@@ -1,8 +1,8 @@
 """Production Host composition for the Stage 2 conversation kernel.
 
-This composition deliberately has no EventLog, RuntimeSession, presentation
-foundation, Oxigraph, durable terminal monitor, or execution-replay owner.
-Resume acquires a new writer generation and rehydrates canonical rows only.
+This composition deliberately has only canonical conversation, process-local
+execution, selective journal, and exact-four background-job owners. Resume
+acquires a new writer generation and rehydrates canonical rows only.
 """
 
 from __future__ import annotations
@@ -55,6 +55,7 @@ from pulsara_agent.conversation_kernel.runner import (
     ConversationKernelRunner,
     KernelRunResult,
 )
+from pulsara_agent.conversation_kernel.safe_point import ExternalSourceNotAtSafePoint
 from pulsara_agent.conversation_kernel.subagent import KernelSubagentManager
 from pulsara_agent.conversation_kernel.tool_runtime import DirectKernelToolPort
 from pulsara_agent.conversation_kernel.tool_policy import (
@@ -66,12 +67,12 @@ from pulsara_agent.workspace_identity import (
     resolve_workspace,
 )
 from pulsara_agent.llm.models import ModelRole
-from pulsara_agent.runtime.permission import (
+from pulsara_agent.tool_permission import (
     EffectivePermissionPolicy,
     default_permission_policy,
 )
 from pulsara_agent.ports.system_prompt import DEFAULT_SYSTEM_PROMPT
-from pulsara_agent.runtime.mcp.store import load_mcp_server_configs
+from pulsara_agent.mcp_config import load_mcp_server_configs
 from pulsara_agent.settings import PulsaraSettings
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 from pulsara_agent.storage.schema_verification_service import (
@@ -200,7 +201,9 @@ class KernelHostSession:
             workspace_root=workspace.workspace_root,
             workspace_kind=workspace.workspace_kind,
             memory_domain=workspace.memory_domain,
-            available_tool_names=frozenset(spec.name for spec in self._tools.tool_specs),
+            available_tool_names=frozenset(
+                spec.name for spec in self._tools.tool_specs
+            ),
             configured_active_skill_names=active_skill_names,
             base_system_prompt=system_prompt or DEFAULT_SYSTEM_PROMPT,
         )
@@ -225,9 +228,15 @@ class KernelHostSession:
         self._active_task: asyncio.Task[KernelRunResult] | None = None
         self._active_turn_id: str | None = None
         self._active_command_id: str | None = None
+        self._external_new_turn_accepting = False
+        self._external_new_turn_settled = asyncio.Event()
+        self._external_new_turn_settled.set()
         self._command_failures: dict[str, KernelCommandOutcome] = {}
         self._lock = asyncio.Lock()
+        self._close_async_lock = asyncio.Lock()
         self._closing = False
+        self._closed = False
+        self._close_conversation_requested = False
         self._queue_wake = asyncio.Event()
         self._renewal_task = asyncio.create_task(
             self._renew_writer(), name=f"kernel-writer-renew:{session_id}"
@@ -282,7 +291,11 @@ class KernelHostSession:
             raise RuntimeError("command was already accepted; query its outcome")
         async with self._lock:
             self._require_open()
-            if self._active_task is not None and not self._active_task.done():
+            if (
+                self._external_new_turn_accepting
+                or self._active_task is not None
+                and not self._active_task.done()
+            ):
                 raise RuntimeError("a canonical ROOT turn is already running")
             task = asyncio.create_task(
                 self._runner.run_turn(text, command_id=command),
@@ -322,9 +335,7 @@ class KernelHostSession:
         if existing is not None:
             return existing
         self._require_open()
-        if (delivery_mode is PromptDeliveryMode.NEW_TURN) != (
-            target_turn_id is None
-        ):
+        if (delivery_mode is PromptDeliveryMode.NEW_TURN) != (target_turn_id is None):
             return KernelCommandOutcome(
                 command_id,
                 "REJECTED",
@@ -429,6 +440,10 @@ class KernelHostSession:
             while not self._closing:
                 async with self._lock:
                     active = self._active_task
+                    external_new_turn_accepting = self._external_new_turn_accepting
+                if external_new_turn_accepting:
+                    await asyncio.sleep(0)
+                    continue
                 if active is not None and not active.done():
                     try:
                         await asyncio.shield(active)
@@ -459,10 +474,9 @@ class KernelHostSession:
                     break
                 if accepted is None:
                     try:
-                        pending = await self._io.run(
-                            self.repository.has_pending_prompt,
+                        head_mode = await self._io.run(
+                            self.repository.pending_prompt_head_mode,
                             session_id=self.session_id,
-                            delivery_mode=PromptDeliveryMode.NEW_TURN,
                             deadline_monotonic=monotonic() + 5.0,
                         )
                     except asyncio.CancelledError:
@@ -471,7 +485,7 @@ class KernelHostSession:
                         await asyncio.sleep(0.1)
                         self._queue_wake.set()
                         break
-                    if pending:
+                    if head_mode is PromptDeliveryMode.NEW_TURN:
                         continue
                     break
                 task = asyncio.create_task(
@@ -516,6 +530,22 @@ class KernelHostSession:
                 str(row.get("target_interaction_decision_id") or ""),
                 f"INTERACTION_{decision}",
                 "Interaction decision accepted.",
+            )
+        if row.get("command_kind") == "ACCEPT_SUBAGENT_RESULT":
+            return KernelCommandOutcome(
+                command_id,
+                "SUCCEEDED",
+                str(row.get("target_entry_id") or ""),
+                "SUBAGENT_RESULT_ACCEPTED",
+                "The durable child result was accepted into the ROOT conversation.",
+            )
+        if row.get("command_kind") == "ACCEPT_JOB_RESULT":
+            return KernelCommandOutcome(
+                command_id,
+                "SUCCEEDED",
+                str(row.get("target_entry_id") or ""),
+                "JOB_RESULT_ACCEPTED",
+                "The durable job result was accepted into the ROOT conversation.",
             )
         status = str(row.get("turn_status") or "")
         target = str(row.get("target_turn_id") or "")
@@ -607,6 +637,278 @@ class KernelHostSession:
             pass
         return True
 
+    async def accept_subagent_result(
+        self,
+        *,
+        command_id: str,
+        target_turn_id: str | None,
+        child_result_id: str,
+        actor_id: str,
+    ) -> KernelCommandOutcome:
+        self._require_open()
+        existing = await self.query_command(command_id)
+        if existing is not None:
+            return existing
+        new_turn = target_turn_id is None
+        resolved_turn_id = target_turn_id or _stable_id(
+            "turn", self.session_id, command_id
+        )
+        new_revision_id = (
+            _stable_id("context-revision", resolved_turn_id, "0")
+            if new_turn
+            else None
+        )
+        if new_turn and not await self._reserve_external_new_turn():
+            return KernelCommandOutcome(
+                command_id,
+                "REJECTED",
+                child_result_id,
+                "ROOT_TURN_ALREADY_RUNNING",
+                "A ROOT turn is already running.",
+            )
+        try:
+            accepted = await self._runner.accept_subagent_result(
+                turn_id=resolved_turn_id,
+                new_context_binding_revision_id=new_revision_id,
+                child_result_id=child_result_id,
+                command_id=command_id,
+                actor_id=actor_id,
+                deadline_monotonic=monotonic() + 10.0,
+            )
+        except ExternalSourceNotAtSafePoint:
+            if new_turn:
+                await self._release_external_new_turn_reservation()
+            return KernelCommandOutcome(
+                command_id,
+                "REJECTED",
+                child_result_id,
+                "PROVIDER_SAFE_POINT_REQUIRED",
+                "The ROOT turn is currently dispatching a provider call.",
+            )
+        except BaseException as error:
+            confirmed = await self._confirm_external_result_command(
+                command_id=command_id,
+                command_kind="ACCEPT_SUBAGENT_RESULT",
+                source_id=child_result_id,
+                expected_turn_id=resolved_turn_id,
+            )
+            if confirmed is not None:
+                if new_turn:
+                    await self._start_external_result_turn(
+                        resolved_turn_id, command_id
+                    )
+                if isinstance(error, asyncio.CancelledError):
+                    raise
+                return confirmed
+            if new_turn:
+                await self._release_external_new_turn_reservation()
+            raise
+        if accepted is None:
+            if new_turn:
+                await self._release_external_new_turn_reservation()
+            return KernelCommandOutcome(
+                command_id,
+                "REJECTED",
+                child_result_id,
+                "SUBAGENT_RESULT_UNAVAILABLE",
+                "The durable child result cannot be accepted into this turn.",
+            )
+        if new_turn:
+            await self._start_external_result_turn(accepted.turn_id, command_id)
+        return KernelCommandOutcome(
+            command_id,
+            "SUCCEEDED",
+            accepted.entry_id,
+            "SUBAGENT_RESULT_ACCEPTED",
+            "The durable child result was accepted into the ROOT conversation.",
+        )
+
+    async def accept_job_result(
+        self,
+        *,
+        command_id: str,
+        target_turn_id: str | None,
+        job_id: str,
+        actor_id: str,
+    ) -> KernelCommandOutcome:
+        self._require_open()
+        existing = await self.query_command(command_id)
+        if existing is not None:
+            return existing
+        new_turn = target_turn_id is None
+        resolved_turn_id = target_turn_id or _stable_id(
+            "turn", self.session_id, command_id
+        )
+        new_revision_id = (
+            _stable_id("context-revision", resolved_turn_id, "0")
+            if new_turn
+            else None
+        )
+        if new_turn and not await self._reserve_external_new_turn():
+            return KernelCommandOutcome(
+                command_id,
+                "REJECTED",
+                job_id,
+                "ROOT_TURN_ALREADY_RUNNING",
+                "A ROOT turn is already running.",
+            )
+        try:
+            accepted = await self._runner.accept_job_result(
+                turn_id=resolved_turn_id,
+                new_context_binding_revision_id=new_revision_id,
+                job_id=job_id,
+                command_id=command_id,
+                actor_id=actor_id,
+                deadline_monotonic=monotonic() + 10.0,
+            )
+        except ExternalSourceNotAtSafePoint:
+            if new_turn:
+                await self._release_external_new_turn_reservation()
+            return KernelCommandOutcome(
+                command_id,
+                "REJECTED",
+                job_id,
+                "PROVIDER_SAFE_POINT_REQUIRED",
+                "The ROOT turn is currently dispatching a provider call.",
+            )
+        except BaseException as error:
+            confirmed = await self._confirm_external_result_command(
+                command_id=command_id,
+                command_kind="ACCEPT_JOB_RESULT",
+                source_id=job_id,
+                expected_turn_id=resolved_turn_id,
+            )
+            if confirmed is not None:
+                if new_turn:
+                    await self._start_external_result_turn(
+                        resolved_turn_id, command_id
+                    )
+                if isinstance(error, asyncio.CancelledError):
+                    raise
+                return confirmed
+            if new_turn:
+                await self._release_external_new_turn_reservation()
+            raise
+        if accepted is None:
+            if new_turn:
+                await self._release_external_new_turn_reservation()
+            return KernelCommandOutcome(
+                command_id,
+                "REJECTED",
+                job_id,
+                "JOB_RESULT_UNAVAILABLE",
+                "The durable job result cannot be accepted into this turn.",
+            )
+        if new_turn:
+            await self._start_external_result_turn(accepted.turn_id, command_id)
+        return KernelCommandOutcome(
+            command_id,
+            "SUCCEEDED",
+            accepted.entry_id,
+            "JOB_RESULT_ACCEPTED",
+            "The durable job result was accepted into the ROOT conversation.",
+        )
+
+    async def _reserve_external_new_turn(self) -> bool:
+        async with self._lock:
+            if (
+                self._closing
+                or self._external_new_turn_accepting
+                or self._active_task is not None
+                and not self._active_task.done()
+            ):
+                return False
+            self._external_new_turn_accepting = True
+            self._external_new_turn_settled.clear()
+            return True
+
+    async def _confirm_external_result_command(
+        self,
+        *,
+        command_id: str,
+        command_kind: str,
+        source_id: str,
+        expected_turn_id: str,
+    ) -> KernelCommandOutcome | None:
+        try:
+            row = await self._query_command_row(command_id)
+        except BaseException:
+            return None
+        if row is None or row.get("command_kind") != command_kind:
+            return None
+        observed_source = (
+            row.get("target_entry_source_subagent_result_id")
+            if command_kind == "ACCEPT_SUBAGENT_RESULT"
+            else row.get("target_entry_source_job_id")
+        )
+        if (
+            observed_source != source_id
+            or row.get("target_entry_turn_id") != expected_turn_id
+            or not row.get("target_entry_id")
+        ):
+            return None
+        return KernelCommandOutcome(
+            command_id,
+            "SUCCEEDED",
+            str(row["target_entry_id"]),
+            (
+                "SUBAGENT_RESULT_ACCEPTED"
+                if command_kind == "ACCEPT_SUBAGENT_RESULT"
+                else "JOB_RESULT_ACCEPTED"
+            ),
+            "The durable external result was accepted into the ROOT conversation.",
+        )
+
+    async def _release_external_new_turn_reservation(self) -> None:
+        async with self._lock:
+            self._external_new_turn_accepting = False
+            self._external_new_turn_settled.set()
+            self._queue_wake.set()
+
+    async def _start_external_result_turn(
+        self, turn_id: str, command_id: str
+    ) -> None:
+        task = asyncio.create_task(
+            self._run_external_result_turn(turn_id),
+            name=f"kernel-external-result-turn:{turn_id}",
+        )
+        lost_admission = False
+        async with self._lock:
+            if (
+                not self._external_new_turn_accepting
+                or self._active_task is not None
+            ):
+                self._external_new_turn_accepting = False
+                self._external_new_turn_settled.set()
+                lost_admission = True
+            else:
+                self._active_task = task
+                self._active_turn_id = turn_id
+                self._active_command_id = command_id
+                self._external_new_turn_accepting = False
+                self._external_new_turn_settled.set()
+        if lost_admission:
+            task.cancel()
+            try:
+                await task
+            except BaseException:
+                pass
+            raise RuntimeError("external result turn lost its local admission")
+
+    async def _run_external_result_turn(self, turn_id: str) -> None:
+        task = asyncio.current_task()
+        try:
+            await self._runner.run_accepted_turn(turn_id)
+        except BaseException:
+            pass
+        finally:
+            async with self._lock:
+                if self._active_task is task:
+                    self._active_task = None
+                    self._active_turn_id = None
+                    self._active_command_id = None
+                    self._queue_wake.set()
+
     async def request_job_cancel(
         self,
         *,
@@ -624,49 +926,68 @@ class KernelHostSession:
         )
 
     async def aclose(self, *, close_conversation: bool) -> None:
-        async with self._lock:
-            if self._closing:
+        async with self._close_async_lock:
+            if self._closed:
                 return
-            self._closing = True
-            task = self._active_task
-            self._queue_wake.set()
-        self.extensions.stop_admission()
-        deadline = monotonic() + HOST_CLOSE_SECONDS
-        if task is not None and not task.done():
-            task.cancel()
+            async with self._lock:
+                self._closing = True
+                self._close_conversation_requested = (
+                    self._close_conversation_requested or close_conversation
+                )
+                self._queue_wake.set()
+            self.extensions.stop_admission()
+            deadline = monotonic() + HOST_CLOSE_SECONDS
             try:
                 await asyncio.wait_for(
-                    asyncio.shield(task), timeout=max(0.01, deadline - monotonic())
+                    self._external_new_turn_settled.wait(),
+                    timeout=max(0.01, deadline - monotonic()),
                 )
-            except BaseException:
-                if not task.done():
-                    raise TimeoutError(
-                        "canonical foreground physical task did not exit"
+            except TimeoutError as error:
+                raise TimeoutError(
+                    "external-result canonical admission did not settle"
+                ) from error
+            async with self._lock:
+                task = self._active_task
+            if task is not None and not task.done():
+                task.cancel()
+                try:
+                    await asyncio.wait_for(
+                        asyncio.shield(task), timeout=max(0.01, deadline - monotonic())
                     )
-        self._renewal_task.cancel()
-        try:
-            await self._renewal_task
-        except BaseException:
-            pass
-        self._delivery_task.cancel()
-        try:
-            await self._delivery_task
-        except BaseException:
-            pass
-        await self._interactions.aclose()
-        await self._subagents.aclose(timeout_seconds=max(0.01, deadline - monotonic()))
-        await self._memory_tools.aclose()
-        await self._tools.aclose(timeout_seconds=max(0.01, deadline - monotonic()))
-        await self.extensions.aclose(deadline_monotonic=deadline)
-        if close_conversation:
-            await self._io.run(
-                self.repository.close_session,
-                self._lease.guard,
-                deadline_monotonic=deadline,
+                except BaseException:
+                    if not task.done():
+                        raise TimeoutError(
+                            "canonical foreground physical task did not exit"
+                        )
+            self._renewal_task.cancel()
+            try:
+                await self._renewal_task
+            except BaseException:
+                pass
+            self._delivery_task.cancel()
+            try:
+                await self._delivery_task
+            except BaseException:
+                pass
+            await self._interactions.aclose()
+            await self._subagents.aclose(
+                timeout_seconds=max(0.01, deadline - monotonic())
             )
-        self.live_bus.close()
-        self.live_control.close()
-        await self._io.aclose(deadline_monotonic=deadline)
+            await self._memory_tools.aclose()
+            await self._tools.aclose(
+                timeout_seconds=max(0.01, deadline - monotonic())
+            )
+            await self.extensions.aclose(deadline_monotonic=deadline)
+            if self._close_conversation_requested:
+                await self._io.run(
+                    self.repository.close_session,
+                    self._lease.guard,
+                    deadline_monotonic=deadline,
+                )
+            self.live_bus.close()
+            self.live_control.close()
+            await self._io.aclose(deadline_monotonic=deadline)
+            self._closed = True
 
     async def _renew_writer(self) -> None:
         while True:
@@ -751,9 +1072,7 @@ class KernelHostCore:
         self._blob_gc_io: KernelSessionIO | None = None
         self._blob_gc_task: asyncio.Task[None] | None = None
         self._sessions: dict[str, KernelHostSession] = {}
-        self._extension_routes: dict[
-            str, tuple[str, KernelExtensionHost]
-        ] = {}
+        self._extension_routes: dict[str, tuple[str, KernelExtensionHost]] = {}
         self._event_loop: asyncio.AbstractEventLoop | None = None
         self._lock = asyncio.Lock()
         self._authenticated_first_party_extension_ids = (
@@ -954,21 +1273,24 @@ class KernelHostCore:
         self, host_session_id: str, *, close_conversation: bool
     ) -> None:
         async with self._lock:
-            session = self._sessions.pop(host_session_id, None)
+            session = self._sessions.get(host_session_id)
         if session is None:
             return
         await session.aclose(close_conversation=close_conversation)
         async with self._lock:
+            if self._sessions.get(host_session_id) is session:
+                self._sessions.pop(host_session_id, None)
             route = self._extension_routes.get(session.session_id)
             if route is not None and route[0] == host_session_id:
                 self._extension_routes.pop(session.session_id, None)
 
     async def shutdown(self) -> None:
         async with self._lock:
-            sessions = tuple(self._sessions.values())
-            self._sessions.clear()
-        for session in sessions:
-            await session.aclose(close_conversation=False)
+            session_ids = tuple(self._sessions)
+        for host_session_id in session_ids:
+            await self.close_session(
+                host_session_id, close_conversation=False
+            )
         self._extension_routes.clear()
         if self._jobs is not None:
             await self._jobs.aclose(timeout_seconds=HOST_CLOSE_SECONDS)
@@ -1043,8 +1365,7 @@ class KernelHostCore:
                     grace_seconds=STAGE2_LIMITS.blob_orphan_grace_seconds,
                     maximum_items=STAGE2_LIMITS.blob_gc_batch_hard_items,
                     deadline_monotonic=(
-                        monotonic()
-                        + STAGE2_LIMITS.foreground_io_timeout_ms / 1_000
+                        monotonic() + STAGE2_LIMITS.foreground_io_timeout_ms / 1_000
                     ),
                 )
             except asyncio.CancelledError:

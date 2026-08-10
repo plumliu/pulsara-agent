@@ -2,7 +2,7 @@
 
 This package is the only production owner of the post-hard-cut conversation,
 effect, work, and selective occurrence authority.  It deliberately does not
-import the legacy EventLog or any presentation/projection subsystem.
+import any retired execution or presentation subsystem.
 """
 
 from pulsara_agent.conversation_kernel.vocabulary import (

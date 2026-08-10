@@ -1,15 +1,7 @@
-"""Shared retrieval-service errors."""
+"""Errors owned by the retained PostgreSQL embedding boundary."""
 
 from __future__ import annotations
 
 
-class RetrievalServiceError(RuntimeError):
-    """Base error for retrieval-side model services."""
-
-
-class EmbeddingServiceError(RetrievalServiceError):
-    """Embedding provider failure."""
-
-
-class RerankServiceError(RetrievalServiceError):
-    """Rerank provider failure."""
+class EmbeddingServiceError(RuntimeError):
+    """The configured embedding provider failed or returned invalid output."""

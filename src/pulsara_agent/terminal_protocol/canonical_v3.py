@@ -543,9 +543,21 @@ class CanonicalProtocolReader:
             (session_id, entry_sequence_floor),
         )
         tasks = bounded(
-            """SELECT * FROM pulsara_v3.subagent_tasks
-               WHERE session_id = %s AND status IN ('PENDING', 'ACTIVE')
-               ORDER BY accepted_at, id LIMIT %s""",
+            """SELECT t.*, c.id AS result_id,
+                      c.entry_id AS result_entry_id,
+                      accepted.id AS accepted_root_entry_id
+               FROM pulsara_v3.subagent_tasks AS t
+               LEFT JOIN pulsara_v3.subagent_task_children AS c
+                 ON c.session_id = t.session_id AND c.task_id = t.id
+                AND c.child_kind = 'RESULT'
+               LEFT JOIN pulsara_v3.transcript_entries AS accepted
+                 ON accepted.session_id = c.session_id
+                AND accepted.source_subagent_result_id = c.id
+               WHERE t.session_id = %s AND (
+                 t.status IN ('PENDING', 'ACTIVE') OR
+                 (t.status = 'COMPLETED' AND c.id IS NOT NULL AND accepted.id IS NULL)
+               )
+               ORDER BY t.accepted_at, t.id LIMIT %s""",
             (session_id,),
         )
         jobs = bounded(
@@ -598,6 +610,9 @@ class CanonicalProtocolReader:
                 parent_turn_id=str(row["parent_turn_id"] or ""),
                 status=str(row["status"]),
                 objective=str(row["objective"]),
+                result_id=str(row["result_id"] or ""),
+                result_entry_id=str(row["result_entry_id"] or ""),
+                result_accepted=row["accepted_root_entry_id"] is not None,
             )
         for row in jobs:
             result.jobs.add(

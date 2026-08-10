@@ -1,0 +1,42 @@
+{
+  "schema_version": "conversation_kernel_expected_catalog.v2",
+  "observed_catalog_fingerprint": "sha256:da8b11b6a5fb5645bcb6d90b54549f7da5ceab3e0b7041ef7a4c66871e7bbda6",
+  "required_extensions": [
+    {
+      "extension_name": "vector",
+      "minimum_version": "0.5.0",
+      "schema_name": "public",
+      "required_type": "vector",
+      "required_operator": "<=>"
+    }
+  ],
+  "product_schema": "pulsara_v3",
+  "product_relations": [
+    "sessions",
+    "session_commands",
+    "turns",
+    "turn_context_binding_revisions",
+    "context_snapshots",
+    "transcript_entries",
+    "assistant_message_blocks",
+    "tool_execution_attempts",
+    "tool_results",
+    "prompt_queue_items",
+    "interaction_decisions",
+    "subagent_tasks",
+    "subagent_task_children",
+    "durable_jobs",
+    "durable_job_attempts",
+    "memory_candidates",
+    "memory_governance_decisions",
+    "memory_facts",
+    "memory_relations",
+    "memory_search_index",
+    "memory_vector_index",
+    "memory_index_state",
+    "blobs",
+    "agent_events"
+  ],
+  "infrastructure_relations": ["public.pulsara_schema_migrations"],
+  "required_functions": ["pulsara_v3.enforce_conversation_kernel_invariants"]
+}

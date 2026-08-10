@@ -392,7 +392,7 @@ def test_subagent_result_acceptance_linearizes_at_provider_safe_point(
         child_id=child_result_id,
         task_id=task_id,
         child_kind="RESULT",
-        child_ordinal=0,
+        child_ordinal=1,
         entry_id=child_reply.entry_id,
         occurred_at=datetime.now(timezone.utc),
         actor_id="subagent:test",
@@ -435,8 +435,19 @@ def test_subagent_result_acceptance_linearizes_at_provider_safe_point(
         )
     first_handle.close()
 
-    accepted = safe_point.accept_subagent_result(
+    assert repository.interrupt_turn(
+        lease.guard,
         turn_id=root_turn,
+        reason="PARENT_ALREADY_TERMINAL",
+        occurred_at=datetime.now(timezone.utc),
+        actor_id="host:test",
+        deadline_monotonic=monotonic() + 30,
+    )
+    new_root_turn = _id("turn")
+    new_revision = _id("revision")
+    accepted = safe_point.accept_subagent_result(
+        turn_id=new_root_turn,
+        new_context_binding_revision_id=new_revision,
         child_result_id=child_result_id,
         command_id=command_id,
         actor_id="host:test",
@@ -445,7 +456,7 @@ def test_subagent_result_acceptance_linearizes_at_provider_safe_point(
     assert accepted is not None
 
     second_handle = safe_point.freeze_provider_input(
-        turn_id=root_turn, deadline_monotonic=monotonic() + 30
+        turn_id=new_root_turn, deadline_monotonic=monotonic() + 30
     )
     try:
         materialized = CanonicalProviderInputReader(provider).rematerialize(
@@ -456,7 +467,8 @@ def test_subagent_result_acceptance_linearizes_at_provider_safe_point(
         second_handle.close()
 
     compatible = safe_point.accept_subagent_result(
-        turn_id=root_turn,
+        turn_id=new_root_turn,
+        new_context_binding_revision_id=new_revision,
         child_result_id=child_result_id,
         command_id=command_id,
         actor_id="host:test",
@@ -601,5 +613,5 @@ def test_inspector_reads_canonical_rows_and_selective_events_from_one_kernel(
     assert health["runtime_limit_contract"] == "stage2_runtime_limits.v1"
     assert health["runtime_limits"]["host_close_hard_ms"] == 5_000
     assert all(value > 0 for value in health["runtime_limits"].values())
-    assert health["legacy_event_replay"] is False
-    assert health["oxigraph_enabled"] is False
+    assert "legacy_event_replay" not in health
+    assert "oxigraph_enabled" not in health

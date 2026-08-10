@@ -13,11 +13,11 @@ from uuid import uuid4
 
 from pulsara_agent.conversation_kernel.host import KernelHostSession
 from pulsara_agent.terminal_client.binary import resolve_terminal_client_binary
-from pulsara_agent.terminal_client.launcher import (
+from pulsara_agent.terminal_client.process_supervision import (
     TerminalClientExit,
     TerminalClientLaunchError,
-    _clear_terminal_display_and_scrollback,
-    _launch_one_terminal_client,
+    clear_terminal_display_and_scrollback,
+    launch_terminal_child,
 )
 from pulsara_agent.terminal_protocol.generated_v3 import terminal_kernel_v3_pb2 as wire
 from pulsara_agent.terminal_protocol.v3_gateway import (
@@ -50,15 +50,15 @@ async def launch_terminal_kernel_client(
     try:
         await server.start()
         if clear_scrollback:
-            _clear_terminal_display_and_scrollback(sys.stdout)
+            clear_terminal_display_and_scrollback(sys.stdout)
         carrier = _bootstrap(
             server=server,
             host_session=host_session,
             client_instance_id=client_instance_id,
         )
-        returncode = await _launch_one_terminal_client(
+        returncode = await launch_terminal_child(
             binary=binary,
-            carrier=carrier,  # type: ignore[arg-type]
+            bootstrap_payload=carrier.SerializeToString(deterministic=True),
         )
         if returncode != 0:
             raise TerminalClientLaunchError(
@@ -90,9 +90,7 @@ def _bootstrap(
         expires_at_utc=expires.isoformat().replace("+00:00", "Z"),
         carrier_nonce=secrets.token_bytes(32),
     )
-    install_fingerprint(
-        "terminal-kernel-bootstrap:v3", carrier, "carrier_fingerprint"
-    )
+    install_fingerprint("terminal-kernel-bootstrap:v3", carrier, "carrier_fingerprint")
     return carrier
 
 

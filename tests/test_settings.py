@@ -20,11 +20,6 @@ _MODEL_LIMIT_ENV_LINES = [
 _MODEL_LIMIT_ENV_KEYS = tuple(line.split("=", 1)[0] for line in _MODEL_LIMIT_ENV_LINES)
 
 
-def test_storage_config_rejects_empty_oxigraph_url() -> None:
-    with pytest.raises(ValueError, match="oxigraph_url is required"):
-        StorageConfig(oxigraph_url="   ")
-
-
 def test_storage_config_rejects_empty_postgres_dsn() -> None:
     with pytest.raises(ValueError, match="postgres_dsn is required"):
         StorageConfig(postgres_dsn="   ")
@@ -41,7 +36,6 @@ def test_settings_can_load_env_file(tmp_path, monkeypatch):
                 "export PULSARA_PRO_MODEL=gpt-5",
                 'PULSARA_FLASH_MODEL="gpt-5-mini"',
                 *_MODEL_LIMIT_ENV_LINES,
-                "PULSARA_OXIGRAPH_URL=http://localhost:7878",
                 "PULSARA_POSTGRES_DSN=postgresql://pulsara:pulsara@localhost:5432/pulsara",
             ]
         ),
@@ -54,7 +48,6 @@ def test_settings_can_load_env_file(tmp_path, monkeypatch):
         "PULSARA_PRO_MODEL",
         "PULSARA_FLASH_MODEL",
         *_MODEL_LIMIT_ENV_KEYS,
-        "PULSARA_OXIGRAPH_URL",
         "PULSARA_POSTGRES_DSN",
     ):
         monkeypatch.delenv(key, raising=False)
@@ -66,15 +59,11 @@ def test_settings_can_load_env_file(tmp_path, monkeypatch):
     assert settings.llm.base_url == "https://example.test/v1"
     assert settings.llm.pro_model == "gpt-5"
     assert settings.llm.flash_model == "gpt-5-mini"
-    assert settings.storage.oxigraph_url == "http://localhost:7878"
     assert (
         settings.storage.postgres_dsn
         == "postgresql://pulsara:pulsara@localhost:5432/pulsara"
     )
-    assert settings.redacted_dict()["storage"] == {
-        "oxigraph_url": "http://localhost:7878",
-        "postgres_dsn_set": True,
-    }
+    assert settings.redacted_dict()["storage"] == {"postgres_dsn_set": True}
     assert settings.redacted_dict()["llm"]["api"] == "openai_chat_completions"
     assert settings.redacted_dict()["llm"]["endpoint_origin"] == "https://example.test"
     assert "base_url" not in settings.redacted_dict()["llm"]

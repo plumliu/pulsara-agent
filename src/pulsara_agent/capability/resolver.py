@@ -102,7 +102,7 @@ class LocalSkillCapabilityProvider:
         *,
         available_tool_names: frozenset[str],
     ) -> CapabilityProjectionOutput:
-        """Narrow public seam for runtimes without legacy surface artifacts."""
+        """Narrow public seam for the canonical capability projection."""
 
         return self._resolve_projection_output(
             context,

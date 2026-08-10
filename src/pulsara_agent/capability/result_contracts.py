@@ -278,72 +278,17 @@ def terminal_process_result_render_contract() -> CapabilityResultRenderContractF
     )
 
 
-@lru_cache(maxsize=1)
-def terminal_monitor_result_render_contract() -> CapabilityResultRenderContractFact:
-    variants = (
-        _variant(
-            code=ToolResultRenderVariantCode.TERMINAL_MONITOR_REGISTRATION,
-            operational=ToolResultOperationalKind.TERMINAL_MONITOR_REGISTRATION,
-            essential=ToolResultEssentialEnvelopeKind.TERMINAL_MONITOR_REGISTRATION,
-            states=(ToolResultStateFact.SUCCESS,),
-            phase="executed",
-            timing="required",
-        ),
-        _variant(
-            code=ToolResultRenderVariantCode.TERMINAL_MONITOR_INVENTORY,
-            operational=ToolResultOperationalKind.TERMINAL_MONITOR_INVENTORY,
-            essential=ToolResultEssentialEnvelopeKind.TERMINAL_MONITOR_INVENTORY,
-            states=(ToolResultStateFact.SUCCESS,),
-            phase="executed",
-            timing="required",
-        ),
-        _variant(
-            code=ToolResultRenderVariantCode.TERMINAL_MONITOR_CANCELLATION,
-            operational=ToolResultOperationalKind.TERMINAL_MONITOR_CANCELLATION,
-            essential=ToolResultEssentialEnvelopeKind.TERMINAL_MONITOR_CANCELLATION,
-            states=(ToolResultStateFact.SUCCESS,),
-            phase="executed",
-            timing="required",
-        ),
-        _variant(
-            code=ToolResultRenderVariantCode.TERMINAL_MONITOR_ERROR,
-            operational=ToolResultOperationalKind.TERMINAL_MONITOR_ERROR,
-            essential=ToolResultEssentialEnvelopeKind.TERMINAL_MONITOR_ERROR,
-            states=(ToolResultStateFact.DENIED, ToolResultStateFact.ERROR),
-            phase="pre_execution",
-            timing="forbidden",
-        ),
-        _variant(
-            code=ToolResultRenderVariantCode.TERMINAL_MONITOR_ADAPTER_ERROR,
-            operational=ToolResultOperationalKind.TERMINAL_MONITOR_ERROR,
-            essential=ToolResultEssentialEnvelopeKind.TERMINAL_MONITOR_ERROR,
-            states=(ToolResultStateFact.ERROR,),
-            phase="executed",
-            timing="optional",
-        ),
-    )
-    return _contract(
-        builder_id="tool-result-semantics:terminal-monitor",
-        builder_version="1",
-        variants=variants,
-        denial=ToolResultRenderVariantCode.TERMINAL_MONITOR_ERROR,
-    )
-
-
 def result_render_contract_for_tool(name: str) -> CapabilityResultRenderContractFact:
     if name == "terminal":
         return terminal_result_render_contract()
     if name == "terminal_process":
         return terminal_process_result_render_contract()
-    if name == "terminal_monitor":
-        return terminal_monitor_result_render_contract()
     return generic_result_render_contract()
 
 
 __all__ = [
     "generic_result_render_contract",
     "result_render_contract_for_tool",
-    "terminal_monitor_result_render_contract",
     "terminal_process_result_render_contract",
     "terminal_result_render_contract",
 ]

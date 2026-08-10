@@ -20,9 +20,35 @@ import (
 const (
 	ProtocolMajor     = 3
 	ProtocolMinor     = 0
-	SchemaFingerprint = "sha256:96981f00ed67cc21dbe0259deb4094788488954c95ebd4ce760c6645950a2124"
+	SchemaFingerprint = "sha256:30c3dec486dea592a4e43650006b1d547e4c44d993d68255941d77b61dd4a05c"
 	maximumFrameBytes = 8 << 20
 )
+
+// ProtocolError is the closed server disposition for one physical request.
+// It does not imply that the serial connection is invalid.
+type ProtocolError struct {
+	StableCode    string
+	PublicMessage string
+}
+
+func (e *ProtocolError) Error() string {
+	return fmt.Sprintf("Protocol v3 %s: %s", e.StableCode, e.PublicMessage)
+}
+
+func (e *ProtocolError) StableProtocolCode() string { return e.StableCode }
+
+func IsCanonicalContentUnavailable(err error) bool {
+	var protocolError *ProtocolError
+	if !errors.As(err, &protocolError) {
+		return false
+	}
+	switch protocolError.StableCode {
+	case "CONTENT_REFERENCE_MISSING", "CONTENT_REFERENCE_CORRUPT", "CONTENT_BLOB_MISSING", "CONTENT_BLOB_CORRUPT":
+		return true
+	default:
+		return false
+	}
+}
 
 type Bootstrap struct {
 	LaunchID         string
@@ -197,12 +223,34 @@ func (s *Service) History(ctx context.Context, cursor *protocolv3.HistoryCursor,
 }
 
 func (s *Service) Command(ctx context.Context, commandID string, kind protocolv3.CommandKind, text string, targetTurnID string) (*protocolv3.CommandOutcome, error) {
+	return s.command(ctx, commandID, kind, text, targetTurnID, "", "")
+}
+
+// AcceptSubagentResult installs an already durable child result into the ROOT
+// conversation.  It never resumes or replays child execution.
+func (s *Service) AcceptSubagentResult(ctx context.Context, commandID, targetTurnID, sourceResultID string) (*protocolv3.CommandOutcome, error) {
+	if sourceResultID == "" {
+		return nil, errors.New("Protocol v3 subagent result identity is empty")
+	}
+	return s.command(ctx, commandID, protocolv3.CommandKind_ACCEPT_SUBAGENT_RESULT, "", targetTurnID, sourceResultID, "")
+}
+
+// AcceptJobResult installs an already durable job result into an existing
+// safe ROOT or, when targetTurnID is empty, an explicit new ROOT turn.
+func (s *Service) AcceptJobResult(ctx context.Context, commandID, targetTurnID, sourceJobID string) (*protocolv3.CommandOutcome, error) {
+	if sourceJobID == "" {
+		return nil, errors.New("Protocol v3 job result identity is empty")
+	}
+	return s.command(ctx, commandID, protocolv3.CommandKind_ACCEPT_JOB_RESULT, "", targetTurnID, "", sourceJobID)
+}
+
+func (s *Service) command(ctx context.Context, commandID string, kind protocolv3.CommandKind, text, targetTurnID, sourceResultID, sourceJobID string) (*protocolv3.CommandOutcome, error) {
 	if commandID == "" {
 		return nil, errors.New("Protocol v3 command identity is empty")
 	}
 	requestID := s.nextRequestID("command")
 	response, err := s.attachedRoundTrip(ctx, &protocolv3.ClientFrame{Request: &protocolv3.ClientFrame_Command{Command: &protocolv3.CommandRequest{
-		RequestId: requestID, CommandId: commandID, CommandKind: kind, ClientSubmissionId: commandID, Text: text, TargetTurnId: targetTurnID,
+		RequestId: requestID, CommandId: commandID, CommandKind: kind, ClientSubmissionId: commandID, Text: text, TargetTurnId: targetTurnID, SourceSubagentResultId: sourceResultID, SourceJobId: sourceJobID,
 	}}})
 	if err != nil {
 		return nil, err
@@ -346,7 +394,9 @@ func (s *Service) roundTripLocked(ctx context.Context, frame *protocolv3.ClientF
 		return nil, fmt.Errorf("decode Protocol v3 response: %w", err)
 	}
 	if failure := response.GetError(); failure != nil {
-		return nil, fmt.Errorf("Protocol v3 %s: %s", failure.StableCode, failure.PublicMessage)
+		return nil, &ProtocolError{
+			StableCode: failure.StableCode, PublicMessage: failure.PublicMessage,
+		}
 	}
 	return response, nil
 }

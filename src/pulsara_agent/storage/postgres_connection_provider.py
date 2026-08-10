@@ -1,4 +1,4 @@
-"""Verifier-owned PostgreSQL physical connection authority."""
+"""Verifier-owned PostgreSQL connection authority without generic write epochs."""
 
 from __future__ import annotations
 
@@ -6,150 +6,43 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import StrEnum
-from threading import RLock, Thread
+from threading import RLock
 from time import monotonic
-from typing import Callable, ContextManager, Iterator, Protocol
+from typing import ContextManager, Iterator, Protocol
 from uuid import uuid4
 
 from psycopg import Connection, IsolationLevel
-from psycopg_pool import ConnectionPool
 
-from pulsara_agent.storage.migrations.contracts import postgres_schema_fingerprint
 from pulsara_agent.storage.migrations.errors import (
     PostgresSchemaError,
     PostgresSchemaFailureCode,
 )
+from pulsara_agent.storage.migrations.registry import POSTGRES_MIGRATION_REGISTRY
 from pulsara_agent.storage.migrations.runner import (
     PostgresDatabaseIdentity,
     _read_identity_from_connection,
+    _validate_clean_ledger,
     read_migration_ledger,
 )
 from pulsara_agent.storage.migrations.verifier import (
     PostgresDeepVerificationBundle,
     PostgresFastVerificationBundle,
-    PostgresMigrationHistoryStatus,
     PostgresSchemaVerifier,
-    classify_migration_history,
 )
 from pulsara_agent.storage.postgres_endpoint import (
     PostgresPhysicalOperationControl,
     ResolvedPostgresConnectionFactory,
-    apply_connection_deadline,
-    classify_postgres_physical_failure,
 )
 from pulsara_agent.storage.schema_contract import VerifiedPostgresSchemaBinding
-from pulsara_agent.storage.runtime_write_admission import (
-    acquire_normal_runtime_write_guard,
-    read_runtime_write_epoch,
-)
-from pulsara_agent.ports.projection_jobs import (
-    MemoryUowPhysicalTransactionCapability,
-    MemoryUowPhysicalTransactionRequest,
-    MemoryUowScopeFactoryAuthority,
-    PostgresCanonicalMutationTransactionDriverPort,
-    build_canonical_mutation_transaction_identity,
-)
-from pulsara_agent.primitives.context import context_fingerprint
 
 
 class PostgresConnectionLane(StrEnum):
-    EVENT_LOG = "event_log"
     ARTIFACT = "artifact"
     HOST_CONTROL = "host_control"
-    MEMORY_UOW = "memory_uow"
     MEMORY_QUERY = "memory_query"
     MEMORY_MAINTENANCE = "memory_maintenance"
-    GOVERNANCE = "governance"
     INSPECTOR = "inspector"
-    CHECKPOINT_MAINTENANCE = "checkpoint_maintenance"
-    PROJECTION_MAINTENANCE = "projection_maintenance"
-
-
-@dataclass(frozen=True, slots=True)
-class PostgresPoolPolicyFact:
-    lane: PostgresConnectionLane
-    min_size: int
-    max_size: int
-    max_waiting: int
-    connect_timeout_seconds: float
-    checkout_timeout_seconds: float
-    policy_fingerprint: str
-
-
-def _pool_policy(
-    lane: PostgresConnectionLane,
-    *,
-    min_size: int,
-    max_size: int,
-    max_waiting: int,
-    connect_timeout_seconds: float = 10.0,
-    checkout_timeout_seconds: float = 30.0,
-) -> PostgresPoolPolicyFact:
-    payload = {
-        "lane": lane.value,
-        "min_size": min_size,
-        "max_size": max_size,
-        "max_waiting": max_waiting,
-        "connect_timeout_seconds": str(connect_timeout_seconds),
-        "checkout_timeout_seconds": str(checkout_timeout_seconds),
-    }
-    return PostgresPoolPolicyFact(
-        lane=lane,
-        min_size=min_size,
-        max_size=max_size,
-        max_waiting=max_waiting,
-        connect_timeout_seconds=connect_timeout_seconds,
-        checkout_timeout_seconds=checkout_timeout_seconds,
-        policy_fingerprint=postgres_schema_fingerprint(
-            "pulsara:postgres-pool-policy:v1", payload
-        ),
-    )
-
-
-POSTGRES_POOL_POLICIES = {
-    PostgresConnectionLane.EVENT_LOG: _pool_policy(
-        PostgresConnectionLane.EVENT_LOG,
-        min_size=0,
-        max_size=16,
-        max_waiting=64,
-    ),
-    PostgresConnectionLane.ARTIFACT: _pool_policy(
-        PostgresConnectionLane.ARTIFACT, min_size=0, max_size=4, max_waiting=16
-    ),
-    PostgresConnectionLane.HOST_CONTROL: _pool_policy(
-        PostgresConnectionLane.HOST_CONTROL, min_size=0, max_size=4, max_waiting=16
-    ),
-    PostgresConnectionLane.MEMORY_UOW: _pool_policy(
-        PostgresConnectionLane.MEMORY_UOW, min_size=0, max_size=8, max_waiting=32
-    ),
-    PostgresConnectionLane.MEMORY_QUERY: _pool_policy(
-        PostgresConnectionLane.MEMORY_QUERY, min_size=0, max_size=8, max_waiting=32
-    ),
-    PostgresConnectionLane.MEMORY_MAINTENANCE: _pool_policy(
-        PostgresConnectionLane.MEMORY_MAINTENANCE,
-        min_size=0,
-        max_size=4,
-        max_waiting=16,
-    ),
-    PostgresConnectionLane.GOVERNANCE: _pool_policy(
-        PostgresConnectionLane.GOVERNANCE, min_size=0, max_size=8, max_waiting=32
-    ),
-    PostgresConnectionLane.INSPECTOR: _pool_policy(
-        PostgresConnectionLane.INSPECTOR, min_size=0, max_size=4, max_waiting=16
-    ),
-    PostgresConnectionLane.CHECKPOINT_MAINTENANCE: _pool_policy(
-        PostgresConnectionLane.CHECKPOINT_MAINTENANCE,
-        min_size=0,
-        max_size=2,
-        max_waiting=8,
-    ),
-    PostgresConnectionLane.PROJECTION_MAINTENANCE: _pool_policy(
-        PostgresConnectionLane.PROJECTION_MAINTENANCE,
-        min_size=0,
-        max_size=8,
-        max_waiting=32,
-    ),
-}
+    BACKGROUND_WORK = "background_work"
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,12 +52,9 @@ class PostgresPreflightIdentity:
 
 
 class PostgresRuntimeConnectionFactory:
-    """Runtime-role wrapper over the sole resolved endpoint owner."""
-
     def __init__(self, dsn: str) -> None:
         self._resolved = ResolvedPostgresConnectionFactory(
-            dsn,
-            application_name="pulsara-runtime",
+            dsn, application_name="pulsara-runtime"
         )
         self.database_target_fingerprint = self._resolved.endpoint.endpoint_fingerprint
 
@@ -172,22 +62,11 @@ class PostgresRuntimeConnectionFactory:
     def runtime_role(self) -> str:
         return self._resolved.expected_role
 
-    def connect(
-        self,
-        *,
-        deadline_monotonic: float,
-        row_factory: object | None = None,
-        autocommit: bool = False,
-    ) -> Connection:
+    def connect(self, *, deadline_monotonic: float, row_factory=None, autocommit=False):
         return self._resolved.connect(
             deadline_monotonic=deadline_monotonic,
             row_factory=row_factory,
             autocommit=autocommit,
-        )
-
-    def pool_conninfo(self, *, connect_timeout_seconds: float) -> str:
-        return self._resolved.pool_conninfo(
-            connect_timeout_seconds=connect_timeout_seconds
         )
 
     def validate_effective_endpoint(self, connection: Connection) -> None:
@@ -202,29 +81,16 @@ class PostgresRuntimeConnectionFactory:
         control = operation_control or PostgresPhysicalOperationControl(
             deadline_monotonic=deadline_monotonic
         )
-        control.arm()
+        owns_control = operation_control is None
+        if owns_control:
+            control.arm()
         try:
-            connection = self._resolved.connect(
-                deadline_monotonic=deadline_monotonic,
-                autocommit=True,
-                operation_control=control,
-            )
-            with connection:
+            with self.connect(deadline_monotonic=deadline_monotonic, autocommit=True) as connection:
                 identity = _read_identity_from_connection(connection)
-        except PostgresSchemaError:
-            raise
-        except BaseException as exc:
-            raise classify_postgres_physical_failure(
-                exc,
-                deadline_monotonic=deadline_monotonic,
-                operation_control=control,
-            ) from exc
         finally:
-            control.finish()
-        return PostgresPreflightIdentity(
-            database_target_fingerprint=self.database_target_fingerprint,
-            database_identity=identity,
-        )
+            if owns_control:
+                control.finish()
+        return PostgresPreflightIdentity(self.database_target_fingerprint, identity)
 
     def verify(
         self,
@@ -232,32 +98,13 @@ class PostgresRuntimeConnectionFactory:
         deadline_monotonic: float,
         operation_control: PostgresPhysicalOperationControl | None = None,
     ) -> PostgresFastVerificationBundle:
-        control = operation_control or PostgresPhysicalOperationControl(
-            deadline_monotonic=deadline_monotonic
-        )
-        control.arm()
-        try:
-            connection = self._resolved.connect(
+        del operation_control
+        with self.connect(deadline_monotonic=deadline_monotonic, autocommit=True) as connection:
+            return PostgresSchemaVerifier().verify_fast_connection(
+                connection,
+                database_target_fingerprint=self.database_target_fingerprint,
                 deadline_monotonic=deadline_monotonic,
-                autocommit=True,
-                operation_control=control,
             )
-            with connection:
-                return PostgresSchemaVerifier().verify_fast_connection(
-                    connection,
-                    database_target_fingerprint=self.database_target_fingerprint,
-                    deadline_monotonic=deadline_monotonic,
-                )
-        except PostgresSchemaError:
-            raise
-        except BaseException as exc:
-            raise classify_postgres_physical_failure(
-                exc,
-                deadline_monotonic=deadline_monotonic,
-                operation_control=control,
-            ) from exc
-        finally:
-            control.finish()
 
     def verify_deep(
         self,
@@ -265,32 +112,13 @@ class PostgresRuntimeConnectionFactory:
         deadline_monotonic: float,
         operation_control: PostgresPhysicalOperationControl | None = None,
     ) -> PostgresDeepVerificationBundle:
-        control = operation_control or PostgresPhysicalOperationControl(
-            deadline_monotonic=deadline_monotonic
-        )
-        control.arm()
-        try:
-            connection = self._resolved.connect(
+        del operation_control
+        with self.connect(deadline_monotonic=deadline_monotonic, autocommit=True) as connection:
+            return PostgresSchemaVerifier().verify_deep_connection(
+                connection,
+                database_target_fingerprint=self.database_target_fingerprint,
                 deadline_monotonic=deadline_monotonic,
-                autocommit=True,
-                operation_control=control,
             )
-            with connection:
-                return PostgresSchemaVerifier().verify_deep_connection(
-                    connection,
-                    database_target_fingerprint=self.database_target_fingerprint,
-                    deadline_monotonic=deadline_monotonic,
-                )
-        except PostgresSchemaError:
-            raise
-        except BaseException as exc:
-            raise classify_postgres_physical_failure(
-                exc,
-                deadline_monotonic=deadline_monotonic,
-                operation_control=control,
-            ) from exc
-        finally:
-            control.finish()
 
 
 class VerifiedPostgresConnectionProviderProtocol(Protocol):
@@ -309,74 +137,13 @@ class VerifiedPostgresConnectionProviderProtocol(Protocol):
         isolation_level: IsolationLevel = IsolationLevel.READ_COMMITTED,
     ) -> ContextManager[Connection]: ...
 
-    def pool(
-        self,
-        *,
-        lane: PostgresConnectionLane,
-        deadline_monotonic: float,
-    ) -> "VerifiedPostgresPoolLease": ...
-
-    def close_pool(self, lane: PostgresConnectionLane) -> None: ...
-
-    def memory_uow_physical_transaction(
-        self,
-        *,
-        request: MemoryUowPhysicalTransactionRequest,
-        scope_factory_authority: MemoryUowScopeFactoryAuthority,
-        mutation_driver: PostgresCanonicalMutationTransactionDriverPort,
-    ) -> ContextManager[MemoryUowPhysicalTransactionCapability]: ...
-
-
-class VerifiedPostgresPoolLease:
-    def __init__(
-        self,
-        *,
-        pool: ConnectionPool,
-        policy: PostgresPoolPolicyFact,
-        usability_guard: Callable[[], None],
-        checkout_guard: Callable[[Connection], None],
-    ) -> None:
-        self._pool = pool
-        self.policy = policy
-        self._usability_guard = usability_guard
-        self._checkout_guard = checkout_guard
-
-    @contextmanager
-    def connection(
-        self,
-        *,
-        timeout: float,
-        isolation_level: IsolationLevel = IsolationLevel.READ_COMMITTED,
-    ) -> Iterator[Connection]:
-        self._usability_guard()
-        with self._pool.connection(timeout=timeout) as connection:
-            connection.isolation_level = isolation_level
-            self._checkout_guard(connection)
-            yield connection
-
-    def scoped_to(
-        self, usability_guard: Callable[[], None]
-    ) -> "VerifiedPostgresPoolLease":
-        def combined_guard() -> None:
-            self._usability_guard()
-            usability_guard()
-
-        return VerifiedPostgresPoolLease(
-            pool=self._pool,
-            policy=self.policy,
-            usability_guard=combined_guard,
-            checkout_guard=self._checkout_guard,
-        )
-
 
 class BorrowedVerifiedPostgresConnectionProvider:
-    """Borrower-scoped facade invalidated with its access lease."""
-
     def __init__(self, provider: "VerifiedPostgresConnectionProvider") -> None:
         self._provider = provider
-        self._lock = RLock()
         self._released = False
         self._borrower_id = f"postgres-borrower:{uuid4().hex}"
+        self._lock = RLock()
         provider._retain_borrower()
 
     @property
@@ -390,89 +157,10 @@ class BorrowedVerifiedPostgresConnectionProvider:
         return self._provider.verification_observed_at_utc
 
     @contextmanager
-    def connection(
-        self,
-        *,
-        lane: PostgresConnectionLane,
-        row_factory: object | None = None,
-        deadline_monotonic: float,
-        isolation_level: IsolationLevel = IsolationLevel.READ_COMMITTED,
-    ) -> Iterator[Connection]:
+    def connection(self, **kwargs) -> Iterator[Connection]:
         self._require_active()
-        with self._provider.connection(
-            lane=lane,
-            row_factory=row_factory,
-            deadline_monotonic=deadline_monotonic,
-            isolation_level=isolation_level,
-        ) as connection:
+        with self._provider.connection(**kwargs) as connection:
             yield connection
-
-    def pool(
-        self,
-        *,
-        lane: PostgresConnectionLane,
-        deadline_monotonic: float,
-    ) -> VerifiedPostgresPoolLease:
-        self._require_active()
-        return self._provider.pool(
-            lane=lane,
-            deadline_monotonic=deadline_monotonic,
-        ).scoped_to(self._require_active)
-
-    def close_pool(self, lane: PostgresConnectionLane) -> None:
-        self._require_active()
-        self._provider.close_pool(lane)
-
-    @contextmanager
-    def memory_uow_physical_transaction(
-        self,
-        *,
-        request: MemoryUowPhysicalTransactionRequest,
-        scope_factory_authority: MemoryUowScopeFactoryAuthority,
-        mutation_driver: PostgresCanonicalMutationTransactionDriverPort,
-    ) -> Iterator[MemoryUowPhysicalTransactionCapability]:
-        self._require_active()
-        with self.connection(
-            lane=PostgresConnectionLane.MEMORY_UOW,
-            deadline_monotonic=request.deadline_monotonic,
-        ) as connection:
-            epoch = read_runtime_write_epoch(connection)
-            transaction_owner_id = (
-                f"postgres:{connection.info.backend_pid}:{epoch.epoch_fingerprint}"
-            )
-            if transaction_owner_id == "" or request.transaction_owner_id == "":
-                raise ValueError("memory UOW transaction owner is required")
-            guard_fingerprint = context_fingerprint(
-                "runtime-write-admission-guard-lock-identity:v1",
-                {
-                    "epoch_fingerprint": epoch.epoch_fingerprint,
-                    "transaction_owner_id": transaction_owner_id,
-                },
-            )
-            identity = build_canonical_mutation_transaction_identity(
-                schema_binding_fingerprint=self.schema_binding.binding_fingerprint,
-                connection_provider_borrower_id=self._borrower_id,
-                transaction_owner_id=request.transaction_owner_id,
-                transaction_generation=request.transaction_generation,
-                backend_pid=connection.info.backend_pid,
-                admission_epoch_fingerprint=epoch.epoch_fingerprint,
-                admission_guard_lock_identity_fingerprint=guard_fingerprint,
-            )
-            from pulsara_agent.storage.postgres_transaction_capability import (
-                PostgresMemoryUowPhysicalTransactionCapability,
-            )
-
-            capability = PostgresMemoryUowPhysicalTransactionCapability(
-                connection=connection,
-                request=request,
-                transaction_identity=identity,
-                scope_authority=scope_factory_authority,
-                driver=mutation_driver,
-            )
-            try:
-                yield capability
-            finally:
-                capability.close()
 
     def release(self) -> None:
         with self._lock:
@@ -486,11 +174,8 @@ class BorrowedVerifiedPostgresConnectionProvider:
             if self._released:
                 raise PostgresSchemaError(
                     PostgresSchemaFailureCode.ACCESS_LEASE_RELEASED,
-                    "verified PostgreSQL borrower access lease is released",
+                    "verified PostgreSQL access lease is released",
                 )
-
-    def __reduce__(self) -> object:
-        raise TypeError("borrowed PostgreSQL connection provider is not serializable")
 
 
 class VerifiedPostgresConnectionProvider:
@@ -506,9 +191,8 @@ class VerifiedPostgresConnectionProvider:
             datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         )
         self._lock = RLock()
-        self._pools: dict[PostgresConnectionLane, ConnectionPool] = {}
-        self._active_lease_count = 0
-        self._released = False
+        self._borrowers = 0
+        self._closing = False
         self._invalidated = False
 
     @property
@@ -522,32 +206,6 @@ class VerifiedPostgresConnectionProvider:
     def borrow(self) -> BorrowedVerifiedPostgresConnectionProvider:
         return BorrowedVerifiedPostgresConnectionProvider(self)
 
-    def _retain_borrower(self) -> None:
-        with self._lock:
-            self._require_usable()
-            self._active_lease_count += 1
-
-    def _release_borrower(self) -> None:
-        pools: tuple[ConnectionPool, ...] = ()
-        with self._lock:
-            if self._active_lease_count <= 0:
-                return
-            self._active_lease_count -= 1
-            if self._active_lease_count == 0 and self._released:
-                pools = tuple(self._pools.values())
-                self._pools.clear()
-        for pool in pools:
-            pool.close()
-
-    def close(self) -> None:
-        with self._lock:
-            self._released = True
-            pools = tuple(self._pools.values()) if self._active_lease_count == 0 else ()
-            if pools:
-                self._pools.clear()
-        for pool in pools:
-            pool.close()
-
     @contextmanager
     def connection(
         self,
@@ -557,255 +215,96 @@ class VerifiedPostgresConnectionProvider:
         deadline_monotonic: float,
         isolation_level: IsolationLevel = IsolationLevel.READ_COMMITTED,
     ) -> Iterator[Connection]:
-        del lane
-        with self._lock:
-            self._require_usable()
+        if lane not in PostgresConnectionLane:
+            raise ValueError("unknown PostgreSQL connection lane")
+        self._require_usable()
         try:
             connection = self._factory.connect(
-                deadline_monotonic=deadline_monotonic,
-                row_factory=row_factory,
+                deadline_monotonic=deadline_monotonic, row_factory=row_factory
             )
-        except PostgresSchemaError as exc:
-            if exc.code is PostgresSchemaFailureCode.DATABASE_IDENTITY_MISMATCH:
-                self._invalidate_confirmed_physical_binding()
-            raise
-        try:
-            self._validate_physical_connection(
-                connection,
-                deadline_monotonic=deadline_monotonic,
-            )
+            self._validate_physical_connection(connection)
             connection.isolation_level = isolation_level
-            self._admit_runtime_transaction(connection)
             yield connection
-            if (
-                not connection.closed
-                and connection.info.transaction_status.name != "IDLE"
-            ):
+            if not connection.closed and connection.info.transaction_status.name != "IDLE":
                 connection.commit()
         except BaseException:
-            if (
-                not connection.closed
-                and connection.info.transaction_status.name != "IDLE"
-            ):
+            if "connection" in locals() and not connection.closed and connection.info.transaction_status.name != "IDLE":
                 connection.rollback()
             raise
         finally:
-            if not connection.closed:
+            if "connection" in locals() and not connection.closed:
                 connection.close()
 
-    def pool(
-        self,
-        *,
-        lane: PostgresConnectionLane,
-        deadline_monotonic: float,
-    ) -> VerifiedPostgresPoolLease:
-        _remaining(deadline_monotonic)
+    def close(self) -> None:
+        with self._lock:
+            self._closing = True
+
+    def _retain_borrower(self) -> None:
         with self._lock:
             self._require_usable()
-            pool = self._pools.get(lane)
-            policy = POSTGRES_POOL_POLICIES[lane]
-            if pool is None:
-                pool = ConnectionPool(
-                    conninfo=self._factory.pool_conninfo(
-                        connect_timeout_seconds=policy.connect_timeout_seconds
-                    ),
-                    min_size=policy.min_size,
-                    max_size=policy.max_size,
-                    max_waiting=policy.max_waiting,
-                    timeout=policy.checkout_timeout_seconds,
-                    configure=self._configure_pool_connection,
-                    open=True,
-                    name=f"pulsara-{lane.value}",
-                )
-                self._pools[lane] = pool
-            return VerifiedPostgresPoolLease(
-                pool=pool,
-                policy=policy,
-                usability_guard=self._require_usable,
-                checkout_guard=self._admit_runtime_transaction,
-            )
+            self._borrowers += 1
 
-    def close_pool(self, lane: PostgresConnectionLane) -> None:
+    def _release_borrower(self) -> None:
         with self._lock:
-            pool = self._pools.pop(lane, None)
-        if pool is not None:
-            pool.close()
+            self._borrowers = max(0, self._borrowers - 1)
 
-    def _configure_pool_connection(self, connection: Connection) -> None:
-        deadline_monotonic = monotonic() + 30.0
-        apply_connection_deadline(connection, deadline_monotonic)
-        self._validate_physical_connection(
-            connection,
-            deadline_monotonic=deadline_monotonic,
-        )
+    def _require_usable(self) -> None:
+        with self._lock:
+            if self._closing or self._invalidated:
+                raise PostgresSchemaError(
+                    PostgresSchemaFailureCode.ACCESS_LEASE_RELEASED,
+                    "verified PostgreSQL provider is unavailable",
+                )
 
-    def _validate_physical_connection(
-        self,
-        connection: Connection,
-        *,
-        deadline_monotonic: float,
-    ) -> None:
+    def _validate_physical_connection(self, connection: Connection) -> None:
         try:
             self._factory.validate_effective_endpoint(connection)
             identity = _read_identity_from_connection(connection)
             rows = read_migration_ledger(connection)
-            history_status = classify_migration_history(rows)
-            identity_mismatch = (
+            if rows is None:
+                raise PostgresSchemaError(
+                    PostgresSchemaFailureCode.DATABASE_IDENTITY_MISMATCH,
+                    "clean migration ledger disappeared",
+                )
+            _validate_clean_ledger(rows, POSTGRES_MIGRATION_REGISTRY.definition(0))
+            mismatch = (
                 identity.database_name != self._binding.database_name
                 or identity.database_oid != self._binding.database_oid
                 or identity.runtime_role != self._binding.runtime_role
-                or identity.normalized_search_path
-                != self._binding.normalized_search_path
+                or identity.normalized_search_path != self._binding.normalized_search_path
                 or identity.server_version_num != self._binding.server_version_num
-            )
-            ledger_matches = (
-                rows is not None
-                and bool(rows)
-                and history_status is PostgresMigrationHistoryStatus.UP_TO_DATE
-                and rows[-1].version == self._binding.migration_head_version
-                and rows[-1].registry_prefix_fingerprint
-                == self._binding.durable_registry_prefix_fingerprint
-            )
-            if identity_mismatch or not ledger_matches:
-                raise PostgresSchemaError(
-                    PostgresSchemaFailureCode.DATABASE_IDENTITY_MISMATCH,
-                    "physical PostgreSQL connection does not match verified binding",
-                )
-            epoch = read_runtime_write_epoch(connection)
-            if (
-                epoch.epoch_fingerprint
-                != self._binding.runtime_write_admission_epoch_fingerprint
-                or epoch.active_migration_registry_prefix_fingerprint
+                or rows[0].universe_fingerprint
+                != self._binding.migration_universe_fingerprint
+                or rows[0].registry_prefix_fingerprint
                 != self._binding.durable_registry_prefix_fingerprint
-            ):
+            )
+            if mismatch:
                 raise PostgresSchemaError(
                     PostgresSchemaFailureCode.DATABASE_IDENTITY_MISMATCH,
-                    "physical PostgreSQL connection has a stale runtime write epoch",
+                    "physical PostgreSQL connection differs from binding v2",
                 )
             if connection.info.transaction_status.name != "IDLE":
                 connection.rollback()
-        except PostgresSchemaError as exc:
-            if exc.code in {
-                PostgresSchemaFailureCode.DATABASE_IDENTITY_MISMATCH,
-                PostgresSchemaFailureCode.SEARCH_PATH_MISMATCH,
-                PostgresSchemaFailureCode.SERVER_VERSION_UNSUPPORTED,
-            }:
-                _close_probe_connection(connection)
-                self._invalidate_confirmed_physical_binding()
-                raise PostgresSchemaError(
-                    PostgresSchemaFailureCode.DATABASE_IDENTITY_MISMATCH,
-                    "physical PostgreSQL connection failed verified binding validation",
-                ) from exc
-            _close_probe_connection(connection)
+        except BaseException:
+            with self._lock:
+                self._invalidated = True
+            if not connection.closed:
+                connection.close()
             raise
-        except BaseException as exc:
-            _close_probe_connection(connection)
-            raise classify_postgres_physical_failure(
-                exc,
-                deadline_monotonic=deadline_monotonic,
-                operation_control=None,
-            ) from exc
-
-    def _admit_runtime_transaction(self, connection: Connection) -> None:
-        epoch = read_runtime_write_epoch(connection)
-        if (
-            epoch.epoch_fingerprint
-            != self._binding.runtime_write_admission_epoch_fingerprint
-            or epoch.active_migration_registry_prefix_fingerprint
-            != self._binding.durable_registry_prefix_fingerprint
-        ):
-            if connection.info.transaction_status.name != "IDLE":
-                connection.rollback()
-            raise PostgresSchemaError(
-                PostgresSchemaFailureCode.DATABASE_IDENTITY_MISMATCH,
-                "runtime write admission epoch changed after schema verification",
-            )
-        acquire_normal_runtime_write_guard(
-            connection,
-            expected_epoch=epoch,
-            transaction_owner_id=(
-                f"postgres:{connection.info.backend_pid}:{epoch.epoch_fingerprint}"
-            ),
-        )
-
-    def _invalidate_confirmed_physical_binding(self) -> None:
-        with self._lock:
-            self._invalidated = True
-            pools = tuple(self._pools.values())
-            self._pools.clear()
-        _retire_invalidated_pools(pools)
-
-    def _require_usable(self) -> None:
-        if self._released or self._invalidated:
-            raise PostgresSchemaError(
-                PostgresSchemaFailureCode.ACCESS_LEASE_RELEASED,
-                "verified PostgreSQL connection provider is unavailable",
-            )
-
-
-def _retire_invalidated_pools(pools: tuple[ConnectionPool, ...]) -> None:
-    if not pools:
-        return
-
-    def retire() -> None:
-        for pool in pools:
-            pool.close()
-
-    Thread(
-        target=retire,
-        name="pulsara-postgres-pool-retirement",
-        daemon=True,
-    ).start()
-
-
-def _close_probe_connection(connection: Connection) -> None:
-    if connection.closed:
-        return
-    try:
-        if connection.info.transaction_status.name != "IDLE":
-            connection.rollback()
-    except BaseException:
-        pass
-    try:
-        connection.close()
-    except BaseException:
-        pass
-
-
-def _remaining(deadline_monotonic: float) -> float:
-    remaining = deadline_monotonic - monotonic()
-    if remaining <= 0:
-        raise PostgresSchemaError(
-            PostgresSchemaFailureCode.DEADLINE_EXCEEDED,
-            "PostgreSQL connection deadline exceeded",
-            retryable=True,
-        )
-    return remaining
 
 
 def postgres_operation_deadline(
-    deadline_monotonic: float | None,
-    *,
-    timeout_seconds: float = 30.0,
+    deadline_monotonic: float | None, *, timeout_seconds: float = 30.0
 ) -> float:
-    """Resolve a boundary deadline when an older protocol has no deadline field."""
-
-    return (
-        deadline_monotonic
-        if deadline_monotonic is not None
-        else monotonic() + timeout_seconds
-    )
+    return deadline_monotonic if deadline_monotonic is not None else monotonic() + timeout_seconds
 
 
 __all__ = [
     "BorrowedVerifiedPostgresConnectionProvider",
-    "POSTGRES_POOL_POLICIES",
     "PostgresConnectionLane",
-    "PostgresPoolPolicyFact",
     "PostgresPreflightIdentity",
     "PostgresRuntimeConnectionFactory",
     "VerifiedPostgresConnectionProvider",
     "VerifiedPostgresConnectionProviderProtocol",
-    "VerifiedPostgresPoolLease",
     "postgres_operation_deadline",
 ]

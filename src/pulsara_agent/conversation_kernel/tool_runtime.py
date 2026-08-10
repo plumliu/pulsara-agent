@@ -1,4 +1,4 @@
-"""Host-scoped Stage 2 tool surface without EventLog execution ownership."""
+"""Host-scoped tool surface with process-local physical execution ownership."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import json
 from pathlib import Path
 from threading import Lock
+from time import monotonic
 from typing import Mapping, Protocol
 
 from jsonschema import ValidationError, validators
@@ -16,8 +17,11 @@ from pulsara_agent.llm.input import ToolSpec
 from pulsara_agent.message import ToolResultState
 from pulsara_agent.ports.terminal import parse_terminal_process_input
 from pulsara_agent.ports.tool_execution import Tool, ToolCall, ToolExecutionResult
-from pulsara_agent.runtime.terminal.manager import TerminalSessionManager
-from pulsara_agent.runtime.terminal.models import TerminalRequest, TerminalResult
+from pulsara_agent.terminal_process import (
+    TerminalRequest,
+    TerminalResult,
+    TerminalSessionManager,
+)
 from pulsara_agent.tools.builtins.filesystem import (
     EditFileTool,
     ReadFileTool,
@@ -26,6 +30,7 @@ from pulsara_agent.tools.builtins.filesystem import (
 )
 from pulsara_agent.tools.builtins.todo import TodoTool
 from pulsara_agent.conversation_kernel.limits import STAGE2_LIMITS
+from pulsara_agent.conversation_kernel.io import KernelSessionIO
 from pulsara_agent.conversation_kernel.live import (
     LiveAgentEventBus,
     LiveBlockKind,
@@ -232,10 +237,8 @@ class DirectKernelToolPort:
         self._session_id = session_id
         self._live_bus = live_bus
         self._maximum_tool_result_bytes = maximum_tool_result_bytes
-        self._terminal = TerminalSessionManager(
-            workspace_root=root,
-            max_pending_completion_records=0,
-        )
+        self._physical_io = KernelSessionIO()
+        self._terminal = TerminalSessionManager(workspace_root=root)
         self._terminal.activate_owner(host_owner_id)
         tools: tuple[Tool, ...] = (
             ReadFileTool(root),
@@ -250,6 +253,9 @@ class DirectKernelToolPort:
         self._authorization_policy = authorization_policy
         self._close_lock = Lock()
         self._closed = False
+        self._physically_closed = False
+        self._close_async_lock = asyncio.Lock()
+        self._terminal_release_task: asyncio.Task[object] | None = None
         self._subagent: KernelSubagentToolPort | None = None
         self._memory: KernelMemoryToolPort | None = None
         self._interaction: KernelToolInteractionPort | None = None
@@ -411,7 +417,15 @@ class DirectKernelToolPort:
             name=tool_name,
             arguments=dict(arguments),
         )
-        result = await asyncio.to_thread(tool.execute, call)
+        result = await self._physical_io.run(
+            _execute_tool_call,
+            tool,
+            call,
+            deadline_monotonic=(
+                monotonic()
+                + STAGE2_LIMITS.foreground_io_timeout_ms / 1_000
+            ),
+        )
         encoded = _truncate_tool_result_utf8(
             result.output,
             maximum_bytes=self._maximum_tool_result_bytes,
@@ -511,18 +525,40 @@ class DirectKernelToolPort:
     async def aclose(self, *, timeout_seconds: float = 5.0) -> None:
         if timeout_seconds <= 0:
             raise ValueError("tool close timeout must be positive")
-        with self._close_lock:
-            if self._closed:
+        async with self._close_async_lock:
+            if self._physically_closed:
                 return
-            self._closed = True
-        await asyncio.wait_for(
-            asyncio.to_thread(
-                self._terminal.release_owner,
-                self._host_owner_id,
-                completion_drain_timeout_seconds=min(timeout_seconds, 1.0),
-            ),
-            timeout=timeout_seconds,
-        )
+            with self._close_lock:
+                self._closed = True
+            deadline = monotonic() + timeout_seconds
+            await self._physical_io.aclose(deadline_monotonic=deadline)
+            if self._terminal_release_task is None:
+                self._terminal_release_task = asyncio.create_task(
+                    asyncio.to_thread(
+                        self._terminal.release_owner,
+                        self._host_owner_id,
+                        timeout_seconds=max(0.001, deadline - monotonic()),
+                    )
+                )
+            await asyncio.wait_for(
+                asyncio.shield(self._terminal_release_task),
+                timeout=max(0.001, deadline - monotonic()),
+            )
+            self._terminal_release_task.result()
+            self._physically_closed = True
+
+
+def _execute_tool_call(
+    tool: Tool,
+    call: ToolCall,
+    *,
+    deadline_monotonic: float,
+) -> ToolExecutionResult:
+    # The closed Tool API predates absolute deadlines.  KernelSessionIO owns
+    # the physical thread and makes a close timeout explicit; adapters with
+    # their own timeouts continue to enforce them inside execute().
+    del deadline_monotonic
+    return tool.execute(call)
 
 
 def _terminal_execution_result(

@@ -6,6 +6,9 @@ from enum import StrEnum
 
 
 class PostgresSchemaFailureCode(StrEnum):
+    MIGRATION_UNIVERSE_RESET_REQUIRED = (
+        "schema_migration_universe_reset_required"
+    )
     ADMIN_DSN_REQUIRED = "schema_admin_dsn_required"
     CONNECTION_FAILED = "schema_connection_failed"
     DEADLINE_EXCEEDED = "schema_deadline_exceeded"
@@ -13,25 +16,13 @@ class PostgresSchemaFailureCode(StrEnum):
     SEARCH_PATH_MISMATCH = "schema_search_path_mismatch"
     SERVER_VERSION_UNSUPPORTED = "schema_server_version_unsupported"
     UNMANAGED_DATABASE = "schema_unmanaged_database"
-    VERSION_BEHIND = "schema_version_behind"
-    VERSION_AHEAD = "schema_version_ahead"
-    HISTORY_CONFLICT = "schema_migration_history_conflict"
-    RESOURCE_CHECKSUM_MISMATCH = "schema_migration_resource_checksum_mismatch"
     MIGRATION_FAILED = "schema_migration_failed"
-    PROJECTION_PREPARATION_PORT_REQUIRED = "schema_projection_preparation_port_required"
-    RESET_REQUIRED_FOR_COMPACTION_MEMORY_EXTRACTION_V1 = (
-        "schema_reset_required_for_compaction_memory_extraction_v1"
-    )
-    RESET_REQUIRED_FOR_MCP_V2 = "schema_reset_required_for_mcp_v2"
     MIGRATION_CONFIRMATION_CONFLICT = "schema_migration_confirmation_conflict"
     MIGRATION_CONFIRMATION_UNRESOLVED = "schema_migration_confirmation_unresolved"
     CATALOG_DRIFT = "schema_catalog_drift"
     EXTENSION_MISSING = "schema_extension_missing"
     EXTENSION_TOO_OLD = "schema_extension_too_old"
     PRIVILEGE_MISSING = "schema_runtime_privilege_missing"
-    PRIVILEGE_RECONCILIATION_FAILED = "schema_privilege_reconciliation_failed"
-    PRIVILEGE_CONFIRMATION_CONFLICT = "schema_runtime_grant_confirmation_conflict"
-    PRIVILEGE_CONFIRMATION_UNRESOLVED = "schema_runtime_grant_confirmation_unresolved"
     CONNINFO_UNSUPPORTED = "schema_conninfo_unsupported"
     ACCESS_LEASE_RELEASED = "schema_access_lease_released"
 

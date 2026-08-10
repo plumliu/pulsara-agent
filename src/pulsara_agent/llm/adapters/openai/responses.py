@@ -35,8 +35,6 @@ from pulsara_agent.llm.provider import mutable_provider_value
 from pulsara_agent.llm.resolution import ResolvedModelCall
 from pulsara_agent.llm.result import TransportUsageReport
 from pulsara_agent.ports.provider_stream import ProviderAdapterStreamItem
-from pulsara_agent.llm.runtime_observation import resolve_runtime_observation_binding
-from pulsara_agent.llm.user_carrier import validate_provider_user_carrier_messages
 from pulsara_agent.llm.retry import (
     LLMRetryConfig,
     RetryAttemptTrace,
@@ -68,12 +66,7 @@ class OpenAIResponsesTransport:
         *,
         call: ResolvedModelCall,
         context: LLMContext,
-        event_context: object | None = None,
     ) -> AsyncIterator[ProviderAdapterStreamItem]:
-        # Explicit legacy LLMRuntime callers may still supply this keyword
-        # until Stage 3 deletes that bridge.  The Stage 2 provider protocol
-        # neither declares nor observes it.
-        del event_context
         model = call.target.model_profile
         builder = ProviderLiveItemBuilder()
         if self._mock_events:
@@ -278,20 +271,8 @@ def build_responses_payload(
     call: ResolvedModelCall,
     context: LLMContext,
 ) -> dict[str, Any]:
-    validate_provider_user_carrier_messages(
-        context.messages,
-        system_prompt=context.system_prompt,
-    )
     model = call.target.model_profile
     options = call.target.effective_options
-    if any(
-        message.role in {MessageRole.RUNTIME_REQUEST, MessageRole.RUNTIME_OBSERVATION}
-        for message in context.messages
-    ):
-        carrier = call.target.fact.runtime_observation_carrier
-        if carrier is None:
-            raise ValueError("resolved target does not support runtime observations")
-        resolve_runtime_observation_binding(carrier)
     payload: dict[str, Any] = {
         "model": model.id,
         "input": _messages_to_responses_inputs(context.messages),
@@ -481,11 +462,6 @@ def _message_to_responses_inputs(message: LLMMessage) -> list[dict[str, Any]]:
 
 def _textual_responses_input(message: LLMMessage) -> dict[str, Any]:
     role = message.role.value
-    if message.role in {
-        MessageRole.RUNTIME_REQUEST,
-        MessageRole.RUNTIME_OBSERVATION,
-    }:
-        role = "user"
     return {
         "role": role,
         # Use Responses' EasyInputMessage string form for maximum compatibility

@@ -8,7 +8,7 @@ from enum import StrEnum
 from typing import Mapping, Protocol
 
 from pulsara_agent.ports.tool_execution import ToolCall
-from pulsara_agent.runtime.permission import (
+from pulsara_agent.tool_permission import (
     AllowAllPermissionGate,
     EffectivePermissionPolicy,
     PermissionDecisionKind,

@@ -1,4 +1,4 @@
-"""Workspace identity resolution shared by legacy and relational Hosts."""
+"""Workspace identity resolution for the canonical Host."""
 
 from __future__ import annotations
 

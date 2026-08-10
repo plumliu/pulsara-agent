@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import ast
 from dataclasses import asdict, fields
-from hashlib import sha256
 import json
 import re
 from pathlib import Path
@@ -24,7 +23,10 @@ from pulsara_agent.conversation_kernel.vocabulary import (
     LIVE_EVENT_TYPES,
     SUBJECT_SLOTS,
 )
-from pulsara_agent.storage.migrations.manifest import CONVERSATION_KERNEL_RELATIONS
+from pulsara_agent.storage.migrations.manifest import (
+    CONVERSATION_KERNEL_RELATIONS,
+    CONVERSATION_KERNEL_RUNTIME_PRIVILEGES,
+)
 from pulsara_agent.storage.migrations.registry import POSTGRES_MIGRATION_REGISTRY
 from pulsara_agent.storage.migrations.grants import (
     build_postgres_runtime_grant_policy,
@@ -72,18 +74,11 @@ def test_stage2_registry_schema_and_job_catalog_are_exact() -> None:
         for token in ("terminal", "subagent", "extension")
     )
 
-    policy = build_postgres_runtime_grant_policy(13)
-    expected_legacy_relations = {
-        str(item["relation_name"])
-        for item in build_postgres_schema_manifest(12).owned_relations
-        if str(item["schema_name"]) == "public"
-        and str(item["relation_name"]) != "pulsara_schema_migrations"
-    }
-    assert {
-        item.target.relation_name
-        for item in policy.revocations
-        if item.target.target_kind == "relation"
-    } == expected_legacy_relations
+    policy = build_postgres_runtime_grant_policy()
+    assert policy.relation_privileges == CONVERSATION_KERNEL_RUNTIME_PRIVILEGES
+    assert build_postgres_schema_manifest().product_relations == (
+        CONVERSATION_KERNEL_RELATIONS
+    )
 
 
 def test_stage2_kernel_has_no_legacy_authority_import_or_target_vocabulary() -> None:
@@ -218,14 +213,14 @@ def test_stage2_repository_sql_is_schema_qualified_and_has_no_durable_stream() -
         assert observed not in legacy_short_names, match.group(0)
     migration = (
         ROOT
-        / "src/pulsara_agent/storage/migrations/sql/0013_conversation_kernel_hard_cut.sql"
+        / "src/pulsara_agent/storage/migrations/sql/0000_conversation_kernel_baseline.sql"
     ).read_text(encoding="utf-8")
     assert "stream_segment" not in migration.lower()
     assert "coalescing" not in migration.lower()
     assert "def complete_turn(" not in repository
 
 
-def test_stage2_activation_evidence_is_derived_from_code_owned_contracts() -> None:
+def test_stage2_product_contract_survives_the_clean_migration_universe() -> None:
     report = json.loads(
         (
             ROOT
@@ -235,18 +230,11 @@ def test_stage2_activation_evidence_is_derived_from_code_owned_contracts() -> No
     assert report["schema_version"] == "durability-subtraction-stage2-activation.v1"
     assert report["status"] in {"activation_candidate", "activated"}
     assert report["authority_activation"] == "single_reset_only"
-    for name, expected in report["document_sha256"].items():
-        assert sha256((ROOT / name).read_bytes()).hexdigest() == expected
-
-    latest = POSTGRES_MIGRATION_REGISTRY.definition(13)
-    manifest = build_postgres_schema_manifest(13)
-    assert report["schema"] == {
-        "migration_head": 13,
-        "product_schema": "pulsara_v3",
-        "active_product_relations": len(CONVERSATION_KERNEL_RELATIONS),
-        "manifest_fingerprint": manifest.manifest_fingerprint,
-        "migration_registry_prefix_fingerprint": latest.registry_prefix_fingerprint,
-    }
+    latest = POSTGRES_MIGRATION_REGISTRY.definition(0)
+    manifest = build_postgres_schema_manifest()
+    assert POSTGRES_MIGRATION_REGISTRY.latest_version == 0
+    assert manifest.product_relations == CONVERSATION_KERNEL_RELATIONS
+    assert latest.resource_name == "0000_conversation_kernel_baseline.sql"
     assert report["vocabulary"] == {
         "committed": len(COMMITTED_EVENT_DESCRIPTORS),
         "live": len(LIVE_EVENT_TYPES),
@@ -272,13 +260,13 @@ def test_stage2_activation_evidence_is_derived_from_code_owned_contracts() -> No
 def test_stage2_ordinary_host_and_terminal_binary_select_only_kernel_v3() -> None:
     from pulsara_agent.conversation_kernel.host import KernelHostCore
     from pulsara_agent.host import HostCore
-    from pulsara_agent.terminal_client import launch_terminal_client
+    from pulsara_agent.terminal_client import launch_terminal_kernel_client as public
     from pulsara_agent.terminal_client.v3_launcher import (
         launch_terminal_kernel_client,
     )
 
     assert HostCore is KernelHostCore
-    assert launch_terminal_client is launch_terminal_kernel_client
+    assert public is launch_terminal_kernel_client
     cli = (ROOT / "src/pulsara_agent/cli.py").read_text(encoding="utf-8")
     assert "result = asyncio.run(_kernel_host_run(args))" in cli
     assert "asyncio.run(_kernel_host_repl(args))" in cli

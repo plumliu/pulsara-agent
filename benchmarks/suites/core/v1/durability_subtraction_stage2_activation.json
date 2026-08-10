@@ -25,7 +25,7 @@
   "protocol": {
     "major": 3,
     "minor": 0,
-    "schema_fingerprint": "sha256:96981f00ed67cc21dbe0259deb4094788488954c95ebd4ce760c6645950a2124"
+    "schema_fingerprint": "sha256:30c3dec486dea592a4e43650006b1d547e4c44d993d68255941d77b61dd4a05c"
   },
   "runtime_limits": {
     "contract": "stage2_runtime_limits.v1",

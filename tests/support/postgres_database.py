@@ -13,19 +13,7 @@ from psycopg import sql
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 from pulsara_agent.settings import load_env_file
-from pulsara_agent.projection_jobs.contracts import (
-    DurableProjectionKind,
-)
-from pulsara_agent.runtime.projection_jobs.migration_port import (
-    build_postgres_projection_migration_preparation_port,
-)
 from pulsara_agent.storage.migrations.runner import PostgresMigrationRunner
-from pulsara_agent.storage.migrations.grants import (
-    PostgresRuntimeGrantExecutor,
-    build_postgres_runtime_grant_policy,
-)
-
-
 @dataclass(frozen=True, slots=True)
 class MigratedPostgresTestDatabase:
     database_name: str
@@ -33,68 +21,23 @@ class MigratedPostgresTestDatabase:
     runtime_dsn: str
 
 
-def create_migrated_postgres_test_database(
-    *, legacy_runtime_access: bool = True
-) -> MigratedPostgresTestDatabase:
+def create_migrated_postgres_test_database() -> MigratedPostgresTestDatabase:
     database = create_empty_postgres_test_database()
     try:
-        coordinator = build_postgres_projection_migration_preparation_port(
-            admin_dsn=database.admin_dsn,
-            runtime_dsn=database.runtime_dsn,
-        )
         runner = PostgresMigrationRunner(
             admin_dsn=database.admin_dsn,
             runtime_dsn=database.runtime_dsn,
-            projection_preparation_port=coordinator,
         )
         deadline = monotonic() + 240.0
         report = runner.migrate(deadline_monotonic=deadline)
-        if report.migration_head_version == 5:
-            coordinator.prepare_legacy_surface_bindings(deadline_monotonic=deadline)
-            report = runner.migrate(deadline_monotonic=deadline)
-        if report.migration_head_version == 6:
-            coordinator.drain_pre_activation(
-                kind=DurableProjectionKind.RUN_TIMELINE,
-                deadline_monotonic=deadline,
-            )
-            report = runner.migrate(deadline_monotonic=deadline)
-        if report.migration_head_version == 7:
-            coordinator.drain_pre_activation(
-                kind=DurableProjectionKind.TOOL_RESULT_EXECUTION_EVIDENCE,
-                deadline_monotonic=deadline,
-            )
-            report = runner.migrate(deadline_monotonic=deadline)
-        if report.migration_head_version != 13:
+        if report.migration_head_version != 0:
             raise RuntimeError(
-                "staged PostgreSQL test migration did not reach version 13"
+                "staged PostgreSQL test migration did not reach clean baseline 0"
             )
-        if legacy_runtime_access:
-            _grant_explicit_legacy_test_access(database)
     except BaseException:
         drop_postgres_test_database(admin_root_dsn(), database.database_name)
         raise
     return database
-
-
-def _grant_explicit_legacy_test_access(
-    database: MigratedPostgresTestDatabase,
-) -> None:
-    """Keep old-source contract tests runnable without weakening production ACLs."""
-
-    runtime_role = conninfo_to_dict(database.runtime_dsn).get("user")
-    if not runtime_role:
-        raise RuntimeError("legacy PostgreSQL test role is unavailable")
-    executor = PostgresRuntimeGrantExecutor()
-    policy = build_postgres_runtime_grant_policy(12)
-    with psycopg.connect(database.admin_dsn) as connection:
-        with connection.transaction():
-            for requirement in policy.requirements:
-                executor.apply_requirement(
-                    connection,
-                    runtime_role=runtime_role,
-                    requirement=requirement,
-                )
-
 
 def create_empty_postgres_test_database() -> MigratedPostgresTestDatabase:
     _load_local_env_if_present()

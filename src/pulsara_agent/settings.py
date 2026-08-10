@@ -11,7 +11,6 @@ from pulsara_agent.llm.config import LLMConfig
 from pulsara_agent.retrieval.config import RetrievalConfig
 
 
-DEFAULT_OXIGRAPH_URL = "http://localhost:7878"
 DEFAULT_POSTGRES_DSN = (
     "postgresql://pulsara_runtime:pulsara_runtime@localhost:5432/pulsara"
 )
@@ -19,21 +18,15 @@ DEFAULT_POSTGRES_DSN = (
 
 @dataclass(frozen=True, slots=True)
 class StorageConfig:
-    oxigraph_url: str = DEFAULT_OXIGRAPH_URL
     postgres_dsn: str = DEFAULT_POSTGRES_DSN
 
     def __post_init__(self) -> None:
         if not self.postgres_dsn.strip():
             raise ValueError("postgres_dsn is required for production storage wiring")
-        if not self.oxigraph_url.strip():
-            raise ValueError("oxigraph_url is required for production storage wiring")
 
     @classmethod
     def from_env(cls, prefix: str = "PULSARA") -> "StorageConfig":
         return cls(
-            oxigraph_url=os.getenv(
-                f"{prefix}_OXIGRAPH_URL", DEFAULT_OXIGRAPH_URL
-            ).strip(),
             postgres_dsn=os.getenv(
                 f"{prefix}_POSTGRES_DSN", DEFAULT_POSTGRES_DSN
             ).strip(),
@@ -41,7 +34,6 @@ class StorageConfig:
 
     def redacted_dict(self) -> dict:
         return {
-            "oxigraph_url": self.oxigraph_url,
             "postgres_dsn_set": bool(self.postgres_dsn),
         }
 
@@ -93,28 +85,6 @@ class PulsaraSettings:
                     "model": self.retrieval.embedding.model,
                     "dimensions": self.retrieval.embedding.dimensions,
                     "api_key_set": bool(self.retrieval.embedding.api_key),
-                },
-                "rerank": {
-                    "provider": self.retrieval.rerank.provider,
-                    "base_url": self.retrieval.rerank.base_url,
-                    "model": self.retrieval.rerank.model,
-                    "api_key_set": bool(self.retrieval.rerank.api_key),
-                },
-                "tokenizer": {
-                    "provider": self.retrieval.tokenizer.provider,
-                    "min_token_length": self.retrieval.tokenizer.min_token_length,
-                    "lowercase": self.retrieval.tokenizer.lowercase,
-                },
-                "governance_relatedness": {
-                    "policy_version": self.retrieval.governance_relatedness.policy_version,
-                    "fixture_version": self.retrieval.governance_relatedness.fixture_version,
-                    "candidate_limit": self.retrieval.governance_relatedness.candidate_limit,
-                    "dense_candidate_min_score": (
-                        self.retrieval.governance_relatedness.dense_candidate_min_score
-                    ),
-                    "max_inline_gap_embeds": (
-                        self.retrieval.governance_relatedness.max_inline_gap_embeds
-                    ),
                 },
             },
         }

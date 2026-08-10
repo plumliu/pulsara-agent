@@ -45,7 +45,6 @@ class CapabilityExecutionSurfaceSnapshotContext:
     workspace_root: Path
     workspace_kind: WorkspaceKind
     available_tool_names: frozenset[str]
-    mcp_installation_id: str
 
 
 @dataclass(frozen=True, slots=True)

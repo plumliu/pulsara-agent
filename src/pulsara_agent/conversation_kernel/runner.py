@@ -52,6 +52,7 @@ from pulsara_agent.conversation_kernel.extensions import (
 )
 from pulsara_agent.conversation_kernel.limits import STAGE2_LIMITS
 from pulsara_agent.conversation_kernel.repository import (
+    AcceptedEntry,
     AssistantBlock,
     AssistantDataBlock,
     AssistantTextBlock,
@@ -395,18 +396,36 @@ class ConversationKernelRunner:
                     parent_content = await self._content(
                         parent_bytes, deadline=deadline
                     )
-                    accepted = await self._io.run(
-                        self._repository.commit_assistant_message,
-                        self._writer_lease.guard,
-                        cut=prepared.cut,
-                        entry_id=entry_id,
-                        parent_content=parent_content,
-                        blocks=canonical_blocks,
-                        complete_turn=not calls,
-                        occurred_at=datetime.now(timezone.utc),
-                        actor_id="model:foreground",
-                        deadline_monotonic=deadline,
-                    )
+                    occurred_at = datetime.now(timezone.utc)
+                    try:
+                        accepted = await self._io.run(
+                            self._repository.commit_assistant_message,
+                            self._writer_lease.guard,
+                            cut=prepared.cut,
+                            entry_id=entry_id,
+                            parent_content=parent_content,
+                            blocks=canonical_blocks,
+                            complete_turn=not calls,
+                            occurred_at=occurred_at,
+                            actor_id="model:foreground",
+                            deadline_monotonic=deadline,
+                        )
+                    except Exception:
+                        winner = await self._io.run(
+                            self._repository.confirm_assistant_message_winner,
+                            self._writer_lease.guard,
+                            cut=prepared.cut,
+                            entry_id=entry_id,
+                            parent_content=parent_content,
+                            blocks=canonical_blocks,
+                            complete_turn=not calls,
+                            occurred_at=occurred_at,
+                            actor_id="model:foreground",
+                            deadline_monotonic=max(deadline, monotonic() + 5.0),
+                        )
+                        if winner is None:
+                            raise
+                        accepted = winner
                     self._live_bus.offer_settlement_nowait(
                         kind=LiveSettlementKind.COMMITTED,
                         session_id=request.session_id,
@@ -724,6 +743,46 @@ class ConversationKernelRunner:
             except BaseException:
                 pass
             raise
+
+    async def accept_subagent_result(
+        self,
+        *,
+        turn_id: str,
+        new_context_binding_revision_id: str | None = None,
+        child_result_id: str,
+        command_id: str,
+        actor_id: str,
+        deadline_monotonic: float,
+    ) -> AcceptedEntry | None:
+        return await self._io.run(
+            self._safe_point.accept_subagent_result,
+            turn_id=turn_id,
+            new_context_binding_revision_id=new_context_binding_revision_id,
+            child_result_id=child_result_id,
+            command_id=command_id,
+            actor_id=actor_id,
+            deadline_monotonic=deadline_monotonic,
+        )
+
+    async def accept_job_result(
+        self,
+        *,
+        turn_id: str,
+        new_context_binding_revision_id: str | None = None,
+        job_id: str,
+        command_id: str,
+        actor_id: str,
+        deadline_monotonic: float,
+    ) -> AcceptedEntry | None:
+        return await self._io.run(
+            self._safe_point.accept_job_result,
+            turn_id=turn_id,
+            new_context_binding_revision_id=new_context_binding_revision_id,
+            job_id=job_id,
+            command_id=command_id,
+            actor_id=actor_id,
+            deadline_monotonic=deadline_monotonic,
+        )
 
     async def _collect_model(
         self,

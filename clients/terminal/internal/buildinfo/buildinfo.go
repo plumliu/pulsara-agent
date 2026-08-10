@@ -6,7 +6,7 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/plumliu/pulsara-agent/clients/terminal/internal/protocolvalue"
+	protocolv3 "github.com/plumliu/pulsara-agent/clients/terminal/internal/protocolv3"
 )
 
 var (
@@ -14,7 +14,7 @@ var (
 	Commit                           = "unknown"
 	ProtocolMajor             uint32 = 3
 	ProtocolMinor             uint32 = 0
-	SchemaFingerprint                = "sha256:96981f00ed67cc21dbe0259deb4094788488954c95ebd4ce760c6645950a2124"
+	SchemaFingerprint                = "sha256:30c3dec486dea592a4e43650006b1d547e4c44d993d68255941d77b61dd4a05c"
 	DependencyLockFingerprint        = "development"
 )
 
@@ -86,7 +86,7 @@ func (v BuildIdentity) Validate() error {
 }
 
 func (v BuildIdentity) expectedFingerprint() (string, error) {
-	return protocolvalue.CanonicalClientFingerprint(
+	return protocolv3.CanonicalFingerprint(
 		"terminal-client-build-identity:v1",
 		map[string]any{
 			"product_version":             v.productVersion,

@@ -55,7 +55,6 @@ def _execution_surface(*tool_names: str):
             )
             for name in sorted(tool_names)
         ),
-        mcp_installation_id="mcp_installation:empty",
     )
 
 

@@ -10,6 +10,7 @@ from typing import Mapping, Protocol
 from uuid import uuid4
 
 from pulsara_agent.conversation_kernel.job_model import DirectKernelJobModel
+from pulsara_agent.conversation_kernel.io import KernelSessionIO
 from pulsara_agent.conversation_kernel.job_catalog import (
     BACKGROUND_COMPACTION,
     JOB_HANDLER_CATALOG,
@@ -70,6 +71,7 @@ class KernelDurableJobExecutor:
         self._poll = poll_interval_seconds
         self._lease = claim_lease_seconds
         self._maximum_concurrency = maximum_concurrency
+        self._io = KernelSessionIO(maximum_concurrency=maximum_concurrency)
         self._owner = f"kernel-job-worker:{uuid4().hex}"
         self._stopping = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
@@ -96,28 +98,35 @@ class KernelDurableJobExecutor:
             await asyncio.wait_for(
                 asyncio.shield(task), timeout=max(0.001, deadline - monotonic())
             )
-        active = tuple(self._active)
-        for operation in active:
+        for operation in tuple(self._active):
             operation.cancel()
-        if active:
-            await asyncio.wait_for(
-                asyncio.gather(*active, return_exceptions=True),
-                timeout=max(0.001, deadline - monotonic()),
-            )
+        while self._active:
+            active = tuple(self._active)
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                raise TimeoutError("durable job handlers did not physically exit")
+            done, pending = await asyncio.wait(active, timeout=remaining)
+            self._active.difference_update(done)
+            for operation in done:
+                if not operation.cancelled():
+                    operation.exception()
+            if pending:
+                raise TimeoutError("durable job handlers did not physically exit")
+        await self._io.aclose(deadline_monotonic=deadline)
         if self._embedding is not None and self._owns_embedding:
             await asyncio.wait_for(
                 self._embedding.aclose(), timeout=max(0.001, deadline - monotonic())
             )
 
     async def run_once(self) -> int:
-        await asyncio.to_thread(
+        await self._io.run(
             self._index.scan_lost_wakes, deadline_monotonic=monotonic() + 5.0
         )
         started = 0
         for contract in JOB_HANDLER_CATALOG:
             if len(self._active) >= self._maximum_concurrency:
                 break
-            candidate = await asyncio.to_thread(
+            candidate = await self._io.run(
                 self._repository.prepare_job_claim_candidate,
                 handler_type=contract.handler_type,
                 deadline_monotonic=monotonic() + 5.0,
@@ -125,7 +134,7 @@ class KernelDurableJobExecutor:
             if candidate is None:
                 continue
             try:
-                attempt = await asyncio.to_thread(
+                attempt = await self._io.run(
                     self._repository.claim_due_job,
                     handler_type=contract.handler_type,
                     claim_owner_id=self._owner,
@@ -134,7 +143,7 @@ class KernelDurableJobExecutor:
                     deadline_monotonic=monotonic() + 5.0,
                 )
             except Exception:
-                attempt = await asyncio.to_thread(
+                attempt = await self._io.run(
                     self._repository.confirm_active_job_claim,
                     job_id=candidate,
                     handler_type=contract.handler_type,
@@ -214,7 +223,7 @@ class KernelDurableJobExecutor:
             maximum_input_tokens=input_limit,
             maximum_output_tokens=output_limit,
         )
-        await asyncio.to_thread(
+        await self._io.run(
             self._repository.mark_job_provider_call_started,
             attempt.guard,
             input_tokens=prepared.estimated_input_tokens,
@@ -225,7 +234,7 @@ class KernelDurableJobExecutor:
 
     async def _background_compaction(self, attempt: AcceptedJobAttempt) -> None:
         intent = _intent(attempt)
-        source = await asyncio.to_thread(
+        source = await self._io.run(
             self._repository.read_compaction_job_source,
             attempt.guard,
             deadline_monotonic=_attempt_deadline(attempt),
@@ -246,7 +255,7 @@ class KernelDurableJobExecutor:
         summary = result.get("summary")
         if not isinstance(summary, str) or not summary.strip():
             raise ValueError("compaction provider omitted summary")
-        await asyncio.to_thread(
+        await self._io.run(
             self._repository.accept_compaction_job_result,
             attempt.guard,
             summary=summary,
@@ -255,7 +264,7 @@ class KernelDurableJobExecutor:
         )
 
     async def _memory_extraction(self, attempt: AcceptedJobAttempt) -> None:
-        source = await asyncio.to_thread(
+        source = await self._io.run(
             self._repository.read_memory_extraction_job_source,
             attempt.guard,
             deadline_monotonic=_attempt_deadline(attempt),
@@ -285,7 +294,7 @@ class KernelDurableJobExecutor:
                     f"job:{uuid4().hex}",
                 )
             )
-        await asyncio.to_thread(
+        await self._io.run(
             self._repository.accept_extracted_memory_bundle,
             attempt.guard,
             candidates=tuple(candidates),
@@ -294,7 +303,7 @@ class KernelDurableJobExecutor:
         )
 
     async def _memory_governance(self, attempt: AcceptedJobAttempt) -> None:
-        candidate = await asyncio.to_thread(
+        candidate = await self._io.run(
             self._repository.read_memory_candidate_for_governance,
             attempt.guard,
             deadline_monotonic=_attempt_deadline(attempt),
@@ -343,7 +352,7 @@ class KernelDurableJobExecutor:
         predecessors = tuple(str(value) for value in predecessor_value)
         if lifecycle != bool(predecessors):
             raise ValueError("memory lifecycle decision lacks exact predecessors")
-        await asyncio.to_thread(
+        await self._io.run(
             self._repository.accept_memory_governance,
             attempt.guard,
             candidate_id=str(candidate["id"]),
@@ -373,7 +382,7 @@ class KernelDurableJobExecutor:
     async def _memory_index_refresh(self, attempt: AcceptedJobAttempt) -> None:
         intent = _intent(attempt)
         if intent.get("channel") == "FTS":
-            await asyncio.to_thread(
+            await self._io.run(
                 self._index.apply_fts_refresh,
                 attempt.guard,
                 deadline_monotonic=_attempt_deadline(attempt),
@@ -381,7 +390,7 @@ class KernelDurableJobExecutor:
             return
         if intent.get("channel") != "VECTOR":
             raise ValueError("memory index channel is invalid")
-        source = await asyncio.to_thread(
+        source = await self._io.run(
             self._repository.snapshot_memory_vector_source,
             attempt.guard,
             handler_contract_id=self._index.handler_contract_id,
@@ -393,7 +402,7 @@ class KernelDurableJobExecutor:
         vectors = await self._embedding.embed_batch(
             tuple(item.embedding_text for item in source.facts)
         )
-        await asyncio.to_thread(
+        await self._io.run(
             self._repository.apply_vector_memory_index,
             attempt.guard,
             source=source,
@@ -408,7 +417,7 @@ class KernelDurableJobExecutor:
         code: str,
         retryable: bool,
     ) -> None:
-        await asyncio.to_thread(
+        await self._io.run(
             self._repository.settle_job_attempt,
             attempt.guard,
             terminal_status=status,
@@ -420,7 +429,7 @@ class KernelDurableJobExecutor:
         )
 
     async def _settle_cancel(self, attempt: AcceptedJobAttempt) -> None:
-        await asyncio.to_thread(
+        await self._io.run(
             self._repository.settle_job_attempt,
             attempt.guard,
             terminal_status="CANCELLED",

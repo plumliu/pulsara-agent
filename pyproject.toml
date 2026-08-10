@@ -1,22 +1,15 @@
 [project]
 name = "pulsara-agent"
 version = "0.1.0"
-description = "Pulsara backend runtime for a JSON-LD grounded agent memory MVP."
+description = "Pulsara canonical conversation-kernel agent runtime."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "cryptography>=49.0.0",
-    "httpx>=0.28.1",
-    "httpx2>=2.5.0",
-    "jieba>=0.42.1",
-    "mcp[cli]==2.0.0",
     "openai>=2.43.0",
     "prompt-toolkit>=3.0.52",
     "psycopg[binary]>=3.3.4",
     "pydantic>=2.0",
     "pyyaml>=6.0.3",
-    "cachetools>=7.1.4",
-    "psycopg-pool>=3.3.1",
     "protobuf>=6.31.1",
 ]
 
@@ -39,7 +32,7 @@ markers = [
 
 [tool.ruff]
 extend-exclude = [
-    "src/pulsara_agent/terminal_protocol/generated/terminal_client_pb2.py",
+    "src/pulsara_agent/terminal_protocol/generated_v3/terminal_kernel_v3_pb2.py",
 ]
 
 [dependency-groups]

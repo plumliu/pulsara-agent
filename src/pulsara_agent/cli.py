@@ -1,4 +1,4 @@
-"""Minimal CLI entrypoint for the Pulsara backend."""
+"""Pulsara command line for the canonical conversation kernel."""
 
 from __future__ import annotations
 
@@ -6,812 +6,121 @@ import argparse
 import asyncio
 import json
 import os
-import sys
-from dataclasses import asdict
 from pathlib import Path
+import sys
 from time import monotonic
-from urllib.parse import SplitResult, urlsplit, urlunsplit
 
 from pulsara_agent import __version__
 from pulsara_agent.capability import (
-    BUNDLED_OPT_OUT_MARKER_NAME,
     bundled_skills_status,
+    default_pulsara_home,
     reset_bundled_skill,
     sync_bundled_skills,
-    default_pulsara_home,
 )
 from pulsara_agent.capability.builtin_catalog import builtin_tool_catalog_entry
 from pulsara_agent.conversation_kernel.capability import KernelCapabilityComposer
 from pulsara_agent.conversation_kernel.host import KernelHostCore
 from pulsara_agent.conversation_kernel.memory_tools import MEMORY_TOOL_NAMES
-from pulsara_agent.conversation_kernel.query import CanonicalConversationQuery
 from pulsara_agent.conversation_kernel.subagent import SUBAGENT_TOOL_NAMES
 from pulsara_agent.conversation_kernel.tool_runtime import DIRECT_KERNEL_TOOL_NAMES
-from pulsara_agent.host import (
-    HostSessionBusyError,
-    HostSessionPendingApprovalError,
-    HostSessionPendingInteractionError,
-    HostWorkspaceInput,
-    normalize_workspace_kind,
-    resolve_workspace,
-)
-from pulsara_agent.host.core import HostCore as LegacyHostCore
-from pulsara_agent.event import (
-    ContextCompactionCompletedEvent,
-    ContextCompactionFailedEvent,
-)
-from pulsara_agent.event_log import PostgresEventLog
-from pulsara_agent.inspector import PostgresInspectorStore
-from pulsara_agent.llm import ModelRole
-from pulsara_agent.runtime.agent import AgentRunResult
-from pulsara_agent.runtime.approval import ApprovalResolution, ToolApprovalDecision
-from pulsara_agent.runtime.plan import (
-    McpInputRequiredInteractionResolution,
-    PendingMcpInputRequired,
-    PendingPlanInteraction,
-    PlanExitResolution,
-    PlanQuestionResolution,
-)
-from pulsara_agent.runtime.mcp import (
-    McpRequiredStartupError,
-    McpServerConfig,
-    McpServerSupervisor,
-    McpStdioConfig,
-    McpStreamableHttpConfig,
-)
-from pulsara_agent.runtime.mcp.store import (
-    DEFAULT_USER_MCP_CONFIG,
-    McpConfigStore,
-    WORKSPACE_MCP_CONFIG,
-    load_mcp_server_configs,
-    mcp_config_sources,
-)
-from pulsara_agent.memory.artifacts.postgres_archive import PostgresArtifactStore
-from pulsara_agent.runtime.long_horizon.checkpoint_doctor import (
-    verify_or_rebuild_subagent_graph_checkpoint,
-)
-from pulsara_agent.runtime.authority_materialization import (
-    build_default_authority_materialization_contract_bundle,
-    build_default_transcript_projection_materialization_contracts,
-    verify_or_rebuild_transcript_projection_checkpoint,
-)
-from pulsara_agent.runtime.long_horizon.checkpoint_gc import (
-    garbage_collect_subagent_graph_checkpoint_artifacts,
-)
-from pulsara_agent.runtime.long_horizon.checkpoint_maintenance import (
-    PostgresCheckpointMaintenanceAuthority,
-)
-from pulsara_agent.runtime.context_input.audit_doctor import (
-    inspect_context_input_audits,
-)
-from pulsara_agent.runtime.context_input.audit_gc import (
-    ContextInputAuditGcEligibility,
-    garbage_collect_incomplete_context_input_audits,
-)
-from pulsara_agent.runtime.long_horizon.feasibility import (
-    check_production_rollout_budget_configuration,
-)
-from pulsara_agent.runtime.long_horizon.reducer_contract import (
-    DEFAULT_SUBAGENT_GRAPH_REDUCER_REGISTRY,
-    build_default_subagent_graph_reducer_binding,
-)
-from pulsara_agent.runtime.permission import (
-    mode_for_policy,
-    preset_to_policy,
-)
+from pulsara_agent.llm.models import ModelRole
+from pulsara_agent.mcp_config import load_mcp_server_configs
 from pulsara_agent.primitives.permission import (
     DEFAULT_PERMISSION_MODE,
     PermissionMode,
     parse_permission_mode,
 )
 from pulsara_agent.repl import ReplPrompt, build_repl_prompt
+from pulsara_agent.tool_permission import mode_for_policy, preset_to_policy
 from pulsara_agent.settings import PulsaraSettings, load_env_file
-from pulsara_agent.storage.schema_verification_service import (
-    VerifiedPostgresAccessLease,
-    acquire_verified_postgres_access_sync,
-    process_postgres_schema_verification_service,
-)
 from pulsara_agent.terminal_client import (
     TerminalClientBinaryError,
     TerminalClientLaunchError,
 )
-from pulsara_agent.terminal_client.launcher import (
-    launch_terminal_client as launch_legacy_terminal_client,
-)
 from pulsara_agent.terminal_client.v3_launcher import launch_terminal_kernel_client
+from pulsara_agent.workspace_identity import (
+    HostWorkspaceInput,
+    normalize_workspace_kind,
+    resolve_workspace,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="pulsara")
-    parser.add_argument("--version", action="store_true", help="Print Pulsara version.")
+    parser.add_argument("--version", action="store_true")
+    commands = parser.add_subparsers(dest="command")
 
-    subcommands = parser.add_subparsers(dest="command")
-    host = subcommands.add_parser("host", help="Run the thin HostCore smoke driver.")
-    host_subcommands = host.add_subparsers(dest="host_command")
-    _add_host_common_args(
-        host_subcommands.add_parser(
-            "run", help="Run one prompt through HostCore and close the session."
-        )
-    ).add_argument("prompt", help="Prompt to run.")
-    repl = _add_host_common_args(
-        host_subcommands.add_parser("repl", help="Start a minimal HostCore REPL.")
-    )
-    repl_resume = repl.add_mutually_exclusive_group()
-    repl_resume.add_argument(
-        "--resume", default=None, help="Resume an existing runtime session id."
-    )
-    repl_resume.add_argument(
-        "--continue",
-        dest="continue_session",
-        action="store_true",
-        help="Resume the most recent resumable session for this workspace.",
-    )
-    repl.add_argument(
-        "--list-sessions",
-        action="store_true",
-        help="List resumable sessions for this workspace and exit.",
-    )
-    tui = _add_host_common_args(
-        host_subcommands.add_parser(
-            "tui", help="Start the renderer-neutral Go terminal client."
-        )
-    )
-    tui_resume = tui.add_mutually_exclusive_group()
-    tui_resume.add_argument(
-        "--resume", default=None, help="Resume an existing runtime session id."
-    )
-    tui_resume.add_argument(
-        "--continue",
-        dest="continue_session",
-        action="store_true",
-        help="Resume the most recent resumable session for this workspace.",
-    )
-    tui.add_argument(
-        "--list-sessions",
-        action="store_true",
-        help="List resumable sessions for this workspace and exit.",
-    )
-    tui.add_argument(
-        "--tui-binary",
-        default=None,
-        help="Explicit path to a verified pulsara-tui binary.",
-    )
-    tui.add_argument(
-        "--clear-scrollback",
-        action="store_true",
-        help=(
-            "Irreversibly erase the current terminal display and scrollback "
-            "before launching the TUI."
-        ),
-    )
-    inspect_cmd = _add_host_permission_args(
-        _add_host_workspace_args(
-            host_subcommands.add_parser(
-                "inspect", help="Print a HostCore diagnostics snapshot."
+    host = commands.add_parser("host", help="Run the canonical conversation kernel.")
+    host_commands = host.add_subparsers(dest="host_command")
+    run = _add_host_common_args(host_commands.add_parser("run"))
+    run.add_argument("prompt")
+    for name in ("repl", "tui"):
+        command = _add_host_common_args(host_commands.add_parser(name))
+        resume = command.add_mutually_exclusive_group()
+        resume.add_argument("--resume", default=None)
+        resume.add_argument("--continue", dest="continue_session", action="store_true")
+        command.add_argument("--list-sessions", action="store_true")
+        if name == "tui":
+            command.add_argument("--tui-binary", default=None)
+            command.add_argument(
+                "--clear-scrollback",
+                action="store_true",
+                help="Irreversibly erase display and scrollback before launch.",
             )
-        )
-    )
-    inspect_cmd.add_argument(
-        "--env-file",
-        default=None,
-        help="Load settings from a .env file before inspecting.",
-    )
-    inspect_cmd.add_argument(
-        "--override-env",
-        action="store_true",
-        help="Let --env-file override existing env.",
-    )
-    inspect_cmd.add_argument(
-        "--prefix",
-        default="PULSARA",
-        help="Environment variable prefix. Defaults to PULSARA.",
-    )
-    skills = subcommands.add_parser("skills", help="Manage Pulsara local skills.")
-    skills_subcommands = skills.add_subparsers(dest="skills_command")
-    sync_bundled = _add_skills_common_args(
-        skills_subcommands.add_parser(
-            "sync-bundled", help="Sync bundled Pulsara skills into PULSARA_HOME."
-        )
-    )
-    sync_bundled.add_argument(
-        "--override-opt-out",
-        action="store_true",
-        help=f"Run even when {BUNDLED_OPT_OUT_MARKER_NAME} exists.",
-    )
-    _add_skills_common_args(
-        skills_subcommands.add_parser("status", help="Print bundled skill status.")
-    )
-    reset = _add_skills_common_args(
-        skills_subcommands.add_parser(
-            "reset", help="Reset a bundled skill from package source."
-        )
-    )
-    reset.add_argument("name", help="Bundled skill name to reset.")
-    mcp = subcommands.add_parser(
-        "mcp", help="Manage MCP server configuration and diagnostics."
-    )
-    mcp_subcommands = mcp.add_subparsers(dest="mcp_command")
-    _add_mcp_common_args(
-        mcp_subcommands.add_parser("list", help="List configured MCP servers.")
-    )
-    mcp_add = _add_mcp_store_args(
-        mcp_subcommands.add_parser("add", help="Add or replace an MCP server.")
-    )
-    mcp_add.add_argument("server_id", help="Stable MCP server id.")
-    transport = mcp_add.add_mutually_exclusive_group(required=True)
-    transport.add_argument("--url", default=None, help="Streamable HTTP MCP endpoint.")
-    transport.add_argument(
-        "--command", dest="mcp_stdio_command", default=None, help="Stdio MCP command."
-    )
-    mcp_add.add_argument(
-        "--arg",
-        action="append",
-        default=[],
-        help="Stdio command argument. May be repeated.",
-    )
-    mcp_add.add_argument(
-        "--cwd", default=None, help="Optional stdio working directory."
-    )
-    mcp_add.add_argument(
-        "--env",
-        action="append",
-        default=[],
-        help="Stdio KEY=VALUE env var. May be repeated.",
-    )
-    mcp_add.add_argument(
-        "--header",
-        action="append",
-        default=[],
-        help="HTTP Header=Value. Stored redacted by inspect/list.",
-    )
-    mcp_add.add_argument(
-        "--env-header",
-        action="append",
-        default=[],
-        help="HTTP Header=ENV_VAR. May be repeated.",
-    )
-    mcp_add.add_argument(
-        "--bearer-token-env-var",
-        default=None,
-        help="Env var containing a bearer token.",
-    )
-    mcp_add.add_argument(
-        "--follow-redirects",
-        action="store_true",
-        help="Allow HTTP redirects for this server.",
-    )
-    mcp_add.add_argument(
-        "--disabled", action="store_true", help="Add the server disabled."
-    )
-    mcp_add.add_argument(
-        "--required",
-        action="store_true",
-        help="Treat startup failure as an error diagnostic.",
-    )
-    mcp_add.add_argument("--connect-timeout-ms", type=int, default=10_000)
-    mcp_add.add_argument("--discovery-timeout-ms", type=int, default=15_000)
-    mcp_add.add_argument("--startup-deadline-ms", type=int, default=30_000)
-    mcp_add.add_argument("--refresh-ttl-ms", type=int, default=300_000)
-    mcp_add.add_argument("--tool-timeout-ms", type=int, default=30_000)
-    mcp_add.add_argument(
-        "--parallel-tools",
-        action="store_true",
-        help="Mark server tools concurrency-safe.",
-    )
-    mcp_add.add_argument(
-        "--enabled-tool",
-        action="append",
-        default=[],
-        help="Allow only this original MCP tool. May be repeated.",
-    )
-    mcp_add.add_argument(
-        "--disabled-tool",
-        action="append",
-        default=[],
-        help="Hide this original MCP tool. May be repeated.",
-    )
-    mcp_remove = _add_mcp_store_args(
-        mcp_subcommands.add_parser("remove", help="Remove an MCP server.")
-    )
-    mcp_remove.add_argument("server_id")
-    mcp_enable = _add_mcp_store_args(
-        mcp_subcommands.add_parser("enable", help="Enable an MCP server.")
-    )
-    mcp_enable.add_argument("server_id")
-    mcp_disable = _add_mcp_store_args(
-        mcp_subcommands.add_parser("disable", help="Disable an MCP server.")
-    )
-    mcp_disable.add_argument("server_id")
-    _add_mcp_common_args(
-        mcp_subcommands.add_parser(
-            "doctor", help="Connect to configured MCP servers and list capabilities."
-        )
-    )
-    _add_mcp_common_args(
-        mcp_subcommands.add_parser(
-            "reconnect", help="Reconnect configured MCP servers and print capabilities."
-        )
-    )
-    database = subcommands.add_parser(
-        "db", help="Privileged PostgreSQL schema migration and verification."
-    )
-    database_subcommands = database.add_subparsers(dest="db_command")
-    for command_name, help_text in (
-        ("status", "Read the migration ledger and report schema status."),
-        ("migrate", "Apply pending packaged PostgreSQL migrations."),
-        ("verify", "Verify the exact runtime schema without changing it."),
-    ):
-        command = database_subcommands.add_parser(command_name, help=help_text)
-        _add_database_common_args(
-            command,
-            default_deadline_seconds=(300.0 if command_name == "migrate" else 10.0),
-        )
-        if command_name == "verify":
+    inspect_host = _add_host_common_args(host_commands.add_parser("inspect"))
+    inspect_host.set_defaults(permission_mode=PermissionMode.READ_ONLY.value)
+
+    skills = commands.add_parser("skills")
+    skill_commands = skills.add_subparsers(dest="skills_command")
+    sync = _add_env_args(skill_commands.add_parser("sync-bundled"))
+    sync.add_argument("--override-opt-out", action="store_true")
+    _add_env_args(skill_commands.add_parser("status"))
+    reset = _add_env_args(skill_commands.add_parser("reset"))
+    reset.add_argument("name")
+
+    database = commands.add_parser("db")
+    database_commands = database.add_subparsers(dest="db_command")
+    for name, deadline in (("status", 10.0), ("migrate", 300.0), ("verify", 30.0)):
+        command = _add_database_args(database_commands.add_parser(name), deadline)
+        if name == "verify":
             command.add_argument("--deep", action="store_true")
-    projections = database_subcommands.add_parser(
-        "projections",
-        help="Inspect and repair durable projection jobs.",
-    )
-    projection_subcommands = projections.add_subparsers(dest="db_projection_command")
-    projection_status = projection_subcommands.add_parser(
-        "status",
-        help="List bounded durable projection authority.",
-    )
-    projection_dead_letters = projection_subcommands.add_parser(
-        "dead-letters",
-        help="List bounded dead-letter projection jobs.",
-    )
-    for command in (projection_status, projection_dead_letters):
-        _add_database_common_args(command, default_deadline_seconds=30.0)
-        command.add_argument("--session", default=None)
-        command.add_argument("--run", default=None)
-        command.add_argument("--after-job-id", default=None)
-        command.add_argument("--limit", type=int, default=100)
-    projection_surfaces = projection_subcommands.add_parser(
-        "surfaces",
-        help="List bounded canonical mutation surface deliveries.",
-    )
-    _add_database_common_args(
-        projection_surfaces,
-        default_deadline_seconds=30.0,
-    )
-    projection_surfaces.add_argument("--after-mutation-id", default=None)
-    projection_surfaces.add_argument("--after-surface", default=None)
-    projection_surfaces.add_argument("--limit", type=int, default=100)
-    projection_surface_retry = projection_subcommands.add_parser(
-        "surface-retry",
-        help="Retry one exact dead-letter canonical mutation surface delivery.",
-    )
-    projection_surface_decommission = projection_subcommands.add_parser(
-        "surface-decommission",
-        help="Terminally decommission one exact dead-letter surface delivery.",
-    )
-    for command in (
-        projection_surface_retry,
-        projection_surface_decommission,
-    ):
-        _add_database_common_args(command, default_deadline_seconds=30.0)
-        command.add_argument("--mutation", required=True)
-        command.add_argument(
-            "--surface",
-            required=True,
-            choices=(
-                "search_index.v1",
-                "vector_index.v1",
-                "oxigraph.v1",
-            ),
-        )
-        command.add_argument("--authority-id", required=True)
-    projection_surface_decommission.add_argument(
-        "--rebuild-result-receipt",
-        default=None,
-        help=(
-            "Use one durable FULL projection result receipt as exact rebuild authority."
-        ),
-    )
-    projection_retry = projection_subcommands.add_parser(
-        "retry",
-        help="Install one typed CAS repair for a dead-letter job.",
-    )
-    _add_database_common_args(projection_retry, default_deadline_seconds=30.0)
-    projection_retry.add_argument("--job", required=True)
-    projection_retry.add_argument(
-        "--reason-code",
-        required=True,
-        choices=(
-            "transient_dependency_restored",
-            "source_authority_repaired",
-            "target_authority_repaired",
-        ),
-    )
-    projection_retry.add_argument("--authority-id", default=None)
-    projection_seed_repair = projection_subcommands.add_parser(
-        "seed-repair",
-        help="Install typed authority to release one exact seed failure latch.",
-    )
-    _add_database_common_args(
-        projection_seed_repair,
-        default_deadline_seconds=30.0,
-    )
-    projection_seed_repair.add_argument("--failure", required=True)
-    projection_seed_repair.add_argument(
-        "--action",
-        required=True,
-        choices=(
-            "retry_after_authority_repair",
-            "reverify_after_schema_repair",
-        ),
-    )
-    projection_seed_repair.add_argument("--authority-id", required=True)
-    projection_plan = projection_subcommands.add_parser(
-        "plan-legacy-surface-bindings",
-        help="Prepare the immutable v5 to v6 legacy binding plan.",
-    )
-    _add_database_common_args(projection_plan, default_deadline_seconds=300.0)
-    projection_drain = projection_subcommands.add_parser(
-        "drain-pre-activation",
-        help="Prepare immutable per-session coverage for v7 or v8.",
-    )
-    _add_database_common_args(projection_drain, default_deadline_seconds=300.0)
-    projection_drain.add_argument(
-        "--kind",
-        required=True,
-        choices=(
-            "run_timeline.v1",
-            "tool_result_execution_evidence.v1",
-        ),
-    )
-    maintenance = database_subcommands.add_parser(
-        "maintenance",
-        help="Inspect or abort a durable database maintenance epoch.",
-    )
-    maintenance_subcommands = maintenance.add_subparsers(dest="db_maintenance_command")
-    maintenance_status = maintenance_subcommands.add_parser(
-        "status",
-        help="Read the current runtime-write admission epoch.",
-    )
-    _add_database_common_args(
-        maintenance_status,
-        default_deadline_seconds=30.0,
-    )
-    maintenance_abort = maintenance_subcommands.add_parser(
-        "abort",
-        help="Abort a maintenance epoch only when its target migration is NONE.",
-    )
-    _add_database_common_args(
-        maintenance_abort,
-        default_deadline_seconds=30.0,
-    )
-    maintenance_abort.add_argument("--operation", required=True)
-    config_check = subcommands.add_parser(
-        "config-check",
-        help=(
-            "Load Pulsara configuration and validate production model-slot "
-            "rollout budgets."
-        ),
-    )
-    config_check.add_argument(
-        "--prefix",
-        default="PULSARA",
-        help="Environment variable prefix. Defaults to PULSARA.",
-    )
-    config_check.add_argument(
-        "--env-file",
-        default=None,
-        help="Load configuration from a .env file before reading the environment.",
-    )
-    config_check.add_argument(
-        "--override-env",
-        action="store_true",
-        help="Let values from --env-file override existing environment variables.",
-    )
-    inspect = subcommands.add_parser(
-        "inspect", help="Read-only durable runtime inspector."
-    )
-    inspect_subcommands = inspect.add_subparsers(dest="inspect_command")
-    inspect_run = _add_inspect_common_args(
-        inspect_subcommands.add_parser("run", help="Inspect a durable run.")
-    )
-    inspect_run.add_argument("run_id")
-    inspect_run.add_argument(
-        "--require-exact-audit",
-        action="store_true",
-        help="Fail unless every compiled context has an exact audit root.",
-    )
-    inspect_session = _add_inspect_common_args(
-        inspect_subcommands.add_parser("session", help="Inspect a durable session.")
-    )
-    inspect_session.add_argument("session_id")
-    inspect_session.add_argument(
-        "--require-exact-audit",
-        action="store_true",
-        help="Fail unless every compiled context has an exact audit root.",
-    )
-    inspect_artifact = _add_inspect_common_args(
-        inspect_subcommands.add_parser("artifact", help="Inspect an artifact.")
-    )
-    inspect_artifact.add_argument("artifact_id")
-    inspect_memory = _add_inspect_common_args(
-        inspect_subcommands.add_parser("memory", help="Inspect a memory node.")
-    )
-    inspect_memory.add_argument("memory_id")
-    _add_inspect_common_args(
-        inspect_subcommands.add_parser(
-            "health", help="Inspect durable subsystem health."
-        )
-    )
-    checkpoint = subcommands.add_parser(
-        "checkpoint",
-        help="Privileged offline subagent graph checkpoint maintenance.",
-    )
-    checkpoint_subcommands = checkpoint.add_subparsers(dest="checkpoint_command")
-    checkpoint_doctor = _add_checkpoint_common_args(
-        checkpoint_subcommands.add_parser(
-            "doctor",
-            help="Verify or deterministically rebuild a closed session checkpoint.",
-        )
-    )
-    checkpoint_doctor.add_argument("runtime_session_id")
-    checkpoint_doctor.add_argument(
-        "--mode",
-        choices=("verify", "rebuild"),
-        default="verify",
-    )
-    checkpoint_doctor.add_argument(
-        "--domain",
-        choices=("subagent_graph", "transcript", "context_input_audit"),
-        default="subagent_graph",
-        help="Checkpoint domain to verify or rebuild.",
-    )
-    checkpoint_doctor.add_argument("--through-sequence", type=int, default=None)
-    checkpoint_doctor.add_argument("--max-events", type=int, default=1_000_000)
-    checkpoint_doctor.add_argument(
-        "--max-payload-bytes", type=int, default=1024 * 1024 * 1024
-    )
-    checkpoint_doctor.add_argument("--timeout-seconds", type=float, default=120.0)
-    checkpoint_doctor.add_argument(
-        "--require-exact-audit",
-        action="store_true",
-        help="For context_input_audit, fail unless every compile has an exact root.",
-    )
-    checkpoint_gc = _add_checkpoint_common_args(
-        checkpoint_subcommands.add_parser(
-            "gc",
-            help="Delete stale checkpoint artifact bytes for a closed session.",
-        )
-    )
-    checkpoint_gc.add_argument("runtime_session_id")
-    checkpoint_gc.add_argument(
-        "--domain",
-        choices=("subagent_graph", "context_input_audit"),
-        default="subagent_graph",
-    )
-    checkpoint_gc.add_argument("--retain", type=int, default=2)
-    checkpoint_gc.add_argument("--max-catalog-events", type=int, default=10_000)
-    checkpoint_gc.add_argument("--through-sequence", type=int, default=None)
-    checkpoint_gc.add_argument("--timeout-seconds", type=float, default=30.0)
-    checkpoint_gc.add_argument(
-        "--apply",
-        action="store_true",
-        help="Delete eligible incomplete audit artifacts; default is dry-run.",
-    )
+
+    config = _add_env_args(commands.add_parser("config-check"))
+    config.set_defaults(prefix="PULSARA")
+    return parser
+
+
+def _add_env_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    parser.add_argument("--env-file", default=None)
+    parser.add_argument("--override-env", action="store_true")
+    parser.add_argument("--prefix", default="PULSARA")
+    return parser
+
+
+def _add_database_args(
+    parser: argparse.ArgumentParser, deadline: float
+) -> argparse.ArgumentParser:
+    _add_env_args(parser)
+    parser.add_argument("--deadline-seconds", type=float, default=deadline)
     return parser
 
 
 def _add_host_common_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
-    _add_host_workspace_args(parser)
-    _add_host_permission_args(parser)
-    parser.add_argument(
-        "--skill",
-        action="append",
-        default=[],
-        help="Activate a workspace skill by name for this turn. May be repeated.",
-    )
-    parser.add_argument(
-        "--env-file",
-        default=None,
-        help="Load settings from a .env file before running.",
-    )
-    parser.add_argument(
-        "--override-env",
-        action="store_true",
-        help="Let --env-file override existing env.",
-    )
-    parser.add_argument(
-        "--prefix",
-        default="PULSARA",
-        help="Environment variable prefix. Defaults to PULSARA.",
-    )
+    _add_env_args(parser)
+    parser.add_argument("--workspace", default=None)
+    parser.add_argument("--workspace-kind", choices=("project", "transient"))
+    parser.add_argument("--display-label", default=None)
+    parser.add_argument("--memory-domain-id", default=None)
+    parser.add_argument("--skill", action="append", default=[])
     parser.add_argument(
         "--model-role",
-        default=ModelRole.PRO.value,
         choices=(ModelRole.PRO.value, ModelRole.FLASH.value),
-        help="Model role to use.",
+        default=ModelRole.PRO.value,
     )
-    return parser
-
-
-def _add_database_common_args(
-    parser: argparse.ArgumentParser,
-    *,
-    default_deadline_seconds: float,
-) -> argparse.ArgumentParser:
-    parser.add_argument("--env-file", default=None)
-    parser.add_argument("--override-env", action="store_true")
-    parser.add_argument("--prefix", default="PULSARA")
-    parser.add_argument(
-        "--deadline-seconds",
-        type=float,
-        default=default_deadline_seconds,
-    )
-    parser.add_argument("--format", choices=("json",), default="json")
-    return parser
-
-
-def _add_host_workspace_args(
-    parser: argparse.ArgumentParser,
-) -> argparse.ArgumentParser:
-    parser.add_argument(
-        "--workspace",
-        default=None,
-        help="Workspace path. Defaults to current directory.",
-    )
-    parser.add_argument(
-        "--workspace-kind",
-        default=None,
-        choices=("project", "transient"),
-        help="Workspace kind: 'project' or 'transient'.",
-    )
-    parser.add_argument(
-        "--display-label", default=None, help="Optional workspace display label."
-    )
-    parser.add_argument(
-        "--memory-domain-id",
-        default=None,
-        help="Memory domain id. Defaults to u_local.",
-    )
-    return parser
-
-
-def _add_host_permission_args(
-    parser: argparse.ArgumentParser,
-) -> argparse.ArgumentParser:
     parser.add_argument(
         "--permission-mode",
+        choices=tuple(item.value for item in PermissionMode),
         default=None,
-        choices=tuple(mode.value for mode in PermissionMode),
-        help=(
-            "Permission preset (main path). One of: read-only, ask-permissions, "
-            "accept-edits, bypass-permissions. Defaults to bypass-permissions for run, "
-            "read-only for inspect. Production host paths are preset-only; the raw "
-            "three-axis flags are rejected."
-        ),
-    )
-    parser.add_argument(
-        "--permission-profile",
-        default=None,
-        choices=("trusted_host", "workspace_guarded", "read_only"),
-        help="[deprecated/test-only] Raw permission profile is not accepted by production host paths.",
-    )
-    parser.add_argument(
-        "--approval-policy",
-        default=None,
-        choices=("never", "risky_only", "on_request"),
-        help="[deprecated/test-only] Raw approval policy is not accepted by production host paths.",
-    )
-    parser.add_argument(
-        "--terminal-access",
-        default=None,
-        choices=("off", "ask", "allow"),
-        help="[deprecated/test-only] Raw terminal access policy is not accepted by production host paths.",
-    )
-    return parser
-
-
-def _add_skills_common_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
-    parser.add_argument(
-        "--env-file",
-        default=None,
-        help="Load a .env file before resolving PULSARA_HOME.",
-    )
-    parser.add_argument(
-        "--override-env",
-        action="store_true",
-        help="Let --env-file override existing env.",
-    )
-    return parser
-
-
-def _add_inspect_common_args(
-    parser: argparse.ArgumentParser,
-) -> argparse.ArgumentParser:
-    parser.add_argument(
-        "--env-file",
-        default=None,
-        help="Load settings from a .env file before inspecting.",
-    )
-    parser.add_argument(
-        "--override-env",
-        action="store_true",
-        help="Let --env-file override existing env.",
-    )
-    parser.add_argument(
-        "--prefix",
-        default="PULSARA",
-        help="Environment variable prefix. Defaults to PULSARA.",
-    )
-    parser.add_argument(
-        "--format",
-        default="json",
-        choices=("json",),
-        help="Output format. Defaults to json.",
-    )
-    parser.add_argument(
-        "--include-payload",
-        action="store_true",
-        help="Include raw event or artifact payloads.",
-    )
-    parser.add_argument(
-        "--limit-events",
-        type=int,
-        default=200,
-        help="Maximum event summaries to include.",
-    )
-    parser.add_argument(
-        "--max-chars",
-        type=int,
-        default=2000,
-        help="Maximum artifact preview characters.",
-    )
-    return parser
-
-
-def _add_checkpoint_common_args(
-    parser: argparse.ArgumentParser,
-) -> argparse.ArgumentParser:
-    parser.add_argument(
-        "--env-file", default=None, help="Load settings before maintenance."
-    )
-    parser.add_argument(
-        "--override-env",
-        action="store_true",
-        help="Let --env-file override existing env.",
-    )
-    parser.add_argument(
-        "--prefix",
-        default="PULSARA",
-        help="Environment variable prefix. Defaults to PULSARA.",
-    )
-    return parser
-
-
-def _add_mcp_common_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
-    parser.add_argument(
-        "--env-file",
-        default=None,
-        help="Load a .env file before resolving MCP env vars.",
-    )
-    parser.add_argument(
-        "--override-env",
-        action="store_true",
-        help="Let --env-file override existing env.",
-    )
-    parser.add_argument(
-        "--workspace",
-        default=None,
-        help="Workspace path for workspace MCP config merge.",
-    )
-    parser.add_argument("--config", default=None, help="Override user MCP config path.")
-    return parser
-
-
-def _add_mcp_store_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
-    _add_mcp_common_args(parser)
-    parser.add_argument(
-        "--scope",
-        default="user",
-        choices=("user", "workspace"),
-        help="Config file to mutate. Defaults to user (~/.pulsara/mcp.yaml).",
     )
     return parser
 
@@ -819,35 +128,51 @@ def _add_mcp_store_args(parser: argparse.ArgumentParser) -> argparse.ArgumentPar
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
-
     if args.version:
         print(__version__)
         return
-
+    if args.command == "host":
+        try:
+            if args.host_command == "run":
+                result = asyncio.run(_kernel_host_run(args))
+                _print_agent_run_result(result)
+                return
+            if args.host_command == "repl":
+                asyncio.run(_kernel_host_repl(args))
+                return
+            if args.host_command == "tui":
+                asyncio.run(_kernel_host_tui(args))
+                return
+            if args.host_command == "inspect":
+                print(json.dumps(_host_inspect(args), indent=2, ensure_ascii=False))
+                return
+        except (
+            ValueError,
+            KeyError,
+            TerminalClientBinaryError,
+            TerminalClientLaunchError,
+        ) as exc:
+            parser.error(_public_error(exc))
+        parser.error("host requires a subcommand")
+    if args.command == "skills":
+        _load_env_file_from_args(args)
+        if args.skills_command == "sync-bundled":
+            result = sync_bundled_skills(override_opt_out=args.override_opt_out)
+        elif args.skills_command == "status":
+            result = bundled_skills_status()
+        elif args.skills_command == "reset":
+            result = reset_bundled_skill(args.name)
+        else:
+            parser.error("skills requires a subcommand")
+        print(json.dumps(result.to_dict(), indent=2, ensure_ascii=False))
+        return
     if args.command == "config-check":
         try:
-            if args.env_file:
-                settings = PulsaraSettings.from_env_file(
-                    args.env_file,
-                    prefix=args.prefix,
-                    override=args.override_env,
-                )
-            else:
-                settings = PulsaraSettings.from_env(prefix=args.prefix)
-            rollout_feasibility = check_production_rollout_budget_configuration(
-                settings.llm
-            )
+            settings = _settings_from_args(args)
         except ValueError as exc:
             parser.error(str(exc))
-        report = settings.redacted_dict()
-        report["rollout_budget_feasibility"] = rollout_feasibility.model_dump(
-            mode="json"
-        )
-        print(json.dumps(report, indent=2))
-        if not rollout_feasibility.feasible:
-            raise SystemExit(2)
+        print(json.dumps(settings.redacted_dict(), indent=2, ensure_ascii=False))
         return
-
     if args.command == "db":
         try:
             report = _database_command(args)
@@ -870,449 +195,12 @@ def main() -> None:
             )
             raise SystemExit(2) from exc
         print(json.dumps(report, indent=2, ensure_ascii=False, default=str))
-        if report.get("status") == "preparation_required":
-            raise SystemExit(3)
         return
-
-    if args.command == "host":
-        if args.host_command == "run":
-            try:
-                result = asyncio.run(_kernel_host_run(args))
-            except ValueError as exc:
-                parser.error(str(exc))
-            if isinstance(result, dict) and (
-                result.get("pending_approval") is not None
-                or result.get("pending_interaction") is not None
-            ):
-                print(json.dumps(result, indent=2))
-            else:
-                _print_agent_run_result(result)
-            return
-        if args.host_command == "repl":
-            try:
-                asyncio.run(_kernel_host_repl(args))
-            except McpRequiredStartupError as exc:
-                parser.error(f"{exc} ({exc.reason_code})")
-            except ValueError as exc:
-                parser.error(str(exc))
-            except KeyError as exc:
-                parser.error(_format_not_found_error(exc))
-            return
-        if args.host_command == "tui":
-            try:
-                asyncio.run(_kernel_host_tui(args))
-            except McpRequiredStartupError as exc:
-                parser.error(f"{exc} ({exc.reason_code})")
-            except (TerminalClientBinaryError, TerminalClientLaunchError) as exc:
-                parser.error(str(exc))
-            except ValueError as exc:
-                parser.error(str(exc))
-            except KeyError as exc:
-                parser.error(_format_not_found_error(exc))
-            return
-        if args.host_command == "inspect":
-            try:
-                snapshot = asyncio.run(_host_inspect(args))
-            except ValueError as exc:
-                parser.error(str(exc))
-            print(json.dumps(snapshot, indent=2))
-            return
-        parser.error("host requires a subcommand")
-
-    if args.command == "inspect":
-        try:
-            report = _inspect(args)
-        except ValueError as exc:
-            parser.error(str(exc))
-        except KeyError as exc:
-            parser.error(f"not found: {exc.args[0]}")
-        print(json.dumps(report, indent=2, ensure_ascii=False, default=str))
-        return
-
-    if args.command == "checkpoint":
-        try:
-            report = _checkpoint_command(args)
-        except (ValueError, RuntimeError) as exc:
-            parser.error(str(exc))
-        print(json.dumps(report, indent=2, ensure_ascii=False, default=str))
-        return
-
-    if args.command == "skills":
-        if args.skills_command == "sync-bundled":
-            result = _skills_sync_bundled(args)
-            print(json.dumps(result.to_dict(), indent=2))
-            return
-        if args.skills_command == "status":
-            result = _skills_status(args)
-            print(json.dumps(result.to_dict(), indent=2))
-            return
-        if args.skills_command == "reset":
-            result = _skills_reset(args)
-            print(json.dumps(result.to_dict(), indent=2))
-            return
-        parser.error("skills requires a subcommand")
-
-    if args.command == "mcp":
-        try:
-            report = asyncio.run(_mcp_command(args))
-        except ValueError as exc:
-            parser.error(str(exc))
-        print(json.dumps(report, indent=2, ensure_ascii=False, default=str))
-        return
-
     parser.print_help()
 
 
-def _database_command(args: argparse.Namespace) -> dict[str, object]:
-    if args.db_command is None:
-        raise ValueError("db requires a subcommand")
-    if not 1.0 <= args.deadline_seconds <= 3600.0:
-        raise ValueError("--deadline-seconds must be between 1 and 3600")
-    if args.env_file:
-        load_env_file(args.env_file, override=args.override_env)
-    runtime_dsn = os.getenv(f"{args.prefix}_POSTGRES_DSN", "").strip()
-    if not runtime_dsn:
-        raise ValueError(f"{args.prefix}_POSTGRES_DSN is required")
-    deadline = monotonic() + args.deadline_seconds
-    from pulsara_agent.storage.migrations.contracts import postgres_schema_fingerprint
-    from pulsara_agent.storage.migrations.registry import POSTGRES_MIGRATION_REGISTRY
-    from pulsara_agent.storage.migrations.runner import (
-        PostgresMigrationRunner,
-        _read_identity_from_connection,
-        read_migration_ledger,
-    )
-    from pulsara_agent.storage.migrations.verifier import (
-        classify_migration_history,
-    )
-    from pulsara_agent.storage.postgres_connection_provider import (
-        PostgresRuntimeConnectionFactory,
-    )
-
-    factory = PostgresRuntimeConnectionFactory(runtime_dsn)
-    if args.db_command == "projections":
-        if args.db_projection_command is None:
-            raise ValueError("db projections requires a subcommand")
-        if args.db_projection_command in {
-            "plan-legacy-surface-bindings",
-            "drain-pre-activation",
-        }:
-            admin_dsn = os.getenv(f"{args.prefix}_POSTGRES_ADMIN_DSN", "").strip()
-            if not admin_dsn:
-                from pulsara_agent.storage.migrations.errors import (
-                    PostgresSchemaError,
-                    PostgresSchemaFailureCode,
-                )
-
-                raise PostgresSchemaError(
-                    PostgresSchemaFailureCode.ADMIN_DSN_REQUIRED,
-                    "PULSARA_POSTGRES_ADMIN_DSN is required for projection preparation",
-                )
-            from pulsara_agent.projection_jobs.contracts import (
-                DurableProjectionKind,
-            )
-            from pulsara_agent.runtime.projection_jobs.migration_port import (
-                build_postgres_projection_migration_preparation_port,
-            )
-
-            coordinator = build_postgres_projection_migration_preparation_port(
-                admin_dsn=admin_dsn,
-                runtime_dsn=runtime_dsn,
-            )
-            if args.db_projection_command == "plan-legacy-surface-bindings":
-                preparation = coordinator.prepare_legacy_surface_bindings(
-                    deadline_monotonic=deadline
-                )
-            else:
-                preparation = coordinator.drain_pre_activation(
-                    kind=DurableProjectionKind(args.kind),
-                    deadline_monotonic=deadline,
-                )
-            return {
-                "status": "prepared",
-                **asdict(preparation),
-            }
-
-        from pulsara_agent.projection_jobs.contracts import (
-            CanonicalMutationSurface,
-            DurableProjectionRepairReason,
-        )
-        from pulsara_agent.runtime.projection_jobs.inspection import (
-            inspect_durable_projection_state,
-        )
-        from pulsara_agent.runtime.projection_jobs.postgres_repository import (
-            PostgresDurableProjectionRepository,
-        )
-        from pulsara_agent.runtime.projection_jobs.surface import (
-            PostgresCanonicalMutationSurfaceRepository,
-        )
-
-        with acquire_verified_postgres_access_sync(
-            runtime_dsn,
-            deadline_monotonic=deadline,
-        ) as access_lease:
-            store = PostgresInspectorStore(access_lease.connection_provider)
-            if args.db_projection_command in {"status", "dead-letters"}:
-                return inspect_durable_projection_state(
-                    store,
-                    session_id=args.session,
-                    run_id=args.run,
-                    after_job_id=args.after_job_id,
-                    limit=args.limit,
-                    job_statuses=(
-                        ("dead_letter",)
-                        if args.db_projection_command == "dead-letters"
-                        else None
-                    ),
-                )
-            if args.db_projection_command == "surfaces":
-                if (args.after_mutation_id is None) != (args.after_surface is None):
-                    raise ValueError(
-                        "--after-mutation-id and --after-surface must be supplied together"
-                    )
-                snapshot = inspect_durable_projection_state(
-                    store,
-                    after_surface_key=(
-                        (args.after_mutation_id, args.after_surface)
-                        if args.after_mutation_id is not None
-                        else None
-                    ),
-                    limit=args.limit,
-                )
-                return {
-                    "status": snapshot["status"],
-                    "runtime_write_admission_epoch": snapshot[
-                        "runtime_write_admission_epoch"
-                    ],
-                    "surface_deliveries": snapshot["surface_deliveries"],
-                    "surface_page": snapshot["surface_page"],
-                    "diagnostics": snapshot["diagnostics"],
-                }
-            if args.db_projection_command == "retry":
-                authority_id = args.authority_id or (
-                    "pulsara-cli:" + args.job + ":" + args.reason_code
-                )
-                action = PostgresDurableProjectionRepository(
-                    access_lease.connection_provider
-                ).repair_dead_letter(
-                    job_id=args.job,
-                    reason=DurableProjectionRepairReason(args.reason_code),
-                    operator_authority_id=authority_id,
-                    deadline_monotonic=deadline,
-                )
-                return {
-                    "status": "repair_installed",
-                    "repair_action": action.model_dump(mode="json"),
-                }
-            if args.db_projection_command == "seed-repair":
-                action = PostgresDurableProjectionRepository(
-                    access_lease.connection_provider
-                ).repair_seed_failure(
-                    failure_id=args.failure,
-                    action=args.action,
-                    operator_authority_id=args.authority_id,
-                    deadline_monotonic=deadline,
-                )
-                return {
-                    "status": "seed_repair_installed",
-                    "repair_action": action.model_dump(mode="json"),
-                }
-            if args.db_projection_command in {
-                "surface-retry",
-                "surface-decommission",
-            }:
-                decommission = args.db_projection_command == "surface-decommission"
-                replacement = args.rebuild_result_receipt if decommission else None
-                action_name = (
-                    "retry_same_contract"
-                    if not decommission
-                    else (
-                        "decommission_after_rebuild"
-                        if replacement is not None
-                        else "decommission_with_authority"
-                    )
-                )
-                action = PostgresCanonicalMutationSurfaceRepository(
-                    access_lease.connection_provider
-                ).repair_dead_letter(
-                    mutation_id=args.mutation,
-                    surface=CanonicalMutationSurface(args.surface),
-                    action=action_name,
-                    operator_authority_id=args.authority_id,
-                    rebuild_result_receipt_id=replacement,
-                    deadline_monotonic=deadline,
-                )
-                return {
-                    "status": "surface_repair_installed",
-                    "repair_action": action.model_dump(mode="json"),
-                }
-        raise ValueError(
-            f"unsupported db projections command: {args.db_projection_command}"
-        )
-    if args.db_command == "maintenance":
-        if args.db_maintenance_command is None:
-            raise ValueError("db maintenance requires a subcommand")
-        from pulsara_agent.storage.runtime_write_admission import (
-            abort_runtime_write_maintenance,
-            read_runtime_write_epoch,
-        )
-
-        if args.db_maintenance_command == "status":
-            with factory.connect(
-                deadline_monotonic=deadline,
-                autocommit=True,
-            ) as connection:
-                epoch = read_runtime_write_epoch(connection)
-            return {
-                "status": epoch.mode.value,
-                "runtime_write_admission_epoch": epoch.model_dump(mode="json"),
-            }
-        admin_dsn = os.getenv(f"{args.prefix}_POSTGRES_ADMIN_DSN", "").strip()
-        if not admin_dsn:
-            from pulsara_agent.storage.migrations.errors import (
-                PostgresSchemaError,
-                PostgresSchemaFailureCode,
-            )
-
-            raise PostgresSchemaError(
-                PostgresSchemaFailureCode.ADMIN_DSN_REQUIRED,
-                "PULSARA_POSTGRES_ADMIN_DSN is required for maintenance abort",
-            )
-        from pulsara_agent.storage.migrations.runner import (
-            PostgresAdminConnectionFactory,
-        )
-
-        admin_factory = PostgresAdminConnectionFactory(admin_dsn)
-        with admin_factory.connect(deadline_monotonic=deadline) as connection:
-            epoch = read_runtime_write_epoch(connection, privileged=True)
-            if epoch.maintenance_operation_id != args.operation:
-                raise ValueError("maintenance operation identity mismatch")
-            target_version = epoch.target_migration_version
-            if target_version is None:
-                raise ValueError("maintenance epoch has no target migration")
-            target_exists = connection.execute(
-                """
-                SELECT 1 FROM pulsara_schema_migrations
-                WHERE version = %s
-                """,
-                (target_version,),
-            ).fetchone()
-            if target_exists is not None:
-                raise ValueError("maintenance target migration is already committed")
-            with connection.transaction():
-                resulting = abort_runtime_write_maintenance(
-                    connection,
-                    maintenance_epoch=epoch,
-                )
-        return {
-            "status": "aborted",
-            "runtime_write_admission_epoch": resulting.model_dump(mode="json"),
-        }
-    if args.db_command == "status":
-        with factory.connect(
-            deadline_monotonic=deadline,
-            autocommit=False,
-        ) as connection:
-            with connection.transaction():
-                connection.execute(
-                    "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"
-                )
-                identity = _read_identity_from_connection(connection)
-                rows = read_migration_ledger(connection)
-        head = rows[-1].version if rows else None
-        observed_prefix = rows[-1].registry_prefix_fingerprint if rows else None
-        status = classify_migration_history(rows).value
-        payload = {
-            "status": status,
-            "database_name": identity.database_name,
-            "runtime_role": identity.runtime_role,
-            "migration_head_version": head,
-            "expected_head_version": POSTGRES_MIGRATION_REGISTRY.latest_version,
-            "observed_registry_prefix_fingerprint": observed_prefix,
-            "expected_registry_prefix_fingerprint": POSTGRES_MIGRATION_REGISTRY.registry_fingerprint,
-        }
-        payload["report_fingerprint"] = postgres_schema_fingerprint(
-            "pulsara:postgres-schema-status-report:v1", payload
-        )
-        return payload
-    if args.db_command == "migrate":
-        admin_dsn = os.getenv(f"{args.prefix}_POSTGRES_ADMIN_DSN", "").strip()
-        if not admin_dsn:
-            from pulsara_agent.storage.migrations.errors import (
-                PostgresSchemaError,
-                PostgresSchemaFailureCode,
-            )
-
-            raise PostgresSchemaError(
-                PostgresSchemaFailureCode.ADMIN_DSN_REQUIRED,
-                "PULSARA_POSTGRES_ADMIN_DSN is required for db migrate",
-            )
-        from pulsara_agent.runtime.projection_jobs.migration_port import (
-            build_postgres_projection_migration_preparation_port,
-        )
-
-        report = PostgresMigrationRunner(
-            admin_dsn=admin_dsn,
-            runtime_dsn=runtime_dsn,
-            projection_preparation_port=(
-                build_postgres_projection_migration_preparation_port(
-                    admin_dsn=admin_dsn,
-                    runtime_dsn=runtime_dsn,
-                )
-            ),
-        ).migrate(deadline_monotonic=deadline)
-        payload = report.to_dict()
-        if report.status == "preparation_required":
-            return payload
-        verification = factory.verify_deep(deadline_monotonic=deadline)
-        payload["deep_verification_result_fingerprint"] = (
-            verification.result.result_fingerprint
-        )
-        return payload
-    if args.deep:
-        bundle = factory.verify_deep(deadline_monotonic=deadline)
-        can_create_in_public = bundle.fast.result.effective_privilege_result.runtime_role_can_create_in_public_schema
-        return {
-            "status": "verified",
-            "mode": "deep",
-            "database_name": bundle.fast.binding.database_name,
-            "runtime_role": bundle.fast.binding.runtime_role,
-            "migration_head_version": bundle.fast.binding.migration_head_version,
-            "registry_prefix_fingerprint": bundle.fast.binding.durable_registry_prefix_fingerprint,
-            "fast_executable_schema_fingerprint": bundle.fast.binding.fast_executable_schema_fingerprint,
-            "expected_object_manifest_fingerprint": bundle.result.expected_object_manifest_fingerprint,
-            "expected_deep_catalog_fingerprint": bundle.result.expected_deep_catalog_fingerprint,
-            "observed_deep_catalog_fingerprint": bundle.result.observed_deep_catalog_fingerprint,
-            "runtime_role_can_create_in_public_schema": can_create_in_public,
-            "warnings": (
-                ("runtime_role_can_create_in_public_schema",)
-                if can_create_in_public
-                else ()
-            ),
-            "result_fingerprint": bundle.result.result_fingerprint,
-        }
-    bundle = factory.verify(deadline_monotonic=deadline)
-    can_create_in_public = bundle.result.effective_privilege_result.runtime_role_can_create_in_public_schema
-    return {
-        "status": "verified",
-        "mode": "fast",
-        "database_name": bundle.binding.database_name,
-        "runtime_role": bundle.binding.runtime_role,
-        "migration_head_version": bundle.binding.migration_head_version,
-        "registry_prefix_fingerprint": bundle.binding.durable_registry_prefix_fingerprint,
-        "fast_executable_schema_fingerprint": bundle.binding.fast_executable_schema_fingerprint,
-        "runtime_role_can_create_in_public_schema": can_create_in_public,
-        "warnings": (
-            ("runtime_role_can_create_in_public_schema",)
-            if can_create_in_public
-            else ()
-        ),
-        "result_fingerprint": bundle.result.result_fingerprint,
-    }
-
-
 async def _kernel_host_run(args) -> object:
-    settings = _settings_from_host_args(args)
-    permission_policy = _permission_policy_from_host_args(args, intent="run")
+    settings = _settings_from_args(args)
     _best_effort_sync_bundled_skills()
     core = KernelHostCore.production(settings=settings)
     session = None
@@ -1320,88 +208,47 @@ async def _kernel_host_run(args) -> object:
         session = await core.open_session(
             _workspace_input_from_args(args),
             model_role=ModelRole(args.model_role),
-            permission_policy=permission_policy,
+            permission_policy=_permission_policy(args, intent="run"),
             active_skill_names=_active_skill_names_from_args(args),
         )
         return await session.run_turn(args.prompt)
     finally:
-        close_error = None
         if session is not None:
-            try:
-                await core.close_session(
-                    session.host_session_id, close_conversation=True
-                )
-            except BaseException as exc:
-                close_error = exc
-        try:
-            await core.shutdown()
-        finally:
-            if close_error is not None:
-                raise close_error
+            await core.close_session(session.host_session_id, close_conversation=True)
+        await core.shutdown()
 
 
-async def _kernel_open_initial_session(
-    core: KernelHostCore,
-    args,
-    *,
-    workspace_input: HostWorkspaceInput,
-    permission_policy,
-):
+async def _open_initial_session(core: KernelHostCore, args):
+    common = {
+        "model_role": ModelRole(args.model_role),
+        "permission_policy": _permission_policy(args, intent="run"),
+        "active_skill_names": _active_skill_names_from_args(args),
+    }
+    workspace = _workspace_input_from_args(args)
     if getattr(args, "resume", None):
         return await core.resume_session(
-            args.resume,
-            workspace_input=workspace_input,
-            model_role=ModelRole(args.model_role),
-            permission_policy=permission_policy,
-            active_skill_names=_active_skill_names_from_args(args),
+            args.resume, workspace_input=workspace, **common
         )
     if getattr(args, "continue_session", False):
-        return await core.resume_most_recent_session(
-            workspace_input,
-            model_role=ModelRole(args.model_role),
-            permission_policy=permission_policy,
-            active_skill_names=_active_skill_names_from_args(args),
-        )
-    return await core.open_session(
-        workspace_input,
-        model_role=ModelRole(args.model_role),
-        permission_policy=permission_policy,
-        active_skill_names=_active_skill_names_from_args(args),
-    )
+        return await core.resume_most_recent_session(workspace, **common)
+    return await core.open_session(workspace, **common)
 
 
 async def _kernel_host_repl(args) -> None:
-    settings = _settings_from_host_args(args)
-    permission_policy = _permission_policy_from_host_args(args, intent="run")
+    settings = _settings_from_args(args)
     _best_effort_sync_bundled_skills()
     core = KernelHostCore.production(settings=settings)
     repl_prompt: ReplPrompt = build_repl_prompt(
-        history_path=default_pulsara_home() / "repl_history",
+        history_path=default_pulsara_home() / "repl_history"
     )
     try:
-        workspace_input = _workspace_input_from_args(args)
-        if getattr(args, "list_sessions", False):
-            sessions = await core.list_resumable_sessions(
-                workspace_input=workspace_input
-            )
-            print(
-                json.dumps(
-                    [summary.to_dict() for summary in sessions],
-                    indent=2,
-                    ensure_ascii=False,
-                )
-            )
+        workspace = _workspace_input_from_args(args)
+        if args.list_sessions:
+            summaries = await core.list_resumable_sessions(workspace_input=workspace)
+            print(json.dumps([item.to_dict() for item in summaries], indent=2))
             return
-        session = await _kernel_open_initial_session(
-            core,
-            args,
-            workspace_input=workspace_input,
-            permission_policy=permission_policy,
-        )
-        print(
-            "Pulsara conversation kernel REPL · :help 查看命令 · "
-            "Ctrl-D detach · :close 关闭对话"
-        )
+        session = await _open_initial_session(core, args)
+        print("Pulsara kernel REPL · :help · Ctrl-D detach · :close conversation")
         while True:
             try:
                 prompt = await repl_prompt.read_line("pulsara> ")
@@ -1410,83 +257,27 @@ async def _kernel_host_repl(args) -> None:
                 continue
             except EOFError:
                 print()
-                break
+                return
             command = prompt.strip()
             if not command:
                 continue
             if command in {"exit", "quit", ":q"}:
-                break
+                return
             if command in {":help", ":h", ":?"}:
-                print(
-                    "Commands:\n"
-                    "  :sessions             List resumable sessions\n"
-                    "  :resume <session-id>  Resume a canonical conversation\n"
-                    "  :continue             Resume the latest conversation\n"
-                    "  :stop                 Interrupt the active turn\n"
-                    "  :close                Close the conversation\n"
-                    "  Ctrl-D / exit         Detach without closing"
-                )
+                print(":sessions · :resume ID · :continue · :stop · :close")
                 continue
             if command == ":sessions":
-                sessions = await core.list_resumable_sessions(
-                    workspace_input=workspace_input
-                )
-                print(
-                    json.dumps(
-                        [summary.to_dict() for summary in sessions],
-                        indent=2,
-                        ensure_ascii=False,
-                    )
-                )
-                continue
-            if command.startswith(":resume"):
-                session_id = command[len(":resume") :].strip()
-                if not session_id:
-                    print("Usage: :resume <session-id>", file=sys.stderr)
-                    continue
-                next_session = await core.resume_session(
-                    session_id,
-                    workspace_input=workspace_input,
-                    model_role=ModelRole(args.model_role),
-                    permission_policy=permission_policy,
-                    active_skill_names=_active_skill_names_from_args(args),
-                )
-                await core.close_session(
-                    session.host_session_id, close_conversation=False
-                )
-                session = next_session
-                print(f"Resumed {session.session_id}")
-                continue
-            if command == ":continue":
                 summaries = await core.list_resumable_sessions(
-                    workspace_input=workspace_input
+                    workspace_input=workspace
                 )
-                target = next(
-                    (
-                        item
-                        for item in summaries
-                        if item.session_id != session.session_id
-                    ),
-                    None,
-                )
-                if target is None:
-                    print(f"Already attached to {session.session_id}")
-                    continue
-                next_session = await core.resume_session(
-                    target.session_id,
-                    workspace_input=workspace_input,
-                    model_role=ModelRole(args.model_role),
-                    permission_policy=permission_policy,
-                    active_skill_names=_active_skill_names_from_args(args),
-                )
-                await core.close_session(
-                    session.host_session_id, close_conversation=False
-                )
-                session = next_session
-                print(f"Resumed {session.session_id}")
+                print(json.dumps([item.to_dict() for item in summaries], indent=2))
                 continue
             if command == ":stop":
-                print("Stopped." if await session.stop_current_turn() else "No active turn.")
+                print(
+                    "Stopped."
+                    if await session.stop_current_turn()
+                    else "No active turn."
+                )
                 continue
             if command == ":close":
                 await core.close_session(
@@ -1494,8 +285,33 @@ async def _kernel_host_repl(args) -> None:
                 )
                 print(f"Closed {session.session_id}")
                 return
-            result = await session.run_turn(prompt)
-            _print_agent_run_result(result)
+            if command.startswith(":resume "):
+                next_session = await core.resume_session(
+                    command.removeprefix(":resume ").strip(),
+                    workspace_input=workspace,
+                    model_role=ModelRole(args.model_role),
+                    permission_policy=_permission_policy(args, intent="run"),
+                    active_skill_names=_active_skill_names_from_args(args),
+                )
+                await core.close_session(
+                    session.host_session_id, close_conversation=False
+                )
+                session = next_session
+                continue
+            if command == ":continue":
+                next_session = await core.resume_most_recent_session(
+                    workspace,
+                    model_role=ModelRole(args.model_role),
+                    permission_policy=_permission_policy(args, intent="run"),
+                    active_skill_names=_active_skill_names_from_args(args),
+                )
+                if next_session.host_session_id != session.host_session_id:
+                    await core.close_session(
+                        session.host_session_id, close_conversation=False
+                    )
+                    session = next_session
+                continue
+            _print_agent_run_result(await session.run_turn(prompt))
     finally:
         await core.shutdown()
 
@@ -1503,1056 +319,29 @@ async def _kernel_host_repl(args) -> None:
 async def _kernel_host_tui(args) -> None:
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
         raise ValueError("host tui requires an interactive terminal")
-    settings = _settings_from_host_args(args)
-    permission_policy = _permission_policy_from_host_args(args, intent="run")
+    settings = _settings_from_args(args)
     _best_effort_sync_bundled_skills()
     core = KernelHostCore.production(settings=settings)
     try:
-        workspace_input = _workspace_input_from_args(args)
-        if getattr(args, "list_sessions", False):
-            sessions = await core.list_resumable_sessions(
-                workspace_input=workspace_input
-            )
-            print(
-                json.dumps(
-                    [summary.to_dict() for summary in sessions],
-                    indent=2,
-                    ensure_ascii=False,
-                )
-            )
+        workspace = _workspace_input_from_args(args)
+        if args.list_sessions:
+            summaries = await core.list_resumable_sessions(workspace_input=workspace)
+            print(json.dumps([item.to_dict() for item in summaries], indent=2))
             return
-        session = await _kernel_open_initial_session(
-            core,
-            args,
-            workspace_input=workspace_input,
-            permission_policy=permission_policy,
-        )
+        session = await _open_initial_session(core, args)
         await launch_terminal_kernel_client(
             host_session=session,
-            binary_path=getattr(args, "tui_binary", None),
-            clear_scrollback=bool(getattr(args, "clear_scrollback", False)),
+            binary_path=args.tui_binary,
+            clear_scrollback=args.clear_scrollback,
         )
     finally:
         await core.shutdown()
 
 
-# Legacy Host functions remain source-only until the Stage 3-5 physical-delete
-# pass.  The CLI dispatcher above has a single production authority: the
-# canonical relational conversation kernel.
-async def _host_run(args) -> object:
-    settings = _settings_from_host_args(args)
-    permission_policy = _permission_policy_from_host_args(args, intent="run")
-    _best_effort_sync_bundled_skills()
-    core = LegacyHostCore.production(settings=settings)
-    session = None
-    try:
-        session = await core.open_session(
-            _workspace_input_from_args(args),
-            model_role=ModelRole(args.model_role),
-            permission_policy=permission_policy,
-        )
-        result = await session.run_turn(
-            args.prompt, active_skill_names=_active_skill_names_from_args(args)
-        )
-        pending = session.get_pending_approval()
-        if pending is not None:
-            return {
-                "status": "waiting_user",
-                "message": "This one-shot host run is waiting for approval. Use host repl or HostCore APIs to resolve it.",
-                "pending_approval": pending.to_dict(),
-            }
-        pending_interaction = session.get_pending_interaction()
-        if pending_interaction is not None:
-            return {
-                "status": "waiting_user",
-                "message": "This one-shot host run is waiting for a user interaction. Use host repl or HostCore APIs to resolve it.",
-                "pending_interaction": pending_interaction.to_dict(),
-            }
-        return result
-    finally:
-        close_error = None
-        if session is not None:
-            try:
-                await core.close_session(
-                    session.host_session_id, close_conversation=True
-                )
-            except BaseException as exc:
-                close_error = exc
-        try:
-            await core.shutdown()
-        finally:
-            if close_error is not None:
-                raise close_error
-
-
-def _print_agent_run_result(result) -> None:
-    final_text = getattr(result, "final_text", "")
-    if final_text:
-        print(final_text)
-        return
-
-    status = getattr(result, "status", None)
-    status_value = getattr(status, "value", status)
-    if status_value == "failed":
-        print(_format_agent_run_failure(result), file=sys.stderr)
-
-
-def _format_agent_run_failure(result) -> str:
-    state = getattr(result, "state", None)
-    run_id = getattr(state, "run_id", None)
-    stop_reason = getattr(result, "stop_reason", None)
-    error_message = getattr(result, "error_message", None) or "unknown error"
-    lines = ["Agent run failed before producing a final reply."]
-    if run_id:
-        lines.append(f"run_id={run_id}")
-    if stop_reason:
-        lines.append(f"stop_reason={stop_reason}")
-    lines.append(f"error={error_message}")
-    return "\n".join(lines)
-
-
-def _inspect(args) -> dict[str, object]:
-    if args.inspect_command is None:
-        raise ValueError("inspect requires a subcommand")
-    settings = _settings_from_inspect_args(args)
-    with acquire_verified_postgres_access_sync(
-        settings.storage.postgres_dsn,
-        deadline_monotonic=monotonic() + 30.0,
-    ) as access_lease:
-        query = CanonicalConversationQuery(access_lease.connection_provider)
-        deadline = monotonic() + 30.0
-        if args.inspect_command == "run":
-            raise ValueError(
-                "execution-run inspection is unavailable after the Stage 2 "
-                "hard cut; inspect the canonical session instead"
-            )
-        if args.inspect_command == "session":
-            return query.inspect(
-                session_id=args.session_id,
-                maximum_entries=min(max(1, args.limit_events), 1024),
-                maximum_events=min(max(1, args.limit_events), 1024),
-                deadline_monotonic=deadline,
-            ).to_dict()
-        if args.inspect_command == "artifact":
-            raise ValueError(
-                "unscoped artifact inspection is unavailable in the canonical "
-                "kernel; content must be re-authorized by session and entry"
-            )
-        if args.inspect_command == "memory":
-            return dict(
-                query.inspect_memory(
-                    memory_id=args.memory_id,
-                    deadline_monotonic=deadline,
-                )
-            )
-        if args.inspect_command == "health":
-            return dict(query.inspect_health(deadline_monotonic=deadline))
-        raise ValueError(f"unsupported inspect command: {args.inspect_command}")
-
-
-def _checkpoint_command(args) -> dict[str, object]:
-    if args.checkpoint_command is None:
-        raise ValueError("checkpoint requires a subcommand")
-    if (
-        args.checkpoint_command == "doctor"
-        and args.domain == "transcript"
-        and args.through_sequence is not None
-    ):
-        raise ValueError(
-            "transcript checkpoint doctor always freezes the current "
-            "high-water; --through-sequence is unsupported"
-        )
-    settings = _settings_from_inspect_args(args)
-    with acquire_verified_postgres_access_sync(
-        settings.storage.postgres_dsn,
-        deadline_monotonic=monotonic() + 30.0,
-    ) as access_lease:
-        return _checkpoint_command_with_access(args, access_lease)
-
-
-def _checkpoint_command_with_access(
-    args,
-    access_lease: VerifiedPostgresAccessLease,
-) -> dict[str, object]:
-    runtime_session_id = str(args.runtime_session_id)
-    event_log = PostgresEventLog(
-        connection_provider=access_lease.connection_provider,
-        runtime_session_id=runtime_session_id,
-    )
-    archive = PostgresArtifactStore(access_lease.connection_provider)
-    maintenance = PostgresCheckpointMaintenanceAuthority(
-        access_lease.connection_provider
-    )
-    if args.checkpoint_command == "doctor":
-        if args.domain == "context_input_audit":
-            if args.mode != "verify":
-                raise ValueError(
-                    "context-input audit doctor is read-only; rebuild is unsupported"
-                )
-            report = inspect_context_input_audits(
-                runtime_session_id=runtime_session_id,
-                event_log=event_log,
-                artifact_store=archive,
-                require_exact_audit=args.require_exact_audit,
-                through_sequence=args.through_sequence,
-                max_events=args.max_events,
-                max_payload_bytes=args.max_payload_bytes,
-                operation_timeout_seconds=args.timeout_seconds,
-            )
-            return report.model_dump(mode="json")
-        if args.domain == "transcript":
-            authority_contracts = (
-                build_default_authority_materialization_contract_bundle()
-            )
-            report = verify_or_rebuild_transcript_projection_checkpoint(
-                runtime_session_id=runtime_session_id,
-                mode=args.mode,
-                event_log=event_log,
-                archive=archive,
-                maintenance_authority=maintenance,
-                authority_contracts=authority_contracts,
-                materialization_contracts=(
-                    build_default_transcript_projection_materialization_contracts(
-                        authority_contracts.limits
-                    )
-                ),
-                max_events=args.max_events,
-                max_payload_bytes=args.max_payload_bytes,
-                operation_timeout_seconds=args.timeout_seconds,
-            )
-            return report.model_dump(mode="json")
-        through_sequence = args.through_sequence
-        if through_sequence is None:
-            through_sequence = event_log.next_sequence() - 1
-        if through_sequence < 1:
-            raise ValueError("checkpoint doctor requires a non-empty event ledger")
-        binding = build_default_subagent_graph_reducer_binding()
-        report = verify_or_rebuild_subagent_graph_checkpoint(
-            runtime_session_id=runtime_session_id,
-            through_sequence=through_sequence,
-            reducer_contract=binding.contract,
-            mode=args.mode,
-            event_log=event_log,
-            archive=archive,
-            reducer_registry=DEFAULT_SUBAGENT_GRAPH_REDUCER_REGISTRY,
-            maintenance_authority=maintenance,
-        )
-        return report.model_dump(mode="json")
-    if args.checkpoint_command == "gc":
-        if args.domain == "context_input_audit":
-            report = garbage_collect_incomplete_context_input_audits(
-                runtime_session_id=runtime_session_id,
-                event_log=event_log,
-                archive=archive,
-                maintenance_authority=maintenance,
-                eligibility=ContextInputAuditGcEligibility(
-                    runtime_session_id=runtime_session_id,
-                    session_close_confirmed=True,
-                    run_owners_drained=True,
-                    context_input_io_drained=True,
-                ),
-                dry_run=not args.apply,
-                through_sequence=args.through_sequence,
-                operation_timeout_seconds=args.timeout_seconds,
-            )
-            return report.model_dump(mode="json")
-        report = garbage_collect_subagent_graph_checkpoint_artifacts(
-            runtime_session_id=runtime_session_id,
-            event_log=event_log,
-            archive=archive,
-            maintenance_authority=maintenance,
-            retained_checkpoint_min_count=args.retain,
-            max_catalog_events=args.max_catalog_events,
-        )
-        return report.model_dump(mode="json")
-    raise ValueError(f"unsupported checkpoint command: {args.checkpoint_command}")
-
-
-PLAN_APPROVE_TOKENS = frozenset(
-    {"approve", "yes", "是", "好", "可以", "同意", "好的", "批准", "y", "Y"}
-)
-
-
-def _format_plan_question(pending: PendingPlanInteraction) -> str:
-    lines = ["Plan question:", "", pending.question]
-    if pending.options:
-        lines.extend(["", "Options:"])
-        for index, option in enumerate(pending.options, start=1):
-            suffix = " (Recommended)" if option.recommended else ""
-            lines.append(f"  {index}. {option.label}{suffix}")
-            if option.description:
-                lines.append(f"     {option.description}")
-    if pending.allow_free_text:
-        lines.extend(
-            ["", "Reply with :choose <n|label>, a number/label, or :answer <text>."]
-        )
-    else:
-        lines.extend(
-            [
-                "",
-                "Reply with :choose <n|label> or a number/label. Free text is disabled.",
-            ]
-        )
-    return "\n".join(lines)
-
-
-def _format_plan_exit(pending: PendingPlanInteraction) -> str:
-    lines = ["Plan ready for approval:"]
-    if pending.summary:
-        lines.extend(["", pending.summary])
-    if pending.plan_text:
-        lines.extend(["", pending.plan_text])
-    lines.extend(
-        [
-            "",
-            "Reply with:",
-            "  :approve-plan    Accept and exit plan mode",
-            "  :revise-plan ... Request a revision and stay read-only",
-            "  :cancel-plan     Abandon this plan workflow and exit plan mode",
-        ]
-    )
-    return "\n".join(lines)
-
-
-def _format_pending_plan_interaction(pending: PendingPlanInteraction) -> str:
-    if pending.kind == "question":
-        return _format_plan_question(pending)
-    return _format_plan_exit(pending)
-
-
-def _host_session_status_payload(session) -> dict:
-    default_mode = session.default_permission_mode
-    effective_mode = session.effective_next_run_permission_mode
-    summary = session.summary() if callable(getattr(session, "summary", None)) else {}
-    return {
-        "default_mode": default_mode.value if default_mode is not None else None,
-        "default_policy": session.default_permission_policy().to_dict(),
-        "effective_next_run_mode": effective_mode.value
-        if effective_mode is not None
-        else None,
-        "effective_next_run_policy": session.effective_next_run_permission_policy().to_dict(),
-        "plan_active": session.plan_state.active,
-        "long_horizon": summary.get("long_horizon"),
-        "mcp": summary.get("mcp"),
-    }
-
-
-def _print_pending_plan_interaction(pending: PendingPlanInteraction | None) -> None:
-    if pending is not None:
-        print(_format_pending_plan_interaction(pending))
-
-
-def _select_plan_question_option(
-    pending: PendingPlanInteraction, selector: str
-) -> str | None:
-    value = selector.strip()
-    if not value:
-        return None
-    if value.isdigit():
-        index = int(value)
-        if 1 <= index <= len(pending.options):
-            return pending.options[index - 1].label
-        return None
-    for option in pending.options:
-        if option.label == value:
-            return option.label
-    return None
-
-
-async def _answer_plan_question(
-    session, pending: PendingPlanInteraction, answer: str
-) -> None:
-    selected_option = _select_plan_question_option(pending, answer)
-    if selected_option is None and not pending.allow_free_text:
-        print(
-            "Free text is disabled for this question. Use :choose <n|label>.",
-            file=sys.stderr,
-        )
-        return
-    result = await session.resolve_plan_interaction(
-        PlanQuestionResolution(
-            interaction_id=pending.interaction_id,
-            answer_text=selected_option or answer,
-            selected_option=selected_option,
-        )
-    )
-    _print_agent_run_result(result)
-    _print_pending_plan_interaction(session.get_pending_interaction())
-
-
-async def _choose_plan_question_option(
-    session, pending: PendingPlanInteraction, selector: str
-) -> None:
-    selected_option = _select_plan_question_option(pending, selector)
-    if selected_option is None:
-        print(
-            "No matching plan question option. Use :interaction to see available choices.",
-            file=sys.stderr,
-        )
-        return
-    await _answer_plan_question(session, pending, selected_option)
-
-
-async def _approve_pending_plan(session, pending: PendingPlanInteraction) -> None:
-    result = await session.resolve_plan_interaction(
-        PlanExitResolution(interaction_id=pending.interaction_id, decision="approve")
-    )
-    _print_agent_run_result(result)
-
-
-def _attach_repl_compaction_notifications(session) -> None:
-    add_listener = getattr(session, "add_compaction_listener", None)
-    if not callable(add_listener):
-        return
-    add_listener(_print_context_compaction_event)
-
-
-def _print_context_compaction_event(event) -> None:
-    if isinstance(event, ContextCompactionCompletedEvent):
-        print(
-            "context compaction completed: "
-            f"compaction_id={event.compaction_id} "
-            f"summary_artifact_id={event.summary_artifact_id} "
-            f"window_id={event.window_id}"
-        )
-        return
-    if isinstance(event, ContextCompactionFailedEvent):
-        print(
-            "context compaction failed: "
-            f"compaction_id={event.compaction_id} "
-            f"{event.error_type}: {event.message}",
-            file=sys.stderr,
-        )
-
-
-def _format_manual_compaction_result(result: dict[str, object]) -> str:
-    if result.get("compacted"):
-        return (
-            "context compaction completed: "
-            f"compaction_id={result.get('compaction_id')} "
-            f"summary_artifact_id={result.get('summary_artifact_id')} "
-            f"window_id={result.get('window_id')}"
-        )
-    return "context compaction skipped: no eligible compact window"
-
-
-def _format_repl_mcp_startup_notice(session) -> str | None:
-    wiring = getattr(session, "wiring", None)
-    runtime_wiring = getattr(wiring, "runtime_wiring", None)
-    installation = getattr(runtime_wiring, "mcp_installation", None)
-    supervisor = getattr(session, "mcp_supervisor", None)
-    if installation is None and supervisor is None:
-        return None
-    snapshots_by_server = {
-        snapshot.server_id: snapshot
-        for snapshot in getattr(installation, "snapshots", ())
-    }
-    if supervisor is not None:
-        for snapshot in supervisor.current_starting_snapshots():
-            snapshots_by_server.setdefault(snapshot.server_id, snapshot)
-    snapshots = tuple(snapshots_by_server[key] for key in sorted(snapshots_by_server))
-    if not snapshots:
-        return None
-    parts: list[str] = []
-    for snapshot in snapshots:
-        server_id = snapshot.server_id
-        status = snapshot.status.value
-        detail = (
-            f"{len(snapshot.tools)} tools"
-            if snapshot.tools
-            else (snapshot.message or "no tools")
-        )
-        if snapshot.diagnostics:
-            detail = f"{detail}; {len(snapshot.diagnostics)} diagnostics"
-        parts.append(f"{server_id}={status} ({detail})")
-    return "MCP servers: " + "; ".join(parts)
-
-
-async def _host_repl(args) -> None:
-    settings = _settings_from_host_args(args)
-    permission_policy = _permission_policy_from_host_args(args, intent="run")
-    _best_effort_sync_bundled_skills()
-    core = LegacyHostCore.production(settings=settings)
-    repl_prompt: ReplPrompt = build_repl_prompt(
-        history_path=default_pulsara_home() / "repl_history",
-    )
-    try:
-        workspace_input = _workspace_input_from_args(args)
-        resume_workspace_input = (
-            workspace_input if _has_explicit_workspace_override(args) else None
-        )
-        if getattr(args, "list_sessions", False):
-            sessions = await core.list_resumable_sessions(
-                workspace_input=workspace_input
-            )
-            print(
-                json.dumps(
-                    [summary.to_dict() for summary in sessions],
-                    indent=2,
-                    ensure_ascii=False,
-                )
-            )
-            return
-        session = await _open_initial_repl_session(
-            core,
-            args,
-            workspace_input=workspace_input,
-            resume_workspace_input=resume_workspace_input,
-            permission_policy=permission_policy,
-        )
-        _attach_repl_compaction_notifications(session)
-        print("Pulsara REPL · :help 查看命令 · Ctrl-D detach · :close 关闭对话")
-        mcp_notice = _format_repl_mcp_startup_notice(session)
-        if mcp_notice:
-            print(mcp_notice)
-        while True:
-            try:
-                prompt = await repl_prompt.read_line(_repl_prompt_message(session))
-            except KeyboardInterrupt:
-                # prompt_toolkit has already cleared the current input buffer.
-                # Keep the session alive instead of turning Ctrl-C into teardown.
-                print("^C")
-                continue
-            except EOFError:
-                print()
-                break
-            command = prompt.strip()
-            if not command:
-                continue
-            if command in {"exit", "quit", ":q"}:
-                break
-            if command in {":help", ":h", ":?"}:
-                print(_REPL_HELP)
-                continue
-            if command == ":sessions":
-                sessions = await core.list_resumable_sessions(
-                    workspace_input=workspace_input
-                )
-                print(
-                    json.dumps(
-                        [summary.to_dict() for summary in sessions],
-                        indent=2,
-                        ensure_ascii=False,
-                    )
-                )
-                continue
-            if command.startswith(":resume"):
-                runtime_session_id = command[len(":resume") :].strip()
-                if not runtime_session_id:
-                    print("Usage: :resume <runtime_session_id>", file=sys.stderr)
-                    continue
-                if runtime_session_id == session.runtime_session_id:
-                    print(f"Already attached to {session.runtime_session_id}")
-                    continue
-                try:
-                    next_session = await core.resume_session(
-                        runtime_session_id,
-                        workspace_input=resume_workspace_input,
-                        model_role=ModelRole(args.model_role),
-                        permission_policy=permission_policy,
-                    )
-                    await core.detach_session(session.host_session_id)
-                    session = next_session
-                    _attach_repl_compaction_notifications(session)
-                except Exception as exc:
-                    print(f"ERROR: {exc}", file=sys.stderr)
-                    continue
-                print(f"Resumed {session.runtime_session_id}")
-                continue
-            if command == ":continue":
-                try:
-                    summaries = await core.list_resumable_sessions(
-                        workspace_input=workspace_input
-                    )
-                    target = next(
-                        (
-                            summary
-                            for summary in summaries
-                            if summary.runtime_session_id != session.runtime_session_id
-                        ),
-                        None,
-                    )
-                    if target is None:
-                        print(
-                            f"Already attached to the latest session: {session.runtime_session_id}"
-                        )
-                        continue
-                    next_session = await core.resume_session(
-                        target.runtime_session_id,
-                        workspace_input=workspace_input,
-                        model_role=ModelRole(args.model_role),
-                        permission_policy=permission_policy,
-                    )
-                    await core.detach_session(session.host_session_id)
-                    session = next_session
-                    _attach_repl_compaction_notifications(session)
-                except Exception as exc:
-                    print(f"ERROR: {exc}", file=sys.stderr)
-                    continue
-                print(f"Resumed {session.runtime_session_id}")
-                continue
-            if command == ":close":
-                await core.close_session(
-                    session.host_session_id, close_conversation=True
-                )
-                print(f"Closed {session.runtime_session_id}")
-                break
-            if command == ":approval":
-                pending = session.get_pending_approval()
-                print(
-                    json.dumps(
-                        pending.to_dict() if pending is not None else None, indent=2
-                    )
-                )
-                continue
-            if command == ":interaction":
-                pending = session.get_pending_interaction()
-                if isinstance(pending, PendingPlanInteraction):
-                    print(_format_pending_plan_interaction(pending))
-                else:
-                    print(
-                        json.dumps(
-                            pending.to_dict() if pending is not None else None, indent=2
-                        )
-                    )
-                continue
-            if command.startswith(":mcp-input"):
-                pending = session.get_pending_interaction()
-                if not isinstance(pending, PendingMcpInputRequired):
-                    print("No pending MCP input-required interaction.")
-                    continue
-                raw = command[len(":mcp-input") :].strip()
-                if not raw:
-                    print(
-                        "Usage: :mcp-input <JSON object mapping request keys to response objects>",
-                        file=sys.stderr,
-                    )
-                    continue
-                try:
-                    parsed = json.loads(raw)
-                    if not isinstance(parsed, dict) or any(
-                        not isinstance(key, str) or not isinstance(value, dict)
-                        for key, value in parsed.items()
-                    ):
-                        raise ValueError("responses must be a JSON object of objects")
-                    result = await session.resolve_mcp_input_required(
-                        McpInputRequiredInteractionResolution(
-                            interaction_id=pending.interaction_id,
-                            responses=parsed,
-                        )
-                    )
-                except Exception as exc:
-                    print(f"ERROR: {exc}", file=sys.stderr)
-                    continue
-                _print_agent_run_result(result)
-                next_pending = session.get_pending_interaction()
-                if next_pending is not None:
-                    print(
-                        json.dumps(
-                            {"pending_interaction": next_pending.to_dict()},
-                            indent=2,
-                        )
-                    )
-                continue
-            if command == ":mcp-cancel":
-                pending = session.get_pending_interaction()
-                if not isinstance(pending, PendingMcpInputRequired):
-                    print("No pending MCP input-required interaction.")
-                    continue
-                try:
-                    result = await session.resolve_mcp_input_required(
-                        McpInputRequiredInteractionResolution(
-                            interaction_id=pending.interaction_id,
-                            cancelled=True,
-                        )
-                    )
-                except Exception as exc:
-                    print(f"ERROR: {exc}", file=sys.stderr)
-                    continue
-                _print_agent_run_result(result)
-                continue
-            if command.startswith(":plan"):
-                reason = command[len(":plan") :].strip()
-                try:
-                    policy = session.enter_plan(reason=reason)
-                except (
-                    HostSessionBusyError,
-                    HostSessionPendingApprovalError,
-                    HostSessionPendingInteractionError,
-                ) as exc:
-                    print(f"ERROR: {exc}", file=sys.stderr)
-                    continue
-                print(
-                    json.dumps(
-                        {
-                            "plan": session.plan_state.to_dict(),
-                            "policy": policy.to_dict(),
-                        },
-                        indent=2,
-                    )
-                )
-                continue
-            if command == ":status":
-                print(json.dumps(_host_session_status_payload(session), indent=2))
-                continue
-            if command.startswith(":mode"):
-                requested = command[len(":mode") :].strip()
-                if not requested:
-                    allowed = ", ".join(m.value for m in PermissionMode)
-                    print(
-                        f"Usage: :mode <preset>  (one of: {allowed})", file=sys.stderr
-                    )
-                    continue
-                try:
-                    policy = session.set_permission_mode(requested)
-                except (
-                    ValueError,
-                    HostSessionBusyError,
-                    HostSessionPendingApprovalError,
-                    HostSessionPendingInteractionError,
-                ) as exc:
-                    print(f"ERROR: {exc}", file=sys.stderr)
-                    continue
-                print(
-                    json.dumps(
-                        {"mode": requested, "policy": policy.to_dict()}, indent=2
-                    )
-                )
-                continue
-            if command == ":stop":
-                result = await session.stop_current_turn()
-                if result is None:
-                    print("No active turn to stop.")
-                elif isinstance(result, AgentRunResult) or not hasattr(
-                    result, "boundary_id"
-                ):
-                    status = result.status
-                    print(
-                        json.dumps(
-                            {
-                                "status": getattr(status, "value", status),
-                                "stop_reason": result.stop_reason,
-                            },
-                            indent=2,
-                        )
-                    )
-                else:
-                    print(
-                        json.dumps(
-                            {
-                                "status": result.status,
-                                "boundary_id": result.boundary_id,
-                                "draft_run_id": result.draft_run_id,
-                                "durable_run_existence": (
-                                    result.durable_run_existence.value
-                                ),
-                            },
-                            indent=2,
-                        )
-                    )
-                continue
-            if command == ":compact":
-                try:
-                    result = await session.compact_now()
-                except Exception as exc:
-                    print(f"context compaction failed: {exc}", file=sys.stderr)
-                    continue
-                print(_format_manual_compaction_result(result))
-                continue
-            if command.startswith(":answer"):
-                pending = session.get_pending_interaction()
-                if (
-                    not isinstance(pending, PendingPlanInteraction)
-                    or pending.kind != "question"
-                ):
-                    print("No pending plan question.")
-                    continue
-                answer = command[len(":answer") :].strip()
-                if not answer:
-                    print("Usage: :answer <text>", file=sys.stderr)
-                    continue
-                await _answer_plan_question(session, pending, answer)
-                continue
-            if command.startswith(":choose"):
-                pending = session.get_pending_interaction()
-                if (
-                    not isinstance(pending, PendingPlanInteraction)
-                    or pending.kind != "question"
-                ):
-                    print("No pending plan question.")
-                    continue
-                selector = command[len(":choose") :].strip()
-                if not selector:
-                    print("Usage: :choose <n|label>", file=sys.stderr)
-                    continue
-                await _choose_plan_question_option(session, pending, selector)
-                continue
-            if command == ":approve-plan":
-                pending = session.get_pending_interaction()
-                if (
-                    not isinstance(pending, PendingPlanInteraction)
-                    or pending.kind != "exit"
-                ):
-                    print("No pending plan exit request.")
-                    continue
-                await _approve_pending_plan(session, pending)
-                continue
-            if command.startswith(":revise-plan"):
-                pending = session.get_pending_interaction()
-                if (
-                    not isinstance(pending, PendingPlanInteraction)
-                    or pending.kind != "exit"
-                ):
-                    print("No pending plan exit request.")
-                    continue
-                feedback = command[len(":revise-plan") :].strip()
-                result = await session.resolve_plan_interaction(
-                    PlanExitResolution(
-                        interaction_id=pending.interaction_id,
-                        decision="revise",
-                        user_feedback=feedback,
-                    )
-                )
-                _print_agent_run_result(result)
-                _print_pending_plan_interaction(session.get_pending_interaction())
-                continue
-            if command == ":cancel-plan":
-                pending = session.get_pending_interaction()
-                if (
-                    not isinstance(pending, PendingPlanInteraction)
-                    or pending.kind != "exit"
-                ):
-                    print(
-                        "No pending plan exit request. Use :force-exit-plan to leave active plan mode.",
-                        file=sys.stderr,
-                    )
-                    continue
-                await session.exit_plan_workflow(source="user_cancel")
-                print("Plan workflow cancelled.")
-                continue
-            if command == ":force-exit-plan":
-                if not session.plan_state.active:
-                    print("Plan workflow is not active.")
-                    continue
-                try:
-                    await session.exit_plan_workflow(source="user_force_exit")
-                except (
-                    HostSessionBusyError,
-                    HostSessionPendingInteractionError,
-                    ValueError,
-                ) as exc:
-                    print(f"ERROR: {exc}", file=sys.stderr)
-                    continue
-                print("Plan workflow exited.")
-                continue
-            if command in {":approve", ":deny"}:
-                pending = session.get_pending_approval()
-                if pending is None:
-                    print("No pending approval.")
-                    continue
-                confirmed = command == ":approve"
-                resolution = ApprovalResolution(
-                    approval_id=pending.approval_id,
-                    decisions=tuple(
-                        ToolApprovalDecision(tool_call_id=call.id, confirmed=confirmed)
-                        for call in pending.tool_calls
-                    ),
-                )
-                result = await session.resolve_approval(resolution)
-                _print_agent_run_result(result)
-                pending = session.get_pending_approval()
-                if pending is not None:
-                    print(json.dumps({"pending_approval": pending.to_dict()}, indent=2))
-                continue
-            pending_interaction = session.get_pending_interaction()
-            if isinstance(pending_interaction, PendingPlanInteraction):
-                if pending_interaction.kind == "question":
-                    selected_option = _select_plan_question_option(
-                        pending_interaction, command
-                    )
-                    if selected_option is not None:
-                        await _choose_plan_question_option(
-                            session, pending_interaction, selected_option
-                        )
-                    elif pending_interaction.allow_free_text:
-                        await _answer_plan_question(
-                            session, pending_interaction, command
-                        )
-                    else:
-                        print(
-                            "Pending plan question requires one of the listed options. Use :interaction to see choices.",
-                            file=sys.stderr,
-                        )
-                    continue
-                if pending_interaction.kind == "exit":
-                    if command in PLAN_APPROVE_TOKENS:
-                        await _approve_pending_plan(session, pending_interaction)
-                    else:
-                        print(
-                            "Pending plan approval. Use :approve-plan, :revise-plan <feedback>, or :cancel-plan.",
-                            file=sys.stderr,
-                        )
-                    continue
-            if isinstance(pending_interaction, PendingMcpInputRequired):
-                print(
-                    "Pending MCP input-required interaction. Use :interaction, "
-                    ":mcp-input <json>, or :mcp-cancel.",
-                    file=sys.stderr,
-                )
-                continue
-            result = await session.run_turn(
-                prompt, active_skill_names=_active_skill_names_from_args(args)
-            )
-            _print_agent_run_result(result)
-            pending = session.get_pending_approval()
-            if pending is not None:
-                print(json.dumps({"pending_approval": pending.to_dict()}, indent=2))
-            pending_interaction = session.get_pending_interaction()
-            if pending_interaction is not None:
-                if isinstance(pending_interaction, PendingPlanInteraction):
-                    print(_format_pending_plan_interaction(pending_interaction))
-                else:
-                    print(
-                        json.dumps(
-                            {"pending_interaction": pending_interaction.to_dict()},
-                            indent=2,
-                        )
-                    )
-    finally:
-        await core.shutdown()
-
-
-async def _host_tui(args) -> None:
-    if not (sys.stdin.isatty() and sys.stdout.isatty()):
-        raise ValueError("host tui requires an interactive terminal")
-    settings = _settings_from_host_args(args)
-    permission_policy = _permission_policy_from_host_args(args, intent="run")
-    _best_effort_sync_bundled_skills()
-    core = LegacyHostCore.production(settings=settings)
-    try:
-        workspace_input = _workspace_input_from_args(args)
-        resume_workspace_input = (
-            workspace_input if _has_explicit_workspace_override(args) else None
-        )
-        if getattr(args, "list_sessions", False):
-            sessions = await core.list_resumable_sessions(
-                workspace_input=workspace_input
-            )
-            print(
-                json.dumps(
-                    [summary.to_dict() for summary in sessions],
-                    indent=2,
-                    ensure_ascii=False,
-                )
-            )
-            return
-        session = await _open_initial_repl_session(
-            core,
-            args,
-            workspace_input=workspace_input,
-            resume_workspace_input=resume_workspace_input,
-            permission_policy=permission_policy,
-        )
-        await launch_legacy_terminal_client(
-            host_session=session,
-            binary_path=getattr(args, "tui_binary", None),
-            clear_scrollback=bool(getattr(args, "clear_scrollback", False)),
-        )
-    finally:
-        await core.shutdown()
-
-
-async def _open_initial_repl_session(
-    core: LegacyHostCore,
-    args,
-    *,
-    workspace_input: HostWorkspaceInput,
-    resume_workspace_input: HostWorkspaceInput | None,
-    permission_policy,
-):
-    if getattr(args, "resume", None):
-        return await core.resume_session(
-            args.resume,
-            workspace_input=resume_workspace_input,
-            model_role=ModelRole(args.model_role),
-            permission_policy=permission_policy,
-        )
-    if getattr(args, "continue_session", False):
-        return await core.resume_most_recent_session(
-            workspace_input,
-            model_role=ModelRole(args.model_role),
-            permission_policy=permission_policy,
-        )
-    return await core.open_session(
-        workspace_input,
-        model_role=ModelRole(args.model_role),
-        permission_policy=permission_policy,
-    )
-
-
-def _repl_prompt_message(session) -> str:
-    if session.get_pending_approval() is not None:
-        return "approval> "
-    pending = session.get_pending_interaction()
-    if isinstance(pending, PendingPlanInteraction):
-        return "plan> "
-    if isinstance(pending, PendingMcpInputRequired):
-        return "mcp> "
-    if session.plan_state.active:
-        return "plan> "
-    return "pulsara> "
-
-
-_REPL_HELP = """Commands:
-  :sessions               List resumable sessions for this workspace
-  :resume <session-id>    Detach current HostSession and resume a durable runtime session
-  :continue               Detach current HostSession and resume the latest workspace session
-  :close                  Explicitly close this durable conversation
-  :status                 Show stored default and effective next-run permission
-  :mode <preset>          Switch permission mode
-  :plan [reason]          Enter plan mode
-  :interaction            Show a pending plan or MCP interaction
-  :mcp-input <json>       Resolve pending MCP input-required with response objects
-  :mcp-cancel             Cancel pending MCP input-required
-  :choose <n|label>       Choose a pending plan question option
-  :answer <text>          Answer a pending plan question
-  :approve-plan           Approve plan exit
-  :revise-plan <feedback> Request a plan revision
-  :cancel-plan            Cancel the plan workflow from a pending plan draft
-  :force-exit-plan        Exit active plan mode without approving a draft
-  :approval               Show a pending tool approval
-  :approve / :deny        Resolve a pending tool approval
-  :stop                   Stop the current active or suspended turn
-  :compact                Manually compact idle session context before the auto threshold
-  :q / quit / exit        Detach from the conversation
-
-Editing: Up/Down history · Ctrl-R search · Ctrl-C clear · Ctrl-Z suspend · Ctrl-D exit"""
-
-
-async def _host_inspect(args) -> dict[str, object]:
-    settings = _settings_from_host_args(args)
-    access_lease = await process_postgres_schema_verification_service().acquire(
-        settings.storage.postgres_dsn,
-        deadline_monotonic=monotonic() + 30.0,
-    )
-    try:
-        return _host_inspect_with_access(args, settings, access_lease)
-    finally:
-        access_lease.release()
-
-
-def _host_inspect_with_access(
-    args,
-    settings: PulsaraSettings,
-    access_lease: VerifiedPostgresAccessLease,
-) -> dict[str, object]:
-    del settings, access_lease
+def _host_inspect(args) -> dict[str, object]:
     workspace = resolve_workspace(_workspace_input_from_args(args))
-    permission_policy = _permission_policy_from_host_args(args, intent="inspect")
-    names = sorted(
-        DIRECT_KERNEL_TOOL_NAMES | SUBAGENT_TOOL_NAMES | MEMORY_TOOL_NAMES
-    )
-    entries = [builtin_tool_catalog_entry(name) for name in names]
+    permission = _permission_policy(args, intent="inspect")
+    names = sorted(DIRECT_KERNEL_TOOL_NAMES | SUBAGENT_TOOL_NAMES | MEMORY_TOOL_NAMES)
     capability = KernelCapabilityComposer(
         workspace_root=workspace.workspace_root,
         workspace_kind=workspace.workspace_kind,
@@ -2560,436 +349,122 @@ def _host_inspect_with_access(
         available_tool_names=frozenset(names),
         configured_active_skill_names=_active_skill_names_from_args(args),
     ).compose(user_input="")
-    enabled_mcp = tuple(
+    enabled_mcp = [
         item.server_id
         for item in load_mcp_server_configs(workspace_root=workspace.workspace_root)
         if item.enabled
-    )
+    ]
     return {
         "inspect_kind": "canonical_kernel_static_workspace_capability.v3",
-        "recovery_scope": "host_process",
         "conversation_authority": "pulsara_v3",
         "protocol_major": 3,
         "workspace": {
             "workspace_kind": workspace.workspace_kind,
             "workspace_root": str(workspace.workspace_root),
-            "display_label": workspace.display_label,
-            "workspace_scope": workspace.workspace_scope,
             "workspace_key": workspace.workspace_key,
-            "read_scopes": sorted(workspace.memory_domain.read_scopes),
-            "allowed_write_scopes": sorted(
-                workspace.memory_domain.allowed_write_scopes
-            ),
         },
         "tools": names,
-        "capability_surface": {
-            "registry_generation": 1,
-            "direct_names": names,
-            "deferred_names": [],
-            "hidden_names": [],
-            "callable_names": names,
-            "descriptors": [
-                entry.descriptor.to_diagnostic_dict() for entry in entries
-            ],
-            "diagnostics": [],
-        },
-        "permissions": permission_policy.to_dict(),
+        "descriptors": [
+            builtin_tool_catalog_entry(name).descriptor.to_diagnostic_dict()
+            for name in names
+        ],
+        "permissions": permission.to_dict(),
         "current_mode": (
-            mode_for_policy(permission_policy).value
-            if mode_for_policy(permission_policy) is not None
+            mode_for_policy(permission).value
+            if mode_for_policy(permission) is not None
             else "custom"
         ),
-        "memory": {
-            "graph_id": workspace.memory_domain.graph_id,
-            "tools_enabled": sorted(MEMORY_TOOL_NAMES),
-            "read_scopes": sorted(workspace.memory_domain.read_scopes),
-            "allowed_write_scopes": sorted(
-                workspace.memory_domain.allowed_write_scopes
-            ),
-        },
         "skills": list(capability.catalog_skill_names),
         "active_skills": list(capability.active_skill_names),
-        "capability_diagnostics": list(capability.diagnostic_codes),
         "mcp": {
-            "composition_status": (
-                "UNAVAILABLE_IN_STAGE2" if enabled_mcp else "NOT_CONFIGURED"
-            ),
-            "configured_enabled_servers": list(enabled_mcp),
+            "composition_status": ("UNAVAILABLE" if enabled_mcp else "NOT_CONFIGURED"),
+            "configured_enabled_servers": enabled_mcp,
         },
-        "bundled_skills": bundled_skills_status().to_dict(),
     }
 
 
-async def _mcp_command(args) -> dict[str, object]:
+def _database_command(args: argparse.Namespace) -> dict[str, object]:
+    if args.db_command is None:
+        raise ValueError("db requires a subcommand")
+    if not 1 <= args.deadline_seconds <= 3600:
+        raise ValueError("--deadline-seconds must be between 1 and 3600")
     _load_env_file_from_args(args)
-    command = args.mcp_command
-    if command is None:
-        raise ValueError("mcp requires a subcommand")
-    if command == "list":
-        workspace_root = _mcp_workspace_root(args)
-        configs = load_mcp_server_configs(
-            workspace_root=workspace_root,
-            user_config_path=_mcp_user_config_path(args),
-        )
-        return {
-            "mcp": "list",
-            "sources": [
-                _mcp_source_to_dict(source)
-                for source in mcp_config_sources(
-                    workspace_root=workspace_root,
-                    user_config_path=_mcp_user_config_path(args),
+    runtime_dsn = os.getenv(f"{args.prefix}_POSTGRES_DSN", "").strip()
+    if not runtime_dsn:
+        raise ValueError(f"{args.prefix}_POSTGRES_DSN is required")
+    deadline = monotonic() + args.deadline_seconds
+    from pulsara_agent.storage.migrations.registry import POSTGRES_MIGRATION_REGISTRY
+    from pulsara_agent.storage.migrations.runner import (
+        PostgresMigrationRunner,
+        _read_identity_from_connection,
+        read_migration_ledger,
+    )
+    from pulsara_agent.storage.migrations.verifier import classify_migration_history
+    from pulsara_agent.storage.postgres_connection_provider import (
+        PostgresRuntimeConnectionFactory,
+    )
+
+    factory = PostgresRuntimeConnectionFactory(runtime_dsn)
+    if args.db_command == "status":
+        with factory.connect(
+            deadline_monotonic=deadline, autocommit=False
+        ) as connection:
+            with connection.transaction():
+                connection.execute(
+                    "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"
                 )
-            ],
-            "servers": [_mcp_config_to_dict(config) for config in configs],
-        }
-    if command == "add":
-        store = McpConfigStore(_mcp_mutation_config_path(args))
-        config = _mcp_config_from_add_args(args)
-        store.upsert(config)
+                identity = _read_identity_from_connection(connection)
+                rows = read_migration_ledger(connection)
         return {
-            "mcp": "add",
-            "path": str(store.path.expanduser()),
-            "server": _mcp_config_to_dict(config),
-        }
-    if command in {"remove", "enable", "disable"}:
-        store = McpConfigStore(_mcp_mutation_config_path(args))
-        if command == "remove":
-            changed = store.remove(args.server_id)
-        else:
-            changed = store.set_enabled(args.server_id, command == "enable")
-        return {
-            "mcp": command,
-            "path": str(store.path.expanduser()),
-            "server_id": args.server_id,
-            "changed": changed,
-        }
-    if command in {"doctor", "reconnect"}:
-        workspace_root = _mcp_workspace_root(args)
-        configs = load_mcp_server_configs(
-            workspace_root=workspace_root,
-            user_config_path=_mcp_user_config_path(args),
-        )
-        supervisor = McpServerSupervisor()
-        ticket = supervisor.prepare(configs, trigger="manual_refresh")
-        try:
-            snapshots = await supervisor.await_ticket_snapshots(ticket)
-            return {
-                "mcp": command,
-                "workspace_root": str(workspace_root),
-                "sources": [
-                    _mcp_source_to_dict(source)
-                    for source in mcp_config_sources(
-                        workspace_root=workspace_root,
-                        user_config_path=_mcp_user_config_path(args),
-                    )
-                ],
-                "servers": [_mcp_snapshot_to_dict(snapshot) for snapshot in snapshots],
-                "ready_count": sum(
-                    1 for snapshot in snapshots if snapshot.status.value == "ready"
-                ),
-                "failed_count": sum(
-                    1
-                    for snapshot in snapshots
-                    if snapshot.status.value in {"failed", "needs_auth", "degraded"}
-                ),
-                "cache_policy": {
-                    "sdk_cache": False,
-                    "snapshot_discovery": "refresh/no-cache",
-                    "inspectable_hit_miss": "not_applicable_until_pulsara_owned_cache",
-                },
-            }
-        finally:
-            await supervisor.aclose(timeout_seconds=5.0)
-    raise ValueError(f"unsupported mcp command: {command}")
-
-
-def _mcp_user_config_path(args) -> Path:
-    raw = getattr(args, "config", None)
-    return Path(raw).expanduser() if raw else DEFAULT_USER_MCP_CONFIG
-
-
-def _mcp_workspace_root(args) -> Path:
-    raw = getattr(args, "workspace", None)
-    return Path(raw or ".").expanduser().resolve()
-
-
-def _mcp_mutation_config_path(args) -> Path:
-    if args.scope == "workspace":
-        return _mcp_workspace_root(args) / WORKSPACE_MCP_CONFIG
-    return _mcp_user_config_path(args)
-
-
-def _mcp_config_from_add_args(args) -> McpServerConfig:
-    if args.mcp_stdio_command:
-        transport = McpStdioConfig(
-            command=args.mcp_stdio_command,
-            args=tuple(args.arg or ()),
-            env=_parse_key_value_pairs(args.env, option_name="--env"),
-            cwd=Path(args.cwd).expanduser() if args.cwd else None,
-        )
-    else:
-        transport = McpStreamableHttpConfig(
-            url=args.url,
-            bearer_token_env_var=args.bearer_token_env_var,
-            headers=_parse_key_value_pairs(args.header, option_name="--header"),
-            env_headers=_parse_key_value_pairs(
-                args.env_header, option_name="--env-header"
+            "status": classify_migration_history(rows).value,
+            "database_name": identity.database_name,
+            "runtime_role": identity.runtime_role,
+            "migration_head_version": rows[-1].version if rows else None,
+            "expected_head_version": POSTGRES_MIGRATION_REGISTRY.latest_version,
+            "observed_registry_prefix_fingerprint": (
+                rows[-1].registry_prefix_fingerprint if rows else None
             ),
-            follow_redirects=bool(args.follow_redirects),
-        )
-    return McpServerConfig(
-        server_id=args.server_id,
-        transport=transport,
-        enabled=not args.disabled,
-        required=bool(args.required),
-        connect_timeout_ms=int(args.connect_timeout_ms),
-        discovery_timeout_ms=int(args.discovery_timeout_ms),
-        startup_deadline_ms=int(args.startup_deadline_ms),
-        refresh_ttl_ms=int(args.refresh_ttl_ms),
-        tool_timeout_ms=int(args.tool_timeout_ms),
-        supports_parallel_tool_calls=bool(args.parallel_tools),
-        enabled_tools=tuple(args.enabled_tool) if args.enabled_tool else None,
-        disabled_tools=tuple(args.disabled_tool or ()),
-    )
-
-
-def _parse_key_value_pairs(raw_items: list[str], *, option_name: str) -> dict[str, str]:
-    values: dict[str, str] = {}
-    for raw in raw_items or ():
-        if "=" not in raw:
-            raise ValueError(f"{option_name} expects KEY=VALUE, got {raw!r}")
-        key, value = raw.split("=", 1)
-        key = key.strip()
-        if not key:
-            raise ValueError(f"{option_name} key cannot be empty")
-        values[key] = value
-    return values
-
-
-def _mcp_source_to_dict(source) -> dict[str, object]:
+            "expected_registry_prefix_fingerprint": (
+                POSTGRES_MIGRATION_REGISTRY.registry_fingerprint
+            ),
+        }
+    if args.db_command == "migrate":
+        admin_dsn = os.getenv(f"{args.prefix}_POSTGRES_ADMIN_DSN", "").strip()
+        if not admin_dsn:
+            raise ValueError(f"{args.prefix}_POSTGRES_ADMIN_DSN is required")
+        report = PostgresMigrationRunner(
+            admin_dsn=admin_dsn,
+            runtime_dsn=runtime_dsn,
+        ).migrate(deadline_monotonic=deadline)
+        return report.to_dict()
+    if args.deep:
+        return factory.verify_deep(deadline_monotonic=deadline).result.to_dict()
+    bundle = factory.verify(deadline_monotonic=deadline)
     return {
-        "scope": source.scope,
-        "path": str(source.path.expanduser()),
-        "exists": source.path.expanduser().exists(),
+        "status": "verified",
+        "database_name": bundle.binding.database_name,
+        "runtime_role": bundle.binding.runtime_role,
+        "migration_head_version": bundle.binding.migration_head_version,
+        "result_fingerprint": bundle.result.result_fingerprint,
     }
 
 
-def _mcp_config_to_dict(config: McpServerConfig) -> dict[str, object]:
-    payload: dict[str, object] = {
-        "server_id": config.server_id,
-        "enabled": config.enabled,
-        "required": config.required,
-        "transport_kind": config.transport_kind.value,
-        "connect_timeout_ms": config.connect_timeout_ms,
-        "discovery_timeout_ms": config.discovery_timeout_ms,
-        "startup_deadline_ms": config.startup_deadline_ms,
-        "refresh_ttl_ms": config.refresh_ttl_ms,
-        "tool_timeout_ms": config.tool_timeout_ms,
-        "supports_parallel_tool_calls": config.supports_parallel_tool_calls,
-        "enabled_tools": list(config.enabled_tools or ()),
-        "disabled_tools": list(config.disabled_tools),
-    }
-    transport = config.transport
-    if isinstance(transport, McpStdioConfig):
-        payload["transport"] = {
-            "command": transport.command,
-            "args": list(transport.args),
-            "cwd": str(transport.cwd) if transport.cwd is not None else None,
-            "env_keys": sorted(transport.env),
-        }
-    else:
-        payload["transport"] = {
-            "url": _redact_url(transport.url),
-            "follow_redirects": transport.follow_redirects,
-            "bearer_token_env_var": transport.bearer_token_env_var,
-            "header_keys": sorted(transport.headers),
-            "env_headers": dict(transport.env_headers),
-        }
-    return payload
+def _print_agent_run_result(result) -> None:
+    if result.final_text:
+        print(result.final_text)
 
 
-def _mcp_snapshot_to_dict(snapshot) -> dict[str, object]:
-    payload: dict[str, object] = {
-        "server_id": snapshot.server_id,
-        "required": snapshot.required,
-        "config_epoch": snapshot.config_epoch,
-        "event_safe_config_fingerprint": snapshot.event_safe_config_fingerprint,
-        "snapshot_id": snapshot.snapshot_id,
-        "snapshot_semantic_fingerprint": snapshot.snapshot_semantic_fingerprint,
-        "reconcile_attempt_id": snapshot.reconcile_attempt_id,
-        "status": snapshot.status.value,
-        "message": snapshot.message,
-        "discovery_generation": snapshot.discovery_generation,
-        "protocol_version": snapshot.protocol_version,
-        "server_info": dict(snapshot.server_info),
-        "instructions": snapshot.instructions,
-        "tools": [
-            {
-                "name": tool.name,
-                "description": tool.description,
-                "input_schema": tool.input_schema,
-                "annotations": tool.annotations.to_dict(),
-            }
-            for tool in snapshot.tools
-        ],
-        "resources": [
-            {
-                "uri": resource.uri,
-                "name": resource.name,
-                "description": resource.description,
-                "mime_type": resource.mime_type,
-                "size": resource.size,
-            }
-            for resource in snapshot.resources
-        ],
-        "resource_templates": [
-            {
-                "uri_template": template.uri_template,
-                "name": template.name,
-                "description": template.description,
-                "mime_type": template.mime_type,
-            }
-            for template in snapshot.resource_templates
-        ],
-        "prompts": [
-            {
-                "name": prompt.name,
-                "description": prompt.description,
-                "arguments": list(prompt.arguments),
-            }
-            for prompt in snapshot.prompts
-        ],
-        "diagnostics": [dict(item) for item in snapshot.diagnostics],
-    }
-    authority = snapshot.authority
-    if authority is not None:
-        discovery = authority.discovery_attribution
-        negotiation = discovery.negotiation
-        protocol = authority.surface_semantic.protocol_semantic
-        payload["protocol_authority"] = {
-            "exact_revision": protocol.protocol_revision,
-            "behavior_era": protocol.behavior_era.value,
-            "protocol_semantic_fingerprint": protocol.semantic_fingerprint,
-            "negotiation_source": negotiation.negotiation_source,
-            "wire_receipt_fingerprint": (
-                negotiation.negotiation_wire_receipt_fingerprint
-            ),
-            "sdk_version": negotiation.sdk_version,
-            "endpoint_attribution_fingerprint": (
-                discovery.endpoint.attribution_fingerprint
-            ),
-            "auth_kind": discovery.auth.auth_kind,
-            "auth_attribution_fingerprint": discovery.auth.attribution_fingerprint,
-        }
-        payload["cache_page_sets"] = [
-            {
-                "method": page_set.method.value,
-                "page_count": len(page_set.ordered_pages),
-                "started_from_cursor_none": page_set.started_from_cursor_none,
-                "complete_capture": page_set.complete_capture,
-                "resolved_cache_scope": page_set.common_resolved_cache_scope,
-                "pages": [
-                    {
-                        "ordinal": page.page_ordinal,
-                        "received_at_utc": page.received_at_utc,
-                        "resolved_ttl_ms": page.resolved_ttl_ms,
-                        "hint_disposition": page.hint_disposition,
-                        "receipt_fingerprint": page.page_receipt_fingerprint,
-                    }
-                    for page in page_set.ordered_pages
-                ],
-            }
-            for page_set in discovery.page_set_receipts
-        ]
-        payload["rejected_tool_count"] = len(discovery.ordered_tool_rejections)
-    return payload
-
-
-def _redact_url(url: str) -> str:
-    parsed = urlsplit(url)
-    host = parsed.hostname or ""
-    if parsed.port is not None:
-        host = f"{host}:{parsed.port}"
-    if parsed.username or parsed.password:
-        host = f"<redacted-userinfo>@{host}"
-    suffix = "<redacted-query-or-fragment>" if parsed.query or parsed.fragment else ""
-    return (
-        urlunsplit(
-            SplitResult(
-                scheme=parsed.scheme,
-                netloc=host,
-                path=parsed.path,
-                query="",
-                fragment="",
-            )
-        )
-        + suffix
-    )
-
-
-def _settings_from_host_args(args) -> PulsaraSettings:
+def _settings_from_args(args) -> PulsaraSettings:
     if args.env_file:
         return PulsaraSettings.from_env_file(
-            args.env_file,
-            prefix=args.prefix,
-            override=args.override_env,
-        )
-    return PulsaraSettings.from_env(prefix=args.prefix)
-
-
-def _format_not_found_error(exc: KeyError) -> str:
-    raw = exc.args[0] if exc.args else "not found"
-    text = str(raw)
-    if text == "no resumable runtime session found":
-        return "no resumable runtime session found for this workspace. Start a new REPL without --continue, or use --resume <runtime_session_id>."
-    return f"not found: {text}"
-
-
-def _settings_from_inspect_args(args) -> PulsaraSettings:
-    if args.env_file:
-        return PulsaraSettings.from_env_file(
-            args.env_file,
-            prefix=args.prefix,
-            override=args.override_env,
+            args.env_file, prefix=args.prefix, override=args.override_env
         )
     return PulsaraSettings.from_env(prefix=args.prefix)
 
 
 def _load_env_file_from_args(args) -> None:
-    env_file = getattr(args, "env_file", None)
-    if env_file:
-        load_env_file(env_file, override=bool(getattr(args, "override_env", False)))
-
-
-def _best_effort_sync_bundled_skills() -> None:
-    try:
-        result = sync_bundled_skills()
-    except Exception as exc:  # pragma: no cover - defensive best-effort boundary
-        print(f"pulsara: bundled skill sync failed: {exc}", file=sys.stderr)
-        return
-    changed = [item for item in result.items if item.action in {"installed", "updated"}]
-    if changed:
-        names = ", ".join(item.name for item in changed)
-        print(f"pulsara: bundled skills synced: {names}", file=sys.stderr)
-
-
-def _skills_sync_bundled(args):
-    _load_env_file_from_args(args)
-    return sync_bundled_skills(override_opt_out=bool(args.override_opt_out))
-
-
-def _skills_status(args):
-    _load_env_file_from_args(args)
-    return bundled_skills_status()
-
-
-def _skills_reset(args):
-    _load_env_file_from_args(args)
-    try:
-        return reset_bundled_skill(args.name)
-    except ValueError as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
-        raise SystemExit(2) from exc
+    if getattr(args, "env_file", None):
+        load_env_file(args.env_file, override=bool(args.override_env))
 
 
 def _workspace_input_from_args(args) -> HostWorkspaceInput:
@@ -3001,74 +476,36 @@ def _workspace_input_from_args(args) -> HostWorkspaceInput:
     )
 
 
-def _has_explicit_workspace_override(args) -> bool:
-    return any(
-        getattr(args, name, None) is not None
-        for name in ("workspace", "workspace_kind", "display_label", "memory_domain_id")
-    )
-
-
 def _active_skill_names_from_args(args) -> frozenset[str]:
-    return frozenset(
-        name.strip() for name in getattr(args, "skill", ()) if name.strip()
-    )
+    return frozenset(item.strip() for item in args.skill if item.strip())
 
 
-def _env_permission_mode(prefix: str) -> str | None:
-    value = os.environ.get(f"{prefix}_PERMISSION_MODE")
-    if value is None:
-        return None
-    value = value.strip()
-    return value or None
-
-
-def _permission_policy_from_host_args(args, *, intent: str):
-    prefix = getattr(args, "prefix", "PULSARA")
-    raw_profile = getattr(args, "permission_profile", None)
-    raw_approval = getattr(args, "approval_policy", None)
-    raw_terminal = getattr(args, "terminal_access", None)
-    mode = getattr(args, "permission_mode", None) or _env_permission_mode(prefix)
-    raw_env_axes = [
-        env_name
-        for env_name in (
-            f"{prefix}_PERMISSION_PROFILE",
-            f"{prefix}_APPROVAL_POLICY",
-            f"{prefix}_TERMINAL_ACCESS",
-        )
-        if os.environ.get(env_name)
-    ]
-    custom_flags = [
-        flag
-        for flag, value in (
-            ("--permission-profile", raw_profile),
-            ("--approval-policy", raw_approval),
-            ("--terminal-access", raw_terminal),
-        )
-        if value is not None
-    ] + raw_env_axes
-
-    if mode is not None:
-        if custom_flags:
-            print(
-                "ERROR: --permission-mode cannot be combined with the advanced flag(s): "
-                f"{', '.join(custom_flags)}. Production host paths are preset-only; use --permission-mode.",
-                file=sys.stderr,
-            )
-            raise SystemExit(2)
-        try:
-            return preset_to_policy(parse_permission_mode(mode))
-        except ValueError as exc:
-            print(f"ERROR: {exc}", file=sys.stderr)
-            raise SystemExit(2) from exc
-
-    if custom_flags:
-        print(
-            "ERROR: raw permission axis flag(s) are not accepted by production host paths: "
-            f"{', '.join(custom_flags)}. Use --permission-mode with one of the preset modes.",
-            file=sys.stderr,
-        )
-        raise SystemExit(2)
-
+def _permission_policy(args, *, intent: str):
+    raw = args.permission_mode or os.getenv(f"{args.prefix}_PERMISSION_MODE")
+    if raw:
+        return preset_to_policy(parse_permission_mode(raw.strip()))
     return preset_to_policy(
         PermissionMode.READ_ONLY if intent == "inspect" else DEFAULT_PERMISSION_MODE
     )
+
+
+def _best_effort_sync_bundled_skills() -> None:
+    try:
+        result = sync_bundled_skills()
+    except Exception as exc:
+        print(f"pulsara: bundled skill sync failed: {exc}", file=sys.stderr)
+        return
+    changed = [
+        item.name for item in result.items if item.action in {"installed", "updated"}
+    ]
+    if changed:
+        print("pulsara: bundled skills synced: " + ", ".join(changed), file=sys.stderr)
+
+
+def _public_error(exc: BaseException) -> str:
+    if isinstance(exc, KeyError):
+        return str(exc.args[0] if exc.args else "not found")
+    return str(exc)
+
+
+__all__ = ["build_parser", "main"]

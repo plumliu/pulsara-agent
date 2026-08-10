@@ -1,6 +1,7 @@
 package kernelapp
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 	"google.golang.org/protobuf/proto"
@@ -70,6 +72,29 @@ func (s *interactionService) ResolveInteraction(_ context.Context, commandID str
 		RequestId: "request:resolve", CommandId: commandID,
 		Status: protocolv3.CommandStatus_SUCCEEDED, TargetId: "decision:1",
 		PublicCode: "INTERACTION_ALLOW", PublicMessage: "Accepted.",
+	}, nil
+}
+
+type queuedPromptInteractionService struct {
+	interactionService
+}
+
+func (*queuedPromptInteractionService) Command(_ context.Context, commandID string, _ protocolv3.CommandKind, _ string, _ string) (*protocolv3.CommandOutcome, error) {
+	return &protocolv3.CommandOutcome{
+		RequestId: "request:prompt", CommandId: commandID,
+		Status: protocolv3.CommandStatus_PENDING, TargetId: "queue:item",
+		PublicCode: "PROMPT_QUEUED", PublicMessage: "Queued.",
+	}, nil
+}
+
+func (*queuedPromptInteractionService) QueryCommand(_ context.Context, commandID string) (*protocolv3.QueryCommandResponse, error) {
+	return &protocolv3.QueryCommandResponse{
+		RequestId: "request:query", Found: true,
+		Outcome: &protocolv3.CommandOutcome{
+			CommandId: commandID, Status: protocolv3.CommandStatus_PENDING,
+			TargetId: "turn:active", PublicCode: "TURN_RUNNING",
+			PublicMessage: "The turn is running.",
+		},
 	}, nil
 }
 
@@ -214,6 +239,58 @@ func TestCanonicalProjectionRetiresLiveDraftAndLateDeltaCannotReviveIt(t *testin
 	}
 }
 
+func TestLiveToolCallRendersBoundedUTF8SafeArguments(t *testing.T) {
+	model := New(fakeService{})
+	start := liveToolCallEvent(1, protocolv3.LiveEventType_TOOL_CALL_START,
+		&protocolv3.LiveEventPayload{Payload: &protocolv3.LiveEventPayload_ToolCallStart{
+			ToolCallStart: &protocolv3.LiveToolCallStartPayload{
+				BlockIdentity: "block:tool", ToolCallId: "call:1", ToolName: "search",
+			},
+		}})
+	if err := model.applyLive(start); err != nil {
+		t.Fatal(err)
+	}
+	delta := liveToolCallEvent(2, protocolv3.LiveEventType_TOOL_CALL_DELTA,
+		&protocolv3.LiveEventPayload{Payload: &protocolv3.LiveEventPayload_ToolCallDelta{
+			ToolCallDelta: &protocolv3.LiveToolCallDeltaPayload{
+				BlockIdentity: "block:tool", ToolCallId: "call:1", Delta: `{"q":"中文"}`,
+			},
+		}})
+	if err := model.applyLive(delta); err != nil {
+		t.Fatal(err)
+	}
+	if got := model.live["entry:tool"].blocks["block:tool"]; got != `search({"q":"中文"})` {
+		t.Fatalf("live tool delta = %q", got)
+	}
+
+	arguments := `{"q":"` + strings.Repeat("界", maximumLiveToolArgumentBytes) + `"}`
+	end := liveToolCallEvent(3, protocolv3.LiveEventType_TOOL_CALL_END,
+		&protocolv3.LiveEventPayload{Payload: &protocolv3.LiveEventPayload_ToolCallEnd{
+			ToolCallEnd: &protocolv3.LiveToolCallEndPayload{
+				BlockIdentity: "block:tool", ToolCallId: "call:1", ToolName: "search",
+				ArgumentsJson: arguments, Utf8Bytes: uint64(len([]byte(arguments))), Digest: digest([]byte(arguments)),
+			},
+		}})
+	if err := model.applyLive(end); err != nil {
+		t.Fatal(err)
+	}
+	got := model.live["entry:tool"].blocks["block:tool"]
+	if !utf8.ValidString(got) || !strings.Contains(got, liveToolArgumentsTruncated) || len(got) >= len(arguments) {
+		t.Fatalf("bounded live tool preview is invalid: bytes=%d", len(got))
+	}
+}
+
+func liveToolCallEvent(revision uint64, kind protocolv3.LiveEventType, payload *protocolv3.LiveEventPayload) *protocolv3.LiveEventProjection {
+	return &protocolv3.LiveEventProjection{
+		OwnerEpoch: 1, LiveRevision: revision, EventType: kind,
+		SessionId: "session:1", TurnId: "turn:1", DraftIdentity: "entry:tool",
+		Payload: payload, ScopeKind: protocolv3.ConversationScopeKind_ROOT,
+		ChannelKind:  protocolv3.LiveChannelKind_LIVE_CHANNEL_MODEL_OUTPUT,
+		GenerationId: "model-output:entry:tool", ProposedEntryId: "entry:tool",
+		BlockId: "block:tool", BlockKind: protocolv3.LiveBlockKind_LIVE_BLOCK_TOOL_CALL,
+	}
+}
+
 func TestLiveAndControlFramesAreBoundToTheAuthenticatedSession(t *testing.T) {
 	model := New(fakeService{})
 	model.liveEpoch, model.controlEpoch = 1, 1
@@ -293,6 +370,12 @@ func TestHelloLiveSnapshotInstallsRetainedPrefixBeforeObservation(t *testing.T) 
 func TestContentIsExactOnlyAfterCompleteDigestVerification(t *testing.T) {
 	model := New(fakeService{})
 	full := []byte("complete content")
+	model.entries["entry:1"] = &protocolv3.CanonicalEntry{
+		EntryId: "entry:1", Content: &protocolv3.CanonicalContentReference{
+			Kind: protocolv3.ContentKind_CANONICAL_BLOB, Digest: digest(full),
+			Size: uint64(len(full)), MediaType: "text/plain", Codec: "utf-8",
+		},
+	}
 	if err := model.applyContent(contentMsg{
 		entryID: "entry:1",
 		value: &protocolv3.CanonicalContentChunk{
@@ -306,6 +389,12 @@ func TestContentIsExactOnlyAfterCompleteDigestVerification(t *testing.T) {
 		t.Fatal("complete content did not become verified")
 	}
 	forged := New(fakeService{})
+	forged.entries["entry:2"] = &protocolv3.CanonicalEntry{
+		EntryId: "entry:2", Content: &protocolv3.CanonicalContentReference{
+			Kind: protocolv3.ContentKind_CANONICAL_BLOB, Digest: digest(full),
+			Size: uint64(len(full)), MediaType: "text/plain", Codec: "utf-8",
+		},
+	}
 	if err := forged.applyContent(contentMsg{
 		entryID: "entry:2",
 		value: &protocolv3.CanonicalContentChunk{
@@ -314,12 +403,86 @@ func TestContentIsExactOnlyAfterCompleteDigestVerification(t *testing.T) {
 	}); err == nil {
 		t.Fatal("forged terminal content digest was accepted")
 	}
+
+	unavailable := New(fakeService{})
+	unavailable.entries["entry:3"] = &protocolv3.CanonicalEntry{
+		EntryId: "entry:3", Content: &protocolv3.CanonicalContentReference{
+			Kind: protocolv3.ContentKind_CANONICAL_BLOB, Digest: digest(full),
+			Size: uint64(len(full)), MediaType: "text/plain", Codec: "utf-8",
+		},
+	}
+	updated, _ := unavailable.Update(contentMsg{
+		entryID: "entry:3", err: &kernelclient.ProtocolError{
+			StableCode: "CONTENT_BLOB_CORRUPT", PublicMessage: "Unavailable.",
+		},
+	})
+	unavailable = updated.(Model)
+	state = unavailable.content[contentKey("entry:3", "")]
+	if state == nil || !state.done || !state.unavailable || unavailable.phase == phaseFatal {
+		t.Fatal("request-local content corruption did not become a stable placeholder")
+	}
+}
+
+func TestMaximumCanonicalBlobHydratesByRangeAndRendersExactly(t *testing.T) {
+	full := append(bytes.Repeat([]byte("a"), maximumHydratedBytes-3), []byte("界")...)
+	model := New(fakeService{})
+	model.entries["entry:max"] = &protocolv3.CanonicalEntry{
+		EntryId: "entry:max", Content: &protocolv3.CanonicalContentReference{
+			Kind: protocolv3.ContentKind_CANONICAL_BLOB, Digest: digest(full),
+			Size: uint64(len(full)), MediaType: "text/plain", Codec: "utf-8",
+		},
+	}
+	const chunkBytes = 1 << 20
+	for offset := 0; offset < len(full); offset += chunkBytes {
+		end := min(len(full), offset+chunkBytes)
+		if err := model.applyContent(contentMsg{
+			entryID: "entry:max",
+			value: &protocolv3.CanonicalContentChunk{
+				Digest: digest(full), CompleteSize: uint64(len(full)),
+				OffsetBytes: uint64(offset), Content: full[offset:end],
+				Complete: end == len(full),
+			},
+		}); err != nil {
+			t.Fatalf("range %d rejected: %v", offset, err)
+		}
+	}
+	state := model.content[contentKey("entry:max", "")]
+	if state == nil || !state.done || !state.verified || state.unavailable || state.truncated {
+		t.Fatal("maximum legal canonical blob did not become exact")
+	}
+	if got := model.contentText("entry:max", "", model.entries["entry:max"].Content); got != string(full) {
+		t.Fatalf("maximum legal canonical blob render drifted: bytes=%d", len(got))
+	}
+}
+
+func TestFinalCanonicalBlobDigestFailureIsContentLocal(t *testing.T) {
+	full := []byte("canonical")
+	model := New(fakeService{})
+	model.phase = phaseReady
+	model.entries["entry:corrupt"] = &protocolv3.CanonicalEntry{
+		EntryId: "entry:corrupt", Content: &protocolv3.CanonicalContentReference{
+			Kind: protocolv3.ContentKind_CANONICAL_BLOB, Digest: digest(full),
+			Size: uint64(len(full)), MediaType: "text/plain", Codec: "utf-8",
+		},
+	}
+	updated, _ := model.Update(contentMsg{
+		entryID: "entry:corrupt",
+		value: &protocolv3.CanonicalContentChunk{
+			Digest: digest(full), CompleteSize: uint64(len(full)),
+			Content: []byte("corrupted"), Complete: true,
+		},
+	})
+	model = updated.(Model)
+	state := model.content[contentKey("entry:corrupt", "")]
+	if model.phase == phaseFatal || state == nil || !state.done || !state.unavailable {
+		t.Fatal("final digest mismatch escaped the request-local content boundary")
+	}
 }
 
 func TestCommandResponseLossKeepsOneStableCandidateForQuery(t *testing.T) {
 	model := New(fakeService{})
 	model.phase = phaseReady
-	frozen := pendingCommand{id: "command:stable", text: "hello", status: protocolv3.CommandStatus_PENDING}
+	frozen := pendingCommand{id: "command:stable", kind: protocolv3.CommandKind_SUBMIT_PROMPT, text: "hello", status: protocolv3.CommandStatus_PENDING}
 	model.pending = &frozen
 	updated, _ := model.Update(commandMsg{err: errors.New("response lost"), frozen: frozen})
 	result := updated.(Model)
@@ -328,6 +491,28 @@ func TestCommandResponseLossKeepsOneStableCandidateForQuery(t *testing.T) {
 	}
 	if string(result.draft) != "" {
 		t.Fatal("ACK-unknown command was restored as a new draft")
+	}
+}
+
+func TestACKUnknownPromptMovesToBackgroundTrackingAfterCanonicalQuery(t *testing.T) {
+	model := New(fakeService{})
+	model.phase = phaseReady
+	frozen := pendingCommand{id: "command:stable", kind: protocolv3.CommandKind_SUBMIT_PROMPT, text: "hello", status: protocolv3.CommandStatus_PENDING}
+	model.pending = &frozen
+	updated, next := model.Update(queryMsg{
+		commandID: frozen.id,
+		value: &protocolv3.QueryCommandResponse{
+			Found: true,
+			Outcome: &protocolv3.CommandOutcome{
+				CommandId: frozen.id, Status: protocolv3.CommandStatus_PENDING,
+				TargetId: "queue:item", PublicCode: "PROMPT_QUEUED",
+				PublicMessage: "Queued.",
+			},
+		},
+	})
+	result := updated.(Model)
+	if next == nil || result.pending != nil || result.trackedPrompts[frozen.id].id != frozen.id {
+		t.Fatal("canonical prompt winner did not release the mutation slot")
 	}
 }
 
@@ -404,6 +589,97 @@ func TestToolInteractionUsesExactSnapshotAndLiveAuthority(t *testing.T) {
 	}
 	if len(result.draft) != 0 || len(result.promptHistory) != 0 {
 		t.Fatal("interaction decision polluted the prompt composer")
+	}
+}
+
+func TestQueuedPromptDoesNotBlockItsOwnToolInteraction(t *testing.T) {
+	service := &queuedPromptInteractionService{}
+	model := New(service)
+	model.phase = phaseReady
+	model.role = protocolv3.AttachmentRole_ATTACHMENT_ROLE_CONTROLLER
+	model.height = 24
+	model.writerGeneration, model.controlEpoch, model.controlLiveRevision = 9, 9, 3
+	model.draft = []rune("use the terminal")
+	model.cursor = len(model.draft)
+
+	updated, submit := model.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	result := updated.(Model)
+	promptID := result.pending.id
+	updated, query := result.Update(submit())
+	result = updated.(Model)
+	if query == nil || result.pending != nil || result.trackedPrompts[promptID].id != promptID {
+		t.Fatal("durably queued prompt retained the interactive mutation slot")
+	}
+
+	result.currentInteraction = &protocolv3.LiveInteractionView{
+		InteractionId: "interaction:prompt-tool", InteractionKind: "TOOL_CONFIRMATION",
+		PublicPrompt: "Allow terminal?", PublicOptions: []string{"ALLOW", "DENY"},
+		ExpiresAtUtc: "2026-08-09T00:10:00Z",
+	}
+	updated, resolve := result.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyExtended, Text: "y"}))
+	result = updated.(Model)
+	if resolve == nil || result.pending == nil || !result.pending.interaction {
+		t.Fatal("queued prompt blocked its own tool confirmation")
+	}
+	updated, _ = result.Update(resolve())
+	result = updated.(Model)
+	if result.pending != nil || service.interactionID != "interaction:prompt-tool" {
+		t.Fatal("tool confirmation did not complete while prompt outcome was tracked")
+	}
+
+	updated, _ = result.Update(queryMsg{
+		commandID: promptID,
+		value: &protocolv3.QueryCommandResponse{
+			Found: true,
+			Outcome: &protocolv3.CommandOutcome{
+				CommandId: promptID, Status: protocolv3.CommandStatus_PENDING,
+				TargetId: "turn:active", PublicCode: "TURN_RUNNING",
+				PublicMessage: "The turn is running.",
+			},
+		},
+	})
+	result = updated.(Model)
+	if _, exists := result.trackedPrompts[promptID]; exists {
+		t.Fatal("canonical turn ingress remained in background tracking")
+	}
+	if len(result.promptHistory) != 1 || result.promptHistory[0] != "use the terminal" {
+		t.Fatal("accepted prompt history was not finalized at canonical ingress")
+	}
+}
+
+func TestTrackedPromptDoesNotBlockSteerStopOrDetach(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		key  tea.Key
+		kind protocolv3.CommandKind
+	}{
+		{"steer", tea.Key{Code: tea.KeyEnter}, protocolv3.CommandKind_STEER_ACTIVE_TURN},
+		{"stop", tea.Key{Code: 'c', Mod: tea.ModCtrl}, protocolv3.CommandKind_STOP_ACTIVE_TURN},
+		{"detach", tea.Key{Code: 'd', Mod: tea.ModCtrl}, protocolv3.CommandKind_DETACH},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			model := New(fakeService{})
+			model.phase = phaseReady
+			model.role = protocolv3.AttachmentRole_ATTACHMENT_ROLE_CONTROLLER
+			model.height = 24
+			model.trackedPrompts["command:original"] = pendingCommand{
+				id: "command:original", kind: protocolv3.CommandKind_SUBMIT_PROMPT,
+				text: "original",
+			}
+			model.control = &protocolv3.CanonicalControl{ActiveTurns: []*protocolv3.ActiveTurnControl{{
+				TurnId: "turn:active", ScopeKind: protocolv3.ConversationScopeKind_ROOT,
+				Status: "RUNNING", AcceptedAtUtc: "2026-08-09T00:00:00Z",
+			}}}
+			if test.kind == protocolv3.CommandKind_STEER_ACTIVE_TURN {
+				model.draft = []rune("change direction")
+				model.cursor = len(model.draft)
+			}
+			updated, command := model.Update(tea.KeyPressMsg(test.key))
+			result := updated.(Model)
+			if command == nil || result.pending == nil || result.pending.kind != test.kind {
+				t.Fatalf("tracked prompt blocked %s", test.name)
+			}
+		})
 	}
 }
 

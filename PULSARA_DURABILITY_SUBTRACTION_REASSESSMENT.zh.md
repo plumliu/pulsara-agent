@@ -3914,6 +3914,8 @@ job payload/version必须与binary同版本；rollback停机并再次complete re
 - session/conversation/tool-attempt/job-attempt/memory/context-snapshot/blob可直接查询；
 - 只查询complete reset后由新authority创建的facts；没有old DB/cold archive产品读取面；
 - schema migration仍由verified runner执行；
+- verified PostgreSQL binding最终只绑定database identity、migration universe/registry、required extension、catalog与grant truth；旧runtime-write epoch/function/trigger graph随reset删除，connection checkout不得再依赖它。Host writer与job-attempt claim仍是两个独立canonical mutation fencing domain，不由schema binding取代；
+- clean Kernel的required database extension exact只有`public.vector >= 0.5.0`；`pgcrypto`随旧projection/write-admission requirement退出。extension是database-scoped retained capability，shared-database reset默认保留compatible既有extension，wrong schema/version/shape fail closed；
 - canonical closed payload保留有限per-domain upcaster/golden，不以旧EventLog historical decoder替代；
 - PostgreSQL仍是唯一线上authority。
 - selective `agent_events`只保存accepted occurrence/audit truth，支持历史stored-suffix查询；Gateway另行组合read-time observation projection。任何reader都不得以event replay execution或证明canonical row存在；
@@ -3924,8 +3926,8 @@ job payload/version必须与binary同版本；rollback停机并再次complete re
 
 **代码修改面**
 
-- event/：拆成committed/live/operational base与窄typed vocabularies，删除151类universal union；
-- event_log/：删除execution confirmation/materialization/reducer耦合，保留selective PostgreSQL journal writer/query/serializer；
+- event/：整个legacy universal package随151类union删除；正式Committed/Live vocabulary的唯一owner是`conversation_kernel.vocabulary`，process-local live payload/bus由`conversation_kernel.live`与窄provider port承载，operational diagnostics不注册进formal vocabulary；
+- event_log/：整个legacy execution-ledger package删除，不保留第二套writer/query/serializer；selective PostgreSQL journal的唯一owner是`conversation_kernel` closed repository/query，canonical owner在自身transaction内部append，Gateway/Inspector经canonical query/observation read，不暴露通用EventLog publisher；
 - replay/：删除execution replay与旧grammar拼装，只保留按canonical rows查询及独立audit reproduction所需的窄边界；
 - storage migrations；
 - Inspector；

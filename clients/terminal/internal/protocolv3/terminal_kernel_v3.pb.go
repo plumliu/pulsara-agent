@@ -789,6 +789,8 @@ const (
 	CommandKind_DETACH                   CommandKind = 3
 	CommandKind_CLOSE_SESSION            CommandKind = 4
 	CommandKind_STEER_ACTIVE_TURN        CommandKind = 5
+	CommandKind_ACCEPT_SUBAGENT_RESULT   CommandKind = 6
+	CommandKind_ACCEPT_JOB_RESULT        CommandKind = 7
 )
 
 // Enum value maps for CommandKind.
@@ -800,6 +802,8 @@ var (
 		3: "DETACH",
 		4: "CLOSE_SESSION",
 		5: "STEER_ACTIVE_TURN",
+		6: "ACCEPT_SUBAGENT_RESULT",
+		7: "ACCEPT_JOB_RESULT",
 	}
 	CommandKind_value = map[string]int32{
 		"COMMAND_KIND_UNSPECIFIED": 0,
@@ -808,6 +812,8 @@ var (
 		"DETACH":                   3,
 		"CLOSE_SESSION":            4,
 		"STEER_ACTIVE_TURN":        5,
+		"ACCEPT_SUBAGENT_RESULT":   6,
+		"ACCEPT_JOB_RESULT":        7,
 	}
 )
 
@@ -1692,13 +1698,16 @@ func (x *ToolAttemptControl) GetResultEntryId() string {
 }
 
 type SubagentTaskControl struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	TaskId        string                 `protobuf:"bytes,1,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
-	ParentTurnId  string                 `protobuf:"bytes,2,opt,name=parent_turn_id,json=parentTurnId,proto3" json:"parent_turn_id,omitempty"`
-	Status        string                 `protobuf:"bytes,3,opt,name=status,proto3" json:"status,omitempty"`
-	Objective     string                 `protobuf:"bytes,4,opt,name=objective,proto3" json:"objective,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	TaskId         string                 `protobuf:"bytes,1,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
+	ParentTurnId   string                 `protobuf:"bytes,2,opt,name=parent_turn_id,json=parentTurnId,proto3" json:"parent_turn_id,omitempty"`
+	Status         string                 `protobuf:"bytes,3,opt,name=status,proto3" json:"status,omitempty"`
+	Objective      string                 `protobuf:"bytes,4,opt,name=objective,proto3" json:"objective,omitempty"`
+	ResultId       string                 `protobuf:"bytes,5,opt,name=result_id,json=resultId,proto3" json:"result_id,omitempty"`
+	ResultEntryId  string                 `protobuf:"bytes,6,opt,name=result_entry_id,json=resultEntryId,proto3" json:"result_entry_id,omitempty"`
+	ResultAccepted bool                   `protobuf:"varint,7,opt,name=result_accepted,json=resultAccepted,proto3" json:"result_accepted,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *SubagentTaskControl) Reset() {
@@ -1757,6 +1766,27 @@ func (x *SubagentTaskControl) GetObjective() string {
 		return x.Objective
 	}
 	return ""
+}
+
+func (x *SubagentTaskControl) GetResultId() string {
+	if x != nil {
+		return x.ResultId
+	}
+	return ""
+}
+
+func (x *SubagentTaskControl) GetResultEntryId() string {
+	if x != nil {
+		return x.ResultEntryId
+	}
+	return ""
+}
+
+func (x *SubagentTaskControl) GetResultAccepted() bool {
+	if x != nil {
+		return x.ResultAccepted
+	}
+	return false
 }
 
 type JobControl struct {
@@ -5706,17 +5736,19 @@ func (x *LiveControlSnapshotResponse) GetSnapshot() *SessionLiveControlSnapshot 
 }
 
 type CommandRequest struct {
-	state                protoimpl.MessageState `protogen:"open.v1"`
-	RequestId            string                 `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
-	AttachmentId         string                 `protobuf:"bytes,2,opt,name=attachment_id,json=attachmentId,proto3" json:"attachment_id,omitempty"`
-	AttachmentGeneration uint64                 `protobuf:"varint,3,opt,name=attachment_generation,json=attachmentGeneration,proto3" json:"attachment_generation,omitempty"`
-	CommandId            string                 `protobuf:"bytes,4,opt,name=command_id,json=commandId,proto3" json:"command_id,omitempty"`
-	CommandKind          CommandKind            `protobuf:"varint,5,opt,name=command_kind,json=commandKind,proto3,enum=pulsara.terminal.v3.CommandKind" json:"command_kind,omitempty"`
-	ClientSubmissionId   string                 `protobuf:"bytes,6,opt,name=client_submission_id,json=clientSubmissionId,proto3" json:"client_submission_id,omitempty"`
-	Text                 string                 `protobuf:"bytes,7,opt,name=text,proto3" json:"text,omitempty"`
-	TargetTurnId         string                 `protobuf:"bytes,8,opt,name=target_turn_id,json=targetTurnId,proto3" json:"target_turn_id,omitempty"`
-	unknownFields        protoimpl.UnknownFields
-	sizeCache            protoimpl.SizeCache
+	state                  protoimpl.MessageState `protogen:"open.v1"`
+	RequestId              string                 `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
+	AttachmentId           string                 `protobuf:"bytes,2,opt,name=attachment_id,json=attachmentId,proto3" json:"attachment_id,omitempty"`
+	AttachmentGeneration   uint64                 `protobuf:"varint,3,opt,name=attachment_generation,json=attachmentGeneration,proto3" json:"attachment_generation,omitempty"`
+	CommandId              string                 `protobuf:"bytes,4,opt,name=command_id,json=commandId,proto3" json:"command_id,omitempty"`
+	CommandKind            CommandKind            `protobuf:"varint,5,opt,name=command_kind,json=commandKind,proto3,enum=pulsara.terminal.v3.CommandKind" json:"command_kind,omitempty"`
+	ClientSubmissionId     string                 `protobuf:"bytes,6,opt,name=client_submission_id,json=clientSubmissionId,proto3" json:"client_submission_id,omitempty"`
+	Text                   string                 `protobuf:"bytes,7,opt,name=text,proto3" json:"text,omitempty"`
+	TargetTurnId           string                 `protobuf:"bytes,8,opt,name=target_turn_id,json=targetTurnId,proto3" json:"target_turn_id,omitempty"`
+	SourceSubagentResultId string                 `protobuf:"bytes,9,opt,name=source_subagent_result_id,json=sourceSubagentResultId,proto3" json:"source_subagent_result_id,omitempty"`
+	SourceJobId            string                 `protobuf:"bytes,10,opt,name=source_job_id,json=sourceJobId,proto3" json:"source_job_id,omitempty"`
+	unknownFields          protoimpl.UnknownFields
+	sizeCache              protoimpl.SizeCache
 }
 
 func (x *CommandRequest) Reset() {
@@ -5801,6 +5833,20 @@ func (x *CommandRequest) GetText() string {
 func (x *CommandRequest) GetTargetTurnId() string {
 	if x != nil {
 		return x.TargetTurnId
+	}
+	return ""
+}
+
+func (x *CommandRequest) GetSourceSubagentResultId() string {
+	if x != nil {
+		return x.SourceSubagentResultId
+	}
+	return ""
+}
+
+func (x *CommandRequest) GetSourceJobId() string {
+	if x != nil {
+		return x.SourceJobId
 	}
 	return ""
 }
@@ -6976,12 +7022,15 @@ const file_terminal_kernel_v3_proto_rawDesc = "" +
 	"\ftool_call_id\x18\x03 \x01(\tR\n" +
 	"toolCallId\x12!\n" +
 	"\fresult_state\x18\x04 \x01(\tR\vresultState\x12&\n" +
-	"\x0fresult_entry_id\x18\x05 \x01(\tR\rresultEntryId\"\x8a\x01\n" +
+	"\x0fresult_entry_id\x18\x05 \x01(\tR\rresultEntryId\"\xf8\x01\n" +
 	"\x13SubagentTaskControl\x12\x17\n" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12$\n" +
 	"\x0eparent_turn_id\x18\x02 \x01(\tR\fparentTurnId\x12\x16\n" +
 	"\x06status\x18\x03 \x01(\tR\x06status\x12\x1c\n" +
-	"\tobjective\x18\x04 \x01(\tR\tobjective\"\xae\x01\n" +
+	"\tobjective\x18\x04 \x01(\tR\tobjective\x12\x1b\n" +
+	"\tresult_id\x18\x05 \x01(\tR\bresultId\x12&\n" +
+	"\x0fresult_entry_id\x18\x06 \x01(\tR\rresultEntryId\x12'\n" +
+	"\x0fresult_accepted\x18\a \x01(\bR\x0eresultAccepted\"\xae\x01\n" +
 	"\n" +
 	"JobControl\x12\x15\n" +
 	"\x06job_id\x18\x01 \x01(\tR\x05jobId\x12!\n" +
@@ -7350,7 +7399,7 @@ const file_terminal_kernel_v3_proto_rawDesc = "" +
 	"\x1bLiveControlSnapshotResponse\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12K\n" +
-	"\bsnapshot\x18\x02 \x01(\v2/.pulsara.terminal.v3.SessionLiveControlSnapshotR\bsnapshot\"\xd9\x02\n" +
+	"\bsnapshot\x18\x02 \x01(\v2/.pulsara.terminal.v3.SessionLiveControlSnapshotR\bsnapshot\"\xb8\x03\n" +
 	"\x0eCommandRequest\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12#\n" +
@@ -7361,7 +7410,10 @@ const file_terminal_kernel_v3_proto_rawDesc = "" +
 	"\fcommand_kind\x18\x05 \x01(\x0e2 .pulsara.terminal.v3.CommandKindR\vcommandKind\x120\n" +
 	"\x14client_submission_id\x18\x06 \x01(\tR\x12clientSubmissionId\x12\x12\n" +
 	"\x04text\x18\a \x01(\tR\x04text\x12$\n" +
-	"\x0etarget_turn_id\x18\b \x01(\tR\ftargetTurnId\"\xef\x01\n" +
+	"\x0etarget_turn_id\x18\b \x01(\tR\ftargetTurnId\x129\n" +
+	"\x19source_subagent_result_id\x18\t \x01(\tR\x16sourceSubagentResultId\x12\"\n" +
+	"\rsource_job_id\x18\n" +
+	" \x01(\tR\vsourceJobId\"\xef\x01\n" +
 	"\x0eCommandOutcome\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x1d\n" +
@@ -7570,7 +7622,7 @@ const file_terminal_kernel_v3_proto_rawDesc = "" +
 	" OBSERVATION_GAP_KIND_UNSPECIFIED\x10\x00\x12\x11\n" +
 	"\rCOMMITTED_GAP\x10\x01\x12\f\n" +
 	"\bLIVE_GAP\x10\x02\x12\x14\n" +
-	"\x10LIVE_CONTROL_GAP\x10\x03*\x8a\x01\n" +
+	"\x10LIVE_CONTROL_GAP\x10\x03*\xbd\x01\n" +
 	"\vCommandKind\x12\x1c\n" +
 	"\x18COMMAND_KIND_UNSPECIFIED\x10\x00\x12\x11\n" +
 	"\rSUBMIT_PROMPT\x10\x01\x12\x14\n" +
@@ -7578,7 +7630,9 @@ const file_terminal_kernel_v3_proto_rawDesc = "" +
 	"\n" +
 	"\x06DETACH\x10\x03\x12\x11\n" +
 	"\rCLOSE_SESSION\x10\x04\x12\x15\n" +
-	"\x11STEER_ACTIVE_TURN\x10\x05*Y\n" +
+	"\x11STEER_ACTIVE_TURN\x10\x05\x12\x1a\n" +
+	"\x16ACCEPT_SUBAGENT_RESULT\x10\x06\x12\x15\n" +
+	"\x11ACCEPT_JOB_RESULT\x10\a*Y\n" +
 	"\rCommandStatus\x12\x1e\n" +
 	"\x1aCOMMAND_STATUS_UNSPECIFIED\x10\x00\x12\r\n" +
 	"\tSUCCEEDED\x10\x01\x12\f\n" +

@@ -19,7 +19,6 @@ from pulsara_agent.llm.errors import (
 from pulsara_agent.llm.estimator import PulsaraHeuristicTokenEstimatorV1, TokenEstimator
 from pulsara_agent.llm.models import ModelProfile, ModelRole
 from pulsara_agent.llm.request import LLMOptions
-from pulsara_agent.llm.runtime_observation import runtime_observation_carrier_for_api
 from pulsara_agent.primitives.model_call import (
     ModelCallPurpose,
     ModelContextLimits,
@@ -35,8 +34,10 @@ from pulsara_agent.primitives.model_call import (
 
 if TYPE_CHECKING:
     from pulsara_agent.llm.config import LLMConfig
-    from pulsara_agent.llm.registry import LLMTransportRegistry
-    from pulsara_agent.llm.transport import LLMTransport
+    from pulsara_agent.llm.normalized_transport import (
+        NormalizedLLMTransport,
+        NormalizedLLMTransportRegistry,
+    )
 
 
 _SENSITIVE_EXACT_KEYS = frozenset(
@@ -79,7 +80,7 @@ _INVALID_PERCENT_ESCAPE_RE = re.compile(r"%(?![0-9a-fA-F]{2})")
 @dataclass(frozen=True, slots=True)
 class ResolvedModelTarget:
     model_profile: ModelProfile
-    transport: LLMTransport
+    transport: NormalizedLLMTransport
     effective_options: LLMOptions
     limits: ModelContextLimits
     context_budget: ResolvedModelContextBudgetFact
@@ -208,7 +209,7 @@ def canonicalize_endpoint(base_url: str) -> tuple[str, str]:
 def resolve_model_target(
     *,
     config: LLMConfig,
-    registry: LLMTransportRegistry,
+    registry: NormalizedLLMTransportRegistry,
     role: ModelRole,
     requested_options: LLMOptions | None,
 ) -> ResolvedModelTarget:
@@ -264,10 +265,6 @@ def resolve_model_target(
     if not binding_id or not contract_version:
         raise ModelTransportUnavailable("transport binding identity is incomplete")
     endpoint_origin, endpoint_fingerprint = canonicalize_endpoint(config.base_url)
-    runtime_observation_carrier = runtime_observation_carrier_for_api(
-        model.api,
-        allow_nonproduction_api=not registry.production_mode,
-    )
     provider_shape = redact_provider_request_shape(
         {
             "request_defaults": profile.request_defaults,
@@ -279,11 +276,6 @@ def resolve_model_target(
                 "message_field": profile.thinking.message_field,
                 "replay_policy": profile.thinking.replay_policy.value,
             },
-            "runtime_observation_carrier": (
-                runtime_observation_carrier.model_dump(mode="json")
-                if runtime_observation_carrier is not None
-                else None
-            ),
             "merge_policy": "validated_extensions_then_pulsara_fields:v2",
         },
         context="provider_profile",
@@ -311,11 +303,6 @@ def resolve_model_target(
         "effective_options": options_fact.model_dump(mode="json"),
         "context_budget": budget.model_dump(mode="json"),
         "token_estimator": estimator.fact.model_dump(mode="json"),
-        "runtime_observation_carrier": (
-            runtime_observation_carrier.model_dump(mode="json")
-            if runtime_observation_carrier is not None
-            else None
-        ),
     }
     fact = ResolvedModelTargetFact(
         target_fingerprint=resolved_model_target_fingerprint(payload),
@@ -355,7 +342,7 @@ def resolve_model_call(
 def rebind_model_target(
     *,
     config: LLMConfig,
-    registry: LLMTransportRegistry,
+    registry: NormalizedLLMTransportRegistry,
     fact: ResolvedModelTargetFact,
 ) -> ResolvedModelTarget:
     options = fact.effective_options

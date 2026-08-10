@@ -1,1 +1,0 @@
-"""Run ownership implementation package."""

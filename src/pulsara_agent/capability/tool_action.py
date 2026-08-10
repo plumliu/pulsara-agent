@@ -278,7 +278,7 @@ def default_tool_action_classifier_registry() -> ToolActionClassifierRegistry:
 def builtin_tool_action_policy(tool_name: str) -> LongHorizonToolPolicyFact:
     """Return the catalog-owned policy for one built-in tool.
 
-    This compatibility query deliberately contains no name/action taxonomy of
+    This query deliberately contains no name/action taxonomy of
     its own.  The built-in catalog remains the only policy owner.
     """
 

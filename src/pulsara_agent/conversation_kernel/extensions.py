@@ -412,12 +412,24 @@ class KernelExtensionHost:
             registration.wake.clear()
             while True:
                 with self._lock:
-                    if registration.revoked:
+                    if (
+                        registration.revoked
+                        or monotonic() >= registration.lease.expires_at_monotonic
+                    ):
+                        registration.revoked = True
+                        registration.queue.clear()
+                        registration.queue_bytes = 0
                         return
                     if not registration.queue:
                         break
                     delivery, charge = registration.queue.popleft()
                     registration.queue_bytes -= charge
+                if monotonic() >= registration.lease.expires_at_monotonic:
+                    with self._lock:
+                        registration.revoked = True
+                        registration.queue.clear()
+                        registration.queue_bytes = 0
+                    return
                 try:
                     await asyncio.wait_for(
                         registration.request.callback(delivery),
@@ -541,6 +553,14 @@ def _project_payload(
                     body[f"{key}_digest"] = (
                         "sha256:" + sha256(encoded).hexdigest()
                     )
+        if event_type == CommittedEventType.TOOL_REMOTE_IDENTITY_PUBLISHED.value:
+            raw = body.pop("remote_identity", None)
+            if raw is not None:
+                encoded = str(raw).encode("utf-8")
+                body["remote_identity_utf8_bytes"] = len(encoded)
+                body["remote_identity_digest"] = (
+                    "sha256:" + sha256(encoded).hexdigest()
+                )
     return value
 
 

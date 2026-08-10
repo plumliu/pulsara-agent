@@ -52,6 +52,7 @@ class _LiveTask:
     result: KernelRunResult | None = None
     failure_code: str | None = None
     cancellation_reason: str | None = None
+    child_result_id: str | None = None
 
 
 class KernelSubagentManager:
@@ -202,13 +203,14 @@ class KernelSubagentManager:
                 task_id=task_id,
                 objective=objective,
             )
+            child_result_id = _stable_child_id(task_id, result.final_entry_id)
             await self._io.run(
                 self._repository.accept_subagent_child,
                 self._guard,
-                child_id=f"subagent-result:{uuid4().hex}",
+                child_id=child_result_id,
                 task_id=task_id,
                 child_kind="RESULT",
-                child_ordinal=0,
+                child_ordinal=result.model_call_count,
                 entry_id=result.final_entry_id,
                 occurred_at=datetime.now(timezone.utc),
                 actor_id=task_id,
@@ -229,6 +231,7 @@ class KernelSubagentManager:
                 if live is not None:
                     live.status = "COMPLETED"
                     live.result = result
+                    live.child_result_id = child_result_id
                     parent_turn_id = live.parent_turn_id
                 else:
                     parent_turn_id = task_id
@@ -293,15 +296,23 @@ class KernelSubagentManager:
     async def _list(self, arguments: Mapping[str, object]) -> KernelToolResult:
         maximum = int(arguments.get("max_items", 50))
         maximum = max(1, min(maximum, 50))
-        async with self._lock:
-            rows = [
-                {
-                    "subagent_run_id": item.task_id,
-                    "status": item.status,
-                    "objective": item.objective,
-                }
-                for item in list(self._tasks.values())[-maximum:]
-            ]
+        durable = await self._io.run(
+            self._repository.list_subagent_tasks,
+            session_id=self._guard.session_id,
+            maximum_items=maximum,
+            deadline_monotonic=monotonic() + 10.0,
+        )
+        rows = [
+            {
+                "subagent_run_id": str(item["id"]),
+                "status": str(item["status"]),
+                "objective": str(item["objective"]),
+                "result_id": item.get("result_id"),
+                "result_entry_id": item.get("result_entry_id"),
+                "result_accepted": item.get("accepted_root_entry_id") is not None,
+            }
+            for item in durable
+        ]
         return _result("SUCCESS", {"agents": rows})
 
     async def _wait(self, arguments: Mapping[str, object]) -> KernelToolResult:
@@ -312,7 +323,17 @@ class KernelSubagentManager:
         async with self._lock:
             live = self._tasks.get(task_id)
         if live is None:
-            return _result("APPLICATION_ERROR", {"error": "subagent is unknown"})
+            durable = await self._io.run(
+                self._repository.query_subagent_task,
+                session_id=self._guard.session_id,
+                task_id=task_id,
+                deadline_monotonic=monotonic() + 10.0,
+            )
+            if durable is None:
+                return _result(
+                    "APPLICATION_ERROR", {"error": "subagent is unknown"}
+                )
+            return _durable_wait_result(durable)
         try:
             await asyncio.wait_for(asyncio.shield(live.task), timeout=timeout)
         except TimeoutError:
@@ -327,6 +348,7 @@ class KernelSubagentManager:
                     "subagent_run_id": task_id,
                     "result": live.result.final_text,
                     "result_entry_id": live.result.final_entry_id,
+                    "result_id": live.child_result_id,
                 },
             )
         return _result(
@@ -433,6 +455,35 @@ def _result(
         state=state,
         content=json.dumps(dict(value), ensure_ascii=False, sort_keys=True).encode(),
         remote_identity=remote_identity,
+    )
+
+
+def _stable_child_id(task_id: str, entry_id: str) -> str:
+    from hashlib import sha256
+
+    return "subagent-result:" + sha256(f"{task_id}:{entry_id}".encode()).hexdigest()
+
+
+def _durable_wait_result(row: Mapping[str, object]) -> KernelToolResult:
+    status = str(row["status"])
+    if status == "COMPLETED" and row.get("result_id") is not None:
+        return _result(
+            "SUCCESS",
+            {
+                "status": "completed",
+                "subagent_run_id": str(row["id"]),
+                "result_id": str(row["result_id"]),
+                "result_entry_id": str(row["result_entry_id"]),
+                "result_accepted": row.get("accepted_root_entry_id") is not None,
+            },
+        )
+    return _result(
+        "SUCCESS" if status in {"PENDING", "ACTIVE"} else "APPLICATION_ERROR",
+        {
+            "status": status.lower(),
+            "subagent_run_id": str(row["id"]),
+            "error_code": row.get("terminal_reason"),
+        },
     )
 
 

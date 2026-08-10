@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+from hashlib import sha256
 from threading import Barrier
 from time import monotonic, sleep
 from uuid import uuid4
@@ -17,7 +18,11 @@ from pulsara_agent.conversation_kernel.contracts import (
 from pulsara_agent.conversation_kernel.activation import (
     require_stage2_runtime_privilege_boundary,
 )
-from pulsara_agent.conversation_kernel.blob import PostgresCanonicalBlobStore
+from pulsara_agent.conversation_kernel.blob import (
+    MAXIMUM_BLOB_BYTES,
+    MAXIMUM_CONTENT_CHUNK_BYTES,
+    PostgresCanonicalBlobStore,
+)
 from pulsara_agent.conversation_kernel.memory import (
     MemoryIndexCoordinator,
     PostgresMemoryQuery,
@@ -133,6 +138,68 @@ def test_stage2_orphan_blob_gc_deletes_only_unreferenced_content_after_grace(
     )
 
 
+def test_stage2_blob_chunk_exactly_joins_complete_canonical_descriptor(
+    stage2_migrated_postgres_database,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    store = PostgresCanonicalBlobStore(provider)
+    content = b"descriptor-bound-content"
+    reference = store.publish(
+        workspace_id=_name("workspace"),
+        content=content,
+        media_type="text/plain",
+        codec="utf-8",
+        deadline_monotonic=monotonic() + 30,
+    )
+    with psycopg.connect(stage2_migrated_postgres_database.admin_dsn) as connection:
+        connection.execute(
+            "UPDATE pulsara_v3.blobs SET media_type = 'application/octet-stream' "
+            "WHERE id = %s",
+            (reference.blob_id,),
+        )
+        connection.commit()
+    with pytest.raises(ConversationKernelConflict):
+        store.read_chunk(
+            blob_id=reference.blob_id,
+            expected_digest=reference.digest,
+            expected_size=reference.size,
+            expected_media_type=reference.media_type,
+            expected_codec=reference.codec,
+            offset=0,
+            maximum_bytes=1024,
+            deadline_monotonic=monotonic() + 30,
+        )
+
+
+def test_stage2_maximum_blob_is_read_as_exact_bounded_storage_ranges(
+    stage2_migrated_postgres_database,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    store = PostgresCanonicalBlobStore(provider)
+    content = b"0123456789abcdef" * (MAXIMUM_BLOB_BYTES // 16)
+    reference = store.publish(
+        workspace_id=_name("workspace"),
+        content=content,
+        media_type="text/plain",
+        codec="utf-8",
+        deadline_monotonic=monotonic() + 30,
+    )
+    offsets = (0, MAXIMUM_CONTENT_CHUNK_BYTES, len(content) - 97, len(content))
+    for offset in offsets:
+        chunk = store.read_chunk(
+            blob_id=reference.blob_id,
+            expected_digest=reference.digest,
+            expected_size=reference.size,
+            expected_media_type=reference.media_type,
+            expected_codec=reference.codec,
+            offset=offset,
+            maximum_bytes=MAXIMUM_CONTENT_CHUNK_BYTES,
+            deadline_monotonic=monotonic() + 30,
+        )
+        assert chunk.content == content[offset : offset + MAXIMUM_CONTENT_CHUNK_BYTES]
+        assert chunk.has_more is (offset + len(chunk.content) < len(content))
+
+
 def test_stage2_schema_and_descriptor_oracles_are_exact(
     stage2_migrated_postgres_database,
 ) -> None:
@@ -159,7 +226,7 @@ def test_stage2_schema_and_descriptor_oracles_are_exact(
         assert observed == tuple(sorted(CONVERSATION_KERNEL_RELATIONS))
         assert connection.execute(
             "SELECT to_regclass('public.sessions'), to_regclass('pulsara_v3.sessions')"
-        ).fetchone() == ("sessions", "pulsara_v3.sessions")
+        ).fetchone() == (None, "pulsara_v3.sessions")
 
 
 def test_stage2_snapshot_and_history_page_are_bounded_by_final_wire_bytes(
@@ -493,6 +560,21 @@ def test_stage2_tool_message_precedes_attempt_and_job_claim_mints_second_guard(
             """,
             (session_id, attempt.attempt_id),
         ).fetchone() == (1,)
+        occurrence_payload = connection.execute(
+            """
+            SELECT payload FROM pulsara_v3.agent_events
+            WHERE session_id = %s
+              AND event_type = 'ToolRemoteIdentityPublished'
+              AND subject_tool_attempt_id = %s
+            """,
+            (session_id, attempt.attempt_id),
+        ).fetchone()[0]
+        assert remote_identity not in repr(occurrence_payload)
+        assert occurrence_payload == {
+            "remote_identity_utf8_bytes": len(remote_identity.encode("utf-8")),
+            "remote_identity_digest": "sha256:"
+            + sha256(remote_identity.encode("utf-8")).hexdigest(),
+        }
 
     job_id = _name("job")
     repository.enqueue_job(
@@ -675,7 +757,7 @@ def test_stage2_human_tool_decision_atomically_installs_exact_effect_boundary(
         )
 
 
-def test_stage2_unqualified_product_sql_resolves_only_legacy_public_table(
+def test_stage2_unqualified_product_sql_cannot_resolve_a_product_relation(
     stage2_migrated_postgres_database,
 ) -> None:
     repository = _repository(stage2_migrated_postgres_database)
@@ -689,7 +771,7 @@ def test_stage2_unqualified_product_sql_resolves_only_legacy_public_table(
     )
     with psycopg.connect(stage2_migrated_postgres_database.runtime_dsn) as connection:
         assert connection.execute("SHOW search_path").fetchone() == ('"$user", public',)
-        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+        with pytest.raises(psycopg.errors.UndefinedTable):
             connection.execute(
                 "SELECT count(*) FROM sessions WHERE id = %s",
                 (session_id,),
@@ -1182,7 +1264,7 @@ def test_stage2_expired_job_reaper_rebinds_normal_claim_append_guard(
         )
         if ordinal < 3:
             with repository.connection_provider.connection(
-                lane=PostgresConnectionLane.PROJECTION_MAINTENANCE,
+                lane=PostgresConnectionLane.BACKGROUND_WORK,
                 deadline_monotonic=deadline,
             ) as connection:
                 connection.execute(
@@ -1769,6 +1851,7 @@ def test_stage2_prompt_queue_has_stable_fifo_and_frozen_terminal_steer_target(
     )
     first_item = _name("queue")
     second_item = _name("queue")
+    third_item = _name("queue")
     assert (
         repository.enqueue_prompt(
             lease.guard,
@@ -1790,6 +1873,21 @@ def test_stage2_prompt_queue_has_stable_fifo_and_frozen_terminal_steer_target(
             command_id=_name("command"),
             queue_item_id=second_item,
             client_submission_id=_name("client"),
+            delivery_mode=PromptDeliveryMode.STEER_ACTIVE_TURN,
+            target_turn_id=root_turn,
+            content=InlineContent.from_bytes(b"second steer"),
+            occurred_at=datetime.now(timezone.utc),
+            actor_id="user",
+            deadline_monotonic=deadline,
+        )
+        == 2
+    )
+    assert (
+        repository.enqueue_prompt(
+            lease.guard,
+            command_id=_name("command"),
+            queue_item_id=third_item,
+            client_submission_id=_name("client"),
             delivery_mode=PromptDeliveryMode.NEW_TURN,
             target_turn_id=None,
             content=InlineContent.from_bytes(b"next"),
@@ -1797,9 +1895,21 @@ def test_stage2_prompt_queue_has_stable_fifo_and_frozen_terminal_steer_target(
             actor_id="user",
             deadline_monotonic=deadline,
         )
-        == 2
+        == 3
     )
     assert initial.turn_id == root_turn
+    assert (
+        repository.consume_prompt_head(
+            lease.guard,
+            new_turn_id=_name("turn"),
+            new_entry_id=_name("entry"),
+            new_context_binding_revision_id=_name("revision"),
+            occurred_at=datetime.now(timezone.utc),
+            actor_id="runtime",
+            deadline_monotonic=deadline,
+        )
+        is None
+    )
     assert repository.interrupt_turn(
         lease.guard,
         turn_id=root_turn,
@@ -1808,18 +1918,8 @@ def test_stage2_prompt_queue_has_stable_fifo_and_frozen_terminal_steer_target(
         actor_id="runtime:test",
         deadline_monotonic=deadline,
     )
-    # The frozen steer is rejected, never redirected to a future ROOT turn.
-    assert (
-        repository.consume_prompt_steer_for_turn(
-            lease.guard,
-            target_turn_id=root_turn,
-            new_entry_id=_name("entry"),
-            occurred_at=datetime.now(timezone.utc),
-            actor_id="runtime",
-            deadline_monotonic=deadline,
-        )
-        is None
-    )
+    # One coalesced wake rejects the entire consecutive stale-steer prefix,
+    # then consumes the next global NEW_TURN head in the same call.
     next_turn = _name("turn")
     consumed = repository.consume_prompt_head(
         lease.guard,
@@ -1846,8 +1946,91 @@ def test_stage2_prompt_queue_has_stable_fifo_and_frozen_terminal_steer_target(
             (session_id,),
         ).fetchall() == [
             (first_item, "REJECTED", "TARGET_TURN_TERMINAL"),
-            (second_item, "CONSUMED", "CONSUMED"),
+            (second_item, "REJECTED", "TARGET_TURN_TERMINAL"),
+            (third_item, "CONSUMED", "CONSUMED"),
         ]
+
+
+def test_stage2_new_turn_head_cannot_be_overtaken_by_later_steer(
+    stage2_migrated_postgres_database,
+) -> None:
+    repository = _repository(stage2_migrated_postgres_database)
+    deadline = monotonic() + 30
+    session_id = _name("session")
+    lease = repository.acquire_host_writer(
+        session_id=session_id,
+        workspace_id=_name("workspace"),
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=deadline,
+    )
+    root_turn = _name("turn")
+    repository.start_root_turn(
+        lease.guard,
+        command_id=_name("command"),
+        turn_id=root_turn,
+        entry_id=_name("entry"),
+        context_binding_revision_id=_name("revision"),
+        content=InlineContent.from_bytes(b"initial"),
+        occurred_at=datetime.now(timezone.utc),
+        deadline_monotonic=deadline,
+    )
+    new_item = _name("queue")
+    steer_item = _name("queue")
+    repository.enqueue_prompt(
+        lease.guard,
+        command_id=_name("command"),
+        queue_item_id=new_item,
+        client_submission_id=_name("client"),
+        delivery_mode=PromptDeliveryMode.NEW_TURN,
+        target_turn_id=None,
+        content=InlineContent.from_bytes(b"next"),
+        occurred_at=datetime.now(timezone.utc),
+        actor_id="user",
+        deadline_monotonic=deadline,
+    )
+    repository.enqueue_prompt(
+        lease.guard,
+        command_id=_name("command"),
+        queue_item_id=steer_item,
+        client_submission_id=_name("client"),
+        delivery_mode=PromptDeliveryMode.STEER_ACTIVE_TURN,
+        target_turn_id=root_turn,
+        content=InlineContent.from_bytes(b"steer"),
+        occurred_at=datetime.now(timezone.utc),
+        actor_id="user",
+        deadline_monotonic=deadline,
+    )
+    assert (
+        repository.consume_prompt_steer_for_turn(
+            lease.guard,
+            target_turn_id=root_turn,
+            new_entry_id=_name("entry"),
+            occurred_at=datetime.now(timezone.utc),
+            actor_id="runtime",
+            deadline_monotonic=deadline,
+        )
+        is None
+    )
+    assert repository.pending_prompt_head_mode(
+        session_id=session_id, deadline_monotonic=deadline
+    ) is PromptDeliveryMode.NEW_TURN
+    repository.cancel_prompt(
+        lease.guard,
+        queue_item_id=new_item,
+        occurred_at=datetime.now(timezone.utc),
+        actor_id="user",
+        deadline_monotonic=deadline,
+    )
+    consumed = repository.consume_prompt_steer_for_turn(
+        lease.guard,
+        target_turn_id=root_turn,
+        new_entry_id=_name("entry"),
+        occurred_at=datetime.now(timezone.utc),
+        actor_id="runtime",
+        deadline_monotonic=deadline,
+    )
+    assert consumed is not None
 
 
 def test_stage2_prompt_cancel_is_single_terminal_cas(

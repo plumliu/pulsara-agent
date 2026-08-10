@@ -67,7 +67,7 @@ from pulsara_agent.terminal_protocol.generated_v3 import terminal_kernel_v3_pb2 
 PROTOCOL_MAJOR = 3
 PROTOCOL_MINOR = 0
 PROTOCOL_SCHEMA_FINGERPRINT = (
-    "sha256:96981f00ed67cc21dbe0259deb4094788488954c95ebd4ce760c6645950a2124"
+    "sha256:30c3dec486dea592a4e43650006b1d547e4c44d993d68255941d77b61dd4a05c"
 )
 MAXIMUM_FRAME_BYTES = 8 << 20
 MAXIMUM_OBSERVATION_WAIT_MS = STAGE2_LIMITS.committed_observation_hard_wait_ms
@@ -543,6 +543,11 @@ class TerminalKernelProtocolServer:
             return _error(request.request_id, "COMMAND_ID_INVALID")
         if request.client_submission_id not in ("", request.command_id):
             return _error(request.request_id, "COMMAND_SUBMISSION_ID_MISMATCH")
+        if request.command_kind not in (
+            wire.ACCEPT_SUBAGENT_RESULT,
+            wire.ACCEPT_JOB_RESULT,
+        ) and (request.source_subagent_result_id or request.source_job_id):
+            return _error(request.request_id, "COMMAND_SOURCE_UNION_INVALID")
         if request.command_kind != wire.DETACH and (
             state.granted_role != wire.ATTACHMENT_ROLE_CONTROLLER
         ):
@@ -571,6 +576,24 @@ class TerminalKernelProtocolServer:
                 "",
                 "TURN_STOP_REQUESTED" if stopped else "NO_ACTIVE_TURN",
                 "The active turn was stopped." if stopped else "No active turn exists.",
+            )
+        elif request.command_kind == wire.ACCEPT_SUBAGENT_RESULT:
+            if request.source_job_id or not request.source_subagent_result_id:
+                return _error(request.request_id, "SUBAGENT_RESULT_REQUEST_INVALID")
+            outcome = await state.host_session.accept_subagent_result(
+                command_id=request.command_id,
+                target_turn_id=request.target_turn_id or None,
+                child_result_id=request.source_subagent_result_id,
+                actor_id=state.attachment_id,
+            )
+        elif request.command_kind == wire.ACCEPT_JOB_RESULT:
+            if request.source_subagent_result_id or not request.source_job_id:
+                return _error(request.request_id, "JOB_RESULT_REQUEST_INVALID")
+            outcome = await state.host_session.accept_job_result(
+                command_id=request.command_id,
+                target_turn_id=request.target_turn_id or None,
+                job_id=request.source_job_id,
+                actor_id=state.attachment_id,
             )
         elif request.command_kind == wire.DETACH:
             from pulsara_agent.conversation_kernel.host import KernelCommandOutcome
@@ -641,16 +664,30 @@ class TerminalKernelProtocolServer:
     ) -> wire.ServerFrame:
         if not 1 <= request.limit_bytes <= 1 << 20:
             return _error(request.request_id, "CONTENT_RANGE_INVALID")
-        reference = await asyncio.to_thread(
-            state.protocol_reader.resolve_content_reference,
-            session_id=state.host_session.session_id,
-            entry_id=request.entry_id,
-            block_id=request.block_id or None,
-            deadline_monotonic=monotonic() + 10.0,
-        )
+        try:
+            reference = await asyncio.to_thread(
+                state.protocol_reader.resolve_content_reference,
+                session_id=state.host_session.session_id,
+                entry_id=request.entry_id,
+                block_id=request.block_id or None,
+                deadline_monotonic=monotonic() + 10.0,
+            )
+        except KeyError:
+            return _error(request.request_id, "CONTENT_REFERENCE_MISSING")
+        except ConversationKernelConflict:
+            return _error(request.request_id, "CONTENT_REFERENCE_CORRUPT")
         inline = reference["inline_content"]
         if inline is not None:
             value = bytes(inline)
+            digest = "sha256:" + sha256(value).hexdigest()
+            if (
+                reference["blob_id"] is not None
+                or digest != str(reference["content_digest"])
+                or len(value) != int(reference["content_size"])
+                or not reference["content_media_type"]
+                or not reference["content_codec"]
+            ):
+                return _error(request.request_id, "CONTENT_REFERENCE_CORRUPT")
             if request.offset_bytes > len(value):
                 return _error(request.request_id, "CONTENT_RANGE_INVALID")
             chunk = value[
@@ -666,17 +703,29 @@ class TerminalKernelProtocolServer:
                     complete=request.offset_bytes + len(chunk) == len(value),
                 )
             )
+        if not reference["blob_id"]:
+            return _error(request.request_id, "CONTENT_REFERENCE_CORRUPT")
         store = PostgresCanonicalBlobStore(
             state.host_session.repository.connection_provider
         )
-        value = await asyncio.to_thread(
-            store.read_chunk,
-            blob_id=str(reference["blob_id"]),
-            expected_digest=str(reference["content_digest"]),
-            offset=request.offset_bytes,
-            maximum_bytes=request.limit_bytes,
-            deadline_monotonic=monotonic() + 10.0,
-        )
+        try:
+            value = await asyncio.to_thread(
+                store.read_chunk,
+                blob_id=str(reference["blob_id"]),
+                expected_digest=str(reference["content_digest"]),
+                expected_size=int(reference["content_size"]),
+                expected_media_type=str(reference["content_media_type"]),
+                expected_codec=str(reference["content_codec"]),
+                offset=request.offset_bytes,
+                maximum_bytes=request.limit_bytes,
+                deadline_monotonic=monotonic() + 10.0,
+            )
+        except KeyError:
+            return _error(request.request_id, "CONTENT_BLOB_MISSING")
+        except ConversationKernelConflict:
+            return _error(request.request_id, "CONTENT_BLOB_CORRUPT")
+        except ValueError:
+            return _error(request.request_id, "CONTENT_RANGE_INVALID")
         return wire.ServerFrame(
             content=wire.CanonicalContentChunk(
                 request_id=request.request_id,

@@ -211,6 +211,40 @@ def test_expired_extension_lease_drops_future_offers() -> None:
     asyncio.run(exercise())
 
 
+def test_extension_lease_expiry_retires_queued_delivery_after_slow_callback() -> None:
+    async def exercise() -> None:
+        deliveries: list[ExtensionDelivery] = []
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+
+        async def callback(item: ExtensionDelivery) -> None:
+            deliveries.append(item)
+            first_started.set()
+            await release_first.wait()
+
+        host = KernelExtensionHost(
+            session_id="session:test",
+            authenticated_first_party_principal_ids=frozenset(
+                {"extension:first-party"}
+            ),
+        )
+        host.register(
+            _request(callback, host=host, lease_seconds=0.03),
+            registration_cut_generation=1,
+            registration_cut_revision=0,
+        )
+        host.offer_post_commit_nowait(_offer(1))
+        await asyncio.wait_for(first_started.wait(), timeout=1)
+        host.offer_post_commit_nowait(_offer(2))
+        await asyncio.sleep(0.05)
+        release_first.set()
+        await asyncio.sleep(0.05)
+        assert [item.source_revision for item in deliveries] == [1]
+        await host.aclose(deadline_monotonic=asyncio.get_running_loop().time() + 1)
+
+    asyncio.run(exercise())
+
+
 def test_redacted_live_extension_never_receives_tool_argument_text() -> None:
     async def exercise() -> None:
         deliveries: list[ExtensionDelivery] = []

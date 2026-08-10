@@ -5,7 +5,11 @@ from pathlib import Path
 
 import pytest
 
-from pulsara_agent.conversation_kernel.host import KernelCommandOutcome
+from pulsara_agent.conversation_kernel.host import (
+    KernelCommandOutcome,
+    KernelHostSession,
+)
+from pulsara_agent.conversation_kernel.repository import AcceptedEntry
 from pulsara_agent.conversation_kernel.interaction import KernelInteractionCoordinator
 from pulsara_agent.conversation_kernel.io import KernelSessionIO
 from pulsara_agent.conversation_kernel.live import LiveAgentEventBus
@@ -38,6 +42,8 @@ class _CommandHost:
         self.submitted: list[tuple[str, str]] = []
         self.steered: list[tuple[str, str, str]] = []
         self.resolved: list[dict[str, object]] = []
+        self.accepted_subagent_results: list[dict[str, object]] = []
+        self.accepted_job_results: list[dict[str, object]] = []
 
     async def submit_prompt(self, *, command_id: str, text: str) -> KernelCommandOutcome:
         self.submitted.append((command_id, text))
@@ -71,6 +77,26 @@ class _CommandHost:
             "SUCCEEDED",
             "decision:1",
             "INTERACTION_ALLOW",
+            "Accepted.",
+        )
+
+    async def accept_subagent_result(self, **kwargs) -> KernelCommandOutcome:
+        self.accepted_subagent_results.append(dict(kwargs))
+        return KernelCommandOutcome(
+            str(kwargs["command_id"]),
+            "SUCCEEDED",
+            "entry:accepted-child",
+            "SUBAGENT_RESULT_ACCEPTED",
+            "Accepted.",
+        )
+
+    async def accept_job_result(self, **kwargs) -> KernelCommandOutcome:
+        self.accepted_job_results.append(dict(kwargs))
+        return KernelCommandOutcome(
+            str(kwargs["command_id"]),
+            "SUCCEEDED",
+            "entry:accepted-job",
+            "JOB_RESULT_ACCEPTED",
             "Accepted.",
         )
 
@@ -164,6 +190,105 @@ def test_stage2_controller_can_send_an_exact_active_turn_steer() -> None:
     assert controller.host_session.steered == [
         ("command:steer", "new direction", "turn:active")
     ]
+
+
+def test_stage2_controller_can_accept_exact_durable_subagent_result() -> None:
+    server = _server()
+    controller = _state(role=wire.ATTACHMENT_ROLE_CONTROLLER)
+    result = asyncio.run(
+        server._command(
+            controller,
+            wire.CommandRequest(
+                request_id="request:accept-child",
+                command_id="command:accept-child",
+                client_submission_id="command:accept-child",
+                command_kind=wire.ACCEPT_SUBAGENT_RESULT,
+                target_turn_id="turn:root",
+                source_subagent_result_id="subagent-result:1",
+            ),
+        )
+    )
+    assert result.command_outcome.status == wire.SUCCEEDED
+    assert controller.host_session.accepted_subagent_results == [
+        {
+            "command_id": "command:accept-child",
+            "target_turn_id": "turn:root",
+            "child_result_id": "subagent-result:1",
+            "actor_id": "attachment:test",
+        }
+    ]
+
+
+def test_stage2_controller_can_accept_external_results_into_a_new_root() -> None:
+    server = _server()
+    controller = _state(role=wire.ATTACHMENT_ROLE_CONTROLLER)
+    subagent = asyncio.run(
+        server._command(
+            controller,
+            wire.CommandRequest(
+                request_id="request:accept-child-new-turn",
+                command_id="command:accept-child-new-turn",
+                client_submission_id="command:accept-child-new-turn",
+                command_kind=wire.ACCEPT_SUBAGENT_RESULT,
+                source_subagent_result_id="subagent-result:2",
+            ),
+        )
+    )
+    assert subagent.command_outcome.status == wire.SUCCEEDED
+    assert controller.host_session.accepted_subagent_results[-1][
+        "target_turn_id"
+    ] is None
+
+    job = asyncio.run(
+        server._command(
+            controller,
+            wire.CommandRequest(
+                request_id="request:accept-job-new-turn",
+                command_id="command:accept-job-new-turn",
+                client_submission_id="command:accept-job-new-turn",
+                command_kind=wire.ACCEPT_JOB_RESULT,
+                source_job_id="job:1",
+            ),
+        )
+    )
+    assert job.command_outcome.status == wire.SUCCEEDED
+    assert controller.host_session.accepted_job_results == [
+        {
+            "command_id": "command:accept-job-new-turn",
+            "target_turn_id": None,
+            "job_id": "job:1",
+            "actor_id": "attachment:test",
+        }
+    ]
+
+
+def test_stage2_host_exposes_job_result_acceptance_to_production_protocol() -> None:
+    class _Runner:
+        def __init__(self) -> None:
+            self.kwargs: dict[str, object] = {}
+
+        async def accept_job_result(self, **kwargs) -> AcceptedEntry:
+            self.kwargs = dict(kwargs)
+            return AcceptedEntry("entry:job", "turn:root", 4, 7)
+
+    host = object.__new__(KernelHostSession)
+    host._closing = False
+    host._runner = _Runner()
+
+    async def query_command(_: str) -> None:
+        return None
+
+    host.query_command = query_command  # type: ignore[method-assign]
+    outcome = asyncio.run(
+        host.accept_job_result(
+            command_id="command:job",
+            target_turn_id="turn:root",
+            job_id="job:durable",
+            actor_id="attachment:controller",
+        )
+    )
+    assert outcome.public_code == "JOB_RESULT_ACCEPTED"
+    assert host._runner.kwargs["job_id"] == "job:durable"
 
 
 def test_stage2_interaction_resolution_is_controller_only_and_exact() -> None:

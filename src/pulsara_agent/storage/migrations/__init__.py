@@ -1,27 +1,19 @@
-"""Versioned PostgreSQL schema ownership for Pulsara."""
+"""Clean conversation-kernel PostgreSQL migration universe."""
 
 from pulsara_agent.storage.migrations.contracts import (
-    PostgresDeepSchemaVerificationResult,
-    PostgresFastSchemaVerificationResult,
+    MigrationUniverseIdentity,
     PostgresMigrationLedgerRowFact,
-    PostgresSchemaObjectManifest,
+    build_migration_universe_identity,
     canonical_json_bytes,
     postgres_schema_fingerprint,
 )
-from pulsara_agent.storage.migrations.registry import (
-    POSTGRES_MIGRATION_REGISTRY,
-    PostgresMigrationDefinition,
-    PostgresMigrationRegistry,
-)
+from pulsara_agent.storage.migrations.registry import POSTGRES_MIGRATION_REGISTRY
 
 __all__ = [
+    "MigrationUniverseIdentity",
     "POSTGRES_MIGRATION_REGISTRY",
-    "PostgresDeepSchemaVerificationResult",
-    "PostgresFastSchemaVerificationResult",
-    "PostgresMigrationDefinition",
     "PostgresMigrationLedgerRowFact",
-    "PostgresMigrationRegistry",
-    "PostgresSchemaObjectManifest",
+    "build_migration_universe_identity",
     "canonical_json_bytes",
     "postgres_schema_fingerprint",
 ]

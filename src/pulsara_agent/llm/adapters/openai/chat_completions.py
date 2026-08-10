@@ -38,10 +38,6 @@ from pulsara_agent.llm.resolution import ResolvedModelCall
 from pulsara_agent.llm.result import TransportUsageReport
 from pulsara_agent.ports.live_agent_event import ProviderStreamPayload
 from pulsara_agent.ports.provider_stream import ProviderAdapterStreamItem
-from pulsara_agent.llm.runtime_observation import (
-    resolve_runtime_observation_binding,
-)
-from pulsara_agent.llm.user_carrier import validate_provider_user_carrier_messages
 from pulsara_agent.llm.retry import (
     LLMRetryConfig,
     RetryAttemptTrace,
@@ -73,12 +69,7 @@ class OpenAIChatCompletionsTransport:
         *,
         call: ResolvedModelCall,
         context: LLMContext,
-        event_context: object | None = None,
     ) -> AsyncIterator[ProviderAdapterStreamItem]:
-        # Explicit legacy LLMRuntime callers may still supply this keyword
-        # until Stage 3 deletes that bridge.  The Stage 2 provider protocol
-        # neither declares nor observes it.
-        del event_context
         model = call.target.model_profile
         builder = ProviderLiveItemBuilder()
         thinking_delta_fields = model.provider_profile.thinking.delta_fields
@@ -261,27 +252,9 @@ def build_chat_completions_payload(
     call: ResolvedModelCall,
     context: LLMContext,
 ) -> dict[str, Any]:
-    validate_provider_user_carrier_messages(
-        context.messages,
-        system_prompt=context.system_prompt,
-    )
     model = call.target.model_profile
     options = call.target.effective_options
     provider_profile = model.provider_profile
-    runtime_observation_role: str | None = None
-    if any(
-        message.role in {MessageRole.RUNTIME_REQUEST, MessageRole.RUNTIME_OBSERVATION}
-        for message in context.messages
-    ):
-        carrier = call.target.fact.runtime_observation_carrier
-        if carrier is None:
-            raise ValueError("resolved target does not support runtime observations")
-        binding = resolve_runtime_observation_binding(carrier)
-        if binding.wire_role != "user":
-            raise ValueError(
-                "resolved runtime observation carrier is not chat-compatible"
-            )
-        runtime_observation_role = binding.wire_role
     messages: list[dict[str, Any]] = []
     if context.system_prompt:
         messages.append({"role": "system", "content": context.system_prompt})
@@ -289,7 +262,6 @@ def build_chat_completions_payload(
         _messages_to_chat_messages(
             context.messages,
             provider_profile=provider_profile,
-            runtime_observation_role=runtime_observation_role,
         )
     )
 
@@ -318,7 +290,6 @@ def _messages_to_chat_messages(
     messages: tuple[LLMMessage, ...],
     *,
     provider_profile: ProviderProfile | None = None,
-    runtime_observation_role: str | None = None,
 ) -> list[dict[str, Any]]:
     provider_profile = provider_profile or ProviderProfile(
         wire_api=OPENAI_CHAT_COMPLETIONS_API
@@ -342,7 +313,6 @@ def _messages_to_chat_messages(
             _message_to_chat_message(
                 message,
                 provider_profile=provider_profile,
-                runtime_observation_role=runtime_observation_role,
             )
         )
     if pending_tool_calls:
@@ -494,7 +464,6 @@ def _message_to_chat_message(
     message: LLMMessage,
     *,
     provider_profile: ProviderProfile,
-    runtime_observation_role: str | None = None,
 ) -> dict[str, Any]:
     if message.role is MessageRole.TOOL_CALL:
         return {
@@ -524,16 +493,6 @@ def _message_to_chat_message(
                 _tool_call_to_chat_tool_call(call) for call in message.tool_calls
             ]
         return payload
-    if message.role in {
-        MessageRole.RUNTIME_REQUEST,
-        MessageRole.RUNTIME_OBSERVATION,
-    }:
-        if runtime_observation_role != "user":
-            raise ValueError("Chat runtime observation carrier is unavailable")
-        return {
-            "role": "user",
-            "content": "\n".join(message.content),
-        }
     return {
         "role": _chat_role(message.role),
         "content": "\n".join(message.content),

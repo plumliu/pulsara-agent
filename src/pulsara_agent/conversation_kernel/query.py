@@ -329,8 +329,6 @@ class CanonicalConversationQuery:
             "runtime_limits": asdict(STAGE2_LIMITS),
             "structural_budget_contract": "stage2_structural_budgets.v1",
             "structural_budgets": asdict(STAGE2_STRUCTURAL_BUDGETS),
-            "legacy_event_replay": False,
-            "oxigraph_enabled": False,
         }
 
 

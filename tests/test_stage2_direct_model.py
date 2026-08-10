@@ -21,7 +21,7 @@ from pulsara_agent.ports.provider_stream import (
     ProviderPhysicalCompletionStatus,
     ProviderStreamTerminal,
 )
-from tests.support.model_call import test_llm_config
+from tests.support.model_config import test_llm_config
 
 
 class _TerminalExecution:
@@ -119,7 +119,7 @@ def test_stage2_direct_model_uses_current_resolved_output_budget_field(
 
     assert asyncio.run(collect()) == []
     assert transport.context.compiler_estimated_input_tokens > 1
-    assert transport.context.system_prompt.startswith("ROOT SYSTEM\n\n")
+    assert transport.context.system_prompt == "ROOT SYSTEM"
     assert transport.context.tools[0].name == "read_file"
     assert transport.execution.closed is True
 

@@ -143,12 +143,18 @@ class PostgresCanonicalBlobStore:
         *,
         blob_id: str,
         expected_digest: str,
+        expected_size: int,
+        expected_media_type: str,
+        expected_codec: str,
         offset: int,
         maximum_bytes: int,
         deadline_monotonic: float,
     ) -> CanonicalContentChunk:
         if offset < 0 or not 1 <= maximum_bytes <= MAXIMUM_CONTENT_CHUNK_BYTES:
             raise ValueError("blob content range is out of bounds")
+        if not 0 <= expected_size <= MAXIMUM_BLOB_BYTES or offset > expected_size:
+            raise ValueError("blob descriptor range is out of bounds")
+        requested_bytes = min(maximum_bytes, expected_size - offset)
         with self._provider.connection(
             lane=PostgresConnectionLane.ARTIFACT,
             row_factory=dict_row,
@@ -156,20 +162,24 @@ class PostgresCanonicalBlobStore:
         ) as connection:
             row = connection.execute(
                 """
-                SELECT logical_digest, logical_size,
-                       substring(body FROM %s FOR %s) AS chunk
+                SELECT logical_digest, logical_size, media_type, codec,
+                       substring(body FROM %s FOR %s) AS content
                 FROM pulsara_v3.blobs WHERE id = %s
                 """,
-                (offset + 1, maximum_bytes, blob_id),
+                (offset + 1, requested_bytes, blob_id),
             ).fetchone()
         if row is None:
             raise KeyError(blob_id)
-        if row["logical_digest"] != expected_digest:
-            raise ConversationKernelConflict("blob digest identity mismatch")
         total_size = int(row["logical_size"])
-        if offset > total_size:
-            raise ValueError("blob offset exceeds content size")
-        content = bytes(row["chunk"] or b"")
+        content = bytes(row["content"])
+        if (
+            row["logical_digest"] != expected_digest
+            or total_size != expected_size
+            or str(row["media_type"]) != expected_media_type
+            or str(row["codec"]) != expected_codec
+            or len(content) != requested_bytes
+        ):
+            raise ConversationKernelConflict("blob descriptor integrity mismatch")
         return CanonicalContentChunk(
             blob_id=blob_id,
             offset=offset,

@@ -4,24 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from pulsara_agent.message import ToolResultState
 from pulsara_agent.ports.tool_execution import (
     ToolCall,
     ToolExecutionResult,
-    ToolResultArtifactCandidate,
 )
-from pulsara_agent.primitives.tool_result import TerminalPayloadTimingFact
-from pulsara_agent.primitives.context import FrozenJsonObjectFact
-from pulsara_agent.primitives.terminal_observation import (
-    TerminalProcessObservationReceiptFact,
-)
-
-if TYPE_CHECKING:
-    from pulsara_agent.ports.tool_result_semantics import (
-        ToolResultSemanticsRuntimeInput,
-    )
 
 
 @dataclass(slots=True)
@@ -68,16 +57,6 @@ class WorkspaceTool:
         status: ToolResultState,
         output: str,
         metadata: dict[str, Any] | None = None,
-        artifact_candidates: tuple[ToolResultArtifactCandidate, ...] = (),
-        display_payload: FrozenJsonObjectFact | None = None,
-        semantics_input: "ToolResultSemanticsRuntimeInput | None" = None,
-        terminal_payload_timing: TerminalPayloadTimingFact | None = None,
-        terminal_process_observation_receipt: (
-            TerminalProcessObservationReceiptFact | None
-        ) = None,
-        prepared_terminal_notification_reservation=None,
-        prepared_terminal_monitor_registration=None,
-        prepared_terminal_monitor_cancellation=None,
     ) -> ToolExecutionResult:
         return ToolExecutionResult(
             call_id=call.id,
@@ -85,18 +64,4 @@ class WorkspaceTool:
             status=status,
             output=output,
             metadata=metadata or {},
-            artifact_candidates=artifact_candidates,
-            display_payload=display_payload,
-            semantics_input=semantics_input,
-            terminal_payload_timing=terminal_payload_timing,
-            terminal_process_observation_receipt=(terminal_process_observation_receipt),
-            prepared_terminal_notification_reservation=(
-                prepared_terminal_notification_reservation
-            ),
-            prepared_terminal_monitor_registration=(
-                prepared_terminal_monitor_registration
-            ),
-            prepared_terminal_monitor_cancellation=(
-                prepared_terminal_monitor_cancellation
-            ),
         )

@@ -159,6 +159,9 @@ class ResolvedPostgresConnectionFactory:
                 operation_control.bind(connection)
             self.validate_effective_endpoint(connection)
             apply_connection_deadline(connection, deadline_monotonic)
+            connection.execute(
+                "SELECT pg_catalog.set_config('search_path', 'public', false)"
+            )
             connection.autocommit = autocommit
             return connection
         except PostgresSchemaError:

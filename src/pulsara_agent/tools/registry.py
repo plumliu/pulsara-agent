@@ -5,11 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from pulsara_agent.ports.tool_execution import AsyncTool, Tool
-from pulsara_agent.ports.tool_registry import (
-    McpToolBindingContract,
-    ToolBindingContract,
-    build_tool_binding_contract,
-)
+from pulsara_agent.ports.tool_registry import ToolBindingContract, build_tool_binding_contract
 
 
 @dataclass(slots=True)
@@ -61,13 +57,6 @@ class ToolRegistry:
     def binding_contracts(self) -> tuple[ToolBindingContract, ...]:
         return tuple(
             self._binding_contracts[name] for name in sorted(self._binding_contracts)
-        )
-
-    def mcp_bindings(self) -> tuple[McpToolBindingContract, ...]:
-        return tuple(
-            contract
-            for contract in self.binding_contracts()
-            if isinstance(contract, McpToolBindingContract)
         )
 
     def restricted_to(self, allowed_names: frozenset[str]) -> ToolRegistry:

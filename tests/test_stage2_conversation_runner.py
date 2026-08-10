@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 from time import monotonic
 from typing import AsyncIterator
 from uuid import uuid4
 
 import pytest
 
+from pulsara_agent.conversation_kernel.contracts import InlineContent
 from pulsara_agent.conversation_kernel.live import (
     LiveAgentEventBus,
     LiveObservationKind,
@@ -60,6 +62,19 @@ class _MeasuredRepository(ConversationKernelRepository):
     def _writer_transaction(self, guard, *, deadline_monotonic):
         self.host_write_transactions += 1
         return super()._writer_transaction(guard, deadline_monotonic=deadline_monotonic)
+
+
+class _LostAssistantAckRepository(ConversationKernelRepository):
+    def __init__(self, provider) -> None:
+        super().__init__(provider)
+        self._lost_once = False
+
+    def commit_assistant_message(self, *args, **kwargs):
+        accepted = super().commit_assistant_message(*args, **kwargs)
+        if not self._lost_once:
+            self._lost_once = True
+            raise OSError("injected lost assistant commit acknowledgement")
+        return accepted
 
 
 class _AssertingTool:
@@ -388,6 +403,169 @@ def test_stage2_no_attempt_result_is_committed_before_any_physical_invoke(
             "SELECT attempt_id, result_state FROM pulsara_v3.tool_results WHERE session_id = %s",
             (session_id,),
         ).fetchone() == (None, "PERMISSION_DENIED")
+
+
+def test_stage2_lost_assistant_commit_ack_exact_confirms_single_winner(
+    stage2_migrated_postgres_database,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = _LostAssistantAckRepository(provider)
+    session_id = _name("session")
+    lease = repository.acquire_host_writer(
+        session_id=session_id,
+        workspace_id=_name("workspace"),
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    runner = ConversationKernelRunner(
+        repository=repository,
+        writer_lease=lease,
+        model=_ScriptedModel([_text_stream("one winner")]),
+        tools=_AssertingTool(provider, session_id),
+        live_bus=LiveAgentEventBus(),
+    )
+    accepted = asyncio.run(runner.run_turn("confirm the winner"))
+    assert accepted is not None
+    with provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        deadline_monotonic=monotonic() + 10,
+    ) as connection:
+        assert connection.execute(
+            "SELECT count(*) FROM pulsara_v3.transcript_entries "
+            "WHERE session_id = %s AND entry_kind = 'ASSISTANT_MESSAGE'",
+            (session_id,),
+        ).fetchone() == (1,)
+        assert connection.execute(
+            "SELECT status, final_entry_id FROM pulsara_v3.turns "
+            "WHERE session_id = %s",
+            (session_id,),
+        ).fetchone() == ("COMPLETED", accepted.final_entry_id)
+
+
+def test_stage2_lost_tool_request_ack_confirms_before_single_dispatch(
+    stage2_migrated_postgres_database,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = _LostAssistantAckRepository(provider)
+    session_id = _name("session")
+    lease = repository.acquire_host_writer(
+        session_id=session_id,
+        workspace_id=_name("workspace"),
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    tools = _AssertingTool(provider, session_id)
+    runner = ConversationKernelRunner(
+        repository=repository,
+        writer_lease=lease,
+        model=_ScriptedModel([_tool_stream(), _text_stream("done", block="text:2")]),
+        tools=tools,
+        live_bus=LiveAgentEventBus(),
+    )
+    asyncio.run(runner.run_turn("dispatch exactly once"))
+    assert len(tools.invocations) == 1
+    with provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        deadline_monotonic=monotonic() + 10,
+    ) as connection:
+        assert connection.execute(
+            "SELECT count(*) FROM pulsara_v3.transcript_entries "
+            "WHERE session_id = %s AND entry_kind = 'ASSISTANT_TOOL_REQUEST'",
+            (session_id,),
+        ).fetchone() == (1,)
+        assert connection.execute(
+            "SELECT count(*) FROM pulsara_v3.tool_execution_attempts "
+            "WHERE session_id = %s",
+            (session_id,),
+        ).fetchone() == (1,)
+
+
+def test_stage2_subagent_runner_produces_durable_message_child(
+    stage2_migrated_postgres_database,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id = _name("session")
+    lease = repository.acquire_host_writer(
+        session_id=session_id,
+        workspace_id=_name("workspace"),
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    parent_turn_id = _name("turn")
+    repository.start_root_turn(
+        lease.guard,
+        command_id=_name("command"),
+        turn_id=parent_turn_id,
+        entry_id=_name("entry"),
+        context_binding_revision_id=_name("revision"),
+        content=InlineContent.from_bytes(b"delegate"),
+        occurred_at=datetime.now(timezone.utc),
+        deadline_monotonic=monotonic() + 30,
+    )
+    task_id = _name("subagent-task")
+    repository.accept_subagent_task(
+        lease.guard,
+        task_id=task_id,
+        parent_turn_id=parent_turn_id,
+        objective="produce one message",
+        occurred_at=datetime.now(timezone.utc),
+        actor_id="host:test",
+        deadline_monotonic=monotonic() + 30,
+    )
+    repository.set_subagent_task_status(
+        lease.guard,
+        task_id=task_id,
+        status="ACTIVE",
+        reason=None,
+        occurred_at=datetime.now(timezone.utc),
+        actor_id="host:test",
+        deadline_monotonic=monotonic() + 30,
+    )
+    runner = ConversationKernelRunner(
+        repository=repository,
+        writer_lease=lease,
+        model=_ScriptedModel([_text_stream("child answer")]),
+        tools=_AssertingTool(provider, session_id),
+        live_bus=LiveAgentEventBus(),
+    )
+    result = asyncio.run(
+        runner.run_subagent_turn(task_id=task_id, objective="produce one message")
+    )
+    repository.accept_subagent_child(
+        lease.guard,
+        child_id=_name("subagent-result"),
+        task_id=task_id,
+        child_kind="RESULT",
+        child_ordinal=result.model_call_count,
+        entry_id=result.final_entry_id,
+        occurred_at=datetime.now(timezone.utc),
+        actor_id=task_id,
+        deadline_monotonic=monotonic() + 30,
+    )
+    with provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        deadline_monotonic=monotonic() + 10,
+    ) as connection:
+        children = connection.execute(
+            "SELECT child_kind, child_ordinal, entry_id "
+            "FROM pulsara_v3.subagent_task_children "
+            "WHERE session_id = %s AND task_id = %s "
+            "ORDER BY child_ordinal",
+            (session_id, task_id),
+        ).fetchall()
+        assert children == [
+            ("MESSAGE", 0, result.final_entry_id),
+            ("RESULT", 1, result.final_entry_id),
+        ]
+        assert connection.execute(
+            "SELECT count(*) FROM pulsara_v3.agent_events "
+            "WHERE session_id = %s AND event_type = 'SubagentMessageAccepted'",
+            (session_id,),
+        ).fetchone() == (1,)
 
 
 def test_stage2_confirmation_without_controller_keeps_policy_and_result_closed(

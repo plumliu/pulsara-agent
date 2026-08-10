@@ -27,7 +27,7 @@ from pulsara_agent.ports.live_agent_event import (
     live_digest,
 )
 from pulsara_agent.settings import PulsaraSettings, StorageConfig
-from tests.support.model_call import test_llm_config
+from tests.support.model_config import test_llm_config
 
 
 pytestmark = pytest.mark.postgres
@@ -92,7 +92,6 @@ def test_stage2_public_host_fresh_open_run_and_canonical_rehydrate(
         ),
         storage=StorageConfig(
             postgres_dsn=stage2_migrated_postgres_database.runtime_dsn,
-            oxigraph_url="http://127.0.0.1:1",
         ),
     )
     workspace = HostWorkspaceInput(
@@ -179,7 +178,7 @@ def test_stage2_public_host_fresh_open_run_and_canonical_rehydrate(
 
     asyncio.run(scenario())
 
-    # The ordinary public Host path must leave every legacy authority empty.
+    # The clean universe does not create any legacy public authority.
     with psycopg.connect(stage2_migrated_postgres_database.admin_dsn) as connection:
         for relation in (
             "sessions",
@@ -188,10 +187,10 @@ def test_stage2_public_host_fresh_open_run_and_canonical_rehydrate(
             "durable_projection_jobs",
             "memory_nodes",
         ):
-            count = connection.execute(
-                f"SELECT count(*) FROM public.{relation}"  # noqa: S608
-            ).fetchone()[0]
-            assert count == 0, relation
+            assert connection.execute(
+                "SELECT pg_catalog.to_regclass(%s)",
+                (f"public.{relation}",),
+            ).fetchone()[0] is None, relation
 
 
 def test_stage2_host_consumes_exact_active_turn_steer_at_provider_safe_point(
@@ -214,7 +213,6 @@ def test_stage2_host_consumes_exact_active_turn_steer_at_provider_safe_point(
         ),
         storage=StorageConfig(
             postgres_dsn=stage2_migrated_postgres_database.runtime_dsn,
-            oxigraph_url="http://127.0.0.1:1",
         ),
     )
 

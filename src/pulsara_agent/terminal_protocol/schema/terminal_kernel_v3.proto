@@ -177,6 +177,9 @@ message SubagentTaskControl {
   string parent_turn_id = 2;
   string status = 3;
   string objective = 4;
+  string result_id = 5;
+  string result_entry_id = 6;
+  bool result_accepted = 7;
 }
 
 message JobControl {
@@ -548,6 +551,8 @@ enum CommandKind {
   DETACH = 3;
   CLOSE_SESSION = 4;
   STEER_ACTIVE_TURN = 5;
+  ACCEPT_SUBAGENT_RESULT = 6;
+  ACCEPT_JOB_RESULT = 7;
 }
 
 message CommandRequest {
@@ -559,6 +564,8 @@ message CommandRequest {
   string client_submission_id = 6;
   string text = 7;
   string target_turn_id = 8;
+  string source_subagent_result_id = 9;
+  string source_job_id = 10;
 }
 
 enum CommandStatus {

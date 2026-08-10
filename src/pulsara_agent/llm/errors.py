@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from pulsara_agent.ports.model_lifecycle import ModelLifecycleContractError
+class ModelLifecycleContractError(RuntimeError):
+    """Base for deterministic process-local model contract failures."""
+
+    reason_code = "model_contract_error"
 
 
 class ModelContractError(ModelLifecycleContractError):

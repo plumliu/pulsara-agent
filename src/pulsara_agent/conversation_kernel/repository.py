@@ -214,6 +214,11 @@ def _id(prefix: str) -> str:
     return f"{prefix}:{uuid4().hex}"
 
 
+def _stable_subagent_message_child_id(task_id: str, entry_id: str) -> str:
+    digest = sha256(f"{task_id}\0{entry_id}".encode()).hexdigest()
+    return f"subagent-message:{digest}"
+
+
 def _deterministic_retry_due(
     *, accepted_at: datetime, job_id: str, attempt_ordinal: int
 ) -> datetime:
@@ -796,6 +801,40 @@ class ConversationKernelRepository:
                     ordinal=ordinal,
                     block=block,
                 )
+            subagent_message: tuple[str, int, str] | None = None
+            if (
+                str(turn["conversation_scope_kind"])
+                == ConversationScopeKind.SUBAGENT_TASK.value
+            ):
+                task_id = str(turn["scope_subagent_task_id"])
+                message_ordinal = int(
+                    connection.execute(
+                        """
+                        SELECT count(*) AS total
+                        FROM pulsara_v3.subagent_task_children
+                        WHERE session_id = %s AND task_id = %s
+                          AND child_kind = 'MESSAGE'
+                        """,
+                        (guard.session_id, task_id),
+                    ).fetchone()["total"]
+                )
+                child_id = _stable_subagent_message_child_id(task_id, entry_id)
+                connection.execute(
+                    """
+                    INSERT INTO pulsara_v3.subagent_task_children (
+                        id, session_id, task_id, child_kind,
+                        child_ordinal, entry_id
+                    ) VALUES (%s, %s, %s, 'MESSAGE', %s, %s)
+                    """,
+                    (
+                        child_id,
+                        guard.session_id,
+                        task_id,
+                        message_ordinal,
+                        entry_id,
+                    ),
+                )
+                subagent_message = (child_id, message_ordinal, task_id)
             event_drafts = [
                 self._event(
                     event_type,
@@ -810,6 +849,19 @@ class ConversationKernelRepository:
                     },
                 )
             ]
+            if subagent_message is not None:
+                child_id, message_ordinal, task_id = subagent_message
+                event_drafts.append(
+                    self._event(
+                        CommittedEventType.SUBAGENT_MESSAGE_ACCEPTED,
+                        SubjectSlot.SUBAGENT_MESSAGE,
+                        child_id,
+                        occurred_at=occurred_at,
+                        actor_kind="subagent",
+                        actor_id=task_id,
+                        payload={"child_ordinal": message_ordinal},
+                    )
+                )
             pending_steer = False
             if complete_turn:
                 pending_steer = bool(
@@ -863,6 +915,179 @@ class ConversationKernelRepository:
                 entry_sequence=entry_sequence,
                 event_sequence=event.event_sequence,
                 turn_completed=turn_completed,
+            )
+
+    def confirm_assistant_message_winner(
+        self,
+        guard: HostWriterGuard,
+        *,
+        cut: PreparedProviderInputCut,
+        entry_id: str,
+        parent_content: CanonicalContent,
+        blocks: Sequence[AssistantBlock],
+        complete_turn: bool,
+        occurred_at: datetime,
+        actor_id: str,
+        deadline_monotonic: float,
+    ) -> AcceptedEntry | None:
+        """Exact-confirm a stable assistant candidate after an unknown ACK.
+
+        This is a read of canonical rows and their accepted occurrence.  It is
+        neither a second write nor a confirmation receipt.
+        """
+
+        tool_request = any(isinstance(item, AssistantToolCallBlock) for item in blocks)
+        expected_entry_kind = (
+            EntryKind.ASSISTANT_TOOL_REQUEST if tool_request else EntryKind.ASSISTANT_MESSAGE
+        )
+        expected_event_type = (
+            CommittedEventType.ASSISTANT_TOOL_REQUEST_ACCEPTED
+            if tool_request
+            else CommittedEventType.ASSISTANT_MESSAGE_ACCEPTED
+        )
+        with self._provider.connection(
+            lane=PostgresConnectionLane.HOST_CONTROL,
+            row_factory=dict_row,
+            deadline_monotonic=deadline_monotonic,
+            isolation_level=IsolationLevel.REPEATABLE_READ,
+        ) as connection:
+            self._require_writer(connection, guard, lock=False)
+            rows = connection.execute(
+                """
+                SELECT e.*, a.event_sequence, a.event_type,
+                       a.actor_kind, a.actor_id, a.occurred_at, a.payload
+                FROM pulsara_v3.transcript_entries AS e
+                JOIN pulsara_v3.agent_events AS a
+                  ON a.session_id = e.session_id
+                 AND a.subject_entry_id = e.id
+                 AND a.event_type IN (
+                    'AssistantMessageAccepted',
+                    'AssistantToolRequestAccepted'
+                 )
+                WHERE e.session_id = %s AND e.id = %s
+                """,
+                (guard.session_id, entry_id),
+            ).fetchall()
+            if not rows:
+                return None
+            if len(rows) != 1:
+                raise ConversationKernelConflict(
+                    "assistant winner occurrence is not unique"
+                )
+            row = rows[0]
+            expected_payload = {
+                "entry_kind": expected_entry_kind.value,
+                "block_count": len(blocks),
+            }
+            if (
+                cut.session_id != guard.session_id
+                or str(row["turn_id"]) != cut.turn_id
+                or str(row["entry_kind"]) != expected_entry_kind.value
+                or str(row["context_binding_revision_id"])
+                != cut.context_binding_revision_id
+                or int(row["provider_input_through_sequence"])
+                != cut.provider_input_through_sequence
+                or self._content_from_row(row) != parent_content
+                or str(row["event_type"]) != expected_event_type.value
+                or str(row["actor_kind"]) != "model"
+                or str(row["actor_id"]) != actor_id
+                or row["occurred_at"] != occurred_at
+                or dict(row["payload"]) != expected_payload
+            ):
+                raise ConversationKernelConflict(
+                    "assistant entry identity names a different winner"
+                )
+            block_rows = connection.execute(
+                """
+                SELECT * FROM pulsara_v3.assistant_message_blocks
+                WHERE session_id = %s AND assistant_entry_id = %s
+                ORDER BY block_ordinal, id
+                """,
+                (guard.session_id, entry_id),
+            ).fetchall()
+            actual_blocks: list[AssistantBlock] = []
+            for block_row in block_rows:
+                kind = str(block_row["block_kind"])
+                if kind == AssistantBlockKind.TOOL_CALL.value:
+                    actual_blocks.append(
+                        AssistantToolCallBlock(
+                            block_id=str(block_row["id"]),
+                            tool_call_id=str(block_row["tool_call_id"]),
+                            tool_name=str(block_row["tool_name"]),
+                            arguments=dict(block_row["tool_arguments"]),
+                        )
+                    )
+                elif kind == AssistantBlockKind.TEXT.value:
+                    actual_blocks.append(
+                        AssistantTextBlock(
+                            str(block_row["id"]), self._content_from_row(block_row)
+                        )
+                    )
+                elif kind == AssistantBlockKind.DATA.value:
+                    actual_blocks.append(
+                        AssistantDataBlock(
+                            str(block_row["id"]), self._content_from_row(block_row)
+                        )
+                    )
+                else:
+                    raise ConversationKernelConflict(
+                        "assistant winner contains an unknown block kind"
+                    )
+            if tuple(actual_blocks) != tuple(blocks):
+                raise ConversationKernelConflict(
+                    "assistant entry blocks differ from the stable candidate"
+                )
+            if (
+                str(row["conversation_scope_kind"])
+                == ConversationScopeKind.SUBAGENT_TASK.value
+            ):
+                task_id = str(row["scope_subagent_task_id"])
+                child_id = _stable_subagent_message_child_id(task_id, entry_id)
+                child = connection.execute(
+                    """
+                    SELECT c.child_kind, c.child_ordinal, c.entry_id,
+                           a.event_type, a.actor_kind, a.actor_id, a.payload
+                    FROM pulsara_v3.subagent_task_children AS c
+                    JOIN pulsara_v3.agent_events AS a
+                      ON a.session_id = c.session_id
+                     AND a.subject_subagent_message_id = c.id
+                    WHERE c.session_id = %s AND c.id = %s
+                    """,
+                    (guard.session_id, child_id),
+                ).fetchall()
+                if (
+                    len(child) != 1
+                    or str(child[0]["child_kind"]) != "MESSAGE"
+                    or str(child[0]["entry_id"]) != entry_id
+                    or str(child[0]["event_type"])
+                    != CommittedEventType.SUBAGENT_MESSAGE_ACCEPTED.value
+                    or str(child[0]["actor_kind"]) != "subagent"
+                    or str(child[0]["actor_id"]) != task_id
+                    or dict(child[0]["payload"])
+                    != {"child_ordinal": int(child[0]["child_ordinal"])}
+                ):
+                    raise ConversationKernelConflict(
+                        "subagent assistant winner lacks its exact message child"
+                    )
+            terminal = connection.execute(
+                """
+                SELECT event_sequence FROM pulsara_v3.agent_events
+                WHERE session_id = %s AND event_type = 'TurnCompleted'
+                  AND subject_turn_id = %s
+                  AND payload->>'final_entry_id' = %s
+                """,
+                (guard.session_id, cut.turn_id, entry_id),
+            ).fetchall()
+            if len(terminal) > 1 or (terminal and not complete_turn):
+                raise ConversationKernelConflict(
+                    "assistant candidate terminal disposition conflicts"
+                )
+            return AcceptedEntry(
+                entry_id=entry_id,
+                turn_id=cut.turn_id,
+                entry_sequence=int(row["entry_sequence"]),
+                event_sequence=int(row["event_sequence"]),
+                turn_completed=bool(terminal),
             )
 
     def accept_tool_capability_decision(
@@ -1201,7 +1426,15 @@ class ConversationKernelRepository:
                         occurred_at=occurred_at,
                         actor_kind="tool",
                         actor_id=actor_id,
-                        payload={"remote_identity": remote_identity},
+                        payload={
+                            "remote_identity_utf8_bytes": len(
+                                remote_identity.encode("utf-8")
+                            ),
+                            "remote_identity_digest": (
+                                "sha256:"
+                                + sha256(remote_identity.encode("utf-8")).hexdigest()
+                            ),
+                        },
                     ),
                 ),
             )
@@ -1974,6 +2207,40 @@ class ConversationKernelRepository:
             guard, deadline_monotonic=deadline_monotonic
         ) as connection:
             workspace_id = self._workspace_id(connection, guard.session_id)
+            existing = connection.execute(
+                """
+                SELECT task_id, child_kind, child_ordinal, entry_id
+                FROM pulsara_v3.subagent_task_children
+                WHERE session_id = %s AND id = %s
+                """,
+                (guard.session_id, child_id),
+            ).fetchone()
+            if existing is not None:
+                if (
+                    str(existing["task_id"]) != task_id
+                    or str(existing["child_kind"]) != child_kind
+                    or int(existing["child_ordinal"]) != child_ordinal
+                    or str(existing["entry_id"]) != entry_id
+                ):
+                    raise ConversationKernelConflict(
+                        "subagent child identity names a different fact"
+                    )
+                return
+            counts = connection.execute(
+                """
+                SELECT count(*) FILTER (WHERE child_kind = 'MESSAGE') AS messages,
+                       count(*) FILTER (WHERE child_kind = 'RESULT') AS results
+                FROM pulsara_v3.subagent_task_children
+                WHERE session_id = %s AND task_id = %s
+                """,
+                (guard.session_id, task_id),
+            ).fetchone()
+            message_count = int(counts["messages"])
+            result_count = int(counts["results"])
+            if result_count or child_ordinal != message_count:
+                raise ConversationKernelConflict(
+                    "subagent child ordinal or terminal result conflicts"
+                )
             connection.execute(
                 """
                 INSERT INTO pulsara_v3.subagent_task_children (
@@ -2004,6 +2271,74 @@ class ConversationKernelRepository:
                         payload={"child_ordinal": child_ordinal},
                     ),
                 ),
+            )
+
+    def query_subagent_task(
+        self,
+        *,
+        session_id: str,
+        task_id: str,
+        deadline_monotonic: float,
+    ) -> Mapping[str, object] | None:
+        """Read durable task/result state without recovering execution."""
+        with self._provider.connection(
+            lane=PostgresConnectionLane.INSPECTOR,
+            row_factory=dict_row,
+            deadline_monotonic=deadline_monotonic,
+        ) as connection:
+            row = connection.execute(
+                """
+                SELECT t.id, t.parent_turn_id, t.objective, t.status,
+                       t.terminal_reason, c.id AS result_id,
+                       c.entry_id AS result_entry_id,
+                       accepted.id AS accepted_root_entry_id
+                FROM pulsara_v3.subagent_tasks AS t
+                LEFT JOIN pulsara_v3.subagent_task_children AS c
+                  ON c.session_id = t.session_id AND c.task_id = t.id
+                 AND c.child_kind = 'RESULT'
+                LEFT JOIN pulsara_v3.transcript_entries AS accepted
+                  ON accepted.session_id = c.session_id
+                 AND accepted.source_subagent_result_id = c.id
+                WHERE t.session_id = %s AND t.id = %s
+                """,
+                (session_id, task_id),
+            ).fetchone()
+            return None if row is None else dict(row)
+
+    def list_subagent_tasks(
+        self,
+        *,
+        session_id: str,
+        maximum_items: int,
+        deadline_monotonic: float,
+    ) -> tuple[Mapping[str, object], ...]:
+        if not 1 <= maximum_items <= 50:
+            raise ValueError("subagent list bound is invalid")
+        with self._provider.connection(
+            lane=PostgresConnectionLane.INSPECTOR,
+            row_factory=dict_row,
+            deadline_monotonic=deadline_monotonic,
+        ) as connection:
+            return tuple(
+                dict(row)
+                for row in connection.execute(
+                    """
+                    SELECT t.id, t.parent_turn_id, t.objective, t.status,
+                           t.terminal_reason, c.id AS result_id,
+                           c.entry_id AS result_entry_id,
+                           accepted.id AS accepted_root_entry_id
+                    FROM pulsara_v3.subagent_tasks AS t
+                    LEFT JOIN pulsara_v3.subagent_task_children AS c
+                      ON c.session_id = t.session_id AND c.task_id = t.id
+                     AND c.child_kind = 'RESULT'
+                    LEFT JOIN pulsara_v3.transcript_entries AS accepted
+                      ON accepted.session_id = c.session_id
+                     AND accepted.source_subagent_result_id = c.id
+                    WHERE t.session_id = %s
+                    ORDER BY t.accepted_at DESC, t.id DESC LIMIT %s
+                    """,
+                    (session_id, maximum_items),
+                ).fetchall()
             )
 
     def enqueue_job(
@@ -2327,11 +2662,16 @@ class ConversationKernelRepository:
         with self._writer_transaction(
             guard, deadline_monotonic=deadline_monotonic
         ) as connection:
+            self._reject_terminal_prompt_steer_heads(
+                connection,
+                guard,
+                occurred_at=occurred_at,
+                actor_id=actor_id,
+            )
             item = connection.execute(
                 """
                 SELECT * FROM pulsara_v3.prompt_queue_items
                 WHERE session_id = %s AND status = 'PENDING'
-                  AND delivery_mode = 'NEW_TURN'
                 ORDER BY queue_sequence, id
                 LIMIT 1
                 FOR UPDATE
@@ -2339,6 +2679,11 @@ class ConversationKernelRepository:
                 (guard.session_id,),
             ).fetchone()
             if item is None:
+                return None
+            if item["delivery_mode"] == PromptDeliveryMode.STEER_ACTIVE_TURN.value:
+                # Every terminal steer in the bounded FIFO prefix has already
+                # been rejected.  The remaining head belongs to the exact
+                # still-running target and cannot be overtaken by a NEW_TURN.
                 return None
             content = self._content_from_row(item)
             workspace_id = str(item["workspace_id"])
@@ -2430,6 +2775,76 @@ class ConversationKernelRepository:
                 event_sequence=events[-1].event_sequence,
             )
 
+    def _reject_terminal_prompt_steer_heads(
+        self,
+        connection: Connection,
+        guard: HostWriterGuard,
+        *,
+        occurred_at: datetime,
+        actor_id: str,
+    ) -> None:
+        """Reject the complete bounded prefix of terminal-target steers."""
+
+        for _ in range(STAGE2_LIMITS.pending_prompt_hard_items):
+            item = connection.execute(
+                """
+                SELECT * FROM pulsara_v3.prompt_queue_items
+                WHERE session_id = %s AND status = 'PENDING'
+                ORDER BY queue_sequence, id
+                LIMIT 1
+                FOR UPDATE
+                """,
+                (guard.session_id,),
+            ).fetchone()
+            if (
+                item is None
+                or item["delivery_mode"]
+                != PromptDeliveryMode.STEER_ACTIVE_TURN.value
+            ):
+                return
+            target = connection.execute(
+                """
+                SELECT conversation_scope_kind, status
+                FROM pulsara_v3.turns
+                WHERE session_id = %s AND id = %s FOR UPDATE
+                """,
+                (guard.session_id, item["target_turn_id"]),
+            ).fetchone()
+            if (
+                target is not None
+                and target["conversation_scope_kind"] == "ROOT"
+                and target["status"] == "RUNNING"
+            ):
+                return
+            updated = connection.execute(
+                """
+                UPDATE pulsara_v3.prompt_queue_items
+                SET status = 'REJECTED', terminal_reason = 'TARGET_TURN_TERMINAL',
+                    terminal_at = clock_timestamp()
+                WHERE session_id = %s AND id = %s AND status = 'PENDING'
+                RETURNING id
+                """,
+                (guard.session_id, item["id"]),
+            ).fetchone()
+            if updated is None:
+                raise ConversationKernelConflict("stale steer rejection CAS lost")
+            self._append_events(
+                connection,
+                guard,
+                workspace_id=str(item["workspace_id"]),
+                drafts=(
+                    self._event(
+                        CommittedEventType.PROMPT_REJECTED,
+                        SubjectSlot.QUEUE_ITEM,
+                        str(item["id"]),
+                        occurred_at=occurred_at,
+                        actor_kind="runtime",
+                        actor_id=actor_id,
+                        payload={"reason": "TARGET_TURN_TERMINAL"},
+                    ),
+                ),
+            )
+
     def consume_prompt_steer_for_turn(
         self,
         guard: HostWriterGuard,
@@ -2440,7 +2855,7 @@ class ConversationKernelRepository:
         actor_id: str,
         deadline_monotonic: float,
     ) -> AcceptedEntry | None:
-        """Consume the oldest exact-target steer at a provider safe point."""
+        """Consume the global FIFO head when it is this turn's steer."""
 
         with self._writer_transaction(
             guard, deadline_monotonic=deadline_monotonic
@@ -2449,14 +2864,15 @@ class ConversationKernelRepository:
                 """
                 SELECT * FROM pulsara_v3.prompt_queue_items
                 WHERE session_id = %s AND status = 'PENDING'
-                  AND delivery_mode = 'STEER_ACTIVE_TURN'
-                  AND target_turn_id = %s
                 ORDER BY queue_sequence, id
                 LIMIT 1 FOR UPDATE
                 """,
-                (guard.session_id, target_turn_id),
+                (guard.session_id,),
             ).fetchone()
             if item is None:
+                return None
+            if item["delivery_mode"] == PromptDeliveryMode.NEW_TURN.value:
+                # A later steer cannot overtake the globally oldest NEW_TURN.
                 return None
             target = connection.execute(
                 """
@@ -2464,7 +2880,7 @@ class ConversationKernelRepository:
                 FROM pulsara_v3.turns
                 WHERE session_id = %s AND id = %s FOR UPDATE
                 """,
-                (guard.session_id, target_turn_id),
+                (guard.session_id, item["target_turn_id"]),
             ).fetchone()
             workspace_id = str(item["workspace_id"])
             if (
@@ -2497,6 +2913,10 @@ class ConversationKernelRepository:
                         ),
                     ),
                 )
+                return None
+            if str(item["target_turn_id"]) != target_turn_id:
+                # A different still-running ROOT owns the global head.  There
+                # is no redirection or overtaking across target identities.
                 return None
             entry_sequence = self._allocate_entry_sequence(connection, guard.session_id)
             self._insert_entry(
@@ -2560,17 +2980,21 @@ class ConversationKernelRepository:
         guard: HostWriterGuard,
         *,
         turn_id: str,
+        new_context_binding_revision_id: str | None = None,
         child_result_id: str,
         command_id: str,
         occurred_at: datetime,
         actor_id: str,
         deadline_monotonic: float,
     ) -> AcceptedEntry | None:
-        """Accept one exact completed child result into its RUNNING ROOT parent.
+        """Accept one exact completed child result into an explicit ROOT target.
 
         The caller must own the process-local provider safe-point lock.  The
         source child is independently durable; this transaction owns only the
-        unique ROOT-visible acceptance and its idempotent command.
+        unique ROOT-visible acceptance and its idempotent command.  A missing
+        ``new_context_binding_revision_id`` means an existing RUNNING ROOT;
+        otherwise this command creates a fresh ROOT turn.  Neither branch
+        resumes or redirects child execution.
         """
 
         if not child_result_id or not command_id:
@@ -2578,26 +3002,12 @@ class ConversationKernelRepository:
         with self._writer_transaction(
             guard, deadline_monotonic=deadline_monotonic
         ) as connection:
-            turn = connection.execute(
-                """
-                SELECT workspace_id, conversation_scope_kind, status
-                FROM pulsara_v3.turns
-                WHERE session_id = %s AND id = %s
-                FOR UPDATE
-                """,
-                (guard.session_id, turn_id),
-            ).fetchone()
-            if (
-                turn is None
-                or turn["conversation_scope_kind"] != "ROOT"
-                or turn["status"] != "RUNNING"
-            ):
-                return None
             row = connection.execute(
                 """
-                SELECT c.id AS child_id, c.entry_id, e.inline_content, e.blob_id,
+                SELECT t.workspace_id, c.id AS child_id, c.entry_id,
+                       e.inline_content, e.blob_id,
                        e.content_digest, e.content_size, e.content_media_type,
-                       e.content_codec
+                       e.content_codec, accepted.id AS accepted_entry_id
                 FROM pulsara_v3.subagent_tasks AS t
                 JOIN pulsara_v3.subagent_task_children AS c
                   ON c.session_id = t.session_id AND c.task_id = t.id
@@ -2607,88 +3017,77 @@ class ConversationKernelRepository:
                 LEFT JOIN pulsara_v3.transcript_entries AS accepted
                   ON accepted.session_id = c.session_id
                  AND accepted.source_subagent_result_id = c.id
-                WHERE t.session_id = %s AND t.parent_turn_id = %s
-                  AND t.status = 'COMPLETED' AND c.id = %s
-                  AND accepted.id IS NULL
+                WHERE t.session_id = %s AND t.status = 'COMPLETED' AND c.id = %s
+                FOR UPDATE OF t
                 """,
-                (guard.session_id, turn_id, child_result_id),
+                (guard.session_id, child_result_id),
             ).fetchone()
             entry_id = "entry:" + sha256(command_id.encode()).hexdigest()
             if row is None:
-                existing = connection.execute(
-                    """
-                    SELECT c.semantic_digest, c.target_entry_id,
-                           e.turn_id, e.entry_sequence, a.event_sequence
-                    FROM pulsara_v3.session_commands AS c
-                    JOIN pulsara_v3.transcript_entries AS e
-                      ON e.session_id = c.session_id AND e.id = c.target_entry_id
-                    JOIN pulsara_v3.agent_events AS a
-                      ON a.session_id = e.session_id
-                     AND a.subject_entry_id = e.id
-                     AND a.event_type = 'UserMessageAccepted'
-                    WHERE c.session_id = %s AND c.command_id = %s
-                      AND c.command_kind = 'ACCEPT_SUBAGENT_RESULT'
-                    """,
-                    (guard.session_id, command_id),
-                ).fetchone()
-                if existing is None:
-                    return None
-                accepted_source = connection.execute(
-                    """
-                    SELECT source_subagent_result_id
-                    FROM pulsara_v3.transcript_entries
-                    WHERE session_id = %s AND id = %s
-                    """,
-                    (guard.session_id, existing["target_entry_id"]),
-                ).fetchone()
+                return None
+            child_id = str(row["child_id"])
+            digest = canonical_digest(
+                "pulsara:accept-subagent-result:v1",
+                {
+                    "turn_id": turn_id,
+                    "new_context_binding_revision_id": (
+                        new_context_binding_revision_id
+                    ),
+                    "source_subagent_result_id": child_id,
+                    "content_digest": str(row["content_digest"]),
+                },
+            )
+            existing = connection.execute(
+                """
+                SELECT c.command_kind, c.semantic_digest, c.target_entry_id,
+                       e.turn_id, e.entry_sequence,
+                       e.source_subagent_result_id, a.event_sequence
+                FROM pulsara_v3.session_commands AS c
+                LEFT JOIN pulsara_v3.transcript_entries AS e
+                  ON e.session_id = c.session_id AND e.id = c.target_entry_id
+                LEFT JOIN pulsara_v3.agent_events AS a
+                  ON a.session_id = e.session_id
+                 AND a.subject_entry_id = e.id
+                 AND a.event_type = 'UserMessageAccepted'
+                WHERE c.session_id = %s AND c.command_id = %s
+                """,
+                (guard.session_id, command_id),
+            ).fetchone()
+            if existing is not None:
                 if (
-                    accepted_source is None
-                    or accepted_source["source_subagent_result_id"] != child_result_id
+                    existing["command_kind"] != "ACCEPT_SUBAGENT_RESULT"
+                    or existing["semantic_digest"] != digest
                     or existing["target_entry_id"] != entry_id
+                    or existing["turn_id"] != turn_id
+                    or existing["source_subagent_result_id"] != child_id
+                    or existing["event_sequence"] is None
                 ):
                     raise ConversationKernelConflict(
                         "subagent result acceptance command conflict"
                     )
                 return AcceptedEntry(
                     entry_id,
-                    str(existing["turn_id"]),
+                    turn_id,
                     int(existing["entry_sequence"]),
                     int(existing["event_sequence"]),
                 )
-            child_id = str(row["child_id"])
-            digest = canonical_digest(
-                "pulsara:accept-subagent-result:v1",
-                {
-                    "turn_id": turn_id,
-                    "source_subagent_result_id": child_id,
-                    "content_digest": str(row["content_digest"]),
-                },
+            if row["accepted_entry_id"] is not None:
+                return None
+            sequence = self._prepare_external_result_target(
+                connection,
+                guard,
+                turn_id=turn_id,
+                entry_id=entry_id,
+                new_context_binding_revision_id=new_context_binding_revision_id,
+                source_workspace_id=str(row["workspace_id"]),
             )
-            existing_command = connection.execute(
-                """
-                SELECT semantic_digest, target_entry_id
-                FROM pulsara_v3.session_commands
-                WHERE session_id = %s AND command_id = %s
-                """,
-                (guard.session_id, command_id),
-            ).fetchone()
-            if existing_command is not None:
-                if (
-                    existing_command["semantic_digest"] != digest
-                    or existing_command["target_entry_id"] != entry_id
-                ):
-                    raise ConversationKernelConflict(
-                        "subagent result acceptance command conflict"
-                    )
-                raise ConversationKernelConflict(
-                    "subagent result acceptance winner is incomplete"
-                )
-            sequence = self._allocate_entry_sequence(connection, guard.session_id)
+            if sequence is None:
+                return None
             content = self._content_from_row(row)
             self._insert_entry(
                 connection,
                 session_id=guard.session_id,
-                workspace_id=str(turn["workspace_id"]),
+                workspace_id=str(row["workspace_id"]),
                 turn_id=turn_id,
                 entry_id=entry_id,
                 entry_sequence=sequence,
@@ -2712,7 +3111,7 @@ class ConversationKernelRepository:
             event = self._append_events(
                 connection,
                 guard,
-                workspace_id=str(turn["workspace_id"]),
+                workspace_id=str(row["workspace_id"]),
                 drafts=(
                     self._event(
                         CommittedEventType.USER_MESSAGE_ACCEPTED,
@@ -2735,85 +3134,41 @@ class ConversationKernelRepository:
         guard: HostWriterGuard,
         *,
         turn_id: str,
+        new_context_binding_revision_id: str | None = None,
         job_id: str,
         command_id: str,
         occurred_at: datetime,
         actor_id: str,
         deadline_monotonic: float,
     ) -> AcceptedEntry | None:
-        """Accept one immutable SUCCEEDED job result into a RUNNING ROOT turn."""
+        """Accept one immutable SUCCEEDED job result into an explicit ROOT target."""
 
         if not job_id or not command_id:
             raise ValueError("job result acceptance identity is empty")
         with self._writer_transaction(
             guard, deadline_monotonic=deadline_monotonic
         ) as connection:
-            turn = connection.execute(
-                """
-                SELECT workspace_id, conversation_scope_kind, status
-                FROM pulsara_v3.turns
-                WHERE session_id = %s AND id = %s
-                FOR UPDATE
-                """,
-                (guard.session_id, turn_id),
-            ).fetchone()
-            if (
-                turn is None
-                or turn["conversation_scope_kind"] != "ROOT"
-                or turn["status"] != "RUNNING"
-            ):
-                return None
             entry_id = "entry:" + sha256(command_id.encode()).hexdigest()
-            compatible = connection.execute(
-                """
-                SELECT c.command_kind, c.target_entry_id, e.turn_id,
-                       e.entry_sequence, e.source_job_id, a.event_sequence
-                FROM pulsara_v3.session_commands AS c
-                LEFT JOIN pulsara_v3.transcript_entries AS e
-                  ON e.session_id = c.session_id AND e.id = c.target_entry_id
-                LEFT JOIN pulsara_v3.agent_events AS a
-                  ON a.session_id = e.session_id
-                 AND a.subject_entry_id = e.id
-                 AND a.event_type = 'UserMessageAccepted'
-                WHERE c.session_id = %s AND c.command_id = %s
-                """,
-                (guard.session_id, command_id),
-            ).fetchone()
-            if compatible is not None:
-                if (
-                    compatible["command_kind"] != "ACCEPT_JOB_RESULT"
-                    or compatible["target_entry_id"] != entry_id
-                    or compatible["turn_id"] != turn_id
-                    or compatible["source_job_id"] != job_id
-                    or compatible["event_sequence"] is None
-                ):
-                    raise ConversationKernelConflict(
-                        "job result acceptance command conflict"
-                    )
-                return AcceptedEntry(
-                    entry_id,
-                    turn_id,
-                    int(compatible["entry_sequence"]),
-                    int(compatible["event_sequence"]),
-                )
             job = connection.execute(
                 """
                 SELECT j.workspace_id, j.status, j.result_blob_id,
-                       a.result_payload
+                       a.result_payload, accepted.id AS accepted_entry_id
                 FROM pulsara_v3.durable_jobs AS j
                 JOIN pulsara_v3.durable_job_attempts AS a ON a.job_id = j.id
+                LEFT JOIN pulsara_v3.transcript_entries AS accepted
+                  ON accepted.session_id = j.origin_session_id
+                 AND accepted.source_job_id = j.id
                 WHERE j.origin_session_id = %s AND j.id = %s
                   AND j.status = 'SUCCEEDED'
                   AND a.terminal_status = 'SUCCEEDED'
                 ORDER BY a.attempt_ordinal DESC
                 LIMIT 1
+                FOR UPDATE OF j, a
                 """,
                 (guard.session_id, job_id),
             ).fetchone()
             if job is None:
                 return None
-            if str(job["workspace_id"]) != str(turn["workspace_id"]):
-                raise ConversationKernelConflict("job result workspace drifted")
             if job["result_blob_id"] is not None:
                 blob = connection.execute(
                     """
@@ -2846,15 +3201,63 @@ class ConversationKernelRepository:
                 "pulsara:accept-job-result:v1",
                 {
                     "turn_id": turn_id,
+                    "new_context_binding_revision_id": (
+                        new_context_binding_revision_id
+                    ),
                     "source_job_id": job_id,
                     "content_digest": content.digest,
                 },
             )
-            sequence = self._allocate_entry_sequence(connection, guard.session_id)
+            compatible = connection.execute(
+                """
+                SELECT c.command_kind, c.semantic_digest, c.target_entry_id,
+                       e.turn_id, e.entry_sequence, e.source_job_id,
+                       a.event_sequence
+                FROM pulsara_v3.session_commands AS c
+                LEFT JOIN pulsara_v3.transcript_entries AS e
+                  ON e.session_id = c.session_id AND e.id = c.target_entry_id
+                LEFT JOIN pulsara_v3.agent_events AS a
+                  ON a.session_id = e.session_id
+                 AND a.subject_entry_id = e.id
+                 AND a.event_type = 'UserMessageAccepted'
+                WHERE c.session_id = %s AND c.command_id = %s
+                """,
+                (guard.session_id, command_id),
+            ).fetchone()
+            if compatible is not None:
+                if (
+                    compatible["command_kind"] != "ACCEPT_JOB_RESULT"
+                    or compatible["semantic_digest"] != digest
+                    or compatible["target_entry_id"] != entry_id
+                    or compatible["turn_id"] != turn_id
+                    or compatible["source_job_id"] != job_id
+                    or compatible["event_sequence"] is None
+                ):
+                    raise ConversationKernelConflict(
+                        "job result acceptance command conflict"
+                    )
+                return AcceptedEntry(
+                    entry_id,
+                    turn_id,
+                    int(compatible["entry_sequence"]),
+                    int(compatible["event_sequence"]),
+                )
+            if job["accepted_entry_id"] is not None:
+                return None
+            sequence = self._prepare_external_result_target(
+                connection,
+                guard,
+                turn_id=turn_id,
+                entry_id=entry_id,
+                new_context_binding_revision_id=new_context_binding_revision_id,
+                source_workspace_id=str(job["workspace_id"]),
+            )
+            if sequence is None:
+                return None
             self._insert_entry(
                 connection,
                 session_id=guard.session_id,
-                workspace_id=str(turn["workspace_id"]),
+                workspace_id=str(job["workspace_id"]),
                 turn_id=turn_id,
                 entry_id=entry_id,
                 entry_sequence=sequence,
@@ -2878,7 +3281,7 @@ class ConversationKernelRepository:
             event = self._append_events(
                 connection,
                 guard,
-                workspace_id=str(turn["workspace_id"]),
+                workspace_id=str(job["workspace_id"]),
                 drafts=(
                     self._event(
                         CommittedEventType.USER_MESSAGE_ACCEPTED,
@@ -2892,6 +3295,91 @@ class ConversationKernelRepository:
                 ),
             )[0]
             return AcceptedEntry(entry_id, turn_id, sequence, event.event_sequence)
+
+    def _prepare_external_result_target(
+        self,
+        connection: Connection,
+        guard: HostWriterGuard,
+        *,
+        turn_id: str,
+        entry_id: str,
+        new_context_binding_revision_id: str | None,
+        source_workspace_id: str,
+    ) -> int | None:
+        """Prepare the only two legal ROOT acceptance targets.
+
+        The writer transaction already owns the session allocator row.  A
+        missing revision selects an existing RUNNING ROOT; a present revision
+        creates revision zero for an exact new ROOT.  Terminal parents are
+        never silently reused or redirected.
+        """
+
+        workspace_id = self._workspace_id(connection, guard.session_id)
+        if workspace_id != source_workspace_id:
+            raise ConversationKernelConflict("external result workspace drifted")
+        if new_context_binding_revision_id is None:
+            turn = connection.execute(
+                """
+                SELECT workspace_id, conversation_scope_kind, status
+                FROM pulsara_v3.turns
+                WHERE session_id = %s AND id = %s
+                FOR UPDATE
+                """,
+                (guard.session_id, turn_id),
+            ).fetchone()
+            if (
+                turn is None
+                or turn["conversation_scope_kind"] != "ROOT"
+                or turn["status"] != "RUNNING"
+            ):
+                return None
+            if str(turn["workspace_id"]) != source_workspace_id:
+                raise ConversationKernelConflict("external result target drifted")
+            return self._allocate_entry_sequence(connection, guard.session_id)
+        if not new_context_binding_revision_id:
+            raise ValueError("new ROOT context binding revision is empty")
+        existing = connection.execute(
+            """
+            SELECT id FROM pulsara_v3.turns
+            WHERE session_id = %s
+              AND (id = %s OR (conversation_scope_kind = 'ROOT' AND status = 'RUNNING'))
+            LIMIT 1
+            """,
+            (guard.session_id, turn_id),
+        ).fetchone()
+        if existing is not None:
+            return None
+        sequence = self._allocate_entry_sequence(connection, guard.session_id)
+        connection.execute(
+            """
+            INSERT INTO pulsara_v3.turns (
+                id, session_id, workspace_id, conversation_scope_kind,
+                status, user_entry_id, current_context_binding_revision_id
+            ) VALUES (%s, %s, %s, 'ROOT', 'RUNNING', %s, %s)
+            """,
+            (
+                turn_id,
+                guard.session_id,
+                workspace_id,
+                entry_id,
+                new_context_binding_revision_id,
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO pulsara_v3.turn_context_binding_revisions (
+                id, session_id, turn_id, revision_ordinal,
+                base_kind, source_through_sequence
+            ) VALUES (%s, %s, %s, 0, 'FULL_HISTORY', %s)
+            """,
+            (
+                new_context_binding_revision_id,
+                guard.session_id,
+                turn_id,
+                sequence - 1,
+            ),
+        )
+        return sequence
 
     def cancel_prompt(
         self,
@@ -2976,6 +3464,33 @@ class ConversationKernelRepository:
                 is not None
             )
 
+    def pending_prompt_head_mode(
+        self,
+        *,
+        session_id: str,
+        deadline_monotonic: float,
+    ) -> PromptDeliveryMode | None:
+        """Return the single global FIFO head mode without claiming it."""
+
+        with self._provider.connection(
+            lane=PostgresConnectionLane.INSPECTOR,
+            row_factory=dict_row,
+            deadline_monotonic=deadline_monotonic,
+        ) as connection:
+            row = connection.execute(
+                """
+                SELECT delivery_mode FROM pulsara_v3.prompt_queue_items
+                WHERE session_id = %s AND status = 'PENDING'
+                ORDER BY queue_sequence, id LIMIT 1
+                """,
+                (session_id,),
+            ).fetchone()
+            return (
+                None
+                if row is None
+                else PromptDeliveryMode(str(row["delivery_mode"]))
+            )
+
     def request_job_cancel(
         self,
         guard: HostWriterGuard,
@@ -3055,7 +3570,7 @@ class ConversationKernelRepository:
             if expected_job_id is None:
                 return None
         with self._event_transaction(
-            lane=PostgresConnectionLane.PROJECTION_MAINTENANCE,
+            lane=PostgresConnectionLane.BACKGROUND_WORK,
             deadline_monotonic=deadline_monotonic,
         ) as connection:
             candidate = connection.execute(
@@ -3321,7 +3836,7 @@ class ConversationKernelRepository:
 
         job_handler_contract(handler_type)
         with self._provider.connection(
-            lane=PostgresConnectionLane.PROJECTION_MAINTENANCE,
+            lane=PostgresConnectionLane.BACKGROUND_WORK,
             row_factory=dict_row,
             deadline_monotonic=deadline_monotonic,
         ) as connection:
@@ -3359,7 +3874,7 @@ class ConversationKernelRepository:
 
         job_handler_contract(handler_type)
         with self._provider.connection(
-            lane=PostgresConnectionLane.PROJECTION_MAINTENANCE,
+            lane=PostgresConnectionLane.BACKGROUND_WORK,
             row_factory=dict_row,
             deadline_monotonic=deadline_monotonic,
         ) as connection:
@@ -4886,6 +5401,9 @@ class ConversationKernelRepository:
                        qt.status AS consumed_turn_status,
                        qt.final_entry_id AS consumed_turn_final_entry_id,
                        qt.terminal_reason AS consumed_turn_terminal_reason,
+                       te.turn_id AS target_entry_turn_id,
+                       te.source_job_id AS target_entry_source_job_id,
+                       te.source_subagent_result_id AS target_entry_source_subagent_result_id,
                        d.decision AS interaction_decision,
                        d.subject_kind AS interaction_subject_kind,
                        d.subject_tool_call_entry_id,
@@ -4899,6 +5417,8 @@ class ConversationKernelRepository:
                   ON qe.session_id = q.session_id AND qe.id = q.consumed_entry_id
                 LEFT JOIN pulsara_v3.turns AS qt
                   ON qt.session_id = qe.session_id AND qt.id = qe.turn_id
+                LEFT JOIN pulsara_v3.transcript_entries AS te
+                  ON te.session_id = c.session_id AND te.id = c.target_entry_id
                 LEFT JOIN pulsara_v3.interaction_decisions AS d
                   ON d.session_id = c.session_id
                  AND d.id = c.target_interaction_decision_id
@@ -5013,7 +5533,7 @@ class ConversationKernelRepository:
             def __enter__(self) -> Connection:
                 repository._begin_event_batch()
                 self._cm = repository._provider.connection(
-                    lane=PostgresConnectionLane.PROJECTION_MAINTENANCE,
+                    lane=PostgresConnectionLane.BACKGROUND_WORK,
                     row_factory=dict_row,
                     deadline_monotonic=deadline_monotonic,
                 )

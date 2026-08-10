@@ -9,7 +9,6 @@ from psycopg.rows import dict_row
 from pulsara_agent.storage.migrations.manifest import (
     CONVERSATION_KERNEL_RELATIONS,
     CONVERSATION_KERNEL_RUNTIME_PRIVILEGES,
-    build_postgres_schema_manifest,
 )
 from pulsara_agent.storage.postgres_connection_provider import (
     PostgresConnectionLane,
@@ -18,14 +17,6 @@ from pulsara_agent.storage.postgres_connection_provider import (
 
 
 _RELATION_PRIVILEGES = ("SELECT", "INSERT", "UPDATE", "DELETE")
-_LEGACY_PRODUCT_RELATIONS = tuple(
-    str(item["relation_name"])
-    for item in build_postgres_schema_manifest(12).owned_relations
-    if str(item["schema_name"]) == "public"
-    and str(item["relation_name"]) != "pulsara_schema_migrations"
-)
-
-
 def require_stage2_runtime_privilege_boundary(
     provider: VerifiedPostgresConnectionProviderProtocol,
     *,
@@ -57,16 +48,11 @@ def require_stage2_runtime_privilege_boundary(
                     raise RuntimeError(
                         "Stage 2 runtime relation privilege boundary is not exact"
                     )
-        for relation in _LEGACY_PRODUCT_RELATIONS:
-            for privilege in _RELATION_PRIVILEGES:
-                allowed = connection.execute(
-                    "SELECT pg_catalog.has_table_privilege(current_user, %s, %s) AS allowed",
-                    (f"public.{relation}", privilege),
-                ).fetchone()["allowed"]
-                if allowed is True:
-                    raise RuntimeError(
-                        "Stage 2 runtime role retains a legacy product privilege"
-                    )
+        if connection.execute(
+            "SELECT pg_catalog.has_table_privilege(current_user, "
+            "'public.pulsara_schema_migrations', 'INSERT') AS allowed"
+        ).fetchone()["allowed"] is True:
+            raise RuntimeError("runtime role can mutate the migration ledger")
 
 
 __all__ = ["require_stage2_runtime_privilege_boundary"]

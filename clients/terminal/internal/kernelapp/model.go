@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -20,15 +21,20 @@ import (
 )
 
 const (
-	maximumResidentEntries = 200
-	maximumControlItems    = 64
-	maximumDraftBytes      = 1 << 20
-	maximumHydratedBytes   = 4 << 20 // one content edge
-	maximumCachedEntries   = 512
-	maximumCachedBytes     = 8 << 20 // entries plus hydrated content
-	maximumHistoryPage     = 128
-	maximumHistoryBytes    = 4 << 20
+	maximumResidentEntries       = 200
+	maximumControlItems          = 64
+	maximumDraftBytes            = 1 << 20
+	maximumHydratedBytes         = 16 << 20 // exact canonical blob hard bound
+	maximumCachedEntries         = 512
+	maximumCachedEntryBytes      = 8 << 20
+	maximumCachedBytes           = 24 << 20 // entry plane plus one maximum blob
+	maximumHistoryPage           = 128
+	maximumHistoryBytes          = 4 << 20
+	maximumLiveToolArgumentBytes = 32 << 10
+	maximumTrackedPromptCommands = 128 // mirrors the server's pending-prompt hard bound
 )
+
+const liveToolArgumentsTruncated = "… [arguments truncated]"
 
 type Service interface {
 	SessionID() string
@@ -47,6 +53,10 @@ type Service interface {
 
 type phase uint8
 
+type contentIntegrityError struct{ reason string }
+
+func (e *contentIntegrityError) Error() string { return e.reason }
+
 const (
 	phaseConnecting phase = iota + 1
 	phaseLoading
@@ -56,21 +66,25 @@ const (
 )
 
 type liveDraft struct {
-	entryID       string
-	turnID        string
-	generationID  string
-	scopeKind     protocolv3.ConversationScopeKind
-	scopeTaskID   string
-	channelKind   protocolv3.LiveChannelKind
-	toolCallID    string
-	attemptID     string
-	blocks        map[string]string
-	blockOrdinals map[string]uint32
-	order         []string
+	entryID                string
+	turnID                 string
+	generationID           string
+	scopeKind              protocolv3.ConversationScopeKind
+	scopeTaskID            string
+	channelKind            protocolv3.LiveChannelKind
+	toolCallID             string
+	attemptID              string
+	blocks                 map[string]string
+	toolNames              map[string]string
+	toolArguments          map[string]string
+	toolArgumentsTruncated map[string]bool
+	blockOrdinals          map[string]uint32
+	order                  []string
 }
 
 type pendingCommand struct {
 	id                  string
+	kind                protocolv3.CommandKind
 	text                string
 	target              string
 	status              protocolv3.CommandStatus
@@ -84,14 +98,15 @@ type pendingCommand struct {
 }
 
 type contentState struct {
-	entryID   string
-	blockID   string
-	digest    string
-	total     uint64
-	value     []byte
-	done      bool
-	verified  bool
-	truncated bool
+	entryID     string
+	blockID     string
+	digest      string
+	total       uint64
+	value       []byte
+	done        bool
+	verified    bool
+	truncated   bool
+	unavailable bool
 }
 
 type Model struct {
@@ -124,6 +139,7 @@ type Model struct {
 	historyIndex           int
 	historyScratch         string
 	pending                *pendingCommand
+	trackedPrompts         map[string]pendingCommand
 	notice                 string
 	scroll                 int
 	followTail             bool
@@ -189,7 +205,8 @@ func New(service Service) Model {
 	return Model{
 		service: service, sessionID: sessionID, phase: phaseConnecting, width: 80, height: 24,
 		entries: map[string]*protocolv3.CanonicalEntry{}, live: map[string]*liveDraft{}, content: map[string]*contentState{},
-		control: &protocolv3.CanonicalControl{}, followTail: true, historyIndex: -1,
+		trackedPrompts: map[string]pendingCommand{},
+		control:        &protocolv3.CanonicalControl{}, followTail: true, historyIndex: -1,
 	}
 }
 
@@ -229,6 +246,9 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		commands := []tea.Cmd{m.observeCommand(), m.heartbeatAfter()}
 		if m.pending != nil {
 			commands = append(commands, m.queryCommand(m.pending.id))
+		}
+		for _, commandID := range m.trackedPromptIDs() {
+			commands = append(commands, m.queryCommand(commandID))
 		}
 		if command := m.nextContentCommand(); command != nil {
 			commands = append(commands, command)
@@ -282,10 +302,29 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	case contentMsg:
 		m.contentLoading = false
 		if value.err != nil {
+			if !isCanonicalContentUnavailable(value.err) {
+				m.notice = "Large content read failed"
+				return m, nil
+			}
+			key := contentKey(value.entryID, value.blockID)
+			m.content[key] = &contentState{
+				entryID: value.entryID, blockID: value.blockID,
+				done: true, unavailable: true,
+			}
 			m.notice = "Large content unavailable"
 			return m, nil
 		}
 		if err := m.applyContent(value); err != nil {
+			var integrity *contentIntegrityError
+			if errors.As(err, &integrity) {
+				key := contentKey(value.entryID, value.blockID)
+				m.content[key] = &contentState{
+					entryID: value.entryID, blockID: value.blockID,
+					done: true, unavailable: true,
+				}
+				m.notice = "Large content failed integrity verification"
+				return m, m.nextContentCommand()
+			}
 			return m.fail(err)
 		}
 		return m, m.nextContentCommand()
@@ -302,7 +341,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.pending.status, m.pending.target = value.value.Status, value.value.TargetId
 		m.notice = publictext.Transform(value.value.PublicMessage)
 		if value.value.Status == protocolv3.CommandStatus_REJECTED {
-			if !value.frozen.interaction {
+			if isPromptCommand(value.frozen.kind) {
 				m.restoreRejectedDraft(value.frozen.text)
 			}
 			m.pending = nil
@@ -312,56 +351,79 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 		if value.value.Status == protocolv3.CommandStatus_SUCCEEDED {
-			if !value.frozen.interaction {
+			if isPromptCommand(value.frozen.kind) {
 				m.acceptPromptHistory(value.frozen.text)
 			}
 			m.pending = nil
 			return m, nil
 		}
+		if isPromptCommand(value.frozen.kind) {
+			tracked := *m.pending
+			m.trackedPrompts[tracked.id] = tracked
+			m.pending = nil
+			if promptIngressAccepted(value.value.PublicCode) {
+				m.acceptPromptHistory(tracked.text)
+				delete(m.trackedPrompts, tracked.id)
+				return m, nil
+			}
+		}
 		return m, queryAfter(value.frozen.id)
 	case queryDueMsg:
-		if m.pending == nil || m.pending.id != value.commandID {
+		if !m.isCommandAwaitingQuery(value.commandID) {
 			return m, nil
 		}
 		return m, m.queryCommand(value.commandID)
 	case queryMsg:
-		if m.pending == nil || m.pending.id != value.commandID {
+		command, isPending, exists := m.commandAwaitingQuery(value.commandID)
+		if !exists {
 			return m, nil
 		}
 		if value.err != nil {
 			return m.scheduleReconnect(value.err)
 		}
 		if !value.value.Found || value.value.Outcome == nil {
-			if m.pending.interaction && m.currentInteraction != nil &&
-				m.currentInteraction.InteractionId == m.pending.interactionID &&
-				m.controlEpoch == m.pending.controlEpoch &&
-				m.controlLiveRevision == m.pending.controlRevision {
-				return m, m.resolveInteractionCommand(*m.pending)
+			if isPending && command.interaction && m.currentInteraction != nil &&
+				m.currentInteraction.InteractionId == command.interactionID &&
+				m.controlEpoch == command.controlEpoch &&
+				m.controlLiveRevision == command.controlRevision {
+				return m, m.resolveInteractionCommand(command)
 			}
-			if !m.pending.interaction {
-				m.restoreRejectedDraft(m.pending.text)
+			if isPromptCommand(command.kind) {
+				m.restoreRejectedDraft(command.text)
 			}
 			m.notice = "Command was not accepted"
-			m.pending = nil
+			m.clearAwaitingCommand(value.commandID, isPending)
 			return m, nil
 		}
 		if value.value.Outcome.Status == protocolv3.CommandStatus_PENDING {
+			if isPromptCommand(command.kind) {
+				if isPending {
+					m.trackedPrompts[command.id] = command
+					m.pending = nil
+				}
+				if promptIngressAccepted(value.value.Outcome.PublicCode) {
+					m.notice = publictext.Transform(value.value.Outcome.PublicMessage)
+					m.acceptPromptHistory(command.text)
+					delete(m.trackedPrompts, command.id)
+					return m, nil
+				}
+			}
 			return m, queryAfter(value.commandID)
 		}
 		outcome := value.value.Outcome
 		m.notice = publictext.Transform(outcome.PublicMessage)
 		if outcome.Status == protocolv3.CommandStatus_SUCCEEDED {
-			if !m.pending.interaction {
-				m.acceptPromptHistory(m.pending.text)
+			if isPromptCommand(command.kind) {
+				m.acceptPromptHistory(command.text)
 			}
-			if m.pending.detach {
-				m.pending = nil
+			if command.detach {
+				m.clearAwaitingCommand(value.commandID, isPending)
 				return m, tea.Quit
 			}
-		} else if !m.pending.interaction {
-			m.restoreRejectedDraft(m.pending.text)
+		} else if isPromptCommand(command.kind) {
+			m.restoreRejectedDraft(command.text)
 		}
-		m.pending = nil
+		m.clearAwaitingCommand(value.commandID, isPending)
 		return m, nil
 	case reconnectDueMsg:
 		if value.generation != m.reconnectGeneration || m.phase != phaseReconnecting {
@@ -505,7 +567,7 @@ func (m Model) beginTargetedCommand(kind protocolv3.CommandKind, text, target st
 		m.notice = "A command is already pending"
 		return m, nil
 	}
-	command := pendingCommand{id: newID("terminal-command"), text: text, target: target, status: protocolv3.CommandStatus_PENDING, detach: detach}
+	command := pendingCommand{id: newID("terminal-command"), kind: kind, text: text, target: target, status: protocolv3.CommandStatus_PENDING, detach: detach}
 	m.pending = &command
 	if kind == protocolv3.CommandKind_SUBMIT_PROMPT || kind == protocolv3.CommandKind_STEER_ACTIVE_TURN {
 		m.draft = nil
@@ -924,7 +986,9 @@ func (m *Model) applyLive(event *protocolv3.LiveEventProjection) error {
 			generationID: event.GenerationId, scopeKind: event.ScopeKind,
 			scopeTaskID: event.ScopeSubagentTaskId, channelKind: event.ChannelKind,
 			toolCallID: event.ChannelToolCallId, attemptID: event.ChannelAttemptId,
-			blocks: map[string]string{}, blockOrdinals: map[string]uint32{},
+			blocks: map[string]string{}, toolNames: map[string]string{},
+			toolArguments: map[string]string{}, toolArgumentsTruncated: map[string]bool{},
+			blockOrdinals: map[string]uint32{},
 		}
 		m.live[event.DraftIdentity] = draft
 	} else if draft.turnID != event.TurnId || !draft.matches(event.GenerationId, event.ScopeKind, event.ScopeSubagentTaskId, event.ChannelKind, event.ChannelToolCallId, event.ChannelAttemptId) {
@@ -942,24 +1006,54 @@ func (m *Model) applyLive(event *protocolv3.LiveEventProjection) error {
 		draft.order = append(draft.order, event.BlockId)
 	}
 	if payload.toolStart {
-		draft.blocks[payload.blockID] = "[tool call]"
+		draft.toolNames[payload.blockID] = payload.toolName
+		draft.blocks[payload.blockID] = renderLiveToolCall(payload.toolName, "", false)
+	}
+	if payload.toolArgumentsDelta != "" {
+		arguments := draft.toolArguments[payload.blockID]
+		truncated := draft.toolArgumentsTruncated[payload.blockID]
+		if !truncated {
+			arguments, truncated = boundedUTF8Prefix(
+				arguments+payload.toolArgumentsDelta, maximumLiveToolArgumentBytes,
+			)
+			draft.toolArguments[payload.blockID] = arguments
+			draft.toolArgumentsTruncated[payload.blockID] = truncated
+		}
+		draft.blocks[payload.blockID] = renderLiveToolCall(
+			draft.toolNames[payload.blockID], arguments, truncated,
+		)
 	}
 	if payload.appendText != "" {
 		draft.blocks[payload.blockID] += publictext.Transform(payload.appendText)
 	}
 	if payload.finalSet {
-		draft.blocks[payload.blockID] = publictext.Transform(payload.finalText)
+		if payload.toolArgumentsFinal {
+			arguments, truncated := boundedUTF8Prefix(
+				payload.finalText, maximumLiveToolArgumentBytes,
+			)
+			draft.toolArguments[payload.blockID] = arguments
+			draft.toolArgumentsTruncated[payload.blockID] = truncated
+			draft.toolNames[payload.blockID] = payload.toolName
+			draft.blocks[payload.blockID] = renderLiveToolCall(
+				payload.toolName, arguments, truncated,
+			)
+		} else {
+			draft.blocks[payload.blockID] = publictext.Transform(payload.finalText)
+		}
 	}
 	return nil
 }
 
 type livePayloadView struct {
-	blockID     string
-	appendText  string
-	finalText   string
-	finalSet    bool
-	toolStart   bool
-	operational bool
+	blockID            string
+	appendText         string
+	toolName           string
+	toolArgumentsDelta string
+	finalText          string
+	finalSet           bool
+	toolStart          bool
+	toolArgumentsFinal bool
+	operational        bool
 }
 
 func validateLivePayload(event *protocolv3.LiveEventProjection) (livePayloadView, error) {
@@ -1017,17 +1111,18 @@ func validateLivePayload(event *protocolv3.LiveEventProjection) (livePayloadView
 		if event.EventType != protocolv3.LiveEventType_TOOL_CALL_START || value.ToolCallStart == nil || value.ToolCallStart.ToolCallId == "" || value.ToolCallStart.ToolName == "" {
 			return view, fmt.Errorf("live tool-call-start branch is invalid")
 		}
-		view.blockID, view.toolStart = value.ToolCallStart.BlockIdentity, true
+		view.blockID, view.toolName, view.toolStart = value.ToolCallStart.BlockIdentity, value.ToolCallStart.ToolName, true
 	case *protocolv3.LiveEventPayload_ToolCallDelta:
 		if event.EventType != protocolv3.LiveEventType_TOOL_CALL_DELTA || value.ToolCallDelta == nil || value.ToolCallDelta.ToolCallId == "" || value.ToolCallDelta.Delta == "" {
 			return view, fmt.Errorf("live tool-call-delta branch is invalid")
 		}
-		view.blockID = value.ToolCallDelta.BlockIdentity
+		view.blockID, view.toolArgumentsDelta = value.ToolCallDelta.BlockIdentity, value.ToolCallDelta.Delta
 	case *protocolv3.LiveEventPayload_ToolCallEnd:
 		if event.EventType != protocolv3.LiveEventType_TOOL_CALL_END || value.ToolCallEnd == nil || value.ToolCallEnd.ToolCallId == "" || value.ToolCallEnd.ToolName == "" || !validLiveTerminalText(value.ToolCallEnd.ArgumentsJson, value.ToolCallEnd.Utf8Bytes, value.ToolCallEnd.Digest) {
 			return view, fmt.Errorf("live tool-call-end branch is invalid")
 		}
-		view.blockID, view.finalText, view.finalSet = value.ToolCallEnd.BlockIdentity, "[tool call]", true
+		view.blockID, view.toolName = value.ToolCallEnd.BlockIdentity, value.ToolCallEnd.ToolName
+		view.finalText, view.finalSet, view.toolArgumentsFinal = value.ToolCallEnd.ArgumentsJson, true, true
 	case *protocolv3.LiveEventPayload_ToolResultStart:
 		if event.EventType != protocolv3.LiveEventType_TOOL_RESULT_START || value.ToolResultStart == nil || value.ToolResultStart.ToolCallId == "" || value.ToolResultStart.AttemptId == "" {
 			return view, fmt.Errorf("live tool-result-start branch is invalid")
@@ -1180,7 +1275,7 @@ func (m *Model) installEntry(entry *protocolv3.CanonicalEntry) error {
 	}
 	if m.entries[entry.EntryId] == nil {
 		entrySize := proto.Size(entry)
-		if len(m.entries) >= maximumCachedEntries || m.entryBytes+entrySize > maximumCachedBytes {
+		if len(m.entries) >= maximumCachedEntries || m.entryBytes+entrySize > maximumCachedEntryBytes {
 			return fmt.Errorf("canonical entry cache bound exceeded")
 		}
 		m.order = append(m.order, entry.EntryId)
@@ -1208,6 +1303,10 @@ func (m *Model) applyHistory(response *protocolv3.HistoryPageResponse) error {
 func (m *Model) applyContent(message contentMsg) error {
 	chunk := message.value
 	key := contentKey(message.entryID, message.blockID)
+	reference := m.contentReference(message.entryID, message.blockID)
+	if reference == nil || reference.Kind != protocolv3.ContentKind_CANONICAL_BLOB || reference.Digest != chunk.Digest || reference.Size != chunk.CompleteSize {
+		return fmt.Errorf("content hydration does not match canonical reference")
+	}
 	state := m.content[key]
 	if state == nil {
 		state = &contentState{entryID: message.entryID, blockID: message.blockID, digest: chunk.Digest, total: chunk.CompleteSize}
@@ -1218,17 +1317,18 @@ func (m *Model) applyContent(message contentMsg) error {
 	}
 	remaining := maximumCachedBytes - m.entryBytes - m.contentBytes()
 	if remaining <= 0 || len(chunk.Content) > remaining {
-		state.done, state.truncated = true, true
+		state.value = nil
+		state.done, state.unavailable = true, true
 		return nil
 	}
 	state.value = append(state.value, chunk.Content...)
 	if chunk.Complete {
 		if uint64(len(state.value)) != state.total || digest(state.value) != state.digest {
-			return fmt.Errorf("content hydration digest is invalid")
+			return &contentIntegrityError{reason: "content hydration digest is invalid"}
 		}
 		state.done, state.verified = true, true
 	} else if len(state.value) == maximumHydratedBytes {
-		state.done, state.truncated = true, true
+		return &contentIntegrityError{reason: "canonical blob exceeded its hard bound"}
 	}
 	return nil
 }
@@ -1346,8 +1446,11 @@ func (m Model) contentText(entryID, blockID string, reference *protocolv3.Canoni
 		return publictext.Transform(string(reference.InlineContent))
 	}
 	if state := m.content[contentKey(entryID, blockID)]; state != nil && state.done {
+		if state.unavailable {
+			return "[canonical content unavailable]"
+		}
 		if state.truncated {
-			return publictext.Transform(string(state.value)) + "\n[content truncated; digest not verified]"
+			return "[canonical content unavailable: client cache capacity]"
 		}
 		if !state.verified {
 			return "[canonical content integrity unavailable]"
@@ -1355,6 +1458,22 @@ func (m Model) contentText(entryID, blockID string, reference *protocolv3.Canoni
 		return publictext.Transform(string(state.value))
 	}
 	return fmt.Sprintf("[content %s · %d bytes]", reference.Digest, reference.Size)
+}
+
+func (m Model) contentReference(entryID, blockID string) *protocolv3.CanonicalContentReference {
+	entry := m.entries[entryID]
+	if entry == nil {
+		return nil
+	}
+	if blockID == "" {
+		return entry.Content
+	}
+	for _, block := range entry.Blocks {
+		if block.BlockId == blockID {
+			return block.Content
+		}
+	}
+	return nil
 }
 
 func (m *Model) nextContentCommand() tea.Cmd {
@@ -1517,8 +1636,53 @@ func queryAfter(id string) tea.Cmd {
 func (m Model) canEdit() bool {
 	return m.phase == phaseReady && m.height >= 4 && m.role == protocolv3.AttachmentRole_ATTACHMENT_ROLE_CONTROLLER && m.currentInteraction == nil
 }
-func (m Model) canSubmit() bool       { return m.canEdit() && m.pending == nil }
+func (m Model) canSubmit() bool {
+	return m.canEdit() && m.pending == nil && len(m.trackedPrompts) < maximumTrackedPromptCommands
+}
 func (m Model) transcriptHeight() int { return max(1, m.height-3) }
+
+func isPromptCommand(kind protocolv3.CommandKind) bool {
+	return kind == protocolv3.CommandKind_SUBMIT_PROMPT || kind == protocolv3.CommandKind_STEER_ACTIVE_TURN
+}
+
+func promptIngressAccepted(publicCode string) bool {
+	return publicCode == "PROMPT_CONSUMED" || publicCode == "TURN_RUNNING"
+}
+
+func (m Model) isCommandAwaitingQuery(commandID string) bool {
+	if m.pending != nil && m.pending.id == commandID {
+		return true
+	}
+	_, exists := m.trackedPrompts[commandID]
+	return exists
+}
+
+func (m Model) commandAwaitingQuery(commandID string) (pendingCommand, bool, bool) {
+	if m.pending != nil && m.pending.id == commandID {
+		return *m.pending, true, true
+	}
+	command, exists := m.trackedPrompts[commandID]
+	return command, false, exists
+}
+
+func (m *Model) clearAwaitingCommand(commandID string, isPending bool) {
+	if isPending {
+		if m.pending != nil && m.pending.id == commandID {
+			m.pending = nil
+		}
+		return
+	}
+	delete(m.trackedPrompts, commandID)
+}
+
+func (m Model) trackedPromptIDs() []string {
+	ids := make([]string, 0, len(m.trackedPrompts))
+	for commandID := range m.trackedPrompts {
+		ids = append(ids, commandID)
+	}
+	sort.Strings(ids)
+	return ids
+}
 
 func (m Model) activeRootTurnID() (string, bool) {
 	if m.control == nil {
@@ -1643,7 +1807,7 @@ func validateContentReference(value *protocolv3.CanonicalContentReference) error
 			return fmt.Errorf("canonical inline content integrity is invalid")
 		}
 	case protocolv3.ContentKind_CANONICAL_BLOB:
-		if len(value.InlineContent) != 0 || len(value.Digest) != 71 || !strings.HasPrefix(value.Digest, "sha256:") {
+		if len(value.InlineContent) != 0 || value.Size > maximumHydratedBytes || len(value.Digest) != 71 || !strings.HasPrefix(value.Digest, "sha256:") {
 			return fmt.Errorf("canonical blob reference is invalid")
 		}
 	default:
@@ -1697,6 +1861,42 @@ func wrap(value string, width int) []string {
 	wrapped := ansi.Hardwrap(value, max(width, 1), true)
 	return strings.Split(wrapped, "\n")
 }
+
+func renderLiveToolCall(toolName, arguments string, truncated bool) string {
+	preview := publictext.Transform(arguments)
+	if truncated {
+		preview += liveToolArgumentsTruncated
+	}
+	return fmt.Sprintf("%s(%s)", publictext.Transform(toolName), preview)
+}
+
+func boundedUTF8Prefix(value string, maximumBytes int) (string, bool) {
+	if len(value) <= maximumBytes {
+		return value, false
+	}
+	limit := maximumBytes - len(liveToolArgumentsTruncated)
+	if limit < 0 {
+		limit = 0
+	}
+	for limit > 0 && !utf8.RuneStart(value[limit]) {
+		limit--
+	}
+	return value[:limit], true
+}
+
+func isCanonicalContentUnavailable(err error) bool {
+	var protocolError interface{ StableProtocolCode() string }
+	if !errors.As(err, &protocolError) {
+		return false
+	}
+	switch protocolError.StableProtocolCode() {
+	case "CONTENT_REFERENCE_MISSING", "CONTENT_REFERENCE_CORRUPT", "CONTENT_BLOB_MISSING", "CONTENT_BLOB_CORRUPT":
+		return true
+	default:
+		return false
+	}
+}
+
 func pad(value string, width int) string {
 	missing := width - ansi.StringWidth(value)
 	if missing > 0 {

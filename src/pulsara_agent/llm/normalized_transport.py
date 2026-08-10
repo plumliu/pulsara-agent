@@ -37,7 +37,7 @@ from pulsara_agent.ports.provider_stream import (
     ProviderStreamFailure,
     ProviderStreamTerminal,
 )
-from pulsara_agent.primitives.authority_materialization import (
+from pulsara_agent.llm.stream_limits import (
     MAX_SANITIZED_SOURCE_PAYLOAD_BYTES_PER_MODEL_CALL,
     MAX_TRANSPORT_SOURCE_ITEMS_PER_MODEL_CALL,
 )

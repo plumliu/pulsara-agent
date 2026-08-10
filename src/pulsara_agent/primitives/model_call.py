@@ -1,9 +1,4 @@
-"""Event-safe model target, call, budget, and usage contracts.
-
-This module deliberately has no dependency on events, transports, runtime
-objects, credentials, or provider SDKs.  The values defined here are safe to
-persist in the event ledger and use as cross-layer identity contracts.
-"""
+"""Small process-local model target, budget, usage, and failure contracts."""
 
 from __future__ import annotations
 
@@ -14,8 +9,6 @@ from enum import StrEnum
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-
-from pulsara_agent.primitives.frozen import StableEventIdentityFact
 
 
 class ModelCallPurpose(StrEnum):
@@ -33,8 +26,6 @@ class ModelContextMode(StrEnum):
 
 
 def canonical_json_bytes(value: object) -> bytes:
-    """Serialize a fingerprint payload deterministically and strictly."""
-
     return json.dumps(
         value,
         ensure_ascii=False,
@@ -90,22 +81,16 @@ class ResolvedModelOptionsFact(BaseModel):
     @model_validator(mode="after")
     def _validate_options(self) -> "ResolvedModelOptionsFact":
         expected = resolved_model_options_fingerprint(
-            reasoning_effort=self.reasoning_effort,
+            reasoning_effort=self.reasoning_effort
         )
         if self.options_fingerprint != expected:
             raise ValueError("options_fingerprint does not match effective options")
         return self
 
 
-def resolved_model_options_fingerprint(
-    *,
-    reasoning_effort: str | None,
-) -> str:
+def resolved_model_options_fingerprint(*, reasoning_effort: str | None) -> str:
     return sha256_fingerprint(
-        "resolved-model-options:v2",
-        {
-            "reasoning_effort": reasoning_effort,
-        },
+        "resolved-model-options:v2", {"reasoning_effort": reasoning_effort}
     )
 
 
@@ -138,10 +123,8 @@ class ModelCallDiagnosticFact(BaseModel):
         if len(self.attributes) > 16:
             raise ValueError("diagnostic attributes exceed 16 entries")
         keys = [item[0] for item in self.attributes]
-        if len(set(keys)) != len(keys):
-            raise ValueError("diagnostic attribute keys must be unique")
-        if keys != sorted(keys):
-            raise ValueError("diagnostic attributes must be sorted by key")
+        if len(set(keys)) != len(keys) or keys != sorted(keys):
+            raise ValueError("diagnostic attribute keys must be unique and sorted")
         for key, value in self.attributes:
             if not key or len(key) > 96:
                 raise ValueError("diagnostic attribute key is invalid")
@@ -178,34 +161,6 @@ class ModelTokenUsageFact(BaseModel):
         return self
 
 
-class RuntimeDerivedObservationCarrierContractFact(BaseModel):
-    """Run-frozen provider wire contract for typed runtime observations."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    schema_version: Literal["runtime_derived_observation_carrier.v2"] = (
-        "runtime_derived_observation_carrier.v2"
-    )
-    carrier_id: str = Field(min_length=1)
-    carrier_version: str = Field(min_length=1)
-    provider_api: str = Field(min_length=1)
-    provider_role_contract: Literal["typed_provider_user_carrier"] = (
-        "typed_provider_user_carrier"
-    )
-    wire_shape_fingerprint: str = Field(min_length=1)
-    contract_fingerprint: str = Field(min_length=1)
-
-    @model_validator(mode="after")
-    def _validate_contract(self) -> "RuntimeDerivedObservationCarrierContractFact":
-        expected = sha256_fingerprint(
-            "runtime-derived-observation-carrier:v2",
-            self.model_dump(mode="json", exclude={"contract_fingerprint"}),
-        )
-        if self.contract_fingerprint != expected:
-            raise ValueError("runtime observation carrier fingerprint mismatch")
-        return self
-
-
 class ResolvedModelTargetFact(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -228,15 +183,9 @@ class ResolvedModelTargetFact(BaseModel):
     effective_options: ResolvedModelOptionsFact
     context_budget: ResolvedModelContextBudgetFact
     token_estimator: TokenEstimatorFact
-    runtime_observation_carrier: RuntimeDerivedObservationCarrierContractFact | None
 
     @model_validator(mode="after")
     def _validate_target(self) -> "ResolvedModelTargetFact":
-        if (
-            self.runtime_observation_carrier is not None
-            and self.runtime_observation_carrier.provider_api != self.api
-        ):
-            raise ValueError("runtime observation carrier provider API mismatch")
         expected_pre_margin = min(
             self.limits.max_input_tokens,
             self.limits.total_context_tokens
@@ -267,9 +216,7 @@ class ResolvedModelTargetFact(BaseModel):
         return self
 
 
-def resolved_model_target_fingerprint(
-    payload_without_fingerprint: dict[str, Any],
-) -> str:
+def resolved_model_target_fingerprint(payload_without_fingerprint: dict[str, Any]) -> str:
     return sha256_fingerprint("resolved-model-target:v3", payload_without_fingerprint)
 
 
@@ -293,588 +240,6 @@ class ResolvedModelCallFact(BaseModel):
             raise ValueError(
                 f"{self.purpose.value} requires context_mode={expected_mode.value}"
             )
-        return self
-
-
-MeasurementStage = Literal["tool_result_render", "section_allocation", "final_payload"]
-
-
-class ContextBudgetReportEvent(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    target_fingerprint: str
-    resolved_model_call_id: str
-    measurement_stage: MeasurementStage
-    total_context_tokens: int = Field(ge=1)
-    max_input_tokens: int = Field(ge=1)
-    max_output_tokens: int = Field(ge=1)
-    effective_output_tokens: int = Field(ge=1)
-    safety_margin_tokens: int = Field(ge=0)
-    input_budget_tokens: int = Field(ge=1)
-    sections_estimated_tokens: int | None = Field(default=None, ge=0)
-    tools_estimated_tokens: int | None = Field(default=None, ge=0)
-    envelope_estimated_tokens: int | None = Field(default=None, ge=0)
-    allocation_estimated_tokens: int | None = Field(default=None, ge=0)
-    final_payload_estimated_tokens: int | None = Field(default=None, ge=0)
-    non_transcript_baseline_tokens: int | None = Field(default=None, ge=0)
-    transcript_estimated_tokens: int | None = Field(default=None, ge=0)
-    estimator: TokenEstimatorFact
-
-    @model_validator(mode="after")
-    def _validate_measurements(self) -> "ContextBudgetReportEvent":
-        measurements = (
-            self.sections_estimated_tokens,
-            self.tools_estimated_tokens,
-            self.envelope_estimated_tokens,
-            self.allocation_estimated_tokens,
-            self.final_payload_estimated_tokens,
-            self.non_transcript_baseline_tokens,
-            self.transcript_estimated_tokens,
-        )
-        if self.measurement_stage == "tool_result_render":
-            if any(value is not None for value in measurements):
-                raise ValueError(
-                    "tool_result_render stage cannot contain aggregate measurements"
-                )
-        elif self.measurement_stage == "section_allocation":
-            required = (
-                self.sections_estimated_tokens,
-                self.tools_estimated_tokens,
-                self.allocation_estimated_tokens,
-            )
-            unavailable = (
-                self.envelope_estimated_tokens,
-                self.final_payload_estimated_tokens,
-                self.non_transcript_baseline_tokens,
-                self.transcript_estimated_tokens,
-            )
-            if any(value is None for value in required) or any(
-                value is not None for value in unavailable
-            ):
-                raise ValueError("section_allocation measurements are incomplete")
-        elif any(value is None for value in measurements):
-            raise ValueError("final_payload stage requires every measurement")
-
-        if (
-            self.allocation_estimated_tokens is not None
-            and self.sections_estimated_tokens is not None
-            and self.tools_estimated_tokens is not None
-            and self.allocation_estimated_tokens
-            != self.sections_estimated_tokens + self.tools_estimated_tokens
-        ):
-            raise ValueError("allocation estimate must equal sections + tools")
-        if (
-            self.final_payload_estimated_tokens is not None
-            and self.non_transcript_baseline_tokens is not None
-            and self.transcript_estimated_tokens is not None
-            and self.final_payload_estimated_tokens
-            != self.non_transcript_baseline_tokens + self.transcript_estimated_tokens
-        ):
-            raise ValueError("final payload estimate must equal baseline + transcript")
-        return self
-
-
-class CompactionTargetEstimateFact(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    estimate_scope: Literal["compiled_context_baseline", "transcript_only"]
-    basis_context_id: str | None
-    basis_context_compiled_sequence: int | None = Field(default=None, ge=1)
-    target_fingerprint: str
-    non_transcript_baseline_tokens: int | None = Field(default=None, ge=0)
-    transcript_tokens_before: int = Field(ge=0)
-    estimated_tokens_before: int = Field(ge=0)
-    summary_tokens_reserved: int = Field(ge=0)
-    retained_transcript_tokens: int = Field(ge=0)
-    protected_transcript_tokens: int = Field(ge=0)
-    summary_tokens_actual: int | None = Field(default=None, ge=0)
-    transcript_tokens_after: int | None = Field(default=None, ge=0)
-    estimated_tokens_after: int | None = Field(default=None, ge=0)
-    predicted_post_target_reached: bool | None
-
-    @model_validator(mode="after")
-    def _validate_scope(self) -> "CompactionTargetEstimateFact":
-        if self.estimate_scope == "compiled_context_baseline":
-            if (
-                self.basis_context_id is None
-                or self.basis_context_compiled_sequence is None
-                or self.non_transcript_baseline_tokens is None
-            ):
-                raise ValueError("compiled baseline attribution is required")
-            if self.estimated_tokens_before != (
-                self.non_transcript_baseline_tokens + self.transcript_tokens_before
-            ):
-                raise ValueError("compiled baseline pre-estimate is inconsistent")
-            if self.transcript_tokens_after is not None:
-                expected_after = (
-                    self.non_transcript_baseline_tokens + self.transcript_tokens_after
-                )
-                if self.estimated_tokens_after != expected_after:
-                    raise ValueError("compiled baseline post-estimate is inconsistent")
-        else:
-            if (
-                self.basis_context_id is not None
-                or self.basis_context_compiled_sequence is not None
-                or self.non_transcript_baseline_tokens is not None
-            ):
-                raise ValueError(
-                    "transcript-only estimate cannot contain compiled attribution"
-                )
-            if self.estimated_tokens_before != self.transcript_tokens_before:
-                raise ValueError("transcript-only pre-estimate is inconsistent")
-            if self.predicted_post_target_reached is not None:
-                raise ValueError(
-                    "transcript-only estimate cannot claim full target success"
-                )
-            if (
-                self.transcript_tokens_after is not None
-                and self.estimated_tokens_after != self.transcript_tokens_after
-            ):
-                raise ValueError("transcript-only post-estimate is inconsistent")
-        if (self.transcript_tokens_after is None) != (
-            self.estimated_tokens_after is None
-        ):
-            raise ValueError(
-                "post-compaction estimates must be both present or both absent"
-            )
-        if (self.summary_tokens_actual is None) != (
-            self.transcript_tokens_after is None
-        ):
-            raise ValueError(
-                "actual summary and post-compaction estimates must appear together"
-            )
-        if (
-            self.summary_tokens_actual is not None
-            and self.transcript_tokens_after
-            != self.summary_tokens_actual
-            + self.retained_transcript_tokens
-            + self.protected_transcript_tokens
-        ):
-            raise ValueError(
-                "post-compaction transcript must equal summary + retained + protected"
-            )
-        if (
-            self.summary_tokens_actual is not None
-            and self.summary_tokens_actual > self.summary_tokens_reserved
-        ):
-            raise ValueError("actual summary tokens exceed the planning reservation")
-        if (
-            self.transcript_tokens_after is None
-            and self.predicted_post_target_reached is not None
-        ):
-            raise ValueError("pre-compaction estimate cannot claim post-target success")
-        if (
-            self.estimate_scope == "compiled_context_baseline"
-            and self.transcript_tokens_after is not None
-            and self.predicted_post_target_reached is None
-        ):
-            raise ValueError(
-                "compiled baseline post-estimate requires a target prediction"
-            )
-        return self
-
-
-class CompactionObservedAfterMeasurementFact(BaseModel):
-    """Observed post-summary values that explain a failed invariant.
-
-    Successful target estimates remain strict.  This separate fact preserves
-    measurements that are themselves evidence of why summary validation
-    failed, without making an invalid success estimate representable.
-    """
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    summary_tokens_actual: int = Field(ge=0)
-    retained_transcript_tokens: int = Field(ge=0)
-    protected_transcript_tokens: int = Field(ge=0)
-    transcript_tokens_after: int = Field(ge=0)
-    estimated_tokens_after: int = Field(ge=0)
-    predicted_post_target_reached: bool | None
-    violation_code: Literal["summary_tokens_exceed_reservation"]
-
-    @model_validator(mode="after")
-    def _validate_observed_after(self) -> "CompactionObservedAfterMeasurementFact":
-        if self.transcript_tokens_after != (
-            self.summary_tokens_actual
-            + self.retained_transcript_tokens
-            + self.protected_transcript_tokens
-        ):
-            raise ValueError(
-                "observed transcript must equal summary + retained + protected"
-            )
-        return self
-
-
-ProviderSemanticDraftKind = Literal[
-    "text_block_start",
-    "text_block_delta",
-    "text_block_end",
-    "thinking_block_start",
-    "thinking_block_delta",
-    "thinking_block_end",
-    "data_block_start",
-    "data_block_delta",
-    "data_block_end",
-    "tool_call_start",
-    "tool_call_delta",
-    "tool_call_end",
-    "provider_error",
-]
-
-
-class ModelStreamSegmentSealReason(StrEnum):
-    SOFT_TEXT_TOKEN_TARGET = "soft_text_token_target"
-    SOFT_STRING_BYTE_TARGET = "soft_string_byte_target"
-    SOFT_DATA_BYTE_TARGET = "soft_data_byte_target"
-    HARD_CONTENT_BYTE_LIMIT = "hard_content_byte_limit"
-    CANONICAL_EVENT_BYTE_BOUNDARY = "canonical_event_byte_boundary"
-    SOURCE_ITEM_LIMIT = "source_item_limit"
-    CONTIGUOUS_KEY_CHANGED = "contiguous_key_changed"
-    STRUCTURAL_BOUNDARY = "structural_boundary"
-    MAXIMUM_UNCONFIRMED_AGE = "maximum_unconfirmed_age"
-    TERMINAL_BOUNDARY = "terminal_boundary"
-    CANCELLATION_BOUNDARY = "cancellation_boundary"
-
-
-class ModelStreamDurableSemanticKind(StrEnum):
-    TEXT_BLOCK_START = "text_block_start"
-    TEXT_BLOCK_SEGMENT = "text_block_segment"
-    TEXT_BLOCK_END = "text_block_end"
-    THINKING_BLOCK_START = "thinking_block_start"
-    THINKING_BLOCK_SEGMENT = "thinking_block_segment"
-    THINKING_BLOCK_END = "thinking_block_end"
-    DATA_BLOCK_START = "data_block_start"
-    DATA_BLOCK_SEGMENT = "data_block_segment"
-    DATA_BLOCK_END = "data_block_end"
-    TOOL_CALL_START = "tool_call_start"
-    TOOL_CALL_ARGUMENTS_SEGMENT = "tool_call_arguments_segment"
-    TOOL_CALL_END = "tool_call_end"
-    PROVIDER_ERROR = "provider_error"
-
-
-class ModelStreamSegmentPolicyContractFact(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    schema_version: Literal["model_stream_segment_policy_contract.v1"] = (
-        "model_stream_segment_policy_contract.v1"
-    )
-    contract_id: Literal["pulsara.model-stream-segment-policy"] = (
-        "pulsara.model-stream-segment-policy"
-    )
-    contract_version: Literal["v1"] = "v1"
-    text_target_estimated_tokens: int = Field(ge=1)
-    text_target_codepoints: int = Field(ge=1)
-    string_target_utf8_bytes: int = Field(ge=1)
-    data_target_utf8_bytes: int = Field(ge=1)
-    max_content_utf8_bytes: int = Field(ge=1)
-    max_canonical_event_bytes: int = Field(ge=1)
-    max_segment_source_items: int = Field(ge=1)
-    commit_max_durable_events: int = Field(ge=1)
-    commit_max_candidate_bytes: int = Field(ge=1)
-    max_unconfirmed_age_millis: int = Field(ge=1)
-    max_single_source_item_canonical_bytes: int = Field(ge=1)
-    estimator_contract_fingerprint: str = Field(min_length=1)
-    contract_fingerprint: str = Field(min_length=1)
-
-    @model_validator(mode="after")
-    def _validate_contract(self) -> "ModelStreamSegmentPolicyContractFact":
-        if self.string_target_utf8_bytes > self.max_content_utf8_bytes:
-            raise ValueError("string segment target exceeds content hard cap")
-        if self.data_target_utf8_bytes > self.max_content_utf8_bytes:
-            raise ValueError("data segment target exceeds content hard cap")
-        if self.max_content_utf8_bytes >= self.max_canonical_event_bytes:
-            raise ValueError("segment canonical cap must leave wrapper headroom")
-        expected = sha256_fingerprint(
-            "model-stream-segment-policy-contract:v1",
-            self.model_dump(mode="json", exclude={"contract_fingerprint"}),
-        )
-        if self.contract_fingerprint != expected:
-            raise ValueError("model stream segment policy fingerprint mismatch")
-        return self
-
-
-def _default_model_stream_segment_policy_contract() -> (
-    ModelStreamSegmentPolicyContractFact
-):
-    payload = {
-        "text_target_estimated_tokens": 8_192,
-        "text_target_codepoints": 32_768,
-        "string_target_utf8_bytes": 64 * 1024,
-        "data_target_utf8_bytes": 64 * 1024,
-        "max_content_utf8_bytes": 128 * 1024,
-        "max_canonical_event_bytes": 256 * 1024,
-        "max_segment_source_items": 4_096,
-        "commit_max_durable_events": 16,
-        "commit_max_candidate_bytes": 1024 * 1024,
-        "max_unconfirmed_age_millis": 1_000,
-        "max_single_source_item_canonical_bytes": 128 * 1024,
-        "estimator_contract_fingerprint": sha256_fingerprint(
-            "model-stream-segment-estimator:v1",
-            {"algorithm": "max(1, ceil(codepoints / 4))"},
-        ),
-    }
-    provisional = ModelStreamSegmentPolicyContractFact.model_construct(
-        **payload, contract_fingerprint="pending"
-    )
-    canonical = provisional.model_dump(mode="json", exclude={"contract_fingerprint"})
-    return ModelStreamSegmentPolicyContractFact(
-        **canonical,
-        contract_fingerprint=sha256_fingerprint(
-            "model-stream-segment-policy-contract:v1", canonical
-        ),
-    )
-
-
-DEFAULT_MODEL_STREAM_SEGMENT_POLICY_CONTRACT = (
-    _default_model_stream_segment_policy_contract()
-)
-
-
-class ModelStreamSourceSpanFact(BaseModel):
-    """Committed receipt span over sanitized provider semantic items."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    schema_version: Literal["model_stream_source_span.v2"] = (
-        "model_stream_source_span.v2"
-    )
-    resolved_model_call_id: str = Field(min_length=1)
-    model_call_start_event_id: str = Field(min_length=1)
-    first_transport_sequence_index: int = Field(ge=0)
-    last_transport_sequence_index: int = Field(ge=0)
-    source_item_count: int = Field(ge=1)
-    adapter_source_item_count: int = Field(ge=0)
-    adapter_source_payload_bytes: int = Field(ge=0)
-    synthetic_source_item_count: int = Field(ge=0)
-    synthetic_source_payload_bytes: int = Field(ge=0)
-    first_draft_kind: ProviderSemanticDraftKind
-    last_draft_kind: ProviderSemanticDraftKind
-    source_accumulator_before: str = Field(min_length=1)
-    source_accumulator_after: str = Field(min_length=1)
-    source_span_fingerprint: str = Field(min_length=1)
-
-    @model_validator(mode="after")
-    def _validate_span(self) -> "ModelStreamSourceSpanFact":
-        if self.last_transport_sequence_index != (
-            self.first_transport_sequence_index + self.source_item_count - 1
-        ):
-            raise ValueError("model stream source span range/count mismatch")
-        if (
-            self.source_item_count == 1
-            and self.first_draft_kind != self.last_draft_kind
-        ):
-            raise ValueError("singleton source span requires one draft kind")
-        if (
-            self.adapter_source_item_count + self.synthetic_source_item_count
-            != self.source_item_count
-        ):
-            raise ValueError("model stream source ownership count mismatch")
-        if (self.adapter_source_item_count == 0) != (
-            self.adapter_source_payload_bytes == 0
-        ):
-            raise ValueError("adapter source item/payload measurement mismatch")
-        if (self.synthetic_source_item_count == 0) != (
-            self.synthetic_source_payload_bytes == 0
-        ):
-            raise ValueError("synthetic source item/payload measurement mismatch")
-        expected = sha256_fingerprint(
-            "model-stream-source-span:v2",
-            self.model_dump(mode="json", exclude={"source_span_fingerprint"}),
-        )
-        if self.source_span_fingerprint != expected:
-            raise ValueError("model stream source span fingerprint mismatch")
-        return self
-
-
-class ModelStreamSemanticAttributionFact(BaseModel):
-    """Exact durable identity of one singleton or coalesced segment event."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    schema_version: Literal["model_stream_semantic_attribution.v2"] = (
-        "model_stream_semantic_attribution.v2"
-    )
-    resolved_model_call_id: str = Field(min_length=1)
-    model_call_start_event_id: str = Field(min_length=1)
-    durable_semantic_event_index: int = Field(ge=0)
-    durable_kind: ModelStreamDurableSemanticKind
-    source_span: ModelStreamSourceSpanFact
-    segment_seal_reason: ModelStreamSegmentSealReason | None
-    segment_policy_contract_fingerprint: str = Field(min_length=1)
-    attribution_fingerprint: str = Field(min_length=1)
-
-    @model_validator(mode="after")
-    def _validate_fingerprint(self) -> "ModelStreamSemanticAttributionFact":
-        expected = sha256_fingerprint(
-            "model-stream-semantic-attribution:v2",
-            self.model_dump(mode="json", exclude={"attribution_fingerprint"}),
-        )
-        if self.attribution_fingerprint != expected:
-            raise ValueError("model stream semantic attribution fingerprint mismatch")
-        if (
-            self.source_span.resolved_model_call_id != self.resolved_model_call_id
-            or self.source_span.model_call_start_event_id
-            != self.model_call_start_event_id
-        ):
-            raise ValueError("model stream attribution/source-span identity mismatch")
-        is_segment = self.durable_kind in {
-            ModelStreamDurableSemanticKind.TEXT_BLOCK_SEGMENT,
-            ModelStreamDurableSemanticKind.THINKING_BLOCK_SEGMENT,
-            ModelStreamDurableSemanticKind.DATA_BLOCK_SEGMENT,
-            ModelStreamDurableSemanticKind.TOOL_CALL_ARGUMENTS_SEGMENT,
-        }
-        if is_segment != (self.segment_seal_reason is not None):
-            raise ValueError("only model stream segments carry a seal reason")
-        expected_draft_kind: dict[
-            ModelStreamDurableSemanticKind,
-            ProviderSemanticDraftKind,
-        ] = {
-            ModelStreamDurableSemanticKind.TEXT_BLOCK_START: "text_block_start",
-            ModelStreamDurableSemanticKind.TEXT_BLOCK_SEGMENT: "text_block_delta",
-            ModelStreamDurableSemanticKind.TEXT_BLOCK_END: "text_block_end",
-            ModelStreamDurableSemanticKind.THINKING_BLOCK_START: (
-                "thinking_block_start"
-            ),
-            ModelStreamDurableSemanticKind.THINKING_BLOCK_SEGMENT: (
-                "thinking_block_delta"
-            ),
-            ModelStreamDurableSemanticKind.THINKING_BLOCK_END: "thinking_block_end",
-            ModelStreamDurableSemanticKind.DATA_BLOCK_START: "data_block_start",
-            ModelStreamDurableSemanticKind.DATA_BLOCK_SEGMENT: "data_block_delta",
-            ModelStreamDurableSemanticKind.DATA_BLOCK_END: "data_block_end",
-            ModelStreamDurableSemanticKind.TOOL_CALL_START: "tool_call_start",
-            ModelStreamDurableSemanticKind.TOOL_CALL_ARGUMENTS_SEGMENT: (
-                "tool_call_delta"
-            ),
-            ModelStreamDurableSemanticKind.TOOL_CALL_END: "tool_call_end",
-            ModelStreamDurableSemanticKind.PROVIDER_ERROR: "provider_error",
-        }
-        expected = expected_draft_kind[self.durable_kind]
-        if (
-            self.source_span.first_draft_kind != expected
-            or self.source_span.last_draft_kind != expected
-        ):
-            raise ValueError("model stream durable/source draft kind mismatch")
-        if not is_segment and self.source_span.source_item_count != 1:
-            raise ValueError(
-                "model stream singleton must cover exactly one source item"
-            )
-        return self
-
-
-class ModelStreamSemanticCommitMeasurementFact(BaseModel):
-    """One confirmed durable semantic batch and its exact physical charge."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    schema_version: Literal["model_stream_semantic_commit_measurement.v1"] = (
-        "model_stream_semantic_commit_measurement.v1"
-    )
-    commit_batch_index: int = Field(ge=0)
-    semantic_event_identities: tuple[StableEventIdentityFact, ...]
-    semantic_candidate_payload_bytes: int = Field(ge=0)
-    physical_charge_event_identity: StableEventIdentityFact
-    physical_charge_fingerprint: str = Field(min_length=1)
-    batch_measurement_fingerprint: str = Field(min_length=1)
-
-    @model_validator(mode="after")
-    def _validate_measurement(self) -> "ModelStreamSemanticCommitMeasurementFact":
-        if not self.semantic_event_identities:
-            raise ValueError("model semantic commit measurement cannot be empty")
-        ids = tuple(item.event_id for item in self.semantic_event_identities)
-        if len(ids) != len(set(ids)):
-            raise ValueError("model semantic commit measurement IDs must be unique")
-        if self.physical_charge_event_identity.event_type != (
-            "PHYSICAL_OPERATION_CHARGE_APPLIED"
-        ):
-            raise ValueError("model semantic commit measurement requires charge event")
-        expected = sha256_fingerprint(
-            "model-stream-semantic-commit-measurement:v1",
-            self.model_dump(mode="json", exclude={"batch_measurement_fingerprint"}),
-        )
-        if self.batch_measurement_fingerprint != expected:
-            raise ValueError("model semantic commit measurement fingerprint mismatch")
-        return self
-
-
-class ModelStreamSettlementMeasurementFact(BaseModel):
-    """Actual source, segment, and commit layout for one terminal model stream."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    schema_version: Literal["model_stream_settlement_measurement.v1"] = (
-        "model_stream_settlement_measurement.v1"
-    )
-    segment_policy_contract_fingerprint: str = Field(min_length=1)
-    physical_accounting_mode: Literal["accounted", "unbootstrapped_test"]
-    adapter_source_item_count: int = Field(ge=0)
-    adapter_source_payload_bytes: int = Field(ge=0)
-    synthetic_source_item_count: int = Field(ge=0)
-    synthetic_source_payload_bytes: int = Field(ge=0)
-    source_item_count: int = Field(ge=0)
-    source_payload_bytes: int = Field(ge=0)
-    singleton_event_count: int = Field(ge=0)
-    segment_event_count: int = Field(ge=0)
-    durable_semantic_event_count: int = Field(ge=0)
-    segment_content_utf8_bytes: int = Field(ge=0)
-    segment_candidate_payload_bytes: int = Field(ge=0)
-    singleton_candidate_payload_bytes: int = Field(ge=0)
-    durable_candidate_payload_bytes: int = Field(ge=0)
-    semantic_commit_batches: tuple[ModelStreamSemanticCommitMeasurementFact, ...]
-    actual_semantic_commit_batch_count: int | None = Field(default=None, ge=0)
-    measurement_fingerprint: str = Field(min_length=1)
-
-    @model_validator(mode="after")
-    def _validate_measurement(self) -> "ModelStreamSettlementMeasurementFact":
-        if self.source_item_count != (
-            self.adapter_source_item_count + self.synthetic_source_item_count
-        ):
-            raise ValueError("model stream source measurement count mismatch")
-        if self.source_payload_bytes != (
-            self.adapter_source_payload_bytes + self.synthetic_source_payload_bytes
-        ):
-            raise ValueError("model stream source measurement bytes mismatch")
-        if self.durable_semantic_event_count != (
-            self.singleton_event_count + self.segment_event_count
-        ):
-            raise ValueError("model stream durable event measurement mismatch")
-        if self.durable_candidate_payload_bytes != (
-            self.segment_candidate_payload_bytes
-            + self.singleton_candidate_payload_bytes
-        ):
-            raise ValueError("model stream candidate byte measurement mismatch")
-        if self.physical_accounting_mode == "accounted":
-            if self.actual_semantic_commit_batch_count != len(
-                self.semantic_commit_batches
-            ):
-                raise ValueError("accounted model stream commit count mismatch")
-            if self.durable_semantic_event_count != sum(
-                len(item.semantic_event_identities)
-                for item in self.semantic_commit_batches
-            ):
-                raise ValueError("accounted model stream commit coverage mismatch")
-            indices = tuple(
-                item.commit_batch_index for item in self.semantic_commit_batches
-            )
-            if indices != tuple(range(len(indices))):
-                raise ValueError("model stream commit batch indices must be contiguous")
-            if self.durable_candidate_payload_bytes != sum(
-                item.semantic_candidate_payload_bytes
-                for item in self.semantic_commit_batches
-            ):
-                raise ValueError("model stream commit candidate bytes mismatch")
-        elif self.semantic_commit_batches or (
-            self.actual_semantic_commit_batch_count is not None
-        ):
-            raise ValueError(
-                "unbootstrapped model stream cannot claim physical batches"
-            )
-        expected = sha256_fingerprint(
-            "model-stream-settlement-measurement:v1",
-            self.model_dump(mode="json", exclude={"measurement_fingerprint"}),
-        )
-        if self.measurement_fingerprint != expected:
-            raise ValueError("model stream settlement measurement fingerprint mismatch")
         return self
 
 
@@ -918,9 +283,7 @@ class ProviderErrorSanitizationContractFact(BaseModel):
             self.model_dump(mode="json", exclude={"contract_fingerprint"}),
         )
         if self.contract_fingerprint != expected:
-            raise ValueError(
-                "provider error sanitization contract fingerprint mismatch"
-            )
+            raise ValueError("provider error sanitization contract fingerprint mismatch")
         return self
 
 
@@ -1074,124 +437,26 @@ class ProviderSanitizedErrorFact(BaseModel):
         return self
 
 
-class ModelCallControlDisposition(StrEnum):
-    ACCEPTED = "accepted"
-    SUPPRESSED_BY_TERMINATION = "suppressed_by_termination"
-    SUPPRESSED_BY_RECOVERY = "suppressed_by_recovery"
-
-
-class RunTerminationIntentAttributionFact(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    schema_version: Literal["run_termination_intent_attribution.v1"] = (
-        "run_termination_intent_attribution.v1"
-    )
-    intent_id: str = Field(min_length=1)
-    kind: Literal["user_stop", "host_teardown"]
-    requested_at_utc: str = Field(min_length=1)
-    requester_id: str = Field(min_length=1)
-    target_run_execution_activation_fingerprint: str = Field(min_length=1)
-    attribution_fingerprint: str = Field(min_length=1)
-
-    @model_validator(mode="after")
-    def _validate_fingerprint(self) -> "RunTerminationIntentAttributionFact":
-        expected = sha256_fingerprint(
-            "run-termination-intent-attribution:v1",
-            self.model_dump(mode="json", exclude={"attribution_fingerprint"}),
-        )
-        if self.attribution_fingerprint != expected:
-            raise ValueError("run termination intent attribution fingerprint mismatch")
-        return self
-
-
-class CommittedModelTextBlockFact(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    block_id: str = Field(min_length=1)
-    text: str
-    start_sequence: int = Field(ge=1)
-    end_sequence: int | None = Field(default=None, ge=1)
-    completion_status: Literal["completed", "interrupted"]
-
-
-class CommittedModelThinkingBlockFact(CommittedModelTextBlockFact):
-    pass
-
-
-class CommittedModelDataBlockFact(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    block_id: str = Field(min_length=1)
-    media_type: str = Field(min_length=1)
-    data: str
-    start_sequence: int = Field(ge=1)
-    end_sequence: int | None = Field(default=None, ge=1)
-    completion_status: Literal["completed", "interrupted"]
-
-
-class CommittedModelToolCallFact(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    tool_call_id: str = Field(min_length=1)
-    tool_call_name: str = Field(min_length=1)
-    raw_arguments_json: str
-    start_sequence: int = Field(ge=1)
-    end_sequence: int | None = Field(default=None, ge=1)
-    completion_status: Literal["completed", "interrupted"]
-
-
-class ModelCallResultControlDisposition(StrEnum):
-    SUCCESS_ELIGIBLE = "success_eligible"
-    AUDIT_ONLY = "audit_only"
-
-
-class CommittedModelCallResult(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    schema_version: Literal["committed_model_call_result.v1"] = (
-        "committed_model_call_result.v1"
-    )
-    resolved_model_call_id: str = Field(min_length=1)
-    model_call_start_event_id: str = Field(min_length=1)
-    model_call_start_sequence: int = Field(ge=1)
-    model_call_end_event_id: str = Field(min_length=1)
-    model_call_end_sequence: int = Field(ge=1)
-    terminal_outcome: Literal[
-        "completed", "provider_error", "cancelled", "runtime_error"
-    ]
-    control_disposition: ModelCallResultControlDisposition
-    text_blocks: tuple[CommittedModelTextBlockFact, ...]
-    combined_text: str
-    thinking_blocks: tuple[CommittedModelThinkingBlockFact, ...]
-    data_blocks: tuple[CommittedModelDataBlockFact, ...]
-    tool_calls: tuple[CommittedModelToolCallFact, ...]
-    provider_errors: tuple[ProviderSanitizedErrorFact, ...]
-    usage_status: Literal["reported", "missing"]
-    usage: ModelTokenUsageFact | None
-    reported_model_id: str | None
-    semantic_item_count: int = Field(ge=0)
-    source_through_sequence: int = Field(ge=1)
-    result_fingerprint: str = Field(min_length=1)
-
-    @model_validator(mode="after")
-    def _validate_result(self) -> "CommittedModelCallResult":
-        if (self.usage_status == "reported") != (self.usage is not None):
-            raise ValueError("committed model result usage mismatch")
-        expected_disposition = (
-            ModelCallResultControlDisposition.SUCCESS_ELIGIBLE
-            if self.terminal_outcome == "completed"
-            else ModelCallResultControlDisposition.AUDIT_ONLY
-        )
-        if self.control_disposition is not expected_disposition:
-            raise ValueError("committed model result terminal disposition mismatch")
-        if self.terminal_outcome == "provider_error" and not self.provider_errors:
-            raise ValueError("provider-error result requires a sanitized error")
-        if self.terminal_outcome != "provider_error" and self.provider_errors:
-            raise ValueError("non-provider-error result cannot carry provider errors")
-        expected = sha256_fingerprint(
-            "committed-model-call-result:v1",
-            self.model_dump(mode="json", exclude={"result_fingerprint"}),
-        )
-        if self.result_fingerprint != expected:
-            raise ValueError("committed model call result fingerprint mismatch")
-        return self
+__all__ = [
+    "ModelCallDiagnosticFact",
+    "ModelCallPurpose",
+    "ModelContextLimits",
+    "ModelContextMode",
+    "ModelTokenUsageFact",
+    "ProviderErrorSanitizationContractFact",
+    "ProviderModelStreamErrorCode",
+    "ProviderRetryAttemptSummaryFact",
+    "ProviderRetrySummaryFact",
+    "ProviderSanitizedDiagnosticFact",
+    "ProviderSanitizedDiagnosticKind",
+    "ProviderSanitizedErrorFact",
+    "ResolvedModelCallFact",
+    "ResolvedModelContextBudgetFact",
+    "ResolvedModelOptionsFact",
+    "ResolvedModelTargetFact",
+    "TokenEstimatorFact",
+    "canonical_json_bytes",
+    "resolved_model_options_fingerprint",
+    "resolved_model_target_fingerprint",
+    "sha256_fingerprint",
+]

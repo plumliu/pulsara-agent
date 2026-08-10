@@ -4,6 +4,7 @@ import asyncio
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from threading import Event
 
 import pytest
 
@@ -12,11 +13,12 @@ from pulsara_agent.conversation_kernel.contracts import (
     JobSafetyClass,
 )
 from pulsara_agent.conversation_kernel.jobs import KernelDurableJobExecutor
+from pulsara_agent.conversation_kernel.io import KernelSessionIO
 from pulsara_agent.conversation_kernel.job_model import DirectKernelJobModel
 from pulsara_agent.conversation_kernel.repository import AcceptedJobAttempt
 from pulsara_agent.llm.estimator import PulsaraHeuristicTokenEstimatorV1
 from pulsara_agent.primitives.model_call import ModelCallPurpose
-from tests.support.model_call import test_llm_config
+from tests.support.model_config import test_llm_config
 
 
 class _SettlementRepository:
@@ -61,6 +63,7 @@ def test_stage2_job_executor_close_joins_active_handler_and_settles_attempt() ->
         executor._active = set()  # type: ignore[attr-defined]
         executor._embedding = None  # type: ignore[attr-defined]
         executor._owns_embedding = False  # type: ignore[attr-defined]
+        executor._io = KernelSessionIO()  # type: ignore[attr-defined]
 
         async def polling_owner() -> None:
             await executor._stopping.wait()  # type: ignore[attr-defined]
@@ -77,6 +80,46 @@ def test_stage2_job_executor_close_joins_active_handler_and_settles_attempt() ->
         assert repository.settled[0]["terminal_status"] == "FAILED"
         assert repository.settled[0]["error_code"] == "WORKER_STOPPED"
         assert repository.settled[0]["retryable"] is True
+
+    asyncio.run(exercise())
+
+
+def test_job_cancellation_settles_only_after_physical_thread_exits() -> None:
+    async def exercise() -> None:
+        repository = _SettlementRepository()
+        started = Event()
+        release = Event()
+
+        def blocking_physical(*, deadline_monotonic: float) -> None:
+            assert deadline_monotonic > 0
+            started.set()
+            release.wait()
+
+        executor = object.__new__(KernelDurableJobExecutor)
+        executor._repository = repository  # type: ignore[attr-defined]
+        executor._io = KernelSessionIO()  # type: ignore[attr-defined]
+
+        async def handler(_attempt: AcceptedJobAttempt) -> None:
+            await executor._io.run(  # type: ignore[attr-defined]
+                blocking_physical,
+                deadline_monotonic=asyncio.get_running_loop().time() + 10,
+            )
+
+        executor._handlers = {"TEST_HANDLER": handler}  # type: ignore[attr-defined]
+        operation = asyncio.create_task(executor._execute(_attempt()))
+        assert await asyncio.to_thread(started.wait, 1)
+        operation.cancel()
+        await asyncio.sleep(0.05)
+        assert repository.settled == []
+
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await operation
+        assert len(repository.settled) == 1
+        assert repository.settled[0]["error_code"] == "WORKER_STOPPED"
+        await executor._io.aclose(  # type: ignore[attr-defined]
+            deadline_monotonic=asyncio.get_running_loop().time() + 1
+        )
 
     asyncio.run(exercise())
 
@@ -158,6 +201,7 @@ def test_job_provider_admission_is_installed_before_the_only_physical_call() -> 
         executor = object.__new__(KernelDurableJobExecutor)
         executor._repository = Repository()  # type: ignore[attr-defined]
         executor._model = Model()  # type: ignore[attr-defined]
+        executor._io = KernelSessionIO()  # type: ignore[attr-defined]
         attempt = replace(
             _attempt(),
             provider_input_token_limit=4096,
@@ -170,5 +214,8 @@ def test_job_provider_admission_is_installed_before_the_only_physical_call() -> 
         )
         assert result == {"ok": True}
         assert order == ["prepared", "admitted", "sent"]
+        await executor._io.aclose(  # type: ignore[attr-defined]
+            deadline_monotonic=asyncio.get_running_loop().time() + 1
+        )
 
     asyncio.run(exercise())

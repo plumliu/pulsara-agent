@@ -1,164 +1,158 @@
-"""Read-only exact-head PostgreSQL schema verifier."""
+"""Deep verifier for the clean conversation-kernel PostgreSQL catalog."""
 
 from __future__ import annotations
 
-import json
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from enum import StrEnum
-from importlib.resources import files
 from time import monotonic
 
-import psycopg
+from psycopg import Connection
 
-from pulsara_agent.storage.migrations.catalog import PostgresCatalogCanonicalizer
-from pulsara_agent.storage.migrations.contracts import (
-    PostgresDeepSchemaVerificationResult,
-    PostgresEffectivePrivilegeResult,
-    PostgresFastSchemaVerificationResult,
-    postgres_schema_fingerprint,
-)
+from pulsara_agent.storage.migrations.contracts import postgres_schema_fingerprint
 from pulsara_agent.storage.migrations.errors import (
     PostgresSchemaError,
     PostgresSchemaFailureCode,
 )
 from pulsara_agent.storage.migrations.grants import build_postgres_runtime_grant_policy
 from pulsara_agent.storage.migrations.manifest import (
-    POSTGRES_SCHEMA_MANIFESTS,
+    CONVERSATION_KERNEL_RELATIONS,
+    build_postgres_schema_manifest,
 )
-from pulsara_agent.storage.migrations.registry import (
-    POSTGRES_MIGRATION_REGISTRY,
-    PostgresMigrationRegistry,
-)
+from pulsara_agent.storage.migrations.registry import POSTGRES_MIGRATION_REGISTRY
 from pulsara_agent.storage.migrations.runner import (
-    _acquire_advisory_lock,
     _read_identity_from_connection,
-    _runtime_role_can_create_in_public_schema,
+    _validate_clean_ledger,
+    _verify_product_relations,
+    _verify_runtime_grants,
+    _verify_vector_capability,
     read_migration_ledger,
-    requirement_satisfied,
 )
 from pulsara_agent.storage.schema_contract import (
     VerifiedPostgresSchemaBinding,
     build_verified_postgres_schema_binding,
 )
-from pulsara_agent.storage.runtime_write_admission import (
-    require_runtime_write_epoch_matches_registry,
-)
+
+
+class PostgresMigrationHistoryStatus(StrEnum):
+    UNMANAGED = "unmanaged"
+    UP_TO_DATE = "up_to_date"
+    RESET_REQUIRED = "reset_required"
+
+
+def classify_migration_history(rows) -> PostgresMigrationHistoryStatus:
+    if rows is None:
+        return PostgresMigrationHistoryStatus.UNMANAGED
+    try:
+        _validate_clean_ledger(rows, POSTGRES_MIGRATION_REGISTRY.definition(0))
+    except (PostgresSchemaError, ValueError):
+        return PostgresMigrationHistoryStatus.RESET_REQUIRED
+    return PostgresMigrationHistoryStatus.UP_TO_DATE
+
+
+@dataclass(frozen=True, slots=True)
+class CleanVerificationResult:
+    status: str
+    universe_fingerprint: str
+    registry_prefix_fingerprint: str
+    verified_catalog_fingerprint: str
+    runtime_grant_policy_fingerprint: str
+    result_fingerprint: str
+
+    def to_dict(self) -> dict[str, object]:
+        return asdict(self)
 
 
 @dataclass(frozen=True, slots=True)
 class PostgresFastVerificationBundle:
     binding: VerifiedPostgresSchemaBinding
-    result: PostgresFastSchemaVerificationResult
+    result: CleanVerificationResult
 
 
-@dataclass(frozen=True, slots=True)
-class PostgresDeepVerificationBundle:
-    fast: PostgresFastVerificationBundle
-    result: PostgresDeepSchemaVerificationResult
-
-
-class PostgresMigrationHistoryStatus(StrEnum):
-    UNMIGRATED = "unmigrated"
-    BEHIND = "behind"
-    UP_TO_DATE = "up_to_date"
-    AHEAD = "ahead"
-    CONFLICT = "conflict"
+PostgresDeepVerificationBundle = PostgresFastVerificationBundle
 
 
 class PostgresSchemaVerifier:
-    def __init__(
-        self,
-        *,
-        registry: PostgresMigrationRegistry = POSTGRES_MIGRATION_REGISTRY,
-        canonicalizer: PostgresCatalogCanonicalizer | None = None,
-    ) -> None:
-        self._registry = registry
-        self._canonicalizer = canonicalizer or PostgresCatalogCanonicalizer()
-        self._expected = _load_expected_catalog(through_version=registry.latest_version)
-        self._expected_relation_names = tuple(
-            (str(item["schema_name"]), str(item["relation_name"]))
-            for item in self._expected["relation_execution_shapes"]
-        )
-
     def verify_fast_connection(
         self,
-        connection: psycopg.Connection,
+        connection: Connection,
         *,
         database_target_fingerprint: str,
         deadline_monotonic: float,
     ) -> PostgresFastVerificationBundle:
-        _require_remaining(deadline_monotonic)
-        identity = _read_identity_from_connection(connection)
-        _acquire_advisory_lock(
+        return self._verify(
             connection,
-            database_oid=identity.database_oid,
-            shared=True,
+            database_target_fingerprint=database_target_fingerprint,
             deadline_monotonic=deadline_monotonic,
         )
+
+    def verify_deep_connection(
+        self,
+        connection: Connection,
+        *,
+        database_target_fingerprint: str,
+        deadline_monotonic: float,
+    ) -> PostgresDeepVerificationBundle:
+        return self._verify(
+            connection,
+            database_target_fingerprint=database_target_fingerprint,
+            deadline_monotonic=deadline_monotonic,
+        )
+
+    def _verify(
+        self,
+        connection: Connection,
+        *,
+        database_target_fingerprint: str,
+        deadline_monotonic: float,
+    ) -> PostgresFastVerificationBundle:
+        if deadline_monotonic <= monotonic():
+            raise PostgresSchemaError(
+                PostgresSchemaFailureCode.DEADLINE_EXCEEDED,
+                "PostgreSQL verification deadline expired",
+                retryable=True,
+            )
+        identity = _read_identity_from_connection(connection)
         rows = read_migration_ledger(connection)
         if rows is None:
             raise PostgresSchemaError(
-                PostgresSchemaFailureCode.VERSION_BEHIND,
-                "database is not migrated; run pulsara db migrate",
+                PostgresSchemaFailureCode.UNMANAGED_DATABASE,
+                "clean migration ledger is absent",
             )
-        _validate_latest_history(rows, self._registry)
-        observed = self._canonicalizer.read_fast(
-            connection,
-            relation_names=self._expected_relation_names,
-        )
-        expected_fast = str(self._expected["fast_executable_schema_fingerprint"])
-        if observed.fast_executable_schema_fingerprint != expected_fast:
+        definition = POSTGRES_MIGRATION_REGISTRY.definition(0)
+        _validate_clean_ledger(rows, definition)
+        _verify_vector_capability(connection)
+        _verify_product_relations(connection)
+        _verify_runtime_grants(connection, identity.runtime_role)
+
+        extension = connection.execute(
+            """
+            SELECT e.extversion FROM pg_catalog.pg_extension e
+            JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace
+            WHERE e.extname = 'vector' AND n.nspname = 'public'
+            """
+        ).fetchone()
+        if extension is None:
+            raise PostgresSchemaError(
+                PostgresSchemaFailureCode.EXTENSION_MISSING,
+                "public.vector extension is absent",
+            )
+        catalog_fingerprint = _observed_catalog_fingerprint(connection)
+        if (
+            catalog_fingerprint
+            != build_postgres_schema_manifest().observed_catalog_fingerprint
+        ):
             raise PostgresSchemaError(
                 PostgresSchemaFailureCode.CATALOG_DRIFT,
-                "PostgreSQL executable schema differs from the packaged manifest",
+                "observed conversation-kernel catalog differs from clean baseline",
             )
-        extension_version = _require_pgvector(observed.extensions)
-        policy = build_postgres_runtime_grant_policy(self._registry.latest_version)
-        satisfied = tuple(
-            requirement.requirement_fingerprint
-            for requirement in policy.requirements
-            if requirement_satisfied(connection, identity.runtime_role, requirement)
-        )
-        missing = tuple(
-            requirement.requirement_fingerprint
-            for requirement in policy.requirements
-            if requirement.requirement_fingerprint not in set(satisfied)
-        )
-        can_create_in_public = _runtime_role_can_create_in_public_schema(
-            connection, identity.runtime_role
-        )
-        privilege_payload = {
-            "runtime_role": identity.runtime_role,
-            "satisfied_requirement_fingerprints": satisfied,
-            "missing_requirement_fingerprints": missing,
-            "runtime_role_can_create_in_public_schema": can_create_in_public,
-        }
-        privileges = PostgresEffectivePrivilegeResult(
-            **privilege_payload,
-            result_fingerprint=postgres_schema_fingerprint(
-                "pulsara:postgres-effective-privilege-result:v1",
-                privilege_payload,
-            ),
-        )
-        if missing:
-            raise PostgresSchemaError(
-                PostgresSchemaFailureCode.PRIVILEGE_MISSING,
-                f"runtime role lacks {len(missing)} required privileges",
-            )
-        runtime_write_epoch = require_runtime_write_epoch_matches_registry(
-            connection,
-            database_target_fingerprint=database_target_fingerprint,
-            expected_registry_prefix_fingerprint=(self._registry.registry_fingerprint),
-        )
+        grant_policy = build_postgres_runtime_grant_policy()
         verification_contract = postgres_schema_fingerprint(
-            "pulsara:postgres-fast-verification-contract:v1",
+            "pulsara:clean-schema-verification-contract:v1",
             {
-                "registry_prefix_fingerprint": self._registry.registry_fingerprint,
-                "expected_fast_executable_schema_fingerprint": expected_fast,
-                "grant_policy_fingerprint": policy.policy_fingerprint,
-                "runtime_write_admission_epoch_fingerprint": (
-                    runtime_write_epoch.epoch_fingerprint
-                ),
+                "universe_fingerprint": definition.identity.universe_fingerprint,
+                "relations": CONVERSATION_KERNEL_RELATIONS,
+                "required_extension": ("public", "vector", ">=0.5.0"),
+                "grant_policy_fingerprint": grant_policy.policy_fingerprint,
             },
         )
         binding = build_verified_postgres_schema_binding(
@@ -168,238 +162,121 @@ class PostgresSchemaVerifier:
             normalized_search_path=identity.normalized_search_path,
             runtime_role=identity.runtime_role,
             server_version_num=identity.server_version_num,
-            pgvector_extension_version=extension_version,
-            migration_head_version=self._registry.latest_version,
-            durable_registry_prefix_fingerprint=rows[-1].registry_prefix_fingerprint,
-            runtime_write_admission_epoch_fingerprint=(
-                runtime_write_epoch.epoch_fingerprint
-            ),
-            fast_executable_schema_fingerprint=observed.fast_executable_schema_fingerprint,
+            pgvector_extension_version=str(extension[0]),
+            migration_universe_id="pulsara.conversation-kernel.v1",
+            migration_universe_generation=1,
+            migration_universe_fingerprint=definition.identity.universe_fingerprint,
+            migration_head_version=0,
+            durable_registry_prefix_fingerprint=definition.registry_prefix_fingerprint,
+            verified_catalog_fingerprint=catalog_fingerprint,
+            runtime_grant_policy_fingerprint=grant_policy.policy_fingerprint,
             verification_contract_fingerprint=verification_contract,
         )
         result_payload = {
             "binding_fingerprint": binding.binding_fingerprint,
-            "ordered_ledger_rows": rows,
-            "expected_registry_prefix_fingerprint": self._registry.registry_fingerprint,
-            "observed_registry_prefix_fingerprint": rows[
-                -1
-            ].registry_prefix_fingerprint,
-            "expected_fast_executable_schema_fingerprint": expected_fast,
-            "observed_fast_executable_schema_fingerprint": observed.fast_executable_schema_fingerprint,
-            "effective_privilege_result": privileges,
+            "universe_fingerprint": definition.identity.universe_fingerprint,
+            "registry_prefix_fingerprint": definition.registry_prefix_fingerprint,
+            "verified_catalog_fingerprint": catalog_fingerprint,
+            "runtime_grant_policy_fingerprint": grant_policy.policy_fingerprint,
         }
-        result = PostgresFastSchemaVerificationResult(
-            **result_payload,
+        result = CleanVerificationResult(
+            status="verified",
+            universe_fingerprint=definition.identity.universe_fingerprint,
+            registry_prefix_fingerprint=definition.registry_prefix_fingerprint,
+            verified_catalog_fingerprint=catalog_fingerprint,
+            runtime_grant_policy_fingerprint=grant_policy.policy_fingerprint,
             result_fingerprint=postgres_schema_fingerprint(
-                "pulsara:postgres-fast-schema-verification-result:v1",
-                result_payload,
+                "pulsara:clean-schema-verification-result:v1", result_payload
             ),
         )
         return PostgresFastVerificationBundle(binding=binding, result=result)
 
-    def verify_deep_connection(
-        self,
-        connection: psycopg.Connection,
-        *,
-        database_target_fingerprint: str,
-        deadline_monotonic: float,
-    ) -> PostgresDeepVerificationBundle:
-        fast = self.verify_fast_connection(
-            connection,
-            database_target_fingerprint=database_target_fingerprint,
-            deadline_monotonic=deadline_monotonic,
-        )
-        observed = self._canonicalizer.read_deep(
-            connection,
-            relation_names=self._expected_relation_names,
-        )
-        expected_deep = str(self._expected["deep_catalog_fingerprint"])
-        if observed.deep_catalog_fingerprint != expected_deep:
-            raise PostgresSchemaError(
-                PostgresSchemaFailureCode.CATALOG_DRIFT,
-                "PostgreSQL deep catalog differs from the packaged manifest",
-            )
-        payload = {
-            "nested_fast_result_fingerprint": fast.result.result_fingerprint,
-            "expected_object_manifest_fingerprint": (
-                POSTGRES_SCHEMA_MANIFESTS[
-                    self._registry.latest_version
-                ].manifest_fingerprint
-            ),
-            "expected_deep_catalog_fingerprint": expected_deep,
-            "observed_deep_catalog_fingerprint": observed.deep_catalog_fingerprint,
-            "unexpected_object_fingerprints": (),
-            "missing_object_fingerprints": (),
-        }
-        result = PostgresDeepSchemaVerificationResult(
-            **payload,
-            result_fingerprint=postgres_schema_fingerprint(
-                "pulsara:postgres-deep-schema-verification-result:v1", payload
-            ),
-        )
-        return PostgresDeepVerificationBundle(fast=fast, result=result)
 
-
-def classify_migration_history(
-    rows: tuple[object, ...] | None,
-    registry: PostgresMigrationRegistry = POSTGRES_MIGRATION_REGISTRY,
-) -> PostgresMigrationHistoryStatus:
-    if rows is None:
-        return PostgresMigrationHistoryStatus.UNMIGRATED
-    if not rows:
-        return PostgresMigrationHistoryStatus.CONFLICT
-    if tuple(row.version for row in rows) != tuple(range(len(rows))):
-        return PostgresMigrationHistoryStatus.CONFLICT
-    for row, expected in zip(
-        rows[: len(registry.definitions)],
-        registry.definitions,
-        strict=False,
-    ):
-        if (
-            row.version != expected.version
-            or row.name != expected.name
-            or row.resource_checksum != expected.expected_sha256
-            or row.migration_contract_fingerprint
-            != expected.migration_contract_fingerprint
-            or row.registry_prefix_fingerprint != expected.registry_prefix_fingerprint
-        ):
-            return PostgresMigrationHistoryStatus.CONFLICT
-    if len(rows) > len(registry.definitions):
-        previous_prefix = registry.registry_fingerprint
-        for row in rows[len(registry.definitions) :]:
-            expected_prefix = postgres_schema_fingerprint(
-                "pulsara:postgres-migration-registry-prefix:v1",
-                {
-                    "previous_registry_prefix_fingerprint": previous_prefix,
-                    "migration_contract_fingerprint": (
-                        row.migration_contract_fingerprint
-                    ),
-                },
-            )
-            if row.registry_prefix_fingerprint != expected_prefix:
-                return PostgresMigrationHistoryStatus.CONFLICT
-            previous_prefix = expected_prefix
-    if len(rows) < len(registry.definitions):
-        return PostgresMigrationHistoryStatus.BEHIND
-    if len(rows) > len(registry.definitions):
-        return PostgresMigrationHistoryStatus.AHEAD
-    return PostgresMigrationHistoryStatus.UP_TO_DATE
-
-
-def _validate_latest_history(
-    rows: tuple[object, ...], registry: PostgresMigrationRegistry
-) -> None:
-    status = classify_migration_history(rows, registry)
-    if status is PostgresMigrationHistoryStatus.BEHIND:
-        raise PostgresSchemaError(
-            PostgresSchemaFailureCode.VERSION_BEHIND,
-            "database migration head is behind this Pulsara binary",
-        )
-    if status is PostgresMigrationHistoryStatus.AHEAD:
-        raise PostgresSchemaError(
-            PostgresSchemaFailureCode.VERSION_AHEAD,
-            "database migration head is ahead of this Pulsara binary",
-        )
-    if status is not PostgresMigrationHistoryStatus.UP_TO_DATE:
-        raise PostgresSchemaError(
-            PostgresSchemaFailureCode.HISTORY_CONFLICT,
-            "migration ledger history conflicts with the packaged registry",
-        )
-
-
-def _load_expected_catalog(
-    *,
-    through_version: int | None = None,
-) -> dict[str, object]:
-    requested_version = (
-        POSTGRES_MIGRATION_REGISTRY.latest_version
-        if through_version is None
-        else through_version
+def _observed_catalog_fingerprint(connection: Connection) -> str:
+    columns = tuple(
+        tuple(row)
+        for row in connection.execute(
+            """
+            SELECT table_name, ordinal_position, column_name, udt_schema, udt_name,
+                   is_nullable, COALESCE(column_default, '')
+            FROM information_schema.columns
+            WHERE table_schema = 'pulsara_v3'
+            ORDER BY table_name, ordinal_position
+            """
+        ).fetchall()
     )
-    catalog_version = requested_version
-    expected_manifest = POSTGRES_SCHEMA_MANIFESTS[catalog_version]
-    resource = files("pulsara_agent.storage.migrations").joinpath(
-        f"expected_catalog_v{catalog_version}.json"
+    constraints = tuple(
+        tuple(row)
+        for row in connection.execute(
+            """
+            SELECT c.relname, con.conname, con.contype,
+                   pg_catalog.pg_get_constraintdef(con.oid, true)
+            FROM pg_catalog.pg_constraint con
+            JOIN pg_catalog.pg_class c ON c.oid = con.conrelid
+            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = 'pulsara_v3'
+            ORDER BY c.relname, con.conname
+            """
+        ).fetchall()
     )
-    payload = json.loads(resource.read_text(encoding="utf-8"))
-    expected_fast = postgres_schema_fingerprint(
-        "pulsara:postgres-fast-executable-schema:v1",
+    indexes = tuple(
+        tuple(row)
+        for row in connection.execute(
+            """
+            SELECT tablename, indexname, indexdef FROM pg_catalog.pg_indexes
+            WHERE schemaname = 'pulsara_v3' ORDER BY tablename, indexname
+            """
+        ).fetchall()
+    )
+    functions = tuple(
+        tuple(row)
+        for row in connection.execute(
+            """
+            SELECT p.proname, pg_catalog.pg_get_function_identity_arguments(p.oid),
+                   pg_catalog.pg_get_function_result(p.oid), l.lanname,
+                   p.provolatile, p.proisstrict, p.prosecdef, p.proleakproof,
+                   p.proparallel, COALESCE(array_to_string(p.proconfig, E'\\x1f'), ''),
+                   pg_catalog.pg_get_functiondef(p.oid)
+            FROM pg_catalog.pg_proc p
+            JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+            JOIN pg_catalog.pg_language l ON l.oid = p.prolang
+            WHERE n.nspname = 'pulsara_v3' ORDER BY p.proname
+            """
+        ).fetchall()
+    )
+    triggers = tuple(
+        tuple(row)
+        for row in connection.execute(
+            """
+            SELECT c.relname, t.tgname, t.tgenabled,
+                   pg_catalog.pg_get_triggerdef(t.oid, true),
+                   pn.nspname, p.proname,
+                   pg_catalog.pg_get_function_identity_arguments(p.oid)
+            FROM pg_catalog.pg_trigger t
+            JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid
+            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+            JOIN pg_catalog.pg_proc p ON p.oid = t.tgfoid
+            JOIN pg_catalog.pg_namespace pn ON pn.oid = p.pronamespace
+            WHERE n.nspname = 'pulsara_v3' AND NOT t.tgisinternal
+            ORDER BY c.relname, t.tgname
+            """
+        ).fetchall()
+    )
+    return postgres_schema_fingerprint(
+        "pulsara:postgres-observed-catalog:v2",
         {
-            "extensions": tuple(
-                sorted(
-                    (
-                        {
-                            "schema_name": item["schema_name"],
-                            "extension_name": item["extension_name"],
-                        }
-                        for item in expected_manifest.required_extensions
-                    ),
-                    key=lambda item: (
-                        str(item["schema_name"]),
-                        str(item["extension_name"]),
-                    ),
-                )
-            ),
-            "types": _freeze(payload["types"]),
-            "relation_execution_shapes": _freeze(payload["relation_execution_shapes"]),
-            "function_execution_shapes": _freeze(payload["function_execution_shapes"]),
+            "relations": tuple(sorted(CONVERSATION_KERNEL_RELATIONS)),
+            "columns": columns,
+            "constraints": constraints,
+            "indexes": indexes,
+            "functions": functions,
+            "triggers": triggers,
         },
     )
-    if payload.get("fast_executable_schema_fingerprint") != expected_fast:
-        raise RuntimeError("packaged expected fast catalog fingerprint mismatch")
-    deep_payload = {
-        "schema_version": "postgres_deep_observed_catalog.v1",
-        "fast_observed_catalog_fingerprint": expected_fast,
-        "relations": _freeze(payload["relations"]),
-        "functions": _freeze(payload["functions"]),
-    }
-    expected_deep = postgres_schema_fingerprint(
-        "pulsara:postgres-deep-catalog:v1", deep_payload
-    )
-    if payload.get("deep_catalog_fingerprint") != expected_deep:
-        raise RuntimeError("packaged expected deep catalog fingerprint mismatch")
-    return payload
-
-
-def _freeze(value: object) -> object:
-    if isinstance(value, list):
-        return tuple(_freeze(item) for item in value)
-    if isinstance(value, dict):
-        return {str(key): _freeze(item) for key, item in value.items()}
-    return value
-
-
-def _require_pgvector(extensions: tuple[dict[str, object], ...]) -> str:
-    matches = tuple(
-        item for item in extensions if item.get("extension_name") == "vector"
-    )
-    if len(matches) != 1:
-        raise PostgresSchemaError(
-            PostgresSchemaFailureCode.EXTENSION_MISSING,
-            "pgvector extension is missing",
-        )
-    version = str(matches[0]["extension_version"])
-    parsed = tuple(int(part) for part in version.split(".") if part.isdigit())
-    if parsed < (0, 5, 0):
-        raise PostgresSchemaError(
-            PostgresSchemaFailureCode.EXTENSION_TOO_OLD,
-            "pgvector extension must be >= 0.5.0",
-        )
-    return version
-
-
-def _require_remaining(deadline_monotonic: float) -> float:
-    remaining = deadline_monotonic - monotonic()
-    if remaining <= 0:
-        raise PostgresSchemaError(
-            PostgresSchemaFailureCode.DEADLINE_EXCEEDED,
-            "PostgreSQL verification deadline exceeded",
-            retryable=True,
-        )
-    return remaining
 
 
 __all__ = [
+    "CleanVerificationResult",
     "PostgresDeepVerificationBundle",
     "PostgresFastVerificationBundle",
     "PostgresMigrationHistoryStatus",

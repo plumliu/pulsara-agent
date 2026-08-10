@@ -85,6 +85,7 @@ class ProviderSafePointCoordinator:
         self,
         *,
         turn_id: str,
+        new_context_binding_revision_id: str | None = None,
         child_result_id: str,
         command_id: str,
         actor_id: str,
@@ -97,14 +98,16 @@ class ProviderSafePointCoordinator:
                 raise ExternalSourceNotAtSafePoint(
                     "provider input/model operation is active"
                 )
-            self._repository.require_provider_safe_turn(
-                self._guard,
-                turn_id=turn_id,
-                deadline_monotonic=deadline_monotonic,
-            )
+            if new_context_binding_revision_id is None:
+                self._repository.require_provider_safe_turn(
+                    self._guard,
+                    turn_id=turn_id,
+                    deadline_monotonic=deadline_monotonic,
+                )
             return self._repository.accept_subagent_result_into_root(
                 self._guard,
                 turn_id=turn_id,
+                new_context_binding_revision_id=new_context_binding_revision_id,
                 child_result_id=child_result_id,
                 command_id=command_id,
                 occurred_at=datetime.now(timezone.utc),
@@ -116,6 +119,7 @@ class ProviderSafePointCoordinator:
         self,
         *,
         turn_id: str,
+        new_context_binding_revision_id: str | None = None,
         job_id: str,
         command_id: str,
         actor_id: str,
@@ -128,14 +132,16 @@ class ProviderSafePointCoordinator:
                 raise ExternalSourceNotAtSafePoint(
                     "provider input/model operation is active"
                 )
-            self._repository.require_provider_safe_turn(
-                self._guard,
-                turn_id=turn_id,
-                deadline_monotonic=deadline_monotonic,
-            )
+            if new_context_binding_revision_id is None:
+                self._repository.require_provider_safe_turn(
+                    self._guard,
+                    turn_id=turn_id,
+                    deadline_monotonic=deadline_monotonic,
+                )
             return self._repository.accept_job_result_into_root(
                 self._guard,
                 turn_id=turn_id,
+                new_context_binding_revision_id=new_context_binding_revision_id,
                 job_id=job_id,
                 command_id=command_id,
                 occurred_at=datetime.now(timezone.utc),

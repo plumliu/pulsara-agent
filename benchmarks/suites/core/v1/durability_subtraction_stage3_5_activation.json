@@ -1,0 +1,138 @@
+{
+  "schema_version": "durability-subtraction-stage3-5-activation.v1",
+  "status": "post_review_closed",
+  "generated_at_utc": "2026-08-10T07:01:49Z",
+  "captured_head": "9dfc79f2d0b21ea45dd313b4a62d6aa191919154",
+  "checkpoint_semantics": "Stages 3-5 were completed in one non-published worktree sequence. Each end manifest is a fresh scan of the final tree and does not pretend to reconstruct an earlier intermediate filesystem.",
+  "document_sha256": {
+    "PULSARA_DURABILITY_SUBTRACTION_REASSESSMENT.zh.md": "7f4168989f734b3cc11a59f06833a642c0edb4d06adf3dd9a1d9deeef76d2bae",
+    "STAGE_2_HARD_CUT_IMPLEMENTATION_SPEC.zh.md": "8a30fb3db34bff7c152f3450ce5b18c7b403e3e657fb6f53d9e2e1d87b812b4a",
+    "STAGE_3_5_IMPLEMENTATION_SPEC.zh.md": "c7a44c62857761f870532e2c6fec02de1a662d0d043854e2eff0df8c04427fbe",
+    "STAGE_5_CLEAN_BASELINE_RUNBOOK.zh.md": "d58e1c585c0f718a516ab4b292061393c6d71f2e1fb2475c311ce11ac5ea82e5",
+    "DURABILITY_SUBTRACTION_CUTOVER_RUNBOOK.zh.md": "7855b124173dfaf53e21e3e651c13bb19a889e5357a0381a41c3f526164a3313"
+  },
+  "deletion_manifests": {
+    "stage3_start": {
+      "path": "benchmarks/suites/core/v1/durability_subtraction_stage3_start_deletion_manifest.json",
+      "sha256": "1d579dc91dec57db1d94bcf8f14524240b178d731e37fb5fd21e70fcbfe47ef0",
+      "target_count_at_start": 148,
+      "unclassified_count": 0
+    },
+    "stage3_end": {
+      "path": "benchmarks/suites/core/v1/durability_subtraction_stage3_end_deletion_manifest.json",
+      "sha256": "e77dbfca74359c967327a2ba3a98b50ff1e80bc5ffaafb3826521946cd7d4289"
+    },
+    "stage4_end": {
+      "path": "benchmarks/suites/core/v1/durability_subtraction_stage4_end_deletion_manifest.json",
+      "sha256": "3d7160729ee7562ef9039b50002d4d79a9f9f870e7595e775a17802d5a5f570e"
+    },
+    "stage5_end": {
+      "path": "benchmarks/suites/core/v1/durability_subtraction_stage5_end_deletion_manifest.json",
+      "sha256": "63a907426b62a8d740f027a64123e27bf5b1f4fb44af1167f1ac604a7e30faf0"
+    },
+    "working_tree_fingerprint": "sha256:1abed8e88d3fe31d00c12265882f36d6f5f1c236aee6b941b32084b09595c0db",
+    "target_count": 850,
+    "physically_deleted_target_count": 842,
+    "remaining_target_count": 8,
+    "unclassified_count": 0,
+    "remaining_delete_count": 0,
+    "remaining_neutral_leaf_count": 6,
+    "remaining_clean_resource_count": 2
+  },
+  "final_oracles": {
+    "committed_event_types": 26,
+    "live_event_types": 23,
+    "subject_slots": 13,
+    "append_guards": 2,
+    "product_relations": 24,
+    "durable_job_handlers": 4,
+    "production_conversation_authorities": 1,
+    "terminal_protocol_majors": 1
+  },
+  "protocol": {
+    "major": 3,
+    "minor": 0,
+    "schema_fingerprint": "sha256:30c3dec486dea592a4e43650006b1d547e4c44d993d68255941d77b61dd4a05c"
+  },
+  "migration_universe": {
+    "universe_id": "pulsara.conversation-kernel.v1",
+    "universe_generation": 1,
+    "baseline_version": 0,
+    "baseline_sql_sha256": "84dfbcfcb4367eec5fcfaed93db4de19d75a2e03be6cbc9fd272682779dc7a56",
+    "catalog_sha256": "2b81be58f27fcc2febc2e6990eb68427ad91a60a23dcdc5696e81d4a9edcc39f",
+    "grant_sha256": "27196ea0a623e22e944761dd2e74192357b07cc00891d88e85fd08225a7756d9",
+    "baseline_contract_fingerprint": "sha256:df783f9ed9aacd6c3c7f6db1095060175ae81dd3643b6641c6eabd4f1b00c61b",
+    "universe_fingerprint": "sha256:5826ad2782bcef2501b149f6ec9f6e74b16fdd0136270e77b687e756ba5b232e",
+    "genesis_registry_prefix_fingerprint": "sha256:9a5f7b6e9c49a845c6534f38b00b2466ca134d29f16acbbc2a28e6c801814cdf",
+    "observed_catalog_fingerprint": "sha256:da8b11b6a5fb5645bcb6d90b54549f7da5ceab3e0b7041ef7a4c66871e7bbda6",
+    "catalog_manifest_fingerprint": "sha256:43977b363ea8b8dfefea5a0415eaa055e11a83f22fc3bbd6e1917fdb4cdeba5f",
+    "runtime_grant_policy_fingerprint": "sha256:7824a2004353b3d8210ca311bf086c0ae61e715a4e52347cb59f79e7211d3462",
+    "required_extensions": [
+      "public.vector>=0.5.0"
+    ],
+    "pgcrypto_required": false,
+    "old_universe_disposition": "schema_migration_universe_reset_required"
+  },
+  "binding": {
+    "schema_version": "pulsara:verified-postgres-schema-binding:v2",
+    "generic_runtime_write_admission_present": false,
+    "domain_fences": [
+      "HostWriterGuard",
+      "JobAttemptClaimGuard"
+    ]
+  },
+  "physical_deletion": {
+    "production_files_changed": 727,
+    "production_lines_added": 6762,
+    "production_lines_deleted": 459552,
+    "production_counting_scope": "tracked diff plus untracked files under src/ and clients/",
+    "deleted_authorities": [
+      "RuntimeSession and foreground execution recovery",
+      "raw provider draft/adoption and durable stream segments",
+      "universal EventLog and execution replay",
+      "reducer/checkpoint/repair and authority materialization",
+      "Presentation Foundation and Terminal Protocol v2",
+      "legacy MCP and subagent execution recovery",
+      "projection-job runtime and surface delivery graph",
+      "Oxigraph, SPARQL, JSON-LD and ontology runtime",
+      "runtime-write epoch/secret/admission graph",
+      "legacy migrations 0000-0013"
+    ]
+  },
+  "verification": {
+    "pytest_collection": "191_collected_0_errors",
+    "full_pytest": "191_passed_in_21.37s",
+    "postgres_pytest": "60_passed_131_deselected_in_20.00s",
+    "stage5_and_architecture_targeted": "51_passed",
+    "post_review_targeted": "68_passed",
+    "ruff": "passed",
+    "compileall": "passed_src_tests_tools",
+    "protocol_generation": "passed_v3_only",
+    "go_test": "passed_all_packages",
+    "go_vet": "passed",
+    "go_mod_verify": "passed",
+    "git_diff_check": "passed",
+    "markdown_active_contracts": "stage3_5_spec_and_cutover_runbooks_fences_headings_links_passed",
+    "historical_link_disposition": "the reassessment and superseded Stage 2 specification intentionally retain deleted-source and deleted-fixture paths as hard-cut audit provenance; they are not current local links",
+    "postgres_environment": "available_ephemeral_databases_only",
+    "external_provider_dogfood": "not_run_not_required_for_clean_migration_gate"
+  },
+  "open_review_findings": {
+    "p1": 0,
+    "p2": 0,
+    "activation_blocked": false,
+    "scope": "memory excluded by review request"
+  },
+  "post_review_closures": [
+    "assistant text and tool-request terminal commits exact-confirm their stable canonical winner after an unknown acknowledgement",
+    "ordinary extension projections contain no raw remote identity and every delivery rechecks lease expiry or revocation",
+    "binding-v2 verification covers function definitions, trigger definitions and enabled state, schema grants, function grants, and forbidden grants",
+    "fresh migration ignores unrelated shared-public-schema objects while rejecting only the closed Pulsara-owned object universe",
+    "Go live tool rendering preserves bounded UTF-8-safe arguments and explicitly marks truncation",
+    "KernelSessionIO joins post-admission physical I/O before timeout or cancellation returns",
+    "global FIFO prompt consumption rejects a complete bounded prefix of stale steer heads in one writer transaction",
+    "subagent and durable-job results support exact existing-safe-point or explicit new ROOT acceptance through Host and Protocol v3",
+    "blob hydration uses bounded PostgreSQL ranges while Go verifies and renders the complete 16 MiB canonical content bound with request-local integrity failure"
+  ],
+  "remaining_blockers": []
+}
