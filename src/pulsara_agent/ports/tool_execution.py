@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Protocol
+from typing import Literal, Protocol
 
 from pulsara_agent.message import ToolResultState
 from pulsara_agent.primitives.context import (
@@ -79,6 +79,67 @@ class ToolCall:
         object.__setattr__(self, "arguments", freeze_tool_json_object(self.arguments))
 
 
+class ToolOutputSourceCoverage(StrEnum):
+    """What portion of the physical tool observation the candidate owns."""
+
+    COMPLETE = "COMPLETE"
+    RETAINED_SNAPSHOT = "RETAINED_SNAPSHOT"
+
+
+class ToolOutputSourceCoverageReason(StrEnum):
+    """Closed reason why a candidate is not the complete source observation."""
+
+    TERMINAL_RETENTION_GAP = "TERMINAL_RETENTION_GAP"
+
+
+class ToolOutputSourceFormatHint(StrEnum):
+    """Process-local hint used only to render the model-facing preview."""
+
+    TEXT = "TEXT"
+    JSON = "JSON"
+
+
+@dataclass(frozen=True, slots=True)
+class ToolOutputArtifactCandidate:
+    """One process-local, sanitized primary tool-output body.
+
+    This carrier is deliberately not serializable or durable.  The text is the
+    exact body eligible for immutable blob publication, before any lossy
+    model-facing preview is built.
+    """
+
+    role: Literal["OUTPUT"]
+    text: str
+    source_coverage: ToolOutputSourceCoverage
+    source_coverage_reason: ToolOutputSourceCoverageReason | None = None
+    original_utf8_bytes: int | None = None
+    source_format_hint: ToolOutputSourceFormatHint = ToolOutputSourceFormatHint.TEXT
+
+    def __post_init__(self) -> None:
+        if self.role != "OUTPUT":
+            raise ValueError("Round 1 supports only the primary OUTPUT artifact")
+        encoded = self.text.encode("utf-8")
+        if self.source_coverage is ToolOutputSourceCoverage.COMPLETE:
+            if self.source_coverage_reason is not None:
+                raise ValueError("complete tool output cannot carry a coverage reason")
+        elif (
+            self.source_coverage is ToolOutputSourceCoverage.RETAINED_SNAPSHOT
+            and self.source_coverage_reason
+            is not ToolOutputSourceCoverageReason.TERMINAL_RETENTION_GAP
+        ):
+            raise ValueError("retained tool output requires its closed coverage reason")
+        if self.original_utf8_bytes is not None:
+            if self.original_utf8_bytes < len(encoded):
+                raise ValueError(
+                    "original tool output size cannot be smaller than candidate"
+                )
+            if (
+                self.source_coverage is ToolOutputSourceCoverage.COMPLETE
+                and self.original_utf8_bytes != len(encoded)
+            ):
+                raise ValueError("complete tool output size must match its exact bytes")
+
+
 @dataclass(frozen=True, slots=True)
 class ToolExecutionResult:
     call_id: str
@@ -86,9 +147,17 @@ class ToolExecutionResult:
     status: ToolResultState
     output: str
     metadata: FrozenToolJsonDict = field(default_factory=FrozenToolJsonDict)
+    output_artifact_candidate: ToolOutputArtifactCandidate | None = None
+    artifact_source_read: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "metadata", freeze_tool_json_object(self.metadata))
+        # Reject surrogate-bearing or otherwise non-UTF-8-encodable public
+        # results at the process-local boundary.  Artifact publication must
+        # never replace raw truth with an implicit errors="replace" value.
+        self.output.encode("utf-8")
+        if self.artifact_source_read and self.output_artifact_candidate is not None:
+            raise ValueError("artifact_read results cannot recursively own artifacts")
 
 
 class Tool(Protocol):
@@ -115,6 +184,10 @@ __all__ = [
     "ToolCall",
     "ToolExecutionResult",
     "ToolInvocationOwnerKind",
+    "ToolOutputArtifactCandidate",
+    "ToolOutputSourceCoverage",
+    "ToolOutputSourceCoverageReason",
+    "ToolOutputSourceFormatHint",
     "freeze_tool_json_object",
     "thaw_tool_json_object",
 ]

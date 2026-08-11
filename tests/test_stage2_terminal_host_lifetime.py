@@ -17,13 +17,23 @@ from pulsara_agent.conversation_kernel.host import KernelHostCore
 from pulsara_agent.conversation_kernel.runner import KernelToolAuthorizationKind
 from pulsara_agent.conversation_kernel.tool_runtime import (
     DirectKernelToolPort,
-    _truncate_tool_result_utf8,
 )
+from pulsara_agent.conversation_kernel.tool_artifacts import (
+    CANONICAL_TOOL_RESULT_PREVIEW_HARD_BYTES,
+    ToolOutputArtifactProcessor,
+)
+from pulsara_agent.conversation_kernel.contracts import BlobContent
+from pulsara_agent.ports.artifact import ToolResultDisplayKind
 from pulsara_agent.conversation_kernel.tool_policy import (
     DefaultToolDispatchAuthorizationPolicy,
 )
 from pulsara_agent.message import ToolResultState
-from pulsara_agent.ports.tool_execution import ToolCall, ToolExecutionResult
+from pulsara_agent.ports.tool_execution import (
+    ToolCall,
+    ToolExecutionResult,
+    ToolOutputArtifactCandidate,
+    ToolOutputSourceCoverage,
+)
 from pulsara_agent.tool_permission import default_permission_policy
 
 
@@ -31,13 +41,36 @@ def _name(prefix: str) -> str:
     return f"{prefix}:{uuid4().hex}"
 
 
-@pytest.mark.parametrize("maximum", [1, 4, 5, 10, 64])
-def test_tool_result_truncation_is_utf8_safe_and_obeys_final_hard_cap(
-    maximum: int,
-) -> None:
-    result = _truncate_tool_result_utf8("🙂" * 100, maximum_bytes=maximum)
-    assert len(result) <= maximum
-    result.decode("utf-8")
+def test_tool_result_preview_is_utf8_safe_and_obeys_final_hard_cap() -> None:
+    class Publisher:
+        def publish(self, **kwargs: object) -> BlobContent:
+            content = bytes(kwargs["content"])
+            return BlobContent(
+                "blob:test",
+                "sha256:" + __import__("hashlib").sha256(content).hexdigest(),
+                len(content),
+                "text/plain",
+                "utf-8",
+            )
+
+    processor = ToolOutputArtifactProcessor(object(), publisher=Publisher())  # type: ignore[arg-type]
+    text = "🙂" * 20_000
+    prepared = processor.prepare(
+        workspace_id="workspace:test",
+        result_entry_id="entry:test",
+        public_output=text,
+        candidate=ToolOutputArtifactCandidate(
+            role="OUTPUT",
+            text=text,
+            source_coverage=ToolOutputSourceCoverage.COMPLETE,
+            original_utf8_bytes=len(text.encode("utf-8")),
+        ),
+        artifact_source_read=False,
+        deadline_monotonic=float("inf"),
+    )
+    assert prepared.display_kind is ToolResultDisplayKind.HEAD_TAIL
+    assert prepared.canonical_preview.size <= CANONICAL_TOOL_RESULT_PREVIEW_HARD_BYTES
+    prepared.canonical_preview.canonical_bytes.decode("utf-8")
 
 
 async def _start_background_process(
@@ -99,13 +132,19 @@ def test_stage2_terminal_handle_is_same_host_only_and_close_kills_and_joins(
             assistant_entry_id=entry_id,
         )
         assert json.loads(poll.content)["process_id"] == process_id
-        assert port._terminal.live_process_count(  # noqa: SLF001
-            owner_host_session_id=owner
-        ) == 1
+        assert (
+            port._terminal.live_process_count(  # noqa: SLF001
+                owner_host_session_id=owner
+            )
+            == 1
+        )
         await port.aclose(timeout_seconds=5.0)
-        assert port._terminal.live_process_count(  # noqa: SLF001
-            owner_host_session_id=owner
-        ) == 0
+        assert (
+            port._terminal.live_process_count(  # noqa: SLF001
+                owner_host_session_id=owner
+            )
+            == 0
+        )
 
     asyncio.run(scenario())
 
@@ -144,9 +183,12 @@ def test_stage2_terminal_new_host_does_not_adopt_or_relaunch_old_process(
                 turn_id=turn_id,
                 assistant_entry_id=entry_id,
             )
-        assert new._terminal.live_process_count(  # noqa: SLF001
-            owner_host_session_id=new_owner
-        ) == 0
+        assert (
+            new._terminal.live_process_count(  # noqa: SLF001
+                owner_host_session_id=new_owner
+            )
+            == 0
+        )
         await old.aclose(timeout_seconds=5.0)
         await new.aclose(timeout_seconds=5.0)
 

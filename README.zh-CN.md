@@ -55,7 +55,11 @@ epoch。
 Kernel 当前支持：
 
 - OpenAI-compatible Responses 与 Chat Completions transport；
-- filesystem、todo、terminal 与 yielded terminal-process tools；
+- filesystem、todo、terminal、yielded terminal-process 与 scoped
+  `artifact_read` tools；
+- 通过 shared blob store 保留完整 sanitized tool output：中等输出完整
+  展示并附 artifact reference，大输出使用 UTF-8-safe head/tail preview
+  并按需有界读取；
 - bounded Host-scoped subagent；
 - bundled/local skills；
 - PostgreSQL FTS/vector memory，以及显式 direct、reverse 与最多 two-hop
@@ -102,7 +106,10 @@ uv run pulsara db verify --deep --env-file .env
 ```
 
 唯一 active migration universe 是
-`pulsara.conversation-kernel.v1` generation 1，从 version 0 开始。旧 v13
+`pulsara.conversation-kernel.v1` generation 1，从 version 0 开始。Round 1
+在保持 exact 24 张产品关系的同时更新了
+version-0 `tool_results` 契约；当前 baseline/catalog identity 与验证证据记录在
+[`round1_tool_output_artifact_activation.json`](benchmarks/suites/core/v1/round1_tool_output_artifact_activation.json)。旧 v13
 数据库只会得到 `schema_migration_universe_reset_required`，不会被在线导入、
 翻译或升级。请严格遵守
 [clean-baseline runbook](STAGE_5_CLEAN_BASELINE_RUNBOOK.zh.md)，没有针对 exact

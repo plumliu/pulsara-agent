@@ -61,6 +61,9 @@ from pulsara_agent.conversation_kernel.runner import (
 from pulsara_agent.conversation_kernel.safe_point import ExternalSourceNotAtSafePoint
 from pulsara_agent.conversation_kernel.subagent import KernelSubagentManager
 from pulsara_agent.conversation_kernel.tool_runtime import DirectKernelToolPort
+from pulsara_agent.conversation_kernel.tool_artifacts import (
+    PostgresToolArtifactReadPort,
+)
 from pulsara_agent.conversation_kernel.tool_policy import (
     DefaultToolDispatchAuthorizationPolicy,
 )
@@ -184,6 +187,11 @@ class KernelHostSession:
             authorization_policy=DefaultToolDispatchAuthorizationPolicy(
                 permission_policy
             ),
+            artifact_read_port=PostgresToolArtifactReadPort(
+                repository.connection_provider,
+                session_id=session_id,
+                workspace_id=workspace.workspace_key,
+            ),
         )
         self._tools.bind_interaction_port(self._interactions)
         self._subagents = KernelSubagentManager(
@@ -228,6 +236,7 @@ class KernelHostSession:
             capability_composer=self._capabilities,
             extensions=self.extensions,
             steer_consumer=self._consume_pending_steers,
+            workspace_id=workspace.workspace_key,
         )
         self._subagents.bind_runner_factory(self._new_child_runner)
         self._active_task: asyncio.Task[KernelRunResult] | None = None
@@ -659,9 +668,7 @@ class KernelHostSession:
             "turn", self.session_id, command_id
         )
         new_revision_id = (
-            _stable_id("context-revision", resolved_turn_id, "0")
-            if new_turn
-            else None
+            _stable_id("context-revision", resolved_turn_id, "0") if new_turn else None
         )
         if new_turn and not await self._reserve_external_new_turn():
             return KernelCommandOutcome(
@@ -699,9 +706,7 @@ class KernelHostSession:
             )
             if confirmed is not None:
                 if new_turn:
-                    await self._start_external_result_turn(
-                        resolved_turn_id, command_id
-                    )
+                    await self._start_external_result_turn(resolved_turn_id, command_id)
                 if isinstance(error, asyncio.CancelledError):
                     raise
                 return confirmed
@@ -745,9 +750,7 @@ class KernelHostSession:
             "turn", self.session_id, command_id
         )
         new_revision_id = (
-            _stable_id("context-revision", resolved_turn_id, "0")
-            if new_turn
-            else None
+            _stable_id("context-revision", resolved_turn_id, "0") if new_turn else None
         )
         if new_turn and not await self._reserve_external_new_turn():
             return KernelCommandOutcome(
@@ -785,9 +788,7 @@ class KernelHostSession:
             )
             if confirmed is not None:
                 if new_turn:
-                    await self._start_external_result_turn(
-                        resolved_turn_id, command_id
-                    )
+                    await self._start_external_result_turn(resolved_turn_id, command_id)
                 if isinstance(error, asyncio.CancelledError):
                     raise
                 return confirmed
@@ -870,19 +871,14 @@ class KernelHostSession:
             self._external_new_turn_settled.set()
             self._queue_wake.set()
 
-    async def _start_external_result_turn(
-        self, turn_id: str, command_id: str
-    ) -> None:
+    async def _start_external_result_turn(self, turn_id: str, command_id: str) -> None:
         task = asyncio.create_task(
             self._run_external_result_turn(turn_id),
             name=f"kernel-external-result-turn:{turn_id}",
         )
         lost_admission = False
         async with self._lock:
-            if (
-                not self._external_new_turn_accepting
-                or self._active_task is not None
-            ):
+            if not self._external_new_turn_accepting or self._active_task is not None:
                 self._external_new_turn_accepting = False
                 self._external_new_turn_settled.set()
                 lost_admission = True
@@ -979,9 +975,7 @@ class KernelHostSession:
                 timeout_seconds=max(0.01, deadline - monotonic())
             )
             await self._memory_tools.aclose()
-            await self._tools.aclose(
-                timeout_seconds=max(0.01, deadline - monotonic())
-            )
+            await self._tools.aclose(timeout_seconds=max(0.01, deadline - monotonic()))
             await self.extensions.aclose(deadline_monotonic=deadline)
             if self._close_conversation_requested:
                 await self._io.run(
@@ -1015,6 +1009,7 @@ class KernelHostSession:
             capability_composer=self._capabilities,
             extensions=self.extensions,
             steer_consumer=self._consume_pending_steers,
+            workspace_id=self.workspace.workspace_key,
         )
 
     def _observe_provider_usage(
@@ -1325,9 +1320,7 @@ class KernelHostCore:
         async with self._lock:
             session_ids = tuple(self._sessions)
         for host_session_id in session_ids:
-            await self.close_session(
-                host_session_id, close_conversation=False
-            )
+            await self.close_session(host_session_id, close_conversation=False)
         self._extension_routes.clear()
         if self._jobs is not None:
             await self._jobs.aclose(timeout_seconds=HOST_CLOSE_SECONDS)

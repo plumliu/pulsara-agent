@@ -24,6 +24,12 @@ from pulsara_agent.terminal_process.models import (
     TerminalSessionState,
     TerminalStatus,
 )
+from pulsara_agent.ports.tool_execution import (
+    ToolOutputArtifactCandidate,
+    ToolOutputSourceCoverage,
+    ToolOutputSourceCoverageReason,
+    ToolOutputSourceFormatHint,
+)
 
 
 DEFAULT_TERMINAL_SESSION_ID = "default"
@@ -77,6 +83,30 @@ class _BoundedOutput:
             truncated = self._truncated or len(public) > maximum_chars
         visible = public[-maximum_chars:] if len(public) > maximum_chars else public
         return visible, truncated
+
+    def artifact_candidate(self) -> ToolOutputArtifactCandidate:
+        """Freeze the complete currently retained sanitized observation."""
+
+        with self._lock:
+            public = _public_output(b"".join(self._chunks))
+            retention_gap = self._truncated
+        encoded_size = len(public.encode("utf-8"))
+        return ToolOutputArtifactCandidate(
+            role="OUTPUT",
+            text=public,
+            source_coverage=(
+                ToolOutputSourceCoverage.RETAINED_SNAPSHOT
+                if retention_gap
+                else ToolOutputSourceCoverage.COMPLETE
+            ),
+            source_coverage_reason=(
+                ToolOutputSourceCoverageReason.TERMINAL_RETENTION_GAP
+                if retention_gap
+                else None
+            ),
+            original_utf8_bytes=None if retention_gap else encoded_size,
+            source_format_hint=ToolOutputSourceFormatHint.JSON,
+        )
 
 
 @dataclass(slots=True)
@@ -356,7 +386,12 @@ class ProcessRegistry:
     ) -> TerminalProcessLog:
         state = self._owned(process_id, owner_host_session_id)
         output, truncated = state.output.snapshot(max_output_chars)
-        return TerminalProcessLog(_info(state), output, truncated)
+        return TerminalProcessLog(
+            _info(state),
+            output,
+            truncated,
+            state.output.artifact_candidate(),
+        )
 
     def live_count(self, *, owner_host_session_id: str) -> int:
         return sum(
@@ -727,4 +762,5 @@ def _snapshot(state: _ProcessState, maximum_chars: int) -> TerminalResult:
         if status in {TerminalStatus.RUNNING, TerminalStatus.SUCCESS}
         else status.value,
         process_id=state.process_id,
+        output_artifact_candidate=state.output.artifact_candidate(),
     )

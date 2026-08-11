@@ -51,6 +51,9 @@ from pulsara_agent.conversation_kernel.extensions import (
     OperationalHookType,
 )
 from pulsara_agent.conversation_kernel.limits import STAGE2_LIMITS
+from pulsara_agent.conversation_kernel.tool_artifacts import (
+    ToolOutputArtifactProcessor,
+)
 from pulsara_agent.conversation_kernel.repository import (
     AcceptedEntry,
     AssistantBlock,
@@ -59,6 +62,8 @@ from pulsara_agent.conversation_kernel.repository import (
     AssistantToolCallBlock,
     ConversationKernelRepository,
     PreparedProviderInputCut,
+    PreparedToolResultAcceptance,
+    build_prepared_tool_result_acceptance,
 )
 from pulsara_agent.conversation_kernel.reader import (
     CanonicalProviderContinuityError,
@@ -69,6 +74,7 @@ from pulsara_agent.conversation_kernel.reader import (
 from pulsara_agent.conversation_kernel.safe_point import ProviderSafePointCoordinator
 from pulsara_agent.conversation_kernel.vocabulary import LiveEventType
 from pulsara_agent.ports.live_agent_event import ProviderStreamPayload
+from pulsara_agent.ports.tool_execution import ToolOutputArtifactCandidate
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,6 +101,15 @@ class KernelToolResult:
     content: bytes
     memory_proposal: KernelMemoryProposal | None = None
     remote_identity: str | None = None
+    output_artifact_candidate: ToolOutputArtifactCandidate | None = None
+    artifact_source_read: bool = False
+
+    def __post_init__(self) -> None:
+        # The model-facing tool result and artifact candidate are both strict
+        # UTF-8 product contracts.  No errors="replace" lowering is allowed.
+        self.content.decode("utf-8")
+        if self.artifact_source_read and self.output_artifact_candidate is not None:
+            raise ValueError("artifact_read cannot recursively own an artifact")
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,6 +212,8 @@ class ConversationKernelRunner:
         capability_composer: KernelCapabilityComposer | None = None,
         extensions: KernelExtensionHost | None = None,
         steer_consumer: Callable[[str, float], Awaitable[int]] | None = None,
+        workspace_id: str | None = None,
+        tool_output_processor: ToolOutputArtifactProcessor | None = None,
         maximum_model_calls_per_turn: int = STAGE2_LIMITS.model_calls_per_turn_hard,
         maximum_input_tokens_per_call: int = STAGE2_LIMITS.provider_input_tokens_per_call_hard,
         maximum_output_tokens_per_call: int = STAGE2_LIMITS.provider_output_tokens_per_call_hard,
@@ -228,6 +245,11 @@ class ConversationKernelRunner:
         self._content_publisher = content_publisher or CanonicalContentPublisher(
             repository.connection_provider
         )
+        self._tool_output_processor = (
+            tool_output_processor
+            or ToolOutputArtifactProcessor(repository.connection_provider)
+        )
+        self._workspace_id = workspace_id
         self._io = io_owner or KernelSessionIO()
         self._capability_composer = capability_composer
         self._extensions = extensions
@@ -458,6 +480,7 @@ class ConversationKernelRunner:
                 for call in calls:
                     tool_call_count += 1
                     result_entry_id = _id("entry")
+                    result_id = _id("tool-result")
                     authorization = await self._tools.authorize(
                         tool_name=call.tool_name,
                         arguments=call.arguments,
@@ -629,7 +652,23 @@ class ConversationKernelRunner:
                                 actor_id=call.tool_name,
                                 deadline_monotonic=deadline,
                             )
-                        result_text = result.content.decode("utf-8", errors="replace")
+                        result_text = result.content.decode("utf-8")
+                    workspace_id = await self._resolved_workspace_id(deadline)
+                    prepared_output = await self._io.run(
+                        self._tool_output_processor.prepare,
+                        workspace_id=workspace_id,
+                        result_entry_id=result_entry_id,
+                        public_output=result.content.decode("utf-8"),
+                        candidate=result.output_artifact_candidate,
+                        artifact_source_read=result.artifact_source_read,
+                        deadline_monotonic=deadline,
+                    )
+                    result_text = (
+                        prepared_output.canonical_preview.canonical_bytes.decode(
+                            "utf-8"
+                        )
+                    )
+                    if attempt_id is not None:
                         if result_text:
                             self._live_bus.offer_nowait(
                                 event_type=LiveEventType.TOOL_RESULT_DELTA,
@@ -661,22 +700,28 @@ class ConversationKernelRunner:
                             block_kind=LiveBlockKind.TOOL_RESULT,
                             **live_attribution,
                         )
-                    result_content = await self._content(
-                        result.content, deadline=deadline
-                    )
-                    result_acceptance = await self._io.run(
-                        self._repository.accept_tool_result,
-                        self._writer_lease.guard,
-                        result_id=_id("tool-result"),
+                    prepared_acceptance = build_prepared_tool_result_acceptance(
+                        guard=self._writer_lease.guard,
+                        workspace_id=workspace_id,
+                        result_id=result_id,
                         result_entry_id=result_entry_id,
                         turn_id=turn_id,
                         assistant_entry_id=accepted.entry_id,
                         tool_call_id=call.tool_call_id,
                         attempt_id=attempt_id,
                         result_state=result.state,
-                        content=result_content,
-                        occurred_at=datetime.now(timezone.utc),
+                        canonical_preview_content=prepared_output.canonical_preview,
+                        artifact_disposition=prepared_output.artifact_disposition,
+                        artifact_id=prepared_output.artifact_id,
+                        artifact_blob_descriptor=prepared_output.artifact_blob,
+                        source_coverage=prepared_output.source_coverage,
+                        display_kind=prepared_output.display_kind,
+                        source_coverage_reason=prepared_output.source_coverage_reason,
+                        artifact_unavailability_reason=(
+                            prepared_output.artifact_unavailability_reason
+                        ),
                         actor_id=call.tool_name,
+                        occurred_at=datetime.now(timezone.utc),
                         memory_candidate_id=(
                             None
                             if result.memory_proposal is None
@@ -697,7 +742,10 @@ class ConversationKernelRunner:
                             if result.memory_proposal is None
                             else result.memory_proposal.governance_job_id
                         ),
-                        deadline_monotonic=deadline,
+                    )
+                    result_acceptance = await self._accept_tool_result_exact(
+                        prepared_acceptance,
+                        deadline=deadline,
                     )
                     if attempt_id is not None:
                         self._live_bus.offer_settlement_nowait(
@@ -902,6 +950,57 @@ class ConversationKernelRunner:
             codec=codec,
             deadline_monotonic=deadline,
         )
+
+    async def _resolved_workspace_id(self, deadline: float) -> str:
+        if self._workspace_id is None:
+            self._workspace_id = await self._io.run(
+                self._repository.read_session_workspace_id,
+                self._writer_lease.guard,
+                deadline_monotonic=deadline,
+            )
+        return self._workspace_id
+
+    async def _accept_tool_result_exact(
+        self,
+        candidate: PreparedToolResultAcceptance,
+        *,
+        deadline: float,
+    ) -> AcceptedEntry:
+        try:
+            return await self._io.run(
+                self._repository.accept_tool_result,
+                self._writer_lease.guard,
+                candidate=candidate,
+                deadline_monotonic=deadline,
+            )
+        except Exception:
+            winner = await self._io.run(
+                self._repository.confirm_tool_result_winner,
+                self._writer_lease.guard,
+                candidate=candidate,
+                deadline_monotonic=max(deadline, monotonic() + 5.0),
+            )
+            if winner is not None:
+                return winner
+        # The first write was proven absent.  Reissue only the exact frozen
+        # canonical candidate; the physical tool is never invoked again.
+        try:
+            return await self._io.run(
+                self._repository.accept_tool_result,
+                self._writer_lease.guard,
+                candidate=candidate,
+                deadline_monotonic=max(deadline, monotonic() + 5.0),
+            )
+        except Exception:
+            winner = await self._io.run(
+                self._repository.confirm_tool_result_winner,
+                self._writer_lease.guard,
+                candidate=candidate,
+                deadline_monotonic=max(deadline, monotonic() + 5.0),
+            )
+            if winner is None:
+                raise
+            return winner
 
 
 def _id(prefix: str) -> str:

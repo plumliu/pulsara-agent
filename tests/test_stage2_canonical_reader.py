@@ -22,7 +22,13 @@ from pulsara_agent.conversation_kernel.repository import (
     AssistantTextBlock,
     AssistantToolCallBlock,
     ConversationKernelRepository,
+    build_prepared_tool_result_acceptance,
 )
+from pulsara_agent.ports.artifact import (
+    ToolOutputArtifactDisposition,
+    ToolResultDisplayKind,
+)
+from pulsara_agent.ports.tool_execution import ToolOutputSourceCoverage
 from pulsara_agent.conversation_kernel.safe_point import (
     ExternalSourceNotAtSafePoint,
     ProviderSafePointCoordinator,
@@ -97,9 +103,10 @@ def test_reader_uses_exact_scope_and_lowers_late_result_without_replay(
 ) -> None:
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
+    workspace_id = _id("workspace")
     lease = repository.acquire_host_writer(
         session_id=_id("session"),
-        workspace_id=_id("workspace"),
+        workspace_id=workspace_id,
         writer_owner_id=_id("host"),
         lease_seconds=30,
         deadline_monotonic=monotonic() + 30,
@@ -153,8 +160,10 @@ def test_reader_uses_exact_scope_and_lowers_late_result_without_replay(
         deadline_monotonic=monotonic() + 30,
     )
     result_entry_id = _id("entry")
-    repository.accept_tool_result(
-        lease.guard,
+    occurred_at = datetime.now(timezone.utc)
+    candidate = build_prepared_tool_result_acceptance(
+        guard=lease.guard,
+        workspace_id=workspace_id,
         result_id=_id("result"),
         result_entry_id=result_entry_id,
         turn_id=old_turn,
@@ -162,9 +171,20 @@ def test_reader_uses_exact_scope_and_lowers_late_result_without_replay(
         tool_call_id=call_id,
         attempt_id=attempt_id,
         result_state="SUCCESS",
-        content=InlineContent.from_bytes(b"late-success"),
-        occurred_at=datetime.now(timezone.utc),
+        canonical_preview_content=InlineContent.from_bytes(b"late-success"),
+        artifact_disposition=ToolOutputArtifactDisposition.NOT_REQUIRED,
+        artifact_id=None,
+        artifact_blob_descriptor=None,
+        source_coverage=ToolOutputSourceCoverage.COMPLETE,
+        display_kind=ToolResultDisplayKind.COMPLETE,
+        source_coverage_reason=None,
+        artifact_unavailability_reason=None,
+        occurred_at=occurred_at,
         actor_id="terminal",
+    )
+    repository.accept_tool_result(
+        lease.guard,
+        candidate=candidate,
         deadline_monotonic=monotonic() + 30,
     )
     current_turn = _start_turn(repository, lease, b"continue")

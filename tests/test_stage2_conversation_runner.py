@@ -31,6 +31,9 @@ from pulsara_agent.conversation_kernel.runner import (
     KernelToolAuthorizationKind,
     KernelToolResult,
 )
+from pulsara_agent.conversation_kernel.tool_artifacts import (
+    PostgresToolArtifactReadPort,
+)
 from pulsara_agent.conversation_kernel.vocabulary import LiveEventType
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 from tests.support.postgres import verified_postgres_provider
@@ -437,8 +440,7 @@ def test_stage2_lost_assistant_commit_ack_exact_confirms_single_winner(
             (session_id,),
         ).fetchone() == (1,)
         assert connection.execute(
-            "SELECT status, final_entry_id FROM pulsara_v3.turns "
-            "WHERE session_id = %s",
+            "SELECT status, final_entry_id FROM pulsara_v3.turns WHERE session_id = %s",
             (session_id,),
         ).fetchone() == ("COMPLETED", accepted.final_entry_id)
 
@@ -707,15 +709,16 @@ def test_stage2_cancellation_does_not_turn_a_live_tool_into_system_error(
         ).fetchone() == (0,)
 
 
-def test_stage2_provider_rematerialization_hydrates_canonical_blob_content(
+def test_round1_provider_rematerialization_uses_preview_and_scoped_artifact(
     stage2_migrated_postgres_database,
 ) -> None:
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
     session_id = _name("session")
+    workspace_id = _name("workspace")
     lease = repository.acquire_host_writer(
         session_id=session_id,
-        workspace_id=_name("workspace"),
+        workspace_id=workspace_id,
         writer_owner_id=_name("host"),
         lease_seconds=30,
         deadline_monotonic=monotonic() + 30,
@@ -735,4 +738,31 @@ def test_stage2_provider_rematerialization_hydrates_canonical_blob_content(
         if item.item_kind.value == "TOOL_RESULT"
     ]
     assert len(tool_items) == 1
-    assert tool_items[0].text == "z" * (70 << 10)
+    preview = tool_items[0].text
+    assert len(preview.encode("utf-8")) <= 65_536
+    assert "OUTPUT TRUNCATED / PREVIEW" in preview
+    assert "Use artifact_read" in preview
+    with provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        deadline_monotonic=monotonic() + 10,
+    ) as connection:
+        artifact_id = connection.execute(
+            """
+            SELECT output_artifact_id
+            FROM pulsara_v3.tool_results
+            WHERE session_id = %s
+            """,
+            (session_id,),
+        ).fetchone()[0]
+    read_port = PostgresToolArtifactReadPort(
+        provider,
+        session_id=session_id,
+        workspace_id=workspace_id,
+    )
+    page = read_port.read_text(
+        artifact_id,
+        offset_chars=0,
+        max_chars=32_000,
+    )
+    assert page.text == "z" * 32_000
+    assert page.has_more

@@ -35,7 +35,13 @@ from pulsara_agent.conversation_kernel.repository import (
     ConversationKernelRepository,
     JobAttemptTerminalized,
     StaleHostWriter,
+    build_prepared_tool_result_acceptance,
 )
+from pulsara_agent.ports.artifact import (
+    ToolOutputArtifactDisposition,
+    ToolResultDisplayKind,
+)
+from pulsara_agent.ports.tool_execution import ToolOutputSourceCoverage
 from pulsara_agent.conversation_kernel.vocabulary import (
     APPEND_GUARDS,
     COMMITTED_EVENT_DESCRIPTORS,
@@ -466,9 +472,10 @@ def test_stage2_tool_message_precedes_attempt_and_job_claim_mints_second_guard(
     repository = _repository(stage2_migrated_postgres_database)
     deadline = monotonic() + 30
     session_id = _name("session")
+    workspace_id = _name("workspace")
     lease = repository.acquire_host_writer(
         session_id=session_id,
-        workspace_id=_name("workspace"),
+        workspace_id=workspace_id,
         writer_owner_id=_name("host"),
         lease_seconds=30,
         deadline_monotonic=deadline,
@@ -2012,9 +2019,12 @@ def test_stage2_new_turn_head_cannot_be_overtaken_by_later_steer(
         )
         is None
     )
-    assert repository.pending_prompt_head_mode(
-        session_id=session_id, deadline_monotonic=deadline
-    ) is PromptDeliveryMode.NEW_TURN
+    assert (
+        repository.pending_prompt_head_mode(
+            session_id=session_id, deadline_monotonic=deadline
+        )
+        is PromptDeliveryMode.NEW_TURN
+    )
     repository.cancel_prompt(
         lease.guard,
         queue_item_id=new_item,
@@ -2101,9 +2111,10 @@ def test_stage2_memory_candidate_and_tool_result_are_one_transaction(
     repository = _repository(stage2_migrated_postgres_database)
     deadline = monotonic() + 30
     session_id = _name("session")
+    workspace_id = _name("workspace")
     lease = repository.acquire_host_writer(
         session_id=session_id,
-        workspace_id=_name("workspace"),
+        workspace_id=workspace_id,
         writer_owner_id=_name("host"),
         lease_seconds=30,
         deadline_monotonic=deadline,
@@ -2158,22 +2169,35 @@ def test_stage2_memory_candidate_and_tool_result_are_one_transaction(
     )
     candidate_id = _name("candidate")
     job_id = _name("job")
-    repository.accept_tool_result(
-        lease.guard,
+    first_result_entry_id = _name("entry")
+    first_candidate = build_prepared_tool_result_acceptance(
+        guard=lease.guard,
+        workspace_id=workspace_id,
         result_id=_name("result"),
-        result_entry_id=_name("entry"),
+        result_entry_id=first_result_entry_id,
         turn_id=turn_id,
         assistant_entry_id=assistant_entry_id,
         tool_call_id=first_call,
         attempt_id=first_attempt.attempt_id,
         result_state="SUCCESS",
-        content=InlineContent.from_bytes(b"proposed"),
+        canonical_preview_content=InlineContent.from_bytes(b"proposed"),
+        artifact_disposition=ToolOutputArtifactDisposition.NOT_REQUIRED,
+        artifact_id=None,
+        artifact_blob_descriptor=None,
+        source_coverage=ToolOutputSourceCoverage.COMPLETE,
+        display_kind=ToolResultDisplayKind.COMPLETE,
+        source_coverage_reason=None,
+        artifact_unavailability_reason=None,
         occurred_at=datetime.now(timezone.utc),
         actor_id="remember_claim",
         memory_candidate_id=candidate_id,
         memory_proposal_kind="FACT",
         memory_proposal_payload={"statement": "a"},
         memory_governance_job_id=job_id,
+    )
+    repository.accept_tool_result(
+        lease.guard,
+        candidate=first_candidate,
         deadline_monotonic=deadline,
     )
     second_attempt = repository.accept_tool_attempt(
@@ -2192,23 +2216,35 @@ def test_stage2_memory_candidate_and_tool_result_are_one_transaction(
     )
     rolled_back_candidate = _name("candidate")
     rolled_back_result = _name("result")
+    rollback_candidate = build_prepared_tool_result_acceptance(
+        guard=lease.guard,
+        workspace_id=workspace_id,
+        result_id=rolled_back_result,
+        result_entry_id=_name("entry"),
+        turn_id=turn_id,
+        assistant_entry_id=assistant_entry_id,
+        tool_call_id=second_call,
+        attempt_id=second_attempt.attempt_id,
+        result_state="SUCCESS",
+        canonical_preview_content=InlineContent.from_bytes(b"must rollback"),
+        artifact_disposition=ToolOutputArtifactDisposition.NOT_REQUIRED,
+        artifact_id=None,
+        artifact_blob_descriptor=None,
+        source_coverage=ToolOutputSourceCoverage.COMPLETE,
+        display_kind=ToolResultDisplayKind.COMPLETE,
+        source_coverage_reason=None,
+        artifact_unavailability_reason=None,
+        occurred_at=datetime.now(timezone.utc),
+        actor_id="remember_claim",
+        memory_candidate_id=rolled_back_candidate,
+        memory_proposal_kind="FACT",
+        memory_proposal_payload={"statement": "b"},
+        memory_governance_job_id=job_id,
+    )
     with pytest.raises(Exception):
         repository.accept_tool_result(
             lease.guard,
-            result_id=rolled_back_result,
-            result_entry_id=_name("entry"),
-            turn_id=turn_id,
-            assistant_entry_id=assistant_entry_id,
-            tool_call_id=second_call,
-            attempt_id=second_attempt.attempt_id,
-            result_state="SUCCESS",
-            content=InlineContent.from_bytes(b"must rollback"),
-            occurred_at=datetime.now(timezone.utc),
-            actor_id="remember_claim",
-            memory_candidate_id=rolled_back_candidate,
-            memory_proposal_kind="FACT",
-            memory_proposal_payload={"statement": "b"},
-            memory_governance_job_id=job_id,
+            candidate=rollback_candidate,
             deadline_monotonic=deadline,
         )
     with repository.connection_provider.connection(

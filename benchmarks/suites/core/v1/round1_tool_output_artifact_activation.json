@@ -1,0 +1,139 @@
+{
+  "schema_version": "round1-tool-output-artifact-activation.v1",
+  "status": "activated",
+  "generated_at_utc": "2026-08-11T04:52:56Z",
+  "captured_head": "12636e34085fae107d64f8c6247c2567e28a25d8",
+  "working_tree_semantics": "Round 1 was implemented and verified in the current uncommitted worktree. This evidence does not claim a later Git checkpoint and no files were staged, committed, or pushed.",
+  "source_documents": {
+    "ROUND_1_TOOL_OUTPUT_ARTIFACT_IMPLEMENTATION_SPEC.zh.md_at_start": "17b9f3a366102dc5c1b4c28c35f5147a3d9c2b6fa03714a290b61f0cc84f627e",
+    "ROUND_1_TOOL_OUTPUT_ARTIFACT_IMPLEMENTATION_SPEC.zh.md_after_activation_update": "bb91af4b95b5a02f966d24900aedc95ceaa446d41e46bf80b3790233ad054e58",
+    "POST_HARD_CUT_PRODUCT_CAPABILITY_GAP_INDEX.zh.md_at_start": "d4ecc9bef1a3cee9b81efe00214b60c7bbb029553133e9d9ad931f8cfff25cd3",
+    "POST_HARD_CUT_PRODUCT_CAPABILITY_GAP_INDEX.zh.md_after_activation_update": "71db1cd88144d7d4601b372db59e9664f807f06a2d27b445aa2084804a05a083",
+    "PULSARA_DURABILITY_SUBTRACTION_REASSESSMENT.zh.md_at_start": "7f4168989f734b3cc11a59f06833a642c0edb4d06adf3dd9a1d9deeef76d2bae",
+    "PULSARA_DURABILITY_SUBTRACTION_REASSESSMENT.zh.md_after_activation_update": "64bbc89e662efa641356acf911ac72e4d33ab70d8a5bad6b0b98c3356faedfc2",
+    "STAGE_3_5_IMPLEMENTATION_SPEC.zh.md": "c7a44c62857761f870532e2c6fec02de1a662d0d043854e2eff0df8c04427fbe",
+    "STAGE_5_CLEAN_BASELINE_RUNBOOK.zh.md": "d58e1c585c0f718a516ab4b292061393c6d71f2e1fb2475c311ce11ac5ea82e5",
+    "historical_product_reference_commit": "5b7ad9f7ffc8565bc572180b2bde0c81ab64473a"
+  },
+  "product_contract": {
+    "full_sanitized_candidate_before_preview": true,
+    "small_output": "complete_inline_without_artifact",
+    "medium_output": "complete_inline_with_artifact_reference",
+    "large_output": "utf8_safe_head_omission_tail_with_artifact_read_instruction",
+    "preview_hard_bytes": 65536,
+    "archive_threshold_utf8_bytes": 8000,
+    "complete_display_body_chars": 32000,
+    "head_tail_body_chars": 8000,
+    "artifact_content_hard_bytes": 16777216,
+    "artifact_read_default_chars": 20000,
+    "artifact_read_hard_chars": 32000,
+    "terminal_retention_gap": "RETAINED_SNAPSHOT",
+    "artifact_read_modes": [
+      "info",
+      "text"
+    ],
+    "artifact_read_recursive_artifact_creation": false
+  },
+  "canonical_contract": {
+    "independent_tool_result_artifact_relation_count": 0,
+    "artifact_edge_owner": "pulsara_v3.tool_results",
+    "blob_body_owner": "pulsara_v3.blobs",
+    "source_coverage_not_null": true,
+    "artifact_disposition_not_null": true,
+    "display_kind_not_null": true,
+    "source_and_unavailability_reasons_are_independent": true,
+    "acceptance_transaction": [
+      "inline TOOL_RESULT transcript entry",
+      "tool_results outcome and optional artifact edge",
+      "ToolResultAccepted occurrence",
+      "closed NONE or MEMORY_PROPOSAL side branch"
+    ],
+    "ack_unknown": "stateless exact confirmation of the immutable PreparedToolResultAcceptance followed only by exact candidate reissue when absence is proven",
+    "physical_tool_reexecution_on_ack_unknown": false,
+    "artifact_failure_effect_semantics": "known tool outcome remains known; publication failure never becomes side-effect unknown and never causes automatic tool retry"
+  },
+  "oracles": {
+    "product_relations": 24,
+    "committed_event_types": 26,
+    "live_event_types": 23,
+    "subject_slots": 13,
+    "append_guards": 2,
+    "durable_job_handlers": 4,
+    "tool_result_artifact_relations": 0
+  },
+  "migration_identity": {
+    "universe_id": "pulsara.conversation-kernel.v1",
+    "universe_generation": 1,
+    "baseline_version": 0,
+    "binding_schema_version": "pulsara:verified-postgres-schema-binding:v2",
+    "baseline_sql_sha256": "6797b3cf6eca1fa0de56c680976779ec24a7fe886540928e65d0ebaab679febc",
+    "expected_catalog_resource_sha256": "3893726fb2597c02732fedfdf557decf5c137409016921e1fd12e367383429e4",
+    "runtime_grants_resource_sha256": "27196ea0a623e22e944761dd2e74192357b07cc00891d88e85fd08225a7756d9",
+    "universe_fingerprint": "sha256:6d33e2ebd0d5067eb36eff909e5fdc1b2e4e93d1e387985b768559551fda5383",
+    "registry_prefix_fingerprint": "sha256:65cb69844f061c50f2dc388418664752509d434a46bd52d01e19fa3d8f62e7a9",
+    "verified_catalog_fingerprint": "sha256:ee2982e8cc8ed131edfb11b478ba84a2c9b08225124d6a64107dfa72393de535",
+    "runtime_grant_policy_fingerprint": "sha256:7824a2004353b3d8210ca311bf086c0ae61e715a4e52347cb59f79e7211d3462",
+    "deep_verify_result_fingerprint": "sha256:216d7f05e526280d21fdb807b0296697c8e8483fd96fd5f736dc2d6996f3dc7b",
+    "deep_verify_target": "post-review ephemeral fresh database",
+    "authorized_local_reset": "drop exact pulsara_v3 schema and public.pulsara_schema_migrations only; shared public/vector state retained",
+    "fresh_install": "passed",
+    "second_migrate": "up_to_date_with_no_applied_migrations",
+    "old_binding_disposition": "schema_migration_universe_reset_required"
+  },
+  "verification": {
+    "round1_targeted": "25_passed",
+    "combined_round1_runner_postgres_reader_terminal_migration_architecture": "105_passed_in_9.21s",
+    "full_pytest": "215_passed_in_22.22s_post_review",
+    "post_review_inline_guard": "Round 1 plus clean-migration tests: 37 passed; PostgreSQL rejects blob-backed TOOL_RESULT with transcript_entries_tool_result_inline_ck",
+    "postgres_pytest": "68_passed_147_deselected_in_21.24s",
+    "ruff": "passed",
+    "compileall": "passed_src_tests_tools",
+    "terminal_protocol_generation": "passed",
+    "go_test": "passed_all_packages",
+    "go_vet": "passed",
+    "go_mod_verify": "passed",
+    "uv_lock_check": "passed",
+    "git_diff_check": "passed_final_worktree",
+    "real_provider_dogfood": {
+      "status": "passed",
+      "configured_mcp_isolation": "one-shot empty HOME; user and workspace configuration were not modified",
+      "tool_sequence": [
+        "terminal",
+        "artifact_read"
+      ],
+      "terminal_result": "SUCCESS_HEAD_TAIL_AVAILABLE",
+      "artifact_read_result": "SUCCESS_COMPLETE_NOT_REQUIRED",
+      "artifact_size_bytes": 40032,
+      "middle_sentinel_offset_chars": 20000,
+      "middle_sentinel_count": 1,
+      "final_answer": "DOGFOOD_PASS",
+      "sensitive_body_or_credentials_recorded": false
+    }
+  },
+  "production_diff": {
+    "lines_added": 2096,
+    "lines_deleted": 765,
+    "net_lines": 1331,
+    "counting_scope": "tracked diff under src plus the untracked Round 1 production module"
+  },
+  "permanent_absences": {
+    "universal_event_log": true,
+    "runtime_session_or_execution_replay": true,
+    "artifact_receipt_checkpoint_repair_projection_graph": true,
+    "independent_artifact_authority": true,
+    "durable_model_stream_segment": true,
+    "fifth_durable_job": true,
+    "new_committed_or_live_event": true,
+    "new_subject_slot_or_append_guard": true,
+    "protocol_v2": true,
+    "exact_context_input_audit": true
+  },
+  "non_goals": [
+    "Go artifact viewer, download UI, or dedicated copy UX",
+    "binary, screenshot, HTML bundle, or multiple artifacts per tool result",
+    "artifact deletion or retention-policy UI",
+    "background retry job for artifact publication",
+    "recovery of terminal bytes already lost before the retained snapshot"
+  ],
+  "remaining_blockers": []
+}

@@ -226,6 +226,10 @@ CREATE TABLE pulsara_v3.transcript_entries (
         REFERENCES pulsara_v3.blobs (id, workspace_id) ON DELETE RESTRICT,
     CHECK ((conversation_scope_kind = 'ROOT') = (scope_subagent_task_id IS NULL)),
     CHECK ((inline_content IS NULL) <> (blob_id IS NULL)),
+    CONSTRAINT transcript_entries_tool_result_inline_ck CHECK (
+        entry_kind <> 'TOOL_RESULT'
+        OR (inline_content IS NOT NULL AND blob_id IS NULL)
+    ),
     CHECK (inline_content IS NULL OR octet_length(inline_content) = content_size),
     CHECK (
         (entry_kind IN ('ASSISTANT_MESSAGE', 'ASSISTANT_TOOL_REQUEST')
@@ -314,6 +318,7 @@ CREATE TABLE pulsara_v3.tool_execution_attempts (
 CREATE TABLE pulsara_v3.tool_results (
     id text PRIMARY KEY,
     session_id text NOT NULL,
+    workspace_id text NOT NULL,
     tool_call_entry_id text NOT NULL,
     tool_call_id text NOT NULL,
     attempt_id text,
@@ -323,10 +328,30 @@ CREATE TABLE pulsara_v3.tool_results (
         'INVALID_ARGUMENTS', 'PERMISSION_DENIED', 'TOOL_UNAVAILABLE',
         'CANCELLED_BEFORE_DISPATCH'
     )),
+    output_artifact_disposition text NOT NULL DEFAULT 'NOT_REQUIRED'
+        CHECK (output_artifact_disposition IN (
+            'NOT_REQUIRED', 'AVAILABLE', 'INCOMPLETE', 'UNAVAILABLE'
+        )),
+    output_artifact_id text,
+    output_artifact_blob_id text,
+    output_source_coverage text NOT NULL DEFAULT 'COMPLETE'
+        CHECK (output_source_coverage IN ('COMPLETE', 'RETAINED_SNAPSHOT')),
+    output_display_kind text NOT NULL DEFAULT 'COMPLETE'
+        CHECK (output_display_kind IN ('COMPLETE', 'HEAD_TAIL')),
+    output_source_coverage_reason text
+        CHECK (output_source_coverage_reason IN ('TERMINAL_RETENTION_GAP')),
+    output_artifact_unavailability_reason text
+        CHECK (output_artifact_unavailability_reason IN (
+            'ARTIFACT_CONTENT_TOO_LARGE',
+            'BLOB_PUBLICATION_FAILED',
+            'BLOB_PUBLICATION_UNCONFIRMED'
+        )),
     accepted_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     UNIQUE (session_id, id),
     UNIQUE (session_id, tool_call_entry_id, tool_call_id),
     UNIQUE (session_id, result_entry_id),
+    FOREIGN KEY (session_id, workspace_id)
+        REFERENCES pulsara_v3.sessions (id, workspace_id) ON DELETE RESTRICT,
     FOREIGN KEY (session_id, tool_call_entry_id, tool_call_id)
         REFERENCES pulsara_v3.assistant_message_blocks (session_id, assistant_entry_id, tool_call_id)
         ON DELETE RESTRICT,
@@ -336,6 +361,8 @@ CREATE TABLE pulsara_v3.tool_results (
         ) ON DELETE RESTRICT,
     FOREIGN KEY (session_id, result_entry_id)
         REFERENCES pulsara_v3.transcript_entries (session_id, id) ON DELETE RESTRICT,
+    FOREIGN KEY (output_artifact_blob_id, workspace_id)
+        REFERENCES pulsara_v3.blobs (id, workspace_id) ON DELETE RESTRICT,
     CHECK (
         (attempt_id IS NULL AND result_state IN (
             'INVALID_ARGUMENTS', 'PERMISSION_DENIED', 'TOOL_UNAVAILABLE', 'CANCELLED_BEFORE_DISPATCH'
@@ -343,8 +370,38 @@ CREATE TABLE pulsara_v3.tool_results (
         (attempt_id IS NOT NULL AND result_state IN (
             'SUCCESS', 'APPLICATION_ERROR', 'SYSTEM_ERROR', 'CANCELLED'
         ))
+    ),
+    CHECK (
+        (output_source_coverage = 'COMPLETE'
+            AND output_source_coverage_reason IS NULL) OR
+        (output_source_coverage = 'RETAINED_SNAPSHOT'
+            AND output_source_coverage_reason = 'TERMINAL_RETENTION_GAP')
+    ),
+    CHECK (
+        (output_artifact_disposition = 'NOT_REQUIRED'
+            AND output_artifact_id IS NULL
+            AND output_artifact_blob_id IS NULL
+            AND output_artifact_unavailability_reason IS NULL
+            AND output_source_coverage = 'COMPLETE') OR
+        (output_artifact_disposition = 'AVAILABLE'
+            AND output_artifact_id IS NOT NULL
+            AND output_artifact_blob_id IS NOT NULL
+            AND output_artifact_unavailability_reason IS NULL
+            AND output_source_coverage = 'COMPLETE') OR
+        (output_artifact_disposition = 'INCOMPLETE'
+            AND output_artifact_id IS NOT NULL
+            AND output_artifact_blob_id IS NOT NULL
+            AND output_artifact_unavailability_reason IS NULL
+            AND output_source_coverage = 'RETAINED_SNAPSHOT') OR
+        (output_artifact_disposition = 'UNAVAILABLE'
+            AND output_artifact_id IS NULL
+            AND output_artifact_blob_id IS NULL
+            AND output_artifact_unavailability_reason IS NOT NULL)
     )
 );
+CREATE UNIQUE INDEX uq_pulsara_v3_tool_result_output_artifact_id
+    ON pulsara_v3.tool_results (output_artifact_id)
+    WHERE output_artifact_id IS NOT NULL;
 
 CREATE TABLE pulsara_v3.prompt_queue_items (
     id text PRIMARY KEY,
@@ -816,9 +873,11 @@ BEGIN
     IF TG_TABLE_NAME = 'tool_results' THEN
         SELECT entry_kind, turn_id INTO observed_kind, observed_turn_id
         FROM pulsara_v3.transcript_entries
-        WHERE session_id = NEW.session_id AND id = NEW.result_entry_id;
+        WHERE session_id = NEW.session_id AND workspace_id = NEW.workspace_id
+          AND id = NEW.result_entry_id
+          AND inline_content IS NOT NULL AND blob_id IS NULL;
         IF observed_kind IS DISTINCT FROM 'TOOL_RESULT' THEN
-            RAISE EXCEPTION 'tool result relation requires TOOL_RESULT entry'
+            RAISE EXCEPTION 'tool result relation requires inline TOOL_RESULT entry'
                 USING ERRCODE = '23514';
         END IF;
         PERFORM 1

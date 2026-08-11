@@ -7,6 +7,8 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+from pulsara_agent.ports.tool_execution import ToolOutputArtifactCandidate
+
 
 class TerminalBackendType(StrEnum):
     LOCAL = "local"
@@ -56,6 +58,7 @@ class TerminalResult:
     truncated: bool = False
     error: str | None = None
     process_id: str | None = None
+    output_artifact_candidate: ToolOutputArtifactCandidate | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,6 +99,7 @@ class TerminalProcessLog:
     process: TerminalProcessInfo
     output: str
     truncated: bool
+    output_artifact_candidate: ToolOutputArtifactCandidate | None = None
 
     def to_payload(self) -> dict[str, Any]:
         return {

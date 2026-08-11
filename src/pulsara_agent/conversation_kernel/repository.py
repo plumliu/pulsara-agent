@@ -8,8 +8,9 @@ inside the same physical transaction; no event is used to prove a row.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from enum import StrEnum
 from hashlib import sha256
 import json
 import math
@@ -45,6 +46,17 @@ from pulsara_agent.conversation_kernel.job_catalog import (
     job_handler_contract,
 )
 from pulsara_agent.conversation_kernel.limits import STAGE2_LIMITS
+from pulsara_agent.ports.artifact import (
+    ToolOutputArtifactDisposition,
+    ToolOutputArtifactUnavailabilityReason,
+    ToolResultDisplayKind,
+)
+from pulsara_agent.ports.tool_execution import (
+    FrozenToolJsonDict,
+    ToolOutputSourceCoverage,
+    ToolOutputSourceCoverageReason,
+    freeze_tool_json_object,
+)
 from pulsara_agent.conversation_kernel.vocabulary import (
     DESCRIPTOR_BY_TYPE,
     AppendGuardKind,
@@ -119,6 +131,213 @@ class AcceptedEntry:
     entry_sequence: int
     event_sequence: int
     turn_completed: bool = False
+
+
+class ToolResultSideBranchKind(StrEnum):
+    NONE = "NONE"
+    MEMORY_PROPOSAL = "MEMORY_PROPOSAL"
+
+
+@dataclass(frozen=True, slots=True)
+class NoToolResultSideBranch:
+    branch_kind: ToolResultSideBranchKind = ToolResultSideBranchKind.NONE
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedMemoryProposalSideBranch:
+    memory_candidate_id: str
+    proposal_kind: str
+    proposal_payload: FrozenToolJsonDict
+    candidate_semantic_digest: str
+    governance_job_id: str
+    intent_payload: FrozenToolJsonDict
+    intent_digest: str
+    automatic_intent_key: str
+    retry_policy_id: str
+    retry_policy_version: int
+    maximum_attempts: int
+    attempt_timeout_ms: int
+    provider_input_token_limit_per_attempt: int
+    provider_output_token_limit_per_attempt: int
+    next_eligible_at: datetime
+    job_queued_occurrence: CommittedEventDraft
+    branch_kind: ToolResultSideBranchKind = ToolResultSideBranchKind.MEMORY_PROPOSAL
+    job_handler_type: str = MEMORY_GOVERNANCE
+    intent_schema_version: str = "memory_governance.v1"
+    safety_class: str = "RETRY_SAFE"
+    initial_status: str = "PENDING"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "proposal_payload", freeze_tool_json_object(self.proposal_payload)
+        )
+        object.__setattr__(
+            self, "intent_payload", freeze_tool_json_object(self.intent_payload)
+        )
+        if self.proposal_kind not in {
+            "FACT",
+            "PREFERENCE",
+            "RELATION",
+            "CORRECTION",
+            "LIFECYCLE",
+        }:
+            raise ValueError("memory proposal kind is not closed")
+        if (
+            min(
+                self.maximum_attempts,
+                self.attempt_timeout_ms,
+                self.provider_input_token_limit_per_attempt,
+                self.provider_output_token_limit_per_attempt,
+            )
+            < 1
+        ):
+            raise ValueError("memory proposal job bounds must be positive")
+
+
+ToolResultSideBranch = NoToolResultSideBranch | PreparedMemoryProposalSideBranch
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedToolResultAcceptance:
+    session_id: str
+    workspace_id: str
+    result_id: str
+    result_entry_id: str
+    turn_id: str
+    assistant_entry_id: str
+    tool_call_id: str
+    attempt_id: str | None
+    result_state: str
+    canonical_preview_content: InlineContent
+    artifact_disposition: ToolOutputArtifactDisposition
+    artifact_id: str | None
+    artifact_blob_descriptor: BlobContent | None
+    source_coverage: ToolOutputSourceCoverage
+    display_kind: ToolResultDisplayKind
+    source_coverage_reason: ToolOutputSourceCoverageReason | None
+    artifact_unavailability_reason: ToolOutputArtifactUnavailabilityReason | None
+    actor_id: str
+    occurred_at: datetime
+    tool_result_occurrence: CommittedEventDraft
+    side_branch: ToolResultSideBranch
+    candidate_fingerprint: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        if not all(
+            (
+                self.session_id,
+                self.workspace_id,
+                self.result_id,
+                self.result_entry_id,
+                self.turn_id,
+                self.assistant_entry_id,
+                self.tool_call_id,
+                self.result_state,
+                self.actor_id,
+            )
+        ):
+            raise ValueError("prepared tool result identity is incomplete")
+        if not isinstance(self.canonical_preview_content, InlineContent):
+            raise TypeError("prepared tool result preview must be inline")
+        attempted_states = {"SUCCESS", "APPLICATION_ERROR", "SYSTEM_ERROR", "CANCELLED"}
+        no_attempt_states = {
+            "INVALID_ARGUMENTS",
+            "PERMISSION_DENIED",
+            "TOOL_UNAVAILABLE",
+            "CANCELLED_BEFORE_DISPATCH",
+        }
+        if (self.attempt_id is None and self.result_state not in no_attempt_states) or (
+            self.attempt_id is not None and self.result_state not in attempted_states
+        ):
+            raise ValueError("prepared tool result attempt/state union is invalid")
+        available = self.artifact_disposition in {
+            ToolOutputArtifactDisposition.AVAILABLE,
+            ToolOutputArtifactDisposition.INCOMPLETE,
+        }
+        if available != (
+            self.artifact_id is not None and self.artifact_blob_descriptor is not None
+        ):
+            raise ValueError("prepared tool result artifact edge is inconsistent")
+        if (self.artifact_disposition is ToolOutputArtifactDisposition.UNAVAILABLE) != (
+            self.artifact_unavailability_reason is not None
+        ):
+            raise ValueError("prepared tool result unavailability is inconsistent")
+        if (self.source_coverage is ToolOutputSourceCoverage.COMPLETE) != (
+            self.source_coverage_reason is None
+        ):
+            raise ValueError("prepared tool result coverage is inconsistent")
+        if self.canonical_preview_content.size > 65_536:
+            raise ValueError("prepared tool result preview exceeds its hard bound")
+        if self.artifact_disposition is ToolOutputArtifactDisposition.NOT_REQUIRED:
+            if self.source_coverage is not ToolOutputSourceCoverage.COMPLETE:
+                raise ValueError("not-required artifact must own complete source")
+        elif self.artifact_disposition is ToolOutputArtifactDisposition.AVAILABLE:
+            if self.source_coverage is not ToolOutputSourceCoverage.COMPLETE:
+                raise ValueError("available artifact must own complete source")
+        elif self.artifact_disposition is ToolOutputArtifactDisposition.INCOMPLETE:
+            if self.source_coverage is not ToolOutputSourceCoverage.RETAINED_SNAPSHOT:
+                raise ValueError("incomplete artifact must be a retained snapshot")
+        blob = self.artifact_blob_descriptor
+        if blob is not None and (
+            blob.media_type != "text/plain"
+            or blob.codec != "utf-8"
+            or blob.size > 16 << 20
+        ):
+            raise ValueError("prepared primary artifact descriptor is invalid")
+        expected_event_id = _stable_identity(
+            "event", self.result_entry_id, "ToolResultAccepted"
+        )
+        occurrence = self.tool_result_occurrence
+        if (
+            occurrence.event_id != expected_event_id
+            or occurrence.event_type is not CommittedEventType.TOOL_RESULT_ACCEPTED
+            or occurrence.subject
+            != CommittedEventSubject(SubjectSlot.ENTRY, self.result_entry_id)
+            or occurrence.actor_kind != "tool"
+            or occurrence.actor_id != self.actor_id
+            or occurrence.sensitivity_class != "PUBLIC"
+            or occurrence.projection_profile != "DEFAULT"
+            or occurrence.occurred_at != self.occurred_at
+            or dict(occurrence.payload)
+            != {
+                "tool_call_id": self.tool_call_id,
+                "result_state": self.result_state,
+            }
+        ):
+            raise ValueError("prepared tool result occurrence is not exact")
+        if isinstance(self.side_branch, NoToolResultSideBranch):
+            if self.side_branch.branch_kind is not ToolResultSideBranchKind.NONE:
+                raise ValueError("prepared no-side-branch discriminator is invalid")
+        elif isinstance(self.side_branch, PreparedMemoryProposalSideBranch):
+            side_event = self.side_branch.job_queued_occurrence
+            if (
+                self.side_branch.branch_kind
+                is not ToolResultSideBranchKind.MEMORY_PROPOSAL
+                or side_event.event_id
+                != _stable_identity(
+                    "event", self.side_branch.governance_job_id, "JobQueued"
+                )
+                or side_event.event_type is not CommittedEventType.JOB_QUEUED
+                or side_event.subject
+                != CommittedEventSubject(
+                    SubjectSlot.JOB, self.side_branch.governance_job_id
+                )
+                or side_event.actor_kind != "runtime"
+                or side_event.sensitivity_class != "PUBLIC"
+                or side_event.projection_profile != "DEFAULT"
+                or side_event.occurred_at != self.occurred_at
+                or dict(side_event.payload)
+                != {"handler_type": self.side_branch.job_handler_type}
+            ):
+                raise ValueError("prepared memory side occurrence is not exact")
+        else:
+            raise TypeError("prepared tool result side branch is not closed")
+        payload = _prepared_tool_result_manifest(self)
+        object.__setattr__(
+            self,
+            "candidate_fingerprint",
+            canonical_digest("pulsara:prepared-tool-result-acceptance:v1", payload),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -252,6 +471,242 @@ def _content_columns(content: CanonicalContent) -> tuple[object, ...]:
     )
 
 
+def _stable_identity(prefix: str, *parts: str) -> str:
+    digest = sha256("\0".join(parts).encode("utf-8")).hexdigest()
+    return f"{prefix}:{digest}"
+
+
+def _content_manifest(content: CanonicalContent) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "digest": content.digest,
+        "size": content.size,
+        "media_type": content.media_type,
+        "codec": content.codec,
+    }
+    if isinstance(content, BlobContent):
+        payload["blob_id"] = content.blob_id
+    else:
+        payload["inline"] = True
+    return payload
+
+
+def _event_manifest(event: CommittedEventDraft) -> dict[str, object]:
+    return {
+        "event_id": event.event_id,
+        "event_type": event.event_type.value,
+        "subject_slot": event.subject.slot.value,
+        "subject_id": event.subject.subject_id,
+        "actor_kind": event.actor_kind,
+        "actor_id": event.actor_id,
+        "sensitivity_class": event.sensitivity_class,
+        "projection_profile": event.projection_profile,
+        "occurred_at": event.occurred_at.isoformat(),
+        "payload": dict(event.payload),
+    }
+
+
+def _prepared_tool_result_manifest(
+    candidate: PreparedToolResultAcceptance,
+) -> dict[str, object]:
+    blob = candidate.artifact_blob_descriptor
+    side = candidate.side_branch
+    side_payload: dict[str, object]
+    if isinstance(side, NoToolResultSideBranch):
+        side_payload = {"branch_kind": side.branch_kind.value}
+    else:
+        side_payload = {
+            "branch_kind": side.branch_kind.value,
+            "memory_candidate_id": side.memory_candidate_id,
+            "proposal_kind": side.proposal_kind,
+            "proposal_payload": dict(side.proposal_payload),
+            "candidate_semantic_digest": side.candidate_semantic_digest,
+            "governance_job_id": side.governance_job_id,
+            "job_handler_type": side.job_handler_type,
+            "intent_schema_version": side.intent_schema_version,
+            "intent_payload": dict(side.intent_payload),
+            "intent_digest": side.intent_digest,
+            "automatic_intent_key": side.automatic_intent_key,
+            "safety_class": side.safety_class,
+            "initial_status": side.initial_status,
+            "retry_policy_id": side.retry_policy_id,
+            "retry_policy_version": side.retry_policy_version,
+            "maximum_attempts": side.maximum_attempts,
+            "attempt_timeout_ms": side.attempt_timeout_ms,
+            "provider_input_token_limit_per_attempt": (
+                side.provider_input_token_limit_per_attempt
+            ),
+            "provider_output_token_limit_per_attempt": (
+                side.provider_output_token_limit_per_attempt
+            ),
+            "next_eligible_at": side.next_eligible_at.isoformat(),
+            "job_queued_occurrence": _event_manifest(side.job_queued_occurrence),
+        }
+    return {
+        "session_id": candidate.session_id,
+        "workspace_id": candidate.workspace_id,
+        "result_id": candidate.result_id,
+        "result_entry_id": candidate.result_entry_id,
+        "turn_id": candidate.turn_id,
+        "assistant_entry_id": candidate.assistant_entry_id,
+        "tool_call_id": candidate.tool_call_id,
+        "attempt_id": candidate.attempt_id,
+        "result_state": candidate.result_state,
+        "canonical_preview_content": _content_manifest(
+            candidate.canonical_preview_content
+        ),
+        "artifact_disposition": candidate.artifact_disposition.value,
+        "artifact_id": candidate.artifact_id,
+        "artifact_blob_descriptor": None if blob is None else _content_manifest(blob),
+        "source_coverage": candidate.source_coverage.value,
+        "display_kind": candidate.display_kind.value,
+        "source_coverage_reason": (
+            None
+            if candidate.source_coverage_reason is None
+            else candidate.source_coverage_reason.value
+        ),
+        "artifact_unavailability_reason": (
+            None
+            if candidate.artifact_unavailability_reason is None
+            else candidate.artifact_unavailability_reason.value
+        ),
+        "actor_id": candidate.actor_id,
+        "occurred_at": candidate.occurred_at.isoformat(),
+        "tool_result_occurrence": _event_manifest(candidate.tool_result_occurrence),
+        "side_branch": side_payload,
+    }
+
+
+def build_prepared_tool_result_acceptance(
+    *,
+    guard: HostWriterGuard,
+    workspace_id: str,
+    result_id: str,
+    result_entry_id: str,
+    turn_id: str,
+    assistant_entry_id: str,
+    tool_call_id: str,
+    attempt_id: str | None,
+    result_state: str,
+    canonical_preview_content: InlineContent,
+    artifact_disposition: ToolOutputArtifactDisposition,
+    artifact_id: str | None,
+    artifact_blob_descriptor: BlobContent | None,
+    source_coverage: ToolOutputSourceCoverage,
+    display_kind: ToolResultDisplayKind,
+    source_coverage_reason: ToolOutputSourceCoverageReason | None,
+    artifact_unavailability_reason: (ToolOutputArtifactUnavailabilityReason | None),
+    actor_id: str,
+    occurred_at: datetime,
+    memory_candidate_id: str | None = None,
+    memory_proposal_kind: str | None = None,
+    memory_proposal_payload: Mapping[str, object] | None = None,
+    memory_governance_job_id: str | None = None,
+) -> PreparedToolResultAcceptance:
+    """Freeze every semantic field before the first canonical write."""
+
+    tool_result_occurrence = CommittedEventDraft(
+        event_id=_stable_identity("event", result_entry_id, "ToolResultAccepted"),
+        event_type=CommittedEventType.TOOL_RESULT_ACCEPTED,
+        subject=CommittedEventSubject(SubjectSlot.ENTRY, result_entry_id),
+        actor_kind="tool",
+        actor_id=actor_id,
+        sensitivity_class="PUBLIC",
+        projection_profile="DEFAULT",
+        occurred_at=occurred_at,
+        payload={"tool_call_id": tool_call_id, "result_state": result_state},
+    )
+    memory_fields = (
+        memory_candidate_id,
+        memory_proposal_kind,
+        memory_proposal_payload,
+        memory_governance_job_id,
+    )
+    if any(item is not None for item in memory_fields) and not all(
+        item is not None for item in memory_fields
+    ):
+        raise ValueError("memory proposal result branch is incomplete")
+    if memory_candidate_id is None:
+        side_branch: ToolResultSideBranch = NoToolResultSideBranch()
+    else:
+        assert memory_proposal_kind is not None
+        assert memory_proposal_payload is not None
+        assert memory_governance_job_id is not None
+        proposal = freeze_tool_json_object(memory_proposal_payload)
+        semantic_digest = canonical_digest(
+            "pulsara:memory-candidate:v1",
+            {
+                "workspace_id": workspace_id,
+                "proposal_kind": memory_proposal_kind,
+                "proposal_payload": dict(proposal),
+                "source_entry_id": assistant_entry_id,
+            },
+        )
+        intent_payload = freeze_tool_json_object(
+            {
+                "candidate_id": memory_candidate_id,
+                "candidate_semantic_digest": semantic_digest,
+            }
+        )
+        governance = job_handler_contract(MEMORY_GOVERNANCE)
+        side_branch = PreparedMemoryProposalSideBranch(
+            memory_candidate_id=memory_candidate_id,
+            proposal_kind=memory_proposal_kind,
+            proposal_payload=proposal,
+            candidate_semantic_digest=semantic_digest,
+            governance_job_id=memory_governance_job_id,
+            intent_payload=intent_payload,
+            intent_digest=canonical_digest(
+                "pulsara:job-intent:memory_governance.v1", dict(intent_payload)
+            ),
+            automatic_intent_key=f"memory-governance:{memory_candidate_id}",
+            retry_policy_id="bounded-exponential",
+            retry_policy_version=1,
+            maximum_attempts=governance.maximum_attempts,
+            attempt_timeout_ms=governance.attempt_timeout_ms,
+            provider_input_token_limit_per_attempt=governance.input_token_limit,
+            provider_output_token_limit_per_attempt=governance.output_token_limit,
+            next_eligible_at=occurred_at,
+            job_queued_occurrence=CommittedEventDraft(
+                event_id=_stable_identity(
+                    "event", memory_governance_job_id, "JobQueued"
+                ),
+                event_type=CommittedEventType.JOB_QUEUED,
+                subject=CommittedEventSubject(
+                    SubjectSlot.JOB, memory_governance_job_id
+                ),
+                actor_kind="runtime",
+                actor_id=guard.writer_owner_id,
+                sensitivity_class="PUBLIC",
+                projection_profile="DEFAULT",
+                occurred_at=occurred_at,
+                payload={"handler_type": MEMORY_GOVERNANCE},
+            ),
+        )
+    return PreparedToolResultAcceptance(
+        session_id=guard.session_id,
+        workspace_id=workspace_id,
+        result_id=result_id,
+        result_entry_id=result_entry_id,
+        turn_id=turn_id,
+        assistant_entry_id=assistant_entry_id,
+        tool_call_id=tool_call_id,
+        attempt_id=attempt_id,
+        result_state=result_state,
+        canonical_preview_content=canonical_preview_content,
+        artifact_disposition=artifact_disposition,
+        artifact_id=artifact_id,
+        artifact_blob_descriptor=artifact_blob_descriptor,
+        source_coverage=source_coverage,
+        display_kind=display_kind,
+        source_coverage_reason=source_coverage_reason,
+        artifact_unavailability_reason=artifact_unavailability_reason,
+        actor_id=actor_id,
+        occurred_at=occurred_at,
+        tool_result_occurrence=tool_result_occurrence,
+        side_branch=side_branch,
+    )
+
+
 class ConversationKernelRepository:
     """Single storage owner for Stage 2 product facts."""
 
@@ -271,6 +726,22 @@ class ConversationKernelRepository:
         """Read-only construction seam for canonical query services."""
 
         return self._provider
+
+    def read_session_workspace_id(
+        self,
+        guard: HostWriterGuard,
+        *,
+        deadline_monotonic: float,
+    ) -> str:
+        """Resolve the exact writer-scoped workspace before candidate freeze."""
+
+        with self._provider.connection(
+            lane=PostgresConnectionLane.HOST_CONTROL,
+            row_factory=dict_row,
+            deadline_monotonic=deadline_monotonic,
+        ) as connection:
+            self._require_writer(connection, guard, lock=False)
+            return self._workspace_id(connection, guard.session_id)
 
     def acquire_host_writer(
         self,
@@ -938,7 +1409,9 @@ class ConversationKernelRepository:
 
         tool_request = any(isinstance(item, AssistantToolCallBlock) for item in blocks)
         expected_entry_kind = (
-            EntryKind.ASSISTANT_TOOL_REQUEST if tool_request else EntryKind.ASSISTANT_MESSAGE
+            EntryKind.ASSISTANT_TOOL_REQUEST
+            if tool_request
+            else EntryKind.ASSISTANT_MESSAGE
         )
         expected_event_type = (
             CommittedEventType.ASSISTANT_TOOL_REQUEST_ACCEPTED
@@ -1253,13 +1726,15 @@ class ConversationKernelRepository:
                 connection.execute(
                     """
                     INSERT INTO pulsara_v3.tool_results (
-                        id, session_id, tool_call_entry_id, tool_call_id,
+                        id, session_id, workspace_id,
+                        tool_call_entry_id, tool_call_id,
                         attempt_id, result_entry_id, result_state
-                    ) VALUES (%s, %s, %s, %s, NULL, %s, 'PERMISSION_DENIED')
+                    ) VALUES (%s, %s, %s, %s, %s, NULL, %s, 'PERMISSION_DENIED')
                     """,
                     (
                         result_id,
                         guard.session_id,
+                        subject["workspace_id"],
                         assistant_entry_id,
                         tool_call_id,
                         result_entry_id,
@@ -1445,40 +1920,11 @@ class ConversationKernelRepository:
         self,
         guard: HostWriterGuard,
         *,
-        result_id: str,
-        result_entry_id: str,
-        turn_id: str,
-        assistant_entry_id: str,
-        tool_call_id: str,
-        attempt_id: str | None,
-        result_state: str,
-        content: CanonicalContent,
-        occurred_at: datetime,
-        actor_id: str,
-        memory_candidate_id: str | None = None,
-        memory_proposal_kind: str | None = None,
-        memory_proposal_payload: Mapping[str, object] | None = None,
-        memory_governance_job_id: str | None = None,
+        candidate: PreparedToolResultAcceptance,
         deadline_monotonic: float,
     ) -> AcceptedEntry:
-        memory_fields = (
-            memory_candidate_id,
-            memory_proposal_kind,
-            memory_proposal_payload,
-            memory_governance_job_id,
-        )
-        if any(value is not None for value in memory_fields) and not all(
-            value is not None for value in memory_fields
-        ):
-            raise ValueError("memory proposal result branch is incomplete")
-        if memory_proposal_kind is not None and memory_proposal_kind not in {
-            "FACT",
-            "PREFERENCE",
-            "RELATION",
-            "CORRECTION",
-            "LIFECYCLE",
-        }:
-            raise ValueError("memory proposal kind is not closed")
+        if candidate.session_id != guard.session_id:
+            raise ValueError("prepared tool result belongs to another session")
         with self._writer_transaction(
             guard, deadline_monotonic=deadline_monotonic
         ) as connection:
@@ -1489,67 +1935,77 @@ class ConversationKernelRepository:
                 WHERE session_id = %s AND id = %s
                 FOR UPDATE
                 """,
-                (guard.session_id, turn_id),
+                (guard.session_id, candidate.turn_id),
             ).fetchone()
-            if turn is None:
+            if turn is None or str(turn["workspace_id"]) != candidate.workspace_id:
                 raise ConversationKernelConflict("tool result turn is absent")
+            if candidate.artifact_blob_descriptor is not None:
+                self._require_exact_tool_artifact_blob(
+                    connection,
+                    workspace_id=candidate.workspace_id,
+                    expected=candidate.artifact_blob_descriptor,
+                )
             entry_sequence = self._allocate_entry_sequence(connection, guard.session_id)
             self._insert_entry(
                 connection,
                 session_id=guard.session_id,
-                workspace_id=str(turn["workspace_id"]),
-                turn_id=turn_id,
-                entry_id=result_entry_id,
+                workspace_id=candidate.workspace_id,
+                turn_id=candidate.turn_id,
+                entry_id=candidate.result_entry_id,
                 entry_sequence=entry_sequence,
                 entry_kind=EntryKind.TOOL_RESULT,
                 scope_kind=ConversationScopeKind(str(turn["conversation_scope_kind"])),
                 scope_task_id=turn["scope_subagent_task_id"],
-                content=content,
+                content=candidate.canonical_preview_content,
             )
             connection.execute(
                 """
                 INSERT INTO pulsara_v3.tool_results (
-                    id, session_id, tool_call_entry_id, tool_call_id,
-                    attempt_id, result_entry_id, result_state
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    id, session_id, workspace_id,
+                    tool_call_entry_id, tool_call_id, attempt_id,
+                    result_entry_id, result_state,
+                    output_artifact_disposition, output_artifact_id,
+                    output_artifact_blob_id, output_source_coverage,
+                    output_display_kind, output_source_coverage_reason,
+                    output_artifact_unavailability_reason
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s
+                )
                 """,
                 (
-                    result_id,
+                    candidate.result_id,
                     guard.session_id,
-                    assistant_entry_id,
-                    tool_call_id,
-                    attempt_id,
-                    result_entry_id,
-                    result_state,
+                    candidate.workspace_id,
+                    candidate.assistant_entry_id,
+                    candidate.tool_call_id,
+                    candidate.attempt_id,
+                    candidate.result_entry_id,
+                    candidate.result_state,
+                    candidate.artifact_disposition.value,
+                    candidate.artifact_id,
+                    (
+                        None
+                        if candidate.artifact_blob_descriptor is None
+                        else candidate.artifact_blob_descriptor.blob_id
+                    ),
+                    candidate.source_coverage.value,
+                    candidate.display_kind.value,
+                    (
+                        None
+                        if candidate.source_coverage_reason is None
+                        else candidate.source_coverage_reason.value
+                    ),
+                    (
+                        None
+                        if candidate.artifact_unavailability_reason is None
+                        else candidate.artifact_unavailability_reason.value
+                    ),
                 ),
             )
-            event_drafts = [
-                self._event(
-                    CommittedEventType.TOOL_RESULT_ACCEPTED,
-                    SubjectSlot.ENTRY,
-                    result_entry_id,
-                    occurred_at=occurred_at,
-                    actor_kind="tool",
-                    actor_id=actor_id,
-                    payload={
-                        "tool_call_id": tool_call_id,
-                        "result_state": result_state,
-                    },
-                )
-            ]
-            if memory_candidate_id is not None:
-                assert memory_proposal_kind is not None
-                assert memory_proposal_payload is not None
-                assert memory_governance_job_id is not None
-                semantic_digest = canonical_digest(
-                    "pulsara:memory-candidate:v1",
-                    {
-                        "workspace_id": str(turn["workspace_id"]),
-                        "proposal_kind": memory_proposal_kind,
-                        "proposal_payload": dict(memory_proposal_payload),
-                        "source_entry_id": assistant_entry_id,
-                    },
-                )
+            event_drafts = [candidate.tool_result_occurrence]
+            side = candidate.side_branch
+            if isinstance(side, PreparedMemoryProposalSideBranch):
                 connection.execute(
                     """
                     INSERT INTO pulsara_v3.memory_candidates (
@@ -1558,20 +2014,15 @@ class ConversationKernelRepository:
                     ) VALUES (%s, %s, %s, %s, %s, %s, %s, 'PENDING')
                     """,
                     (
-                        memory_candidate_id,
-                        turn["workspace_id"],
+                        side.memory_candidate_id,
+                        candidate.workspace_id,
                         guard.session_id,
-                        assistant_entry_id,
-                        memory_proposal_kind,
-                        semantic_digest,
-                        Jsonb(dict(memory_proposal_payload)),
+                        candidate.assistant_entry_id,
+                        side.proposal_kind,
+                        side.candidate_semantic_digest,
+                        Jsonb(dict(side.proposal_payload)),
                     ),
                 )
-                intent_payload = {
-                    "candidate_id": memory_candidate_id,
-                    "candidate_semantic_digest": semantic_digest,
-                }
-                governance = job_handler_contract(MEMORY_GOVERNANCE)
                 connection.execute(
                     """
                     INSERT INTO pulsara_v3.durable_jobs (
@@ -1582,51 +2033,263 @@ class ConversationKernelRepository:
                         attempt_timeout_ms, provider_input_token_limit_per_attempt,
                         provider_output_token_limit_per_attempt, next_eligible_at
                     ) VALUES (
-                        %s, %s, %s, 'MEMORY_GOVERNANCE',
-                        'memory_governance.v1', %s, %s, %s,
-                        'RETRY_SAFE', 'PENDING', 'bounded-exponential', 1,
-                        %s, %s, %s, %s, clock_timestamp()
+                        %s, %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s
                     )
                     """,
                     (
-                        memory_governance_job_id,
-                        turn["workspace_id"],
+                        side.governance_job_id,
+                        candidate.workspace_id,
                         guard.session_id,
-                        canonical_digest(
-                            "pulsara:job-intent:memory_governance.v1",
-                            intent_payload,
-                        ),
-                        Jsonb(intent_payload),
-                        f"memory-governance:{memory_candidate_id}",
-                        governance.maximum_attempts,
-                        governance.attempt_timeout_ms,
-                        governance.input_token_limit,
-                        governance.output_token_limit,
+                        side.job_handler_type,
+                        side.intent_schema_version,
+                        side.intent_digest,
+                        Jsonb(dict(side.intent_payload)),
+                        side.automatic_intent_key,
+                        side.safety_class,
+                        side.initial_status,
+                        side.retry_policy_id,
+                        side.retry_policy_version,
+                        side.maximum_attempts,
+                        side.attempt_timeout_ms,
+                        side.provider_input_token_limit_per_attempt,
+                        side.provider_output_token_limit_per_attempt,
+                        side.next_eligible_at,
                     ),
                 )
-                event_drafts.append(
-                    self._event(
-                        CommittedEventType.JOB_QUEUED,
-                        SubjectSlot.JOB,
-                        memory_governance_job_id,
-                        occurred_at=occurred_at,
-                        actor_kind="runtime",
-                        actor_id=guard.writer_owner_id,
-                        payload={"handler_type": "MEMORY_GOVERNANCE"},
-                    )
-                )
+                event_drafts.append(side.job_queued_occurrence)
             event = self._append_events(
                 connection,
                 guard,
-                workspace_id=str(turn["workspace_id"]),
+                workspace_id=candidate.workspace_id,
                 drafts=tuple(event_drafts),
             )[0]
             return AcceptedEntry(
-                entry_id=result_entry_id,
-                turn_id=turn_id,
+                entry_id=candidate.result_entry_id,
+                turn_id=candidate.turn_id,
                 entry_sequence=entry_sequence,
                 event_sequence=event.event_sequence,
             )
+
+    def confirm_tool_result_winner(
+        self,
+        guard: HostWriterGuard,
+        *,
+        candidate: PreparedToolResultAcceptance,
+        deadline_monotonic: float,
+    ) -> AcceptedEntry | None:
+        """Stateless exact confirmation after an ambiguous canonical ACK."""
+
+        if candidate.session_id != guard.session_id:
+            raise ValueError("prepared tool result belongs to another session")
+        with self._provider.connection(
+            lane=PostgresConnectionLane.HOST_CONTROL,
+            row_factory=dict_row,
+            deadline_monotonic=deadline_monotonic,
+            isolation_level=IsolationLevel.REPEATABLE_READ,
+        ) as connection:
+            self._require_writer(connection, guard, lock=False)
+            entry = connection.execute(
+                """
+                SELECT * FROM pulsara_v3.transcript_entries
+                WHERE session_id = %s AND id = %s
+                """,
+                (guard.session_id, candidate.result_entry_id),
+            ).fetchone()
+            result = connection.execute(
+                """
+                SELECT * FROM pulsara_v3.tool_results
+                WHERE session_id = %s AND id = %s
+                """,
+                (guard.session_id, candidate.result_id),
+            ).fetchone()
+            if entry is None and result is None:
+                return None
+            if entry is None or result is None:
+                raise ConversationKernelConflict(
+                    "tool result winner is only partially installed"
+                )
+            blob = candidate.artifact_blob_descriptor
+            if (
+                str(entry["workspace_id"]) != candidate.workspace_id
+                or str(entry["turn_id"]) != candidate.turn_id
+                or str(entry["entry_kind"]) != EntryKind.TOOL_RESULT.value
+                or self._content_from_row(entry) != candidate.canonical_preview_content
+                or str(result["workspace_id"]) != candidate.workspace_id
+                or str(result["tool_call_entry_id"]) != candidate.assistant_entry_id
+                or str(result["tool_call_id"]) != candidate.tool_call_id
+                or result["attempt_id"] != candidate.attempt_id
+                or str(result["result_entry_id"]) != candidate.result_entry_id
+                or str(result["result_state"]) != candidate.result_state
+                or str(result["output_artifact_disposition"])
+                != candidate.artifact_disposition.value
+                or result["output_artifact_id"] != candidate.artifact_id
+                or result["output_artifact_blob_id"]
+                != (None if blob is None else blob.blob_id)
+                or str(result["output_source_coverage"])
+                != candidate.source_coverage.value
+                or str(result["output_display_kind"]) != candidate.display_kind.value
+                or result["output_source_coverage_reason"]
+                != (
+                    None
+                    if candidate.source_coverage_reason is None
+                    else candidate.source_coverage_reason.value
+                )
+                or result["output_artifact_unavailability_reason"]
+                != (
+                    None
+                    if candidate.artifact_unavailability_reason is None
+                    else candidate.artifact_unavailability_reason.value
+                )
+            ):
+                raise ConversationKernelConflict(
+                    "tool result identity names a different winner"
+                )
+            result_event = self._exact_event_for_confirmation(
+                connection,
+                candidate.tool_result_occurrence,
+                session_id=candidate.session_id,
+                workspace_id=candidate.workspace_id,
+            )
+            if blob is not None:
+                self._require_exact_tool_artifact_blob(
+                    connection,
+                    workspace_id=candidate.workspace_id,
+                    expected=blob,
+                )
+            side = candidate.side_branch
+            if isinstance(side, PreparedMemoryProposalSideBranch):
+                self._confirm_memory_proposal_side_branch(connection, candidate, side)
+            return AcceptedEntry(
+                entry_id=candidate.result_entry_id,
+                turn_id=candidate.turn_id,
+                entry_sequence=int(entry["entry_sequence"]),
+                event_sequence=int(result_event["event_sequence"]),
+            )
+
+    @staticmethod
+    def _exact_event_for_confirmation(
+        connection: Connection,
+        expected: CommittedEventDraft,
+        *,
+        session_id: str,
+        workspace_id: str,
+    ) -> Mapping[str, object]:
+        rows = connection.execute(
+            "SELECT * FROM pulsara_v3.agent_events WHERE event_id = %s",
+            (expected.event_id,),
+        ).fetchall()
+        if len(rows) != 1:
+            raise ConversationKernelConflict(
+                "prepared tool result occurrence is absent or non-unique"
+            )
+        row = rows[0]
+        subject_column = DESCRIPTOR_BY_TYPE[expected.event_type].subject_slot.value
+        if (
+            str(row["session_id"]) != session_id
+            or str(row["workspace_id"]) != workspace_id
+            or str(row["event_type"]) != expected.event_type.value
+            or row[subject_column] != expected.subject.subject_id
+            or row["occurred_at"] != expected.occurred_at
+            or str(row["actor_kind"]) != expected.actor_kind
+            or str(row["actor_id"]) != expected.actor_id
+            or str(row["sensitivity_class"]) != expected.sensitivity_class
+            or str(row["projection_profile"]) != expected.projection_profile
+            or dict(row["payload"]) != dict(expected.payload)
+        ):
+            raise ConversationKernelConflict(
+                "prepared occurrence identity names a different winner"
+            )
+        return row
+
+    @staticmethod
+    def _require_exact_tool_artifact_blob(
+        connection: Connection,
+        *,
+        workspace_id: str,
+        expected: BlobContent,
+    ) -> None:
+        row = connection.execute(
+            """
+            SELECT id, logical_digest, logical_size, media_type, codec
+            FROM pulsara_v3.blobs
+            WHERE id = %s AND workspace_id = %s
+            """,
+            (expected.blob_id, workspace_id),
+        ).fetchone()
+        if (
+            row is None
+            or BlobContent(
+                blob_id=str(row["id"]),
+                digest=str(row["logical_digest"]),
+                size=int(row["logical_size"]),
+                media_type=str(row["media_type"]),
+                codec=str(row["codec"]),
+            )
+            != expected
+        ):
+            raise ConversationKernelConflict(
+                "prepared tool artifact descriptor names a different blob"
+            )
+
+    def _confirm_memory_proposal_side_branch(
+        self,
+        connection: Connection,
+        candidate: PreparedToolResultAcceptance,
+        side: PreparedMemoryProposalSideBranch,
+    ) -> None:
+        memory = connection.execute(
+            """
+            SELECT * FROM pulsara_v3.memory_candidates
+            WHERE workspace_id = %s AND id = %s
+            """,
+            (candidate.workspace_id, side.memory_candidate_id),
+        ).fetchone()
+        job = connection.execute(
+            """
+            SELECT * FROM pulsara_v3.durable_jobs
+            WHERE workspace_id = %s AND id = %s
+            """,
+            (candidate.workspace_id, side.governance_job_id),
+        ).fetchone()
+        if memory is None or job is None:
+            raise ConversationKernelConflict(
+                "prepared memory proposal side branch is only partially installed"
+            )
+        if (
+            str(memory["origin_session_id"]) != candidate.session_id
+            or str(memory["source_entry_id"]) != candidate.assistant_entry_id
+            or str(memory["proposal_kind"]) != side.proposal_kind
+            or str(memory["semantic_digest"]) != side.candidate_semantic_digest
+            or dict(memory["proposal_payload"]) != dict(side.proposal_payload)
+            or str(memory["status"]) != "PENDING"
+            or str(job["origin_session_id"]) != candidate.session_id
+            or str(job["handler_type"]) != side.job_handler_type
+            or str(job["intent_schema_version"]) != side.intent_schema_version
+            or str(job["intent_digest"]) != side.intent_digest
+            or dict(job["intent_payload"]) != dict(side.intent_payload)
+            or str(job["automatic_intent_key"]) != side.automatic_intent_key
+            or str(job["safety_class"]) != side.safety_class
+            or str(job["status"]) != side.initial_status
+            or str(job["retry_policy_id"]) != side.retry_policy_id
+            or int(job["retry_policy_version"]) != side.retry_policy_version
+            or int(job["maximum_attempts"]) != side.maximum_attempts
+            or int(job["attempt_timeout_ms"]) != side.attempt_timeout_ms
+            or int(job["provider_input_token_limit_per_attempt"])
+            != side.provider_input_token_limit_per_attempt
+            or int(job["provider_output_token_limit_per_attempt"])
+            != side.provider_output_token_limit_per_attempt
+            or job["next_eligible_at"] != side.next_eligible_at
+        ):
+            raise ConversationKernelConflict(
+                "prepared memory proposal side branch names a different winner"
+            )
+        self._exact_event_for_confirmation(
+            connection,
+            side.job_queued_occurrence,
+            session_id=candidate.session_id,
+            workspace_id=candidate.workspace_id,
+        )
 
     def accept_tool_interaction_decision(
         self,
@@ -1874,13 +2537,15 @@ class ConversationKernelRepository:
                 connection.execute(
                     """
                     INSERT INTO pulsara_v3.tool_results (
-                        id, session_id, tool_call_entry_id, tool_call_id,
+                        id, session_id, workspace_id,
+                        tool_call_entry_id, tool_call_id,
                         attempt_id, result_entry_id, result_state
-                    ) VALUES (%s, %s, %s, %s, NULL, %s, 'PERMISSION_DENIED')
+                    ) VALUES (%s, %s, %s, %s, %s, NULL, %s, 'PERMISSION_DENIED')
                     """,
                     (
                         result_id,
                         guard.session_id,
+                        subject["workspace_id"],
                         assistant_entry_id,
                         tool_call_id,
                         result_entry_id,
@@ -2798,8 +3463,7 @@ class ConversationKernelRepository:
             ).fetchone()
             if (
                 item is None
-                or item["delivery_mode"]
-                != PromptDeliveryMode.STEER_ACTIVE_TURN.value
+                or item["delivery_mode"] != PromptDeliveryMode.STEER_ACTIVE_TURN.value
             ):
                 return
             target = connection.execute(
@@ -3486,9 +4150,7 @@ class ConversationKernelRepository:
                 (session_id,),
             ).fetchone()
             return (
-                None
-                if row is None
-                else PromptDeliveryMode(str(row["delivery_mode"]))
+                None if row is None else PromptDeliveryMode(str(row["delivery_mode"]))
             )
 
     def request_job_cancel(
@@ -3594,9 +4256,7 @@ class ConversationKernelRepository:
                     (origin_session_id,),
                 ).fetchone()
                 if session is None:
-                    raise ConversationKernelConflict(
-                        "job origin session disappeared"
-                    )
+                    raise ConversationKernelConflict("job origin session disappeared")
             expired = connection.execute(
                 """
                 SELECT j.*, a.id AS attempt_id, a.attempt_ordinal,
@@ -4738,9 +5398,7 @@ class ConversationKernelRepository:
         superseded_fact_ids_value = lineage_payload.get("superseded_fact_ids", ())
         if not isinstance(superseded_fact_ids_value, (list, tuple)):
             raise ValueError("memory lineage superseded-fact carrier is invalid")
-        superseded_fact_ids = tuple(
-            str(value) for value in superseded_fact_ids_value
-        )
+        superseded_fact_ids = tuple(str(value) for value in superseded_fact_ids_value)
         if len(superseded_fact_ids) > 32 or any(
             not value for value in superseded_fact_ids
         ):
@@ -6307,7 +6965,13 @@ __all__ = [
     "JobAttemptTerminalized",
     "MemoryVectorFactSource",
     "MemoryVectorSource",
+    "NoToolResultSideBranch",
+    "PreparedMemoryProposalSideBranch",
     "PreparedProviderInputCut",
+    "PreparedToolResultAcceptance",
     "StaleHostWriter",
     "StaleJobClaim",
+    "ToolResultSideBranch",
+    "ToolResultSideBranchKind",
+    "build_prepared_tool_result_acceptance",
 ]

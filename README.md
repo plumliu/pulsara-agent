@@ -56,7 +56,11 @@ runtime-write admission epoch.
 The current Kernel supports:
 
 - OpenAI-compatible Responses and Chat Completions transports;
-- filesystem, todo, terminal, and yielded terminal-process tools;
+- filesystem, todo, terminal, yielded terminal-process, and scoped
+  `artifact_read` tools;
+- complete sanitized tool output retention through the shared blob store:
+  medium output stays fully visible with an artifact reference, while large
+  output uses a UTF-8-safe head/tail preview and bounded on-demand reads;
 - bounded Host-scoped subagents;
 - bundled and local skills;
 - PostgreSQL full-text/vector memory with explicit direct, reverse, and at
@@ -104,6 +108,10 @@ uv run pulsara db verify --deep --env-file .env
 
 The only active migration universe is
 `pulsara.conversation-kernel.v1`, generation 1, beginning at version 0.
+Round 1 keeps the schema at exactly 24 product relations while extending the
+version-0 `tool_results` contract; its current baseline/catalog identity and
+verification results are recorded in
+[`round1_tool_output_artifact_activation.json`](benchmarks/suites/core/v1/round1_tool_output_artifact_activation.json).
 An old v13 database is rejected with
 `schema_migration_universe_reset_required`; Pulsara never imports, translates,
 or upgrades it in place. Follow

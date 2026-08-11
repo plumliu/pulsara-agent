@@ -15,8 +15,14 @@ from jsonschema import ValidationError, validators
 from pulsara_agent.capability.builtin_catalog import builtin_tool_catalog_entry
 from pulsara_agent.llm.input import ToolSpec
 from pulsara_agent.message import ToolResultState
+from pulsara_agent.ports.artifact import ToolArtifactReadPort
 from pulsara_agent.ports.terminal import parse_terminal_process_input
-from pulsara_agent.ports.tool_execution import Tool, ToolCall, ToolExecutionResult
+from pulsara_agent.ports.tool_execution import (
+    Tool,
+    ToolCall,
+    ToolExecutionResult,
+    ToolOutputArtifactCandidate,
+)
 from pulsara_agent.terminal_process import (
     TerminalRequest,
     TerminalResult,
@@ -29,6 +35,7 @@ from pulsara_agent.tools.builtins.filesystem import (
     WriteFileTool,
 )
 from pulsara_agent.tools.builtins.todo import TodoTool
+from pulsara_agent.tools.builtins.artifact import ArtifactReadTool
 from pulsara_agent.conversation_kernel.limits import STAGE2_LIMITS
 from pulsara_agent.conversation_kernel.io import KernelSessionIO
 from pulsara_agent.conversation_kernel.live import (
@@ -43,6 +50,7 @@ from pulsara_agent.ports.live_agent_event import (
     TerminalProcessCompletedPayload,
     live_digest,
 )
+from pulsara_agent.primitives.model_call import sha256_fingerprint
 from pulsara_agent.conversation_kernel.vocabulary import LiveEventType
 from pulsara_agent.conversation_kernel.tool_policy import (
     ToolDispatchAuthorizationPolicy,
@@ -57,9 +65,9 @@ from .runner import (
 )
 
 
-MAXIMUM_TOOL_RESULT_BYTES = STAGE2_LIMITS.tool_result_hard_bytes
 DIRECT_KERNEL_TOOL_NAMES = frozenset(
     {
+        "artifact_read",
         "read_file",
         "search_files",
         "edit_file",
@@ -69,6 +77,90 @@ DIRECT_KERNEL_TOOL_NAMES = frozenset(
         "terminal_process",
     }
 )
+
+
+@dataclass(frozen=True, slots=True)
+class ProductionBuiltinExecutorBinding:
+    """Exact descriptor-to-executor closure for one advertised builtin."""
+
+    tool_name: str
+    descriptor_id: str
+    descriptor_contract_version: str
+    descriptor_fingerprint: str
+    input_schema_fingerprint: str
+    binding_contract_fingerprint: str
+    catalog_entry_fingerprint: str
+    availability_requirement_fingerprint: str
+    permission_contract_fingerprint: str
+    execution_binding_kind: str
+    is_read_only: bool
+    is_concurrency_safe: bool
+    permission_category: str
+    executor_identity: str
+    binding_fingerprint: str
+
+
+def _production_executor_binding(
+    tool_name: str, executor_identity: str
+) -> ProductionBuiltinExecutorBinding:
+    if not tool_name or not executor_identity:
+        raise ValueError("production executor binding identity is incomplete")
+    entry = builtin_tool_catalog_entry(tool_name)
+    descriptor = entry.descriptor
+    contract = entry.binding_contract
+    if descriptor.name != tool_name or contract.tool_name != tool_name:
+        raise RuntimeError("builtin descriptor and executor name do not join")
+    input_schema_fingerprint = sha256_fingerprint(
+        "production-builtin-input-schema:v1", descriptor.input_schema
+    )
+    payload = {
+        "tool_name": tool_name,
+        "descriptor_id": descriptor.id,
+        "descriptor_contract_version": contract.contract_version,
+        "descriptor_fingerprint": descriptor.fingerprint(),
+        "input_schema_fingerprint": input_schema_fingerprint,
+        "binding_contract_fingerprint": contract.contract_fact_fingerprint,
+        "catalog_entry_fingerprint": entry.entry_fingerprint,
+        "availability_requirement_fingerprint": (
+            entry.availability_requirement.requirement_fingerprint
+        ),
+        "permission_contract_fingerprint": (
+            entry.permission_contract.contract_fingerprint
+        ),
+        "execution_binding_kind": entry.execution_binding_kind.value,
+        "is_read_only": descriptor.is_read_only,
+        "is_concurrency_safe": descriptor.is_concurrency_safe,
+        "permission_category": descriptor.permission_category,
+        "executor_identity": executor_identity,
+    }
+    return ProductionBuiltinExecutorBinding(
+        tool_name=tool_name,
+        descriptor_id=descriptor.id,
+        descriptor_contract_version=contract.contract_version,
+        descriptor_fingerprint=descriptor.fingerprint(),
+        input_schema_fingerprint=input_schema_fingerprint,
+        binding_contract_fingerprint=contract.contract_fact_fingerprint,
+        catalog_entry_fingerprint=entry.entry_fingerprint,
+        availability_requirement_fingerprint=(
+            entry.availability_requirement.requirement_fingerprint
+        ),
+        permission_contract_fingerprint=(
+            entry.permission_contract.contract_fingerprint
+        ),
+        execution_binding_kind=entry.execution_binding_kind.value,
+        is_read_only=descriptor.is_read_only,
+        is_concurrency_safe=descriptor.is_concurrency_safe,
+        permission_category=descriptor.permission_category,
+        executor_identity=executor_identity,
+        binding_fingerprint=sha256_fingerprint(
+            "production-builtin-executor-binding:v1", payload
+        ),
+    )
+
+
+def _qualified_executor_identity(owner: object, tool_name: str) -> str:
+    owner_type = type(owner)
+    return f"{owner_type.__module__}.{owner_type.__qualname__}#{tool_name}"
 
 
 class KernelSubagentToolPort(Protocol):
@@ -171,7 +263,11 @@ class _DirectTerminalProcessTool:
                 max_output_chars=maximum,
                 owner_host_session_id=self.owner_host_session_id,
             )
-            return _success(call, {"status": "success", **log.to_payload()})
+            return _success(
+                call,
+                {"status": "success", **log.to_payload()},
+                output_artifact_candidate=log.output_artifact_candidate,
+            )
         if action == "poll":
             result = self.manager.poll_process(
                 request.process_id,
@@ -228,15 +324,12 @@ class DirectKernelToolPort:
         authorization_policy: ToolDispatchAuthorizationPolicy,
         session_id: str,
         live_bus: LiveAgentEventBus,
-        maximum_tool_result_bytes: int = MAXIMUM_TOOL_RESULT_BYTES,
+        artifact_read_port: ToolArtifactReadPort | None = None,
     ) -> None:
-        if not 1 <= maximum_tool_result_bytes <= MAXIMUM_TOOL_RESULT_BYTES:
-            raise ValueError("tool result bound is outside the Stage 2 contract")
         root = workspace_root.expanduser().resolve()
         self._host_owner_id = host_owner_id
         self._session_id = session_id
         self._live_bus = live_bus
-        self._maximum_tool_result_bytes = maximum_tool_result_bytes
         self._physical_io = KernelSessionIO()
         self._terminal = TerminalSessionManager(workspace_root=root)
         self._terminal.activate_owner(host_owner_id)
@@ -249,6 +342,8 @@ class DirectKernelToolPort:
             _DirectTerminalTool(self._terminal, host_owner_id),
             _DirectTerminalProcessTool(self._terminal, host_owner_id),
         )
+        if artifact_read_port is not None:
+            tools = (*tools, ArtifactReadTool(artifact_read_port))
         self._tools = {tool.name: tool for tool in tools}
         self._authorization_policy = authorization_policy
         self._close_lock = Lock()
@@ -277,20 +372,41 @@ class DirectKernelToolPort:
 
     @property
     def tool_specs(self) -> tuple[ToolSpec, ...]:
-        names = set(self._tools)
-        if self._subagent is not None:
-            names.update(self._subagent.tool_names)
-        if self._memory is not None:
-            names.update(self._memory.tool_names)
+        bindings = self.executor_bindings
         return tuple(
             ToolSpec(
-                name=name,
-                description=builtin_tool_catalog_entry(name).descriptor.description,
+                name=binding.tool_name,
+                description=builtin_tool_catalog_entry(
+                    binding.tool_name
+                ).descriptor.description,
                 parameters=_json_schema_value(
-                    builtin_tool_catalog_entry(name).descriptor.input_schema
+                    builtin_tool_catalog_entry(
+                        binding.tool_name
+                    ).descriptor.input_schema
                 ),
             )
-            for name in sorted(names)
+            for binding in bindings
+        )
+
+    @property
+    def executor_bindings(self) -> tuple[ProductionBuiltinExecutorBinding, ...]:
+        identities = {
+            name: _qualified_executor_identity(tool, name)
+            for name, tool in self._tools.items()
+        }
+        if self._subagent is not None:
+            for name in self._subagent.tool_names:
+                if name in identities:
+                    raise RuntimeError("production builtin has multiple executors")
+                identities[name] = _qualified_executor_identity(self._subagent, name)
+        if self._memory is not None:
+            for name in self._memory.tool_names:
+                if name in identities:
+                    raise RuntimeError("production builtin has multiple executors")
+                identities[name] = _qualified_executor_identity(self._memory, name)
+        return tuple(
+            _production_executor_binding(name, identities[name])
+            for name in sorted(identities)
         )
 
     async def authorize(
@@ -422,14 +538,10 @@ class DirectKernelToolPort:
             tool,
             call,
             deadline_monotonic=(
-                monotonic()
-                + STAGE2_LIMITS.foreground_io_timeout_ms / 1_000
+                monotonic() + STAGE2_LIMITS.foreground_io_timeout_ms / 1_000
             ),
         )
-        encoded = _truncate_tool_result_utf8(
-            result.output,
-            maximum_bytes=self._maximum_tool_result_bytes,
-        )
+        encoded = result.output.encode("utf-8")
         state = {
             ToolResultState.SUCCESS: "SUCCESS",
             ToolResultState.ERROR: "APPLICATION_ERROR",
@@ -457,6 +569,8 @@ class DirectKernelToolPort:
             state=state,
             content=encoded,
             remote_identity=remote_identity,
+            output_artifact_candidate=result.output_artifact_candidate,
+            artifact_source_read=result.artifact_source_read,
         )
 
     def _offer_terminal_live(
@@ -589,46 +703,22 @@ def _terminal_execution_result(
         tool_name=call.name,
         status=state,
         output=json.dumps(payload, ensure_ascii=False),
+        output_artifact_candidate=result.output_artifact_candidate,
     )
 
 
-def _truncate_tool_result_utf8(output: str, *, maximum_bytes: int) -> bytes:
-    """Return a valid UTF-8 tool result whose final carrier obeys the hard cap."""
-
-    if maximum_bytes < 1:
-        raise ValueError("tool result byte cap must be positive")
-    raw = output.encode("utf-8", errors="replace")
-    if len(raw) <= maximum_bytes:
-        return raw
-    if maximum_bytes < len(b"[cut]"):
-        return b"~"[:maximum_bytes]
-
-    # The omitted count includes bytes removed to make room for the marker.
-    # Recompute until the digit-width-dependent suffix and prefix agree.
-    omitted = len(raw)
-    for _ in range(4):
-        suffix = f"\n[tool output truncated: {omitted} bytes omitted]".encode("ascii")
-        if len(suffix) > maximum_bytes:
-            return b"[cut]"[:maximum_bytes]
-        prefix_budget = maximum_bytes - len(suffix)
-        prefix = raw[:prefix_budget].decode("utf-8", errors="ignore").encode("utf-8")
-        next_omitted = len(raw) - len(prefix)
-        if next_omitted == omitted:
-            result = prefix + suffix
-            if len(result) > maximum_bytes:
-                raise AssertionError("tool result truncation exceeded its hard cap")
-            result.decode("utf-8")
-            return result
-        omitted = next_omitted
-    raise AssertionError("tool result truncation did not converge")
-
-
-def _success(call: ToolCall, payload: Mapping[str, object]) -> ToolExecutionResult:
+def _success(
+    call: ToolCall,
+    payload: Mapping[str, object],
+    *,
+    output_artifact_candidate: ToolOutputArtifactCandidate | None = None,
+) -> ToolExecutionResult:
     return ToolExecutionResult(
         call_id=call.id,
         tool_name=call.name,
         status=ToolResultState.SUCCESS,
         output=json.dumps(dict(payload), ensure_ascii=False),
+        output_artifact_candidate=output_artifact_candidate,
     )
 
 
@@ -655,5 +745,5 @@ __all__ = [
     "DIRECT_KERNEL_TOOL_NAMES",
     "DirectKernelToolPort",
     "KernelToolInteractionPort",
-    "MAXIMUM_TOOL_RESULT_BYTES",
+    "ProductionBuiltinExecutorBinding",
 ]

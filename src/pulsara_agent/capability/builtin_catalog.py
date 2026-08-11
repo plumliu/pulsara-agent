@@ -314,17 +314,20 @@ _BUILTIN_DESCRIPTORS: dict[str, CapabilityDescriptor] = {
     "artifact_read": _descriptor(
         name="artifact_read",
         description=(
-            "Read a retained tool result artifact by artifact_id. Use this when a tool result includes artifacts[] "
-            "and you need details beyond the inline output_preview. Prefer preview.read_more.suggested_offset_chars "
-            "when present instead of rereading from 0."
+            "Read a canonical tool-output artifact by artifact_id. Large tool "
+            "result previews include an exact artifact_id and a suggested "
+            "offset_chars; use those values to inspect omitted content. A "
+            "preview that says artifact unavailable has no readable handle."
         ),
         input_schema=object_schema(
             properties={
-                "artifact_id": {"type": "string"},
+                "artifact_id": {"type": "string", "minLength": 1},
                 "mode": {"type": "string", "enum": ["text", "info"], "default": "text"},
-                "offset_chars": {"type": "integer", "default": 0},
+                "offset_chars": {"type": "integer", "minimum": 0, "default": 0},
                 "max_chars": {
                     "type": "integer",
+                    "minimum": 1,
+                    "maximum": 32_000,
                     "default": DEFAULT_ARTIFACT_READ_CHARS,
                 },
             },

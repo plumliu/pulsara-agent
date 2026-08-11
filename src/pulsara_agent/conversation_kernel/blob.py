@@ -242,6 +242,10 @@ class PostgresCanonicalBlobStore:
                           SELECT 1 FROM pulsara_v3.durable_jobs AS j
                           WHERE j.result_blob_id = b.id
                       )
+                      AND NOT EXISTS (
+                          SELECT 1 FROM pulsara_v3.tool_results AS r
+                          WHERE r.output_artifact_blob_id = b.id
+                      )
                       AND pg_catalog.pg_try_advisory_xact_lock(
                           pg_catalog.hashtextextended(b.id, 0)
                       )
