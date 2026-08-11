@@ -90,6 +90,7 @@ class ToolOutputSourceCoverageReason(StrEnum):
     """Closed reason why a candidate is not the complete source observation."""
 
     TERMINAL_RETENTION_GAP = "TERMINAL_RETENTION_GAP"
+    TERMINAL_SANITIZER_UNAVAILABLE = "TERMINAL_SANITIZER_UNAVAILABLE"
 
 
 class ToolOutputSourceFormatHint(StrEnum):
@@ -122,10 +123,12 @@ class ToolOutputArtifactCandidate:
         if self.source_coverage is ToolOutputSourceCoverage.COMPLETE:
             if self.source_coverage_reason is not None:
                 raise ValueError("complete tool output cannot carry a coverage reason")
-        elif (
-            self.source_coverage is ToolOutputSourceCoverage.RETAINED_SNAPSHOT
-            and self.source_coverage_reason
-            is not ToolOutputSourceCoverageReason.TERMINAL_RETENTION_GAP
+        elif self.source_coverage is ToolOutputSourceCoverage.RETAINED_SNAPSHOT and (
+            self.source_coverage_reason
+            not in {
+                ToolOutputSourceCoverageReason.TERMINAL_RETENTION_GAP,
+                ToolOutputSourceCoverageReason.TERMINAL_SANITIZER_UNAVAILABLE,
+            }
         ):
             raise ValueError("retained tool output requires its closed coverage reason")
         if self.original_utf8_bytes is not None:

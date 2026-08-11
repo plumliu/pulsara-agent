@@ -1,6 +1,6 @@
-"""Closed Stage 2 event vocabulary and subject/guard descriptor.
+"""Closed conversation-kernel event vocabulary and subject/guard descriptor.
 
-The descriptor is the single Python owner for the exact 26/23/13/2 oracle.
+The descriptor is the single Python owner for the exact 27/23/13/2 oracle.
 SQL checks, repository validation, protocol projection mapping, and generated
 test fixtures consume these values; callers cannot register new entries.
 """
@@ -40,6 +40,7 @@ class CommittedEventType(StrEnum):
     TURN_COMPLETED = "TurnCompleted"
     TURN_INTERRUPTED = "TurnInterrupted"
     USER_STEER_ACCEPTED = "UserSteerAccepted"
+    TERMINAL_OBSERVATION_ACCEPTED = "TerminalObservationAccepted"
     CAPABILITY_DECISION_ACCEPTED = "CapabilityDecisionAccepted"
     INTERACTION_DECISION_ACCEPTED = "InteractionDecisionAccepted"
     TOOL_ATTEMPT_ACCEPTED = "ToolAttemptAccepted"
@@ -112,6 +113,7 @@ COMMITTED_EVENT_DESCRIPTORS = (
     _host(CommittedEventType.TURN_COMPLETED, SubjectSlot.TURN),
     _host(CommittedEventType.TURN_INTERRUPTED, SubjectSlot.TURN),
     _host(CommittedEventType.USER_STEER_ACCEPTED, SubjectSlot.ENTRY),
+    _host(CommittedEventType.TERMINAL_OBSERVATION_ACCEPTED, SubjectSlot.ENTRY),
     _host(
         CommittedEventType.CAPABILITY_DECISION_ACCEPTED,
         SubjectSlot.INTERACTION_DECISION,
@@ -187,8 +189,8 @@ APPEND_GUARDS = tuple(item.value for item in AppendGuardKind)
 
 DESCRIPTOR_BY_TYPE = {item.event_type: item for item in COMMITTED_EVENT_DESCRIPTORS}
 
-if len(COMMITTED_EVENT_DESCRIPTORS) != 26 or len(DESCRIPTOR_BY_TYPE) != 26:
-    raise RuntimeError("committed event descriptor must contain exact 26 types")
+if len(COMMITTED_EVENT_DESCRIPTORS) != 27 or len(DESCRIPTOR_BY_TYPE) != 27:
+    raise RuntimeError("committed event descriptor must contain exact 27 types")
 if len(LIVE_EVENT_TYPES) != 23 or len(set(LIVE_EVENT_TYPES)) != 23:
     raise RuntimeError("live event registry must contain exact 23 types")
 if len(SUBJECT_SLOTS) != 13 or len(set(SUBJECT_SLOTS)) != 13:

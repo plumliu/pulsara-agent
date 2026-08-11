@@ -21,6 +21,11 @@ from pulsara_agent.conversation_kernel.repository import (
     ConversationKernelConflict,
     PreparedProviderInputCut,
 )
+from pulsara_agent.ports.terminal_observation import (
+    TerminalDeliveryCoverage,
+    TerminalObservationContentV1,
+    TerminalObservationKind,
+)
 from pulsara_agent.storage.postgres_connection_provider import (
     PostgresConnectionLane,
     VerifiedPostgresConnectionProviderProtocol,
@@ -30,6 +35,7 @@ from pulsara_agent.storage.postgres_connection_provider import (
 class ProviderInputItemKind(StrEnum):
     CONTEXT_SNAPSHOT = "CONTEXT_SNAPSHOT"
     USER = "USER"
+    TERMINAL_OBSERVATION = "TERMINAL_OBSERVATION"
     ASSISTANT = "ASSISTANT"
     ASSISTANT_TOOL_REQUEST = "ASSISTANT_TOOL_REQUEST"
     TOOL_RESULT = "TOOL_RESULT"
@@ -271,6 +277,25 @@ class CanonicalProviderInputReader:
                     items.append(
                         ProviderInputItem(
                             ProviderInputItemKind.USER,
+                            entry_id,
+                            sequence,
+                            text,
+                        )
+                    )
+                    continue
+                if kind == "TERMINAL_OBSERVATION":
+                    if (
+                        str(row["content_media_type"])
+                        != "application/vnd.pulsara.terminal-observation+json"
+                        or str(row["content_codec"]) != "utf-8"
+                    ):
+                        raise ConversationKernelConflict(
+                            "terminal observation content descriptor is invalid"
+                        )
+                    _validate_terminal_observation_content(content)
+                    items.append(
+                        ProviderInputItem(
+                            ProviderInputItemKind.TERMINAL_OBSERVATION,
                             entry_id,
                             sequence,
                             text,
@@ -578,6 +603,102 @@ def _canonical_json_text(payload: Mapping[str, object]) -> str:
     return json.dumps(
         dict(payload), ensure_ascii=False, sort_keys=True, separators=(",", ":")
     )
+
+
+def _validate_terminal_observation_content(content: bytes) -> None:
+    try:
+        payload = json.loads(content)
+        if not isinstance(payload, dict) or set(payload) != {
+            "schema_version",
+            "observation_id",
+            "monitor_id",
+            "process_id",
+            "observation_ordinal",
+            "observation_kind",
+            "process_status",
+            "exit_code",
+            "output_disposition",
+            "gap_before_output",
+            "delivery_coverage",
+            "available_source_utf8_bytes",
+            "included_source_utf8_bytes",
+            "omitted_by_delivery_bound_utf8_bytes",
+            "output",
+            "host_scoped",
+        }:
+            raise ValueError("terminal observation schema is not closed")
+        integer_fields = (
+            "observation_ordinal",
+            "available_source_utf8_bytes",
+            "included_source_utf8_bytes",
+            "omitted_by_delivery_bound_utf8_bytes",
+        )
+        if any(
+            not isinstance(payload[field], int)
+            or isinstance(payload[field], bool)
+            for field in integer_fields
+        ):
+            raise ValueError("terminal observation integer field is invalid")
+        if not isinstance(payload["gap_before_output"], bool) or not isinstance(
+            payload["host_scoped"], bool
+        ):
+            raise ValueError("terminal observation boolean field is invalid")
+        if payload["exit_code"] is not None and (
+            not isinstance(payload["exit_code"], int)
+            or isinstance(payload["exit_code"], bool)
+        ):
+            raise ValueError("terminal observation exit code is invalid")
+        if any(
+            not isinstance(payload[field], str)
+            for field in (
+                "schema_version",
+                "observation_id",
+                "monitor_id",
+                "process_id",
+                "observation_kind",
+                "process_status",
+                "output_disposition",
+                "delivery_coverage",
+                "output",
+            )
+        ):
+            raise ValueError("terminal observation string field is invalid")
+        fact = TerminalObservationContentV1(
+            schema_version=str(payload["schema_version"]),
+            observation_id=str(payload["observation_id"]),
+            monitor_id=str(payload["monitor_id"]),
+            process_id=str(payload["process_id"]),
+            observation_ordinal=int(payload["observation_ordinal"]),
+            observation_kind=TerminalObservationKind(
+                str(payload["observation_kind"])
+            ),
+            process_status=str(payload["process_status"]),
+            exit_code=(
+                None if payload["exit_code"] is None else int(payload["exit_code"])
+            ),
+            output_disposition=str(payload["output_disposition"]),
+            gap_before_output=payload["gap_before_output"],
+            delivery_coverage=TerminalDeliveryCoverage(
+                str(payload["delivery_coverage"])
+            ),
+            available_source_utf8_bytes=int(
+                payload["available_source_utf8_bytes"]
+            ),
+            included_source_utf8_bytes=int(payload["included_source_utf8_bytes"]),
+            omitted_by_delivery_bound_utf8_bytes=int(
+                payload["omitted_by_delivery_bound_utf8_bytes"]
+            ),
+            output=str(payload["output"]),
+            host_scoped=payload["host_scoped"],
+        )
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ConversationKernelConflict(
+            "terminal observation canonical envelope is invalid"
+        ) from exc
+    if fact.canonical_bytes() != content:
+        raise ConversationKernelConflict(
+            "terminal observation canonical encoding is not unique"
+        )
 
 
 __all__ = [

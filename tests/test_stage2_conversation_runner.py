@@ -106,8 +106,10 @@ class _AssertingTool:
         attempt_id,
         turn_id,
         assistant_entry_id,
+        invocation_context,
+        live_sink=None,
     ):
-        del turn_id, assistant_entry_id
+        del turn_id, assistant_entry_id, invocation_context, live_sink
         with self._provider.connection(
             lane=PostgresConnectionLane.INSPECTOR,
             deadline_monotonic=monotonic() + 10,

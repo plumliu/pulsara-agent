@@ -79,6 +79,10 @@ from pulsara_agent.tool_permission import (
     default_permission_policy,
 )
 from pulsara_agent.ports.system_prompt import DEFAULT_SYSTEM_PROMPT
+from pulsara_agent.ports.terminal_observation import (
+    ExistingTurnInstallation,
+    NewTurnInstallation,
+)
 from pulsara_agent.mcp_config import load_mcp_server_configs
 from pulsara_agent.settings import PulsaraSettings
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
@@ -179,6 +183,12 @@ class KernelHostSession:
             live_bus=self.live_bus,
             io_owner=self._io,
         )
+        self._event_loop = asyncio.get_running_loop()
+        self._monitor_wake = asyncio.Event()
+
+        def wake_terminal_monitor_scheduler() -> None:
+            self._event_loop.call_soon_threadsafe(self._monitor_wake.set)
+
         self._tools = DirectKernelToolPort(
             workspace_root=workspace.workspace_root,
             host_owner_id=host_session_id,
@@ -192,6 +202,7 @@ class KernelHostSession:
                 session_id=session_id,
                 workspace_id=workspace.workspace_key,
             ),
+            terminal_monitor_wake_scheduler=wake_terminal_monitor_scheduler,
         )
         self._tools.bind_interaction_port(self._interactions)
         self._subagents = KernelSubagentManager(
@@ -243,6 +254,7 @@ class KernelHostSession:
         self._active_turn_id: str | None = None
         self._active_command_id: str | None = None
         self._external_new_turn_accepting = False
+        self._terminal_new_turn_observation_id: str | None = None
         self._external_new_turn_settled = asyncio.Event()
         self._external_new_turn_settled.set()
         self._command_failures: dict[str, KernelCommandOutcome] = {}
@@ -258,6 +270,10 @@ class KernelHostSession:
         self._delivery_task = asyncio.create_task(
             self._prompt_delivery_loop(),
             name=f"kernel-prompt-delivery:{session_id}",
+        )
+        self._monitor_task = asyncio.create_task(
+            self._terminal_monitor_delivery_loop(),
+            name=f"kernel-terminal-monitor-delivery:{session_id}",
         )
         self._queue_wake.set()
 
@@ -522,6 +538,201 @@ class KernelHostSession:
                             self._active_task = None
                             self._active_turn_id = None
                             self._active_command_id = None
+
+    async def _terminal_monitor_delivery_loop(self) -> None:
+        """Install process-local monitor drafts through the Host safe point."""
+
+        coordinator = self._tools.terminal_monitor_coordinator
+        while True:
+            await self._monitor_wake.wait()
+            self._monitor_wake.clear()
+            if self._closing:
+                await self._release_any_terminal_new_turn_reservation()
+                return
+            delivered = 0
+            while delivered < STAGE2_LIMITS.pending_prompt_hard_items:
+                monitor_ids = coordinator.pending_monitor_ids()
+                if not monitor_ids or self._closing:
+                    break
+                try:
+                    prompt_head = await self._io.run(
+                        self.repository.pending_prompt_head_mode,
+                        session_id=self.session_id,
+                        deadline_monotonic=monotonic() + 5.0,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    await asyncio.sleep(0.1)
+                    self._monitor_wake.set()
+                    break
+                if prompt_head is not None:
+                    # Human input owns the next canonical safe point.
+                    self._queue_wake.set()
+                    await asyncio.sleep(0.05)
+                    self._monitor_wake.set()
+                    break
+                monitor_id = monitor_ids[0]
+                observation_id = coordinator.pending_observation_id(monitor_id)
+                if observation_id is None:
+                    continue
+                attempt = coordinator.current_installation_attempt(monitor_id)
+                target = None if attempt is None else attempt.target
+                reserved_new_turn = False
+                if target is None:
+                    async with self._lock:
+                        active = self._active_task
+                        active_turn_id = self._active_turn_id
+                        if active is not None and active.done():
+                            if self._active_task is active:
+                                self._active_task = None
+                                self._active_turn_id = None
+                                self._active_command_id = None
+                            active = None
+                            active_turn_id = None
+                        if active is not None and active_turn_id is not None:
+                            target = ExistingTurnInstallation(
+                                turn_id=active_turn_id,
+                                entry_id=_stable_id(
+                                    "entry", self.session_id, observation_id
+                                ),
+                            )
+                        elif not self._external_new_turn_accepting:
+                            self._external_new_turn_accepting = True
+                            self._terminal_new_turn_observation_id = observation_id
+                            self._external_new_turn_settled.clear()
+                            reserved_new_turn = True
+                            turn_id = _stable_id(
+                                "turn", self.session_id, observation_id
+                            )
+                            target = NewTurnInstallation(
+                                turn_id=turn_id,
+                                context_binding_revision_id=_stable_id(
+                                    "context-revision", turn_id, "0"
+                                ),
+                                initial_entry_id=_stable_id(
+                                    "entry", self.session_id, observation_id
+                                ),
+                            )
+                elif isinstance(target, NewTurnInstallation):
+                    async with self._lock:
+                        if (
+                            self._terminal_new_turn_observation_id
+                            == observation_id
+                            and self._external_new_turn_accepting
+                        ):
+                            reserved_new_turn = True
+                        elif (
+                            self._active_task is None
+                            and not self._external_new_turn_accepting
+                        ):
+                            self._external_new_turn_accepting = True
+                            self._terminal_new_turn_observation_id = observation_id
+                            self._external_new_turn_settled.clear()
+                            reserved_new_turn = True
+                if target is None:
+                    await asyncio.sleep(0.05)
+                    self._monitor_wake.set()
+                    break
+                try:
+                    accepted = await self._runner.install_terminal_observation(
+                        coordinator=coordinator,
+                        monitor_id=monitor_id,
+                        target=target,
+                        workspace_id=self.workspace.workspace_key,
+                        actor_id=self.host_session_id,
+                        deadline_monotonic=monotonic() + 10.0,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except (ConversationKernelConflict, ExternalSourceNotAtSafePoint):
+                    if reserved_new_turn:
+                        await self._release_terminal_new_turn_reservation(
+                            observation_id
+                        )
+                    await asyncio.sleep(0.05)
+                    self._monitor_wake.set()
+                    break
+                except Exception:
+                    # The immutable attempt remains process-local and is
+                    # exact-confirmed by the next pass before any re-write.
+                    await asyncio.sleep(0.1)
+                    self._monitor_wake.set()
+                    break
+                if accepted is None:
+                    if reserved_new_turn:
+                        await self._release_terminal_new_turn_reservation(
+                            observation_id
+                        )
+                    continue
+                delivered += 1
+                if isinstance(target, NewTurnInstallation):
+                    await self._start_terminal_observation_turn(
+                        accepted.turn_id, observation_id
+                    )
+                    break
+            if self._closing:
+                await self._release_any_terminal_new_turn_reservation()
+                return
+
+    async def _release_terminal_new_turn_reservation(
+        self, observation_id: str
+    ) -> None:
+        async with self._lock:
+            if self._terminal_new_turn_observation_id != observation_id:
+                return
+            self._terminal_new_turn_observation_id = None
+            self._external_new_turn_accepting = False
+            self._external_new_turn_settled.set()
+            self._queue_wake.set()
+
+    async def _release_any_terminal_new_turn_reservation(self) -> None:
+        async with self._lock:
+            if self._terminal_new_turn_observation_id is None:
+                return
+            self._terminal_new_turn_observation_id = None
+            self._external_new_turn_accepting = False
+            self._external_new_turn_settled.set()
+            self._queue_wake.set()
+
+    async def _start_terminal_observation_turn(
+        self, turn_id: str, observation_id: str
+    ) -> None:
+        task = asyncio.create_task(
+            self._run_terminal_observation_turn(turn_id),
+            name=f"kernel-terminal-observation-turn:{turn_id}",
+        )
+        async with self._lock:
+            if (
+                self._terminal_new_turn_observation_id != observation_id
+                or not self._external_new_turn_accepting
+                or self._active_task is not None
+            ):
+                task.cancel()
+                raise RuntimeError(
+                    "terminal observation turn lost its local admission"
+                )
+            self._active_task = task
+            self._active_turn_id = turn_id
+            self._active_command_id = None
+            self._terminal_new_turn_observation_id = None
+            self._external_new_turn_accepting = False
+            self._external_new_turn_settled.set()
+
+    async def _run_terminal_observation_turn(self, turn_id: str) -> None:
+        task = asyncio.current_task()
+        try:
+            await self._runner.run_accepted_turn(turn_id)
+        except BaseException:
+            pass
+        finally:
+            async with self._lock:
+                if self._active_task is task:
+                    self._active_task = None
+                    self._active_turn_id = None
+                    self._active_command_id = None
+                    self._queue_wake.set()
+                    self._monitor_wake.set()
 
     async def _query_command_row(self, command_id: str):
         return await self._io.run(
@@ -936,8 +1147,18 @@ class KernelHostSession:
                     self._close_conversation_requested or close_conversation
                 )
                 self._queue_wake.set()
+                self._monitor_wake.set()
             self.extensions.stop_admission()
             deadline = monotonic() + HOST_CLOSE_SECONDS
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(self._monitor_task),
+                    timeout=max(0.01, deadline - monotonic()),
+                )
+            except TimeoutError as error:
+                raise TimeoutError(
+                    "terminal monitor scheduler did not physically exit"
+                ) from error
             try:
                 await asyncio.wait_for(
                     self._external_new_turn_settled.wait(),
@@ -947,6 +1168,12 @@ class KernelHostSession:
                 raise TimeoutError(
                     "external-result canonical admission did not settle"
                 ) from error
+            # A cancelled asyncio task cannot stop its Terminal worker thread.
+            # Terminate and physically join monitor/process owners first so
+            # the exact in-flight tool invocation can leave its bounded wait.
+            await self._tools.stop_terminal_physical_owners(
+                timeout_seconds=max(0.01, deadline - monotonic())
+            )
             async with self._lock:
                 task = self._active_task
             if task is not None and not task.done():

@@ -1,7 +1,7 @@
 package protocolv3
 
 // ProjectionContract is the generated-language view of the Python-owned
-// 26-type event descriptor. It validates server lowering; it is not an event
+// 27-type event descriptor. It validates server lowering; it is not an event
 // reducer or a second conversation authority.
 type ProjectionContract struct {
 	Kind        ObservationProjectionKind
@@ -16,6 +16,7 @@ var projectionContracts = map[CommittedEventType]ProjectionContract{
 	CommittedEventType_TURN_COMPLETED:                  {ObservationProjectionKind_CURRENT_CONTROL, "subject_turn_id"},
 	CommittedEventType_TURN_INTERRUPTED:                {ObservationProjectionKind_CURRENT_CONTROL, "subject_turn_id"},
 	CommittedEventType_USER_STEER_ACCEPTED:             {ObservationProjectionKind_IMMUTABLE_ENTRY, "subject_entry_id"},
+	CommittedEventType_TERMINAL_OBSERVATION_ACCEPTED:   {ObservationProjectionKind_IMMUTABLE_ENTRY, "subject_entry_id"},
 	CommittedEventType_CAPABILITY_DECISION_ACCEPTED:    {ObservationProjectionKind_CURRENT_CONTROL, "subject_interaction_decision_id"},
 	CommittedEventType_INTERACTION_DECISION_ACCEPTED:   {ObservationProjectionKind_CURRENT_CONTROL, "subject_interaction_decision_id"},
 	CommittedEventType_TOOL_ATTEMPT_ACCEPTED:           {ObservationProjectionKind_CURRENT_CONTROL, "subject_tool_attempt_id"},

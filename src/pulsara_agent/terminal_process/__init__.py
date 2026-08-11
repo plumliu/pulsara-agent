@@ -7,8 +7,10 @@ destroyed during owner close.
 
 from pulsara_agent.terminal_process.manager import TerminalSessionManager
 from pulsara_agent.terminal_process.models import (
+    TerminalPhysicalState,
     TerminalProcessInfo,
     TerminalProcessLog,
+    TerminalProcessOrigin,
     TerminalRequest,
     TerminalResult,
     TerminalStatus,
@@ -16,7 +18,9 @@ from pulsara_agent.terminal_process.models import (
 
 __all__ = [
     "TerminalProcessInfo",
+    "TerminalPhysicalState",
     "TerminalProcessLog",
+    "TerminalProcessOrigin",
     "TerminalRequest",
     "TerminalResult",
     "TerminalSessionManager",

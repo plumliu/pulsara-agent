@@ -11,9 +11,12 @@ from typing import Callable, Iterator, TypeVar
 from pulsara_agent.conversation_kernel.contracts import HostWriterGuard
 from pulsara_agent.conversation_kernel.repository import (
     AcceptedEntry,
+    ConversationKernelConflict,
     ConversationKernelRepository,
     PreparedProviderInputCut,
 )
+from pulsara_agent.ports.terminal_observation import PreparedInstallationTarget
+from pulsara_agent.terminal_process.monitor import TerminalMonitorCoordinator
 
 
 T = TypeVar("T")
@@ -148,6 +151,71 @@ class ProviderSafePointCoordinator:
                 actor_id=actor_id,
                 deadline_monotonic=deadline_monotonic,
             )
+
+    def install_terminal_observation(
+        self,
+        *,
+        coordinator: TerminalMonitorCoordinator,
+        monitor_id: str,
+        target: PreparedInstallationTarget,
+        workspace_id: str,
+        actor_id: str,
+        deadline_monotonic: float,
+    ) -> AcceptedEntry | None:
+        """Freeze and install one monitor draft under the provider-safe lock.
+
+        A process-local in-flight candidate survives an ambiguous database
+        acknowledgement.  The next invocation exact-confirms that candidate
+        before it can issue the same canonical write again.
+        """
+
+        with self._lock:
+            if self._active_handle is not None:
+                raise ExternalSourceNotAtSafePoint(
+                    "provider input/model operation is active"
+                )
+            attempt = coordinator.current_installation_attempt(monitor_id)
+            if attempt is not None:
+                confirmed = self._repository.confirm_terminal_observation_winner(
+                    self._guard,
+                    candidate=attempt,
+                    deadline_monotonic=deadline_monotonic,
+                )
+                if confirmed is not None:
+                    coordinator.settle_installation(attempt, accepted=True)
+                    return confirmed
+            else:
+                attempt = coordinator.freeze(
+                    monitor_id=monitor_id,
+                    target=target,
+                    workspace_id=workspace_id,
+                    writer_generation=self._guard.writer_generation,
+                    actor_id=actor_id,
+                )
+                if attempt is None:
+                    return None
+            try:
+                accepted = self._repository.accept_terminal_observation(
+                    self._guard,
+                    candidate=attempt,
+                    deadline_monotonic=deadline_monotonic,
+                )
+            except ConversationKernelConflict:
+                coordinator.settle_installation(attempt, accepted=False)
+                raise
+            except BaseException:
+                confirmed = self._repository.confirm_terminal_observation_winner(
+                    self._guard,
+                    candidate=attempt,
+                    deadline_monotonic=deadline_monotonic,
+                )
+                if confirmed is None:
+                    # UNKNOWN remains owned by the immutable process-local
+                    # attempt.  A later Host scheduler pass exact-confirms it.
+                    raise
+                accepted = confirmed
+            coordinator.settle_installation(attempt, accepted=True)
+            return accepted
 
     @contextmanager
     def exclusive_safe_mutation(self) -> Iterator[None]:

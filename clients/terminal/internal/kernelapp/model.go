@@ -1788,6 +1788,8 @@ func entryLabel(entry *protocolv3.CanonicalEntry) string {
 		return "assistant"
 	case protocolv3.EntryKind_TOOL_RESULT:
 		return "tool"
+	case protocolv3.EntryKind_TERMINAL_OBSERVATION:
+		return "terminal"
 	}
 	return "entry"
 }

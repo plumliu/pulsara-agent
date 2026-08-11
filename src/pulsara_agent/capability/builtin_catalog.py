@@ -15,6 +15,7 @@ from pulsara_agent.ports.artifact import ToolArtifactMode
 from pulsara_agent.capability.result_contracts import result_render_contract_for_tool
 from pulsara_agent.capability.tool_action import (
     fixed_tool_action_policy,
+    terminal_monitor_tool_action_policy,
     terminal_process_tool_action_policy,
     terminal_tool_action_policy,
 )
@@ -27,8 +28,11 @@ from pulsara_agent.ports.tool_registry import (
 from pulsara_agent.primitives.context import context_fingerprint
 from pulsara_agent.primitives.long_horizon import LongHorizonActionClass
 from pulsara_agent.ports.terminal import (
+    TERMINAL_MONITOR_TOOL_DESCRIPTION,
     TERMINAL_PROCESS_TOOL_DESCRIPTION,
     TERMINAL_TOOL_DESCRIPTION,
+    terminal_monitor_input_schema,
+    terminal_input_schema,
     terminal_process_input_schema,
 )
 
@@ -64,6 +68,7 @@ class BuiltinToolLongHorizonPolicyKind(StrEnum):
     USER_INTERACTION = "user_interaction"
     TERMINAL_COMMAND = "terminal_command"
     TERMINAL_PROCESS = "terminal_process"
+    TERMINAL_MONITOR = "terminal_monitor"
 
 
 _LONG_HORIZON_POLICY_KIND_BY_NAME = {
@@ -90,6 +95,7 @@ _LONG_HORIZON_POLICY_KIND_BY_NAME = {
     "stop_agent": BuiltinToolLongHorizonPolicyKind.PROCESS_CONTROL,
     "stop_agent_task": BuiltinToolLongHorizonPolicyKind.PROCESS_CONTROL,
     "terminal": BuiltinToolLongHorizonPolicyKind.TERMINAL_COMMAND,
+    "terminal_monitor": BuiltinToolLongHorizonPolicyKind.TERMINAL_MONITOR,
     "terminal_process": BuiltinToolLongHorizonPolicyKind.TERMINAL_PROCESS,
     "todo": BuiltinToolLongHorizonPolicyKind.SYNTHESIS_MUTATION,
     "wait_agent": BuiltinToolLongHorizonPolicyKind.EVIDENCE_HYDRATION,
@@ -101,6 +107,9 @@ _ACTION_PERMISSION_OVERRIDE_SPECS: dict[str, tuple[tuple[str, str, str, bool], .
     "terminal_process": tuple(
         ("action", action, "terminal_process_observe", True)
         for action in ("list", "log", "poll", "wait")
+    ),
+    "terminal_monitor": (
+        ("action", "list", "terminal_process_observe", True),
     ),
 }
 
@@ -171,6 +180,10 @@ def _long_horizon_policy(name: str):
     )
     if kind is BuiltinToolLongHorizonPolicyKind.TERMINAL_PROCESS:
         return terminal_process_tool_action_policy(
+            observe_actions=observe_actions,
+        )
+    if kind is BuiltinToolLongHorizonPolicyKind.TERMINAL_MONITOR:
+        return terminal_monitor_tool_action_policy(
             observe_actions=observe_actions,
         )
     return fixed_tool_action_policy(LongHorizonActionClass(kind.value))
@@ -434,20 +447,7 @@ _BUILTIN_DESCRIPTORS: dict[str, CapabilityDescriptor] = {
     "terminal": _descriptor(
         name="terminal",
         description=TERMINAL_TOOL_DESCRIPTION,
-        input_schema=object_schema(
-            properties={
-                "command": {"type": "string"},
-                "workdir": {"type": "string"},
-                "terminal_session_id": {"type": "string", "default": "default"},
-                "yield_time_ms": {"type": "integer", "default": 10_000},
-                "tty": {"type": "boolean", "default": False},
-                "max_output_chars": {
-                    "type": "integer",
-                    "default": DEFAULT_MAX_OUTPUT_CHARS,
-                },
-            },
-            required=["command"],
-        ),
+        input_schema=terminal_input_schema(),
         is_read_only=False,
         is_concurrency_safe=False,
         permission_category="terminal",
@@ -464,6 +464,17 @@ _BUILTIN_DESCRIPTORS: dict[str, CapabilityDescriptor] = {
         artifact_mode=ToolArtifactMode.LARGE_OUTPUT,
         is_destructive=True,
         is_open_world=True,
+    ),
+    "terminal_monitor": _descriptor(
+        name="terminal_monitor",
+        description=TERMINAL_MONITOR_TOOL_DESCRIPTION,
+        input_schema=terminal_monitor_input_schema(),
+        is_read_only=False,
+        is_concurrency_safe=False,
+        permission_category="terminal",
+        artifact_mode=ToolArtifactMode.DEFAULT,
+        is_destructive=True,
+        is_open_world=False,
     ),
     "todo": _descriptor(
         name="todo",
@@ -809,6 +820,7 @@ class BuiltinToolBindingKind(StrEnum):
     PLAN_WORKFLOW = "plan_workflow"
     TERMINAL_COMMAND = "terminal_command"
     TERMINAL_PROCESS = "terminal_process"
+    TERMINAL_MONITOR = "terminal_monitor"
     TODO_LOCAL_STATE = "todo_local_state"
     SUBAGENT_CONTROL = "subagent_control"
 
@@ -925,6 +937,7 @@ _TERMINAL_PROCESS_ACTIONS = (
     "wait",
     "write",
 )
+_TERMINAL_MONITOR_ACTIONS = ("cancel", "list", "register")
 
 
 def builtin_tool_catalog() -> tuple[BuiltinToolCatalogEntry, ...]:
@@ -1042,6 +1055,13 @@ def _catalog_shape(name: str):
             both,
             "terminal",
         )
+    if name == "terminal_monitor":
+        return (
+            BuiltinToolBindingKind.TERMINAL_MONITOR,
+            BuiltinToolAvailabilityKind.REQUIRES_TERMINAL_PORTS,
+            (ToolInvocationOwnerKind.HOST_MAIN_RUN,),
+            "terminal",
+        )
     if name == "todo":
         return (
             BuiltinToolBindingKind.TODO_LOCAL_STATE,
@@ -1118,6 +1138,10 @@ def _permission_contract(
     elif binding_kind is BuiltinToolBindingKind.TERMINAL_PROCESS:
         terminal_kind = BuiltinTerminalPermissionRuleKind.CLOSED_ACTION_SET
         access_actions = _TERMINAL_PROCESS_ACTIONS
+        scheduling_actions = ()
+    elif binding_kind is BuiltinToolBindingKind.TERMINAL_MONITOR:
+        terminal_kind = BuiltinTerminalPermissionRuleKind.CLOSED_ACTION_SET
+        access_actions = _TERMINAL_MONITOR_ACTIONS
         scheduling_actions = ()
     else:
         terminal_kind = BuiltinTerminalPermissionRuleKind.NOT_APPLICABLE

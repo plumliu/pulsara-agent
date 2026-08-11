@@ -31,10 +31,33 @@ TERMINAL_PROCESS_TOOL_DESCRIPTION = (
     "write, submit, close_stdin, and kill. Use the exact process_id returned by "
     "terminal; retained output and foreground waits are bounded."
 )
+TERMINAL_MONITOR_TOOL_DESCRIPTION = (
+    "Register, list, or cancel bounded future observations for one running "
+    "Host-scoped Terminal process. Registration never survives Host close, "
+    "cancel does not kill the process, and completion is always observed."
+)
 
 
 class _StrictInput(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+
+class TerminalInput(_StrictInput):
+    command: str = Field(min_length=1, max_length=1_048_576)
+    workdir: str | None = Field(default=None, min_length=1, max_length=4096)
+    terminal_session_id: str = Field(
+        default="default", min_length=1, max_length=32, pattern=r"^[A-Za-z0-9_-]+$"
+    )
+    yield_time_ms: int = Field(default=10_000, ge=0, le=30_000)
+    tty: bool = False
+    max_output_chars: int = Field(
+        default=DEFAULT_MAX_OUTPUT_CHARS,
+        ge=MIN_TERMINAL_OUTPUT_CHARS,
+        le=DEFAULT_MAX_OUTPUT_CHARS,
+    )
+
+
+_TERMINAL_ADAPTER = TypeAdapter(TerminalInput)
 
 
 class TerminalProcessListInput(_StrictInput):
@@ -49,6 +72,7 @@ class _ProcessInput(_StrictInput):
 
 class TerminalProcessLogInput(_ProcessInput):
     action: Literal["log"]
+    since_cursor: str | None = None
     max_output_chars: int = Field(
         default=DEFAULT_MAX_OUTPUT_CHARS,
         ge=MIN_TERMINAL_OUTPUT_CHARS,
@@ -58,6 +82,7 @@ class TerminalProcessLogInput(_ProcessInput):
 
 class TerminalProcessPollInput(_ProcessInput):
     action: Literal["poll"]
+    since_cursor: str | None = None
     max_output_chars: int = Field(
         default=DEFAULT_MAX_OUTPUT_CHARS,
         ge=MIN_TERMINAL_OUTPUT_CHARS,
@@ -67,6 +92,7 @@ class TerminalProcessPollInput(_ProcessInput):
 
 class TerminalProcessWaitInput(_ProcessInput):
     action: Literal["wait"]
+    since_cursor: str | None = None
     timeout_seconds: int = Field(default=DEFAULT_WAIT_TIMEOUT_SECONDS, ge=1, le=30)
     max_output_chars: int = Field(
         default=DEFAULT_MAX_OUTPUT_CHARS,
@@ -108,6 +134,52 @@ TerminalProcessInput: TypeAlias = Annotated[
 _TERMINAL_PROCESS_ADAPTER = TypeAdapter(TerminalProcessInput)
 
 
+class TerminalMonitorOutputCondition(_StrictInput):
+    min_new_output_chars: int = Field(default=200, ge=1, le=65_536)
+    quiet_period_ms: int = Field(default=500, ge=0, le=10_000)
+
+
+class TerminalMonitorConditions(_StrictInput):
+    output: TerminalMonitorOutputCondition | None = None
+    heartbeat_interval_seconds: int | None = Field(default=None, ge=5, le=1800)
+
+
+class TerminalMonitorDelivery(_StrictInput):
+    max_output_chars: int = Field(default=4000, ge=512, le=32_000)
+    minimum_progress_observation_interval_seconds: int = Field(
+        default=5, ge=5, le=1800
+    )
+
+
+class TerminalMonitorLifetime(_StrictInput):
+    maximum_duration_seconds: int = Field(default=36_000, ge=1, le=36_000)
+
+
+class TerminalMonitorRegisterInput(_StrictInput):
+    action: Literal["register"]
+    process_id: str = Field(min_length=1)
+    conditions: TerminalMonitorConditions = TerminalMonitorConditions()
+    delivery: TerminalMonitorDelivery = TerminalMonitorDelivery()
+    lifetime: TerminalMonitorLifetime = TerminalMonitorLifetime()
+
+
+class TerminalMonitorListInput(_StrictInput):
+    action: Literal["list"]
+
+
+class TerminalMonitorCancelInput(_StrictInput):
+    action: Literal["cancel"]
+    monitor_id: str = Field(min_length=1)
+
+
+TerminalMonitorInput: TypeAlias = Annotated[
+    TerminalMonitorRegisterInput | TerminalMonitorListInput | TerminalMonitorCancelInput,
+    Field(discriminator="action"),
+]
+
+_TERMINAL_MONITOR_ADAPTER = TypeAdapter(TerminalMonitorInput)
+
+
 @dataclass(frozen=True, slots=True)
 class BuiltinToolInputContractBinding:
     tool_name: Literal["terminal_process"]
@@ -121,6 +193,14 @@ class BuiltinToolInputContractBinding:
 
 def parse_terminal_process_input(arguments: object) -> TerminalProcessInput:
     return _TERMINAL_PROCESS_ADAPTER.validate_python(arguments, strict=True)
+
+
+def parse_terminal_input(arguments: object) -> TerminalInput:
+    return _TERMINAL_ADAPTER.validate_python(arguments, strict=True)
+
+
+def parse_terminal_monitor_input(arguments: object) -> TerminalMonitorInput:
+    return _TERMINAL_MONITOR_ADAPTER.validate_python(arguments, strict=True)
 
 
 @lru_cache(maxsize=1)
@@ -141,6 +221,16 @@ def builtin_tool_input_contract_binding() -> BuiltinToolInputContractBinding:
 
 def terminal_process_input_schema() -> dict[str, Any]:
     return builtin_tool_input_contract_binding().schema_copy()
+
+
+@lru_cache(maxsize=1)
+def terminal_input_schema() -> dict[str, Any]:
+    return _inline_schema_references(_TERMINAL_ADAPTER.json_schema())
+
+
+@lru_cache(maxsize=1)
+def terminal_monitor_input_schema() -> dict[str, Any]:
+    return _inline_schema_references(_TERMINAL_MONITOR_ADAPTER.json_schema())
 
 
 def _inline_schema_references(schema: dict[str, Any]) -> dict[str, Any]:
@@ -178,8 +268,15 @@ def _inline_schema_references(schema: dict[str, Any]) -> dict[str, Any]:
 __all__ = [
     "DEFAULT_MAX_OUTPUT_CHARS",
     "TERMINAL_PROCESS_TOOL_DESCRIPTION",
+    "TERMINAL_MONITOR_TOOL_DESCRIPTION",
     "TERMINAL_TOOL_DESCRIPTION",
+    "TerminalInput",
     "TerminalProcessInput",
+    "TerminalMonitorInput",
+    "parse_terminal_input",
+    "parse_terminal_monitor_input",
     "parse_terminal_process_input",
+    "terminal_input_schema",
     "terminal_process_input_schema",
+    "terminal_monitor_input_schema",
 ]

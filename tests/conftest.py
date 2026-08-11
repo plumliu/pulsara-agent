@@ -21,6 +21,7 @@ _POSTGRES_KERNEL_MODULES = frozenset(
         "test_stage2_conversation_runner.py",
         "test_stage2_kernel_host_dogfood.py",
         "test_stage2_tui_cross_language.py",
+        "test_round2_terminal_postgres.py",
     }
 )
 

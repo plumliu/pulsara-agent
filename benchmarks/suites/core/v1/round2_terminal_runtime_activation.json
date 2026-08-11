@@ -1,0 +1,226 @@
+{
+  "schema_version": "round2-terminal-runtime-activation.v1",
+  "status": "activated",
+  "generated_at_utc": "2026-08-11T12:15:12Z",
+  "captured_head": "739f4a209e61d89b3dba45d39106047205506983",
+  "working_tree_semantics": "Round 2 was implemented and verified in the current uncommitted worktree. Existing user documentation changes were preserved. This evidence does not claim a later Git checkpoint and no files were staged, committed, or pushed.",
+  "source_documents": {
+    "ROUND_2_TERMINAL_RUNTIME_IMPLEMENTATION_SPEC.zh.md_at_start": "d788570921879ab72c52464984200320121f16ddc91ec6a36f24d860df5ad209",
+    "ROUND_2_TERMINAL_RUNTIME_IMPLEMENTATION_SPEC.zh.md_after_activation_update": "0de90b7b926fa53080729b4462946a4715429e9c3530ed49524c5b5f3f4532c4",
+    "POST_HARD_CUT_PRODUCT_CAPABILITY_GAP_INDEX.zh.md_at_start": "71db1cd88144d7d4601b372db59e9664f807f06a2d27b445aa2084804a05a083",
+    "POST_HARD_CUT_PRODUCT_CAPABILITY_GAP_INDEX.zh.md_after_activation_update": "1dd23deab98cedb1a7410affda07f7ac5a9ce0fb5bd4fc8b938cd362eadb7393",
+    "PULSARA_DURABILITY_SUBTRACTION_REASSESSMENT.zh.md": "cb3e7b0a9f33e5e4c5b17850d47e1af580a3f23f094f868076351bb17a6a6e80",
+    "ROUND_1_TOOL_OUTPUT_ARTIFACT_IMPLEMENTATION_SPEC.zh.md": "7b34caa305f5a5f9f5f9fda1dd1d1254bbd8d33c6116ca86f8c5bb22cbe4374b",
+    "historical_product_reference_commit": "5b7ad9f7ffc8565bc572180b2bde0c81ab64473a",
+    "round1_kernel_checkpoint": "739f4a209e61d89b3dba45d39106047205506983"
+  },
+  "product_contract": {
+    "production_tools": [
+      "terminal",
+      "terminal_process",
+      "terminal_monitor"
+    ],
+    "terminal_process_actions": [
+      "list",
+      "log",
+      "poll",
+      "wait",
+      "write",
+      "submit",
+      "close_stdin",
+      "kill"
+    ],
+    "terminal_monitor_actions": [
+      "register",
+      "list",
+      "cancel"
+    ],
+    "physical_stream_source": "PIPE or PTY reader -> single incremental sanitizer -> bounded TerminalOutputOwner",
+    "tool_result_live_semantics": "provisional Start/Delta while the process is running; one authoritative End replaces the same block with the Round 1 canonical preview",
+    "retained_process_utf8_hard_bytes": 16777216,
+    "retained_host_utf8_hard_bytes": 134217728,
+    "sanitizer_carry_hard_bytes": 4096,
+    "public_output_hard_chars": 32000,
+    "monitor_canonical_content_hard_bytes": 32000,
+    "cursor_semantics": "exact same-process cursor and delta; retention loss returns typed GAP",
+    "foreground_cwd": "advances only after physical completion to an existing workspace-contained final cwd",
+    "yielded_cwd": "never advances the Terminal session cwd"
+  },
+  "monitor_and_canonical_contract": {
+    "monitor_owner": "process-local TerminalMonitorCoordinator in the current Host",
+    "repository_access_from_coordinator": false,
+    "runner_start_from_coordinator": false,
+    "prepared_target_owner": "KernelHostSession safe-point scheduler",
+    "lock_order": "Host safe-point then TerminalMonitorCoordinator",
+    "installation_attempt": "immutable TerminalObservationInstallationAttempt",
+    "canonical_entry_kind": "TERMINAL_OBSERVATION",
+    "provider_input_kind": "TERMINAL_OBSERVATION",
+    "provider_wire_role": "user with a fixed untrusted-terminal-output boundary and no human provenance",
+    "canonical_acceptance_transaction": [
+      "TERMINAL_OBSERVATION transcript entry",
+      "TerminalObservationAccepted occurrence",
+      "active-turn safe predicate or idle revision-0 turn genesis"
+    ],
+    "idle_turn_genesis": "turn, revision-0 binding, initial entry, and event are installed atomically",
+    "turn_initial_entry_id": "NOT NULL with deferred same-session, same-turn, scope, and kind validation",
+    "skill_or_capability_activation_from_terminal_output": false,
+    "cross_host_monitor_or_process_rebind": false
+  },
+  "environment_and_physical_close": {
+    "shell_probe": "bounded login-shell process-group probe with sentinel, 1 MiB cap, timeout, single-flight, startup-file signature, TTL, and typed fallback",
+    "default_environment": "inert-only exact allowlist with secret-shaped name/value defense",
+    "active_capability_environment_default": "denied",
+    "nearest_venv_bin": true,
+    "diagnostic_environment_values": 0,
+    "physical_state_order": [
+      "RUNNING",
+      "TERMINALIZING",
+      "PHYSICALLY_JOINED",
+      "PRUNABLE"
+    ],
+    "host_close_order": "stop monitor admission, terminate process groups, join reader/watcher/process owners, then release tool, repository, provider, and Host resources"
+  },
+  "oracles": {
+    "product_relations": 24,
+    "committed_event_types": 27,
+    "live_event_types": 23,
+    "subject_slots": 13,
+    "append_guards": 2,
+    "durable_job_handlers": 4,
+    "durable_terminal_process_output_monitor_relations": 0,
+    "durable_terminal_job_handlers": 0
+  },
+  "migration_identity": {
+    "universe_id": "pulsara.conversation-kernel.v1",
+    "universe_generation": 1,
+    "baseline_version": 0,
+    "binding_schema_version": "pulsara:verified-postgres-schema-binding:v2",
+    "baseline_sql_sha256": "2410f021ad4d73e8348a62beb6187f5d0df76b3f11911876e4737e743c4fb95b",
+    "expected_catalog_resource_sha256": "6af2abbff3861d13fee792152764f343ba666eea2efbcada9e73a9525abc3ebf",
+    "runtime_grants_resource_sha256": "27196ea0a623e22e944761dd2e74192357b07cc00891d88e85fd08225a7756d9",
+    "baseline_contract_fingerprint": "sha256:25c30b77124acfe4b59b74295c12ce084eed60df2d4b963e719e536a1b868153",
+    "universe_fingerprint": "sha256:9290b5f4cc617ebb4d9d409d39e00497f6384fbeee13ed9cd89fb7439c15228b",
+    "registry_prefix_fingerprint": "sha256:65c37060ef101c2907fad1c4af803c20eb9cb419f1b41babca2efb50f9872c88",
+    "verified_catalog_fingerprint": "sha256:c4a34bba80d4653bf171ecf60e80a578c862471ecf1b8baec40dd3bef4319ee2",
+    "runtime_grant_policy_fingerprint": "sha256:7824a2004353b3d8210ca311bf086c0ae61e715a4e52347cb59f79e7211d3462",
+    "verification_contract_fingerprint": "sha256:15c3741d98e2c2bc79f8b377bd51073f60a0dfe58c59baf5ced81880557231a3",
+    "ephemeral_deep_verify_result_fingerprint": "sha256:b3b4f0224bf16a32e225f66c8b940314cddbd4ea717c3d715d8af0c80b9d4c40",
+    "fresh_install": "passed",
+    "second_migrate": "passed",
+    "deep_verify": "passed",
+    "old_binding_disposition": "schema_migration_universe_reset_required"
+  },
+  "protocol": {
+    "major": 3,
+    "minor": 0,
+    "schema_sha256": "c8571a6124c4b02f6d4b10911fbd11aa46517f05b84408b6606fa8c85866dbbe",
+    "python_and_go_generated_bindings_updated": true,
+    "terminal_observation_provider_kind_preserved": true,
+    "advanced_go_terminal_dashboard_added": false
+  },
+  "post_review_closure": {
+    "p1_closed": 6,
+    "p2_closed": 3,
+    "remaining_p1": 0,
+    "remaining_p2": 0,
+    "closed_contracts": [
+      "cursor-selected artifact candidate uses the exact selected source range",
+      "process completion and capacity retirement wait for the entire process group",
+      "monitor successor installation revalidates the frozen evaluation generation",
+      "login-shell probe close linearizes SPAWNING, RUNNING, and JOINED",
+      "PTY close_stdin sends EOT or returns a typed failure",
+      "SUBAGENT_TASK scope cannot list, register, or cancel ROOT monitors",
+      "normal monitor rejection lowers to a typed REJECTED result",
+      "sanitizer-unavailable output cannot claim COMPLETE source coverage",
+      "terminal completion preserves exact ROOT or SUBAGENT_TASK origin"
+    ]
+  },
+  "second_post_review_closure": {
+    "p1_closed": 2,
+    "non_blocking_contract_corrections": 2,
+    "remaining_p1": 0,
+    "remaining_p2": 0,
+    "closed_contracts": [
+      "terminal and terminal_process.wait use watcher-owned physical completion instead of shell-leader wait",
+      "process admission linearizes live plus launching capacity under the registry lock",
+      "sanitizer failure persists TERMINAL_SANITIZER_UNAVAILABLE instead of retention eviction",
+      "malformed terminal_monitor input uses the common INVALID_ARGUMENTS descriptor contract"
+    ]
+  },
+  "verification": {
+    "round2_plus_round1_stage2_retained_pre_final": "90_passed_in_10.12s",
+    "final_round2_plus_round1_stage2_stage3_5_targeted": "136_passed_in_17.16s",
+    "round2_terminal_monitor": "12_passed",
+    "round2_terminal_environment": "9_passed",
+    "round2_postgres": "3_passed",
+    "round2_postgres_host_vertical": "1_passed",
+    "clean_v0_and_round2_postgres_focused": "16_passed_in_4.36s",
+    "architecture_retained": "25_passed_in_1.60s",
+    "post_review_terminal_unit_targeted": "42_passed_in_6.20s",
+    "post_review_vertical_targeted": "82_passed_in_9.73s",
+    "post_review_race_repeat": "7_nodes_x_5_rounds_35_passed",
+    "second_post_review_vertical_targeted": "85_passed_in_9.05s",
+    "second_post_review_clean_v0_postgres_host": "16_passed_in_4.46s",
+    "pytest_collection": "279_tests_collected_in_0.42s",
+    "full_pytest_pre_final": "264_passed_in_33.82s",
+    "full_pytest": "279_passed_in_33.68s",
+    "postgres_marker": "72_passed_207_deselected_in_20.61s",
+    "clean_v0_round2_postgres_host": "16_passed_in_4.73s",
+    "ruff": "passed",
+    "compileall": "passed_src_tests_tools",
+    "terminal_protocol_generation": "passed",
+    "go_test": "passed_all_packages",
+    "go_vet": "passed",
+    "go_mod_verify": "passed",
+    "uv_lock_check": "passed",
+    "git_diff_check": "passed",
+    "new_skip_or_xfail": 0,
+    "real_provider_dogfood": {
+      "status": "passed",
+      "configuration": "real configured OpenAI-compatible provider; 1024-token output cap; one-shot empty HOME; MCP discovery replaced with an empty tuple only inside the dogfood process",
+      "database": "fresh clean-v0 ephemeral database, force-dropped after verification",
+      "user_turns": 2,
+      "exact_tool_sequence": true,
+      "first_turn_tool_names": [
+        "terminal"
+      ],
+      "first_turn_final_exact": true,
+      "second_turn_tool_names": [
+        "terminal_monitor"
+      ],
+      "second_turn_final_exact": true,
+      "terminal_process_completed_live_events": 1,
+      "terminal_observation_entries": 1,
+      "terminal_observation_accepted_events": 1,
+      "autonomous_final_exact": true,
+      "host_close_passed": true,
+      "ephemeral_database_dropped": true,
+      "sensitive_body_environment_or_credentials_recorded": false
+    }
+  },
+  "production_diff": {
+    "lines_added": 4909,
+    "lines_deleted": 428,
+    "net_lines": 4481,
+    "counting_scope": "tracked diff under src and clients plus four untracked Round 2 production modules"
+  },
+  "permanent_absences": {
+    "durable_terminal_process_output_monitor_relation": true,
+    "fifth_durable_job": true,
+    "third_append_guard_or_fourteenth_subject_slot": true,
+    "cross_host_terminal_rebind_or_replay": true,
+    "runtime_session_or_universal_event_log": true,
+    "receipt_checkpoint_reducer_repair_projection_graph": true,
+    "durable_model_or_tool_result_segments": true,
+    "protocol_v2": true
+  },
+  "non_goals": [
+    "cross-Host process, cursor, monitor, or autonomous-continuation recovery",
+    "durable raw Terminal output or monitor notification history",
+    "recovery of process bytes already removed by the retained-output bound",
+    "active capability environment inheritance by default",
+    "Git, SSH, proxy, or another specialized environment grant mechanism",
+    "advanced Go Terminal process viewer or monitor dashboard"
+  ],
+  "remaining_blockers": []
+}

@@ -98,7 +98,7 @@ CREATE TABLE pulsara_v3.turns (
     conversation_scope_kind text NOT NULL CHECK (conversation_scope_kind IN ('ROOT', 'SUBAGENT_TASK')),
     scope_subagent_task_id text,
     status text NOT NULL CHECK (status IN ('RUNNING', 'COMPLETED', 'INTERRUPTED')),
-    user_entry_id text,
+    initial_entry_id text NOT NULL,
     final_entry_id text,
     current_context_binding_revision_id text,
     terminal_reason text,
@@ -195,7 +195,7 @@ CREATE TABLE pulsara_v3.transcript_entries (
     entry_sequence bigint NOT NULL CHECK (entry_sequence >= 1),
     entry_kind text NOT NULL CHECK (entry_kind IN (
         'USER_MESSAGE', 'USER_STEER', 'ASSISTANT_MESSAGE',
-        'ASSISTANT_TOOL_REQUEST', 'TOOL_RESULT'
+        'ASSISTANT_TOOL_REQUEST', 'TOOL_RESULT', 'TERMINAL_OBSERVATION'
     )),
     conversation_scope_kind text NOT NULL CHECK (conversation_scope_kind IN ('ROOT', 'SUBAGENT_TASK')),
     scope_subagent_task_id text,
@@ -245,8 +245,8 @@ CREATE TABLE pulsara_v3.transcript_entries (
     CHECK ((source_job_id IS NULL AND source_subagent_result_id IS NULL) OR
         (conversation_scope_kind = 'ROOT' AND entry_kind = 'USER_MESSAGE'))
 );
-ALTER TABLE pulsara_v3.turns ADD CONSTRAINT turns_user_entry_fk
-    FOREIGN KEY (session_id, user_entry_id)
+ALTER TABLE pulsara_v3.turns ADD CONSTRAINT turns_initial_entry_fk
+    FOREIGN KEY (session_id, initial_entry_id)
     REFERENCES pulsara_v3.transcript_entries (session_id, id)
     ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED;
 ALTER TABLE pulsara_v3.turns ADD CONSTRAINT turns_final_entry_fk
@@ -339,7 +339,9 @@ CREATE TABLE pulsara_v3.tool_results (
     output_display_kind text NOT NULL DEFAULT 'COMPLETE'
         CHECK (output_display_kind IN ('COMPLETE', 'HEAD_TAIL')),
     output_source_coverage_reason text
-        CHECK (output_source_coverage_reason IN ('TERMINAL_RETENTION_GAP')),
+        CHECK (output_source_coverage_reason IN (
+            'TERMINAL_RETENTION_GAP', 'TERMINAL_SANITIZER_UNAVAILABLE'
+        )),
     output_artifact_unavailability_reason text
         CHECK (output_artifact_unavailability_reason IN (
             'ARTIFACT_CONTENT_TOO_LARGE',
@@ -375,7 +377,9 @@ CREATE TABLE pulsara_v3.tool_results (
         (output_source_coverage = 'COMPLETE'
             AND output_source_coverage_reason IS NULL) OR
         (output_source_coverage = 'RETAINED_SNAPSHOT'
-            AND output_source_coverage_reason = 'TERMINAL_RETENTION_GAP')
+            AND output_source_coverage_reason IN (
+                'TERMINAL_RETENTION_GAP', 'TERMINAL_SANITIZER_UNAVAILABLE'
+            ))
     ),
     CHECK (
         (output_artifact_disposition = 'NOT_REQUIRED'
@@ -708,7 +712,8 @@ CREATE TABLE pulsara_v3.agent_events (
         'PromptRejected', 'CompactionAdopted', 'SubagentTaskAccepted',
         'SubagentTaskStatusAccepted', 'SubagentMessageAccepted', 'SubagentResultAccepted',
         'JobQueued', 'JobAttemptAccepted', 'JobTerminalAccepted', 'MemoryFactAccepted',
-        'MemoryFactLifecycleChanged', 'MemoryRelationAccepted'
+        'MemoryFactLifecycleChanged', 'MemoryRelationAccepted',
+        'TerminalObservationAccepted'
     )),
     schema_major integer NOT NULL CHECK (schema_major = 1),
     schema_minor integer NOT NULL CHECK (schema_minor >= 0),
@@ -783,7 +788,8 @@ CREATE TABLE pulsara_v3.agent_events (
     ),
     CHECK (
         (event_type IN ('UserMessageAccepted', 'AssistantMessageAccepted',
-            'AssistantToolRequestAccepted', 'ToolResultAccepted', 'UserSteerAccepted')
+            'AssistantToolRequestAccepted', 'ToolResultAccepted', 'UserSteerAccepted',
+            'TerminalObservationAccepted')
             AND subject_entry_id IS NOT NULL) OR
         (event_type IN ('TurnCompleted', 'TurnInterrupted') AND subject_turn_id IS NOT NULL) OR
         (event_type IN ('CapabilityDecisionAccepted', 'InteractionDecisionAccepted')
@@ -833,6 +839,28 @@ DECLARE
     observed_task_id text;
     observed_turn_id text;
 BEGIN
+    IF TG_TABLE_NAME = 'turns' THEN
+        SELECT entry_kind, turn_id, conversation_scope_kind,
+               scope_subagent_task_id
+          INTO observed_kind, observed_turn_id, observed_scope, observed_task_id
+        FROM pulsara_v3.transcript_entries
+        WHERE session_id = NEW.session_id AND id = NEW.initial_entry_id;
+        IF observed_turn_id IS DISTINCT FROM NEW.id
+           OR observed_scope IS DISTINCT FROM NEW.conversation_scope_kind
+           OR observed_task_id IS DISTINCT FROM NEW.scope_subagent_task_id THEN
+            RAISE EXCEPTION 'turn initial entry must belong to its exact turn and scope'
+                USING ERRCODE = '23514';
+        END IF;
+        IF (NEW.conversation_scope_kind = 'ROOT'
+                AND observed_kind NOT IN ('USER_MESSAGE', 'TERMINAL_OBSERVATION'))
+           OR (NEW.conversation_scope_kind = 'SUBAGENT_TASK'
+                AND observed_kind IS DISTINCT FROM 'USER_MESSAGE') THEN
+            RAISE EXCEPTION 'turn initial entry kind is invalid for its scope'
+                USING ERRCODE = '23514';
+        END IF;
+        RETURN NEW;
+    END IF;
+
     IF TG_TABLE_NAME = 'transcript_entries' THEN
         IF NEW.source_job_id IS NOT NULL THEN
             SELECT status INTO observed_status
@@ -930,6 +958,11 @@ REVOKE ALL ON FUNCTION pulsara_v3.enforce_conversation_kernel_invariants()
 
 CREATE CONSTRAINT TRIGGER trg_pulsara_v3_entry_source_integrity
 AFTER INSERT ON pulsara_v3.transcript_entries
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION pulsara_v3.enforce_conversation_kernel_invariants();
+
+CREATE CONSTRAINT TRIGGER trg_pulsara_v3_turn_initial_entry_integrity
+AFTER INSERT OR UPDATE ON pulsara_v3.turns
 DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW EXECUTE FUNCTION pulsara_v3.enforce_conversation_kernel_invariants();
 

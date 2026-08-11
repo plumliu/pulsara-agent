@@ -57,6 +57,11 @@ from pulsara_agent.ports.tool_execution import (
     ToolOutputSourceCoverageReason,
     freeze_tool_json_object,
 )
+from pulsara_agent.ports.terminal_observation import (
+    ExistingTurnInstallation,
+    NewTurnInstallation,
+    TerminalObservationInstallationAttempt,
+)
 from pulsara_agent.conversation_kernel.vocabulary import (
     DESCRIPTOR_BY_TYPE,
     AppendGuardKind,
@@ -913,7 +918,7 @@ class ConversationKernelRepository:
                 """
                 INSERT INTO pulsara_v3.turns (
                     id, session_id, workspace_id, conversation_scope_kind,
-                    status, user_entry_id, current_context_binding_revision_id
+                    status, initial_entry_id, current_context_binding_revision_id
                 ) VALUES (%s, %s, %s, 'ROOT', 'RUNNING', %s, %s)
                 """,
                 (
@@ -1035,33 +1040,254 @@ class ConversationKernelRepository:
             isolation_level=IsolationLevel.REPEATABLE_READ,
         ) as connection:
             self._require_writer(connection, guard, lock=False)
-            row = connection.execute(
+            self._require_provider_safe_turn_in_transaction(
+                connection,
+                session_id=guard.session_id,
+                turn_id=turn_id,
+                lock=False,
+            )
+
+    def accept_terminal_observation(
+        self,
+        guard: HostWriterGuard,
+        *,
+        candidate: TerminalObservationInstallationAttempt,
+        deadline_monotonic: float,
+    ) -> AcceptedEntry:
+        """Atomically accept one same-Host Terminal observation.
+
+        The immutable process-local candidate is the only retry identity.  A
+        successful transaction installs the entry, an optional new ROOT turn
+        and its revision zero, plus the selective occurrence together.
+        """
+
+        if candidate.session_id != guard.session_id:
+            raise ValueError("terminal observation belongs to another session")
+        if candidate.writer_generation != guard.writer_generation:
+            raise StaleHostWriter("terminal observation writer generation is stale")
+        content = InlineContent.from_bytes(
+            candidate.content.canonical_bytes(),
+            media_type="application/vnd.pulsara.terminal-observation+json",
+            codec="utf-8",
+        )
+        if content.digest != candidate.content_digest:
+            raise ValueError("terminal observation content digest conflicts")
+        target = candidate.target
+        with self._writer_transaction(
+            guard, deadline_monotonic=deadline_monotonic
+        ) as connection:
+            workspace_id = self._workspace_id(connection, guard.session_id)
+            if workspace_id != candidate.workspace_id:
+                raise ConversationKernelConflict(
+                    "terminal observation workspace conflicts"
+                )
+            entry_sequence = self._allocate_entry_sequence(
+                connection, guard.session_id
+            )
+            if isinstance(target, ExistingTurnInstallation):
+                turn = self._require_provider_safe_turn_in_transaction(
+                    connection,
+                    session_id=guard.session_id,
+                    turn_id=target.turn_id,
+                    lock=True,
+                )
+                if (
+                    str(turn["workspace_id"]) != workspace_id
+                    or str(turn["conversation_scope_kind"])
+                    != ConversationScopeKind.ROOT.value
+                ):
+                    raise ConversationKernelConflict(
+                        "terminal observation target is not a ROOT turn"
+                    )
+                turn_id = target.turn_id
+                entry_id = target.entry_id
+            elif isinstance(target, NewTurnInstallation):
+                running = connection.execute(
+                    """
+                    SELECT id FROM pulsara_v3.turns
+                    WHERE session_id = %s AND conversation_scope_kind = 'ROOT'
+                      AND status = 'RUNNING'
+                    LIMIT 1
+                    """,
+                    (guard.session_id,),
+                ).fetchone()
+                if running is not None:
+                    raise ConversationKernelConflict(
+                        "idle terminal observation has a running ROOT turn"
+                    )
+                turn_id = target.turn_id
+                entry_id = target.initial_entry_id
+                connection.execute(
+                    """
+                    INSERT INTO pulsara_v3.turns (
+                        id, session_id, workspace_id, conversation_scope_kind,
+                        status, initial_entry_id,
+                        current_context_binding_revision_id
+                    ) VALUES (%s, %s, %s, 'ROOT', 'RUNNING', %s, %s)
+                    """,
+                    (
+                        turn_id,
+                        guard.session_id,
+                        workspace_id,
+                        entry_id,
+                        target.context_binding_revision_id,
+                    ),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO pulsara_v3.turn_context_binding_revisions (
+                        id, session_id, turn_id, revision_ordinal,
+                        base_kind, source_through_sequence
+                    ) VALUES (%s, %s, %s, 0, 'FULL_HISTORY', %s)
+                    """,
+                    (
+                        target.context_binding_revision_id,
+                        guard.session_id,
+                        turn_id,
+                        entry_sequence - 1,
+                    ),
+                )
+            else:  # pragma: no cover - closed union exhaustiveness
+                raise TypeError("terminal observation installation target is unknown")
+            self._insert_entry(
+                connection,
+                session_id=guard.session_id,
+                workspace_id=workspace_id,
+                turn_id=turn_id,
+                entry_id=entry_id,
+                entry_sequence=entry_sequence,
+                entry_kind=EntryKind.TERMINAL_OBSERVATION,
+                scope_kind=ConversationScopeKind.ROOT,
+                scope_task_id=None,
+                content=content,
+            )
+            event = self._append_events(
+                connection,
+                guard,
+                workspace_id=workspace_id,
+                drafts=(self._terminal_observation_event(candidate, entry_id),),
+            )[0]
+            return AcceptedEntry(
+                entry_id=entry_id,
+                turn_id=turn_id,
+                entry_sequence=entry_sequence,
+                event_sequence=event.event_sequence,
+            )
+
+    def confirm_terminal_observation_winner(
+        self,
+        guard: HostWriterGuard,
+        *,
+        candidate: TerminalObservationInstallationAttempt,
+        deadline_monotonic: float,
+    ) -> AcceptedEntry | None:
+        """Stateless exact confirmation for an ambiguous observation ACK."""
+
+        if candidate.session_id != guard.session_id:
+            raise ValueError("terminal observation belongs to another session")
+        content = InlineContent.from_bytes(
+            candidate.content.canonical_bytes(),
+            media_type="application/vnd.pulsara.terminal-observation+json",
+            codec="utf-8",
+        )
+        if content.digest != candidate.content_digest:
+            raise ValueError("terminal observation content digest conflicts")
+        target = candidate.target
+        entry_id = (
+            target.entry_id
+            if isinstance(target, ExistingTurnInstallation)
+            else target.initial_entry_id
+        )
+        turn_id = target.turn_id
+        with self._provider.connection(
+            lane=PostgresConnectionLane.HOST_CONTROL,
+            row_factory=dict_row,
+            deadline_monotonic=deadline_monotonic,
+            isolation_level=IsolationLevel.REPEATABLE_READ,
+        ) as connection:
+            self._require_writer(connection, guard, lock=False)
+            entry = connection.execute(
                 """
-                SELECT t.id
-                FROM pulsara_v3.turns AS t
-                WHERE t.session_id = %s AND t.id = %s AND t.status = 'RUNNING'
-                  AND NOT EXISTS (
-                    SELECT 1
-                    FROM pulsara_v3.assistant_message_blocks AS b
-                    LEFT JOIN pulsara_v3.tool_results AS r
-                      ON r.session_id = b.session_id
-                     AND r.tool_call_entry_id = b.assistant_entry_id
-                     AND r.tool_call_id = b.tool_call_id
-                    WHERE b.session_id = t.session_id
-                      AND b.block_kind = 'TOOL_CALL'
-                      AND r.id IS NULL
-                      AND EXISTS (
-                        SELECT 1 FROM pulsara_v3.transcript_entries AS e
-                        WHERE e.session_id = b.session_id
-                          AND e.id = b.assistant_entry_id
-                          AND e.turn_id = t.id
-                      )
-                  )
+                SELECT * FROM pulsara_v3.transcript_entries
+                WHERE session_id = %s AND id = %s
+                """,
+                (guard.session_id, entry_id),
+            ).fetchone()
+            event_id = _stable_identity(
+                "event",
+                candidate.content.observation_id,
+                CommittedEventType.TERMINAL_OBSERVATION_ACCEPTED.value,
+            )
+            event_rows = connection.execute(
+                "SELECT * FROM pulsara_v3.agent_events WHERE event_id = %s",
+                (event_id,),
+            ).fetchall()
+            if entry is None and not event_rows:
+                return None
+            if entry is None or len(event_rows) != 1:
+                raise ConversationKernelConflict(
+                    "terminal observation winner is partially installed"
+                )
+            if (
+                str(entry["workspace_id"]) != candidate.workspace_id
+                or str(entry["turn_id"]) != turn_id
+                or str(entry["entry_kind"])
+                != EntryKind.TERMINAL_OBSERVATION.value
+                or str(entry["conversation_scope_kind"])
+                != ConversationScopeKind.ROOT.value
+                or entry["scope_subagent_task_id"] is not None
+                or entry["context_binding_revision_id"] is not None
+                or entry["provider_input_through_sequence"] is not None
+                or self._content_from_row(entry) != content
+            ):
+                raise ConversationKernelConflict(
+                    "terminal observation identity names a different entry"
+                )
+            event = self._exact_event_for_confirmation(
+                connection,
+                self._terminal_observation_event(candidate, entry_id),
+                session_id=guard.session_id,
+                workspace_id=candidate.workspace_id,
+            )
+            turn = connection.execute(
+                """
+                SELECT * FROM pulsara_v3.turns
+                WHERE session_id = %s AND id = %s
                 """,
                 (guard.session_id, turn_id),
             ).fetchone()
-            if row is None:
-                raise ConversationKernelConflict("turn is not at a provider safe point")
+            if turn is None:
+                raise ConversationKernelConflict(
+                    "terminal observation turn is absent"
+                )
+            if isinstance(target, NewTurnInstallation):
+                revision = connection.execute(
+                    """
+                    SELECT * FROM pulsara_v3.turn_context_binding_revisions
+                    WHERE session_id = %s AND id = %s
+                    """,
+                    (guard.session_id, target.context_binding_revision_id),
+                ).fetchone()
+                if (
+                    str(turn["initial_entry_id"]) != target.initial_entry_id
+                    or str(turn["current_context_binding_revision_id"])
+                    != target.context_binding_revision_id
+                    or revision is None
+                    or str(revision["turn_id"]) != target.turn_id
+                    or int(revision["revision_ordinal"]) != 0
+                    or str(revision["base_kind"]) != "FULL_HISTORY"
+                    or int(revision["source_through_sequence"])
+                    != int(entry["entry_sequence"]) - 1
+                ):
+                    raise ConversationKernelConflict(
+                        "terminal observation genesis differs from candidate"
+                    )
+            return AcceptedEntry(
+                entry_id=entry_id,
+                turn_id=turn_id,
+                entry_sequence=int(entry["entry_sequence"]),
+                event_sequence=int(event["event_sequence"]),
+            )
 
     def adopt_context_snapshot(
         self,
@@ -1095,14 +1321,14 @@ class ConversationKernelRepository:
                 SELECT t.workspace_id, t.current_context_binding_revision_id,
                        current.revision_ordinal,
                        current.source_through_sequence AS current_source_cut,
-                       user_entry.entry_sequence AS user_entry_sequence
+                       initial_entry.entry_sequence AS initial_entry_sequence
                 FROM pulsara_v3.turns AS t
                 JOIN pulsara_v3.turn_context_binding_revisions AS current
                   ON current.session_id = t.session_id
                  AND current.id = t.current_context_binding_revision_id
-                JOIN pulsara_v3.transcript_entries AS user_entry
-                  ON user_entry.session_id = t.session_id
-                 AND user_entry.id = t.user_entry_id
+                JOIN pulsara_v3.transcript_entries AS initial_entry
+                  ON initial_entry.session_id = t.session_id
+                 AND initial_entry.id = t.initial_entry_id
                 WHERE t.session_id = %s AND t.id = %s AND t.status = 'RUNNING'
                 FOR UPDATE OF t
                 """,
@@ -1130,7 +1356,7 @@ class ConversationKernelRepository:
                 raise ConversationKernelConflict("tool request is not terminal")
             if source_through_sequence < int(
                 turn["current_source_cut"]
-            ) or source_through_sequence >= int(turn["user_entry_sequence"]):
+            ) or source_through_sequence >= int(turn["initial_entry_sequence"]):
                 raise ConversationKernelConflict("snapshot source range is invalid")
             revision_ordinal = int(turn["revision_ordinal"]) + 1
             connection.execute(
@@ -2783,7 +3009,7 @@ class ConversationKernelRepository:
                 """
                 INSERT INTO pulsara_v3.turns (
                     id, session_id, workspace_id, conversation_scope_kind,
-                    scope_subagent_task_id, status, user_entry_id,
+                    scope_subagent_task_id, status, initial_entry_id,
                     current_context_binding_revision_id
                 ) VALUES (%s, %s, %s, 'SUBAGENT_TASK', %s,
                           'RUNNING', %s, %s)
@@ -3359,7 +3585,7 @@ class ConversationKernelRepository:
                 """
                 INSERT INTO pulsara_v3.turns (
                     id, session_id, workspace_id, conversation_scope_kind,
-                    status, user_entry_id, current_context_binding_revision_id
+                    status, initial_entry_id, current_context_binding_revision_id
                 ) VALUES (%s, %s, %s, 'ROOT', 'RUNNING', %s, %s)
                 """,
                 (
@@ -4018,7 +4244,7 @@ class ConversationKernelRepository:
             """
             INSERT INTO pulsara_v3.turns (
                 id, session_id, workspace_id, conversation_scope_kind,
-                status, user_entry_id, current_context_binding_revision_id
+                status, initial_entry_id, current_context_binding_revision_id
             ) VALUES (%s, %s, %s, 'ROOT', 'RUNNING', %s, %s)
             """,
             (
@@ -6471,6 +6697,45 @@ class ConversationKernelRepository:
         return str(row["workspace_id"])
 
     @staticmethod
+    def _require_provider_safe_turn_in_transaction(
+        connection: Connection,
+        *,
+        session_id: str,
+        turn_id: str,
+        lock: bool,
+    ) -> Mapping[str, object]:
+        lock_clause = "FOR UPDATE OF t" if lock else ""
+        row = connection.execute(
+            f"""
+            SELECT t.*
+            FROM pulsara_v3.turns AS t
+            WHERE t.session_id = %s AND t.id = %s AND t.status = 'RUNNING'
+              AND NOT EXISTS (
+                SELECT 1
+                FROM pulsara_v3.assistant_message_blocks AS b
+                LEFT JOIN pulsara_v3.tool_results AS r
+                  ON r.session_id = b.session_id
+                 AND r.tool_call_entry_id = b.assistant_entry_id
+                 AND r.tool_call_id = b.tool_call_id
+                WHERE b.session_id = t.session_id
+                  AND b.block_kind = 'TOOL_CALL'
+                  AND r.id IS NULL
+                  AND EXISTS (
+                    SELECT 1 FROM pulsara_v3.transcript_entries AS e
+                    WHERE e.session_id = b.session_id
+                      AND e.id = b.assistant_entry_id
+                      AND e.turn_id = t.id
+                  )
+              )
+            {lock_clause}
+            """,
+            (session_id, turn_id),
+        ).fetchone()
+        if row is None:
+            raise ConversationKernelConflict("turn is not at a provider safe point")
+        return row
+
+    @staticmethod
     def _allocate_entry_sequence(connection: Connection, session_id: str) -> int:
         row = connection.execute(
             """
@@ -6701,6 +6966,33 @@ class ConversationKernelRepository:
             projection_profile="DEFAULT",
             occurred_at=occurred_at,
             payload=payload,
+        )
+
+    @staticmethod
+    def _terminal_observation_event(
+        candidate: TerminalObservationInstallationAttempt,
+        entry_id: str,
+    ) -> CommittedEventDraft:
+        return CommittedEventDraft(
+            event_id=_stable_identity(
+                "event",
+                candidate.content.observation_id,
+                CommittedEventType.TERMINAL_OBSERVATION_ACCEPTED.value,
+            ),
+            event_type=CommittedEventType.TERMINAL_OBSERVATION_ACCEPTED,
+            subject=CommittedEventSubject(
+                slot=SubjectSlot.ENTRY,
+                subject_id=entry_id,
+            ),
+            actor_kind="runtime",
+            actor_id=candidate.actor_id,
+            sensitivity_class="S1",
+            projection_profile="IMMUTABLE_ENTRY",
+            occurred_at=candidate.occurred_at,
+            payload={
+                "entry_kind": EntryKind.TERMINAL_OBSERVATION.value,
+                "observation_kind": candidate.content.observation_kind.value,
+            },
         )
 
     @staticmethod

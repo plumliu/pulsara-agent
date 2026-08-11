@@ -100,6 +100,7 @@ const (
 	CommittedEventType_MEMORY_FACT_ACCEPTED             CommittedEventType = 24
 	CommittedEventType_MEMORY_FACT_LIFECYCLE_CHANGED    CommittedEventType = 25
 	CommittedEventType_MEMORY_RELATION_ACCEPTED         CommittedEventType = 26
+	CommittedEventType_TERMINAL_OBSERVATION_ACCEPTED    CommittedEventType = 27
 )
 
 // Enum value maps for CommittedEventType.
@@ -132,6 +133,7 @@ var (
 		24: "MEMORY_FACT_ACCEPTED",
 		25: "MEMORY_FACT_LIFECYCLE_CHANGED",
 		26: "MEMORY_RELATION_ACCEPTED",
+		27: "TERMINAL_OBSERVATION_ACCEPTED",
 	}
 	CommittedEventType_value = map[string]int32{
 		"COMMITTED_EVENT_TYPE_UNSPECIFIED": 0,
@@ -161,6 +163,7 @@ var (
 		"MEMORY_FACT_ACCEPTED":             24,
 		"MEMORY_FACT_LIFECYCLE_CHANGED":    25,
 		"MEMORY_RELATION_ACCEPTED":         26,
+		"TERMINAL_OBSERVATION_ACCEPTED":    27,
 	}
 )
 
@@ -361,6 +364,7 @@ const (
 	EntryKind_ASSISTANT_MESSAGE      EntryKind = 3
 	EntryKind_ASSISTANT_TOOL_REQUEST EntryKind = 4
 	EntryKind_TOOL_RESULT            EntryKind = 5
+	EntryKind_TERMINAL_OBSERVATION   EntryKind = 6
 )
 
 // Enum value maps for EntryKind.
@@ -372,6 +376,7 @@ var (
 		3: "ASSISTANT_MESSAGE",
 		4: "ASSISTANT_TOOL_REQUEST",
 		5: "TOOL_RESULT",
+		6: "TERMINAL_OBSERVATION",
 	}
 	EntryKind_value = map[string]int32{
 		"ENTRY_KIND_UNSPECIFIED": 0,
@@ -380,6 +385,7 @@ var (
 		"ASSISTANT_MESSAGE":      3,
 		"ASSISTANT_TOOL_REQUEST": 4,
 		"TOOL_RESULT":            5,
+		"TERMINAL_OBSERVATION":   6,
 	}
 )
 
@@ -7511,7 +7517,7 @@ const file_terminal_kernel_v3_proto_rawDesc = "" +
 	"\x0eAttachmentRole\x12\x1f\n" +
 	"\x1bATTACHMENT_ROLE_UNSPECIFIED\x10\x00\x12\x1c\n" +
 	"\x18ATTACHMENT_ROLE_OBSERVER\x10\x01\x12\x1e\n" +
-	"\x1aATTACHMENT_ROLE_CONTROLLER\x10\x02*\x82\x06\n" +
+	"\x1aATTACHMENT_ROLE_CONTROLLER\x10\x02*\xa5\x06\n" +
 	"\x12CommittedEventType\x12$\n" +
 	" COMMITTED_EVENT_TYPE_UNSPECIFIED\x10\x00\x12\x19\n" +
 	"\x15USER_MESSAGE_ACCEPTED\x10\x01\x12\x1e\n" +
@@ -7541,7 +7547,8 @@ const file_terminal_kernel_v3_proto_rawDesc = "" +
 	"\x15JOB_TERMINAL_ACCEPTED\x10\x17\x12\x18\n" +
 	"\x14MEMORY_FACT_ACCEPTED\x10\x18\x12!\n" +
 	"\x1dMEMORY_FACT_LIFECYCLE_CHANGED\x10\x19\x12\x1c\n" +
-	"\x18MEMORY_RELATION_ACCEPTED\x10\x1a*\xa3\x04\n" +
+	"\x18MEMORY_RELATION_ACCEPTED\x10\x1a\x12!\n" +
+	"\x1dTERMINAL_OBSERVATION_ACCEPTED\x10\x1b*\xa3\x04\n" +
 	"\rLiveEventType\x12\x1f\n" +
 	"\x1bLIVE_EVENT_TYPE_UNSPECIFIED\x10\x00\x12\x0e\n" +
 	"\n" +
@@ -7575,7 +7582,7 @@ const file_terminal_kernel_v3_proto_rawDesc = "" +
 	"\x15ConversationScopeKind\x12'\n" +
 	"#CONVERSATION_SCOPE_KIND_UNSPECIFIED\x10\x00\x12\b\n" +
 	"\x04ROOT\x10\x01\x12\x11\n" +
-	"\rSUBAGENT_TASK\x10\x02*\x8d\x01\n" +
+	"\rSUBAGENT_TASK\x10\x02*\xa7\x01\n" +
 	"\tEntryKind\x12\x1a\n" +
 	"\x16ENTRY_KIND_UNSPECIFIED\x10\x00\x12\x10\n" +
 	"\fUSER_MESSAGE\x10\x01\x12\x0e\n" +
@@ -7583,7 +7590,8 @@ const file_terminal_kernel_v3_proto_rawDesc = "" +
 	"USER_STEER\x10\x02\x12\x15\n" +
 	"\x11ASSISTANT_MESSAGE\x10\x03\x12\x1a\n" +
 	"\x16ASSISTANT_TOOL_REQUEST\x10\x04\x12\x0f\n" +
-	"\vTOOL_RESULT\x10\x05*K\n" +
+	"\vTOOL_RESULT\x10\x05\x12\x18\n" +
+	"\x14TERMINAL_OBSERVATION\x10\x06*K\n" +
 	"\vContentKind\x12\x1c\n" +
 	"\x18CONTENT_KIND_UNSPECIFIED\x10\x00\x12\n" +
 	"\n" +

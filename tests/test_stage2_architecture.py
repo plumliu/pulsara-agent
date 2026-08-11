@@ -32,11 +32,6 @@ from pulsara_agent.storage.migrations.grants import (
     build_postgres_runtime_grant_policy,
 )
 from pulsara_agent.storage.migrations.manifest import build_postgres_schema_manifest
-from pulsara_agent.terminal_protocol.v3_gateway import (
-    PROTOCOL_MAJOR as PROTOCOL_V3_MAJOR,
-    PROTOCOL_MINOR as PROTOCOL_V3_MINOR,
-    PROTOCOL_SCHEMA_FINGERPRINT as PROTOCOL_V3_SCHEMA_FINGERPRINT,
-)
 from pulsara_agent.ports.live_agent_event import LivePayload, ProviderStreamPayload
 
 
@@ -57,7 +52,7 @@ PROVIDER_PRODUCTION_MODULES = (
 
 
 def test_stage2_registry_schema_and_job_catalog_are_exact() -> None:
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == 26
+    assert len(COMMITTED_EVENT_DESCRIPTORS) == 27
     assert len(LIVE_EVENT_TYPES) == 23
     assert len(SUBJECT_SLOTS) == 13
     assert len(APPEND_GUARDS) == 2
@@ -235,16 +230,20 @@ def test_stage2_product_contract_survives_the_clean_migration_universe() -> None
     assert POSTGRES_MIGRATION_REGISTRY.latest_version == 0
     assert manifest.product_relations == CONVERSATION_KERNEL_RELATIONS
     assert latest.resource_name == "0000_conversation_kernel_baseline.sql"
+    # This is immutable Stage 2 activation evidence, not a rolling current
+    # product manifest.  Round 2 owns a separate 27-event activation record.
     assert report["vocabulary"] == {
-        "committed": len(COMMITTED_EVENT_DESCRIPTORS),
-        "live": len(LIVE_EVENT_TYPES),
-        "subject_slots": len(SUBJECT_SLOTS),
-        "append_guards": len(APPEND_GUARDS),
+        "committed": 26,
+        "live": 23,
+        "subject_slots": 13,
+        "append_guards": 2,
     }
     assert report["protocol"] == {
-        "major": PROTOCOL_V3_MAJOR,
-        "minor": PROTOCOL_V3_MINOR,
-        "schema_fingerprint": PROTOCOL_V3_SCHEMA_FINGERPRINT,
+        "major": 3,
+        "minor": 0,
+        "schema_fingerprint": (
+            "sha256:30c3dec486dea592a4e43650006b1d547e4c44d993d68255941d77b61dd4a05c"
+        ),
     }
     assert report["runtime_limits"] == {
         "contract": "stage2_runtime_limits.v1",

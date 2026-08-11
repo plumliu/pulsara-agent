@@ -37,7 +37,7 @@ The durable boundary is intentionally narrow:
 
 - canonical relational rows own current conversation, tool, job, memory, and
   coordination truth;
-- a closed 26-type `agent_events` journal records accepted occurrences but is
+- a closed 27-type `agent_events` journal records accepted occurrences but is
   never replayed to reconstruct execution;
 - 23 live event types exist only in memory and may be lost at process exit;
 - tool requests are committed before dispatch and a physical attempt is
@@ -56,8 +56,14 @@ runtime-write admission epoch.
 The current Kernel supports:
 
 - OpenAI-compatible Responses and Chat Completions transports;
-- filesystem, todo, terminal, yielded terminal-process, and scoped
-  `artifact_read` tools;
+- filesystem, todo, `terminal`, `terminal_process`, `terminal_monitor`, and
+  scoped `artifact_read` tools;
+- real PIPE/PTY terminal output streaming, exact process-local cursors and
+  typed GAP, same-Host future monitor observations, and autonomous
+  continuation at a provider-safe point;
+- default-deny subprocess environments with a bounded login-shell snapshot,
+  nearest `.venv/bin`, foreground cwd continuity, and physical process-group
+  drain on Host close;
 - complete sanitized tool output retention through the shared blob store:
   medium output stays fully visible with an artifact reference, while large
   output uses a UTF-8-safe head/tail preview and bounded on-demand reads;
@@ -108,10 +114,12 @@ uv run pulsara db verify --deep --env-file .env
 
 The only active migration universe is
 `pulsara.conversation-kernel.v1`, generation 1, beginning at version 0.
-Round 1 keeps the schema at exactly 24 product relations while extending the
-version-0 `tool_results` contract; its current baseline/catalog identity and
-verification results are recorded in
-[`round1_tool_output_artifact_activation.json`](benchmarks/suites/core/v1/round1_tool_output_artifact_activation.json).
+Rounds 1 and 2 keep the schema at exactly 24 product relations while extending
+the version-0 `tool_results` and canonical Terminal-observation contracts.
+Their baseline/catalog identities and verification results are recorded in
+[`round1_tool_output_artifact_activation.json`](benchmarks/suites/core/v1/round1_tool_output_artifact_activation.json)
+and
+[`round2_terminal_runtime_activation.json`](benchmarks/suites/core/v1/round2_terminal_runtime_activation.json).
 An old v13 database is rejected with
 `schema_migration_universe_reset_required`; Pulsara never imports, translates,
 or upgrades it in place. Follow

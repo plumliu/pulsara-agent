@@ -72,7 +72,7 @@ from pulsara_agent.ports.tool_execution import (
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 from pulsara_agent.storage.migrations.manifest import CONVERSATION_KERNEL_RELATIONS
 from pulsara_agent.conversation_kernel.jobs import JOB_HANDLER_CATALOG
-from pulsara_agent.terminal_process.manager import _BoundedOutput
+from pulsara_agent.terminal_process.output import TerminalOutputOwner
 from pulsara_agent.tools.builtins.artifact import ArtifactReadTool
 from pulsara_agent.tool_permission import default_permission_policy
 from tests.support.postgres import verified_postgres_provider
@@ -80,6 +80,14 @@ from tests.support.postgres import verified_postgres_provider
 
 def _name(prefix: str) -> str:
     return f"{prefix}:{uuid4().hex}"
+
+
+def _terminal_output(maximum_bytes: int) -> TerminalOutputOwner:
+    return TerminalOutputOwner(
+        owner_epoch="round1-test-host",
+        process_id=_name("terminal-process"),
+        maximum_bytes=maximum_bytes,
+    )
 
 
 @dataclass(slots=True)
@@ -118,7 +126,7 @@ def _processor(publisher: _RecordingPublisher) -> ToolOutputArtifactProcessor:
 def test_round1_static_authority_and_count_oracles_remain_closed() -> None:
     assert len(CONVERSATION_KERNEL_RELATIONS) == 24
     assert "tool_result_artifacts" not in CONVERSATION_KERNEL_RELATIONS
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == 26
+    assert len(COMMITTED_EVENT_DESCRIPTORS) == 27
     assert len(LIVE_EVENT_TYPES) == 23
     assert len(SUBJECT_SLOTS) == 13
     assert len(APPEND_GUARDS) == 2
@@ -239,6 +247,33 @@ def test_round1_preview_threshold_matrix(
             len(text) - projection.visible_head_chars - projection.visible_tail_chars
         )
         assert len(preview) <= 8_000
+
+
+def test_round2_cursor_artifact_replaces_only_the_selected_terminal_delta() -> None:
+    owner = _terminal_output(16 * 1024 * 1024)
+    owner.append_raw(b"old-output\n")
+    cursor = owner.snapshot(maximum_chars=512).output_cursor
+    owner.append_raw(b"new-output\n")
+    snapshot, candidate = owner.snapshot_with_artifact_candidate(
+        maximum_chars=512,
+        since_cursor=cursor,
+    )
+    public_output = json.dumps(
+        {"status": "success", "output": snapshot.text},
+        ensure_ascii=False,
+    )
+
+    projection = _processor(_RecordingPublisher()).prepare(
+        workspace_id="workspace",
+        result_entry_id="entry:cursor-delta",
+        public_output=public_output,
+        candidate=candidate,
+        artifact_source_read=False,
+        deadline_monotonic=monotonic() + 10,
+    )
+    rendered = json.loads(projection.canonical_preview.canonical_bytes)
+    assert rendered["output"] == "new-output\n"
+    assert "old-output" not in projection.canonical_preview.canonical_bytes.decode()
 
 
 def test_round1_archive_bytes_and_display_chars_are_independent() -> None:
@@ -390,9 +425,10 @@ def test_round1_oversized_artifact_keeps_known_output_without_publishing() -> No
 
 
 def test_round1_retained_snapshot_keeps_both_failure_axes() -> None:
-    bounded = _BoundedOutput(maximum_bytes=64)
-    bounded.append(b"lost-prefix-" * 16)
-    bounded.append(b"RETAINED-SENTINEL")
+    bounded = _terminal_output(64)
+    bounded.append_raw(b"lost-prefix-" * 16)
+    bounded.append_raw(b"RETAINED-SENTINEL")
+    bounded.finalize(status="success", exit_code=0)
     candidate = bounded.artifact_candidate()
     assert candidate.source_coverage is ToolOutputSourceCoverage.RETAINED_SNAPSHOT
     publisher = _RecordingPublisher(
@@ -426,12 +462,49 @@ def test_round1_retained_snapshot_keeps_both_failure_axes() -> None:
     assert "ARTIFACT UNAVAILABLE" in preview
 
 
+def test_round2_sanitizer_unavailable_remains_distinct_from_retention_gap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bounded = _terminal_output(8_192)
+    bounded.append_raw(b"safe-prefix")
+
+    def fail_feed(_raw: bytes) -> bytes:
+        raise RuntimeError("injected sanitizer failure")
+
+    monkeypatch.setattr(bounded._sanitizer, "feed", fail_feed)  # noqa: SLF001
+    assert bounded.append_raw(b"not-public") == b""
+    candidate = bounded.artifact_candidate()
+    publisher = _RecordingPublisher(
+        failure=KnownArtifactPublicationFailure("publication failed")
+    )
+    projection = _processor(publisher).prepare(
+        workspace_id="workspace",
+        result_entry_id="entry",
+        public_output=json.dumps(
+            {"status": "success", "output": candidate.text}, ensure_ascii=False
+        ),
+        candidate=candidate,
+        artifact_source_read=False,
+        deadline_monotonic=monotonic() + 10,
+    )
+
+    assert projection.source_coverage is ToolOutputSourceCoverage.RETAINED_SNAPSHOT
+    assert projection.source_coverage_reason is (
+        ToolOutputSourceCoverageReason.TERMINAL_SANITIZER_UNAVAILABLE
+    )
+    assert projection.artifact_disposition is ToolOutputArtifactDisposition.UNAVAILABLE
+    assert projection.artifact_unavailability_reason is (
+        ToolOutputArtifactUnavailabilityReason.BLOB_PUBLICATION_FAILED
+    )
+
+
 def test_round1_terminal_candidate_uses_the_public_sanitization_boundary() -> None:
-    bounded = _BoundedOutput(maximum_bytes=8_192)
-    bounded.append(
+    bounded = _terminal_output(8_192)
+    bounded.append_raw(
         b"\x1b[31mvisible\x1b[0m\r\nAPI_TOKEN=private-value\r\n"
         b"Authorization: Bearer abc.def\r\n"
     )
+    bounded.finalize(status="success", exit_code=0)
     candidate = bounded.artifact_candidate()
     assert candidate.text == (
         "visible\nAPI_TOKEN=<redacted>\nAuthorization: Bearer <redacted>\n"
@@ -1084,9 +1157,10 @@ def test_round1_retention_gap_and_blob_failure_persist_as_independent_reasons(
     lease, turn_id, assistant_entry_id, tool_call_id, attempt_id = _install_tool_call(
         repository, workspace_id
     )
-    bounded = _BoundedOutput(maximum_bytes=64)
-    bounded.append(b"discarded-prefix" * 16)
-    bounded.append(b"retained-tail")
+    bounded = _terminal_output(64)
+    bounded.append_raw(b"discarded-prefix" * 16)
+    bounded.append_raw(b"retained-tail")
+    bounded.finalize(status="success", exit_code=0)
     retained = bounded.artifact_candidate()
     result_entry_id = _name("entry")
     projection = ToolOutputArtifactProcessor(
@@ -1151,6 +1225,29 @@ def test_round1_retention_gap_and_blob_failure_persist_as_independent_reasons(
     with psycopg.connect(
         stage2_migrated_postgres_database.admin_dsn, autocommit=True
     ) as connection:
+        connection.execute(
+            """
+            UPDATE pulsara_v3.tool_results
+            SET output_source_coverage_reason = 'TERMINAL_SANITIZER_UNAVAILABLE'
+            WHERE id = %s
+            """,
+            (candidate.result_id,),
+        )
+        assert connection.execute(
+            """
+            SELECT output_source_coverage, output_source_coverage_reason
+            FROM pulsara_v3.tool_results WHERE id = %s
+            """,
+            (candidate.result_id,),
+        ).fetchone() == ("RETAINED_SNAPSHOT", "TERMINAL_SANITIZER_UNAVAILABLE")
+        connection.execute(
+            """
+            UPDATE pulsara_v3.tool_results
+            SET output_source_coverage_reason = 'TERMINAL_RETENTION_GAP'
+            WHERE id = %s
+            """,
+            (candidate.result_id,),
+        )
         with pytest.raises(psycopg.errors.CheckViolation):
             connection.execute(
                 """
@@ -1190,9 +1287,11 @@ def test_round1_retained_snapshot_artifact_offset_zero_is_retained_body_start(
     lease, turn_id, assistant_entry_id, tool_call_id, attempt_id = _install_tool_call(
         repository, workspace_id
     )
-    bounded = _BoundedOutput(maximum_bytes=64)
-    bounded.append(b"original-prefix-that-will-be-evicted" * 8)
-    bounded.append(b"RETAINED-BODY-START-and-tail")
+    retained_suffix = b"RETAINED-BODY-START-and-tail"
+    bounded = _terminal_output(len(retained_suffix))
+    bounded.append_raw(b"original-prefix-that-will-be-evicted" * 8)
+    bounded.append_raw(retained_suffix)
+    bounded.finalize(status="success", exit_code=0)
     retained = bounded.artifact_candidate()
     result_entry_id = _name("entry")
     projection = ToolOutputArtifactProcessor(provider).prepare(

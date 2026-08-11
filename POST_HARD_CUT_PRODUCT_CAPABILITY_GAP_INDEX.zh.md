@@ -1,12 +1,12 @@
 # Pulsara hard-cut 后产品能力缺失索引
 
-> 状态：WORKING GAP INDEX（产品能力事实索引，不是恢复设计；PHC-02 已于 2026-08-11 通过 Round 1 恢复）
+> 状态：WORKING GAP INDEX（产品能力事实索引，不是恢复设计；PHC-02 已通过 Round 1 恢复，PHC-01/03/04/05/06 已于 2026-08-11 通过 Round 2 恢复）
 >
 > 调研日期：2026-08-10
 >
 > hard-cut 前代码基线：`5b7ad9f7`
 >
-> 当前代码基线：`12636e34`
+> 当前代码基线：以 `739f4a209e61d89b3dba45d39106047205506983` 为 checkpoint 的 Round 2 已验证工作树
 >
 > 范围：Python Agent Runtime / Host及其直接产品能力；Go TUI暂不在当前恢复主线中，但被确定为后续唯一主要交互与观察产品面
 >
@@ -66,9 +66,9 @@
 9. 当前正式append authority封闭为`HostWriterGuard | JobAttemptClaimGuard`。新增产品事件通常必须归入其中之一；若产品确实需要第三个writer domain，那是需要独立ADR、fencing与SQL lock-order证明的架构变更，而不是随event一起顺手增加。
 10. 产品语义可以增长，execution recovery machinery不能借产品恢复换名回归。
 
-#### `26 / 23 / 13 / 2`的正确地位
+#### `27 / 23 / 13 / 2`的正确地位
 
-当前代码中的26类Committed、23类Live、13个subject slot与2类append guard，是Stage 2 hard-cut时用于证明旧151类universal grammar已经退出production composition的**closed activation oracle**。它们不是Pulsara永久的产品能力上限，也不是评价架构好坏的数字目标。
+当前代码中的27类Committed、23类Live、13个subject slot与2类append guard，是Stage 2 hard-cut及Round 2产品恢复后用于证明旧151类universal grammar仍未回流production composition的**closed activation oracle**。第27类是与canonical `TERMINAL_OBSERVATION`同事务接受的`TerminalObservationAccepted`；这些数字不是Pulsara永久的产品能力上限，也不是评价架构好坏的数字目标。
 
 - 两类append guard表达当前真正存在的writer authority domain，具有长期架构意义；
 - Committed/Live event数量会随着新的独立产品语义受控增长；
@@ -158,12 +158,12 @@ git grep -n 'TerminalMonitorTool' "$PRE_HARD_CUT" -- src tests
 
 | ID | 产品能力族 | 当前判断 | 主要用户影响 |
 |---|---|---|---|
-| PHC-01 | Terminal 三工具完整边界 | **缺失**：`terminal_monitor` 整个工具与 future-notification owner 消失 | 长任务只能轮询/等待，无法注册完成通知或自动唤醒 Agent |
+| PHC-01 | Terminal 三工具完整边界 | **已恢复（Round 2）**：三套strict工具与production executor闭合；monitor只活在当前Host并可在safe point自主唤醒Agent | 长任务可注册future observation，无需模型反复poll；cancel不kill process |
 | PHC-02 | 完整 tool output artifact 与 `artifact_read` | **已恢复（Round 1）**：完整 sanitized candidate 先于 preview 保留；大输出可通过 scoped `artifact_read` 分页读取 | 中等输出完整展示并给出 artifact reference；大输出显示 UTF-8-safe head/tail 并可按需读取省略段 |
-| PHC-03 | Terminal 真正实时 stdout/stderr streaming | **缺失**：当前 ToolResult Delta 在物理调用返回后一次性产生 | 运行中的命令没有真实增量反馈，交互体验与可观察性退化 |
-| PHC-04 | Terminal retained-output/cursor 语义 | **显著退化**：只保留进程内 8 MiB rolling tail 与重复 tail snapshot | 早期输出被丢弃，无法可靠取得“自上次以来的新输出” |
-| PHC-05 | Terminal shell/profile/env 产品语义 | **显著退化**：登录 shell snapshot、default-deny env、fallback/diagnostic 消失 | Agent shell 与用户 shell 不一致，环境安全与工具可发现性下降 |
-| PHC-06 | Terminal foreground cwd continuity | **缺失**：命令结束后的真实 cwd 不再回写 session | `cd` 类前台命令不能改变下一条 terminal 命令的工作目录 |
+| PHC-03 | Terminal 真正实时 stdout/stderr streaming | **已恢复（Round 2）**：PIPE/PTY physical reader在process运行期间产生provisional ToolResult Delta，End以canonical preview authoritative replacement | 用户与模型可在命令结束前观察真实sanitized增量 |
+| PHC-04 | Terminal retained-output/cursor 语义 | **已恢复（Round 2）**：16 MiB/process、128 MiB/Host UTF-8 retained hard bound，exact cursor/delta与typed GAP | 当前Host内可可靠增量读取；retention淘汰被显式表示而非重复tail |
+| PHC-05 | Terminal shell/profile/env 产品语义 | **已恢复（Round 2）**：bounded login-shell snapshot、default-deny inert env、single-flight/TTL/fallback、nearest `.venv/bin`与diagnostic | 用户工具链PATH可用；active capability environment默认拒绝且env value不进入diagnostic |
+| PHC-06 | Terminal foreground cwd continuity | **已恢复（Round 2）**：前台命令physical completion后捕获workspace内final cwd；yielded process永不推进session cwd | 后续前台命令从真实final cwd启动，无后台并发竞争 |
 | PHC-07 | Long-horizon context window / compaction | **缺失**：新 schema 有 dormant snapshot primitives，但无产品触发路径 | 长任务碰到固定输入、call 数或总时限后失败，不能主动/自动压缩继续 |
 | PHC-08 | MCP production capability | **缺失**：仅保留配置检测，启用任何 MCP server 会阻止 Kernel open | MCP server discovery、tool call、interaction 与 CLI 管理均不可用 |
 | PHC-09 | Plan workflow | **缺失**：三个 workflow descriptor 残留，但无执行/交互入口 | Agent 无法进入只读规划、提问、提交计划并等待批准/修订 |
@@ -172,7 +172,7 @@ git grep -n 'TerminalMonitorTool' "$PRE_HARD_CUT" -- src tests
 | PHC-12 | Frozen Legacy Python REPL 产品面 | **明确退役，不恢复兼容**：旧命令差异只作hard-cut审计记录 | approval、plan、MCP等仍有价值的产品语义归各自能力族，并最终通过Go TUI交互，不为旧命令表复建Runtime机制 |
 | PHC-13 | 跨 turn 失败/中断提示 | **缺失**：turn 可标 interrupted，但下一轮 provider context 没有明确失败旁注 | “继续”时模型无法区分上一轮完整回答与空/半截失败输出 |
 | PHC-14 | Model-visible tool observation timing/freshness | **缺失**：数据库时间仍可能存在，但不再进入 provider-visible typed observation | 模型无法判断旧工具结果何时观测、耗时多久、是否可能过期 |
-| PHC-15 | Capability catalog 与真实 executor 一致性 | **不闭合**：28 个 descriptor 中 9 个没有 production executor/binding | 静态 catalog 会误报能力；代码残留掩盖真实产品缺失 |
+| PHC-15 | Capability catalog 与真实 executor 一致性 | **仍不闭合，但漂移已缩小**：29 个descriptor中，9个direct、4个subagent、8个memory已有production binding；剩余8个属于Plan/旧task-graph缺口 | Round 1/2已让`artifact_read`与`terminal_monitor`闭合；其他dead descriptor仍需后续能力族处理 |
 | PHC-16 | Go TUI S1–S3 后续能力 | **未来主要产品面，当前已知延后** | 最终承接会话观察、交互与控制；composer/copy/paste/notice及各能力族UI另行实施 |
 
 ## 4. Terminal：hard-cut 前后三工具产品真值
@@ -185,15 +185,17 @@ terminal_process
 terminal_monitor
 ```
 
+Round 2已在当前conversation kernel中恢复这三项产品能力。以下小节同时保留hard-cut后、Round 2前的缺口证据，并在每个“当前”结论处更新为activation后的production真值。机器证据见[`round2_terminal_runtime_activation.json`](benchmarks/suites/core/v1/round2_terminal_runtime_activation.json)。恢复没有新增durable terminal relation、job、guard、subject slot、receipt、checkpoint、projection或跨Host recovery。两轮activation反向审阅又把exact-cursor artifact source、shell leader/process-group completion、physical-completion wait、linearized launching admission、monitor evaluation generation、probe SPAWNING close、PTY EOT、ROOT monitor scope、closed rejection、独立sanitizer-unavailable reason与subagent completion attribution纳入同一产品门控；这些均是现有process-local owner的窄闭合，不是新的durability authority。
+
 [`PULSARA_TERMINAL_PUBLIC_TOOL_API_SPLIT_HARD_CUT_IMPLEMENTATION.zh.md`](archived_docs/PULSARA_TERMINAL_PUBLIC_TOOL_API_SPLIT_HARD_CUT_IMPLEMENTATION.zh.md) 标记 `TAPI0–TAPI2 已落地`；[`PULSARA_TERMINAL_PROCESS_MONITOR_AND_AGENT_WAKE_DESIGN.zh.md`](archived_docs/PULSARA_TERMINAL_PROCESS_MONITOR_AND_AGENT_WAKE_DESIGN.zh.md) 标记 `TM0–TM5 已完成`。hard-cut 前 `5b7ad9f7:src/pulsara_agent/ports/terminal.py` 也确实同时定义了三套 description、schema、port 与 result union。
 
 ### 4.1 三工具职责矩阵
 
 | 工具 | hard-cut 前的正式产品职责 | 当前代码事实 | 判断 |
 |---|---|---|---|
-| `terminal` | 启动一条 shell command；在 `yield_time_ms` 内等待；完成则返回 terminal result，仍运行则返回 exact `process_id` | 仍正式暴露；基础启动、yield、Host-scoped process id、PIPE/PTY 均存在 | 基础能力保留，输出/cwd/env 子语义退化 |
-| `terminal_process` | 对 exact process 做一次即时操作：`list/log/poll/wait/write/submit/close_stdin/kill`；不安排未来 wake | 八个 action 当前仍在 [`ports/terminal.py`](src/pulsara_agent/ports/terminal.py) 和 [`terminal_process/manager.py`](src/pulsara_agent/terminal_process/manager.py) | 基础 action 保留，完整输出与 cursor 语义退化 |
-| `terminal_monitor` | `register/list/cancel` Host-owned monitor；按 output/quiet/heartbeat/completion/expiry 形成未来观察；可在后续安全点唤醒 Agent | 当前 direct tools 只有 `terminal` 与 `terminal_process`；无 public schema、port、manager、registration 或 production binding | **整个产品工具缺失** |
+| `terminal` | 启动一条 shell command；在 `yield_time_ms` 内等待；完成则返回 terminal result，仍运行则返回 exact `process_id` | strict schema、production binding、PIPE/PTY reader、real live sink、Round 1 artifact与final cwd均闭合 | **已恢复** |
+| `terminal_process` | 对 exact process 做一次即时操作：`list/log/poll/wait/write/submit/close_stdin/kill`；不安排未来 wake | 八个action、exact since-cursor、typed GAP、bounded snapshot、stdin/kill/join全部由同一Host process owner提供 | **已恢复** |
+| `terminal_monitor` | `register/list/cancel` Host-owned monitor；按 output/quiet/heartbeat/completion/expiry 形成未来观察；可在后续安全点唤醒 Agent | strict schema、production executor、process-local coordinator、safe-point acceptance与autonomous continuation闭合 | **已恢复** |
 
 这三个工具的产品分工不能互相替代：
 
@@ -201,9 +203,9 @@ terminal_monitor
 - `terminal_process.poll/log` 表示“现在读取一次”；
 - `terminal_monitor.register` 表示“结束当前等待，未来有意义的进展或完成时再通知”。
 
-当前只有前两种语义，因此长任务只能通过模型反复 poll/wait，或在本轮结束后无人继续跟进。
+三种语义现已同时存在，但monitor/process/cursor都不会跨Host恢复；只有被safe point接受的observation进入canonical conversation。
 
-### 4.2 `terminal`：保留与缺失的精确边界
+### 4.2 `terminal`：保留与恢复后的精确边界
 
 #### 已保留
 
@@ -216,32 +218,32 @@ terminal_monitor
 - 输出基础 ANSI 清理与常见 secret 文本 redaction；
 - 当前 Host 内的进程数量与 finished TTL bound。
 
-#### 已缺失或退化
+#### Round 2已恢复
 
-1. **运行中真实输出增量**：hard-cut 前 `_StreamingTerminalJsonBuilder` 会在 command 尚未完成时产生 `ToolResultTextDeltaEvent`。当前 [`conversation_kernel/runner.py`](src/pulsara_agent/conversation_kernel/runner.py) 先等待 `tools.invoke()` 完成，随后才把整段结果作为一个 `ToolResultDelta` 发出。即使 event 名仍叫 Delta，它也不是物理 terminal stream。
-2. **完整输出权威**：hard-cut 前 terminal result 同时提供 bounded preview 与完整 redacted output artifact。当前输出先在 manager 的 rolling buffer 中淘汰，再在 tool runtime 中截断，省略部分没有可读取 owner。
-3. **真实 final cwd**：hard-cut 前前台 command 完成后会捕获 shell 最终 cwd，并更新 terminal session；当前只把 command 启动时的 `cwd` 重新赋给 `current_cwd`。
-4. **用户 shell 环境近似**：hard-cut 前有 shell detection、受控 login-shell env snapshot、TTL/cache/timeout/fallback 与最近 `.venv/bin` overlay；当前只使用 `$SHELL -c`、父进程 env 的 suffix blocklist 和最近 `.venv/bin`。
-5. **长任务下一步提示**：hard-cut 前工具 description 明确区分 wait/poll/log/monitor，并在 output artifact 存在时提示 `artifact_read`。当前 description 只能指向 `terminal_process`。
+1. **运行中真实输出增量**：single incremental sanitizer直接消费PIPE/PTY physical reader；process尚未结束时即可发出bounded provisional `ToolResultDelta`，final `ToolResultEnd`用相同block identity安装Round 1 canonical preview。
+2. **完整输出与retention边界**：process-local owner保存最多16 MiB sanitized retained body；每次tool result冻结时由Round 1保存可证明的完整retained snapshot，省略内容通过scoped `artifact_read`读取。retention GAP与delivery HEAD_TAIL正交。
+3. **真实 final cwd**：只在foreground process physical completion后读取workspace内final cwd并推进session；yielded process不推进。
+4. **用户 shell环境近似**：受控login-shell probe具备size/timeout/TTL/single-flight/fallback、default-deny inert allowlist与最近`.venv/bin` overlay；active环境默认拒绝。
+5. **长任务下一步提示**：三工具description再次区分即时wait/poll/log、future monitor与artifact continuation。
 
-### 4.3 `terminal_process`：八个 action 没有丢，但产品完整性已下降
+### 4.3 `terminal_process`：八个即时 action 与cursor/GAP边界
 
-| Action | 当前状态 | 缺失/退化点 |
+| Action | 当前状态 | Round 2后的精确边界 |
 |---|---|---|
 | `list` | 保留 | 只能列当前 Host 的 process，不含 monitor inventory；跨 Host 不恢复是既定边界，不算缺口 |
-| `poll` | 保留 | 返回当前 bounded tail；没有 exact since-cursor |
-| `log` | 保留 | 只读 8 MiB rolling buffer 的末尾，早期输出可能已丢失；没有完整 artifact continuation |
-| `wait` | 保留 | 仍是单次、最长 30 秒的有限等待；等待后仍 running 时没有 monitor 后续路径 |
+| `poll` | 保留并补全 | 接受exact `since_cursor`，返回delta或typed GAP；单次响应仍有独立展示上限 |
+| `log` | 保留并补全 | 读取16 MiB/process retained owner的bounded snapshot/delta；tool result可通过Round 1 artifact continuation读取其冻结正文 |
+| `wait` | 保留并补全 | 仍是单次、最长30秒的有限等待；仍running时可显式转入monitor future observation |
 | `write` | 保留 | 无换行写入仍可用 |
 | `submit` | 保留 | 带换行写入仍可用 |
 | `close_stdin` | 保留 | EOF 语义仍可用 |
-| `kill` | 保留 | 终止 process 仍可用；但“只取消通知而不杀进程”的 `terminal_monitor.cancel` 已不存在 |
+| `kill` | 保留 | 终止并physical join process；`terminal_monitor.cancel`是独立的只取消通知、不kill语义 |
 
-这里最关键的事实是：`terminal_process` 没有整体消失，但它已经无法完成 hard-cut 前“三工具协作”中的长期观察分工。
+这里最关键的事实是：`terminal_process`只负责即时操作；长期观察重新由`terminal_monitor`承担，没有把future wake伪装成poll重试。
 
-### 4.4 `terminal_monitor`：当前缺失的完整产品语义
+### 4.4 `terminal_monitor`：Round 2已恢复的完整产品语义
 
-hard-cut 前已经落地、当前完全不可调用的语义包括：
+hard-cut 前已经落地、Round 2重新闭合的语义包括：
 
 - 对 exact `process_id` 执行 `register`；
 - 返回并维护 exact `monitor_id`；
@@ -262,38 +264,29 @@ hard-cut 前已经落地、当前完全不可调用的语义包括：
 - 条件满足后触发 same-Host autonomous continuation；
 - process completion 与 monitor cancellation 是两种不同的用户动作。
 
-当前 [`conversation_kernel/tool_runtime.py`](src/pulsara_agent/conversation_kernel/tool_runtime.py) 的 `_offer_terminal_live()` 会在一次 `terminal`/`terminal_process` 返回时同步发出名字类似 `TerminalMonitorOpened/Observation/Closed` 的 Live events，但它不等于上述产品能力：
-
-- 没有模型可调用的 `terminal_monitor`；
-- 没有 registration；
-- 没有持有 future observation 的后台 owner；
-- running response 之后不会自动观察新增输出或完成；
-- 下一次 poll 使用新的 tool attempt/monitor identity，不是原 monitor 的后续 observation；
-- 没有 autonomous continuation。
-
-因此，“Live vocabulary 中仍有 TerminalMonitor 名称”不能作为产品保留证据。
+当前实现由[`terminal_process/monitor.py`](src/pulsara_agent/terminal_process/monitor.py)持有process-local registration/draft/cursor/coalescing，由Host scheduler唯一构造prepared target，并通过provider safe point安装canonical observation。Coordinator不访问repository、不创建turn、不启动runner；Host close后所有monitor失效。`TerminalMonitor*` live event现在有真实producer，但live enum本身仍不承担产品authority。
 
 ### 4.5 Terminal 输出：retained tail、单次响应与 canonical result 三个边界
 
-当前 Terminal 大输出依次受三个不同边界约束：
+Round 2后的 Terminal 大输出受三个正交边界约束：
 
-1. [`terminal_process/manager.py`](src/pulsara_agent/terminal_process/manager.py) 的 `_BoundedOutput` 只保留最近 8 MiB bytes，超出后从 head 删除；
-2. `terminal` / `terminal_process` 的 public request 把单次返回限制为最多 32,000 chars，因此普通响应只携带 rolling buffer 的一个 bounded tail；
-3. [`conversation_kernel/tool_runtime.py`](src/pulsara_agent/conversation_kernel/tool_runtime.py) 对所有 tool result 另有 4 MiB 总 hard cap；Terminal 通常先被 32,000-char response bound 限制，但这个 generic cap 仍是最终 carrier 上界。
+1. [`terminal_process/output.py`](src/pulsara_agent/terminal_process/output.py) 每process最多保留16 MiB sanitized UTF-8，Host aggregate最多128 MiB；淘汰推进retained start并使旧cursor返回typed GAP；
+2. `terminal` / `terminal_process` 单次public response最多32,000 chars，monitor canonical envelope最多32,000 UTF-8 bytes，并用`COMPLETE | HEAD_TAIL`和available/included/omitted counts表达delivery coverage；
+3. Round 1 tool-output processor把一次tool result冻结时的exact retained candidate转换为不超过65,536 UTF-8 bytes的inline canonical preview，并按需发布shared blob artifact。
 
-随后 canonical inline/blob content 保存的是**该次 bounded tool response**，不是 manager 中曾经出现过的完整 output。虽然 canonical blob relation 支持更大的 entry content，它无法恢复在形成 tool response 之前已经淘汰或省略的 bytes。
+artifact保存的是该次冻结时仍可证明的完整sanitized retained candidate；如果更早bytes已被retention淘汰，source coverage明确为`RETAINED_SNAPSHOT`，不得冒充原始完整process stream。delivery truncation也不得伪装成retention GAP。
 
-hard-cut 前存在的下列产品语义因此一起消失：
+下列产品语义已由Round 1与Round 2共同恢复：
 
-- 完整 redacted stdout/stderr 被保留；
+- 一次冻结时仍在retention owner中的完整sanitized stdout/stderr被保留；
 - bounded inline preview 与完整事实分离；
 - huge output 使用稳定 head/tail preview；
 - preview 明确声明 original size、omitted middle 与 read-more hint；
 - `artifact_read` 按 offset/limit 继续读取完整输出；
-- Inspector 能解释 preview 为什么被截断以及完整内容在哪里；
+- typed result能解释preview为何截断以及完整内容在哪里；
 - terminal 与普通 tool output 使用一致的 artifact continuation 语义。
 
-### 4.6 Terminal shell/profile/env 的产品退化
+### 4.6 Terminal shell/profile/env 的产品恢复
 
 hard-cut 前 [`TERMINAL_SHELL_ENV_V1_IMPLEMENTATION_PLAN.zh.md`](archived_docs/TERMINAL_SHELL_ENV_V1_IMPLEMENTATION_PLAN.zh.md) 对应的生产代码包含 `runtime/terminal/env.py` 与 `runtime/terminal/shell.py`，并有实际测试。主要用户可观察能力是：
 
@@ -306,18 +299,9 @@ hard-cut 前 [`TERMINAL_SHELL_ENV_V1_IMPLEMENTATION_PLAN.zh.md`](archived_docs/T
 - 每条命令按 effective cwd 查找最近 `.venv/bin`；
 - shell/env 来源与 fallback diagnostic。
 
-当前实现仍做“最近 `.venv/bin`”和部分 secret suffix stripping，但已经不具备完整等价语义：
+当前[`terminal_process/environment.py`](src/pulsara_agent/terminal_process/environment.py)已经重新实现这组语义：login-shell probe受1 MiB、deadline和process-group physical join约束；成功snapshot按startup-file signature与TTL缓存；失败typed fallback；默认环境只采用inert allowlist并做secret-shaped value防线；最近`.venv/bin`与显式PATH prepend有确定顺序。通用exact-name passthrough是高权限显式配置，默认空；diagnostic只记录来源、错误码和计数，不记录env value。
 
-- 不捕获用户 shell profile 的 PATH；
-- 没有 snapshot/cache/timeout/fallback；
-- env 从 default-deny allowlist 退回到“继承绝大多数父环境，只排除以 KEY/TOKEN/SECRET/PASSWORD 结尾的变量名”；
-- 没有稳定的 env provenance/diagnostic；
-- 非典型 secret 变量名可能继续传入 subprocess；
-- 用户配置在 shell profile 中的 `nvm`、`pyenv`、`mise`、Homebrew、proxy helper 等可能不可见。
-
-这既是可用性退化，也是 terminal 安全边界退化。
-
-### 4.7 Terminal cwd continuity 的具体丢失
+### 4.7 Terminal cwd continuity 的恢复边界
 
 hard-cut 前的 foreground cwd doctrine 是：
 
@@ -330,12 +314,7 @@ terminal("cd src && pwd")
 
 background/yielded command 不允许回写 session cwd，以避免并发 command 竞争。
 
-当前 `TerminalSession.execute()` 在 foreground command 完成后执行的是 `current_cwd = cwd`，其中 `cwd` 是**启动前解析出的目录**，并非 shell command 的 final cwd。结果是：
-
-- `cd subdir` 的输出可以显示正确目录；
-- tool result 的 `cwd` 仍报告启动目录；
-- 下一条 command 仍从旧目录启动；
-- hard-cut 前的 terminal session cwd 连续性不再成立。
+当前`TerminalSession.execute()`为每个foreground command创建private cwd probe，并且只在process及reader/watcher已完成、probe结果仍位于workspace且目录存在时推进`current_cwd`。yielded command立即放弃cwd推进权，完成后也不能回写；probe文件在成功、失败、yield与close路径全部清理。
 
 ### 4.8 明确不计为 Terminal 缺口的旧 durability
 
@@ -349,7 +328,7 @@ background/yielded command 不允许回写 session cwd，以避免并发 command
 - delivery ACK/reconciliation machinery；
 - Host 退出后继续持有 terminal process。
 
-目标产品边界仍可保持为：terminal process 与 monitor 都只活在当前 Host；Host close 时 process 关闭。缺失的是**同一 Host 生命周期内**已经存在过的完整 terminal 产品体验。
+目标产品边界已经实现为：terminal process 与 monitor 都只活在当前 Host；Host close时先停止monitor admission、终止process group并bounded join reader/watcher/process，再释放repository/provider等依赖。没有跨Host rebind或execution replay。
 
 ### 4.9 hard-cut前Terminal参考代码
 
@@ -454,7 +433,7 @@ Round 1 已在新 conversation kernel 内恢复产品能力，没有恢复旧 du
 - `tool_results` 直接拥有 nullable artifact edge、source coverage、artifact disposition、display kind 与两类独立 reason；没有新增 `tool_result_artifacts` relation；
 - tool-result entry、artifact edge/state 与现有 `ToolResultAccepted` occurrence 在同一 Host-writer transaction 接受；ACK unknown 只 exact-confirm/reissue 同一 prepared candidate，不重跑 physical tool；
 - `artifact_read` 已进入 production tool specs/executor，支持 `info | text`、character offset、bounded page、session/workspace scope 与 integrity failure；它的结果不再递归归档；
-- terminal 只对当前仍保留的 sanitized body 承诺 `RETAINED_SNAPSHOT`；一旦 rolling retention 丢失更早输出，`TERMINAL_RETENTION_GAP` 不会被冒充为原始 process stream 完整。
+- terminal 只对当前仍保留的 sanitized body 承诺 `RETAINED_SNAPSHOT`；rolling retention 丢失更早输出使用`TERMINAL_RETENTION_GAP`，sanitizer处理失败使用独立`TERMINAL_SANITIZER_UNAVAILABLE`，二者都不会被冒充为原始process stream完整。
 
 对应机器证据见 [`round1_tool_output_artifact_activation.json`](benchmarks/suites/core/v1/round1_tool_output_artifact_activation.json)。Go artifact viewer/download UI、binary artifact、多 artifact result、artifact 删除/retention UI 与后台 retention retry job 仍是明确 non-goal；PHC-01、PHC-03 至 PHC-16 的状态不因本轮改变。
 
@@ -882,16 +861,15 @@ ordinary prompt、detach/quit 也仍可用。
 
 ## 14. PHC-15：Capability catalog 与真实 executor 不一致
 
-当前 builtin catalog 共 28 个 descriptor。production model tool surface实际可达 19 个：
+当前 builtin catalog 共29个descriptor。production model tool surface实际可达21个：
 
-- 7 个 direct tools：`read_file/search_files/edit_file/write_file/todo/terminal/terminal_process`；
+- 9个direct tools：`artifact_read/read_file/search_files/edit_file/write_file/todo/terminal/terminal_process/terminal_monitor`；
 - 4 个 flat subagent tools：`spawn_agent/list_agents/wait_agent/stop_agent`；
 - 8 个 current memory tools（memory 语义不在本轮复核范围）。
 
-以下 9 个 descriptor 没有当前 production executor/binding：
+以下8个descriptor没有当前production executor/binding：
 
 ```text
-artifact_read
 enter_plan
 ask_plan_question
 exit_plan
@@ -902,7 +880,7 @@ report_agent_phase
 report_agent_result
 ```
 
-此外，`capability/tool_action.py` 仍有 `terminal_monitor` policy helper，会查询一个当前 builtin catalog 中已不存在的 `terminal_monitor` entry。
+Round 1已把`artifact_read`descriptor接到scoped production executor；Round 2已让`terminal_monitor`descriptor、tool-action policy、strict schema与production executor闭合。PHC-15仍未整体恢复，因为Plan与hierarchical task-graph的8个descriptor仍不可达。
 
 这不是独立用户功能，但它是重要产品缺失证据：
 
@@ -1088,7 +1066,7 @@ report_agent_result
 - Protocol v3 canonical snapshot/history/live/content read 基础；
 - PostgreSQL canonical blobs 对已提交 transcript content 与 accepted tool-result artifact edge 的 bounded read。
 
-这些“已保留/已恢复”项不抵消前文的子语义缺失。例如，Round 1 恢复了已保留 terminal snapshot 的 artifact，但没有恢复 terminal monitor、真正实时 stdout/stderr streaming 或被 rolling retention 淘汰的原始字节；“TerminalMonitor Live enum 保留”也不代表“terminal_monitor 工具保留”。
+这些“已保留/已恢复”项不抵消前文仍未恢复的其他能力族。Round 1只保证一次tool-result冻结时可证明的retained snapshot artifact；Round 2恢复了same-Host terminal monitor、真实stdout/stderr streaming与16 MiB/process retention，但仍不承诺恢复在retention前已经丢失的原始字节，也不承诺跨Host process/monitor continuation。
 
 ## 18. 尚未作为缺口确认的标题
 

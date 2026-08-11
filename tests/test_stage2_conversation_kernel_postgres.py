@@ -211,7 +211,7 @@ def test_stage2_schema_and_descriptor_oracles_are_exact(
 ) -> None:
     assert len(CONVERSATION_KERNEL_RELATIONS) == 24
     assert len(set(CONVERSATION_KERNEL_RELATIONS)) == 24
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == 26
+    assert len(COMMITTED_EVENT_DESCRIPTORS) == 27
     assert len(LIVE_EVENT_TYPES) == 23
     assert len(SUBJECT_SLOTS) == 13
     assert len(APPEND_GUARDS) == 2

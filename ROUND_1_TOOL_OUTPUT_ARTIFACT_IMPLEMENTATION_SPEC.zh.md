@@ -397,7 +397,7 @@ JSON只是process-local source-format hint，用于构造正确的preview envelo
 
 - candidate只存在于当前physical invocation调用栈；
 - `source_coverage=COMPLETE`当且仅当`source_coverage_reason IS NULL`；
-- `source_coverage=RETAINED_SNAPSHOT`当且仅当`source_coverage_reason`为closed reason，Round 1唯一允许值为`TERMINAL_RETENTION_GAP`；
+- `source_coverage=RETAINED_SNAPSHOT`当且仅当`source_coverage_reason`为closed reason；Round 1激活时唯一值为`TERMINAL_RETENTION_GAP`，Round 2的single incremental sanitizer增加`TERMINAL_SANITIZER_UNAVAILABLE`，两者不得互相冒充；
 - candidate不进入event metadata、serializer、schema registry或LiveAgentEvent payload；
 - callback、recorder、writer owner或port实例不得被放入candidate；
 - generic tool没有candidate时，processor以`ToolExecutionResult.output`作为完整source；
@@ -466,6 +466,7 @@ Round 1的两类closed reason严格分属不同轴：
 ```text
 ToolOutputSourceCoverageReason =
     TERMINAL_RETENTION_GAP
+  | TERMINAL_SANITIZER_UNAVAILABLE  # Round 2 additive closed vocabulary
 
 ToolOutputArtifactUnavailabilityReason =
     ARTIFACT_CONTENT_TOO_LARGE

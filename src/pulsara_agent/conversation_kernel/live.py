@@ -521,6 +521,16 @@ class LiveAgentEventBus:
             self._observers.clear()
             return self._generation
 
+    def invalidate_observation_generation_nowait(self) -> None:
+        """Detach slow/current observers with the existing typed GAP seam.
+
+        Process-local producers use this only when a bounded live handoff has
+        already lost provisional data.  It never affects canonical execution
+        or installs a durable cursor/ack owner.
+        """
+
+        self._invalidate_generation_nowait()
+
     def _invalidate_generation_nowait(self) -> None:
         # Oversize/malformed producer output is an observation-plane GAP, not
         # a silent missing delta and never a canonical execution failure.
@@ -531,7 +541,9 @@ class LiveAgentEventBus:
             self._revision = 0
             self._ring.clear()
             self._ring_bytes = 0
-            self._observers.clear()
+            # Keep existing observer identities on their old generation so
+            # their next level read returns GAP.  A generation replacement is
+            # the separate administrative operation that detaches observers.
 
     def close(self) -> None:
         with self._lock:

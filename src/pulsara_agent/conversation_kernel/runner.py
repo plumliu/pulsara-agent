@@ -13,6 +13,7 @@ from enum import StrEnum
 from hashlib import sha256
 import json
 from time import monotonic
+from threading import Lock
 from typing import AsyncIterator, Awaitable, Callable, Mapping, Protocol
 from uuid import uuid4
 
@@ -72,6 +73,8 @@ from pulsara_agent.conversation_kernel.reader import (
     RematerializedProviderInput,
 )
 from pulsara_agent.conversation_kernel.safe_point import ProviderSafePointCoordinator
+from pulsara_agent.ports.terminal_observation import PreparedInstallationTarget
+from pulsara_agent.terminal_process.monitor import TerminalMonitorCoordinator
 from pulsara_agent.conversation_kernel.vocabulary import LiveEventType
 from pulsara_agent.ports.live_agent_event import ProviderStreamPayload
 from pulsara_agent.ports.tool_execution import ToolOutputArtifactCandidate
@@ -103,6 +106,7 @@ class KernelToolResult:
     remote_identity: str | None = None
     output_artifact_candidate: ToolOutputArtifactCandidate | None = None
     artifact_source_read: bool = False
+    process_local_settlement: "ProcessLocalEffectSettlementToken | None" = None
 
     def __post_init__(self) -> None:
         # The model-facing tool result and artifact candidate are both strict
@@ -110,6 +114,169 @@ class KernelToolResult:
         self.content.decode("utf-8")
         if self.artifact_source_read and self.output_artifact_candidate is not None:
             raise ValueError("artifact_read cannot recursively own an artifact")
+
+
+@dataclass(frozen=True, slots=True)
+class KernelToolInvocationContext:
+    session_id: str
+    workspace_id: str
+    turn_id: str
+    assistant_entry_id: str
+    tool_call_id: str
+    attempt_id: str
+    result_entry_id: str
+    conversation_scope_kind: str
+    scope_subagent_task_id: str | None
+    host_owner_epoch: int
+    authorization_reference: str
+
+    def __post_init__(self) -> None:
+        if not all(
+            (
+                self.session_id,
+                self.workspace_id,
+                self.turn_id,
+                self.assistant_entry_id,
+                self.tool_call_id,
+                self.attempt_id,
+                self.result_entry_id,
+                self.authorization_reference,
+            )
+        ):
+            raise ValueError("kernel tool invocation context is incomplete")
+        if self.conversation_scope_kind not in {"ROOT", "SUBAGENT_TASK"}:
+            raise ValueError("kernel tool invocation scope is invalid")
+        if (self.conversation_scope_kind == "ROOT") != (
+            self.scope_subagent_task_id is None
+        ):
+            raise ValueError("kernel tool invocation scope identity is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class ProcessLocalEffectSettlementToken:
+    token_id: str
+    token_fingerprint: str
+
+    def __post_init__(self) -> None:
+        if not self.token_id or not self.token_fingerprint.startswith("sha256:"):
+            raise ValueError("process-local settlement token is invalid")
+
+
+class ProcessLocalEffectSettlementDisposition(StrEnum):
+    COMMITTED = "COMMITTED"
+    DISCARDED = "DISCARDED"
+
+
+class KernelToolLiveSink(Protocol):
+    def offer_text(self, text: str) -> None: ...
+
+
+class _ToolResultLiveSink:
+    """Thread-safe, bounded, mechanically coalescing live handoff."""
+
+    _MAXIMUM_PENDING_BYTES = 1 * 1024 * 1024
+
+    def __init__(
+        self,
+        *,
+        live_bus: LiveAgentEventBus,
+        session_id: str,
+        turn_id: str,
+        draft_identity: str,
+        block_identity: str,
+        attribution: Mapping[str, object],
+    ) -> None:
+        self._live_bus = live_bus
+        self._session_id = session_id
+        self._turn_id = turn_id
+        self._draft_identity = draft_identity
+        self._block_identity = block_identity
+        self._attribution = dict(attribution)
+        self._loop = asyncio.get_running_loop()
+        self._lock = Lock()
+        self._pending: list[str] = []
+        self._pending_bytes = 0
+        self._scheduled = False
+        self._closed = False
+        self._overflowed = False
+        self._gap_pending = False
+        self._drained = asyncio.Event()
+        self._drained.set()
+        self.emitted = False
+
+    @property
+    def overflowed(self) -> bool:
+        with self._lock:
+            return self._overflowed
+
+    def offer_text(self, text: str) -> None:
+        if not text:
+            return
+        encoded = text.encode("utf-8")
+        with self._lock:
+            if self._closed:
+                return
+            self._drained.clear()
+            remaining = self._MAXIMUM_PENDING_BYTES - self._pending_bytes
+            if len(encoded) > remaining:
+                if not self._overflowed:
+                    self._gap_pending = True
+                self._overflowed = True
+                if remaining <= 0:
+                    return
+                encoded = encoded[:remaining]
+                while encoded:
+                    try:
+                        text = encoded.decode("utf-8")
+                        break
+                    except UnicodeDecodeError:
+                        encoded = encoded[:-1]
+                if not encoded:
+                    return
+            self._pending.append(text)
+            self._pending_bytes += len(encoded)
+            if self._scheduled:
+                return
+            self._scheduled = True
+        self._loop.call_soon_threadsafe(self._drain_nowait)
+
+    def _drain_nowait(self) -> None:
+        with self._lock:
+            text = "".join(self._pending)
+            self._pending.clear()
+            self._pending_bytes = 0
+            self._scheduled = False
+            gap = self._gap_pending
+            self._gap_pending = False
+        if gap:
+            self._live_bus.invalidate_observation_generation_nowait()
+        if text:
+            self.emitted = True
+            self._live_bus.offer_nowait(
+                event_type=LiveEventType.TOOL_RESULT_DELTA,
+                session_id=self._session_id,
+                turn_id=self._turn_id,
+                draft_identity=self._draft_identity,
+                payload=ToolResultDeltaPayload(self._block_identity, text),
+                block_id=self._block_identity,
+                block_ordinal=0,
+                block_kind=LiveBlockKind.TOOL_RESULT,
+                **self._attribution,
+            )
+        with self._lock:
+            if self._pending and not self._scheduled:
+                self._scheduled = True
+                self._loop.call_soon(self._drain_nowait)
+                return
+            self._drained.set()
+
+    async def close(self) -> None:
+        with self._lock:
+            self._closed = True
+            if self._pending and not self._scheduled:
+                self._scheduled = True
+                self._loop.call_soon(self._drain_nowait)
+        await asyncio.wait_for(self._drained.wait(), timeout=1.0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,7 +351,15 @@ class KernelToolPort(Protocol):
         attempt_id: str,
         turn_id: str,
         assistant_entry_id: str,
+        invocation_context: KernelToolInvocationContext,
+        live_sink: KernelToolLiveSink | None = None,
     ) -> KernelToolResult: ...
+
+    async def settle_process_local_effect(
+        self,
+        token: ProcessLocalEffectSettlementToken,
+        disposition: ProcessLocalEffectSettlementDisposition,
+    ) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -352,6 +527,9 @@ class ConversationKernelRunner:
         model_call_count = 0
         tool_call_count = 0
         try:
+            unsettled_process_local_effect: ProcessLocalEffectSettlementToken | None = (
+                None
+            )
             while model_call_count < self._maximum_model_calls_per_turn:
                 if self._steer_consumer is not None:
                     await self._steer_consumer(turn_id, deadline)
@@ -519,8 +697,9 @@ class ConversationKernelRunner:
                             tool_call_id=call.tool_call_id,
                             turn_id=turn_id,
                             assistant_entry_id=accepted.entry_id,
-                        )
+                    )
                     attempt_id: str | None = None
+                    live_sink: _ToolResultLiveSink | None = None
                     if authorization.kind is not KernelToolAuthorizationKind.ALLOW:
                         if authorization.accepted_result_entry_id is not None:
                             # Human DENY atomically committed the decision and
@@ -613,6 +792,42 @@ class ConversationKernelRunner:
                             block_kind=LiveBlockKind.TOOL_RESULT,
                             **live_attribution,
                         )
+                        terminal_streaming = call.tool_name == "terminal" or (
+                            call.tool_name == "terminal_process"
+                            and call.arguments.get("action") == "wait"
+                        )
+                        live_sink = (
+                            _ToolResultLiveSink(
+                                live_bus=self._live_bus,
+                                session_id=request.session_id,
+                                turn_id=turn_id,
+                                draft_identity=result_entry_id,
+                                block_identity=tool_result_block_id,
+                                attribution=live_attribution,
+                            )
+                            if terminal_streaming
+                            else None
+                        )
+                        workspace_id = await self._resolved_workspace_id(deadline)
+                        invocation_context = KernelToolInvocationContext(
+                            session_id=request.session_id,
+                            workspace_id=workspace_id,
+                            turn_id=turn_id,
+                            assistant_entry_id=accepted.entry_id,
+                            tool_call_id=call.tool_call_id,
+                            attempt_id=attempt_id,
+                            result_entry_id=result_entry_id,
+                            conversation_scope_kind=(
+                                provider_input.conversation_scope_kind
+                            ),
+                            scope_subagent_task_id=(
+                                provider_input.scope_subagent_task_id
+                            ),
+                            host_owner_epoch=(
+                                self._writer_lease.guard.writer_generation
+                            ),
+                            authorization_reference=authorization.reference,
+                        )
                         try:
                             result = await self._tools.invoke(
                                 tool_name=call.tool_name,
@@ -621,6 +836,11 @@ class ConversationKernelRunner:
                                 attempt_id=attempt_id,
                                 turn_id=turn_id,
                                 assistant_entry_id=accepted.entry_id,
+                                invocation_context=invocation_context,
+                                live_sink=live_sink,
+                            )
+                            unsettled_process_local_effect = (
+                                result.process_local_settlement
                             )
                         except asyncio.CancelledError:
                             self._live_bus.offer_settlement_nowait(
@@ -639,6 +859,9 @@ class ConversationKernelRunner:
                                     f"tool execution failed: {type(exc).__name__}"
                                 ).encode("utf-8"),
                             )
+                        finally:
+                            if live_sink is not None:
+                                await asyncio.shield(live_sink.close())
                         if (
                             attempt_id is not None
                             and result.remote_identity is not None
@@ -669,7 +892,9 @@ class ConversationKernelRunner:
                         )
                     )
                     if attempt_id is not None:
-                        if result_text:
+                        if result_text and (
+                            live_sink is None or not live_sink.emitted
+                        ):
                             self._live_bus.offer_nowait(
                                 event_type=LiveEventType.TOOL_RESULT_DELTA,
                                 session_id=request.session_id,
@@ -747,6 +972,12 @@ class ConversationKernelRunner:
                         prepared_acceptance,
                         deadline=deadline,
                     )
+                    if result.process_local_settlement is not None:
+                        await self._tools.settle_process_local_effect(
+                            result.process_local_settlement,
+                            ProcessLocalEffectSettlementDisposition.COMMITTED,
+                        )
+                        unsettled_process_local_effect = None
                     if attempt_id is not None:
                         self._live_bus.offer_settlement_nowait(
                             kind=LiveSettlementKind.COMMITTED,
@@ -758,6 +989,16 @@ class ConversationKernelRunner:
                         )
             raise RuntimeError("model-call limit exhausted")
         except BaseException as error:
+            if unsettled_process_local_effect is not None:
+                try:
+                    await asyncio.shield(
+                        self._tools.settle_process_local_effect(
+                            unsettled_process_local_effect,
+                            ProcessLocalEffectSettlementDisposition.DISCARDED,
+                        )
+                    )
+                except BaseException:
+                    pass
             if self._extensions is not None:
                 if isinstance(error, CanonicalProviderContinuityError):
                     self._extensions.offer_operational_nowait(
@@ -828,6 +1069,26 @@ class ConversationKernelRunner:
             new_context_binding_revision_id=new_context_binding_revision_id,
             job_id=job_id,
             command_id=command_id,
+            actor_id=actor_id,
+            deadline_monotonic=deadline_monotonic,
+        )
+
+    async def install_terminal_observation(
+        self,
+        *,
+        coordinator: TerminalMonitorCoordinator,
+        monitor_id: str,
+        target: PreparedInstallationTarget,
+        workspace_id: str,
+        actor_id: str,
+        deadline_monotonic: float,
+    ) -> AcceptedEntry | None:
+        return await self._io.run(
+            self._safe_point.install_terminal_observation,
+            coordinator=coordinator,
+            monitor_id=monitor_id,
+            target=target,
+            workspace_id=workspace_id,
             actor_id=actor_id,
             deadline_monotonic=deadline_monotonic,
         )

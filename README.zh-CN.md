@@ -37,7 +37,7 @@ Durable 边界有意保持狭窄：
 
 - canonical relational rows 拥有 conversation、tool、job、memory 与
   coordination 的当前语义真值；
-- closed 26-type `agent_events` journal 只记录 accepted occurrence，不用于恢复
+- closed 27-type `agent_events` journal 只记录 accepted occurrence，不用于恢复
   execution；
 - 23 种 live event 只存在于内存，进程退出即可丢失；
 - tool request 在 dispatch 前提交，physical attempt 在 effect invoke 前提交；
@@ -55,8 +55,14 @@ epoch。
 Kernel 当前支持：
 
 - OpenAI-compatible Responses 与 Chat Completions transport；
-- filesystem、todo、terminal、yielded terminal-process 与 scoped
-  `artifact_read` tools；
+- filesystem、todo、`terminal`、`terminal_process`、`terminal_monitor` 与
+  scoped `artifact_read` tools；
+- 真实 PIPE/PTY Terminal output streaming、exact process-local cursor、typed
+  GAP、same-Host future monitor observation，以及 provider safe-point 上的
+  autonomous continuation；
+- default-deny subprocess environment、bounded login-shell snapshot、最近
+  `.venv/bin`、foreground cwd continuity，以及 Host close 时的 physical
+  process-group drain；
 - 通过 shared blob store 保留完整 sanitized tool output：中等输出完整
   展示并附 artifact reference，大输出使用 UTF-8-safe head/tail preview
   并按需有界读取；
@@ -106,10 +112,12 @@ uv run pulsara db verify --deep --env-file .env
 ```
 
 唯一 active migration universe 是
-`pulsara.conversation-kernel.v1` generation 1，从 version 0 开始。Round 1
-在保持 exact 24 张产品关系的同时更新了
-version-0 `tool_results` 契约；当前 baseline/catalog identity 与验证证据记录在
-[`round1_tool_output_artifact_activation.json`](benchmarks/suites/core/v1/round1_tool_output_artifact_activation.json)。旧 v13
+`pulsara.conversation-kernel.v1` generation 1，从 version 0 开始。Round 1 与
+Round 2 在保持 exact 24 张产品关系的同时更新了 version-0 `tool_results` 与
+canonical Terminal-observation 契约；当前 baseline/catalog identity 与验证证据记录在
+[`round1_tool_output_artifact_activation.json`](benchmarks/suites/core/v1/round1_tool_output_artifact_activation.json)
+和
+[`round2_terminal_runtime_activation.json`](benchmarks/suites/core/v1/round2_terminal_runtime_activation.json)。旧 v13
 数据库只会得到 `schema_migration_universe_reset_required`，不会被在线导入、
 翻译或升级。请严格遵守
 [clean-baseline runbook](STAGE_5_CLEAN_BASELINE_RUNBOOK.zh.md)，没有针对 exact

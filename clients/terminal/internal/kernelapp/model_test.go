@@ -160,7 +160,7 @@ func TestSnapshotFingerprintAndCanonicalContentIntegrity(t *testing.T) {
 }
 
 func TestCommittedProjectionContractIsExactAndFailClosed(t *testing.T) {
-	if protocolv3.ProjectionContractCount() != 26 {
+	if protocolv3.ProjectionContractCount() != 27 {
 		t.Fatalf("projection contract count = %d", protocolv3.ProjectionContractCount())
 	}
 	model := New(fakeService{})
