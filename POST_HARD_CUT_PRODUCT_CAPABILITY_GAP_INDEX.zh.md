@@ -1,12 +1,12 @@
 # Pulsara hard-cut 后产品能力缺失索引
 
-> 状态：WORKING GAP INDEX（产品能力事实索引，不是恢复设计；PHC-02 已通过 Round 1 恢复，PHC-01/03/04/05/06 已通过 Round 2 恢复；PHC-17 已于 2026-08-12 通过 Round 3 恢复）
+> 状态：WORKING GAP INDEX（产品能力事实索引，不是恢复设计；PHC-02 已通过 Round 1 恢复，PHC-01/03/04/05/06 已通过 Round 2 恢复；PHC-17 已于 2026-08-12 通过 Round 3 恢复；PHC-09 的 Python Runtime/Host、canonical/Protocol 后端已于 2026-08-12 通过 Round 4 恢复，Go/TUI 产品闭环明确延期）
 >
-> 初始调研：2026-08-10；最近复核：2026-08-12（PHC-17 activation；PHC-09 permission边界）
+> 初始调研：2026-08-10；最近复核：2026-08-12（PHC-17、PHC-09 activation）
 >
 > hard-cut 前代码基线：`5b7ad9f7`
 >
-> 当前 checkpoint HEAD：`242895dcfef1af1fcdcd1f433b28637c16020720`；Round 3 Structured Model-Input Compiler 已在其上的未提交工作树激活，证据见本页 PHC-17 与 activation JSON
+> 当前 checkpoint HEAD：`d64dbeb23c6af0a00e112349a50878eae4abd9f6`；Round 3 Structured Model-Input Compiler 已提交，PHC-09 已按 [`ROUND_4_PLAN_WORKFLOW_AND_RUN_PERMISSION_IMPLEMENTATION_SPEC.zh.md`](ROUND_4_PLAN_WORKFLOW_AND_RUN_PERMISSION_IMPLEMENTATION_SPEC.zh.md) 激活 Python Runtime/Host 与 Protocol 后端；Go/TUI 交互产品面不计入本次 activation
 >
 > 范围：Python Agent Runtime / Host及其直接产品能力；Go TUI暂不在当前恢复主线中，但被确定为后续唯一主要交互与观察产品面
 >
@@ -170,14 +170,14 @@ git grep -n 'TerminalMonitorTool' "$PRE_HARD_CUT" -- src tests
 | PHC-06 | Terminal foreground cwd continuity | **已恢复（Round 2）**：前台命令physical completion后捕获workspace内final cwd；yielded process永不推进session cwd | 后续前台命令从真实final cwd启动，无后台并发竞争 |
 | PHC-07 | Long-horizon context window / compaction | **缺失**：新 schema 有 dormant snapshot primitives，但无产品触发路径 | 长任务碰到固定输入、call 数或总时限后失败，不能主动/自动压缩继续 |
 | PHC-08 | MCP production capability | **缺失**：仅保留配置检测，启用任何 MCP server 会阻止 Kernel open | MCP server discovery、tool call、interaction 与 CLI 管理均不可用 |
-| PHC-09 | Plan workflow | **缺失**：三个workflow descriptor残留，但无执行/交互入口，也没有Plan-scoped read-only overlay；四种静态permission preset仍在，但用户不能在发送前选择本次run的mode，也没有send-time frozen permission snapshot | Agent无法进入Runtime强制只读的规划阶段、提问、提交计划并等待批准/修订；普通会话也不能逐次发送不同权限的run |
+| PHC-09 | Plan workflow | **Python Runtime/Host 与 Protocol 后端已通过 Round 4 恢复；Go/TUI 延期**：三项ROOT-only control tool、canonical question/draft lifecycle、Plan-scoped read-only overlay、send-time immutable permission snapshot、Host-owned automatic continuation及typed Protocol v3边界已进入production；oracle为`34/23/15/2/26/4` | Headless typed caller已可完成Plan流程；面向用户的permission selector、question/draft review与重连展示仍等待Go/TUI闭环 |
 | PHC-10 | Hierarchical/batch subagent task graph | **显著退化**：只剩 flat spawn/list/wait/stop | 依赖任务、批量调度、child phase/result reporting 与 task-board 语义消失 |
 | PHC-11 | Standalone Canonical Inspector 产品入口 | **并入Go TUI，不单独恢复**：历史Inspector已消失；canonical query/Protocol后端按TUI需要保留和补齐 | 不建设第二套Inspector UI、read model或durable projection；会话观察最终由Go TUI呈现 |
 | PHC-12 | Frozen Legacy Python REPL 产品面 | **明确退役，不恢复兼容**：旧命令差异只作hard-cut审计记录 | approval、plan、MCP等仍有价值的产品语义归各自能力族，并最终通过Go TUI交互，不为旧命令表复建Runtime机制 |
 | PHC-13 | 跨 turn 失败/中断提示 | **缺失**：turn 可标 interrupted，但下一轮 provider context 没有明确失败旁注 | “继续”时模型无法区分上一轮完整回答与空/半截失败输出 |
 | PHC-14 | Model-visible tool observation timing/freshness | **缺失**：数据库时间仍可能存在，但不再进入 provider-visible typed observation | 模型无法判断旧工具结果何时观测、耗时多久、是否可能过期 |
-| PHC-15 | Capability catalog 与真实 executor 一致性 | **仍不闭合，但漂移已缩小**：29 个descriptor中，9个direct、4个subagent、8个memory已有production binding；剩余8个属于Plan/旧task-graph缺口 | Round 1/2已让`artifact_read`与`terminal_monitor`闭合；其他dead descriptor仍需后续能力族处理 |
-| PHC-16 | Go TUI S1–S3 后续能力 | **未来主要产品面，当前已知延后** | 最终承接会话观察、交互与控制；composer/copy/paste/notice及各能力族UI另行实施 |
+| PHC-15 | Capability catalog 与真实 executor 一致性 | **仍不闭合，但Plan漂移已由Round 4关闭**：29 个descriptor中，9个direct、4个flat subagent、8个memory及3个Plan control已有production binding；剩余5个均属于旧hierarchical task-graph缺口 | Round 1/2/4已分别闭合`artifact_read`、Terminal与Plan；dead descriptor只剩PHC-10任务图能力族 |
+| PHC-16 | Go TUI S1–S3及各恢复轮次UI | **未来主要产品面，明确延后**：Round 4只冻结Python Protocol/canonical边界，不把Go selector、question/draft review或客户端exact-join计入activation | 最终承接会话观察、交互与控制；composer/copy/paste/notice及Plan/MCP等能力族UI另行实施 |
 | PHC-17 | Structured model-input / context compilation | **已恢复（Round 3）**：exact canonical reader继续拥有conversation truth；provider-neutral immutable compiler统一五类typed source、scope-frozen tool surface、target estimator、channel与确定性降级；adapter只做exact join、ephemeral thaw与最终validation | 模型稳定获得runtime environment/clock与capability source；catalog/tool-result可按预算降级且canonical transcript/tool pairing不变；future Plan/MCP/failure/timing/compaction可复用同一source边界 |
 
 Round 3已经闭合PHC-17的克制、process-local typed compilation boundary。PHC-07 compaction及其他model-visible能力应在该边界上生长，避免每个产品族再次各自拼接system/user消息和预算逻辑；它们仍分别保持open，不能因compiler已存在而误报恢复。Permission不另立PHC：通用动态mode能力表现为“发送前选择、发送时冻结本次run”，frozen snapshot正是该选择的accepted form；Plan-scoped overlay仍由PHC-09拥有，并在snapshot冻结前强制收窄effective mode。
@@ -596,29 +596,27 @@ hard-cut 前生产代码和测试确认以下完整 workflow：
 - [`PULSARA_RUN_BOUND_PERMISSION_MODE_PLAN.zh.md`](archived_docs/PULSARA_RUN_BOUND_PERMISSION_MODE_PLAN.zh.md)；
 - hard-cut 前 `runtime/agent.py`、`host/session.py`、`runtime/plan.py` 与相应 tests。
 
-### 8.2 当前代码事实
+### 8.2 Round 4 activation后的代码事实
 
-- `PermissionMode`仍定义`read-only / ask-permissions / accept-edits / bypass-permissions`四种preset，CLI也能在Host/session打开时选择其中一种；
-- `PolicyPermissionGate`与`DefaultToolDispatchAuthorizationPolicy`仍在physical dispatch前执行typed allow/deny/confirmation，静态read-only会拒绝非只读调用；
-- 但`KernelHostSession`构造时把一份固定的`EffectivePermissionPolicy`装入tool port；当前production没有会话运行期间的`set_permission_mode`或等价typed command；
-- mutable `PermissionState`类型虽然残留，但新Kernel没有把它作为production owner，也没有per-run frozen permission snapshot；
-- `enter_plan`、`ask_plan_question`、`exit_plan` descriptor 仍在 builtin catalog；
-- 当前 `DirectKernelToolPort` 不绑定它们；
-- 当前 runner 没有 plan workflow dispatch；
-- current canonical schema 没有 plan workflow current state；
-- current REPL 没有 `:plan`、approve/revise/cancel/force-exit 命令；
-- Protocol v3 interaction 只承载普通 tool confirmation 的 allow/deny。
+- 四种preset仍由typed permission contract拥有；每个turn与queued prompt在admission处冻结requested/effective mode、overlay、Plan identity与contract fingerprint；
+- active Plan对ROOT admission应用`PLAN_READ_ONLY`收窄，SUBAGENT_TASK只继承parent effective permission且不成为workflow成员；authorization、attempt与physical invoke exact join同一snapshot；
+- `enter_plan`、`ask_plan_question`、`exit_plan`只在ROOT tool surface可达；包含Plan call的batch先执行全批barrier，所有siblings均不得产生physical attempt；
+- `plan_workflows`与`plan_interactions`是唯一current Plan truth；question使用process-local dormant waiter，draft review是canonical异步decision；
+- ENTER/REVISE/APPROVE由Host-owned continuation attempt完成canonical write、ACK confirmation、ROOT slot settlement与task bind；CANCEL不创建空白turn，只留下下一条真实prompt可认领一次的typed handoff；
+- canonical reader在一个repeatable-read cut中同时冻结conversation、permission、workflow、handoff与approved-plan facts；Round 3 pure compiler只消费这些immutable facts；
+- Python Protocol v3后端提供requested mode、current Plan control、true question-answer oneof、draft feedback presence及bounded content read；这些是已激活的wire/server authority边界；
+- Go生成binding或局部consumer代码不等于Go/TUI产品闭环。permission selector、question/options/free-text交互、draft分页审阅、approve/revise/cancel控制、current-control重建及client-side exact-join均明确延期，不计入Round 4 Python activation；
+- Legacy Python REPL的`:plan`/`:mode`命令仍不恢复；当前可验证入口是headless typed API与Python Protocol server，未来主要交互入口才是Go composer/TUI。
 
-### 8.3 具体丢失的用户能力
+### 8.3 恢复后的用户能力
 
-- 普通会话不能在输入框旁为即将发送的消息选择permission preset，并把它作为本次run的一部分提交；
-- message submission没有冻结permission snapshot，因而后续UI mode变化、queue delay或ACK-unknown重试没有一份稳定的“这次run使用什么policy”事实；
-- 用户不能要求一个由 Runtime 强制只读的正式规划阶段；
-- Agent 无法把“规划”作为 typed workflow，而只能用普通文本模拟；
-- Agent 无法在规划中结构化提问并恢复原 tool call；
-- plan draft 没有 approve/revise/cancel lifecycle；
-- “规划完成后再执行”的权限边界消失；
-- descriptor 残留会让静态 capability inspection 高估实际能力。
+- 普通prompt可携带本次requested preset；提交后UI变化、queue delay或ACK-unknown不会重绑accepted snapshot；
+- Agent可主动进入typed Plan，Runtime从下一turn开始强制read-only，而不是依赖prompt自律；
+- structured question的answer成为exact canonical ToolResult并继续同一turn；
+- draft支持APPROVE、REVISE、CANCEL，Host在前两者FULL后自动启动exact continuation；
+- approved plan按content identity只物化/计量一次，implementation turn恢复workflow冻结的resume preset；
+- Python Protocol/canonical层允许detach/reattach后重新发现并继续审阅；Host crash不恢复provider/future，但不丢失已提交draft decision truth。Go/TUI尚未被本轮认定为完成这项最终用户旅程；
+- descriptor、schema、binding与executor在同一tool-surface snapshot中闭合，SUBAGENT_TASK看不到Plan tools。
 
 ### 8.4 send-time permission snapshot与Plan overlay的归属
 
@@ -644,19 +642,37 @@ submit / command acceptance linearization
 后续恢复必须保持以下归属：
 
 - 动态mode选择不是Legacy Python REPL兼容项；Go TUI应在输入框旁提供selector，headless typed API则把requested mode作为prompt submission字段，而不是先发送一条自由文本或独立`:mode`命令；
-- composer selector可以把上次选择作为下一次发送的便捷默认值，但它只是可变input state，不是active run的permission authority；
+- composer selector可以把上次选择作为下一次发送的便捷默认值，但它只是可变input state，不是active run的permission authority；workflow会冻结进入Plan时的`resume_permission_mode`，只用于后续automatic turn admission与Plan退出后的selector恢复；
 - Plan read-only overlay属于PHC-09，因为它的安装、持续与撤销都由Plan lifecycle决定，不另立PHC-18；
-- overlay只能收窄用户所选mode，不能扩大权限；Plan退出只能影响下一次submission，不得让已经开始的read-only run中途获得写权限；
+- overlay只能收窄用户所选mode，不能扩大权限；Plan退出只能影响下一次new-turn admission（包括APPROVE的automatic implementation turn），不得让已经开始的read-only run中途获得写权限；
 - permission snapshot必须与prompt submission在同一command candidate中冻结；queue中的每个prompt保留各自mode，后来调节composer selector不得改变已经排队的prompt；
 - ACK-unknown只能exact-confirm同一message、requested mode与effective snapshot，不能使用重试时TUI当前选择重新绑定；
 - 每次run在tool call/physical attempt之前使用同一份frozen effective policy；UI selection或Plan状态的后续变化不得追溯改写已经接受的run。prompt acceptance与Plan transition的canonical顺序决定overlay是否适用，Plan只约束其激活之后接受的submission；
 - detach/attach后若canonical Plan仍active，新Host必须重新得到同一read-only overlay；这应读取canonical Plan state，而不是replay permission event；
 - PHC-17只负责把Plan status/guidance编译进model input。是否允许physical effect仍由typed policy port决定，不能以system prompt代替；
+- Agent `enter_plan`关闭origin turn并由Runtime原子创建read-only Plan continuation；question answer作为canonical ToolResult恢复同一个turn；`exit_plan`关闭origin turn并把draft review变成canonical异步decision；REVISE/APPROVE分别原子创建新的Plan/implementation turn，CANCEL则等待下一条真实human prompt取得一次性typed handoff；
+- automatic continuation使用独立`PLAN_CONTINUATION` input origin，不伪造human `USER_MESSAGE`，也不能激活skill/capability。APPROVE后的第一次compile必须exact携带被批准的plan；CANCEL后的下一条真实prompt仍按用户发送前的selector冻结permission；
+- question UI的“其他（以上选项都不合适）”是Go-owned free-text入口，不污染model options。提交前selection/draft可process-local；提交后的exact answer必须进入canonical conversation truth；
 - 不恢复旧permission snapshot event、event reducer、RuntimeSession recovery或逐次permission receipt graph。Committed occurrence至多审计用户可观察的Plan/mode transition，不成为effective policy真源。
 
-本Gap Index只冻结上述产品和ownership边界；composer默认选择、prompt command、Plan row、run snapshot及policy request的具体DTO/列由未来PHC-09实施规格决定。
+上述Python Runtime/Host、canonical、compiler与Protocol server ownership边界已按 [`ROUND_4_PLAN_WORKFLOW_AND_RUN_PERMISSION_IMPLEMENTATION_SPEC.zh.md`](ROUND_4_PLAN_WORKFLOW_AND_RUN_PERMISSION_IMPLEMENTATION_SPEC.zh.md) 激活。两张canonical Plan relation、每个turn/queue item的immutable permission snapshot、七类Plan occurrence与两个typed subject slot均已进入production；最终oracle为`34 Committed / 23 Live / 15 subjects / 2 guards / 26 relations / 4 jobs`，证据见 [`round4_plan_workflow_and_run_permission_activation.json`](benchmarks/suites/core/v1/round4_plan_workflow_and_run_permission_activation.json)。该activation不证明Go/TUI产品行为已经完成，也不把Go端未审阅项降格为Python blocker。
 
-### 8.5 hard-cut前Plan与permission参考代码
+### 8.5 明确延期的Go/TUI闭环
+
+Round 4刻意停在“Python authority与typed wire已经可用”，没有把客户端实现量计入PHC-09的Python闭环。后续Go/TUI工作至少包括：
+
+- composer输入框旁的permission preset selector；选择在发送前可变，发送后展示canonical requested/effective snapshot；
+- 从canonical snapshot/current-control发现active workflow与open interaction，而不是依赖一次性live通知；
+- question的typed options、recommended标记与UI-owned“其他”free-text分支；不得伪造第四个model option；
+- 按UTF-8 body identity分页读取并安全渲染plan draft，校验digest、offset连续性与content identity；
+- `APPROVE / REVISE / CANCEL` closed review UX，以及idle `ENTER_PLAN / CANCEL_PLAN / FORCE_EXIT_PLAN`控制；
+- ACK-unknown、detach/reattach、live/committed GAP后的command winner与current-control重建；
+- 所有question、option、feedback和draft正文统一经过terminal-safe public-text transform；
+- client-side Plan question fingerprint recomputation与control projection exact join。
+
+这些是PHC-16拥有的客户端产品工作，不得反向推动Python恢复Legacy REPL、第二套Inspector、durable UI receipt或event replay。Go/TUI完成前，不能宣传“普通终端用户已获得完整Plan UX”；但Python Plan workflow、permission authority与headless Protocol能力仍保持已恢复状态。
+
+### 8.6 hard-cut前Plan与permission参考代码
 
 - `5b7ad9f7:src/pulsara_agent/tools/builtins/plan.py`：`EnterPlanTool`、`AskPlanQuestionTool`、`ExitPlanTool`三项模型工具的最小公开面。
 - `5b7ad9f7:src/pulsara_agent/runtime/plan.py`：Plan instruction、question options、active/read-only状态、pending question/exit view与approve/revise/cancel语义；旧`reduce_plan_workflow_state(events)`不能作为新state owner。
@@ -916,18 +932,16 @@ ordinary prompt、detach/quit 也仍可用。
 
 ## 14. PHC-15：Capability catalog 与真实 executor 不一致
 
-当前 builtin catalog 共29个descriptor。production model tool surface实际可达21个：
+当前 builtin catalog 共29个descriptor。Round 4后production model tool surface实际可达24个：
 
 - 9个direct tools：`artifact_read/read_file/search_files/edit_file/write_file/todo/terminal/terminal_process/terminal_monitor`；
 - 4 个 flat subagent tools：`spawn_agent/list_agents/wait_agent/stop_agent`；
 - 8 个 current memory tools（memory 语义不在本轮复核范围）。
+- 3个ROOT-only Plan control tools：`enter_plan/ask_plan_question/exit_plan`。
 
-以下8个descriptor没有当前production executor/binding：
+以下5个descriptor没有当前production executor/binding：
 
 ```text
-enter_plan
-ask_plan_question
-exit_plan
 create_agent_tasks
 wait_agent_tasks
 stop_agent_task
@@ -935,14 +949,14 @@ report_agent_phase
 report_agent_result
 ```
 
-Round 1已把`artifact_read`descriptor接到scoped production executor；Round 2已让`terminal_monitor`descriptor、tool-action policy、strict schema与production executor闭合。PHC-15仍未整体恢复，因为Plan与hierarchical task-graph的8个descriptor仍不可达。
+Round 1已把`artifact_read`descriptor接到scoped production executor；Round 2已让`terminal_monitor`descriptor、tool-action policy、strict schema与production executor闭合；Round 4又让三项Plan descriptor通过scope-frozen tool surface与Runtime control executor闭合。PHC-15仍未整体恢复，只因为PHC-10的五项hierarchical task-graph descriptor尚不可达。
 
 这不是独立用户功能，但它是重要产品缺失证据：
 
 - 静态 descriptor inventory 不能代表实际可用能力；
 - tests 若只检查 descriptor/schema，会漏掉 production binding 缺失；
 - dead descriptor 使 hard-cut 后的真实产品面难以判断；
-- Terminal、artifact、Plan 与 task-graph 的缺失被残留类型掩盖。
+- 剩余task-graph缺失仍可能被残留descriptor掩盖。
 
 ### 14.1 hard-cut前catalog/executor闭合参考代码
 
@@ -957,18 +971,18 @@ Round 1已把`artifact_read`descriptor接到scoped production executor；Round 2
 
 用户已明确：当前优先修复Python Agent Runtime内核，Go端TUI S1–S3能力可以先搁置；同时，未来不再恢复Legacy Python REPL或standalone Canonical Inspector，Go TUI将成为主要的会话观察、交互和控制产品面。因此本节当前只登记UI缺口，不把它们混入Runtime恢复主线，但其长期地位不是可选客户端。
 
-根据根目录 TUI 文档与当前 `clients/terminal` 对照，至少以下能力不在当前 production Go client 主路径中，或只剩 S0 spike 证据：
+根据根目录 TUI 文档、当前 `clients/terminal`以及Round 4的Python-only activation口径，至少以下能力不在已验收的production Go client主路径中，或只有未纳入本轮闭环的局部代码/生成binding：
 
 - bounded composer undo/redo；
 - multiline command-history scratch 与对称 Up/Down traversal；
 - large bracketed-paste review、head/omission/tail 展示与显式确认；
 - selection/copy 与 copy-last/copy current materialization；
 - warning/failure sticky notice 与显式 dismiss；
-- plan draft/approval UI；
+- permission selector、active Plan/current interaction重建、question options/free-text、plan draft分页审阅及approve/revise/cancel/force-exit UI；
 - MCP form/private URL/secret interaction UI；
 - richer semantic activity cells 与 terminal monitor activity。
 
-当前 Go client 已保留 Protocol v3 snapshot/history/live/content read 的基本能力，因此本节不能写成“TUI 全部丢失”。这里只记录 hard-cut 前文档已冻结、当前 production implementation 未兑现的高层 UX。
+当前 Go client 已保留 Protocol v3 snapshot/history/live/content read 的基本能力，Round 4也生成了新的wire类型并存在局部consumer改动，因此本节不能写成“TUI 全部丢失”。但这些代码本轮未接受Go端产品审查，不能据此把selector、Plan交互、renderer safety或reconnect exact-join标记为完成。这里只记录hard-cut前文档已冻结、当前尚未验收的高层UX。
 
 这一方向不要求现在提前实现完整Go UI，但要求Python Kernel恢复产品能力时提供稳定的typed command、canonical observation、live event与bounded content read契约。不得为了方便TUI而让客户端从raw row猜测实时语义；也不得为TUI恢复universal EventLog、execution replay或独立Inspector projection。
 
@@ -1180,7 +1194,7 @@ Round 3的具体DTO、target estimator、source registry、physical bounds与act
 - `APPROVAL_RESUME_V1_IMPLEMENTATION`；
 - `HOST_USER_STOP_V1_IMPLEMENTATION`。
 
-结论：Plan workflow及其scoped read-only overlay缺失形成PHC-09，不另立permission PHC。四种静态preset、普通tool confirmation、allow/deny与Host stop当前仍存在，不应误报为全部permission/approval丢失；真正额外缺失的是用户在发送前逐run选择mode，并在提交时把effective permission冻结为该run的snapshot。REPL命令兼容仍明确退役；该语义应由Go TUI输入框旁的selector或headless prompt API承接，而不是复活`:mode`状态机。`STEP4`本身标记计划草案，不过hard-cut前`:mode`已有production代码，仍作为该产品语义的历史审计事实。
+结论：PHC-09已由Round 4恢复，不另立permission PHC。四种preset、逐run选择与immutable snapshot、Plan-scoped read-only overlay、question/draft lifecycle及automatic continuation已在canonical Kernel中闭合。REPL命令兼容仍明确退役；Go TUI仅承接最小selector与review交互，Python继续拥有permission与Plan authority。
 
 ### 17.5 Subagent 标题族
 
@@ -1291,6 +1305,6 @@ Round 3的具体DTO、target estimator、source registry、physical bounds与act
 
 PHC-11与PHC-12是例外处置：它们保留在索引中用于审计hard-cut事实，但不进入恢复backlog。前者所需的canonical观察能力、后者所涉及的Plan/MCP/approval等独立产品语义，最终由Go TUI及各自Kernel契约承接；不以恢复旧Python产品面为目标。
 
-Round 3已按独立实施规格恢复PHC-17，并证明没有恢复durable compiled-input audit、provider-input replay或旧generation recovery graph。后续PHC-07/08/09/13/14仍需各自规格化其domain truth，只能把已接受事实投影进这一compiler，不能让compiler替代其authority。
+Round 3已恢复PHC-17，Round 4已恢复PHC-09；两轮都没有恢复durable compiled-input audit、provider-input replay或旧generation recovery graph。PHC-07/08/13/14仍需各自规格化其domain truth。它们都只能把已接受事实投影进compiler，不能让compiler替代其authority。
 
 同样，后续恢复不能把`26 / 23 / 13 / 2`当作拒绝真实产品语义的永久配额。任何数量变化都必须经过上述closed contract审查，但“保持旧数字”不优先于“以正确的canonical/live边界完整表达产品能力”。

@@ -1,6 +1,6 @@
 {
   "schema_version": "conversation_kernel_expected_catalog.v2",
-  "observed_catalog_fingerprint": "sha256:c4a34bba80d4653bf171ecf60e80a578c862471ecf1b8baec40dd3bef4319ee2",
+  "observed_catalog_fingerprint": "sha256:d0c142ce16449bbe355da403ebb68dee5239999e892be0d7297bc3a533553d5d",
   "required_extensions": [
     {
       "extension_name": "vector",
@@ -23,6 +23,8 @@
     "tool_results",
     "prompt_queue_items",
     "interaction_decisions",
+    "plan_workflows",
+    "plan_interactions",
     "subagent_tasks",
     "subagent_task_children",
     "durable_jobs",

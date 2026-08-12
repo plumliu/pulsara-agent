@@ -34,7 +34,6 @@ from pulsara_agent.terminal_process.monitor import (
     TerminalMonitorRejected,
     TerminalMonitorRejectionReason,
 )
-from pulsara_agent.tool_permission import default_permission_policy
 from pulsara_agent.model_input.contracts import ModelInputScopeKind
 from tests.support.round3 import (
     authorize_direct_tool,
@@ -86,9 +85,7 @@ def test_round2_terminal_streams_before_physical_completion_for_pipe_and_pty(
             host_owner_id=_name("host"),
             session_id=session_id,
             live_bus=LiveAgentEventBus(),
-            authorization_policy=DefaultToolDispatchAuthorizationPolicy(
-                default_permission_policy()
-            ),
+            authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
         )
         port._terminal.environment_owner.config = TerminalEnvConfig(  # noqa: SLF001
             enable_shell_snapshot=False
@@ -137,9 +134,7 @@ def test_round2_tool_close_terminates_process_before_draining_terminal_thread(
             host_owner_id="host:close-order",
             session_id="session:close-order",
             live_bus=LiveAgentEventBus(),
-            authorization_policy=DefaultToolDispatchAuthorizationPolicy(
-                default_permission_policy()
-            ),
+            authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
         )
         port._terminal.environment_owner.config = TerminalEnvConfig(  # noqa: SLF001
             enable_shell_snapshot=False
@@ -187,9 +182,7 @@ def test_round2_foreground_updates_cwd_but_yielded_process_never_does(
             host_owner_id="host:cwd",
             session_id="session:cwd",
             live_bus=LiveAgentEventBus(),
-            authorization_policy=DefaultToolDispatchAuthorizationPolicy(
-                default_permission_policy()
-            ),
+            authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
         )
         port._terminal.environment_owner.config = TerminalEnvConfig(  # noqa: SLF001
             enable_shell_snapshot=False
@@ -609,9 +602,7 @@ def test_round2_terminal_monitor_tool_root_settlement_and_subagent_rejection(
             host_owner_id="host:monitor-tool",
             session_id=session_id,
             live_bus=live_bus,
-            authorization_policy=DefaultToolDispatchAuthorizationPolicy(
-                default_permission_policy()
-            ),
+            authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
         )
         port._terminal.environment_owner.config = TerminalEnvConfig(  # noqa: SLF001
             enable_shell_snapshot=False
@@ -764,9 +755,7 @@ def test_round2_malformed_monitor_input_uses_common_invalid_arguments_contract(
             host_owner_id=_name("host"),
             session_id=session_id,
             live_bus=LiveAgentEventBus(),
-            authorization_policy=DefaultToolDispatchAuthorizationPolicy(
-                default_permission_policy()
-            ),
+            authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
         )
         try:
             decision = await authorize_direct_tool(
@@ -797,9 +786,7 @@ def test_round2_subagent_terminal_completion_preserves_exact_process_origin(
             host_owner_id="host:subagent-terminal-origin",
             session_id="session:subagent-terminal-origin",
             live_bus=live_bus,
-            authorization_policy=DefaultToolDispatchAuthorizationPolicy(
-                default_permission_policy()
-            ),
+            authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
         )
         port._terminal.environment_owner.config = TerminalEnvConfig(  # noqa: SLF001
             enable_shell_snapshot=False

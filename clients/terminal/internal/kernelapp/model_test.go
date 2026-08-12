@@ -87,6 +87,10 @@ func (*queuedPromptInteractionService) Command(_ context.Context, commandID stri
 	}, nil
 }
 
+func (s *queuedPromptInteractionService) CommandWithPlanFields(ctx context.Context, commandID string, kind protocolv3.CommandKind, text string, target string, _ protocolv3.PermissionMode, _ string, _ uint64) (*protocolv3.CommandOutcome, error) {
+	return s.Command(ctx, commandID, kind, text, target)
+}
+
 func (*queuedPromptInteractionService) QueryCommand(_ context.Context, commandID string) (*protocolv3.QueryCommandResponse, error) {
 	return &protocolv3.QueryCommandResponse{
 		RequestId: "request:query", Found: true,

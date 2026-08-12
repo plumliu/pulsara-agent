@@ -69,6 +69,7 @@ from pulsara_agent.ports.live_agent_event import (
 )
 from pulsara_agent.primitives.model_call import sha256_fingerprint
 from pulsara_agent.primitives.context import FrozenJsonObjectFact, freeze_json
+from pulsara_agent.primitives.run_permission import FrozenRunPermissionSnapshot
 from pulsara_agent.conversation_kernel.vocabulary import LiveEventType
 from pulsara_agent.conversation_kernel.tool_policy import (
     ToolDispatchAuthorizationPolicy,
@@ -381,6 +382,15 @@ class _DirectTerminalMonitorTool:
         )
 
 
+@dataclass(slots=True)
+class _DirectPlanControlTool:
+    name: str
+
+    def execute(self, call: ToolCall) -> ToolExecutionResult:
+        del call
+        raise RuntimeError("Plan control must be consumed by the runner batch barrier")
+
+
 @dataclass(frozen=True, slots=True)
 class _PreparedMonitorSettlement:
     prepared: PreparedTerminalMonitorRegistration
@@ -428,6 +438,9 @@ class DirectKernelToolPort:
             _DirectTerminalTool(self._terminal, host_owner_id),
             _DirectTerminalProcessTool(self._terminal, host_owner_id),
             _DirectTerminalMonitorTool(self._terminal_monitor),
+            _DirectPlanControlTool("enter_plan"),
+            _DirectPlanControlTool("ask_plan_question"),
+            _DirectPlanControlTool("exit_plan"),
         )
         if artifact_read_port is not None:
             tools = (*tools, ArtifactReadTool(artifact_read_port))
@@ -533,7 +546,13 @@ class DirectKernelToolPort:
                 bindings = tuple(
                     binding
                     for binding in bindings
-                    if binding.tool_name != "terminal_monitor"
+                    if binding.tool_name
+                    not in {
+                        "terminal_monitor",
+                        "enter_plan",
+                        "ask_plan_question",
+                        "exit_plan",
+                    }
                 )
             specs: list[FrozenToolSpec] = []
             for binding in bindings:
@@ -650,6 +669,7 @@ class DirectKernelToolPort:
         tool_call_id: str,
         turn_id: str,
         assistant_entry_id: str,
+        permission_snapshot: FrozenRunPermissionSnapshot,
         surface_borrow: ProcessLocalToolSurfaceBorrow,
     ) -> KernelToolAuthorization:
         try:
@@ -688,6 +708,7 @@ class DirectKernelToolPort:
                 arguments=dict(arguments),
                 turn_id=turn_id,
                 assistant_entry_id=assistant_entry_id,
+                permission_snapshot=permission_snapshot,
             )
         )
         if decision.kind is ToolDispatchDecisionKind.REQUIRE_CONFIRMATION:
@@ -716,6 +737,7 @@ class DirectKernelToolPort:
         tool_call_id: str,
         turn_id: str,
         assistant_entry_id: str,
+        permission_snapshot: FrozenRunPermissionSnapshot,
     ) -> KernelToolAuthorization:
         if self._interaction is None:
             return KernelToolAuthorization(
@@ -728,6 +750,7 @@ class DirectKernelToolPort:
             assistant_entry_id=assistant_entry_id,
             tool_call_id=tool_call_id,
             tool_name=tool_name,
+            permission_snapshot=permission_snapshot,
         )
         if resolution.decision == "ALLOW":
             return KernelToolAuthorization(
@@ -735,6 +758,9 @@ class DirectKernelToolPort:
                 resolution.reference,
                 resolution.public_message,
                 accepted_attempt_id=resolution.attempt_id,
+                accepted_permission_snapshot_fingerprint=(
+                    resolution.permission_snapshot_fingerprint
+                ),
             )
         if resolution.decision == "DENY":
             return KernelToolAuthorization(
@@ -765,6 +791,8 @@ class DirectKernelToolPort:
             or invocation_context.assistant_entry_id != assistant_entry_id
             or invocation_context.tool_call_id != tool_call_id
             or invocation_context.attempt_id != attempt_id
+            or invocation_context.attempt_permission_snapshot_fingerprint
+            != invocation_context.permission_snapshot_fingerprint
         ):
             # This check precedes every adapter dispatch.  A mismatched
             # process-local authority must never create a monitor, process or
@@ -796,6 +824,8 @@ class DirectKernelToolPort:
                 assistant_entry_id=assistant_entry_id,
             )
         tool = self._tools[tool_name]
+        if isinstance(tool, _DirectPlanControlTool):
+            raise RuntimeError("Plan control escaped the runner batch barrier")
         call = ToolCall(
             id=tool_call_id,
             name=tool_name,

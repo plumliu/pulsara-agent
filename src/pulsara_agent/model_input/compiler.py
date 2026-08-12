@@ -24,6 +24,8 @@ from pulsara_agent.model_input.contracts import (
     ContextSourceKind,
     ContextTrustClass,
     FrozenCompiledModelInput,
+    FrozenProviderInputItem,
+    FrozenProviderInputItemKind,
     ModelInputCompileFailureKind,
     StructuredModelInputCompileError,
     StructuredModelInputCompileRequest,
@@ -38,6 +40,9 @@ from pulsara_agent.model_input.lowering import (
     source_variant_message,
 )
 from pulsara_agent.primitives.context import canonical_json_bytes, context_fingerprint
+from pulsara_agent.primitives.plan_workflow import (
+    PlanApprovedMaterializationDisposition,
+)
 
 
 COMPILER_CONTRACT_VERSION = "pulsara.structured-model-input-compiler.v1"
@@ -66,6 +71,33 @@ _SOURCE_POLICY = {
         ContextTrustClass.TRUSTED_RUNTIME_FACT,
         ContextBudgetClass.MUST_KEEP,
         10,
+        10,
+        (ContextRenderMode.FULL, ContextRenderMode.COMPACT),
+    ),
+    ContextSourceKind.RUN_PERMISSION: (
+        "pulsara.run-permission.v1",
+        ContextChannel.SYSTEM,
+        ContextTrustClass.AUTHORIZED_CAPABILITY_CONTEXT,
+        ContextBudgetClass.MUST_KEEP,
+        14,
+        12,
+        (ContextRenderMode.FULL, ContextRenderMode.COMPACT),
+    ),
+    ContextSourceKind.PLAN_HANDOFF: (
+        "pulsara.plan-handoff.v1",
+        ContextChannel.SYSTEM,
+        ContextTrustClass.TRUSTED_RUNTIME_FACT,
+        ContextBudgetClass.MUST_KEEP,
+        15,
+        11,
+        (ContextRenderMode.FULL, ContextRenderMode.COMPACT),
+    ),
+    ContextSourceKind.PLAN_WORKFLOW: (
+        "pulsara.plan-workflow.v1",
+        ContextChannel.SYSTEM,
+        ContextTrustClass.ROOT_INSTRUCTION,
+        ContextBudgetClass.MUST_KEEP,
+        16,
         10,
         (ContextRenderMode.FULL, ContextRenderMode.COMPACT),
     ),
@@ -183,13 +215,16 @@ class StructuredModelInputCompiler:
         artifact_read_available = any(
             tool.name == "artifact_read" for tool in surface.tool_specs
         )
+        canonical_items, materialized_plan_bytes = self._materialize_approved_plan(
+            request
+        )
         lowered = tuple(
             lower_canonical_item(
                 item,
                 artifact_read_available=artifact_read_available,
                 limits=self._limits,
             )
-            for item in request.canonical_input.items
+            for item in canonical_items
         )
         source_states = [_SourceState(item) for item in request.sources.candidates]
         tool_states = [
@@ -207,7 +242,11 @@ class StructuredModelInputCompiler:
             raise StructuredModelInputCompileError(
                 ModelInputCompileFailureKind.COMPILE_WORKING_SET_EXCEEDED
             )
-        self._validate_physical_bounds(request, lowered)
+        self._validate_physical_bounds(
+            request,
+            lowered,
+            materialized_plan_bytes=materialized_plan_bytes,
+        )
         estimator = request.compile_binding.estimator
         diagnostics = [item.code for item in request.sources.diagnostics]
 
@@ -466,9 +505,25 @@ class StructuredModelInputCompiler:
         if not {
             ContextSourceKind.BASE_SYSTEM,
             ContextSourceKind.RUNTIME_ENVIRONMENT,
+            ContextSourceKind.RUN_PERMISSION,
         }.issubset(present):
             raise StructuredModelInputCompileError(
                 ModelInputCompileFailureKind.REQUIRED_SOURCE_UNAVAILABLE
+            )
+        expected_optional = {
+            ContextSourceKind.PLAN_HANDOFF: (
+                request.canonical_facts.plan_handoff_fact is not None
+            ),
+            ContextSourceKind.PLAN_WORKFLOW: (
+                request.canonical_facts.plan_workflow_fact is not None
+            ),
+        }
+        if any(
+            (kind in present) != expected_presence
+            for kind, expected_presence in expected_optional.items()
+        ):
+            raise StructuredModelInputCompileError(
+                ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
             )
         for candidate in sources.candidates:
             expected = _SOURCE_POLICY.get(candidate.source_kind)
@@ -528,6 +583,8 @@ class StructuredModelInputCompiler:
         self,
         request: StructuredModelInputCompileRequest,
         lowered: tuple[LoweredCanonicalItem, ...],
+        *,
+        materialized_plan_bytes: int,
     ) -> None:
         candidates = request.sources.candidates
         aggregate_full = sum(item.variants[0].utf8_bytes for item in candidates)
@@ -576,6 +633,7 @@ class StructuredModelInputCompiler:
         )
         working = (
             request.canonical_input.canonical_utf8_bytes
+            + materialized_plan_bytes
             + aggregate_all
             + source_carrier_bytes
             + system_join_bytes
@@ -587,6 +645,68 @@ class StructuredModelInputCompiler:
             raise StructuredModelInputCompileError(
                 ModelInputCompileFailureKind.COMPILE_WORKING_SET_EXCEEDED
             )
+
+    @staticmethod
+    def _materialize_approved_plan(
+        request: StructuredModelInputCompileRequest,
+    ) -> tuple[tuple[FrozenProviderInputItem, ...], int]:
+        approved = request.canonical_facts.approved_plan_materialization_fact
+        if (
+            approved is None
+            or approved.disposition
+            is PlanApprovedMaterializationDisposition.PIN_EXISTING_CANONICAL_BLOCK
+        ):
+            return request.canonical_input.items, 0
+        handoff = request.canonical_facts.plan_handoff_fact
+        if handoff is None:
+            raise StructuredModelInputCompileError(
+                ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
+            )
+        try:
+            exact_plan = approved.exact_plan_utf8.decode("utf-8")
+        except UnicodeDecodeError as exc:  # central extraction normally proves this
+            raise StructuredModelInputCompileError(
+                ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
+            ) from exc
+        indexes = tuple(
+            index
+            for index, item in enumerate(request.canonical_input.items)
+            if item.item_kind is FrozenProviderInputItemKind.PLAN_CONTINUATION
+            and item.source_entry_id == handoff.carrier_entry_id
+            and item.source_turn_id == handoff.target_turn_id
+        )
+        if len(indexes) != 1:
+            raise StructuredModelInputCompileError(
+                ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
+            )
+        index = indexes[0]
+        original = request.canonical_input.items[index]
+        materialized_text = (
+            original.text
+            + "\n[UNTRUSTED_APPROVED_PLAN exact=true digest="
+            + approved.content_identity.plan_utf8_digest
+            + "]\n"
+            + exact_plan
+            + "\n[/UNTRUSTED_APPROVED_PLAN]"
+        )
+        replacement = FrozenProviderInputItem(
+            item_kind=original.item_kind,
+            source_entry_id=original.source_entry_id,
+            source_entry_sequence=original.source_entry_sequence,
+            source_turn_id=original.source_turn_id,
+            text=materialized_text,
+            input_origin=original.input_origin,
+            tool_calls=original.tool_calls,
+            tool_call_id=original.tool_call_id,
+            tool_result_context=original.tool_result_context,
+            tool_result_body_text=original.tool_result_body_text,
+        )
+        items = list(request.canonical_input.items)
+        items[index] = replacement
+        added = len(materialized_text.encode("utf-8")) - len(
+            original.text.encode("utf-8")
+        )
+        return tuple(items), added
 
     def _advance_source_to_progress(
         self,

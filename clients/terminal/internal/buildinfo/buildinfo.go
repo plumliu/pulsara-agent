@@ -14,7 +14,7 @@ var (
 	Commit                           = "unknown"
 	ProtocolMajor             uint32 = 3
 	ProtocolMinor             uint32 = 0
-	SchemaFingerprint                = "sha256:c8571a6124c4b02f6d4b10911fbd11aa46517f05b84408b6606fa8c85866dbbe"
+	SchemaFingerprint                = "sha256:93a7667cd79b0e3992f5e302e7a3f52f1caa7feabb4a265547995046522e0d97"
 	DependencyLockFingerprint        = "development"
 )
 

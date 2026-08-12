@@ -28,7 +28,7 @@ Python KernelHostCore
         └── Go terminal client
 
 PostgreSQL
-├── pulsara_v3: 24 product relations
+├── pulsara_v3: 26 product relations
 ├── selective agent_events occurrence journal
 ├── public.vector capability
 └── public.pulsara_schema_migrations (universe metadata only)
@@ -38,7 +38,7 @@ The durable boundary is intentionally narrow:
 
 - canonical relational rows own current conversation, tool, job, memory, and
   coordination truth;
-- a closed 27-type `agent_events` journal records accepted occurrences but is
+- a closed 34-type `agent_events` journal records accepted occurrences but is
   never replayed to reconstruct execution;
 - 23 live event types exist only in memory and may be lost at process exit;
 - tool requests are committed before dispatch and a physical attempt is
@@ -65,6 +65,10 @@ The current Kernel supports:
 - real PIPE/PTY terminal output streaming, exact process-local cursors and
   typed GAP, same-Host future monitor observations, and autonomous
   continuation at a provider-safe point;
+- run-bound permission selection with an immutable admission snapshot, plus a
+  canonical Plan workflow with Runtime-enforced read-only planning,
+  structured questions, draft approve/revise/cancel, and Host-owned automatic
+  continuation;
 - default-deny subprocess environments with a bounded login-shell snapshot,
   nearest `.venv/bin`, foreground cwd continuity, and physical process-group
   drain on Host close;
@@ -127,6 +131,10 @@ and
 Round 3 does not change the database universe; its process-local compiler and
 multi-provider verification are recorded in
 [`round3_structured_model_input_compiler_activation.json`](benchmarks/suites/core/v1/round3_structured_model_input_compiler_activation.json).
+Round 4 extends clean-v0 to 26 product relations and 34 selective occurrences;
+its Plan workflow, run-bound permission, Protocol v3, and real-provider
+verification are recorded in
+[`round4_plan_workflow_and_run_permission_activation.json`](benchmarks/suites/core/v1/round4_plan_workflow_and_run_permission_activation.json).
 An old v13 database is rejected with
 `schema_migration_universe_reset_required`; Pulsara never imports, translates,
 or upgrades it in place. Follow

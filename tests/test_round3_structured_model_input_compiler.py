@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from pulsara_agent.capability.provider import CapabilityProjectionOutput
+from pulsara_agent.capability.builtin_catalog import builtin_tool_catalog_entry
 from pulsara_agent.capability.types import (
     CapabilityDiagnostic,
     ResolvedSkillCatalogEntry,
@@ -45,6 +46,7 @@ from pulsara_agent.conversation_kernel.live import LiveAgentEventBus
 from pulsara_agent.llm.input import MessageRole
 from pulsara_agent.model_input.compiler import StructuredModelInputCompiler
 from pulsara_agent.model_input.contracts import (
+    ApprovedPlanMaterializationFact,
     CapabilityActivationSubjectKind,
     CanonicalInputOriginKind,
     CanonicalModelInputIdentity,
@@ -58,6 +60,8 @@ from pulsara_agent.model_input.contracts import (
     ContextSourceCandidate,
     ContextSourceKind,
     ContextTrustClass,
+    FrozenCanonicalCompileSnapshot,
+    FrozenPlanHandoffCompileFact,
     FrozenProviderInputItem,
     FrozenProviderInputItemKind,
     ModelInputCompileFailureKind,
@@ -71,6 +75,10 @@ from pulsara_agent.model_input.contracts import (
     ToolResultProviderRenderMode,
     canonical_model_input_identity_fingerprint,
     canonical_model_input_snapshot_fingerprint,
+    canonical_compile_snapshot_fingerprint,
+    approved_plan_materialization_fingerprint,
+    plan_handoff_compile_fact_fingerprint,
+    provider_input_item_fingerprint,
     model_input_compile_binding_fingerprint,
 )
 from pulsara_agent.model_input.lowering import lower_canonical_item
@@ -94,7 +102,18 @@ from pulsara_agent.primitives.context import (
     freeze_json,
 )
 from pulsara_agent.primitives.model_call import ModelCallPurpose
-from pulsara_agent.tool_permission import default_permission_policy
+from pulsara_agent.primitives.permission import PermissionMode
+from pulsara_agent.primitives.plan_workflow import (
+    PlanApprovedMaterializationDisposition,
+    PlanHandoffKind,
+    PlanInteractionBinding,
+    PlanWorkflowStatus,
+    extract_plan_draft,
+)
+from pulsara_agent.primitives.run_permission import (
+    RunPermissionAdmissionSource,
+    build_run_permission_snapshot,
+)
 from pulsara_agent.terminal_process.models import TerminalRequest, TerminalStatus
 from tests.support.model_config import test_llm_config
 from tests.support.round3 import StructuredToolPort
@@ -128,6 +147,15 @@ _SOURCE_FACTS = {
         80,
         (ContextRenderMode.FULL, ContextRenderMode.COMPACT),
     ),
+    ContextSourceKind.RUN_PERMISSION: (
+        "pulsara.run-permission.v1",
+        ContextChannel.SYSTEM,
+        ContextTrustClass.AUTHORIZED_CAPABILITY_CONTEXT,
+        ContextBudgetClass.MUST_KEEP,
+        14,
+        12,
+        (ContextRenderMode.FULL, ContextRenderMode.COMPACT),
+    ),
     ContextSourceKind.CAPABILITY_CATALOG: (
         "pulsara.capability-catalog.v1",
         ContextChannel.SYSTEM,
@@ -140,6 +168,24 @@ _SOURCE_FACTS = {
             ContextRenderMode.COMPACT,
             ContextRenderMode.REF_ONLY,
         ),
+    ),
+    ContextSourceKind.PLAN_HANDOFF: (
+        "pulsara.plan-handoff.v1",
+        ContextChannel.SYSTEM,
+        ContextTrustClass.TRUSTED_RUNTIME_FACT,
+        ContextBudgetClass.MUST_KEEP,
+        15,
+        11,
+        (ContextRenderMode.FULL, ContextRenderMode.COMPACT),
+    ),
+    ContextSourceKind.PLAN_WORKFLOW: (
+        "pulsara.plan-workflow.v1",
+        ContextChannel.SYSTEM,
+        ContextTrustClass.ROOT_INSTRUCTION,
+        ContextBudgetClass.MUST_KEEP,
+        16,
+        10,
+        (ContextRenderMode.FULL, ContextRenderMode.COMPACT),
     ),
     ContextSourceKind.ACTIVE_SKILL: (
         "pulsara.active-skill.v1",
@@ -223,6 +269,13 @@ def _sources(*candidates: ContextSourceCandidate) -> CollectedContextSources:
     if ContextSourceKind.RUNTIME_ENVIRONMENT not in kinds:
         required.append(
             _candidate(ContextSourceKind.RUNTIME_ENVIRONMENT, ("runtime", "runtime"))
+        )
+    if ContextSourceKind.RUN_PERMISSION not in kinds:
+        required.append(
+            _candidate(
+                ContextSourceKind.RUN_PERMISSION,
+                ("permission=bypass-permissions", "permission=bypass"),
+            )
         )
     candidates = (*required, *candidates)
     registry = ContextSourceRegistry().fingerprint
@@ -340,6 +393,7 @@ def _prepared_request(
     *,
     budget: int = 100_000,
     tool_names: tuple[str, ...] = (),
+    canonical_facts: FrozenCanonicalCompileSnapshot | None = None,
 ) -> StructuredModelInputCompileRequest:
     tools = StructuredToolPort(object(), tool_names=tool_names)
     prepared_surface = tools.snapshot_tool_surface(
@@ -380,13 +434,221 @@ def _prepared_request(
             tool_surface=binding.tool_surface,
         ),
     )
+    canonical_facts = canonical_facts or _canonical_facts(snapshot)
     return StructuredModelInputCompileRequest(
         context_id="context:test",
         model_call_index=1,
         canonical_input=snapshot,
+        canonical_facts=canonical_facts,
         compile_binding=binding,
         sources=sources,
     )
+
+
+def _canonical_facts(
+    snapshot: CanonicalModelInputSnapshot | None = None,
+) -> FrozenCanonicalCompileSnapshot:
+    canonical = snapshot or _snapshot()
+    permission = build_run_permission_snapshot(
+        snapshot_id="permission:test",
+        requested_mode=PermissionMode.BYPASS_PERMISSIONS,
+        effective_mode=PermissionMode.BYPASS_PERMISSIONS,
+        admission_source=RunPermissionAdmissionSource.USER_SUBMISSION,
+    )
+    provisional = FrozenCanonicalCompileSnapshot.__new__(
+        FrozenCanonicalCompileSnapshot
+    )
+    object.__setattr__(provisional, "canonical_input", canonical)
+    object.__setattr__(provisional, "run_permission_snapshot", permission)
+    object.__setattr__(provisional, "plan_workflow_fact", None)
+    object.__setattr__(provisional, "plan_handoff_fact", None)
+    object.__setattr__(provisional, "approved_plan_materialization_fact", None)
+    object.__setattr__(provisional, "canonical_read_cut_fingerprint", "")
+    return FrozenCanonicalCompileSnapshot(
+        canonical_input=canonical,
+        run_permission_snapshot=permission,
+        plan_workflow_fact=None,
+        plan_handoff_fact=None,
+        approved_plan_materialization_fact=None,
+        canonical_read_cut_fingerprint=canonical_compile_snapshot_fingerprint(
+            provisional
+        ),
+    )
+
+
+def _permission_snapshot():
+    return build_run_permission_snapshot(
+        snapshot_id="permission:test",
+        requested_mode=PermissionMode.BYPASS_PERMISSIONS,
+        effective_mode=PermissionMode.BYPASS_PERMISSIONS,
+        admission_source=RunPermissionAdmissionSource.USER_SUBMISSION,
+    )
+
+
+def _approved_plan_compile_facts(
+    *,
+    disposition: PlanApprovedMaterializationDisposition,
+) -> tuple[FrozenCanonicalCompileSnapshot, str]:
+    plan = "PLAN_SENTINEL_EXACTLY_ONCE"
+    binding_contract = builtin_tool_catalog_entry(
+        "exit_plan"
+    ).binding_contract.base
+    binding = PlanInteractionBinding(
+        binding_contract.contract_id,
+        binding_contract.contract_version,
+        binding_contract.binding_fingerprint,
+    )
+    arguments = freeze_json({"plan": plan})
+    assert isinstance(arguments, FrozenJsonObjectFact)
+    assistant = FrozenProviderInputItem(
+        FrozenProviderInputItemKind.ASSISTANT_TOOL_REQUEST,
+        "entry:draft",
+        1,
+        "turn:origin",
+        "",
+        tool_calls=(ProviderToolCall("call:exit", "exit_plan", arguments),),
+    )
+    continuation = FrozenProviderInputItem(
+        FrozenProviderInputItemKind.PLAN_CONTINUATION,
+        "entry:continuation",
+        2,
+        "turn:implementation",
+        '{"handoff":"APPROVED_PLAN","plan_reference":"interaction:draft"}',
+        input_origin=CanonicalInputOriginKind.PLAN_CONTINUATION,
+    )
+    items = (
+        (assistant, continuation)
+        if disposition
+        is PlanApprovedMaterializationDisposition.PIN_EXISTING_CANONICAL_BLOCK
+        else (continuation,)
+    )
+    snapshot = _snapshot(*items, turn_id="turn:implementation")
+    handoff_values = {
+        "session_id": "session:test",
+        "workspace_id": "workspace:test",
+        "target_turn_id": "turn:implementation",
+        "carrier_entry_id": "entry:continuation",
+        "carrier_entry_sequence": 2,
+        "workflow_id": "workflow:test",
+        "workflow_ordinal": 1,
+        "workflow_revision_at_transition": 4,
+        "interaction_id": "interaction:draft",
+        "handoff_kind": PlanHandoffKind.APPROVED_PLAN,
+        "workflow_status": PlanWorkflowStatus.APPROVED,
+        "resume_permission_mode": PermissionMode.ACCEPT_EDITS,
+        "transition_semantic_digest": "sha256:" + "2" * 64,
+    }
+    provisional_handoff = FrozenPlanHandoffCompileFact.__new__(
+        FrozenPlanHandoffCompileFact
+    )
+    for name, value in handoff_values.items():
+        object.__setattr__(provisional_handoff, name, value)
+    object.__setattr__(provisional_handoff, "fact_fingerprint", "")
+    handoff = FrozenPlanHandoffCompileFact(
+        **handoff_values,
+        fact_fingerprint=plan_handoff_compile_fact_fingerprint(
+            provisional_handoff
+        ),
+    )
+    extracted = extract_plan_draft(
+        interaction_id="interaction:draft",
+        assistant_entry_id="entry:draft",
+        tool_call_id="call:exit",
+        binding=binding,
+        request_semantic_digest="sha256:" + "3" * 64,
+        arguments=arguments,
+    )
+    approved_values = {
+        "session_id": "session:test",
+        "workspace_id": "workspace:test",
+        "target_turn_id": "turn:implementation",
+        "workflow_id": "workflow:test",
+        "interaction_id": "interaction:draft",
+        "assistant_entry_id": "entry:draft",
+        "tool_call_id": "call:exit",
+        "request_contract_id": binding.contract_id,
+        "request_contract_version": binding.contract_version,
+        "request_contract_fingerprint": binding.contract_fingerprint,
+        "request_semantic_digest": "sha256:" + "3" * 64,
+        "content_identity": extracted.identity,
+        "exact_plan_utf8": extracted.exact_plan_utf8,
+        "disposition": disposition,
+        "pinned_canonical_item_fingerprint": (
+            provider_input_item_fingerprint(assistant)
+            if disposition
+            is PlanApprovedMaterializationDisposition.PIN_EXISTING_CANONICAL_BLOCK
+            else None
+        ),
+    }
+    provisional_approved = ApprovedPlanMaterializationFact.__new__(
+        ApprovedPlanMaterializationFact
+    )
+    for name, value in approved_values.items():
+        object.__setattr__(provisional_approved, name, value)
+    object.__setattr__(provisional_approved, "fact_fingerprint", "")
+    approved = ApprovedPlanMaterializationFact(
+        **approved_values,
+        fact_fingerprint=approved_plan_materialization_fingerprint(
+            provisional_approved
+        ),
+    )
+    permission = build_run_permission_snapshot(
+        snapshot_id="permission:implementation",
+        requested_mode=PermissionMode.ACCEPT_EDITS,
+        effective_mode=PermissionMode.ACCEPT_EDITS,
+        admission_source=RunPermissionAdmissionSource.RUNTIME_PLAN_CONTINUATION,
+        inherited_from_turn_id="turn:origin",
+    )
+    provisional = FrozenCanonicalCompileSnapshot.__new__(
+        FrozenCanonicalCompileSnapshot
+    )
+    object.__setattr__(provisional, "canonical_input", snapshot)
+    object.__setattr__(provisional, "run_permission_snapshot", permission)
+    object.__setattr__(provisional, "plan_workflow_fact", None)
+    object.__setattr__(provisional, "plan_handoff_fact", handoff)
+    object.__setattr__(provisional, "approved_plan_materialization_fact", approved)
+    object.__setattr__(provisional, "canonical_read_cut_fingerprint", "")
+    facts = FrozenCanonicalCompileSnapshot(
+        canonical_input=snapshot,
+        run_permission_snapshot=permission,
+        plan_workflow_fact=None,
+        plan_handoff_fact=handoff,
+        approved_plan_materialization_fact=approved,
+        canonical_read_cut_fingerprint=canonical_compile_snapshot_fingerprint(
+            provisional
+        ),
+    )
+    return facts, plan
+
+
+@pytest.mark.parametrize(
+    "disposition",
+    tuple(PlanApprovedMaterializationDisposition),
+)
+def test_round4_approved_plan_is_materialized_exactly_once(
+    disposition: PlanApprovedMaterializationDisposition,
+) -> None:
+    facts, plan = _approved_plan_compile_facts(disposition=disposition)
+    request = _prepared_request(
+        facts.canonical_input,
+        _sources(
+            _candidate(
+                ContextSourceKind.PLAN_HANDOFF,
+                ("approved handoff", "approved"),
+            )
+        ),
+        canonical_facts=facts,
+    )
+    compiled = StructuredModelInputCompiler().compile(request)
+    carriers = "\n".join(
+        value
+        for message in compiled.messages
+        for value in (
+            *message.content,
+            *(call.arguments for call in message.tool_calls),
+        )
+    )
+    assert carriers.count(plan) == 1
 
 
 def test_round3_source_registry_is_exact_and_rejects_self_certified_wrong_trust() -> (
@@ -467,7 +729,8 @@ def test_round3_system_placement_is_independent_of_input_order() -> None:
         _prepared_request(_snapshot(_user("hello")), _sources(*candidates))
     )
     assert compiled.system_prompt == (
-        "BASE\n\nRUNTIME ENVIRONMENT FULL\n\nCATALOG FULL LONG\n\nACTIVE"
+        "BASE\n\nRUNTIME ENVIRONMENT FULL\n\npermission=bypass-permissions"
+        "\n\nCATALOG FULL LONG\n\nACTIVE"
     )
 
 
@@ -718,9 +981,23 @@ def test_round3_prior_turn_tool_result_degrades_before_current_turn() -> None:
 def test_round3_aggregate_variant_and_total_working_set_exact_boundaries() -> None:
     snapshot = _snapshot(canonical_utf8_bytes=100)
     request = _prepared_request(snapshot, _sources())
-    exact = StructuredModelInputLimits(maximum_compile_working_set_bytes=120)
+    candidates = request.sources.candidates
+    expected_working_bytes = (
+        snapshot.canonical_utf8_bytes
+        + sum(
+            variant.utf8_bytes
+            for candidate in candidates
+            for variant in candidate.variants
+        )
+        + (len(candidates) - 1) * len("\n\n".encode())
+    )
+    exact = StructuredModelInputLimits(
+        maximum_compile_working_set_bytes=expected_working_bytes
+    )
     StructuredModelInputCompiler(limits=exact).compile(request)
-    too_small = replace(exact, maximum_compile_working_set_bytes=119)
+    too_small = replace(
+        exact, maximum_compile_working_set_bytes=expected_working_bytes - 1
+    )
     with pytest.raises(StructuredModelInputCompileError) as failure:
         StructuredModelInputCompiler(limits=too_small).compile(request)
     assert (
@@ -809,14 +1086,23 @@ def test_round3_catalog_walks_full_compact_reference_then_omitted() -> None:
 def test_round3_aggregate_source_variant_exact_boundaries() -> None:
     environment = _candidate(ContextSourceKind.RUNTIME_ENVIRONMENT, ("12345", "123"))
     source_request = _prepared_request(_snapshot(), _sources(environment))
+    full_bytes = sum(
+        candidate.variants[0].utf8_bytes
+        for candidate in source_request.sources.candidates
+    )
+    all_bytes = sum(
+        variant.utf8_bytes
+        for candidate in source_request.sources.candidates
+        for variant in candidate.variants
+    )
     aggregate_exact = replace(
         StructuredModelInputLimits(),
-        maximum_aggregate_full_source_bytes=9,
-        maximum_aggregate_source_variant_bytes=12,
+        maximum_aggregate_full_source_bytes=full_bytes,
+        maximum_aggregate_source_variant_bytes=all_bytes,
     )
     StructuredModelInputCompiler(limits=aggregate_exact).compile(source_request)
     aggregate_too_small = replace(
-        aggregate_exact, maximum_aggregate_source_variant_bytes=11
+        aggregate_exact, maximum_aggregate_source_variant_bytes=all_bytes - 1
     )
     with pytest.raises(StructuredModelInputCompileError) as failure:
         StructuredModelInputCompiler(limits=aggregate_too_small).compile(source_request)
@@ -828,11 +1114,22 @@ def test_round3_aggregate_source_variant_exact_boundaries() -> None:
 def test_round3_single_source_variant_exact_boundary() -> None:
     environment = _candidate(ContextSourceKind.RUNTIME_ENVIRONMENT, ("12345", "123"))
     request = _prepared_request(_snapshot(), _sources(environment))
-    exact = replace(StructuredModelInputLimits(), maximum_single_source_variant_bytes=5)
+    maximum_variant_bytes = max(
+        variant.utf8_bytes
+        for candidate in request.sources.candidates
+        for variant in candidate.variants
+    )
+    exact = replace(
+        StructuredModelInputLimits(),
+        maximum_single_source_variant_bytes=maximum_variant_bytes,
+    )
     StructuredModelInputCompiler(limits=exact).compile(request)
     with pytest.raises(StructuredModelInputCompileError) as failure:
         StructuredModelInputCompiler(
-            limits=replace(exact, maximum_single_source_variant_bytes=4)
+            limits=replace(
+                exact,
+                maximum_single_source_variant_bytes=maximum_variant_bytes - 1,
+            )
         ).compile(request)
     assert (
         failure.value.kind
@@ -1017,6 +1314,7 @@ def test_round3_temporal_capture_is_single_and_dst_consistent(tmp_path: Path) ->
         activation_subject=CapabilityActivationSubjectKind.ROOT_HUMAN_PROMPT,
         activation_text="$skill demo",
         tool_surface=surface,
+        canonical_facts=_canonical_facts(),
     )
     assert clock_calls == 1
     assert terminal.calls == 1
@@ -1069,6 +1367,7 @@ def test_round3_unkeyed_timezone_is_frozen_to_opening_offset(tmp_path: Path) -> 
         activation_subject=CapabilityActivationSubjectKind.ROOT_HUMAN_PROMPT,
         activation_text="hello",
         tool_surface=surface,
+        canonical_facts=_canonical_facts(),
     )
     by_kind = {candidate.source_kind: candidate for candidate in collected.candidates}
     environment = by_kind[ContextSourceKind.RUNTIME_ENVIRONMENT].variants[0].text
@@ -1108,6 +1407,7 @@ def test_round3_temporal_failure_samples_once_and_omits_clock(tmp_path: Path) ->
         activation_subject=CapabilityActivationSubjectKind.ROOT_HUMAN_PROMPT,
         activation_text="hello",
         tool_surface=surface,
+        canonical_facts=_canonical_facts(),
     )
     assert calls == 1
     assert ContextSourceKind.RUNTIME_CLOCK not in {
@@ -1150,6 +1450,7 @@ def test_round3_capability_sources_and_public_diagnostics_are_separate(
         activation_subject=CapabilityActivationSubjectKind.ROOT_HUMAN_PROMPT,
         activation_text="skill:demo",
         tool_surface=surface,
+        canonical_facts=_canonical_facts(),
     )
     by_kind = {candidate.source_kind: candidate for candidate in collected.candidates}
     assert by_kind[ContextSourceKind.CAPABILITY_CATALOG].variants[0].text == (
@@ -1188,6 +1489,7 @@ def test_round3_large_catalog_renderer_never_inverts_declared_variants(
         activation_subject=CapabilityActivationSubjectKind.ROOT_HUMAN_PROMPT,
         activation_text="hello",
         tool_surface=surface,
+        canonical_facts=_canonical_facts(),
     )
     request = _prepared_request(_snapshot(_user("hello")), collected)
     compiled = StructuredModelInputCompiler().compile(request)
@@ -1238,6 +1540,7 @@ def test_round3_runtime_path_is_fixed_escaped_and_cannot_leave_workspace(
         activation_subject=CapabilityActivationSubjectKind.ROOT_HUMAN_PROMPT,
         activation_text="hello",
         tool_surface=surface,
+        canonical_facts=_canonical_facts(),
     )
     environment = (
         next(
@@ -1257,6 +1560,7 @@ def test_round3_runtime_path_is_fixed_escaped_and_cannot_leave_workspace(
             activation_subject=CapabilityActivationSubjectKind.ROOT_HUMAN_PROMPT,
             activation_text="hello",
             tool_surface=surface,
+            canonical_facts=_canonical_facts(),
         )
 
 
@@ -1272,9 +1576,7 @@ def test_round3_runtime_source_tracks_foreground_cwd_but_not_yielded_cwd(
         host_owner_id="host:cwd",
         session_id="session:cwd",
         live_bus=LiveAgentEventBus(),
-        authorization_policy=DefaultToolDispatchAuthorizationPolicy(
-            default_permission_policy()
-        ),
+        authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
     )
     try:
         session = port._terminal.get_or_create(  # noqa: SLF001
@@ -1314,6 +1616,7 @@ def test_round3_runtime_source_tracks_foreground_cwd_but_not_yielded_cwd(
                 conversation_scope_kind=ModelInputScopeKind.ROOT,
                 scope_subagent_task_id=None,
             ).model_surface,
+            canonical_facts=_canonical_facts(),
         )
         environment = next(
             item
@@ -1381,6 +1684,12 @@ def test_round3_tool_invocation_rejects_other_subagent_access() -> None:
                 scope_subagent_task_id="subagent-task:b",
                 host_owner_epoch=1,
                 authorization_reference="authorization:test",
+                permission_snapshot_fingerprint=(
+                    _permission_snapshot().snapshot_fingerprint
+                ),
+                attempt_permission_snapshot_fingerprint=(
+                    _permission_snapshot().snapshot_fingerprint
+                ),
                 tool_surface_fingerprint=prepared.model_surface.surface_fingerprint,
                 executor_binding_fingerprint=borrow.binding_fingerprint("read_file"),
                 surface_borrow=borrow,
@@ -1405,9 +1714,7 @@ def test_round3_tool_owner_rejects_foreign_host_surface_borrow(tmp_path: Path) -
                 host_owner_id=f"host:{name}",
                 session_id="session:test",
                 live_bus=LiveAgentEventBus(),
-                authorization_policy=DefaultToolDispatchAuthorizationPolicy(
-                    default_permission_policy()
-                ),
+                authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
             )
             for name in ("a", "b")
         )
@@ -1430,6 +1737,7 @@ def test_round3_tool_owner_rejects_foreign_host_surface_borrow(tmp_path: Path) -
                 turn_id="turn:test",
                 assistant_entry_id="entry:assistant",
                 surface_borrow=borrow,
+                permission_snapshot=_permission_snapshot(),
             )
             assert authorization.kind is KernelToolAuthorizationKind.TOOL_UNAVAILABLE
             invocation = KernelToolInvocationContext(
@@ -1444,6 +1752,12 @@ def test_round3_tool_owner_rejects_foreign_host_surface_borrow(tmp_path: Path) -
                 scope_subagent_task_id=None,
                 host_owner_epoch=1,
                 authorization_reference="authorization:test",
+                permission_snapshot_fingerprint=(
+                    _permission_snapshot().snapshot_fingerprint
+                ),
+                attempt_permission_snapshot_fingerprint=(
+                    _permission_snapshot().snapshot_fingerprint
+                ),
                 tool_surface_fingerprint=(
                     foreign_surface.model_surface.surface_fingerprint
                 ),
@@ -1476,9 +1790,7 @@ def test_round3_tool_surface_excludes_root_only_monitor_and_schema_is_frozen(
         host_owner_id="host:test",
         session_id="session:test",
         live_bus=LiveAgentEventBus(),
-        authorization_policy=DefaultToolDispatchAuthorizationPolicy(
-            default_permission_policy()
-        ),
+        authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
     )
     root = port.snapshot_tool_surface(
         conversation_scope_kind=ModelInputScopeKind.ROOT,
@@ -1549,7 +1861,7 @@ def test_round3_report_projection_is_bounded_and_contains_no_prompt() -> None:
     offer = offers[0]
     assert offer.event_type is OperationalHookType.MODEL_INPUT_COMPILE_OBSERVED
     assert offer.public_payload["decision_sample_count"] == 64
-    assert offer.public_payload["decision_omitted_count"] == 8
+    assert offer.public_payload["decision_omitted_count"] == 9
     assert secret not in repr(offer.public_payload)
 
     failing_owner = SimpleNamespace(
@@ -1592,7 +1904,7 @@ def test_round3_diagnostic_projector_is_the_bounded_public_owner() -> None:
         compiled=compiled,
     )
     assert len(projection.decision_samples) == 64
-    assert projection.decision_omitted_count == 8
+    assert projection.decision_omitted_count == 9
     assert {item.decision_kind for item in projection.decision_samples} <= {
         CompileDecisionSampleKind.SOURCE,
         CompileDecisionSampleKind.TOOL_RESULT,
@@ -1676,15 +1988,15 @@ def test_round3_source_decision_and_compiled_fingerprints_are_golden() -> None:
     )
     compiled = StructuredModelInputCompiler().compile(request)
     assert compiled.source_collection_fingerprint == (
-        "sha256:59abac60f106ab9345512bb3f3b04fce3143dec67f5090dfe048782866045ae6"
+        "sha256:0b5464493104aa330faa8be8419c7e8937859af93050375f51d176282760cf52"
     )
     assert compiled.budget_report.decision_digest == (
-        "sha256:b778da42d367070ba5fe16edd90d06b83ce2603e8b1386f721b33949f375dabb"
+        "sha256:e64b741142fa8b050466fbce483a64293c4e15c47f3b4933603b61e7b01c01a3"
     )
     assert compiled.compiled_semantic_fingerprint == (
-        "sha256:5eb30d88af464c2857c0dd1450496be2f3922212bc9989b4780ba7386bc50a8a"
+        "sha256:ef4396d6483edca59e463e1bc3ac0570984d1e4eeb8cea29d4d6b09c0d4bbe76"
     )
-    assert compiled.final_estimate.total_input_tokens == 131
+    assert compiled.final_estimate.total_input_tokens == 138
 
 
 def test_round3_pure_compiler_import_graph_has_no_kernel_transport_or_io() -> None:

@@ -27,6 +27,11 @@ from pulsara_agent.conversation_kernel.repository import (
     AcceptedInteractionDecision,
     ConversationKernelConflict,
 )
+from pulsara_agent.primitives.permission import PermissionMode
+from pulsara_agent.primitives.run_permission import (
+    RunPermissionAdmissionSource,
+    build_run_permission_snapshot,
+)
 from pulsara_agent.terminal_protocol.generated_v3 import terminal_kernel_v3_pb2 as wire
 from pulsara_agent.terminal_protocol.v3_gateway import (
     MAXIMUM_PROMPT_BYTES,
@@ -338,6 +343,7 @@ class _InteractionRepository:
             str(kwargs["tool_call_id"]),
             kwargs["attempt_id"],
             kwargs["result_entry_id"],
+            str(kwargs["permission_snapshot_fingerprint"]),
         )
 
 
@@ -364,6 +370,12 @@ def test_stage2_pending_interaction_is_same_host_ephemeral_and_stale_safe() -> N
                 assistant_entry_id="entry:assistant",
                 tool_call_id="call:1",
                 tool_name="terminal",
+                permission_snapshot=build_run_permission_snapshot(
+                    snapshot_id="permission:test",
+                    requested_mode=PermissionMode.ASK_PERMISSIONS,
+                    effective_mode=PermissionMode.ASK_PERMISSIONS,
+                    admission_source=RunPermissionAdmissionSource.USER_SUBMISSION,
+                ),
             )
         )
         await asyncio.sleep(0)
@@ -435,7 +447,7 @@ def test_stage2_protocol_v3_closed_vocabularies_are_exact() -> None:
     live = {
         item.name for item in wire.LiveEventType.DESCRIPTOR.values if item.number != 0
     }
-    assert len(committed) == 27
+    assert len(committed) == 34
     assert len(live) == 23
     assert set(COMMITTED_PROJECTION_BRANCH_BY_TYPE) == {
         item.value for item in CommittedEventType
@@ -451,11 +463,12 @@ def test_stage2_protocol_v3_closed_vocabularies_are_exact() -> None:
         "ToolResultAccepted",
         "UserSteerAccepted",
         "TerminalObservationAccepted",
+        "PlanContinuationAccepted",
     }
     assert sum(
         value == "CURRENT_CONTROL"
         for value in COMMITTED_PROJECTION_BRANCH_BY_TYPE.values()
-    ) == 17
+    ) == 23
     assert sum(
         value == "EVENT_ONLY"
         for value in COMMITTED_PROJECTION_BRANCH_BY_TYPE.values()

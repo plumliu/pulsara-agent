@@ -21,9 +21,13 @@ from pulsara_agent.conversation_kernel.repository import (
     ConversationKernelConflict,
 )
 from pulsara_agent.model_input.contracts import (
+    ApprovedPlanMaterializationFact,
     CanonicalInputOriginKind,
     CanonicalModelInputIdentity,
     CanonicalModelInputSnapshot,
+    FrozenCanonicalCompileSnapshot,
+    FrozenPlanHandoffCompileFact,
+    FrozenPlanWorkflowCompileFact,
     FrozenProviderInputItem,
     FrozenProviderInputItemKind,
     LateToolOutcomeObservation,
@@ -35,6 +39,11 @@ from pulsara_agent.model_input.contracts import (
     PreparedProviderInputCut,
     canonical_model_input_identity_fingerprint,
     canonical_model_input_snapshot_fingerprint,
+    canonical_compile_snapshot_fingerprint,
+    plan_handoff_compile_fact_fingerprint,
+    plan_workflow_compile_fact_fingerprint,
+    approved_plan_materialization_fingerprint,
+    provider_input_item_fingerprint,
 )
 from pulsara_agent.ports.artifact import (
     ToolOutputArtifactDisposition,
@@ -45,7 +54,25 @@ from pulsara_agent.ports.tool_execution import (
     ToolOutputSourceCoverage,
     ToolOutputSourceCoverageReason,
 )
-from pulsara_agent.primitives.context import FrozenJsonObjectFact, freeze_json
+from pulsara_agent.primitives.context import (
+    FrozenJsonObjectFact,
+    context_fingerprint,
+    freeze_json,
+)
+from pulsara_agent.primitives.permission import PermissionMode
+from pulsara_agent.primitives.plan_workflow import (
+    PlanApprovedMaterializationDisposition,
+    PlanHandoffKind,
+    PlanInteractionBinding,
+    PlanWorkflowEnteredBy,
+    PlanWorkflowStatus,
+    extract_plan_draft,
+)
+from pulsara_agent.primitives.run_permission import (
+    FrozenRunPermissionSnapshot,
+    RunPermissionAdmissionSource,
+    RunPermissionOverlay,
+)
 from pulsara_agent.ports.terminal_observation import (
     TerminalDeliveryCoverage,
     TerminalObservationContentV1,
@@ -117,6 +144,16 @@ class CanonicalProviderInputReader:
         *,
         deadline_monotonic: float,
     ) -> CanonicalModelInputSnapshot:
+        return self.read_frozen_compile_snapshot(
+            cut, deadline_monotonic=deadline_monotonic
+        ).canonical_input
+
+    def read_frozen_compile_snapshot(
+        self,
+        cut: PreparedProviderInputCut,
+        *,
+        deadline_monotonic: float,
+    ) -> FrozenCanonicalCompileSnapshot:
         with self._provider.connection(
             lane=PostgresConnectionLane.INSPECTOR,
             row_factory=dict_row,
@@ -125,9 +162,22 @@ class CanonicalProviderInputReader:
         ) as connection:
             binding = connection.execute(
                 """
-                SELECT t.conversation_scope_kind, t.scope_subagent_task_id,
+                SELECT t.workspace_id, t.conversation_scope_kind,
+                       t.scope_subagent_task_id,
                        t.status AS turn_status,
                        t.current_context_binding_revision_id,
+                       t.permission_snapshot_id,
+                       t.requested_permission_mode,
+                       t.effective_permission_mode,
+                       t.permission_admission_source,
+                       t.permission_overlay,
+                       t.permission_plan_context_ordinal,
+                       t.permission_plan_workflow_id,
+                       t.permission_plan_revision_at_admission,
+                       t.permission_inherited_from_turn_id,
+                       t.permission_contract_id,
+                       t.permission_contract_fingerprint,
+                       t.permission_snapshot_fingerprint,
                        r.revision_ordinal, r.base_kind,
                        r.context_snapshot_id, r.source_through_sequence,
                        s.latest_entry_sequence
@@ -189,6 +239,9 @@ class CanonicalProviderInputReader:
                        e.context_binding_revision_id,
                        e.provider_input_through_sequence,
                        e.source_job_id, e.source_subagent_result_id,
+                       e.source_plan_workflow_id,
+                       e.source_plan_interaction_id,
+                       e.source_plan_handoff_kind,
                        e.blob_id, e.content_digest, e.content_size,
                        e.content_media_type, e.content_codec,
                        t.status AS owning_turn_status
@@ -237,6 +290,7 @@ class CanonicalProviderInputReader:
                         "USER_STEER",
                         "TERMINAL_OBSERVATION",
                         "TOOL_RESULT",
+                        "PLAN_CONTINUATION",
                     )
                 ),
             )
@@ -330,6 +384,26 @@ class CanonicalProviderInputReader:
                         )
                     )
                     continue
+                if kind == "PLAN_CONTINUATION":
+                    content = self._read_content(
+                        _with_inline_payload(row, entry_payloads[entry_id]),
+                        deadline_monotonic=deadline_monotonic,
+                        remaining_bytes=remaining_bytes,
+                    )
+                    canonical_bytes += len(content)
+                    items.append(
+                        ProviderInputItem(
+                            item_kind=ProviderInputItemKind.PLAN_CONTINUATION,
+                            source_entry_id=entry_id,
+                            source_entry_sequence=sequence,
+                            source_turn_id=str(row["turn_id"]),
+                            text=_decode_provider_text(
+                                content, str(row["content_codec"])
+                            ),
+                            input_origin=CanonicalInputOriginKind.PLAN_CONTINUATION,
+                        )
+                    )
+                    continue
                 if kind not in ("ASSISTANT_MESSAGE", "ASSISTANT_TOOL_REQUEST"):
                     raise ConversationKernelConflict(
                         "provider input entry kind is not closed"
@@ -417,11 +491,16 @@ class CanonicalProviderInputReader:
                             )
                         )
                         continue
-                    closure_kind = (
-                        ProviderToolResultClosureKind.INTERRUPTED_MAY_HAVE_PARTIALLY_EXECUTED
-                        if state.get("attempt_id") is not None
-                        else ProviderToolResultClosureKind.INTERRUPTED_BEFORE_DISPATCH
-                    )
+                    if state.get("plan_interaction_status") == "ABORTED":
+                        closure_kind = (
+                            ProviderToolResultClosureKind.PLAN_INTERACTION_ABORTED
+                        )
+                    else:
+                        closure_kind = (
+                            ProviderToolResultClosureKind.INTERRUPTED_MAY_HAVE_PARTIALLY_EXECUTED
+                            if state.get("attempt_id") is not None
+                            else ProviderToolResultClosureKind.INTERRUPTED_BEFORE_DISPATCH
+                        )
                     closure = ProviderToolResultClosure(
                         assistant_entry_id=entry_id,
                         tool_call_id=call.tool_call_id,
@@ -429,12 +508,18 @@ class CanonicalProviderInputReader:
                         target_provider_input_through_sequence=target_cut,
                     )
                     closures.append(closure)
-                    closure_text = _canonical_json_text(
-                        {
-                            "schema_version": "provider_tool_result_closure.v1",
-                            "tool_call_id": call.tool_call_id,
-                            "disposition": closure_kind.value,
-                        }
+                    closure_text = (
+                        "Plan interaction ended before a user decision was "
+                        "accepted; no physical tool effect occurred."
+                        if closure_kind
+                        is ProviderToolResultClosureKind.PLAN_INTERACTION_ABORTED
+                        else _canonical_json_text(
+                            {
+                                "schema_version": "provider_tool_result_closure.v1",
+                                "tool_call_id": call.tool_call_id,
+                                "disposition": closure_kind.value,
+                            }
+                        )
                     )
                     canonical_bytes += len(closure_text.encode("utf-8"))
                     items.append(
@@ -536,7 +621,7 @@ class CanonicalProviderInputReader:
             frozen_items = tuple(items)
             frozen_closures = tuple(closures)
             frozen_late = tuple(late)
-            return CanonicalModelInputSnapshot(
+            canonical_input = CanonicalModelInputSnapshot(
                 identity=identity,
                 items=frozen_items,
                 canonical_utf8_bytes=canonical_bytes,
@@ -549,6 +634,40 @@ class CanonicalProviderInputReader:
                 ),
                 closures=frozen_closures,
                 late_outcomes=frozen_late,
+            )
+            permission = _permission_snapshot_from_binding(binding)
+            workflow_fact = _plan_workflow_compile_fact(
+                connection,
+                cut=cut,
+                binding=binding,
+                permission=permission,
+            )
+            handoff_fact, approved_fact = _plan_handoff_compile_facts(
+                connection,
+                cut=cut,
+                binding=binding,
+                items=frozen_items,
+            )
+            provisional = FrozenCanonicalCompileSnapshot.__new__(
+                FrozenCanonicalCompileSnapshot
+            )
+            object.__setattr__(provisional, "canonical_input", canonical_input)
+            object.__setattr__(provisional, "run_permission_snapshot", permission)
+            object.__setattr__(provisional, "plan_workflow_fact", workflow_fact)
+            object.__setattr__(provisional, "plan_handoff_fact", handoff_fact)
+            object.__setattr__(
+                provisional, "approved_plan_materialization_fact", approved_fact
+            )
+            object.__setattr__(provisional, "canonical_read_cut_fingerprint", "")
+            return FrozenCanonicalCompileSnapshot(
+                canonical_input=canonical_input,
+                run_permission_snapshot=permission,
+                plan_workflow_fact=workflow_fact,
+                plan_handoff_fact=handoff_fact,
+                approved_plan_materialization_fact=approved_fact,
+                canonical_read_cut_fingerprint=(
+                    canonical_compile_snapshot_fingerprint(provisional)
+                ),
             )
 
     def _load_block_metadata(
@@ -585,6 +704,259 @@ class CanonicalProviderInputReader:
             raise ConversationKernelConflict("provider input tool-call bound exceeded")
         return rows
 
+
+def _permission_snapshot_from_binding(
+    binding: Mapping[str, object],
+) -> FrozenRunPermissionSnapshot:
+    return FrozenRunPermissionSnapshot(
+        snapshot_id=str(binding["permission_snapshot_id"]),
+        requested_mode=PermissionMode(str(binding["requested_permission_mode"])),
+        effective_mode=PermissionMode(str(binding["effective_permission_mode"])),
+        admission_source=RunPermissionAdmissionSource(
+            str(binding["permission_admission_source"])
+        ),
+        overlay=RunPermissionOverlay(str(binding["permission_overlay"])),
+        plan_context_ordinal_at_admission=int(
+            binding["permission_plan_context_ordinal"]
+        ),
+        plan_workflow_id=(
+            None
+            if binding["permission_plan_workflow_id"] is None
+            else str(binding["permission_plan_workflow_id"])
+        ),
+        plan_workflow_revision_at_admission=(
+            None
+            if binding["permission_plan_revision_at_admission"] is None
+            else int(binding["permission_plan_revision_at_admission"])
+        ),
+        inherited_from_turn_id=(
+            None
+            if binding["permission_inherited_from_turn_id"] is None
+            else str(binding["permission_inherited_from_turn_id"])
+        ),
+        permission_contract_id=str(binding["permission_contract_id"]),
+        permission_contract_fingerprint=str(
+            binding["permission_contract_fingerprint"]
+        ),
+        snapshot_fingerprint=str(binding["permission_snapshot_fingerprint"]),
+    )
+
+
+def _plan_workflow_compile_fact(
+    connection,
+    *,
+    cut: PreparedProviderInputCut,
+    binding: Mapping[str, object],
+    permission: FrozenRunPermissionSnapshot,
+) -> FrozenPlanWorkflowCompileFact | None:
+    if permission.overlay is RunPermissionOverlay.NONE:
+        return None
+    row = connection.execute(
+        """
+        SELECT * FROM pulsara_v3.plan_workflows
+        WHERE session_id = %s AND id = %s AND status = 'ACTIVE'
+        """,
+        (cut.session_id, permission.plan_workflow_id),
+    ).fetchone()
+    if row is None:
+        raise ConversationKernelConflict("active Plan compile workflow is absent")
+    provisional = FrozenPlanWorkflowCompileFact.__new__(
+        FrozenPlanWorkflowCompileFact
+    )
+    values = {
+        "session_id": cut.session_id,
+        "workspace_id": str(binding["workspace_id"]),
+        "turn_id": cut.turn_id,
+        "permission_snapshot_id": permission.snapshot_id,
+        "permission_snapshot_fingerprint": permission.snapshot_fingerprint,
+        "workflow_id": str(row["id"]),
+        "workflow_ordinal": int(row["workflow_ordinal"]),
+        "current_workflow_revision": int(row["workflow_revision"]),
+        "workflow_status": PlanWorkflowStatus(str(row["status"])),
+        "entered_by": PlanWorkflowEnteredBy(str(row["entered_by"])),
+        "resume_permission_mode": PermissionMode(
+            str(row["resume_permission_mode"])
+        ),
+        "permission_contract_id": str(row["permission_contract_id"]),
+        "permission_contract_fingerprint": str(
+            row["permission_contract_fingerprint"]
+        ),
+    }
+    for name, value in values.items():
+        object.__setattr__(provisional, name, value)
+    object.__setattr__(provisional, "fact_fingerprint", "")
+    return FrozenPlanWorkflowCompileFact(
+        **values,
+        fact_fingerprint=plan_workflow_compile_fact_fingerprint(provisional),
+    )
+
+
+def _plan_handoff_compile_facts(
+    connection,
+    *,
+    cut: PreparedProviderInputCut,
+    binding: Mapping[str, object],
+    items: tuple[FrozenProviderInputItem, ...],
+) -> tuple[
+    FrozenPlanHandoffCompileFact | None,
+    ApprovedPlanMaterializationFact | None,
+]:
+    row = connection.execute(
+        """
+        SELECT e.id AS carrier_entry_id, e.entry_sequence,
+               e.source_plan_handoff_kind, e.source_plan_interaction_id,
+               t.permission_plan_revision_at_admission,
+               w.*, i.assistant_entry_id, i.tool_call_id,
+               i.request_contract_id, i.request_contract_version,
+               i.request_contract_fingerprint, i.request_semantic_digest,
+               b.tool_arguments
+        FROM pulsara_v3.transcript_entries AS e
+        JOIN pulsara_v3.turns AS t
+          ON t.session_id = e.session_id AND t.id = e.turn_id
+        JOIN pulsara_v3.plan_workflows AS w
+          ON w.session_id = e.session_id AND w.id = e.source_plan_workflow_id
+        LEFT JOIN pulsara_v3.plan_interactions AS i
+          ON i.session_id = e.session_id AND i.id = e.source_plan_interaction_id
+        LEFT JOIN pulsara_v3.assistant_message_blocks AS b
+          ON b.session_id = i.session_id
+         AND b.assistant_entry_id = i.assistant_entry_id
+         AND b.tool_call_id = i.tool_call_id
+        WHERE e.session_id = %s AND e.turn_id = %s
+          AND e.source_plan_handoff_kind IS NOT NULL
+          AND e.entry_sequence <= %s
+        ORDER BY e.entry_sequence DESC LIMIT 1
+        """,
+        (cut.session_id, cut.turn_id, cut.provider_input_through_sequence),
+    ).fetchone()
+    if row is None:
+        return None, None
+    kind = PlanHandoffKind(str(row["source_plan_handoff_kind"]))
+    interaction_id = (
+        None
+        if row["source_plan_interaction_id"] is None
+        else str(row["source_plan_interaction_id"])
+    )
+    transition_revision = (
+        int(row["permission_plan_revision_at_admission"])
+        if row["permission_plan_revision_at_admission"] is not None
+        else int(row["workflow_revision"])
+    )
+    transition_digest = context_fingerprint(
+        "pulsara:plan-transition:v1",
+        {
+            "workflow_id": str(row["id"]),
+            "workflow_revision": transition_revision,
+            "interaction_id": interaction_id,
+            "handoff_kind": kind.value,
+            "workflow_status": str(row["status"]),
+        },
+    )
+    values = {
+        "session_id": cut.session_id,
+        "workspace_id": str(binding["workspace_id"]),
+        "target_turn_id": cut.turn_id,
+        "carrier_entry_id": str(row["carrier_entry_id"]),
+        "carrier_entry_sequence": int(row["entry_sequence"]),
+        "workflow_id": str(row["id"]),
+        "workflow_ordinal": int(row["workflow_ordinal"]),
+        "workflow_revision_at_transition": transition_revision,
+        "interaction_id": interaction_id,
+        "handoff_kind": kind,
+        "workflow_status": PlanWorkflowStatus(str(row["status"])),
+        "resume_permission_mode": PermissionMode(
+            str(row["resume_permission_mode"])
+        ),
+        "transition_semantic_digest": transition_digest,
+    }
+    provisional = FrozenPlanHandoffCompileFact.__new__(
+        FrozenPlanHandoffCompileFact
+    )
+    for name, value in values.items():
+        object.__setattr__(provisional, name, value)
+    object.__setattr__(provisional, "fact_fingerprint", "")
+    handoff = FrozenPlanHandoffCompileFact(
+        **values,
+        fact_fingerprint=plan_handoff_compile_fact_fingerprint(provisional),
+    )
+    if kind is not PlanHandoffKind.APPROVED_PLAN:
+        return handoff, None
+    if (
+        interaction_id is None
+        or row["tool_arguments"] is None
+        or row["assistant_entry_id"] is None
+        or row["tool_call_id"] is None
+    ):
+        raise ConversationKernelConflict("approved Plan content is absent")
+    frozen_arguments = freeze_json(dict(row["tool_arguments"]))
+    if not isinstance(frozen_arguments, FrozenJsonObjectFact):
+        raise ConversationKernelConflict("approved Plan arguments are invalid")
+    extracted = extract_plan_draft(
+        interaction_id=interaction_id,
+        assistant_entry_id=str(row["assistant_entry_id"]),
+        tool_call_id=str(row["tool_call_id"]),
+        binding=PlanInteractionBinding(
+            str(row["request_contract_id"]),
+            str(row["request_contract_version"]),
+            str(row["request_contract_fingerprint"]),
+        ),
+        request_semantic_digest=str(row["request_semantic_digest"]),
+        arguments=frozen_arguments,
+    )
+    pinned_item = next(
+        (
+            item
+            for item in items
+            if item.source_entry_id == str(row["assistant_entry_id"])
+            and any(
+                call.tool_call_id == str(row["tool_call_id"])
+                for call in item.tool_calls
+            )
+        ),
+        None,
+    )
+    disposition = (
+        PlanApprovedMaterializationDisposition.PIN_EXISTING_CANONICAL_BLOCK
+        if pinned_item is not None
+        else PlanApprovedMaterializationDisposition.MATERIALIZE_REFERENCED_BLOCK
+    )
+    approved_values = {
+        "session_id": cut.session_id,
+        "workspace_id": str(binding["workspace_id"]),
+        "target_turn_id": cut.turn_id,
+        "workflow_id": str(row["id"]),
+        "interaction_id": interaction_id,
+        "assistant_entry_id": str(row["assistant_entry_id"]),
+        "tool_call_id": str(row["tool_call_id"]),
+        "request_contract_id": str(row["request_contract_id"]),
+        "request_contract_version": str(row["request_contract_version"]),
+        "request_contract_fingerprint": str(row["request_contract_fingerprint"]),
+        "request_semantic_digest": str(row["request_semantic_digest"]),
+        "content_identity": extracted.identity,
+        "exact_plan_utf8": extracted.exact_plan_utf8,
+        "disposition": disposition,
+        "pinned_canonical_item_fingerprint": (
+            None
+            if pinned_item is None
+            else provider_input_item_fingerprint(pinned_item)
+        ),
+    }
+    provisional_approved = ApprovedPlanMaterializationFact.__new__(
+        ApprovedPlanMaterializationFact
+    )
+    for name, value in approved_values.items():
+        object.__setattr__(provisional_approved, name, value)
+    object.__setattr__(provisional_approved, "fact_fingerprint", "")
+    approved = ApprovedPlanMaterializationFact(
+        **approved_values,
+        fact_fingerprint=approved_plan_materialization_fingerprint(
+            provisional_approved
+        ),
+    )
+    return handoff, approved
+
+class CanonicalProviderInputReader(CanonicalProviderInputReader):
+    """Complete the bounded physical hydration methods after pure fact helpers."""
+
     def _load_tool_state(self, connection, session_id: str, entry_ids: Sequence[str]):
         state: dict[tuple[str, str], dict[str, object]] = {}
         if not entry_ids:
@@ -593,6 +965,8 @@ class CanonicalProviderInputReader:
             connection.execute(
                 """
                 SELECT b.assistant_entry_id, b.tool_call_id, a.id AS attempt_id,
+                       i.kind AS plan_interaction_kind,
+                       i.status AS plan_interaction_status,
                        r.result_state, r.result_entry_id,
                        r.output_artifact_disposition, r.output_artifact_id,
                        r.output_source_coverage, r.output_display_kind,
@@ -611,6 +985,10 @@ class CanonicalProviderInputReader:
                   ON r.session_id = b.session_id
                  AND r.tool_call_entry_id = b.assistant_entry_id
                  AND r.tool_call_id = b.tool_call_id
+                LEFT JOIN pulsara_v3.plan_interactions AS i
+                  ON i.session_id = b.session_id
+                 AND i.assistant_entry_id = b.assistant_entry_id
+                 AND i.tool_call_id = b.tool_call_id
                 LEFT JOIN pulsara_v3.transcript_entries AS e
                   ON e.session_id = r.session_id AND e.id = r.result_entry_id
                 WHERE b.session_id = %s
@@ -625,7 +1003,11 @@ class CanonicalProviderInputReader:
         if len(rows) > self._maximum_items:
             raise ConversationKernelConflict("provider input tool-call bound exceeded")
         for row in rows:
-            payload: dict[str, object] = {"attempt_id": row["attempt_id"]}
+            payload: dict[str, object] = {
+                "attempt_id": row["attempt_id"],
+                "plan_interaction_kind": row["plan_interaction_kind"],
+                "plan_interaction_status": row["plan_interaction_status"],
+            }
             if row["result_entry_id"] is not None:
                 payload["result"] = row
             state[(str(row["assistant_entry_id"]), str(row["tool_call_id"]))] = payload

@@ -60,6 +60,13 @@ enum CommittedEventType {
   MEMORY_FACT_LIFECYCLE_CHANGED = 25;
   MEMORY_RELATION_ACCEPTED = 26;
   TERMINAL_OBSERVATION_ACCEPTED = 27;
+  PLAN_WORKFLOW_ENTERED = 28;
+  PLAN_QUESTION_ASKED = 29;
+  PLAN_QUESTION_ANSWERED = 30;
+  PLAN_DRAFT_SUBMITTED = 31;
+  PLAN_DRAFT_DECISION_ACCEPTED = 32;
+  PLAN_WORKFLOW_EXITED = 33;
+  PLAN_CONTINUATION_ACCEPTED = 34;
 }
 
 enum LiveEventType {
@@ -103,6 +110,30 @@ enum EntryKind {
   ASSISTANT_TOOL_REQUEST = 4;
   TOOL_RESULT = 5;
   TERMINAL_OBSERVATION = 6;
+  PLAN_CONTINUATION = 7;
+}
+
+enum PermissionMode {
+  PERMISSION_MODE_UNSPECIFIED = 0;
+  PERMISSION_MODE_ACCEPT_EDITS = 1;
+  PERMISSION_MODE_READ_ONLY = 2;
+  PERMISSION_MODE_ASK_PERMISSIONS = 3;
+  PERMISSION_MODE_BYPASS_PERMISSIONS = 4;
+}
+
+message RunPermissionProjection {
+  string permission_snapshot_id = 1;
+  PermissionMode requested_mode = 2;
+  PermissionMode effective_mode = 3;
+  string admission_source = 4;
+  string overlay = 5;
+  uint64 plan_context_ordinal = 6;
+  string plan_workflow_id = 7;
+  uint64 plan_workflow_revision = 8;
+  string inherited_from_turn_id = 9;
+  string contract_id = 10;
+  string contract_fingerprint = 11;
+  string snapshot_fingerprint = 12;
 }
 
 enum ContentKind {
@@ -155,6 +186,7 @@ message ActiveTurnControl {
   string scope_subagent_task_id = 3;
   string status = 4;
   string accepted_at_utc = 5;
+  RunPermissionProjection permission = 6;
 }
 
 message PromptQueueControl {
@@ -164,6 +196,47 @@ message PromptQueueControl {
   string delivery_mode = 4;
   string target_turn_id = 5;
   CanonicalContentReference content = 6;
+  RunPermissionProjection permission = 7;
+}
+
+message PlanWorkflowControl {
+  string workflow_id = 1;
+  uint64 workflow_ordinal = 2;
+  uint64 workflow_revision = 3;
+  string status = 4;
+  string entered_by = 5;
+  PermissionMode resume_permission_mode = 6;
+}
+
+message PlanInteractionControl {
+  string interaction_id = 1;
+  string workflow_id = 2;
+  string kind = 3;
+  string status = 4;
+  uint64 interaction_ordinal = 5;
+  string typed_content_fingerprint = 6;
+  uint64 option_count = 7;
+  bool allow_free_text = 8;
+  uint64 draft_utf8_size = 9;
+  string draft_utf8_digest = 10;
+  bool summary_present = 11;
+}
+
+enum PlanHandoffDisposition {
+  PLAN_HANDOFF_DISPOSITION_UNSPECIFIED = 0;
+  PLAN_HANDOFF_PENDING = 1;
+  PLAN_HANDOFF_CLAIMED = 2;
+  PLAN_HANDOFF_SUPERSEDED = 3;
+}
+
+message PlanHandoffControl {
+  string workflow_id = 1;
+  string interaction_id = 2;
+  string handoff_kind = 3;
+  PlanHandoffDisposition disposition = 4;
+  string claim_entry_id = 5;
+  string claim_queue_item_id = 6;
+  PermissionMode resume_permission_mode = 7;
 }
 
 message ToolAttemptControl {
@@ -208,6 +281,9 @@ message CanonicalControl {
   repeated SubagentTaskControl subagent_tasks = 6;
   repeated JobControl jobs = 7;
   repeated MemoryFreshnessControl memory_freshness = 8;
+  PlanWorkflowControl active_plan_workflow = 9;
+  PlanInteractionControl open_plan_interaction = 10;
+  PlanHandoffControl latest_plan_handoff = 11;
 }
 
 message HistoryCursor {
@@ -555,6 +631,9 @@ enum CommandKind {
   STEER_ACTIVE_TURN = 5;
   ACCEPT_SUBAGENT_RESULT = 6;
   ACCEPT_JOB_RESULT = 7;
+  ENTER_PLAN = 8;
+  CANCEL_PLAN = 9;
+  FORCE_EXIT_PLAN = 10;
 }
 
 message CommandRequest {
@@ -568,6 +647,9 @@ message CommandRequest {
   string target_turn_id = 8;
   string source_subagent_result_id = 9;
   string source_job_id = 10;
+  PermissionMode requested_permission_mode = 11;
+  string target_plan_workflow_id = 12;
+  uint64 expected_plan_workflow_revision = 13;
 }
 
 enum CommandStatus {
@@ -584,6 +666,12 @@ message CommandOutcome {
   string target_id = 4;
   string public_code = 5;
   string public_message = 6;
+  string plan_workflow_status = 7;
+  PermissionMode resume_permission_mode = 8;
+  bool handoff_created_at_commit = 9;
+  uint64 plan_workflow_revision = 10;
+  PlanDraftDecision plan_draft_decision = 11;
+  string plan_continuation_turn_id = 12;
 }
 
 message QueryCommandRequest {
@@ -615,6 +703,101 @@ message ResolveInteractionRequest {
   uint64 expected_live_revision = 7;
   string interaction_id = 8;
   InteractionResolutionDecision decision = 9;
+}
+
+message PlanQuestionAnswer {
+  oneof answer {
+    uint32 option_ordinal = 1;
+    string free_text = 2;
+  }
+}
+
+enum PlanDraftDecision {
+  PLAN_DRAFT_DECISION_UNSPECIFIED = 0;
+  PLAN_DRAFT_APPROVE = 1;
+  PLAN_DRAFT_REVISE = 2;
+  PLAN_DRAFT_CANCEL = 3;
+}
+
+message PlanDraftResolution {
+  PlanDraftDecision decision = 1;
+  optional string feedback = 2;
+}
+
+message ResolvePlanInteractionRequest {
+  string request_id = 1;
+  string attachment_id = 2;
+  uint64 attachment_generation = 3;
+  string command_id = 4;
+  uint64 attempt_expected_writer_generation = 5;
+  string interaction_id = 6;
+  oneof resolution {
+    PlanQuestionAnswer question_answer = 7;
+    PlanDraftResolution draft = 8;
+  }
+  string workflow_id = 9;
+  uint64 expected_workflow_revision = 10;
+}
+
+message ResolvePlanInteractionResponse {
+  string request_id = 1;
+  string command_id = 2;
+  string workflow_id = 3;
+  string workflow_status = 4;
+  string interaction_id = 5;
+  string interaction_status = 6;
+  PermissionMode resume_permission_mode = 7;
+  string continuation_turn_id = 8;
+  bool handoff_created_at_commit = 9;
+  PlanDraftDecision draft_decision = 10;
+  uint64 workflow_revision = 11;
+}
+
+message ReadPlanQuestionContentRequest {
+  string request_id = 1;
+  string attachment_id = 2;
+  uint64 attachment_generation = 3;
+  string interaction_id = 4;
+}
+
+message PlanQuestionOption {
+  uint32 ordinal = 1;
+  string label = 2;
+  string description = 3;
+  bool recommended = 4;
+}
+
+message PlanQuestionContent {
+  string request_id = 1;
+  string interaction_id = 2;
+  string question = 3;
+  repeated PlanQuestionOption options = 4;
+  bool allow_free_text = 5;
+  string typed_content_fingerprint = 6;
+}
+
+message ReadPlanDraftTextChunkRequest {
+  string request_id = 1;
+  string attachment_id = 2;
+  uint64 attachment_generation = 3;
+  string interaction_id = 4;
+  uint64 offset_utf8_bytes = 5;
+  uint32 limit_bytes = 6;
+  optional string expected_plan_utf8_digest = 7;
+}
+
+message PlanDraftTextChunk {
+  string request_id = 1;
+  string interaction_id = 2;
+  string assistant_entry_id = 3;
+  string tool_call_id = 4;
+  string request_semantic_digest = 5;
+  uint64 plan_utf8_size = 6;
+  string plan_utf8_digest = 7;
+  uint64 offset_utf8_bytes = 8;
+  string body = 9;
+  uint64 next_offset_utf8_bytes = 10;
+  bool eof = 11;
 }
 
 message ReadContentRequest {
@@ -659,6 +842,9 @@ message ClientFrame {
     HeartbeatRequest heartbeat = 8;
     LiveControlSnapshotRequest live_control_snapshot = 9;
     ResolveInteractionRequest resolve_interaction = 10;
+    ResolvePlanInteractionRequest resolve_plan_interaction = 11;
+    ReadPlanQuestionContentRequest read_plan_question = 12;
+    ReadPlanDraftTextChunkRequest read_plan_draft = 13;
   }
 }
 
@@ -680,5 +866,8 @@ message ServerFrame {
     HeartbeatResponse heartbeat = 8;
     ProtocolError error = 9;
     LiveControlSnapshotResponse live_control_snapshot = 10;
+    ResolvePlanInteractionResponse resolve_plan_interaction = 11;
+    PlanQuestionContent plan_question = 12;
+    PlanDraftTextChunk plan_draft = 13;
   }
 }

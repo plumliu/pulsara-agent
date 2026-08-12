@@ -17,6 +17,8 @@ from threading import Lock
 from typing import AsyncIterator, Awaitable, Callable, Mapping, Protocol
 from uuid import uuid4
 
+from jsonschema import ValidationError, validators
+
 from pulsara_agent.conversation_kernel.assembler import (
     CompletedAssistantMessage,
     CompletedDataBlock,
@@ -61,13 +63,30 @@ from pulsara_agent.conversation_kernel.tool_artifacts import (
 )
 from pulsara_agent.conversation_kernel.repository import (
     AcceptedEntry,
+    AcceptedPlanToolBatch,
     AssistantBlock,
     AssistantDataBlock,
     AssistantTextBlock,
     AssistantToolCallBlock,
     ConversationKernelRepository,
+    PlanToolBatchDisposition,
+    PlanToolControlKind,
+    PreparedPlanBatchCall,
+    PreparedPlanToolBatch,
     PreparedToolResultAcceptance,
     build_prepared_tool_result_acceptance,
+)
+from pulsara_agent.conversation_kernel.plan_runtime import (
+    KernelPlanInteractionCoordinator,
+    PlanQuestionWaiter,
+)
+from pulsara_agent.capability.builtin_catalog import builtin_tool_catalog_entry
+from pulsara_agent.primitives.plan_workflow import (
+    PlanInteractionBinding,
+    PlanInteractionKind,
+    extract_plan_draft,
+    extract_plan_entry_reason,
+    extract_plan_question,
 )
 from pulsara_agent.conversation_kernel.reader import (
     CanonicalProviderContinuityError,
@@ -78,7 +97,10 @@ from pulsara_agent.ports.terminal_observation import PreparedInstallationTarget
 from pulsara_agent.terminal_process.monitor import TerminalMonitorCoordinator
 from pulsara_agent.conversation_kernel.vocabulary import LiveEventType
 from pulsara_agent.ports.live_agent_event import ProviderStreamPayload
-from pulsara_agent.ports.tool_execution import ToolOutputArtifactCandidate
+from pulsara_agent.ports.tool_execution import (
+    ToolOutputArtifactCandidate,
+    thaw_tool_json_object,
+)
 from pulsara_agent.model_input.compiler import StructuredModelInputCompiler
 from pulsara_agent.model_input.diagnostics import (
     project_model_input_compile_observation,
@@ -86,6 +108,7 @@ from pulsara_agent.model_input.diagnostics import (
 from pulsara_agent.model_input.contracts import (
     CapabilityActivationSubjectKind,
     CanonicalInputOriginKind,
+    FrozenCanonicalCompileSnapshot,
     CanonicalModelInputSnapshot,
     FrozenCompiledModelInput,
     ModelInputCompileFailureKind,
@@ -94,6 +117,8 @@ from pulsara_agent.model_input.contracts import (
     StructuredModelInputCompileRequest,
 )
 from pulsara_agent.primitives.model_call import ModelCallPurpose
+from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE, PermissionMode
+from pulsara_agent.primitives.run_permission import FrozenRunPermissionSnapshot
 from pulsara_agent.primitives.context import (
     FrozenJsonObjectFact,
     canonical_json_bytes,
@@ -113,6 +138,14 @@ class KernelModelPort(Protocol):
     def stream(
         self, request: KernelModelExecutionRequest
     ) -> AsyncIterator[ProviderStreamPayload]: ...
+
+
+class AutomaticPlanContinuationPort(Protocol):
+    async def __call__(
+        self,
+        candidate: PreparedPlanToolBatch,
+        deadline_monotonic: float,
+    ) -> AcceptedPlanToolBatch: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,6 +179,8 @@ class KernelToolInvocationContext:
     scope_subagent_task_id: str | None
     host_owner_epoch: int
     authorization_reference: str
+    permission_snapshot_fingerprint: str
+    attempt_permission_snapshot_fingerprint: str
     tool_surface_fingerprint: str
     executor_binding_fingerprint: str
     surface_borrow: ProcessLocalToolSurfaceBorrow = dataclass_field(
@@ -163,6 +198,8 @@ class KernelToolInvocationContext:
                 self.attempt_id,
                 self.result_entry_id,
                 self.authorization_reference,
+                self.permission_snapshot_fingerprint,
+                self.attempt_permission_snapshot_fingerprint,
                 self.tool_surface_fingerprint,
                 self.executor_binding_fingerprint,
             )
@@ -174,6 +211,13 @@ class KernelToolInvocationContext:
             self.scope_subagent_task_id is None
         ):
             raise ValueError("kernel tool invocation scope identity is invalid")
+        if (
+            self.attempt_permission_snapshot_fingerprint
+            != self.permission_snapshot_fingerprint
+        ):
+            raise ValueError(
+                "tool attempt permission snapshot does not exact-join the run"
+            )
         access = self.surface_borrow.prepared.access
         if (
             access.conversation_scope_kind.value != self.conversation_scope_kind
@@ -333,6 +377,7 @@ class KernelToolAuthorization:
     public_message: str = ""
     accepted_attempt_id: str | None = None
     accepted_result_entry_id: str | None = None
+    accepted_permission_snapshot_fingerprint: str | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -350,6 +395,12 @@ class KernelToolAuthorization:
             and self.accepted_result_entry_id is not None
         ):
             raise ValueError("authorization effect union is invalid")
+        if (self.accepted_attempt_id is not None) != (
+            self.accepted_permission_snapshot_fingerprint is not None
+        ):
+            raise ValueError(
+                "accepted attempt permission attribution is incomplete"
+            )
 
 
 class KernelToolPort(Protocol):
@@ -372,6 +423,7 @@ class KernelToolPort(Protocol):
         tool_call_id: str,
         turn_id: str,
         assistant_entry_id: str,
+        permission_snapshot: FrozenRunPermissionSnapshot,
         surface_borrow: ProcessLocalToolSurfaceBorrow,
     ) -> KernelToolAuthorization: ...
 
@@ -382,6 +434,7 @@ class KernelToolPort(Protocol):
         tool_call_id: str,
         turn_id: str,
         assistant_entry_id: str,
+        permission_snapshot: FrozenRunPermissionSnapshot,
     ) -> KernelToolAuthorization: ...
 
     async def invoke(
@@ -411,6 +464,9 @@ class KernelRunResult:
     final_text: str
     model_call_count: int
     tool_call_count: int
+    continuation_turn_id: str | None = None
+    continuation_entry_id: str | None = None
+    pending_plan_interaction_id: str | None = None
 
 
 class ConversationKernelRunner:
@@ -432,6 +488,9 @@ class ConversationKernelRunner:
         steer_consumer: Callable[[str, float], Awaitable[int]] | None = None,
         workspace_id: str | None = None,
         tool_output_processor: ToolOutputArtifactProcessor | None = None,
+        plan_interactions: KernelPlanInteractionCoordinator | None = None,
+        automatic_plan_continuation: AutomaticPlanContinuationPort | None = None,
+        launch_permission_mode: PermissionMode = DEFAULT_PERMISSION_MODE,
         maximum_model_calls_per_turn: int = STAGE2_LIMITS.model_calls_per_turn_hard,
         maximum_input_tokens_per_call: int = STAGE2_LIMITS.provider_input_tokens_per_call_hard,
         maximum_output_tokens_per_call: int = STAGE2_LIMITS.provider_output_tokens_per_call_hard,
@@ -448,6 +507,8 @@ class ConversationKernelRunner:
         ):
             raise ValueError("runner limits must be finite and positive")
         self._repository = repository
+        self._plan_interactions = plan_interactions
+        self._automatic_plan_continuation = automatic_plan_continuation
         self._writer_lease = writer_lease
         self._model = model
         self._tools = tools
@@ -467,6 +528,7 @@ class ConversationKernelRunner:
             tool_output_processor
             or ToolOutputArtifactProcessor(repository.connection_provider)
         )
+        self._launch_permission_mode = launch_permission_mode
         self._workspace_id = workspace_id
         self._io = io_owner or KernelSessionIO()
         self._context_source_collector = context_source_collector
@@ -483,11 +545,15 @@ class ConversationKernelRunner:
         text: str,
         *,
         command_id: str | None = None,
+        requested_permission_mode: PermissionMode | None = None,
     ) -> KernelRunResult:
         return await self._run_turn(
             text,
             command_id=command_id,
             subagent_task_id=None,
+            requested_permission_mode=(
+                requested_permission_mode or self._launch_permission_mode
+            ),
         )
 
     async def run_subagent_turn(
@@ -502,6 +568,7 @@ class ConversationKernelRunner:
             objective,
             command_id=None,
             subagent_task_id=task_id,
+            requested_permission_mode=None,
         )
 
     async def _run_turn(
@@ -510,6 +577,7 @@ class ConversationKernelRunner:
         *,
         command_id: str | None,
         subagent_task_id: str | None,
+        requested_permission_mode: PermissionMode | None,
     ) -> KernelRunResult:
         if not text:
             raise ValueError("user message must be non-empty")
@@ -528,6 +596,12 @@ class ConversationKernelRunner:
                 entry_id=_stable_id("entry", turn_id, "user"),
                 context_binding_revision_id=_stable_id(
                     "context-revision", turn_id, "0"
+                ),
+                permission_snapshot_id=_stable_id(
+                    "permission-snapshot", turn_id
+                ),
+                requested_permission_mode=(
+                    requested_permission_mode or self._launch_permission_mode
                 ),
                 content=content,
                 occurred_at=datetime.now(timezone.utc),
@@ -586,11 +660,12 @@ class ConversationKernelRunner:
                 )
                 try:
                     try:
-                        canonical_input = await self._io.run(
-                            self._input_reader.read_frozen_snapshot,
+                        canonical_facts = await self._io.run(
+                            self._input_reader.read_frozen_compile_snapshot,
                             prepared.cut,
                             deadline_monotonic=deadline,
                         )
+                        canonical_input = canonical_facts.canonical_input
                     except TimeoutError as exc:
                         raise StructuredModelInputCompileError(
                             ModelInputCompileFailureKind.DEADLINE_EXPIRED
@@ -634,6 +709,7 @@ class ConversationKernelRunner:
                             activation_subject=activation_subject,
                             activation_text=activation_text,
                             tool_surface=tool_surface.model_surface,
+                            canonical_facts=canonical_facts,
                             deadline_monotonic=deadline,
                         )
                     except StructuredModelInputCompileError:
@@ -657,6 +733,7 @@ class ConversationKernelRunner:
                         context_id=f"model-context:{uuid4().hex}",
                         model_call_index=model_call_count,
                         canonical_input=canonical_input,
+                        canonical_facts=canonical_facts,
                         compile_binding=prepared_call.compile_binding,
                         sources=sources,
                     )
@@ -785,6 +862,51 @@ class ConversationKernelRunner:
                     active_surface_borrow.close()
                     active_surface_borrow = None
                     continue
+                plan_call_indexes = tuple(
+                    index
+                    for index, call in enumerate(calls)
+                    if call.tool_name
+                    in {"enter_plan", "ask_plan_question", "exit_plan"}
+                )
+                if plan_call_indexes:
+                    if identity.conversation_scope_kind is not ModelInputScopeKind.ROOT:
+                        raise RuntimeError("Plan control escaped the ROOT tool surface")
+                    if active_surface_borrow is None:
+                        raise RuntimeError("Plan batch lost its tool surface borrow")
+                    tool_call_count += len(calls)
+                    outcome = await self._accept_plan_control_batch(
+                        calls=calls,
+                        selected_call_index=plan_call_indexes[0],
+                        assistant_entry_id=accepted.entry_id,
+                        canonical_facts=canonical_facts,
+                        surface_borrow=active_surface_borrow,
+                        deadline=deadline,
+                    )
+                    active_surface_borrow.close()
+                    active_surface_borrow = None
+                    if outcome.interaction_kind is PlanInteractionKind.QUESTION:
+                        # The canonical answer/tool result is installed by the
+                        # Host resolution command.  Human think time is not a
+                        # provider/tool operation deadline.
+                        deadline = monotonic() + self._operation_timeout_seconds
+                        continue
+                    if not outcome.origin_turn_completed:
+                        # Idempotent enter_plan against the already-active
+                        # workflow settles the batch but keeps this exact run.
+                        deadline = monotonic() + self._operation_timeout_seconds
+                        continue
+                    return KernelRunResult(
+                        turn_id=turn_id,
+                        final_entry_id=(
+                            outcome.selected_result_entry_id or accepted.entry_id
+                        ),
+                        final_text=completed.public_text,
+                        model_call_count=model_call_count,
+                        tool_call_count=tool_call_count,
+                        continuation_turn_id=outcome.continuation_turn_id,
+                        continuation_entry_id=outcome.continuation_entry_id,
+                        pending_plan_interaction_id=outcome.interaction_id,
+                    )
                 for call in calls:
                     tool_call_count += 1
                     invocation_arguments = thaw_json(call.arguments)
@@ -804,6 +926,9 @@ class ConversationKernelRunner:
                         tool_call_id=call.tool_call_id,
                         turn_id=turn_id,
                         assistant_entry_id=accepted.entry_id,
+                        permission_snapshot=(
+                            canonical_facts.run_permission_snapshot
+                        ),
                         surface_borrow=active_surface_borrow,
                     )
                     machine_policy_kind = authorization.kind
@@ -830,6 +955,9 @@ class ConversationKernelRunner:
                             denial_result_state=None,
                             occurred_at=datetime.now(timezone.utc),
                             actor_id="tool-dispatch-policy",
+                            permission_snapshot_fingerprint=(
+                                canonical_facts.run_permission_snapshot.snapshot_fingerprint
+                            ),
                             deadline_monotonic=deadline,
                         )
                         authorization = await self._tools.request_confirmation(
@@ -837,8 +965,14 @@ class ConversationKernelRunner:
                             tool_call_id=call.tool_call_id,
                             turn_id=turn_id,
                             assistant_entry_id=accepted.entry_id,
+                            permission_snapshot=(
+                                canonical_facts.run_permission_snapshot
+                            ),
                         )
                     attempt_id: str | None = None
+                    attempt_permission_snapshot_fingerprint: str | None = (
+                        authorization.accepted_permission_snapshot_fingerprint
+                    )
                     live_sink: _ToolResultLiveSink | None = None
                     binding_fingerprint: str | None = None
                     if authorization.kind is KernelToolAuthorizationKind.ALLOW:
@@ -890,6 +1024,9 @@ class ConversationKernelRunner:
                                 denial_result_state="PERMISSION_DENIED",
                                 occurred_at=datetime.now(timezone.utc),
                                 actor_id="tool-dispatch-policy",
+                                permission_snapshot_fingerprint=(
+                                    canonical_facts.run_permission_snapshot.snapshot_fingerprint
+                                ),
                                 deadline_monotonic=deadline,
                             )
                             continue
@@ -910,7 +1047,7 @@ class ConversationKernelRunner:
                                 raise RuntimeError(
                                     "tool binding drifted before attempt acceptance"
                                 )
-                            await self._io.run(
+                            accepted_decision = await self._io.run(
                                 self._repository.accept_tool_capability_decision,
                                 self._writer_lease.guard,
                                 decision_id=capability_decision_id,
@@ -926,7 +1063,24 @@ class ConversationKernelRunner:
                                 denial_result_state=None,
                                 occurred_at=datetime.now(timezone.utc),
                                 actor_id="tool-dispatch-policy",
+                                permission_snapshot_fingerprint=(
+                                    canonical_facts.run_permission_snapshot.snapshot_fingerprint
+                                ),
                                 deadline_monotonic=deadline,
+                            )
+                            if accepted_decision.attempt_id != attempt_id:
+                                raise RuntimeError(
+                                    "accepted tool attempt identity drifted"
+                                )
+                            attempt_permission_snapshot_fingerprint = (
+                                accepted_decision.permission_snapshot_fingerprint
+                            )
+                        if (
+                            attempt_permission_snapshot_fingerprint
+                            != canonical_facts.run_permission_snapshot.snapshot_fingerprint
+                        ):
+                            raise RuntimeError(
+                                "accepted tool attempt permission drifted before invoke"
                             )
                         tool_result_generation = f"tool-result:{result_entry_id}"
                         tool_result_block_id = _stable_id(
@@ -989,6 +1143,12 @@ class ConversationKernelRunner:
                                 self._writer_lease.guard.writer_generation
                             ),
                             authorization_reference=authorization.reference,
+                            permission_snapshot_fingerprint=(
+                                canonical_facts.run_permission_snapshot.snapshot_fingerprint
+                            ),
+                            attempt_permission_snapshot_fingerprint=(
+                                attempt_permission_snapshot_fingerprint
+                            ),
                             tool_surface_fingerprint=(
                                 tool_surface.model_surface.surface_fingerprint
                             ),
@@ -1212,10 +1372,286 @@ class ConversationKernelRunner:
                     reason="FOREGROUND_EXECUTION_INTERRUPTED",
                     occurred_at=datetime.now(timezone.utc),
                     actor_id="foreground-runner",
-                    deadline_monotonic=deadline,
+                    # Terminalization owns a fresh bounded physical deadline;
+                    # human question wait or an expired model cycle cannot
+                    # suppress canonical interruption.
+                    deadline_monotonic=(
+                        monotonic() + self._operation_timeout_seconds
+                    ),
                 )
             except BaseException:
                 pass
+            raise
+
+    async def _accept_plan_control_batch(
+        self,
+        *,
+        calls: tuple[CompletedToolCallBlock, ...],
+        selected_call_index: int,
+        assistant_entry_id: str,
+        canonical_facts: FrozenCanonicalCompileSnapshot,
+        surface_borrow: ProcessLocalToolSurfaceBorrow,
+        deadline: float,
+    ) -> AcceptedPlanToolBatch:
+        selected = calls[selected_call_index]
+        kind = {
+            "enter_plan": PlanToolControlKind.ENTER,
+            "ask_plan_question": PlanToolControlKind.QUESTION,
+            "exit_plan": PlanToolControlKind.DRAFT,
+        }[selected.tool_name]
+        workflow_fact = canonical_facts.plan_workflow_fact
+        if kind is PlanToolControlKind.ENTER:
+            if workflow_fact is None:
+                workflow_id = _stable_id(
+                    "plan-workflow",
+                    self._writer_lease.guard.session_id,
+                    assistant_entry_id,
+                    selected.tool_call_id,
+                )
+                expected_revision = None
+            else:
+                workflow_id = workflow_fact.workflow_id
+                expected_revision = workflow_fact.current_workflow_revision
+        else:
+            workflow_id = (
+                workflow_fact.workflow_id
+                if workflow_fact is not None
+                else _stable_id(
+                    "plan-unavailable-workflow",
+                    self._writer_lease.guard.session_id,
+                    assistant_entry_id,
+                    selected.tool_call_id,
+                )
+            )
+            expected_revision = (
+                None
+                if workflow_fact is None
+                else workflow_fact.current_workflow_revision
+            )
+        provisional_interaction_id = (
+            None
+            if kind is PlanToolControlKind.ENTER
+            else _stable_id(
+                "plan-interaction", workflow_id, assistant_entry_id, selected.tool_call_id
+            )
+        )
+        catalog_entry = builtin_tool_catalog_entry(selected.tool_name)
+        catalog_binding = catalog_entry.binding_contract.base
+        request_binding = PlanInteractionBinding(
+            catalog_binding.contract_id,
+            catalog_binding.contract_version,
+            catalog_binding.binding_fingerprint,
+        )
+        disposition = PlanToolBatchDisposition.APPLY
+        # A Plan call owns the complete batch even when its frozen surface was
+        # revoked or its arguments are invalid.  Classify those conditions
+        # before constructing any workflow/interaction subject so the
+        # repository can install one closed no-attempt result for every call.
+        try:
+            advertised_executor_binding = surface_borrow.binding_fingerprint(
+                selected.tool_name
+            )
+            advertised_spec = next(
+                (
+                    item
+                    for item in surface_borrow.prepared.model_surface.tool_specs
+                    if item.name == selected.tool_name
+                ),
+                None,
+            )
+            if (
+                advertised_spec is None
+                or advertised_spec.executor_binding_fingerprint
+                != advertised_executor_binding
+                or advertised_spec.descriptor_fingerprint
+                != catalog_entry.descriptor.fingerprint()
+            ):
+                disposition = PlanToolBatchDisposition.TOOL_UNAVAILABLE
+        except (KeyError, RuntimeError):
+            disposition = PlanToolBatchDisposition.TOOL_UNAVAILABLE
+        if disposition is PlanToolBatchDisposition.APPLY:
+            schema_source = catalog_entry.descriptor.input_schema
+            if schema_source is None:
+                disposition = PlanToolBatchDisposition.TOOL_UNAVAILABLE
+            else:
+                schema = thaw_tool_json_object(schema_source)
+                try:
+                    validator = validators.validator_for(schema)
+                    validator.check_schema(schema)
+                except Exception:
+                    disposition = PlanToolBatchDisposition.TOOL_UNAVAILABLE
+                else:
+                    try:
+                        raw_arguments = thaw_json(selected.arguments)
+                        if not isinstance(raw_arguments, dict):
+                            raise ValidationError("arguments must be an object")
+                        validator(schema).validate(raw_arguments)
+                    except ValidationError:
+                        disposition = PlanToolBatchDisposition.INVALID_ARGUMENTS
+        if disposition is PlanToolBatchDisposition.APPLY:
+            try:
+                if kind is PlanToolControlKind.ENTER:
+                    extract_plan_entry_reason(
+                        binding=request_binding,
+                        arguments=selected.arguments,
+                    )
+                elif kind is PlanToolControlKind.QUESTION:
+                    assert provisional_interaction_id is not None
+                    extract_plan_question(
+                        interaction_id=provisional_interaction_id,
+                        binding=request_binding,
+                        arguments=selected.arguments,
+                    )
+                else:
+                    assert provisional_interaction_id is not None
+                    extract_plan_draft(
+                        interaction_id=provisional_interaction_id,
+                        assistant_entry_id=assistant_entry_id,
+                        tool_call_id=selected.tool_call_id,
+                        binding=request_binding,
+                        request_semantic_digest=_json_digest(selected.arguments),
+                        arguments=selected.arguments,
+                    )
+            except ValueError:
+                disposition = PlanToolBatchDisposition.INVALID_ARGUMENTS
+        if disposition is PlanToolBatchDisposition.APPLY:
+            if kind is not PlanToolControlKind.ENTER and workflow_fact is None:
+                disposition = PlanToolBatchDisposition.TOOL_UNAVAILABLE
+            elif (
+                kind is PlanToolControlKind.QUESTION
+                and self._plan_interactions is None
+            ):
+                disposition = PlanToolBatchDisposition.TOOL_UNAVAILABLE
+            elif (
+                kind is PlanToolControlKind.ENTER
+                and workflow_fact is None
+                and self._automatic_plan_continuation is None
+            ):
+                disposition = PlanToolBatchDisposition.TOOL_UNAVAILABLE
+        apply_control = disposition is PlanToolBatchDisposition.APPLY
+        interaction_id = provisional_interaction_id if apply_control else None
+        continuation_turn_id = (
+            _stable_id("plan-continuation-turn", workflow_id, selected.tool_call_id)
+            if apply_control
+            and kind is PlanToolControlKind.ENTER
+            and workflow_fact is None
+            else None
+        )
+        continuation_entry_id = (
+            _stable_id("plan-continuation-entry", workflow_id, selected.tool_call_id)
+            if apply_control
+            and kind is PlanToolControlKind.ENTER
+            and workflow_fact is None
+            else None
+        )
+        continuation_revision_id = (
+            _stable_id(
+                "context-revision", continuation_turn_id or "", "0"
+            )
+            if continuation_turn_id is not None
+            else None
+        )
+        prepared_calls: list[PreparedPlanBatchCall] = []
+        for index, call in enumerate(calls):
+            selected_question = (
+                apply_control
+                and
+                index == selected_call_index
+                and kind is PlanToolControlKind.QUESTION
+            )
+            prepared_calls.append(
+                PreparedPlanBatchCall(
+                    block_id=call.block_id,
+                    tool_call_id=call.tool_call_id,
+                    tool_name=call.tool_name,
+                    result_id=(
+                        None
+                        if selected_question
+                        else _stable_id("tool-result", assistant_entry_id, call.tool_call_id)
+                    ),
+                    result_entry_id=(
+                        None
+                        if selected_question
+                        else _stable_id(
+                            "tool-result-entry", assistant_entry_id, call.tool_call_id
+                        )
+                    ),
+                )
+            )
+        candidate = PreparedPlanToolBatch(
+            session_id=self._writer_lease.guard.session_id,
+            workspace_id=await self._resolved_workspace_id(deadline),
+            origin_turn_id=canonical_facts.canonical_input.identity.turn_id,
+            assistant_entry_id=assistant_entry_id,
+            selected_call_ordinal=selected_call_index,
+            control_kind=kind,
+            selected_arguments=selected.arguments,
+            request_binding=request_binding,
+            permission_snapshot=canonical_facts.run_permission_snapshot,
+            workflow_id=workflow_id,
+            expected_workflow_revision=expected_revision,
+            interaction_id=interaction_id,
+            continuation_turn_id=continuation_turn_id,
+            continuation_entry_id=continuation_entry_id,
+            continuation_context_binding_revision_id=continuation_revision_id,
+            calls=tuple(prepared_calls),
+            occurred_at=datetime.now(timezone.utc),
+            actor_id="plan-runtime",
+            idempotent_existing=(
+                apply_control
+                and kind is PlanToolControlKind.ENTER
+                and workflow_fact is not None
+            ),
+            selected_disposition=disposition,
+        )
+        waiter: PlanQuestionWaiter | None = None
+        if apply_control and kind is PlanToolControlKind.QUESTION:
+            assert self._plan_interactions is not None
+            assert interaction_id is not None
+            waiter = await self._plan_interactions.prepare_question(
+                interaction_id=interaction_id,
+                origin_turn_id=candidate.origin_turn_id,
+            )
+        try:
+            if (
+                apply_control
+                and kind is PlanToolControlKind.ENTER
+                and not candidate.idempotent_existing
+            ):
+                assert self._automatic_plan_continuation is not None
+                # The Host callback installs its own continuation task before
+                # its first await.  Calling it in the ROOT run-chain task is
+                # essential: an extra shield-created wrapper would become the
+                # observed origin task and could never exact-join Host's ROOT
+                # slot.  The callback itself shields the installed owner.
+                outcome = await self._automatic_plan_continuation(
+                    candidate, deadline
+                )
+            else:
+                try:
+                    outcome = await self._io.run(
+                        self._repository.accept_plan_tool_batch,
+                        self._writer_lease.guard,
+                        candidate=candidate,
+                        deadline_monotonic=deadline,
+                    )
+                except Exception:
+                    outcome = await self._io.run(
+                        self._repository.confirm_plan_tool_batch_winner,
+                        candidate=candidate,
+                        deadline_monotonic=max(deadline, monotonic() + 5.0),
+                    )
+                    if outcome is None:
+                        raise
+            if waiter is not None:
+                if outcome.question is None:
+                    raise RuntimeError("accepted Plan question lacks typed content")
+                await self._plan_interactions.publish_open(waiter, outcome.question)
+                await self._plan_interactions.wait(waiter)
+            return outcome
+        except BaseException as error:
+            if waiter is not None and self._plan_interactions is not None:
+                await self._plan_interactions.abandon(waiter, error)
             raise
 
     async def accept_subagent_result(

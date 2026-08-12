@@ -20,7 +20,7 @@ import (
 const (
 	ProtocolMajor     = 3
 	ProtocolMinor     = 0
-	SchemaFingerprint = "sha256:c8571a6124c4b02f6d4b10911fbd11aa46517f05b84408b6606fa8c85866dbbe"
+	SchemaFingerprint = "sha256:93a7667cd79b0e3992f5e302e7a3f52f1caa7feabb4a265547995046522e0d97"
 	maximumFrameBytes = 8 << 20
 )
 
@@ -223,7 +223,22 @@ func (s *Service) History(ctx context.Context, cursor *protocolv3.HistoryCursor,
 }
 
 func (s *Service) Command(ctx context.Context, commandID string, kind protocolv3.CommandKind, text string, targetTurnID string) (*protocolv3.CommandOutcome, error) {
-	return s.command(ctx, commandID, kind, text, targetTurnID, "", "")
+	return s.command(ctx, commandID, kind, text, targetTurnID, "", "", protocolv3.PermissionMode_PERMISSION_MODE_UNSPECIFIED, "", 0)
+}
+
+// CommandWithPlanFields is the closed new-turn/Plan command surface.  The
+// ordinary Command method remains intentionally narrow for detach, stop and
+// steer, whose wire matrix forbids permission or Plan fields.
+func (s *Service) CommandWithPlanFields(
+	ctx context.Context,
+	commandID string,
+	kind protocolv3.CommandKind,
+	text, targetTurnID string,
+	requestedMode protocolv3.PermissionMode,
+	workflowID string,
+	expectedWorkflowRevision uint64,
+) (*protocolv3.CommandOutcome, error) {
+	return s.command(ctx, commandID, kind, text, targetTurnID, "", "", requestedMode, workflowID, expectedWorkflowRevision)
 }
 
 // AcceptSubagentResult installs an already durable child result into the ROOT
@@ -232,7 +247,7 @@ func (s *Service) AcceptSubagentResult(ctx context.Context, commandID, targetTur
 	if sourceResultID == "" {
 		return nil, errors.New("Protocol v3 subagent result identity is empty")
 	}
-	return s.command(ctx, commandID, protocolv3.CommandKind_ACCEPT_SUBAGENT_RESULT, "", targetTurnID, sourceResultID, "")
+	return s.command(ctx, commandID, protocolv3.CommandKind_ACCEPT_SUBAGENT_RESULT, "", targetTurnID, sourceResultID, "", protocolv3.PermissionMode_PERMISSION_MODE_UNSPECIFIED, "", 0)
 }
 
 // AcceptJobResult installs an already durable job result into an existing
@@ -241,16 +256,17 @@ func (s *Service) AcceptJobResult(ctx context.Context, commandID, targetTurnID, 
 	if sourceJobID == "" {
 		return nil, errors.New("Protocol v3 job result identity is empty")
 	}
-	return s.command(ctx, commandID, protocolv3.CommandKind_ACCEPT_JOB_RESULT, "", targetTurnID, "", sourceJobID)
+	return s.command(ctx, commandID, protocolv3.CommandKind_ACCEPT_JOB_RESULT, "", targetTurnID, "", sourceJobID, protocolv3.PermissionMode_PERMISSION_MODE_UNSPECIFIED, "", 0)
 }
 
-func (s *Service) command(ctx context.Context, commandID string, kind protocolv3.CommandKind, text, targetTurnID, sourceResultID, sourceJobID string) (*protocolv3.CommandOutcome, error) {
+func (s *Service) command(ctx context.Context, commandID string, kind protocolv3.CommandKind, text, targetTurnID, sourceResultID, sourceJobID string, requestedMode protocolv3.PermissionMode, workflowID string, expectedWorkflowRevision uint64) (*protocolv3.CommandOutcome, error) {
 	if commandID == "" {
 		return nil, errors.New("Protocol v3 command identity is empty")
 	}
 	requestID := s.nextRequestID("command")
 	response, err := s.attachedRoundTrip(ctx, &protocolv3.ClientFrame{Request: &protocolv3.ClientFrame_Command{Command: &protocolv3.CommandRequest{
 		RequestId: requestID, CommandId: commandID, CommandKind: kind, ClientSubmissionId: commandID, Text: text, TargetTurnId: targetTurnID, SourceSubagentResultId: sourceResultID, SourceJobId: sourceJobID,
+		RequestedPermissionMode: requestedMode, TargetPlanWorkflowId: workflowID, ExpectedPlanWorkflowRevision: expectedWorkflowRevision,
 	}}})
 	if err != nil {
 		return nil, err
@@ -260,6 +276,102 @@ func (s *Service) command(ctx context.Context, commandID string, kind protocolv3
 		return nil, errors.New("Protocol v3 command outcome failed validation")
 	}
 	return proto.Clone(value).(*protocolv3.CommandOutcome), nil
+}
+
+func (s *Service) ResolvePlanQuestion(
+	ctx context.Context,
+	commandID, workflowID, interactionID string,
+	expectedWriterGeneration, expectedWorkflowRevision uint64,
+	answer *protocolv3.PlanQuestionAnswer,
+) (*protocolv3.ResolvePlanInteractionResponse, error) {
+	if answer == nil || answer.Answer == nil {
+		return nil, errors.New("Protocol v3 Plan question answer is absent")
+	}
+	request := &protocolv3.ResolvePlanInteractionRequest{
+		CommandId: commandID, AttemptExpectedWriterGeneration: expectedWriterGeneration,
+		WorkflowId: workflowID, ExpectedWorkflowRevision: expectedWorkflowRevision,
+		InteractionId: interactionID,
+		Resolution:    &protocolv3.ResolvePlanInteractionRequest_QuestionAnswer{QuestionAnswer: proto.Clone(answer).(*protocolv3.PlanQuestionAnswer)},
+	}
+	return s.resolvePlanInteraction(ctx, request)
+}
+
+func (s *Service) ResolvePlanDraft(
+	ctx context.Context,
+	commandID, workflowID, interactionID string,
+	expectedWriterGeneration, expectedWorkflowRevision uint64,
+	decision protocolv3.PlanDraftDecision,
+	feedback *string,
+) (*protocolv3.ResolvePlanInteractionResponse, error) {
+	if decision == protocolv3.PlanDraftDecision_PLAN_DRAFT_DECISION_UNSPECIFIED {
+		return nil, errors.New("Protocol v3 Plan draft decision is invalid")
+	}
+	draft := &protocolv3.PlanDraftResolution{Decision: decision}
+	if feedback != nil {
+		value := *feedback
+		draft.Feedback = &value
+	}
+	request := &protocolv3.ResolvePlanInteractionRequest{
+		CommandId: commandID, AttemptExpectedWriterGeneration: expectedWriterGeneration,
+		WorkflowId: workflowID, ExpectedWorkflowRevision: expectedWorkflowRevision,
+		InteractionId: interactionID,
+		Resolution:    &protocolv3.ResolvePlanInteractionRequest_Draft{Draft: draft},
+	}
+	return s.resolvePlanInteraction(ctx, request)
+}
+
+func (s *Service) resolvePlanInteraction(ctx context.Context, request *protocolv3.ResolvePlanInteractionRequest) (*protocolv3.ResolvePlanInteractionResponse, error) {
+	if request.CommandId == "" || request.WorkflowId == "" || request.InteractionId == "" || request.AttemptExpectedWriterGeneration == 0 || request.ExpectedWorkflowRevision == 0 {
+		return nil, errors.New("Protocol v3 Plan resolution identity is incomplete")
+	}
+	requestID := s.nextRequestID("resolve-plan-interaction")
+	request.RequestId = requestID
+	response, err := s.attachedRoundTrip(ctx, &protocolv3.ClientFrame{Request: &protocolv3.ClientFrame_ResolvePlanInteraction{ResolvePlanInteraction: request}})
+	if err != nil {
+		return nil, err
+	}
+	value := response.GetResolvePlanInteraction()
+	if value == nil || value.RequestId != requestID || value.CommandId != request.CommandId || value.WorkflowId != request.WorkflowId || value.InteractionId != request.InteractionId || value.WorkflowRevision == 0 {
+		return nil, errors.New("Protocol v3 Plan resolution failed validation")
+	}
+	return proto.Clone(value).(*protocolv3.ResolvePlanInteractionResponse), nil
+}
+
+func (s *Service) ReadPlanQuestion(ctx context.Context, interactionID string) (*protocolv3.PlanQuestionContent, error) {
+	if interactionID == "" {
+		return nil, errors.New("Protocol v3 Plan question identity is empty")
+	}
+	requestID := s.nextRequestID("read-plan-question")
+	response, err := s.attachedRoundTrip(ctx, &protocolv3.ClientFrame{Request: &protocolv3.ClientFrame_ReadPlanQuestion{ReadPlanQuestion: &protocolv3.ReadPlanQuestionContentRequest{RequestId: requestID, InteractionId: interactionID}}})
+	if err != nil {
+		return nil, err
+	}
+	value := response.GetPlanQuestion()
+	if value == nil || value.RequestId != requestID || value.InteractionId != interactionID || value.TypedContentFingerprint == "" || len(value.Options) > 3 {
+		return nil, errors.New("Protocol v3 Plan question content failed validation")
+	}
+	return proto.Clone(value).(*protocolv3.PlanQuestionContent), nil
+}
+
+func (s *Service) ReadPlanDraft(ctx context.Context, interactionID, expectedDigest string, offset uint64, limit uint32) (*protocolv3.PlanDraftTextChunk, error) {
+	if interactionID == "" || limit < 4 || limit > 64<<10 {
+		return nil, errors.New("Protocol v3 Plan draft read is invalid")
+	}
+	requestID := s.nextRequestID("read-plan-draft")
+	request := &protocolv3.ReadPlanDraftTextChunkRequest{RequestId: requestID, InteractionId: interactionID, OffsetUtf8Bytes: offset, LimitBytes: limit}
+	if expectedDigest != "" {
+		value := expectedDigest
+		request.ExpectedPlanUtf8Digest = &value
+	}
+	response, err := s.attachedRoundTrip(ctx, &protocolv3.ClientFrame{Request: &protocolv3.ClientFrame_ReadPlanDraft{ReadPlanDraft: request}})
+	if err != nil {
+		return nil, err
+	}
+	value := response.GetPlanDraft()
+	if value == nil || value.RequestId != requestID || value.InteractionId != interactionID || value.OffsetUtf8Bytes != offset || value.NextOffsetUtf8Bytes < offset || value.NextOffsetUtf8Bytes-offset != uint64(len([]byte(value.Body))) || value.PlanUtf8Digest == "" || value.PlanUtf8Size < value.NextOffsetUtf8Bytes || (value.Eof && value.NextOffsetUtf8Bytes != value.PlanUtf8Size) {
+		return nil, errors.New("Protocol v3 Plan draft chunk failed validation")
+	}
+	return proto.Clone(value).(*protocolv3.PlanDraftTextChunk), nil
 }
 
 func (s *Service) QueryCommand(ctx context.Context, commandID string) (*protocolv3.QueryCommandResponse, error) {
@@ -425,6 +537,12 @@ func installAttachment(frame *protocolv3.ClientFrame, id string, generation uint
 		value.LiveControlSnapshot.AttachmentId, value.LiveControlSnapshot.AttachmentGeneration = id, generation
 	case *protocolv3.ClientFrame_ResolveInteraction:
 		value.ResolveInteraction.AttachmentId, value.ResolveInteraction.AttachmentGeneration = id, generation
+	case *protocolv3.ClientFrame_ResolvePlanInteraction:
+		value.ResolvePlanInteraction.AttachmentId, value.ResolvePlanInteraction.AttachmentGeneration = id, generation
+	case *protocolv3.ClientFrame_ReadPlanQuestion:
+		value.ReadPlanQuestion.AttachmentId, value.ReadPlanQuestion.AttachmentGeneration = id, generation
+	case *protocolv3.ClientFrame_ReadPlanDraft:
+		value.ReadPlanDraft.AttachmentId, value.ReadPlanDraft.AttachmentGeneration = id, generation
 	}
 }
 

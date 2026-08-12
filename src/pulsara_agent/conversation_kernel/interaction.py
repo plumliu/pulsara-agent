@@ -39,6 +39,7 @@ from pulsara_agent.conversation_kernel.repository import (
     ConversationKernelConflict,
     ConversationKernelRepository,
 )
+from pulsara_agent.primitives.run_permission import FrozenRunPermissionSnapshot
 
 
 INTERACTION_TIMEOUT_SECONDS = 10 * 60
@@ -51,6 +52,7 @@ class ToolInteractionResolution:
     public_message: str
     attempt_id: str | None = None
     result_entry_id: str | None = None
+    permission_snapshot_fingerprint: str | None = None
 
 
 @dataclass(slots=True)
@@ -64,6 +66,7 @@ class _PendingToolInteraction:
     attempt_id: str
     result_id: str
     result_entry_id: str
+    permission_snapshot_fingerprint: str
     future: asyncio.Future[ToolInteractionResolution]
     resolving: bool = False
 
@@ -111,6 +114,16 @@ class KernelInteractionCoordinator:
         with self._controller_lock:
             return not self._closed and self._controller_id is not None
 
+    def is_current_controller(self, attachment_id: str) -> bool:
+        """Return the narrow same-Host content/control capability join."""
+
+        with self._controller_lock:
+            return (
+                not self._closed
+                and bool(attachment_id)
+                and self._controller_id == attachment_id
+            )
+
     async def request_tool_confirmation(
         self,
         *,
@@ -118,6 +131,7 @@ class KernelInteractionCoordinator:
         assistant_entry_id: str,
         tool_call_id: str,
         tool_name: str,
+        permission_snapshot: FrozenRunPermissionSnapshot,
     ) -> ToolInteractionResolution:
         if not self.has_controller():
             return ToolInteractionResolution(
@@ -163,6 +177,9 @@ class KernelInteractionCoordinator:
                 attempt_id=f"tool-attempt:{uuid4().hex}",
                 result_id=f"tool-result:{uuid4().hex}",
                 result_entry_id=f"entry:{uuid4().hex}",
+                permission_snapshot_fingerprint=(
+                    permission_snapshot.snapshot_fingerprint
+                ),
                 future=loop.create_future(),
             )
             self._pending = pending
@@ -237,6 +254,9 @@ class KernelInteractionCoordinator:
                 "redacted_subject": f"tool:{pending.tool_name}",
                 "actor_id": actor_id,
                 "occurred_at": datetime.now(timezone.utc),
+                "permission_snapshot_fingerprint": (
+                    pending.permission_snapshot_fingerprint
+                ),
                 "deadline_monotonic": monotonic() + 10.0,
             }
         try:
@@ -273,6 +293,7 @@ class KernelInteractionCoordinator:
                 else "tool execution was denied",
                 accepted.attempt_id,
                 accepted.result_entry_id,
+                accepted.permission_snapshot_fingerprint,
             )
             if not pending.future.done():
                 pending.future.set_result(resolution)

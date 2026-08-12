@@ -34,7 +34,6 @@ from pulsara_agent.ports.tool_execution import (
     ToolOutputArtifactCandidate,
     ToolOutputSourceCoverage,
 )
-from pulsara_agent.tool_permission import default_permission_policy
 from tests.support.round3 import authorize_direct_tool, invoke_direct_tool
 
 
@@ -126,9 +125,7 @@ def test_stage2_terminal_handle_is_same_host_only_and_close_kills_and_joins(
             host_owner_id=owner,
             session_id=session_id,
             live_bus=LiveAgentEventBus(),
-            authorization_policy=DefaultToolDispatchAuthorizationPolicy(
-                default_permission_policy()
-            ),
+            authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
         )
         process_id, turn_id, entry_id = await _start_background_process(
             port, session_id=session_id
@@ -174,18 +171,14 @@ def test_stage2_terminal_new_host_does_not_adopt_or_relaunch_old_process(
             host_owner_id=old_owner,
             session_id=old_session_id,
             live_bus=LiveAgentEventBus(),
-            authorization_policy=DefaultToolDispatchAuthorizationPolicy(
-                default_permission_policy()
-            ),
+            authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
         )
         new = DirectKernelToolPort(
             workspace_root=tmp_path,
             host_owner_id=new_owner,
             session_id=new_session_id,
             live_bus=LiveAgentEventBus(),
-            authorization_policy=DefaultToolDispatchAuthorizationPolicy(
-                default_permission_policy()
-            ),
+            authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
         )
         process_id, turn_id, entry_id = await _start_background_process(
             old, session_id=old_session_id
@@ -238,9 +231,7 @@ def test_tool_close_blocks_until_cancelled_physical_thread_exits(
             host_owner_id=_name("host"),
             session_id=session_id,
             live_bus=LiveAgentEventBus(),
-            authorization_policy=DefaultToolDispatchAuthorizationPolicy(
-                default_permission_policy()
-            ),
+            authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
         )
         port._tools["read_file"] = BlockingTool()  # type: ignore[assignment]  # noqa: SLF001
         operation = asyncio.create_task(

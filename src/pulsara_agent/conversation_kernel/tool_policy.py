@@ -10,10 +10,11 @@ from typing import Mapping, Protocol
 from pulsara_agent.ports.tool_execution import ToolCall
 from pulsara_agent.tool_permission import (
     AllowAllPermissionGate,
-    EffectivePermissionPolicy,
     PermissionDecisionKind,
     PolicyPermissionGate,
+    preset_to_policy,
 )
+from pulsara_agent.primitives.run_permission import FrozenRunPermissionSnapshot
 
 
 class ToolDispatchDecisionKind(StrEnum):
@@ -29,6 +30,7 @@ class ToolDispatchAuthorizationRequest:
     arguments: Mapping[str, object]
     turn_id: str
     assistant_entry_id: str
+    permission_snapshot: FrozenRunPermissionSnapshot
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,13 +49,11 @@ class ToolDispatchAuthorizationPolicy(Protocol):
 class DefaultToolDispatchAuthorizationPolicy:
     def __init__(
         self,
-        policy: EffectivePermissionPolicy,
         *,
         timeout_seconds: float = 2.0,
     ) -> None:
         if not 0 < timeout_seconds <= 5.0:
             raise ValueError("tool authorization timeout exceeds its hard cap")
-        self._gate = PolicyPermissionGate(policy, AllowAllPermissionGate())
         self._timeout_seconds = timeout_seconds
 
     async def decide(
@@ -64,9 +64,13 @@ class DefaultToolDispatchAuthorizationPolicy:
             name=request.tool_name,
             arguments=dict(request.arguments),
         )
+        gate = PolicyPermissionGate(
+            preset_to_policy(request.permission_snapshot.effective_mode),
+            AllowAllPermissionGate(),
+        )
         try:
             decision = await asyncio.wait_for(
-                self._gate.evaluate([call]), timeout=self._timeout_seconds
+                gate.evaluate([call]), timeout=self._timeout_seconds
             )
         except asyncio.CancelledError:
             raise

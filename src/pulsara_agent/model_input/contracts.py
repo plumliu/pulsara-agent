@@ -33,6 +33,21 @@ from pulsara_agent.primitives.model_call import (
     ResolvedModelTargetFact,
     TokenEstimatorFact,
 )
+from pulsara_agent.primitives.permission import PermissionMode
+from pulsara_agent.primitives.plan_workflow import (
+    PlanApprovedMaterializationDisposition,
+    PlanDraftContentIdentity,
+    PlanHandoffKind,
+    PlanInteractionBinding,
+    PlanWorkflowEnteredBy,
+    PlanWorkflowStatus,
+    extract_plan_draft,
+    plan_draft_utf8_digest,
+)
+from pulsara_agent.primitives.run_permission import (
+    FrozenRunPermissionSnapshot,
+    RunPermissionOverlay,
+)
 
 
 SHA256_PREFIX = "sha256:"
@@ -54,12 +69,16 @@ class CanonicalInputOriginKind(StrEnum):
     SUBAGENT_OBJECTIVE = "SUBAGENT_OBJECTIVE"
     SUBAGENT_RESULT = "SUBAGENT_RESULT"
     JOB_RESULT = "JOB_RESULT"
+    PLAN_CONTINUATION = "PLAN_CONTINUATION"
 
 
 class ContextSourceKind(StrEnum):
     BASE_SYSTEM = "BASE_SYSTEM"
     RUNTIME_ENVIRONMENT = "RUNTIME_ENVIRONMENT"
     RUNTIME_CLOCK = "RUNTIME_CLOCK"
+    RUN_PERMISSION = "RUN_PERMISSION"
+    PLAN_HANDOFF = "PLAN_HANDOFF"
+    PLAN_WORKFLOW = "PLAN_WORKFLOW"
     CAPABILITY_CATALOG = "CAPABILITY_CATALOG"
     ACTIVE_SKILL = "ACTIVE_SKILL"
 
@@ -525,11 +544,13 @@ class FrozenProviderInputItemKind(StrEnum):
     TOOL_RESULT = "TOOL_RESULT"
     TOOL_RESULT_CLOSURE = "TOOL_RESULT_CLOSURE"
     LATE_TOOL_OUTCOME = "LATE_TOOL_OUTCOME"
+    PLAN_CONTINUATION = "PLAN_CONTINUATION"
 
 
 class ProviderToolResultClosureKind(StrEnum):
     INTERRUPTED_BEFORE_DISPATCH = "interrupted_before_dispatch"
     INTERRUPTED_MAY_HAVE_PARTIALLY_EXECUTED = "interrupted_may_have_partially_executed"
+    PLAN_INTERACTION_ABORTED = "plan_interaction_aborted"
 
 
 @dataclass(frozen=True, slots=True)
@@ -585,7 +606,11 @@ class FrozenProviderInputItem:
             and self.source_turn_id is not None
         ):
             raise ValueError("provider input entry attribution union is invalid")
-        if (self.item_kind is FrozenProviderInputItemKind.USER) != (
+        has_origin = self.item_kind in {
+            FrozenProviderInputItemKind.USER,
+            FrozenProviderInputItemKind.PLAN_CONTINUATION,
+        }
+        if has_origin != (
             self.input_origin is not None
         ):
             raise ValueError("provider input origin union is invalid")
@@ -713,6 +738,383 @@ class CanonicalModelInputSnapshot:
             raise ValueError("canonical model input snapshot fingerprint mismatch")
 
 
+@dataclass(frozen=True, slots=True)
+class FrozenPlanWorkflowCompileFact:
+    session_id: str
+    workspace_id: str
+    turn_id: str
+    permission_snapshot_id: str
+    permission_snapshot_fingerprint: str
+    workflow_id: str
+    workflow_ordinal: int
+    current_workflow_revision: int
+    workflow_status: PlanWorkflowStatus
+    entered_by: PlanWorkflowEnteredBy
+    resume_permission_mode: PermissionMode
+    permission_contract_id: str
+    permission_contract_fingerprint: str
+    fact_fingerprint: str
+
+    def __post_init__(self) -> None:
+        if self.workflow_status is not PlanWorkflowStatus.ACTIVE:
+            raise ValueError("compiled Plan workflow must be active")
+        if min(self.workflow_ordinal, self.current_workflow_revision) < 1:
+            raise ValueError("compiled Plan workflow revision is invalid")
+        if self.fact_fingerprint != plan_workflow_compile_fact_fingerprint(self):
+            raise ValueError("compiled Plan workflow fingerprint mismatch")
+
+
+def plan_workflow_compile_fact_fingerprint(
+    fact: FrozenPlanWorkflowCompileFact,
+) -> str:
+    return context_fingerprint(
+        "pulsara:plan-workflow-compile-fact:v1",
+        {
+            "session_id": fact.session_id,
+            "workspace_id": fact.workspace_id,
+            "turn_id": fact.turn_id,
+            "permission_snapshot_id": fact.permission_snapshot_id,
+            "permission_snapshot_fingerprint": fact.permission_snapshot_fingerprint,
+            "workflow_id": fact.workflow_id,
+            "workflow_ordinal": fact.workflow_ordinal,
+            "current_workflow_revision": fact.current_workflow_revision,
+            "workflow_status": fact.workflow_status.value,
+            "entered_by": fact.entered_by.value,
+            "resume_permission_mode": fact.resume_permission_mode.value,
+            "permission_contract_id": fact.permission_contract_id,
+            "permission_contract_fingerprint": fact.permission_contract_fingerprint,
+        },
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class FrozenPlanHandoffCompileFact:
+    session_id: str
+    workspace_id: str
+    target_turn_id: str
+    carrier_entry_id: str
+    carrier_entry_sequence: int
+    workflow_id: str
+    workflow_ordinal: int
+    workflow_revision_at_transition: int
+    interaction_id: str | None
+    handoff_kind: PlanHandoffKind
+    workflow_status: PlanWorkflowStatus
+    resume_permission_mode: PermissionMode
+    transition_semantic_digest: str
+    fact_fingerprint: str
+
+    def __post_init__(self) -> None:
+        if min(
+            self.carrier_entry_sequence,
+            self.workflow_ordinal,
+            self.workflow_revision_at_transition,
+        ) < 1:
+            raise ValueError("compiled Plan handoff sequence is invalid")
+        if (
+            self.handoff_kind is PlanHandoffKind.ENTERED_PLAN
+            and self.interaction_id is not None
+        ) or (
+            self.handoff_kind
+            in {
+                PlanHandoffKind.REVISION_REQUESTED,
+                PlanHandoffKind.APPROVED_PLAN,
+            }
+            and self.interaction_id is None
+        ):
+            raise ValueError("compiled Plan handoff interaction is invalid")
+        expected_status = {
+            PlanHandoffKind.ENTERED_PLAN: PlanWorkflowStatus.ACTIVE,
+            PlanHandoffKind.REVISION_REQUESTED: PlanWorkflowStatus.ACTIVE,
+            PlanHandoffKind.APPROVED_PLAN: PlanWorkflowStatus.APPROVED,
+            PlanHandoffKind.CANCELLED_PLAN: PlanWorkflowStatus.CANCELLED,
+            PlanHandoffKind.FORCE_EXITED_PLAN: PlanWorkflowStatus.FORCE_EXITED,
+        }[self.handoff_kind]
+        if self.workflow_status is not expected_status:
+            raise ValueError("compiled Plan handoff status is invalid")
+        if self.fact_fingerprint != plan_handoff_compile_fact_fingerprint(self):
+            raise ValueError("compiled Plan handoff fingerprint mismatch")
+
+
+def plan_handoff_compile_fact_fingerprint(
+    fact: FrozenPlanHandoffCompileFact,
+) -> str:
+    return context_fingerprint(
+        "pulsara:plan-handoff-compile-fact:v1",
+        {
+            "session_id": fact.session_id,
+            "workspace_id": fact.workspace_id,
+            "target_turn_id": fact.target_turn_id,
+            "carrier_entry_id": fact.carrier_entry_id,
+            "carrier_entry_sequence": fact.carrier_entry_sequence,
+            "workflow_id": fact.workflow_id,
+            "workflow_ordinal": fact.workflow_ordinal,
+            "workflow_revision_at_transition": (
+                fact.workflow_revision_at_transition
+            ),
+            "interaction_id": fact.interaction_id,
+            "handoff_kind": fact.handoff_kind.value,
+            "workflow_status": fact.workflow_status.value,
+            "resume_permission_mode": fact.resume_permission_mode.value,
+            "transition_semantic_digest": fact.transition_semantic_digest,
+        },
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class ApprovedPlanMaterializationFact:
+    session_id: str
+    workspace_id: str
+    target_turn_id: str
+    workflow_id: str
+    interaction_id: str
+    assistant_entry_id: str
+    tool_call_id: str
+    request_contract_id: str
+    request_contract_version: str
+    request_contract_fingerprint: str
+    request_semantic_digest: str
+    content_identity: PlanDraftContentIdentity
+    exact_plan_utf8: bytes = field(repr=False)
+    disposition: PlanApprovedMaterializationDisposition
+    pinned_canonical_item_fingerprint: str | None
+    fact_fingerprint: str
+
+    def __post_init__(self) -> None:
+        if len(self.exact_plan_utf8) != self.content_identity.plan_utf8_size:
+            raise ValueError("approved Plan materialization size mismatch")
+        if plan_draft_utf8_digest(self.exact_plan_utf8) != (
+            self.content_identity.plan_utf8_digest
+        ):
+            raise ValueError("approved Plan materialization digest mismatch")
+        pinned = self.disposition is (
+            PlanApprovedMaterializationDisposition.PIN_EXISTING_CANONICAL_BLOCK
+        )
+        if pinned != (self.pinned_canonical_item_fingerprint is not None):
+            raise ValueError("approved Plan materialization disposition is invalid")
+        if self.fact_fingerprint != approved_plan_materialization_fingerprint(self):
+            raise ValueError("approved Plan materialization fingerprint mismatch")
+
+
+def approved_plan_materialization_fingerprint(
+    fact: ApprovedPlanMaterializationFact,
+) -> str:
+    return context_fingerprint(
+        "pulsara:approved-plan-materialization-fact:v1",
+        {
+            "session_id": fact.session_id,
+            "workspace_id": fact.workspace_id,
+            "target_turn_id": fact.target_turn_id,
+            "workflow_id": fact.workflow_id,
+            "interaction_id": fact.interaction_id,
+            "assistant_entry_id": fact.assistant_entry_id,
+            "tool_call_id": fact.tool_call_id,
+            "request_contract_id": fact.request_contract_id,
+            "request_contract_version": fact.request_contract_version,
+            "request_contract_fingerprint": fact.request_contract_fingerprint,
+            "request_semantic_digest": fact.request_semantic_digest,
+            "content_identity": {
+                "interaction_id": fact.content_identity.interaction_id,
+                "assistant_entry_id": fact.content_identity.assistant_entry_id,
+                "tool_call_id": fact.content_identity.tool_call_id,
+                "request_contract_id": fact.content_identity.request_contract_id,
+                "request_contract_version": (
+                    fact.content_identity.request_contract_version
+                ),
+                "request_contract_fingerprint": (
+                    fact.content_identity.request_contract_fingerprint
+                ),
+                "request_semantic_digest": (
+                    fact.content_identity.request_semantic_digest
+                ),
+                "plan_utf8_size": fact.content_identity.plan_utf8_size,
+                "plan_utf8_digest": fact.content_identity.plan_utf8_digest,
+            },
+            "disposition": fact.disposition.value,
+            "pinned_canonical_item_fingerprint": (
+                fact.pinned_canonical_item_fingerprint
+            ),
+        },
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class FrozenCanonicalCompileSnapshot:
+    canonical_input: CanonicalModelInputSnapshot = field(repr=False)
+    run_permission_snapshot: FrozenRunPermissionSnapshot
+    plan_workflow_fact: FrozenPlanWorkflowCompileFact | None
+    plan_handoff_fact: FrozenPlanHandoffCompileFact | None
+    approved_plan_materialization_fact: ApprovedPlanMaterializationFact | None = field(
+        repr=False
+    )
+    canonical_read_cut_fingerprint: str
+
+    def __post_init__(self) -> None:
+        identity = self.canonical_input.identity
+        permission = self.run_permission_snapshot
+        if permission.snapshot_id == "":
+            raise ValueError("compile permission snapshot is absent")
+        workflow = self.plan_workflow_fact
+        plan_bound = permission.overlay is RunPermissionOverlay.PLAN_READ_ONLY
+        if plan_bound != (workflow is not None):
+            raise ValueError("compile Plan workflow presence does not exact-join")
+        if workflow is not None and (
+            workflow.session_id != identity.session_id
+            or workflow.turn_id != identity.turn_id
+            or workflow.permission_snapshot_id != permission.snapshot_id
+            or workflow.permission_snapshot_fingerprint
+            != permission.snapshot_fingerprint
+            or workflow.workflow_id != permission.plan_workflow_id
+            or workflow.workflow_ordinal
+            != permission.plan_context_ordinal_at_admission
+            or workflow.current_workflow_revision
+            < int(permission.plan_workflow_revision_at_admission or 0)
+            or workflow.permission_contract_id
+            != permission.permission_contract_id
+            or workflow.permission_contract_fingerprint
+            != permission.permission_contract_fingerprint
+        ):
+            raise ValueError("compile Plan workflow does not exact-join")
+        handoff = self.plan_handoff_fact
+        if handoff is not None:
+            expected_item_kind = (
+                FrozenProviderInputItemKind.USER
+                if handoff.handoff_kind
+                in {
+                    PlanHandoffKind.CANCELLED_PLAN,
+                    PlanHandoffKind.FORCE_EXITED_PLAN,
+                }
+                else FrozenProviderInputItemKind.PLAN_CONTINUATION
+            )
+            matching_items = tuple(
+                item
+                for item in self.canonical_input.items
+                if item.source_entry_id == handoff.carrier_entry_id
+                and item.source_entry_sequence == handoff.carrier_entry_sequence
+                and item.source_turn_id == identity.turn_id
+                and item.item_kind is expected_item_kind
+            )
+            if (
+                handoff.session_id != identity.session_id
+                or handoff.target_turn_id != identity.turn_id
+                or len(matching_items) != 1
+                or (
+                    workflow is not None
+                    and workflow.workspace_id != handoff.workspace_id
+                )
+            ):
+                raise ValueError("compile Plan handoff does not exact-join")
+        approved = self.approved_plan_materialization_fact
+        if (approved is not None) != (
+            handoff is not None
+            and handoff.handoff_kind is PlanHandoffKind.APPROVED_PLAN
+        ):
+            raise ValueError("approved Plan materialization presence is invalid")
+        if approved is not None:
+            assert handoff is not None
+            content = approved.content_identity
+            if (
+                approved.session_id != identity.session_id
+                or approved.workspace_id != handoff.workspace_id
+                or approved.target_turn_id != identity.turn_id
+                or approved.workflow_id != handoff.workflow_id
+                or approved.interaction_id != handoff.interaction_id
+                or approved.assistant_entry_id != content.assistant_entry_id
+                or approved.tool_call_id != content.tool_call_id
+                or approved.interaction_id != content.interaction_id
+                or approved.request_contract_id != content.request_contract_id
+                or approved.request_contract_version
+                != content.request_contract_version
+                or approved.request_contract_fingerprint
+                != content.request_contract_fingerprint
+                or approved.request_semantic_digest
+                != content.request_semantic_digest
+            ):
+                raise ValueError("approved Plan materialization does not exact-join")
+            matching_items = tuple(
+                item
+                for item in self.canonical_input.items
+                if item.item_kind
+                is FrozenProviderInputItemKind.ASSISTANT_TOOL_REQUEST
+                and item.source_entry_id == approved.assistant_entry_id
+                and any(
+                    call.tool_call_id == approved.tool_call_id
+                    for call in item.tool_calls
+                )
+            )
+            if len(matching_items) > 1:
+                raise ValueError("approved Plan canonical carrier is duplicated")
+            matching_calls = tuple(
+                call
+                for item in matching_items
+                for call in item.tool_calls
+                if call.tool_call_id == approved.tool_call_id
+            )
+            if matching_calls:
+                extracted = extract_plan_draft(
+                    interaction_id=approved.interaction_id,
+                    assistant_entry_id=approved.assistant_entry_id,
+                    tool_call_id=approved.tool_call_id,
+                    binding=PlanInteractionBinding(
+                        approved.request_contract_id,
+                        approved.request_contract_version,
+                        approved.request_contract_fingerprint,
+                    ),
+                    request_semantic_digest=approved.request_semantic_digest,
+                    arguments=matching_calls[0].arguments,
+                )
+                if (
+                    extracted.identity != approved.content_identity
+                    or extracted.exact_plan_utf8 != approved.exact_plan_utf8
+                ):
+                    raise ValueError("approved Plan canonical content drifted")
+            pinned = approved.disposition is (
+                PlanApprovedMaterializationDisposition.PIN_EXISTING_CANONICAL_BLOCK
+            )
+            if pinned:
+                if (
+                    len(matching_items) != 1
+                    or approved.pinned_canonical_item_fingerprint
+                    != provider_input_item_fingerprint(matching_items[0])
+                ):
+                    raise ValueError("approved Plan pinned carrier does not exact-join")
+            elif matching_items:
+                raise ValueError("approved Plan materialization would duplicate content")
+        if self.canonical_read_cut_fingerprint != (
+            canonical_compile_snapshot_fingerprint(self)
+        ):
+            raise ValueError("canonical compile snapshot fingerprint mismatch")
+
+
+def canonical_compile_snapshot_fingerprint(
+    snapshot: FrozenCanonicalCompileSnapshot,
+) -> str:
+    return context_fingerprint(
+        "pulsara:canonical-compile-snapshot:v1",
+        {
+            "canonical_input": snapshot.canonical_input.snapshot_fingerprint,
+            "run_permission": (
+                snapshot.run_permission_snapshot.snapshot_fingerprint
+            ),
+            "plan_workflow": (
+                None
+                if snapshot.plan_workflow_fact is None
+                else snapshot.plan_workflow_fact.fact_fingerprint
+            ),
+            "plan_handoff": (
+                None
+                if snapshot.plan_handoff_fact is None
+                else snapshot.plan_handoff_fact.fact_fingerprint
+            ),
+            "approved_plan": (
+                None
+                if snapshot.approved_plan_materialization_fact is None
+                else snapshot.approved_plan_materialization_fact.fact_fingerprint
+            ),
+        },
+    )
+
+
 def provider_input_item_fingerprint(item: FrozenProviderInputItem) -> str:
     return context_fingerprint(
         "frozen-provider-input-item:v1",
@@ -799,6 +1201,7 @@ class StructuredModelInputCompileRequest:
     context_id: str
     model_call_index: int
     canonical_input: CanonicalModelInputSnapshot = field(repr=False)
+    canonical_facts: FrozenCanonicalCompileSnapshot = field(repr=False)
     compile_binding: ModelInputCompileBinding = field(repr=False)
     sources: CollectedContextSources = field(repr=False)
 
@@ -806,6 +1209,10 @@ class StructuredModelInputCompileRequest:
         if not self.context_id or self.model_call_index < 1:
             raise ValueError("compile request identity is invalid")
         identity = self.canonical_input.identity
+        if self.canonical_facts.canonical_input.snapshot_fingerprint != (
+            self.canonical_input.snapshot_fingerprint
+        ):
+            raise ValueError("compile request canonical facts do not exact-join")
         if (
             identity.conversation_scope_kind
             is not self.compile_binding.tool_surface.conversation_scope_kind

@@ -51,6 +51,18 @@ type Service interface {
 	ReadContent(context.Context, string, string, uint64) (*protocolv3.CanonicalContentChunk, error)
 }
 
+type planCommandService interface {
+	CommandWithPlanFields(context.Context, string, protocolv3.CommandKind, string, string, protocolv3.PermissionMode, string, uint64) (*protocolv3.CommandOutcome, error)
+}
+type planResolutionService interface {
+	ResolvePlanQuestion(context.Context, string, string, string, uint64, uint64, *protocolv3.PlanQuestionAnswer) (*protocolv3.ResolvePlanInteractionResponse, error)
+	ResolvePlanDraft(context.Context, string, string, string, uint64, uint64, protocolv3.PlanDraftDecision, *string) (*protocolv3.ResolvePlanInteractionResponse, error)
+}
+type planContentService interface {
+	ReadPlanQuestion(context.Context, string) (*protocolv3.PlanQuestionContent, error)
+	ReadPlanDraft(context.Context, string, string, uint64, uint32) (*protocolv3.PlanDraftTextChunk, error)
+}
+
 type phase uint8
 
 type contentIntegrityError struct{ reason string }
@@ -83,18 +95,30 @@ type liveDraft struct {
 }
 
 type pendingCommand struct {
-	id                  string
-	kind                protocolv3.CommandKind
-	text                string
-	target              string
-	status              protocolv3.CommandStatus
-	detach              bool
-	interaction         bool
-	interactionID       string
-	interactionDecision protocolv3.InteractionResolutionDecision
-	writerGeneration    uint64
-	controlEpoch        uint64
-	controlRevision     uint64
+	id                   string
+	kind                 protocolv3.CommandKind
+	text                 string
+	target               string
+	status               protocolv3.CommandStatus
+	detach               bool
+	interaction          bool
+	interactionID        string
+	interactionDecision  protocolv3.InteractionResolutionDecision
+	writerGeneration     uint64
+	controlEpoch         uint64
+	controlRevision      uint64
+	requestedMode        protocolv3.PermissionMode
+	planWorkflowID       string
+	planWorkflowRevision uint64
+}
+
+type planDraftState struct {
+	interactionID string
+	digest        string
+	total         uint64
+	value         []byte
+	done          bool
+	loading       bool
 }
 
 type contentState struct {
@@ -132,6 +156,9 @@ type Model struct {
 	controlLiveRevision uint64
 	currentInteraction  *protocolv3.LiveInteractionView
 	content             map[string]*contentState
+	permissionMode      protocolv3.PermissionMode
+	planQuestion        *protocolv3.PlanQuestionContent
+	planDraft           *planDraftState
 
 	draft                  []rune
 	cursor                 int
@@ -196,6 +223,21 @@ type heartbeatMsg struct {
 	err        error
 	generation uint64
 }
+type planQuestionMsg struct {
+	value         *protocolv3.PlanQuestionContent
+	err           error
+	interactionID string
+}
+type planDraftMsg struct {
+	value         *protocolv3.PlanDraftTextChunk
+	err           error
+	interactionID string
+}
+type planResolutionMsg struct {
+	value  *protocolv3.ResolvePlanInteractionResponse
+	err    error
+	frozen pendingCommand
+}
 
 func New(service Service) Model {
 	sessionID := service.SessionID()
@@ -206,7 +248,8 @@ func New(service Service) Model {
 		service: service, sessionID: sessionID, phase: phaseConnecting, width: 80, height: 24,
 		entries: map[string]*protocolv3.CanonicalEntry{}, live: map[string]*liveDraft{}, content: map[string]*contentState{},
 		trackedPrompts: map[string]pendingCommand{},
-		control:        &protocolv3.CanonicalControl{}, followTail: true, historyIndex: -1,
+		control:        &protocolv3.CanonicalControl{}, permissionMode: protocolv3.PermissionMode_PERMISSION_MODE_BYPASS_PERMISSIONS,
+		followTail: true, historyIndex: -1,
 	}
 }
 
@@ -253,6 +296,9 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if command := m.nextContentCommand(); command != nil {
 			commands = append(commands, command)
 		}
+		if command := m.nextPlanContentCommand(); command != nil {
+			commands = append(commands, command)
+		}
 		return m, tea.Batch(commands...)
 	case observationMsg:
 		if value.err != nil {
@@ -282,7 +328,51 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if command := m.nextContentCommand(); command != nil {
 			commands = append(commands, command)
 		}
+		if command := m.nextPlanContentCommand(); command != nil {
+			commands = append(commands, command)
+		}
 		return m, tea.Batch(commands...)
+	case planQuestionMsg:
+		if m.control == nil || m.control.OpenPlanInteraction == nil || m.control.OpenPlanInteraction.InteractionId != value.interactionID {
+			return m, nil
+		}
+		if value.err != nil {
+			m.notice = "Plan question content unavailable"
+			return m, nil
+		}
+		if err := validatePlanQuestion(value.value, value.interactionID); err != nil {
+			return m.fail(err)
+		}
+		m.planQuestion = proto.Clone(value.value).(*protocolv3.PlanQuestionContent)
+		return m, nil
+	case planDraftMsg:
+		if m.planDraft == nil || m.planDraft.interactionID != value.interactionID {
+			return m, nil
+		}
+		m.planDraft.loading = false
+		if value.err != nil {
+			m.notice = "Plan draft content unavailable"
+			return m, nil
+		}
+		if err := m.applyPlanDraftChunk(value.value); err != nil {
+			return m.fail(err)
+		}
+		return m, m.nextPlanContentCommand()
+	case planResolutionMsg:
+		if m.pending == nil || m.pending.id != value.frozen.id {
+			return m, nil
+		}
+		if value.err != nil {
+			return m.scheduleReconnect(value.err)
+		}
+		m.notice = "Plan decision accepted"
+		if value.value.ResumePermissionMode != protocolv3.PermissionMode_PERMISSION_MODE_UNSPECIFIED {
+			m.permissionMode = value.value.ResumePermissionMode
+		}
+		m.pending = nil
+		m.draft = nil
+		m.cursor = 0
+		return m, m.snapshotCommand()
 	case historyMsg:
 		m.pageLoading = false
 		if value.err != nil {
@@ -413,6 +503,9 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		outcome := value.value.Outcome
 		m.notice = publictext.Transform(outcome.PublicMessage)
 		if outcome.Status == protocolv3.CommandStatus_SUCCEEDED {
+			if outcome.ResumePermissionMode != protocolv3.PermissionMode_PERMISSION_MODE_UNSPECIFIED {
+				m.permissionMode = outcome.ResumePermissionMode
+			}
 			if isPromptCommand(command.kind) {
 				m.acceptPromptHistory(command.text)
 			}
@@ -480,6 +573,37 @@ func (m Model) View() tea.View {
 
 func (m Model) handleKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := message.Keystroke()
+	if m.phase == phaseReady && m.pending == nil {
+		if interaction := m.openPlanInteraction(); interaction != nil {
+			switch interaction.Kind {
+			case "QUESTION":
+				if m.planQuestion != nil {
+					if len(key) == 1 && key[0] >= '1' && key[0] <= '3' {
+						ordinal := int(key[0] - '1')
+						if ordinal < len(m.planQuestion.Options) {
+							return m.beginPlanQuestionOption(uint32(ordinal))
+						}
+					}
+					if key == "enter" && m.planQuestion.AllowFreeText && strings.TrimSpace(string(m.draft)) != "" {
+						return m.beginPlanQuestionText(string(m.draft))
+					}
+				}
+			case "DRAFT_REVIEW":
+				switch key {
+				case "a", "A":
+					return m.beginPlanDraftDecision(protocolv3.PlanDraftDecision_PLAN_DRAFT_APPROVE, nil)
+				case "c", "C":
+					return m.beginPlanDraftDecision(protocolv3.PlanDraftDecision_PLAN_DRAFT_CANCEL, nil)
+				case "r", "R":
+					var feedback *string
+					if value := strings.TrimSpace(string(m.draft)); value != "" {
+						feedback = &value
+					}
+					return m.beginPlanDraftDecision(protocolv3.PlanDraftDecision_PLAN_DRAFT_REVISE, feedback)
+				}
+			}
+		}
+	}
 	if m.phase == phaseReady && m.currentInteraction != nil && m.pending == nil {
 		switch key {
 		case "y", "Y", "enter":
@@ -489,6 +613,24 @@ func (m Model) handleKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	switch key {
+	case "ctrl+p":
+		if m.phase == phaseReady && m.pending == nil {
+			m.permissionMode = nextPermissionMode(m.permissionMode)
+			m.notice = "Permission: " + permissionModeLabel(m.permissionMode)
+		}
+		return m, nil
+	case "ctrl+l":
+		if m.phase == phaseReady && m.pending == nil && m.activePlanWorkflow() == nil && m.openPlanInteraction() == nil {
+			return m.beginTargetedCommand(protocolv3.CommandKind_ENTER_PLAN, strings.TrimSpace(string(m.draft)), "", false)
+		}
+	case "ctrl+x":
+		if workflow := m.activePlanWorkflow(); workflow != nil && m.pending == nil {
+			return m.beginPlanExit(protocolv3.CommandKind_CANCEL_PLAN, workflow)
+		}
+	case "ctrl+f":
+		if workflow := m.activePlanWorkflow(); workflow != nil && m.pending == nil {
+			return m.beginPlanExit(protocolv3.CommandKind_FORCE_EXIT_PLAN, workflow)
+		}
 	case "ctrl+d":
 		if m.phase != phaseReady {
 			return m, tea.Quit
@@ -540,7 +682,7 @@ func (m Model) handleKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.insertText("\n")
 		}
 	case "enter":
-		if m.canSubmit() && strings.TrimSpace(string(m.draft)) != "" {
+		if m.canSubmit() && m.openPlanInteraction() == nil && strings.TrimSpace(string(m.draft)) != "" {
 			kind := protocolv3.CommandKind_SUBMIT_PROMPT
 			target := ""
 			if activeTurnID, present := m.activeRootTurnID(); present {
@@ -567,7 +709,7 @@ func (m Model) beginTargetedCommand(kind protocolv3.CommandKind, text, target st
 		m.notice = "A command is already pending"
 		return m, nil
 	}
-	command := pendingCommand{id: newID("terminal-command"), kind: kind, text: text, target: target, status: protocolv3.CommandStatus_PENDING, detach: detach}
+	command := pendingCommand{id: newID("terminal-command"), kind: kind, text: text, target: target, status: protocolv3.CommandStatus_PENDING, detach: detach, requestedMode: m.permissionMode}
 	m.pending = &command
 	if kind == protocolv3.CommandKind_SUBMIT_PROMPT || kind == protocolv3.CommandKind_STEER_ACTIVE_TURN {
 		m.draft = nil
@@ -591,6 +733,46 @@ func (m Model) beginInteraction(decision protocolv3.InteractionResolutionDecisio
 	return m, m.resolveInteractionCommand(command)
 }
 
+func (m Model) beginPlanExit(kind protocolv3.CommandKind, workflow *protocolv3.PlanWorkflowControl) (tea.Model, tea.Cmd) {
+	command := pendingCommand{
+		id: newID("terminal-plan-command"), kind: kind,
+		status:               protocolv3.CommandStatus_PENDING,
+		planWorkflowID:       workflow.WorkflowId,
+		planWorkflowRevision: workflow.WorkflowRevision,
+		requestedMode:        m.permissionMode,
+	}
+	m.pending = &command
+	return m, m.commandCommand(command, kind)
+}
+
+func (m Model) beginPlanQuestionOption(ordinal uint32) (tea.Model, tea.Cmd) {
+	answer := &protocolv3.PlanQuestionAnswer{Answer: &protocolv3.PlanQuestionAnswer_OptionOrdinal{OptionOrdinal: ordinal}}
+	return m.beginPlanResolution(answer, protocolv3.PlanDraftDecision_PLAN_DRAFT_DECISION_UNSPECIFIED, nil)
+}
+
+func (m Model) beginPlanQuestionText(value string) (tea.Model, tea.Cmd) {
+	answer := &protocolv3.PlanQuestionAnswer{Answer: &protocolv3.PlanQuestionAnswer_FreeText{FreeText: value}}
+	return m.beginPlanResolution(answer, protocolv3.PlanDraftDecision_PLAN_DRAFT_DECISION_UNSPECIFIED, nil)
+}
+
+func (m Model) beginPlanDraftDecision(decision protocolv3.PlanDraftDecision, feedback *string) (tea.Model, tea.Cmd) {
+	return m.beginPlanResolution(nil, decision, feedback)
+}
+
+func (m Model) beginPlanResolution(answer *protocolv3.PlanQuestionAnswer, decision protocolv3.PlanDraftDecision, feedback *string) (tea.Model, tea.Cmd) {
+	workflow, interaction := m.activePlanWorkflow(), m.openPlanInteraction()
+	if workflow == nil || interaction == nil || m.pending != nil {
+		return m, nil
+	}
+	command := pendingCommand{
+		id: newID("terminal-plan-resolution"), status: protocolv3.CommandStatus_PENDING,
+		interactionID: interaction.InteractionId, writerGeneration: m.writerGeneration,
+		planWorkflowID: workflow.WorkflowId, planWorkflowRevision: workflow.WorkflowRevision,
+	}
+	m.pending = &command
+	return m, m.resolvePlanCommand(command, answer, decision, feedback)
+}
+
 func (m *Model) installSnapshot(response *protocolv3.SnapshotResponse) error {
 	if response == nil || response.Snapshot == nil || response.Snapshot.SessionId != m.sessionID || response.Snapshot.WriterGeneration == 0 || response.Snapshot.SnapshotFingerprint == "" || response.Snapshot.Control == nil {
 		return fmt.Errorf("canonical snapshot is incomplete")
@@ -610,6 +792,7 @@ func (m *Model) installSnapshot(response *protocolv3.SnapshotResponse) error {
 		}
 	}
 	m.control = proto.Clone(response.Snapshot.Control).(*protocolv3.CanonicalControl)
+	m.syncPlanControl()
 	m.writerGeneration = response.Snapshot.WriterGeneration
 	m.older = cloneCursor(response.Snapshot.OlderHistoryCursor)
 	m.event = response.Snapshot.EventSequenceCut
@@ -667,6 +850,7 @@ func (m *Model) applyObservation(response *protocolv3.ObservationResponse) error
 				return err
 			}
 			m.control = proto.Clone(projection.CurrentControl).(*protocolv3.CanonicalControl)
+			m.syncPlanControl()
 		case protocolv3.ObservationProjectionKind_EVENT_ONLY:
 		default:
 			return fmt.Errorf("observation projection kind is unknown")
@@ -834,6 +1018,9 @@ func validateCanonicalControl(control *protocolv3.CanonicalControl) error {
 		default:
 			return fmt.Errorf("canonical active-turn scope is unknown")
 		}
+		if err := validateRunPermission(turn.Permission); err != nil {
+			return err
+		}
 	}
 	if rootRunning > 1 {
 		return fmt.Errorf("canonical control has multiple active ROOT turns")
@@ -861,7 +1048,27 @@ func validateCanonicalControl(control *protocolv3.CanonicalControl) error {
 		default:
 			return fmt.Errorf("canonical prompt delivery mode is unknown")
 		}
+		if item.DeliveryMode == "NEW_TURN" {
+			if err := validateRunPermission(item.Permission); err != nil {
+				return err
+			}
+		} else if item.Permission != nil {
+			return fmt.Errorf("steer queue item carries permission state")
+		}
 		lastQueue = item.QueueSequence
+	}
+	if workflow := control.ActivePlanWorkflow; workflow != nil {
+		if workflow.WorkflowId == "" || workflow.WorkflowOrdinal == 0 || workflow.WorkflowRevision == 0 || workflow.Status != "ACTIVE" || workflow.ResumePermissionMode == protocolv3.PermissionMode_PERMISSION_MODE_UNSPECIFIED {
+			return fmt.Errorf("canonical active Plan workflow is invalid")
+		}
+	}
+	if interaction := control.OpenPlanInteraction; interaction != nil {
+		if control.ActivePlanWorkflow == nil || interaction.InteractionId == "" || interaction.WorkflowId != control.ActivePlanWorkflow.WorkflowId || interaction.Status != "OPEN" || interaction.InteractionOrdinal == 0 || interaction.TypedContentFingerprint == "" || (interaction.Kind != "QUESTION" && interaction.Kind != "DRAFT_REVIEW") {
+			return fmt.Errorf("canonical open Plan interaction is invalid")
+		}
+		if interaction.Kind == "DRAFT_REVIEW" && (interaction.DraftUtf8Digest == "" || interaction.DraftUtf8Size == 0) {
+			return fmt.Errorf("canonical Plan draft identity is invalid")
+		}
 	}
 	for _, attempt := range control.ToolAttempts {
 		if attempt == nil || attempt.AttemptId == "" || attempt.AssistantEntryId == "" || attempt.ToolCallId == "" || attempt.ResultState != "" || attempt.ResultEntryId != "" {
@@ -898,6 +1105,63 @@ func validateCanonicalControl(control *protocolv3.CanonicalControl) error {
 			return fmt.Errorf("canonical memory freshness channel is duplicated")
 		}
 		channels[freshness.Channel] = struct{}{}
+	}
+	return nil
+}
+
+func validateRunPermission(value *protocolv3.RunPermissionProjection) error {
+	if value == nil || value.PermissionSnapshotId == "" || value.SnapshotFingerprint == "" || value.ContractId == "" || value.ContractFingerprint == "" || value.RequestedMode == protocolv3.PermissionMode_PERMISSION_MODE_UNSPECIFIED || value.EffectiveMode == protocolv3.PermissionMode_PERMISSION_MODE_UNSPECIFIED {
+		return fmt.Errorf("canonical run permission is incomplete")
+	}
+	plan := value.Overlay == "PLAN_READ_ONLY"
+	if plan != (value.PlanWorkflowId != "" && value.PlanWorkflowRevision > 0) {
+		return fmt.Errorf("canonical run permission Plan union is invalid")
+	}
+	if plan && value.EffectiveMode != protocolv3.PermissionMode_PERMISSION_MODE_READ_ONLY {
+		return fmt.Errorf("canonical Plan permission is not read-only")
+	}
+	if !plan && value.Overlay != "NONE" {
+		return fmt.Errorf("canonical run permission overlay is unknown")
+	}
+	return nil
+}
+
+func validatePlanQuestion(value *protocolv3.PlanQuestionContent, interactionID string) error {
+	if value == nil || value.InteractionId != interactionID || value.Question == "" || value.TypedContentFingerprint == "" || len(value.Options) > 3 {
+		return fmt.Errorf("Plan question content is invalid")
+	}
+	if len(value.Options) == 1 || (!value.AllowFreeText && len(value.Options) == 0) {
+		return fmt.Errorf("Plan question option union is invalid")
+	}
+	recommended := 0
+	for index, option := range value.Options {
+		if option == nil || option.Ordinal != uint32(index) || option.Label == "" {
+			return fmt.Errorf("Plan question option is invalid")
+		}
+		if option.Recommended {
+			recommended++
+		}
+	}
+	if len(value.Options) > 0 && recommended != 1 {
+		return fmt.Errorf("Plan question recommendation is invalid")
+	}
+	return nil
+}
+
+func (m *Model) applyPlanDraftChunk(chunk *protocolv3.PlanDraftTextChunk) error {
+	state := m.planDraft
+	if state == nil || chunk == nil || chunk.InteractionId != state.interactionID || chunk.OffsetUtf8Bytes != uint64(len(state.value)) || chunk.PlanUtf8Digest != state.digest || chunk.PlanUtf8Size != state.total || !utf8.ValidString(chunk.Body) {
+		return fmt.Errorf("Plan draft chunk identity is invalid")
+	}
+	state.value = append(state.value, []byte(chunk.Body)...)
+	if uint64(len(state.value)) != chunk.NextOffsetUtf8Bytes || uint64(len(state.value)) > state.total {
+		return fmt.Errorf("Plan draft chunk range is invalid")
+	}
+	if chunk.Eof {
+		if uint64(len(state.value)) != state.total || planDraftDigest(state.value) != state.digest {
+			return fmt.Errorf("Plan draft integrity is invalid")
+		}
+		state.done = true
 	}
 	return nil
 }
@@ -1338,7 +1602,7 @@ func (m Model) render() string {
 	if height == 1 {
 		return ansi.Truncate(m.phaseText()+" · Ctrl-D", width, "")
 	}
-	header := ansi.Truncate("Pulsara  "+m.phaseText()+m.statusText(), width, "")
+	header := ansi.Truncate("Pulsara  "+m.phaseText()+" · "+permissionModeLabel(m.permissionMode)+m.statusText(), width, "")
 	composerRows := 2
 	if height < 4 {
 		composerRows = 1
@@ -1357,6 +1621,23 @@ func (m Model) render() string {
 	}
 	if composerRows == 2 {
 		prompt := "> " + string(m.draft[:min(m.cursor, len(m.draft))]) + "▏" + string(m.draft[min(m.cursor, len(m.draft)):])
+		if interaction := m.openPlanInteraction(); interaction != nil {
+			switch interaction.Kind {
+			case "QUESTION":
+				if m.planQuestion == nil {
+					prompt = "> Loading Plan question…"
+				} else {
+					prompt = "> " + publictext.Transform(m.planQuestion.Question)
+				}
+			case "DRAFT_REVIEW":
+				if m.planDraft == nil || !m.planDraft.done {
+					prompt = "> Loading Plan draft…"
+				} else {
+					preview := publictext.Transform(string(m.planDraft.value))
+					prompt = "> Review Plan: " + preview
+				}
+			}
+		}
 		if m.currentInteraction != nil {
 			prompt = "> " + publictext.Transform(m.currentInteraction.PublicPrompt)
 		}
@@ -1366,6 +1647,18 @@ func (m Model) render() string {
 		result = append(result, pad(ansi.Truncate(prompt, width, ""), width))
 	}
 	footer := "Enter send · Alt+Enter newline · Ctrl-C stop · PgUp transcript · ↑↓ prompts · Ctrl-D detach"
+	if m.activePlanWorkflow() == nil {
+		footer = "Ctrl-P permission · Ctrl-L Plan · Enter send · Ctrl-D detach"
+	} else {
+		footer = "Plan read-only · Ctrl-X cancel · Ctrl-F force · Ctrl-D detach"
+	}
+	if interaction := m.openPlanInteraction(); interaction != nil {
+		if interaction.Kind == "QUESTION" {
+			footer = "1-3 option · Enter free text · Ctrl-F force · Ctrl-D detach"
+		} else {
+			footer = "a approve · r revise · c cancel · Ctrl-F force · Ctrl-D detach"
+		}
+	}
 	if m.currentInteraction != nil {
 		footer = "y/Enter allow · n/Esc deny · Ctrl-D detach"
 	}
@@ -1590,9 +1883,73 @@ func (m Model) commandCommand(command pendingCommand, kind protocolv3.CommandKin
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 		defer cancel()
-		value, err := m.service.Command(ctx, command.id, kind, command.text, command.target)
+		var value *protocolv3.CommandOutcome
+		var err error
+		if kind == protocolv3.CommandKind_SUBMIT_PROMPT || kind == protocolv3.CommandKind_ENTER_PLAN || kind == protocolv3.CommandKind_CANCEL_PLAN || kind == protocolv3.CommandKind_FORCE_EXIT_PLAN {
+			service, ok := m.service.(planCommandService)
+			if !ok {
+				return commandMsg{err: errors.New("Protocol v3 Plan/permission client is unavailable"), frozen: command}
+			}
+			requested := protocolv3.PermissionMode_PERMISSION_MODE_UNSPECIFIED
+			if kind == protocolv3.CommandKind_SUBMIT_PROMPT || kind == protocolv3.CommandKind_ENTER_PLAN {
+				requested = command.requestedMode
+			}
+			value, err = service.CommandWithPlanFields(ctx, command.id, kind, command.text, command.target, requested, command.planWorkflowID, command.planWorkflowRevision)
+		} else {
+			value, err = m.service.Command(ctx, command.id, kind, command.text, command.target)
+		}
 		return commandMsg{value: value, err: err, frozen: command}
 	}
+}
+
+func (m Model) resolvePlanCommand(command pendingCommand, answer *protocolv3.PlanQuestionAnswer, decision protocolv3.PlanDraftDecision, feedback *string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+		defer cancel()
+		service, ok := m.service.(planResolutionService)
+		if !ok {
+			return planResolutionMsg{err: errors.New("Protocol v3 Plan client is unavailable"), frozen: command}
+		}
+		var value *protocolv3.ResolvePlanInteractionResponse
+		var err error
+		if answer != nil {
+			value, err = service.ResolvePlanQuestion(ctx, command.id, command.planWorkflowID, command.interactionID, command.writerGeneration, command.planWorkflowRevision, answer)
+		} else {
+			value, err = service.ResolvePlanDraft(ctx, command.id, command.planWorkflowID, command.interactionID, command.writerGeneration, command.planWorkflowRevision, decision, feedback)
+		}
+		return planResolutionMsg{value: value, err: err, frozen: command}
+	}
+}
+
+func (m Model) nextPlanContentCommand() tea.Cmd {
+	interaction := m.openPlanInteraction()
+	if interaction == nil {
+		return nil
+	}
+	service, ok := m.service.(planContentService)
+	if !ok {
+		return nil
+	}
+	if interaction.Kind == "QUESTION" && (m.planQuestion == nil || m.planQuestion.InteractionId != interaction.InteractionId) {
+		interactionID := interaction.InteractionId
+		return func() tea.Msg {
+			ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+			defer cancel()
+			value, err := service.ReadPlanQuestion(ctx, interactionID)
+			return planQuestionMsg{value: value, err: err, interactionID: interactionID}
+		}
+	}
+	if interaction.Kind == "DRAFT_REVIEW" && m.planDraft != nil && !m.planDraft.done && !m.planDraft.loading {
+		m.planDraft.loading = true
+		interactionID, digest, offset := m.planDraft.interactionID, m.planDraft.digest, uint64(len(m.planDraft.value))
+		return func() tea.Msg {
+			ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+			defer cancel()
+			value, err := service.ReadPlanDraft(ctx, interactionID, digest, offset, 64<<10)
+			return planDraftMsg{value: value, err: err, interactionID: interactionID}
+		}
+	}
+	return nil
 }
 func (m Model) resolveInteractionCommand(command pendingCommand) tea.Cmd {
 	return func() tea.Msg {
@@ -1820,6 +2177,83 @@ func validateContentReference(value *protocolv3.CanonicalContentReference) error
 func digest(value []byte) string {
 	sum := sha256.Sum256(value)
 	return "sha256:" + hex.EncodeToString(sum[:])
+}
+func planDraftDigest(value []byte) string {
+	prefix := []byte("pulsara:plan-draft-utf8:v1\x00")
+	length := make([]byte, 8)
+	for index := 7; index >= 0; index-- {
+		length[index] = byte(len(value))
+		valueLength := len(value) >> (8 * (7 - index))
+		length[index] = byte(valueLength)
+	}
+	payload := append(prefix, length...)
+	payload = append(payload, value...)
+	return digest(payload)
+}
+
+func (m Model) activePlanWorkflow() *protocolv3.PlanWorkflowControl {
+	if m.control == nil || m.control.ActivePlanWorkflow == nil {
+		return nil
+	}
+	return m.control.ActivePlanWorkflow
+}
+
+func (m Model) openPlanInteraction() *protocolv3.PlanInteractionControl {
+	if m.control == nil || m.control.OpenPlanInteraction == nil {
+		return nil
+	}
+	return m.control.OpenPlanInteraction
+}
+
+func (m *Model) syncPlanControl() {
+	workflow, interaction := m.activePlanWorkflow(), m.openPlanInteraction()
+	if workflow != nil && workflow.ResumePermissionMode != protocolv3.PermissionMode_PERMISSION_MODE_UNSPECIFIED {
+		m.permissionMode = workflow.ResumePermissionMode
+	}
+	if interaction == nil {
+		m.planQuestion = nil
+		m.planDraft = nil
+		return
+	}
+	if interaction.Kind == "QUESTION" {
+		if m.planQuestion != nil && m.planQuestion.InteractionId != interaction.InteractionId {
+			m.planQuestion = nil
+		}
+		m.planDraft = nil
+		return
+	}
+	m.planQuestion = nil
+	if m.planDraft == nil || m.planDraft.interactionID != interaction.InteractionId || m.planDraft.digest != interaction.DraftUtf8Digest || m.planDraft.total != interaction.DraftUtf8Size {
+		m.planDraft = &planDraftState{interactionID: interaction.InteractionId, digest: interaction.DraftUtf8Digest, total: interaction.DraftUtf8Size}
+	}
+}
+
+func nextPermissionMode(value protocolv3.PermissionMode) protocolv3.PermissionMode {
+	switch value {
+	case protocolv3.PermissionMode_PERMISSION_MODE_ACCEPT_EDITS:
+		return protocolv3.PermissionMode_PERMISSION_MODE_READ_ONLY
+	case protocolv3.PermissionMode_PERMISSION_MODE_READ_ONLY:
+		return protocolv3.PermissionMode_PERMISSION_MODE_ASK_PERMISSIONS
+	case protocolv3.PermissionMode_PERMISSION_MODE_ASK_PERMISSIONS:
+		return protocolv3.PermissionMode_PERMISSION_MODE_BYPASS_PERMISSIONS
+	default:
+		return protocolv3.PermissionMode_PERMISSION_MODE_ACCEPT_EDITS
+	}
+}
+
+func permissionModeLabel(value protocolv3.PermissionMode) string {
+	switch value {
+	case protocolv3.PermissionMode_PERMISSION_MODE_ACCEPT_EDITS:
+		return "accept-edits"
+	case protocolv3.PermissionMode_PERMISSION_MODE_READ_ONLY:
+		return "read-only"
+	case protocolv3.PermissionMode_PERMISSION_MODE_ASK_PERMISSIONS:
+		return "ask-permissions"
+	case protocolv3.PermissionMode_PERMISSION_MODE_BYPASS_PERMISSIONS:
+		return "bypass-permissions"
+	default:
+		return "unknown"
+	}
 }
 func canonicalSnapshotFingerprint(value *protocolv3.CanonicalSessionSnapshot) string {
 	clone := proto.Clone(value).(*protocolv3.CanonicalSessionSnapshot)

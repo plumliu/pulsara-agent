@@ -43,6 +43,7 @@ from pulsara_agent.ports.artifact import (
 )
 from pulsara_agent.ports.tool_execution import ToolOutputSourceCoverage
 from pulsara_agent.primitives.context import freeze_json
+from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
 from pulsara_agent.conversation_kernel.vocabulary import (
     APPEND_GUARDS,
     COMMITTED_EVENT_DESCRIPTORS,
@@ -65,6 +66,74 @@ def _repository(stage2_migrated_postgres_database) -> ConversationKernelReposito
     return ConversationKernelRepository(
         verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     )
+
+
+def _start_root_turn(repository: ConversationKernelRepository, *args, **kwargs):
+    """Retained Stage 2 fixture expressed through the Round 4 admission API."""
+
+    kwargs.setdefault("permission_snapshot_id", _name("permission-snapshot"))
+    kwargs.setdefault("requested_permission_mode", DEFAULT_PERMISSION_MODE)
+    return repository.start_root_turn(*args, **kwargs)
+
+
+def _enqueue_prompt(repository: ConversationKernelRepository, *args, **kwargs):
+    if kwargs["delivery_mode"] is PromptDeliveryMode.NEW_TURN:
+        kwargs.setdefault("permission_snapshot_id", _name("permission-snapshot"))
+        kwargs.setdefault("requested_permission_mode", DEFAULT_PERMISSION_MODE)
+    else:
+        kwargs.setdefault("permission_snapshot_id", None)
+        kwargs.setdefault("requested_permission_mode", None)
+    return repository.enqueue_prompt(*args, **kwargs)
+
+
+def _assistant_permission_fingerprint(
+    repository: ConversationKernelRepository,
+    guard,
+    assistant_entry_id: str,
+    deadline: float,
+) -> str:
+    with repository.connection_provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        deadline_monotonic=deadline,
+    ) as connection:
+        row = connection.execute(
+            """
+            SELECT t.permission_snapshot_fingerprint
+            FROM pulsara_v3.transcript_entries AS e
+            JOIN pulsara_v3.turns AS t
+              ON t.session_id = e.session_id AND t.id = e.turn_id
+            WHERE e.session_id = %s AND e.id = %s
+            """,
+            (guard.session_id, assistant_entry_id),
+        ).fetchone()
+    assert row is not None
+    return str(row[0])
+
+
+def _accept_tool_attempt(repository, guard, *args, **kwargs):
+    kwargs.setdefault(
+        "permission_snapshot_fingerprint",
+        _assistant_permission_fingerprint(
+            repository,
+            guard,
+            kwargs["assistant_entry_id"],
+            kwargs["deadline_monotonic"],
+        ),
+    )
+    return repository.accept_tool_attempt(guard, *args, **kwargs)
+
+
+def _accept_tool_interaction_decision(repository, guard, *args, **kwargs):
+    kwargs.setdefault(
+        "permission_snapshot_fingerprint",
+        _assistant_permission_fingerprint(
+            repository,
+            guard,
+            kwargs["assistant_entry_id"],
+            kwargs["deadline_monotonic"],
+        ),
+    )
+    return repository.accept_tool_interaction_decision(guard, *args, **kwargs)
 
 
 def test_stage2_orphan_blob_gc_deletes_only_unreferenced_content_after_grace(
@@ -96,7 +165,8 @@ def test_stage2_orphan_blob_gc_deletes_only_unreferenced_content_after_grace(
         codec="utf-8",
         deadline_monotonic=monotonic() + 30,
     )
-    repository.start_root_turn(
+    _start_root_turn(
+        repository,
         lease.guard,
         command_id=_name("command"),
         turn_id=_name("turn"),
@@ -210,11 +280,11 @@ def test_stage2_maximum_blob_is_read_as_exact_bounded_storage_ranges(
 def test_stage2_schema_and_descriptor_oracles_are_exact(
     stage2_migrated_postgres_database,
 ) -> None:
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 24
-    assert len(set(CONVERSATION_KERNEL_RELATIONS)) == 24
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == 27
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 26
+    assert len(set(CONVERSATION_KERNEL_RELATIONS)) == 26
+    assert len(COMMITTED_EVENT_DESCRIPTORS) == 34
     assert len(LIVE_EVENT_TYPES) == 23
-    assert len(SUBJECT_SLOTS) == 13
+    assert len(SUBJECT_SLOTS) == 15
     assert len(APPEND_GUARDS) == 2
 
     with psycopg.connect(stage2_migrated_postgres_database.admin_dsn) as connection:
@@ -250,7 +320,8 @@ def test_stage2_snapshot_and_history_page_are_bounded_by_final_wire_bytes(
     payload = b"x" * (64 * 1024)
     for _ in range(6):
         turn_id = _name("turn")
-        repository.start_root_turn(
+        _start_root_turn(
+            repository,
             lease.guard,
             command_id=_name("command"),
             turn_id=turn_id,
@@ -311,7 +382,8 @@ def test_stage2_text_turn_is_canonical_and_sequences_rollback_without_gaps(
         deadline_monotonic=deadline,
     )
     turn_id = _name("turn")
-    repository.start_root_turn(
+    _start_root_turn(
+        repository,
         lease.guard,
         command_id=_name("command"),
         turn_id=turn_id,
@@ -380,7 +452,8 @@ def test_stage2_stale_writer_cannot_mutate_after_takeover(
     )
     assert second.guard.writer_generation == first.guard.writer_generation + 1
     with pytest.raises(StaleHostWriter):
-        repository.start_root_turn(
+        _start_root_turn(
+            repository,
             first.guard,
             command_id=_name("command"),
             turn_id=_name("turn"),
@@ -407,7 +480,8 @@ def test_stage2_host_takeover_rejects_pending_exact_turn_steer(
         deadline_monotonic=deadline,
     )
     turn_id = _name("turn")
-    repository.start_root_turn(
+    _start_root_turn(
+        repository,
         first.guard,
         command_id=_name("command"),
         turn_id=turn_id,
@@ -418,7 +492,8 @@ def test_stage2_host_takeover_rejects_pending_exact_turn_steer(
         deadline_monotonic=deadline,
     )
     queue_item_id = _name("queue")
-    repository.enqueue_prompt(
+    _enqueue_prompt(
+        repository,
         first.guard,
         command_id=_name("command"),
         queue_item_id=queue_item_id,
@@ -482,7 +557,8 @@ def test_stage2_tool_message_precedes_attempt_and_job_claim_mints_second_guard(
         deadline_monotonic=deadline,
     )
     turn_id = _name("turn")
-    repository.start_root_turn(
+    _start_root_turn(
+        repository,
         lease.guard,
         command_id=_name("command"),
         turn_id=turn_id,
@@ -514,7 +590,8 @@ def test_stage2_tool_message_precedes_attempt_and_job_claim_mints_second_guard(
         actor_id="model:test",
         deadline_monotonic=deadline,
     )
-    attempt = repository.accept_tool_attempt(
+    attempt = _accept_tool_attempt(
+        repository,
         lease.guard,
         attempt_id=_name("attempt"),
         assistant_entry_id=request_entry_id,
@@ -630,7 +707,8 @@ def test_stage2_human_tool_decision_atomically_installs_exact_effect_boundary(
         deadline_monotonic=deadline,
     )
     turn_id = _name("turn")
-    repository.start_root_turn(
+    _start_root_turn(
+        repository,
         lease.guard,
         command_id=_name("command"),
         turn_id=turn_id,
@@ -667,7 +745,8 @@ def test_stage2_human_tool_decision_atomically_installs_exact_effect_boundary(
     attempt_id = _name("attempt") if decision == "ALLOW" else None
     result_id = _name("result") if decision == "DENY" else None
     result_entry_id = _name("entry") if decision == "DENY" else None
-    accepted = repository.accept_tool_interaction_decision(
+    accepted = _accept_tool_interaction_decision(
+        repository,
         lease.guard,
         command_id=command_id,
         decision_id=decision_id,
@@ -690,7 +769,8 @@ def test_stage2_human_tool_decision_atomically_installs_exact_effect_boundary(
     assert accepted.decision == decision
     # Lost response is resolved by exact command-winner confirmation, not by
     # creating a second decision or physical effect.
-    confirmed = repository.accept_tool_interaction_decision(
+    confirmed = _accept_tool_interaction_decision(
+        repository,
         lease.guard,
         command_id=command_id,
         decision_id=decision_id,
@@ -1480,7 +1560,8 @@ def test_stage2_memory_governance_is_async_and_postgres_only(
     )
     turn_id = _name("turn")
     source_entry_id = _name("entry")
-    repository.start_root_turn(
+    _start_root_turn(
+        repository,
         lease.guard,
         command_id=_name("command"),
         turn_id=turn_id,
@@ -1590,7 +1671,8 @@ def test_stage2_memory_lifecycle_change_has_one_canonical_occurrence(
         deadline_monotonic=deadline,
     )
     source_entry_id = _name("entry")
-    repository.start_root_turn(
+    _start_root_turn(
+        repository,
         lease.guard,
         command_id=_name("command"),
         turn_id=_name("turn"),
@@ -1718,7 +1800,8 @@ def test_stage2_postgres_memory_preserves_bounded_direct_and_two_hop_paths(
     )
     turn_id = _name("turn")
     source_entry_id = _name("entry")
-    repository.start_root_turn(
+    _start_root_turn(
+        repository,
         lease.guard,
         command_id=_name("command"),
         turn_id=turn_id,
@@ -1847,7 +1930,8 @@ def test_stage2_prompt_queue_has_stable_fifo_and_frozen_terminal_steer_target(
         deadline_monotonic=deadline,
     )
     root_turn = _name("turn")
-    initial = repository.start_root_turn(
+    initial = _start_root_turn(
+        repository,
         lease.guard,
         command_id=_name("command"),
         turn_id=root_turn,
@@ -1861,7 +1945,8 @@ def test_stage2_prompt_queue_has_stable_fifo_and_frozen_terminal_steer_target(
     second_item = _name("queue")
     third_item = _name("queue")
     assert (
-        repository.enqueue_prompt(
+        _enqueue_prompt(
+            repository,
             lease.guard,
             command_id=_name("command"),
             queue_item_id=first_item,
@@ -1876,7 +1961,8 @@ def test_stage2_prompt_queue_has_stable_fifo_and_frozen_terminal_steer_target(
         == 1
     )
     assert (
-        repository.enqueue_prompt(
+        _enqueue_prompt(
+            repository,
             lease.guard,
             command_id=_name("command"),
             queue_item_id=second_item,
@@ -1891,7 +1977,8 @@ def test_stage2_prompt_queue_has_stable_fifo_and_frozen_terminal_steer_target(
         == 2
     )
     assert (
-        repository.enqueue_prompt(
+        _enqueue_prompt(
+            repository,
             lease.guard,
             command_id=_name("command"),
             queue_item_id=third_item,
@@ -1973,7 +2060,8 @@ def test_stage2_new_turn_head_cannot_be_overtaken_by_later_steer(
         deadline_monotonic=deadline,
     )
     root_turn = _name("turn")
-    repository.start_root_turn(
+    _start_root_turn(
+        repository,
         lease.guard,
         command_id=_name("command"),
         turn_id=root_turn,
@@ -1985,7 +2073,8 @@ def test_stage2_new_turn_head_cannot_be_overtaken_by_later_steer(
     )
     new_item = _name("queue")
     steer_item = _name("queue")
-    repository.enqueue_prompt(
+    _enqueue_prompt(
+        repository,
         lease.guard,
         command_id=_name("command"),
         queue_item_id=new_item,
@@ -1997,7 +2086,8 @@ def test_stage2_new_turn_head_cannot_be_overtaken_by_later_steer(
         actor_id="user",
         deadline_monotonic=deadline,
     )
-    repository.enqueue_prompt(
+    _enqueue_prompt(
+        repository,
         lease.guard,
         command_id=_name("command"),
         queue_item_id=steer_item,
@@ -2058,7 +2148,8 @@ def test_stage2_prompt_cancel_is_single_terminal_cas(
         deadline_monotonic=deadline,
     )
     item_id = _name("queue")
-    repository.enqueue_prompt(
+    _enqueue_prompt(
+        repository,
         lease.guard,
         command_id=_name("command"),
         queue_item_id=item_id,
@@ -2121,7 +2212,8 @@ def test_stage2_memory_candidate_and_tool_result_are_one_transaction(
         deadline_monotonic=deadline,
     )
     turn_id = _name("turn")
-    repository.start_root_turn(
+    _start_root_turn(
+        repository,
         lease.guard,
         command_id=_name("command"),
         turn_id=turn_id,
@@ -2160,7 +2252,8 @@ def test_stage2_memory_candidate_and_tool_result_are_one_transaction(
         actor_id="model:test",
         deadline_monotonic=deadline,
     )
-    first_attempt = repository.accept_tool_attempt(
+    first_attempt = _accept_tool_attempt(
+        repository,
         lease.guard,
         attempt_id=_name("attempt"),
         assistant_entry_id=assistant_entry_id,
@@ -2207,7 +2300,8 @@ def test_stage2_memory_candidate_and_tool_result_are_one_transaction(
         candidate=first_candidate,
         deadline_monotonic=deadline,
     )
-    second_attempt = repository.accept_tool_attempt(
+    second_attempt = _accept_tool_attempt(
+        repository,
         lease.guard,
         attempt_id=_name("attempt"),
         assistant_entry_id=assistant_entry_id,

@@ -688,7 +688,8 @@ _BUILTIN_DESCRIPTORS: dict[str, CapabilityDescriptor] = {
         name="enter_plan",
         description="Enter Plan workflow, narrowing the session to read-only planning.",
         input_schema=object_schema(
-            properties={"reason": {"type": "string"}}, required=[]
+            properties={"reason": {"type": "string", "maxLength": 4096}},
+            required=[],
         ),
         provider_kind=CapabilityProviderKind.WORKFLOW,
         is_read_only=False,
@@ -700,24 +701,38 @@ _BUILTIN_DESCRIPTORS: dict[str, CapabilityDescriptor] = {
         description="Ask the user a blocking question while in Plan workflow.",
         input_schema=object_schema(
             properties={
-                "question": {"type": "string"},
+                "question": {"type": "string", "minLength": 1, "maxLength": 16384},
                 "options": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "label": {"type": "string"},
-                            "description": {"type": "string"},
-                            "recommended": {"type": "boolean"},
+                    "anyOf": [
+                        {"type": "array", "maxItems": 0},
+                        {
+                            "type": "array",
+                            "minItems": 2,
+                            "maxItems": 3,
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "label": {
+                                        "type": "string",
+                                        "minLength": 1,
+                                        "maxLength": 256,
+                                    },
+                                    "description": {
+                                        "type": "string",
+                                        "maxLength": 2048,
+                                    },
+                                    "recommended": {"type": "boolean"},
+                                },
+                                "required": ["label"],
+                                "additionalProperties": False,
+                            },
                         },
-                        "required": ["label"],
-                        "additionalProperties": False,
-                    },
+                    ],
                 },
                 "allow_free_text": {"type": "boolean"},
-                "reason": {"type": "string"},
+                "reason": {"type": "string", "maxLength": 4096},
             },
-            required=["question"],
+            required=["question", "allow_free_text"],
         ),
         provider_kind=CapabilityProviderKind.WORKFLOW,
         is_read_only=False,
@@ -728,7 +743,10 @@ _BUILTIN_DESCRIPTORS: dict[str, CapabilityDescriptor] = {
         name="exit_plan",
         description="Submit a plan draft and ask the user whether to exit Plan workflow.",
         input_schema=object_schema(
-            properties={"plan": {"type": "string"}, "summary": {"type": "string"}},
+            properties={
+                "plan": {"type": "string", "minLength": 1, "maxLength": 1048576},
+                "summary": {"type": "string", "maxLength": 8192},
+            },
             required=["plan"],
         ),
         provider_kind=CapabilityProviderKind.WORKFLOW,
@@ -1073,7 +1091,7 @@ def _catalog_shape(name: str):
         return (
             BuiltinToolBindingKind.PLAN_WORKFLOW,
             BuiltinToolAvailabilityKind.ALWAYS,
-            both,
+            (ToolInvocationOwnerKind.HOST_MAIN_RUN,),
             "plan",
         )
     if name == "memory_search":

@@ -156,6 +156,7 @@ class TerminalObservationInstallationAttempt:
     session_id: str
     workspace_id: str
     writer_generation: int
+    origin_turn_id: str
     content: TerminalObservationContentV1
     content_digest: str
     retained_from_cursor: str
@@ -170,6 +171,7 @@ class TerminalObservationInstallationAttempt:
             (
                 self.session_id,
                 self.workspace_id,
+                self.origin_turn_id,
                 self.actor_id,
                 self.retained_from_cursor,
                 self.through_cursor,

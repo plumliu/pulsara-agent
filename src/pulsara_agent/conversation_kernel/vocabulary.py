@@ -1,6 +1,6 @@
 """Closed conversation-kernel event vocabulary and subject/guard descriptor.
 
-The descriptor is the single Python owner for the exact 27/23/13/2 oracle.
+The descriptor is the single Python owner for the exact 34/23/15/2 oracle.
 SQL checks, repository validation, protocol projection mapping, and generated
 test fixtures consume these values; callers cannot register new entries.
 """
@@ -30,6 +30,8 @@ class SubjectSlot(StrEnum):
     SUBAGENT_RESULT = "subject_subagent_result_id"
     MEMORY_FACT = "subject_memory_fact_id"
     MEMORY_RELATION = "subject_memory_relation_id"
+    PLAN_WORKFLOW = "subject_plan_workflow_id"
+    PLAN_INTERACTION = "subject_plan_interaction_id"
 
 
 class CommittedEventType(StrEnum):
@@ -60,6 +62,13 @@ class CommittedEventType(StrEnum):
     MEMORY_FACT_ACCEPTED = "MemoryFactAccepted"
     MEMORY_FACT_LIFECYCLE_CHANGED = "MemoryFactLifecycleChanged"
     MEMORY_RELATION_ACCEPTED = "MemoryRelationAccepted"
+    PLAN_WORKFLOW_ENTERED = "PlanWorkflowEntered"
+    PLAN_QUESTION_ASKED = "PlanQuestionAsked"
+    PLAN_QUESTION_ANSWERED = "PlanQuestionAnswered"
+    PLAN_DRAFT_SUBMITTED = "PlanDraftSubmitted"
+    PLAN_DRAFT_DECISION_ACCEPTED = "PlanDraftDecisionAccepted"
+    PLAN_WORKFLOW_EXITED = "PlanWorkflowExited"
+    PLAN_CONTINUATION_ACCEPTED = "PlanContinuationAccepted"
 
 
 class LiveEventType(StrEnum):
@@ -181,6 +190,16 @@ COMMITTED_EVENT_DESCRIPTORS = (
         subject_slot=SubjectSlot.MEMORY_RELATION,
         append_guards=(AppendGuardKind.JOB_ATTEMPT_CLAIM,),
     ),
+    _host(CommittedEventType.PLAN_WORKFLOW_ENTERED, SubjectSlot.PLAN_WORKFLOW),
+    _host(CommittedEventType.PLAN_QUESTION_ASKED, SubjectSlot.PLAN_INTERACTION),
+    _host(CommittedEventType.PLAN_QUESTION_ANSWERED, SubjectSlot.PLAN_INTERACTION),
+    _host(CommittedEventType.PLAN_DRAFT_SUBMITTED, SubjectSlot.PLAN_INTERACTION),
+    _host(
+        CommittedEventType.PLAN_DRAFT_DECISION_ACCEPTED,
+        SubjectSlot.PLAN_INTERACTION,
+    ),
+    _host(CommittedEventType.PLAN_WORKFLOW_EXITED, SubjectSlot.PLAN_WORKFLOW),
+    _host(CommittedEventType.PLAN_CONTINUATION_ACCEPTED, SubjectSlot.ENTRY),
 )
 
 LIVE_EVENT_TYPES = tuple(item.value for item in LiveEventType)
@@ -189,12 +208,12 @@ APPEND_GUARDS = tuple(item.value for item in AppendGuardKind)
 
 DESCRIPTOR_BY_TYPE = {item.event_type: item for item in COMMITTED_EVENT_DESCRIPTORS}
 
-if len(COMMITTED_EVENT_DESCRIPTORS) != 27 or len(DESCRIPTOR_BY_TYPE) != 27:
-    raise RuntimeError("committed event descriptor must contain exact 27 types")
+if len(COMMITTED_EVENT_DESCRIPTORS) != 34 or len(DESCRIPTOR_BY_TYPE) != 34:
+    raise RuntimeError("committed event descriptor must contain exact 34 types")
 if len(LIVE_EVENT_TYPES) != 23 or len(set(LIVE_EVENT_TYPES)) != 23:
     raise RuntimeError("live event registry must contain exact 23 types")
-if len(SUBJECT_SLOTS) != 13 or len(set(SUBJECT_SLOTS)) != 13:
-    raise RuntimeError("subject registry must contain exact 13 slots")
+if len(SUBJECT_SLOTS) != 15 or len(set(SUBJECT_SLOTS)) != 15:
+    raise RuntimeError("subject registry must contain exact 15 slots")
 if len(APPEND_GUARDS) != 2:
     raise RuntimeError("append guard registry must contain exact 2 guards")
 

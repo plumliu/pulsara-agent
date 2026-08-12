@@ -38,6 +38,7 @@ from pulsara_agent.conversation_kernel.safe_point import (
 from pulsara_agent.model_input.contracts import CanonicalInputOriginKind
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 from pulsara_agent.primitives.context import freeze_json
+from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
 from tests.support.postgres import verified_postgres_provider
 
 
@@ -56,11 +57,27 @@ def _start_turn(repository, lease, text: bytes):
         turn_id=turn_id,
         entry_id=_id("entry"),
         context_binding_revision_id=_id("revision"),
+        permission_snapshot_id=_id("permission-snapshot"),
+        requested_permission_mode=DEFAULT_PERMISSION_MODE,
         content=InlineContent.from_bytes(text),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=monotonic() + 30,
     )
     return turn_id
+
+
+def _permission_fingerprint(repository, lease, turn_id: str) -> str:
+    with repository.connection_provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        deadline_monotonic=monotonic() + 30,
+    ) as connection:
+        row = connection.execute(
+            """SELECT permission_snapshot_fingerprint
+               FROM pulsara_v3.turns WHERE session_id = %s AND id = %s""",
+            (lease.guard.session_id, turn_id),
+        ).fetchone()
+    assert row is not None
+    return str(row[0])
 
 
 class _BrokenBlobReader:
@@ -192,6 +209,9 @@ def test_reader_uses_exact_scope_and_lowers_late_result_without_replay(
         actor_id="executor",
         remote_idempotency_key=None,
         retry_of_attempt_id=None,
+        permission_snapshot_fingerprint=_permission_fingerprint(
+            repository, lease, old_turn
+        ),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=monotonic() + 30,
     )
@@ -676,6 +696,7 @@ def test_subagent_result_acceptance_linearizes_at_provider_safe_point(
     accepted = safe_point.accept_subagent_result(
         turn_id=new_root_turn,
         new_context_binding_revision_id=new_revision,
+        requested_permission_mode=DEFAULT_PERMISSION_MODE,
         child_result_id=child_result_id,
         command_id=command_id,
         actor_id="host:test",
@@ -701,6 +722,7 @@ def test_subagent_result_acceptance_linearizes_at_provider_safe_point(
     compatible = safe_point.accept_subagent_result(
         turn_id=new_root_turn,
         new_context_binding_revision_id=new_revision,
+        requested_permission_mode=DEFAULT_PERMISSION_MODE,
         child_result_id=child_result_id,
         command_id=command_id,
         actor_id="host:test",

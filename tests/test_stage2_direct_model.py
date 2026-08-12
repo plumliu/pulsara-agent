@@ -30,7 +30,11 @@ from pulsara_agent.ports.live_agent_event import (
 )
 from pulsara_agent.primitives.model_call import ModelCallPurpose
 from tests.support.model_config import test_llm_config
-from tests.support.round3 import StaticContextSourceCollector, StructuredToolPort
+from tests.support.round3 import (
+    StaticContextSourceCollector,
+    StructuredToolPort,
+    static_canonical_compile_facts,
+)
 
 
 def _prepared_execution(
@@ -88,12 +92,16 @@ def _prepared_execution(
             late_outcomes=(),
         ),
     )
-    sources = StaticContextSourceCollector().collect()
+    canonical_facts = static_canonical_compile_facts(snapshot)
+    sources = StaticContextSourceCollector().collect(
+        canonical_facts=canonical_facts
+    )
     compiled = StructuredModelInputCompiler().compile(
         StructuredModelInputCompileRequest(
             context_id="context:test",
             model_call_index=1,
             canonical_input=snapshot,
+            canonical_facts=canonical_facts,
             compile_binding=prepared.compile_binding,
             sources=sources,
         )

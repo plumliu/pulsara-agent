@@ -8,10 +8,11 @@ acquires a new writer generation and rehydrates canonical rows only.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from hashlib import sha256
 from time import monotonic
+from typing import Awaitable, Callable
 from uuid import uuid4
 
 from psycopg import IsolationLevel
@@ -36,6 +37,7 @@ from pulsara_agent.conversation_kernel.contracts import (
     PromptDeliveryMode,
     StoredCommittedEvent,
     WriterLease,
+    canonical_digest,
 )
 from pulsara_agent.conversation_kernel.io import KernelSessionIO
 from pulsara_agent.conversation_kernel.extensions import (
@@ -50,14 +52,28 @@ from pulsara_agent.conversation_kernel.extensions import (
 )
 from pulsara_agent.conversation_kernel.jobs import KernelDurableJobExecutor
 from pulsara_agent.conversation_kernel.interaction import KernelInteractionCoordinator
+from pulsara_agent.conversation_kernel.plan_runtime import (
+    ContinuationAdmissionOwner,
+    KernelPlanInteractionCoordinator,
+)
 from pulsara_agent.conversation_kernel.limits import STAGE2_LIMITS
 from pulsara_agent.conversation_kernel.live import LiveAgentEventBus
 from pulsara_agent.conversation_kernel.live_control import SessionLiveControlOwner
 from pulsara_agent.conversation_kernel.memory_tools import KernelMemoryToolPort
 from pulsara_agent.conversation_kernel.query import CanonicalConversationQuery
 from pulsara_agent.conversation_kernel.repository import (
+    AcceptedPlanResolution,
+    AcceptedPlanToolBatch,
+    AcceptedPlanWorkflowCommand,
     ConversationKernelConflict,
     ConversationKernelRepository,
+    PlanContinuationDisposition,
+    PlanQuestionAnswer,
+    PlanContinuationInspection,
+    PreparedPlanToolBatch,
+    plan_draft_review_semantic_candidate,
+    plan_exit_semantic_fingerprint,
+    plan_question_resolution_semantic_fingerprint,
 )
 from pulsara_agent.conversation_kernel.runner import (
     ConversationKernelRunner,
@@ -82,7 +98,10 @@ from pulsara_agent.llm.result import TransportUsageReport
 from pulsara_agent.tool_permission import (
     EffectivePermissionPolicy,
     default_permission_policy,
+    mode_for_policy,
 )
+from pulsara_agent.primitives.permission import PermissionMode
+from pulsara_agent.primitives.plan_workflow import PlanDraftDecision, PlanHandoffKind
 from pulsara_agent.ports.system_prompt import DEFAULT_SYSTEM_PROMPT
 from pulsara_agent.ports.terminal_observation import (
     ExistingTurnInstallation,
@@ -134,6 +153,12 @@ class KernelCommandOutcome:
     target_id: str
     public_code: str
     public_message: str
+    plan_workflow_status: str | None = None
+    resume_permission_mode: PermissionMode | None = None
+    handoff_created_at_commit: bool = False
+    plan_workflow_revision: int | None = None
+    plan_draft_decision: PlanDraftDecision | None = None
+    plan_continuation_turn_id: str | None = None
 
 
 class KernelCompositionUnavailable(ValueError):
@@ -188,7 +213,15 @@ class KernelHostSession:
             live_bus=self.live_bus,
             io_owner=self._io,
         )
+        self._plan_interactions = KernelPlanInteractionCoordinator()
+        self._plan_continuations = ContinuationAdmissionOwner()
         self._event_loop = asyncio.get_running_loop()
+        launch_permission_mode = mode_for_policy(permission_policy)
+        if launch_permission_mode is None:
+            raise KernelCompositionUnavailable(
+                "production Host permission must be a closed preset"
+            )
+        self._launch_permission_mode = launch_permission_mode
         self._monitor_wake = asyncio.Event()
 
         def wake_terminal_monitor_scheduler() -> None:
@@ -199,9 +232,7 @@ class KernelHostSession:
             host_owner_id=host_session_id,
             session_id=session_id,
             live_bus=self.live_bus,
-            authorization_policy=DefaultToolDispatchAuthorizationPolicy(
-                permission_policy
-            ),
+            authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
             artifact_read_port=PostgresToolArtifactReadPort(
                 repository.connection_provider,
                 session_id=session_id,
@@ -261,12 +292,17 @@ class KernelHostSession:
             extensions=self.extensions,
             steer_consumer=self._consume_pending_steers,
             workspace_id=workspace.workspace_key,
+            plan_interactions=self._plan_interactions,
+            automatic_plan_continuation=(
+                self._accept_automatic_plan_continuation
+            ),
         )
         self._subagents.bind_runner_factory(self._new_child_runner)
         self._active_task: asyncio.Task[KernelRunResult] | None = None
         self._active_turn_id: str | None = None
         self._active_command_id: str | None = None
         self._external_new_turn_accepting = False
+        self._plan_exit_fence = False
         self._terminal_new_turn_observation_id: str | None = None
         self._external_new_turn_settled = asyncio.Event()
         self._external_new_turn_settled.set()
@@ -325,6 +361,7 @@ class KernelHostSession:
         text: str,
         *,
         command_id: str | None = None,
+        requested_permission_mode: PermissionMode | None = None,
     ) -> KernelRunResult:
         _validate_prompt(text)
         command = command_id or f"command:{uuid4().hex}"
@@ -334,27 +371,283 @@ class KernelHostSession:
             raise RuntimeError("command was already accepted; query its outcome")
         async with self._lock:
             self._require_open()
+            self._retire_done_active_root_locked()
             if (
-                self._external_new_turn_accepting
+                self._plan_exit_fence
+                or self._external_new_turn_accepting
                 or self._active_task is not None
-                and not self._active_task.done()
             ):
                 raise RuntimeError("a canonical ROOT turn is already running")
-            task = asyncio.create_task(
-                self._runner.run_turn(text, command_id=command),
+            task = self._install_active_root_task_locked(
+                turn_id=turn_id,
+                command_id=command,
                 name=f"kernel-turn:{command}",
+                run=lambda: self._run_root_turn_chain(
+                    text,
+                    command_id=command,
+                    requested_permission_mode=(
+                        requested_permission_mode or self._launch_permission_mode
+                    ),
+                ),
             )
-            self._active_task = task
-            self._active_turn_id = turn_id
-            self._active_command_id = command
-        try:
-            return await task
-        finally:
+        # The Host owns the run chain.  A gateway/request cancellation detaches
+        # only this waiter; the task itself settles the ROOT slot when its full
+        # continuation lineage physically exits.
+        return await asyncio.shield(task)
+
+    async def _run_root_turn_chain(
+        self,
+        text: str,
+        *,
+        command_id: str,
+        requested_permission_mode: PermissionMode,
+    ) -> KernelRunResult:
+        result = await self._runner.run_turn(
+            text,
+            command_id=command_id,
+            requested_permission_mode=requested_permission_mode,
+        )
+        return await self._finish_root_chain(result)
+
+    async def _run_accepted_root_chain(
+        self,
+        turn_id: str,
+        *,
+        deadline_monotonic: float | None = None,
+    ) -> KernelRunResult:
+        """Run one accepted ROOT turn and every automatic successor."""
+
+        result = await self._runner.run_accepted_turn(
+            turn_id,
+            deadline_monotonic=(
+                monotonic() + 120.0
+                if deadline_monotonic is None
+                else deadline_monotonic
+            ),
+        )
+        return await self._finish_root_chain(result)
+
+    async def _finish_root_chain(
+        self, result: KernelRunResult
+    ) -> KernelRunResult:
+        total_model_calls = result.model_call_count
+        total_tool_calls = result.tool_call_count
+        while result.continuation_turn_id is not None:
+            continuation_turn_id = result.continuation_turn_id
             async with self._lock:
-                if self._active_task is task:
-                    self._active_task = None
-                    self._active_turn_id = None
-                    self._active_command_id = None
+                if self._active_task is not asyncio.current_task():
+                    raise RuntimeError("ROOT continuation lost its Host task owner")
+                self._active_turn_id = continuation_turn_id
+            result = await self._runner.run_accepted_turn(
+                continuation_turn_id,
+                deadline_monotonic=monotonic() + 120.0,
+            )
+            total_model_calls += result.model_call_count
+            total_tool_calls += result.tool_call_count
+        return KernelRunResult(
+            turn_id=result.turn_id,
+            final_entry_id=result.final_entry_id,
+            final_text=result.final_text,
+            model_call_count=total_model_calls,
+            tool_call_count=total_tool_calls,
+            pending_plan_interaction_id=result.pending_plan_interaction_id,
+        )
+
+    def _install_active_root_task_locked(
+        self,
+        *,
+        turn_id: str,
+        command_id: str | None,
+        name: str,
+        run: Callable[[], Awaitable[KernelRunResult]],
+    ) -> asyncio.Task[KernelRunResult]:
+        """Install the sole Host-owned ROOT task while ``self._lock`` is held."""
+
+        self._retire_done_active_root_locked()
+        if self._active_task is not None:
+            raise RuntimeError("a canonical ROOT turn is already running")
+        task = asyncio.create_task(
+            self._run_owned_root_task(run),
+            name=name,
+        )
+        self._active_task = task
+        self._active_turn_id = turn_id
+        self._active_command_id = command_id
+        task.add_done_callback(self._observe_active_root_task_done)
+        return task
+
+    @staticmethod
+    def _observe_active_root_task_done(task: asyncio.Task[KernelRunResult]) -> None:
+        """Consume a detached ROOT task exception after task-owned settlement."""
+
+        try:
+            task.exception()
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    async def _run_owned_root_task(
+        self,
+        run: Callable[[], Awaitable[KernelRunResult]],
+    ) -> KernelRunResult:
+        task = asyncio.current_task()
+        if task is None:
+            raise RuntimeError("ROOT task has no asyncio owner")
+        try:
+            return await run()
+        finally:
+            await self._settle_active_root_task(task)
+
+    async def _settle_active_root_task(self, task: asyncio.Task[object]) -> None:
+        async with self._lock:
+            if self._active_task is task:
+                self._clear_active_root_locked()
+
+    def _retire_done_active_root_locked(self) -> None:
+        task = self._active_task
+        if task is not None and task.done():
+            self._clear_active_root_locked()
+
+    def _clear_active_root_locked(self) -> None:
+        self._active_task = None
+        self._active_turn_id = None
+        self._active_command_id = None
+        self._queue_wake.set()
+        self._monitor_wake.set()
+
+    def _admit_plan_resolution_write_locked(self, *, creates_turn: bool) -> None:
+        """Linearize every new Plan-resolution write against force exit."""
+
+        self._require_open()
+        if self._plan_exit_fence:
+            raise ConversationKernelConflict(
+                "Plan resolution conflicts with force exit"
+            )
+        if not creates_turn:
+            return
+        self._retire_done_active_root_locked()
+        if self._external_new_turn_accepting or self._active_task is not None:
+            raise ConversationKernelConflict(
+                "a canonical ROOT turn is already running"
+            )
+        self._external_new_turn_accepting = True
+        self._external_new_turn_settled.clear()
+
+    async def _accept_automatic_plan_continuation(
+        self,
+        candidate: PreparedPlanToolBatch,
+        deadline_monotonic: float,
+    ) -> AcceptedPlanToolBatch:
+        if candidate.continuation_turn_id is None:
+            raise ValueError("automatic Plan continuation candidate has no turn")
+        if candidate.continuation_entry_id is None:
+            raise ValueError("automatic Plan continuation candidate has no entry")
+        origin_task = asyncio.current_task()
+        if origin_task is None:
+            raise RuntimeError("Plan continuation has no Host-owned origin task")
+
+        attempt_id = f"plan-continuation:{candidate.candidate_fingerprint}"
+
+        async def accept() -> AcceptedPlanToolBatch:
+            try:
+                result = await self._io.run(
+                    self.repository.accept_plan_tool_batch,
+                    self._lease.guard,
+                    candidate=candidate,
+                    deadline_monotonic=deadline_monotonic,
+                )
+            except Exception:
+                winner = await self._io.run(
+                    self.repository.confirm_plan_tool_batch_winner,
+                    candidate=candidate,
+                    deadline_monotonic=max(deadline_monotonic, monotonic() + 5.0),
+                )
+                if winner is None:
+                    raise
+                result = winner
+            try:
+                inspection = await self._inspect_plan_continuation(
+                    turn_id=candidate.continuation_turn_id,
+                    entry_id=candidate.continuation_entry_id,
+                    workflow_id=candidate.workflow_id,
+                    interaction_id=None,
+                    handoff_kind=PlanHandoffKind.ENTERED_PLAN,
+                )
+                disposition = self.repository.classify_plan_continuation(
+                    inspection, self._lease.guard
+                )
+                if disposition is PlanContinuationDisposition.HISTORICAL_TERMINAL:
+                    return replace(
+                        result,
+                        continuation_turn_id=None,
+                        continuation_entry_id=None,
+                    )
+                async with self._lock:
+                    current_writer = (
+                        disposition
+                        is PlanContinuationDisposition.RUNNING_CURRENT_WRITER
+                    )
+                    compatible_slot = (
+                        self._active_task is origin_task
+                        and self._active_turn_id == candidate.origin_turn_id
+                    )
+                    origin_runner_live = (
+                        not origin_task.done() and origin_task.cancelling() == 0
+                    )
+                    if (
+                        not self._closing
+                        and not self._plan_exit_fence
+                        and current_writer
+                        and compatible_slot
+                        and origin_runner_live
+                    ):
+                        # The same Host-owned run-chain task is rebound before
+                        # the origin runner is released.
+                        self._active_turn_id = candidate.continuation_turn_id
+                        return result
+            except BaseException:
+                # The canonical continuation may already be FULL.  The same
+                # process-local attempt must own its terminalization until the
+                # exact turn is terminal or belongs to a replacement writer.
+                pass
+            await self._terminalize_unbound_plan_successor(
+                attempt_id=attempt_id,
+                turn_id=candidate.continuation_turn_id,
+                entry_id=candidate.continuation_entry_id,
+                workflow_id=candidate.workflow_id,
+                interaction_id=None,
+                handoff_kind=PlanHandoffKind.ENTERED_PLAN,
+            )
+            return replace(
+                result,
+                continuation_turn_id=None,
+                continuation_entry_id=None,
+            )
+
+        async with self._lock:
+            def require_new_attempt() -> None:
+                if (
+                    self._closing
+                    or self._plan_exit_fence
+                    or self._active_task is not origin_task
+                    or self._active_turn_id != candidate.origin_turn_id
+                    or origin_task.done()
+                    or origin_task.cancelling() != 0
+                ):
+                    raise ConversationKernelConflict(
+                        "automatic Plan continuation admission is stale"
+                    )
+
+            attempt = self._plan_continuations.start(
+                attempt_id=attempt_id,
+                turn_id=candidate.continuation_turn_id,
+                semantic_candidate_fingerprint=candidate.candidate_fingerprint,
+                run=accept,
+                before_start=require_new_attempt,
+            )
+        result = await asyncio.shield(attempt.task)
+        if not isinstance(result, AcceptedPlanToolBatch):
+            raise RuntimeError("Plan continuation owner returned an invalid result")
+        return result
 
     async def submit_prompt(
         self,
@@ -363,6 +656,7 @@ class KernelHostSession:
         text: str,
         delivery_mode: PromptDeliveryMode = PromptDeliveryMode.NEW_TURN,
         target_turn_id: str | None = None,
+        requested_permission_mode: PermissionMode | None = None,
     ) -> KernelCommandOutcome:
         if not command_id:
             return KernelCommandOutcome(
@@ -378,6 +672,15 @@ class KernelHostSession:
         if existing is not None:
             return existing
         self._require_open()
+        async with self._lock:
+            if self._plan_exit_fence:
+                return KernelCommandOutcome(
+                    command_id,
+                    "REJECTED",
+                    "",
+                    "PLAN_TRANSITION_BUSY",
+                    "A Plan force-exit transition is in progress.",
+                )
         if (delivery_mode is PromptDeliveryMode.NEW_TURN) != (target_turn_id is None):
             return KernelCommandOutcome(
                 command_id,
@@ -405,6 +708,18 @@ class KernelHostSession:
                 client_submission_id=command_id,
                 delivery_mode=delivery_mode,
                 target_turn_id=target_turn_id,
+                permission_snapshot_id=(
+                    None
+                    if delivery_mode is PromptDeliveryMode.STEER_ACTIVE_TURN
+                    else _stable_id(
+                        "permission-snapshot", self.session_id, queue_item_id
+                    )
+                ),
+                requested_permission_mode=(
+                    None
+                    if delivery_mode is PromptDeliveryMode.STEER_ACTIVE_TURN
+                    else requested_permission_mode or self._launch_permission_mode
+                ),
                 content=content,
                 occurred_at=datetime.now().astimezone(),
                 actor_id=self.host_session_id,
@@ -455,6 +770,607 @@ class KernelHostSession:
             target_turn_id=target_turn_id,
         )
 
+    async def enter_plan(
+        self,
+        *,
+        command_id: str,
+        entry_reason: str,
+        resume_permission_mode: PermissionMode,
+    ) -> KernelCommandOutcome:
+        """Install a user-origin Plan workflow while the ROOT slot is idle."""
+
+        workflow_id = _stable_id("plan-workflow", self.session_id, command_id)
+        semantic_digest = canonical_digest(
+            "pulsara:user-enter-plan:v1",
+            {
+                "workflow_id": workflow_id,
+                "entry_reason": entry_reason,
+                "resume_permission_mode": resume_permission_mode.value,
+            },
+        )
+        existing = await self._query_command_row(command_id)
+        if existing is not None:
+            if (
+                str(existing.get("command_kind")) != "ENTER_PLAN"
+                or str(existing.get("semantic_digest")) != semantic_digest
+                or str(existing.get("target_plan_workflow_id")) != workflow_id
+            ):
+                raise ConversationKernelConflict("Plan enter command conflicts")
+            outcome = await self.query_command(command_id)
+            assert outcome is not None
+            return outcome
+        async with self._lock:
+            self._require_open()
+            self._retire_done_active_root_locked()
+            active = self._active_task
+            if (
+                self._plan_exit_fence
+                or self._external_new_turn_accepting
+                or active is not None
+            ):
+                return KernelCommandOutcome(
+                    command_id,
+                    "REJECTED",
+                    workflow_id,
+                    "ROOT_SLOT_UNAVAILABLE",
+                    "Plan mode can only be entered while the ROOT slot is idle.",
+                )
+            self._external_new_turn_accepting = True
+            self._external_new_turn_settled.clear()
+        try:
+            accepted = await self._io.run(
+                self.repository.enter_plan_by_user,
+                self._lease.guard,
+                command_id=command_id,
+                workflow_id=workflow_id,
+                entry_reason=entry_reason,
+                resume_permission_mode=resume_permission_mode,
+                occurred_at=datetime.now().astimezone(),
+                actor_id=self.host_session_id,
+                deadline_monotonic=monotonic() + 10.0,
+            )
+            return _plan_workflow_command_outcome(accepted)
+        finally:
+            await self._release_plan_continuation_reservation()
+
+    async def cancel_plan(
+        self,
+        *,
+        command_id: str,
+        workflow_id: str,
+        expected_workflow_revision: int,
+    ) -> KernelCommandOutcome:
+        return await self._exit_plan(
+            command_id=command_id,
+            command_kind="CANCEL_PLAN",
+            workflow_id=workflow_id,
+            expected_workflow_revision=expected_workflow_revision,
+            force=False,
+        )
+
+    async def force_exit_plan(
+        self,
+        *,
+        command_id: str,
+        workflow_id: str,
+        expected_workflow_revision: int,
+    ) -> KernelCommandOutcome:
+        return await self._exit_plan(
+            command_id=command_id,
+            command_kind="FORCE_EXIT_PLAN",
+            workflow_id=workflow_id,
+            expected_workflow_revision=expected_workflow_revision,
+            force=True,
+        )
+
+    async def _exit_plan(
+        self,
+        *,
+        command_id: str,
+        command_kind: str,
+        workflow_id: str,
+        expected_workflow_revision: int,
+        force: bool,
+    ) -> KernelCommandOutcome:
+        semantic_digest = plan_exit_semantic_fingerprint(
+            command_kind=command_kind,
+            workflow_id=workflow_id,
+            expected_workflow_revision=expected_workflow_revision,
+        )
+        existing = await self._query_command_row(command_id)
+        if existing is not None:
+            if (
+                str(existing.get("command_kind")) != command_kind
+                or str(existing.get("semantic_digest")) != semantic_digest
+                or str(existing.get("target_plan_workflow_id")) != workflow_id
+            ):
+                raise ConversationKernelConflict("Plan exit command conflicts")
+            outcome = await self.query_command(command_id)
+            assert outcome is not None
+            return outcome
+        async with self._lock:
+            self._require_open()
+            self._retire_done_active_root_locked()
+            if self._plan_exit_fence or self._external_new_turn_accepting:
+                return KernelCommandOutcome(
+                    command_id,
+                    "REJECTED",
+                    workflow_id,
+                    "PLAN_TRANSITION_BUSY",
+                    "Another ROOT admission or Plan transition is in progress.",
+                )
+            active = self._active_task
+            active_turn_id = self._active_turn_id
+            if not force and active is not None:
+                return KernelCommandOutcome(
+                    command_id,
+                    "REJECTED",
+                    workflow_id,
+                    "PLAN_NOT_IDLE",
+                    "Plan mode can only be cancelled while the ROOT slot is idle.",
+                )
+            self._plan_exit_fence = True
+        try:
+            if force:
+                # Phase one validates the exact workflow/revision before any
+                # physical cancellation.  The same transaction interrupts the
+                # exact canonical ROOT turn and aborts its interaction.
+                await self._io.run(
+                    self.repository.prepare_force_plan_exit,
+                    self._lease.guard,
+                    command_id=command_id,
+                    workflow_id=workflow_id,
+                    expected_workflow_revision=expected_workflow_revision,
+                    expected_active_turn_id=active_turn_id,
+                    occurred_at=datetime.now().astimezone(),
+                    actor_id=self.host_session_id,
+                    deadline_monotonic=monotonic() + 10.0,
+                )
+                if active is not None:
+                    active.cancel()
+                    try:
+                        await active
+                    except BaseException:
+                        pass
+                    await self._settle_active_root_task(active)
+                await self._plan_interactions.abort_current(
+                    RuntimeError("Plan question was aborted by force exit")
+                )
+                # The origin task may have detached from a shielded automatic
+                # continuation after that continuation committed FULL.  Keep
+                # the exit fence installed until every already-admitted owner
+                # has either bound before the fence or interrupted its exact
+                # unbound successor.
+                await self._plan_continuations.drain()
+            accepted = await self._io.run(
+                self.repository.exit_plan_by_user,
+                self._lease.guard,
+                command_id=command_id,
+                command_kind=command_kind,
+                workflow_id=workflow_id,
+                expected_workflow_revision=expected_workflow_revision,
+                occurred_at=datetime.now().astimezone(),
+                actor_id=self.host_session_id,
+                deadline_monotonic=monotonic() + 10.0,
+            )
+            return _plan_workflow_command_outcome(accepted)
+        finally:
+            async with self._lock:
+                self._plan_exit_fence = False
+                self._queue_wake.set()
+                self._monitor_wake.set()
+
+    async def resolve_plan_question(
+        self,
+        *,
+        command_id: str,
+        workflow_id: str,
+        expected_workflow_revision: int,
+        interaction_id: str,
+        answer: PlanQuestionAnswer,
+        write_expected_writer_generation: int | None = None,
+    ) -> AcceptedPlanResolution:
+        self._require_open()
+        result_id = _stable_id("plan-question-result", self.session_id, command_id)
+        result_entry_id = _stable_id(
+            "plan-question-result-entry", self.session_id, command_id
+        )
+        semantic_candidate_fingerprint = (
+            plan_question_resolution_semantic_fingerprint(
+                workflow_id=workflow_id,
+                expected_workflow_revision=expected_workflow_revision,
+                interaction_id=interaction_id,
+                answer=answer,
+                result_id=result_id,
+                result_entry_id=result_entry_id,
+            )
+        )
+        existing = await self._io.run(
+            self.repository.confirm_plan_question_winner,
+            session_id=self.session_id,
+            command_id=command_id,
+            workflow_id=workflow_id,
+            expected_workflow_revision=expected_workflow_revision,
+            interaction_id=interaction_id,
+            answer=answer,
+            result_id=result_id,
+            result_entry_id=result_entry_id,
+            deadline_monotonic=monotonic() + 10.0,
+        )
+        if existing is not None:
+            await self._plan_interactions.settle(
+                interaction_id=interaction_id,
+                resolution=existing,
+            )
+            return existing
+        if (
+            write_expected_writer_generation is not None
+            and write_expected_writer_generation != self.writer_generation
+        ):
+            raise ConversationKernelConflict(
+                "Plan resolution writer generation is stale"
+            )
+
+        async def resolve() -> AcceptedPlanResolution:
+            try:
+                resolution = await self._io.run(
+                    self.repository.resolve_plan_question,
+                    self._lease.guard,
+                    command_id=command_id,
+                    workflow_id=workflow_id,
+                    expected_workflow_revision=expected_workflow_revision,
+                    interaction_id=interaction_id,
+                    answer=answer,
+                    result_id=result_id,
+                    result_entry_id=result_entry_id,
+                    occurred_at=datetime.now().astimezone(),
+                    actor_id=self.host_session_id,
+                    deadline_monotonic=monotonic() + 10.0,
+                )
+            except Exception:
+                # The same stable semantic candidate is retried only after its
+                # stateless query-first path has checked for a FULL winner.
+                resolution = await self._io.run(
+                    self.repository.resolve_plan_question,
+                    self._lease.guard,
+                    command_id=command_id,
+                    workflow_id=workflow_id,
+                    expected_workflow_revision=expected_workflow_revision,
+                    interaction_id=interaction_id,
+                    answer=answer,
+                    result_id=result_id,
+                    result_entry_id=result_entry_id,
+                    occurred_at=datetime.now().astimezone(),
+                    actor_id=self.host_session_id,
+                    deadline_monotonic=monotonic() + 10.0,
+                )
+            await self._plan_interactions.settle(
+                interaction_id=interaction_id,
+                resolution=resolution,
+            )
+            return resolution
+
+        async with self._lock:
+            attempt = self._plan_continuations.start(
+                attempt_id=f"plan-question-resolution:{command_id}",
+                turn_id=f"question:{interaction_id}",
+                semantic_candidate_fingerprint=semantic_candidate_fingerprint,
+                run=resolve,
+                before_start=lambda: self._admit_plan_resolution_write_locked(
+                    creates_turn=False
+                ),
+            )
+        result = await asyncio.shield(attempt.task)
+        if not isinstance(result, AcceptedPlanResolution):
+            raise RuntimeError("Plan question resolution returned an invalid result")
+        return result
+
+    async def resolve_plan_draft_review(
+        self,
+        *,
+        command_id: str,
+        workflow_id: str,
+        expected_workflow_revision: int,
+        interaction_id: str,
+        decision: PlanDraftDecision,
+        feedback: str | None,
+        write_expected_writer_generation: int | None = None,
+    ) -> AcceptedPlanResolution:
+        self._require_open()
+        creates_turn = decision in {
+            PlanDraftDecision.APPROVE,
+            PlanDraftDecision.REVISE,
+        }
+        continuation_turn_id = (
+            _stable_id("plan-review-turn", self.session_id, command_id)
+            if creates_turn
+            else None
+        )
+        continuation_entry_id = (
+            _stable_id("plan-review-entry", self.session_id, command_id)
+            if creates_turn
+            else None
+        )
+        continuation_revision_id = (
+            _stable_id("context-revision", continuation_turn_id or "", "0")
+            if creates_turn
+            else None
+        )
+        (
+            normalized_feedback,
+            _,
+            semantic_candidate_fingerprint,
+        ) = plan_draft_review_semantic_candidate(
+            workflow_id=workflow_id,
+            expected_workflow_revision=expected_workflow_revision,
+            interaction_id=interaction_id,
+            decision=decision,
+            feedback=feedback,
+            continuation_turn_id=continuation_turn_id,
+            continuation_entry_id=continuation_entry_id,
+            continuation_context_binding_revision_id=continuation_revision_id,
+        )
+        existing = await self._io.run(
+            self.repository.confirm_plan_draft_review_winner,
+            session_id=self.session_id,
+            command_id=command_id,
+            workflow_id=workflow_id,
+            expected_workflow_revision=expected_workflow_revision,
+            interaction_id=interaction_id,
+            decision=decision,
+            feedback=normalized_feedback,
+            continuation_turn_id=continuation_turn_id,
+            continuation_entry_id=continuation_entry_id,
+            continuation_context_binding_revision_id=continuation_revision_id,
+            deadline_monotonic=monotonic() + 10.0,
+        )
+        if existing is not None:
+            return existing
+        if (
+            write_expected_writer_generation is not None
+            and write_expected_writer_generation != self.writer_generation
+        ):
+            raise ConversationKernelConflict(
+                "Plan resolution writer generation is stale"
+            )
+        reserved = False
+        attempt_id = f"plan-review-continuation:{command_id}"
+
+        async def admit() -> AcceptedPlanResolution:
+            try:
+                try:
+                    resolution = await self._io.run(
+                        self.repository.resolve_plan_draft_review,
+                        self._lease.guard,
+                        command_id=command_id,
+                        workflow_id=workflow_id,
+                        expected_workflow_revision=expected_workflow_revision,
+                        interaction_id=interaction_id,
+                        decision=decision,
+                        feedback=normalized_feedback,
+                        continuation_turn_id=continuation_turn_id,
+                        continuation_entry_id=continuation_entry_id,
+                        continuation_context_binding_revision_id=(
+                            continuation_revision_id
+                        ),
+                        occurred_at=datetime.now().astimezone(),
+                        actor_id=self.host_session_id,
+                        deadline_monotonic=monotonic() + 10.0,
+                    )
+                except Exception:
+                    resolution = await self._io.run(
+                        self.repository.resolve_plan_draft_review,
+                        self._lease.guard,
+                        command_id=command_id,
+                        workflow_id=workflow_id,
+                        expected_workflow_revision=expected_workflow_revision,
+                        interaction_id=interaction_id,
+                        decision=decision,
+                        feedback=normalized_feedback,
+                        continuation_turn_id=continuation_turn_id,
+                        continuation_entry_id=continuation_entry_id,
+                        continuation_context_binding_revision_id=(
+                            continuation_revision_id
+                        ),
+                        occurred_at=datetime.now().astimezone(),
+                        actor_id=self.host_session_id,
+                        deadline_monotonic=monotonic() + 10.0,
+                    )
+                if resolution.continuation_turn_id is None:
+                    if reserved:
+                        await self._release_plan_continuation_reservation()
+                    return resolution
+                assert resolution.continuation_entry_id is not None
+                handoff_kind = (
+                    PlanHandoffKind.APPROVED_PLAN
+                    if decision is PlanDraftDecision.APPROVE
+                    else PlanHandoffKind.REVISION_REQUESTED
+                )
+                try:
+                    inspection = await self._inspect_plan_continuation(
+                        turn_id=resolution.continuation_turn_id,
+                        entry_id=resolution.continuation_entry_id,
+                        workflow_id=workflow_id,
+                        interaction_id=interaction_id,
+                        handoff_kind=handoff_kind,
+                    )
+                    disposition = self.repository.classify_plan_continuation(
+                        inspection, self._lease.guard
+                    )
+                    if (
+                        disposition
+                        is PlanContinuationDisposition.HISTORICAL_TERMINAL
+                    ):
+                        await self._release_plan_continuation_reservation()
+                        return resolution
+                    if await self._bind_plan_review_successor(
+                        command_id=command_id,
+                        inspection=inspection,
+                    ):
+                        return resolution
+                except BaseException:
+                    # FULL canonical acceptance already owns the successor;
+                    # this attempt must continue into terminalization.
+                    pass
+                await self._terminalize_unbound_plan_successor(
+                    attempt_id=attempt_id,
+                    turn_id=resolution.continuation_turn_id,
+                    entry_id=resolution.continuation_entry_id,
+                    workflow_id=workflow_id,
+                    interaction_id=interaction_id,
+                    handoff_kind=handoff_kind,
+                )
+                await self._release_plan_continuation_reservation()
+                return resolution
+            except BaseException:
+                if reserved:
+                    await self._release_plan_continuation_reservation()
+                raise
+
+        async with self._lock:
+            def reserve_new_attempt() -> None:
+                nonlocal reserved
+                self._admit_plan_resolution_write_locked(
+                    creates_turn=creates_turn
+                )
+                reserved = creates_turn
+
+            attempt = self._plan_continuations.start(
+                attempt_id=attempt_id,
+                turn_id=continuation_turn_id or f"no-continuation:{command_id}",
+                semantic_candidate_fingerprint=semantic_candidate_fingerprint,
+                run=admit,
+                before_start=reserve_new_attempt,
+            )
+        result = await asyncio.shield(attempt.task)
+        if not isinstance(result, AcceptedPlanResolution):
+            raise RuntimeError("Plan review admission returned an invalid result")
+        return result
+
+    async def _inspect_plan_continuation(
+        self,
+        *,
+        turn_id: str,
+        entry_id: str,
+        workflow_id: str,
+        interaction_id: str | None,
+        handoff_kind: PlanHandoffKind,
+    ) -> PlanContinuationInspection:
+        inspection = await self._io.run(
+            self.repository.inspect_plan_continuation,
+            session_id=self.session_id,
+            turn_id=turn_id,
+            initial_entry_id=entry_id,
+            workflow_id=workflow_id,
+            interaction_id=interaction_id,
+            handoff_kind=handoff_kind,
+            deadline_monotonic=monotonic() + 10.0,
+        )
+        if inspection is None:
+            raise ConversationKernelConflict("Plan continuation winner is absent")
+        return inspection
+
+    def _inspection_owned_by_current_host(
+        self, inspection: PlanContinuationInspection
+    ) -> bool:
+        return (
+            self.repository.classify_plan_continuation(
+                inspection, self._lease.guard
+            )
+            is PlanContinuationDisposition.RUNNING_CURRENT_WRITER
+        )
+
+    async def _bind_plan_review_successor(
+        self,
+        *,
+        command_id: str,
+        inspection: PlanContinuationInspection,
+    ) -> bool:
+        async with self._lock:
+            self._retire_done_active_root_locked()
+            if (
+                self._closing
+                or self._plan_exit_fence
+                or not self._inspection_owned_by_current_host(inspection)
+                or not self._external_new_turn_accepting
+                or self._active_task is not None
+            ):
+                return False
+            self._install_active_root_task_locked(
+                turn_id=inspection.turn_id,
+                command_id=command_id,
+                name=f"kernel-plan-review-turn:{inspection.turn_id}",
+                run=lambda: self._run_accepted_root_chain(inspection.turn_id),
+            )
+            self._external_new_turn_accepting = False
+            self._external_new_turn_settled.set()
+            return True
+
+    async def _terminalize_unbound_plan_successor(
+        self,
+        *,
+        attempt_id: str,
+        turn_id: str,
+        entry_id: str,
+        workflow_id: str,
+        interaction_id: str | None,
+        handoff_kind: PlanHandoffKind,
+    ) -> None:
+        """Retain ownership until the exact FULL successor is safely settled."""
+
+        task = asyncio.current_task()
+        if task is None:
+            raise RuntimeError("Plan successor terminalization has no task owner")
+        self._plan_continuations.mark_terminalizing(
+            attempt_id=attempt_id,
+            task=task,
+        )
+        delay_seconds = 0.05
+        while True:
+            try:
+                await self._io.run(
+                    self.repository.interrupt_turn,
+                    self._lease.guard,
+                    turn_id=turn_id,
+                    reason="PLAN_CONTINUATION_NOT_BOUND",
+                    occurred_at=datetime.now().astimezone(),
+                    actor_id=self.host_session_id,
+                    deadline_monotonic=monotonic() + 10.0,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # Confirmation below distinguishes a replacement writer from
+                # a transient failure under this exact writer.
+                pass
+            try:
+                inspection = await self._inspect_plan_continuation(
+                    turn_id=turn_id,
+                    entry_id=entry_id,
+                    workflow_id=workflow_id,
+                    interaction_id=interaction_id,
+                    handoff_kind=handoff_kind,
+                )
+                disposition = self.repository.classify_plan_continuation(
+                    inspection, self._lease.guard
+                )
+                if disposition in {
+                    PlanContinuationDisposition.HISTORICAL_TERMINAL,
+                    PlanContinuationDisposition.NOT_OWNED_BY_CURRENT_WRITER,
+                }:
+                    return
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass
+            await asyncio.sleep(delay_seconds)
+            delay_seconds = min(delay_seconds * 2, 0.5)
+
+    async def _release_plan_continuation_reservation(self) -> None:
+        async with self._lock:
+            self._external_new_turn_accepting = False
+            self._external_new_turn_settled.set()
+
     async def _consume_pending_steers(
         self, turn_id: str, deadline_monotonic: float
     ) -> int:
@@ -482,12 +1398,17 @@ class KernelHostSession:
                 return
             while not self._closing:
                 async with self._lock:
+                    self._retire_done_active_root_locked()
                     active = self._active_task
                     external_new_turn_accepting = self._external_new_turn_accepting
+                    plan_exit_fence = self._plan_exit_fence
+                if plan_exit_fence:
+                    await asyncio.sleep(0)
+                    continue
                 if external_new_turn_accepting:
                     await asyncio.sleep(0)
                     continue
-                if active is not None and not active.done():
+                if active is not None:
                     try:
                         await asyncio.shield(active)
                     except BaseException:
@@ -531,26 +1452,26 @@ class KernelHostSession:
                     if head_mode is PromptDeliveryMode.NEW_TURN:
                         continue
                     break
-                task = asyncio.create_task(
-                    self._runner.run_accepted_turn(accepted.turn_id),
-                    name=f"kernel-queued-turn:{accepted.turn_id}",
-                )
                 async with self._lock:
+                    task = self._install_active_root_task_locked(
+                        turn_id=accepted.turn_id,
+                        command_id=None,
+                        name=f"kernel-queued-turn:{accepted.turn_id}",
+                        run=lambda: self._run_accepted_root_chain(
+                            accepted.turn_id
+                        ),
+                    )
                     if self._closing:
                         task.cancel()
-                    self._active_task = task
-                    self._active_turn_id = accepted.turn_id
-                    self._active_command_id = None
                 try:
                     await task
                 except BaseException:
                     pass
                 finally:
-                    async with self._lock:
-                        if self._active_task is task:
-                            self._active_task = None
-                            self._active_turn_id = None
-                            self._active_command_id = None
+                    # Covers cancellation before the task wrapper gets its
+                    # first scheduling turn; the normal path already settled
+                    # itself in ``_run_owned_root_task``.
+                    await self._settle_active_root_task(task)
 
     async def _terminal_monitor_delivery_loop(self) -> None:
         """Install process-local monitor drafts through the Host safe point."""
@@ -594,15 +1515,9 @@ class KernelHostSession:
                 reserved_new_turn = False
                 if target is None:
                     async with self._lock:
+                        self._retire_done_active_root_locked()
                         active = self._active_task
                         active_turn_id = self._active_turn_id
-                        if active is not None and active.done():
-                            if self._active_task is active:
-                                self._active_task = None
-                                self._active_turn_id = None
-                                self._active_command_id = None
-                            active = None
-                            active_turn_id = None
                         if active is not None and active_turn_id is not None:
                             target = ExistingTurnInstallation(
                                 turn_id=active_turn_id,
@@ -610,7 +1525,10 @@ class KernelHostSession:
                                     "entry", self.session_id, observation_id
                                 ),
                             )
-                        elif not self._external_new_turn_accepting:
+                        elif (
+                            not self._plan_exit_fence
+                            and not self._external_new_turn_accepting
+                        ):
                             self._external_new_turn_accepting = True
                             self._terminal_new_turn_observation_id = observation_id
                             self._external_new_turn_settled.clear()
@@ -708,39 +1626,23 @@ class KernelHostSession:
     async def _start_terminal_observation_turn(
         self, turn_id: str, observation_id: str
     ) -> None:
-        task = asyncio.create_task(
-            self._run_terminal_observation_turn(turn_id),
-            name=f"kernel-terminal-observation-turn:{turn_id}",
-        )
         async with self._lock:
+            self._retire_done_active_root_locked()
             if (
                 self._terminal_new_turn_observation_id != observation_id
                 or not self._external_new_turn_accepting
                 or self._active_task is not None
             ):
-                task.cancel()
                 raise RuntimeError("terminal observation turn lost its local admission")
-            self._active_task = task
-            self._active_turn_id = turn_id
-            self._active_command_id = None
+            self._install_active_root_task_locked(
+                turn_id=turn_id,
+                command_id=None,
+                name=f"kernel-terminal-observation-turn:{turn_id}",
+                run=lambda: self._run_accepted_root_chain(turn_id),
+            )
             self._terminal_new_turn_observation_id = None
             self._external_new_turn_accepting = False
             self._external_new_turn_settled.set()
-
-    async def _run_terminal_observation_turn(self, turn_id: str) -> None:
-        task = asyncio.current_task()
-        try:
-            await self._runner.run_accepted_turn(turn_id)
-        except BaseException:
-            pass
-        finally:
-            async with self._lock:
-                if self._active_task is task:
-                    self._active_task = None
-                    self._active_turn_id = None
-                    self._active_command_id = None
-                    self._queue_wake.set()
-                    self._monitor_wake.set()
 
     async def _query_command_row(self, command_id: str):
         return await self._io.run(
@@ -755,6 +1657,73 @@ class KernelHostSession:
         row = await self._query_command_row(command_id)
         if row is None:
             return failure
+        command_kind = str(row.get("command_kind") or "")
+        if command_kind in {"ENTER_PLAN", "CANCEL_PLAN", "FORCE_EXIT_PLAN"}:
+            workflow_status = str(row.get("plan_workflow_status") or "")
+            if not workflow_status:
+                raise ConversationKernelConflict(
+                    "Plan workflow command is partially installed"
+                )
+            return KernelCommandOutcome(
+                command_id=command_id,
+                status="SUCCEEDED",
+                target_id=str(row.get("target_plan_workflow_id") or ""),
+                public_code={
+                    "ENTER_PLAN": "PLAN_ENTERED",
+                    "CANCEL_PLAN": "PLAN_CANCELLED",
+                    "FORCE_EXIT_PLAN": "PLAN_FORCE_EXITED",
+                }[command_kind],
+                public_message="Plan workflow transition accepted.",
+                plan_workflow_status=workflow_status,
+                resume_permission_mode=PermissionMode(
+                    str(row["plan_resume_permission_mode"])
+                ),
+                handoff_created_at_commit=command_kind != "ENTER_PLAN",
+                plan_workflow_revision=int(row["plan_workflow_revision"]),
+            )
+        if command_kind == "RESOLVE_PLAN_INTERACTION":
+            interaction_status = str(row.get("plan_interaction_status") or "")
+            workflow_status = str(row.get("interaction_workflow_status") or "")
+            if not interaction_status or not workflow_status:
+                raise ConversationKernelConflict(
+                    "Plan resolution command is partially installed"
+                )
+            interaction_kind = str(row.get("plan_interaction_kind") or "")
+            draft_decision = None
+            if interaction_kind == "DRAFT_REVIEW":
+                draft_decision = {
+                    "APPROVED": PlanDraftDecision.APPROVE,
+                    "REVISION_REQUESTED": PlanDraftDecision.REVISE,
+                    "CANCELLED": PlanDraftDecision.CANCEL,
+                }.get(interaction_status)
+                if draft_decision is None:
+                    raise ConversationKernelConflict(
+                        "Plan draft resolution command has an invalid terminal status"
+                    )
+            continuation_turn_id = str(
+                row.get("plan_continuation_turn_id") or ""
+            ) or None
+            if (draft_decision in {PlanDraftDecision.APPROVE, PlanDraftDecision.REVISE}) != (
+                continuation_turn_id is not None
+            ):
+                raise ConversationKernelConflict(
+                    "Plan resolution continuation identity is incomplete"
+                )
+            return KernelCommandOutcome(
+                command_id=command_id,
+                status="SUCCEEDED",
+                target_id=str(row.get("target_plan_interaction_id") or ""),
+                public_code=f"PLAN_INTERACTION_{interaction_status}",
+                public_message="Plan interaction resolution accepted.",
+                plan_workflow_status=workflow_status,
+                resume_permission_mode=PermissionMode(
+                    str(row["interaction_resume_permission_mode"])
+                ),
+                handoff_created_at_commit=interaction_status == "CANCELLED",
+                plan_workflow_revision=int(row["interaction_workflow_revision"]),
+                plan_draft_decision=draft_decision,
+                plan_continuation_turn_id=continuation_turn_id,
+            )
         if row.get("interaction_decision") is not None:
             decision = str(row["interaction_decision"])
             return KernelCommandOutcome(
@@ -826,6 +1795,11 @@ class KernelHostSession:
         self._require_open()
         return self._interactions.attach_controller(attachment_id)
 
+    def has_controller_attachment(self, attachment_id: str) -> bool:
+        """Validate the process-local Plan-content capability holder."""
+
+        return self._interactions.is_current_controller(attachment_id)
+
     async def controller_detached(self, attachment_id: str) -> None:
         await self._interactions.controller_detached(attachment_id)
 
@@ -868,6 +1842,7 @@ class KernelHostSession:
             await task
         except BaseException:
             pass
+        await self._settle_active_root_task(task)
         return True
 
     async def accept_subagent_result(
@@ -1036,11 +2011,12 @@ class KernelHostSession:
 
     async def _reserve_external_new_turn(self) -> bool:
         async with self._lock:
+            self._retire_done_active_root_locked()
             if (
                 self._closing
+                or self._plan_exit_fence
                 or self._external_new_turn_accepting
                 or self._active_task is not None
-                and not self._active_task.done()
             ):
                 return False
             self._external_new_turn_accepting = True
@@ -1091,43 +2067,20 @@ class KernelHostSession:
             self._queue_wake.set()
 
     async def _start_external_result_turn(self, turn_id: str, command_id: str) -> None:
-        task = asyncio.create_task(
-            self._run_external_result_turn(turn_id),
-            name=f"kernel-external-result-turn:{turn_id}",
-        )
-        lost_admission = False
         async with self._lock:
+            self._retire_done_active_root_locked()
             if not self._external_new_turn_accepting or self._active_task is not None:
                 self._external_new_turn_accepting = False
                 self._external_new_turn_settled.set()
-                lost_admission = True
-            else:
-                self._active_task = task
-                self._active_turn_id = turn_id
-                self._active_command_id = command_id
-                self._external_new_turn_accepting = False
-                self._external_new_turn_settled.set()
-        if lost_admission:
-            task.cancel()
-            try:
-                await task
-            except BaseException:
-                pass
-            raise RuntimeError("external result turn lost its local admission")
-
-    async def _run_external_result_turn(self, turn_id: str) -> None:
-        task = asyncio.current_task()
-        try:
-            await self._runner.run_accepted_turn(turn_id)
-        except BaseException:
-            pass
-        finally:
-            async with self._lock:
-                if self._active_task is task:
-                    self._active_task = None
-                    self._active_turn_id = None
-                    self._active_command_id = None
-                    self._queue_wake.set()
+                raise RuntimeError("external result turn lost its local admission")
+            self._install_active_root_task_locked(
+                turn_id=turn_id,
+                command_id=command_id,
+                name=f"kernel-external-result-turn:{turn_id}",
+                run=lambda: self._run_accepted_root_chain(turn_id),
+            )
+            self._external_new_turn_accepting = False
+            self._external_new_turn_settled.set()
 
     async def request_job_cancel(
         self,
@@ -1195,6 +2148,8 @@ class KernelHostSession:
                         raise TimeoutError(
                             "canonical foreground physical task did not exit"
                         )
+            if task is not None:
+                await self._settle_active_root_task(task)
             self._renewal_task.cancel()
             try:
                 await self._renewal_task
@@ -1205,6 +2160,8 @@ class KernelHostSession:
                 await self._delivery_task
             except BaseException:
                 pass
+            await self._plan_interactions.aclose()
+            await self._plan_continuations.aclose()
             await self._interactions.aclose()
             await self._subagents.aclose(
                 timeout_seconds=max(0.01, deadline - monotonic())
@@ -1245,6 +2202,7 @@ class KernelHostSession:
             extensions=self.extensions,
             steer_consumer=self._consume_pending_steers,
             workspace_id=self.workspace.workspace_key,
+            launch_permission_mode=self._launch_permission_mode,
         )
 
     def _observe_provider_usage(
@@ -1640,6 +2598,27 @@ class KernelHostCore:
                 # bounded interval retries; product writes never wait for it.
                 pass
             await asyncio.sleep(STAGE2_LIMITS.blob_gc_interval_ms / 1_000)
+
+
+def _plan_workflow_command_outcome(
+    accepted: AcceptedPlanWorkflowCommand,
+) -> KernelCommandOutcome:
+    code = {
+        "ACTIVE": "PLAN_ENTERED",
+        "CANCELLED": "PLAN_CANCELLED",
+        "FORCE_EXITED": "PLAN_FORCE_EXITED",
+    }[accepted.workflow_status.value]
+    return KernelCommandOutcome(
+        command_id=accepted.command_id,
+        status="SUCCEEDED",
+        target_id=accepted.workflow_id,
+        public_code=code,
+        public_message="Plan workflow transition accepted.",
+        plan_workflow_status=accepted.workflow_status.value,
+        resume_permission_mode=accepted.resume_permission_mode,
+        handoff_created_at_commit=accepted.handoff_created_at_commit,
+        plan_workflow_revision=accepted.workflow_revision,
+    )
 
 
 __all__ = [

@@ -59,7 +59,16 @@ from pulsara_agent.terminal_protocol.canonical_v3 import (
     MAXIMUM_OBSERVATION_EVENTS,
     MAXIMUM_SNAPSHOT_BYTES,
 )
-from pulsara_agent.conversation_kernel.repository import ConversationKernelConflict
+from pulsara_agent.conversation_kernel.repository import (
+    ConversationKernelConflict,
+    PlanDraftIdentityConflict,
+    PlanQuestionAnswer,
+)
+from pulsara_agent.primitives.permission import PermissionMode
+from pulsara_agent.primitives.plan_workflow import (
+    PlanDraftDecision,
+    PlanQuestionAnswerKind,
+)
 from pulsara_agent.conversation_kernel.vocabulary import LiveEventType
 from pulsara_agent.terminal_protocol.generated_v3 import terminal_kernel_v3_pb2 as wire
 
@@ -67,7 +76,7 @@ from pulsara_agent.terminal_protocol.generated_v3 import terminal_kernel_v3_pb2 
 PROTOCOL_MAJOR = 3
 PROTOCOL_MINOR = 0
 PROTOCOL_SCHEMA_FINGERPRINT = (
-    "sha256:c8571a6124c4b02f6d4b10911fbd11aa46517f05b84408b6606fa8c85866dbbe"
+    "sha256:93a7667cd79b0e3992f5e302e7a3f52f1caa7feabb4a265547995046522e0d97"
 )
 MAXIMUM_FRAME_BYTES = 8 << 20
 MAXIMUM_OBSERVATION_WAIT_MS = STAGE2_LIMITS.committed_observation_hard_wait_ms
@@ -253,6 +262,12 @@ class TerminalKernelProtocolServer:
             return self._live_control_snapshot(state, request)
         if kind == "resolve_interaction":
             return await self._resolve_interaction(state, request)
+        if kind == "resolve_plan_interaction":
+            return await self._resolve_plan_interaction(state, request)
+        if kind == "read_plan_question":
+            return await self._read_plan_question(state, request)
+        if kind == "read_plan_draft":
+            return await self._read_plan_draft(state, request)
         return _error(_request_id(frame), "UNKNOWN_REQUEST")
 
     def _hello(
@@ -552,11 +567,34 @@ class TerminalKernelProtocolServer:
             state.granted_role != wire.ATTACHMENT_ROLE_CONTROLLER
         ):
             return _error(request.request_id, "CONTROLLER_REQUIRED")
+        requested_permission = _permission_from_wire(
+            request.requested_permission_mode
+        )
+        if (
+            request.command_kind not in (wire.SUBMIT_PROMPT, wire.ENTER_PLAN)
+            and request.requested_permission_mode
+            != wire.PERMISSION_MODE_UNSPECIFIED
+        ):
+            return _error(request.request_id, "PERMISSION_FIELD_NOT_ALLOWED")
+        plan_command = request.command_kind in (
+            wire.ENTER_PLAN,
+            wire.CANCEL_PLAN,
+            wire.FORCE_EXIT_PLAN,
+        )
+        if not plan_command and (
+            request.target_plan_workflow_id
+            or request.expected_plan_workflow_revision
+        ):
+            return _error(request.request_id, "PLAN_COMMAND_FIELDS_NOT_ALLOWED")
         if request.command_kind == wire.SUBMIT_PROMPT:
-            if not _valid_prompt(request.text):
+            if not _valid_prompt(request.text) or request.target_turn_id:
                 return _error(request.request_id, "PROMPT_INVALID")
+            if requested_permission is None:
+                return _error(request.request_id, "PERMISSION_MODE_REQUIRED")
             outcome = await state.host_session.submit_prompt(
-                command_id=request.command_id, text=request.text
+                command_id=request.command_id,
+                text=request.text,
+                requested_permission_mode=requested_permission,
             )
         elif request.command_kind == wire.STEER_ACTIVE_TURN:
             if not _valid_prompt(request.text) or not request.target_turn_id:
@@ -567,6 +605,8 @@ class TerminalKernelProtocolServer:
                 target_turn_id=request.target_turn_id,
             )
         elif request.command_kind == wire.STOP_ACTIVE_TURN:
+            if request.text or request.target_turn_id:
+                return _error(request.request_id, "STOP_REQUEST_INVALID")
             stopped = await state.host_session.stop_current_turn()
             from pulsara_agent.conversation_kernel.host import KernelCommandOutcome
 
@@ -578,7 +618,11 @@ class TerminalKernelProtocolServer:
                 "The active turn was stopped." if stopped else "No active turn exists.",
             )
         elif request.command_kind == wire.ACCEPT_SUBAGENT_RESULT:
-            if request.source_job_id or not request.source_subagent_result_id:
+            if (
+                request.text
+                or request.source_job_id
+                or not request.source_subagent_result_id
+            ):
                 return _error(request.request_id, "SUBAGENT_RESULT_REQUEST_INVALID")
             outcome = await state.host_session.accept_subagent_result(
                 command_id=request.command_id,
@@ -587,7 +631,11 @@ class TerminalKernelProtocolServer:
                 actor_id=state.attachment_id,
             )
         elif request.command_kind == wire.ACCEPT_JOB_RESULT:
-            if request.source_subagent_result_id or not request.source_job_id:
+            if (
+                request.text
+                or request.source_subagent_result_id
+                or not request.source_job_id
+            ):
                 return _error(request.request_id, "JOB_RESULT_REQUEST_INVALID")
             outcome = await state.host_session.accept_job_result(
                 command_id=request.command_id,
@@ -595,13 +643,57 @@ class TerminalKernelProtocolServer:
                 job_id=request.source_job_id,
                 actor_id=state.attachment_id,
             )
+        elif request.command_kind == wire.ENTER_PLAN:
+            if (
+                requested_permission is None
+                or not _valid_prompt(request.text)
+                or request.target_turn_id
+                or request.target_plan_workflow_id
+                or request.expected_plan_workflow_revision
+            ):
+                return _error(request.request_id, "PLAN_ENTER_REQUEST_INVALID")
+            try:
+                outcome = await state.host_session.enter_plan(
+                    command_id=request.command_id,
+                    entry_reason=request.text,
+                    resume_permission_mode=requested_permission,
+                )
+            except (ConversationKernelConflict, ValueError):
+                return _error(request.request_id, "PLAN_ENTER_CONFLICT")
+        elif request.command_kind in (wire.CANCEL_PLAN, wire.FORCE_EXIT_PLAN):
+            if (
+                request.text
+                or request.target_turn_id
+                or not request.target_plan_workflow_id
+                or request.expected_plan_workflow_revision < 1
+            ):
+                return _error(request.request_id, "PLAN_EXIT_REQUEST_INVALID")
+            method = (
+                state.host_session.cancel_plan
+                if request.command_kind == wire.CANCEL_PLAN
+                else state.host_session.force_exit_plan
+            )
+            try:
+                outcome = await method(
+                    command_id=request.command_id,
+                    workflow_id=request.target_plan_workflow_id,
+                    expected_workflow_revision=(
+                        request.expected_plan_workflow_revision
+                    ),
+                )
+            except (ConversationKernelConflict, ValueError):
+                return _error(request.request_id, "PLAN_EXIT_CONFLICT")
         elif request.command_kind == wire.DETACH:
+            if request.text or request.target_turn_id:
+                return _error(request.request_id, "DETACH_REQUEST_INVALID")
             from pulsara_agent.conversation_kernel.host import KernelCommandOutcome
 
             outcome = KernelCommandOutcome(
                 request.command_id, "SUCCEEDED", "", "DETACHED", "Client detached."
             )
         elif request.command_kind == wire.CLOSE_SESSION:
+            if request.text or request.target_turn_id:
+                return _error(request.request_id, "CLOSE_REQUEST_INVALID")
             from pulsara_agent.conversation_kernel.host import KernelCommandOutcome
 
             outcome = KernelCommandOutcome(
@@ -644,6 +736,195 @@ class TerminalKernelProtocolServer:
             return _error(request.request_id, "INTERACTION_STALE")
         return wire.ServerFrame(
             command_outcome=_outcome_to_wire(request.request_id, outcome)
+        )
+
+    async def _resolve_plan_interaction(
+        self, state: _Connection, request: wire.ResolvePlanInteractionRequest
+    ) -> wire.ServerFrame:
+        if not self._has_plan_content_capability(state):
+            return _error(request.request_id, "CONTROLLER_REQUIRED")
+        if (
+            not _valid_command_id(request.command_id)
+            or not request.interaction_id
+            or not request.workflow_id
+            or request.expected_workflow_revision < 1
+            or request.attempt_expected_writer_generation < 1
+        ):
+            return _error(request.request_id, "PLAN_RESOLUTION_REQUEST_INVALID")
+        branch = request.WhichOneof("resolution")
+        try:
+            if branch == "question_answer":
+                answer_branch = request.question_answer.WhichOneof("answer")
+                if answer_branch == "option_ordinal":
+                    answer = PlanQuestionAnswer(
+                        PlanQuestionAnswerKind.OPTION,
+                        option_ordinal=request.question_answer.option_ordinal,
+                    )
+                elif answer_branch == "free_text":
+                    if (
+                        not request.question_answer.free_text
+                        or len(request.question_answer.free_text.encode("utf-8"))
+                        > 32 * 1024
+                    ):
+                        return _error(
+                            request.request_id, "PLAN_QUESTION_ANSWER_INVALID"
+                        )
+                    answer = PlanQuestionAnswer(
+                        PlanQuestionAnswerKind.FREE_TEXT,
+                        free_text=request.question_answer.free_text,
+                    )
+                else:
+                    return _error(request.request_id, "PLAN_QUESTION_ANSWER_INVALID")
+                outcome = await state.host_session.resolve_plan_question(
+                    command_id=request.command_id,
+                    workflow_id=request.workflow_id,
+                    expected_workflow_revision=(
+                        request.expected_workflow_revision
+                    ),
+                    interaction_id=request.interaction_id,
+                    answer=answer,
+                    write_expected_writer_generation=(
+                        request.attempt_expected_writer_generation
+                    ),
+                )
+            elif branch == "draft":
+                decision = {
+                    wire.PLAN_DRAFT_APPROVE: PlanDraftDecision.APPROVE,
+                    wire.PLAN_DRAFT_REVISE: PlanDraftDecision.REVISE,
+                    wire.PLAN_DRAFT_CANCEL: PlanDraftDecision.CANCEL,
+                }.get(request.draft.decision)
+                if decision is None:
+                    return _error(request.request_id, "PLAN_DRAFT_DECISION_INVALID")
+                feedback = (
+                    request.draft.feedback
+                    if request.draft.HasField("feedback")
+                    else None
+                )
+                if (
+                    decision
+                    in {PlanDraftDecision.APPROVE, PlanDraftDecision.CANCEL}
+                    and request.draft.HasField("feedback")
+                ):
+                    return _error(
+                        request.request_id, "PLAN_DRAFT_FEEDBACK_NOT_ALLOWED"
+                    )
+                if feedback is not None and len(feedback.encode("utf-8")) > 32 * 1024:
+                    return _error(request.request_id, "PLAN_DRAFT_FEEDBACK_INVALID")
+                # Missing and present-empty REVISE feedback have one semantic
+                # candidate.  APPROVE/CANCEL presence is rejected by Host.
+                if decision is PlanDraftDecision.REVISE and feedback == "":
+                    feedback = None
+                outcome = await state.host_session.resolve_plan_draft_review(
+                    command_id=request.command_id,
+                    workflow_id=request.workflow_id,
+                    expected_workflow_revision=(
+                        request.expected_workflow_revision
+                    ),
+                    interaction_id=request.interaction_id,
+                    decision=decision,
+                    feedback=feedback,
+                    write_expected_writer_generation=(
+                        request.attempt_expected_writer_generation
+                    ),
+                )
+            else:
+                return _error(request.request_id, "PLAN_RESOLUTION_KIND_INVALID")
+        except (ConversationKernelConflict, ValueError, KeyError):
+            return _error(request.request_id, "PLAN_RESOLUTION_CONFLICT")
+        return wire.ServerFrame(
+            resolve_plan_interaction=wire.ResolvePlanInteractionResponse(
+                request_id=request.request_id,
+                command_id=outcome.command_id,
+                workflow_id=outcome.workflow_id,
+                workflow_status=outcome.workflow_status.value,
+                interaction_id=outcome.interaction_id,
+                interaction_status=outcome.interaction_status,
+                resume_permission_mode=_permission_to_wire(
+                    outcome.resume_permission_mode
+                ),
+                continuation_turn_id=outcome.continuation_turn_id or "",
+                handoff_created_at_commit=outcome.handoff_created_at_commit,
+                draft_decision={
+                    None: wire.PLAN_DRAFT_DECISION_UNSPECIFIED,
+                    PlanDraftDecision.APPROVE: wire.PLAN_DRAFT_APPROVE,
+                    PlanDraftDecision.REVISE: wire.PLAN_DRAFT_REVISE,
+                    PlanDraftDecision.CANCEL: wire.PLAN_DRAFT_CANCEL,
+                }[outcome.draft_decision],
+                workflow_revision=outcome.workflow_revision,
+            )
+        )
+
+    async def _read_plan_question(
+        self, state: _Connection, request: wire.ReadPlanQuestionContentRequest
+    ) -> wire.ServerFrame:
+        if not self._has_plan_content_capability(state):
+            return _error(request.request_id, "CONTROLLER_REQUIRED")
+        try:
+            question = await asyncio.to_thread(
+                state.host_session.repository.read_plan_question_content,
+                session_id=state.host_session.session_id,
+                interaction_id=request.interaction_id,
+                deadline_monotonic=monotonic() + 10.0,
+            )
+        except (ConversationKernelConflict, ValueError, KeyError):
+            return _error(request.request_id, "PLAN_CONTENT_INVALID")
+        return wire.ServerFrame(
+            plan_question=wire.PlanQuestionContent(
+                request_id=request.request_id,
+                interaction_id=question.interaction_id,
+                question=question.question,
+                options=(
+                    wire.PlanQuestionOption(
+                        ordinal=item.ordinal,
+                        label=item.label,
+                        description=item.description,
+                        recommended=item.recommended,
+                    )
+                    for item in question.options
+                ),
+                allow_free_text=question.allow_free_text,
+                typed_content_fingerprint=question.typed_content_fingerprint,
+            )
+        )
+
+    async def _read_plan_draft(
+        self, state: _Connection, request: wire.ReadPlanDraftTextChunkRequest
+    ) -> wire.ServerFrame:
+        if not self._has_plan_content_capability(state):
+            return _error(request.request_id, "CONTROLLER_REQUIRED")
+        try:
+            chunk = await asyncio.to_thread(
+                state.host_session.repository.read_plan_draft_text_chunk,
+                session_id=state.host_session.session_id,
+                interaction_id=request.interaction_id,
+                offset_utf8_bytes=request.offset_utf8_bytes,
+                limit_bytes=request.limit_bytes,
+                expected_plan_utf8_digest=(
+                    request.expected_plan_utf8_digest
+                    if request.HasField("expected_plan_utf8_digest")
+                    else None
+                ),
+                deadline_monotonic=monotonic() + 10.0,
+            )
+        except PlanDraftIdentityConflict:
+            return _error(request.request_id, "PLAN_DRAFT_IDENTITY_CONFLICT")
+        except (ConversationKernelConflict, ValueError, KeyError):
+            return _error(request.request_id, "PLAN_CONTENT_INVALID")
+        identity = chunk.identity
+        return wire.ServerFrame(
+            plan_draft=wire.PlanDraftTextChunk(
+                request_id=request.request_id,
+                interaction_id=identity.interaction_id,
+                assistant_entry_id=identity.assistant_entry_id,
+                tool_call_id=identity.tool_call_id,
+                request_semantic_digest=identity.request_semantic_digest,
+                plan_utf8_size=identity.plan_utf8_size,
+                plan_utf8_digest=identity.plan_utf8_digest,
+                offset_utf8_bytes=chunk.offset_utf8_bytes,
+                body=chunk.body,
+                next_offset_utf8_bytes=chunk.next_offset_utf8_bytes,
+                eof=chunk.eof,
+            )
         )
 
     async def _query_command(
@@ -743,6 +1024,17 @@ class TerminalKernelProtocolServer:
             getattr(request, "attachment_id", None) == state.attachment_id
             and getattr(request, "attachment_generation", None)
             == state.attachment_generation
+        )
+
+    @staticmethod
+    def _has_plan_content_capability(state: _Connection) -> bool:
+        """Bind exact Plan reads to the currently attached controller owner."""
+
+        return (
+            state.granted_role == wire.ATTACHMENT_ROLE_CONTROLLER
+            and state.host_session is not None
+            and bool(state.attachment_id)
+            and state.host_session.has_controller_attachment(state.attachment_id)
         )
 
     async def _read_frame(self, reader: asyncio.StreamReader) -> wire.ClientFrame:
@@ -1096,6 +1388,21 @@ def _outcome_to_wire(request_id: str, outcome: object) -> wire.CommandOutcome:
         target_id=outcome.target_id,
         public_code=outcome.public_code,
         public_message=outcome.public_message,
+        plan_workflow_status=outcome.plan_workflow_status or "",
+        resume_permission_mode=(
+            wire.PERMISSION_MODE_UNSPECIFIED
+            if outcome.resume_permission_mode is None
+            else _permission_to_wire(outcome.resume_permission_mode)
+        ),
+        handoff_created_at_commit=outcome.handoff_created_at_commit,
+        plan_workflow_revision=outcome.plan_workflow_revision or 0,
+        plan_draft_decision={
+            None: wire.PLAN_DRAFT_DECISION_UNSPECIFIED,
+            PlanDraftDecision.APPROVE: wire.PLAN_DRAFT_APPROVE,
+            PlanDraftDecision.REVISE: wire.PLAN_DRAFT_REVISE,
+            PlanDraftDecision.CANCEL: wire.PLAN_DRAFT_CANCEL,
+        }[outcome.plan_draft_decision],
+        plan_continuation_turn_id=outcome.plan_continuation_turn_id or "",
     )
 
 
@@ -1132,6 +1439,24 @@ def _valid_prompt(value: str) -> bool:
     if not encoded or len(encoded) > MAXIMUM_PROMPT_BYTES:
         return False
     return all(character in "\n\t" or ord(character) >= 0x20 for character in value)
+
+
+def _permission_from_wire(value: int) -> PermissionMode | None:
+    return {
+        wire.PERMISSION_MODE_ACCEPT_EDITS: PermissionMode.ACCEPT_EDITS,
+        wire.PERMISSION_MODE_READ_ONLY: PermissionMode.READ_ONLY,
+        wire.PERMISSION_MODE_ASK_PERMISSIONS: PermissionMode.ASK_PERMISSIONS,
+        wire.PERMISSION_MODE_BYPASS_PERMISSIONS: PermissionMode.BYPASS_PERMISSIONS,
+    }.get(value)
+
+
+def _permission_to_wire(value: PermissionMode) -> int:
+    return {
+        PermissionMode.ACCEPT_EDITS: wire.PERMISSION_MODE_ACCEPT_EDITS,
+        PermissionMode.READ_ONLY: wire.PERMISSION_MODE_READ_ONLY,
+        PermissionMode.ASK_PERMISSIONS: wire.PERMISSION_MODE_ASK_PERMISSIONS,
+        PermissionMode.BYPASS_PERMISSIONS: wire.PERMISSION_MODE_BYPASS_PERMISSIONS,
+    }[value]
 
 
 __all__ = [

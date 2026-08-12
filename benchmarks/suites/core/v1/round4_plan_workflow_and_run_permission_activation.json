@@ -1,0 +1,217 @@
+{
+  "schema_version": "round4-plan-workflow-and-run-permission-activation.v1",
+  "status": "activated",
+  "generated_at_utc": "2026-08-12T12:42:56Z",
+  "captured_head": "d64dbeb23c6af0a00e112349a50878eae4abd9f6",
+  "working_tree_semantics": "Round 4 was implemented and verified in the current uncommitted worktree. Existing user changes were preserved. No files were staged, committed, or pushed.",
+  "post_review_code_sha256": {
+    "host.py": "210f39a0a40d75d184d4e11185faca62a0491078a49b1fe4c7733188890a558b",
+    "repository.py": "1ad1f719a43046d3f1e2801d621e46d70687099fc279e6cb8802d741a58c91f2",
+    "plan_runtime.py": "db10bdbd8bf435aeff1e066c420f63daf2257e09f0e707969057b153d78d0d15",
+    "run_permission.py": "041496420e4f67fdfea303f2b2ddcab146da06d1b3e1748cd373891adbdc9de1",
+    "v3_gateway.py": "87b45b74da3fb8b85854ba9db06fad19e53e127c42432e604634bbb1113350be",
+    "canonical_v3.py": "81e6e24904af9849b49525525503f5005910947f26ac5036e87077ee10192d38",
+    "test_round4_plan_workflow.py": "b3df7a89efb4f5e6805e097e36a9796b99569ccf2a311bcaa51f35180346c33f",
+    "test_round4_plan_postgres.py": "956a160748ba36e07004e2eb7c15240a00c782d5023fb651541c387e8e26249e",
+    "test_round4_plan_host.py": "670d36bba9f3e50e1df88b225acd0560e85998b3204b3cc071b3792d94573af7",
+    "test_round4_architecture.py": "ea92862a766d3c7e248f0aa2a5fbd6f32962b52880852b022302a286e048f388"
+  },
+  "source_documents": {
+    "ROUND_4_PLAN_WORKFLOW_AND_RUN_PERMISSION_IMPLEMENTATION_SPEC.zh.md_at_start": "1e8ffad2b74044636c882685449fcb4b4e96bd113c32d24d1ba4545f1241a9a2",
+    "ROUND_4_PLAN_WORKFLOW_AND_RUN_PERMISSION_IMPLEMENTATION_SPEC.zh.md_after_activation_update": "9209f21692bfc9534d9f95ff583738cd9a86f44a34714bc6d9f38083a72c4c0b",
+    "POST_HARD_CUT_PRODUCT_CAPABILITY_GAP_INDEX.zh.md_at_start": "95c339b937170964da9ec56adbbfb618e87e0486debb7d82176d6e4ba2211c72",
+    "POST_HARD_CUT_PRODUCT_CAPABILITY_GAP_INDEX.zh.md_after_activation_update": "8675fa5b1a4b3887cea8b1e41f3b464168380ea81f0e3f1e03a2276a067955b1",
+    "PULSARA_DURABILITY_SUBTRACTION_REASSESSMENT.zh.md": "cb3e7b0a9f33e5e4c5b17850d47e1af580a3f23f094f868076351bb17a6a6e80",
+    "ROUND_3_STRUCTURED_MODEL_INPUT_COMPILER_IMPLEMENTATION_SPEC.zh.md": "1a996f8dda8c767043e4c84bf7d414724129dbd3d890d5cf3bb5463922cae6e6",
+    "STAGE_5_CLEAN_BASELINE_RUNBOOK.zh.md": "d58e1c585c0f718a516ab4b292061393c6d71f2e1fb2475c311ce11ac5ea82e5",
+    "README.md_after_activation_update": "34ab5fe06b3e6bcc28385493ee849767403447761aea43fe9e89153ea121c46e"
+  },
+  "authority_contract": {
+    "current_plan_truth": [
+      "pulsara_v3.plan_workflows",
+      "pulsara_v3.plan_interactions"
+    ],
+    "run_permission_truth": "immutable permission snapshot columns on every admitted turn and queued prompt",
+    "plan_overlay": "PLAN_READ_ONLY is a narrowing-only ROOT admission overlay",
+    "plan_control_tools": [
+      "enter_plan",
+      "ask_plan_question",
+      "exit_plan"
+    ],
+    "subagent_plan_tool_visibility": 0,
+    "plan_control_physical_attempts": 0,
+    "automatic_continuation_owner": "Host process-local ContinuationAdmissionAttempt owns write, query-first ACK confirmation, ROOT slot settlement, and task bind",
+    "question_wait_owner": "pre-write dormant process-local waiter; human wait has no physical-operation deadline",
+    "canonical_reader_cut": "one repeatable-read composite containing conversation, run permission, workflow, handoff, and approved-plan facts",
+    "approved_plan_materialization": "closed PIN_EXISTING_CANONICAL_BLOCK or MATERIALIZE_REFERENCED_BLOCK exact-once identity join",
+    "rejected_plan_batch": "INVALID_ARGUMENTS or TOOL_UNAVAILABLE is accepted as POLICY_NO_ATTEMPT; every sibling is atomically CANCELLED_BEFORE_DISPATCH; the origin turn remains RUNNING and ACK loss confirms the stable winner without physical redispatch",
+    "event_replay_or_plan_recovery_owner": 0
+  },
+  "schema_contract": {
+    "baseline_sql_sha256": "0ee0bc7d79e072d37de81d7f401e31956df7f2e01b9dc3770335f81bef2b0430",
+    "expected_catalog_resource_sha256": "9093937686701aa3a636474bd163fedfd38206059eb238e588a6d527398bfe4a",
+    "runtime_grants_resource_sha256": "fcd8e959be6e365a518ff4ca9dcc0f1e7d5141c089f03463fd14fdb4a6d2d01f",
+    "observed_catalog_fingerprint": "sha256:d0c142ce16449bbe355da403ebb68dee5239999e892be0d7297bc3a533553d5d",
+    "migration_universe_fingerprint": "sha256:dfbb4e50ae8272ede0922a64868595831c9a961ba2eb670c56d1aad35f1f65ea",
+    "registry_prefix_fingerprint": "sha256:fd0257b371026771e2cce17cfd6adc70c3c9f74a51a47d27826cde65620ca620",
+    "migration_universe": "pulsara.conversation-kernel.v1",
+    "migration_generation": 1,
+    "migration_head": 0,
+    "reset_only": true,
+    "new_plan_relations": 2
+  },
+  "protocol_contract": {
+    "protocol_major": 3,
+    "schema_sha256": "93a7667cd79b0e3992f5e302e7a3f52f1caa7feabb4a265547995046522e0d97",
+    "question_answer": "true protobuf oneof",
+    "draft_feedback": "presence-bearing optional field; missing and present-empty REVISE normalize to NO_FEEDBACK",
+    "stable_winner": "commit-time handoff_created_at_commit only; mutable disposition is read through canonical control",
+    "go_scope": "minimal permission selector and Plan question/review/decision state; Python remains authority"
+  },
+  "oracles": {
+    "product_relations": 26,
+    "committed_event_types": 34,
+    "live_event_types": 23,
+    "subject_slots": 15,
+    "append_guards": 2,
+    "durable_job_handlers": 4,
+    "new_plan_durable_jobs": 0,
+    "new_append_guards": 0
+  },
+  "verification": {
+    "round4_targeted": "48_passed_in_6.44s",
+    "round3_and_clean_v0_retained": "64_passed_in_8.66s",
+    "pytest_collection": "379_tests_collected_0_errors_in_0.54s",
+    "full_pytest": "379_passed_in_48.79s",
+    "postgres_marker": "104_passed_275_deselected_in_29.05s",
+    "clean_v0_fresh_repeat_deep_verify_and_old_universe": "passed_in_targeted_and_full_suites",
+    "ruff": "passed",
+    "compileall": "passed_src_tests_tools",
+    "terminal_protocol_generation": "passed",
+    "go_test": "prior_activation_pass_retained; not_rerun_for_python_only_post_review",
+    "go_vet": "prior_activation_pass_retained; not_rerun_for_python_only_post_review",
+    "go_mod_verify": "prior_activation_pass_retained; not_rerun_for_python_only_post_review",
+    "uv_lock_check": "passed",
+    "git_diff_check": "passed",
+    "new_skip_or_xfail": 0
+  },
+  "real_provider_dogfood": {
+    "status": "passed",
+    "completed_at_utc": "2026-08-12T09:55:01.672952+00:00",
+    "harness_sha256": "8bfb9132c451bba443374cbbaa5cdcf2e75de0bd3cf75f036a77b6e22a5086c4",
+    "configuration": "one configured OpenAI-compatible chat-completions provider; MCP discovery replaced by an empty tuple only inside the dogfood process; user configuration was not modified",
+    "provider_api": "openai_chat_completions",
+    "provider_model": "deepseek-v4-flash",
+    "database": "fresh clean-v0 ephemeral database, force-dropped after verification",
+    "main_flow": {
+      "status": "passed",
+      "sequence": "enter -> read-only write denial -> question -> answer -> draft -> revise -> revised draft -> approve -> implementation",
+      "first_chain_model_calls": 4,
+      "question_option_count": 2,
+      "permission_denial": "PERMISSION_DENIED",
+      "workflow_status": "APPROVED",
+      "implementation_permission": "accept-edits",
+      "implementation_overlay": "NONE",
+      "plan_event_count": 11,
+      "blocked_effect_absent": true,
+      "approved_effect_present": true,
+      "revision_continuation_completed": true,
+      "implementation_continuation_completed": true,
+      "final_text_utf8_bytes": 179,
+      "final_text_digest": "sha256:c33b3c81d304d9fcd50b33142dfbfb4a7b79d8a808095908e4a78291329df4ac"
+    },
+    "cancel_flow": {
+      "status": "passed",
+      "cancel_created_blank_continuation": false,
+      "next_prompt_permission": "read-only",
+      "handoff_kind": "CANCELLED_PLAN",
+      "handoff_claimed_once": true,
+      "handoff_replayed_on_second_prompt": false,
+      "first_final_utf8_bytes": 76,
+      "second_final_utf8_bytes": 53
+    },
+    "sensitive_content_recorded": false
+  },
+  "real_provider_discovered_contract_fix": {
+    "finding": "ask_plan_question descriptor permitted zero recommended options while the canonical extractor incorrectly required exactly one",
+    "resolution": "descriptor and canonical validator now implement the frozen at-most-one rule; allow_free_text is required; zero and multiple recommendation regressions are tested",
+    "new_durability_or_recovery_owner": false
+  },
+  "post_dogfood_batch_barrier_closure": {
+    "finding": "runtime-only Plan argument validation and a revoked or unavailable Plan control could previously escape as a fatal turn error after the assistant batch had already committed",
+    "resolution": "the frozen Plan call now owns a closed APPLY, INVALID_ARGUMENTS, or TOOL_UNAVAILABLE candidate; rejected calls and all siblings are accepted atomically as no-attempt results and exact winner confirmation covers simulated post-COMMIT ACK loss",
+    "regression_cases": [
+      "duplicate option labels outside JSON Schema expressiveness",
+      "valid ask_plan_question without an active workflow",
+      "write_file sibling ordered before the selected Plan call",
+      "post-COMMIT ACK loss without physical redispatch"
+    ],
+    "new_durability_or_recovery_owner": false
+  },
+  "post_activation_root_ownership_closure": {
+    "all_root_producers": "direct submission, queue delivery, Plan review successor, Terminal observation, and external result all install the single Host-owned accepted ROOT chain",
+    "detached_waiter": "API or gateway cancellation detaches from an asyncio shield; the ROOT task owns exact slot settlement and wakes pending producers when its complete continuation lineage exits",
+    "force_exit_race": "the Plan exit fence and origin-task liveness are checked at automatic-continuation bind; an admitted FULL winner that loses the race is deterministically interrupted before the fence is released",
+    "plan_content_capability": "Python Protocol v3 binds Plan resolution and exact content reads to the current controller attachment ID in addition to the existing attachment ID/generation request gate",
+    "regression_evidence": [
+      "queued ROOT enter_plan automatically executes its committed successor",
+      "detached origin waiter reaches DRAFT_REVIEW, clears the slot, and APPROVE completes its successor",
+      "FULL-before-bind force-exit leaves the committed successor INTERRUPTED and opens no second provider call",
+      "replaced controller identity cannot resolve Plan content or decisions"
+    ],
+    "new_durability_or_recovery_owner": false
+  },
+  "post_review_plan_resolution_and_force_exit_closure": {
+    "semantic_attempt_identity": "question answer, draft decision, and normalized feedback are covered by the central semantic candidate fingerprint; the same process-local attempt ID only shares an exact fingerprint and otherwise conflicts before repository write",
+    "force_exit_phase_one": "the exact workflow ID, revision, Host ROOT identity, canonical running ROOT turn, and open interaction are validated and terminalized in one Host-writer transaction before physical task cancellation",
+    "resolution_fence": "an exact command winner remains queryable, while every new QUESTION, APPROVE, REVISE, or CANCEL write is linearized under the Host lock and rejected after the force-exit fence is installed",
+    "unbound_successor_terminalization": "the admitting attempt transitions to a process-local TERMINALIZING substate and uses fresh bounded repository cycles until the exact successor is terminal or explicitly owned by a replacement writer",
+    "python_option_ordinal": "both the Python DTO and repository selection require a non-negative in-range ordinal",
+    "regression_evidence": [
+      "three same-command semantic conflict matrices do not share the first task",
+      "stale force-exit leaves the valid ROOT provider task live and completes normally",
+      "all four Plan resolution branches are rejected behind the force-exit fence without repository writes",
+      "an injected first terminalization failure is retried and the FULL successor is confirmed INTERRUPTED before attempt retirement"
+    ],
+    "new_durability_or_recovery_owner": false
+  },
+  "post_review_permission_ack_and_control_closure": {
+    "permission_amplification": "overlay NONE now requires requested and effective permission modes to be identical in the immutable primitive, ROOT turns, and queued NEW_TURN rows; named PostgreSQL CHECK constraints reject read-only to bypass mutations",
+    "query_first_writer_replacement": "Plan question and draft resolution first perform stateless exact winner confirmation; only a NONE result binds the current Host writer generation, so an old physical attempt can query a FULL semantic winner after writer replacement",
+    "plan_batch_exact_confirmation": "assistant block identity and arguments, every tool result row and canonical entry, workflow or interaction state, continuation turn and revision, origin turn terminal state, and every expected committed occurrence are exact-joined before returning FULL",
+    "force_exit_control_projection": "current-control handoff projection uses the same CANCELLED or ABORTED interaction mapping as the canonical handoff claim, preserving the exact interaction identity for FORCE_EXITED_PLAN",
+    "fault_evidence": [
+      "five independent post-COMMIT corruptions of assistant arguments, result content, result event payload, workflow identity, and continuation cut fail closed",
+      "question request semantic digest drift fails closed",
+      "old writer generation returns one existing winner without a second write while a winnerless stale generation conflicts",
+      "ABORTED question force-exit exposes its exact interaction ID in canonical Protocol control"
+    ],
+    "new_durability_or_recovery_owner": false
+  },
+  "production_diff": {
+    "lines_added": 16148,
+    "lines_deleted": 4544,
+    "net_lines": 11604,
+    "counting_scope": "tracked diff under src and clients plus three untracked Round 4 production modules; generated Python/Go protocol bindings are included"
+  },
+  "permanent_absences": {
+    "runtime_session_or_execution_replay": true,
+    "universal_event_log": true,
+    "plan_reducer_checkpoint_receipt_or_repair_graph": true,
+    "durable_plan_runner_or_future": true,
+    "third_append_guard": true,
+    "fifth_durable_job": true,
+    "second_plan_body_authority": true
+  },
+  "remaining_blockers": [],
+  "user_deferred_go_followup": [
+    "Go client-side Plan question fingerprint recomputation and exact control-projection join were intentionally not changed in this Python-focused post-review"
+  ],
+  "non_goals": [
+    "legacy Python :plan or :mode command compatibility",
+    "MCP execution or elicitation",
+    "hierarchical subagent task graph",
+    "long-horizon compaction redesign",
+    "advanced Go Plan dashboard or editor"
+  ]
+}

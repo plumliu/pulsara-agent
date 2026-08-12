@@ -7,6 +7,7 @@ from uuid import uuid4
 
 import pytest
 
+from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
 from pulsara_agent.conversation_kernel.contracts import InlineContent
 from pulsara_agent.conversation_kernel.live import (
     LiveAgentEventBus,
@@ -697,6 +698,8 @@ def test_stage2_subagent_runner_produces_durable_message_child(
         turn_id=parent_turn_id,
         entry_id=_name("entry"),
         context_binding_revision_id=_name("revision"),
+        permission_snapshot_id=_name("permission-snapshot"),
+        requested_permission_mode=DEFAULT_PERMISSION_MODE,
         content=InlineContent.from_bytes(b"delegate"),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=monotonic() + 30,

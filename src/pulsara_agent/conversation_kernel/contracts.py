@@ -8,7 +8,7 @@ from enum import StrEnum
 from hashlib import sha256
 from typing import Mapping
 
-from pulsara_agent.storage.migrations.contracts import canonical_json_bytes
+from pulsara_agent.primitives.context import canonical_json_bytes
 from pulsara_agent.conversation_kernel.vocabulary import (
     AppendGuardKind,
     CommittedEventType,
@@ -55,6 +55,7 @@ class EntryKind(StrEnum):
     ASSISTANT_MESSAGE = "ASSISTANT_MESSAGE"
     ASSISTANT_TOOL_REQUEST = "ASSISTANT_TOOL_REQUEST"
     TOOL_RESULT = "TOOL_RESULT"
+    PLAN_CONTINUATION = "PLAN_CONTINUATION"
 
 
 class AssistantBlockKind(StrEnum):

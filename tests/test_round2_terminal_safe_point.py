@@ -102,6 +102,7 @@ class _Coordinator:
             session_id="session:safe-point",
             workspace_id=workspace_id,
             writer_generation=writer_generation,
+            origin_turn_id="turn:origin",
             content=content,
             content_digest=digest,
             retained_from_cursor="cursor:retained",

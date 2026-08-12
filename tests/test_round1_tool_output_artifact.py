@@ -53,6 +53,11 @@ from tests.support.round3 import (
     direct_tool_invocation_context,
 )
 from pulsara_agent.primitives.context import freeze_json, thaw_json
+from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
+from pulsara_agent.primitives.run_permission import (
+    RunPermissionAdmissionSource,
+    build_run_permission_snapshot,
+)
 from pulsara_agent.message import ToolResultState
 from pulsara_agent.ports.artifact import (
     ArtifactContentError,
@@ -79,7 +84,6 @@ from pulsara_agent.storage.migrations.manifest import CONVERSATION_KERNEL_RELATI
 from pulsara_agent.conversation_kernel.jobs import JOB_HANDLER_CATALOG
 from pulsara_agent.terminal_process.output import TerminalOutputOwner
 from pulsara_agent.tools.builtins.artifact import ArtifactReadTool
-from pulsara_agent.tool_permission import default_permission_policy
 from tests.support.postgres import verified_postgres_provider
 
 
@@ -129,11 +133,11 @@ def _processor(publisher: _RecordingPublisher) -> ToolOutputArtifactProcessor:
 
 
 def test_round1_static_authority_and_count_oracles_remain_closed() -> None:
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 24
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 26
     assert "tool_result_artifacts" not in CONVERSATION_KERNEL_RELATIONS
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == 27
+    assert len(COMMITTED_EVENT_DESCRIPTORS) == 34
     assert len(LIVE_EVENT_TYPES) == 23
-    assert len(SUBJECT_SLOTS) == 13
+    assert len(SUBJECT_SLOTS) == 15
     assert len(APPEND_GUARDS) == 2
     assert len(JOB_HANDLER_CATALOG) == 4
 
@@ -535,9 +539,7 @@ def test_round1_terminal_preserves_full_sanitized_candidate_and_envelope(
         host_owner_id=_name("host"),
         session_id=session_id,
         live_bus=LiveAgentEventBus(),
-        authorization_policy=DefaultToolDispatchAuthorizationPolicy(
-            default_permission_policy()
-        ),
+        authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
     )
 
     async def invoke_and_close() -> KernelToolResult:
@@ -884,12 +886,15 @@ def _install_tool_call(repository: ConversationKernelRepository, workspace_id: s
         deadline_monotonic=monotonic() + 30,
     )
     turn_id = _name("turn")
+    permission_snapshot_id = _name("permission-snapshot")
     repository.start_root_turn(
         lease.guard,
         command_id=_name("command"),
         turn_id=turn_id,
         entry_id=_name("entry"),
         context_binding_revision_id=_name("binding"),
+        permission_snapshot_id=permission_snapshot_id,
+        requested_permission_mode=DEFAULT_PERMISSION_MODE,
         content=InlineContent.from_bytes(b"run"),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=monotonic() + 30,
@@ -929,6 +934,12 @@ def _install_tool_call(repository: ConversationKernelRepository, workspace_id: s
         actor_id="tool",
         remote_idempotency_key=None,
         retry_of_attempt_id=None,
+        permission_snapshot_fingerprint=build_run_permission_snapshot(
+            snapshot_id=permission_snapshot_id,
+            requested_mode=DEFAULT_PERMISSION_MODE,
+            effective_mode=DEFAULT_PERMISSION_MODE,
+            admission_source=RunPermissionAdmissionSource.USER_SUBMISSION,
+        ).snapshot_fingerprint,
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=monotonic() + 30,
     )
@@ -1552,9 +1563,7 @@ def test_round1_production_descriptor_executor_closure(tmp_path: Path) -> None:
         host_owner_id=_name("host"),
         session_id=_name("session"),
         live_bus=LiveAgentEventBus(),
-        authorization_policy=DefaultToolDispatchAuthorizationPolicy(
-            default_permission_policy()
-        ),
+        authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
         artifact_read_port=_MissingReadPort(),
     )
     specs = {item.name: item for item in port.tool_specs}
@@ -1586,9 +1595,7 @@ def test_round1_production_descriptor_executor_closure(tmp_path: Path) -> None:
         host_owner_id=_name("host"),
         session_id=_name("session"),
         live_bus=LiveAgentEventBus(),
-        authorization_policy=DefaultToolDispatchAuthorizationPolicy(
-            default_permission_policy()
-        ),
+        authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
     )
     assert "artifact_read" not in {item.name for item in hidden.tool_specs}
     asyncio.run(hidden.aclose())

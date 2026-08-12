@@ -15,6 +15,11 @@ from pulsara_agent.conversation_kernel.reader import (
 from pulsara_agent.model_input.contracts import STRUCTURED_MODEL_INPUT_LIMITS
 from pulsara_agent.model_input.lowering import lower_canonical_item
 from pulsara_agent.primitives.context import freeze_json
+from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
+from pulsara_agent.primitives.run_permission import (
+    RunPermissionAdmissionSource,
+    build_run_permission_snapshot,
+)
 from pulsara_agent.conversation_kernel.repository import (
     AssistantToolCallBlock,
     ConversationKernelConflict,
@@ -65,6 +70,7 @@ def _candidate(
     session_id: str,
     workspace_id: str,
     writer_generation: int,
+    origin_turn_id: str,
     target: ExistingTurnInstallation | NewTurnInstallation,
 ) -> TerminalObservationInstallationAttempt:
     content = _content(observation_id=_name("observation"))
@@ -77,6 +83,7 @@ def _candidate(
         session_id=session_id,
         workspace_id=workspace_id,
         writer_generation=writer_generation,
+        origin_turn_id=origin_turn_id,
         content=content,
         content_digest=digest,
         retained_from_cursor="cursor:retained",
@@ -109,6 +116,8 @@ def test_round2_existing_turn_observation_is_atomic_and_rematerializes_untrusted
         turn_id=turn_id,
         entry_id=_name("entry"),
         context_binding_revision_id=_name("revision"),
+        permission_snapshot_id=_name("permission-snapshot"),
+        requested_permission_mode=DEFAULT_PERMISSION_MODE,
         content=InlineContent.from_bytes(b"human prompt"),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=monotonic() + 30,
@@ -117,6 +126,7 @@ def test_round2_existing_turn_observation_is_atomic_and_rematerializes_untrusted
         session_id=session_id,
         workspace_id=workspace_id,
         writer_generation=lease.guard.writer_generation,
+        origin_turn_id=turn_id,
         target=ExistingTurnInstallation(turn_id, _name("entry")),
     )
     accepted = repository.accept_terminal_observation(
@@ -194,11 +204,33 @@ def test_round2_idle_observation_creates_exact_genesis_and_initial_fk_is_strict(
         lease_seconds=30,
         deadline_monotonic=monotonic() + 30,
     )
+    origin_turn_id = _name("turn")
+    repository.start_root_turn(
+        lease.guard,
+        command_id=_name("command"),
+        turn_id=origin_turn_id,
+        entry_id=_name("entry"),
+        context_binding_revision_id=_name("revision"),
+        permission_snapshot_id=_name("permission-snapshot"),
+        requested_permission_mode=DEFAULT_PERMISSION_MODE,
+        content=InlineContent.from_bytes(b"origin"),
+        occurred_at=datetime.now(timezone.utc),
+        deadline_monotonic=monotonic() + 30,
+    )
+    repository.interrupt_turn(
+        lease.guard,
+        turn_id=origin_turn_id,
+        reason="terminal observation fixture",
+        actor_id="host:test",
+        occurred_at=datetime.now(timezone.utc),
+        deadline_monotonic=monotonic() + 30,
+    )
     target = NewTurnInstallation(_name("turn"), _name("revision"), _name("entry"))
     candidate = _candidate(
         session_id=session_id,
         workspace_id=workspace_id,
         writer_generation=lease.guard.writer_generation,
+        origin_turn_id=origin_turn_id,
         target=target,
     )
     accepted = repository.accept_terminal_observation(
@@ -246,17 +278,49 @@ def test_round2_idle_observation_creates_exact_genesis_and_initial_fk_is_strict(
         actor_id="test",
         deadline_monotonic=monotonic() + 30,
     )
+    invalid_permission = build_run_permission_snapshot(
+        snapshot_id=_name("permission-snapshot"),
+        requested_mode=DEFAULT_PERMISSION_MODE,
+        effective_mode=DEFAULT_PERMISSION_MODE,
+        admission_source=RunPermissionAdmissionSource.USER_SUBMISSION,
+    )
     with pytest.raises(psycopg.errors.CheckViolation):
         with psycopg.connect(stage2_migrated_postgres_database.admin_dsn) as connection:
             connection.execute(
                 """
                 INSERT INTO pulsara_v3.turns (
                     id, session_id, workspace_id, conversation_scope_kind,
-                    status, initial_entry_id, terminal_reason, terminal_at
+                    status, initial_entry_id, terminal_reason, terminal_at,
+                    permission_snapshot_id, requested_permission_mode,
+                    effective_permission_mode, permission_admission_source,
+                    permission_overlay, permission_plan_context_ordinal,
+                    permission_plan_workflow_id,
+                    permission_plan_revision_at_admission,
+                    permission_inherited_from_turn_id, permission_contract_id,
+                    permission_contract_fingerprint,
+                    permission_snapshot_fingerprint
                 ) VALUES (%s, %s, %s, 'ROOT', 'INTERRUPTED', %s,
-                          'TEST_INVALID', clock_timestamp())
+                          'TEST_INVALID', clock_timestamp(),
+                          %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
-                (_name("turn"), session_id, workspace_id, target.initial_entry_id),
+                (
+                    _name("turn"),
+                    session_id,
+                    workspace_id,
+                    target.initial_entry_id,
+                    invalid_permission.snapshot_id,
+                    invalid_permission.requested_mode.value,
+                    invalid_permission.effective_mode.value,
+                    invalid_permission.admission_source.value,
+                    invalid_permission.overlay.value,
+                    invalid_permission.plan_context_ordinal_at_admission,
+                    invalid_permission.plan_workflow_id,
+                    invalid_permission.plan_workflow_revision_at_admission,
+                    invalid_permission.inherited_from_turn_id,
+                    invalid_permission.permission_contract_id,
+                    invalid_permission.permission_contract_fingerprint,
+                    invalid_permission.snapshot_fingerprint,
+                ),
             )
 
     with pytest.raises(psycopg.errors.NotNullViolation):
@@ -288,11 +352,37 @@ def test_round2_idle_observation_creates_exact_genesis_and_initial_fk_is_strict(
                 """
                 INSERT INTO pulsara_v3.turns (
                     id, session_id, workspace_id, conversation_scope_kind,
-                    status, initial_entry_id, terminal_reason, terminal_at
+                    status, initial_entry_id, terminal_reason, terminal_at,
+                    permission_snapshot_id, requested_permission_mode,
+                    effective_permission_mode, permission_admission_source,
+                    permission_overlay, permission_plan_context_ordinal,
+                    permission_plan_workflow_id,
+                    permission_plan_revision_at_admission,
+                    permission_inherited_from_turn_id, permission_contract_id,
+                    permission_contract_fingerprint,
+                    permission_snapshot_fingerprint
                 ) VALUES (%s, %s, %s, 'ROOT', 'INTERRUPTED', %s,
-                          'TEST_INVALID', clock_timestamp())
+                          'TEST_INVALID', clock_timestamp(),
+                          %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
-                (wrong_kind_turn, session_id, workspace_id, wrong_kind_entry),
+                (
+                    wrong_kind_turn,
+                    session_id,
+                    workspace_id,
+                    wrong_kind_entry,
+                    invalid_permission.snapshot_id,
+                    invalid_permission.requested_mode.value,
+                    invalid_permission.effective_mode.value,
+                    invalid_permission.admission_source.value,
+                    invalid_permission.overlay.value,
+                    invalid_permission.plan_context_ordinal_at_admission,
+                    invalid_permission.plan_workflow_id,
+                    invalid_permission.plan_workflow_revision_at_admission,
+                    invalid_permission.inherited_from_turn_id,
+                    invalid_permission.permission_contract_id,
+                    invalid_permission.permission_contract_fingerprint,
+                    invalid_permission.snapshot_fingerprint,
+                ),
             )
             connection.execute(
                 """
@@ -353,9 +443,18 @@ def test_round2_idle_observation_creates_exact_genesis_and_initial_fk_is_strict(
                 INSERT INTO pulsara_v3.turns (
                     id, session_id, workspace_id, conversation_scope_kind,
                     scope_subagent_task_id, status, initial_entry_id,
-                    terminal_reason, terminal_at
+                    terminal_reason, terminal_at,
+                    permission_snapshot_id, requested_permission_mode,
+                    effective_permission_mode, permission_admission_source,
+                    permission_overlay, permission_plan_context_ordinal,
+                    permission_plan_workflow_id,
+                    permission_plan_revision_at_admission,
+                    permission_inherited_from_turn_id, permission_contract_id,
+                    permission_contract_fingerprint,
+                    permission_snapshot_fingerprint
                 ) VALUES (%s, %s, %s, 'SUBAGENT_TASK', %s, 'INTERRUPTED', %s,
-                          'TEST_INVALID', clock_timestamp())
+                          'TEST_INVALID', clock_timestamp(),
+                          %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     cross_scope_turn,
@@ -363,6 +462,18 @@ def test_round2_idle_observation_creates_exact_genesis_and_initial_fk_is_strict(
                     workspace_id,
                     task_id,
                     cross_scope_entry,
+                    invalid_permission.snapshot_id,
+                    invalid_permission.requested_mode.value,
+                    invalid_permission.effective_mode.value,
+                    invalid_permission.admission_source.value,
+                    invalid_permission.overlay.value,
+                    invalid_permission.plan_context_ordinal_at_admission,
+                    invalid_permission.plan_workflow_id,
+                    invalid_permission.plan_workflow_revision_at_admission,
+                    invalid_permission.inherited_from_turn_id,
+                    invalid_permission.permission_contract_id,
+                    invalid_permission.permission_contract_fingerprint,
+                    invalid_permission.snapshot_fingerprint,
                 ),
             )
             connection.execute(
@@ -411,6 +522,8 @@ def test_round2_active_observation_requires_terminal_tool_requests_and_current_w
         turn_id=turn_id,
         entry_id=_name("entry"),
         context_binding_revision_id=_name("revision"),
+        permission_snapshot_id=_name("permission-snapshot"),
+        requested_permission_mode=DEFAULT_PERMISSION_MODE,
         content=InlineContent.from_bytes(b"run terminal"),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=monotonic() + 30,
@@ -439,6 +552,7 @@ def test_round2_active_observation_requires_terminal_tool_requests_and_current_w
         session_id=session_id,
         workspace_id=workspace_id,
         writer_generation=first.guard.writer_generation,
+        origin_turn_id=turn_id,
         target=ExistingTurnInstallation(turn_id, _name("entry")),
     )
     with pytest.raises(ConversationKernelConflict, match="provider safe point"):

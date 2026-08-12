@@ -52,11 +52,11 @@ PROVIDER_PRODUCTION_MODULES = (
 
 
 def test_stage2_registry_schema_and_job_catalog_are_exact() -> None:
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == 27
+    assert len(COMMITTED_EVENT_DESCRIPTORS) == 34
     assert len(LIVE_EVENT_TYPES) == 23
-    assert len(SUBJECT_SLOTS) == 13
+    assert len(SUBJECT_SLOTS) == 15
     assert len(APPEND_GUARDS) == 2
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 24
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 26
     assert {item.handler_type for item in JOB_HANDLER_CATALOG} == {
         "BACKGROUND_COMPACTION",
         "POST_COMPACTION_MEMORY_EXTRACTION",

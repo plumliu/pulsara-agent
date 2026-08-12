@@ -22,7 +22,17 @@ from pulsara_agent.conversation_kernel.vocabulary import (
     CommittedEventType,
 )
 from pulsara_agent.conversation_kernel.limits import STAGE2_LIMITS
-from pulsara_agent.storage.migrations.contracts import canonical_json_bytes
+from pulsara_agent.primitives.context import (
+    FrozenJsonObjectFact,
+    canonical_json_bytes,
+    freeze_json,
+)
+from pulsara_agent.primitives.permission import PermissionMode
+from pulsara_agent.primitives.plan_workflow import (
+    PlanInteractionBinding,
+    extract_plan_draft,
+    extract_plan_question,
+)
 from pulsara_agent.storage.postgres_connection_provider import (
     PostgresConnectionLane,
     VerifiedPostgresConnectionProviderProtocol,
@@ -74,6 +84,7 @@ _ENTRY_TYPES = frozenset(
         CommittedEventType.TOOL_RESULT_ACCEPTED.value,
         CommittedEventType.USER_STEER_ACCEPTED.value,
         CommittedEventType.TERMINAL_OBSERVATION_ACCEPTED.value,
+        CommittedEventType.PLAN_CONTINUATION_ACCEPTED.value,
     }
 )
 _EVENT_ONLY_TYPES = frozenset(
@@ -98,9 +109,9 @@ COMMITTED_PROJECTION_BRANCH_BY_TYPE: Mapping[str, str] = MappingProxyType(
     }
 )
 
-if len(_COMMITTED_ENUM) != 27 or len(COMMITTED_EVENT_DESCRIPTORS) != 27:
+if len(_COMMITTED_ENUM) != 34 or len(COMMITTED_EVENT_DESCRIPTORS) != 34:
     raise RuntimeError(
-        "Protocol v3 committed projection map must contain exact 27 types"
+        "Protocol v3 committed projection map must contain exact 34 types"
     )
 
 
@@ -575,21 +586,82 @@ class CanonicalProtocolReader:
                WHERE workspace_id = %s ORDER BY channel""",
             (workspace_id,),
         ).fetchall()
+        active_plan = connection.execute(
+            """
+            SELECT * FROM pulsara_v3.plan_workflows
+            WHERE session_id = %s AND status = 'ACTIVE'
+            """,
+            (session_id,),
+        ).fetchone()
+        open_plan = connection.execute(
+            """
+            SELECT i.*, b.tool_arguments
+            FROM pulsara_v3.plan_interactions AS i
+            JOIN pulsara_v3.assistant_message_blocks AS b
+              ON b.session_id = i.session_id
+             AND b.assistant_entry_id = i.assistant_entry_id
+             AND b.tool_call_id = i.tool_call_id
+            WHERE i.session_id = %s AND i.status = 'OPEN'
+            """,
+            (session_id,),
+        ).fetchone()
+        latest_handoff = connection.execute(
+            """
+            SELECT w.*,
+                   i.id AS interaction_id,
+                   ce.id AS claim_entry_id,
+                   cq.id AS claim_queue_item_id,
+                   EXISTS (
+                       SELECT 1 FROM pulsara_v3.plan_workflows AS newer
+                       WHERE newer.session_id = w.session_id
+                         AND newer.workflow_ordinal > w.workflow_ordinal
+                   ) AS superseded
+            FROM pulsara_v3.plan_workflows AS w
+            LEFT JOIN LATERAL (
+                SELECT id FROM pulsara_v3.plan_interactions
+                WHERE session_id = w.session_id
+                  AND plan_workflow_id = w.id
+                  AND status IN ('CANCELLED', 'ABORTED')
+                ORDER BY interaction_ordinal DESC LIMIT 1
+            ) AS i ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT id FROM pulsara_v3.transcript_entries
+                WHERE session_id = w.session_id
+                  AND source_plan_workflow_id = w.id
+                  AND source_plan_handoff_kind IN (
+                      'CANCELLED_PLAN', 'FORCE_EXITED_PLAN'
+                  )
+                ORDER BY entry_sequence LIMIT 1
+            ) AS ce ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT id FROM pulsara_v3.prompt_queue_items
+                WHERE session_id = w.session_id
+                  AND pending_plan_handoff_workflow_id = w.id
+                ORDER BY queue_sequence LIMIT 1
+            ) AS cq ON TRUE
+            WHERE w.session_id = %s
+              AND w.status IN ('CANCELLED', 'FORCE_EXITED')
+            ORDER BY w.workflow_ordinal DESC LIMIT 1
+            """,
+            (session_id,),
+        ).fetchone()
         by_channel = {str(item["channel"]): item for item in freshness}
         result = wire.CanonicalControl(
             session_lifecycle=lifecycle,
             prompt_queue_total_count=queue_total,
         )
         for row in turns:
-            result.active_turns.add(
+            target = result.active_turns.add(
                 turn_id=str(row["id"]),
                 scope_kind=_scope_kind(str(row["conversation_scope_kind"])),
                 scope_subagent_task_id=str(row["scope_subagent_task_id"] or ""),
                 status=str(row["status"]),
                 accepted_at_utc=_utc(row["accepted_at"]),
             )
+            if row["permission_snapshot_id"] is not None:
+                target.permission.CopyFrom(_permission_projection(row))
         for row in queue:
-            result.prompt_queue.add(
+            target = result.prompt_queue.add(
                 queue_item_id=str(row["id"]),
                 queue_sequence=int(row["queue_sequence"]),
                 status=str(row["status"]),
@@ -597,6 +669,8 @@ class CanonicalProtocolReader:
                 target_turn_id=str(row["target_turn_id"] or ""),
                 content=_content_reference(row),
             )
+            if row["permission_snapshot_id"] is not None:
+                target.permission.CopyFrom(_permission_projection(row))
         for row in attempts:
             result.tool_attempts.add(
                 attempt_id=str(row["id"]),
@@ -635,7 +709,123 @@ class CanonicalProtocolReader:
                     else "uninitialized@0"
                 ),
             )
+        if active_plan is not None:
+            result.active_plan_workflow.CopyFrom(
+                wire.PlanWorkflowControl(
+                    workflow_id=str(active_plan["id"]),
+                    workflow_ordinal=int(active_plan["workflow_ordinal"]),
+                    workflow_revision=int(active_plan["workflow_revision"]),
+                    status=str(active_plan["status"]),
+                    entered_by=str(active_plan["entered_by"]),
+                    resume_permission_mode=_permission_mode(
+                        str(active_plan["resume_permission_mode"])
+                    ),
+                )
+            )
+        if open_plan is not None:
+            frozen = freeze_json(dict(open_plan["tool_arguments"]))
+            if not isinstance(frozen, FrozenJsonObjectFact):
+                raise CanonicalProtocolResourceExhausted(
+                    "open Plan content is not a canonical object"
+                )
+            binding = PlanInteractionBinding(
+                str(open_plan["request_contract_id"]),
+                str(open_plan["request_contract_version"]),
+                str(open_plan["request_contract_fingerprint"]),
+            )
+            target = wire.PlanInteractionControl(
+                interaction_id=str(open_plan["id"]),
+                workflow_id=str(open_plan["plan_workflow_id"]),
+                kind=str(open_plan["kind"]),
+                status=str(open_plan["status"]),
+                interaction_ordinal=int(open_plan["interaction_ordinal"]),
+            )
+            if str(open_plan["kind"]) == "QUESTION":
+                question = extract_plan_question(
+                    interaction_id=str(open_plan["id"]),
+                    binding=binding,
+                    arguments=frozen,
+                )
+                target.typed_content_fingerprint = question.typed_content_fingerprint
+                target.option_count = len(question.options)
+                target.allow_free_text = question.allow_free_text
+            else:
+                draft = extract_plan_draft(
+                    interaction_id=str(open_plan["id"]),
+                    assistant_entry_id=str(open_plan["assistant_entry_id"]),
+                    tool_call_id=str(open_plan["tool_call_id"]),
+                    binding=binding,
+                    request_semantic_digest=str(open_plan["request_semantic_digest"]),
+                    arguments=frozen,
+                )
+                target.draft_utf8_size = draft.identity.plan_utf8_size
+                target.draft_utf8_digest = draft.identity.plan_utf8_digest
+                target.summary_present = draft.summary is not None
+            result.open_plan_interaction.CopyFrom(target)
+        if latest_handoff is not None:
+            claimed = (
+                latest_handoff["claim_entry_id"] is not None
+                or latest_handoff["claim_queue_item_id"] is not None
+            )
+            disposition = (
+                wire.PLAN_HANDOFF_CLAIMED
+                if claimed
+                else (
+                    wire.PLAN_HANDOFF_SUPERSEDED
+                    if bool(latest_handoff["superseded"])
+                    else wire.PLAN_HANDOFF_PENDING
+                )
+            )
+            result.latest_plan_handoff.CopyFrom(
+                wire.PlanHandoffControl(
+                    workflow_id=str(latest_handoff["id"]),
+                    interaction_id=str(latest_handoff["interaction_id"] or ""),
+                    handoff_kind=(
+                        "CANCELLED_PLAN"
+                        if str(latest_handoff["status"]) == "CANCELLED"
+                        else "FORCE_EXITED_PLAN"
+                    ),
+                    disposition=disposition,
+                    claim_entry_id=str(latest_handoff["claim_entry_id"] or ""),
+                    claim_queue_item_id=str(
+                        latest_handoff["claim_queue_item_id"] or ""
+                    ),
+                    resume_permission_mode=_permission_mode(
+                        str(latest_handoff["resume_permission_mode"])
+                    ),
+                )
+            )
         return result
+
+
+def _permission_mode(value: str) -> int:
+    return {
+        PermissionMode.ACCEPT_EDITS.value: wire.PERMISSION_MODE_ACCEPT_EDITS,
+        PermissionMode.READ_ONLY.value: wire.PERMISSION_MODE_READ_ONLY,
+        PermissionMode.ASK_PERMISSIONS.value: wire.PERMISSION_MODE_ASK_PERMISSIONS,
+        PermissionMode.BYPASS_PERMISSIONS.value: (
+            wire.PERMISSION_MODE_BYPASS_PERMISSIONS
+        ),
+    }[value]
+
+
+def _permission_projection(row: Mapping[str, object]):
+    return wire.RunPermissionProjection(
+        permission_snapshot_id=str(row["permission_snapshot_id"]),
+        requested_mode=_permission_mode(str(row["requested_permission_mode"])),
+        effective_mode=_permission_mode(str(row["effective_permission_mode"])),
+        admission_source=str(row["permission_admission_source"]),
+        overlay=str(row["permission_overlay"]),
+        plan_context_ordinal=int(row["permission_plan_context_ordinal"]),
+        plan_workflow_id=str(row["permission_plan_workflow_id"] or ""),
+        plan_workflow_revision=int(
+            row["permission_plan_revision_at_admission"] or 0
+        ),
+        inherited_from_turn_id=str(row["permission_inherited_from_turn_id"] or ""),
+        contract_id=str(row["permission_contract_id"]),
+        contract_fingerprint=str(row["permission_contract_fingerprint"]),
+        snapshot_fingerprint=str(row["permission_snapshot_fingerprint"]),
+    )
 
 
 def _bounded(value: int, hard: int, label: str) -> None:
@@ -717,6 +907,8 @@ def _event_subject(event: Mapping[str, object]) -> tuple[str, str]:
             "subject_subagent_result_id",
             "subject_memory_fact_id",
             "subject_memory_relation_id",
+            "subject_plan_workflow_id",
+            "subject_plan_interaction_id",
         )
         if event.get(key) is not None
     )

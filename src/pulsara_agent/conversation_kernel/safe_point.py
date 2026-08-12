@@ -14,6 +14,7 @@ from pulsara_agent.conversation_kernel.repository import (
     ConversationKernelConflict,
     ConversationKernelRepository,
 )
+from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.model_input.contracts import PreparedProviderInputCut
 from pulsara_agent.ports.terminal_observation import PreparedInstallationTarget
 from pulsara_agent.terminal_process.monitor import TerminalMonitorCoordinator
@@ -89,6 +90,7 @@ class ProviderSafePointCoordinator:
         *,
         turn_id: str,
         new_context_binding_revision_id: str | None = None,
+        requested_permission_mode: PermissionMode | None = None,
         child_result_id: str,
         command_id: str,
         actor_id: str,
@@ -111,6 +113,7 @@ class ProviderSafePointCoordinator:
                 self._guard,
                 turn_id=turn_id,
                 new_context_binding_revision_id=new_context_binding_revision_id,
+                requested_permission_mode=requested_permission_mode,
                 child_result_id=child_result_id,
                 command_id=command_id,
                 occurred_at=datetime.now(timezone.utc),
@@ -123,6 +126,7 @@ class ProviderSafePointCoordinator:
         *,
         turn_id: str,
         new_context_binding_revision_id: str | None = None,
+        requested_permission_mode: PermissionMode | None = None,
         job_id: str,
         command_id: str,
         actor_id: str,
@@ -145,6 +149,7 @@ class ProviderSafePointCoordinator:
                 self._guard,
                 turn_id=turn_id,
                 new_context_binding_revision_id=new_context_binding_revision_id,
+                requested_permission_mode=requested_permission_mode,
                 job_id=job_id,
                 command_id=command_id,
                 occurred_at=datetime.now(timezone.utc),

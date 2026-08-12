@@ -23,6 +23,7 @@ from pulsara_agent.conversation_kernel.contracts import InlineContent
 from pulsara_agent.conversation_kernel.live import LiveAgentEventBus
 from pulsara_agent.conversation_kernel.live_control import SessionLiveControlOwner
 from pulsara_agent.conversation_kernel.repository import ConversationKernelRepository
+from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
 from pulsara_agent.terminal_client.binary import resolve_terminal_client_binary
 from pulsara_agent.terminal_client.v3_launcher import _bootstrap
 from pulsara_agent.terminal_protocol.v3_gateway import TerminalKernelProtocolServer
@@ -112,6 +113,8 @@ def test_stage2_python_gateway_to_go_tui_fresh_snapshot_and_detach(
             turn_id=_name("turn"),
             entry_id=_name("entry"),
             context_binding_revision_id=_name("context-revision"),
+            permission_snapshot_id=_name("permission-snapshot"),
+            requested_permission_mode=DEFAULT_PERMISSION_MODE,
             content=InlineContent.from_bytes(b"PROTOCOL_V3_FRESH_SNAPSHOT"),
             occurred_at=datetime.now(timezone.utc),
             deadline_monotonic=monotonic() + 30,

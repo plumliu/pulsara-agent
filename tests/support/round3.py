@@ -19,6 +19,7 @@ from pulsara_agent.conversation_kernel.tool_surface import (
 )
 from pulsara_agent.conversation_kernel.tool_runtime import DirectKernelToolPort
 from pulsara_agent.model_input.contracts import (
+    CanonicalModelInputSnapshot,
     CollectedContextSources,
     ContextBudgetClass,
     ContextChannel,
@@ -28,11 +29,19 @@ from pulsara_agent.model_input.contracts import (
     ContextSourceKind,
     ContextTrustClass,
     FrozenModelToolSurface,
+    FrozenCanonicalCompileSnapshot,
     FrozenToolSpec,
     ModelInputScopeKind,
+    canonical_compile_snapshot_fingerprint,
     model_tool_surface_fingerprint,
 )
 from pulsara_agent.primitives.context import context_fingerprint, freeze_json
+from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
+from pulsara_agent.primitives.run_permission import (
+    FrozenRunPermissionSnapshot,
+    RunPermissionAdmissionSource,
+    build_run_permission_snapshot,
+)
 from tests.support.model_config import test_llm_config
 
 
@@ -71,7 +80,7 @@ class _Cwd:
 
 
 class StaticContextSourceCollector:
-    """Two required first-party facts with the production contracts."""
+    """Required first-party facts with the production contracts."""
 
     @property
     def registry_fingerprint(self) -> str:
@@ -80,11 +89,14 @@ class StaticContextSourceCollector:
             (
                 ContextSourceKind.BASE_SYSTEM.value,
                 ContextSourceKind.RUNTIME_ENVIRONMENT.value,
+                ContextSourceKind.RUN_PERMISSION.value,
             ),
         )
 
     def collect(self, **_kwargs: object) -> CollectedContextSources:
-        candidates = (
+        canonical_facts = _kwargs["canonical_facts"]
+        permission = canonical_facts.run_permission_snapshot  # type: ignore[union-attr]
+        candidates: tuple[ContextSourceCandidate, ...] = (
             _candidate(
                 kind=ContextSourceKind.BASE_SYSTEM,
                 version="pulsara.base-system.v1",
@@ -108,7 +120,58 @@ class StaticContextSourceCollector:
                     (ContextRenderMode.COMPACT, "runtime=/test/workspace"),
                 ),
             ),
+            _candidate(
+                kind=ContextSourceKind.RUN_PERMISSION,
+                version="pulsara.run-permission.v1",
+                channel=ContextChannel.SYSTEM,
+                trust=ContextTrustClass.AUTHORIZED_CAPABILITY_CONTEXT,
+                budget=ContextBudgetClass.MUST_KEEP,
+                placement=14,
+                degradation=12,
+                variants=(
+                    (
+                        ContextRenderMode.FULL,
+                        f"permission={permission.effective_mode.value}",
+                    ),
+                    (
+                        ContextRenderMode.COMPACT,
+                        f"permission={permission.effective_mode.value}",
+                    ),
+                ),
+            ),
         )
+        if canonical_facts.plan_handoff_fact is not None:  # type: ignore[union-attr]
+            candidates += (
+                _candidate(
+                    kind=ContextSourceKind.PLAN_HANDOFF,
+                    version="pulsara.plan-handoff.v1",
+                    channel=ContextChannel.SYSTEM,
+                    trust=ContextTrustClass.TRUSTED_RUNTIME_FACT,
+                    budget=ContextBudgetClass.MUST_KEEP,
+                    placement=15,
+                    degradation=11,
+                    variants=(
+                        (ContextRenderMode.FULL, "plan handoff full"),
+                        (ContextRenderMode.COMPACT, "plan handoff"),
+                    ),
+                ),
+            )
+        if canonical_facts.plan_workflow_fact is not None:  # type: ignore[union-attr]
+            candidates += (
+                _candidate(
+                    kind=ContextSourceKind.PLAN_WORKFLOW,
+                    version="pulsara.plan-workflow.v1",
+                    channel=ContextChannel.SYSTEM,
+                    trust=ContextTrustClass.ROOT_INSTRUCTION,
+                    budget=ContextBudgetClass.MUST_KEEP,
+                    placement=16,
+                    degradation=10,
+                    variants=(
+                        (ContextRenderMode.FULL, "plan workflow full"),
+                        (ContextRenderMode.COMPACT, "plan workflow"),
+                    ),
+                ),
+            )
         registry = self.registry_fingerprint
         collection = context_fingerprint(
             "collected-context-sources:v1",
@@ -121,6 +184,38 @@ class StaticContextSourceCollector:
             },
         )
         return CollectedContextSources(candidates, (), registry, collection)
+
+
+def static_canonical_compile_facts(
+    canonical_input: CanonicalModelInputSnapshot,
+) -> FrozenCanonicalCompileSnapshot:
+    """Build the final no-Plan compile fact for isolated adapter tests."""
+
+    permission = build_run_permission_snapshot(
+        snapshot_id="permission:test",
+        requested_mode=DEFAULT_PERMISSION_MODE,
+        effective_mode=DEFAULT_PERMISSION_MODE,
+        admission_source=RunPermissionAdmissionSource.USER_SUBMISSION,
+    )
+    provisional = FrozenCanonicalCompileSnapshot.__new__(
+        FrozenCanonicalCompileSnapshot
+    )
+    object.__setattr__(provisional, "canonical_input", canonical_input)
+    object.__setattr__(provisional, "run_permission_snapshot", permission)
+    object.__setattr__(provisional, "plan_workflow_fact", None)
+    object.__setattr__(provisional, "plan_handoff_fact", None)
+    object.__setattr__(provisional, "approved_plan_materialization_fact", None)
+    object.__setattr__(provisional, "canonical_read_cut_fingerprint", "")
+    return FrozenCanonicalCompileSnapshot(
+        canonical_input=canonical_input,
+        run_permission_snapshot=permission,
+        plan_workflow_fact=None,
+        plan_handoff_fact=None,
+        approved_plan_materialization_fact=None,
+        canonical_read_cut_fingerprint=canonical_compile_snapshot_fingerprint(
+            provisional
+        ),
+    )
 
 
 class StructuredToolPort:
@@ -206,9 +301,15 @@ class StructuredToolPort:
 
     async def authorize(self, **kwargs: object):
         kwargs.pop("surface_borrow")
+        permission = kwargs.pop("permission_snapshot")
+        if not isinstance(permission, FrozenRunPermissionSnapshot):
+            raise TypeError("test tool authorization lacks a permission snapshot")
         return await self.delegate.authorize(**kwargs)
 
     async def request_confirmation(self, **kwargs: object):
+        permission = kwargs.pop("permission_snapshot")
+        if not isinstance(permission, FrozenRunPermissionSnapshot):
+            raise TypeError("test confirmation lacks a permission snapshot")
         return await self.delegate.request_confirmation(**kwargs)
 
     async def invoke(self, **kwargs: object):
@@ -232,6 +333,7 @@ def direct_tool_invocation_context(
     workspace_id: str = "workspace:test",
     conversation_scope_kind: ModelInputScopeKind = ModelInputScopeKind.ROOT,
     scope_subagent_task_id: str | None = None,
+    permission_snapshot: FrozenRunPermissionSnapshot | None = None,
 ) -> tuple[ProcessLocalToolSurfaceBorrow, KernelToolInvocationContext]:
     """Acquire the same narrow surface authority used by the runner."""
 
@@ -241,6 +343,12 @@ def direct_tool_invocation_context(
     )
     borrow = port.borrow_tool_surface(prepared)
     try:
+        permission = permission_snapshot or build_run_permission_snapshot(
+            snapshot_id=f"permission:{turn_id}",
+            requested_mode=DEFAULT_PERMISSION_MODE,
+            effective_mode=DEFAULT_PERMISSION_MODE,
+            admission_source=RunPermissionAdmissionSource.USER_SUBMISSION,
+        )
         binding_fingerprint = borrow.binding_fingerprint(tool_name)
         return borrow, KernelToolInvocationContext(
             session_id=session_id,
@@ -254,6 +362,10 @@ def direct_tool_invocation_context(
             scope_subagent_task_id=scope_subagent_task_id,
             host_owner_epoch=1,
             authorization_reference="test:authorized",
+            permission_snapshot_fingerprint=permission.snapshot_fingerprint,
+            attempt_permission_snapshot_fingerprint=(
+                permission.snapshot_fingerprint
+            ),
             tool_surface_fingerprint=prepared.model_surface.surface_fingerprint,
             executor_binding_fingerprint=binding_fingerprint,
             surface_borrow=borrow,
@@ -318,6 +430,7 @@ async def authorize_direct_tool(
     assistant_entry_id: str,
     conversation_scope_kind: ModelInputScopeKind = ModelInputScopeKind.ROOT,
     scope_subagent_task_id: str | None = None,
+    permission_snapshot: FrozenRunPermissionSnapshot | None = None,
 ):
     """Authorize under a formally acquired immutable surface borrow."""
 
@@ -327,6 +440,12 @@ async def authorize_direct_tool(
     )
     borrow = port.borrow_tool_surface(prepared)
     try:
+        permission = permission_snapshot or build_run_permission_snapshot(
+            snapshot_id=f"permission:{turn_id}",
+            requested_mode=DEFAULT_PERMISSION_MODE,
+            effective_mode=DEFAULT_PERMISSION_MODE,
+            admission_source=RunPermissionAdmissionSource.USER_SUBMISSION,
+        )
         return await port.authorize(
             tool_name=tool_name,
             arguments=arguments,
@@ -334,6 +453,7 @@ async def authorize_direct_tool(
             turn_id=turn_id,
             assistant_entry_id=assistant_entry_id,
             surface_borrow=borrow,
+            permission_snapshot=permission,
         )
     finally:
         borrow.close()
@@ -405,4 +525,5 @@ __all__ = [
     "StaticContextSourceCollector",
     "StructuredToolPort",
     "direct_tool_invocation_context",
+    "static_canonical_compile_facts",
 ]

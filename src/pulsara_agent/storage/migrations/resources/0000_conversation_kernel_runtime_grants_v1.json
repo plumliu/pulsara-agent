@@ -12,6 +12,8 @@
     "durable_job_attempts": ["SELECT", "INSERT", "UPDATE"],
     "durable_jobs": ["SELECT", "INSERT", "UPDATE"],
     "interaction_decisions": ["SELECT", "INSERT"],
+    "plan_workflows": ["SELECT", "INSERT", "UPDATE"],
+    "plan_interactions": ["SELECT", "INSERT", "UPDATE"],
     "memory_candidates": ["SELECT", "INSERT", "UPDATE"],
     "memory_facts": ["SELECT", "INSERT", "UPDATE"],
     "memory_governance_decisions": ["SELECT", "INSERT"],
