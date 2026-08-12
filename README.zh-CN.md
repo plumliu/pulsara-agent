@@ -19,6 +19,7 @@ migration universe。
 ```text
 Python KernelHostCore
 ├── canonical conversation runner
+├── provider-neutral structured model-input compiler
 ├── tool policy + Host-scoped physical tools
 ├── exact-four durable job executor
 ├── PostgreSQL-only memory
@@ -55,6 +56,9 @@ epoch。
 Kernel 当前支持：
 
 - OpenAI-compatible Responses 与 Chat Completions transport；
+- 基于 exact canonical cut 的 provider-neutral structured input compiler：
+  五类 typed first-party source、按 scope 冻结的 tool schema、目标 estimator
+  精确计量，以及 source/tool-result 的确定性降级；
 - filesystem、todo、`terminal`、`terminal_process`、`terminal_monitor` 与
   scoped `artifact_read` tools；
 - 真实 PIPE/PTY Terminal output streaming、exact process-local cursor、typed
@@ -117,7 +121,10 @@ Round 2 在保持 exact 24 张产品关系的同时更新了 version-0 `tool_res
 canonical Terminal-observation 契约；当前 baseline/catalog identity 与验证证据记录在
 [`round1_tool_output_artifact_activation.json`](benchmarks/suites/core/v1/round1_tool_output_artifact_activation.json)
 和
-[`round2_terminal_runtime_activation.json`](benchmarks/suites/core/v1/round2_terminal_runtime_activation.json)。旧 v13
+[`round2_terminal_runtime_activation.json`](benchmarks/suites/core/v1/round2_terminal_runtime_activation.json)。
+Round 3 不改变数据库 universe；其 process-local compiler 与双 provider
+验证记录在
+[`round3_structured_model_input_compiler_activation.json`](benchmarks/suites/core/v1/round3_structured_model_input_compiler_activation.json)。旧 v13
 数据库只会得到 `schema_migration_universe_reset_required`，不会被在线导入、
 翻译或升级。请严格遵守
 [clean-baseline runbook](STAGE_5_CLEAN_BASELINE_RUNBOOK.zh.md)，没有针对 exact

@@ -46,17 +46,17 @@ def test_kernel_composition_preserves_root_catalog_and_active_skill_prompt(
         memory_domain=None,  # type: ignore[arg-type]
         available_tool_names=frozenset({"read_file"}),
         configured_active_skill_names=frozenset({"review"}),
-        base_system_prompt="ROOT SYSTEM",
         provider=_CapabilityProvider(),  # type: ignore[arg-type]
     )
-    projection = composer.compose(user_input="please review")
-    assert projection.system_prompt == (
-        "ROOT SYSTEM\n\n<skills>review</skills>\n\n"
-        "<active-skill>review body</active-skill>"
+    projection = composer.resolve_projection(
+        user_input="please review",
+        available_tool_names=frozenset({"read_file"}),
     )
-    assert projection.catalog_skill_names == ("review",)
-    assert projection.active_skill_names == ("review",)
-    assert projection.diagnostic_codes == ("skill_ready",)
+    assert projection.catalog_prompt == "<skills>review</skills>"
+    assert projection.active_skill_prompt == "<active-skill>review body</active-skill>"
+    assert tuple(item.name for item in projection.catalog_entries) == ("review",)
+    assert tuple(item.name for item in projection.active_injections) == ("review",)
+    assert tuple(item.code for item in projection.diagnostics) == ("skill_ready",)
 
 
 def test_enabled_mcp_is_rejected_before_kernel_resource_activation(

@@ -9,7 +9,6 @@ from pathlib import Path
 import shlex
 import sys
 from time import monotonic
-from typing import AsyncIterator
 from uuid import uuid4
 
 import psycopg
@@ -26,7 +25,6 @@ from pulsara_agent.conversation_kernel.repository import (
 )
 from pulsara_agent.conversation_kernel.runner import (
     ConversationKernelRunner,
-    KernelModelRequest,
     KernelToolAuthorization,
     KernelToolAuthorizationKind,
     KernelToolResult,
@@ -48,6 +46,13 @@ from pulsara_agent.conversation_kernel.vocabulary import (
     LIVE_EVENT_TYPES,
     SUBJECT_SLOTS,
 )
+from tests.support.round3 import (
+    ScriptedKernelModel,
+    StaticContextSourceCollector,
+    StructuredToolPort,
+    direct_tool_invocation_context,
+)
+from pulsara_agent.primitives.context import freeze_json, thaw_json
 from pulsara_agent.message import ToolResultState
 from pulsara_agent.ports.artifact import (
     ArtifactContentError,
@@ -524,10 +529,11 @@ def test_round1_terminal_preserves_full_sanitized_candidate_and_envelope(
         "'-MIDDLE-SENTINEL-' + ('尾' * 20000))"
     )
     command = f"{shlex.quote(sys.executable)} -c {shlex.quote(code)}"
+    session_id = _name("session")
     port = DirectKernelToolPort(
         workspace_root=tmp_path,
         host_owner_id=_name("host"),
-        session_id=_name("session"),
+        session_id=session_id,
         live_bus=LiveAgentEventBus(),
         authorization_policy=DefaultToolDispatchAuthorizationPolicy(
             default_permission_policy()
@@ -535,6 +541,15 @@ def test_round1_terminal_preserves_full_sanitized_candidate_and_envelope(
     )
 
     async def invoke_and_close() -> KernelToolResult:
+        borrow, invocation_context = direct_tool_invocation_context(
+            port,
+            session_id=session_id,
+            tool_name="terminal",
+            tool_call_id="call:terminal",
+            attempt_id="attempt:terminal",
+            turn_id="turn:terminal",
+            assistant_entry_id="entry:terminal",
+        )
         try:
             return await port.invoke(
                 tool_name="terminal",
@@ -547,8 +562,10 @@ def test_round1_terminal_preserves_full_sanitized_candidate_and_envelope(
                 attempt_id="attempt:terminal",
                 turn_id="turn:terminal",
                 assistant_entry_id="entry:terminal",
+                invocation_context=invocation_context,
             )
         finally:
+            borrow.close()
             await port.aclose()
 
     result = asyncio.run(invoke_and_close())
@@ -582,15 +599,8 @@ def test_round1_terminal_preserves_full_sanitized_candidate_and_envelope(
     assert "Use artifact_read" in preview_envelope["output"]
 
 
-class _ScriptedModel:
-    def __init__(self, calls: list[list[object]]) -> None:
-        self._calls = calls
-        self.requests: list[KernelModelRequest] = []
-
-    async def stream(self, request: KernelModelRequest) -> AsyncIterator[object]:
-        self.requests.append(request)
-        for item in self._calls.pop(0):
-            yield item
+class _ScriptedModel(ScriptedKernelModel):
+    pass
 
 
 def _tool_stream(tool_name: str = "test_tool") -> list[object]:
@@ -695,8 +705,9 @@ def test_round1_runner_accepts_known_outcome_when_publication_fails_and_confirms
         repository=repository,
         writer_lease=lease,
         model=_ScriptedModel([_tool_stream(), _text_stream("done")]),
-        tools=tool,
+        tools=StructuredToolPort(tool),
         live_bus=LiveAgentEventBus(),
+        context_source_collector=StaticContextSourceCollector(),
         workspace_id=workspace_id,
         tool_output_processor=processor,
     )
@@ -897,7 +908,10 @@ def _install_tool_call(repository: ConversationKernelRepository, workspace_id: s
         parent_content=InlineContent.from_bytes(b""),
         blocks=(
             AssistantToolCallBlock(
-                _name("block"), tool_call_id, "terminal", {"command": "true"}
+                _name("block"),
+                tool_call_id,
+                "terminal",
+                freeze_json({"command": "true"}),
             ),
         ),
         occurred_at=datetime.now(timezone.utc),
@@ -1560,7 +1574,8 @@ def test_round1_production_descriptor_executor_closure(tmp_path: Path) -> None:
     assert binding.is_concurrency_safe
     assert binding.permission_category == "artifact_read"
     assert binding.executor_identity.endswith("ArtifactReadTool#artifact_read")
-    schema = specs["artifact_read"].parameters
+    schema = thaw_json(specs["artifact_read"].parameters)
+    assert isinstance(schema, dict)
     assert schema["additionalProperties"] is False
     assert schema["properties"]["offset_chars"]["minimum"] == 0
     assert schema["properties"]["max_chars"]["maximum"] == 32_000

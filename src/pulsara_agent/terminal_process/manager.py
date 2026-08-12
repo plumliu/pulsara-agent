@@ -144,10 +144,7 @@ class ProcessRegistry:
                 raise RuntimeError("terminal process owner is closed")
             self._prune_locked()
             if (
-                sum(
-                    _occupies_live_capacity(state)
-                    for state in self._states.values()
-                )
+                sum(_occupies_live_capacity(state) for state in self._states.values())
                 + sum(self._launching_by_owner.values())
                 >= self.max_live_processes
             ):
@@ -727,6 +724,7 @@ class TerminalSession:
     state: TerminalSessionState
     registry: ProcessRegistry
     environment: TerminalEnvironmentOwner
+    state_lock: RLock
 
     def execute(
         self,
@@ -735,9 +733,10 @@ class TerminalSession:
         output_subscriber: OutputSubscriber | None = None,
         origin: TerminalProcessOrigin | None = None,
     ) -> TerminalResult:
-        current = _nearest_existing_cwd(
-            self.state.current_cwd, self.state.workspace_root
-        )
+        with self.state_lock:
+            current = _nearest_existing_cwd(
+                self.state.current_cwd, self.state.workspace_root
+            )
         cwd = _resolve_workdir(
             request.workdir, current=current, workspace=self.state.workspace_root
         )
@@ -783,10 +782,13 @@ class TerminalSession:
                 or self.state.workspace_root in candidate.parents
             ):
                 if candidate.is_dir():
-                    self.state.current_cwd = candidate
+                    with self.state_lock:
+                        self.state.current_cwd = candidate
+        with self.state_lock:
+            visible_cwd = self.state.current_cwd if not yielded else cwd
         return replace(
             result,
-            cwd=str(self.state.current_cwd if not yielded else cwd),
+            cwd=str(visible_cwd),
             shell_diagnostic=environment.diagnostic,
         )
 
@@ -855,9 +857,20 @@ class TerminalSessionManager:
                 ),
                 self.process_registry,
                 self.environment_owner,
+                self._lock,
             )
             self._sessions[key] = session
             return session
+
+    def snapshot_default_cwd(self, *, owner_host_session_id: str) -> Path:
+        """Read the default session cwd without creating a Terminal session."""
+
+        key = (owner_host_session_id, DEFAULT_TERMINAL_SESSION_ID)
+        with self._lock:
+            if self._closed or owner_host_session_id in self._released_owners:
+                raise RuntimeError("terminal owner is closed")
+            session = self._sessions.get(key)
+            return self.workspace_root if session is None else session.state.current_cwd
 
     def list_processes(self, **kwargs):
         return self.process_registry.list_processes(**kwargs)

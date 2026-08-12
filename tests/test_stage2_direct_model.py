@@ -3,148 +3,123 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
 
-from pulsara_agent.conversation_kernel.direct_model import DirectKernelModelPort
-from pulsara_agent.llm.estimator import PulsaraHeuristicTokenEstimatorV1
-from pulsara_agent.llm.input import ToolSpec
+from pulsara_agent.conversation_kernel.direct_model import (
+    DirectKernelModelPort,
+    KernelModelExecutionRequest,
+    KernelModelPreparationRequest,
+)
+from pulsara_agent.model_input.compiler import StructuredModelInputCompiler
+from pulsara_agent.model_input.contracts import (
+    CanonicalModelInputIdentity,
+    CanonicalModelInputSnapshot,
+    ModelInputScopeKind,
+    PreparedProviderInputCut,
+    StructuredModelInputCompileRequest,
+    canonical_model_input_identity_fingerprint,
+    canonical_model_input_snapshot_fingerprint,
+)
 from pulsara_agent.ports.live_agent_event import (
     TextDeltaPayload,
     TextEndPayload,
     TextStartPayload,
 )
-from pulsara_agent.llm.result import TransportUsageReport
-from pulsara_agent.ports.provider_stream import (
-    ProviderPhysicalCompletion,
-    ProviderPhysicalCompletionStatus,
-    ProviderStreamTerminal,
-)
+from pulsara_agent.primitives.model_call import ModelCallPurpose
 from tests.support.model_config import test_llm_config
+from tests.support.round3 import StaticContextSourceCollector, StructuredToolPort
 
 
-class _TerminalExecution:
-    def __init__(self) -> None:
-        self._delivered = False
-        self.closed = False
-
-    async def read_next(self):
-        if self._delivered:
-            return None
-        self._delivered = True
-        return ProviderStreamTerminal(
-            outcome="COMPLETED",
-            usage=TransportUsageReport(usage_status="missing", usage=None),
+def _prepared_execution(
+    port: DirectKernelModelPort,
+    *,
+    maximum_input_tokens: int = 4_096,
+    scope_kind: ModelInputScopeKind = ModelInputScopeKind.ROOT,
+    scope_subagent_task_id: str | None = None,
+) -> tuple[KernelModelExecutionRequest, StructuredToolPort]:
+    session_id = "session:test"
+    turn_id = "turn:test"
+    revision_id = "binding:test"
+    sequence = 0
+    tool_port = StructuredToolPort(object(), tool_names=("read_file",))
+    surface = tool_port.snapshot_tool_surface(
+        conversation_scope_kind=scope_kind,
+        scope_subagent_task_id=scope_subagent_task_id,
+    )
+    prepared = port.prepare_call(
+        KernelModelPreparationRequest(
+            session_id=session_id,
+            turn_id=turn_id,
+            model_call_index=1,
+            purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
+            maximum_input_tokens=maximum_input_tokens,
+            maximum_output_tokens=16_384,
+            tool_surface=surface,
         )
-
-    async def aclose(self) -> None:
-        self.closed = True
-
-    async def wait_physical_completion(self) -> ProviderPhysicalCompletion:
-        return ProviderPhysicalCompletion(
-            status=ProviderPhysicalCompletionStatus.COMPLETED,
-            diagnostic_code=None,
+    )
+    identity = CanonicalModelInputIdentity(
+        session_id=session_id,
+        turn_id=turn_id,
+        context_binding_revision_id=revision_id,
+        provider_input_through_sequence=sequence,
+        conversation_scope_kind=scope_kind,
+        scope_subagent_task_id=scope_subagent_task_id,
+        identity_fingerprint=canonical_model_input_identity_fingerprint(
+            session_id=session_id,
+            turn_id=turn_id,
+            context_binding_revision_id=revision_id,
+            provider_input_through_sequence=sequence,
+            conversation_scope_kind=scope_kind,
+            scope_subagent_task_id=scope_subagent_task_id,
+        ),
+    )
+    snapshot = CanonicalModelInputSnapshot(
+        identity=identity,
+        items=(),
+        canonical_utf8_bytes=0,
+        snapshot_fingerprint=canonical_model_input_snapshot_fingerprint(
+            identity=identity,
+            items=(),
+            canonical_utf8_bytes=0,
+            closures=(),
+            late_outcomes=(),
+        ),
+    )
+    sources = StaticContextSourceCollector().collect()
+    compiled = StructuredModelInputCompiler().compile(
+        StructuredModelInputCompileRequest(
+            context_id="context:test",
+            model_call_index=1,
+            canonical_input=snapshot,
+            compile_binding=prepared.compile_binding,
+            sources=sources,
         )
-
-
-class _TerminalTransport:
-    def __init__(self) -> None:
-        self.execution = _TerminalExecution()
-        self.context = None
-
-    def open_stream(self, *, call, context):
-        del call
-        self.context = context
-        return self.execution
-
-
-def test_stage2_direct_model_uses_current_resolved_output_budget_field(
-    monkeypatch,
-) -> None:
-    import pulsara_agent.conversation_kernel.direct_model as direct_model
-
-    transport = _TerminalTransport()
-    target = SimpleNamespace(
-        context_budget=SimpleNamespace(effective_output_tokens=64),
-        fact=SimpleNamespace(target_fingerprint="sha256:" + "2" * 64),
-        transport=transport,
-        token_estimator=PulsaraHeuristicTokenEstimatorV1(),
     )
-    monkeypatch.setattr(direct_model, "resolve_model_target", lambda **_: target)
-    monkeypatch.setattr(
-        direct_model,
-        "resolve_model_call",
-        lambda **_: SimpleNamespace(
-            resolved_model_call_id="model-call:test", target=target
-        ),
-    )
-    monkeypatch.setattr(
-        direct_model,
-        "validate_model_context_for_call",
-        lambda *, call, context: SimpleNamespace(
-            estimate=call.target.token_estimator.estimate_context(context)
-        ),
-    )
-    port = DirectKernelModelPort(
-        config=test_llm_config(
-            api_key="test",
-            base_url="https://example.invalid/v1",
-            pro_model="test-pro",
-            flash_model="test-flash",
-            api="openai_chat_completions",
-        ),
-        tools=(
-            ToolSpec(
-                name="read_file",
-                description="Read one file from the active workspace.",
-                parameters={
-                    "type": "object",
-                    "properties": {"path": {"type": "string"}},
-                },
+    borrow = tool_port.borrow_tool_surface(surface)
+    return (
+        KernelModelExecutionRequest(
+            session_id=session_id,
+            turn_id=turn_id,
+            model_call_index=1,
+            prepared_call=prepared,
+            compiled_input=compiled,
+            cut=PreparedProviderInputCut(
+                session_id=session_id,
+                turn_id=turn_id,
+                context_binding_revision_id=revision_id,
+                provider_input_through_sequence=sequence,
             ),
+            surface_borrow=borrow,
         ),
-        system_prompt="ROOT SYSTEM",
-    )
-    request = SimpleNamespace(
-        provider_input=SimpleNamespace(canonical_bytes=4, items=()),
-        model_call_index=1,
-        system_prompt=None,
-        maximum_input_tokens=4_096,
-        maximum_output_tokens=64,
+        tool_port,
     )
 
-    async def collect() -> list[object]:
-        return [item async for item in port.stream(request)]  # type: ignore[arg-type]
 
-    assert asyncio.run(collect()) == []
-    assert transport.context.compiler_estimated_input_tokens > 1
-    assert transport.context.system_prompt == "ROOT SYSTEM"
-    assert transport.context.tools[0].name == "read_file"
-    assert transport.execution.closed is True
-
-
-def test_stage2_direct_model_rejects_resolved_input_before_physical_send(
-    monkeypatch,
-) -> None:
-    import pulsara_agent.conversation_kernel.direct_model as direct_model
-
-    transport = _TerminalTransport()
-    target = SimpleNamespace(
-        context_budget=SimpleNamespace(effective_output_tokens=64),
-        fact=SimpleNamespace(target_fingerprint="sha256:" + "2" * 64),
-        transport=transport,
-        token_estimator=PulsaraHeuristicTokenEstimatorV1(),
-    )
-    monkeypatch.setattr(direct_model, "resolve_model_target", lambda **_: target)
-    monkeypatch.setattr(
-        direct_model,
-        "resolve_model_call",
-        lambda **_: SimpleNamespace(
-            resolved_model_call_id="model-call:test", target=target
-        ),
-    )
-    port = DirectKernelModelPort(
+def _port(*, usage_observer=None) -> DirectKernelModelPort:
+    return DirectKernelModelPort(
         config=test_llm_config(
             api_key="test",
             base_url="https://example.invalid/v1",
@@ -152,37 +127,138 @@ def test_stage2_direct_model_rejects_resolved_input_before_physical_send(
             flash_model="test-flash",
             api="openai_chat_completions",
         ),
-        tools=(ToolSpec("tool", "large schema", {"type": "object"}),),
-        system_prompt="ROOT SYSTEM",
+        usage_observer=usage_observer,
     )
-    request = SimpleNamespace(
-        provider_input=SimpleNamespace(canonical_bytes=1, items=()),
-        model_call_index=1,
-        system_prompt=None,
-        maximum_input_tokens=1,
-        maximum_output_tokens=64,
+
+
+def test_stage2_direct_model_freezes_output_budget_system_and_tools() -> None:
+    port = _port()
+    request, _tool_port = _prepared_execution(port)
+    prepared = request.prepared_call
+    compiled = request.compiled_input
+
+    assert prepared.compile_binding.effective_output_tokens <= 16_384
+    assert compiled.system_prompt.startswith("ROOT SYSTEM")
+    assert [item.name for item in compiled.tools] == ["read_file"]
+    assert (
+        compiled.final_estimate
+        == prepared.compile_binding.estimator.estimate_frozen_input(
+            system_prompt=compiled.system_prompt,
+            messages=compiled.messages,
+            tools=compiled.tools,
+        )
+    )
+    request.surface_borrow.close()
+
+
+def test_stage2_direct_model_rejects_invalid_compiled_input_before_send() -> None:
+    port = _port()
+    request, _tool_port = _prepared_execution(port)
+    other, _other_tool_port = _prepared_execution(port)
+    invalid = replace(request, compiled_input=other.compiled_input)
+
+    async def collect() -> list[object]:
+        return [item async for item in port.stream(invalid)]
+
+    with pytest.raises(ValueError, match="exact-join preparation"):
+        asyncio.run(collect())
+    request.surface_borrow.close()
+    other.surface_borrow.close()
+
+
+def test_round3_execution_exactly_joins_provider_cut_before_open() -> None:
+    port = _port()
+    request, _tool_port = _prepared_execution(port)
+    with pytest.raises(ValueError, match="structurally joined"):
+        replace(
+            request,
+            cut=replace(
+                request.cut,
+                context_binding_revision_id="binding:other",
+                provider_input_through_sequence=1,
+            ),
+        )
+    request.surface_borrow.close()
+
+
+def test_round3_execution_rejects_other_subagent_surface_access() -> None:
+    port = _port()
+    request_a, _tool_port_a = _prepared_execution(
+        port,
+        scope_kind=ModelInputScopeKind.SUBAGENT_TASK,
+        scope_subagent_task_id="subagent-task:a",
+    )
+    request_b, _tool_port_b = _prepared_execution(
+        port,
+        scope_kind=ModelInputScopeKind.SUBAGENT_TASK,
+        scope_subagent_task_id="subagent-task:b",
+    )
+    with pytest.raises(ValueError, match="structurally joined"):
+        replace(
+            request_b,
+            compiled_input=request_a.compiled_input,
+            cut=request_a.cut,
+        )
+    request_a.surface_borrow.close()
+    request_b.surface_borrow.close()
+
+
+def test_round3_execution_rejects_same_shape_foreign_host_surface_borrow() -> None:
+    port = _port()
+    request_a, _tool_port_a = _prepared_execution(port)
+    request_b, _tool_port_b = _prepared_execution(port)
+
+    assert request_a.prepared_call.tool_surface != request_b.prepared_call.tool_surface
+    with pytest.raises(ValueError, match="structurally joined"):
+        replace(request_a, surface_borrow=request_b.surface_borrow)
+
+    request_a.surface_borrow.close()
+    request_b.surface_borrow.close()
+
+
+def test_round3_direct_model_rejects_final_estimate_drift_before_transport_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    port = _port()
+    request, _tool_port = _prepared_execution(port)
+    compiled = request.compiled_input
+    divergent = replace(
+        compiled.final_estimate,
+        envelope_tokens=compiled.final_estimate.envelope_tokens + 1,
+        total_input_tokens=compiled.final_estimate.total_input_tokens + 1,
+    )
+    opened = 0
+
+    def validate_differently(*, call, context):
+        del call, context
+        return SimpleNamespace(estimate=divergent)
+
+    def forbidden_open(*, call, context):
+        del call, context
+        nonlocal opened
+        opened += 1
+        raise AssertionError("transport must not open after estimate drift")
+
+    monkeypatch.setattr(
+        "pulsara_agent.conversation_kernel.direct_model.validate_model_context_for_call",
+        validate_differently,
+    )
+    monkeypatch.setattr(
+        request.prepared_call.call.target.transport, "open_stream", forbidden_open
     )
 
     async def collect() -> list[object]:
-        return [item async for item in port.stream(request)]  # type: ignore[arg-type]
+        return [item async for item in port.stream(request)]
 
-    with pytest.raises(ValueError, match="provider input"):
+    with pytest.raises(RuntimeError, match="pre-send input estimates differ"):
         asyncio.run(collect())
-    assert transport.context is None
+    assert opened == 0
+    request.surface_borrow.close()
 
 
 def test_stage2_direct_model_real_adapter_path_emits_only_live_payloads() -> None:
-    usage_reports: list[TransportUsageReport] = []
-    port = DirectKernelModelPort(
-        config=test_llm_config(
-            api_key="test",
-            base_url="https://example.invalid/v1",
-            pro_model="test-pro",
-            flash_model="test-flash",
-            api="openai_chat_completions",
-        ),
-        usage_observer=lambda _request, report: usage_reports.append(report),
-    )
+    usage_reports = []
+    port = _port(usage_observer=lambda _request, report: usage_reports.append(report))
     binding = port._registry.get("openai_chat_completions")
     binding._adapter._mock_chunks = [
         {"choices": [{"delta": {"content": "hello"}}]},
@@ -197,16 +273,10 @@ def test_stage2_direct_model_real_adapter_path_emits_only_live_payloads() -> Non
             },
         },
     ]
-    request = SimpleNamespace(
-        provider_input=SimpleNamespace(canonical_bytes=1, items=()),
-        model_call_index=1,
-        system_prompt=None,
-        maximum_input_tokens=4_096,
-        maximum_output_tokens=16_384,
-    )
+    request, _tool_port = _prepared_execution(port)
 
     async def collect() -> list[object]:
-        return [item async for item in port.stream(request)]  # type: ignore[arg-type]
+        return [item async for item in port.stream(request)]
 
     values = asyncio.run(collect())
     assert [type(value) for value in values] == [
@@ -220,3 +290,4 @@ def test_stage2_direct_model_real_adapter_path_emits_only_live_payloads() -> Non
     assert usage_reports[0].usage.input_tokens == 4
     assert usage_reports[0].usage.cached_input_tokens == 3
     assert usage_reports[0].usage.output_tokens == 1
+    request.surface_borrow.close()

@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 from time import monotonic
-from typing import AsyncIterator
 from uuid import uuid4
 
 import pytest
@@ -26,7 +25,6 @@ from pulsara_agent.ports.live_agent_event import (
 from pulsara_agent.conversation_kernel.repository import ConversationKernelRepository
 from pulsara_agent.conversation_kernel.runner import (
     ConversationKernelRunner,
-    KernelModelRequest,
     KernelToolAuthorization,
     KernelToolAuthorizationKind,
     KernelToolResult,
@@ -35,8 +33,18 @@ from pulsara_agent.conversation_kernel.tool_artifacts import (
     PostgresToolArtifactReadPort,
 )
 from pulsara_agent.conversation_kernel.vocabulary import LiveEventType
+from pulsara_agent.llm.input import MessageRole
+from pulsara_agent.model_input.contracts import (
+    ModelInputCompileFailureKind,
+    StructuredModelInputCompileError,
+)
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 from tests.support.postgres import verified_postgres_provider
+from tests.support.round3 import (
+    ScriptedKernelModel,
+    StaticContextSourceCollector,
+    StructuredToolPort,
+)
 
 
 pytestmark = pytest.mark.postgres
@@ -46,15 +54,46 @@ def _name(prefix: str) -> str:
     return f"{prefix}:{uuid4().hex}"
 
 
-class _ScriptedModel:
-    def __init__(self, calls: list[list[object]]) -> None:
-        self._calls = calls
-        self.requests: list[KernelModelRequest] = []
+class _ScriptedModel(ScriptedKernelModel):
+    pass
 
-    async def stream(self, request: KernelModelRequest) -> AsyncIterator[object]:
-        self.requests.append(request)
-        for item in self._calls.pop(0):
-            yield item
+
+class _ChangingRegistryCollector(StaticContextSourceCollector):
+    def __init__(self) -> None:
+        self._reads = 0
+
+    @property
+    def registry_fingerprint(self) -> str:
+        self._reads += 1
+        if self._reads == 1:
+            return super().registry_fingerprint
+        return "sha256:" + ("0" * 64)
+
+
+class _FailingOperationalExtension:
+    def offer_operational_nowait(self, _offer) -> None:
+        raise RuntimeError("injected best-effort observer failure")
+
+
+class _RevocableStructuredToolPort(StructuredToolPort):
+    def __init__(self, delegate: object, *, tool_names: tuple[str, ...] = ()) -> None:
+        super().__init__(delegate, tool_names=tool_names)
+        self.revoked = False
+
+    def borrow_tool_surface(self, prepared):
+        if self.revoked:
+            raise RuntimeError("injected tool surface revocation")
+        return super().borrow_tool_surface(prepared)
+
+
+class _SurfaceRevokingCollector(StaticContextSourceCollector):
+    def __init__(self, tools: _RevocableStructuredToolPort) -> None:
+        self._tools = tools
+
+    def collect(self, **kwargs):
+        result = super().collect(**kwargs)
+        self._tools.revoked = True
+        return result
 
 
 class _MeasuredRepository(ConversationKernelRepository):
@@ -223,8 +262,9 @@ def test_stage2_runner_text_turn_has_two_entry_transactions_and_no_segments(
         repository=repository,
         writer_lease=lease,
         model=model,
-        tools=_AssertingTool(provider, session_id),
+        tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
         live_bus=LiveAgentEventBus(),
+        context_source_collector=StaticContextSourceCollector(),
     )
     result = asyncio.run(runner.run_turn("question"))
     assert result.final_text == "answer"
@@ -251,6 +291,148 @@ def test_stage2_runner_text_turn_has_two_entry_transactions_and_no_segments(
     )
 
 
+def test_round3_compile_failure_interrupts_after_user_acceptance_with_zero_open(
+    stage2_migrated_postgres_database,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id = _name("session")
+    lease = repository.acquire_host_writer(
+        session_id=session_id,
+        workspace_id=_name("workspace"),
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    model = _ScriptedModel([_text_stream("must not open")])
+    runner = ConversationKernelRunner(
+        repository=repository,
+        writer_lease=lease,
+        model=model,
+        tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
+        live_bus=LiveAgentEventBus(),
+        context_source_collector=StaticContextSourceCollector(),
+        maximum_input_tokens_per_call=4,
+    )
+    with pytest.raises(StructuredModelInputCompileError) as failure:
+        asyncio.run(runner.run_turn("accepted before compile"))
+    assert failure.value.kind is (
+        ModelInputCompileFailureKind.PROTECTED_TRANSCRIPT_EXCEEDS_BUDGET
+    )
+    assert model.preparation_requests
+    assert model.requests == []
+    rows = repository.rehydrate_session(
+        session_id=session_id, deadline_monotonic=monotonic() + 30
+    )
+    assert [row["entry_kind"] for row in rows] == ["USER_MESSAGE"]
+    with provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        deadline_monotonic=monotonic() + 30,
+    ) as connection:
+        status = connection.execute(
+            "SELECT status FROM pulsara_v3.turns WHERE session_id = %s",
+            (session_id,),
+        ).fetchone()[0]
+    assert status == "INTERRUPTED"
+
+
+def test_round3_compile_failure_observer_cannot_block_turn_interruption(
+    stage2_migrated_postgres_database,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id = _name("session")
+    lease = repository.acquire_host_writer(
+        session_id=session_id,
+        workspace_id=_name("workspace"),
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    model = _ScriptedModel([_text_stream("must not open")])
+    runner = ConversationKernelRunner(
+        repository=repository,
+        writer_lease=lease,
+        model=model,
+        tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
+        live_bus=LiveAgentEventBus(),
+        context_source_collector=StaticContextSourceCollector(),
+        maximum_input_tokens_per_call=4,
+        extensions=_FailingOperationalExtension(),  # type: ignore[arg-type]
+    )
+    with pytest.raises(StructuredModelInputCompileError):
+        asyncio.run(runner.run_turn("accepted before compile"))
+    assert model.requests == []
+    with provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        deadline_monotonic=monotonic() + 30,
+    ) as connection:
+        status = connection.execute(
+            "SELECT status FROM pulsara_v3.turns WHERE session_id = %s",
+            (session_id,),
+        ).fetchone()[0]
+    assert status == "INTERRUPTED"
+
+
+def test_round3_source_registry_drift_interrupts_with_zero_provider_open(
+    stage2_migrated_postgres_database,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id = _name("session")
+    lease = repository.acquire_host_writer(
+        session_id=session_id,
+        workspace_id=_name("workspace"),
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    model = _ScriptedModel([_text_stream("must not open")])
+    runner = ConversationKernelRunner(
+        repository=repository,
+        writer_lease=lease,
+        model=model,
+        tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
+        live_bus=LiveAgentEventBus(),
+        context_source_collector=_ChangingRegistryCollector(),
+    )
+    with pytest.raises(StructuredModelInputCompileError) as failure:
+        asyncio.run(runner.run_turn("accepted before registry drift"))
+    assert failure.value.kind is ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
+    assert model.requests == []
+
+
+def test_round3_surface_revoked_before_borrow_has_zero_provider_open(
+    stage2_migrated_postgres_database,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id = _name("session")
+    lease = repository.acquire_host_writer(
+        session_id=session_id,
+        workspace_id=_name("workspace"),
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    model = _ScriptedModel([_text_stream("must not open")])
+    tools = _RevocableStructuredToolPort(
+        _AssertingTool(provider, session_id), tool_names=()
+    )
+    runner = ConversationKernelRunner(
+        repository=repository,
+        writer_lease=lease,
+        model=model,
+        tools=tools,
+        live_bus=LiveAgentEventBus(),
+        context_source_collector=_SurfaceRevokingCollector(tools),
+    )
+    with pytest.raises(StructuredModelInputCompileError) as failure:
+        asyncio.run(runner.run_turn("accepted before surface revocation"))
+    assert failure.value.kind is ModelInputCompileFailureKind.TOOL_SURFACE_INVALID
+    assert model.requests == []
+
+
 def test_stage2_runner_commits_tool_message_and_attempt_before_invoke(
     stage2_migrated_postgres_database,
 ) -> None:
@@ -270,8 +452,9 @@ def test_stage2_runner_commits_tool_message_and_attempt_before_invoke(
         repository=repository,
         writer_lease=lease,
         model=model,
-        tools=tool,
+        tools=StructuredToolPort(tool),
         live_bus=LiveAgentEventBus(),
+        context_source_collector=StaticContextSourceCollector(),
     )
     result = asyncio.run(runner.run_turn("run it"))
     assert result.final_text == "done"
@@ -287,7 +470,12 @@ def test_stage2_runner_commits_tool_message_and_attempt_before_invoke(
         "TOOL_RESULT",
         "ASSISTANT_MESSAGE",
     ]
-    assert model.requests[1].cut.provider_input_through_sequence == 3
+    assert (
+        model.requests[
+            1
+        ].compiled_input.canonical_input_identity.provider_input_through_sequence
+        == 3
+    )
     events = repository.events_after(
         session_id=session_id,
         after_sequence=0,
@@ -391,8 +579,9 @@ def test_stage2_no_attempt_result_is_committed_before_any_physical_invoke(
         repository=repository,
         writer_lease=lease,
         model=model,
-        tools=tools,
+        tools=StructuredToolPort(tools),
         live_bus=LiveAgentEventBus(),
+        context_source_collector=StaticContextSourceCollector(),
     )
     asyncio.run(runner.run_turn("do not dispatch"))
     assert tools.invocations == []
@@ -427,8 +616,9 @@ def test_stage2_lost_assistant_commit_ack_exact_confirms_single_winner(
         repository=repository,
         writer_lease=lease,
         model=_ScriptedModel([_text_stream("one winner")]),
-        tools=_AssertingTool(provider, session_id),
+        tools=StructuredToolPort(_AssertingTool(provider, session_id)),
         live_bus=LiveAgentEventBus(),
+        context_source_collector=StaticContextSourceCollector(),
     )
     accepted = asyncio.run(runner.run_turn("confirm the winner"))
     assert accepted is not None
@@ -465,8 +655,9 @@ def test_stage2_lost_tool_request_ack_confirms_before_single_dispatch(
         repository=repository,
         writer_lease=lease,
         model=_ScriptedModel([_tool_stream(), _text_stream("done", block="text:2")]),
-        tools=tools,
+        tools=StructuredToolPort(tools),
         live_bus=LiveAgentEventBus(),
+        context_source_collector=StaticContextSourceCollector(),
     )
     asyncio.run(runner.run_turn("dispatch exactly once"))
     assert len(tools.invocations) == 1
@@ -533,8 +724,9 @@ def test_stage2_subagent_runner_produces_durable_message_child(
         repository=repository,
         writer_lease=lease,
         model=_ScriptedModel([_text_stream("child answer")]),
-        tools=_AssertingTool(provider, session_id),
+        tools=StructuredToolPort(_AssertingTool(provider, session_id)),
         live_bus=LiveAgentEventBus(),
+        context_source_collector=StaticContextSourceCollector(),
     )
     result = asyncio.run(
         runner.run_subagent_turn(task_id=task_id, objective="produce one message")
@@ -590,8 +782,9 @@ def test_stage2_confirmation_without_controller_keeps_policy_and_result_closed(
         repository=repository,
         writer_lease=lease,
         model=_ScriptedModel([_tool_stream(), _text_stream("done", block="text:2")]),
-        tools=tools,
+        tools=StructuredToolPort(tools),
         live_bus=LiveAgentEventBus(),
+        context_source_collector=StaticContextSourceCollector(),
     )
     asyncio.run(runner.run_turn("ask before dispatch"))
     assert tools.invocations == []
@@ -642,8 +835,9 @@ def test_stage2_large_assistant_content_uses_immutable_blob_reference(
         repository=repository,
         writer_lease=lease,
         model=_ScriptedModel([_text_stream(text)]),
-        tools=_AssertingTool(provider, session_id),
+        tools=StructuredToolPort(_AssertingTool(provider, session_id)),
         live_bus=LiveAgentEventBus(),
+        context_source_collector=StaticContextSourceCollector(),
     )
     asyncio.run(runner.run_turn("large answer"))
     with provider.connection(
@@ -681,8 +875,9 @@ def test_stage2_cancellation_does_not_turn_a_live_tool_into_system_error(
         repository=repository,
         writer_lease=lease,
         model=_ScriptedModel([_tool_stream()]),
-        tools=tools,
+        tools=StructuredToolPort(tools),
         live_bus=LiveAgentEventBus(),
+        context_source_collector=StaticContextSourceCollector(),
     )
 
     async def exercise() -> None:
@@ -730,17 +925,18 @@ def test_round1_provider_rematerialization_uses_preview_and_scoped_artifact(
         repository=repository,
         writer_lease=lease,
         model=model,
-        tools=_LargeTool(provider, session_id),
+        tools=StructuredToolPort(_LargeTool(provider, session_id)),
         live_bus=LiveAgentEventBus(),
+        context_source_collector=StaticContextSourceCollector(),
     )
     asyncio.run(runner.run_turn("return a large result"))
-    tool_items = [
+    tool_messages = [
         item
-        for item in model.requests[1].provider_input.items
-        if item.item_kind.value == "TOOL_RESULT"
+        for item in model.requests[1].compiled_input.messages
+        if item.role is MessageRole.TOOL_RESULT
     ]
-    assert len(tool_items) == 1
-    preview = tool_items[0].text
+    assert len(tool_messages) == 1
+    preview = tool_messages[0].content[0]
     assert len(preview.encode("utf-8")) <= 65_536
     assert "OUTPUT TRUNCATED / PREVIEW" in preview
     assert "Use artifact_read" in preview

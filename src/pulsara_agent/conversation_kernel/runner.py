@@ -7,7 +7,7 @@ coroutine, interaction, terminal process, or subagent execution after a crash.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field as dataclass_field
 from datetime import datetime, timezone
 from enum import StrEnum
 from hashlib import sha256
@@ -28,9 +28,13 @@ from pulsara_agent.conversation_kernel.blob import (
     CanonicalContentPublisher,
     PostgresCanonicalBlobStore,
 )
-from pulsara_agent.conversation_kernel.capability import (
-    KernelCapabilityComposer,
-    KernelCapabilityProjection,
+from pulsara_agent.conversation_kernel.context_sources import (
+    ContextSourceCollectorPort,
+)
+from pulsara_agent.conversation_kernel.direct_model import (
+    KernelModelExecutionRequest,
+    KernelModelPreparationRequest,
+    PreparedKernelModelCall,
 )
 from pulsara_agent.conversation_kernel.contracts import CanonicalContent, WriterLease
 from pulsara_agent.conversation_kernel.live import (
@@ -62,15 +66,12 @@ from pulsara_agent.conversation_kernel.repository import (
     AssistantTextBlock,
     AssistantToolCallBlock,
     ConversationKernelRepository,
-    PreparedProviderInputCut,
     PreparedToolResultAcceptance,
     build_prepared_tool_result_acceptance,
 )
 from pulsara_agent.conversation_kernel.reader import (
     CanonicalProviderContinuityError,
     CanonicalProviderInputReader,
-    ProviderInputItemKind,
-    RematerializedProviderInput,
 )
 from pulsara_agent.conversation_kernel.safe_point import ProviderSafePointCoordinator
 from pulsara_agent.ports.terminal_observation import PreparedInstallationTarget
@@ -78,23 +79,39 @@ from pulsara_agent.terminal_process.monitor import TerminalMonitorCoordinator
 from pulsara_agent.conversation_kernel.vocabulary import LiveEventType
 from pulsara_agent.ports.live_agent_event import ProviderStreamPayload
 from pulsara_agent.ports.tool_execution import ToolOutputArtifactCandidate
-
-
-@dataclass(frozen=True, slots=True)
-class KernelModelRequest:
-    session_id: str
-    turn_id: str
-    cut: PreparedProviderInputCut
-    provider_input: RematerializedProviderInput
-    model_call_index: int
-    system_prompt: str | None
-    maximum_input_tokens: int
-    maximum_output_tokens: int
+from pulsara_agent.model_input.compiler import StructuredModelInputCompiler
+from pulsara_agent.model_input.diagnostics import (
+    project_model_input_compile_observation,
+)
+from pulsara_agent.model_input.contracts import (
+    CapabilityActivationSubjectKind,
+    CanonicalInputOriginKind,
+    CanonicalModelInputSnapshot,
+    FrozenCompiledModelInput,
+    ModelInputCompileFailureKind,
+    ModelInputScopeKind,
+    StructuredModelInputCompileError,
+    StructuredModelInputCompileRequest,
+)
+from pulsara_agent.primitives.model_call import ModelCallPurpose
+from pulsara_agent.primitives.context import (
+    FrozenJsonObjectFact,
+    canonical_json_bytes,
+    thaw_json,
+)
+from pulsara_agent.conversation_kernel.tool_surface import (
+    PreparedKernelToolSurface,
+    ProcessLocalToolSurfaceBorrow,
+)
 
 
 class KernelModelPort(Protocol):
+    def prepare_call(
+        self, request: KernelModelPreparationRequest
+    ) -> PreparedKernelModelCall: ...
+
     def stream(
-        self, request: KernelModelRequest
+        self, request: KernelModelExecutionRequest
     ) -> AsyncIterator[ProviderStreamPayload]: ...
 
 
@@ -129,6 +146,11 @@ class KernelToolInvocationContext:
     scope_subagent_task_id: str | None
     host_owner_epoch: int
     authorization_reference: str
+    tool_surface_fingerprint: str
+    executor_binding_fingerprint: str
+    surface_borrow: ProcessLocalToolSurfaceBorrow = dataclass_field(
+        repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         if not all(
@@ -141,6 +163,8 @@ class KernelToolInvocationContext:
                 self.attempt_id,
                 self.result_entry_id,
                 self.authorization_reference,
+                self.tool_surface_fingerprint,
+                self.executor_binding_fingerprint,
             )
         ):
             raise ValueError("kernel tool invocation context is incomplete")
@@ -150,6 +174,12 @@ class KernelToolInvocationContext:
             self.scope_subagent_task_id is None
         ):
             raise ValueError("kernel tool invocation scope identity is invalid")
+        access = self.surface_borrow.prepared.access
+        if (
+            access.conversation_scope_kind.value != self.conversation_scope_kind
+            or access.scope_subagent_task_id != self.scope_subagent_task_id
+        ):
+            raise ValueError("kernel tool invocation scope access does not exact-join")
 
 
 @dataclass(frozen=True, slots=True)
@@ -323,6 +353,17 @@ class KernelToolAuthorization:
 
 
 class KernelToolPort(Protocol):
+    def snapshot_tool_surface(
+        self,
+        *,
+        conversation_scope_kind: ModelInputScopeKind,
+        scope_subagent_task_id: str | None,
+    ) -> PreparedKernelToolSurface: ...
+
+    def borrow_tool_surface(
+        self, prepared: PreparedKernelToolSurface
+    ) -> ProcessLocalToolSurfaceBorrow: ...
+
     async def authorize(
         self,
         *,
@@ -331,6 +372,7 @@ class KernelToolPort(Protocol):
         tool_call_id: str,
         turn_id: str,
         assistant_entry_id: str,
+        surface_borrow: ProcessLocalToolSurfaceBorrow,
     ) -> KernelToolAuthorization: ...
 
     async def request_confirmation(
@@ -384,7 +426,8 @@ class ConversationKernelRunner:
         safe_point: ProviderSafePointCoordinator | None = None,
         content_publisher: CanonicalContentPublisher | None = None,
         io_owner: KernelSessionIO | None = None,
-        capability_composer: KernelCapabilityComposer | None = None,
+        context_source_collector: ContextSourceCollectorPort,
+        compiler: StructuredModelInputCompiler | None = None,
         extensions: KernelExtensionHost | None = None,
         steer_consumer: Callable[[str, float], Awaitable[int]] | None = None,
         workspace_id: str | None = None,
@@ -426,7 +469,8 @@ class ConversationKernelRunner:
         )
         self._workspace_id = workspace_id
         self._io = io_owner or KernelSessionIO()
-        self._capability_composer = capability_composer
+        self._context_source_collector = context_source_collector
+        self._compiler = compiler or StructuredModelInputCompiler()
         self._extensions = extensions
         self._steer_consumer = steer_consumer
         self._maximum_model_calls_per_turn = maximum_model_calls_per_turn
@@ -526,6 +570,7 @@ class ConversationKernelRunner:
         deadline = deadline_monotonic or (monotonic() + self._operation_timeout_seconds)
         model_call_count = 0
         tool_call_count = 0
+        active_surface_borrow: ProcessLocalToolSurfaceBorrow | None = None
         try:
             unsettled_process_local_effect: ProcessLocalEffectSettlementToken | None = (
                 None
@@ -540,34 +585,115 @@ class ConversationKernelRunner:
                     deadline_monotonic=deadline,
                 )
                 try:
-                    provider_input = await self._io.run(
-                        self._input_reader.rematerialize,
-                        prepared.cut,
-                        deadline_monotonic=deadline,
-                    )
-                    capability_projection = (
-                        await self._io.run(
-                            _compose_capability_projection,
-                            self._capability_composer,
-                            _latest_user_input(provider_input),
+                    try:
+                        canonical_input = await self._io.run(
+                            self._input_reader.read_frozen_snapshot,
+                            prepared.cut,
                             deadline_monotonic=deadline,
                         )
-                        if self._capability_composer is not None
-                        else None
+                    except TimeoutError as exc:
+                        raise StructuredModelInputCompileError(
+                            ModelInputCompileFailureKind.DEADLINE_EXPIRED
+                        ) from exc
+                    identity = canonical_input.identity
+                    try:
+                        tool_surface = self._tools.snapshot_tool_surface(
+                            conversation_scope_kind=identity.conversation_scope_kind,
+                            scope_subagent_task_id=identity.scope_subagent_task_id,
+                        )
+                    except Exception as exc:
+                        raise StructuredModelInputCompileError(
+                            ModelInputCompileFailureKind.TOOL_SURFACE_INVALID
+                        ) from exc
+                    try:
+                        prepared_call = self._model.prepare_call(
+                            KernelModelPreparationRequest(
+                                session_id=self._writer_lease.guard.session_id,
+                                turn_id=turn_id,
+                                model_call_index=model_call_count,
+                                purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
+                                maximum_input_tokens=(
+                                    self._maximum_input_tokens_per_call
+                                ),
+                                maximum_output_tokens=(
+                                    self._maximum_output_tokens_per_call
+                                ),
+                                tool_surface=tool_surface,
+                            )
+                        )
+                    except Exception as exc:
+                        raise StructuredModelInputCompileError(
+                            ModelInputCompileFailureKind.MODEL_TARGET_PREPARATION_FAILED
+                        ) from exc
+                    activation_subject, activation_text = _activation_subject(
+                        canonical_input
                     )
-                    request = KernelModelRequest(
+                    try:
+                        sources = await self._io.run(
+                            self._context_source_collector.collect,
+                            activation_subject=activation_subject,
+                            activation_text=activation_text,
+                            tool_surface=tool_surface.model_surface,
+                            deadline_monotonic=deadline,
+                        )
+                    except StructuredModelInputCompileError:
+                        raise
+                    except TimeoutError as exc:
+                        raise StructuredModelInputCompileError(
+                            ModelInputCompileFailureKind.DEADLINE_EXPIRED
+                        ) from exc
+                    except Exception as exc:
+                        raise StructuredModelInputCompileError(
+                            ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
+                        ) from exc
+                    if (
+                        sources.registry_fingerprint
+                        != self._context_source_collector.registry_fingerprint
+                    ):
+                        raise StructuredModelInputCompileError(
+                            ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
+                        )
+                    compile_request = StructuredModelInputCompileRequest(
+                        context_id=f"model-context:{uuid4().hex}",
+                        model_call_index=model_call_count,
+                        canonical_input=canonical_input,
+                        compile_binding=prepared_call.compile_binding,
+                        sources=sources,
+                    )
+                    try:
+                        compiled_input = await self._io.run(
+                            _compile_structured_input,
+                            self._compiler,
+                            compile_request,
+                            deadline_monotonic=deadline,
+                        )
+                    except StructuredModelInputCompileError:
+                        raise
+                    except TimeoutError as exc:
+                        raise StructuredModelInputCompileError(
+                            ModelInputCompileFailureKind.DEADLINE_EXPIRED
+                        ) from exc
+                    self._offer_compile_observation(
+                        turn_id=turn_id,
+                        model_call_index=model_call_count,
+                        compiled=compiled_input,
+                    )
+                    try:
+                        active_surface_borrow = self._tools.borrow_tool_surface(
+                            tool_surface
+                        )
+                    except Exception as exc:
+                        raise StructuredModelInputCompileError(
+                            ModelInputCompileFailureKind.TOOL_SURFACE_INVALID
+                        ) from exc
+                    request = KernelModelExecutionRequest(
                         session_id=self._writer_lease.guard.session_id,
                         turn_id=turn_id,
-                        cut=prepared.cut,
-                        provider_input=provider_input,
                         model_call_index=model_call_count,
-                        system_prompt=(
-                            None
-                            if capability_projection is None
-                            else capability_projection.system_prompt
-                        ),
-                        maximum_input_tokens=self._maximum_input_tokens_per_call,
-                        maximum_output_tokens=self._maximum_output_tokens_per_call,
+                        prepared_call=prepared_call,
+                        compiled_input=compiled_input,
+                        cut=prepared.cut,
+                        surface_borrow=active_surface_borrow,
                     )
                     prepared.begin_model_operation()
                     entry_id = _id("entry")
@@ -601,7 +727,7 @@ class ConversationKernelRunner:
                         accepted = await self._io.run(
                             self._repository.commit_assistant_message,
                             self._writer_lease.guard,
-                            cut=prepared.cut,
+                            cut=request.cut,
                             entry_id=entry_id,
                             parent_content=parent_content,
                             blocks=canonical_blocks,
@@ -614,7 +740,7 @@ class ConversationKernelRunner:
                         winner = await self._io.run(
                             self._repository.confirm_assistant_message_winner,
                             self._writer_lease.guard,
-                            cut=prepared.cut,
+                            cut=request.cut,
                             entry_id=entry_id,
                             parent_content=parent_content,
                             blocks=canonical_blocks,
@@ -632,8 +758,8 @@ class ConversationKernelRunner:
                         turn_id=turn_id,
                         draft_identity=entry_id,
                         committed_entry_id=accepted.entry_id,
-                        scope_kind=provider_input.conversation_scope_kind,
-                        scope_subagent_task_id=provider_input.scope_subagent_task_id,
+                        scope_kind=identity.conversation_scope_kind.value,
+                        scope_subagent_task_id=identity.scope_subagent_task_id,
                         channel_kind=LiveChannelKind.MODEL_OUTPUT,
                         generation_id=f"model-output:{entry_id}",
                         proposed_entry_id=entry_id,
@@ -641,6 +767,8 @@ class ConversationKernelRunner:
                 finally:
                     prepared.close()
                 if not calls and accepted.turn_completed:
+                    active_surface_borrow.close()
+                    active_surface_borrow = None
                     return KernelRunResult(
                         turn_id=turn_id,
                         final_entry_id=accepted.entry_id,
@@ -654,17 +782,29 @@ class ConversationKernelRunner:
                     # the old cut, while the atomic commit kept the turn open.
                     # The next loop iteration consumes the steer before a new
                     # provider dispatch.
+                    active_surface_borrow.close()
+                    active_surface_borrow = None
                     continue
                 for call in calls:
                     tool_call_count += 1
+                    invocation_arguments = thaw_json(call.arguments)
+                    if not isinstance(invocation_arguments, dict):
+                        raise RuntimeError(
+                            "canonical tool-call arguments did not thaw as an object"
+                        )
                     result_entry_id = _id("entry")
                     result_id = _id("tool-result")
+                    if active_surface_borrow is None:
+                        raise RuntimeError(
+                            "model response lost its tool surface borrow"
+                        )
                     authorization = await self._tools.authorize(
                         tool_name=call.tool_name,
-                        arguments=call.arguments,
+                        arguments=invocation_arguments,
                         tool_call_id=call.tool_call_id,
                         turn_id=turn_id,
                         assistant_entry_id=accepted.entry_id,
+                        surface_borrow=active_surface_borrow,
                     )
                     machine_policy_kind = authorization.kind
                     capability_decision_id = _stable_id(
@@ -697,9 +837,23 @@ class ConversationKernelRunner:
                             tool_call_id=call.tool_call_id,
                             turn_id=turn_id,
                             assistant_entry_id=accepted.entry_id,
-                    )
+                        )
                     attempt_id: str | None = None
                     live_sink: _ToolResultLiveSink | None = None
+                    binding_fingerprint: str | None = None
+                    if authorization.kind is KernelToolAuthorizationKind.ALLOW:
+                        try:
+                            binding_fingerprint = (
+                                active_surface_borrow.binding_fingerprint(
+                                    call.tool_name
+                                )
+                            )
+                        except RuntimeError:
+                            authorization = KernelToolAuthorization(
+                                KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
+                                "tool-surface:revoked",
+                                f"tool unavailable: {call.tool_name}",
+                            )
                     if authorization.kind is not KernelToolAuthorizationKind.ALLOW:
                         if authorization.accepted_result_entry_id is not None:
                             # Human DENY atomically committed the decision and
@@ -740,12 +894,22 @@ class ConversationKernelRunner:
                             )
                             continue
                     else:
+                        assert binding_fingerprint is not None
                         attempt_id = authorization.accepted_attempt_id or _id(
                             "tool-attempt"
                         )
                         # The adapter is not reachable until both the complete
                         # tool-request message and this attempt transaction return.
                         if authorization.accepted_attempt_id is None:
+                            if (
+                                active_surface_borrow.binding_fingerprint(
+                                    call.tool_name
+                                )
+                                != binding_fingerprint
+                            ):
+                                raise RuntimeError(
+                                    "tool binding drifted before attempt acceptance"
+                                )
                             await self._io.run(
                                 self._repository.accept_tool_capability_decision,
                                 self._writer_lease.guard,
@@ -769,8 +933,8 @@ class ConversationKernelRunner:
                             "tool-result-block", result_entry_id, call.tool_call_id
                         )
                         live_attribution = {
-                            "scope_kind": provider_input.conversation_scope_kind,
-                            "scope_subagent_task_id": provider_input.scope_subagent_task_id,
+                            "scope_kind": identity.conversation_scope_kind.value,
+                            "scope_subagent_task_id": identity.scope_subagent_task_id,
                             "channel_kind": LiveChannelKind.TOOL_RESULT,
                             "channel_tool_call_id": call.tool_call_id,
                             "channel_attempt_id": attempt_id,
@@ -794,7 +958,7 @@ class ConversationKernelRunner:
                         )
                         terminal_streaming = call.tool_name == "terminal" or (
                             call.tool_name == "terminal_process"
-                            and call.arguments.get("action") == "wait"
+                            and invocation_arguments.get("action") == "wait"
                         )
                         live_sink = (
                             _ToolResultLiveSink(
@@ -818,20 +982,23 @@ class ConversationKernelRunner:
                             attempt_id=attempt_id,
                             result_entry_id=result_entry_id,
                             conversation_scope_kind=(
-                                provider_input.conversation_scope_kind
+                                identity.conversation_scope_kind.value
                             ),
-                            scope_subagent_task_id=(
-                                provider_input.scope_subagent_task_id
-                            ),
+                            scope_subagent_task_id=identity.scope_subagent_task_id,
                             host_owner_epoch=(
                                 self._writer_lease.guard.writer_generation
                             ),
                             authorization_reference=authorization.reference,
+                            tool_surface_fingerprint=(
+                                tool_surface.model_surface.surface_fingerprint
+                            ),
+                            executor_binding_fingerprint=binding_fingerprint,
+                            surface_borrow=active_surface_borrow,
                         )
                         try:
                             result = await self._tools.invoke(
                                 tool_name=call.tool_name,
-                                arguments=call.arguments,
+                                arguments=invocation_arguments,
                                 tool_call_id=call.tool_call_id,
                                 attempt_id=attempt_id,
                                 turn_id=turn_id,
@@ -892,9 +1059,7 @@ class ConversationKernelRunner:
                         )
                     )
                     if attempt_id is not None:
-                        if result_text and (
-                            live_sink is None or not live_sink.emitted
-                        ):
+                        if result_text and (live_sink is None or not live_sink.emitted):
                             self._live_bus.offer_nowait(
                                 event_type=LiveEventType.TOOL_RESULT_DELTA,
                                 session_id=request.session_id,
@@ -987,8 +1152,13 @@ class ConversationKernelRunner:
                             committed_entry_id=result_acceptance.entry_id,
                             **live_attribution,
                         )
+                active_surface_borrow.close()
+                active_surface_borrow = None
             raise RuntimeError("model-call limit exhausted")
         except BaseException as error:
+            if active_surface_borrow is not None:
+                active_surface_borrow.close()
+                active_surface_borrow = None
             if unsettled_process_local_effect is not None:
                 try:
                     await asyncio.shield(
@@ -1000,8 +1170,23 @@ class ConversationKernelRunner:
                 except BaseException:
                     pass
             if self._extensions is not None:
+                if isinstance(error, StructuredModelInputCompileError):
+                    self._offer_operational_best_effort(
+                        OperationalHookOffer(
+                            event_type=(
+                                OperationalHookType.MODEL_INPUT_COMPILE_OBSERVED
+                            ),
+                            session_id=self._writer_lease.guard.session_id,
+                            turn_id=turn_id,
+                            public_payload={
+                                "disposition": "FAILED",
+                                "model_call_index": model_call_count,
+                                "failure_kind": error.kind.value,
+                            },
+                        )
+                    )
                 if isinstance(error, CanonicalProviderContinuityError):
-                    self._extensions.offer_operational_nowait(
+                    self._offer_operational_best_effort(
                         OperationalHookOffer(
                             event_type=OperationalHookType.PROVIDER_CONTINUITY_FAILED,
                             session_id=self._writer_lease.guard.session_id,
@@ -1009,7 +1194,7 @@ class ConversationKernelRunner:
                             public_payload={"failure_kind": error.kind.value},
                         )
                     )
-                self._extensions.offer_operational_nowait(
+                self._offer_operational_best_effort(
                     OperationalHookOffer(
                         event_type=OperationalHookType.FOREGROUND_TURN_FAILED,
                         session_id=self._writer_lease.guard.session_id,
@@ -1095,7 +1280,7 @@ class ConversationKernelRunner:
 
     async def _collect_model(
         self,
-        request: KernelModelRequest,
+        request: KernelModelExecutionRequest,
         *,
         proposed_entry_id: str,
     ) -> CompletedAssistantMessage:
@@ -1104,8 +1289,12 @@ class ConversationKernelRunner:
             turn_id=request.turn_id,
             live_bus=self._live_bus,
             proposed_entry_id=proposed_entry_id,
-            conversation_scope_kind=request.provider_input.conversation_scope_kind,
-            scope_subagent_task_id=request.provider_input.scope_subagent_task_id,
+            conversation_scope_kind=(
+                request.compiled_input.canonical_input_identity.conversation_scope_kind.value
+            ),
+            scope_subagent_task_id=(
+                request.compiled_input.canonical_input_identity.scope_subagent_task_id
+            ),
         )
         try:
             async for item in self._model.stream(request):
@@ -1118,13 +1307,52 @@ class ConversationKernelRunner:
                 turn_id=request.turn_id,
                 draft_identity=proposed_entry_id,
                 reason_code=f"MODEL_STREAM_{type(exc).__name__.upper()}",
-                scope_kind=request.provider_input.conversation_scope_kind,
-                scope_subagent_task_id=request.provider_input.scope_subagent_task_id,
+                scope_kind=(
+                    request.compiled_input.canonical_input_identity.conversation_scope_kind.value
+                ),
+                scope_subagent_task_id=(
+                    request.compiled_input.canonical_input_identity.scope_subagent_task_id
+                ),
                 channel_kind=LiveChannelKind.MODEL_OUTPUT,
                 generation_id=f"model-output:{proposed_entry_id}",
                 proposed_entry_id=proposed_entry_id,
             )
             raise
+
+    def _offer_compile_observation(
+        self,
+        *,
+        turn_id: str,
+        model_call_index: int,
+        compiled: FrozenCompiledModelInput,
+    ) -> None:
+        if self._extensions is None:
+            return
+        try:
+            projection = project_model_input_compile_observation(
+                model_call_index=model_call_index,
+                compiled=compiled,
+            )
+            self._extensions.offer_operational_nowait(
+                OperationalHookOffer(
+                    event_type=OperationalHookType.MODEL_INPUT_COMPILE_OBSERVED,
+                    session_id=self._writer_lease.guard.session_id,
+                    turn_id=turn_id,
+                    public_payload=projection.public_payload(),
+                )
+            )
+        except Exception:
+            # Operational observation is intentionally best-effort.  Its owner
+            # cannot veto a compiled provider call or canonical transition.
+            return
+
+    def _offer_operational_best_effort(self, offer: OperationalHookOffer) -> None:
+        if self._extensions is None:
+            return
+        try:
+            self._extensions.offer_operational_nowait(offer)
+        except Exception:
+            return
 
     async def _canonical_blocks(
         self,
@@ -1154,7 +1382,7 @@ class ConversationKernelRunner:
                         ),
                     )
                 )
-            else:
+            elif isinstance(block, CompletedToolCallBlock):
                 result.append(
                     AssistantToolCallBlock(
                         block_id=block.block_id,
@@ -1272,37 +1500,46 @@ def _stable_id(prefix: str, *parts: str) -> str:
     return f"{prefix}:{sha256(chr(0).join(parts).encode()).hexdigest()}"
 
 
-def _json_digest(value: Mapping[str, object]) -> str:
-    from hashlib import sha256
-
-    encoded = json.dumps(
-        dict(value), ensure_ascii=False, sort_keys=True, separators=(",", ":")
-    ).encode("utf-8")
-    return "sha256:" + sha256(encoded).hexdigest()
+def _json_digest(value: FrozenJsonObjectFact) -> str:
+    return "sha256:" + sha256(canonical_json_bytes(value)).hexdigest()
 
 
-def _latest_user_input(provider_input: RematerializedProviderInput) -> str:
-    for item in reversed(provider_input.items):
-        if item.item_kind is ProviderInputItemKind.USER:
-            return item.text
-    return ""
+def _activation_subject(
+    canonical_input: CanonicalModelInputSnapshot,
+) -> tuple[CapabilityActivationSubjectKind, str]:
+    if (
+        canonical_input.identity.conversation_scope_kind
+        is ModelInputScopeKind.SUBAGENT_TASK
+    ):
+        return CapabilityActivationSubjectKind.SUBAGENT_OBJECTIVE, ""
+    for item in reversed(canonical_input.items):
+        if (
+            item.item_kind.value == "USER"
+            and item.source_turn_id == canonical_input.identity.turn_id
+            and item.input_origin
+            in {
+                CanonicalInputOriginKind.HUMAN_MESSAGE,
+                CanonicalInputOriginKind.HUMAN_STEER,
+            }
+        ):
+            return CapabilityActivationSubjectKind.ROOT_HUMAN_PROMPT, item.text
+    return CapabilityActivationSubjectKind.ROOT_HUMAN_PROMPT, ""
 
 
-def _compose_capability_projection(
-    composer: KernelCapabilityComposer,
-    user_input: str,
+def _compile_structured_input(
+    compiler: StructuredModelInputCompiler,
+    request: StructuredModelInputCompileRequest,
     *,
     deadline_monotonic: float,
-) -> KernelCapabilityProjection:
+) -> FrozenCompiledModelInput:
     if monotonic() >= deadline_monotonic:
-        raise TimeoutError("capability composition deadline expired")
-    return composer.compose(user_input=user_input)
+        raise TimeoutError("structured model input deadline expired")
+    return compiler.compile(request)
 
 
 __all__ = [
     "ConversationKernelRunner",
     "KernelModelPort",
-    "KernelModelRequest",
     "KernelRunResult",
     "KernelToolPort",
     "KernelToolAuthorization",

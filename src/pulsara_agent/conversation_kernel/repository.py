@@ -46,6 +46,7 @@ from pulsara_agent.conversation_kernel.job_catalog import (
     job_handler_contract,
 )
 from pulsara_agent.conversation_kernel.limits import STAGE2_LIMITS
+from pulsara_agent.model_input.contracts import PreparedProviderInputCut
 from pulsara_agent.ports.artifact import (
     ToolOutputArtifactDisposition,
     ToolOutputArtifactUnavailabilityReason,
@@ -61,6 +62,11 @@ from pulsara_agent.ports.terminal_observation import (
     ExistingTurnInstallation,
     NewTurnInstallation,
     TerminalObservationInstallationAttempt,
+)
+from pulsara_agent.primitives.context import (
+    FrozenJsonObjectFact,
+    freeze_json,
+    thaw_json,
 )
 from pulsara_agent.conversation_kernel.vocabulary import (
     DESCRIPTOR_BY_TYPE,
@@ -115,18 +121,14 @@ class AssistantToolCallBlock:
     block_id: str
     tool_call_id: str
     tool_name: str
-    arguments: Mapping[str, object]
+    arguments: FrozenJsonObjectFact
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.arguments, FrozenJsonObjectFact):
+            raise TypeError("assistant tool-call arguments must be recursively frozen")
 
 
 AssistantBlock = AssistantTextBlock | AssistantDataBlock | AssistantToolCallBlock
-
-
-@dataclass(frozen=True, slots=True)
-class PreparedProviderInputCut:
-    session_id: str
-    turn_id: str
-    context_binding_revision_id: str
-    provider_input_through_sequence: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -1081,9 +1083,7 @@ class ConversationKernelRepository:
                 raise ConversationKernelConflict(
                     "terminal observation workspace conflicts"
                 )
-            entry_sequence = self._allocate_entry_sequence(
-                connection, guard.session_id
-            )
+            entry_sequence = self._allocate_entry_sequence(connection, guard.session_id)
             if isinstance(target, ExistingTurnInstallation):
                 turn = self._require_provider_safe_turn_in_transaction(
                     connection,
@@ -1231,8 +1231,7 @@ class ConversationKernelRepository:
             if (
                 str(entry["workspace_id"]) != candidate.workspace_id
                 or str(entry["turn_id"]) != turn_id
-                or str(entry["entry_kind"])
-                != EntryKind.TERMINAL_OBSERVATION.value
+                or str(entry["entry_kind"]) != EntryKind.TERMINAL_OBSERVATION.value
                 or str(entry["conversation_scope_kind"])
                 != ConversationScopeKind.ROOT.value
                 or entry["scope_subagent_task_id"] is not None
@@ -1257,9 +1256,7 @@ class ConversationKernelRepository:
                 (guard.session_id, turn_id),
             ).fetchone()
             if turn is None:
-                raise ConversationKernelConflict(
-                    "terminal observation turn is absent"
-                )
+                raise ConversationKernelConflict("terminal observation turn is absent")
             if isinstance(target, NewTurnInstallation):
                 revision = connection.execute(
                     """
@@ -1708,12 +1705,17 @@ class ConversationKernelRepository:
             for block_row in block_rows:
                 kind = str(block_row["block_kind"])
                 if kind == AssistantBlockKind.TOOL_CALL.value:
+                    frozen_arguments = freeze_json(dict(block_row["tool_arguments"]))
+                    if not isinstance(frozen_arguments, FrozenJsonObjectFact):
+                        raise ConversationKernelConflict(
+                            "assistant winner tool arguments are not an object"
+                        )
                     actual_blocks.append(
                         AssistantToolCallBlock(
                             block_id=str(block_row["id"]),
                             tool_call_id=str(block_row["tool_call_id"]),
                             tool_name=str(block_row["tool_name"]),
-                            arguments=dict(block_row["tool_arguments"]),
+                            arguments=frozen_arguments,
                         )
                     )
                 elif kind == AssistantBlockKind.TEXT.value:
@@ -7053,6 +7055,9 @@ class ConversationKernelRepository:
         block: AssistantBlock,
     ) -> None:
         if isinstance(block, AssistantToolCallBlock):
+            tool_arguments = thaw_json(block.arguments)
+            if not isinstance(tool_arguments, dict):
+                raise TypeError("assistant tool-call arguments must thaw as an object")
             connection.execute(
                 """
                 INSERT INTO pulsara_v3.assistant_message_blocks (
@@ -7068,7 +7073,7 @@ class ConversationKernelRepository:
                     ordinal,
                     block.tool_call_id,
                     block.tool_name,
-                    Jsonb(dict(block.arguments)),
+                    Jsonb(tool_arguments),
                 ),
             )
             return
@@ -7259,7 +7264,6 @@ __all__ = [
     "MemoryVectorSource",
     "NoToolResultSideBranch",
     "PreparedMemoryProposalSideBranch",
-    "PreparedProviderInputCut",
     "PreparedToolResultAcceptance",
     "StaleHostWriter",
     "StaleJobClaim",

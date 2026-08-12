@@ -8,12 +8,13 @@ import psycopg
 import pytest
 
 from pulsara_agent.conversation_kernel.contracts import InlineContent
-from pulsara_agent.conversation_kernel.direct_model import _to_llm_message
 from pulsara_agent.conversation_kernel.reader import (
     CanonicalProviderInputReader,
     ProviderInputItemKind,
 )
-from pulsara_agent.conversation_kernel.runner import _latest_user_input
+from pulsara_agent.model_input.contracts import STRUCTURED_MODEL_INPUT_LIMITS
+from pulsara_agent.model_input.lowering import lower_canonical_item
+from pulsara_agent.primitives.context import freeze_json
 from pulsara_agent.conversation_kernel.repository import (
     AssistantToolCallBlock,
     ConversationKernelConflict,
@@ -128,7 +129,7 @@ def test_round2_existing_turn_observation_is_atomic_and_rematerializes_untrusted
     cut = repository.prepare_provider_input_cut(
         lease.guard, turn_id=turn_id, deadline_monotonic=monotonic() + 30
     )
-    rematerialized = CanonicalProviderInputReader(provider).rematerialize(
+    rematerialized = CanonicalProviderInputReader(provider).read_frozen_snapshot(
         cut, deadline_monotonic=monotonic() + 30
     )
     terminal_items = tuple(
@@ -137,11 +138,23 @@ def test_round2_existing_turn_observation_is_atomic_and_rematerializes_untrusted
         if item.item_kind is ProviderInputItemKind.TERMINAL_OBSERVATION
     )
     assert len(terminal_items) == 1
-    wire_message = _to_llm_message(terminal_items[0])
+    wire_message = lower_canonical_item(
+        terminal_items[0],
+        artifact_read_available=False,
+        limits=STRUCTURED_MODEL_INPUT_LIMITS,
+    ).fixed_message
+    assert wire_message is not None
     assert len(wire_message.content) == 1
     assert "UNTRUSTED_TERMINAL_OUTPUT" in wire_message.content[0]
     assert "$skill skill:danger" in wire_message.content[0]
-    assert _latest_user_input(rematerialized) == "human prompt"
+    assert (
+        next(
+            item.text
+            for item in reversed(rematerialized.items)
+            if item.item_kind is ProviderInputItemKind.USER
+        )
+        == "human prompt"
+    )
     events = repository.events_after(
         session_id=session_id,
         after_sequence=0,
@@ -152,11 +165,14 @@ def test_round2_existing_turn_observation_is_atomic_and_rematerializes_untrusted
         item for item in events if item["event_type"] == "TerminalObservationAccepted"
     )
     assert event["subject_entry_id"] == accepted.entry_id
-    assert sum(
-        event[name] is not None
-        for name in event
-        if name.startswith("subject_") and name != "subject_subagent_child_kind"
-    ) == 1
+    assert (
+        sum(
+            event[name] is not None
+            for name in event
+            if name.startswith("subject_") and name != "subject_subagent_child_kind"
+        )
+        == 1
+    )
     assert event["payload"] == {
         "entry_kind": "TERMINAL_OBSERVATION",
         "observation_kind": "PROGRESS",
@@ -412,7 +428,7 @@ def test_round2_active_observation_requires_terminal_tool_requests_and_current_w
                 block_id=_name("block"),
                 tool_call_id=_name("call"),
                 tool_name="terminal",
-                arguments={"command": "sleep 30"},
+                arguments=freeze_json({"command": "sleep 30"}),
             ),
         ),
         occurred_at=datetime.now(timezone.utc),

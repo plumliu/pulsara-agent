@@ -1,0 +1,196 @@
+{
+  "schema_version": "round3-structured-model-input-compiler-activation.v1",
+  "status": "activated",
+  "generated_at_utc": "2026-08-12T01:33:47Z",
+  "captured_head": "242895dcfef1af1fcdcd1f433b28637c16020720",
+  "working_tree_semantics": "Round 3 was implemented and verified in the current uncommitted worktree. Existing user documentation changes were preserved. This evidence does not claim a later Git checkpoint and no files were staged, committed, or pushed.",
+  "source_documents": {
+    "ROUND_3_STRUCTURED_MODEL_INPUT_COMPILER_IMPLEMENTATION_SPEC.zh.md_at_start": "3e414922b0e909bc451abf4ef55b93a0459e533029430fbca877fad14f6ac3bf",
+    "ROUND_3_STRUCTURED_MODEL_INPUT_COMPILER_IMPLEMENTATION_SPEC.zh.md_after_activation_update": "1a996f8dda8c767043e4c84bf7d414724129dbd3d890d5cf3bb5463922cae6e6",
+    "POST_HARD_CUT_PRODUCT_CAPABILITY_GAP_INDEX.zh.md_at_start": "fc32565440b94b95a90fa2266408c9d0ab914457a955d39c6a710a66d14ed71f",
+    "POST_HARD_CUT_PRODUCT_CAPABILITY_GAP_INDEX.zh.md_after_activation_update": "a71ec0ad8caa5db45ebb26dbb2f8244f3ffe0d3e8d3bd2d72c36827740999156",
+    "PULSARA_DURABILITY_SUBTRACTION_REASSESSMENT.zh.md": "cb3e7b0a9f33e5e4c5b17850d47e1af580a3f23f094f868076351bb17a6a6e80",
+    "ROUND_1_TOOL_OUTPUT_ARTIFACT_IMPLEMENTATION_SPEC.zh.md": "7b34caa305f5a5f9f5f9fda1dd1d1254bbd8d33c6116ca86f8c5bb22cbe4374b",
+    "ROUND_2_TERMINAL_RUNTIME_IMPLEMENTATION_SPEC.zh.md": "0de90b7b926fa53080729b4462946a4715429e9c3530ed49524c5b5f3f4532c4",
+    "historical_product_reference_commit": "5b7ad9f7ffc8565bc572180b2bde0c81ab64473a"
+  },
+  "authority_contract": {
+    "conversation_input_truth_owner": "CanonicalProviderInputReader over one exact canonical cut",
+    "pure_compiler_package": "pulsara_agent.model_input",
+    "transport_adapter": "pulsara_agent.conversation_kernel.direct_model.DirectKernelModelPort",
+    "transport_bearing_prepared_call_location": "conversation_kernel adapter only",
+    "compiler_transport_or_kernel_imports": 0,
+    "durable_compiled_input_authorities": 0,
+    "provider_trial_requests": 0,
+    "tool_surface_binding": "one atomic scope-filtered descriptor/schema/executor snapshot plus one process-local access/borrow exact join, including opaque Host authority identity and current-owner validation at authorize/invoke",
+    "binding_name_replacement_on_drift": false
+  },
+  "source_contract": {
+    "initial_source_kinds": [
+      "BASE_SYSTEM",
+      "RUNTIME_ENVIRONMENT",
+      "RUNTIME_CLOCK",
+      "CAPABILITY_CATALOG",
+      "ACTIVE_SKILL"
+    ],
+    "system_placement": [
+      "BASE_SYSTEM",
+      "RUNTIME_ENVIRONMENT",
+      "CAPABILITY_CATALOG",
+      "ACTIVE_SKILL"
+    ],
+    "placement_and_degradation_priority_are_independent": true,
+    "runtime_environment_and_clock_share_one_temporal_capture": true,
+    "unkeyed_timezone_fallback": "display name and fixed-offset tzinfo are frozen together at Host open",
+    "root_human_prompt_can_activate_skill": true,
+    "subagent_terminal_tool_clock_runtime_can_activate_skill": false,
+    "public_diagnostic_free_text_or_path_fields": 0
+  },
+  "lowering_contract": {
+    "assistant_text_sources": [
+      "ordered TEXT semantic blocks",
+      "ordered DATA semantic blocks"
+    ],
+    "assistant_parent_manifest_model_visible": false,
+    "pure_tool_call_assistant_text": "empty",
+    "canonical_tool_arguments": "FrozenJsonObjectFact",
+    "tool_schemas": "FrozenJsonObjectFact",
+    "current_user_or_history_auto_trim": false,
+    "tool_pairing_or_closure_auto_trim": false,
+    "round1_artifact_ref_projection_supported": true
+  },
+  "physical_bounds": {
+    "maximum_source_candidates": 32,
+    "maximum_variants_per_source": 4,
+    "maximum_single_source_variant_bytes": 1048576,
+    "maximum_aggregate_full_source_bytes": 2097152,
+    "maximum_aggregate_source_variant_bytes": 4194304,
+    "maximum_tool_specs": 64,
+    "maximum_tool_spec_canonical_bytes": 1048576,
+    "maximum_compile_working_set_bytes": 67108864,
+    "maximum_diagnostics": 64,
+    "maximum_public_diagnostic_bytes": 32768,
+    "maximum_tool_result_compact_bytes": 8192,
+    "maximum_tool_result_ref_only_bytes": 2048,
+    "maximum_tool_result_decisions": 4096,
+    "maximum_decision_samples": 64,
+    "bounds_checked_before_provider_open": true,
+    "token_budget_authority": "resolved target estimator",
+    "compiler_and_adapter_estimate_exact_equal": true
+  },
+  "oracles": {
+    "product_relations": 24,
+    "committed_event_types": 27,
+    "live_event_types": 23,
+    "subject_slots": 13,
+    "append_guards": 2,
+    "durable_job_handlers": 4,
+    "new_schema_relations": 0,
+    "new_committed_events": 0,
+    "new_live_events": 0,
+    "new_durable_jobs": 0
+  },
+  "verification": {
+    "round3_targeted": "37_passed_in_1.87s",
+    "round1_round2_stage2_round3_retained": "133_passed_in_11.52s",
+    "pytest_collection": "329_tests_collected_0_errors_in_0.43s",
+    "full_pytest": "329_passed_in_36.49s",
+    "postgres_marker": "81_passed_248_deselected_in_23.23s",
+    "clean_v0_fresh_repeat_deep_verify": "passed_in_postgres_marker_suite",
+    "ruff": "passed",
+    "compileall": "passed_src_tests",
+    "terminal_protocol_generation": "passed",
+    "go_test": "passed_all_packages",
+    "go_vet": "passed",
+    "go_mod_verify": "passed",
+    "uv_lock_check": "passed",
+    "git_diff_check": "passed",
+    "new_skip_or_xfail": 0,
+    "large_catalog_contract_regression": "40-entry production renderer accepted with deterministic COMPACT and REF_ONLY selection",
+    "low_budget_disposition": "5000-token production probe failed closed as TOOL_SCHEMA_EXCEEDS_BUDGET before provider open"
+  },
+  "post_activation_review_closure": {
+    "prepared_provider_input_cut": "provider-neutral immutable fact exact-joined to compiled session, turn, binding revision, and through-sequence before provider open; assistant commit consumes the same request cut",
+    "canonical_input_origin": "closed HUMAN_MESSAGE/HUMAN_STEER/SUBAGENT_OBJECTIVE/SUBAGENT_RESULT/JOB_RESULT provenance derived from existing relational columns; only the two human origins may activate a ROOT skill",
+    "canonical_reader_physical_bounds": "entries, assistant blocks, and tool calls each use LIMIT maximum+1 metadata reads; declared content and physical argument bytes are admitted before payload fetch; every blob/content hydration consumes one monotonic remaining-byte budget",
+    "subagent_surface_attribution": "canonical subagent task identity exact-joins the process-local surface access at execution and invocation boundaries",
+    "opaque_host_surface_authority": "same-shape surfaces from distinct Hosts compare unequal; foreign borrows fail model execution construction and are revalidated by the current tool owner before authorization or physical invocation",
+    "unkeyed_timezone_freeze": "a dynamic tzinfo without an IANA key is converted once to a fixed-offset timezone so its public name and utc_offset_minutes cannot diverge across DST",
+    "new_regressions": 9,
+    "remaining_findings": 0
+  },
+  "real_provider_dogfood": {
+    "status": "passed",
+    "configuration": "one real configured OpenAI-compatible provider; MCP discovery replaced with an empty tuple only inside the dogfood process; user configuration was not modified",
+    "database": "fresh clean-v0 ephemeral database per scenario, force-dropped after verification",
+    "openai_chat_completions": {
+      "status": "success",
+      "scenario": "ROOT human skill activation -> Terminal 90025-character output -> canonical HEAD_TAIL artifact -> scoped artifact_read of middle sentinel -> final assistant",
+      "model_calls": 4,
+      "physical_provider_streams": 4,
+      "tool_calls": 3,
+      "tool_sequence_contains": [
+        "terminal",
+        "artifact_read"
+      ],
+      "artifact_read_middle_sentinel_seen": true,
+      "runtime_environment_seen": true,
+      "degradation_seen": true,
+      "source_modes_seen": [
+        "FULL",
+        "COMPACT",
+        "REF_ONLY",
+        "OMITTED"
+      ],
+      "tool_result_modes_seen": [
+        "FULL",
+        "REF_ONLY"
+      ],
+      "compiler_and_presend_estimates_exact": true,
+      "trial_or_duplicate_provider_stream": false
+    },
+    "openai_responses": {
+      "status": "success",
+      "scenario": "one production ROOT turn through the structured compiler",
+      "model_calls": 1,
+      "physical_provider_streams": 1,
+      "runtime_environment_seen": true,
+      "runtime_clock_seen": true,
+      "compiler_and_presend_estimates_exact": true,
+      "trial_or_duplicate_provider_stream": false
+    },
+    "post_review_exact_cut_smoke": {
+      "openai_responses": "success_1_model_call_1_physical_stream",
+      "openai_chat_completions": "success_1_model_call_1_physical_stream",
+      "fresh_clean_v0_database_per_adapter": true,
+      "remaining_ephemeral_databases": 0,
+      "rerun_after_opaque_host_authority_fix_at_utc": "2026-08-12T01:33:47Z",
+      "rerun_result": "both adapters returned one 2-byte final response through the current exact surface borrow"
+    },
+    "api_key_prompt_private_url_or_large_body_recorded": false
+  },
+  "production_diff": {
+    "lines_added": 4875,
+    "lines_deleted": 489,
+    "net_lines": 4386,
+    "counting_scope": "tracked diff under src and clients plus seven untracked Round 3 production modules"
+  },
+  "permanent_absences": {
+    "universal_event_log_or_execution_replay": true,
+    "context_checkpoint_receipt_repair_graph": true,
+    "durable_compiled_input_or_exact_prompt_audit": true,
+    "second_conversation_reader_or_source_authority": true,
+    "schema_event_job_guard_growth": true,
+    "automatic_context_snapshot_or_model_switch": true
+  },
+  "non_goals": [
+    "long-horizon compaction or context snapshot generation",
+    "Memory source or memory subsystem redesign",
+    "Plan or dynamic permission guidance",
+    "MCP resources, tools, diagnostics, or execution",
+    "cross-turn failure note",
+    "model-visible tool timing or freshness",
+    "provider prompt persistence or exact historical request replay"
+  ],
+  "remaining_blockers": []
+}

@@ -11,6 +11,8 @@ from typing import AsyncIterator
 import pytest
 
 from pulsara_agent.conversation_kernel.host import KernelHostCore
+from pulsara_agent.conversation_kernel.direct_model import DirectKernelModelPort
+from pulsara_agent.llm.input import MessageRole
 from pulsara_agent.ports.live_agent_event import (
     TextDeltaPayload,
     TextEndPayload,
@@ -28,7 +30,9 @@ from tests.support.model_config import test_llm_config
 pytestmark = pytest.mark.postgres
 
 
-def _tool_call(name: str, call_id: str, arguments: dict[str, object]) -> tuple[object, ...]:
+def _tool_call(
+    name: str, call_id: str, arguments: dict[str, object]
+) -> tuple[object, ...]:
     encoded = json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))
     return (
         ToolCallStartPayload(call_id, call_id, name),
@@ -62,6 +66,18 @@ class _TerminalMonitorDogfoodModel:
         self.command = command
         self.requests: list[object] = []
         self.autonomous_seen = asyncio.Event()
+        self._preparer = DirectKernelModelPort(
+            config=test_llm_config(
+                api_key="test",
+                base_url="https://example.invalid/v1",
+                pro_model="test-pro",
+                flash_model="test-flash",
+                api="openai_chat_completions",
+            )
+        )
+
+    def prepare_call(self, request):
+        return self._preparer.prepare_call(request)
 
     async def stream(self, request: object) -> AsyncIterator[object]:
         self.requests.append(request)
@@ -78,10 +94,10 @@ class _TerminalMonitorDogfoodModel:
             )
         elif call_index == 2:
             process_id = None
-            for item in reversed(request.provider_input.items):  # type: ignore[attr-defined]
-                if item.item_kind.value != "TOOL_RESULT":
+            for item in reversed(request.compiled_input.messages):  # type: ignore[attr-defined]
+                if item.role is not MessageRole.TOOL_RESULT or not item.content:
                     continue
-                decoded = json.loads(item.text)
+                decoded = json.loads(item.content[0])
                 candidate = decoded.get("process_id")
                 if isinstance(candidate, str):
                     process_id = candidate
@@ -96,16 +112,16 @@ class _TerminalMonitorDogfoodModel:
             payloads = _text("text:round2-waiting", "MONITOR_REGISTERED_WAITING")
         else:
             terminal_items = [
-                item
-                for item in request.provider_input.items  # type: ignore[attr-defined]
-                if item.item_kind.value == "TERMINAL_OBSERVATION"
+                item.content[0]
+                for item in request.compiled_input.messages  # type: ignore[attr-defined]
+                if item.role is MessageRole.USER
+                and item.content
+                and "[UNTRUSTED_TERMINAL_OUTPUT:" in item.content[0]
             ]
             assert len(terminal_items) == 1
-            assert "R2_COMPLETION_SENTINEL" in terminal_items[0].text
+            assert "R2_COMPLETION_SENTINEL" in terminal_items[0]
             self.autonomous_seen.set()
-            payloads = _text(
-                "text:round2-autonomous", "AUTONOMOUS_COMPLETION_SEEN"
-            )
+            payloads = _text("text:round2-autonomous", "AUTONOMOUS_COMPLETION_SEEN")
         for payload in payloads:
             yield payload
 
@@ -123,9 +139,7 @@ def test_round2_host_yield_monitor_completion_and_autonomous_continuation(
         "time.sleep(1.0); "
         "print('R2_COMPLETION_SENTINEL', flush=True)"
     )
-    command = (
-        f"{shlex.quote(sys.executable)} -u -c {shlex.quote(script)}"
-    )
+    command = f"{shlex.quote(sys.executable)} -u -c {shlex.quote(script)}"
     model = _TerminalMonitorDogfoodModel(command)
     monkeypatch.setattr(kernel_host, "DirectKernelModelPort", lambda **_: model)
     monkeypatch.setattr(kernel_host, "load_mcp_server_configs", lambda **_: ())
@@ -164,8 +178,7 @@ def test_round2_host_yield_monitor_completion_and_autonomous_continuation(
             )
             if any(
                 row.get("entry_kind") == "ASSISTANT_MESSAGE"
-                and row.get("block_inline_content")
-                == b"AUTONOMOUS_COMPLETION_SEEN"
+                and row.get("block_inline_content") == b"AUTONOMOUS_COMPLETION_SEEN"
                 for row in rows
             ):
                 break
@@ -182,10 +195,12 @@ def test_round2_host_yield_monitor_completion_and_autonomous_continuation(
             limit=64,
             deadline_monotonic=monotonic() + 5,
         )
-        assert sum(
-            event["event_type"] == "TerminalObservationAccepted"
-            for event in events
-        ) == 1
+        assert (
+            sum(
+                event["event_type"] == "TerminalObservationAccepted" for event in events
+            )
+            == 1
+        )
         await core.close_session(
             session.host_session_id,
             close_conversation=True,

@@ -317,9 +317,16 @@ def test_stage2_provider_admission_and_blob_gc_are_physical_not_heuristic() -> N
     blob = (KERNEL / "blob.py").read_text(encoding="utf-8")
     host = (KERNEL / "host.py").read_text(encoding="utf-8")
 
+    # Foreground model input is now estimated by the pure structured compiler
+    # and exact-joined to the transport-aware final validator. Durable jobs
+    # retain their direct estimate seam because they do not consume the
+    # conversation compiler.
+    assert "validate_model_context_for_call" in direct
+    assert "validated.estimate != compiled.final_estimate" in direct
+    assert "estimate_model_context_for_call" not in direct
+    assert "estimate_model_context_for_call" in jobs
+    assert "validate_model_context_for_call" in jobs
     for source in (direct, jobs):
-        assert "estimate_model_context_for_call" in source
-        assert "validate_model_context_for_call" in source
         assert "canonical_bytes / 4" not in source
     assert "CanonicalProviderContinuityError" in reader
     assert "delete_orphans" in blob

@@ -6,14 +6,20 @@ import asyncio
 from dataclasses import dataclass
 import json
 from pathlib import Path
-from threading import Lock
+from threading import Condition, Lock, RLock
 from time import monotonic
 from typing import Callable, Mapping, Protocol
+from uuid import uuid4
 
 from jsonschema import ValidationError, validators
 
 from pulsara_agent.capability.builtin_catalog import builtin_tool_catalog_entry
-from pulsara_agent.llm.input import ToolSpec
+from pulsara_agent.model_input.contracts import (
+    FrozenModelToolSurface,
+    FrozenToolSpec,
+    ModelInputScopeKind,
+    model_tool_surface_fingerprint,
+)
 from pulsara_agent.message import ToolResultState
 from pulsara_agent.ports.artifact import ToolArtifactReadPort
 from pulsara_agent.ports.terminal import (
@@ -62,11 +68,17 @@ from pulsara_agent.ports.live_agent_event import (
     live_digest,
 )
 from pulsara_agent.primitives.model_call import sha256_fingerprint
+from pulsara_agent.primitives.context import FrozenJsonObjectFact, freeze_json
 from pulsara_agent.conversation_kernel.vocabulary import LiveEventType
 from pulsara_agent.conversation_kernel.tool_policy import (
     ToolDispatchAuthorizationPolicy,
     ToolDispatchAuthorizationRequest,
     ToolDispatchDecisionKind,
+)
+from pulsara_agent.conversation_kernel.tool_surface import (
+    PreparedKernelToolSurface,
+    ProcessLocalToolSurfaceAccess,
+    ProcessLocalToolSurfaceBorrow,
 )
 
 from .runner import (
@@ -422,6 +434,12 @@ class DirectKernelToolPort:
         self._tools = {tool.name: tool for tool in tools}
         self._authorization_policy = authorization_policy
         self._close_lock = Lock()
+        self._surface_lock = RLock()
+        self._surface_condition = Condition(self._surface_lock)
+        self._surface_authority = object()
+        self._surface_generation = 1
+        self._surface_owner_epoch = 1
+        self._surface_borrows: set[str] = set()
         self._closed = False
         self._physically_closed = False
         self._terminal_physically_closed = False
@@ -434,14 +452,22 @@ class DirectKernelToolPort:
         self._interaction: KernelToolInteractionPort | None = None
 
     def bind_subagent_port(self, port: KernelSubagentToolPort) -> None:
-        if self._subagent is not None:
-            raise RuntimeError("subagent tool port is already bound")
-        self._subagent = port
+        with self._surface_lock:
+            if self._subagent is not None:
+                raise RuntimeError("subagent tool port is already bound")
+            if self._surface_borrows:
+                raise RuntimeError("tool surface cannot change during an active borrow")
+            self._subagent = port
+            self._surface_generation += 1
 
     def bind_memory_port(self, port: KernelMemoryToolPort) -> None:
-        if self._memory is not None:
-            raise RuntimeError("memory tool port is already bound")
-        self._memory = port
+        with self._surface_lock:
+            if self._memory is not None:
+                raise RuntimeError("memory tool port is already bound")
+            if self._surface_borrows:
+                raise RuntimeError("tool surface cannot change during an active borrow")
+            self._memory = port
+            self._surface_generation += 1
 
     def bind_interaction_port(self, port: KernelToolInteractionPort) -> None:
         if self._interaction is not None:
@@ -452,26 +478,7 @@ class DirectKernelToolPort:
     def terminal_monitor_coordinator(self) -> TerminalMonitorCoordinator:
         return self._terminal_monitor
 
-    @property
-    def tool_specs(self) -> tuple[ToolSpec, ...]:
-        bindings = self.executor_bindings
-        return tuple(
-            ToolSpec(
-                name=binding.tool_name,
-                description=builtin_tool_catalog_entry(
-                    binding.tool_name
-                ).descriptor.description,
-                parameters=_json_schema_value(
-                    builtin_tool_catalog_entry(
-                        binding.tool_name
-                    ).descriptor.input_schema
-                ),
-            )
-            for binding in bindings
-        )
-
-    @property
-    def executor_bindings(self) -> tuple[ProductionBuiltinExecutorBinding, ...]:
+    def _executor_bindings_locked(self) -> tuple[ProductionBuiltinExecutorBinding, ...]:
         identities = {
             name: _qualified_executor_identity(tool, name)
             for name, tool in self._tools.items()
@@ -491,6 +498,150 @@ class DirectKernelToolPort:
             for name in sorted(identities)
         )
 
+    @property
+    def executor_bindings(self) -> tuple[ProductionBuiltinExecutorBinding, ...]:
+        with self._surface_lock:
+            return self._executor_bindings_locked()
+
+    @property
+    def tool_specs(self) -> tuple[FrozenToolSpec, ...]:
+        return self.snapshot_tool_surface(
+            conversation_scope_kind=ModelInputScopeKind.ROOT,
+            scope_subagent_task_id=None,
+        ).model_surface.tool_specs
+
+    def snapshot_terminal_cwd(self) -> Path:
+        return self._terminal.snapshot_default_cwd(
+            owner_host_session_id=self._host_owner_id
+        )
+
+    def snapshot_tool_surface(
+        self,
+        *,
+        conversation_scope_kind: ModelInputScopeKind,
+        scope_subagent_task_id: str | None,
+    ) -> PreparedKernelToolSurface:
+        if (conversation_scope_kind is ModelInputScopeKind.ROOT) != (
+            scope_subagent_task_id is None
+        ):
+            raise ValueError("tool surface scope identity is invalid")
+        with self._surface_lock:
+            if self._closed:
+                raise RuntimeError("tool surface is closed")
+            bindings = self._executor_bindings_locked()
+            if conversation_scope_kind is ModelInputScopeKind.SUBAGENT_TASK:
+                bindings = tuple(
+                    binding
+                    for binding in bindings
+                    if binding.tool_name != "terminal_monitor"
+                )
+            specs: list[FrozenToolSpec] = []
+            for binding in bindings:
+                schema = freeze_json(
+                    _json_schema_value(
+                        builtin_tool_catalog_entry(
+                            binding.tool_name
+                        ).descriptor.input_schema
+                    )
+                )
+                if not isinstance(schema, FrozenJsonObjectFact):
+                    raise TypeError("tool schema did not freeze to an object")
+                specs.append(
+                    FrozenToolSpec(
+                        name=binding.tool_name,
+                        description=builtin_tool_catalog_entry(
+                            binding.tool_name
+                        ).descriptor.description,
+                        parameters=schema,
+                        descriptor_fingerprint=binding.descriptor_fingerprint,
+                        executor_binding_fingerprint=binding.binding_fingerprint,
+                    )
+                )
+            frozen_specs = tuple(specs)
+            fingerprint = model_tool_surface_fingerprint(
+                conversation_scope_kind, frozen_specs
+            )
+            surface = FrozenModelToolSurface(
+                conversation_scope_kind=conversation_scope_kind,
+                tool_specs=frozen_specs,
+                surface_fingerprint=fingerprint,
+            )
+            access = ProcessLocalToolSurfaceAccess(
+                owner_epoch=self._surface_owner_epoch,
+                surface_generation=self._surface_generation,
+                conversation_scope_kind=conversation_scope_kind,
+                scope_subagent_task_id=scope_subagent_task_id,
+                surface_fingerprint=fingerprint,
+                _authority=self._surface_authority,
+            )
+            return PreparedKernelToolSurface(
+                model_surface=surface,
+                executor_binding_fingerprints=tuple(
+                    binding.binding_fingerprint for binding in bindings
+                ),
+                access=access,
+            )
+
+    def borrow_tool_surface(
+        self, prepared: PreparedKernelToolSurface
+    ) -> ProcessLocalToolSurfaceBorrow:
+        with self._surface_lock:
+            self._require_prepared_surface_locked(prepared)
+            borrow_id = f"tool-surface-borrow:{uuid4().hex}"
+            self._surface_borrows.add(borrow_id)
+            return ProcessLocalToolSurfaceBorrow(
+                prepared=prepared,
+                borrow_id=borrow_id,
+                _authority=self._surface_authority,
+                _validate=self._validate_surface_borrow,
+                _release=self._release_surface_borrow,
+            )
+
+    def _require_prepared_surface_locked(
+        self, prepared: PreparedKernelToolSurface
+    ) -> None:
+        access = prepared.access
+        if (
+            self._closed
+            or access._authority is not self._surface_authority
+            or access.owner_epoch != self._surface_owner_epoch
+            or access.surface_generation != self._surface_generation
+        ):
+            raise RuntimeError("prepared tool surface is revoked")
+        current = self.snapshot_tool_surface(
+            conversation_scope_kind=access.conversation_scope_kind,
+            scope_subagent_task_id=access.scope_subagent_task_id,
+        )
+        if (
+            current.model_surface != prepared.model_surface
+            or current.executor_binding_fingerprints
+            != prepared.executor_binding_fingerprints
+        ):
+            raise RuntimeError("prepared tool surface binding drifted")
+
+    def _validate_surface_borrow(
+        self, borrow: ProcessLocalToolSurfaceBorrow, tool_name: str
+    ) -> str:
+        with self._surface_lock:
+            if (
+                borrow._closed
+                or borrow._authority is not self._surface_authority
+                or borrow.borrow_id not in self._surface_borrows
+            ):
+                raise RuntimeError("tool surface borrow is not active")
+            self._require_prepared_surface_locked(borrow.prepared)
+            for tool in borrow.prepared.model_surface.tool_specs:
+                if tool.name == tool_name:
+                    return tool.executor_binding_fingerprint
+        raise RuntimeError("tool was not advertised by the prepared surface")
+
+    def _release_surface_borrow(self, borrow: ProcessLocalToolSurfaceBorrow) -> None:
+        with self._surface_condition:
+            if borrow._authority is not self._surface_authority:
+                raise RuntimeError("tool surface borrow authority conflicts")
+            self._surface_borrows.discard(borrow.borrow_id)
+            self._surface_condition.notify_all()
+
     async def authorize(
         self,
         *,
@@ -499,7 +650,16 @@ class DirectKernelToolPort:
         tool_call_id: str,
         turn_id: str,
         assistant_entry_id: str,
+        surface_borrow: ProcessLocalToolSurfaceBorrow,
     ) -> KernelToolAuthorization:
+        try:
+            self._validate_surface_borrow(surface_borrow, tool_name)
+        except RuntimeError:
+            return KernelToolAuthorization(
+                KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
+                "tool-surface:revoked",
+                f"tool unavailable: {tool_name}",
+            )
         tool = self._tools.get(tool_name)
         subagent = self._subagent is not None and tool_name in self._subagent.tool_names
         memory = self._memory is not None and tool_name in self._memory.tool_names
@@ -594,12 +754,12 @@ class DirectKernelToolPort:
         attempt_id: str,
         turn_id: str,
         assistant_entry_id: str,
-        invocation_context: KernelToolInvocationContext | None = None,
+        invocation_context: KernelToolInvocationContext,
         live_sink: KernelToolLiveSink | None = None,
     ) -> KernelToolResult:
         if self._closed:
             raise RuntimeError("tool surface is closed")
-        if invocation_context is not None and (
+        if (
             invocation_context.session_id != self._session_id
             or invocation_context.turn_id != turn_id
             or invocation_context.assistant_entry_id != assistant_entry_id
@@ -610,6 +770,19 @@ class DirectKernelToolPort:
             # process-local authority must never create a monitor, process or
             # any other physical effect before being rejected.
             raise RuntimeError("tool invocation context does not exact-join request")
+        if (
+            invocation_context.tool_surface_fingerprint
+            != invocation_context.surface_borrow.prepared.model_surface.surface_fingerprint
+            or invocation_context.conversation_scope_kind
+            != invocation_context.surface_borrow.prepared.access.conversation_scope_kind.value
+            or invocation_context.scope_subagent_task_id
+            != invocation_context.surface_borrow.prepared.access.scope_subagent_task_id
+            or self._validate_surface_borrow(
+                invocation_context.surface_borrow, tool_name
+            )
+            != invocation_context.executor_binding_fingerprint
+        ):
+            raise RuntimeError("tool invocation surface binding does not exact-join")
         if self._subagent is not None and tool_name in self._subagent.tool_names:
             return await self._subagent.invoke(
                 tool_name=tool_name,
@@ -630,8 +803,6 @@ class DirectKernelToolPort:
         )
         settlement_token: ProcessLocalEffectSettlementToken | None = None
         if isinstance(tool, _DirectTerminalMonitorTool):
-            if invocation_context is None:
-                raise RuntimeError("terminal monitor invocation context is required")
             result, settlement_token = self._invoke_terminal_monitor(
                 tool=tool,
                 call=call,
@@ -640,16 +811,8 @@ class DirectKernelToolPort:
         elif isinstance(tool, (_DirectTerminalTool, _DirectTerminalProcessTool)):
             origin = TerminalProcessOrigin(
                 turn_id=turn_id,
-                conversation_scope_kind=(
-                    invocation_context.conversation_scope_kind
-                    if invocation_context is not None
-                    else "ROOT"
-                ),
-                scope_subagent_task_id=(
-                    invocation_context.scope_subagent_task_id
-                    if invocation_context is not None
-                    else None
-                ),
+                conversation_scope_kind=(invocation_context.conversation_scope_kind),
+                scope_subagent_task_id=invocation_context.scope_subagent_task_id,
             )
             result = await self._physical_io.run(
                 _execute_terminal_tool_call,
@@ -853,7 +1016,17 @@ class DirectKernelToolPort:
             if self._physically_closed:
                 return
             deadline = monotonic() + timeout_seconds
+            with self._surface_condition:
+                self._closed = True
+                self._surface_condition.notify_all()
+            # A surface borrow can be held by an in-flight Terminal call whose
+            # bounded physical wait only exits after its process group is
+            # terminated.  Seal the surface first, stop those process-local
+            # owners, then drain the immutable borrow before closing the
+            # general thread owner.  Non-Terminal tools remain bounded by the
+            # same borrow deadline and are never replaced or detached.
             await self._stop_terminal_physical_owners_locked(deadline)
+            await asyncio.to_thread(self._wait_for_surface_borrows, deadline)
             await self._physical_io.aclose(deadline_monotonic=deadline)
             self._physically_closed = True
 
@@ -882,6 +1055,9 @@ class DirectKernelToolPort:
             return
         with self._close_lock:
             self._closed = True
+        with self._surface_condition:
+            self._closed = True
+            self._surface_condition.notify_all()
         for token_id, settlement in tuple(self._process_local_settlements.items()):
             self._terminal_monitor.settle_registration(
                 token_id,
@@ -915,6 +1091,14 @@ class DirectKernelToolPort:
         )
         self._terminal_release_task.result()
         self._terminal_physically_closed = True
+
+    def _wait_for_surface_borrows(self, deadline_monotonic: float) -> None:
+        with self._surface_condition:
+            while self._surface_borrows:
+                remaining = deadline_monotonic - monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("tool surface borrows did not drain")
+                self._surface_condition.wait(timeout=remaining)
 
 
 def _execute_tool_call(

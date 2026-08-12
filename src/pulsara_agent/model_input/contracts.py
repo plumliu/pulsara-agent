@@ -1,0 +1,1188 @@
+"""Immutable, provider-neutral contracts for structured model input.
+
+This module is intentionally pure: it owns no Kernel, transport, repository,
+clock, filesystem, or callback capability.  Every value crossing this boundary
+is immutable and finite before the compiler is invoked.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import date, datetime
+from enum import StrEnum
+from typing import Literal, Protocol
+
+from pulsara_agent.llm.estimator import TokenEstimate
+from pulsara_agent.llm.input import LLMMessage
+from pulsara_agent.ports.artifact import (
+    ToolOutputArtifactDisposition,
+    ToolOutputArtifactUnavailabilityReason,
+    ToolResultDisplayKind,
+)
+from pulsara_agent.ports.tool_execution import (
+    ToolOutputSourceCoverage,
+    ToolOutputSourceCoverageReason,
+)
+from pulsara_agent.primitives.context import (
+    FrozenJsonObjectFact,
+    canonical_json_bytes,
+    context_fingerprint,
+)
+from pulsara_agent.primitives.model_call import (
+    ResolvedModelCallFact,
+    ResolvedModelTargetFact,
+    TokenEstimatorFact,
+)
+
+
+SHA256_PREFIX = "sha256:"
+
+
+class ModelInputScopeKind(StrEnum):
+    ROOT = "ROOT"
+    SUBAGENT_TASK = "SUBAGENT_TASK"
+
+
+class CapabilityActivationSubjectKind(StrEnum):
+    ROOT_HUMAN_PROMPT = "ROOT_HUMAN_PROMPT"
+    SUBAGENT_OBJECTIVE = "SUBAGENT_OBJECTIVE"
+
+
+class CanonicalInputOriginKind(StrEnum):
+    HUMAN_MESSAGE = "HUMAN_MESSAGE"
+    HUMAN_STEER = "HUMAN_STEER"
+    SUBAGENT_OBJECTIVE = "SUBAGENT_OBJECTIVE"
+    SUBAGENT_RESULT = "SUBAGENT_RESULT"
+    JOB_RESULT = "JOB_RESULT"
+
+
+class ContextSourceKind(StrEnum):
+    BASE_SYSTEM = "BASE_SYSTEM"
+    RUNTIME_ENVIRONMENT = "RUNTIME_ENVIRONMENT"
+    RUNTIME_CLOCK = "RUNTIME_CLOCK"
+    CAPABILITY_CATALOG = "CAPABILITY_CATALOG"
+    ACTIVE_SKILL = "ACTIVE_SKILL"
+
+
+class ContextChannel(StrEnum):
+    SYSTEM = "SYSTEM"
+    LEADING_OBSERVATION = "LEADING_OBSERVATION"
+    TRAILING_OBSERVATION = "TRAILING_OBSERVATION"
+
+
+class ContextTrustClass(StrEnum):
+    ROOT_INSTRUCTION = "ROOT_INSTRUCTION"
+    AUTHORIZED_CAPABILITY_CONTEXT = "AUTHORIZED_CAPABILITY_CONTEXT"
+    TRUSTED_RUNTIME_FACT = "TRUSTED_RUNTIME_FACT"
+    UNTRUSTED_OBSERVATION = "UNTRUSTED_OBSERVATION"
+
+
+class ContextBudgetClass(StrEnum):
+    MUST_KEEP = "MUST_KEEP"
+    IMPORTANT = "IMPORTANT"
+    OPTIONAL = "OPTIONAL"
+    DEBUG = "DEBUG"
+
+
+class ContextRenderMode(StrEnum):
+    FULL = "FULL"
+    COMPACT = "COMPACT"
+    SUMMARY = "SUMMARY"
+    REF_ONLY = "REF_ONLY"
+
+
+class ToolResultProviderRenderMode(StrEnum):
+    FULL = "FULL"
+    COMPACT = "COMPACT"
+    REF_ONLY = "REF_ONLY"
+    OMITTED_BODY = "OMITTED_BODY"
+
+
+class ContextPublicDiagnosticCode(StrEnum):
+    OPTIONAL_SOURCE_UNAVAILABLE = "OPTIONAL_SOURCE_UNAVAILABLE"
+    CAPABILITY_DISCOVERY_INCOMPLETE = "CAPABILITY_DISCOVERY_INCOMPLETE"
+    ACTIVE_SKILL_NOT_FOUND = "ACTIVE_SKILL_NOT_FOUND"
+    ACTIVE_SKILL_UNAVAILABLE = "ACTIVE_SKILL_UNAVAILABLE"
+    CATALOG_TRUNCATED = "CATALOG_TRUNCATED"
+    RUNTIME_CLOCK_UNAVAILABLE = "RUNTIME_CLOCK_UNAVAILABLE"
+    SOURCE_DEGRADED = "SOURCE_DEGRADED"
+    SOURCE_OMITTED = "SOURCE_OMITTED"
+    TOOL_RESULT_DEGRADED = "TOOL_RESULT_DEGRADED"
+    TOOL_RESULT_BODY_OMITTED = "TOOL_RESULT_BODY_OMITTED"
+    SOURCE_VARIANT_NON_PROGRESS = "SOURCE_VARIANT_NON_PROGRESS"
+    DECISION_SAMPLE_TRUNCATED = "DECISION_SAMPLE_TRUNCATED"
+
+
+class ModelInputCompileFailureKind(StrEnum):
+    MODEL_TARGET_PREPARATION_FAILED = "MODEL_TARGET_PREPARATION_FAILED"
+    TOOL_SURFACE_INVALID = "TOOL_SURFACE_INVALID"
+    REQUIRED_SOURCE_UNAVAILABLE = "REQUIRED_SOURCE_UNAVAILABLE"
+    SOURCE_CONTRACT_INVALID = "SOURCE_CONTRACT_INVALID"
+    SOURCE_PHYSICAL_BOUND_EXCEEDED = "SOURCE_PHYSICAL_BOUND_EXCEEDED"
+    COMPILE_WORKING_SET_EXCEEDED = "COMPILE_WORKING_SET_EXCEEDED"
+    PROTECTED_TRANSCRIPT_EXCEEDS_BUDGET = "PROTECTED_TRANSCRIPT_EXCEEDS_BUDGET"
+    REQUIRED_CONTEXT_EXCEEDS_BUDGET = "REQUIRED_CONTEXT_EXCEEDS_BUDGET"
+    TOOL_SCHEMA_EXCEEDS_BUDGET = "TOOL_SCHEMA_EXCEEDS_BUDGET"
+    FINAL_ESTIMATE_MISMATCH = "FINAL_ESTIMATE_MISMATCH"
+    DEADLINE_EXPIRED = "DEADLINE_EXPIRED"
+
+
+class StructuredModelInputCompileError(ValueError):
+    def __init__(self, kind: ModelInputCompileFailureKind) -> None:
+        self.kind = kind
+        super().__init__(f"structured model input compile failed: {kind.value}")
+
+
+@dataclass(frozen=True, slots=True)
+class StructuredModelInputLimits:
+    maximum_source_candidates: int = 32
+    maximum_variants_per_source: int = 4
+    maximum_single_source_variant_bytes: int = 1 << 20
+    maximum_aggregate_full_source_bytes: int = 2 << 20
+    maximum_aggregate_source_variant_bytes: int = 4 << 20
+    maximum_tool_specs: int = 64
+    maximum_tool_spec_canonical_bytes: int = 1 << 20
+    maximum_compile_working_set_bytes: int = 64 << 20
+    maximum_diagnostics: int = 64
+    maximum_public_diagnostic_bytes: int = 32 << 10
+    maximum_tool_result_compact_bytes: int = 8 << 10
+    maximum_tool_result_ref_only_bytes: int = 2 << 10
+    maximum_tool_result_decisions: int = 4_096
+    maximum_decision_samples: int = 64
+
+    def __post_init__(self) -> None:
+        if (
+            min(
+                self.maximum_source_candidates,
+                self.maximum_variants_per_source,
+                self.maximum_single_source_variant_bytes,
+                self.maximum_aggregate_full_source_bytes,
+                self.maximum_aggregate_source_variant_bytes,
+                self.maximum_tool_specs,
+                self.maximum_tool_spec_canonical_bytes,
+                self.maximum_compile_working_set_bytes,
+                self.maximum_diagnostics,
+                self.maximum_public_diagnostic_bytes,
+                self.maximum_tool_result_compact_bytes,
+                self.maximum_tool_result_ref_only_bytes,
+                self.maximum_tool_result_decisions,
+                self.maximum_decision_samples,
+            )
+            < 1
+        ):
+            raise ValueError("structured model input limits must be positive")
+
+
+STRUCTURED_MODEL_INPUT_LIMITS = StructuredModelInputLimits()
+
+
+@dataclass(frozen=True, slots=True)
+class FrozenToolSpec:
+    name: str
+    description: str
+    parameters: FrozenJsonObjectFact = field(repr=False)
+    descriptor_fingerprint: str
+    executor_binding_fingerprint: str
+
+    def __post_init__(self) -> None:
+        if (
+            not self.name
+            or not self.descriptor_fingerprint
+            or not self.executor_binding_fingerprint
+        ):
+            raise ValueError("frozen tool specification identity is incomplete")
+        if not isinstance(self.parameters, FrozenJsonObjectFact):
+            raise TypeError("tool parameters must be a frozen JSON object")
+
+    @property
+    def canonical_bytes(self) -> bytes:
+        return canonical_json_bytes(
+            {
+                "name": self.name,
+                "description": self.description,
+                "parameters": self.parameters,
+            }
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class FrozenModelToolSurface:
+    conversation_scope_kind: ModelInputScopeKind
+    tool_specs: tuple[FrozenToolSpec, ...] = field(repr=False)
+    surface_fingerprint: str
+
+    def __post_init__(self) -> None:
+        names = tuple(tool.name for tool in self.tool_specs)
+        if names != tuple(sorted(names)) or len(names) != len(set(names)):
+            raise ValueError("frozen tool specs must be sorted and unique")
+        expected = model_tool_surface_fingerprint(
+            self.conversation_scope_kind, self.tool_specs
+        )
+        if self.surface_fingerprint != expected:
+            raise ValueError("tool surface fingerprint mismatch")
+
+
+def model_tool_surface_fingerprint(
+    scope: ModelInputScopeKind, tools: tuple[FrozenToolSpec, ...]
+) -> str:
+    return context_fingerprint(
+        "model-input-tool-surface:v1",
+        {
+            "scope": scope.value,
+            "tools": tuple(
+                {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": tool.parameters,
+                    "descriptor_fingerprint": tool.descriptor_fingerprint,
+                    "executor_binding_fingerprint": tool.executor_binding_fingerprint,
+                }
+                for tool in tools
+            ),
+        },
+    )
+
+
+class ModelInputTokenEstimator(Protocol):
+    fact: TokenEstimatorFact
+
+    def estimate_text(self, text: str) -> int: ...
+
+    def estimate_message(self, message: LLMMessage) -> int: ...
+
+    def estimate_frozen_tool_spec(self, tool: FrozenToolSpec) -> int: ...
+
+    def estimate_frozen_input(
+        self,
+        *,
+        system_prompt: str,
+        messages: tuple[LLMMessage, ...],
+        tools: tuple[FrozenToolSpec, ...],
+    ) -> TokenEstimate: ...
+
+
+@dataclass(frozen=True, slots=True)
+class ModelInputCompileBinding:
+    call_fact: ResolvedModelCallFact
+    target_fact: ResolvedModelTargetFact
+    estimator: ModelInputTokenEstimator = field(repr=False, compare=False)
+    estimator_fingerprint: str
+    effective_input_budget_tokens: int
+    effective_output_tokens: int
+    tool_surface: FrozenModelToolSurface = field(repr=False)
+    binding_fingerprint: str
+
+    def __post_init__(self) -> None:
+        if self.call_fact.target != self.target_fact:
+            raise ValueError("compile call and target facts do not join")
+        if self.call_fact.purpose.value != "agent_model_loop":
+            raise ValueError("compile binding is not an agent model loop")
+        if self.estimator.fact.estimator_fingerprint != self.estimator_fingerprint:
+            raise ValueError("compile estimator fingerprint mismatch")
+        if (
+            self.target_fact.token_estimator.estimator_fingerprint
+            != self.estimator_fingerprint
+        ):
+            raise ValueError("compile target estimator fingerprint mismatch")
+        if min(self.effective_input_budget_tokens, self.effective_output_tokens) < 1:
+            raise ValueError("compile binding budgets must be positive")
+        if (
+            self.effective_input_budget_tokens
+            > self.target_fact.context_budget.input_budget_tokens
+        ):
+            raise ValueError("compile input budget exceeds the resolved target")
+        if (
+            self.effective_output_tokens
+            != self.target_fact.context_budget.effective_output_tokens
+        ):
+            raise ValueError("compile output budget differs from the resolved target")
+        expected = model_input_compile_binding_fingerprint(
+            call_fact=self.call_fact,
+            target_fact=self.target_fact,
+            estimator_fingerprint=self.estimator_fingerprint,
+            effective_input_budget_tokens=self.effective_input_budget_tokens,
+            effective_output_tokens=self.effective_output_tokens,
+            tool_surface=self.tool_surface,
+        )
+        if self.binding_fingerprint != expected:
+            raise ValueError("compile binding fingerprint mismatch")
+
+
+def model_input_compile_binding_fingerprint(
+    *,
+    call_fact: ResolvedModelCallFact,
+    target_fact: ResolvedModelTargetFact,
+    estimator_fingerprint: str,
+    effective_input_budget_tokens: int,
+    effective_output_tokens: int,
+    tool_surface: FrozenModelToolSurface,
+) -> str:
+    return context_fingerprint(
+        "model-input-compile-binding:v1",
+        {
+            "call_fact": call_fact,
+            "target_fact": target_fact,
+            "estimator_fingerprint": estimator_fingerprint,
+            "effective_input_budget_tokens": effective_input_budget_tokens,
+            "effective_output_tokens": effective_output_tokens,
+            "tool_surface_fingerprint": tool_surface.surface_fingerprint,
+        },
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class ContextRenderVariant:
+    mode: ContextRenderMode
+    text: str = field(repr=False)
+    utf8_bytes: int
+    semantic_fingerprint: str
+
+    def __post_init__(self) -> None:
+        encoded = self.text.encode("utf-8")
+        if len(encoded) != self.utf8_bytes:
+            raise ValueError("source variant byte count mismatch")
+        expected = context_fingerprint(
+            "context-render-variant:v1",
+            {"mode": self.mode.value, "text": self.text},
+        )
+        if self.semantic_fingerprint != expected:
+            raise ValueError("source variant fingerprint mismatch")
+
+
+@dataclass(frozen=True, slots=True)
+class ContextSourceCandidate:
+    source_kind: ContextSourceKind
+    source_instance_id: str
+    source_contract_version: str
+    source_contract_fingerprint: str
+    source_semantic_fingerprint: str
+    channel: ContextChannel
+    trust_class: ContextTrustClass
+    budget_class: ContextBudgetClass
+    placement_ordinal: int
+    degradation_priority: int
+    variants: tuple[ContextRenderVariant, ...] = field(repr=False)
+
+    def __post_init__(self) -> None:
+        if not self.source_instance_id or not self.source_contract_version:
+            raise ValueError("source candidate identity is incomplete")
+        if (
+            not 0 <= self.placement_ordinal <= 999
+            or not 0 <= self.degradation_priority <= 999
+        ):
+            raise ValueError("source candidate ordinal is outside its closed bound")
+        if not self.variants:
+            raise ValueError("source candidate needs at least one variant")
+        modes = tuple(variant.mode for variant in self.variants)
+        order = tuple(ContextRenderMode)
+        positions = tuple(order.index(mode) for mode in modes)
+        if positions != tuple(sorted(set(positions))):
+            raise ValueError("source render variants are duplicated or unordered")
+        if (
+            self.trust_class is ContextTrustClass.ROOT_INSTRUCTION
+            and self.channel is not ContextChannel.SYSTEM
+        ):
+            raise ValueError("root instruction must use SYSTEM channel")
+        if (
+            self.trust_class is ContextTrustClass.AUTHORIZED_CAPABILITY_CONTEXT
+            and self.channel is not ContextChannel.SYSTEM
+        ):
+            raise ValueError("capability context must use SYSTEM channel")
+        if (
+            self.trust_class is ContextTrustClass.UNTRUSTED_OBSERVATION
+            and self.channel is ContextChannel.SYSTEM
+        ):
+            raise ValueError("untrusted observation cannot use SYSTEM channel")
+        expected_contract = context_fingerprint(
+            "context-source-contract:v1",
+            {
+                "kind": self.source_kind.value,
+                "version": self.source_contract_version,
+                "channel": self.channel.value,
+                "trust": self.trust_class.value,
+                "budget": self.budget_class.value,
+                "placement": self.placement_ordinal,
+                "degradation": self.degradation_priority,
+                "modes": tuple(mode.value for mode in modes),
+            },
+        )
+        if self.source_contract_fingerprint != expected_contract:
+            raise ValueError("source contract fingerprint mismatch")
+        expected_semantic = context_fingerprint(
+            "context-source-candidate:v1",
+            {
+                "source_kind": self.source_kind.value,
+                "source_instance_id": self.source_instance_id,
+                "source_contract_fingerprint": self.source_contract_fingerprint,
+                "variants": tuple(v.semantic_fingerprint for v in self.variants),
+            },
+        )
+        if self.source_semantic_fingerprint != expected_semantic:
+            raise ValueError("source candidate semantic fingerprint mismatch")
+
+
+@dataclass(frozen=True, slots=True)
+class ContextSourceCollectionDiagnostic:
+    code: ContextPublicDiagnosticCode
+    severity: Literal["INFO", "WARNING", "ERROR"]
+    source_kind: ContextSourceKind | None
+
+    def __post_init__(self) -> None:
+        if self.severity not in {"INFO", "WARNING", "ERROR"}:
+            raise ValueError("context diagnostic severity is not closed")
+
+
+@dataclass(frozen=True, slots=True)
+class CollectedContextSources:
+    candidates: tuple[ContextSourceCandidate, ...]
+    diagnostics: tuple[ContextSourceCollectionDiagnostic, ...]
+    registry_fingerprint: str
+    collection_fingerprint: str
+
+    def __post_init__(self) -> None:
+        identities = tuple(item.source_instance_id for item in self.candidates)
+        kinds = tuple(item.source_kind for item in self.candidates)
+        if len(identities) != len(set(identities)) or len(kinds) != len(set(kinds)):
+            raise ValueError("collected source identities or kinds are duplicated")
+        expected = context_fingerprint(
+            "collected-context-sources:v1",
+            {
+                "registry_fingerprint": self.registry_fingerprint,
+                "candidates": tuple(
+                    c.source_semantic_fingerprint for c in self.candidates
+                ),
+                "diagnostics": tuple(
+                    (
+                        d.code.value,
+                        d.severity,
+                        None if d.source_kind is None else d.source_kind.value,
+                    )
+                    for d in self.diagnostics
+                ),
+            },
+        )
+        if self.collection_fingerprint != expected:
+            raise ValueError("source collection fingerprint mismatch")
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderToolCall:
+    tool_call_id: str
+    tool_name: str
+    arguments: FrozenJsonObjectFact = field(repr=False)
+
+    def __post_init__(self) -> None:
+        if not self.tool_call_id or not self.tool_name:
+            raise ValueError("provider tool call identity is incomplete")
+        if not isinstance(self.arguments, FrozenJsonObjectFact):
+            raise TypeError("provider tool arguments must be frozen JSON")
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderToolResultContextMetadata:
+    result_state: str
+    display_kind: ToolResultDisplayKind
+    artifact_disposition: ToolOutputArtifactDisposition
+    artifact_id: str | None
+    source_coverage: ToolOutputSourceCoverage
+    source_coverage_reason: ToolOutputSourceCoverageReason | None
+    artifact_unavailability_reason: ToolOutputArtifactUnavailabilityReason | None
+
+    def __post_init__(self) -> None:
+        if self.result_state not in {
+            "SUCCESS",
+            "APPLICATION_ERROR",
+            "SYSTEM_ERROR",
+            "CANCELLED",
+            "INVALID_ARGUMENTS",
+            "PERMISSION_DENIED",
+            "TOOL_UNAVAILABLE",
+            "CANCELLED_BEFORE_DISPATCH",
+        }:
+            raise ValueError("tool result state is not closed")
+        available = self.artifact_disposition in {
+            ToolOutputArtifactDisposition.AVAILABLE,
+            ToolOutputArtifactDisposition.INCOMPLETE,
+        }
+        if available != (self.artifact_id is not None):
+            raise ValueError("tool result artifact identity is inconsistent")
+        if (self.source_coverage is ToolOutputSourceCoverage.COMPLETE) != (
+            self.source_coverage_reason is None
+        ):
+            raise ValueError("tool result source coverage is inconsistent")
+        if (self.artifact_disposition is ToolOutputArtifactDisposition.UNAVAILABLE) != (
+            self.artifact_unavailability_reason is not None
+        ):
+            raise ValueError("tool result unavailability is inconsistent")
+
+
+class FrozenProviderInputItemKind(StrEnum):
+    CONTEXT_SNAPSHOT = "CONTEXT_SNAPSHOT"
+    USER = "USER"
+    TERMINAL_OBSERVATION = "TERMINAL_OBSERVATION"
+    ASSISTANT = "ASSISTANT"
+    ASSISTANT_TOOL_REQUEST = "ASSISTANT_TOOL_REQUEST"
+    TOOL_RESULT = "TOOL_RESULT"
+    TOOL_RESULT_CLOSURE = "TOOL_RESULT_CLOSURE"
+    LATE_TOOL_OUTCOME = "LATE_TOOL_OUTCOME"
+
+
+class ProviderToolResultClosureKind(StrEnum):
+    INTERRUPTED_BEFORE_DISPATCH = "interrupted_before_dispatch"
+    INTERRUPTED_MAY_HAVE_PARTIALLY_EXECUTED = "interrupted_may_have_partially_executed"
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderToolResultClosure:
+    assistant_entry_id: str
+    tool_call_id: str
+    closure_kind: ProviderToolResultClosureKind
+    target_provider_input_through_sequence: int
+
+
+@dataclass(frozen=True, slots=True)
+class LateToolOutcomeObservation:
+    assistant_entry_id: str
+    tool_call_id: str
+    result_entry_id: str
+    result_entry_sequence: int
+    result_state: str
+
+
+@dataclass(frozen=True, slots=True)
+class FrozenProviderInputItem:
+    item_kind: FrozenProviderInputItemKind
+    source_entry_id: str | None
+    source_entry_sequence: int | None
+    source_turn_id: str | None
+    text: str = field(repr=False)
+    input_origin: CanonicalInputOriginKind | None = None
+    tool_calls: tuple[ProviderToolCall, ...] = field(default=(), repr=False)
+    tool_call_id: str | None = None
+    tool_result_context: ProviderToolResultContextMetadata | None = field(
+        default=None, repr=False
+    )
+    tool_result_body_text: str | None = field(default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        self.text.encode("utf-8")
+        result_kind = self.item_kind in {
+            FrozenProviderInputItemKind.TOOL_RESULT,
+            FrozenProviderInputItemKind.LATE_TOOL_OUTCOME,
+        }
+        if result_kind != (
+            self.tool_result_context is not None
+            and self.tool_result_body_text is not None
+        ):
+            raise ValueError("tool result context union is invalid")
+        entry_backed = self.item_kind not in {
+            FrozenProviderInputItemKind.CONTEXT_SNAPSHOT,
+            FrozenProviderInputItemKind.TOOL_RESULT_CLOSURE,
+        }
+        if entry_backed != (
+            self.source_entry_id is not None
+            and self.source_entry_sequence is not None
+            and self.source_turn_id is not None
+        ):
+            raise ValueError("provider input entry attribution union is invalid")
+        if (self.item_kind is FrozenProviderInputItemKind.USER) != (
+            self.input_origin is not None
+        ):
+            raise ValueError("provider input origin union is invalid")
+        if self.source_entry_sequence is not None and self.source_entry_sequence < 0:
+            raise ValueError("provider input entry sequence is invalid")
+        if self.item_kind is FrozenProviderInputItemKind.CONTEXT_SNAPSHOT and (
+            self.source_entry_id is not None
+            or self.source_turn_id is not None
+            or self.source_entry_sequence is None
+        ):
+            raise ValueError("context snapshot attribution is invalid")
+        call_owner = self.item_kind is (
+            FrozenProviderInputItemKind.ASSISTANT_TOOL_REQUEST
+        )
+        if call_owner != bool(self.tool_calls):
+            raise ValueError("assistant tool-call union is invalid")
+        call_ids = tuple(call.tool_call_id for call in self.tool_calls)
+        if len(call_ids) != len(set(call_ids)):
+            raise ValueError("provider tool-call identities are duplicated")
+        call_result_kind = result_kind or self.item_kind is (
+            FrozenProviderInputItemKind.TOOL_RESULT_CLOSURE
+        )
+        if call_result_kind != (self.tool_call_id is not None):
+            raise ValueError("provider tool-result call identity union is invalid")
+        if (
+            self.item_kind is FrozenProviderInputItemKind.TOOL_RESULT
+            and self.tool_result_body_text != self.text
+        ):
+            raise ValueError("ordinary tool result body differs from canonical text")
+
+
+@dataclass(frozen=True, slots=True)
+class CanonicalModelInputIdentity:
+    session_id: str
+    turn_id: str
+    context_binding_revision_id: str
+    provider_input_through_sequence: int
+    conversation_scope_kind: ModelInputScopeKind
+    scope_subagent_task_id: str | None
+    identity_fingerprint: str
+
+    def __post_init__(self) -> None:
+        if (
+            not self.session_id
+            or not self.turn_id
+            or not self.context_binding_revision_id
+            or self.provider_input_through_sequence < 0
+        ):
+            raise ValueError("canonical model input identity is incomplete")
+        if (self.conversation_scope_kind is ModelInputScopeKind.ROOT) != (
+            self.scope_subagent_task_id is None
+        ):
+            raise ValueError("canonical model input scope identity is invalid")
+        expected = canonical_model_input_identity_fingerprint(
+            session_id=self.session_id,
+            turn_id=self.turn_id,
+            context_binding_revision_id=self.context_binding_revision_id,
+            provider_input_through_sequence=self.provider_input_through_sequence,
+            conversation_scope_kind=self.conversation_scope_kind,
+            scope_subagent_task_id=self.scope_subagent_task_id,
+        )
+        if self.identity_fingerprint != expected:
+            raise ValueError("canonical model input identity fingerprint mismatch")
+
+
+def canonical_model_input_identity_fingerprint(
+    *,
+    session_id: str,
+    turn_id: str,
+    context_binding_revision_id: str,
+    provider_input_through_sequence: int,
+    conversation_scope_kind: ModelInputScopeKind,
+    scope_subagent_task_id: str | None,
+) -> str:
+    return context_fingerprint(
+        "canonical-model-input-identity:v1",
+        {
+            "session_id": session_id,
+            "turn_id": turn_id,
+            "context_binding_revision_id": context_binding_revision_id,
+            "provider_input_through_sequence": provider_input_through_sequence,
+            "conversation_scope_kind": conversation_scope_kind.value,
+            "scope_subagent_task_id": scope_subagent_task_id,
+        },
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedProviderInputCut:
+    session_id: str
+    turn_id: str
+    context_binding_revision_id: str
+    provider_input_through_sequence: int
+
+    def __post_init__(self) -> None:
+        if (
+            not self.session_id
+            or not self.turn_id
+            or not self.context_binding_revision_id
+            or self.provider_input_through_sequence < 0
+        ):
+            raise ValueError("prepared provider input cut is incomplete")
+
+
+@dataclass(frozen=True, slots=True)
+class CanonicalModelInputSnapshot:
+    identity: CanonicalModelInputIdentity
+    items: tuple[FrozenProviderInputItem, ...] = field(repr=False)
+    canonical_utf8_bytes: int
+    snapshot_fingerprint: str
+    closures: tuple[ProviderToolResultClosure, ...] = ()
+    late_outcomes: tuple[LateToolOutcomeObservation, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.canonical_utf8_bytes < 0:
+            raise ValueError("canonical model input byte count is invalid")
+        expected = canonical_model_input_snapshot_fingerprint(
+            identity=self.identity,
+            items=self.items,
+            canonical_utf8_bytes=self.canonical_utf8_bytes,
+            closures=self.closures,
+            late_outcomes=self.late_outcomes,
+        )
+        if self.snapshot_fingerprint != expected:
+            raise ValueError("canonical model input snapshot fingerprint mismatch")
+
+
+def provider_input_item_fingerprint(item: FrozenProviderInputItem) -> str:
+    return context_fingerprint(
+        "frozen-provider-input-item:v1",
+        {
+            "kind": item.item_kind.value,
+            "entry_id": item.source_entry_id,
+            "sequence": item.source_entry_sequence,
+            "turn_id": item.source_turn_id,
+            "input_origin": (
+                None if item.input_origin is None else item.input_origin.value
+            ),
+            "text": item.text,
+            "calls": tuple(
+                (call.tool_call_id, call.tool_name, call.arguments)
+                for call in item.tool_calls
+            ),
+            "tool_call_id": item.tool_call_id,
+            "tool_result_context": (
+                None
+                if item.tool_result_context is None
+                else {
+                    "result_state": item.tool_result_context.result_state,
+                    "display_kind": item.tool_result_context.display_kind.value,
+                    "artifact_disposition": item.tool_result_context.artifact_disposition.value,
+                    "artifact_id": item.tool_result_context.artifact_id,
+                    "source_coverage": item.tool_result_context.source_coverage.value,
+                    "source_coverage_reason": (
+                        None
+                        if item.tool_result_context.source_coverage_reason is None
+                        else item.tool_result_context.source_coverage_reason.value
+                    ),
+                    "artifact_unavailability_reason": (
+                        None
+                        if item.tool_result_context.artifact_unavailability_reason
+                        is None
+                        else item.tool_result_context.artifact_unavailability_reason.value
+                    ),
+                }
+            ),
+            "tool_result_body_text": item.tool_result_body_text,
+        },
+    )
+
+
+def canonical_model_input_snapshot_fingerprint(
+    *,
+    identity: CanonicalModelInputIdentity,
+    items: tuple[FrozenProviderInputItem, ...],
+    canonical_utf8_bytes: int,
+    closures: tuple[ProviderToolResultClosure, ...],
+    late_outcomes: tuple[LateToolOutcomeObservation, ...],
+) -> str:
+    return context_fingerprint(
+        "canonical-model-input-snapshot:v1",
+        {
+            "identity": identity.identity_fingerprint,
+            "items": tuple(provider_input_item_fingerprint(item) for item in items),
+            "canonical_utf8_bytes": canonical_utf8_bytes,
+            "closures": tuple(
+                (
+                    item.assistant_entry_id,
+                    item.tool_call_id,
+                    item.closure_kind.value,
+                    item.target_provider_input_through_sequence,
+                )
+                for item in closures
+            ),
+            "late_outcomes": tuple(
+                (
+                    item.assistant_entry_id,
+                    item.tool_call_id,
+                    item.result_entry_id,
+                    item.result_entry_sequence,
+                    item.result_state,
+                )
+                for item in late_outcomes
+            ),
+        },
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class StructuredModelInputCompileRequest:
+    context_id: str
+    model_call_index: int
+    canonical_input: CanonicalModelInputSnapshot = field(repr=False)
+    compile_binding: ModelInputCompileBinding = field(repr=False)
+    sources: CollectedContextSources = field(repr=False)
+
+    def __post_init__(self) -> None:
+        if not self.context_id or self.model_call_index < 1:
+            raise ValueError("compile request identity is invalid")
+        identity = self.canonical_input.identity
+        if (
+            identity.conversation_scope_kind
+            is not self.compile_binding.tool_surface.conversation_scope_kind
+        ):
+            raise ValueError("compile request scope and tool surface differ")
+
+
+@dataclass(frozen=True, slots=True)
+class CompiledSourceDecision:
+    source_kind: ContextSourceKind
+    source_instance_fingerprint: str
+    channel: ContextChannel
+    selected_mode: ContextRenderMode | None
+    included: bool
+    estimated_tokens: int
+    reason_code: str
+
+    def __post_init__(self) -> None:
+        if self.estimated_tokens < 0 or self.reason_code not in {
+            "SELECTED_FULL",
+            "DEGRADED_FOR_BUDGET",
+            "OMITTED_FOR_BUDGET",
+        }:
+            raise ValueError("compiled source decision is invalid")
+        if self.included != (self.selected_mode is not None):
+            raise ValueError("compiled source inclusion union is invalid")
+        if not self.included and (
+            self.estimated_tokens != 0 or self.reason_code != "OMITTED_FOR_BUDGET"
+        ):
+            raise ValueError("omitted source decision is inconsistent")
+
+
+@dataclass(frozen=True, slots=True)
+class CompiledToolResultDecision:
+    source_entry_fingerprint: str
+    current_turn: bool
+    selected_mode: ToolResultProviderRenderMode
+    estimated_tokens: int
+    reason_code: str
+
+    def __post_init__(self) -> None:
+        if self.estimated_tokens < 0 or self.reason_code not in {
+            "SELECTED_FULL",
+            "DEGRADED_FOR_BUDGET",
+        }:
+            raise ValueError("compiled tool-result decision is invalid")
+        if (self.selected_mode is ToolResultProviderRenderMode.FULL) != (
+            self.reason_code == "SELECTED_FULL"
+        ):
+            raise ValueError("compiled tool-result selection reason is inconsistent")
+
+
+@dataclass(frozen=True, slots=True)
+class ContextCompileBudgetReport:
+    compiler_contract_version: str
+    estimator_fingerprint: str
+    target_fingerprint: str
+    tool_surface_fingerprint: str
+    effective_input_budget_tokens: int
+    system_tokens: int
+    message_tokens: int
+    tool_tokens: int
+    envelope_tokens: int
+    total_input_tokens: int
+    protected_transcript_tokens: int
+    context_source_tokens: int
+    degraded_source_count: int
+    omitted_source_count: int
+    degraded_tool_result_count: int
+    omitted_tool_result_body_count: int
+    decision_digest: str
+
+    def __post_init__(self) -> None:
+        if not self.compiler_contract_version:
+            raise ValueError("compile budget report contract is empty")
+        numeric = (
+            self.effective_input_budget_tokens,
+            self.system_tokens,
+            self.message_tokens,
+            self.tool_tokens,
+            self.envelope_tokens,
+            self.total_input_tokens,
+            self.protected_transcript_tokens,
+            self.context_source_tokens,
+            self.degraded_source_count,
+            self.omitted_source_count,
+            self.degraded_tool_result_count,
+            self.omitted_tool_result_body_count,
+        )
+        if any(value < 0 for value in numeric):
+            raise ValueError("compile budget report contains a negative value")
+        if self.total_input_tokens != (
+            self.system_tokens
+            + self.message_tokens
+            + self.tool_tokens
+            + self.envelope_tokens
+        ):
+            raise ValueError("compile budget report total is inconsistent")
+        if self.total_input_tokens > self.effective_input_budget_tokens:
+            raise ValueError("compile budget report exceeds its effective budget")
+        for value in (
+            self.estimator_fingerprint,
+            self.target_fingerprint,
+            self.tool_surface_fingerprint,
+            self.decision_digest,
+        ):
+            if not value.startswith(SHA256_PREFIX):
+                raise ValueError("compile budget report fingerprint is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class FrozenCompiledModelInput:
+    context_id: str
+    canonical_input_identity: CanonicalModelInputIdentity
+    system_prompt: str = field(repr=False)
+    messages: tuple[LLMMessage, ...] = field(repr=False)
+    tools: tuple[FrozenToolSpec, ...] = field(repr=False)
+    final_estimate: TokenEstimate
+    source_decisions: tuple[CompiledSourceDecision, ...]
+    tool_result_decisions: tuple[CompiledToolResultDecision, ...]
+    budget_report: ContextCompileBudgetReport
+    diagnostic_codes: tuple[ContextPublicDiagnosticCode, ...]
+    source_collection_fingerprint: str
+    compiled_semantic_fingerprint: str
+    compile_binding_fingerprint: str
+
+    def __post_init__(self) -> None:
+        if not self.context_id:
+            raise ValueError("compiled model input context identity is empty")
+        if (
+            self.final_estimate.total_input_tokens
+            != self.budget_report.total_input_tokens
+        ):
+            raise ValueError("compiled model input estimate and report differ")
+        if (
+            self.final_estimate.system_tokens != self.budget_report.system_tokens
+            or self.final_estimate.message_tokens != self.budget_report.message_tokens
+            or self.final_estimate.tool_tokens != self.budget_report.tool_tokens
+            or self.final_estimate.envelope_tokens != self.budget_report.envelope_tokens
+        ):
+            raise ValueError("compiled model input component estimates differ")
+        if (
+            self.final_estimate.total_input_tokens
+            > self.budget_report.effective_input_budget_tokens
+        ):
+            raise ValueError("compiled model input exceeds its effective budget")
+        if (
+            len(self.tool_result_decisions)
+            > STRUCTURED_MODEL_INPUT_LIMITS.maximum_tool_result_decisions
+        ):
+            raise ValueError("compiled tool-result decisions exceed the hard bound")
+        if (
+            len(self.diagnostic_codes)
+            > STRUCTURED_MODEL_INPUT_LIMITS.maximum_diagnostics
+        ):
+            raise ValueError("compiled diagnostics exceed the hard bound")
+        if len(self.diagnostic_codes) != len(set(self.diagnostic_codes)):
+            raise ValueError("compiled diagnostics are duplicated")
+        for value in (
+            self.source_collection_fingerprint,
+            self.compiled_semantic_fingerprint,
+            self.compile_binding_fingerprint,
+        ):
+            if not value.startswith(SHA256_PREFIX):
+                raise ValueError("compiled model input fingerprint is invalid")
+        expected = frozen_compiled_model_input_fingerprint(
+            context_id=self.context_id,
+            canonical_input_identity=self.canonical_input_identity,
+            system_prompt=self.system_prompt,
+            messages=self.messages,
+            tools=self.tools,
+            final_estimate=self.final_estimate,
+            source_decisions=self.source_decisions,
+            tool_result_decisions=self.tool_result_decisions,
+            budget_report=self.budget_report,
+            diagnostic_codes=self.diagnostic_codes,
+            source_collection_fingerprint=self.source_collection_fingerprint,
+            compile_binding_fingerprint=self.compile_binding_fingerprint,
+        )
+        if self.compiled_semantic_fingerprint != expected:
+            raise ValueError("compiled model input fingerprint mismatch")
+
+
+def frozen_compiled_model_input_fingerprint(
+    *,
+    context_id: str,
+    canonical_input_identity: CanonicalModelInputIdentity,
+    system_prompt: str,
+    messages: tuple[LLMMessage, ...],
+    tools: tuple[FrozenToolSpec, ...],
+    final_estimate: TokenEstimate,
+    source_decisions: tuple[CompiledSourceDecision, ...],
+    tool_result_decisions: tuple[CompiledToolResultDecision, ...],
+    budget_report: ContextCompileBudgetReport,
+    diagnostic_codes: tuple[ContextPublicDiagnosticCode, ...],
+    source_collection_fingerprint: str,
+    compile_binding_fingerprint: str,
+) -> str:
+    return context_fingerprint(
+        "frozen-compiled-model-input:v1",
+        {
+            "context_id": context_id,
+            "canonical_identity": canonical_input_identity.identity_fingerprint,
+            "compile_binding": compile_binding_fingerprint,
+            "source_collection": source_collection_fingerprint,
+            "system_prompt": system_prompt,
+            "messages": tuple(_llm_message_value(item) for item in messages),
+            "tools": tuple(tool.canonical_bytes.decode("utf-8") for tool in tools),
+            "estimate": _token_estimate_value(final_estimate),
+            "source_decisions": tuple(
+                (
+                    item.source_kind.value,
+                    item.source_instance_fingerprint,
+                    item.channel.value,
+                    None if item.selected_mode is None else item.selected_mode.value,
+                    item.included,
+                    item.estimated_tokens,
+                    item.reason_code,
+                )
+                for item in source_decisions
+            ),
+            "tool_result_decisions": tuple(
+                (
+                    item.source_entry_fingerprint,
+                    item.current_turn,
+                    item.selected_mode.value,
+                    item.estimated_tokens,
+                    item.reason_code,
+                )
+                for item in tool_result_decisions
+            ),
+            "budget_report": _budget_report_value(budget_report),
+            "diagnostics": tuple(item.value for item in diagnostic_codes),
+        },
+    )
+
+
+def _llm_message_value(message: LLMMessage) -> dict[str, object]:
+    return {
+        "role": message.role.value,
+        "content": message.content,
+        "thinking": message.thinking,
+        "tool_calls": tuple(
+            (call.id, call.name, call.arguments) for call in message.tool_calls
+        ),
+        "tool_call_id": message.tool_call_id,
+        "name": message.name,
+        "arguments": message.arguments,
+    }
+
+
+def _token_estimate_value(estimate: TokenEstimate) -> dict[str, object]:
+    return {
+        "system_tokens": estimate.system_tokens,
+        "message_tokens": estimate.message_tokens,
+        "message_tokens_by_index": estimate.message_tokens_by_index,
+        "tool_tokens": estimate.tool_tokens,
+        "envelope_tokens": estimate.envelope_tokens,
+        "total_input_tokens": estimate.total_input_tokens,
+    }
+
+
+def _budget_report_value(report: ContextCompileBudgetReport) -> dict[str, object]:
+    return {
+        "compiler_contract_version": report.compiler_contract_version,
+        "estimator_fingerprint": report.estimator_fingerprint,
+        "target_fingerprint": report.target_fingerprint,
+        "tool_surface_fingerprint": report.tool_surface_fingerprint,
+        "effective_input_budget_tokens": report.effective_input_budget_tokens,
+        "system_tokens": report.system_tokens,
+        "message_tokens": report.message_tokens,
+        "tool_tokens": report.tool_tokens,
+        "envelope_tokens": report.envelope_tokens,
+        "total_input_tokens": report.total_input_tokens,
+        "protected_transcript_tokens": report.protected_transcript_tokens,
+        "context_source_tokens": report.context_source_tokens,
+        "degraded_source_count": report.degraded_source_count,
+        "omitted_source_count": report.omitted_source_count,
+        "degraded_tool_result_count": report.degraded_tool_result_count,
+        "omitted_tool_result_body_count": report.omitted_tool_result_body_count,
+        "decision_digest": report.decision_digest,
+    }
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeTemporalCapture:
+    observed_at_utc: datetime
+    local_date: date
+    timezone_name: str
+    utc_offset_minutes: int
+    capture_fingerprint: str
+
+    def __post_init__(self) -> None:
+        if (
+            self.observed_at_utc.tzinfo is None
+            or self.observed_at_utc.utcoffset() is None
+            or self.observed_at_utc.utcoffset().total_seconds() != 0
+            or not self.timezone_name
+            or not -1_440 < self.utc_offset_minutes < 1_440
+        ):
+            raise ValueError("runtime temporal capture is invalid")
+        expected = context_fingerprint(
+            "runtime-temporal-capture:v1",
+            {
+                "observed_at_utc": self.observed_at_utc.isoformat(),
+                "local_date": self.local_date.isoformat(),
+                "timezone_name": self.timezone_name,
+                "utc_offset_minutes": self.utc_offset_minutes,
+            },
+        )
+        if self.capture_fingerprint != expected:
+            raise ValueError("runtime temporal capture fingerprint mismatch")
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeEnvironmentSnapshot:
+    workspace_kind: Literal["project", "transient"]
+    workspace_root: str
+    terminal_current_cwd: str
+    timezone_name: str
+    utc_offset_minutes: int | None
+    snapshot_fingerprint: str
+
+    def __post_init__(self) -> None:
+        if (
+            self.workspace_kind not in {"project", "transient"}
+            or not self.workspace_root
+            or not self.terminal_current_cwd
+            or not self.timezone_name
+            or (
+                self.utc_offset_minutes is not None
+                and not -1_440 < self.utc_offset_minutes < 1_440
+            )
+        ):
+            raise ValueError("runtime environment snapshot is invalid")
+        expected = context_fingerprint(
+            "runtime-environment-snapshot:v1",
+            {
+                "workspace_kind": self.workspace_kind,
+                "workspace_root": self.workspace_root,
+                "terminal_current_cwd": self.terminal_current_cwd,
+                "timezone_name": self.timezone_name,
+                "utc_offset_minutes": self.utc_offset_minutes,
+            },
+        )
+        if self.snapshot_fingerprint != expected:
+            raise ValueError("runtime environment snapshot fingerprint mismatch")
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeClockSnapshot:
+    observed_at_utc: datetime
+    local_date: date
+    timezone_name: str
+    utc_offset_minutes: int
+    temporal_capture_fingerprint: str
+
+    def __post_init__(self) -> None:
+        if (
+            self.observed_at_utc.tzinfo is None
+            or self.observed_at_utc.utcoffset() is None
+            or self.observed_at_utc.utcoffset().total_seconds() != 0
+            or not self.timezone_name
+            or not -1_440 < self.utc_offset_minutes < 1_440
+        ):
+            raise ValueError("runtime clock snapshot is invalid")
+        expected = context_fingerprint(
+            "runtime-temporal-capture:v1",
+            {
+                "observed_at_utc": self.observed_at_utc.isoformat(),
+                "local_date": self.local_date.isoformat(),
+                "timezone_name": self.timezone_name,
+                "utc_offset_minutes": self.utc_offset_minutes,
+            },
+        )
+        if self.temporal_capture_fingerprint != expected:
+            raise ValueError("runtime clock temporal capture does not exact-join")
+
+
+__all__ = [name for name in globals() if not name.startswith("_")]

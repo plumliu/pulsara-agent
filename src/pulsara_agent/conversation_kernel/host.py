@@ -17,7 +17,13 @@ from uuid import uuid4
 from psycopg import IsolationLevel
 from psycopg.rows import dict_row
 
-from pulsara_agent.conversation_kernel.direct_model import DirectKernelModelPort
+from pulsara_agent.conversation_kernel.direct_model import (
+    DirectKernelModelPort,
+    KernelModelExecutionRequest,
+)
+from pulsara_agent.conversation_kernel.context_sources import (
+    KernelContextSourceCollector,
+)
 from pulsara_agent.conversation_kernel.activation import (
     require_stage2_runtime_privilege_boundary,
 )
@@ -55,7 +61,6 @@ from pulsara_agent.conversation_kernel.repository import (
 )
 from pulsara_agent.conversation_kernel.runner import (
     ConversationKernelRunner,
-    KernelModelRequest,
     KernelRunResult,
 )
 from pulsara_agent.conversation_kernel.safe_point import ExternalSourceNotAtSafePoint
@@ -228,14 +233,22 @@ class KernelHostSession:
                 spec.name for spec in self._tools.tool_specs
             ),
             configured_active_skill_names=active_skill_names,
-            base_system_prompt=system_prompt or DEFAULT_SYSTEM_PROMPT,
         )
         self._model = DirectKernelModelPort(
             config=settings.llm,
-            tools=self._tools.tool_specs,
-            system_prompt=system_prompt or DEFAULT_SYSTEM_PROMPT,
             role=model_role,
             usage_observer=self._observe_provider_usage,
+        )
+        display_timezone = datetime.now().astimezone().tzinfo
+        if display_timezone is None:
+            raise RuntimeError("Host display timezone is unavailable")
+        self._context_sources = KernelContextSourceCollector(
+            workspace_kind=workspace.workspace_kind,
+            workspace_root=workspace.workspace_root,
+            terminal_cwd=self._tools,
+            capability_composer=self._capabilities,
+            base_system_prompt=system_prompt or DEFAULT_SYSTEM_PROMPT,
+            display_timezone=display_timezone,
         )
         self._runner = ConversationKernelRunner(
             repository=repository,
@@ -244,7 +257,7 @@ class KernelHostSession:
             tools=self._tools,
             live_bus=self.live_bus,
             io_owner=self._io,
-            capability_composer=self._capabilities,
+            context_source_collector=self._context_sources,
             extensions=self.extensions,
             steer_consumer=self._consume_pending_steers,
             workspace_id=workspace.workspace_key,
@@ -617,8 +630,7 @@ class KernelHostSession:
                 elif isinstance(target, NewTurnInstallation):
                     async with self._lock:
                         if (
-                            self._terminal_new_turn_observation_id
-                            == observation_id
+                            self._terminal_new_turn_observation_id == observation_id
                             and self._external_new_turn_accepting
                         ):
                             reserved_new_turn = True
@@ -675,9 +687,7 @@ class KernelHostSession:
                 await self._release_any_terminal_new_turn_reservation()
                 return
 
-    async def _release_terminal_new_turn_reservation(
-        self, observation_id: str
-    ) -> None:
+    async def _release_terminal_new_turn_reservation(self, observation_id: str) -> None:
         async with self._lock:
             if self._terminal_new_turn_observation_id != observation_id:
                 return
@@ -709,9 +719,7 @@ class KernelHostSession:
                 or self._active_task is not None
             ):
                 task.cancel()
-                raise RuntimeError(
-                    "terminal observation turn lost its local admission"
-                )
+                raise RuntimeError("terminal observation turn lost its local admission")
             self._active_task = task
             self._active_turn_id = turn_id
             self._active_command_id = None
@@ -1233,7 +1241,7 @@ class KernelHostSession:
             tools=self._tools,
             live_bus=self.live_bus,
             io_owner=self._io,
-            capability_composer=self._capabilities,
+            context_source_collector=self._context_sources,
             extensions=self.extensions,
             steer_consumer=self._consume_pending_steers,
             workspace_id=self.workspace.workspace_key,
@@ -1241,7 +1249,7 @@ class KernelHostSession:
 
     def _observe_provider_usage(
         self,
-        request: KernelModelRequest,
+        request: KernelModelExecutionRequest,
         report: TransportUsageReport,
     ) -> None:
         usage = report.usage

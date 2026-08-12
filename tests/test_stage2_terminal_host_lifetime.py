@@ -35,6 +35,7 @@ from pulsara_agent.ports.tool_execution import (
     ToolOutputSourceCoverage,
 )
 from pulsara_agent.tool_permission import default_permission_policy
+from tests.support.round3 import authorize_direct_tool, invoke_direct_tool
 
 
 def _name(prefix: str) -> str:
@@ -75,6 +76,8 @@ def test_tool_result_preview_is_utf8_safe_and_obeys_final_hard_cap() -> None:
 
 async def _start_background_process(
     port: DirectKernelToolPort,
+    *,
+    session_id: str,
 ) -> tuple[str, str, str]:
     call_id = _name("call")
     turn_id = _name("turn")
@@ -86,7 +89,9 @@ async def _start_background_process(
         ),
         "yield_time_ms": 0,
     }
-    authorization = await port.authorize(
+    authorization = await authorize_direct_tool(
+        port,
+        session_id=session_id,
         tool_name="terminal",
         arguments=arguments,
         tool_call_id=call_id,
@@ -94,7 +99,9 @@ async def _start_background_process(
         assistant_entry_id=entry_id,
     )
     assert authorization.kind is KernelToolAuthorizationKind.ALLOW
-    result = await port.invoke(
+    result = await invoke_direct_tool(
+        port,
+        session_id=session_id,
         tool_name="terminal",
         arguments=arguments,
         tool_call_id=call_id,
@@ -113,17 +120,22 @@ def test_stage2_terminal_handle_is_same_host_only_and_close_kills_and_joins(
 ) -> None:
     async def scenario() -> None:
         owner = _name("host")
+        session_id = _name("session")
         port = DirectKernelToolPort(
             workspace_root=tmp_path,
             host_owner_id=owner,
-            session_id=_name("session"),
+            session_id=session_id,
             live_bus=LiveAgentEventBus(),
             authorization_policy=DefaultToolDispatchAuthorizationPolicy(
                 default_permission_policy()
             ),
         )
-        process_id, turn_id, entry_id = await _start_background_process(port)
-        poll = await port.invoke(
+        process_id, turn_id, entry_id = await _start_background_process(
+            port, session_id=session_id
+        )
+        poll = await invoke_direct_tool(
+            port,
+            session_id=session_id,
             tool_name="terminal_process",
             arguments={"action": "poll", "process_id": process_id},
             tool_call_id=_name("call"),
@@ -155,10 +167,12 @@ def test_stage2_terminal_new_host_does_not_adopt_or_relaunch_old_process(
     async def scenario() -> None:
         old_owner = _name("host")
         new_owner = _name("host")
+        old_session_id = _name("session")
+        new_session_id = _name("session")
         old = DirectKernelToolPort(
             workspace_root=tmp_path,
             host_owner_id=old_owner,
-            session_id=_name("session"),
+            session_id=old_session_id,
             live_bus=LiveAgentEventBus(),
             authorization_policy=DefaultToolDispatchAuthorizationPolicy(
                 default_permission_policy()
@@ -167,15 +181,19 @@ def test_stage2_terminal_new_host_does_not_adopt_or_relaunch_old_process(
         new = DirectKernelToolPort(
             workspace_root=tmp_path,
             host_owner_id=new_owner,
-            session_id=_name("session"),
+            session_id=new_session_id,
             live_bus=LiveAgentEventBus(),
             authorization_policy=DefaultToolDispatchAuthorizationPolicy(
                 default_permission_policy()
             ),
         )
-        process_id, turn_id, entry_id = await _start_background_process(old)
+        process_id, turn_id, entry_id = await _start_background_process(
+            old, session_id=old_session_id
+        )
         with pytest.raises(KeyError):
-            await new.invoke(
+            await invoke_direct_tool(
+                new,
+                session_id=new_session_id,
                 tool_name="terminal_process",
                 arguments={"action": "poll", "process_id": process_id},
                 tool_call_id=_name("call"),
@@ -214,10 +232,11 @@ def test_tool_close_blocks_until_cancelled_physical_thread_exits(
                     call.id, self.name, ToolResultState.SUCCESS, "done"
                 )
 
+        session_id = _name("session")
         port = DirectKernelToolPort(
             workspace_root=tmp_path,
             host_owner_id=_name("host"),
-            session_id=_name("session"),
+            session_id=session_id,
             live_bus=LiveAgentEventBus(),
             authorization_policy=DefaultToolDispatchAuthorizationPolicy(
                 default_permission_policy()
@@ -225,7 +244,9 @@ def test_tool_close_blocks_until_cancelled_physical_thread_exits(
         )
         port._tools["read_file"] = BlockingTool()  # type: ignore[assignment]  # noqa: SLF001
         operation = asyncio.create_task(
-            port.invoke(
+            invoke_direct_tool(
+                port,
+                session_id=session_id,
                 tool_name="read_file",
                 arguments={"path": "ignored"},
                 tool_call_id=_name("call"),

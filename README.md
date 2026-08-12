@@ -19,6 +19,7 @@ uses a reset-only migration universe while the product is still young.
 ```text
 Python KernelHostCore
 ├── canonical conversation runner
+├── provider-neutral structured model-input compiler
 ├── tool policy + Host-scoped physical tools
 ├── exact-four durable job executor
 ├── PostgreSQL-only memory
@@ -56,6 +57,9 @@ runtime-write admission epoch.
 The current Kernel supports:
 
 - OpenAI-compatible Responses and Chat Completions transports;
+- a provider-neutral structured input compiler over the exact canonical cut,
+  with five typed first-party sources, scope-frozen tool schemas, exact target
+  token estimation, and deterministic source/tool-result degradation;
 - filesystem, todo, `terminal`, `terminal_process`, `terminal_monitor`, and
   scoped `artifact_read` tools;
 - real PIPE/PTY terminal output streaming, exact process-local cursors and
@@ -120,6 +124,9 @@ Their baseline/catalog identities and verification results are recorded in
 [`round1_tool_output_artifact_activation.json`](benchmarks/suites/core/v1/round1_tool_output_artifact_activation.json)
 and
 [`round2_terminal_runtime_activation.json`](benchmarks/suites/core/v1/round2_terminal_runtime_activation.json).
+Round 3 does not change the database universe; its process-local compiler and
+multi-provider verification are recorded in
+[`round3_structured_model_input_compiler_activation.json`](benchmarks/suites/core/v1/round3_structured_model_input_compiler_activation.json).
 An old v13 database is rejected with
 `schema_migration_universe_reset_required`; Pulsara never imports, translates,
 or upgrades it in place. Follow

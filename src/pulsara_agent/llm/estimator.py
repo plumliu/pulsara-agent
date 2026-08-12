@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from pulsara_agent.llm.input import LLMMessage, ToolSpec
 from pulsara_agent.llm.request import LLMContext
+from pulsara_agent.primitives.context import thaw_json
 from pulsara_agent.primitives.model_call import (
     TokenEstimatorFact,
     canonical_json_bytes,
     sha256_fingerprint,
 )
+
+if TYPE_CHECKING:
+    from pulsara_agent.model_input.contracts import FrozenToolSpec
 
 TEXT_CHARS_PER_TOKEN = 4
 JSON_CHARS_PER_TOKEN = 2
@@ -57,6 +61,16 @@ class TokenEstimator(Protocol):
     def estimate_message(self, message: LLMMessage) -> int: ...
 
     def estimate_context(self, context: LLMContext) -> TokenEstimate: ...
+
+    def estimate_frozen_tool_spec(self, tool: "FrozenToolSpec") -> int: ...
+
+    def estimate_frozen_input(
+        self,
+        *,
+        system_prompt: str,
+        messages: tuple[LLMMessage, ...],
+        tools: tuple["FrozenToolSpec", ...],
+    ) -> TokenEstimate: ...
 
 
 def _ceil_div(value: int, divisor: int) -> int:
@@ -147,6 +161,46 @@ class PulsaraHeuristicTokenEstimatorV1:
             envelope_tokens=envelope_tokens,
             total_input_tokens=(
                 system_tokens + message_tokens + tool_tokens + envelope_tokens
+            ),
+        )
+
+    def estimate_frozen_tool_spec(self, tool: "FrozenToolSpec") -> int:
+        parameters = thaw_json(tool.parameters)
+        if not isinstance(parameters, dict):
+            raise TypeError("frozen tool schema did not thaw to an object")
+        return self.estimate_tool_spec(
+            ToolSpec(
+                name=tool.name,
+                description=tool.description,
+                parameters=parameters,
+            )
+        )
+
+    def estimate_frozen_input(
+        self,
+        *,
+        system_prompt: str,
+        messages: tuple[LLMMessage, ...],
+        tools: tuple["FrozenToolSpec", ...],
+    ) -> TokenEstimate:
+        system_tokens = (
+            SYSTEM_MESSAGE_FRAMING_TOKENS + self.estimate_text(system_prompt)
+            if system_prompt
+            else 0
+        )
+        message_tokens_by_index = tuple(
+            self.estimate_message(message) for message in messages
+        )
+        message_tokens = sum(message_tokens_by_index)
+        tool_tokens = sum(self.estimate_frozen_tool_spec(tool) for tool in tools)
+        return TokenEstimate(
+            system_tokens=system_tokens,
+            message_tokens=message_tokens,
+            message_tokens_by_index=message_tokens_by_index,
+            tool_tokens=tool_tokens,
+            envelope_tokens=REQUEST_ENVELOPE_TOKENS,
+            total_input_tokens=(
+                system_tokens + message_tokens + tool_tokens + REQUEST_ENVELOPE_TOKENS
             ),
         )
 

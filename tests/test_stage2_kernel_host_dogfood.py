@@ -11,6 +11,9 @@ import psycopg
 import pytest
 
 from pulsara_agent.conversation_kernel.host import KernelHostCore
+from pulsara_agent.conversation_kernel.direct_model import (
+    DirectKernelModelPort as ActualDirectKernelModelPort,
+)
 from pulsara_agent.conversation_kernel.extensions import (
     ExtensionDelivery,
     ExtensionPlane,
@@ -27,6 +30,7 @@ from pulsara_agent.ports.live_agent_event import (
     live_digest,
 )
 from pulsara_agent.settings import PulsaraSettings, StorageConfig
+from pulsara_agent.llm.input import MessageRole
 from tests.support.model_config import test_llm_config
 
 
@@ -34,8 +38,11 @@ pytestmark = pytest.mark.postgres
 
 
 class _DogfoodModelPort:
-    def __init__(self, **_: object) -> None:
-        pass
+    def __init__(self, **kwargs: object) -> None:
+        self._preparer = ActualDirectKernelModelPort(**kwargs)  # type: ignore[arg-type]
+
+    def prepare_call(self, request):
+        return self._preparer.prepare_call(request)
 
     async def stream(self, _request: object) -> AsyncIterator[object]:
         text = "STAGE2_DOGFOOD_OK"
@@ -54,6 +61,18 @@ class _SteerModelPort:
         self.started = asyncio.Event()
         self.release = asyncio.Event()
         self.requests: list[object] = []
+        self._preparer = ActualDirectKernelModelPort(
+            config=test_llm_config(
+                api_key="test",
+                base_url="https://example.invalid/v1",
+                pro_model="test-pro",
+                flash_model="test-flash",
+                api="openai_chat_completions",
+            )
+        )
+
+    def prepare_call(self, request):
+        return self._preparer.prepare_call(request)
 
     async def stream(self, request: object) -> AsyncIterator[object]:
         self.requests.append(request)
@@ -187,10 +206,13 @@ def test_stage2_public_host_fresh_open_run_and_canonical_rehydrate(
             "durable_projection_jobs",
             "memory_nodes",
         ):
-            assert connection.execute(
-                "SELECT pg_catalog.to_regclass(%s)",
-                (f"public.{relation}",),
-            ).fetchone()[0] is None, relation
+            assert (
+                connection.execute(
+                    "SELECT pg_catalog.to_regclass(%s)",
+                    (f"public.{relation}",),
+                ).fetchone()[0]
+                is None
+            ), relation
 
 
 def test_stage2_host_consumes_exact_active_turn_steer_at_provider_safe_point(
@@ -241,8 +263,8 @@ def test_stage2_host_consumes_exact_active_turn_steer_at_provider_safe_point(
         assert len(model.requests) == 2
         second = model.requests[1]
         assert any(
-            item.text == "new direction"
-            for item in second.provider_input.items  # type: ignore[attr-defined]
+            item.role is MessageRole.USER and item.content == ("new direction",)
+            for item in second.compiled_input.messages  # type: ignore[attr-defined]
         )
         rows = await asyncio.to_thread(
             session.repository.rehydrate_session,

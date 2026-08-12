@@ -5,8 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from hashlib import sha256
 import json
-from typing import Mapping
-
 from pulsara_agent.conversation_kernel.live import LiveAgentEventBus
 from pulsara_agent.conversation_kernel.live import LiveBlockKind
 from pulsara_agent.conversation_kernel.live import LiveChannelKind
@@ -28,6 +26,7 @@ from pulsara_agent.ports.live_agent_event import (
     live_digest,
 )
 from pulsara_agent.conversation_kernel.vocabulary import LiveEventType
+from pulsara_agent.primitives.context import FrozenJsonObjectFact, freeze_json
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,7 +47,11 @@ class CompletedToolCallBlock:
     block_id: str
     tool_call_id: str
     tool_name: str
-    arguments: Mapping[str, object]
+    arguments: FrozenJsonObjectFact
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.arguments, FrozenJsonObjectFact):
+            raise TypeError("completed tool-call arguments must be recursively frozen")
 
 
 CompletedBlock = CompletedTextBlock | CompletedDataBlock | CompletedToolCallBlock
@@ -299,11 +302,14 @@ class ProviderStreamAssembler:
                 ) from exc
             if not isinstance(parsed, dict):
                 raise RuntimeError("provider tool arguments must be an object")
+            frozen_arguments = freeze_json(parsed)
+            if not isinstance(frozen_arguments, FrozenJsonObjectFact):
+                raise RuntimeError("provider tool arguments must freeze as an object")
             completed = CompletedToolCallBlock(
                 block_id=block.canonical_block_id,
                 tool_call_id=identity,
                 tool_name=block.name_or_media,
-                arguments=parsed,
+                arguments=frozen_arguments,
             )
         else:
             # Thinking remains process-local, but its Start ordinal still

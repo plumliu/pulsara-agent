@@ -10,8 +10,8 @@ from pulsara_agent.conversation_kernel.contracts import HostWriterGuard
 from pulsara_agent.conversation_kernel.repository import (
     AcceptedEntry,
     ConversationKernelConflict,
-    PreparedProviderInputCut,
 )
+from pulsara_agent.model_input.contracts import PreparedProviderInputCut
 from pulsara_agent.conversation_kernel.safe_point import (
     ExternalSourceNotAtSafePoint,
     ProviderSafePointCoordinator,
@@ -157,9 +157,7 @@ def test_round2_active_provider_handle_prevents_monitor_freeze() -> None:
 
 def test_round2_canonical_safe_predicate_conflict_retires_mutable_candidate() -> None:
     repository = _Repository()
-    repository.accept_error = ConversationKernelConflict(
-        "tool request is not terminal"
-    )
+    repository.accept_error = ConversationKernelConflict("tool request is not terminal")
     safe_point = _safe_point(repository)
     coordinator = _Coordinator()
     with pytest.raises(ConversationKernelConflict, match="tool request"):

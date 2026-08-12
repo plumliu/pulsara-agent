@@ -342,13 +342,16 @@ def _host_inspect(args) -> dict[str, object]:
     workspace = resolve_workspace(_workspace_input_from_args(args))
     permission = _permission_policy(args, intent="inspect")
     names = sorted(DIRECT_KERNEL_TOOL_NAMES | SUBAGENT_TOOL_NAMES | MEMORY_TOOL_NAMES)
-    capability = KernelCapabilityComposer(
+    capability_composer = KernelCapabilityComposer(
         workspace_root=workspace.workspace_root,
         workspace_kind=workspace.workspace_kind,
         memory_domain=workspace.memory_domain,
         available_tool_names=frozenset(names),
         configured_active_skill_names=_active_skill_names_from_args(args),
-    ).compose(user_input="")
+    )
+    capability = capability_composer.resolve_projection(
+        user_input="", available_tool_names=frozenset(names)
+    )
     enabled_mcp = [
         item.server_id
         for item in load_mcp_server_configs(workspace_root=workspace.workspace_root)
@@ -374,8 +377,8 @@ def _host_inspect(args) -> dict[str, object]:
             if mode_for_policy(permission) is not None
             else "custom"
         ),
-        "skills": list(capability.catalog_skill_names),
-        "active_skills": list(capability.active_skill_names),
+        "skills": [item.name for item in capability.catalog_entries],
+        "active_skills": [item.name for item in capability.active_injections],
         "mcp": {
             "composition_status": ("UNAVAILABLE" if enabled_mcp else "NOT_CONFIGURED"),
             "configured_enabled_servers": enabled_mcp,

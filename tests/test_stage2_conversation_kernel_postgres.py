@@ -42,6 +42,7 @@ from pulsara_agent.ports.artifact import (
     ToolResultDisplayKind,
 )
 from pulsara_agent.ports.tool_execution import ToolOutputSourceCoverage
+from pulsara_agent.primitives.context import freeze_json
 from pulsara_agent.conversation_kernel.vocabulary import (
     APPEND_GUARDS,
     COMMITTED_EVENT_DESCRIPTORS,
@@ -506,7 +507,7 @@ def test_stage2_tool_message_precedes_attempt_and_job_claim_mints_second_guard(
                 block_id=_name("block"),
                 tool_call_id=call_id,
                 tool_name="terminal",
-                arguments={"command": "true"},
+                arguments=freeze_json({"command": "true"}),
             ),
         ),
         occurred_at=datetime.now(timezone.utc),
@@ -654,7 +655,7 @@ def test_stage2_human_tool_decision_atomically_installs_exact_effect_boundary(
                 block_id=_name("block"),
                 tool_call_id=tool_call_id,
                 tool_name="terminal",
-                arguments={"command": "true"},
+                arguments=freeze_json({"command": "true"}),
             ),
         ),
         occurred_at=datetime.now(timezone.utc),
@@ -2143,10 +2144,16 @@ def test_stage2_memory_candidate_and_tool_result_are_one_transaction(
         parent_content=InlineContent.from_bytes(b"memory proposals"),
         blocks=(
             AssistantToolCallBlock(
-                _name("block"), first_call, "remember_claim", {"statement": "a"}
+                _name("block"),
+                first_call,
+                "remember_claim",
+                freeze_json({"statement": "a"}),
             ),
             AssistantToolCallBlock(
-                _name("block"), second_call, "remember_claim", {"statement": "b"}
+                _name("block"),
+                second_call,
+                "remember_claim",
+                freeze_json({"statement": "b"}),
             ),
         ),
         occurred_at=datetime.now(timezone.utc),

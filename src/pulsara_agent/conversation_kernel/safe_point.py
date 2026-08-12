@@ -13,8 +13,8 @@ from pulsara_agent.conversation_kernel.repository import (
     AcceptedEntry,
     ConversationKernelConflict,
     ConversationKernelRepository,
-    PreparedProviderInputCut,
 )
+from pulsara_agent.model_input.contracts import PreparedProviderInputCut
 from pulsara_agent.ports.terminal_observation import PreparedInstallationTarget
 from pulsara_agent.terminal_process.monitor import TerminalMonitorCoordinator
 

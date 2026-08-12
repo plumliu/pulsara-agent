@@ -16,7 +16,6 @@ from pulsara_agent.conversation_kernel.vocabulary import LiveEventType
 from pulsara_agent.conversation_kernel.runner import KernelToolLiveSink
 from pulsara_agent.conversation_kernel.runner import (
     KernelToolAuthorizationKind,
-    KernelToolInvocationContext,
     ProcessLocalEffectSettlementDisposition,
 )
 from pulsara_agent.conversation_kernel.tool_policy import (
@@ -36,6 +35,12 @@ from pulsara_agent.terminal_process.monitor import (
     TerminalMonitorRejectionReason,
 )
 from pulsara_agent.tool_permission import default_permission_policy
+from pulsara_agent.model_input.contracts import ModelInputScopeKind
+from tests.support.round3 import (
+    authorize_direct_tool,
+    direct_tool_invocation_context,
+    invoke_direct_tool,
+)
 
 
 def _name(prefix: str) -> str:
@@ -75,10 +80,11 @@ def test_round2_terminal_streams_before_physical_completion_for_pipe_and_pty(
     tmp_path: Path,
 ) -> None:
     async def scenario(tty: bool) -> None:
+        session_id = _name("session")
         port = DirectKernelToolPort(
             workspace_root=tmp_path,
             host_owner_id=_name("host"),
-            session_id=_name("session"),
+            session_id=session_id,
             live_bus=LiveAgentEventBus(),
             authorization_policy=DefaultToolDispatchAuthorizationPolicy(
                 default_permission_policy()
@@ -89,7 +95,9 @@ def test_round2_terminal_streams_before_physical_completion_for_pipe_and_pty(
         )
         sink = _LiveSink()
         invocation = asyncio.create_task(
-            port.invoke(
+            invoke_direct_tool(
+                port,
+                session_id=session_id,
                 tool_name="terminal",
                 arguments={
                     "command": (
@@ -138,7 +146,9 @@ def test_round2_tool_close_terminates_process_before_draining_terminal_thread(
         )
         sink = _LiveSink()
         invocation = asyncio.create_task(
-            port.invoke(
+            invoke_direct_tool(
+                port,
+                session_id="session:close-order",
                 tool_name="terminal",
                 arguments={
                     "command": (
@@ -186,7 +196,9 @@ def test_round2_foreground_updates_cwd_but_yielded_process_never_does(
         )
 
         async def invoke(command: str, *, yield_time_ms: int = 2_000):
-            result = await port.invoke(
+            result = await invoke_direct_tool(
+                port,
+                session_id="session:cwd",
                 tool_name="terminal",
                 arguments={"command": command, "yield_time_ms": yield_time_ms},
                 tool_call_id=_name("call"),
@@ -200,7 +212,9 @@ def test_round2_foreground_updates_cwd_but_yielded_process_never_does(
         assert first["cwd"] == str(tmp_path / "foreground")
         yielded = await invoke("cd ../background; sleep 0.4", yield_time_ms=0)
         assert yielded["status"] == "running"
-        await port.invoke(
+        await invoke_direct_tool(
+            port,
+            session_id="session:cwd",
             tool_name="terminal_process",
             arguments={
                 "action": "wait",
@@ -588,11 +602,12 @@ def test_round2_terminal_monitor_tool_root_settlement_and_subagent_rejection(
     tmp_path: Path,
 ) -> None:
     async def scenario() -> None:
+        session_id = "session:monitor-tool"
         live_bus = LiveAgentEventBus()
         port = DirectKernelToolPort(
             workspace_root=tmp_path,
             host_owner_id="host:monitor-tool",
-            session_id="session:monitor-tool",
+            session_id=session_id,
             live_bus=live_bus,
             authorization_policy=DefaultToolDispatchAuthorizationPolicy(
                 default_permission_policy()
@@ -601,7 +616,9 @@ def test_round2_terminal_monitor_tool_root_settlement_and_subagent_rejection(
         port._terminal.environment_owner.config = TerminalEnvConfig(  # noqa: SLF001
             enable_shell_snapshot=False
         )
-        started = await port.invoke(
+        started = await invoke_direct_tool(
+            port,
+            session_id=session_id,
             tool_name="terminal",
             arguments={"command": "sleep 30", "yield_time_ms": 0},
             tool_call_id="call:start-monitor-tool",
@@ -611,56 +628,70 @@ def test_round2_terminal_monitor_tool_root_settlement_and_subagent_rejection(
         )
         process_id = json.loads(started.content)["process_id"]
 
-        def context(label: str, scope: str = "ROOT") -> KernelToolInvocationContext:
-            return KernelToolInvocationContext(
-                session_id="session:monitor-tool",
+        async def invoke_root(label: str, tool_name: str, arguments: dict[str, object]):
+            return await invoke_direct_tool(
+                port,
+                session_id=session_id,
                 workspace_id="workspace:monitor-tool",
-                turn_id=f"turn:{label}",
-                assistant_entry_id=f"entry:{label}",
+                tool_name=tool_name,
+                arguments=arguments,
                 tool_call_id=f"call:{label}",
                 attempt_id=f"attempt:{label}",
-                result_entry_id=f"result-entry:{label}",
-                conversation_scope_kind=scope,
-                scope_subagent_task_id=(None if scope == "ROOT" else "task:child"),
-                host_owner_epoch=1,
-                authorization_reference=f"policy:{scope}",
+                turn_id=f"turn:{label}",
+                assistant_entry_id=f"entry:{label}",
             )
 
+        mismatch_borrow, mismatch_context = direct_tool_invocation_context(
+            port,
+            session_id=session_id,
+            workspace_id="workspace:monitor-tool",
+            tool_name="terminal_monitor",
+            tool_call_id="call:different",
+            attempt_id="attempt:different",
+            turn_id="turn:different",
+            assistant_entry_id="entry:different",
+        )
         with pytest.raises(RuntimeError, match="exact-join"):
-            await port.invoke(
-                tool_name="terminal_monitor",
-                arguments={"action": "register", "process_id": process_id},
-                tool_call_id="call:mismatch",
-                attempt_id="attempt:mismatch",
-                turn_id="turn:mismatch",
-                assistant_entry_id="entry:mismatch",
-                invocation_context=context("different"),
-            )
+            try:
+                await port.invoke(
+                    tool_name="terminal_monitor",
+                    arguments={"action": "register", "process_id": process_id},
+                    tool_call_id="call:mismatch",
+                    attempt_id="attempt:mismatch",
+                    turn_id="turn:mismatch",
+                    assistant_entry_id="entry:mismatch",
+                    invocation_context=mismatch_context,
+                )
+            finally:
+                mismatch_borrow.close()
         assert port.terminal_monitor_coordinator.list_current() == ()
 
-        child = await port.invoke(
-            tool_name="terminal_monitor",
-            arguments={"action": "register", "process_id": process_id},
-            tool_call_id="call:SUBAGENT_TASK",
-            attempt_id="attempt:SUBAGENT_TASK",
-            turn_id="turn:SUBAGENT_TASK",
-            assistant_entry_id="entry:SUBAGENT_TASK",
-            invocation_context=context("SUBAGENT_TASK", "SUBAGENT_TASK"),
+        child_surface = port.snapshot_tool_surface(
+            conversation_scope_kind=ModelInputScopeKind.SUBAGENT_TASK,
+            scope_subagent_task_id="task:child",
         )
-        assert json.loads(child.content) == {
-            "status": "REJECTED",
-            "reason": "ROOT_SCOPE_REQUIRED",
+        assert "terminal_monitor" not in {
+            spec.name for spec in child_surface.model_surface.tool_specs
         }
-        assert child.process_local_settlement is None
+        with pytest.raises(RuntimeError, match="not advertised"):
+            await invoke_direct_tool(
+                port,
+                session_id=session_id,
+                workspace_id="workspace:monitor-tool",
+                tool_name="terminal_monitor",
+                arguments={"action": "register", "process_id": process_id},
+                tool_call_id="call:SUBAGENT_TASK",
+                attempt_id="attempt:SUBAGENT_TASK",
+                turn_id="turn:SUBAGENT_TASK",
+                assistant_entry_id="entry:SUBAGENT_TASK",
+                conversation_scope_kind=ModelInputScopeKind.SUBAGENT_TASK,
+                scope_subagent_task_id="task:child",
+            )
 
-        registered = await port.invoke(
-            tool_name="terminal_monitor",
-            arguments={"action": "register", "process_id": process_id},
-            tool_call_id="call:ROOT",
-            attempt_id="attempt:ROOT",
-            turn_id="turn:ROOT",
-            assistant_entry_id="entry:ROOT",
-            invocation_context=context("ROOT"),
+        registered = await invoke_root(
+            "ROOT",
+            "terminal_monitor",
+            {"action": "register", "process_id": process_id},
         )
         token = registered.process_local_settlement
         assert token is not None
@@ -671,107 +702,48 @@ def test_round2_terminal_monitor_tool_root_settlement_and_subagent_rejection(
         await port.settle_process_local_effect(
             token, ProcessLocalEffectSettlementDisposition.COMMITTED
         )
-        monitor_id = port.terminal_monitor_coordinator.list_current()[0]["monitor_id"]
-        child_list = await port.invoke(
-            tool_name="terminal_monitor",
-            arguments={"action": "list"},
-            tool_call_id="call:child-list",
-            attempt_id="attempt:child-list",
-            turn_id="turn:child-list",
-            assistant_entry_id="entry:child-list",
-            invocation_context=context("child-list", "SUBAGENT_TASK"),
-        )
-        assert json.loads(child_list.content) == {
-            "reason": "ROOT_SCOPE_REQUIRED",
-            "status": "REJECTED",
-        }
-        child_cancel = await port.invoke(
-            tool_name="terminal_monitor",
-            arguments={"action": "cancel", "monitor_id": monitor_id},
-            tool_call_id="call:child-cancel",
-            attempt_id="attempt:child-cancel",
-            turn_id="turn:child-cancel",
-            assistant_entry_id="entry:child-cancel",
-            invocation_context=context("child-cancel", "SUBAGENT_TASK"),
-        )
-        assert json.loads(child_cancel.content) == {
-            "reason": "ROOT_SCOPE_REQUIRED",
-            "status": "REJECTED",
-        }
         assert port.terminal_monitor_coordinator.list_current()[0]["state"] == "ACTIVE"
 
-        duplicate = await port.invoke(
-            tool_name="terminal_monitor",
-            arguments={"action": "register", "process_id": process_id},
-            tool_call_id="call:duplicate",
-            attempt_id="attempt:duplicate",
-            turn_id="turn:duplicate",
-            assistant_entry_id="entry:duplicate",
-            invocation_context=context("duplicate"),
+        duplicate = await invoke_root(
+            "duplicate",
+            "terminal_monitor",
+            {"action": "register", "process_id": process_id},
         )
         assert json.loads(duplicate.content) == {
             "reason": "DUPLICATE_PROCESS_MONITOR",
             "status": "REJECTED",
         }
-        unknown = await port.invoke(
-            tool_name="terminal_monitor",
-            arguments={"action": "register", "process_id": "process:missing"},
-            tool_call_id="call:missing",
-            attempt_id="attempt:missing",
-            turn_id="turn:missing",
-            assistant_entry_id="entry:missing",
-            invocation_context=context("missing"),
+        unknown = await invoke_root(
+            "missing",
+            "terminal_monitor",
+            {"action": "register", "process_id": "process:missing"},
         )
         assert json.loads(unknown.content) == {
             "reason": "PROCESS_NOT_FOUND",
             "status": "REJECTED",
         }
-        inventory = await port.invoke(
-            tool_name="terminal_monitor",
-            arguments={"action": "list"},
-            tool_call_id="call:list",
-            attempt_id="attempt:list",
-            turn_id="turn:list",
-            assistant_entry_id="entry:list",
-            invocation_context=context("list"),
-        )
+        inventory = await invoke_root("list", "terminal_monitor", {"action": "list"})
         monitors = json.loads(inventory.content)["monitors"]
         assert len(monitors) == 1 and monitors[0]["state"] == "ACTIVE"
-        cancelled = await port.invoke(
-            tool_name="terminal_monitor",
-            arguments={"action": "cancel", "monitor_id": monitors[0]["monitor_id"]},
-            tool_call_id="call:cancel",
-            attempt_id="attempt:cancel",
-            turn_id="turn:cancel",
-            assistant_entry_id="entry:cancel",
-            invocation_context=context("cancel"),
+        cancelled = await invoke_root(
+            "cancel",
+            "terminal_monitor",
+            {"action": "cancel", "monitor_id": monitors[0]["monitor_id"]},
         )
         assert json.loads(cancelled.content)["cancellation_outcome"] == "cancelled"
-        processes = await port.invoke(
-            tool_name="terminal_process",
-            arguments={"action": "list"},
-            tool_call_id="call:list-processes",
-            attempt_id="attempt:list-processes",
-            turn_id="turn:ROOT",
-            assistant_entry_id="entry:ROOT",
+        processes = await invoke_root(
+            "list-processes", "terminal_process", {"action": "list"}
         )
         assert json.loads(processes.content)["processes"][0]["status"] == "running"
-        await port.invoke(
-            tool_name="terminal_process",
-            arguments={"action": "kill", "process_id": process_id},
-            tool_call_id="call:kill-process",
-            attempt_id="attempt:kill-process",
-            turn_id="turn:ROOT",
-            assistant_entry_id="entry:ROOT",
+        await invoke_root(
+            "kill-process",
+            "terminal_process",
+            {"action": "kill", "process_id": process_id},
         )
-        terminal = await port.invoke(
-            tool_name="terminal_monitor",
-            arguments={"action": "register", "process_id": process_id},
-            tool_call_id="call:terminal-process",
-            attempt_id="attempt:terminal-process",
-            turn_id="turn:terminal-process",
-            assistant_entry_id="entry:terminal-process",
-            invocation_context=context("terminal-process"),
+        terminal = await invoke_root(
+            "terminal-process",
+            "terminal_monitor",
+            {"action": "register", "process_id": process_id},
         )
         assert json.loads(terminal.content) == {
             "reason": "PROCESS_ALREADY_TERMINAL",
@@ -786,17 +758,20 @@ def test_round2_malformed_monitor_input_uses_common_invalid_arguments_contract(
     tmp_path: Path,
 ) -> None:
     async def scenario() -> None:
+        session_id = _name("session")
         port = DirectKernelToolPort(
             workspace_root=tmp_path,
             host_owner_id=_name("host"),
-            session_id=_name("session"),
+            session_id=session_id,
             live_bus=LiveAgentEventBus(),
             authorization_policy=DefaultToolDispatchAuthorizationPolicy(
                 default_permission_policy()
             ),
         )
         try:
-            decision = await port.authorize(
+            decision = await authorize_direct_tool(
+                port,
+                session_id=session_id,
                 tool_name="terminal_monitor",
                 arguments={"action": "malformed"},
                 tool_call_id=_name("call"),
@@ -829,27 +804,18 @@ def test_round2_subagent_terminal_completion_preserves_exact_process_origin(
         port._terminal.environment_owner.config = TerminalEnvConfig(  # noqa: SLF001
             enable_shell_snapshot=False
         )
-        context = KernelToolInvocationContext(
+        started = await invoke_direct_tool(
+            port,
             session_id="session:subagent-terminal-origin",
             workspace_id="workspace:subagent-terminal-origin",
-            turn_id="turn:child-origin",
-            assistant_entry_id="entry:child-origin",
-            tool_call_id="call:child-origin",
-            attempt_id="attempt:child-origin",
-            result_entry_id="result-entry:child-origin",
-            conversation_scope_kind="SUBAGENT_TASK",
-            scope_subagent_task_id="task:child-origin",
-            host_owner_epoch=1,
-            authorization_reference="policy:child-origin",
-        )
-        started = await port.invoke(
             tool_name="terminal",
             arguments={"command": "sleep 0.15", "yield_time_ms": 0},
-            tool_call_id=context.tool_call_id,
-            attempt_id=context.attempt_id,
-            turn_id=context.turn_id,
-            assistant_entry_id=context.assistant_entry_id,
-            invocation_context=context,
+            tool_call_id="call:child-origin",
+            attempt_id="attempt:child-origin",
+            turn_id="turn:child-origin",
+            assistant_entry_id="entry:child-origin",
+            conversation_scope_kind=ModelInputScopeKind.SUBAGENT_TASK,
+            scope_subagent_task_id="task:child-origin",
         )
         assert json.loads(started.content)["status"] == "running"
 

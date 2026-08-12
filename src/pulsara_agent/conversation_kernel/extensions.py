@@ -40,6 +40,7 @@ class ExtensionDeliveryKind(StrEnum):
 
 
 class OperationalHookType(StrEnum):
+    MODEL_INPUT_COMPILE_OBSERVED = "ModelInputCompileObserved"
     PROVIDER_USAGE_OBSERVED = "ProviderUsageObserved"
     FOREGROUND_TURN_FAILED = "ForegroundTurnFailed"
     PROVIDER_CONTINUITY_FAILED = "ProviderContinuityFailed"
@@ -145,7 +146,9 @@ class KernelExtensionHost:
             authenticated_first_party_principal_ids
         )
 
-    def authenticate_principal(self, *, extension_principal_id: str) -> ExtensionPrincipal:
+    def authenticate_principal(
+        self, *, extension_principal_id: str
+    ) -> ExtensionPrincipal:
         """Mint one process-local principal after Host authentication.
 
         The returned carrier is scoped to this Host extension owner.  A
@@ -158,8 +161,7 @@ class KernelExtensionHost:
         return ExtensionPrincipal(
             extension_principal_id=extension_principal_id,
             authenticated_first_party=(
-                extension_principal_id
-                in self._authenticated_first_party_principal_ids
+                extension_principal_id in self._authenticated_first_party_principal_ids
             ),
             _host_authority=self._principal_authority,
         )
@@ -186,8 +188,7 @@ class KernelExtensionHost:
             if not self._accepting:
                 raise RuntimeError("extension registration is closed")
             active_registrations = sum(
-                not item.revoked
-                and monotonic() < item.lease.expires_at_monotonic
+                not item.revoked and monotonic() < item.lease.expires_at_monotonic
                 for item in self._registrations.values()
             )
             if active_registrations >= STAGE2_LIMITS.live_observer_hard_count:
@@ -551,17 +552,13 @@ def _project_payload(
                     del body[key]
                     body[f"{key}_redacted"] = True
                     body[f"{key}_utf8_bytes"] = len(encoded)
-                    body[f"{key}_digest"] = (
-                        "sha256:" + sha256(encoded).hexdigest()
-                    )
+                    body[f"{key}_digest"] = "sha256:" + sha256(encoded).hexdigest()
         if event_type == CommittedEventType.TOOL_REMOTE_IDENTITY_PUBLISHED.value:
             raw = body.pop("remote_identity", None)
             if raw is not None:
                 encoded = str(raw).encode("utf-8")
                 body["remote_identity_utf8_bytes"] = len(encoded)
-                body["remote_identity_digest"] = (
-                    "sha256:" + sha256(encoded).hexdigest()
-                )
+                body["remote_identity_digest"] = "sha256:" + sha256(encoded).hexdigest()
     return value
 
 

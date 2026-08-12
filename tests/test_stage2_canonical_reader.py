@@ -16,11 +16,13 @@ from pulsara_agent.conversation_kernel.reader import (
     CanonicalProviderInputReader,
     ProviderInputItemKind,
     ProviderToolResultClosureKind,
+    _RemainingReadBudget,
 )
 from pulsara_agent.conversation_kernel.query import CanonicalConversationQuery
 from pulsara_agent.conversation_kernel.repository import (
     AssistantTextBlock,
     AssistantToolCallBlock,
+    ConversationKernelConflict,
     ConversationKernelRepository,
     build_prepared_tool_result_acceptance,
 )
@@ -33,7 +35,9 @@ from pulsara_agent.conversation_kernel.safe_point import (
     ExternalSourceNotAtSafePoint,
     ProviderSafePointCoordinator,
 )
+from pulsara_agent.model_input.contracts import CanonicalInputOriginKind
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
+from pulsara_agent.primitives.context import freeze_json
 from tests.support.postgres import verified_postgres_provider
 
 
@@ -98,6 +102,46 @@ def test_provider_reader_fails_closed_on_canonical_blob_and_utf8_integrity() -> 
     assert invalid.value.kind is CanonicalProviderContinuityFailureKind.INVALID_UTF8
 
 
+def test_provider_blob_hydration_consumes_one_monotonic_remaining_budget() -> None:
+    from hashlib import sha256
+
+    class CountingBlobReader:
+        calls = 0
+
+        def read_exact(self, **kwargs):
+            del kwargs
+            self.calls += 1
+            return b"data"
+
+    blob_reader = CountingBlobReader()
+    reader = object.__new__(CanonicalProviderInputReader)
+    reader._blob_reader = blob_reader  # type: ignore[attr-defined]
+    row = {
+        "inline_content": None,
+        "blob_id": "blob:test",
+        "content_size": 4,
+        "content_digest": "sha256:" + sha256(b"data").hexdigest(),
+    }
+    budget = _RemainingReadBudget(4)
+    assert (
+        reader._read_content(
+            row,
+            deadline_monotonic=monotonic() + 1,
+            remaining_bytes=budget,
+        )
+        == b"data"
+    )
+    with pytest.raises(
+        ConversationKernelConflict, match="physical byte bound exceeded"
+    ):
+        reader._read_content(
+            row,
+            deadline_monotonic=monotonic() + 1,
+            remaining_bytes=budget,
+        )
+    assert blob_reader.calls == 1
+
+
 def test_reader_uses_exact_scope_and_lowers_late_result_without_replay(
     stage2_migrated_postgres_database,
 ) -> None:
@@ -129,7 +173,7 @@ def test_reader_uses_exact_scope_and_lowers_late_result_without_replay(
                 block_id=_id("block"),
                 tool_call_id=call_id,
                 tool_name="terminal",
-                arguments={"command": "true"},
+                arguments=freeze_json({"command": "true"}),
             ),
         ),
         occurred_at=datetime.now(timezone.utc),
@@ -193,10 +237,10 @@ def test_reader_uses_exact_scope_and_lowers_late_result_without_replay(
         turn_id=current_turn,
         deadline_monotonic=monotonic() + 30,
     )
-    materialized = CanonicalProviderInputReader(provider).rematerialize(
+    materialized = CanonicalProviderInputReader(provider).read_frozen_snapshot(
         cut, deadline_monotonic=monotonic() + 30
     )
-    assert materialized.conversation_scope_kind == "ROOT"
+    assert materialized.identity.conversation_scope_kind.value == "ROOT"
     assert [item.item_kind for item in materialized.items] == [
         ProviderInputItemKind.USER,
         ProviderInputItemKind.ASSISTANT_TOOL_REQUEST,
@@ -237,7 +281,7 @@ def test_reader_lowers_no_attempt_as_interrupted_before_dispatch(
                 block_id=_id("block"),
                 tool_call_id=_id("call"),
                 tool_name="terminal",
-                arguments={"command": "true"},
+                arguments=freeze_json({"command": "true"}),
             ),
         ),
         occurred_at=datetime.now(timezone.utc),
@@ -253,7 +297,7 @@ def test_reader_lowers_no_attempt_as_interrupted_before_dispatch(
         deadline_monotonic=monotonic() + 30,
     )
     new_turn = _start_turn(repository, lease, b"continue")
-    materialized = CanonicalProviderInputReader(provider).rematerialize(
+    materialized = CanonicalProviderInputReader(provider).read_frozen_snapshot(
         repository.prepare_provider_input_cut(
             lease.guard,
             turn_id=new_turn,
@@ -265,6 +309,170 @@ def test_reader_lowers_no_attempt_as_interrupted_before_dispatch(
         ProviderToolResultClosureKind.INTERRUPTED_BEFORE_DISPATCH
     )
     assert materialized.late_outcomes == ()
+
+
+def test_reader_rejects_declared_bytes_before_loading_any_payload(
+    stage2_migrated_postgres_database,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    lease = repository.acquire_host_writer(
+        session_id=_id("session"),
+        workspace_id=_id("workspace"),
+        writer_owner_id=_id("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    turn_id = _start_turn(repository, lease, b"five!")
+    reader = CanonicalProviderInputReader(provider, maximum_canonical_bytes=4)
+
+    def forbidden_payload_load(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("payload loaded before metadata size admission")
+
+    monkeypatch.setattr(reader, "_load_entry_payloads", forbidden_payload_load)
+    with pytest.raises(
+        ConversationKernelConflict, match="physical byte bound exceeded"
+    ):
+        reader.read_frozen_snapshot(
+            repository.prepare_provider_input_cut(
+                lease.guard,
+                turn_id=turn_id,
+                deadline_monotonic=monotonic() + 30,
+            ),
+            deadline_monotonic=monotonic() + 30,
+        )
+
+
+def test_reader_has_an_independent_bounded_assistant_block_query(
+    stage2_migrated_postgres_database,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    lease = repository.acquire_host_writer(
+        session_id=_id("session"),
+        workspace_id=_id("workspace"),
+        writer_owner_id=_id("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    turn_id = _start_turn(repository, lease, b"bounded blocks")
+    cut = repository.prepare_provider_input_cut(
+        lease.guard,
+        turn_id=turn_id,
+        deadline_monotonic=monotonic() + 30,
+    )
+    repository.commit_assistant_message(
+        lease.guard,
+        cut=cut,
+        entry_id=_id("entry"),
+        parent_content=InlineContent.from_bytes(b"storage manifest"),
+        blocks=tuple(
+            AssistantTextBlock(
+                block_id=_id("block"),
+                text=InlineContent.from_bytes(f"part-{index}".encode()),
+            )
+            for index in range(3)
+        ),
+        occurred_at=datetime.now(timezone.utc),
+        actor_id="model:test",
+        deadline_monotonic=monotonic() + 30,
+    )
+    reader = CanonicalProviderInputReader(provider, maximum_items=2)
+    with pytest.raises(ConversationKernelConflict, match="block bound exceeded"):
+        reader.read_frozen_snapshot(
+            repository.prepare_provider_input_cut(
+                lease.guard,
+                turn_id=turn_id,
+                deadline_monotonic=monotonic() + 30,
+            ),
+            deadline_monotonic=monotonic() + 30,
+        )
+
+
+@pytest.mark.parametrize("include_text", [False, True])
+def test_round3_reader_uses_ordered_semantic_blocks_not_parent_manifest(
+    stage2_migrated_postgres_database,
+    include_text: bool,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    lease = repository.acquire_host_writer(
+        session_id=_id("session"),
+        workspace_id=_id("workspace"),
+        writer_owner_id=_id("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    turn_id = _start_turn(repository, lease, b"run tools")
+    cut = repository.prepare_provider_input_cut(
+        lease.guard, turn_id=turn_id, deadline_monotonic=monotonic() + 30
+    )
+    blocks = []
+    if include_text:
+        blocks.append(
+            AssistantTextBlock(
+                block_id=_id("block"),
+                text=InlineContent.from_bytes(b"semantic answer"),
+            )
+        )
+    blocks.extend(
+        (
+            AssistantToolCallBlock(
+                block_id=_id("block"),
+                tool_call_id="call:first",
+                tool_name="terminal",
+                arguments=freeze_json({"command": "first"}),
+            ),
+            AssistantToolCallBlock(
+                block_id=_id("block"),
+                tool_call_id="call:second",
+                tool_name="terminal",
+                arguments=freeze_json({"command": "second"}),
+            ),
+        )
+    )
+    repository.commit_assistant_message(
+        lease.guard,
+        cut=cut,
+        entry_id=_id("entry"),
+        parent_content=InlineContent.from_bytes(
+            b'{"draft_identity":"MUST_NOT_REACH_PROVIDER","blocks":["'
+            + (b"storage-carrier-only" * 512)
+            + b'"]}'
+        ),
+        blocks=tuple(blocks),
+        occurred_at=datetime.now(timezone.utc),
+        actor_id="model:test",
+        deadline_monotonic=monotonic() + 30,
+    )
+    materialized = CanonicalProviderInputReader(
+        provider, maximum_canonical_bytes=4_096
+    ).read_frozen_snapshot(
+        repository.prepare_provider_input_cut(
+            lease.guard,
+            turn_id=turn_id,
+            deadline_monotonic=monotonic() + 30,
+        ),
+        deadline_monotonic=monotonic() + 30,
+    )
+    assistant = next(
+        item
+        for item in materialized.items
+        if item.item_kind is ProviderInputItemKind.ASSISTANT_TOOL_REQUEST
+    )
+    assert assistant.item_kind is ProviderInputItemKind.ASSISTANT_TOOL_REQUEST
+    assert assistant.text == ("semantic answer" if include_text else "")
+    assert "MUST_NOT_REACH_PROVIDER" not in assistant.text
+    assert [call.tool_call_id for call in assistant.tool_calls] == [
+        "call:first",
+        "call:second",
+    ]
+    assert [call.arguments for call in assistant.tool_calls] == [
+        freeze_json({"command": "first"}),
+        freeze_json({"command": "second"}),
+    ]
 
 
 def test_mid_turn_snapshot_revision_keeps_current_user_as_exact_delta(
@@ -322,7 +530,7 @@ def test_mid_turn_snapshot_revision_keeps_current_user_as_exact_delta(
         turn_id=current_turn, deadline_monotonic=monotonic() + 30
     )
     try:
-        materialized = CanonicalProviderInputReader(provider).rematerialize(
+        materialized = CanonicalProviderInputReader(provider).read_frozen_snapshot(
             prepared.cut, deadline_monotonic=monotonic() + 30
         )
     finally:
@@ -479,10 +687,14 @@ def test_subagent_result_acceptance_linearizes_at_provider_safe_point(
         turn_id=new_root_turn, deadline_monotonic=monotonic() + 30
     )
     try:
-        materialized = CanonicalProviderInputReader(provider).rematerialize(
+        materialized = CanonicalProviderInputReader(provider).read_frozen_snapshot(
             second_handle.cut, deadline_monotonic=monotonic() + 30
         )
         assert materialized.items[-1].text == "the exact child result"
+        assert (
+            materialized.items[-1].input_origin
+            is CanonicalInputOriginKind.SUBAGENT_RESULT
+        )
     finally:
         second_handle.close()
 
@@ -596,10 +808,13 @@ def test_job_result_acceptance_is_explicit_idempotent_and_safe_point_bound(
         turn_id=root_turn, deadline_monotonic=monotonic() + 30
     )
     try:
-        materialized = CanonicalProviderInputReader(provider).rematerialize(
+        materialized = CanonicalProviderInputReader(provider).read_frozen_snapshot(
             next_input.cut, deadline_monotonic=monotonic() + 30
         )
         assert materialized.items[-1].text == '{"answer":"durable job result"}'
+        assert (
+            materialized.items[-1].input_origin is CanonicalInputOriginKind.JOB_RESULT
+        )
     finally:
         next_input.close()
 
