@@ -27,6 +27,10 @@ from pulsara_agent.conversation_kernel.memory import (
     MemoryIndexCoordinator,
     PostgresMemoryQuery,
 )
+from pulsara_agent.conversation_kernel.input_continuity import (
+    HostProviderInputContinuityOwner,
+)
+from pulsara_agent.conversation_kernel.reader import CanonicalProviderInputReader
 from pulsara_agent.terminal_protocol.canonical_v3 import CanonicalProtocolReader
 from pulsara_agent.conversation_kernel.repository import (
     AssistantTextBlock,
@@ -37,12 +41,31 @@ from pulsara_agent.conversation_kernel.repository import (
     StaleHostWriter,
     build_prepared_tool_result_acceptance,
 )
+from pulsara_agent.conversation_kernel.steer import (
+    PromptIngressConfirmationKind,
+    SteerConsumptionConfirmationKind,
+    SteerResourceRejectionConfirmationKind,
+    build_prompt_ingress_command,
+    build_steer_canonical_base_fence,
+    build_steer_consumption_candidate,
+    build_steer_resource_rejection,
+)
 from pulsara_agent.ports.artifact import (
     ToolOutputArtifactDisposition,
     ToolResultDisplayKind,
 )
 from pulsara_agent.ports.tool_execution import ToolOutputSourceCoverage
 from pulsara_agent.primitives.context import freeze_json
+from pulsara_agent.model_input.continuity import (
+    FULL_HISTORY_CONTEXT_BASE_IDENTITY,
+    NoNewTriggerAnchor,
+    ProcessLocalCanonicalFrontier,
+    ProviderInputContinuityScope,
+)
+from pulsara_agent.model_input.contracts import (
+    ModelInputScopeKind,
+    PreparedProviderInputCut,
+)
 from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
 from pulsara_agent.conversation_kernel.vocabulary import (
     APPEND_GUARDS,
@@ -66,6 +89,15 @@ def _repository(stage2_migrated_postgres_database) -> ConversationKernelReposito
     return ConversationKernelRepository(
         verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     )
+
+
+class _FailingSteerRejectionRepository(ConversationKernelRepository):
+    fail_event_append = False
+
+    def _append_events(self, *args, **kwargs):
+        if self.fail_event_append:
+            raise RuntimeError("injected event append failure")
+        return super()._append_events(*args, **kwargs)
 
 
 def _start_root_turn(repository: ConversationKernelRepository, *args, **kwargs):
@@ -2046,7 +2078,7 @@ def test_stage2_prompt_queue_has_stable_fifo_and_frozen_terminal_steer_target(
         ]
 
 
-def test_stage2_new_turn_head_cannot_be_overtaken_by_later_steer(
+def test_round3_1_future_new_turn_lane_does_not_block_active_steer_cut(
     stage2_migrated_postgres_database,
 ) -> None:
     repository = _repository(stage2_migrated_postgres_database)
@@ -2099,39 +2131,439 @@ def test_stage2_new_turn_head_cannot_be_overtaken_by_later_steer(
         actor_id="user",
         deadline_monotonic=deadline,
     )
-    assert (
-        repository.consume_prompt_steer_for_turn(
-            lease.guard,
-            target_turn_id=root_turn,
-            new_entry_id=_name("entry"),
-            occurred_at=datetime.now(timezone.utc),
-            actor_id="runtime",
-            deadline_monotonic=deadline,
-        )
-        is None
+    steers = repository.read_pending_prompt_steer_facts(
+        session_id=session_id,
+        target_turn_id=root_turn,
+        deadline_monotonic=deadline,
     )
+    assert tuple(item.queue_item_id for item in steers) == (steer_item,)
     assert (
         repository.pending_prompt_head_mode(
             session_id=session_id, deadline_monotonic=deadline
         )
         is PromptDeliveryMode.NEW_TURN
     )
-    repository.cancel_prompt(
+    assert steers[0].exact_target_turn_id == root_turn
+
+
+def test_round3_1_prompt_ingress_confirmation_is_semantically_exact_and_stable(
+    stage2_migrated_postgres_database,
+) -> None:
+    repository = _repository(stage2_migrated_postgres_database)
+    deadline = monotonic() + 30
+    session_id = _name("session")
+    workspace_id = _name("workspace")
+    lease = repository.acquire_host_writer(
+        session_id=session_id,
+        workspace_id=workspace_id,
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=deadline,
+    )
+    root_turn = _name("turn")
+    _start_root_turn(
+        repository,
         lease.guard,
-        queue_item_id=new_item,
+        command_id=_name("command"),
+        turn_id=root_turn,
+        entry_id=_name("entry"),
+        context_binding_revision_id=_name("revision"),
+        content=InlineContent.from_bytes(b"initial"),
+        occurred_at=datetime.now(timezone.utc),
+        deadline_monotonic=deadline,
+    )
+    command_id = _name("command-steer")
+    queue_item_id = _name("queue-steer")
+    client_submission_id = _name("submission")
+    content = b"exact steer"
+    candidate = build_prompt_ingress_command(
+        session_id=session_id,
+        command_id=command_id,
+        queue_item_id=queue_item_id,
+        client_submission_id=client_submission_id,
+        delivery_mode=PromptDeliveryMode.STEER_ACTIVE_TURN,
+        target_turn_id=root_turn,
+        permission_snapshot_id=None,
+        requested_permission_mode=None,
+        content_utf8=content,
+    )
+    _enqueue_prompt(
+        repository,
+        lease.guard,
+        command_id=command_id,
+        queue_item_id=queue_item_id,
+        client_submission_id=client_submission_id,
+        delivery_mode=PromptDeliveryMode.STEER_ACTIVE_TURN,
+        target_turn_id=root_turn,
+        content=InlineContent.from_bytes(content),
         occurred_at=datetime.now(timezone.utc),
         actor_id="user",
         deadline_monotonic=deadline,
     )
-    consumed = repository.consume_prompt_steer_for_turn(
-        lease.guard,
+    assert (
+        repository.confirm_prompt_ingress(
+            candidate=candidate, deadline_monotonic=deadline
+        ).kind
+        is PromptIngressConfirmationKind.FULL_COMPATIBLE
+    )
+
+    conflicting = build_prompt_ingress_command(
+        session_id=session_id,
+        command_id=command_id,
+        queue_item_id=queue_item_id,
+        client_submission_id=client_submission_id,
+        delivery_mode=PromptDeliveryMode.STEER_ACTIVE_TURN,
         target_turn_id=root_turn,
-        new_entry_id=_name("entry"),
+        permission_snapshot_id=None,
+        requested_permission_mode=None,
+        content_utf8=b"different steer",
+    )
+    assert (
+        repository.confirm_prompt_ingress(
+            candidate=conflicting, deadline_monotonic=deadline
+        ).kind
+        is PromptIngressConfirmationKind.CONFLICT
+    )
+
+    repository.interrupt_turn(
+        lease.guard,
+        turn_id=root_turn,
+        reason="TEST_TERMINAL_AFTER_ACK_LOSS",
         occurred_at=datetime.now(timezone.utc),
-        actor_id="runtime",
+        actor_id="runtime:test",
         deadline_monotonic=deadline,
     )
-    assert consumed is not None
+    assert (
+        repository.confirm_prompt_ingress(
+            candidate=candidate, deadline_monotonic=deadline
+        ).kind
+        is PromptIngressConfirmationKind.FULL_COMPATIBLE
+    )
+
+
+def test_round3_1_steer_consumption_ack_confirmation_is_exact(
+    stage2_migrated_postgres_database,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    deadline = monotonic() + 30
+    session_id = _name("session")
+    lease = repository.acquire_host_writer(
+        session_id=session_id,
+        workspace_id=_name("workspace"),
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=deadline,
+    )
+    turn_id = _name("turn")
+    revision_id = _name("revision")
+    _start_root_turn(
+        repository,
+        lease.guard,
+        command_id=_name("command"),
+        turn_id=turn_id,
+        entry_id=_name("entry"),
+        context_binding_revision_id=revision_id,
+        content=InlineContent.from_bytes(b"initial"),
+        occurred_at=datetime.now(timezone.utc),
+        deadline_monotonic=deadline,
+    )
+    _enqueue_prompt(
+        repository,
+        lease.guard,
+        command_id=_name("command-steer"),
+        queue_item_id=_name("queue-steer"),
+        client_submission_id=_name("submission"),
+        delivery_mode=PromptDeliveryMode.STEER_ACTIVE_TURN,
+        target_turn_id=turn_id,
+        content=InlineContent.from_bytes(b"exact steer"),
+        occurred_at=datetime.now(timezone.utc),
+        actor_id="user",
+        deadline_monotonic=deadline,
+    )
+    fact = repository.read_pending_prompt_steer_facts(
+        session_id=session_id,
+        target_turn_id=turn_id,
+        deadline_monotonic=deadline,
+    )[0]
+    owner = HostProviderInputContinuityOwner(session_id=session_id)
+    planning = owner.freeze_planning_input(
+        scope=ProviderInputContinuityScope(
+            session_id=session_id,
+            scope_kind=ModelInputScopeKind.ROOT,
+            scope_subagent_task_id=None,
+        ),
+        canonical_frontier=ProcessLocalCanonicalFrontier(
+            latest_context_binding_revision_id=revision_id,
+            context_base_semantic_identity=FULL_HISTORY_CONTEXT_BASE_IDENTITY,
+            through_sequence=1,
+            ordered_item_fingerprints=("sha256:" + "1" * 64,),
+        ),
+        dispatch_anchor=NoNewTriggerAnchor(None),
+    )
+    occurred_at = datetime.now(timezone.utc)
+    canonical_base_fence = build_steer_canonical_base_fence(
+        CanonicalProviderInputReader(provider).read_frozen_compile_snapshot(
+            PreparedProviderInputCut(
+                session_id=session_id,
+                turn_id=turn_id,
+                context_binding_revision_id=revision_id,
+                provider_input_through_sequence=1,
+            ),
+            deadline_monotonic=deadline,
+        )
+    )
+    candidate = build_steer_consumption_candidate(
+        fact=fact,
+        body_utf8=b"exact steer",
+        expected_entry_sequence=2,
+        predecessor=planning,
+        canonical_base_fence=canonical_base_fence,
+        occurred_at=occurred_at,
+        actor_id=lease.guard.writer_owner_id,
+    )
+    assert (
+        repository.confirm_prepared_prompt_steer(
+            candidate=candidate, deadline_monotonic=deadline
+        ).kind
+        is SteerConsumptionConfirmationKind.NONE
+    )
+    accepted = repository.consume_prepared_prompt_steer(
+        lease.guard,
+        candidate=candidate,
+        deadline_monotonic=deadline,
+    )
+    assert accepted.user_steer_event_sequence == (
+        accepted.prompt_consumed_event_sequence + 1
+    )
+    confirmation = repository.confirm_prepared_prompt_steer(
+        candidate=candidate, deadline_monotonic=deadline
+    )
+    assert confirmation.kind is SteerConsumptionConfirmationKind.FULL
+    assert confirmation.accepted == accepted
+
+    conflicting = build_steer_consumption_candidate(
+        fact=fact,
+        body_utf8=b"exact steer",
+        expected_entry_sequence=2,
+        predecessor=planning,
+        canonical_base_fence=canonical_base_fence,
+        occurred_at=occurred_at + timedelta(microseconds=1),
+        actor_id=lease.guard.writer_owner_id,
+    )
+    assert (
+        repository.confirm_prepared_prompt_steer(
+            candidate=conflicting, deadline_monotonic=deadline
+        ).kind
+        is SteerConsumptionConfirmationKind.CONFLICT
+    )
+
+
+def test_round3_1_steer_consume_rejects_canonical_base_drift_without_mutation(
+    stage2_migrated_postgres_database,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    deadline = monotonic() + 30
+    session_id = _name("session")
+    lease = repository.acquire_host_writer(
+        session_id=session_id,
+        workspace_id=_name("workspace"),
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=deadline,
+    )
+    turn_id = _name("turn")
+    revision_id = _name("revision")
+    _start_root_turn(
+        repository,
+        lease.guard,
+        command_id=_name("command"),
+        turn_id=turn_id,
+        entry_id=_name("entry"),
+        context_binding_revision_id=revision_id,
+        content=InlineContent.from_bytes(b"initial"),
+        occurred_at=datetime.now(timezone.utc),
+        deadline_monotonic=deadline,
+    )
+    _enqueue_prompt(
+        repository,
+        lease.guard,
+        command_id=_name("command-steer"),
+        queue_item_id=_name("queue-steer"),
+        client_submission_id=_name("submission"),
+        delivery_mode=PromptDeliveryMode.STEER_ACTIVE_TURN,
+        target_turn_id=turn_id,
+        content=InlineContent.from_bytes(b"must remain pending"),
+        occurred_at=datetime.now(timezone.utc),
+        actor_id="user",
+        deadline_monotonic=deadline,
+    )
+    fact = repository.read_pending_prompt_steer_facts(
+        session_id=session_id,
+        target_turn_id=turn_id,
+        deadline_monotonic=deadline,
+    )[0]
+    base = CanonicalProviderInputReader(provider).read_frozen_compile_snapshot(
+        PreparedProviderInputCut(
+            session_id=session_id,
+            turn_id=turn_id,
+            context_binding_revision_id=revision_id,
+            provider_input_through_sequence=1,
+        ),
+        deadline_monotonic=deadline,
+    )
+    planning = HostProviderInputContinuityOwner(
+        session_id=session_id
+    ).freeze_planning_input(
+        scope=ProviderInputContinuityScope(
+            session_id=session_id,
+            scope_kind=ModelInputScopeKind.ROOT,
+            scope_subagent_task_id=None,
+        ),
+        canonical_frontier=ProcessLocalCanonicalFrontier(
+            latest_context_binding_revision_id=revision_id,
+            context_base_semantic_identity=FULL_HISTORY_CONTEXT_BASE_IDENTITY,
+            through_sequence=1,
+            ordered_item_fingerprints=(base.canonical_input.snapshot_fingerprint,),
+        ),
+        dispatch_anchor=NoNewTriggerAnchor(None),
+    )
+    candidate = build_steer_consumption_candidate(
+        fact=fact,
+        body_utf8=b"must remain pending",
+        expected_entry_sequence=2,
+        predecessor=planning,
+        canonical_base_fence=build_steer_canonical_base_fence(base),
+        occurred_at=datetime.now(timezone.utc),
+        actor_id=lease.guard.writer_owner_id,
+    )
+
+    repository.adopt_context_snapshot(
+        lease.guard,
+        turn_id=turn_id,
+        snapshot_id=_name("snapshot"),
+        context_binding_revision_id=_name("replacement-revision"),
+        source_through_sequence=0,
+        source_digest="sha256:" + sha256(b"summary").hexdigest(),
+        compiler_contract="test:compiler",
+        prompt_contract="test:prompt",
+        model_contract="test:model",
+        content=InlineContent.from_bytes(b"summary"),
+        occurred_at=datetime.now(timezone.utc),
+        actor_id="runtime:test",
+        deadline_monotonic=deadline,
+    )
+
+    with pytest.raises(ConversationKernelConflict, match="control base drifted"):
+        repository.consume_prepared_prompt_steer(
+            lease.guard,
+            candidate=candidate,
+            deadline_monotonic=deadline,
+        )
+    assert (
+        repository.confirm_prepared_prompt_steer(
+            candidate=candidate, deadline_monotonic=deadline
+        ).kind
+        is SteerConsumptionConfirmationKind.NONE
+    )
+    with provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        deadline_monotonic=deadline,
+    ) as connection:
+        assert connection.execute(
+            "SELECT status, consumed_entry_id FROM pulsara_v3.prompt_queue_items "
+            "WHERE session_id = %s AND id = %s",
+            (session_id, fact.queue_item_id),
+        ).fetchone() == ("PENDING", None)
+        assert connection.execute(
+            "SELECT count(*) FROM pulsara_v3.transcript_entries "
+            "WHERE session_id = %s AND entry_kind = 'USER_STEER'",
+            (session_id,),
+        ).fetchone() == (0,)
+
+
+def test_round3_1_resource_rejection_is_atomic_and_exactly_confirmable(
+    stage2_migrated_postgres_database,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = _FailingSteerRejectionRepository(provider)
+    deadline = monotonic() + 30
+    session_id = _name("session")
+    lease = repository.acquire_host_writer(
+        session_id=session_id,
+        workspace_id=_name("workspace"),
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=deadline,
+    )
+    turn_id = _name("turn")
+    _start_root_turn(
+        repository,
+        lease.guard,
+        command_id=_name("command"),
+        turn_id=turn_id,
+        entry_id=_name("entry"),
+        context_binding_revision_id=_name("revision"),
+        content=InlineContent.from_bytes(b"initial"),
+        occurred_at=datetime.now(timezone.utc),
+        deadline_monotonic=deadline,
+    )
+    _enqueue_prompt(
+        repository,
+        lease.guard,
+        command_id=_name("command-steer"),
+        queue_item_id=_name("queue-steer"),
+        client_submission_id=_name("submission"),
+        delivery_mode=PromptDeliveryMode.STEER_ACTIVE_TURN,
+        target_turn_id=turn_id,
+        content=InlineContent.from_bytes(b"too large for the fixed prefix"),
+        occurred_at=datetime.now(timezone.utc),
+        actor_id="user",
+        deadline_monotonic=deadline,
+    )
+    fact = repository.read_pending_prompt_steer_facts(
+        session_id=session_id,
+        target_turn_id=turn_id,
+        deadline_monotonic=deadline,
+    )[0]
+    candidate = build_steer_resource_rejection(
+        source_plan_fingerprint="sha256:" + "1" * 64,
+        fact=fact,
+        occurred_at=datetime.now(timezone.utc),
+        actor_id=lease.guard.writer_owner_id,
+    )
+
+    repository.fail_event_append = True
+    with pytest.raises(RuntimeError, match="injected event append failure"):
+        repository.reject_prepared_prompt_steer_resource_exhaustion(
+            lease.guard,
+            candidate=candidate,
+            deadline_monotonic=deadline,
+        )
+    repository.fail_event_append = False
+    assert (
+        repository.confirm_prepared_prompt_steer_resource_rejection(
+            session_id=session_id,
+            candidate=candidate,
+            deadline_monotonic=deadline,
+        ).kind
+        is SteerResourceRejectionConfirmationKind.NONE
+    )
+
+    repository.reject_prepared_prompt_steer_resource_exhaustion(
+        lease.guard,
+        candidate=candidate,
+        deadline_monotonic=deadline,
+    )
+    assert (
+        repository.confirm_prepared_prompt_steer_resource_rejection(
+            session_id=session_id,
+            candidate=candidate,
+            deadline_monotonic=deadline,
+        ).kind
+        is SteerResourceRejectionConfirmationKind.FULL
+    )
 
 
 def test_stage2_prompt_cancel_is_single_terminal_cas(

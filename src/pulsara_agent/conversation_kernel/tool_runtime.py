@@ -616,6 +616,23 @@ class DirectKernelToolPort:
                 _release=self._release_surface_borrow,
             )
 
+    def validate_tool_surface_borrow(
+        self,
+        borrow: ProcessLocalToolSurfaceBorrow,
+        prepared: PreparedKernelToolSurface,
+    ) -> None:
+        """Revalidate one pinned surface without selecting an arbitrary tool."""
+
+        with self._surface_lock:
+            if (
+                borrow._closed
+                or borrow._authority is not self._surface_authority
+                or borrow.borrow_id not in self._surface_borrows
+                or not borrow.exactly_joins(prepared)
+            ):
+                raise RuntimeError("tool surface borrow is not active")
+            self._require_prepared_surface_locked(prepared)
+
     def _require_prepared_surface_locked(
         self, prepared: PreparedKernelToolSurface
     ) -> None:

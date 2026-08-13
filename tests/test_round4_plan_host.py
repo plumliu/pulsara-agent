@@ -25,6 +25,8 @@ from pulsara_agent.ports.live_agent_event import (
     live_digest,
 )
 from pulsara_agent.primitives.permission import PermissionMode
+from pulsara_agent.model_input.continuity import ProcessLocalProviderInputInstallPermit
+from pulsara_agent.primitives.context import context_fingerprint
 from pulsara_agent.primitives.plan_workflow import (
     PlanDraftDecision,
     PlanQuestionAnswerKind,
@@ -38,6 +40,52 @@ from tests.support.model_config import test_llm_config
 pytestmark = pytest.mark.postgres
 
 _PLAN_SENTINEL = "ROUND4_APPROVED_PLAN_SENTINEL"
+
+
+class _PreparedTestExecution:
+    def __init__(self, owner, request, candidate: str) -> None:
+        self._owner = owner
+        self._request = request
+        self._candidate = candidate
+        self._opened = False
+        self.execution_fingerprint = context_fingerprint(
+            "test:round4-prepared-execution:v1",
+            {
+                "candidate": candidate,
+                "compiled": request.compiled_input.compiled_semantic_fingerprint,
+            },
+        )
+
+    def discard(self) -> None:
+        if self._opened:
+            raise RuntimeError("test execution already opened")
+        self._opened = True
+
+    async def open_once(self, permit: ProcessLocalProviderInputInstallPermit):
+        if self._opened:
+            raise RuntimeError("test execution already opened")
+        if (
+            permit.candidate_fingerprint != self._candidate
+            or permit.execution_fingerprint != self.execution_fingerprint
+        ):
+            raise RuntimeError("test execution permit mismatch")
+        self._opened = True
+        async for item in self._owner.stream(self._request):
+            yield item
+
+
+class _PreflightModel:
+    def preflight_execution(
+        self,
+        request,
+        *,
+        expected_append_candidate_fingerprint: str,
+        install_authority,
+    ) -> _PreparedTestExecution:
+        del install_authority
+        return _PreparedTestExecution(
+            self, request, expected_append_candidate_fingerprint
+        )
 
 
 def _tool_call(
@@ -71,7 +119,7 @@ def _text(value: str) -> tuple[object, ...]:
     )
 
 
-class _PlanHostModel:
+class _PlanHostModel(_PreflightModel):
     def __init__(self) -> None:
         self.requests: list[object] = []
         self.question_opened = asyncio.Event()
@@ -161,7 +209,7 @@ class _PlanHostModel:
             yield payload
 
 
-class _EnterPlanThenTextModel:
+class _EnterPlanThenTextModel(_PreflightModel):
     def __init__(self) -> None:
         self.requests: list[object] = []
         self.completed = asyncio.Event()
@@ -193,7 +241,7 @@ class _EnterPlanThenTextModel:
             yield payload
 
 
-class _DetachedDraftModel:
+class _DetachedDraftModel(_PreflightModel):
     def __init__(self) -> None:
         self.started = asyncio.Event()
         self.release = asyncio.Event()
@@ -231,7 +279,7 @@ class _DetachedDraftModel:
             yield payload
 
 
-class _ForceExitRaceModel:
+class _ForceExitRaceModel(_PreflightModel):
     def __init__(self) -> None:
         self.requests: list[object] = []
         self._preparer = DirectKernelModelPort(
@@ -257,7 +305,7 @@ class _ForceExitRaceModel:
             yield payload
 
 
-class _BlockingPlanTextModel:
+class _BlockingPlanTextModel(_PreflightModel):
     def __init__(self) -> None:
         self.started = asyncio.Event()
         self.release = asyncio.Event()
@@ -351,7 +399,13 @@ def test_round4_host_enter_question_approve_and_permission_happy_path(
                 requested_permission_mode=PermissionMode.ACCEPT_EDITS,
             )
         )
-        await asyncio.wait_for(model.question_opened.wait(), timeout=5)
+        question_wait = asyncio.create_task(model.question_opened.wait())
+        done, _pending = await asyncio.wait(
+            {running, question_wait}, timeout=5, return_when=asyncio.FIRST_COMPLETED
+        )
+        if running in done:
+            await running
+        assert question_wait in done, "Plan question was not opened"
         deadline = monotonic() + 5
         opened = None
         while opened is None:

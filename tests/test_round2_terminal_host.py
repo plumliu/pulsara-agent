@@ -11,7 +11,7 @@ from typing import AsyncIterator
 import pytest
 
 from pulsara_agent.conversation_kernel.host import KernelHostCore
-from pulsara_agent.conversation_kernel.direct_model import DirectKernelModelPort
+from pulsara_agent.conversation_kernel.direct_model import KernelModelExecutionRequest
 from pulsara_agent.llm.input import MessageRole
 from pulsara_agent.ports.live_agent_event import (
     TextDeltaPayload,
@@ -25,6 +25,7 @@ from pulsara_agent.ports.live_agent_event import (
 from pulsara_agent.settings import PulsaraSettings, StorageConfig
 from pulsara_agent.workspace_identity import HostWorkspaceInput
 from tests.support.model_config import test_llm_config
+from tests.support.round3 import CallbackScriptedKernelModel
 
 
 pytestmark = pytest.mark.postgres
@@ -64,23 +65,19 @@ def _text(block_id: str, value: str) -> tuple[object, ...]:
 class _TerminalMonitorDogfoodModel:
     def __init__(self, command: str) -> None:
         self.command = command
-        self.requests: list[object] = []
         self.autonomous_seen = asyncio.Event()
-        self._preparer = DirectKernelModelPort(
-            config=test_llm_config(
-                api_key="test",
-                base_url="https://example.invalid/v1",
-                pro_model="test-pro",
-                flash_model="test-flash",
-                api="openai_chat_completions",
-            )
-        )
+        self._delegate = CallbackScriptedKernelModel(self._stream)
+        self.requests = self._delegate.requests
 
     def prepare_call(self, request):
-        return self._preparer.prepare_call(request)
+        return self._delegate.prepare_call(request)
 
-    async def stream(self, request: object) -> AsyncIterator[object]:
-        self.requests.append(request)
+    def preflight_execution(self, request, **kwargs):
+        return self._delegate.preflight_execution(request, **kwargs)
+
+    async def _stream(
+        self, request: KernelModelExecutionRequest
+    ) -> AsyncIterator[object]:
         call_index = len(self.requests)
         if call_index == 1:
             payloads = _tool_call(
@@ -94,7 +91,7 @@ class _TerminalMonitorDogfoodModel:
             )
         elif call_index == 2:
             process_id = None
-            for item in reversed(request.compiled_input.messages):  # type: ignore[attr-defined]
+            for item in reversed(request.compiled_input.messages):
                 if item.role is not MessageRole.TOOL_RESULT or not item.content:
                     continue
                 decoded = json.loads(item.content[0])
@@ -113,7 +110,7 @@ class _TerminalMonitorDogfoodModel:
         else:
             terminal_items = [
                 item.content[0]
-                for item in request.compiled_input.messages  # type: ignore[attr-defined]
+                for item in request.compiled_input.messages
                 if item.role is MessageRole.USER
                 and item.content
                 and "[UNTRUSTED_TERMINAL_OUTPUT:" in item.content[0]

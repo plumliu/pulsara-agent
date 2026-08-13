@@ -203,6 +203,7 @@ def test_stage3_5_process_local_task_sites_are_closed() -> None:
         "src/pulsara_agent/conversation_kernel/io.py",
         "src/pulsara_agent/conversation_kernel/jobs.py",
         "src/pulsara_agent/conversation_kernel/plan_runtime.py",
+        "src/pulsara_agent/conversation_kernel/runner.py",
         "src/pulsara_agent/conversation_kernel/subagent.py",
         "src/pulsara_agent/conversation_kernel/tool_runtime.py",
         "src/pulsara_agent/terminal_client/binary.py",

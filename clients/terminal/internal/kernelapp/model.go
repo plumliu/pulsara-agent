@@ -681,6 +681,12 @@ func (m Model) handleKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if m.canEdit() {
 			m.insertText("\n")
 		}
+	case "tab":
+		if m.canSubmit() && m.openPlanInteraction() == nil && strings.TrimSpace(string(m.draft)) != "" {
+			// Tab is the explicit future-turn lane.  Unlike Enter it never
+			// targets (or later rebinds to) the currently active ROOT turn.
+			return m.beginTargetedCommand(protocolv3.CommandKind_SUBMIT_PROMPT, string(m.draft), "", false)
+		}
 	case "enter":
 		if m.canSubmit() && m.openPlanInteraction() == nil && strings.TrimSpace(string(m.draft)) != "" {
 			kind := protocolv3.CommandKind_SUBMIT_PROMPT
@@ -1646,9 +1652,9 @@ func (m Model) render() string {
 		}
 		result = append(result, pad(ansi.Truncate(prompt, width, ""), width))
 	}
-	footer := "Enter send · Alt+Enter newline · Ctrl-C stop · PgUp transcript · ↑↓ prompts · Ctrl-D detach"
+	footer := "Enter send/steer · Tab queue · Alt+Enter newline · Ctrl-C stop · PgUp transcript · ↑↓ prompts · Ctrl-D detach"
 	if m.activePlanWorkflow() == nil {
-		footer = "Ctrl-P permission · Ctrl-L Plan · Enter send · Ctrl-D detach"
+		footer = "Ctrl-P permission · Ctrl-L Plan · Enter send/steer · Tab queue · Ctrl-D detach"
 	} else {
 		footer = "Plan read-only · Ctrl-X cancel · Ctrl-F force · Ctrl-D detach"
 	}
@@ -1663,7 +1669,7 @@ func (m Model) render() string {
 		footer = "y/Enter allow · n/Esc deny · Ctrl-D detach"
 	}
 	if width < 70 {
-		footer = "Enter send · PgUp transcript · Ctrl-D detach"
+		footer = "Enter/steer · Tab queue · PgUp transcript · Ctrl-D detach"
 	}
 	if width < 38 {
 		footer = "Enter · PgUp · Ctrl-D"

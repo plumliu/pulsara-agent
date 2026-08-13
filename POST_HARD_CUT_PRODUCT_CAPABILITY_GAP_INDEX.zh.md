@@ -1,16 +1,16 @@
 # Pulsara hard-cut 后产品能力缺失索引
 
-> 状态：WORKING GAP INDEX（产品能力事实索引，不是恢复设计；PHC-02 已通过 Round 1 恢复，PHC-01/03/04/05/06 已通过 Round 2 恢复；PHC-17 已于 2026-08-12 通过 Round 3 恢复；PHC-09 的 Python Runtime/Host、canonical/Protocol 后端已于 2026-08-12 通过 Round 4 恢复，Go/TUI 产品闭环明确延期）
+> 状态：WORKING GAP INDEX（产品能力事实索引，不是恢复设计；PHC-02 已通过 Round 1 恢复，PHC-01/03/04/05/06 已通过 Round 2 恢复；PHC-17 的typed compiler与同Host prefix continuity已通过 Round 3 / 3.1完整恢复；PHC-09 的 Python Runtime/Host、canonical/Protocol 后端已于 2026-08-12 通过 Round 4 恢复，Go/TUI 产品闭环明确延期）
 >
-> 初始调研：2026-08-10；最近复核：2026-08-12（PHC-17、PHC-09 activation）
+> 初始调研：2026-08-10；最近复核：2026-08-13（PHC-17 Round 3.1 activation、PHC-09 activation）
 >
 > hard-cut 前代码基线：`5b7ad9f7`
 >
-> 当前 checkpoint HEAD：`d64dbeb23c6af0a00e112349a50878eae4abd9f6`；Round 3 Structured Model-Input Compiler 已提交，PHC-09 已按 [`ROUND_4_PLAN_WORKFLOW_AND_RUN_PERMISSION_IMPLEMENTATION_SPEC.zh.md`](ROUND_4_PLAN_WORKFLOW_AND_RUN_PERMISSION_IMPLEMENTATION_SPEC.zh.md) 激活 Python Runtime/Host 与 Protocol 后端；Go/TUI 交互产品面不计入本次 activation
+> 当前 checkpoint HEAD：`a71aa195f2469701fb078d79f78f4fe234bc0d46`；Round 3 Structured Model-Input Compiler与Round 4 Plan Workflow已经提交；Round 3.1已按[`ROUND_3_1_PROVIDER_INPUT_PREFIX_CONTINUITY_IMPLEMENTATION_SPEC.zh.md`](ROUND_3_1_PROVIDER_INPUT_PREFIX_CONTINUITY_IMPLEMENTATION_SPEC.zh.md)激活，并闭合既有Protocol上的busy-steer/queue-next-turn窄Go输入；Round 4 Plan的完整Go/TUI交互产品面仍不计入本次activation
 >
-> 范围：Python Agent Runtime / Host及其直接产品能力；Go TUI暂不在当前恢复主线中，但被确定为后续唯一主要交互与观察产品面
+> 范围：Python Agent Runtime / Host及其直接产品能力；Go TUI总体仍不在当前恢复主线中，但被确定为后续唯一主要交互与观察产品面。Round 3.1只例外纳入既有Protocol上的busy-steer/queue-next-turn窄输入绑定，因为它直接决定provider-input causal suffix
 >
-> 明确排除：memory 子系统重设计、Oxigraph/SPARQL、旧 EventLog execution replay、coroutine/provider transport recovery、exact context-input audit、跨 Host terminal/subagent execution 恢复、Legacy Python REPL兼容恢复、standalone Canonical Inspector产品
+> 明确排除：memory 子系统重设计、Oxigraph/SPARQL、旧 EventLog execution replay、coroutine/provider transport recovery、exact context-input audit、跨Host provider-input generation/prefix accumulator恢复、跨 Host terminal/subagent execution 恢复、Legacy Python REPL兼容恢复、standalone Canonical Inspector产品
 
 ## 1. 文档目的
 
@@ -177,10 +177,10 @@ git grep -n 'TerminalMonitorTool' "$PRE_HARD_CUT" -- src tests
 | PHC-13 | 跨 turn 失败/中断提示 | **缺失**：turn 可标 interrupted，但下一轮 provider context 没有明确失败旁注 | “继续”时模型无法区分上一轮完整回答与空/半截失败输出 |
 | PHC-14 | Model-visible tool observation timing/freshness | **缺失**：数据库时间仍可能存在，但不再进入 provider-visible typed observation | 模型无法判断旧工具结果何时观测、耗时多久、是否可能过期 |
 | PHC-15 | Capability catalog 与真实 executor 一致性 | **仍不闭合，但Plan漂移已由Round 4关闭**：29 个descriptor中，9个direct、4个flat subagent、8个memory及3个Plan control已有production binding；剩余5个均属于旧hierarchical task-graph缺口 | Round 1/2/4已分别闭合`artifact_read`、Terminal与Plan；dead descriptor只剩PHC-10任务图能力族 |
-| PHC-16 | Go TUI S1–S3及各恢复轮次UI | **未来主要产品面，明确延后**：Round 4只冻结Python Protocol/canonical边界，不把Go selector、question/draft review或客户端exact-join计入activation | 最终承接会话观察、交互与控制；composer/copy/paste/notice及Plan/MCP等能力族UI另行实施 |
-| PHC-17 | Structured model-input / context compilation | **已恢复（Round 3）**：exact canonical reader继续拥有conversation truth；provider-neutral immutable compiler统一五类typed source、scope-frozen tool surface、target estimator、channel与确定性降级；adapter只做exact join、ephemeral thaw与最终validation | 模型稳定获得runtime environment/clock与capability source；catalog/tool-result可按预算降级且canonical transcript/tool pairing不变；future Plan/MCP/failure/timing/compaction可复用同一source边界 |
+| PHC-16 | Go TUI S1–S3及各恢复轮次UI | **未来主要产品面，整体明确延后；Round 3.1有窄例外**：Round 4只冻结Python Protocol/canonical边界，不把Go selector、question/draft review或客户端exact-join计入activation；Round 3.1仅补既有command kind上的busy Enter steer与Tab queue-next-turn | 最终承接会话观察、交互与控制；composer/copy/paste/notice及Plan/MCP等能力族UI另行实施 |
+| PHC-17 | Structured model-input / context compilation | **已恢复（Round 3 + Round 3.1）**：exact canonical reader、provider-neutral compiler、scope-frozen tool surface、target estimator与typed allocation已恢复；Host-scoped ROOT/child epoch保证同scope同epoch的SYSTEM/tools不变、messages只追加，dynamic source与历史tool-result表示不再重写 | busy `Enter` steer exact active ROOT，`Tab`排队future `NEW_TURN`；Host replacement从canonical rows冷启动，不恢复durable generation、provider remote state或prefix replay |
 
-Round 3已经闭合PHC-17的克制、process-local typed compilation boundary。PHC-07 compaction及其他model-visible能力应在该边界上生长，避免每个产品族再次各自拼接system/user消息和预算逻辑；它们仍分别保持open，不能因compiler已存在而误报恢复。Permission不另立PHC：通用动态mode能力表现为“发送前选择、发送时冻结本次run”，frozen snapshot正是该选择的accepted form；Plan-scoped overlay仍由PHC-09拥有，并在snapshot冻结前强制收窄effective mode。
+Round 3与Round 3.1已经闭合PHC-17的克制、process-local typed compilation与跨model-call append-only lifecycle。同一Host、同一ROOT/child scope、同一epoch满足`system/tools不变 + messages只追加`；它不新增durable真值，Host replacement仍cold start。PHC-07 compaction及其他model-visible能力应在该边界上生长，避免每个产品族再次各自拼接system/user消息和预算逻辑；它们仍分别保持open。Permission不另立PHC：通用动态mode能力表现为“发送前选择、发送时冻结本次run”，frozen snapshot正是该选择的accepted form；Plan-scoped overlay仍由PHC-09拥有，并在snapshot冻结前强制收窄effective mode。
 
 ## 4. Terminal：hard-cut 前后三工具产品真值
 
@@ -1002,20 +1002,21 @@ PHC-17不是“把system prompt写得更长”，也不是PHC-07 compaction的�
 
 > 基于exact canonical conversation cut与当前已授权的process-local/domain facts，决定哪些事实以什么顺序、channel和有界表示进入本次provider input。
 
-[前后代码确认] hard-cut前这是一条已经接入真实Agent model loop的production路径；hard-cut曾只保留canonical transcript rematerialization、最终provider materialization和一个很薄的skill prompt composer。Round 3已在当前canonical Kernel上重新建立provider-neutral typed compiler，而没有恢复旧durable context-input audit、provider-input replay或execution recovery graph，因此本项现判断为**已恢复**。机器证据见[`round3_structured_model_input_compiler_activation.json`](benchmarks/suites/core/v1/round3_structured_model_input_compiler_activation.json)。
+[前后代码确认] hard-cut前这是一条已经接入真实Agent model loop的production路径；hard-cut曾只保留canonical transcript rematerialization、最终provider materialization和一个很薄的skill prompt composer。Round 3已在当前canonical Kernel上重新建立provider-neutral typed compiler，而没有恢复旧durable context-input audit、provider-input replay或execution recovery graph；机器证据见[`round3_structured_model_input_compiler_activation.json`](benchmarks/suites/core/v1/round3_structured_model_input_compiler_activation.json)。Round 3.1随后恢复同一Host、同一exact scope内的append-only source/tool-result lifecycle，机器证据见[`round3_1_provider_input_prefix_continuity_activation.json`](benchmarks/suites/core/v1/round3_1_provider_input_prefix_continuity_activation.json)。PHC-17现为**完整恢复**；跨Host prefix restore与exact historical request replay仍是明确不承诺的减法边界，不计缺口。
 
-### 16.1 必须分开的六个边界
+### 16.1 必须分开的七个边界
 
 | 边界 | 当前代码事实 | 本索引判断 |
 |---|---|---|
 | exact canonical conversation cut | [reader.py](src/pulsara_agent/conversation_kernel/reader.py)在repeatable-read transaction中读取binding revision、entry cut、scope、blocks、tool attempt/result与blob content，并冻结provider-neutral immutable facts | **唯一conversation input truth owner** |
 | transcript/provider lowering | [lowering.py](src/pulsara_agent/model_input/lowering.py)只消费frozen canonical facts，保持user/assistant/tool顺序、tool pairing、provider-only unknown closure与late outcome；assistant parent manifest不再泄漏正文 | **已恢复并绑定canonical reader** |
 | provider materialization与最终估算 | [direct_model.py](src/pulsara_agent/conversation_kernel/direct_model.py)保留transport-bearing `PreparedKernelModelCall`，exact join后才thaw一次性`LLMContext`并执行最终validation | **compiler estimate与pre-send estimate exact equal** |
-| first-party context source | [context_sources.py](src/pulsara_agent/conversation_kernel/context_sources.py)独立产生BASE_SYSTEM、RUNTIME_ENVIRONMENT、RUNTIME_CLOCK、CAPABILITY_CATALOG与ACTIVE_SKILL；environment/clock来自一次temporal capture | **五类初始source已恢复** |
+| first-party context source | [context_sources.py](src/pulsara_agent/conversation_kernel/context_sources.py)当前独立产生BASE_SYSTEM、RUNTIME_ENVIRONMENT、RUNTIME_CLOCK、RUN_PERMISSION、PLAN_HANDOFF、PLAN_WORKFLOW、CAPABILITY_CATALOG与ACTIVE_SKILL；environment/clock来自一次temporal capture，permission/Plan来自同一canonical compile snapshot | **Round 3五类基础source与Round 4三类workflow source均已接入** |
 | typed multi-source allocation | [compiler.py](src/pulsara_agent/model_input/compiler.py)拥有channel、placement、degradation priority、budget class、render mode、physical bounds、deterministic degrade/omit与bounded report | **PHC-17核心能力已恢复** |
+| process-local prefix lifecycle | Host持有一个ROOT epoch及每个active child各自的epoch；dynamic source形成causal runtime-observation suffix，旧canonical item与旧tool-result render保持冻结；steer planning复用prefix estimate、执行cooperative deadline与累计工作量上限；Plan handoff occurrence使用exact transition/carrier identity；adapter-final执行strict-prefix proof | **Round 3.1已恢复；仍不持久化prefix或provider remote state** |
 | exact historical request audit/replay | 不保存每次dispatch的逐byte compiled input，也不靠其reopen | **既定减法，不计缺口** |
 
-Round 3恢复的不是一个更长的prompt builder，而是provider payload构造之前的typed、可预算、可组合且不创造durable真值的编译边界。Tool surface以process-local access/borrow把同一descriptor/schema/executor binding闭合到authorize、attempt acceptance与physical invoke；binding漂移typed fail，不按同名tool切换executor。
+Round 3恢复的不是一个更长的prompt builder，而是provider payload构造之前的typed、可预算、可组合且不创造durable真值的编译边界。Tool surface以process-local access/borrow把同一descriptor/schema/executor binding闭合到authorize、attempt acceptance与physical invoke；binding漂移typed fail，不按同名tool切换executor。Round 3.1也不能建立第二个compiler；它只给这条现有路径增加process-local append lifecycle。
 
 ### 16.2 hard-cut 前已存在的production能力
 
@@ -1053,27 +1054,32 @@ production source builder至少实际处理过：
 ProviderSafePoint.freeze exact canonical cut
     -> CanonicalProviderInputReader.read_frozen_snapshot
     -> PreparedKernelToolSurface(scope-filtered descriptor/schema/binding)
-    -> DirectKernelModelPort.prepare_call(target + provider-neutral estimator fact)
-    -> KernelContextSourceCollector.collect(five typed sources)
-    -> StructuredModelInputCompiler.compile
-    -> FrozenCompiledModelInput
-    -> process-local surface borrow
-    -> DirectKernelModelPort exact join + ephemeral thaw + one physical stream
+    -> KernelContextSourceCollector.freeze one causal source cut
+    -> StructuredModelInputCompiler.compile against EMPTY/INSTALLED predecessor
+    -> FrozenCompiledModelInput + process-local surface borrow
+    -> DirectKernelModelPort.preflight
+    -> Host continuity owner compare-and-swap
+    -> exact join + ephemeral thaw + open_once
 ```
 
 该路径现已兑现：
 
 - ROOT与SUBAGENT_TASK共用同一compiler；child surface不advertise ROOT-only `terminal_monitor`；
-- base、runtime environment、runtime clock、capability catalog与active skill是独立typed source，SYSTEM placement固定为`base -> runtime -> catalog -> active`；
+- 八类first-party fact均为独立typed source；只有稳定`BASE_SYSTEM`保留在SYSTEM root，environment、clock、permission、Plan handoff/workflow、catalog与active skill均按closed lifecycle成为causally appended runtime observation；
 - environment与clock只从一次`RuntimeTemporalCapture`派生，Terminal cwd通过窄snapshot port读取；
 - 只有最后一个ROOT human prompt可做textual skill activation；SUBAGENT objective、Terminal observation、tool result、clock与runtime source都没有该authority；
-- current user、history order、tool pairing、closure与late result由canonical reader保护，compiler只允许降级source和tool-result body；
+- current user、history order、tool pairing、closure与late result由canonical reader保护；compiler只允许对尚未安装的新suffix降级，已安装prefix与旧tool-result表示不再重写；
 - tool schema与canonical tool-call arguments使用递归冻结JSON；compiler输出之后的原对象修改不能改变dispatch；
 - compiler在provider open前检查source、variant、aggregate、schema、diagnostic、tool-result和64 MiB logical working-set上界；token budget由resolved target estimator决定；
 - public operational observation只含closed code、count、mode与opaque fingerprint，不保存full prompt、path、tool argument或secret；
-- optional source/hook失败不否定canonical事实；protected input超限则typed fail且provider open count为0。
+- optional source/hook失败不否定canonical事实；protected input或fixed prefix超限则typed fail且provider open count为0；
+- DirectModel按`preflight -> continuity CAS -> open_once`执行；CAS之前完成全部validation，失败不会打开试探性provider stream；
+- busy期间`Enter`向exact active ROOT提交steer，`Tab`排队future `NEW_TURN`；同lane FIFO、cross-lane不互锁，accepted steer按三重quote消费最长FIFO前缀并只触发一次后续model call；
+- prompt与steer的稳定candidate均使用`FULL | NONE | CONFLICT`确认ACK-unknown；steer consume FULL后只重读canonical exact join并提升同一precompiled input。
 
-### 16.4 恢复后的产品影响与仍开放边界
+Round 3.1的本地adapter-final回归现已证明：同一Host、同一exact scope、同一epoch连续调用的SYSTEM与tools逐项相等，messages要么相等、要么只追加suffix；clock、cwd、permission、Plan、catalog与skill变化不会改写前序。真实provider dogfood也观察到cached input，但remote比例只受provider cohort、TTL与服务端策略影响，继续只作operational observation，不替代本地strict-prefix正确性门控。
+
+### 16.4 已恢复的产品影响与仍开放边界
 
 PHC-17恢复后：
 
@@ -1082,6 +1088,8 @@ PHC-17恢复后：
 - Round 1 tool-result artifact可在`COMPACT/REF_ONLY`中继续引导`artifact_read`，不改写canonical result或重跑effect；
 - provider adapter不再决定source与预算；Responses和Chat Completions共享同一个frozen compiled truth；
 - future PHC-07/08/09/13/14获得共同接入层，不再需要各自拼接隐式prompt。
+
+以上单次compile与prefix continuity现已共同闭合。“模型稳定获得source”同时表示每call得到合法事实，并且同epoch内preceding provider-visible prefix不被后续动态事实或预算决策改写。
 
 这些future source的domain truth仍未恢复，不能由PHC-17代替：
 
@@ -1093,9 +1101,9 @@ PHC-17恢复后：
 - PHC-08/09/10各自拥有MCP、Plan、subagent domain truth；PHC-17不得替它们创造或判断事实。
 - PHC-09拥有Plan-scoped read-only overlay；send-time frozen permission snapshot是用户逐run动态选择经过该overlay收窄后的accepted form；PHC-17只呈现Plan guidance，不能授权、拒绝或恢复physical effect权限。
 
-### 16.5 Activation与后续架构边界
+### 16.5 Round 3 / 3.1 activation与后续架构边界
 
-Round 3已激活PHC-17，并保持其他model-visible能力只能按以下依赖方向接入：
+Round 3与Round 3.1已完整激活PHC-17，并保持其他model-visible能力只能按以下依赖方向接入：
 
 ```text
 canonical/domain facts
@@ -1118,7 +1126,7 @@ compaction / Plan / MCP / failure note / timing
 - ordinary hook、TUI或Inspector失败不能否定compile或provider call；若未来需要inspect，只读取bounded operational report或重新从canonical facts计算；
 - 恢复typed compiler本身不要求增加Committed/Live event、subject slot、append guard、table或durable job；若后续某个独立产品transition确需新增event，应由对应PHC单独论证。
 
-Round 3的具体DTO、target estimator、source registry、physical bounds与activation gate由[`ROUND_3_STRUCTURED_MODEL_INPUT_COMPILER_IMPLEMENTATION_SPEC.zh.md`](ROUND_3_STRUCTURED_MODEL_INPUT_COMPILER_IMPLEMENTATION_SPEC.zh.md)冻结。任何future source只能投影其domain owner已经接受的事实，不得把compiler扩成durable input authority、第二个conversation reader或execution recovery graph。
+Round 3的具体DTO、target estimator、source registry、physical bounds与activation gate由[`ROUND_3_STRUCTURED_MODEL_INPUT_COMPILER_IMPLEMENTATION_SPEC.zh.md`](ROUND_3_STRUCTURED_MODEL_INPUT_COMPILER_IMPLEMENTATION_SPEC.zh.md)冻结。Round 3.1的Host-scoped epoch、source lifecycle、suffix-only degradation、dispatch linearization及cold-reopen边界由[`ROUND_3_1_PROVIDER_INPUT_PREFIX_CONTINUITY_IMPLEMENTATION_SPEC.zh.md`](ROUND_3_1_PROVIDER_INPUT_PREFIX_CONTINUITY_IMPLEMENTATION_SPEC.zh.md)冻结。任何future source只能投影其domain owner已经接受的事实，不得把compiler扩成durable input authority、第二个conversation reader或execution recovery graph。
 
 ### 16.6 hard-cut前Context Compiler参考代码
 
@@ -1130,6 +1138,40 @@ Round 3的具体DTO、target estimator、source registry、physical bounds与act
 - production接线参考：`5b7ad9f7:src/pulsara_agent/runtime/agent.py`中两次`compile_context_from_facts()`调用，以及`runtime/context_input/live.py::prepare_live_context_snapshot()`；只能抽取model-call前的事实准备与编译顺序。
 - 关键回归：`5b7ad9f7:tests/test_agent_runtime_loop.py::test_agent_runtime_builds_immutable_context_input_before_compile`验证workspace root与current date真实进入provider context；`5b7ad9f7:tests/test_provider_input_hard_cut.py::test_system_prompt_retains_per_source_fragment_ownership`验证source ownership；同文件`test_compiler_omission_is_final_provider_payload_truth`验证预算省略与最终wire一致；`5b7ad9f7:tests/test_context_candidates.py`覆盖candidate lifecycle、forgery rejection和bounded cache。
 - 禁止照搬：`runtime/context_input/audit_*`、`commit.py`、`replay.py`、`event_slice.py`，以及`runtime/provider_input/`中的generation store、continuation/recovery、resident vector和exact audit graph。它们承载的是已删除durability/recovery承诺，不是PHC-17恢复条件。
+
+### 16.7 Round 3.1：Process-local provider-input prefix continuity
+
+Round 3.1恢复的产品不变量是：
+
+```text
+same Host + same exact ROOT/SUBAGENT_TASK scope + same epoch
+
+system[n + 1] == system[n]
+tools[n + 1]  == tools[n]
+messages[n + 1] == messages[n] || append_only_suffix
+```
+
+它采用以下最小边界：
+
+- continuity owner由Host持有，跨同Host的ROOT turn/automatic continuation复用；每个subagent task单独持有；
+- 只有stable `BASE_SYSTEM`留在SYSTEM root；clock、environment、permission、Plan、catalog和active skill改为causally appended typed user-role runtime observation；
+- runtime observation使用closed canonical JSON codec，source VALUE/clear/unavailable/no-op及call/turn/one-shot lifecycle为closed contract；已有stateful head变化时必须安装minimum replacement/invalidation或fail，不能让旧状态悄悄残留；
+- configured skill在ROOT/child每个新turn重算，textual activation只来自exact ROOT human prompt，不能泄漏进Plan/Terminal等non-human continuation；
+- cold/reset/compatible路径都使用explicit process-local dispatch anchor，不从全history猜最后一个user；同一safe point的多项steer以bounded FIFO accepted-entry batch交付，latest steer是唯一dispatch/textual-skill anchor；
+- busy输入采用双入口：`Enter`向exact active ROOT turn提交steer，显式`Tab`排队future `NEW_TURN`；两种既有delivery mode各自在自己的lane内FIFO，**已accepted rows**的current-turn steer不会被future turn互锁，session-wide 128项admission cap仍可typed拒绝新输入；
+- prompt ingress必须以完整semantic candidate确认compatible command winner；steer consumption使用stable entry candidate与canonical row/event `FULL | NONE | CONFLICT` confirmation，不能因commit ACK unknown留下RUNNING turn而无physical runner；
+- steer quote必须在canonical mutation前冻结base cut、EMPTY/INSTALLED predecessor、target、pinned tool surface与one-cut sources；多项steer保持独立canonical/provider user messages并共享一次后续model call，但每个safe point只消费同时满足item count、canonical UTF-8 bytes与resulting epoch/target quote的FIFO最长前缀，FULL后只exact join并提升同一precompiled input；
+- pre-first-call steer以EMPTY predecessor与initial prompt共同形成一次call；single head无法容纳时，queue rejection、turn interruption、`PromptRejected`与`TurnInterrupted`由一个Host-writer transaction原子接受；
+- canonical reader的新item只lower一次，old tool-result render decision进入dispatch后冻结；
+- DirectModel必须显式`preflight -> continuity CAS -> open_once`；CAS permit由Host continuity owner以exact object identity密封签发，same-shape caller DTO不能打开transport；同一tool-surface borrow覆盖provider response、assistant acceptance和该响应的完整tool/result settlement；
+- first-party source registry的每个kind在compiler入口必须exactly one `VALUE | ABSENT`，ABSENT的contract/trust/budget/placement/degradation/lifecycle/disposition由closed binding重验；steer longest-first planning共享immutable base并只对unique base/suffix work计量，不能因重复试探较长prefix而在到达合法短前缀前虚假耗尽；
+- append planning input在compile前冻结，完整candidate只在compile后注册；initial/successor的所有pre-install失败分别回到EMPTY/old INSTALLED，不允许stuck PREPARED；
+- compiler只对new suffix做budget degradation；fixed prefix超过预算时等待PHC-07显式rewrite或在provider open前typed fail；
+- 合法reset只包括cold Host bootstrap、root/tool/model/provider-lowering变化和未来accepted context-binding rewrite；cache miss、turn、clock、permission与Plan变化不是reset理由；
+- 同一Host内客户端detach/reattach保持epoch；Host replacement后即使attach同一session也从canonical rows cold start，future session fork默认cold start；
+- 不新增表、event、job、guard、subject、blob或Protocol类型，Round 4 oracle保持`34/23/15/2/26/4`。
+
+这不是旧`ProviderInputGeneration`换名。hard-cut前约1.5万行provider-input primitive/package同时承担exact replay、Inspector、restart recovery、persistent vector、prepared abandonment和resident restore；Round 3.1明确排除这些职责。provider cache仍是best effort，hard correctness gate是本地adapter-final strict prefix，cached usage只作redacted dogfood evidence。
 
 ## 17. archived_docs 标题覆盖与结论
 
@@ -1168,7 +1210,7 @@ Round 3的具体DTO、target estimator、source registry、physical bounds与act
 - `PULSARA_PROMPT_CACHE_CONTRACT`；
 - `PULSARA_CONTEXT_TIMING_HEADER_PLAN`。
 
-结论：Context Compiler Input与ContextSource文档有明确历史产品证据，`5b7ad9f7`也存在真实production owner和tests，因而形成PHC-17；Round 3现已在canonical Kernel上恢复其产品语义。long-horizon/compaction与tool timing仍分别形成PHC-07/PHC-14。Exact context-input audit已明确不承诺，不计缺口；Prompt cache accounting仍只是provider优化，不替代typed compiler；Context Timing Header只有计划证据，未单列。
+结论：Context Compiler Input与ContextSource文档有明确历史产品证据，`5b7ad9f7`也存在真实production owner和tests，因而形成PHC-17；Round 3已在canonical Kernel上恢复单次typed compilation，Round 3.1继续恢复同Host同scope的append-only prefix lifecycle。long-horizon/compaction与tool timing仍分别形成PHC-07/PHC-14。Exact context-input audit及跨Hostprefix recovery已明确不承诺，不计缺口；provider cache accounting仍只是operational observation，不替代typed compiler或本地strict-prefix proof；Context Timing Header只有计划证据，未单列。
 
 ### 17.3 MCP 标题族
 
@@ -1305,6 +1347,6 @@ Round 3的具体DTO、target estimator、source registry、physical bounds与act
 
 PHC-11与PHC-12是例外处置：它们保留在索引中用于审计hard-cut事实，但不进入恢复backlog。前者所需的canonical观察能力、后者所涉及的Plan/MCP/approval等独立产品语义，最终由Go TUI及各自Kernel契约承接；不以恢复旧Python产品面为目标。
 
-Round 3已恢复PHC-17，Round 4已恢复PHC-09；两轮都没有恢复durable compiled-input audit、provider-input replay或旧generation recovery graph。PHC-07/08/13/14仍需各自规格化其domain truth。它们都只能把已接受事实投影进compiler，不能让compiler替代其authority。
+Round 3与Round 3.1已完整恢复PHC-17的typed compiler和process-local prefix continuity；Round 4已恢复PHC-09的Python Runtime/Host与Protocol后端。这些轮次都不恢复durable compiled-input audit、provider-input replay或旧generation recovery graph。PHC-07/08/13/14仍需各自规格化其domain truth。它们都只能把已接受事实投影进compiler，不能让compiler替代其authority。
 
 同样，后续恢复不能把`26 / 23 / 13 / 2`当作拒绝真实产品语义的永久配额。任何数量变化都必须经过上述closed contract审查，但“保持旧数字”不优先于“以正确的canonical/live边界完整表达产品能力”。

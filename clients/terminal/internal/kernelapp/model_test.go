@@ -687,6 +687,58 @@ func TestTrackedPromptDoesNotBlockSteerStopOrDetach(t *testing.T) {
 	}
 }
 
+func TestPromptEnterAndTabSelectIndependentDeliveryLanes(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		activeTurn string
+		key        tea.Key
+		wantKind   protocolv3.CommandKind
+		wantTarget string
+	}{
+		{"idle-enter", "", tea.Key{Code: tea.KeyEnter}, protocolv3.CommandKind_SUBMIT_PROMPT, ""},
+		{"idle-tab", "", tea.Key{Code: tea.KeyTab}, protocolv3.CommandKind_SUBMIT_PROMPT, ""},
+		{"busy-enter", "turn:active", tea.Key{Code: tea.KeyEnter}, protocolv3.CommandKind_STEER_ACTIVE_TURN, "turn:active"},
+		{"busy-tab", "turn:active", tea.Key{Code: tea.KeyTab}, protocolv3.CommandKind_SUBMIT_PROMPT, ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			model := New(fakeService{})
+			model.phase = phaseReady
+			model.role = protocolv3.AttachmentRole_ATTACHMENT_ROLE_CONTROLLER
+			model.height = 24
+			model.draft = []rune("next input")
+			model.cursor = len(model.draft)
+			if test.activeTurn != "" {
+				model.control = &protocolv3.CanonicalControl{ActiveTurns: []*protocolv3.ActiveTurnControl{{
+					TurnId: test.activeTurn, ScopeKind: protocolv3.ConversationScopeKind_ROOT,
+					Status: "RUNNING", AcceptedAtUtc: "2026-08-09T00:00:00Z",
+				}}}
+			}
+
+			updated, command := model.Update(tea.KeyPressMsg(test.key))
+			result := updated.(Model)
+			if command == nil || result.pending == nil {
+				t.Fatal("prompt key did not install a command")
+			}
+			if result.pending.kind != test.wantKind || result.pending.target != test.wantTarget {
+				t.Fatalf("got kind=%v target=%q, want kind=%v target=%q", result.pending.kind, result.pending.target, test.wantKind, test.wantTarget)
+			}
+		})
+	}
+}
+
+func TestReadyFooterAdvertisesIndependentPromptDeliveryLanes(t *testing.T) {
+	model := New(fakeService{})
+	model.phase = phaseReady
+	model.width, model.height = 120, 24
+	view := model.render()
+	if !strings.Contains(view, "Enter send/steer") {
+		t.Fatalf("ready footer hid active-turn steer entry: %q", view)
+	}
+	if !strings.Contains(view, "Tab queue") {
+		t.Fatalf("ready footer hid future-turn queue entry: %q", view)
+	}
+}
+
 func TestThreeGapKindsHaveSeparateRecoveryScopes(t *testing.T) {
 	for _, test := range []struct {
 		kind      protocolv3.ObservationGapKind

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone, tzinfo
 import json
 from pathlib import Path
@@ -10,7 +10,10 @@ from typing import Callable, Protocol
 
 from pulsara_agent.capability.provider import CapabilityProjectionOutput
 from pulsara_agent.capability.types import CapabilityDiagnostic
-from pulsara_agent.conversation_kernel.capability import KernelCapabilityComposer
+from pulsara_agent.conversation_kernel.capability import (
+    FrozenKernelCapabilityProjectionInput,
+    KernelCapabilityComposer,
+)
 from pulsara_agent.model_input.contracts import (
     CapabilityActivationSubjectKind,
     CollectedContextSources,
@@ -19,9 +22,12 @@ from pulsara_agent.model_input.contracts import (
     ContextPublicDiagnosticCode,
     ContextRenderMode,
     ContextRenderVariant,
+    ContextSourceAbsentFact,
+    ContextSourceAbsenceKind,
     ContextSourceCandidate,
     ContextSourceCollectionDiagnostic,
     ContextSourceKind,
+    ContextSourceLifecycle,
     ContextTrustClass,
     FrozenModelToolSurface,
     FrozenCanonicalCompileSnapshot,
@@ -51,6 +57,23 @@ class ContextSourceCollectorPort(Protocol):
         deadline_monotonic: float | None = None,
     ) -> CollectedContextSources: ...
 
+    def freeze_non_trigger_sources(
+        self,
+        *,
+        tool_surface: FrozenModelToolSurface,
+        canonical_facts: FrozenCanonicalCompileSnapshot,
+        deadline_monotonic: float | None = None,
+    ) -> "FrozenNonTriggerContextSources": ...
+
+    def complete_frozen_sources(
+        self,
+        frozen: "FrozenNonTriggerContextSources",
+        *,
+        activation_subject: CapabilityActivationSubjectKind | None,
+        activation_text: str,
+        deadline_monotonic: float | None = None,
+    ) -> CollectedContextSources: ...
+
 
 @dataclass(frozen=True, slots=True)
 class _SourceBinding:
@@ -63,6 +86,7 @@ class _SourceBinding:
     degradation: int
     modes: tuple[ContextRenderMode, ...]
     implementation_contract_version: str
+    lifecycle: ContextSourceLifecycle
 
     @property
     def contract_fingerprint(self) -> str:
@@ -77,14 +101,28 @@ class _SourceBinding:
                 "placement": self.placement,
                 "degradation": self.degradation,
                 "modes": tuple(mode.value for mode in self.modes),
+                "lifecycle": self.lifecycle.value,
             },
         )
+
+
+@dataclass(frozen=True, slots=True)
+class FrozenNonTriggerContextSources:
+    candidates: tuple[ContextSourceCandidate, ...]
+    absent_facts: tuple[ContextSourceAbsentFact, ...]
+    diagnostics: tuple[ContextSourceCollectionDiagnostic, ...]
+    available_tool_names: frozenset[str]
+    registry_fingerprint: str
+    freeze_fingerprint: str
+    capability_projection_input: FrozenKernelCapabilityProjectionInput | None = field(
+        default=None, repr=False
+    )
 
 
 _BINDINGS = (
     _SourceBinding(
         ContextSourceKind.BASE_SYSTEM,
-        "pulsara.base-system.v1",
+        "pulsara.base-system.prefix-continuity.v2",
         ContextChannel.SYSTEM,
         ContextTrustClass.ROOT_INSTRUCTION,
         ContextBudgetClass.MUST_KEEP,
@@ -92,83 +130,91 @@ _BINDINGS = (
         0,
         (ContextRenderMode.FULL,),
         "pulsara.base-system-collector.v1",
+        ContextSourceLifecycle.EPOCH_ROOT,
     ),
     _SourceBinding(
         ContextSourceKind.RUNTIME_ENVIRONMENT,
         "pulsara.runtime-environment.v1",
-        ContextChannel.SYSTEM,
+        ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.TRUSTED_RUNTIME_FACT,
         ContextBudgetClass.MUST_KEEP,
         10,
         10,
         (ContextRenderMode.FULL, ContextRenderMode.COMPACT),
         "pulsara.runtime-environment-collector.v1",
+        ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
     ),
     _SourceBinding(
         ContextSourceKind.RUNTIME_CLOCK,
         "pulsara.runtime-clock.v1",
-        ContextChannel.LEADING_OBSERVATION,
+        ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.TRUSTED_RUNTIME_FACT,
         ContextBudgetClass.OPTIONAL,
-        0,
+        90,
         80,
         (ContextRenderMode.FULL, ContextRenderMode.COMPACT),
         "pulsara.runtime-clock-collector.v1",
+        ContextSourceLifecycle.CALL_APPEND,
     ),
     _SourceBinding(
         ContextSourceKind.RUN_PERMISSION,
         "pulsara.run-permission.v1",
-        ContextChannel.SYSTEM,
-        ContextTrustClass.AUTHORIZED_CAPABILITY_CONTEXT,
+        ContextChannel.RUNTIME_OBSERVATION,
+        ContextTrustClass.AUTHORIZED_RUNTIME_GUIDANCE,
         ContextBudgetClass.MUST_KEEP,
-        14,
+        20,
         12,
         (ContextRenderMode.FULL, ContextRenderMode.COMPACT),
         "pulsara.run-permission-collector.v1",
+        ContextSourceLifecycle.TURN_APPEND,
     ),
     _SourceBinding(
         ContextSourceKind.PLAN_HANDOFF,
         "pulsara.plan-handoff.v1",
-        ContextChannel.SYSTEM,
-        ContextTrustClass.TRUSTED_RUNTIME_FACT,
+        ContextChannel.RUNTIME_OBSERVATION,
+        ContextTrustClass.AUTHORIZED_RUNTIME_GUIDANCE,
         ContextBudgetClass.MUST_KEEP,
-        15,
+        30,
         11,
         (ContextRenderMode.FULL, ContextRenderMode.COMPACT),
         "pulsara.plan-handoff-collector.v1",
+        ContextSourceLifecycle.ONE_SHOT,
     ),
     _SourceBinding(
         ContextSourceKind.PLAN_WORKFLOW,
         "pulsara.plan-workflow.v1",
-        ContextChannel.SYSTEM,
-        ContextTrustClass.ROOT_INSTRUCTION,
+        ContextChannel.RUNTIME_OBSERVATION,
+        ContextTrustClass.AUTHORIZED_RUNTIME_GUIDANCE,
         ContextBudgetClass.MUST_KEEP,
-        16,
+        40,
         10,
         (ContextRenderMode.FULL, ContextRenderMode.COMPACT),
         "pulsara.plan-workflow-collector.v1",
+        ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
     ),
     _SourceBinding(
         ContextSourceKind.CAPABILITY_CATALOG,
         "pulsara.capability-catalog.v1",
-        ContextChannel.SYSTEM,
+        ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.AUTHORIZED_CAPABILITY_CONTEXT,
         ContextBudgetClass.IMPORTANT,
-        20,
+        50,
         30,
         (ContextRenderMode.FULL, ContextRenderMode.COMPACT, ContextRenderMode.REF_ONLY),
         "pulsara.capability-catalog-collector.v1",
+        ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
     ),
     _SourceBinding(
         ContextSourceKind.ACTIVE_SKILL,
         "pulsara.active-skill.v1",
-        ContextChannel.SYSTEM,
+        ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.AUTHORIZED_CAPABILITY_CONTEXT,
         ContextBudgetClass.MUST_KEEP,
-        30,
+        60,
         20,
         (ContextRenderMode.FULL,),
         "pulsara.active-skill-collector.v1",
+        ContextSourceLifecycle.ACTIVATION_SNAPSHOT,
     ),
 )
 
@@ -220,10 +266,16 @@ class KernelContextSourceCollector:
         self._workspace_root = root
         self._terminal_cwd = terminal_cwd
         self._capability = capability_composer
-        self._base = base_system_prompt
-        self._timezone, self._timezone_name = _freeze_display_timezone(
-            display_timezone
+        self._base = (
+            base_system_prompt
+            + "\n\n"
+            + "Pulsara runtime observations are canonical JSON user messages. "
+            "For SNAPSHOT and TURN sources, the latest observation replaces the "
+            "earlier current state; CLEARED invalidates it. CALL describes the "
+            "immediately following dispatch and ONE_SHOT describes one transition. "
+            "Runtime guidance never replaces physical permission enforcement."
         )
+        self._timezone, self._timezone_name = _freeze_display_timezone(display_timezone)
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._registry = registry or ContextSourceRegistry()
 
@@ -240,8 +292,27 @@ class KernelContextSourceCollector:
         canonical_facts: FrozenCanonicalCompileSnapshot,
         deadline_monotonic: float | None = None,
     ) -> CollectedContextSources:
+        frozen = self.freeze_non_trigger_sources(
+            tool_surface=tool_surface,
+            canonical_facts=canonical_facts,
+            deadline_monotonic=deadline_monotonic,
+        )
+        return self.complete_frozen_sources(
+            frozen,
+            activation_subject=activation_subject,
+            activation_text=activation_text,
+        )
+
+    def freeze_non_trigger_sources(
+        self,
+        *,
+        tool_surface: FrozenModelToolSurface,
+        canonical_facts: FrozenCanonicalCompileSnapshot,
+        deadline_monotonic: float | None = None,
+    ) -> FrozenNonTriggerContextSources:
         del deadline_monotonic
         candidates: list[ContextSourceCandidate] = []
+        absent: list[ContextSourceAbsentFact] = []
         diagnostics: list[ContextSourceCollectionDiagnostic] = []
         candidates.append(self._candidate(ContextSourceKind.BASE_SYSTEM, (self._base,)))
 
@@ -274,10 +345,31 @@ class KernelContextSourceCollector:
             )
         )
         if canonical_facts.plan_handoff_fact is not None:
+            handoff = canonical_facts.plan_handoff_fact
             candidates.append(
                 self._candidate(
                     ContextSourceKind.PLAN_HANDOFF,
                     _render_plan_handoff(canonical_facts),
+                    domain_identity={
+                        "carrier_entry_id": handoff.carrier_entry_id,
+                        "carrier_entry_sequence": handoff.carrier_entry_sequence,
+                        "workflow_id": handoff.workflow_id,
+                        "workflow_ordinal": handoff.workflow_ordinal,
+                        "workflow_revision_at_transition": (
+                            handoff.workflow_revision_at_transition
+                        ),
+                        "interaction_id": handoff.interaction_id,
+                        "transition_semantic_digest": (
+                            handoff.transition_semantic_digest
+                        ),
+                    },
+                )
+            )
+        else:
+            absent.append(
+                self._absent(
+                    ContextSourceKind.PLAN_HANDOFF,
+                    ContextSourceAbsenceKind.NOT_APPLICABLE,
                 )
             )
         if canonical_facts.plan_workflow_fact is not None:
@@ -285,6 +377,13 @@ class KernelContextSourceCollector:
                 self._candidate(
                     ContextSourceKind.PLAN_WORKFLOW,
                     _render_plan_workflow(canonical_facts),
+                )
+            )
+        else:
+            absent.append(
+                self._absent(
+                    ContextSourceKind.PLAN_WORKFLOW,
+                    ContextSourceAbsenceKind.EXPLICIT_EMPTY,
                 )
             )
         if temporal is not None:
@@ -304,17 +403,69 @@ class KernelContextSourceCollector:
                     ),
                 )
             )
+        else:
+            absent.append(
+                self._absent(
+                    ContextSourceKind.RUNTIME_CLOCK,
+                    ContextSourceAbsenceKind.UNAVAILABLE,
+                )
+            )
 
+        tool_names = frozenset(tool.name for tool in tool_surface.tool_specs)
+        capability_projection_input = self._capability.freeze_projection_input(
+            available_tool_names=tool_names
+        )
+        fingerprint = context_fingerprint(
+            "pulsara:frozen-non-trigger-context-sources:v1",
+            {
+                "candidates": tuple(
+                    item.source_semantic_fingerprint for item in candidates
+                ),
+                "absent": tuple(item.domain_semantic_fingerprint for item in absent),
+                "diagnostics": tuple(
+                    (item.code.value, item.severity) for item in diagnostics
+                ),
+                "tools": tuple(sorted(tool_names)),
+                "capability_projection_input": (
+                    capability_projection_input.snapshot_fingerprint
+                ),
+                "registry": self._registry.fingerprint,
+            },
+        )
+        return FrozenNonTriggerContextSources(
+            candidates=tuple(candidates),
+            absent_facts=tuple(absent),
+            diagnostics=tuple(diagnostics),
+            available_tool_names=tool_names,
+            registry_fingerprint=self._registry.fingerprint,
+            freeze_fingerprint=fingerprint,
+            capability_projection_input=capability_projection_input,
+        )
+
+    def complete_frozen_sources(
+        self,
+        frozen: FrozenNonTriggerContextSources,
+        *,
+        activation_subject: CapabilityActivationSubjectKind | None,
+        activation_text: str,
+        deadline_monotonic: float | None = None,
+    ) -> CollectedContextSources:
+        del deadline_monotonic
+        if frozen.registry_fingerprint != self._registry.fingerprint:
+            raise ValueError("context source registry changed after source freeze")
+        candidates = list(frozen.candidates)
+        absent = list(frozen.absent_facts)
+        diagnostics = list(frozen.diagnostics)
         user_input = (
             activation_text
             if activation_subject is CapabilityActivationSubjectKind.ROOT_HUMAN_PROMPT
             else ""
         )
-        output = self._capability.resolve_projection(
+        if frozen.capability_projection_input is None:
+            raise ValueError("capability projection input was not frozen")
+        output = self._capability.resolve_projection_from_frozen(
+            frozen.capability_projection_input,
             user_input=user_input,
-            available_tool_names=frozenset(
-                tool.name for tool in tool_surface.tool_specs
-            ),
         )
         diagnostics.extend(_public_capability_diagnostics(output.diagnostics))
         if output.catalog_prompt:
@@ -335,15 +486,40 @@ class KernelContextSourceCollector:
                     ),
                 )
             )
-        if output.active_skill_prompt:
+        else:
+            absent.append(
+                self._absent(
+                    ContextSourceKind.CAPABILITY_CATALOG,
+                    ContextSourceAbsenceKind.EXPLICIT_EMPTY,
+                )
+            )
+        if activation_subject is None:
+            # A same-turn tool/result follow-up is not a new activation
+            # boundary.  Keep the installed ACTIVE_SKILL head unchanged while
+            # still allowing the capability catalog to advance.
+            absent.append(
+                self._absent(
+                    ContextSourceKind.ACTIVE_SKILL,
+                    ContextSourceAbsenceKind.NOT_APPLICABLE,
+                )
+            )
+        elif output.active_skill_prompt:
             candidates.append(
                 self._candidate(
                     ContextSourceKind.ACTIVE_SKILL,
                     (output.active_skill_prompt,),
                 )
             )
+        else:
+            absent.append(
+                self._absent(
+                    ContextSourceKind.ACTIVE_SKILL,
+                    ContextSourceAbsenceKind.EXPLICIT_EMPTY,
+                )
+            )
         return _collected(
             candidates=tuple(candidates),
+            absent_facts=tuple(absent),
             diagnostics=tuple(diagnostics),
             registry_fingerprint=self._registry.fingerprint,
         )
@@ -401,6 +577,8 @@ class KernelContextSourceCollector:
         self,
         kind: ContextSourceKind,
         texts: tuple[str, ...],
+        *,
+        domain_identity: object | None = None,
     ) -> ContextSourceCandidate:
         binding = self._registry.binding(kind)
         if len(texts) != len(binding.modes):
@@ -419,6 +597,19 @@ class KernelContextSourceCollector:
                 "variants": tuple(item.semantic_fingerprint for item in variants),
             },
         )
+        domain_semantic_fingerprint = (
+            semantic
+            if domain_identity is None
+            else context_fingerprint(
+                "context-source-domain-identity:v1",
+                {
+                    "source_kind": kind.value,
+                    "source_contract_fingerprint": binding.contract_fingerprint,
+                    "provider_visible_semantic_fingerprint": semantic,
+                    "domain_identity": domain_identity,
+                },
+            )
+        )
         return ContextSourceCandidate(
             source_kind=kind,
             source_instance_id=instance_id,
@@ -431,6 +622,35 @@ class KernelContextSourceCollector:
             placement_ordinal=binding.placement,
             degradation_priority=binding.degradation,
             variants=variants,
+            lifecycle=binding.lifecycle,
+            domain_semantic_fingerprint=domain_semantic_fingerprint,
+        )
+
+    def _absent(
+        self,
+        kind: ContextSourceKind,
+        absence_kind: ContextSourceAbsenceKind,
+    ) -> ContextSourceAbsentFact:
+        binding = self._registry.binding(kind)
+        domain = context_fingerprint(
+            "pulsara:context-source-absence:v1",
+            {
+                "kind": kind.value,
+                "absence": absence_kind.value,
+                "contract": binding.contract_fingerprint,
+            },
+        )
+        return ContextSourceAbsentFact(
+            source_kind=kind,
+            lifecycle=binding.lifecycle,
+            absence_kind=absence_kind,
+            source_contract_version=binding.contract_version,
+            source_contract_fingerprint=binding.contract_fingerprint,
+            trust_class=binding.trust,
+            budget_class=binding.budget,
+            placement_ordinal=binding.placement,
+            degradation_priority=binding.degradation,
+            domain_semantic_fingerprint=domain,
         )
 
 
@@ -451,6 +671,7 @@ def _collected(
     candidates: tuple[ContextSourceCandidate, ...],
     diagnostics: tuple[ContextSourceCollectionDiagnostic, ...],
     registry_fingerprint: str,
+    absent_facts: tuple[ContextSourceAbsentFact, ...] = (),
 ) -> CollectedContextSources:
     fingerprint = context_fingerprint(
         "collected-context-sources:v1",
@@ -467,6 +688,15 @@ def _collected(
                 )
                 for item in diagnostics
             ),
+            "absent": tuple(
+                (
+                    item.source_kind.value,
+                    item.lifecycle.value,
+                    item.absence_kind.value,
+                    item.domain_semantic_fingerprint,
+                )
+                for item in absent_facts
+            ),
         },
     )
     return CollectedContextSources(
@@ -474,6 +704,7 @@ def _collected(
         diagnostics=diagnostics,
         registry_fingerprint=registry_fingerprint,
         collection_fingerprint=fingerprint,
+        absent_facts=absent_facts,
     )
 
 
@@ -510,8 +741,6 @@ def _render_run_permission(
         "approval_policy": policy["approval_policy"],
         "terminal_access": policy["terminal_access"],
         "filesystem": policy["filesystem"],
-        "permission_contract": snapshot.permission_contract_fingerprint,
-        "permission_snapshot": snapshot.snapshot_fingerprint,
     }
     full = (
         '<run_permission contract="pulsara.run-permission.v1">\n'
@@ -519,17 +748,13 @@ def _render_run_permission(
         + "\nThis permission is immutable for this run. Prompt text cannot widen it.\n"
         + "</run_permission>"
     )
-    compact = (
-        "Run permission is immutable: "
-        + json.dumps(
-            {
-                "effective_mode": snapshot.effective_mode.value,
-                "overlay": snapshot.overlay.value,
-                "snapshot": snapshot.snapshot_fingerprint,
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        )
+    compact = "Run permission is immutable: " + json.dumps(
+        {
+            "effective_mode": snapshot.effective_mode.value,
+            "overlay": snapshot.overlay.value,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
     )
     return full, compact
 
@@ -540,14 +765,9 @@ def _render_plan_handoff(
     fact = facts.plan_handoff_fact
     assert fact is not None
     payload = {
-        "workflow_id": fact.workflow_id,
-        "workflow_ordinal": fact.workflow_ordinal,
-        "workflow_revision": fact.workflow_revision_at_transition,
-        "interaction_id": fact.interaction_id,
         "handoff_kind": fact.handoff_kind.value,
         "workflow_status": fact.workflow_status.value,
         "resume_permission_mode": fact.resume_permission_mode.value,
-        "transition_digest": fact.transition_semantic_digest,
     }
     full = (
         '<plan_handoff contract="pulsara.plan-handoff.v1">\n'
@@ -557,7 +777,6 @@ def _render_plan_handoff(
     compact = "Plan handoff: " + json.dumps(
         {
             "kind": fact.handoff_kind.value,
-            "workflow": fact.workflow_id,
             "status": fact.workflow_status.value,
         },
         sort_keys=True,
@@ -576,20 +795,10 @@ def _render_plan_workflow(
         "This ROOT run is read-only. Investigate with read-only tools; use "
         "ask_plan_question only for blocking choices and exit_plan to submit the "
         "complete draft. Do not claim that Plan has ended in ordinary prose.\n"
-        + json.dumps(
-            {
-                "workflow_id": fact.workflow_id,
-                "workflow_ordinal": fact.workflow_ordinal,
-                "workflow_revision": fact.current_workflow_revision,
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        + "\n</plan_workflow>"
+        + "</plan_workflow>"
     )
     compact = (
-        "Plan active: read-only; ask_plan_question for blockers; exit_plan for draft. "
-        f"workflow={fact.workflow_id} revision={fact.current_workflow_revision}"
+        "Plan active: read-only; ask_plan_question for blockers; exit_plan for draft."
     )
     return full, compact
 

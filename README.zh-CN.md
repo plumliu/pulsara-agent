@@ -124,7 +124,19 @@ canonical Terminal-observation 契约；当前 baseline/catalog identity 与验�
 [`round2_terminal_runtime_activation.json`](benchmarks/suites/core/v1/round2_terminal_runtime_activation.json)。
 Round 3 不改变数据库 universe；其 process-local compiler 与双 provider
 验证记录在
-[`round3_structured_model_input_compiler_activation.json`](benchmarks/suites/core/v1/round3_structured_model_input_compiler_activation.json)。旧 v13
+[`round3_structured_model_input_compiler_activation.json`](benchmarks/suites/core/v1/round3_structured_model_input_compiler_activation.json)。
+Round 3.1 增加 Host-scoped、process-local provider-input continuity epoch：在
+同一 exact ROOT 或 child scope 内，system prompt 与 tool surface 保持不变，
+canonical conversation fact 和 typed runtime observation 只作为 message suffix
+追加。busy `Enter` steer exact active ROOT turn，`Tab`排队 future new turn。
+Host replacement 只从 canonical rows 冷启动，不持久化 provider conversation、
+prefix replay 或 remote response identity。Steer prefix planning复用已安装prefix
+estimate，共享一个cooperative absolute deadline；unique-work quote不会为每个
+nested-prefix trial重复收取同一immutable base。provider open还必须消费Host
+continuity owner密封签发的exact one-shot permit对象，compiler则强制每种
+first-party source恰好一个VALUE或ABSENT branch；
+Plan handoff显示正文与exact canonical transition identity相互分离。证据记录在
+[`round3_1_provider_input_prefix_continuity_activation.json`](benchmarks/suites/core/v1/round3_1_provider_input_prefix_continuity_activation.json)。旧 v13
 数据库只会得到 `schema_migration_universe_reset_required`，不会被在线导入、
 翻译或升级。请严格遵守
 [clean-baseline runbook](STAGE_5_CLEAN_BASELINE_RUNBOOK.zh.md)，没有针对 exact

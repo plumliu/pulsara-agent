@@ -14,6 +14,11 @@ from pulsara_agent.model_input.contracts import (
     StructuredModelInputLimits,
     ToolResultProviderRenderMode,
 )
+from pulsara_agent.model_input.continuity import (
+    SourceObservationLifecycle,
+    SourceObservationPresence,
+    encode_runtime_observation,
+)
 from pulsara_agent.ports.artifact import ToolOutputArtifactDisposition
 from pulsara_agent.primitives.context import canonical_json_bytes
 
@@ -121,7 +126,24 @@ def render_source_observation(candidate: ContextSourceCandidate, text: str) -> s
 def source_variant_message(candidate: ContextSourceCandidate, text: str) -> LLMMessage:
     if candidate.channel is ContextChannel.SYSTEM:
         raise ValueError("SYSTEM source is not an ordered message")
-    return LLMMessage.user(render_source_observation(candidate, text))
+    lifecycle = {
+        "SNAPSHOT_ON_CHANGE": SourceObservationLifecycle.SNAPSHOT,
+        "CALL_APPEND": SourceObservationLifecycle.CALL,
+        "TURN_APPEND": SourceObservationLifecycle.TURN,
+        "TURN_SNAPSHOT": SourceObservationLifecycle.TURN,
+        "ACTIVATION_SNAPSHOT": SourceObservationLifecycle.ACTIVATION,
+        "ONE_SHOT": SourceObservationLifecycle.ONE_SHOT,
+    }.get(candidate.lifecycle.value)
+    if lifecycle is None:
+        raise ValueError("source lifecycle cannot be lowered as an observation")
+    return encode_runtime_observation(
+        source_kind=candidate.source_kind,
+        trust_class=candidate.trust_class,
+        lifecycle=lifecycle,
+        presence=SourceObservationPresence.VALUE,
+        contract_version=candidate.source_contract_version,
+        body=text,
+    )
 
 
 def _tool_result_variants(

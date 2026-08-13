@@ -60,6 +60,7 @@ class ModelInputScopeKind(StrEnum):
 
 class CapabilityActivationSubjectKind(StrEnum):
     ROOT_HUMAN_PROMPT = "ROOT_HUMAN_PROMPT"
+    ROOT_NON_HUMAN_TRIGGER = "ROOT_NON_HUMAN_TRIGGER"
     SUBAGENT_OBJECTIVE = "SUBAGENT_OBJECTIVE"
 
 
@@ -85,15 +86,31 @@ class ContextSourceKind(StrEnum):
 
 class ContextChannel(StrEnum):
     SYSTEM = "SYSTEM"
-    LEADING_OBSERVATION = "LEADING_OBSERVATION"
-    TRAILING_OBSERVATION = "TRAILING_OBSERVATION"
+    RUNTIME_OBSERVATION = "RUNTIME_OBSERVATION"
 
 
 class ContextTrustClass(StrEnum):
     ROOT_INSTRUCTION = "ROOT_INSTRUCTION"
     AUTHORIZED_CAPABILITY_CONTEXT = "AUTHORIZED_CAPABILITY_CONTEXT"
+    AUTHORIZED_RUNTIME_GUIDANCE = "AUTHORIZED_RUNTIME_GUIDANCE"
     TRUSTED_RUNTIME_FACT = "TRUSTED_RUNTIME_FACT"
     UNTRUSTED_OBSERVATION = "UNTRUSTED_OBSERVATION"
+
+
+class ContextSourceLifecycle(StrEnum):
+    EPOCH_ROOT = "EPOCH_ROOT"
+    SNAPSHOT_ON_CHANGE = "SNAPSHOT_ON_CHANGE"
+    CALL_APPEND = "CALL_APPEND"
+    TURN_APPEND = "TURN_APPEND"
+    TURN_SNAPSHOT = "TURN_SNAPSHOT"
+    ACTIVATION_SNAPSHOT = "ACTIVATION_SNAPSHOT"
+    ONE_SHOT = "ONE_SHOT"
+
+
+class ContextSourceAbsenceKind(StrEnum):
+    NOT_APPLICABLE = "NOT_APPLICABLE"
+    EXPLICIT_EMPTY = "EXPLICIT_EMPTY"
+    UNAVAILABLE = "UNAVAILABLE"
 
 
 class ContextBudgetClass(StrEnum):
@@ -140,6 +157,12 @@ class ModelInputCompileFailureKind(StrEnum):
     SOURCE_PHYSICAL_BOUND_EXCEEDED = "SOURCE_PHYSICAL_BOUND_EXCEEDED"
     COMPILE_WORKING_SET_EXCEEDED = "COMPILE_WORKING_SET_EXCEEDED"
     PROTECTED_TRANSCRIPT_EXCEEDS_BUDGET = "PROTECTED_TRANSCRIPT_EXCEEDS_BUDGET"
+    PREFIX_EPOCH_BUDGET_EXHAUSTED = "PREFIX_EPOCH_BUDGET_EXHAUSTED"
+    CANONICAL_PREFIX_CONFLICT = "CANONICAL_PREFIX_CONFLICT"
+    CANONICAL_DELTA_NOT_PROVIDER_SAFE = "CANONICAL_DELTA_NOT_PROVIDER_SAFE"
+    STATEFUL_SOURCE_REPLACEMENT_OVER_BUDGET = (
+        "STATEFUL_SOURCE_REPLACEMENT_OVER_BUDGET"
+    )
     REQUIRED_CONTEXT_EXCEEDS_BUDGET = "REQUIRED_CONTEXT_EXCEEDS_BUDGET"
     TOOL_SCHEMA_EXCEEDS_BUDGET = "TOOL_SCHEMA_EXCEEDS_BUDGET"
     FINAL_ESTIMATE_MISMATCH = "FINAL_ESTIMATE_MISMATCH"
@@ -150,6 +173,10 @@ class StructuredModelInputCompileError(ValueError):
     def __init__(self, kind: ModelInputCompileFailureKind) -> None:
         self.kind = kind
         super().__init__(f"structured model input compile failed: {kind.value}")
+
+
+MAXIMUM_CANONICAL_PROVIDER_INPUT_ITEMS = 4_096
+MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES = 16 << 20
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,6 +195,8 @@ class StructuredModelInputLimits:
     maximum_tool_result_ref_only_bytes: int = 2 << 10
     maximum_tool_result_decisions: int = 4_096
     maximum_decision_samples: int = 64
+    maximum_canonical_input_items: int = MAXIMUM_CANONICAL_PROVIDER_INPUT_ITEMS
+    maximum_canonical_input_bytes: int = MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES
 
     def __post_init__(self) -> None:
         if (
@@ -186,6 +215,8 @@ class StructuredModelInputLimits:
                 self.maximum_tool_result_ref_only_bytes,
                 self.maximum_tool_result_decisions,
                 self.maximum_decision_samples,
+                self.maximum_canonical_input_items,
+                self.maximum_canonical_input_bytes,
             )
             < 1
         ):
@@ -381,6 +412,8 @@ class ContextSourceCandidate:
     placement_ordinal: int
     degradation_priority: int
     variants: tuple[ContextRenderVariant, ...] = field(repr=False)
+    lifecycle: ContextSourceLifecycle = ContextSourceLifecycle.SNAPSHOT_ON_CHANGE
+    domain_semantic_fingerprint: str = ""
 
     def __post_init__(self) -> None:
         if not self.source_instance_id or not self.source_contract_version:
@@ -390,6 +423,12 @@ class ContextSourceCandidate:
             or not 0 <= self.degradation_priority <= 999
         ):
             raise ValueError("source candidate ordinal is outside its closed bound")
+        if not self.domain_semantic_fingerprint:
+            object.__setattr__(
+                self, "domain_semantic_fingerprint", self.source_semantic_fingerprint
+            )
+        if not self.domain_semantic_fingerprint.startswith(SHA256_PREFIX):
+            raise ValueError("source domain semantic fingerprint is invalid")
         if not self.variants:
             raise ValueError("source candidate needs at least one variant")
         modes = tuple(variant.mode for variant in self.variants)
@@ -404,9 +443,14 @@ class ContextSourceCandidate:
             raise ValueError("root instruction must use SYSTEM channel")
         if (
             self.trust_class is ContextTrustClass.AUTHORIZED_CAPABILITY_CONTEXT
-            and self.channel is not ContextChannel.SYSTEM
+            and self.channel is not ContextChannel.RUNTIME_OBSERVATION
         ):
-            raise ValueError("capability context must use SYSTEM channel")
+            raise ValueError("capability context must use runtime observation")
+        if (
+            self.trust_class is ContextTrustClass.AUTHORIZED_RUNTIME_GUIDANCE
+            and self.channel is not ContextChannel.RUNTIME_OBSERVATION
+        ):
+            raise ValueError("runtime guidance must use runtime observation")
         if (
             self.trust_class is ContextTrustClass.UNTRUSTED_OBSERVATION
             and self.channel is ContextChannel.SYSTEM
@@ -423,6 +467,7 @@ class ContextSourceCandidate:
                 "placement": self.placement_ordinal,
                 "degradation": self.degradation_priority,
                 "modes": tuple(mode.value for mode in modes),
+                "lifecycle": self.lifecycle.value,
             },
         )
         if self.source_contract_fingerprint != expected_contract:
@@ -452,16 +497,51 @@ class ContextSourceCollectionDiagnostic:
 
 
 @dataclass(frozen=True, slots=True)
+class ContextSourceAbsentFact:
+    source_kind: ContextSourceKind
+    lifecycle: ContextSourceLifecycle
+    absence_kind: ContextSourceAbsenceKind
+    source_contract_version: str
+    source_contract_fingerprint: str
+    trust_class: ContextTrustClass
+    budget_class: ContextBudgetClass
+    placement_ordinal: int
+    degradation_priority: int
+    domain_semantic_fingerprint: str
+
+    def __post_init__(self) -> None:
+        if not self.source_contract_version:
+            raise ValueError("absent source contract is empty")
+        for value in (
+            self.source_contract_fingerprint,
+            self.domain_semantic_fingerprint,
+        ):
+            if not value.startswith(SHA256_PREFIX):
+                raise ValueError("absent source fingerprint is invalid")
+        if not 0 <= self.placement_ordinal <= 999:
+            raise ValueError("absent source placement is invalid")
+        if not 0 <= self.degradation_priority <= 999:
+            raise ValueError("absent source degradation priority is invalid")
+
+
+@dataclass(frozen=True, slots=True)
 class CollectedContextSources:
     candidates: tuple[ContextSourceCandidate, ...]
     diagnostics: tuple[ContextSourceCollectionDiagnostic, ...]
     registry_fingerprint: str
     collection_fingerprint: str
+    absent_facts: tuple[ContextSourceAbsentFact, ...] = ()
 
     def __post_init__(self) -> None:
         identities = tuple(item.source_instance_id for item in self.candidates)
         kinds = tuple(item.source_kind for item in self.candidates)
-        if len(identities) != len(set(identities)) or len(kinds) != len(set(kinds)):
+        absent_kinds = tuple(item.source_kind for item in self.absent_facts)
+        if (
+            len(identities) != len(set(identities))
+            or len(kinds) != len(set(kinds))
+            or len(absent_kinds) != len(set(absent_kinds))
+            or set(kinds).intersection(absent_kinds)
+        ):
             raise ValueError("collected source identities or kinds are duplicated")
         expected = context_fingerprint(
             "collected-context-sources:v1",
@@ -477,6 +557,15 @@ class CollectedContextSources:
                         None if d.source_kind is None else d.source_kind.value,
                     )
                     for d in self.diagnostics
+                ),
+                "absent": tuple(
+                    (
+                        item.source_kind.value,
+                        item.lifecycle.value,
+                        item.absence_kind.value,
+                        item.domain_semantic_fingerprint,
+                    )
+                    for item in self.absent_facts
                 ),
             },
         )
@@ -646,6 +735,7 @@ class FrozenProviderInputItem:
 class CanonicalModelInputIdentity:
     session_id: str
     turn_id: str
+    initial_entry_id: str
     context_binding_revision_id: str
     provider_input_through_sequence: int
     conversation_scope_kind: ModelInputScopeKind
@@ -656,6 +746,7 @@ class CanonicalModelInputIdentity:
         if (
             not self.session_id
             or not self.turn_id
+            or not self.initial_entry_id
             or not self.context_binding_revision_id
             or self.provider_input_through_sequence < 0
         ):
@@ -667,6 +758,7 @@ class CanonicalModelInputIdentity:
         expected = canonical_model_input_identity_fingerprint(
             session_id=self.session_id,
             turn_id=self.turn_id,
+            initial_entry_id=self.initial_entry_id,
             context_binding_revision_id=self.context_binding_revision_id,
             provider_input_through_sequence=self.provider_input_through_sequence,
             conversation_scope_kind=self.conversation_scope_kind,
@@ -680,6 +772,7 @@ def canonical_model_input_identity_fingerprint(
     *,
     session_id: str,
     turn_id: str,
+    initial_entry_id: str,
     context_binding_revision_id: str,
     provider_input_through_sequence: int,
     conversation_scope_kind: ModelInputScopeKind,
@@ -690,6 +783,7 @@ def canonical_model_input_identity_fingerprint(
         {
             "session_id": session_id,
             "turn_id": turn_id,
+            "initial_entry_id": initial_entry_id,
             "context_binding_revision_id": context_binding_revision_id,
             "provider_input_through_sequence": provider_input_through_sequence,
             "conversation_scope_kind": conversation_scope_kind.value,
@@ -713,6 +807,54 @@ class PreparedProviderInputCut:
             or self.provider_input_through_sequence < 0
         ):
             raise ValueError("prepared provider input cut is incomplete")
+
+
+class ContextBindingBaseKind(StrEnum):
+    FULL_HISTORY = "FULL_HISTORY"
+    SNAPSHOT = "SNAPSHOT"
+
+
+@dataclass(frozen=True, slots=True)
+class FrozenContextBindingCompileFact:
+    binding_revision_id: str
+    revision_ordinal: int
+    base_kind: ContextBindingBaseKind
+    context_snapshot_id: str | None
+    source_through_sequence: int
+    context_base_semantic_identity: str
+    fact_fingerprint: str
+
+    def __post_init__(self) -> None:
+        if (
+            not self.binding_revision_id
+            or self.revision_ordinal < 0
+            or self.source_through_sequence < 0
+        ):
+            raise ValueError("context binding compile fact is incomplete")
+        if (self.base_kind is ContextBindingBaseKind.FULL_HISTORY) != (
+            self.context_snapshot_id is None
+        ):
+            raise ValueError("context binding base union is invalid")
+        if not self.context_base_semantic_identity.startswith(SHA256_PREFIX):
+            raise ValueError("context base semantic identity is invalid")
+        if self.fact_fingerprint != context_binding_compile_fact_fingerprint(self):
+            raise ValueError("context binding compile fact fingerprint mismatch")
+
+
+def context_binding_compile_fact_fingerprint(
+    fact: FrozenContextBindingCompileFact,
+) -> str:
+    return context_fingerprint(
+        "pulsara:context-binding-compile-fact:v1",
+        {
+            "binding_revision_id": fact.binding_revision_id,
+            "revision_ordinal": fact.revision_ordinal,
+            "base_kind": fact.base_kind.value,
+            "context_snapshot_id": fact.context_snapshot_id,
+            "source_through_sequence": fact.source_through_sequence,
+            "context_base_semantic_identity": fact.context_base_semantic_identity,
+        },
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -941,6 +1083,7 @@ def approved_plan_materialization_fingerprint(
 @dataclass(frozen=True, slots=True)
 class FrozenCanonicalCompileSnapshot:
     canonical_input: CanonicalModelInputSnapshot = field(repr=False)
+    context_binding_fact: FrozenContextBindingCompileFact
     run_permission_snapshot: FrozenRunPermissionSnapshot
     plan_workflow_fact: FrozenPlanWorkflowCompileFact | None
     plan_handoff_fact: FrozenPlanHandoffCompileFact | None
@@ -951,6 +1094,13 @@ class FrozenCanonicalCompileSnapshot:
 
     def __post_init__(self) -> None:
         identity = self.canonical_input.identity
+        binding = self.context_binding_fact
+        if (
+            binding.binding_revision_id != identity.context_binding_revision_id
+            or binding.source_through_sequence
+            > identity.provider_input_through_sequence
+        ):
+            raise ValueError("compile context binding does not exact-join")
         permission = self.run_permission_snapshot
         if permission.snapshot_id == "":
             raise ValueError("compile permission snapshot is absent")
@@ -1093,6 +1243,7 @@ def canonical_compile_snapshot_fingerprint(
         "pulsara:canonical-compile-snapshot:v1",
         {
             "canonical_input": snapshot.canonical_input.snapshot_fingerprint,
+            "context_binding": snapshot.context_binding_fact.fact_fingerprint,
             "run_permission": (
                 snapshot.run_permission_snapshot.snapshot_fingerprint
             ),
@@ -1204,6 +1355,7 @@ class StructuredModelInputCompileRequest:
     canonical_facts: FrozenCanonicalCompileSnapshot = field(repr=False)
     compile_binding: ModelInputCompileBinding = field(repr=False)
     sources: CollectedContextSources = field(repr=False)
+    dispatch_anchor_entry_id: str | None = None
 
     def __post_init__(self) -> None:
         if not self.context_id or self.model_call_index < 1:
@@ -1218,6 +1370,11 @@ class StructuredModelInputCompileRequest:
             is not self.compile_binding.tool_surface.conversation_scope_kind
         ):
             raise ValueError("compile request scope and tool surface differ")
+        if self.dispatch_anchor_entry_id is not None and not any(
+            item.source_entry_id == self.dispatch_anchor_entry_id
+            for item in self.canonical_input.items
+        ):
+            raise ValueError("compile request dispatch anchor is not canonical")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1278,6 +1435,9 @@ class ContextCompileBudgetReport:
     envelope_tokens: int
     total_input_tokens: int
     protected_transcript_tokens: int
+    protected_prefix_message_count: int
+    protected_prefix_logical_utf8_bytes: int
+    protected_prefix_fingerprint: str | None
     context_source_tokens: int
     degraded_source_count: int
     omitted_source_count: int
@@ -1296,6 +1456,8 @@ class ContextCompileBudgetReport:
             self.envelope_tokens,
             self.total_input_tokens,
             self.protected_transcript_tokens,
+            self.protected_prefix_message_count,
+            self.protected_prefix_logical_utf8_bytes,
             self.context_source_tokens,
             self.degraded_source_count,
             self.omitted_source_count,
@@ -1321,6 +1483,14 @@ class ContextCompileBudgetReport:
         ):
             if not value.startswith(SHA256_PREFIX):
                 raise ValueError("compile budget report fingerprint is invalid")
+        if self.protected_prefix_fingerprint is not None and not (
+            self.protected_prefix_fingerprint.startswith(SHA256_PREFIX)
+        ):
+            raise ValueError("protected prefix fingerprint is invalid")
+        if (self.protected_prefix_message_count == 0) != (
+            self.protected_prefix_fingerprint is None
+        ):
+            raise ValueError("protected prefix summary union is invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1488,6 +1658,11 @@ def _budget_report_value(report: ContextCompileBudgetReport) -> dict[str, object
         "envelope_tokens": report.envelope_tokens,
         "total_input_tokens": report.total_input_tokens,
         "protected_transcript_tokens": report.protected_transcript_tokens,
+        "protected_prefix_message_count": report.protected_prefix_message_count,
+        "protected_prefix_logical_utf8_bytes": (
+            report.protected_prefix_logical_utf8_bytes
+        ),
+        "protected_prefix_fingerprint": report.protected_prefix_fingerprint,
         "context_source_tokens": report.context_source_tokens,
         "degraded_source_count": report.degraded_source_count,
         "omitted_source_count": report.omitted_source_count,

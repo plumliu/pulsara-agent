@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import StrEnum
+from threading import Lock
 from typing import AsyncIterator, Callable
 from uuid import uuid4
 
 from pulsara_agent.conversation_kernel.tool_surface import (
     PreparedKernelToolSurface,
     ProcessLocalToolSurfaceBorrow,
+)
+from pulsara_agent.conversation_kernel.input_continuity import (
+    ProcessLocalProviderInputInstallAuthority,
 )
 from pulsara_agent.llm.adapters.openai.chat_completions import (
     OpenAIChatCompletionsTransport,
@@ -34,6 +39,9 @@ from pulsara_agent.model_input.contracts import (
     ModelInputCompileBinding,
     PreparedProviderInputCut,
     model_input_compile_binding_fingerprint,
+)
+from pulsara_agent.model_input.continuity import (
+    ProcessLocalProviderInputInstallPermit,
 )
 from pulsara_agent.ports.live_agent_event import ProviderStreamPayload
 from pulsara_agent.ports.provider_stream import (
@@ -120,6 +128,116 @@ class KernelModelExecutionRequest:
             )
         ):
             raise ValueError("model execution request is not structurally joined")
+
+
+class _PreparedExecutionState(StrEnum):
+    PREFLIGHTED = "PREFLIGHTED"
+    OPENING = "OPENING"
+    STREAMING = "STREAMING"
+    PHYSICALLY_CLOSED = "PHYSICALLY_CLOSED"
+    DISCARDED = "DISCARDED"
+
+
+class PreparedKernelModelExecution:
+    """Transport-bearing one-shot produced without opening the transport."""
+
+    def __init__(
+        self,
+        *,
+        request: KernelModelExecutionRequest,
+        final_context: LLMContext,
+        expected_append_candidate_fingerprint: str,
+        execution_fingerprint: str,
+        install_authority: ProcessLocalProviderInputInstallAuthority,
+        usage_observer: Callable[
+            [KernelModelExecutionRequest, TransportUsageReport], None
+        ]
+        | None,
+    ) -> None:
+        self.request = request
+        self.final_context = final_context
+        self.expected_append_candidate_fingerprint = (
+            expected_append_candidate_fingerprint
+        )
+        self.execution_fingerprint = execution_fingerprint
+        self._install_authority = install_authority
+        self._usage_observer = usage_observer
+        self._state = _PreparedExecutionState.PREFLIGHTED
+        self._lock = Lock()
+
+    @property
+    def state(self) -> str:
+        with self._lock:
+            return self._state.value
+
+    def discard(self) -> None:
+        with self._lock:
+            if self._state is not _PreparedExecutionState.PREFLIGHTED:
+                raise RuntimeError("prepared model execution can no longer be discarded")
+            self._state = _PreparedExecutionState.DISCARDED
+
+    async def open_once(
+        self,
+        permit: ProcessLocalProviderInputInstallPermit,
+    ) -> AsyncIterator[ProviderStreamPayload]:
+        request = self.request
+        if (
+            permit.scope.session_id != request.session_id
+            or permit.scope.scope_kind
+            is not request.compiled_input.canonical_input_identity.conversation_scope_kind
+            or permit.scope.scope_subagent_task_id
+            != request.compiled_input.canonical_input_identity.scope_subagent_task_id
+            or permit.candidate_fingerprint
+            != self.expected_append_candidate_fingerprint
+            or permit.execution_fingerprint != self.execution_fingerprint
+        ):
+            raise RuntimeError("provider-input install permit does not exact-join")
+        self._install_authority.consume(
+            permit,
+            candidate_fingerprint=self.expected_append_candidate_fingerprint,
+            execution_fingerprint=self.execution_fingerprint,
+        )
+        with self._lock:
+            if self._state is not _PreparedExecutionState.PREFLIGHTED:
+                raise RuntimeError("prepared model execution is not openable")
+            self._state = _PreparedExecutionState.OPENING
+        for tool in request.compiled_input.tools:
+            if (
+                request.surface_borrow.binding_fingerprint(tool.name)
+                != tool.executor_binding_fingerprint
+            ):
+                with self._lock:
+                    self._state = _PreparedExecutionState.DISCARDED
+                raise RuntimeError("prepared tool binding was revoked before open")
+        call = request.prepared_call.call
+        execution = call.target.transport.open_stream(
+            call=call, context=self.final_context
+        )
+        with self._lock:
+            self._state = _PreparedExecutionState.STREAMING
+        try:
+            while True:
+                item = await execution.read_next()
+                if item is None:
+                    break
+                if isinstance(item, ProviderStreamTerminal):
+                    if item.outcome != "COMPLETED":
+                        assert item.error is not None
+                        raise RuntimeError(f"provider failed: {item.error.code.value}")
+                    if self._usage_observer is not None:
+                        try:
+                            self._usage_observer(request, item.usage)
+                        except Exception:
+                            pass
+                    break
+                yield item
+        finally:
+            await execution.aclose()
+            completion = await execution.wait_physical_completion()
+            with self._lock:
+                self._state = _PreparedExecutionState.PHYSICALLY_CLOSED
+            if completion.status is not ProviderPhysicalCompletionStatus.COMPLETED:
+                raise RuntimeError("provider physical operation did not exit")
 
 
 class DirectKernelModelPort:
@@ -239,9 +357,17 @@ class DirectKernelModelPort:
             preparation_fingerprint=preparation_fingerprint,
         )
 
-    async def stream(
-        self, request: KernelModelExecutionRequest
-    ) -> AsyncIterator[ProviderStreamPayload]:
+    def preflight_execution(
+        self,
+        request: KernelModelExecutionRequest,
+        *,
+        expected_append_candidate_fingerprint: str,
+        install_authority: ProcessLocalProviderInputInstallAuthority,
+    ) -> PreparedKernelModelExecution:
+        if type(install_authority) is not ProcessLocalProviderInputInstallAuthority:
+            raise TypeError("provider-input install authority is invalid")
+        if not expected_append_candidate_fingerprint.startswith("sha256:"):
+            raise ValueError("append candidate fingerprint is invalid")
         prepared = request.prepared_call
         compiled = request.compiled_input
         if (
@@ -303,28 +429,30 @@ class DirectKernelModelPort:
         validated = validate_model_context_for_call(call=call, context=context)
         if validated.estimate != compiled.final_estimate:
             raise RuntimeError("compiler and pre-send input estimates differ")
-        execution = call.target.transport.open_stream(call=call, context=context)
-        try:
-            while True:
-                item = await execution.read_next()
-                if item is None:
-                    break
-                if isinstance(item, ProviderStreamTerminal):
-                    if item.outcome != "COMPLETED":
-                        assert item.error is not None
-                        raise RuntimeError(f"provider failed: {item.error.code.value}")
-                    if self._usage_observer is not None:
-                        try:
-                            self._usage_observer(request, item.usage)
-                        except Exception:
-                            pass
-                    break
-                yield item
-        finally:
-            await execution.aclose()
-            completion = await execution.wait_physical_completion()
-            if completion.status is not ProviderPhysicalCompletionStatus.COMPLETED:
-                raise RuntimeError("provider physical operation did not exit")
+        execution_fingerprint = context_fingerprint(
+            "pulsara:prepared-kernel-model-execution:v1",
+            {
+                "preparation": prepared.preparation_fingerprint,
+                "compiled": compiled.compiled_semantic_fingerprint,
+                "cut": {
+                    "session": request.cut.session_id,
+                    "turn": request.cut.turn_id,
+                    "revision": request.cut.context_binding_revision_id,
+                    "through": request.cut.provider_input_through_sequence,
+                },
+                "append_candidate": expected_append_candidate_fingerprint,
+            },
+        )
+        return PreparedKernelModelExecution(
+            request=request,
+            final_context=context,
+            expected_append_candidate_fingerprint=(
+                expected_append_candidate_fingerprint
+            ),
+            execution_fingerprint=execution_fingerprint,
+            install_authority=install_authority,
+            usage_observer=self._usage_observer,
+        )
 
 
 def _prepared_model_call_fingerprint(
@@ -353,5 +481,6 @@ __all__ = [
     "DirectKernelModelPort",
     "KernelModelExecutionRequest",
     "KernelModelPreparationRequest",
+    "PreparedKernelModelExecution",
     "PreparedKernelModelCall",
 ]

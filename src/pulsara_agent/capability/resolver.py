@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 
 from pulsara_agent.capability.local_skills import LocalSkillProvider
+from pulsara_agent.capability.local_skills import LocalSkillDiscovery
 from pulsara_agent.capability.provider import (
     CapabilityProjectionOutput,
 )
@@ -43,11 +44,13 @@ class LocalSkillCapabilityProvider:
         context: CapabilityProjectionResolveContext,
         *,
         available_tool_names: frozenset[str],
+        discovery: LocalSkillDiscovery | None = None,
     ) -> CapabilityProjectionOutput:
-        discovery = self.provider.discover(
-            context.workspace_root,
-            available_tool_names=available_tool_names,
-        )
+        if discovery is None:
+            discovery = self.snapshot_projection_input(
+                workspace_root=context.workspace_root,
+                available_tool_names=available_tool_names,
+            )
         skills_by_name = {skill.name: skill for skill in discovery.skills}
         catalog_entries = tuple(
             _catalog_entry(skill)
@@ -81,6 +84,34 @@ class LocalSkillCapabilityProvider:
             active_skill_prompt=active.text,
             catalog_rendered=catalog,
             active_skill_rendered=active,
+        )
+
+    def snapshot_projection_input(
+        self,
+        *,
+        workspace_root,
+        available_tool_names: frozenset[str],
+    ) -> LocalSkillDiscovery:
+        """Freeze all filesystem-backed projection inputs for one plan."""
+
+        return self.provider.discover(
+            workspace_root,
+            available_tool_names=available_tool_names,
+        )
+
+    def resolve_projection_from_snapshot(
+        self,
+        context: CapabilityProjectionResolveContext,
+        *,
+        available_tool_names: frozenset[str],
+        discovery: LocalSkillDiscovery,
+    ) -> CapabilityProjectionOutput:
+        """Resolve a trigger against an already frozen discovery cut."""
+
+        return self._resolve_projection_output(
+            context,
+            available_tool_names=available_tool_names,
+            discovery=discovery,
         )
 
     def resolve_projection(

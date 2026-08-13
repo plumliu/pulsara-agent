@@ -223,6 +223,32 @@ def test_reader_uses_exact_scope_and_lowers_late_result_without_replay(
         actor_id="runtime",
         deadline_monotonic=monotonic() + 30,
     )
+    # Freeze a real provider cut before the late result exists.  The accepted
+    # assistant attributes that exact cut to the old request, so later reads
+    # must retain its provider-only closure and append the physical outcome as
+    # a late observation instead of rewriting history.
+    bridge_turn = _start_turn(repository, lease, b"bridge")
+    bridge_cut = repository.prepare_provider_input_cut(
+        lease.guard,
+        turn_id=bridge_turn,
+        deadline_monotonic=monotonic() + 30,
+    )
+    repository.commit_assistant_message(
+        lease.guard,
+        cut=bridge_cut,
+        entry_id=_id("entry"),
+        parent_content=InlineContent.from_bytes(b"bridge answer"),
+        blocks=(
+            AssistantTextBlock(
+                block_id=_id("block"),
+                text=InlineContent.from_bytes(b"bridge answer"),
+            ),
+        ),
+        complete_turn=True,
+        occurred_at=datetime.now(timezone.utc),
+        actor_id="model:test",
+        deadline_monotonic=monotonic() + 30,
+    )
     result_entry_id = _id("entry")
     occurred_at = datetime.now(timezone.utc)
     candidate = build_prepared_tool_result_acceptance(
@@ -265,6 +291,8 @@ def test_reader_uses_exact_scope_and_lowers_late_result_without_replay(
         ProviderInputItemKind.USER,
         ProviderInputItemKind.ASSISTANT_TOOL_REQUEST,
         ProviderInputItemKind.TOOL_RESULT_CLOSURE,
+        ProviderInputItemKind.USER,
+        ProviderInputItemKind.ASSISTANT,
         ProviderInputItemKind.LATE_TOOL_OUTCOME,
         ProviderInputItemKind.USER,
     ]
@@ -272,7 +300,7 @@ def test_reader_uses_exact_scope_and_lowers_late_result_without_replay(
         ProviderToolResultClosureKind.INTERRUPTED_MAY_HAVE_PARTIALLY_EXECUTED
     )
     assert materialized.late_outcomes[0].result_entry_id == result_entry_id
-    assert "late-success" in materialized.items[3].text
+    assert "late-success" in materialized.items[5].text
 
 
 def test_reader_lowers_no_attempt_as_interrupted_before_dispatch(

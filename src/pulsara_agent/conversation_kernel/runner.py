@@ -14,7 +14,7 @@ from hashlib import sha256
 import json
 from time import monotonic
 from threading import Lock
-from typing import AsyncIterator, Awaitable, Callable, Mapping, Protocol
+from typing import Mapping, Protocol, TypeVar
 from uuid import uuid4
 
 from jsonschema import ValidationError, validators
@@ -37,8 +37,18 @@ from pulsara_agent.conversation_kernel.direct_model import (
     KernelModelExecutionRequest,
     KernelModelPreparationRequest,
     PreparedKernelModelCall,
+    PreparedKernelModelExecution,
 )
-from pulsara_agent.conversation_kernel.contracts import CanonicalContent, WriterLease
+from pulsara_agent.conversation_kernel.input_continuity import (
+    HostProviderInputContinuityOwner,
+    ProcessLocalProviderInputInstallAuthority,
+)
+from pulsara_agent.conversation_kernel.contracts import (
+    CanonicalContent,
+    InlineContent,
+    TurnStatus,
+    WriterLease,
+)
 from pulsara_agent.conversation_kernel.live import (
     LiveAgentEventBus,
     LiveBlockKind,
@@ -69,11 +79,13 @@ from pulsara_agent.conversation_kernel.repository import (
     AssistantTextBlock,
     AssistantToolCallBlock,
     ConversationKernelRepository,
+    ConversationKernelConflict,
     PlanToolBatchDisposition,
     PlanToolControlKind,
     PreparedPlanBatchCall,
     PreparedPlanToolBatch,
     PreparedToolResultAcceptance,
+    StaleHostWriter,
     build_prepared_tool_result_acceptance,
 )
 from pulsara_agent.conversation_kernel.plan_runtime import (
@@ -92,29 +104,79 @@ from pulsara_agent.conversation_kernel.reader import (
     CanonicalProviderContinuityError,
     CanonicalProviderInputReader,
 )
-from pulsara_agent.conversation_kernel.safe_point import ProviderSafePointCoordinator
+from pulsara_agent.conversation_kernel.safe_point import (
+    PreparedProviderInputHandle,
+    ProviderSafePointCoordinator,
+)
+from pulsara_agent.conversation_kernel.steer import (
+    MAXIMUM_STEER_CANDIDATE_UTF8_BYTES,
+    MAXIMUM_STEER_PLANNING_CANONICAL_WORK_BYTES,
+    AcceptedSteerDispatchBatch,
+    AcceptedSteerDispatchEntry,
+    PendingPromptSteerFact,
+    PreparedSteerResourceRejection,
+    PreparedSteerPlanConflictInterruption,
+    PreparedSteerSuffixAdmissionPlan,
+    SteerConsumptionConfirmationKind,
+    SteerPlanConflictConfirmationKind,
+    SteerResourceRejectionConfirmationKind,
+    build_accepted_steer_dispatch_batch,
+    build_prepared_steer_suffix_plan,
+    build_steer_canonical_base_fence,
+    build_steer_consumption_candidate,
+    build_steer_plan_conflict_interruption,
+    build_steer_resource_rejection,
+    build_steer_suffix_quote,
+)
 from pulsara_agent.ports.terminal_observation import PreparedInstallationTarget
 from pulsara_agent.terminal_process.monitor import TerminalMonitorCoordinator
 from pulsara_agent.conversation_kernel.vocabulary import LiveEventType
-from pulsara_agent.ports.live_agent_event import ProviderStreamPayload
 from pulsara_agent.ports.tool_execution import (
     ToolOutputArtifactCandidate,
     thaw_tool_json_object,
 )
-from pulsara_agent.model_input.compiler import StructuredModelInputCompiler
+from pulsara_agent.model_input.compiler import (
+    COMPILER_CONTRACT_VERSION,
+    StructuredModelInputCompiler,
+)
 from pulsara_agent.model_input.diagnostics import (
     project_model_input_compile_observation,
 )
 from pulsara_agent.model_input.contracts import (
+    MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES,
+    MAXIMUM_CANONICAL_PROVIDER_INPUT_ITEMS,
     CapabilityActivationSubjectKind,
     CanonicalInputOriginKind,
+    CollectedContextSources,
     FrozenCanonicalCompileSnapshot,
+    CanonicalModelInputIdentity,
     CanonicalModelInputSnapshot,
+    FrozenProviderInputItem,
+    FrozenProviderInputItemKind,
+    PreparedProviderInputCut,
     FrozenCompiledModelInput,
     ModelInputCompileFailureKind,
     ModelInputScopeKind,
     StructuredModelInputCompileError,
     StructuredModelInputCompileRequest,
+    canonical_compile_snapshot_fingerprint,
+    canonical_model_input_identity_fingerprint,
+    canonical_model_input_snapshot_fingerprint,
+    provider_input_item_fingerprint,
+)
+from pulsara_agent.model_input.continuity import (
+    NewTriggerAnchor,
+    FrozenProviderInputAppendCompileResult,
+    FrozenProviderInputAppendPlanningInput,
+    NoNewTriggerAnchor,
+    PROVIDER_MESSAGE_LOWERING_CONTRACT,
+    PreparedProviderInputAppendCandidate,
+    ProcessLocalCanonicalFrontier,
+    ProcessLocalProviderInputInstallPermit,
+    ProviderInputContinuityScope,
+    ProviderInputEpochCompatibility,
+    provider_input_logical_utf8_bytes,
+    prepared_provider_input_append_candidate_fingerprint,
 )
 from pulsara_agent.primitives.model_call import ModelCallPurpose
 from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE, PermissionMode
@@ -122,6 +184,7 @@ from pulsara_agent.primitives.run_permission import FrozenRunPermissionSnapshot
 from pulsara_agent.primitives.context import (
     FrozenJsonObjectFact,
     canonical_json_bytes,
+    context_fingerprint,
     thaw_json,
 )
 from pulsara_agent.conversation_kernel.tool_surface import (
@@ -130,14 +193,25 @@ from pulsara_agent.conversation_kernel.tool_surface import (
 )
 
 
+_T = TypeVar("_T")
+
+
+class _PreparedSteerPlanStale(ConversationKernelConflict):
+    """The frozen pre-consumption plan lost before its first mutation."""
+
+
 class KernelModelPort(Protocol):
     def prepare_call(
         self, request: KernelModelPreparationRequest
     ) -> PreparedKernelModelCall: ...
 
-    def stream(
-        self, request: KernelModelExecutionRequest
-    ) -> AsyncIterator[ProviderStreamPayload]: ...
+    def preflight_execution(
+        self,
+        request: KernelModelExecutionRequest,
+        *,
+        expected_append_candidate_fingerprint: str,
+        install_authority: ProcessLocalProviderInputInstallAuthority,
+    ) -> PreparedKernelModelExecution: ...
 
 
 class AutomaticPlanContinuationPort(Protocol):
@@ -398,9 +472,7 @@ class KernelToolAuthorization:
         if (self.accepted_attempt_id is not None) != (
             self.accepted_permission_snapshot_fingerprint is not None
         ):
-            raise ValueError(
-                "accepted attempt permission attribution is incomplete"
-            )
+            raise ValueError("accepted attempt permission attribution is incomplete")
 
 
 class KernelToolPort(Protocol):
@@ -414,6 +486,12 @@ class KernelToolPort(Protocol):
     def borrow_tool_surface(
         self, prepared: PreparedKernelToolSurface
     ) -> ProcessLocalToolSurfaceBorrow: ...
+
+    def validate_tool_surface_borrow(
+        self,
+        borrow: ProcessLocalToolSurfaceBorrow,
+        prepared: PreparedKernelToolSurface,
+    ) -> None: ...
 
     async def authorize(
         self,
@@ -469,6 +547,18 @@ class KernelRunResult:
     pending_plan_interaction_id: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _PreparedProviderDispatch:
+    handle: PreparedProviderInputHandle
+    canonical_facts: FrozenCanonicalCompileSnapshot
+    planning: FrozenProviderInputAppendPlanningInput
+    prepared_call: PreparedKernelModelCall
+    surface_borrow: ProcessLocalToolSurfaceBorrow
+    sources: CollectedContextSources
+    append_result: FrozenProviderInputAppendCompileResult
+    accepted_steers: AcceptedSteerDispatchBatch | None = None
+
+
 class ConversationKernelRunner:
     def __init__(
         self,
@@ -484,8 +574,8 @@ class ConversationKernelRunner:
         io_owner: KernelSessionIO | None = None,
         context_source_collector: ContextSourceCollectorPort,
         compiler: StructuredModelInputCompiler | None = None,
+        continuity_owner: HostProviderInputContinuityOwner | None = None,
         extensions: KernelExtensionHost | None = None,
-        steer_consumer: Callable[[str, float], Awaitable[int]] | None = None,
         workspace_id: str | None = None,
         tool_output_processor: ToolOutputArtifactProcessor | None = None,
         plan_interactions: KernelPlanInteractionCoordinator | None = None,
@@ -517,6 +607,7 @@ class ConversationKernelRunner:
             repository.connection_provider,
             blob_reader=PostgresCanonicalBlobStore(repository.connection_provider),
         )
+        self._blob_store = PostgresCanonicalBlobStore(repository.connection_provider)
         self._safe_point = safe_point or ProviderSafePointCoordinator(
             repository=repository,
             guard=writer_lease.guard,
@@ -533,8 +624,10 @@ class ConversationKernelRunner:
         self._io = io_owner or KernelSessionIO()
         self._context_source_collector = context_source_collector
         self._compiler = compiler or StructuredModelInputCompiler()
+        self._continuity = continuity_owner or HostProviderInputContinuityOwner(
+            session_id=writer_lease.guard.session_id
+        )
         self._extensions = extensions
-        self._steer_consumer = steer_consumer
         self._maximum_model_calls_per_turn = maximum_model_calls_per_turn
         self._maximum_input_tokens_per_call = maximum_input_tokens_per_call
         self._maximum_output_tokens_per_call = maximum_output_tokens_per_call
@@ -564,12 +657,21 @@ class ConversationKernelRunner:
     ) -> KernelRunResult:
         if not task_id:
             raise ValueError("subagent task identity is required")
-        return await self._run_turn(
-            objective,
-            command_id=None,
-            subagent_task_id=task_id,
-            requested_permission_mode=None,
-        )
+        try:
+            return await self._run_turn(
+                objective,
+                command_id=None,
+                subagent_task_id=task_id,
+                requested_permission_mode=None,
+            )
+        finally:
+            self._continuity.discard_scope(
+                ProviderInputContinuityScope(
+                    session_id=self._writer_lease.guard.session_id,
+                    scope_kind=ModelInputScopeKind.SUBAGENT_TASK,
+                    scope_subagent_task_id=task_id,
+                )
+            )
 
     async def _run_turn(
         self,
@@ -597,9 +699,7 @@ class ConversationKernelRunner:
                 context_binding_revision_id=_stable_id(
                     "context-revision", turn_id, "0"
                 ),
-                permission_snapshot_id=_stable_id(
-                    "permission-snapshot", turn_id
-                ),
+                permission_snapshot_id=_stable_id("permission-snapshot", turn_id),
                 requested_permission_mode=(
                     requested_permission_mode or self._launch_permission_mode
                 ),
@@ -633,6 +733,706 @@ class ConversationKernelRunner:
             deadline_monotonic=deadline,
         )
 
+    async def _prepare_provider_dispatch(
+        self,
+        *,
+        turn_id: str,
+        model_call_index: int,
+        deadline: float,
+    ) -> _PreparedProviderDispatch:
+        """Freeze, quote and (when present) consume one exact steer suffix."""
+
+        handle = await self._io.run(
+            self._safe_point.freeze_provider_input,
+            turn_id=turn_id,
+            deadline_monotonic=deadline,
+        )
+        borrow: ProcessLocalToolSurfaceBorrow | None = None
+        try:
+            base_facts = await self._read_compile_snapshot(
+                handle.cut, deadline=deadline
+            )
+            base_input = base_facts.canonical_input
+            identity = base_input.identity
+            scope = ProviderInputContinuityScope(
+                session_id=identity.session_id,
+                scope_kind=identity.conversation_scope_kind,
+                scope_subagent_task_id=identity.scope_subagent_task_id,
+            )
+            base_frontier = _canonical_frontier(base_input, base_facts)
+            current_epoch = self._continuity.current_view(scope)
+            predecessor_count = (
+                0
+                if current_epoch is None
+                or current_epoch.canonical_frontier.context_base_semantic_identity
+                != base_frontier.context_base_semantic_identity
+                else len(current_epoch.canonical_frontier.ordered_item_fingerprints)
+            )
+            base_anchor = _dispatch_anchor(
+                base_input,
+                predecessor_item_count=predecessor_count,
+                model_call_index=model_call_index,
+            )
+
+            try:
+                surface = self._tools.snapshot_tool_surface(
+                    conversation_scope_kind=identity.conversation_scope_kind,
+                    scope_subagent_task_id=identity.scope_subagent_task_id,
+                )
+                borrow = self._tools.borrow_tool_surface(surface)
+            except Exception as exc:
+                raise StructuredModelInputCompileError(
+                    ModelInputCompileFailureKind.TOOL_SURFACE_INVALID
+                ) from exc
+            try:
+                prepared_call = self._model.prepare_call(
+                    KernelModelPreparationRequest(
+                        session_id=self._writer_lease.guard.session_id,
+                        turn_id=turn_id,
+                        model_call_index=model_call_index,
+                        purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
+                        maximum_input_tokens=self._maximum_input_tokens_per_call,
+                        maximum_output_tokens=self._maximum_output_tokens_per_call,
+                        tool_surface=surface,
+                    )
+                )
+            except Exception as exc:
+                raise StructuredModelInputCompileError(
+                    ModelInputCompileFailureKind.MODEL_TARGET_PREPARATION_FAILED
+                ) from exc
+            try:
+                frozen_sources = await self._io.run(
+                    self._context_source_collector.freeze_non_trigger_sources,
+                    tool_surface=surface.model_surface,
+                    canonical_facts=base_facts,
+                    deadline_monotonic=deadline,
+                )
+            except StructuredModelInputCompileError:
+                raise
+            except TimeoutError as exc:
+                raise StructuredModelInputCompileError(
+                    ModelInputCompileFailureKind.DEADLINE_EXPIRED
+                ) from exc
+            except Exception as exc:
+                raise StructuredModelInputCompileError(
+                    ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
+                ) from exc
+
+            pending = (
+                ()
+                if identity.conversation_scope_kind is not ModelInputScopeKind.ROOT
+                else await self._io.run(
+                    self._repository.read_pending_prompt_steer_facts,
+                    session_id=identity.session_id,
+                    target_turn_id=turn_id,
+                    deadline_monotonic=deadline,
+                )
+            )
+            hydrated = await self._hydrate_pending_steers(pending, deadline=deadline)
+            selected_plan: PreparedSteerSuffixAdmissionPlan | None = None
+            selected_facts: FrozenCanonicalCompileSnapshot | None = None
+            selected_sources: CollectedContextSources | None = None
+            selected_append: FrozenProviderInputAppendCompileResult | None = None
+
+            if hydrated:
+                all_hydrated = hydrated
+                occurred_at = datetime.now(timezone.utc)
+                canonical_base_fence = build_steer_canonical_base_fence(base_facts)
+                # Nested FIFO prefixes share one immutable canonical base and
+                # the same hydrated steer bodies.  Quote that unique physical
+                # materialization once; charging the full base per trial could
+                # exhaust the planning bound before reaching a valid shorter
+                # prefix.  Cooperative deadline checks still bound the at-most
+                # 128 compile trials.
+                maximum_suffix_items = max(
+                    0,
+                    MAXIMUM_CANONICAL_PROVIDER_INPUT_ITEMS
+                    - len(base_input.items),
+                )
+                maximum_suffix_bytes = max(
+                    0,
+                    MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES
+                    - base_input.canonical_utf8_bytes,
+                )
+                eligible_count = 0
+                eligible_bytes = 0
+                for _fact, body in hydrated[:maximum_suffix_items]:
+                    if eligible_bytes + len(body) > maximum_suffix_bytes:
+                        break
+                    eligible_bytes += len(body)
+                    eligible_count += 1
+                planning_work_bytes = (
+                    base_input.canonical_utf8_bytes + eligible_bytes
+                )
+                if planning_work_bytes > (
+                    MAXIMUM_STEER_PLANNING_CANONICAL_WORK_BYTES
+                ):
+                    raise StructuredModelInputCompileError(
+                        ModelInputCompileFailureKind.COMPILE_WORKING_SET_EXCEEDED
+                    )
+                hydrated = all_hydrated[:eligible_count]
+                for count in range(len(hydrated), 0, -1):
+                    if monotonic() >= deadline:
+                        raise StructuredModelInputCompileError(
+                            ModelInputCompileFailureKind.DEADLINE_EXPIRED
+                        )
+                    prefix = hydrated[:count]
+                    prospective = _prospective_steer_compile_snapshot(
+                        base_facts,
+                        facts=tuple(item[0] for item in prefix),
+                        bodies=tuple(item[1] for item in prefix),
+                        deadline_monotonic=deadline,
+                    )
+                    prospective_input = prospective.canonical_input
+                    prospective_frontier = _canonical_frontier(
+                        prospective_input,
+                        prospective,
+                        deadline_monotonic=deadline,
+                    )
+                    anchor = _new_trigger_anchor(prospective_input.items[-1])
+                    planning = self._continuity.freeze_planning_input(
+                        scope=scope,
+                        canonical_frontier=prospective_frontier,
+                        dispatch_anchor=anchor,
+                    )
+                    candidates = tuple(
+                        build_steer_consumption_candidate(
+                            fact=fact,
+                            body_utf8=body,
+                            expected_entry_sequence=(
+                                base_input.identity.provider_input_through_sequence
+                                + index
+                            ),
+                            predecessor=planning,
+                            canonical_base_fence=canonical_base_fence,
+                            occurred_at=occurred_at,
+                            actor_id=self._writer_lease.guard.writer_owner_id,
+                        )
+                        for index, (fact, body) in enumerate(prefix, start=1)
+                    )
+                    activation_text = prefix[-1][1].decode("utf-8")
+                    try:
+                        sources = await self._io.run(
+                            self._context_source_collector.complete_frozen_sources,
+                            frozen_sources,
+                            activation_subject=(
+                                CapabilityActivationSubjectKind.ROOT_HUMAN_PROMPT
+                            ),
+                            activation_text=activation_text,
+                            deadline_monotonic=deadline,
+                        )
+                    except StructuredModelInputCompileError:
+                        raise
+                    except Exception as exc:
+                        raise StructuredModelInputCompileError(
+                            ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
+                        ) from exc
+                    compile_request = StructuredModelInputCompileRequest(
+                        context_id=_stable_id(
+                            "model-context",
+                            identity.session_id,
+                            turn_id,
+                            str(model_call_index),
+                            candidates[-1].candidate_fingerprint,
+                        ),
+                        model_call_index=model_call_index,
+                        canonical_input=prospective_input,
+                        canonical_facts=prospective,
+                        compile_binding=prepared_call.compile_binding,
+                        sources=sources,
+                        dispatch_anchor_entry_id=anchor.source_entry_id,
+                    )
+                    compatibility = _provider_input_compatibility(
+                        prepared_call=prepared_call,
+                        canonical_facts=prospective,
+                        sources=sources,
+                    )
+                    try:
+                        append = await self._io.run(
+                            _compile_structured_append,
+                            self._compiler,
+                            compile_request,
+                            planning=planning,
+                            compatibility=compatibility,
+                            deadline_monotonic=deadline,
+                        )
+                    except StructuredModelInputCompileError as exc:
+                        if exc.kind not in {
+                            ModelInputCompileFailureKind.COMPILE_WORKING_SET_EXCEEDED,
+                            ModelInputCompileFailureKind.PROTECTED_TRANSCRIPT_EXCEEDS_BUDGET,
+                            ModelInputCompileFailureKind.REQUIRED_CONTEXT_EXCEEDS_BUDGET,
+                            ModelInputCompileFailureKind.PREFIX_EPOCH_BUDGET_EXHAUSTED,
+                            ModelInputCompileFailureKind.STATEFUL_SOURCE_REPLACEMENT_OVER_BUDGET,
+                        }:
+                            raise
+                        continue
+                    quote = build_steer_suffix_quote(
+                        candidates=candidates,
+                        prospective_snapshot_hydrated_bytes=(
+                            prospective_input.canonical_utf8_bytes
+                        ),
+                        resulting_epoch_logical_bytes=provider_input_logical_utf8_bytes(
+                            system_prompt=append.compiled_input.system_prompt,
+                            tools=append.compiled_input.tools,
+                            messages=append.compiled_input.messages,
+                        ),
+                        resulting_target_estimate=append.compiled_input.final_estimate,
+                        effective_target_budget=(
+                            prepared_call.compile_binding.effective_input_budget_tokens
+                        ),
+                        estimator_fingerprint=(
+                            prepared_call.compile_binding.estimator.fact.estimator_fingerprint
+                        ),
+                        predecessor_prefix_fingerprint=(
+                            None
+                            if planning.predecessor_view is None
+                            else planning.predecessor_view.semantic_prefix_fingerprint
+                        ),
+                    )
+                    selected_plan = build_prepared_steer_suffix_plan(
+                        scope=scope,
+                        predecessor=planning,
+                        base_cut_fingerprint=_provider_cut_fingerprint(handle.cut),
+                        base_canonical_frontier_fingerprint=(
+                            _canonical_frontier_fingerprint(base_frontier)
+                        ),
+                        base_compile_snapshot_fingerprint=(
+                            base_facts.canonical_read_cut_fingerprint
+                        ),
+                        target_binding_fingerprint=(
+                            prepared_call.compile_binding.binding_fingerprint
+                        ),
+                        tool_surface_fingerprint=(
+                            surface.model_surface.surface_fingerprint
+                        ),
+                        source_facts_fingerprint=sources.collection_fingerprint,
+                        ordered_pending_queue_fingerprints=tuple(
+                            item.fact_fingerprint for item, _body in all_hydrated
+                        ),
+                        selected_consumption_candidates=candidates,
+                        quote=quote,
+                        prospective_compiled_input=append.compiled_input,
+                    )
+                    selected_facts = prospective
+                    selected_sources = sources
+                    selected_append = append
+                    break
+
+                if selected_plan is None:
+                    source_plan_fingerprint = context_fingerprint(
+                        "pulsara:unfit-steer-source-plan:v1",
+                        {
+                            "scope": (
+                                scope.session_id,
+                                scope.scope_kind.value,
+                                scope.scope_subagent_task_id,
+                            ),
+                            "base_cut": _provider_cut_fingerprint(handle.cut),
+                            "base_frontier": _canonical_frontier_fingerprint(
+                                base_frontier
+                            ),
+                            "base_compile": (base_facts.canonical_read_cut_fingerprint),
+                            "target": prepared_call.compile_binding.binding_fingerprint,
+                            "surface": surface.model_surface.surface_fingerprint,
+                            "sources": frozen_sources.freeze_fingerprint,
+                            "pending": tuple(
+                                item.fact_fingerprint
+                                for item, _body in all_hydrated
+                            ),
+                        },
+                    )
+                    rejection = build_steer_resource_rejection(
+                        source_plan_fingerprint=source_plan_fingerprint,
+                        fact=all_hydrated[0][0],
+                        occurred_at=occurred_at,
+                        actor_id=self._writer_lease.guard.writer_owner_id,
+                    )
+                    await self._settle_steer_resource_rejection(
+                        rejection,
+                        deadline=deadline,
+                    )
+                    raise StructuredModelInputCompileError(
+                        ModelInputCompileFailureKind.PREFIX_EPOCH_BUDGET_EXHAUSTED
+                    )
+            if selected_plan is not None:
+                assert selected_facts is not None
+                assert selected_sources is not None
+                assert selected_append is not None
+                try:
+                    self._tools.validate_tool_surface_borrow(borrow, surface)
+                    if (
+                        frozen_sources.registry_fingerprint
+                        != self._context_source_collector.registry_fingerprint
+                    ):
+                        raise RuntimeError("context source registry drifted")
+                except Exception as exc:
+                    raise _PreparedSteerPlanStale(
+                        "prepared steer process-local facts changed before consumption"
+                    ) from exc
+                accepted_entries = await self._consume_prepared_steer_plan(
+                    selected_plan, deadline=deadline
+                )
+                try:
+                    handle.close()
+                    handle = await self._io.run(
+                        self._safe_point.freeze_provider_input,
+                        turn_id=turn_id,
+                        deadline_monotonic=deadline,
+                    )
+                    actual = await self._read_compile_snapshot(
+                        handle.cut, deadline=deadline
+                    )
+                    if (
+                        actual.canonical_read_cut_fingerprint
+                        != selected_facts.canonical_read_cut_fingerprint
+                        or actual.canonical_input.snapshot_fingerprint
+                        != selected_facts.canonical_input.snapshot_fingerprint
+                        or _provider_cut_fingerprint(handle.cut)
+                        != _provider_cut_fingerprint(
+                            PreparedProviderInputCut(
+                                session_id=(
+                                    selected_facts.canonical_input.identity.session_id
+                                ),
+                                turn_id=selected_facts.canonical_input.identity.turn_id,
+                                context_binding_revision_id=(
+                                    selected_facts.canonical_input.identity.context_binding_revision_id
+                                ),
+                                provider_input_through_sequence=(
+                                    selected_facts.canonical_input.identity.provider_input_through_sequence
+                                ),
+                            )
+                        )
+                    ):
+                        raise StructuredModelInputCompileError(
+                            ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
+                        )
+                except BaseException:
+                    await self._settle_post_consumption_plan_conflict(selected_plan)
+                    raise
+                batch = build_accepted_steer_dispatch_batch(
+                    session_id=identity.session_id,
+                    target_turn_id=turn_id,
+                    entries=accepted_entries,
+                    canonical_utf8_bytes=sum(
+                        item.content.size
+                        for item in selected_plan.selected_consumption_candidates
+                    ),
+                    resulting_epoch_logical_bytes=(
+                        selected_plan.quote.resulting_epoch_logical_bytes
+                    ),
+                )
+                return _PreparedProviderDispatch(
+                    handle=handle,
+                    canonical_facts=actual,
+                    planning=selected_plan.predecessor,
+                    prepared_call=prepared_call,
+                    surface_borrow=borrow,
+                    sources=selected_sources,
+                    append_result=selected_append,
+                    accepted_steers=batch,
+                )
+
+            planning = self._continuity.freeze_planning_input(
+                scope=scope,
+                canonical_frontier=base_frontier,
+                dispatch_anchor=base_anchor,
+            )
+            activation_subject, activation_text = _activation_subject_for_anchor(
+                base_input, base_anchor
+            )
+            try:
+                sources = await self._io.run(
+                    self._context_source_collector.complete_frozen_sources,
+                    frozen_sources,
+                    activation_subject=activation_subject,
+                    activation_text=activation_text,
+                    deadline_monotonic=deadline,
+                )
+            except StructuredModelInputCompileError:
+                raise
+            except Exception as exc:
+                raise StructuredModelInputCompileError(
+                    ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
+                ) from exc
+            compile_request = StructuredModelInputCompileRequest(
+                context_id=f"model-context:{uuid4().hex}",
+                model_call_index=model_call_index,
+                canonical_input=base_input,
+                canonical_facts=base_facts,
+                compile_binding=prepared_call.compile_binding,
+                sources=sources,
+                dispatch_anchor_entry_id=(
+                    base_anchor.source_entry_id
+                    if isinstance(base_anchor, NewTriggerAnchor)
+                    else None
+                ),
+            )
+            compatibility = _provider_input_compatibility(
+                prepared_call=prepared_call,
+                canonical_facts=base_facts,
+                sources=sources,
+            )
+            append = await self._io.run(
+                _compile_structured_append,
+                self._compiler,
+                compile_request,
+                planning=planning,
+                compatibility=compatibility,
+                deadline_monotonic=deadline,
+            )
+            return _PreparedProviderDispatch(
+                handle=handle,
+                canonical_facts=base_facts,
+                planning=planning,
+                prepared_call=prepared_call,
+                surface_borrow=borrow,
+                sources=sources,
+                append_result=append,
+            )
+        except BaseException:
+            handle.close()
+            if borrow is not None:
+                borrow.close()
+            raise
+
+    async def _read_compile_snapshot(
+        self, cut: PreparedProviderInputCut, *, deadline: float
+    ) -> FrozenCanonicalCompileSnapshot:
+        try:
+            return await self._io.run(
+                self._input_reader.read_frozen_compile_snapshot,
+                cut,
+                deadline_monotonic=deadline,
+            )
+        except TimeoutError as exc:
+            raise StructuredModelInputCompileError(
+                ModelInputCompileFailureKind.DEADLINE_EXPIRED
+            ) from exc
+
+    async def _hydrate_pending_steers(
+        self,
+        facts: tuple[PendingPromptSteerFact, ...],
+        *,
+        deadline: float,
+    ) -> tuple[tuple[PendingPromptSteerFact, bytes], ...]:
+        result: list[tuple[PendingPromptSteerFact, bytes]] = []
+        used = 0
+        for fact in facts:
+            if used + fact.content.size > MAXIMUM_STEER_CANDIDATE_UTF8_BYTES:
+                break
+            if isinstance(fact.content, InlineContent):
+                body = fact.content.canonical_bytes
+            else:
+                body = await self._io.run(
+                    self._blob_store.read_exact,
+                    blob_id=fact.content.blob_id,
+                    expected_digest=fact.content.digest,
+                    expected_size=fact.content.size,
+                    deadline_monotonic=deadline,
+                )
+            try:
+                body.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise StructuredModelInputCompileError(
+                    ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
+                ) from exc
+            used += len(body)
+            result.append((fact, body))
+        return tuple(result)
+
+    async def _consume_prepared_steer_plan(
+        self,
+        plan: PreparedSteerSuffixAdmissionPlan,
+        *,
+        deadline: float,
+    ) -> tuple[AcceptedSteerDispatchEntry, ...]:
+        task = asyncio.create_task(
+            self._consume_prepared_steer_plan_worker(plan, deadline=deadline),
+            name=(
+                "kernel-steer-consumption:"
+                f"{plan.selected_consumption_candidates[0].exact_target_turn_id}"
+            ),
+        )
+        return await _await_started_settlement(task)
+
+    async def _consume_prepared_steer_plan_worker(
+        self,
+        plan: PreparedSteerSuffixAdmissionPlan,
+        *,
+        deadline: float,
+    ) -> tuple[AcceptedSteerDispatchEntry, ...]:
+        accepted: list[AcceptedSteerDispatchEntry] = []
+        for candidate in plan.selected_consumption_candidates:
+            while True:
+                try:
+                    value = await self._io.run(
+                        self._repository.consume_prepared_prompt_steer,
+                        self._writer_lease.guard,
+                        candidate=candidate,
+                        deadline_monotonic=deadline,
+                    )
+                    accepted.append(value)
+                    break
+                except ConversationKernelConflict:
+                    confirmation = await self._io.run(
+                        self._repository.confirm_prepared_prompt_steer,
+                        candidate=candidate,
+                        deadline_monotonic=max(deadline, monotonic() + 5.0),
+                    )
+                    if confirmation.kind is SteerConsumptionConfirmationKind.FULL:
+                        assert confirmation.accepted is not None
+                        accepted.append(confirmation.accepted)
+                        break
+                    if accepted:
+                        await self._settle_post_consumption_plan_conflict(plan)
+                        raise ConversationKernelConflict(
+                            "prepared steer plan changed after partial consumption"
+                        )
+                    raise _PreparedSteerPlanStale(
+                        "prepared steer plan changed before first consumption"
+                    )
+                except BaseException:
+                    confirmation = await self._io.run(
+                        self._repository.confirm_prepared_prompt_steer,
+                        candidate=candidate,
+                        deadline_monotonic=max(deadline, monotonic() + 5.0),
+                    )
+                    if confirmation.kind is SteerConsumptionConfirmationKind.FULL:
+                        assert confirmation.accepted is not None
+                        accepted.append(confirmation.accepted)
+                        break
+                    if (
+                        confirmation.kind is SteerConsumptionConfirmationKind.NONE
+                        and monotonic() < deadline
+                    ):
+                        continue
+                    if accepted:
+                        await self._settle_post_consumption_plan_conflict(plan)
+                    elif confirmation.kind is SteerConsumptionConfirmationKind.CONFLICT:
+                        raise _PreparedSteerPlanStale(
+                            "prepared steer plan changed before first consumption"
+                        )
+                    raise ConversationKernelConflict(
+                        "prepared steer consumption could not be settled"
+                    )
+        return tuple(accepted)
+
+    async def _settle_post_consumption_plan_conflict(
+        self,
+        plan: PreparedSteerSuffixAdmissionPlan,
+    ) -> None:
+        first = plan.selected_consumption_candidates[0]
+        candidate = build_steer_plan_conflict_interruption(
+            session_id=first.session_id,
+            exact_target_turn_id=first.exact_target_turn_id,
+            source_plan_fingerprint=plan.plan_fingerprint,
+            occurred_at=datetime.now(timezone.utc),
+            actor_id=self._writer_lease.guard.writer_owner_id,
+        )
+        task = asyncio.create_task(
+            self._settle_post_consumption_plan_conflict_worker(candidate),
+            name=f"kernel-steer-plan-conflict:{candidate.exact_target_turn_id}",
+        )
+        await _await_started_settlement(task)
+
+    async def _settle_post_consumption_plan_conflict_worker(
+        self,
+        candidate: PreparedSteerPlanConflictInterruption,
+    ) -> None:
+        while True:
+            deadline = monotonic() + self._operation_timeout_seconds
+            try:
+                await self._io.run(
+                    self._repository.interrupt_prepared_steer_plan_conflict,
+                    self._writer_lease.guard,
+                    candidate=candidate,
+                    deadline_monotonic=deadline,
+                )
+            except StaleHostWriter:
+                # The acquiring generation atomically interrupts all prior
+                # RUNNING turns before it can become the new writer.
+                return
+            except BaseException:
+                pass
+            try:
+                confirmation = await self._io.run(
+                    self._repository.confirm_prepared_steer_plan_conflict,
+                    candidate=candidate,
+                    deadline_monotonic=monotonic() + self._operation_timeout_seconds,
+                )
+            except BaseException:
+                await asyncio.sleep(0.05)
+                continue
+            if confirmation.kind in {
+                SteerPlanConflictConfirmationKind.FULL,
+                SteerPlanConflictConfirmationKind.HISTORICAL_TERMINAL,
+            }:
+                return
+            if confirmation.kind is SteerPlanConflictConfirmationKind.CONFLICT:
+                raise ConversationKernelConflict(
+                    "steer plan-conflict interruption has a foreign winner"
+                )
+            await asyncio.sleep(0.05)
+
+    async def _settle_steer_resource_rejection(
+        self,
+        candidate: PreparedSteerResourceRejection,
+        *,
+        deadline: float,
+    ) -> None:
+        task = asyncio.create_task(
+            self._settle_steer_resource_rejection_worker(candidate, deadline=deadline),
+            name=(f"kernel-steer-resource-rejection:{candidate.exact_target_turn_id}"),
+        )
+        await _await_started_settlement(task)
+
+    async def _settle_steer_resource_rejection_worker(
+        self,
+        candidate: PreparedSteerResourceRejection,
+        *,
+        deadline: float,
+    ) -> None:
+        write_deadline = deadline
+        while True:
+            try:
+                await self._io.run(
+                    self._repository.reject_prepared_prompt_steer_resource_exhaustion,
+                    self._writer_lease.guard,
+                    candidate=candidate,
+                    deadline_monotonic=write_deadline,
+                )
+                return
+            except StaleHostWriter:
+                # A replacement Host terminalizes the old RUNNING turn and
+                # rejects its exact-target steer lane during writer takeover.
+                return
+            except BaseException:
+                settlement_deadline = monotonic() + self._operation_timeout_seconds
+                try:
+                    confirmation = await self._io.run(
+                        self._repository.confirm_prepared_prompt_steer_resource_rejection,
+                        session_id=self._writer_lease.guard.session_id,
+                        candidate=candidate,
+                        deadline_monotonic=settlement_deadline,
+                    )
+                except BaseException:
+                    await asyncio.sleep(0.05)
+                    write_deadline = monotonic() + self._operation_timeout_seconds
+                    continue
+                if confirmation.kind is SteerResourceRejectionConfirmationKind.FULL:
+                    return
+                if confirmation.kind is SteerResourceRejectionConfirmationKind.NONE:
+                    # The ordinary operation deadline may already be exhausted,
+                    # but this admitted atomic rejection must still reach one
+                    # exact winner (or writer takeover) before the ROOT slot can
+                    # retire.  Use a fresh bounded physical attempt; do not split
+                    # queue rejection and turn interruption into two writes.
+                    write_deadline = monotonic() + self._operation_timeout_seconds
+                    continue
+                raise ConversationKernelConflict(
+                    "steer resource rejection could not be settled"
+                )
+
     async def run_accepted_turn(
         self,
         turn_id: str,
@@ -650,78 +1450,30 @@ class ConversationKernelRunner:
                 None
             )
             while model_call_count < self._maximum_model_calls_per_turn:
-                if self._steer_consumer is not None:
-                    await self._steer_consumer(turn_id, deadline)
                 model_call_count += 1
-                prepared = await self._io.run(
-                    self._safe_point.freeze_provider_input,
-                    turn_id=turn_id,
-                    deadline_monotonic=deadline,
-                )
+                steer_plan_retries = 0
+                while True:
+                    try:
+                        dispatch = await self._prepare_provider_dispatch(
+                            turn_id=turn_id,
+                            model_call_index=model_call_count,
+                            deadline=deadline,
+                        )
+                        break
+                    except _PreparedSteerPlanStale:
+                        steer_plan_retries += 1
+                        if steer_plan_retries >= 3 or monotonic() >= deadline:
+                            raise
+                        await asyncio.sleep(0)
+                prepared = dispatch.handle
+                active_surface_borrow = dispatch.surface_borrow
                 try:
-                    try:
-                        canonical_facts = await self._io.run(
-                            self._input_reader.read_frozen_compile_snapshot,
-                            prepared.cut,
-                            deadline_monotonic=deadline,
-                        )
-                        canonical_input = canonical_facts.canonical_input
-                    except TimeoutError as exc:
-                        raise StructuredModelInputCompileError(
-                            ModelInputCompileFailureKind.DEADLINE_EXPIRED
-                        ) from exc
+                    canonical_facts = dispatch.canonical_facts
+                    canonical_input = canonical_facts.canonical_input
                     identity = canonical_input.identity
-                    try:
-                        tool_surface = self._tools.snapshot_tool_surface(
-                            conversation_scope_kind=identity.conversation_scope_kind,
-                            scope_subagent_task_id=identity.scope_subagent_task_id,
-                        )
-                    except Exception as exc:
-                        raise StructuredModelInputCompileError(
-                            ModelInputCompileFailureKind.TOOL_SURFACE_INVALID
-                        ) from exc
-                    try:
-                        prepared_call = self._model.prepare_call(
-                            KernelModelPreparationRequest(
-                                session_id=self._writer_lease.guard.session_id,
-                                turn_id=turn_id,
-                                model_call_index=model_call_count,
-                                purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
-                                maximum_input_tokens=(
-                                    self._maximum_input_tokens_per_call
-                                ),
-                                maximum_output_tokens=(
-                                    self._maximum_output_tokens_per_call
-                                ),
-                                tool_surface=tool_surface,
-                            )
-                        )
-                    except Exception as exc:
-                        raise StructuredModelInputCompileError(
-                            ModelInputCompileFailureKind.MODEL_TARGET_PREPARATION_FAILED
-                        ) from exc
-                    activation_subject, activation_text = _activation_subject(
-                        canonical_input
-                    )
-                    try:
-                        sources = await self._io.run(
-                            self._context_source_collector.collect,
-                            activation_subject=activation_subject,
-                            activation_text=activation_text,
-                            tool_surface=tool_surface.model_surface,
-                            canonical_facts=canonical_facts,
-                            deadline_monotonic=deadline,
-                        )
-                    except StructuredModelInputCompileError:
-                        raise
-                    except TimeoutError as exc:
-                        raise StructuredModelInputCompileError(
-                            ModelInputCompileFailureKind.DEADLINE_EXPIRED
-                        ) from exc
-                    except Exception as exc:
-                        raise StructuredModelInputCompileError(
-                            ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
-                        ) from exc
+                    planning = dispatch.planning
+                    prepared_call = dispatch.prepared_call
+                    sources = dispatch.sources
                     if (
                         sources.registry_fingerprint
                         != self._context_source_collector.registry_fingerprint
@@ -729,40 +1481,24 @@ class ConversationKernelRunner:
                         raise StructuredModelInputCompileError(
                             ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
                         )
-                    compile_request = StructuredModelInputCompileRequest(
-                        context_id=f"model-context:{uuid4().hex}",
-                        model_call_index=model_call_count,
-                        canonical_input=canonical_input,
+                    compatibility = _provider_input_compatibility(
+                        prepared_call=prepared_call,
                         canonical_facts=canonical_facts,
-                        compile_binding=prepared_call.compile_binding,
                         sources=sources,
                     )
-                    try:
-                        compiled_input = await self._io.run(
-                            _compile_structured_input,
-                            self._compiler,
-                            compile_request,
-                            deadline_monotonic=deadline,
-                        )
-                    except StructuredModelInputCompileError:
-                        raise
-                    except TimeoutError as exc:
-                        raise StructuredModelInputCompileError(
-                            ModelInputCompileFailureKind.DEADLINE_EXPIRED
-                        ) from exc
+                    append_result = dispatch.append_result
+                    compiled_input = append_result.compiled_input
                     self._offer_compile_observation(
                         turn_id=turn_id,
                         model_call_index=model_call_count,
                         compiled=compiled_input,
                     )
-                    try:
-                        active_surface_borrow = self._tools.borrow_tool_surface(
-                            tool_surface
-                        )
-                    except Exception as exc:
-                        raise StructuredModelInputCompileError(
-                            ModelInputCompileFailureKind.TOOL_SURFACE_INVALID
-                        ) from exc
+                    append_candidate = _prepared_append_candidate(
+                        planning=planning,
+                        compatibility=compatibility,
+                        compiled_result=append_result,
+                    )
+                    self._continuity.register(append_candidate)
                     request = KernelModelExecutionRequest(
                         session_id=self._writer_lease.guard.session_id,
                         turn_id=turn_id,
@@ -772,11 +1508,62 @@ class ConversationKernelRunner:
                         cut=prepared.cut,
                         surface_borrow=active_surface_borrow,
                     )
-                    prepared.begin_model_operation()
-                    entry_id = _id("entry")
-                    completed = await self._collect_model(
-                        request, proposed_entry_id=entry_id
-                    )
+                    execution: PreparedKernelModelExecution | None = None
+                    installed = False
+                    try:
+                        try:
+                            for tool in compiled_input.tools:
+                                if (
+                                    active_surface_borrow.binding_fingerprint(tool.name)
+                                    != tool.executor_binding_fingerprint
+                                ):
+                                    raise RuntimeError("tool binding changed")
+                        except Exception as exc:
+                            raise StructuredModelInputCompileError(
+                                ModelInputCompileFailureKind.TOOL_SURFACE_INVALID
+                            ) from exc
+                        try:
+                            execution = self._model.preflight_execution(
+                                request,
+                                expected_append_candidate_fingerprint=(
+                                    append_candidate.candidate_fingerprint
+                                ),
+                                install_authority=(
+                                    self._continuity.install_authority
+                                ),
+                            )
+                        except StructuredModelInputCompileError:
+                            raise
+                        except Exception as exc:
+                            raise StructuredModelInputCompileError(
+                                ModelInputCompileFailureKind.FINAL_ESTIMATE_MISMATCH
+                            ) from exc
+                        prepared.begin_model_operation()
+                        permit = self._continuity.install(
+                            candidate_fingerprint=(
+                                append_candidate.candidate_fingerprint
+                            ),
+                            execution_fingerprint=execution.execution_fingerprint,
+                        )
+                        installed = True
+                        entry_id = _id("entry")
+                        completed = await self._collect_model(
+                            request,
+                            execution=execution,
+                            permit=permit,
+                            proposed_entry_id=entry_id,
+                        )
+                    except BaseException:
+                        if not installed:
+                            if execution is not None:
+                                try:
+                                    execution.discard()
+                                except RuntimeError:
+                                    pass
+                            self._continuity.discard(
+                                append_candidate.candidate_fingerprint
+                            )
+                        raise
                     canonical_blocks = await self._canonical_blocks(
                         completed, deadline=deadline
                     )
@@ -926,9 +1713,7 @@ class ConversationKernelRunner:
                         tool_call_id=call.tool_call_id,
                         turn_id=turn_id,
                         assistant_entry_id=accepted.entry_id,
-                        permission_snapshot=(
-                            canonical_facts.run_permission_snapshot
-                        ),
+                        permission_snapshot=(canonical_facts.run_permission_snapshot),
                         surface_borrow=active_surface_borrow,
                     )
                     machine_policy_kind = authorization.kind
@@ -1150,7 +1935,7 @@ class ConversationKernelRunner:
                                 attempt_permission_snapshot_fingerprint
                             ),
                             tool_surface_fingerprint=(
-                                tool_surface.model_surface.surface_fingerprint
+                                active_surface_borrow.prepared.model_surface.surface_fingerprint
                             ),
                             executor_binding_fingerprint=binding_fingerprint,
                             surface_borrow=active_surface_borrow,
@@ -1364,24 +2149,48 @@ class ConversationKernelRunner:
                         },
                     )
                 )
+            await self._settle_failed_turn(turn_id)
+            raise
+
+    async def _settle_failed_turn(self, turn_id: str) -> None:
+        task = asyncio.create_task(
+            self._settle_failed_turn_worker(turn_id),
+            name=f"kernel-turn-terminalization:{turn_id}",
+        )
+        await _await_started_settlement(task)
+
+    async def _settle_failed_turn_worker(self, turn_id: str) -> None:
+        while True:
+            deadline = monotonic() + self._operation_timeout_seconds
             try:
-                await self._io.run(
+                changed = await self._io.run(
                     self._repository.interrupt_turn,
                     self._writer_lease.guard,
                     turn_id=turn_id,
                     reason="FOREGROUND_EXECUTION_INTERRUPTED",
                     occurred_at=datetime.now(timezone.utc),
                     actor_id="foreground-runner",
-                    # Terminalization owns a fresh bounded physical deadline;
-                    # human question wait or an expired model cycle cannot
-                    # suppress canonical interruption.
-                    deadline_monotonic=(
-                        monotonic() + self._operation_timeout_seconds
-                    ),
+                    deadline_monotonic=deadline,
                 )
+                if changed:
+                    return
+            except StaleHostWriter:
+                return
             except BaseException:
                 pass
-            raise
+            try:
+                status = await self._io.run(
+                    self._repository.read_turn_status,
+                    session_id=self._writer_lease.guard.session_id,
+                    turn_id=turn_id,
+                    deadline_monotonic=monotonic() + self._operation_timeout_seconds,
+                )
+            except BaseException:
+                await asyncio.sleep(0.05)
+                continue
+            if status is None or status is not TurnStatus.RUNNING:
+                return
+            await asyncio.sleep(0.05)
 
     async def _accept_plan_control_batch(
         self,
@@ -1432,7 +2241,10 @@ class ConversationKernelRunner:
             None
             if kind is PlanToolControlKind.ENTER
             else _stable_id(
-                "plan-interaction", workflow_id, assistant_entry_id, selected.tool_call_id
+                "plan-interaction",
+                workflow_id,
+                assistant_entry_id,
+                selected.tool_call_id,
             )
         )
         catalog_entry = builtin_tool_catalog_entry(selected.tool_name)
@@ -1518,8 +2330,7 @@ class ConversationKernelRunner:
             if kind is not PlanToolControlKind.ENTER and workflow_fact is None:
                 disposition = PlanToolBatchDisposition.TOOL_UNAVAILABLE
             elif (
-                kind is PlanToolControlKind.QUESTION
-                and self._plan_interactions is None
+                kind is PlanToolControlKind.QUESTION and self._plan_interactions is None
             ):
                 disposition = PlanToolBatchDisposition.TOOL_UNAVAILABLE
             elif (
@@ -1545,9 +2356,7 @@ class ConversationKernelRunner:
             else None
         )
         continuation_revision_id = (
-            _stable_id(
-                "context-revision", continuation_turn_id or "", "0"
-            )
+            _stable_id("context-revision", continuation_turn_id or "", "0")
             if continuation_turn_id is not None
             else None
         )
@@ -1555,8 +2364,7 @@ class ConversationKernelRunner:
         for index, call in enumerate(calls):
             selected_question = (
                 apply_control
-                and
-                index == selected_call_index
+                and index == selected_call_index
                 and kind is PlanToolControlKind.QUESTION
             )
             prepared_calls.append(
@@ -1567,7 +2375,9 @@ class ConversationKernelRunner:
                     result_id=(
                         None
                         if selected_question
-                        else _stable_id("tool-result", assistant_entry_id, call.tool_call_id)
+                        else _stable_id(
+                            "tool-result", assistant_entry_id, call.tool_call_id
+                        )
                     ),
                     result_entry_id=(
                         None
@@ -1624,9 +2434,7 @@ class ConversationKernelRunner:
                 # essential: an extra shield-created wrapper would become the
                 # observed origin task and could never exact-join Host's ROOT
                 # slot.  The callback itself shields the installed owner.
-                outcome = await self._automatic_plan_continuation(
-                    candidate, deadline
-                )
+                outcome = await self._automatic_plan_continuation(candidate, deadline)
             else:
                 try:
                     outcome = await self._io.run(
@@ -1718,6 +2526,8 @@ class ConversationKernelRunner:
         self,
         request: KernelModelExecutionRequest,
         *,
+        execution: PreparedKernelModelExecution,
+        permit: ProcessLocalProviderInputInstallPermit,
         proposed_entry_id: str,
     ) -> CompletedAssistantMessage:
         assembler = ProviderStreamAssembler(
@@ -1733,7 +2543,7 @@ class ConversationKernelRunner:
             ),
         )
         try:
-            async for item in self._model.stream(request):
+            async for item in execution.open_once(permit):
                 assembler.apply(item)
             return assembler.complete()
         except BaseException as exc:
@@ -1940,26 +2750,38 @@ def _json_digest(value: FrozenJsonObjectFact) -> str:
     return "sha256:" + sha256(canonical_json_bytes(value)).hexdigest()
 
 
-def _activation_subject(
+def _activation_subject_for_anchor(
     canonical_input: CanonicalModelInputSnapshot,
-) -> tuple[CapabilityActivationSubjectKind, str]:
+    anchor: NewTriggerAnchor | NoNewTriggerAnchor,
+) -> tuple[CapabilityActivationSubjectKind | None, str]:
     if (
         canonical_input.identity.conversation_scope_kind
         is ModelInputScopeKind.SUBAGENT_TASK
     ):
         return CapabilityActivationSubjectKind.SUBAGENT_OBJECTIVE, ""
-    for item in reversed(canonical_input.items):
-        if (
-            item.item_kind.value == "USER"
-            and item.source_turn_id == canonical_input.identity.turn_id
-            and item.input_origin
-            in {
-                CanonicalInputOriginKind.HUMAN_MESSAGE,
-                CanonicalInputOriginKind.HUMAN_STEER,
-            }
-        ):
+    if isinstance(anchor, NewTriggerAnchor):
+        matches = tuple(
+            item
+            for item in canonical_input.items
+            if item.source_entry_id == anchor.source_entry_id
+            and provider_input_item_fingerprint(item)
+            == anchor.provider_input_item_fingerprint
+        )
+        if len(matches) != 1:
+            raise StructuredModelInputCompileError(
+                ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
+            )
+        item = matches[0]
+        if item.input_origin in {
+            CanonicalInputOriginKind.HUMAN_MESSAGE,
+            CanonicalInputOriginKind.HUMAN_STEER,
+        }:
             return CapabilityActivationSubjectKind.ROOT_HUMAN_PROMPT, item.text
-    return CapabilityActivationSubjectKind.ROOT_HUMAN_PROMPT, ""
+        return CapabilityActivationSubjectKind.ROOT_NON_HUMAN_TRIGGER, ""
+    # NoNewTriggerAnchor represents a same-turn tool/result continuation.  It
+    # must preserve the last activation snapshot rather than re-evaluating the
+    # turn as a fresh non-human trigger.
+    return None, ""
 
 
 def _compile_structured_input(
@@ -1971,6 +2793,339 @@ def _compile_structured_input(
     if monotonic() >= deadline_monotonic:
         raise TimeoutError("structured model input deadline expired")
     return compiler.compile(request)
+
+
+def _compile_structured_append(
+    compiler: StructuredModelInputCompiler,
+    request: StructuredModelInputCompileRequest,
+    *,
+    planning: FrozenProviderInputAppendPlanningInput,
+    compatibility: ProviderInputEpochCompatibility,
+    deadline_monotonic: float,
+) -> FrozenProviderInputAppendCompileResult:
+    if monotonic() >= deadline_monotonic:
+        raise TimeoutError("structured model input deadline expired")
+    return compiler.compile_append(
+        request,
+        planning=planning,
+        compatibility=compatibility,
+        deadline_monotonic=deadline_monotonic,
+    )
+
+
+def _canonical_frontier(
+    snapshot: CanonicalModelInputSnapshot,
+    facts: FrozenCanonicalCompileSnapshot,
+    *,
+    deadline_monotonic: float | None = None,
+) -> ProcessLocalCanonicalFrontier:
+    binding = facts.context_binding_fact
+    fingerprints: list[str] = []
+    for item in snapshot.items:
+        if deadline_monotonic is not None and monotonic() >= deadline_monotonic:
+            raise StructuredModelInputCompileError(
+                ModelInputCompileFailureKind.DEADLINE_EXPIRED
+            )
+        fingerprints.append(provider_input_item_fingerprint(item))
+    return ProcessLocalCanonicalFrontier(
+        latest_context_binding_revision_id=binding.binding_revision_id,
+        context_base_semantic_identity=binding.context_base_semantic_identity,
+        through_sequence=snapshot.identity.provider_input_through_sequence,
+        ordered_item_fingerprints=tuple(fingerprints),
+    )
+
+
+def _provider_cut_fingerprint(cut: PreparedProviderInputCut) -> str:
+    return context_fingerprint(
+        "pulsara:prepared-provider-input-cut:v1",
+        {
+            "session_id": cut.session_id,
+            "turn_id": cut.turn_id,
+            "binding_revision": cut.context_binding_revision_id,
+            "through_sequence": cut.provider_input_through_sequence,
+        },
+    )
+
+
+def _canonical_frontier_fingerprint(frontier: ProcessLocalCanonicalFrontier) -> str:
+    return context_fingerprint(
+        "pulsara:provider-input-frontier:v1",
+        {
+            "binding_revision": frontier.latest_context_binding_revision_id,
+            "context_base": frontier.context_base_semantic_identity,
+            "through": frontier.through_sequence,
+            "items": frontier.ordered_item_fingerprints,
+        },
+    )
+
+
+def _new_trigger_anchor(item: FrozenProviderInputItem) -> NewTriggerAnchor:
+    if item.source_entry_id is None:
+        raise StructuredModelInputCompileError(
+            ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
+        )
+    fingerprint = provider_input_item_fingerprint(item)
+    return NewTriggerAnchor(
+        source_entry_id=item.source_entry_id,
+        provider_input_item_fingerprint=fingerprint,
+        provider_group_boundary_fingerprint=context_fingerprint(
+            "pulsara:provider-group-boundary:v1",
+            {
+                "entry_id": item.source_entry_id,
+                "entry_sequence": item.source_entry_sequence,
+                "item": fingerprint,
+                "position": "BEFORE_ITEM",
+            },
+        ),
+    )
+
+
+def _prospective_steer_compile_snapshot(
+    base: FrozenCanonicalCompileSnapshot,
+    *,
+    facts: tuple[PendingPromptSteerFact, ...],
+    bodies: tuple[bytes, ...],
+    deadline_monotonic: float | None = None,
+) -> FrozenCanonicalCompileSnapshot:
+    if not facts or len(facts) != len(bodies):
+        raise ValueError("prospective steer suffix cardinality is invalid")
+    canonical = base.canonical_input
+    identity = canonical.identity
+    if identity.conversation_scope_kind is not ModelInputScopeKind.ROOT:
+        raise ValueError("prospective steer suffix requires ROOT scope")
+    start_sequence = identity.provider_input_through_sequence
+    appended: list[FrozenProviderInputItem] = []
+    for index, (fact, body) in enumerate(zip(facts, bodies, strict=True), start=1):
+        if deadline_monotonic is not None and monotonic() >= deadline_monotonic:
+            raise StructuredModelInputCompileError(
+                ModelInputCompileFailureKind.DEADLINE_EXPIRED
+            )
+        if fact.session_id != identity.session_id or (
+            fact.exact_target_turn_id != identity.turn_id
+        ):
+            raise ValueError("prospective steer fact target differs from input cut")
+        try:
+            text = body.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError("prospective steer text is not UTF-8") from exc
+        appended.append(
+            FrozenProviderInputItem(
+                item_kind=FrozenProviderInputItemKind.USER,
+                source_entry_id=_stable_id(
+                    "steer-entry", fact.session_id, fact.queue_item_id
+                ),
+                source_entry_sequence=start_sequence + index,
+                source_turn_id=identity.turn_id,
+                text=text,
+                input_origin=CanonicalInputOriginKind.HUMAN_STEER,
+            )
+        )
+    through = start_sequence + len(appended)
+    identity_values = {
+        "session_id": identity.session_id,
+        "turn_id": identity.turn_id,
+        "initial_entry_id": identity.initial_entry_id,
+        "context_binding_revision_id": identity.context_binding_revision_id,
+        "provider_input_through_sequence": through,
+        "conversation_scope_kind": identity.conversation_scope_kind,
+        "scope_subagent_task_id": identity.scope_subagent_task_id,
+    }
+    successor_identity = CanonicalModelInputIdentity(
+        **identity_values,
+        identity_fingerprint=canonical_model_input_identity_fingerprint(
+            **identity_values
+        ),
+    )
+    items = (*canonical.items, *appended)
+    canonical_bytes = canonical.canonical_utf8_bytes + sum(len(item) for item in bodies)
+    successor_input = CanonicalModelInputSnapshot(
+        identity=successor_identity,
+        items=items,
+        canonical_utf8_bytes=canonical_bytes,
+        snapshot_fingerprint=canonical_model_input_snapshot_fingerprint(
+            identity=successor_identity,
+            items=items,
+            canonical_utf8_bytes=canonical_bytes,
+            closures=canonical.closures,
+            late_outcomes=canonical.late_outcomes,
+        ),
+        closures=canonical.closures,
+        late_outcomes=canonical.late_outcomes,
+    )
+    if deadline_monotonic is not None and monotonic() >= deadline_monotonic:
+        raise StructuredModelInputCompileError(
+            ModelInputCompileFailureKind.DEADLINE_EXPIRED
+        )
+    values = {
+        "canonical_input": successor_input,
+        "context_binding_fact": base.context_binding_fact,
+        "run_permission_snapshot": base.run_permission_snapshot,
+        "plan_workflow_fact": base.plan_workflow_fact,
+        "plan_handoff_fact": base.plan_handoff_fact,
+        "approved_plan_materialization_fact": (base.approved_plan_materialization_fact),
+    }
+    provisional = FrozenCanonicalCompileSnapshot.__new__(FrozenCanonicalCompileSnapshot)
+    for name, value in values.items():
+        object.__setattr__(provisional, name, value)
+    object.__setattr__(provisional, "canonical_read_cut_fingerprint", "")
+    result = FrozenCanonicalCompileSnapshot(
+        **values,
+        canonical_read_cut_fingerprint=canonical_compile_snapshot_fingerprint(
+            provisional
+        ),
+    )
+    if deadline_monotonic is not None and monotonic() >= deadline_monotonic:
+        raise StructuredModelInputCompileError(
+            ModelInputCompileFailureKind.DEADLINE_EXPIRED
+        )
+    return result
+
+
+def _dispatch_anchor(
+    snapshot: CanonicalModelInputSnapshot,
+    *,
+    predecessor_item_count: int,
+    model_call_index: int,
+) -> NewTriggerAnchor | NoNewTriggerAnchor:
+    delta = snapshot.items[predecessor_item_count:]
+    if model_call_index == 1:
+        candidates = tuple(
+            item
+            for item in delta
+            if item.source_entry_id == snapshot.identity.initial_entry_id
+        )
+    else:
+        candidates = ()
+    if len(candidates) > 1:
+        raise StructuredModelInputCompileError(
+            ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
+        )
+    if not candidates:
+        return NoNewTriggerAnchor(
+            predecessor_frontier_fingerprint=(
+                None
+                if predecessor_item_count == 0
+                else context_fingerprint(
+                    "pulsara:canonical-frontier-prefix:v1",
+                    tuple(
+                        provider_input_item_fingerprint(item)
+                        for item in snapshot.items[:predecessor_item_count]
+                    ),
+                )
+            )
+        )
+    item = candidates[0]
+    item_fingerprint = provider_input_item_fingerprint(item)
+    return NewTriggerAnchor(
+        source_entry_id=item.source_entry_id or "",
+        provider_input_item_fingerprint=item_fingerprint,
+        provider_group_boundary_fingerprint=context_fingerprint(
+            "pulsara:provider-group-boundary:v1",
+            {
+                "entry_id": item.source_entry_id,
+                "item": item_fingerprint,
+                "sequence": item.source_entry_sequence,
+            },
+        ),
+    )
+
+
+def _provider_input_compatibility(
+    *,
+    prepared_call: PreparedKernelModelCall,
+    canonical_facts: FrozenCanonicalCompileSnapshot,
+    sources: CollectedContextSources,
+) -> ProviderInputEpochCompatibility:
+    base = next(
+        item for item in sources.candidates if item.source_kind.value == "BASE_SYSTEM"
+    )
+    binding = prepared_call.compile_binding
+    return ProviderInputEpochCompatibility(
+        compiler_contract_version=COMPILER_CONTRACT_VERSION,
+        base_system_semantic_fingerprint=base.source_semantic_fingerprint,
+        tool_surface_fingerprint=binding.tool_surface.surface_fingerprint,
+        model_target_fingerprint=binding.target_fact.target_fingerprint,
+        estimator_fingerprint=binding.estimator_fingerprint,
+        provider_message_lowering_contract=PROVIDER_MESSAGE_LOWERING_CONTRACT,
+        context_base_semantic_identity=(
+            canonical_facts.context_binding_fact.context_base_semantic_identity
+        ),
+    )
+
+
+def _prepared_append_candidate(
+    *,
+    planning: FrozenProviderInputAppendPlanningInput,
+    compatibility: ProviderInputEpochCompatibility,
+    compiled_result: FrozenProviderInputAppendCompileResult,
+) -> PreparedProviderInputAppendCandidate:
+    predecessor = planning.predecessor_view
+    epoch_nonce = (
+        f"provider-input-epoch:{uuid4().hex}"
+        if predecessor is None or compiled_result.reset_reason is not None
+        else predecessor.epoch_nonce
+    )
+    expected_revision = 0 if predecessor is None else predecessor.epoch_revision
+    predecessor_fingerprint = (
+        None if predecessor is None else predecessor.semantic_prefix_fingerprint
+    )
+    candidate_fingerprint = prepared_provider_input_append_candidate_fingerprint(
+        scope=planning.scope,
+        epoch_nonce=epoch_nonce,
+        expected_epoch_revision=expected_revision,
+        predecessor_prefix_fingerprint=predecessor_fingerprint,
+        dispatch_anchor=planning.dispatch_anchor,
+        resulting_compiled_input=compiled_result.compiled_input,
+        resulting_canonical_frontier=compiled_result.canonical_frontier,
+        resulting_source_heads=compiled_result.source_heads,
+        appended_message_count=compiled_result.appended_message_count,
+        reset_reason=compiled_result.reset_reason,
+        compatibility=compatibility,
+        planning_fingerprint=planning.planning_fingerprint,
+    )
+    return PreparedProviderInputAppendCandidate(
+        scope=planning.scope,
+        epoch_nonce=epoch_nonce,
+        expected_epoch_revision=expected_revision,
+        predecessor_prefix_fingerprint=predecessor_fingerprint,
+        dispatch_anchor=planning.dispatch_anchor,
+        resulting_compiled_input=compiled_result.compiled_input,
+        resulting_canonical_frontier=compiled_result.canonical_frontier,
+        resulting_source_heads=compiled_result.source_heads,
+        appended_message_count=compiled_result.appended_message_count,
+        reset_reason=compiled_result.reset_reason,
+        compatibility=compatibility,
+        planning_fingerprint=planning.planning_fingerprint,
+        candidate_fingerprint=candidate_fingerprint,
+    )
+
+
+async def _await_started_settlement(
+    task: asyncio.Task[_T],
+) -> _T:
+    """Keep one admitted canonical settlement attached through cancellation.
+
+    Once a steer mutation worker exists, cancelling the API/runner waiter may
+    not leave that worker detached behind a ROOT slot that is about to retire.
+    asyncio cancellation is therefore only observed after the exact worker has
+    reached a terminal state.  A settlement error wins over the detached
+    caller cancellation so the normal turn-terminalization path can fail
+    closed with the real conflict.
+    """
+
+    cancellation: asyncio.CancelledError | None = None
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as exc:
+            cancellation = exc
+            continue
+        except BaseException:
+            break
+    result = task.result()
+    if cancellation is not None:
+        raise cancellation
+    return result
 
 
 __all__ = [

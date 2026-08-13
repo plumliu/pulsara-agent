@@ -131,6 +131,21 @@ and
 Round 3 does not change the database universe; its process-local compiler and
 multi-provider verification are recorded in
 [`round3_structured_model_input_compiler_activation.json`](benchmarks/suites/core/v1/round3_structured_model_input_compiler_activation.json).
+Round 3.1 adds a Host-scoped, process-local provider-input continuity epoch:
+within one exact ROOT or child scope, the system prompt and tool surface remain
+stable while canonical conversation facts and typed runtime observations are
+appended as a strict message suffix. Busy `Enter` steers the exact active ROOT
+turn; `Tab` queues a future new turn. A replacement Host cold-starts from
+canonical rows—there is no durable provider conversation, prefix replay, or
+remote response identity. Steer-prefix planning shares the installed prefix
+estimate, observes one absolute cooperative deadline, and is capped by a
+process-local unique-work quote that never recharges the same immutable base
+for each nested-prefix trial. Provider open additionally requires the exact
+one-shot permit object sealed by the Host continuity owner, and the compiler
+enforces exactly one value-or-absence branch for every first-party source.
+Plan handoff display text is
+separate from its exact canonical transition identity. Verification is recorded in
+[`round3_1_provider_input_prefix_continuity_activation.json`](benchmarks/suites/core/v1/round3_1_provider_input_prefix_continuity_activation.json).
 Round 4 extends clean-v0 to 26 product relations and 34 selective occurrences;
 its Plan workflow, run-bound permission, Protocol v3, and real-provider
 verification are recorded in

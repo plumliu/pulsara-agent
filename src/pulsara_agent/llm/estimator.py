@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Callable, Protocol
 
 from pulsara_agent.llm.input import LLMMessage, ToolSpec
 from pulsara_agent.llm.request import LLMContext
@@ -161,6 +161,46 @@ class PulsaraHeuristicTokenEstimatorV1:
             envelope_tokens=envelope_tokens,
             total_input_tokens=(
                 system_tokens + message_tokens + tool_tokens + envelope_tokens
+            ),
+        )
+
+    def estimate_frozen_input_cooperative(
+        self,
+        *,
+        system_prompt: str,
+        messages: tuple[LLMMessage, ...],
+        tools: tuple["FrozenToolSpec", ...],
+        checkpoint: Callable[[], None],
+    ) -> TokenEstimate:
+        """Estimate the same contract while yielding at bounded item seams."""
+
+        checkpoint()
+        system_tokens = (
+            SYSTEM_MESSAGE_FRAMING_TOKENS + self.estimate_text(system_prompt)
+            if system_prompt
+            else 0
+        )
+        message_tokens_by_index: list[int] = []
+        for message in messages:
+            checkpoint()
+            message_tokens_by_index.append(self.estimate_message(message))
+        tool_tokens = 0
+        for tool in tools:
+            checkpoint()
+            tool_tokens += self.estimate_frozen_tool_spec(tool)
+        checkpoint()
+        message_tokens = sum(message_tokens_by_index)
+        return TokenEstimate(
+            system_tokens=system_tokens,
+            message_tokens=message_tokens,
+            message_tokens_by_index=tuple(message_tokens_by_index),
+            tool_tokens=tool_tokens,
+            envelope_tokens=REQUEST_ENVELOPE_TOKENS,
+            total_input_tokens=(
+                system_tokens
+                + message_tokens
+                + tool_tokens
+                + REQUEST_ENVELOPE_TOKENS
             ),
         )
 

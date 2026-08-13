@@ -26,11 +26,15 @@ from pulsara_agent.model_input.contracts import (
     CanonicalModelInputIdentity,
     CanonicalModelInputSnapshot,
     FrozenCanonicalCompileSnapshot,
+    ContextBindingBaseKind,
+    FrozenContextBindingCompileFact,
     FrozenPlanHandoffCompileFact,
     FrozenPlanWorkflowCompileFact,
     FrozenProviderInputItem,
     FrozenProviderInputItemKind,
     LateToolOutcomeObservation,
+    MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES,
+    MAXIMUM_CANONICAL_PROVIDER_INPUT_ITEMS,
     ModelInputScopeKind,
     ProviderToolCall,
     ProviderToolResultClosure,
@@ -40,10 +44,15 @@ from pulsara_agent.model_input.contracts import (
     canonical_model_input_identity_fingerprint,
     canonical_model_input_snapshot_fingerprint,
     canonical_compile_snapshot_fingerprint,
+    context_binding_compile_fact_fingerprint,
     plan_handoff_compile_fact_fingerprint,
     plan_workflow_compile_fact_fingerprint,
     approved_plan_materialization_fingerprint,
     provider_input_item_fingerprint,
+)
+from pulsara_agent.model_input.continuity import (
+    FULL_HISTORY_CONTEXT_BASE_IDENTITY,
+    PROVIDER_MESSAGE_LOWERING_CONTRACT,
 )
 from pulsara_agent.ports.artifact import (
     ToolOutputArtifactDisposition,
@@ -128,8 +137,8 @@ class CanonicalProviderInputReader:
         connection_provider: VerifiedPostgresConnectionProviderProtocol,
         *,
         blob_reader: CanonicalBlobReader | None = None,
-        maximum_items: int = 4096,
-        maximum_canonical_bytes: int = 16 << 20,
+        maximum_items: int = MAXIMUM_CANONICAL_PROVIDER_INPUT_ITEMS,
+        maximum_canonical_bytes: int = MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES,
     ) -> None:
         if maximum_items < 1 or maximum_canonical_bytes < 1:
             raise ValueError("provider input bounds must be positive")
@@ -163,7 +172,7 @@ class CanonicalProviderInputReader:
             binding = connection.execute(
                 """
                 SELECT t.workspace_id, t.conversation_scope_kind,
-                       t.scope_subagent_task_id,
+                       t.scope_subagent_task_id, t.initial_entry_id,
                        t.status AS turn_status,
                        t.current_context_binding_revision_id,
                        t.permission_snapshot_id,
@@ -232,6 +241,48 @@ class CanonicalProviderInputReader:
                     raise ConversationKernelConflict(
                         "snapshot binding source cut drifted"
                     )
+            binding_values = {
+                "binding_revision_id": cut.context_binding_revision_id,
+                "revision_ordinal": int(binding["revision_ordinal"]),
+                "base_kind": ContextBindingBaseKind(str(binding["base_kind"])),
+                "context_snapshot_id": (
+                    None
+                    if binding["context_snapshot_id"] is None
+                    else str(binding["context_snapshot_id"])
+                ),
+                "source_through_sequence": int(binding["source_through_sequence"]),
+                "context_base_semantic_identity": (
+                    FULL_HISTORY_CONTEXT_BASE_IDENTITY
+                    if snapshot is None
+                    else context_fingerprint(
+                        "pulsara:context-snapshot-base-semantic-identity:v1",
+                        {
+                            "snapshot_id": str(snapshot["id"]),
+                            "blob_id": str(snapshot["blob_id"]),
+                            "digest": str(snapshot["content_digest"]),
+                            "size": int(snapshot["content_size"]),
+                            "media_type": str(snapshot["content_media_type"]),
+                            "codec": str(snapshot["content_codec"]),
+                            "source_through_sequence": int(
+                                snapshot["source_through_sequence"]
+                            ),
+                            "lowering": PROVIDER_MESSAGE_LOWERING_CONTRACT,
+                        },
+                    )
+                ),
+            }
+            provisional_binding = FrozenContextBindingCompileFact.__new__(
+                FrozenContextBindingCompileFact
+            )
+            for name, value in binding_values.items():
+                object.__setattr__(provisional_binding, name, value)
+            object.__setattr__(provisional_binding, "fact_fingerprint", "")
+            binding_fact = FrozenContextBindingCompileFact(
+                **binding_values,
+                fact_fingerprint=context_binding_compile_fact_fingerprint(
+                    provisional_binding
+                ),
+            )
 
             entries = connection.execute(
                 """
@@ -454,10 +505,15 @@ class CanonicalProviderInputReader:
                 if not calls:
                     continue
                 target_cut = next_assistant_cut.get(entry_id)
-                if target_cut is None and row["owning_turn_status"] == "RUNNING":
-                    target_cut = cut.provider_input_through_sequence
                 if target_cut is None:
-                    target_cut = sequence
+                    # This read is preparing the first provider call after the
+                    # request.  Its immutable cut is the only truthful answer
+                    # to whether a result is ordinarily visible.  Once that
+                    # call commits an assistant entry, _next_assistant_cuts()
+                    # returns the exact same attributed cut, so a historical
+                    # request/result pair never changes representation merely
+                    # because its owning turn became terminal.
+                    target_cut = cut.provider_input_through_sequence
                 for call in calls:
                     state = tool_state.get((entry_id, call.tool_call_id), {})
                     result = state.get("result")
@@ -604,6 +660,7 @@ class CanonicalProviderInputReader:
             identity_fingerprint = canonical_model_input_identity_fingerprint(
                 session_id=cut.session_id,
                 turn_id=cut.turn_id,
+                initial_entry_id=str(binding["initial_entry_id"]),
                 context_binding_revision_id=cut.context_binding_revision_id,
                 provider_input_through_sequence=cut.provider_input_through_sequence,
                 conversation_scope_kind=pure_scope,
@@ -612,6 +669,7 @@ class CanonicalProviderInputReader:
             identity = CanonicalModelInputIdentity(
                 session_id=cut.session_id,
                 turn_id=cut.turn_id,
+                initial_entry_id=str(binding["initial_entry_id"]),
                 context_binding_revision_id=cut.context_binding_revision_id,
                 provider_input_through_sequence=cut.provider_input_through_sequence,
                 conversation_scope_kind=pure_scope,
@@ -652,6 +710,7 @@ class CanonicalProviderInputReader:
                 FrozenCanonicalCompileSnapshot
             )
             object.__setattr__(provisional, "canonical_input", canonical_input)
+            object.__setattr__(provisional, "context_binding_fact", binding_fact)
             object.__setattr__(provisional, "run_permission_snapshot", permission)
             object.__setattr__(provisional, "plan_workflow_fact", workflow_fact)
             object.__setattr__(provisional, "plan_handoff_fact", handoff_fact)
@@ -661,6 +720,7 @@ class CanonicalProviderInputReader:
             object.__setattr__(provisional, "canonical_read_cut_fingerprint", "")
             return FrozenCanonicalCompileSnapshot(
                 canonical_input=canonical_input,
+                context_binding_fact=binding_fact,
                 run_permission_snapshot=permission,
                 plan_workflow_fact=workflow_fact,
                 plan_handoff_fact=handoff_fact,

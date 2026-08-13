@@ -15,6 +15,9 @@ from pulsara_agent.workspace_identity import HostWorkspaceInput
 
 
 class _CapabilityProvider:
+    def __init__(self) -> None:
+        self.snapshot_calls = 0
+
     def resolve_projection_for_available_tools(self, context, *, available_tool_names):
         assert context.active_skill_names == frozenset({"review"})
         assert available_tool_names == frozenset({"read_file"})
@@ -24,6 +27,20 @@ class _CapabilityProvider:
             diagnostics=(SimpleNamespace(code="skill_ready"),),
             catalog_prompt="<skills>review</skills>",
             active_skill_prompt="<active-skill>review body</active-skill>",
+        )
+
+    def snapshot_projection_input(self, *, workspace_root, available_tool_names):
+        del workspace_root
+        self.snapshot_calls += 1
+        assert available_tool_names == frozenset({"read_file"})
+        return SimpleNamespace(skills=(), diagnostics=())
+
+    def resolve_projection_from_snapshot(
+        self, context, *, available_tool_names, discovery
+    ):
+        assert discovery.skills == ()
+        return self.resolve_projection_for_available_tools(
+            context, available_tool_names=available_tool_names
         )
 
 
@@ -57,6 +74,28 @@ def test_kernel_composition_preserves_root_catalog_and_active_skill_prompt(
     assert tuple(item.name for item in projection.catalog_entries) == ("review",)
     assert tuple(item.name for item in projection.active_injections) == ("review",)
     assert tuple(item.code for item in projection.diagnostics) == ("skill_ready",)
+
+
+def test_round3_1_capability_input_is_sampled_once_for_multiple_prefix_trials(
+    tmp_path,
+) -> None:
+    provider = _CapabilityProvider()
+    composer = KernelCapabilityComposer(
+        workspace_root=tmp_path,
+        workspace_kind="project",
+        memory_domain=None,  # type: ignore[arg-type]
+        available_tool_names=frozenset({"read_file"}),
+        configured_active_skill_names=frozenset({"review"}),
+        provider=provider,  # type: ignore[arg-type]
+    )
+    frozen = composer.freeze_projection_input(
+        available_tool_names=frozenset({"read_file"})
+    )
+    first = composer.resolve_projection_from_frozen(frozen, user_input="first")
+    second = composer.resolve_projection_from_frozen(frozen, user_input="second")
+
+    assert provider.snapshot_calls == 1
+    assert first.catalog_prompt == second.catalog_prompt == "<skills>review</skills>"
 
 
 def test_enabled_mcp_is_rejected_before_kernel_resource_activation(

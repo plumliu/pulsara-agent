@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
+from threading import Event
 from time import monotonic
 from uuid import uuid4
 
 import pytest
 
 from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
-from pulsara_agent.conversation_kernel.contracts import InlineContent
+from pulsara_agent.conversation_kernel.contracts import (
+    InlineContent,
+    PromptDeliveryMode,
+)
 from pulsara_agent.conversation_kernel.live import (
     LiveAgentEventBus,
     LiveObservationKind,
@@ -24,11 +28,14 @@ from pulsara_agent.ports.live_agent_event import (
     live_digest,
 )
 from pulsara_agent.conversation_kernel.repository import ConversationKernelRepository
+from pulsara_agent.conversation_kernel.reader import CanonicalProviderInputReader
+from pulsara_agent.conversation_kernel.io import KernelSessionIO
 from pulsara_agent.conversation_kernel.runner import (
     ConversationKernelRunner,
     KernelToolAuthorization,
     KernelToolAuthorizationKind,
     KernelToolResult,
+    _stable_id,
 )
 from pulsara_agent.conversation_kernel.tool_artifacts import (
     PostgresToolArtifactReadPort,
@@ -39,6 +46,7 @@ from pulsara_agent.model_input.contracts import (
     ModelInputCompileFailureKind,
     StructuredModelInputCompileError,
 )
+from pulsara_agent.model_input.compiler import StructuredModelInputCompiler
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 from tests.support.postgres import verified_postgres_provider
 from tests.support.round3 import (
@@ -84,15 +92,24 @@ class _RevocableStructuredToolPort(StructuredToolPort):
     def borrow_tool_surface(self, prepared):
         if self.revoked:
             raise RuntimeError("injected tool surface revocation")
-        return super().borrow_tool_surface(prepared)
+        borrow = super().borrow_tool_surface(prepared)
+        original_validate = borrow._validate
+
+        def validate(current, tool_name):
+            if self.revoked:
+                raise RuntimeError("injected tool surface revocation")
+            return original_validate(current, tool_name)
+
+        borrow._validate = validate
+        return borrow
 
 
 class _SurfaceRevokingCollector(StaticContextSourceCollector):
     def __init__(self, tools: _RevocableStructuredToolPort) -> None:
         self._tools = tools
 
-    def collect(self, **kwargs):
-        result = super().collect(**kwargs)
+    def complete_frozen_sources(self, frozen, **kwargs):
+        result = super().complete_frozen_sources(frozen, **kwargs)
         self._tools.revoked = True
         return result
 
@@ -118,6 +135,63 @@ class _LostAssistantAckRepository(ConversationKernelRepository):
             self._lost_once = True
             raise OSError("injected lost assistant commit acknowledgement")
         return accepted
+
+
+class _CancellingFirstSteerRepository(ConversationKernelRepository):
+    def __init__(self, provider) -> None:
+        super().__init__(provider)
+        self.cancelled_once = False
+
+    def consume_prepared_prompt_steer(self, guard, *, candidate, deadline_monotonic):
+        if not self.cancelled_once:
+            self.cancelled_once = True
+            self.cancel_prompt(
+                guard,
+                queue_item_id=candidate.queue_item_id,
+                occurred_at=datetime.now(timezone.utc),
+                actor_id="test:concurrent-cancel",
+                deadline_monotonic=deadline_monotonic,
+            )
+        return super().consume_prepared_prompt_steer(
+            guard,
+            candidate=candidate,
+            deadline_monotonic=deadline_monotonic,
+        )
+
+
+class _ExpiredSteerCompiler(StructuredModelInputCompiler):
+    def compile_append(self, request, **kwargs):
+        if len(request.canonical_input.items) > 1:
+            kwargs["deadline_monotonic"] = monotonic() - 1
+        return super().compile_append(request, **kwargs)
+
+
+class _OnlyOneSteerCompiler(StructuredModelInputCompiler):
+    def __init__(self) -> None:
+        super().__init__()
+        self.failures: list[tuple[int, ModelInputCompileFailureKind]] = []
+
+    def compile_append(self, request, **kwargs):
+        steer_count = sum(
+            item.input_origin is not None
+            and item.input_origin.value == "HUMAN_STEER"
+            for item in request.canonical_input.items
+        )
+        if steer_count > 1:
+            self.failures.append(
+                (
+                    steer_count,
+                    ModelInputCompileFailureKind.PROTECTED_TRANSCRIPT_EXCEEDS_BUDGET,
+                )
+            )
+            raise StructuredModelInputCompileError(
+                ModelInputCompileFailureKind.PROTECTED_TRANSCRIPT_EXCEEDS_BUDGET
+            )
+        try:
+            return super().compile_append(request, **kwargs)
+        except StructuredModelInputCompileError as exc:
+            self.failures.append((steer_count, exc.kind))
+            raise
 
 
 class _AssertingTool:
@@ -221,6 +295,81 @@ class _LargeTool(_AssertingTool):
         return KernelToolResult(state="SUCCESS", content=b"z" * (70 << 10))
 
 
+class _BlockingSourceCollector(StaticContextSourceCollector):
+    def __init__(self) -> None:
+        self.started = Event()
+        self.release = Event()
+        self.freeze_calls = 0
+        self.complete_calls = 0
+
+    def freeze_non_trigger_sources(self, **kwargs):
+        self.freeze_calls += 1
+        self.started.set()
+        if not self.release.wait(timeout=10):
+            raise TimeoutError("test source capture was not released")
+        return super().freeze_non_trigger_sources(**kwargs)
+
+    def complete_frozen_sources(self, frozen, **kwargs):
+        self.complete_calls += 1
+        return super().complete_frozen_sources(frozen, **kwargs)
+
+
+class _DelayedPreparedExecution:
+    def __init__(self, delegate, started: asyncio.Event, release: asyncio.Event) -> None:
+        self._delegate = delegate
+        self._started = started
+        self._release = release
+        self.execution_fingerprint = delegate.execution_fingerprint
+
+    def discard(self) -> None:
+        self._delegate.discard()
+
+    async def open_once(self, permit):
+        self._started.set()
+        await self._release.wait()
+        async for item in self._delegate.open_once(permit):
+            yield item
+
+
+class _BlockingFirstCallModel(_ScriptedModel):
+    def __init__(self, calls: list[list[object]]) -> None:
+        super().__init__(calls)
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    def preflight_execution(
+        self,
+        request,
+        *,
+        expected_append_candidate_fingerprint,
+        install_authority,
+    ):
+        prepared = super().preflight_execution(
+            request,
+            expected_append_candidate_fingerprint=(
+                expected_append_candidate_fingerprint
+            ),
+            install_authority=install_authority,
+        )
+        if len(self.requests) == 1:
+            return _DelayedPreparedExecution(prepared, self.started, self.release)
+        return prepared
+
+
+class _FailingPostConsumptionReader:
+    def __init__(self, delegate: CanonicalProviderInputReader) -> None:
+        self._delegate = delegate
+        self.calls = 0
+
+    def read_frozen_compile_snapshot(self, cut, *, deadline_monotonic):
+        self.calls += 1
+        if self.calls == 2:
+            raise RuntimeError("injected post-consumption canonical mismatch")
+        return self._delegate.read_frozen_compile_snapshot(
+            cut, deadline_monotonic=deadline_monotonic
+        )
+
+
 def _text_stream(text: str, *, block: str = "text:1") -> list[object]:
     return [
         TextStartPayload(block),
@@ -290,6 +439,540 @@ def test_stage2_runner_text_turn_has_two_entry_transactions_and_no_segments(
         "AssistantMessageAccepted",
         "TurnCompleted",
     )
+
+
+def test_round3_1_empty_epoch_absorbs_pre_first_call_steers_once(
+    stage2_migrated_postgres_database,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id = _name("session")
+    lease = repository.acquire_host_writer(
+        session_id=session_id,
+        workspace_id=_name("workspace"),
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    command_id = _name("command")
+    turn_id = _stable_id("turn", session_id, command_id)
+    collector = _BlockingSourceCollector()
+    model = _ScriptedModel([_text_stream("one call")])
+    runner = ConversationKernelRunner(
+        repository=repository,
+        writer_lease=lease,
+        model=model,
+        tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
+        live_bus=LiveAgentEventBus(),
+        context_source_collector=collector,
+    )
+
+    async def exercise():
+        task = asyncio.create_task(runner.run_turn("initial", command_id=command_id))
+        assert await asyncio.to_thread(collector.started.wait, 5)
+        for index, text in enumerate(("steer one", "steer two"), start=1):
+            steer_command = _name(f"steer-command-{index}")
+            repository.enqueue_prompt(
+                lease.guard,
+                command_id=steer_command,
+                queue_item_id=_name(f"steer-queue-{index}"),
+                client_submission_id=steer_command,
+                delivery_mode=PromptDeliveryMode.STEER_ACTIVE_TURN,
+                target_turn_id=turn_id,
+                permission_snapshot_id=None,
+                requested_permission_mode=None,
+                content=InlineContent.from_bytes(text.encode("utf-8")),
+                occurred_at=datetime.now(timezone.utc),
+                actor_id="test",
+                deadline_monotonic=monotonic() + 10,
+            )
+        collector.release.set()
+        return await task
+
+    result = asyncio.run(exercise())
+    assert result.final_text == "one call"
+    assert len(model.requests) == 1
+    assert collector.freeze_calls == 1
+    assert collector.complete_calls == 1
+    user_messages = [
+        message.content[0]
+        for message in model.requests[0].compiled_input.messages
+        if message.role is MessageRole.USER
+        and message.content
+        and "pulsara_runtime_observation" not in message.content[0]
+    ]
+    assert user_messages == ["initial", "steer one", "steer two"]
+
+
+def test_round3_1_planning_reaches_shorter_fifo_prefix_without_recharging_base(
+    stage2_migrated_postgres_database,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id = _name("session")
+    lease = repository.acquire_host_writer(
+        session_id=session_id,
+        workspace_id=_name("workspace"),
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    command_id = _name("command")
+    turn_id = _stable_id("turn", session_id, command_id)
+    collector = _BlockingSourceCollector()
+    model = _BlockingFirstCallModel([_text_stream("one call")])
+    compiler = _OnlyOneSteerCompiler()
+    runner = ConversationKernelRunner(
+        repository=repository,
+        writer_lease=lease,
+        model=model,
+        tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
+        live_bus=LiveAgentEventBus(),
+        context_source_collector=collector,
+        compiler=compiler,
+    )
+    # Nested prefixes share the same 64 KiB canonical base.  The injected
+    # target admits only one steer.  A 512 KiB planning bound admits the unique
+    # base + suffix materialization, while charging the base for each of the
+    # sixteen trials would fail before reaching the valid one-item prefix.
+    initial = "x" * (64 << 10)
+    body = b"12345678"
+    queue_ids = tuple(_name(f"steer-queue-{index}") for index in range(1, 17))
+
+    async def exercise():
+        task = asyncio.create_task(runner.run_turn(initial, command_id=command_id))
+        assert await asyncio.to_thread(collector.started.wait, 5)
+        for index, queue_id in enumerate(queue_ids, start=1):
+            steer_command = _name(f"steer-command-{index}")
+            repository.enqueue_prompt(
+                lease.guard,
+                command_id=steer_command,
+                queue_item_id=queue_id,
+                client_submission_id=steer_command,
+                delivery_mode=PromptDeliveryMode.STEER_ACTIVE_TURN,
+                target_turn_id=turn_id,
+                permission_snapshot_id=None,
+                requested_permission_mode=None,
+                content=InlineContent.from_bytes(body),
+                occurred_at=datetime.now(timezone.utc),
+                actor_id="test",
+                deadline_monotonic=monotonic() + 10,
+            )
+        monkeypatch.setattr(
+            "pulsara_agent.conversation_kernel.runner.MAXIMUM_STEER_PLANNING_CANONICAL_WORK_BYTES",
+            512 << 10,
+        )
+        collector.release.set()
+        await asyncio.wait_for(model.started.wait(), timeout=5)
+        user_messages = [
+            message.content[0]
+            for message in model.requests[0].compiled_input.messages
+            if message.role is MessageRole.USER
+            and message.content
+            and "pulsara_runtime_observation" not in message.content[0]
+        ]
+        with provider.connection(
+            lane=PostgresConnectionLane.INSPECTOR,
+            deadline_monotonic=monotonic() + 10,
+        ) as connection:
+            rows = connection.execute(
+                "SELECT id, status FROM pulsara_v3.prompt_queue_items "
+                "WHERE session_id = %s AND id = ANY(%s) ORDER BY queue_sequence",
+                (session_id, list(queue_ids)),
+            ).fetchall()
+        task.cancel()
+        model.release.set()
+        await asyncio.gather(task, return_exceptions=True)
+        return user_messages, rows
+
+    try:
+        user_messages, rows = asyncio.run(exercise())
+    except StructuredModelInputCompileError as exc:
+        pytest.fail(f"shortest prefix was rejected: {exc.kind}; {compiler.failures}")
+    assert user_messages == [initial, body.decode("utf-8")]
+    assert rows[0] == (queue_ids[0], "CONSUMED")
+    assert len(rows) == len(queue_ids)
+    assert all(status == "PENDING" for _queue_id, status in rows[1:])
+
+
+def test_round3_1_expired_steer_planning_consumes_nothing_and_io_closes(
+    stage2_migrated_postgres_database,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id = _name("session")
+    lease = repository.acquire_host_writer(
+        session_id=session_id,
+        workspace_id=_name("workspace"),
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    command_id = _name("command")
+    turn_id = _stable_id("turn", session_id, command_id)
+    steer_command = _name("steer-command")
+    steer_queue = _name("steer-queue")
+    collector = _BlockingSourceCollector()
+    io_owner = KernelSessionIO()
+    model = _ScriptedModel([_text_stream("must not open")])
+    runner = ConversationKernelRunner(
+        repository=repository,
+        writer_lease=lease,
+        model=model,
+        tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
+        live_bus=LiveAgentEventBus(),
+        context_source_collector=collector,
+        compiler=_ExpiredSteerCompiler(),
+        io_owner=io_owner,
+    )
+
+    async def exercise() -> None:
+        task = asyncio.create_task(runner.run_turn("initial", command_id=command_id))
+        assert await asyncio.to_thread(collector.started.wait, 5)
+        repository.enqueue_prompt(
+            lease.guard,
+            command_id=steer_command,
+            queue_item_id=steer_queue,
+            client_submission_id=steer_command,
+            delivery_mode=PromptDeliveryMode.STEER_ACTIVE_TURN,
+            target_turn_id=turn_id,
+            permission_snapshot_id=None,
+            requested_permission_mode=None,
+            content=InlineContent.from_bytes(b"must remain pending"),
+            occurred_at=datetime.now(timezone.utc),
+            actor_id="test",
+            deadline_monotonic=monotonic() + 10,
+        )
+        collector.release.set()
+        with pytest.raises(StructuredModelInputCompileError) as failure:
+            await task
+        assert failure.value.kind is ModelInputCompileFailureKind.DEADLINE_EXPIRED
+        await io_owner.aclose(deadline_monotonic=monotonic() + 1)
+
+    asyncio.run(exercise())
+    assert model.requests == []
+    with provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        deadline_monotonic=monotonic() + 10,
+    ) as connection:
+        assert connection.execute(
+            "SELECT status, consumed_entry_id FROM pulsara_v3.prompt_queue_items "
+            "WHERE session_id = %s AND id = %s",
+            (session_id, steer_queue),
+        ).fetchone() == ("PENDING", None)
+        assert connection.execute(
+            "SELECT status FROM pulsara_v3.turns WHERE session_id = %s AND id = %s",
+            (session_id, turn_id),
+        ).fetchone() == ("INTERRUPTED",)
+
+
+def test_round3_1_future_lane_does_not_block_active_steer_batch(
+    stage2_migrated_postgres_database,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id = _name("session")
+    lease = repository.acquire_host_writer(
+        session_id=session_id,
+        workspace_id=_name("workspace"),
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    command_id = _name("command")
+    future_command_id = _name("future-command")
+    future_queue_item_id = _name("future-queue")
+    steer_command_id = _name("steer-command")
+    steer_queue_item_id = _name("steer-queue")
+    turn_id = _stable_id("turn", session_id, command_id)
+    collector = _BlockingSourceCollector()
+    model = _ScriptedModel([_text_stream("one call")])
+    runner = ConversationKernelRunner(
+        repository=repository,
+        writer_lease=lease,
+        model=model,
+        tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
+        live_bus=LiveAgentEventBus(),
+        context_source_collector=collector,
+    )
+
+    async def exercise():
+        task = asyncio.create_task(runner.run_turn("initial", command_id=command_id))
+        assert await asyncio.to_thread(collector.started.wait, 5)
+        repository.enqueue_prompt(
+            lease.guard,
+            command_id=future_command_id,
+            queue_item_id=future_queue_item_id,
+            client_submission_id=future_command_id,
+            delivery_mode=PromptDeliveryMode.NEW_TURN,
+            target_turn_id=None,
+            permission_snapshot_id="permission:future",
+            requested_permission_mode=DEFAULT_PERMISSION_MODE,
+            content=InlineContent.from_bytes(b"future"),
+            occurred_at=datetime.now(timezone.utc),
+            actor_id="test",
+            deadline_monotonic=monotonic() + 10,
+        )
+        repository.enqueue_prompt(
+            lease.guard,
+            command_id=steer_command_id,
+            queue_item_id=steer_queue_item_id,
+            client_submission_id=steer_command_id,
+            delivery_mode=PromptDeliveryMode.STEER_ACTIVE_TURN,
+            target_turn_id=turn_id,
+            permission_snapshot_id=None,
+            requested_permission_mode=None,
+            content=InlineContent.from_bytes(b"steer now"),
+            occurred_at=datetime.now(timezone.utc),
+            actor_id="test",
+            deadline_monotonic=monotonic() + 10,
+        )
+        collector.release.set()
+        return await task
+
+    asyncio.run(exercise())
+    assert collector.freeze_calls == 1
+    assert collector.complete_calls == 1
+    with provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        deadline_monotonic=monotonic() + 10,
+    ) as connection:
+        rows = connection.execute(
+            "SELECT id, status FROM pulsara_v3.prompt_queue_items "
+            "WHERE session_id = %s ORDER BY queue_sequence",
+            (session_id,),
+        ).fetchall()
+    assert rows == [
+        (future_queue_item_id, "PENDING"),
+        (steer_queue_item_id, "CONSUMED"),
+    ]
+
+
+def test_round3_1_installed_epoch_absorbs_two_steers_in_one_followup_call(
+    stage2_migrated_postgres_database,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id = _name("session")
+    lease = repository.acquire_host_writer(
+        session_id=session_id,
+        workspace_id=_name("workspace"),
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    command_id = _name("command")
+    turn_id = _stable_id("turn", session_id, command_id)
+    model = _BlockingFirstCallModel(
+        [_text_stream("first answer"), _text_stream("final answer", block="text:2")]
+    )
+    runner = ConversationKernelRunner(
+        repository=repository,
+        writer_lease=lease,
+        model=model,
+        tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
+        live_bus=LiveAgentEventBus(),
+        context_source_collector=StaticContextSourceCollector(),
+    )
+
+    async def exercise():
+        task = asyncio.create_task(runner.run_turn("initial", command_id=command_id))
+        await asyncio.wait_for(model.started.wait(), timeout=5)
+        for index, text in enumerate(("steer one", "steer two"), start=1):
+            steer_command = _name(f"command-steer-{index}")
+            steer_queue = _name(f"queue-steer-{index}")
+            repository.enqueue_prompt(
+                lease.guard,
+                command_id=steer_command,
+                queue_item_id=steer_queue,
+                client_submission_id=steer_command,
+                delivery_mode=PromptDeliveryMode.STEER_ACTIVE_TURN,
+                target_turn_id=turn_id,
+                permission_snapshot_id=None,
+                requested_permission_mode=None,
+                content=InlineContent.from_bytes(text.encode("utf-8")),
+                occurred_at=datetime.now(timezone.utc),
+                actor_id="test",
+                deadline_monotonic=monotonic() + 10,
+            )
+        model.release.set()
+        return await task
+
+    result = asyncio.run(exercise())
+    assert result.final_text == "final answer"
+    assert len(model.requests) == 2
+    first = model.requests[0].compiled_input
+    second = model.requests[1].compiled_input
+    assert second.system_prompt == first.system_prompt
+    assert second.tools == first.tools
+    assert second.messages[: len(first.messages)] == first.messages
+    appended_users = [
+        message.content[0]
+        for message in second.messages[len(first.messages) :]
+        if message.role is MessageRole.USER
+        and message.content
+        and "pulsara_runtime_observation" not in message.content[0]
+    ]
+    assert appended_users == ["steer one", "steer two"]
+    with provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        deadline_monotonic=monotonic() + 10,
+    ) as connection:
+        assert connection.execute(
+            "SELECT status FROM pulsara_v3.prompt_queue_items "
+            "WHERE session_id = %s ORDER BY queue_sequence",
+            (session_id,),
+        ).fetchall() == [("CONSUMED",), ("CONSUMED",)]
+
+
+def test_round3_1_post_consumption_read_failure_interrupts_without_open_or_recompile(
+    stage2_migrated_postgres_database,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id = _name("session")
+    lease = repository.acquire_host_writer(
+        session_id=session_id,
+        workspace_id=_name("workspace"),
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    command_id = _name("command")
+    steer_command_id = _name("steer-command")
+    steer_queue_item_id = _name("steer-queue")
+    turn_id = _stable_id("turn", session_id, command_id)
+    collector = _BlockingSourceCollector()
+    reader = _FailingPostConsumptionReader(CanonicalProviderInputReader(provider))
+    model = _ScriptedModel([_text_stream("must not open")])
+    runner = ConversationKernelRunner(
+        repository=repository,
+        writer_lease=lease,
+        model=model,
+        tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
+        live_bus=LiveAgentEventBus(),
+        input_reader=reader,
+        context_source_collector=collector,
+    )
+
+    async def exercise() -> None:
+        task = asyncio.create_task(runner.run_turn("initial", command_id=command_id))
+        assert await asyncio.to_thread(collector.started.wait, 5)
+        repository.enqueue_prompt(
+            lease.guard,
+            command_id=steer_command_id,
+            queue_item_id=steer_queue_item_id,
+            client_submission_id=steer_command_id,
+            delivery_mode=PromptDeliveryMode.STEER_ACTIVE_TURN,
+            target_turn_id=turn_id,
+            permission_snapshot_id=None,
+            requested_permission_mode=None,
+            content=InlineContent.from_bytes(b"accepted then mismatched"),
+            occurred_at=datetime.now(timezone.utc),
+            actor_id="test",
+            deadline_monotonic=monotonic() + 10,
+        )
+        collector.release.set()
+        with pytest.raises(
+            RuntimeError, match="injected post-consumption canonical mismatch"
+        ):
+            await task
+
+    asyncio.run(exercise())
+    assert reader.calls == 2
+    assert collector.freeze_calls == 1
+    assert collector.complete_calls == 1
+    assert model.requests == []
+    with provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        deadline_monotonic=monotonic() + 10,
+    ) as connection:
+        assert connection.execute(
+            "SELECT status FROM pulsara_v3.prompt_queue_items "
+            "WHERE session_id = %s AND id = %s",
+            (session_id, steer_queue_item_id),
+        ).fetchone() == ("CONSUMED",)
+        assert connection.execute(
+            "SELECT status, terminal_reason FROM pulsara_v3.turns "
+            "WHERE session_id = %s AND id = %s",
+            (session_id, turn_id),
+        ).fetchone() == ("INTERRUPTED", "PROVIDER_INPUT_PLAN_CONFLICT")
+
+
+def test_round3_1_pre_consumption_stale_plan_discards_and_replans_without_steer_entry(
+    stage2_migrated_postgres_database,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = _CancellingFirstSteerRepository(provider)
+    session_id = _name("session")
+    lease = repository.acquire_host_writer(
+        session_id=session_id,
+        workspace_id=_name("workspace"),
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    command_id = _name("command")
+    steer_command_id = _name("steer-command")
+    steer_queue_item_id = _name("steer-queue")
+    turn_id = _stable_id("turn", session_id, command_id)
+    collector = _BlockingSourceCollector()
+    model = _ScriptedModel([_text_stream("initial only")])
+    runner = ConversationKernelRunner(
+        repository=repository,
+        writer_lease=lease,
+        model=model,
+        tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
+        live_bus=LiveAgentEventBus(),
+        context_source_collector=collector,
+    )
+
+    async def exercise():
+        task = asyncio.create_task(runner.run_turn("initial", command_id=command_id))
+        assert await asyncio.to_thread(collector.started.wait, 5)
+        repository.enqueue_prompt(
+            lease.guard,
+            command_id=steer_command_id,
+            queue_item_id=steer_queue_item_id,
+            client_submission_id=steer_command_id,
+            delivery_mode=PromptDeliveryMode.STEER_ACTIVE_TURN,
+            target_turn_id=turn_id,
+            permission_snapshot_id=None,
+            requested_permission_mode=None,
+            content=InlineContent.from_bytes(b"cancel before consume"),
+            occurred_at=datetime.now(timezone.utc),
+            actor_id="test",
+            deadline_monotonic=monotonic() + 10,
+        )
+        collector.release.set()
+        return await task
+
+    result = asyncio.run(exercise())
+    assert result.final_text == "initial only"
+    assert repository.cancelled_once
+    assert len(model.requests) == 1
+    assert [
+        message.content[0]
+        for message in model.requests[0].compiled_input.messages
+        if message.role is MessageRole.USER
+        and message.content
+        and "pulsara_runtime_observation" not in message.content[0]
+    ] == ["initial"]
+    with provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        deadline_monotonic=monotonic() + 10,
+    ) as connection:
+        assert connection.execute(
+            "SELECT status, consumed_entry_id FROM pulsara_v3.prompt_queue_items "
+            "WHERE session_id = %s AND id = %s",
+            (session_id, steer_queue_item_id),
+        ).fetchone() == ("CANCELLED", None)
+        assert connection.execute(
+            "SELECT count(*) FROM pulsara_v3.transcript_entries "
+            "WHERE session_id = %s AND entry_kind = 'USER_STEER'",
+            (session_id,),
+        ).fetchone() == (0,)
 
 
 def test_round3_compile_failure_interrupts_after_user_acceptance_with_zero_open(
@@ -418,7 +1101,7 @@ def test_round3_surface_revoked_before_borrow_has_zero_provider_open(
     )
     model = _ScriptedModel([_text_stream("must not open")])
     tools = _RevocableStructuredToolPort(
-        _AssertingTool(provider, session_id), tool_names=()
+        _AssertingTool(provider, session_id), tool_names=("test_tool",)
     )
     runner = ConversationKernelRunner(
         repository=repository,

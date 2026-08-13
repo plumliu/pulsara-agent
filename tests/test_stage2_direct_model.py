@@ -13,7 +13,25 @@ from pulsara_agent.conversation_kernel.direct_model import (
     KernelModelExecutionRequest,
     KernelModelPreparationRequest,
 )
+from pulsara_agent.conversation_kernel.input_continuity import (
+    HostProviderInputContinuityOwner,
+    ProviderInputContinuityConflict,
+)
+from pulsara_agent.conversation_kernel.runner import _prepared_append_candidate
+from pulsara_agent.llm.adapters.openai.chat_completions import (
+    build_chat_completions_payload,
+)
+from pulsara_agent.llm.adapters.openai.responses import build_responses_payload
+from pulsara_agent.llm.input import LLMMessage, LLMToolCall
 from pulsara_agent.model_input.compiler import StructuredModelInputCompiler
+from pulsara_agent.model_input.continuity import (
+    FULL_HISTORY_CONTEXT_BASE_IDENTITY,
+    FrozenProviderInputAppendCompileResult,
+    NoNewTriggerAnchor,
+    ProcessLocalCanonicalFrontier,
+    ProviderInputEpochCompatibility,
+    ProviderInputContinuityScope,
+)
 from pulsara_agent.model_input.contracts import (
     CanonicalModelInputIdentity,
     CanonicalModelInputSnapshot,
@@ -29,6 +47,7 @@ from pulsara_agent.ports.live_agent_event import (
     TextStartPayload,
 )
 from pulsara_agent.primitives.model_call import ModelCallPurpose
+from pulsara_agent.primitives.context import context_fingerprint
 from tests.support.model_config import test_llm_config
 from tests.support.round3 import (
     StaticContextSourceCollector,
@@ -67,6 +86,7 @@ def _prepared_execution(
     identity = CanonicalModelInputIdentity(
         session_id=session_id,
         turn_id=turn_id,
+        initial_entry_id="entry:initial",
         context_binding_revision_id=revision_id,
         provider_input_through_sequence=sequence,
         conversation_scope_kind=scope_kind,
@@ -74,6 +94,7 @@ def _prepared_execution(
         identity_fingerprint=canonical_model_input_identity_fingerprint(
             session_id=session_id,
             turn_id=turn_id,
+            initial_entry_id="entry:initial",
             context_binding_revision_id=revision_id,
             provider_input_through_sequence=sequence,
             conversation_scope_kind=scope_kind,
@@ -93,9 +114,7 @@ def _prepared_execution(
         ),
     )
     canonical_facts = static_canonical_compile_facts(snapshot)
-    sources = StaticContextSourceCollector().collect(
-        canonical_facts=canonical_facts
-    )
+    sources = StaticContextSourceCollector().collect(canonical_facts=canonical_facts)
     compiled = StructuredModelInputCompiler().compile(
         StructuredModelInputCompileRequest(
             context_id="context:test",
@@ -126,17 +145,88 @@ def _prepared_execution(
     )
 
 
-def _port(*, usage_observer=None) -> DirectKernelModelPort:
+def _port(
+    *,
+    usage_observer=None,
+    api: str = "openai_chat_completions",
+) -> DirectKernelModelPort:
     return DirectKernelModelPort(
         config=test_llm_config(
             api_key="test",
             base_url="https://example.invalid/v1",
             pro_model="test-pro",
             flash_model="test-flash",
-            api="openai_chat_completions",
+            api=api,
         ),
         usage_observer=usage_observer,
     )
+
+
+async def _collect_preflighted(
+    port: DirectKernelModelPort, request: KernelModelExecutionRequest
+) -> list[object]:
+    owner, append_candidate = _continuity_candidate(request)
+    execution = port.preflight_execution(
+        request,
+        expected_append_candidate_fingerprint=(
+            append_candidate.candidate_fingerprint
+        ),
+        install_authority=owner.install_authority,
+    )
+    permit = owner.install(
+        candidate_fingerprint=append_candidate.candidate_fingerprint,
+        execution_fingerprint=execution.execution_fingerprint,
+    )
+    return [item async for item in execution.open_once(permit)]
+
+
+def _continuity_candidate(request: KernelModelExecutionRequest):
+    identity = request.compiled_input.canonical_input_identity
+    scope = ProviderInputContinuityScope(
+        session_id=request.session_id,
+        scope_kind=identity.conversation_scope_kind,
+        scope_subagent_task_id=identity.scope_subagent_task_id,
+    )
+    owner = HostProviderInputContinuityOwner(session_id=request.session_id)
+    frontier = ProcessLocalCanonicalFrontier(
+        latest_context_binding_revision_id=identity.context_binding_revision_id,
+        context_base_semantic_identity=FULL_HISTORY_CONTEXT_BASE_IDENTITY,
+        through_sequence=identity.provider_input_through_sequence,
+        ordered_item_fingerprints=(),
+    )
+    planning = owner.freeze_planning_input(
+        scope=scope,
+        canonical_frontier=frontier,
+        dispatch_anchor=NoNewTriggerAnchor(None),
+    )
+    compatibility = ProviderInputEpochCompatibility(
+        compiler_contract_version="test:compiler",
+        base_system_semantic_fingerprint=context_fingerprint("test:base", "base"),
+        tool_surface_fingerprint=(
+            request.prepared_call.tool_surface.model_surface.surface_fingerprint
+        ),
+        model_target_fingerprint=(
+            request.prepared_call.compile_binding.target_fact.target_fingerprint
+        ),
+        estimator_fingerprint=(
+            request.prepared_call.compile_binding.estimator_fingerprint
+        ),
+        provider_message_lowering_contract="test:lowering",
+        context_base_semantic_identity=FULL_HISTORY_CONTEXT_BASE_IDENTITY,
+    )
+    candidate = _prepared_append_candidate(
+        planning=planning,
+        compatibility=compatibility,
+        compiled_result=FrozenProviderInputAppendCompileResult(
+            compiled_input=request.compiled_input,
+            canonical_frontier=frontier,
+            source_heads=(),
+            appended_message_count=len(request.compiled_input.messages),
+            reset_reason=None,
+        ),
+    )
+    owner.register(candidate)
+    return owner, candidate
 
 
 def test_stage2_direct_model_freezes_output_budget_system_and_tools() -> None:
@@ -159,6 +249,153 @@ def test_stage2_direct_model_freezes_output_budget_system_and_tools() -> None:
     request.surface_borrow.close()
 
 
+@pytest.mark.parametrize(
+    ("api", "payload_builder", "message_key", "system_key"),
+    (
+        (
+            "openai_chat_completions",
+            build_chat_completions_payload,
+            "messages",
+            None,
+        ),
+        ("openai_responses", build_responses_payload, "input", "instructions"),
+    ),
+)
+def test_round3_1_adapter_wire_items_preserve_strict_prefix_and_steer_order(
+    api,
+    payload_builder,
+    message_key: str,
+    system_key: str | None,
+) -> None:
+    port = _port(api=api)
+    request, _tool_port = _prepared_execution(port)
+    candidate = context_fingerprint("test:append-candidate:v1", api)
+    owner = HostProviderInputContinuityOwner(session_id=request.session_id)
+    execution = port.preflight_execution(
+        request,
+        expected_append_candidate_fingerprint=candidate,
+        install_authority=owner.install_authority,
+    )
+    first_context = execution.final_context
+    first_payload = payload_builder(
+        call=request.prepared_call.call, context=first_context
+    )
+
+    steer_messages = tuple(
+        LLMMessage.user(value) for value in ("steer one", "steer two", "steer three")
+    )
+    second_context = replace(
+        first_context,
+        messages=first_context.messages + steer_messages,
+        context_id="context:successor",
+        model_call_index=2,
+    )
+    second_payload = payload_builder(
+        call=request.prepared_call.call, context=second_context
+    )
+    before = first_payload[message_key]
+    after = second_payload[message_key]
+    assert after[: len(before)] == before
+    assert len(after) == len(before) + 3
+    assert [item["role"] for item in after[-3:]] == ["user", "user", "user"]
+    if api == "openai_chat_completions":
+        assert [item["content"] for item in after[-3:]] == [
+            "steer one",
+            "steer two",
+            "steer three",
+        ]
+    else:
+        assert [item["content"] for item in after[-3:]] == [
+            "steer one",
+            "steer two",
+            "steer three",
+        ]
+    assert first_payload.get("tools") == second_payload.get("tools")
+    if system_key is None:
+        assert first_payload["messages"][0] == second_payload["messages"][0]
+    else:
+        assert first_payload[system_key] == second_payload[system_key]
+    request.surface_borrow.close()
+
+
+@pytest.mark.parametrize(
+    ("api", "payload_builder", "message_key", "system_key"),
+    (
+        (
+            "openai_chat_completions",
+            build_chat_completions_payload,
+            "messages",
+            None,
+        ),
+        ("openai_responses", build_responses_payload, "input", "instructions"),
+    ),
+)
+def test_round3_1_adapter_preserves_twelve_call_strict_prefix_trajectory(
+    api,
+    payload_builder,
+    message_key: str,
+    system_key: str | None,
+) -> None:
+    port = _port(api=api)
+    request, _tool_port = _prepared_execution(port)
+    candidate = context_fingerprint(
+        "test:append-candidate:v1", {"api": api, "trajectory": "twelve"}
+    )
+    owner = HostProviderInputContinuityOwner(session_id=request.session_id)
+    execution = port.preflight_execution(
+        request,
+        expected_append_candidate_fingerprint=candidate,
+        install_authority=owner.install_authority,
+    )
+    contexts = [execution.final_context]
+    for call_index in range(2, 13):
+        previous = contexts[-1]
+        if call_index % 3 == 0:
+            tool_call_id = f"tool-call:{call_index}"
+            suffix = (
+                LLMMessage.assistant_turn(
+                    text=f"using tool {call_index}",
+                    tool_calls=(
+                        LLMToolCall(
+                            id=tool_call_id,
+                            name="read_file",
+                            arguments='{"path":"README.md"}',
+                        ),
+                    ),
+                ),
+                LLMMessage.tool_result(
+                    f"tool result {call_index}", tool_call_id=tool_call_id
+                ),
+            )
+        elif call_index % 3 == 1:
+            suffix = (LLMMessage.user(f"steer {call_index}"),)
+        else:
+            suffix = (LLMMessage.assistant(f"answer {call_index}"),)
+        contexts.append(
+            replace(
+                previous,
+                messages=previous.messages + suffix,
+                context_id=f"context:trajectory:{call_index}",
+                model_call_index=call_index,
+            )
+        )
+
+    payloads = [
+        payload_builder(call=request.prepared_call.call, context=context)
+        for context in contexts
+    ]
+    for previous, current in zip(payloads[:-1], payloads[1:], strict=True):
+        old_items = previous[message_key]
+        new_items = current[message_key]
+        assert new_items[: len(old_items)] == old_items
+        assert previous.get("tools") == current.get("tools")
+        if system_key is None:
+            assert previous["messages"][0] == current["messages"][0]
+        else:
+            assert previous[system_key] == current[system_key]
+    request.surface_borrow.close()
+
+
 def test_stage2_direct_model_rejects_invalid_compiled_input_before_send() -> None:
     port = _port()
     request, _tool_port = _prepared_execution(port)
@@ -166,7 +403,7 @@ def test_stage2_direct_model_rejects_invalid_compiled_input_before_send() -> Non
     invalid = replace(request, compiled_input=other.compiled_input)
 
     async def collect() -> list[object]:
-        return [item async for item in port.stream(invalid)]
+        return await _collect_preflighted(port, invalid)
 
     with pytest.raises(ValueError, match="exact-join preparation"):
         asyncio.run(collect())
@@ -186,6 +423,32 @@ def test_round3_execution_exactly_joins_provider_cut_before_open() -> None:
                 provider_input_through_sequence=1,
             ),
         )
+    request.surface_borrow.close()
+
+
+def test_round3_1_open_rejects_forged_same_shape_install_permit() -> None:
+    port = _port()
+    request, _tool_port = _prepared_execution(port)
+    owner, candidate = _continuity_candidate(request)
+    execution = port.preflight_execution(
+        request,
+        expected_append_candidate_fingerprint=candidate.candidate_fingerprint,
+        install_authority=owner.install_authority,
+    )
+    permit = owner.install(
+        candidate_fingerprint=candidate.candidate_fingerprint,
+        execution_fingerprint=execution.execution_fingerprint,
+    )
+    forged = replace(permit)
+
+    async def collect() -> list[object]:
+        return [item async for item in execution.open_once(forged)]
+
+    with pytest.raises(
+        ProviderInputContinuityConflict,
+        match="was not issued for this execution",
+    ):
+        asyncio.run(collect())
     request.surface_borrow.close()
 
 
@@ -256,7 +519,7 @@ def test_round3_direct_model_rejects_final_estimate_drift_before_transport_open(
     )
 
     async def collect() -> list[object]:
-        return [item async for item in port.stream(request)]
+        return await _collect_preflighted(port, request)
 
     with pytest.raises(RuntimeError, match="pre-send input estimates differ"):
         asyncio.run(collect())
@@ -284,7 +547,7 @@ def test_stage2_direct_model_real_adapter_path_emits_only_live_payloads() -> Non
     request, _tool_port = _prepared_execution(port)
 
     async def collect() -> list[object]:
-        return [item async for item in port.stream(request)]
+        return await _collect_preflighted(port, request)
 
     values = asyncio.run(collect())
     assert [type(value) for value in values] == [

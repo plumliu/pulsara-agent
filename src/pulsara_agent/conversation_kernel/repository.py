@@ -36,6 +36,7 @@ from pulsara_agent.conversation_kernel.contracts import (
     JobSafetyClass,
     PromptDeliveryMode,
     StoredCommittedEvent,
+    TurnStatus,
     WriterLease,
     canonical_digest,
 )
@@ -102,6 +103,25 @@ from pulsara_agent.conversation_kernel.vocabulary import (
     CommittedEventType,
     SubjectSlot,
 )
+from pulsara_agent.conversation_kernel.steer import (
+    AcceptedSteerDispatchEntry,
+    MAXIMUM_STEER_ITEMS_PER_SAFE_POINT,
+    PendingPromptSteerFact,
+    PreparedPromptIngressCommand,
+    PreparedSteerConsumptionCandidate,
+    PreparedSteerPlanConflictInterruption,
+    PreparedSteerResourceRejection,
+    PromptIngressConfirmation,
+    PromptIngressConfirmationKind,
+    PromptIngressWriteRejection,
+    SteerConsumptionConfirmation,
+    SteerConsumptionConfirmationKind,
+    SteerPlanConflictConfirmation,
+    SteerPlanConflictConfirmationKind,
+    SteerResourceRejectionConfirmation,
+    SteerResourceRejectionConfirmationKind,
+    build_pending_prompt_steer_fact,
+)
 from pulsara_agent.storage.postgres_connection_provider import (
     PostgresConnectionLane,
     VerifiedPostgresConnectionProviderProtocol,
@@ -117,6 +137,12 @@ MAXIMUM_PLAN_INTERACTIONS_PER_WORKFLOW = 64
 
 class ConversationKernelConflict(RuntimeError):
     """A stable identity already names a different semantic fact."""
+
+
+class PromptIngressRejected(ConversationKernelConflict):
+    def __init__(self, reason: PromptIngressWriteRejection) -> None:
+        self.reason = reason
+        super().__init__(reason.value)
 
 
 class PlanToolBatchDisposition(StrEnum):
@@ -523,7 +549,9 @@ class PreparedPlanToolBatch:
         elif self.control_kind is PlanToolControlKind.ENTER:
             if self.idempotent_existing:
                 if not self.expected_workflow_revision:
-                    raise ValueError("idempotent Plan enter requires an active revision")
+                    raise ValueError(
+                        "idempotent Plan enter requires an active revision"
+                    )
             elif self.expected_workflow_revision is not None:
                 raise ValueError("fresh Plan enter cannot target an existing revision")
         elif self.idempotent_existing:
@@ -604,7 +632,10 @@ class PlanQuestionAnswer:
                 raise ValueError("Plan option answer union is invalid")
         elif self.option_ordinal is not None or not self.free_text:
             raise ValueError("Plan free-text answer union is invalid")
-        if self.free_text is not None and len(self.free_text.encode("utf-8")) > 32 * 1024:
+        if (
+            self.free_text is not None
+            and len(self.free_text.encode("utf-8")) > 32 * 1024
+        ):
             raise ValueError("Plan free-text answer exceeds its bound")
 
 
@@ -1321,9 +1352,7 @@ class ConversationKernelRepository:
                 ):
                     raise ConversationKernelConflict("command identity conflict")
                 return self._accepted_entry(connection, guard.session_id, entry_id)
-            self._require_root_admission_open(
-                connection, session_id=guard.session_id
-            )
+            self._require_root_admission_open(connection, session_id=guard.session_id)
             entry_sequence = self._allocate_entry_sequence(connection, guard.session_id)
             workspace_id = self._workspace_id(connection, guard.session_id)
             permission = self._freeze_root_permission_snapshot(
@@ -1392,9 +1421,7 @@ class ConversationKernelRepository:
                 source_plan_interaction_id=(
                     None if handoff is None else handoff.interaction_id
                 ),
-                source_plan_handoff_kind=(
-                    None if handoff is None else handoff.kind
-                ),
+                source_plan_handoff_kind=(None if handoff is None else handoff.kind),
             )
             connection.execute(
                 """
@@ -2997,10 +3024,7 @@ class ConversationKernelRepository:
                 raise ConversationKernelConflict(
                     "prepared Plan control arguments drifted"
                 )
-            if (
-                candidate.selected_disposition
-                is not PlanToolBatchDisposition.APPLY
-            ):
+            if candidate.selected_disposition is not PlanToolBatchDisposition.APPLY:
                 return self._accept_rejected_plan_tool_batch_in_transaction(
                     connection,
                     guard=guard,
@@ -3270,7 +3294,9 @@ class ConversationKernelRepository:
         """Install a no-attempt Plan rejection and every sibling cancellation."""
 
         if candidate.selected_disposition is PlanToolBatchDisposition.APPLY:
-            raise ConversationKernelConflict("applied Plan batch entered rejection path")
+            raise ConversationKernelConflict(
+                "applied Plan batch entered rejection path"
+            )
         event_drafts: list[CommittedEventDraft] = []
         selected_result_entry_id: str | None = None
         for ordinal, call in enumerate(candidate.calls):
@@ -3291,9 +3317,7 @@ class ConversationKernelRepository:
                     "status": "cancelled_before_dispatch",
                     "reason": "plan_workflow_batch_barrier",
                 }
-            entry_sequence = self._allocate_entry_sequence(
-                connection, guard.session_id
-            )
+            entry_sequence = self._allocate_entry_sequence(connection, guard.session_id)
             self._insert_entry(
                 connection,
                 session_id=guard.session_id,
@@ -3446,8 +3470,7 @@ class ConversationKernelRepository:
             if (
                 interaction is None
                 or str(interaction["plan_workflow_id"]) != workflow_id
-                or int(interaction["workflow_revision"])
-                != expected_workflow_revision
+                or int(interaction["workflow_revision"]) != expected_workflow_revision
                 or str(interaction["kind"]) != PlanInteractionKind.QUESTION.value
                 or str(interaction["status"]) != "OPEN"
                 or str(interaction["workflow_status"]) != "ACTIVE"
@@ -3491,9 +3514,7 @@ class ConversationKernelRepository:
                     **response,
                 }
             )
-            entry_sequence = self._allocate_entry_sequence(
-                connection, guard.session_id
-            )
+            entry_sequence = self._allocate_entry_sequence(connection, guard.session_id)
             self._insert_entry(
                 connection,
                 session_id=guard.session_id,
@@ -3586,8 +3607,7 @@ class ConversationKernelRepository:
                     projection_profile="DEFAULT",
                     occurred_at=occurred_at,
                     payload={
-                        "selected_option": answer.kind
-                        is PlanQuestionAnswerKind.OPTION,
+                        "selected_option": answer.kind is PlanQuestionAnswerKind.OPTION,
                         "answer_present": True,
                     },
                 ),
@@ -3596,9 +3616,7 @@ class ConversationKernelRepository:
                         "event", result_entry_id, "ToolResultAccepted"
                     ),
                     event_type=CommittedEventType.TOOL_RESULT_ACCEPTED,
-                    subject=CommittedEventSubject(
-                        SubjectSlot.ENTRY, result_entry_id
-                    ),
+                    subject=CommittedEventSubject(SubjectSlot.ENTRY, result_entry_id),
                     actor_kind="runtime",
                     actor_id=actor_id,
                     sensitivity_class="S1",
@@ -3719,28 +3737,37 @@ class ConversationKernelRepository:
             )
             if winner is not None:
                 return winner
-            if connection.execute(
-                """SELECT 1 FROM pulsara_v3.turns
+            if (
+                connection.execute(
+                    """SELECT 1 FROM pulsara_v3.turns
                    WHERE session_id = %s AND conversation_scope_kind = 'ROOT'
                      AND status = 'RUNNING'""",
-                (guard.session_id,),
-            ).fetchone() is not None:
+                    (guard.session_id,),
+                ).fetchone()
+                is not None
+            ):
                 raise ConversationKernelConflict(
                     "user Plan enter requires an idle ROOT slot"
                 )
-            if connection.execute(
-                """SELECT 1 FROM pulsara_v3.plan_interactions
+            if (
+                connection.execute(
+                    """SELECT 1 FROM pulsara_v3.plan_interactions
                    WHERE session_id = %s AND status = 'OPEN'""",
-                (guard.session_id,),
-            ).fetchone() is not None:
+                    (guard.session_id,),
+                ).fetchone()
+                is not None
+            ):
                 raise ConversationKernelConflict(
                     "user Plan enter conflicts with an open interaction"
                 )
-            if connection.execute(
-                """SELECT 1 FROM pulsara_v3.plan_workflows
+            if (
+                connection.execute(
+                    """SELECT 1 FROM pulsara_v3.plan_workflows
                    WHERE session_id = %s AND status = 'ACTIVE'""",
-                (guard.session_id,),
-            ).fetchone() is not None:
+                    (guard.session_id,),
+                ).fetchone()
+                is not None
+            ):
                 raise ConversationKernelConflict("a Plan workflow is already active")
             workspace_id = self._workspace_id(connection, guard.session_id)
             ordinal = int(
@@ -3850,8 +3877,7 @@ class ConversationKernelRepository:
             if (
                 workflow is None
                 or str(workflow["status"]) != "ACTIVE"
-                or int(workflow["workflow_revision"])
-                != expected_workflow_revision
+                or int(workflow["workflow_revision"]) != expected_workflow_revision
             ):
                 raise ConversationKernelConflict("Plan force-exit target drifted")
 
@@ -3908,9 +3934,7 @@ class ConversationKernelRepository:
                 (guard.session_id, workflow_id),
             ).fetchall()
             if len(open_interactions) > 1:
-                raise ConversationKernelConflict(
-                    "multiple Plan interactions are open"
-                )
+                raise ConversationKernelConflict("multiple Plan interactions are open")
             interaction_aborted = bool(open_interactions)
             if interaction_aborted:
                 connection.execute(
@@ -4022,8 +4046,7 @@ class ConversationKernelRepository:
             if (
                 workflow is None
                 or str(workflow["status"]) != "ACTIVE"
-                or int(workflow["workflow_revision"])
-                != expected_workflow_revision
+                or int(workflow["workflow_revision"]) != expected_workflow_revision
             ):
                 raise ConversationKernelConflict("Plan exit target drifted")
             running = connection.execute(
@@ -4201,10 +4224,8 @@ class ConversationKernelRepository:
             if (
                 interaction is None
                 or str(interaction["plan_workflow_id"]) != workflow_id
-                or int(interaction["workflow_revision"])
-                != expected_workflow_revision
-                or str(interaction["kind"])
-                != PlanInteractionKind.DRAFT_REVIEW.value
+                or int(interaction["workflow_revision"]) != expected_workflow_revision
+                or str(interaction["kind"]) != PlanInteractionKind.DRAFT_REVIEW.value
                 or str(interaction["status"]) != "OPEN"
                 or str(interaction["workflow_status"]) != "ACTIVE"
             ):
@@ -4218,9 +4239,7 @@ class ConversationKernelRepository:
                     )
                 frozen = freeze_json(dict(raw_arguments))
                 if not isinstance(frozen, FrozenJsonObjectFact):
-                    raise ConversationKernelConflict(
-                        "Plan draft arguments are invalid"
-                    )
+                    raise ConversationKernelConflict("Plan draft arguments are invalid")
                 extracted = extract_plan_draft(
                     interaction_id=interaction_id,
                     assistant_entry_id=str(interaction["assistant_entry_id"]),
@@ -4230,9 +4249,7 @@ class ConversationKernelRepository:
                         str(interaction["request_contract_version"]),
                         str(interaction["request_contract_fingerprint"]),
                     ),
-                    request_semantic_digest=str(
-                        interaction["request_semantic_digest"]
-                    ),
+                    request_semantic_digest=str(interaction["request_semantic_digest"]),
                     arguments=frozen,
                 )
             status = {
@@ -4289,11 +4306,7 @@ class ConversationKernelRepository:
                 (
                     terminal_status,
                     revision,
-                    (
-                        interaction_id
-                        if decision is PlanDraftDecision.APPROVE
-                        else None
-                    ),
+                    (interaction_id if decision is PlanDraftDecision.APPROVE else None),
                     terminal_status,
                     guard.session_id,
                     interaction["plan_workflow_id"],
@@ -4475,9 +4488,7 @@ class ConversationKernelRepository:
                 ),
                 continuation_turn_id=continuation_turn_id,
                 continuation_entry_id=continuation_entry_id,
-                handoff_created_at_commit=(
-                    decision is PlanDraftDecision.CANCEL
-                ),
+                handoff_created_at_commit=(decision is PlanDraftDecision.CANCEL),
                 workflow_revision=revision,
                 draft_decision=decision,
             )
@@ -4666,9 +4677,7 @@ class ConversationKernelRepository:
                 expected_plan_utf8_digest is not None
                 and draft.identity.plan_utf8_digest != expected_plan_utf8_digest
             ):
-                raise PlanDraftIdentityConflict(
-                    "Plan draft content identity changed"
-                )
+                raise PlanDraftIdentityConflict("Plan draft content identity changed")
             return read_plan_draft_chunk(
                 draft,
                 offset_utf8_bytes=offset_utf8_bytes,
@@ -5192,6 +5201,145 @@ class ConversationKernelRepository:
                 ),
             )
             return True
+
+    def interrupt_prepared_steer_plan_conflict(
+        self,
+        guard: HostWriterGuard,
+        *,
+        candidate: PreparedSteerPlanConflictInterruption,
+        deadline_monotonic: float,
+    ) -> None:
+        """Install one stable post-consumption interruption winner."""
+
+        if candidate.session_id != guard.session_id:
+            raise ValueError("steer plan-conflict candidate belongs to another session")
+        with self._writer_transaction(
+            guard, deadline_monotonic=deadline_monotonic
+        ) as connection:
+            turn = connection.execute(
+                """
+                SELECT workspace_id, status FROM pulsara_v3.turns
+                WHERE session_id = %s AND id = %s FOR UPDATE
+                """,
+                (guard.session_id, candidate.exact_target_turn_id),
+            ).fetchone()
+            if turn is None:
+                raise ConversationKernelConflict("steer target turn is absent")
+            if str(turn["status"]) != TurnStatus.RUNNING.value:
+                return
+            connection.execute(
+                """
+                UPDATE pulsara_v3.plan_interactions
+                SET status = 'ABORTED', aborted_at = clock_timestamp()
+                WHERE session_id = %s AND origin_turn_id = %s
+                  AND status IN ('OPEN', 'CLAIMED')
+                """,
+                (guard.session_id, candidate.exact_target_turn_id),
+            )
+            updated = connection.execute(
+                """
+                UPDATE pulsara_v3.turns
+                SET status = 'INTERRUPTED',
+                    terminal_reason = 'PROVIDER_INPUT_PLAN_CONFLICT',
+                    terminal_at = clock_timestamp()
+                WHERE session_id = %s AND id = %s AND status = 'RUNNING'
+                RETURNING id
+                """,
+                (guard.session_id, candidate.exact_target_turn_id),
+            ).fetchone()
+            if updated is None:
+                raise ConversationKernelConflict(
+                    "steer plan-conflict turn CAS was lost"
+                )
+            self._append_events(
+                connection,
+                guard,
+                workspace_id=str(turn["workspace_id"]),
+                drafts=(candidate.turn_interrupted_occurrence,),
+            )
+            self._reject_terminal_prompt_steer_heads(
+                connection,
+                guard,
+                occurred_at=candidate.occurred_at,
+                actor_id=candidate.actor_id,
+            )
+
+    def confirm_prepared_steer_plan_conflict(
+        self,
+        *,
+        candidate: PreparedSteerPlanConflictInterruption,
+        deadline_monotonic: float,
+    ) -> SteerPlanConflictConfirmation:
+        """Classify the exact stable interruption or a historical terminal turn."""
+
+        with self._provider.connection(
+            lane=PostgresConnectionLane.HOST_CONTROL,
+            row_factory=dict_row,
+            isolation_level=IsolationLevel.REPEATABLE_READ,
+            deadline_monotonic=deadline_monotonic,
+        ) as connection:
+            turn = connection.execute(
+                """SELECT status, terminal_reason FROM pulsara_v3.turns
+                   WHERE session_id = %s AND id = %s""",
+                (candidate.session_id, candidate.exact_target_turn_id),
+            ).fetchone()
+            event = connection.execute(
+                """SELECT event_id, event_sequence, event_type, occurred_at,
+                          actor_kind, actor_id, sensitivity_class,
+                          projection_profile, payload, subject_turn_id
+                   FROM pulsara_v3.agent_events
+                   WHERE session_id = %s AND event_id = %s""",
+                (
+                    candidate.session_id,
+                    candidate.turn_interrupted_occurrence.event_id,
+                ),
+            ).fetchone()
+            open_interaction = connection.execute(
+                """SELECT 1 FROM pulsara_v3.plan_interactions
+                   WHERE session_id = %s AND origin_turn_id = %s
+                     AND status IN ('OPEN', 'CLAIMED') LIMIT 1""",
+                (candidate.session_id, candidate.exact_target_turn_id),
+            ).fetchone()
+        if turn is None:
+            return SteerPlanConflictConfirmation(
+                SteerPlanConflictConfirmationKind.CONFLICT
+            )
+        status = TurnStatus(str(turn["status"]))
+        if (
+            status is TurnStatus.INTERRUPTED
+            and str(turn["terminal_reason"]) == "PROVIDER_INPUT_PLAN_CONFLICT"
+            and open_interaction is None
+            and _event_row_matches_draft(event, candidate.turn_interrupted_occurrence)
+        ):
+            return SteerPlanConflictConfirmation(SteerPlanConflictConfirmationKind.FULL)
+        if status is not TurnStatus.RUNNING:
+            return SteerPlanConflictConfirmation(
+                SteerPlanConflictConfirmationKind.HISTORICAL_TERMINAL
+            )
+        if event is None:
+            return SteerPlanConflictConfirmation(SteerPlanConflictConfirmationKind.NONE)
+        return SteerPlanConflictConfirmation(SteerPlanConflictConfirmationKind.CONFLICT)
+
+    def read_turn_status(
+        self,
+        *,
+        session_id: str,
+        turn_id: str,
+        deadline_monotonic: float,
+    ) -> TurnStatus | None:
+        """Read only the canonical lifecycle needed by physical settlement."""
+
+        with self._provider.connection(
+            lane=PostgresConnectionLane.HOST_CONTROL,
+            row_factory=dict_row,
+            deadline_monotonic=deadline_monotonic,
+        ) as connection:
+            row = connection.execute(
+                """SELECT status FROM pulsara_v3.turns
+                   WHERE session_id = %s AND id = %s""",
+                (session_id, turn_id),
+            ).fetchone()
+        return None if row is None else TurnStatus(str(row["status"]))
 
     def accept_subagent_task(
         self,
@@ -5756,6 +5904,91 @@ class ConversationKernelRepository:
                 ),
             )
 
+    def confirm_prompt_ingress(
+        self,
+        *,
+        candidate: PreparedPromptIngressCommand,
+        deadline_monotonic: float,
+    ) -> PromptIngressConfirmation:
+        """Query one stable prompt command without binding a writer generation."""
+
+        with self._provider.connection(
+            lane=PostgresConnectionLane.HOST_CONTROL,
+            row_factory=dict_row,
+            deadline_monotonic=deadline_monotonic,
+        ) as connection:
+            command = connection.execute(
+                """
+                SELECT command_kind, request_schema_version, semantic_digest,
+                       target_queue_item_id
+                FROM pulsara_v3.session_commands
+                WHERE session_id = %s AND command_id = %s
+                """,
+                (candidate.session_id, candidate.command_id),
+            ).fetchone()
+            queue = connection.execute(
+                """
+                SELECT queue_sequence, command_id, client_submission_id,
+                       delivery_mode, target_turn_id, permission_snapshot_id,
+                       requested_permission_mode, status,
+                       inline_content, blob_id, content_digest, content_size,
+                       content_media_type, content_codec
+                FROM pulsara_v3.prompt_queue_items
+                WHERE session_id = %s AND id = %s
+                """,
+                (candidate.session_id, candidate.queue_item_id),
+            ).fetchone()
+        if command is None and queue is None:
+            return PromptIngressConfirmation(PromptIngressConfirmationKind.NONE)
+        compatible = (
+            command is not None
+            and queue is not None
+            and str(command["command_kind"]) == "QUEUE_PROMPT"
+            and str(command["request_schema_version"]) == "queue_prompt.v1"
+            and str(command["semantic_digest"]) == candidate.semantic_digest
+            and str(command["target_queue_item_id"]) == candidate.queue_item_id
+            and str(queue["command_id"]) == candidate.command_id
+            and str(queue["client_submission_id"]) == candidate.client_submission_id
+            and str(queue["delivery_mode"]) == candidate.delivery_mode.value
+            and (
+                None
+                if queue["target_turn_id"] is None
+                else str(queue["target_turn_id"])
+            )
+            == candidate.target_turn_id
+            and (
+                None
+                if queue["permission_snapshot_id"] is None
+                else str(queue["permission_snapshot_id"])
+            )
+            == candidate.permission_snapshot_id
+            and (
+                None
+                if queue["requested_permission_mode"] is None
+                else str(queue["requested_permission_mode"])
+            )
+            == (
+                None
+                if candidate.requested_permission_mode is None
+                else candidate.requested_permission_mode.value
+            )
+            and str(queue["content_digest"]) == candidate.content_digest
+            and int(queue["content_size"]) == candidate.content_size
+            and str(queue["content_media_type"]) == "text/plain"
+            and str(queue["content_codec"]) == "utf-8"
+            and ((queue["inline_content"] is None) != (queue["blob_id"] is None))
+        )
+        if compatible:
+            return PromptIngressConfirmation(
+                PromptIngressConfirmationKind.FULL_COMPATIBLE,
+                queue_sequence=int(queue["queue_sequence"]),
+                status=str(queue["status"]),
+            )
+        return PromptIngressConfirmation(
+            PromptIngressConfirmationKind.CONFLICT,
+            rejection=PromptIngressWriteRejection.COMMAND_CONFLICT,
+        )
+
     def enqueue_prompt(
         self,
         guard: HostWriterGuard,
@@ -5775,8 +6008,7 @@ class ConversationKernelRepository:
         if (delivery_mode is PromptDeliveryMode.NEW_TURN) != (target_turn_id is None):
             raise ValueError("prompt delivery target union is invalid")
         if (delivery_mode is PromptDeliveryMode.NEW_TURN) != (
-            permission_snapshot_id is not None
-            and requested_permission_mode is not None
+            permission_snapshot_id is not None and requested_permission_mode is not None
         ):
             raise ValueError("queued new-turn permission candidate is invalid")
         digest = canonical_digest(
@@ -5800,7 +6032,8 @@ class ConversationKernelRepository:
         ) as connection:
             existing = connection.execute(
                 """
-                SELECT semantic_digest, target_queue_item_id
+                SELECT command_kind, request_schema_version, semantic_digest,
+                       target_queue_item_id
                 FROM pulsara_v3.session_commands
                 WHERE session_id = %s AND command_id = %s
                 """,
@@ -5808,19 +6041,53 @@ class ConversationKernelRepository:
             ).fetchone()
             if existing is not None:
                 if (
-                    existing["semantic_digest"] != digest
+                    existing["command_kind"] != "QUEUE_PROMPT"
+                    or existing["request_schema_version"] != "queue_prompt.v1"
+                    or existing["semantic_digest"] != digest
                     or existing["target_queue_item_id"] != queue_item_id
                 ):
-                    raise ConversationKernelConflict("queue command conflict")
+                    raise PromptIngressRejected(
+                        PromptIngressWriteRejection.COMMAND_CONFLICT
+                    )
                 row = connection.execute(
                     """
-                    SELECT queue_sequence FROM pulsara_v3.prompt_queue_items
+                    SELECT * FROM pulsara_v3.prompt_queue_items
                     WHERE session_id = %s AND id = %s
                     """,
                     (guard.session_id, queue_item_id),
                 ).fetchone()
-                if row is None:
-                    raise ConversationKernelConflict("queue command target is absent")
+                if (
+                    row is None
+                    or str(row["command_id"]) != command_id
+                    or str(row["client_submission_id"]) != client_submission_id
+                    or str(row["delivery_mode"]) != delivery_mode.value
+                    or (
+                        None
+                        if row["target_turn_id"] is None
+                        else str(row["target_turn_id"])
+                    )
+                    != target_turn_id
+                    or (
+                        None
+                        if row["permission_snapshot_id"] is None
+                        else str(row["permission_snapshot_id"])
+                    )
+                    != permission_snapshot_id
+                    or (
+                        None
+                        if row["requested_permission_mode"] is None
+                        else str(row["requested_permission_mode"])
+                    )
+                    != (
+                        None
+                        if requested_permission_mode is None
+                        else requested_permission_mode.value
+                    )
+                    or self._content_from_row(row) != content
+                ):
+                    raise PromptIngressRejected(
+                        PromptIngressWriteRejection.COMMAND_CONFLICT
+                    )
                 return int(row["queue_sequence"])
             if target_turn_id is not None:
                 target = connection.execute(
@@ -5833,9 +6100,13 @@ class ConversationKernelRepository:
                     (guard.session_id, target_turn_id),
                 ).fetchone()
                 if target is None or target["conversation_scope_kind"] != "ROOT":
-                    raise ConversationKernelConflict("steer target is not a ROOT turn")
+                    raise PromptIngressRejected(
+                        PromptIngressWriteRejection.TARGET_STALE_OR_NON_STEERABLE
+                    )
                 if target["status"] != "RUNNING":
-                    raise ConversationKernelConflict("steer target is terminal")
+                    raise PromptIngressRejected(
+                        PromptIngressWriteRejection.TARGET_STALE_OR_NON_STEERABLE
+                    )
             pending = connection.execute(
                 """SELECT count(*) AS total
                    FROM pulsara_v3.prompt_queue_items
@@ -5843,7 +6114,9 @@ class ConversationKernelRepository:
                 (guard.session_id,),
             ).fetchone()
             if int(pending["total"]) >= STAGE2_LIMITS.pending_prompt_hard_items:
-                raise ConversationKernelConflict("prompt queue capacity is exhausted")
+                raise PromptIngressRejected(
+                    PromptIngressWriteRejection.CAPACITY_EXHAUSTED
+                )
             row = connection.execute(
                 """
                 UPDATE pulsara_v3.sessions
@@ -5971,10 +6244,27 @@ class ConversationKernelRepository:
                 occurred_at=occurred_at,
                 actor_id=actor_id,
             )
+            active_root = connection.execute(
+                """
+                SELECT id FROM pulsara_v3.turns
+                WHERE session_id = %s
+                  AND conversation_scope_kind = 'ROOT'
+                  AND status = 'RUNNING'
+                LIMIT 1 FOR UPDATE
+                """,
+                (guard.session_id,),
+            ).fetchone()
+            if active_root is not None:
+                # NEW_TURN is an independent delivery lane, but it is still a
+                # future turn.  It may not overtake the physical ownership of
+                # the current ROOT turn merely because the steer lane was
+                # drained separately.
+                return None
             item = connection.execute(
                 """
                 SELECT * FROM pulsara_v3.prompt_queue_items
                 WHERE session_id = %s AND status = 'PENDING'
+                  AND delivery_mode = 'NEW_TURN'
                 ORDER BY queue_sequence, id
                 LIMIT 1
                 FOR UPDATE
@@ -5982,11 +6272,6 @@ class ConversationKernelRepository:
                 (guard.session_id,),
             ).fetchone()
             if item is None:
-                return None
-            if item["delivery_mode"] == PromptDeliveryMode.STEER_ACTIVE_TURN.value:
-                # Every terminal steer in the bounded FIFO prefix has already
-                # been rejected.  The remaining head belongs to the exact
-                # still-running target and cannot be overtaken by a NEW_TURN.
                 return None
             if self._open_plan_interaction(connection, guard.session_id) is not None:
                 # A QUESTION keeps its existing turn alive; a DRAFT_REVIEW
@@ -6045,9 +6330,7 @@ class ConversationKernelRepository:
                             occurred_at=occurred_at,
                             actor_kind="runtime",
                             actor_id=actor_id,
-                            payload={
-                                "reason": "PLAN_CONTEXT_CHANGED_BEFORE_DELIVERY"
-                            },
+                            payload={"reason": "PLAN_CONTEXT_CHANGED_BEFORE_DELIVERY"},
                         ),
                     ),
                 )
@@ -6107,12 +6390,8 @@ class ConversationKernelRepository:
                 scope_kind=ConversationScopeKind.ROOT,
                 scope_task_id=None,
                 content=content,
-                source_plan_workflow_id=item[
-                    "pending_plan_handoff_workflow_id"
-                ],
-                source_plan_interaction_id=item[
-                    "pending_plan_handoff_interaction_id"
-                ],
+                source_plan_workflow_id=item["pending_plan_handoff_workflow_id"],
+                source_plan_interaction_id=item["pending_plan_handoff_interaction_id"],
                 source_plan_handoff_kind=(
                     None
                     if item["pending_plan_handoff_kind"] is None
@@ -6178,6 +6457,7 @@ class ConversationKernelRepository:
                 """
                 SELECT * FROM pulsara_v3.prompt_queue_items
                 WHERE session_id = %s AND status = 'PENDING'
+                  AND delivery_mode = 'STEER_ACTIVE_TURN'
                 ORDER BY queue_sequence, id
                 LIMIT 1
                 FOR UPDATE
@@ -6232,18 +6512,67 @@ class ConversationKernelRepository:
                 ),
             )
 
-    def consume_prompt_steer_for_turn(
+    def read_pending_prompt_steer_facts(
+        self,
+        *,
+        session_id: str,
+        target_turn_id: str,
+        maximum_items: int = MAXIMUM_STEER_ITEMS_PER_SAFE_POINT,
+        deadline_monotonic: float,
+    ) -> tuple[PendingPromptSteerFact, ...]:
+        """Read one bounded target-lane metadata cut without consuming rows."""
+
+        if not 1 <= maximum_items <= MAXIMUM_STEER_ITEMS_PER_SAFE_POINT:
+            raise ValueError("steer metadata read bound is invalid")
+        with self._provider.connection(
+            lane=PostgresConnectionLane.HOST_CONTROL,
+            row_factory=dict_row,
+            isolation_level=IsolationLevel.REPEATABLE_READ,
+            deadline_monotonic=deadline_monotonic,
+        ) as connection:
+            rows = connection.execute(
+                """
+                SELECT id, session_id, workspace_id, queue_sequence,
+                       command_id, target_turn_id, inline_content, blob_id,
+                       content_digest, content_size, content_media_type,
+                       content_codec
+                FROM pulsara_v3.prompt_queue_items
+                WHERE session_id = %s AND status = 'PENDING'
+                  AND delivery_mode = 'STEER_ACTIVE_TURN'
+                  AND target_turn_id = %s
+                ORDER BY queue_sequence, id
+                LIMIT %s
+                """,
+                (session_id, target_turn_id, maximum_items + 1),
+            ).fetchall()
+        if len(rows) > maximum_items:
+            # The caller quotes the first bounded prefix.  An additional row is
+            # deliberately not hydrated and remains pending for the next cut.
+            rows = rows[:maximum_items]
+        return tuple(
+            build_pending_prompt_steer_fact(
+                session_id=str(row["session_id"]),
+                workspace_id=str(row["workspace_id"]),
+                queue_item_id=str(row["id"]),
+                queue_sequence=int(row["queue_sequence"]),
+                command_id=str(row["command_id"]),
+                exact_target_turn_id=str(row["target_turn_id"]),
+                content=self._content_from_row(row),
+            )
+            for row in rows
+        )
+
+    def consume_prepared_prompt_steer(
         self,
         guard: HostWriterGuard,
         *,
-        target_turn_id: str,
-        new_entry_id: str,
-        occurred_at: datetime,
-        actor_id: str,
+        candidate: PreparedSteerConsumptionCandidate,
         deadline_monotonic: float,
-    ) -> AcceptedEntry | None:
-        """Consume the global FIFO head when it is this turn's steer."""
+    ) -> AcceptedSteerDispatchEntry:
+        """Consume one deterministic target-lane head in one canonical tx."""
 
+        if candidate.session_id != guard.session_id:
+            raise ValueError("steer candidate belongs to another session")
         with self._writer_transaction(
             guard, deadline_monotonic=deadline_monotonic
         ) as connection:
@@ -6251,72 +6580,118 @@ class ConversationKernelRepository:
                 """
                 SELECT * FROM pulsara_v3.prompt_queue_items
                 WHERE session_id = %s AND status = 'PENDING'
+                  AND delivery_mode = 'STEER_ACTIVE_TURN'
+                  AND target_turn_id = %s
                 ORDER BY queue_sequence, id
                 LIMIT 1 FOR UPDATE
                 """,
-                (guard.session_id,),
+                (guard.session_id, candidate.exact_target_turn_id),
             ).fetchone()
-            if item is None:
-                return None
-            if item["delivery_mode"] == PromptDeliveryMode.NEW_TURN.value:
-                # A later steer cannot overtake the globally oldest NEW_TURN.
-                return None
+            if item is None or not _prompt_steer_row_matches_candidate(item, candidate):
+                raise ConversationKernelConflict(
+                    "prepared steer no longer owns the exact lane head"
+                )
             target = connection.execute(
                 """
-                SELECT conversation_scope_kind, status
+                SELECT conversation_scope_kind, status, workspace_id,
+                       current_context_binding_revision_id,
+                       permission_snapshot_id, requested_permission_mode,
+                       effective_permission_mode, permission_admission_source,
+                       permission_overlay, permission_plan_context_ordinal,
+                       permission_plan_workflow_id,
+                       permission_plan_revision_at_admission,
+                       permission_inherited_from_turn_id,
+                       permission_contract_id,
+                       permission_contract_fingerprint,
+                       permission_snapshot_fingerprint
                 FROM pulsara_v3.turns
                 WHERE session_id = %s AND id = %s FOR UPDATE
                 """,
-                (guard.session_id, item["target_turn_id"]),
+                (guard.session_id, candidate.exact_target_turn_id),
             ).fetchone()
-            workspace_id = str(item["workspace_id"])
             if (
                 target is None
                 or target["conversation_scope_kind"] != "ROOT"
                 or target["status"] != "RUNNING"
             ):
-                connection.execute(
+                raise ConversationKernelConflict(
+                    "prepared steer target is no longer live"
+                )
+            fence = candidate.canonical_base_fence
+            if (
+                str(target["current_context_binding_revision_id"])
+                != fence.context_binding_fact.binding_revision_id
+                or self._permission_from_row(target)
+                != fence.run_permission_snapshot
+            ):
+                raise ConversationKernelConflict(
+                    "prepared steer canonical control base drifted"
+                )
+            expected_workflow = fence.plan_workflow_fact
+            if expected_workflow is not None:
+                workflow = connection.execute(
                     """
-                    UPDATE pulsara_v3.prompt_queue_items
-                    SET status = 'REJECTED', terminal_reason = 'TARGET_TURN_TERMINAL',
-                        terminal_at = clock_timestamp()
-                    WHERE session_id = %s AND id = %s AND status = 'PENDING'
+                    SELECT id, session_id, workspace_id, workflow_ordinal,
+                           status, entered_by, resume_permission_mode,
+                           permission_contract_id,
+                           permission_contract_fingerprint, workflow_revision
+                    FROM pulsara_v3.plan_workflows
+                    WHERE session_id = %s AND id = %s
+                    FOR UPDATE
                     """,
-                    (guard.session_id, item["id"]),
+                    (guard.session_id, expected_workflow.workflow_id),
+                ).fetchone()
+                if workflow is None or (
+                    str(workflow["id"]) != expected_workflow.workflow_id
+                    or str(workflow["session_id"]) != expected_workflow.session_id
+                    or str(workflow["workspace_id"])
+                    != expected_workflow.workspace_id
+                    or int(workflow["workflow_ordinal"])
+                    != expected_workflow.workflow_ordinal
+                    or str(workflow["status"])
+                    != expected_workflow.workflow_status.value
+                    or str(workflow["entered_by"])
+                    != expected_workflow.entered_by.value
+                    or str(workflow["resume_permission_mode"])
+                    != expected_workflow.resume_permission_mode.value
+                    or str(workflow["permission_contract_id"])
+                    != expected_workflow.permission_contract_id
+                    or str(workflow["permission_contract_fingerprint"])
+                    != expected_workflow.permission_contract_fingerprint
+                    or int(workflow["workflow_revision"])
+                    != expected_workflow.current_workflow_revision
+                ):
+                    raise ConversationKernelConflict(
+                        "prepared steer Plan control base drifted"
+                    )
+            allocator = connection.execute(
+                """SELECT latest_entry_sequence FROM pulsara_v3.sessions
+                   WHERE id = %s""",
+                (guard.session_id,),
+            ).fetchone()
+            if allocator is None or int(allocator["latest_entry_sequence"]) + 1 != (
+                candidate.expected_entry_sequence
+            ):
+                raise ConversationKernelConflict(
+                    "prepared steer canonical base sequence drifted"
                 )
-                self._append_events(
-                    connection,
-                    guard,
-                    workspace_id=workspace_id,
-                    drafts=(
-                        self._event(
-                            CommittedEventType.PROMPT_REJECTED,
-                            SubjectSlot.QUEUE_ITEM,
-                            str(item["id"]),
-                            occurred_at=occurred_at,
-                            actor_kind="runtime",
-                            actor_id=actor_id,
-                            payload={"reason": "TARGET_TURN_TERMINAL"},
-                        ),
-                    ),
-                )
-                return None
-            if str(item["target_turn_id"]) != target_turn_id:
-                # A different still-running ROOT owns the global head.  There
-                # is no redirection or overtaking across target identities.
-                return None
             entry_sequence = self._allocate_entry_sequence(connection, guard.session_id)
+            if entry_sequence != candidate.expected_entry_sequence:
+                raise ConversationKernelConflict(
+                    "prepared steer entry sequence drifted"
+                )
+            workspace_id = str(item["workspace_id"])
             self._insert_entry(
                 connection,
                 session_id=guard.session_id,
                 workspace_id=workspace_id,
-                turn_id=target_turn_id,
-                entry_id=new_entry_id,
+                turn_id=candidate.exact_target_turn_id,
+                entry_id=candidate.new_entry_id,
                 entry_sequence=entry_sequence,
                 entry_kind=EntryKind.USER_STEER,
                 scope_kind=ConversationScopeKind.ROOT,
                 scope_task_id=None,
-                content=self._content_from_row(item),
+                content=candidate.content,
             )
             updated = connection.execute(
                 """
@@ -6326,41 +6701,300 @@ class ConversationKernelRepository:
                 WHERE session_id = %s AND id = %s AND status = 'PENDING'
                 RETURNING id
                 """,
-                (new_entry_id, guard.session_id, item["id"]),
+                (candidate.new_entry_id, guard.session_id, candidate.queue_item_id),
             ).fetchone()
             if updated is None:
-                raise ConversationKernelConflict("steer prompt terminal CAS lost")
+                raise ConversationKernelConflict("prepared steer queue CAS lost")
             events = self._append_events(
                 connection,
                 guard,
                 workspace_id=workspace_id,
                 drafts=(
-                    self._event(
-                        CommittedEventType.PROMPT_CONSUMED,
-                        SubjectSlot.QUEUE_ITEM,
-                        str(item["id"]),
-                        occurred_at=occurred_at,
-                        actor_kind="runtime",
-                        actor_id=actor_id,
-                        payload={"entry_id": new_entry_id},
-                    ),
-                    self._event(
-                        CommittedEventType.USER_STEER_ACCEPTED,
-                        SubjectSlot.ENTRY,
-                        new_entry_id,
-                        occurred_at=occurred_at,
-                        actor_kind="human",
-                        actor_id=actor_id,
-                        payload={"source": "PROMPT_QUEUE"},
-                    ),
+                    candidate.prompt_consumed_occurrence,
+                    candidate.user_steer_accepted_occurrence,
                 ),
             )
-            return AcceptedEntry(
-                new_entry_id,
-                target_turn_id,
-                entry_sequence,
-                events[-1].event_sequence,
+            return AcceptedSteerDispatchEntry(
+                queue_item_id=candidate.queue_item_id,
+                queue_sequence=candidate.queue_sequence,
+                entry_id=candidate.new_entry_id,
+                entry_sequence=entry_sequence,
+                target_turn_id=candidate.exact_target_turn_id,
+                content_digest=candidate.content.digest,
+                content_size=candidate.content.size,
+                prompt_consumed_event_id=events[0].event_id,
+                prompt_consumed_event_sequence=events[0].event_sequence,
+                user_steer_event_id=events[1].event_id,
+                user_steer_event_sequence=events[1].event_sequence,
             )
+
+    def confirm_prepared_prompt_steer(
+        self,
+        *,
+        candidate: PreparedSteerConsumptionCandidate,
+        deadline_monotonic: float,
+    ) -> SteerConsumptionConfirmation:
+        """Stateless FULL/NONE/CONFLICT confirmation for ACK-unknown."""
+
+        with self._provider.connection(
+            lane=PostgresConnectionLane.HOST_CONTROL,
+            row_factory=dict_row,
+            isolation_level=IsolationLevel.REPEATABLE_READ,
+            deadline_monotonic=deadline_monotonic,
+        ) as connection:
+            queue = connection.execute(
+                """SELECT * FROM pulsara_v3.prompt_queue_items
+                   WHERE session_id = %s AND id = %s""",
+                (candidate.session_id, candidate.queue_item_id),
+            ).fetchone()
+            entry = connection.execute(
+                """SELECT * FROM pulsara_v3.transcript_entries
+                   WHERE session_id = %s AND id = %s""",
+                (candidate.session_id, candidate.new_entry_id),
+            ).fetchone()
+            event_rows = connection.execute(
+                """
+                SELECT event_id, event_sequence, event_type, occurred_at,
+                       actor_kind, actor_id, sensitivity_class,
+                       projection_profile, payload,
+                       subject_queue_item_id, subject_entry_id
+                FROM pulsara_v3.agent_events
+                WHERE session_id = %s AND event_id = ANY(%s)
+                """,
+                (
+                    candidate.session_id,
+                    [
+                        candidate.prompt_consumed_occurrence.event_id,
+                        candidate.user_steer_accepted_occurrence.event_id,
+                    ],
+                ),
+            ).fetchall()
+        events = {str(row["event_id"]): row for row in event_rows}
+        if (
+            queue is not None
+            and str(queue["status"]) == "CONSUMED"
+            and str(queue["consumed_entry_id"]) == candidate.new_entry_id
+            and _prompt_steer_row_matches_candidate(queue, candidate)
+            and _accepted_steer_entry_matches(entry, candidate)
+            and _event_row_matches_draft(
+                events.get(candidate.prompt_consumed_occurrence.event_id),
+                candidate.prompt_consumed_occurrence,
+            )
+            and _event_row_matches_draft(
+                events.get(candidate.user_steer_accepted_occurrence.event_id),
+                candidate.user_steer_accepted_occurrence,
+            )
+        ):
+            prompt_row = events[candidate.prompt_consumed_occurrence.event_id]
+            steer_row = events[candidate.user_steer_accepted_occurrence.event_id]
+            return SteerConsumptionConfirmation(
+                SteerConsumptionConfirmationKind.FULL,
+                AcceptedSteerDispatchEntry(
+                    queue_item_id=candidate.queue_item_id,
+                    queue_sequence=candidate.queue_sequence,
+                    entry_id=candidate.new_entry_id,
+                    entry_sequence=candidate.expected_entry_sequence,
+                    target_turn_id=candidate.exact_target_turn_id,
+                    content_digest=candidate.content.digest,
+                    content_size=candidate.content.size,
+                    prompt_consumed_event_id=candidate.prompt_consumed_occurrence.event_id,
+                    prompt_consumed_event_sequence=int(prompt_row["event_sequence"]),
+                    user_steer_event_id=candidate.user_steer_accepted_occurrence.event_id,
+                    user_steer_event_sequence=int(steer_row["event_sequence"]),
+                ),
+            )
+        if (
+            queue is not None
+            and str(queue["status"]) == "PENDING"
+            and _prompt_steer_row_matches_candidate(queue, candidate)
+            and entry is None
+            and not events
+        ):
+            return SteerConsumptionConfirmation(SteerConsumptionConfirmationKind.NONE)
+        return SteerConsumptionConfirmation(SteerConsumptionConfirmationKind.CONFLICT)
+
+    def reject_prepared_prompt_steer_resource_exhaustion(
+        self,
+        guard: HostWriterGuard,
+        *,
+        candidate: PreparedSteerResourceRejection,
+        deadline_monotonic: float,
+    ) -> None:
+        """Reject one unfit steer and interrupt its ROOT turn atomically."""
+
+        with self._writer_transaction(
+            guard, deadline_monotonic=deadline_monotonic
+        ) as connection:
+            item = connection.execute(
+                """
+                SELECT * FROM pulsara_v3.prompt_queue_items
+                WHERE session_id = %s AND status = 'PENDING'
+                  AND delivery_mode = 'STEER_ACTIVE_TURN'
+                  AND target_turn_id = %s
+                ORDER BY queue_sequence, id
+                LIMIT 1 FOR UPDATE
+                """,
+                (guard.session_id, candidate.exact_target_turn_id),
+            ).fetchone()
+            if not _prompt_steer_row_matches_resource_rejection(item, candidate):
+                raise ConversationKernelConflict(
+                    "steer resource rejection no longer owns the lane head"
+                )
+            turn = connection.execute(
+                """
+                SELECT workspace_id, conversation_scope_kind, status
+                FROM pulsara_v3.turns
+                WHERE session_id = %s AND id = %s
+                FOR UPDATE
+                """,
+                (guard.session_id, candidate.exact_target_turn_id),
+            ).fetchone()
+            if (
+                turn is None
+                or str(turn["conversation_scope_kind"]) != "ROOT"
+                or str(turn["status"]) != "RUNNING"
+            ):
+                raise ConversationKernelConflict(
+                    "steer resource rejection target is no longer live"
+                )
+            updated = connection.execute(
+                """
+                UPDATE pulsara_v3.prompt_queue_items
+                SET status = 'REJECTED', terminal_reason = %s,
+                    terminal_at = clock_timestamp()
+                WHERE session_id = %s AND id = %s AND status = 'PENDING'
+                RETURNING id
+                """,
+                (candidate.reason, guard.session_id, candidate.queue_item_id),
+            ).fetchone()
+            if updated is None:
+                raise ConversationKernelConflict("steer resource rejection CAS lost")
+            connection.execute(
+                """
+                UPDATE pulsara_v3.plan_interactions
+                SET status = 'ABORTED', aborted_at = clock_timestamp()
+                WHERE session_id = %s AND origin_turn_id = %s
+                  AND status IN ('OPEN', 'CLAIMED')
+                """,
+                (guard.session_id, candidate.exact_target_turn_id),
+            )
+            interrupted = connection.execute(
+                """
+                UPDATE pulsara_v3.turns
+                SET status = 'INTERRUPTED',
+                    terminal_reason = 'PROVIDER_INPUT_RESOURCE_EXHAUSTED',
+                    terminal_at = clock_timestamp()
+                WHERE session_id = %s AND id = %s AND status = 'RUNNING'
+                RETURNING id
+                """,
+                (guard.session_id, candidate.exact_target_turn_id),
+            ).fetchone()
+            if interrupted is None:
+                raise ConversationKernelConflict(
+                    "steer resource rejection turn CAS lost"
+                )
+            self._append_events(
+                connection,
+                guard,
+                workspace_id=str(turn["workspace_id"]),
+                drafts=(
+                    candidate.prompt_rejected_occurrence,
+                    candidate.turn_interrupted_occurrence,
+                ),
+            )
+            self._reject_terminal_prompt_steer_heads(
+                connection,
+                guard,
+                occurred_at=candidate.occurred_at,
+                actor_id=candidate.actor_id,
+            )
+
+    def confirm_prepared_prompt_steer_resource_rejection(
+        self,
+        *,
+        session_id: str,
+        candidate: PreparedSteerResourceRejection,
+        deadline_monotonic: float,
+    ) -> SteerResourceRejectionConfirmation:
+        """Confirm the exact queue/turn/event winner after an unknown ACK."""
+
+        if session_id != candidate.session_id:
+            raise ValueError("steer rejection belongs to another session")
+        with self._provider.connection(
+            lane=PostgresConnectionLane.HOST_CONTROL,
+            row_factory=dict_row,
+            isolation_level=IsolationLevel.REPEATABLE_READ,
+            deadline_monotonic=deadline_monotonic,
+        ) as connection:
+            queue = connection.execute(
+                """SELECT * FROM pulsara_v3.prompt_queue_items
+                   WHERE session_id = %s AND id = %s""",
+                (session_id, candidate.queue_item_id),
+            ).fetchone()
+            turn = connection.execute(
+                """SELECT status, terminal_reason
+                   FROM pulsara_v3.turns WHERE session_id = %s AND id = %s""",
+                (session_id, candidate.exact_target_turn_id),
+            ).fetchone()
+            events = connection.execute(
+                """
+                SELECT event_id, event_sequence, event_type, occurred_at,
+                       actor_kind, actor_id, sensitivity_class,
+                       projection_profile, payload,
+                       subject_queue_item_id, subject_turn_id
+                FROM pulsara_v3.agent_events
+                WHERE session_id = %s AND event_id = ANY(%s)
+                """,
+                (
+                    session_id,
+                    [
+                        candidate.prompt_rejected_occurrence.event_id,
+                        candidate.turn_interrupted_occurrence.event_id,
+                    ],
+                ),
+            ).fetchall()
+            open_interactions = connection.execute(
+                """
+                SELECT 1 FROM pulsara_v3.plan_interactions
+                WHERE session_id = %s AND origin_turn_id = %s
+                  AND status IN ('OPEN', 'CLAIMED') LIMIT 1
+                """,
+                (session_id, candidate.exact_target_turn_id),
+            ).fetchone()
+        by_id = {str(row["event_id"]): row for row in events}
+        if (
+            _prompt_steer_row_matches_resource_rejection(queue, candidate)
+            and str(queue["status"]) == "REJECTED"
+            and str(queue["terminal_reason"]) == candidate.reason
+            and turn is not None
+            and str(turn["status"]) == "INTERRUPTED"
+            and str(turn["terminal_reason"]) == "PROVIDER_INPUT_RESOURCE_EXHAUSTED"
+            and open_interactions is None
+            and _event_row_matches_draft(
+                by_id.get(candidate.prompt_rejected_occurrence.event_id),
+                candidate.prompt_rejected_occurrence,
+            )
+            and _event_row_matches_draft(
+                by_id.get(candidate.turn_interrupted_occurrence.event_id),
+                candidate.turn_interrupted_occurrence,
+            )
+        ):
+            return SteerResourceRejectionConfirmation(
+                SteerResourceRejectionConfirmationKind.FULL
+            )
+        if (
+            _prompt_steer_row_matches_resource_rejection(queue, candidate)
+            and str(queue["status"]) == "PENDING"
+            and turn is not None
+            and str(turn["status"]) == "RUNNING"
+            and not events
+        ):
+            return SteerResourceRejectionConfirmation(
+                SteerResourceRejectionConfirmationKind.NONE
+            )
+        return SteerResourceRejectionConfirmation(
+            SteerResourceRejectionConfirmationKind.CONFLICT
+        )
 
     def accept_subagent_result_into_root(
         self,
@@ -6742,9 +7376,7 @@ class ConversationKernelRepository:
             raise ValueError("new ROOT context binding revision is empty")
         if requested_permission_mode is None:
             raise ValueError("new ROOT external result requires a permission mode")
-        self._require_root_admission_open(
-            connection, session_id=guard.session_id
-        )
+        self._require_root_admission_open(connection, session_id=guard.session_id)
         existing = connection.execute(
             """
             SELECT id FROM pulsara_v3.turns
@@ -6894,7 +7526,7 @@ class ConversationKernelRepository:
         session_id: str,
         deadline_monotonic: float,
     ) -> PromptDeliveryMode | None:
-        """Return the single global FIFO head mode without claiming it."""
+        """Return whether the future-NEW_TURN delivery lane has a head."""
 
         with self._provider.connection(
             lane=PostgresConnectionLane.INSPECTOR,
@@ -6905,6 +7537,7 @@ class ConversationKernelRepository:
                 """
                 SELECT delivery_mode FROM pulsara_v3.prompt_queue_items
                 WHERE session_id = %s AND status = 'PENDING'
+                  AND delivery_mode = 'NEW_TURN'
                 ORDER BY queue_sequence, id LIMIT 1
                 """,
                 (session_id,),
@@ -9380,8 +10013,7 @@ class ConversationKernelRepository:
         if (
             active is None
             or str(active["id"]) != candidate.workflow_id
-            or int(active["workflow_revision"])
-            != candidate.expected_workflow_revision
+            or int(active["workflow_revision"]) != candidate.expected_workflow_revision
         ):
             raise ConversationKernelConflict(
                 "prepared Plan interaction workflow drifted"
@@ -9654,8 +10286,7 @@ class ConversationKernelRepository:
             assistant is None
             or str(assistant["workspace_id"]) != candidate.workspace_id
             or str(assistant["turn_id"]) != candidate.origin_turn_id
-            or str(assistant["entry_kind"])
-            != EntryKind.ASSISTANT_TOOL_REQUEST.value
+            or str(assistant["entry_kind"]) != EntryKind.ASSISTANT_TOOL_REQUEST.value
             or str(assistant["conversation_scope_kind"]) != "ROOT"
             or tuple(
                 (str(row["id"]), str(row["tool_call_id"]), str(row["tool_name"]))
@@ -9702,10 +10333,7 @@ class ConversationKernelRepository:
                 (candidate.session_id, candidate.continuation_entry_id),
             ).fetchone()
         )
-        if (
-            candidate.selected_disposition
-            is not PlanToolBatchDisposition.APPLY
-        ):
+        if candidate.selected_disposition is not PlanToolBatchDisposition.APPLY:
             if not result_rows:
                 return None
             if (
@@ -9731,8 +10359,7 @@ class ConversationKernelRepository:
                 if (
                     row is None
                     or str(row["workspace_id"]) != candidate.workspace_id
-                    or str(row["tool_call_entry_id"])
-                    != candidate.assistant_entry_id
+                    or str(row["tool_call_entry_id"]) != candidate.assistant_entry_id
                     or str(row["tool_call_id"]) != item.tool_call_id
                     or str(row["result_entry_id"]) != item.result_entry_id
                     or str(row["result_origin_kind"]) != "POLICY_NO_ATTEMPT"
@@ -9772,8 +10399,7 @@ class ConversationKernelRepository:
                     or str(entry["turn_id"]) != candidate.origin_turn_id
                     or str(entry["entry_kind"]) != EntryKind.TOOL_RESULT.value
                     or str(entry["conversation_scope_kind"]) != "ROOT"
-                    or self._content_from_row(entry)
-                    != _plan_inline(expected_payload)
+                    or self._content_from_row(entry) != _plan_inline(expected_payload)
                 ):
                     raise ConversationKernelConflict(
                         "rejected Plan batch result content conflicts"
@@ -9858,8 +10484,7 @@ class ConversationKernelRepository:
                 != ("PLAN_CONTROL" if expected_selected else "POLICY_NO_ATTEMPT")
                 or row["attempt_id"] is not None
                 or row["control_plan_workflow_id"] != expected_workflow_subject
-                or row["control_plan_interaction_id"]
-                != expected_interaction_subject
+                or row["control_plan_interaction_id"] != expected_interaction_subject
                 or str(row["permission_snapshot_fingerprint"])
                 != candidate.permission_snapshot.snapshot_fingerprint
                 or str(row["result_state"]) != expected_state
@@ -9979,9 +10604,7 @@ class ConversationKernelRepository:
                     "binding": {
                         "id": candidate.request_binding.contract_id,
                         "version": candidate.request_binding.contract_version,
-                        "fingerprint": (
-                            candidate.request_binding.contract_fingerprint
-                        ),
+                        "fingerprint": (candidate.request_binding.contract_fingerprint),
                     },
                     "arguments": thaw_json(candidate.selected_arguments),
                 },
@@ -10146,13 +10769,10 @@ class ConversationKernelRepository:
                 or continuation_turn is None
                 or continuation_revision is None
                 or str(continuation["workspace_id"]) != candidate.workspace_id
-                or str(continuation["turn_id"])
-                != candidate.continuation_turn_id
-                or str(continuation["entry_kind"])
-                != EntryKind.PLAN_CONTINUATION.value
+                or str(continuation["turn_id"]) != candidate.continuation_turn_id
+                or str(continuation["entry_kind"]) != EntryKind.PLAN_CONTINUATION.value
                 or str(continuation["conversation_scope_kind"]) != "ROOT"
-                or str(continuation["source_plan_workflow_id"])
-                != candidate.workflow_id
+                or str(continuation["source_plan_workflow_id"]) != candidate.workflow_id
                 or continuation["source_plan_interaction_id"] is not None
                 or str(continuation["source_plan_handoff_kind"])
                 != PlanHandoffKind.ENTERED_PLAN.value
@@ -10168,8 +10788,7 @@ class ConversationKernelRepository:
                 != candidate.continuation_entry_id
                 or str(continuation_turn["current_context_binding_revision_id"])
                 != candidate.continuation_context_binding_revision_id
-                or self._permission_from_row(continuation_turn)
-                != expected_permission
+                or self._permission_from_row(continuation_turn) != expected_permission
                 or str(continuation_revision["turn_id"])
                 != candidate.continuation_turn_id
                 or int(continuation_revision["revision_ordinal"]) != 0
@@ -10351,9 +10970,7 @@ class ConversationKernelRepository:
             command_id=command_id,
             workflow_id=expected_workflow_id,
             workflow_status=status,
-            resume_permission_mode=PermissionMode(
-                str(row["resume_permission_mode"])
-            ),
+            resume_permission_mode=PermissionMode(str(row["resume_permission_mode"])),
             handoff_created_at_commit=command_kind != "ENTER_PLAN",
             workflow_revision=int(row["workflow_revision"]),
         )
@@ -10420,9 +11037,7 @@ class ConversationKernelRepository:
             workflow_status=PlanWorkflowStatus(str(row["workflow_status"])),
             interaction_id=str(row["target_plan_interaction_id"]),
             interaction_status=interaction_status,
-            resume_permission_mode=PermissionMode(
-                str(row["resume_permission_mode"])
-            ),
+            resume_permission_mode=PermissionMode(str(row["resume_permission_mode"])),
             continuation_turn_id=(
                 None
                 if row["continuation_turn_id"] is None
@@ -10496,9 +11111,7 @@ class ConversationKernelRepository:
                 else str(row["permission_inherited_from_turn_id"])
             ),
             permission_contract_id=str(row["permission_contract_id"]),
-            permission_contract_fingerprint=str(
-                row["permission_contract_fingerprint"]
-            ),
+            permission_contract_fingerprint=str(row["permission_contract_fingerprint"]),
             snapshot_fingerprint=str(row["permission_snapshot_fingerprint"]),
         )
 
@@ -10593,9 +11206,7 @@ class ConversationKernelRepository:
         )
         return _EligiblePlanHandoff(
             workflow_id=workflow_id,
-            interaction_id=(
-                None if interaction is None else str(interaction["id"])
-            ),
+            interaction_id=(None if interaction is None else str(interaction["id"])),
             kind=kind,
         )
 
@@ -10682,9 +11293,7 @@ class ConversationKernelRepository:
                 overlay=RunPermissionOverlay.PLAN_READ_ONLY,
                 plan_context_ordinal_at_admission=int(active["workflow_ordinal"]),
                 plan_workflow_id=str(active["id"]),
-                plan_workflow_revision_at_admission=int(
-                    active["workflow_revision"]
-                ),
+                plan_workflow_revision_at_admission=int(active["workflow_revision"]),
                 inherited_from_turn_id=inherited_from_turn_id,
             )
         return build_run_permission_snapshot(
@@ -11208,6 +11817,133 @@ class ConversationKernelRepository:
             media_type=str(row["content_media_type"]),
             codec=str(row["content_codec"]),
         )
+
+
+def _prompt_steer_row_matches_candidate(
+    row: Mapping[str, object] | None, candidate: PreparedSteerConsumptionCandidate
+) -> bool:
+    if row is None:
+        return False
+    content = candidate.content
+    storage_matches = (
+        (
+            bytes(row["inline_content"]) == content.canonical_bytes
+            and row["blob_id"] is None
+        )
+        if isinstance(content, InlineContent)
+        else (row["inline_content"] is None and str(row["blob_id"]) == content.blob_id)
+    )
+    return bool(
+        str(row["id"]) == candidate.queue_item_id
+        and int(row["queue_sequence"]) == candidate.queue_sequence
+        and str(row["command_id"]) == candidate.command_id
+        and str(row["delivery_mode"]) == PromptDeliveryMode.STEER_ACTIVE_TURN.value
+        and str(row["target_turn_id"]) == candidate.exact_target_turn_id
+        and str(row["content_digest"]) == content.digest
+        and int(row["content_size"]) == content.size
+        and str(row["content_media_type"]) == content.media_type
+        and str(row["content_codec"]) == content.codec
+        and storage_matches
+    )
+
+
+def _prompt_steer_row_matches_resource_rejection(
+    row: Mapping[str, object] | None,
+    candidate: PreparedSteerResourceRejection,
+) -> bool:
+    if row is None:
+        return False
+    try:
+        fact = build_pending_prompt_steer_fact(
+            session_id=str(row["session_id"]),
+            workspace_id=str(row["workspace_id"]),
+            queue_item_id=str(row["id"]),
+            queue_sequence=int(row["queue_sequence"]),
+            command_id=str(row["command_id"]),
+            exact_target_turn_id=str(row["target_turn_id"]),
+            content=ConversationKernelRepository._content_from_row(row),
+        )
+    except (KeyError, TypeError, ValueError):
+        return False
+    return bool(
+        str(row["delivery_mode"]) == PromptDeliveryMode.STEER_ACTIVE_TURN.value
+        and fact.fact_fingerprint == candidate.expected_pending_fact_fingerprint
+        and fact.session_id == candidate.session_id
+        and fact.workspace_id == candidate.workspace_id
+        and fact.queue_item_id == candidate.queue_item_id
+        and fact.queue_sequence == candidate.queue_sequence
+        and fact.command_id == candidate.command_id
+        and fact.exact_target_turn_id == candidate.exact_target_turn_id
+        and fact.content == candidate.content
+    )
+
+
+def _accepted_steer_entry_matches(
+    row: Mapping[str, object] | None,
+    candidate: PreparedSteerConsumptionCandidate,
+) -> bool:
+    if row is None:
+        return False
+    content = candidate.content
+    storage_matches = (
+        (
+            bytes(row["inline_content"]) == content.canonical_bytes
+            and row["blob_id"] is None
+        )
+        if isinstance(content, InlineContent)
+        else (row["inline_content"] is None and str(row["blob_id"]) == content.blob_id)
+    )
+    return bool(
+        str(row["id"]) == candidate.new_entry_id
+        and str(row["turn_id"]) == candidate.exact_target_turn_id
+        and int(row["entry_sequence"]) == candidate.expected_entry_sequence
+        and str(row["entry_kind"]) == EntryKind.USER_STEER.value
+        and str(row["conversation_scope_kind"]) == ConversationScopeKind.ROOT.value
+        and row["scope_subagent_task_id"] is None
+        and str(row["content_digest"]) == content.digest
+        and int(row["content_size"]) == content.size
+        and str(row["content_media_type"]) == content.media_type
+        and str(row["content_codec"]) == content.codec
+        and storage_matches
+    )
+
+
+def _event_row_matches_draft(
+    row: Mapping[str, object] | None, draft: CommittedEventDraft
+) -> bool:
+    if row is None:
+        return False
+    if draft.subject.slot is SubjectSlot.QUEUE_ITEM:
+        subject_matches = (
+            row.get("subject_queue_item_id") == draft.subject.subject_id
+            and row.get("subject_entry_id") is None
+            and row.get("subject_turn_id") is None
+        )
+    elif draft.subject.slot is SubjectSlot.ENTRY:
+        subject_matches = (
+            row.get("subject_entry_id") == draft.subject.subject_id
+            and row.get("subject_queue_item_id") is None
+            and row.get("subject_turn_id") is None
+        )
+    elif draft.subject.slot is SubjectSlot.TURN:
+        subject_matches = (
+            row.get("subject_turn_id") == draft.subject.subject_id
+            and row.get("subject_queue_item_id") is None
+            and row.get("subject_entry_id") is None
+        )
+    else:
+        return False
+    return bool(
+        str(row["event_id"]) == draft.event_id
+        and str(row["event_type"]) == draft.event_type.value
+        and row["occurred_at"] == draft.occurred_at
+        and str(row["actor_kind"]) == draft.actor_kind
+        and str(row["actor_id"]) == draft.actor_id
+        and str(row["sensitivity_class"]) == draft.sensitivity_class
+        and str(row["projection_profile"]) == draft.projection_profile
+        and dict(row["payload"]) == dict(draft.payload)
+        and subject_matches
+    )
 
 
 def _required_string(value: object, field: str) -> str:

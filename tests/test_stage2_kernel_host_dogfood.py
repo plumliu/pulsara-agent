@@ -11,9 +11,7 @@ import psycopg
 import pytest
 
 from pulsara_agent.conversation_kernel.host import KernelHostCore
-from pulsara_agent.conversation_kernel.direct_model import (
-    DirectKernelModelPort as ActualDirectKernelModelPort,
-)
+from pulsara_agent.conversation_kernel.direct_model import KernelModelExecutionRequest
 from pulsara_agent.conversation_kernel.extensions import (
     ExtensionDelivery,
     ExtensionPlane,
@@ -32,19 +30,25 @@ from pulsara_agent.ports.live_agent_event import (
 from pulsara_agent.settings import PulsaraSettings, StorageConfig
 from pulsara_agent.llm.input import MessageRole
 from tests.support.model_config import test_llm_config
+from tests.support.round3 import CallbackScriptedKernelModel
 
 
 pytestmark = pytest.mark.postgres
 
 
 class _DogfoodModelPort:
-    def __init__(self, **kwargs: object) -> None:
-        self._preparer = ActualDirectKernelModelPort(**kwargs)  # type: ignore[arg-type]
+    def __init__(self, **_: object) -> None:
+        self._delegate = CallbackScriptedKernelModel(self._stream)
 
     def prepare_call(self, request):
-        return self._preparer.prepare_call(request)
+        return self._delegate.prepare_call(request)
 
-    async def stream(self, _request: object) -> AsyncIterator[object]:
+    def preflight_execution(self, request, **kwargs):
+        return self._delegate.preflight_execution(request, **kwargs)
+
+    async def _stream(
+        self, _request: KernelModelExecutionRequest
+    ) -> AsyncIterator[object]:
         text = "STAGE2_DOGFOOD_OK"
         yield TextStartPayload("text:dogfood")
         yield TextDeltaPayload("text:dogfood", text)
@@ -60,22 +64,18 @@ class _SteerModelPort:
     def __init__(self, **_: object) -> None:
         self.started = asyncio.Event()
         self.release = asyncio.Event()
-        self.requests: list[object] = []
-        self._preparer = ActualDirectKernelModelPort(
-            config=test_llm_config(
-                api_key="test",
-                base_url="https://example.invalid/v1",
-                pro_model="test-pro",
-                flash_model="test-flash",
-                api="openai_chat_completions",
-            )
-        )
+        self._delegate = CallbackScriptedKernelModel(self._stream)
+        self.requests = self._delegate.requests
 
     def prepare_call(self, request):
-        return self._preparer.prepare_call(request)
+        return self._delegate.prepare_call(request)
 
-    async def stream(self, request: object) -> AsyncIterator[object]:
-        self.requests.append(request)
+    def preflight_execution(self, request, **kwargs):
+        return self._delegate.preflight_execution(request, **kwargs)
+
+    async def _stream(
+        self, request: KernelModelExecutionRequest
+    ) -> AsyncIterator[object]:
         call_index = len(self.requests)
         if call_index == 1:
             self.started.set()

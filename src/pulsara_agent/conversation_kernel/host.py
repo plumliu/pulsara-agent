@@ -40,6 +40,9 @@ from pulsara_agent.conversation_kernel.contracts import (
     canonical_digest,
 )
 from pulsara_agent.conversation_kernel.io import KernelSessionIO
+from pulsara_agent.conversation_kernel.input_continuity import (
+    HostProviderInputContinuityOwner,
+)
 from pulsara_agent.conversation_kernel.extensions import (
     ExtensionPlane,
     ExtensionPrincipal,
@@ -67,6 +70,7 @@ from pulsara_agent.conversation_kernel.repository import (
     AcceptedPlanWorkflowCommand,
     ConversationKernelConflict,
     ConversationKernelRepository,
+    PromptIngressRejected,
     PlanContinuationDisposition,
     PlanQuestionAnswer,
     PlanContinuationInspection,
@@ -74,6 +78,11 @@ from pulsara_agent.conversation_kernel.repository import (
     plan_draft_review_semantic_candidate,
     plan_exit_semantic_fingerprint,
     plan_question_resolution_semantic_fingerprint,
+)
+from pulsara_agent.conversation_kernel.steer import (
+    PromptIngressConfirmationKind,
+    PromptIngressWriteRejection,
+    build_prompt_ingress_command,
 )
 from pulsara_agent.conversation_kernel.runner import (
     ConversationKernelRunner,
@@ -215,6 +224,7 @@ class KernelHostSession:
         )
         self._plan_interactions = KernelPlanInteractionCoordinator()
         self._plan_continuations = ContinuationAdmissionOwner()
+        self._input_continuity = HostProviderInputContinuityOwner(session_id=session_id)
         self._event_loop = asyncio.get_running_loop()
         launch_permission_mode = mode_for_policy(permission_policy)
         if launch_permission_mode is None:
@@ -289,13 +299,11 @@ class KernelHostSession:
             live_bus=self.live_bus,
             io_owner=self._io,
             context_source_collector=self._context_sources,
+            continuity_owner=self._input_continuity,
             extensions=self.extensions,
-            steer_consumer=self._consume_pending_steers,
             workspace_id=workspace.workspace_key,
             plan_interactions=self._plan_interactions,
-            automatic_plan_continuation=(
-                self._accept_automatic_plan_continuation
-            ),
+            automatic_plan_continuation=(self._accept_automatic_plan_continuation),
         )
         self._subagents.bind_runner_factory(self._new_child_runner)
         self._active_task: asyncio.Task[KernelRunResult] | None = None
@@ -427,9 +435,7 @@ class KernelHostSession:
         )
         return await self._finish_root_chain(result)
 
-    async def _finish_root_chain(
-        self, result: KernelRunResult
-    ) -> KernelRunResult:
+    async def _finish_root_chain(self, result: KernelRunResult) -> KernelRunResult:
         total_model_calls = result.model_call_count
         total_tool_calls = result.tool_call_count
         while result.continuation_turn_id is not None:
@@ -526,9 +532,7 @@ class KernelHostSession:
             return
         self._retire_done_active_root_locked()
         if self._external_new_turn_accepting or self._active_task is not None:
-            raise ConversationKernelConflict(
-                "a canonical ROOT turn is already running"
-            )
+            raise ConversationKernelConflict("a canonical ROOT turn is already running")
         self._external_new_turn_accepting = True
         self._external_new_turn_settled.clear()
 
@@ -624,6 +628,7 @@ class KernelHostSession:
             )
 
         async with self._lock:
+
             def require_new_attempt() -> None:
                 if (
                     self._closing
@@ -668,19 +673,7 @@ class KernelHostSession:
             return KernelCommandOutcome(
                 command_id, "REJECTED", "", "INVALID_PROMPT", "Prompt is invalid."
             )
-        existing = await self.query_command(command_id)
-        if existing is not None:
-            return existing
         self._require_open()
-        async with self._lock:
-            if self._plan_exit_fence:
-                return KernelCommandOutcome(
-                    command_id,
-                    "REJECTED",
-                    "",
-                    "PLAN_TRANSITION_BUSY",
-                    "A Plan force-exit transition is in progress.",
-                )
         if (delivery_mode is PromptDeliveryMode.NEW_TURN) != (target_turn_id is None):
             return KernelCommandOutcome(
                 command_id,
@@ -691,10 +684,64 @@ class KernelHostSession:
             )
         queue_item_id = _stable_id("queue-item", self.session_id, command_id)
         deadline = monotonic() + 10.0
+        permission_snapshot_id = (
+            None
+            if delivery_mode is PromptDeliveryMode.STEER_ACTIVE_TURN
+            else _stable_id("permission-snapshot", self.session_id, queue_item_id)
+        )
+        effective_requested_permission = (
+            None
+            if delivery_mode is PromptDeliveryMode.STEER_ACTIVE_TURN
+            else requested_permission_mode or self._launch_permission_mode
+        )
+        content_utf8 = text.encode("utf-8")
+        ingress = build_prompt_ingress_command(
+            session_id=self.session_id,
+            command_id=command_id,
+            queue_item_id=queue_item_id,
+            client_submission_id=command_id,
+            delivery_mode=delivery_mode,
+            target_turn_id=target_turn_id,
+            permission_snapshot_id=permission_snapshot_id,
+            requested_permission_mode=effective_requested_permission,
+            content_utf8=content_utf8,
+        )
+        confirmation = await self._io.run(
+            self.repository.confirm_prompt_ingress,
+            candidate=ingress,
+            deadline_monotonic=deadline,
+        )
+        if confirmation.kind is PromptIngressConfirmationKind.CONFLICT:
+            return KernelCommandOutcome(
+                command_id,
+                "REJECTED",
+                queue_item_id,
+                "COMMAND_CONFLICT",
+                "The command identity names a different prompt.",
+            )
+        if confirmation.kind is PromptIngressConfirmationKind.FULL_COMPATIBLE:
+            # The row is the level-triggered delivery truth.  A prior caller
+            # may have lost the COMMIT acknowledgement before it could wake
+            # the process-local queue loop, so every compatible retry must
+            # re-assert the wake hint.
+            self._queue_wake.set()
+            existing = await self.query_command(command_id)
+            if existing is None:
+                raise RuntimeError("compatible prompt command has no canonical outcome")
+            return existing
+        async with self._lock:
+            if self._plan_exit_fence:
+                return KernelCommandOutcome(
+                    command_id,
+                    "REJECTED",
+                    "",
+                    "PLAN_TRANSITION_BUSY",
+                    "A Plan force-exit transition is in progress.",
+                )
         content = await self._io.run(
             self._content_publisher.materialize,
             session_id=self.session_id,
-            content=text.encode("utf-8"),
+            content=content_utf8,
             media_type="text/plain",
             codec="utf-8",
             deadline_monotonic=deadline,
@@ -708,31 +755,62 @@ class KernelHostSession:
                 client_submission_id=command_id,
                 delivery_mode=delivery_mode,
                 target_turn_id=target_turn_id,
-                permission_snapshot_id=(
-                    None
-                    if delivery_mode is PromptDeliveryMode.STEER_ACTIVE_TURN
-                    else _stable_id(
-                        "permission-snapshot", self.session_id, queue_item_id
-                    )
-                ),
-                requested_permission_mode=(
-                    None
-                    if delivery_mode is PromptDeliveryMode.STEER_ACTIVE_TURN
-                    else requested_permission_mode or self._launch_permission_mode
-                ),
+                permission_snapshot_id=permission_snapshot_id,
+                requested_permission_mode=effective_requested_permission,
                 content=content,
                 occurred_at=datetime.now().astimezone(),
                 actor_id=self.host_session_id,
                 deadline_monotonic=deadline,
             )
-        except ConversationKernelConflict:
-            if delivery_mode is PromptDeliveryMode.STEER_ACTIVE_TURN:
+        except PromptIngressRejected as exc:
+            if exc.reason is PromptIngressWriteRejection.COMMAND_CONFLICT:
+                return KernelCommandOutcome(
+                    command_id,
+                    "REJECTED",
+                    queue_item_id,
+                    "COMMAND_CONFLICT",
+                    "The command identity names a different prompt.",
+                )
+            if exc.reason is PromptIngressWriteRejection.CAPACITY_EXHAUSTED:
+                return KernelCommandOutcome(
+                    command_id,
+                    "REJECTED",
+                    queue_item_id,
+                    "PROMPT_CAPACITY_EXHAUSTED",
+                    "The session prompt queue is full.",
+                )
+            if exc.reason is (
+                PromptIngressWriteRejection.TARGET_STALE_OR_NON_STEERABLE
+            ):
                 return KernelCommandOutcome(
                     command_id,
                     "REJECTED",
                     target_turn_id or "",
                     "STEER_TARGET_STALE",
                     "The target turn no longer accepts steering.",
+                )
+            raise
+        except Exception:
+            confirmation = await self._io.run(
+                self.repository.confirm_prompt_ingress,
+                candidate=ingress,
+                deadline_monotonic=max(deadline, monotonic() + 5.0),
+            )
+            if confirmation.kind is PromptIngressConfirmationKind.FULL_COMPATIBLE:
+                self._queue_wake.set()
+                existing = await self.query_command(command_id)
+                if existing is None:
+                    raise RuntimeError(
+                        "compatible prompt command has no canonical outcome"
+                    )
+                return existing
+            if confirmation.kind is PromptIngressConfirmationKind.CONFLICT:
+                return KernelCommandOutcome(
+                    command_id,
+                    "REJECTED",
+                    queue_item_id,
+                    "COMMAND_CONFLICT",
+                    "The command identity names a different prompt.",
                 )
             raise
         self._queue_wake.set()
@@ -747,22 +825,11 @@ class KernelHostSession:
     async def steer_active_turn(
         self, *, command_id: str, text: str, target_turn_id: str
     ) -> KernelCommandOutcome:
-        async with self._lock:
-            task = self._active_task
-            active_turn_id = self._active_turn_id
-        if (
-            task is None
-            or task.done()
-            or active_turn_id is None
-            or target_turn_id != active_turn_id
-        ):
-            return KernelCommandOutcome(
-                command_id,
-                "REJECTED",
-                target_turn_id,
-                "NO_ACTIVE_TURN",
-                "No active turn can accept a steer.",
-            )
+        # The stable command is queried before any process-local liveness
+        # shortcut.  This lets a retry recover a committed queue winner after
+        # its ACK was lost even if the target turn has since become terminal.
+        # A genuinely new write is still exact-target validated by the
+        # repository in the Host-writer transaction.
         return await self.submit_prompt(
             command_id=command_id,
             text=text,
@@ -975,15 +1042,13 @@ class KernelHostSession:
         result_entry_id = _stable_id(
             "plan-question-result-entry", self.session_id, command_id
         )
-        semantic_candidate_fingerprint = (
-            plan_question_resolution_semantic_fingerprint(
-                workflow_id=workflow_id,
-                expected_workflow_revision=expected_workflow_revision,
-                interaction_id=interaction_id,
-                answer=answer,
-                result_id=result_id,
-                result_entry_id=result_entry_id,
-            )
+        semantic_candidate_fingerprint = plan_question_resolution_semantic_fingerprint(
+            workflow_id=workflow_id,
+            expected_workflow_revision=expected_workflow_revision,
+            interaction_id=interaction_id,
+            answer=answer,
+            result_id=result_id,
+            result_entry_id=result_entry_id,
         )
         existing = await self._io.run(
             self.repository.confirm_plan_question_winner,
@@ -1197,10 +1262,7 @@ class KernelHostSession:
                     disposition = self.repository.classify_plan_continuation(
                         inspection, self._lease.guard
                     )
-                    if (
-                        disposition
-                        is PlanContinuationDisposition.HISTORICAL_TERMINAL
-                    ):
+                    if disposition is PlanContinuationDisposition.HISTORICAL_TERMINAL:
                         await self._release_plan_continuation_reservation()
                         return resolution
                     if await self._bind_plan_review_successor(
@@ -1228,11 +1290,10 @@ class KernelHostSession:
                 raise
 
         async with self._lock:
+
             def reserve_new_attempt() -> None:
                 nonlocal reserved
-                self._admit_plan_resolution_write_locked(
-                    creates_turn=creates_turn
-                )
+                self._admit_plan_resolution_write_locked(creates_turn=creates_turn)
                 reserved = creates_turn
 
             attempt = self._plan_continuations.start(
@@ -1274,9 +1335,7 @@ class KernelHostSession:
         self, inspection: PlanContinuationInspection
     ) -> bool:
         return (
-            self.repository.classify_plan_continuation(
-                inspection, self._lease.guard
-            )
+            self.repository.classify_plan_continuation(inspection, self._lease.guard)
             is PlanContinuationDisposition.RUNNING_CURRENT_WRITER
         )
 
@@ -1371,25 +1430,6 @@ class KernelHostSession:
             self._external_new_turn_accepting = False
             self._external_new_turn_settled.set()
 
-    async def _consume_pending_steers(
-        self, turn_id: str, deadline_monotonic: float
-    ) -> int:
-        consumed = 0
-        while consumed < STAGE2_LIMITS.pending_prompt_hard_items:
-            accepted = await self._io.run(
-                self.repository.consume_prompt_steer_for_turn,
-                self._lease.guard,
-                target_turn_id=turn_id,
-                new_entry_id=f"entry:{uuid4().hex}",
-                occurred_at=datetime.now().astimezone(),
-                actor_id=self.host_session_id,
-                deadline_monotonic=deadline_monotonic,
-            )
-            if accepted is None:
-                return consumed
-            consumed += 1
-        raise RuntimeError("steer safe-point batch exceeded its hard bound")
-
     async def _prompt_delivery_loop(self) -> None:
         while True:
             await self._queue_wake.wait()
@@ -1457,9 +1497,7 @@ class KernelHostSession:
                         turn_id=accepted.turn_id,
                         command_id=None,
                         name=f"kernel-queued-turn:{accepted.turn_id}",
-                        run=lambda: self._run_accepted_root_chain(
-                            accepted.turn_id
-                        ),
+                        run=lambda: self._run_accepted_root_chain(accepted.turn_id),
                     )
                     if self._closing:
                         task.cancel()
@@ -1700,12 +1738,12 @@ class KernelHostSession:
                     raise ConversationKernelConflict(
                         "Plan draft resolution command has an invalid terminal status"
                     )
-            continuation_turn_id = str(
-                row.get("plan_continuation_turn_id") or ""
-            ) or None
-            if (draft_decision in {PlanDraftDecision.APPROVE, PlanDraftDecision.REVISE}) != (
-                continuation_turn_id is not None
-            ):
+            continuation_turn_id = (
+                str(row.get("plan_continuation_turn_id") or "") or None
+            )
+            if (
+                draft_decision in {PlanDraftDecision.APPROVE, PlanDraftDecision.REVISE}
+            ) != (continuation_turn_id is not None):
                 raise ConversationKernelConflict(
                     "Plan resolution continuation identity is incomplete"
                 )
@@ -2166,6 +2204,7 @@ class KernelHostSession:
             await self._subagents.aclose(
                 timeout_seconds=max(0.01, deadline - monotonic())
             )
+            self._input_continuity.close()
             await self._memory_tools.aclose()
             await self._tools.aclose(timeout_seconds=max(0.01, deadline - monotonic()))
             await self.extensions.aclose(deadline_monotonic=deadline)
@@ -2199,8 +2238,8 @@ class KernelHostSession:
             live_bus=self.live_bus,
             io_owner=self._io,
             context_source_collector=self._context_sources,
+            continuity_owner=self._input_continuity,
             extensions=self.extensions,
-            steer_consumer=self._consume_pending_steers,
             workspace_id=self.workspace.workspace_key,
             launch_permission_mode=self._launch_permission_mode,
         )
