@@ -213,6 +213,7 @@ def test_round2_host_aggregate_evicts_finished_output_before_live_output(
             "-c",
             "print('F' * 120, flush=True)",
         ),
+        decision_deadline_monotonic=monotonic() + 5,
         env=dict(os.environ),
     )
     assert yielded is False
@@ -230,6 +231,7 @@ def test_round2_host_aggregate_evicts_finished_output_before_live_output(
             "-c",
             "import time; print('L' * 120, flush=True); time.sleep(30)",
         ),
+        decision_deadline_monotonic=monotonic() + 5,
         env=dict(os.environ),
     )
     assert yielded is True
@@ -264,6 +266,7 @@ def test_round2_physical_retirement_joins_reader_watcher_timer_and_group(
                 "print('running', flush=True); time.sleep(30)"
             ),
         ),
+        decision_deadline_monotonic=monotonic() + 5,
         env=dict(os.environ),
     )
     assert yielded is True
@@ -307,6 +310,7 @@ def test_round2_leader_exit_does_not_complete_or_release_capacity_until_group_ex
             "-c",
             "sleep 0.8 >/dev/null 2>&1 & exit 0",
         ),
+        decision_deadline_monotonic=monotonic() + 5,
         env=dict(os.environ),
     )
     assert yielded is True
@@ -329,6 +333,7 @@ def test_round2_leader_exit_does_not_complete_or_release_capacity_until_group_ex
             max_lifetime_seconds=None,
             owner_host_session_id=owner,
             shell_argv=("/bin/sh", "-c", "true"),
+            decision_deadline_monotonic=monotonic() + 5,
             env=dict(os.environ),
         )
 
@@ -355,6 +360,7 @@ def test_round2_wait_uses_physical_group_completion_not_shell_leader(
         max_lifetime_seconds=None,
         owner_host_session_id=owner,
         shell_argv=("/bin/sh", "-c", "sleep 0.35 >/dev/null 2>&1 & exit 0"),
+        decision_deadline_monotonic=monotonic() + 5,
         env=dict(os.environ),
     )
     assert yielded is True
@@ -392,6 +398,7 @@ def test_round2_foreground_yield_waits_for_physical_group_completion(
         max_lifetime_seconds=None,
         owner_host_session_id=owner,
         shell_argv=("/bin/sh", "-c", "sleep 0.35 >/dev/null 2>&1 & exit 0"),
+        decision_deadline_monotonic=monotonic() + 5,
         env=dict(os.environ),
     )
 
@@ -432,6 +439,7 @@ def test_round2_process_admission_linearizes_launching_reservation(
                     max_lifetime_seconds=None,
                     owner_host_session_id=owner,
                     shell_argv=("/bin/sh", "-c", "sleep 30"),
+                    decision_deadline_monotonic=monotonic() + 5,
                     env=dict(os.environ),
                 )
             )
@@ -451,6 +459,7 @@ def test_round2_process_admission_linearizes_launching_reservation(
             max_lifetime_seconds=None,
             owner_host_session_id=owner,
             shell_argv=("/bin/sh", "-c", "sleep 30"),
+            decision_deadline_monotonic=monotonic() + 5,
             env=dict(os.environ),
         )
     release_spawn.set()
@@ -484,6 +493,7 @@ def test_round2_launch_reservation_releases_on_spawn_failure(
             max_lifetime_seconds=None,
             owner_host_session_id=owner,
             shell_argv=("/bin/sh", "-c", "true"),
+            decision_deadline_monotonic=monotonic() + 5,
             env=dict(os.environ),
         )
 
@@ -524,6 +534,7 @@ def test_round2_owner_close_waits_unpublished_launch_and_physical_drain(
                 max_lifetime_seconds=None,
                 owner_host_session_id=owner,
                 shell_argv=("/bin/sh", "-c", "sleep 30"),
+                decision_deadline_monotonic=monotonic() + 5,
                 env=dict(os.environ),
             )
         except BaseException as exc:
@@ -572,6 +583,7 @@ def test_round2_pty_close_stdin_sends_eot_and_produces_real_eof(
         max_lifetime_seconds=None,
         owner_host_session_id=owner,
         shell_argv=("/bin/sh", "-c", "cat"),
+        decision_deadline_monotonic=monotonic() + 5,
         env=dict(os.environ),
     )
     assert yielded is True
@@ -607,6 +619,7 @@ def test_round2_finished_process_reaches_joined_before_prunable_without_regressi
         max_lifetime_seconds=None,
         owner_host_session_id=owner,
         shell_argv=(sys.executable, "-c", "print('done')"),
+        decision_deadline_monotonic=monotonic() + 5,
         env=dict(os.environ),
     )
     assert yielded is False
@@ -694,6 +707,100 @@ def test_round2_concurrent_append_and_snapshot_preserve_exact_utf8_stream() -> N
     assert owner.artifact_candidate().text.count("line🙂\n") == 4_000
 
 
+@pytest.mark.parametrize("fault_stage", ("subscribe", "reader", "timer"))
+def test_round5_post_spawn_installation_fault_rolls_back_every_physical_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fault_stage: str,
+) -> None:
+    registry = ProcessRegistry()
+    owner = f"host:post-spawn-{fault_stage}"
+    registry.activate_owner(owner)
+    spawned: list[object] = []
+    original_spawn = registry._spawn  # noqa: SLF001
+
+    def capture_spawn(**kwargs: object):
+        state = original_spawn(**kwargs)
+        spawned.append(state)
+        return state
+
+    monkeypatch.setattr(registry, "_spawn", capture_spawn)
+    subscriber = None
+    lifetime = None
+    if fault_stage == "subscribe":
+        original_install = TerminalOutputOwner.install_subscription
+
+        def fail_after_subscription(
+            output: TerminalOutputOwner,
+            token: str,
+            callback,
+        ):
+            original_install(output, token, callback)
+            raise RuntimeError("injected subscription installation failure")
+
+        monkeypatch.setattr(
+            TerminalOutputOwner,
+            "install_subscription",
+            fail_after_subscription,
+        )
+
+        def ignore_output(*_args: object) -> None:
+            return
+
+        subscriber = ignore_output
+    elif fault_stage == "reader":
+
+        def fail_after_reader_start(state) -> None:
+            state.reader.start()
+            state.reader_started = True
+            raise RuntimeError("injected watcher installation failure")
+
+        monkeypatch.setattr(
+            registry,
+            "_start_physical_threads",
+            fail_after_reader_start,
+        )
+    else:
+        original_timer_start = terminal_manager_module.Timer.start
+
+        def fail_lifetime_timer(timer) -> None:
+            if getattr(timer.function, "__name__", "") == "_expire":
+                raise RuntimeError("injected lifetime timer installation failure")
+            original_timer_start(timer)
+
+        monkeypatch.setattr(
+            terminal_manager_module.Timer,
+            "start",
+            fail_lifetime_timer,
+        )
+        lifetime = 10
+
+    with pytest.raises(RuntimeError, match="injected"):
+        registry.exec_with_yield(
+            terminal_session_id="default",
+            command="faulted launch",
+            cwd=tmp_path,
+            yield_time_ms=0,
+            tty=False,
+            max_lifetime_seconds=lifetime,
+            owner_host_session_id=owner,
+            shell_argv=(sys.executable, "-c", "import time; time.sleep(30)"),
+            decision_deadline_monotonic=monotonic() + 5,
+            env=dict(os.environ),
+            output_subscriber=subscriber,
+        )
+
+    assert len(spawned) == 1
+    state = spawned[0]
+    assert state.physical_completion.is_set()
+    assert state.process.poll() is not None
+    assert state.output.observation_lease_count == 0
+    assert registry._states == {}  # noqa: SLF001
+    assert registry._launching_by_owner == {}  # noqa: SLF001
+    assert registry._decision_attempts == {}  # noqa: SLF001
+    registry.release_owner(owner, timeout_seconds=1)
+
+
 def test_round2_observation_lease_and_join_failure_block_prune(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -709,6 +816,7 @@ def test_round2_observation_lease_and_join_failure_block_prune(
         max_lifetime_seconds=None,
         owner_host_session_id=owner,
         shell_argv=(sys.executable, "-c", "print('done')"),
+        decision_deadline_monotonic=monotonic() + 5,
         env=dict(os.environ),
     )
     assert yielded is False
@@ -741,6 +849,7 @@ def test_round2_host_close_invalidates_process_and_cursor(tmp_path: Path) -> Non
         max_lifetime_seconds=None,
         owner_host_session_id=owner,
         shell_argv=(sys.executable, "-c", "import time; time.sleep(30)"),
+        decision_deadline_monotonic=monotonic() + 5,
         env=dict(os.environ),
     )
     assert yielded is True
@@ -771,7 +880,8 @@ def test_round2_cwd_fallback_outside_rejection_and_probe_cleanup(
     session.state.current_cwd = nested
     nested.rmdir()
     result = session.execute(
-        terminal_manager_module.TerminalRequest(command="pwd", yield_time_ms=2_000)
+        terminal_manager_module.TerminalRequest(command="pwd", yield_time_ms=2_000),
+        decision_deadline_monotonic=monotonic() + 5,
     )
     assert result.status.value == "success"
     assert str(workspace / "a") in result.output
@@ -779,7 +889,8 @@ def test_round2_cwd_fallback_outside_rejection_and_probe_cleanup(
         session.execute(
             terminal_manager_module.TerminalRequest(
                 command="pwd", workdir=str(tmp_path), yield_time_ms=2_000
-            )
+            ),
+            decision_deadline_monotonic=monotonic() + 5,
         )
 
     original_spawn = manager.process_registry._spawn  # noqa: SLF001
@@ -790,7 +901,8 @@ def test_round2_cwd_fallback_outside_rejection_and_probe_cleanup(
     monkeypatch.setattr(manager.process_registry, "_spawn", fail_spawn)
     with pytest.raises(OSError, match="spawn failure"):
         session.execute(
-            terminal_manager_module.TerminalRequest(command="true", yield_time_ms=1)
+            terminal_manager_module.TerminalRequest(command="true", yield_time_ms=1),
+            decision_deadline_monotonic=monotonic() + 5,
         )
     monkeypatch.setattr(manager.process_registry, "_spawn", original_spawn)
     assert list(workspace.glob(".pulsara-cwd-*")) == []

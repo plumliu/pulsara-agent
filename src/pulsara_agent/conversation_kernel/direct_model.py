@@ -15,6 +15,10 @@ from pulsara_agent.conversation_kernel.tool_surface import (
 from pulsara_agent.conversation_kernel.input_continuity import (
     ProcessLocalProviderInputInstallAuthority,
 )
+from pulsara_agent.conversation_kernel.execution_watchdogs import (
+    DEFAULT_KERNEL_WATCHDOG_POLICY,
+    OpenAITransportTimeoutPolicy,
+)
 from pulsara_agent.llm.adapters.openai.chat_completions import (
     OpenAIChatCompletionsTransport,
 )
@@ -71,6 +75,7 @@ class PreparedKernelModelCall:
     call: ResolvedModelCall = field(repr=False)
     tool_surface: PreparedKernelToolSurface = field(repr=False)
     compile_binding: ModelInputCompileBinding
+    transport_timeout_policy_fingerprint: str
     preparation_fingerprint: str
 
     def __post_init__(self) -> None:
@@ -81,6 +86,7 @@ class PreparedKernelModelCall:
             or self.call.fact != self.compile_binding.call_fact
             or self.call.target.fact != self.compile_binding.target_fact
             or self.tool_surface.model_surface != self.compile_binding.tool_surface
+            or not self.transport_timeout_policy_fingerprint.startswith("sha256:")
         ):
             raise ValueError("prepared model call facts do not exact-join")
         expected = _prepared_model_call_fingerprint(
@@ -90,6 +96,9 @@ class PreparedKernelModelCall:
             resolved_model_call_id=self.call.resolved_model_call_id,
             compile_binding_fingerprint=self.compile_binding.binding_fingerprint,
             surface_fingerprint=self.tool_surface.model_surface.surface_fingerprint,
+            transport_timeout_policy_fingerprint=(
+                self.transport_timeout_policy_fingerprint
+            ),
         )
         if self.preparation_fingerprint != expected:
             raise ValueError("prepared model call fingerprint mismatch")
@@ -148,6 +157,7 @@ class PreparedKernelModelExecution:
         final_context: LLMContext,
         expected_append_candidate_fingerprint: str,
         execution_fingerprint: str,
+        transport_timeout_policy_fingerprint: str,
         install_authority: ProcessLocalProviderInputInstallAuthority,
         usage_observer: Callable[
             [KernelModelExecutionRequest, TransportUsageReport], None
@@ -160,6 +170,9 @@ class PreparedKernelModelExecution:
             expected_append_candidate_fingerprint
         )
         self.execution_fingerprint = execution_fingerprint
+        self._transport_timeout_policy_fingerprint = (
+            transport_timeout_policy_fingerprint
+        )
         self._install_authority = install_authority
         self._usage_observer = usage_observer
         self._state = _PreparedExecutionState.PREFLIGHTED
@@ -190,6 +203,8 @@ class PreparedKernelModelExecution:
             or permit.candidate_fingerprint
             != self.expected_append_candidate_fingerprint
             or permit.execution_fingerprint != self.execution_fingerprint
+            or request.prepared_call.transport_timeout_policy_fingerprint
+            != self._transport_timeout_policy_fingerprint
         ):
             raise RuntimeError("provider-input install permit does not exact-join")
         self._install_authority.consume(
@@ -253,12 +268,21 @@ class DirectKernelModelPort:
             [KernelModelExecutionRequest, TransportUsageReport], None
         ]
         | None = None,
+        timeout_policy: OpenAITransportTimeoutPolicy | None = None,
     ) -> None:
+        transport_timeout = (
+            timeout_policy or DEFAULT_KERNEL_WATCHDOG_POLICY.foreground_transport
+        )
+        if transport_timeout.total_seconds is not None:
+            raise ValueError(
+                "foreground provider transport must not have a total response timeout"
+            )
         registry = NormalizedLLMTransportRegistry()
         registry.register(
             NormalizedLLMTransport(
                 OpenAIResponsesTransport(
                     api_key=config.api_key,
+                    timeout_policy=transport_timeout,
                     retry_config=config.retry,
                     openai_sdk_max_retries=config.openai_sdk_max_retries,
                 )
@@ -268,6 +292,7 @@ class DirectKernelModelPort:
             NormalizedLLMTransport(
                 OpenAIChatCompletionsTransport(
                     api_key=config.api_key,
+                    timeout_policy=transport_timeout,
                     retry_config=config.retry,
                     openai_sdk_max_retries=config.openai_sdk_max_retries,
                 )
@@ -278,6 +303,9 @@ class DirectKernelModelPort:
         self._role = role
         self._options = options
         self._usage_observer = usage_observer
+        self._transport_timeout_policy_fingerprint = (
+            transport_timeout.policy_fingerprint
+        )
 
     def prepare_call(
         self, request: KernelModelPreparationRequest
@@ -346,6 +374,9 @@ class DirectKernelModelPort:
             resolved_model_call_id=call.resolved_model_call_id,
             compile_binding_fingerprint=binding_fingerprint,
             surface_fingerprint=surface.surface_fingerprint,
+            transport_timeout_policy_fingerprint=(
+                self._transport_timeout_policy_fingerprint
+            ),
         )
         return PreparedKernelModelCall(
             session_id=request.session_id,
@@ -354,6 +385,9 @@ class DirectKernelModelPort:
             call=call,
             tool_surface=request.tool_surface,
             compile_binding=compile_binding,
+            transport_timeout_policy_fingerprint=(
+                self._transport_timeout_policy_fingerprint
+            ),
             preparation_fingerprint=preparation_fingerprint,
         )
 
@@ -390,6 +424,8 @@ class DirectKernelModelPort:
             != prepared.tool_surface.model_surface.surface_fingerprint
             or compiled.final_estimate.total_input_tokens
             > prepared.compile_binding.effective_input_budget_tokens
+            or prepared.transport_timeout_policy_fingerprint
+            != self._transport_timeout_policy_fingerprint
         ):
             raise ValueError("compiled model input does not exact-join preparation")
         if not request.surface_borrow.exactly_joins(prepared.tool_surface):
@@ -441,6 +477,9 @@ class DirectKernelModelPort:
                     "through": request.cut.provider_input_through_sequence,
                 },
                 "append_candidate": expected_append_candidate_fingerprint,
+                "transport_timeout_policy": (
+                    prepared.transport_timeout_policy_fingerprint
+                ),
             },
         )
         return PreparedKernelModelExecution(
@@ -450,6 +489,9 @@ class DirectKernelModelPort:
                 expected_append_candidate_fingerprint
             ),
             execution_fingerprint=execution_fingerprint,
+            transport_timeout_policy_fingerprint=(
+                self._transport_timeout_policy_fingerprint
+            ),
             install_authority=install_authority,
             usage_observer=self._usage_observer,
         )
@@ -463,6 +505,7 @@ def _prepared_model_call_fingerprint(
     resolved_model_call_id: str,
     compile_binding_fingerprint: str,
     surface_fingerprint: str,
+    transport_timeout_policy_fingerprint: str,
 ) -> str:
     return context_fingerprint(
         "prepared-kernel-model-call:v1",
@@ -473,6 +516,7 @@ def _prepared_model_call_fingerprint(
             "call_id": resolved_model_call_id,
             "compile_binding": compile_binding_fingerprint,
             "surface": surface_fingerprint,
+            "transport_timeout_policy": transport_timeout_policy_fingerprint,
         },
     )
 

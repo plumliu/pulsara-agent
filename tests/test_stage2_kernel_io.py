@@ -33,10 +33,15 @@ def test_session_io_keeps_event_loop_live_and_close_joins_physical_operation() -
             await asyncio.sleep(0)
         # This sleep must execute while the physical call is blocked.
         await asyncio.wait_for(asyncio.sleep(0.01), timeout=0.1)
-        with pytest.raises(TimeoutError, match="physical I/O"):
-            await owner.aclose(deadline_monotonic=monotonic() + 0.01)
+        close = asyncio.create_task(
+            owner.aclose(deadline_monotonic=monotonic() + 0.01)
+        )
+        await asyncio.sleep(0.03)
+        assert not close.done()
         release.set()
         assert await operation == "done"
+        with pytest.raises(TimeoutError, match="after close deadline"):
+            await close
         await owner.aclose(deadline_monotonic=monotonic() + 1)
 
     asyncio.run(exercise())
@@ -69,6 +74,34 @@ def test_session_io_post_admission_deadline_joins_the_physical_thread() -> None:
         assert len(owner._active) == 1
         release.set()
         with pytest.raises(TimeoutError, match="physical I/O"):
+            await caller
+        assert owner._active == set()
+        await owner.aclose(deadline_monotonic=monotonic() + 1)
+
+    asyncio.run(exercise())
+
+
+def test_session_io_worker_error_cannot_replace_explicit_cancellation() -> None:
+    async def exercise() -> None:
+        owner = KernelSessionIO(maximum_concurrency=1)
+        started = Event()
+        release = Event()
+
+        def operation(*, deadline_monotonic: float) -> None:
+            del deadline_monotonic
+            started.set()
+            release.wait(timeout=2)
+            raise OSError("physical operation failed after caller cancellation")
+
+        caller = asyncio.create_task(
+            owner.run(operation, deadline_monotonic=monotonic() + 2)
+        )
+        assert await asyncio.to_thread(started.wait, 1)
+        caller.cancel()
+        await asyncio.sleep(0)
+        assert not caller.done()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
             await caller
         assert owner._active == set()
         await owner.aclose(deadline_monotonic=monotonic() + 1)

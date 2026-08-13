@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, replace
 from datetime import datetime
+from enum import StrEnum
 from hashlib import sha256
 from time import monotonic
 from typing import Awaitable, Callable
@@ -40,6 +41,12 @@ from pulsara_agent.conversation_kernel.contracts import (
     canonical_digest,
 )
 from pulsara_agent.conversation_kernel.io import KernelSessionIO
+from pulsara_agent.conversation_kernel.execution_watchdogs import (
+    DEFAULT_KERNEL_WATCHDOG_POLICY,
+    KernelExecutionDeadlineFactory,
+    KernelExecutionWatchdogPolicy,
+    KernelWatchdogOwner,
+)
 from pulsara_agent.conversation_kernel.input_continuity import (
     HostProviderInputContinuityOwner,
 )
@@ -125,9 +132,6 @@ from pulsara_agent.storage.schema_verification_service import (
 )
 
 
-WRITER_LEASE_SECONDS = 30.0
-WRITER_RENEW_INTERVAL_SECONDS = 10.0
-HOST_CLOSE_SECONDS = STAGE2_LIMITS.host_close_hard_ms / 1000
 MAXIMUM_PROMPT_BYTES = STAGE2_LIMITS.prompt_hard_bytes
 
 
@@ -174,6 +178,48 @@ class KernelCompositionUnavailable(ValueError):
     pass
 
 
+class HostSessionCloseState(StrEnum):
+    TASK_INSTALLED = "TASK_INSTALLED"
+    CLOSED = "CLOSED"
+    CLOSE_FAILED_QUARANTINED = "CLOSE_FAILED_QUARANTINED"
+
+
+class HostSessionCloseDecisionFrozen(RuntimeError):
+    """A canonical-close upgrade arrived after its linearization fence."""
+
+
+@dataclass(slots=True)
+class HostSessionCloseAttempt:
+    """Unique process-local close owner installed by ``KernelHostCore``."""
+
+    host_session_id: str
+    session: "KernelHostSession"
+    deadline_monotonic: float
+    close_conversation_requested: bool
+    task: asyncio.Task[None]
+    state: HostSessionCloseState = HostSessionCloseState.TASK_INSTALLED
+    close_decision_frozen: bool = False
+
+    def merge_close_conversation(self, requested: bool) -> None:
+        if requested and not self.close_conversation_requested:
+            if self.close_decision_frozen:
+                raise HostSessionCloseDecisionFrozen(
+                    "canonical close decision is already frozen"
+                )
+            if self.state is not HostSessionCloseState.TASK_INSTALLED:
+                raise RuntimeError(
+                    "canonical close cannot be added after the Host close settled"
+                )
+            self.close_conversation_requested = True
+            self.session.request_close_conversation()
+
+    def freeze_close_conversation(self) -> bool:
+        if self.close_decision_frozen:
+            raise RuntimeError("canonical close decision was frozen twice")
+        self.close_decision_frozen = True
+        return self.close_conversation_requested
+
+
 class KernelHostSession:
     def __init__(
         self,
@@ -190,6 +236,7 @@ class KernelHostSession:
         system_prompt: str | None,
         active_skill_names: frozenset[str],
         authenticated_first_party_extension_ids: frozenset[str],
+        deadline_factory: KernelExecutionDeadlineFactory,
     ) -> None:
         self.settings = settings
         self.workspace = workspace
@@ -205,11 +252,15 @@ class KernelHostSession:
             ),
         )
         self.live_bus.bind_extension_tap(self.extensions.offer_live_nowait)
-        self.query = CanonicalConversationQuery(repository.connection_provider)
+        self.query = CanonicalConversationQuery(
+            repository.connection_provider,
+            watchdog_policy=deadline_factory.policy,
+        )
         self._content_publisher = CanonicalContentPublisher(
             repository.connection_provider
         )
         self._io = io_owner
+        self._deadlines = deadline_factory
         self._lease = writer_lease
         self.live_control = SessionLiveControlOwner(
             session_id=session_id,
@@ -221,6 +272,7 @@ class KernelHostSession:
             live_control=self.live_control,
             live_bus=self.live_bus,
             io_owner=self._io,
+            deadline_factory=self._deadlines,
         )
         self._plan_interactions = KernelPlanInteractionCoordinator()
         self._plan_continuations = ContinuationAdmissionOwner()
@@ -249,6 +301,7 @@ class KernelHostSession:
                 workspace_id=workspace.workspace_key,
             ),
             terminal_monitor_wake_scheduler=wake_terminal_monitor_scheduler,
+            deadline_factory=self._deadlines,
         )
         self._tools.bind_interaction_port(self._interactions)
         self._subagents = KernelSubagentManager(
@@ -257,6 +310,7 @@ class KernelHostSession:
             host_owner_id=host_session_id,
             io_owner=self._io,
             live_bus=self.live_bus,
+            deadline_factory=self._deadlines,
         )
         self._tools.bind_subagent_port(self._subagents)
         self._memory_tools = KernelMemoryToolPort(
@@ -279,6 +333,7 @@ class KernelHostSession:
             config=settings.llm,
             role=model_role,
             usage_observer=self._observe_provider_usage,
+            timeout_policy=self._deadlines.policy.foreground_transport,
         )
         display_timezone = datetime.now().astimezone().tzinfo
         if display_timezone is None:
@@ -304,6 +359,7 @@ class KernelHostSession:
             workspace_id=workspace.workspace_key,
             plan_interactions=self._plan_interactions,
             automatic_plan_continuation=(self._accept_automatic_plan_continuation),
+            deadline_factory=self._deadlines,
         )
         self._subagents.bind_runner_factory(self._new_child_runner)
         self._active_task: asyncio.Task[KernelRunResult] | None = None
@@ -341,6 +397,11 @@ class KernelHostSession:
     @property
     def active_skill_names(self) -> frozenset[str]:
         return self._capabilities.configured_active_skill_names
+
+    def _canonical_deadline(self) -> float:
+        """Issue a fresh watchdog for one foreground canonical operation."""
+
+        return self._deadlines.deadline(KernelWatchdogOwner.FOREGROUND_CANONICAL)
 
     async def register_extension(
         self, request: ExtensionRegistrationRequest
@@ -420,19 +481,10 @@ class KernelHostSession:
     async def _run_accepted_root_chain(
         self,
         turn_id: str,
-        *,
-        deadline_monotonic: float | None = None,
     ) -> KernelRunResult:
         """Run one accepted ROOT turn and every automatic successor."""
 
-        result = await self._runner.run_accepted_turn(
-            turn_id,
-            deadline_monotonic=(
-                monotonic() + 120.0
-                if deadline_monotonic is None
-                else deadline_monotonic
-            ),
-        )
+        result = await self._runner.run_accepted_turn(turn_id)
         return await self._finish_root_chain(result)
 
     async def _finish_root_chain(self, result: KernelRunResult) -> KernelRunResult:
@@ -444,10 +496,7 @@ class KernelHostSession:
                 if self._active_task is not asyncio.current_task():
                     raise RuntimeError("ROOT continuation lost its Host task owner")
                 self._active_turn_id = continuation_turn_id
-            result = await self._runner.run_accepted_turn(
-                continuation_turn_id,
-                deadline_monotonic=monotonic() + 120.0,
-            )
+            result = await self._runner.run_accepted_turn(continuation_turn_id)
             total_model_calls += result.model_call_count
             total_tool_calls += result.tool_call_count
         return KernelRunResult(
@@ -563,7 +612,7 @@ class KernelHostSession:
                 winner = await self._io.run(
                     self.repository.confirm_plan_tool_batch_winner,
                     candidate=candidate,
-                    deadline_monotonic=max(deadline_monotonic, monotonic() + 5.0),
+                    deadline_monotonic=self._canonical_deadline(),
                 )
                 if winner is None:
                     raise
@@ -683,7 +732,6 @@ class KernelHostSession:
                 "Prompt delivery target is invalid.",
             )
         queue_item_id = _stable_id("queue-item", self.session_id, command_id)
-        deadline = monotonic() + 10.0
         permission_snapshot_id = (
             None
             if delivery_mode is PromptDeliveryMode.STEER_ACTIVE_TURN
@@ -709,7 +757,7 @@ class KernelHostSession:
         confirmation = await self._io.run(
             self.repository.confirm_prompt_ingress,
             candidate=ingress,
-            deadline_monotonic=deadline,
+            deadline_monotonic=self._canonical_deadline(),
         )
         if confirmation.kind is PromptIngressConfirmationKind.CONFLICT:
             return KernelCommandOutcome(
@@ -744,7 +792,7 @@ class KernelHostSession:
             content=content_utf8,
             media_type="text/plain",
             codec="utf-8",
-            deadline_monotonic=deadline,
+            deadline_monotonic=self._canonical_deadline(),
         )
         try:
             queue_sequence = await self._io.run(
@@ -760,7 +808,7 @@ class KernelHostSession:
                 content=content,
                 occurred_at=datetime.now().astimezone(),
                 actor_id=self.host_session_id,
-                deadline_monotonic=deadline,
+                deadline_monotonic=self._canonical_deadline(),
             )
         except PromptIngressRejected as exc:
             if exc.reason is PromptIngressWriteRejection.COMMAND_CONFLICT:
@@ -794,7 +842,7 @@ class KernelHostSession:
             confirmation = await self._io.run(
                 self.repository.confirm_prompt_ingress,
                 candidate=ingress,
-                deadline_monotonic=max(deadline, monotonic() + 5.0),
+                deadline_monotonic=self._canonical_deadline(),
             )
             if confirmation.kind is PromptIngressConfirmationKind.FULL_COMPATIBLE:
                 self._queue_wake.set()
@@ -894,7 +942,7 @@ class KernelHostSession:
                 resume_permission_mode=resume_permission_mode,
                 occurred_at=datetime.now().astimezone(),
                 actor_id=self.host_session_id,
-                deadline_monotonic=monotonic() + 10.0,
+                deadline_monotonic=self._canonical_deadline(),
             )
             return _plan_workflow_command_outcome(accepted)
         finally:
@@ -991,7 +1039,7 @@ class KernelHostSession:
                     expected_active_turn_id=active_turn_id,
                     occurred_at=datetime.now().astimezone(),
                     actor_id=self.host_session_id,
-                    deadline_monotonic=monotonic() + 10.0,
+                    deadline_monotonic=self._canonical_deadline(),
                 )
                 if active is not None:
                     active.cancel()
@@ -1018,7 +1066,7 @@ class KernelHostSession:
                 expected_workflow_revision=expected_workflow_revision,
                 occurred_at=datetime.now().astimezone(),
                 actor_id=self.host_session_id,
-                deadline_monotonic=monotonic() + 10.0,
+                deadline_monotonic=self._canonical_deadline(),
             )
             return _plan_workflow_command_outcome(accepted)
         finally:
@@ -1060,7 +1108,7 @@ class KernelHostSession:
             answer=answer,
             result_id=result_id,
             result_entry_id=result_entry_id,
-            deadline_monotonic=monotonic() + 10.0,
+            deadline_monotonic=self._canonical_deadline(),
         )
         if existing is not None:
             await self._plan_interactions.settle(
@@ -1090,7 +1138,7 @@ class KernelHostSession:
                     result_entry_id=result_entry_id,
                     occurred_at=datetime.now().astimezone(),
                     actor_id=self.host_session_id,
-                    deadline_monotonic=monotonic() + 10.0,
+                    deadline_monotonic=self._canonical_deadline(),
                 )
             except Exception:
                 # The same stable semantic candidate is retried only after its
@@ -1107,7 +1155,7 @@ class KernelHostSession:
                     result_entry_id=result_entry_id,
                     occurred_at=datetime.now().astimezone(),
                     actor_id=self.host_session_id,
-                    deadline_monotonic=monotonic() + 10.0,
+                    deadline_monotonic=self._canonical_deadline(),
                 )
             await self._plan_interactions.settle(
                 interaction_id=interaction_id,
@@ -1187,7 +1235,7 @@ class KernelHostSession:
             continuation_turn_id=continuation_turn_id,
             continuation_entry_id=continuation_entry_id,
             continuation_context_binding_revision_id=continuation_revision_id,
-            deadline_monotonic=monotonic() + 10.0,
+            deadline_monotonic=self._canonical_deadline(),
         )
         if existing is not None:
             return existing
@@ -1220,7 +1268,7 @@ class KernelHostSession:
                         ),
                         occurred_at=datetime.now().astimezone(),
                         actor_id=self.host_session_id,
-                        deadline_monotonic=monotonic() + 10.0,
+                        deadline_monotonic=self._canonical_deadline(),
                     )
                 except Exception:
                     resolution = await self._io.run(
@@ -1239,7 +1287,7 @@ class KernelHostSession:
                         ),
                         occurred_at=datetime.now().astimezone(),
                         actor_id=self.host_session_id,
-                        deadline_monotonic=monotonic() + 10.0,
+                        deadline_monotonic=self._canonical_deadline(),
                     )
                 if resolution.continuation_turn_id is None:
                     if reserved:
@@ -1325,7 +1373,7 @@ class KernelHostSession:
             workflow_id=workflow_id,
             interaction_id=interaction_id,
             handoff_kind=handoff_kind,
-            deadline_monotonic=monotonic() + 10.0,
+            deadline_monotonic=self._canonical_deadline(),
         )
         if inspection is None:
             raise ConversationKernelConflict("Plan continuation winner is absent")
@@ -1394,7 +1442,7 @@ class KernelHostSession:
                     reason="PLAN_CONTINUATION_NOT_BOUND",
                     occurred_at=datetime.now().astimezone(),
                     actor_id=self.host_session_id,
-                    deadline_monotonic=monotonic() + 10.0,
+                    deadline_monotonic=self._canonical_deadline(),
                 )
             except asyncio.CancelledError:
                 raise
@@ -1465,7 +1513,7 @@ class KernelHostSession:
                         ),
                         occurred_at=datetime.now().astimezone(),
                         actor_id=self.host_session_id,
-                        deadline_monotonic=monotonic() + 10.0,
+                        deadline_monotonic=self._canonical_deadline(),
                     )
                 except asyncio.CancelledError:
                     raise
@@ -1481,7 +1529,7 @@ class KernelHostSession:
                         head_mode = await self._io.run(
                             self.repository.pending_prompt_head_mode,
                             session_id=self.session_id,
-                            deadline_monotonic=monotonic() + 5.0,
+                            deadline_monotonic=self._canonical_deadline(),
                         )
                     except asyncio.CancelledError:
                         raise
@@ -1530,7 +1578,7 @@ class KernelHostSession:
                     prompt_head = await self._io.run(
                         self.repository.pending_prompt_head_mode,
                         session_id=self.session_id,
-                        deadline_monotonic=monotonic() + 5.0,
+                        deadline_monotonic=self._canonical_deadline(),
                     )
                 except asyncio.CancelledError:
                     raise
@@ -1609,7 +1657,7 @@ class KernelHostSession:
                         target=target,
                         workspace_id=self.workspace.workspace_key,
                         actor_id=self.host_session_id,
-                        deadline_monotonic=monotonic() + 10.0,
+                        deadline_monotonic=self._canonical_deadline(),
                     )
                 except asyncio.CancelledError:
                     raise
@@ -1687,7 +1735,7 @@ class KernelHostSession:
             self.repository.query_command,
             session_id=self.session_id,
             command_id=command_id,
-            deadline_monotonic=monotonic() + 10.0,
+            deadline_monotonic=self._canonical_deadline(),
         )
 
     async def query_command(self, command_id: str) -> KernelCommandOutcome | None:
@@ -1917,7 +1965,7 @@ class KernelHostSession:
                 child_result_id=child_result_id,
                 command_id=command_id,
                 actor_id=actor_id,
-                deadline_monotonic=monotonic() + 10.0,
+                deadline_monotonic=self._canonical_deadline(),
             )
         except ExternalSourceNotAtSafePoint:
             if new_turn:
@@ -1999,7 +2047,7 @@ class KernelHostSession:
                 job_id=job_id,
                 command_id=command_id,
                 actor_id=actor_id,
-                deadline_monotonic=monotonic() + 10.0,
+                deadline_monotonic=self._canonical_deadline(),
             )
         except ExternalSourceNotAtSafePoint:
             if new_turn:
@@ -2133,10 +2181,25 @@ class KernelHostSession:
             job_id=job_id,
             actor_id=self.host_session_id,
             reason=reason,
-            deadline_monotonic=monotonic() + 10.0,
+            deadline_monotonic=self._deadlines.deadline(
+                KernelWatchdogOwner.FOREGROUND_CANONICAL
+            ),
         )
 
-    async def aclose(self, *, close_conversation: bool) -> None:
+    def request_close_conversation(self) -> None:
+        """Monotonically merge the canonical-close bit into an installed close."""
+
+        self._close_conversation_requested = True
+
+    async def aclose(
+        self,
+        *,
+        close_conversation: bool,
+        deadline_monotonic: float | None = None,
+        freeze_close_conversation_decision: (
+            Callable[[], Awaitable[bool]] | None
+        ) = None,
+    ) -> None:
         async with self._close_async_lock:
             if self._closed:
                 return
@@ -2148,44 +2211,54 @@ class KernelHostSession:
                 self._queue_wake.set()
                 self._monitor_wake.set()
             self.extensions.stop_admission()
-            deadline = monotonic() + HOST_CLOSE_SECONDS
+            deadline = (
+                self._deadlines.deadline(KernelWatchdogOwner.HOST_SESSION_CLOSE)
+                if deadline_monotonic is None
+                else deadline_monotonic
+            )
+            close_error: BaseException | None = None
             try:
-                await asyncio.wait_for(
-                    asyncio.shield(self._monitor_task),
-                    timeout=max(0.01, deadline - monotonic()),
-                )
-            except TimeoutError as error:
-                raise TimeoutError(
-                    "terminal monitor scheduler did not physically exit"
-                ) from error
+                if await _join_close_task(
+                    self._monitor_task, deadline_monotonic=deadline
+                ):
+                    close_error = TimeoutError(
+                        "terminal monitor scheduler exited after close deadline"
+                    )
+            except BaseException as exc:
+                close_error = exc
+            external_settlement = asyncio.create_task(
+                self._external_new_turn_settled.wait(),
+                name=f"kernel-external-settlement-close:{self.host_session_id}",
+            )
             try:
-                await asyncio.wait_for(
-                    self._external_new_turn_settled.wait(),
-                    timeout=max(0.01, deadline - monotonic()),
-                )
-            except TimeoutError as error:
-                raise TimeoutError(
-                    "external-result canonical admission did not settle"
-                ) from error
+                if await _join_close_task(
+                    external_settlement, deadline_monotonic=deadline
+                ):
+                    close_error = close_error or TimeoutError(
+                        "external-result admission settled after close deadline"
+                    )
+            except BaseException as exc:
+                close_error = close_error or exc
             # A cancelled asyncio task cannot stop its Terminal worker thread.
             # Terminate and physically join monitor/process owners first so
             # the exact in-flight tool invocation can leave its bounded wait.
-            await self._tools.stop_terminal_physical_owners(
-                timeout_seconds=max(0.01, deadline - monotonic())
-            )
+            try:
+                await self._tools.stop_terminal_physical_owners(
+                    timeout_seconds=max(0.001, deadline - monotonic())
+                )
+            except BaseException as exc:
+                close_error = close_error or exc
             async with self._lock:
                 task = self._active_task
             if task is not None and not task.done():
                 task.cancel()
                 try:
-                    await asyncio.wait_for(
-                        asyncio.shield(task), timeout=max(0.01, deadline - monotonic())
-                    )
-                except BaseException:
-                    if not task.done():
-                        raise TimeoutError(
-                            "canonical foreground physical task did not exit"
+                    if await _join_close_task(task, deadline_monotonic=deadline):
+                        close_error = close_error or TimeoutError(
+                            "canonical foreground task exited after close deadline"
                         )
+                except BaseException as exc:
+                    close_error = close_error or exc
             if task is not None:
                 await self._settle_active_root_task(task)
             self._renewal_task.cancel()
@@ -2198,35 +2271,72 @@ class KernelHostSession:
                 await self._delivery_task
             except BaseException:
                 pass
-            await self._plan_interactions.aclose()
-            await self._plan_continuations.aclose()
-            await self._interactions.aclose()
-            await self._subagents.aclose(
-                timeout_seconds=max(0.01, deadline - monotonic())
-            )
-            self._input_continuity.close()
-            await self._memory_tools.aclose()
-            await self._tools.aclose(timeout_seconds=max(0.01, deadline - monotonic()))
-            await self.extensions.aclose(deadline_monotonic=deadline)
-            if self._close_conversation_requested:
-                await self._io.run(
-                    self.repository.close_session,
-                    self._lease.guard,
-                    deadline_monotonic=deadline,
+            for close_operation in (
+                self._plan_interactions.aclose,
+                self._plan_continuations.aclose,
+                self._interactions.aclose,
+            ):
+                try:
+                    await close_operation()
+                except BaseException as exc:
+                    close_error = close_error or exc
+            try:
+                await self._subagents.aclose(
+                    timeout_seconds=max(0.001, deadline - monotonic())
                 )
+            except BaseException as exc:
+                close_error = close_error or exc
+            self._input_continuity.close()
+            try:
+                await self._memory_tools.aclose()
+            except BaseException as exc:
+                close_error = close_error or exc
+            try:
+                await self._tools.aclose(
+                    timeout_seconds=max(0.001, deadline - monotonic())
+                )
+            except BaseException as exc:
+                close_error = close_error or exc
+            try:
+                await self.extensions.aclose(deadline_monotonic=deadline)
+            except BaseException as exc:
+                close_error = close_error or exc
+            canonical_close = self._close_conversation_requested
+            if freeze_close_conversation_decision is not None:
+                try:
+                    canonical_close = await freeze_close_conversation_decision()
+                except BaseException as exc:
+                    close_error = close_error or exc
+                    canonical_close = False
+            if canonical_close:
+                try:
+                    await self._io.run(
+                        self.repository.close_session,
+                        self._lease.guard,
+                        deadline_monotonic=deadline,
+                    )
+                except BaseException as exc:
+                    close_error = close_error or exc
             self.live_bus.close()
             self.live_control.close()
-            await self._io.aclose(deadline_monotonic=deadline)
+            try:
+                await self._io.aclose(deadline_monotonic=deadline)
+            except BaseException as exc:
+                close_error = close_error or exc
             self._closed = True
+            if close_error is not None:
+                raise close_error
 
     async def _renew_writer(self) -> None:
         while True:
-            await asyncio.sleep(WRITER_RENEW_INTERVAL_SECONDS)
+            await asyncio.sleep(self._deadlines.policy.writer_renew_interval_seconds)
             self._lease = await self._io.run(
                 self.repository.renew_host_writer,
                 self._lease.guard,
-                lease_seconds=WRITER_LEASE_SECONDS,
-                deadline_monotonic=monotonic() + WRITER_RENEW_INTERVAL_SECONDS,
+                lease_seconds=self._deadlines.policy.writer_lease_seconds,
+                deadline_monotonic=self._deadlines.deadline(
+                    KernelWatchdogOwner.WRITER_RENEWAL
+                ),
             )
 
     def _new_child_runner(self) -> ConversationKernelRunner:
@@ -2242,6 +2352,7 @@ class KernelHostSession:
             extensions=self.extensions,
             workspace_id=self.workspace.workspace_key,
             launch_permission_mode=self._launch_permission_mode,
+            deadline_factory=self._deadlines,
         )
 
     def _observe_provider_usage(
@@ -2279,6 +2390,78 @@ class KernelHostSession:
     def _require_open(self) -> None:
         if self._closing:
             raise RuntimeError("kernel Host session is closing")
+
+
+async def _join_close_task(
+    task: asyncio.Task[object], *, deadline_monotonic: float
+) -> bool:
+    """Join the exact async owner; report if its logical close deadline elapsed."""
+
+    deadline_expired = False
+    if not task.done():
+        remaining = deadline_monotonic - monotonic()
+        if remaining > 0:
+            done, _pending = await asyncio.wait((task,), timeout=remaining)
+            deadline_expired = not done
+        else:
+            deadline_expired = True
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            # Only the waiter is cancelled.  The Host-owned close operation
+            # keeps the physical owner attached until it is terminal.
+            continue
+        except BaseException:
+            break
+    if not task.cancelled():
+        task.result()
+    return deadline_expired
+
+
+async def _join_task_beyond_logical_deadline(
+    task: asyncio.Task[object],
+    *,
+    deadline_monotonic: float,
+) -> tuple[bool, asyncio.CancelledError | None, BaseException | None]:
+    """Join one physical task even after its logical close deadline expires.
+
+    The deadline controls the caller-visible close outcome; it never transfers
+    or abandons ownership of the task.  Cancellation likewise detaches only the
+    current waiter and is re-raised after the exact physical owner has exited.
+    """
+
+    deadline_expired = False
+    waiter_cancellation: asyncio.CancelledError | None = None
+    while not task.done():
+        remaining = deadline_monotonic - monotonic()
+        if remaining > 0 and not deadline_expired:
+            try:
+                done, _pending = await asyncio.wait((task,), timeout=remaining)
+            except asyncio.CancelledError as exc:
+                waiter_cancellation = waiter_cancellation or exc
+                continue
+            if not done:
+                deadline_expired = True
+            continue
+        deadline_expired = True
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as exc:
+            if task.done():
+                break
+            waiter_cancellation = waiter_cancellation or exc
+            continue
+        except BaseException:
+            break
+
+    task_error: BaseException | None = None
+    if not task.cancelled():
+        try:
+            task.result()
+        except BaseException as exc:
+            task_error = exc
+    return deadline_expired, waiter_cancellation, task_error
 
 
 def _stable_id(namespace: str, *parts: str) -> str:
@@ -2327,8 +2510,12 @@ class KernelHostCore:
         *,
         settings: PulsaraSettings,
         authenticated_first_party_extension_ids: frozenset[str] = frozenset(),
+        watchdog_policy: KernelExecutionWatchdogPolicy | None = None,
     ) -> None:
         self.settings = settings
+        self._deadlines = KernelExecutionDeadlineFactory(
+            watchdog_policy or DEFAULT_KERNEL_WATCHDOG_POLICY
+        )
         self._access: VerifiedPostgresAccessLease | None = None
         self._repository: ConversationKernelRepository | None = None
         self._jobs: KernelDurableJobExecutor | None = None
@@ -2336,6 +2523,7 @@ class KernelHostCore:
         self._blob_gc_io: KernelSessionIO | None = None
         self._blob_gc_task: asyncio.Task[None] | None = None
         self._sessions: dict[str, KernelHostSession] = {}
+        self._close_attempts: dict[str, HostSessionCloseAttempt] = {}
         self._extension_routes: dict[str, tuple[str, KernelExtensionHost]] = {}
         self._event_loop: asyncio.AbstractEventLoop | None = None
         self._lock = asyncio.Lock()
@@ -2343,18 +2531,23 @@ class KernelHostCore:
             authenticated_first_party_extension_ids
         )
 
+    def _canonical_deadline(self) -> float:
+        return self._deadlines.deadline(KernelWatchdogOwner.FOREGROUND_CANONICAL)
+
     @classmethod
     def production(
         cls,
         *,
         settings: PulsaraSettings,
         authenticated_first_party_extension_ids: frozenset[str] = frozenset(),
+        watchdog_policy: KernelExecutionWatchdogPolicy | None = None,
     ) -> "KernelHostCore":
         return cls(
             settings=settings,
             authenticated_first_party_extension_ids=(
                 authenticated_first_party_extension_ids
             ),
+            watchdog_policy=watchdog_policy,
         )
 
     async def _ensure_resources(self) -> ConversationKernelRepository:
@@ -2362,13 +2555,13 @@ class KernelHostCore:
             self._event_loop = asyncio.get_running_loop()
             self._access = await process_postgres_schema_verification_service().acquire(
                 self.settings.storage.postgres_dsn,
-                deadline_monotonic=monotonic() + 30.0,
+                deadline_monotonic=self._canonical_deadline(),
             )
             try:
                 await asyncio.to_thread(
                     require_stage2_runtime_privilege_boundary,
                     self._access.connection_provider,
-                    deadline_monotonic=monotonic() + 30.0,
+                    deadline_monotonic=self._canonical_deadline(),
                 )
             except BaseException:
                 self._access.release()
@@ -2382,6 +2575,7 @@ class KernelHostCore:
                 repository=self._repository,
                 llm_config=self.settings.llm,
                 embedding_config=self.settings.retrieval.embedding,
+                deadline_factory=self._deadlines,
             )
             self._jobs.start()
             self._blob_store = PostgresCanonicalBlobStore(
@@ -2468,14 +2662,16 @@ class KernelHostCore:
         repository = await self._ensure_resources()
         host_id = f"host:{uuid4().hex}"
         io_owner = KernelSessionIO()
-        deadline = monotonic() + STAGE2_LIMITS.foreground_io_timeout_ms / 1000
+        deadline = self._deadlines.deadline(
+            KernelWatchdogOwner.FOREGROUND_CANONICAL
+        )
         try:
             writer_lease = await io_owner.run(
                 repository.acquire_host_writer,
                 session_id=session_id,
                 workspace_id=workspace.workspace_key,
                 writer_owner_id=host_id,
-                lease_seconds=WRITER_LEASE_SECONDS,
+                lease_seconds=self._deadlines.policy.writer_lease_seconds,
                 deadline_monotonic=deadline,
             )
             session = KernelHostSession(
@@ -2493,6 +2689,7 @@ class KernelHostCore:
                 authenticated_first_party_extension_ids=(
                     self._authenticated_first_party_extension_ids
                 ),
+                deadline_factory=self._deadlines,
             )
         except BaseException:
             await io_owner.aclose(deadline_monotonic=deadline)
@@ -2519,7 +2716,7 @@ class KernelHostCore:
             workspace.workspace_key,
             include_closed,
             limit,
-            monotonic() + 10.0,
+            self._canonical_deadline(),
         )
         return [
             KernelSessionSummary(
@@ -2538,15 +2735,96 @@ class KernelHostCore:
     ) -> None:
         async with self._lock:
             session = self._sessions.get(host_session_id)
-        if session is None:
-            return
-        await session.aclose(close_conversation=close_conversation)
+            attempt = self._close_attempts.get(host_session_id)
+            if attempt is None:
+                if session is None:
+                    if close_conversation:
+                        raise HostSessionCloseDecisionFrozen(
+                            "canonical close cannot be added after the Host session "
+                            "owner was retired"
+                        )
+                    return
+                if close_conversation:
+                    session.request_close_conversation()
+                deadline = self._deadlines.deadline(
+                    KernelWatchdogOwner.HOST_SESSION_CLOSE
+                )
+                task = asyncio.create_task(
+                    self._close_session_owner(
+                        host_session_id=host_session_id,
+                        session=session,
+                        deadline_monotonic=deadline,
+                    ),
+                    name=f"kernel-host-close:{host_session_id}",
+                )
+                attempt = HostSessionCloseAttempt(
+                    host_session_id=host_session_id,
+                    session=session,
+                    deadline_monotonic=deadline,
+                    close_conversation_requested=close_conversation,
+                    task=task,
+                )
+                self._close_attempts[host_session_id] = attempt
+            else:
+                attempt.merge_close_conversation(close_conversation)
+        # The Host owns the close operation.  Request/gateway cancellation
+        # detaches only this waiter; later callers and shutdown join the exact
+        # same physical close task.
+        await asyncio.shield(attempt.task)
+
+    async def _close_session_owner(
+        self,
+        *,
+        host_session_id: str,
+        session: KernelHostSession,
+        deadline_monotonic: float,
+    ) -> None:
+        try:
+            await session.aclose(
+                close_conversation=False,
+                deadline_monotonic=deadline_monotonic,
+                freeze_close_conversation_decision=(
+                    lambda: self._freeze_close_conversation_decision(
+                        host_session_id=host_session_id,
+                        session=session,
+                    )
+                ),
+            )
+        except BaseException:
+            async with self._lock:
+                attempt = self._close_attempts.get(host_session_id)
+                if attempt is not None:
+                    attempt.state = HostSessionCloseState.CLOSE_FAILED_QUARANTINED
+            raise
         async with self._lock:
+            attempt = self._close_attempts.get(host_session_id)
+            if attempt is not None:
+                attempt.state = HostSessionCloseState.CLOSED
             if self._sessions.get(host_session_id) is session:
                 self._sessions.pop(host_session_id, None)
             route = self._extension_routes.get(session.session_id)
             if route is not None and route[0] == host_session_id:
                 self._extension_routes.pop(session.session_id, None)
+            # Successful close has no future join/recovery work.  Retaining the
+            # attempt would retain its completed task and the entire session
+            # object graph for the lifetime of KernelHostCore.  Failed attempts
+            # remain quarantined above; successful attempts retire immediately.
+            if self._close_attempts.get(host_session_id) is attempt:
+                self._close_attempts.pop(host_session_id, None)
+
+    async def _freeze_close_conversation_decision(
+        self,
+        *,
+        host_session_id: str,
+        session: KernelHostSession,
+    ) -> bool:
+        """Linearize the last point at which canonical close can be upgraded."""
+
+        async with self._lock:
+            attempt = self._close_attempts.get(host_session_id)
+            if attempt is None or attempt.session is not session:
+                raise RuntimeError("Host close decision owner is absent")
+            return attempt.freeze_close_conversation()
 
     async def shutdown(self) -> None:
         async with self._lock:
@@ -2555,19 +2833,50 @@ class KernelHostCore:
             await self.close_session(host_session_id, close_conversation=False)
         self._extension_routes.clear()
         if self._jobs is not None:
-            await self._jobs.aclose(timeout_seconds=HOST_CLOSE_SECONDS)
+            await self._jobs.aclose(
+                deadline_monotonic=self._deadlines.deadline(
+                    KernelWatchdogOwner.DURABLE_JOB_EXECUTOR_CLOSE
+                )
+            )
             self._jobs = None
+        blob_close_deadline = self._deadlines.deadline(
+            KernelWatchdogOwner.BLOB_GC_CLOSE
+        )
+        blob_close_deadline_expired = False
+        blob_close_cancellation: asyncio.CancelledError | None = None
+        blob_close_error: BaseException | None = None
         if self._blob_gc_task is not None:
             self._blob_gc_task.cancel()
-            try:
-                await self._blob_gc_task
-            except asyncio.CancelledError:
-                pass
+            (
+                task_deadline_expired,
+                task_cancellation,
+                task_error,
+            ) = await _join_task_beyond_logical_deadline(
+                self._blob_gc_task,
+                deadline_monotonic=blob_close_deadline,
+            )
+            blob_close_deadline_expired |= task_deadline_expired
+            blob_close_cancellation = task_cancellation
+            blob_close_error = task_error
             self._blob_gc_task = None
         if self._blob_gc_io is not None:
-            await self._blob_gc_io.aclose(
-                deadline_monotonic=monotonic() + HOST_CLOSE_SECONDS
+            io_close_task = asyncio.create_task(
+                self._blob_gc_io.aclose(
+                    deadline_monotonic=blob_close_deadline
+                ),
+                name="kernel-blob-orphan-gc-io-close",
             )
+            (
+                io_deadline_expired,
+                io_cancellation,
+                io_error,
+            ) = await _join_task_beyond_logical_deadline(
+                io_close_task,
+                deadline_monotonic=blob_close_deadline,
+            )
+            blob_close_deadline_expired |= io_deadline_expired
+            blob_close_cancellation = blob_close_cancellation or io_cancellation
+            blob_close_error = blob_close_error or io_error
             self._blob_gc_io = None
         self._blob_store = None
         if self._access is not None:
@@ -2575,6 +2884,12 @@ class KernelHostCore:
             self._access = None
             self._repository = None
             self._event_loop = None
+        if blob_close_error is not None:
+            raise blob_close_error
+        if blob_close_cancellation is not None:
+            raise blob_close_cancellation
+        if blob_close_deadline_expired:
+            raise TimeoutError("blob GC physical owner exited after close deadline")
 
     def _route_committed_events_from_thread(
         self, events: tuple[StoredCommittedEvent, ...]
@@ -2666,4 +2981,5 @@ __all__ = [
     "KernelHostCore",
     "KernelHostSession",
     "KernelSessionSummary",
+    "HostSessionCloseDecisionFrozen",
 ]

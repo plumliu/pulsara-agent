@@ -15,6 +15,11 @@ from pulsara_agent.conversation_kernel.contracts import (
 from pulsara_agent.conversation_kernel.jobs import KernelDurableJobExecutor
 from pulsara_agent.conversation_kernel.io import KernelSessionIO
 from pulsara_agent.conversation_kernel.job_model import DirectKernelJobModel
+from pulsara_agent.conversation_kernel.execution_watchdogs import (
+    DEFAULT_KERNEL_WATCHDOG_POLICY,
+    KernelExecutionDeadlineFactory,
+    KernelExecutionWatchdogPolicy,
+)
 from pulsara_agent.conversation_kernel.repository import AcceptedJobAttempt
 from pulsara_agent.llm.estimator import PulsaraHeuristicTokenEstimatorV1
 from pulsara_agent.primitives.model_call import ModelCallPurpose
@@ -162,12 +167,24 @@ def test_job_model_prepares_the_final_context_with_target_token_estimator(
         prompt="x",
         maximum_input_tokens=4096,
         maximum_output_tokens=64,
+        timeout_policy=(
+            DEFAULT_KERNEL_WATCHDOG_POLICY.durable_job_transport(45.0)
+        ),
     )
     assert prepared.estimated_input_tokens > len(b"x") // 4
     assert (
         prepared.context.compiler_estimated_input_tokens
         == prepared.estimated_input_tokens
     )
+
+    with pytest.raises(ValueError, match="requires an attempt total timeout"):
+        model.prepare_json_call(
+            purpose=ModelCallPurpose.CONTEXT_COMPACTION_SUMMARY,
+            prompt="x",
+            maximum_input_tokens=4096,
+            maximum_output_tokens=64,
+            timeout_policy=DEFAULT_KERNEL_WATCHDOG_POLICY.foreground_transport,
+        )
 
 
 def test_job_provider_admission_is_installed_before_the_only_physical_call() -> None:
@@ -189,7 +206,12 @@ def test_job_provider_admission_is_installed_before_the_only_physical_call() -> 
                 order.append("admitted")
 
         class Model:
-            def prepare_json_call(self, **_kwargs):
+            def prepare_json_call(self, **kwargs):
+                timeout = kwargs["timeout_policy"]
+                assert timeout.connect_seconds == 7.0
+                assert timeout.write_seconds == 8.0
+                assert timeout.pool_seconds == 9.0
+                assert timeout.read_idle_seconds == 11.0
                 order.append("prepared")
                 return SimpleNamespace(estimated_input_tokens=338)
 
@@ -202,6 +224,14 @@ def test_job_provider_admission_is_installed_before_the_only_physical_call() -> 
         executor._repository = Repository()  # type: ignore[attr-defined]
         executor._model = Model()  # type: ignore[attr-defined]
         executor._io = KernelSessionIO()  # type: ignore[attr-defined]
+        executor._deadlines = KernelExecutionDeadlineFactory(  # type: ignore[attr-defined]
+            KernelExecutionWatchdogPolicy(
+                provider_connect_seconds=7.0,
+                provider_write_seconds=8.0,
+                provider_pool_seconds=9.0,
+                provider_stream_idle_seconds=11.0,
+            )
+        )
         attempt = replace(
             _attempt(),
             provider_input_token_limit=4096,

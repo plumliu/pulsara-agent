@@ -11,13 +11,16 @@ import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
-from time import monotonic
 from typing import Callable, Mapping
 from uuid import uuid4
 
 from pulsara_agent.conversation_kernel.contracts import HostWriterGuard
 from pulsara_agent.conversation_kernel.limits import STAGE2_LIMITS
 from pulsara_agent.conversation_kernel.io import KernelSessionIO
+from pulsara_agent.conversation_kernel.execution_watchdogs import (
+    KernelExecutionDeadlineFactory,
+    KernelWatchdogOwner,
+)
 from pulsara_agent.conversation_kernel.live import (
     LiveAgentEventBus,
     LiveBlockKind,
@@ -64,17 +67,22 @@ class KernelSubagentManager:
         host_owner_id: str,
         io_owner: KernelSessionIO,
         live_bus: LiveAgentEventBus,
+        deadline_factory: KernelExecutionDeadlineFactory | None = None,
     ) -> None:
         self._repository = repository
         self._guard = guard
         self._host_owner_id = host_owner_id
         self._io = io_owner
         self._live_bus = live_bus
+        self._deadlines = deadline_factory or KernelExecutionDeadlineFactory()
         self._runner_factory: Callable[[], ConversationKernelRunner] | None = None
         self._tasks: dict[str, _LiveTask] = {}
         self._spawning: set[str] = set()
         self._lock = asyncio.Lock()
         self._closed = False
+
+    def _canonical_deadline(self) -> float:
+        return self._deadlines.deadline(KernelWatchdogOwner.FOREGROUND_CANONICAL)
 
     @property
     def tool_names(self) -> frozenset[str]:
@@ -144,7 +152,7 @@ class KernelSubagentManager:
                 objective=objective,
                 occurred_at=datetime.now(timezone.utc),
                 actor_id=self._host_owner_id,
-                deadline_monotonic=monotonic() + 10.0,
+                deadline_monotonic=self._canonical_deadline(),
             )
             changed = await self._io.run(
                 self._repository.set_subagent_task_status,
@@ -154,7 +162,7 @@ class KernelSubagentManager:
                 reason=None,
                 occurred_at=datetime.now(timezone.utc),
                 actor_id=self._host_owner_id,
-                deadline_monotonic=monotonic() + 10.0,
+                deadline_monotonic=self._canonical_deadline(),
             )
             if not changed:
                 raise RuntimeError("subagent activation CAS failed")
@@ -214,7 +222,7 @@ class KernelSubagentManager:
                 entry_id=result.final_entry_id,
                 occurred_at=datetime.now(timezone.utc),
                 actor_id=task_id,
-                deadline_monotonic=monotonic() + 10.0,
+                deadline_monotonic=self._canonical_deadline(),
             )
             await self._io.run(
                 self._repository.set_subagent_task_status,
@@ -224,7 +232,7 @@ class KernelSubagentManager:
                 reason=None,
                 occurred_at=datetime.now(timezone.utc),
                 actor_id=self._host_owner_id,
-                deadline_monotonic=monotonic() + 10.0,
+                deadline_monotonic=self._canonical_deadline(),
             )
             async with self._lock:
                 live = self._tasks.get(task_id)
@@ -287,7 +295,7 @@ class KernelSubagentManager:
                 reason=reason,
                 occurred_at=datetime.now(timezone.utc),
                 actor_id=self._host_owner_id,
-                deadline_monotonic=monotonic() + 5.0,
+                deadline_monotonic=self._canonical_deadline(),
             )
         except BaseException:
             # A writer takeover owns the canonical INTERRUPTED transition.
@@ -300,7 +308,7 @@ class KernelSubagentManager:
             self._repository.list_subagent_tasks,
             session_id=self._guard.session_id,
             maximum_items=maximum,
-            deadline_monotonic=monotonic() + 10.0,
+            deadline_monotonic=self._canonical_deadline(),
         )
         rows = [
             {
@@ -327,7 +335,7 @@ class KernelSubagentManager:
                 self._repository.query_subagent_task,
                 session_id=self._guard.session_id,
                 task_id=task_id,
-                deadline_monotonic=monotonic() + 10.0,
+                deadline_monotonic=self._canonical_deadline(),
             )
             if durable is None:
                 return _result(
@@ -390,11 +398,18 @@ class KernelSubagentManager:
                     item.cancellation_reason = "HOST_CLOSING"
         for task in tasks:
             task.cancel()
+        close_deadline_expired = False
         if tasks:
-            await asyncio.wait_for(
-                asyncio.gather(*tasks, return_exceptions=True),
-                timeout=timeout_seconds,
-            )
+            done, pending = await asyncio.wait(tasks, timeout=timeout_seconds)
+            close_deadline_expired = bool(pending)
+            if pending:
+                # A child owns process-local tool/provider resources until its
+                # task is terminal.  The watchdog selects the close outcome;
+                # it never authorizes detaching those physical owners.
+                await asyncio.gather(*pending, return_exceptions=True)
+            for task in done:
+                if not task.cancelled():
+                    task.exception()
         # asyncio can cancel a newly-created Task before its coroutine body
         # executes, in which case _run_child() never observes CancelledError.
         # The Host owner still has to install the frozen close disposition for
@@ -418,6 +433,8 @@ class KernelSubagentManager:
                 "INTERRUPTED",
                 "HOST_CLOSING",
             )
+        if close_deadline_expired:
+            raise TimeoutError("subagent owner exited after close deadline")
 
     def _offer_progress(
         self, task_id: str, parent_turn_id: str, status: str, summary: str

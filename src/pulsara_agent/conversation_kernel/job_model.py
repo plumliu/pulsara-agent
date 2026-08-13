@@ -11,6 +11,7 @@ from pulsara_agent.llm.adapters.openai.chat_completions import (
     OpenAIChatCompletionsTransport,
 )
 from pulsara_agent.llm.adapters.openai.responses import OpenAIResponsesTransport
+from pulsara_agent.llm.adapters.openai.client import OpenAITransportTimeoutPolicy
 from pulsara_agent.llm.config import LLMConfig, ModelSlotConfig
 from pulsara_agent.llm.input import LLMMessage
 from pulsara_agent.llm.estimator import estimate_model_context_for_call
@@ -44,6 +45,7 @@ class PreparedKernelJobModelCall:
     context: LLMContext
     estimated_input_tokens: int
     maximum_result_bytes: int
+    transport_timeout_policy_fingerprint: str
 
 
 class DirectKernelJobModel:
@@ -59,6 +61,7 @@ class DirectKernelJobModel:
         prompt: str,
         maximum_input_tokens: int,
         maximum_output_tokens: int,
+        timeout_policy: OpenAITransportTimeoutPolicy,
         maximum_result_bytes: int = 256 << 10,
     ) -> Mapping[str, object]:
         prepared = self.prepare_json_call(
@@ -66,6 +69,7 @@ class DirectKernelJobModel:
             prompt=prompt,
             maximum_input_tokens=maximum_input_tokens,
             maximum_output_tokens=maximum_output_tokens,
+            timeout_policy=timeout_policy,
             maximum_result_bytes=maximum_result_bytes,
         )
         return await self.complete_prepared_json(prepared)
@@ -78,13 +82,19 @@ class DirectKernelJobModel:
         maximum_input_tokens: int,
         maximum_output_tokens: int,
         maximum_result_bytes: int = 256 << 10,
+        timeout_policy: OpenAITransportTimeoutPolicy,
     ) -> PreparedKernelJobModelCall:
+        if timeout_policy.total_seconds is None:
+            raise ValueError(
+                "durable job provider transport requires an attempt total timeout"
+            )
         config = _with_output_cap(self._config, maximum_output_tokens)
         registry = NormalizedLLMTransportRegistry()
         registry.register(
             NormalizedLLMTransport(
                 OpenAIResponsesTransport(
                     api_key=config.api_key,
+                    timeout_policy=timeout_policy,
                     retry_config=config.retry,
                     openai_sdk_max_retries=config.openai_sdk_max_retries,
                 )
@@ -94,6 +104,7 @@ class DirectKernelJobModel:
             NormalizedLLMTransport(
                 OpenAIChatCompletionsTransport(
                     api_key=config.api_key,
+                    timeout_policy=timeout_policy,
                     retry_config=config.retry,
                     openai_sdk_max_retries=config.openai_sdk_max_retries,
                 )
@@ -133,12 +144,15 @@ class DirectKernelJobModel:
             context=context,
             estimated_input_tokens=estimate.total_input_tokens,
             maximum_result_bytes=maximum_result_bytes,
+            transport_timeout_policy_fingerprint=timeout_policy.policy_fingerprint,
         )
 
     async def complete_prepared_json(
         self, prepared: PreparedKernelJobModelCall
     ) -> Mapping[str, object]:
         call = prepared.call
+        if not prepared.transport_timeout_policy_fingerprint.startswith("sha256:"):
+            raise ValueError("job provider timeout policy fingerprint is invalid")
         execution = call.target.transport.open_stream(
             call=call, context=prepared.context
         )

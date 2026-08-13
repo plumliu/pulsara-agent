@@ -39,6 +39,8 @@ from pulsara_agent.conversation_kernel.repository import (
     ConversationKernelRepository,
     JobAttemptTerminalized,
     StaleHostWriter,
+    ToolRemoteIdentityConfirmationKind,
+    build_prepared_tool_remote_identity_publication,
     build_prepared_tool_result_acceptance,
 )
 from pulsara_agent.conversation_kernel.steer import (
@@ -639,23 +641,32 @@ def test_stage2_tool_message_precedes_attempt_and_job_claim_mints_second_guard(
     )
     assert attempt.tool_call_id == call_id
     remote_identity = _name("process")
-    repository.publish_tool_remote_identity(
-        lease.guard,
+    remote_identity_candidate = build_prepared_tool_remote_identity_publication(
+        session_id=session_id,
         attempt_id=attempt.attempt_id,
         remote_identity=remote_identity,
         occurred_at=datetime.now(timezone.utc),
         actor_id="tool-executor",
+    )
+    repository.publish_tool_remote_identity(
+        lease.guard,
+        candidate=remote_identity_candidate,
         deadline_monotonic=deadline,
     )
     # The set-once publication is idempotent for the compatible winner and
     # owns the previously missing committed occurrence.
     repository.publish_tool_remote_identity(
         lease.guard,
-        attempt_id=attempt.attempt_id,
-        remote_identity=remote_identity,
-        occurred_at=datetime.now(timezone.utc),
-        actor_id="tool-executor",
+        candidate=remote_identity_candidate,
         deadline_monotonic=deadline,
+    )
+    assert (
+        repository.confirm_tool_remote_identity(
+            lease.guard,
+            candidate=remote_identity_candidate,
+            deadline_monotonic=deadline,
+        )
+        is ToolRemoteIdentityConfirmationKind.FULL
     )
     with repository.connection_provider.connection(
         lane=PostgresConnectionLane.INSPECTOR,

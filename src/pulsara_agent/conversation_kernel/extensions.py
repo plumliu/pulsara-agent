@@ -45,6 +45,7 @@ class OperationalHookType(StrEnum):
     FOREGROUND_TURN_FAILED = "ForegroundTurnFailed"
     PROVIDER_CONTINUITY_FAILED = "ProviderContinuityFailed"
     BLOB_ORPHAN_GC_FAILED = "BlobOrphanGcFailed"
+    TOOL_INVOCATION_OBSERVED = "ToolInvocationObserved"
 
 
 @dataclass(frozen=True, slots=True)

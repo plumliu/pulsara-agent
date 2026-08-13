@@ -1,8 +1,8 @@
 # Pulsara hard-cut 后产品能力缺失索引
 
-> 状态：WORKING GAP INDEX（产品能力事实索引，不是恢复设计；PHC-02 已通过 Round 1 恢复，PHC-01/03/04/05/06 已通过 Round 2 恢复；PHC-17 的typed compiler与同Host prefix continuity已通过 Round 3 / 3.1完整恢复；PHC-09 的 Python Runtime/Host、canonical/Protocol 后端已于 2026-08-12 通过 Round 4 恢复，Go/TUI 产品闭环明确延期）
+> 状态：WORKING GAP INDEX（产品能力事实索引，不是恢复设计；PHC-02 已通过 Round 1 恢复，PHC-01/03/04/05/06 已通过 Round 2 恢复；PHC-17 的typed compiler与同Host prefix continuity已通过 Round 3 / 3.1完整恢复；PHC-09 的 Python Runtime/Host、canonical/Protocol 后端已于 2026-08-12 通过 Round 4 恢复，Go/TUI 产品闭环明确延期；PHC-07A execution envelope已通过 Round 5A恢复，PHC-07B compaction仍缺失）
 >
-> 初始调研：2026-08-10；最近复核：2026-08-13（PHC-17 Round 3.1 activation、PHC-09 activation）
+> 初始调研：2026-08-10；最近复核：2026-08-13（PHC-17 Round 3.1 activation、PHC-09 activation、PHC-07A Round 5A activation）
 >
 > hard-cut 前代码基线：`5b7ad9f7`
 >
@@ -168,7 +168,7 @@ git grep -n 'TerminalMonitorTool' "$PRE_HARD_CUT" -- src tests
 | PHC-04 | Terminal retained-output/cursor 语义 | **已恢复（Round 2）**：16 MiB/process、128 MiB/Host UTF-8 retained hard bound，exact cursor/delta与typed GAP | 当前Host内可可靠增量读取；retention淘汰被显式表示而非重复tail |
 | PHC-05 | Terminal shell/profile/env 产品语义 | **已恢复（Round 2）**：bounded login-shell snapshot、default-deny inert env、single-flight/TTL/fallback、nearest `.venv/bin`与diagnostic | 用户工具链PATH可用；active capability environment默认拒绝且env value不进入diagnostic |
 | PHC-06 | Terminal foreground cwd continuity | **已恢复（Round 2）**：前台命令physical completion后捕获workspace内final cwd；yielded process永不推进session cwd | 后续前台命令从真实final cwd启动，无后台并发竞争 |
-| PHC-07 | Long-horizon context window / compaction | **缺失**：新 schema 有 dormant snapshot primitives，但无产品触发路径 | 长任务碰到固定输入、call 数或总时限后失败，不能主动/自动压缩继续 |
+| PHC-07 | Long-horizon execution / context window / compaction | **部分恢复**：Round 5A已删除固定model/tool-call次数与turn-wide wall-clock cap，并以closed owner watchdog约束单项operation；Round 5B仍拥有context rebase、summary与snapshot adoption | execution envelope已恢复；当fixed prefix或new suffix命中单次provider-input/resource typed boundary时仍不能主动/自动压缩继续，两类问题不得再由一套budget/recovery graph混合解决 |
 | PHC-08 | MCP production capability | **缺失**：仅保留配置检测，启用任何 MCP server 会阻止 Kernel open | MCP server discovery、tool call、interaction 与 CLI 管理均不可用 |
 | PHC-09 | Plan workflow | **Python Runtime/Host 与 Protocol 后端已通过 Round 4 恢复；Go/TUI 延期**：三项ROOT-only control tool、canonical question/draft lifecycle、Plan-scoped read-only overlay、send-time immutable permission snapshot、Host-owned automatic continuation及typed Protocol v3边界已进入production；oracle为`34/23/15/2/26/4` | Headless typed caller已可完成Plan流程；面向用户的permission selector、question/draft review与重连展示仍等待Go/TUI闭环 |
 | PHC-10 | Hierarchical/batch subagent task graph | **显著退化**：只剩 flat spawn/list/wait/stop | 依赖任务、批量调度、child phase/result reporting 与 task-board 语义消失 |
@@ -444,9 +444,18 @@ Round 1 已在新 conversation kernel 内恢复产品能力，没有恢复旧 du
 
 对应机器证据见 [`round1_tool_output_artifact_activation.json`](benchmarks/suites/core/v1/round1_tool_output_artifact_activation.json)。Go artifact viewer/download UI、binary artifact、多 artifact result、artifact 删除/retention UI 与后台 retention retry job 仍是明确 non-goal；PHC-01、PHC-03 至 PHC-17 的状态不因本轮改变。
 
-## 6. PHC-07：Long-horizon context window 与 compaction
+## 6. PHC-07：Long-horizon execution、context window 与 compaction
 
-本项拥有canonical snapshot生成、采用与长程continuation语义，但不应再次拥有一套独立prompt builder。当前恢复顺序冻结为：先用PHC-17建立统一的process-local compiled-context测量与source allocation边界，再让PHC-07在provider safe point生成/采用snapshot并重新调用该compiler。
+本项不再把“任务能持续工作”与“model-visible context如何换代”视为一个编码切片。当前恢复顺序冻结为：先用PHC-17建立统一的process-local compiled-context测量与source allocation边界；再由Round 5A删除错误层级的step/time保险丝；最后才由Round 5B在provider safe point生成/采用snapshot并重新调用同一个compiler。
+
+### 6.0 两个实施切片
+
+| 切片 | 拥有的产品语义 | 明确不拥有 |
+|---|---|---|
+| Round 5A：Long-horizon execution envelope | 正常ROOT/child turn无固定model/tool call上限；无turn总deadline；Round 3.1 dispatch planning保留单attempt总上界，foreground canonical transaction、writer renewal、provider、tool、Terminal decision与close按closed owner matrix使用各自watchdog；长循环继续满足append-only prefix | compaction、summary、snapshot adoption、context rebase、rollout account、finalization、128K/16K与256K/1M配置决策 |
+| Round 5B：Long-horizon context compaction | active-context测量、safe-point compaction、single-turn continuation、protected tail、explicit continuity epoch rebase、manual/auto/reactive compact | 恢复旧EventLog/reducer/checkpoint/repair、删除canonical transcript、把累计token误当active context |
+
+Round 5A实施规格见[`ROUND_5_LONG_HORIZON_EXECUTION_ENVELOPE_IMPLEMENTATION_SPEC.zh.md`](ROUND_5_LONG_HORIZON_EXECUTION_ENVELOPE_IMPLEMENTATION_SPEC.zh.md)，机器证据见[`round5_long_horizon_execution_envelope_activation.json`](benchmarks/suites/core/v1/round5_long_horizon_execution_envelope_activation.json)。PHC-07A已恢复；PHC-07B仍保持open，不能据此宣传自动compaction或跨context-window continuation。
 
 ### 6.1 hard-cut 前已存在的产品能力
 
@@ -487,7 +496,7 @@ Round 1 已在新 conversation kernel 内恢复产品能力，没有恢复旧 du
 
 - 每 turn 最多 24 次 model call；
 - 每 call 最大估算输入 128,000 tokens；
-- foreground runner 使用 120 秒 operation deadline；
+- foreground runner在turn admission创建120秒deadline，并在normal canonical prepare/settlement间复用；provider/tool经过的wall time会使后续canonical操作拿到过期deadline；
 - 输入估算超过 cap 时直接抛出 `ValueError`；
 - model-call 次数耗尽时直接失败。
 
@@ -500,6 +509,8 @@ Round 1 已在新 conversation kernel 内恢复产品能力，没有恢复旧 du
 - 长程 Agent 不能把稳定历史与当前未完成 tail 分层；
 - 当前有 snapshot 表并不意味着用户实际获得 compaction；
 - transcript 完整保留这一正确 hard-cut 决策仍成立，但“完整保存历史”目前没有配套的“有界选择历史进入下一 call”产品能力。
+
+其中固定24次model-call与runner总时限造成的task-progress失败由Round 5A负责；snapshot、thinning与context continuation由Round 5B负责。Round 5A完成后只能把PHC-07标成“execution envelope已恢复、compaction仍缺失”，不能宣传完整long-horizon context window已经恢复。
 
 以下不计为缺口：不保存 exact context-input audit、不通过 event replay 恢复 execution，以及不删除 canonical transcript。这些是既定减法边界。
 
@@ -1347,6 +1358,6 @@ messages[n + 1] == messages[n] || append_only_suffix
 
 PHC-11与PHC-12是例外处置：它们保留在索引中用于审计hard-cut事实，但不进入恢复backlog。前者所需的canonical观察能力、后者所涉及的Plan/MCP/approval等独立产品语义，最终由Go TUI及各自Kernel契约承接；不以恢复旧Python产品面为目标。
 
-Round 3与Round 3.1已完整恢复PHC-17的typed compiler和process-local prefix continuity；Round 4已恢复PHC-09的Python Runtime/Host与Protocol后端。这些轮次都不恢复durable compiled-input audit、provider-input replay或旧generation recovery graph。PHC-07/08/13/14仍需各自规格化其domain truth。它们都只能把已接受事实投影进compiler，不能让compiler替代其authority。
+Round 3与Round 3.1已完整恢复PHC-17的typed compiler和process-local prefix continuity；Round 4已恢复PHC-09的Python Runtime/Host与Protocol后端；Round 5A已恢复PHC-07A execution envelope。上述轮次都不恢复durable compiled-input audit、provider-input replay或旧generation recovery graph。PHC-07B/08/13/14仍需各自规格化其domain truth。它们都只能把已接受事实投影进compiler，不能让compiler替代其authority。
 
 同样，后续恢复不能把`26 / 23 / 13 / 2`当作拒绝真实产品语义的永久配额。任何数量变化都必须经过上述closed contract审查，但“保持旧数字”不优先于“以正确的canonical/live边界完整表达产品能力”。

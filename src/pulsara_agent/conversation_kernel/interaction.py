@@ -12,7 +12,6 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from threading import Lock
-from time import monotonic
 from uuid import uuid4
 
 from pulsara_agent.conversation_kernel.contracts import HostWriterGuard, InlineContent
@@ -34,6 +33,10 @@ from pulsara_agent.ports.live_agent_event import (
 )
 from pulsara_agent.conversation_kernel.vocabulary import LiveEventType
 from pulsara_agent.conversation_kernel.io import KernelSessionIO
+from pulsara_agent.conversation_kernel.execution_watchdogs import (
+    KernelExecutionDeadlineFactory,
+    KernelWatchdogOwner,
+)
 from pulsara_agent.conversation_kernel.repository import (
     AcceptedInteractionDecision,
     ConversationKernelConflict,
@@ -82,12 +85,14 @@ class KernelInteractionCoordinator:
         live_control: SessionLiveControlOwner,
         live_bus: LiveAgentEventBus,
         io_owner: KernelSessionIO,
+        deadline_factory: KernelExecutionDeadlineFactory | None = None,
     ) -> None:
         self._repository = repository
         self._guard = guard
         self._live_control = live_control
         self._live_bus = live_bus
         self._io = io_owner
+        self._deadlines = deadline_factory or KernelExecutionDeadlineFactory()
         self._lock = asyncio.Lock()
         self._controller_lock = Lock()
         self._controller_id: str | None = None
@@ -257,7 +262,9 @@ class KernelInteractionCoordinator:
                 "permission_snapshot_fingerprint": (
                     pending.permission_snapshot_fingerprint
                 ),
-                "deadline_monotonic": monotonic() + 10.0,
+                "deadline_monotonic": self._deadlines.deadline(
+                    KernelWatchdogOwner.FOREGROUND_CANONICAL
+                ),
             }
         try:
             accepted = await self._io.run(

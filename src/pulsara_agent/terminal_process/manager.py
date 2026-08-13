@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from enum import StrEnum
 import os
 from pathlib import Path
 import pty
@@ -61,6 +62,29 @@ TerminalCompletionSubscriber = Callable[
 ]
 
 
+class TerminalForegroundDecisionState(StrEnum):
+    PREPARING = "PREPARING"
+    PROCESS_INSTALLED = "PROCESS_INSTALLED"
+    ABORT_REQUESTED = "ABORT_REQUESTED"
+    RESULT_READY = "RESULT_READY"
+    SETTLED = "SETTLED"
+
+
+@dataclass(frozen=True, slots=True)
+class TerminalForegroundDecisionAttemptHandle:
+    attempt_id: str
+    owner_host_session_id: str
+
+
+@dataclass(slots=True)
+class _TerminalForegroundDecisionAttempt:
+    handle: TerminalForegroundDecisionAttemptHandle
+    state: TerminalForegroundDecisionState
+    process_id: str | None = None
+    adoption_allowed: bool = True
+    timer: Timer | None = None
+
+
 @dataclass(slots=True)
 class _ProcessState:
     process_id: str
@@ -86,6 +110,9 @@ class _ProcessState:
     physical_state: TerminalPhysicalState = TerminalPhysicalState.RUNNING
     yield_decision: bool | None = None
     completion_offered: bool = False
+    reader_started: bool = False
+    watcher_started: bool = False
+    deadline_timer_started: bool = False
     physical_completion: Event = field(default_factory=Event)
     lock: RLock = field(default_factory=RLock)
 
@@ -112,6 +139,9 @@ class ProcessRegistry:
         self._completion_subscriber = completion_subscriber
         self._states: dict[str, _ProcessState] = {}
         self._launching_by_owner: dict[str, int] = {}
+        self._decision_attempts: dict[
+            str, _TerminalForegroundDecisionAttempt
+        ] = {}
         self._released_owners: set[str] = set()
         self._closed = False
         self._lock = RLock()
@@ -138,7 +168,13 @@ class ProcessRegistry:
         origin: TerminalProcessOrigin | None = None,
         output_subscriber: OutputSubscriber | None = None,
         cwd_probe_path: Path | None = None,
+        decision_attempt_id: str | None = None,
+        decision_deadline_monotonic: float | None = None,
     ) -> tuple[_ProcessState, bool, str | None]:
+        decision_handle = TerminalForegroundDecisionAttemptHandle(
+            attempt_id=decision_attempt_id or f"terminal-decision:{uuid4().hex}",
+            owner_host_session_id=owner_host_session_id,
+        )
         with self._launch_condition:
             if self._closed or owner_host_session_id in self._released_owners:
                 raise RuntimeError("terminal process owner is closed")
@@ -154,8 +190,38 @@ class ProcessRegistry:
             self._launching_by_owner[owner_host_session_id] = (
                 self._launching_by_owner.get(owner_host_session_id, 0) + 1
             )
+            if decision_handle.attempt_id in self._decision_attempts:
+                self._release_launch_locked(owner_host_session_id)
+                raise RuntimeError("terminal foreground decision attempt already exists")
+            decision = _TerminalForegroundDecisionAttempt(
+                handle=decision_handle,
+                state=TerminalForegroundDecisionState.PREPARING,
+            )
+            self._decision_attempts[decision_handle.attempt_id] = decision
+            if decision_deadline_monotonic is None:
+                self._release_launch_locked(owner_host_session_id)
+                self._decision_attempts.pop(decision_handle.attempt_id, None)
+                raise ValueError(
+                    "terminal foreground decision requires a policy-owned deadline"
+                )
+            decision_deadline = decision_deadline_monotonic
+            remaining = decision_deadline - monotonic()
+            if remaining <= 0:
+                decision.state = TerminalForegroundDecisionState.ABORT_REQUESTED
+                decision.adoption_allowed = False
+            else:
+                timer = Timer(
+                    remaining,
+                    self._abort_foreground_decision,
+                    args=(decision_handle.attempt_id,),
+                )
+                timer.daemon = False
+                decision.timer = timer
+                timer.start()
         launch_reserved = True
         try:
+            if remaining <= 0:
+                raise TimeoutError("terminal foreground decision expired before spawn")
             state = self._spawn(
                 terminal_session_id=terminal_session_id,
                 command=command,
@@ -176,35 +242,33 @@ class ProcessRegistry:
         except BaseException:
             with self._launch_condition:
                 self._release_launch_locked(owner_host_session_id)
-            raise
-        live_subscription: str | None = None
-        if output_subscriber is not None:
-            live_subscription, _ = state.output.subscribe(output_subscriber)
-        closed_during_launch = False
-        with self._launch_condition:
-            if self._closed or owner_host_session_id in self._released_owners:
-                closed_during_launch = True
-            else:
-                self._states[state.process_id] = state
-            # Reader, watcher and lifetime timer are installed while the
-            # registry lock excludes release_owner().  A visible process state
-            # therefore never exists without all of its physical owners.
-            self._start_physical_threads(state)
-            if max_lifetime_seconds is not None and not closed_during_launch:
-                timer = Timer(
-                    max_lifetime_seconds, self._expire, args=(state.process_id,)
+                self._settle_foreground_decision_locked(
+                    decision_handle.attempt_id
                 )
-                timer.daemon = False
-                state.deadline_timer = timer
-                timer.start()
-            if not closed_during_launch:
-                # Publication and reservation release share one lock.  A
-                # concurrent admission or owner close therefore observes
-                # either the launching slot or the fully-owned process state,
-                # never a capacity-free gap between them.
-                self._release_launch_locked(owner_host_session_id)
-                launch_reserved = False
+            raise
+        live_subscription = (
+            None
+            if output_subscriber is None
+            else f"terminal-output-subscription:{uuid4().hex}"
+        )
+        closed_during_launch = False
+        decision_aborted = False
         try:
+            (
+                live_subscription,
+                closed_during_launch,
+                decision_aborted,
+                launch_released,
+            ) = self._install_spawned_process(
+                state,
+                decision_attempt_id=decision_handle.attempt_id,
+                owner_host_session_id=owner_host_session_id,
+                live_subscription=live_subscription,
+                output_subscriber=output_subscriber,
+                max_lifetime_seconds=max_lifetime_seconds,
+            )
+            if launch_released:
+                launch_reserved = False
             if closed_during_launch:
                 _terminate_process_group(state)
                 if not _join_physical(state, timeout=2.0):
@@ -212,11 +276,43 @@ class ProcessRegistry:
                         "terminal process owner closed during launch before physical join"
                     )
                 raise RuntimeError("terminal process owner closed during launch")
+            if decision_aborted:
+                with state.lock:
+                    state.yield_decision = True
+                state.killed = state.killed or _process_is_live(state)
+                _terminate_process_group(state)
+                if not _join_physical(state, timeout=2.0):
+                    raise ProcessPhysicalJoinError(
+                        "terminal decision abort did not physically join"
+                    )
+                self._mark_foreground_decision_result_ready(
+                    decision_handle.attempt_id, state.process_id
+                )
+                return state, False, None
             if yield_time_ms > 0:
                 state.physical_completion.wait(yield_time_ms / 1000)
+            if self._foreground_decision_abort_requested(
+                decision_handle.attempt_id
+            ):
+                with state.lock:
+                    if state.yield_decision is None:
+                        state.yield_decision = True
+                state.killed = state.killed or _process_is_live(state)
+                _terminate_process_group(state)
+                if not _join_physical(state, timeout=2.0):
+                    raise ProcessPhysicalJoinError(
+                        "terminal decision watchdog did not physically join"
+                    )
+                self._mark_foreground_decision_result_ready(
+                    decision_handle.attempt_id, state.process_id
+                )
+                return state, False, None
             state.refresh()
             yielded = not state.physical_completion.is_set()
             final_cwd = self.finalize_yield_decision(state, yielded=yielded)
+            self._mark_foreground_decision_result_ready(
+                decision_handle.attempt_id, state.process_id
+            )
             return state, yielded, final_cwd
         except BaseException as error:
             # No caller received this process identity, so it must not remain
@@ -226,13 +322,33 @@ class ProcessRegistry:
             with state.lock:
                 if state.yield_decision is None:
                     state.yield_decision = True
-            state.killed = _process_is_live(state)
+            state.killed = state.killed or _process_is_live(state)
             _terminate_process_group(state)
             if not _join_physical(state, timeout=2.0):
+                # Preserve the still-physical owner for Host close rather than
+                # releasing an invisible child.  This is a quarantine path,
+                # not a successful launch publication.
+                with self._launch_condition:
+                    self._states[state.process_id] = state
+                    attempt = self._decision_attempts.get(
+                        decision_handle.attempt_id
+                    )
+                    if attempt is not None:
+                        attempt.process_id = state.process_id
+                        attempt.state = (
+                            TerminalForegroundDecisionState.ABORT_REQUESTED
+                        )
+                        attempt.adoption_allowed = False
                 raise ProcessPhysicalJoinError(
                     "failed terminal launch did not physically join"
                 ) from error
             self._cleanup_disallowed_cwd_probe(state)
+            with self._launch_condition:
+                if self._states.get(state.process_id) is state:
+                    self._states.pop(state.process_id, None)
+                self._settle_foreground_decision_locked(
+                    decision_handle.attempt_id
+                )
             raise
         finally:
             if live_subscription is not None:
@@ -240,6 +356,67 @@ class ProcessRegistry:
             if launch_reserved:
                 with self._launch_condition:
                     self._release_launch_locked(owner_host_session_id)
+
+    def settle_foreground_decision(self, attempt_id: str) -> None:
+        with self._launch_condition:
+            self._settle_foreground_decision_locked(attempt_id)
+
+    def foreground_decision_state(self, attempt_id: str) -> str | None:
+        with self._lock:
+            attempt = self._decision_attempts.get(attempt_id)
+            return None if attempt is None else attempt.state.value
+
+    def _abort_foreground_decision(self, attempt_id: str) -> None:
+        state: _ProcessState | None = None
+        with self._launch_condition:
+            attempt = self._decision_attempts.get(attempt_id)
+            if attempt is None or attempt.state in {
+                TerminalForegroundDecisionState.RESULT_READY,
+                TerminalForegroundDecisionState.SETTLED,
+            }:
+                return
+            attempt.state = TerminalForegroundDecisionState.ABORT_REQUESTED
+            attempt.adoption_allowed = False
+            if attempt.process_id is not None:
+                state = self._states.get(attempt.process_id)
+        if state is not None:
+            state.killed = state.killed or _process_is_live(state)
+            _terminate_process_group(state)
+
+    def _foreground_decision_abort_requested(self, attempt_id: str) -> bool:
+        with self._lock:
+            attempt = self._decision_attempts.get(attempt_id)
+            return (
+                attempt is not None
+                and attempt.state is TerminalForegroundDecisionState.ABORT_REQUESTED
+            )
+
+    def _mark_foreground_decision_result_ready(
+        self, attempt_id: str, process_id: str
+    ) -> None:
+        with self._launch_condition:
+            attempt = self._decision_attempts.get(attempt_id)
+            if attempt is None:
+                raise RuntimeError("terminal foreground decision attempt is absent")
+            attempt.process_id = process_id
+            attempt.state = TerminalForegroundDecisionState.RESULT_READY
+            if attempt.timer is not None:
+                attempt.timer.cancel()
+                attempt.timer = None
+
+    def _settle_foreground_decision_locked(self, attempt_id: str) -> None:
+        attempt = self._decision_attempts.get(attempt_id)
+        if attempt is None:
+            return
+        if attempt.timer is not None:
+            attempt.timer.cancel()
+            attempt.timer = None
+        attempt.state = TerminalForegroundDecisionState.SETTLED
+        if not attempt.adoption_allowed and attempt.process_id is not None:
+            state = self._states.get(attempt.process_id)
+            if state is None or state.physical_completion.is_set():
+                self._states.pop(attempt.process_id, None)
+        self._decision_attempts.pop(attempt_id, None)
 
     def _spawn(
         self,
@@ -324,6 +501,7 @@ class ProcessRegistry:
 
     def _start_physical_threads(self, state: _ProcessState) -> None:
         state.reader.start()
+        state.reader_started = True
         watcher = Thread(
             target=self._watch_process,
             args=(state,),
@@ -332,6 +510,68 @@ class ProcessRegistry:
         )
         state.watcher = watcher
         watcher.start()
+        state.watcher_started = True
+
+    def _install_spawned_process(
+        self,
+        state: _ProcessState,
+        *,
+        decision_attempt_id: str,
+        owner_host_session_id: str,
+        live_subscription: str | None,
+        output_subscriber: OutputSubscriber | None,
+        max_lifetime_seconds: int | None,
+    ) -> tuple[str | None, bool, bool, bool]:
+        """Install every post-spawn physical owner under one rollback boundary.
+
+        The returned booleans are ``closed``, ``decision_aborted`` and
+        ``launch_reservation_released``.  Any exception leaves the launch
+        reservation installed so the caller's single rollback path owns it.
+        """
+
+        if output_subscriber is not None:
+            if live_subscription is None:
+                raise RuntimeError("terminal output subscription identity is absent")
+            state.output.install_subscription(live_subscription, output_subscriber)
+        closed_during_launch = False
+        decision_aborted = False
+        with self._launch_condition:
+            if self._closed or owner_host_session_id in self._released_owners:
+                closed_during_launch = True
+            else:
+                current_decision = self._decision_attempts.get(decision_attempt_id)
+                if (
+                    current_decision is None
+                    or current_decision.state
+                    is TerminalForegroundDecisionState.ABORT_REQUESTED
+                ):
+                    decision_aborted = True
+                else:
+                    current_decision.state = (
+                        TerminalForegroundDecisionState.PROCESS_INSTALLED
+                    )
+                    current_decision.process_id = state.process_id
+                    self._states[state.process_id] = state
+            # A visible state is published only while the same lock excludes
+            # release_owner().  If any start below raises, the caller removes
+            # that exact publication before releasing the launch reservation.
+            self._start_physical_threads(state)
+            if (
+                max_lifetime_seconds is not None
+                and not closed_during_launch
+                and not decision_aborted
+            ):
+                timer = Timer(
+                    max_lifetime_seconds, self._expire, args=(state.process_id,)
+                )
+                timer.daemon = False
+                state.deadline_timer = timer
+                timer.start()
+                state.deadline_timer_started = True
+            if not closed_during_launch:
+                self._release_launch_locked(owner_host_session_id)
+                return live_subscription, False, decision_aborted, True
+        return live_subscription, True, decision_aborted, False
 
     def _watch_process(self, state: _ProcessState) -> None:
         code = state.process.wait()
@@ -605,6 +845,14 @@ class ProcessRegistry:
         deadline = monotonic() + timeout_seconds
         with self._launch_condition:
             self._released_owners.add(owner)
+            decision_ids = tuple(
+                attempt_id
+                for attempt_id, attempt in self._decision_attempts.items()
+                if attempt.handle.owner_host_session_id == owner
+            )
+        for attempt_id in decision_ids:
+            self._abort_foreground_decision(attempt_id)
+        with self._launch_condition:
             while self._launching_by_owner.get(owner, 0):
                 remaining = deadline - monotonic()
                 if remaining <= 0:
@@ -618,7 +866,7 @@ class ProcessRegistry:
                 if state.owner_host_session_id == owner
             ]
         for state in states:
-            state.killed = _process_is_live(state)
+            state.killed = state.killed or _process_is_live(state)
             _terminate_process_group(state)
         results: list[TerminalResult] = []
         for state in states:
@@ -629,6 +877,59 @@ class ProcessRegistry:
         with self._lock:
             for state in states:
                 self._states.pop(state.process_id, None)
+            for attempt_id in decision_ids:
+                attempt = self._decision_attempts.get(attempt_id)
+                if (
+                    attempt is not None
+                    and attempt.state is TerminalForegroundDecisionState.RESULT_READY
+                ):
+                    self._settle_foreground_decision_locked(attempt_id)
+                # An ABORT_REQUESTED attempt still belongs to the physical
+                # exec_with_yield caller.  That caller must observe the joined
+                # process, freeze the exact killed result, and only then settle
+                # the attempt.  Removing it here races _mark_*_result_ready()
+                # and turns a known terminal outcome into a generic error.
+        return results
+
+    def release_owner_and_join(self, owner: str) -> list[TerminalResult]:
+        """Force-path release that never detaches an admitted process owner."""
+
+        with self._launch_condition:
+            self._released_owners.add(owner)
+            decision_ids = tuple(
+                attempt_id
+                for attempt_id, attempt in self._decision_attempts.items()
+                if attempt.handle.owner_host_session_id == owner
+            )
+        for attempt_id in decision_ids:
+            self._abort_foreground_decision(attempt_id)
+        with self._launch_condition:
+            while self._launching_by_owner.get(owner, 0):
+                self._launch_condition.wait()
+            states = [
+                state
+                for state in self._states.values()
+                if state.owner_host_session_id == owner
+            ]
+        for state in states:
+            state.killed = state.killed or _process_is_live(state)
+            _terminate_process_group(state)
+        results: list[TerminalResult] = []
+        for state in states:
+            while not _join_physical(state, timeout=1.0):
+                _terminate_process_group(state)
+            results.append(_snapshot(state, 32_000))
+        with self._lock:
+            for state in states:
+                self._states.pop(state.process_id, None)
+            for attempt_id in decision_ids:
+                attempt = self._decision_attempts.get(attempt_id)
+                if (
+                    attempt is not None
+                    and attempt.state
+                    is TerminalForegroundDecisionState.RESULT_READY
+                ):
+                    self._settle_foreground_decision_locked(attempt_id)
         return results
 
     def shutdown(self) -> None:
@@ -732,6 +1033,8 @@ class TerminalSession:
         *,
         output_subscriber: OutputSubscriber | None = None,
         origin: TerminalProcessOrigin | None = None,
+        decision_attempt_id: str | None = None,
+        decision_deadline_monotonic: float | None = None,
     ) -> TerminalResult:
         with self.state_lock:
             current = _nearest_existing_cwd(
@@ -743,6 +1046,9 @@ class TerminalSession:
         environment = self.environment.build(cwd=cwd)
         probe = _new_cwd_probe(self.state.workspace_root)
         command = _command_with_cwd_probe(request.command, probe)
+        effective_decision_attempt_id = (
+            decision_attempt_id or f"terminal-decision:{uuid4().hex}"
+        )
         try:
             process, yielded, final_cwd = self.registry.exec_with_yield(
                 terminal_session_id=self.state.session_id,
@@ -757,9 +1063,14 @@ class TerminalSession:
                 output_subscriber=output_subscriber,
                 cwd_probe_path=probe,
                 origin=origin,
+                decision_attempt_id=effective_decision_attempt_id,
+                decision_deadline_monotonic=decision_deadline_monotonic,
             )
         except ProcessLimitError as exc:
             probe.unlink(missing_ok=True)
+            self.registry.settle_foreground_decision(
+                effective_decision_attempt_id
+            )
             return TerminalResult(
                 status=TerminalStatus.BLOCKED,
                 output="",
@@ -773,6 +1084,9 @@ class TerminalSession:
             # it before raising.  This caller still owns the path for failures
             # that happened before a child state existed.
             probe.unlink(missing_ok=True)
+            self.registry.settle_foreground_decision(
+                effective_decision_attempt_id
+            )
             raise
         result = _snapshot(process, request.max_output_chars)
         if not yielded and final_cwd is not None:
@@ -786,11 +1100,16 @@ class TerminalSession:
                         self.state.current_cwd = candidate
         with self.state_lock:
             visible_cwd = self.state.current_cwd if not yielded else cwd
-        return replace(
-            result,
-            cwd=str(visible_cwd),
-            shell_diagnostic=environment.diagnostic,
-        )
+        try:
+            return replace(
+                result,
+                cwd=str(visible_cwd),
+                shell_diagnostic=environment.diagnostic,
+            )
+        finally:
+            self.registry.settle_foreground_decision(
+                effective_decision_attempt_id
+            )
 
 
 @dataclass(slots=True)
@@ -914,6 +1233,21 @@ class TerminalSessionManager:
                 self._sessions.pop(key, None)
         return results
 
+    def release_owner_and_join(
+        self, owner_host_session_id: str
+    ) -> list[TerminalResult]:
+        results = self.process_registry.release_owner_and_join(
+            owner_host_session_id
+        )
+        self.environment_owner.close_and_join()
+        with self._lock:
+            self._released_owners.add(owner_host_session_id)
+            for key in [
+                key for key in self._sessions if key[0] == owner_host_session_id
+            ]:
+                self._sessions.pop(key, None)
+        return results
+
 
 def _read_stream(stream: IO[bytes], output: TerminalOutputOwner) -> None:
     try:
@@ -984,17 +1318,37 @@ def _join_physical(state: _ProcessState, *, timeout: float) -> bool:
         state.process.wait(timeout=max(0.0, deadline - monotonic()))
     except subprocess.TimeoutExpired:
         return False
-    state.reader.join(timeout=max(0.0, deadline - monotonic()))
-    if state.reader.is_alive():
-        return False
+    if state.reader_started:
+        state.reader.join(timeout=max(0.0, deadline - monotonic()))
+        if state.reader.is_alive():
+            return False
+    else:
+        # A Thread.start() fault still leaves the spawned pipe/PTY source owned
+        # by this invisible state.  Close it here so rollback does not strand a
+        # descriptor after the child group has been terminated.
+        try:
+            if state.io_mode is TerminalIOMode.PTY and state.master_fd is not None:
+                os.close(state.master_fd)
+                state.master_fd = None
+            elif state.process.stdout is not None:
+                state.process.stdout.close()
+        except OSError:
+            pass
     watcher = state.watcher
-    if watcher is not None and watcher is not current_thread():
+    if (
+        watcher is not None
+        and state.watcher_started
+        and watcher is not current_thread()
+    ):
         watcher.join(timeout=max(0.0, deadline - monotonic()))
         if watcher.is_alive():
             return False
     if state.deadline_timer is not None:
         state.deadline_timer.cancel()
-        if state.deadline_timer is not current_thread():
+        if (
+            state.deadline_timer_started
+            and state.deadline_timer is not current_thread()
+        ):
             state.deadline_timer.join(timeout=max(0.0, deadline - monotonic()))
             if state.deadline_timer.is_alive():
                 return False
@@ -1012,6 +1366,10 @@ def _join_physical(state: _ProcessState, *, timeout: float) -> bool:
     with state.lock:
         if state.physical_state is not TerminalPhysicalState.PRUNABLE:
             state.physical_state = TerminalPhysicalState.PHYSICALLY_JOINED
+        if state.ended_at is None:
+            state.ended_at = monotonic()
+    if not state.watcher_started:
+        state.physical_completion.set()
     return True
 
 

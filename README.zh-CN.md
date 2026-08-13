@@ -136,7 +136,18 @@ nested-prefix trial重复收取同一immutable base。provider open还必须消�
 continuity owner密封签发的exact one-shot permit对象，compiler则强制每种
 first-party source恰好一个VALUE或ABSENT branch；
 Plan handoff显示正文与exact canonical transition identity相互分离。证据记录在
-[`round3_1_provider_input_prefix_continuity_activation.json`](benchmarks/suites/core/v1/round3_1_provider_input_prefix_continuity_activation.json)。旧 v13
+[`round3_1_provider_input_prefix_continuity_activation.json`](benchmarks/suites/core/v1/round3_1_provider_input_prefix_continuity_activation.json)。
+Round 4将clean-v0扩展为26张产品关系和34类selective occurrence；Plan
+workflow、run-bound permission、Protocol v3与real-provider证据记录在
+[`round4_plan_workflow_and_run_permission_activation.json`](benchmarks/suites/core/v1/round4_plan_workflow_and_run_permission_activation.json)。
+Round 5A删除ROOT与child turn的固定model/tool-call次数和turn-wide wall-clock
+deadline。每次provider-dispatch planning、canonical operation、provider
+transport、physical tool、writer renewal、Terminal decision和close分别使用自己的
+closed watchdog；foreground provider stream只有connect/write/pool/read-idle边界，
+没有total response timeout，finite durable job仍保留30/45秒attempt total。
+本轮只恢复execution envelope；automatic compaction、summary adoption和
+provider-input rebase仍明确延期到Round 5B。证据记录在
+[`round5_long_horizon_execution_envelope_activation.json`](benchmarks/suites/core/v1/round5_long_horizon_execution_envelope_activation.json)。旧 v13
 数据库只会得到 `schema_migration_universe_reset_required`，不会被在线导入、
 翻译或升级。请严格遵守
 [clean-baseline runbook](STAGE_5_CLEAN_BASELINE_RUNBOOK.zh.md)，没有针对 exact

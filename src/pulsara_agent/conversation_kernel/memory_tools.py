@@ -37,6 +37,8 @@ MEMORY_WRITE_TOOL_NAMES = frozenset(
 )
 MEMORY_TOOL_NAMES = MEMORY_READ_TOOL_NAMES | MEMORY_WRITE_TOOL_NAMES
 MAXIMUM_MEMORY_TOOL_OUTPUT_BYTES = 256 * 1024
+MEMORY_POINT_READ_TIMEOUT_SECONDS = 10.0
+MEMORY_SEARCH_TIMEOUT_SECONDS = 20.0
 
 
 class KernelMemoryToolPort:
@@ -80,7 +82,7 @@ class KernelMemoryToolPort:
                 self._get,
                 arguments,
                 explain=tool_name == "memory_explain",
-                deadline_monotonic=monotonic() + 10.0,
+                deadline_monotonic=monotonic() + MEMORY_POINT_READ_TIMEOUT_SECONDS,
             )
         if tool_name in MEMORY_WRITE_TOOL_NAMES:
             return self._prepare_proposal(
@@ -98,7 +100,7 @@ class KernelMemoryToolPort:
         )
         max_hops = int(arguments.get("max_hops", 0))
         embedding = await self._embedding_provider()
-        deadline = monotonic() + 20.0
+        deadline = monotonic() + MEMORY_SEARCH_TIMEOUT_SECONDS
         if embedding is None:
             result = await self._io.run(
                 self._query.search,
@@ -169,12 +171,13 @@ class KernelMemoryToolPort:
         arguments: Mapping[str, object],
         *,
         explain: bool,
+        deadline_monotonic: float,
     ) -> KernelToolResult:
         memory_id = str(arguments.get("memory_id") or "")
         with self._repository.connection_provider.connection(
             lane=PostgresConnectionLane.MEMORY_QUERY,
             row_factory=dict_row,
-            deadline_monotonic=monotonic() + 10.0,
+            deadline_monotonic=deadline_monotonic,
         ) as connection:
             fact = connection.execute(
                 """

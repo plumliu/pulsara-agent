@@ -8,6 +8,9 @@ import pytest
 
 from pulsara_agent.capability.builtin_catalog import builtin_tool_catalog_entry
 from pulsara_agent.conversation_kernel.live import LiveAgentEventBus
+from pulsara_agent.conversation_kernel.execution_watchdogs import (
+    KernelExecutionDeadlineFactory,
+)
 from pulsara_agent.conversation_kernel.host import (
     KernelCommandOutcome,
     KernelHostSession,
@@ -700,6 +703,7 @@ def test_round4_existing_draft_winner_precedes_root_slot_reservation() -> None:
 
         host = object.__new__(KernelHostSession)
         host._closing = False  # type: ignore[attr-defined]
+        host._deadlines = KernelExecutionDeadlineFactory()  # type: ignore[attr-defined]
         host._plan_exit_fence = True  # type: ignore[attr-defined]
         host.session_id = "session:one"  # type: ignore[attr-defined]
         host._lease = Lease()  # type: ignore[attr-defined]
@@ -758,6 +762,7 @@ def test_round4_force_exit_fence_rejects_every_new_resolution_write() -> None:
     async def new_host() -> KernelHostSession:
         host = object.__new__(KernelHostSession)
         host._closing = False  # type: ignore[attr-defined]
+        host._deadlines = KernelExecutionDeadlineFactory()  # type: ignore[attr-defined]
         host._plan_exit_fence = True  # type: ignore[attr-defined]
         host._external_new_turn_accepting = False  # type: ignore[attr-defined]
         host._active_task = None  # type: ignore[attr-defined]

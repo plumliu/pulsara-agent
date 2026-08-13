@@ -494,11 +494,22 @@ class TerminalOutputOwner:
 
     def subscribe(self, callback: OutputSubscriber) -> tuple[str, TerminalOutputCursor]:
         token = f"terminal-output-subscription:{uuid4().hex}"
+        return token, self.install_subscription(token, callback)
+
+    def install_subscription(
+        self, token: str, callback: OutputSubscriber
+    ) -> TerminalOutputCursor:
+        """Install a caller-prepared identity for rollback-safe ownership."""
+
+        if not token:
+            raise ValueError("terminal output subscription token is empty")
         with self._lock:
+            if token in self._subscribers:
+                raise RuntimeError("terminal output subscription already exists")
             self._subscribers[token] = callback
             self._observation_leases += 1
             cursor = self._cursor(self._through)
-        return token, cursor
+        return cursor
 
     def unsubscribe(self, token: str) -> bool:
         with self._lock:

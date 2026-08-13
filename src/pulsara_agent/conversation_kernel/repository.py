@@ -15,6 +15,7 @@ from hashlib import sha256
 import json
 import math
 from threading import local
+from types import MappingProxyType
 from typing import Callable, Mapping, Sequence
 from uuid import uuid4
 
@@ -205,6 +206,201 @@ class AcceptedEntry:
     entry_sequence: int
     event_sequence: int
     turn_completed: bool = False
+
+
+class TurnAdmissionConfirmationKind(StrEnum):
+    FULL = "FULL"
+    NONE = "NONE"
+    CONFLICT = "CONFLICT"
+
+
+class ToolRemoteIdentityConfirmationKind(StrEnum):
+    FULL = "FULL"
+    NONE = "NONE"
+    CONFLICT = "CONFLICT"
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedRootTurnAdmission:
+    session_id: str
+    command_id: str
+    turn_id: str
+    entry_id: str
+    context_binding_revision_id: str
+    permission_snapshot_id: str
+    requested_permission_mode: PermissionMode
+    content: CanonicalContent
+    occurred_at: datetime
+    actor_kind: str
+    actor_id: str
+    semantic_digest: str
+    event: CommittedEventDraft
+    candidate_fingerprint: str
+
+    def __post_init__(self) -> None:
+        payload = _root_turn_admission_payload(
+            session_id=self.session_id,
+            command_id=self.command_id,
+            turn_id=self.turn_id,
+            entry_id=self.entry_id,
+            context_binding_revision_id=self.context_binding_revision_id,
+            permission_snapshot_id=self.permission_snapshot_id,
+            requested_permission_mode=self.requested_permission_mode,
+            content=self.content,
+            occurred_at=self.occurred_at,
+            actor_kind=self.actor_kind,
+            actor_id=self.actor_id,
+        )
+        expected_digest = canonical_digest(
+            "pulsara:submit-prompt-command:v2", payload
+        )
+        expected_fingerprint = canonical_digest(
+            "pulsara:prepared-root-turn-admission:v1",
+            {**payload, "semantic_digest": expected_digest},
+        )
+        if (
+            not self.session_id
+            or not self.command_id
+            or not self.turn_id
+            or not self.entry_id
+            or not self.context_binding_revision_id
+            or not self.permission_snapshot_id
+            or self.semantic_digest != expected_digest
+            or self.candidate_fingerprint != expected_fingerprint
+            or self.event.event_id
+            != _stable_identity(
+                "event", expected_fingerprint, "UserMessageAccepted"
+            )
+            or self.event.event_type is not CommittedEventType.USER_MESSAGE_ACCEPTED
+            or self.event.subject
+            != CommittedEventSubject(SubjectSlot.ENTRY, self.entry_id)
+            or self.event.actor_kind != self.actor_kind
+            or self.event.actor_id != self.actor_id
+            or self.event.sensitivity_class != "PUBLIC"
+            or self.event.projection_profile != "DEFAULT"
+            or self.event.occurred_at != self.occurred_at
+            or dict(self.event.payload)
+            != {"entry_kind": EntryKind.USER_MESSAGE.value}
+        ):
+            raise ValueError("prepared ROOT turn admission is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedSubagentTurnAdmission:
+    session_id: str
+    task_id: str
+    turn_id: str
+    entry_id: str
+    context_binding_revision_id: str
+    permission_snapshot_id: str
+    content: CanonicalContent
+    occurred_at: datetime
+    actor_id: str
+    event: CommittedEventDraft
+    candidate_fingerprint: str
+
+    def __post_init__(self) -> None:
+        payload = _subagent_turn_admission_payload(
+            session_id=self.session_id,
+            task_id=self.task_id,
+            turn_id=self.turn_id,
+            entry_id=self.entry_id,
+            context_binding_revision_id=self.context_binding_revision_id,
+            permission_snapshot_id=self.permission_snapshot_id,
+            content=self.content,
+            occurred_at=self.occurred_at,
+            actor_id=self.actor_id,
+        )
+        expected = canonical_digest(
+            "pulsara:prepared-subagent-turn-admission:v1", payload
+        )
+        if (
+            not self.session_id
+            or not self.task_id
+            or not self.turn_id
+            or not self.entry_id
+            or not self.context_binding_revision_id
+            or not self.permission_snapshot_id
+            or self.candidate_fingerprint != expected
+            or self.event.event_id
+            != _stable_identity("event", expected, "UserMessageAccepted")
+            or self.event.event_type is not CommittedEventType.USER_MESSAGE_ACCEPTED
+            or self.event.subject
+            != CommittedEventSubject(SubjectSlot.ENTRY, self.entry_id)
+            or self.event.actor_kind != "runtime"
+            or self.event.actor_id != self.actor_id
+            or self.event.sensitivity_class != "PUBLIC"
+            or self.event.projection_profile != "DEFAULT"
+            or self.event.occurred_at != self.occurred_at
+            or dict(self.event.payload) != {"source": "SUBAGENT_TASK_OBJECTIVE"}
+        ):
+            raise ValueError("prepared subagent turn admission is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class TurnAdmissionConfirmation:
+    kind: TurnAdmissionConfirmationKind
+    accepted: AcceptedEntry | None = None
+
+    def __post_init__(self) -> None:
+        if (self.kind is TurnAdmissionConfirmationKind.FULL) != (
+            self.accepted is not None
+        ):
+            raise ValueError("turn admission confirmation union is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedToolRemoteIdentityPublication:
+    session_id: str
+    attempt_id: str
+    remote_identity: str
+    occurred_at: datetime
+    actor_id: str
+    event: CommittedEventDraft
+    candidate_fingerprint: str
+
+    def __post_init__(self) -> None:
+        payload = _tool_remote_identity_publication_payload(
+            session_id=self.session_id,
+            attempt_id=self.attempt_id,
+            remote_identity=self.remote_identity,
+            occurred_at=self.occurred_at,
+            actor_id=self.actor_id,
+        )
+        expected = canonical_digest(
+            "pulsara:prepared-tool-remote-identity-publication:v1", payload
+        )
+        identity_bytes = self.remote_identity.encode("utf-8")
+        if (
+            not self.session_id
+            or not self.attempt_id
+            or not self.remote_identity
+            or len(identity_bytes) > 4096
+            or not self.actor_id
+            or self.candidate_fingerprint != expected
+            or self.event.event_id
+            != _stable_identity(
+                "event",
+                expected,
+                CommittedEventType.TOOL_REMOTE_IDENTITY_PUBLISHED.value,
+            )
+            or self.event.event_type
+            is not CommittedEventType.TOOL_REMOTE_IDENTITY_PUBLISHED
+            or self.event.subject
+            != CommittedEventSubject(SubjectSlot.TOOL_ATTEMPT, self.attempt_id)
+            or self.event.actor_kind != "tool"
+            or self.event.actor_id != self.actor_id
+            or self.event.sensitivity_class != "PUBLIC"
+            or self.event.projection_profile != "DEFAULT"
+            or self.event.occurred_at != self.occurred_at
+            or dict(self.event.payload)
+            != {
+                "remote_identity_utf8_bytes": len(identity_bytes),
+                "remote_identity_digest": "sha256:"
+                + sha256(identity_bytes).hexdigest(),
+            }
+        ):
+            raise ValueError("prepared tool remote identity publication is invalid")
 
 
 class ToolResultSideBranchKind(StrEnum):
@@ -813,6 +1009,276 @@ def _stable_identity(prefix: str, *parts: str) -> str:
     return f"{prefix}:{digest}"
 
 
+def _canonical_content_identity(content: CanonicalContent) -> Mapping[str, object]:
+    return {
+        "kind": "INLINE" if isinstance(content, InlineContent) else "BLOB",
+        "blob_id": None if isinstance(content, InlineContent) else content.blob_id,
+        "digest": content.digest,
+        "size": content.size,
+        "media_type": content.media_type,
+        "codec": content.codec,
+    }
+
+
+def _canonical_content_matches_utf8_text(
+    content: CanonicalContent, value: str
+) -> bool:
+    encoded = value.encode("utf-8")
+    return (
+        content.media_type == "text/plain"
+        and content.codec == "utf-8"
+        and content.size == len(encoded)
+        and content.digest == "sha256:" + sha256(encoded).hexdigest()
+        and (
+            not isinstance(content, InlineContent)
+            or content.canonical_bytes == encoded
+        )
+    )
+
+
+def _root_turn_admission_payload(
+    *,
+    session_id: str,
+    command_id: str,
+    turn_id: str,
+    entry_id: str,
+    context_binding_revision_id: str,
+    permission_snapshot_id: str,
+    requested_permission_mode: PermissionMode,
+    content: CanonicalContent,
+    occurred_at: datetime,
+    actor_kind: str,
+    actor_id: str,
+) -> Mapping[str, object]:
+    return {
+        "session_id": session_id,
+        "command_id": command_id,
+        "turn_id": turn_id,
+        "entry_id": entry_id,
+        "context_binding_revision_id": context_binding_revision_id,
+        "permission_snapshot_id": permission_snapshot_id,
+        "requested_permission_mode": requested_permission_mode.value,
+        "content": _canonical_content_identity(content),
+        "occurred_at": occurred_at.isoformat(),
+        "actor_kind": actor_kind,
+        "actor_id": actor_id,
+    }
+
+
+def build_prepared_root_turn_admission(
+    *,
+    session_id: str,
+    command_id: str,
+    turn_id: str,
+    entry_id: str,
+    context_binding_revision_id: str,
+    permission_snapshot_id: str,
+    requested_permission_mode: PermissionMode,
+    content: CanonicalContent,
+    occurred_at: datetime,
+    actor_kind: str = "human",
+    actor_id: str = "user",
+) -> PreparedRootTurnAdmission:
+    payload = _root_turn_admission_payload(
+        session_id=session_id,
+        command_id=command_id,
+        turn_id=turn_id,
+        entry_id=entry_id,
+        context_binding_revision_id=context_binding_revision_id,
+        permission_snapshot_id=permission_snapshot_id,
+        requested_permission_mode=requested_permission_mode,
+        content=content,
+        occurred_at=occurred_at,
+        actor_kind=actor_kind,
+        actor_id=actor_id,
+    )
+    semantic_digest = canonical_digest(
+        "pulsara:submit-prompt-command:v2", payload
+    )
+    candidate_fingerprint = canonical_digest(
+        "pulsara:prepared-root-turn-admission:v1",
+        {**payload, "semantic_digest": semantic_digest},
+    )
+    event = CommittedEventDraft(
+        event_id=_stable_identity(
+            "event", candidate_fingerprint, "UserMessageAccepted"
+        ),
+        event_type=CommittedEventType.USER_MESSAGE_ACCEPTED,
+        subject=CommittedEventSubject(SubjectSlot.ENTRY, entry_id),
+        actor_kind=actor_kind,
+        actor_id=actor_id,
+        sensitivity_class="PUBLIC",
+        projection_profile="DEFAULT",
+        occurred_at=occurred_at,
+        payload=MappingProxyType(
+            {"entry_kind": EntryKind.USER_MESSAGE.value}
+        ),
+    )
+    return PreparedRootTurnAdmission(
+        session_id=session_id,
+        command_id=command_id,
+        turn_id=turn_id,
+        entry_id=entry_id,
+        context_binding_revision_id=context_binding_revision_id,
+        permission_snapshot_id=permission_snapshot_id,
+        requested_permission_mode=requested_permission_mode,
+        content=content,
+        occurred_at=occurred_at,
+        actor_kind=actor_kind,
+        actor_id=actor_id,
+        semantic_digest=semantic_digest,
+        event=event,
+        candidate_fingerprint=candidate_fingerprint,
+    )
+
+
+def _subagent_turn_admission_payload(
+    *,
+    session_id: str,
+    task_id: str,
+    turn_id: str,
+    entry_id: str,
+    context_binding_revision_id: str,
+    permission_snapshot_id: str,
+    content: CanonicalContent,
+    occurred_at: datetime,
+    actor_id: str,
+) -> Mapping[str, object]:
+    return {
+        "session_id": session_id,
+        "task_id": task_id,
+        "turn_id": turn_id,
+        "entry_id": entry_id,
+        "context_binding_revision_id": context_binding_revision_id,
+        "permission_snapshot_id": permission_snapshot_id,
+        "content": _canonical_content_identity(content),
+        "occurred_at": occurred_at.isoformat(),
+        "actor_id": actor_id,
+    }
+
+
+def build_prepared_subagent_turn_admission(
+    *,
+    session_id: str,
+    task_id: str,
+    turn_id: str,
+    entry_id: str,
+    context_binding_revision_id: str,
+    permission_snapshot_id: str,
+    content: CanonicalContent,
+    occurred_at: datetime,
+    actor_id: str = "subagent-manager",
+) -> PreparedSubagentTurnAdmission:
+    payload = _subagent_turn_admission_payload(
+        session_id=session_id,
+        task_id=task_id,
+        turn_id=turn_id,
+        entry_id=entry_id,
+        context_binding_revision_id=context_binding_revision_id,
+        permission_snapshot_id=permission_snapshot_id,
+        content=content,
+        occurred_at=occurred_at,
+        actor_id=actor_id,
+    )
+    candidate_fingerprint = canonical_digest(
+        "pulsara:prepared-subagent-turn-admission:v1", payload
+    )
+    event = CommittedEventDraft(
+        event_id=_stable_identity(
+            "event", candidate_fingerprint, "UserMessageAccepted"
+        ),
+        event_type=CommittedEventType.USER_MESSAGE_ACCEPTED,
+        subject=CommittedEventSubject(SubjectSlot.ENTRY, entry_id),
+        actor_kind="runtime",
+        actor_id=actor_id,
+        sensitivity_class="PUBLIC",
+        projection_profile="DEFAULT",
+        occurred_at=occurred_at,
+        payload=MappingProxyType({"source": "SUBAGENT_TASK_OBJECTIVE"}),
+    )
+    return PreparedSubagentTurnAdmission(
+        session_id=session_id,
+        task_id=task_id,
+        turn_id=turn_id,
+        entry_id=entry_id,
+        context_binding_revision_id=context_binding_revision_id,
+        permission_snapshot_id=permission_snapshot_id,
+        content=content,
+        occurred_at=occurred_at,
+        actor_id=actor_id,
+        event=event,
+        candidate_fingerprint=candidate_fingerprint,
+    )
+
+
+def _tool_remote_identity_publication_payload(
+    *,
+    session_id: str,
+    attempt_id: str,
+    remote_identity: str,
+    occurred_at: datetime,
+    actor_id: str,
+) -> Mapping[str, object]:
+    return {
+        "session_id": session_id,
+        "attempt_id": attempt_id,
+        "remote_identity": remote_identity,
+        "occurred_at": occurred_at.isoformat(),
+        "actor_id": actor_id,
+    }
+
+
+def build_prepared_tool_remote_identity_publication(
+    *,
+    session_id: str,
+    attempt_id: str,
+    remote_identity: str,
+    occurred_at: datetime,
+    actor_id: str,
+) -> PreparedToolRemoteIdentityPublication:
+    payload = _tool_remote_identity_publication_payload(
+        session_id=session_id,
+        attempt_id=attempt_id,
+        remote_identity=remote_identity,
+        occurred_at=occurred_at,
+        actor_id=actor_id,
+    )
+    candidate_fingerprint = canonical_digest(
+        "pulsara:prepared-tool-remote-identity-publication:v1", payload
+    )
+    identity_bytes = remote_identity.encode("utf-8")
+    event = CommittedEventDraft(
+        event_id=_stable_identity(
+            "event",
+            candidate_fingerprint,
+            CommittedEventType.TOOL_REMOTE_IDENTITY_PUBLISHED.value,
+        ),
+        event_type=CommittedEventType.TOOL_REMOTE_IDENTITY_PUBLISHED,
+        subject=CommittedEventSubject(SubjectSlot.TOOL_ATTEMPT, attempt_id),
+        actor_kind="tool",
+        actor_id=actor_id,
+        sensitivity_class="PUBLIC",
+        projection_profile="DEFAULT",
+        occurred_at=occurred_at,
+        payload=MappingProxyType(
+            {
+                "remote_identity_utf8_bytes": len(identity_bytes),
+                "remote_identity_digest": "sha256:"
+                + sha256(identity_bytes).hexdigest(),
+            }
+        ),
+    )
+    return PreparedToolRemoteIdentityPublication(
+        session_id=session_id,
+        attempt_id=attempt_id,
+        remote_identity=remote_identity,
+        occurred_at=occurred_at,
+        actor_id=actor_id,
+        event=event,
+        candidate_fingerprint=candidate_fingerprint,
+    )
+
+
 def _plan_inline(payload: Mapping[str, object]) -> InlineContent:
     encoded = json.dumps(
         dict(payload),
@@ -1322,17 +1788,37 @@ class ConversationKernelRepository:
         actor_kind: str = "human",
         actor_id: str = "user",
         deadline_monotonic: float,
+        _prepared_candidate: PreparedRootTurnAdmission | None = None,
     ) -> AcceptedEntry:
-        semantic_digest = canonical_digest(
-            "pulsara:submit-prompt-command:v1",
-            {
-                "turn_id": turn_id,
-                "entry_id": entry_id,
-                "content_digest": content.digest,
-                "permission_snapshot_id": permission_snapshot_id,
-                "requested_permission_mode": requested_permission_mode.value,
-            },
+        prepared = _prepared_candidate or build_prepared_root_turn_admission(
+            session_id=guard.session_id,
+            command_id=command_id,
+            turn_id=turn_id,
+            entry_id=entry_id,
+            context_binding_revision_id=context_binding_revision_id,
+            permission_snapshot_id=permission_snapshot_id,
+            requested_permission_mode=requested_permission_mode,
+            content=content,
+            occurred_at=occurred_at,
+            actor_kind=actor_kind,
+            actor_id=actor_id,
         )
+        if (
+            prepared.session_id != guard.session_id
+            or prepared.command_id != command_id
+            or prepared.turn_id != turn_id
+            or prepared.entry_id != entry_id
+            or prepared.context_binding_revision_id
+            != context_binding_revision_id
+            or prepared.permission_snapshot_id != permission_snapshot_id
+            or prepared.requested_permission_mode is not requested_permission_mode
+            or prepared.content != content
+            or prepared.occurred_at != occurred_at
+            or prepared.actor_kind != actor_kind
+            or prepared.actor_id != actor_id
+        ):
+            raise ValueError("prepared ROOT admission does not exact-join arguments")
+        semantic_digest = prepared.semantic_digest
         with self._writer_transaction(
             guard, deadline_monotonic=deadline_monotonic
         ) as connection:
@@ -1438,23 +1924,122 @@ class ConversationKernelRepository:
                 connection,
                 guard,
                 workspace_id=workspace_id,
-                drafts=(
-                    self._event(
-                        CommittedEventType.USER_MESSAGE_ACCEPTED,
-                        SubjectSlot.ENTRY,
-                        entry_id,
-                        occurred_at=occurred_at,
-                        actor_kind=actor_kind,
-                        actor_id=actor_id,
-                        payload={"entry_kind": EntryKind.USER_MESSAGE.value},
-                    ),
-                ),
+                drafts=(prepared.event,),
             )[0]
             return AcceptedEntry(
                 entry_id=entry_id,
                 turn_id=turn_id,
                 entry_sequence=entry_sequence,
                 event_sequence=event.event_sequence,
+            )
+
+    def accept_root_turn(
+        self,
+        guard: HostWriterGuard,
+        *,
+        candidate: PreparedRootTurnAdmission,
+        deadline_monotonic: float,
+    ) -> AcceptedEntry:
+        if candidate.session_id != guard.session_id:
+            raise ValueError("prepared ROOT admission belongs to another session")
+        return self.start_root_turn(
+            guard,
+            command_id=candidate.command_id,
+            turn_id=candidate.turn_id,
+            entry_id=candidate.entry_id,
+            context_binding_revision_id=candidate.context_binding_revision_id,
+            permission_snapshot_id=candidate.permission_snapshot_id,
+            requested_permission_mode=candidate.requested_permission_mode,
+            content=candidate.content,
+            occurred_at=candidate.occurred_at,
+            actor_kind=candidate.actor_kind,
+            actor_id=candidate.actor_id,
+            deadline_monotonic=deadline_monotonic,
+            _prepared_candidate=candidate,
+        )
+
+    def confirm_root_turn_admission(
+        self,
+        *,
+        candidate: PreparedRootTurnAdmission,
+        guard: HostWriterGuard | None = None,
+        deadline_monotonic: float,
+    ) -> TurnAdmissionConfirmation:
+        with self._provider.connection(
+            lane=PostgresConnectionLane.HOST_CONTROL,
+            row_factory=dict_row,
+            deadline_monotonic=deadline_monotonic,
+            isolation_level=IsolationLevel.REPEATABLE_READ,
+        ) as connection:
+            if guard is not None:
+                if guard.session_id != candidate.session_id:
+                    raise ValueError("ROOT admission guard belongs to another session")
+                self._require_writer(connection, guard, lock=False)
+            command = connection.execute(
+                """SELECT * FROM pulsara_v3.session_commands
+                   WHERE session_id = %s AND command_id = %s""",
+                (candidate.session_id, candidate.command_id),
+            ).fetchone()
+            turn = connection.execute(
+                """SELECT * FROM pulsara_v3.turns
+                   WHERE session_id = %s AND id = %s""",
+                (candidate.session_id, candidate.turn_id),
+            ).fetchone()
+            revision = connection.execute(
+                """SELECT * FROM pulsara_v3.turn_context_binding_revisions
+                   WHERE session_id = %s AND id = %s""",
+                (candidate.session_id, candidate.context_binding_revision_id),
+            ).fetchone()
+            entry = connection.execute(
+                """SELECT * FROM pulsara_v3.transcript_entries
+                   WHERE session_id = %s AND id = %s""",
+                (candidate.session_id, candidate.entry_id),
+            ).fetchone()
+            event = connection.execute(
+                """SELECT * FROM pulsara_v3.agent_events
+                   WHERE session_id = %s AND event_id = %s""",
+                (candidate.session_id, candidate.event.event_id),
+            ).fetchone()
+            rows = (command, turn, revision, entry, event)
+            if all(row is None for row in rows):
+                return TurnAdmissionConfirmation(TurnAdmissionConfirmationKind.NONE)
+            if any(row is None for row in rows):
+                return TurnAdmissionConfirmation(TurnAdmissionConfirmationKind.CONFLICT)
+            assert command is not None and turn is not None and revision is not None
+            assert entry is not None and event is not None
+            try:
+                permission = self._permission_from_row(turn)
+            except (TypeError, ValueError):
+                return TurnAdmissionConfirmation(TurnAdmissionConfirmationKind.CONFLICT)
+            matches = (
+                str(command["command_kind"]) == "SUBMIT_PROMPT"
+                and str(command["semantic_digest"]) == candidate.semantic_digest
+                and str(command["target_kind"]) == "TURN"
+                and str(command["target_turn_id"]) == candidate.turn_id
+                and str(turn["conversation_scope_kind"]) == "ROOT"
+                and turn["scope_subagent_task_id"] is None
+                and str(turn["initial_entry_id"]) == candidate.entry_id
+                and str(turn["current_context_binding_revision_id"])
+                == candidate.context_binding_revision_id
+                and permission.snapshot_id == candidate.permission_snapshot_id
+                and permission.requested_mode is candidate.requested_permission_mode
+                and int(revision["revision_ordinal"]) == 0
+                and str(revision["base_kind"]) == "FULL_HISTORY"
+                and revision["context_snapshot_id"] is None
+                and int(revision["source_through_sequence"])
+                == int(entry["entry_sequence"]) - 1
+                and str(entry["turn_id"]) == candidate.turn_id
+                and str(entry["entry_kind"]) == EntryKind.USER_MESSAGE.value
+                and str(entry["conversation_scope_kind"]) == "ROOT"
+                and entry["scope_subagent_task_id"] is None
+                and self._content_from_row(entry) == candidate.content
+                and _event_row_matches_draft(event, candidate.event)
+            )
+            if not matches:
+                return TurnAdmissionConfirmation(TurnAdmissionConfirmationKind.CONFLICT)
+            return TurnAdmissionConfirmation(
+                TurnAdmissionConfirmationKind.FULL,
+                self._accepted_entry(connection, candidate.session_id, candidate.entry_id),
             )
 
     def prepare_provider_input_cut(
@@ -2617,10 +3202,7 @@ class ConversationKernelRepository:
         self,
         guard: HostWriterGuard,
         *,
-        attempt_id: str,
-        remote_identity: str,
-        occurred_at: datetime,
-        actor_id: str,
+        candidate: PreparedToolRemoteIdentityPublication,
         deadline_monotonic: float,
     ) -> bool:
         """Install one immutable remote identity before accepting its result.
@@ -2629,10 +3211,8 @@ class ConversationKernelRepository:
         occurrence.  A different identity is canonical corruption.
         """
 
-        if not attempt_id or not remote_identity:
-            raise ValueError("tool remote identity is incomplete")
-        if len(remote_identity.encode("utf-8")) > 4096:
-            raise ValueError("tool remote identity exceeds its bound")
+        if candidate.session_id != guard.session_id:
+            raise ValueError("tool remote identity belongs to another session")
         installed = False
         with self._writer_transaction(
             guard, deadline_monotonic=deadline_monotonic
@@ -2644,17 +3224,27 @@ class ConversationKernelRepository:
                 WHERE session_id = %s AND id = %s
                 FOR UPDATE
                 """,
-                (guard.session_id, attempt_id),
+                (guard.session_id, candidate.attempt_id),
             ).fetchone()
             if row is None:
                 raise ConversationKernelConflict("tool attempt is absent")
+            event = connection.execute(
+                """SELECT * FROM pulsara_v3.agent_events
+                   WHERE session_id = %s AND event_id = %s""",
+                (guard.session_id, candidate.event.event_id),
+            ).fetchone()
             current = row["remote_identity"]
-            if current is not None:
-                if str(current) != remote_identity:
-                    raise ConversationKernelConflict(
-                        "tool remote identity conflicts with installed authority"
-                    )
-                return False
+            if current is not None or event is not None:
+                if (
+                    current is not None
+                    and str(current) == candidate.remote_identity
+                    and event is not None
+                    and _event_row_matches_draft(event, candidate.event)
+                ):
+                    return False
+                raise ConversationKernelConflict(
+                    "tool remote identity conflicts with installed authority"
+                )
             connection.execute(
                 """
                 UPDATE pulsara_v3.tool_execution_attempts
@@ -2662,35 +3252,62 @@ class ConversationKernelRepository:
                     remote_identity_published_at = clock_timestamp()
                 WHERE session_id = %s AND id = %s
                 """,
-                (remote_identity, guard.session_id, attempt_id),
+                (
+                    candidate.remote_identity,
+                    guard.session_id,
+                    candidate.attempt_id,
+                ),
             )
             workspace_id = self._workspace_id(connection, guard.session_id)
             self._append_events(
                 connection,
                 guard,
                 workspace_id=workspace_id,
-                drafts=(
-                    self._event(
-                        CommittedEventType.TOOL_REMOTE_IDENTITY_PUBLISHED,
-                        SubjectSlot.TOOL_ATTEMPT,
-                        attempt_id,
-                        occurred_at=occurred_at,
-                        actor_kind="tool",
-                        actor_id=actor_id,
-                        payload={
-                            "remote_identity_utf8_bytes": len(
-                                remote_identity.encode("utf-8")
-                            ),
-                            "remote_identity_digest": (
-                                "sha256:"
-                                + sha256(remote_identity.encode("utf-8")).hexdigest()
-                            ),
-                        },
-                    ),
-                ),
+                drafts=(candidate.event,),
             )
             installed = True
         return installed
+
+    def confirm_tool_remote_identity(
+        self,
+        guard: HostWriterGuard,
+        *,
+        candidate: PreparedToolRemoteIdentityPublication,
+        deadline_monotonic: float,
+    ) -> ToolRemoteIdentityConfirmationKind:
+        if candidate.session_id != guard.session_id:
+            raise ValueError("tool remote identity belongs to another session")
+        with self._provider.connection(
+            lane=PostgresConnectionLane.HOST_CONTROL,
+            row_factory=dict_row,
+            deadline_monotonic=deadline_monotonic,
+            isolation_level=IsolationLevel.REPEATABLE_READ,
+        ) as connection:
+            self._require_writer(connection, guard, lock=False)
+            row = connection.execute(
+                """SELECT remote_identity
+                   FROM pulsara_v3.tool_execution_attempts
+                   WHERE session_id = %s AND id = %s""",
+                (guard.session_id, candidate.attempt_id),
+            ).fetchone()
+            if row is None:
+                return ToolRemoteIdentityConfirmationKind.CONFLICT
+            event = connection.execute(
+                """SELECT * FROM pulsara_v3.agent_events
+                   WHERE session_id = %s AND event_id = %s""",
+                (guard.session_id, candidate.event.event_id),
+            ).fetchone()
+            current = row["remote_identity"]
+            if current is None and event is None:
+                return ToolRemoteIdentityConfirmationKind.NONE
+            if (
+                current is not None
+                and str(current) == candidate.remote_identity
+                and event is not None
+                and _event_row_matches_draft(event, candidate.event)
+            ):
+                return ToolRemoteIdentityConfirmationKind.FULL
+            return ToolRemoteIdentityConfirmationKind.CONFLICT
 
     def accept_tool_result(
         self,
@@ -5480,13 +6097,38 @@ class ConversationKernelRepository:
         occurred_at: datetime,
         actor_id: str,
         deadline_monotonic: float,
+        _prepared_candidate: PreparedSubagentTurnAdmission | None = None,
     ) -> AcceptedEntry:
+        prepared = _prepared_candidate or build_prepared_subagent_turn_admission(
+            session_id=guard.session_id,
+            task_id=task_id,
+            turn_id=turn_id,
+            entry_id=entry_id,
+            context_binding_revision_id=context_binding_revision_id,
+            permission_snapshot_id=_stable_identity("permission-snapshot", turn_id),
+            content=content,
+            occurred_at=occurred_at,
+            actor_id=actor_id,
+        )
+        if (
+            prepared.session_id != guard.session_id
+            or prepared.task_id != task_id
+            or prepared.turn_id != turn_id
+            or prepared.entry_id != entry_id
+            or prepared.context_binding_revision_id
+            != context_binding_revision_id
+            or prepared.content != content
+            or prepared.occurred_at != occurred_at
+            or prepared.actor_id != actor_id
+        ):
+            raise ValueError("prepared subagent admission does not exact-join arguments")
         with self._writer_transaction(
             guard, deadline_monotonic=deadline_monotonic
         ) as connection:
             task = connection.execute(
                 """
-                SELECT workspace_id, parent_turn_id FROM pulsara_v3.subagent_tasks
+                SELECT workspace_id, parent_turn_id, objective
+                FROM pulsara_v3.subagent_tasks
                 WHERE session_id = %s AND id = %s AND status = 'ACTIVE'
                   AND execution_writer_generation = %s
                 FOR UPDATE
@@ -5495,11 +6137,17 @@ class ConversationKernelRepository:
             ).fetchone()
             if task is None:
                 raise ConversationKernelConflict("subagent task is not active")
+            if not _canonical_content_matches_utf8_text(
+                prepared.content, str(task["objective"])
+            ):
+                raise ConversationKernelConflict(
+                    "subagent initial content conflicts with immutable objective"
+                )
             entry_sequence = self._allocate_entry_sequence(connection, guard.session_id)
             permission = self._freeze_subagent_permission_snapshot(
                 connection,
                 session_id=guard.session_id,
-                snapshot_id=_stable_identity("permission-snapshot", turn_id),
+                snapshot_id=prepared.permission_snapshot_id,
                 parent_turn_id=str(task["parent_turn_id"]),
             )
             connection.execute(
@@ -5560,20 +6208,120 @@ class ConversationKernelRepository:
                 connection,
                 guard,
                 workspace_id=str(task["workspace_id"]),
-                drafts=(
-                    self._event(
-                        CommittedEventType.USER_MESSAGE_ACCEPTED,
-                        SubjectSlot.ENTRY,
-                        entry_id,
-                        occurred_at=occurred_at,
-                        actor_kind="runtime",
-                        actor_id=actor_id,
-                        payload={"source": "SUBAGENT_TASK_OBJECTIVE"},
-                    ),
-                ),
+                drafts=(prepared.event,),
             )[0]
             return AcceptedEntry(
                 entry_id, turn_id, entry_sequence, event.event_sequence
+            )
+
+    def accept_subagent_turn(
+        self,
+        guard: HostWriterGuard,
+        *,
+        candidate: PreparedSubagentTurnAdmission,
+        deadline_monotonic: float,
+    ) -> AcceptedEntry:
+        if candidate.session_id != guard.session_id:
+            raise ValueError("prepared subagent admission belongs to another session")
+        return self.start_subagent_turn(
+            guard,
+            task_id=candidate.task_id,
+            turn_id=candidate.turn_id,
+            entry_id=candidate.entry_id,
+            context_binding_revision_id=candidate.context_binding_revision_id,
+            content=candidate.content,
+            occurred_at=candidate.occurred_at,
+            actor_id=candidate.actor_id,
+            deadline_monotonic=deadline_monotonic,
+            _prepared_candidate=candidate,
+        )
+
+    def confirm_subagent_turn_admission(
+        self,
+        *,
+        candidate: PreparedSubagentTurnAdmission,
+        guard: HostWriterGuard | None = None,
+        deadline_monotonic: float,
+    ) -> TurnAdmissionConfirmation:
+        with self._provider.connection(
+            lane=PostgresConnectionLane.HOST_CONTROL,
+            row_factory=dict_row,
+            deadline_monotonic=deadline_monotonic,
+            isolation_level=IsolationLevel.REPEATABLE_READ,
+        ) as connection:
+            if guard is not None:
+                if guard.session_id != candidate.session_id:
+                    raise ValueError(
+                        "subagent admission guard belongs to another session"
+                    )
+                self._require_writer(connection, guard, lock=False)
+            task = connection.execute(
+                """SELECT * FROM pulsara_v3.subagent_tasks
+                   WHERE session_id = %s AND id = %s""",
+                (candidate.session_id, candidate.task_id),
+            ).fetchone()
+            turn = connection.execute(
+                """SELECT * FROM pulsara_v3.turns
+                   WHERE session_id = %s AND id = %s""",
+                (candidate.session_id, candidate.turn_id),
+            ).fetchone()
+            revision = connection.execute(
+                """SELECT * FROM pulsara_v3.turn_context_binding_revisions
+                   WHERE session_id = %s AND id = %s""",
+                (candidate.session_id, candidate.context_binding_revision_id),
+            ).fetchone()
+            entry = connection.execute(
+                """SELECT * FROM pulsara_v3.transcript_entries
+                   WHERE session_id = %s AND id = %s""",
+                (candidate.session_id, candidate.entry_id),
+            ).fetchone()
+            event = connection.execute(
+                """SELECT * FROM pulsara_v3.agent_events
+                   WHERE session_id = %s AND event_id = %s""",
+                (candidate.session_id, candidate.event.event_id),
+            ).fetchone()
+            required = (turn, revision, entry, event)
+            if task is None or not _canonical_content_matches_utf8_text(
+                candidate.content, str(task["objective"])
+            ):
+                return TurnAdmissionConfirmation(TurnAdmissionConfirmationKind.CONFLICT)
+            if all(row is None for row in required):
+                return TurnAdmissionConfirmation(TurnAdmissionConfirmationKind.NONE)
+            if any(row is None for row in required):
+                return TurnAdmissionConfirmation(TurnAdmissionConfirmationKind.CONFLICT)
+            assert turn is not None and revision is not None
+            assert entry is not None and event is not None
+            try:
+                permission = self._permission_from_row(turn)
+            except (TypeError, ValueError):
+                return TurnAdmissionConfirmation(TurnAdmissionConfirmationKind.CONFLICT)
+            matches = (
+                str(turn["conversation_scope_kind"]) == "SUBAGENT_TASK"
+                and str(turn["scope_subagent_task_id"]) == candidate.task_id
+                and str(turn["initial_entry_id"]) == candidate.entry_id
+                and str(turn["current_context_binding_revision_id"])
+                == candidate.context_binding_revision_id
+                and permission.snapshot_id == candidate.permission_snapshot_id
+                and permission.admission_source
+                is RunPermissionAdmissionSource.SUBAGENT_INHERITANCE
+                and permission.inherited_from_turn_id == str(task["parent_turn_id"])
+                and int(revision["revision_ordinal"]) == 0
+                and str(revision["base_kind"]) == "FULL_HISTORY"
+                and revision["context_snapshot_id"] is None
+                and int(revision["source_through_sequence"])
+                == int(entry["entry_sequence"]) - 1
+                and str(entry["turn_id"]) == candidate.turn_id
+                and str(entry["entry_kind"]) == EntryKind.USER_MESSAGE.value
+                and str(entry["conversation_scope_kind"]) == "SUBAGENT_TASK"
+                and str(entry["scope_subagent_task_id"]) == candidate.task_id
+                and self._content_from_row(entry) == candidate.content
+                and _event_row_matches_draft(event, candidate.event)
+            )
+            if not matches:
+                return TurnAdmissionConfirmation(TurnAdmissionConfirmationKind.CONFLICT)
+            return TurnAdmissionConfirmation(
+                TurnAdmissionConfirmationKind.FULL,
+                self._accepted_entry(connection, candidate.session_id, candidate.entry_id),
             )
 
     def accept_subagent_child(
@@ -11913,26 +12661,19 @@ def _event_row_matches_draft(
 ) -> bool:
     if row is None:
         return False
-    if draft.subject.slot is SubjectSlot.QUEUE_ITEM:
-        subject_matches = (
-            row.get("subject_queue_item_id") == draft.subject.subject_id
-            and row.get("subject_entry_id") is None
-            and row.get("subject_turn_id") is None
+    subject_matches = bool(
+        row.get(draft.subject.slot.value) == draft.subject.subject_id
+        and all(
+            row.get(slot.value) is None
+            for slot in SubjectSlot
+            if slot is not draft.subject.slot
         )
-    elif draft.subject.slot is SubjectSlot.ENTRY:
-        subject_matches = (
-            row.get("subject_entry_id") == draft.subject.subject_id
-            and row.get("subject_queue_item_id") is None
-            and row.get("subject_turn_id") is None
-        )
-    elif draft.subject.slot is SubjectSlot.TURN:
-        subject_matches = (
-            row.get("subject_turn_id") == draft.subject.subject_id
-            and row.get("subject_queue_item_id") is None
-            and row.get("subject_entry_id") is None
-        )
-    else:
-        return False
+    )
+    expected_child_kind: str | None = None
+    if draft.subject.slot is SubjectSlot.SUBAGENT_MESSAGE:
+        expected_child_kind = "MESSAGE"
+    elif draft.subject.slot is SubjectSlot.SUBAGENT_RESULT:
+        expected_child_kind = "RESULT"
     return bool(
         str(row["event_id"]) == draft.event_id
         and str(row["event_type"]) == draft.event_type.value
@@ -11943,6 +12684,7 @@ def _event_row_matches_draft(
         and str(row["projection_profile"]) == draft.projection_profile
         and dict(row["payload"]) == dict(draft.payload)
         and subject_matches
+        and row.get("subject_subagent_child_kind") == expected_child_kind
     )
 
 
@@ -12067,9 +12809,18 @@ __all__ = [
     "PreparedToolResultAcceptance",
     "PlanDraftIdentityConflict",
     "PlanContinuationDisposition",
+    "PreparedRootTurnAdmission",
+    "PreparedSubagentTurnAdmission",
+    "PreparedToolRemoteIdentityPublication",
     "StaleHostWriter",
     "StaleJobClaim",
     "ToolResultSideBranch",
     "ToolResultSideBranchKind",
+    "ToolRemoteIdentityConfirmationKind",
+    "TurnAdmissionConfirmation",
+    "TurnAdmissionConfirmationKind",
+    "build_prepared_root_turn_admission",
+    "build_prepared_subagent_turn_admission",
+    "build_prepared_tool_remote_identity_publication",
     "build_prepared_tool_result_acceptance",
 ]

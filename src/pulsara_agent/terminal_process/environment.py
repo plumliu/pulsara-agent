@@ -372,6 +372,23 @@ class TerminalEnvironmentOwner:
                     )
             self._cache.clear()
 
+    def close_and_join(self) -> None:
+        """Seal admission and join every exact probe without detaching it."""
+
+        with self._lock:
+            self._closed = True
+            attempts = tuple(self._attempts.values())
+            for attempt in attempts:
+                attempt.condition.notify_all()
+            for attempt in attempts:
+                while not attempt.done:
+                    attempt.condition.wait()
+                if attempt.state is not _ProbeAttemptState.JOINED:
+                    raise RuntimeError(
+                        "terminal environment probe completed without physical join"
+                    )
+            self._cache.clear()
+
 
 def detect_terminal_shell(
     environ: Mapping[str, str] | None = None,

@@ -35,6 +35,9 @@ from pulsara_agent.conversation_kernel.input_continuity import (
     HostProviderInputContinuityOwner,
     ProviderInputContinuityConflict,
 )
+from pulsara_agent.conversation_kernel.execution_watchdogs import (
+    KernelWatchdogOwner,
+)
 from pulsara_agent.conversation_kernel.io import KernelSessionIO
 from pulsara_agent.conversation_kernel.extensions import OperationalHookType
 from pulsara_agent.conversation_kernel.repository import AssistantToolCallBlock
@@ -2234,7 +2237,10 @@ def test_round3_runtime_source_tracks_foreground_cwd_but_not_yielded_cwd(
             TerminalRequest(
                 command=f"cd {shlex.quote(str(foreground))}",
                 yield_time_ms=2_000,
-            )
+            ),
+            decision_deadline_monotonic=port._deadlines.deadline(  # noqa: SLF001
+                KernelWatchdogOwner.TERMINAL_FOREGROUND_DECISION
+            ),
         )
         assert completed.status is TerminalStatus.SUCCESS
         assert port.snapshot_terminal_cwd() == foreground.resolve()
@@ -2243,7 +2249,10 @@ def test_round3_runtime_source_tracks_foreground_cwd_but_not_yielded_cwd(
                 command=f"cd {shlex.quote(str(yielded))}; sleep 5",
                 yield_time_ms=5,
                 max_lifetime_seconds=10,
-            )
+            ),
+            decision_deadline_monotonic=port._deadlines.deadline(  # noqa: SLF001
+                KernelWatchdogOwner.TERMINAL_FOREGROUND_DECISION
+            ),
         )
         assert background.status is TerminalStatus.RUNNING
         assert port.snapshot_terminal_cwd() == foreground.resolve()

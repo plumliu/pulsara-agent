@@ -56,6 +56,10 @@ from pulsara_agent.conversation_kernel.live import (
     LiveSettlementKind,
 )
 from pulsara_agent.conversation_kernel.io import KernelSessionIO
+from pulsara_agent.conversation_kernel.execution_watchdogs import (
+    KernelExecutionDeadlineFactory,
+    KernelWatchdogOwner,
+)
 from pulsara_agent.ports.live_agent_event import (
     ToolResultDeltaPayload,
     ToolResultEndPayload,
@@ -84,8 +88,16 @@ from pulsara_agent.conversation_kernel.repository import (
     PlanToolControlKind,
     PreparedPlanBatchCall,
     PreparedPlanToolBatch,
+    PreparedRootTurnAdmission,
+    PreparedSubagentTurnAdmission,
+    PreparedToolRemoteIdentityPublication,
     PreparedToolResultAcceptance,
     StaleHostWriter,
+    ToolRemoteIdentityConfirmationKind,
+    TurnAdmissionConfirmationKind,
+    build_prepared_root_turn_admission,
+    build_prepared_subagent_turn_admission,
+    build_prepared_tool_remote_identity_publication,
     build_prepared_tool_result_acceptance,
 )
 from pulsara_agent.conversation_kernel.plan_runtime import (
@@ -231,6 +243,8 @@ class KernelToolResult:
     output_artifact_candidate: ToolOutputArtifactCandidate | None = None
     artifact_source_read: bool = False
     process_local_settlement: "ProcessLocalEffectSettlementToken | None" = None
+    physical_timing: str = "ON_TIME"
+    caller_cancelled_while_running: bool = False
 
     def __post_init__(self) -> None:
         # The model-facing tool result and artifact candidate are both strict
@@ -238,6 +252,38 @@ class KernelToolResult:
         self.content.decode("utf-8")
         if self.artifact_source_read and self.output_artifact_candidate is not None:
             raise ValueError("artifact_read cannot recursively own an artifact")
+
+
+@dataclass(frozen=True, slots=True)
+class _KnownToolResultSettlementOutcome:
+    accepted: AcceptedEntry
+    process_local_effect_committed: bool
+
+
+@dataclass(slots=True)
+class _TurnAdmissionSettlementAttempt:
+    candidate: PreparedRootTurnAdmission | PreparedSubagentTurnAdmission
+    root: bool
+    reissue_allowed: bool
+    cancellation_requested: bool = False
+
+
+class KernelToolPhysicalInvocationError(RuntimeError):
+    """Process-local exact exception classified by the frozen tool contract."""
+
+    def __init__(
+        self,
+        *,
+        effect_class: str,
+        error: BaseException,
+        timing: str,
+        caller_cancelled: bool,
+    ) -> None:
+        self.effect_class = effect_class
+        self.physical_error = error
+        self.timing = timing
+        self.caller_cancelled = caller_cancelled
+        super().__init__(f"tool physical invocation raised: {type(error).__name__}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -581,19 +627,16 @@ class ConversationKernelRunner:
         plan_interactions: KernelPlanInteractionCoordinator | None = None,
         automatic_plan_continuation: AutomaticPlanContinuationPort | None = None,
         launch_permission_mode: PermissionMode = DEFAULT_PERMISSION_MODE,
-        maximum_model_calls_per_turn: int = STAGE2_LIMITS.model_calls_per_turn_hard,
         maximum_input_tokens_per_call: int = STAGE2_LIMITS.provider_input_tokens_per_call_hard,
         maximum_output_tokens_per_call: int = STAGE2_LIMITS.provider_output_tokens_per_call_hard,
-        operation_timeout_seconds: float = 120.0,
+        deadline_factory: KernelExecutionDeadlineFactory | None = None,
     ) -> None:
         if (
             min(
-                maximum_model_calls_per_turn,
                 maximum_input_tokens_per_call,
                 maximum_output_tokens_per_call,
             )
             < 1
-            or operation_timeout_seconds <= 0
         ):
             raise ValueError("runner limits must be finite and positive")
         self._repository = repository
@@ -628,10 +671,17 @@ class ConversationKernelRunner:
             session_id=writer_lease.guard.session_id
         )
         self._extensions = extensions
-        self._maximum_model_calls_per_turn = maximum_model_calls_per_turn
         self._maximum_input_tokens_per_call = maximum_input_tokens_per_call
         self._maximum_output_tokens_per_call = maximum_output_tokens_per_call
-        self._operation_timeout_seconds = operation_timeout_seconds
+        self._deadlines = deadline_factory or KernelExecutionDeadlineFactory()
+
+    def _canonical_deadline(self) -> float:
+        return self._deadlines.deadline(KernelWatchdogOwner.FOREGROUND_CANONICAL)
+
+    def _planning_deadline(self) -> float:
+        return self._deadlines.deadline(
+            KernelWatchdogOwner.PROVIDER_DISPATCH_PLANNING
+        )
 
     async def run_turn(
         self,
@@ -683,16 +733,17 @@ class ConversationKernelRunner:
     ) -> KernelRunResult:
         if not text:
             raise ValueError("user message must be non-empty")
-        deadline = monotonic() + self._operation_timeout_seconds
         if subagent_task_id is None:
             stable_command_id = command_id or _id("command")
             turn_id = _stable_id(
                 "turn", self._writer_lease.guard.session_id, stable_command_id
             )
-            content = await self._content(text.encode("utf-8"), deadline=deadline)
-            await self._io.run(
-                self._repository.start_root_turn,
-                self._writer_lease.guard,
+            content = await self._content(
+                text.encode("utf-8"), deadline=self._canonical_deadline()
+            )
+            occurred_at = datetime.now(timezone.utc)
+            candidate = build_prepared_root_turn_admission(
+                session_id=self._writer_lease.guard.session_id,
                 command_id=stable_command_id,
                 turn_id=turn_id,
                 entry_id=_stable_id("entry", turn_id, "user"),
@@ -704,34 +755,158 @@ class ConversationKernelRunner:
                     requested_permission_mode or self._launch_permission_mode
                 ),
                 content=content,
-                occurred_at=datetime.now(timezone.utc),
-                deadline_monotonic=deadline,
+                occurred_at=occurred_at,
             )
+            await self._accept_root_turn_exact(candidate)
         else:
             turn_id = _stable_id(
                 "subagent-turn",
                 self._writer_lease.guard.session_id,
                 subagent_task_id,
             )
-            content = await self._content(text.encode("utf-8"), deadline=deadline)
-            await self._io.run(
-                self._repository.start_subagent_turn,
-                self._writer_lease.guard,
+            content = await self._content(
+                text.encode("utf-8"), deadline=self._canonical_deadline()
+            )
+            occurred_at = datetime.now(timezone.utc)
+            candidate = build_prepared_subagent_turn_admission(
+                session_id=self._writer_lease.guard.session_id,
                 task_id=subagent_task_id,
                 turn_id=turn_id,
                 entry_id=_stable_id("entry", turn_id, "objective"),
                 context_binding_revision_id=_stable_id(
                     "context-revision", turn_id, "0"
                 ),
+                permission_snapshot_id=_stable_id("permission-snapshot", turn_id),
                 content=content,
-                occurred_at=datetime.now(timezone.utc),
+                occurred_at=occurred_at,
                 actor_id="subagent-manager",
-                deadline_monotonic=deadline,
             )
-        return await self.run_accepted_turn(
-            turn_id,
-            deadline_monotonic=deadline,
+            await self._accept_subagent_turn_exact(candidate)
+        return await self.run_accepted_turn(turn_id)
+
+    async def _accept_root_turn_exact(
+        self, candidate: PreparedRootTurnAdmission
+    ) -> AcceptedEntry:
+        return await self._accept_turn_exact(candidate=candidate, root=True)
+
+    async def _accept_subagent_turn_exact(
+        self, candidate: PreparedSubagentTurnAdmission
+    ) -> AcceptedEntry:
+        return await self._accept_turn_exact(candidate=candidate, root=False)
+
+    async def _accept_turn_exact(
+        self,
+        *,
+        candidate: PreparedRootTurnAdmission | PreparedSubagentTurnAdmission,
+        root: bool,
+    ) -> AcceptedEntry:
+        accept_operation = (
+            self._repository.accept_root_turn
+            if root
+            else self._repository.accept_subagent_turn
         )
+        try:
+            return await self._io.run(
+                accept_operation,
+                self._writer_lease.guard,
+                candidate=candidate,
+                deadline_monotonic=self._canonical_deadline(),
+            )
+        except asyncio.CancelledError as cancellation:
+            attempt = _TurnAdmissionSettlementAttempt(
+                candidate=candidate,
+                root=root,
+                reissue_allowed=False,
+                cancellation_requested=True,
+            )
+            settlement = asyncio.create_task(
+                self._settle_turn_admission(attempt),
+                name=f"kernel-cancelled-turn-admission:{candidate.turn_id}",
+            )
+            await _await_turn_admission_settlement(settlement, attempt)
+            raise cancellation
+        except BaseException:
+            attempt = _TurnAdmissionSettlementAttempt(
+                candidate=candidate,
+                root=root,
+                reissue_allowed=True,
+            )
+            settlement = asyncio.create_task(
+                self._settle_turn_admission(attempt),
+                name=f"kernel-turn-admission-settlement:{candidate.turn_id}",
+            )
+            accepted, cancellation = await _await_turn_admission_settlement(
+                settlement, attempt
+            )
+            if cancellation is not None:
+                raise cancellation
+            if accepted is None:
+                raise ConversationKernelConflict("turn admission did not settle")
+            return accepted
+
+    async def _settle_turn_admission(
+        self,
+        attempt: _TurnAdmissionSettlementAttempt,
+    ) -> AcceptedEntry | None:
+        """Own one ACK-unknown admission until its exact state is proved.
+
+        The shielded process-local task remains attached to the Host runner
+        through transient confirmation failures.  Cancellation only disables
+        future writes; a write already in flight is confirmed and any FULL
+        winner is interrupted before the caller observes cancellation.
+        """
+
+        confirmation_operation = (
+            self._repository.confirm_root_turn_admission
+            if attempt.root
+            else self._repository.confirm_subagent_turn_admission
+        )
+        accept_operation = (
+            self._repository.accept_root_turn
+            if attempt.root
+            else self._repository.accept_subagent_turn
+        )
+        while True:
+            try:
+                confirmation = await self._io.run(
+                    confirmation_operation,
+                    candidate=attempt.candidate,
+                    guard=self._writer_lease.guard,
+                    deadline_monotonic=self._canonical_deadline(),
+                )
+            except StaleHostWriter:
+                raise
+            except BaseException:
+                await asyncio.sleep(0.05)
+                continue
+            if confirmation.kind is TurnAdmissionConfirmationKind.FULL:
+                assert confirmation.accepted is not None
+                if attempt.cancellation_requested:
+                    await self._settle_failed_turn_worker(attempt.candidate.turn_id)
+                    return None
+                return confirmation.accepted
+            if confirmation.kind is TurnAdmissionConfirmationKind.CONFLICT:
+                kind = "ROOT" if attempt.root else "subagent"
+                raise ConversationKernelConflict(
+                    f"{kind} turn admission has a conflicting winner"
+                )
+            if attempt.cancellation_requested or not attempt.reissue_allowed:
+                return None
+            try:
+                accepted = await self._io.run(
+                    accept_operation,
+                    self._writer_lease.guard,
+                    candidate=attempt.candidate,
+                    deadline_monotonic=self._canonical_deadline(),
+                )
+            except StaleHostWriter:
+                raise
+            except BaseException:
+                continue
+            if attempt.cancellation_requested:
+                await self._settle_failed_turn_worker(attempt.candidate.turn_id)
+                return None
+            return accepted
 
     async def _prepare_provider_dispatch(
         self,
@@ -1049,7 +1224,6 @@ class ConversationKernelRunner:
                     )
                     await self._settle_steer_resource_rejection(
                         rejection,
-                        deadline=deadline,
                     )
                     raise StructuredModelInputCompileError(
                         ModelInputCompileFailureKind.PREFIX_EPOCH_BUDGET_EXHAUSTED
@@ -1069,18 +1243,17 @@ class ConversationKernelRunner:
                     raise _PreparedSteerPlanStale(
                         "prepared steer process-local facts changed before consumption"
                     ) from exc
-                accepted_entries = await self._consume_prepared_steer_plan(
-                    selected_plan, deadline=deadline
-                )
+                accepted_entries = await self._consume_prepared_steer_plan(selected_plan)
                 try:
                     handle.close()
+                    canonical_deadline = self._canonical_deadline()
                     handle = await self._io.run(
                         self._safe_point.freeze_provider_input,
                         turn_id=turn_id,
-                        deadline_monotonic=deadline,
+                        deadline_monotonic=canonical_deadline,
                     )
                     actual = await self._read_compile_snapshot(
-                        handle.cut, deadline=deadline
+                        handle.cut, deadline=canonical_deadline
                     )
                     if (
                         actual.canonical_read_cut_fingerprint
@@ -1243,11 +1416,9 @@ class ConversationKernelRunner:
     async def _consume_prepared_steer_plan(
         self,
         plan: PreparedSteerSuffixAdmissionPlan,
-        *,
-        deadline: float,
     ) -> tuple[AcceptedSteerDispatchEntry, ...]:
         task = asyncio.create_task(
-            self._consume_prepared_steer_plan_worker(plan, deadline=deadline),
+            self._consume_prepared_steer_plan_worker(plan),
             name=(
                 "kernel-steer-consumption:"
                 f"{plan.selected_consumption_candidates[0].exact_target_turn_id}"
@@ -1258,13 +1429,12 @@ class ConversationKernelRunner:
     async def _consume_prepared_steer_plan_worker(
         self,
         plan: PreparedSteerSuffixAdmissionPlan,
-        *,
-        deadline: float,
     ) -> tuple[AcceptedSteerDispatchEntry, ...]:
         accepted: list[AcceptedSteerDispatchEntry] = []
         for candidate in plan.selected_consumption_candidates:
             while True:
                 try:
+                    deadline = self._canonical_deadline()
                     value = await self._io.run(
                         self._repository.consume_prepared_prompt_steer,
                         self._writer_lease.guard,
@@ -1277,7 +1447,7 @@ class ConversationKernelRunner:
                     confirmation = await self._io.run(
                         self._repository.confirm_prepared_prompt_steer,
                         candidate=candidate,
-                        deadline_monotonic=max(deadline, monotonic() + 5.0),
+                        deadline_monotonic=self._canonical_deadline(),
                     )
                     if confirmation.kind is SteerConsumptionConfirmationKind.FULL:
                         assert confirmation.accepted is not None
@@ -1295,7 +1465,7 @@ class ConversationKernelRunner:
                     confirmation = await self._io.run(
                         self._repository.confirm_prepared_prompt_steer,
                         candidate=candidate,
-                        deadline_monotonic=max(deadline, monotonic() + 5.0),
+                        deadline_monotonic=self._canonical_deadline(),
                     )
                     if confirmation.kind is SteerConsumptionConfirmationKind.FULL:
                         assert confirmation.accepted is not None
@@ -1303,7 +1473,6 @@ class ConversationKernelRunner:
                         break
                     if (
                         confirmation.kind is SteerConsumptionConfirmationKind.NONE
-                        and monotonic() < deadline
                     ):
                         continue
                     if accepted:
@@ -1340,7 +1509,7 @@ class ConversationKernelRunner:
         candidate: PreparedSteerPlanConflictInterruption,
     ) -> None:
         while True:
-            deadline = monotonic() + self._operation_timeout_seconds
+            deadline = self._canonical_deadline()
             try:
                 await self._io.run(
                     self._repository.interrupt_prepared_steer_plan_conflict,
@@ -1358,7 +1527,7 @@ class ConversationKernelRunner:
                 confirmation = await self._io.run(
                     self._repository.confirm_prepared_steer_plan_conflict,
                     candidate=candidate,
-                    deadline_monotonic=monotonic() + self._operation_timeout_seconds,
+                    deadline_monotonic=self._canonical_deadline(),
                 )
             except BaseException:
                 await asyncio.sleep(0.05)
@@ -1377,11 +1546,9 @@ class ConversationKernelRunner:
     async def _settle_steer_resource_rejection(
         self,
         candidate: PreparedSteerResourceRejection,
-        *,
-        deadline: float,
     ) -> None:
         task = asyncio.create_task(
-            self._settle_steer_resource_rejection_worker(candidate, deadline=deadline),
+            self._settle_steer_resource_rejection_worker(candidate),
             name=(f"kernel-steer-resource-rejection:{candidate.exact_target_turn_id}"),
         )
         await _await_started_settlement(task)
@@ -1389,10 +1556,8 @@ class ConversationKernelRunner:
     async def _settle_steer_resource_rejection_worker(
         self,
         candidate: PreparedSteerResourceRejection,
-        *,
-        deadline: float,
     ) -> None:
-        write_deadline = deadline
+        write_deadline = self._canonical_deadline()
         while True:
             try:
                 await self._io.run(
@@ -1407,7 +1572,7 @@ class ConversationKernelRunner:
                 # rejects its exact-target steer lane during writer takeover.
                 return
             except BaseException:
-                settlement_deadline = monotonic() + self._operation_timeout_seconds
+                settlement_deadline = self._canonical_deadline()
                 try:
                     confirmation = await self._io.run(
                         self._repository.confirm_prepared_prompt_steer_resource_rejection,
@@ -1417,7 +1582,7 @@ class ConversationKernelRunner:
                     )
                 except BaseException:
                     await asyncio.sleep(0.05)
-                    write_deadline = monotonic() + self._operation_timeout_seconds
+                    write_deadline = self._canonical_deadline()
                     continue
                 if confirmation.kind is SteerResourceRejectionConfirmationKind.FULL:
                     return
@@ -1427,7 +1592,7 @@ class ConversationKernelRunner:
                     # exact winner (or writer takeover) before the ROOT slot can
                     # retire.  Use a fresh bounded physical attempt; do not split
                     # queue rejection and turn interruption into two writes.
-                    write_deadline = monotonic() + self._operation_timeout_seconds
+                    write_deadline = self._canonical_deadline()
                     continue
                 raise ConversationKernelConflict(
                     "steer resource rejection could not be settled"
@@ -1436,12 +1601,9 @@ class ConversationKernelRunner:
     async def run_accepted_turn(
         self,
         turn_id: str,
-        *,
-        deadline_monotonic: float | None = None,
     ) -> KernelRunResult:
         """Execute a ROOT/task turn whose user entry is already canonical."""
 
-        deadline = deadline_monotonic or (monotonic() + self._operation_timeout_seconds)
         model_call_count = 0
         tool_call_count = 0
         active_surface_borrow: ProcessLocalToolSurfaceBorrow | None = None
@@ -1449,20 +1611,24 @@ class ConversationKernelRunner:
             unsettled_process_local_effect: ProcessLocalEffectSettlementToken | None = (
                 None
             )
-            while model_call_count < self._maximum_model_calls_per_turn:
+            while True:
                 model_call_count += 1
+                planning_deadline = self._planning_deadline()
                 steer_plan_retries = 0
                 while True:
                     try:
                         dispatch = await self._prepare_provider_dispatch(
                             turn_id=turn_id,
                             model_call_index=model_call_count,
-                            deadline=deadline,
+                            deadline=planning_deadline,
                         )
                         break
                     except _PreparedSteerPlanStale:
                         steer_plan_retries += 1
-                        if steer_plan_retries >= 3 or monotonic() >= deadline:
+                        if (
+                            steer_plan_retries >= 3
+                            or monotonic() >= planning_deadline
+                        ):
                             raise
                         await asyncio.sleep(0)
                 prepared = dispatch.handle
@@ -1564,9 +1730,7 @@ class ConversationKernelRunner:
                                 append_candidate.candidate_fingerprint
                             )
                         raise
-                    canonical_blocks = await self._canonical_blocks(
-                        completed, deadline=deadline
-                    )
+                    canonical_blocks = await self._canonical_blocks(completed)
                     calls = tuple(
                         item
                         for item in completed.blocks
@@ -1584,9 +1748,10 @@ class ConversationKernelRunner:
                         separators=(",", ":"),
                     ).encode("utf-8")
                     parent_content = await self._content(
-                        parent_bytes, deadline=deadline
+                        parent_bytes, deadline=self._canonical_deadline()
                     )
                     occurred_at = datetime.now(timezone.utc)
+                    assistant_deadline = self._canonical_deadline()
                     try:
                         accepted = await self._io.run(
                             self._repository.commit_assistant_message,
@@ -1598,7 +1763,7 @@ class ConversationKernelRunner:
                             complete_turn=not calls,
                             occurred_at=occurred_at,
                             actor_id="model:foreground",
-                            deadline_monotonic=deadline,
+                            deadline_monotonic=assistant_deadline,
                         )
                     except Exception:
                         winner = await self._io.run(
@@ -1611,7 +1776,7 @@ class ConversationKernelRunner:
                             complete_turn=not calls,
                             occurred_at=occurred_at,
                             actor_id="model:foreground",
-                            deadline_monotonic=max(deadline, monotonic() + 5.0),
+                            deadline_monotonic=self._canonical_deadline(),
                         )
                         if winner is None:
                             raise
@@ -1667,7 +1832,7 @@ class ConversationKernelRunner:
                         assistant_entry_id=accepted.entry_id,
                         canonical_facts=canonical_facts,
                         surface_borrow=active_surface_borrow,
-                        deadline=deadline,
+                        deadline=self._canonical_deadline(),
                     )
                     active_surface_borrow.close()
                     active_surface_borrow = None
@@ -1675,12 +1840,10 @@ class ConversationKernelRunner:
                         # The canonical answer/tool result is installed by the
                         # Host resolution command.  Human think time is not a
                         # provider/tool operation deadline.
-                        deadline = monotonic() + self._operation_timeout_seconds
                         continue
                     if not outcome.origin_turn_completed:
                         # Idempotent enter_plan against the already-active
                         # workflow settles the batch but keeps this exact run.
-                        deadline = monotonic() + self._operation_timeout_seconds
                         continue
                     return KernelRunResult(
                         turn_id=turn_id,
@@ -1743,7 +1906,7 @@ class ConversationKernelRunner:
                             permission_snapshot_fingerprint=(
                                 canonical_facts.run_permission_snapshot.snapshot_fingerprint
                             ),
-                            deadline_monotonic=deadline,
+                            deadline_monotonic=self._canonical_deadline(),
                         )
                         authorization = await self._tools.request_confirmation(
                             tool_name=call.tool_name,
@@ -1759,6 +1922,9 @@ class ConversationKernelRunner:
                         authorization.accepted_permission_snapshot_fingerprint
                     )
                     live_sink: _ToolResultLiveSink | None = None
+                    live_attribution: dict[str, object] | None = None
+                    tool_result_block_id: str | None = None
+                    workspace_id: str | None = None
                     binding_fingerprint: str | None = None
                     if authorization.kind is KernelToolAuthorizationKind.ALLOW:
                         try:
@@ -1791,7 +1957,7 @@ class ConversationKernelRunner:
                             is KernelToolAuthorizationKind.PERMISSION_DENIED
                         ):
                             denial_content = await self._content(
-                                result.content, deadline=deadline
+                                result.content, deadline=self._canonical_deadline()
                             )
                             await self._io.run(
                                 self._repository.accept_tool_capability_decision,
@@ -1812,7 +1978,7 @@ class ConversationKernelRunner:
                                 permission_snapshot_fingerprint=(
                                     canonical_facts.run_permission_snapshot.snapshot_fingerprint
                                 ),
-                                deadline_monotonic=deadline,
+                                deadline_monotonic=self._canonical_deadline(),
                             )
                             continue
                     else:
@@ -1851,7 +2017,7 @@ class ConversationKernelRunner:
                                 permission_snapshot_fingerprint=(
                                     canonical_facts.run_permission_snapshot.snapshot_fingerprint
                                 ),
-                                deadline_monotonic=deadline,
+                                deadline_monotonic=self._canonical_deadline(),
                             )
                             if accepted_decision.attempt_id != attempt_id:
                                 raise RuntimeError(
@@ -1911,7 +2077,7 @@ class ConversationKernelRunner:
                             if terminal_streaming
                             else None
                         )
-                        workspace_id = await self._resolved_workspace_id(deadline)
+                        workspace_id = await self._resolved_workspace_id()
                         invocation_context = KernelToolInvocationContext(
                             session_id=request.session_id,
                             workspace_id=workspace_id,
@@ -1951,10 +2117,10 @@ class ConversationKernelRunner:
                                 invocation_context=invocation_context,
                                 live_sink=live_sink,
                             )
-                            unsettled_process_local_effect = (
-                                result.process_local_settlement
-                            )
                         except asyncio.CancelledError:
+                            if live_sink is not None:
+                                await asyncio.shield(live_sink.close())
+                            assert live_attribution is not None
                             self._live_bus.offer_settlement_nowait(
                                 kind=LiveSettlementKind.ABORTED,
                                 session_id=request.session_id,
@@ -1964,142 +2130,101 @@ class ConversationKernelRunner:
                                 **live_attribution,
                             )
                             raise
-                        except Exception as exc:
+                        except KernelToolPhysicalInvocationError as exc:
+                            self._offer_operational_best_effort(
+                                OperationalHookOffer(
+                                    event_type=(
+                                        OperationalHookType.TOOL_INVOCATION_OBSERVED
+                                    ),
+                                    session_id=request.session_id,
+                                    turn_id=turn_id,
+                                    public_payload={
+                                        "tool_name": call.tool_name,
+                                        "effect_class": exc.effect_class,
+                                        "physical_timing": exc.timing,
+                                        "outcome": "RAISED",
+                                    },
+                                )
+                            )
+                            if exc.effect_class not in {
+                                "read_only",
+                                "TERMINAL_OBSERVATION",
+                            }:
+                                if live_sink is not None:
+                                    await asyncio.shield(live_sink.close())
+                                assert live_attribution is not None
+                                self._live_bus.offer_settlement_nowait(
+                                    kind=LiveSettlementKind.ABORTED,
+                                    session_id=request.session_id,
+                                    turn_id=turn_id,
+                                    draft_identity=result_entry_id,
+                                    reason_code="TOOL_EFFECT_OUTCOME_UNKNOWN",
+                                    **live_attribution,
+                                )
+                                raise
                             result = KernelToolResult(
                                 state="SYSTEM_ERROR",
                                 content=(
-                                    f"tool execution failed: {type(exc).__name__}"
+                                    "tool observation failed: "
+                                    f"{type(exc.physical_error).__name__}"
+                                ).encode("utf-8"),
+                                physical_timing=exc.timing,
+                                caller_cancelled_while_running=exc.caller_cancelled,
+                            )
+                        except Exception as exc:
+                            severity = builtin_tool_catalog_entry(
+                                call.tool_name
+                            ).recovery_contract.severity
+                            if severity != "read_only":
+                                if live_sink is not None:
+                                    await asyncio.shield(live_sink.close())
+                                raise
+                            result = KernelToolResult(
+                                state="SYSTEM_ERROR",
+                                content=(
+                                    f"tool admission failed: {type(exc).__name__}"
                                 ).encode("utf-8"),
                             )
-                        finally:
-                            if live_sink is not None:
-                                await asyncio.shield(live_sink.close())
-                        if (
-                            attempt_id is not None
-                            and result.remote_identity is not None
-                        ):
-                            await self._io.run(
-                                self._repository.publish_tool_remote_identity,
-                                self._writer_lease.guard,
-                                attempt_id=attempt_id,
-                                remote_identity=result.remote_identity,
-                                occurred_at=datetime.now(timezone.utc),
-                                actor_id=call.tool_name,
-                                deadline_monotonic=deadline,
-                            )
-                        result_text = result.content.decode("utf-8")
-                    workspace_id = await self._resolved_workspace_id(deadline)
-                    prepared_output = await self._io.run(
-                        self._tool_output_processor.prepare,
-                        workspace_id=workspace_id,
-                        result_entry_id=result_entry_id,
-                        public_output=result.content.decode("utf-8"),
-                        candidate=result.output_artifact_candidate,
-                        artifact_source_read=result.artifact_source_read,
-                        deadline_monotonic=deadline,
-                    )
-                    result_text = (
-                        prepared_output.canonical_preview.canonical_bytes.decode(
-                            "utf-8"
-                        )
-                    )
-                    if attempt_id is not None:
-                        if result_text and (live_sink is None or not live_sink.emitted):
-                            self._live_bus.offer_nowait(
-                                event_type=LiveEventType.TOOL_RESULT_DELTA,
-                                session_id=request.session_id,
-                                turn_id=turn_id,
-                                draft_identity=result_entry_id,
-                                payload=ToolResultDeltaPayload(
-                                    tool_result_block_id, result_text
-                                ),
-                                block_id=tool_result_block_id,
-                                block_ordinal=0,
-                                block_kind=LiveBlockKind.TOOL_RESULT,
-                                **live_attribution,
-                            )
-                        self._live_bus.offer_nowait(
-                            event_type=LiveEventType.TOOL_RESULT_END,
+
+                    # Once a physical call has returned an exact outcome, this
+                    # process-local task owns every remaining settlement step.
+                    # Cancelling the turn detaches only its waiter; it cannot
+                    # erase the result or race a Terminal monitor token discard.
+                    unsettled_process_local_effect = result.process_local_settlement
+                    if workspace_id is None:
+                        workspace_id = await self._resolved_workspace_id()
+                    settlement_task = asyncio.create_task(
+                        self._settle_known_tool_result(
                             session_id=request.session_id,
                             turn_id=turn_id,
-                            draft_identity=result_entry_id,
-                            payload=ToolResultEndPayload(
-                                tool_result_block_id,
-                                result.state,
-                                result_text,
-                                len(result_text.encode("utf-8")),
-                                live_digest(result_text),
-                            ),
-                            block_id=tool_result_block_id,
-                            block_ordinal=0,
-                            block_kind=LiveBlockKind.TOOL_RESULT,
-                            **live_attribution,
-                        )
-                    prepared_acceptance = build_prepared_tool_result_acceptance(
-                        guard=self._writer_lease.guard,
-                        workspace_id=workspace_id,
-                        result_id=result_id,
-                        result_entry_id=result_entry_id,
-                        turn_id=turn_id,
-                        assistant_entry_id=accepted.entry_id,
-                        tool_call_id=call.tool_call_id,
-                        attempt_id=attempt_id,
-                        result_state=result.state,
-                        canonical_preview_content=prepared_output.canonical_preview,
-                        artifact_disposition=prepared_output.artifact_disposition,
-                        artifact_id=prepared_output.artifact_id,
-                        artifact_blob_descriptor=prepared_output.artifact_blob,
-                        source_coverage=prepared_output.source_coverage,
-                        display_kind=prepared_output.display_kind,
-                        source_coverage_reason=prepared_output.source_coverage_reason,
-                        artifact_unavailability_reason=(
-                            prepared_output.artifact_unavailability_reason
+                            assistant_entry_id=accepted.entry_id,
+                            tool_name=call.tool_name,
+                            tool_call_id=call.tool_call_id,
+                            invocation_arguments=invocation_arguments,
+                            result_id=result_id,
+                            result_entry_id=result_entry_id,
+                            attempt_id=attempt_id,
+                            workspace_id=workspace_id,
+                            result=result,
+                            live_sink=live_sink,
+                            tool_result_block_id=tool_result_block_id,
+                            live_attribution=live_attribution,
                         ),
-                        actor_id=call.tool_name,
-                        occurred_at=datetime.now(timezone.utc),
-                        memory_candidate_id=(
-                            None
-                            if result.memory_proposal is None
-                            else result.memory_proposal.candidate_id
-                        ),
-                        memory_proposal_kind=(
-                            None
-                            if result.memory_proposal is None
-                            else result.memory_proposal.proposal_kind
-                        ),
-                        memory_proposal_payload=(
-                            None
-                            if result.memory_proposal is None
-                            else result.memory_proposal.proposal_payload
-                        ),
-                        memory_governance_job_id=(
-                            None
-                            if result.memory_proposal is None
-                            else result.memory_proposal.governance_job_id
-                        ),
+                        name=f"kernel-tool-result-settlement:{result_entry_id}",
                     )
-                    result_acceptance = await self._accept_tool_result_exact(
-                        prepared_acceptance,
-                        deadline=deadline,
+                    settlement, cancellation = await _await_tool_result_settlement(
+                        settlement_task
                     )
-                    if result.process_local_settlement is not None:
-                        await self._tools.settle_process_local_effect(
-                            result.process_local_settlement,
-                            ProcessLocalEffectSettlementDisposition.COMMITTED,
-                        )
+                    if settlement.process_local_effect_committed:
                         unsettled_process_local_effect = None
-                    if attempt_id is not None:
-                        self._live_bus.offer_settlement_nowait(
-                            kind=LiveSettlementKind.COMMITTED,
-                            session_id=request.session_id,
-                            turn_id=turn_id,
-                            draft_identity=result_entry_id,
-                            committed_entry_id=result_acceptance.entry_id,
-                            **live_attribution,
-                        )
+                    if cancellation is not None:
+                        raise cancellation
+                    if result.caller_cancelled_while_running:
+                        # Preserve the unique known result first, then honor
+                        # the user/Host cancellation by interrupting the turn.
+                        raise asyncio.CancelledError
                 active_surface_borrow.close()
                 active_surface_borrow = None
-            raise RuntimeError("model-call limit exhausted")
         except BaseException as error:
             if active_surface_borrow is not None:
                 active_surface_borrow.close()
@@ -2161,7 +2286,7 @@ class ConversationKernelRunner:
 
     async def _settle_failed_turn_worker(self, turn_id: str) -> None:
         while True:
-            deadline = monotonic() + self._operation_timeout_seconds
+            deadline = self._canonical_deadline()
             try:
                 changed = await self._io.run(
                     self._repository.interrupt_turn,
@@ -2183,7 +2308,7 @@ class ConversationKernelRunner:
                     self._repository.read_turn_status,
                     session_id=self._writer_lease.guard.session_id,
                     turn_id=turn_id,
-                    deadline_monotonic=monotonic() + self._operation_timeout_seconds,
+                    deadline_monotonic=self._canonical_deadline(),
                 )
             except BaseException:
                 await asyncio.sleep(0.05)
@@ -2390,7 +2515,7 @@ class ConversationKernelRunner:
             )
         candidate = PreparedPlanToolBatch(
             session_id=self._writer_lease.guard.session_id,
-            workspace_id=await self._resolved_workspace_id(deadline),
+            workspace_id=await self._resolved_workspace_id(),
             origin_turn_id=canonical_facts.canonical_input.identity.turn_id,
             assistant_entry_id=assistant_entry_id,
             selected_call_ordinal=selected_call_index,
@@ -2447,7 +2572,7 @@ class ConversationKernelRunner:
                     outcome = await self._io.run(
                         self._repository.confirm_plan_tool_batch_winner,
                         candidate=candidate,
-                        deadline_monotonic=max(deadline, monotonic() + 5.0),
+                        deadline_monotonic=self._canonical_deadline(),
                     )
                     if outcome is None:
                         raise
@@ -2603,8 +2728,6 @@ class ConversationKernelRunner:
     async def _canonical_blocks(
         self,
         completed: CompletedAssistantMessage,
-        *,
-        deadline: float,
     ) -> tuple[AssistantBlock, ...]:
         result: list[AssistantBlock] = []
         for block in completed.blocks:
@@ -2613,7 +2736,8 @@ class ConversationKernelRunner:
                     AssistantTextBlock(
                         block_id=block.block_id,
                         text=await self._content(
-                            block.text.encode("utf-8"), deadline=deadline
+                            block.text.encode("utf-8"),
+                            deadline=self._canonical_deadline(),
                         ),
                     )
                 )
@@ -2624,7 +2748,7 @@ class ConversationKernelRunner:
                         data=await self._content(
                             block.data.encode("utf-8"),
                             media_type=block.media_type,
-                            deadline=deadline,
+                            deadline=self._canonical_deadline(),
                         ),
                     )
                 )
@@ -2641,7 +2765,9 @@ class ConversationKernelRunner:
             result.append(
                 AssistantTextBlock(
                     block_id=_id("block"),
-                    text=await self._content(b"", deadline=deadline),
+                    text=await self._content(
+                        b"", deadline=self._canonical_deadline()
+                    ),
                 )
             )
         return tuple(result)
@@ -2686,34 +2812,251 @@ class ConversationKernelRunner:
             deadline_monotonic=deadline,
         )
 
-    async def _resolved_workspace_id(self, deadline: float) -> str:
+    async def _resolved_workspace_id(self) -> str:
         if self._workspace_id is None:
             self._workspace_id = await self._io.run(
                 self._repository.read_session_workspace_id,
                 self._writer_lease.guard,
-                deadline_monotonic=deadline,
+                deadline_monotonic=self._canonical_deadline(),
             )
         return self._workspace_id
+
+    async def _settle_known_tool_result(
+        self,
+        *,
+        session_id: str,
+        turn_id: str,
+        assistant_entry_id: str,
+        tool_name: str,
+        tool_call_id: str,
+        invocation_arguments: Mapping[str, object],
+        result_id: str,
+        result_entry_id: str,
+        attempt_id: str | None,
+        workspace_id: str,
+        result: KernelToolResult,
+        live_sink: _ToolResultLiveSink | None,
+        tool_result_block_id: str | None,
+        live_attribution: Mapping[str, object] | None,
+    ) -> _KnownToolResultSettlementOutcome:
+        if live_sink is not None:
+            await asyncio.shield(live_sink.close())
+        if attempt_id is not None and result.remote_identity is not None:
+            remote_identity_candidate = (
+                build_prepared_tool_remote_identity_publication(
+                    session_id=session_id,
+                    attempt_id=attempt_id,
+                    remote_identity=result.remote_identity,
+                    occurred_at=datetime.now(timezone.utc),
+                    actor_id=tool_name,
+                )
+            )
+            await self._publish_tool_remote_identity_exact(
+                remote_identity_candidate
+            )
+        prepared_output = await self._io.run(
+            self._tool_output_processor.prepare,
+            workspace_id=workspace_id,
+            result_entry_id=result_entry_id,
+            public_output=result.content.decode("utf-8"),
+            candidate=result.output_artifact_candidate,
+            artifact_source_read=result.artifact_source_read,
+            deadline_monotonic=self._canonical_deadline(),
+        )
+        result_text = prepared_output.canonical_preview.canonical_bytes.decode("utf-8")
+        if attempt_id is not None:
+            if tool_result_block_id is None or live_attribution is None:
+                raise RuntimeError("physical tool settlement lost live attribution")
+            if result_text and (live_sink is None or not live_sink.emitted):
+                self._live_bus.offer_nowait(
+                    event_type=LiveEventType.TOOL_RESULT_DELTA,
+                    session_id=session_id,
+                    turn_id=turn_id,
+                    draft_identity=result_entry_id,
+                    payload=ToolResultDeltaPayload(tool_result_block_id, result_text),
+                    block_id=tool_result_block_id,
+                    block_ordinal=0,
+                    block_kind=LiveBlockKind.TOOL_RESULT,
+                    **live_attribution,
+                )
+            self._live_bus.offer_nowait(
+                event_type=LiveEventType.TOOL_RESULT_END,
+                session_id=session_id,
+                turn_id=turn_id,
+                draft_identity=result_entry_id,
+                payload=ToolResultEndPayload(
+                    tool_result_block_id,
+                    result.state,
+                    result_text,
+                    len(result_text.encode("utf-8")),
+                    live_digest(result_text),
+                ),
+                block_id=tool_result_block_id,
+                block_ordinal=0,
+                block_kind=LiveBlockKind.TOOL_RESULT,
+                **live_attribution,
+            )
+        prepared_acceptance = build_prepared_tool_result_acceptance(
+            guard=self._writer_lease.guard,
+            workspace_id=workspace_id,
+            result_id=result_id,
+            result_entry_id=result_entry_id,
+            turn_id=turn_id,
+            assistant_entry_id=assistant_entry_id,
+            tool_call_id=tool_call_id,
+            attempt_id=attempt_id,
+            result_state=result.state,
+            canonical_preview_content=prepared_output.canonical_preview,
+            artifact_disposition=prepared_output.artifact_disposition,
+            artifact_id=prepared_output.artifact_id,
+            artifact_blob_descriptor=prepared_output.artifact_blob,
+            source_coverage=prepared_output.source_coverage,
+            display_kind=prepared_output.display_kind,
+            source_coverage_reason=prepared_output.source_coverage_reason,
+            artifact_unavailability_reason=(
+                prepared_output.artifact_unavailability_reason
+            ),
+            actor_id=tool_name,
+            occurred_at=datetime.now(timezone.utc),
+            memory_candidate_id=(
+                None
+                if result.memory_proposal is None
+                else result.memory_proposal.candidate_id
+            ),
+            memory_proposal_kind=(
+                None
+                if result.memory_proposal is None
+                else result.memory_proposal.proposal_kind
+            ),
+            memory_proposal_payload=(
+                None
+                if result.memory_proposal is None
+                else result.memory_proposal.proposal_payload
+            ),
+            memory_governance_job_id=(
+                None
+                if result.memory_proposal is None
+                else result.memory_proposal.governance_job_id
+            ),
+        )
+        try:
+            accepted = await self._accept_tool_result_exact(prepared_acceptance)
+        except StaleHostWriter:
+            # A process-local exact return is never handed to a replacement
+            # Host.  The durable attempt remains result-less and readers derive
+            # the unknown outcome.
+            self._offer_operational_best_effort(
+                OperationalHookOffer(
+                    event_type=OperationalHookType.TOOL_INVOCATION_OBSERVED,
+                    session_id=session_id,
+                    turn_id=turn_id,
+                    public_payload={
+                        "tool_name": tool_name,
+                        "effect_class": _tool_effect_class(
+                            tool_name, invocation_arguments
+                        ),
+                        "physical_timing": result.physical_timing,
+                        "outcome": "EXACT_RETURN_STALE_WRITER",
+                    },
+                )
+            )
+            raise
+        effect_committed = False
+        if result.process_local_settlement is not None:
+            await self._tools.settle_process_local_effect(
+                result.process_local_settlement,
+                ProcessLocalEffectSettlementDisposition.COMMITTED,
+            )
+            effect_committed = True
+        if attempt_id is not None:
+            assert live_attribution is not None
+            self._live_bus.offer_settlement_nowait(
+                kind=LiveSettlementKind.COMMITTED,
+                session_id=session_id,
+                turn_id=turn_id,
+                draft_identity=result_entry_id,
+                committed_entry_id=accepted.entry_id,
+                **live_attribution,
+            )
+        if result.physical_timing != "ON_TIME":
+            self._offer_operational_best_effort(
+                OperationalHookOffer(
+                    event_type=OperationalHookType.TOOL_INVOCATION_OBSERVED,
+                    session_id=session_id,
+                    turn_id=turn_id,
+                    public_payload={
+                        "tool_name": tool_name,
+                        "effect_class": _tool_effect_class(
+                            tool_name, invocation_arguments
+                        ),
+                        "physical_timing": result.physical_timing,
+                        "outcome": "RETURNED_EXACT",
+                    },
+                )
+            )
+        return _KnownToolResultSettlementOutcome(
+            accepted=accepted,
+            process_local_effect_committed=effect_committed,
+        )
+
+    async def _publish_tool_remote_identity_exact(
+        self,
+        candidate: PreparedToolRemoteIdentityPublication,
+    ) -> None:
+        """Settle one immutable remote identity without losing a known result."""
+
+        while True:
+            try:
+                await self._io.run(
+                    self._repository.publish_tool_remote_identity,
+                    self._writer_lease.guard,
+                    candidate=candidate,
+                    deadline_monotonic=self._canonical_deadline(),
+                )
+                return
+            except StaleHostWriter:
+                raise
+            except BaseException:
+                pass
+            while True:
+                try:
+                    confirmation = await self._io.run(
+                        self._repository.confirm_tool_remote_identity,
+                        self._writer_lease.guard,
+                        candidate=candidate,
+                        deadline_monotonic=self._canonical_deadline(),
+                    )
+                    break
+                except StaleHostWriter:
+                    raise
+                except BaseException:
+                    await asyncio.sleep(0.05)
+            if confirmation is ToolRemoteIdentityConfirmationKind.FULL:
+                return
+            if confirmation is ToolRemoteIdentityConfirmationKind.CONFLICT:
+                raise ConversationKernelConflict(
+                    "tool remote identity has a conflicting winner"
+                )
+            # NONE: retry the exact prepared candidate.  The physical tool has
+            # already returned and is never invoked by this settlement loop.
 
     async def _accept_tool_result_exact(
         self,
         candidate: PreparedToolResultAcceptance,
-        *,
-        deadline: float,
     ) -> AcceptedEntry:
         try:
             return await self._io.run(
                 self._repository.accept_tool_result,
                 self._writer_lease.guard,
                 candidate=candidate,
-                deadline_monotonic=deadline,
+                deadline_monotonic=self._canonical_deadline(),
             )
         except Exception:
             winner = await self._io.run(
                 self._repository.confirm_tool_result_winner,
                 self._writer_lease.guard,
                 candidate=candidate,
-                deadline_monotonic=max(deadline, monotonic() + 5.0),
+                deadline_monotonic=self._canonical_deadline(),
             )
             if winner is not None:
                 return winner
@@ -2724,14 +3067,14 @@ class ConversationKernelRunner:
                 self._repository.accept_tool_result,
                 self._writer_lease.guard,
                 candidate=candidate,
-                deadline_monotonic=max(deadline, monotonic() + 5.0),
+                deadline_monotonic=self._canonical_deadline(),
             )
         except Exception:
             winner = await self._io.run(
                 self._repository.confirm_tool_result_winner,
                 self._writer_lease.guard,
                 candidate=candidate,
-                deadline_monotonic=max(deadline, monotonic() + 5.0),
+                deadline_monotonic=self._canonical_deadline(),
             )
             if winner is None:
                 raise
@@ -2748,6 +3091,21 @@ def _stable_id(prefix: str, *parts: str) -> str:
 
 def _json_digest(value: FrozenJsonObjectFact) -> str:
     return "sha256:" + sha256(canonical_json_bytes(value)).hexdigest()
+
+
+def _tool_effect_class(
+    tool_name: str, arguments: Mapping[str, object]
+) -> str:
+    if tool_name == "terminal_process":
+        action = arguments.get("action")
+        if action in {"list", "log", "poll", "wait"}:
+            return "TERMINAL_OBSERVATION"
+        if action in {"write", "submit", "close_stdin", "kill"}:
+            return "TERMINAL_EFFECT"
+        raise RuntimeError("terminal_process action escaped its closed catalog")
+    if tool_name == "terminal":
+        return "TERMINAL_EFFECT"
+    return builtin_tool_catalog_entry(tool_name).recovery_contract.severity
 
 
 def _activation_subject_for_anchor(
@@ -3128,6 +3486,47 @@ async def _await_started_settlement(
     return result
 
 
+async def _await_turn_admission_settlement(
+    task: asyncio.Task[AcceptedEntry | None],
+    attempt: _TurnAdmissionSettlementAttempt,
+) -> tuple[AcceptedEntry | None, asyncio.CancelledError | None]:
+    """Join one admission owner and turn waiter cancellation into no-reissue."""
+
+    cancellation: asyncio.CancelledError | None = None
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as exc:
+            attempt.cancellation_requested = True
+            cancellation = exc
+            continue
+        except BaseException:
+            break
+    return task.result(), cancellation
+
+
+async def _await_tool_result_settlement(
+    task: asyncio.Task[_KnownToolResultSettlementOutcome],
+) -> tuple[_KnownToolResultSettlementOutcome, asyncio.CancelledError | None]:
+    """Join a known-result settlement while retaining caller cancellation.
+
+    Unlike the generic helper above, the caller must first observe whether the
+    process-local effect token was committed so its outer failure cleanup cannot
+    incorrectly discard that token after the canonical ToolResult won.
+    """
+
+    cancellation: asyncio.CancelledError | None = None
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as exc:
+            cancellation = exc
+            continue
+        except BaseException:
+            break
+    return task.result(), cancellation
+
+
 __all__ = [
     "ConversationKernelRunner",
     "KernelModelPort",
@@ -3135,5 +3534,6 @@ __all__ = [
     "KernelToolPort",
     "KernelToolAuthorization",
     "KernelToolAuthorizationKind",
+    "KernelToolPhysicalInvocationError",
     "KernelToolResult",
 ]

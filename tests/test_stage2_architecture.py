@@ -247,8 +247,11 @@ def test_stage2_product_contract_survives_the_clean_migration_universe() -> None
     }
     assert report["runtime_limits"] == {
         "contract": "stage2_runtime_limits.v1",
-        "named_finite_fields": len(fields(Stage2RuntimeLimits)),
+        "named_finite_fields": 62,
     }
+    # Stage 2 evidence is immutable.  Round 5A physically removes the old
+    # Host-close and model-call admission caps from the live limit carrier.
+    assert len(fields(Stage2RuntimeLimits)) == 60
     assert all(value > 0 for value in asdict(STAGE2_LIMITS).values())
     assert report["structural_budgets"] == {
         "contract": "stage2_structural_budgets.v1",

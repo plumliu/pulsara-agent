@@ -14,6 +14,10 @@ from pulsara_agent.conversation_kernel.limits import (
     STAGE2_LIMITS,
     STAGE2_STRUCTURAL_BUDGETS,
 )
+from pulsara_agent.conversation_kernel.execution_watchdogs import (
+    DEFAULT_KERNEL_WATCHDOG_POLICY,
+    KernelExecutionWatchdogPolicy,
+)
 from pulsara_agent.storage.postgres_connection_provider import (
     PostgresConnectionLane,
     VerifiedPostgresConnectionProviderProtocol,
@@ -71,9 +75,13 @@ class CanonicalInspectorView:
 
 class CanonicalConversationQuery:
     def __init__(
-        self, connection_provider: VerifiedPostgresConnectionProviderProtocol
+        self,
+        connection_provider: VerifiedPostgresConnectionProviderProtocol,
+        *,
+        watchdog_policy: KernelExecutionWatchdogPolicy | None = None,
     ) -> None:
         self._provider = connection_provider
+        self._watchdog_policy = watchdog_policy or DEFAULT_KERNEL_WATCHDOG_POLICY
 
     def page_entries(
         self,
@@ -327,6 +335,8 @@ class CanonicalConversationQuery:
             "memory_index": [_public_row(item) for item in freshness],
             "runtime_limit_contract": "stage2_runtime_limits.v1",
             "runtime_limits": asdict(STAGE2_LIMITS),
+            "execution_watchdog_contract": "kernel_execution_watchdogs.v1",
+            "execution_watchdogs": asdict(self._watchdog_policy),
             "structural_budget_contract": "stage2_structural_budgets.v1",
             "structural_budgets": asdict(STAGE2_STRUCTURAL_BUDGETS),
         }

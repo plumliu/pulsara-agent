@@ -372,6 +372,7 @@ def test_round2_pipe_and_pty_receive_the_same_bounded_environment(
             max_lifetime_seconds=5,
             owner_host_session_id=owner_id,
             shell_argv=environment.shell.command_argv(command),
+            decision_deadline_monotonic=monotonic() + 5,
             env=environment.values,
         )
         assert yielded is False

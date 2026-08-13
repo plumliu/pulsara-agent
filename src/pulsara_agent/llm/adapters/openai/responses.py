@@ -9,6 +9,7 @@ from typing import Any, AsyncIterator
 
 from pulsara_agent.llm.adapters.openai.client import (
     OPENAI_RESPONSES_API,
+    OpenAITransportTimeoutPolicy,
     build_async_openai_client,
 )
 from pulsara_agent.llm.adapters.openai.errors import classify_llm_error
@@ -49,10 +50,10 @@ class OpenAIResponsesTransport:
     """Adapter for OpenAI Responses-compatible APIs."""
 
     api_key: str
+    timeout_policy: OpenAITransportTimeoutPolicy
     api: str = OPENAI_RESPONSES_API
     binding_id: str = "pulsara.openai.responses"
     contract_version: str = "v1"
-    timeout_seconds: float = 60.0
     retry_config: LLMRetryConfig = field(default_factory=LLMRetryConfig)
     openai_sdk_max_retries: int | None = None
     retry_sleep: Callable[[float], Awaitable[None]] = field(
@@ -110,7 +111,7 @@ class OpenAIResponsesTransport:
         client = self._client or build_async_openai_client(
             api_key=self.api_key,
             base_url=model.base_url,
-            timeout_seconds=self.timeout_seconds,
+            timeout_policy=self.timeout_policy,
             max_retries=sdk_max_retries_for_transport(
                 retry_config=self.retry_config,
                 explicit_max_retries=self.openai_sdk_max_retries,

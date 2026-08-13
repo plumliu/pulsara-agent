@@ -19,6 +19,9 @@ from pulsara_agent.conversation_kernel.reader import (
     _RemainingReadBudget,
 )
 from pulsara_agent.conversation_kernel.query import CanonicalConversationQuery
+from pulsara_agent.conversation_kernel.execution_watchdogs import (
+    KernelExecutionWatchdogPolicy,
+)
 from pulsara_agent.conversation_kernel.repository import (
     AssistantTextBlock,
     AssistantToolCallBlock,
@@ -896,7 +899,24 @@ def test_inspector_reads_canonical_rows_and_selective_events_from_one_kernel(
     health = query.inspect_health(deadline_monotonic=monotonic() + 30)
     assert health["conversation_authority"] == "pulsara_v3"
     assert health["runtime_limit_contract"] == "stage2_runtime_limits.v1"
-    assert health["runtime_limits"]["host_close_hard_ms"] == 5_000
+    assert "host_close_hard_ms" not in health["runtime_limits"]
+    assert "model_calls_per_turn_hard" not in health["runtime_limits"]
     assert all(value > 0 for value in health["runtime_limits"].values())
+    assert health["execution_watchdog_contract"] == "kernel_execution_watchdogs.v1"
+    watchdogs = health["execution_watchdogs"]
+    assert watchdogs["host_session_close_join_seconds"] == 120.0
+    assert watchdogs["foreground_provider_total_seconds"] is None
+    assert watchdogs["model_calls_per_turn"] is None
+    assert watchdogs["tool_calls_per_turn"] is None
+    assert watchdogs["turn_total_seconds"] is None
+    injected_health = CanonicalConversationQuery(
+        provider,
+        watchdog_policy=KernelExecutionWatchdogPolicy(
+            host_session_close_join_seconds=41.0
+        ),
+    ).inspect_health(deadline_monotonic=monotonic() + 30)
+    assert injected_health["execution_watchdogs"][
+        "host_session_close_join_seconds"
+    ] == 41.0
     assert "legacy_event_replay" not in health
     assert "oxigraph_enabled" not in health

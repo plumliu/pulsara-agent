@@ -5,7 +5,11 @@ A process handle is valid only for the Host owner that created it and is
 destroyed during owner close.
 """
 
-from pulsara_agent.terminal_process.manager import TerminalSessionManager
+from pulsara_agent.terminal_process.manager import (
+    TerminalForegroundDecisionAttemptHandle,
+    TerminalForegroundDecisionState,
+    TerminalSessionManager,
+)
 from pulsara_agent.terminal_process.models import (
     TerminalPhysicalState,
     TerminalProcessInfo,
@@ -18,6 +22,8 @@ from pulsara_agent.terminal_process.models import (
 
 __all__ = [
     "TerminalProcessInfo",
+    "TerminalForegroundDecisionAttemptHandle",
+    "TerminalForegroundDecisionState",
     "TerminalPhysicalState",
     "TerminalProcessLog",
     "TerminalProcessOrigin",

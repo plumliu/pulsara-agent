@@ -56,6 +56,7 @@ def _spawn_sleeping_process(registry: ProcessRegistry, owner: str, tmp_path: Pat
         max_lifetime_seconds=None,
         owner_host_session_id=owner,
         shell_argv=(sys.executable, "-c", "import time; time.sleep(30)"),
+        decision_deadline_monotonic=monotonic() + 5,
         env=dict(os.environ),
     )
     assert yielded is True
@@ -242,6 +243,7 @@ def test_round2_monitor_uses_exact_cursor_and_single_pass_head_tail(
         max_lifetime_seconds=None,
         owner_host_session_id=owner,
         shell_argv=(sys.executable, "-c", "import time; time.sleep(30)"),
+        decision_deadline_monotonic=monotonic() + 5,
         env=dict(os.environ),
     )
     assert yielded is True
@@ -331,6 +333,7 @@ def test_round2_monitor_registration_cannot_miss_completion_between_snapshot_and
         max_lifetime_seconds=None,
         owner_host_session_id=owner,
         shell_argv=(sys.executable, "-c", "import time; time.sleep(30)"),
+        decision_deadline_monotonic=monotonic() + 5,
         env=dict(os.environ),
     )
     assert yielded is True
@@ -398,6 +401,7 @@ def test_round2_monitor_cancel_after_freeze_preserves_exact_attempt_until_settle
         max_lifetime_seconds=None,
         owner_host_session_id=owner,
         shell_argv=(sys.executable, "-c", "import time; time.sleep(30)"),
+        decision_deadline_monotonic=monotonic() + 5,
         env=dict(os.environ),
     )
     assert yielded is True

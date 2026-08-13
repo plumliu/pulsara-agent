@@ -19,10 +19,16 @@ from pulsara_agent.conversation_kernel.input_continuity import (
 )
 from pulsara_agent.conversation_kernel.runner import _prepared_append_candidate
 from pulsara_agent.llm.adapters.openai.chat_completions import (
+    OpenAIChatCompletionsTransport,
     build_chat_completions_payload,
 )
-from pulsara_agent.llm.adapters.openai.responses import build_responses_payload
+from pulsara_agent.llm.adapters.openai.responses import (
+    OpenAIResponsesTransport,
+    build_responses_payload,
+)
+from pulsara_agent.llm.adapters.openai.client import OpenAITransportTimeoutPolicy
 from pulsara_agent.llm.input import LLMMessage, LLMToolCall
+from pulsara_agent.llm.retry import LLMRetryConfig
 from pulsara_agent.model_input.compiler import StructuredModelInputCompiler
 from pulsara_agent.model_input.continuity import (
     FULL_HISTORY_CONTEXT_BASE_IDENTITY,
@@ -46,6 +52,7 @@ from pulsara_agent.ports.live_agent_event import (
     TextEndPayload,
     TextStartPayload,
 )
+from pulsara_agent.ports.provider_stream import ProviderStreamFailure
 from pulsara_agent.primitives.model_call import ModelCallPurpose
 from pulsara_agent.primitives.context import context_fingerprint
 from tests.support.model_config import test_llm_config
@@ -54,6 +61,200 @@ from tests.support.round3 import (
     StructuredToolPort,
     static_canonical_compile_facts,
 )
+
+
+def test_round5_foreground_model_rejects_a_total_transport_timeout() -> None:
+    with pytest.raises(ValueError, match="must not have a total"):
+        DirectKernelModelPort(
+            config=test_llm_config(
+                api_key="test",
+                base_url="https://example.invalid/v1",
+                pro_model="test-pro",
+                flash_model="test-flash",
+                api="openai_chat_completions",
+            ),
+            timeout_policy=OpenAITransportTimeoutPolicy(1, 1, 1, 1, 30),
+        )
+
+
+def test_round5_preflight_rejects_a_foreign_transport_timeout_binding() -> None:
+    config = test_llm_config(
+        api_key="test",
+        base_url="https://example.invalid/v1",
+        pro_model="test-pro",
+        flash_model="test-flash",
+        api="openai_chat_completions",
+    )
+    first = DirectKernelModelPort(
+        config=config,
+        timeout_policy=OpenAITransportTimeoutPolicy(120, 120, 120, 600, None),
+    )
+    second = DirectKernelModelPort(
+        config=config,
+        timeout_policy=OpenAITransportTimeoutPolicy(120, 120, 120, 601, None),
+    )
+    request, _tool_port = _prepared_execution(first)
+    owner, candidate = _continuity_candidate(request)
+
+    with pytest.raises(ValueError, match="does not exact-join preparation"):
+        second.preflight_execution(
+            request,
+            expected_append_candidate_fingerprint=candidate.candidate_fingerprint,
+            install_authority=owner.install_authority,
+        )
+    request.surface_borrow.close()
+
+
+class _Round5RetryEndpoint:
+    def __init__(self, *, api: str, semantic_output_before_failure: bool) -> None:
+        self.api = api
+        self.semantic_output_before_failure = semantic_output_before_failure
+        self.calls = 0
+
+    async def create(self, **_kwargs: object):
+        self.calls += 1
+        attempt = self.calls
+        if attempt == 1 and not self.semantic_output_before_failure:
+            raise ConnectionError("transient connection failure before output")
+
+        async def stream():
+            if self.api == "openai_chat_completions":
+                yield {
+                    "model": "test-pro",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {"content": f"attempt-{attempt}"},
+                            "finish_reason": None,
+                        }
+                    ],
+                }
+            else:
+                yield {
+                    "type": "response.output_text.delta",
+                    "delta": f"attempt-{attempt}",
+                }
+            if attempt == 1:
+                raise ConnectionError("transient connection failure after output")
+
+        return stream()
+
+
+class _Round5RetryClient:
+    def __init__(self, endpoint: _Round5RetryEndpoint) -> None:
+        self.chat = SimpleNamespace(completions=endpoint)
+        self.responses = endpoint
+
+
+async def _no_retry_delay(_seconds: float) -> None:
+    return
+
+
+@pytest.mark.parametrize(
+    ("api", "transport_type"),
+    (
+        ("openai_chat_completions", OpenAIChatCompletionsTransport),
+        ("openai_responses", OpenAIResponsesTransport),
+    ),
+)
+def test_round5_provider_retries_before_semantic_output(
+    api: str,
+    transport_type,
+) -> None:
+    port = _port(api=api)
+    request, _tool_port = _prepared_execution(port)
+    owner, candidate = _continuity_candidate(request)
+    execution = port.preflight_execution(
+        request,
+        expected_append_candidate_fingerprint=candidate.candidate_fingerprint,
+        install_authority=owner.install_authority,
+    )
+    endpoint = _Round5RetryEndpoint(
+        api=api,
+        semantic_output_before_failure=False,
+    )
+    transport = transport_type(
+        api_key="test",
+        timeout_policy=OpenAITransportTimeoutPolicy(1, 1, 1, 1, None),
+        retry_config=LLMRetryConfig(
+            attempts=2,
+            base_delay_seconds=0.001,
+            max_delay_seconds=0.001,
+            jitter_ratio=0,
+        ),
+        retry_sleep=_no_retry_delay,
+        _client=_Round5RetryClient(endpoint),
+    )
+
+    async def collect() -> list[object]:
+        return [
+            item
+            async for item in transport.stream(
+                call=request.prepared_call.call,
+                context=execution.final_context,
+            )
+        ]
+
+    items = asyncio.run(collect())
+    assert endpoint.calls == 2
+    assert any(isinstance(item, TextDeltaPayload) for item in items)
+    assert not any(isinstance(item, ProviderStreamFailure) for item in items)
+    request.surface_borrow.close()
+
+
+@pytest.mark.parametrize(
+    ("api", "transport_type"),
+    (
+        ("openai_chat_completions", OpenAIChatCompletionsTransport),
+        ("openai_responses", OpenAIResponsesTransport),
+    ),
+)
+def test_round5_provider_never_retries_after_semantic_output(
+    api: str,
+    transport_type,
+) -> None:
+    port = _port(api=api)
+    request, _tool_port = _prepared_execution(port)
+    owner, candidate = _continuity_candidate(request)
+    execution = port.preflight_execution(
+        request,
+        expected_append_candidate_fingerprint=candidate.candidate_fingerprint,
+        install_authority=owner.install_authority,
+    )
+    endpoint = _Round5RetryEndpoint(
+        api=api,
+        semantic_output_before_failure=True,
+    )
+    transport = transport_type(
+        api_key="test",
+        timeout_policy=OpenAITransportTimeoutPolicy(1, 1, 1, 1, None),
+        retry_config=LLMRetryConfig(
+            attempts=2,
+            base_delay_seconds=0.001,
+            max_delay_seconds=0.001,
+            jitter_ratio=0,
+        ),
+        retry_sleep=_no_retry_delay,
+        _client=_Round5RetryClient(endpoint),
+    )
+
+    async def collect() -> list[object]:
+        return [
+            item
+            async for item in transport.stream(
+                call=request.prepared_call.call,
+                context=execution.final_context,
+            )
+        ]
+
+    items = asyncio.run(collect())
+    assert endpoint.calls == 1
+    assert any(isinstance(item, TextDeltaPayload) for item in items)
+    failures = [item for item in items if isinstance(item, ProviderStreamFailure)]
+    assert len(failures) == 1
+    assert failures[0].retry_summary is not None
+    assert failures[0].retry_summary.skipped_reason == "semantic_output_started"
+    request.surface_borrow.close()
 
 
 def _prepared_execution(

@@ -150,6 +150,15 @@ Round 4 extends clean-v0 to 26 product relations and 34 selective occurrences;
 its Plan workflow, run-bound permission, Protocol v3, and real-provider
 verification are recorded in
 [`round4_plan_workflow_and_run_permission_activation.json`](benchmarks/suites/core/v1/round4_plan_workflow_and_run_permission_activation.json).
+Round 5A removes fixed model/tool-call counts and the turn-wide wall-clock
+deadline from ROOT and child turns. Each provider-dispatch plan, canonical
+operation, provider transport, physical tool call, writer renewal, Terminal
+decision, and close owner instead has its own closed watchdog. Foreground
+provider streams have connect/write/pool/read-idle bounds but no total response
+timeout; finite durable jobs retain their 30/45-second attempt totals. This is
+an execution-envelope change only: automatic compaction, summary adoption, and
+provider-input rebase remain deferred to Round 5B. Verification is recorded in
+[`round5_long_horizon_execution_envelope_activation.json`](benchmarks/suites/core/v1/round5_long_horizon_execution_envelope_activation.json).
 An old v13 database is rejected with
 `schema_migration_universe_reset_required`; Pulsara never imports, translates,
 or upgrades it in place. Follow

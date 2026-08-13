@@ -614,6 +614,14 @@ class TerminalMonitorCoordinator:
         if self._worker.is_alive():
             raise TimeoutError("terminal monitor coordinator did not physically join")
 
+    def join_physical_after_close(self) -> None:
+        """Force-path join after the logical close watchdog has elapsed."""
+
+        with self._lock:
+            if not self._closed:
+                raise RuntimeError("terminal monitor close was not installed")
+        self._worker.join()
+
     def _output_changed(self, monitor_id: str, value: bytes) -> None:
         with self._lock:
             registration = self._registrations.get(monitor_id)

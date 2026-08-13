@@ -10,6 +10,10 @@ from typing import Mapping, Protocol
 from uuid import uuid4
 
 from pulsara_agent.conversation_kernel.job_model import DirectKernelJobModel
+from pulsara_agent.conversation_kernel.execution_watchdogs import (
+    KernelExecutionDeadlineFactory,
+    KernelWatchdogOwner,
+)
 from pulsara_agent.conversation_kernel.io import KernelSessionIO
 from pulsara_agent.conversation_kernel.job_catalog import (
     BACKGROUND_COMPACTION,
@@ -53,6 +57,7 @@ class KernelDurableJobExecutor:
         poll_interval_seconds: float = 0.25,
         claim_lease_seconds: float = STAGE2_LIMITS.job_claim_lease_ms / 1000,
         maximum_concurrency: int = STAGE2_LIMITS.job_worker_default_concurrency,
+        deadline_factory: KernelExecutionDeadlineFactory | None = None,
     ) -> None:
         if (
             poll_interval_seconds <= 0
@@ -63,6 +68,7 @@ class KernelDurableJobExecutor:
         ):
             raise ValueError("job executor timing must be finite and positive")
         self._repository = repository
+        self._deadlines = deadline_factory or KernelExecutionDeadlineFactory()
         self._model = DirectKernelJobModel(llm_config)
         self._embedding_config = embedding_config
         self._embedding = embedding_provider
@@ -88,35 +94,66 @@ class KernelDurableJobExecutor:
             raise RuntimeError("job executor already started")
         self._task = asyncio.create_task(self._run(), name=self._owner)
 
-    async def aclose(self, *, timeout_seconds: float = 5.0) -> None:
-        if timeout_seconds <= 0:
+    async def aclose(
+        self,
+        *,
+        timeout_seconds: float | None = None,
+        deadline_monotonic: float | None = None,
+    ) -> None:
+        if timeout_seconds is not None and deadline_monotonic is not None:
+            raise ValueError("job executor close accepts one deadline authority")
+        if timeout_seconds is not None and timeout_seconds <= 0:
             raise ValueError("job executor close timeout must be positive")
-        deadline = monotonic() + timeout_seconds
+        deadline = (
+            deadline_monotonic
+            if deadline_monotonic is not None
+            else (
+                monotonic() + timeout_seconds
+                if timeout_seconds is not None
+                else self._deadlines.deadline(
+                    KernelWatchdogOwner.DURABLE_JOB_EXECUTOR_CLOSE
+                )
+            )
+        )
         self._stopping.set()
+        close_error: BaseException | None = None
         task = self._task
         if task is not None:
-            await asyncio.wait_for(
-                asyncio.shield(task), timeout=max(0.001, deadline - monotonic())
-            )
-        for operation in tuple(self._active):
+            try:
+                if await _join_close_task(task, deadline_monotonic=deadline):
+                    close_error = TimeoutError(
+                        "durable job poll owner exited after close deadline"
+                    )
+            except BaseException as exc:
+                close_error = exc
+        active_snapshot = tuple(self._active)
+        for operation in active_snapshot:
             operation.cancel()
-        while self._active:
-            active = tuple(self._active)
-            remaining = deadline - monotonic()
-            if remaining <= 0:
-                raise TimeoutError("durable job handlers did not physically exit")
-            done, pending = await asyncio.wait(active, timeout=remaining)
-            self._active.difference_update(done)
-            for operation in done:
-                if not operation.cancelled():
-                    operation.exception()
-            if pending:
-                raise TimeoutError("durable job handlers did not physically exit")
-        await self._io.aclose(deadline_monotonic=deadline)
+        for operation in active_snapshot:
+            try:
+                if await _join_close_task(operation, deadline_monotonic=deadline):
+                    close_error = close_error or TimeoutError(
+                        "durable job handler exited after close deadline"
+                    )
+            except BaseException as exc:
+                close_error = close_error or exc
+        try:
+            await self._io.aclose(deadline_monotonic=deadline)
+        except BaseException as exc:
+            close_error = close_error or exc
         if self._embedding is not None and self._owns_embedding:
-            await asyncio.wait_for(
-                self._embedding.aclose(), timeout=max(0.001, deadline - monotonic())
-            )
+            embedding_close = asyncio.create_task(self._embedding.aclose())
+            try:
+                if await _join_close_task(
+                    embedding_close, deadline_monotonic=deadline
+                ):
+                    close_error = close_error or TimeoutError(
+                        "job embedding owner exited after close deadline"
+                    )
+            except BaseException as exc:
+                close_error = close_error or exc
+        if close_error is not None:
+            raise close_error
 
     async def run_once(self) -> int:
         await self._io.run(
@@ -217,11 +254,16 @@ class KernelDurableJobExecutor:
         output_limit = attempt.provider_output_token_limit
         if input_limit is None or output_limit is None:
             raise ValueError("provider-backed job lacks finite attempt limits")
+        remaining = (
+            attempt.deadline_at - datetime.now(timezone.utc)
+        ).total_seconds()
+        timeout_policy = self._deadlines.policy.durable_job_transport(remaining)
         prepared = self._model.prepare_json_call(
             purpose=purpose,
             prompt=prompt,
             maximum_input_tokens=input_limit,
             maximum_output_tokens=output_limit,
+            timeout_policy=timeout_policy,
         )
         await self._io.run(
             self._repository.mark_job_provider_call_started,
@@ -439,6 +481,32 @@ class KernelDurableJobExecutor:
             occurred_at=datetime.now(timezone.utc),
             deadline_monotonic=_terminal_deadline(),
         )
+
+
+async def _join_close_task(
+    task: asyncio.Task[object], *, deadline_monotonic: float
+) -> bool:
+    """Return whether the close watchdog elapsed, after exact task join."""
+
+    deadline_expired = False
+    if not task.done():
+        remaining = deadline_monotonic - monotonic()
+        if remaining > 0:
+            done, _pending = await asyncio.wait((task,), timeout=remaining)
+            deadline_expired = not done
+        else:
+            deadline_expired = True
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            # Cancellation can detach a waiter, never the job close owner.
+            continue
+        except BaseException:
+            break
+    if not task.cancelled():
+        task.result()
+    return deadline_expired
 
 
 def _intent(attempt: AcceptedJobAttempt) -> Mapping[str, object]:

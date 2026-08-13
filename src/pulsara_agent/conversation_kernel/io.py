@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from dataclasses import dataclass
+from enum import StrEnum
 from functools import partial
 from time import monotonic
-from typing import TypeVar
+from typing import Generic, TypeVar
 
 from pulsara_agent.conversation_kernel.limits import STAGE2_LIMITS
 
@@ -22,6 +24,38 @@ T = TypeVar("T")
 
 class KernelSessionIOClosed(RuntimeError):
     pass
+
+
+class PhysicalToolInvocationDisposition(StrEnum):
+    RETURNED_EXACT = "RETURNED_EXACT"
+    RAISED = "RAISED"
+
+
+class PhysicalToolInvocationTiming(StrEnum):
+    ON_TIME = "ON_TIME"
+    LATE_AFTER_WATCHDOG = "LATE_AFTER_WATCHDOG"
+
+
+@dataclass(frozen=True, slots=True)
+class PhysicalToolInvocationOutcome(Generic[T]):
+    """Exact terminal outcome of one process-local physical worker.
+
+    This carrier is never serialized.  It lets the semantic owner preserve a
+    value returned after a logical watchdog or caller cancellation instead of
+    mistaking the logical waiter state for the physical effect outcome.
+    """
+
+    disposition: PhysicalToolInvocationDisposition
+    timing: PhysicalToolInvocationTiming
+    caller_cancelled: bool
+    value: T | None = None
+    error: BaseException | None = None
+
+    def __post_init__(self) -> None:
+        if (self.disposition is PhysicalToolInvocationDisposition.RETURNED_EXACT) != (
+            self.error is None
+        ):
+            raise ValueError("physical tool outcome value/error union is invalid")
 
 
 class KernelSessionIO:
@@ -92,14 +126,107 @@ class KernelSessionIO:
                 raise TimeoutError(
                     "foreground physical I/O exited after its deadline"
                 ) from exc
-            except asyncio.CancelledError:
+            except asyncio.CancelledError as cancellation:
                 # asyncio cannot cancel a worker thread.  Do not let a caller
                 # observe cancellation while the exact physical operation can
                 # still mutate resources behind the next settlement/close.
                 await _drain_physical_task(task)
                 if not task.cancelled():
-                    task.result()
-                raise
+                    try:
+                        task.result()
+                    except BaseException:
+                        # The operation's terminal error is retrieved, but it
+                        # cannot erase the explicit cancellation signal.  The
+                        # canonical caller owns ACK/outcome confirmation.
+                        pass
+                raise cancellation
+        except BaseException:
+            if task is None:
+                self._semaphore.release()
+            raise
+
+    async def run_tool_invocation(
+        self,
+        operation: Callable[..., T],
+        /,
+        *args: object,
+        deadline_monotonic: float,
+        **kwargs: object,
+    ) -> PhysicalToolInvocationOutcome[T]:
+        """Run one physical tool call and never discard its exact terminal state."""
+
+        remaining = deadline_monotonic - monotonic()
+        if remaining <= 0:
+            return PhysicalToolInvocationOutcome(
+                disposition=PhysicalToolInvocationDisposition.RAISED,
+                timing=PhysicalToolInvocationTiming.ON_TIME,
+                caller_cancelled=False,
+                error=TimeoutError("tool invocation deadline expired before admission"),
+            )
+        try:
+            await asyncio.wait_for(self._semaphore.acquire(), timeout=remaining)
+        except TimeoutError as exc:
+            return PhysicalToolInvocationOutcome(
+                disposition=PhysicalToolInvocationDisposition.RAISED,
+                timing=PhysicalToolInvocationTiming.ON_TIME,
+                caller_cancelled=False,
+                error=exc,
+            )
+        task: asyncio.Task[object] | None = None
+        try:
+            async with self._lock:
+                if self._closing:
+                    raise KernelSessionIOClosed("foreground I/O owner is closing")
+                task = asyncio.create_task(
+                    asyncio.to_thread(
+                        partial(
+                            operation,
+                            *args,
+                            deadline_monotonic=deadline_monotonic,
+                            **kwargs,
+                        )
+                    ),
+                    name=(
+                        "kernel-physical-tool:"
+                        f"{getattr(operation, '__name__', 'operation')}"
+                    ),
+                )
+                self._active.add(task)
+                task.add_done_callback(self._retire)
+            timed_out = False
+            caller_cancelled = False
+            remaining = deadline_monotonic - monotonic()
+            if remaining > 0:
+                try:
+                    await asyncio.wait_for(asyncio.shield(task), timeout=remaining)
+                except TimeoutError:
+                    timed_out = True
+                except asyncio.CancelledError:
+                    caller_cancelled = True
+            else:
+                timed_out = True
+            if not task.done():
+                await _drain_physical_task(task)
+            timing = (
+                PhysicalToolInvocationTiming.LATE_AFTER_WATCHDOG
+                if timed_out or caller_cancelled
+                else PhysicalToolInvocationTiming.ON_TIME
+            )
+            try:
+                value = task.result()
+            except BaseException as exc:
+                return PhysicalToolInvocationOutcome(
+                    disposition=PhysicalToolInvocationDisposition.RAISED,
+                    timing=timing,
+                    caller_cancelled=caller_cancelled,
+                    error=exc,
+                )
+            return PhysicalToolInvocationOutcome(
+                disposition=PhysicalToolInvocationDisposition.RETURNED_EXACT,
+                timing=timing,
+                caller_cancelled=caller_cancelled,
+                value=value,  # type: ignore[arg-type]
+            )
         except BaseException:
             if task is None:
                 self._semaphore.release()
@@ -115,19 +242,30 @@ class KernelSessionIO:
     async def aclose(self, *, deadline_monotonic: float) -> None:
         async with self._lock:
             self._closing = True
+        deadline_expired = False
         while True:
             active = tuple(self._active)
             if not active:
-                return
+                break
             remaining = deadline_monotonic - monotonic()
             if remaining <= 0:
-                raise TimeoutError("foreground physical I/O did not exit before close")
-            done, pending = await asyncio.wait(active, timeout=remaining)
+                deadline_expired = True
+                done, pending = (), active
+            else:
+                done, pending = await asyncio.wait(active, timeout=remaining)
             for task in done:
                 if not task.cancelled():
                     task.exception()
             if pending:
-                raise TimeoutError("foreground physical I/O did not exit before close")
+                deadline_expired = True
+                # The close watchdog is a logical force/failure boundary.  It
+                # cannot make a worker thread disappear, so keep the exact
+                # close owner alive until every admitted task is physically
+                # terminal before exposing the typed timeout.
+                for task in pending:
+                    await _drain_physical_task(task)
+        if deadline_expired:
+            raise TimeoutError("foreground physical I/O exited after close deadline")
 
 
 async def _drain_physical_task(task: asyncio.Task[object]) -> None:
@@ -146,4 +284,10 @@ async def _drain_physical_task(task: asyncio.Task[object]) -> None:
             break
 
 
-__all__ = ["KernelSessionIO", "KernelSessionIOClosed"]
+__all__ = [
+    "KernelSessionIO",
+    "KernelSessionIOClosed",
+    "PhysicalToolInvocationDisposition",
+    "PhysicalToolInvocationOutcome",
+    "PhysicalToolInvocationTiming",
+]

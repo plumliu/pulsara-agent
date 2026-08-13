@@ -56,8 +56,14 @@ from pulsara_agent.tools.builtins.filesystem import (
 )
 from pulsara_agent.tools.builtins.todo import TodoTool
 from pulsara_agent.tools.builtins.artifact import ArtifactReadTool
-from pulsara_agent.conversation_kernel.limits import STAGE2_LIMITS
-from pulsara_agent.conversation_kernel.io import KernelSessionIO
+from pulsara_agent.conversation_kernel.io import (
+    KernelSessionIO,
+    PhysicalToolInvocationDisposition,
+)
+from pulsara_agent.conversation_kernel.execution_watchdogs import (
+    KernelExecutionDeadlineFactory,
+    KernelWatchdogOwner,
+)
 from pulsara_agent.conversation_kernel.live import (
     LiveAgentEventBus,
     LiveBlockKind,
@@ -87,6 +93,7 @@ from .runner import (
     KernelToolLiveSink,
     KernelToolAuthorization,
     KernelToolAuthorizationKind,
+    KernelToolPhysicalInvocationError,
     KernelToolResult,
     ProcessLocalEffectSettlementDisposition,
     ProcessLocalEffectSettlementToken,
@@ -108,6 +115,18 @@ DIRECT_KERNEL_TOOL_NAMES = frozenset(
 )
 
 
+_TERMINAL_PROCESS_ACTION_EFFECTS = (
+    ("list", "TERMINAL_OBSERVATION"),
+    ("log", "TERMINAL_OBSERVATION"),
+    ("poll", "TERMINAL_OBSERVATION"),
+    ("wait", "TERMINAL_OBSERVATION"),
+    ("write", "TERMINAL_EFFECT"),
+    ("submit", "TERMINAL_EFFECT"),
+    ("close_stdin", "TERMINAL_EFFECT"),
+    ("kill", "TERMINAL_EFFECT"),
+)
+
+
 @dataclass(frozen=True, slots=True)
 class ProductionBuiltinExecutorBinding:
     """Exact descriptor-to-executor closure for one advertised builtin."""
@@ -125,6 +144,7 @@ class ProductionBuiltinExecutorBinding:
     is_read_only: bool
     is_concurrency_safe: bool
     permission_category: str
+    physical_effect_contract_fingerprint: str
     executor_identity: str
     binding_fingerprint: str
 
@@ -141,6 +161,21 @@ def _production_executor_binding(
         raise RuntimeError("builtin descriptor and executor name do not join")
     input_schema_fingerprint = sha256_fingerprint(
         "production-builtin-input-schema:v1", descriptor.input_schema
+    )
+    physical_effect_contract = (
+        {"actions": _TERMINAL_PROCESS_ACTION_EFFECTS}
+        if tool_name == "terminal_process"
+        else {
+            "default": (
+                "TERMINAL_EFFECT"
+                if tool_name == "terminal"
+                else entry.recovery_contract.severity
+            )
+        }
+    )
+    physical_effect_contract_fingerprint = sha256_fingerprint(
+        "production-builtin-physical-effect-contract:v1",
+        physical_effect_contract,
     )
     payload = {
         "tool_name": tool_name,
@@ -160,6 +195,9 @@ def _production_executor_binding(
         "is_read_only": descriptor.is_read_only,
         "is_concurrency_safe": descriptor.is_concurrency_safe,
         "permission_category": descriptor.permission_category,
+        "physical_effect_contract_fingerprint": (
+            physical_effect_contract_fingerprint
+        ),
         "executor_identity": executor_identity,
     }
     return ProductionBuiltinExecutorBinding(
@@ -180,6 +218,9 @@ def _production_executor_binding(
         is_read_only=descriptor.is_read_only,
         is_concurrency_safe=descriptor.is_concurrency_safe,
         permission_category=descriptor.permission_category,
+        physical_effect_contract_fingerprint=(
+            physical_effect_contract_fingerprint
+        ),
         executor_identity=executor_identity,
         binding_fingerprint=sha256_fingerprint(
             "production-builtin-executor-binding:v1", payload
@@ -249,6 +290,8 @@ class _DirectTerminalTool:
         *,
         live_sink: KernelToolLiveSink | None = None,
         origin: TerminalProcessOrigin,
+        decision_attempt_id: str,
+        decision_deadline_monotonic: float,
     ) -> ToolExecutionResult:
         request = parse_terminal_input(call.arguments)
         session_id = request.terminal_session_id
@@ -272,6 +315,8 @@ class _DirectTerminalTool:
                 )
             ),
             origin=origin,
+            decision_attempt_id=decision_attempt_id,
+            decision_deadline_monotonic=decision_deadline_monotonic,
         )
         return _terminal_execution_result(call, result)
 
@@ -411,12 +456,14 @@ class DirectKernelToolPort:
         live_bus: LiveAgentEventBus,
         artifact_read_port: ToolArtifactReadPort | None = None,
         terminal_monitor_wake_scheduler: Callable[[], None] | None = None,
+        deadline_factory: KernelExecutionDeadlineFactory | None = None,
     ) -> None:
         root = workspace_root.expanduser().resolve()
         self._host_owner_id = host_owner_id
         self._session_id = session_id
         self._live_bus = live_bus
         self._physical_io = KernelSessionIO()
+        self._deadlines = deadline_factory or KernelExecutionDeadlineFactory()
         self._terminal = TerminalSessionManager(
             workspace_root=root,
             completion_subscriber=self._terminal_process_completed,
@@ -861,25 +908,42 @@ class DirectKernelToolPort:
                 conversation_scope_kind=(invocation_context.conversation_scope_kind),
                 scope_subagent_task_id=invocation_context.scope_subagent_task_id,
             )
-            result = await self._physical_io.run(
+            owner = (
+                KernelWatchdogOwner.TERMINAL_FOREGROUND_DECISION
+                if isinstance(tool, _DirectTerminalTool)
+                else KernelWatchdogOwner.NONTERMINAL_TOOL_INVOCATION
+            )
+            physical = await self._physical_io.run_tool_invocation(
                 _execute_terminal_tool_call,
                 tool,
                 call,
                 live_sink,
                 origin,
-                deadline_monotonic=(
-                    monotonic() + STAGE2_LIMITS.foreground_io_timeout_ms / 1_000
-                ),
+                attempt_id,
+                deadline_monotonic=self._deadlines.deadline(owner),
             )
         else:
-            result = await self._physical_io.run(
+            physical = await self._physical_io.run_tool_invocation(
                 _execute_tool_call,
                 tool,
                 call,
-                deadline_monotonic=(
-                    monotonic() + STAGE2_LIMITS.foreground_io_timeout_ms / 1_000
+                deadline_monotonic=self._deadlines.deadline(
+                    KernelWatchdogOwner.NONTERMINAL_TOOL_INVOCATION
                 ),
             )
+        if not isinstance(tool, _DirectTerminalMonitorTool):
+            if physical.disposition is PhysicalToolInvocationDisposition.RAISED:
+                assert physical.error is not None
+                effect_class = _physical_effect_class(tool_name, arguments)
+                raise KernelToolPhysicalInvocationError(
+                    effect_class=effect_class,
+                    error=physical.error,
+                    timing=physical.timing.value,
+                    caller_cancelled=physical.caller_cancelled,
+                )
+            result = physical.value
+            if not isinstance(result, ToolExecutionResult):
+                raise TypeError("physical tool returned an invalid result carrier")
         encoded = result.output.encode("utf-8")
         state = {
             ToolResultState.SUCCESS: "SUCCESS",
@@ -905,6 +969,16 @@ class DirectKernelToolPort:
             output_artifact_candidate=result.output_artifact_candidate,
             artifact_source_read=result.artifact_source_read,
             process_local_settlement=settlement_token,
+            physical_timing=(
+                "ON_TIME"
+                if isinstance(tool, _DirectTerminalMonitorTool)
+                else physical.timing.value
+            ),
+            caller_cancelled_while_running=(
+                False
+                if isinstance(tool, _DirectTerminalMonitorTool)
+                else physical.caller_cancelled
+            ),
         )
 
     def _invoke_terminal_monitor(
@@ -1072,10 +1146,27 @@ class DirectKernelToolPort:
             # owners, then drain the immutable borrow before closing the
             # general thread owner.  Non-Terminal tools remain bounded by the
             # same borrow deadline and are never replaced or detached.
-            await self._stop_terminal_physical_owners_locked(deadline)
-            await asyncio.to_thread(self._wait_for_surface_borrows, deadline)
-            await self._physical_io.aclose(deadline_monotonic=deadline)
+            close_error: BaseException | None = None
+            try:
+                await self._stop_terminal_physical_owners_locked(deadline)
+            except BaseException as exc:
+                close_error = exc
+            try:
+                if await asyncio.to_thread(
+                    self._wait_for_surface_borrows, deadline
+                ):
+                    close_error = close_error or TimeoutError(
+                        "tool surface borrows exited after close deadline"
+                    )
+            except BaseException as exc:
+                close_error = close_error or exc
+            try:
+                await self._physical_io.aclose(deadline_monotonic=deadline)
+            except BaseException as exc:
+                close_error = close_error or exc
             self._physically_closed = True
+            if close_error is not None:
+                raise close_error
 
     async def stop_terminal_physical_owners(
         self, *, timeout_seconds: float = 5.0
@@ -1114,38 +1205,90 @@ class DirectKernelToolPort:
             self._process_local_settlements.pop(token_id, None)
         if self._terminal_monitor_close_task is None:
             self._terminal_monitor_close_task = asyncio.create_task(
-                asyncio.to_thread(
-                    self._terminal_monitor.stop_admission_and_close,
-                    timeout_seconds=max(0.001, deadline_monotonic - monotonic()),
-                )
+                self._close_terminal_monitor_worker(deadline_monotonic)
             )
-        await asyncio.wait_for(
-            asyncio.shield(self._terminal_monitor_close_task),
-            timeout=max(0.001, deadline_monotonic - monotonic()),
+        monitor_late = await _join_close_task(
+            self._terminal_monitor_close_task,
+            deadline_monotonic=deadline_monotonic,
         )
         self._terminal_monitor_close_task.result()
         if self._terminal_release_task is None:
             self._terminal_release_task = asyncio.create_task(
-                asyncio.to_thread(
-                    self._terminal.release_owner,
-                    self._host_owner_id,
-                    timeout_seconds=max(0.001, deadline_monotonic - monotonic()),
-                )
+                self._release_terminal_owner_worker(deadline_monotonic)
             )
-        await asyncio.wait_for(
-            asyncio.shield(self._terminal_release_task),
-            timeout=max(0.001, deadline_monotonic - monotonic()),
+        release_late = await _join_close_task(
+            self._terminal_release_task,
+            deadline_monotonic=deadline_monotonic,
         )
         self._terminal_release_task.result()
         self._terminal_physically_closed = True
+        if monitor_late or release_late:
+            raise TimeoutError("Terminal owner exited after close deadline")
 
-    def _wait_for_surface_borrows(self, deadline_monotonic: float) -> None:
+    async def _close_terminal_monitor_worker(
+        self, deadline_monotonic: float
+    ) -> None:
+        try:
+            await asyncio.to_thread(
+                self._terminal_monitor.stop_admission_and_close,
+                timeout_seconds=max(0.001, deadline_monotonic - monotonic()),
+            )
+        except TimeoutError:
+            await asyncio.to_thread(
+                self._terminal_monitor.join_physical_after_close
+            )
+            raise
+
+    async def _release_terminal_owner_worker(
+        self, deadline_monotonic: float
+    ) -> None:
+        try:
+            await asyncio.to_thread(
+                self._terminal.release_owner,
+                self._host_owner_id,
+                timeout_seconds=max(0.001, deadline_monotonic - monotonic()),
+            )
+        except TimeoutError:
+            await asyncio.to_thread(
+                self._terminal.release_owner_and_join,
+                self._host_owner_id,
+            )
+            raise
+
+    def _wait_for_surface_borrows(self, deadline_monotonic: float) -> bool:
+        deadline_expired = False
         with self._surface_condition:
             while self._surface_borrows:
                 remaining = deadline_monotonic - monotonic()
                 if remaining <= 0:
-                    raise TimeoutError("tool surface borrows did not drain")
-                self._surface_condition.wait(timeout=remaining)
+                    deadline_expired = True
+                    self._surface_condition.wait()
+                else:
+                    self._surface_condition.wait(timeout=remaining)
+        return deadline_expired
+
+
+async def _join_close_task(
+    task: asyncio.Task[object], *, deadline_monotonic: float
+) -> bool:
+    """Join an admitted close worker and report logical watchdog expiry."""
+
+    deadline_expired = False
+    if not task.done():
+        remaining = deadline_monotonic - monotonic()
+        if remaining > 0:
+            done, _pending = await asyncio.wait((task,), timeout=remaining)
+            deadline_expired = not done
+        else:
+            deadline_expired = True
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            continue
+        except BaseException:
+            break
+    return deadline_expired
 
 
 def _execute_tool_call(
@@ -1161,17 +1304,37 @@ def _execute_tool_call(
     return tool.execute(call)
 
 
+def _physical_effect_class(
+    tool_name: str, arguments: Mapping[str, object]
+) -> str:
+    if tool_name == "terminal_process":
+        action = arguments.get("action")
+        for candidate, effect_class in _TERMINAL_PROCESS_ACTION_EFFECTS:
+            if action == candidate:
+                return effect_class
+        raise RuntimeError("terminal_process action escaped its closed catalog")
+    if tool_name == "terminal":
+        return "TERMINAL_EFFECT"
+    return builtin_tool_catalog_entry(tool_name).recovery_contract.severity
+
+
 def _execute_terminal_tool_call(
     tool: _DirectTerminalTool | _DirectTerminalProcessTool,
     call: ToolCall,
     live_sink: KernelToolLiveSink | None,
     origin: TerminalProcessOrigin,
+    decision_attempt_id: str,
     *,
     deadline_monotonic: float,
 ) -> ToolExecutionResult:
-    del deadline_monotonic
     if isinstance(tool, _DirectTerminalTool):
-        return tool.execute(call, live_sink=live_sink, origin=origin)
+        return tool.execute(
+            call,
+            live_sink=live_sink,
+            origin=origin,
+            decision_attempt_id=decision_attempt_id,
+            decision_deadline_monotonic=deadline_monotonic,
+        )
     return tool.execute(call, live_sink=live_sink)
 
 

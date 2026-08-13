@@ -9,6 +9,9 @@ from pulsara_agent.conversation_kernel.host import (
     KernelCommandOutcome,
     KernelHostSession,
 )
+from pulsara_agent.conversation_kernel.execution_watchdogs import (
+    KernelExecutionDeadlineFactory,
+)
 from pulsara_agent.conversation_kernel.repository import AcceptedEntry
 from pulsara_agent.conversation_kernel.interaction import KernelInteractionCoordinator
 from pulsara_agent.conversation_kernel.io import KernelSessionIO
@@ -278,6 +281,7 @@ def test_stage2_host_exposes_job_result_acceptance_to_production_protocol() -> N
 
     host = object.__new__(KernelHostSession)
     host._closing = False
+    host._deadlines = KernelExecutionDeadlineFactory()
     host._runner = _Runner()
 
     async def query_command(_: str) -> None:

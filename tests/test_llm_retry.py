@@ -7,6 +7,7 @@ from pulsara_agent.llm.adapters.openai.errors import (
     parse_retry_after_seconds,
 )
 from pulsara_agent.llm.adapters.openai import client as openai_client
+from pulsara_agent.llm.adapters.openai.client import OpenAITransportTimeoutPolicy
 from pulsara_agent.llm.config import LLMConfig
 from pulsara_agent.llm.retry import (
     LLMRetryConfig,
@@ -97,12 +98,12 @@ def test_openai_client_max_retries_plumbing(monkeypatch) -> None:
     openai_client.build_async_openai_client(
         api_key="sk-test",
         base_url="https://example.test/v1/",
-        timeout_seconds=7,
+        timeout_policy=OpenAITransportTimeoutPolicy(7, 7, 7, 7, 7),
     )
     openai_client.build_async_openai_client(
         api_key="sk-test",
         base_url="https://example.test/v1/",
-        timeout_seconds=7,
+        timeout_policy=OpenAITransportTimeoutPolicy(7, 7, 7, 7, 7),
         max_retries=0,
     )
 

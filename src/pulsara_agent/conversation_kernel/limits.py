@@ -45,7 +45,6 @@ class Stage2RuntimeLimits:
     diagnostic_sample_every: int = 1_000
     tool_argument_display_hard_bytes: int = 32 << 10
     hook_callback_timeout_ms: int = 2_000
-    host_close_hard_ms: int = 5_000
     content_chunk_hard_bytes: int = 1 << 20
     content_hydrate_default_concurrency: int = 4
     content_hydrate_hard_concurrency: int = 8
@@ -59,7 +58,6 @@ class Stage2RuntimeLimits:
     job_worker_hard_concurrency: int = 8
     memory_index_lag_warning_generations: int = 2
     memory_index_lag_error_generations: int = 10
-    model_calls_per_turn_hard: int = 24
     provider_input_tokens_per_call_hard: int = 128_000
     provider_output_tokens_per_call_hard: int = 16_384
     prompt_hard_bytes: int = 1 << 20
