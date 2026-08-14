@@ -1223,7 +1223,51 @@ class _ConversationOperations:
                    WHERE session_id = %s AND id = %s""",
                 (session_id, turn_id),
             ).fetchone()
-        return None if row is None else TurnStatus(str(row["status"]))
+            return None if row is None else TurnStatus(str(row["status"]))
+
+    def read_turn_terminal_outcome(
+        self,
+        *,
+        session_id: str,
+        turn_id: str,
+        deadline_monotonic: float,
+    ) -> Mapping[str, object] | None:
+        """Read one exact lifecycle winner, including interruption reason."""
+
+        with self._provider.connection(
+            lane=PostgresConnectionLane.HOST_CONTROL,
+            row_factory=dict_row,
+            deadline_monotonic=deadline_monotonic,
+            isolation_level=IsolationLevel.REPEATABLE_READ,
+        ) as connection:
+            row = connection.execute(
+                """SELECT status, terminal_reason, terminal_at
+                   FROM pulsara_v3.turns
+                   WHERE session_id = %s AND id = %s""",
+                (session_id, turn_id),
+            ).fetchone()
+            if row is None:
+                return None
+            status = str(row["status"])
+            reason = (
+                None if row["terminal_reason"] is None else str(row["terminal_reason"])
+            )
+            if status == "INTERRUPTED":
+                events = connection.execute(
+                    """SELECT payload FROM pulsara_v3.agent_events
+                       WHERE session_id = %s AND event_type = 'TurnInterrupted'
+                         AND subject_turn_id = %s""",
+                    (session_id, turn_id),
+                ).fetchall()
+                if len(events) != 1 or events[0]["payload"] != {"reason": reason}:
+                    raise ConversationKernelConflict(
+                        "turn interruption winner lacks its exact occurrence"
+                    )
+            return {
+                "status": status,
+                "terminal_reason": reason,
+                "terminal_at": row["terminal_at"],
+            }
 
     def rehydrate_session(
         self,

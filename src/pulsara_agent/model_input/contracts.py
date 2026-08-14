@@ -48,6 +48,10 @@ from pulsara_agent.primitives.run_permission import (
     FrozenRunPermissionSnapshot,
     RunPermissionOverlay,
 )
+from pulsara_agent.primitives.tool_observation import (
+    FrozenToolObservationTimingFact,
+    canonical_utc_timestamp,
+)
 
 
 SHA256_PREFIX = "sha256:"
@@ -83,6 +87,8 @@ class ContextSourceKind(StrEnum):
     CAPABILITY_CATALOG = "CAPABILITY_CATALOG"
     MCP_CATALOG = "MCP_CATALOG"
     ACTIVE_SKILL = "ACTIVE_SKILL"
+    PREVIOUS_TURN_OUTCOME = "PREVIOUS_TURN_OUTCOME"
+    TOOL_OBSERVATION_FRESHNESS = "TOOL_OBSERVATION_FRESHNESS"
 
 
 class ContextChannel(StrEnum):
@@ -590,6 +596,7 @@ class ProviderToolResultContextMetadata:
     source_coverage: ToolOutputSourceCoverage
     source_coverage_reason: ToolOutputSourceCoverageReason | None
     artifact_unavailability_reason: ToolOutputArtifactUnavailabilityReason | None
+    timing: FrozenToolObservationTimingFact
 
     def __post_init__(self) -> None:
         if self.result_state not in {
@@ -617,6 +624,8 @@ class ProviderToolResultContextMetadata:
             self.artifact_unavailability_reason is not None
         ):
             raise ValueError("tool result unavailability is inconsistent")
+        if not isinstance(self.timing, FrozenToolObservationTimingFact):
+            raise TypeError("tool result timing must be a frozen canonical fact")
 
 
 class FrozenProviderInputItemKind(StrEnum):
@@ -1075,6 +1084,230 @@ def approved_plan_materialization_fingerprint(
     )
 
 
+class PreviousTurnOutcomeKind(StrEnum):
+    USER_STOPPED = "USER_STOPPED"
+    EXECUTION_FAILED = "EXECUTION_FAILED"
+    HOST_SESSION_CLOSED = "HOST_SESSION_CLOSED"
+    HOST_REPLACED = "HOST_REPLACED"
+    PROVIDER_INPUT_CONFLICT = "PROVIDER_INPUT_CONFLICT"
+    RESOURCE_BOUNDARY = "RESOURCE_BOUNDARY"
+    PLAN_CONTINUATION_FAILED = "PLAN_CONTINUATION_FAILED"
+    UNKNOWN_INTERRUPTION = "UNKNOWN_INTERRUPTION"
+
+
+class AcceptedAssistantDisposition(StrEnum):
+    NONE_ACCEPTED = "NONE_ACCEPTED"
+    ACCEPTED_PREFIX_PRESENT = "ACCEPTED_PREFIX_PRESENT"
+
+
+@dataclass(frozen=True, slots=True)
+class FrozenPreviousTurnOutcomeCompileFact:
+    session_id: str
+    workspace_id: str
+    current_turn_id: str
+    current_scope_kind: ModelInputScopeKind
+    scope_subagent_task_id: str | None
+    predecessor_turn_id: str
+    predecessor_initial_entry_sequence: int
+    predecessor_terminal_at_utc: str
+    outcome_kind: PreviousTurnOutcomeKind
+    accepted_assistant_disposition: AcceptedAssistantDisposition
+    accepted_assistant_entry_count: int
+    definitely_not_dispatched_tool_count: int
+    outcome_unknown_tool_count: int
+    bounded_tool_name_samples: tuple[str, ...]
+    user_input_preserved: Literal[True]
+    canonical_entries_preserved: Literal[True]
+    fact_fingerprint: str
+
+    def __post_init__(self) -> None:
+        if not all(
+            (
+                self.session_id,
+                self.workspace_id,
+                self.current_turn_id,
+                self.predecessor_turn_id,
+            )
+        ):
+            raise ValueError("previous-turn outcome identity is incomplete")
+        if (self.current_scope_kind is ModelInputScopeKind.ROOT) != (
+            self.scope_subagent_task_id is None
+        ):
+            raise ValueError("previous-turn outcome scope union is invalid")
+        if self.predecessor_initial_entry_sequence < 1:
+            raise ValueError("previous-turn sequence is invalid")
+        parsed = datetime.fromisoformat(
+            self.predecessor_terminal_at_utc.replace("Z", "+00:00")
+        )
+        if canonical_utc_timestamp(parsed) != self.predecessor_terminal_at_utc:
+            raise ValueError("previous-turn terminal time is not canonical UTC")
+        counts = (
+            self.accepted_assistant_entry_count,
+            self.definitely_not_dispatched_tool_count,
+            self.outcome_unknown_tool_count,
+        )
+        if min(counts) < 0:
+            raise ValueError("previous-turn outcome count is negative")
+        expected_disposition = (
+            AcceptedAssistantDisposition.ACCEPTED_PREFIX_PRESENT
+            if self.accepted_assistant_entry_count
+            else AcceptedAssistantDisposition.NONE_ACCEPTED
+        )
+        if self.accepted_assistant_disposition is not expected_disposition:
+            raise ValueError("previous-turn assistant disposition is inconsistent")
+        if len(self.bounded_tool_name_samples) > 3:
+            raise ValueError("previous-turn tool samples exceed their bound")
+        for name in self.bounded_tool_name_samples:
+            encoded = name.encode("utf-8")
+            if not encoded or len(encoded) > 128:
+                raise ValueError("previous-turn tool sample is outside its bound")
+        if not self.user_input_preserved or not self.canonical_entries_preserved:
+            raise ValueError("previous-turn preservation facts must be true")
+        if self.fact_fingerprint != previous_turn_outcome_fingerprint(self):
+            raise ValueError("previous-turn outcome fingerprint mismatch")
+
+
+def previous_turn_outcome_fingerprint(
+    fact: FrozenPreviousTurnOutcomeCompileFact,
+) -> str:
+    return context_fingerprint(
+        "pulsara:previous-turn-outcome:v1",
+        {
+            "session_id": fact.session_id,
+            "workspace_id": fact.workspace_id,
+            "current_turn_id": fact.current_turn_id,
+            "current_scope_kind": fact.current_scope_kind.value,
+            "scope_subagent_task_id": fact.scope_subagent_task_id,
+            "predecessor_turn_id": fact.predecessor_turn_id,
+            "predecessor_initial_entry_sequence": (
+                fact.predecessor_initial_entry_sequence
+            ),
+            "predecessor_terminal_at_utc": fact.predecessor_terminal_at_utc,
+            "outcome_kind": fact.outcome_kind.value,
+            "accepted_assistant_disposition": (
+                fact.accepted_assistant_disposition.value
+            ),
+            "accepted_assistant_entry_count": fact.accepted_assistant_entry_count,
+            "definitely_not_dispatched_tool_count": (
+                fact.definitely_not_dispatched_tool_count
+            ),
+            "outcome_unknown_tool_count": fact.outcome_unknown_tool_count,
+            "bounded_tool_name_samples": fact.bounded_tool_name_samples,
+            "user_input_preserved": fact.user_input_preserved,
+            "canonical_entries_preserved": fact.canonical_entries_preserved,
+        },
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class FrozenToolObservationFreshnessCompileFact:
+    session_id: str
+    workspace_id: str
+    current_turn_id: str
+    current_scope_kind: ModelInputScopeKind
+    scope_subagent_task_id: str | None
+    current_turn_ref: str
+    current_initial_entry_sequence: int
+    immediate_predecessor_turn_id: str | None
+    immediate_predecessor_turn_ref: str | None
+    classification_contract: Literal[
+        "pulsara.tool-observation-freshness.v1"
+    ]
+    fact_fingerprint: str
+
+    def __post_init__(self) -> None:
+        if (self.current_scope_kind is ModelInputScopeKind.ROOT) != (
+            self.scope_subagent_task_id is None
+        ):
+            raise ValueError("tool freshness scope union is invalid")
+        if self.current_initial_entry_sequence < 1:
+            raise ValueError("tool freshness current sequence is invalid")
+        if (self.immediate_predecessor_turn_id is None) != (
+            self.immediate_predecessor_turn_ref is None
+        ):
+            raise ValueError("tool freshness predecessor union is invalid")
+        for value in (self.current_turn_ref, self.immediate_predecessor_turn_ref):
+            if value is not None and (
+                len(value) != 71
+                or not value.startswith(SHA256_PREFIX)
+                or any(
+                    character not in "0123456789abcdef" for character in value[7:]
+                )
+            ):
+                raise ValueError("tool freshness turn reference is invalid")
+        if self.classification_contract != "pulsara.tool-observation-freshness.v1":
+            raise ValueError("tool freshness classification contract is invalid")
+        if self.fact_fingerprint != tool_observation_freshness_fingerprint(self):
+            raise ValueError("tool freshness fingerprint mismatch")
+
+
+def tool_observation_freshness_fingerprint(
+    fact: FrozenToolObservationFreshnessCompileFact,
+) -> str:
+    return context_fingerprint(
+        "pulsara:tool-observation-freshness:v1",
+        {
+            "session_id": fact.session_id,
+            "workspace_id": fact.workspace_id,
+            "current_turn_id": fact.current_turn_id,
+            "current_scope_kind": fact.current_scope_kind.value,
+            "scope_subagent_task_id": fact.scope_subagent_task_id,
+            "current_turn_ref": fact.current_turn_ref,
+            "current_initial_entry_sequence": fact.current_initial_entry_sequence,
+            "immediate_predecessor_turn_id": fact.immediate_predecessor_turn_id,
+            "immediate_predecessor_turn_ref": fact.immediate_predecessor_turn_ref,
+            "classification_contract": fact.classification_contract,
+        },
+    )
+
+
+def build_tool_observation_freshness_fact(
+    *,
+    session_id: str,
+    workspace_id: str,
+    current_turn_id: str,
+    current_scope_kind: ModelInputScopeKind,
+    scope_subagent_task_id: str | None,
+    current_initial_entry_sequence: int,
+    immediate_predecessor_turn_id: str | None,
+) -> FrozenToolObservationFreshnessCompileFact:
+    values = {
+        "session_id": session_id,
+        "workspace_id": workspace_id,
+        "current_turn_id": current_turn_id,
+        "current_scope_kind": current_scope_kind,
+        "scope_subagent_task_id": scope_subagent_task_id,
+        "current_turn_ref": context_fingerprint(
+            "pulsara:provider-visible-turn-ref:v1",
+            {"session_id": session_id, "turn_id": current_turn_id},
+        ),
+        "current_initial_entry_sequence": current_initial_entry_sequence,
+        "immediate_predecessor_turn_id": immediate_predecessor_turn_id,
+        "immediate_predecessor_turn_ref": (
+            None
+            if immediate_predecessor_turn_id is None
+            else context_fingerprint(
+                "pulsara:provider-visible-turn-ref:v1",
+                {
+                    "session_id": session_id,
+                    "turn_id": immediate_predecessor_turn_id,
+                },
+            )
+        ),
+        "classification_contract": "pulsara.tool-observation-freshness.v1",
+    }
+    provisional = FrozenToolObservationFreshnessCompileFact.__new__(
+        FrozenToolObservationFreshnessCompileFact
+    )
+    for name, value in values.items():
+        object.__setattr__(provisional, name, value)
+    object.__setattr__(provisional, "fact_fingerprint", "")
+    return FrozenToolObservationFreshnessCompileFact(
+        **values,
+        fact_fingerprint=tool_observation_freshness_fingerprint(provisional),
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class FrozenCanonicalCompileSnapshot:
     canonical_input: CanonicalModelInputSnapshot = field(repr=False)
@@ -1085,6 +1318,8 @@ class FrozenCanonicalCompileSnapshot:
     approved_plan_materialization_fact: ApprovedPlanMaterializationFact | None = field(
         repr=False
     )
+    previous_turn_outcome_fact: FrozenPreviousTurnOutcomeCompileFact | None
+    tool_observation_freshness_fact: FrozenToolObservationFreshnessCompileFact
     canonical_read_cut_fingerprint: str
 
     def __post_init__(self) -> None:
@@ -1225,6 +1460,24 @@ class FrozenCanonicalCompileSnapshot:
                     raise ValueError("approved Plan pinned carrier does not exact-join")
             elif matching_items:
                 raise ValueError("approved Plan materialization would duplicate content")
+        previous = self.previous_turn_outcome_fact
+        freshness = self.tool_observation_freshness_fact
+        if (
+            freshness.session_id != identity.session_id
+            or freshness.current_turn_id != identity.turn_id
+            or freshness.current_scope_kind is not identity.conversation_scope_kind
+            or freshness.scope_subagent_task_id != identity.scope_subagent_task_id
+        ):
+            raise ValueError("tool freshness fact does not exact-join input")
+        if previous is not None and (
+            previous.session_id != identity.session_id
+            or previous.current_turn_id != identity.turn_id
+            or previous.current_scope_kind is not identity.conversation_scope_kind
+            or previous.scope_subagent_task_id != identity.scope_subagent_task_id
+            or previous.predecessor_turn_id
+            != freshness.immediate_predecessor_turn_id
+        ):
+            raise ValueError("previous-turn fact does not exact-join freshness")
         if self.canonical_read_cut_fingerprint != (
             canonical_compile_snapshot_fingerprint(self)
         ):
@@ -1256,6 +1509,14 @@ def canonical_compile_snapshot_fingerprint(
                 None
                 if snapshot.approved_plan_materialization_fact is None
                 else snapshot.approved_plan_materialization_fact.fact_fingerprint
+            ),
+            "previous_turn_outcome": (
+                None
+                if snapshot.previous_turn_outcome_fact is None
+                else snapshot.previous_turn_outcome_fact.fact_fingerprint
+            ),
+            "tool_observation_freshness": (
+                snapshot.tool_observation_freshness_fact.fact_fingerprint
             ),
         },
     )
@@ -1298,6 +1559,7 @@ def provider_input_item_fingerprint(item: FrozenProviderInputItem) -> str:
                         is None
                         else item.tool_result_context.artifact_unavailability_reason.value
                     ),
+                    "timing": item.tool_result_context.timing.fact_fingerprint,
                 }
             ),
             "tool_result_body_text": item.tool_result_body_text,

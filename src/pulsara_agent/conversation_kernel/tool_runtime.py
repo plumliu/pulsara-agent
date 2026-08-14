@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 from threading import Condition, Lock, RLock
@@ -89,6 +90,12 @@ from pulsara_agent.primitives.context import (
     thaw_json,
 )
 from pulsara_agent.primitives.run_permission import FrozenRunPermissionSnapshot
+from pulsara_agent.primitives.tool_observation import (
+    PhysicalToolObservationSupplement,
+    ToolObservationOrigin,
+    TrustedToolObservationSupplement,
+    normalize_observation_duration,
+)
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.conversation_kernel.vocabulary import LiveEventType
 from pulsara_agent.conversation_kernel.tool_policy import (
@@ -104,6 +111,7 @@ from pulsara_agent.conversation_kernel.tool_surface import (
     PreparedToolExecutionBinding,
     ProcessLocalToolSurfaceAccess,
     ProcessLocalToolSurfaceBorrow,
+    tool_observation_origin_for_binding,
     tool_execution_surface_fingerprint,
 )
 
@@ -1343,6 +1351,8 @@ class DirectKernelToolPort:
         ):
             raise RuntimeError("tool invocation surface binding does not exact-join")
         binding = invocation_context.surface_borrow.execution_binding(tool_name)
+        invocation_started = monotonic()
+        observation_origin = tool_observation_origin_for_binding(binding)
         if isinstance(binding.execution_policy, McpToolExecutionPolicyFact):
             generation = (
                 invocation_context.surface_borrow.prepared.access.surface_generation
@@ -1366,6 +1376,9 @@ class DirectKernelToolPort:
             try:
                 known, caller_cancelled = await _await_mcp_operation(operation_task)
             except McpPhysicalOutcomeUnknown as exc:
+                observation = _freeze_physical_observation(
+                    invocation_started, observation_origin
+                )
                 raise KernelToolPhysicalInvocationError(
                     effect_class=(
                         "read_only"
@@ -1378,8 +1391,12 @@ class DirectKernelToolPort:
                     caller_cancelled=bool(
                         getattr(exc, "caller_cancelled", False)
                     ),
+                    physical_observation=observation,
                 ) from exc
             except BaseException as exc:
+                observation = _freeze_physical_observation(
+                    invocation_started, observation_origin
+                )
                 raise KernelToolPhysicalInvocationError(
                     effect_class=(
                         "read_only"
@@ -1390,6 +1407,7 @@ class DirectKernelToolPort:
                     error=exc,
                     timing="ON_TIME",
                     caller_cancelled=False,
+                    physical_observation=observation,
                 ) from exc
             text = known.content.decode("utf-8")
             return KernelToolResult(
@@ -1413,6 +1431,9 @@ class DirectKernelToolPort:
                     if binding.execution_policy.effect_kind
                     is McpEffectKind.READ_ONLY
                     else "unknown_effect"
+                ),
+                physical_observation=_freeze_physical_observation(
+                    invocation_started, observation_origin
                 ),
             )
         if tool_name in {
@@ -1447,11 +1468,19 @@ class DirectKernelToolPort:
                 known, caller_cancelled = await _await_mcp_operation(
                     operation_task
                 )
-            except BaseException:
+            except BaseException as exc:
                 if permit is not None and permit.state.value != "RELEASED":
                     with suppress(RuntimeError):
                         permit.release()
-                raise
+                raise KernelToolPhysicalInvocationError(
+                    effect_class="read_only",
+                    error=exc,
+                    timing="ON_TIME",
+                    caller_cancelled=False,
+                    physical_observation=_freeze_physical_observation(
+                        invocation_started, observation_origin
+                    ),
+                ) from exc
             text = known.content.decode("utf-8")
             return KernelToolResult(
                 state=known.state,
@@ -1465,18 +1494,34 @@ class DirectKernelToolPort:
                     source_format_hint=ToolOutputSourceFormatHint.TEXT,
                 ),
                 caller_cancelled_while_running=caller_cancelled,
+                effect_class="read_only",
+                physical_observation=_freeze_physical_observation(
+                    invocation_started, observation_origin
+                ),
             )
         if self._subagent is not None and tool_name in self._subagent.tool_names:
-            return await self._subagent.invoke(
+            result = await self._subagent.invoke(
                 tool_name=tool_name,
                 arguments=arguments,
                 parent_turn_id=turn_id,
             )
+            return replace(
+                result,
+                physical_observation=_freeze_physical_observation(
+                    invocation_started, observation_origin
+                ),
+            )
         if self._memory is not None and tool_name in self._memory.tool_names:
-            return await self._memory.invoke(
+            result = await self._memory.invoke(
                 tool_name=tool_name,
                 arguments=arguments,
                 assistant_entry_id=assistant_entry_id,
+            )
+            return replace(
+                result,
+                physical_observation=_freeze_physical_observation(
+                    invocation_started, observation_origin
+                ),
             )
         tool = self._tools[tool_name]
         if isinstance(tool, _DirectPlanControlTool):
@@ -1526,11 +1571,20 @@ class DirectKernelToolPort:
             if physical.disposition is PhysicalToolInvocationDisposition.RAISED:
                 assert physical.error is not None
                 effect_class = _physical_effect_class(tool_name, arguments)
+                observation = (
+                    None
+                    if physical.observation is None
+                    else replace(
+                        physical.observation,
+                        observation_origin_kind=observation_origin,
+                    )
+                )
                 raise KernelToolPhysicalInvocationError(
                     effect_class=effect_class,
                     error=physical.error,
                     timing=physical.timing.value,
                     caller_cancelled=physical.caller_cancelled,
+                    physical_observation=observation,
                 )
             result = physical.value
             if not isinstance(result, ToolExecutionResult):
@@ -1569,6 +1623,24 @@ class DirectKernelToolPort:
                 False
                 if isinstance(tool, _DirectTerminalMonitorTool)
                 else physical.caller_cancelled
+            ),
+            physical_observation=(
+                _freeze_physical_observation(
+                    invocation_started, observation_origin
+                )
+                if isinstance(tool, _DirectTerminalMonitorTool)
+                else None
+                if physical.observation is None
+                else replace(
+                    physical.observation,
+                    observation_origin_kind=observation_origin,
+                )
+            ),
+            trusted_observation=_validated_terminal_observation_supplement(
+                tool=tool,
+                tool_name=tool_name,
+                arguments=arguments,
+                claimed=result.trusted_observation,
             ),
         )
 
@@ -1999,13 +2071,55 @@ def _terminal_execution_result(
         if result.status.value in {"success", "running"}
         else ToolResultState.ERROR
     )
+    trusted_duration = (
+        normalize_observation_duration(
+            result.trusted_process_duration_microseconds
+        )
+        if action in {"start", "log", "poll", "wait"}
+        else None
+    )
     return ToolExecutionResult(
         call_id=call.id,
         tool_name=call.name,
         status=state,
         output=json.dumps(payload, ensure_ascii=False),
         output_artifact_candidate=result.output_artifact_candidate,
+        trusted_observation=(
+            TrustedToolObservationSupplement(trusted_duration)
+            if trusted_duration is not None
+            else None
+        ),
     )
+
+
+def _validated_terminal_observation_supplement(
+    *,
+    tool: Tool,
+    tool_name: str,
+    arguments: Mapping[str, object],
+    claimed: TrustedToolObservationSupplement | None,
+) -> TrustedToolObservationSupplement | None:
+    """Admit trusted duration only from the pinned Terminal binding matrix.
+
+    ``ToolExecutionResult`` remains a neutral physical-result carrier, so a
+    custom/builtin implementation can syntactically attach a supplement.  The
+    Host tool owner must not trust it: only the exact Terminal executor binding
+    and an observation action can promote that value into model-visible timing.
+    Invalid claims are ignored so metadata cannot negate an already-known tool
+    outcome.
+    """
+
+    if claimed is None:
+        return None
+    if tool_name == "terminal" and isinstance(tool, _DirectTerminalTool):
+        return claimed
+    if tool_name == "terminal_process" and isinstance(
+        tool, _DirectTerminalProcessTool
+    ):
+        action = parse_terminal_process_input(arguments).action
+        if action in {"log", "poll", "wait"}:
+            return claimed
+    return None
 
 
 def _success(
@@ -2040,6 +2154,20 @@ def _json_schema_value(value: Mapping[str, object]) -> dict[str, object]:
     """Lower recursively frozen catalog values to JSON Schema containers."""
 
     return {str(key): _thaw_json(item) for key, item in value.items()}
+
+
+def _freeze_physical_observation(
+    started_at_monotonic: float,
+    origin: ToolObservationOrigin,
+) -> PhysicalToolObservationSupplement:
+    elapsed = normalize_observation_duration(
+        max(0, int((monotonic() - started_at_monotonic) * 1_000_000))
+    )
+    return PhysicalToolObservationSupplement(
+        observed_at=datetime.now(timezone.utc),
+        elapsed_microseconds=elapsed,
+        observation_origin_kind=origin,
+    )
 
 
 def _thaw_json(value: object) -> object:

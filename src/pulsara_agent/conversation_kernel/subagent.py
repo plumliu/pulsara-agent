@@ -15,6 +15,11 @@ from typing import Callable, Mapping
 from uuid import uuid4
 
 from pulsara_agent.conversation_kernel.contracts import HostWriterGuard
+from pulsara_agent.conversation_kernel.cancellation import (
+    ActiveTurnCancellationIntent,
+    ForegroundCancellationCause,
+    stable_subagent_turn_id,
+)
 from pulsara_agent.conversation_kernel.limits import STAGE2_LIMITS
 from pulsara_agent.conversation_kernel.io import KernelSessionIO
 from pulsara_agent.conversation_kernel.execution_watchdogs import (
@@ -31,7 +36,14 @@ from pulsara_agent.ports.live_agent_event import (
     live_digest,
 )
 from pulsara_agent.conversation_kernel.vocabulary import LiveEventType
-from pulsara_agent.conversation_kernel.repository import ConversationKernelRepository
+from pulsara_agent.conversation_kernel.repository import (
+    AcceptedEntry,
+    ConversationKernelConflict,
+    ConversationKernelRepository,
+    StaleHostWriter,
+    TurnAdmissionConfirmationKind,
+)
+from pulsara_agent.model_input.contracts import ModelInputScopeKind
 from pulsara_agent.conversation_kernel.runner import (
     ConversationKernelRunner,
     KernelRunResult,
@@ -51,6 +63,7 @@ class _LiveTask:
     parent_turn_id: str
     objective: str
     task: asyncio.Task[KernelRunResult]
+    cancellation_intent: ActiveTurnCancellationIntent
     status: str = "ACTIVE"
     result: KernelRunResult | None = None
     failure_code: str | None = None
@@ -177,11 +190,18 @@ class KernelSubagentManager:
             if self._closed:
                 closing_after_accept = True
             else:
+                intent = ActiveTurnCancellationIntent(
+                    turn_id=stable_subagent_turn_id(
+                        session_id=self._guard.session_id, task_id=task_id
+                    ),
+                    scope_kind=ModelInputScopeKind.SUBAGENT_TASK,
+                    scope_subagent_task_id=task_id,
+                )
                 task = asyncio.create_task(
-                    self._run_child(task_id, objective),
+                    self._run_child(task_id, objective, intent),
                     name=f"kernel-subagent:{task_id}",
                 )
-                live = _LiveTask(task_id, parent_turn_id, objective, task)
+                live = _LiveTask(task_id, parent_turn_id, objective, task, intent)
                 self._tasks[task_id] = live
         if closing_after_accept:
             await self._terminalize_best_effort(
@@ -203,37 +223,57 @@ class KernelSubagentManager:
             remote_identity=task_id,
         )
 
-    async def _run_child(self, task_id: str, objective: str) -> KernelRunResult:
+    async def _run_child(
+        self,
+        task_id: str,
+        objective: str,
+        cancellation_intent: ActiveTurnCancellationIntent,
+    ) -> KernelRunResult:
         runner_factory = self._runner_factory
         assert runner_factory is not None
         try:
             result = await runner_factory().run_subagent_turn(
                 task_id=task_id,
                 objective=objective,
+                cancellation_intent=cancellation_intent,
             )
             child_result_id = _stable_child_id(task_id, result.final_entry_id)
-            await self._io.run(
-                self._repository.accept_subagent_child,
-                self._guard,
-                child_id=child_result_id,
-                task_id=task_id,
-                child_kind="RESULT",
-                child_ordinal=result.model_call_count,
-                entry_id=result.final_entry_id,
-                occurred_at=datetime.now(timezone.utc),
-                actor_id=task_id,
-                deadline_monotonic=self._canonical_deadline(),
+
+            async def settle_completed_child() -> None:
+                await self._io.run(
+                    self._repository.accept_subagent_child,
+                    self._guard,
+                    child_id=child_result_id,
+                    task_id=task_id,
+                    child_kind="RESULT",
+                    # RESULT is the terminal child after every accepted MESSAGE.
+                    # Let the repository derive that exact ordinal in the same
+                    # transaction rather than trusting process-local call count.
+                    child_ordinal=None,
+                    entry_id=result.final_entry_id,
+                    occurred_at=datetime.now(timezone.utc),
+                    actor_id=task_id,
+                    deadline_monotonic=self._canonical_deadline(),
+                )
+                await self._io.run(
+                    self._repository.set_subagent_task_status,
+                    self._guard,
+                    task_id=task_id,
+                    status="COMPLETED",
+                    reason=None,
+                    occurred_at=datetime.now(timezone.utc),
+                    actor_id=self._host_owner_id,
+                    deadline_monotonic=self._canonical_deadline(),
+                )
+
+            completion_settlement = asyncio.create_task(
+                settle_completed_child(),
+                name=f"kernel-subagent-completion:{task_id}",
             )
-            await self._io.run(
-                self._repository.set_subagent_task_status,
-                self._guard,
-                task_id=task_id,
-                status="COMPLETED",
-                reason=None,
-                occurred_at=datetime.now(timezone.utc),
-                actor_id=self._host_owner_id,
-                deadline_monotonic=self._canonical_deadline(),
-            )
+            # The exact child turn already has a completed assistant winner.
+            # A late stop/close may detach its waiter, but cannot replace that
+            # winner or split the result/task settlement.
+            await _join_child_settlement(completion_settlement)
             async with self._lock:
                 live = self._tasks.get(task_id)
                 if live is not None:
@@ -258,16 +298,43 @@ class KernelSubagentManager:
                 ) or "HOST_CLOSING"
             explicit_stop = reason == "USER_CANCELLED"
             status = "CANCELLED" if explicit_stop else "INTERRUPTED"
-            await self._terminalize_best_effort(task_id, status, reason)
+            turn_reason = "USER_STOPPED" if explicit_stop else "SESSION_CLOSED"
+            cancellation_settlement = asyncio.create_task(
+                self._settle_cancelled_child(
+                    task_id=task_id,
+                    turn_id=cancellation_intent.turn_id,
+                    task_status=status,
+                    task_reason=reason,
+                    turn_reason=turn_reason,
+                ),
+                name=f"kernel-subagent-cancellation:{task_id}",
+            )
+            historical = await _join_child_settlement(cancellation_settlement)
             async with self._lock:
                 live = self._tasks.get(task_id)
                 if live is not None:
-                    live.status = status
-                    live.failure_code = reason
+                    if historical is not None:
+                        live.status = "COMPLETED"
+                        live.failure_code = None
+                        live.child_result_id = _stable_child_id(
+                            task_id, historical.entry_id
+                        )
+                    else:
+                        live.status = status
+                        live.failure_code = reason
                     parent_turn_id = live.parent_turn_id
                 else:
                     parent_turn_id = task_id
-            self._offer_progress(task_id, parent_turn_id, status, reason)
+            self._offer_progress(
+                task_id,
+                parent_turn_id,
+                "COMPLETED" if historical is not None else status,
+                (
+                    "Subagent completed before cancellation"
+                    if historical is not None
+                    else reason
+                ),
+            )
             raise
         except BaseException as exc:
             code = f"CHILD_{type(exc).__name__.upper()}"
@@ -300,6 +367,128 @@ class KernelSubagentManager:
         except BaseException:
             # A writer takeover owns the canonical INTERRUPTED transition.
             pass
+
+    async def _settle_cancelled_child(
+        self,
+        *,
+        task_id: str,
+        turn_id: str,
+        task_status: str,
+        task_reason: str,
+        turn_reason: str,
+    ) -> AcceptedEntry | None:
+        occurred_at = datetime.now(timezone.utc)
+        while True:
+            try:
+                confirmation = await self._io.run(
+                    self._repository.confirm_cancelled_subagent_turn_and_task,
+                    session_id=self._guard.session_id,
+                    task_id=task_id,
+                    turn_id=turn_id,
+                    task_status=task_status,
+                    task_reason=task_reason,
+                    turn_reason=turn_reason,
+                    occurred_at=occurred_at,
+                    actor_id=self._host_owner_id,
+                    deadline_monotonic=self._canonical_deadline(),
+                )
+                if confirmation.kind is TurnAdmissionConfirmationKind.FULL:
+                    return None
+                if (
+                    confirmation.kind
+                    is TurnAdmissionConfirmationKind.HISTORICAL_TERMINAL
+                ):
+                    accepted = confirmation.accepted
+                    if accepted is None:
+                        raise RuntimeError(
+                            "historical child winner lacks its final entry"
+                        )
+                    child_result_id = _stable_child_id(task_id, accepted.entry_id)
+                    await self._io.run(
+                        self._repository.accept_subagent_child,
+                        self._guard,
+                        child_id=child_result_id,
+                        task_id=task_id,
+                        child_kind="RESULT",
+                        child_ordinal=None,
+                        entry_id=accepted.entry_id,
+                        occurred_at=occurred_at,
+                        actor_id=task_id,
+                        deadline_monotonic=self._canonical_deadline(),
+                    )
+                    completed = await self._io.run(
+                        self._repository.set_subagent_task_status,
+                        self._guard,
+                        task_id=task_id,
+                        status="COMPLETED",
+                        reason=None,
+                        occurred_at=occurred_at,
+                        actor_id=self._host_owner_id,
+                        deadline_monotonic=self._canonical_deadline(),
+                    )
+                    if not completed:
+                        durable = await self._io.run(
+                            self._repository.query_subagent_task,
+                            session_id=self._guard.session_id,
+                            task_id=task_id,
+                            deadline_monotonic=self._canonical_deadline(),
+                        )
+                        if durable is None or durable.get("status") != "COMPLETED":
+                            raise ConversationKernelConflict(
+                                "completed child winner conflicts with task state"
+                            )
+                    return accepted
+                if confirmation.kind is TurnAdmissionConfirmationKind.CONFLICT:
+                    raise ConversationKernelConflict(
+                        "subagent cancellation winner conflicts"
+                    )
+            except StaleHostWriter:
+                return None
+            except ConversationKernelConflict:
+                raise
+            except Exception:
+                # NONE and transient confirmation failure both proceed to the
+                # same immutable candidate write.  Exact conflicts are never
+                # retried or overwritten.
+                pass
+            try:
+                changed = await self._io.run(
+                    self._repository.settle_cancelled_subagent_turn_and_task,
+                    self._guard,
+                    task_id=task_id,
+                    turn_id=turn_id,
+                    task_status=task_status,
+                    task_reason=task_reason,
+                    turn_reason=turn_reason,
+                    occurred_at=occurred_at,
+                    actor_id=self._host_owner_id,
+                    deadline_monotonic=self._canonical_deadline(),
+                )
+                if changed:
+                    return None
+                # A cancellation can win before the task-scoped turn admission.
+                # The guarded task-only CAS is legal only while that exact turn
+                # is still absent; if a terminal turn raced us, loop back to the
+                # closed confirmation instead of overwriting its lineage.
+                task_only_changed = await self._io.run(
+                    self._repository.set_subagent_task_status,
+                    self._guard,
+                    task_id=task_id,
+                    status=task_status,
+                    reason=task_reason,
+                    occurred_at=occurred_at,
+                    actor_id=self._host_owner_id,
+                    deadline_monotonic=self._canonical_deadline(),
+                    require_absent_turn_id=turn_id,
+                )
+                if task_only_changed:
+                    return None
+            except StaleHostWriter:
+                return None
+            except ConversationKernelConflict:
+                raise
+            except Exception:
+                await asyncio.sleep(0.05)
 
     async def _list(self, arguments: Mapping[str, object]) -> KernelToolResult:
         maximum = int(arguments.get("max_items", 50))
@@ -359,6 +548,19 @@ class KernelSubagentManager:
                     "result_id": live.child_result_id,
                 },
             )
+        if live.status == "COMPLETED":
+            # A cancellation can race after the canonical assistant winner but
+            # before the runner returns its process-local result.  In that case
+            # the manager finishes the durable child/result lineage from the
+            # historical winner and reads the resulting product fact here.
+            durable = await self._io.run(
+                self._repository.query_subagent_task,
+                session_id=self._guard.session_id,
+                task_id=task_id,
+                deadline_monotonic=self._canonical_deadline(),
+            )
+            if durable is not None:
+                return _durable_wait_result(durable)
         return _result(
             "APPLICATION_ERROR",
             {
@@ -378,7 +580,14 @@ class KernelSubagentManager:
             async with self._lock:
                 current = self._tasks.get(task_id)
                 if current is not None:
-                    current.cancellation_reason = "USER_CANCELLED"
+                    cause = current.cancellation_intent.install_cause(
+                        ForegroundCancellationCause.USER_REQUEST
+                    )
+                    current.cancellation_reason = (
+                        "USER_CANCELLED"
+                        if cause is ForegroundCancellationCause.USER_REQUEST
+                        else "HOST_CLOSING"
+                    )
             live.task.cancel()
             await asyncio.gather(live.task, return_exceptions=True)
         return _result(
@@ -395,7 +604,14 @@ class KernelSubagentManager:
             )
             for item in self._tasks.values():
                 if not item.task.done():
-                    item.cancellation_reason = "HOST_CLOSING"
+                    cause = item.cancellation_intent.install_cause(
+                        ForegroundCancellationCause.HOST_SESSION_CLOSE
+                    )
+                    item.cancellation_reason = (
+                        "USER_CANCELLED"
+                        if cause is ForegroundCancellationCause.USER_REQUEST
+                        else "HOST_CLOSING"
+                    )
         for task in tasks:
             task.cancel()
         close_deadline_expired = False
@@ -502,6 +718,23 @@ def _durable_wait_result(row: Mapping[str, object]) -> KernelToolResult:
             "error_code": row.get("terminal_reason"),
         },
     )
+
+
+async def _join_child_settlement(
+    task: asyncio.Task[AcceptedEntry | None] | asyncio.Task[None],
+) -> AcceptedEntry | None:
+    """Join one physical settlement despite repeated waiter cancellation."""
+
+    while True:
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if task.done():
+                return task.result()
+            # The child task already records the caller's cancellation cause.
+            # Additional stop/close calls only detach their waiter and cannot
+            # cancel or replace the exact settlement owner.
+            continue
 
 
 __all__ = ["KernelSubagentManager", "MAXIMUM_LIVE_SUBAGENTS", "SUBAGENT_TOOL_NAMES"]

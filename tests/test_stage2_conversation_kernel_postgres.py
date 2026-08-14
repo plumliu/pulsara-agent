@@ -69,6 +69,7 @@ from pulsara_agent.model_input.contracts import (
     PreparedProviderInputCut,
 )
 from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
+from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
 from pulsara_agent.conversation_kernel.vocabulary import (
     APPEND_GUARDS,
     COMMITTED_EVENT_DESCRIPTORS,
@@ -2731,7 +2732,10 @@ def test_stage2_memory_candidate_and_tool_result_are_one_transaction(
         display_kind=ToolResultDisplayKind.COMPLETE,
         source_coverage_reason=None,
         artifact_unavailability_reason=None,
-        occurred_at=datetime.now(timezone.utc),
+        observed_at=datetime.now(timezone.utc),
+        observation_duration_microseconds=None,
+        observation_origin_kind=ToolObservationOrigin.BUILTIN,
+        trusted_tool_reported_duration_microseconds=None,
         actor_id="remember_claim",
         memory_candidate_id=candidate_id,
         memory_proposal_kind="FACT",
@@ -2778,7 +2782,10 @@ def test_stage2_memory_candidate_and_tool_result_are_one_transaction(
         display_kind=ToolResultDisplayKind.COMPLETE,
         source_coverage_reason=None,
         artifact_unavailability_reason=None,
-        occurred_at=datetime.now(timezone.utc),
+        observed_at=datetime.now(timezone.utc),
+        observation_duration_microseconds=None,
+        observation_origin_kind=ToolObservationOrigin.BUILTIN,
+        trusted_tool_reported_duration_microseconds=None,
         actor_id="remember_claim",
         memory_candidate_id=rolled_back_candidate,
         memory_proposal_kind="FACT",

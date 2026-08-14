@@ -6,7 +6,14 @@ from datetime import datetime
 from typing import Mapping
 from psycopg import IsolationLevel
 from psycopg.rows import dict_row
-from pulsara_agent.conversation_kernel.contracts import CanonicalContent, ConversationScopeKind, EntryKind, HostWriterGuard
+from pulsara_agent.conversation_kernel.contracts import (
+    CanonicalContent,
+    CommittedEventDraft,
+    CommittedEventSubject,
+    ConversationScopeKind,
+    EntryKind,
+    HostWriterGuard,
+)
 from pulsara_agent.primitives.run_permission import RunPermissionAdmissionSource
 from pulsara_agent.conversation_kernel.vocabulary import CommittedEventType, SubjectSlot
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
@@ -27,6 +34,258 @@ from .matching import (
 )
 
 class _SubagentOperations:
+    @staticmethod
+    def _subagent_cancellation_drafts(
+        *,
+        task_id: str,
+        turn_id: str,
+        task_status: str,
+        task_reason: str,
+        turn_reason: str,
+        occurred_at: datetime,
+        actor_id: str,
+    ) -> tuple[CommittedEventDraft, CommittedEventDraft]:
+        common = {
+            "actor_kind": "runtime",
+            "actor_id": actor_id,
+            "sensitivity_class": "PUBLIC",
+            "projection_profile": "DEFAULT",
+            "occurred_at": occurred_at,
+        }
+        return (
+            CommittedEventDraft(
+                event_id=_stable_identity(
+                    "event", task_id, turn_id, "TurnInterrupted", turn_reason
+                ),
+                event_type=CommittedEventType.TURN_INTERRUPTED,
+                subject=CommittedEventSubject(SubjectSlot.TURN, turn_id),
+                payload={"reason": turn_reason},
+                **common,
+            ),
+            CommittedEventDraft(
+                event_id=_stable_identity(
+                    "event",
+                    task_id,
+                    turn_id,
+                    "SubagentTaskStatusAccepted",
+                    task_status,
+                    task_reason,
+                ),
+                event_type=CommittedEventType.SUBAGENT_TASK_STATUS_ACCEPTED,
+                subject=CommittedEventSubject(SubjectSlot.SUBAGENT_TASK, task_id),
+                payload={"status": task_status, "reason": task_reason},
+                **common,
+            ),
+        )
+
+    def settle_cancelled_subagent_turn_and_task(
+        self,
+        guard: HostWriterGuard,
+        *,
+        task_id: str,
+        turn_id: str,
+        task_status: str,
+        task_reason: str,
+        turn_reason: str,
+        occurred_at: datetime,
+        actor_id: str,
+        deadline_monotonic: float,
+    ) -> bool:
+        if (task_status, task_reason, turn_reason) not in {
+            ("CANCELLED", "USER_CANCELLED", "USER_STOPPED"),
+            ("INTERRUPTED", "HOST_CLOSING", "SESSION_CLOSED"),
+        }:
+            raise ValueError("subagent cancellation disposition is invalid")
+        drafts = self._subagent_cancellation_drafts(
+            task_id=task_id,
+            turn_id=turn_id,
+            task_status=task_status,
+            task_reason=task_reason,
+            turn_reason=turn_reason,
+            occurred_at=occurred_at,
+            actor_id=actor_id,
+        )
+        with self._writer_transaction(
+            guard, deadline_monotonic=deadline_monotonic
+        ) as connection:
+            task = connection.execute(
+                """SELECT workspace_id, status, terminal_reason,
+                          execution_writer_generation
+                   FROM pulsara_v3.subagent_tasks
+                   WHERE session_id = %s AND id = %s FOR UPDATE""",
+                (guard.session_id, task_id),
+            ).fetchone()
+            turn = connection.execute(
+                """SELECT workspace_id, status, terminal_reason,
+                          conversation_scope_kind, scope_subagent_task_id
+                   FROM pulsara_v3.turns
+                   WHERE session_id = %s AND id = %s FOR UPDATE""",
+                (guard.session_id, turn_id),
+            ).fetchone()
+            if task is None or turn is None:
+                return False
+            if (
+                int(task["execution_writer_generation"]) != guard.writer_generation
+                or str(turn["conversation_scope_kind"]) != "SUBAGENT_TASK"
+                or str(turn["scope_subagent_task_id"]) != task_id
+                or str(task["workspace_id"]) != str(turn["workspace_id"])
+            ):
+                raise ConversationKernelConflict(
+                    "subagent cancellation target identity conflicts"
+                )
+            if (
+                str(turn["status"]) != "RUNNING"
+                or str(task["status"]) != "ACTIVE"
+            ):
+                return False
+            connection.execute(
+                """UPDATE pulsara_v3.plan_interactions
+                   SET status = 'ABORTED', aborted_at = clock_timestamp()
+                   WHERE session_id = %s AND origin_turn_id = %s
+                     AND kind = 'QUESTION' AND status = 'OPEN'""",
+                (guard.session_id, turn_id),
+            )
+            connection.execute(
+                """UPDATE pulsara_v3.turns
+                   SET status = 'INTERRUPTED', terminal_reason = %s,
+                       terminal_at = clock_timestamp()
+                   WHERE session_id = %s AND id = %s AND status = 'RUNNING'""",
+                (turn_reason, guard.session_id, turn_id),
+            )
+            connection.execute(
+                """UPDATE pulsara_v3.subagent_tasks
+                   SET status = %s, terminal_reason = %s,
+                       terminal_at = clock_timestamp()
+                   WHERE session_id = %s AND id = %s
+                     AND status IN ('PENDING', 'ACTIVE')""",
+                (task_status, task_reason, guard.session_id, task_id),
+            )
+            self._append_events(
+                connection,
+                guard,
+                workspace_id=str(task["workspace_id"]),
+                drafts=drafts,
+            )
+            return True
+
+    def confirm_cancelled_subagent_turn_and_task(
+        self,
+        *,
+        session_id: str,
+        task_id: str,
+        turn_id: str,
+        task_status: str,
+        task_reason: str,
+        turn_reason: str,
+        occurred_at: datetime,
+        actor_id: str,
+        deadline_monotonic: float,
+    ) -> TurnAdmissionConfirmation:
+        drafts = self._subagent_cancellation_drafts(
+            task_id=task_id,
+            turn_id=turn_id,
+            task_status=task_status,
+            task_reason=task_reason,
+            turn_reason=turn_reason,
+            occurred_at=occurred_at,
+            actor_id=actor_id,
+        )
+        with self._provider.connection(
+            lane=PostgresConnectionLane.HOST_CONTROL,
+            row_factory=dict_row,
+            deadline_monotonic=deadline_monotonic,
+            isolation_level=IsolationLevel.REPEATABLE_READ,
+        ) as connection:
+            task = connection.execute(
+                """SELECT status, terminal_reason FROM pulsara_v3.subagent_tasks
+                   WHERE session_id = %s AND id = %s""",
+                (session_id, task_id),
+            ).fetchone()
+            turn = connection.execute(
+                """SELECT status, terminal_reason, conversation_scope_kind,
+                          scope_subagent_task_id, initial_entry_id, final_entry_id
+                   FROM pulsara_v3.turns WHERE session_id = %s AND id = %s""",
+                (session_id, turn_id),
+            ).fetchone()
+            events = tuple(
+                connection.execute(
+                    """SELECT * FROM pulsara_v3.agent_events
+                       WHERE session_id = %s AND event_id = %s""",
+                    (session_id, draft.event_id),
+                ).fetchone()
+                for draft in drafts
+            )
+            no_events = all(row is None for row in events)
+            if turn is None and no_events and task is not None:
+                # The task coordination row is accepted before the task-scoped
+                # turn.  Cancellation may therefore win before admission; that
+                # is a clean NONE for the joint candidate and is settled through
+                # the existing task-only terminal transition.
+                return TurnAdmissionConfirmation(TurnAdmissionConfirmationKind.NONE)
+            if task is None and turn is None and no_events:
+                return TurnAdmissionConfirmation(TurnAdmissionConfirmationKind.NONE)
+            if task is None or turn is None:
+                return TurnAdmissionConfirmation(
+                    TurnAdmissionConfirmationKind.CONFLICT
+                )
+            scope_matches = (
+                str(turn["conversation_scope_kind"]) == "SUBAGENT_TASK"
+                and str(turn["scope_subagent_task_id"]) == task_id
+            )
+            if not scope_matches:
+                return TurnAdmissionConfirmation(
+                    TurnAdmissionConfirmationKind.CONFLICT
+                )
+            if (
+                str(task["status"]) == "ACTIVE"
+                and str(turn["status"]) == "RUNNING"
+                and no_events
+            ):
+                # This is the ordinary confirm-before-write state.  Neither
+                # accepted coordination row is partial; the immutable
+                # cancellation candidate simply has no winner yet.
+                return TurnAdmissionConfirmation(TurnAdmissionConfirmationKind.NONE)
+            if (
+                str(turn["status"]) == "COMPLETED"
+                and str(task["status"]) in {"ACTIVE", "COMPLETED"}
+                and no_events
+                and turn["final_entry_id"] is not None
+            ):
+                # The assistant winner may commit immediately before the child
+                # manager resumes from its runner await.  Cancellation cannot
+                # replace that winner; return its exact entry so the existing
+                # result/task lineage can finish under the same Host owner.
+                return TurnAdmissionConfirmation(
+                    TurnAdmissionConfirmationKind.HISTORICAL_TERMINAL,
+                    self._accepted_entry(
+                        connection, session_id, str(turn["final_entry_id"])
+                    ),
+                )
+            if any(row is None for row in events):
+                return TurnAdmissionConfirmation(
+                    TurnAdmissionConfirmationKind.CONFLICT
+                )
+            assert all(row is not None for row in events)
+            if not (
+                str(task["status"]) == task_status
+                and str(task["terminal_reason"]) == task_reason
+                and str(turn["status"]) == "INTERRUPTED"
+                and str(turn["terminal_reason"]) == turn_reason
+                and all(
+                    _event_row_matches_draft(row, draft)
+                    for row, draft in zip(events, drafts, strict=True)
+                )
+            ):
+                return TurnAdmissionConfirmation(
+                    TurnAdmissionConfirmationKind.CONFLICT
+                )
+            return TurnAdmissionConfirmation(
+                TurnAdmissionConfirmationKind.FULL,
+                self._accepted_entry(
+                    connection, session_id, str(turn["initial_entry_id"])
+                ),
+            )
+
     def accept_subagent_task(
         self,
         guard: HostWriterGuard,
@@ -95,6 +354,7 @@ class _SubagentOperations:
         occurred_at: datetime,
         actor_id: str,
         deadline_monotonic: float,
+        require_absent_turn_id: str | None = None,
     ) -> bool:
         if status not in {
             "ACTIVE",
@@ -116,6 +376,13 @@ class _SubagentOperations:
                 WHERE session_id = %s AND id = %s
                   AND execution_writer_generation = %s
                   AND (
+                    %s::text IS NULL OR NOT EXISTS (
+                      SELECT 1 FROM pulsara_v3.turns AS child_turn
+                      WHERE child_turn.session_id = subagent_tasks.session_id
+                        AND child_turn.id = %s
+                    )
+                  )
+                  AND (
                     (status = 'PENDING' AND %s = 'ACTIVE') OR
                     (status IN ('PENDING', 'ACTIVE') AND %s IN (
                       'COMPLETED', 'FAILED', 'INTERRUPTED', 'CANCELLED'
@@ -130,6 +397,8 @@ class _SubagentOperations:
                     guard.session_id,
                     task_id,
                     guard.writer_generation,
+                    require_absent_turn_id,
+                    require_absent_turn_id,
                     status,
                     status,
                 ),
@@ -400,13 +669,17 @@ class _SubagentOperations:
         child_id: str,
         task_id: str,
         child_kind: str,
-        child_ordinal: int,
+        child_ordinal: int | None,
         entry_id: str,
         occurred_at: datetime,
         actor_id: str,
         deadline_monotonic: float,
     ) -> None:
-        if child_kind not in {"MESSAGE", "RESULT"} or child_ordinal < 0:
+        if (
+            child_kind not in {"MESSAGE", "RESULT"}
+            or (child_ordinal is None and child_kind != "RESULT")
+            or (child_ordinal is not None and child_ordinal < 0)
+        ):
             raise ValueError("subagent child carrier is invalid")
         event_type = (
             CommittedEventType.SUBAGENT_MESSAGE_ACCEPTED
@@ -422,6 +695,20 @@ class _SubagentOperations:
             guard, deadline_monotonic=deadline_monotonic
         ) as connection:
             workspace_id = self._workspace_id(connection, guard.session_id)
+            counts = connection.execute(
+                """
+                SELECT count(*) FILTER (WHERE child_kind = 'MESSAGE') AS messages,
+                       count(*) FILTER (WHERE child_kind = 'RESULT') AS results
+                FROM pulsara_v3.subagent_task_children
+                WHERE session_id = %s AND task_id = %s
+                """,
+                (guard.session_id, task_id),
+            ).fetchone()
+            message_count = int(counts["messages"])
+            result_count = int(counts["results"])
+            resolved_ordinal = (
+                message_count if child_ordinal is None else child_ordinal
+            )
             existing = connection.execute(
                 """
                 SELECT task_id, child_kind, child_ordinal, entry_id
@@ -434,25 +721,14 @@ class _SubagentOperations:
                 if (
                     str(existing["task_id"]) != task_id
                     or str(existing["child_kind"]) != child_kind
-                    or int(existing["child_ordinal"]) != child_ordinal
+                    or int(existing["child_ordinal"]) != resolved_ordinal
                     or str(existing["entry_id"]) != entry_id
                 ):
                     raise ConversationKernelConflict(
                         "subagent child identity names a different fact"
                     )
                 return
-            counts = connection.execute(
-                """
-                SELECT count(*) FILTER (WHERE child_kind = 'MESSAGE') AS messages,
-                       count(*) FILTER (WHERE child_kind = 'RESULT') AS results
-                FROM pulsara_v3.subagent_task_children
-                WHERE session_id = %s AND task_id = %s
-                """,
-                (guard.session_id, task_id),
-            ).fetchone()
-            message_count = int(counts["messages"])
-            result_count = int(counts["results"])
-            if result_count or child_ordinal != message_count:
+            if result_count or resolved_ordinal != message_count:
                 raise ConversationKernelConflict(
                     "subagent child ordinal or terminal result conflicts"
                 )
@@ -467,7 +743,7 @@ class _SubagentOperations:
                     guard.session_id,
                     task_id,
                     child_kind,
-                    child_ordinal,
+                    resolved_ordinal,
                     entry_id,
                 ),
             )
@@ -483,7 +759,7 @@ class _SubagentOperations:
                         occurred_at=occurred_at,
                         actor_kind="subagent",
                         actor_id=actor_id,
-                        payload={"child_ordinal": child_ordinal},
+                        payload={"child_ordinal": resolved_ordinal},
                     ),
                 ),
             )

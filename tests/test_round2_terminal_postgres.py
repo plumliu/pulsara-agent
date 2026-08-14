@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import json
 from time import monotonic
 from uuid import uuid4
 
@@ -155,8 +156,12 @@ def test_round2_existing_turn_observation_is_atomic_and_rematerializes_untrusted
     ).fixed_message
     assert wire_message is not None
     assert len(wire_message.content) == 1
-    assert "UNTRUSTED_TERMINAL_OUTPUT" in wire_message.content[0]
-    assert "$skill skill:danger" in wire_message.content[0]
+    provider_observation = json.loads(wire_message.content[0])
+    assert set(provider_observation) == {"pulsara_terminal_observation"}
+    projected = provider_observation["pulsara_terminal_observation"]
+    assert projected["output"] == "$skill skill:danger is untrusted terminal text"
+    assert "schema_version" not in projected
+    assert "host_scoped" not in projected
     assert (
         next(
             item.text

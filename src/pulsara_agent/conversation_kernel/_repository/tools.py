@@ -206,10 +206,13 @@ class _ToolOperations:
                         tool_call_entry_id, tool_call_id,
                         attempt_id, result_origin_kind,
                         permission_snapshot_fingerprint,
-                        result_entry_id, result_state
+                        result_entry_id, result_state,
+                        observed_at, observation_duration_microseconds,
+                        observation_origin_kind,
+                        tool_reported_duration_microseconds
                     ) VALUES (%s, %s, %s, %s, %s, NULL,
                               'POLICY_NO_ATTEMPT', %s, %s,
-                              'PERMISSION_DENIED')
+                              'PERMISSION_DENIED', %s, NULL, 'POLICY', NULL)
                     """,
                     (
                         result_id,
@@ -219,6 +222,7 @@ class _ToolOperations:
                         tool_call_id,
                         permission_snapshot_fingerprint,
                         result_entry_id,
+                        occurred_at,
                     ),
                 )
                 drafts.append(
@@ -512,10 +516,14 @@ class _ToolOperations:
                     output_artifact_disposition, output_artifact_id,
                     output_artifact_blob_id, output_source_coverage,
                     output_display_kind, output_source_coverage_reason,
-                    output_artifact_unavailability_reason
+                    output_artifact_unavailability_reason,
+                    observed_at, observation_duration_microseconds,
+                    observation_origin_kind,
+                    tool_reported_duration_microseconds
                 ) VALUES (
                     %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s, %s, %s, %s, %s
+                    %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s
                 )
                 """,
                 (
@@ -552,6 +560,10 @@ class _ToolOperations:
                         if candidate.artifact_unavailability_reason is None
                         else candidate.artifact_unavailability_reason.value
                     ),
+                    candidate.observed_at,
+                    candidate.observation_duration_microseconds,
+                    candidate.observation_origin_kind.value,
+                    candidate.trusted_tool_reported_duration_microseconds,
                 ),
             )
             event_drafts = [candidate.tool_result_occurrence]
@@ -702,6 +714,13 @@ class _ToolOperations:
                     if candidate.artifact_unavailability_reason is None
                     else candidate.artifact_unavailability_reason.value
                 )
+                or result["observed_at"] != candidate.observed_at
+                or result["observation_duration_microseconds"]
+                != candidate.observation_duration_microseconds
+                or str(result["observation_origin_kind"])
+                != candidate.observation_origin_kind.value
+                or result["tool_reported_duration_microseconds"]
+                != candidate.trusted_tool_reported_duration_microseconds
             ):
                 raise ConversationKernelConflict(
                     "tool result identity names a different winner"
@@ -1081,10 +1100,13 @@ class _ToolOperations:
                         tool_call_entry_id, tool_call_id,
                         attempt_id, result_origin_kind,
                         permission_snapshot_fingerprint,
-                        result_entry_id, result_state
+                        result_entry_id, result_state,
+                        observed_at, observation_duration_microseconds,
+                        observation_origin_kind,
+                        tool_reported_duration_microseconds
                     ) VALUES (%s, %s, %s, %s, %s, NULL,
                               'POLICY_NO_ATTEMPT', %s, %s,
-                              'PERMISSION_DENIED')
+                              'PERMISSION_DENIED', %s, NULL, 'POLICY', NULL)
                     """,
                     (
                         result_id,
@@ -1094,6 +1116,7 @@ class _ToolOperations:
                         tool_call_id,
                         permission_snapshot_fingerprint,
                         result_entry_id,
+                        occurred_at,
                     ),
                 )
                 drafts.append(

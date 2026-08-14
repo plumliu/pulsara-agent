@@ -1486,6 +1486,9 @@ def _snapshot(
         gap_before_output=snapshot.gap_before_output,
         truncated_by_response_bound=snapshot.truncated_by_response_bound,
         source_coverage=snapshot.source_coverage,
+        trusted_process_duration_microseconds=max(
+            0, int(((state.ended_at or monotonic()) - state.started_at) * 1_000_000)
+        ),
     )
 
 

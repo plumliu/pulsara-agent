@@ -174,8 +174,8 @@ git grep -n 'TerminalMonitorTool' "$PRE_HARD_CUT" -- src tests
 | PHC-10 | Hierarchical/batch subagent task graph | **显著退化**：只剩 flat spawn/list/wait/stop | 依赖任务、批量调度、child phase/result reporting 与 task-board 语义消失 |
 | PHC-11 | Standalone Canonical Inspector 产品入口 | **并入Go TUI，不单独恢复**：历史Inspector已消失；canonical query/Protocol后端按TUI需要保留和补齐 | 不建设第二套Inspector UI、read model或durable projection；会话观察最终由Go TUI呈现 |
 | PHC-12 | Frozen Legacy Python REPL 产品面 | **明确退役，不恢复兼容**：旧命令差异只作hard-cut审计记录 | approval、plan、MCP等仍有价值的产品语义归各自能力族，并最终通过Go TUI交互，不为旧命令表复建Runtime机制 |
-| PHC-13 | 跨 turn 失败/中断提示 | **缺失**：turn 可标 interrupted，但下一轮 provider context 没有明确失败旁注 | “继续”时模型无法区分上一轮完整回答与空/半截失败输出 |
-| PHC-14 | Model-visible tool observation timing/freshness | **缺失**：数据库时间仍可能存在，但不再进入 provider-visible typed observation | 模型无法判断旧工具结果何时观测、耗时多久、是否可能过期 |
+| PHC-13 | 跨 turn 失败/中断提示 | **已恢复（Round 7）**：same-scope immediate predecessor在同一canonical cut中形成bounded、脱敏、typed outcome；成功successor遮蔽更早失败，late result只追加修正 | “继续”时模型可区分user stop、Runtime/provider failure、Host lifecycle、resource boundary与unknown interruption，不把完整canonical entry误称为partial message |
+| PHC-14 | Model-visible tool observation timing/freshness | **已恢复（Round 7）**：既有`tool_results`冻结observed time、monotonic duration、immutable origin与optional trusted duration；每turn追加freshness frontier而不回写旧result | 模型可判断观测时刻、耗时及CURRENT/PREVIOUS/HISTORICAL关系，tool body不能伪造outer timing |
 | PHC-15 | Capability catalog 与真实 executor 一致性 | **仍不闭合，但Plan漂移已由Round 4关闭**：29 个descriptor中，9个direct、4个flat subagent、8个memory及3个Plan control已有production binding；剩余5个均属于旧hierarchical task-graph缺口 | Round 1/2/4已分别闭合`artifact_read`、Terminal与Plan；dead descriptor只剩PHC-10任务图能力族 |
 | PHC-16 | Go TUI S1–S3及各恢复轮次UI | **未来主要产品面，整体明确延后；Round 3.1有窄例外**：Round 4只冻结Python Protocol/canonical边界，不把Go selector、question/draft review或客户端exact-join计入activation；Round 3.1仅补既有command kind上的busy Enter steer与Tab queue-next-turn | 最终承接会话观察、交互与控制；composer/copy/paste/notice及Plan/MCP等能力族UI另行实施 |
 | PHC-17 | Structured model-input / context compilation | **已恢复（Round 3 + Round 3.1）**：exact canonical reader、provider-neutral compiler、scope-frozen tool surface、target estimator与typed allocation已恢复；Host-scoped ROOT/child epoch保证同scope同epoch的SYSTEM/tools不变、messages只追加，dynamic source与历史tool-result表示不再重写 | busy `Enter` steer exact active ROOT，`Tab`排队future `NEW_TURN`；Host replacement从canonical rows冷启动，不恢复durable generation、provider remote state或prefix replay |
@@ -904,16 +904,16 @@ ordinary prompt、detach/quit 也仍可用。
 - 用户说“继续”时，模型知道应从保留的输入继续，而不是把半截 reply 当完整结论；
 - 新er successful turn 会使旧 note 不再反复注入。
 
-当前新 Kernel 会把异常 turn 标记为 `INTERRUPTED`，并为未闭合 tool call 生成 provider-only closure；这是正确的 canonical/effect continuity。但 provider input item vocabulary 没有“previous turn failed/interrupted note”，普通 model/provider failure 也未被转成 model-visible explanation。
+Round 7已在当前Kernel上恢复该语义：canonical reader在同一个
+`REPEATABLE READ` cut中选择same-scope immediate predecessor，并冻结bounded、脱敏的
+`PREVIOUS_TURN_OUTCOME` fact；compiler只追加typed runtime observation。user stop、
+Runtime/provider failure、Host close/takeover、resource boundary与unknown interruption使用closed
+分类；成功successor使更早failure不再成为current guidance。no-attempt与attempt-without-result分别表达
+“未dispatch”与“effect可能unknown”，raw exception、arguments、private URL和transport detail均不进入
+provider正文。late exact result只在首个覆盖它的新cut中追加修正，不修改已安装prefix。
 
-具体缺失是：
-
-- 下一轮模型看见旧 user/assistant entries，却未必知道上一轮 terminal outcome；
-- 空 assistant 或部分 assistant text 可能被误解为正常完成；
-- “继续”需要模型自行猜测上一次为什么停止；
-- tool-call closure 只修复 provider wire pairing，不能代替对整个 turn 失败的用户/模型语义说明。
-
-本项不要求恢复 coroutine 或 execution replay；它记录的是 canonical history lowering 时丢失的产品语义。
+该恢复没有引入coroutine/execution replay、failure-note relation、receipt、checkpoint或repair owner；
+tool-call closure继续只负责native provider pairing，previous-turn source只负责turn-level解释。
 
 ### 12.1 hard-cut前failure-note参考代码
 
@@ -934,14 +934,15 @@ ordinary prompt、detach/quit 也仍可用。
 - freshness，例如 current turn/current run tail/historical；
 - compaction 后旧 observation 的时间归属。
 
-当前 canonical rows 仍保存若干 `accepted_at`/`started_at` 时间，但 provider input lowering主要输出 tool result text，不再形成上述统一的 model-visible typed observation。
+Round 7已把该语义收回existing `tool_results` relation：`observed_at`、单一monotonic
+clock产生的observation duration、exact executor binding决定的immutable origin，以及optional trusted
+tool-reported duration均在result acceptance时冻结。provider-visible tool result使用独立closed outer
+observation envelope，remote/tool body只能作为string data，不能伪造timing。
 
-具体产品退化：
-
-- 模型难以判断“这个状态是刚查的还是很早以前查的”；
-- 长运行 terminal、网络查询、文件状态、MCP/resource observation 的过期风险不可见；
-- duration 不再帮助判断 timeout、卡住或完成速度；
-- resume/compaction 后，旧 tool result 与当前环境的时间关系不明确。
+freshness不再写回历史result。每个新turn只追加一个小型frontier，将result的stable
+`source_turn_ref`映射为CURRENT_TURN、PREVIOUS_TURN_TAIL或HISTORICAL；因此同Host、同scope、同epoch的
+SYSTEM/tools保持不变，messages严格等于旧prefix或只追加suffix。compaction后的rebase语义仍属于Round
+5B，本轮没有建立跨Hostprefix恢复承诺。
 
 ### 13.1 hard-cut前tool timing参考代码
 

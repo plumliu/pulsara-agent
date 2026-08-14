@@ -10,7 +10,7 @@ from psycopg.rows import dict_row
 import pytest
 
 from pulsara_agent.conversation_kernel.direct_model import DirectKernelModelPort
-from pulsara_agent.conversation_kernel.host import KernelHostCore
+from pulsara_agent.conversation_kernel.host import KernelHostCore, RootChainPhase
 from pulsara_agent.conversation_kernel.repository import (
     ConversationKernelConflict,
     PlanQuestionAnswer,
@@ -708,6 +708,88 @@ def test_round4_force_exit_fences_full_automatic_continuation_before_bind(
         assert successor_row == {"status": "INTERRUPTED"}
         assert len(model.requests) == 1
         await core.close_session(session.host_session_id, close_conversation=True)
+        await core.shutdown()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("operation", "terminal_reason"),
+    (("stop", "USER_STOPPED"), ("close", "SESSION_CLOSED")),
+)
+def test_round7_cancel_during_automatic_plan_pending_handoff_interrupts_successor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stage2_migrated_postgres_database,
+    operation: str,
+    terminal_reason: str,
+) -> None:
+    model = _EnterPlanThenTextModel()
+
+    async def scenario() -> None:
+        core, session = await _open_test_session(
+            tmp_path=tmp_path,
+            model=model,
+            postgres_dsn=stage2_migrated_postgres_database.runtime_dsn,
+            monkeypatch=monkeypatch,
+        )
+        handoff_reached = asyncio.Event()
+        original_finish = session._finish_root_chain  # noqa: SLF001
+
+        async def hold_before_handoff(result, cancellation_intent):
+            if result.continuation_turn_id is not None:
+                handoff_reached.set()
+                await asyncio.Event().wait()
+            return await original_finish(result, cancellation_intent)
+
+        monkeypatch.setattr(session, "_finish_root_chain", hold_before_handoff)
+        running = asyncio.create_task(
+            session.run_turn(
+                "Enter Plan and wait at the ownership handoff.",
+                command_id="command:round7-pending-plan-stop",
+            )
+        )
+        await asyncio.wait_for(handoff_reached.wait(), timeout=5)
+        pending = session._pending_root_successor  # noqa: SLF001
+        assert pending is not None
+        successor_turn_id = pending.successor_turn_id
+        assert session._active_turn_id == pending.origin_turn_id  # noqa: SLF001
+        assert session._active_root_phase is (  # noqa: SLF001
+            RootChainPhase.SUCCESSOR_COMMITTED_PENDING_HANDOFF
+        )
+
+        if operation == "stop":
+            assert await asyncio.wait_for(session.stop_current_turn(), timeout=5)
+        else:
+            await asyncio.wait_for(
+                core.close_session(
+                    session.host_session_id,
+                    close_conversation=True,
+                ),
+                timeout=5,
+            )
+        with pytest.raises(asyncio.CancelledError):
+            await running
+        assert session._active_task is None  # noqa: SLF001
+        assert session._pending_root_successor is None  # noqa: SLF001
+        with session.repository.connection_provider.connection(
+            lane=PostgresConnectionLane.INSPECTOR,
+            row_factory=dict_row,
+            deadline_monotonic=monotonic() + 5,
+        ) as connection:
+            successor = connection.execute(
+                "SELECT status, terminal_reason FROM pulsara_v3.turns "
+                "WHERE session_id = %s AND id = %s",
+                (session.session_id, successor_turn_id),
+            ).fetchone()
+        assert successor == {
+            "status": "INTERRUPTED",
+            "terminal_reason": terminal_reason,
+        }
+        if operation == "stop":
+            await core.close_session(
+                session.host_session_id, close_conversation=True
+            )
         await core.shutdown()
 
     asyncio.run(scenario())

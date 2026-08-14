@@ -18,6 +18,11 @@ from pulsara_agent.ports.tool_execution import FrozenToolJsonDict, ToolOutputSou
 from pulsara_agent.primitives.context import FrozenJsonObjectFact, thaw_json
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.primitives.run_permission import FrozenRunPermissionSnapshot
+from pulsara_agent.primitives.tool_observation import (
+    ToolObservationOrigin,
+    canonical_utc_timestamp,
+    normalize_observation_duration,
+)
 from pulsara_agent.primitives.plan_workflow import PLAN_ENTRY_CONTRACT, ExtractedPlanDraft, PlanDraftDecision, PlanHandoffKind, PlanInteractionBinding, PlanInteractionKind, PlanQuestionAnswerKind, PlanQuestionContent, PlanWorkflowStatus, require_plan_interaction_contract
 from pulsara_agent.conversation_kernel.vocabulary import CommittedEventType, SubjectSlot
 from pulsara_agent.conversation_kernel.steer import PromptIngressWriteRejection
@@ -112,6 +117,7 @@ class AcceptedEntry:
 class TurnAdmissionConfirmationKind(StrEnum):
     FULL = "FULL"
     NONE = "NONE"
+    HISTORICAL_TERMINAL = "HISTORICAL_TERMINAL"
     CONFLICT = "CONFLICT"
 
 
@@ -244,9 +250,11 @@ class TurnAdmissionConfirmation:
     accepted: AcceptedEntry | None = None
 
     def __post_init__(self) -> None:
-        if (self.kind is TurnAdmissionConfirmationKind.FULL) != (
-            self.accepted is not None
-        ):
+        carries_entry = self.kind in {
+            TurnAdmissionConfirmationKind.FULL,
+            TurnAdmissionConfirmationKind.HISTORICAL_TERMINAL,
+        }
+        if carries_entry != (self.accepted is not None):
             raise ValueError("turn admission confirmation union is invalid")
 
 
@@ -387,8 +395,11 @@ class PreparedToolResultAcceptance:
     display_kind: ToolResultDisplayKind
     source_coverage_reason: ToolOutputSourceCoverageReason | None
     artifact_unavailability_reason: ToolOutputArtifactUnavailabilityReason | None
+    observed_at: datetime
+    observation_duration_microseconds: int | None
+    observation_origin_kind: ToolObservationOrigin
+    trusted_tool_reported_duration_microseconds: int | None
     actor_id: str
-    occurred_at: datetime
     tool_result_occurrence: CommittedEventDraft
     side_branch: ToolResultSideBranch
     candidate_fingerprint: str = field(init=False)
@@ -439,6 +450,36 @@ class PreparedToolResultAcceptance:
             raise ValueError("prepared tool result coverage is inconsistent")
         if self.canonical_preview_content.size > 65_536:
             raise ValueError("prepared tool result preview exceeds its hard bound")
+        canonical_utc_timestamp(self.observed_at)
+        if self.observation_duration_microseconds != normalize_observation_duration(
+            self.observation_duration_microseconds
+        ):
+            raise ValueError("prepared tool observation duration is invalid")
+        if self.trusted_tool_reported_duration_microseconds != (
+            normalize_observation_duration(
+                self.trusted_tool_reported_duration_microseconds
+            )
+        ):
+            raise ValueError("prepared trusted tool duration is invalid")
+        nonphysical = self.attempt_id is None
+        if nonphysical:
+            expected_origin = (
+                ToolObservationOrigin.PLAN_CONTROL
+                if self.result_state in {"SUCCESS", "APPLICATION_ERROR"}
+                and self.observation_origin_kind is ToolObservationOrigin.PLAN_CONTROL
+                else ToolObservationOrigin.POLICY
+            )
+            if (
+                self.observation_origin_kind is not expected_origin
+                or self.observation_duration_microseconds is not None
+                or self.trusted_tool_reported_duration_microseconds is not None
+            ):
+                raise ValueError("prepared nonphysical observation is inconsistent")
+        elif self.observation_origin_kind in {
+            ToolObservationOrigin.POLICY,
+            ToolObservationOrigin.PLAN_CONTROL,
+        }:
+            raise ValueError("prepared physical result has a nonphysical origin")
         if self.artifact_disposition is ToolOutputArtifactDisposition.NOT_REQUIRED:
             if self.source_coverage is not ToolOutputSourceCoverage.COMPLETE:
                 raise ValueError("not-required artifact must own complete source")
@@ -468,7 +509,7 @@ class PreparedToolResultAcceptance:
             or occurrence.actor_id != self.actor_id
             or occurrence.sensitivity_class != "PUBLIC"
             or occurrence.projection_profile != "DEFAULT"
-            or occurrence.occurred_at != self.occurred_at
+            or occurrence.occurred_at != self.observed_at
             or dict(occurrence.payload)
             != {
                 "tool_call_id": self.tool_call_id,
@@ -496,7 +537,7 @@ class PreparedToolResultAcceptance:
                 or side_event.actor_kind != "runtime"
                 or side_event.sensitivity_class != "PUBLIC"
                 or side_event.projection_profile != "DEFAULT"
-                or side_event.occurred_at != self.occurred_at
+                or side_event.occurred_at != self.observed_at
                 or dict(side_event.payload)
                 != {"handler_type": self.side_branch.job_handler_type}
             ):
@@ -1377,8 +1418,15 @@ def _prepared_tool_result_manifest(
             if candidate.artifact_unavailability_reason is None
             else candidate.artifact_unavailability_reason.value
         ),
+        "observed_at": canonical_utc_timestamp(candidate.observed_at),
+        "observation_duration_microseconds": (
+            candidate.observation_duration_microseconds
+        ),
+        "observation_origin_kind": candidate.observation_origin_kind.value,
+        "trusted_tool_reported_duration_microseconds": (
+            candidate.trusted_tool_reported_duration_microseconds
+        ),
         "actor_id": candidate.actor_id,
-        "occurred_at": candidate.occurred_at.isoformat(),
         "tool_result_occurrence": _event_manifest(candidate.tool_result_occurrence),
         "side_branch": side_payload,
     }
@@ -1403,8 +1451,11 @@ def build_prepared_tool_result_acceptance(
     display_kind: ToolResultDisplayKind,
     source_coverage_reason: ToolOutputSourceCoverageReason | None,
     artifact_unavailability_reason: (ToolOutputArtifactUnavailabilityReason | None),
+    observed_at: datetime,
+    observation_duration_microseconds: int | None,
+    observation_origin_kind: ToolObservationOrigin,
+    trusted_tool_reported_duration_microseconds: int | None,
     actor_id: str,
-    occurred_at: datetime,
     memory_candidate_id: str | None = None,
     memory_proposal_kind: str | None = None,
     memory_proposal_payload: Mapping[str, object] | None = None,
@@ -1420,7 +1471,7 @@ def build_prepared_tool_result_acceptance(
         actor_id=actor_id,
         sensitivity_class="PUBLIC",
         projection_profile="DEFAULT",
-        occurred_at=occurred_at,
+        occurred_at=observed_at,
         payload={"tool_call_id": tool_call_id, "result_state": result_state},
     )
     memory_fields = (
@@ -1473,7 +1524,7 @@ def build_prepared_tool_result_acceptance(
             attempt_timeout_ms=governance.attempt_timeout_ms,
             provider_input_token_limit_per_attempt=governance.input_token_limit,
             provider_output_token_limit_per_attempt=governance.output_token_limit,
-            next_eligible_at=occurred_at,
+            next_eligible_at=observed_at,
             job_queued_occurrence=CommittedEventDraft(
                 event_id=_stable_identity(
                     "event", memory_governance_job_id, "JobQueued"
@@ -1486,7 +1537,7 @@ def build_prepared_tool_result_acceptance(
                 actor_id=guard.writer_owner_id,
                 sensitivity_class="PUBLIC",
                 projection_profile="DEFAULT",
-                occurred_at=occurred_at,
+                occurred_at=observed_at,
                 payload={"handler_type": MEMORY_GOVERNANCE},
             ),
         )
@@ -1508,8 +1559,13 @@ def build_prepared_tool_result_acceptance(
         display_kind=display_kind,
         source_coverage_reason=source_coverage_reason,
         artifact_unavailability_reason=artifact_unavailability_reason,
+        observed_at=observed_at,
+        observation_duration_microseconds=observation_duration_microseconds,
+        observation_origin_kind=observation_origin_kind,
+        trusted_tool_reported_duration_microseconds=(
+            trusted_tool_reported_duration_microseconds
+        ),
         actor_id=actor_id,
-        occurred_at=occurred_at,
         tool_result_occurrence=tool_result_occurrence,
         side_branch=side_branch,
     )

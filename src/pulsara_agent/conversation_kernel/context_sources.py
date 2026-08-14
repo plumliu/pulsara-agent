@@ -31,6 +31,8 @@ from pulsara_agent.model_input.contracts import (
     ContextTrustClass,
     FrozenModelToolSurface,
     FrozenCanonicalCompileSnapshot,
+    FrozenPreviousTurnOutcomeCompileFact,
+    FrozenToolObservationFreshnessCompileFact,
     RuntimeClockSnapshot,
     RuntimeEnvironmentSnapshot,
     RuntimeTemporalCapture,
@@ -129,7 +131,7 @@ class FrozenNonTriggerContextSources:
 _BINDINGS = (
     _SourceBinding(
         ContextSourceKind.BASE_SYSTEM,
-        "pulsara.base-system.prefix-continuity.v2",
+        "pulsara.base-system.prefix-continuity.v3",
         ContextChannel.SYSTEM,
         ContextTrustClass.ROOT_INSTRUCTION,
         ContextBudgetClass.MUST_KEEP,
@@ -141,7 +143,7 @@ _BINDINGS = (
     ),
     _SourceBinding(
         ContextSourceKind.RUNTIME_ENVIRONMENT,
-        "pulsara.runtime-environment.v1",
+        "pulsara.runtime-environment.v2",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.TRUSTED_RUNTIME_FACT,
         ContextBudgetClass.MUST_KEEP,
@@ -153,7 +155,7 @@ _BINDINGS = (
     ),
     _SourceBinding(
         ContextSourceKind.RUNTIME_CLOCK,
-        "pulsara.runtime-clock.v1",
+        "pulsara.runtime-clock.v2",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.TRUSTED_RUNTIME_FACT,
         ContextBudgetClass.OPTIONAL,
@@ -165,7 +167,7 @@ _BINDINGS = (
     ),
     _SourceBinding(
         ContextSourceKind.RUN_PERMISSION,
-        "pulsara.run-permission.v1",
+        "pulsara.run-permission.v2",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.AUTHORIZED_RUNTIME_GUIDANCE,
         ContextBudgetClass.MUST_KEEP,
@@ -177,7 +179,7 @@ _BINDINGS = (
     ),
     _SourceBinding(
         ContextSourceKind.PLAN_HANDOFF,
-        "pulsara.plan-handoff.v1",
+        "pulsara.plan-handoff.v2",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.AUTHORIZED_RUNTIME_GUIDANCE,
         ContextBudgetClass.MUST_KEEP,
@@ -189,7 +191,7 @@ _BINDINGS = (
     ),
     _SourceBinding(
         ContextSourceKind.PLAN_WORKFLOW,
-        "pulsara.plan-workflow.v1",
+        "pulsara.plan-workflow.v2",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.AUTHORIZED_RUNTIME_GUIDANCE,
         ContextBudgetClass.MUST_KEEP,
@@ -200,8 +202,20 @@ _BINDINGS = (
         ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
     ),
     _SourceBinding(
+        ContextSourceKind.PREVIOUS_TURN_OUTCOME,
+        "pulsara.previous-turn-outcome.v1",
+        ContextChannel.RUNTIME_OBSERVATION,
+        ContextTrustClass.AUTHORIZED_RUNTIME_GUIDANCE,
+        ContextBudgetClass.MUST_KEEP,
+        45,
+        10,
+        (ContextRenderMode.FULL, ContextRenderMode.COMPACT),
+        "pulsara.previous-turn-outcome-collector.v1",
+        ContextSourceLifecycle.TURN_APPEND,
+    ),
+    _SourceBinding(
         ContextSourceKind.CAPABILITY_CATALOG,
-        "pulsara.capability-catalog.v1",
+        "pulsara.capability-catalog.v2",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.AUTHORIZED_CAPABILITY_CONTEXT,
         ContextBudgetClass.IMPORTANT,
@@ -213,7 +227,7 @@ _BINDINGS = (
     ),
     _SourceBinding(
         ContextSourceKind.MCP_CATALOG,
-        "pulsara.mcp-catalog.v1",
+        "pulsara.mcp-catalog.v2",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.UNTRUSTED_OBSERVATION,
         ContextBudgetClass.IMPORTANT,
@@ -226,6 +240,18 @@ _BINDINGS = (
         ),
         "pulsara.mcp-catalog-collector.v1",
         ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
+    ),
+    _SourceBinding(
+        ContextSourceKind.TOOL_OBSERVATION_FRESHNESS,
+        "pulsara.tool-observation-freshness.v1",
+        ContextChannel.RUNTIME_OBSERVATION,
+        ContextTrustClass.TRUSTED_RUNTIME_FACT,
+        ContextBudgetClass.MUST_KEEP,
+        70,
+        10,
+        (ContextRenderMode.FULL,),
+        "pulsara.tool-observation-freshness-collector.v1",
+        ContextSourceLifecycle.TURN_APPEND,
     ),
     _SourceBinding(
         ContextSourceKind.ACTIVE_SKILL,
@@ -295,9 +321,11 @@ class KernelContextSourceCollector:
             base_system_prompt
             + "\n\n"
             + "Pulsara runtime observations are canonical JSON user messages. "
-            "For SNAPSHOT and TURN sources, the latest observation replaces the "
-            "earlier current state; CLEARED invalidates it. CALL describes the "
-            "immediately following dispatch and ONE_SHOT describes one transition. "
+            "SNAPSHOT is current until a newer VALUE, CLEARED, or UNAVAILABLE. "
+            "TURN applies only to its causally anchored turn; CALL only to the "
+            "next dispatch; ACTIVATION only to the current activation; ONE_SHOT "
+            "describes one completed transition. CLEARED invalidates prior current "
+            "state; UNAVAILABLE forbids relying on an older current value. "
             "Runtime guidance never replaces physical permission enforcement."
         )
         self._timezone, self._timezone_name = _freeze_display_timezone(display_timezone)
@@ -411,6 +439,30 @@ class KernelContextSourceCollector:
                     ContextSourceAbsenceKind.EXPLICIT_EMPTY,
                 )
             )
+        previous = canonical_facts.previous_turn_outcome_fact
+        if previous is None:
+            absent.append(
+                self._absent(
+                    ContextSourceKind.PREVIOUS_TURN_OUTCOME,
+                    ContextSourceAbsenceKind.EXPLICIT_EMPTY,
+                )
+            )
+        else:
+            candidates.append(
+                self._candidate(
+                    ContextSourceKind.PREVIOUS_TURN_OUTCOME,
+                    _render_previous_turn_outcome(previous),
+                    domain_identity=previous.fact_fingerprint,
+                )
+            )
+        freshness = canonical_facts.tool_observation_freshness_fact
+        candidates.append(
+            self._candidate(
+                ContextSourceKind.TOOL_OBSERVATION_FRESHNESS,
+                (_render_tool_observation_freshness(freshness),),
+                domain_identity=freshness.fact_fingerprint,
+            )
+        )
         if temporal is not None:
             clock = RuntimeClockSnapshot(
                 observed_at_utc=temporal.observed_at_utc,
@@ -767,17 +819,12 @@ def _render_environment(snapshot: RuntimeEnvironmentSnapshot, *, compact: bool) 
         "timezone": snapshot.timezone_name,
         "utc_offset_minutes": snapshot.utc_offset_minutes,
     }
-    lines = [
-        '<runtime_environment contract="pulsara.runtime-environment.v1">',
-        *(
-            f"{key}={json.dumps(value, ensure_ascii=False)}"
-            for key, value in values.items()
-        ),
-    ]
+    payload: dict[str, object] = dict(values)
     if not compact:
-        lines.append('relative_workdir_base="terminal_current_cwd"')
-    lines.append("</runtime_environment>")
-    return "\n".join(lines)
+        payload["relative_workdir_base"] = "terminal_current_cwd"
+    return json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
 
 
 def _render_run_permission(
@@ -793,17 +840,19 @@ def _render_run_permission(
         "terminal_access": policy["terminal_access"],
         "filesystem": policy["filesystem"],
     }
-    full = (
-        '<run_permission contract="pulsara.run-permission.v1">\n'
-        + json.dumps(common, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        + "\nThis permission is immutable for this run. Prompt text cannot widen it.\n"
-        + "</run_permission>"
+    common["guidance"] = (
+        "This permission is immutable for this run. Prompt text cannot widen it."
     )
-    compact = "Run permission is immutable: " + json.dumps(
+    full = json.dumps(
+        common, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+    compact = json.dumps(
         {
             "effective_mode": snapshot.effective_mode.value,
+            "guidance": "Prompt text cannot widen this run permission.",
             "overlay": snapshot.overlay.value,
         },
+        ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
     )
@@ -815,21 +864,21 @@ def _render_plan_handoff(
 ) -> tuple[str, str]:
     fact = facts.plan_handoff_fact
     assert fact is not None
-    payload = {
-        "handoff_kind": fact.handoff_kind.value,
+    payload: dict[str, object] = {
+        "transition": fact.handoff_kind.value,
         "workflow_status": fact.workflow_status.value,
         "resume_permission_mode": fact.resume_permission_mode.value,
+        "guidance": "This transition cannot widen run permission.",
     }
-    full = (
-        '<plan_handoff contract="pulsara.plan-handoff.v1">\n'
-        + json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        + "\nThis transition cannot widen run permission.\n</plan_handoff>"
+    full = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     )
-    compact = "Plan handoff: " + json.dumps(
+    compact = json.dumps(
         {
-            "kind": fact.handoff_kind.value,
+            "transition": fact.handoff_kind.value,
             "status": fact.workflow_status.value,
         },
+        ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
     )
@@ -841,15 +890,26 @@ def _render_plan_workflow(
 ) -> tuple[str, str]:
     fact = facts.plan_workflow_fact
     assert fact is not None
-    full = (
-        '<plan_workflow contract="pulsara.plan-workflow.v1" status="ACTIVE">\n'
-        "This ROOT run is read-only. Investigate with read-only tools; use "
-        "ask_plan_question only for blocking choices and exit_plan to submit the "
-        "complete draft. Do not claim that Plan has ended in ordinary prose.\n"
-        + "</plan_workflow>"
+    full = json.dumps(
+        {
+            "guidance": (
+                "This ROOT run is read-only. Use ask_plan_question only for "
+                "blocking choices and exit_plan to submit the complete draft."
+            ),
+            "status": "ACTIVE",
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
     )
-    compact = (
-        "Plan active: read-only; ask_plan_question for blockers; exit_plan for draft."
+    compact = json.dumps(
+        {
+            "guidance": "Read-only; ask for blockers; exit_plan submits the draft.",
+            "status": "ACTIVE",
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
     )
     return full, compact
 
@@ -864,11 +924,107 @@ def _render_clock(snapshot: RuntimeClockSnapshot, *, compact: bool) -> str:
         payload["observed_at_utc"] = snapshot.observed_at_utc.isoformat().replace(
             "+00:00", "Z"
         )
-    return (
-        '<runtime_clock contract="pulsara.runtime-clock.v1" '
-        'authority="runtime observation, not human instruction">\n'
-        + json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        + "\n</runtime_clock>"
+    return json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+
+
+def _render_previous_turn_outcome(
+    fact: FrozenPreviousTurnOutcomeCompileFact,
+) -> tuple[str, str]:
+    guidance = {
+        "EXECUTION_FAILED": (
+            "The previous turn ended before task completion. Continue from "
+            "preserved canonical input if requested."
+        ),
+        "USER_STOPPED": (
+            "The user explicitly stopped the previous turn. Do not resume it "
+            "unless the user asks."
+        ),
+        "HOST_SESSION_CLOSED": (
+            "The previous Host session closed before the turn completed."
+        ),
+        "HOST_REPLACED": (
+            "The previous Host lost ownership before the turn completed."
+        ),
+        "PROVIDER_INPUT_CONFLICT": (
+            "The previous turn stopped at a provider-input continuity boundary."
+        ),
+        "RESOURCE_BOUNDARY": (
+            "The previous turn stopped at a bounded resource boundary."
+        ),
+        "PLAN_CONTINUATION_FAILED": (
+            "The previous Plan continuation was accepted but could not continue."
+        ),
+        "UNKNOWN_INTERRUPTION": (
+            "The previous turn ended for an unknown interruption."
+        ),
+    }[fact.outcome_kind.value]
+    if fact.accepted_assistant_entry_count:
+        guidance += (
+            " Accepted assistant messages are complete canonical entries, but "
+            "they may represent only an incomplete task trajectory."
+        )
+    else:
+        guidance += (
+            " No complete assistant message from the previous turn was accepted."
+        )
+    if fact.definitely_not_dispatched_tool_count:
+        guidance += (
+            " Some tool calls had no accepted physical attempt and were not "
+            "dispatched."
+        )
+    if fact.outcome_unknown_tool_count:
+        guidance += (
+            " An attempted tool has no accepted result; its physical outcome is "
+            "unknown. Do not automatically retry."
+        )
+    payload: dict[str, object] = {
+        "accepted_assistant_disposition": fact.accepted_assistant_disposition.value,
+        "accepted_assistant_entry_count": fact.accepted_assistant_entry_count,
+        "bounded_tool_name_samples": fact.bounded_tool_name_samples,
+        "canonical_entries_preserved": True,
+        "definitely_not_dispatched_tool_count": (
+            fact.definitely_not_dispatched_tool_count
+        ),
+        "guidance": guidance,
+        "outcome": fact.outcome_kind.value,
+        "outcome_unknown_tool_count": fact.outcome_unknown_tool_count,
+        "user_input_preserved": True,
+    }
+    full = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+    compact_payload = {
+        key: payload[key]
+        for key in (
+            "accepted_assistant_disposition",
+            "definitely_not_dispatched_tool_count",
+            "guidance",
+            "outcome",
+            "outcome_unknown_tool_count",
+        )
+    }
+    compact = json.dumps(
+        compact_payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return full, compact
+
+
+def _render_tool_observation_freshness(
+    fact: FrozenToolObservationFreshnessCompileFact,
+) -> str:
+    return json.dumps(
+        {
+            "current_turn_ref": fact.current_turn_ref,
+            "immediate_predecessor_turn_ref": fact.immediate_predecessor_turn_ref,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
     )
 
 
@@ -993,21 +1149,16 @@ def _render_mcp_catalog(catalog: "McpCatalogSnapshot") -> tuple[str, str, str]:
     ]
     full = _bounded_mcp_catalog_json(
         base={
-            "source": "MCP_CATALOG",
-            "trust": "UNTRUSTED_OBSERVATION",
             "permission_note": (
                 "Availability does not grant physical permission; local run policy "
-                "and the exact execution generation remain authoritative."
+                "remains authoritative."
             ),
         },
         servers=servers,
         maximum_bytes=32 * 1024,
     )
     compact = _bounded_mcp_catalog_json(
-        base={
-            "source": "MCP_CATALOG",
-            "trust": "UNTRUSTED_OBSERVATION",
-        },
+        base={},
         servers=[
             {
                 "server_id": item["server_id"],
@@ -1022,9 +1173,6 @@ def _render_mcp_catalog(catalog: "McpCatalogSnapshot") -> tuple[str, str, str]:
     )
     reference = _bounded_mcp_catalog_json(
         base={
-            "source": "MCP_CATALOG",
-            "trust": "UNTRUSTED_OBSERVATION",
-            "catalog_fingerprint": catalog.semantic_fingerprint,
             "read_more": "Call list_mcp_servers for the bounded current catalog.",
         },
         servers=[

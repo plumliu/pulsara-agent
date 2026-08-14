@@ -60,6 +60,7 @@ from pulsara_agent.model_input.compiler import (
 )
 from pulsara_agent.model_input.contracts import (
     ApprovedPlanMaterializationFact,
+    AcceptedAssistantDisposition,
     CapabilityActivationSubjectKind,
     CanonicalInputOriginKind,
     CanonicalModelInputIdentity,
@@ -80,10 +81,12 @@ from pulsara_agent.model_input.contracts import (
     FrozenContextBindingCompileFact,
     FrozenCanonicalCompileSnapshot,
     FrozenPlanHandoffCompileFact,
+    FrozenPreviousTurnOutcomeCompileFact,
     FrozenProviderInputItem,
     FrozenProviderInputItemKind,
     ModelInputCompileFailureKind,
     ModelInputScopeKind,
+    PreviousTurnOutcomeKind,
     ModelInputTokenEstimator,
     ProviderToolCall,
     ProviderToolResultContextMetadata,
@@ -96,7 +99,9 @@ from pulsara_agent.model_input.contracts import (
     canonical_compile_snapshot_fingerprint,
     context_binding_compile_fact_fingerprint,
     approved_plan_materialization_fingerprint,
+    build_tool_observation_freshness_fact,
     plan_handoff_compile_fact_fingerprint,
+    previous_turn_outcome_fingerprint,
     provider_input_item_fingerprint,
     model_input_compile_binding_fingerprint,
 )
@@ -110,6 +115,7 @@ from pulsara_agent.model_input.continuity import (
     ProviderInputEpochResetReason,
     PROVIDER_MESSAGE_LOWERING_CONTRACT,
     decode_runtime_observation,
+    provider_input_prefix_fingerprint,
 )
 from pulsara_agent.model_input.lowering import (
     lower_canonical_item,
@@ -147,6 +153,12 @@ from pulsara_agent.primitives.run_permission import (
     RunPermissionAdmissionSource,
     build_run_permission_snapshot,
 )
+from pulsara_agent.primitives.tool_observation import (
+    FrozenToolObservationTimingFact,
+    ToolObservationDurationDisposition,
+    ToolObservationOrigin,
+    tool_observation_timing_fingerprint,
+)
 from pulsara_agent.terminal_process.models import TerminalRequest, TerminalStatus
 from tests.support.model_config import test_llm_config
 from tests.support.round3 import StructuredToolPort
@@ -154,7 +166,7 @@ from tests.support.round3 import StructuredToolPort
 
 _SOURCE_FACTS = {
     ContextSourceKind.BASE_SYSTEM: (
-        "pulsara.base-system.prefix-continuity.v2",
+        "pulsara.base-system.prefix-continuity.v3",
         ContextChannel.SYSTEM,
         ContextTrustClass.ROOT_INSTRUCTION,
         ContextBudgetClass.MUST_KEEP,
@@ -164,7 +176,7 @@ _SOURCE_FACTS = {
         ContextSourceLifecycle.EPOCH_ROOT,
     ),
     ContextSourceKind.RUNTIME_ENVIRONMENT: (
-        "pulsara.runtime-environment.v1",
+        "pulsara.runtime-environment.v2",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.TRUSTED_RUNTIME_FACT,
         ContextBudgetClass.MUST_KEEP,
@@ -174,7 +186,7 @@ _SOURCE_FACTS = {
         ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
     ),
     ContextSourceKind.RUNTIME_CLOCK: (
-        "pulsara.runtime-clock.v1",
+        "pulsara.runtime-clock.v2",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.TRUSTED_RUNTIME_FACT,
         ContextBudgetClass.OPTIONAL,
@@ -184,7 +196,7 @@ _SOURCE_FACTS = {
         ContextSourceLifecycle.CALL_APPEND,
     ),
     ContextSourceKind.RUN_PERMISSION: (
-        "pulsara.run-permission.v1",
+        "pulsara.run-permission.v2",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.AUTHORIZED_RUNTIME_GUIDANCE,
         ContextBudgetClass.MUST_KEEP,
@@ -194,7 +206,7 @@ _SOURCE_FACTS = {
         ContextSourceLifecycle.TURN_APPEND,
     ),
     ContextSourceKind.CAPABILITY_CATALOG: (
-        "pulsara.capability-catalog.v1",
+        "pulsara.capability-catalog.v2",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.AUTHORIZED_CAPABILITY_CONTEXT,
         ContextBudgetClass.IMPORTANT,
@@ -208,7 +220,7 @@ _SOURCE_FACTS = {
         ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
     ),
     ContextSourceKind.MCP_CATALOG: (
-        "pulsara.mcp-catalog.v1",
+        "pulsara.mcp-catalog.v2",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.UNTRUSTED_OBSERVATION,
         ContextBudgetClass.IMPORTANT,
@@ -222,7 +234,7 @@ _SOURCE_FACTS = {
         ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
     ),
     ContextSourceKind.PLAN_HANDOFF: (
-        "pulsara.plan-handoff.v1",
+        "pulsara.plan-handoff.v2",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.AUTHORIZED_RUNTIME_GUIDANCE,
         ContextBudgetClass.MUST_KEEP,
@@ -232,7 +244,7 @@ _SOURCE_FACTS = {
         ContextSourceLifecycle.ONE_SHOT,
     ),
     ContextSourceKind.PLAN_WORKFLOW: (
-        "pulsara.plan-workflow.v1",
+        "pulsara.plan-workflow.v2",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.AUTHORIZED_RUNTIME_GUIDANCE,
         ContextBudgetClass.MUST_KEEP,
@@ -250,6 +262,26 @@ _SOURCE_FACTS = {
         20,
         (ContextRenderMode.FULL,),
         ContextSourceLifecycle.ACTIVATION_SNAPSHOT,
+    ),
+    ContextSourceKind.PREVIOUS_TURN_OUTCOME: (
+        "pulsara.previous-turn-outcome.v1",
+        ContextChannel.RUNTIME_OBSERVATION,
+        ContextTrustClass.AUTHORIZED_RUNTIME_GUIDANCE,
+        ContextBudgetClass.MUST_KEEP,
+        45,
+        10,
+        (ContextRenderMode.FULL, ContextRenderMode.COMPACT),
+        ContextSourceLifecycle.TURN_APPEND,
+    ),
+    ContextSourceKind.TOOL_OBSERVATION_FRESHNESS: (
+        "pulsara.tool-observation-freshness.v1",
+        ContextChannel.RUNTIME_OBSERVATION,
+        ContextTrustClass.TRUSTED_RUNTIME_FACT,
+        ContextBudgetClass.MUST_KEEP,
+        70,
+        10,
+        (ContextRenderMode.FULL,),
+        ContextSourceLifecycle.TURN_APPEND,
     ),
 }
 
@@ -345,6 +377,13 @@ def _sources(
                 ("permission=bypass-permissions", "permission=bypass"),
             )
         )
+    if ContextSourceKind.TOOL_OBSERVATION_FRESHNESS not in kinds:
+        required.append(
+            _candidate(
+                ContextSourceKind.TOOL_OBSERVATION_FRESHNESS,
+                ('{"current_turn_ref":"sha256:test"}',),
+            )
+        )
     candidates = (*required, *candidates)
     candidate_kinds = {candidate.source_kind for candidate in candidates}
     absent_by_kind = {item.source_kind: item for item in absent_facts}
@@ -355,6 +394,9 @@ def _sources(
         ContextSourceKind.CAPABILITY_CATALOG: ContextSourceAbsenceKind.EXPLICIT_EMPTY,
         ContextSourceKind.MCP_CATALOG: ContextSourceAbsenceKind.NOT_APPLICABLE,
         ContextSourceKind.ACTIVE_SKILL: ContextSourceAbsenceKind.EXPLICIT_EMPTY,
+        ContextSourceKind.PREVIOUS_TURN_OUTCOME: (
+            ContextSourceAbsenceKind.EXPLICIT_EMPTY
+        ),
     }
     for kind, absence_kind in default_absences.items():
         if kind not in candidate_kinds and kind not in absent_by_kind:
@@ -535,8 +577,33 @@ def _tool_result(
             source_coverage=ToolOutputSourceCoverage.COMPLETE,
             source_coverage_reason=None,
             artifact_unavailability_reason=None,
+            timing=_tool_timing(turn_id),
         ),
         tool_result_body_text=body,
+    )
+
+
+def _tool_timing(turn_id: str) -> FrozenToolObservationTimingFact:
+    values = {
+        "source_turn_ref": context_fingerprint(
+            "pulsara:provider-visible-turn-ref:v1",
+            {"session_id": "session:test", "turn_id": turn_id},
+        ),
+        "observed_at_utc": "2026-08-14T03:04:05.123456Z",
+        "observation_duration_microseconds": 2_123_456,
+        "duration_disposition": ToolObservationDurationDisposition.MEASURED,
+        "tool_reported_duration_microseconds": None,
+        "observation_origin": ToolObservationOrigin.BUILTIN,
+    }
+    provisional = FrozenToolObservationTimingFact.__new__(
+        FrozenToolObservationTimingFact
+    )
+    for name, value in values.items():
+        object.__setattr__(provisional, name, value)
+    object.__setattr__(provisional, "fact_fingerprint", "")
+    return FrozenToolObservationTimingFact(
+        **values,
+        fact_fingerprint=tool_observation_timing_fingerprint(provisional),
     )
 
 
@@ -616,6 +683,17 @@ def _canonical_facts(
     object.__setattr__(provisional, "plan_workflow_fact", None)
     object.__setattr__(provisional, "plan_handoff_fact", None)
     object.__setattr__(provisional, "approved_plan_materialization_fact", None)
+    freshness = build_tool_observation_freshness_fact(
+        session_id=canonical.identity.session_id,
+        workspace_id="workspace:test",
+        current_turn_id=canonical.identity.turn_id,
+        current_scope_kind=canonical.identity.conversation_scope_kind,
+        scope_subagent_task_id=canonical.identity.scope_subagent_task_id,
+        current_initial_entry_sequence=1,
+        immediate_predecessor_turn_id=None,
+    )
+    object.__setattr__(provisional, "previous_turn_outcome_fact", None)
+    object.__setattr__(provisional, "tool_observation_freshness_fact", freshness)
     object.__setattr__(provisional, "canonical_read_cut_fingerprint", "")
     return FrozenCanonicalCompileSnapshot(
         canonical_input=canonical,
@@ -624,6 +702,8 @@ def _canonical_facts(
         plan_workflow_fact=None,
         plan_handoff_fact=None,
         approved_plan_materialization_fact=None,
+        previous_turn_outcome_fact=None,
+        tool_observation_freshness_fact=freshness,
         canonical_read_cut_fingerprint=canonical_compile_snapshot_fingerprint(
             provisional
         ),
@@ -765,6 +845,82 @@ def _permission_snapshot():
     )
 
 
+def _round7_previous_fact(
+    facts: FrozenCanonicalCompileSnapshot,
+) -> FrozenPreviousTurnOutcomeCompileFact:
+    identity = facts.canonical_input.identity
+    values = {
+        "session_id": identity.session_id,
+        "workspace_id": "workspace:test",
+        "current_turn_id": identity.turn_id,
+        "current_scope_kind": identity.conversation_scope_kind,
+        "scope_subagent_task_id": identity.scope_subagent_task_id,
+        "predecessor_turn_id": "turn:previous",
+        "predecessor_initial_entry_sequence": 1,
+        "predecessor_terminal_at_utc": "2026-08-14T03:04:05.123456Z",
+        "outcome_kind": PreviousTurnOutcomeKind.EXECUTION_FAILED,
+        "accepted_assistant_disposition": (
+            AcceptedAssistantDisposition.NONE_ACCEPTED
+        ),
+        "accepted_assistant_entry_count": 0,
+        "definitely_not_dispatched_tool_count": 0,
+        "outcome_unknown_tool_count": 0,
+        "bounded_tool_name_samples": (),
+        "user_input_preserved": True,
+        "canonical_entries_preserved": True,
+    }
+    provisional = FrozenPreviousTurnOutcomeCompileFact.__new__(
+        FrozenPreviousTurnOutcomeCompileFact
+    )
+    for name, value in values.items():
+        object.__setattr__(provisional, name, value)
+    object.__setattr__(provisional, "fact_fingerprint", "")
+    return FrozenPreviousTurnOutcomeCompileFact(
+        **values,
+        fact_fingerprint=previous_turn_outcome_fingerprint(provisional),
+    )
+
+
+def _with_round7_previous(
+    facts: FrozenCanonicalCompileSnapshot,
+    previous: FrozenPreviousTurnOutcomeCompileFact | None,
+) -> FrozenCanonicalCompileSnapshot:
+    values = {
+        field.name: getattr(facts, field.name)
+        for field in fields(FrozenCanonicalCompileSnapshot)
+        if field.name != "canonical_read_cut_fingerprint"
+    }
+    values["previous_turn_outcome_fact"] = previous
+    freshness = facts.tool_observation_freshness_fact
+    values["tool_observation_freshness_fact"] = (
+        build_tool_observation_freshness_fact(
+            session_id=freshness.session_id,
+            workspace_id=freshness.workspace_id,
+            current_turn_id=freshness.current_turn_id,
+            current_scope_kind=freshness.current_scope_kind,
+            scope_subagent_task_id=freshness.scope_subagent_task_id,
+            current_initial_entry_sequence=(
+                freshness.current_initial_entry_sequence
+            ),
+            immediate_predecessor_turn_id=(
+                None if previous is None else previous.predecessor_turn_id
+            ),
+        )
+    )
+    provisional = FrozenCanonicalCompileSnapshot.__new__(
+        FrozenCanonicalCompileSnapshot
+    )
+    for name, value in values.items():
+        object.__setattr__(provisional, name, value)
+    object.__setattr__(provisional, "canonical_read_cut_fingerprint", "")
+    return FrozenCanonicalCompileSnapshot(
+        **values,
+        canonical_read_cut_fingerprint=canonical_compile_snapshot_fingerprint(
+            provisional
+        ),
+    )
+
+
 def _approved_plan_compile_facts(
     *,
     disposition: PlanApprovedMaterializationDisposition,
@@ -795,7 +951,12 @@ def _approved_plan_compile_facts(
         2,
         "turn:implementation",
         json.dumps(
-            {"handoff": "APPROVED_PLAN", "plan_reference": interaction_id},
+            {
+                "pulsara_plan_continuation": {
+                    "status": "APPROVED",
+                    "transition": "APPROVED_PLAN",
+                }
+            },
             sort_keys=True,
             separators=(",", ":"),
         ),
@@ -890,6 +1051,17 @@ def _approved_plan_compile_facts(
     object.__setattr__(provisional, "plan_workflow_fact", None)
     object.__setattr__(provisional, "plan_handoff_fact", handoff)
     object.__setattr__(provisional, "approved_plan_materialization_fact", approved)
+    freshness = build_tool_observation_freshness_fact(
+        session_id=snapshot.identity.session_id,
+        workspace_id="workspace:test",
+        current_turn_id=snapshot.identity.turn_id,
+        current_scope_kind=snapshot.identity.conversation_scope_kind,
+        scope_subagent_task_id=snapshot.identity.scope_subagent_task_id,
+        current_initial_entry_sequence=1,
+        immediate_predecessor_turn_id=None,
+    )
+    object.__setattr__(provisional, "previous_turn_outcome_fact", None)
+    object.__setattr__(provisional, "tool_observation_freshness_fact", freshness)
     object.__setattr__(provisional, "canonical_read_cut_fingerprint", "")
     facts = FrozenCanonicalCompileSnapshot(
         canonical_input=snapshot,
@@ -898,6 +1070,8 @@ def _approved_plan_compile_facts(
         plan_workflow_fact=None,
         plan_handoff_fact=handoff,
         approved_plan_materialization_fact=approved,
+        previous_turn_outcome_fact=None,
+        tool_observation_freshness_fact=freshness,
         canonical_read_cut_fingerprint=canonical_compile_snapshot_fingerprint(
             provisional
         ),
@@ -1047,7 +1221,7 @@ def test_round3_1_plan_handoff_occurrence_uses_canonical_transition_identity(
         if item.source_kind is ContextSourceKind.PLAN_HANDOFF
     )
     assert len(handoffs) == 1
-    assert plan in handoffs[0].body
+    assert plan not in handoffs[0].body
 
 
 def test_round3_1_two_plan_revisions_in_one_epoch_have_distinct_occurrences(
@@ -1059,7 +1233,8 @@ def test_round3_1_two_plan_revisions_in_one_epoch_have_distinct_occurrences(
             "entry:1",
             1,
             "turn:test",
-            "continue plan",
+            '{"pulsara_plan_continuation":{"feedback":{"presence":"ABSENT"},'
+            '"status":"ACTIVE","transition":"REVISION_REQUESTED"}}',
             input_origin=CanonicalInputOriginKind.PLAN_CONTINUATION,
         )
     )
@@ -1100,6 +1275,10 @@ def test_round3_1_two_plan_revisions_in_one_epoch_have_distinct_occurrences(
             "plan_workflow_fact": None,
             "plan_handoff_fact": handoff,
             "approved_plan_materialization_fact": None,
+            "previous_turn_outcome_fact": base.previous_turn_outcome_fact,
+            "tool_observation_freshness_fact": (
+                base.tool_observation_freshness_fact
+            ),
         }
         provisional = FrozenCanonicalCompileSnapshot.__new__(
             FrozenCanonicalCompileSnapshot
@@ -1303,6 +1482,7 @@ def test_round3_system_placement_is_independent_of_input_order() -> None:
         ContextSourceKind.RUN_PERMISSION,
         ContextSourceKind.CAPABILITY_CATALOG,
         ContextSourceKind.ACTIVE_SKILL,
+        ContextSourceKind.TOOL_OBSERVATION_FRESHNESS,
     )
 
 
@@ -1478,6 +1658,7 @@ def test_round3_retained_snapshot_reference_keeps_typed_warning() -> None:
         source_coverage=ToolOutputSourceCoverage.RETAINED_SNAPSHOT,
         source_coverage_reason=ToolOutputSourceCoverageReason.TERMINAL_RETENTION_GAP,
         artifact_unavailability_reason=None,
+        timing=_tool_timing("turn:test"),
     )
     item = FrozenProviderInputItem(
         FrozenProviderInputItemKind.TOOL_RESULT,
@@ -1988,7 +2169,7 @@ def test_round3_temporal_capture_is_single_and_dst_consistent(tmp_path: Path) ->
     by_kind = {candidate.source_kind: candidate for candidate in collected.candidates}
     environment = by_kind[ContextSourceKind.RUNTIME_ENVIRONMENT].variants[0].text
     clock_text = by_kind[ContextSourceKind.RUNTIME_CLOCK].variants[0].text
-    assert "utc_offset_minutes=-240" in environment
+    assert '"utc_offset_minutes":-240' in environment
     assert '"utc_offset_minutes":-240' in clock_text
     assert '"local_date":"2024-11-03"' in clock_text
 
@@ -2038,8 +2219,8 @@ def test_round3_unkeyed_timezone_is_frozen_to_opening_offset(tmp_path: Path) -> 
     by_kind = {candidate.source_kind: candidate for candidate in collected.candidates}
     environment = by_kind[ContextSourceKind.RUNTIME_ENVIRONMENT].variants[0].text
     clock_text = by_kind[ContextSourceKind.RUNTIME_CLOCK].variants[0].text
-    assert 'timezone="UTC-04:00"' in environment
-    assert "utc_offset_minutes=-240" in environment
+    assert '"timezone":"UTC-04:00"' in environment
+    assert '"utc_offset_minutes":-240' in environment
     assert '"timezone":"UTC-04:00"' in clock_text
     assert '"utc_offset_minutes":-240' in clock_text
 
@@ -2088,7 +2269,7 @@ def test_round3_temporal_failure_samples_once_and_omits_clock(tmp_path: Path) ->
         for candidate in collected.candidates
         if candidate.source_kind is ContextSourceKind.RUNTIME_ENVIRONMENT
     )
-    assert "utc_offset_minutes=null" in environment.variants[0].text
+    assert '"utc_offset_minutes":null' in environment.variants[0].text
 
 
 def test_round3_capability_sources_and_public_diagnostics_are_separate(
@@ -2501,7 +2682,7 @@ def test_round3_report_projection_is_bounded_and_contains_no_prompt() -> None:
     offer = offers[0]
     assert offer.event_type is OperationalHookType.MODEL_INPUT_COMPILE_OBSERVED
     assert offer.public_payload["decision_sample_count"] == 64
-    assert offer.public_payload["decision_omitted_count"] == 9
+    assert offer.public_payload["decision_omitted_count"] == 10
     assert secret not in repr(offer.public_payload)
 
     failing_owner = SimpleNamespace(
@@ -2544,7 +2725,7 @@ def test_round3_diagnostic_projector_is_the_bounded_public_owner() -> None:
         compiled=compiled,
     )
     assert len(projection.decision_samples) == 64
-    assert projection.decision_omitted_count == 9
+    assert projection.decision_omitted_count == 10
     assert {item.decision_kind for item in projection.decision_samples} <= {
         CompileDecisionSampleKind.SOURCE,
         CompileDecisionSampleKind.TOOL_RESULT,
@@ -2628,15 +2809,15 @@ def test_round3_source_decision_and_compiled_fingerprints_are_golden() -> None:
     )
     compiled = StructuredModelInputCompiler().compile(request)
     assert compiled.source_collection_fingerprint == (
-        "sha256:658103c564acf1ae3f489a1c7254c019faf696a9b683ab53019b3da4d9d187ab"
+        "sha256:f629c0d5c7a37a6a9ed6ded98b162dbd946ed2924949d4a575c510900530a4c4"
     )
     assert compiled.budget_report.decision_digest == (
-        "sha256:0c70198d1d2a90d1b8e4271d266561102f671daf01c5edc46a436973a4d70fa9"
+        "sha256:caee1ae23a161f2c862947ef5b7b2b9a4ae3093bce6117e00bc13a3a19058fbd"
     )
     assert compiled.compiled_semantic_fingerprint == (
-        "sha256:9f5c5cd9484f917575e4a515edcc48298cbd02610fe678c5ab6f1d7eb9c58287"
+        "sha256:1e4e1221604cf1547cd5f63b58e8226e1ad0ffe5f8fe12d7c65f81519a75bace"
     )
-    assert compiled.final_estimate.total_input_tokens == 248
+    assert compiled.final_estimate.total_input_tokens == 268
 
 
 def test_round3_1_compatible_epoch_appends_clock_without_rewriting_prefix() -> None:
@@ -2813,6 +2994,146 @@ def test_round3_1_active_skill_no_change_and_clear_are_causal_once() -> None:
         )
         == 1
     )
+
+
+def test_round7_previous_outcome_value_clears_once_without_prefix_rewrite() -> None:
+    compiler = StructuredModelInputCompiler()
+    owner = HostProviderInputContinuityOwner(session_id="session:test")
+    initial = _user("continue", sequence=1)
+    failure_source = _candidate(
+        ContextSourceKind.PREVIOUS_TURN_OUTCOME,
+        (
+            '{"outcome":"EXECUTION_FAILED","guidance":"continue safely"}',
+            '{"outcome":"EXECUTION_FAILED"}',
+        ),
+    )
+    initial_snapshot = _snapshot(initial)
+    base_facts = _canonical_facts(initial_snapshot)
+    first_request = _prepared_request(
+        initial_snapshot,
+        _sources(failure_source),
+        canonical_facts=_with_round7_previous(
+            base_facts,
+            _round7_previous_fact(base_facts),
+        ),
+    )
+    _first, first_view = _compile_and_install_append(
+        compiler=compiler, owner=owner, request=first_request
+    )
+
+    assistant = FrozenProviderInputItem(
+        FrozenProviderInputItemKind.ASSISTANT,
+        "entry:2",
+        2,
+        "turn:test",
+        "completed successor",
+    )
+    clear_request = replace(
+        _prepared_request(_snapshot(initial, assistant), _sources()),
+        context_id="context:round7-clear",
+        model_call_index=2,
+    )
+    _clear, second_view = _compile_and_install_append(
+        compiler=compiler, owner=owner, request=clear_request
+    )
+    assert second_view.system_prompt == first_view.system_prompt
+    assert second_view.tools == first_view.tools
+    assert second_view.messages[: len(first_view.messages)] == first_view.messages
+    clear_observations = tuple(
+        decode_runtime_observation(message)
+        for message in second_view.messages[len(first_view.messages) :]
+        if message.role is MessageRole.USER
+        and message.content
+        and "pulsara_runtime_observation" in message.content[0]
+    )
+    assert sum(
+        item.source_kind is ContextSourceKind.PREVIOUS_TURN_OUTCOME
+        and item.presence.value == "CLEARED"
+        for item in clear_observations
+    ) == 1
+
+    final = FrozenProviderInputItem(
+        FrozenProviderInputItemKind.ASSISTANT,
+        "entry:3",
+        3,
+        "turn:test",
+        "another success",
+    )
+    repeated_request = replace(
+        _prepared_request(_snapshot(initial, assistant, final), _sources()),
+        context_id="context:round7-clear-repeat",
+        model_call_index=3,
+    )
+    _repeat, third_view = _compile_and_install_append(
+        compiler=compiler, owner=owner, request=repeated_request
+    )
+    assert third_view.messages[: len(second_view.messages)] == second_view.messages
+    all_previous = tuple(
+        decode_runtime_observation(message)
+        for message in third_view.messages
+        if message.role is MessageRole.USER
+        and message.content
+        and "pulsara_runtime_observation" in message.content[0]
+        and decode_runtime_observation(message).source_kind
+        is ContextSourceKind.PREVIOUS_TURN_OUTCOME
+    )
+    assert [item.presence.value for item in all_previous] == ["VALUE", "CLEARED"]
+
+
+def test_round7_freshness_frontier_appends_without_reclassifying_old_messages() -> None:
+    compiler = StructuredModelInputCompiler()
+    owner = HostProviderInputContinuityOwner(session_id="session:test")
+    initial = _user("first", sequence=1)
+    first_freshness = _candidate(
+        ContextSourceKind.TOOL_OBSERVATION_FRESHNESS,
+        ('{"current_turn_ref":"sha256:first"}',),
+    )
+    first_request = _prepared_request(
+        _snapshot(initial), _sources(first_freshness)
+    )
+    _first, first_view = _compile_and_install_append(
+        compiler=compiler, owner=owner, request=first_request
+    )
+
+    result = _tool_result("exact tool body", sequence=2, turn_id="turn:test")
+    second_freshness = _candidate(
+        ContextSourceKind.TOOL_OBSERVATION_FRESHNESS,
+        (
+            '{"current_turn_ref":"sha256:second",'
+            '"immediate_predecessor_turn_ref":"sha256:first"}',
+        ),
+    )
+    second_request = replace(
+        _prepared_request(
+            _snapshot(initial, result), _sources(second_freshness)
+        ),
+        context_id="context:round7-freshness",
+        model_call_index=2,
+    )
+    _second, second_view = _compile_and_install_append(
+        compiler=compiler, owner=owner, request=second_request
+    )
+    assert second_view.system_prompt == first_view.system_prompt
+    assert second_view.tools == first_view.tools
+    assert second_view.messages[: len(first_view.messages)] == first_view.messages
+    old_prefix = provider_input_prefix_fingerprint(
+        system_prompt=first_view.system_prompt,
+        tools=first_view.tools,
+        messages=first_view.messages,
+    )
+    assert old_prefix == first_view.semantic_prefix_fingerprint
+    freshness = tuple(
+        decode_runtime_observation(message)
+        for message in second_view.messages
+        if message.role is MessageRole.USER
+        and message.content
+        and "pulsara_runtime_observation" in message.content[0]
+        and decode_runtime_observation(message).source_kind
+        is ContextSourceKind.TOOL_OBSERVATION_FRESHNESS
+    )
+    assert len(freshness) == 2
+    assert "sha256:first" in freshness[0].body
+    assert "sha256:second" in freshness[1].body
 
 
 @pytest.mark.parametrize(

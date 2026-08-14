@@ -40,6 +40,24 @@ from .contracts import (
 
 from .kernel import _RepositoryKernel
 
+
+def _plan_question_response(
+    *, content: PlanQuestionContent, answer: PlanQuestionAnswer
+) -> dict[str, object]:
+    if answer.kind is PlanQuestionAnswerKind.OPTION:
+        assert answer.option_ordinal is not None
+        if not 0 <= answer.option_ordinal < len(content.options):
+            raise ConversationKernelConflict("Plan option answer is absent")
+        return {
+            "answer_kind": "OPTION",
+            "selected_option_ordinal": answer.option_ordinal,
+            "selected_label": content.options[answer.option_ordinal].label,
+        }
+    if not content.allow_free_text:
+        raise ConversationKernelConflict("Plan question does not allow free text")
+    return {"answer_kind": "FREE_TEXT", "answer": answer.free_text}
+
+
 class _PlanOperations:
     def accept_plan_tool_batch(
         self,
@@ -216,9 +234,12 @@ class _PlanOperations:
                         tool_call_id, attempt_id, result_origin_kind,
                         control_plan_workflow_id, control_plan_interaction_id,
                         permission_snapshot_fingerprint,
-                        result_entry_id, result_state
+                        result_entry_id, result_state,
+                        observed_at, observation_duration_microseconds,
+                        observation_origin_kind,
+                        tool_reported_duration_microseconds
                     ) VALUES (%s, %s, %s, %s, %s, NULL, %s, %s, %s,
-                              %s, %s, %s)
+                              %s, %s, %s, %s, NULL, %s, NULL)
                     """,
                     (
                         call.result_id,
@@ -232,6 +253,12 @@ class _PlanOperations:
                         candidate.permission_snapshot.snapshot_fingerprint,
                         call.result_entry_id,
                         result_state,
+                        candidate.occurred_at,
+                        (
+                            "PLAN_CONTROL"
+                            if origin_kind == "PLAN_CONTROL"
+                            else "POLICY"
+                        ),
                     ),
                 )
                 event_drafts.append(
@@ -417,9 +444,13 @@ class _PlanOperations:
                     tool_call_id, attempt_id, result_origin_kind,
                     control_plan_workflow_id, control_plan_interaction_id,
                     permission_snapshot_fingerprint,
-                    result_entry_id, result_state
+                    result_entry_id, result_state,
+                    observed_at, observation_duration_microseconds,
+                    observation_origin_kind,
+                    tool_reported_duration_microseconds
                 ) VALUES (%s, %s, %s, %s, %s, NULL,
-                          'POLICY_NO_ATTEMPT', NULL, NULL, %s, %s, %s)
+                          'POLICY_NO_ATTEMPT', NULL, NULL, %s, %s, %s,
+                          %s, NULL, 'POLICY', NULL)
                 """,
                 (
                     call.result_id,
@@ -430,6 +461,7 @@ class _PlanOperations:
                     candidate.permission_snapshot.snapshot_fingerprint,
                     call.result_entry_id,
                     result_state,
+                    candidate.occurred_at,
                 ),
             )
             event_drafts.append(
@@ -514,6 +546,9 @@ class _PlanOperations:
                 session_id=guard.session_id,
                 command_id=command_id,
                 semantic_digest=semantic_digest,
+                expected_question_answer=answer,
+                expected_result_id=result_id,
+                expected_result_entry_id=result_entry_id,
             )
             if winner is not None:
                 return winner
@@ -525,6 +560,9 @@ class _PlanOperations:
                 session_id=guard.session_id,
                 command_id=command_id,
                 semantic_digest=semantic_digest,
+                expected_question_answer=answer,
+                expected_result_id=result_id,
+                expected_result_entry_id=result_entry_id,
             )
             if winner is not None:
                 return winner
@@ -568,24 +606,7 @@ class _PlanOperations:
                 ),
                 arguments=frozen,
             )
-            if answer.kind is PlanQuestionAnswerKind.OPTION:
-                assert answer.option_ordinal is not None
-                if not 0 <= answer.option_ordinal < len(content.options):
-                    raise ConversationKernelConflict("Plan option answer is absent")
-                response = {
-                    "answer_kind": "OPTION",
-                    "selected_option_ordinal": answer.option_ordinal,
-                    "selected_label": content.options[answer.option_ordinal].label,
-                }
-            else:
-                if not content.allow_free_text:
-                    raise ConversationKernelConflict(
-                        "Plan question does not allow free text"
-                    )
-                response = {
-                    "answer_kind": "FREE_TEXT",
-                    "answer": answer.free_text,
-                }
+            response = _plan_question_response(content=content, answer=answer)
             result_content = _plan_inline(
                 {
                     "status": "success",
@@ -614,9 +635,12 @@ class _PlanOperations:
                     tool_call_id, attempt_id, result_origin_kind,
                     control_plan_interaction_id,
                     permission_snapshot_fingerprint,
-                    result_entry_id, result_state
+                    result_entry_id, result_state,
+                    observed_at, observation_duration_microseconds,
+                    observation_origin_kind,
+                    tool_reported_duration_microseconds
                 ) VALUES (%s, %s, %s, %s, %s, NULL, 'PLAN_CONTROL',
-                          %s, %s, %s, 'SUCCESS')
+                          %s, %s, %s, 'SUCCESS', %s, NULL, 'PLAN_CONTROL', NULL)
                 """,
                 (
                     result_id,
@@ -627,6 +651,7 @@ class _PlanOperations:
                     interaction_id,
                     str(interaction["permission_snapshot_fingerprint"]),
                     result_entry_id,
+                    occurred_at,
                 ),
             )
             response_digest = canonical_digest(
@@ -764,6 +789,9 @@ class _PlanOperations:
                 session_id=session_id,
                 command_id=command_id,
                 semantic_digest=semantic_digest,
+                expected_question_answer=answer,
+                expected_result_id=result_id,
+                expected_result_entry_id=result_entry_id,
             )
 
     def enter_plan_by_user(
@@ -2208,6 +2236,10 @@ class _PlanOperations:
                     or str(row["permission_snapshot_fingerprint"])
                     != candidate.permission_snapshot.snapshot_fingerprint
                     or str(row["result_state"]) != expected_state
+                    or row["observed_at"] != candidate.occurred_at
+                    or row["observation_duration_microseconds"] is not None
+                    or str(row["observation_origin_kind"]) != "POLICY"
+                    or row["tool_reported_duration_microseconds"] is not None
                 ):
                     raise ConversationKernelConflict(
                         "rejected Plan batch result identity conflicts"
@@ -2327,6 +2359,11 @@ class _PlanOperations:
                 or str(row["permission_snapshot_fingerprint"])
                 != candidate.permission_snapshot.snapshot_fingerprint
                 or str(row["result_state"]) != expected_state
+                or row["observed_at"] != candidate.occurred_at
+                or row["observation_duration_microseconds"] is not None
+                or str(row["observation_origin_kind"])
+                != ("PLAN_CONTROL" if expected_selected else "POLICY")
+                or row["tool_reported_duration_microseconds"] is not None
             ):
                 raise ConversationKernelConflict(
                     "Plan batch result identity names another winner"
@@ -2814,13 +2851,16 @@ class _PlanOperations:
             workflow_revision=int(row["workflow_revision"]),
         )
 
-    @staticmethod
     def _confirm_plan_resolution_in_transaction(
+        self,
         connection: Connection,
         *,
         session_id: str,
         command_id: str,
         semantic_digest: str,
+        expected_question_answer: PlanQuestionAnswer | None = None,
+        expected_result_id: str | None = None,
+        expected_result_entry_id: str | None = None,
     ) -> AcceptedPlanResolution | None:
         row = connection.execute(
             """
@@ -2828,15 +2868,28 @@ class _PlanOperations:
                    i.status AS interaction_status, i.kind AS interaction_kind,
                    i.plan_workflow_id, i.decision_continuation_entry_id,
                    i.control_tool_result_id,
+                   i.origin_turn_id, i.workspace_id,
+                   i.assistant_entry_id, i.tool_call_id,
+                   i.request_contract_id, i.request_contract_version,
+                   i.request_contract_fingerprint,
+                   i.answer_kind, i.selected_option_ordinal,
                    w.status AS workflow_status, w.resume_permission_mode,
                    w.workflow_revision,
-                   e.turn_id AS continuation_turn_id
+                   e.turn_id AS continuation_turn_id,
+                   b.tool_arguments,
+                   t.permission_snapshot_fingerprint
             FROM pulsara_v3.session_commands AS c
             JOIN pulsara_v3.plan_interactions AS i
               ON i.session_id = c.session_id
              AND i.id = c.target_plan_interaction_id
             JOIN pulsara_v3.plan_workflows AS w
               ON w.session_id = i.session_id AND w.id = i.plan_workflow_id
+            JOIN pulsara_v3.assistant_message_blocks AS b
+              ON b.session_id = i.session_id
+             AND b.assistant_entry_id = i.assistant_entry_id
+             AND b.tool_call_id = i.tool_call_id
+            JOIN pulsara_v3.turns AS t
+              ON t.session_id = i.session_id AND t.id = i.origin_turn_id
             LEFT JOIN pulsara_v3.transcript_entries AS e
               ON e.session_id = i.session_id
              AND e.id = i.decision_continuation_entry_id
@@ -2856,19 +2909,132 @@ class _PlanOperations:
             else None
         )
         if question_result is not None:
+            if (
+                expected_question_answer is None
+                or expected_result_id is None
+                or expected_result_entry_id is None
+                or question_result != expected_result_id
+            ):
+                raise ConversationKernelConflict(
+                    "Plan question result identity conflicts"
+                )
             result = connection.execute(
                 """
-                SELECT result_entry_id FROM pulsara_v3.tool_results
+                SELECT * FROM pulsara_v3.tool_results
                 WHERE session_id = %s AND id = %s
                 """,
                 (session_id, question_result),
             ).fetchone()
-            if result is None:
+            result_entry = connection.execute(
+                """SELECT * FROM pulsara_v3.transcript_entries
+                   WHERE session_id = %s AND id = %s""",
+                (session_id, expected_result_entry_id),
+            ).fetchone()
+            frozen_arguments = freeze_json(dict(row["tool_arguments"]))
+            if not isinstance(frozen_arguments, FrozenJsonObjectFact):
+                raise ConversationKernelConflict(
+                    "Plan question arguments are invalid"
+                )
+            question = extract_plan_question(
+                interaction_id=str(row["target_plan_interaction_id"]),
+                binding=PlanInteractionBinding(
+                    str(row["request_contract_id"]),
+                    str(row["request_contract_version"]),
+                    str(row["request_contract_fingerprint"]),
+                ),
+                arguments=frozen_arguments,
+            )
+            response = _plan_question_response(
+                content=question, answer=expected_question_answer
+            )
+            expected_content = _plan_inline(
+                {
+                    "status": "success",
+                    "plan_control": "QUESTION_ANSWERED",
+                    "interaction_id": str(row["target_plan_interaction_id"]),
+                    **response,
+                }
+            )
+            if (
+                result is None
+                or result_entry is None
+                or str(result["result_entry_id"]) != expected_result_entry_id
+                or result["attempt_id"] is not None
+                or str(result["result_origin_kind"]) != "PLAN_CONTROL"
+                or str(result["control_plan_interaction_id"])
+                != str(row["target_plan_interaction_id"])
+                or str(result["tool_call_entry_id"])
+                != str(row["assistant_entry_id"])
+                or str(result["tool_call_id"]) != str(row["tool_call_id"])
+                or str(result["permission_snapshot_fingerprint"])
+                != str(row["permission_snapshot_fingerprint"])
+                or str(result["result_state"]) != "SUCCESS"
+                or result["observation_duration_microseconds"] is not None
+                or str(result["observation_origin_kind"]) != "PLAN_CONTROL"
+                or result["tool_reported_duration_microseconds"] is not None
+                or str(result_entry["workspace_id"]) != str(row["workspace_id"])
+                or str(result_entry["turn_id"]) != str(row["origin_turn_id"])
+                or str(result_entry["entry_kind"]) != EntryKind.TOOL_RESULT.value
+                or self._content_from_row(result_entry) != expected_content
+            ):
                 raise ConversationKernelConflict(
                     "Plan question winner is partially installed"
                 )
-            question_result_entry_id = str(result["result_entry_id"])
+            question_event = connection.execute(
+                """SELECT * FROM pulsara_v3.agent_events
+                   WHERE event_id = %s""",
+                (
+                    _stable_identity(
+                        "event", command_id, "PlanQuestionAnswered"
+                    ),
+                ),
+            ).fetchone()
+            result_event = connection.execute(
+                """SELECT * FROM pulsara_v3.agent_events
+                   WHERE event_id = %s""",
+                (
+                    _stable_identity(
+                        "event", expected_result_entry_id, "ToolResultAccepted"
+                    ),
+                ),
+            ).fetchone()
+            expected_result_payload = {
+                "tool_call_id": str(row["tool_call_id"]),
+                "result_state": "SUCCESS",
+            }
+            if (
+                question_event is None
+                or result_event is None
+                or str(question_event["event_type"]) != "PlanQuestionAnswered"
+                or question_event["subject_plan_interaction_id"]
+                != str(row["target_plan_interaction_id"])
+                or str(result_event["event_type"]) != "ToolResultAccepted"
+                or result_event["subject_entry_id"] != expected_result_entry_id
+                or result_event["occurred_at"] != result["observed_at"]
+                or question_event["occurred_at"] != result["observed_at"]
+                or str(result_event["actor_kind"]) != "runtime"
+                or str(result_event["actor_id"])
+                != str(question_event["actor_id"])
+                or str(result_event["sensitivity_class"]) != "S1"
+                or str(result_event["projection_profile"]) != "DEFAULT"
+                or dict(result_event["payload"]) != expected_result_payload
+            ):
+                raise ConversationKernelConflict(
+                    "Plan question occurrence is partially installed"
+                )
+            question_result_entry_id = expected_result_entry_id
         else:
+            if any(
+                value is not None
+                for value in (
+                    expected_question_answer,
+                    expected_result_id,
+                    expected_result_entry_id,
+                )
+            ):
+                raise ConversationKernelConflict(
+                    "Plan question winner is absent"
+                )
             question_result_entry_id = None
         return AcceptedPlanResolution(
             command_id=command_id,

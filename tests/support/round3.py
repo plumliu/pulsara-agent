@@ -48,6 +48,7 @@ from pulsara_agent.model_input.contracts import (
     FrozenToolSpec,
     ModelInputScopeKind,
     canonical_compile_snapshot_fingerprint,
+    build_tool_observation_freshness_fact,
     context_binding_compile_fact_fingerprint,
     model_tool_surface_fingerprint,
 )
@@ -262,7 +263,7 @@ class StaticContextSourceCollector:
         candidates: tuple[ContextSourceCandidate, ...] = (
             _candidate(
                 kind=ContextSourceKind.BASE_SYSTEM,
-                version="pulsara.base-system.prefix-continuity.v2",
+                version="pulsara.base-system.prefix-continuity.v3",
                 channel=ContextChannel.SYSTEM,
                 trust=ContextTrustClass.ROOT_INSTRUCTION,
                 budget=ContextBudgetClass.MUST_KEEP,
@@ -272,7 +273,7 @@ class StaticContextSourceCollector:
             ),
             _candidate(
                 kind=ContextSourceKind.RUNTIME_ENVIRONMENT,
-                version="pulsara.runtime-environment.v1",
+                version="pulsara.runtime-environment.v2",
                 channel=ContextChannel.RUNTIME_OBSERVATION,
                 trust=ContextTrustClass.TRUSTED_RUNTIME_FACT,
                 budget=ContextBudgetClass.MUST_KEEP,
@@ -285,7 +286,7 @@ class StaticContextSourceCollector:
             ),
             _candidate(
                 kind=ContextSourceKind.RUN_PERMISSION,
-                version="pulsara.run-permission.v1",
+                version="pulsara.run-permission.v2",
                 channel=ContextChannel.RUNTIME_OBSERVATION,
                 trust=ContextTrustClass.AUTHORIZED_RUNTIME_GUIDANCE,
                 budget=ContextBudgetClass.MUST_KEEP,
@@ -307,7 +308,7 @@ class StaticContextSourceCollector:
             candidates += (
                 _candidate(
                     kind=ContextSourceKind.PLAN_HANDOFF,
-                    version="pulsara.plan-handoff.v1",
+                    version="pulsara.plan-handoff.v2",
                     channel=ContextChannel.RUNTIME_OBSERVATION,
                     trust=ContextTrustClass.AUTHORIZED_RUNTIME_GUIDANCE,
                     budget=ContextBudgetClass.MUST_KEEP,
@@ -323,7 +324,7 @@ class StaticContextSourceCollector:
             candidates += (
                 _candidate(
                     kind=ContextSourceKind.PLAN_WORKFLOW,
-                    version="pulsara.plan-workflow.v1",
+                    version="pulsara.plan-workflow.v2",
                     channel=ContextChannel.RUNTIME_OBSERVATION,
                     trust=ContextTrustClass.AUTHORIZED_RUNTIME_GUIDANCE,
                     budget=ContextBudgetClass.MUST_KEEP,
@@ -335,6 +336,19 @@ class StaticContextSourceCollector:
                     ),
                 ),
             )
+        freshness = canonical_facts.tool_observation_freshness_fact  # type: ignore[union-attr]
+        candidates += (
+            _candidate(
+                kind=ContextSourceKind.TOOL_OBSERVATION_FRESHNESS,
+                version="pulsara.tool-observation-freshness.v1",
+                channel=ContextChannel.RUNTIME_OBSERVATION,
+                trust=ContextTrustClass.TRUSTED_RUNTIME_FACT,
+                budget=ContextBudgetClass.MUST_KEEP,
+                placement=70,
+                degradation=10,
+                variants=((ContextRenderMode.FULL, freshness.current_turn_ref),),
+            ),
+        )
         present = {item.source_kind for item in candidates}
         absence_kinds = {
             ContextSourceKind.RUNTIME_CLOCK: ContextSourceAbsenceKind.UNAVAILABLE,
@@ -343,6 +357,9 @@ class StaticContextSourceCollector:
             ContextSourceKind.CAPABILITY_CATALOG: ContextSourceAbsenceKind.EXPLICIT_EMPTY,
             ContextSourceKind.MCP_CATALOG: ContextSourceAbsenceKind.NOT_APPLICABLE,
             ContextSourceKind.ACTIVE_SKILL: ContextSourceAbsenceKind.EXPLICIT_EMPTY,
+            ContextSourceKind.PREVIOUS_TURN_OUTCOME: (
+                ContextSourceAbsenceKind.EXPLICIT_EMPTY
+            ),
         }
         absent = tuple(
             _absent_source(kind, absence)
@@ -496,6 +513,17 @@ def static_canonical_compile_facts(
     object.__setattr__(provisional, "plan_workflow_fact", None)
     object.__setattr__(provisional, "plan_handoff_fact", None)
     object.__setattr__(provisional, "approved_plan_materialization_fact", None)
+    freshness = build_tool_observation_freshness_fact(
+        session_id=canonical_input.identity.session_id,
+        workspace_id="workspace:test",
+        current_turn_id=canonical_input.identity.turn_id,
+        current_scope_kind=canonical_input.identity.conversation_scope_kind,
+        scope_subagent_task_id=canonical_input.identity.scope_subagent_task_id,
+        current_initial_entry_sequence=1,
+        immediate_predecessor_turn_id=None,
+    )
+    object.__setattr__(provisional, "previous_turn_outcome_fact", None)
+    object.__setattr__(provisional, "tool_observation_freshness_fact", freshness)
     object.__setattr__(provisional, "canonical_read_cut_fingerprint", "")
     return FrozenCanonicalCompileSnapshot(
         canonical_input=canonical_input,
@@ -504,6 +532,8 @@ def static_canonical_compile_facts(
         plan_workflow_fact=None,
         plan_handoff_fact=None,
         approved_plan_materialization_fact=None,
+        previous_turn_outcome_fact=None,
+        tool_observation_freshness_fact=freshness,
         canonical_read_cut_fingerprint=canonical_compile_snapshot_fingerprint(
             provisional
         ),
@@ -818,6 +848,8 @@ def _candidate(
         ContextSourceKind.CAPABILITY_CATALOG: ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
         ContextSourceKind.MCP_CATALOG: ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
         ContextSourceKind.ACTIVE_SKILL: ContextSourceLifecycle.ACTIVATION_SNAPSHOT,
+        ContextSourceKind.PREVIOUS_TURN_OUTCOME: ContextSourceLifecycle.TURN_APPEND,
+        ContextSourceKind.TOOL_OBSERVATION_FRESHNESS: ContextSourceLifecycle.TURN_APPEND,
     }[kind]
     modes = tuple(mode for mode, _text in variants)
     contract = context_fingerprint(

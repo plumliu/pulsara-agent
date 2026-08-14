@@ -13,6 +13,7 @@ from pulsara_agent.primitives.context import (
     freeze_json,
     thaw_json,
 )
+from pulsara_agent.primitives.tool_observation import TrustedToolObservationSupplement
 
 
 class FrozenToolJsonDict(dict[str, object]):
@@ -152,6 +153,7 @@ class ToolExecutionResult:
     metadata: FrozenToolJsonDict = field(default_factory=FrozenToolJsonDict)
     output_artifact_candidate: ToolOutputArtifactCandidate | None = None
     artifact_source_read: bool = False
+    trusted_observation: TrustedToolObservationSupplement | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "metadata", freeze_tool_json_object(self.metadata))

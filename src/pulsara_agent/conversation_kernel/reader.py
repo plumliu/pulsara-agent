@@ -30,6 +30,8 @@ from pulsara_agent.model_input.contracts import (
     FrozenContextBindingCompileFact,
     FrozenPlanHandoffCompileFact,
     FrozenPlanWorkflowCompileFact,
+    FrozenPreviousTurnOutcomeCompileFact,
+    FrozenToolObservationFreshnessCompileFact,
     FrozenProviderInputItem,
     FrozenProviderInputItemKind,
     LateToolOutcomeObservation,
@@ -40,6 +42,8 @@ from pulsara_agent.model_input.contracts import (
     ProviderToolResultClosure,
     ProviderToolResultClosureKind,
     ProviderToolResultContextMetadata,
+    PreviousTurnOutcomeKind,
+    AcceptedAssistantDisposition,
     PreparedProviderInputCut,
     canonical_model_input_identity_fingerprint,
     canonical_model_input_snapshot_fingerprint,
@@ -49,6 +53,8 @@ from pulsara_agent.model_input.contracts import (
     plan_workflow_compile_fact_fingerprint,
     approved_plan_materialization_fingerprint,
     provider_input_item_fingerprint,
+    previous_turn_outcome_fingerprint,
+    tool_observation_freshness_fingerprint,
 )
 from pulsara_agent.model_input.continuity import (
     FULL_HISTORY_CONTEXT_BASE_IDENTITY,
@@ -81,6 +87,14 @@ from pulsara_agent.primitives.run_permission import (
     FrozenRunPermissionSnapshot,
     RunPermissionAdmissionSource,
     RunPermissionOverlay,
+)
+from pulsara_agent.primitives.tool_observation import (
+    FrozenToolObservationTimingFact,
+    ToolObservationDurationDisposition,
+    ToolObservationOrigin,
+    canonical_utc_timestamp,
+    provider_visible_turn_ref,
+    tool_observation_timing_fingerprint,
 )
 from pulsara_agent.ports.terminal_observation import (
     TerminalDeliveryCoverage,
@@ -189,13 +203,18 @@ class CanonicalProviderInputReader:
                        t.permission_snapshot_fingerprint,
                        r.revision_ordinal, r.base_kind,
                        r.context_snapshot_id, r.source_through_sequence,
-                       s.latest_entry_sequence
+                       s.latest_entry_sequence,
+                       initial_entry.entry_sequence AS current_initial_entry_sequence
                 FROM pulsara_v3.turns AS t
                 JOIN pulsara_v3.turn_context_binding_revisions AS r
                   ON r.session_id = t.session_id
                  AND r.id = %s
                  AND r.turn_id = t.id
                 JOIN pulsara_v3.sessions AS s ON s.id = t.session_id
+                JOIN pulsara_v3.transcript_entries AS initial_entry
+                  ON initial_entry.session_id = t.session_id
+                 AND initial_entry.id = t.initial_entry_id
+                 AND initial_entry.turn_id = t.id
                 WHERE t.session_id = %s AND t.id = %s
                 """,
                 (
@@ -220,6 +239,18 @@ class CanonicalProviderInputReader:
 
             scope_kind = str(binding["conversation_scope_kind"])
             scope_task_id = binding["scope_subagent_task_id"]
+            previous_turn_outcome_fact, freshness_fact = self._load_round7_scope_facts(
+                connection,
+                cut=cut,
+                workspace_id=str(binding["workspace_id"]),
+                scope_kind=ModelInputScopeKind(scope_kind),
+                scope_task_id=(
+                    None if scope_task_id is None else str(scope_task_id)
+                ),
+                current_initial_entry_sequence=int(
+                    binding["current_initial_entry_sequence"]
+                ),
+            )
             source_floor = 0
             items: list[FrozenProviderInputItem] = []
             canonical_bytes = 0
@@ -323,7 +354,14 @@ class CanonicalProviderInputReader:
             block_metadata = self._load_block_metadata(
                 connection, cut.session_id, entry_ids
             )
-            tool_state = self._load_tool_state(connection, cut.session_id, entry_ids)
+            tool_state = self._load_tool_state(
+                connection,
+                cut.session_id,
+                entry_ids,
+                provider_input_through_sequence=(
+                    cut.provider_input_through_sequence
+                ),
+            )
             self._preflight_physical_bytes(
                 snapshot=snapshot,
                 entries=entries,
@@ -441,16 +479,20 @@ class CanonicalProviderInputReader:
                         deadline_monotonic=deadline_monotonic,
                         remaining_bytes=remaining_bytes,
                     )
-                    canonical_bytes += len(content)
+                    storage_text = _decode_provider_text(
+                        content, str(row["content_codec"])
+                    )
+                    provider_text = _project_plan_continuation_storage(
+                        row, storage_text
+                    )
+                    canonical_bytes += len(provider_text.encode("utf-8"))
                     items.append(
                         ProviderInputItem(
                             item_kind=ProviderInputItemKind.PLAN_CONTINUATION,
                             source_entry_id=entry_id,
                             source_entry_sequence=sequence,
                             source_turn_id=str(row["turn_id"]),
-                            text=_decode_provider_text(
-                                content, str(row["content_codec"])
-                            ),
+                            text=provider_text,
                             input_origin=CanonicalInputOriginKind.PLAN_CONTINUATION,
                         )
                     )
@@ -717,6 +759,12 @@ class CanonicalProviderInputReader:
             object.__setattr__(
                 provisional, "approved_plan_materialization_fact", approved_fact
             )
+            object.__setattr__(
+                provisional, "previous_turn_outcome_fact", previous_turn_outcome_fact
+            )
+            object.__setattr__(
+                provisional, "tool_observation_freshness_fact", freshness_fact
+            )
             object.__setattr__(provisional, "canonical_read_cut_fingerprint", "")
             return FrozenCanonicalCompileSnapshot(
                 canonical_input=canonical_input,
@@ -725,6 +773,8 @@ class CanonicalProviderInputReader:
                 plan_workflow_fact=workflow_fact,
                 plan_handoff_fact=handoff_fact,
                 approved_plan_materialization_fact=approved_fact,
+                previous_turn_outcome_fact=previous_turn_outcome_fact,
+                tool_observation_freshness_fact=freshness_fact,
                 canonical_read_cut_fingerprint=(
                     canonical_compile_snapshot_fingerprint(provisional)
                 ),
@@ -1017,7 +1067,233 @@ def _plan_handoff_compile_facts(
 class CanonicalProviderInputReader(CanonicalProviderInputReader):
     """Complete the bounded physical hydration methods after pure fact helpers."""
 
-    def _load_tool_state(self, connection, session_id: str, entry_ids: Sequence[str]):
+    def _load_round7_scope_facts(
+        self,
+        connection,
+        *,
+        cut: PreparedProviderInputCut,
+        workspace_id: str,
+        scope_kind: ModelInputScopeKind,
+        scope_task_id: str | None,
+        current_initial_entry_sequence: int,
+    ) -> tuple[
+        FrozenPreviousTurnOutcomeCompileFact | None,
+        FrozenToolObservationFreshnessCompileFact,
+    ]:
+        predecessor = connection.execute(
+            """
+            SELECT e.turn_id, e.entry_sequence, t.workspace_id, t.status,
+                   t.terminal_reason, t.terminal_at,
+                   t.conversation_scope_kind, t.scope_subagent_task_id
+            FROM pulsara_v3.transcript_entries AS e
+            JOIN pulsara_v3.turns AS t
+              ON t.session_id = e.session_id
+             AND t.id = e.turn_id
+             AND t.initial_entry_id = e.id
+            WHERE e.session_id = %s
+              AND e.conversation_scope_kind = %s
+              AND e.scope_subagent_task_id IS NOT DISTINCT FROM %s
+              AND e.entry_sequence < %s
+            ORDER BY e.entry_sequence DESC
+            LIMIT 1
+            """,
+            (
+                cut.session_id,
+                scope_kind.value,
+                scope_task_id,
+                current_initial_entry_sequence,
+            ),
+        ).fetchone()
+        predecessor_turn_id = (
+            None if predecessor is None else str(predecessor["turn_id"])
+        )
+        freshness_values = {
+            "session_id": cut.session_id,
+            "workspace_id": workspace_id,
+            "current_turn_id": cut.turn_id,
+            "current_scope_kind": scope_kind,
+            "scope_subagent_task_id": scope_task_id,
+            "current_turn_ref": provider_visible_turn_ref(
+                session_id=cut.session_id, turn_id=cut.turn_id
+            ),
+            "current_initial_entry_sequence": current_initial_entry_sequence,
+            "immediate_predecessor_turn_id": predecessor_turn_id,
+            "immediate_predecessor_turn_ref": (
+                None
+                if predecessor_turn_id is None
+                else provider_visible_turn_ref(
+                    session_id=cut.session_id, turn_id=predecessor_turn_id
+                )
+            ),
+            "classification_contract": "pulsara.tool-observation-freshness.v1",
+        }
+        provisional_freshness = FrozenToolObservationFreshnessCompileFact.__new__(
+            FrozenToolObservationFreshnessCompileFact
+        )
+        for name, value in freshness_values.items():
+            object.__setattr__(provisional_freshness, name, value)
+        object.__setattr__(provisional_freshness, "fact_fingerprint", "")
+        freshness = FrozenToolObservationFreshnessCompileFact(
+            **freshness_values,
+            fact_fingerprint=tool_observation_freshness_fingerprint(
+                provisional_freshness
+            ),
+        )
+        if predecessor is None:
+            return None, freshness
+        if (
+            str(predecessor["workspace_id"]) != workspace_id
+            or str(predecessor["conversation_scope_kind"]) != scope_kind.value
+            or predecessor["scope_subagent_task_id"] != scope_task_id
+        ):
+            raise ConversationKernelConflict("previous-turn scope identity drifted")
+        status = str(predecessor["status"])
+        raw_reason = str(predecessor["terminal_reason"] or "")
+        if status == "COMPLETED" or raw_reason.startswith("PLAN_FORCE_EXIT:"):
+            return None, freshness
+        if status != "INTERRUPTED" or predecessor["terminal_at"] is None:
+            raise ConversationKernelConflict(
+                "previous turn is neither completed nor terminal interrupted"
+            )
+        outcome_kind = _previous_turn_outcome_kind(raw_reason)
+        assistant_count_row = connection.execute(
+            """
+            SELECT count(*) AS accepted_assistant_count
+            FROM pulsara_v3.transcript_entries
+            WHERE session_id = %s AND turn_id = %s
+              AND entry_sequence <= %s
+              AND entry_kind IN ('ASSISTANT_MESSAGE', 'ASSISTANT_TOOL_REQUEST')
+            """,
+            (
+                cut.session_id,
+                predecessor_turn_id,
+                cut.provider_input_through_sequence,
+            ),
+        ).fetchone()
+        unresolved = connection.execute(
+            """
+            SELECT
+              count(*) FILTER (WHERE a.id IS NULL) AS not_dispatched_count,
+              count(*) FILTER (WHERE a.id IS NOT NULL) AS unknown_count
+            FROM pulsara_v3.assistant_message_blocks AS b
+            JOIN pulsara_v3.transcript_entries AS ae
+              ON ae.session_id = b.session_id
+             AND ae.id = b.assistant_entry_id
+            LEFT JOIN pulsara_v3.tool_execution_attempts AS a
+              ON a.session_id = b.session_id
+             AND a.assistant_entry_id = b.assistant_entry_id
+             AND a.tool_call_id = b.tool_call_id
+            LEFT JOIN pulsara_v3.tool_results AS r
+              ON r.session_id = b.session_id
+             AND r.tool_call_entry_id = b.assistant_entry_id
+             AND r.tool_call_id = b.tool_call_id
+            LEFT JOIN pulsara_v3.transcript_entries AS re
+              ON re.session_id = r.session_id AND re.id = r.result_entry_id
+            LEFT JOIN pulsara_v3.plan_interactions AS pi
+              ON pi.session_id = b.session_id
+             AND pi.assistant_entry_id = b.assistant_entry_id
+             AND pi.tool_call_id = b.tool_call_id
+            WHERE b.session_id = %s AND ae.turn_id = %s
+              AND ae.entry_sequence <= %s
+              AND b.block_kind = 'TOOL_CALL'
+              AND pi.id IS NULL
+              AND (r.id IS NULL OR re.entry_sequence > %s)
+            """,
+            (
+                cut.session_id,
+                predecessor_turn_id,
+                cut.provider_input_through_sequence,
+                cut.provider_input_through_sequence,
+            ),
+        ).fetchone()
+        sample_rows = connection.execute(
+            """
+            SELECT b.tool_name
+            FROM pulsara_v3.assistant_message_blocks AS b
+            JOIN pulsara_v3.transcript_entries AS ae
+              ON ae.session_id = b.session_id
+             AND ae.id = b.assistant_entry_id
+            LEFT JOIN pulsara_v3.tool_results AS r
+              ON r.session_id = b.session_id
+             AND r.tool_call_entry_id = b.assistant_entry_id
+             AND r.tool_call_id = b.tool_call_id
+            LEFT JOIN pulsara_v3.transcript_entries AS re
+              ON re.session_id = r.session_id AND re.id = r.result_entry_id
+            LEFT JOIN pulsara_v3.plan_interactions AS pi
+              ON pi.session_id = b.session_id
+             AND pi.assistant_entry_id = b.assistant_entry_id
+             AND pi.tool_call_id = b.tool_call_id
+            WHERE b.session_id = %s AND ae.turn_id = %s
+              AND ae.entry_sequence <= %s
+              AND b.block_kind = 'TOOL_CALL'
+              AND pi.id IS NULL
+              AND (r.id IS NULL OR re.entry_sequence > %s)
+            ORDER BY ae.entry_sequence, b.block_ordinal
+            LIMIT 3
+            """,
+            (
+                cut.session_id,
+                predecessor_turn_id,
+                cut.provider_input_through_sequence,
+                cut.provider_input_through_sequence,
+            ),
+        ).fetchall()
+        assistant_count = int(assistant_count_row["accepted_assistant_count"])
+        previous_values = {
+            "session_id": cut.session_id,
+            "workspace_id": workspace_id,
+            "current_turn_id": cut.turn_id,
+            "current_scope_kind": scope_kind,
+            "scope_subagent_task_id": scope_task_id,
+            "predecessor_turn_id": predecessor_turn_id,
+            "predecessor_initial_entry_sequence": int(
+                predecessor["entry_sequence"]
+            ),
+            "predecessor_terminal_at_utc": canonical_utc_timestamp(
+                predecessor["terminal_at"]
+            ),
+            "outcome_kind": outcome_kind,
+            "accepted_assistant_disposition": (
+                AcceptedAssistantDisposition.ACCEPTED_PREFIX_PRESENT
+                if assistant_count
+                else AcceptedAssistantDisposition.NONE_ACCEPTED
+            ),
+            "accepted_assistant_entry_count": assistant_count,
+            "definitely_not_dispatched_tool_count": int(
+                unresolved["not_dispatched_count"] or 0
+            ),
+            "outcome_unknown_tool_count": int(unresolved["unknown_count"] or 0),
+            "bounded_tool_name_samples": tuple(
+                _bounded_tool_name_sample(str(row["tool_name"]))
+                for row in sample_rows
+            ),
+            "user_input_preserved": True,
+            "canonical_entries_preserved": True,
+        }
+        provisional_previous = FrozenPreviousTurnOutcomeCompileFact.__new__(
+            FrozenPreviousTurnOutcomeCompileFact
+        )
+        for name, value in previous_values.items():
+            object.__setattr__(provisional_previous, name, value)
+        object.__setattr__(provisional_previous, "fact_fingerprint", "")
+        return (
+            FrozenPreviousTurnOutcomeCompileFact(
+                **previous_values,
+                fact_fingerprint=previous_turn_outcome_fingerprint(
+                    provisional_previous
+                ),
+            ),
+            freshness,
+        )
+
+    def _load_tool_state(
+        self,
+        connection,
+        session_id: str,
+        entry_ids: Sequence[str],
+        *,
+        provider_input_through_sequence: int,
+    ):
         state: dict[tuple[str, str], dict[str, object]] = {}
         if not entry_ids:
             return state
@@ -1027,11 +1303,16 @@ class CanonicalProviderInputReader(CanonicalProviderInputReader):
                 SELECT b.assistant_entry_id, b.tool_call_id, a.id AS attempt_id,
                        i.kind AS plan_interaction_kind,
                        i.status AS plan_interaction_status,
+                       r.session_id AS result_session_id,
                        r.result_state, r.result_entry_id,
                        r.output_artifact_disposition, r.output_artifact_id,
                        r.output_source_coverage, r.output_display_kind,
                        r.output_source_coverage_reason,
                        r.output_artifact_unavailability_reason,
+                       r.result_origin_kind, r.observed_at,
+                       r.observation_duration_microseconds,
+                       r.observation_origin_kind,
+                       r.tool_reported_duration_microseconds,
                        e.entry_sequence, e.blob_id,
                        e.content_digest, e.content_size,
                        e.content_media_type, e.content_codec,
@@ -1068,8 +1349,12 @@ class CanonicalProviderInputReader(CanonicalProviderInputReader):
                 "plan_interaction_kind": row["plan_interaction_kind"],
                 "plan_interaction_status": row["plan_interaction_status"],
             }
-            if row["result_entry_id"] is not None:
-                payload["result"] = row
+            visible_result = visible_tool_result_at_cut(
+                row,
+                provider_input_through_sequence=provider_input_through_sequence,
+            )
+            if visible_result is not None:
+                payload["result"] = visible_result
             state[(str(row["assistant_entry_id"]), str(row["tool_call_id"]))] = payload
         if len(state) != len(rows):
             raise ConversationKernelConflict(
@@ -1297,10 +1582,9 @@ def _decode_provider_text(content: bytes, codec: str) -> str:
     if codec != "utf-8":
         return _canonical_json_text(
             {
-                "schema_version": "canonical_binary_content.v1",
+                "kind": "binary_content",
                 "codec": codec,
                 "size": len(content),
-                "digest": "sha256:" + sha256(content).hexdigest(),
             }
         )
     try:
@@ -1310,6 +1594,55 @@ def _decode_provider_text(content: bytes, codec: str) -> str:
             CanonicalProviderContinuityFailureKind.INVALID_UTF8,
             content_identity="sha256:" + sha256(content).hexdigest(),
         ) from exc
+
+
+def _project_plan_continuation_storage(
+    row: Mapping[str, object], storage_text: str
+) -> str:
+    """Validate the canonical carrier, then emit its closed provider DTO."""
+
+    transition = str(row.get("source_plan_handoff_kind") or "")
+    if transition not in {"ENTERED_PLAN", "REVISION_REQUESTED", "APPROVED_PLAN"}:
+        raise ConversationKernelConflict("Plan continuation transition is invalid")
+    try:
+        value = json.loads(storage_text)
+    except json.JSONDecodeError as exc:
+        raise ConversationKernelConflict(
+            "Plan continuation storage carrier is invalid"
+        ) from exc
+    if not isinstance(value, dict) or str(value.get("transition") or "") != transition:
+        raise ConversationKernelConflict(
+            "Plan continuation storage transition conflicts"
+        )
+    typed_workflow = row.get("source_plan_workflow_id")
+    typed_interaction = row.get("source_plan_interaction_id")
+    if value.get("workflow_id") is not None and str(value["workflow_id"]) != str(
+        typed_workflow
+    ):
+        raise ConversationKernelConflict("Plan continuation workflow conflicts")
+    if value.get("interaction_id") is not None and str(
+        value["interaction_id"]
+    ) != str(typed_interaction):
+        raise ConversationKernelConflict("Plan continuation interaction conflicts")
+
+    projected: dict[str, object] = {
+        "status": "APPROVED" if transition == "APPROVED_PLAN" else "ACTIVE",
+        "transition": transition,
+    }
+    if transition == "REVISION_REQUESTED":
+        feedback = value.get("feedback")
+        if feedback is not None and not isinstance(feedback, str):
+            raise ConversationKernelConflict("Plan revision feedback is invalid")
+        projected["feedback"] = (
+            {"presence": "ABSENT"}
+            if feedback is None
+            else {"presence": "PRESENT", "text": feedback}
+        )
+    if transition == "APPROVED_PLAN" and not isinstance(
+        value.get("approved_plan"), dict
+    ):
+        raise ConversationKernelConflict("approved Plan identity carrier is invalid")
+    return _canonical_json_text({"pulsara_plan_continuation": projected})
 
 
 def _canonical_json_text(payload: Mapping[str, object]) -> str:
@@ -1331,9 +1664,98 @@ def _freeze_tool_arguments(
     return frozen
 
 
+def visible_tool_result_at_cut(
+    row: Mapping[str, object],
+    *,
+    provider_input_through_sequence: int,
+) -> Mapping[str, object] | None:
+    """Return one exact result only when its canonical entry is in the cut."""
+
+    if row.get("result_entry_id") is None:
+        return None
+    if row.get("entry_sequence") is None or row.get("result_turn_id") is None:
+        raise ConversationKernelConflict("tool result canonical entry is absent")
+    sequence = int(row["entry_sequence"])
+    if sequence > provider_input_through_sequence:
+        return None
+    if sequence < 1:
+        raise ConversationKernelConflict("tool result entry sequence is invalid")
+    return row
+
+
+def _previous_turn_outcome_kind(raw_reason: str) -> PreviousTurnOutcomeKind:
+    return {
+        "USER_STOPPED": PreviousTurnOutcomeKind.USER_STOPPED,
+        "FOREGROUND_EXECUTION_INTERRUPTED": PreviousTurnOutcomeKind.EXECUTION_FAILED,
+        "SESSION_CLOSED": PreviousTurnOutcomeKind.HOST_SESSION_CLOSED,
+        "HOST_TAKEOVER": PreviousTurnOutcomeKind.HOST_REPLACED,
+        "PROVIDER_INPUT_PLAN_CONFLICT": (
+            PreviousTurnOutcomeKind.PROVIDER_INPUT_CONFLICT
+        ),
+        "PROVIDER_INPUT_RESOURCE_EXHAUSTED": (
+            PreviousTurnOutcomeKind.RESOURCE_BOUNDARY
+        ),
+        "PLAN_CONTINUATION_NOT_BOUND": (
+            PreviousTurnOutcomeKind.PLAN_CONTINUATION_FAILED
+        ),
+    }.get(raw_reason, PreviousTurnOutcomeKind.UNKNOWN_INTERRUPTION)
+
+
+def _bounded_tool_name_sample(value: str) -> str:
+    encoded = value.encode("utf-8")
+    if len(encoded) <= 128:
+        return value
+    candidate = encoded[:128]
+    while candidate:
+        try:
+            return candidate.decode("utf-8")
+        except UnicodeDecodeError:
+            candidate = candidate[:-1]
+    raise ConversationKernelConflict("tool name cannot form a bounded UTF-8 sample")
+
+
 def _tool_result_metadata(
     row: Mapping[str, object],
 ) -> ProviderToolResultContextMetadata:
+    origin = ToolObservationOrigin(str(row["observation_origin_kind"]))
+    result_origin = str(row["result_origin_kind"])
+    duration = (
+        None
+        if row["observation_duration_microseconds"] is None
+        else int(row["observation_duration_microseconds"])
+    )
+    disposition = (
+        ToolObservationDurationDisposition.NO_PHYSICAL_ATTEMPT
+        if result_origin in {"POLICY_NO_ATTEMPT", "PLAN_CONTROL"}
+        else ToolObservationDurationDisposition.MEASURED
+        if duration is not None
+        else ToolObservationDurationDisposition.MEASUREMENT_UNAVAILABLE
+    )
+    timing_values = {
+        "source_turn_ref": provider_visible_turn_ref(
+            session_id=str(row["result_session_id"]),
+            turn_id=str(row["result_turn_id"]),
+        ),
+        "observed_at_utc": canonical_utc_timestamp(row["observed_at"]),
+        "observation_duration_microseconds": duration,
+        "duration_disposition": disposition,
+        "tool_reported_duration_microseconds": (
+            None
+            if row["tool_reported_duration_microseconds"] is None
+            else int(row["tool_reported_duration_microseconds"])
+        ),
+        "observation_origin": origin,
+    }
+    provisional_timing = FrozenToolObservationTimingFact.__new__(
+        FrozenToolObservationTimingFact
+    )
+    for name, value in timing_values.items():
+        object.__setattr__(provisional_timing, name, value)
+    object.__setattr__(provisional_timing, "fact_fingerprint", "")
+    timing = FrozenToolObservationTimingFact(
+        **timing_values,
+        fact_fingerprint=tool_observation_timing_fingerprint(provisional_timing),
+    )
     return ProviderToolResultContextMetadata(
         result_state=str(row["result_state"]),
         display_kind=ToolResultDisplayKind(str(row["output_display_kind"])),
@@ -1360,6 +1782,7 @@ def _tool_result_metadata(
                 str(row["output_artifact_unavailability_reason"])
             )
         ),
+        timing=timing,
     )
 
 

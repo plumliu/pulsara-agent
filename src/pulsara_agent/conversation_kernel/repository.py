@@ -41,6 +41,7 @@ from pulsara_agent.primitives.plan_workflow import (
     PlanWorkflowStatus,
 )
 from pulsara_agent.primitives.run_permission import FrozenRunPermissionSnapshot
+from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
 
 from ._repository.contracts import (
     AcceptedCapabilityDecision,

@@ -458,6 +458,13 @@ CREATE TABLE pulsara_v3.tool_results (
         'INVALID_ARGUMENTS', 'PERMISSION_DENIED', 'TOOL_UNAVAILABLE',
         'CANCELLED_BEFORE_DISPATCH'
     )),
+    observed_at timestamptz NOT NULL,
+    observation_duration_microseconds bigint,
+    observation_origin_kind text NOT NULL CHECK (observation_origin_kind IN (
+        'BUILTIN', 'TERMINAL_PROCESS', 'MCP_REMOTE',
+        'POLICY', 'PLAN_CONTROL', 'CUSTOM_OR_UNKNOWN'
+    )),
+    tool_reported_duration_microseconds bigint,
     output_artifact_disposition text NOT NULL DEFAULT 'NOT_REQUIRED'
         CHECK (output_artifact_disposition IN (
             'NOT_REQUIRED', 'AVAILABLE', 'INCOMPLETE', 'UNAVAILABLE'
@@ -515,6 +522,37 @@ CREATE TABLE pulsara_v3.tool_results (
             AND num_nonnulls(control_plan_workflow_id, control_plan_interaction_id) = 1
             AND result_state IN ('SUCCESS', 'APPLICATION_ERROR')
         )
+    ),
+    CHECK (
+        observation_duration_microseconds IS NULL OR (
+            result_origin_kind = 'PHYSICAL_ATTEMPT'
+            AND observation_duration_microseconds >= 0
+            AND observation_duration_microseconds <= 31536000000000
+        )
+    ),
+    CHECK (
+        tool_reported_duration_microseconds IS NULL OR (
+            result_origin_kind = 'PHYSICAL_ATTEMPT'
+            AND tool_reported_duration_microseconds >= 0
+            AND tool_reported_duration_microseconds <= 31536000000000
+        )
+    ),
+    CHECK (
+        (result_origin_kind = 'POLICY_NO_ATTEMPT'
+            AND observation_origin_kind = 'POLICY'
+            AND observation_duration_microseconds IS NULL
+            AND tool_reported_duration_microseconds IS NULL)
+        OR
+        (result_origin_kind = 'PLAN_CONTROL'
+            AND observation_origin_kind = 'PLAN_CONTROL'
+            AND observation_duration_microseconds IS NULL
+            AND tool_reported_duration_microseconds IS NULL)
+        OR
+        (result_origin_kind = 'PHYSICAL_ATTEMPT'
+            AND observation_origin_kind IN (
+                'BUILTIN', 'TERMINAL_PROCESS', 'MCP_REMOTE',
+                'CUSTOM_OR_UNKNOWN'
+            ))
     ),
     CHECK (
         (output_source_coverage = 'COMPLETE'

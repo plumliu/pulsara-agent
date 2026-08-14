@@ -129,7 +129,6 @@ class KernelMemoryToolPort:
                 "kind": item.fact_kind,
                 "lifecycle": item.lifecycle,
                 "payload": dict(item.fact_payload),
-                "semantic_digest": item.semantic_digest,
             }
             for item in result.facts
             if (
@@ -146,8 +145,6 @@ class KernelMemoryToolPort:
                 "channels": [
                     {
                         "channel": item.channel,
-                        "desired_generation": item.desired_generation,
-                        "applied_generation": item.applied_generation,
                         "disposition": item.disposition.value,
                         "reason": item.reason,
                     }
@@ -206,7 +203,6 @@ class KernelMemoryToolPort:
                 "kind": str(fact["fact_kind"]),
                 "lifecycle": str(fact["lifecycle"]),
                 "payload": dict(fact["fact_payload"]),
-                "semantic_digest": str(fact["semantic_digest"]),
                 "relations": [
                     {
                         "relation_id": str(item["id"]),

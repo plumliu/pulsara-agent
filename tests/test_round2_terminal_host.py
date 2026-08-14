@@ -13,6 +13,7 @@ import pytest
 from pulsara_agent.conversation_kernel.host import KernelHostCore
 from pulsara_agent.conversation_kernel.direct_model import KernelModelExecutionRequest
 from pulsara_agent.llm.input import MessageRole
+from pulsara_agent.model_input.lowering import decode_tool_result_observation
 from pulsara_agent.ports.live_agent_event import (
     TextDeltaPayload,
     TextEndPayload,
@@ -94,7 +95,8 @@ class _TerminalMonitorDogfoodModel:
             for item in reversed(request.compiled_input.messages):
                 if item.role is not MessageRole.TOOL_RESULT or not item.content:
                     continue
-                decoded = json.loads(item.content[0])
+                provider_result = decode_tool_result_observation(item.content[0])
+                decoded = json.loads(str(provider_result["body"]))
                 candidate = decoded.get("process_id")
                 if isinstance(candidate, str):
                     process_id = candidate
@@ -108,15 +110,17 @@ class _TerminalMonitorDogfoodModel:
         elif call_index == 3:
             payloads = _text("text:round2-waiting", "MONITOR_REGISTERED_WAITING")
         else:
-            terminal_items = [
-                item.content[0]
+            terminal_items = tuple(
+                json.loads(item.content[0])["pulsara_terminal_observation"]
                 for item in request.compiled_input.messages
                 if item.role is MessageRole.USER
                 and item.content
-                and "[UNTRUSTED_TERMINAL_OUTPUT:" in item.content[0]
-            ]
+                and item.content[0].startswith(
+                    '{"pulsara_terminal_observation":'
+                )
+            )
             assert len(terminal_items) == 1
-            assert "R2_COMPLETION_SENTINEL" in terminal_items[0]
+            assert "R2_COMPLETION_SENTINEL" in terminal_items[0]["output"]
             self.autonomous_seen.set()
             payloads = _text("text:round2-autonomous", "AUTONOMOUS_COMPLETION_SEEN")
         for payload in payloads:

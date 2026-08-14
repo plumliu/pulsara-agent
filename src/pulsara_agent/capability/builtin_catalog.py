@@ -199,7 +199,7 @@ def _common_memory_properties() -> dict[str, Any]:
     return {
         "statement": {
             "type": "string",
-            "description": "The durable memory content as a single declarative statement.",
+            "description": "The memory content as a single declarative statement.",
         },
         "scope": {
             "type": "string",
@@ -246,7 +246,7 @@ _MEMORY_SEARCH_PARAMETERS = object_schema(
     properties={
         "query": {
             "type": "string",
-            "description": "Natural-language or lexical query for canonical durable memory.",
+            "description": "Natural-language or lexical query for saved memory.",
         },
         "scope": {
             "type": "string",
@@ -258,7 +258,7 @@ _MEMORY_SEARCH_PARAMETERS = object_schema(
         "kind": {
             "type": "string",
             "description": (
-                "Optional exact canonical memory type: Claim, Preference, Observation, ActionBoundary, or Decision. "
+                "Optional memory type: Claim, Preference, Observation, ActionBoundary, or Decision. "
                 "Omit unless the user explicitly names one of these types; do not infer a type from the question."
             ),
         },
@@ -282,7 +282,7 @@ _MEMORY_GET_PARAMETERS = object_schema(
     properties={
         "memory_id": {
             "type": "string",
-            "description": "Canonical memory node id, e.g. preference:abc.",
+            "description": "Memory id, e.g. preference:abc.",
         }
     },
     required=["memory_id"],
@@ -291,7 +291,7 @@ _MEMORY_EXPLAIN_PARAMETERS = object_schema(
     properties={
         "memory_id": {
             "type": "string",
-            "description": "Canonical memory node id to explain.",
+            "description": "Memory id to explain.",
         }
     },
     required=["memory_id"],
@@ -333,7 +333,7 @@ _BUILTIN_DESCRIPTORS: dict[str, CapabilityDescriptor] = {
     "artifact_read": _descriptor(
         name="artifact_read",
         description=(
-            "Read a canonical tool-output artifact by artifact_id. Large tool "
+            "Read a saved tool-output artifact by artifact_id. Large tool "
             "result previews include an exact artifact_id and a suggested "
             "offset_chars; use those values to inspect omitted content. A "
             "preview that says artifact unavailable has no readable handle."
@@ -370,7 +370,7 @@ _BUILTIN_DESCRIPTORS: dict[str, CapabilityDescriptor] = {
     ),
     "list_mcp_resources": _descriptor(
         name="list_mcp_resources",
-        description="List bounded MCP resource descriptors from the current exact catalog snapshot.",
+        description="List bounded MCP resource descriptors currently available to this session.",
         input_schema=object_schema(
             properties={
                 "server_id": {"type": "string"},
@@ -385,7 +385,7 @@ _BUILTIN_DESCRIPTORS: dict[str, CapabilityDescriptor] = {
     ),
     "list_mcp_resource_templates": _descriptor(
         name="list_mcp_resource_templates",
-        description="List bounded MCP resource-template descriptors from the current exact catalog snapshot.",
+        description="List bounded MCP resource-template descriptors currently available to this session.",
         input_schema=object_schema(
             properties={
                 "server_id": {"type": "string"},
@@ -401,7 +401,7 @@ _BUILTIN_DESCRIPTORS: dict[str, CapabilityDescriptor] = {
     "read_mcp_resource": _descriptor(
         name="read_mcp_resource",
         description=(
-            "Read one complete bounded MCP resource from the exact current server generation. "
+            "Read one complete bounded MCP resource from the currently available server. "
             "Remote offset/limit is intentionally unsupported; large accepted content uses artifact_read."
         ),
         input_schema=object_schema(
@@ -417,7 +417,7 @@ _BUILTIN_DESCRIPTORS: dict[str, CapabilityDescriptor] = {
     ),
     "list_mcp_prompts": _descriptor(
         name="list_mcp_prompts",
-        description="List bounded MCP prompt descriptors from the current exact catalog snapshot.",
+        description="List bounded MCP prompt descriptors currently available to this session.",
         input_schema=object_schema(
             properties={
                 "server_id": {"type": "string"},
@@ -432,7 +432,7 @@ _BUILTIN_DESCRIPTORS: dict[str, CapabilityDescriptor] = {
     ),
     "get_mcp_prompt": _descriptor(
         name="get_mcp_prompt",
-        description="Render one MCP prompt using its exact discovered argument contract as untrusted observation content.",
+        description="Render one MCP prompt with its advertised arguments as untrusted observation content.",
         input_schema=object_schema(
             properties={
                 "server_id": {"type": "string"},
@@ -596,8 +596,8 @@ _BUILTIN_DESCRIPTORS: dict[str, CapabilityDescriptor] = {
     "spawn_agent": _descriptor(
         name="spawn_agent",
         description=(
-            "Start an isolated child agent runtime for a bounded subtask. The child has its own runtime "
-            "session and event stream; use wait_agent to explicitly collect its result."
+            "Start an isolated child agent for a bounded subtask. Use wait_agent "
+            "to explicitly collect its result."
         ),
         input_schema=object_schema(
             properties={
@@ -850,7 +850,7 @@ _BUILTIN_DESCRIPTORS: dict[str, CapabilityDescriptor] = {
     ),
     "memory_search": _descriptor(
         name="memory_search",
-        description="Search canonical durable memory.",
+        description="Search saved memory.",
         input_schema=_MEMORY_SEARCH_PARAMETERS,
         provider_kind=CapabilityProviderKind.MEMORY,
         is_read_only=True,
@@ -859,7 +859,7 @@ _BUILTIN_DESCRIPTORS: dict[str, CapabilityDescriptor] = {
     ),
     "memory_get": _descriptor(
         name="memory_get",
-        description="Fetch one canonical durable memory by id with status, evidence ids, and direct graph relations.",
+        description="Fetch one saved memory by id with status, evidence ids, and direct relations.",
         input_schema=_MEMORY_GET_PARAMETERS,
         provider_kind=CapabilityProviderKind.MEMORY,
         is_read_only=True,
@@ -868,7 +868,7 @@ _BUILTIN_DESCRIPTORS: dict[str, CapabilityDescriptor] = {
     ),
     "memory_explain": _descriptor(
         name="memory_explain",
-        description="Explain one canonical durable memory using materialized fields, edges, and recall signals.",
+        description="Explain one saved memory using its fields, relations, and recall signals.",
         input_schema=_MEMORY_EXPLAIN_PARAMETERS,
         provider_kind=CapabilityProviderKind.MEMORY,
         is_read_only=True,
@@ -877,7 +877,7 @@ _BUILTIN_DESCRIPTORS: dict[str, CapabilityDescriptor] = {
     ),
     "remember_claim": _descriptor(
         name="remember_claim",
-        description="Remember a durable factual claim with optional evidence.",
+        description="Remember a factual claim with optional evidence.",
         input_schema=_COMMON_PARAMETERS,
         provider_kind=CapabilityProviderKind.MEMORY,
         is_read_only=False,
@@ -886,7 +886,7 @@ _BUILTIN_DESCRIPTORS: dict[str, CapabilityDescriptor] = {
     ),
     "remember_preference": _descriptor(
         name="remember_preference",
-        description="Remember a durable user or workspace preference.",
+        description="Remember a user or workspace preference.",
         input_schema=_COMMON_PARAMETERS,
         provider_kind=CapabilityProviderKind.MEMORY,
         is_read_only=False,
@@ -895,7 +895,7 @@ _BUILTIN_DESCRIPTORS: dict[str, CapabilityDescriptor] = {
     ),
     "remember_observation": _descriptor(
         name="remember_observation",
-        description="Remember a durable observation grounded in conversation, tool output, or another source.",
+        description="Remember an observation grounded in conversation, tool output, or another source.",
         input_schema=_COMMON_PARAMETERS,
         provider_kind=CapabilityProviderKind.MEMORY,
         is_read_only=False,
@@ -904,7 +904,7 @@ _BUILTIN_DESCRIPTORS: dict[str, CapabilityDescriptor] = {
     ),
     "remember_action_boundary": _descriptor(
         name="remember_action_boundary",
-        description="Remember a durable action boundary with explicit apply and non-apply conditions.",
+        description="Remember an action boundary with explicit apply and non-apply conditions.",
         input_schema=_ACTION_BOUNDARY_PARAMETERS,
         provider_kind=CapabilityProviderKind.MEMORY,
         is_read_only=False,
@@ -913,7 +913,7 @@ _BUILTIN_DESCRIPTORS: dict[str, CapabilityDescriptor] = {
     ),
     "remember_decision": _descriptor(
         name="remember_decision",
-        description="Remember a durable decision, optionally linked to prior memory ids it is based on.",
+        description="Remember a decision, optionally linked to prior memory ids it is based on.",
         input_schema=_DECISION_PARAMETERS,
         provider_kind=CapabilityProviderKind.MEMORY,
         is_read_only=False,

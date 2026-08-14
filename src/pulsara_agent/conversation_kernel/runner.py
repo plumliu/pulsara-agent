@@ -33,6 +33,11 @@ from pulsara_agent.conversation_kernel.blob import (
 from pulsara_agent.conversation_kernel.context_sources import (
     ContextSourceCollectorPort,
 )
+from pulsara_agent.conversation_kernel.cancellation import (
+    ActiveTurnCancellationIntent,
+    ForegroundCancellationCause,
+    stable_subagent_turn_id,
+)
 from pulsara_agent.conversation_kernel.direct_model import (
     KernelModelExecutionRequest,
     KernelModelPreparationRequest,
@@ -111,6 +116,11 @@ from pulsara_agent.primitives.plan_workflow import (
     extract_plan_draft,
     extract_plan_entry_reason,
     extract_plan_question,
+)
+from pulsara_agent.primitives.tool_observation import (
+    PhysicalToolObservationSupplement,
+    ToolObservationOrigin,
+    TrustedToolObservationSupplement,
 )
 from pulsara_agent.conversation_kernel.reader import (
     CanonicalProviderContinuityError,
@@ -202,6 +212,7 @@ from pulsara_agent.primitives.context import (
 from pulsara_agent.conversation_kernel.tool_surface import (
     PreparedKernelToolSurface,
     ProcessLocalToolSurfaceBorrow,
+    tool_observation_origin_for_binding,
 )
 
 
@@ -246,6 +257,8 @@ class KernelToolResult:
     physical_timing: str = "ON_TIME"
     caller_cancelled_while_running: bool = False
     effect_class: str | None = None
+    physical_observation: PhysicalToolObservationSupplement | None = None
+    trusted_observation: TrustedToolObservationSupplement | None = None
 
     def __post_init__(self) -> None:
         # The model-facing tool result and artifact candidate are both strict
@@ -267,6 +280,7 @@ class _TurnAdmissionSettlementAttempt:
     root: bool
     reissue_allowed: bool
     cancellation_requested: bool = False
+    cancellation_intent: ActiveTurnCancellationIntent | None = None
 
 
 class KernelToolPhysicalInvocationError(RuntimeError):
@@ -279,11 +293,13 @@ class KernelToolPhysicalInvocationError(RuntimeError):
         error: BaseException,
         timing: str,
         caller_cancelled: bool,
+        physical_observation: PhysicalToolObservationSupplement | None = None,
     ) -> None:
         self.effect_class = effect_class
         self.physical_error = error
         self.timing = timing
         self.caller_cancelled = caller_cancelled
+        self.physical_observation = physical_observation
         super().__init__(f"tool physical invocation raised: {type(error).__name__}")
 
 
@@ -690,6 +706,7 @@ class ConversationKernelRunner:
         *,
         command_id: str | None = None,
         requested_permission_mode: PermissionMode | None = None,
+        cancellation_intent: ActiveTurnCancellationIntent | None = None,
     ) -> KernelRunResult:
         return await self._run_turn(
             text,
@@ -698,6 +715,7 @@ class ConversationKernelRunner:
             requested_permission_mode=(
                 requested_permission_mode or self._launch_permission_mode
             ),
+            cancellation_intent=cancellation_intent,
         )
 
     async def run_subagent_turn(
@@ -705,6 +723,7 @@ class ConversationKernelRunner:
         *,
         task_id: str,
         objective: str,
+        cancellation_intent: ActiveTurnCancellationIntent | None = None,
     ) -> KernelRunResult:
         if not task_id:
             raise ValueError("subagent task identity is required")
@@ -714,6 +733,7 @@ class ConversationKernelRunner:
                 command_id=None,
                 subagent_task_id=task_id,
                 requested_permission_mode=None,
+                cancellation_intent=cancellation_intent,
             )
         finally:
             self._continuity.discard_scope(
@@ -731,6 +751,7 @@ class ConversationKernelRunner:
         command_id: str | None,
         subagent_task_id: str | None,
         requested_permission_mode: PermissionMode | None,
+        cancellation_intent: ActiveTurnCancellationIntent | None,
     ) -> KernelRunResult:
         if not text:
             raise ValueError("user message must be non-empty")
@@ -758,12 +779,19 @@ class ConversationKernelRunner:
                 content=content,
                 occurred_at=occurred_at,
             )
-            await self._accept_root_turn_exact(candidate)
+            intent = cancellation_intent or ActiveTurnCancellationIntent(
+                turn_id, ModelInputScopeKind.ROOT, None
+            )
+            intent.require_exact(
+                turn_id=turn_id,
+                scope_kind=ModelInputScopeKind.ROOT,
+                scope_subagent_task_id=None,
+            )
+            await self._accept_root_turn_exact(candidate, cancellation_intent=intent)
         else:
-            turn_id = _stable_id(
-                "subagent-turn",
-                self._writer_lease.guard.session_id,
-                subagent_task_id,
+            turn_id = stable_subagent_turn_id(
+                session_id=self._writer_lease.guard.session_id,
+                task_id=subagent_task_id,
             )
             content = await self._content(
                 text.encode("utf-8"), deadline=self._canonical_deadline()
@@ -782,24 +810,49 @@ class ConversationKernelRunner:
                 occurred_at=occurred_at,
                 actor_id="subagent-manager",
             )
-            await self._accept_subagent_turn_exact(candidate)
-        return await self.run_accepted_turn(turn_id)
+            intent = cancellation_intent or ActiveTurnCancellationIntent(
+                turn_id, ModelInputScopeKind.SUBAGENT_TASK, subagent_task_id
+            )
+            intent.require_exact(
+                turn_id=turn_id,
+                scope_kind=ModelInputScopeKind.SUBAGENT_TASK,
+                scope_subagent_task_id=subagent_task_id,
+            )
+            await self._accept_subagent_turn_exact(
+                candidate, cancellation_intent=intent
+            )
+        return await self.run_accepted_turn(turn_id, cancellation_intent=intent)
 
     async def _accept_root_turn_exact(
-        self, candidate: PreparedRootTurnAdmission
+        self,
+        candidate: PreparedRootTurnAdmission,
+        *,
+        cancellation_intent: ActiveTurnCancellationIntent,
     ) -> AcceptedEntry:
-        return await self._accept_turn_exact(candidate=candidate, root=True)
+        return await self._accept_turn_exact(
+            candidate=candidate,
+            root=True,
+            cancellation_intent=cancellation_intent,
+        )
 
     async def _accept_subagent_turn_exact(
-        self, candidate: PreparedSubagentTurnAdmission
+        self,
+        candidate: PreparedSubagentTurnAdmission,
+        *,
+        cancellation_intent: ActiveTurnCancellationIntent,
     ) -> AcceptedEntry:
-        return await self._accept_turn_exact(candidate=candidate, root=False)
+        return await self._accept_turn_exact(
+            candidate=candidate,
+            root=False,
+            cancellation_intent=cancellation_intent,
+        )
 
     async def _accept_turn_exact(
         self,
         *,
         candidate: PreparedRootTurnAdmission | PreparedSubagentTurnAdmission,
         root: bool,
+        cancellation_intent: ActiveTurnCancellationIntent,
     ) -> AcceptedEntry:
         accept_operation = (
             self._repository.accept_root_turn
@@ -819,6 +872,7 @@ class ConversationKernelRunner:
                 root=root,
                 reissue_allowed=False,
                 cancellation_requested=True,
+                cancellation_intent=cancellation_intent,
             )
             settlement = asyncio.create_task(
                 self._settle_turn_admission(attempt),
@@ -883,7 +937,13 @@ class ConversationKernelRunner:
             if confirmation.kind is TurnAdmissionConfirmationKind.FULL:
                 assert confirmation.accepted is not None
                 if attempt.cancellation_requested:
-                    await self._settle_failed_turn_worker(attempt.candidate.turn_id)
+                    if attempt.root:
+                        await self._settle_failed_turn_worker(
+                            attempt.candidate.turn_id,
+                            _root_cancellation_terminal_reason(
+                                attempt.cancellation_intent
+                            ),
+                        )
                     return None
                 return confirmation.accepted
             if confirmation.kind is TurnAdmissionConfirmationKind.CONFLICT:
@@ -905,7 +965,13 @@ class ConversationKernelRunner:
             except BaseException:
                 continue
             if attempt.cancellation_requested:
-                await self._settle_failed_turn_worker(attempt.candidate.turn_id)
+                if attempt.root:
+                    await self._settle_failed_turn_worker(
+                        attempt.candidate.turn_id,
+                        _root_cancellation_terminal_reason(
+                            attempt.cancellation_intent
+                        ),
+                    )
                 return None
             return accepted
 
@@ -1605,8 +1671,19 @@ class ConversationKernelRunner:
     async def run_accepted_turn(
         self,
         turn_id: str,
+        *,
+        cancellation_intent: ActiveTurnCancellationIntent | None = None,
     ) -> KernelRunResult:
         """Execute a ROOT/task turn whose user entry is already canonical."""
+
+        intent = cancellation_intent or ActiveTurnCancellationIntent(
+            turn_id, ModelInputScopeKind.ROOT, None
+        )
+        intent.require_exact(
+            turn_id=turn_id,
+            scope_kind=intent.scope_kind,
+            scope_subagent_task_id=intent.scope_subagent_task_id,
+        )
 
         model_call_count = 0
         tool_call_count = 0
@@ -1866,6 +1943,7 @@ class ConversationKernelRunner:
                     )
                 for call in calls:
                     tool_call_count += 1
+                    observation_origin = ToolObservationOrigin.POLICY
                     invocation_arguments = thaw_json(call.arguments)
                     if not isinstance(invocation_arguments, dict):
                         raise RuntimeError(
@@ -1935,10 +2013,14 @@ class ConversationKernelRunner:
                     binding_fingerprint: str | None = None
                     if authorization.kind is KernelToolAuthorizationKind.ALLOW:
                         try:
+                            advertised_binding = (
+                                active_surface_borrow.execution_binding(call.tool_name)
+                            )
                             binding_fingerprint = (
-                                active_surface_borrow.binding_fingerprint(
-                                    call.tool_name
-                                )
+                                advertised_binding.executor_binding_fingerprint
+                            )
+                            observation_origin = tool_observation_origin_for_binding(
+                                advertised_binding
                             )
                         except RuntimeError:
                             authorization = KernelToolAuthorization(
@@ -2177,6 +2259,7 @@ class ConversationKernelRunner:
                                 ).encode("utf-8"),
                                 physical_timing=exc.timing,
                                 caller_cancelled_while_running=exc.caller_cancelled,
+                                physical_observation=exc.physical_observation,
                             )
                         except Exception as exc:
                             severity = builtin_tool_catalog_entry(
@@ -2198,6 +2281,19 @@ class ConversationKernelRunner:
                     # Cancelling the turn detaches only its waiter; it cannot
                     # erase the result or race a Terminal monitor token discard.
                     unsettled_process_local_effect = result.process_local_settlement
+                    if (
+                        result.physical_observation is not None
+                        and result.physical_observation.observation_origin_kind
+                        is not observation_origin
+                    ):
+                        raise RuntimeError(
+                            "physical tool observation origin drifted from binding"
+                        )
+                    outcome_observed_at = (
+                        result.physical_observation.observed_at
+                        if result.physical_observation is not None
+                        else datetime.now(timezone.utc)
+                    )
                     if workspace_id is None:
                         workspace_id = await self._resolved_workspace_id()
                     settlement_task = asyncio.create_task(
@@ -2213,6 +2309,8 @@ class ConversationKernelRunner:
                             attempt_id=attempt_id,
                             workspace_id=workspace_id,
                             result=result,
+                            observed_at=outcome_observed_at,
+                            observation_origin=observation_origin,
                             live_sink=live_sink,
                             tool_result_block_id=tool_result_block_id,
                             live_attribution=live_attribution,
@@ -2281,17 +2379,26 @@ class ConversationKernelRunner:
                         },
                     )
                 )
-            await self._settle_failed_turn(turn_id)
+            cause = intent.cause
+            if intent.scope_kind is ModelInputScopeKind.SUBAGENT_TASK and cause is not None:
+                # The child manager owns the atomic turn+task settlement.
+                raise
+            reason = (
+                _root_cancellation_terminal_reason(intent)
+                if isinstance(error, asyncio.CancelledError) and cause is not None
+                else "FOREGROUND_EXECUTION_INTERRUPTED"
+            )
+            await self._settle_failed_turn(turn_id, reason=reason)
             raise
 
-    async def _settle_failed_turn(self, turn_id: str) -> None:
+    async def _settle_failed_turn(self, turn_id: str, *, reason: str) -> None:
         task = asyncio.create_task(
-            self._settle_failed_turn_worker(turn_id),
+            self._settle_failed_turn_worker(turn_id, reason),
             name=f"kernel-turn-terminalization:{turn_id}",
         )
         await _await_started_settlement(task)
 
-    async def _settle_failed_turn_worker(self, turn_id: str) -> None:
+    async def _settle_failed_turn_worker(self, turn_id: str, reason: str) -> None:
         while True:
             deadline = self._canonical_deadline()
             try:
@@ -2299,7 +2406,7 @@ class ConversationKernelRunner:
                     self._repository.interrupt_turn,
                     self._writer_lease.guard,
                     turn_id=turn_id,
-                    reason="FOREGROUND_EXECUTION_INTERRUPTED",
+                    reason=reason,
                     occurred_at=datetime.now(timezone.utc),
                     actor_id="foreground-runner",
                     deadline_monotonic=deadline,
@@ -2311,8 +2418,8 @@ class ConversationKernelRunner:
             except BaseException:
                 pass
             try:
-                status = await self._io.run(
-                    self._repository.read_turn_status,
+                outcome = await self._io.run(
+                    self._repository.read_turn_terminal_outcome,
                     session_id=self._writer_lease.guard.session_id,
                     turn_id=turn_id,
                     deadline_monotonic=self._canonical_deadline(),
@@ -2320,8 +2427,19 @@ class ConversationKernelRunner:
             except BaseException:
                 await asyncio.sleep(0.05)
                 continue
-            if status is None or status is not TurnStatus.RUNNING:
+            if outcome is None:
                 return
+            status = str(outcome["status"])
+            if status == TurnStatus.INTERRUPTED.value:
+                # A different exact interruption is the canonical winner; do
+                # not overwrite it with a later process-local diagnosis.
+                return
+            if status == TurnStatus.COMPLETED.value:
+                return
+            if status != TurnStatus.RUNNING.value:
+                raise ConversationKernelConflict(
+                    "turn terminal outcome has an invalid status"
+                )
             await asyncio.sleep(0.05)
 
     async def _accept_plan_control_batch(
@@ -2842,6 +2960,8 @@ class ConversationKernelRunner:
         attempt_id: str | None,
         workspace_id: str,
         result: KernelToolResult,
+        observed_at: datetime,
+        observation_origin: ToolObservationOrigin,
         live_sink: _ToolResultLiveSink | None,
         tool_result_block_id: str | None,
         live_attribution: Mapping[str, object] | None,
@@ -2923,8 +3043,19 @@ class ConversationKernelRunner:
             artifact_unavailability_reason=(
                 prepared_output.artifact_unavailability_reason
             ),
+            observed_at=observed_at,
+            observation_duration_microseconds=(
+                None
+                if result.physical_observation is None
+                else result.physical_observation.elapsed_microseconds
+            ),
+            observation_origin_kind=observation_origin,
+            trusted_tool_reported_duration_microseconds=(
+                None
+                if result.trusted_observation is None
+                else result.trusted_observation.duration_microseconds
+            ),
             actor_id=tool_name,
-            occurred_at=datetime.now(timezone.utc),
             memory_candidate_id=(
                 None
                 if result.memory_proposal is None
@@ -3090,6 +3221,17 @@ class ConversationKernelRunner:
 
 def _id(prefix: str) -> str:
     return f"{prefix}:{uuid4().hex}"
+
+
+def _root_cancellation_terminal_reason(
+    intent: ActiveTurnCancellationIntent | None,
+) -> str:
+    cause = None if intent is None else intent.cause
+    if cause is ForegroundCancellationCause.USER_REQUEST:
+        return "USER_STOPPED"
+    if cause is ForegroundCancellationCause.HOST_SESSION_CLOSE:
+        return "SESSION_CLOSED"
+    return "FOREGROUND_EXECUTION_INTERRUPTED"
 
 
 def _stable_id(prefix: str, *parts: str) -> str:
@@ -3332,6 +3474,10 @@ def _prospective_steer_compile_snapshot(
         "plan_workflow_fact": base.plan_workflow_fact,
         "plan_handoff_fact": base.plan_handoff_fact,
         "approved_plan_materialization_fact": (base.approved_plan_materialization_fact),
+        "previous_turn_outcome_fact": base.previous_turn_outcome_fact,
+        "tool_observation_freshness_fact": (
+            base.tool_observation_freshness_fact
+        ),
     }
     provisional = FrozenCanonicalCompileSnapshot.__new__(FrozenCanonicalCompileSnapshot)
     for name, value in values.items():

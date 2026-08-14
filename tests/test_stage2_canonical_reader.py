@@ -42,6 +42,7 @@ from pulsara_agent.model_input.contracts import CanonicalInputOriginKind
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 from pulsara_agent.primitives.context import freeze_json
 from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
+from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
 from tests.support.postgres import verified_postgres_provider
 
 
@@ -272,7 +273,10 @@ def test_reader_uses_exact_scope_and_lowers_late_result_without_replay(
         display_kind=ToolResultDisplayKind.COMPLETE,
         source_coverage_reason=None,
         artifact_unavailability_reason=None,
-        occurred_at=occurred_at,
+        observed_at=occurred_at,
+        observation_duration_microseconds=None,
+        observation_origin_kind=ToolObservationOrigin.TERMINAL_PROCESS,
+        trusted_tool_reported_duration_microseconds=None,
         actor_id="terminal",
     )
     repository.accept_tool_result(

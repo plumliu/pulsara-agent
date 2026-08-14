@@ -16,6 +16,25 @@ from pulsara_agent.model_input.contracts import (
     ModelInputScopeKind,
 )
 from pulsara_agent.primitives.context import context_fingerprint
+from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
+
+
+_MCP_STANDARD_TOOL_NAMES = frozenset(
+    {
+        "get_mcp_prompt",
+        "list_mcp_prompts",
+        "list_mcp_resource_templates",
+        "list_mcp_resources",
+        "list_mcp_servers",
+        "read_mcp_resource",
+    }
+)
+_TERMINAL_TOOL_NAMES = frozenset(
+    {"terminal", "terminal_process", "terminal_monitor"}
+)
+_PLAN_CONTROL_TOOL_NAMES = frozenset(
+    {"enter_plan", "ask_plan_question", "exit_plan"}
+)
 
 
 class McpEffectKind(StrEnum):
@@ -131,6 +150,26 @@ class PreparedToolExecutionBinding:
                 raise ValueError("MCP policy does not join tool binding")
         else:
             raise TypeError("tool execution policy union is open")
+
+
+def tool_observation_origin_for_binding(
+    binding: PreparedToolExecutionBinding,
+) -> ToolObservationOrigin:
+    """Freeze observation origin from the exact advertised executor binding."""
+
+    tool_name = binding.tool_name
+    if (
+        isinstance(binding.execution_policy, McpToolExecutionPolicyFact)
+        or tool_name in _MCP_STANDARD_TOOL_NAMES
+    ):
+        return ToolObservationOrigin.MCP_REMOTE
+    if tool_name in _TERMINAL_TOOL_NAMES:
+        return ToolObservationOrigin.TERMINAL_PROCESS
+    if tool_name in _PLAN_CONTROL_TOOL_NAMES:
+        return ToolObservationOrigin.PLAN_CONTROL
+    if isinstance(binding.execution_policy, BuiltinExecutionPolicyRef):
+        return ToolObservationOrigin.BUILTIN
+    raise TypeError("tool execution policy union is open")
 
 
 def tool_execution_surface_fingerprint(
@@ -299,5 +338,6 @@ __all__ = [
     "ProcessLocalToolSurfaceBorrow",
     "ToolExecutionPolicy",
     "execution_policy_fingerprint",
+    "tool_observation_origin_for_binding",
     "tool_execution_surface_fingerprint",
 ]

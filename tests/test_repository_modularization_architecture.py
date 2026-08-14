@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import ast
+import hashlib
 import inspect
 import json
 from pathlib import Path
@@ -25,6 +26,43 @@ ROOT = Path(__file__).resolve().parents[1]
 TOOL = ROOT / "tools/repository_modularization_inventory.py"
 BASELINE = ROOT / "tests/fixtures/repository_modularization_baseline.json"
 _INTERNAL_REPOSITORY_PACKAGE = "pulsara_agent.conversation_kernel._repository"
+_ROUND7_ADDED_TOP_LEVEL_FUNCTIONS = {"_plan_question_response"}
+_ROUND7_CHANGED_TOP_LEVEL_FUNCTIONS = {
+    "_prepared_tool_result_manifest",
+    "build_prepared_tool_result_acceptance",
+}
+_ROUND7_ADDED_METHODS = {
+    "_subagent_cancellation_drafts",
+    "confirm_cancelled_subagent_turn_and_task",
+    "read_turn_terminal_outcome",
+    "settle_cancelled_subagent_turn_and_task",
+}
+_ROUND7_CHANGED_METHODS = {
+    "_accept_rejected_plan_tool_batch_in_transaction",
+    "_confirm_plan_resolution_in_transaction",
+    "_confirm_plan_tool_batch_in_transaction",
+    "accept_subagent_child",
+    "accept_plan_tool_batch",
+    "accept_tool_capability_decision",
+    "accept_tool_interaction_decision",
+    "accept_tool_result",
+    "confirm_plan_question_winner",
+    "confirm_tool_result_winner",
+    "read_turn_status",
+    "resolve_plan_question",
+    "set_subagent_task_status",
+}
+_ROUND7_RUNTIME_CHANGED_METHODS = {
+    "_confirm_plan_resolution_in_transaction",
+    "accept_subagent_child",
+    "set_subagent_task_status",
+}
+# Exact digest of the deliberately changed Round 7 repository slice.  The M0
+# fixture remains immutable; all definitions and physical DB calls outside
+# this closed allowlist must still equal that historical checkpoint exactly.
+_ROUND7_REPOSITORY_DELTA_SHA256 = (
+    "f11be8ab473f29aba733e1f094af393c8d745541da502675ac9f16e1579b76a9"
+)
 
 
 def _package_for_source(path: Path) -> str:
@@ -102,6 +140,52 @@ def _closed_owner_calls(
     return sorted(renames.get(call, call) for call in calls)
 
 
+def _round7_repository_delta(current: dict[str, object]) -> dict[str, object]:
+    changed_functions = (
+        _ROUND7_ADDED_TOP_LEVEL_FUNCTIONS | _ROUND7_CHANGED_TOP_LEVEL_FUNCTIONS
+    )
+    changed_methods = _ROUND7_ADDED_METHODS | _ROUND7_CHANGED_METHODS
+    runtime = current["runtime"]
+    assert isinstance(runtime, dict)
+    dataclasses = runtime["dataclasses"]
+    methods = runtime["methods"]
+    assert isinstance(dataclasses, dict) and isinstance(methods, dict)
+    return {
+        "top_level_functions": {
+            name: current["top_level_functions"][name]
+            for name in sorted(changed_functions)
+        },
+        "methods": {
+            name: current["methods"][name] for name in sorted(changed_methods)
+        },
+        "runtime_dataclasses": {
+            "PreparedToolResultAcceptance": dataclasses[
+                "PreparedToolResultAcceptance"
+            ]
+        },
+        "runtime_methods": {
+            name: methods[name]
+            for name in sorted(
+                _ROUND7_ADDED_METHODS | _ROUND7_RUNTIME_CHANGED_METHODS
+            )
+        },
+        "database_calls": _without_source_modules(
+            [
+                record
+                for record in current["database_calls"]
+                if record["owner"] in changed_methods
+            ]
+        ),
+        "physical_checkouts": _without_source_modules(
+            [
+                record
+                for record in current["physical_checkouts"]
+                if record["owner"] in changed_methods
+            ]
+        ),
+    }
+
+
 def test_repository_modularization_baseline_is_exact_at_checkpoint() -> None:
     baseline = _baseline()
     assert baseline["checkpoint_head"] == "edbe7aea5518085028657aedc161d8fcbe88bb6b"
@@ -134,22 +218,64 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
         "all",
         "observed_imports",
         "top_level_classes",
-        "top_level_functions",
-        "methods",
         "closed_owner_renames",
         "override_seams",
-        "runtime",
     ):
         assert current[key] == baseline[key], key
+    for key, added, changed in (
+        (
+            "top_level_functions",
+            _ROUND7_ADDED_TOP_LEVEL_FUNCTIONS,
+            _ROUND7_CHANGED_TOP_LEVEL_FUNCTIONS,
+        ),
+        ("methods", _ROUND7_ADDED_METHODS, _ROUND7_CHANGED_METHODS),
+    ):
+        assert set(current[key]) == set(baseline[key]) | added
+        for name in set(baseline[key]) - changed:
+            assert current[key][name] == baseline[key][name], (key, name)
+    current_runtime = current["runtime"]
+    baseline_runtime = baseline["runtime"]
+    for key in set(baseline_runtime) - {"dataclasses", "methods"}:
+        assert current_runtime[key] == baseline_runtime[key], ("runtime", key)
+    assert set(current_runtime["dataclasses"]) == set(
+        baseline_runtime["dataclasses"]
+    )
+    for name in set(baseline_runtime["dataclasses"]) - {
+        "PreparedToolResultAcceptance"
+    }:
+        assert current_runtime["dataclasses"][name] == baseline_runtime[
+            "dataclasses"
+        ][name]
+    assert set(current_runtime["methods"]) == set(baseline_runtime["methods"]) | (
+        _ROUND7_ADDED_METHODS
+    )
+    for name in set(baseline_runtime["methods"]) - _ROUND7_RUNTIME_CHANGED_METHODS:
+        assert current_runtime["methods"][name] == baseline_runtime["methods"][
+            name
+        ]
     assert _closed_owner_calls(
         current["class_qualified_calls"], baseline["closed_owner_renames"]
     ) == _closed_owner_calls(
         baseline["class_qualified_calls"], baseline["closed_owner_renames"]
     )
+    changed_owners = _ROUND7_ADDED_METHODS | _ROUND7_CHANGED_METHODS
     for key in ("database_calls", "physical_checkouts"):
-        assert _without_source_modules(current[key]) == _without_source_modules(
-            baseline[key]
-        ), key
+        current_unchanged = _without_source_modules(
+            [item for item in current[key] if item["owner"] not in changed_owners]
+        )
+        baseline_unchanged = _without_source_modules(
+            [item for item in baseline[key] if item["owner"] not in changed_owners]
+        )
+        assert current_unchanged == baseline_unchanged, key
+    encoded_delta = json.dumps(
+        _round7_repository_delta(current),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    assert hashlib.sha256(encoded_delta).hexdigest() == (
+        _ROUND7_REPOSITORY_DELTA_SHA256
+    )
     import pulsara_agent.conversation_kernel.repository as repository
 
     for name in baseline["runtime"]["owned_observed_symbols"]:

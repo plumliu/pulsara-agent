@@ -53,6 +53,7 @@ from tests.support.round3 import (
     direct_tool_invocation_context,
 )
 from pulsara_agent.primitives.context import freeze_json, thaw_json
+from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
 from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
 from pulsara_agent.primitives.run_permission import (
     RunPermissionAdmissionSource,
@@ -786,7 +787,10 @@ def test_round1_blob_before_event_conflict_rolls_back_all_canonical_rows(
         source_coverage_reason=projection.source_coverage_reason,
         artifact_unavailability_reason=projection.artifact_unavailability_reason,
         actor_id="tool",
-        occurred_at=datetime.now(timezone.utc),
+        observed_at=datetime.now(timezone.utc),
+        observation_duration_microseconds=None,
+        observation_origin_kind=ToolObservationOrigin.BUILTIN,
+        trusted_tool_reported_duration_microseconds=None,
     )
     with pytest.raises(ConversationKernelConflict, match="event append conflict"):
         repository.accept_tool_result(
@@ -854,7 +858,10 @@ def test_round1_missing_artifact_edge_fails_before_canonical_acceptance(
         source_coverage_reason=None,
         artifact_unavailability_reason=None,
         actor_id="tool",
-        occurred_at=datetime.now(timezone.utc),
+        observed_at=datetime.now(timezone.utc),
+        observation_duration_microseconds=None,
+        observation_origin_kind=ToolObservationOrigin.BUILTIN,
+        trusted_tool_reported_duration_microseconds=None,
     )
     with pytest.raises(ConversationKernelConflict, match="different blob"):
         repository.accept_tool_result(
@@ -987,7 +994,10 @@ def test_round1_artifact_body_read_scope_pagination_and_nonrecursive_result(
         source_coverage_reason=projection.source_coverage_reason,
         artifact_unavailability_reason=projection.artifact_unavailability_reason,
         actor_id="terminal",
-        occurred_at=datetime.now(timezone.utc),
+        observed_at=datetime.now(timezone.utc),
+        observation_duration_microseconds=None,
+        observation_origin_kind=ToolObservationOrigin.TERMINAL_PROCESS,
+        trusted_tool_reported_duration_microseconds=None,
     )
     repository.accept_tool_result(
         lease.guard,
@@ -1222,7 +1232,10 @@ def test_round1_retention_gap_and_blob_failure_persist_as_independent_reasons(
         source_coverage_reason=projection.source_coverage_reason,
         artifact_unavailability_reason=projection.artifact_unavailability_reason,
         actor_id="terminal",
-        occurred_at=datetime.now(timezone.utc),
+        observed_at=datetime.now(timezone.utc),
+        observation_duration_microseconds=None,
+        observation_origin_kind=ToolObservationOrigin.TERMINAL_PROCESS,
+        trusted_tool_reported_duration_microseconds=None,
     )
     repository.accept_tool_result(
         lease.guard, candidate=candidate, deadline_monotonic=monotonic() + 30
@@ -1350,7 +1363,10 @@ def test_round1_retained_snapshot_artifact_offset_zero_is_retained_body_start(
         source_coverage_reason=projection.source_coverage_reason,
         artifact_unavailability_reason=projection.artifact_unavailability_reason,
         actor_id="terminal",
-        occurred_at=datetime.now(timezone.utc),
+        observed_at=datetime.now(timezone.utc),
+        observation_duration_microseconds=None,
+        observation_origin_kind=ToolObservationOrigin.TERMINAL_PROCESS,
+        trusted_tool_reported_duration_microseconds=None,
     )
     repository.accept_tool_result(
         lease.guard, candidate=candidate, deadline_monotonic=monotonic() + 30
@@ -1408,7 +1424,10 @@ def test_round1_corrupt_blob_is_one_typed_content_error(
         source_coverage_reason=projection.source_coverage_reason,
         artifact_unavailability_reason=projection.artifact_unavailability_reason,
         actor_id="tool",
-        occurred_at=datetime.now(timezone.utc),
+        observed_at=datetime.now(timezone.utc),
+        observation_duration_microseconds=None,
+        observation_origin_kind=ToolObservationOrigin.BUILTIN,
+        trusted_tool_reported_duration_microseconds=None,
     )
     repository.accept_tool_result(
         lease.guard, candidate=candidate, deadline_monotonic=monotonic() + 30
@@ -1509,7 +1528,10 @@ def test_round1_memory_side_branch_confirmation_is_all_or_none(
         source_coverage_reason=None,
         artifact_unavailability_reason=None,
         actor_id="remember_claim",
-        occurred_at=datetime.now(timezone.utc),
+        observed_at=datetime.now(timezone.utc),
+        observation_duration_microseconds=None,
+        observation_origin_kind=ToolObservationOrigin.BUILTIN,
+        trusted_tool_reported_duration_microseconds=None,
         memory_candidate_id=_name("candidate"),
         memory_proposal_kind="FACT",
         memory_proposal_payload={"statement": "remember"},

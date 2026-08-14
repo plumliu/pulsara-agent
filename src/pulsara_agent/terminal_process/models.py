@@ -100,6 +100,7 @@ class TerminalResult:
         TerminalOutputSourceCoverage.COMPLETE
     )
     shell_diagnostic: dict[str, object] | None = None
+    trusted_process_duration_microseconds: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

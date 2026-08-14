@@ -2768,7 +2768,6 @@ def _bounded_server_catalog_payload(catalog: McpCatalogSnapshot) -> object:
         payload = {
             "servers": candidate,
             "omitted_server_count": total - len(candidate),
-            "catalog_fingerprint": catalog.semantic_fingerprint,
         }
         if len(canonical_json_bytes(payload)) > MAXIMUM_MCP_CATALOG_RESULT_BYTES:
             break
@@ -2776,7 +2775,6 @@ def _bounded_server_catalog_payload(catalog: McpCatalogSnapshot) -> object:
     return {
         "servers": servers,
         "omitted_server_count": total - len(servers),
-        "catalog_fingerprint": catalog.semantic_fingerprint,
     }
 
 

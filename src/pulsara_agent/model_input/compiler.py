@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from enum import IntEnum
 import heapq
+import json
 from time import monotonic
 
 from pulsara_agent.llm.estimator import TokenEstimate
@@ -65,7 +66,7 @@ from pulsara_agent.primitives.plan_workflow import (
 
 
 COMPILER_CONTRACT_VERSION = (
-    "pulsara.structured-model-input-compiler.prefix-continuity.v2"
+    "pulsara.structured-model-input-compiler.prefix-continuity.v3"
 )
 
 
@@ -78,7 +79,7 @@ class _SacrificeRank(IntEnum):
 
 _SOURCE_POLICY = {
     ContextSourceKind.BASE_SYSTEM: (
-        "pulsara.base-system.prefix-continuity.v2",
+        "pulsara.base-system.prefix-continuity.v3",
         ContextChannel.SYSTEM,
         ContextTrustClass.ROOT_INSTRUCTION,
         ContextBudgetClass.MUST_KEEP,
@@ -88,7 +89,7 @@ _SOURCE_POLICY = {
         ContextSourceLifecycle.EPOCH_ROOT,
     ),
     ContextSourceKind.RUNTIME_ENVIRONMENT: (
-        "pulsara.runtime-environment.v1",
+        "pulsara.runtime-environment.v2",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.TRUSTED_RUNTIME_FACT,
         ContextBudgetClass.MUST_KEEP,
@@ -98,7 +99,7 @@ _SOURCE_POLICY = {
         ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
     ),
     ContextSourceKind.RUN_PERMISSION: (
-        "pulsara.run-permission.v1",
+        "pulsara.run-permission.v2",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.AUTHORIZED_RUNTIME_GUIDANCE,
         ContextBudgetClass.MUST_KEEP,
@@ -108,7 +109,7 @@ _SOURCE_POLICY = {
         ContextSourceLifecycle.TURN_APPEND,
     ),
     ContextSourceKind.PLAN_HANDOFF: (
-        "pulsara.plan-handoff.v1",
+        "pulsara.plan-handoff.v2",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.AUTHORIZED_RUNTIME_GUIDANCE,
         ContextBudgetClass.MUST_KEEP,
@@ -118,7 +119,7 @@ _SOURCE_POLICY = {
         ContextSourceLifecycle.ONE_SHOT,
     ),
     ContextSourceKind.PLAN_WORKFLOW: (
-        "pulsara.plan-workflow.v1",
+        "pulsara.plan-workflow.v2",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.AUTHORIZED_RUNTIME_GUIDANCE,
         ContextBudgetClass.MUST_KEEP,
@@ -128,7 +129,7 @@ _SOURCE_POLICY = {
         ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
     ),
     ContextSourceKind.CAPABILITY_CATALOG: (
-        "pulsara.capability-catalog.v1",
+        "pulsara.capability-catalog.v2",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.AUTHORIZED_CAPABILITY_CONTEXT,
         ContextBudgetClass.IMPORTANT,
@@ -142,7 +143,7 @@ _SOURCE_POLICY = {
         ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
     ),
     ContextSourceKind.MCP_CATALOG: (
-        "pulsara.mcp-catalog.v1",
+        "pulsara.mcp-catalog.v2",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.UNTRUSTED_OBSERVATION,
         ContextBudgetClass.IMPORTANT,
@@ -165,8 +166,28 @@ _SOURCE_POLICY = {
         (ContextRenderMode.FULL,),
         ContextSourceLifecycle.ACTIVATION_SNAPSHOT,
     ),
+    ContextSourceKind.PREVIOUS_TURN_OUTCOME: (
+        "pulsara.previous-turn-outcome.v1",
+        ContextChannel.RUNTIME_OBSERVATION,
+        ContextTrustClass.AUTHORIZED_RUNTIME_GUIDANCE,
+        ContextBudgetClass.MUST_KEEP,
+        45,
+        10,
+        (ContextRenderMode.FULL, ContextRenderMode.COMPACT),
+        ContextSourceLifecycle.TURN_APPEND,
+    ),
+    ContextSourceKind.TOOL_OBSERVATION_FRESHNESS: (
+        "pulsara.tool-observation-freshness.v1",
+        ContextChannel.RUNTIME_OBSERVATION,
+        ContextTrustClass.TRUSTED_RUNTIME_FACT,
+        ContextBudgetClass.MUST_KEEP,
+        70,
+        10,
+        (ContextRenderMode.FULL,),
+        ContextSourceLifecycle.TURN_APPEND,
+    ),
     ContextSourceKind.RUNTIME_CLOCK: (
-        "pulsara.runtime-clock.v1",
+        "pulsara.runtime-clock.v2",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.TRUSTED_RUNTIME_FACT,
         ContextBudgetClass.OPTIONAL,
@@ -209,6 +230,10 @@ _SOURCE_ABSENCE_POLICY = {
             ContextSourceAbsenceKind.UNAVAILABLE,
         }
     ),
+    ContextSourceKind.PREVIOUS_TURN_OUTCOME: frozenset(
+        {ContextSourceAbsenceKind.EXPLICIT_EMPTY}
+    ),
+    ContextSourceKind.TOOL_OBSERVATION_FRESHNESS: frozenset(),
 }
 
 
@@ -1041,54 +1066,6 @@ class StructuredModelInputCompiler:
             )
             if not should_append:
                 continue
-            approved = request.canonical_facts.approved_plan_materialization_fact
-            if (
-                candidate.source_kind is ContextSourceKind.PLAN_HANDOFF
-                and approved is not None
-                and approved.disposition
-                is PlanApprovedMaterializationDisposition.MATERIALIZE_REFERENCED_BLOCK
-            ):
-                try:
-                    exact_plan = approved.exact_plan_utf8.decode("utf-8")
-                except UnicodeDecodeError as exc:
-                    raise StructuredModelInputCompileError(
-                        ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
-                    ) from exc
-                body = (
-                    candidate.variants[0].text
-                    + "\n[UNTRUSTED_APPROVED_PLAN exact=true digest="
-                    + approved.content_identity.plan_utf8_digest
-                    + "]\n"
-                    + exact_plan
-                    + "\n[/UNTRUSTED_APPROVED_PLAN]"
-                )
-                if len(body.encode("utf-8")) > (
-                    self._limits.maximum_single_source_variant_bytes
-                ):
-                    raise StructuredModelInputCompileError(
-                        ModelInputCompileFailureKind.SOURCE_PHYSICAL_BOUND_EXCEEDED
-                    )
-                emissions.append(
-                    _AppendSourceEmission(
-                        source_kind=candidate.source_kind,
-                        placement_ordinal=candidate.placement_ordinal,
-                        presence=presence,
-                        lifecycle=_observation_lifecycle(candidate.lifecycle),
-                        semantic_fingerprint=semantic,
-                        contract_version=candidate.source_contract_version,
-                        trust_class=candidate.trust_class,
-                        fixed_message=encode_runtime_observation(
-                            source_kind=candidate.source_kind,
-                            trust_class=candidate.trust_class,
-                            lifecycle=_observation_lifecycle(candidate.lifecycle),
-                            presence=presence,
-                            contract_version=candidate.source_contract_version,
-                            body=body,
-                        ),
-                        requires_installed_replacement=True,
-                    )
-                )
-                continue
             state = _SourceState(candidate)
             emissions.append(
                 _AppendSourceEmission(
@@ -1673,6 +1650,7 @@ class StructuredModelInputCompiler:
             ContextSourceKind.BASE_SYSTEM,
             ContextSourceKind.RUNTIME_ENVIRONMENT,
             ContextSourceKind.RUN_PERMISSION,
+            ContextSourceKind.TOOL_OBSERVATION_FRESHNESS,
         }.issubset(present):
             raise StructuredModelInputCompileError(
                 ModelInputCompileFailureKind.REQUIRED_SOURCE_UNAVAILABLE
@@ -1683,6 +1661,9 @@ class StructuredModelInputCompiler:
             ),
             ContextSourceKind.PLAN_WORKFLOW: (
                 request.canonical_facts.plan_workflow_fact is not None
+            ),
+            ContextSourceKind.PREVIOUS_TURN_OUTCOME: (
+                request.canonical_facts.previous_turn_outcome_fact is not None
             ),
         }
         if any(
@@ -1906,14 +1887,36 @@ class StructuredModelInputCompiler:
             )
         index = indexes[0]
         original = request.canonical_input.items[index]
-        materialized_text = (
-            original.text
-            + "\n[UNTRUSTED_APPROVED_PLAN exact=true digest="
-            + approved.content_identity.plan_utf8_digest
-            + "]\n"
-            + exact_plan
-            + "\n[/UNTRUSTED_APPROVED_PLAN]"
-        )
+        try:
+            storage_value = json.loads(original.text)
+        except (TypeError, ValueError) as exc:
+            raise StructuredModelInputCompileError(
+                ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
+            ) from exc
+        if not isinstance(storage_value, dict) or set(storage_value) != {
+            "pulsara_plan_continuation"
+        }:
+            raise StructuredModelInputCompileError(
+                ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
+            )
+        projection = storage_value["pulsara_plan_continuation"]
+        if not isinstance(projection, dict) or projection != {
+            "status": "APPROVED",
+            "transition": "APPROVED_PLAN",
+        }:
+            raise StructuredModelInputCompileError(
+                ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
+            )
+        # Add the exact centrally extracted Plan to the already-validated
+        # provider DTO.  No storage identity descriptor or delimiter reaches
+        # the prepared model call.
+        storage_value = {
+            "pulsara_plan_continuation": {
+                **projection,
+                "approved_plan": exact_plan,
+            }
+        }
+        materialized_text = canonical_json_bytes(storage_value).decode("utf-8")
         replacement = FrozenProviderInputItem(
             item_kind=original.item_kind,
             source_entry_id=original.source_entry_id,

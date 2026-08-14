@@ -28,7 +28,7 @@ Python KernelHostCore
         └── Go terminal client
 
 PostgreSQL
-├── pulsara_v3：24 张产品关系
+├── pulsara_v3：26 张产品关系
 ├── selective agent_events occurrence journal
 ├── public.vector capability
 └── public.pulsara_schema_migrations（只保存 universe metadata）
@@ -38,7 +38,7 @@ Durable 边界有意保持狭窄：
 
 - canonical relational rows 拥有 conversation、tool、job、memory 与
   coordination 的当前语义真值；
-- closed 27-type `agent_events` journal 只记录 accepted occurrence，不用于恢复
+- closed 34-type `agent_events` journal 只记录 accepted occurrence，不用于恢复
   execution；
 - 23 种 live event 只存在于内存，进程退出即可丢失；
 - tool request 在 dispatch 前提交，physical attempt 在 effect invoke 前提交；
@@ -57,8 +57,12 @@ Kernel 当前支持：
 
 - OpenAI-compatible Responses 与 Chat Completions transport；
 - 基于 exact canonical cut 的 provider-neutral structured input compiler：
-  五类 typed first-party source、按 scope 冻结的 tool schema、目标 estimator
+  closed typed first-party source、按 scope 冻结的 tool schema、目标 estimator
   精确计量，以及 source/tool-result 的确定性降级；
+- bounded、脱敏的上一turn outcome guidance与append-only tool freshness
+  frontier；每条accepted tool result携带immutable observed time、monotonic
+  duration disposition、execution origin及optional trusted duration，tool body
+  无法伪造这些outer timing facts；
 - filesystem、todo、`terminal`、`terminal_process`、`terminal_monitor` 与
   scoped `artifact_read` tools；
 - 真实 PIPE/PTY Terminal output streaming、exact process-local cursor、typed
@@ -155,7 +159,16 @@ closed watchdog；foreground provider stream只有connect/write/pool/read-idle�
 没有total response timeout，finite durable job仍保留30/45秒attempt total。
 本轮只恢复execution envelope；automatic compaction、summary adoption和
 provider-input rebase仍明确延期到Round 5B。证据记录在
-[`round5_long_horizon_execution_envelope_activation.json`](benchmarks/suites/core/v1/round5_long_horizon_execution_envelope_activation.json)。旧 v13
+[`round5_long_horizon_execution_envelope_activation.json`](benchmarks/suites/core/v1/round5_long_horizon_execution_envelope_activation.json)。
+Round 7在existing `tool_results` relation中增加immutable observation
+timing/origin facts，并为immediate predecessor outcome与per-turn freshness
+frontier增加两个provider-neutral compiler source。同一compatible Host/scope
+epoch内不会重写旧provider message；late result与freshness变化只形成新suffix。
+Pulsara-owned provider carrier只保留产品语义与lifecycle，internal contract
+version、fingerprint、generation、schema marker和delimiter式Plan carrier不再进入
+model input。验证记录在
+[`round7_model_visible_failure_and_tool_observation_activation.json`](benchmarks/suites/core/v1/round7_model_visible_failure_and_tool_observation_activation.json)。
+旧 v13
 数据库只会得到 `schema_migration_universe_reset_required`，不会被在线导入、
 翻译或升级。请严格遵守
 [clean-baseline runbook](STAGE_5_CLEAN_BASELINE_RUNBOOK.zh.md)，没有针对 exact

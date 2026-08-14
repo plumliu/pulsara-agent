@@ -27,6 +27,10 @@ from pulsara_agent.conversation_kernel.direct_model import (
 from pulsara_agent.conversation_kernel.context_sources import (
     KernelContextSourceCollector,
 )
+from pulsara_agent.conversation_kernel.cancellation import (
+    ActiveTurnCancellationIntent,
+    ForegroundCancellationCause,
+)
 from pulsara_agent.conversation_kernel.activation import (
     require_stage2_runtime_privilege_boundary,
 )
@@ -112,6 +116,7 @@ from pulsara_agent.workspace_identity import (
 )
 from pulsara_agent.llm.models import ModelRole
 from pulsara_agent.llm.result import TransportUsageReport
+from pulsara_agent.model_input.contracts import ModelInputScopeKind
 from pulsara_agent.tool_permission import (
     EffectivePermissionPolicy,
     default_permission_policy,
@@ -174,6 +179,24 @@ class KernelCommandOutcome:
     plan_workflow_revision: int | None = None
     plan_draft_decision: PlanDraftDecision | None = None
     plan_continuation_turn_id: str | None = None
+
+
+class RootChainPhase(StrEnum):
+    ORIGIN_RUNNING = "ORIGIN_RUNNING"
+    SUCCESSOR_COMMITTED_PENDING_HANDOFF = "SUCCESSOR_COMMITTED_PENDING_HANDOFF"
+    SUCCESSOR_RUNNING = "SUCCESSOR_RUNNING"
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingRootSuccessorHandoff:
+    owner_task: asyncio.Task[KernelRunResult]
+    attempt_id: str
+    origin_turn_id: str
+    successor_turn_id: str
+    successor_entry_id: str
+    workflow_id: str
+    interaction_id: str | None
+    handoff_kind: PlanHandoffKind
 
 
 class KernelCompositionUnavailable(ValueError):
@@ -374,7 +397,10 @@ class KernelHostSession:
         self._subagents.bind_runner_factory(self._new_child_runner)
         self._active_task: asyncio.Task[KernelRunResult] | None = None
         self._active_turn_id: str | None = None
+        self._active_cancellation_intent: ActiveTurnCancellationIntent | None = None
         self._active_command_id: str | None = None
+        self._active_root_phase: RootChainPhase | None = None
+        self._pending_root_successor: _PendingRootSuccessorHandoff | None = None
         self._external_new_turn_accepting = False
         self._plan_exit_fence = False
         self._terminal_new_turn_observation_id: str | None = None
@@ -479,12 +505,13 @@ class KernelHostSession:
                 turn_id=turn_id,
                 command_id=command,
                 name=f"kernel-turn:{command}",
-                run=lambda: self._run_root_turn_chain(
+                run=lambda intent: self._run_root_turn_chain(
                     text,
                     command_id=command,
                     requested_permission_mode=(
                         requested_permission_mode or self._launch_permission_mode
                     ),
+                    cancellation_intent=intent,
                 ),
             )
         # The Host owns the run chain.  A gateway/request cancellation detaches
@@ -498,24 +525,33 @@ class KernelHostSession:
         *,
         command_id: str,
         requested_permission_mode: PermissionMode,
+        cancellation_intent: ActiveTurnCancellationIntent,
     ) -> KernelRunResult:
         result = await self._runner.run_turn(
             text,
             command_id=command_id,
             requested_permission_mode=requested_permission_mode,
+            cancellation_intent=cancellation_intent,
         )
-        return await self._finish_root_chain(result)
+        return await self._finish_root_chain(result, cancellation_intent)
 
     async def _run_accepted_root_chain(
         self,
         turn_id: str,
+        cancellation_intent: ActiveTurnCancellationIntent,
     ) -> KernelRunResult:
         """Run one accepted ROOT turn and every automatic successor."""
 
-        result = await self._runner.run_accepted_turn(turn_id)
-        return await self._finish_root_chain(result)
+        result = await self._runner.run_accepted_turn(
+            turn_id, cancellation_intent=cancellation_intent
+        )
+        return await self._finish_root_chain(result, cancellation_intent)
 
-    async def _finish_root_chain(self, result: KernelRunResult) -> KernelRunResult:
+    async def _finish_root_chain(
+        self,
+        result: KernelRunResult,
+        cancellation_intent: ActiveTurnCancellationIntent,
+    ) -> KernelRunResult:
         total_model_calls = result.model_call_count
         total_tool_calls = result.tool_call_count
         while result.continuation_turn_id is not None:
@@ -523,8 +559,35 @@ class KernelHostSession:
             async with self._lock:
                 if self._active_task is not asyncio.current_task():
                     raise RuntimeError("ROOT continuation lost its Host task owner")
+                pending = self._pending_root_successor
+                if (
+                    pending is None
+                    or pending.owner_task is not asyncio.current_task()
+                    or pending.origin_turn_id != self._active_turn_id
+                    or pending.successor_turn_id != continuation_turn_id
+                    or self._active_root_phase
+                    is not RootChainPhase.SUCCESSOR_COMMITTED_PENDING_HANDOFF
+                ):
+                    raise RuntimeError(
+                        "ROOT continuation lost its closed pending handoff"
+                    )
+                if (
+                    self._closing
+                    or self._plan_exit_fence
+                    or asyncio.current_task().cancelling() != 0
+                ):
+                    raise asyncio.CancelledError
                 self._active_turn_id = continuation_turn_id
-            result = await self._runner.run_accepted_turn(continuation_turn_id)
+                cancellation_intent = ActiveTurnCancellationIntent(
+                    continuation_turn_id, ModelInputScopeKind.ROOT, None
+                )
+                self._active_cancellation_intent = cancellation_intent
+                self._pending_root_successor = None
+                self._active_root_phase = RootChainPhase.SUCCESSOR_RUNNING
+            result = await self._runner.run_accepted_turn(
+                continuation_turn_id,
+                cancellation_intent=cancellation_intent,
+            )
             total_model_calls += result.model_call_count
             total_tool_calls += result.tool_call_count
         return KernelRunResult(
@@ -542,20 +605,26 @@ class KernelHostSession:
         turn_id: str,
         command_id: str | None,
         name: str,
-        run: Callable[[], Awaitable[KernelRunResult]],
+        run: Callable[[ActiveTurnCancellationIntent], Awaitable[KernelRunResult]],
     ) -> asyncio.Task[KernelRunResult]:
         """Install the sole Host-owned ROOT task while ``self._lock`` is held."""
 
         self._retire_done_active_root_locked()
         if self._active_task is not None:
             raise RuntimeError("a canonical ROOT turn is already running")
+        intent = ActiveTurnCancellationIntent(
+            turn_id, ModelInputScopeKind.ROOT, None
+        )
         task = asyncio.create_task(
-            self._run_owned_root_task(run),
+            self._run_owned_root_task(run, intent),
             name=name,
         )
         self._active_task = task
         self._active_turn_id = turn_id
+        self._active_cancellation_intent = intent
         self._active_command_id = command_id
+        self._active_root_phase = RootChainPhase.ORIGIN_RUNNING
+        self._pending_root_successor = None
         task.add_done_callback(self._observe_active_root_task_done)
         return task
 
@@ -570,15 +639,55 @@ class KernelHostSession:
 
     async def _run_owned_root_task(
         self,
-        run: Callable[[], Awaitable[KernelRunResult]],
+        run: Callable[[ActiveTurnCancellationIntent], Awaitable[KernelRunResult]],
+        intent: ActiveTurnCancellationIntent,
     ) -> KernelRunResult:
         task = asyncio.current_task()
         if task is None:
             raise RuntimeError("ROOT task has no asyncio owner")
         try:
-            return await run()
+            return await run(intent)
         finally:
+            await self._settle_pending_root_successor(task)
             await self._settle_active_root_task(task)
+
+    async def _settle_pending_root_successor(
+        self, task: asyncio.Task[object]
+    ) -> None:
+        async with self._lock:
+            pending = self._pending_root_successor
+            if pending is None or pending.owner_task is not task:
+                return
+            self._pending_root_successor = None
+            intent = self._active_cancellation_intent
+            cause = None if intent is None else intent.cause
+        # The origin chain owns this already-committed successor until the
+        # exact turn is terminal.  Caller cancellation cannot detach it, and
+        # no replacement process-local task is installed.
+        settlement = asyncio.create_task(
+            self._terminalize_pending_root_successor(
+                pending,
+                reason=(
+                    "USER_STOPPED"
+                    if cause is ForegroundCancellationCause.USER_REQUEST
+                    else "SESSION_CLOSED"
+                    if cause is ForegroundCancellationCause.HOST_SESSION_CLOSE
+                    else "PLAN_CONTINUATION_NOT_BOUND"
+                ),
+            ),
+            name=f"kernel-root-successor-terminalization:{pending.successor_turn_id}",
+        )
+        while True:
+            try:
+                await asyncio.shield(settlement)
+                break
+            except asyncio.CancelledError:
+                if settlement.done():
+                    settlement.result()
+                    break
+                # A repeated stop/close cancellation only detaches its waiter;
+                # it cannot cancel or replace this exact successor settlement.
+                continue
 
     async def _settle_active_root_task(self, task: asyncio.Task[object]) -> None:
         async with self._lock:
@@ -591,9 +700,13 @@ class KernelHostSession:
             self._clear_active_root_locked()
 
     def _clear_active_root_locked(self) -> None:
+        if self._pending_root_successor is not None:
+            raise RuntimeError("ROOT slot cleared with an unsettled successor handoff")
         self._active_task = None
         self._active_turn_id = None
+        self._active_cancellation_intent = None
         self._active_command_id = None
+        self._active_root_phase = None
         self._queue_wake.set()
         self._monitor_wake.set()
 
@@ -681,9 +794,27 @@ class KernelHostSession:
                         and compatible_slot
                         and origin_runner_live
                     ):
-                        # The same Host-owned run-chain task is rebound before
-                        # the origin runner is released.
-                        self._active_turn_id = candidate.continuation_turn_id
+                        if self._pending_root_successor is not None:
+                            raise ConversationKernelConflict(
+                                "ROOT chain already owns a pending successor"
+                            )
+                        # The canonical successor is FULL, but the outer ROOT
+                        # chain still executes the origin runner.  Preserve the
+                        # origin cancellation intent until _finish_root_chain()
+                        # atomically promotes this closed handoff.
+                        self._pending_root_successor = _PendingRootSuccessorHandoff(
+                            owner_task=origin_task,
+                            attempt_id=attempt_id,
+                            origin_turn_id=candidate.origin_turn_id,
+                            successor_turn_id=candidate.continuation_turn_id,
+                            successor_entry_id=candidate.continuation_entry_id,
+                            workflow_id=candidate.workflow_id,
+                            interaction_id=None,
+                            handoff_kind=PlanHandoffKind.ENTERED_PLAN,
+                        )
+                        self._active_root_phase = (
+                            RootChainPhase.SUCCESSOR_COMMITTED_PENDING_HANDOFF
+                        )
                         return result
             except BaseException:
                 # The canonical continuation may already be FULL.  The same
@@ -1435,7 +1566,9 @@ class KernelHostSession:
                 turn_id=inspection.turn_id,
                 command_id=command_id,
                 name=f"kernel-plan-review-turn:{inspection.turn_id}",
-                run=lambda: self._run_accepted_root_chain(inspection.turn_id),
+                run=lambda intent: self._run_accepted_root_chain(
+                    inspection.turn_id, intent
+                ),
             )
             self._external_new_turn_accepting = False
             self._external_new_turn_settled.set()
@@ -1460,6 +1593,37 @@ class KernelHostSession:
             attempt_id=attempt_id,
             task=task,
         )
+        await self._terminalize_plan_successor_until_safe(
+            turn_id=turn_id,
+            entry_id=entry_id,
+            workflow_id=workflow_id,
+            interaction_id=interaction_id,
+            handoff_kind=handoff_kind,
+            reason="PLAN_CONTINUATION_NOT_BOUND",
+        )
+
+    async def _terminalize_pending_root_successor(
+        self, pending: _PendingRootSuccessorHandoff, *, reason: str
+    ) -> None:
+        await self._terminalize_plan_successor_until_safe(
+            turn_id=pending.successor_turn_id,
+            entry_id=pending.successor_entry_id,
+            workflow_id=pending.workflow_id,
+            interaction_id=pending.interaction_id,
+            handoff_kind=pending.handoff_kind,
+            reason=reason,
+        )
+
+    async def _terminalize_plan_successor_until_safe(
+        self,
+        *,
+        turn_id: str,
+        entry_id: str,
+        workflow_id: str,
+        interaction_id: str | None,
+        handoff_kind: PlanHandoffKind,
+        reason: str,
+    ) -> None:
         delay_seconds = 0.05
         while True:
             try:
@@ -1467,7 +1631,7 @@ class KernelHostSession:
                     self.repository.interrupt_turn,
                     self._lease.guard,
                     turn_id=turn_id,
-                    reason="PLAN_CONTINUATION_NOT_BOUND",
+                    reason=reason,
                     occurred_at=datetime.now().astimezone(),
                     actor_id=self.host_session_id,
                     deadline_monotonic=self._canonical_deadline(),
@@ -1573,9 +1737,15 @@ class KernelHostSession:
                         turn_id=accepted.turn_id,
                         command_id=None,
                         name=f"kernel-queued-turn:{accepted.turn_id}",
-                        run=lambda: self._run_accepted_root_chain(accepted.turn_id),
+                        run=lambda intent: self._run_accepted_root_chain(
+                            accepted.turn_id, intent
+                        ),
                     )
                     if self._closing:
+                        assert self._active_cancellation_intent is not None
+                        self._active_cancellation_intent.install_cause(
+                            ForegroundCancellationCause.HOST_SESSION_CLOSE
+                        )
                         task.cancel()
                 try:
                     await task
@@ -1752,7 +1922,7 @@ class KernelHostSession:
                 turn_id=turn_id,
                 command_id=None,
                 name=f"kernel-terminal-observation-turn:{turn_id}",
-                run=lambda: self._run_accepted_root_chain(turn_id),
+                run=lambda intent: self._run_accepted_root_chain(turn_id, intent),
             )
             self._terminal_new_turn_observation_id = None
             self._external_new_turn_accepting = False
@@ -1949,6 +2119,11 @@ class KernelHostSession:
     async def stop_current_turn(self) -> bool:
         async with self._lock:
             task = self._active_task
+            intent = self._active_cancellation_intent
+            if task is not None and not task.done():
+                if intent is None:
+                    raise RuntimeError("active ROOT task lacks cancellation intent")
+                intent.install_cause(ForegroundCancellationCause.USER_REQUEST)
         if task is None or task.done():
             return False
         task.cancel()
@@ -2191,7 +2366,7 @@ class KernelHostSession:
                 turn_id=turn_id,
                 command_id=command_id,
                 name=f"kernel-external-result-turn:{turn_id}",
-                run=lambda: self._run_accepted_root_chain(turn_id),
+                run=lambda intent: self._run_accepted_root_chain(turn_id, intent),
             )
             self._external_new_turn_accepting = False
             self._external_new_turn_settled.set()
@@ -2283,6 +2458,15 @@ class KernelHostSession:
                 close_error = close_error or exc
             async with self._lock:
                 task = self._active_task
+                intent = self._active_cancellation_intent
+                if task is not None and not task.done():
+                    if intent is None:
+                        raise RuntimeError(
+                            "active ROOT task lacks cancellation intent"
+                        )
+                    intent.install_cause(
+                        ForegroundCancellationCause.HOST_SESSION_CLOSE
+                    )
             if task is not None and not task.done():
                 task.cancel()
                 try:

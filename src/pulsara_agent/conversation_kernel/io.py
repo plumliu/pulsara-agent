@@ -11,12 +11,18 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from enum import StrEnum
 from functools import partial
 from time import monotonic
 from typing import Generic, TypeVar
 
 from pulsara_agent.conversation_kernel.limits import STAGE2_LIMITS
+from pulsara_agent.primitives.tool_observation import (
+    PhysicalToolObservationSupplement,
+    ToolObservationOrigin,
+    normalize_observation_duration,
+)
 
 
 T = TypeVar("T")
@@ -50,6 +56,7 @@ class PhysicalToolInvocationOutcome(Generic[T]):
     caller_cancelled: bool
     value: T | None = None
     error: BaseException | None = None
+    observation: PhysicalToolObservationSupplement | None = None
 
     def __post_init__(self) -> None:
         if (self.disposition is PhysicalToolInvocationDisposition.RETURNED_EXACT) != (
@@ -173,10 +180,12 @@ class KernelSessionIO:
                 error=exc,
             )
         task: asyncio.Task[object] | None = None
+        physical_started: float | None = None
         try:
             async with self._lock:
                 if self._closing:
                     raise KernelSessionIOClosed("foreground I/O owner is closing")
+                physical_started = monotonic()
                 task = asyncio.create_task(
                     asyncio.to_thread(
                         partial(
@@ -212,6 +221,16 @@ class KernelSessionIO:
                 if timed_out or caller_cancelled
                 else PhysicalToolInvocationTiming.ON_TIME
             )
+            assert physical_started is not None
+            observation = PhysicalToolObservationSupplement(
+                observed_at=datetime.now(timezone.utc),
+                elapsed_microseconds=normalize_observation_duration(
+                    max(0, int((monotonic() - physical_started) * 1_000_000))
+                ),
+                # The exact sealed binding refines this placeholder before the
+                # candidate crosses the canonical repository boundary.
+                observation_origin_kind=ToolObservationOrigin.CUSTOM_OR_UNKNOWN,
+            )
             try:
                 value = task.result()
             except BaseException as exc:
@@ -220,12 +239,14 @@ class KernelSessionIO:
                     timing=timing,
                     caller_cancelled=caller_cancelled,
                     error=exc,
+                    observation=observation,
                 )
             return PhysicalToolInvocationOutcome(
                 disposition=PhysicalToolInvocationDisposition.RETURNED_EXACT,
                 timing=timing,
                 caller_cancelled=caller_cancelled,
                 value=value,  # type: ignore[arg-type]
+                observation=observation,
             )
         except BaseException:
             if task is None:

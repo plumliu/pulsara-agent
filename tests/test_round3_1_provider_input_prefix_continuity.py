@@ -50,7 +50,7 @@ def test_round3_1_runtime_observation_codec_is_canonical_and_inert() -> None:
             trust_class=decoded.trust_class,
             lifecycle=decoded.lifecycle,
             presence=decoded.presence,
-            contract_version=decoded.contract_version,
+            contract_version="pulsara.active-skill-observation.v1",
             body=decoded.body,
         )
         == message

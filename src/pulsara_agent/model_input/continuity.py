@@ -24,7 +24,7 @@ from pulsara_agent.primitives.context import canonical_json_bytes, context_finge
 
 
 PROVIDER_MESSAGE_LOWERING_CONTRACT = (
-    "pulsara.provider-message-lowering.prefix-continuity.v1"
+    "pulsara.provider-message-lowering.prefix-continuity.v2"
 )
 FULL_HISTORY_CONTEXT_BASE_IDENTITY = context_fingerprint(
     "pulsara:context-base-semantic-identity:v1",
@@ -149,6 +149,44 @@ class RuntimeObservation:
             raise ValueError("unavailable runtime observation must have an empty body")
 
 
+@dataclass(frozen=True, slots=True)
+class ProviderRuntimeObservation:
+    """Exact provider-visible projection; internal contract proofs stay local."""
+
+    source_kind: ContextSourceKind
+    trust_class: ContextTrustClass
+    lifecycle: SourceObservationLifecycle
+    presence: SourceObservationPresence
+    body: str = field(repr=False)
+
+    def __post_init__(self) -> None:
+        # Reuse the closed lifecycle/presence validator without exposing its
+        # internal contract member on the provider wire.
+        RuntimeObservation(
+            source_kind=self.source_kind,
+            trust_class=self.trust_class,
+            lifecycle=self.lifecycle,
+            presence=self.presence,
+            contract_version="provider-projection-only",
+            body=self.body,
+        )
+
+
+def _provider_runtime_observation_message(
+    observation: ProviderRuntimeObservation,
+) -> LLMMessage:
+    payload = {
+        "pulsara_runtime_observation": {
+            "body": observation.body,
+            "lifecycle": observation.lifecycle.value,
+            "presence": observation.presence.value,
+            "source": observation.source_kind.value,
+            "trust": observation.trust_class.value,
+        }
+    }
+    return LLMMessage.user(canonical_json_bytes(payload).decode("utf-8"))
+
+
 def encode_runtime_observation(
     *,
     source_kind: ContextSourceKind,
@@ -166,20 +204,18 @@ def encode_runtime_observation(
         contract_version=contract_version,
         body=body,
     )
-    payload = {
-        "pulsara_runtime_observation": {
-            "body": observation.body,
-            "contract": observation.contract_version,
-            "lifecycle": observation.lifecycle.value,
-            "presence": observation.presence.value,
-            "source": observation.source_kind.value,
-            "trust": observation.trust_class.value,
-        }
-    }
-    return LLMMessage.user(canonical_json_bytes(payload).decode("utf-8"))
+    return _provider_runtime_observation_message(
+        ProviderRuntimeObservation(
+            source_kind=observation.source_kind,
+            trust_class=observation.trust_class,
+            lifecycle=observation.lifecycle,
+            presence=observation.presence,
+            body=observation.body,
+        )
+    )
 
 
-def decode_runtime_observation(message: LLMMessage) -> RuntimeObservation:
+def decode_runtime_observation(message: LLMMessage) -> ProviderRuntimeObservation:
     if message.role is not MessageRole.USER or len(message.content) != 1:
         raise ValueError("runtime observation must be one user-role JSON message")
     try:
@@ -189,27 +225,19 @@ def decode_runtime_observation(message: LLMMessage) -> RuntimeObservation:
     if not isinstance(value, dict) or set(value) != {"pulsara_runtime_observation"}:
         raise ValueError("runtime observation top-level contract is invalid")
     payload = value["pulsara_runtime_observation"]
-    required = {"body", "contract", "lifecycle", "presence", "source", "trust"}
+    required = {"body", "lifecycle", "presence", "source", "trust"}
     if not isinstance(payload, dict) or set(payload) != required:
         raise ValueError("runtime observation member contract is invalid")
     if not all(isinstance(payload[name], str) for name in required):
         raise ValueError("runtime observation members must be strings")
-    result = RuntimeObservation(
+    result = ProviderRuntimeObservation(
         source_kind=ContextSourceKind(payload["source"]),
         trust_class=ContextTrustClass(payload["trust"]),
         lifecycle=SourceObservationLifecycle(payload["lifecycle"]),
         presence=SourceObservationPresence(payload["presence"]),
-        contract_version=payload["contract"],
         body=payload["body"],
     )
-    if encode_runtime_observation(
-        source_kind=result.source_kind,
-        trust_class=result.trust_class,
-        lifecycle=result.lifecycle,
-        presence=result.presence,
-        contract_version=result.contract_version,
-        body=result.body,
-    ) != message:
+    if _provider_runtime_observation_message(result) != message:
         raise ValueError("runtime observation is not canonically encoded")
     return result
 
@@ -578,6 +606,7 @@ __all__ = [
     "NewTriggerAnchor",
     "NoNewTriggerAnchor",
     "PROVIDER_MESSAGE_LOWERING_CONTRACT",
+    "ProviderRuntimeObservation",
     "PreparedProviderInputAppendCandidate",
     "ProcessLocalCanonicalFrontier",
     "ProcessLocalProviderInputInstallPermit",

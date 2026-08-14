@@ -5,6 +5,10 @@ import asyncio
 from pulsara_agent.conversation_kernel.contracts import HostWriterGuard
 from pulsara_agent.conversation_kernel.io import KernelSessionIO
 from pulsara_agent.conversation_kernel.live import LiveAgentEventBus
+from pulsara_agent.conversation_kernel.repository import (
+    TurnAdmissionConfirmation,
+    TurnAdmissionConfirmationKind,
+)
 from pulsara_agent.conversation_kernel.subagent import KernelSubagentManager
 
 
@@ -17,6 +21,13 @@ class _Repository:
 
     def set_subagent_task_status(self, *_args, **kwargs):
         self.statuses.append((str(kwargs["status"]), kwargs["reason"]))
+        return True
+
+    def confirm_cancelled_subagent_turn_and_task(self, **_kwargs):
+        return TurnAdmissionConfirmation(TurnAdmissionConfirmationKind.NONE)
+
+    def settle_cancelled_subagent_turn_and_task(self, *_args, **kwargs):
+        self.statuses.append((str(kwargs["task_status"]), kwargs["task_reason"]))
         return True
 
 
