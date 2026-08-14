@@ -51,6 +51,12 @@ PROVIDER_PRODUCTION_MODULES = (
 )
 
 
+def _repository_aggregate_source() -> str:
+    paths = [KERNEL / "repository.py"]
+    paths.extend(sorted((KERNEL / "_repository").glob("*.py")))
+    return "\n".join(path.read_text(encoding="utf-8") for path in paths)
+
+
 def test_stage2_registry_schema_and_job_catalog_are_exact() -> None:
     assert len(COMMITTED_EVENT_DESCRIPTORS) == 34
     assert len(LIVE_EVENT_TYPES) == 23
@@ -185,7 +191,7 @@ print(json.dumps(observed))
 
 
 def test_stage2_repository_sql_is_schema_qualified_and_has_no_durable_stream() -> None:
-    repository = (KERNEL / "repository.py").read_text(encoding="utf-8")
+    repository = _repository_aggregate_source()
     legacy_short_names = {
         "sessions",
         "session_commands",
@@ -297,7 +303,7 @@ def test_stage2_protocol_v3_does_not_expose_durable_event_or_blob_identity() -> 
 
 
 def test_stage2_extension_and_tool_policy_have_single_production_owners() -> None:
-    repository = (KERNEL / "repository.py").read_text(encoding="utf-8")
+    repository = _repository_aggregate_source()
     runner = (KERNEL / "runner.py").read_text(encoding="utf-8")
     extensions = (KERNEL / "extensions.py").read_text(encoding="utf-8")
     tool_runtime = (KERNEL / "tool_runtime.py").read_text(encoding="utf-8")

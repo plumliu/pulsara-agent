@@ -48,6 +48,13 @@ BASELINE = (
 )
 
 
+def _repository_aggregate_source() -> str:
+    kernel = SRC / "conversation_kernel"
+    paths = [kernel / "repository.py"]
+    paths.extend(sorted((kernel / "_repository").glob("*.py")))
+    return "\n".join(path.read_text(encoding="utf-8") for path in paths)
+
+
 def _fixed_live_producers() -> dict[str, set[Path]]:
     result: dict[str, set[Path]] = {}
     for path in SRC.rglob("*.py"):
@@ -109,9 +116,7 @@ def test_round2_terminal_observation_descriptor_and_payload_surface_are_narrow()
     )
     assert descriptor.subject_slot is SubjectSlot.ENTRY
     assert descriptor.append_guards == (AppendGuardKind.HOST_WRITER,)
-    source = (SRC / "conversation_kernel" / "repository.py").read_text(
-        encoding="utf-8"
-    )
+    source = _repository_aggregate_source()
     event_method = source[
         source.index("def _terminal_observation_event(") : source.index(
             "def _insert_entry(", source.index("def _terminal_observation_event(")

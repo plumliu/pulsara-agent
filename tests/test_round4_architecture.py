@@ -38,6 +38,12 @@ PLAN_DESCRIPTORS = {
 }
 
 
+def _repository_aggregate_source() -> str:
+    paths = [KERNEL / "repository.py"]
+    paths.extend(sorted((KERNEL / "_repository").glob("*.py")))
+    return "\n".join(path.read_text(encoding="utf-8") for path in paths)
+
+
 def _imports(path: Path) -> set[str]:
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     imports: set[str] = set()
@@ -99,7 +105,7 @@ def test_round4_schema_has_exact_plan_relations_and_required_initial_entry() -> 
 
 
 def test_round4_every_turn_creator_installs_frozen_permission_columns() -> None:
-    source = (KERNEL / "repository.py").read_text(encoding="utf-8")
+    source = _repository_aggregate_source()
     turn_inserts = tuple(
         match.group(1)
         for match in re.finditer(

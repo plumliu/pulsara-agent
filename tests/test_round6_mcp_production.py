@@ -3191,11 +3191,10 @@ def test_round6_does_not_expand_durable_or_protocol_oracles() -> None:
     # subject kind before Round 6.  V1 must not add a new relation/generation
     # or activate that durable subject path.
     assert "mcp_generation" not in baseline.lower()
-    repository_source = (
-        root
-        / "src"
-        / "pulsara_agent"
-        / "conversation_kernel"
-        / "repository.py"
-    ).read_text(encoding="utf-8")
+    kernel = root / "src" / "pulsara_agent" / "conversation_kernel"
+    repository_paths = [kernel / "repository.py"]
+    repository_paths.extend(sorted((kernel / "_repository").glob("*.py")))
+    repository_source = "\n".join(
+        path.read_text(encoding="utf-8") for path in repository_paths
+    )
     assert "MCP_INPUT" not in repository_source

@@ -1,0 +1,160 @@
+{
+  "schema_version": "repository-modularization-activation.v1",
+  "status": "activated",
+  "generated_at_utc": "2026-08-14T02:42:05Z",
+  "captured_head": "edbe7aea5518085028657aedc161d8fcbe88bb6b",
+  "working_tree_semantics": "Mechanical repository modularization was implemented and verified in the current uncommitted worktree. No file was staged, committed, or pushed.",
+  "source_contract": {
+    "spec_sha256_at_start": "98f47eb3e8c82f4dd2dbd35742a43aa316bde443085430fde1d49c7525cec69c",
+    "spec_sha256_after_activation": "647ce62acba124e0292227eb78fdfe9d353adbddd593a9e0f70159bc111988a9",
+    "baseline_repository_sha256": "43669989c424012e84874d15d85ca3d6842f216d025fa2ae2be293166b2b915e",
+    "baseline_inventory_sha256": "e83c5806718ca43739fd4bc4f8fd6ee2b41137fd9d18fe867a0a78f3d652622a",
+    "inventory_tool_sha256": "49235839d6e7bd054d4f50af6069a385b1415f96daaa7cadf2b5c21129f5486d"
+  },
+  "final_modules": {
+    "repository.py": {
+      "owner": "only public compatibility facade and concrete ConversationKernelRepository",
+      "lines": 212,
+      "sha256": "23198aa6ad4492309b97c280ac5d8a0b2ba10250433884c12c9c78ac7515c6ff"
+    },
+    "_repository/__init__.py": {
+      "owner": "internal package marker only",
+      "lines": 1,
+      "sha256": "0059d9671d9ebd5cc8685a9954277a795b0a49505c723081fe91e9e131d966c1"
+    },
+    "_repository/contracts.py": {
+      "owner": "exceptions, DTOs, prepared candidates and pure builders",
+      "lines": 1515,
+      "sha256": "c724716031097e143105bc32ca5890dd8b7acf2bfe897b6c9461276d6f2c6361"
+    },
+    "_repository/matching.py": {
+      "owner": "pure row/confirmation matching and _MatchingOperations._content_from_row",
+      "lines": 165,
+      "sha256": "6f583ff2b69516dc5d5f733ad53f6e9d840bb96133760050f09c521c1f3d370f"
+    },
+    "_repository/kernel.py": {
+      "owner": "sole connection provider, transaction, guard, event and entry primitive owner",
+      "lines": 1044,
+      "sha256": "24064af205787554b58b46720ba0e96cdf83485e30582dfb1ac401f9feee7603"
+    },
+    "_repository/authority.py": {
+      "owner": "workspace and Host writer acquire/renew operations",
+      "lines": 154,
+      "sha256": "bc1f7f9822cc40e683c4d43748b8fb86a23d5706d6d799748ea440b29dd17563"
+    },
+    "_repository/conversation.py": {
+      "owner": "turn, assistant, snapshot, terminal observation, rehydrate and close operations",
+      "lines": 1477,
+      "sha256": "95eadf6eee2b07e65357d37c0a92c3a7e392a892674ac3117d0f791a4ce5078e"
+    },
+    "_repository/tools.py": {
+      "owner": "tool decision, attempt, remote identity, result and interaction operations",
+      "lines": 1128,
+      "sha256": "7f57713458f508bd9820fd96d956767b078f3686fd226387dccc46d736630ccf"
+    },
+    "_repository/plans.py": {
+      "owner": "Plan workflow, interaction, resolution and continuation operations",
+      "lines": 2981,
+      "sha256": "0874aedfe2c2731252f97bbe11da3521d08d5cfc003cab8b68ad16ec13a6cf2d"
+    },
+    "_repository/prompts.py": {
+      "owner": "prompt ingress, queue, steer, rejection and cancellation operations",
+      "lines": 1349,
+      "sha256": "f46cfc515f5a04408fe4b0fa8428a947bcbc00cbc06b15ba2cce8a63ba94012c"
+    },
+    "_repository/subagents.py": {
+      "owner": "flat task and task-scoped conversation operations",
+      "lines": 557,
+      "sha256": "00acd4daa2a972ca533cde841b9c59e403045632c452f80def4db54bd0b60cae"
+    },
+    "_repository/external_results.py": {
+      "owner": "subagent/job result safe-point acceptance into ROOT",
+      "lines": 460,
+      "sha256": "56c211fafb35742394b9ee01b72a04b3a8ff69d3076e6b01953572c8266697e5"
+    },
+    "_repository/jobs.py": {
+      "owner": "durable job lifecycle and SQL-owning root transcript cut loader",
+      "lines": 1177,
+      "sha256": "474883f9f495f5bcb6f1ee55677851612f5f82cc1b26074766bd86cbc000b629"
+    },
+    "_repository/memory.py": {
+      "owner": "memory extraction, candidate, governance and index operations",
+      "lines": 985,
+      "sha256": "42917a404f8a22ee58bf3c9daa7841d50d6253017808a2e70e09007bff82193a"
+    }
+  },
+  "mechanical_equivalence": {
+    "ordered___all__": 34,
+    "observed_direct_import_symbols": 41,
+    "facade_owned_fqcn_symbols": 39,
+    "repository_methods": 128,
+    "top_level_functions": 29,
+    "normalized_method_and_function_ast": "exact_after_three_closed_owner_renames",
+    "database_call_shapes": 542,
+    "direct_operation_checkout_sites": 36,
+    "shared_transaction_helper_checkout_sites": 3,
+    "physical_transaction_paths": [
+      "writer_bootstrap_or_renew",
+      "guarded_writer_mutation",
+      "job_claim_bootstrap",
+      "guarded_job_mutation",
+      "direct_read_preflight_or_confirmation"
+    ],
+    "sql_expression_parameter_fetch_lane_deadline_and_lock_order": "exact",
+    "stable_identity_domain_separator_and_confirmation": "exact",
+    "subclass_fault_injection_seams": 11,
+    "content_decoder_owner": "_MatchingOperations._content_from_row",
+    "root_transcript_cut_owner": "_repository/jobs.py",
+    "duplicate_method_or_database_call_owners": 0,
+    "production_direct_imports_of_internal_package": 0
+  },
+  "pytest_collection": {
+    "preexisting_checkpoint_nodes": 541,
+    "m0_inventory_nodes_including_initial_gate": 545,
+    "final_nodes": 546,
+    "removed_or_renamed_preexisting_nodes": 0,
+    "new_skip_or_xfail": 0
+  },
+  "verification": {
+    "repository_architecture": "5_passed_in_2.32s",
+    "targeted_repository_and_retained_product_gate": "176_passed_in_23.39s",
+    "named_postgresql_transaction_families": "76_passed_in_28.47s",
+    "postgres_marker": "143_passed_403_deselected_in_54.24s",
+    "full_pytest": "546_passed_in_82.94s",
+    "ruff": "passed",
+    "compileall_src_tests_tools": "passed",
+    "terminal_protocol_generation": "passed",
+    "go_test": "passed_all_packages",
+    "go_vet": "passed",
+    "go_mod_verify": "passed_all_modules",
+    "uv_lock_check": "passed",
+    "git_diff_check": "passed"
+  },
+  "oracles": {
+    "committed_event_types": 34,
+    "live_event_types": 23,
+    "subject_slots": 15,
+    "append_guards": 2,
+    "product_relations": 26,
+    "durable_job_handlers": 4
+  },
+  "production_diff": {
+    "modified_facade_files": 1,
+    "new_internal_files": 13,
+    "lines_added": 13130,
+    "lines_deleted": 12751,
+    "net_lines": 379,
+    "scope": "src/pulsara_agent/conversation_kernel/repository.py and _repository only"
+  },
+  "forbidden_changes": {
+    "schema_or_migration": 0,
+    "protocol_or_go": 0,
+    "readme_or_gap_index": 0,
+    "dependency_or_lockfile": 0,
+    "product_behavior": 0,
+    "new_repository_authority": 0,
+    "duplicated_sql": 0,
+    "temporary_monolith_or_shim": 0
+  },
+  "remaining_blockers": []
+}
