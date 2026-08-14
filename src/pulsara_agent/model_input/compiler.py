@@ -141,6 +141,20 @@ _SOURCE_POLICY = {
         ),
         ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
     ),
+    ContextSourceKind.MCP_CATALOG: (
+        "pulsara.mcp-catalog.v1",
+        ContextChannel.RUNTIME_OBSERVATION,
+        ContextTrustClass.UNTRUSTED_OBSERVATION,
+        ContextBudgetClass.IMPORTANT,
+        55,
+        35,
+        (
+            ContextRenderMode.FULL,
+            ContextRenderMode.COMPACT,
+            ContextRenderMode.REF_ONLY,
+        ),
+        ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
+    ),
     ContextSourceKind.ACTIVE_SKILL: (
         "pulsara.active-skill.v1",
         ContextChannel.RUNTIME_OBSERVATION,
@@ -179,6 +193,12 @@ _SOURCE_ABSENCE_POLICY = {
     ContextSourceKind.CAPABILITY_CATALOG: frozenset(
         {
             ContextSourceAbsenceKind.EXPLICIT_EMPTY,
+            ContextSourceAbsenceKind.UNAVAILABLE,
+        }
+    ),
+    ContextSourceKind.MCP_CATALOG: frozenset(
+        {
+            ContextSourceAbsenceKind.NOT_APPLICABLE,
             ContextSourceAbsenceKind.UNAVAILABLE,
         }
     ),

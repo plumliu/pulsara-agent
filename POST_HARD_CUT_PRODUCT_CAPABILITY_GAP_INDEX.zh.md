@@ -169,7 +169,7 @@ git grep -n 'TerminalMonitorTool' "$PRE_HARD_CUT" -- src tests
 | PHC-05 | Terminal shell/profile/env 产品语义 | **已恢复（Round 2）**：bounded login-shell snapshot、default-deny inert env、single-flight/TTL/fallback、nearest `.venv/bin`与diagnostic | 用户工具链PATH可用；active capability environment默认拒绝且env value不进入diagnostic |
 | PHC-06 | Terminal foreground cwd continuity | **已恢复（Round 2）**：前台命令physical completion后捕获workspace内final cwd；yielded process永不推进session cwd | 后续前台命令从真实final cwd启动，无后台并发竞争 |
 | PHC-07 | Long-horizon execution / context window / compaction | **部分恢复**：Round 5A已删除固定model/tool-call次数与turn-wide wall-clock cap，并以closed owner watchdog约束单项operation；Round 5B仍拥有context rebase、summary与snapshot adoption | execution envelope已恢复；当fixed prefix或new suffix命中单次provider-input/resource typed boundary时仍不能主动/自动压缩继续，两类问题不得再由一套budget/recovery graph混合解决 |
-| PHC-08 | MCP production capability | **缺失**：仅保留配置检测，启用任何 MCP server 会阻止 Kernel open | MCP server discovery、tool call、interaction 与 CLI 管理均不可用 |
+| PHC-08 | MCP production capability | **核心已恢复（Round 6）**：stdio/Streamable HTTP、bounded discovery、scope-filtered direct typed tools、resource/prompt读取、MCP_CATALOG、CLI管理与真实执行均已接入；semantic-identical reconnect保持Round 3.1 prefix，schema变化在safe point rebase | Agent可直接使用已配置MCP能力；form/private URL、OAuth、MCP-backed skill activation、server Sampling/Roots、Apps/Tasks与advanced Go UI仍是明确non-goal |
 | PHC-09 | Plan workflow | **Python Runtime/Host 与 Protocol 后端已通过 Round 4 恢复；Go/TUI 延期**：三项ROOT-only control tool、canonical question/draft lifecycle、Plan-scoped read-only overlay、send-time immutable permission snapshot、Host-owned automatic continuation及typed Protocol v3边界已进入production；oracle为`34/23/15/2/26/4` | Headless typed caller已可完成Plan流程；面向用户的permission selector、question/draft review与重连展示仍等待Go/TUI闭环 |
 | PHC-10 | Hierarchical/batch subagent task graph | **显著退化**：只剩 flat spawn/list/wait/stop | 依赖任务、批量调度、child phase/result reporting 与 task-board 语义消失 |
 | PHC-11 | Standalone Canonical Inspector 产品入口 | **并入Go TUI，不单独恢复**：历史Inspector已消失；canonical query/Protocol后端按TUI需要保留和补齐 | 不建设第二套Inspector UI、read model或durable projection；会话观察最终由Go TUI呈现 |
@@ -551,24 +551,35 @@ Round 5A实施规格见[`ROUND_5_LONG_HORIZON_EXECUTION_ENVELOPE_IMPLEMENTATION_
 
 ### 7.2 当前代码事实
 
-当前只保留 MCP config parser/detection：
+Round 6已把核心MCP能力接入当前conversation kernel：
 
-- `host inspect` 能列出已配置且 enabled 的 server id；
-- production Kernel open 发现任何 enabled MCP server 时直接抛出 `KernelCompositionUnavailable`；
-- README 明确说明 MCP execution adapter 未安装；
-- 当前没有 MCP server supervisor、discovery owner、tool executor、interaction bridge 或 CLI 管理命令。
+- user、显式trusted workspace与Host override配置经typed merge进入Host-scoped supervisor；普通Host open默认把repository-owned workspace entry保持disabled，避免checkout即执行stdio command或解封HTTP secret reference；
+- stdio与Streamable HTTP均通过唯一official-SDK facade进行bounded initialize、capability-aware discovery和调用；PUBLIC_ONLY HTTP pin验证后的actual address并保留Host/SNI，所有并发response共享slot-owned 32 MiB byte reservation；wire JSON在`json.loads`分配object graph前先经linear structural scanner，Host discovery reservation从`client.open()`前覆盖到normalized candidate安装；
+- discovered descriptor、effect policy、slot lease与physical executor绑定同一semantic/physical generation；
+- stdio与sessionful HTTP严格串行，只有proved-stateless HTTP可在Host policy上界内并行；
+- `listChanged`立即关闭新dispatch，已有admission permit可drain，safe-point reconcile后才恢复；
+- scope-filtered direct MCP tools、`MCP_CATALOG`、`list_mcp_servers`、静态或advertised-template resources、prompts读取和Round 1 artifact承接进入production；resource-template matcher线性、拒绝adjacent ambiguity并exact校验query/matrix变量名，remote tool identity用覆盖完整原名与physical generation的bounded domain-separated digest；
+- CLI已提供`list/add/remove/enable/disable/doctor/reconnect`，standalone reconnect不会伪装成另一个活跃Host的控制面；
+- V1 elicitation固定DISABLED；state-only `input_required`有界续接，human/Sampling/Roots/unknown均typed拒绝；unsupported input出现在external-effect调用后且没有terminal response时保留unknown outcome，绝不伪造known failure；
+- supervisor是唯一physical close owner，runtime generation只持有opaque `McpSlotLease`；failure与close exact join slot identity，stdio EOF推进future reconnect，成功retire后删除physical重对象；Host replacement只fresh connect，不恢复旧request。
 
-### 7.3 具体丢失的用户能力
+### 7.3 Round 6恢复范围与剩余缺口
 
-- 任何已配置 MCP server 都不能被 Agent 使用；
-- 配置启用 MCP 不是“能力降级”，而是阻止 session 打开；
-- MCP tools 不进入模型 tool set；
-- server-side schema/update 不能刷新；
-- input-required、form 与 private URL 交互不可用；
-- CLI 无法管理或诊断 server lifecycle；
-- MCP 与 skills/capability catalog 的统一展示能力消失。
+已恢复的用户能力包括：
+
+- enabled MCP server可被Agent发现和直接调用，不再阻止session open；
+- server tool schema进入scope-filtered provider surface，permission只在local authorize执行，不按preset改写schema；
+- resource/prompt/catalog标准读取、bounded artifact承接及CLI lifecycle诊断可用；
+- semantic-identical physical reconnect不破坏provider-input prefix，schema变化通过dirty fence与safe-point rebase显式反映；
+- builtin/MCP confirmation共享Host-wide bounded FIFO与单一visible interaction；ALLOW继续复用既有decision+attempt原子事务。
+
+仍明确不属于Round 6 V1的能力是：form/private URL elicitation、OAuth、MCP-backed skill activation、server-initiated Sampling/Roots、Apps/Tasks与advanced Go MCP UI。`input_required`仅恢复bounded keyed state-only continuation；这些缺口不得通过普通字符串fallback或新的durable MCP owner伪装为已支持。
 
 MCP Apps 与 Tasks 在旧 MCP2 文档中本来就是非目标，不列为 hard-cut 回归。
+
+Round 6 V1冻结了一条克制边界：scope-filtered direct MCP tool surface、MCP_CATALOG与`list_mcp_servers`已经恢复，但“MCP-backed skill activation”没有恢复。当前skill resolver会在Host初始allowlist中删除未知tool引用；让late-ready MCP tool重新参与skill dependency resolution需要单独的capability/skill safe-point规格，不能作为MCP supervisor的隐含副作用。该项作为PHC-08的后续capability-integration子项保留，不阻塞direct MCP happy path，也不改变PHC-15当前只剩hierarchical task-graph dead descriptor的统计口径。
+
+同理，hard-cut前确有form/private URL能力，但Round 6 V1因当前Protocol/Go只有ALLOW/DENY而明确不广告elicitation；MCP direct execution不会把secret form伪装成普通字符串。form/private URL仍是PHC-08未恢复的后续产品子项，不能因核心MCP activation而从本索引消失。
 
 ### 7.4 hard-cut前MCP参考代码
 

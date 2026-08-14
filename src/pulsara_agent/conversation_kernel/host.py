@@ -8,6 +8,7 @@ acquires a new writer generation and rehydrates canonical rows only.
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import StrEnum
@@ -123,7 +124,8 @@ from pulsara_agent.ports.terminal_observation import (
     ExistingTurnInstallation,
     NewTurnInstallation,
 )
-from pulsara_agent.mcp_config import load_mcp_server_configs
+from pulsara_agent.mcp_config import McpServerConfig, load_mcp_server_configs
+from pulsara_agent.conversation_kernel.mcp import McpHostSupervisor
 from pulsara_agent.settings import PulsaraSettings
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 from pulsara_agent.storage.schema_verification_service import (
@@ -237,6 +239,7 @@ class KernelHostSession:
         active_skill_names: frozenset[str],
         authenticated_first_party_extension_ids: frozenset[str],
         deadline_factory: KernelExecutionDeadlineFactory,
+        mcp_configs: tuple[McpServerConfig, ...] = (),
     ) -> None:
         self.settings = settings
         self.workspace = workspace
@@ -320,6 +323,12 @@ class KernelHostSession:
             io_owner=self._io,
         )
         self._tools.bind_memory_port(self._memory_tools)
+        self._mcp_supervisor = McpHostSupervisor(
+            session_id=session_id,
+            workspace_root=workspace.workspace_root,
+            configs=mcp_configs,
+        )
+        self._tools.bind_mcp_supervisor(self._mcp_supervisor)
         self._capabilities = KernelCapabilityComposer(
             workspace_root=workspace.workspace_root,
             workspace_kind=workspace.workspace_kind,
@@ -345,6 +354,7 @@ class KernelHostSession:
             capability_composer=self._capabilities,
             base_system_prompt=system_prompt or DEFAULT_SYSTEM_PROMPT,
             display_timezone=display_timezone,
+            mcp_catalog=self._mcp_supervisor,
         )
         self._runner = ConversationKernelRunner(
             repository=repository,
@@ -389,6 +399,24 @@ class KernelHostSession:
             name=f"kernel-terminal-monitor-delivery:{session_id}",
         )
         self._queue_wake.set()
+
+    async def start_mcp(self) -> None:
+        await self._mcp_supervisor.start()
+        self._tools.prepare_tool_surface_safe_point()
+
+    async def reload_mcp_configs(
+        self, configs: tuple[McpServerConfig, ...]
+    ) -> frozenset[str]:
+        """Install a process-local config epoch; publication waits for safe point."""
+
+        self._require_open()
+        return await self._tools.reload_mcp_configs(configs)
+
+    def reconnect_mcp_server(self, server_id: str) -> None:
+        """Request a fresh physical generation for future safe-point borrows."""
+
+        self._require_open()
+        self._mcp_supervisor.reconnect(server_id)
 
     @property
     def writer_generation(self) -> int:
@@ -2211,6 +2239,11 @@ class KernelHostSession:
                 self._queue_wake.set()
                 self._monitor_wake.set()
             self.extensions.stop_admission()
+            self._mcp_supervisor.stop_admission()
+            mcp_close_task = asyncio.create_task(
+                self._mcp_supervisor.aclose(),
+                name=f"kernel-mcp-close:{self.host_session_id}",
+            )
             deadline = (
                 self._deadlines.deadline(KernelWatchdogOwner.HOST_SESSION_CLOSE)
                 if deadline_monotonic is None
@@ -2295,6 +2328,15 @@ class KernelHostSession:
                 await self._tools.aclose(
                     timeout_seconds=max(0.001, deadline - monotonic())
                 )
+            except BaseException as exc:
+                close_error = close_error or exc
+            try:
+                if await _join_close_task(
+                    mcp_close_task, deadline_monotonic=deadline
+                ):
+                    close_error = close_error or TimeoutError(
+                        "MCP physical owners exited after close deadline"
+                    )
             except BaseException as exc:
                 close_error = close_error or exc
             try:
@@ -2652,13 +2694,8 @@ class KernelHostCore:
         mcp_configs = await asyncio.to_thread(
             load_mcp_server_configs,
             workspace_root=workspace.workspace_root,
+            trust_workspace_config=workspace.trust_workspace_mcp_config,
         )
-        enabled_mcp = tuple(item.server_id for item in mcp_configs if item.enabled)
-        if enabled_mcp:
-            raise KernelCompositionUnavailable(
-                "Stage 2 MCP composition is not installed; disable configured MCP "
-                "servers before opening the canonical kernel: " + ", ".join(enabled_mcp)
-            )
         repository = await self._ensure_resources()
         host_id = f"host:{uuid4().hex}"
         io_owner = KernelSessionIO()
@@ -2690,8 +2727,13 @@ class KernelHostCore:
                     self._authenticated_first_party_extension_ids
                 ),
                 deadline_factory=self._deadlines,
+                mcp_configs=mcp_configs,
             )
+            await session.start_mcp()
         except BaseException:
+            if "session" in locals():
+                with suppress(BaseException):
+                    await session.aclose(deadline_monotonic=deadline)
             await io_owner.aclose(deadline_monotonic=deadline)
             raise
         async with self._lock:

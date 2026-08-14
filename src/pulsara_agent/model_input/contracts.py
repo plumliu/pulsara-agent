@@ -81,6 +81,7 @@ class ContextSourceKind(StrEnum):
     PLAN_HANDOFF = "PLAN_HANDOFF"
     PLAN_WORKFLOW = "PLAN_WORKFLOW"
     CAPABILITY_CATALOG = "CAPABILITY_CATALOG"
+    MCP_CATALOG = "MCP_CATALOG"
     ACTIVE_SKILL = "ACTIVE_SKILL"
 
 
@@ -232,14 +233,9 @@ class FrozenToolSpec:
     description: str
     parameters: FrozenJsonObjectFact = field(repr=False)
     descriptor_fingerprint: str
-    executor_binding_fingerprint: str
 
     def __post_init__(self) -> None:
-        if (
-            not self.name
-            or not self.descriptor_fingerprint
-            or not self.executor_binding_fingerprint
-        ):
+        if not self.name or not self.descriptor_fingerprint:
             raise ValueError("frozen tool specification identity is incomplete")
         if not isinstance(self.parameters, FrozenJsonObjectFact):
             raise TypeError("tool parameters must be a frozen JSON object")
@@ -276,7 +272,7 @@ def model_tool_surface_fingerprint(
     scope: ModelInputScopeKind, tools: tuple[FrozenToolSpec, ...]
 ) -> str:
     return context_fingerprint(
-        "model-input-tool-surface:v1",
+        "model-input-tool-surface:v2",
         {
             "scope": scope.value,
             "tools": tuple(
@@ -285,7 +281,6 @@ def model_tool_surface_fingerprint(
                     "description": tool.description,
                     "parameters": tool.parameters,
                     "descriptor_fingerprint": tool.descriptor_fingerprint,
-                    "executor_binding_fingerprint": tool.executor_binding_fingerprint,
                 }
                 for tool in tools
             ),

@@ -96,6 +96,9 @@ class PreparedKernelModelCall:
             resolved_model_call_id=self.call.resolved_model_call_id,
             compile_binding_fingerprint=self.compile_binding.binding_fingerprint,
             surface_fingerprint=self.tool_surface.model_surface.surface_fingerprint,
+            execution_surface_fingerprint=(
+                self.tool_surface.execution_surface_fingerprint
+            ),
             transport_timeout_policy_fingerprint=(
                 self.transport_timeout_policy_fingerprint
             ),
@@ -217,10 +220,8 @@ class PreparedKernelModelExecution:
                 raise RuntimeError("prepared model execution is not openable")
             self._state = _PreparedExecutionState.OPENING
         for tool in request.compiled_input.tools:
-            if (
-                request.surface_borrow.binding_fingerprint(tool.name)
-                != tool.executor_binding_fingerprint
-            ):
+            binding = request.surface_borrow.execution_binding(tool.name)
+            if binding.descriptor_fingerprint != tool.descriptor_fingerprint:
                 with self._lock:
                     self._state = _PreparedExecutionState.DISCARDED
                 raise RuntimeError("prepared tool binding was revoked before open")
@@ -374,6 +375,9 @@ class DirectKernelModelPort:
             resolved_model_call_id=call.resolved_model_call_id,
             compile_binding_fingerprint=binding_fingerprint,
             surface_fingerprint=surface.surface_fingerprint,
+            execution_surface_fingerprint=(
+                request.tool_surface.execution_surface_fingerprint
+            ),
             transport_timeout_policy_fingerprint=(
                 self._transport_timeout_policy_fingerprint
             ),
@@ -440,10 +444,8 @@ class DirectKernelModelPort:
         # Revalidate the complete advertised binding immediately before any
         # mutable schema is created or the transport is opened.
         for tool in compiled.tools:
-            if (
-                request.surface_borrow.binding_fingerprint(tool.name)
-                != tool.executor_binding_fingerprint
-            ):
+            binding = request.surface_borrow.execution_binding(tool.name)
+            if binding.descriptor_fingerprint != tool.descriptor_fingerprint:
                 raise RuntimeError("prepared tool binding was revoked")
         thawed_tools: list[ToolSpec] = []
         for item in compiled.tools:
@@ -477,6 +479,9 @@ class DirectKernelModelPort:
                     "through": request.cut.provider_input_through_sequence,
                 },
                 "append_candidate": expected_append_candidate_fingerprint,
+                "execution_surface": (
+                    prepared.tool_surface.execution_surface_fingerprint
+                ),
                 "transport_timeout_policy": (
                     prepared.transport_timeout_policy_fingerprint
                 ),
@@ -505,6 +510,7 @@ def _prepared_model_call_fingerprint(
     resolved_model_call_id: str,
     compile_binding_fingerprint: str,
     surface_fingerprint: str,
+    execution_surface_fingerprint: str,
     transport_timeout_policy_fingerprint: str,
 ) -> str:
     return context_fingerprint(
@@ -516,6 +522,7 @@ def _prepared_model_call_fingerprint(
             "call_id": resolved_model_call_id,
             "compile_binding": compile_binding_fingerprint,
             "surface": surface_fingerprint,
+            "execution_surface": execution_surface_fingerprint,
             "transport_timeout_policy": transport_timeout_policy_fingerprint,
         },
     )

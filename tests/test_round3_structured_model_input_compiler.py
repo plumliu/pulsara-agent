@@ -207,6 +207,20 @@ _SOURCE_FACTS = {
         ),
         ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
     ),
+    ContextSourceKind.MCP_CATALOG: (
+        "pulsara.mcp-catalog.v1",
+        ContextChannel.RUNTIME_OBSERVATION,
+        ContextTrustClass.UNTRUSTED_OBSERVATION,
+        ContextBudgetClass.IMPORTANT,
+        55,
+        35,
+        (
+            ContextRenderMode.FULL,
+            ContextRenderMode.COMPACT,
+            ContextRenderMode.REF_ONLY,
+        ),
+        ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
+    ),
     ContextSourceKind.PLAN_HANDOFF: (
         "pulsara.plan-handoff.v1",
         ContextChannel.RUNTIME_OBSERVATION,
@@ -339,6 +353,7 @@ def _sources(
         ContextSourceKind.PLAN_HANDOFF: ContextSourceAbsenceKind.NOT_APPLICABLE,
         ContextSourceKind.PLAN_WORKFLOW: ContextSourceAbsenceKind.EXPLICIT_EMPTY,
         ContextSourceKind.CAPABILITY_CATALOG: ContextSourceAbsenceKind.EXPLICIT_EMPTY,
+        ContextSourceKind.MCP_CATALOG: ContextSourceAbsenceKind.NOT_APPLICABLE,
         ContextSourceKind.ACTIVE_SKILL: ContextSourceAbsenceKind.EXPLICIT_EMPTY,
     }
     for kind, absence_kind in default_absences.items():
@@ -2428,8 +2443,18 @@ def test_round3_tool_surface_excludes_root_only_monitor_and_schema_is_frozen(
     with pytest.raises((AttributeError, TypeError)):
         terminal.parameters["type"] = "array"  # type: ignore[index]
     borrow = port.borrow_tool_surface(root)
-    with pytest.raises(RuntimeError, match="active borrow"):
-        port.bind_subagent_port(SimpleNamespace(tool_names=frozenset({"spawn_agent"})))
+    old_binding = borrow.binding_fingerprint("terminal")
+    port.bind_subagent_port(SimpleNamespace(tool_names=frozenset({"spawn_agent"})))
+    assert borrow.binding_fingerprint("terminal") == old_binding
+    with pytest.raises(RuntimeError, match="retiring"):
+        port.borrow_tool_surface(root)
+    replacement = port.snapshot_tool_surface(
+        conversation_scope_kind=ModelInputScopeKind.ROOT,
+        scope_subagent_task_id=None,
+    )
+    assert "spawn_agent" in {
+        tool.name for tool in replacement.model_surface.tool_specs
+    }
     borrow.close()
     asyncio.run(port.aclose(timeout_seconds=2))
 
@@ -2603,13 +2628,13 @@ def test_round3_source_decision_and_compiled_fingerprints_are_golden() -> None:
     )
     compiled = StructuredModelInputCompiler().compile(request)
     assert compiled.source_collection_fingerprint == (
-        "sha256:771d620c4b06950280b5cb0a35c124ac01bcc1ce38a265a3e1acaf12a889fc29"
+        "sha256:658103c564acf1ae3f489a1c7254c019faf696a9b683ab53019b3da4d9d187ab"
     )
     assert compiled.budget_report.decision_digest == (
         "sha256:0c70198d1d2a90d1b8e4271d266561102f671daf01c5edc46a436973a4d70fa9"
     )
     assert compiled.compiled_semantic_fingerprint == (
-        "sha256:e19ae6df5f20692859be0bcb3c9e2458c81d31ca17d1f28623741d7cfadf0661"
+        "sha256:9f5c5cd9484f917575e4a515edcc48298cbd02610fe678c5ab6f1d7eb9c58287"
     )
     assert compiled.final_estimate.total_input_tokens == 248
 

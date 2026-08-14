@@ -72,14 +72,22 @@ Kernel 当前支持：
   并按需有界读取；
 - bounded Host-scoped subagent；
 - bundled/local skills；
+- Host-scoped stdio/Streamable HTTP MCP：bounded discovery、按scope过滤的
+  direct typed tools、catalog/resource/prompt读取、local authorization与CLI
+  lifecycle管理；
 - PostgreSQL FTS/vector memory，以及显式 direct、reverse 与最多 two-hop
   relation traversal；
 - 四类具名 durable background job：compaction、post-compaction memory
   extraction、memory governance、memory-index refresh；
 - canonical Inspector 与 Protocol v3 terminal observation。
 
-当前 conversation kernel 未安装 MCP execution adapter。若配置了 enabled MCP
-server，Host 会 fail closed，不会静默忽略。
+Round 6不增加durable MCP连接或request recovery；Host换代只按配置fresh
+connect。form/private URL elicitation、OAuth、MCP-backed skill activation、
+server-initiated Sampling/Roots、Apps/Tasks与advanced Go MCP UI仍是明确
+non-goal。
+普通Host启动时，workspace自带的MCP entry默认保持disabled；只有用户显式传入
+`--trust-workspace-mcp`才会激活。仅仅打开一个仓库不会执行其中的stdio command，
+也不会解析其HTTP secret reference。
 
 ## 环境要求
 

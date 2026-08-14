@@ -24,7 +24,14 @@ from pulsara_agent.conversation_kernel.memory_tools import MEMORY_TOOL_NAMES
 from pulsara_agent.conversation_kernel.subagent import SUBAGENT_TOOL_NAMES
 from pulsara_agent.conversation_kernel.tool_runtime import DIRECT_KERNEL_TOOL_NAMES
 from pulsara_agent.llm.models import ModelRole
-from pulsara_agent.mcp_config import load_mcp_server_configs
+from pulsara_agent.mcp_config import (
+    McpServerConfig,
+    StdioTransportConfig,
+    StreamableHttpTransportConfig,
+    load_mcp_server_configs,
+    set_mcp_server_enabled,
+    write_mcp_server_config,
+)
 from pulsara_agent.primitives.permission import (
     DEFAULT_PERMISSION_MODE,
     PermissionMode,
@@ -78,6 +85,40 @@ def build_parser() -> argparse.ArgumentParser:
     reset = _add_env_args(skill_commands.add_parser("reset"))
     reset.add_argument("name")
 
+    mcp = commands.add_parser("mcp", help="Manage MCP server configuration.")
+    mcp_commands = mcp.add_subparsers(dest="mcp_command")
+    for name in ("list", "doctor"):
+        command = _add_env_args(mcp_commands.add_parser(name))
+        command.add_argument("--workspace", default=None)
+        if name == "doctor":
+            command.add_argument("server_id", nargs="?")
+    add = _add_env_args(mcp_commands.add_parser("add"))
+    add.add_argument("server_id")
+    add.add_argument("--workspace", default=None)
+    transport = add.add_mutually_exclusive_group(required=True)
+    transport.add_argument("--stdio-command")
+    transport.add_argument("--url")
+    add.add_argument("--arg", action="append", default=[])
+    add.add_argument("--allow-http-localhost", action="store_true")
+    add.add_argument("--allow-private-network", action="store_true")
+    add.add_argument("--proved-stateless", action="store_true")
+    add.add_argument("--required", action="store_true")
+    add.add_argument("--disabled", action="store_true")
+    add.add_argument(
+        "--scope",
+        choices=("ROOT_ONLY", "ROOT_AND_SUBAGENTS"),
+        default="ROOT_ONLY",
+    )
+    add.add_argument(
+        "--effect",
+        choices=("AUTO", "READ_ONLY", "EXTERNAL_EFFECT"),
+        default="AUTO",
+    )
+    for name in ("remove", "enable", "disable", "reconnect"):
+        command = _add_env_args(mcp_commands.add_parser(name))
+        command.add_argument("server_id")
+        command.add_argument("--workspace", default=None)
+
     database = commands.add_parser("db")
     database_commands = database.add_subparsers(dest="db_command")
     for name, deadline in (("status", 10.0), ("migrate", 300.0), ("verify", 30.0)):
@@ -112,6 +153,15 @@ def _add_host_common_args(parser: argparse.ArgumentParser) -> argparse.ArgumentP
     parser.add_argument("--display-label", default=None)
     parser.add_argument("--memory-domain-id", default=None)
     parser.add_argument("--skill", action="append", default=[])
+    parser.add_argument(
+        "--trust-workspace-mcp",
+        action="store_true",
+        help=(
+            "Trust this workspace's .pulsara/mcp.yaml for the current Host "
+            "open. Disabled by default because workspace MCP may launch code "
+            "or resolve secret references."
+        ),
+    )
     parser.add_argument(
         "--model-role",
         choices=(ModelRole.PRO.value, ModelRole.FLASH.value),
@@ -165,6 +215,13 @@ def main() -> None:
         else:
             parser.error("skills requires a subcommand")
         print(json.dumps(result.to_dict(), indent=2, ensure_ascii=False))
+        return
+    if args.command == "mcp":
+        try:
+            result = asyncio.run(_mcp_command(args))
+        except (ValueError, KeyError, RuntimeError) as exc:
+            parser.error(_public_error(exc))
+        print(json.dumps(result, indent=2, ensure_ascii=False))
         return
     if args.command == "config-check":
         try:
@@ -354,7 +411,10 @@ def _host_inspect(args) -> dict[str, object]:
     )
     enabled_mcp = [
         item.server_id
-        for item in load_mcp_server_configs(workspace_root=workspace.workspace_root)
+        for item in load_mcp_server_configs(
+            workspace_root=workspace.workspace_root,
+            trust_workspace_config=workspace.trust_workspace_mcp_config,
+        )
         if item.enabled
     ]
     return {
@@ -380,9 +440,164 @@ def _host_inspect(args) -> dict[str, object]:
         "skills": [item.name for item in capability.catalog_entries],
         "active_skills": [item.name for item in capability.active_injections],
         "mcp": {
-            "composition_status": ("UNAVAILABLE" if enabled_mcp else "NOT_CONFIGURED"),
+            "composition_status": ("CONFIGURED" if enabled_mcp else "NOT_CONFIGURED"),
             "configured_enabled_servers": enabled_mcp,
         },
+    }
+
+
+async def _mcp_command(args: argparse.Namespace) -> dict[str, object]:
+    _load_env_file_from_args(args)
+    workspace_root = (
+        Path(args.workspace).expanduser().resolve()
+        if getattr(args, "workspace", None)
+        else None
+    )
+    command = args.mcp_command
+    if command == "list":
+        configs = load_mcp_server_configs(
+            workspace_root=workspace_root,
+            trust_workspace_config=workspace_root is not None,
+        )
+        return {
+            "status": "ok",
+            "servers": [_mcp_config_public(item) for item in configs],
+        }
+    if command == "add":
+        transport: dict[str, object]
+        if args.stdio_command:
+            transport = {
+                "type": "stdio",
+                "command": args.stdio_command,
+                "args": args.arg,
+            }
+        else:
+            if args.arg:
+                raise ValueError("--arg is only valid with --stdio-command")
+            transport = {
+                "type": "streamable_http",
+                "endpoint": args.url,
+                "allow_http_localhost": args.allow_http_localhost,
+                "network_policy": (
+                    "ALLOW_PRIVATE"
+                    if args.allow_private_network
+                    else "PUBLIC_ONLY"
+                ),
+                "proved_stateless": args.proved_stateless,
+            }
+        entry = {
+            "enabled": not args.disabled,
+            "required": args.required,
+            "transport": transport,
+            "scope_policy": args.scope,
+            "effect_policy": {"default_effect": args.effect},
+            "catalog_refresh_interval_ms": 300_000,
+        }
+        path = write_mcp_server_config(
+            server_id=args.server_id,
+            entry=entry,
+            workspace_root=workspace_root,
+        )
+        return {"status": "ok", "server_id": args.server_id, "path": str(path)}
+    if command == "remove":
+        path = write_mcp_server_config(
+            server_id=args.server_id,
+            entry=None,
+            workspace_root=workspace_root,
+        )
+        return {"status": "ok", "server_id": args.server_id, "path": str(path)}
+    if command in {"enable", "disable"}:
+        path = set_mcp_server_enabled(
+            server_id=args.server_id,
+            enabled=command == "enable",
+            workspace_root=workspace_root,
+        )
+        return {"status": "ok", "server_id": args.server_id, "path": str(path)}
+    if command == "doctor":
+        configs = load_mcp_server_configs(
+            workspace_root=workspace_root,
+            trust_workspace_config=workspace_root is not None,
+        )
+        if args.server_id is not None:
+            configs = tuple(
+                item for item in configs if item.server_id == args.server_id
+            )
+            if not configs:
+                raise KeyError(args.server_id)
+        from pulsara_agent.conversation_kernel.mcp.supervisor import (
+            McpHostSupervisor,
+        )
+
+        results: list[dict[str, object]] = []
+        for config in configs:
+            if not config.enabled:
+                results.append(
+                    {"server_id": config.server_id, "status": "disabled"}
+                )
+                continue
+            supervisor = McpHostSupervisor(
+                session_id=f"mcp-doctor:{config.server_id}",
+                workspace_root=workspace_root or Path.cwd(),
+                configs=(config,),
+            )
+            try:
+                await supervisor.start()
+                state = await supervisor.wait_for_server_settlement(
+                    config.server_id,
+                    timeout_seconds=30,
+                )
+                runtime = supervisor.install_pending_at_safe_point()
+                catalog = supervisor.catalog_snapshot()
+                entry = catalog.servers[0]
+                results.append(
+                    {
+                        "server_id": config.server_id,
+                        "status": state.value.lower(),
+                        "tool_count": entry.discovered_tool_count,
+                        "exposed_tool_count": entry.exposed_tool_count,
+                        "resource_count": entry.resource_count,
+                        "resource_template_count": entry.resource_template_count,
+                        "prompt_count": entry.prompt_count,
+                    }
+                )
+                if runtime is not None:
+                    runtime.release()
+            except Exception as exc:
+                results.append(
+                    {
+                        "server_id": config.server_id,
+                        "status": "failed",
+                        "failure_category": type(exc).__name__,
+                    }
+                )
+            finally:
+                await supervisor.aclose()
+        return {"status": "ok", "servers": results}
+    if command == "reconnect":
+        raise RuntimeError(
+            "mcp reconnect requires an active Host-owned supervisor; "
+            "a standalone CLI process cannot control another Host"
+        )
+    raise ValueError("mcp requires a subcommand")
+
+
+def _mcp_config_public(config: McpServerConfig) -> dict[str, object]:
+    transport = config.transport
+    if isinstance(transport, StdioTransportConfig):
+        transport_kind = "stdio"
+    elif isinstance(transport, StreamableHttpTransportConfig):
+        transport_kind = "streamable_http"
+    else:  # pragma: no cover - closed transport union
+        raise TypeError("unknown MCP transport")
+    return {
+        "server_id": config.server_id,
+        "display_name": config.display_name,
+        "enabled": config.enabled,
+        "required": config.required,
+        "transport": transport_kind,
+        "scope_policy": config.scope_policy.value,
+        "effect_policy": config.effect_policy.default_effect.value,
+        "semantic_config_fingerprint": config.semantic_config_fingerprint,
     }
 
 
@@ -476,6 +691,9 @@ def _workspace_input_from_args(args) -> HostWorkspaceInput:
         workspace_root=Path(args.workspace or "."),
         display_label=args.display_label,
         memory_domain_id=args.memory_domain_id or "u_local",
+        trust_workspace_mcp_config=bool(
+            getattr(args, "trust_workspace_mcp", False)
+        ),
     )
 
 

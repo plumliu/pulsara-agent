@@ -20,9 +20,12 @@ from pulsara_agent.conversation_kernel.context_sources import (
 )
 from pulsara_agent.conversation_kernel.runner import KernelToolInvocationContext
 from pulsara_agent.conversation_kernel.tool_surface import (
+    BuiltinExecutionPolicyRef,
     PreparedKernelToolSurface,
+    PreparedToolExecutionBinding,
     ProcessLocalToolSurfaceAccess,
     ProcessLocalToolSurfaceBorrow,
+    tool_execution_surface_fingerprint,
 )
 from pulsara_agent.conversation_kernel.tool_runtime import DirectKernelToolPort
 from pulsara_agent.model_input.contracts import (
@@ -89,10 +92,8 @@ class ScriptedKernelModel:
         install_authority: ProcessLocalProviderInputInstallAuthority,
     ) -> "_ScriptedPreparedExecution":
         for tool in request.compiled_input.tools:
-            if (
-                request.surface_borrow.binding_fingerprint(tool.name)
-                != tool.executor_binding_fingerprint
-            ):
+            binding = request.surface_borrow.execution_binding(tool.name)
+            if binding.descriptor_fingerprint != tool.descriptor_fingerprint:
                 raise RuntimeError("scripted tool binding was revoked")
         self.requests.append(request)
         return _ScriptedPreparedExecution(
@@ -340,6 +341,7 @@ class StaticContextSourceCollector:
             ContextSourceKind.PLAN_HANDOFF: ContextSourceAbsenceKind.NOT_APPLICABLE,
             ContextSourceKind.PLAN_WORKFLOW: ContextSourceAbsenceKind.EXPLICIT_EMPTY,
             ContextSourceKind.CAPABILITY_CATALOG: ContextSourceAbsenceKind.EXPLICIT_EMPTY,
+            ContextSourceKind.MCP_CATALOG: ContextSourceAbsenceKind.NOT_APPLICABLE,
             ContextSourceKind.ACTIVE_SKILL: ContextSourceAbsenceKind.EXPLICIT_EMPTY,
         }
         absent = tuple(
@@ -528,9 +530,6 @@ class StructuredToolPort:
                 descriptor_fingerprint=context_fingerprint(
                     "test-tool-descriptor:v1", name
                 ),
-                executor_binding_fingerprint=context_fingerprint(
-                    "test-tool-binding:v1", name
-                ),
             )
             for name in sorted(tool_names)
         )
@@ -550,18 +549,51 @@ class StructuredToolPort:
         scope_subagent_task_id: str | None,
     ) -> PreparedKernelToolSurface:
         surface = self._surfaces[conversation_scope_kind]
+        bindings = tuple(
+            PreparedToolExecutionBinding(
+                tool_name=item.name,
+                descriptor_fingerprint=item.descriptor_fingerprint,
+                executor_binding_fingerprint=context_fingerprint(
+                    "test-tool-binding:v1", item.name
+                ),
+                execution_policy=BuiltinExecutionPolicyRef(
+                    tool_name=item.name,
+                    catalog_entry_fingerprint=context_fingerprint(
+                        "test-tool-catalog:v1", item.name
+                    ),
+                    policy_fingerprint=context_fingerprint(
+                        "builtin-execution-policy-ref:v1",
+                        {
+                            "tool_name": item.name,
+                            "catalog_entry_fingerprint": context_fingerprint(
+                                "test-tool-catalog:v1", item.name
+                            ),
+                        },
+                    ),
+                ),
+            )
+            for item in surface.tool_specs
+        )
+        execution_fingerprint = tool_execution_surface_fingerprint(
+            owner_epoch=1,
+            surface_generation=1,
+            semantic_surface_fingerprint=surface.surface_fingerprint,
+            bindings=bindings,
+        )
         access = ProcessLocalToolSurfaceAccess(
             owner_epoch=1,
             surface_generation=1,
             conversation_scope_kind=conversation_scope_kind,
             scope_subagent_task_id=scope_subagent_task_id,
-            surface_fingerprint=surface.surface_fingerprint,
+            semantic_surface_fingerprint=surface.surface_fingerprint,
+            execution_surface_fingerprint=execution_fingerprint,
             _authority=self._authority,
         )
         return PreparedKernelToolSurface(
-            surface,
-            tuple(item.executor_binding_fingerprint for item in surface.tool_specs),
-            access,
+            model_surface=surface,
+            execution_bindings=bindings,
+            execution_surface_fingerprint=execution_fingerprint,
+            access=access,
         )
 
     def borrow_tool_surface(
@@ -570,12 +602,14 @@ class StructuredToolPort:
         borrow_id = f"test-borrow:{len(self._active) + 1}"
         self._active.add(borrow_id)
 
-        def validate(borrow: ProcessLocalToolSurfaceBorrow, tool_name: str) -> str:
+        def validate(
+            borrow: ProcessLocalToolSurfaceBorrow, tool_name: str
+        ) -> PreparedToolExecutionBinding:
             if borrow.borrow_id not in self._active:
                 raise RuntimeError("test tool surface borrow is inactive")
-            for item in prepared.model_surface.tool_specs:
-                if item.name == tool_name:
-                    return item.executor_binding_fingerprint
+            for item in prepared.execution_bindings:
+                if item.tool_name == tool_name:
+                    return item
             raise RuntimeError("test tool was not advertised")
 
         def release(borrow: ProcessLocalToolSurfaceBorrow) -> None:
@@ -782,6 +816,7 @@ def _candidate(
         ContextSourceKind.PLAN_HANDOFF: ContextSourceLifecycle.ONE_SHOT,
         ContextSourceKind.PLAN_WORKFLOW: ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
         ContextSourceKind.CAPABILITY_CATALOG: ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
+        ContextSourceKind.MCP_CATALOG: ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
         ContextSourceKind.ACTIVE_SKILL: ContextSourceLifecycle.ACTIVATION_SNAPSHOT,
     }[kind]
     modes = tuple(mode for mode, _text in variants)

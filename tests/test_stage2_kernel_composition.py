@@ -8,7 +8,6 @@ import pytest
 from pulsara_agent.capability.builtin_catalog import builtin_tool_descriptors
 from pulsara_agent.conversation_kernel.capability import KernelCapabilityComposer
 from pulsara_agent.conversation_kernel.host import (
-    KernelCompositionUnavailable,
     KernelHostCore,
 )
 from pulsara_agent.workspace_identity import HostWorkspaceInput
@@ -98,28 +97,28 @@ def test_round3_1_capability_input_is_sampled_once_for_multiple_prefix_trials(
     assert first.catalog_prompt == second.catalog_prompt == "<skills>review</skills>"
 
 
-def test_enabled_mcp_is_rejected_before_kernel_resource_activation(
+def test_enabled_mcp_enters_kernel_resource_activation(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import pulsara_agent.conversation_kernel.host as kernel_host
 
     activated = False
 
-    async def forbidden_activation(_self):
+    async def observed_activation(_self):
         nonlocal activated
         activated = True
-        raise AssertionError("resource activation must not run")
+        raise RuntimeError("resource activation observed")
 
     monkeypatch.setattr(
         kernel_host,
         "load_mcp_server_configs",
         lambda **_: (SimpleNamespace(server_id="mcp:test", enabled=True),),
     )
-    monkeypatch.setattr(KernelHostCore, "_ensure_resources", forbidden_activation)
+    monkeypatch.setattr(KernelHostCore, "_ensure_resources", observed_activation)
     core = KernelHostCore(settings=SimpleNamespace())  # type: ignore[arg-type]
 
     async def exercise() -> None:
-        with pytest.raises(KernelCompositionUnavailable, match="mcp:test"):
+        with pytest.raises(RuntimeError, match="resource activation observed"):
             await core.open_session(
                 HostWorkspaceInput(
                     workspace_kind="project",
@@ -128,4 +127,4 @@ def test_enabled_mcp_is_rejected_before_kernel_resource_activation(
             )
 
     asyncio.run(exercise())
-    assert activated is False
+    assert activated is True

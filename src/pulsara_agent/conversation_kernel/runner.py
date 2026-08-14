@@ -245,6 +245,7 @@ class KernelToolResult:
     process_local_settlement: "ProcessLocalEffectSettlementToken | None" = None
     physical_timing: str = "ON_TIME"
     caller_cancelled_while_running: bool = False
+    effect_class: str | None = None
 
     def __post_init__(self) -> None:
         # The model-facing tool result and artifact candidate are both strict
@@ -917,6 +918,9 @@ class ConversationKernelRunner:
     ) -> _PreparedProviderDispatch:
         """Freeze, quote and (when present) consume one exact steer suffix."""
 
+        prepare_surface = getattr(self._tools, "prepare_tool_surface_safe_point", None)
+        if prepare_surface is not None:
+            prepare_surface()
         handle = await self._io.run(
             self._safe_point.freeze_provider_input,
             turn_id=turn_id,
@@ -1679,9 +1683,12 @@ class ConversationKernelRunner:
                     try:
                         try:
                             for tool in compiled_input.tools:
+                                binding = active_surface_borrow.execution_binding(
+                                    tool.name
+                                )
                                 if (
-                                    active_surface_borrow.binding_fingerprint(tool.name)
-                                    != tool.executor_binding_fingerprint
+                                    binding.descriptor_fingerprint
+                                    != tool.descriptor_fingerprint
                                 ):
                                     raise RuntimeError("tool binding changed")
                         except Exception as exc:
@@ -2385,7 +2392,7 @@ class ConversationKernelRunner:
         # before constructing any workflow/interaction subject so the
         # repository can install one closed no-attempt result for every call.
         try:
-            advertised_executor_binding = surface_borrow.binding_fingerprint(
+            advertised_execution_binding = surface_borrow.execution_binding(
                 selected.tool_name
             )
             advertised_spec = next(
@@ -2398,8 +2405,8 @@ class ConversationKernelRunner:
             )
             if (
                 advertised_spec is None
-                or advertised_spec.executor_binding_fingerprint
-                != advertised_executor_binding
+                or advertised_execution_binding.descriptor_fingerprint
+                != advertised_spec.descriptor_fingerprint
                 or advertised_spec.descriptor_fingerprint
                 != catalog_entry.descriptor.fingerprint()
             ):
@@ -2953,7 +2960,7 @@ class ConversationKernelRunner:
                     public_payload={
                         "tool_name": tool_name,
                         "effect_class": _tool_effect_class(
-                            tool_name, invocation_arguments
+                            tool_name, invocation_arguments, result.effect_class
                         ),
                         "physical_timing": result.physical_timing,
                         "outcome": "EXACT_RETURN_STALE_WRITER",
@@ -2987,7 +2994,7 @@ class ConversationKernelRunner:
                     public_payload={
                         "tool_name": tool_name,
                         "effect_class": _tool_effect_class(
-                            tool_name, invocation_arguments
+                            tool_name, invocation_arguments, result.effect_class
                         ),
                         "physical_timing": result.physical_timing,
                         "outcome": "RETURNED_EXACT",
@@ -3094,8 +3101,12 @@ def _json_digest(value: FrozenJsonObjectFact) -> str:
 
 
 def _tool_effect_class(
-    tool_name: str, arguments: Mapping[str, object]
+    tool_name: str,
+    arguments: Mapping[str, object],
+    result_effect_class: str | None = None,
 ) -> str:
+    if result_effect_class is not None:
+        return result_effect_class
     if tool_name == "terminal_process":
         action = arguments.get("action")
         if action in {"list", "log", "poll", "wait"}:

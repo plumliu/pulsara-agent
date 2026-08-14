@@ -20,6 +20,7 @@ class HostWorkspaceInput:
     display_label: str | None = None
     memory_domain_id: str = "u_local"
     cleanup_workspace_root_on_close: bool = False
+    trust_workspace_mcp_config: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,6 +32,7 @@ class ResolvedWorkspace:
     workspace_scope: str | None
     workspace_key: str
     cleanup_workspace_root_on_close: bool = False
+    trust_workspace_mcp_config: bool = False
 
 
 def normalize_workspace_kind(raw: str) -> WorkspaceKind:
@@ -66,6 +68,7 @@ def resolve_workspace(
             memory_domain=domain,
             workspace_scope=scope,
             workspace_key=scope,
+            trust_workspace_mcp_config=workspace.trust_workspace_mcp_config,
         )
 
     root, host_created_root = _resolve_transient_root(
@@ -86,6 +89,7 @@ def resolve_workspace(
         workspace_key=f"transient:{uuid4().hex}",
         cleanup_workspace_root_on_close=host_created_root
         and workspace.cleanup_workspace_root_on_close,
+        trust_workspace_mcp_config=workspace.trust_workspace_mcp_config,
     )
 
 

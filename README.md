@@ -77,14 +77,22 @@ The current Kernel supports:
   output uses a UTF-8-safe head/tail preview and bounded on-demand reads;
 - bounded Host-scoped subagents;
 - bundled and local skills;
+- Host-scoped MCP over stdio and Streamable HTTP, with bounded discovery,
+  scope-filtered direct typed tools, catalog/resource/prompt reads, local
+  authorization, and CLI lifecycle management;
 - PostgreSQL full-text/vector memory with explicit direct, reverse, and at
   most two-hop relation traversal;
 - four named durable background jobs: compaction, post-compaction memory
   extraction, memory governance, and memory-index refresh;
 - canonical inspection and Protocol v3 terminal observation.
 
-Configured MCP servers currently fail closed because no MCP execution adapter
-is installed in the conversation kernel. They are never silently ignored.
+Round 6 intentionally does not add durable MCP connection or request recovery.
+Host replacement reconnects from configuration. Form/private-URL elicitation,
+OAuth, MCP-backed skill activation, server-initiated Sampling/Roots, Apps/Tasks,
+and an advanced Go MCP UI remain explicit non-goals.
+Workspace-owned MCP entries remain disabled during ordinary Host startup unless
+the user explicitly passes `--trust-workspace-mcp`; merely opening a repository
+can never execute its stdio command or resolve its HTTP secret references.
 
 ## Requirements
 

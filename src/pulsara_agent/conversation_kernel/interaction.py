@@ -8,6 +8,7 @@ with the exact tool attempt (allow) or no-attempt result (deny).
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
@@ -33,6 +34,10 @@ from pulsara_agent.ports.live_agent_event import (
 )
 from pulsara_agent.conversation_kernel.vocabulary import LiveEventType
 from pulsara_agent.conversation_kernel.io import KernelSessionIO
+from pulsara_agent.conversation_kernel.interaction_arbiter import (
+    InteractionAdmissionHooks,
+    MAXIMUM_DORMANT_INTERACTION_CANDIDATES,
+)
 from pulsara_agent.conversation_kernel.execution_watchdogs import (
     KernelExecutionDeadlineFactory,
     KernelWatchdogOwner,
@@ -71,7 +76,11 @@ class _PendingToolInteraction:
     result_entry_id: str
     permission_snapshot_fingerprint: str
     future: asyncio.Future[ToolInteractionResolution]
+    admission_hooks: InteractionAdmissionHooks | None = None
+    visible: bool = False
+    discarded: bool = False
     resolving: bool = False
+    settlement_changed: asyncio.Event | None = None
 
 
 class KernelInteractionCoordinator:
@@ -97,6 +106,7 @@ class KernelInteractionCoordinator:
         self._controller_lock = Lock()
         self._controller_id: str | None = None
         self._pending: _PendingToolInteraction | None = None
+        self._dormant: deque[_PendingToolInteraction] = deque()
         self._closed = False
 
     def attach_controller(self, attachment_id: str) -> bool:
@@ -137,8 +147,11 @@ class KernelInteractionCoordinator:
         tool_call_id: str,
         tool_name: str,
         permission_snapshot: FrozenRunPermissionSnapshot,
+        admission_hooks: InteractionAdmissionHooks | None = None,
     ) -> ToolInteractionResolution:
         if not self.has_controller():
+            if admission_hooks is not None:
+                admission_hooks.discard()
             return ToolInteractionResolution(
                 "DENY",
                 "interaction:no-controller",
@@ -147,34 +160,27 @@ class KernelInteractionCoordinator:
         loop = asyncio.get_running_loop()
         async with self._lock:
             if self._closed or not self.has_controller():
+                if admission_hooks is not None:
+                    admission_hooks.discard()
                 return ToolInteractionResolution(
                     "DENY",
                     "interaction:no-controller",
                     "tool execution requires confirmation but no controller is attached",
                 )
-            if self._pending is not None:
-                raise RuntimeError("another interaction is already pending")
-            interaction_id = f"interaction:{uuid4().hex}"
-            view = CurrentInteractionView(
-                    interaction_id=interaction_id,
-                    interaction_kind="TOOL_CONFIRMATION",
-                    public_prompt=f"Allow {tool_name}?",
-                    public_options=("ALLOW", "DENY"),
-                    expires_at_utc=(
-                        datetime.now(timezone.utc)
-                        + timedelta(seconds=INTERACTION_TIMEOUT_SECONDS)
-                    ).isoformat(),
+            if len(self._dormant) + int(self._pending is not None) >= (
+                MAXIMUM_DORMANT_INTERACTION_CANDIDATES
+            ):
+                if admission_hooks is not None:
+                    admission_hooks.discard()
+                return ToolInteractionResolution(
+                    "DENY",
+                    "interaction:capacity",
+                    "tool confirmation capacity is full",
                 )
-            event = self._live_control.install_interaction(view)
-            self._offer_interaction_event(
-                event,
-                turn_id=turn_id,
-                current=view,
-                reason=None,
-            )
+            interaction_id = f"interaction:{uuid4().hex}"
             pending = _PendingToolInteraction(
                 interaction_id=interaction_id,
-                revision=event.revision,
+                revision=0,
                 turn_id=turn_id,
                 assistant_entry_id=assistant_entry_id,
                 tool_call_id=tool_call_id,
@@ -186,20 +192,23 @@ class KernelInteractionCoordinator:
                     permission_snapshot.snapshot_fingerprint
                 ),
                 future=loop.create_future(),
+                admission_hooks=admission_hooks,
+                settlement_changed=asyncio.Event(),
             )
-            self._pending = pending
+            self._dormant.append(pending)
+        await self._promote_next()
         try:
             async with asyncio.timeout(INTERACTION_TIMEOUT_SECONDS):
                 return await asyncio.shield(pending.future)
         except TimeoutError:
-            await self._abort_pending(
+            await self._abort_candidate(
                 interaction_id=interaction_id,
                 reference="interaction:expired",
                 public_message="tool confirmation expired",
             )
             return await pending.future
         except asyncio.CancelledError:
-            await self._abort_pending(
+            await self._abort_candidate(
                 interaction_id=interaction_id,
                 reference="interaction:turn-cancelled",
                 public_message="tool confirmation was cancelled",
@@ -236,6 +245,11 @@ class KernelInteractionCoordinator:
                 raise ConversationKernelConflict("interaction live authority is stale")
             if pending.resolving:
                 raise ConversationKernelConflict("interaction resolution is already active")
+            assert pending.settlement_changed is not None
+            # Each physical resolution attempt owns a fresh unsettled edge.
+            # A prior failed attempt set this event to wake detach/close; if it
+            # remains set, _abort_all would spin instead of joining this retry.
+            pending.settlement_changed.clear()
             pending.resolving = True
             kwargs = {
                 "command_id": command_id,
@@ -276,6 +290,8 @@ class KernelInteractionCoordinator:
             async with self._lock:
                 if self._pending is pending:
                     pending.resolving = False
+                    assert pending.settlement_changed is not None
+                    pending.settlement_changed.set()
             raise
         async with self._lock:
             if self._pending is not pending:
@@ -304,19 +320,82 @@ class KernelInteractionCoordinator:
             )
             if not pending.future.done():
                 pending.future.set_result(resolution)
-            return accepted
+            assert pending.settlement_changed is not None
+            pending.settlement_changed.set()
+        if decision == "DENY":
+            self._discard_hooks(pending)
+        await self._promote_next()
+        return accepted
 
     async def controller_detached(self, attachment_id: str) -> None:
         if not self.detach_controller(attachment_id):
             return
-        await self._abort_current_if_no_controller()
+        await self._abort_all(
+            reference="interaction:controller-detached",
+            public_message="tool confirmation ended because the controller detached",
+        )
+
+    async def cancel_tool_confirmations(
+        self,
+        *,
+        owner_keys: frozenset[str],
+        reference: str,
+        public_message: str,
+    ) -> None:
+        """Cancel exact process-local candidates for one capability plane.
+
+        A candidate whose durable resolution is already running remains owned by
+        that resolution.  Config replacement must not erase a canonical winner.
+        """
+
+        if not owner_keys:
+            return
+        discarded: list[_PendingToolInteraction] = []
+        async with self._lock:
+            pending = self._pending
+            if (
+                pending is not None
+                and not pending.resolving
+                and pending.admission_hooks is not None
+                and pending.admission_hooks.owner_key in owner_keys
+            ):
+                if pending.visible:
+                    try:
+                        close_event = self._live_control.close_interaction(
+                            expected_interaction_id=pending.interaction_id
+                        )
+                        self._offer_interaction_event(
+                            close_event,
+                            turn_id=pending.turn_id,
+                            current=None,
+                            reason=reference,
+                        )
+                    except RuntimeError:
+                        pass
+                self._pending = None
+                discarded.append(pending)
+            for candidate in tuple(self._dormant):
+                hooks = candidate.admission_hooks
+                if hooks is None or hooks.owner_key not in owner_keys:
+                    continue
+                self._dormant.remove(candidate)
+                discarded.append(candidate)
+            for candidate in discarded:
+                if not candidate.future.done():
+                    candidate.future.set_result(
+                        ToolInteractionResolution(
+                            "DENY", reference, public_message
+                        )
+                    )
+        for candidate in discarded:
+            self._discard_hooks(candidate)
+        await self._promote_next()
 
     async def aclose(self) -> None:
         with self._controller_lock:
             self._closed = True
             self._controller_id = None
-        await self._abort_pending(
-            interaction_id=None,
+        await self._abort_all(
             reference="interaction:host-closing",
             public_message="tool confirmation ended with the Host",
         )
@@ -324,47 +403,188 @@ class KernelInteractionCoordinator:
     async def _abort_current_if_no_controller(self) -> None:
         if self.has_controller():
             return
-        await self._abort_pending(
-            interaction_id=None,
+        await self._abort_all(
             reference="interaction:controller-detached",
             public_message="tool confirmation ended because the controller detached",
         )
 
-    async def _abort_pending(
+    async def _abort_candidate(
         self,
         *,
-        interaction_id: str | None,
+        interaction_id: str,
         reference: str,
         public_message: str,
     ) -> None:
+        discarded: _PendingToolInteraction | None = None
         async with self._lock:
             pending = self._pending
-            if pending is None or (
-                interaction_id is not None
-                and pending.interaction_id != interaction_id
-            ):
+            if pending is not None and pending.interaction_id == interaction_id:
+                if pending.resolving:
+                    return
+                if pending.visible:
+                    try:
+                        close_event = self._live_control.close_interaction(
+                            expected_interaction_id=pending.interaction_id
+                        )
+                        self._offer_interaction_event(
+                            close_event,
+                            turn_id=pending.turn_id,
+                            current=None,
+                            reason=reference,
+                        )
+                    except RuntimeError:
+                        pass
+                self._pending = None
+                discarded = pending
+            else:
+                for candidate in tuple(self._dormant):
+                    if candidate.interaction_id == interaction_id:
+                        self._dormant.remove(candidate)
+                        discarded = candidate
+                        break
+            if discarded is None:
                 return
-            if pending.resolving:
-                return
-            try:
-                close_event = self._live_control.close_interaction(
-                    expected_interaction_id=pending.interaction_id
-                )
-                self._offer_interaction_event(
-                    close_event,
-                    turn_id=pending.turn_id,
-                    current=None,
-                    reason=reference,
-                )
-            except RuntimeError:
-                pass
-            self._pending = None
+            pending = discarded
             if not pending.future.done():
                 pending.future.set_result(
                     ToolInteractionResolution(
                         "DENY", reference, public_message
                     )
                 )
+        self._discard_hooks(discarded)
+        await self._promote_next()
+
+    async def _promote_next(self) -> None:
+        """Publish exactly one FIFO head after its local admission succeeds."""
+
+        while True:
+            async with self._lock:
+                if (
+                    self._closed
+                    or not self.has_controller()
+                    or self._pending is not None
+                    or not self._dormant
+                ):
+                    return
+                candidate = self._dormant.popleft()
+                self._pending = candidate
+            try:
+                if candidate.admission_hooks is not None:
+                    candidate.admission_hooks.before_publish()
+            except BaseException as exc:
+                async with self._lock:
+                    if self._pending is candidate:
+                        self._pending = None
+                    if not candidate.future.done():
+                        candidate.future.set_result(
+                            ToolInteractionResolution(
+                                "DENY",
+                                "interaction:admission-rejected",
+                                "tool confirmation admission was rejected: "
+                                f"{type(exc).__name__}",
+                            )
+                        )
+                self._discard_hooks(candidate)
+                continue
+            discard = False
+            async with self._lock:
+                if (
+                    self._pending is not candidate
+                    or self._closed
+                    or not self.has_controller()
+                ):
+                    if self._pending is candidate:
+                        self._pending = None
+                    if not candidate.future.done():
+                        candidate.future.set_result(
+                            ToolInteractionResolution(
+                                "DENY",
+                                "interaction:owner-unavailable",
+                                "tool confirmation owner is unavailable",
+                            )
+                        )
+                    discard = True
+                else:
+                    view = CurrentInteractionView(
+                        interaction_id=candidate.interaction_id,
+                        interaction_kind="TOOL_CONFIRMATION",
+                        public_prompt=f"Allow {candidate.tool_name}?",
+                        public_options=("ALLOW", "DENY"),
+                        expires_at_utc=(
+                            datetime.now(timezone.utc)
+                            + timedelta(seconds=INTERACTION_TIMEOUT_SECONDS)
+                        ).isoformat(),
+                    )
+                    event = self._live_control.install_interaction(view)
+                    candidate.revision = event.revision
+                    candidate.visible = True
+                    self._offer_interaction_event(
+                        event,
+                        turn_id=candidate.turn_id,
+                        current=view,
+                        reason=None,
+                    )
+                    return
+            if discard:
+                self._discard_hooks(candidate)
+
+    async def _abort_all(
+        self,
+        *,
+        reference: str,
+        public_message: str,
+    ) -> None:
+        # A controller detach or Host close may race a decision transaction
+        # after it has started.  That transaction owns a possible canonical
+        # winner and therefore cannot be erased or have its MCP admission
+        # permit discarded.  Wait for its process-local settlement, then make
+        # another pass; a failed transaction resets ``resolving`` and can be
+        # cancelled normally, while a FULL winner removes itself.
+        while True:
+            settlement_changed: asyncio.Event | None = None
+            async with self._lock:
+                candidates = list(self._dormant)
+                self._dormant.clear()
+                pending = self._pending
+                if pending is not None:
+                    if pending.resolving:
+                        settlement_changed = pending.settlement_changed
+                    else:
+                        candidates.insert(0, pending)
+                        if pending.visible:
+                            try:
+                                close_event = self._live_control.close_interaction(
+                                    expected_interaction_id=pending.interaction_id
+                                )
+                                self._offer_interaction_event(
+                                    close_event,
+                                    turn_id=pending.turn_id,
+                                    current=None,
+                                    reason=reference,
+                                )
+                            except RuntimeError:
+                                pass
+                        self._pending = None
+                for candidate in candidates:
+                    if not candidate.future.done():
+                        candidate.future.set_result(
+                            ToolInteractionResolution(
+                                "DENY", reference, public_message
+                            )
+                        )
+            for candidate in candidates:
+                self._discard_hooks(candidate)
+            if settlement_changed is None:
+                return
+            await asyncio.shield(settlement_changed.wait())
+
+    @staticmethod
+    def _discard_hooks(candidate: _PendingToolInteraction) -> None:
+        if candidate.discarded:
+            return
+        candidate.discarded = True
+        if candidate.admission_hooks is not None:
+            candidate.admission_hooks.discard()
 
     def _offer_interaction_event(
         self,

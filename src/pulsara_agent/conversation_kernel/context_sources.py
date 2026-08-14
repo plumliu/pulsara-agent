@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone, tzinfo
 import json
 from pathlib import Path
-from typing import Callable, Protocol
+from typing import TYPE_CHECKING, Callable, Protocol
 
 from pulsara_agent.capability.provider import CapabilityProjectionOutput
 from pulsara_agent.capability.types import CapabilityDiagnostic
@@ -38,9 +38,16 @@ from pulsara_agent.model_input.contracts import (
 from pulsara_agent.primitives.context import context_fingerprint
 from pulsara_agent.primitives.permission import preset_permission_payload
 
+if TYPE_CHECKING:
+    from pulsara_agent.conversation_kernel.mcp.contracts import McpCatalogSnapshot
+
 
 class TerminalCurrentCwdSnapshotPort(Protocol):
     def snapshot_terminal_cwd(self) -> Path: ...
+
+
+class McpCatalogSnapshotPort(Protocol):
+    def catalog_snapshot(self) -> "McpCatalogSnapshot": ...
 
 
 class ContextSourceCollectorPort(Protocol):
@@ -205,6 +212,22 @@ _BINDINGS = (
         ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
     ),
     _SourceBinding(
+        ContextSourceKind.MCP_CATALOG,
+        "pulsara.mcp-catalog.v1",
+        ContextChannel.RUNTIME_OBSERVATION,
+        ContextTrustClass.UNTRUSTED_OBSERVATION,
+        ContextBudgetClass.IMPORTANT,
+        55,
+        35,
+        (
+            ContextRenderMode.FULL,
+            ContextRenderMode.COMPACT,
+            ContextRenderMode.REF_ONLY,
+        ),
+        "pulsara.mcp-catalog-collector.v1",
+        ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
+    ),
+    _SourceBinding(
         ContextSourceKind.ACTIVE_SKILL,
         "pulsara.active-skill.v1",
         ContextChannel.RUNTIME_OBSERVATION,
@@ -253,6 +276,7 @@ class KernelContextSourceCollector:
         capability_composer: KernelCapabilityComposer,
         base_system_prompt: str,
         display_timezone: tzinfo,
+        mcp_catalog: McpCatalogSnapshotPort | None = None,
         clock: Callable[[], datetime] | None = None,
         registry: ContextSourceRegistry | None = None,
     ) -> None:
@@ -266,6 +290,7 @@ class KernelContextSourceCollector:
         self._workspace_root = root
         self._terminal_cwd = terminal_cwd
         self._capability = capability_composer
+        self._mcp_catalog = mcp_catalog
         self._base = (
             base_system_prompt
             + "\n\n"
@@ -415,6 +440,32 @@ class KernelContextSourceCollector:
         capability_projection_input = self._capability.freeze_projection_input(
             available_tool_names=tool_names
         )
+        if self._mcp_catalog is None:
+            absent.append(
+                self._absent(
+                    ContextSourceKind.MCP_CATALOG,
+                    ContextSourceAbsenceKind.NOT_APPLICABLE,
+                )
+            )
+        else:
+            catalog = self._mcp_catalog.catalog_snapshot().for_scope(
+                canonical_facts.canonical_input.identity.conversation_scope_kind
+            )
+            if catalog.servers:
+                candidates.append(
+                    self._candidate(
+                        ContextSourceKind.MCP_CATALOG,
+                        _render_mcp_catalog(catalog),
+                        domain_identity=catalog.semantic_fingerprint,
+                    )
+                )
+            else:
+                absent.append(
+                    self._absent(
+                        ContextSourceKind.MCP_CATALOG,
+                        ContextSourceAbsenceKind.NOT_APPLICABLE,
+                    )
+                )
         fingerprint = context_fingerprint(
             "pulsara:frozen-non-trigger-context-sources:v1",
             {
@@ -924,6 +975,102 @@ def _public_capability_diagnostics(
     return tuple(result)
 
 
+def _render_mcp_catalog(catalog: "McpCatalogSnapshot") -> tuple[str, str, str]:
+    servers = [
+        {
+            "server_id": item.server_id,
+            "display_name": item.display_name,
+            "status": item.status.value,
+            "required": item.required,
+            "tools": item.bounded_tool_name_overview,
+            "resource_count": item.resource_count,
+            "resource_template_count": item.resource_template_count,
+            "prompt_count": item.prompt_count,
+            "instructions": item.sanitized_instructions,
+            "failure_category": item.stable_failure_category,
+        }
+        for item in catalog.servers
+    ]
+    full = _bounded_mcp_catalog_json(
+        base={
+            "source": "MCP_CATALOG",
+            "trust": "UNTRUSTED_OBSERVATION",
+            "permission_note": (
+                "Availability does not grant physical permission; local run policy "
+                "and the exact execution generation remain authoritative."
+            ),
+        },
+        servers=servers,
+        maximum_bytes=32 * 1024,
+    )
+    compact = _bounded_mcp_catalog_json(
+        base={
+            "source": "MCP_CATALOG",
+            "trust": "UNTRUSTED_OBSERVATION",
+        },
+        servers=[
+            {
+                "server_id": item["server_id"],
+                "status": item["status"],
+                "tools": item["tools"],
+                "resource_count": item["resource_count"],
+                "prompt_count": item["prompt_count"],
+            }
+            for item in servers
+        ],
+        maximum_bytes=8 * 1024,
+    )
+    reference = _bounded_mcp_catalog_json(
+        base={
+            "source": "MCP_CATALOG",
+            "trust": "UNTRUSTED_OBSERVATION",
+            "catalog_fingerprint": catalog.semantic_fingerprint,
+            "read_more": "Call list_mcp_servers for the bounded current catalog.",
+        },
+        servers=[
+            {"server_id": item["server_id"], "status": item["status"]}
+            for item in servers
+        ],
+        maximum_bytes=2 * 1024,
+    )
+    return full, compact, reference
+
+
+def _bounded_catalog_json(value: object, maximum_bytes: int) -> str:
+    text = json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+    if len(text.encode("utf-8")) > maximum_bytes:
+        raise ValueError("MCP catalog context source exceeds its bound")
+    return text
+
+
+def _bounded_mcp_catalog_json(
+    *,
+    base: dict[str, object],
+    servers: list[dict[str, object]],
+    maximum_bytes: int,
+) -> str:
+    included: list[dict[str, object]] = []
+    for server in servers:
+        candidate = {
+            **base,
+            "servers": [*included, server],
+            "omitted_server_count": len(servers) - len(included) - 1,
+        }
+        encoded = json.dumps(
+            candidate, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        if len(encoded) > maximum_bytes:
+            break
+        included.append(server)
+    final = {**base, "servers": included}
+    omitted = len(servers) - len(included)
+    if omitted:
+        final["omitted_server_count"] = omitted
+    return _bounded_catalog_json(final, maximum_bytes)
+
+
 def _freeze_display_timezone(value: tzinfo) -> tuple[tzinfo, str]:
     """Keep IANA rules, but freeze an unkeyed zone to its opening offset."""
 
@@ -948,5 +1095,6 @@ __all__ = [
     "ContextSourceCollectorPort",
     "ContextSourceRegistry",
     "KernelContextSourceCollector",
+    "McpCatalogSnapshotPort",
     "TerminalCurrentCwdSnapshotPort",
 ]

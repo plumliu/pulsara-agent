@@ -82,7 +82,13 @@ _LONG_HORIZON_POLICY_KIND_BY_NAME = {
     "memory_explain": BuiltinToolLongHorizonPolicyKind.EVIDENCE_HYDRATION,
     "memory_get": BuiltinToolLongHorizonPolicyKind.EVIDENCE_HYDRATION,
     "memory_search": BuiltinToolLongHorizonPolicyKind.EVIDENCE_ACQUISITION,
+    "get_mcp_prompt": BuiltinToolLongHorizonPolicyKind.EVIDENCE_ACQUISITION,
+    "list_mcp_prompts": BuiltinToolLongHorizonPolicyKind.EVIDENCE_HYDRATION,
+    "list_mcp_resource_templates": BuiltinToolLongHorizonPolicyKind.EVIDENCE_HYDRATION,
+    "list_mcp_resources": BuiltinToolLongHorizonPolicyKind.EVIDENCE_HYDRATION,
+    "list_mcp_servers": BuiltinToolLongHorizonPolicyKind.EVIDENCE_HYDRATION,
     "read_file": BuiltinToolLongHorizonPolicyKind.EVIDENCE_ACQUISITION,
+    "read_mcp_resource": BuiltinToolLongHorizonPolicyKind.EVIDENCE_ACQUISITION,
     "remember_action_boundary": BuiltinToolLongHorizonPolicyKind.SYNTHESIS_MUTATION,
     "remember_claim": BuiltinToolLongHorizonPolicyKind.SYNTHESIS_MUTATION,
     "remember_decision": BuiltinToolLongHorizonPolicyKind.SYNTHESIS_MUTATION,
@@ -350,6 +356,94 @@ _BUILTIN_DESCRIPTORS: dict[str, CapabilityDescriptor] = {
         is_concurrency_safe=True,
         permission_category="artifact_read",
         artifact_mode=ToolArtifactMode.NEVER,
+    ),
+    "list_mcp_servers": _descriptor(
+        name="list_mcp_servers",
+        description=(
+            "List the bounded, scope-visible MCP server catalog. This is a "
+            "read-only local snapshot and never connects or refreshes a server."
+        ),
+        input_schema=object_schema(properties={}, required=[]),
+        is_read_only=True,
+        is_concurrency_safe=True,
+        permission_category="mcp_read",
+    ),
+    "list_mcp_resources": _descriptor(
+        name="list_mcp_resources",
+        description="List bounded MCP resource descriptors from the current exact catalog snapshot.",
+        input_schema=object_schema(
+            properties={
+                "server_id": {"type": "string"},
+                "cursor": {"type": "string"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50},
+            },
+            required=[],
+        ),
+        is_read_only=True,
+        is_concurrency_safe=True,
+        permission_category="mcp_read",
+    ),
+    "list_mcp_resource_templates": _descriptor(
+        name="list_mcp_resource_templates",
+        description="List bounded MCP resource-template descriptors from the current exact catalog snapshot.",
+        input_schema=object_schema(
+            properties={
+                "server_id": {"type": "string"},
+                "cursor": {"type": "string"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50},
+            },
+            required=[],
+        ),
+        is_read_only=True,
+        is_concurrency_safe=True,
+        permission_category="mcp_read",
+    ),
+    "read_mcp_resource": _descriptor(
+        name="read_mcp_resource",
+        description=(
+            "Read one complete bounded MCP resource from the exact current server generation. "
+            "Remote offset/limit is intentionally unsupported; large accepted content uses artifact_read."
+        ),
+        input_schema=object_schema(
+            properties={
+                "server_id": {"type": "string"},
+                "uri": {"type": "string", "maxLength": 32768},
+            },
+            required=["server_id", "uri"],
+        ),
+        is_read_only=True,
+        is_concurrency_safe=False,
+        permission_category="mcp_read",
+    ),
+    "list_mcp_prompts": _descriptor(
+        name="list_mcp_prompts",
+        description="List bounded MCP prompt descriptors from the current exact catalog snapshot.",
+        input_schema=object_schema(
+            properties={
+                "server_id": {"type": "string"},
+                "cursor": {"type": "string"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50},
+            },
+            required=[],
+        ),
+        is_read_only=True,
+        is_concurrency_safe=True,
+        permission_category="mcp_read",
+    ),
+    "get_mcp_prompt": _descriptor(
+        name="get_mcp_prompt",
+        description="Render one MCP prompt using its exact discovered argument contract as untrusted observation content.",
+        input_schema=object_schema(
+            properties={
+                "server_id": {"type": "string"},
+                "prompt_name": {"type": "string"},
+                "arguments": {"type": "object", "additionalProperties": {"type": "string"}},
+            },
+            required=["server_id", "prompt_name"],
+        ),
+        is_read_only=True,
+        is_concurrency_safe=False,
+        permission_category="mcp_read",
     ),
     "read_file": _descriptor(
         name="read_file",
@@ -841,6 +935,7 @@ class BuiltinToolBindingKind(StrEnum):
     TERMINAL_MONITOR = "terminal_monitor"
     TODO_LOCAL_STATE = "todo_local_state"
     SUBAGENT_CONTROL = "subagent_control"
+    MCP_CATALOG = "mcp_catalog"
 
 
 class BuiltinToolAvailabilityKind(StrEnum):
@@ -852,6 +947,7 @@ class BuiltinToolAvailabilityKind(StrEnum):
     REQUIRES_TERMINAL_PORTS = "requires_terminal_ports"
     REQUIRES_MAIN_SUBAGENT_CONTROL = "requires_main_subagent_control"
     REQUIRES_CHILD_REPORT_CONTROL = "requires_child_report_control"
+    REQUIRES_MCP_PORT = "requires_mcp_port"
 
 
 class BuiltinTerminalPermissionRuleKind(StrEnum):
@@ -917,6 +1013,7 @@ class BuiltinToolCatalogEntry:
         "subagent_parent",
         "subagent_child",
         "local_state",
+        "mcp",
     ]
     entry_fingerprint: str
 
@@ -1051,6 +1148,20 @@ def _catalog_shape(name: str):
             BuiltinToolAvailabilityKind.REQUIRES_ARTIFACT_READ_PORT,
             both,
             "artifact",
+        )
+    if name in {
+        "get_mcp_prompt",
+        "list_mcp_prompts",
+        "list_mcp_resource_templates",
+        "list_mcp_resources",
+        "list_mcp_servers",
+        "read_mcp_resource",
+    }:
+        return (
+            BuiltinToolBindingKind.MCP_CATALOG,
+            BuiltinToolAvailabilityKind.REQUIRES_MCP_PORT,
+            both,
+            "mcp",
         )
     if name in _FILESYSTEM:
         return (
@@ -1196,7 +1307,17 @@ def _recovery_contract(name: str) -> BuiltinToolRecoveryContract:
         severity = "terminal"
     elif name in {"edit_file", "write_file"}:
         severity = "bounded_write"
-    elif name in {"artifact_read", "read_file", "search_files"}:
+    elif name in {
+        "artifact_read",
+        "get_mcp_prompt",
+        "list_mcp_prompts",
+        "list_mcp_resource_templates",
+        "list_mcp_resources",
+        "list_mcp_servers",
+        "read_file",
+        "read_mcp_resource",
+        "search_files",
+    }:
         severity = "read_only"
     else:
         severity = "unknown_effect"
