@@ -19,7 +19,6 @@ from pulsara_agent.conversation_kernel.extensions import (
     ExtensionRegistrationRequest,
 )
 from pulsara_agent.conversation_kernel.vocabulary import CommittedEventType
-from pulsara_agent.host import HostCore
 from pulsara_agent.workspace_identity import HostWorkspaceInput
 from pulsara_agent.ports.live_agent_event import (
     TextDeltaPayload,
@@ -119,8 +118,7 @@ def test_stage2_public_host_fresh_open_run_and_canonical_rehydrate(
     )
 
     async def scenario() -> None:
-        assert HostCore is KernelHostCore
-        core = HostCore.production(
+        core = KernelHostCore.production(
             settings=settings,
             authenticated_first_party_extension_ids=frozenset({"extension:dogfood"}),
         )

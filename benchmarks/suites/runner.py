@@ -51,13 +51,13 @@ from pulsara_agent.conversation_kernel.query import (
     CanonicalConversationQuery,
     CanonicalInspectorView,
 )
-from pulsara_agent.host import HostWorkspaceInput
 from pulsara_agent.llm import ModelRole
 from pulsara_agent.mcp_config import load_mcp_server_configs
 from pulsara_agent.settings import PulsaraSettings
 from pulsara_agent.storage.schema_verification_service import (
     acquire_verified_postgres_access_sync,
 )
+from pulsara_agent.workspace_identity import HostWorkspaceInput
 
 
 ProgressSink = Callable[[str], None]

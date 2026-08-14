@@ -267,13 +267,13 @@ def test_stage2_product_contract_survives_the_clean_migration_universe() -> None
 
 def test_stage2_ordinary_host_and_terminal_binary_select_only_kernel_v3() -> None:
     from pulsara_agent.conversation_kernel.host import KernelHostCore
-    from pulsara_agent.host import HostCore
     from pulsara_agent.terminal_client import launch_terminal_kernel_client as public
     from pulsara_agent.terminal_client.v3_launcher import (
         launch_terminal_kernel_client,
     )
 
-    assert HostCore is KernelHostCore
+    assert KernelHostCore.__module__ == "pulsara_agent.conversation_kernel.host"
+    assert not (ROOT / "src/pulsara_agent/host").exists()
     assert public is launch_terminal_kernel_client
     cli = (ROOT / "src/pulsara_agent/cli.py").read_text(encoding="utf-8")
     assert "result = asyncio.run(_kernel_host_run(args))" in cli
