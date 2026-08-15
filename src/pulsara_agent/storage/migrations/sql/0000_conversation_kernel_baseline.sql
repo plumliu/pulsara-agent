@@ -20,6 +20,9 @@ REVOKE ALL ON SCHEMA pulsara_v3 FROM PUBLIC;
 CREATE TABLE pulsara_v3.sessions (
     id text PRIMARY KEY,
     workspace_id text NOT NULL,
+    memory_domain_id text NOT NULL CHECK (
+        memory_domain_id ~ '^[a-z0-9][a-z0-9._-]{0,127}$'
+    ),
     lifecycle text NOT NULL CHECK (lifecycle IN ('OPEN', 'CLOSED')),
     writer_generation bigint NOT NULL CHECK (writer_generation >= 1),
     writer_lease_owner_id text,
@@ -30,6 +33,7 @@ CREATE TABLE pulsara_v3.sessions (
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     UNIQUE (id, workspace_id),
+    UNIQUE (id, workspace_id, memory_domain_id),
     CHECK ((writer_lease_owner_id IS NULL) = (writer_lease_expires_at IS NULL))
 );
 
@@ -485,6 +489,10 @@ CREATE TABLE pulsara_v3.tool_results (
             'BLOB_PUBLICATION_FAILED',
             'BLOB_PUBLICATION_UNCONFIRMED'
         )),
+    model_visible_memory_fact_ids text[] NOT NULL DEFAULT '{}'::text[] CHECK (
+        cardinality(model_visible_memory_fact_ids) <= 50
+        AND octet_length(array_to_json(model_visible_memory_fact_ids)::text) <= 8192
+    ),
     accepted_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     UNIQUE (session_id, id),
     UNIQUE (session_id, tool_call_entry_id, tool_call_id),
@@ -975,8 +983,7 @@ CREATE TABLE pulsara_v3.durable_jobs (
     origin_session_id text,
     origin_command_id text,
     handler_type text NOT NULL CHECK (handler_type IN (
-        'BACKGROUND_COMPACTION', 'POST_COMPACTION_MEMORY_EXTRACTION',
-        'MEMORY_GOVERNANCE', 'MEMORY_INDEX_REFRESH'
+        'BACKGROUND_COMPACTION'
     )),
     intent_schema_version text NOT NULL,
     intent_digest text NOT NULL CHECK (intent_digest ~ '^sha256:[0-9a-f]{64}$'),
@@ -1005,9 +1012,7 @@ CREATE TABLE pulsara_v3.durable_jobs (
     FOREIGN KEY (origin_session_id) REFERENCES pulsara_v3.sessions (id) ON DELETE RESTRICT,
     FOREIGN KEY (result_blob_id, workspace_id)
         REFERENCES pulsara_v3.blobs (id, workspace_id) ON DELETE RESTRICT,
-    CHECK ((handler_type IN (
-        'BACKGROUND_COMPACTION', 'POST_COMPACTION_MEMORY_EXTRACTION', 'MEMORY_GOVERNANCE'
-    )) = (provider_input_token_limit_per_attempt IS NOT NULL
+    CHECK ((handler_type = 'BACKGROUND_COMPACTION') = (provider_input_token_limit_per_attempt IS NOT NULL
         AND provider_output_token_limit_per_attempt IS NOT NULL)),
     CHECK (provider_input_token_limit_per_attempt IS NULL OR provider_input_token_limit_per_attempt > 0),
     CHECK (provider_output_token_limit_per_attempt IS NULL OR provider_output_token_limit_per_attempt > 0),
@@ -1062,98 +1067,561 @@ ALTER TABLE pulsara_v3.transcript_entries ADD CONSTRAINT transcript_entries_sour
 
 CREATE TABLE pulsara_v3.memory_candidates (
     id text PRIMARY KEY,
-    workspace_id text NOT NULL,
-    origin_session_id text,
-    source_entry_id text,
-    proposal_kind text NOT NULL CHECK (proposal_kind IN (
-        'FACT', 'PREFERENCE', 'RELATION', 'CORRECTION', 'LIFECYCLE'
+    memory_domain_id text NOT NULL,
+    origin_workspace_id text NOT NULL,
+    origin_session_id text NOT NULL,
+    producer_kind text NOT NULL CHECK (producer_kind IN (
+        'MAIN_AGENT_REMEMBER', 'CHEAP_HINT_REFLECTION'
     )),
-    semantic_digest text NOT NULL CHECK (semantic_digest ~ '^sha256:[0-9a-f]{64}$'),
-    proposal_payload jsonb NOT NULL,
-    status text NOT NULL CHECK (status IN ('PENDING', 'DECIDED')),
+    producer_entry_id text,
+    producer_tool_call_id text,
+    trigger_user_entry_id text,
+    producer_candidate_ordinal integer,
+    scope_kind text NOT NULL CHECK (scope_kind IN ('USER', 'WORKSPACE')),
+    scope_id text NOT NULL,
+    kind_hint text NOT NULL CHECK (kind_hint IN (
+        'AUTO', 'FACT', 'USER_PROFILE', 'RESPONSE_PREFERENCE',
+        'ACTION_RULE', 'DECISION'
+    )),
+    statement text NOT NULL CHECK (
+        octet_length(statement) BETWEEN 1 AND 8192
+    ),
+    applies_when text CHECK (
+        applies_when IS NULL OR octet_length(applies_when) BETWEEN 1 AND 4096
+    ),
+    do_not_apply_when text[] NOT NULL DEFAULT '{}'::text[] CHECK (
+        cardinality(do_not_apply_when) <= 8
+    ),
+    candidate_acceptance_digest text NOT NULL UNIQUE CHECK (
+        candidate_acceptance_digest ~ '^sha256:[0-9a-f]{64}$'
+    ),
+    model_visible_memory_provenance_disposition text NOT NULL CHECK (
+        model_visible_memory_provenance_disposition IN ('COMPLETE', 'OVERFLOW')
+    ),
+    model_visible_memory_fact_ids text[] NOT NULL DEFAULT '{}'::text[] CHECK (
+        cardinality(model_visible_memory_fact_ids) <= 128
+        AND octet_length(array_to_json(model_visible_memory_fact_ids)::text) <= 16384
+        AND (model_visible_memory_provenance_disposition = 'COMPLETE'
+             OR cardinality(model_visible_memory_fact_ids) = 0)
+    ),
+    status text NOT NULL CHECK (status IN (
+        'PENDING', 'PROCESSING', 'ACCEPTED', 'APPLIED_TO_EXISTING',
+        'SKIPPED', 'ABANDONED'
+    )),
+    decision_kind text CHECK (decision_kind IN (
+        'SKIP', 'ACCEPT', 'ACCEPT_AND_SUPERSEDE', 'ACCEPT_AND_CONTRADICT'
+    )),
+    final_kind text CHECK (final_kind IN (
+        'FACT', 'USER_PROFILE', 'RESPONSE_PREFERENCE', 'ACTION_RULE', 'DECISION'
+    )),
+    decision_reason_code text CHECK (decision_reason_code IN (
+        'DUPLICATE', 'TEMPORARY_OR_EPHEMERAL', 'LOW_VALUE',
+        'MULTI_ATOM_STATEMENT', 'USER_PROFILE_SCOPE_OR_KIND_MISMATCH',
+        'UNSAFE_RESPONSE_PREFERENCE', 'UNSUPPORTED_STRUCTURE',
+        'RECALLED_MEMORY_ECHO', 'MODEL_VISIBLE_MEMORY_PROVENANCE_OVERFLOW',
+        'RESPONSE_PREFERENCE_CAPACITY_EXCEEDED',
+        'SKIPPED_DUPLICATE', 'SKIPPED_DUPLICATE_BASIS_UNAPPLIED',
+        'SKIPPED_DUPLICATE_RELATION_ALREADY_PRESENT',
+        'ABANDONED_GOVERNANCE_FAILURE', 'ABANDONED_INVALID_OUTPUT',
+        'ABANDONED_KIND_CONFLICT', 'ABANDONED_REFERENCE_DRIFT',
+        'ABANDONED_RELATION_CONTRACT_CONFLICT', 'ABANDONED_TARGET_DRIFT',
+        'ABANDONED_RETRIEVAL_INPUT_UNSUPPORTED'
+    )),
+    decision_public_summary text CHECK (
+        decision_public_summary IS NULL OR octet_length(decision_public_summary) <= 2048
+    ),
+    related_target_fact_id text,
+    duplicate_winner_fact_id text,
+    accepted_fact_id text,
+    applied_existing_fact_id text,
+    processing_started_at timestamptz,
+    decided_at timestamptz,
+    accepted_fact_at timestamptz,
     accepted_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-    UNIQUE (origin_session_id, id),
-    FOREIGN KEY (origin_session_id, source_entry_id)
-        REFERENCES pulsara_v3.transcript_entries (session_id, id) ON DELETE RESTRICT
+    UNIQUE (id, origin_session_id),
+    UNIQUE (id, memory_domain_id),
+    UNIQUE (id, memory_domain_id, scope_kind, scope_id),
+    UNIQUE (id, accepted_fact_id),
+    FOREIGN KEY (origin_session_id, origin_workspace_id, memory_domain_id)
+        REFERENCES pulsara_v3.sessions (id, workspace_id, memory_domain_id)
+        ON DELETE RESTRICT,
+    FOREIGN KEY (origin_session_id, producer_entry_id)
+        REFERENCES pulsara_v3.transcript_entries (session_id, id) ON DELETE RESTRICT,
+    FOREIGN KEY (origin_session_id, producer_entry_id, producer_tool_call_id)
+        REFERENCES pulsara_v3.assistant_message_blocks (
+            session_id, assistant_entry_id, tool_call_id
+        ) ON DELETE RESTRICT,
+    FOREIGN KEY (origin_session_id, trigger_user_entry_id)
+        REFERENCES pulsara_v3.transcript_entries (session_id, id) ON DELETE RESTRICT,
+    CHECK (
+        (producer_kind = 'MAIN_AGENT_REMEMBER'
+            AND producer_entry_id IS NOT NULL
+            AND producer_tool_call_id IS NOT NULL
+            AND trigger_user_entry_id IS NULL
+            AND producer_candidate_ordinal IS NULL)
+        OR
+        (producer_kind = 'CHEAP_HINT_REFLECTION'
+            AND producer_entry_id IS NULL
+            AND producer_tool_call_id IS NULL
+            AND trigger_user_entry_id IS NOT NULL
+            AND producer_candidate_ordinal BETWEEN 0 AND 3)
+    ),
+    CHECK (
+        (scope_kind = 'USER' AND scope_id = 'ctx:user') OR
+        (scope_kind = 'WORKSPACE'
+            AND scope_id = origin_workspace_id
+            AND scope_id ~ '^ctx:workspace/[a-z0-9][a-z0-9._-]{0,127}$')
+    ),
+    CHECK (kind_hint <> 'USER_PROFILE' OR scope_kind = 'USER'),
+    CHECK (
+        (status = 'PENDING' AND processing_started_at IS NULL AND decided_at IS NULL
+            AND decision_kind IS NULL AND final_kind IS NULL
+            AND decision_reason_code IS NULL AND decision_public_summary IS NULL
+            AND related_target_fact_id IS NULL AND duplicate_winner_fact_id IS NULL
+            AND accepted_fact_id IS NULL AND accepted_fact_at IS NULL
+            AND applied_existing_fact_id IS NULL)
+        OR
+        (status = 'PROCESSING' AND processing_started_at IS NOT NULL AND decided_at IS NULL
+            AND decision_kind IS NULL AND final_kind IS NULL
+            AND decision_reason_code IS NULL AND decision_public_summary IS NULL
+            AND related_target_fact_id IS NULL AND duplicate_winner_fact_id IS NULL
+            AND accepted_fact_id IS NULL AND accepted_fact_at IS NULL
+            AND applied_existing_fact_id IS NULL)
+        OR
+        (status = 'ACCEPTED' AND processing_started_at IS NOT NULL AND decided_at IS NOT NULL
+            AND decision_kind IN ('ACCEPT', 'ACCEPT_AND_SUPERSEDE', 'ACCEPT_AND_CONTRADICT')
+            AND final_kind IS NOT NULL AND accepted_fact_id IS NOT NULL
+            AND accepted_fact_at IS NOT NULL AND applied_existing_fact_id IS NULL
+            AND decision_reason_code IS NULL AND duplicate_winner_fact_id IS NULL
+            AND ((decision_kind = 'ACCEPT' AND related_target_fact_id IS NULL)
+                OR (decision_kind IN ('ACCEPT_AND_SUPERSEDE', 'ACCEPT_AND_CONTRADICT')
+                    AND related_target_fact_id IS NOT NULL)))
+        OR
+        (status = 'APPLIED_TO_EXISTING' AND processing_started_at IS NOT NULL
+            AND decided_at IS NOT NULL AND decision_kind IN (
+                'ACCEPT_AND_SUPERSEDE', 'ACCEPT_AND_CONTRADICT'
+            ) AND final_kind IS NOT NULL AND accepted_fact_id IS NULL
+            AND accepted_fact_at IS NULL AND applied_existing_fact_id IS NOT NULL
+            AND related_target_fact_id IS NOT NULL
+            AND decision_reason_code IS NULL AND duplicate_winner_fact_id IS NULL)
+        OR
+        (status = 'SKIPPED' AND processing_started_at IS NOT NULL
+            AND decided_at IS NOT NULL AND decision_kind = 'SKIP'
+            AND decision_reason_code IS NOT NULL AND final_kind IS NULL
+            AND accepted_fact_id IS NULL AND accepted_fact_at IS NULL
+            AND applied_existing_fact_id IS NULL
+            AND ((decision_reason_code IN (
+                    'SKIPPED_DUPLICATE', 'SKIPPED_DUPLICATE_BASIS_UNAPPLIED'
+                ) AND duplicate_winner_fact_id IS NOT NULL
+                AND related_target_fact_id IS NULL)
+              OR (decision_reason_code = 'SKIPPED_DUPLICATE_RELATION_ALREADY_PRESENT'
+                AND duplicate_winner_fact_id IS NOT NULL
+                AND related_target_fact_id IS NOT NULL)
+              OR (decision_reason_code NOT LIKE 'SKIPPED_DUPLICATE%'
+                AND duplicate_winner_fact_id IS NULL
+                AND related_target_fact_id IS NULL)))
+        OR
+        (status = 'ABANDONED' AND processing_started_at IS NOT NULL
+            AND decided_at IS NOT NULL AND decision_kind = 'SKIP'
+            AND decision_reason_code IS NOT NULL AND final_kind IS NULL
+            AND related_target_fact_id IS NULL AND duplicate_winner_fact_id IS NULL
+            AND accepted_fact_id IS NULL AND accepted_fact_at IS NULL
+            AND applied_existing_fact_id IS NULL)
+    )
 );
 
-CREATE TABLE pulsara_v3.memory_governance_decisions (
-    id text PRIMARY KEY,
-    candidate_id text NOT NULL UNIQUE,
-    job_id text NOT NULL,
-    decision text NOT NULL CHECK (decision IN (
-        'SKIP', 'SUBMIT', 'CORRECT', 'MERGE', 'SUPERSEDE', 'CONTRADICT'
+CREATE TABLE pulsara_v3.memory_candidate_tool_result_refs (
+    candidate_id text NOT NULL,
+    origin_session_id text NOT NULL,
+    tool_result_id text NOT NULL,
+    ordinal integer NOT NULL CHECK (ordinal BETWEEN 0 AND 7),
+    evidence_kind text NOT NULL CHECK (evidence_kind IN (
+        'PRIMARY_OBSERVATION', 'MEMORY_READ_EXPOSURE'
     )),
-    lineage_payload jsonb NOT NULL,
-    accepted_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-    FOREIGN KEY (candidate_id) REFERENCES pulsara_v3.memory_candidates (id) ON DELETE RESTRICT,
-    FOREIGN KEY (job_id) REFERENCES pulsara_v3.durable_jobs (id) ON DELETE RESTRICT
+    citation_visibility text NOT NULL CHECK (citation_visibility IN (
+        'USER_SAFE', 'WORKSPACE_BOUND'
+    )),
+    PRIMARY KEY (candidate_id, ordinal),
+    UNIQUE (candidate_id, tool_result_id),
+    FOREIGN KEY (candidate_id, origin_session_id)
+        REFERENCES pulsara_v3.memory_candidates (id, origin_session_id) ON DELETE RESTRICT,
+    FOREIGN KEY (origin_session_id, tool_result_id)
+        REFERENCES pulsara_v3.tool_results (session_id, id) ON DELETE RESTRICT
 );
 
 CREATE TABLE pulsara_v3.memory_facts (
     id text PRIMARY KEY,
-    workspace_id text NOT NULL,
-    governance_decision_id text NOT NULL UNIQUE,
-    lifecycle text NOT NULL CHECK (lifecycle IN ('ACTIVE', 'SUPERSEDED', 'STALE')),
-    fact_kind text NOT NULL,
-    fact_payload jsonb NOT NULL,
-    semantic_digest text NOT NULL CHECK (semantic_digest ~ '^sha256:[0-9a-f]{64}$'),
+    memory_domain_id text NOT NULL,
+    scope_kind text NOT NULL CHECK (scope_kind IN ('USER', 'WORKSPACE')),
+    scope_id text NOT NULL,
+    source_candidate_id text NOT NULL UNIQUE,
+    lifecycle text NOT NULL CHECK (lifecycle IN ('ACTIVE', 'SUPERSEDED')),
+    fact_kind text NOT NULL CHECK (fact_kind IN (
+        'FACT', 'USER_PROFILE', 'RESPONSE_PREFERENCE', 'ACTION_RULE', 'DECISION'
+    )),
+    statement text NOT NULL CHECK (octet_length(statement) BETWEEN 1 AND 8192),
+    applies_when text CHECK (
+        applies_when IS NULL OR octet_length(applies_when) BETWEEN 1 AND 4096
+    ),
+    do_not_apply_when text[] NOT NULL DEFAULT '{}'::text[] CHECK (
+        cardinality(do_not_apply_when) <= 8
+    ),
+    fact_semantic_digest text NOT NULL CHECK (
+        fact_semantic_digest ~ '^sha256:[0-9a-f]{64}$'
+    ),
     accepted_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-    UNIQUE (workspace_id, id),
-    FOREIGN KEY (governance_decision_id)
-        REFERENCES pulsara_v3.memory_governance_decisions (id) ON DELETE RESTRICT
+    search_contract_id text NOT NULL CHECK (
+        search_contract_id = 'pulsara.memory-retrieval-tokenizer'
+    ),
+    search_contract_version integer NOT NULL CHECK (search_contract_version = 2),
+    search_terms text[] NOT NULL CHECK (
+        cardinality(search_terms) <= 256
+        AND octet_length(array_to_json(search_terms)::text) <= 16384
+    ),
+    search_document tsvector NOT NULL,
+    UNIQUE (memory_domain_id, id),
+    UNIQUE (memory_domain_id, scope_kind, scope_id, id),
+    UNIQUE (source_candidate_id, id),
+    FOREIGN KEY (source_candidate_id, id)
+        REFERENCES pulsara_v3.memory_candidates (id, accepted_fact_id)
+        ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+    CHECK (
+        (scope_kind = 'USER' AND scope_id = 'ctx:user') OR
+        (scope_kind = 'WORKSPACE' AND scope_id ~ '^ctx:workspace/[a-z0-9][a-z0-9._-]{0,127}$')
+    ),
+    CHECK (fact_kind <> 'USER_PROFILE' OR scope_kind = 'USER'),
+    CHECK (fact_kind <> 'RESPONSE_PREFERENCE' OR octet_length(statement) <= 2048),
+    CHECK (
+        (fact_kind = 'ACTION_RULE' AND applies_when IS NOT NULL)
+        OR
+        (fact_kind <> 'ACTION_RULE' AND applies_when IS NULL
+            AND cardinality(do_not_apply_when) = 0)
+    )
+);
+CREATE UNIQUE INDEX uq_pulsara_v3_memory_active_semantic
+    ON pulsara_v3.memory_facts (
+        memory_domain_id, scope_kind, scope_id, fact_semantic_digest
+    ) WHERE lifecycle = 'ACTIVE';
+CREATE INDEX idx_pulsara_v3_memory_search_document_gin
+    ON pulsara_v3.memory_facts USING gin (search_document);
+CREATE INDEX idx_pulsara_v3_memory_search_terms_gin
+    ON pulsara_v3.memory_facts USING gin (search_terms);
+
+ALTER TABLE pulsara_v3.memory_candidates ADD CONSTRAINT memory_candidate_fact_fk
+    FOREIGN KEY (id, accepted_fact_id)
+    REFERENCES pulsara_v3.memory_facts (source_candidate_id, id)
+    ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED;
+ALTER TABLE pulsara_v3.memory_candidates ADD CONSTRAINT memory_candidate_related_target_fk
+    FOREIGN KEY (memory_domain_id, scope_kind, scope_id, related_target_fact_id)
+    REFERENCES pulsara_v3.memory_facts (memory_domain_id, scope_kind, scope_id, id)
+    ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED;
+ALTER TABLE pulsara_v3.memory_candidates ADD CONSTRAINT memory_candidate_duplicate_winner_fk
+    FOREIGN KEY (memory_domain_id, scope_kind, scope_id, duplicate_winner_fact_id)
+    REFERENCES pulsara_v3.memory_facts (memory_domain_id, scope_kind, scope_id, id)
+    ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED;
+ALTER TABLE pulsara_v3.memory_candidates ADD CONSTRAINT memory_candidate_applied_existing_fk
+    FOREIGN KEY (memory_domain_id, scope_kind, scope_id, applied_existing_fact_id)
+    REFERENCES pulsara_v3.memory_facts (memory_domain_id, scope_kind, scope_id, id)
+    ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED;
+
+CREATE TABLE pulsara_v3.memory_candidate_basis_refs (
+    candidate_id text NOT NULL,
+    memory_domain_id text NOT NULL,
+    source_scope_kind text NOT NULL,
+    source_scope_id text NOT NULL,
+    target_scope_kind text NOT NULL,
+    target_scope_id text NOT NULL,
+    target_fact_id text NOT NULL,
+    ordinal integer NOT NULL CHECK (ordinal BETWEEN 0 AND 7),
+    PRIMARY KEY (candidate_id, ordinal),
+    UNIQUE (candidate_id, target_fact_id),
+    FOREIGN KEY (candidate_id, memory_domain_id, source_scope_kind, source_scope_id)
+        REFERENCES pulsara_v3.memory_candidates (
+            id, memory_domain_id, scope_kind, scope_id
+        ) ON DELETE RESTRICT,
+    FOREIGN KEY (memory_domain_id, target_scope_kind, target_scope_id, target_fact_id)
+        REFERENCES pulsara_v3.memory_facts (
+            memory_domain_id, scope_kind, scope_id, id
+        ) ON DELETE RESTRICT,
+    CHECK (
+        (source_scope_kind = 'USER' AND target_scope_kind = 'USER') OR
+        (source_scope_kind = 'WORKSPACE' AND (
+            target_scope_kind = 'USER' OR
+            (target_scope_kind = 'WORKSPACE' AND source_scope_id = target_scope_id)
+        ))
+    )
 );
 
 CREATE TABLE pulsara_v3.memory_relations (
     id text PRIMARY KEY,
-    workspace_id text NOT NULL,
+    memory_domain_id text NOT NULL,
+    decision_candidate_id text NOT NULL,
+    source_scope_kind text NOT NULL CHECK (source_scope_kind IN ('USER', 'WORKSPACE')),
+    source_scope_id text NOT NULL,
     source_fact_id text NOT NULL,
+    source_fact_kind text NOT NULL CHECK (source_fact_kind IN (
+        'FACT', 'USER_PROFILE', 'RESPONSE_PREFERENCE', 'ACTION_RULE', 'DECISION'
+    )),
+    relation_kind text NOT NULL CHECK (relation_kind IN (
+        'BASED_ON', 'SUPERSEDES', 'CONTRADICTS'
+    )),
+    target_scope_kind text NOT NULL CHECK (target_scope_kind IN ('USER', 'WORKSPACE')),
+    target_scope_id text NOT NULL,
     target_fact_id text NOT NULL,
-    relation_kind text NOT NULL,
+    target_fact_kind text NOT NULL CHECK (target_fact_kind IN (
+        'FACT', 'USER_PROFILE', 'RESPONSE_PREFERENCE', 'ACTION_RULE', 'DECISION'
+    )),
+    supersede_mode text CHECK (supersede_mode IN (
+        'SAME_KIND_REPLACEMENT', 'TAXONOMY_CORRECTION'
+    )),
+    ordinal integer,
     accepted_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-    UNIQUE (workspace_id, id),
-    UNIQUE (workspace_id, source_fact_id, target_fact_id, relation_kind),
-    FOREIGN KEY (workspace_id, source_fact_id)
-        REFERENCES pulsara_v3.memory_facts (workspace_id, id) ON DELETE RESTRICT,
-    FOREIGN KEY (workspace_id, target_fact_id)
-        REFERENCES pulsara_v3.memory_facts (workspace_id, id) ON DELETE RESTRICT
+    UNIQUE (memory_domain_id, id),
+    UNIQUE (
+        memory_domain_id, source_scope_kind, source_scope_id, source_fact_id,
+        relation_kind, target_scope_kind, target_scope_id, target_fact_id
+    ),
+    FOREIGN KEY (decision_candidate_id, memory_domain_id)
+        REFERENCES pulsara_v3.memory_candidates (id, memory_domain_id) ON DELETE RESTRICT,
+    FOREIGN KEY (memory_domain_id, source_scope_kind, source_scope_id, source_fact_id)
+        REFERENCES pulsara_v3.memory_facts (
+            memory_domain_id, scope_kind, scope_id, id
+        ) ON DELETE RESTRICT,
+    FOREIGN KEY (memory_domain_id, target_scope_kind, target_scope_id, target_fact_id)
+        REFERENCES pulsara_v3.memory_facts (
+            memory_domain_id, scope_kind, scope_id, id
+        ) ON DELETE RESTRICT,
+    CHECK (source_fact_id <> target_fact_id),
+    CHECK (
+        (relation_kind = 'BASED_ON' AND supersede_mode IS NULL
+            AND ordinal BETWEEN 0 AND 7 AND source_fact_kind = 'DECISION'
+            AND ((source_scope_kind = 'USER' AND target_scope_kind = 'USER')
+                OR (source_scope_kind = 'WORKSPACE' AND (
+                    target_scope_kind = 'USER' OR
+                    (target_scope_kind = 'WORKSPACE' AND source_scope_id = target_scope_id)
+                ))))
+        OR
+        (relation_kind = 'SUPERSEDES' AND ordinal IS NULL
+            AND supersede_mode IS NOT NULL
+            AND source_scope_kind = target_scope_kind
+            AND source_scope_id = target_scope_id
+            AND ((supersede_mode = 'SAME_KIND_REPLACEMENT'
+                    AND source_fact_kind = target_fact_kind)
+                OR (supersede_mode = 'TAXONOMY_CORRECTION'
+                    AND source_fact_kind <> target_fact_kind)))
+        OR
+        (relation_kind = 'CONTRADICTS' AND supersede_mode IS NULL
+            AND ordinal IS NULL AND source_scope_kind = target_scope_kind
+            AND source_scope_id = target_scope_id
+            AND source_fact_kind = target_fact_kind)
+    )
 );
+CREATE INDEX idx_pulsara_v3_memory_relation_outgoing
+    ON pulsara_v3.memory_relations (
+        memory_domain_id, source_scope_kind, source_scope_id,
+        source_fact_id, relation_kind
+    );
+CREATE INDEX idx_pulsara_v3_memory_relation_incoming
+    ON pulsara_v3.memory_relations (
+        memory_domain_id, target_scope_kind, target_scope_id,
+        target_fact_id, relation_kind
+    );
+CREATE UNIQUE INDEX uq_pulsara_v3_memory_contradiction_unordered
+    ON pulsara_v3.memory_relations (
+        memory_domain_id, source_scope_kind, source_scope_id,
+        least(source_fact_id, target_fact_id),
+        greatest(source_fact_id, target_fact_id)
+    ) WHERE relation_kind = 'CONTRADICTS';
 
-CREATE TABLE pulsara_v3.memory_search_index (
-    workspace_id text NOT NULL,
+CREATE TABLE pulsara_v3.memory_embeddings (
+    memory_domain_id text NOT NULL,
     fact_id text NOT NULL,
-    generation bigint NOT NULL CHECK (generation >= 0),
-    search_document tsvector NOT NULL,
-    PRIMARY KEY (workspace_id, fact_id),
-    FOREIGN KEY (workspace_id, fact_id)
-        REFERENCES pulsara_v3.memory_facts (workspace_id, id) ON DELETE CASCADE
+    fact_semantic_digest text NOT NULL CHECK (
+        fact_semantic_digest ~ '^sha256:[0-9a-f]{64}$'
+    ),
+    embedding_contract_id text NOT NULL,
+    embedding_contract_version integer NOT NULL CHECK (embedding_contract_version >= 1),
+    embedding public.vector(1024) NOT NULL,
+    embedded_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (memory_domain_id, fact_id),
+    FOREIGN KEY (memory_domain_id, fact_id)
+        REFERENCES pulsara_v3.memory_facts (memory_domain_id, id) ON DELETE CASCADE
 );
-CREATE INDEX idx_pulsara_v3_memory_search_gin
-    ON pulsara_v3.memory_search_index USING gin (search_document);
+CREATE INDEX idx_pulsara_v3_memory_embeddings_hnsw
+    ON pulsara_v3.memory_embeddings USING hnsw (embedding public.vector_cosine_ops);
 
-CREATE TABLE pulsara_v3.memory_vector_index (
-    workspace_id text NOT NULL,
-    fact_id text NOT NULL,
-    generation bigint NOT NULL CHECK (generation >= 0),
-    embedding public.vector NOT NULL,
-    PRIMARY KEY (workspace_id, fact_id),
-    FOREIGN KEY (workspace_id, fact_id)
-        REFERENCES pulsara_v3.memory_facts (workspace_id, id) ON DELETE CASCADE
-);
+CREATE FUNCTION pulsara_v3.memory_terms_to_tsquery(terms text[])
+RETURNS tsquery
+LANGUAGE sql
+IMMUTABLE
+STRICT
+SET search_path = pg_catalog, pg_temp
+AS $$
+    SELECT COALESCE(
+        to_tsquery(
+            'pg_catalog.simple'::regconfig,
+            string_agg(
+                '(' || plainto_tsquery('pg_catalog.simple'::regconfig, term)::text || ')',
+                ' | ' ORDER BY ordinal
+            )
+        ),
+        ''::tsquery
+    )
+    FROM unnest(terms) WITH ORDINALITY AS value(term, ordinal)
+    WHERE plainto_tsquery('pg_catalog.simple'::regconfig, term) <> ''::tsquery;
+$$;
 
-CREATE TABLE pulsara_v3.memory_index_state (
-    workspace_id text NOT NULL,
-    channel text NOT NULL CHECK (channel IN ('FTS', 'VECTOR')),
-    desired_generation bigint NOT NULL CHECK (desired_generation >= 0),
-    desired_handler_contract_id text NOT NULL,
-    desired_handler_contract_version integer NOT NULL CHECK (desired_handler_contract_version >= 1),
-    applied_generation bigint NOT NULL CHECK (applied_generation >= 0),
-    applied_handler_contract_id text NOT NULL,
-    applied_handler_contract_version integer NOT NULL CHECK (applied_handler_contract_version >= 1),
-    PRIMARY KEY (workspace_id, channel),
-    CHECK (applied_generation <= desired_generation)
-);
+CREATE FUNCTION pulsara_v3.seal_memory_fact_search_document()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp
+AS $$
+BEGIN
+    IF TG_OP = 'UPDATE' AND (
+        OLD.memory_domain_id IS DISTINCT FROM NEW.memory_domain_id OR
+        OLD.scope_kind IS DISTINCT FROM NEW.scope_kind OR
+        OLD.scope_id IS DISTINCT FROM NEW.scope_id OR
+        OLD.source_candidate_id IS DISTINCT FROM NEW.source_candidate_id OR
+        OLD.fact_kind IS DISTINCT FROM NEW.fact_kind OR
+        OLD.statement IS DISTINCT FROM NEW.statement OR
+        OLD.applies_when IS DISTINCT FROM NEW.applies_when OR
+        OLD.do_not_apply_when IS DISTINCT FROM NEW.do_not_apply_when OR
+        OLD.fact_semantic_digest IS DISTINCT FROM NEW.fact_semantic_digest OR
+        OLD.search_contract_id IS DISTINCT FROM NEW.search_contract_id OR
+        OLD.search_contract_version IS DISTINCT FROM NEW.search_contract_version OR
+        OLD.search_terms IS DISTINCT FROM NEW.search_terms OR
+        OLD.search_document IS DISTINCT FROM NEW.search_document
+    ) THEN
+        RAISE EXCEPTION 'memory fact immutable fields changed' USING ERRCODE = '23514';
+    END IF;
+    NEW.search_document := to_tsvector(
+        'pg_catalog.simple'::regconfig,
+        array_to_string(NEW.search_terms, ' ')
+    );
+    RETURN NEW;
+END;
+$$;
+CREATE TRIGGER trg_pulsara_v3_memory_fact_search_document
+BEFORE INSERT OR UPDATE ON pulsara_v3.memory_facts
+FOR EACH ROW EXECUTE FUNCTION pulsara_v3.seal_memory_fact_search_document();
+
+CREATE FUNCTION pulsara_v3.enforce_memory_candidate_lineage()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    candidate_row pulsara_v3.memory_candidates%ROWTYPE;
+    fact_row pulsara_v3.memory_facts%ROWTYPE;
+    producer_entry_row pulsara_v3.transcript_entries%ROWTYPE;
+    producer_turn_row pulsara_v3.turns%ROWTYPE;
+    relation_count integer;
+BEGIN
+    IF TG_TABLE_NAME = 'memory_facts' THEN
+        SELECT * INTO candidate_row FROM pulsara_v3.memory_candidates
+        WHERE id = NEW.source_candidate_id;
+        IF candidate_row.status IS DISTINCT FROM 'ACCEPTED'
+           OR candidate_row.accepted_fact_id IS DISTINCT FROM NEW.id
+           OR candidate_row.memory_domain_id IS DISTINCT FROM NEW.memory_domain_id
+           OR candidate_row.scope_kind IS DISTINCT FROM NEW.scope_kind
+           OR candidate_row.scope_id IS DISTINCT FROM NEW.scope_id
+           OR candidate_row.final_kind IS DISTINCT FROM NEW.fact_kind THEN
+            RAISE EXCEPTION 'memory fact does not exact-join accepted candidate'
+                USING ERRCODE = '23514';
+        END IF;
+        RETURN NEW;
+    END IF;
+
+    IF TG_TABLE_NAME = 'memory_relations' THEN
+        SELECT * INTO candidate_row FROM pulsara_v3.memory_candidates
+        WHERE id = NEW.decision_candidate_id;
+        SELECT * INTO fact_row FROM pulsara_v3.memory_facts
+        WHERE memory_domain_id = NEW.memory_domain_id AND id = NEW.source_fact_id;
+        IF candidate_row.status = 'ACCEPTED' THEN
+            IF candidate_row.accepted_fact_id IS DISTINCT FROM NEW.source_fact_id
+               OR fact_row.source_candidate_id IS DISTINCT FROM candidate_row.id THEN
+                RAISE EXCEPTION 'accepted relation source attribution drifted'
+                    USING ERRCODE = '23514';
+            END IF;
+        ELSIF candidate_row.status = 'APPLIED_TO_EXISTING' THEN
+            IF NEW.relation_kind NOT IN ('SUPERSEDES', 'CONTRADICTS')
+               OR candidate_row.applied_existing_fact_id IS DISTINCT FROM NEW.source_fact_id THEN
+                RAISE EXCEPTION 'existing-source relation attribution drifted'
+                    USING ERRCODE = '23514';
+            END IF;
+            SELECT count(*) INTO relation_count FROM pulsara_v3.memory_relations
+            WHERE decision_candidate_id = candidate_row.id;
+            IF relation_count <> 1 THEN
+                RAISE EXCEPTION 'existing-source candidate must own exact one relation'
+                    USING ERRCODE = '23514';
+            END IF;
+        ELSE
+            RAISE EXCEPTION 'non-terminal candidate cannot own memory relation'
+                USING ERRCODE = '23514';
+        END IF;
+        RETURN NEW;
+    END IF;
+
+    IF TG_TABLE_NAME = 'memory_candidates'
+       AND NEW.producer_kind = 'CHEAP_HINT_REFLECTION' THEN
+        SELECT * INTO producer_entry_row FROM pulsara_v3.transcript_entries
+        WHERE session_id = NEW.origin_session_id
+          AND id = NEW.trigger_user_entry_id;
+        SELECT * INTO producer_turn_row FROM pulsara_v3.turns
+        WHERE session_id = NEW.origin_session_id
+          AND id = producer_entry_row.turn_id;
+        IF producer_entry_row.id IS NULL
+           OR producer_entry_row.entry_kind NOT IN ('USER_MESSAGE', 'USER_STEER')
+           OR producer_turn_row.id IS NULL
+           OR producer_turn_row.conversation_scope_kind <> 'ROOT'
+           OR producer_turn_row.status <> 'COMPLETED' THEN
+            RAISE EXCEPTION 'reflection candidate lacks completed ROOT human trigger'
+                USING ERRCODE = '23514';
+        END IF;
+    END IF;
+
+    IF NEW.status = 'ACCEPTED' THEN
+        SELECT * INTO fact_row FROM pulsara_v3.memory_facts
+        WHERE source_candidate_id = NEW.id AND id = NEW.accepted_fact_id;
+        IF fact_row.id IS NULL THEN
+            RAISE EXCEPTION 'accepted memory candidate lacks exact fact'
+                USING ERRCODE = '23514';
+        END IF;
+    ELSIF NEW.status = 'APPLIED_TO_EXISTING' THEN
+        SELECT count(*) INTO relation_count FROM pulsara_v3.memory_relations
+        WHERE decision_candidate_id = NEW.id
+          AND source_fact_id = NEW.applied_existing_fact_id
+          AND target_fact_id = NEW.related_target_fact_id
+          AND relation_kind IN ('SUPERSEDES', 'CONTRADICTS');
+        IF relation_count <> 1 THEN
+            RAISE EXCEPTION 'applied memory candidate lacks exact relation'
+                USING ERRCODE = '23514';
+        END IF;
+    ELSE
+        IF EXISTS (SELECT 1 FROM pulsara_v3.memory_facts WHERE source_candidate_id=NEW.id)
+           OR EXISTS (SELECT 1 FROM pulsara_v3.memory_relations WHERE decision_candidate_id=NEW.id) THEN
+            RAISE EXCEPTION 'non-accepting memory candidate owns canonical rows'
+                USING ERRCODE = '23514';
+        END IF;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+REVOKE ALL ON FUNCTION pulsara_v3.memory_terms_to_tsquery(text[]) FROM PUBLIC;
+REVOKE ALL ON FUNCTION pulsara_v3.seal_memory_fact_search_document() FROM PUBLIC;
+REVOKE ALL ON FUNCTION pulsara_v3.enforce_memory_candidate_lineage() FROM PUBLIC;
+CREATE CONSTRAINT TRIGGER trg_pulsara_v3_memory_candidate_lineage
+AFTER INSERT OR UPDATE ON pulsara_v3.memory_candidates
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION pulsara_v3.enforce_memory_candidate_lineage();
+CREATE CONSTRAINT TRIGGER trg_pulsara_v3_memory_fact_lineage
+AFTER INSERT OR UPDATE ON pulsara_v3.memory_facts
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION pulsara_v3.enforce_memory_candidate_lineage();
+CREATE CONSTRAINT TRIGGER trg_pulsara_v3_memory_relation_lineage
+AFTER INSERT ON pulsara_v3.memory_relations
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION pulsara_v3.enforce_memory_candidate_lineage();
 
 CREATE TABLE pulsara_v3.agent_events (
     event_id text PRIMARY KEY,
@@ -1168,8 +1636,7 @@ CREATE TABLE pulsara_v3.agent_events (
         'ToolRemoteIdentityPublished', 'PromptQueued', 'PromptConsumed', 'PromptCancelled',
         'PromptRejected', 'CompactionAdopted', 'SubagentTaskAccepted',
         'SubagentTaskStatusAccepted', 'SubagentMessageAccepted', 'SubagentResultAccepted',
-        'JobQueued', 'JobAttemptAccepted', 'JobTerminalAccepted', 'MemoryFactAccepted',
-        'MemoryFactLifecycleChanged', 'MemoryRelationAccepted',
+        'JobQueued', 'JobAttemptAccepted', 'JobTerminalAccepted',
         'TerminalObservationAccepted', 'PlanWorkflowEntered',
         'PlanQuestionAsked', 'PlanQuestionAnswered', 'PlanDraftSubmitted',
         'PlanDraftDecisionAccepted', 'PlanWorkflowExited',
@@ -1198,8 +1665,6 @@ CREATE TABLE pulsara_v3.agent_events (
     subject_subagent_child_kind text CHECK (
         subject_subagent_child_kind IN ('MESSAGE', 'RESULT')
     ),
-    subject_memory_fact_id text,
-    subject_memory_relation_id text,
     subject_plan_workflow_id text,
     subject_plan_interaction_id text,
     UNIQUE (session_id, event_sequence),
@@ -1231,10 +1696,6 @@ CREATE TABLE pulsara_v3.agent_events (
     FOREIGN KEY (session_id, subject_subagent_result_id, subject_subagent_child_kind)
         REFERENCES pulsara_v3.subagent_task_children (session_id, id, child_kind)
         ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
-    FOREIGN KEY (workspace_id, subject_memory_fact_id)
-        REFERENCES pulsara_v3.memory_facts (workspace_id, id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
-    FOREIGN KEY (workspace_id, subject_memory_relation_id)
-        REFERENCES pulsara_v3.memory_relations (workspace_id, id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (session_id, subject_plan_workflow_id)
         REFERENCES pulsara_v3.plan_workflows (session_id, id)
         ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
@@ -1246,7 +1707,6 @@ CREATE TABLE pulsara_v3.agent_events (
         subject_job_attempt_id, subject_queue_item_id, subject_interaction_decision_id,
         subject_context_binding_revision_id, subject_subagent_task_id,
         subject_subagent_message_id, subject_subagent_result_id,
-        subject_memory_fact_id, subject_memory_relation_id,
         subject_plan_workflow_id, subject_plan_interaction_id
     ) = 1),
     CHECK (
@@ -1274,10 +1734,7 @@ CREATE TABLE pulsara_v3.agent_events (
         (event_type = 'SubagentResultAccepted' AND subject_subagent_result_id IS NOT NULL) OR
         (event_type IN ('JobQueued', 'JobTerminalAccepted') AND subject_job_id IS NOT NULL) OR
         (event_type = 'JobAttemptAccepted' AND subject_job_attempt_id IS NOT NULL) OR
-        (event_type IN ('MemoryFactAccepted', 'MemoryFactLifecycleChanged')
-            AND subject_memory_fact_id IS NOT NULL) OR
-        (event_type = 'MemoryRelationAccepted' AND subject_memory_relation_id IS NOT NULL)
-        OR (event_type IN ('PlanWorkflowEntered', 'PlanWorkflowExited')
+        (event_type IN ('PlanWorkflowEntered', 'PlanWorkflowExited')
             AND subject_plan_workflow_id IS NOT NULL)
         OR (event_type IN ('PlanQuestionAsked', 'PlanQuestionAnswered',
                 'PlanDraftSubmitted', 'PlanDraftDecisionAccepted')

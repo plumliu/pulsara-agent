@@ -86,6 +86,22 @@ class PulsaraSettings:
                     "dimensions": self.retrieval.embedding.dimensions,
                     "api_key_set": bool(self.retrieval.embedding.api_key),
                 },
+                "rerank": {
+                    "provider": self.retrieval.rerank.provider,
+                    "base_url": self.retrieval.rerank.base_url,
+                    "model": self.retrieval.rerank.model,
+                    "api_key_set": bool(self.retrieval.rerank.api_key),
+                },
+                "memory": {
+                    "automatic_dense": self.retrieval.memory.automatic_dense,
+                    "explicit_rerank": self.retrieval.memory.explicit_rerank,
+                    "cheap_hint_reflection": (
+                        self.retrieval.memory.cheap_hint_reflection
+                    ),
+                    "hint_review_allow_cross_provider": (
+                        self.retrieval.memory.hint_review_allow_cross_provider
+                    ),
+                },
             },
         }
 

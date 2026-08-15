@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from hashlib import sha256
 from typing import Mapping
 from psycopg import Connection
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from pulsara_agent.conversation_kernel.contracts import CommittedEventDraft, HostWriterGuard, JobAttemptClaimGuard, JobSafetyClass, canonical_digest
-from pulsara_agent.conversation_kernel.job_catalog import BACKGROUND_COMPACTION, POST_COMPACTION_MEMORY_EXTRACTION, job_handler_contract
+from pulsara_agent.conversation_kernel.job_catalog import BACKGROUND_COMPACTION, job_handler_contract
 from pulsara_agent.conversation_kernel.vocabulary import CommittedEventType, SubjectSlot
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 
@@ -24,10 +23,7 @@ from .contracts import (
     _utcnow,
 )
 
-from .matching import (
-    _required_nonnegative_int,
-    _required_string,
-)
+from .matching import _required_nonnegative_int
 
 class _JobOperations:
     def enqueue_job(
@@ -911,19 +907,12 @@ class _JobOperations:
         occurred_at: datetime,
         deadline_monotonic: float,
     ) -> str:
-        """Accept a compaction result and its extraction job atomically."""
+        """Accept a compaction result without creating follow-on memory work."""
 
         if not summary.strip() or len(summary.encode("utf-8")) > 256 * 1024:
             raise ValueError("compaction summary is outside its bound")
-        extraction = job_handler_contract(POST_COMPACTION_MEMORY_EXTRACTION)
         summary_digest = canonical_digest(
             "pulsara:background-compaction-result:v1", {"summary": summary}
-        )
-        extraction_job_id = (
-            "job:"
-            + sha256(
-                f"post-compaction:{guard.job_id}:{summary_digest}".encode()
-            ).hexdigest()
         )
         with self._job_transaction(
             guard, deadline_monotonic=deadline_monotonic
@@ -938,66 +927,17 @@ class _JobOperations:
             ).fetchone()
             if job is None:
                 raise ConversationKernelConflict("compaction job is absent")
-            extraction_intent = {
-                "source_job_id": guard.job_id,
-                "source_result_digest": summary_digest,
-            }
-            connection.execute(
-                """
-                INSERT INTO pulsara_v3.durable_jobs (
-                    id, workspace_id, origin_session_id, handler_type,
-                    intent_schema_version, intent_digest, intent_payload,
-                    automatic_intent_key, safety_class, status,
-                    retry_policy_id, retry_policy_version, maximum_attempts,
-                    attempt_timeout_ms, provider_input_token_limit_per_attempt,
-                    provider_output_token_limit_per_attempt, next_eligible_at
-                ) VALUES (
-                    %s, %s, %s, 'POST_COMPACTION_MEMORY_EXTRACTION',
-                    'post_compaction_memory_extraction.v1', %s, %s, %s,
-                    'RETRY_SAFE', 'PENDING', 'bounded-exponential', 1,
-                    %s, %s, %s, %s, clock_timestamp()
-                )
-                """,
-                (
-                    extraction_job_id,
-                    job["workspace_id"],
-                    job["origin_session_id"],
-                    canonical_digest(
-                        "pulsara:job-intent:post_compaction_memory_extraction.v1",
-                        extraction_intent,
-                    ),
-                    Jsonb(extraction_intent),
-                    f"post-compaction:{guard.job_id}",
-                    extraction.maximum_attempts,
-                    extraction.attempt_timeout_ms,
-                    extraction.input_token_limit,
-                    extraction.output_token_limit,
-                ),
-            )
             drafts: list[CommittedEventDraft] = []
             if guard.origin_session_id is not None:
-                drafts.extend(
-                    (
-                        self._event(
-                            CommittedEventType.JOB_QUEUED,
-                            SubjectSlot.JOB,
-                            extraction_job_id,
-                            occurred_at=occurred_at,
-                            actor_kind="job_worker",
-                            actor_id=guard.claim_owner_id,
-                            payload={
-                                "handler_type": "POST_COMPACTION_MEMORY_EXTRACTION"
-                            },
-                        ),
-                        self._event(
-                            CommittedEventType.JOB_TERMINAL_ACCEPTED,
-                            SubjectSlot.JOB,
-                            guard.job_id,
-                            occurred_at=occurred_at,
-                            actor_kind="job_worker",
-                            actor_id=guard.claim_owner_id,
-                            payload={"status": "SUCCEEDED", "terminal_reason": None},
-                        ),
+                drafts.append(
+                    self._event(
+                        CommittedEventType.JOB_TERMINAL_ACCEPTED,
+                        SubjectSlot.JOB,
+                        guard.job_id,
+                        occurred_at=occurred_at,
+                        actor_kind="job_worker",
+                        actor_id=guard.claim_owner_id,
+                        payload={"status": "SUCCEEDED", "terminal_reason": None},
                     )
                 )
                 self._append_events(
@@ -1019,7 +959,6 @@ class _JobOperations:
                         {
                             "summary": summary,
                             "summary_digest": summary_digest,
-                            "extraction_job_id": extraction_job_id,
                         }
                     ),
                     terminal_at,
@@ -1035,57 +974,7 @@ class _JobOperations:
                 """,
                 (terminal_at, guard.job_id),
             )
-        return extraction_job_id
-
-    def read_memory_extraction_job_source(
-        self,
-        guard: JobAttemptClaimGuard,
-        *,
-        deadline_monotonic: float,
-    ) -> Mapping[str, object]:
-        with self._job_transaction(
-            guard, deadline_monotonic=deadline_monotonic
-        ) as connection:
-            job = connection.execute(
-                """
-                SELECT handler_type, intent_payload FROM pulsara_v3.durable_jobs
-                WHERE id = %s
-                """,
-                (guard.job_id,),
-            ).fetchone()
-            if (
-                job is None
-                or job["handler_type"] != "POST_COMPACTION_MEMORY_EXTRACTION"
-            ):
-                raise ConversationKernelConflict("memory extraction job is invalid")
-            intent = dict(job["intent_payload"])
-            source_job_id = _required_string(
-                intent.get("source_job_id"), "source_job_id"
-            )
-            source = connection.execute(
-                """
-                SELECT j.status, a.result_payload
-                FROM pulsara_v3.durable_jobs AS j
-                JOIN pulsara_v3.durable_job_attempts AS a ON a.job_id = j.id
-                WHERE j.id = %s AND j.handler_type = 'BACKGROUND_COMPACTION'
-                  AND j.status = 'SUCCEEDED' AND a.terminal_status = 'SUCCEEDED'
-                ORDER BY a.attempt_ordinal DESC LIMIT 1
-                """,
-                (source_job_id,),
-            ).fetchone()
-            if source is None or source["result_payload"] is None:
-                raise ConversationKernelConflict("compaction result is unavailable")
-            payload = dict(source["result_payload"])
-            if intent.get("source_result_digest") != payload.get("summary_digest"):
-                raise ConversationKernelConflict("compaction result identity drifted")
-            summary = payload.get("summary")
-            if not isinstance(summary, str):
-                raise ConversationKernelConflict("compaction result is malformed")
-            return {
-                "source_job_id": source_job_id,
-                "source_result_digest": payload["summary_digest"],
-                "summary": summary,
-            }
+        return guard.job_id
 
 
 

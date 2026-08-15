@@ -25,13 +25,23 @@ from pulsara_agent.conversation_kernel.interaction import (
 from pulsara_agent.conversation_kernel.interaction_arbiter import (
     InteractionAdmissionHooks,
 )
+from pulsara_agent.conversation_kernel.context_sources import _render_mcp_catalog
 from pulsara_agent.conversation_kernel.io import KernelSessionIO
 from pulsara_agent.conversation_kernel.live import LiveAgentEventBus
 from pulsara_agent.conversation_kernel.live_control import SessionLiveControlOwner
+from pulsara_agent.conversation_kernel.memory.contracts import (
+    FrozenModelCallMemoryContext,
+    FrozenModelVisibleMemoryProvenance,
+    ModelVisibleMemoryProvenanceDisposition,
+)
 from pulsara_agent.conversation_kernel.mcp.input_required import (
     McpInputRequiredFailure,
     McpInputRequiredRoundOwner,
     McpInputRequiredUnsupported,
+)
+from pulsara_agent.conversation_kernel.mcp.contracts import (
+    McpCatalogSnapshot,
+    McpServerCatalogEntry,
 )
 from pulsara_agent.conversation_kernel.mcp.naming import mangle_mcp_tool_names
 from pulsara_agent.conversation_kernel.mcp.sdk_facade import (
@@ -108,6 +118,15 @@ from tests.support.round3 import ScriptedKernelModel, StaticContextSourceCollect
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "round6_mcp_server.py"
+
+
+def _enabled_memory_context() -> FrozenModelCallMemoryContext:
+    return FrozenModelCallMemoryContext(
+        FrozenModelVisibleMemoryProvenance(
+            ModelVisibleMemoryProvenanceDisposition.COMPLETE,
+            (),
+        )
+    )
 HTTP_FIXTURE = Path(__file__).parent / "fixtures" / "round6_mcp_http_server.py"
 
 
@@ -1132,6 +1151,40 @@ def test_round6_replacement_attempt_keeps_installed_catalog_status_stable(
     asyncio.run(exercise())
 
 
+def test_round6_mcp_catalog_ref_only_is_a_strict_compact_degradation() -> None:
+    catalog = McpCatalogSnapshot(
+        owner_epoch=1,
+        catalog_revision=1,
+        servers=(
+            McpServerCatalogEntry(
+                server_id="fixture",
+                display_name="Fixture",
+                status=McpServerState.READY,
+                required=False,
+                exposed_tool_count=1,
+                discovered_tool_count=1,
+                resource_count=1,
+                resource_template_count=0,
+                prompt_count=1,
+                bounded_tool_name_overview=("fixture_echo",),
+                sanitized_instructions="bounded fixture instructions",
+                stable_failure_category=None,
+                tool_surface_semantic_fingerprint="sha256:" + "1" * 64,
+                catalog_semantic_fingerprint="sha256:" + "2" * 64,
+                scope_subagents=False,
+            ),
+        ),
+        semantic_fingerprint="sha256:" + "3" * 64,
+        presentation_fingerprint="sha256:" + "4" * 64,
+    )
+
+    full, compact, reference = _render_mcp_catalog(catalog)
+
+    assert len(reference.encode("utf-8")) < len(compact.encode("utf-8"))
+    assert len(compact.encode("utf-8")) < len(full.encode("utf-8"))
+    assert "read_more" not in reference
+
+
 def test_round6_terminal_failure_retires_only_exact_pending_slot(
     tmp_path: Path,
 ) -> None:
@@ -1588,6 +1641,7 @@ def test_round6_direct_kernel_surface_executes_exact_mcp_generation(
                 assistant_entry_id="entry:assistant",
                 permission_snapshot=permission,
                 surface_borrow=borrow,
+                memory_context=_enabled_memory_context(),
             )
             assert authorization.kind is KernelToolAuthorizationKind.ALLOW
             invocation = KernelToolInvocationContext(
@@ -1692,6 +1746,7 @@ def test_round6_permission_matrix_is_local_and_scope_surface_is_stable(
                         assistant_entry_id="entry:policy",
                         permission_snapshot=permission,
                         surface_borrow=borrow,
+                        memory_context=_enabled_memory_context(),
                     )
                     decisions[(mode, semantic.name)] = decision.kind
             assert all(
@@ -2162,6 +2217,7 @@ def test_round6_config_disable_rebuilds_surface_and_old_borrow_drains(
                 assistant_entry_id="entry:disable",
                 permission_snapshot=permission,
                 surface_borrow=old_borrow,
+                memory_context=_enabled_memory_context(),
             )
             assert (
                 authorization.kind
@@ -2276,6 +2332,7 @@ def test_round6_config_disable_cancels_visible_uncommitted_confirmation(
                 assistant_entry_id="entry:disable-confirmation",
                 permission_snapshot=permission,
                 surface_borrow=borrow,
+                memory_context=_enabled_memory_context(),
             )
             assert (
                 authorization.kind
@@ -2478,6 +2535,7 @@ def test_round6_mcp_confirmation_admits_before_publish_and_drains_dirty(
                 assistant_entry_id="entry:assistant",
                 permission_snapshot=permission,
                 surface_borrow=borrow,
+                memory_context=_enabled_memory_context(),
             )
             assert (
                 authorization.kind
@@ -3075,12 +3133,12 @@ def test_round6_wire_bounds_and_result_type_presence_fail_closed(
 
 
 def test_round6_does_not_expand_durable_or_protocol_oracles() -> None:
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == 34
+    assert len(COMMITTED_EVENT_DESCRIPTORS) == 31
     assert len(LIVE_EVENT_TYPES) == 23
-    assert len(SUBJECT_SLOTS) == 15
+    assert len(SUBJECT_SLOTS) == 13
     assert len(APPEND_GUARDS) == 2
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 26
-    assert len(JOB_HANDLER_CATALOG) == 4
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 25
+    assert len(JOB_HANDLER_CATALOG) == 1
 
     root = Path(__file__).parents[1]
     mcp_root = root / "src" / "pulsara_agent" / "conversation_kernel" / "mcp"

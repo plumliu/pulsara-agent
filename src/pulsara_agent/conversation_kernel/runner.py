@@ -7,7 +7,7 @@ coroutine, interaction, terminal process, or subagent execution after a crash.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field as dataclass_field
+from dataclasses import dataclass, field as dataclass_field, replace
 from datetime import datetime, timezone
 from enum import StrEnum
 from hashlib import sha256
@@ -32,6 +32,8 @@ from pulsara_agent.conversation_kernel.blob import (
 )
 from pulsara_agent.conversation_kernel.context_sources import (
     ContextSourceCollectorPort,
+    build_memory_context_source,
+    replace_memory_context_sources,
 )
 from pulsara_agent.conversation_kernel.cancellation import (
     ActiveTurnCancellationIntent,
@@ -77,6 +79,21 @@ from pulsara_agent.conversation_kernel.extensions import (
     OperationalHookType,
 )
 from pulsara_agent.conversation_kernel.limits import STAGE2_LIMITS
+from pulsara_agent.conversation_kernel.memory.contracts import (
+    AutomaticMemoryTriggerDisposition,
+    FrozenMemoryTriggerPolicy,
+    FrozenModelCallMemoryContext,
+    FrozenModelVisibleMemoryProvenance,
+    ModelVisibleMemoryProvenanceDisposition,
+    MemoryCitationEvidenceKind,
+    MemoryCitationVisibility,
+    MemoryUsePolicy,
+    PreparedMemoryCandidateAcceptance,
+    strongest_memory_use_policy,
+)
+from pulsara_agent.conversation_kernel.memory.citations import (
+    ProcessLocalMemoryCallContextOwner,
+)
 from pulsara_agent.conversation_kernel.tool_artifacts import (
     ToolOutputArtifactProcessor,
 )
@@ -139,6 +156,7 @@ from pulsara_agent.conversation_kernel.steer import (
     PreparedSteerResourceRejection,
     PreparedSteerPlanConflictInterruption,
     PreparedSteerSuffixAdmissionPlan,
+    MemorySourceInvalidationReservation,
     SteerConsumptionConfirmationKind,
     SteerPlanConflictConfirmationKind,
     SteerResourceRejectionConfirmationKind,
@@ -149,6 +167,7 @@ from pulsara_agent.conversation_kernel.steer import (
     build_steer_plan_conflict_interruption,
     build_steer_resource_rejection,
     build_steer_suffix_quote,
+    build_memory_source_invalidation_reservation,
 )
 from pulsara_agent.ports.terminal_observation import PreparedInstallationTarget
 from pulsara_agent.terminal_process.monitor import TerminalMonitorCoordinator
@@ -170,6 +189,11 @@ from pulsara_agent.model_input.contracts import (
     CapabilityActivationSubjectKind,
     CanonicalInputOriginKind,
     CollectedContextSources,
+    ContextSourceAbsentFact,
+    ContextSourceAbsenceKind,
+    ContextSourceCandidate,
+    ContextSourceKind,
+    ContextSourceLifecycle,
     FrozenCanonicalCompileSnapshot,
     CanonicalModelInputIdentity,
     CanonicalModelInputSnapshot,
@@ -195,9 +219,13 @@ from pulsara_agent.model_input.continuity import (
     PreparedProviderInputAppendCandidate,
     ProcessLocalCanonicalFrontier,
     ProcessLocalProviderInputInstallPermit,
+    ProcessLocalSourceHead,
     ProviderInputContinuityScope,
     ProviderInputEpochCompatibility,
     provider_input_logical_utf8_bytes,
+    encode_runtime_observation,
+    SourceObservationLifecycle,
+    SourceObservationPresence,
     prepared_provider_input_append_candidate_fingerprint,
 )
 from pulsara_agent.primitives.model_call import ModelCallPurpose
@@ -237,6 +265,32 @@ class KernelModelPort(Protocol):
     ) -> PreparedKernelModelExecution: ...
 
 
+class MemoryContextProjectionPort(Protocol):
+    async def freeze_response_preference_source(
+        self,
+    ) -> ContextSourceCandidate | ContextSourceAbsentFact: ...
+
+    async def freeze_automatic_recall_source(
+        self, query: str
+    ) -> ContextSourceCandidate | ContextSourceAbsentFact: ...
+
+    def classify_automatic_trigger(
+        self, text: str
+    ) -> AutomaticMemoryTriggerDisposition: ...
+
+    def classify_memory_trigger(self, text: str) -> FrozenMemoryTriggerPolicy: ...
+
+    def offer_candidate_wake(self, candidate_id: str) -> None: ...
+
+    def prepare_and_adopt_reflection(
+        self,
+        *,
+        canonical: CanonicalModelInputSnapshot,
+        permission: FrozenRunPermissionSnapshot,
+        remember_requested: bool,
+    ) -> str | None: ...
+
+
 class AutomaticPlanContinuationPort(Protocol):
     async def __call__(
         self,
@@ -249,7 +303,7 @@ class AutomaticPlanContinuationPort(Protocol):
 class KernelToolResult:
     state: str
     content: bytes
-    memory_proposal: KernelMemoryProposal | None = None
+    memory_candidate: PreparedMemoryCandidateAcceptance | None = None
     remote_identity: str | None = None
     output_artifact_candidate: ToolOutputArtifactCandidate | None = None
     artifact_source_read: bool = False
@@ -259,6 +313,7 @@ class KernelToolResult:
     effect_class: str | None = None
     physical_observation: PhysicalToolObservationSupplement | None = None
     trusted_observation: TrustedToolObservationSupplement | None = None
+    model_visible_memory_fact_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         # The model-facing tool result and artifact candidate are both strict
@@ -322,6 +377,15 @@ class KernelToolInvocationContext:
     executor_binding_fingerprint: str
     surface_borrow: ProcessLocalToolSurfaceBorrow = dataclass_field(
         repr=False, compare=False
+    )
+    memory_context: FrozenModelCallMemoryContext = dataclass_field(
+        default_factory=lambda: FrozenModelCallMemoryContext(
+            FrozenModelVisibleMemoryProvenance(
+                ModelVisibleMemoryProvenanceDisposition.COMPLETE,
+                (),
+            )
+        ),
+        repr=False,
     )
 
     def __post_init__(self) -> None:
@@ -490,14 +554,6 @@ class _ToolResultLiveSink:
         await asyncio.wait_for(self._drained.wait(), timeout=1.0)
 
 
-@dataclass(frozen=True, slots=True)
-class KernelMemoryProposal:
-    candidate_id: str
-    proposal_kind: str
-    proposal_payload: Mapping[str, object]
-    governance_job_id: str
-
-
 class KernelToolAuthorizationKind(StrEnum):
     ALLOW = "ALLOW"
     REQUIRE_CONFIRMATION = "REQUIRE_CONFIRMATION"
@@ -566,6 +622,7 @@ class KernelToolPort(Protocol):
         assistant_entry_id: str,
         permission_snapshot: FrozenRunPermissionSnapshot,
         surface_borrow: ProcessLocalToolSurfaceBorrow,
+        memory_context: FrozenModelCallMemoryContext,
     ) -> KernelToolAuthorization: ...
 
     async def request_confirmation(
@@ -608,6 +665,7 @@ class KernelRunResult:
     continuation_turn_id: str | None = None
     continuation_entry_id: str | None = None
     pending_plan_interaction_id: str | None = None
+    memory_reflection_tokens: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -619,6 +677,7 @@ class _PreparedProviderDispatch:
     surface_borrow: ProcessLocalToolSurfaceBorrow
     sources: CollectedContextSources
     append_result: FrozenProviderInputAppendCompileResult
+    memory_context: FrozenModelCallMemoryContext
     accepted_steers: AcceptedSteerDispatchBatch | None = None
 
 
@@ -647,6 +706,7 @@ class ConversationKernelRunner:
         maximum_input_tokens_per_call: int = STAGE2_LIMITS.provider_input_tokens_per_call_hard,
         maximum_output_tokens_per_call: int = STAGE2_LIMITS.provider_output_tokens_per_call_hard,
         deadline_factory: KernelExecutionDeadlineFactory | None = None,
+        memory_projection: MemoryContextProjectionPort | None = None,
     ) -> None:
         if (
             min(
@@ -687,10 +747,15 @@ class ConversationKernelRunner:
         self._continuity = continuity_owner or HostProviderInputContinuityOwner(
             session_id=writer_lease.guard.session_id
         )
+        self._memory_contexts = ProcessLocalMemoryCallContextOwner(
+            session_id=writer_lease.guard.session_id
+        )
         self._extensions = extensions
         self._maximum_input_tokens_per_call = maximum_input_tokens_per_call
         self._maximum_output_tokens_per_call = maximum_output_tokens_per_call
         self._deadlines = deadline_factory or KernelExecutionDeadlineFactory()
+        self._memory_projection = memory_projection
+        self._root_memory_use_policy = MemoryUsePolicy.ENABLED
 
     def _canonical_deadline(self) -> float:
         return self._deadlines.deadline(KernelWatchdogOwner.FOREGROUND_CANONICAL)
@@ -736,13 +801,13 @@ class ConversationKernelRunner:
                 cancellation_intent=cancellation_intent,
             )
         finally:
-            self._continuity.discard_scope(
-                ProviderInputContinuityScope(
-                    session_id=self._writer_lease.guard.session_id,
-                    scope_kind=ModelInputScopeKind.SUBAGENT_TASK,
-                    scope_subagent_task_id=task_id,
-                )
+            scope = ProviderInputContinuityScope(
+                session_id=self._writer_lease.guard.session_id,
+                scope_kind=ModelInputScopeKind.SUBAGENT_TASK,
+                scope_subagent_task_id=task_id,
             )
+            self._continuity.discard_scope(scope)
+            self._memory_contexts.discard_scope(scope)
 
     async def _run_turn(
         self,
@@ -980,6 +1045,7 @@ class ConversationKernelRunner:
         *,
         turn_id: str,
         model_call_index: int,
+        inherited_memory_use_policy: MemoryUsePolicy,
         deadline: float,
     ) -> _PreparedProviderDispatch:
         """Freeze, quote and (when present) consume one exact steer suffix."""
@@ -1078,6 +1144,44 @@ class ConversationKernelRunner:
             selected_facts: FrozenCanonicalCompileSnapshot | None = None
             selected_sources: CollectedContextSources | None = None
             selected_append: FrozenProviderInputAppendCompileResult | None = None
+            selected_memory_context: FrozenModelCallMemoryContext | None = None
+            selected_activation_text: str | None = None
+            prepared_preference: ContextSourceCandidate | ContextSourceAbsentFact | None = None
+            selected_preference: ContextSourceCandidate | ContextSourceAbsentFact | None = None
+            selected_trigger_disposition: str | None = None
+            selected_memory_use_policy = inherited_memory_use_policy
+
+            # A steer batch is appended to the already-admitted ROOT prompt.
+            # Classify that exact base prompt first so a new HUMAN_MESSAGE
+            # resets the policy epoch even when busy-Enter steers arrived
+            # before the first provider dispatch.  The ordered steer prefix
+            # below may only strengthen this base policy.
+            steer_base_memory_use_policy = inherited_memory_use_policy
+            if self._memory_projection is not None:
+                base_activation_subject, base_activation_text = (
+                    _activation_subject_for_anchor(base_input, base_anchor)
+                )
+                if (
+                    base_activation_subject
+                    is CapabilityActivationSubjectKind.ROOT_HUMAN_PROMPT
+                ):
+                    base_trigger_policy = (
+                        self._memory_projection.classify_memory_trigger(
+                            base_activation_text
+                        )
+                    )
+                    base_trigger_origin = _input_origin_for_anchor(
+                        base_input, base_anchor
+                    )
+                    steer_base_memory_use_policy = (
+                        base_trigger_policy.memory_use
+                        if base_trigger_origin
+                        is CanonicalInputOriginKind.HUMAN_MESSAGE
+                        else strongest_memory_use_policy(
+                            inherited_memory_use_policy,
+                            base_trigger_policy.memory_use,
+                        )
+                    )
 
             if hydrated:
                 all_hydrated = hydrated
@@ -1156,6 +1260,30 @@ class ConversationKernelRunner:
                         for index, (fact, body) in enumerate(prefix, start=1)
                     )
                     activation_text = prefix[-1][1].decode("utf-8")
+                    memory_use_policy = steer_base_memory_use_policy
+                    trigger_disposition = "ELIGIBLE"
+                    if self._memory_projection is not None:
+                        trigger_policies = tuple(
+                            self._memory_projection.classify_memory_trigger(
+                                body.decode("utf-8")
+                            )
+                            for _fact, body in prefix
+                        )
+                        for trigger_policy in trigger_policies:
+                            memory_use_policy = strongest_memory_use_policy(
+                                memory_use_policy,
+                                trigger_policy.memory_use,
+                            )
+                        trigger_disposition = str(
+                            trigger_policies[-1].automatic_recall
+                        )
+                        if (
+                            memory_use_policy
+                            is MemoryUsePolicy.ALL_DISABLED_BY_USER
+                        ):
+                            trigger_disposition = str(
+                                AutomaticMemoryTriggerDisposition.DISABLED_BY_EXPLICIT_USER_DIRECTIVE
+                            )
                     try:
                         sources = await self._io.run(
                             self._context_source_collector.complete_frozen_sources,
@@ -1172,6 +1300,61 @@ class ConversationKernelRunner:
                         raise StructuredModelInputCompileError(
                             ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
                         ) from exc
+                    effective_preference = prepared_preference
+                    if (
+                        self._memory_projection is not None
+                        and memory_use_policy
+                        is not MemoryUsePolicy.ALL_DISABLED_BY_USER
+                        and effective_preference is None
+                    ):
+                        prepared_preference = (
+                            await self._memory_projection.freeze_response_preference_source()
+                        )
+                        effective_preference = prepared_preference
+                    if (
+                        self._memory_projection is not None
+                        and memory_use_policy
+                        is MemoryUsePolicy.ALL_DISABLED_BY_USER
+                    ):
+                        effective_preference = build_memory_context_source(
+                            kind=(
+                                ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD
+                            ),
+                            texts=None,
+                            absence_kind=ContextSourceAbsenceKind.EXPLICIT_EMPTY,
+                        )
+                    recall_desired = build_memory_context_source(
+                        kind=ContextSourceKind.MEMORY_RECALL,
+                        texts=("", "", "")
+                        if trigger_disposition == "ELIGIBLE"
+                        else None,
+                        absence_kind=ContextSourceAbsenceKind.EXPLICIT_EMPTY,
+                        domain_identity={
+                            "pending_trigger": anchor.provider_input_item_fingerprint,
+                            "disposition": trigger_disposition,
+                        },
+                    )
+                    # Phase A never materializes optional memory.  The exact
+                    # current preference carrier and recall trigger are bound
+                    # into typed reservations below; only their mandatory
+                    # invalidation ceilings can reject a steer.
+                    sources = replace_memory_context_sources(
+                        sources,
+                        (
+                            build_memory_context_source(
+                                kind=(
+                                    ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD
+                                ),
+                                texts=None,
+                                absence_kind=ContextSourceAbsenceKind.NOT_APPLICABLE,
+                            ),
+                            build_memory_context_source(
+                                kind=ContextSourceKind.MEMORY_RECALL,
+                                texts=None,
+                                absence_kind=ContextSourceAbsenceKind.NOT_APPLICABLE,
+                            ),
+                        ),
+                    )
                     compile_request = StructuredModelInputCompileRequest(
                         context_id=_stable_id(
                             "model-context",
@@ -1186,6 +1369,15 @@ class ConversationKernelRunner:
                         compile_binding=prepared_call.compile_binding,
                         sources=sources,
                         dispatch_anchor_entry_id=anchor.source_entry_id,
+                        memory_citation_handles=(
+                            memory_snapshot := self._freeze_memory_call_context(
+                                scope=scope,
+                                planning=planning,
+                                canonical_facts=prospective,
+                                sources=sources,
+                                memory_use_policy=memory_use_policy,
+                            )
+                        )[1],
                     )
                     compatibility = _provider_input_compatibility(
                         prepared_call=prepared_call,
@@ -1211,6 +1403,45 @@ class ConversationKernelRunner:
                         }:
                             raise
                         continue
+                    recall_reservation = None
+                    preference_reservation = None
+                    if effective_preference is not None:
+                        recall_reservation, preference_reservation = (
+                            self._memory_planning_reservations(
+                                planning=planning,
+                                prepared_preference=effective_preference,
+                                recall_desired=recall_desired,
+                                compiled=append.compiled_input,
+                                prepared_call=prepared_call,
+                            )
+                        )
+                    reservations = tuple(
+                        item
+                        for item in (
+                            recall_reservation,
+                            preference_reservation,
+                        )
+                        if item is not None
+                    )
+                    if (
+                        append.compiled_input.final_estimate.total_input_tokens
+                        + sum(
+                            item.invalidation_input_token_ceiling
+                            for item in reservations
+                        )
+                        > prepared_call.compile_binding.effective_input_budget_tokens
+                        or provider_input_logical_utf8_bytes(
+                            system_prompt=append.compiled_input.system_prompt,
+                            tools=append.compiled_input.tools,
+                            messages=append.compiled_input.messages,
+                        )
+                        + sum(
+                            item.invalidation_epoch_bytes_ceiling
+                            for item in reservations
+                        )
+                        > (64 << 20)
+                    ):
+                        continue
                     quote = build_steer_suffix_quote(
                         candidates=candidates,
                         prospective_snapshot_hydrated_bytes=(
@@ -1232,6 +1463,10 @@ class ConversationKernelRunner:
                             None
                             if planning.predecessor_view is None
                             else planning.predecessor_view.semantic_prefix_fingerprint
+                        ),
+                        memory_recall_reservation=recall_reservation,
+                        memory_response_preference_reservation=(
+                            preference_reservation
                         ),
                     )
                     selected_plan = build_prepared_steer_suffix_plan(
@@ -1261,6 +1496,11 @@ class ConversationKernelRunner:
                     selected_facts = prospective
                     selected_sources = sources
                     selected_append = append
+                    selected_memory_context = memory_snapshot[0]
+                    selected_activation_text = activation_text
+                    selected_preference = effective_preference
+                    selected_trigger_disposition = trigger_disposition
+                    selected_memory_use_policy = memory_use_policy
                     break
 
                 if selected_plan is None:
@@ -1302,6 +1542,9 @@ class ConversationKernelRunner:
                 assert selected_facts is not None
                 assert selected_sources is not None
                 assert selected_append is not None
+                assert selected_memory_context is not None
+                assert selected_activation_text is not None
+                assert selected_trigger_disposition is not None
                 try:
                     self._tools.validate_tool_surface_borrow(borrow, surface)
                     if (
@@ -1315,10 +1558,10 @@ class ConversationKernelRunner:
                     ) from exc
                 accepted_entries = await self._consume_prepared_steer_plan(selected_plan)
                 try:
-                    handle.close()
                     canonical_deadline = self._canonical_deadline()
                     handle = await self._io.run(
-                        self._safe_point.freeze_provider_input,
+                        self._safe_point.rotate_provider_input,
+                        handle,
                         turn_id=turn_id,
                         deadline_monotonic=canonical_deadline,
                     )
@@ -1364,14 +1607,72 @@ class ConversationKernelRunner:
                         selected_plan.quote.resulting_epoch_logical_bytes
                     ),
                 )
+                final_sources = await self._apply_memory_sources(
+                    selected_sources,
+                    activation_subject=CapabilityActivationSubjectKind.ROOT_HUMAN_PROMPT,
+                    activation_text=selected_activation_text,
+                    include_recall=True,
+                    frozen_preference=selected_preference,
+                    trigger_disposition=selected_trigger_disposition,
+                )
+                final_memory = self._freeze_memory_call_context(
+                    scope=scope,
+                    planning=selected_plan.predecessor,
+                    canonical_facts=actual,
+                    sources=final_sources,
+                    memory_use_policy=selected_memory_use_policy,
+                )
+                final_request = StructuredModelInputCompileRequest(
+                    context_id=_stable_id(
+                        "model-context-final-steer",
+                        identity.session_id,
+                        turn_id,
+                        str(model_call_index),
+                        selected_plan.plan_fingerprint,
+                    ),
+                    model_call_index=model_call_index,
+                    canonical_input=actual.canonical_input,
+                    canonical_facts=actual,
+                    compile_binding=prepared_call.compile_binding,
+                    sources=final_sources,
+                    dispatch_anchor_entry_id=(
+                        actual.canonical_input.items[-1].source_entry_id
+                    ),
+                    memory_citation_handles=final_memory[1],
+                )
+                final_append, final_sources = await self._compile_with_memory_fallback(
+                    request=final_request,
+                    planning=selected_plan.predecessor,
+                    prepared_call=prepared_call,
+                    canonical_facts=actual,
+                    sources=final_sources,
+                    preference_source=selected_preference,
+                    recall_reservation=(
+                        selected_plan.quote.memory_recall_reservation
+                    ),
+                    preference_reservation=(
+                        selected_plan.quote.memory_response_preference_reservation
+                    ),
+                    scope=scope,
+                    memory_use_policy=selected_memory_use_policy,
+                    deadline=deadline,
+                )
+                final_memory = self._freeze_memory_call_context(
+                    scope=scope,
+                    planning=selected_plan.predecessor,
+                    canonical_facts=actual,
+                    sources=final_sources,
+                    memory_use_policy=selected_memory_use_policy,
+                )
                 return _PreparedProviderDispatch(
                     handle=handle,
                     canonical_facts=actual,
                     planning=selected_plan.predecessor,
                     prepared_call=prepared_call,
                     surface_borrow=borrow,
-                    sources=selected_sources,
-                    append_result=selected_append,
+                    sources=final_sources,
+                    append_result=final_append,
+                    memory_context=final_memory[0],
                     accepted_steers=batch,
                 )
 
@@ -1397,25 +1698,87 @@ class ConversationKernelRunner:
                 raise StructuredModelInputCompileError(
                     ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
                 ) from exc
+            base_sources = sources
+            preference_source = None
+            recall_reservation = None
+            preference_reservation = None
+            trigger_disposition = None
+            memory_use_policy = inherited_memory_use_policy
+            if (
+                self._memory_projection is not None
+                and activation_subject
+                is CapabilityActivationSubjectKind.ROOT_HUMAN_PROMPT
+            ):
+                trigger_policy = self._memory_projection.classify_memory_trigger(
+                    activation_text
+                )
+                trigger_origin = _input_origin_for_anchor(base_input, base_anchor)
+                memory_use_policy = (
+                    trigger_policy.memory_use
+                    if trigger_origin is CanonicalInputOriginKind.HUMAN_MESSAGE
+                    else strongest_memory_use_policy(
+                        inherited_memory_use_policy,
+                        trigger_policy.memory_use,
+                    )
+                )
+                trigger_disposition = str(trigger_policy.automatic_recall)
+                if memory_use_policy is MemoryUsePolicy.ALL_DISABLED_BY_USER:
+                    trigger_disposition = str(
+                        AutomaticMemoryTriggerDisposition.DISABLED_BY_EXPLICIT_USER_DIRECTIVE
+                    )
+                if memory_use_policy is MemoryUsePolicy.ALL_DISABLED_BY_USER:
+                    preference_source = build_memory_context_source(
+                        kind=(ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD),
+                        texts=None,
+                        absence_kind=ContextSourceAbsenceKind.EXPLICIT_EMPTY,
+                    )
+                else:
+                    preference_source = (
+                        await self._memory_projection.freeze_response_preference_source()
+                    )
+                base_sources = replace_memory_context_sources(
+                    sources,
+                    (
+                        build_memory_context_source(
+                            kind=ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD,
+                            texts=None,
+                            absence_kind=ContextSourceAbsenceKind.NOT_APPLICABLE,
+                        ),
+                        build_memory_context_source(
+                            kind=ContextSourceKind.MEMORY_RECALL,
+                            texts=None,
+                            absence_kind=ContextSourceAbsenceKind.NOT_APPLICABLE,
+                        ),
+                    ),
+                )
             compile_request = StructuredModelInputCompileRequest(
                 context_id=f"model-context:{uuid4().hex}",
                 model_call_index=model_call_index,
                 canonical_input=base_input,
                 canonical_facts=base_facts,
                 compile_binding=prepared_call.compile_binding,
-                sources=sources,
+                sources=base_sources,
                 dispatch_anchor_entry_id=(
                     base_anchor.source_entry_id
                     if isinstance(base_anchor, NewTriggerAnchor)
                     else None
                 ),
+                memory_citation_handles=(
+                    memory_snapshot := self._freeze_memory_call_context(
+                        scope=scope,
+                        planning=planning,
+                        canonical_facts=base_facts,
+                        sources=base_sources,
+                        memory_use_policy=memory_use_policy,
+                    )
+                )[1],
             )
             compatibility = _provider_input_compatibility(
                 prepared_call=prepared_call,
                 canonical_facts=base_facts,
-                sources=sources,
+                sources=base_sources,
             )
-            append = await self._io.run(
+            base_append = await self._io.run(
                 _compile_structured_append,
                 self._compiler,
                 compile_request,
@@ -1423,14 +1786,82 @@ class ConversationKernelRunner:
                 compatibility=compatibility,
                 deadline_monotonic=deadline,
             )
+            final_sources = base_sources
+            append = base_append
+            if preference_source is not None and trigger_disposition is not None:
+                recall_desired = build_memory_context_source(
+                    kind=ContextSourceKind.MEMORY_RECALL,
+                    texts=("", "", "")
+                    if trigger_disposition == "ELIGIBLE"
+                    else None,
+                    absence_kind=ContextSourceAbsenceKind.EXPLICIT_EMPTY,
+                    domain_identity={
+                        "dispatch_anchor": (
+                            None
+                            if not isinstance(base_anchor, NewTriggerAnchor)
+                            else base_anchor.provider_input_item_fingerprint
+                        ),
+                        "disposition": trigger_disposition,
+                    },
+                )
+                recall_reservation, preference_reservation = (
+                    self._memory_planning_reservations(
+                        planning=planning,
+                        prepared_preference=preference_source,
+                        recall_desired=recall_desired,
+                        compiled=base_append.compiled_input,
+                        prepared_call=prepared_call,
+                    )
+                )
+                final_sources = await self._apply_memory_sources(
+                    sources,
+                    activation_subject=activation_subject,
+                    activation_text=activation_text,
+                    include_recall=True,
+                    frozen_preference=preference_source,
+                    trigger_disposition=trigger_disposition,
+                )
+                final_memory = self._freeze_memory_call_context(
+                    scope=scope,
+                    planning=planning,
+                    canonical_facts=base_facts,
+                    sources=final_sources,
+                    memory_use_policy=memory_use_policy,
+                )
+                final_request = replace(
+                    compile_request,
+                    sources=final_sources,
+                    memory_citation_handles=final_memory[1],
+                )
+                append, final_sources = await self._compile_with_memory_fallback(
+                    request=final_request,
+                    planning=planning,
+                    prepared_call=prepared_call,
+                    canonical_facts=base_facts,
+                    sources=final_sources,
+                    preference_source=preference_source,
+                    recall_reservation=recall_reservation,
+                    preference_reservation=preference_reservation,
+                    scope=scope,
+                    memory_use_policy=memory_use_policy,
+                    deadline=deadline,
+                )
+            memory_snapshot = self._freeze_memory_call_context(
+                scope=scope,
+                planning=planning,
+                canonical_facts=base_facts,
+                sources=final_sources,
+                memory_use_policy=memory_use_policy,
+            )
             return _PreparedProviderDispatch(
                 handle=handle,
                 canonical_facts=base_facts,
                 planning=planning,
                 prepared_call=prepared_call,
                 surface_borrow=borrow,
-                sources=sources,
+                sources=final_sources,
                 append_result=append,
+                memory_context=memory_snapshot[0],
             )
         except BaseException:
             handle.close()
@@ -1451,6 +1882,441 @@ class ConversationKernelRunner:
             raise StructuredModelInputCompileError(
                 ModelInputCompileFailureKind.DEADLINE_EXPIRED
             ) from exc
+
+    def _freeze_memory_call_context(
+        self,
+        *,
+        scope: ProviderInputContinuityScope,
+        planning: FrozenProviderInputAppendPlanningInput,
+        canonical_facts: FrozenCanonicalCompileSnapshot,
+        sources: CollectedContextSources,
+        memory_use_policy: MemoryUsePolicy,
+    ) -> tuple[FrozenModelCallMemoryContext, tuple[tuple[str, str], ...]]:
+        epoch_nonce = (
+            planning.predecessor_view.epoch_nonce
+            if planning.predecessor_view is not None
+            else f"cold:{planning.planning_fingerprint}"
+        )
+        return self._memory_contexts.freeze_call(
+            scope=scope,
+            epoch_nonce=epoch_nonce,
+            canonical_facts=canonical_facts,
+            sources=sources.candidates,
+            memory_use_policy=memory_use_policy,
+        )
+
+    @staticmethod
+    def _memory_source_head(
+        planning: FrozenProviderInputAppendPlanningInput,
+        kind: ContextSourceKind,
+    ) -> ProcessLocalSourceHead | None:
+        predecessor = planning.predecessor_view
+        if predecessor is None:
+            return None
+        return next(
+            (item for item in predecessor.source_heads if item.source_kind is kind),
+            None,
+        )
+
+    @staticmethod
+    def _memory_source_presence(
+        source: ContextSourceCandidate | ContextSourceAbsentFact,
+    ) -> SourceObservationPresence:
+        if isinstance(source, ContextSourceCandidate):
+            return SourceObservationPresence.VALUE
+        if source.absence_kind is ContextSourceAbsenceKind.UNAVAILABLE:
+            return SourceObservationPresence.UNAVAILABLE
+        return SourceObservationPresence.CLEARED
+
+    @staticmethod
+    def _memory_source_occurrence_fingerprint(
+        source: ContextSourceCandidate | ContextSourceAbsentFact,
+    ) -> str:
+        # Both Round 8 sources are SNAPSHOT_ON_CHANGE.  Keep the occurrence
+        # derivation identical to the pure compiler without importing its
+        # private implementation.
+        if source.lifecycle is not ContextSourceLifecycle.SNAPSHOT_ON_CHANGE:
+            raise StructuredModelInputCompileError(
+                ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
+            )
+        return context_fingerprint(
+            "pulsara:context-source-occurrence:v1",
+            {
+                "domain": source.domain_semantic_fingerprint,
+                "lifecycle": source.lifecycle.value,
+                "occurrence": None,
+            },
+        )
+
+    def _memory_invalidation_reservation(
+        self,
+        *,
+        source_kind: ContextSourceKind,
+        prior: ProcessLocalSourceHead,
+        desired: ContextSourceCandidate | ContextSourceAbsentFact,
+        compiled: FrozenCompiledModelInput,
+        prepared_call: PreparedKernelModelCall,
+    ) -> MemorySourceInvalidationReservation:
+        cleared = build_memory_context_source(
+            kind=source_kind,
+            texts=None,
+            absence_kind=ContextSourceAbsenceKind.EXPLICIT_EMPTY,
+        )
+        unavailable = build_memory_context_source(
+            kind=source_kind,
+            texts=None,
+            absence_kind=ContextSourceAbsenceKind.UNAVAILABLE,
+        )
+        assert isinstance(cleared, ContextSourceAbsentFact)
+        assert isinstance(unavailable, ContextSourceAbsentFact)
+        invalidation_messages = tuple(
+            encode_runtime_observation(
+                source_kind=source_kind,
+                trust_class=item.trust_class,
+                lifecycle=(
+                    SourceObservationLifecycle.CLEARED
+                    if item.absence_kind is ContextSourceAbsenceKind.EXPLICIT_EMPTY
+                    else SourceObservationLifecycle.UNAVAILABLE
+                ),
+                presence=(
+                    SourceObservationPresence.CLEARED
+                    if item.absence_kind is ContextSourceAbsenceKind.EXPLICIT_EMPTY
+                    else SourceObservationPresence.UNAVAILABLE
+                ),
+                contract_version=item.source_contract_version,
+                body="",
+            )
+            for item in (cleared, unavailable)
+        )
+        estimator = prepared_call.compile_binding.estimator
+        base_estimate = compiled.final_estimate
+        token_deltas: list[int] = []
+        byte_deltas: list[int] = []
+        for message in invalidation_messages:
+            estimate = estimator.estimate_frozen_input(
+                system_prompt=compiled.system_prompt,
+                messages=(*compiled.messages, message),
+                tools=compiled.tools,
+            )
+            token_deltas.append(
+                max(0, estimate.total_input_tokens - base_estimate.total_input_tokens)
+            )
+            byte_deltas.append(
+                provider_input_logical_utf8_bytes(
+                    system_prompt="",
+                    tools=(),
+                    messages=(message,),
+                )
+            )
+        full_bytes = 0
+        full_tokens = 0
+        if isinstance(desired, ContextSourceCandidate):
+            full_message = encode_runtime_observation(
+                source_kind=source_kind,
+                trust_class=desired.trust_class,
+                lifecycle=SourceObservationLifecycle.SNAPSHOT,
+                presence=SourceObservationPresence.VALUE,
+                contract_version=desired.source_contract_version,
+                body=desired.variants[0].text,
+            )
+            full_bytes = provider_input_logical_utf8_bytes(
+                system_prompt="", tools=(), messages=(full_message,)
+            )
+            full_estimate = estimator.estimate_frozen_input(
+                system_prompt=compiled.system_prompt,
+                messages=(*compiled.messages, full_message),
+                tools=compiled.tools,
+            )
+            full_tokens = max(
+                0,
+                full_estimate.total_input_tokens - base_estimate.total_input_tokens,
+            )
+        return build_memory_source_invalidation_reservation(
+            source_kind=source_kind,
+            prior_presence=prior.presence,
+            prior_semantic_fingerprint=prior.semantic_fingerprint,
+            desired_presence=self._memory_source_presence(desired),
+            desired_semantic_fingerprint=(
+                self._memory_source_occurrence_fingerprint(desired)
+            ),
+            source_contract_fingerprint=desired.source_contract_fingerprint,
+            invalidation_encoded_utf8_bytes_ceiling=max(byte_deltas),
+            invalidation_input_token_ceiling=max(token_deltas),
+            invalidation_epoch_bytes_ceiling=max(byte_deltas),
+            full_encoded_utf8_bytes=full_bytes,
+            full_input_token_cost=full_tokens,
+            estimator_fingerprint=(
+                prepared_call.compile_binding.estimator.fact.estimator_fingerprint
+            ),
+        )
+
+    def _memory_planning_reservations(
+        self,
+        *,
+        planning: FrozenProviderInputAppendPlanningInput,
+        prepared_preference: ContextSourceCandidate | ContextSourceAbsentFact,
+        recall_desired: ContextSourceCandidate | ContextSourceAbsentFact,
+        compiled: FrozenCompiledModelInput,
+        prepared_call: PreparedKernelModelCall,
+    ) -> tuple[
+        MemorySourceInvalidationReservation | None,
+        MemorySourceInvalidationReservation | None,
+    ]:
+        recall_prior = self._memory_source_head(
+            planning, ContextSourceKind.MEMORY_RECALL
+        )
+        preference_prior = self._memory_source_head(
+            planning, ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD
+        )
+        recall = None
+        if recall_prior is not None and recall_prior.presence in {
+            SourceObservationPresence.VALUE,
+            SourceObservationPresence.UNAVAILABLE,
+        }:
+            recall = self._memory_invalidation_reservation(
+                source_kind=ContextSourceKind.MEMORY_RECALL,
+                prior=recall_prior,
+                desired=recall_desired,
+                compiled=compiled,
+                prepared_call=prepared_call,
+            )
+        preference = None
+        desired_presence = self._memory_source_presence(prepared_preference)
+        desired_semantic = self._memory_source_occurrence_fingerprint(
+            prepared_preference
+        )
+        if (
+            preference_prior is not None
+            and preference_prior.presence is SourceObservationPresence.VALUE
+            and (
+                desired_presence is not SourceObservationPresence.VALUE
+                or preference_prior.semantic_fingerprint != desired_semantic
+            )
+        ):
+            preference = self._memory_invalidation_reservation(
+                source_kind=ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD,
+                prior=preference_prior,
+                desired=prepared_preference,
+                compiled=compiled,
+                prepared_call=prepared_call,
+            )
+        return recall, preference
+
+    async def _apply_memory_sources(
+        self,
+        sources: CollectedContextSources,
+        *,
+        activation_subject: CapabilityActivationSubjectKind | None,
+        activation_text: str,
+        include_recall: bool,
+        frozen_preference: ContextSourceCandidate | ContextSourceAbsentFact | None = None,
+        trigger_disposition: str | None = None,
+    ) -> CollectedContextSources:
+        if (
+            self._memory_projection is None
+            or activation_subject
+            is not CapabilityActivationSubjectKind.ROOT_HUMAN_PROMPT
+        ):
+            return sources
+        disposition = trigger_disposition or str(
+            self._memory_projection.classify_automatic_trigger(activation_text)
+        )
+        preference = frozen_preference or (
+            await self._memory_projection.freeze_response_preference_source()
+        )
+        if disposition == "DISABLED_BY_EXPLICIT_USER_DIRECTIVE":
+            preference = build_memory_context_source(
+                kind=ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD,
+                texts=None,
+                absence_kind=ContextSourceAbsenceKind.EXPLICIT_EMPTY,
+            )
+        replacements: list[ContextSourceCandidate | ContextSourceAbsentFact] = [
+            preference
+        ]
+        if include_recall:
+            if disposition in {
+                "DISABLED_BY_EXPLICIT_USER_DIRECTIVE",
+                "SKIPPED_LOW_INFORMATION",
+            }:
+                replacements.append(
+                    build_memory_context_source(
+                        kind=ContextSourceKind.MEMORY_RECALL,
+                        texts=None,
+                        absence_kind=ContextSourceAbsenceKind.EXPLICIT_EMPTY,
+                    )
+                )
+            else:
+                replacements.append(
+                    await self._memory_projection.freeze_automatic_recall_source(
+                        activation_text
+                    )
+                )
+        return replace_memory_context_sources(sources, tuple(replacements))
+
+    async def _compile_with_memory_fallback(
+        self,
+        *,
+        request: StructuredModelInputCompileRequest,
+        planning: FrozenProviderInputAppendPlanningInput,
+        prepared_call: PreparedKernelModelCall,
+        canonical_facts: FrozenCanonicalCompileSnapshot,
+        sources: CollectedContextSources,
+        preference_source: ContextSourceCandidate | ContextSourceAbsentFact | None,
+        recall_reservation: MemorySourceInvalidationReservation | None,
+        preference_reservation: MemorySourceInvalidationReservation | None,
+        scope: ProviderInputContinuityScope,
+        memory_use_policy: MemoryUsePolicy,
+        deadline: float,
+    ) -> tuple[FrozenProviderInputAppendCompileResult, CollectedContextSources]:
+        """Materialize optional memory without invalidating an accepted steer.
+
+        Preference FULL gets the first optional allocation.  Recall then uses
+        the ordinary FULL/COMPACT/REF_ONLY compiler degradation.  If either
+        optional VALUE cannot fit, only the already-quoted stale-state carrier
+        may remain.  No queue row is reconsidered and no remote operation is
+        retried here.
+        """
+
+        budget_failures = {
+            ModelInputCompileFailureKind.COMPILE_WORKING_SET_EXCEEDED,
+            ModelInputCompileFailureKind.PROTECTED_TRANSCRIPT_EXCEEDS_BUDGET,
+            ModelInputCompileFailureKind.REQUIRED_CONTEXT_EXCEEDS_BUDGET,
+            ModelInputCompileFailureKind.PREFIX_EPOCH_BUDGET_EXHAUSTED,
+            ModelInputCompileFailureKind.STATEFUL_SOURCE_REPLACEMENT_OVER_BUDGET,
+        }
+
+        def request_for(
+            selected_sources: CollectedContextSources,
+        ) -> StructuredModelInputCompileRequest:
+            memory = self._freeze_memory_call_context(
+                scope=scope,
+                planning=planning,
+                canonical_facts=canonical_facts,
+                sources=selected_sources,
+                memory_use_policy=memory_use_policy,
+            )
+            return replace(
+                request,
+                sources=selected_sources,
+                memory_citation_handles=memory[1],
+            )
+
+        async def compile_one(selected_sources: CollectedContextSources):
+            selected_request = request_for(selected_sources)
+            return await self._io.run(
+                _compile_structured_append,
+                self._compiler,
+                selected_request,
+                planning=planning,
+                compatibility=_provider_input_compatibility(
+                    prepared_call=prepared_call,
+                    canonical_facts=canonical_facts,
+                    sources=selected_sources,
+                ),
+                deadline_monotonic=deadline,
+            )
+
+        try:
+            return await compile_one(sources), sources
+        except StructuredModelInputCompileError as exc:
+            if exc.kind not in budget_failures:
+                raise
+
+        def fallback_source(
+            kind: ContextSourceKind,
+            reservation: MemorySourceInvalidationReservation | None,
+            desired: ContextSourceCandidate | ContextSourceAbsentFact | None,
+        ) -> ContextSourceAbsentFact:
+            absence = ContextSourceAbsenceKind.NOT_APPLICABLE
+            if reservation is not None:
+                if (
+                    isinstance(desired, ContextSourceAbsentFact)
+                    and desired.absence_kind
+                    is ContextSourceAbsenceKind.EXPLICIT_EMPTY
+                ):
+                    absence = ContextSourceAbsenceKind.EXPLICIT_EMPTY
+                else:
+                    absence = ContextSourceAbsenceKind.UNAVAILABLE
+            value = build_memory_context_source(
+                kind=kind,
+                texts=None,
+                absence_kind=absence,
+            )
+            assert isinstance(value, ContextSourceAbsentFact)
+            return value
+
+        recall_desired = next(
+            (
+                item
+                for item in (*sources.candidates, *sources.absent_facts)
+                if item.source_kind is ContextSourceKind.MEMORY_RECALL
+            ),
+            None,
+        )
+        without_recall = replace_memory_context_sources(
+            sources,
+            (
+                fallback_source(
+                    ContextSourceKind.MEMORY_RECALL,
+                    recall_reservation,
+                    recall_desired,
+                ),
+            ),
+        )
+        try:
+            return await compile_one(without_recall), without_recall
+        except StructuredModelInputCompileError as exc:
+            if exc.kind not in budget_failures:
+                raise
+
+        without_optional_values = replace_memory_context_sources(
+            without_recall,
+            (
+                fallback_source(
+                    ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD,
+                    preference_reservation,
+                    preference_source,
+                ),
+            ),
+        )
+        return await compile_one(without_optional_values), without_optional_values
+
+    async def _prepare_memory_reflection(
+        self,
+        *,
+        cut: PreparedProviderInputCut,
+        through_sequence: int,
+        permission: FrozenRunPermissionSnapshot,
+        remember_requested: bool,
+        memory_use_policy: MemoryUsePolicy,
+    ) -> str | None:
+        """Install one optional DORMANT handoff before the ROOT slot releases."""
+
+        if (
+            self._memory_projection is None
+            or memory_use_policy is MemoryUsePolicy.ALL_DISABLED_BY_USER
+        ):
+            return None
+        post_turn_cut = PreparedProviderInputCut(
+            session_id=cut.session_id,
+            turn_id=cut.turn_id,
+            context_binding_revision_id=cut.context_binding_revision_id,
+            provider_input_through_sequence=through_sequence,
+        )
+        try:
+            frozen = await self._read_compile_snapshot(
+                post_turn_cut, deadline=self._canonical_deadline()
+            )
+            return self._memory_projection.prepare_and_adopt_reflection(
+                canonical=frozen.canonical_input,
+                permission=permission,
+                remember_requested=remember_requested,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # Reflection is weaker than the already-committed reply.
+            return None
 
     async def _hydrate_pending_steers(
         self,
@@ -1687,6 +2553,12 @@ class ConversationKernelRunner:
 
         model_call_count = 0
         tool_call_count = 0
+        remember_requested = False
+        current_memory_use_policy = (
+            self._root_memory_use_policy
+            if intent.scope_kind is ModelInputScopeKind.ROOT
+            else MemoryUsePolicy.ENABLED
+        )
         active_surface_borrow: ProcessLocalToolSurfaceBorrow | None = None
         try:
             unsettled_process_local_effect: ProcessLocalEffectSettlementToken | None = (
@@ -1701,6 +2573,7 @@ class ConversationKernelRunner:
                         dispatch = await self._prepare_provider_dispatch(
                             turn_id=turn_id,
                             model_call_index=model_call_count,
+                            inherited_memory_use_policy=current_memory_use_policy,
                             deadline=planning_deadline,
                         )
                         break
@@ -1721,6 +2594,10 @@ class ConversationKernelRunner:
                     planning = dispatch.planning
                     prepared_call = dispatch.prepared_call
                     sources = dispatch.sources
+                    memory_context = dispatch.memory_context
+                    current_memory_use_policy = memory_context.memory_use_policy
+                    if identity.conversation_scope_kind is ModelInputScopeKind.ROOT:
+                        self._root_memory_use_policy = current_memory_use_policy
                     if (
                         sources.registry_fingerprint
                         != self._context_source_collector.registry_fingerprint
@@ -1754,6 +2631,7 @@ class ConversationKernelRunner:
                         compiled_input=compiled_input,
                         cut=prepared.cut,
                         surface_borrow=active_surface_borrow,
+                        memory_context=memory_context,
                     )
                     execution: PreparedKernelModelExecution | None = None
                     installed = False
@@ -1882,12 +2760,22 @@ class ConversationKernelRunner:
                 if not calls and accepted.turn_completed:
                     active_surface_borrow.close()
                     active_surface_borrow = None
+                    reflection_token = await self._prepare_memory_reflection(
+                        cut=request.cut,
+                        through_sequence=accepted.entry_sequence,
+                        permission=canonical_facts.run_permission_snapshot,
+                        remember_requested=remember_requested,
+                        memory_use_policy=current_memory_use_policy,
+                    )
                     return KernelRunResult(
                         turn_id=turn_id,
                         final_entry_id=accepted.entry_id,
                         final_text=completed.public_text,
                         model_call_count=model_call_count,
                         tool_call_count=tool_call_count,
+                        memory_reflection_tokens=(
+                            () if reflection_token is None else (reflection_token,)
+                        ),
                     )
                 if not calls:
                     # A steer arrived after this provider call froze its cut.
@@ -1963,6 +2851,7 @@ class ConversationKernelRunner:
                         assistant_entry_id=accepted.entry_id,
                         permission_snapshot=(canonical_facts.run_permission_snapshot),
                         surface_borrow=active_surface_borrow,
+                        memory_context=request.memory_context,
                     )
                     machine_policy_kind = authorization.kind
                     capability_decision_id = _stable_id(
@@ -2194,6 +3083,7 @@ class ConversationKernelRunner:
                             ),
                             executor_binding_fingerprint=binding_fingerprint,
                             surface_borrow=active_surface_borrow,
+                            memory_context=request.memory_context,
                         )
                         try:
                             result = await self._tools.invoke(
@@ -2314,6 +3204,23 @@ class ConversationKernelRunner:
                             live_sink=live_sink,
                             tool_result_block_id=tool_result_block_id,
                             live_attribution=live_attribution,
+                            continuity_scope=planning.scope,
+                            memory_citation_visibility=(
+                                MemoryCitationVisibility(
+                                    binding.memory_citation_visibility
+                                )
+                            ),
+                            memory_citation_evidence_kind=(
+                                MemoryCitationEvidenceKind.MEMORY_READ_EXPOSURE
+                                if call.tool_name == "artifact_read"
+                                and result.model_visible_memory_fact_ids
+                                else MemoryCitationEvidenceKind(
+                                    binding.memory_citation_evidence_kind
+                                )
+                            ),
+                            execution_binding_fingerprint=(
+                                binding.executor_binding_fingerprint
+                            ),
                         ),
                         name=f"kernel-tool-result-settlement:{result_entry_id}",
                     )
@@ -2322,6 +3229,8 @@ class ConversationKernelRunner:
                     )
                     if settlement.process_local_effect_committed:
                         unsettled_process_local_effect = None
+                    if result.memory_candidate is not None:
+                        remember_requested = True
                     if cancellation is not None:
                         raise cancellation
                     if result.caller_cancelled_while_running:
@@ -2965,6 +3874,10 @@ class ConversationKernelRunner:
         live_sink: _ToolResultLiveSink | None,
         tool_result_block_id: str | None,
         live_attribution: Mapping[str, object] | None,
+        continuity_scope: ProviderInputContinuityScope,
+        memory_citation_visibility: MemoryCitationVisibility,
+        memory_citation_evidence_kind: MemoryCitationEvidenceKind,
+        execution_binding_fingerprint: str,
     ) -> _KnownToolResultSettlementOutcome:
         if live_sink is not None:
             await asyncio.shield(live_sink.close())
@@ -3056,26 +3969,8 @@ class ConversationKernelRunner:
                 else result.trusted_observation.duration_microseconds
             ),
             actor_id=tool_name,
-            memory_candidate_id=(
-                None
-                if result.memory_proposal is None
-                else result.memory_proposal.candidate_id
-            ),
-            memory_proposal_kind=(
-                None
-                if result.memory_proposal is None
-                else result.memory_proposal.proposal_kind
-            ),
-            memory_proposal_payload=(
-                None
-                if result.memory_proposal is None
-                else result.memory_proposal.proposal_payload
-            ),
-            memory_governance_job_id=(
-                None
-                if result.memory_proposal is None
-                else result.memory_proposal.governance_job_id
-            ),
+            memory_candidate=result.memory_candidate,
+            model_visible_memory_fact_ids=result.model_visible_memory_fact_ids,
         )
         try:
             accepted = await self._accept_tool_result_exact(prepared_acceptance)
@@ -3099,6 +3994,22 @@ class ConversationKernelRunner:
                 )
             )
             raise
+        if result.memory_candidate is not None and self._memory_projection is not None:
+            self._memory_projection.offer_candidate_wake(
+                result.memory_candidate.candidate_id
+            )
+        epoch = self._continuity.current_view(continuity_scope)
+        if epoch is None:
+            raise RuntimeError("accepted ToolResult lost its provider-input epoch")
+        self._memory_contexts.register_result(
+            scope=continuity_scope,
+            epoch_nonce=epoch.epoch_nonce,
+            result_id=result_id,
+            result_entry_sequence=accepted.entry_sequence,
+            visibility=memory_citation_visibility,
+            evidence_kind=memory_citation_evidence_kind,
+            execution_binding_fingerprint=execution_binding_fingerprint,
+        )
         effect_committed = False
         if result.process_local_settlement is not None:
             await self._tools.settle_process_local_effect(
@@ -3293,6 +4204,26 @@ def _activation_subject_for_anchor(
     # must preserve the last activation snapshot rather than re-evaluating the
     # turn as a fresh non-human trigger.
     return None, ""
+
+
+def _input_origin_for_anchor(
+    canonical_input: CanonicalModelInputSnapshot,
+    anchor: NewTriggerAnchor | NoNewTriggerAnchor,
+) -> CanonicalInputOriginKind | None:
+    if not isinstance(anchor, NewTriggerAnchor):
+        return None
+    matches = tuple(
+        item
+        for item in canonical_input.items
+        if item.source_entry_id == anchor.source_entry_id
+        and provider_input_item_fingerprint(item)
+        == anchor.provider_input_item_fingerprint
+    )
+    if len(matches) != 1:
+        raise StructuredModelInputCompileError(
+            ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
+        )
+    return matches[0].input_origin
 
 
 def _compile_structured_input(

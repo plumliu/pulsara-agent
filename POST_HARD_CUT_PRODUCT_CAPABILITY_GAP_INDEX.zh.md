@@ -1,16 +1,16 @@
 # Pulsara hard-cut 后产品能力缺失索引
 
-> 状态：WORKING GAP INDEX（产品能力事实索引，不是恢复设计；PHC-02 已通过 Round 1 恢复，PHC-01/03/04/05/06 已通过 Round 2 恢复；PHC-17 的typed compiler与同Host prefix continuity已通过 Round 3 / 3.1完整恢复；PHC-09 的 Python Runtime/Host、canonical/Protocol 后端已于 2026-08-12 通过 Round 4 恢复，Go/TUI 产品闭环明确延期；PHC-07A execution envelope已通过 Round 5A恢复，PHC-07B compaction仍缺失）
+> 状态：WORKING GAP INDEX（产品能力事实索引，不是恢复设计；PHC-02 已通过 Round 1 恢复，PHC-01/03/04/05/06 已通过 Round 2 恢复；PHC-17 的typed compiler与同Host prefix continuity已通过 Round 3 / 3.1完整恢复；PHC-09 的 Python Runtime/Host、canonical/Protocol 后端已通过 Round 4 恢复，Go/TUI 产品闭环明确延期；PHC-07A execution envelope已通过 Round 5A恢复，PHC-07B compaction仍缺失；memory专项已按 Round 8 advisory 边界重构并激活）
 >
-> 初始调研：2026-08-10；最近复核：2026-08-13（PHC-17 Round 3.1 activation、PHC-09 activation、PHC-07A Round 5A activation）
+> 初始调研：2026-08-10；最近复核：2026-08-16（Round 8 Advisory Memory activation）
 >
 > hard-cut 前代码基线：`5b7ad9f7`
 >
-> 当前 checkpoint HEAD：`a71aa195f2469701fb078d79f78f4fe234bc0d46`；Round 3 Structured Model-Input Compiler与Round 4 Plan Workflow已经提交；Round 3.1已按[`ROUND_3_1_PROVIDER_INPUT_PREFIX_CONTINUITY_IMPLEMENTATION_SPEC.zh.md`](ROUND_3_1_PROVIDER_INPUT_PREFIX_CONTINUITY_IMPLEMENTATION_SPEC.zh.md)激活，并闭合既有Protocol上的busy-steer/queue-next-turn窄Go输入；Round 4 Plan的完整Go/TUI交互产品面仍不计入本次activation
+> 当前 checkpoint HEAD：`327bf86061a04e628dc8e700d7030f4237fbbe5d`；Round 8已按[`ROUND_8_ADVISORY_MEMORY_SUBSYSTEM_IMPLEMENTATION_SPEC.zh.md`](ROUND_8_ADVISORY_MEMORY_SUBSYSTEM_IMPLEMENTATION_SPEC.zh.md)在当前未提交工作树中激活；没有恢复旧memory durable job/event/recovery graph，Round 4 Plan的完整Go/TUI交互产品面仍不计入本次activation
 >
 > 范围：Python Agent Runtime / Host及其直接产品能力；Go TUI总体仍不在当前恢复主线中，但被确定为后续唯一主要交互与观察产品面。Round 3.1只例外纳入既有Protocol上的busy-steer/queue-next-turn窄输入绑定，因为它直接决定provider-input causal suffix
 >
-> 明确排除：memory 子系统重设计、Oxigraph/SPARQL、旧 EventLog execution replay、coroutine/provider transport recovery、exact context-input audit、跨Host provider-input generation/prefix accumulator恢复、跨 Host terminal/subagent execution 恢复、Legacy Python REPL兼容恢复、standalone Canonical Inspector产品
+> 明确排除：旧memory durability/recovery系统、Oxigraph/SPARQL、旧 EventLog execution replay、coroutine/provider transport recovery、exact context-input audit、跨Host provider-input generation/prefix accumulator恢复、跨 Host terminal/subagent execution 恢复、Legacy Python REPL兼容恢复、standalone Canonical Inspector产品
 
 ## 1. 文档目的
 
@@ -106,7 +106,7 @@ Codex、Claude Code和Grok Build都同时拥有typed lifecycle、completed conve
 ### 2.2 代码对照点
 
 - hard-cut 前：`5b7ad9f7`，即 Stage 2/3–5 开始删除生产 owner 之前的代码真值；
-- 当前：`242895dcfef1af1fcdcd1f433b28637c16020720`；
+- 当前：`327bf86061a04e628dc8e700d7030f4237fbbe5d`上的Round 8未提交activation工作树；
 - 归档标题扫描：[`archived_docs/`](archived_docs/) 下共 **116** 份 Markdown 文档；
 - 根目录仍活跃的产品/架构材料也用于确认原有产品承诺，尤其是：
   - [`PULSARA_LEGACY_REPL_RETENTION_CONTRACT.zh.md`](PULSARA_LEGACY_REPL_RETENTION_CONTRACT.zh.md)；
@@ -176,7 +176,7 @@ git grep -n 'TerminalMonitorTool' "$PRE_HARD_CUT" -- src tests
 | PHC-12 | Frozen Legacy Python REPL 产品面 | **明确退役，不恢复兼容**：旧命令差异只作hard-cut审计记录 | approval、plan、MCP等仍有价值的产品语义归各自能力族，并最终通过Go TUI交互，不为旧命令表复建Runtime机制 |
 | PHC-13 | 跨 turn 失败/中断提示 | **已恢复（Round 7）**：same-scope immediate predecessor在同一canonical cut中形成bounded、脱敏、typed outcome；成功successor遮蔽更早失败，late result只追加修正 | “继续”时模型可区分user stop、Runtime/provider failure、Host lifecycle、resource boundary与unknown interruption，不把完整canonical entry误称为partial message |
 | PHC-14 | Model-visible tool observation timing/freshness | **已恢复（Round 7）**：既有`tool_results`冻结observed time、monotonic duration、immutable origin与optional trusted duration；每turn追加freshness frontier而不回写旧result | 模型可判断观测时刻、耗时及CURRENT/PREVIOUS/HISTORICAL关系，tool body不能伪造outer timing |
-| PHC-15 | Capability catalog 与真实 executor 一致性 | **仍不闭合，但Plan漂移已由Round 4关闭**：29 个descriptor中，9个direct、4个flat subagent、8个memory及3个Plan control已有production binding；剩余5个均属于旧hierarchical task-graph缺口 | Round 1/2/4已分别闭合`artifact_read`、Terminal与Plan；dead descriptor只剩PHC-10任务图能力族 |
+| PHC-15 | Capability catalog 与真实 executor 一致性 | **仍不闭合，但Plan、MCP与Memory漂移已关闭**：31个descriptor中，9个direct、4个flat subagent、4个Round 8 memory、3个Plan control与6个MCP已有production binding；剩余5个均属于旧hierarchical task-graph缺口 | Round 1/2/4/6/8已分别闭合artifact、Terminal、Plan、MCP与Advisory Memory；dead descriptor只剩PHC-10任务图能力族 |
 | PHC-16 | Go TUI S1–S3及各恢复轮次UI | **未来主要产品面，整体明确延后；Round 3.1有窄例外**：Round 4只冻结Python Protocol/canonical边界，不把Go selector、question/draft review或客户端exact-join计入activation；Round 3.1仅补既有command kind上的busy Enter steer与Tab queue-next-turn | 最终承接会话观察、交互与控制；composer/copy/paste/notice及Plan/MCP等能力族UI另行实施 |
 | PHC-17 | Structured model-input / context compilation | **已恢复（Round 3 + Round 3.1）**：exact canonical reader、provider-neutral compiler、scope-frozen tool surface、target estimator与typed allocation已恢复；Host-scoped ROOT/child epoch保证同scope同epoch的SYSTEM/tools不变、messages只追加，dynamic source与历史tool-result表示不再重写 | busy `Enter` steer exact active ROOT，`Tab`排队future `NEW_TURN`；Host replacement从canonical rows冷启动，不恢复durable generation、provider remote state或prefix replay |
 
@@ -1303,7 +1303,7 @@ messages[n + 1] == messages[n] || append_only_suffix
 
 包括全部 `MEMORY_*`、`GRAPH_DATABASE_VISION`、`ONTOLOGY_*`、`OXIGRAPH_*`。
 
-结论：memory 按用户要求由后续专项重新设计，本索引不评价；Oxigraph、SPARQL、JSON-LD ontology 是 hard-cut 明确删除项，不计产品回归。
+结论：memory已通过Round 8按advisory data重构：一次`remember`只产生一个candidate，五类taxonomy、USER/domain与WORKSPACE scope、best-effort governance/reflection/embedding、sparse+dense recall、explicit rerank、relation/lifecycle与append-only compiler source已闭合；不恢复durable memory job/event/replay/recovery。Oxigraph、SPARQL、JSON-LD ontology仍是hard-cut明确删除项，不计产品回归。
 
 ### 17.9 Durability / recovery / architecture 标题族
 
@@ -1351,7 +1351,7 @@ messages[n + 1] == messages[n] || append_only_suffix
 - exact context-input audit：已经冻结“不承诺”；
 - yielded terminal/subagent 跨 Host continuation：已经冻结“不承诺”；
 - old event replay/reducer/checkpoint/receipt：durability machinery，不是独立产品能力；
-- memory governance/recall/lifecycle：进入后续 memory 专项，不在本索引下结论。
+- memory governance/recall/lifecycle：已由Round 8 Advisory Memory专项关闭；其弱完整性是产品契约，不得再解释为需要恢复durable retry/recovery。
 
 ## 20. 本索引的使用边界
 
@@ -1370,6 +1370,6 @@ messages[n + 1] == messages[n] || append_only_suffix
 
 PHC-11与PHC-12是例外处置：它们保留在索引中用于审计hard-cut事实，但不进入恢复backlog。前者所需的canonical观察能力、后者所涉及的Plan/MCP/approval等独立产品语义，最终由Go TUI及各自Kernel契约承接；不以恢复旧Python产品面为目标。
 
-Round 3与Round 3.1已完整恢复PHC-17的typed compiler和process-local prefix continuity；Round 4已恢复PHC-09的Python Runtime/Host与Protocol后端；Round 5A已恢复PHC-07A execution envelope。上述轮次都不恢复durable compiled-input audit、provider-input replay或旧generation recovery graph。PHC-07B/08/13/14仍需各自规格化其domain truth。它们都只能把已接受事实投影进compiler，不能让compiler替代其authority。
+Round 3与Round 3.1已完整恢复PHC-17的typed compiler和process-local prefix continuity；Round 4已恢复PHC-09的Python Runtime/Host与Protocol后端；Round 5A已恢复PHC-07A execution envelope；Round 6与Round 7分别闭合MCP、previous-turn outcome与tool observation；Round 8已闭合Advisory Memory。上述轮次都不恢复durable compiled-input audit、provider-input replay或旧generation recovery graph。PHC-07B仍需独立规格化context compaction/rebase truth；它只能把已接受事实投影进compiler，不能让compiler替代其authority。
 
-同样，后续恢复不能把`26 / 23 / 13 / 2`当作拒绝真实产品语义的永久配额。任何数量变化都必须经过上述closed contract审查，但“保持旧数字”不优先于“以正确的canonical/live边界完整表达产品能力”。
+同样，后续恢复不能把任何历史oracle当作拒绝真实产品语义的永久配额。Round 8当前的closed oracle为`31 Committed / 23 Live / 13 subjects / 2 guards / 25 product relations / 1 durable job`。任何数量变化都必须经过上述closed contract审查，但“保持旧数字”不优先于“以正确的canonical/live边界完整表达产品能力”。

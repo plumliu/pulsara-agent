@@ -18,6 +18,10 @@ from pulsara_agent.conversation_kernel.contracts import (
     JobSafetyClass,
     PromptDeliveryMode,
 )
+from pulsara_agent.conversation_kernel.memory.contracts import (
+    MemoryCandidateStatus,
+    PreparedMemoryCandidateAcceptance,
+)
 from pulsara_agent.ports.artifact import (
     ToolOutputArtifactDisposition,
     ToolOutputArtifactUnavailabilityReason,
@@ -60,8 +64,6 @@ from ._repository.contracts import (
     ConversationKernelConflict,
     JobAttemptTerminalized,
     JobCancellationRequested,
-    MemoryVectorFactSource,
-    MemoryVectorSource,
     NoToolResultSideBranch,
     PlanContinuationDisposition,
     PlanContinuationInspection,
@@ -98,7 +100,7 @@ from ._repository.external_results import _ExternalResultOperations
 from ._repository.jobs import _JobOperations
 from ._repository.kernel import _RepositoryKernel
 from ._repository.matching import _MatchingOperations
-from ._repository.memory import _MemoryOperations
+from ._repository.memory import AcceptedMemoryGovernance, _MemoryOperations
 from ._repository.plans import _PlanOperations
 from ._repository.prompts import _PromptOperations
 from ._repository.subagents import _SubagentOperations
@@ -137,8 +139,7 @@ _FACADE_OWNED_SYMBOLS = (
     "ConversationKernelConflict",
     "JobAttemptTerminalized",
     "JobCancellationRequested",
-    "MemoryVectorFactSource",
-    "MemoryVectorSource",
+    "AcceptedMemoryGovernance",
     "NoToolResultSideBranch",
     "PlanContinuationDisposition",
     "PlanContinuationInspection",
@@ -189,8 +190,7 @@ __all__ = [
     "ConversationKernelConflict",
     "ConversationKernelRepository",
     "JobAttemptTerminalized",
-    "MemoryVectorFactSource",
-    "MemoryVectorSource",
+    "AcceptedMemoryGovernance",
     "NoToolResultSideBranch",
     "PreparedMemoryProposalSideBranch",
     "PreparedToolResultAcceptance",

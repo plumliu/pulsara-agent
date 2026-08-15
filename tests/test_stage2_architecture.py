@@ -58,16 +58,13 @@ def _repository_aggregate_source() -> str:
 
 
 def test_stage2_registry_schema_and_job_catalog_are_exact() -> None:
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == 34
+    assert len(COMMITTED_EVENT_DESCRIPTORS) == 31
     assert len(LIVE_EVENT_TYPES) == 23
-    assert len(SUBJECT_SLOTS) == 15
+    assert len(SUBJECT_SLOTS) == 13
     assert len(APPEND_GUARDS) == 2
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 26
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 25
     assert {item.handler_type for item in JOB_HANDLER_CATALOG} == {
         "BACKGROUND_COMPACTION",
-        "POST_COMPACTION_MEMORY_EXTRACTION",
-        "MEMORY_GOVERNANCE",
-        "MEMORY_INDEX_REFRESH",
     }
     assert not any(
         token in item.handler_type.lower()
@@ -322,6 +319,7 @@ def test_stage2_extension_and_tool_policy_have_single_production_owners() -> Non
 def test_stage2_provider_admission_and_blob_gc_are_physical_not_heuristic() -> None:
     direct = (KERNEL / "direct_model.py").read_text(encoding="utf-8")
     jobs = (KERNEL / "job_model.py").read_text(encoding="utf-8")
+    auxiliary = (KERNEL / "auxiliary_model.py").read_text(encoding="utf-8")
     reader = (KERNEL / "reader.py").read_text(encoding="utf-8")
     blob = (KERNEL / "blob.py").read_text(encoding="utf-8")
     host = (KERNEL / "host.py").read_text(encoding="utf-8")
@@ -333,9 +331,9 @@ def test_stage2_provider_admission_and_blob_gc_are_physical_not_heuristic() -> N
     assert "validate_model_context_for_call" in direct
     assert "validated.estimate != compiled.final_estimate" in direct
     assert "estimate_model_context_for_call" not in direct
-    assert "estimate_model_context_for_call" in jobs
-    assert "validate_model_context_for_call" in jobs
-    for source in (direct, jobs):
+    assert "estimate_model_context_for_call" in auxiliary
+    assert "validate_model_context_for_call" in auxiliary
+    for source in (direct, jobs, auxiliary):
         assert "canonical_bytes / 4" not in source
     assert "CanonicalProviderContinuityError" in reader
     assert "delete_orphans" in blob

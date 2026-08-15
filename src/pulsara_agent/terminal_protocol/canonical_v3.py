@@ -92,7 +92,6 @@ _EVENT_ONLY_TYPES = frozenset(
         CommittedEventType.SUBAGENT_MESSAGE_ACCEPTED.value,
         CommittedEventType.SUBAGENT_RESULT_ACCEPTED.value,
         CommittedEventType.JOB_ATTEMPT_ACCEPTED.value,
-        CommittedEventType.MEMORY_RELATION_ACCEPTED.value,
     }
 )
 _CONTROL_TYPES = frozenset(_COMMITTED_ENUM) - _ENTRY_TYPES - _EVENT_ONLY_TYPES
@@ -109,9 +108,9 @@ COMMITTED_PROJECTION_BRANCH_BY_TYPE: Mapping[str, str] = MappingProxyType(
     }
 )
 
-if len(_COMMITTED_ENUM) != 34 or len(COMMITTED_EVENT_DESCRIPTORS) != 34:
+if len(_COMMITTED_ENUM) != 31 or len(COMMITTED_EVENT_DESCRIPTORS) != 31:
     raise RuntimeError(
-        "Protocol v3 committed projection map must contain exact 34 types"
+        "Protocol v3 committed projection map must contain exact 31 types"
     )
 
 
@@ -580,12 +579,6 @@ class CanonicalProtocolReader:
                GROUP BY j.id ORDER BY j.accepted_at, j.id LIMIT %s""",
             (session_id,),
         )
-        workspace_id = self._session(connection, session_id)["workspace_id"]
-        freshness = connection.execute(
-            """SELECT * FROM pulsara_v3.memory_index_state
-               WHERE workspace_id = %s ORDER BY channel""",
-            (workspace_id,),
-        ).fetchall()
         active_plan = connection.execute(
             """
             SELECT * FROM pulsara_v3.plan_workflows
@@ -645,7 +638,6 @@ class CanonicalProtocolReader:
             """,
             (session_id,),
         ).fetchone()
-        by_channel = {str(item["channel"]): item for item in freshness}
         result = wire.CanonicalControl(
             session_lifecycle=lifecycle,
             prompt_queue_total_count=queue_total,
@@ -696,18 +688,6 @@ class CanonicalProtocolReader:
                 status=str(row["status"]),
                 maximum_attempts=int(row["maximum_attempts"]),
                 attempt_count=int(row["attempt_count"]),
-            )
-        for channel in ("FTS", "VECTOR"):
-            row = by_channel.get(channel)
-            result.memory_freshness.add(
-                channel=channel,
-                desired_generation=int(row["desired_generation"]) if row else 0,
-                applied_generation=int(row["applied_generation"]) if row else 0,
-                handler_contract=(
-                    f"{row['applied_handler_contract_id']}@{row['applied_handler_contract_version']}"
-                    if row
-                    else "uninitialized@0"
-                ),
             )
         if active_plan is not None:
             result.active_plan_workflow.CopyFrom(
@@ -905,8 +885,6 @@ def _event_subject(event: Mapping[str, object]) -> tuple[str, str]:
             "subject_subagent_task_id",
             "subject_subagent_message_id",
             "subject_subagent_result_id",
-            "subject_memory_fact_id",
-            "subject_memory_relation_id",
             "subject_plan_workflow_id",
             "subject_plan_interaction_id",
         )

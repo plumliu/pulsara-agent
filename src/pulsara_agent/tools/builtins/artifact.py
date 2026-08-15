@@ -46,6 +46,7 @@ class ArtifactReadTool:
                     max_chars=max_chars,
                 )
                 payload = _bounded_text_payload(text_slice)
+                record = text_slice.info.record
         except KeyError:
             return self._json_result(
                 call,
@@ -73,11 +74,20 @@ class ArtifactReadTool:
                     "error": str(exc),
                 },
             )
-        return self._json_result(call, status=ToolResultState.SUCCESS, payload=payload)
+        return self._json_result(
+            call,
+            status=ToolResultState.SUCCESS,
+            payload=payload,
+            model_visible_memory_fact_ids=(record.model_visible_memory_fact_ids),
+        )
 
     @staticmethod
     def _json_result(
-        call: ToolCall, *, status: ToolResultState, payload: dict[str, Any]
+        call: ToolCall,
+        *,
+        status: ToolResultState,
+        payload: dict[str, Any],
+        model_visible_memory_fact_ids: tuple[str, ...] = (),
     ) -> ToolExecutionResult:
         output = json.dumps(
             payload,
@@ -95,6 +105,7 @@ class ArtifactReadTool:
             status=status,
             output=output,
             artifact_source_read=True,
+            model_visible_memory_fact_ids=model_visible_memory_fact_ids,
         )
 
 
@@ -147,6 +158,7 @@ def _base_payload(record: object) -> dict[str, Any]:
             if record.artifact_unavailability_reason is None
             else record.artifact_unavailability_reason.value
         ),
+        "model_visible_memory_ids": list(record.model_visible_memory_fact_ids),
     }
 
 

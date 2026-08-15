@@ -15,7 +15,11 @@ def build_embedding_provider(config: EmbeddingBackendConfig) -> EmbeddingProvide
         raise ValueError("Embedding api_key is not configured.")
     if not config.base_url:
         raise ValueError("Embedding base_url is not configured.")
-    if config.provider == "openai_compatible":
+    if (
+        config.provider == "openai_compatible"
+        and config.model == "text-embedding-v4"
+        and config.dimensions == 1024
+    ):
         return OpenAICompatibleEmbeddingProvider(
             model=config.model,
             api_key=config.api_key,
@@ -26,4 +30,4 @@ def build_embedding_provider(config: EmbeddingBackendConfig) -> EmbeddingProvide
             batch_size=config.batch_size,
             max_concurrent=config.max_concurrent,
         )
-    raise ValueError(f"Unknown embedding provider: {config.provider!r}")
+    raise ValueError("embedding configuration is outside the V1 contract")

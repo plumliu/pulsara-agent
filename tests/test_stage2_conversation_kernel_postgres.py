@@ -23,9 +23,12 @@ from pulsara_agent.conversation_kernel.blob import (
     MAXIMUM_CONTENT_CHUNK_BYTES,
     PostgresCanonicalBlobStore,
 )
-from pulsara_agent.conversation_kernel.memory import (
-    MemoryIndexCoordinator,
-    PostgresMemoryQuery,
+from pulsara_agent.conversation_kernel.memory import PostgresMemoryQuery
+from pulsara_agent.conversation_kernel.memory.contracts import (
+    FrozenMemoryProposal,
+    MemoryKindHint,
+    MemoryProducerKind,
+    prepare_memory_candidate,
 )
 from pulsara_agent.conversation_kernel.input_continuity import (
     HostProviderInputContinuityOwner,
@@ -70,6 +73,7 @@ from pulsara_agent.model_input.contracts import (
 )
 from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
 from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
+from pulsara_agent.memory.scope import CTX_USER, MemoryScopeKind
 from pulsara_agent.conversation_kernel.vocabulary import (
     APPEND_GUARDS,
     COMMITTED_EVENT_DESCRIPTORS,
@@ -315,11 +319,11 @@ def test_stage2_maximum_blob_is_read_as_exact_bounded_storage_ranges(
 def test_stage2_schema_and_descriptor_oracles_are_exact(
     stage2_migrated_postgres_database,
 ) -> None:
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 26
-    assert len(set(CONVERSATION_KERNEL_RELATIONS)) == 26
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == 34
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 25
+    assert len(set(CONVERSATION_KERNEL_RELATIONS)) == 25
+    assert len(COMMITTED_EVENT_DESCRIPTORS) == 31
     assert len(LIVE_EVENT_TYPES) == 23
-    assert len(SUBJECT_SLOTS) == 15
+    assert len(SUBJECT_SLOTS) == 13
     assert len(APPEND_GUARDS) == 2
 
     with psycopg.connect(stage2_migrated_postgres_database.admin_dsn) as connection:
@@ -709,7 +713,7 @@ def test_stage2_tool_message_precedes_attempt_and_job_claim_mints_second_guard(
     repository.enqueue_job(
         lease.guard,
         job_id=job_id,
-        handler_type="MEMORY_INDEX_REFRESH",
+        handler_type="BACKGROUND_COMPACTION",
         intent_schema_version="memory_index_refresh.v1",
         intent_payload={"workspace_id": "x", "generation": 1},
         automatic_intent_key=_name("intent"),
@@ -717,15 +721,15 @@ def test_stage2_tool_message_precedes_attempt_and_job_claim_mints_second_guard(
         retry_policy_id="bounded-exponential",
         retry_policy_version=1,
         maximum_attempts=3,
-        attempt_timeout_ms=30_000,
-        provider_input_token_limit_per_attempt=None,
-        provider_output_token_limit_per_attempt=None,
+        attempt_timeout_ms=45_000,
+        provider_input_token_limit_per_attempt=32_000,
+        provider_output_token_limit_per_attempt=2_048,
         next_eligible_at=datetime.now(timezone.utc) - timedelta(seconds=1),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=deadline,
     )
     claimed = repository.claim_due_job(
-        handler_type="MEMORY_INDEX_REFRESH",
+        handler_type="BACKGROUND_COMPACTION",
         claim_owner_id=_name("worker"),
         lease_seconds=15,
         deadline_monotonic=deadline,
@@ -936,7 +940,7 @@ def test_stage2_job_attempt_retry_and_terminal_event_are_finite(
     repository.enqueue_job(
         lease.guard,
         job_id=job_id,
-        handler_type="MEMORY_GOVERNANCE",
+        handler_type="BACKGROUND_COMPACTION",
         intent_schema_version="memory_governance.v1",
         intent_payload={"candidate_id": _name("candidate")},
         automatic_intent_key=None,
@@ -944,15 +948,15 @@ def test_stage2_job_attempt_retry_and_terminal_event_are_finite(
         retry_policy_id="bounded-exponential",
         retry_policy_version=1,
         maximum_attempts=3,
-        attempt_timeout_ms=30_000,
-        provider_input_token_limit_per_attempt=16_000,
-        provider_output_token_limit_per_attempt=1_024,
+        attempt_timeout_ms=45_000,
+        provider_input_token_limit_per_attempt=32_000,
+        provider_output_token_limit_per_attempt=2_048,
         next_eligible_at=datetime.now(timezone.utc) - timedelta(seconds=1),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=deadline,
     )
     first = repository.claim_due_job(
-        handler_type="MEMORY_GOVERNANCE",
+        handler_type="BACKGROUND_COMPACTION",
         claim_owner_id=_name("worker"),
         lease_seconds=15,
         deadline_monotonic=deadline,
@@ -986,14 +990,14 @@ def test_stage2_job_attempt_retry_and_terminal_event_are_finite(
     # next attempt early merely because it polls aggressively.
     assert (
         repository.prepare_job_claim_candidate(
-            handler_type="MEMORY_GOVERNANCE",
+            handler_type="BACKGROUND_COMPACTION",
             deadline_monotonic=deadline,
         )
         is None
     )
     assert (
         repository.claim_due_job(
-            handler_type="MEMORY_GOVERNANCE",
+            handler_type="BACKGROUND_COMPACTION",
             claim_owner_id=_name("worker"),
             lease_seconds=15,
             deadline_monotonic=deadline,
@@ -1018,7 +1022,7 @@ def test_stage2_job_attempt_retry_and_terminal_event_are_finite(
     terminal = None
     for ordinal in (2, 3):
         attempt = repository.claim_due_job(
-            handler_type="MEMORY_GOVERNANCE",
+            handler_type="BACKGROUND_COMPACTION",
             claim_owner_id=_name("worker"),
             lease_seconds=15,
             deadline_monotonic=deadline,
@@ -1077,7 +1081,7 @@ def test_stage2_job_claim_ack_unknown_and_host_takeover_keep_one_attempt_owner(
     repository.enqueue_job(
         first_host.guard,
         job_id=job_id,
-        handler_type="MEMORY_GOVERNANCE",
+        handler_type="BACKGROUND_COMPACTION",
         intent_schema_version="memory_governance.v1",
         intent_payload={"candidate_id": _name("candidate")},
         automatic_intent_key=None,
@@ -1085,22 +1089,22 @@ def test_stage2_job_claim_ack_unknown_and_host_takeover_keep_one_attempt_owner(
         retry_policy_id="bounded-exponential",
         retry_policy_version=1,
         maximum_attempts=3,
-        attempt_timeout_ms=30_000,
-        provider_input_token_limit_per_attempt=16_000,
-        provider_output_token_limit_per_attempt=1_024,
+        attempt_timeout_ms=45_000,
+        provider_input_token_limit_per_attempt=32_000,
+        provider_output_token_limit_per_attempt=2_048,
         next_eligible_at=datetime.now(timezone.utc) - timedelta(seconds=1),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=deadline,
     )
     assert (
         repository.prepare_job_claim_candidate(
-            handler_type="MEMORY_GOVERNANCE", deadline_monotonic=deadline
+            handler_type="BACKGROUND_COMPACTION", deadline_monotonic=deadline
         )
         == job_id
     )
     worker_id = _name("worker")
     accepted = repository.claim_due_job(
-        handler_type="MEMORY_GOVERNANCE",
+        handler_type="BACKGROUND_COMPACTION",
         claim_owner_id=worker_id,
         lease_seconds=15,
         expected_job_id=job_id,
@@ -1112,7 +1116,7 @@ def test_stage2_job_claim_ack_unknown_and_host_takeover_keep_one_attempt_owner(
     # guard; a different worker cannot acquire or confirm a second owner.
     confirmed = repository.confirm_active_job_claim(
         job_id=job_id,
-        handler_type="MEMORY_GOVERNANCE",
+        handler_type="BACKGROUND_COMPACTION",
         claim_owner_id=worker_id,
         deadline_monotonic=deadline,
     )
@@ -1121,7 +1125,7 @@ def test_stage2_job_claim_ack_unknown_and_host_takeover_keep_one_attempt_owner(
     assert (
         repository.confirm_active_job_claim(
             job_id=job_id,
-            handler_type="MEMORY_GOVERNANCE",
+            handler_type="BACKGROUND_COMPACTION",
             claim_owner_id=_name("other-worker"),
             deadline_monotonic=deadline,
         )
@@ -1180,7 +1184,7 @@ def test_stage2_job_cancel_is_set_once_and_exact_claim_owner_terminalizes_it(
     repository.enqueue_job(
         lease.guard,
         job_id=job_id,
-        handler_type="MEMORY_INDEX_REFRESH",
+        handler_type="BACKGROUND_COMPACTION",
         intent_schema_version="memory_index_refresh.v1",
         intent_payload={"workspace_id": "workspace:test", "generation": 1},
         automatic_intent_key=None,
@@ -1188,9 +1192,9 @@ def test_stage2_job_cancel_is_set_once_and_exact_claim_owner_terminalizes_it(
         retry_policy_id="bounded-exponential",
         retry_policy_version=1,
         maximum_attempts=3,
-        attempt_timeout_ms=30_000,
-        provider_input_token_limit_per_attempt=None,
-        provider_output_token_limit_per_attempt=None,
+        attempt_timeout_ms=45_000,
+        provider_input_token_limit_per_attempt=32_000,
+        provider_output_token_limit_per_attempt=2_048,
         next_eligible_at=datetime.now(timezone.utc) - timedelta(seconds=1),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=deadline,
@@ -1224,7 +1228,7 @@ def test_stage2_job_cancel_is_set_once_and_exact_claim_owner_terminalizes_it(
             deadline_monotonic=deadline,
         )
     attempt = repository.claim_due_job(
-        handler_type="MEMORY_INDEX_REFRESH",
+        handler_type="BACKGROUND_COMPACTION",
         claim_owner_id=_name("worker"),
         lease_seconds=15,
         expected_job_id=job_id,
@@ -1276,7 +1280,7 @@ def test_stage2_job_claim_and_host_cancel_share_session_first_lock_order(
     repository.enqueue_job(
         lease.guard,
         job_id=job_id,
-        handler_type="MEMORY_INDEX_REFRESH",
+        handler_type="BACKGROUND_COMPACTION",
         intent_schema_version="memory_index_refresh.v1",
         intent_payload={"workspace_id": "workspace:test", "generation": 1},
         automatic_intent_key=None,
@@ -1284,9 +1288,9 @@ def test_stage2_job_claim_and_host_cancel_share_session_first_lock_order(
         retry_policy_id="bounded-exponential",
         retry_policy_version=1,
         maximum_attempts=3,
-        attempt_timeout_ms=30_000,
-        provider_input_token_limit_per_attempt=None,
-        provider_output_token_limit_per_attempt=None,
+        attempt_timeout_ms=45_000,
+        provider_input_token_limit_per_attempt=32_000,
+        provider_output_token_limit_per_attempt=2_048,
         next_eligible_at=datetime.now(timezone.utc) - timedelta(seconds=1),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=deadline,
@@ -1296,7 +1300,7 @@ def test_stage2_job_claim_and_host_cancel_share_session_first_lock_order(
     def claim():
         start.wait()
         return repository.claim_due_job(
-            handler_type="MEMORY_INDEX_REFRESH",
+            handler_type="BACKGROUND_COMPACTION",
             claim_owner_id=_name("worker"),
             lease_seconds=15,
             expected_job_id=job_id,
@@ -1359,7 +1363,7 @@ def test_stage2_expired_job_reaper_rebinds_normal_claim_append_guard(
     repository.enqueue_job(
         lease.guard,
         job_id=job_id,
-        handler_type="MEMORY_INDEX_REFRESH",
+        handler_type="BACKGROUND_COMPACTION",
         intent_schema_version="memory_index_refresh.v1",
         intent_payload={"workspace_id": "workspace:test", "generation": 1},
         automatic_intent_key=None,
@@ -1367,16 +1371,16 @@ def test_stage2_expired_job_reaper_rebinds_normal_claim_append_guard(
         retry_policy_id="bounded-exponential",
         retry_policy_version=1,
         maximum_attempts=3,
-        attempt_timeout_ms=30_000,
-        provider_input_token_limit_per_attempt=None,
-        provider_output_token_limit_per_attempt=None,
+        attempt_timeout_ms=45_000,
+        provider_input_token_limit_per_attempt=32_000,
+        provider_output_token_limit_per_attempt=2_048,
         next_eligible_at=datetime.now(timezone.utc) - timedelta(seconds=1),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=deadline,
     )
     for ordinal in (1, 2, 3):
         claimed = repository.claim_due_job(
-            handler_type="MEMORY_INDEX_REFRESH",
+            handler_type="BACKGROUND_COMPACTION",
             claim_owner_id=_name("worker"),
             lease_seconds=0.01,
             expected_job_id=job_id,
@@ -1386,7 +1390,7 @@ def test_stage2_expired_job_reaper_rebinds_normal_claim_append_guard(
         sleep(0.03)
         assert (
             repository.claim_due_job(
-                handler_type="MEMORY_INDEX_REFRESH",
+                handler_type="BACKGROUND_COMPACTION",
                 claim_owner_id=_name("reaper"),
                 lease_seconds=15,
                 expected_job_id=job_id,
@@ -1442,7 +1446,7 @@ def test_stage2_provider_request_bound_terminalizes_without_retry(
     repository.enqueue_job(
         lease.guard,
         job_id=job_id,
-        handler_type="MEMORY_GOVERNANCE",
+        handler_type="BACKGROUND_COMPACTION",
         intent_schema_version="memory_governance.v1",
         intent_payload={"candidate_id": _name("candidate")},
         automatic_intent_key=None,
@@ -1450,15 +1454,15 @@ def test_stage2_provider_request_bound_terminalizes_without_retry(
         retry_policy_id="bounded-exponential",
         retry_policy_version=1,
         maximum_attempts=3,
-        attempt_timeout_ms=30_000,
-        provider_input_token_limit_per_attempt=16_000,
-        provider_output_token_limit_per_attempt=1_024,
+        attempt_timeout_ms=45_000,
+        provider_input_token_limit_per_attempt=32_000,
+        provider_output_token_limit_per_attempt=2_048,
         next_eligible_at=datetime.now(timezone.utc) - timedelta(seconds=1),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=deadline,
     )
     attempt = repository.claim_due_job(
-        handler_type="MEMORY_GOVERNANCE",
+        handler_type="BACKGROUND_COMPACTION",
         claim_owner_id=_name("worker"),
         lease_seconds=15,
         deadline_monotonic=deadline,
@@ -1467,13 +1471,13 @@ def test_stage2_provider_request_bound_terminalizes_without_retry(
     with pytest.raises(JobAttemptTerminalized):
         repository.mark_job_provider_call_started(
             attempt.guard,
-            input_tokens=16_001,
-            requested_output_tokens=1_024,
+            input_tokens=32_001,
+            requested_output_tokens=2_048,
             deadline_monotonic=deadline,
         )
     assert (
         repository.prepare_job_claim_candidate(
-            handler_type="MEMORY_GOVERNANCE", deadline_monotonic=deadline
+            handler_type="BACKGROUND_COMPACTION", deadline_monotonic=deadline
         )
         is None
     )
@@ -1498,467 +1502,76 @@ def test_stage2_provider_request_bound_terminalizes_without_retry(
 def test_stage2_memory_refresh_exhaustion_is_stable_and_query_is_unavailable(
     stage2_migrated_postgres_database,
 ) -> None:
-    repository = _repository(stage2_migrated_postgres_database)
-    deadline = monotonic() + 30
-    workspace_id = _name("workspace")
-    with repository.connection_provider.connection(
-        lane=PostgresConnectionLane.MEMORY_MAINTENANCE,
-        deadline_monotonic=deadline,
-    ) as connection:
-        connection.execute(
-            """
-            INSERT INTO pulsara_v3.memory_index_state (
-                workspace_id, channel, desired_generation,
-                desired_handler_contract_id, desired_handler_contract_version,
-                applied_generation, applied_handler_contract_id,
-                applied_handler_contract_version
-            ) VALUES
-                (%s, 'FTS', 1, 'postgres-memory-index', 1,
-                 0, 'postgres-memory-index', 1),
-                (%s, 'VECTOR', 0, 'postgres-memory-index', 1,
-                 0, 'postgres-memory-index', 1)
-            """,
-            (workspace_id, workspace_id),
-        )
-    index = MemoryIndexCoordinator(repository)
-    query = PostgresMemoryQuery(repository.connection_provider)
-    assert index.scan_lost_wakes(deadline_monotonic=deadline) == 1
-    stale = query.search(
-        workspace_id=workspace_id,
-        query="anything",
-        deadline_monotonic=deadline,
-    )
-    assert stale.disposition.value == "PARTIAL_STALE"
+    """Round 8 successor: there is no durable refresh debt or retry job."""
 
-    terminal = None
-    for ordinal in (1, 2, 3):
-        attempt = repository.claim_due_job(
-            handler_type="MEMORY_INDEX_REFRESH",
-            claim_owner_id=_name("indexer"),
-            lease_seconds=15,
-            deadline_monotonic=deadline,
-        )
-        assert attempt is not None and attempt.attempt_ordinal == ordinal
-        terminal = repository.settle_job_attempt(
-            attempt.guard,
-            terminal_status="FAILED",
-            result_payload=None,
-            error_code="INDEX_WRITE_FAILED",
-            retryable=True,
-            occurred_at=datetime.now(timezone.utc),
-            deadline_monotonic=deadline,
-        )
-        if terminal.retry_scheduled:
-            with repository.connection_provider.connection(
-                lane=PostgresConnectionLane.MEMORY_MAINTENANCE,
-                deadline_monotonic=deadline,
-            ) as connection:
-                connection.execute(
-                    """
-                    UPDATE pulsara_v3.durable_jobs
-                    SET next_eligible_at = clock_timestamp() - interval '1 second'
-                    WHERE id = %s
-                    """,
-                    (attempt.guard.job_id,),
-                )
-    assert terminal is not None and terminal.aggregate_status == "FAILED"
-    assert index.scan_lost_wakes(deadline_monotonic=deadline) == 0
-    assert index.scan_lost_wakes(deadline_monotonic=deadline) == 0
-    unavailable = query.search(
-        workspace_id=workspace_id,
-        query="anything",
-        deadline_monotonic=deadline,
-    )
-    assert unavailable.disposition.value == "PARTIAL_UNAVAILABLE"
-    assert (
-        next(item for item in unavailable.channels if item.channel == "FTS").reason
-        == "INDEX_REFRESH_EXHAUSTED"
-    )
+    repository = _repository(stage2_migrated_postgres_database)
     with repository.connection_provider.connection(
         lane=PostgresConnectionLane.INSPECTOR,
-        deadline_monotonic=deadline,
+        deadline_monotonic=monotonic() + 30,
     ) as connection:
+        assert connection.execute(
+            "SELECT to_regclass('pulsara_v3.memory_index_state')"
+        ).fetchone() == (None,)
         assert connection.execute(
             """
             SELECT count(*) FROM pulsara_v3.durable_jobs
-            WHERE handler_type = 'MEMORY_INDEX_REFRESH'
-              AND workspace_id = %s
-            """,
-            (workspace_id,),
-        ).fetchone() == (1,)
-
+            WHERE handler_type IN ('MEMORY_INDEX_REFRESH', 'MEMORY_GOVERNANCE',
+                                   'POST_COMPACTION_MEMORY_EXTRACTION')
+            """
+        ).fetchone() == (0,)
 
 def test_stage2_memory_governance_is_async_and_postgres_only(
     stage2_migrated_postgres_database,
 ) -> None:
+    """Round 8 successor: governance owns rows but no durable execution."""
+
     repository = _repository(stage2_migrated_postgres_database)
-    deadline = monotonic() + 30
-    session_id = _name("session")
-    workspace_id = _name("workspace")
-    lease = repository.acquire_host_writer(
-        session_id=session_id,
-        workspace_id=workspace_id,
-        writer_owner_id=_name("host"),
-        lease_seconds=30,
-        deadline_monotonic=deadline,
-    )
-    turn_id = _name("turn")
-    source_entry_id = _name("entry")
-    _start_root_turn(
-        repository,
-        lease.guard,
-        command_id=_name("command"),
-        turn_id=turn_id,
-        entry_id=source_entry_id,
-        context_binding_revision_id=_name("revision"),
-        content=InlineContent.from_bytes(b"remember green apples"),
-        occurred_at=datetime.now(timezone.utc),
-        deadline_monotonic=deadline,
-    )
-    candidate_id = _name("candidate")
-    governance_job_id = _name("job")
-    repository.accept_memory_candidate_and_governance_job(
-        lease.guard,
-        candidate_id=candidate_id,
-        source_entry_id=source_entry_id,
-        proposal_kind="FACT",
-        proposal_payload={"text": "green apples are preferred"},
-        governance_job_id=governance_job_id,
-        occurred_at=datetime.now(timezone.utc),
-        deadline_monotonic=deadline,
-    )
     with repository.connection_provider.connection(
         lane=PostgresConnectionLane.INSPECTOR,
-        deadline_monotonic=deadline,
+        deadline_monotonic=monotonic() + 30,
     ) as connection:
-        assert connection.execute(
-            "SELECT count(*) FROM pulsara_v3.memory_facts WHERE workspace_id = %s",
-            (workspace_id,),
-        ).fetchone() == (0,)
-    claimed = repository.claim_due_job(
-        handler_type="MEMORY_GOVERNANCE",
-        claim_owner_id=_name("worker"),
-        lease_seconds=15,
-        deadline_monotonic=deadline,
-    )
-    assert claimed is not None and claimed.guard.job_id == governance_job_id
-    fact_id = _name("memory")
-    accepted = repository.accept_memory_governance(
-        claimed.guard,
-        candidate_id=candidate_id,
-        decision_id=_name("decision"),
-        decision="SUBMIT",
-        lineage_payload={"source": "test"},
-        fact_id=fact_id,
-        fact_kind="FACT",
-        fact_payload={"text": "green apples are preferred"},
-        relations=(),
-        index_handler_contract_id="postgres-memory-index",
-        index_handler_contract_version=1,
-        occurred_at=datetime.now(timezone.utc),
-        deadline_monotonic=deadline,
-    )
-    assert accepted.fact_id == fact_id
-    index = MemoryIndexCoordinator(repository)
-    assert index.scan_lost_wakes(deadline_monotonic=deadline) == 2
-    for _ in range(2):
-        refresh = repository.claim_due_job(
-            handler_type="MEMORY_INDEX_REFRESH",
-            claim_owner_id=_name("indexer"),
-            lease_seconds=15,
-            deadline_monotonic=deadline,
-        )
-        assert refresh is not None
-        if refresh.intent_payload["channel"] == "FTS":
-            assert (
-                index.apply_fts_refresh(refresh.guard, deadline_monotonic=deadline) == 1
-            )
-        else:
-            source = repository.snapshot_memory_vector_source(
-                refresh.guard,
-                handler_contract_id="postgres-memory-index",
-                handler_contract_version=1,
-                deadline_monotonic=deadline,
-            )
-            assert (
-                repository.apply_vector_memory_index(
-                    refresh.guard,
-                    source=source,
-                    embeddings=((0.25, 0.75),),
-                    deadline_monotonic=deadline,
-                )
-                == 1
-            )
-    result = PostgresMemoryQuery(repository.connection_provider).search(
-        workspace_id=workspace_id,
-        query="green apples",
-        query_embedding=(0.25, 0.75),
-        max_hops=2,
-        deadline_monotonic=deadline,
-    )
-    assert result.disposition.value == "COMPLETE"
-    assert [item.fact_id for item in result.facts] == [fact_id]
-
+        relations = {
+            row[0]
+            for row in connection.execute(
+                """
+                SELECT table_name FROM information_schema.tables
+                WHERE table_schema='pulsara_v3' AND table_name LIKE 'memory_%'
+                """
+            ).fetchall()
+        }
+    assert relations == {
+        'memory_candidates',
+        'memory_candidate_tool_result_refs',
+        'memory_candidate_basis_refs',
+        'memory_facts',
+        'memory_relations',
+        'memory_embeddings',
+    }
 
 def test_stage2_memory_lifecycle_change_has_one_canonical_occurrence(
     stage2_migrated_postgres_database,
 ) -> None:
-    repository = _repository(stage2_migrated_postgres_database)
-    deadline = monotonic() + 30
-    session_id = _name("session")
-    workspace_id = _name("workspace")
-    lease = repository.acquire_host_writer(
-        session_id=session_id,
-        workspace_id=workspace_id,
-        writer_owner_id=_name("host"),
-        lease_seconds=30,
-        deadline_monotonic=deadline,
-    )
-    source_entry_id = _name("entry")
-    _start_root_turn(
-        repository,
-        lease.guard,
-        command_id=_name("command"),
-        turn_id=_name("turn"),
-        entry_id=source_entry_id,
-        context_binding_revision_id=_name("revision"),
-        content=InlineContent.from_bytes(b"memory source"),
-        occurred_at=datetime.now(timezone.utc),
-        deadline_monotonic=deadline,
-    )
+    """Round 8 successor: memory lifecycle is relational, not an occurrence."""
 
-    first_candidate = _name("candidate")
-    first_job = _name("job")
-    repository.accept_memory_candidate_and_governance_job(
-        lease.guard,
-        candidate_id=first_candidate,
-        source_entry_id=source_entry_id,
-        proposal_kind="FACT",
-        proposal_payload={"text": "old fact"},
-        governance_job_id=first_job,
-        occurred_at=datetime.now(timezone.utc),
-        deadline_monotonic=deadline,
+    del stage2_migrated_postgres_database
+    assert {item.event_type.value for item in COMMITTED_EVENT_DESCRIPTORS}.isdisjoint(
+        {'MemoryFactAccepted', 'MemoryFactLifecycleChanged', 'MemoryRelationAccepted'}
     )
-    first_attempt = repository.claim_due_job(
-        handler_type="MEMORY_GOVERNANCE",
-        claim_owner_id=_name("governor"),
-        lease_seconds=15,
-        expected_job_id=first_job,
-        deadline_monotonic=deadline,
-    )
-    assert first_attempt is not None
-    old_fact = _name("memory")
-    repository.accept_memory_governance(
-        first_attempt.guard,
-        candidate_id=first_candidate,
-        decision_id=_name("decision"),
-        decision="SUBMIT",
-        lineage_payload={"source": "test"},
-        fact_id=old_fact,
-        fact_kind="FACT",
-        fact_payload={"text": "old fact"},
-        relations=(),
-        index_handler_contract_id="postgres-memory-index",
-        index_handler_contract_version=1,
-        occurred_at=datetime.now(timezone.utc),
-        deadline_monotonic=deadline,
-    )
-
-    second_candidate = _name("candidate")
-    second_job = _name("job")
-    repository.accept_memory_candidate_and_governance_job(
-        lease.guard,
-        candidate_id=second_candidate,
-        source_entry_id=source_entry_id,
-        proposal_kind="CORRECTION",
-        proposal_payload={
-            "text": "new fact",
-            "superseded_fact_ids": (old_fact,),
-        },
-        governance_job_id=second_job,
-        occurred_at=datetime.now(timezone.utc),
-        deadline_monotonic=deadline,
-    )
-    second_attempt = repository.claim_due_job(
-        handler_type="MEMORY_GOVERNANCE",
-        claim_owner_id=_name("governor"),
-        lease_seconds=15,
-        expected_job_id=second_job,
-        deadline_monotonic=deadline,
-    )
-    assert second_attempt is not None
-    new_fact = _name("memory")
-    repository.accept_memory_governance(
-        second_attempt.guard,
-        candidate_id=second_candidate,
-        decision_id=_name("decision"),
-        decision="CORRECT",
-        lineage_payload={
-            "source": "test",
-            "superseded_fact_ids": [old_fact],
-        },
-        fact_id=new_fact,
-        fact_kind="FACT",
-        fact_payload={"text": "new fact"},
-        relations=(),
-        index_handler_contract_id="postgres-memory-index",
-        index_handler_contract_version=1,
-        occurred_at=datetime.now(timezone.utc),
-        deadline_monotonic=deadline,
-    )
-    with repository.connection_provider.connection(
-        lane=PostgresConnectionLane.INSPECTOR,
-        deadline_monotonic=deadline,
-    ) as connection:
-        assert connection.execute(
-            """
-            SELECT id, lifecycle FROM pulsara_v3.memory_facts
-            WHERE id = ANY(%s) ORDER BY id
-            """,
-            ([old_fact, new_fact],),
-        ).fetchall() == sorted([(old_fact, "SUPERSEDED"), (new_fact, "ACTIVE")])
-        assert connection.execute(
-            """
-            SELECT count(*) FROM pulsara_v3.agent_events
-            WHERE session_id = %s
-              AND event_type = 'MemoryFactLifecycleChanged'
-              AND subject_memory_fact_id = %s
-            """,
-            (session_id, old_fact),
-        ).fetchone() == (1,)
-
+    assert all('memory' not in slot.lower() for slot in SUBJECT_SLOTS)
 
 def test_stage2_postgres_memory_preserves_bounded_direct_and_two_hop_paths(
     stage2_migrated_postgres_database,
 ) -> None:
-    repository = _repository(stage2_migrated_postgres_database)
-    deadline = monotonic() + 30
-    session_id = _name("session")
-    workspace_id = _name("workspace")
-    lease = repository.acquire_host_writer(
-        session_id=session_id,
-        workspace_id=workspace_id,
-        writer_owner_id=_name("host"),
-        lease_seconds=30,
-        deadline_monotonic=deadline,
-    )
-    turn_id = _name("turn")
-    source_entry_id = _name("entry")
-    _start_root_turn(
-        repository,
-        lease.guard,
-        command_id=_name("command"),
-        turn_id=turn_id,
-        entry_id=source_entry_id,
-        context_binding_revision_id=_name("revision"),
-        content=InlineContent.from_bytes(b"memory graph source"),
-        occurred_at=datetime.now(timezone.utc),
-        deadline_monotonic=deadline,
-    )
+    """Round 8 successor: only exact rows and direct relations remain public."""
 
-    def accept_fact(label: str, relations: tuple[tuple[str, str, str], ...]) -> str:
-        candidate_id = _name("candidate")
-        job_id = _name("job")
-        repository.accept_memory_candidate_and_governance_job(
-            lease.guard,
-            candidate_id=candidate_id,
-            source_entry_id=source_entry_id,
-            proposal_kind="FACT",
-            proposal_payload={"text": label},
-            governance_job_id=job_id,
-            occurred_at=datetime.now(timezone.utc),
-            deadline_monotonic=deadline,
-        )
-        attempt = repository.claim_due_job(
-            handler_type="MEMORY_GOVERNANCE",
-            claim_owner_id=_name("governor"),
-            lease_seconds=15,
-            expected_job_id=job_id,
-            deadline_monotonic=deadline,
-        )
-        assert attempt is not None
-        fact_id = _name("memory")
-        repository.accept_memory_governance(
-            attempt.guard,
-            candidate_id=candidate_id,
-            decision_id=_name("decision"),
-            decision="SUBMIT",
-            lineage_payload={"source": "two-hop-test"},
-            fact_id=fact_id,
-            fact_kind="FACT",
-            fact_payload={"text": label},
-            relations=relations,
-            index_handler_contract_id="postgres-memory-index",
-            index_handler_contract_version=1,
-            occurred_at=datetime.now(timezone.utc),
-            deadline_monotonic=deadline,
-        )
-        return fact_id
-
-    terminal = accept_fact("terminal node", ())
-    middle = accept_fact("middle node", ((_name("relation"), terminal, "NEXT"),))
-    source = accept_fact("source alpha", ((_name("relation"), middle, "NEXT"),))
-    index = MemoryIndexCoordinator(repository)
-    assert index.scan_lost_wakes(deadline_monotonic=deadline) >= 2
-    with repository.connection_provider.connection(
-        lane=PostgresConnectionLane.INSPECTOR,
-        deadline_monotonic=deadline,
-    ) as connection:
-        refresh_job_ids = tuple(
-            str(row[0])
-            for row in connection.execute(
-                """
-                SELECT id FROM pulsara_v3.durable_jobs
-                WHERE handler_type = 'MEMORY_INDEX_REFRESH'
-                  AND workspace_id = %s
-                ORDER BY id
-                """,
-                (workspace_id,),
-            ).fetchall()
-        )
-    assert len(refresh_job_ids) == 2
-    for refresh_job_id in refresh_job_ids:
-        refresh = repository.claim_due_job(
-            handler_type="MEMORY_INDEX_REFRESH",
-            claim_owner_id=_name("indexer"),
-            lease_seconds=15,
-            expected_job_id=refresh_job_id,
-            deadline_monotonic=deadline,
-        )
-        assert refresh is not None
-        if refresh.intent_payload["channel"] == "FTS":
-            assert (
-                index.apply_fts_refresh(refresh.guard, deadline_monotonic=deadline) == 3
-            )
-        else:
-            vector_source = repository.snapshot_memory_vector_source(
-                refresh.guard,
-                handler_contract_id="postgres-memory-index",
-                handler_contract_version=1,
-                deadline_monotonic=deadline,
-            )
-            assert (
-                repository.apply_vector_memory_index(
-                    refresh.guard,
-                    source=vector_source,
-                    embeddings=((1.0, 0.0), (0.0, 1.0), (0.5, 0.5)),
-                    deadline_monotonic=deadline,
-                )
-                == 3
-            )
-    result = PostgresMemoryQuery(repository.connection_provider).search(
-        workspace_id=workspace_id,
-        query="source alpha",
-        max_hops=2,
-        deadline_monotonic=deadline,
-    )
-    assert result.disposition.value == "COMPLETE"
-    assert result.facts[0].fact_id == source
-    assert [(item.target_fact_id, item.hop_count) for item in result.paths] == [
-        (middle, 1),
-        (terminal, 2),
-    ]
-
+    del stage2_migrated_postgres_database
+    assert 'max_hops' not in PostgresMemoryQuery.search.__code__.co_varnames
+    source = (
+        __import__('pathlib').Path(__file__).resolve().parents[1]
+        / 'src/pulsara_agent/conversation_kernel/memory/recall.py'
+    ).read_text(encoding='utf-8')
+    assert 'WITH RECURSIVE' not in source
+    assert 'max_hops' not in source
 
 def test_stage2_prompt_queue_has_stable_fifo_and_frozen_terminal_steer_target(
     stage2_migrated_postgres_database,
@@ -2712,7 +2325,21 @@ def test_stage2_memory_candidate_and_tool_result_are_one_transaction(
         deadline_monotonic=deadline,
     )
     candidate_id = _name("candidate")
-    job_id = _name("job")
+    memory_candidate = prepare_memory_candidate(
+        candidate_id=candidate_id,
+        memory_domain_id="u_local",
+        origin_workspace_id=workspace_id,
+        origin_session_id=session_id,
+        producer_kind=MemoryProducerKind.MAIN_AGENT_REMEMBER,
+        producer_entry_id=assistant_entry_id,
+        producer_tool_call_id=first_call,
+        proposal=FrozenMemoryProposal(
+            statement="a",
+            scope_kind=MemoryScopeKind.USER,
+            scope_id=CTX_USER,
+            kind_hint=MemoryKindHint.FACT,
+        ),
+    )
     first_result_entry_id = _name("entry")
     first_candidate = build_prepared_tool_result_acceptance(
         guard=lease.guard,
@@ -2737,10 +2364,7 @@ def test_stage2_memory_candidate_and_tool_result_are_one_transaction(
         observation_origin_kind=ToolObservationOrigin.BUILTIN,
         trusted_tool_reported_duration_microseconds=None,
         actor_id="remember_claim",
-        memory_candidate_id=candidate_id,
-        memory_proposal_kind="FACT",
-        memory_proposal_payload={"statement": "a"},
-        memory_governance_job_id=job_id,
+        memory_candidate=memory_candidate,
     )
     repository.accept_tool_result(
         lease.guard,
@@ -2762,7 +2386,22 @@ def test_stage2_memory_candidate_and_tool_result_are_one_transaction(
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=deadline,
     )
-    rolled_back_candidate = _name("candidate")
+    rolled_back_candidate = candidate_id
+    conflicting_memory_candidate = prepare_memory_candidate(
+        candidate_id=rolled_back_candidate,
+        memory_domain_id="u_local",
+        origin_workspace_id=workspace_id,
+        origin_session_id=session_id,
+        producer_kind=MemoryProducerKind.MAIN_AGENT_REMEMBER,
+        producer_entry_id=assistant_entry_id,
+        producer_tool_call_id=second_call,
+        proposal=FrozenMemoryProposal(
+            statement="b",
+            scope_kind=MemoryScopeKind.USER,
+            scope_id=CTX_USER,
+            kind_hint=MemoryKindHint.FACT,
+        ),
+    )
     rolled_back_result = _name("result")
     rollback_candidate = build_prepared_tool_result_acceptance(
         guard=lease.guard,
@@ -2787,10 +2426,7 @@ def test_stage2_memory_candidate_and_tool_result_are_one_transaction(
         observation_origin_kind=ToolObservationOrigin.BUILTIN,
         trusted_tool_reported_duration_microseconds=None,
         actor_id="remember_claim",
-        memory_candidate_id=rolled_back_candidate,
-        memory_proposal_kind="FACT",
-        memory_proposal_payload={"statement": "b"},
-        memory_governance_job_id=job_id,
+        memory_candidate=conflicting_memory_candidate,
     )
     with pytest.raises(Exception):
         repository.accept_tool_result(
@@ -2805,10 +2441,6 @@ def test_stage2_memory_candidate_and_tool_result_are_one_transaction(
         assert connection.execute(
             "SELECT count(*) FROM pulsara_v3.tool_results WHERE id = %s",
             (rolled_back_result,),
-        ).fetchone() == (0,)
-        assert connection.execute(
-            "SELECT count(*) FROM pulsara_v3.memory_candidates WHERE id = %s",
-            (rolled_back_candidate,),
         ).fetchone() == (0,)
         assert connection.execute(
             "SELECT count(*) FROM pulsara_v3.memory_candidates WHERE id = %s",

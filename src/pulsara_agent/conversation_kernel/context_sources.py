@@ -131,7 +131,7 @@ class FrozenNonTriggerContextSources:
 _BINDINGS = (
     _SourceBinding(
         ContextSourceKind.BASE_SYSTEM,
-        "pulsara.base-system.prefix-continuity.v3",
+        "pulsara.base-system.prefix-continuity.v4",
         ContextChannel.SYSTEM,
         ContextTrustClass.ROOT_INSTRUCTION,
         ContextBudgetClass.MUST_KEEP,
@@ -265,6 +265,34 @@ _BINDINGS = (
         "pulsara.active-skill-collector.v1",
         ContextSourceLifecycle.ACTIVATION_SNAPSHOT,
     ),
+    _SourceBinding(
+        ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD,
+        "pulsara.memory-response-preference-head.v1",
+        ContextChannel.RUNTIME_OBSERVATION,
+        ContextTrustClass.UNTRUSTED_OBSERVATION,
+        ContextBudgetClass.IMPORTANT,
+        62,
+        42,
+        (ContextRenderMode.FULL,),
+        "pulsara.memory-response-preference-head-collector.v1",
+        ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
+    ),
+    _SourceBinding(
+        ContextSourceKind.MEMORY_RECALL,
+        "pulsara.memory-recall.v1",
+        ContextChannel.RUNTIME_OBSERVATION,
+        ContextTrustClass.UNTRUSTED_OBSERVATION,
+        ContextBudgetClass.IMPORTANT,
+        65,
+        48,
+        (
+            ContextRenderMode.FULL,
+            ContextRenderMode.COMPACT,
+            ContextRenderMode.REF_ONLY,
+        ),
+        "pulsara.memory-recall-collector.v1",
+        ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
+    ),
 )
 
 
@@ -368,6 +396,18 @@ class KernelContextSourceCollector:
         absent: list[ContextSourceAbsentFact] = []
         diagnostics: list[ContextSourceCollectionDiagnostic] = []
         candidates.append(self._candidate(ContextSourceKind.BASE_SYSTEM, (self._base,)))
+        absent.extend(
+            (
+                self._absent(
+                    ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD,
+                    ContextSourceAbsenceKind.NOT_APPLICABLE,
+                ),
+                self._absent(
+                    ContextSourceKind.MEMORY_RECALL,
+                    ContextSourceAbsenceKind.NOT_APPLICABLE,
+                ),
+            )
+        )
 
         temporal: RuntimeTemporalCapture | None
         try:
@@ -766,6 +806,110 @@ def _variant(mode: ContextRenderMode, text: str) -> ContextRenderVariant:
         semantic_fingerprint=context_fingerprint(
             "context-render-variant:v1", {"mode": mode.value, "text": text}
         ),
+    )
+
+
+def build_memory_context_source(
+    *,
+    kind: ContextSourceKind,
+    texts: tuple[str, ...] | None,
+    memory_fact_ids: tuple[str, ...] = (),
+    domain_identity: object | None = None,
+    absence_kind: ContextSourceAbsenceKind = ContextSourceAbsenceKind.NOT_APPLICABLE,
+) -> ContextSourceCandidate | ContextSourceAbsentFact:
+    """Build one closed memory source without granting it collector authority."""
+
+    if kind not in {
+        ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD,
+        ContextSourceKind.MEMORY_RECALL,
+    }:
+        raise ValueError("memory source builder received a foreign source kind")
+    registry = ContextSourceRegistry()
+    binding = registry.binding(kind)
+    if texts is None:
+        domain = context_fingerprint(
+            "pulsara:context-source-absence:v1",
+            {
+                "kind": kind.value,
+                "absence": absence_kind.value,
+                "contract": binding.contract_fingerprint,
+            },
+        )
+        return ContextSourceAbsentFact(
+            source_kind=kind,
+            lifecycle=binding.lifecycle,
+            absence_kind=absence_kind,
+            source_contract_version=binding.contract_version,
+            source_contract_fingerprint=binding.contract_fingerprint,
+            trust_class=binding.trust,
+            budget_class=binding.budget,
+            placement_ordinal=binding.placement,
+            degradation_priority=binding.degradation,
+            domain_semantic_fingerprint=domain,
+        )
+    if len(texts) != len(binding.modes):
+        raise ValueError("memory source variant count differs from contract")
+    variants = tuple(
+        _variant(mode, text)
+        for mode, text in zip(binding.modes, texts, strict=True)
+    )
+    instance_id = f"context-source:{kind.value.lower()}"
+    semantic = context_fingerprint(
+        "context-source-candidate:v1",
+        {
+            "source_kind": kind.value,
+            "source_instance_id": instance_id,
+            "source_contract_fingerprint": binding.contract_fingerprint,
+            "variants": tuple(item.semantic_fingerprint for item in variants),
+        },
+    )
+    domain = (
+        semantic
+        if domain_identity is None
+        else context_fingerprint(
+            "context-source-domain-identity:v1",
+            {
+                "source_kind": kind.value,
+                "source_contract_fingerprint": binding.contract_fingerprint,
+                "provider_visible_semantic_fingerprint": semantic,
+                "domain_identity": domain_identity,
+            },
+        )
+    )
+    return ContextSourceCandidate(
+        source_kind=kind,
+        source_instance_id=instance_id,
+        source_contract_version=binding.contract_version,
+        source_contract_fingerprint=binding.contract_fingerprint,
+        source_semantic_fingerprint=semantic,
+        channel=binding.channel,
+        trust_class=binding.trust,
+        budget_class=binding.budget,
+        placement_ordinal=binding.placement,
+        degradation_priority=binding.degradation,
+        variants=variants,
+        lifecycle=binding.lifecycle,
+        domain_semantic_fingerprint=domain,
+        model_visible_memory_fact_ids=memory_fact_ids,
+    )
+
+
+def replace_memory_context_sources(
+    sources: CollectedContextSources,
+    replacements: tuple[ContextSourceCandidate | ContextSourceAbsentFact, ...],
+) -> CollectedContextSources:
+    kinds = {item.source_kind for item in replacements}
+    candidates = tuple(
+        item for item in sources.candidates if item.source_kind not in kinds
+    ) + tuple(item for item in replacements if isinstance(item, ContextSourceCandidate))
+    absent = tuple(
+        item for item in sources.absent_facts if item.source_kind not in kinds
+    ) + tuple(item for item in replacements if isinstance(item, ContextSourceAbsentFact))
+    return _collected(
+        candidates=candidates,
+        absent_facts=absent,
+        diagnostics=sources.diagnostics,
+        registry_fingerprint=sources.registry_fingerprint,
     )
 
 
@@ -1172,9 +1316,14 @@ def _render_mcp_catalog(catalog: "McpCatalogSnapshot") -> tuple[str, str, str]:
         maximum_bytes=8 * 1024,
     )
     reference = _bounded_mcp_catalog_json(
-        base={
-            "read_more": "Call list_mcp_servers for the bounded current catalog.",
-        },
+        # REF_ONLY must be a strict degradation of COMPACT for every target
+        # estimator.  Keeping an extra prose instruction here made the empty
+        # or one-server reference larger than the compact projection under
+        # some production tokenizers, so the compiler correctly rejected the
+        # entire source contract before provider open.  The capability catalog
+        # already advertises list_mcp_servers; this carrier only needs stable
+        # server identity and availability.
+        base={},
         servers=[
             {"server_id": item["server_id"], "status": item["status"]}
             for item in servers
@@ -1245,4 +1394,6 @@ __all__ = [
     "KernelContextSourceCollector",
     "McpCatalogSnapshotPort",
     "TerminalCurrentCwdSnapshotPort",
+    "build_memory_context_source",
+    "replace_memory_context_sources",
 ]

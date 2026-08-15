@@ -14,9 +14,6 @@ from pulsara_agent.conversation_kernel.contracts import JobSafetyClass
 
 
 BACKGROUND_COMPACTION = "BACKGROUND_COMPACTION"
-POST_COMPACTION_MEMORY_EXTRACTION = "POST_COMPACTION_MEMORY_EXTRACTION"
-MEMORY_GOVERNANCE = "MEMORY_GOVERNANCE"
-MEMORY_INDEX_REFRESH = "MEMORY_INDEX_REFRESH"
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,45 +62,12 @@ JOB_HANDLER_CATALOG = (
         32_000,
         2_048,
     ),
-    KernelJobHandlerContract(
-        POST_COMPACTION_MEMORY_EXTRACTION,
-        JobSafetyClass.RETRY_SAFE,
-        "bounded-exponential",
-        1,
-        3,
-        45_000,
-        True,
-        32_000,
-        2_048,
-    ),
-    KernelJobHandlerContract(
-        MEMORY_GOVERNANCE,
-        JobSafetyClass.RETRY_SAFE,
-        "bounded-exponential",
-        1,
-        3,
-        30_000,
-        True,
-        16_000,
-        1_024,
-    ),
-    KernelJobHandlerContract(
-        MEMORY_INDEX_REFRESH,
-        JobSafetyClass.RETRY_SAFE,
-        "bounded-exponential",
-        1,
-        3,
-        30_000,
-        False,
-        None,
-        None,
-    ),
 )
 JOB_HANDLER_BY_TYPE: Mapping[str, KernelJobHandlerContract] = MappingProxyType(
     {item.handler_type: item for item in JOB_HANDLER_CATALOG}
 )
-if len(JOB_HANDLER_BY_TYPE) != 4:
-    raise RuntimeError("Stage 2 job handler catalog is not exhaustive")
+if len(JOB_HANDLER_BY_TYPE) != 1:
+    raise RuntimeError("Round 8 job handler catalog is not exhaustive")
 
 
 def job_handler_contract(handler_type: str) -> KernelJobHandlerContract:
@@ -118,8 +82,5 @@ __all__ = [
     "JOB_HANDLER_BY_TYPE",
     "JOB_HANDLER_CATALOG",
     "KernelJobHandlerContract",
-    "MEMORY_GOVERNANCE",
-    "MEMORY_INDEX_REFRESH",
-    "POST_COMPACTION_MEMORY_EXTRACTION",
     "job_handler_contract",
 ]

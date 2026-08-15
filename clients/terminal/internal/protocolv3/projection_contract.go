@@ -1,7 +1,7 @@
 package protocolv3
 
 // ProjectionContract is the generated-language view of the Python-owned
-// 27-type event descriptor. It validates server lowering; it is not an event
+// 31-type event descriptor. It validates server lowering; it is not an event
 // reducer or a second conversation authority.
 type ProjectionContract struct {
 	Kind        ObservationProjectionKind
@@ -33,9 +33,13 @@ var projectionContracts = map[CommittedEventType]ProjectionContract{
 	CommittedEventType_JOB_QUEUED:                      {ObservationProjectionKind_CURRENT_CONTROL, "subject_job_id"},
 	CommittedEventType_JOB_ATTEMPT_ACCEPTED:            {ObservationProjectionKind_EVENT_ONLY, "subject_job_attempt_id"},
 	CommittedEventType_JOB_TERMINAL_ACCEPTED:           {ObservationProjectionKind_CURRENT_CONTROL, "subject_job_id"},
-	CommittedEventType_MEMORY_FACT_ACCEPTED:            {ObservationProjectionKind_CURRENT_CONTROL, "subject_memory_fact_id"},
-	CommittedEventType_MEMORY_FACT_LIFECYCLE_CHANGED:   {ObservationProjectionKind_CURRENT_CONTROL, "subject_memory_fact_id"},
-	CommittedEventType_MEMORY_RELATION_ACCEPTED:        {ObservationProjectionKind_EVENT_ONLY, "subject_memory_relation_id"},
+	CommittedEventType_PLAN_WORKFLOW_ENTERED:           {ObservationProjectionKind_CURRENT_CONTROL, "subject_plan_workflow_id"},
+	CommittedEventType_PLAN_QUESTION_ASKED:             {ObservationProjectionKind_CURRENT_CONTROL, "subject_plan_interaction_id"},
+	CommittedEventType_PLAN_QUESTION_ANSWERED:          {ObservationProjectionKind_CURRENT_CONTROL, "subject_plan_interaction_id"},
+	CommittedEventType_PLAN_DRAFT_SUBMITTED:            {ObservationProjectionKind_CURRENT_CONTROL, "subject_plan_interaction_id"},
+	CommittedEventType_PLAN_DRAFT_DECISION_ACCEPTED:    {ObservationProjectionKind_CURRENT_CONTROL, "subject_plan_interaction_id"},
+	CommittedEventType_PLAN_WORKFLOW_EXITED:            {ObservationProjectionKind_CURRENT_CONTROL, "subject_plan_workflow_id"},
+	CommittedEventType_PLAN_CONTINUATION_ACCEPTED:      {ObservationProjectionKind_IMMUTABLE_ENTRY, "subject_entry_id"},
 }
 
 func ExpectedProjectionContract(eventType CommittedEventType) (ProjectionContract, bool) {

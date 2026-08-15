@@ -797,7 +797,7 @@ def test_job_result_acceptance_is_explicit_idempotent_and_safe_point_bound(
     repository.enqueue_job(
         lease.guard,
         job_id=job_id,
-        handler_type="MEMORY_GOVERNANCE",
+        handler_type="BACKGROUND_COMPACTION",
         intent_schema_version="memory_governance.v1",
         intent_payload={"candidate_id": _id("candidate")},
         automatic_intent_key=None,
@@ -805,15 +805,15 @@ def test_job_result_acceptance_is_explicit_idempotent_and_safe_point_bound(
         retry_policy_id="bounded-exponential",
         retry_policy_version=1,
         maximum_attempts=3,
-        attempt_timeout_ms=30_000,
-        provider_input_token_limit_per_attempt=16_000,
-        provider_output_token_limit_per_attempt=1_024,
+        attempt_timeout_ms=45_000,
+        provider_input_token_limit_per_attempt=32_000,
+        provider_output_token_limit_per_attempt=2_048,
         next_eligible_at=datetime.now(timezone.utc) - timedelta(seconds=1),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=monotonic() + 30,
     )
     attempt = repository.claim_due_job(
-        handler_type="MEMORY_GOVERNANCE",
+        handler_type="BACKGROUND_COMPACTION",
         claim_owner_id=_id("worker"),
         lease_seconds=15,
         deadline_monotonic=monotonic() + 30,

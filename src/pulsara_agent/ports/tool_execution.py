@@ -154,6 +154,7 @@ class ToolExecutionResult:
     output_artifact_candidate: ToolOutputArtifactCandidate | None = None
     artifact_source_read: bool = False
     trusted_observation: TrustedToolObservationSupplement | None = None
+    model_visible_memory_fact_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "metadata", freeze_tool_json_object(self.metadata))
@@ -163,6 +164,12 @@ class ToolExecutionResult:
         self.output.encode("utf-8")
         if self.artifact_source_read and self.output_artifact_candidate is not None:
             raise ValueError("artifact_read results cannot recursively own artifacts")
+        if (
+            len(self.model_visible_memory_fact_ids) > 50
+            or len(set(self.model_visible_memory_fact_ids))
+            != len(self.model_visible_memory_fact_ids)
+        ):
+            raise ValueError("tool result memory provenance header is invalid")
 
 
 class Tool(Protocol):

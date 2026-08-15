@@ -54,6 +54,11 @@ from pulsara_agent.ports.provider_stream import (
 )
 from pulsara_agent.primitives.context import context_fingerprint, thaw_json
 from pulsara_agent.primitives.model_call import ModelCallPurpose
+from pulsara_agent.conversation_kernel.memory.contracts import (
+    FrozenModelCallMemoryContext,
+    FrozenModelVisibleMemoryProvenance,
+    ModelVisibleMemoryProvenanceDisposition,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,6 +121,14 @@ class KernelModelExecutionRequest:
     compiled_input: FrozenCompiledModelInput = field(repr=False)
     cut: PreparedProviderInputCut
     surface_borrow: ProcessLocalToolSurfaceBorrow = field(repr=False)
+    memory_context: FrozenModelCallMemoryContext = field(
+        default_factory=lambda: FrozenModelCallMemoryContext(
+            FrozenModelVisibleMemoryProvenance(
+                ModelVisibleMemoryProvenanceDisposition.COMPLETE, ()
+            )
+        ),
+        repr=False,
+    )
 
     def __post_init__(self) -> None:
         identity = self.compiled_input.canonical_input_identity

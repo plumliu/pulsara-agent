@@ -764,13 +764,11 @@ class _RepositoryKernel:
                 subject_context_binding_revision_id,
                 subject_subagent_task_id, subject_subagent_message_id,
                 subject_subagent_result_id, subject_subagent_child_kind,
-                subject_memory_fact_id,
-                subject_memory_relation_id,
                 subject_plan_workflow_id, subject_plan_interaction_id
             ) VALUES (
                 %s, %s, %s, %s, 'pulsara.core', %s, 1, 0,
                 %s, %s, %s, %s, %s, %s,
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                 %s, %s
             )
             RETURNING accepted_at

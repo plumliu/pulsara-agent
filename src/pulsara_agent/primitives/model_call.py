@@ -16,7 +16,7 @@ class ModelCallPurpose(StrEnum):
     CONTEXT_COMPACTION_SUMMARY = "context_compaction_summary"
     CONTEXT_WINDOW_COMPACTION_SUMMARY = "context_window_compaction_summary"
     MEMORY_GOVERNANCE = "memory_governance"
-    MEMORY_REFLECTION = "memory_reflection"
+    MEMORY_HINT_REVIEW = "memory_hint_review"
     COMPACTION_MEMORY_EXTRACTION = "compaction_memory_extraction"
 
 

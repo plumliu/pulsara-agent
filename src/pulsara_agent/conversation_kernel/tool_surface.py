@@ -128,6 +128,8 @@ class PreparedToolExecutionBinding:
     descriptor_fingerprint: str
     executor_binding_fingerprint: str
     execution_policy: ToolExecutionPolicy
+    memory_citation_visibility: str = "WORKSPACE_BOUND"
+    memory_citation_evidence_kind: str = "PRIMARY_OBSERVATION"
 
     def __post_init__(self) -> None:
         if not all(
@@ -150,6 +152,13 @@ class PreparedToolExecutionBinding:
                 raise ValueError("MCP policy does not join tool binding")
         else:
             raise TypeError("tool execution policy union is open")
+        if self.memory_citation_visibility not in {"USER_SAFE", "WORKSPACE_BOUND"}:
+            raise ValueError("memory citation visibility is not closed")
+        if self.memory_citation_evidence_kind not in {
+            "PRIMARY_OBSERVATION",
+            "MEMORY_READ_EXPOSURE",
+        }:
+            raise ValueError("memory citation evidence kind is not closed")
 
 
 def tool_observation_origin_for_binding(
@@ -194,6 +203,10 @@ def tool_execution_surface_fingerprint(
                     ),
                     "execution_policy_fingerprint": execution_policy_fingerprint(
                         item.execution_policy
+                    ),
+                    "memory_citation_visibility": item.memory_citation_visibility,
+                    "memory_citation_evidence_kind": (
+                        item.memory_citation_evidence_kind
                     ),
                 }
                 for item in bindings

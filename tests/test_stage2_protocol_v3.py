@@ -451,7 +451,7 @@ def test_stage2_protocol_v3_closed_vocabularies_are_exact() -> None:
     live = {
         item.name for item in wire.LiveEventType.DESCRIPTOR.values if item.number != 0
     }
-    assert len(committed) == 34
+    assert len(committed) == 31
     assert len(live) == 23
     assert set(COMMITTED_PROJECTION_BRANCH_BY_TYPE) == {
         item.value for item in CommittedEventType
@@ -472,11 +472,11 @@ def test_stage2_protocol_v3_closed_vocabularies_are_exact() -> None:
     assert sum(
         value == "CURRENT_CONTROL"
         for value in COMMITTED_PROJECTION_BRANCH_BY_TYPE.values()
-    ) == 23
+    ) == 21
     assert sum(
         value == "EVENT_ONLY"
         for value in COMMITTED_PROJECTION_BRANCH_BY_TYPE.values()
-    ) == 4
+    ) == 3
     assert {item.name for item in wire.ObservationGapKind.DESCRIPTOR.values} == {
         "OBSERVATION_GAP_KIND_UNSPECIFIED",
         "COMMITTED_GAP",

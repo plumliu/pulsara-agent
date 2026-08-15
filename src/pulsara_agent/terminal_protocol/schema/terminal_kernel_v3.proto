@@ -56,9 +56,7 @@ enum CommittedEventType {
   JOB_QUEUED = 21;
   JOB_ATTEMPT_ACCEPTED = 22;
   JOB_TERMINAL_ACCEPTED = 23;
-  MEMORY_FACT_ACCEPTED = 24;
-  MEMORY_FACT_LIFECYCLE_CHANGED = 25;
-  MEMORY_RELATION_ACCEPTED = 26;
+  reserved 24 to 26;
   TERMINAL_OBSERVATION_ACCEPTED = 27;
   PLAN_WORKFLOW_ENTERED = 28;
   PLAN_QUESTION_ASKED = 29;
@@ -265,13 +263,6 @@ message JobControl {
   uint32 attempt_count = 5;
 }
 
-message MemoryFreshnessControl {
-  string channel = 1;
-  uint64 desired_generation = 2;
-  uint64 applied_generation = 3;
-  string handler_contract = 4;
-}
-
 message CanonicalControl {
   string session_lifecycle = 1;
   repeated ActiveTurnControl active_turns = 2;
@@ -280,7 +271,7 @@ message CanonicalControl {
   repeated ToolAttemptControl tool_attempts = 5;
   repeated SubagentTaskControl subagent_tasks = 6;
   repeated JobControl jobs = 7;
-  repeated MemoryFreshnessControl memory_freshness = 8;
+  reserved 8;
   PlanWorkflowControl active_plan_workflow = 9;
   PlanInteractionControl open_plan_interaction = 10;
   PlanHandoffControl latest_plan_handoff = 11;

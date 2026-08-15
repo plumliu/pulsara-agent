@@ -85,6 +85,42 @@ class ProviderSafePointCoordinator:
             self._active_handle = handle
             return handle
 
+    def rotate_provider_input(
+        self,
+        handle: PreparedProviderInputHandle,
+        *,
+        turn_id: str,
+        deadline_monotonic: float,
+    ) -> PreparedProviderInputHandle:
+        """Atomically replace one pre-consumption cut with its successor cut.
+
+        The old handle remains the active exclusion owner until the new cut has
+        been prepared.  External producers therefore never observe an empty
+        safe-point window between steer consumption and final materialization.
+        This is process-local ownership, not a durable input generation.
+        """
+
+        with self._lock:
+            self._require_current(handle)
+            if handle._model_active:
+                raise RuntimeError("cannot rotate an active model operation")
+            self._repository.require_provider_safe_turn(
+                self._guard,
+                turn_id=turn_id,
+                deadline_monotonic=deadline_monotonic,
+            )
+            cut = self._repository.prepare_provider_input_cut(
+                self._guard,
+                turn_id=turn_id,
+                deadline_monotonic=deadline_monotonic,
+            )
+            self._generation += 1
+            successor = PreparedProviderInputHandle(cut, self, self._generation)
+            handle._closed = True
+            handle._model_active = False
+            self._active_handle = successor
+            return successor
+
     def accept_subagent_result(
         self,
         *,

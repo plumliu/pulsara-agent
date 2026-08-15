@@ -21,7 +21,10 @@ from pulsara_agent.storage.migrations.errors import (
     PostgresSchemaError,
     PostgresSchemaFailureCode,
 )
-from pulsara_agent.storage.migrations.grants import PostgresRuntimeGrantExecutor
+from pulsara_agent.storage.migrations.grants import (
+    PostgresRuntimeGrantExecutor,
+    build_postgres_runtime_grant_policy,
+)
 from pulsara_agent.storage.migrations.manifest import CONVERSATION_KERNEL_RELATIONS
 from pulsara_agent.storage.migrations.registry import (
     POSTGRES_MIGRATION_REGISTRY,
@@ -501,31 +504,36 @@ def _verify_runtime_grants(connection: Connection, runtime_role: str) -> None:
                 "clean runtime migration-ledger grants are not exact",
             )
 
-    function_identity = "pulsara_v3.enforce_conversation_kernel_invariants()"
-    function_execute = connection.execute(
-        "SELECT pg_catalog.has_function_privilege(%s, %s, 'EXECUTE') AS allowed",
-        (runtime_role, function_identity),
-    ).fetchone()
-    public_execute = connection.execute(
-        """
-        SELECT COALESCE(bool_or(a.grantee = 0 AND a.privilege_type = 'EXECUTE'), false)
-        FROM pg_catalog.pg_proc p
-        JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
-        LEFT JOIN LATERAL pg_catalog.aclexplode(
-            COALESCE(p.proacl, pg_catalog.acldefault('f', p.proowner))
-        ) a ON true
-        WHERE n.nspname = 'pulsara_v3'
-          AND p.proname = 'enforce_conversation_kernel_invariants'
-          AND pg_catalog.pg_get_function_identity_arguments(p.oid) = ''
-        """
-    ).fetchone()
-    if not bool(_cell(function_execute, 0, "allowed")) or bool(
-        _cell(public_execute, 0, "allowed")
-    ):
-        raise PostgresSchemaError(
-            PostgresSchemaFailureCode.PRIVILEGE_MISSING,
-            "clean runtime invariant-function grants are not exact",
-        )
+    function_policy = build_postgres_runtime_grant_policy().function_privileges
+    for function_signature, required in function_policy.items():
+        function_identity = f"pulsara_v3.{function_signature}"
+        function_execute = connection.execute(
+            "SELECT pg_catalog.has_function_privilege(%s, %s, 'EXECUTE') AS allowed",
+            (runtime_role, function_identity),
+        ).fetchone()
+        function_name, arguments = function_signature[:-1].split("(", 1)
+        public_execute = connection.execute(
+            """
+            SELECT COALESCE(bool_or(
+                a.grantee = 0 AND a.privilege_type = 'EXECUTE'
+            ), false)
+            FROM pg_catalog.pg_proc p
+            JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+            LEFT JOIN LATERAL pg_catalog.aclexplode(
+                COALESCE(p.proacl, pg_catalog.acldefault('f', p.proowner))
+            ) a ON true
+            WHERE n.nspname = 'pulsara_v3' AND p.proname = %s
+              AND pg_catalog.pg_get_function_identity_arguments(p.oid) = %s
+            """,
+            (function_name, arguments),
+        ).fetchone()
+        if required != ("EXECUTE",) or not bool(
+            _cell(function_execute, 0, "allowed")
+        ) or bool(_cell(public_execute, 0, "allowed")):
+            raise PostgresSchemaError(
+                PostgresSchemaFailureCode.PRIVILEGE_MISSING,
+                "clean runtime invariant-function grants are not exact",
+            )
 
 
 def _read_identity_from_connection(connection: Connection) -> PostgresDatabaseIdentity:

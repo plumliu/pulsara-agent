@@ -515,9 +515,11 @@ def test_round5_writer_renewal_uses_its_short_owner_deadline_during_long_turn() 
                 actual_guard: HostWriterGuard,
                 *,
                 lease_seconds: float,
+                memory_domain_id: str,
                 deadline_monotonic: float,
             ) -> WriterLease:
                 assert actual_guard == guard
+                assert memory_domain_id == "u_local"
                 calls.append((lease_seconds, deadline_monotonic - monotonic()))
                 return WriterLease(
                     guard=guard,
@@ -531,6 +533,7 @@ def test_round5_writer_renewal_uses_its_short_owner_deadline_during_long_turn() 
         session = object.__new__(KernelHostSession)
         session._deadlines = deadlines  # type: ignore[attr-defined]
         session._lease = initial  # type: ignore[attr-defined]
+        session._memory_domain_id = "u_local"  # type: ignore[attr-defined]
         session._io = InlineIO()  # type: ignore[attr-defined]
         session.repository = RecordingRepository()  # type: ignore[attr-defined]
         renewal = asyncio.create_task(session._renew_writer())  # noqa: SLF001

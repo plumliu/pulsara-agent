@@ -11,11 +11,17 @@ from types import MappingProxyType
 from typing import Mapping
 from uuid import uuid4
 from pulsara_agent.conversation_kernel.contracts import BlobContent, CanonicalContent, CommittedEventDraft, CommittedEventSubject, EntryKind, HostWriterGuard, InlineContent, JobAttemptClaimGuard, JobSafetyClass, canonical_digest
-from pulsara_agent.conversation_kernel.job_catalog import MEMORY_GOVERNANCE, job_handler_contract
+from pulsara_agent.conversation_kernel.memory.contracts import (
+    PreparedMemoryCandidateAcceptance,
+)
 from pulsara_agent.conversation_kernel.limits import STAGE2_LIMITS
 from pulsara_agent.ports.artifact import ToolOutputArtifactDisposition, ToolOutputArtifactUnavailabilityReason, ToolResultDisplayKind
-from pulsara_agent.ports.tool_execution import FrozenToolJsonDict, ToolOutputSourceCoverage, ToolOutputSourceCoverageReason, freeze_tool_json_object
-from pulsara_agent.primitives.context import FrozenJsonObjectFact, thaw_json
+from pulsara_agent.ports.tool_execution import ToolOutputSourceCoverage, ToolOutputSourceCoverageReason
+from pulsara_agent.primitives.context import (
+    FrozenJsonObjectFact,
+    canonical_json_bytes,
+    thaw_json,
+)
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.primitives.run_permission import FrozenRunPermissionSnapshot
 from pulsara_agent.primitives.tool_observation import (
@@ -26,6 +32,10 @@ from pulsara_agent.primitives.tool_observation import (
 from pulsara_agent.primitives.plan_workflow import PLAN_ENTRY_CONTRACT, ExtractedPlanDraft, PlanDraftDecision, PlanHandoffKind, PlanInteractionBinding, PlanInteractionKind, PlanQuestionAnswerKind, PlanQuestionContent, PlanWorkflowStatus, require_plan_interaction_contract
 from pulsara_agent.conversation_kernel.vocabulary import CommittedEventType, SubjectSlot
 from pulsara_agent.conversation_kernel.steer import PromptIngressWriteRejection
+
+
+class _ObservedActiveMemoryDuplicate(Exception):
+    """Internal control-flow signal for the ACTIVE partial-unique winner."""
 
 INLINE_CONTENT_LIMIT = STAGE2_LIMITS.inline_content_hard_bytes
 
@@ -324,53 +334,12 @@ class NoToolResultSideBranch:
 
 @dataclass(frozen=True, slots=True)
 class PreparedMemoryProposalSideBranch:
-    memory_candidate_id: str
-    proposal_kind: str
-    proposal_payload: FrozenToolJsonDict
-    candidate_semantic_digest: str
-    governance_job_id: str
-    intent_payload: FrozenToolJsonDict
-    intent_digest: str
-    automatic_intent_key: str
-    retry_policy_id: str
-    retry_policy_version: int
-    maximum_attempts: int
-    attempt_timeout_ms: int
-    provider_input_token_limit_per_attempt: int
-    provider_output_token_limit_per_attempt: int
-    next_eligible_at: datetime
-    job_queued_occurrence: CommittedEventDraft
+    candidate: PreparedMemoryCandidateAcceptance
     branch_kind: ToolResultSideBranchKind = ToolResultSideBranchKind.MEMORY_PROPOSAL
-    job_handler_type: str = MEMORY_GOVERNANCE
-    intent_schema_version: str = "memory_governance.v1"
-    safety_class: str = "RETRY_SAFE"
-    initial_status: str = "PENDING"
 
     def __post_init__(self) -> None:
-        object.__setattr__(
-            self, "proposal_payload", freeze_tool_json_object(self.proposal_payload)
-        )
-        object.__setattr__(
-            self, "intent_payload", freeze_tool_json_object(self.intent_payload)
-        )
-        if self.proposal_kind not in {
-            "FACT",
-            "PREFERENCE",
-            "RELATION",
-            "CORRECTION",
-            "LIFECYCLE",
-        }:
-            raise ValueError("memory proposal kind is not closed")
-        if (
-            min(
-                self.maximum_attempts,
-                self.attempt_timeout_ms,
-                self.provider_input_token_limit_per_attempt,
-                self.provider_output_token_limit_per_attempt,
-            )
-            < 1
-        ):
-            raise ValueError("memory proposal job bounds must be positive")
+        if not isinstance(self.candidate, PreparedMemoryCandidateAcceptance):
+            raise TypeError("memory side branch requires a frozen candidate")
 
 
 ToolResultSideBranch = NoToolResultSideBranch | PreparedMemoryProposalSideBranch
@@ -402,6 +371,7 @@ class PreparedToolResultAcceptance:
     actor_id: str
     tool_result_occurrence: CommittedEventDraft
     side_branch: ToolResultSideBranch
+    model_visible_memory_fact_ids: tuple[str, ...] = ()
     candidate_fingerprint: str = field(init=False)
 
     def __post_init__(self) -> None:
@@ -450,6 +420,14 @@ class PreparedToolResultAcceptance:
             raise ValueError("prepared tool result coverage is inconsistent")
         if self.canonical_preview_content.size > 65_536:
             raise ValueError("prepared tool result preview exceeds its hard bound")
+        if (
+            len(self.model_visible_memory_fact_ids) > 50
+            or len(set(self.model_visible_memory_fact_ids))
+            != len(self.model_visible_memory_fact_ids)
+            or any(not value for value in self.model_visible_memory_fact_ids)
+            or len(canonical_json_bytes(self.model_visible_memory_fact_ids)) > 8_192
+        ):
+            raise ValueError("prepared model-visible memory header is invalid")
         canonical_utc_timestamp(self.observed_at)
         if self.observation_duration_microseconds != normalize_observation_duration(
             self.observation_duration_microseconds
@@ -521,27 +499,16 @@ class PreparedToolResultAcceptance:
             if self.side_branch.branch_kind is not ToolResultSideBranchKind.NONE:
                 raise ValueError("prepared no-side-branch discriminator is invalid")
         elif isinstance(self.side_branch, PreparedMemoryProposalSideBranch):
-            side_event = self.side_branch.job_queued_occurrence
+            memory = self.side_branch.candidate
             if (
                 self.side_branch.branch_kind
                 is not ToolResultSideBranchKind.MEMORY_PROPOSAL
-                or side_event.event_id
-                != _stable_identity(
-                    "event", self.side_branch.governance_job_id, "JobQueued"
-                )
-                or side_event.event_type is not CommittedEventType.JOB_QUEUED
-                or side_event.subject
-                != CommittedEventSubject(
-                    SubjectSlot.JOB, self.side_branch.governance_job_id
-                )
-                or side_event.actor_kind != "runtime"
-                or side_event.sensitivity_class != "PUBLIC"
-                or side_event.projection_profile != "DEFAULT"
-                or side_event.occurred_at != self.observed_at
-                or dict(side_event.payload)
-                != {"handler_type": self.side_branch.job_handler_type}
+                or memory.origin_session_id != self.session_id
+                or memory.origin_workspace_id != self.workspace_id
+                or memory.producer_entry_id != self.assistant_entry_id
+                or memory.producer_tool_call_id != self.tool_call_id
             ):
-                raise ValueError("prepared memory side occurrence is not exact")
+                raise ValueError("prepared memory candidate side branch is not exact")
         else:
             raise TypeError("prepared tool result side branch is not closed")
         payload = _prepared_tool_result_manifest(self)
@@ -866,38 +833,6 @@ class AcceptedJobSettlement:
     aggregate_status: str
     retry_scheduled: bool
     next_eligible_at: datetime | None
-
-
-@dataclass(frozen=True, slots=True)
-class AcceptedMemoryCandidate:
-    candidate_id: str
-    governance_job_id: str
-
-
-@dataclass(frozen=True, slots=True)
-class AcceptedMemoryGovernance:
-    candidate_id: str
-    decision_id: str
-    decision: str
-    fact_id: str | None
-    relation_ids: tuple[str, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class MemoryVectorFactSource:
-    fact_id: str
-    semantic_digest: str
-    embedding_text: str
-
-
-@dataclass(frozen=True, slots=True)
-class MemoryVectorSource:
-    workspace_id: str
-    target_generation: int
-    handler_contract_id: str
-    handler_contract_version: int
-    source_digest: str
-    facts: tuple[MemoryVectorFactSource, ...]
 
 
 def _utcnow() -> datetime:
@@ -1365,30 +1300,9 @@ def _prepared_tool_result_manifest(
     else:
         side_payload = {
             "branch_kind": side.branch_kind.value,
-            "memory_candidate_id": side.memory_candidate_id,
-            "proposal_kind": side.proposal_kind,
-            "proposal_payload": dict(side.proposal_payload),
-            "candidate_semantic_digest": side.candidate_semantic_digest,
-            "governance_job_id": side.governance_job_id,
-            "job_handler_type": side.job_handler_type,
-            "intent_schema_version": side.intent_schema_version,
-            "intent_payload": dict(side.intent_payload),
-            "intent_digest": side.intent_digest,
-            "automatic_intent_key": side.automatic_intent_key,
-            "safety_class": side.safety_class,
-            "initial_status": side.initial_status,
-            "retry_policy_id": side.retry_policy_id,
-            "retry_policy_version": side.retry_policy_version,
-            "maximum_attempts": side.maximum_attempts,
-            "attempt_timeout_ms": side.attempt_timeout_ms,
-            "provider_input_token_limit_per_attempt": (
-                side.provider_input_token_limit_per_attempt
+            "candidate_acceptance_digest": (
+                side.candidate.candidate_acceptance_digest
             ),
-            "provider_output_token_limit_per_attempt": (
-                side.provider_output_token_limit_per_attempt
-            ),
-            "next_eligible_at": side.next_eligible_at.isoformat(),
-            "job_queued_occurrence": _event_manifest(side.job_queued_occurrence),
         }
     return {
         "session_id": candidate.session_id,
@@ -1427,6 +1341,7 @@ def _prepared_tool_result_manifest(
             candidate.trusted_tool_reported_duration_microseconds
         ),
         "actor_id": candidate.actor_id,
+        "model_visible_memory_fact_ids": candidate.model_visible_memory_fact_ids,
         "tool_result_occurrence": _event_manifest(candidate.tool_result_occurrence),
         "side_branch": side_payload,
     }
@@ -1456,10 +1371,8 @@ def build_prepared_tool_result_acceptance(
     observation_origin_kind: ToolObservationOrigin,
     trusted_tool_reported_duration_microseconds: int | None,
     actor_id: str,
-    memory_candidate_id: str | None = None,
-    memory_proposal_kind: str | None = None,
-    memory_proposal_payload: Mapping[str, object] | None = None,
-    memory_governance_job_id: str | None = None,
+    memory_candidate: PreparedMemoryCandidateAcceptance | None = None,
+    model_visible_memory_fact_ids: tuple[str, ...] = (),
 ) -> PreparedToolResultAcceptance:
     """Freeze every semantic field before the first canonical write."""
 
@@ -1474,73 +1387,10 @@ def build_prepared_tool_result_acceptance(
         occurred_at=observed_at,
         payload={"tool_call_id": tool_call_id, "result_state": result_state},
     )
-    memory_fields = (
-        memory_candidate_id,
-        memory_proposal_kind,
-        memory_proposal_payload,
-        memory_governance_job_id,
-    )
-    if any(item is not None for item in memory_fields) and not all(
-        item is not None for item in memory_fields
-    ):
-        raise ValueError("memory proposal result branch is incomplete")
-    if memory_candidate_id is None:
+    if memory_candidate is None:
         side_branch: ToolResultSideBranch = NoToolResultSideBranch()
     else:
-        assert memory_proposal_kind is not None
-        assert memory_proposal_payload is not None
-        assert memory_governance_job_id is not None
-        proposal = freeze_tool_json_object(memory_proposal_payload)
-        semantic_digest = canonical_digest(
-            "pulsara:memory-candidate:v1",
-            {
-                "workspace_id": workspace_id,
-                "proposal_kind": memory_proposal_kind,
-                "proposal_payload": dict(proposal),
-                "source_entry_id": assistant_entry_id,
-            },
-        )
-        intent_payload = freeze_tool_json_object(
-            {
-                "candidate_id": memory_candidate_id,
-                "candidate_semantic_digest": semantic_digest,
-            }
-        )
-        governance = job_handler_contract(MEMORY_GOVERNANCE)
-        side_branch = PreparedMemoryProposalSideBranch(
-            memory_candidate_id=memory_candidate_id,
-            proposal_kind=memory_proposal_kind,
-            proposal_payload=proposal,
-            candidate_semantic_digest=semantic_digest,
-            governance_job_id=memory_governance_job_id,
-            intent_payload=intent_payload,
-            intent_digest=canonical_digest(
-                "pulsara:job-intent:memory_governance.v1", dict(intent_payload)
-            ),
-            automatic_intent_key=f"memory-governance:{memory_candidate_id}",
-            retry_policy_id="bounded-exponential",
-            retry_policy_version=1,
-            maximum_attempts=governance.maximum_attempts,
-            attempt_timeout_ms=governance.attempt_timeout_ms,
-            provider_input_token_limit_per_attempt=governance.input_token_limit,
-            provider_output_token_limit_per_attempt=governance.output_token_limit,
-            next_eligible_at=observed_at,
-            job_queued_occurrence=CommittedEventDraft(
-                event_id=_stable_identity(
-                    "event", memory_governance_job_id, "JobQueued"
-                ),
-                event_type=CommittedEventType.JOB_QUEUED,
-                subject=CommittedEventSubject(
-                    SubjectSlot.JOB, memory_governance_job_id
-                ),
-                actor_kind="runtime",
-                actor_id=guard.writer_owner_id,
-                sensitivity_class="PUBLIC",
-                projection_profile="DEFAULT",
-                occurred_at=observed_at,
-                payload={"handler_type": MEMORY_GOVERNANCE},
-            ),
-        )
+        side_branch = PreparedMemoryProposalSideBranch(candidate=memory_candidate)
     return PreparedToolResultAcceptance(
         session_id=guard.session_id,
         workspace_id=workspace_id,
@@ -1568,4 +1418,5 @@ def build_prepared_tool_result_acceptance(
         actor_id=actor_id,
         tool_result_occurrence=tool_result_occurrence,
         side_branch=side_branch,
+        model_visible_memory_fact_ids=model_visible_memory_fact_ids,
     )

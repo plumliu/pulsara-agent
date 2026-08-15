@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from enum import StrEnum
 from hashlib import sha256
 from pathlib import Path
 from typing import Literal
@@ -14,6 +15,123 @@ WORKSPACE_SCOPE_PREFIX = "ctx:workspace/"
 
 _FLAT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
 _WORKSPACE_SCOPE_KEY_CHARS = 16
+
+
+class MemoryScopeKind(StrEnum):
+    USER = "USER"
+    WORKSPACE = "WORKSPACE"
+
+
+class MemoryHostWorkspaceKind(StrEnum):
+    PROJECT = "PROJECT"
+    TRANSIENT = "TRANSIENT"
+
+
+@dataclass(frozen=True, slots=True)
+class FrozenMemoryScope:
+    kind: MemoryScopeKind
+    scope_id: str
+
+    def __post_init__(self) -> None:
+        if self.kind is MemoryScopeKind.USER:
+            if self.scope_id != CTX_USER:
+                raise ValueError("USER memory scope must use ctx:user")
+        elif not self.scope_id.startswith(WORKSPACE_SCOPE_PREFIX) or not is_valid_scope(
+            self.scope_id
+        ):
+            raise ValueError("WORKSPACE memory scope identity is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class FrozenMemoryReadScopeBinding:
+    """Host-selected advisory-memory visibility; never a durable authority."""
+
+    memory_domain_id: str
+    host_workspace_id: str
+    host_workspace_kind: MemoryHostWorkspaceKind
+    readable_scopes: tuple[FrozenMemoryScope, ...]
+    binding_fingerprint: str
+
+    def __post_init__(self) -> None:
+        if not is_valid_flat_id(self.memory_domain_id) or not self.host_workspace_id:
+            raise ValueError("memory read binding identity is invalid")
+        expected_scopes = (FrozenMemoryScope(MemoryScopeKind.USER, CTX_USER),)
+        if self.host_workspace_kind is MemoryHostWorkspaceKind.PROJECT:
+            if len(self.readable_scopes) != 2:
+                raise ValueError("project memory binding needs USER and WORKSPACE")
+            if self.readable_scopes[0] != expected_scopes[0]:
+                raise ValueError("USER memory scope must be first")
+            if self.readable_scopes[1].kind is not MemoryScopeKind.WORKSPACE:
+                raise ValueError("project memory binding lacks WORKSPACE scope")
+        elif self.readable_scopes != expected_scopes:
+            raise ValueError("transient memory binding can only read USER memory")
+        if self.binding_fingerprint != memory_read_scope_binding_fingerprint(
+            memory_domain_id=self.memory_domain_id,
+            host_workspace_id=self.host_workspace_id,
+            host_workspace_kind=self.host_workspace_kind,
+            readable_scopes=self.readable_scopes,
+        ):
+            raise ValueError("memory read binding fingerprint mismatch")
+
+    def can_read(self, kind: MemoryScopeKind | str, scope_id: str) -> bool:
+        try:
+            target = FrozenMemoryScope(MemoryScopeKind(kind), scope_id)
+        except (ValueError, TypeError):
+            return False
+        return target in self.readable_scopes
+
+
+def memory_read_scope_binding_fingerprint(
+    *,
+    memory_domain_id: str,
+    host_workspace_id: str,
+    host_workspace_kind: MemoryHostWorkspaceKind,
+    readable_scopes: tuple[FrozenMemoryScope, ...],
+) -> str:
+    import json
+
+    payload = {
+        "memory_domain_id": memory_domain_id,
+        "host_workspace_id": host_workspace_id,
+        "host_workspace_kind": host_workspace_kind.value,
+        "readable_scopes": tuple(
+            (scope.kind.value, scope.scope_id) for scope in readable_scopes
+        ),
+    }
+    encoded = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+    return "sha256:" + sha256(
+        b"pulsara:memory-read-scope-binding:v1\x00" + encoded
+    ).hexdigest()
+
+
+def freeze_memory_read_scope_binding(
+    *, domain: "MemoryDomainContext", host_workspace_id: str
+) -> FrozenMemoryReadScopeBinding:
+    scopes = [FrozenMemoryScope(MemoryScopeKind.USER, CTX_USER)]
+    kind = MemoryHostWorkspaceKind.TRANSIENT
+    if domain.workspace_kind == "project":
+        assert domain.stable_project_key is not None
+        kind = MemoryHostWorkspaceKind.PROJECT
+        scopes.append(
+            FrozenMemoryScope(
+                MemoryScopeKind.WORKSPACE, workspace_scope(domain.stable_project_key)
+            )
+        )
+    ordered = tuple(scopes)
+    return FrozenMemoryReadScopeBinding(
+        memory_domain_id=domain.memory_domain_id,
+        host_workspace_id=host_workspace_id,
+        host_workspace_kind=kind,
+        readable_scopes=ordered,
+        binding_fingerprint=memory_read_scope_binding_fingerprint(
+            memory_domain_id=domain.memory_domain_id,
+            host_workspace_id=host_workspace_id,
+            host_workspace_kind=kind,
+            readable_scopes=ordered,
+        ),
+    )
 
 
 def is_valid_flat_id(value: str) -> bool:

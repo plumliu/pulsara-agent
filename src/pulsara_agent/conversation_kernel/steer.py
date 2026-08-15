@@ -27,8 +27,10 @@ from pulsara_agent.llm.estimator import TokenEstimate
 from pulsara_agent.model_input.continuity import (
     FrozenProviderInputAppendPlanningInput,
     ProviderInputContinuityScope,
+    SourceObservationPresence,
 )
 from pulsara_agent.model_input.contracts import (
+    ContextSourceKind,
     FrozenCanonicalCompileSnapshot,
     FrozenCompiledModelInput,
     FrozenContextBindingCompileFact,
@@ -567,6 +569,10 @@ class SteerSuffixAdmissionQuote:
     effective_target_budget: int
     estimator_fingerprint: str
     predecessor_prefix_fingerprint: str | None
+    memory_recall_reservation: "MemorySourceInvalidationReservation | None"
+    memory_response_preference_reservation: (
+        "MemorySourceInvalidationReservation | None"
+    )
     quote_fingerprint: str
 
     def __post_init__(self) -> None:
@@ -589,12 +595,37 @@ class SteerSuffixAdmissionQuote:
             raise ValueError("steer quote snapshot bound is invalid")
         if not 0 < self.resulting_epoch_logical_bytes <= (64 << 20):
             raise ValueError("steer quote epoch bound is invalid")
+        reservations = tuple(
+            item
+            for item in (
+                self.memory_recall_reservation,
+                self.memory_response_preference_reservation,
+            )
+            if item is not None
+        )
         if (
             self.effective_target_budget < 1
             or self.resulting_target_estimate.total_input_tokens
+            + sum(item.invalidation_input_token_ceiling for item in reservations)
             > self.effective_target_budget
         ):
             raise ValueError("steer quote target budget is invalid")
+        if self.resulting_epoch_logical_bytes + sum(
+            item.invalidation_epoch_bytes_ceiling for item in reservations
+        ) > (64 << 20):
+            raise ValueError("steer quote epoch reservation is invalid")
+        if any(item.estimator_fingerprint != self.estimator_fingerprint for item in reservations):
+            raise ValueError("steer quote memory estimator differs")
+        if (
+            self.memory_recall_reservation is not None
+            and self.memory_recall_reservation.source_kind
+            is not ContextSourceKind.MEMORY_RECALL
+        ) or (
+            self.memory_response_preference_reservation is not None
+            and self.memory_response_preference_reservation.source_kind
+            is not ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD
+        ):
+            raise ValueError("steer quote memory reservation kind is invalid")
         if not self.estimator_fingerprint.startswith("sha256:"):
             raise ValueError("steer quote estimator fingerprint is invalid")
         if self.predecessor_prefix_fingerprint is not None and not (
@@ -627,7 +658,150 @@ def steer_suffix_quote_fingerprint(quote: SteerSuffixAdmissionQuote) -> str:
             "effective_budget": quote.effective_target_budget,
             "estimator": quote.estimator_fingerprint,
             "predecessor_prefix": quote.predecessor_prefix_fingerprint,
+            "memory_recall_reservation": (
+                None
+                if quote.memory_recall_reservation is None
+                else quote.memory_recall_reservation.reservation_fingerprint
+            ),
+            "memory_response_preference_reservation": (
+                None
+                if quote.memory_response_preference_reservation is None
+                else quote.memory_response_preference_reservation.reservation_fingerprint
+            ),
         },
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class MemorySourceInvalidationReservation:
+    """Exact process-local quote for one possible stale-memory invalidation."""
+
+    source_kind: ContextSourceKind
+    prior_presence: SourceObservationPresence
+    prior_semantic_fingerprint: str
+    desired_presence: SourceObservationPresence
+    desired_semantic_fingerprint: str
+    source_contract_fingerprint: str
+    invalidation_provider_item_ceiling: int
+    invalidation_encoded_utf8_bytes_ceiling: int
+    invalidation_input_token_ceiling: int
+    invalidation_epoch_bytes_ceiling: int
+    full_encoded_utf8_bytes: int
+    full_input_token_cost: int
+    estimator_fingerprint: str
+    reservation_fingerprint: str
+
+    def __post_init__(self) -> None:
+        if self.source_kind not in {
+            ContextSourceKind.MEMORY_RECALL,
+            ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD,
+        }:
+            raise ValueError("memory invalidation reservation has foreign source")
+        if self.prior_presence not in {
+            SourceObservationPresence.VALUE,
+            SourceObservationPresence.UNAVAILABLE,
+        }:
+            raise ValueError("memory invalidation reservation has no stale head")
+        if self.desired_presence not in {
+            SourceObservationPresence.VALUE,
+            SourceObservationPresence.CLEARED,
+            SourceObservationPresence.UNAVAILABLE,
+        }:
+            raise ValueError("memory invalidation desired presence is invalid")
+        for value in (
+            self.prior_semantic_fingerprint,
+            self.desired_semantic_fingerprint,
+            self.source_contract_fingerprint,
+            self.estimator_fingerprint,
+        ):
+            if not value.startswith("sha256:"):
+                raise ValueError("memory invalidation fingerprint is invalid")
+        if self.invalidation_provider_item_ceiling != 1 or min(
+            self.invalidation_encoded_utf8_bytes_ceiling,
+            self.invalidation_input_token_ceiling,
+            self.invalidation_epoch_bytes_ceiling,
+            self.full_encoded_utf8_bytes,
+            self.full_input_token_cost,
+        ) < 0:
+            raise ValueError("memory invalidation quote is outside its bound")
+        if self.reservation_fingerprint != memory_invalidation_reservation_fingerprint(
+            self
+        ):
+            raise ValueError("memory invalidation reservation fingerprint mismatch")
+
+
+def memory_invalidation_reservation_fingerprint(
+    reservation: MemorySourceInvalidationReservation,
+) -> str:
+    return context_fingerprint(
+        "pulsara:memory-source-invalidation-reservation:v1",
+        {
+            "source": reservation.source_kind.value,
+            "prior": (
+                reservation.prior_presence.value,
+                reservation.prior_semantic_fingerprint,
+            ),
+            "desired": (
+                reservation.desired_presence.value,
+                reservation.desired_semantic_fingerprint,
+            ),
+            "contract": reservation.source_contract_fingerprint,
+            "invalidation": (
+                reservation.invalidation_provider_item_ceiling,
+                reservation.invalidation_encoded_utf8_bytes_ceiling,
+                reservation.invalidation_input_token_ceiling,
+                reservation.invalidation_epoch_bytes_ceiling,
+            ),
+            "full": (
+                reservation.full_encoded_utf8_bytes,
+                reservation.full_input_token_cost,
+            ),
+            "estimator": reservation.estimator_fingerprint,
+        },
+    )
+
+
+def build_memory_source_invalidation_reservation(
+    *,
+    source_kind: ContextSourceKind,
+    prior_presence: SourceObservationPresence,
+    prior_semantic_fingerprint: str,
+    desired_presence: SourceObservationPresence,
+    desired_semantic_fingerprint: str,
+    source_contract_fingerprint: str,
+    invalidation_encoded_utf8_bytes_ceiling: int,
+    invalidation_input_token_ceiling: int,
+    invalidation_epoch_bytes_ceiling: int,
+    full_encoded_utf8_bytes: int,
+    full_input_token_cost: int,
+    estimator_fingerprint: str,
+) -> MemorySourceInvalidationReservation:
+    values = {
+        "source_kind": source_kind,
+        "prior_presence": prior_presence,
+        "prior_semantic_fingerprint": prior_semantic_fingerprint,
+        "desired_presence": desired_presence,
+        "desired_semantic_fingerprint": desired_semantic_fingerprint,
+        "source_contract_fingerprint": source_contract_fingerprint,
+        "invalidation_provider_item_ceiling": 1,
+        "invalidation_encoded_utf8_bytes_ceiling": invalidation_encoded_utf8_bytes_ceiling,
+        "invalidation_input_token_ceiling": invalidation_input_token_ceiling,
+        "invalidation_epoch_bytes_ceiling": invalidation_epoch_bytes_ceiling,
+        "full_encoded_utf8_bytes": full_encoded_utf8_bytes,
+        "full_input_token_cost": full_input_token_cost,
+        "estimator_fingerprint": estimator_fingerprint,
+    }
+    provisional = MemorySourceInvalidationReservation.__new__(
+        MemorySourceInvalidationReservation
+    )
+    for name, value in values.items():
+        object.__setattr__(provisional, name, value)
+    object.__setattr__(provisional, "reservation_fingerprint", "")
+    return MemorySourceInvalidationReservation(
+        **values,
+        reservation_fingerprint=memory_invalidation_reservation_fingerprint(
+            provisional
+        ),
     )
 
 
@@ -932,6 +1106,10 @@ def build_steer_suffix_quote(
     effective_target_budget: int,
     estimator_fingerprint: str,
     predecessor_prefix_fingerprint: str | None,
+    memory_recall_reservation: MemorySourceInvalidationReservation | None = None,
+    memory_response_preference_reservation: (
+        MemorySourceInvalidationReservation | None
+    ) = None,
 ) -> SteerSuffixAdmissionQuote:
     canonical_bytes = sum(item.content.size for item in candidates)
     values = {
@@ -946,6 +1124,10 @@ def build_steer_suffix_quote(
         "effective_target_budget": effective_target_budget,
         "estimator_fingerprint": estimator_fingerprint,
         "predecessor_prefix_fingerprint": predecessor_prefix_fingerprint,
+        "memory_recall_reservation": memory_recall_reservation,
+        "memory_response_preference_reservation": (
+            memory_response_preference_reservation
+        ),
     }
     provisional = SteerSuffixAdmissionQuote.__new__(SteerSuffixAdmissionQuote)
     for name, value in values.items():
@@ -1089,6 +1271,7 @@ __all__ = [
     "AcceptedSteerDispatchEntry",
     "MAXIMUM_STEER_CANDIDATE_UTF8_BYTES",
     "MAXIMUM_STEER_ITEMS_PER_SAFE_POINT",
+    "MemorySourceInvalidationReservation",
     "MAXIMUM_STEER_PLANNING_CANONICAL_WORK_BYTES",
     "PendingPromptSteerFact",
     "PreparedPromptIngressCommand",
@@ -1116,6 +1299,8 @@ __all__ = [
     "build_steer_plan_conflict_interruption",
     "build_steer_resource_rejection",
     "build_steer_suffix_quote",
+    "build_memory_source_invalidation_reservation",
+    "memory_invalidation_reservation_fingerprint",
     "pending_prompt_steer_fact_fingerprint",
     "steer_consumption_candidate_fingerprint",
     "steer_canonical_base_fence_fingerprint",

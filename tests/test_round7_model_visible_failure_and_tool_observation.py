@@ -194,6 +194,7 @@ def _tool_result_item(body: str) -> FrozenProviderInputItem:
         text=body,
         tool_call_id="call:test",
         tool_result_context=ProviderToolResultContextMetadata(
+            result_id="result:test",
             result_state="SUCCESS",
             display_kind=ToolResultDisplayKind.COMPLETE,
             artifact_disposition=ToolOutputArtifactDisposition.NOT_REQUIRED,
@@ -201,6 +202,7 @@ def _tool_result_item(body: str) -> FrozenProviderInputItem:
             source_coverage=ToolOutputSourceCoverage.COMPLETE,
             source_coverage_reason=None,
             artifact_unavailability_reason=None,
+            model_visible_memory_fact_ids=(),
             timing=_timing(reported=10_000),
         ),
         tool_result_body_text=body,
@@ -325,7 +327,7 @@ def test_round7_source_registry_wire_and_oracle_architecture_guards() -> None:
     ).contract_version == "pulsara.tool-observation-freshness.v1"
     assert (
         COMPILER_CONTRACT_VERSION
-        == "pulsara.structured-model-input-compiler.prefix-continuity.v3"
+        == "pulsara.structured-model-input-compiler.prefix-continuity.v4"
     )
     assert (
         PROVIDER_MESSAGE_LOWERING_CONTRACT
@@ -359,9 +361,9 @@ def test_round7_source_registry_wire_and_oracle_architecture_guards() -> None:
     assert "observed_at -" not in reader
     assert "attempt.started_at" not in reader
 
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == len(CommittedEventType) == 34
+    assert len(COMMITTED_EVENT_DESCRIPTORS) == len(CommittedEventType) == 31
     assert len(LiveEventType) == 23
-    assert len(SUBJECT_SLOTS) == 15
+    assert len(SUBJECT_SLOTS) == 13
     assert len(APPEND_GUARDS) == 2
 
 

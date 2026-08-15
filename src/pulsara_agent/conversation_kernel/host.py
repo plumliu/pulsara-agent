@@ -55,6 +55,10 @@ from pulsara_agent.conversation_kernel.execution_watchdogs import (
 from pulsara_agent.conversation_kernel.input_continuity import (
     HostProviderInputContinuityOwner,
 )
+from pulsara_agent.conversation_kernel.auxiliary_model import (
+    DirectKernelAuxiliaryJsonModel,
+    provider_trust_domain_identity,
+)
 from pulsara_agent.conversation_kernel.extensions import (
     ExtensionPlane,
     ExtensionPrincipal,
@@ -75,6 +79,8 @@ from pulsara_agent.conversation_kernel.limits import STAGE2_LIMITS
 from pulsara_agent.conversation_kernel.live import LiveAgentEventBus
 from pulsara_agent.conversation_kernel.live_control import SessionLiveControlOwner
 from pulsara_agent.conversation_kernel.memory_tools import KernelMemoryToolPort
+from pulsara_agent.conversation_kernel.memory.governor import AdvisoryMemoryGovernor
+from pulsara_agent.memory.scope import freeze_memory_read_scope_binding
 from pulsara_agent.conversation_kernel.query import CanonicalConversationQuery
 from pulsara_agent.conversation_kernel.repository import (
     AcceptedPlanResolution,
@@ -146,6 +152,7 @@ MAXIMUM_PROMPT_BYTES = STAGE2_LIMITS.prompt_hard_bytes
 class KernelSessionSummary:
     session_id: str
     workspace_id: str
+    memory_domain_id: str
     lifecycle: str
     writer_generation: int
     latest_entry_sequence: int
@@ -159,6 +166,7 @@ class KernelSessionSummary:
         return {
             "runtime_session_id": self.session_id,
             "workspace_id": self.workspace_id,
+            "memory_domain_id": self.memory_domain_id,
             "lifecycle": self.lifecycle,
             "writer_generation": self.writer_generation,
             "latest_entry_sequence": self.latest_entry_sequence,
@@ -288,6 +296,7 @@ class KernelHostSession:
         self._io = io_owner
         self._deadlines = deadline_factory
         self._lease = writer_lease
+        self._memory_domain_id = workspace.memory_domain.memory_domain_id
         self.live_control = SessionLiveControlOwner(
             session_id=session_id,
             owner_epoch=self._lease.guard.writer_generation,
@@ -339,12 +348,36 @@ class KernelHostSession:
             deadline_factory=self._deadlines,
         )
         self._tools.bind_subagent_port(self._subagents)
+        memory_read_binding = freeze_memory_read_scope_binding(
+            domain=workspace.memory_domain,
+            host_workspace_id=workspace.workspace_key,
+        )
+        memory_provider_trust_domain = provider_trust_domain_identity(settings.llm)
         self._memory_tools = KernelMemoryToolPort(
             repository=repository,
-            workspace_id=workspace.workspace_key,
+            session_id=session_id,
+            read_binding=memory_read_binding,
             embedding_config=settings.retrieval.embedding,
+            rerank_config=settings.retrieval.rerank,
+            feature_config=settings.retrieval.memory,
             io_owner=self._io,
+            provider_trust_domain_identity=memory_provider_trust_domain,
         )
+        self._memory_tools.bind_deadline_factory(self._deadlines)
+        self._memory_governor = AdvisoryMemoryGovernor(
+            repository=repository,
+            guard=self._lease.guard,
+            read_binding=memory_read_binding,
+            model=DirectKernelAuxiliaryJsonModel(settings.llm),
+            io_owner=self._io,
+            deadline_factory=self._deadlines,
+            provider_trust_domain_identity=memory_provider_trust_domain,
+            embedding_port=self._memory_tools,
+            hint_review_allow_cross_provider=(
+                settings.retrieval.memory.hint_review_allow_cross_provider
+            ),
+        )
+        self._memory_tools.bind_governor(self._memory_governor)
         self._tools.bind_memory_port(self._memory_tools)
         self._mcp_supervisor = McpHostSupervisor(
             session_id=session_id,
@@ -393,6 +426,7 @@ class KernelHostSession:
             plan_interactions=self._plan_interactions,
             automatic_plan_continuation=(self._accept_automatic_plan_continuation),
             deadline_factory=self._deadlines,
+            memory_projection=self._memory_tools,
         )
         self._subagents.bind_runner_factory(self._new_child_runner)
         self._active_task: asyncio.Task[KernelRunResult] | None = None
@@ -420,6 +454,7 @@ class KernelHostSession:
             self._prompt_delivery_loop(),
             name=f"kernel-prompt-delivery:{session_id}",
         )
+        self._memory_governor.start()
         self._monitor_task = asyncio.create_task(
             self._terminal_monitor_delivery_loop(),
             name=f"kernel-terminal-monitor-delivery:{session_id}",
@@ -554,6 +589,7 @@ class KernelHostSession:
     ) -> KernelRunResult:
         total_model_calls = result.model_call_count
         total_tool_calls = result.tool_call_count
+        reflection_tokens = list(result.memory_reflection_tokens)
         while result.continuation_turn_id is not None:
             continuation_turn_id = result.continuation_turn_id
             async with self._lock:
@@ -590,6 +626,7 @@ class KernelHostSession:
             )
             total_model_calls += result.model_call_count
             total_tool_calls += result.tool_call_count
+            reflection_tokens.extend(result.memory_reflection_tokens)
         return KernelRunResult(
             turn_id=result.turn_id,
             final_entry_id=result.final_entry_id,
@@ -597,6 +634,7 @@ class KernelHostSession:
             model_call_count=total_model_calls,
             tool_call_count=total_tool_calls,
             pending_plan_interaction_id=result.pending_plan_interaction_id,
+            memory_reflection_tokens=tuple(reflection_tokens),
         )
 
     def _install_active_root_task_locked(
@@ -645,11 +683,18 @@ class KernelHostSession:
         task = asyncio.current_task()
         if task is None:
             raise RuntimeError("ROOT task has no asyncio owner")
+        result: KernelRunResult | None = None
         try:
-            return await run(intent)
+            result = await run(intent)
+            return result
         finally:
             await self._settle_pending_root_successor(task)
             await self._settle_active_root_task(task)
+            if result is not None:
+                # Cheap-hint review becomes RUNNABLE only after the exact ROOT
+                # slot has settled.  It can never delay the foreground reply.
+                for token in result.memory_reflection_tokens:
+                    self._memory_tools.activate_reflection(token)
 
     async def _settle_pending_root_successor(
         self, task: asyncio.Task[object]
@@ -2505,6 +2550,10 @@ class KernelHostSession:
                 close_error = close_error or exc
             self._input_continuity.close()
             try:
+                await self._memory_governor.aclose(deadline_monotonic=deadline)
+            except BaseException as exc:
+                close_error = close_error or exc
+            try:
                 await self._memory_tools.aclose()
             except BaseException as exc:
                 close_error = close_error or exc
@@ -2560,6 +2609,7 @@ class KernelHostSession:
                 self.repository.renew_host_writer,
                 self._lease.guard,
                 lease_seconds=self._deadlines.policy.writer_lease_seconds,
+                memory_domain_id=self._memory_domain_id,
                 deadline_monotonic=self._deadlines.deadline(
                     KernelWatchdogOwner.WRITER_RENEWAL
                 ),
@@ -2706,6 +2756,7 @@ def _validate_prompt(value: str) -> None:
 def _list_resumable_session_rows(
     repository: ConversationKernelRepository,
     workspace_id: str,
+    memory_domain_id: str,
     include_closed: bool,
     limit: int,
     deadline_monotonic: float,
@@ -2718,13 +2769,14 @@ def _list_resumable_session_rows(
     ) as connection:
         return connection.execute(
             """
-            SELECT id, workspace_id, lifecycle, writer_generation,
+            SELECT id, workspace_id, memory_domain_id, lifecycle, writer_generation,
                    latest_entry_sequence, updated_at
             FROM pulsara_v3.sessions
-            WHERE workspace_id = %s AND (%s OR lifecycle = 'OPEN')
+            WHERE workspace_id = %s AND memory_domain_id = %s
+              AND (%s OR lifecycle = 'OPEN')
             ORDER BY updated_at DESC, id LIMIT %s
             """,
-            (workspace_id, include_closed, limit),
+            (workspace_id, memory_domain_id, include_closed, limit),
         ).fetchall()
 
 
@@ -2800,7 +2852,6 @@ class KernelHostCore:
             self._jobs = KernelDurableJobExecutor(
                 repository=self._repository,
                 llm_config=self.settings.llm,
-                embedding_config=self.settings.retrieval.embedding,
                 deadline_factory=self._deadlines,
             )
             self._jobs.start()
@@ -2891,6 +2942,7 @@ class KernelHostCore:
                 repository.acquire_host_writer,
                 session_id=session_id,
                 workspace_id=workspace.workspace_key,
+                memory_domain_id=workspace.memory_domain.memory_domain_id,
                 writer_owner_id=host_id,
                 lease_seconds=self._deadlines.policy.writer_lease_seconds,
                 deadline_monotonic=deadline,
@@ -2940,6 +2992,7 @@ class KernelHostCore:
             _list_resumable_session_rows,
             repository,
             workspace.workspace_key,
+            workspace.memory_domain.memory_domain_id,
             include_closed,
             limit,
             self._canonical_deadline(),
@@ -2948,6 +3001,7 @@ class KernelHostCore:
             KernelSessionSummary(
                 session_id=str(row["id"]),
                 workspace_id=str(row["workspace_id"]),
+                memory_domain_id=str(row["memory_domain_id"]),
                 lifecycle=str(row["lifecycle"]),
                 writer_generation=int(row["writer_generation"]),
                 latest_entry_sequence=int(row["latest_entry_sequence"]),

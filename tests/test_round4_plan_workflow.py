@@ -94,11 +94,11 @@ def _accepted_resolution(interaction_id: str) -> AcceptedPlanResolution:
 
 
 def test_round4_closed_oracle_and_permission_presets() -> None:
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == 34
+    assert len(COMMITTED_EVENT_DESCRIPTORS) == 31
     assert len(LIVE_EVENT_TYPES) == 23
-    assert len(SUBJECT_SLOTS) == 15
+    assert len(SUBJECT_SLOTS) == 13
     assert len(APPEND_GUARDS) == 2
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 26
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 25
     assert set(PLAN_INTERACTION_CONTRACTS.values()) == {
         "ask_plan_question",
         "exit_plan",

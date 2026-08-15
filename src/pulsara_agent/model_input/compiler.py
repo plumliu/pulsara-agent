@@ -66,7 +66,7 @@ from pulsara_agent.primitives.plan_workflow import (
 
 
 COMPILER_CONTRACT_VERSION = (
-    "pulsara.structured-model-input-compiler.prefix-continuity.v3"
+    "pulsara.structured-model-input-compiler.prefix-continuity.v4"
 )
 
 
@@ -79,7 +79,7 @@ class _SacrificeRank(IntEnum):
 
 _SOURCE_POLICY = {
     ContextSourceKind.BASE_SYSTEM: (
-        "pulsara.base-system.prefix-continuity.v3",
+        "pulsara.base-system.prefix-continuity.v4",
         ContextChannel.SYSTEM,
         ContextTrustClass.ROOT_INSTRUCTION,
         ContextBudgetClass.MUST_KEEP,
@@ -196,6 +196,30 @@ _SOURCE_POLICY = {
         (ContextRenderMode.FULL, ContextRenderMode.COMPACT),
         ContextSourceLifecycle.CALL_APPEND,
     ),
+    ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD: (
+        "pulsara.memory-response-preference-head.v1",
+        ContextChannel.RUNTIME_OBSERVATION,
+        ContextTrustClass.UNTRUSTED_OBSERVATION,
+        ContextBudgetClass.IMPORTANT,
+        62,
+        42,
+        (ContextRenderMode.FULL,),
+        ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
+    ),
+    ContextSourceKind.MEMORY_RECALL: (
+        "pulsara.memory-recall.v1",
+        ContextChannel.RUNTIME_OBSERVATION,
+        ContextTrustClass.UNTRUSTED_OBSERVATION,
+        ContextBudgetClass.IMPORTANT,
+        65,
+        48,
+        (
+            ContextRenderMode.FULL,
+            ContextRenderMode.COMPACT,
+            ContextRenderMode.REF_ONLY,
+        ),
+        ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
+    ),
 }
 
 _SOURCE_ABSENCE_POLICY = {
@@ -234,6 +258,20 @@ _SOURCE_ABSENCE_POLICY = {
         {ContextSourceAbsenceKind.EXPLICIT_EMPTY}
     ),
     ContextSourceKind.TOOL_OBSERVATION_FRESHNESS: frozenset(),
+    ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD: frozenset(
+        {
+            ContextSourceAbsenceKind.NOT_APPLICABLE,
+            ContextSourceAbsenceKind.EXPLICIT_EMPTY,
+            ContextSourceAbsenceKind.UNAVAILABLE,
+        }
+    ),
+    ContextSourceKind.MEMORY_RECALL: frozenset(
+        {
+            ContextSourceAbsenceKind.NOT_APPLICABLE,
+            ContextSourceAbsenceKind.EXPLICIT_EMPTY,
+            ContextSourceAbsenceKind.UNAVAILABLE,
+        }
+    ),
 }
 
 
@@ -351,6 +389,7 @@ class StructuredModelInputCompiler:
         canonical_items, materialized_plan_bytes = self._materialize_approved_plan(
             request
         )
+        citation_handles = dict(request.memory_citation_handles)
         lowered_items: list[LoweredCanonicalItem] = []
         for item in canonical_items:
             deadline.check()
@@ -359,6 +398,7 @@ class StructuredModelInputCompiler:
                     item,
                     artifact_read_available=artifact_read_available,
                     limits=self._limits,
+                    memory_citation_handles=citation_handles,
                 )
             )
         lowered = tuple(lowered_items)
@@ -732,6 +772,7 @@ class StructuredModelInputCompiler:
             for tool in request.compile_binding.tool_surface.tool_specs
         )
         lowered_delta_values: list[LoweredCanonicalItem] = []
+        citation_handles = dict(request.memory_citation_handles)
         for item in delta_items:
             deadline.check()
             lowered_delta_values.append(
@@ -739,6 +780,7 @@ class StructuredModelInputCompiler:
                     item,
                     artifact_read_available=artifact_read_available,
                     limits=self._limits,
+                    memory_citation_handles=citation_handles,
                 )
             )
         lowered_delta = tuple(lowered_delta_values)
@@ -1018,6 +1060,7 @@ class StructuredModelInputCompiler:
             for tool in request.compile_binding.tool_surface.tool_specs
         )
         lowered_delta_values: list[LoweredCanonicalItem] = []
+        citation_handles = dict(request.memory_citation_handles)
         for item in delta_items:
             deadline.check()
             lowered_delta_values.append(
@@ -1025,6 +1068,7 @@ class StructuredModelInputCompiler:
                     item,
                     artifact_read_available=artifact_read_available,
                     limits=self._limits,
+                    memory_citation_handles=citation_handles,
                 )
             )
         lowered_delta = tuple(lowered_delta_values)

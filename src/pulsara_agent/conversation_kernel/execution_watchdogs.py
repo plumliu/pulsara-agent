@@ -23,6 +23,15 @@ class KernelWatchdogOwner(StrEnum):
     HOST_SESSION_CLOSE = "HOST_SESSION_CLOSE"
     DURABLE_JOB_EXECUTOR_CLOSE = "DURABLE_JOB_EXECUTOR_CLOSE"
     BLOB_GC_CLOSE = "BLOB_GC_CLOSE"
+    MEMORY_GOVERNANCE_ATTEMPT = "MEMORY_GOVERNANCE_ATTEMPT"
+    MEMORY_HINT_REVIEW_ATTEMPT = "MEMORY_HINT_REVIEW_ATTEMPT"
+    MEMORY_GOVERNOR_CLOSE = "MEMORY_GOVERNOR_CLOSE"
+    MEMORY_AUTO_QUERY_EMBEDDING = "MEMORY_AUTO_QUERY_EMBEDDING"
+    MEMORY_EXPLICIT_QUERY_EMBEDDING = "MEMORY_EXPLICIT_QUERY_EMBEDDING"
+    MEMORY_EXPLICIT_RERANK = "MEMORY_EXPLICIT_RERANK"
+    MEMORY_EXPLICIT_RECALL_TOTAL = "MEMORY_EXPLICIT_RECALL_TOTAL"
+    MEMORY_FACT_EMBEDDING_BATCH = "MEMORY_FACT_EMBEDDING_BATCH"
+    MEMORY_RETRIEVAL_DISABLE_CLOSE = "MEMORY_RETRIEVAL_DISABLE_CLOSE"
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +49,15 @@ class KernelExecutionWatchdogPolicy:
     host_session_close_join_seconds: float = 120.0
     durable_job_executor_close_seconds: float = 120.0
     blob_gc_close_seconds: float = 120.0
+    memory_governance_attempt_seconds: float = 300.0
+    memory_hint_review_attempt_seconds: float = 120.0
+    memory_governor_close_seconds: float = 120.0
+    memory_auto_query_embedding_seconds: float = 3.0
+    memory_explicit_query_embedding_seconds: float = 4.0
+    memory_explicit_rerank_seconds: float = 4.0
+    memory_explicit_recall_total_seconds: float = 8.0
+    memory_fact_embedding_batch_seconds: float = 30.0
+    memory_retrieval_disable_close_seconds: float = 120.0
     writer_lease_seconds: float = 30.0
     writer_renew_interval_seconds: float = 10.0
 
@@ -67,6 +85,15 @@ class KernelExecutionWatchdogPolicy:
             self.host_session_close_join_seconds,
             self.durable_job_executor_close_seconds,
             self.blob_gc_close_seconds,
+            self.memory_governance_attempt_seconds,
+            self.memory_hint_review_attempt_seconds,
+            self.memory_governor_close_seconds,
+            self.memory_auto_query_embedding_seconds,
+            self.memory_explicit_query_embedding_seconds,
+            self.memory_explicit_rerank_seconds,
+            self.memory_explicit_recall_total_seconds,
+            self.memory_fact_embedding_batch_seconds,
+            self.memory_retrieval_disable_close_seconds,
             self.writer_lease_seconds,
             self.writer_renew_interval_seconds,
         )
@@ -123,6 +150,15 @@ class KernelExecutionWatchdogPolicy:
             KernelWatchdogOwner.HOST_SESSION_CLOSE: self.host_session_close_join_seconds,
             KernelWatchdogOwner.DURABLE_JOB_EXECUTOR_CLOSE: self.durable_job_executor_close_seconds,
             KernelWatchdogOwner.BLOB_GC_CLOSE: self.blob_gc_close_seconds,
+            KernelWatchdogOwner.MEMORY_GOVERNANCE_ATTEMPT: self.memory_governance_attempt_seconds,
+            KernelWatchdogOwner.MEMORY_HINT_REVIEW_ATTEMPT: self.memory_hint_review_attempt_seconds,
+            KernelWatchdogOwner.MEMORY_GOVERNOR_CLOSE: self.memory_governor_close_seconds,
+            KernelWatchdogOwner.MEMORY_AUTO_QUERY_EMBEDDING: self.memory_auto_query_embedding_seconds,
+            KernelWatchdogOwner.MEMORY_EXPLICIT_QUERY_EMBEDDING: self.memory_explicit_query_embedding_seconds,
+            KernelWatchdogOwner.MEMORY_EXPLICIT_RERANK: self.memory_explicit_rerank_seconds,
+            KernelWatchdogOwner.MEMORY_EXPLICIT_RECALL_TOTAL: self.memory_explicit_recall_total_seconds,
+            KernelWatchdogOwner.MEMORY_FACT_EMBEDDING_BATCH: self.memory_fact_embedding_batch_seconds,
+            KernelWatchdogOwner.MEMORY_RETRIEVAL_DISABLE_CLOSE: self.memory_retrieval_disable_close_seconds,
         }
         return mapping[owner]
 

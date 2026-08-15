@@ -5,6 +5,7 @@ description = "Pulsara canonical conversation-kernel agent runtime."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "jieba==0.42.1",
     "openai>=2.43.0",
     "prompt-toolkit>=3.0.52",
     "psycopg[binary]>=3.3.4",

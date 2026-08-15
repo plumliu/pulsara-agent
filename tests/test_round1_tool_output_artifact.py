@@ -16,6 +16,12 @@ import pytest
 
 from pulsara_agent.conversation_kernel.contracts import BlobContent, InlineContent
 from pulsara_agent.conversation_kernel.live import LiveAgentEventBus
+from pulsara_agent.conversation_kernel.memory.contracts import (
+    FrozenMemoryProposal,
+    MemoryKindHint,
+    MemoryProducerKind,
+    prepare_memory_candidate,
+)
 from pulsara_agent.conversation_kernel.repository import (
     AssistantToolCallBlock,
     ConversationKernelConflict,
@@ -81,6 +87,7 @@ from pulsara_agent.ports.tool_execution import (
     ToolOutputSourceCoverageReason,
 )
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
+from pulsara_agent.memory.scope import CTX_USER, MemoryScopeKind
 from pulsara_agent.storage.migrations.manifest import CONVERSATION_KERNEL_RELATIONS
 from pulsara_agent.conversation_kernel.jobs import JOB_HANDLER_CATALOG
 from pulsara_agent.terminal_process.output import TerminalOutputOwner
@@ -134,13 +141,13 @@ def _processor(publisher: _RecordingPublisher) -> ToolOutputArtifactProcessor:
 
 
 def test_round1_static_authority_and_count_oracles_remain_closed() -> None:
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 26
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 25
     assert "tool_result_artifacts" not in CONVERSATION_KERNEL_RELATIONS
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == 34
+    assert len(COMMITTED_EVENT_DESCRIPTORS) == 31
     assert len(LIVE_EVENT_TYPES) == 23
-    assert len(SUBJECT_SLOTS) == 15
+    assert len(SUBJECT_SLOTS) == 13
     assert len(APPEND_GUARDS) == 2
-    assert len(JOB_HANDLER_CATALOG) == 4
+    assert len(JOB_HANDLER_CATALOG) == 1
 
     root = Path(__file__).resolve().parents[1]
     sql = (
@@ -1509,6 +1516,31 @@ def test_round1_memory_side_branch_confirmation_is_all_or_none(
     lease, turn_id, assistant_entry_id, tool_call_id, attempt_id = _install_tool_call(
         repository, workspace_id
     )
+    with provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        deadline_monotonic=monotonic() + 30,
+    ) as connection:
+        memory_domain_id = str(
+            connection.execute(
+                "SELECT memory_domain_id FROM pulsara_v3.sessions WHERE id=%s",
+                (lease.guard.session_id,),
+            ).fetchone()[0]
+        )
+    memory_candidate = prepare_memory_candidate(
+        candidate_id=_name("candidate"),
+        memory_domain_id=memory_domain_id,
+        origin_workspace_id=workspace_id,
+        origin_session_id=lease.guard.session_id,
+        producer_kind=MemoryProducerKind.MAIN_AGENT_REMEMBER,
+        producer_entry_id=assistant_entry_id,
+        producer_tool_call_id=tool_call_id,
+        proposal=FrozenMemoryProposal(
+            statement="remember",
+            scope_kind=MemoryScopeKind.USER,
+            scope_id=CTX_USER,
+            kind_hint=MemoryKindHint.FACT,
+        ),
+    )
     candidate = build_prepared_tool_result_acceptance(
         guard=lease.guard,
         workspace_id=workspace_id,
@@ -1532,10 +1564,7 @@ def test_round1_memory_side_branch_confirmation_is_all_or_none(
         observation_duration_microseconds=None,
         observation_origin_kind=ToolObservationOrigin.BUILTIN,
         trusted_tool_reported_duration_microseconds=None,
-        memory_candidate_id=_name("candidate"),
-        memory_proposal_kind="FACT",
-        memory_proposal_payload={"statement": "remember"},
-        memory_governance_job_id=_name("job"),
+        memory_candidate=memory_candidate,
     )
     assert isinstance(candidate.side_branch, PreparedMemoryProposalSideBranch)
     repository.accept_tool_result(
@@ -1549,22 +1578,16 @@ def test_round1_memory_side_branch_confirmation_is_all_or_none(
     )
     with psycopg.connect(stage2_migrated_postgres_database.admin_dsn) as connection:
         connection.execute(
-            "DELETE FROM pulsara_v3.agent_events WHERE event_id = %s",
-            (candidate.side_branch.job_queued_occurrence.event_id,),
+            "DELETE FROM pulsara_v3.memory_candidates WHERE id = %s",
+            (candidate.side_branch.candidate.candidate_id,),
         )
         connection.commit()
-    with pytest.raises(ConversationKernelConflict, match="occurrence is absent"):
+    with pytest.raises(
+        ConversationKernelConflict, match="memory candidate side branch"
+    ):
         repository.confirm_tool_result_winner(
             lease.guard, candidate=candidate, deadline_monotonic=monotonic() + 30
         )
-    # This suite uses one migrated database per pytest process.  Do not leave
-    # an eligible governance job that unrelated job-catalog tests could claim.
-    with psycopg.connect(stage2_migrated_postgres_database.admin_dsn) as connection:
-        connection.execute(
-            "DELETE FROM pulsara_v3.durable_jobs WHERE id = %s",
-            (candidate.side_branch.governance_job_id,),
-        )
-        connection.commit()
 
 
 def test_round1_production_descriptor_executor_closure(tmp_path: Path) -> None:

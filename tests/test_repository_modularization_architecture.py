@@ -64,6 +64,102 @@ _ROUND7_REPOSITORY_DELTA_SHA256 = (
     "f11be8ab473f29aba733e1f094af393c8d745541da502675ac9f16e1579b76a9"
 )
 
+# Round 8 deliberately replaces the old memory projection/job surface with the
+# advisory-memory candidate/fact/relation transactions.  Keep the M0 fixture
+# immutable and describe that evolution as a closed delta: anything outside
+# these sets must remain byte-for-byte equivalent to the modularization
+# checkpoint.
+_ROUND8_ADDED_ALL = {"AcceptedMemoryGovernance"}
+_ROUND8_REMOVED_ALL = {"MemoryVectorFactSource", "MemoryVectorSource"}
+_ROUND8_ADDED_TOP_LEVEL_CLASSES = {"_ObservedActiveMemoryDuplicate"}
+_ROUND8_REMOVED_TOP_LEVEL_CLASSES = {
+    "AcceptedMemoryCandidate",
+    "MemoryVectorFactSource",
+    "MemoryVectorSource",
+}
+_ROUND8_ADDED_TOP_LEVEL_FUNCTIONS = {
+    "_decode_governance_projection",
+    "_governance_public_text",
+}
+_ROUND8_ADDED_METHODS = {
+    "_accept_memory_governance_once",
+    "_active_semantic_winner",
+    "_candidate_owns_no_memory_rows",
+    "_confirm_existing_relation",
+    "_confirm_processing_existing_source_settlement",
+    "_expected_relation_tuple",
+    "_fact_draft_row",
+    "_find_exact_relation",
+    "_freeze_existing_source_relation_settlement",
+    "_governance_relations_match",
+    "_insert_governance_relations",
+    "_insert_memory_fact",
+    "_insert_prepared_memory_candidate",
+    "_insert_relation",
+    "_lock_basis_targets",
+    "_lock_governance_target",
+    "_lock_processing_candidate",
+    "_lock_response_preference_scope",
+    "_memory_fact_matches",
+    "_memory_fact_settlement_identity",
+    "_memory_settlement_identity_matches",
+    "_prepare_memory_duplicate_outcome",
+    "_prepared_governance_inputs_still_match",
+    "_read_assistant_public_body",
+    "_read_entry_public_body",
+    "_read_governance_target_for_confirmation",
+    "_read_memory_governance_tool_evidence",
+    "_read_memory_governance_turn_projection",
+    "_read_memory_public_facts",
+    "_read_prepared_memory_candidate",
+    "_relation_tuple",
+    "_response_preference_capacity_allows",
+    "_settle_existing_source_memory_relation_once",
+    "abandon_memory_candidate",
+    "accept_reflection_memory_candidates",
+    "claim_memory_candidate_for_governance",
+    "confirm_memory_candidate_intake",
+    "confirm_memory_governance_winner",
+    "list_unembedded_memory_facts",
+    "prepare_existing_source_memory_relation_settlement",
+    "read_memory_governance_evidence",
+    "settle_existing_source_memory_relation",
+    "upsert_memory_embedding",
+}
+_ROUND8_REMOVED_METHODS = {
+    "accept_extracted_memory_bundle",
+    "accept_memory_candidate_and_governance_job",
+    "apply_fts_memory_index",
+    "apply_vector_memory_index",
+    "read_memory_extraction_job_source",
+    "snapshot_memory_vector_source",
+}
+_ROUND8_CHANGED_METHODS = {
+    "_confirm_memory_proposal_side_branch",
+    "_insert_event",
+    "accept_compaction_job_result",
+    "accept_memory_governance",
+    "accept_tool_result",
+    "acquire_host_writer",
+    "confirm_tool_result_winner",
+    "read_memory_candidate_for_governance",
+    "renew_host_writer",
+}
+_ROUND8_RUNTIME_ADDED_EXCEPTIONS = {"_ObservedActiveMemoryDuplicate"}
+_ROUND8_RUNTIME_REMOVED_DATACLASSES = {
+    "AcceptedMemoryCandidate",
+    "MemoryVectorFactSource",
+    "MemoryVectorSource",
+}
+_ROUND8_RUNTIME_CHANGED_DATACLASSES = {
+    "AcceptedMemoryGovernance",
+    "PreparedMemoryProposalSideBranch",
+    "PreparedToolResultAcceptance",
+}
+_ROUND8_REPOSITORY_DELTA_SHA256 = (
+    "03fc3abf3c68104b8c7b018b330d7c661bc66ea8e84d99d862fb021f75275536"
+)
+
 
 def _package_for_source(path: Path) -> str:
     relative = path.relative_to(ROOT / "src").with_suffix("")
@@ -186,6 +282,58 @@ def _round7_repository_delta(current: dict[str, object]) -> dict[str, object]:
     }
 
 
+def _round8_repository_delta(current: dict[str, object]) -> dict[str, object]:
+    changed_functions = (
+        _ROUND7_ADDED_TOP_LEVEL_FUNCTIONS
+        | _ROUND7_CHANGED_TOP_LEVEL_FUNCTIONS
+        | _ROUND8_ADDED_TOP_LEVEL_FUNCTIONS
+    )
+    changed_methods = (
+        _ROUND7_ADDED_METHODS
+        | _ROUND7_CHANGED_METHODS
+        | _ROUND8_ADDED_METHODS
+        | _ROUND8_CHANGED_METHODS
+    )
+    runtime = current["runtime"]
+    assert isinstance(runtime, dict)
+    return {
+        "all": current["all"],
+        "top_level_classes": current["top_level_classes"],
+        "top_level_functions": {
+            name: current["top_level_functions"][name]
+            for name in sorted(changed_functions)
+        },
+        "methods": {
+            name: current["methods"][name] for name in sorted(changed_methods)
+        },
+        "runtime_exceptions": runtime["exceptions"],
+        "runtime_dataclasses": runtime["dataclasses"],
+        "runtime_methods": {
+            name: runtime["methods"][name]
+            for name in sorted(
+                _ROUND7_ADDED_METHODS
+                | _ROUND7_RUNTIME_CHANGED_METHODS
+                | _ROUND8_ADDED_METHODS
+                | _ROUND8_CHANGED_METHODS
+            )
+        },
+        "database_calls": _without_source_modules(
+            [
+                record
+                for record in current["database_calls"]
+                if record["owner"] in changed_methods
+            ]
+        ),
+        "physical_checkouts": _without_source_modules(
+            [
+                record
+                for record in current["physical_checkouts"]
+                if record["owner"] in changed_methods
+            ]
+        ),
+    }
+
+
 def test_repository_modularization_baseline_is_exact_at_checkpoint() -> None:
     baseline = _baseline()
     assert baseline["checkpoint_head"] == "edbe7aea5518085028657aedc161d8fcbe88bb6b"
@@ -214,42 +362,64 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
     module = _inventory_module()
     current = module.build_inventory(include_pytest_nodes=False)
     baseline = _baseline()
-    for key in (
-        "all",
-        "observed_imports",
-        "top_level_classes",
-        "closed_owner_renames",
-        "override_seams",
-    ):
+    for key in ("observed_imports", "closed_owner_renames", "override_seams"):
         assert current[key] == baseline[key], key
+    assert set(current["all"]) == (
+        set(baseline["all"]) - _ROUND8_REMOVED_ALL
+    ) | _ROUND8_ADDED_ALL
+    assert set(current["top_level_classes"]) == (
+        set(baseline["top_level_classes"]) - _ROUND8_REMOVED_TOP_LEVEL_CLASSES
+    ) | _ROUND8_ADDED_TOP_LEVEL_CLASSES
     for key, added, changed in (
         (
             "top_level_functions",
-            _ROUND7_ADDED_TOP_LEVEL_FUNCTIONS,
+            _ROUND7_ADDED_TOP_LEVEL_FUNCTIONS | _ROUND8_ADDED_TOP_LEVEL_FUNCTIONS,
             _ROUND7_CHANGED_TOP_LEVEL_FUNCTIONS,
         ),
-        ("methods", _ROUND7_ADDED_METHODS, _ROUND7_CHANGED_METHODS),
+        (
+            "methods",
+            _ROUND7_ADDED_METHODS | _ROUND8_ADDED_METHODS,
+            _ROUND7_CHANGED_METHODS | _ROUND8_CHANGED_METHODS,
+        ),
     ):
-        assert set(current[key]) == set(baseline[key]) | added
+        removed = _ROUND8_REMOVED_METHODS if key == "methods" else set()
+        assert set(current[key]) == (set(baseline[key]) - removed) | added
         for name in set(baseline[key]) - changed:
+            if name in removed:
+                continue
             assert current[key][name] == baseline[key][name], (key, name)
     current_runtime = current["runtime"]
     baseline_runtime = baseline["runtime"]
-    for key in set(baseline_runtime) - {"dataclasses", "methods"}:
+    for key in set(baseline_runtime) - {"dataclasses", "exceptions", "methods"}:
         assert current_runtime[key] == baseline_runtime[key], ("runtime", key)
-    assert set(current_runtime["dataclasses"]) == set(
-        baseline_runtime["dataclasses"]
+    assert set(current_runtime["exceptions"]) == set(
+        baseline_runtime["exceptions"]
+    ) | _ROUND8_RUNTIME_ADDED_EXCEPTIONS
+    for name in baseline_runtime["exceptions"]:
+        assert current_runtime["exceptions"][name] == baseline_runtime["exceptions"][
+            name
+        ]
+    assert set(current_runtime["dataclasses"]) == (
+        set(baseline_runtime["dataclasses"])
+        - _ROUND8_RUNTIME_REMOVED_DATACLASSES
     )
-    for name in set(baseline_runtime["dataclasses"]) - {
-        "PreparedToolResultAcceptance"
-    }:
+    for name in (
+        set(baseline_runtime["dataclasses"])
+        - _ROUND8_RUNTIME_REMOVED_DATACLASSES
+        - _ROUND8_RUNTIME_CHANGED_DATACLASSES
+    ):
         assert current_runtime["dataclasses"][name] == baseline_runtime[
             "dataclasses"
         ][name]
-    assert set(current_runtime["methods"]) == set(baseline_runtime["methods"]) | (
-        _ROUND7_ADDED_METHODS
-    )
-    for name in set(baseline_runtime["methods"]) - _ROUND7_RUNTIME_CHANGED_METHODS:
+    assert set(current_runtime["methods"]) == (
+        set(baseline_runtime["methods"]) - _ROUND8_REMOVED_METHODS
+    ) | _ROUND7_ADDED_METHODS | _ROUND8_ADDED_METHODS
+    for name in (
+        set(baseline_runtime["methods"])
+        - _ROUND7_RUNTIME_CHANGED_METHODS
+        - _ROUND8_CHANGED_METHODS
+        - _ROUND8_REMOVED_METHODS
+    ):
         assert current_runtime["methods"][name] == baseline_runtime["methods"][
             name
         ]
@@ -258,7 +428,13 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
     ) == _closed_owner_calls(
         baseline["class_qualified_calls"], baseline["closed_owner_renames"]
     )
-    changed_owners = _ROUND7_ADDED_METHODS | _ROUND7_CHANGED_METHODS
+    changed_owners = (
+        _ROUND7_ADDED_METHODS
+        | _ROUND7_CHANGED_METHODS
+        | _ROUND8_ADDED_METHODS
+        | _ROUND8_CHANGED_METHODS
+        | _ROUND8_REMOVED_METHODS
+    )
     for key in ("database_calls", "physical_checkouts"):
         current_unchanged = _without_source_modules(
             [item for item in current[key] if item["owner"] not in changed_owners]
@@ -268,13 +444,13 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
         )
         assert current_unchanged == baseline_unchanged, key
     encoded_delta = json.dumps(
-        _round7_repository_delta(current),
+        _round8_repository_delta(current),
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
     assert hashlib.sha256(encoded_delta).hexdigest() == (
-        _ROUND7_REPOSITORY_DELTA_SHA256
+        _ROUND8_REPOSITORY_DELTA_SHA256
     )
     import pulsara_agent.conversation_kernel.repository as repository
 
@@ -330,12 +506,12 @@ def test_repository_modularization_facade_and_internal_owner_shape() -> None:
     assert ConversationKernelRepository.__module__ == (
         "pulsara_agent.conversation_kernel.repository"
     )
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == 34
+    assert len(COMMITTED_EVENT_DESCRIPTORS) == 31
     assert len(LIVE_EVENT_TYPES) == 23
-    assert len(SUBJECT_SLOTS) == 15
+    assert len(SUBJECT_SLOTS) == 13
     assert len(APPEND_GUARDS) == 2
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 26
-    assert len(JOB_HANDLER_CATALOG) == 4
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 25
+    assert len(JOB_HANDLER_CATALOG) == 1
 
 
 def test_repository_modularization_internal_package_is_not_a_second_public_api() -> None:

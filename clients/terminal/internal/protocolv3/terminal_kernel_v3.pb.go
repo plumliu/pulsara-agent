@@ -97,9 +97,6 @@ const (
 	CommittedEventType_JOB_QUEUED                       CommittedEventType = 21
 	CommittedEventType_JOB_ATTEMPT_ACCEPTED             CommittedEventType = 22
 	CommittedEventType_JOB_TERMINAL_ACCEPTED            CommittedEventType = 23
-	CommittedEventType_MEMORY_FACT_ACCEPTED             CommittedEventType = 24
-	CommittedEventType_MEMORY_FACT_LIFECYCLE_CHANGED    CommittedEventType = 25
-	CommittedEventType_MEMORY_RELATION_ACCEPTED         CommittedEventType = 26
 	CommittedEventType_TERMINAL_OBSERVATION_ACCEPTED    CommittedEventType = 27
 	CommittedEventType_PLAN_WORKFLOW_ENTERED            CommittedEventType = 28
 	CommittedEventType_PLAN_QUESTION_ASKED              CommittedEventType = 29
@@ -137,9 +134,6 @@ var (
 		21: "JOB_QUEUED",
 		22: "JOB_ATTEMPT_ACCEPTED",
 		23: "JOB_TERMINAL_ACCEPTED",
-		24: "MEMORY_FACT_ACCEPTED",
-		25: "MEMORY_FACT_LIFECYCLE_CHANGED",
-		26: "MEMORY_RELATION_ACCEPTED",
 		27: "TERMINAL_OBSERVATION_ACCEPTED",
 		28: "PLAN_WORKFLOW_ENTERED",
 		29: "PLAN_QUESTION_ASKED",
@@ -174,9 +168,6 @@ var (
 		"JOB_QUEUED":                       21,
 		"JOB_ATTEMPT_ACCEPTED":             22,
 		"JOB_TERMINAL_ACCEPTED":            23,
-		"MEMORY_FACT_ACCEPTED":             24,
-		"MEMORY_FACT_LIFECYCLE_CHANGED":    25,
-		"MEMORY_RELATION_ACCEPTED":         26,
 		"TERMINAL_OBSERVATION_ACCEPTED":    27,
 		"PLAN_WORKFLOW_ENTERED":            28,
 		"PLAN_QUESTION_ASKED":              29,
@@ -2511,94 +2502,25 @@ func (x *JobControl) GetAttemptCount() uint32 {
 	return 0
 }
 
-type MemoryFreshnessControl struct {
-	state             protoimpl.MessageState `protogen:"open.v1"`
-	Channel           string                 `protobuf:"bytes,1,opt,name=channel,proto3" json:"channel,omitempty"`
-	DesiredGeneration uint64                 `protobuf:"varint,2,opt,name=desired_generation,json=desiredGeneration,proto3" json:"desired_generation,omitempty"`
-	AppliedGeneration uint64                 `protobuf:"varint,3,opt,name=applied_generation,json=appliedGeneration,proto3" json:"applied_generation,omitempty"`
-	HandlerContract   string                 `protobuf:"bytes,4,opt,name=handler_contract,json=handlerContract,proto3" json:"handler_contract,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
-}
-
-func (x *MemoryFreshnessControl) Reset() {
-	*x = MemoryFreshnessControl{}
-	mi := &file_terminal_kernel_v3_proto_msgTypes[14]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *MemoryFreshnessControl) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*MemoryFreshnessControl) ProtoMessage() {}
-
-func (x *MemoryFreshnessControl) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_kernel_v3_proto_msgTypes[14]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use MemoryFreshnessControl.ProtoReflect.Descriptor instead.
-func (*MemoryFreshnessControl) Descriptor() ([]byte, []int) {
-	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{14}
-}
-
-func (x *MemoryFreshnessControl) GetChannel() string {
-	if x != nil {
-		return x.Channel
-	}
-	return ""
-}
-
-func (x *MemoryFreshnessControl) GetDesiredGeneration() uint64 {
-	if x != nil {
-		return x.DesiredGeneration
-	}
-	return 0
-}
-
-func (x *MemoryFreshnessControl) GetAppliedGeneration() uint64 {
-	if x != nil {
-		return x.AppliedGeneration
-	}
-	return 0
-}
-
-func (x *MemoryFreshnessControl) GetHandlerContract() string {
-	if x != nil {
-		return x.HandlerContract
-	}
-	return ""
-}
-
 type CanonicalControl struct {
-	state                 protoimpl.MessageState    `protogen:"open.v1"`
-	SessionLifecycle      string                    `protobuf:"bytes,1,opt,name=session_lifecycle,json=sessionLifecycle,proto3" json:"session_lifecycle,omitempty"`
-	ActiveTurns           []*ActiveTurnControl      `protobuf:"bytes,2,rep,name=active_turns,json=activeTurns,proto3" json:"active_turns,omitempty"`
-	PromptQueue           []*PromptQueueControl     `protobuf:"bytes,3,rep,name=prompt_queue,json=promptQueue,proto3" json:"prompt_queue,omitempty"`
-	PromptQueueTotalCount uint64                    `protobuf:"varint,4,opt,name=prompt_queue_total_count,json=promptQueueTotalCount,proto3" json:"prompt_queue_total_count,omitempty"`
-	ToolAttempts          []*ToolAttemptControl     `protobuf:"bytes,5,rep,name=tool_attempts,json=toolAttempts,proto3" json:"tool_attempts,omitempty"`
-	SubagentTasks         []*SubagentTaskControl    `protobuf:"bytes,6,rep,name=subagent_tasks,json=subagentTasks,proto3" json:"subagent_tasks,omitempty"`
-	Jobs                  []*JobControl             `protobuf:"bytes,7,rep,name=jobs,proto3" json:"jobs,omitempty"`
-	MemoryFreshness       []*MemoryFreshnessControl `protobuf:"bytes,8,rep,name=memory_freshness,json=memoryFreshness,proto3" json:"memory_freshness,omitempty"`
-	ActivePlanWorkflow    *PlanWorkflowControl      `protobuf:"bytes,9,opt,name=active_plan_workflow,json=activePlanWorkflow,proto3" json:"active_plan_workflow,omitempty"`
-	OpenPlanInteraction   *PlanInteractionControl   `protobuf:"bytes,10,opt,name=open_plan_interaction,json=openPlanInteraction,proto3" json:"open_plan_interaction,omitempty"`
-	LatestPlanHandoff     *PlanHandoffControl       `protobuf:"bytes,11,opt,name=latest_plan_handoff,json=latestPlanHandoff,proto3" json:"latest_plan_handoff,omitempty"`
+	state                 protoimpl.MessageState  `protogen:"open.v1"`
+	SessionLifecycle      string                  `protobuf:"bytes,1,opt,name=session_lifecycle,json=sessionLifecycle,proto3" json:"session_lifecycle,omitempty"`
+	ActiveTurns           []*ActiveTurnControl    `protobuf:"bytes,2,rep,name=active_turns,json=activeTurns,proto3" json:"active_turns,omitempty"`
+	PromptQueue           []*PromptQueueControl   `protobuf:"bytes,3,rep,name=prompt_queue,json=promptQueue,proto3" json:"prompt_queue,omitempty"`
+	PromptQueueTotalCount uint64                  `protobuf:"varint,4,opt,name=prompt_queue_total_count,json=promptQueueTotalCount,proto3" json:"prompt_queue_total_count,omitempty"`
+	ToolAttempts          []*ToolAttemptControl   `protobuf:"bytes,5,rep,name=tool_attempts,json=toolAttempts,proto3" json:"tool_attempts,omitempty"`
+	SubagentTasks         []*SubagentTaskControl  `protobuf:"bytes,6,rep,name=subagent_tasks,json=subagentTasks,proto3" json:"subagent_tasks,omitempty"`
+	Jobs                  []*JobControl           `protobuf:"bytes,7,rep,name=jobs,proto3" json:"jobs,omitempty"`
+	ActivePlanWorkflow    *PlanWorkflowControl    `protobuf:"bytes,9,opt,name=active_plan_workflow,json=activePlanWorkflow,proto3" json:"active_plan_workflow,omitempty"`
+	OpenPlanInteraction   *PlanInteractionControl `protobuf:"bytes,10,opt,name=open_plan_interaction,json=openPlanInteraction,proto3" json:"open_plan_interaction,omitempty"`
+	LatestPlanHandoff     *PlanHandoffControl     `protobuf:"bytes,11,opt,name=latest_plan_handoff,json=latestPlanHandoff,proto3" json:"latest_plan_handoff,omitempty"`
 	unknownFields         protoimpl.UnknownFields
 	sizeCache             protoimpl.SizeCache
 }
 
 func (x *CanonicalControl) Reset() {
 	*x = CanonicalControl{}
-	mi := &file_terminal_kernel_v3_proto_msgTypes[15]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2610,7 +2532,7 @@ func (x *CanonicalControl) String() string {
 func (*CanonicalControl) ProtoMessage() {}
 
 func (x *CanonicalControl) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_kernel_v3_proto_msgTypes[15]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2623,7 +2545,7 @@ func (x *CanonicalControl) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CanonicalControl.ProtoReflect.Descriptor instead.
 func (*CanonicalControl) Descriptor() ([]byte, []int) {
-	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{15}
+	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *CanonicalControl) GetSessionLifecycle() string {
@@ -2675,13 +2597,6 @@ func (x *CanonicalControl) GetJobs() []*JobControl {
 	return nil
 }
 
-func (x *CanonicalControl) GetMemoryFreshness() []*MemoryFreshnessControl {
-	if x != nil {
-		return x.MemoryFreshness
-	}
-	return nil
-}
-
 func (x *CanonicalControl) GetActivePlanWorkflow() *PlanWorkflowControl {
 	if x != nil {
 		return x.ActivePlanWorkflow
@@ -2714,7 +2629,7 @@ type HistoryCursor struct {
 
 func (x *HistoryCursor) Reset() {
 	*x = HistoryCursor{}
-	mi := &file_terminal_kernel_v3_proto_msgTypes[16]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2726,7 +2641,7 @@ func (x *HistoryCursor) String() string {
 func (*HistoryCursor) ProtoMessage() {}
 
 func (x *HistoryCursor) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_kernel_v3_proto_msgTypes[16]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2739,7 +2654,7 @@ func (x *HistoryCursor) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HistoryCursor.ProtoReflect.Descriptor instead.
 func (*HistoryCursor) Descriptor() ([]byte, []int) {
-	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{16}
+	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *HistoryCursor) GetSessionId() string {
@@ -2780,7 +2695,7 @@ type CanonicalSessionSnapshot struct {
 
 func (x *CanonicalSessionSnapshot) Reset() {
 	*x = CanonicalSessionSnapshot{}
-	mi := &file_terminal_kernel_v3_proto_msgTypes[17]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2792,7 +2707,7 @@ func (x *CanonicalSessionSnapshot) String() string {
 func (*CanonicalSessionSnapshot) ProtoMessage() {}
 
 func (x *CanonicalSessionSnapshot) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_kernel_v3_proto_msgTypes[17]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2805,7 +2720,7 @@ func (x *CanonicalSessionSnapshot) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CanonicalSessionSnapshot.ProtoReflect.Descriptor instead.
 func (*CanonicalSessionSnapshot) Descriptor() ([]byte, []int) {
-	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{17}
+	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *CanonicalSessionSnapshot) GetSessionId() string {
@@ -2887,7 +2802,7 @@ type HelloRequest struct {
 
 func (x *HelloRequest) Reset() {
 	*x = HelloRequest{}
-	mi := &file_terminal_kernel_v3_proto_msgTypes[18]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2899,7 +2814,7 @@ func (x *HelloRequest) String() string {
 func (*HelloRequest) ProtoMessage() {}
 
 func (x *HelloRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_kernel_v3_proto_msgTypes[18]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2912,7 +2827,7 @@ func (x *HelloRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HelloRequest.ProtoReflect.Descriptor instead.
 func (*HelloRequest) Descriptor() ([]byte, []int) {
-	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{18}
+	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *HelloRequest) GetRequestId() string {
@@ -2990,7 +2905,7 @@ type HelloAccepted struct {
 
 func (x *HelloAccepted) Reset() {
 	*x = HelloAccepted{}
-	mi := &file_terminal_kernel_v3_proto_msgTypes[19]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3002,7 +2917,7 @@ func (x *HelloAccepted) String() string {
 func (*HelloAccepted) ProtoMessage() {}
 
 func (x *HelloAccepted) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_kernel_v3_proto_msgTypes[19]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3015,7 +2930,7 @@ func (x *HelloAccepted) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HelloAccepted.ProtoReflect.Descriptor instead.
 func (*HelloAccepted) Descriptor() ([]byte, []int) {
-	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{19}
+	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *HelloAccepted) GetRequestId() string {
@@ -3108,7 +3023,7 @@ type SnapshotRequest struct {
 
 func (x *SnapshotRequest) Reset() {
 	*x = SnapshotRequest{}
-	mi := &file_terminal_kernel_v3_proto_msgTypes[20]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3120,7 +3035,7 @@ func (x *SnapshotRequest) String() string {
 func (*SnapshotRequest) ProtoMessage() {}
 
 func (x *SnapshotRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_kernel_v3_proto_msgTypes[20]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3133,7 +3048,7 @@ func (x *SnapshotRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SnapshotRequest.ProtoReflect.Descriptor instead.
 func (*SnapshotRequest) Descriptor() ([]byte, []int) {
-	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{20}
+	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *SnapshotRequest) GetRequestId() string {
@@ -3181,7 +3096,7 @@ type SnapshotResponse struct {
 
 func (x *SnapshotResponse) Reset() {
 	*x = SnapshotResponse{}
-	mi := &file_terminal_kernel_v3_proto_msgTypes[21]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3193,7 +3108,7 @@ func (x *SnapshotResponse) String() string {
 func (*SnapshotResponse) ProtoMessage() {}
 
 func (x *SnapshotResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_kernel_v3_proto_msgTypes[21]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3206,7 +3121,7 @@ func (x *SnapshotResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SnapshotResponse.ProtoReflect.Descriptor instead.
 func (*SnapshotResponse) Descriptor() ([]byte, []int) {
-	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{21}
+	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *SnapshotResponse) GetRequestId() string {
@@ -3237,7 +3152,7 @@ type HistoryPageRequest struct {
 
 func (x *HistoryPageRequest) Reset() {
 	*x = HistoryPageRequest{}
-	mi := &file_terminal_kernel_v3_proto_msgTypes[22]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3249,7 +3164,7 @@ func (x *HistoryPageRequest) String() string {
 func (*HistoryPageRequest) ProtoMessage() {}
 
 func (x *HistoryPageRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_kernel_v3_proto_msgTypes[22]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3262,7 +3177,7 @@ func (x *HistoryPageRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HistoryPageRequest.ProtoReflect.Descriptor instead.
 func (*HistoryPageRequest) Descriptor() ([]byte, []int) {
-	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{22}
+	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *HistoryPageRequest) GetRequestId() string {
@@ -3319,7 +3234,7 @@ type HistoryPageResponse struct {
 
 func (x *HistoryPageResponse) Reset() {
 	*x = HistoryPageResponse{}
-	mi := &file_terminal_kernel_v3_proto_msgTypes[23]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3331,7 +3246,7 @@ func (x *HistoryPageResponse) String() string {
 func (*HistoryPageResponse) ProtoMessage() {}
 
 func (x *HistoryPageResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_kernel_v3_proto_msgTypes[23]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3344,7 +3259,7 @@ func (x *HistoryPageResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HistoryPageResponse.ProtoReflect.Descriptor instead.
 func (*HistoryPageResponse) Descriptor() ([]byte, []int) {
-	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{23}
+	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *HistoryPageResponse) GetRequestId() string {
@@ -3391,7 +3306,7 @@ type CommittedObservationProjection struct {
 
 func (x *CommittedObservationProjection) Reset() {
 	*x = CommittedObservationProjection{}
-	mi := &file_terminal_kernel_v3_proto_msgTypes[24]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3403,7 +3318,7 @@ func (x *CommittedObservationProjection) String() string {
 func (*CommittedObservationProjection) ProtoMessage() {}
 
 func (x *CommittedObservationProjection) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_kernel_v3_proto_msgTypes[24]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3416,7 +3331,7 @@ func (x *CommittedObservationProjection) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CommittedObservationProjection.ProtoReflect.Descriptor instead.
 func (*CommittedObservationProjection) Descriptor() ([]byte, []int) {
-	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{24}
+	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *CommittedObservationProjection) GetEventSequence() uint64 {
@@ -3484,7 +3399,7 @@ type LiveTextStartPayload struct {
 
 func (x *LiveTextStartPayload) Reset() {
 	*x = LiveTextStartPayload{}
-	mi := &file_terminal_kernel_v3_proto_msgTypes[25]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3496,7 +3411,7 @@ func (x *LiveTextStartPayload) String() string {
 func (*LiveTextStartPayload) ProtoMessage() {}
 
 func (x *LiveTextStartPayload) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_kernel_v3_proto_msgTypes[25]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3509,7 +3424,7 @@ func (x *LiveTextStartPayload) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LiveTextStartPayload.ProtoReflect.Descriptor instead.
 func (*LiveTextStartPayload) Descriptor() ([]byte, []int) {
-	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{25}
+	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *LiveTextStartPayload) GetBlockIdentity() string {
@@ -3529,7 +3444,7 @@ type LiveTextDeltaPayload struct {
 
 func (x *LiveTextDeltaPayload) Reset() {
 	*x = LiveTextDeltaPayload{}
-	mi := &file_terminal_kernel_v3_proto_msgTypes[26]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3541,7 +3456,7 @@ func (x *LiveTextDeltaPayload) String() string {
 func (*LiveTextDeltaPayload) ProtoMessage() {}
 
 func (x *LiveTextDeltaPayload) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_kernel_v3_proto_msgTypes[26]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3554,7 +3469,7 @@ func (x *LiveTextDeltaPayload) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LiveTextDeltaPayload.ProtoReflect.Descriptor instead.
 func (*LiveTextDeltaPayload) Descriptor() ([]byte, []int) {
-	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{26}
+	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *LiveTextDeltaPayload) GetBlockIdentity() string {
@@ -3583,7 +3498,7 @@ type LiveTextEndPayload struct {
 
 func (x *LiveTextEndPayload) Reset() {
 	*x = LiveTextEndPayload{}
-	mi := &file_terminal_kernel_v3_proto_msgTypes[27]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3595,7 +3510,7 @@ func (x *LiveTextEndPayload) String() string {
 func (*LiveTextEndPayload) ProtoMessage() {}
 
 func (x *LiveTextEndPayload) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_kernel_v3_proto_msgTypes[27]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3608,7 +3523,7 @@ func (x *LiveTextEndPayload) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LiveTextEndPayload.ProtoReflect.Descriptor instead.
 func (*LiveTextEndPayload) Descriptor() ([]byte, []int) {
-	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{27}
+	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *LiveTextEndPayload) GetBlockIdentity() string {
@@ -3648,7 +3563,7 @@ type LiveThinkingStartPayload struct {
 
 func (x *LiveThinkingStartPayload) Reset() {
 	*x = LiveThinkingStartPayload{}
-	mi := &file_terminal_kernel_v3_proto_msgTypes[28]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3660,7 +3575,7 @@ func (x *LiveThinkingStartPayload) String() string {
 func (*LiveThinkingStartPayload) ProtoMessage() {}
 
 func (x *LiveThinkingStartPayload) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_kernel_v3_proto_msgTypes[28]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3673,7 +3588,7 @@ func (x *LiveThinkingStartPayload) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LiveThinkingStartPayload.ProtoReflect.Descriptor instead.
 func (*LiveThinkingStartPayload) Descriptor() ([]byte, []int) {
-	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{28}
+	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *LiveThinkingStartPayload) GetBlockIdentity() string {
@@ -3693,7 +3608,7 @@ type LiveThinkingDeltaPayload struct {
 
 func (x *LiveThinkingDeltaPayload) Reset() {
 	*x = LiveThinkingDeltaPayload{}
-	mi := &file_terminal_kernel_v3_proto_msgTypes[29]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3705,7 +3620,7 @@ func (x *LiveThinkingDeltaPayload) String() string {
 func (*LiveThinkingDeltaPayload) ProtoMessage() {}
 
 func (x *LiveThinkingDeltaPayload) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_kernel_v3_proto_msgTypes[29]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3718,7 +3633,7 @@ func (x *LiveThinkingDeltaPayload) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LiveThinkingDeltaPayload.ProtoReflect.Descriptor instead.
 func (*LiveThinkingDeltaPayload) Descriptor() ([]byte, []int) {
-	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{29}
+	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *LiveThinkingDeltaPayload) GetBlockIdentity() string {
@@ -3747,7 +3662,7 @@ type LiveThinkingEndPayload struct {
 
 func (x *LiveThinkingEndPayload) Reset() {
 	*x = LiveThinkingEndPayload{}
-	mi := &file_terminal_kernel_v3_proto_msgTypes[30]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3759,7 +3674,7 @@ func (x *LiveThinkingEndPayload) String() string {
 func (*LiveThinkingEndPayload) ProtoMessage() {}
 
 func (x *LiveThinkingEndPayload) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_kernel_v3_proto_msgTypes[30]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3772,7 +3687,7 @@ func (x *LiveThinkingEndPayload) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LiveThinkingEndPayload.ProtoReflect.Descriptor instead.
 func (*LiveThinkingEndPayload) Descriptor() ([]byte, []int) {
-	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{30}
+	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *LiveThinkingEndPayload) GetBlockIdentity() string {
@@ -3813,7 +3728,7 @@ type LiveDataStartPayload struct {
 
 func (x *LiveDataStartPayload) Reset() {
 	*x = LiveDataStartPayload{}
-	mi := &file_terminal_kernel_v3_proto_msgTypes[31]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3825,7 +3740,7 @@ func (x *LiveDataStartPayload) String() string {
 func (*LiveDataStartPayload) ProtoMessage() {}
 
 func (x *LiveDataStartPayload) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_kernel_v3_proto_msgTypes[31]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3838,7 +3753,7 @@ func (x *LiveDataStartPayload) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LiveDataStartPayload.ProtoReflect.Descriptor instead.
 func (*LiveDataStartPayload) Descriptor() ([]byte, []int) {
-	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{31}
+	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *LiveDataStartPayload) GetBlockIdentity() string {
@@ -3865,7 +3780,7 @@ type LiveDataDeltaPayload struct {
 
 func (x *LiveDataDeltaPayload) Reset() {
 	*x = LiveDataDeltaPayload{}
-	mi := &file_terminal_kernel_v3_proto_msgTypes[32]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3877,7 +3792,7 @@ func (x *LiveDataDeltaPayload) String() string {
 func (*LiveDataDeltaPayload) ProtoMessage() {}
 
 func (x *LiveDataDeltaPayload) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_kernel_v3_proto_msgTypes[32]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3890,7 +3805,7 @@ func (x *LiveDataDeltaPayload) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LiveDataDeltaPayload.ProtoReflect.Descriptor instead.
 func (*LiveDataDeltaPayload) Descriptor() ([]byte, []int) {
-	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{32}
+	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *LiveDataDeltaPayload) GetBlockIdentity() string {
@@ -3920,7 +3835,7 @@ type LiveDataEndPayload struct {
 
 func (x *LiveDataEndPayload) Reset() {
 	*x = LiveDataEndPayload{}
-	mi := &file_terminal_kernel_v3_proto_msgTypes[33]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3932,7 +3847,7 @@ func (x *LiveDataEndPayload) String() string {
 func (*LiveDataEndPayload) ProtoMessage() {}
 
 func (x *LiveDataEndPayload) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_kernel_v3_proto_msgTypes[33]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3945,7 +3860,7 @@ func (x *LiveDataEndPayload) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LiveDataEndPayload.ProtoReflect.Descriptor instead.
 func (*LiveDataEndPayload) Descriptor() ([]byte, []int) {
-	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{33}
+	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *LiveDataEndPayload) GetBlockIdentity() string {
@@ -3994,7 +3909,7 @@ type LiveToolCallStartPayload struct {
 
 func (x *LiveToolCallStartPayload) Reset() {
 	*x = LiveToolCallStartPayload{}
-	mi := &file_terminal_kernel_v3_proto_msgTypes[34]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4006,7 +3921,7 @@ func (x *LiveToolCallStartPayload) String() string {
 func (*LiveToolCallStartPayload) ProtoMessage() {}
 
 func (x *LiveToolCallStartPayload) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_kernel_v3_proto_msgTypes[34]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4019,7 +3934,7 @@ func (x *LiveToolCallStartPayload) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LiveToolCallStartPayload.ProtoReflect.Descriptor instead.
 func (*LiveToolCallStartPayload) Descriptor() ([]byte, []int) {
-	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{34}
+	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *LiveToolCallStartPayload) GetBlockIdentity() string {
@@ -4054,7 +3969,7 @@ type LiveToolCallDeltaPayload struct {
 
 func (x *LiveToolCallDeltaPayload) Reset() {
 	*x = LiveToolCallDeltaPayload{}
-	mi := &file_terminal_kernel_v3_proto_msgTypes[35]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4066,7 +3981,7 @@ func (x *LiveToolCallDeltaPayload) String() string {
 func (*LiveToolCallDeltaPayload) ProtoMessage() {}
 
 func (x *LiveToolCallDeltaPayload) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_kernel_v3_proto_msgTypes[35]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4079,7 +3994,7 @@ func (x *LiveToolCallDeltaPayload) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LiveToolCallDeltaPayload.ProtoReflect.Descriptor instead.
 func (*LiveToolCallDeltaPayload) Descriptor() ([]byte, []int) {
-	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{35}
+	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *LiveToolCallDeltaPayload) GetBlockIdentity() string {
@@ -4117,7 +4032,7 @@ type LiveToolCallEndPayload struct {
 
 func (x *LiveToolCallEndPayload) Reset() {
 	*x = LiveToolCallEndPayload{}
-	mi := &file_terminal_kernel_v3_proto_msgTypes[36]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4129,7 +4044,7 @@ func (x *LiveToolCallEndPayload) String() string {
 func (*LiveToolCallEndPayload) ProtoMessage() {}
 
 func (x *LiveToolCallEndPayload) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_kernel_v3_proto_msgTypes[36]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4142,7 +4057,7 @@ func (x *LiveToolCallEndPayload) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LiveToolCallEndPayload.ProtoReflect.Descriptor instead.
 func (*LiveToolCallEndPayload) Descriptor() ([]byte, []int) {
-	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{36}
+	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{35}
 }
 
 func (x *LiveToolCallEndPayload) GetBlockIdentity() string {
@@ -4198,7 +4113,7 @@ type LiveToolResultStartPayload struct {
 
 func (x *LiveToolResultStartPayload) Reset() {
 	*x = LiveToolResultStartPayload{}
-	mi := &file_terminal_kernel_v3_proto_msgTypes[37]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4210,7 +4125,7 @@ func (x *LiveToolResultStartPayload) String() string {
 func (*LiveToolResultStartPayload) ProtoMessage() {}
 
 func (x *LiveToolResultStartPayload) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_kernel_v3_proto_msgTypes[37]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4223,7 +4138,7 @@ func (x *LiveToolResultStartPayload) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LiveToolResultStartPayload.ProtoReflect.Descriptor instead.
 func (*LiveToolResultStartPayload) Descriptor() ([]byte, []int) {
-	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{37}
+	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *LiveToolResultStartPayload) GetBlockIdentity() string {
@@ -4257,7 +4172,7 @@ type LiveToolResultDeltaPayload struct {
 
 func (x *LiveToolResultDeltaPayload) Reset() {
 	*x = LiveToolResultDeltaPayload{}
-	mi := &file_terminal_kernel_v3_proto_msgTypes[38]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4269,7 +4184,7 @@ func (x *LiveToolResultDeltaPayload) String() string {
 func (*LiveToolResultDeltaPayload) ProtoMessage() {}
 
 func (x *LiveToolResultDeltaPayload) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_kernel_v3_proto_msgTypes[38]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4282,7 +4197,7 @@ func (x *LiveToolResultDeltaPayload) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LiveToolResultDeltaPayload.ProtoReflect.Descriptor instead.
 func (*LiveToolResultDeltaPayload) Descriptor() ([]byte, []int) {
-	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{38}
+	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{37}
 }
 
 func (x *LiveToolResultDeltaPayload) GetBlockIdentity() string {
@@ -4312,7 +4227,7 @@ type LiveToolResultEndPayload struct {
 
 func (x *LiveToolResultEndPayload) Reset() {
 	*x = LiveToolResultEndPayload{}
-	mi := &file_terminal_kernel_v3_proto_msgTypes[39]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4324,7 +4239,7 @@ func (x *LiveToolResultEndPayload) String() string {
 func (*LiveToolResultEndPayload) ProtoMessage() {}
 
 func (x *LiveToolResultEndPayload) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_kernel_v3_proto_msgTypes[39]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4337,7 +4252,7 @@ func (x *LiveToolResultEndPayload) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LiveToolResultEndPayload.ProtoReflect.Descriptor instead.
 func (*LiveToolResultEndPayload) Descriptor() ([]byte, []int) {
-	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{39}
+	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{38}
 }
 
 func (x *LiveToolResultEndPayload) GetBlockIdentity() string {
@@ -4388,7 +4303,7 @@ type LiveInteractionOpenedPayload struct {
 
 func (x *LiveInteractionOpenedPayload) Reset() {
 	*x = LiveInteractionOpenedPayload{}
-	mi := &file_terminal_kernel_v3_proto_msgTypes[40]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[39]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4400,7 +4315,7 @@ func (x *LiveInteractionOpenedPayload) String() string {
 func (*LiveInteractionOpenedPayload) ProtoMessage() {}
 
 func (x *LiveInteractionOpenedPayload) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_kernel_v3_proto_msgTypes[40]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[39]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4413,7 +4328,7 @@ func (x *LiveInteractionOpenedPayload) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LiveInteractionOpenedPayload.ProtoReflect.Descriptor instead.
 func (*LiveInteractionOpenedPayload) Descriptor() ([]byte, []int) {
-	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{40}
+	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{39}
 }
 
 func (x *LiveInteractionOpenedPayload) GetInteractionId() string {
@@ -4465,7 +4380,7 @@ type LiveInteractionReplacedPayload struct {
 
 func (x *LiveInteractionReplacedPayload) Reset() {
 	*x = LiveInteractionReplacedPayload{}
-	mi := &file_terminal_kernel_v3_proto_msgTypes[41]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[40]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4477,7 +4392,7 @@ func (x *LiveInteractionReplacedPayload) String() string {
 func (*LiveInteractionReplacedPayload) ProtoMessage() {}
 
 func (x *LiveInteractionReplacedPayload) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_kernel_v3_proto_msgTypes[41]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[40]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4490,7 +4405,7 @@ func (x *LiveInteractionReplacedPayload) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LiveInteractionReplacedPayload.ProtoReflect.Descriptor instead.
 func (*LiveInteractionReplacedPayload) Descriptor() ([]byte, []int) {
-	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{41}
+	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{40}
 }
 
 func (x *LiveInteractionReplacedPayload) GetReplacedInteractionId() string {
@@ -4545,7 +4460,7 @@ type LiveInteractionClosedPayload struct {
 
 func (x *LiveInteractionClosedPayload) Reset() {
 	*x = LiveInteractionClosedPayload{}
-	mi := &file_terminal_kernel_v3_proto_msgTypes[42]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[41]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4557,7 +4472,7 @@ func (x *LiveInteractionClosedPayload) String() string {
 func (*LiveInteractionClosedPayload) ProtoMessage() {}
 
 func (x *LiveInteractionClosedPayload) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_kernel_v3_proto_msgTypes[42]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[41]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4570,7 +4485,7 @@ func (x *LiveInteractionClosedPayload) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LiveInteractionClosedPayload.ProtoReflect.Descriptor instead.
 func (*LiveInteractionClosedPayload) Descriptor() ([]byte, []int) {
-	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{42}
+	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{41}
 }
 
 func (x *LiveInteractionClosedPayload) GetInteractionId() string {
@@ -4600,7 +4515,7 @@ type LiveTerminalProcessCompletedPayload struct {
 
 func (x *LiveTerminalProcessCompletedPayload) Reset() {
 	*x = LiveTerminalProcessCompletedPayload{}
-	mi := &file_terminal_kernel_v3_proto_msgTypes[43]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[42]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4612,7 +4527,7 @@ func (x *LiveTerminalProcessCompletedPayload) String() string {
 func (*LiveTerminalProcessCompletedPayload) ProtoMessage() {}
 
 func (x *LiveTerminalProcessCompletedPayload) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_kernel_v3_proto_msgTypes[43]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[42]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4625,7 +4540,7 @@ func (x *LiveTerminalProcessCompletedPayload) ProtoReflect() protoreflect.Messag
 
 // Deprecated: Use LiveTerminalProcessCompletedPayload.ProtoReflect.Descriptor instead.
 func (*LiveTerminalProcessCompletedPayload) Descriptor() ([]byte, []int) {
-	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{43}
+	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{42}
 }
 
 func (x *LiveTerminalProcessCompletedPayload) GetProcessId() string {
@@ -4673,7 +4588,7 @@ type LiveTerminalMonitorOpenedPayload struct {
 
 func (x *LiveTerminalMonitorOpenedPayload) Reset() {
 	*x = LiveTerminalMonitorOpenedPayload{}
-	mi := &file_terminal_kernel_v3_proto_msgTypes[44]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[43]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4685,7 +4600,7 @@ func (x *LiveTerminalMonitorOpenedPayload) String() string {
 func (*LiveTerminalMonitorOpenedPayload) ProtoMessage() {}
 
 func (x *LiveTerminalMonitorOpenedPayload) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_kernel_v3_proto_msgTypes[44]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[43]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4698,7 +4613,7 @@ func (x *LiveTerminalMonitorOpenedPayload) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LiveTerminalMonitorOpenedPayload.ProtoReflect.Descriptor instead.
 func (*LiveTerminalMonitorOpenedPayload) Descriptor() ([]byte, []int) {
-	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{44}
+	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{43}
 }
 
 func (x *LiveTerminalMonitorOpenedPayload) GetMonitorId() string {
@@ -4729,7 +4644,7 @@ type LiveTerminalMonitorObservationPayload struct {
 
 func (x *LiveTerminalMonitorObservationPayload) Reset() {
 	*x = LiveTerminalMonitorObservationPayload{}
-	mi := &file_terminal_kernel_v3_proto_msgTypes[45]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[44]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4741,7 +4656,7 @@ func (x *LiveTerminalMonitorObservationPayload) String() string {
 func (*LiveTerminalMonitorObservationPayload) ProtoMessage() {}
 
 func (x *LiveTerminalMonitorObservationPayload) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_kernel_v3_proto_msgTypes[45]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[44]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4754,7 +4669,7 @@ func (x *LiveTerminalMonitorObservationPayload) ProtoReflect() protoreflect.Mess
 
 // Deprecated: Use LiveTerminalMonitorObservationPayload.ProtoReflect.Descriptor instead.
 func (*LiveTerminalMonitorObservationPayload) Descriptor() ([]byte, []int) {
-	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{45}
+	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{44}
 }
 
 func (x *LiveTerminalMonitorObservationPayload) GetMonitorId() string {
@@ -4810,7 +4725,7 @@ type LiveTerminalMonitorClosedPayload struct {
 
 func (x *LiveTerminalMonitorClosedPayload) Reset() {
 	*x = LiveTerminalMonitorClosedPayload{}
-	mi := &file_terminal_kernel_v3_proto_msgTypes[46]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[45]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4822,7 +4737,7 @@ func (x *LiveTerminalMonitorClosedPayload) String() string {
 func (*LiveTerminalMonitorClosedPayload) ProtoMessage() {}
 
 func (x *LiveTerminalMonitorClosedPayload) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_kernel_v3_proto_msgTypes[46]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[45]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4835,7 +4750,7 @@ func (x *LiveTerminalMonitorClosedPayload) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LiveTerminalMonitorClosedPayload.ProtoReflect.Descriptor instead.
 func (*LiveTerminalMonitorClosedPayload) Descriptor() ([]byte, []int) {
-	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{46}
+	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{45}
 }
 
 func (x *LiveTerminalMonitorClosedPayload) GetMonitorId() string {
@@ -4872,7 +4787,7 @@ type LiveSubagentProgressPayload struct {
 
 func (x *LiveSubagentProgressPayload) Reset() {
 	*x = LiveSubagentProgressPayload{}
-	mi := &file_terminal_kernel_v3_proto_msgTypes[47]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[46]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4884,7 +4799,7 @@ func (x *LiveSubagentProgressPayload) String() string {
 func (*LiveSubagentProgressPayload) ProtoMessage() {}
 
 func (x *LiveSubagentProgressPayload) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_kernel_v3_proto_msgTypes[47]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[46]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4897,7 +4812,7 @@ func (x *LiveSubagentProgressPayload) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LiveSubagentProgressPayload.ProtoReflect.Descriptor instead.
 func (*LiveSubagentProgressPayload) Descriptor() ([]byte, []int) {
-	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{47}
+	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{46}
 }
 
 func (x *LiveSubagentProgressPayload) GetTaskId() string {
@@ -4969,7 +4884,7 @@ type LiveEventPayload struct {
 
 func (x *LiveEventPayload) Reset() {
 	*x = LiveEventPayload{}
-	mi := &file_terminal_kernel_v3_proto_msgTypes[48]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[47]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4981,7 +4896,7 @@ func (x *LiveEventPayload) String() string {
 func (*LiveEventPayload) ProtoMessage() {}
 
 func (x *LiveEventPayload) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_kernel_v3_proto_msgTypes[48]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[47]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4994,7 +4909,7 @@ func (x *LiveEventPayload) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LiveEventPayload.ProtoReflect.Descriptor instead.
 func (*LiveEventPayload) Descriptor() ([]byte, []int) {
-	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{48}
+	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{47}
 }
 
 func (x *LiveEventPayload) GetPayload() isLiveEventPayload_Payload {
@@ -5378,7 +5293,7 @@ type LiveEventProjection struct {
 
 func (x *LiveEventProjection) Reset() {
 	*x = LiveEventProjection{}
-	mi := &file_terminal_kernel_v3_proto_msgTypes[49]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[48]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5390,7 +5305,7 @@ func (x *LiveEventProjection) String() string {
 func (*LiveEventProjection) ProtoMessage() {}
 
 func (x *LiveEventProjection) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_kernel_v3_proto_msgTypes[49]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[48]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5403,7 +5318,7 @@ func (x *LiveEventProjection) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LiveEventProjection.ProtoReflect.Descriptor instead.
 func (*LiveEventProjection) Descriptor() ([]byte, []int) {
-	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{49}
+	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{48}
 }
 
 func (x *LiveEventProjection) GetOwnerEpoch() uint64 {
@@ -5548,7 +5463,7 @@ type LiveGenerationSettlement struct {
 
 func (x *LiveGenerationSettlement) Reset() {
 	*x = LiveGenerationSettlement{}
-	mi := &file_terminal_kernel_v3_proto_msgTypes[50]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[49]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5560,7 +5475,7 @@ func (x *LiveGenerationSettlement) String() string {
 func (*LiveGenerationSettlement) ProtoMessage() {}
 
 func (x *LiveGenerationSettlement) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_kernel_v3_proto_msgTypes[50]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[49]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5573,7 +5488,7 @@ func (x *LiveGenerationSettlement) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LiveGenerationSettlement.ProtoReflect.Descriptor instead.
 func (*LiveGenerationSettlement) Descriptor() ([]byte, []int) {
-	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{50}
+	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{49}
 }
 
 func (x *LiveGenerationSettlement) GetOwnerEpoch() uint64 {
@@ -5695,7 +5610,7 @@ type LiveSnapshotProjection struct {
 
 func (x *LiveSnapshotProjection) Reset() {
 	*x = LiveSnapshotProjection{}
-	mi := &file_terminal_kernel_v3_proto_msgTypes[51]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[50]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5707,7 +5622,7 @@ func (x *LiveSnapshotProjection) String() string {
 func (*LiveSnapshotProjection) ProtoMessage() {}
 
 func (x *LiveSnapshotProjection) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_kernel_v3_proto_msgTypes[51]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[50]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5720,7 +5635,7 @@ func (x *LiveSnapshotProjection) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LiveSnapshotProjection.ProtoReflect.Descriptor instead.
 func (*LiveSnapshotProjection) Descriptor() ([]byte, []int) {
-	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{51}
+	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{50}
 }
 
 func (x *LiveSnapshotProjection) GetOwnerEpoch() uint64 {
@@ -5778,7 +5693,7 @@ type LiveInteractionView struct {
 
 func (x *LiveInteractionView) Reset() {
 	*x = LiveInteractionView{}
-	mi := &file_terminal_kernel_v3_proto_msgTypes[52]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[51]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5790,7 +5705,7 @@ func (x *LiveInteractionView) String() string {
 func (*LiveInteractionView) ProtoMessage() {}
 
 func (x *LiveInteractionView) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_kernel_v3_proto_msgTypes[52]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[51]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5803,7 +5718,7 @@ func (x *LiveInteractionView) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LiveInteractionView.ProtoReflect.Descriptor instead.
 func (*LiveInteractionView) Descriptor() ([]byte, []int) {
-	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{52}
+	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{51}
 }
 
 func (x *LiveInteractionView) GetInteractionId() string {
@@ -5853,7 +5768,7 @@ type SessionLiveControlSnapshot struct {
 
 func (x *SessionLiveControlSnapshot) Reset() {
 	*x = SessionLiveControlSnapshot{}
-	mi := &file_terminal_kernel_v3_proto_msgTypes[53]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[52]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5865,7 +5780,7 @@ func (x *SessionLiveControlSnapshot) String() string {
 func (*SessionLiveControlSnapshot) ProtoMessage() {}
 
 func (x *SessionLiveControlSnapshot) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_kernel_v3_proto_msgTypes[53]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[52]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5878,7 +5793,7 @@ func (x *SessionLiveControlSnapshot) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SessionLiveControlSnapshot.ProtoReflect.Descriptor instead.
 func (*SessionLiveControlSnapshot) Descriptor() ([]byte, []int) {
-	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{53}
+	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{52}
 }
 
 func (x *SessionLiveControlSnapshot) GetSessionId() string {
@@ -5922,7 +5837,7 @@ type LiveControlEventProjection struct {
 
 func (x *LiveControlEventProjection) Reset() {
 	*x = LiveControlEventProjection{}
-	mi := &file_terminal_kernel_v3_proto_msgTypes[54]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[53]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5934,7 +5849,7 @@ func (x *LiveControlEventProjection) String() string {
 func (*LiveControlEventProjection) ProtoMessage() {}
 
 func (x *LiveControlEventProjection) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_kernel_v3_proto_msgTypes[54]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[53]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5947,7 +5862,7 @@ func (x *LiveControlEventProjection) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LiveControlEventProjection.ProtoReflect.Descriptor instead.
 func (*LiveControlEventProjection) Descriptor() ([]byte, []int) {
-	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{54}
+	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{53}
 }
 
 func (x *LiveControlEventProjection) GetOwnerEpoch() uint64 {
@@ -5996,7 +5911,7 @@ type ObservationGap struct {
 
 func (x *ObservationGap) Reset() {
 	*x = ObservationGap{}
-	mi := &file_terminal_kernel_v3_proto_msgTypes[55]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[54]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6008,7 +5923,7 @@ func (x *ObservationGap) String() string {
 func (*ObservationGap) ProtoMessage() {}
 
 func (x *ObservationGap) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_kernel_v3_proto_msgTypes[55]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[54]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6021,7 +5936,7 @@ func (x *ObservationGap) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ObservationGap.ProtoReflect.Descriptor instead.
 func (*ObservationGap) Descriptor() ([]byte, []int) {
-	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{55}
+	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{54}
 }
 
 func (x *ObservationGap) GetKind() ObservationGapKind {
@@ -6064,7 +5979,7 @@ type ObserveRequest struct {
 
 func (x *ObserveRequest) Reset() {
 	*x = ObserveRequest{}
-	mi := &file_terminal_kernel_v3_proto_msgTypes[56]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[55]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6076,7 +5991,7 @@ func (x *ObserveRequest) String() string {
 func (*ObserveRequest) ProtoMessage() {}
 
 func (x *ObserveRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_kernel_v3_proto_msgTypes[56]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[55]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6089,7 +6004,7 @@ func (x *ObserveRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ObserveRequest.ProtoReflect.Descriptor instead.
 func (*ObserveRequest) Descriptor() ([]byte, []int) {
-	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{56}
+	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{55}
 }
 
 func (x *ObserveRequest) GetRequestId() string {
@@ -6188,7 +6103,7 @@ type ObservationResponse struct {
 
 func (x *ObservationResponse) Reset() {
 	*x = ObservationResponse{}
-	mi := &file_terminal_kernel_v3_proto_msgTypes[57]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[56]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6200,7 +6115,7 @@ func (x *ObservationResponse) String() string {
 func (*ObservationResponse) ProtoMessage() {}
 
 func (x *ObservationResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_kernel_v3_proto_msgTypes[57]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[56]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6213,7 +6128,7 @@ func (x *ObservationResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ObservationResponse.ProtoReflect.Descriptor instead.
 func (*ObservationResponse) Descriptor() ([]byte, []int) {
-	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{57}
+	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{56}
 }
 
 func (x *ObservationResponse) GetRequestId() string {
@@ -6304,7 +6219,7 @@ type LiveControlSnapshotRequest struct {
 
 func (x *LiveControlSnapshotRequest) Reset() {
 	*x = LiveControlSnapshotRequest{}
-	mi := &file_terminal_kernel_v3_proto_msgTypes[58]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[57]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6316,7 +6231,7 @@ func (x *LiveControlSnapshotRequest) String() string {
 func (*LiveControlSnapshotRequest) ProtoMessage() {}
 
 func (x *LiveControlSnapshotRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_kernel_v3_proto_msgTypes[58]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[57]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6329,7 +6244,7 @@ func (x *LiveControlSnapshotRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LiveControlSnapshotRequest.ProtoReflect.Descriptor instead.
 func (*LiveControlSnapshotRequest) Descriptor() ([]byte, []int) {
-	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{58}
+	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{57}
 }
 
 func (x *LiveControlSnapshotRequest) GetRequestId() string {
@@ -6363,7 +6278,7 @@ type LiveControlSnapshotResponse struct {
 
 func (x *LiveControlSnapshotResponse) Reset() {
 	*x = LiveControlSnapshotResponse{}
-	mi := &file_terminal_kernel_v3_proto_msgTypes[59]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[58]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6375,7 +6290,7 @@ func (x *LiveControlSnapshotResponse) String() string {
 func (*LiveControlSnapshotResponse) ProtoMessage() {}
 
 func (x *LiveControlSnapshotResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_kernel_v3_proto_msgTypes[59]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[58]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6388,7 +6303,7 @@ func (x *LiveControlSnapshotResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LiveControlSnapshotResponse.ProtoReflect.Descriptor instead.
 func (*LiveControlSnapshotResponse) Descriptor() ([]byte, []int) {
-	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{59}
+	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{58}
 }
 
 func (x *LiveControlSnapshotResponse) GetRequestId() string {
@@ -6426,7 +6341,7 @@ type CommandRequest struct {
 
 func (x *CommandRequest) Reset() {
 	*x = CommandRequest{}
-	mi := &file_terminal_kernel_v3_proto_msgTypes[60]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[59]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6438,7 +6353,7 @@ func (x *CommandRequest) String() string {
 func (*CommandRequest) ProtoMessage() {}
 
 func (x *CommandRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_kernel_v3_proto_msgTypes[60]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[59]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6451,7 +6366,7 @@ func (x *CommandRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CommandRequest.ProtoReflect.Descriptor instead.
 func (*CommandRequest) Descriptor() ([]byte, []int) {
-	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{60}
+	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{59}
 }
 
 func (x *CommandRequest) GetRequestId() string {
@@ -6565,7 +6480,7 @@ type CommandOutcome struct {
 
 func (x *CommandOutcome) Reset() {
 	*x = CommandOutcome{}
-	mi := &file_terminal_kernel_v3_proto_msgTypes[61]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[60]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6577,7 +6492,7 @@ func (x *CommandOutcome) String() string {
 func (*CommandOutcome) ProtoMessage() {}
 
 func (x *CommandOutcome) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_kernel_v3_proto_msgTypes[61]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[60]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6590,7 +6505,7 @@ func (x *CommandOutcome) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CommandOutcome.ProtoReflect.Descriptor instead.
 func (*CommandOutcome) Descriptor() ([]byte, []int) {
-	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{61}
+	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{60}
 }
 
 func (x *CommandOutcome) GetRequestId() string {
@@ -6689,7 +6604,7 @@ type QueryCommandRequest struct {
 
 func (x *QueryCommandRequest) Reset() {
 	*x = QueryCommandRequest{}
-	mi := &file_terminal_kernel_v3_proto_msgTypes[62]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[61]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6701,7 +6616,7 @@ func (x *QueryCommandRequest) String() string {
 func (*QueryCommandRequest) ProtoMessage() {}
 
 func (x *QueryCommandRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_kernel_v3_proto_msgTypes[62]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[61]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6714,7 +6629,7 @@ func (x *QueryCommandRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QueryCommandRequest.ProtoReflect.Descriptor instead.
 func (*QueryCommandRequest) Descriptor() ([]byte, []int) {
-	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{62}
+	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{61}
 }
 
 func (x *QueryCommandRequest) GetRequestId() string {
@@ -6756,7 +6671,7 @@ type QueryCommandResponse struct {
 
 func (x *QueryCommandResponse) Reset() {
 	*x = QueryCommandResponse{}
-	mi := &file_terminal_kernel_v3_proto_msgTypes[63]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[62]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6768,7 +6683,7 @@ func (x *QueryCommandResponse) String() string {
 func (*QueryCommandResponse) ProtoMessage() {}
 
 func (x *QueryCommandResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_kernel_v3_proto_msgTypes[63]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[62]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6781,7 +6696,7 @@ func (x *QueryCommandResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QueryCommandResponse.ProtoReflect.Descriptor instead.
 func (*QueryCommandResponse) Descriptor() ([]byte, []int) {
-	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{63}
+	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{62}
 }
 
 func (x *QueryCommandResponse) GetRequestId() string {
@@ -6822,7 +6737,7 @@ type ResolveInteractionRequest struct {
 
 func (x *ResolveInteractionRequest) Reset() {
 	*x = ResolveInteractionRequest{}
-	mi := &file_terminal_kernel_v3_proto_msgTypes[64]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[63]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6834,7 +6749,7 @@ func (x *ResolveInteractionRequest) String() string {
 func (*ResolveInteractionRequest) ProtoMessage() {}
 
 func (x *ResolveInteractionRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_kernel_v3_proto_msgTypes[64]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[63]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6847,7 +6762,7 @@ func (x *ResolveInteractionRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResolveInteractionRequest.ProtoReflect.Descriptor instead.
 func (*ResolveInteractionRequest) Descriptor() ([]byte, []int) {
-	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{64}
+	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{63}
 }
 
 func (x *ResolveInteractionRequest) GetRequestId() string {
@@ -6926,7 +6841,7 @@ type PlanQuestionAnswer struct {
 
 func (x *PlanQuestionAnswer) Reset() {
 	*x = PlanQuestionAnswer{}
-	mi := &file_terminal_kernel_v3_proto_msgTypes[65]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[64]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6938,7 +6853,7 @@ func (x *PlanQuestionAnswer) String() string {
 func (*PlanQuestionAnswer) ProtoMessage() {}
 
 func (x *PlanQuestionAnswer) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_kernel_v3_proto_msgTypes[65]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[64]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6951,7 +6866,7 @@ func (x *PlanQuestionAnswer) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PlanQuestionAnswer.ProtoReflect.Descriptor instead.
 func (*PlanQuestionAnswer) Descriptor() ([]byte, []int) {
-	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{65}
+	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{64}
 }
 
 func (x *PlanQuestionAnswer) GetAnswer() isPlanQuestionAnswer_Answer {
@@ -7005,7 +6920,7 @@ type PlanDraftResolution struct {
 
 func (x *PlanDraftResolution) Reset() {
 	*x = PlanDraftResolution{}
-	mi := &file_terminal_kernel_v3_proto_msgTypes[66]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[65]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7017,7 +6932,7 @@ func (x *PlanDraftResolution) String() string {
 func (*PlanDraftResolution) ProtoMessage() {}
 
 func (x *PlanDraftResolution) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_kernel_v3_proto_msgTypes[66]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[65]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7030,7 +6945,7 @@ func (x *PlanDraftResolution) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PlanDraftResolution.ProtoReflect.Descriptor instead.
 func (*PlanDraftResolution) Descriptor() ([]byte, []int) {
-	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{66}
+	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{65}
 }
 
 func (x *PlanDraftResolution) GetDecision() PlanDraftDecision {
@@ -7068,7 +6983,7 @@ type ResolvePlanInteractionRequest struct {
 
 func (x *ResolvePlanInteractionRequest) Reset() {
 	*x = ResolvePlanInteractionRequest{}
-	mi := &file_terminal_kernel_v3_proto_msgTypes[67]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[66]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7080,7 +6995,7 @@ func (x *ResolvePlanInteractionRequest) String() string {
 func (*ResolvePlanInteractionRequest) ProtoMessage() {}
 
 func (x *ResolvePlanInteractionRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_kernel_v3_proto_msgTypes[67]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[66]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7093,7 +7008,7 @@ func (x *ResolvePlanInteractionRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResolvePlanInteractionRequest.ProtoReflect.Descriptor instead.
 func (*ResolvePlanInteractionRequest) Descriptor() ([]byte, []int) {
-	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{67}
+	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{66}
 }
 
 func (x *ResolvePlanInteractionRequest) GetRequestId() string {
@@ -7212,7 +7127,7 @@ type ResolvePlanInteractionResponse struct {
 
 func (x *ResolvePlanInteractionResponse) Reset() {
 	*x = ResolvePlanInteractionResponse{}
-	mi := &file_terminal_kernel_v3_proto_msgTypes[68]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[67]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7224,7 +7139,7 @@ func (x *ResolvePlanInteractionResponse) String() string {
 func (*ResolvePlanInteractionResponse) ProtoMessage() {}
 
 func (x *ResolvePlanInteractionResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_kernel_v3_proto_msgTypes[68]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[67]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7237,7 +7152,7 @@ func (x *ResolvePlanInteractionResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResolvePlanInteractionResponse.ProtoReflect.Descriptor instead.
 func (*ResolvePlanInteractionResponse) Descriptor() ([]byte, []int) {
-	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{68}
+	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{67}
 }
 
 func (x *ResolvePlanInteractionResponse) GetRequestId() string {
@@ -7329,7 +7244,7 @@ type ReadPlanQuestionContentRequest struct {
 
 func (x *ReadPlanQuestionContentRequest) Reset() {
 	*x = ReadPlanQuestionContentRequest{}
-	mi := &file_terminal_kernel_v3_proto_msgTypes[69]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[68]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7341,7 +7256,7 @@ func (x *ReadPlanQuestionContentRequest) String() string {
 func (*ReadPlanQuestionContentRequest) ProtoMessage() {}
 
 func (x *ReadPlanQuestionContentRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_kernel_v3_proto_msgTypes[69]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[68]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7354,7 +7269,7 @@ func (x *ReadPlanQuestionContentRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReadPlanQuestionContentRequest.ProtoReflect.Descriptor instead.
 func (*ReadPlanQuestionContentRequest) Descriptor() ([]byte, []int) {
-	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{69}
+	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{68}
 }
 
 func (x *ReadPlanQuestionContentRequest) GetRequestId() string {
@@ -7397,7 +7312,7 @@ type PlanQuestionOption struct {
 
 func (x *PlanQuestionOption) Reset() {
 	*x = PlanQuestionOption{}
-	mi := &file_terminal_kernel_v3_proto_msgTypes[70]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[69]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7409,7 +7324,7 @@ func (x *PlanQuestionOption) String() string {
 func (*PlanQuestionOption) ProtoMessage() {}
 
 func (x *PlanQuestionOption) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_kernel_v3_proto_msgTypes[70]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[69]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7422,7 +7337,7 @@ func (x *PlanQuestionOption) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PlanQuestionOption.ProtoReflect.Descriptor instead.
 func (*PlanQuestionOption) Descriptor() ([]byte, []int) {
-	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{70}
+	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{69}
 }
 
 func (x *PlanQuestionOption) GetOrdinal() uint32 {
@@ -7467,7 +7382,7 @@ type PlanQuestionContent struct {
 
 func (x *PlanQuestionContent) Reset() {
 	*x = PlanQuestionContent{}
-	mi := &file_terminal_kernel_v3_proto_msgTypes[71]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[70]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7479,7 +7394,7 @@ func (x *PlanQuestionContent) String() string {
 func (*PlanQuestionContent) ProtoMessage() {}
 
 func (x *PlanQuestionContent) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_kernel_v3_proto_msgTypes[71]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[70]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7492,7 +7407,7 @@ func (x *PlanQuestionContent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PlanQuestionContent.ProtoReflect.Descriptor instead.
 func (*PlanQuestionContent) Descriptor() ([]byte, []int) {
-	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{71}
+	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{70}
 }
 
 func (x *PlanQuestionContent) GetRequestId() string {
@@ -7552,7 +7467,7 @@ type ReadPlanDraftTextChunkRequest struct {
 
 func (x *ReadPlanDraftTextChunkRequest) Reset() {
 	*x = ReadPlanDraftTextChunkRequest{}
-	mi := &file_terminal_kernel_v3_proto_msgTypes[72]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[71]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7564,7 +7479,7 @@ func (x *ReadPlanDraftTextChunkRequest) String() string {
 func (*ReadPlanDraftTextChunkRequest) ProtoMessage() {}
 
 func (x *ReadPlanDraftTextChunkRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_kernel_v3_proto_msgTypes[72]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[71]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7577,7 +7492,7 @@ func (x *ReadPlanDraftTextChunkRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReadPlanDraftTextChunkRequest.ProtoReflect.Descriptor instead.
 func (*ReadPlanDraftTextChunkRequest) Descriptor() ([]byte, []int) {
-	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{72}
+	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{71}
 }
 
 func (x *ReadPlanDraftTextChunkRequest) GetRequestId() string {
@@ -7648,7 +7563,7 @@ type PlanDraftTextChunk struct {
 
 func (x *PlanDraftTextChunk) Reset() {
 	*x = PlanDraftTextChunk{}
-	mi := &file_terminal_kernel_v3_proto_msgTypes[73]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[72]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7660,7 +7575,7 @@ func (x *PlanDraftTextChunk) String() string {
 func (*PlanDraftTextChunk) ProtoMessage() {}
 
 func (x *PlanDraftTextChunk) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_kernel_v3_proto_msgTypes[73]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[72]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7673,7 +7588,7 @@ func (x *PlanDraftTextChunk) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PlanDraftTextChunk.ProtoReflect.Descriptor instead.
 func (*PlanDraftTextChunk) Descriptor() ([]byte, []int) {
-	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{73}
+	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{72}
 }
 
 func (x *PlanDraftTextChunk) GetRequestId() string {
@@ -7768,7 +7683,7 @@ type ReadContentRequest struct {
 
 func (x *ReadContentRequest) Reset() {
 	*x = ReadContentRequest{}
-	mi := &file_terminal_kernel_v3_proto_msgTypes[74]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[73]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7780,7 +7695,7 @@ func (x *ReadContentRequest) String() string {
 func (*ReadContentRequest) ProtoMessage() {}
 
 func (x *ReadContentRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_kernel_v3_proto_msgTypes[74]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[73]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7793,7 +7708,7 @@ func (x *ReadContentRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReadContentRequest.ProtoReflect.Descriptor instead.
 func (*ReadContentRequest) Descriptor() ([]byte, []int) {
-	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{74}
+	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{73}
 }
 
 func (x *ReadContentRequest) GetRequestId() string {
@@ -7859,7 +7774,7 @@ type CanonicalContentChunk struct {
 
 func (x *CanonicalContentChunk) Reset() {
 	*x = CanonicalContentChunk{}
-	mi := &file_terminal_kernel_v3_proto_msgTypes[75]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[74]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7871,7 +7786,7 @@ func (x *CanonicalContentChunk) String() string {
 func (*CanonicalContentChunk) ProtoMessage() {}
 
 func (x *CanonicalContentChunk) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_kernel_v3_proto_msgTypes[75]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[74]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7884,7 +7799,7 @@ func (x *CanonicalContentChunk) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CanonicalContentChunk.ProtoReflect.Descriptor instead.
 func (*CanonicalContentChunk) Descriptor() ([]byte, []int) {
-	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{75}
+	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{74}
 }
 
 func (x *CanonicalContentChunk) GetRequestId() string {
@@ -7940,7 +7855,7 @@ type HeartbeatRequest struct {
 
 func (x *HeartbeatRequest) Reset() {
 	*x = HeartbeatRequest{}
-	mi := &file_terminal_kernel_v3_proto_msgTypes[76]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[75]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7952,7 +7867,7 @@ func (x *HeartbeatRequest) String() string {
 func (*HeartbeatRequest) ProtoMessage() {}
 
 func (x *HeartbeatRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_kernel_v3_proto_msgTypes[76]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[75]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7965,7 +7880,7 @@ func (x *HeartbeatRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HeartbeatRequest.ProtoReflect.Descriptor instead.
 func (*HeartbeatRequest) Descriptor() ([]byte, []int) {
-	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{76}
+	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{75}
 }
 
 func (x *HeartbeatRequest) GetRequestId() string {
@@ -7999,7 +7914,7 @@ type HeartbeatResponse struct {
 
 func (x *HeartbeatResponse) Reset() {
 	*x = HeartbeatResponse{}
-	mi := &file_terminal_kernel_v3_proto_msgTypes[77]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[76]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8011,7 +7926,7 @@ func (x *HeartbeatResponse) String() string {
 func (*HeartbeatResponse) ProtoMessage() {}
 
 func (x *HeartbeatResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_kernel_v3_proto_msgTypes[77]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[76]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8024,7 +7939,7 @@ func (x *HeartbeatResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HeartbeatResponse.ProtoReflect.Descriptor instead.
 func (*HeartbeatResponse) Descriptor() ([]byte, []int) {
-	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{77}
+	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{76}
 }
 
 func (x *HeartbeatResponse) GetRequestId() string {
@@ -8065,7 +7980,7 @@ type ClientFrame struct {
 
 func (x *ClientFrame) Reset() {
 	*x = ClientFrame{}
-	mi := &file_terminal_kernel_v3_proto_msgTypes[78]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[77]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8077,7 +7992,7 @@ func (x *ClientFrame) String() string {
 func (*ClientFrame) ProtoMessage() {}
 
 func (x *ClientFrame) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_kernel_v3_proto_msgTypes[78]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[77]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8090,7 +8005,7 @@ func (x *ClientFrame) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ClientFrame.ProtoReflect.Descriptor instead.
 func (*ClientFrame) Descriptor() ([]byte, []int) {
-	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{78}
+	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{77}
 }
 
 func (x *ClientFrame) GetRequest() isClientFrame_Request {
@@ -8310,7 +8225,7 @@ type ProtocolError struct {
 
 func (x *ProtocolError) Reset() {
 	*x = ProtocolError{}
-	mi := &file_terminal_kernel_v3_proto_msgTypes[79]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[78]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8322,7 +8237,7 @@ func (x *ProtocolError) String() string {
 func (*ProtocolError) ProtoMessage() {}
 
 func (x *ProtocolError) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_kernel_v3_proto_msgTypes[79]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[78]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8335,7 +8250,7 @@ func (x *ProtocolError) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProtocolError.ProtoReflect.Descriptor instead.
 func (*ProtocolError) Descriptor() ([]byte, []int) {
-	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{79}
+	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{78}
 }
 
 func (x *ProtocolError) GetRequestId() string {
@@ -8383,7 +8298,7 @@ type ServerFrame struct {
 
 func (x *ServerFrame) Reset() {
 	*x = ServerFrame{}
-	mi := &file_terminal_kernel_v3_proto_msgTypes[80]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[79]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8395,7 +8310,7 @@ func (x *ServerFrame) String() string {
 func (*ServerFrame) ProtoMessage() {}
 
 func (x *ServerFrame) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_kernel_v3_proto_msgTypes[80]
+	mi := &file_terminal_kernel_v3_proto_msgTypes[79]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8408,7 +8323,7 @@ func (x *ServerFrame) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ServerFrame.ProtoReflect.Descriptor instead.
 func (*ServerFrame) Descriptor() ([]byte, []int) {
-	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{80}
+	return file_terminal_kernel_v3_proto_rawDescGZIP(), []int{79}
 }
 
 func (x *ServerFrame) GetResponse() isServerFrame_Response {
@@ -8768,12 +8683,7 @@ const file_terminal_kernel_v3_proto_rawDesc = "" +
 	"\fhandler_type\x18\x02 \x01(\tR\vhandlerType\x12\x16\n" +
 	"\x06status\x18\x03 \x01(\tR\x06status\x12)\n" +
 	"\x10maximum_attempts\x18\x04 \x01(\rR\x0fmaximumAttempts\x12#\n" +
-	"\rattempt_count\x18\x05 \x01(\rR\fattemptCount\"\xbb\x01\n" +
-	"\x16MemoryFreshnessControl\x12\x18\n" +
-	"\achannel\x18\x01 \x01(\tR\achannel\x12-\n" +
-	"\x12desired_generation\x18\x02 \x01(\x04R\x11desiredGeneration\x12-\n" +
-	"\x12applied_generation\x18\x03 \x01(\x04R\x11appliedGeneration\x12)\n" +
-	"\x10handler_contract\x18\x04 \x01(\tR\x0fhandlerContract\"\xd1\x06\n" +
+	"\rattempt_count\x18\x05 \x01(\rR\fattemptCount\"\xff\x05\n" +
 	"\x10CanonicalControl\x12+\n" +
 	"\x11session_lifecycle\x18\x01 \x01(\tR\x10sessionLifecycle\x12I\n" +
 	"\factive_turns\x18\x02 \x03(\v2&.pulsara.terminal.v3.ActiveTurnControlR\vactiveTurns\x12J\n" +
@@ -8781,12 +8691,11 @@ const file_terminal_kernel_v3_proto_rawDesc = "" +
 	"\x18prompt_queue_total_count\x18\x04 \x01(\x04R\x15promptQueueTotalCount\x12L\n" +
 	"\rtool_attempts\x18\x05 \x03(\v2'.pulsara.terminal.v3.ToolAttemptControlR\ftoolAttempts\x12O\n" +
 	"\x0esubagent_tasks\x18\x06 \x03(\v2(.pulsara.terminal.v3.SubagentTaskControlR\rsubagentTasks\x123\n" +
-	"\x04jobs\x18\a \x03(\v2\x1f.pulsara.terminal.v3.JobControlR\x04jobs\x12V\n" +
-	"\x10memory_freshness\x18\b \x03(\v2+.pulsara.terminal.v3.MemoryFreshnessControlR\x0fmemoryFreshness\x12Z\n" +
+	"\x04jobs\x18\a \x03(\v2\x1f.pulsara.terminal.v3.JobControlR\x04jobs\x12Z\n" +
 	"\x14active_plan_workflow\x18\t \x01(\v2(.pulsara.terminal.v3.PlanWorkflowControlR\x12activePlanWorkflow\x12_\n" +
 	"\x15open_plan_interaction\x18\n" +
 	" \x01(\v2+.pulsara.terminal.v3.PlanInteractionControlR\x13openPlanInteraction\x12W\n" +
-	"\x13latest_plan_handoff\x18\v \x01(\v2'.pulsara.terminal.v3.PlanHandoffControlR\x11latestPlanHandoff\"x\n" +
+	"\x13latest_plan_handoff\x18\v \x01(\v2'.pulsara.terminal.v3.PlanHandoffControlR\x11latestPlanHandoffJ\x04\b\b\x10\t\"x\n" +
 	"\rHistoryCursor\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12!\n" +
@@ -9349,7 +9258,7 @@ const file_terminal_kernel_v3_proto_rawDesc = "" +
 	"\x0eAttachmentRole\x12\x1f\n" +
 	"\x1bATTACHMENT_ROLE_UNSPECIFIED\x10\x00\x12\x1c\n" +
 	"\x18ATTACHMENT_ROLE_OBSERVER\x10\x01\x12\x1e\n" +
-	"\x1aATTACHMENT_ROLE_CONTROLLER\x10\x02*\xeb\a\n" +
+	"\x1aATTACHMENT_ROLE_CONTROLLER\x10\x02*\x96\a\n" +
 	"\x12CommittedEventType\x12$\n" +
 	" COMMITTED_EVENT_TYPE_UNSPECIFIED\x10\x00\x12\x19\n" +
 	"\x15USER_MESSAGE_ACCEPTED\x10\x01\x12\x1e\n" +
@@ -9376,10 +9285,7 @@ const file_terminal_kernel_v3_proto_rawDesc = "" +
 	"\n" +
 	"JOB_QUEUED\x10\x15\x12\x18\n" +
 	"\x14JOB_ATTEMPT_ACCEPTED\x10\x16\x12\x19\n" +
-	"\x15JOB_TERMINAL_ACCEPTED\x10\x17\x12\x18\n" +
-	"\x14MEMORY_FACT_ACCEPTED\x10\x18\x12!\n" +
-	"\x1dMEMORY_FACT_LIFECYCLE_CHANGED\x10\x19\x12\x1c\n" +
-	"\x18MEMORY_RELATION_ACCEPTED\x10\x1a\x12!\n" +
+	"\x15JOB_TERMINAL_ACCEPTED\x10\x17\x12!\n" +
 	"\x1dTERMINAL_OBSERVATION_ACCEPTED\x10\x1b\x12\x19\n" +
 	"\x15PLAN_WORKFLOW_ENTERED\x10\x1c\x12\x17\n" +
 	"\x13PLAN_QUESTION_ASKED\x10\x1d\x12\x1a\n" +
@@ -9387,7 +9293,7 @@ const file_terminal_kernel_v3_proto_rawDesc = "" +
 	"\x14PLAN_DRAFT_SUBMITTED\x10\x1f\x12 \n" +
 	"\x1cPLAN_DRAFT_DECISION_ACCEPTED\x10 \x12\x18\n" +
 	"\x14PLAN_WORKFLOW_EXITED\x10!\x12\x1e\n" +
-	"\x1aPLAN_CONTINUATION_ACCEPTED\x10\"*\xa3\x04\n" +
+	"\x1aPLAN_CONTINUATION_ACCEPTED\x10\"\"\x04\b\x18\x10\x1a*\xa3\x04\n" +
 	"\rLiveEventType\x12\x1f\n" +
 	"\x1bLIVE_EVENT_TYPE_UNSPECIFIED\x10\x00\x12\x0e\n" +
 	"\n" +
@@ -9525,7 +9431,7 @@ func file_terminal_kernel_v3_proto_rawDescGZIP() []byte {
 }
 
 var file_terminal_kernel_v3_proto_enumTypes = make([]protoimpl.EnumInfo, 18)
-var file_terminal_kernel_v3_proto_msgTypes = make([]protoimpl.MessageInfo, 81)
+var file_terminal_kernel_v3_proto_msgTypes = make([]protoimpl.MessageInfo, 80)
 var file_terminal_kernel_v3_proto_goTypes = []any{
 	(AttachmentRole)(0),                           // 0: pulsara.terminal.v3.AttachmentRole
 	(CommittedEventType)(0),                       // 1: pulsara.terminal.v3.CommittedEventType
@@ -9559,73 +9465,72 @@ var file_terminal_kernel_v3_proto_goTypes = []any{
 	(*ToolAttemptControl)(nil),                    // 29: pulsara.terminal.v3.ToolAttemptControl
 	(*SubagentTaskControl)(nil),                   // 30: pulsara.terminal.v3.SubagentTaskControl
 	(*JobControl)(nil),                            // 31: pulsara.terminal.v3.JobControl
-	(*MemoryFreshnessControl)(nil),                // 32: pulsara.terminal.v3.MemoryFreshnessControl
-	(*CanonicalControl)(nil),                      // 33: pulsara.terminal.v3.CanonicalControl
-	(*HistoryCursor)(nil),                         // 34: pulsara.terminal.v3.HistoryCursor
-	(*CanonicalSessionSnapshot)(nil),              // 35: pulsara.terminal.v3.CanonicalSessionSnapshot
-	(*HelloRequest)(nil),                          // 36: pulsara.terminal.v3.HelloRequest
-	(*HelloAccepted)(nil),                         // 37: pulsara.terminal.v3.HelloAccepted
-	(*SnapshotRequest)(nil),                       // 38: pulsara.terminal.v3.SnapshotRequest
-	(*SnapshotResponse)(nil),                      // 39: pulsara.terminal.v3.SnapshotResponse
-	(*HistoryPageRequest)(nil),                    // 40: pulsara.terminal.v3.HistoryPageRequest
-	(*HistoryPageResponse)(nil),                   // 41: pulsara.terminal.v3.HistoryPageResponse
-	(*CommittedObservationProjection)(nil),        // 42: pulsara.terminal.v3.CommittedObservationProjection
-	(*LiveTextStartPayload)(nil),                  // 43: pulsara.terminal.v3.LiveTextStartPayload
-	(*LiveTextDeltaPayload)(nil),                  // 44: pulsara.terminal.v3.LiveTextDeltaPayload
-	(*LiveTextEndPayload)(nil),                    // 45: pulsara.terminal.v3.LiveTextEndPayload
-	(*LiveThinkingStartPayload)(nil),              // 46: pulsara.terminal.v3.LiveThinkingStartPayload
-	(*LiveThinkingDeltaPayload)(nil),              // 47: pulsara.terminal.v3.LiveThinkingDeltaPayload
-	(*LiveThinkingEndPayload)(nil),                // 48: pulsara.terminal.v3.LiveThinkingEndPayload
-	(*LiveDataStartPayload)(nil),                  // 49: pulsara.terminal.v3.LiveDataStartPayload
-	(*LiveDataDeltaPayload)(nil),                  // 50: pulsara.terminal.v3.LiveDataDeltaPayload
-	(*LiveDataEndPayload)(nil),                    // 51: pulsara.terminal.v3.LiveDataEndPayload
-	(*LiveToolCallStartPayload)(nil),              // 52: pulsara.terminal.v3.LiveToolCallStartPayload
-	(*LiveToolCallDeltaPayload)(nil),              // 53: pulsara.terminal.v3.LiveToolCallDeltaPayload
-	(*LiveToolCallEndPayload)(nil),                // 54: pulsara.terminal.v3.LiveToolCallEndPayload
-	(*LiveToolResultStartPayload)(nil),            // 55: pulsara.terminal.v3.LiveToolResultStartPayload
-	(*LiveToolResultDeltaPayload)(nil),            // 56: pulsara.terminal.v3.LiveToolResultDeltaPayload
-	(*LiveToolResultEndPayload)(nil),              // 57: pulsara.terminal.v3.LiveToolResultEndPayload
-	(*LiveInteractionOpenedPayload)(nil),          // 58: pulsara.terminal.v3.LiveInteractionOpenedPayload
-	(*LiveInteractionReplacedPayload)(nil),        // 59: pulsara.terminal.v3.LiveInteractionReplacedPayload
-	(*LiveInteractionClosedPayload)(nil),          // 60: pulsara.terminal.v3.LiveInteractionClosedPayload
-	(*LiveTerminalProcessCompletedPayload)(nil),   // 61: pulsara.terminal.v3.LiveTerminalProcessCompletedPayload
-	(*LiveTerminalMonitorOpenedPayload)(nil),      // 62: pulsara.terminal.v3.LiveTerminalMonitorOpenedPayload
-	(*LiveTerminalMonitorObservationPayload)(nil), // 63: pulsara.terminal.v3.LiveTerminalMonitorObservationPayload
-	(*LiveTerminalMonitorClosedPayload)(nil),      // 64: pulsara.terminal.v3.LiveTerminalMonitorClosedPayload
-	(*LiveSubagentProgressPayload)(nil),           // 65: pulsara.terminal.v3.LiveSubagentProgressPayload
-	(*LiveEventPayload)(nil),                      // 66: pulsara.terminal.v3.LiveEventPayload
-	(*LiveEventProjection)(nil),                   // 67: pulsara.terminal.v3.LiveEventProjection
-	(*LiveGenerationSettlement)(nil),              // 68: pulsara.terminal.v3.LiveGenerationSettlement
-	(*LiveSnapshotProjection)(nil),                // 69: pulsara.terminal.v3.LiveSnapshotProjection
-	(*LiveInteractionView)(nil),                   // 70: pulsara.terminal.v3.LiveInteractionView
-	(*SessionLiveControlSnapshot)(nil),            // 71: pulsara.terminal.v3.SessionLiveControlSnapshot
-	(*LiveControlEventProjection)(nil),            // 72: pulsara.terminal.v3.LiveControlEventProjection
-	(*ObservationGap)(nil),                        // 73: pulsara.terminal.v3.ObservationGap
-	(*ObserveRequest)(nil),                        // 74: pulsara.terminal.v3.ObserveRequest
-	(*ObservationResponse)(nil),                   // 75: pulsara.terminal.v3.ObservationResponse
-	(*LiveControlSnapshotRequest)(nil),            // 76: pulsara.terminal.v3.LiveControlSnapshotRequest
-	(*LiveControlSnapshotResponse)(nil),           // 77: pulsara.terminal.v3.LiveControlSnapshotResponse
-	(*CommandRequest)(nil),                        // 78: pulsara.terminal.v3.CommandRequest
-	(*CommandOutcome)(nil),                        // 79: pulsara.terminal.v3.CommandOutcome
-	(*QueryCommandRequest)(nil),                   // 80: pulsara.terminal.v3.QueryCommandRequest
-	(*QueryCommandResponse)(nil),                  // 81: pulsara.terminal.v3.QueryCommandResponse
-	(*ResolveInteractionRequest)(nil),             // 82: pulsara.terminal.v3.ResolveInteractionRequest
-	(*PlanQuestionAnswer)(nil),                    // 83: pulsara.terminal.v3.PlanQuestionAnswer
-	(*PlanDraftResolution)(nil),                   // 84: pulsara.terminal.v3.PlanDraftResolution
-	(*ResolvePlanInteractionRequest)(nil),         // 85: pulsara.terminal.v3.ResolvePlanInteractionRequest
-	(*ResolvePlanInteractionResponse)(nil),        // 86: pulsara.terminal.v3.ResolvePlanInteractionResponse
-	(*ReadPlanQuestionContentRequest)(nil),        // 87: pulsara.terminal.v3.ReadPlanQuestionContentRequest
-	(*PlanQuestionOption)(nil),                    // 88: pulsara.terminal.v3.PlanQuestionOption
-	(*PlanQuestionContent)(nil),                   // 89: pulsara.terminal.v3.PlanQuestionContent
-	(*ReadPlanDraftTextChunkRequest)(nil),         // 90: pulsara.terminal.v3.ReadPlanDraftTextChunkRequest
-	(*PlanDraftTextChunk)(nil),                    // 91: pulsara.terminal.v3.PlanDraftTextChunk
-	(*ReadContentRequest)(nil),                    // 92: pulsara.terminal.v3.ReadContentRequest
-	(*CanonicalContentChunk)(nil),                 // 93: pulsara.terminal.v3.CanonicalContentChunk
-	(*HeartbeatRequest)(nil),                      // 94: pulsara.terminal.v3.HeartbeatRequest
-	(*HeartbeatResponse)(nil),                     // 95: pulsara.terminal.v3.HeartbeatResponse
-	(*ClientFrame)(nil),                           // 96: pulsara.terminal.v3.ClientFrame
-	(*ProtocolError)(nil),                         // 97: pulsara.terminal.v3.ProtocolError
-	(*ServerFrame)(nil),                           // 98: pulsara.terminal.v3.ServerFrame
+	(*CanonicalControl)(nil),                      // 32: pulsara.terminal.v3.CanonicalControl
+	(*HistoryCursor)(nil),                         // 33: pulsara.terminal.v3.HistoryCursor
+	(*CanonicalSessionSnapshot)(nil),              // 34: pulsara.terminal.v3.CanonicalSessionSnapshot
+	(*HelloRequest)(nil),                          // 35: pulsara.terminal.v3.HelloRequest
+	(*HelloAccepted)(nil),                         // 36: pulsara.terminal.v3.HelloAccepted
+	(*SnapshotRequest)(nil),                       // 37: pulsara.terminal.v3.SnapshotRequest
+	(*SnapshotResponse)(nil),                      // 38: pulsara.terminal.v3.SnapshotResponse
+	(*HistoryPageRequest)(nil),                    // 39: pulsara.terminal.v3.HistoryPageRequest
+	(*HistoryPageResponse)(nil),                   // 40: pulsara.terminal.v3.HistoryPageResponse
+	(*CommittedObservationProjection)(nil),        // 41: pulsara.terminal.v3.CommittedObservationProjection
+	(*LiveTextStartPayload)(nil),                  // 42: pulsara.terminal.v3.LiveTextStartPayload
+	(*LiveTextDeltaPayload)(nil),                  // 43: pulsara.terminal.v3.LiveTextDeltaPayload
+	(*LiveTextEndPayload)(nil),                    // 44: pulsara.terminal.v3.LiveTextEndPayload
+	(*LiveThinkingStartPayload)(nil),              // 45: pulsara.terminal.v3.LiveThinkingStartPayload
+	(*LiveThinkingDeltaPayload)(nil),              // 46: pulsara.terminal.v3.LiveThinkingDeltaPayload
+	(*LiveThinkingEndPayload)(nil),                // 47: pulsara.terminal.v3.LiveThinkingEndPayload
+	(*LiveDataStartPayload)(nil),                  // 48: pulsara.terminal.v3.LiveDataStartPayload
+	(*LiveDataDeltaPayload)(nil),                  // 49: pulsara.terminal.v3.LiveDataDeltaPayload
+	(*LiveDataEndPayload)(nil),                    // 50: pulsara.terminal.v3.LiveDataEndPayload
+	(*LiveToolCallStartPayload)(nil),              // 51: pulsara.terminal.v3.LiveToolCallStartPayload
+	(*LiveToolCallDeltaPayload)(nil),              // 52: pulsara.terminal.v3.LiveToolCallDeltaPayload
+	(*LiveToolCallEndPayload)(nil),                // 53: pulsara.terminal.v3.LiveToolCallEndPayload
+	(*LiveToolResultStartPayload)(nil),            // 54: pulsara.terminal.v3.LiveToolResultStartPayload
+	(*LiveToolResultDeltaPayload)(nil),            // 55: pulsara.terminal.v3.LiveToolResultDeltaPayload
+	(*LiveToolResultEndPayload)(nil),              // 56: pulsara.terminal.v3.LiveToolResultEndPayload
+	(*LiveInteractionOpenedPayload)(nil),          // 57: pulsara.terminal.v3.LiveInteractionOpenedPayload
+	(*LiveInteractionReplacedPayload)(nil),        // 58: pulsara.terminal.v3.LiveInteractionReplacedPayload
+	(*LiveInteractionClosedPayload)(nil),          // 59: pulsara.terminal.v3.LiveInteractionClosedPayload
+	(*LiveTerminalProcessCompletedPayload)(nil),   // 60: pulsara.terminal.v3.LiveTerminalProcessCompletedPayload
+	(*LiveTerminalMonitorOpenedPayload)(nil),      // 61: pulsara.terminal.v3.LiveTerminalMonitorOpenedPayload
+	(*LiveTerminalMonitorObservationPayload)(nil), // 62: pulsara.terminal.v3.LiveTerminalMonitorObservationPayload
+	(*LiveTerminalMonitorClosedPayload)(nil),      // 63: pulsara.terminal.v3.LiveTerminalMonitorClosedPayload
+	(*LiveSubagentProgressPayload)(nil),           // 64: pulsara.terminal.v3.LiveSubagentProgressPayload
+	(*LiveEventPayload)(nil),                      // 65: pulsara.terminal.v3.LiveEventPayload
+	(*LiveEventProjection)(nil),                   // 66: pulsara.terminal.v3.LiveEventProjection
+	(*LiveGenerationSettlement)(nil),              // 67: pulsara.terminal.v3.LiveGenerationSettlement
+	(*LiveSnapshotProjection)(nil),                // 68: pulsara.terminal.v3.LiveSnapshotProjection
+	(*LiveInteractionView)(nil),                   // 69: pulsara.terminal.v3.LiveInteractionView
+	(*SessionLiveControlSnapshot)(nil),            // 70: pulsara.terminal.v3.SessionLiveControlSnapshot
+	(*LiveControlEventProjection)(nil),            // 71: pulsara.terminal.v3.LiveControlEventProjection
+	(*ObservationGap)(nil),                        // 72: pulsara.terminal.v3.ObservationGap
+	(*ObserveRequest)(nil),                        // 73: pulsara.terminal.v3.ObserveRequest
+	(*ObservationResponse)(nil),                   // 74: pulsara.terminal.v3.ObservationResponse
+	(*LiveControlSnapshotRequest)(nil),            // 75: pulsara.terminal.v3.LiveControlSnapshotRequest
+	(*LiveControlSnapshotResponse)(nil),           // 76: pulsara.terminal.v3.LiveControlSnapshotResponse
+	(*CommandRequest)(nil),                        // 77: pulsara.terminal.v3.CommandRequest
+	(*CommandOutcome)(nil),                        // 78: pulsara.terminal.v3.CommandOutcome
+	(*QueryCommandRequest)(nil),                   // 79: pulsara.terminal.v3.QueryCommandRequest
+	(*QueryCommandResponse)(nil),                  // 80: pulsara.terminal.v3.QueryCommandResponse
+	(*ResolveInteractionRequest)(nil),             // 81: pulsara.terminal.v3.ResolveInteractionRequest
+	(*PlanQuestionAnswer)(nil),                    // 82: pulsara.terminal.v3.PlanQuestionAnswer
+	(*PlanDraftResolution)(nil),                   // 83: pulsara.terminal.v3.PlanDraftResolution
+	(*ResolvePlanInteractionRequest)(nil),         // 84: pulsara.terminal.v3.ResolvePlanInteractionRequest
+	(*ResolvePlanInteractionResponse)(nil),        // 85: pulsara.terminal.v3.ResolvePlanInteractionResponse
+	(*ReadPlanQuestionContentRequest)(nil),        // 86: pulsara.terminal.v3.ReadPlanQuestionContentRequest
+	(*PlanQuestionOption)(nil),                    // 87: pulsara.terminal.v3.PlanQuestionOption
+	(*PlanQuestionContent)(nil),                   // 88: pulsara.terminal.v3.PlanQuestionContent
+	(*ReadPlanDraftTextChunkRequest)(nil),         // 89: pulsara.terminal.v3.ReadPlanDraftTextChunkRequest
+	(*PlanDraftTextChunk)(nil),                    // 90: pulsara.terminal.v3.PlanDraftTextChunk
+	(*ReadContentRequest)(nil),                    // 91: pulsara.terminal.v3.ReadContentRequest
+	(*CanonicalContentChunk)(nil),                 // 92: pulsara.terminal.v3.CanonicalContentChunk
+	(*HeartbeatRequest)(nil),                      // 93: pulsara.terminal.v3.HeartbeatRequest
+	(*HeartbeatResponse)(nil),                     // 94: pulsara.terminal.v3.HeartbeatResponse
+	(*ClientFrame)(nil),                           // 95: pulsara.terminal.v3.ClientFrame
+	(*ProtocolError)(nil),                         // 96: pulsara.terminal.v3.ProtocolError
+	(*ServerFrame)(nil),                           // 97: pulsara.terminal.v3.ServerFrame
 }
 var file_terminal_kernel_v3_proto_depIdxs = []int32{
 	0,   // 0: pulsara.terminal.v3.TerminalKernelBootstrapCarrier.requested_role:type_name -> pulsara.terminal.v3.AttachmentRole
@@ -9649,113 +9554,112 @@ var file_terminal_kernel_v3_proto_depIdxs = []int32{
 	29,  // 18: pulsara.terminal.v3.CanonicalControl.tool_attempts:type_name -> pulsara.terminal.v3.ToolAttemptControl
 	30,  // 19: pulsara.terminal.v3.CanonicalControl.subagent_tasks:type_name -> pulsara.terminal.v3.SubagentTaskControl
 	31,  // 20: pulsara.terminal.v3.CanonicalControl.jobs:type_name -> pulsara.terminal.v3.JobControl
-	32,  // 21: pulsara.terminal.v3.CanonicalControl.memory_freshness:type_name -> pulsara.terminal.v3.MemoryFreshnessControl
-	26,  // 22: pulsara.terminal.v3.CanonicalControl.active_plan_workflow:type_name -> pulsara.terminal.v3.PlanWorkflowControl
-	27,  // 23: pulsara.terminal.v3.CanonicalControl.open_plan_interaction:type_name -> pulsara.terminal.v3.PlanInteractionControl
-	28,  // 24: pulsara.terminal.v3.CanonicalControl.latest_plan_handoff:type_name -> pulsara.terminal.v3.PlanHandoffControl
-	23,  // 25: pulsara.terminal.v3.CanonicalSessionSnapshot.entries:type_name -> pulsara.terminal.v3.CanonicalEntry
-	34,  // 26: pulsara.terminal.v3.CanonicalSessionSnapshot.older_history_cursor:type_name -> pulsara.terminal.v3.HistoryCursor
-	33,  // 27: pulsara.terminal.v3.CanonicalSessionSnapshot.control:type_name -> pulsara.terminal.v3.CanonicalControl
-	18,  // 28: pulsara.terminal.v3.HelloRequest.protocol:type_name -> pulsara.terminal.v3.ProtocolIdentity
-	0,   // 29: pulsara.terminal.v3.HelloRequest.requested_role:type_name -> pulsara.terminal.v3.AttachmentRole
-	18,  // 30: pulsara.terminal.v3.HelloAccepted.protocol:type_name -> pulsara.terminal.v3.ProtocolIdentity
-	0,   // 31: pulsara.terminal.v3.HelloAccepted.granted_role:type_name -> pulsara.terminal.v3.AttachmentRole
-	69,  // 32: pulsara.terminal.v3.HelloAccepted.live_snapshot:type_name -> pulsara.terminal.v3.LiveSnapshotProjection
-	35,  // 33: pulsara.terminal.v3.SnapshotResponse.snapshot:type_name -> pulsara.terminal.v3.CanonicalSessionSnapshot
-	34,  // 34: pulsara.terminal.v3.HistoryPageRequest.cursor:type_name -> pulsara.terminal.v3.HistoryCursor
-	23,  // 35: pulsara.terminal.v3.HistoryPageResponse.entries:type_name -> pulsara.terminal.v3.CanonicalEntry
-	34,  // 36: pulsara.terminal.v3.HistoryPageResponse.older_history_cursor:type_name -> pulsara.terminal.v3.HistoryCursor
-	1,   // 37: pulsara.terminal.v3.CommittedObservationProjection.event_type:type_name -> pulsara.terminal.v3.CommittedEventType
-	8,   // 38: pulsara.terminal.v3.CommittedObservationProjection.projection_kind:type_name -> pulsara.terminal.v3.ObservationProjectionKind
-	23,  // 39: pulsara.terminal.v3.CommittedObservationProjection.entry:type_name -> pulsara.terminal.v3.CanonicalEntry
-	33,  // 40: pulsara.terminal.v3.CommittedObservationProjection.current_control:type_name -> pulsara.terminal.v3.CanonicalControl
-	43,  // 41: pulsara.terminal.v3.LiveEventPayload.text_start:type_name -> pulsara.terminal.v3.LiveTextStartPayload
-	44,  // 42: pulsara.terminal.v3.LiveEventPayload.text_delta:type_name -> pulsara.terminal.v3.LiveTextDeltaPayload
-	45,  // 43: pulsara.terminal.v3.LiveEventPayload.text_end:type_name -> pulsara.terminal.v3.LiveTextEndPayload
-	46,  // 44: pulsara.terminal.v3.LiveEventPayload.thinking_start:type_name -> pulsara.terminal.v3.LiveThinkingStartPayload
-	47,  // 45: pulsara.terminal.v3.LiveEventPayload.thinking_delta:type_name -> pulsara.terminal.v3.LiveThinkingDeltaPayload
-	48,  // 46: pulsara.terminal.v3.LiveEventPayload.thinking_end:type_name -> pulsara.terminal.v3.LiveThinkingEndPayload
-	49,  // 47: pulsara.terminal.v3.LiveEventPayload.data_start:type_name -> pulsara.terminal.v3.LiveDataStartPayload
-	50,  // 48: pulsara.terminal.v3.LiveEventPayload.data_delta:type_name -> pulsara.terminal.v3.LiveDataDeltaPayload
-	51,  // 49: pulsara.terminal.v3.LiveEventPayload.data_end:type_name -> pulsara.terminal.v3.LiveDataEndPayload
-	52,  // 50: pulsara.terminal.v3.LiveEventPayload.tool_call_start:type_name -> pulsara.terminal.v3.LiveToolCallStartPayload
-	53,  // 51: pulsara.terminal.v3.LiveEventPayload.tool_call_delta:type_name -> pulsara.terminal.v3.LiveToolCallDeltaPayload
-	54,  // 52: pulsara.terminal.v3.LiveEventPayload.tool_call_end:type_name -> pulsara.terminal.v3.LiveToolCallEndPayload
-	55,  // 53: pulsara.terminal.v3.LiveEventPayload.tool_result_start:type_name -> pulsara.terminal.v3.LiveToolResultStartPayload
-	56,  // 54: pulsara.terminal.v3.LiveEventPayload.tool_result_delta:type_name -> pulsara.terminal.v3.LiveToolResultDeltaPayload
-	57,  // 55: pulsara.terminal.v3.LiveEventPayload.tool_result_end:type_name -> pulsara.terminal.v3.LiveToolResultEndPayload
-	58,  // 56: pulsara.terminal.v3.LiveEventPayload.interaction_opened:type_name -> pulsara.terminal.v3.LiveInteractionOpenedPayload
-	59,  // 57: pulsara.terminal.v3.LiveEventPayload.interaction_replaced:type_name -> pulsara.terminal.v3.LiveInteractionReplacedPayload
-	60,  // 58: pulsara.terminal.v3.LiveEventPayload.interaction_closed:type_name -> pulsara.terminal.v3.LiveInteractionClosedPayload
-	61,  // 59: pulsara.terminal.v3.LiveEventPayload.terminal_process_completed:type_name -> pulsara.terminal.v3.LiveTerminalProcessCompletedPayload
-	62,  // 60: pulsara.terminal.v3.LiveEventPayload.terminal_monitor_opened:type_name -> pulsara.terminal.v3.LiveTerminalMonitorOpenedPayload
-	63,  // 61: pulsara.terminal.v3.LiveEventPayload.terminal_monitor_observation:type_name -> pulsara.terminal.v3.LiveTerminalMonitorObservationPayload
-	64,  // 62: pulsara.terminal.v3.LiveEventPayload.terminal_monitor_closed:type_name -> pulsara.terminal.v3.LiveTerminalMonitorClosedPayload
-	65,  // 63: pulsara.terminal.v3.LiveEventPayload.subagent_progress:type_name -> pulsara.terminal.v3.LiveSubagentProgressPayload
-	2,   // 64: pulsara.terminal.v3.LiveEventProjection.event_type:type_name -> pulsara.terminal.v3.LiveEventType
-	66,  // 65: pulsara.terminal.v3.LiveEventProjection.payload:type_name -> pulsara.terminal.v3.LiveEventPayload
-	3,   // 66: pulsara.terminal.v3.LiveEventProjection.scope_kind:type_name -> pulsara.terminal.v3.ConversationScopeKind
-	9,   // 67: pulsara.terminal.v3.LiveEventProjection.channel_kind:type_name -> pulsara.terminal.v3.LiveChannelKind
-	10,  // 68: pulsara.terminal.v3.LiveEventProjection.block_kind:type_name -> pulsara.terminal.v3.LiveBlockKind
-	11,  // 69: pulsara.terminal.v3.LiveGenerationSettlement.kind:type_name -> pulsara.terminal.v3.LiveSettlementKind
-	3,   // 70: pulsara.terminal.v3.LiveGenerationSettlement.scope_kind:type_name -> pulsara.terminal.v3.ConversationScopeKind
-	9,   // 71: pulsara.terminal.v3.LiveGenerationSettlement.channel_kind:type_name -> pulsara.terminal.v3.LiveChannelKind
-	67,  // 72: pulsara.terminal.v3.LiveSnapshotProjection.events:type_name -> pulsara.terminal.v3.LiveEventProjection
-	68,  // 73: pulsara.terminal.v3.LiveSnapshotProjection.settlements:type_name -> pulsara.terminal.v3.LiveGenerationSettlement
-	70,  // 74: pulsara.terminal.v3.SessionLiveControlSnapshot.current_interaction:type_name -> pulsara.terminal.v3.LiveInteractionView
-	12,  // 75: pulsara.terminal.v3.LiveControlEventProjection.kind:type_name -> pulsara.terminal.v3.LiveControlEventKind
-	70,  // 76: pulsara.terminal.v3.LiveControlEventProjection.interaction:type_name -> pulsara.terminal.v3.LiveInteractionView
-	13,  // 77: pulsara.terminal.v3.ObservationGap.kind:type_name -> pulsara.terminal.v3.ObservationGapKind
-	42,  // 78: pulsara.terminal.v3.ObservationResponse.committed:type_name -> pulsara.terminal.v3.CommittedObservationProjection
-	67,  // 79: pulsara.terminal.v3.ObservationResponse.live:type_name -> pulsara.terminal.v3.LiveEventProjection
-	73,  // 80: pulsara.terminal.v3.ObservationResponse.gap:type_name -> pulsara.terminal.v3.ObservationGap
-	68,  // 81: pulsara.terminal.v3.ObservationResponse.settlements:type_name -> pulsara.terminal.v3.LiveGenerationSettlement
-	72,  // 82: pulsara.terminal.v3.ObservationResponse.live_control:type_name -> pulsara.terminal.v3.LiveControlEventProjection
-	71,  // 83: pulsara.terminal.v3.LiveControlSnapshotResponse.snapshot:type_name -> pulsara.terminal.v3.SessionLiveControlSnapshot
-	14,  // 84: pulsara.terminal.v3.CommandRequest.command_kind:type_name -> pulsara.terminal.v3.CommandKind
-	5,   // 85: pulsara.terminal.v3.CommandRequest.requested_permission_mode:type_name -> pulsara.terminal.v3.PermissionMode
-	15,  // 86: pulsara.terminal.v3.CommandOutcome.status:type_name -> pulsara.terminal.v3.CommandStatus
-	5,   // 87: pulsara.terminal.v3.CommandOutcome.resume_permission_mode:type_name -> pulsara.terminal.v3.PermissionMode
-	17,  // 88: pulsara.terminal.v3.CommandOutcome.plan_draft_decision:type_name -> pulsara.terminal.v3.PlanDraftDecision
-	79,  // 89: pulsara.terminal.v3.QueryCommandResponse.outcome:type_name -> pulsara.terminal.v3.CommandOutcome
-	16,  // 90: pulsara.terminal.v3.ResolveInteractionRequest.decision:type_name -> pulsara.terminal.v3.InteractionResolutionDecision
-	17,  // 91: pulsara.terminal.v3.PlanDraftResolution.decision:type_name -> pulsara.terminal.v3.PlanDraftDecision
-	83,  // 92: pulsara.terminal.v3.ResolvePlanInteractionRequest.question_answer:type_name -> pulsara.terminal.v3.PlanQuestionAnswer
-	84,  // 93: pulsara.terminal.v3.ResolvePlanInteractionRequest.draft:type_name -> pulsara.terminal.v3.PlanDraftResolution
-	5,   // 94: pulsara.terminal.v3.ResolvePlanInteractionResponse.resume_permission_mode:type_name -> pulsara.terminal.v3.PermissionMode
-	17,  // 95: pulsara.terminal.v3.ResolvePlanInteractionResponse.draft_decision:type_name -> pulsara.terminal.v3.PlanDraftDecision
-	88,  // 96: pulsara.terminal.v3.PlanQuestionContent.options:type_name -> pulsara.terminal.v3.PlanQuestionOption
-	36,  // 97: pulsara.terminal.v3.ClientFrame.hello:type_name -> pulsara.terminal.v3.HelloRequest
-	38,  // 98: pulsara.terminal.v3.ClientFrame.snapshot:type_name -> pulsara.terminal.v3.SnapshotRequest
-	40,  // 99: pulsara.terminal.v3.ClientFrame.history_page:type_name -> pulsara.terminal.v3.HistoryPageRequest
-	74,  // 100: pulsara.terminal.v3.ClientFrame.observe:type_name -> pulsara.terminal.v3.ObserveRequest
-	78,  // 101: pulsara.terminal.v3.ClientFrame.command:type_name -> pulsara.terminal.v3.CommandRequest
-	80,  // 102: pulsara.terminal.v3.ClientFrame.query_command:type_name -> pulsara.terminal.v3.QueryCommandRequest
-	92,  // 103: pulsara.terminal.v3.ClientFrame.read_content:type_name -> pulsara.terminal.v3.ReadContentRequest
-	94,  // 104: pulsara.terminal.v3.ClientFrame.heartbeat:type_name -> pulsara.terminal.v3.HeartbeatRequest
-	76,  // 105: pulsara.terminal.v3.ClientFrame.live_control_snapshot:type_name -> pulsara.terminal.v3.LiveControlSnapshotRequest
-	82,  // 106: pulsara.terminal.v3.ClientFrame.resolve_interaction:type_name -> pulsara.terminal.v3.ResolveInteractionRequest
-	85,  // 107: pulsara.terminal.v3.ClientFrame.resolve_plan_interaction:type_name -> pulsara.terminal.v3.ResolvePlanInteractionRequest
-	87,  // 108: pulsara.terminal.v3.ClientFrame.read_plan_question:type_name -> pulsara.terminal.v3.ReadPlanQuestionContentRequest
-	90,  // 109: pulsara.terminal.v3.ClientFrame.read_plan_draft:type_name -> pulsara.terminal.v3.ReadPlanDraftTextChunkRequest
-	37,  // 110: pulsara.terminal.v3.ServerFrame.hello:type_name -> pulsara.terminal.v3.HelloAccepted
-	39,  // 111: pulsara.terminal.v3.ServerFrame.snapshot:type_name -> pulsara.terminal.v3.SnapshotResponse
-	41,  // 112: pulsara.terminal.v3.ServerFrame.history_page:type_name -> pulsara.terminal.v3.HistoryPageResponse
-	75,  // 113: pulsara.terminal.v3.ServerFrame.observation:type_name -> pulsara.terminal.v3.ObservationResponse
-	79,  // 114: pulsara.terminal.v3.ServerFrame.command_outcome:type_name -> pulsara.terminal.v3.CommandOutcome
-	81,  // 115: pulsara.terminal.v3.ServerFrame.query_command:type_name -> pulsara.terminal.v3.QueryCommandResponse
-	93,  // 116: pulsara.terminal.v3.ServerFrame.content:type_name -> pulsara.terminal.v3.CanonicalContentChunk
-	95,  // 117: pulsara.terminal.v3.ServerFrame.heartbeat:type_name -> pulsara.terminal.v3.HeartbeatResponse
-	97,  // 118: pulsara.terminal.v3.ServerFrame.error:type_name -> pulsara.terminal.v3.ProtocolError
-	77,  // 119: pulsara.terminal.v3.ServerFrame.live_control_snapshot:type_name -> pulsara.terminal.v3.LiveControlSnapshotResponse
-	86,  // 120: pulsara.terminal.v3.ServerFrame.resolve_plan_interaction:type_name -> pulsara.terminal.v3.ResolvePlanInteractionResponse
-	89,  // 121: pulsara.terminal.v3.ServerFrame.plan_question:type_name -> pulsara.terminal.v3.PlanQuestionContent
-	91,  // 122: pulsara.terminal.v3.ServerFrame.plan_draft:type_name -> pulsara.terminal.v3.PlanDraftTextChunk
-	123, // [123:123] is the sub-list for method output_type
-	123, // [123:123] is the sub-list for method input_type
-	123, // [123:123] is the sub-list for extension type_name
-	123, // [123:123] is the sub-list for extension extendee
-	0,   // [0:123] is the sub-list for field type_name
+	26,  // 21: pulsara.terminal.v3.CanonicalControl.active_plan_workflow:type_name -> pulsara.terminal.v3.PlanWorkflowControl
+	27,  // 22: pulsara.terminal.v3.CanonicalControl.open_plan_interaction:type_name -> pulsara.terminal.v3.PlanInteractionControl
+	28,  // 23: pulsara.terminal.v3.CanonicalControl.latest_plan_handoff:type_name -> pulsara.terminal.v3.PlanHandoffControl
+	23,  // 24: pulsara.terminal.v3.CanonicalSessionSnapshot.entries:type_name -> pulsara.terminal.v3.CanonicalEntry
+	33,  // 25: pulsara.terminal.v3.CanonicalSessionSnapshot.older_history_cursor:type_name -> pulsara.terminal.v3.HistoryCursor
+	32,  // 26: pulsara.terminal.v3.CanonicalSessionSnapshot.control:type_name -> pulsara.terminal.v3.CanonicalControl
+	18,  // 27: pulsara.terminal.v3.HelloRequest.protocol:type_name -> pulsara.terminal.v3.ProtocolIdentity
+	0,   // 28: pulsara.terminal.v3.HelloRequest.requested_role:type_name -> pulsara.terminal.v3.AttachmentRole
+	18,  // 29: pulsara.terminal.v3.HelloAccepted.protocol:type_name -> pulsara.terminal.v3.ProtocolIdentity
+	0,   // 30: pulsara.terminal.v3.HelloAccepted.granted_role:type_name -> pulsara.terminal.v3.AttachmentRole
+	68,  // 31: pulsara.terminal.v3.HelloAccepted.live_snapshot:type_name -> pulsara.terminal.v3.LiveSnapshotProjection
+	34,  // 32: pulsara.terminal.v3.SnapshotResponse.snapshot:type_name -> pulsara.terminal.v3.CanonicalSessionSnapshot
+	33,  // 33: pulsara.terminal.v3.HistoryPageRequest.cursor:type_name -> pulsara.terminal.v3.HistoryCursor
+	23,  // 34: pulsara.terminal.v3.HistoryPageResponse.entries:type_name -> pulsara.terminal.v3.CanonicalEntry
+	33,  // 35: pulsara.terminal.v3.HistoryPageResponse.older_history_cursor:type_name -> pulsara.terminal.v3.HistoryCursor
+	1,   // 36: pulsara.terminal.v3.CommittedObservationProjection.event_type:type_name -> pulsara.terminal.v3.CommittedEventType
+	8,   // 37: pulsara.terminal.v3.CommittedObservationProjection.projection_kind:type_name -> pulsara.terminal.v3.ObservationProjectionKind
+	23,  // 38: pulsara.terminal.v3.CommittedObservationProjection.entry:type_name -> pulsara.terminal.v3.CanonicalEntry
+	32,  // 39: pulsara.terminal.v3.CommittedObservationProjection.current_control:type_name -> pulsara.terminal.v3.CanonicalControl
+	42,  // 40: pulsara.terminal.v3.LiveEventPayload.text_start:type_name -> pulsara.terminal.v3.LiveTextStartPayload
+	43,  // 41: pulsara.terminal.v3.LiveEventPayload.text_delta:type_name -> pulsara.terminal.v3.LiveTextDeltaPayload
+	44,  // 42: pulsara.terminal.v3.LiveEventPayload.text_end:type_name -> pulsara.terminal.v3.LiveTextEndPayload
+	45,  // 43: pulsara.terminal.v3.LiveEventPayload.thinking_start:type_name -> pulsara.terminal.v3.LiveThinkingStartPayload
+	46,  // 44: pulsara.terminal.v3.LiveEventPayload.thinking_delta:type_name -> pulsara.terminal.v3.LiveThinkingDeltaPayload
+	47,  // 45: pulsara.terminal.v3.LiveEventPayload.thinking_end:type_name -> pulsara.terminal.v3.LiveThinkingEndPayload
+	48,  // 46: pulsara.terminal.v3.LiveEventPayload.data_start:type_name -> pulsara.terminal.v3.LiveDataStartPayload
+	49,  // 47: pulsara.terminal.v3.LiveEventPayload.data_delta:type_name -> pulsara.terminal.v3.LiveDataDeltaPayload
+	50,  // 48: pulsara.terminal.v3.LiveEventPayload.data_end:type_name -> pulsara.terminal.v3.LiveDataEndPayload
+	51,  // 49: pulsara.terminal.v3.LiveEventPayload.tool_call_start:type_name -> pulsara.terminal.v3.LiveToolCallStartPayload
+	52,  // 50: pulsara.terminal.v3.LiveEventPayload.tool_call_delta:type_name -> pulsara.terminal.v3.LiveToolCallDeltaPayload
+	53,  // 51: pulsara.terminal.v3.LiveEventPayload.tool_call_end:type_name -> pulsara.terminal.v3.LiveToolCallEndPayload
+	54,  // 52: pulsara.terminal.v3.LiveEventPayload.tool_result_start:type_name -> pulsara.terminal.v3.LiveToolResultStartPayload
+	55,  // 53: pulsara.terminal.v3.LiveEventPayload.tool_result_delta:type_name -> pulsara.terminal.v3.LiveToolResultDeltaPayload
+	56,  // 54: pulsara.terminal.v3.LiveEventPayload.tool_result_end:type_name -> pulsara.terminal.v3.LiveToolResultEndPayload
+	57,  // 55: pulsara.terminal.v3.LiveEventPayload.interaction_opened:type_name -> pulsara.terminal.v3.LiveInteractionOpenedPayload
+	58,  // 56: pulsara.terminal.v3.LiveEventPayload.interaction_replaced:type_name -> pulsara.terminal.v3.LiveInteractionReplacedPayload
+	59,  // 57: pulsara.terminal.v3.LiveEventPayload.interaction_closed:type_name -> pulsara.terminal.v3.LiveInteractionClosedPayload
+	60,  // 58: pulsara.terminal.v3.LiveEventPayload.terminal_process_completed:type_name -> pulsara.terminal.v3.LiveTerminalProcessCompletedPayload
+	61,  // 59: pulsara.terminal.v3.LiveEventPayload.terminal_monitor_opened:type_name -> pulsara.terminal.v3.LiveTerminalMonitorOpenedPayload
+	62,  // 60: pulsara.terminal.v3.LiveEventPayload.terminal_monitor_observation:type_name -> pulsara.terminal.v3.LiveTerminalMonitorObservationPayload
+	63,  // 61: pulsara.terminal.v3.LiveEventPayload.terminal_monitor_closed:type_name -> pulsara.terminal.v3.LiveTerminalMonitorClosedPayload
+	64,  // 62: pulsara.terminal.v3.LiveEventPayload.subagent_progress:type_name -> pulsara.terminal.v3.LiveSubagentProgressPayload
+	2,   // 63: pulsara.terminal.v3.LiveEventProjection.event_type:type_name -> pulsara.terminal.v3.LiveEventType
+	65,  // 64: pulsara.terminal.v3.LiveEventProjection.payload:type_name -> pulsara.terminal.v3.LiveEventPayload
+	3,   // 65: pulsara.terminal.v3.LiveEventProjection.scope_kind:type_name -> pulsara.terminal.v3.ConversationScopeKind
+	9,   // 66: pulsara.terminal.v3.LiveEventProjection.channel_kind:type_name -> pulsara.terminal.v3.LiveChannelKind
+	10,  // 67: pulsara.terminal.v3.LiveEventProjection.block_kind:type_name -> pulsara.terminal.v3.LiveBlockKind
+	11,  // 68: pulsara.terminal.v3.LiveGenerationSettlement.kind:type_name -> pulsara.terminal.v3.LiveSettlementKind
+	3,   // 69: pulsara.terminal.v3.LiveGenerationSettlement.scope_kind:type_name -> pulsara.terminal.v3.ConversationScopeKind
+	9,   // 70: pulsara.terminal.v3.LiveGenerationSettlement.channel_kind:type_name -> pulsara.terminal.v3.LiveChannelKind
+	66,  // 71: pulsara.terminal.v3.LiveSnapshotProjection.events:type_name -> pulsara.terminal.v3.LiveEventProjection
+	67,  // 72: pulsara.terminal.v3.LiveSnapshotProjection.settlements:type_name -> pulsara.terminal.v3.LiveGenerationSettlement
+	69,  // 73: pulsara.terminal.v3.SessionLiveControlSnapshot.current_interaction:type_name -> pulsara.terminal.v3.LiveInteractionView
+	12,  // 74: pulsara.terminal.v3.LiveControlEventProjection.kind:type_name -> pulsara.terminal.v3.LiveControlEventKind
+	69,  // 75: pulsara.terminal.v3.LiveControlEventProjection.interaction:type_name -> pulsara.terminal.v3.LiveInteractionView
+	13,  // 76: pulsara.terminal.v3.ObservationGap.kind:type_name -> pulsara.terminal.v3.ObservationGapKind
+	41,  // 77: pulsara.terminal.v3.ObservationResponse.committed:type_name -> pulsara.terminal.v3.CommittedObservationProjection
+	66,  // 78: pulsara.terminal.v3.ObservationResponse.live:type_name -> pulsara.terminal.v3.LiveEventProjection
+	72,  // 79: pulsara.terminal.v3.ObservationResponse.gap:type_name -> pulsara.terminal.v3.ObservationGap
+	67,  // 80: pulsara.terminal.v3.ObservationResponse.settlements:type_name -> pulsara.terminal.v3.LiveGenerationSettlement
+	71,  // 81: pulsara.terminal.v3.ObservationResponse.live_control:type_name -> pulsara.terminal.v3.LiveControlEventProjection
+	70,  // 82: pulsara.terminal.v3.LiveControlSnapshotResponse.snapshot:type_name -> pulsara.terminal.v3.SessionLiveControlSnapshot
+	14,  // 83: pulsara.terminal.v3.CommandRequest.command_kind:type_name -> pulsara.terminal.v3.CommandKind
+	5,   // 84: pulsara.terminal.v3.CommandRequest.requested_permission_mode:type_name -> pulsara.terminal.v3.PermissionMode
+	15,  // 85: pulsara.terminal.v3.CommandOutcome.status:type_name -> pulsara.terminal.v3.CommandStatus
+	5,   // 86: pulsara.terminal.v3.CommandOutcome.resume_permission_mode:type_name -> pulsara.terminal.v3.PermissionMode
+	17,  // 87: pulsara.terminal.v3.CommandOutcome.plan_draft_decision:type_name -> pulsara.terminal.v3.PlanDraftDecision
+	78,  // 88: pulsara.terminal.v3.QueryCommandResponse.outcome:type_name -> pulsara.terminal.v3.CommandOutcome
+	16,  // 89: pulsara.terminal.v3.ResolveInteractionRequest.decision:type_name -> pulsara.terminal.v3.InteractionResolutionDecision
+	17,  // 90: pulsara.terminal.v3.PlanDraftResolution.decision:type_name -> pulsara.terminal.v3.PlanDraftDecision
+	82,  // 91: pulsara.terminal.v3.ResolvePlanInteractionRequest.question_answer:type_name -> pulsara.terminal.v3.PlanQuestionAnswer
+	83,  // 92: pulsara.terminal.v3.ResolvePlanInteractionRequest.draft:type_name -> pulsara.terminal.v3.PlanDraftResolution
+	5,   // 93: pulsara.terminal.v3.ResolvePlanInteractionResponse.resume_permission_mode:type_name -> pulsara.terminal.v3.PermissionMode
+	17,  // 94: pulsara.terminal.v3.ResolvePlanInteractionResponse.draft_decision:type_name -> pulsara.terminal.v3.PlanDraftDecision
+	87,  // 95: pulsara.terminal.v3.PlanQuestionContent.options:type_name -> pulsara.terminal.v3.PlanQuestionOption
+	35,  // 96: pulsara.terminal.v3.ClientFrame.hello:type_name -> pulsara.terminal.v3.HelloRequest
+	37,  // 97: pulsara.terminal.v3.ClientFrame.snapshot:type_name -> pulsara.terminal.v3.SnapshotRequest
+	39,  // 98: pulsara.terminal.v3.ClientFrame.history_page:type_name -> pulsara.terminal.v3.HistoryPageRequest
+	73,  // 99: pulsara.terminal.v3.ClientFrame.observe:type_name -> pulsara.terminal.v3.ObserveRequest
+	77,  // 100: pulsara.terminal.v3.ClientFrame.command:type_name -> pulsara.terminal.v3.CommandRequest
+	79,  // 101: pulsara.terminal.v3.ClientFrame.query_command:type_name -> pulsara.terminal.v3.QueryCommandRequest
+	91,  // 102: pulsara.terminal.v3.ClientFrame.read_content:type_name -> pulsara.terminal.v3.ReadContentRequest
+	93,  // 103: pulsara.terminal.v3.ClientFrame.heartbeat:type_name -> pulsara.terminal.v3.HeartbeatRequest
+	75,  // 104: pulsara.terminal.v3.ClientFrame.live_control_snapshot:type_name -> pulsara.terminal.v3.LiveControlSnapshotRequest
+	81,  // 105: pulsara.terminal.v3.ClientFrame.resolve_interaction:type_name -> pulsara.terminal.v3.ResolveInteractionRequest
+	84,  // 106: pulsara.terminal.v3.ClientFrame.resolve_plan_interaction:type_name -> pulsara.terminal.v3.ResolvePlanInteractionRequest
+	86,  // 107: pulsara.terminal.v3.ClientFrame.read_plan_question:type_name -> pulsara.terminal.v3.ReadPlanQuestionContentRequest
+	89,  // 108: pulsara.terminal.v3.ClientFrame.read_plan_draft:type_name -> pulsara.terminal.v3.ReadPlanDraftTextChunkRequest
+	36,  // 109: pulsara.terminal.v3.ServerFrame.hello:type_name -> pulsara.terminal.v3.HelloAccepted
+	38,  // 110: pulsara.terminal.v3.ServerFrame.snapshot:type_name -> pulsara.terminal.v3.SnapshotResponse
+	40,  // 111: pulsara.terminal.v3.ServerFrame.history_page:type_name -> pulsara.terminal.v3.HistoryPageResponse
+	74,  // 112: pulsara.terminal.v3.ServerFrame.observation:type_name -> pulsara.terminal.v3.ObservationResponse
+	78,  // 113: pulsara.terminal.v3.ServerFrame.command_outcome:type_name -> pulsara.terminal.v3.CommandOutcome
+	80,  // 114: pulsara.terminal.v3.ServerFrame.query_command:type_name -> pulsara.terminal.v3.QueryCommandResponse
+	92,  // 115: pulsara.terminal.v3.ServerFrame.content:type_name -> pulsara.terminal.v3.CanonicalContentChunk
+	94,  // 116: pulsara.terminal.v3.ServerFrame.heartbeat:type_name -> pulsara.terminal.v3.HeartbeatResponse
+	96,  // 117: pulsara.terminal.v3.ServerFrame.error:type_name -> pulsara.terminal.v3.ProtocolError
+	76,  // 118: pulsara.terminal.v3.ServerFrame.live_control_snapshot:type_name -> pulsara.terminal.v3.LiveControlSnapshotResponse
+	85,  // 119: pulsara.terminal.v3.ServerFrame.resolve_plan_interaction:type_name -> pulsara.terminal.v3.ResolvePlanInteractionResponse
+	88,  // 120: pulsara.terminal.v3.ServerFrame.plan_question:type_name -> pulsara.terminal.v3.PlanQuestionContent
+	90,  // 121: pulsara.terminal.v3.ServerFrame.plan_draft:type_name -> pulsara.terminal.v3.PlanDraftTextChunk
+	122, // [122:122] is the sub-list for method output_type
+	122, // [122:122] is the sub-list for method input_type
+	122, // [122:122] is the sub-list for extension type_name
+	122, // [122:122] is the sub-list for extension extendee
+	0,   // [0:122] is the sub-list for field type_name
 }
 
 func init() { file_terminal_kernel_v3_proto_init() }
@@ -9763,8 +9667,8 @@ func file_terminal_kernel_v3_proto_init() {
 	if File_terminal_kernel_v3_proto != nil {
 		return
 	}
-	file_terminal_kernel_v3_proto_msgTypes[43].OneofWrappers = []any{}
-	file_terminal_kernel_v3_proto_msgTypes[48].OneofWrappers = []any{
+	file_terminal_kernel_v3_proto_msgTypes[42].OneofWrappers = []any{}
+	file_terminal_kernel_v3_proto_msgTypes[47].OneofWrappers = []any{
 		(*LiveEventPayload_TextStart)(nil),
 		(*LiveEventPayload_TextDelta)(nil),
 		(*LiveEventPayload_TextEnd)(nil),
@@ -9789,17 +9693,17 @@ func file_terminal_kernel_v3_proto_init() {
 		(*LiveEventPayload_TerminalMonitorClosed)(nil),
 		(*LiveEventPayload_SubagentProgress)(nil),
 	}
-	file_terminal_kernel_v3_proto_msgTypes[65].OneofWrappers = []any{
+	file_terminal_kernel_v3_proto_msgTypes[64].OneofWrappers = []any{
 		(*PlanQuestionAnswer_OptionOrdinal)(nil),
 		(*PlanQuestionAnswer_FreeText)(nil),
 	}
-	file_terminal_kernel_v3_proto_msgTypes[66].OneofWrappers = []any{}
-	file_terminal_kernel_v3_proto_msgTypes[67].OneofWrappers = []any{
+	file_terminal_kernel_v3_proto_msgTypes[65].OneofWrappers = []any{}
+	file_terminal_kernel_v3_proto_msgTypes[66].OneofWrappers = []any{
 		(*ResolvePlanInteractionRequest_QuestionAnswer)(nil),
 		(*ResolvePlanInteractionRequest_Draft)(nil),
 	}
-	file_terminal_kernel_v3_proto_msgTypes[72].OneofWrappers = []any{}
-	file_terminal_kernel_v3_proto_msgTypes[78].OneofWrappers = []any{
+	file_terminal_kernel_v3_proto_msgTypes[71].OneofWrappers = []any{}
+	file_terminal_kernel_v3_proto_msgTypes[77].OneofWrappers = []any{
 		(*ClientFrame_Hello)(nil),
 		(*ClientFrame_Snapshot)(nil),
 		(*ClientFrame_HistoryPage)(nil),
@@ -9814,7 +9718,7 @@ func file_terminal_kernel_v3_proto_init() {
 		(*ClientFrame_ReadPlanQuestion)(nil),
 		(*ClientFrame_ReadPlanDraft)(nil),
 	}
-	file_terminal_kernel_v3_proto_msgTypes[80].OneofWrappers = []any{
+	file_terminal_kernel_v3_proto_msgTypes[79].OneofWrappers = []any{
 		(*ServerFrame_Hello)(nil),
 		(*ServerFrame_Snapshot)(nil),
 		(*ServerFrame_HistoryPage)(nil),
@@ -9835,7 +9739,7 @@ func file_terminal_kernel_v3_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_terminal_kernel_v3_proto_rawDesc), len(file_terminal_kernel_v3_proto_rawDesc)),
 			NumEnums:      18,
-			NumMessages:   81,
+			NumMessages:   80,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

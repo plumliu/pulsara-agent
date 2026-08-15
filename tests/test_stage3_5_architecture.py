@@ -53,15 +53,15 @@ def _imports(path: Path) -> tuple[str, ...]:
 
 
 def test_stage3_5_final_oracles_are_exact() -> None:
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == 34
-    assert len({item.event_type for item in COMMITTED_EVENT_DESCRIPTORS}) == 34
+    assert len(COMMITTED_EVENT_DESCRIPTORS) == 31
+    assert len({item.event_type for item in COMMITTED_EVENT_DESCRIPTORS}) == 31
     assert len(LIVE_EVENT_TYPES) == 23
-    assert len(SUBJECT_SLOTS) == 15
+    assert len(SUBJECT_SLOTS) == 13
     assert len(APPEND_GUARDS) == 2
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 26
-    assert len(set(CONVERSATION_KERNEL_RELATIONS)) == 26
-    assert len(JOB_HANDLER_CATALOG) == 4
-    assert len({item.handler_type for item in JOB_HANDLER_CATALOG}) == 4
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 25
+    assert len(set(CONVERSATION_KERNEL_RELATIONS)) == 25
+    assert len(JOB_HANDLER_CATALOG) == 1
+    assert len({item.handler_type for item in JOB_HANDLER_CATALOG}) == 1
 
 
 def test_stage3_5_obsolete_authority_paths_are_physically_absent() -> None:
@@ -160,7 +160,7 @@ def test_stage3_5_clean_migration_universe_is_the_only_packaged_universe() -> No
     )
 
     baseline = (sql_root / BASELINE_RESOURCE).read_text(encoding="utf-8")
-    assert baseline.count("CREATE TABLE pulsara_v3.") == 26
+    assert baseline.count("CREATE TABLE pulsara_v3.") == 25
     assert "CREATE TABLE public.pulsara_schema_migrations" in baseline
     assert "CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public" in baseline
     for token in (
@@ -204,6 +204,8 @@ def test_stage3_5_process_local_task_sites_are_closed() -> None:
         "src/pulsara_agent/conversation_kernel/jobs.py",
         "src/pulsara_agent/conversation_kernel/mcp/sdk_facade.py",
         "src/pulsara_agent/conversation_kernel/mcp/supervisor.py",
+        "src/pulsara_agent/conversation_kernel/memory/governor.py",
+        "src/pulsara_agent/conversation_kernel/memory_tools.py",
         "src/pulsara_agent/conversation_kernel/plan_runtime.py",
         "src/pulsara_agent/conversation_kernel/runner.py",
         "src/pulsara_agent/conversation_kernel/subagent.py",

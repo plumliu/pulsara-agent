@@ -17,6 +17,7 @@ from pulsara_agent.storage.migrations.manifest import (
 @dataclass(frozen=True, slots=True)
 class CleanRuntimeGrantPolicy:
     relation_privileges: dict[str, tuple[str, ...]]
+    function_privileges: dict[str, tuple[str, ...]]
     policy_fingerprint: str
 
 
@@ -34,8 +35,13 @@ def build_postgres_runtime_grant_policy(
     }
     if relations != CONVERSATION_KERNEL_RUNTIME_PRIVILEGES:
         raise RuntimeError("clean runtime grant artifact drifted")
+    functions = {
+        str(name): tuple(str(item) for item in privileges)
+        for name, privileges in payload["function_grants"].items()
+    }
     return CleanRuntimeGrantPolicy(
         relation_privileges=relations,
+        function_privileges=functions,
         policy_fingerprint=postgres_schema_fingerprint(
             "pulsara:conversation-kernel-runtime-grants:v1",
             _freeze_json(payload),
@@ -101,18 +107,19 @@ class PostgresRuntimeGrantExecutor:
                     {"relation": relation, "privileges": required},
                 )
             )
-        connection.execute(
-            sql.SQL(
-                "REVOKE ALL ON FUNCTION "
-                "pulsara_v3.enforce_conversation_kernel_invariants() FROM {}"
-            ).format(sql.Identifier(runtime_role))
-        )
-        connection.execute(
-            sql.SQL(
-                "GRANT EXECUTE ON FUNCTION "
-                "pulsara_v3.enforce_conversation_kernel_invariants() TO {}"
-            ).format(sql.Identifier(runtime_role))
-        )
+        for function_identity, required in policy.function_privileges.items():
+            if required != ("EXECUTE",):
+                raise RuntimeError("clean runtime function grant is not closed")
+            connection.execute(
+                sql.SQL("REVOKE ALL ON FUNCTION pulsara_v3.{} FROM {}").format(
+                    sql.SQL(function_identity), sql.Identifier(runtime_role)
+                )
+            )
+            connection.execute(
+                sql.SQL("GRANT EXECUTE ON FUNCTION pulsara_v3.{} TO {}").format(
+                    sql.SQL(function_identity), sql.Identifier(runtime_role)
+                )
+            )
         return tuple(fingerprints)
 
 

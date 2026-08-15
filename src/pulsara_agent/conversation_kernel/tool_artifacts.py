@@ -549,7 +549,8 @@ class PostgresToolArtifactReadPort:
             SELECT r.output_artifact_id, r.output_artifact_disposition,
                    r.output_source_coverage, r.output_display_kind,
                    r.output_source_coverage_reason,
-                   r.output_artifact_unavailability_reason, r.accepted_at,
+                   r.output_artifact_unavailability_reason,
+                   r.model_visible_memory_fact_ids, r.accepted_at,
                    b.id AS blob_id, b.logical_digest, b.logical_size,
                    b.media_type, b.codec{body_column}
             FROM pulsara_v3.tool_results AS r
@@ -627,6 +628,9 @@ class PostgresToolArtifactReadPort:
             digest=str(row["logical_digest"]),
             codec=str(row["codec"]),
             accepted_at_utc=row["accepted_at"].isoformat(),  # type: ignore[union-attr]
+            model_visible_memory_fact_ids=tuple(
+                str(value) for value in row["model_visible_memory_fact_ids"]
+            ),
         )
 
 

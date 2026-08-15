@@ -20,7 +20,7 @@ import (
 const (
 	ProtocolMajor     = 3
 	ProtocolMinor     = 0
-	SchemaFingerprint = "sha256:93a7667cd79b0e3992f5e302e7a3f52f1caa7feabb4a265547995046522e0d97"
+	SchemaFingerprint = "sha256:718ceb75d0261f8916ff6604b980345fdabd7c8e51ff3e065c1960f9c4d72b44"
 	maximumFrameBytes = 8 << 20
 )
 

@@ -19,11 +19,7 @@ from pulsara_agent.conversation_kernel.job_catalog import (
     BACKGROUND_COMPACTION,
     JOB_HANDLER_CATALOG,
     KernelJobHandlerContract,
-    MEMORY_GOVERNANCE,
-    MEMORY_INDEX_REFRESH,
-    POST_COMPACTION_MEMORY_EXTRACTION,
 )
-from pulsara_agent.conversation_kernel.memory import MemoryIndexCoordinator
 from pulsara_agent.conversation_kernel.limits import STAGE2_LIMITS
 from pulsara_agent.conversation_kernel.repository import (
     AcceptedJobAttempt,
@@ -35,9 +31,6 @@ from pulsara_agent.conversation_kernel.repository import (
 )
 from pulsara_agent.llm.config import LLMConfig
 from pulsara_agent.primitives.model_call import ModelCallPurpose
-from pulsara_agent.retrieval.config import EmbeddingBackendConfig
-from pulsara_agent.retrieval.embedding.factory import build_embedding_provider
-from pulsara_agent.retrieval.embedding.protocol import EmbeddingProvider
 
 
 class KernelJobHandler(Protocol):
@@ -52,8 +45,6 @@ class KernelDurableJobExecutor:
         *,
         repository: ConversationKernelRepository,
         llm_config: LLMConfig,
-        embedding_config: EmbeddingBackendConfig,
-        embedding_provider: EmbeddingProvider | None = None,
         poll_interval_seconds: float = 0.25,
         claim_lease_seconds: float = STAGE2_LIMITS.job_claim_lease_ms / 1000,
         maximum_concurrency: int = STAGE2_LIMITS.job_worker_default_concurrency,
@@ -70,10 +61,6 @@ class KernelDurableJobExecutor:
         self._repository = repository
         self._deadlines = deadline_factory or KernelExecutionDeadlineFactory()
         self._model = DirectKernelJobModel(llm_config)
-        self._embedding_config = embedding_config
-        self._embedding = embedding_provider
-        self._owns_embedding = embedding_provider is None
-        self._index = MemoryIndexCoordinator(repository)
         self._poll = poll_interval_seconds
         self._lease = claim_lease_seconds
         self._maximum_concurrency = maximum_concurrency
@@ -84,9 +71,6 @@ class KernelDurableJobExecutor:
         self._active: set[asyncio.Task[None]] = set()
         self._handlers: dict[str, KernelJobHandler] = {
             BACKGROUND_COMPACTION: self._background_compaction,
-            POST_COMPACTION_MEMORY_EXTRACTION: self._memory_extraction,
-            MEMORY_GOVERNANCE: self._memory_governance,
-            MEMORY_INDEX_REFRESH: self._memory_index_refresh,
         }
 
     def start(self) -> None:
@@ -141,24 +125,10 @@ class KernelDurableJobExecutor:
             await self._io.aclose(deadline_monotonic=deadline)
         except BaseException as exc:
             close_error = close_error or exc
-        if self._embedding is not None and self._owns_embedding:
-            embedding_close = asyncio.create_task(self._embedding.aclose())
-            try:
-                if await _join_close_task(
-                    embedding_close, deadline_monotonic=deadline
-                ):
-                    close_error = close_error or TimeoutError(
-                        "job embedding owner exited after close deadline"
-                    )
-            except BaseException as exc:
-                close_error = close_error or exc
         if close_error is not None:
             raise close_error
 
     async def run_once(self) -> int:
-        await self._io.run(
-            self._index.scan_lost_wakes, deadline_monotonic=monotonic() + 5.0
-        )
         started = 0
         for contract in JOB_HANDLER_CATALOG:
             if len(self._active) >= self._maximum_concurrency:
@@ -305,153 +275,6 @@ class KernelDurableJobExecutor:
             deadline_monotonic=_terminal_deadline(),
         )
 
-    async def _memory_extraction(self, attempt: AcceptedJobAttempt) -> None:
-        source = await self._io.run(
-            self._repository.read_memory_extraction_job_source,
-            attempt.guard,
-            deadline_monotonic=_attempt_deadline(attempt),
-        )
-        result = await self._provider_json(
-            attempt,
-            purpose=ModelCallPurpose.COMPACTION_MEMORY_EXTRACTION,
-            prompt=(
-                'Return only JSON {"candidates": [{"kind": one of FACT, '
-                'PREFERENCE, RELATION, CORRECTION, LIFECYCLE, "payload": object}]}. '
-                "Return at most 32 candidates.\n"
-                + json.dumps(source, ensure_ascii=False, sort_keys=True)
-            ),
-        )
-        raw = result.get("candidates")
-        if not isinstance(raw, list) or len(raw) > 32:
-            raise ValueError("memory extraction candidate bundle is invalid")
-        candidates: list[tuple[str, str, Mapping[str, object], str]] = []
-        for item in raw:
-            if not isinstance(item, dict) or not isinstance(item.get("payload"), dict):
-                raise ValueError("memory extraction candidate is malformed")
-            candidates.append(
-                (
-                    f"memory-candidate:{uuid4().hex}",
-                    str(item.get("kind")),
-                    dict(item["payload"]),
-                    f"job:{uuid4().hex}",
-                )
-            )
-        await self._io.run(
-            self._repository.accept_extracted_memory_bundle,
-            attempt.guard,
-            candidates=tuple(candidates),
-            occurred_at=datetime.now(timezone.utc),
-            deadline_monotonic=_terminal_deadline(),
-        )
-
-    async def _memory_governance(self, attempt: AcceptedJobAttempt) -> None:
-        candidate = await self._io.run(
-            self._repository.read_memory_candidate_for_governance,
-            attempt.guard,
-            deadline_monotonic=_attempt_deadline(attempt),
-        )
-        result = await self._provider_json(
-            attempt,
-            purpose=ModelCallPurpose.MEMORY_GOVERNANCE,
-            prompt=(
-                'Return only JSON. Use decision SKIP, SUBMIT, CORRECT, MERGE, '
-                'SUPERSEDE, or CONTRADICT. SKIP needs a reason. Every other '
-                'decision needs fact_kind and fact_payload. Lifecycle decisions '
-                'may only use predecessor fact IDs already supplied by the '
-                'candidate proposal.\n'
-                + json.dumps(candidate, ensure_ascii=False, sort_keys=True)
-            ),
-        )
-        decision = result.get("decision")
-        allowed = {
-            "SKIP",
-            "SUBMIT",
-            "CORRECT",
-            "MERGE",
-            "SUPERSEDE",
-            "CONTRADICT",
-        }
-        if decision not in allowed:
-            raise ValueError("memory governance decision is invalid")
-        fact_payload = result.get("fact_payload")
-        fact_id = None if decision == "SKIP" else f"memory:{uuid4().hex}"
-        if fact_id is not None and not isinstance(fact_payload, dict):
-            raise ValueError("memory governance fact is missing")
-        lifecycle = decision in {
-            "CORRECT",
-            "MERGE",
-            "SUPERSEDE",
-            "CONTRADICT",
-        }
-        proposal = candidate.get("proposal_payload")
-        predecessor_value = (
-            proposal.get("superseded_fact_ids", ())
-            if isinstance(proposal, dict)
-            else ()
-        )
-        if not isinstance(predecessor_value, (list, tuple)):
-            raise ValueError("memory lifecycle predecessor carrier is invalid")
-        predecessors = tuple(str(value) for value in predecessor_value)
-        if lifecycle != bool(predecessors):
-            raise ValueError("memory lifecycle decision lacks exact predecessors")
-        await self._io.run(
-            self._repository.accept_memory_governance,
-            attempt.guard,
-            candidate_id=str(candidate["id"]),
-            decision_id=f"memory-decision:{uuid4().hex}",
-            decision=str(decision),
-            lineage_payload={
-                "handler": MEMORY_GOVERNANCE,
-                "attempt": attempt.attempt_ordinal,
-                "superseded_fact_ids": predecessors,
-            },
-            fact_id=fact_id,
-            fact_kind=(
-                str(result.get("fact_kind") or candidate["proposal_kind"])
-                if fact_id
-                else None
-            ),
-            fact_payload=(
-                dict(fact_payload) if isinstance(fact_payload, dict) else None
-            ),
-            relations=(),
-            index_handler_contract_id=self._index.handler_contract_id,
-            index_handler_contract_version=self._index.handler_contract_version,
-            occurred_at=datetime.now(timezone.utc),
-            deadline_monotonic=_terminal_deadline(),
-        )
-
-    async def _memory_index_refresh(self, attempt: AcceptedJobAttempt) -> None:
-        intent = _intent(attempt)
-        if intent.get("channel") == "FTS":
-            await self._io.run(
-                self._index.apply_fts_refresh,
-                attempt.guard,
-                deadline_monotonic=_attempt_deadline(attempt),
-            )
-            return
-        if intent.get("channel") != "VECTOR":
-            raise ValueError("memory index channel is invalid")
-        source = await self._io.run(
-            self._repository.snapshot_memory_vector_source,
-            attempt.guard,
-            handler_contract_id=self._index.handler_contract_id,
-            handler_contract_version=self._index.handler_contract_version,
-            deadline_monotonic=_attempt_deadline(attempt),
-        )
-        if self._embedding is None:
-            self._embedding = build_embedding_provider(self._embedding_config)
-        vectors = await self._embedding.embed_batch(
-            tuple(item.embedding_text for item in source.facts)
-        )
-        await self._io.run(
-            self._repository.apply_vector_memory_index,
-            attempt.guard,
-            source=source,
-            embeddings=vectors,
-            deadline_monotonic=_terminal_deadline(),
-        )
-
     async def _settle_failure(
         self,
         attempt: AcceptedJobAttempt,
@@ -539,7 +362,4 @@ __all__ = [
     "JOB_HANDLER_CATALOG",
     "KernelDurableJobExecutor",
     "KernelJobHandlerContract",
-    "MEMORY_GOVERNANCE",
-    "MEMORY_INDEX_REFRESH",
-    "POST_COMPACTION_MEMORY_EXTRACTION",
 ]

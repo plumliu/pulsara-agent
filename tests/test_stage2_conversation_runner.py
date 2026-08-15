@@ -18,6 +18,18 @@ from pulsara_agent.conversation_kernel.live import (
     LiveObservationKind,
     LiveSettlementKind,
 )
+from pulsara_agent.conversation_kernel.context_sources import (
+    build_memory_context_source,
+)
+from pulsara_agent.conversation_kernel.memory.contracts import (
+    AutomaticMemoryTriggerDisposition,
+    FrozenMemoryTriggerPolicy,
+    MemoryUsePolicy,
+)
+from pulsara_agent.conversation_kernel.memory.reflection import (
+    MemoryWriteOptOut,
+    TurnMemoryUseOptOut,
+)
 from pulsara_agent.ports.live_agent_event import (
     TextDeltaPayload,
     TextEndPayload,
@@ -43,10 +55,12 @@ from pulsara_agent.conversation_kernel.tool_artifacts import (
 from pulsara_agent.conversation_kernel.vocabulary import LiveEventType
 from pulsara_agent.llm.input import MessageRole
 from pulsara_agent.model_input.contracts import (
+    ContextSourceKind,
     ModelInputCompileFailureKind,
     StructuredModelInputCompileError,
 )
 from pulsara_agent.model_input.compiler import StructuredModelInputCompiler
+from pulsara_agent.model_input.continuity import decode_runtime_observation
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 from tests.support.postgres import verified_postgres_provider
 from tests.support.round3 import (
@@ -314,6 +328,62 @@ class _BlockingSourceCollector(StaticContextSourceCollector):
         return super().complete_frozen_sources(frozen, **kwargs)
 
 
+class _PolicyMemoryProjection:
+    def __init__(self) -> None:
+        self._write = MemoryWriteOptOut()
+        self._all = TurnMemoryUseOptOut()
+        self.preference_calls = 0
+        self.recall_calls = 0
+
+    def classify_memory_trigger(self, text: str) -> FrozenMemoryTriggerPolicy:
+        if self._all.excludes(text):
+            return FrozenMemoryTriggerPolicy(
+                AutomaticMemoryTriggerDisposition.DISABLED_BY_EXPLICIT_USER_DIRECTIVE,
+                MemoryUsePolicy.ALL_DISABLED_BY_USER,
+            )
+        return FrozenMemoryTriggerPolicy(
+            (
+                AutomaticMemoryTriggerDisposition.SKIPPED_LOW_INFORMATION
+                if len(" ".join(text.split())) < 8
+                else AutomaticMemoryTriggerDisposition.ELIGIBLE
+            ),
+            (
+                MemoryUsePolicy.WRITE_DISABLED_BY_USER
+                if self._write.excludes(text)
+                else MemoryUsePolicy.ENABLED
+            ),
+        )
+
+    def classify_automatic_trigger(
+        self, text: str
+    ) -> AutomaticMemoryTriggerDisposition:
+        return self.classify_memory_trigger(text).automatic_recall
+
+    async def freeze_response_preference_source(self):
+        self.preference_calls += 1
+        return build_memory_context_source(
+            kind=ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD,
+            texts=(' {"items":[]} ',),
+        )
+
+    async def freeze_automatic_recall_source(self, _query: str):
+        self.recall_calls += 1
+        return build_memory_context_source(
+            kind=ContextSourceKind.MEMORY_RECALL,
+            texts=(
+                '{"items":[]}',
+                '{"items":[]}',
+                '{"items":[]}',
+            ),
+        )
+
+    def offer_candidate_wake(self, _candidate_id: str) -> None:
+        return None
+
+    def prepare_and_adopt_reflection(self, **_kwargs: object) -> None:
+        return None
+
+
 class _DelayedPreparedExecution:
     def __init__(self, delegate, started: asyncio.Event, release: asyncio.Event) -> None:
         self._delegate = delegate
@@ -502,6 +572,120 @@ def test_round3_1_empty_epoch_absorbs_pre_first_call_steers_once(
         and "pulsara_runtime_observation" not in message.content[0]
     ]
     assert user_messages == ["initial", "steer one", "steer two"]
+
+
+def test_round8_memory_policy_aggregates_steers_and_resets_on_next_root_message(
+    stage2_migrated_postgres_database,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id = _name("session")
+    lease = repository.acquire_host_writer(
+        session_id=session_id,
+        workspace_id=_name("workspace"),
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    collector = _BlockingSourceCollector()
+    projection = _PolicyMemoryProjection()
+    model = _ScriptedModel(
+        [
+            _text_stream("first answer"),
+            _text_stream("second answer"),
+            _text_stream("third answer"),
+        ]
+    )
+    runner = ConversationKernelRunner(
+        repository=repository,
+        writer_lease=lease,
+        model=model,
+        tools=StructuredToolPort(
+            _AssertingTool(provider, session_id), tool_names=()
+        ),
+        live_bus=LiveAgentEventBus(),
+        context_source_collector=collector,
+        memory_projection=projection,
+    )
+
+    async def exercise() -> None:
+        first = asyncio.create_task(runner.run_turn("normal initial root message"))
+        assert await asyncio.to_thread(collector.started.wait, 5)
+        collector.release.set()
+        await first
+        assert model.requests[0].memory_context.memory_use_policy is (
+            MemoryUsePolicy.ENABLED
+        )
+        assert projection.preference_calls == 1
+        assert projection.recall_calls == 1
+
+        collector.started.clear()
+        collector.release.clear()
+        second_command = _name("command")
+        second_turn = _stable_id("turn", session_id, second_command)
+        second = asyncio.create_task(
+            runner.run_turn(
+                "don't use saved memory for this answer",
+                command_id=second_command,
+            )
+        )
+        assert await asyncio.to_thread(collector.started.wait, 5)
+        steer_command = _name("steer-command")
+        repository.enqueue_prompt(
+            lease.guard,
+            command_id=steer_command,
+            queue_item_id=_name("steer-queue"),
+            client_submission_id=steer_command,
+            delivery_mode=PromptDeliveryMode.STEER_ACTIVE_TURN,
+            target_turn_id=second_turn,
+            permission_snapshot_id=None,
+            requested_permission_mode=None,
+            content=InlineContent.from_bytes(b"continue normally"),
+            occurred_at=datetime.now(timezone.utc),
+            actor_id="test",
+            deadline_monotonic=monotonic() + 10,
+        )
+        collector.release.set()
+        await second
+        assert model.requests[1].memory_context.memory_use_policy is (
+            MemoryUsePolicy.ALL_DISABLED_BY_USER
+        )
+        assert projection.preference_calls == 1
+        assert projection.recall_calls == 1
+
+        await runner.run_turn("normal next root message")
+        assert model.requests[2].memory_context.memory_use_policy is (
+            MemoryUsePolicy.ENABLED
+        )
+        assert projection.preference_calls == 2
+        assert projection.recall_calls == 2
+
+    asyncio.run(exercise())
+    first_input, second_input, third_input = (
+        request.compiled_input for request in model.requests
+    )
+    assert first_input.system_prompt == second_input.system_prompt
+    assert second_input.system_prompt == third_input.system_prompt
+    assert first_input.tools == second_input.tools
+    assert second_input.tools == third_input.tools
+    assert second_input.messages[: len(first_input.messages)] == first_input.messages
+    assert third_input.messages[: len(second_input.messages)] == second_input.messages
+    second_suffix_observations = tuple(
+        decode_runtime_observation(message)
+        for message in second_input.messages[len(first_input.messages) :]
+        if message.role is MessageRole.USER
+        and message.content
+        and "pulsara_runtime_observation" in message.content[0]
+    )
+    cleared_memory_sources = {
+        item.source_kind
+        for item in second_suffix_observations
+        if item.presence.value == "CLEARED"
+    }
+    assert {
+        ContextSourceKind.MEMORY_RECALL,
+        ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD,
+    } <= cleared_memory_sources
 
 
 def test_round3_1_planning_reaches_shorter_fifo_prefix_without_recharging_base(

@@ -35,6 +35,11 @@ from pulsara_agent.conversation_kernel.input_continuity import (
     HostProviderInputContinuityOwner,
     ProviderInputContinuityConflict,
 )
+from pulsara_agent.conversation_kernel.memory.contracts import (
+    FrozenModelCallMemoryContext,
+    FrozenModelVisibleMemoryProvenance,
+    ModelVisibleMemoryProvenanceDisposition,
+)
 from pulsara_agent.conversation_kernel.execution_watchdogs import (
     KernelWatchdogOwner,
 )
@@ -166,7 +171,7 @@ from tests.support.round3 import StructuredToolPort
 
 _SOURCE_FACTS = {
     ContextSourceKind.BASE_SYSTEM: (
-        "pulsara.base-system.prefix-continuity.v3",
+        "pulsara.base-system.prefix-continuity.v4",
         ContextChannel.SYSTEM,
         ContextTrustClass.ROOT_INSTRUCTION,
         ContextBudgetClass.MUST_KEEP,
@@ -262,6 +267,30 @@ _SOURCE_FACTS = {
         20,
         (ContextRenderMode.FULL,),
         ContextSourceLifecycle.ACTIVATION_SNAPSHOT,
+    ),
+    ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD: (
+        "pulsara.memory-response-preference-head.v1",
+        ContextChannel.RUNTIME_OBSERVATION,
+        ContextTrustClass.UNTRUSTED_OBSERVATION,
+        ContextBudgetClass.IMPORTANT,
+        62,
+        42,
+        (ContextRenderMode.FULL,),
+        ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
+    ),
+    ContextSourceKind.MEMORY_RECALL: (
+        "pulsara.memory-recall.v1",
+        ContextChannel.RUNTIME_OBSERVATION,
+        ContextTrustClass.UNTRUSTED_OBSERVATION,
+        ContextBudgetClass.IMPORTANT,
+        65,
+        48,
+        (
+            ContextRenderMode.FULL,
+            ContextRenderMode.COMPACT,
+            ContextRenderMode.REF_ONLY,
+        ),
+        ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
     ),
     ContextSourceKind.PREVIOUS_TURN_OUTCOME: (
         "pulsara.previous-turn-outcome.v1",
@@ -397,6 +426,10 @@ def _sources(
         ContextSourceKind.PREVIOUS_TURN_OUTCOME: (
             ContextSourceAbsenceKind.EXPLICIT_EMPTY
         ),
+        ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD: (
+            ContextSourceAbsenceKind.NOT_APPLICABLE
+        ),
+        ContextSourceKind.MEMORY_RECALL: ContextSourceAbsenceKind.NOT_APPLICABLE,
     }
     for kind, absence_kind in default_absences.items():
         if kind not in candidate_kinds and kind not in absent_by_kind:
@@ -566,6 +599,7 @@ def _tool_result(
         body,
         tool_call_id=f"call:{sequence}",
         tool_result_context=ProviderToolResultContextMetadata(
+            result_id=f"result:{sequence}",
             result_state="SUCCESS",
             display_kind=ToolResultDisplayKind.COMPLETE,
             artifact_disposition=(
@@ -577,6 +611,7 @@ def _tool_result(
             source_coverage=ToolOutputSourceCoverage.COMPLETE,
             source_coverage_reason=None,
             artifact_unavailability_reason=None,
+            model_visible_memory_fact_ids=(),
             timing=_tool_timing(turn_id),
         ),
         tool_result_body_text=body,
@@ -1651,6 +1686,7 @@ def test_round3_tool_result_bounds_cover_final_late_outcome_carrier() -> None:
 
 def test_round3_retained_snapshot_reference_keeps_typed_warning() -> None:
     metadata = ProviderToolResultContextMetadata(
+        result_id="result:retained",
         result_state="SUCCESS",
         display_kind=ToolResultDisplayKind.HEAD_TAIL,
         artifact_disposition=ToolOutputArtifactDisposition.INCOMPLETE,
@@ -1658,6 +1694,7 @@ def test_round3_retained_snapshot_reference_keeps_typed_warning() -> None:
         source_coverage=ToolOutputSourceCoverage.RETAINED_SNAPSHOT,
         source_coverage_reason=ToolOutputSourceCoverageReason.TERMINAL_RETENTION_GAP,
         artifact_unavailability_reason=None,
+        model_visible_memory_fact_ids=(),
         timing=_tool_timing("turn:test"),
     )
     item = FrozenProviderInputItem(
@@ -2549,6 +2586,12 @@ def test_round3_tool_owner_rejects_foreign_host_surface_borrow(tmp_path: Path) -
                 assistant_entry_id="entry:assistant",
                 surface_borrow=borrow,
                 permission_snapshot=_permission_snapshot(),
+                memory_context=FrozenModelCallMemoryContext(
+                    FrozenModelVisibleMemoryProvenance(
+                        ModelVisibleMemoryProvenanceDisposition.COMPLETE,
+                        (),
+                    )
+                ),
             )
             assert authorization.kind is KernelToolAuthorizationKind.TOOL_UNAVAILABLE
             invocation = KernelToolInvocationContext(
@@ -2809,13 +2852,13 @@ def test_round3_source_decision_and_compiled_fingerprints_are_golden() -> None:
     )
     compiled = StructuredModelInputCompiler().compile(request)
     assert compiled.source_collection_fingerprint == (
-        "sha256:f629c0d5c7a37a6a9ed6ded98b162dbd946ed2924949d4a575c510900530a4c4"
+        "sha256:c36805247bf57d3ad481b791cc683a94ad63ed35ea8f64fb394719f4ec8513a3"
     )
     assert compiled.budget_report.decision_digest == (
         "sha256:caee1ae23a161f2c862947ef5b7b2b9a4ae3093bce6117e00bc13a3a19058fbd"
     )
     assert compiled.compiled_semantic_fingerprint == (
-        "sha256:1e4e1221604cf1547cd5f63b58e8226e1ad0ffe5f8fe12d7c65f81519a75bace"
+        "sha256:f02b8a791504aeb69be6e650e2f64a582fb1846c13a9b39a69de27f0c382e092"
     )
     assert compiled.final_estimate.total_input_tokens == 268
 

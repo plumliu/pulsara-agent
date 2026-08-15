@@ -21,14 +21,14 @@ Python KernelHostCore
 ├── canonical conversation runner
 ├── provider-neutral structured model-input compiler
 ├── tool policy + Host-scoped physical tools
-├── exact-four durable job executor
-├── PostgreSQL-only memory
+├── exact-one durable job executor
+├── advisory memory governor + retrieval
 ├── process-local live event bus
 └── Terminal Protocol v3 gateway
         └── Go terminal client
 
 PostgreSQL
-├── pulsara_v3：26 张产品关系
+├── pulsara_v3：25 张产品关系
 ├── selective agent_events occurrence journal
 ├── public.vector capability
 └── public.pulsara_schema_migrations（只保存 universe metadata）
@@ -36,9 +36,9 @@ PostgreSQL
 
 Durable 边界有意保持狭窄：
 
-- canonical relational rows 拥有 conversation、tool、job、memory 与
-  coordination 的当前语义真值；
-- closed 34-type `agent_events` journal 只记录 accepted occurrence，不用于恢复
+- canonical relational rows 拥有 conversation、tool、job 与 coordination 的
+  当前语义真值；accepted memory row只拥有advisory dataset当前包含的内容；
+- closed 31-type `agent_events` journal 只记录 accepted occurrence，不用于恢复
   execution；
 - 23 种 live event 只存在于内存，进程退出即可丢失；
 - tool request 在 dispatch 前提交，physical attempt 在 effect invoke 前提交；
@@ -79,10 +79,12 @@ Kernel 当前支持：
 - Host-scoped stdio/Streamable HTTP MCP：bounded discovery、按scope过滤的
   direct typed tools、catalog/resource/prompt读取、local authorization与CLI
   lifecycle管理；
-- PostgreSQL FTS/vector memory，以及显式 direct、reverse 与最多 two-hop
-  relation traversal；
-- 四类具名 durable background job：compaction、post-compaction memory
-  extraction、memory governance、memory-index refresh；
+- advisory PostgreSQL memory：每次`remember`只提交一个candidate，五类closed
+  taxonomy，USER/domain与exact WORKSPACE scope隔离，best-effort governance，
+  多语种sparse recall，optional 1024维dense recall与explicit rerank，以及
+  direct/reverse/最多two-hop relation read；
+- 只保留一类具名durable compaction job；memory governance、reflection、
+  embedding与recall均为Host-owned best-effort work，不恢复、不replay；
 - canonical Inspector 与 Protocol v3 terminal observation。
 
 Round 6不增加durable MCP连接或request recovery；Host换代只按配置fresh
@@ -114,6 +116,10 @@ PULSARA_BASE_URL=https://api.openai.com/v1
 PULSARA_API=openai_responses
 PULSARA_PRO_MODEL=...
 PULSARA_FLASH_MODEL=...
+
+# Optional advisory-memory data egress；未配置或禁用时仍保留sparse recall。
+PULSARA_EMBEDDING_API_KEY=...
+PULSARA_RERANK_API_KEY=...
 
 PULSARA_POSTGRES_DSN=postgresql://pulsara_runtime:...@localhost:5432/pulsara
 PULSARA_POSTGRES_ADMIN_DSN=postgresql://pulsara_admin:...@localhost:5432/pulsara
@@ -168,6 +174,19 @@ Pulsara-owned provider carrier只保留产品语义与lifecycle，internal contr
 version、fingerprint、generation、schema marker和delimiter式Plan carrier不再进入
 model input。验证记录在
 [`round7_model_visible_failure_and_tool_observation_activation.json`](benchmarks/suites/core/v1/round7_model_visible_failure_and_tool_observation_activation.json)。
+Round 8用advisory dataset取代旧memory durability/recovery graph。`remember`会与
+ToolResult同事务接受一个candidate；governance、cheap-hint reflection、
+embedding与reranking均保持可丢失的process-local弱完成。Accepted item只能是
+FACT、USER_PROFILE、RESPONSE_PREFERENCE、ACTION_RULE或DECISION。Sparse recall
+始终本地可用；automatic dense recall与explicit rerank是optional remote data egress。
+Memory只通过bounded append-only `MEMORY_RECALL`与
+`MEMORY_RESPONSE_PREFERENCE_HEAD`进入model input，不改写已安装prefix，也不获得
+permission authority。Sparse index与query共用tokenizer-v2，保留否定、先后词、
+code/path token与英文contraction语义。明确“不要保存当前内容”只在该ROOT run中
+关闭`remember`，recall仍可见；明确“本轮不使用已有记忆”会清除两个memory source
+并在不改变advertised tool surface的前提下拒绝四个memory tool。短输入跳过automatic
+recall仍是独立策略，不会关闭显式memory tool。验证证据记录在
+[`round8_advisory_memory_subsystem_activation.json`](benchmarks/suites/core/v1/round8_advisory_memory_subsystem_activation.json)。
 旧 v13
 数据库只会得到 `schema_migration_universe_reset_required`，不会被在线导入、
 翻译或升级。请严格遵守

@@ -271,24 +271,17 @@ class CanonicalConversationQuery:
             relations = connection.execute(
                 """
                 SELECT * FROM pulsara_v3.memory_relations
-                WHERE workspace_id = %s
+                WHERE memory_domain_id = %s
                   AND (source_fact_id = %s OR target_fact_id = %s)
                 ORDER BY accepted_at, id LIMIT 256
                 """,
-                (fact["workspace_id"], memory_id, memory_id),
-            ).fetchall()
-            freshness = connection.execute(
-                """
-                SELECT * FROM pulsara_v3.memory_index_state
-                WHERE workspace_id = %s ORDER BY channel
-                """,
-                (fact["workspace_id"],),
+                (fact["memory_domain_id"], memory_id, memory_id),
             ).fetchall()
         return {
             "inspect_kind": "canonical_memory.v3",
             "fact": _public_row(fact),
             "relations": [_public_row(item) for item in relations],
-            "index_freshness": [_public_row(item) for item in freshness],
+            "index_freshness": [],
         }
 
     def inspect_health(self, *, deadline_monotonic: float) -> Mapping[str, object]:
@@ -313,17 +306,7 @@ class CanonicalConversationQuery:
             jobs = grouped("durable_jobs", "status")
             queue = grouped("prompt_queue_items", "status")
             task = grouped("subagent_tasks", "status")
-            freshness = connection.execute(
-                """
-                SELECT channel,
-                       count(*) FILTER (WHERE applied_generation = desired_generation)::bigint
-                         AS complete,
-                       count(*) FILTER (WHERE applied_generation < desired_generation)::bigint
-                         AS partial,
-                       max(desired_generation - applied_generation)::bigint AS maximum_lag
-                FROM pulsara_v3.memory_index_state GROUP BY channel ORDER BY channel
-                """
-            ).fetchall()
+            memory_candidates = grouped("memory_candidates", "status")
         return {
             "inspect_kind": "canonical_kernel_health.v3",
             "conversation_authority": "pulsara_v3",
@@ -332,7 +315,7 @@ class CanonicalConversationQuery:
             "jobs": jobs,
             "prompt_queue": queue,
             "subagent_tasks": task,
-            "memory_index": [_public_row(item) for item in freshness],
+            "memory_candidates": memory_candidates,
             "runtime_limit_contract": "stage2_runtime_limits.v1",
             "runtime_limits": asdict(STAGE2_LIMITS),
             "execution_watchdog_contract": "kernel_execution_watchdogs.v1",

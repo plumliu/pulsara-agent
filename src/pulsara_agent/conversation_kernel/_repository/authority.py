@@ -35,6 +35,7 @@ class _AuthorityOperations:
         *,
         session_id: str,
         workspace_id: str,
+        memory_domain_id: str = "u_local",
         writer_owner_id: str,
         lease_seconds: float,
         deadline_monotonic: float,
@@ -51,7 +52,7 @@ class _AuthorityOperations:
             ) as connection:
                 row = connection.execute(
                     """
-                    SELECT id, workspace_id, lifecycle, writer_generation,
+                    SELECT id, workspace_id, memory_domain_id, lifecycle, writer_generation,
                            writer_lease_owner_id, writer_lease_expires_at
                     FROM pulsara_v3.sessions
                     WHERE id = %s
@@ -63,16 +64,18 @@ class _AuthorityOperations:
                     connection.execute(
                         """
                         INSERT INTO pulsara_v3.sessions (
-                            id, workspace_id, lifecycle, writer_generation,
+                            id, workspace_id, memory_domain_id, lifecycle, writer_generation,
                             writer_lease_owner_id, writer_lease_expires_at
-                        ) VALUES (%s, %s, 'OPEN', 1, %s, %s)
+                        ) VALUES (%s, %s, %s, 'OPEN', 1, %s, %s)
                         """,
-                        (session_id, workspace_id, writer_owner_id, expires_at),
+                        (session_id, workspace_id, memory_domain_id, writer_owner_id, expires_at),
                     )
                     generation = 1
                 else:
                     if str(row["workspace_id"]) != workspace_id:
                         raise ConversationKernelConflict("session workspace conflict")
+                    if str(row["memory_domain_id"]) != memory_domain_id:
+                        raise ConversationKernelConflict("session memory domain conflict")
                     if str(row["lifecycle"]) != "OPEN":
                         raise ConversationKernelConflict("session is closed")
                     same_live_owner = (
@@ -124,6 +127,7 @@ class _AuthorityOperations:
         guard: HostWriterGuard,
         *,
         lease_seconds: float,
+        memory_domain_id: str | None = None,
         deadline_monotonic: float,
     ) -> WriterLease:
         if lease_seconds <= 0:
@@ -139,6 +143,7 @@ class _AuthorityOperations:
                 SET writer_lease_expires_at = %s, updated_at = clock_timestamp()
                 WHERE id = %s AND writer_generation = %s
                   AND writer_lease_owner_id = %s AND lifecycle = 'OPEN'
+                  AND (%s IS NULL OR memory_domain_id = %s)
                   AND writer_lease_expires_at > clock_timestamp()
                 RETURNING writer_generation
                 """,
@@ -147,6 +152,8 @@ class _AuthorityOperations:
                     guard.session_id,
                     guard.writer_generation,
                     guard.writer_owner_id,
+                    memory_domain_id,
+                    memory_domain_id,
                 ),
             ).fetchone()
             if row is None:

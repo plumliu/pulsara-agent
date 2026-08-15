@@ -1,6 +1,6 @@
 {
   "schema_version": "conversation_kernel_expected_catalog.v2",
-  "observed_catalog_fingerprint": "sha256:7b32fc6efc177f94bb2c45383f97196f3fb65deac0126eaa9c350d63c197b13f",
+  "observed_catalog_fingerprint": "sha256:eaba18c16e29c55c51703f7ea629fe014c21d000cc157d3c8f48a1e943bd5d31",
   "required_extensions": [
     {
       "extension_name": "vector",
@@ -30,15 +30,19 @@
     "durable_jobs",
     "durable_job_attempts",
     "memory_candidates",
-    "memory_governance_decisions",
+    "memory_candidate_tool_result_refs",
+    "memory_candidate_basis_refs",
     "memory_facts",
     "memory_relations",
-    "memory_search_index",
-    "memory_vector_index",
-    "memory_index_state",
+    "memory_embeddings",
     "blobs",
     "agent_events"
   ],
   "infrastructure_relations": ["public.pulsara_schema_migrations"],
-  "required_functions": ["pulsara_v3.enforce_conversation_kernel_invariants"]
+  "required_functions": [
+    "pulsara_v3.enforce_conversation_kernel_invariants",
+    "pulsara_v3.enforce_memory_candidate_lineage",
+    "pulsara_v3.memory_terms_to_tsquery",
+    "pulsara_v3.seal_memory_fact_search_document"
+  ]
 }

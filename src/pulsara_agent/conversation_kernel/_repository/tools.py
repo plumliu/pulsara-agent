@@ -5,7 +5,6 @@ from __future__ import annotations
 from datetime import datetime
 from psycopg import Connection, IsolationLevel
 from psycopg.rows import dict_row
-from psycopg.types.json import Jsonb
 from pulsara_agent.conversation_kernel.contracts import BlobContent, CanonicalContent, ConversationScopeKind, EntryKind, HostWriterGuard, canonical_digest
 from pulsara_agent.conversation_kernel.vocabulary import CommittedEventType, SubjectSlot
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
@@ -517,13 +516,14 @@ class _ToolOperations:
                     output_artifact_blob_id, output_source_coverage,
                     output_display_kind, output_source_coverage_reason,
                     output_artifact_unavailability_reason,
+                    model_visible_memory_fact_ids,
                     observed_at, observation_duration_microseconds,
                     observation_origin_kind,
                     tool_reported_duration_microseconds
                 ) VALUES (
                     %s, %s, %s, %s, %s, %s, %s, %s, %s,
                     %s, %s, %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s
+                    %s, %s, %s, %s, %s
                 )
                 """,
                 (
@@ -560,6 +560,7 @@ class _ToolOperations:
                         if candidate.artifact_unavailability_reason is None
                         else candidate.artifact_unavailability_reason.value
                     ),
+                    list(candidate.model_visible_memory_fact_ids),
                     candidate.observed_at,
                     candidate.observation_duration_microseconds,
                     candidate.observation_origin_kind.value,
@@ -569,58 +570,7 @@ class _ToolOperations:
             event_drafts = [candidate.tool_result_occurrence]
             side = candidate.side_branch
             if isinstance(side, PreparedMemoryProposalSideBranch):
-                connection.execute(
-                    """
-                    INSERT INTO pulsara_v3.memory_candidates (
-                        id, workspace_id, origin_session_id, source_entry_id,
-                        proposal_kind, semantic_digest, proposal_payload, status
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, 'PENDING')
-                    """,
-                    (
-                        side.memory_candidate_id,
-                        candidate.workspace_id,
-                        guard.session_id,
-                        candidate.assistant_entry_id,
-                        side.proposal_kind,
-                        side.candidate_semantic_digest,
-                        Jsonb(dict(side.proposal_payload)),
-                    ),
-                )
-                connection.execute(
-                    """
-                    INSERT INTO pulsara_v3.durable_jobs (
-                        id, workspace_id, origin_session_id, handler_type,
-                        intent_schema_version, intent_digest, intent_payload,
-                        automatic_intent_key, safety_class, status,
-                        retry_policy_id, retry_policy_version, maximum_attempts,
-                        attempt_timeout_ms, provider_input_token_limit_per_attempt,
-                        provider_output_token_limit_per_attempt, next_eligible_at
-                    ) VALUES (
-                        %s, %s, %s, %s, %s, %s, %s, %s,
-                        %s, %s, %s, %s, %s, %s, %s, %s, %s
-                    )
-                    """,
-                    (
-                        side.governance_job_id,
-                        candidate.workspace_id,
-                        guard.session_id,
-                        side.job_handler_type,
-                        side.intent_schema_version,
-                        side.intent_digest,
-                        Jsonb(dict(side.intent_payload)),
-                        side.automatic_intent_key,
-                        side.safety_class,
-                        side.initial_status,
-                        side.retry_policy_id,
-                        side.retry_policy_version,
-                        side.maximum_attempts,
-                        side.attempt_timeout_ms,
-                        side.provider_input_token_limit_per_attempt,
-                        side.provider_output_token_limit_per_attempt,
-                        side.next_eligible_at,
-                    ),
-                )
-                event_drafts.append(side.job_queued_occurrence)
+                self._insert_prepared_memory_candidate(connection, side)
             event = self._append_events(
                 connection,
                 guard,
@@ -714,6 +664,8 @@ class _ToolOperations:
                     if candidate.artifact_unavailability_reason is None
                     else candidate.artifact_unavailability_reason.value
                 )
+                or tuple(result["model_visible_memory_fact_ids"])
+                != candidate.model_visible_memory_fact_ids
                 or result["observed_at"] != candidate.observed_at
                 or result["observation_duration_microseconds"]
                 != candidate.observation_duration_microseconds
@@ -783,58 +735,180 @@ class _ToolOperations:
         candidate: PreparedToolResultAcceptance,
         side: PreparedMemoryProposalSideBranch,
     ) -> None:
+        prepared = side.candidate
         memory = connection.execute(
             """
             SELECT * FROM pulsara_v3.memory_candidates
-            WHERE workspace_id = %s AND id = %s
+            WHERE memory_domain_id = %s AND id = %s
             """,
-            (candidate.workspace_id, side.memory_candidate_id),
+            (prepared.memory_domain_id, prepared.candidate_id),
         ).fetchone()
-        job = connection.execute(
-            """
-            SELECT * FROM pulsara_v3.durable_jobs
-            WHERE workspace_id = %s AND id = %s
-            """,
-            (candidate.workspace_id, side.governance_job_id),
-        ).fetchone()
-        if memory is None or job is None:
+        if memory is None:
             raise ConversationKernelConflict(
-                "prepared memory proposal side branch is only partially installed"
+                "prepared memory candidate side branch is absent"
             )
+        proposal = prepared.proposal
         if (
-            str(memory["origin_session_id"]) != candidate.session_id
-            or str(memory["source_entry_id"]) != candidate.assistant_entry_id
-            or str(memory["proposal_kind"]) != side.proposal_kind
-            or str(memory["semantic_digest"]) != side.candidate_semantic_digest
-            or dict(memory["proposal_payload"]) != dict(side.proposal_payload)
+            str(memory["origin_workspace_id"]) != prepared.origin_workspace_id
+            or str(memory["origin_session_id"]) != prepared.origin_session_id
+            or str(memory["producer_kind"]) != prepared.producer_kind.value
+            or memory["producer_entry_id"] != prepared.producer_entry_id
+            or memory["producer_tool_call_id"] != prepared.producer_tool_call_id
+            or memory["trigger_user_entry_id"] != prepared.trigger_user_entry_id
+            or memory["producer_candidate_ordinal"]
+            != prepared.producer_candidate_ordinal
+            or str(memory["scope_kind"]) != proposal.scope_kind.value
+            or str(memory["scope_id"]) != proposal.scope_id
+            or str(memory["kind_hint"]) != proposal.kind_hint.value
+            or str(memory["statement"]) != proposal.statement
+            or memory["applies_when"] != proposal.applies_when
+            or tuple(memory["do_not_apply_when"]) != proposal.do_not_apply_when
+            or str(memory["candidate_acceptance_digest"])
+            != prepared.candidate_acceptance_digest
+            or str(memory["model_visible_memory_provenance_disposition"])
+            != prepared.visible_memory.disposition.value
+            or tuple(memory["model_visible_memory_fact_ids"])
+            != prepared.visible_memory.fact_ids
             or str(memory["status"]) != "PENDING"
-            or str(job["origin_session_id"]) != candidate.session_id
-            or str(job["handler_type"]) != side.job_handler_type
-            or str(job["intent_schema_version"]) != side.intent_schema_version
-            or str(job["intent_digest"]) != side.intent_digest
-            or dict(job["intent_payload"]) != dict(side.intent_payload)
-            or str(job["automatic_intent_key"]) != side.automatic_intent_key
-            or str(job["safety_class"]) != side.safety_class
-            or str(job["status"]) != side.initial_status
-            or str(job["retry_policy_id"]) != side.retry_policy_id
-            or int(job["retry_policy_version"]) != side.retry_policy_version
-            or int(job["maximum_attempts"]) != side.maximum_attempts
-            or int(job["attempt_timeout_ms"]) != side.attempt_timeout_ms
-            or int(job["provider_input_token_limit_per_attempt"])
-            != side.provider_input_token_limit_per_attempt
-            or int(job["provider_output_token_limit_per_attempt"])
-            != side.provider_output_token_limit_per_attempt
-            or job["next_eligible_at"] != side.next_eligible_at
         ):
             raise ConversationKernelConflict(
-                "prepared memory proposal side branch names a different winner"
+                "prepared memory candidate side branch names a different winner"
             )
-        self._exact_event_for_confirmation(
-            connection,
-            side.job_queued_occurrence,
-            session_id=candidate.session_id,
-            workspace_id=candidate.workspace_id,
+        refs = connection.execute(
+            """
+            SELECT origin_session_id, tool_result_id, ordinal, evidence_kind,
+                   citation_visibility
+            FROM pulsara_v3.memory_candidate_tool_result_refs
+            WHERE candidate_id = %s ORDER BY ordinal
+            """,
+            (prepared.candidate_id,),
+        ).fetchall()
+        basis = connection.execute(
+            """
+            SELECT target_fact_id, target_scope_kind, target_scope_id, ordinal
+            FROM pulsara_v3.memory_candidate_basis_refs
+            WHERE candidate_id = %s ORDER BY ordinal
+            """,
+            (prepared.candidate_id,),
+        ).fetchall()
+        if tuple(
+            (
+                str(row["origin_session_id"]),
+                str(row["tool_result_id"]),
+                int(row["ordinal"]),
+                str(row["evidence_kind"]),
+                str(row["citation_visibility"]),
+            )
+            for row in refs
+        ) != tuple(
+            (
+                ref.origin_session_id,
+                ref.tool_result_id,
+                ref.ordinal,
+                ref.evidence_kind.value,
+                ref.citation_visibility.value,
+            )
+            for ref in prepared.tool_result_refs
+        ) or tuple(
+            (
+                str(row["target_fact_id"]),
+                str(row["target_scope_kind"]),
+                str(row["target_scope_id"]),
+                int(row["ordinal"]),
+            )
+            for row in basis
+        ) != tuple(
+            (
+                ref.target_fact_id,
+                ref.target_scope_kind.value,
+                ref.target_scope_id,
+                ref.ordinal,
+            )
+            for ref in prepared.basis_refs
+        ):
+            raise ConversationKernelConflict(
+                "prepared memory candidate references name a different winner"
+            )
+
+    @staticmethod
+    def _insert_prepared_memory_candidate(
+        connection: Connection, side: PreparedMemoryProposalSideBranch
+    ) -> None:
+        prepared = side.candidate
+        proposal = prepared.proposal
+        connection.execute(
+            """
+            INSERT INTO pulsara_v3.memory_candidates (
+                id, memory_domain_id, origin_workspace_id, origin_session_id,
+                producer_kind, producer_entry_id, producer_tool_call_id,
+                trigger_user_entry_id, producer_candidate_ordinal,
+                scope_kind, scope_id, kind_hint, statement, applies_when,
+                do_not_apply_when, candidate_acceptance_digest,
+                model_visible_memory_provenance_disposition,
+                model_visible_memory_fact_ids, status
+            ) VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, 'PENDING'
+            )
+            """,
+            (
+                prepared.candidate_id,
+                prepared.memory_domain_id,
+                prepared.origin_workspace_id,
+                prepared.origin_session_id,
+                prepared.producer_kind.value,
+                prepared.producer_entry_id,
+                prepared.producer_tool_call_id,
+                prepared.trigger_user_entry_id,
+                prepared.producer_candidate_ordinal,
+                proposal.scope_kind.value,
+                proposal.scope_id,
+                proposal.kind_hint.value,
+                proposal.statement,
+                proposal.applies_when,
+                list(proposal.do_not_apply_when),
+                prepared.candidate_acceptance_digest,
+                prepared.visible_memory.disposition.value,
+                list(prepared.visible_memory.fact_ids),
+            ),
         )
+        for ref in prepared.tool_result_refs:
+            connection.execute(
+                """
+                INSERT INTO pulsara_v3.memory_candidate_tool_result_refs (
+                    candidate_id, origin_session_id, tool_result_id,
+                    ordinal, evidence_kind, citation_visibility
+                ) VALUES (%s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    prepared.candidate_id,
+                    ref.origin_session_id,
+                    ref.tool_result_id,
+                    ref.ordinal,
+                    ref.evidence_kind.value,
+                    ref.citation_visibility.value,
+                ),
+            )
+        for ref in prepared.basis_refs:
+            connection.execute(
+                """
+                INSERT INTO pulsara_v3.memory_candidate_basis_refs (
+                    candidate_id, memory_domain_id,
+                    source_scope_kind, source_scope_id,
+                    target_scope_kind, target_scope_id, target_fact_id, ordinal
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    prepared.candidate_id,
+                    prepared.memory_domain_id,
+                    proposal.scope_kind.value,
+                    proposal.scope_id,
+                    ref.target_scope_kind.value,
+                    ref.target_scope_id,
+                    ref.target_fact_id,
+                    ref.ordinal,
+                ),
+            )
 
     def accept_tool_interaction_decision(
         self,

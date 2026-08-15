@@ -21,14 +21,14 @@ Python KernelHostCore
 ├── canonical conversation runner
 ├── provider-neutral structured model-input compiler
 ├── tool policy + Host-scoped physical tools
-├── exact-four durable job executor
-├── PostgreSQL-only memory
+├── exact-one durable job executor
+├── advisory memory governor + retrieval
 ├── process-local live event bus
 └── Terminal Protocol v3 gateway
         └── Go terminal client
 
 PostgreSQL
-├── pulsara_v3: 26 product relations
+├── pulsara_v3: 25 product relations
 ├── selective agent_events occurrence journal
 ├── public.vector capability
 └── public.pulsara_schema_migrations (universe metadata only)
@@ -36,9 +36,10 @@ PostgreSQL
 
 The durable boundary is intentionally narrow:
 
-- canonical relational rows own current conversation, tool, job, memory, and
-  coordination truth;
-- a closed 34-type `agent_events` journal records accepted occurrences but is
+- canonical relational rows own current conversation, tool, job, and
+  coordination truth; accepted memory rows own only the current contents of
+  the advisory dataset;
+- a closed 31-type `agent_events` journal records accepted occurrences but is
   never replayed to reconstruct execution;
 - 23 live event types exist only in memory and may be lost at process exit;
 - tool requests are committed before dispatch and a physical attempt is
@@ -84,10 +85,14 @@ The current Kernel supports:
 - Host-scoped MCP over stdio and Streamable HTTP, with bounded discovery,
   scope-filtered direct typed tools, catalog/resource/prompt reads, local
   authorization, and CLI lifecycle management;
-- PostgreSQL full-text/vector memory with explicit direct, reverse, and at
-  most two-hop relation traversal;
-- four named durable background jobs: compaction, post-compaction memory
-  extraction, memory governance, and memory-index refresh;
+- advisory PostgreSQL memory with one-candidate `remember`, five closed item
+  kinds, USER/domain and exact WORKSPACE scope isolation, best-effort
+  governance, multilingual sparse recall, optional 1024-dimensional dense
+  recall and explicit rerank, direct/reverse relation reads, and at most
+  two-hop traversal;
+- one named durable background job for compaction; memory governance,
+  reflection, embedding, and recall remain Host-owned best-effort work and are
+  never recovered or replayed;
 - canonical inspection and Protocol v3 terminal observation.
 
 Round 6 intentionally does not add durable MCP connection or request recovery.
@@ -119,6 +124,11 @@ PULSARA_BASE_URL=https://api.openai.com/v1
 PULSARA_API=openai_responses
 PULSARA_PRO_MODEL=...
 PULSARA_FLASH_MODEL=...
+
+# Optional advisory-memory data egress. Sparse recall remains available when
+# these are absent or disabled.
+PULSARA_EMBEDDING_API_KEY=...
+PULSARA_RERANK_API_KEY=...
 
 PULSARA_POSTGRES_DSN=postgresql://pulsara_runtime:...@localhost:5432/pulsara
 PULSARA_POSTGRES_ADMIN_DSN=postgresql://pulsara_admin:...@localhost:5432/pulsara
@@ -181,6 +191,25 @@ internal contract versions, fingerprints, generations, schema markers, and
 delimiter-based Plan carriers are removed from model input. Verification is
 recorded in
 [`round7_model_visible_failure_and_tool_observation_activation.json`](benchmarks/suites/core/v1/round7_model_visible_failure_and_tool_observation_activation.json).
+Round 8 replaces the old memory durability/recovery graph with an advisory
+dataset. `remember` atomically accepts one candidate with its ToolResult, while
+governance, cheap-hint reflection, embedding, and reranking remain lossy
+process-local work. Accepted items use the closed FACT, USER_PROFILE,
+RESPONSE_PREFERENCE, ACTION_RULE, and DECISION taxonomy. Sparse recall is
+always local; automatic dense recall and explicit rerank are optional remote
+data egress. Memory enters model input only through bounded append-only
+`MEMORY_RECALL` and `MEMORY_RESPONSE_PREFERENCE_HEAD` observations, never by
+rewriting an installed prefix or granting permission authority. Verification
+uses the same tokenizer-v2 sparse terms for indexing and queries, preserving
+negation, ordering words, code/path tokens, and lexical contractions. A
+command that forbids saving the current entry disables `remember` for that
+ROOT run while leaving recall visible; an explicit “do not use saved memory
+for this answer” clears both memory observations and denies all four memory
+tools without changing the advertised tool surface. Short-input recall
+skipping remains independent and does not disable explicit memory tools.
+Verification
+is recorded in
+[`round8_advisory_memory_subsystem_activation.json`](benchmarks/suites/core/v1/round8_advisory_memory_subsystem_activation.json).
 An old v13 database is rejected with
 `schema_migration_universe_reset_required`; Pulsara never imports, translates,
 or upgrades it in place. Follow

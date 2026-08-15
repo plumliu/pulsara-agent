@@ -1,0 +1,213 @@
+{
+  "schema_version": "round8-advisory-memory-subsystem-activation.v1",
+  "status": "activated",
+  "generated_at_utc": "2026-08-15T17:54:02Z",
+  "captured_head": "327bf86061a04e628dc8e700d7030f4237fbbe5d",
+  "working_tree_semantics": "Round 8 was implemented and verified in the current uncommitted worktree. The pre-existing user modification to PULSARA_MEMORY_RELATIONAL_SUBTRACTION_PRELIMINARY_DESIGN.zh.md and the user-owned untracked PULSARA_LONG_TERM_MEMORY_PRIOR_ART_AND_FUTURE_DIRECTIONS_DRAFT.zh.md were preserved. The superseded preliminary design was not used as an implementation authority. No files were staged, committed, or pushed.",
+  "source_documents": {
+    "ROUND_8_ADVISORY_MEMORY_SUBSYSTEM_IMPLEMENTATION_SPEC.zh.md_at_start": "c6c0e16775283f5c2b172b81294d26c567228cb78d99a2ceab19ff64a4e46496",
+    "ROUND_8_ADVISORY_MEMORY_SUBSYSTEM_IMPLEMENTATION_SPEC.zh.md_after_activation_update": "e1e64645671105bd409a329f317496d92d57db69177a7c454ba062d1cafc3803",
+    "POST_HARD_CUT_PRODUCT_CAPABILITY_GAP_INDEX.zh.md_at_start": "1b2983325e04dfc8a123673125f0d811efc3350116a120a4d1c7d40e7fd52fd0",
+    "POST_HARD_CUT_PRODUCT_CAPABILITY_GAP_INDEX.zh.md_after_activation_update": "8f8f8e4606a51b9003090ce260ebfd68815fde7003f5b8db3c0ca08f82ffc851",
+    "PULSARA_DURABILITY_SUBTRACTION_REASSESSMENT.zh.md": "cb3e7b0a9f33e5e4c5b17850d47e1af580a3f23f094f868076351bb17a6a6e80",
+    "ROUND_3_STRUCTURED_MODEL_INPUT_COMPILER_IMPLEMENTATION_SPEC.zh.md": "1a996f8dda8c767043e4c84bf7d414724129dbd3d890d5cf3bb5463922cae6e6",
+    "ROUND_3_1_PROVIDER_INPUT_PREFIX_CONTINUITY_IMPLEMENTATION_SPEC.zh.md": "9ee6cfca09869a67903a2164c2c2025d7c836998bd26a459336cee90658e34c2",
+    "ROUND_5_LONG_HORIZON_EXECUTION_ENVELOPE_IMPLEMENTATION_SPEC.zh.md": "608ecfdd8e4f20acc62c012fb39569c19c4a34f6bf981d8c96df0aa293f48832",
+    "ROUND_7_MODEL_VISIBLE_FAILURE_AND_TOOL_OBSERVATION_IMPLEMENTATION_SPEC.zh.md": "1dd729efa14cb31261da11b07b4006d954cf0ce52c115aa6cf4bb5ed50554e52",
+    "README.md_after_activation_update": "e7966f387575a4ca5535aa72e895b0bdbba35586d8b53b50fbcabe9f4c0a5fd0",
+    "README.zh-CN.md_after_activation_update": "55b6fd57f25c02b8175322337657d70e202b63fe7c6dc790d01c61895fa0e42a",
+    ".env.example_after_activation_update": "2cb8bae22705e43cc7be1d2cd32b9528f186f162d87a3c68bc148a62d0ead859"
+  },
+  "post_activation_code_sha256": {
+    "conversation_kernel/memory/__init__.py": "5873b8196b133bb4887bd9bcaea2d0fd459d92dffe3e9f999a53a1ef26a3cc98",
+    "conversation_kernel/memory/citations.py": "44f6c6aadab2e0311f155cee935e0794a802519eab574813d15938160f7e2474",
+    "conversation_kernel/memory/contracts.py": "5be38096744de56869fd94d6909e6a1784e1de67b5cb4158f2d50183ac8608c1",
+    "conversation_kernel/memory/governor.py": "dab47a1240df9886569403d5e4ed9fa86d0afdde4a12d69d1317ee2b0ce7ab95",
+    "conversation_kernel/memory/recall.py": "7c0432065f32aba2d9c1b5b54f539d20ccfe73609e247598f84968a8d2fe7013",
+    "conversation_kernel/memory/reflection.py": "90a7817da5a16f641d68f4498f950eca1cb07cb4b7a6dfb866ac51419c67ac54",
+    "conversation_kernel/auxiliary_model.py": "6b2e31b734ea3e074cd6b0aa5e18dfcb70eb1680bc330a5f01799c35c87cdee7",
+    "conversation_kernel/memory_tools.py": "ec83af14543ef97fdd3d60956f6e5a02285f27a0942ace1e7c5c03d296fcb335",
+    "conversation_kernel/context_sources.py": "a7924c68768528108036a9ce3eed18da80a66e0ac22c9d63661c8d93b43af49a",
+    "conversation_kernel/runner.py": "db1dde74512146d52cb67fa1fb4ef5301cb62b893b87f780985ce354b8047a7d",
+    "conversation_kernel/host.py": "b4144d48a1aeff9674e338dc0c72e7d312d75335ad16d9de0d863e4fbc98bb6e",
+    "conversation_kernel/tool_runtime.py": "330fdf1d0cc055dbf9aa2fa8aa3eea969bc4b41490ddb9a9f49bdac4bfb7e943",
+    "conversation_kernel/_repository/memory.py": "64bd7a5a1393c99e56741e120ee3b936f6704e0fe2aafacbd6005584abd7fd8c",
+    "model_input/contracts.py": "bf5446732fda2ee5821db5b4c278a3d5e20467191e0026275917e95fcd4893d7",
+    "model_input/compiler.py": "66c907f10f33aa83e64569330f74c7334eb725a5ac0a25218c1d15094cda1c53",
+    "retrieval/config.py": "5fc035f38e904998403551a0f6bbeefb066494bf13609283ebb0e793c4064ba8",
+    "retrieval/tokenizer/memory_v1.py": "4757425f8411132b1689b487f04535645f094f6c3f3893ac67260c57b23be144",
+    "retrieval/embedding/openai_compatible.py": "ce3f6fe3c7fddff4c9ed4422cfa69f313d863b8b379b85148b06f5e5d8dd67b3",
+    "retrieval/embedding/validation.py": "08ac0c12c3bcf2f23d09eae13685b14f283d288259c55b40f18888a752698972",
+    "retrieval/rerank/dashscope.py": "0ba07fd1a60fc65ff201a5cc8699e2509d8409e0eefd2026c2fc2f6ec764059e",
+    "storage/migrations/sql/0000_conversation_kernel_baseline.sql": "3aee468221407a13d9804cd531530f669990fa5b7a23f5ae6120effa89abb550",
+    "storage/migrations/resources/0000_conversation_kernel_expected_catalog_v1.json": "5ada3413d923a7299f679f79b298a37d4b1ff175945383ff3fbf20545d6d0e4f",
+    "storage/migrations/resources/0000_conversation_kernel_runtime_grants_v1.json": "607902ae37c3192ad7dc79e3fd72393a385b8c5a3ecacdf6f30e24beb5c9a869",
+    "tests/test_round8_advisory_memory.py": "f088d881c45574454049d8297477f1089e488b1056583e81b3ff51a591409a78",
+    "tests/test_stage2_conversation_runner.py": "c965685fced5cff6bee17ae93b2853dff4c233c0d1f440b074d8ea2d1a5b87cd",
+    "tests/support/round3.py": "1365df505274139561e0baaaf742eb9d197f84fd375032e8d995b8a661d7487a",
+    "tests/test_repository_modularization_architecture.py": "10412e019c81e0b1581d10116e16d9a8b1129c039dcccdfa9bb85f3bd44a1467",
+    "clients/terminal/internal/protocolv3/projection_contract.go": "412da086077a2a30e43a6693914c83d6cf8c84bf9f15de67a49c1cd314636638"
+  },
+  "clean_schema_identity": {
+    "universe_id": "pulsara.conversation-kernel.v1",
+    "universe_generation": 1,
+    "baseline_version": 0,
+    "baseline_sql_sha256": "3aee468221407a13d9804cd531530f669990fa5b7a23f5ae6120effa89abb550",
+    "catalog_sha256": "5ada3413d923a7299f679f79b298a37d4b1ff175945383ff3fbf20545d6d0e4f",
+    "grant_sha256": "607902ae37c3192ad7dc79e3fd72393a385b8c5a3ecacdf6f30e24beb5c9a869",
+    "observed_catalog_fingerprint": "sha256:eaba18c16e29c55c51703f7ea629fe014c21d000cc157d3c8f48a1e943bd5d31",
+    "manifest_fingerprint": "sha256:d87f762c7e330cfc8a1e2d571806dfb8d75404a16f58b79e0a39ff479ee26fa2",
+    "baseline_contract_fingerprint": "sha256:c0784a243ac6a01b2c3f1de7b87b9d3101b793e4bf25bc05fbb23e2045e37bd9",
+    "universe_fingerprint": "sha256:79e7414baf56a295390ef35d7e199a9894471fae06895bccc066225d4beaf49f",
+    "genesis_registry_prefix_fingerprint": "sha256:e7b1bbd72c66d04a4cd3f32c5d9bd90547837f8fd357184704ae4415b0069ce7"
+  },
+  "product_contract": {
+    "authority": "memory rows own only the current advisory dataset; conversation, tool, permission, Plan and external systems remain authoritative for current operational truth",
+    "candidate_intake": "one remember call prepares exactly one candidate and accepts it with the existing ToolResult transaction; even an explicit must-remember request cannot bypass governance",
+    "taxonomy": [
+      "FACT",
+      "USER_PROFILE",
+      "RESPONSE_PREFERENCE",
+      "ACTION_RULE",
+      "DECISION"
+    ],
+    "governance": "Host-scoped process-local best effort; the model may select only a sealed branch and cannot rewrite, split or merge the candidate statement",
+    "duplicate_and_relation_settlement": "ACTIVE exact duplicate has one partial-unique winner; plain duplicate skips deterministically; sealed SUPERSEDES or CONTRADICTS can use an exact existing source through APPLY_NEW_RELATION or CONFIRM_EXISTING_RELATION without overwriting producer or relation decision provenance; CONTRADICTS uses one canonical unordered identity and confirms the actual stored attribution in either endpoint direction; BASED_ON never backpatches a duplicate",
+    "scope": "USER facts become visible only inside the same memory domain after exact-origin governance; WORKSPACE facts remain inside the exact canonical project scope; relation reads filter both endpoints",
+    "recall": "one tokenizer-v2 contract serves indexing and query paths; private jieba HMM-disabled multilingual/code/path tokenization preserves negation, ordering terms and lexically expanded contractions while rejecting punctuation-only terms; compatible pgvector dense recall is optional and bounded; only explicit memory_search may invoke the optional qwen3-rerank provider; embedding and rerank accept only their dedicated credentials and all optional provider/enrichment failures remain advisory fallbacks",
+    "compiler": "MEMORY_RECALL and MEMORY_RESPONSE_PREFERENCE_HEAD are bounded untrusted append-only observations; each true ROOT user message starts one ENABLED/WRITE_DISABLED_BY_USER/ALL_DISABLED_BY_USER policy epoch, ordered steers may only strengthen it, model execution and local authorize/invoke exact-join the frozen policy, stable BASE_SYSTEM and tools never change, and installed messages are never rewritten",
+    "preference_head": "query-independent full replacement or minimal CLEARED/UNAVAILABLE invalidation read from one bounded repeatable-read fact/relation composite; no silent Top-N, summary or preference-specific durable projection",
+    "anti_echo_and_sensitivity": "exact-call model-visible provenance suppresses recalled-memory echo and repeated snapshots; sensitive USER_PROFILE is projected only for explicit relevance or safety/accuracy need",
+    "weak_completion": "wake, reflection, governance, embedding and rerank may be lost or remain incomplete without making conversation or accepted ToolResult fail"
+  },
+  "deterministic_verification": {
+    "pytest_collection": "586_tests_collected_in_0.77s",
+    "round8_targeted": "18_passed_in_26.53s_including_ROOT_policy_and_strict_prefix_integration",
+    "postgres_marker": "171_passed_415_deselected_in_83.05s",
+    "full_pytest": "586_passed_in_112.60s",
+    "architecture_guards": "all architecture guard nodes passed within full pytest; repository modularization delta targeted node passed in 1.27s",
+    "clean_v0_fresh_repeat_deep_verify_and_old_universe_reset_required": "12_passed_in_3.16s",
+    "sparse_dense_hnsw": "tokenizer/search trigger, compatible vector upsert, dense result and HNSW EXPLAIN path passed",
+    "strict_prefix": "response-preference head and automatic recall are separate source heads; ALL_DISABLED appends CLEARED or no-op for both, WRITE_DISABLED keeps both visible, normal steers cannot weaken the current ROOT epoch, the next true ROOT user message resets policy, SYSTEM and tools remain equal, and messages only append a suffix",
+    "governance_faults": "plain duplicate, exact existing-source relation in both CONTRADICTS endpoint directions, taxonomy correction, ACK-unknown confirmation, candidate/fact attribution, relation all-or-none, echo and scope fences passed",
+    "optional_retrieval_faults": "main-model credentials never cross into embedding/rerank; provider construction and contradiction-enrichment failures preserve sparse/explicit advisory fallback without failing the conversation",
+    "ruff": "passed",
+    "compileall": "passed_src_tests_tools",
+    "terminal_protocol_generation": "passed",
+    "go_test": "passed_all_packages",
+    "go_vet": "passed",
+    "go_mod_verify": "passed_all_modules",
+    "uv_lock_check": "passed",
+    "git_diff_check": "passed",
+    "new_skip_or_xfail": 0
+  },
+  "real_provider_dogfood": {
+    "status": "passed",
+    "database": "fresh clean-v0 ephemeral PostgreSQL database force-dropped after each attempt; the user database was untouched",
+    "end_to_end": {
+      "elapsed_seconds": 17.633,
+      "provider_model_role": "pro",
+      "provider_call_count": 4,
+      "tool_names": [
+        "remember",
+        "memory_search"
+      ],
+      "tool_result_states": [
+        "SUCCESS",
+        "SUCCESS"
+      ],
+      "candidate_terminal_state": "ACCEPTED",
+      "accepted_fact_count": 1,
+      "remember_turn_finalized": true,
+      "search_turn_finalized": true
+    },
+    "embedding_adapter": {
+      "provider_contract": "text-embedding-v4",
+      "dimensions": 1024,
+      "all_finite": true,
+      "nonzero_norm": true
+    },
+    "rerank_adapter": {
+      "provider_contract": "qwen3-rerank",
+      "candidate_count": 3,
+      "complete_index_permutation": true,
+      "all_scores_finite": true
+    },
+    "remote_latency_observations": {
+      "cold_query_embedding_ms": {
+        "samples": 1,
+        "min": 1191.3,
+        "p50": 1191.3,
+        "p95": 1191.3,
+        "max": 1191.3
+      },
+      "warm_query_embedding_ms": {
+        "samples": 3,
+        "min": 373.3,
+        "p50": 386.4,
+        "p95": 386.4,
+        "max": 389.3
+      },
+      "top20_rerank_ms": {
+        "samples": 3,
+        "min": 355.8,
+        "p50": 373.7,
+        "p95": 373.7,
+        "max": 1003.0
+      },
+      "explicit_dense_rerank_e2e_ms": {
+        "samples": 3,
+        "min": 759.3,
+        "p50": 795.5,
+        "p95": 795.5,
+        "max": 800.8
+      },
+      "used_as_correctness_gate": false
+    },
+    "weak_completion_probe": "an additional real-provider candidate was conservatively ABANDONED after strict governance output validation; no fact or embedding was written and the conversation still finalized normally",
+    "api_key_dsn_headers_full_prompt_memory_body_query_candidate_vector_score_private_url_or_raw_response_recorded": false
+  },
+  "oracles": {
+    "committed_event_types": 31,
+    "live_event_types": 23,
+    "subject_slots": 13,
+    "append_guards": 2,
+    "product_relations": 25,
+    "memory_relations": 6,
+    "durable_job_handlers": 1,
+    "memory_committed_events": 0,
+    "memory_durable_job_handlers": 0,
+    "new_append_guards": 0,
+    "new_protocol_types": 0
+  },
+  "production_diff": {
+    "tracked_modified_or_deleted_files_under_src_and_clients": 57,
+    "new_python_files_under_src": 14,
+    "lines_added": 12003,
+    "lines_deleted": 3420,
+    "net_lines": 8583,
+    "counting_scope": "git numstat under src and clients plus wc -l for untracked production Python files; dependency manifests, tests, documentation and machine evidence are excluded"
+  },
+  "permanent_absences": {
+    "memory_event_or_event_replay": true,
+    "memory_durable_job_or_governance_retry": true,
+    "memory_receipt_checkpoint_projection_repair_or_recovery_graph": true,
+    "generic_existing_source_relation_writer": true,
+    "candidate_to_candidate_or_relation_backpatch": true,
+    "embedding_or_reranker_canonical_authority": true,
+    "oxigraph_sparql_jsonld_or_generic_graph_dsl": true,
+    "cross_host_memory_processing_recovery": true,
+    "permission_or_business_authority_from_memory": true
+  },
+  "remaining_blockers": [],
+  "non_goals": [
+    "Round 5B compaction, summary generation, snapshot adoption or provider-input rebase",
+    "memory deletion, forget or privacy-erasure UI",
+    "generic graph query, arbitrary-hop traversal, user-defined relations or cross-domain relations",
+    "durable reflection history, recall trace, embedding receipt, rerank usage or vector freshness guarantee",
+    "automatic generative extraction beyond Cheap Hint Reflection",
+    "ACTION_RULE enforcement or permission changes driven by memory",
+    "MCP-backed skill activation and Go TUI memory panel",
+    "online migration or compatibility import of old memory data"
+  ]
+}

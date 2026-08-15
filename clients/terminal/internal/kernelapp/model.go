@@ -1087,8 +1087,7 @@ func validateCanonicalControl(control *protocolv3.CanonicalControl) error {
 		}
 	}
 	validHandlers := map[string]struct{}{
-		"BACKGROUND_COMPACTION": {}, "POST_COMPACTION_MEMORY_EXTRACTION": {},
-		"MEMORY_GOVERNANCE": {}, "MEMORY_INDEX_REFRESH": {},
+		"BACKGROUND_COMPACTION": {},
 	}
 	for _, job := range control.Jobs {
 		if job == nil {
@@ -1098,19 +1097,6 @@ func validateCanonicalControl(control *protocolv3.CanonicalControl) error {
 		if job.JobId == "" || !knownHandler || (job.Status != "PENDING" && job.Status != "ACTIVE") || job.MaximumAttempts == 0 || job.AttemptCount > job.MaximumAttempts {
 			return fmt.Errorf("canonical durable-job control is invalid")
 		}
-	}
-	if len(control.MemoryFreshness) != 2 {
-		return fmt.Errorf("canonical memory freshness must contain exact two channels")
-	}
-	channels := map[string]struct{}{}
-	for _, freshness := range control.MemoryFreshness {
-		if freshness == nil || (freshness.Channel != "FTS" && freshness.Channel != "VECTOR") || freshness.AppliedGeneration > freshness.DesiredGeneration || freshness.HandlerContract == "" {
-			return fmt.Errorf("canonical memory freshness control is invalid")
-		}
-		if _, duplicate := channels[freshness.Channel]; duplicate {
-			return fmt.Errorf("canonical memory freshness channel is duplicated")
-		}
-		channels[freshness.Channel] = struct{}{}
 	}
 	return nil
 }

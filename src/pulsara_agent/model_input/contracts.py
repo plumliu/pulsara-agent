@@ -89,6 +89,8 @@ class ContextSourceKind(StrEnum):
     ACTIVE_SKILL = "ACTIVE_SKILL"
     PREVIOUS_TURN_OUTCOME = "PREVIOUS_TURN_OUTCOME"
     TOOL_OBSERVATION_FRESHNESS = "TOOL_OBSERVATION_FRESHNESS"
+    MEMORY_RESPONSE_PREFERENCE_HEAD = "MEMORY_RESPONSE_PREFERENCE_HEAD"
+    MEMORY_RECALL = "MEMORY_RECALL"
 
 
 class ContextChannel(StrEnum):
@@ -415,6 +417,7 @@ class ContextSourceCandidate:
     variants: tuple[ContextRenderVariant, ...] = field(repr=False)
     lifecycle: ContextSourceLifecycle = ContextSourceLifecycle.SNAPSHOT_ON_CHANGE
     domain_semantic_fingerprint: str = ""
+    model_visible_memory_fact_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.source_instance_id or not self.source_contract_version:
@@ -430,6 +433,14 @@ class ContextSourceCandidate:
             )
         if not self.domain_semantic_fingerprint.startswith(SHA256_PREFIX):
             raise ValueError("source domain semantic fingerprint is invalid")
+        if (
+            len(self.model_visible_memory_fact_ids) > 128
+            or len(set(self.model_visible_memory_fact_ids))
+            != len(self.model_visible_memory_fact_ids)
+            or any(not value for value in self.model_visible_memory_fact_ids)
+            or len(canonical_json_bytes(self.model_visible_memory_fact_ids)) > 16 * 1024
+        ):
+            raise ValueError("source memory provenance is outside its closed bound")
         if not self.variants:
             raise ValueError("source candidate needs at least one variant")
         modes = tuple(variant.mode for variant in self.variants)
@@ -589,6 +600,7 @@ class ProviderToolCall:
 
 @dataclass(frozen=True, slots=True)
 class ProviderToolResultContextMetadata:
+    result_id: str
     result_state: str
     display_kind: ToolResultDisplayKind
     artifact_disposition: ToolOutputArtifactDisposition
@@ -596,9 +608,12 @@ class ProviderToolResultContextMetadata:
     source_coverage: ToolOutputSourceCoverage
     source_coverage_reason: ToolOutputSourceCoverageReason | None
     artifact_unavailability_reason: ToolOutputArtifactUnavailabilityReason | None
+    model_visible_memory_fact_ids: tuple[str, ...]
     timing: FrozenToolObservationTimingFact
 
     def __post_init__(self) -> None:
+        if not self.result_id:
+            raise ValueError("tool result canonical identity is empty")
         if self.result_state not in {
             "SUCCESS",
             "APPLICATION_ERROR",
@@ -626,6 +641,13 @@ class ProviderToolResultContextMetadata:
             raise ValueError("tool result unavailability is inconsistent")
         if not isinstance(self.timing, FrozenToolObservationTimingFact):
             raise TypeError("tool result timing must be a frozen canonical fact")
+        if (
+            len(self.model_visible_memory_fact_ids) > 50
+            or len(set(self.model_visible_memory_fact_ids))
+            != len(self.model_visible_memory_fact_ids)
+            or any(not value for value in self.model_visible_memory_fact_ids)
+        ):
+            raise ValueError("tool result memory provenance header is invalid")
 
 
 class FrozenProviderInputItemKind(StrEnum):
@@ -1559,6 +1581,9 @@ def provider_input_item_fingerprint(item: FrozenProviderInputItem) -> str:
                         is None
                         else item.tool_result_context.artifact_unavailability_reason.value
                     ),
+                    "model_visible_memory_fact_ids": (
+                        item.tool_result_context.model_visible_memory_fact_ids
+                    ),
                     "timing": item.tool_result_context.timing.fact_fingerprint,
                 }
             ),
@@ -1613,6 +1638,9 @@ class StructuredModelInputCompileRequest:
     compile_binding: ModelInputCompileBinding = field(repr=False)
     sources: CollectedContextSources = field(repr=False)
     dispatch_anchor_entry_id: str | None = None
+    memory_citation_handles: tuple[tuple[str, str], ...] = field(
+        default=(), repr=False
+    )
 
     def __post_init__(self) -> None:
         if not self.context_id or self.model_call_index < 1:
@@ -1632,6 +1660,17 @@ class StructuredModelInputCompileRequest:
             for item in self.canonical_input.items
         ):
             raise ValueError("compile request dispatch anchor is not canonical")
+        result_ids = tuple(item[0] for item in self.memory_citation_handles)
+        handles = tuple(item[1] for item in self.memory_citation_handles)
+        if (
+            len(result_ids) != len(set(result_ids))
+            or len(handles) != len(set(handles))
+            or any(
+                not result_id or not handle
+                for result_id, handle in self.memory_citation_handles
+            )
+        ):
+            raise ValueError("compile request memory citation handles are invalid")
 
 
 @dataclass(frozen=True, slots=True)

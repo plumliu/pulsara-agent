@@ -1303,7 +1303,7 @@ class CanonicalProviderInputReader(CanonicalProviderInputReader):
                 SELECT b.assistant_entry_id, b.tool_call_id, a.id AS attempt_id,
                        i.kind AS plan_interaction_kind,
                        i.status AS plan_interaction_status,
-                       r.session_id AS result_session_id,
+                       r.session_id AS result_session_id, r.id AS result_id,
                        r.result_state, r.result_entry_id,
                        r.output_artifact_disposition, r.output_artifact_id,
                        r.output_source_coverage, r.output_display_kind,
@@ -1313,6 +1313,7 @@ class CanonicalProviderInputReader(CanonicalProviderInputReader):
                        r.observation_duration_microseconds,
                        r.observation_origin_kind,
                        r.tool_reported_duration_microseconds,
+                       r.model_visible_memory_fact_ids,
                        e.entry_sequence, e.blob_id,
                        e.content_digest, e.content_size,
                        e.content_media_type, e.content_codec,
@@ -1757,6 +1758,7 @@ def _tool_result_metadata(
         fact_fingerprint=tool_observation_timing_fingerprint(provisional_timing),
     )
     return ProviderToolResultContextMetadata(
+        result_id=str(row["result_id"]),
         result_state=str(row["result_state"]),
         display_kind=ToolResultDisplayKind(str(row["output_display_kind"])),
         artifact_disposition=ToolOutputArtifactDisposition(
@@ -1781,6 +1783,9 @@ def _tool_result_metadata(
             else ToolOutputArtifactUnavailabilityReason(
                 str(row["output_artifact_unavailability_reason"])
             )
+        ),
+        model_visible_memory_fact_ids=tuple(
+            str(value) for value in row["model_visible_memory_fact_ids"]
         ),
         timing=timing,
     )

@@ -15,12 +15,11 @@
     "plan_workflows": ["SELECT", "INSERT", "UPDATE"],
     "plan_interactions": ["SELECT", "INSERT", "UPDATE"],
     "memory_candidates": ["SELECT", "INSERT", "UPDATE"],
+    "memory_candidate_tool_result_refs": ["SELECT", "INSERT"],
+    "memory_candidate_basis_refs": ["SELECT", "INSERT"],
     "memory_facts": ["SELECT", "INSERT", "UPDATE"],
-    "memory_governance_decisions": ["SELECT", "INSERT"],
-    "memory_index_state": ["SELECT", "INSERT", "UPDATE"],
     "memory_relations": ["SELECT", "INSERT"],
-    "memory_search_index": ["SELECT", "INSERT", "UPDATE", "DELETE"],
-    "memory_vector_index": ["SELECT", "INSERT", "DELETE"],
+    "memory_embeddings": ["SELECT", "INSERT", "UPDATE", "DELETE"],
     "prompt_queue_items": ["SELECT", "INSERT", "UPDATE"],
     "session_commands": ["SELECT", "INSERT"],
     "sessions": ["SELECT", "INSERT", "UPDATE"],
@@ -33,7 +32,10 @@
     "turns": ["SELECT", "INSERT", "UPDATE"]
   },
   "function_grants": {
-    "enforce_conversation_kernel_invariants()": ["EXECUTE"]
+    "enforce_conversation_kernel_invariants()": ["EXECUTE"],
+    "enforce_memory_candidate_lineage()": ["EXECUTE"],
+    "memory_terms_to_tsquery(text[])": ["EXECUTE"],
+    "seal_memory_fact_search_document()": ["EXECUTE"]
   },
   "forbidden_runtime_grants": [
     "CREATE ON SCHEMA public",

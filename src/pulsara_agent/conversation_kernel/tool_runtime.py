@@ -69,6 +69,9 @@ from pulsara_agent.conversation_kernel.io import (
 from pulsara_agent.conversation_kernel.interaction_arbiter import (
     InteractionAdmissionHooks,
 )
+from pulsara_agent.conversation_kernel.memory.contracts import (
+    FrozenModelCallMemoryContext,
+)
 from pulsara_agent.conversation_kernel.execution_watchdogs import (
     KernelExecutionDeadlineFactory,
     KernelWatchdogOwner,
@@ -297,7 +300,7 @@ class KernelMemoryToolPort(Protocol):
         *,
         tool_name: str,
         arguments: Mapping[str, object],
-        assistant_entry_id: str,
+        invocation_context: KernelToolInvocationContext,
     ) -> KernelToolResult: ...
 
 
@@ -808,6 +811,13 @@ class DirectKernelToolPort:
                         descriptor_fingerprint=binding.descriptor_fingerprint,
                         executor_binding_fingerprint=binding.binding_fingerprint,
                         execution_policy=policy,
+                        memory_citation_visibility="WORKSPACE_BOUND",
+                        memory_citation_evidence_kind=(
+                            "MEMORY_READ_EXPOSURE"
+                            if binding.tool_name
+                            in {"memory_search", "memory_get", "memory_explain"}
+                            else "PRIMARY_OBSERVATION"
+                        ),
                     )
                 )
             mcp_runtime = self._mcp_current
@@ -974,6 +984,7 @@ class DirectKernelToolPort:
         assistant_entry_id: str,
         permission_snapshot: FrozenRunPermissionSnapshot,
         surface_borrow: ProcessLocalToolSurfaceBorrow,
+        memory_context: FrozenModelCallMemoryContext,
     ) -> KernelToolAuthorization:
         try:
             binding = self._validate_surface_borrow(surface_borrow, tool_name)
@@ -1001,6 +1012,24 @@ class DirectKernelToolPort:
                 KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
                 "tool-surface:unavailable",
                 f"tool unavailable: {tool_name}",
+            )
+        if memory and (
+            (tool_name == "remember" and not memory_context.memory_use_policy.allows_writes)
+            or (
+                tool_name != "remember"
+                and not memory_context.memory_use_policy.allows_reads
+            )
+        ):
+            return KernelToolAuthorization(
+                KernelToolAuthorizationKind.PERMISSION_DENIED,
+                context_fingerprint(
+                    "pulsara:memory-user-opt-out-authorization:v1",
+                    {
+                        "policy": memory_context.memory_use_policy.value,
+                        "tool_name": tool_name,
+                    },
+                ),
+                "memory use was disabled by the user for this run",
             )
         entry = builtin_tool_catalog_entry(tool_name)
         schema = _json_schema_value(entry.descriptor.input_schema)
@@ -1515,7 +1544,7 @@ class DirectKernelToolPort:
             result = await self._memory.invoke(
                 tool_name=tool_name,
                 arguments=arguments,
-                assistant_entry_id=assistant_entry_id,
+                invocation_context=invocation_context,
             )
             return replace(
                 result,
@@ -1642,6 +1671,7 @@ class DirectKernelToolPort:
                 arguments=arguments,
                 claimed=result.trusted_observation,
             ),
+            model_visible_memory_fact_ids=result.model_visible_memory_fact_ids,
         )
 
     def _invoke_terminal_monitor(

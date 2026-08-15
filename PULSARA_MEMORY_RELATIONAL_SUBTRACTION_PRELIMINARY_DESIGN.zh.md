@@ -1,16 +1,18 @@
 # Pulsara PostgreSQL 记忆模型减法：初步设计
 
-> 状态：**DRAFT / 架构讨论基线，不是实施规格**
+> 状态：**SUPERSEDED — 2026-08-14 / 仅保留为历史讨论输入**
 >
 > 日期：2026-08-10
 >
 > 代码读取基线：`9dfc79f2d0b21ea45dd313b4a62d6aa191919154`，并包含读取时尚未提交的 Stage 2 工作树状态
 >
+> 替代文档：[ROUND_8_ADVISORY_MEMORY_SUBSYSTEM_IMPLEMENTATION_SPEC.zh.md](ROUND_8_ADVISORY_MEMORY_SUBSYSTEM_IMPLEMENTATION_SPEC.zh.md)
+>
 > 上位约束：[PULSARA_DURABILITY_SUBTRACTION_REASSESSMENT.zh.md](PULSARA_DURABILITY_SUBTRACTION_REASSESSMENT.zh.md)
 >
 > Stage 2 输入：[STAGE_2_HARD_CUT_IMPLEMENTATION_SPEC.zh.md](STAGE_2_HARD_CUT_IMPLEMENTATION_SPEC.zh.md)
 
-本文记录 PostgreSQL-only 记忆系统的初步收敛方向。它用于继续讨论记忆类型、关系、候选工具、治理和 bounded recall，不授权修改生产代码，也不替代后续实施规格。
+本文记录 PostgreSQL-only 记忆系统在 2026-08-10 时的初步收敛方向。其关系减法与历史代码调研仍可作为审计输入，但 reliable durable governance/index/event 假设已被 Round 8 的 advisory、weak-completion 设计替代。本文不再作为编码或review真源。
 
 读取期间，另一个 Codex 线程仍在修改 `src/pulsara_agent/conversation_kernel/`。因此本文的 current-state finding 是 2026-08-10 的点时快照；目标设计不依赖未提交实现细节。
 

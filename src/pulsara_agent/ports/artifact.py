@@ -64,6 +64,7 @@ class ToolArtifactRecordView:
     digest: str
     codec: str
     accepted_at_utc: str
+    model_visible_memory_fact_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

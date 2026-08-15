@@ -138,10 +138,6 @@ func snapshot(entries ...*protocolv3.CanonicalEntry) *protocolv3.SnapshotRespons
 		EntrySequenceCut: uint64(len(entries)), EventSequenceCut: uint64(len(entries)),
 		Entries: entries, Control: &protocolv3.CanonicalControl{
 			SessionLifecycle: "OPEN",
-			MemoryFreshness: []*protocolv3.MemoryFreshnessControl{
-				{Channel: "FTS", HandlerContract: "uninitialized@0"},
-				{Channel: "VECTOR", HandlerContract: "uninitialized@0"},
-			},
 		},
 	}
 	value.SnapshotFingerprint = canonicalSnapshotFingerprint(value)
@@ -164,7 +160,7 @@ func TestSnapshotFingerprintAndCanonicalContentIntegrity(t *testing.T) {
 }
 
 func TestCommittedProjectionContractIsExactAndFailClosed(t *testing.T) {
-	if protocolv3.ProjectionContractCount() != 27 {
+	if protocolv3.ProjectionContractCount() != 31 {
 		t.Fatalf("projection contract count = %d", protocolv3.ProjectionContractCount())
 	}
 	model := New(fakeService{})

@@ -89,11 +89,7 @@ _LONG_HORIZON_POLICY_KIND_BY_NAME = {
     "list_mcp_servers": BuiltinToolLongHorizonPolicyKind.EVIDENCE_HYDRATION,
     "read_file": BuiltinToolLongHorizonPolicyKind.EVIDENCE_ACQUISITION,
     "read_mcp_resource": BuiltinToolLongHorizonPolicyKind.EVIDENCE_ACQUISITION,
-    "remember_action_boundary": BuiltinToolLongHorizonPolicyKind.SYNTHESIS_MUTATION,
-    "remember_claim": BuiltinToolLongHorizonPolicyKind.SYNTHESIS_MUTATION,
-    "remember_decision": BuiltinToolLongHorizonPolicyKind.SYNTHESIS_MUTATION,
-    "remember_observation": BuiltinToolLongHorizonPolicyKind.SYNTHESIS_MUTATION,
-    "remember_preference": BuiltinToolLongHorizonPolicyKind.SYNTHESIS_MUTATION,
+    "remember": BuiltinToolLongHorizonPolicyKind.SYNTHESIS_MUTATION,
     "report_agent_phase": BuiltinToolLongHorizonPolicyKind.PROCESS_CONTROL,
     "report_agent_result": BuiltinToolLongHorizonPolicyKind.SYNTHESIS_MUTATION,
     "search_files": BuiltinToolLongHorizonPolicyKind.EVIDENCE_ACQUISITION,
@@ -195,51 +191,85 @@ def _long_horizon_policy(name: str):
     return fixed_tool_action_policy(LongHorizonActionClass(kind.value))
 
 
-def _common_memory_properties() -> dict[str, Any]:
-    return {
+def _remember_parameters() -> dict[str, Any]:
+    schema = object_schema(
+        properties={
         "statement": {
             "type": "string",
-            "description": "The memory content as a single declarative statement.",
+            "minLength": 1,
+            "maxLength": 8192,
+            "description": "One advisory semantic atom. Split distinct ideas into separate remember calls.",
         },
         "scope": {
             "type": "string",
-            "description": "Exact visible scope this memory applies to, e.g. ctx:user or the current ctx:workspace/<id>.",
+            "enum": ["USER", "WORKSPACE"],
+            "description": "USER is visible in the same memory domain; WORKSPACE is limited to this project.",
         },
-        "source_authority": {
+        "kind_hint": {
             "type": "string",
-            "enum": _SOURCE_AUTHORITIES,
-            "description": "Where the authority for this memory comes from.",
+            "enum": [
+                "AUTO", "FACT", "USER_PROFILE", "RESPONSE_PREFERENCE",
+                "ACTION_RULE", "DECISION",
+            ],
+            "default": "AUTO",
         },
-        "verification_status": {
-            "type": "string",
-            "enum": _VERIFICATION_STATUSES,
-            "description": "How well this memory is verified.",
+        "applies_when": {
+            "type": "string", "minLength": 1, "maxLength": 4096,
         },
-        "evidence_ids": {
+        "do_not_apply_when": {
             "type": "array",
-            "items": {"type": "string"},
-            "description": "Evidence node ids that support this memory.",
+            "items": {"type": "string", "minLength": 1, "maxLength": 2048},
+            "maxItems": 8,
         },
-    }
-
-
-def _memory_parameters(
-    *,
-    extra_properties: dict[str, Any] | None = None,
-    extra_required: list[str] | None = None,
-) -> dict[str, Any]:
-    properties = _common_memory_properties()
-    properties.update(extra_properties or {})
-    return object_schema(
-        properties=properties,
-        required=[
-            "statement",
-            "scope",
-            "source_authority",
-            "verification_status",
-            *(extra_required or []),
-        ],
+        "based_on_memory_ids": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "maxItems": 8,
+        },
+        "cited_tool_result_handles": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "maxItems": 8,
+        },
+        },
+        required=["statement", "scope"],
     )
+    schema["allOf"] = [
+        {
+            "if": {"properties": {"kind_hint": {"const": "USER_PROFILE"}},
+                   "required": ["kind_hint"]},
+            "then": {"properties": {"scope": {"const": "USER"}}},
+        },
+        {
+            "if": {"properties": {"kind_hint": {"const": "ACTION_RULE"}},
+                   "required": ["kind_hint"]},
+            "then": {"required": ["applies_when"],
+                     "properties": {"based_on_memory_ids": {"maxItems": 0}}},
+        },
+        {
+            "if": {"properties": {"kind_hint": {"enum": [
+                "FACT", "USER_PROFILE", "RESPONSE_PREFERENCE"
+            ]}}, "required": ["kind_hint"]},
+            "then": {
+                "properties": {
+                    "applies_when": False,
+                    "do_not_apply_when": {"maxItems": 0},
+                    "based_on_memory_ids": {"maxItems": 0},
+                }
+            },
+        },
+        {
+            "if": {"properties": {"kind_hint": {"const": "DECISION"}},
+                   "required": ["kind_hint"]},
+            "then": {
+                "properties": {
+                    "applies_when": False,
+                    "do_not_apply_when": {"maxItems": 0},
+                }
+            },
+        },
+    ]
+    return schema
 
 
 _MEMORY_SEARCH_PARAMETERS = object_schema(
@@ -250,6 +280,7 @@ _MEMORY_SEARCH_PARAMETERS = object_schema(
         },
         "scope": {
             "type": "string",
+            "enum": ["USER", "WORKSPACE"],
             "description": (
                 "Optional exact visible memory scope. Omit this field to search all visible scopes. "
                 "Only set it when the user explicitly names a scope; do not infer the current workspace."
@@ -257,23 +288,21 @@ _MEMORY_SEARCH_PARAMETERS = object_schema(
         },
         "kind": {
             "type": "string",
+            "enum": [
+                "FACT", "USER_PROFILE", "RESPONSE_PREFERENCE",
+                "ACTION_RULE", "DECISION",
+            ],
             "description": (
-                "Optional memory type: Claim, Preference, Observation, ActionBoundary, or Decision. "
+                "Optional memory type: Fact, User Profile, Response Preference, Action Rule, or Decision. "
                 "Omit unless the user explicitly names one of these types; do not infer a type from the question."
             ),
         },
         "limit": {
             "type": "integer",
+            "minimum": 1,
+            "maximum": 50,
             "default": 5,
             "description": "Maximum results to return.",
-        },
-        "max_hops": {
-            "type": "integer",
-            "default": 0,
-            "description": (
-                "Graph expansion depth: 0 for direct retrieval only, 1 for direct relations, "
-                "or 2 for bounded typed multi-hop paths. Choose explicitly from task complexity."
-            ),
         },
     },
     required=["query"],
@@ -296,37 +325,7 @@ _MEMORY_EXPLAIN_PARAMETERS = object_schema(
     },
     required=["memory_id"],
 )
-_COMMON_PARAMETERS = _memory_parameters()
-_ACTION_BOUNDARY_PARAMETERS = _memory_parameters(
-    extra_properties={
-        "applies_when": {
-            "type": "string",
-            "description": "Condition under which this action boundary applies.",
-        },
-        "do_not_apply_when": {
-            "type": "string",
-            "description": "Condition under which this action boundary does not apply.",
-        },
-        "trigger_tools": {"type": "array", "items": {"type": "string"}},
-        "trigger_actions": {"type": "array", "items": {"type": "string"}},
-        "trigger_file_globs": {"type": "array", "items": {"type": "string"}},
-        "trigger_scopes": {"type": "array", "items": {"type": "string"}},
-        "trigger_keywords": {"type": "array", "items": {"type": "string"}},
-        "negative_tools": {"type": "array", "items": {"type": "string"}},
-        "negative_actions": {"type": "array", "items": {"type": "string"}},
-        "negative_file_globs": {"type": "array", "items": {"type": "string"}},
-    },
-    extra_required=["applies_when", "do_not_apply_when"],
-)
-_DECISION_PARAMETERS = _memory_parameters(
-    extra_properties={
-        "based_on_ids": {
-            "type": "array",
-            "items": {"type": "string"},
-            "description": "Prior memory ids this decision builds on.",
-        },
-    }
-)
+_REMEMBER_PARAMETERS = _remember_parameters()
 
 
 _BUILTIN_DESCRIPTORS: dict[str, CapabilityDescriptor] = {
@@ -875,46 +874,13 @@ _BUILTIN_DESCRIPTORS: dict[str, CapabilityDescriptor] = {
         is_concurrency_safe=True,
         permission_category="memory_read",
     ),
-    "remember_claim": _descriptor(
-        name="remember_claim",
-        description="Remember a factual claim with optional evidence.",
-        input_schema=_COMMON_PARAMETERS,
-        provider_kind=CapabilityProviderKind.MEMORY,
-        is_read_only=False,
-        is_concurrency_safe=False,
-        permission_category="memory_write",
-    ),
-    "remember_preference": _descriptor(
-        name="remember_preference",
-        description="Remember a user or workspace preference.",
-        input_schema=_COMMON_PARAMETERS,
-        provider_kind=CapabilityProviderKind.MEMORY,
-        is_read_only=False,
-        is_concurrency_safe=False,
-        permission_category="memory_write",
-    ),
-    "remember_observation": _descriptor(
-        name="remember_observation",
-        description="Remember an observation grounded in conversation, tool output, or another source.",
-        input_schema=_COMMON_PARAMETERS,
-        provider_kind=CapabilityProviderKind.MEMORY,
-        is_read_only=False,
-        is_concurrency_safe=False,
-        permission_category="memory_write",
-    ),
-    "remember_action_boundary": _descriptor(
-        name="remember_action_boundary",
-        description="Remember an action boundary with explicit apply and non-apply conditions.",
-        input_schema=_ACTION_BOUNDARY_PARAMETERS,
-        provider_kind=CapabilityProviderKind.MEMORY,
-        is_read_only=False,
-        is_concurrency_safe=False,
-        permission_category="memory_write",
-    ),
-    "remember_decision": _descriptor(
-        name="remember_decision",
-        description="Remember a decision, optionally linked to prior memory ids it is based on.",
-        input_schema=_DECISION_PARAMETERS,
+    "remember": _descriptor(
+        name="remember",
+        description=(
+            "Propose one advisory memory candidate. Acceptance is asynchronous "
+            "and governed; this never promises that the statement will be saved."
+        ),
+        input_schema=_REMEMBER_PARAMETERS,
         provider_kind=CapabilityProviderKind.MEMORY,
         is_read_only=False,
         is_concurrency_safe=False,
@@ -1019,15 +985,7 @@ class BuiltinToolCatalogEntry:
 
 
 _FILESYSTEM = frozenset({"edit_file", "read_file", "search_files", "write_file"})
-_MEMORY_PROPOSAL = frozenset(
-    {
-        "remember_action_boundary",
-        "remember_claim",
-        "remember_decision",
-        "remember_observation",
-        "remember_preference",
-    }
-)
+_MEMORY_PROPOSAL = frozenset({"remember"})
 _MEMORY_QUERY = frozenset({"memory_explain", "memory_get"})
 _PLAN = frozenset({"ask_plan_question", "enter_plan", "exit_plan"})
 _SUBAGENT_PARENT = frozenset(

@@ -14,6 +14,11 @@ from pulsara_agent.conversation_kernel.direct_model import (
 from pulsara_agent.conversation_kernel.input_continuity import (
     ProcessLocalProviderInputInstallAuthority,
 )
+from pulsara_agent.conversation_kernel.memory.contracts import (
+    FrozenModelCallMemoryContext,
+    FrozenModelVisibleMemoryProvenance,
+    ModelVisibleMemoryProvenanceDisposition,
+)
 from pulsara_agent.conversation_kernel.context_sources import (
     ContextSourceRegistry,
     FrozenNonTriggerContextSources,
@@ -263,7 +268,7 @@ class StaticContextSourceCollector:
         candidates: tuple[ContextSourceCandidate, ...] = (
             _candidate(
                 kind=ContextSourceKind.BASE_SYSTEM,
-                version="pulsara.base-system.prefix-continuity.v3",
+                version="pulsara.base-system.prefix-continuity.v4",
                 channel=ContextChannel.SYSTEM,
                 trust=ContextTrustClass.ROOT_INSTRUCTION,
                 budget=ContextBudgetClass.MUST_KEEP,
@@ -359,6 +364,12 @@ class StaticContextSourceCollector:
             ContextSourceKind.ACTIVE_SKILL: ContextSourceAbsenceKind.EXPLICIT_EMPTY,
             ContextSourceKind.PREVIOUS_TURN_OUTCOME: (
                 ContextSourceAbsenceKind.EXPLICIT_EMPTY
+            ),
+            ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD: (
+                ContextSourceAbsenceKind.NOT_APPLICABLE
+            ),
+            ContextSourceKind.MEMORY_RECALL: (
+                ContextSourceAbsenceKind.NOT_APPLICABLE
             ),
         }
         absent = tuple(
@@ -670,6 +681,7 @@ class StructuredToolPort:
     async def authorize(self, **kwargs: object):
         kwargs.pop("surface_borrow")
         permission = kwargs.pop("permission_snapshot")
+        kwargs.pop("memory_context")
         if not isinstance(permission, FrozenRunPermissionSnapshot):
             raise TypeError("test tool authorization lacks a permission snapshot")
         return await self.delegate.authorize(**kwargs)
@@ -702,6 +714,7 @@ def direct_tool_invocation_context(
     conversation_scope_kind: ModelInputScopeKind = ModelInputScopeKind.ROOT,
     scope_subagent_task_id: str | None = None,
     permission_snapshot: FrozenRunPermissionSnapshot | None = None,
+    memory_context: FrozenModelCallMemoryContext | None = None,
 ) -> tuple[ProcessLocalToolSurfaceBorrow, KernelToolInvocationContext]:
     """Acquire the same narrow surface authority used by the runner."""
 
@@ -737,6 +750,7 @@ def direct_tool_invocation_context(
             tool_surface_fingerprint=prepared.model_surface.surface_fingerprint,
             executor_binding_fingerprint=binding_fingerprint,
             surface_borrow=borrow,
+            memory_context=memory_context or _enabled_memory_context(),
         )
     except BaseException:
         borrow.close()
@@ -756,6 +770,7 @@ async def invoke_direct_tool(
     workspace_id: str = "workspace:test",
     conversation_scope_kind: ModelInputScopeKind = ModelInputScopeKind.ROOT,
     scope_subagent_task_id: str | None = None,
+    memory_context: FrozenModelCallMemoryContext | None = None,
     **kwargs: object,
 ):
     """Invoke through the same short-lived binding borrow as production."""
@@ -771,6 +786,7 @@ async def invoke_direct_tool(
         workspace_id=workspace_id,
         conversation_scope_kind=conversation_scope_kind,
         scope_subagent_task_id=scope_subagent_task_id,
+        memory_context=memory_context,
     )
     try:
         return await port.invoke(
@@ -799,6 +815,7 @@ async def authorize_direct_tool(
     conversation_scope_kind: ModelInputScopeKind = ModelInputScopeKind.ROOT,
     scope_subagent_task_id: str | None = None,
     permission_snapshot: FrozenRunPermissionSnapshot | None = None,
+    memory_context: FrozenModelCallMemoryContext | None = None,
 ):
     """Authorize under a formally acquired immutable surface borrow."""
 
@@ -822,9 +839,19 @@ async def authorize_direct_tool(
             assistant_entry_id=assistant_entry_id,
             surface_borrow=borrow,
             permission_snapshot=permission,
+            memory_context=memory_context or _enabled_memory_context(),
         )
     finally:
         borrow.close()
+
+
+def _enabled_memory_context() -> FrozenModelCallMemoryContext:
+    return FrozenModelCallMemoryContext(
+        FrozenModelVisibleMemoryProvenance(
+            ModelVisibleMemoryProvenanceDisposition.COMPLETE,
+            (),
+        )
+    )
 
 
 def _candidate(
