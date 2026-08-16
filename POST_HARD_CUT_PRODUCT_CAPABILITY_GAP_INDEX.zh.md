@@ -453,9 +453,9 @@ Round 1 已在新 conversation kernel 内恢复产品能力，没有恢复旧 du
 | 切片 | 拥有的产品语义 | 明确不拥有 |
 |---|---|---|
 | Round 5A：Long-horizon execution envelope | 正常ROOT/child turn无固定model/tool call上限；无turn总deadline；Round 3.1 dispatch planning保留单attempt总上界，foreground canonical transaction、writer renewal、provider、tool、Terminal decision与close按closed owner matrix使用各自watchdog；长循环继续满足append-only prefix | compaction、summary、snapshot adoption、context rebase、rollout account、finalization、128K/16K与256K/1M配置决策 |
-| Round 5B：Long-horizon context compaction | active-context测量、safe-point compaction、single-turn continuation、protected tail、explicit continuity epoch rebase、manual/auto/reactive compact | 恢复旧EventLog/reducer/checkpoint/repair、删除canonical transcript、把累计token误当active context |
+| Round 5B：Long-horizon context compaction | active-context测量、safe-point compaction、single-turn continuation、protected tail、explicit continuity epoch rebase、manual/proactive auto/mid-turn compact | 恢复旧EventLog/reducer/checkpoint/repair、删除canonical transcript、把累计token误当active context、provider context-error后的reactive compact/retry |
 
-Round 5A实施规格见[`ROUND_5_LONG_HORIZON_EXECUTION_ENVELOPE_IMPLEMENTATION_SPEC.zh.md`](ROUND_5_LONG_HORIZON_EXECUTION_ENVELOPE_IMPLEMENTATION_SPEC.zh.md)，机器证据见[`round5_long_horizon_execution_envelope_activation.json`](benchmarks/suites/core/v1/round5_long_horizon_execution_envelope_activation.json)。PHC-07A已恢复；PHC-07B仍保持open，不能据此宣传自动compaction或跨context-window continuation。
+Round 5A实施规格见[`ROUND_5_LONG_HORIZON_EXECUTION_ENVELOPE_IMPLEMENTATION_SPEC.zh.md`](ROUND_5_LONG_HORIZON_EXECUTION_ENVELOPE_IMPLEMENTATION_SPEC.zh.md)，机器证据见[`round5_long_horizon_execution_envelope_activation.json`](benchmarks/suites/core/v1/round5_long_horizon_execution_envelope_activation.json)。Round 5B当前实施真源见[`ROUND_5B_LONG_HORIZON_CONTEXT_COMPACTION_IMPLEMENTATION_SPEC.zh.md`](ROUND_5B_LONG_HORIZON_CONTEXT_COMPACTION_IMPLEMENTATION_SPEC.zh.md)，状态仍为DRAFT/NOT ACTIVATED。PHC-07A已恢复；PHC-07B仍保持open，不能据此宣传自动compaction或跨context-window continuation。
 
 ### 6.1 hard-cut 前已存在的产品能力
 
@@ -490,27 +490,26 @@ Round 5A实施规格见[`ROUND_5_LONG_HORIZON_EXECUTION_ENVELOPE_IMPLEMENTATION_
 - `ConversationKernelRepository.adopt_context_snapshot()`；
 - `enqueue_background_compaction()` 与 background compaction job handler。
 
-但这些只是 dormant primitives：production Host/runner 没有调用 adoption 或 enqueue path，CLI 也没有 `:compact`。
+但这些只是 dormant primitives：production Host/runner 没有调用 adoption 或 enqueue path，CLI 也没有manual compact入口。现有唯一durable job就是未接入production的`BACKGROUND_COMPACTION`；Round 5B已决定使用当前主模型在safe point前台生成summary，因此该job及其job/attempt relation、event、subject与claim guard应在实施时删除，不能成为第二套compaction authority。
 
-当前前台路径主要依赖固定 hard bounds：
+Round 5A已经删除固定model/tool-call次数与turn-wide deadline。当前剩余边界是单次provider-input、compiler working set、canonical read、tool result projection等各自owner的physical/resource hard bound；这些边界命中时，当前仍没有snapshot/rebase continuation：
 
-- 每 turn 最多 24 次 model call；
-- 每 call 最大估算输入 128,000 tokens；
-- foreground runner在turn admission创建120秒deadline，并在normal canonical prepare/settlement间复用；provider/tool经过的wall time会使后续canonical操作拿到过期deadline；
-- 输入估算超过 cap 时直接抛出 `ValueError`；
-- model-call 次数耗尽时直接失败。
+- active compiled input接近resolved target budget时没有proactive compaction；
+- fixed prefix或new suffix超过effective input/resource boundary时仍只能typed fail；
+- mid-turn完整tool batch后没有pairing-safe protected-tail rewrite；
+- new turn总是从FULL_HISTORY revision-0开始，不继承已采用snapshot；
+- `adopt_context_snapshot()`当前还禁止source cut进入active turn，因此不能完成single-turn long-agent compaction。
 
 ### 6.3 具体丢失的用户能力
 
 - 长对话不能主动压缩后继续；
 - 运行中增长的 tool output 不能在 safe point 被折叠；
-- 触及 provider input cap 时没有自动 continuation path；
-- 24 次 model-call 限制前没有“为最终回答保留预算”的产品行为；
+- 触及 provider input cap 前没有proactive continuation path；provider报错后的reactive compact明确不进入Round 5B；
 - 长程 Agent 不能把稳定历史与当前未完成 tail 分层；
 - 当前有 snapshot 表并不意味着用户实际获得 compaction；
 - transcript 完整保留这一正确 hard-cut 决策仍成立，但“完整保存历史”目前没有配套的“有界选择历史进入下一 call”产品能力。
 
-其中固定24次model-call与runner总时限造成的task-progress失败由Round 5A负责；snapshot、thinning与context continuation由Round 5B负责。Round 5A完成后只能把PHC-07标成“execution envelope已恢复、compaction仍缺失”，不能宣传完整long-horizon context window已经恢复。
+其中固定model-call与runner总时限造成的task-progress失败已由Round 5A关闭；snapshot、protected tail、summary与context continuation由Round 5B负责。当前仍只能把PHC-07标成“execution envelope已恢复、compaction仍缺失”，不能宣传完整long-horizon context window已经恢复。
 
 以下不计为缺口：不保存 exact context-input audit、不通过 event replay 恢复 execution，以及不删除 canonical transcript。这些是既定减法边界。
 
