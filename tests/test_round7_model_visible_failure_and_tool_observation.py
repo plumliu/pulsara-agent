@@ -327,7 +327,7 @@ def test_round7_source_registry_wire_and_oracle_architecture_guards() -> None:
     ).contract_version == "pulsara.tool-observation-freshness.v1"
     assert (
         COMPILER_CONTRACT_VERSION
-        == "pulsara.structured-model-input-compiler.prefix-continuity.v4"
+        == "pulsara.structured-model-input-compiler.prefix-continuity.v5"
     )
     assert (
         PROVIDER_MESSAGE_LOWERING_CONTRACT

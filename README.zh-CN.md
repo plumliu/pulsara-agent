@@ -56,9 +56,13 @@ epoch。
 Kernel 当前支持：
 
 - OpenAI-compatible Responses 与 Chat Completions transport；
+- 显式provider-neutral `COMPLETED | OUTPUT_INCOMPLETE | PROVIDER_ERROR`
+  model terminal、whole-response atomic assistant acceptance，以及不依赖
+  provider-held response state的same-epoch exact manual reasoning replay；
 - 基于 exact canonical cut 的 provider-neutral structured input compiler：
   closed typed first-party source、按 scope 冻结的 tool schema、目标 estimator
-  精确计量，以及 source/tool-result 的确定性降级；
+  精确计量、source/tool-result 的确定性降级，以及一次冻结的
+  semantic-plus-actual-wire continuity proof；
 - bounded、脱敏的上一turn outcome guidance与append-only tool freshness
   frontier；每条accepted tool result携带immutable observed time、monotonic
   duration disposition、execution origin及optional trusted duration，tool body

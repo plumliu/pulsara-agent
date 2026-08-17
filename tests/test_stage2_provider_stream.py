@@ -19,6 +19,8 @@ from pulsara_agent.ports.live_agent_event import (
     live_digest,
 )
 from pulsara_agent.ports.provider_stream import (
+    ProviderAdapterTerminal,
+    ProviderAdapterTerminalKind,
     ProviderPhysicalCompletionStatus,
     ProviderStreamFailure,
     ProviderStreamTerminal,
@@ -44,6 +46,7 @@ def test_stage2_provider_stream_uses_formal_live_payloads_without_adoption() -> 
                     live_digest(text),
                 ),
                 TransportUsageReport(usage_status="missing", usage=None),
+                ProviderAdapterTerminal(ProviderAdapterTerminalKind.COMPLETED),
             )
         )
     )

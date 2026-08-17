@@ -1,0 +1,266 @@
+{
+  "schema_version": "round5a1-provider-neutral-model-output-termination-activation.v1",
+  "status": "activated",
+  "generated_at_utc": "2026-08-17T00:31:57Z",
+  "captured_head": "e375b5be3a493cf42ec6a7d4aed3392b937935d1",
+  "working_tree_semantics": "Round 5A.1 was implemented and verified in the current uncommitted worktree. The clean checkpoint was preserved as the comparison base. No files were staged, committed, or pushed.",
+  "source_documents": {
+    "ROUND_5A_1_PROVIDER_NEUTRAL_MODEL_OUTPUT_TERMINATION_IMPLEMENTATION_SPEC.zh.md_at_start": "ef01d8fac727456237c318124a172ecbeb7c682ee03b0f9dbfba4f9e58af4ef2",
+    "ROUND_5A_1_PROVIDER_NEUTRAL_MODEL_OUTPUT_TERMINATION_IMPLEMENTATION_SPEC.zh.md_after_activation_update": "ccd2faeaeedf5ea0a3744bdf03373650267c0a2b207ac94016a86446c3b8dfef",
+    "POST_HARD_CUT_PRODUCT_CAPABILITY_GAP_INDEX.zh.md_at_start": "96c2147ae11f605360967213b7be72d241dff4477eb6f8fb1cb94ed70e48ef64",
+    "POST_HARD_CUT_PRODUCT_CAPABILITY_GAP_INDEX.zh.md_after_activation_update": "9a75bd07e25c020109f70022bfa7d0d331a069d02ee46de3b809ca2cdd10688e",
+    "PULSARA_DURABILITY_SUBTRACTION_REASSESSMENT.zh.md": "cb3e7b0a9f33e5e4c5b17850d47e1af580a3f23f094f868076351bb17a6a6e80",
+    "README.md_after_activation_update": "2ef869dfdbc54b93db6c9db650f1b6ed237cc9632b9081c005b452a7e6528e3a",
+    "README.zh-CN.md_after_activation_update": "0792c6c155ed2867eddd58175af7c6105d5fa96b063f294c20bd623daf711029"
+  },
+  "post_activation_code_sha256": {
+    "ports/provider_stream.py": "1842a55d1516849dce22287bf49cd414f3b7ef523e517f511eb600db67833156",
+    "llm/adapters/openai/chat_completions.py": "d9dc2c3692bbf4efe8fb60e3c6ab3236ec7ec9c456a7cd00005d1997d9e71ed8",
+    "llm/adapters/openai/responses.py": "d6ad79432e9c5f7703e3b2be473ba82d2418f299c89cb79ce57d5b601658f8df",
+    "llm/normalized_transport.py": "149644c79db28fbe3ef2e97a8e5d711d84f5b3afbc4d180f2426905a8bf327de",
+    "llm/provider.py": "68c642aa080901321c0eb75644a62fa6bbf0d99b6c316405f34f4121b23b61e5",
+    "llm/request.py": "fcd8ff6faf7998a5daaea36fe3655cb6d75cf9b67a14007a114fe41ec8a69bf9",
+    "conversation_kernel/direct_model.py": "ba01d14daf8353433c72f20f8565c0903aaa07ff4afaa8da6eb0df5f17c6ef18",
+    "conversation_kernel/input_continuity.py": "3a700cf9841db9ac45b9fcf94c42c07904b32875b65b81b96f6e3c44820d1fbf",
+    "conversation_kernel/assistant_settlement.py": "43d615a79f61d1743b127adb47e1b4e8f7ec40a815a66f7029702e2fef970bc8",
+    "conversation_kernel/runner.py": "cfba52d0f84299d53b0760d707ab7edc795a55a2599426cbb46f63ed9d4e7cf6",
+    "conversation_kernel/host.py": "f411663528a00ddd01de3e9295c95762f3ff2a5fdce9a50306b8d6db040bf360",
+    "conversation_kernel/auxiliary_model.py": "29161abf02d137a072269075f8f02b654400f94a9d6935ef8d0a4eb2f83017ad",
+    "model_input/compiler.py": "eee0c9c47babddc4b7fca34ca51a39c529e032eb875d4c39d7fc436a12a05e49",
+    "model_input/continuity.py": "8c5845b47836539a55fecc4d01be19522094e590ba44497e4b7d0579c847192a",
+    "test_round5a1_provider_output_termination.py": "c9f5176774ba4ede539d7cdb9a6fb45ec3d52437615b5211a42b71d32b8fb393",
+    "test_round5a1_architecture.py": "d4e61ac6d79267c59e6a5021c2163aa9335473e409e7b2aa8b38377c24f95f0d",
+    "test_stage2_conversation_runner.py": "5e04377df065170fab9924eda63a03acbf0297b9e18cd3f0349e8e033086d23b"
+  },
+  "provider_output_contract": {
+    "provider_neutral_terminal": [
+      "COMPLETED",
+      "OUTPUT_INCOMPLETE",
+      "PROVIDER_ERROR"
+    ],
+    "whole_response_atomicity": "Only COMPLETED may install one complete assistant message; OUTPUT_INCOMPLETE and PROVIDER_ERROR install no assistant, tool attempt, or physical tool effect.",
+    "chat_accumulation": [
+      "TEXT_CONCAT",
+      "SINGLE_EXACT_VALUE",
+      "ORDERED_ARRAY_APPEND"
+    ],
+    "chat_terminal_echo": "After the first semantic terminal, an identical finish_reason with an empty assistant delta is idempotent transport metadata. Usage may be installed once or repeated exactly; conflicting reason, semantic delta, final message, or usage still fails closed.",
+    "responses_output_allowlist": [
+      "reasoning",
+      "message",
+      "function_call"
+    ],
+    "responses_message_content_allowlist": [
+      "output_text",
+      "text"
+    ],
+    "responses_public_order": "At most one message item is accepted and it must precede every function_call; reasoning may occur anywhere. Non-representable order fails before canonical acceptance.",
+    "reasoning_replay": "A bounded completed-response carrier is process-local, reserves exact Host/epoch capacity before assistant mutation, promotes only after the exact winner is FULL, and is replayed exactly only inside the same Host, scope, target/profile, and continuity epoch.",
+    "remote_response_id_as_authority": false,
+    "hidden_reasoning_persisted": false
+  },
+  "wire_input_and_settlement": {
+    "plan_first": "One FrozenProviderWireInputPlan materializes root policy, tools, ordered input, exact reasoning replacements, quote, and wire fingerprints before preflight.",
+    "continuity_cas": "The Host-scoped continuity owner atomically validates and installs both the compiler semantic view and the actual wire SYSTEM/tools/input proof before open_once.",
+    "strict_prefix": "For one compatible Host/scope/epoch, SYSTEM and tools are byte-stable and ordered provider wire input is equal or append-only suffix.",
+    "assistant_settlement": "One Host-owned shielded AssistantMessageSettlementAttempt owns the stable assistant candidate and immutable replay-capacity reservation through FULL/NONE/CONFLICT confirmation; caller cancellation detaches and cannot abandon an ACK-unknown winner.",
+    "auxiliary_incomplete": "Auxiliary JSON consumers parse only COMPLETED output and treat incomplete output as a typed non-result.",
+    "tool_effect_on_incomplete": "No attempt is accepted and physical invocation count remains zero."
+  },
+  "deterministic_verification": {
+    "pytest_collection": "657_tests_collected_in_1.23s",
+    "round5a1_and_retained_round3_3_1_5a_7_8": "258_passed_in_70.07s",
+    "postgres_marker": "177_passed_472_deselected_in_85.98s",
+    "pre_review_full_pytest": "649_passed_in_122.79s",
+    "post_review_full_pytest": "not_rerun_after_local_order_and_capacity_closure; adjacent regression is recorded separately",
+    "chat_and_responses_terminal_matrix": "completed, output-limit, content-filter/policy, provider-error, EOF-before-terminal, exact-empty Chat terminal echo, conflicting terminal, and semantic event-after-terminal cases passed",
+    "whole_response_atomicity": "ROOT and SUBAGENT_TASK incomplete-after-text/tool cases committed no assistant, attempt, result, or physical effect",
+    "reasoning_exact_replay": "Chat text/opaque fields and Responses ordered output items replayed exactly; malformed, conflicting, oversized, or unsupported carriers failed closed",
+    "wire_prefix_golden": "semantic and actual-wire fingerprints proved SYSTEM/tools equality and ordered-input append-only suffix for Chat and Responses",
+    "assistant_ack_unknown": "shielded settlement confirmed or reissued only the stable candidate and cold-reset the process-local replay epoch on conflict",
+    "post_review_responses_order": "50 adapter/terminal tests passed; function_call-before-message is rejected before canonical acceptance and message-before-function_call remains exact replayable",
+    "post_review_complete_tool_loop": "Chat and Responses each completed reasoning + tool request -> assistant FULL -> one physical tool/result -> exact second-request replay -> final assistant",
+    "post_review_capacity_reservation": "Near-bound injection raised before commit_assistant_message; commit call count and assistant-row count were both zero",
+    "post_review_adjacent_regression": "111 passed across Round 5A.1 adapter, architecture, runner and DirectModel suites",
+    "auxiliary_incomplete": "governance/reflection/direct auxiliary consumers never parsed partial JSON",
+    "ruff": "passed",
+    "compileall": "passed_src_tests_tools",
+    "terminal_protocol_generation": "passed",
+    "go_test": "passed_all_packages",
+    "go_vet": "passed",
+    "go_mod_verify": "passed_all_modules",
+    "uv_lock_check": "passed",
+    "git_diff_check": "passed",
+    "new_skip_or_xfail": 0
+  },
+  "real_provider_conformance": {
+    "status": "completed_with_one_fail_closed_endpoint_profile_incompatibility",
+    "post_review_remote_rerun": true,
+    "post_review_remote_rerun_disposition": "OpenRouter Chat terminal normalization was re-probed with bounded text, virtual-tool and append-only cache chains. Responses ordering and replay-capacity correctness remain deterministic local gates.",
+    "all_four_providers_received_bounded_paid_requests": true,
+    "no_effect_virtual_tool_only": true,
+    "api_key_dsn_header_full_prompt_hidden_reasoning_tool_arguments_or_raw_response_recorded": false,
+    "matrix": [
+      {
+        "provider": "bobdong",
+        "model": "gpt-5.4",
+        "api": "openai_chat_completions",
+        "request_sent": true,
+        "terminal_conformance": "passed",
+        "complete_tool_call": "passed",
+        "manual_full_history_replay": "passed",
+        "small_output_cap": "endpoint_returned_completed_instead_of_incomplete"
+      },
+      {
+        "provider": "bobdong",
+        "model": "gpt-5.4",
+        "api": "openai_responses",
+        "request_sent": true,
+        "terminal_conformance": "passed",
+        "complete_tool_call": "passed",
+        "manual_full_history_replay": "passed",
+        "small_output_cap": "endpoint_returned_completed_instead_of_incomplete"
+      },
+      {
+        "provider": "deepseek",
+        "model": "deepseek-v4-flash",
+        "api": "openai_chat_completions",
+        "request_sent": true,
+        "terminal_conformance": "passed",
+        "complete_tool_call": "passed",
+        "manual_full_history_replay": "passed",
+        "small_output_cap": "endpoint_returned_completed_instead_of_incomplete"
+      },
+      {
+        "provider": "deepseek",
+        "model": "deepseek-v4-flash",
+        "api": "openai_responses",
+        "request_sent": true,
+        "terminal_conformance": "passed",
+        "complete_tool_call": "passed",
+        "manual_full_history_replay": "passed",
+        "small_output_cap": "OUTPUT_INCOMPLETE_OUTPUT_TOKEN_LIMIT_and_zero_tool_effect"
+      },
+      {
+        "provider": "dashscope",
+        "model": "qwen3.7-plus",
+        "api": "openai_chat_completions",
+        "request_sent": true,
+        "terminal_conformance": "passed",
+        "complete_tool_call": "passed",
+        "manual_full_history_replay": "passed",
+        "small_output_cap": "OUTPUT_INCOMPLETE_OUTPUT_TOKEN_LIMIT_and_zero_tool_effect"
+      },
+      {
+        "provider": "dashscope",
+        "model": "qwen3.7-plus",
+        "api": "openai_responses",
+        "request_sent": true,
+        "terminal_conformance": "failed_closed_endpoint_profile_incompatibility",
+        "incompatibility": "streamed reasoning text was absent from the final completed output item, so exact output reconciliation rejected the response"
+      },
+      {
+        "provider": "openrouter",
+        "model": "openai/gpt-5.6-luna",
+        "api": "openai_chat_completions",
+        "request_sent": true,
+        "terminal_conformance": "passed_with_vendor_neutral_exact_empty_terminal_echo_normalization",
+        "complete_tool_call": "passed",
+        "manual_full_history_replay": "passed_with_positive_cached_prefix_observation",
+        "small_output_cap": "not_rerun_after_terminal_echo_normalization"
+      },
+      {
+        "provider": "openrouter",
+        "model": "openai/gpt-5.6-luna",
+        "api": "openai_responses",
+        "request_sent": true,
+        "terminal_conformance": "passed",
+        "complete_tool_call": "passed",
+        "manual_full_history_replay": "passed",
+        "small_output_cap": "OUTPUT_INCOMPLETE_OUTPUT_TOKEN_LIMIT_and_zero_tool_effect"
+      }
+    ],
+    "openrouter_chat_terminal_echo_observation": {
+      "raw_short_probes": 28,
+      "raw_short_probes_with_duplicate_terminal": 28,
+      "text_reason_sequence": "stop -> stop",
+      "tool_reason_sequence": "tool_calls -> tool_calls",
+      "production_accumulator_real_text": "2 raw terminal frames -> 1 COMPLETED adapter terminal with one Text semantic sequence",
+      "production_accumulator_real_tool": "2 raw terminal frames -> 1 COMPLETED adapter terminal with one ToolCall semantic sequence",
+      "terminal_fields_replayed_in_outbound_history": 0,
+      "four_step_text_append_chain": [
+        {"call":1,"input_tokens":14022,"cached_tokens":0,"uncached_tokens":14022,"cache_metric":"zero"},
+        {"call":2,"input_tokens":14043,"cached_tokens":14019,"uncached_tokens":24,"cache_metric":"positive"},
+        {"call":3,"input_tokens":14064,"cached_tokens":14040,"uncached_tokens":24,"cache_metric":"positive"},
+        {"call":4,"input_tokens":14085,"cached_tokens":14061,"uncached_tokens":24,"cache_metric":"positive"}
+      ],
+      "tool_continuation_cache": {"input_tokens":14107,"cached_tokens":13938,"uncached_tokens":169,"cache_metric":"positive"},
+      "correctness_note": "Terminal metadata is never part of Chat history; one complete assistant message and any tool result are appended exactly once. Cache metrics are observational, not the correctness gate."
+    },
+    "cache_observation": {
+      "correctness_gate": false,
+      "local_strict_prefix_proof_is_the_correctness_gate": true,
+      "bounded_deterministic_prefix": "approximately 14000 provider-reported input tokens; prompt body not retained",
+      "calls": [
+        {"provider":"bobdong","api":"openai_chat_completions","call":1,"prefix_fingerprint":"sha256:9ce1c8189d486c7cba6f49360a4c143f51370ea1b0e1f493fc5d235586809a22","input_tokens":14068,"output_tokens":5,"cached_tokens":null,"uncached_tokens":null,"cache_metric":"absent"},
+        {"provider":"bobdong","api":"openai_chat_completions","call":2,"prefix_fingerprint":"sha256:fa91e61f0d5fc47753fd9baaca031c5ce4e85d61e3cc74d1d92b50228c807d52","input_tokens":14078,"output_tokens":5,"cached_tokens":13568,"uncached_tokens":510,"cache_metric":"positive"},
+        {"provider":"bobdong","api":"openai_chat_completions","call":3,"prefix_fingerprint":"sha256:f0d5a1ae217af8efd04204b9ebc0dbf3cbe96110e6b81435fd95a3e0bf82f943","input_tokens":14088,"output_tokens":5,"cached_tokens":13568,"uncached_tokens":520,"cache_metric":"positive"},
+        {"provider":"bobdong","api":"openai_responses","call":1,"prefix_fingerprint":"sha256:9ce1c8189d486c7cba6f49360a4c143f51370ea1b0e1f493fc5d235586809a22","input_tokens":14068,"output_tokens":5,"cached_tokens":0,"uncached_tokens":14068,"cache_metric":"zero"},
+        {"provider":"bobdong","api":"openai_responses","call":2,"prefix_fingerprint":"sha256:fa91e61f0d5fc47753fd9baaca031c5ce4e85d61e3cc74d1d92b50228c807d52","input_tokens":14078,"output_tokens":5,"cached_tokens":0,"uncached_tokens":14078,"cache_metric":"zero"},
+        {"provider":"bobdong","api":"openai_responses","call":3,"prefix_fingerprint":"sha256:f0d5a1ae217af8efd04204b9ebc0dbf3cbe96110e6b81435fd95a3e0bf82f943","input_tokens":14088,"output_tokens":5,"cached_tokens":13568,"uncached_tokens":520,"cache_metric":"positive"},
+        {"provider":"deepseek","api":"openai_chat_completions","call":1,"prefix_fingerprint":"sha256:9ce1c8189d486c7cba6f49360a4c143f51370ea1b0e1f493fc5d235586809a22","input_tokens":14104,"output_tokens":42,"cached_tokens":0,"uncached_tokens":14104,"cache_metric":"zero"},
+        {"provider":"deepseek","api":"openai_chat_completions","call":2,"prefix_fingerprint":"sha256:fa91e61f0d5fc47753fd9baaca031c5ce4e85d61e3cc74d1d92b50228c807d52","input_tokens":14110,"output_tokens":56,"cached_tokens":14080,"uncached_tokens":30,"cache_metric":"positive"},
+        {"provider":"deepseek","api":"openai_chat_completions","call":3,"prefix_fingerprint":"sha256:f0d5a1ae217af8efd04204b9ebc0dbf3cbe96110e6b81435fd95a3e0bf82f943","input_tokens":14117,"output_tokens":54,"cached_tokens":14080,"uncached_tokens":37,"cache_metric":"positive"},
+        {"provider":"deepseek","api":"openai_responses","call":1,"prefix_fingerprint":"sha256:9ce1c8189d486c7cba6f49360a4c143f51370ea1b0e1f493fc5d235586809a22","input_tokens":14104,"output_tokens":33,"cached_tokens":14080,"uncached_tokens":24,"cache_metric":"positive"},
+        {"provider":"deepseek","api":"openai_responses","call":2,"prefix_fingerprint":"sha256:fa91e61f0d5fc47753fd9baaca031c5ce4e85d61e3cc74d1d92b50228c807d52","input_tokens":14110,"output_tokens":32,"cached_tokens":14080,"uncached_tokens":30,"cache_metric":"positive"},
+        {"provider":"deepseek","api":"openai_responses","call":3,"prefix_fingerprint":"sha256:f0d5a1ae217af8efd04204b9ebc0dbf3cbe96110e6b81435fd95a3e0bf82f943","input_tokens":14117,"output_tokens":59,"cached_tokens":14080,"uncached_tokens":37,"cache_metric":"positive"},
+        {"provider":"dashscope","api":"openai_chat_completions","call":1,"prefix_fingerprint":"sha256:9ce1c8189d486c7cba6f49360a4c143f51370ea1b0e1f493fc5d235586809a22","input_tokens":14035,"output_tokens":66,"cached_tokens":0,"uncached_tokens":14035,"cache_metric":"zero"},
+        {"provider":"dashscope","api":"openai_chat_completions","call":2,"prefix_fingerprint":"sha256:fa91e61f0d5fc47753fd9baaca031c5ce4e85d61e3cc74d1d92b50228c807d52","input_tokens":14042,"output_tokens":66,"cached_tokens":12672,"uncached_tokens":1370,"cache_metric":"positive"},
+        {"provider":"dashscope","api":"openai_chat_completions","call":3,"prefix_fingerprint":"sha256:f0d5a1ae217af8efd04204b9ebc0dbf3cbe96110e6b81435fd95a3e0bf82f943","input_tokens":14049,"output_tokens":66,"cached_tokens":12672,"uncached_tokens":1377,"cache_metric":"positive"},
+        {"provider":"openrouter","api":"openai_responses","call":1,"prefix_fingerprint":"sha256:9ce1c8189d486c7cba6f49360a4c143f51370ea1b0e1f493fc5d235586809a22","input_tokens":14030,"output_tokens":5,"cached_tokens":0,"uncached_tokens":14030,"cache_metric":"zero"},
+        {"provider":"openrouter","api":"openai_responses","call":2,"prefix_fingerprint":"sha256:fa91e61f0d5fc47753fd9baaca031c5ce4e85d61e3cc74d1d92b50228c807d52","input_tokens":14040,"output_tokens":5,"cached_tokens":14027,"uncached_tokens":13,"cache_metric":"positive"},
+        {"provider":"openrouter","api":"openai_responses","call":3,"prefix_fingerprint":"sha256:f0d5a1ae217af8efd04204b9ebc0dbf3cbe96110e6b81435fd95a3e0bf82f943","input_tokens":14050,"output_tokens":35,"cached_tokens":14037,"uncached_tokens":13,"cache_metric":"positive"}
+      ]
+    }
+  },
+  "oracles": {
+    "committed_event_types": 31,
+    "live_event_types": 23,
+    "subject_slots": 13,
+    "append_guards": 2,
+    "product_relations": 25,
+    "durable_job_handlers": 1,
+    "new_product_relations": 0,
+    "new_committed_events": 0,
+    "new_live_events": 0,
+    "new_subject_slots": 0,
+    "new_append_guards": 0,
+    "new_durable_jobs": 0,
+    "new_protocol_types": 0
+  },
+  "production_diff": {
+    "modified_tracked_files_under_src": 19,
+    "new_files_under_src": 1,
+    "lines_added": 3986,
+    "lines_deleted": 359,
+    "net_lines": 3627,
+    "counting_scope": "tracked git diff under src plus the untracked assistant_settlement.py production module"
+  },
+  "permanent_absences": {
+    "round5b_compaction_summary_snapshot_or_adoption": true,
+    "partial_answer_continuation": true,
+    "provider_remote_response_id_as_correctness_authority": true,
+    "hidden_reasoning_durable_persistence": true,
+    "receipt_checkpoint_reducer_projection_repair_or_execution_replay": true,
+    "schema_event_subject_guard_job_or_protocol_growth": true
+  },
+  "remaining_blockers": [],
+  "non_goals": [
+    "Round 5B reactive or proactive compaction",
+    "summary generation, snapshot adoption, or continuity rebase",
+    "partial-answer continuation after an incomplete response",
+    "MCP promotion or any additional capability round",
+    "cross-Host hidden-reasoning replay",
+    "changes to the production default output cap"
+  ]
+}

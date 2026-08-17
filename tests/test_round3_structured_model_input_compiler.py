@@ -28,8 +28,10 @@ from pulsara_agent.conversation_kernel.context_sources import (
     KernelContextSourceCollector,
 )
 from pulsara_agent.conversation_kernel.direct_model import (
+    CompletedProviderModelExecution,
     DirectKernelModelPort,
     KernelModelPreparationRequest,
+    PreparedKernelModelCall,
 )
 from pulsara_agent.conversation_kernel.input_continuity import (
     HostProviderInputContinuityOwner,
@@ -57,7 +59,16 @@ from pulsara_agent.conversation_kernel.tool_policy import (
 )
 from pulsara_agent.conversation_kernel.tool_runtime import DirectKernelToolPort
 from pulsara_agent.conversation_kernel.live import LiveAgentEventBus
-from pulsara_agent.llm.input import MessageRole
+from pulsara_agent.llm.input import LLMMessage, MessageRole
+from pulsara_agent.llm.provider import (
+    ProviderProfile,
+    ThinkingProfile,
+    ThinkingReplayPolicy,
+)
+from pulsara_agent.llm.request import (
+    provider_assistant_message_public_projection_fingerprint,
+)
+from pulsara_agent.llm.result import TransportUsageReport
 from pulsara_agent.model_input.compiler import (
     COMPILER_CONTRACT_VERSION,
     StructuredModelInputCompiler,
@@ -140,10 +151,16 @@ from pulsara_agent.ports.tool_execution import (
     ToolOutputSourceCoverage,
     ToolOutputSourceCoverageReason,
 )
+from pulsara_agent.ports.provider_stream import (
+    ProviderNormalizedTerminalKind,
+    ProviderStreamTerminal,
+    freeze_provider_adapter_completed_replay_payload,
+)
 from pulsara_agent.primitives.context import (
     FrozenJsonObjectFact,
     context_fingerprint,
     freeze_json,
+    thaw_json,
 )
 from pulsara_agent.primitives.model_call import ModelCallPurpose
 from pulsara_agent.primitives.permission import PermissionMode
@@ -154,6 +171,8 @@ from pulsara_agent.primitives.plan_workflow import (
     PlanWorkflowStatus,
     extract_plan_draft,
 )
+
+
 from pulsara_agent.primitives.run_permission import (
     RunPermissionAdmissionSource,
     build_run_permission_snapshot,
@@ -167,6 +186,11 @@ from pulsara_agent.primitives.tool_observation import (
 from pulsara_agent.terminal_process.models import TerminalRequest, TerminalStatus
 from tests.support.model_config import test_llm_config
 from tests.support.round3 import StructuredToolPort
+
+
+_PREPARED_MODEL_CALLS: dict[
+    str, tuple[DirectKernelModelPort, PreparedKernelModelCall]
+] = {}
 
 
 _SOURCE_FACTS = {
@@ -649,6 +673,7 @@ def _prepared_request(
     budget: int = 100_000,
     tool_names: tuple[str, ...] = (),
     canonical_facts: FrozenCanonicalCompileSnapshot | None = None,
+    provider_profile: ProviderProfile | None = None,
 ) -> StructuredModelInputCompileRequest:
     tools = StructuredToolPort(object(), tool_names=tool_names)
     prepared_surface = tools.snapshot_tool_surface(
@@ -661,7 +686,12 @@ def _prepared_request(
             base_url="https://example.invalid/v1",
             pro_model="test-pro",
             flash_model="test-flash",
-            api="openai_chat_completions",
+            api=(
+                "openai_chat_completions"
+                if provider_profile is None
+                else provider_profile.wire_api
+            ),
+            provider_profile=provider_profile,
         )
     )
     prepared = model.prepare_call(
@@ -689,6 +719,9 @@ def _prepared_request(
             tool_surface=binding.tool_surface,
         ),
     )
+    if binding.binding_fingerprint != prepared.compile_binding.binding_fingerprint:
+        raise AssertionError("test preparation changed the compile binding")
+    _PREPARED_MODEL_CALLS[binding.binding_fingerprint] = (model, prepared)
     canonical_facts = canonical_facts or _canonical_facts(snapshot)
     return StructuredModelInputCompileRequest(
         context_id="context:test",
@@ -777,6 +810,7 @@ def _append_compatibility(
         if item.source_kind is ContextSourceKind.BASE_SYSTEM
     )
     binding = request.compile_binding
+    _model, prepared = _PREPARED_MODEL_CALLS[binding.binding_fingerprint]
     return ProviderInputEpochCompatibility(
         compiler_contract_version=COMPILER_CONTRACT_VERSION,
         base_system_semantic_fingerprint=base.source_semantic_fingerprint,
@@ -786,6 +820,10 @@ def _append_compatibility(
         provider_message_lowering_contract=PROVIDER_MESSAGE_LOWERING_CONTRACT,
         context_base_semantic_identity=(
             request.canonical_facts.context_binding_fact.context_base_semantic_identity
+        ),
+        provider_assistant_replay_contract_fingerprint=(
+            prepared.call.target.model_profile.provider_profile
+            .assistant_replay_contract_fingerprint
         ),
     )
 
@@ -854,10 +892,19 @@ def _compile_and_install_append(
         planning=planning,
         compatibility=compatibility,
     )
+    model, prepared_call = _PREPARED_MODEL_CALLS[
+        request.compile_binding.binding_fingerprint
+    ]
+    wire_input_plan = model.plan_wire_input(
+        prepared_call=prepared_call,
+        compiled_input=result.compiled_input,
+        predecessor_view=(None if result.reset_reason is not None else planning.predecessor_view),
+    )
     candidate = _prepared_append_candidate(
         planning=planning,
         compatibility=compatibility,
         compiled_result=result,
+        wire_input_plan=wire_input_plan,
     )
     owner.register(candidate)
     owner.install(
@@ -2858,7 +2905,7 @@ def test_round3_source_decision_and_compiled_fingerprints_are_golden() -> None:
         "sha256:caee1ae23a161f2c862947ef5b7b2b9a4ae3093bce6117e00bc13a3a19058fbd"
     )
     assert compiled.compiled_semantic_fingerprint == (
-        "sha256:f02b8a791504aeb69be6e650e2f64a582fb1846c13a9b39a69de27f0c382e092"
+        "sha256:94989786db924684828e8fe2ba1d54f273807c49e6134833b57a398c2279376e"
     )
     assert compiled.final_estimate.total_input_tokens == 268
 
@@ -2915,6 +2962,223 @@ def test_round3_1_compatible_epoch_appends_clock_without_rewriting_prefix() -> N
         "clock=A",
         "clock=B",
     ]
+
+
+def test_round5a1_reasoning_replay_replaces_exact_assistant_and_keeps_wire_prefix() -> None:
+    profile = ProviderProfile(
+        id="test:chat-replay",
+        wire_api="openai_chat_completions",
+        thinking=ThinkingProfile(
+            enabled=True,
+            message_field="reasoning_content",
+            replay_policy=ThinkingReplayPolicy.ALWAYS,
+        ),
+    )
+    compiler = StructuredModelInputCompiler()
+    owner = HostProviderInputContinuityOwner(session_id="session:test")
+    initial = _user("first", sequence=1)
+    first_request = _prepared_request(
+        _snapshot(initial), _sources(), provider_profile=profile
+    )
+    _first, installed = _compile_and_install_append(
+        compiler=compiler,
+        owner=owner,
+        request=first_request,
+    )
+    _model, first_prepared = _PREPARED_MODEL_CALLS[
+        first_request.compile_binding.binding_fingerprint
+    ]
+    replay_message = freeze_json(
+        {
+            "role": "assistant",
+            "content": "answer",
+            "reasoning_content": "opaque-process-local-reasoning",
+        }
+    )
+    assert isinstance(replay_message, FrozenJsonObjectFact)
+    replay_payload = freeze_provider_adapter_completed_replay_payload(
+        codec_kind=profile.assistant_replay_codec_kind,
+        ordered_items=(replay_message,),
+    )
+    completion = CompletedProviderModelExecution(
+        terminal=ProviderStreamTerminal(
+            terminal_kind=ProviderNormalizedTerminalKind.COMPLETED,
+            usage=TransportUsageReport(usage_status="missing", usage=None),
+            completed_replay_payload=replay_payload,
+        ),
+        replay_payload=replay_payload,
+        replay_scope=profile.reasoning_replay_scope,
+        provider_profile_fingerprint=(
+            installed.wire_input_plan.provider_profile_fingerprint
+        ),
+        resolved_target_fingerprint=(
+            first_prepared.call.target.fact.target_fingerprint
+        ),
+    )
+    public_message = LLMMessage.assistant("answer")
+    fragment = completion.bind_assistant_entry(
+        assistant_entry_id="entry:2",
+        public_projection_fingerprint=(
+            provider_assistant_message_public_projection_fingerprint(public_message)
+        ),
+        has_tool_calls=False,
+    )
+    assert fragment is not None
+    scope = installed.scope
+    reservation = owner.reserve_assistant_replay_fragment(
+        scope=scope,
+        epoch_nonce=installed.epoch_nonce,
+        epoch_revision=installed.epoch_revision,
+        fragment=fragment,
+    )
+    owner.promote_assistant_replay_fragment(reservation)
+
+    assistant = FrozenProviderInputItem(
+        FrozenProviderInputItemKind.ASSISTANT,
+        "entry:2",
+        2,
+        "turn:test",
+        "answer",
+    )
+    second_request = replace(
+        _prepared_request(
+            _snapshot(initial, assistant),
+            _sources(),
+            provider_profile=profile,
+        ),
+        context_id="context:second",
+        model_call_index=2,
+    )
+    _second, successor = _compile_and_install_append(
+        compiler=compiler,
+        owner=owner,
+        request=second_request,
+    )
+    first_wire = installed.wire_input_plan.materialization
+    second_wire = successor.wire_input_plan.materialization
+    assert second_wire.root_policy_value == first_wire.root_policy_value
+    assert second_wire.tool_items == first_wire.tool_items
+    assert second_wire.ordered_input_items[: len(first_wire.ordered_input_items)] == (
+        first_wire.ordered_input_items
+    )
+    assert thaw_json(second_wire.ordered_input_items[-1]) == thaw_json(replay_message)
+    assert successor.messages[: len(installed.messages)] == installed.messages
+
+    follow_up = _user("follow-up", sequence=3)
+    third_request = replace(
+        _prepared_request(
+            _snapshot(initial, assistant, follow_up),
+            _sources(),
+            provider_profile=profile,
+        ),
+        context_id="context:third",
+        model_call_index=3,
+    )
+    _third, third_view = _compile_and_install_append(
+        compiler=compiler,
+        owner=owner,
+        request=third_request,
+    )
+    third_wire = third_view.wire_input_plan.materialization
+    assert third_wire.ordered_input_items[
+        : len(second_wire.ordered_input_items)
+    ] == second_wire.ordered_input_items
+
+
+def test_round5a1_responses_replay_preserves_ordered_items_after_wire_prefix() -> None:
+    profile = ProviderProfile(id="test:responses-replay", wire_api="openai_responses")
+    compiler = StructuredModelInputCompiler()
+    owner = HostProviderInputContinuityOwner(session_id="session:test")
+    initial = _user("first", sequence=1)
+    first_request = _prepared_request(
+        _snapshot(initial), _sources(), provider_profile=profile
+    )
+    _first, installed = _compile_and_install_append(
+        compiler=compiler,
+        owner=owner,
+        request=first_request,
+    )
+    _model, prepared = _PREPARED_MODEL_CALLS[
+        first_request.compile_binding.binding_fingerprint
+    ]
+    replay_items = tuple(
+        freeze_json(item)
+        for item in (
+            {
+                "type": "reasoning",
+                "id": "reasoning:1",
+                "status": "completed",
+                "summary": [],
+                "encrypted_content": "opaque-process-local-value",
+            },
+            {
+                "type": "message",
+                "id": "message:1",
+                "status": "completed",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "answer"}],
+            },
+        )
+    )
+    assert all(isinstance(item, FrozenJsonObjectFact) for item in replay_items)
+    payload = freeze_provider_adapter_completed_replay_payload(
+        codec_kind=profile.assistant_replay_codec_kind,
+        ordered_items=replay_items,  # type: ignore[arg-type]
+    )
+    completion = CompletedProviderModelExecution(
+        terminal=ProviderStreamTerminal(
+            terminal_kind=ProviderNormalizedTerminalKind.COMPLETED,
+            usage=TransportUsageReport(usage_status="missing", usage=None),
+            completed_replay_payload=payload,
+        ),
+        replay_payload=payload,
+        replay_scope=profile.reasoning_replay_scope,
+        provider_profile_fingerprint=(
+            installed.wire_input_plan.provider_profile_fingerprint
+        ),
+        resolved_target_fingerprint=prepared.call.target.fact.target_fingerprint,
+    )
+    public_message = LLMMessage.assistant("answer")
+    fragment = completion.bind_assistant_entry(
+        assistant_entry_id="entry:2",
+        public_projection_fingerprint=(
+            provider_assistant_message_public_projection_fingerprint(public_message)
+        ),
+        has_tool_calls=False,
+    )
+    assert fragment is not None
+    reservation = owner.reserve_assistant_replay_fragment(
+        scope=installed.scope,
+        epoch_nonce=installed.epoch_nonce,
+        epoch_revision=installed.epoch_revision,
+        fragment=fragment,
+    )
+    owner.promote_assistant_replay_fragment(reservation)
+    assistant = FrozenProviderInputItem(
+        FrozenProviderInputItemKind.ASSISTANT,
+        "entry:2",
+        2,
+        "turn:test",
+        "answer",
+    )
+    second_request = replace(
+        _prepared_request(
+            _snapshot(initial, assistant),
+            _sources(),
+            provider_profile=profile,
+        ),
+        context_id="context:responses:second",
+        model_call_index=2,
+    )
+    _second, successor = _compile_and_install_append(
+        compiler=compiler,
+        owner=owner,
+        request=second_request,
+    )
+    first_wire = installed.wire_input_plan.materialization.ordered_input_items
+    second_wire = successor.wire_input_plan.materialization.ordered_input_items
+    assert second_wire[: len(first_wire)] == first_wire
+    assert second_wire[-2:] == replay_items
 
 
 def test_round3_1_active_skill_no_change_and_clear_are_causal_once() -> None:

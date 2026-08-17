@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 import json
 from typing import AsyncIterator
@@ -31,13 +32,17 @@ from pulsara_agent.ports.live_agent_event import (
     payload_to_mapping,
 )
 from pulsara_agent.ports.provider_stream import (
+    ProviderAdapterTerminal,
+    ProviderAdapterTerminalKind,
     ProviderAdapterTransport,
+    ProviderNormalizedTerminalKind,
     ProviderPhysicalCompletion,
     ProviderPhysicalCompletionStatus,
     ProviderStreamFailure,
     ProviderStreamTerminal,
 )
 from pulsara_agent.llm.stream_limits import (
+    MAX_COMPLETED_PROVIDER_RESPONSE_AGGREGATE_BYTES,
     MAX_SANITIZED_SOURCE_PAYLOAD_BYTES_PER_MODEL_CALL,
     MAX_TRANSPORT_SOURCE_ITEMS_PER_MODEL_CALL,
 )
@@ -65,6 +70,7 @@ class NormalizedProviderTransportExecution:
         self._item_count = 0
         self._payload_bytes = 0
         self._terminal_delivered = False
+        self._adapter_terminal_seen = False
         self._physical_completed = False
         self._physical_blocked = False
 
@@ -74,18 +80,13 @@ class NormalizedProviderTransportExecution:
         while True:
             try:
                 item = await anext(self._stream)
+            except asyncio.CancelledError:
+                raise
             except StopAsyncIteration:
                 self._physical_completed = True
-                if self._open:
-                    return self._terminal_error(
-                        "Provider stream ended with an open semantic block.",
-                        "transport_protocol_error",
-                    )
-                self._terminal_delivered = True
-                return ProviderStreamTerminal(
-                    outcome="COMPLETED",
-                    usage=self._usage
-                    or TransportUsageReport(usage_status="missing", usage=None),
+                return self._terminal_error(
+                    "Provider stream ended before an explicit semantic terminal.",
+                    "transport_protocol_error",
                 )
             except BaseException as exc:
                 return self._terminal_error(exc, None)
@@ -103,6 +104,62 @@ class NormalizedProviderTransportExecution:
                     item.message,
                     item.code_hint,
                     retry_summary=item.retry_summary,
+                )
+            if isinstance(item, ProviderAdapterTerminal):
+                if self._adapter_terminal_seen:
+                    return self._terminal_error(
+                        "Provider emitted duplicate semantic terminals.",
+                        "transport_protocol_error",
+                    )
+                self._adapter_terminal_seen = True
+                if (
+                    item.terminal_kind is ProviderAdapterTerminalKind.COMPLETED
+                    and self._open
+                ):
+                    return self._terminal_error(
+                        "Provider completed with an open semantic block.",
+                        "transport_protocol_error",
+                    )
+                replay_bytes = (
+                    0
+                    if item.completed_replay_payload is None
+                    else item.completed_replay_payload.logical_utf8_bytes
+                )
+                if (
+                    self._payload_bytes + replay_bytes
+                    > MAX_COMPLETED_PROVIDER_RESPONSE_AGGREGATE_BYTES
+                ):
+                    return self._terminal_error(
+                        "Provider completed-response aggregate exceeded its byte bound.",
+                        "transport_source_payload_limit_exceeded",
+                    )
+                try:
+                    trailing = await anext(self._stream)
+                except asyncio.CancelledError:
+                    raise
+                except StopAsyncIteration:
+                    self._physical_completed = True
+                except BaseException as exc:
+                    return self._terminal_error(exc, None)
+                else:
+                    return self._terminal_error(
+                        (
+                            "Provider emitted an item after its explicit semantic "
+                            f"terminal ({type(trailing).__name__})."
+                        ),
+                        "transport_protocol_error",
+                    )
+                self._terminal_delivered = True
+                return ProviderStreamTerminal(
+                    terminal_kind=(
+                        ProviderNormalizedTerminalKind.COMPLETED
+                        if item.terminal_kind is ProviderAdapterTerminalKind.COMPLETED
+                        else ProviderNormalizedTerminalKind.OUTPUT_INCOMPLETE
+                    ),
+                    usage=self._usage
+                    or TransportUsageReport(usage_status="missing", usage=None),
+                    incomplete_reason=item.incomplete_reason,
+                    completed_replay_payload=item.completed_replay_payload,
                 )
             if not is_provider_stream_payload(item):
                 return self._terminal_error(
@@ -154,6 +211,8 @@ class NormalizedProviderTransportExecution:
         if callable(closer):
             try:
                 await closer()
+            except asyncio.CancelledError:
+                raise
             except BaseException:
                 self._physical_blocked = True
                 return
@@ -183,7 +242,7 @@ class NormalizedProviderTransportExecution:
     ) -> ProviderStreamTerminal:
         self._terminal_delivered = True
         return ProviderStreamTerminal(
-            outcome="PROVIDER_ERROR",
+            terminal_kind=ProviderNormalizedTerminalKind.PROVIDER_ERROR,
             usage=self._usage
             or TransportUsageReport(usage_status="missing", usage=None),
             error=sanitize_provider_failure(
@@ -268,7 +327,7 @@ class NormalizedLLMTransport:
             DEFAULT_PROVIDER_ERROR_SANITIZATION_CONTRACT.contract_fingerprint
         )
         self.boundary_contract_fingerprint = sha256_fingerprint(
-            "normalized-live-provider-transport:v1",
+            "normalized-live-provider-transport:v2-explicit-terminal",
             {
                 "api": self.api,
                 "binding_id": self.binding_id,

@@ -24,6 +24,12 @@ from pulsara_agent.ports.provider_stream import ProviderStreamFailure
 from pulsara_agent.llm.result import TransportUsageReport
 from pulsara_agent.llm.errors import LLMTransportContractError
 from pulsara_agent.llm.provider import ModelIdentityPolicy
+from pulsara_agent.llm.stream_limits import (
+    MAX_COMPLETED_PROVIDER_RESPONSE_AGGREGATE_BYTES,
+    MAX_PROVIDER_DECODED_JSON_DEPTH,
+    MAX_PROVIDER_DECODED_JSON_NODES,
+    MAX_PROVIDER_DECODED_JSON_STRING_BYTES,
+)
 from pulsara_agent.primitives.model_call import (
     ModelCallDiagnosticFact,
     ModelTokenUsageFact,
@@ -336,17 +342,105 @@ def sdk_event_to_dict(raw_event: Any) -> dict[str, Any]:
     """Normalize SDK model objects and test dictionaries into plain dicts."""
 
     if isinstance(raw_event, dict):
-        return raw_event
-    model_dump = getattr(raw_event, "model_dump", None)
-    if callable(model_dump):
-        return model_dump(mode="python")
-    if hasattr(raw_event, "__dict__"):
-        return {
-            key: value
-            for key, value in vars(raw_event).items()
-            if not key.startswith("_")
-        }
-    return {"value": raw_event}
+        result = raw_event
+    else:
+        model_dump = getattr(raw_event, "model_dump", None)
+        if callable(model_dump):
+            # OpenAI's Pydantic DTOs expose optional, absent fields as default
+            # ``None`` values from a plain model_dump().  Treating those SDK
+            # defaults as wire-presence both defeats the closed field
+            # validators and loses the absence-vs-explicit-null distinction
+            # needed by exact replay.  ``exclude_unset`` preserves fields that
+            # were actually decoded (including an explicit null) while
+            # omitting SDK-only defaults that were never present on the wire.
+            result = model_dump(mode="python", exclude_unset=True)
+        elif hasattr(raw_event, "__dict__"):
+            result = {
+                key: value
+                for key, value in vars(raw_event).items()
+                if not key.startswith("_")
+            }
+        else:
+            result = {"value": raw_event}
+    if not isinstance(result, dict):
+        raise LLMTransportContractError(
+            "provider SDK event is not an object",
+            reason_code="transport_provider_json_shape_invalid",
+        )
+    _validate_decoded_provider_json(result)
+    return result
+
+
+def _validate_decoded_provider_json(value: object) -> None:
+    """Bound an SDK-decoded JSON graph before any immutable deep copy.
+
+    The SDK has already parsed its wire frame, so this is deliberately a
+    post-parse physical fence.  It prevents opaque reasoning/output fields
+    from bypassing the same completed-response working-set contract used by
+    the public stream.
+    """
+
+    nodes = 0
+    string_bytes = 0
+    stack: list[tuple[object, int]] = [(value, 1)]
+    while stack:
+        current, depth = stack.pop()
+        if depth > MAX_PROVIDER_DECODED_JSON_DEPTH:
+            raise LLMTransportContractError(
+                "provider SDK event exceeds the JSON depth bound",
+                reason_code="transport_provider_json_shape_exceeded",
+            )
+        nodes += 1
+        if nodes > MAX_PROVIDER_DECODED_JSON_NODES:
+            raise LLMTransportContractError(
+                "provider SDK event exceeds the JSON node bound",
+                reason_code="transport_provider_json_shape_exceeded",
+            )
+        if isinstance(current, str):
+            string_bytes += len(current.encode("utf-8"))
+            if string_bytes > MAX_PROVIDER_DECODED_JSON_STRING_BYTES:
+                raise LLMTransportContractError(
+                    "provider SDK event exceeds the JSON string-byte bound",
+                    reason_code="transport_provider_json_shape_exceeded",
+                )
+            continue
+        if current is None or isinstance(current, bool | int | float):
+            continue
+        if isinstance(current, dict):
+            for key, item in current.items():
+                if not isinstance(key, str):
+                    raise LLMTransportContractError(
+                        "provider SDK event contains a non-text JSON key",
+                        reason_code="transport_provider_json_shape_invalid",
+                    )
+                stack.append((key, depth + 1))
+                stack.append((item, depth + 1))
+            continue
+        if isinstance(current, (list, tuple)):
+            stack.extend((item, depth + 1) for item in current)
+            continue
+        raise LLMTransportContractError(
+            "provider SDK event contains a non-JSON value",
+            reason_code="transport_provider_json_shape_invalid",
+        )
+    try:
+        encoded = json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise LLMTransportContractError(
+            "provider SDK event is not strict JSON",
+            reason_code="transport_provider_json_shape_invalid",
+        ) from exc
+    if len(encoded) > MAX_COMPLETED_PROVIDER_RESPONSE_AGGREGATE_BYTES:
+        raise LLMTransportContractError(
+            "provider SDK event exceeds the completed-response byte bound",
+            reason_code="transport_source_payload_limit_exceeded",
+        )
 
 
 @dataclass(slots=True)
@@ -394,8 +488,17 @@ def arguments_to_json_string(raw_arguments: Any) -> str:
     if isinstance(raw_arguments, str):
         return raw_arguments
     if isinstance(raw_arguments, dict):
-        return json.dumps(raw_arguments)
-    return "{}"
+        return json.dumps(
+            raw_arguments,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+    raise LLMTransportContractError(
+        "provider function-call arguments are absent or invalid",
+        reason_code="transport_tool_arguments_invalid",
+    )
 
 
 def transport_usage_report_from_mapping(raw_usage: Any) -> TransportUsageReport:

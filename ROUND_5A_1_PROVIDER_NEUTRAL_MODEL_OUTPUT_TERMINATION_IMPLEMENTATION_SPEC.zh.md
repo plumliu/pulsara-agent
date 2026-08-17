@@ -1,10 +1,12 @@
 # Pulsara Round 5A.1：Provider-neutral Model Output Termination 与 Same-epoch Reasoning Continuation 实施规格
 
-> 状态：**DRAFT — NOT ACTIVATED**
+> 状态：**ACTIVATED**
 >
-> 记录日期：2026-08-16
+> 激活日期：2026-08-17
 >
-> 当前代码基线：`38fc8181d1abc55b123ddd346ca807ccd054dc30`（`feat: activate advisory memory subsystem`）
+> 实施检查点：`e375b5be3a493cf42ec6a7d4aed3392b937935d1`
+>
+> 机器证据：[round5a1_provider_neutral_model_output_termination_activation.json](benchmarks/suites/core/v1/round5a1_provider_neutral_model_output_termination_activation.json)
 >
 > 上位架构：[PULSARA_DURABILITY_SUBTRACTION_REASSESSMENT.zh.md](PULSARA_DURABILITY_SUBTRACTION_REASSESSMENT.zh.md)
 >
@@ -1036,6 +1038,8 @@ streaming Responses必须从`output_item.added/done`与最终`response.completed
 | unknown non-null string | OUTPUT_INCOMPLETE / UNKNOWN_PROVIDER_INCOMPLETE | fail closed，不猜success |
 | 始终为null后EOF | PROVIDER_ERROR / TRANSPORT_PROTOCOL_ERROR | adapter未收到semantic terminal |
 
+首个non-null finish reason唯一决定semantic terminal。其后的frame只有在finish reason完全相同，且delta只含空的assistant role/content/tool/replay字段时，才作为vendor-neutral、idempotent terminal echo丢弃；它可以补充usage，完全相同的usage重复为no-op。不同finish reason、任何非空正文/reasoning/tool delta、final message或冲突usage仍fail closed。echo不进入下一次history、不创建第二个terminal语义，也不改变whole-response atomicity。
+
 若provider在异常对象中、而不是finish chunk中明确报告`context_length_exceeded`且尚未发送semantic output，它仍属于现有deterministic invalid request，不触发compaction。只有provider在generation terminal中明确表达“生成过程中达到context window”时，才映射`CONTEXT_WINDOW_LIMIT_DURING_GENERATION`。
 
 ### 7.2 Choice规则
@@ -1043,7 +1047,7 @@ streaming Responses必须从`output_item.added/done`与最终`response.completed
 Pulsara请求语义仍是单一assistant candidate。adapter必须：
 
 - 只接受预期choice；
-- 对同一choice重复或矛盾的非null finish reason fail closed；
+- 对同一choice矛盾的non-null finish reason fail closed；exact empty terminal echo按§7.1归一化；
 - 不把一个choice的terminal用于关闭另一个choice的blocks；
 - 不在本轮引入multi-candidate/n-best语义。
 
@@ -1151,6 +1155,8 @@ function_call
 ```
 
 `message.content`同样使用closed profile-era validator：默认只接受当前Runtime能完整投影的`output_text`；明确列入compatible profile的`text` alias可映射为同一语义。`refusal`、audio/image、hosted-tool output、computer/program call及任何未知content/item type一律在canonical acceptance前形成provider contract failure。
+
+V1还必须把provider item order限制在当前canonical assistant blocks能够无损表达的closed subset：`message`最多一个；若存在，必须位于全部`function_call`之前。`reasoning`可出现在任意位置且不参与public block order。`function_call -> message`、多个message或其他无法经canonical commit/read保持public顺序的shape，必须在assistant acceptance前以typed provider contract failure拒绝。该限制是fail-closed capability boundary，不允许先执行tool、再在下一次replay join时发现顺序漂移。
 
 在该allowlist内，Responses COMPLETED fragment必须冻结最终`response.output`的**全部**ordered item tuple。下一次input builder直接把该tuple放回原位置，再追加对应`function_call_output`与后续items：
 
@@ -1561,7 +1567,8 @@ reasoning replay不能成为绕过这些bounds的第二条内存通道：
 | Chat completed但required reasoning field缺失/malformed | PROVIDER_ERROR/CONTRACT | 0 | 0 | 不接受后静默降级 |
 | Chat opaque reasoning shape unknown | PROVIDER_ERROR/CONTRACT | 0 | 0 | 不转成字符串 |
 | Chat field accumulation duplicate/conflict | PROVIDER_ERROR/CONTRACT | 0 | 0 | 按profile exact mode fail closed |
-| Responses completed + exact ordered output | COMPLETED | 1 | normal | FULL后绑定全部output items |
+| Responses completed + canonical-representable exact ordered output | COMPLETED | 1 | normal | FULL后绑定全部output items |
+| Responses function_call先于message或多个message | PROVIDER_ERROR/CONTRACT | 0 | 0 | canonical acceptance前fail closed |
 | Responses含unknown/hosted/effect-bearing item | PROVIDER_ERROR/CONTRACT | 0 | 0 | 不opaque接受、不重放 |
 | Responses completed但final output与stream projection不一致 | PROVIDER_ERROR/CONTRACT | 0 | 0 | fragment与assistant均不接受 |
 | incomplete/failure含reasoning bytes | non-COMPLETED | 0 | 0 | reasoning buffer discarded |
@@ -1613,7 +1620,7 @@ Responses：
 8. terminal后event；
 9. incomplete usage仍被观测但不被接受；
 10. final `response.output`全部item按原序深冻结；
-11. reasoning + message + multiple function_call mixed ordering exact replay；
+11. reasoning任意位置、单message位于全部multiple function_call之前时exact replay；function_call先于message及multiple message fail closed；
 12. encrypted/opaque fields只做bounded freeze/thaw，不进入live text；
 13. streamed item与final response item不一致fail closed；
 14. manual replay payload不含`previous_response_id`；

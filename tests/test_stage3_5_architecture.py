@@ -198,6 +198,7 @@ def test_stage3_5_binding_v2_has_only_the_closed_identity_fields() -> None:
 
 def test_stage3_5_process_local_task_sites_are_closed() -> None:
     allowed = {
+        "src/pulsara_agent/conversation_kernel/assistant_settlement.py",
         "src/pulsara_agent/conversation_kernel/extensions.py",
         "src/pulsara_agent/conversation_kernel/host.py",
         "src/pulsara_agent/conversation_kernel/io.py",

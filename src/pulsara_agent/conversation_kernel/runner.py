@@ -26,6 +26,11 @@ from pulsara_agent.conversation_kernel.assembler import (
     CompletedToolCallBlock,
     ProviderStreamAssembler,
 )
+from pulsara_agent.conversation_kernel.assistant_settlement import (
+    AssistantMessageSettlementOwner,
+    PreparedAssistantMessageSettlement,
+    assistant_settlement_candidate_fingerprint,
+)
 from pulsara_agent.conversation_kernel.blob import (
     CanonicalContentPublisher,
     PostgresCanonicalBlobStore,
@@ -41,10 +46,22 @@ from pulsara_agent.conversation_kernel.cancellation import (
     stable_subagent_turn_id,
 )
 from pulsara_agent.conversation_kernel.direct_model import (
+    CompletedProviderModelExecution,
     KernelModelExecutionRequest,
     KernelModelPreparationRequest,
     PreparedKernelModelCall,
     PreparedKernelModelExecution,
+)
+from pulsara_agent.llm.input import LLMToolCall
+from pulsara_agent.llm.request import (
+    FrozenProviderWireInputPlan,
+    ProviderAssistantReplayFragment,
+    provider_assistant_public_projection_fingerprint,
+)
+from pulsara_agent.ports.provider_stream import (
+    ProviderModelExecutionFailed,
+    ProviderModelOutputIncomplete,
+    ProviderOutputIncompleteReason,
 )
 from pulsara_agent.conversation_kernel.input_continuity import (
     HostProviderInputContinuityOwner,
@@ -214,6 +231,7 @@ from pulsara_agent.model_input.continuity import (
     NewTriggerAnchor,
     FrozenProviderInputAppendCompileResult,
     FrozenProviderInputAppendPlanningInput,
+    FrozenProviderInputEpochView,
     NoNewTriggerAnchor,
     PROVIDER_MESSAGE_LOWERING_CONTRACT,
     PreparedProviderInputAppendCandidate,
@@ -263,6 +281,14 @@ class KernelModelPort(Protocol):
         expected_append_candidate_fingerprint: str,
         install_authority: ProcessLocalProviderInputInstallAuthority,
     ) -> PreparedKernelModelExecution: ...
+
+    def plan_wire_input(
+        self,
+        *,
+        prepared_call: PreparedKernelModelCall,
+        compiled_input: FrozenCompiledModelInput,
+        predecessor_view: FrozenProviderInputEpochView | None,
+    ) -> FrozenProviderWireInputPlan: ...
 
 
 class MemoryContextProjectionPort(Protocol):
@@ -681,6 +707,15 @@ class _PreparedProviderDispatch:
     accepted_steers: AcceptedSteerDispatchBatch | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _CollectedModelResponse:
+    completed: CompletedAssistantMessage
+    provider_completion: CompletedProviderModelExecution
+    replay_fragment: ProviderAssistantReplayFragment | None = dataclass_field(
+        default=None, repr=False
+    )
+
+
 class ConversationKernelRunner:
     def __init__(
         self,
@@ -707,6 +742,7 @@ class ConversationKernelRunner:
         maximum_output_tokens_per_call: int = STAGE2_LIMITS.provider_output_tokens_per_call_hard,
         deadline_factory: KernelExecutionDeadlineFactory | None = None,
         memory_projection: MemoryContextProjectionPort | None = None,
+        assistant_settlement_owner: AssistantMessageSettlementOwner | None = None,
     ) -> None:
         if (
             min(
@@ -742,10 +778,20 @@ class ConversationKernelRunner:
         self._launch_permission_mode = launch_permission_mode
         self._workspace_id = workspace_id
         self._io = io_owner or KernelSessionIO()
+        self._deadlines = deadline_factory or KernelExecutionDeadlineFactory()
         self._context_source_collector = context_source_collector
         self._compiler = compiler or StructuredModelInputCompiler()
         self._continuity = continuity_owner or HostProviderInputContinuityOwner(
             session_id=writer_lease.guard.session_id
+        )
+        self._assistant_settlements = (
+            assistant_settlement_owner
+            or AssistantMessageSettlementOwner(
+                repository=repository,
+                io_owner=self._io,
+                continuity_owner=self._continuity,
+                deadline_factory=self._deadlines,
+            )
         )
         self._memory_contexts = ProcessLocalMemoryCallContextOwner(
             session_id=writer_lease.guard.session_id
@@ -753,7 +799,6 @@ class ConversationKernelRunner:
         self._extensions = extensions
         self._maximum_input_tokens_per_call = maximum_input_tokens_per_call
         self._maximum_output_tokens_per_call = maximum_output_tokens_per_call
-        self._deadlines = deadline_factory or KernelExecutionDeadlineFactory()
         self._memory_projection = memory_projection
         self._root_memory_use_policy = MemoryUsePolicy.ENABLED
 
@@ -2617,10 +2662,20 @@ class ConversationKernelRunner:
                         model_call_index=model_call_count,
                         compiled=compiled_input,
                     )
+                    wire_input_plan = self._model.plan_wire_input(
+                        prepared_call=prepared_call,
+                        compiled_input=compiled_input,
+                        predecessor_view=(
+                            None
+                            if append_result.reset_reason is not None
+                            else planning.predecessor_view
+                        ),
+                    )
                     append_candidate = _prepared_append_candidate(
                         planning=planning,
                         compatibility=compatibility,
                         compiled_result=append_result,
+                        wire_input_plan=wire_input_plan,
                     )
                     self._continuity.register(append_candidate)
                     request = KernelModelExecutionRequest(
@@ -2629,6 +2684,7 @@ class ConversationKernelRunner:
                         model_call_index=model_call_count,
                         prepared_call=prepared_call,
                         compiled_input=compiled_input,
+                        wire_input_plan=wire_input_plan,
                         cut=prepared.cut,
                         surface_borrow=active_surface_borrow,
                         memory_context=memory_context,
@@ -2675,12 +2731,13 @@ class ConversationKernelRunner:
                         )
                         installed = True
                         entry_id = _id("entry")
-                        completed = await self._collect_model(
+                        collected = await self._collect_model(
                             request,
                             execution=execution,
                             permit=permit,
                             proposed_entry_id=entry_id,
                         )
+                        completed = collected.completed
                     except BaseException:
                         if not installed:
                             if execution is not None:
@@ -2713,36 +2770,36 @@ class ConversationKernelRunner:
                         parent_bytes, deadline=self._canonical_deadline()
                     )
                     occurred_at = datetime.now(timezone.utc)
-                    assistant_deadline = self._canonical_deadline()
-                    try:
-                        accepted = await self._io.run(
-                            self._repository.commit_assistant_message,
-                            self._writer_lease.guard,
-                            cut=request.cut,
-                            entry_id=entry_id,
-                            parent_content=parent_content,
-                            blocks=canonical_blocks,
-                            complete_turn=not calls,
-                            occurred_at=occurred_at,
-                            actor_id="model:foreground",
-                            deadline_monotonic=assistant_deadline,
-                        )
-                    except Exception:
-                        winner = await self._io.run(
-                            self._repository.confirm_assistant_message_winner,
-                            self._writer_lease.guard,
-                            cut=request.cut,
-                            entry_id=entry_id,
-                            parent_content=parent_content,
-                            blocks=canonical_blocks,
-                            complete_turn=not calls,
-                            occurred_at=occurred_at,
-                            actor_id="model:foreground",
-                            deadline_monotonic=self._canonical_deadline(),
-                        )
-                        if winner is None:
-                            raise
-                        accepted = winner
+                    settlement = PreparedAssistantMessageSettlement(
+                        candidate_fingerprint=(
+                            assistant_settlement_candidate_fingerprint(
+                                cut=request.cut,
+                                entry_id=entry_id,
+                                parent_content=parent_content,
+                                blocks=canonical_blocks,
+                                complete_turn=not calls,
+                                occurred_at=occurred_at,
+                                actor_id="model:foreground",
+                                continuity_scope=permit.scope,
+                                continuity_epoch_nonce=permit.epoch_nonce,
+                                continuity_epoch_revision=permit.epoch_revision,
+                                replay_fragment=collected.replay_fragment,
+                            )
+                        ),
+                        guard=self._writer_lease.guard,
+                        cut=request.cut,
+                        entry_id=entry_id,
+                        parent_content=parent_content,
+                        blocks=canonical_blocks,
+                        complete_turn=not calls,
+                        occurred_at=occurred_at,
+                        actor_id="model:foreground",
+                        continuity_scope=permit.scope,
+                        continuity_epoch_nonce=permit.epoch_nonce,
+                        continuity_epoch_revision=permit.epoch_revision,
+                        replay_fragment=collected.replay_fragment,
+                    )
+                    accepted = await self._assistant_settlements.settle(settlement)
                     self._live_bus.offer_settlement_nowait(
                         kind=LiveSettlementKind.COMMITTED,
                         session_id=request.session_id,
@@ -3278,25 +3335,33 @@ class ConversationKernelRunner:
                             public_payload={"failure_kind": error.kind.value},
                         )
                     )
+                failure_payload: dict[str, object] = {
+                    "failure_code": "FOREGROUND_EXECUTION_INTERRUPTED"
+                }
+                if isinstance(error, ProviderModelExecutionFailed):
+                    failure_payload["provider_error_code"] = error.error.code.value
+                    failure_payload["provider_error_fingerprint"] = (
+                        error.error.error_fingerprint
+                    )
                 self._offer_operational_best_effort(
                     OperationalHookOffer(
                         event_type=OperationalHookType.FOREGROUND_TURN_FAILED,
                         session_id=self._writer_lease.guard.session_id,
                         turn_id=turn_id,
-                        public_payload={
-                            "failure_code": "FOREGROUND_EXECUTION_INTERRUPTED"
-                        },
+                        public_payload=failure_payload,
                     )
                 )
             cause = intent.cause
             if intent.scope_kind is ModelInputScopeKind.SUBAGENT_TASK and cause is not None:
                 # The child manager owns the atomic turn+task settlement.
                 raise
-            reason = (
-                _root_cancellation_terminal_reason(intent)
-                if isinstance(error, asyncio.CancelledError) and cause is not None
-                else "FOREGROUND_EXECUTION_INTERRUPTED"
-            )
+            reason = _provider_incomplete_terminal_reason(error)
+            if reason is None:
+                reason = (
+                    _root_cancellation_terminal_reason(intent)
+                    if isinstance(error, asyncio.CancelledError) and cause is not None
+                    else "FOREGROUND_EXECUTION_INTERRUPTED"
+                )
             await self._settle_failed_turn(turn_id, reason=reason)
             raise
 
@@ -3688,7 +3753,7 @@ class ConversationKernelRunner:
         execution: PreparedKernelModelExecution,
         permit: ProcessLocalProviderInputInstallPermit,
         proposed_entry_id: str,
-    ) -> CompletedAssistantMessage:
+    ) -> _CollectedModelResponse:
         assembler = ProviderStreamAssembler(
             session_id=request.session_id,
             turn_id=request.turn_id,
@@ -3704,7 +3769,56 @@ class ConversationKernelRunner:
         try:
             async for item in execution.open_once(permit):
                 assembler.apply(item)
-            return assembler.complete()
+            provider_completion = execution.take_completed_result_once()
+            completed = assembler.complete()
+            public_text = "".join(
+                block.text
+                if isinstance(block, CompletedTextBlock)
+                else block.data
+                if isinstance(block, CompletedDataBlock)
+                else ""
+                for block in completed.blocks
+            )
+            public_calls = tuple(
+                LLMToolCall(
+                    id=block.tool_call_id,
+                    name=block.tool_name,
+                    arguments=canonical_json_bytes(
+                        thaw_json(block.arguments)
+                    ).decode("utf-8"),
+                )
+                for block in completed.blocks
+                if isinstance(block, CompletedToolCallBlock)
+            )
+            public_blocks = tuple(
+                ("TEXT", block.text)
+                if isinstance(block, CompletedTextBlock)
+                else ("DATA", block.media_type, block.data)
+                if isinstance(block, CompletedDataBlock)
+                else (
+                    "TOOL_CALL",
+                    block.tool_call_id,
+                    block.tool_name,
+                    canonical_json_bytes(thaw_json(block.arguments)).decode("utf-8"),
+                )
+                for block in completed.blocks
+            )
+            replay = provider_completion.bind_assistant_entry(
+                assistant_entry_id=proposed_entry_id,
+                public_projection_fingerprint=(
+                    provider_assistant_public_projection_fingerprint(
+                        text=public_text,
+                        tool_calls=public_calls,
+                        ordered_blocks=public_blocks,
+                    )
+                ),
+                has_tool_calls=bool(public_calls),
+            )
+            return _CollectedModelResponse(
+                completed=completed,
+                provider_completion=provider_completion,
+                replay_fragment=replay,
+            )
         except BaseException as exc:
             self._live_bus.offer_settlement_nowait(
                 kind=LiveSettlementKind.ABORTED,
@@ -4145,6 +4259,25 @@ def _root_cancellation_terminal_reason(
     return "FOREGROUND_EXECUTION_INTERRUPTED"
 
 
+def _provider_incomplete_terminal_reason(error: BaseException) -> str | None:
+    if not isinstance(error, ProviderModelOutputIncomplete):
+        return None
+    return {
+        ProviderOutputIncompleteReason.OUTPUT_TOKEN_LIMIT: (
+            "MODEL_OUTPUT_TOKEN_LIMIT_REACHED"
+        ),
+        ProviderOutputIncompleteReason.CONTEXT_WINDOW_LIMIT_DURING_GENERATION: (
+            "MODEL_OUTPUT_CONTEXT_LIMIT_REACHED"
+        ),
+        ProviderOutputIncompleteReason.CONTENT_FILTERED: (
+            "MODEL_OUTPUT_CONTENT_FILTERED"
+        ),
+        ProviderOutputIncompleteReason.UNKNOWN_PROVIDER_INCOMPLETE: (
+            "MODEL_OUTPUT_INCOMPLETE"
+        ),
+    }[error.reason]
+
+
 def _stable_id(prefix: str, *parts: str) -> str:
     return f"{prefix}:{sha256(chr(0).join(parts).encode()).hexdigest()}"
 
@@ -4496,6 +4629,10 @@ def _provider_input_compatibility(
         context_base_semantic_identity=(
             canonical_facts.context_binding_fact.context_base_semantic_identity
         ),
+        provider_assistant_replay_contract_fingerprint=(
+            prepared_call.call.target.model_profile.provider_profile
+            .assistant_replay_contract_fingerprint
+        ),
     )
 
 
@@ -4504,6 +4641,7 @@ def _prepared_append_candidate(
     planning: FrozenProviderInputAppendPlanningInput,
     compatibility: ProviderInputEpochCompatibility,
     compiled_result: FrozenProviderInputAppendCompileResult,
+    wire_input_plan: FrozenProviderWireInputPlan,
 ) -> PreparedProviderInputAppendCandidate:
     predecessor = planning.predecessor_view
     epoch_nonce = (
@@ -4522,6 +4660,7 @@ def _prepared_append_candidate(
         predecessor_prefix_fingerprint=predecessor_fingerprint,
         dispatch_anchor=planning.dispatch_anchor,
         resulting_compiled_input=compiled_result.compiled_input,
+        wire_input_plan=wire_input_plan,
         resulting_canonical_frontier=compiled_result.canonical_frontier,
         resulting_source_heads=compiled_result.source_heads,
         appended_message_count=compiled_result.appended_message_count,
@@ -4536,6 +4675,7 @@ def _prepared_append_candidate(
         predecessor_prefix_fingerprint=predecessor_fingerprint,
         dispatch_anchor=planning.dispatch_anchor,
         resulting_compiled_input=compiled_result.compiled_input,
+        wire_input_plan=wire_input_plan,
         resulting_canonical_frontier=compiled_result.canonical_frontier,
         resulting_source_heads=compiled_result.source_heads,
         appended_message_count=compiled_result.appended_message_count,

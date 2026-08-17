@@ -52,7 +52,11 @@ from pulsara_agent.ports.live_agent_event import (
     TextEndPayload,
     TextStartPayload,
 )
-from pulsara_agent.ports.provider_stream import ProviderStreamFailure
+from pulsara_agent.ports.provider_stream import (
+    ProviderModelOutputIncomplete,
+    ProviderOutputIncompleteReason,
+    ProviderStreamFailure,
+)
 from pulsara_agent.primitives.model_call import ModelCallPurpose
 from pulsara_agent.primitives.context import context_fingerprint
 from tests.support.model_config import test_llm_config
@@ -132,10 +136,41 @@ class _Round5RetryEndpoint:
             else:
                 yield {
                     "type": "response.output_text.delta",
+                    "output_index": 0,
+                    "content_index": 0,
                     "delta": f"attempt-{attempt}",
                 }
             if attempt == 1:
                 raise ConnectionError("transient connection failure after output")
+            if self.api == "openai_chat_completions":
+                yield {
+                    "model": "test-pro",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                }
+            else:
+                yield {
+                    "type": "response.completed",
+                    "response": {
+                        "output": [
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": f"attempt-{attempt}",
+                                    }
+                                ],
+                            }
+                        ]
+                    },
+                }
 
         return stream()
 
@@ -326,6 +361,11 @@ def _prepared_execution(
             sources=sources,
         )
     )
+    wire_input_plan = port.plan_wire_input(
+        prepared_call=prepared,
+        compiled_input=compiled,
+        predecessor_view=None,
+    )
     borrow = tool_port.borrow_tool_surface(surface)
     return (
         KernelModelExecutionRequest(
@@ -334,6 +374,7 @@ def _prepared_execution(
             model_call_index=1,
             prepared_call=prepared,
             compiled_input=compiled,
+            wire_input_plan=wire_input_plan,
             cut=PreparedProviderInputCut(
                 session_id=session_id,
                 turn_id=turn_id,
@@ -425,6 +466,7 @@ def _continuity_candidate(request: KernelModelExecutionRequest):
             appended_message_count=len(request.compiled_input.messages),
             reset_reason=None,
         ),
+        wire_input_plan=request.wire_input_plan,
     )
     owner.register(candidate)
     return owner, candidate
@@ -470,11 +512,10 @@ def test_round3_1_adapter_wire_items_preserve_strict_prefix_and_steer_order(
 ) -> None:
     port = _port(api=api)
     request, _tool_port = _prepared_execution(port)
-    candidate = context_fingerprint("test:append-candidate:v1", api)
-    owner = HostProviderInputContinuityOwner(session_id=request.session_id)
+    owner, candidate = _continuity_candidate(request)
     execution = port.preflight_execution(
         request,
-        expected_append_candidate_fingerprint=candidate,
+        expected_append_candidate_fingerprint=candidate.candidate_fingerprint,
         install_authority=owner.install_authority,
     )
     first_context = execution.final_context
@@ -490,6 +531,7 @@ def test_round3_1_adapter_wire_items_preserve_strict_prefix_and_steer_order(
         messages=first_context.messages + steer_messages,
         context_id="context:successor",
         model_call_index=2,
+        provider_wire_input_plan=None,
     )
     second_payload = payload_builder(
         call=request.prepared_call.call, context=second_context
@@ -506,6 +548,8 @@ def test_round3_1_adapter_wire_items_preserve_strict_prefix_and_steer_order(
             "steer three",
         ]
     else:
+        assert first_payload["store"] is False
+        assert "previous_response_id" not in first_payload
         assert [item["content"] for item in after[-3:]] == [
             "steer one",
             "steer two",
@@ -539,13 +583,10 @@ def test_round3_1_adapter_preserves_twelve_call_strict_prefix_trajectory(
 ) -> None:
     port = _port(api=api)
     request, _tool_port = _prepared_execution(port)
-    candidate = context_fingerprint(
-        "test:append-candidate:v1", {"api": api, "trajectory": "twelve"}
-    )
-    owner = HostProviderInputContinuityOwner(session_id=request.session_id)
+    owner, candidate = _continuity_candidate(request)
     execution = port.preflight_execution(
         request,
-        expected_append_candidate_fingerprint=candidate,
+        expected_append_candidate_fingerprint=candidate.candidate_fingerprint,
         install_authority=owner.install_authority,
     )
     contexts = [execution.final_context]
@@ -601,13 +642,8 @@ def test_stage2_direct_model_rejects_invalid_compiled_input_before_send() -> Non
     port = _port()
     request, _tool_port = _prepared_execution(port)
     other, _other_tool_port = _prepared_execution(port)
-    invalid = replace(request, compiled_input=other.compiled_input)
-
-    async def collect() -> list[object]:
-        return await _collect_preflighted(port, invalid)
-
-    with pytest.raises(ValueError, match="exact-join preparation"):
-        asyncio.run(collect())
+    with pytest.raises(ValueError, match="structurally joined"):
+        replace(request, compiled_input=other.compiled_input)
     request.surface_borrow.close()
     other.surface_borrow.close()
 
@@ -650,6 +686,28 @@ def test_round3_1_open_rejects_forged_same_shape_install_permit() -> None:
         match="was not issued for this execution",
     ):
         asyncio.run(collect())
+    request.surface_borrow.close()
+
+
+def test_round5a1_preflight_rejects_same_shape_unregistered_wire_plan() -> None:
+    port = _port()
+    request, _tool_port = _prepared_execution(port)
+    owner, candidate = _continuity_candidate(request)
+    forged_request = replace(
+        request,
+        wire_input_plan=replace(request.wire_input_plan),
+    )
+
+    with pytest.raises(
+        ProviderInputContinuityConflict,
+        match="wire plan was not registered",
+    ):
+        port.preflight_execution(
+            forged_request,
+            expected_append_candidate_fingerprint=(candidate.candidate_fingerprint),
+            install_authority=owner.install_authority,
+        )
+
     request.surface_borrow.close()
 
 
@@ -735,6 +793,11 @@ def test_stage2_direct_model_real_adapter_path_emits_only_live_payloads() -> Non
     binding._adapter._mock_chunks = [
         {"choices": [{"delta": {"content": "hello"}}]},
         {
+            "choices": [
+                {"index": 0, "delta": {}, "finish_reason": "stop"}
+            ]
+        },
+        {
             "choices": [],
             "usage": {
                 "prompt_tokens": 4,
@@ -762,4 +825,69 @@ def test_stage2_direct_model_real_adapter_path_emits_only_live_payloads() -> Non
     assert usage_reports[0].usage.input_tokens == 4
     assert usage_reports[0].usage.cached_input_tokens == 3
     assert usage_reports[0].usage.output_tokens == 1
+    request.surface_borrow.close()
+
+
+@pytest.mark.parametrize(
+    ("api", "reason"),
+    (
+        (
+            "openai_chat_completions",
+            ProviderOutputIncompleteReason.OUTPUT_TOKEN_LIMIT,
+        ),
+        (
+            "openai_responses",
+            ProviderOutputIncompleteReason.OUTPUT_TOKEN_LIMIT,
+        ),
+    ),
+)
+def test_round5a1_direct_model_never_promotes_incomplete_adapter_output(
+    api: str,
+    reason: ProviderOutputIncompleteReason,
+) -> None:
+    port = _port(api=api)
+    binding = port._registry.get(api)
+    if api == "openai_chat_completions":
+        binding._adapter._mock_chunks = [
+            {
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"content": "partial"},
+                        "finish_reason": None,
+                    }
+                ]
+            },
+            {
+                "choices": [
+                    {"index": 0, "delta": {}, "finish_reason": "length"}
+                ]
+            },
+        ]
+    else:
+        binding._adapter._mock_events = [
+            {
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": {
+                    "type": "function_call",
+                    "id": "item:1",
+                    "status": "completed",
+                    "call_id": "call:1",
+                    "name": "read_file",
+                    "arguments": '{"path":"README.md"}',
+                },
+            },
+            {
+                "type": "response.incomplete",
+                "response": {
+                    "output": [],
+                    "incomplete_details": {"reason": "max_output_tokens"},
+                },
+            },
+        ]
+    request, _tool_port = _prepared_execution(port)
+    with pytest.raises(ProviderModelOutputIncomplete) as captured:
+        asyncio.run(_collect_preflighted(port, request))
+    assert captured.value.reason is reason
     request.surface_borrow.close()

@@ -58,9 +58,13 @@ runtime-write admission epoch.
 The current Kernel supports:
 
 - OpenAI-compatible Responses and Chat Completions transports;
+- explicit provider-neutral `COMPLETED | OUTPUT_INCOMPLETE | PROVIDER_ERROR`
+  model terminals, whole-response atomic assistant acceptance, and exact
+  same-epoch manual reasoning replay without provider-held response state;
 - a provider-neutral structured input compiler over the exact canonical cut,
   with closed typed first-party sources, scope-frozen tool schemas, exact target
-  token estimation, and deterministic source/tool-result degradation;
+  token estimation, deterministic source/tool-result degradation, and one
+  frozen semantic-plus-actual-wire continuity proof;
 - bounded, redacted previous-turn outcome guidance plus append-only tool
   freshness frontiers; each accepted tool result carries an immutable observed
   time, monotonic duration disposition, execution origin, and optional trusted

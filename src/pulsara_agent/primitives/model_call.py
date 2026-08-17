@@ -164,7 +164,7 @@ class ModelTokenUsageFact(BaseModel):
 class ResolvedModelTargetFact(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    contract_version: Literal["resolved-model-target:v3"] = "resolved-model-target:v3"
+    contract_version: Literal["resolved-model-target:v4"] = "resolved-model-target:v4"
     target_fingerprint: str
     model_id: str = Field(min_length=1)
     model_role: Literal["pro", "flash"]
@@ -217,7 +217,7 @@ class ResolvedModelTargetFact(BaseModel):
 
 
 def resolved_model_target_fingerprint(payload_without_fingerprint: dict[str, Any]) -> str:
-    return sha256_fingerprint("resolved-model-target:v3", payload_without_fingerprint)
+    return sha256_fingerprint("resolved-model-target:v4", payload_without_fingerprint)
 
 
 class ResolvedModelCallFact(BaseModel):

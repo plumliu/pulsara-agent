@@ -13,10 +13,15 @@ import json
 
 from pulsara_agent.llm.input import LLMMessage, MessageRole
 from pulsara_agent.llm.estimator import TokenEstimate
+from pulsara_agent.llm.request import (
+    FrozenProviderWireInputPlan,
+    ProviderAssistantReplayFragment,
+)
 from pulsara_agent.model_input.contracts import (
     ContextSourceKind,
     ContextTrustClass,
     FrozenCompiledModelInput,
+    FrozenCompiledMessagePlacement,
     FrozenToolSpec,
     ModelInputScopeKind,
 )
@@ -31,6 +36,9 @@ FULL_HISTORY_CONTEXT_BASE_IDENTITY = context_fingerprint(
     {"kind": "FULL_HISTORY", "lowering": PROVIDER_MESSAGE_LOWERING_CONTRACT},
 )
 MAXIMUM_PROVIDER_INPUT_EPOCH_BYTES = 64 << 20
+NO_PROVIDER_ASSISTANT_REPLAY_CONTRACT_FINGERPRINT = context_fingerprint(
+    "pulsara.provider-assistant-replay-profile:v1", {"kind": "NONE"}
+)
 
 
 def _fingerprint(value: str, name: str) -> None:
@@ -62,6 +70,9 @@ class ProviderInputEpochCompatibility:
     estimator_fingerprint: str
     provider_message_lowering_contract: str
     context_base_semantic_identity: str
+    provider_assistant_replay_contract_fingerprint: str = (
+        NO_PROVIDER_ASSISTANT_REPLAY_CONTRACT_FINGERPRINT
+    )
 
     def __post_init__(self) -> None:
         if not self.compiler_contract_version or not self.provider_message_lowering_contract:
@@ -72,6 +83,10 @@ class ProviderInputEpochCompatibility:
             (self.model_target_fingerprint, "model target"),
             (self.estimator_fingerprint, "estimator"),
             (self.context_base_semantic_identity, "context base"),
+            (
+                self.provider_assistant_replay_contract_fingerprint,
+                "provider assistant replay contract",
+            ),
         ):
             _fingerprint(value, name)
 
@@ -289,7 +304,7 @@ def provider_input_prefix_fingerprint(
     messages: tuple[LLMMessage, ...],
 ) -> str:
     return context_fingerprint(
-        "pulsara:provider-input-semantic-prefix:v1",
+        "pulsara:provider-input-semantic-prefix:v2-wire-proof",
         {
             "system": system_prompt,
             "tools": tuple(item.canonical_bytes.decode("utf-8") for item in tools),
@@ -325,17 +340,30 @@ class FrozenProviderInputEpochView:
     system_prompt: str = field(repr=False)
     tools: tuple[FrozenToolSpec, ...] = field(repr=False)
     messages: tuple[LLMMessage, ...] = field(repr=False)
+    message_placements: tuple[FrozenCompiledMessagePlacement, ...] = field(
+        repr=False
+    )
+    wire_input_plan: FrozenProviderWireInputPlan = field(repr=False)
     canonical_frontier: ProcessLocalCanonicalFrontier
     source_heads: tuple[ProcessLocalSourceHead, ...]
     final_estimate: TokenEstimate
     logical_utf8_bytes: int
     semantic_prefix_fingerprint: str
+    assistant_replay_fragments: tuple[ProviderAssistantReplayFragment, ...] = field(
+        default=(), repr=False
+    )
 
     def __post_init__(self) -> None:
         if not self.epoch_nonce or self.epoch_revision < 1:
             raise ValueError("provider-input epoch revision is invalid")
         if len(self.final_estimate.message_tokens_by_index) != len(self.messages):
             raise ValueError("provider-input epoch token breakdown is invalid")
+        if len(self.message_placements) != len(self.messages):
+            raise ValueError("provider-input epoch placements are not parallel")
+        _fingerprint(
+            self.wire_input_plan.compiled_semantic_fingerprint,
+            "compiled semantic input",
+        )
         if self.logical_utf8_bytes != provider_input_logical_utf8_bytes(
             system_prompt=self.system_prompt, tools=self.tools, messages=self.messages
         ):
@@ -350,6 +378,11 @@ class FrozenProviderInputEpochView:
         kinds = tuple(item.source_kind for item in self.source_heads)
         if len(kinds) != len(set(kinds)):
             raise ValueError("provider-input source heads are duplicated")
+        fragment_entries = tuple(
+            item.assistant_entry_id for item in self.assistant_replay_fragments
+        )
+        if len(fragment_entries) != len(set(fragment_entries)):
+            raise ValueError("provider-input replay fragments are duplicated")
 
 
 class ProviderInputAdmissionPredecessorKind(StrEnum):
@@ -439,6 +472,7 @@ class PreparedProviderInputAppendCandidate:
     predecessor_prefix_fingerprint: str | None
     dispatch_anchor: ProviderInputDispatchAnchor
     resulting_compiled_input: FrozenCompiledModelInput = field(repr=False)
+    wire_input_plan: FrozenProviderWireInputPlan = field(repr=False)
     resulting_canonical_frontier: ProcessLocalCanonicalFrontier
     resulting_source_heads: tuple[ProcessLocalSourceHead, ...]
     appended_message_count: int
@@ -461,6 +495,7 @@ class PreparedProviderInputAppendCandidate:
             predecessor_prefix_fingerprint=self.predecessor_prefix_fingerprint,
             dispatch_anchor=self.dispatch_anchor,
             resulting_compiled_input=self.resulting_compiled_input,
+            wire_input_plan=self.wire_input_plan,
             resulting_canonical_frontier=self.resulting_canonical_frontier,
             resulting_source_heads=self.resulting_source_heads,
             appended_message_count=self.appended_message_count,
@@ -510,7 +545,7 @@ def provider_input_append_planning_fingerprint(
     canonical_delta_fingerprints: tuple[str, ...],
 ) -> str:
     return context_fingerprint(
-        "pulsara:provider-input-append-planning:v1",
+        "pulsara:provider-input-append-planning:v2-wire-proof",
         {
             "scope": (
                 scope.session_id,
@@ -540,6 +575,7 @@ def prepared_provider_input_append_candidate_fingerprint(
     predecessor_prefix_fingerprint: str | None,
     dispatch_anchor: ProviderInputDispatchAnchor,
     resulting_compiled_input: FrozenCompiledModelInput,
+    wire_input_plan: FrozenProviderWireInputPlan,
     resulting_canonical_frontier: ProcessLocalCanonicalFrontier,
     resulting_source_heads: tuple[ProcessLocalSourceHead, ...],
     appended_message_count: int,
@@ -548,7 +584,7 @@ def prepared_provider_input_append_candidate_fingerprint(
     planning_fingerprint: str,
 ) -> str:
     return context_fingerprint(
-        "pulsara:prepared-provider-input-append:v1",
+        "pulsara:prepared-provider-input-append:v2-wire-proof",
         {
             "scope": (
                 scope.session_id,
@@ -560,6 +596,8 @@ def prepared_provider_input_append_candidate_fingerprint(
             "predecessor": predecessor_prefix_fingerprint,
             "anchor": provider_input_dispatch_anchor_value(dispatch_anchor),
             "compiled": resulting_compiled_input.compiled_semantic_fingerprint,
+            "wire_plan": wire_input_plan.plan_fingerprint,
+            "wire_quote": wire_input_plan.quote.quote_fingerprint,
             "frontier": {
                 "binding_revision": (
                     resulting_canonical_frontier.latest_context_binding_revision_id
@@ -591,6 +629,9 @@ def prepared_provider_input_append_candidate_fingerprint(
                 "estimator": compatibility.estimator_fingerprint,
                 "lowering": compatibility.provider_message_lowering_contract,
                 "context_base": compatibility.context_base_semantic_identity,
+                "replay_contract": (
+                    compatibility.provider_assistant_replay_contract_fingerprint
+                ),
             },
             "planning": planning_fingerprint,
         },

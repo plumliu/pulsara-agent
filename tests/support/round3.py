@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from typing import AsyncIterator, Callable
 
 from pulsara_agent.conversation_kernel.direct_model import (
+    CompletedProviderModelExecution,
     DirectKernelModelPort,
     KernelModelExecutionRequest,
     KernelModelPreparationRequest,
@@ -60,6 +62,11 @@ from pulsara_agent.model_input.contracts import (
 from pulsara_agent.model_input.continuity import FULL_HISTORY_CONTEXT_BASE_IDENTITY
 from pulsara_agent.model_input.continuity import ProcessLocalProviderInputInstallPermit
 from pulsara_agent.primitives.context import context_fingerprint, freeze_json
+from pulsara_agent.llm.result import TransportUsageReport
+from pulsara_agent.ports.provider_stream import (
+    ProviderNormalizedTerminalKind,
+    ProviderStreamTerminal,
+)
 from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
 from pulsara_agent.primitives.run_permission import (
     FrozenRunPermissionSnapshot,
@@ -89,6 +96,9 @@ class ScriptedKernelModel:
     ) -> PreparedKernelModelCall:
         self.preparation_requests.append(request)
         return self._preparer.prepare_call(request)
+
+    def plan_wire_input(self, **kwargs):
+        return self._preparer.plan_wire_input(**kwargs)
 
     def preflight_execution(
         self,
@@ -136,6 +146,9 @@ class CallbackScriptedKernelModel:
     ) -> PreparedKernelModelCall:
         return self._preparer.prepare_call(request)
 
+    def plan_wire_input(self, **kwargs):
+        return self._preparer.plan_wire_input(**kwargs)
+
     def preflight_execution(
         self,
         request: KernelModelExecutionRequest,
@@ -175,6 +188,7 @@ class _CallbackPreparedExecution:
                 "candidate": expected_candidate_fingerprint,
             },
         )
+        self._completion = None
 
     def discard(self) -> None:
         if self._settled:
@@ -200,6 +214,14 @@ class _CallbackPreparedExecution:
         self._settled = True
         async for item in self._stream_factory(self._request):
             yield item
+        self._completion = completed_provider_execution_for_test(self._request)
+
+    def take_completed_result_once(self):
+        if self._completion is None:
+            raise RuntimeError("test provider execution is not completed")
+        result = self._completion
+        self._completion = None
+        return result
 
 
 class _ScriptedPreparedExecution:
@@ -223,6 +245,7 @@ class _ScriptedPreparedExecution:
                 "candidate": expected_candidate_fingerprint,
             },
         )
+        self._completion = None
 
     def discard(self) -> None:
         if self._opened:
@@ -248,6 +271,35 @@ class _ScriptedPreparedExecution:
         self._opened = True
         for item in self._items:
             yield item
+        self._completion = completed_provider_execution_for_test(self._request)
+
+    def take_completed_result_once(self):
+        if self._completion is None:
+            raise RuntimeError("test provider execution is not completed")
+        result = self._completion
+        self._completion = None
+        return result
+
+
+def completed_provider_execution_for_test(
+    request: KernelModelExecutionRequest,
+) -> CompletedProviderModelExecution:
+    terminal = ProviderStreamTerminal(
+        terminal_kind=ProviderNormalizedTerminalKind.COMPLETED,
+        usage=TransportUsageReport(usage_status="missing", usage=None),
+    )
+    profile = request.prepared_call.call.target.model_profile.provider_profile
+    return CompletedProviderModelExecution(
+        terminal=terminal,
+        replay_payload=None,
+        replay_scope=profile.reasoning_replay_scope,
+        provider_profile_fingerprint=(
+            request.wire_input_plan.provider_profile_fingerprint
+        ),
+        resolved_target_fingerprint=(
+            request.prepared_call.call.target.fact.target_fingerprint
+        ),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -338,6 +390,40 @@ class StaticContextSourceCollector:
                     variants=(
                         (ContextRenderMode.FULL, "plan workflow full"),
                         (ContextRenderMode.COMPACT, "plan workflow"),
+                    ),
+                ),
+            )
+        previous = canonical_facts.previous_turn_outcome_fact  # type: ignore[union-attr]
+        if previous is not None:
+            body = json.dumps(
+                {
+                    "kind": previous.outcome_kind.value,
+                    "accepted_assistant_entry_count": (
+                        previous.accepted_assistant_entry_count
+                    ),
+                    "definitely_not_dispatched_tool_count": (
+                        previous.definitely_not_dispatched_tool_count
+                    ),
+                    "outcome_unknown_tool_count": (
+                        previous.outcome_unknown_tool_count
+                    ),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            candidates += (
+                _candidate(
+                    kind=ContextSourceKind.PREVIOUS_TURN_OUTCOME,
+                    version="pulsara.previous-turn-outcome.v1",
+                    channel=ContextChannel.RUNTIME_OBSERVATION,
+                    trust=ContextTrustClass.AUTHORIZED_RUNTIME_GUIDANCE,
+                    budget=ContextBudgetClass.MUST_KEEP,
+                    placement=45,
+                    degradation=10,
+                    variants=(
+                        (ContextRenderMode.FULL, body),
+                        (ContextRenderMode.COMPACT, body),
                     ),
                 ),
             )

@@ -13,7 +13,7 @@ from enum import StrEnum
 from typing import Literal, Protocol
 
 from pulsara_agent.llm.estimator import TokenEstimate
-from pulsara_agent.llm.input import LLMMessage
+from pulsara_agent.llm.input import LLMMessage, MessageRole
 from pulsara_agent.ports.artifact import (
     ToolOutputArtifactDisposition,
     ToolOutputArtifactUnavailabilityReason,
@@ -1790,11 +1790,52 @@ class ContextCompileBudgetReport:
 
 
 @dataclass(frozen=True, slots=True)
+class FrozenCompiledMessagePlacement:
+    message_ordinal: int
+    origin_entry_id: str | None
+    origin_item_fingerprint: str
+    within_origin_ordinal: int
+    role: MessageRole
+    placement_fingerprint: str
+
+    def __post_init__(self) -> None:
+        if self.message_ordinal < 0 or self.within_origin_ordinal < 0:
+            raise ValueError("compiled message placement ordinal is invalid")
+        if not self.origin_item_fingerprint.startswith(SHA256_PREFIX):
+            raise ValueError("compiled message origin fingerprint is invalid")
+        expected = context_fingerprint(
+            "pulsara.compiled-message-placement:v1",
+            {
+                "ordinal": self.message_ordinal,
+                "entry": self.origin_entry_id,
+                "item": self.origin_item_fingerprint,
+                "within": self.within_origin_ordinal,
+                "role": self.role.value,
+            },
+        )
+        if self.placement_fingerprint != expected:
+            raise ValueError("compiled message placement fingerprint mismatch")
+
+
+def compiled_message_placements_fingerprint(
+    placements: tuple[FrozenCompiledMessagePlacement, ...],
+) -> str:
+    return context_fingerprint(
+        "pulsara.compiled-message-placements:v1",
+        tuple(item.placement_fingerprint for item in placements),
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class FrozenCompiledModelInput:
     context_id: str
     canonical_input_identity: CanonicalModelInputIdentity
     system_prompt: str = field(repr=False)
     messages: tuple[LLMMessage, ...] = field(repr=False)
+    message_placements: tuple[FrozenCompiledMessagePlacement, ...] = field(
+        repr=False
+    )
+    message_placements_fingerprint: str
     tools: tuple[FrozenToolSpec, ...] = field(repr=False)
     final_estimate: TokenEstimate
     source_decisions: tuple[CompiledSourceDecision, ...]
@@ -1825,6 +1866,23 @@ class FrozenCompiledModelInput:
             > self.budget_report.effective_input_budget_tokens
         ):
             raise ValueError("compiled model input exceeds its effective budget")
+        if len(self.message_placements) != len(self.messages):
+            raise ValueError("compiled message placements are not parallel")
+        if tuple(item.message_ordinal for item in self.message_placements) != tuple(
+            range(len(self.messages))
+        ):
+            raise ValueError("compiled message placement order is invalid")
+        if any(
+            item.role is not message.role
+            for item, message in zip(
+                self.message_placements, self.messages, strict=True
+            )
+        ):
+            raise ValueError("compiled message placement role drifted")
+        if self.message_placements_fingerprint != (
+            compiled_message_placements_fingerprint(self.message_placements)
+        ):
+            raise ValueError("compiled message placements fingerprint mismatch")
         if (
             len(self.tool_result_decisions)
             > STRUCTURED_MODEL_INPUT_LIMITS.maximum_tool_result_decisions

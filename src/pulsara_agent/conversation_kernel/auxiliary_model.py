@@ -40,6 +40,9 @@ from pulsara_agent.ports.live_agent_event import (
     TextStartPayload,
 )
 from pulsara_agent.ports.provider_stream import (
+    ProviderModelExecutionFailed,
+    ProviderModelOutputIncomplete,
+    ProviderNormalizedTerminalKind,
     ProviderPhysicalCompletionStatus,
     ProviderStreamTerminal,
 )
@@ -189,11 +192,14 @@ class DirectKernelAuxiliaryJsonModel:
                 if item is None:
                     break
                 if isinstance(item, ProviderStreamTerminal):
-                    if item.outcome != "COMPLETED":
+                    if item.terminal_kind is (
+                        ProviderNormalizedTerminalKind.OUTPUT_INCOMPLETE
+                    ):
+                        assert item.incomplete_reason is not None
+                        raise ProviderModelOutputIncomplete(item.incomplete_reason)
+                    if item.terminal_kind is ProviderNormalizedTerminalKind.PROVIDER_ERROR:
                         assert item.error is not None
-                        raise RuntimeError(
-                            f"auxiliary provider failed: {item.error.code.value}"
-                        )
+                        raise ProviderModelExecutionFailed(item.error)
                     break
                 if isinstance(item, TextStartPayload):
                     if item.block_identity in open_blocks:

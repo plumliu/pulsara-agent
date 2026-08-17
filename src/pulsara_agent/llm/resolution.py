@@ -276,7 +276,19 @@ def resolve_model_target(
                 "message_field": profile.thinking.message_field,
                 "replay_policy": profile.thinking.replay_policy.value,
             },
-            "merge_policy": "validated_extensions_then_pulsara_fields:v2",
+            "assistant_replay_contract": (
+                profile.assistant_replay_contract_fingerprint
+            ),
+            "chat_replay_fields": tuple(
+                (
+                    item.field_name,
+                    item.accumulation_mode.value,
+                    item.required_on_selected_response,
+                    item.final_value_required,
+                )
+                for item in profile.chat_replay_fields
+            ),
+            "merge_policy": "validated_extensions_then_pulsara_fields:v3",
         },
         context="provider_profile",
     )
@@ -285,7 +297,7 @@ def resolve_model_target(
     )
     estimator = PulsaraHeuristicTokenEstimatorV1()
     payload: dict[str, Any] = {
-        "contract_version": "resolved-model-target:v3",
+        "contract_version": "resolved-model-target:v4",
         "model_id": model.id,
         "model_role": role.value,
         "provider": model.provider,

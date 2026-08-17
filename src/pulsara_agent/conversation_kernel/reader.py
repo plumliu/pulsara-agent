@@ -1688,6 +1688,10 @@ def _previous_turn_outcome_kind(raw_reason: str) -> PreviousTurnOutcomeKind:
     return {
         "USER_STOPPED": PreviousTurnOutcomeKind.USER_STOPPED,
         "FOREGROUND_EXECUTION_INTERRUPTED": PreviousTurnOutcomeKind.EXECUTION_FAILED,
+        "MODEL_OUTPUT_TOKEN_LIMIT_REACHED": PreviousTurnOutcomeKind.EXECUTION_FAILED,
+        "MODEL_OUTPUT_CONTEXT_LIMIT_REACHED": PreviousTurnOutcomeKind.EXECUTION_FAILED,
+        "MODEL_OUTPUT_CONTENT_FILTERED": PreviousTurnOutcomeKind.EXECUTION_FAILED,
+        "MODEL_OUTPUT_INCOMPLETE": PreviousTurnOutcomeKind.EXECUTION_FAILED,
         "SESSION_CLOSED": PreviousTurnOutcomeKind.HOST_SESSION_CLOSED,
         "HOST_TAKEOVER": PreviousTurnOutcomeKind.HOST_REPLACED,
         "PROVIDER_INPUT_PLAN_CONFLICT": (

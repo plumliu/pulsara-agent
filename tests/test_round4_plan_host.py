@@ -35,6 +35,7 @@ from pulsara_agent.settings import PulsaraSettings, StorageConfig
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 from pulsara_agent.workspace_identity import HostWorkspaceInput
 from tests.support.model_config import test_llm_config
+from tests.support.round3 import completed_provider_execution_for_test
 
 
 pytestmark = pytest.mark.postgres
@@ -55,6 +56,7 @@ class _PreparedTestExecution:
                 "compiled": request.compiled_input.compiled_semantic_fingerprint,
             },
         )
+        self._completion = None
 
     def discard(self) -> None:
         if self._opened:
@@ -72,9 +74,20 @@ class _PreparedTestExecution:
         self._opened = True
         async for item in self._owner.stream(self._request):
             yield item
+        self._completion = completed_provider_execution_for_test(self._request)
+
+    def take_completed_result_once(self):
+        if self._completion is None:
+            raise RuntimeError("test provider execution is not complete")
+        result = self._completion
+        self._completion = None
+        return result
 
 
 class _PreflightModel:
+    def plan_wire_input(self, **kwargs):
+        return self._preparer.plan_wire_input(**kwargs)
+
     def preflight_execution(
         self,
         request,

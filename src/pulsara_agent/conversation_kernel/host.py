@@ -55,6 +55,9 @@ from pulsara_agent.conversation_kernel.execution_watchdogs import (
 from pulsara_agent.conversation_kernel.input_continuity import (
     HostProviderInputContinuityOwner,
 )
+from pulsara_agent.conversation_kernel.assistant_settlement import (
+    AssistantMessageSettlementOwner,
+)
 from pulsara_agent.conversation_kernel.auxiliary_model import (
     DirectKernelAuxiliaryJsonModel,
     provider_trust_domain_identity,
@@ -312,6 +315,12 @@ class KernelHostSession:
         self._plan_interactions = KernelPlanInteractionCoordinator()
         self._plan_continuations = ContinuationAdmissionOwner()
         self._input_continuity = HostProviderInputContinuityOwner(session_id=session_id)
+        self._assistant_settlements = AssistantMessageSettlementOwner(
+            repository=repository,
+            io_owner=self._io,
+            continuity_owner=self._input_continuity,
+            deadline_factory=self._deadlines,
+        )
         self._event_loop = asyncio.get_running_loop()
         launch_permission_mode = mode_for_policy(permission_policy)
         if launch_permission_mode is None:
@@ -427,6 +436,7 @@ class KernelHostSession:
             automatic_plan_continuation=(self._accept_automatic_plan_continuation),
             deadline_factory=self._deadlines,
             memory_projection=self._memory_tools,
+            assistant_settlement_owner=self._assistant_settlements,
         )
         self._subagents.bind_runner_factory(self._new_child_runner)
         self._active_task: asyncio.Task[KernelRunResult] | None = None
@@ -2548,6 +2558,12 @@ class KernelHostSession:
                 )
             except BaseException as exc:
                 close_error = close_error or exc
+            try:
+                await self._assistant_settlements.aclose(
+                    deadline_monotonic=deadline
+                )
+            except BaseException as exc:
+                close_error = close_error or exc
             self._input_continuity.close()
             try:
                 await self._memory_governor.aclose(deadline_monotonic=deadline)
@@ -2629,6 +2645,7 @@ class KernelHostSession:
             workspace_id=self.workspace.workspace_key,
             launch_permission_mode=self._launch_permission_mode,
             deadline_factory=self._deadlines,
+            assistant_settlement_owner=self._assistant_settlements,
         )
 
     def _observe_provider_usage(

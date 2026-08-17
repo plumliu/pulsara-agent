@@ -73,6 +73,9 @@ class _TerminalMonitorDogfoodModel:
     def prepare_call(self, request):
         return self._delegate.prepare_call(request)
 
+    def plan_wire_input(self, **kwargs):
+        return self._delegate.plan_wire_input(**kwargs)
+
     def preflight_execution(self, request, **kwargs):
         return self._delegate.preflight_execution(request, **kwargs)
 

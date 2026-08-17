@@ -27,6 +27,7 @@ from pulsara_agent.model_input.contracts import (
     ContextSourceKind,
     ContextSourceLifecycle,
     ContextTrustClass,
+    FrozenCompiledMessagePlacement,
     FrozenCompiledModelInput,
     FrozenToolSpec,
     FrozenProviderInputItem,
@@ -37,6 +38,7 @@ from pulsara_agent.model_input.contracts import (
     StructuredModelInputLimits,
     STRUCTURED_MODEL_INPUT_LIMITS,
     ToolResultProviderRenderMode,
+    compiled_message_placements_fingerprint,
     frozen_compiled_model_input_fingerprint,
     provider_input_item_fingerprint,
 )
@@ -66,7 +68,7 @@ from pulsara_agent.primitives.plan_workflow import (
 
 
 COMPILER_CONTRACT_VERSION = (
-    "pulsara.structured-model-input-compiler.prefix-continuity.v4"
+    "pulsara.structured-model-input-compiler.prefix-continuity.v5"
 )
 
 
@@ -329,6 +331,7 @@ class _ToolState:
 class _Layout:
     system_prompt: str
     messages: tuple[LLMMessage, ...]
+    message_placements: tuple[FrozenCompiledMessagePlacement, ...]
     estimate: TokenEstimate
 
 
@@ -663,6 +666,12 @@ class StructuredModelInputCompiler:
             canonical_input_identity=request.canonical_input.identity,
             system_prompt=layout.system_prompt,
             messages=layout.messages,
+            message_placements=layout.message_placements,
+            message_placements_fingerprint=(
+                compiled_message_placements_fingerprint(
+                    layout.message_placements
+                )
+            ),
             tools=surface.tool_specs,
             final_estimate=full,
             source_decisions=source_decisions,
@@ -949,6 +958,45 @@ class StructuredModelInputCompiler:
         else:
             suffix_messages = (*delta_messages, *ordered_observations)
         messages = (*prefix_messages, *suffix_messages)
+        delta_placement_values = tuple(
+            (
+                message,
+                item.source_entry_id,
+                provider_input_item_fingerprint(item),
+            )
+            for item, message in zip(delta_items, delta_messages, strict=True)
+        )
+        observation_placement_values = tuple(
+            (
+                item[2],
+                None,
+                context_fingerprint(
+                    "pulsara.compiled-runtime-observation-origin:v1",
+                    {"source_kind": item[1], "message": _llm_message_value(item[2])},
+                ),
+            )
+            for item in sorted(observation_messages, key=lambda item: item[:2])
+        )
+        if isinstance(planning.dispatch_anchor, NewTriggerAnchor):
+            suffix_placement_values = (
+                *delta_placement_values[:trigger_index],
+                *observation_placement_values,
+                *delta_placement_values[trigger_index:],
+            )
+        else:
+            suffix_placement_values = (
+                *delta_placement_values,
+                *observation_placement_values,
+            )
+        prefix_placements = (
+            ()
+            if predecessor is None or reset_reason is not None
+            else predecessor.message_placements
+        )
+        message_placements = _compiled_message_placements(
+            prefix=prefix_placements,
+            values=suffix_placement_values,
+        )
         estimate = self._estimate_frozen_input(
             request,
             system_prompt=system_prompt,
@@ -1015,6 +1063,10 @@ class StructuredModelInputCompiler:
             canonical_input_identity=identity,
             system_prompt=system_prompt,
             messages=messages,
+            message_placements=message_placements,
+            message_placements_fingerprint=(
+                compiled_message_placements_fingerprint(message_placements)
+            ),
             tools=tools,
             final_estimate=estimate,
             source_decisions=fresh.source_decisions,
@@ -1517,6 +1569,12 @@ class StructuredModelInputCompiler:
             canonical_input_identity=request.canonical_input.identity,
             system_prompt=layout.system_prompt,
             messages=layout.messages,
+            message_placements=layout.message_placements,
+            message_placements_fingerprint=(
+                compiled_message_placements_fingerprint(
+                    layout.message_placements
+                )
+            ),
             tools=predecessor.tools,
             final_estimate=layout.estimate,
             source_decisions=source_decisions,
@@ -1646,8 +1704,65 @@ class StructuredModelInputCompiler:
             ),
         )
         messages = (*predecessor.messages, *suffix)
+        suffix_placement_values: list[tuple[LLMMessage, str | None, str]] = []
+        delta_values = tuple(
+            (
+                message,
+                item.source.source_entry_id,
+                provider_input_item_fingerprint(item.source),
+            )
+            for item, message in zip(lowered_delta, delta_messages, strict=True)
+        )
+        observation_values = tuple(
+            (
+                message,
+                None,
+                _observation_origin_fingerprint(
+                    source_kind=kind,
+                    semantic_fingerprint=semantic,
+                    text="\n".join(message.content),
+                ),
+            )
+            for _placement, kind_value, message in sorted(
+                (
+                    (
+                        item.placement_ordinal,
+                        item.source_kind.value,
+                        item.fixed_message
+                        if item.fixed_message is not None
+                        else None
+                        if item.state is None or item.state.omitted
+                        else source_variant_message(
+                            item.state.candidate, item.state.text() or ""
+                        ),
+                    )
+                    for item in emissions
+                ),
+                key=lambda value: value[:2],
+            )
+            if message is not None
+            for kind in (ContextSourceKind(kind_value),)
+            for semantic in (
+                context_fingerprint(
+                    "pulsara.append-runtime-observation-semantic:v1",
+                    _llm_message_value(message),
+                ),
+            )
+        )
+        if isinstance(planning.dispatch_anchor, NewTriggerAnchor):
+            suffix_placement_values.extend(delta_values[:trigger_index])
+            suffix_placement_values.extend(observation_values)
+            suffix_placement_values.extend(delta_values[trigger_index:])
+        else:
+            suffix_placement_values.extend(delta_values)
+            suffix_placement_values.extend(observation_values)
+        prefix_placements = predecessor.message_placements
+        placements = _compiled_message_placements(
+            prefix=prefix_placements,
+            values=tuple(suffix_placement_values),
+        )
         deadline.check()
-        return _Layout(predecessor.system_prompt, messages, estimate)
+        return _Layout(predecessor.system_prompt, messages, placements, estimate)
 
     @staticmethod
     def _require_provider_safe_delta(
@@ -2090,7 +2205,14 @@ class StructuredModelInputCompiler:
         ]
         system_prompt = "\n\n".join(system_fragments)
         observations = tuple(
-            source_variant_message(state.candidate, text)
+            (
+                source_variant_message(state.candidate, text),
+                _observation_origin_fingerprint(
+                    source_kind=state.candidate.source_kind,
+                    semantic_fingerprint=state.candidate.domain_semantic_fingerprint,
+                    text=text,
+                ),
+            )
             for state in sorted(
                 sources, key=lambda item: self._placement_key(item.candidate)
             )
@@ -2100,14 +2222,18 @@ class StructuredModelInputCompiler:
         tool_by_identity = {id(state.lowered): state for state in tools}
         transcript = tuple(
             (
-                item.fixed_message
-                if item.fixed_message is not None
-                else tool_by_identity[id(item)].message()
+                (
+                    item.fixed_message
+                    if item.fixed_message is not None
+                    else tool_by_identity[id(item)].message()
+                ),
+                provider_input_item_fingerprint(item.source),
+                item.source.source_entry_id,
             )
             for item in lowered
         )
         if request.dispatch_anchor_entry_id is None:
-            messages = (*transcript, *observations)
+            ordered = (*transcript, *((item[0], item[1], None) for item in observations))
         else:
             indexes = tuple(
                 index
@@ -2119,7 +2245,16 @@ class StructuredModelInputCompiler:
                     ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
                 )
             index = indexes[0]
-            messages = (*transcript[:index], *observations, *transcript[index:])
+            ordered = (
+                *transcript[:index],
+                *((item[0], item[1], None) for item in observations),
+                *transcript[index:],
+            )
+        messages = tuple(item[0] for item in ordered)
+        placements = _compiled_message_placements(
+            prefix=(),
+            values=tuple((item[0], item[2], item[1]) for item in ordered),
+        )
         estimate = self._estimate_frozen_input(
             request,
             system_prompt=system_prompt,
@@ -2128,7 +2263,7 @@ class StructuredModelInputCompiler:
             deadline=active_deadline,
         )
         active_deadline.check()
-        return _Layout(system_prompt, messages, estimate)
+        return _Layout(system_prompt, messages, placements, estimate)
 
     @staticmethod
     def _estimate_frozen_input(
@@ -2364,6 +2499,59 @@ def _llm_message_value(message: LLMMessage) -> object:
         "name": message.name,
         "arguments": message.arguments,
     }
+
+
+def _observation_origin_fingerprint(
+    *, source_kind: ContextSourceKind, semantic_fingerprint: str, text: str
+) -> str:
+    return context_fingerprint(
+        "pulsara.compiled-runtime-observation-origin:v1",
+        {
+            "source_kind": source_kind.value,
+            "semantic": semantic_fingerprint,
+            "text": text,
+        },
+    )
+
+
+def _compiled_message_placements(
+    *,
+    prefix: tuple[FrozenCompiledMessagePlacement, ...],
+    values: tuple[tuple[LLMMessage, str | None, str], ...],
+) -> tuple[FrozenCompiledMessagePlacement, ...]:
+    placements = list(prefix)
+    previous_entry = prefix[-1].origin_entry_id if prefix else None
+    previous_within = prefix[-1].within_origin_ordinal if prefix else -1
+    for message, origin_entry_id, origin_item_fingerprint in values:
+        within = (
+            previous_within + 1
+            if origin_entry_id is not None and origin_entry_id == previous_entry
+            else 0
+        )
+        message_ordinal = len(placements)
+        fingerprint = context_fingerprint(
+            "pulsara.compiled-message-placement:v1",
+            {
+                "ordinal": message_ordinal,
+                "entry": origin_entry_id,
+                "item": origin_item_fingerprint,
+                "within": within,
+                "role": message.role.value,
+            },
+        )
+        placements.append(
+            FrozenCompiledMessagePlacement(
+                message_ordinal=message_ordinal,
+                origin_entry_id=origin_entry_id,
+                origin_item_fingerprint=origin_item_fingerprint,
+                within_origin_ordinal=within,
+                role=message.role,
+                placement_fingerprint=fingerprint,
+            )
+        )
+        previous_entry = origin_entry_id
+        previous_within = within
+    return tuple(placements)
 
 
 def _tool_result_source_fingerprint(item: FrozenProviderInputItem) -> str:
