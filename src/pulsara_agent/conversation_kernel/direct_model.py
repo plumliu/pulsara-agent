@@ -33,7 +33,10 @@ from pulsara_agent.llm.adapters.openai.responses import (
 from pulsara_agent.llm.config import LLMConfig
 from pulsara_agent.llm.input import LLMToolCall, ToolSpec
 from pulsara_agent.llm.models import ModelRole
-from pulsara_agent.llm.provider import ProviderReasoningReplayScope
+from pulsara_agent.llm.provider import (
+    ProviderAssistantReplayCodecKind,
+    ProviderReasoningReplayScope,
+)
 from pulsara_agent.llm.normalized_transport import (
     NormalizedLLMTransport,
     NormalizedLLMTransportRegistry,
@@ -223,7 +226,7 @@ class CompletedProviderModelExecution:
         selected = profile_scope.value == "ALL_COMPLETED_RESPONSES" or (
             profile_scope.value == "TOOL_RESPONSES" and has_tool_calls
         )
-        if selected != (payload is not None):
+        if payload is not None and not selected:
             raise RuntimeError("completed response replay selection drifted")
         if payload is None:
             return None
@@ -371,8 +374,8 @@ class PreparedKernelModelExecution:
                     if item.terminal_kind is ProviderNormalizedTerminalKind.COMPLETED:
                         profile = call.target.model_profile.provider_profile
                         if (
-                            profile.reasoning_replay_scope.value
-                            == "ALL_COMPLETED_RESPONSES"
+                            profile.assistant_replay_codec_kind
+                            is ProviderAssistantReplayCodecKind.RESPONSES_EXACT_OUTPUT_ITEMS
                             and item.completed_replay_payload is None
                         ):
                             semantic_error = RuntimeError(

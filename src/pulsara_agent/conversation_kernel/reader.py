@@ -96,6 +96,9 @@ from pulsara_agent.primitives.tool_observation import (
     provider_visible_turn_ref,
     tool_observation_timing_fingerprint,
 )
+from pulsara_agent.primitives.tool_result_projection import (
+    classify_tool_result_delivery,
+)
 from pulsara_agent.ports.terminal_observation import (
     TerminalDeliveryCoverage,
     TerminalObservationContentV1,
@@ -586,6 +589,11 @@ class CanonicalProviderInputReader:
                                 tool_result_body_text=_decode_provider_text(
                                     result_content, str(result["content_codec"])
                                 ),
+                                tool_result_delivery=classify_tool_result_delivery(
+                                    tool_name=call.tool_name,
+                                    arguments=call.arguments,
+                                    result_state=str(result["result_state"]),
+                                ),
                             )
                         )
                         continue
@@ -675,6 +683,13 @@ class CanonicalProviderInputReader:
                                     tool_result_body_text=_decode_provider_text(
                                         result_content,
                                         str(result["content_codec"]),
+                                    ),
+                                    tool_result_delivery=(
+                                        classify_tool_result_delivery(
+                                            tool_name=call.tool_name,
+                                            arguments=call.arguments,
+                                            result_state=str(result["result_state"]),
+                                        )
                                     ),
                                 ),
                             )

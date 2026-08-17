@@ -1,6 +1,6 @@
 # Pulsara hard-cut 后产品能力缺失索引
 
-> 状态：WORKING GAP INDEX（产品能力事实索引，不是恢复设计；PHC-02 已通过 Round 1 恢复，PHC-01/03/04/05/06 已通过 Round 2 恢复；PHC-17 的typed compiler与同Host prefix continuity已通过 Round 3 / 3.1完整恢复；PHC-09 的 Python Runtime/Host、canonical/Protocol 后端已通过 Round 4 恢复，Go/TUI 产品闭环明确延期；PHC-07A execution envelope已通过 Round 5A恢复，Round 5A.1已闭合provider-neutral terminal、whole-response atomicity与same-epoch reasoning replay；Round 7.1、Round 9、Round 9.1与PHC-07B Round 5B依次仍为DRAFT；memory专项已按 Round 8 advisory 边界重构并激活）
+> 状态：WORKING GAP INDEX（产品能力事实索引，不是恢复设计；PHC-02 已通过 Round 1 恢复，PHC-01/03/04/05/06 已通过 Round 2 恢复；PHC-17 的typed compiler与同Host prefix continuity已通过 Round 3 / 3.1完整恢复；PHC-09 的 Python Runtime/Host、canonical/Protocol 后端已通过 Round 4 恢复，Go/TUI 产品闭环明确延期；PHC-07A execution envelope已通过 Round 5A恢复，Round 5A.1已闭合provider-neutral terminal、whole-response atomicity与same-epoch reasoning replay；Round 7.1已闭合全局provider-visible ToolResult与FULL-delivery边界，Round 9、Round 9.1与PHC-07B Round 5B仍为DRAFT；memory专项已按 Round 8 advisory 边界重构并激活）
 >
 > 初始调研：2026-08-10；最近复核：2026-08-16（Round 8 Advisory Memory activation）
 >
@@ -444,7 +444,7 @@ Round 1 已在新 conversation kernel 内恢复产品能力，没有恢复旧 du
 
 对应机器证据见 [`round1_tool_output_artifact_activation.json`](benchmarks/suites/core/v1/round1_tool_output_artifact_activation.json)。Go artifact viewer/download UI、binary artifact、多 artifact result、artifact 删除/retention UI 与后台 retention retry job 仍是明确 non-goal；PHC-01、PHC-03 至 PHC-17 的状态不因本轮改变。
 
-### 5.6 Round 7.1：全局provider-visible ToolResult投影（未激活）
+### 5.6 Round 7.1：全局provider-visible ToolResult投影（已激活）
 
 Round 1恢复了canonical result、artifact与bounded preview，但normal provider lowering仍存在32,000-character旧分界、不同variant的byte/character口径，以及ordinary history与未来compaction retained tail可能各自发明阈值的问题。这不是compaction能力，也不是Capability registry语义；它是所有工具共同依赖的provider-visible ToolResult contract。
 
@@ -458,7 +458,7 @@ Round 1恢复了canonical result、artifact与bounded preview，但normal provid
 - artifact handle/guidance只在正文确有省略且读取对当前任务可能有帮助时出现，不向模型注入artifact inventory；
 - Round 5B retained group复用同一pure builder；只有canonical item、lowering contract与call-local augmentation相同才要求逐字相等，successor citation mapping不得迁移旧epoch opaque handle；它不能拥有“最后一个结果”或compaction专用cap。
 
-该轮当前为DRAFT/NOT ACTIVATED，不改变Round 1已恢复状态，也不能据此宣传40,000-byte normal output已经进入production。它不新增relation、event、job、receipt、projection或recovery owner。
+该轮已于2026-08-17激活：40,000-byte provider-neutral logical FULL、UTF-8 canonical COMPLETE、无FULL variant、actual-mode decision、conditional artifact guidance及`artifact_read`的`FULL_REQUIRED`分页均已进入production；aggregate不足时provider open为0且不改写canonical result、不重跑tool。它不新增relation、event、job、receipt、projection或recovery owner。机器证据见[`round7_1_provider_visible_tool_result_projection_activation.json`](benchmarks/suites/core/v1/round7_1_provider_visible_tool_result_projection_activation.json)。
 
 ## 6. PHC-07：Long-horizon execution、context window 与 compaction
 

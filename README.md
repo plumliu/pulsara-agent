@@ -82,8 +82,9 @@ The current Kernel supports:
   nearest `.venv/bin`, foreground cwd continuity, and physical process-group
   drain on Host close;
 - complete sanitized tool output retention through the shared blob store:
-  medium output stays fully visible with an artifact reference, while large
-  output uses a UTF-8-safe head/tail preview and bounded on-demand reads;
+  a provider-neutral ToolResult logical message up to 40,000 UTF-8 bytes may
+  remain FULL (independent of adapter wire bytes), while larger output uses a
+  UTF-8-safe 8,000-character head/tail preview and bounded on-demand reads;
 - bounded Host-scoped subagents;
 - bundled and local skills;
 - Host-scoped MCP over stdio and Streamable HTTP, with bounded discovery,
@@ -195,6 +196,15 @@ internal contract versions, fingerprints, generations, schema markers, and
 delimiter-based Plan carriers are removed from model input. Verification is
 recorded in
 [`round7_model_visible_failure_and_tool_observation_activation.json`](benchmarks/suites/core/v1/round7_model_visible_failure_and_tool_observation_activation.json).
+Round 7.1 gives every tool origin one provider-visible projection ladder. The
+40,000-byte cap applies only to the provider-neutral logical ToolResult;
+Chat/Responses physical request bytes remain owned by the exact wire plan.
+Compiler variants may begin at COMPACT/REF_ONLY/OMITTED when FULL is
+ineligible, while successful `artifact_read` pages require exact FULL delivery
+or stop before provider open. Artifact guidance is conditional, canonical
+results are never rewritten for budget, and installed same-epoch messages
+remain append-only. Verification is recorded in
+[`round7_1_provider_visible_tool_result_projection_activation.json`](benchmarks/suites/core/v1/round7_1_provider_visible_tool_result_projection_activation.json).
 Round 8 replaces the old memory durability/recovery graph with an advisory
 dataset. `remember` atomically accepts one candidate with its ToolResult, while
 governance, cheap-hint reflection, embedding, and reranking remain lossy

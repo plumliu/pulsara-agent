@@ -1673,11 +1673,10 @@ def test_round3_tool_result_variants_are_typed_utf8_safe_and_surface_aware() -> 
         limits=StructuredModelInputLimits(),
     )
     assert tuple(variant.mode for variant in without_read.tool_result_variants) == (
-        ToolResultProviderRenderMode.FULL,
         ToolResultProviderRenderMode.COMPACT,
         ToolResultProviderRenderMode.OMITTED_BODY,
     )
-    compact = without_read.tool_result_variants[1]
+    compact = without_read.tool_result_variants[0]
     assert (
         compact.utf8_bytes
         <= StructuredModelInputLimits().maximum_tool_result_compact_bytes
@@ -1700,7 +1699,7 @@ def test_round3_tool_result_variants_are_typed_utf8_safe_and_surface_aware() -> 
         for variant in with_read.tool_result_variants
         if variant.mode is ToolResultProviderRenderMode.COMPACT
     )
-    assert "Use artifact_read" in with_read_compact.message.content[0]
+    assert "If the omitted content is necessary" in with_read_compact.message.content[0]
 
 
 def test_round3_tool_result_bounds_cover_final_late_outcome_carrier() -> None:
@@ -2905,7 +2904,7 @@ def test_round3_source_decision_and_compiled_fingerprints_are_golden() -> None:
         "sha256:caee1ae23a161f2c862947ef5b7b2b9a4ae3093bce6117e00bc13a3a19058fbd"
     )
     assert compiled.compiled_semantic_fingerprint == (
-        "sha256:94989786db924684828e8fe2ba1d54f273807c49e6134833b57a398c2279376e"
+        "sha256:5a5225952d34cd6089dacbd9ebe563bd513523e63909312b8610f8f66fbd53e0"
     )
     assert compiled.final_estimate.total_input_tokens == 268
 

@@ -31,6 +31,7 @@ from pulsara_agent.llm.adapters.openai.retrying import (
 from pulsara_agent.llm.errors import LLMTransportContractError
 from pulsara_agent.llm.input import LLMMessage, LLMToolCall, MessageRole, ToolSpec
 from pulsara_agent.llm.provider import (
+    CHAT_CLOSED_REASONING_FIELD_CONTRACTS,
     ProviderChatFieldAccumulationMode,
     ProviderProfile,
     ProviderReasoningReplayScope,
@@ -40,6 +41,10 @@ from pulsara_agent.llm.provider import (
 from pulsara_agent.llm.request import LLMContext
 from pulsara_agent.llm.resolution import ResolvedModelCall
 from pulsara_agent.llm.result import TransportUsageReport
+from pulsara_agent.llm.stream_limits import (
+    MAX_CHAT_REASONING_REPLAY_AGGREGATE_BYTES,
+    MAX_CHAT_REASONING_REPLAY_ITEMS_PER_RESPONSE,
+)
 from pulsara_agent.ports.live_agent_event import ProviderStreamPayload
 from pulsara_agent.ports.provider_stream import (
     ProviderAdapterStreamItem,
@@ -53,6 +58,7 @@ from pulsara_agent.primitives.context import (
     FrozenJsonArrayFact,
     FrozenJsonObjectFact,
     FrozenJsonValue,
+    canonical_json_bytes,
     freeze_json,
     thaw_json,
 )
@@ -73,7 +79,7 @@ class OpenAIChatCompletionsTransport:
     timeout_policy: OpenAITransportTimeoutPolicy
     api: str = OPENAI_CHAT_COMPLETIONS_API
     binding_id: str = "pulsara.openai.chat_completions"
-    contract_version: str = "v3-explicit-terminal-echo-normalization"
+    contract_version: str = "v5-explicit-terminal-bounded-reasoning-carriers"
     retry_config: LLMRetryConfig = field(default_factory=LLMRetryConfig)
     openai_sdk_max_retries: int | None = None
     retry_sleep: Callable[[float], Awaitable[None]] = field(
@@ -205,7 +211,11 @@ class OpenAIChatCompletionsTransport:
                         )
                     yield ProviderStreamFailure(
                         message=str(exc),
-                        code_hint=provider_failure_code_hint(decision),
+                        code_hint=(
+                            exc.reason_code
+                            if isinstance(exc, LLMTransportContractError)
+                            else provider_failure_code_hint(decision)
+                        ),
                         retry_summary=build_provider_retry_summary(
                             config=self.retry_config,
                             traces=retry_traces,
@@ -376,6 +386,10 @@ def _messages_to_chat_messages(
     return chat_messages
 
 
+def _is_empty_chat_extension_value(value: object) -> bool:
+    return value is None or value == "" or value == [] or value == {}
+
+
 @dataclass(slots=True)
 class ChatCompletionAccumulator:
     """Closed one-choice Chat response state; EOF is never acceptance."""
@@ -388,9 +402,13 @@ class ChatCompletionAccumulator:
     _terminal_finish_reason: str | None = None
     _text_parts: list[str] = field(default_factory=list)
     _content_observed: bool = False
-    _field_values: dict[str, FrozenJsonValue | list[FrozenJsonValue]] = field(
+    _text_field_chunks: dict[str, list[str]] = field(default_factory=dict)
+    _array_field_items: dict[str, list[FrozenJsonValue]] = field(
         default_factory=dict
     )
+    _replay_aggregate_bytes: int = 2
+    _replay_item_count: int = 0
+    _unknown_nonempty_field_seen: bool = False
 
     def __post_init__(self) -> None:
         self.tool_calls = ChatToolCallAccumulator(builder=self.builder)
@@ -443,9 +461,9 @@ class ChatCompletionAccumulator:
                 reason_code="transport_chat_delta_contract_invalid",
             )
         if isinstance(delta, dict):
-            replay_contracts = {
+            known_contracts = {
                 item.field_name: item
-                for item in self.provider_profile.chat_replay_fields
+                for item in CHAT_CLOSED_REASONING_FIELD_CONTRACTS
             }
             live_thinking_fields = frozenset(
                 self.provider_profile.thinking.delta_fields
@@ -454,15 +472,11 @@ class ChatCompletionAccumulator:
                 "role",
                 "content",
                 "tool_calls",
-                *replay_contracts,
+                *known_contracts,
                 *live_thinking_fields,
             }
             unknown = set(delta).difference(allowed)
-            if unknown:
-                raise LLMTransportContractError(
-                    "chat delta contains an unsupported field",
-                    reason_code="transport_chat_delta_contract_invalid",
-                )
+            self._record_unknown_fields(delta, unknown)
             role = delta.get("role")
             if role is not None and role != "assistant":
                 raise LLMTransportContractError(
@@ -481,7 +495,7 @@ class ChatCompletionAccumulator:
                     self._text_parts.append(content)
                     events.extend(self.builder.text_delta(content))
             projected_fields = tuple(
-                dict.fromkeys((*replay_contracts, *sorted(live_thinking_fields)))
+                dict.fromkeys((*known_contracts, *sorted(live_thinking_fields)))
             )
             for field_name in projected_fields:
                 if field_name not in delta:
@@ -496,7 +510,7 @@ class ChatCompletionAccumulator:
                 # was ever observed.
                 if value is None:
                     continue
-                contract = replay_contracts.get(field_name)
+                contract = known_contracts.get(field_name)
                 if contract is not None:
                     self._accumulate_field(
                         field_name, contract.accumulation_mode, value
@@ -544,13 +558,17 @@ class ChatCompletionAccumulator:
                     or ProviderOutputIncompleteReason.UNKNOWN_PROVIDER_INCOMPLETE
                 ),
             )
-            self._field_values.clear()
+            self._clear_replay_fields()
             return events
 
         events.extend(self.tool_calls.close_active_tool_calls())
         self._reconcile_final_message(choice.get("message"))
+        self._validate_unknown_fields_for_terminal()
         events.extend(self.builder.close_active_blocks())
-        replay = self._freeze_completed_replay()
+        try:
+            replay = self._freeze_completed_replay()
+        finally:
+            self._clear_replay_fields()
         self._terminal_finish_reason = finish_reason
         self.terminal = ProviderAdapterTerminal(
             ProviderAdapterTerminalKind.COMPLETED,
@@ -573,24 +591,12 @@ class ChatCompletionAccumulator:
             delta = {}
         if not isinstance(delta, dict):
             return False
-        replay_fields = {
-            item.field_name for item in self.provider_profile.chat_replay_fields
-        }
-        allowed = {
-            "role",
-            "content",
-            "tool_calls",
-            *replay_fields,
-            *self.provider_profile.thinking.delta_fields,
-        }
-        if set(delta).difference(allowed):
-            return False
         if delta.get("role") not in (None, "assistant"):
             return False
         for field_name, value in delta.items():
             if field_name == "role":
                 continue
-            if value not in (None, "", []):
+            if not _is_empty_chat_extension_value(value):
                 return False
         return True
 
@@ -604,9 +610,15 @@ class ChatCompletionAccumulator:
                 and bool(self.tool_calls.completed_calls)
             )
         )
-        contracts = self.provider_profile.chat_replay_fields
+        known_contracts = CHAT_CLOSED_REASONING_FIELD_CONTRACTS
+        replay_contracts = {
+            item.field_name: item
+            for item in self.provider_profile.chat_replay_fields
+        }
         if raw_message is None:
-            if selected and any(item.final_value_required for item in contracts):
+            if selected and any(
+                item.final_value_required for item in replay_contracts.values()
+            ):
                 raise LLMTransportContractError(
                     "completed chat response lacks its required final message",
                     reason_code="transport_chat_replay_field_missing",
@@ -621,13 +633,9 @@ class ChatCompletionAccumulator:
             "role",
             "content",
             "tool_calls",
-            *(item.field_name for item in contracts),
+            *(item.field_name for item in known_contracts),
         }
-        if set(raw_message).difference(allowed):
-            raise LLMTransportContractError(
-                "chat final message contains an unsupported field",
-                reason_code="transport_chat_replay_field_invalid",
-            )
+        self._record_unknown_fields(raw_message, set(raw_message).difference(allowed))
         if raw_message.get("role", "assistant") != "assistant":
             raise LLMTransportContractError(
                 "chat final message changed the assistant role",
@@ -649,9 +657,15 @@ class ChatCompletionAccumulator:
                 "chat final tool calls differ from streamed tool calls",
                 reason_code="transport_chat_final_message_mismatch",
             )
-        for contract in contracts:
+        for contract in known_contracts:
             present = contract.field_name in raw_message
-            if selected and contract.final_value_required and not present:
+            replay_contract = replay_contracts.get(contract.field_name)
+            if (
+                selected
+                and replay_contract is not None
+                and replay_contract.final_value_required
+                and not present
+            ):
                 raise LLMTransportContractError(
                     "chat final message lacks a required replay field",
                     reason_code="transport_chat_replay_field_missing",
@@ -659,6 +673,17 @@ class ChatCompletionAccumulator:
             if not present:
                 continue
             raw_value = raw_message[contract.field_name]
+            if raw_value is None:
+                if (
+                    selected
+                    and replay_contract is not None
+                    and replay_contract.final_value_required
+                ):
+                    raise LLMTransportContractError(
+                        "chat final message has a null required replay field",
+                        reason_code="transport_chat_replay_field_missing",
+                    )
+                continue
             if contract.accumulation_mode is (
                 ProviderChatFieldAccumulationMode.TEXT_CONCAT
             ):
@@ -667,33 +692,47 @@ class ChatCompletionAccumulator:
                         "chat final replay text field is not text",
                         reason_code="transport_chat_replay_field_invalid",
                     )
-                accumulated = self._field_values.get(contract.field_name)
-                if accumulated is None:
-                    self._field_values[contract.field_name] = raw_value
-                elif accumulated != raw_value:
+                self._validate_final_replay_field_bound(
+                    contract.field_name,
+                    contract.accumulation_mode,
+                    raw_value,
+                )
+                if not self._field_observed(contract.field_name):
+                    self._accumulate_field(
+                        contract.field_name,
+                        contract.accumulation_mode,
+                        raw_value,
+                    )
+                elif self._text_field_value(contract.field_name) != raw_value:
                     raise LLMTransportContractError(
                         "chat final replay field differs from its deltas",
                         reason_code="transport_chat_replay_field_conflict",
                     )
                 continue
-            frozen = freeze_json(raw_value)
             if contract.accumulation_mode is (
                 ProviderChatFieldAccumulationMode.ORDERED_ARRAY_APPEND
             ):
+                self._validate_final_replay_field_bound(
+                    contract.field_name,
+                    contract.accumulation_mode,
+                    raw_value,
+                )
+                frozen = freeze_json(raw_value)
                 if not isinstance(frozen, FrozenJsonArrayFact):
                     raise LLMTransportContractError(
                         "chat final replay append field is not an array",
                         reason_code="transport_chat_replay_field_invalid",
                     )
-                final_value: FrozenJsonValue | list[FrozenJsonValue] = list(
-                    frozen.items
-                )
+                final_value = list(frozen.items)
             else:
-                final_value = frozen
-            accumulated = self._field_values.get(contract.field_name)
-            if accumulated is None:
-                self._field_values[contract.field_name] = final_value
-            elif accumulated != final_value:
+                raise AssertionError("chat replay accumulation mode drifted")
+            if not self._field_observed(contract.field_name):
+                self._accumulate_field(
+                    contract.field_name,
+                    contract.accumulation_mode,
+                    raw_value,
+                )
+            elif self._array_field_items[contract.field_name] != final_value:
                 raise LLMTransportContractError(
                     "chat final replay field differs from its deltas",
                     reason_code="transport_chat_replay_field_conflict",
@@ -701,7 +740,7 @@ class ChatCompletionAccumulator:
 
     def finish(self) -> ProviderAdapterTerminal | ProviderStreamFailure:
         if self.terminal is None:
-            self._field_values.clear()
+            self._clear_replay_fields()
             return ProviderStreamFailure(
                 message="Chat stream ended before a finish reason.",
                 code_hint="transport_protocol_error",
@@ -720,31 +759,153 @@ class ChatCompletionAccumulator:
                     "chat replay text field is not text",
                     reason_code="transport_chat_replay_field_invalid",
                 )
-            current = self._field_values.get(field_name, "")
-            if not isinstance(current, str):
-                raise AssertionError("chat replay accumulator shape drifted")
-            self._field_values[field_name] = current + raw_value
+            self._reserve_replay_append(field_name, mode, raw_value)
+            chunks = self._text_field_chunks.setdefault(field_name, [])
+            if raw_value:
+                chunks.append(raw_value)
             return
+        if not isinstance(raw_value, list):
+            raise LLMTransportContractError(
+                "chat replay append field is not an array",
+                reason_code="transport_chat_replay_field_invalid",
+            )
+        self._reserve_replay_append(field_name, mode, raw_value)
         frozen = freeze_json(raw_value)
-        if mode is ProviderChatFieldAccumulationMode.SINGLE_EXACT_VALUE:
-            if field_name in self._field_values and (
-                self._field_values[field_name] != frozen
-            ):
-                raise LLMTransportContractError(
-                    "chat replay field changed its exact value",
-                    reason_code="transport_chat_replay_field_conflict",
-                )
-            self._field_values[field_name] = frozen
-            return
         if not isinstance(frozen, FrozenJsonArrayFact):
             raise LLMTransportContractError(
                 "chat replay append field is not an array",
                 reason_code="transport_chat_replay_field_invalid",
             )
-        current = self._field_values.setdefault(field_name, [])
-        if not isinstance(current, list):
-            raise AssertionError("chat replay accumulator shape drifted")
+        current = self._array_field_items.setdefault(field_name, [])
         current.extend(frozen.items)
+
+    def _reserve_replay_append(
+        self,
+        field_name: str,
+        mode: ProviderChatFieldAccumulationMode,
+        raw_value: object,
+    ) -> None:
+        observed = self._field_observed(field_name)
+        if mode is ProviderChatFieldAccumulationMode.TEXT_CONCAT:
+            if not isinstance(raw_value, str):
+                raise AssertionError("chat replay text quote shape drifted")
+            item_increment = 1
+            encoded = self._canonical_replay_value_bytes(raw_value)
+            additional_bytes = (
+                self._new_replay_field_prefix_bytes(field_name) + len(encoded)
+                if not observed
+                else len(encoded) - 2
+            )
+        elif mode is ProviderChatFieldAccumulationMode.ORDERED_ARRAY_APPEND:
+            if not isinstance(raw_value, list):
+                raise AssertionError("chat replay array quote shape drifted")
+            item_increment = max(1, len(raw_value))
+            if (
+                self._replay_item_count + item_increment
+                > MAX_CHAT_REASONING_REPLAY_ITEMS_PER_RESPONSE
+            ):
+                self._fail_replay_limit(items=True)
+            encoded = self._canonical_replay_value_bytes(raw_value)
+            if not observed:
+                additional_bytes = self._new_replay_field_prefix_bytes(
+                    field_name
+                ) + len(encoded)
+            else:
+                interior_bytes = len(encoded) - 2
+                existing_items = self._array_field_items[field_name]
+                additional_bytes = interior_bytes + (
+                    1 if existing_items and raw_value else 0
+                )
+        else:  # pragma: no cover - closed enum.
+            raise AssertionError("chat replay accumulation mode drifted")
+
+        if (
+            self._replay_item_count + item_increment
+            > MAX_CHAT_REASONING_REPLAY_ITEMS_PER_RESPONSE
+        ):
+            self._fail_replay_limit(items=True)
+        if (
+            self._replay_aggregate_bytes + additional_bytes
+            > MAX_CHAT_REASONING_REPLAY_AGGREGATE_BYTES
+        ):
+            self._fail_replay_limit(items=False)
+        self._replay_item_count += item_increment
+        self._replay_aggregate_bytes += additional_bytes
+
+    def _validate_final_replay_field_bound(
+        self,
+        field_name: str,
+        mode: ProviderChatFieldAccumulationMode,
+        raw_value: object,
+    ) -> None:
+        if mode is ProviderChatFieldAccumulationMode.TEXT_CONCAT:
+            if not isinstance(raw_value, str):
+                raise AssertionError("chat final replay text quote shape drifted")
+            item_count = 1
+        elif mode is ProviderChatFieldAccumulationMode.ORDERED_ARRAY_APPEND:
+            if not isinstance(raw_value, list):
+                raise LLMTransportContractError(
+                    "chat final replay append field is not an array",
+                    reason_code="transport_chat_replay_field_invalid",
+                )
+            item_count = max(1, len(raw_value))
+        else:  # pragma: no cover - closed enum.
+            raise AssertionError("chat replay accumulation mode drifted")
+        if item_count > MAX_CHAT_REASONING_REPLAY_ITEMS_PER_RESPONSE:
+            self._fail_replay_limit(items=True)
+        encoded = self._canonical_replay_value_bytes(raw_value)
+        logical_bytes = (
+            2
+            + len(canonical_json_bytes(field_name))
+            + 1
+            + len(encoded)
+        )
+        if logical_bytes > MAX_CHAT_REASONING_REPLAY_AGGREGATE_BYTES:
+            self._fail_replay_limit(items=False)
+
+    @staticmethod
+    def _canonical_replay_value_bytes(raw_value: object) -> bytes:
+        try:
+            return canonical_json_bytes(raw_value)
+        except (TypeError, ValueError) as exc:
+            raise LLMTransportContractError(
+                "chat replay field is not canonical JSON",
+                reason_code="transport_chat_replay_field_invalid",
+            ) from exc
+
+    def _new_replay_field_prefix_bytes(self, field_name: str) -> int:
+        separator = 1 if self._text_field_chunks or self._array_field_items else 0
+        return separator + len(canonical_json_bytes(field_name)) + 1
+
+    def _field_observed(self, field_name: str) -> bool:
+        return (
+            field_name in self._text_field_chunks
+            or field_name in self._array_field_items
+        )
+
+    def _text_field_value(self, field_name: str) -> str:
+        return "".join(self._text_field_chunks[field_name])
+
+    def _fail_replay_limit(self, *, items: bool) -> None:
+        self._clear_replay_fields()
+        raise LLMTransportContractError(
+            (
+                "chat reasoning replay exceeded its item bound"
+                if items
+                else "chat reasoning replay exceeded its aggregate byte bound"
+            ),
+            reason_code=(
+                "transport_source_item_limit_exceeded"
+                if items
+                else "transport_source_payload_limit_exceeded"
+            ),
+        )
+
+    def _clear_replay_fields(self) -> None:
+        self._text_field_chunks.clear()
+        self._array_field_items.clear()
+        self._replay_aggregate_bytes = 2
+        self._replay_item_count = 0
 
     def _freeze_completed_replay(self):
         scope = self.provider_profile.reasoning_replay_scope
@@ -757,30 +918,40 @@ class ChatCompletionAccumulator:
         )
         if not selected:
             return None
-        for contract in self.provider_profile.chat_replay_fields:
+        contracts = self.provider_profile.chat_replay_fields
+        for contract in contracts:
             if contract.required_on_selected_response and (
-                contract.field_name not in self._field_values
+                not self._field_observed(contract.field_name)
             ):
                 raise LLMTransportContractError(
                     "completed chat response lacks a required replay field",
                     reason_code="transport_chat_replay_field_missing",
                 )
+        observed_contracts = tuple(
+            contract
+            for contract in contracts
+            if self._field_observed(contract.field_name)
+        )
+        if not observed_contracts:
+            return None
         message: dict[str, object] = {
             "role": "assistant",
             "content": "".join(self._text_parts) if self._content_observed else None,
         }
         if self.tool_calls.completed_calls:
             message["tool_calls"] = list(self.tool_calls.completed_calls)
-        for contract in self.provider_profile.chat_replay_fields:
-            if contract.field_name not in self._field_values:
-                continue
-            value = self._field_values[contract.field_name]
-            if isinstance(value, list):
-                message[contract.field_name] = [thaw_json(item) for item in value]
-            elif isinstance(value, str):
-                message[contract.field_name] = value
+        for contract in observed_contracts:
+            if contract.accumulation_mode is (
+                ProviderChatFieldAccumulationMode.TEXT_CONCAT
+            ):
+                message[contract.field_name] = self._text_field_value(
+                    contract.field_name
+                )
             else:
-                message[contract.field_name] = thaw_json(value)
+                message[contract.field_name] = [
+                    thaw_json(item)
+                    for item in self._array_field_items[contract.field_name]
+                ]
         frozen = freeze_json(message)
         if not isinstance(frozen, FrozenJsonObjectFact):
             raise AssertionError("chat replay message did not freeze as an object")
@@ -788,6 +959,28 @@ class ChatCompletionAccumulator:
             codec_kind=self.provider_profile.assistant_replay_codec_kind,
             ordered_items=(frozen,),
         )
+
+    def _record_unknown_fields(
+        self, carrier: dict[str, Any], unknown_fields: set[str]
+    ) -> None:
+        for field_name in unknown_fields:
+            if not _is_empty_chat_extension_value(carrier[field_name]):
+                self._unknown_nonempty_field_seen = True
+                return
+
+    def _validate_unknown_fields_for_terminal(self) -> None:
+        if not self._unknown_nonempty_field_seen:
+            return
+        if self.tool_calls.completed_calls:
+            raise LLMTransportContractError(
+                "chat tool continuation contains an unsupported replay carrier",
+                reason_code="transport_chat_replay_field_unsupported",
+            )
+        if not "".join(self._text_parts):
+            raise LLMTransportContractError(
+                "chat response contains only an unsupported semantic carrier",
+                reason_code="transport_chat_replay_field_unsupported",
+            )
 
 
 @dataclass(slots=True)

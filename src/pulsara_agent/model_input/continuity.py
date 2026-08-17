@@ -29,7 +29,7 @@ from pulsara_agent.primitives.context import canonical_json_bytes, context_finge
 
 
 PROVIDER_MESSAGE_LOWERING_CONTRACT = (
-    "pulsara.provider-message-lowering.prefix-continuity.v2"
+    "pulsara.provider-message-lowering.prefix-continuity.v3-tool-result-full"
 )
 FULL_HISTORY_CONTEXT_BASE_IDENTITY = context_fingerprint(
     "pulsara:context-base-semantic-identity:v1",

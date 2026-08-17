@@ -1,0 +1,179 @@
+{
+  "schema_version": "round7-1-provider-visible-tool-result-projection-activation.v1",
+  "status": "activated",
+  "generated_at_utc": "2026-08-17T14:42:23Z",
+  "captured_head": "572798cf50650d670dfc2bfcb47e3e6e334d80aa",
+  "working_tree_semantics": "Round 7.1 was implemented and verified in the current uncommitted worktree. The checkpoint was preserved as the comparison base. No files were staged, committed, or pushed.",
+  "source_documents": {
+    "ROUND_7_1_PROVIDER_VISIBLE_TOOL_RESULT_PROJECTION_IMPLEMENTATION_SPEC.zh.md_at_start": "bba8778c2b8f259105be1c29371d087b6ec4d9a3c8546725e854233869e3d176",
+    "ROUND_7_1_PROVIDER_VISIBLE_TOOL_RESULT_PROJECTION_IMPLEMENTATION_SPEC.zh.md_after_activation_update": "56326ab872ffb907540d0b067536c3faa535c74730c64cb835a0fb70091638b7",
+    "POST_HARD_CUT_PRODUCT_CAPABILITY_GAP_INDEX.zh.md_at_start": "021bb3f39a5999e93d93974ad43164bbcd2bb7028d6664defb3371b91f863cfa",
+    "POST_HARD_CUT_PRODUCT_CAPABILITY_GAP_INDEX.zh.md_after_activation_update": "ced58cdd8b453ae18200af3860b3a57172dbb74de673096d2747f0eb9ba14eea",
+    "README.md_after_activation_update": "ead362817ce13d8b5073f87b208bdb586f2b15161e1486cc5b00ccf3ef222206",
+    "README.zh-CN.md_after_activation_update": "004bdd5662b71e114ceafb92838906147dd8d8828a1ef2157c3cfbc88d60f926"
+  },
+  "post_activation_code_sha256": {
+    "primitives/tool_observation.py": "0f237b8a11fa679f93a1fbe29ba9e3b4d500e0a95c59502f23d623095b580529",
+    "primitives/tool_result_projection.py": "93cf8eb3ee8b2c7ad348f2cbdb7fc7b6eb6d3b24c7267a616cfe56de0bef7482",
+    "conversation_kernel/tool_artifacts.py": "30d1cf5e38a1b127c0eb8f41aa5f58148eac0cef94fcf5c10264868650fe29ee",
+    "conversation_kernel/reader.py": "bfeb3817b68968bc0d8d863a677bb3618d56ff9f69f041202dd1ac3540c3d44c",
+    "conversation_kernel/runner.py": "b226688612996eaf8e0ee2aceab9bc84479b966a7206a1d7e3e70bd8a8d2caa0",
+    "model_input/lowering.py": "6bbeb2f65f112fd8c9d6f91fb4b9cbd82ed31195817eec8ddbba5e7050593225",
+    "conversation_kernel/_repository/contracts.py": "9ae5480e50acba52b071150001bf5500b677f550899ba3637b8c0fc3c9c16c86",
+    "model_input/contracts.py": "3f66e0f99591fc7bcffd1846ef8eb4482d7544134ff50fb5d181a356b981f383",
+    "model_input/compiler.py": "f3b86f16762cf28a8d1b0e7a94bf9c84e48583992c2593ed6154766409dd0b59",
+    "model_input/continuity.py": "7448157511bf4c2c471b0755c802507dc7cafbebd1f5e032e71fbcfea194c4ab",
+    "tools/builtins/artifact.py": "9e591dccd2ec4d644f6c612686a56abc4d0764c490347a4dc40d53675bd6a60e",
+    "test_round7_1_provider_visible_tool_result_projection.py": "dc423247b33148a3689b497f68208c90b8a195f4e1fc7d16933a802855e8b54f",
+    "test_stage2_conversation_runner.py": "3e214e41a9c33a583604d95dc3fa35f0128e666f44e2bf9ec39f29adf38942a4",
+    "run_round7_1_tool_result_projection_dogfood.py": "066d61328dd68ad3c101acdb1d6c4c203faa0aa571c299b892246d5fdb277181"
+  },
+  "projection_contract": {
+    "provider_neutral_full_logical_utf8_bytes": 40000,
+    "canonical_complete_soft_decision": "candidate UTF-8 bytes <= 40000",
+    "canonical_preview_hard_utf8_bytes": 65536,
+    "head_tail_characters": 8000,
+    "compact_max_utf8_bytes": 8192,
+    "ref_only_max_utf8_bytes": 2048,
+    "artifact_archive_threshold_utf8_bytes": 8000,
+    "model_visible_memory_provenance": "maximum 50 IDs and 8192 canonical JSON bytes, shared by repository and pure renderer/decoder; no separate generic 2 KiB lowering fence",
+    "logical_vs_wire": "The 40000-byte quote covers the provider-neutral ToolResult logical message only. Chat Completions and Responses physical wire bytes remain independently materialized and proven by FrozenProviderWireInputPlan.",
+    "variant_order": [
+      "FULL",
+      "COMPACT",
+      "REF_ONLY",
+      "OMITTED_BODY"
+    ],
+    "full_optional": true,
+    "decision_reasons": [
+      "SELECTED_FULL",
+      "FULL_INELIGIBLE_RESULT_BOUND",
+      "DEGRADED_FOR_BUDGET"
+    ],
+    "guidance": "conditional",
+    "installed_same_epoch_result_rewrite": false
+  },
+  "full_delivery_contract": {
+    "requirements": [
+      "BEST_AVAILABLE",
+      "FULL_REQUIRED"
+    ],
+    "closed_reasons": [
+      "ARTIFACT_PAGE",
+      "MCP_DIRECTORY_PAGE",
+      "MCP_INSPECT_SCHEMA",
+      "SKILL_ACTIVATION"
+    ],
+    "production_reason_enabled_in_round7_1": "ARTIFACT_PAGE",
+    "future_reasons": "interface and synthetic regression only; Round 9, Round 9.1 and Round 5B product features were not implemented",
+    "aggregate_nonfit": "FULL_REQUIRED_TOOL_RESULT_EXCEEDS_INPUT_BUDGET; provider execution/open count is zero; canonical result is retained and the physical tool is not rerun",
+    "not_inlineable": "FULL_REQUIRED_TOOL_RESULT_NOT_INLINEABLE",
+    "artifact_page": "The largest UTF-8/code-point-safe prefix whose conservative final logical message remains FULL-eligible is returned with exact offsets. The result is inline-only and never recursively archived."
+  },
+  "deterministic_verification": {
+    "pytest_collection": "694_tests_collected_in_1.07s",
+    "round7_1_targeted": "24_passed",
+    "round1_3_3_1_5a_5a1_7_7_1_and_adjacent_reader_runner": "241_passed_in_16.38s",
+    "full_pytest": "694_passed_in_123.26s",
+    "post_review_provenance_closure": "50-ID canonical artifact result -> reader -> actual lowering/compiler -> typed FULL_REQUIRED boundary with zero provider open; canonical result retained as SUCCESS; closed DTO regressions passed",
+    "post_review_adjacent_retained": "129_passed_in_34.85s",
+    "post_review_full_pytest": "705_passed_in_122.65s",
+    "postgres_marker": "182_passed_512_deselected_in_86.82s",
+    "utf8_boundaries": "39999/40000/40001 logical bytes covered for ASCII, Chinese, emoji and JSON escaping",
+    "variant_matrix": "no-FULL, COMPACT-first, REF_ONLY-first, OMITTED-only, parallel siblings and actual-mode decisions passed",
+    "full_required_matrix": "single-item ineligibility, aggregate pressure, ordinary sibling degradation, reader reconstruction, provider-open-zero and resource-terminal mapping passed",
+    "strict_prefix": "fresh compile, compatible append, retained replay and Chat/Responses logical-vs-wire tests passed; SYSTEM/tools remain exact and messages append only",
+    "artifact_paging": "longest conservative FULL-eligible page, exact offsets, no recursive artifact, integrity and scope retained tests passed",
+    "ruff": "passed_all_repository_files",
+    "compileall": "passed_src_tests_tools",
+    "terminal_protocol_generation": "passed",
+    "go_test": "passed_all_packages",
+    "go_vet": "passed",
+    "go_mod_verify": "passed_all_modules",
+    "uv_lock_check": "passed",
+    "git_diff_check": "passed",
+    "new_skip_or_xfail": 0
+  },
+  "postgres_clean_v0": {
+    "target_mechanical_check": "admin and runtime DSNs were parsed; host was loopback and database name was exactly pulsara; no DSN was recorded",
+    "reset_authority": "explicit user authorization for the dedicated local pulsara database",
+    "old_binding_disposition": "MIGRATION_UNIVERSE_RESET_REQUIRED before reset",
+    "reset_and_current_clean_v0_install": "passed",
+    "second_migrate": "passed_idempotently_before_each_real_provider_probe",
+    "deep_verify": "passed",
+    "universe_fingerprint": "sha256:79e7414baf56a295390ef35d7e199a9894471fae06895bccc066225d4beaf49f",
+    "verified_catalog_fingerprint": "sha256:eaba18c16e29c55c51703f7ea629fe014c21d000cc157d3c8f48a1e943bd5d31",
+    "runtime_grant_policy_fingerprint": "sha256:77958b821155e7cdb007468da87047bcb0793c1dc51c41400ab5632a8da712e4",
+    "schema_change_in_round7_1": false
+  },
+  "real_provider_smoke": {
+    "status": "passed",
+    "content_free_reproducible_runner": "tools/run_round7_1_tool_result_projection_dogfood.py",
+    "provider_profile": "deepseek-v4-flash",
+    "openai_chat_completions_complete": {
+      "status": "passed",
+      "read_file_results": 1,
+      "read_file_display_kind": "COMPLETE",
+      "read_file_artifact_disposition": "AVAILABLE",
+      "artifact_read_calls": 0,
+      "final_utf8_bytes": 68,
+      "final_sha256": "sha256:946223d9c8fc3635e8746f40f12649d622564f68325c2b9a194d615a19de4128"
+    },
+    "openai_chat_completions_head_tail_sufficient": {
+      "status": "passed",
+      "read_file_results": 1,
+      "read_file_display_kind": "HEAD_TAIL",
+      "read_file_artifact_disposition": "AVAILABLE",
+      "artifact_read_calls": 0,
+      "final_utf8_bytes": 49,
+      "final_sha256": "sha256:ad0ed98dd2c9d817d8549da0ebfa7382d456e01c87e5ea210ec54ac48faa57b5"
+    },
+    "openai_responses_omitted_middle": {
+      "status": "passed",
+      "read_file_results": 1,
+      "read_file_display_kind": "HEAD_TAIL",
+      "read_file_artifact_disposition": "AVAILABLE",
+      "artifact_read_calls": 2,
+      "artifact_read_results_complete": true,
+      "final_utf8_bytes": 65,
+      "final_sha256": "sha256:12e74b6e9875b2697d4c9ba1bb0126c5cc903be7ad51d56f94133d81ffe282cd"
+    },
+    "active_openrouter_chat_observation": "failed closed before assistant acceptance and before tool execution with sanitized unknown_provider_error; a compatible configured Chat profile was then used for the required smoke",
+    "api_key_dsn_header_prompt_tool_result_artifact_body_provider_response_environment_or_hidden_reasoning_recorded": false
+  },
+  "diff": {
+    "production_tracked_additions": 331,
+    "production_tracked_deletions": 234,
+    "production_new_pure_module_lines": 388,
+    "production_total_additions": 719,
+    "production_total_deletions": 234,
+    "production_net_lines": 485
+  },
+  "oracles": {
+    "committed_event_types": 31,
+    "live_event_types": 23,
+    "subject_slots": 13,
+    "append_guards": 2,
+    "product_relations": 25,
+    "durable_job_handlers": 1,
+    "new_product_relations": 0,
+    "new_committed_events": 0,
+    "new_live_events": 0,
+    "new_subject_slots": 0,
+    "new_append_guards": 0,
+    "new_durable_jobs": 0,
+    "new_protocol_types": 0
+  },
+  "non_goals": [
+    "Round 9 MCP directory/inspect product activation",
+    "Round 9.1 Skill activation",
+    "Round 5B compaction, summary, snapshot adoption or context rebase",
+    "durable FULL-delivery receipt, checkpoint, projection, repair or recovery",
+    "schema, relation, event, subject, append-guard, job or Protocol expansion"
+  ],
+  "secret_scan": {
+    "api_key_or_dsn_recorded": false,
+    "full_prompt_or_tool_result_recorded": false,
+    "artifact_body_or_provider_response_recorded": false
+  }
+}

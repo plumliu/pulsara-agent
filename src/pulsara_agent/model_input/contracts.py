@@ -52,6 +52,12 @@ from pulsara_agent.primitives.tool_observation import (
     FrozenToolObservationTimingFact,
     canonical_utc_timestamp,
 )
+from pulsara_agent.primitives.tool_result_projection import (
+    BEST_AVAILABLE_TOOL_RESULT_DELIVERY,
+    FrozenToolResultDeliveryRequirement,
+    ToolResultDeliveryRequirement,
+    ToolResultFullDeliveryReason,
+)
 
 
 SHA256_PREFIX = "sha256:"
@@ -175,6 +181,12 @@ class ModelInputCompileFailureKind(StrEnum):
     REQUIRED_CONTEXT_EXCEEDS_BUDGET = "REQUIRED_CONTEXT_EXCEEDS_BUDGET"
     TOOL_SCHEMA_EXCEEDS_BUDGET = "TOOL_SCHEMA_EXCEEDS_BUDGET"
     FINAL_ESTIMATE_MISMATCH = "FINAL_ESTIMATE_MISMATCH"
+    FULL_REQUIRED_TOOL_RESULT_NOT_INLINEABLE = (
+        "FULL_REQUIRED_TOOL_RESULT_NOT_INLINEABLE"
+    )
+    FULL_REQUIRED_TOOL_RESULT_EXCEEDS_INPUT_BUDGET = (
+        "FULL_REQUIRED_TOOL_RESULT_EXCEEDS_INPUT_BUDGET"
+    )
     DEADLINE_EXPIRED = "DEADLINE_EXPIRED"
 
 
@@ -699,6 +711,9 @@ class FrozenProviderInputItem:
         default=None, repr=False
     )
     tool_result_body_text: str | None = field(default=None, repr=False)
+    tool_result_delivery: FrozenToolResultDeliveryRequirement = (
+        BEST_AVAILABLE_TOOL_RESULT_DELIVERY
+    )
 
     def __post_init__(self) -> None:
         self.text.encode("utf-8")
@@ -711,6 +726,15 @@ class FrozenProviderInputItem:
             and self.tool_result_body_text is not None
         ):
             raise ValueError("tool result context union is invalid")
+        if not isinstance(
+            self.tool_result_delivery, FrozenToolResultDeliveryRequirement
+        ):
+            raise TypeError("tool result delivery requirement must be frozen")
+        if (
+            not result_kind
+            and self.tool_result_delivery != BEST_AVAILABLE_TOOL_RESULT_DELIVERY
+        ):
+            raise ValueError("non-result item cannot require FULL delivery")
         entry_backed = self.item_kind not in {
             FrozenProviderInputItemKind.CONTEXT_SNAPSHOT,
             FrozenProviderInputItemKind.TOOL_RESULT_CLOSURE,
@@ -1546,7 +1570,7 @@ def canonical_compile_snapshot_fingerprint(
 
 def provider_input_item_fingerprint(item: FrozenProviderInputItem) -> str:
     return context_fingerprint(
-        "frozen-provider-input-item:v1",
+        "frozen-provider-input-item:v2-tool-result-delivery",
         {
             "kind": item.item_kind.value,
             "entry_id": item.source_entry_id,
@@ -1588,6 +1612,17 @@ def provider_input_item_fingerprint(item: FrozenProviderInputItem) -> str:
                 }
             ),
             "tool_result_body_text": item.tool_result_body_text,
+            "tool_result_delivery": {
+                "requirement": item.tool_result_delivery.requirement.value,
+                "reason": (
+                    None
+                    if item.tool_result_delivery.reason is None
+                    else item.tool_result_delivery.reason.value
+                ),
+                "classifier_contract": (
+                    item.tool_result_delivery.classifier_contract
+                ),
+            },
         },
     )
 
@@ -1702,20 +1737,38 @@ class CompiledSourceDecision:
 class CompiledToolResultDecision:
     source_entry_fingerprint: str
     current_turn: bool
+    first_legal_mode: ToolResultProviderRenderMode
     selected_mode: ToolResultProviderRenderMode
+    delivery_requirement: ToolResultDeliveryRequirement
+    full_delivery_reason: ToolResultFullDeliveryReason | None
     estimated_tokens: int
     reason_code: str
 
     def __post_init__(self) -> None:
         if self.estimated_tokens < 0 or self.reason_code not in {
             "SELECTED_FULL",
+            "FULL_INELIGIBLE_RESULT_BOUND",
             "DEGRADED_FOR_BUDGET",
         }:
             raise ValueError("compiled tool-result decision is invalid")
-        if (self.selected_mode is ToolResultProviderRenderMode.FULL) != (
-            self.reason_code == "SELECTED_FULL"
-        ):
+        expected_reason = (
+            "SELECTED_FULL"
+            if self.selected_mode is ToolResultProviderRenderMode.FULL
+            else "FULL_INELIGIBLE_RESULT_BOUND"
+            if self.selected_mode is self.first_legal_mode
+            else "DEGRADED_FOR_BUDGET"
+        )
+        if self.reason_code != expected_reason:
             raise ValueError("compiled tool-result selection reason is inconsistent")
+        required = self.delivery_requirement is (
+            ToolResultDeliveryRequirement.FULL_REQUIRED
+        )
+        if required != (self.full_delivery_reason is not None):
+            raise ValueError("compiled FULL-delivery requirement is inconsistent")
+        if required and self.selected_mode is not ToolResultProviderRenderMode.FULL:
+            raise ValueError("required tool result was not compiled as FULL")
+        if required and self.first_legal_mode is not ToolResultProviderRenderMode.FULL:
+            raise ValueError("required tool result has no legal FULL variant")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1962,7 +2015,14 @@ def frozen_compiled_model_input_fingerprint(
                 (
                     item.source_entry_fingerprint,
                     item.current_turn,
+                    item.first_legal_mode.value,
                     item.selected_mode.value,
+                    item.delivery_requirement.value,
+                    (
+                        None
+                        if item.full_delivery_reason is None
+                        else item.full_delivery_reason.value
+                    ),
                     item.estimated_tokens,
                     item.reason_code,
                 )

@@ -197,7 +197,11 @@ class OpenAIResponsesTransport:
                         yield report
                     yield ProviderStreamFailure(
                         message=str(exc),
-                        code_hint=provider_failure_code_hint(decision),
+                        code_hint=(
+                            exc.reason_code
+                            if isinstance(exc, LLMTransportContractError)
+                            else provider_failure_code_hint(decision)
+                        ),
                         retry_summary=build_provider_retry_summary(
                             config=self.retry_config,
                             traces=retry_traces,

@@ -1,12 +1,24 @@
 {
   "schema_version": "round5a1-provider-neutral-model-output-termination-activation.v1",
   "status": "activated",
-  "generated_at_utc": "2026-08-17T00:31:57Z",
+  "generated_at_utc": "2026-08-17T15:26:15Z",
   "captured_head": "e375b5be3a493cf42ec6a7d4aed3392b937935d1",
   "working_tree_semantics": "Round 5A.1 was implemented and verified in the current uncommitted worktree. The clean checkpoint was preserved as the comparison base. No files were staged, committed, or pushed.",
+  "post_activation_closed_chat_carrier_amendment": {
+    "checkpoint_head": "572798cf50650d670dfc2bfcb47e3e6e334d80aa",
+    "scope": "Provider-neutral Chat reasoning carrier closure; no schema, durable owner, provider-name branch, or Responses item-contract expansion.",
+    "closed_registry": {
+      "reasoning_content": "TEXT_CONCAT",
+      "reasoning": "TEXT_CONCAT",
+      "reasoning_details": "ORDERED_ARRAY_APPEND"
+    },
+    "unknown_fallback": "empty/null is ignored; non-empty with a complete ordinary final text is not replayed; non-empty with tool continuation or as the only output fails before assistant acceptance and tool dispatch",
+    "preterminal_accumulator": "Chat adapter v5 reuses the 16777216-byte completed-response physical bound and allows 65536 fragments/elements before freeze/append; text uses chunk lists; unknown non-empty fields retain one boolean only; overflow is typed and non-retryable",
+    "direct_native_non_openai_carriers": "out_of_scope"
+  },
   "source_documents": {
     "ROUND_5A_1_PROVIDER_NEUTRAL_MODEL_OUTPUT_TERMINATION_IMPLEMENTATION_SPEC.zh.md_at_start": "ef01d8fac727456237c318124a172ecbeb7c682ee03b0f9dbfba4f9e58af4ef2",
-    "ROUND_5A_1_PROVIDER_NEUTRAL_MODEL_OUTPUT_TERMINATION_IMPLEMENTATION_SPEC.zh.md_after_activation_update": "ccd2faeaeedf5ea0a3744bdf03373650267c0a2b207ac94016a86446c3b8dfef",
+    "ROUND_5A_1_PROVIDER_NEUTRAL_MODEL_OUTPUT_TERMINATION_IMPLEMENTATION_SPEC.zh.md_after_activation_update": "a235d0440abaac55e3e82ddf52cc5ab9b200409b888e8faaf5cd4f4d282ef26e",
     "POST_HARD_CUT_PRODUCT_CAPABILITY_GAP_INDEX.zh.md_at_start": "96c2147ae11f605360967213b7be72d241dff4477eb6f8fb1cb94ed70e48ef64",
     "POST_HARD_CUT_PRODUCT_CAPABILITY_GAP_INDEX.zh.md_after_activation_update": "9a75bd07e25c020109f70022bfa7d0d331a069d02ee46de3b809ca2cdd10688e",
     "PULSARA_DURABILITY_SUBTRACTION_REASSESSMENT.zh.md": "cb3e7b0a9f33e5e4c5b17850d47e1af580a3f23f094f868076351bb17a6a6e80",
@@ -15,22 +27,27 @@
   },
   "post_activation_code_sha256": {
     "ports/provider_stream.py": "1842a55d1516849dce22287bf49cd414f3b7ef523e517f511eb600db67833156",
-    "llm/adapters/openai/chat_completions.py": "d9dc2c3692bbf4efe8fb60e3c6ab3236ec7ec9c456a7cd00005d1997d9e71ed8",
-    "llm/adapters/openai/responses.py": "d6ad79432e9c5f7703e3b2be473ba82d2418f299c89cb79ce57d5b601658f8df",
-    "llm/normalized_transport.py": "149644c79db28fbe3ef2e97a8e5d711d84f5b3afbc4d180f2426905a8bf327de",
-    "llm/provider.py": "68c642aa080901321c0eb75644a62fa6bbf0d99b6c316405f34f4121b23b61e5",
+    "llm/adapters/openai/chat_completions.py": "08e26ef57e47192280ed0047471f4eae692632fb4300e615403462ff2f823c6c",
+    "llm/adapters/openai/responses.py": "957db4b0ff95d8f9bea11e45d7dceb5da175a749c3601b6431777d7d2945f5b8",
+    "llm/config.py": "a1451cebcc7fb9fcdc1819b7be889255052aafeba6520b9c680ba743d8597711",
+    "llm/normalized_transport.py": "91abc33e059484ef5e6553cbe772548050851d7e6debb6cac0754e23b2d491f2",
+    "llm/provider.py": "abb2a9bacc0e518c230e1b820e0fa19fd6aadab7617d8936b686db38b1ca33e2",
+    "llm/provider_sanitization.py": "ca4611903f29a7d94b1fdafe476c7c49d6bd4cc587055a3da294f91958f21b99",
+    "llm/stream_limits.py": "04e9f5d313ed1602657e58450ed430c0abe2590ac9b3273587db8592f1a91eca",
     "llm/request.py": "fcd8ff6faf7998a5daaea36fe3655cb6d75cf9b67a14007a114fe41ec8a69bf9",
-    "conversation_kernel/direct_model.py": "ba01d14daf8353433c72f20f8565c0903aaa07ff4afaa8da6eb0df5f17c6ef18",
+    "conversation_kernel/direct_model.py": "dbd6503f4d6a023d84cd037db1be3a99d4d25a070ec872ee0fb3499535d51f5d",
     "conversation_kernel/input_continuity.py": "3a700cf9841db9ac45b9fcf94c42c07904b32875b65b81b96f6e3c44820d1fbf",
     "conversation_kernel/assistant_settlement.py": "43d615a79f61d1743b127adb47e1b4e8f7ec40a815a66f7029702e2fef970bc8",
-    "conversation_kernel/runner.py": "cfba52d0f84299d53b0760d707ab7edc795a55a2599426cbb46f63ed9d4e7cf6",
+    "conversation_kernel/runner.py": "b226688612996eaf8e0ee2aceab9bc84479b966a7206a1d7e3e70bd8a8d2caa0",
     "conversation_kernel/host.py": "f411663528a00ddd01de3e9295c95762f3ff2a5fdce9a50306b8d6db040bf360",
     "conversation_kernel/auxiliary_model.py": "29161abf02d137a072269075f8f02b654400f94a9d6935ef8d0a4eb2f83017ad",
-    "model_input/compiler.py": "eee0c9c47babddc4b7fca34ca51a39c529e032eb875d4c39d7fc436a12a05e49",
-    "model_input/continuity.py": "8c5845b47836539a55fecc4d01be19522094e590ba44497e4b7d0579c847192a",
-    "test_round5a1_provider_output_termination.py": "c9f5176774ba4ede539d7cdb9a6fb45ec3d52437615b5211a42b71d32b8fb393",
+    "model_input/compiler.py": "f3b86f16762cf28a8d1b0e7a94bf9c84e48583992c2593ed6154766409dd0b59",
+    "model_input/continuity.py": "7448157511bf4c2c471b0755c802507dc7cafbebd1f5e032e71fbcfea194c4ab",
+    "test_round5a1_provider_output_termination.py": "4fabcf217399f59611cb5b3f6a4dd0cb4b3c73a70523ece53dfb8811c6fd836e",
+    "test_settings.py": "4b79ac5f2e5fdcbcba8b0485c7b1e3ae28514394329ef89a281b02b7e90b6ae4",
+    "test_round3_structured_model_input_compiler.py": "0c073f14963bebf41c323688fe1dae0ae12283a228f9fcb061fca414cac34918",
     "test_round5a1_architecture.py": "d4e61ac6d79267c59e6a5021c2163aa9335473e409e7b2aa8b38377c24f95f0d",
-    "test_stage2_conversation_runner.py": "5e04377df065170fab9924eda63a03acbf0297b9e18cd3f0349e8e033086d23b"
+    "test_stage2_conversation_runner.py": "3e214e41a9c33a583604d95dc3fa35f0128e666f44e2bf9ec39f29adf38942a4"
   },
   "provider_output_contract": {
     "provider_neutral_terminal": [
@@ -41,9 +58,23 @@
     "whole_response_atomicity": "Only COMPLETED may install one complete assistant message; OUTPUT_INCOMPLETE and PROVIDER_ERROR install no assistant, tool attempt, or physical tool effect.",
     "chat_accumulation": [
       "TEXT_CONCAT",
-      "SINGLE_EXACT_VALUE",
       "ORDERED_ARRAY_APPEND"
     ],
+    "chat_closed_carrier_registry": {
+      "reasoning_content": "TEXT_CONCAT",
+      "reasoning": "TEXT_CONCAT",
+      "reasoning_details": "ORDERED_ARRAY_APPEND"
+    },
+    "chat_observed_subset_replay": "Only known fields actually observed in one completed response are replayed; a standard Chat tool response with no reasoning carrier installs no empty fragment.",
+    "chat_unknown_field_policy": "Empty/null values are no-ops. A non-empty unknown field is discarded only with complete supported final text and no tool continuation; otherwise it is a typed pre-acceptance contract failure.",
+    "chat_preterminal_reasoning_bounds": {
+      "canonical_aggregate_bytes": 16777216,
+      "fragments_or_array_elements": 65536,
+      "byte_bound_owner": "MAX_COMPLETED_PROVIDER_RESPONSE_AGGREGATE_BYTES",
+      "text_storage": "bounded chunk list",
+      "unknown_field_storage": "single boolean",
+      "overflow": "typed source item/payload limit before terminal; retry count remains one"
+    },
     "chat_terminal_echo": "After the first semantic terminal, an identical finish_reason with an empty assistant delta is idempotent transport metadata. Usage may be installed once or repeated exactly; conflicting reason, semantic delta, final message, or usage still fails closed.",
     "responses_output_allowlist": [
       "reasoning",
@@ -75,7 +106,14 @@
     "post_review_full_pytest": "not_rerun_after_local_order_and_capacity_closure; adjacent regression is recorded separately",
     "chat_and_responses_terminal_matrix": "completed, output-limit, content-filter/policy, provider-error, EOF-before-terminal, exact-empty Chat terminal echo, conflicting terminal, and semantic event-after-terminal cases passed",
     "whole_response_atomicity": "ROOT and SUBAGENT_TASK incomplete-after-text/tool cases committed no assistant, attempt, result, or physical effect",
-    "reasoning_exact_replay": "Chat text/opaque fields and Responses ordered output items replayed exactly; malformed, conflicting, oversized, or unsupported carriers failed closed",
+    "reasoning_exact_replay": "The three provider-neutral Chat carriers and Responses ordered output items replayed exactly; malformed/conflicting known carriers and continuation-relevant unknown carriers failed closed",
+    "post_activation_closed_carrier_regression": "227 passed across Round 5A.1, settings, architecture, DirectModel, Runner, Round 3/3.1 and Round 7.1 retained suites",
+    "post_activation_closed_carrier_full_pytest": "702 passed in 126.45s",
+    "post_review_preterminal_bounds": "1000 opaque-only chunks stayed bounded under a test-local threshold; the next item failed before terminal; production item headroom is 65536; the reasoning byte bound aliases the completed-response aggregate; byte overflow produced one non-retried provider attempt; text concat used chunk-list storage",
+    "post_review_preterminal_adjacent": "96 passed across Round 5A.1, architecture, DirectModel and settings; 137 retained Round 3/3.1/Runner/Round 7.1 tests passed",
+    "post_review_preterminal_full_pytest": "708 passed in 113.71s",
+    "post_review_physical_headroom_targeted": "102 passed across Round 5A.1, Round 7.1, architecture and settings",
+    "post_review_physical_headroom_full_pytest": "709 passed in 122.30s",
     "wire_prefix_golden": "semantic and actual-wire fingerprints proved SYSTEM/tools equality and ordered-input append-only suffix for Chat and Responses",
     "assistant_ack_unknown": "shielded settlement confirmed or reissued only the stable candidate and cold-reset the process-local replay epoch on conflict",
     "post_review_responses_order": "50 adapter/terminal tests passed; function_call-before-message is rejected before canonical acceptance and message-before-function_call remains exact replayable",
@@ -100,6 +138,14 @@
     "all_four_providers_received_bounded_paid_requests": true,
     "no_effect_virtual_tool_only": true,
     "api_key_dsn_header_full_prompt_hidden_reasoning_tool_arguments_or_raw_response_recorded": false,
+    "post_activation_openrouter_chat_default_profile_smoke": {
+      "request_sent": true,
+      "legacy_thinking_field_environment_overrides": false,
+      "terminal": "COMPLETED",
+      "virtual_tool_call_end_count": 1,
+      "reasoning_carrier_observed_on_this_response": false,
+      "disposition": "A valid tool response without a reasoning carrier completed without an empty replay fragment; structured-carrier and terminal-echo closure is covered deterministically."
+    },
     "matrix": [
       {
         "provider": "bobdong",

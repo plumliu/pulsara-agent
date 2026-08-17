@@ -280,7 +280,8 @@ def _thinking_profile_from_env(
     return ThinkingProfile(
         enabled=_bool_env(f"{prefix}_THINKING_ENABLED", default=enabled_default),
         delta_fields=_csv_env(
-            f"{prefix}_THINKING_DELTA_FIELDS", default=("reasoning_content",)
+            f"{prefix}_THINKING_DELTA_FIELDS",
+            default=("reasoning_content", "reasoning"),
         ),
         message_field=os.getenv(
             f"{prefix}_THINKING_MESSAGE_FIELD", "reasoning_content"

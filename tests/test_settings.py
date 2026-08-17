@@ -205,6 +205,12 @@ def test_settings_chat_completions_defaults_to_thinking_profile(tmp_path, monkey
     assert profile is not None
     assert profile.thinking.enabled is True
     assert profile.thinking.replay_policy == "when_tool_calls"
+    assert profile.thinking.delta_fields == ("reasoning_content", "reasoning")
+    assert tuple(item.field_name for item in profile.chat_replay_fields) == (
+        "reasoning_content",
+        "reasoning",
+        "reasoning_details",
+    )
     assert profile.request_extra_body == {"thinking": {"type": "enabled"}}
     assert profile.omit_params_when_thinking == (
         "temperature",

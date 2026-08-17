@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
 import json
 from typing import Mapping
 
@@ -24,10 +23,13 @@ from pulsara_agent.model_input.continuity import (
 from pulsara_agent.ports.artifact import ToolOutputArtifactDisposition
 from pulsara_agent.primitives.context import canonical_json_bytes
 from pulsara_agent.primitives.tool_observation import (
-    ToolObservationDurationDisposition,
-    ToolObservationOrigin,
-    canonical_utc_timestamp,
-    normalize_observation_duration,
+    MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES,
+)
+from pulsara_agent.primitives.tool_result_projection import (
+    ToolResultLogicalMessageKind,
+    decode_provider_tool_result_observation,
+    provider_neutral_message_logical_utf8_bytes,
+    render_provider_tool_result_logical_message,
 )
 
 
@@ -37,12 +39,42 @@ class LoweredToolResultVariant:
     message: LLMMessage
     utf8_bytes: int
 
+    def __post_init__(self) -> None:
+        if self.utf8_bytes != provider_neutral_message_logical_utf8_bytes(
+            self.message
+        ):
+            raise ValueError("tool-result variant logical quote mismatch")
+        if (
+            self.mode is ToolResultProviderRenderMode.FULL
+            and self.utf8_bytes
+            > MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES
+        ):
+            raise ValueError("FULL tool-result variant exceeds its logical bound")
+
 
 @dataclass(frozen=True, slots=True)
 class LoweredCanonicalItem:
     source: FrozenProviderInputItem
     fixed_message: LLMMessage | None
     tool_result_variants: tuple[LoweredToolResultVariant, ...] = ()
+
+    def __post_init__(self) -> None:
+        is_tool_result = self.source.item_kind in {
+            FrozenProviderInputItemKind.TOOL_RESULT,
+            FrozenProviderInputItemKind.LATE_TOOL_OUTCOME,
+        }
+        if is_tool_result:
+            if self.fixed_message is not None or not self.tool_result_variants:
+                raise ValueError("lowered canonical item carrier union is invalid")
+        elif self.fixed_message is None or self.tool_result_variants:
+            raise ValueError("lowered canonical item carrier union is invalid")
+        modes = tuple(item.mode for item in self.tool_result_variants)
+        order = tuple(ToolResultProviderRenderMode)
+        if (
+            len(modes) != len(set(modes))
+            or modes != tuple(mode for mode in order if mode in modes)
+        ):
+            raise ValueError("tool-result variants are not a unique ordered subset")
 
 
 def lower_canonical_item(
@@ -174,8 +206,10 @@ def _tool_result_variants(
         message = _tool_result_message(
             item, rendered_body, citation_handle=citation_handle
         )
-        logical_bytes = _message_logical_utf8_bytes(message)
+        logical_bytes = provider_neutral_message_logical_utf8_bytes(message)
         if maximum_message_bytes is not None and logical_bytes > maximum_message_bytes:
+            return False
+        if any(existing.message == message for existing in result):
             return False
         result.append(
             LoweredToolResultVariant(
@@ -186,7 +220,11 @@ def _tool_result_variants(
         )
         return True
 
-    append(ToolResultProviderRenderMode.FULL, body)
+    append(
+        ToolResultProviderRenderMode.FULL,
+        body,
+        maximum_message_bytes=MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES,
+    )
     compact = _bounded_compact_tool_result_body(
         item,
         maximum_message_bytes=limits.maximum_tool_result_compact_bytes,
@@ -215,19 +253,9 @@ def _tool_result_variants(
             maximum_message_bytes=limits.maximum_tool_result_ref_only_bytes,
         )
     append(ToolResultProviderRenderMode.OMITTED_BODY, _omitted_tool_result_body(item))
+    if not result:
+        raise ValueError("tool result lowering produced no legal representation")
     return tuple(result)
-
-
-def _message_logical_utf8_bytes(message: LLMMessage) -> int:
-    values = [*message.content, *message.thinking]
-    for call in message.tool_calls:
-        values.extend((call.id, call.name, call.arguments))
-    values.extend(
-        value
-        for value in (message.tool_call_id, message.name, message.arguments)
-        if value is not None
-    )
-    return sum(len(value.encode("utf-8")) for value in values)
 
 
 def _tool_result_message(
@@ -237,171 +265,29 @@ def _tool_result_message(
     citation_handle: str | None,
 ) -> LLMMessage:
     assert item.tool_call_id is not None
-    projected = _tool_result_envelope(
-        item, body, citation_handle=citation_handle
-    )
-    if item.item_kind is FrozenProviderInputItemKind.TOOL_RESULT:
-        return LLMMessage.tool_result(projected, tool_call_id=item.tool_call_id)
     metadata = item.tool_result_context
     assert metadata is not None
-    return LLMMessage.user(
-        canonical_json_bytes(
-            {
-                "pulsara_late_tool_outcome": {
-                    "result": json.loads(projected)["pulsara_tool_result"],
-                    "tool_call_id": item.tool_call_id,
-                }
-            }
-        ).decode("utf-8")
+    projected_body = _project_plan_tool_result_if_owned(
+        body, metadata.timing.observation_origin
     )
-
-
-def _tool_result_envelope(
-    item: FrozenProviderInputItem,
-    body: str,
-    *,
-    citation_handle: str | None,
-) -> str:
-    metadata = item.tool_result_context
-    if metadata is None:
-        raise ValueError("tool result observation metadata is absent")
-    timing = metadata.timing
-    payload = {
-        "pulsara_tool_result": {
-            "body": _project_plan_tool_result_if_owned(body, timing.observation_origin),
-            "citation_handle": citation_handle,
-            "model_visible_memory_ids": list(
-                metadata.model_visible_memory_fact_ids
-            ),
-            "observation": {
-                "duration_disposition": timing.duration_disposition.value,
-                "observation_duration_microseconds": (
-                    timing.observation_duration_microseconds
-                ),
-                "observation_origin": timing.observation_origin.value,
-                "observed_at_utc": timing.observed_at_utc,
-                "source_turn_ref": timing.source_turn_ref,
-                "tool_reported_duration_microseconds": (
-                    timing.tool_reported_duration_microseconds
-                ),
-            },
-            "result_state": metadata.result_state,
-        }
-    }
-    encoded = canonical_json_bytes(payload)
-    # Timing is essential and has a small closed physical bound even when the
-    # selected body is an artifact reference or omitted projection.
-    metadata_only = canonical_json_bytes(
-        {
-            "pulsara_tool_result": {
-                "body": "",
-                "citation_handle": citation_handle,
-                "model_visible_memory_ids": list(
-                    metadata.model_visible_memory_fact_ids
-                ),
-                "observation": payload["pulsara_tool_result"]["observation"],
-                "result_state": metadata.result_state,
-            }
-        }
+    rendered = render_provider_tool_result_logical_message(
+        message_kind=(
+            ToolResultLogicalMessageKind.TOOL_RESULT
+            if item.item_kind is FrozenProviderInputItemKind.TOOL_RESULT
+            else ToolResultLogicalMessageKind.LATE_TOOL_OUTCOME
+        ),
+        tool_call_id=item.tool_call_id,
+        body=projected_body,
+        result_state=metadata.result_state,
+        timing=metadata.timing,
+        citation_handle=citation_handle,
+        model_visible_memory_ids=metadata.model_visible_memory_fact_ids,
     )
-    if len(metadata_only) > 2 * 1024:
-        raise ValueError("tool observation metadata exceeds its physical bound")
-    result = encoded.decode("utf-8")
-    decode_tool_result_observation(result)
-    return result
+    return rendered.message
 
 
 def decode_tool_result_observation(text: str) -> Mapping[str, object]:
-    """Decode and fixed-point validate one provider-visible result envelope."""
-
-    try:
-        value = json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise ValueError("tool result observation is invalid JSON") from exc
-    if not isinstance(value, dict) or set(value) != {"pulsara_tool_result"}:
-        raise ValueError("tool result observation outer contract is invalid")
-    payload = value["pulsara_tool_result"]
-    if not isinstance(payload, dict) or set(payload) != {
-        "body",
-        "citation_handle",
-        "model_visible_memory_ids",
-        "observation",
-        "result_state",
-    }:
-        raise ValueError("tool result observation member contract is invalid")
-    if not isinstance(payload["body"], str) or not isinstance(
-        payload["result_state"], str
-    ):
-        raise ValueError("tool result observation scalar contract is invalid")
-    citation_handle = payload["citation_handle"]
-    if citation_handle is not None and (
-        not isinstance(citation_handle, str)
-        or not citation_handle.startswith("tool:")
-        or len(citation_handle.encode("utf-8")) > 128
-    ):
-        raise ValueError("tool result citation handle is invalid")
-    memory_ids = payload["model_visible_memory_ids"]
-    if (
-        not isinstance(memory_ids, list)
-        or len(memory_ids) > 50
-        or any(not isinstance(value, str) or not value for value in memory_ids)
-        or len(set(memory_ids)) != len(memory_ids)
-    ):
-        raise ValueError("tool result memory provenance header is invalid")
-    observation = payload["observation"]
-    if not isinstance(observation, dict) or set(observation) != {
-        "duration_disposition",
-        "observation_duration_microseconds",
-        "observation_origin",
-        "observed_at_utc",
-        "source_turn_ref",
-        "tool_reported_duration_microseconds",
-    }:
-        raise ValueError("tool timing observation contract is invalid")
-    source_turn_ref = observation["source_turn_ref"]
-    if (
-        not isinstance(source_turn_ref, str)
-        or len(source_turn_ref) != 71
-        or not source_turn_ref.startswith("sha256:")
-        or any(character not in "0123456789abcdef" for character in source_turn_ref[7:])
-    ):
-        raise ValueError("tool timing turn reference is invalid")
-    observed_at = observation["observed_at_utc"]
-    if not isinstance(observed_at, str):
-        raise ValueError("tool timing timestamp is invalid")
-    try:
-        parsed = datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
-    except ValueError as exc:
-        raise ValueError("tool timing timestamp is invalid") from exc
-    if canonical_utc_timestamp(parsed) != observed_at:
-        raise ValueError("tool timing timestamp is not canonical UTC")
-    disposition = ToolObservationDurationDisposition(
-        observation["duration_disposition"]
-    )
-    origin = ToolObservationOrigin(observation["observation_origin"])
-    duration = observation["observation_duration_microseconds"]
-    reported = observation["tool_reported_duration_microseconds"]
-    if duration != normalize_observation_duration(duration):
-        raise ValueError("tool timing duration is invalid")
-    if reported != normalize_observation_duration(reported):
-        raise ValueError("tool-reported duration is invalid")
-    if (disposition is ToolObservationDurationDisposition.MEASURED) != (
-        duration is not None
-    ):
-        raise ValueError("tool timing disposition is inconsistent")
-    nonphysical = origin in {
-        ToolObservationOrigin.POLICY,
-        ToolObservationOrigin.PLAN_CONTROL,
-    }
-    if nonphysical != (
-        disposition is ToolObservationDurationDisposition.NO_PHYSICAL_ATTEMPT
-    ):
-        raise ValueError("tool timing origin is inconsistent")
-    if nonphysical and reported is not None:
-        raise ValueError("nonphysical tool timing reports a duration")
-    if canonical_json_bytes(value).decode("utf-8") != text:
-        raise ValueError("tool result observation is not canonical JSON")
-    return payload
+    return decode_provider_tool_result_observation(text)
 
 
 def _project_tool_result_closure(text: str) -> str:
@@ -634,9 +520,11 @@ def _compact_tool_result_body(
             f"{omitted_characters} characters …]\n"
         )
         guidance = (
-            "\nUse artifact_read with artifact_id="
+            "\nIf the omitted content is necessary for the current task, read "
+            "the retained artifact with artifact_read using artifact_id="
             + json.dumps(metadata.artifact_id, ensure_ascii=False)
-            + " and paginate with offset/limit."
+            + " and paginate with offset/limit; otherwise continue from the "
+            "visible result without opening the artifact."
             if readable_artifact
             else ""
         )
@@ -685,7 +573,10 @@ def _bounded_compact_tool_result_body(
         message = _tool_result_message(
             item, candidate, citation_handle=citation_handle
         )
-        if _message_logical_utf8_bytes(message) <= maximum_message_bytes:
+        if (
+            provider_neutral_message_logical_utf8_bytes(message)
+            <= maximum_message_bytes
+        ):
             winner = candidate
             low = middle + 1
         else:
@@ -712,9 +603,11 @@ def _artifact_reference_body(item: FrozenProviderInputItem) -> str:
         )
         + "\n"
         + warning
-        + " Use artifact_read with artifact_id="
+        + " If the omitted content is necessary for the current task, read the "
+        "retained artifact with artifact_read using artifact_id="
         + json.dumps(metadata.artifact_id, ensure_ascii=False)
-        + " and paginate with offset/limit.\n"
+        + " and paginate with offset/limit; otherwise continue from the visible "
+        "result without opening the artifact.\n"
         "[/PULSARA_TOOL_RESULT_REFERENCE]"
     )
 

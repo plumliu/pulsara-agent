@@ -327,11 +327,11 @@ def test_round7_source_registry_wire_and_oracle_architecture_guards() -> None:
     ).contract_version == "pulsara.tool-observation-freshness.v1"
     assert (
         COMPILER_CONTRACT_VERSION
-        == "pulsara.structured-model-input-compiler.prefix-continuity.v5"
+        == "pulsara.structured-model-input-compiler.prefix-continuity.v6-tool-result-full"
     )
     assert (
         PROVIDER_MESSAGE_LOWERING_CONTRACT
-        == "pulsara.provider-message-lowering.prefix-continuity.v2"
+        == "pulsara.provider-message-lowering.prefix-continuity.v3-tool-result-full"
     )
 
     reader = (ROOT / "src/pulsara_agent/conversation_kernel/reader.py").read_text()

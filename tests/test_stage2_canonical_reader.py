@@ -43,6 +43,10 @@ from pulsara_agent.storage.postgres_connection_provider import PostgresConnectio
 from pulsara_agent.primitives.context import freeze_json
 from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
 from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
+from pulsara_agent.primitives.tool_result_projection import (
+    ToolResultDeliveryRequirement,
+    ToolResultFullDeliveryReason,
+)
 from tests.support.postgres import verified_postgres_provider
 
 
@@ -322,6 +326,7 @@ def test_reader_lowers_no_attempt_as_interrupted_before_dispatch(
         lease_seconds=30,
         deadline_monotonic=monotonic() + 30,
     )
+
     old_turn = _start_turn(repository, lease, b"old")
     cut = repository.prepare_provider_input_cut(
         lease.guard, turn_id=old_turn, deadline_monotonic=monotonic() + 30
@@ -364,6 +369,121 @@ def test_reader_lowers_no_attempt_as_interrupted_before_dispatch(
         ProviderToolResultClosureKind.INTERRUPTED_BEFORE_DISPATCH
     )
     assert materialized.late_outcomes == ()
+
+
+def test_round7_1_reader_rebuilds_artifact_page_full_requirement_from_exact_rows(
+    stage2_migrated_postgres_database,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    workspace_id = _id("workspace")
+    lease = repository.acquire_host_writer(
+        session_id=_id("session"),
+        workspace_id=workspace_id,
+        writer_owner_id=_id("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    turn_id = _start_turn(repository, lease, b"read an artifact page")
+    cut = repository.prepare_provider_input_cut(
+        lease.guard,
+        turn_id=turn_id,
+        deadline_monotonic=monotonic() + 30,
+    )
+    assistant_entry_id = _id("entry")
+    call_id = _id("call")
+    repository.commit_assistant_message(
+        lease.guard,
+        cut=cut,
+        entry_id=assistant_entry_id,
+        parent_content=InlineContent.from_bytes(b"artifact request"),
+        blocks=(
+            AssistantToolCallBlock(
+                block_id=_id("block"),
+                tool_call_id=call_id,
+                tool_name="artifact_read",
+                arguments=freeze_json(
+                    {
+                        "artifact_id": "artifact:test",
+                        "mode": "text",
+                        "offset_chars": 0,
+                        "max_chars": 20_000,
+                    }
+                ),
+            ),
+        ),
+        occurred_at=datetime.now(timezone.utc),
+        actor_id="model:test",
+        deadline_monotonic=monotonic() + 30,
+    )
+    attempt_id = _id("attempt")
+    repository.accept_tool_attempt(
+        lease.guard,
+        attempt_id=attempt_id,
+        assistant_entry_id=assistant_entry_id,
+        tool_call_id=call_id,
+        authorization_kind="policy",
+        authorization_reference="allow",
+        actor_kind="runtime",
+        actor_id="executor",
+        remote_idempotency_key=None,
+        retry_of_attempt_id=None,
+        permission_snapshot_fingerprint=_permission_fingerprint(
+            repository, lease, turn_id
+        ),
+        occurred_at=datetime.now(timezone.utc),
+        deadline_monotonic=monotonic() + 30,
+    )
+    observed_at = datetime.now(timezone.utc)
+    result = build_prepared_tool_result_acceptance(
+        guard=lease.guard,
+        workspace_id=workspace_id,
+        result_id=_id("result"),
+        result_entry_id=_id("entry"),
+        turn_id=turn_id,
+        assistant_entry_id=assistant_entry_id,
+        tool_call_id=call_id,
+        attempt_id=attempt_id,
+        result_state="SUCCESS",
+        canonical_preview_content=InlineContent.from_bytes(
+            b'{"has_more":true,"text":"page"}'
+        ),
+        artifact_disposition=ToolOutputArtifactDisposition.NOT_REQUIRED,
+        artifact_id=None,
+        artifact_blob_descriptor=None,
+        source_coverage=ToolOutputSourceCoverage.COMPLETE,
+        display_kind=ToolResultDisplayKind.COMPLETE,
+        source_coverage_reason=None,
+        artifact_unavailability_reason=None,
+        observed_at=observed_at,
+        observation_duration_microseconds=1,
+        observation_origin_kind=ToolObservationOrigin.BUILTIN,
+        trusted_tool_reported_duration_microseconds=None,
+        actor_id="runtime",
+    )
+    repository.accept_tool_result(
+        lease.guard,
+        candidate=result,
+        deadline_monotonic=monotonic() + 30,
+    )
+    read_cut = repository.prepare_provider_input_cut(
+        lease.guard,
+        turn_id=turn_id,
+        deadline_monotonic=monotonic() + 30,
+    )
+    snapshot = CanonicalProviderInputReader(provider).read_frozen_snapshot(
+        read_cut,
+        deadline_monotonic=monotonic() + 30,
+    )
+    page = next(
+        item
+        for item in snapshot.items
+        if item.item_kind is ProviderInputItemKind.TOOL_RESULT
+    )
+    assert page.tool_result_delivery.requirement is (
+        ToolResultDeliveryRequirement.FULL_REQUIRED
+    )
+    assert page.tool_result_delivery.reason is ToolResultFullDeliveryReason.ARTIFACT_PAGE
 
 
 def test_reader_rejects_declared_bytes_before_loading_any_payload(

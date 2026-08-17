@@ -29,6 +29,10 @@ from pulsara_agent.primitives.tool_observation import (
     canonical_utc_timestamp,
     normalize_observation_duration,
 )
+from pulsara_agent.primitives.tool_result_projection import (
+    MAXIMUM_TOOL_RESULT_MEMORY_PROVENANCE_ITEMS,
+    MAXIMUM_TOOL_RESULT_MEMORY_PROVENANCE_UTF8_BYTES,
+)
 from pulsara_agent.primitives.plan_workflow import PLAN_ENTRY_CONTRACT, ExtractedPlanDraft, PlanDraftDecision, PlanHandoffKind, PlanInteractionBinding, PlanInteractionKind, PlanQuestionAnswerKind, PlanQuestionContent, PlanWorkflowStatus, require_plan_interaction_contract
 from pulsara_agent.conversation_kernel.vocabulary import CommittedEventType, SubjectSlot
 from pulsara_agent.conversation_kernel.steer import PromptIngressWriteRejection
@@ -421,11 +425,13 @@ class PreparedToolResultAcceptance:
         if self.canonical_preview_content.size > 65_536:
             raise ValueError("prepared tool result preview exceeds its hard bound")
         if (
-            len(self.model_visible_memory_fact_ids) > 50
+            len(self.model_visible_memory_fact_ids)
+            > MAXIMUM_TOOL_RESULT_MEMORY_PROVENANCE_ITEMS
             or len(set(self.model_visible_memory_fact_ids))
             != len(self.model_visible_memory_fact_ids)
             or any(not value for value in self.model_visible_memory_fact_ids)
-            or len(canonical_json_bytes(self.model_visible_memory_fact_ids)) > 8_192
+            or len(canonical_json_bytes(self.model_visible_memory_fact_ids))
+            > MAXIMUM_TOOL_RESULT_MEMORY_PROVENANCE_UTF8_BYTES
         ):
             raise ValueError("prepared model-visible memory header is invalid")
         canonical_utc_timestamp(self.observed_at)

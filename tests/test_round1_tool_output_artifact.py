@@ -59,7 +59,13 @@ from tests.support.round3 import (
     direct_tool_invocation_context,
 )
 from pulsara_agent.primitives.context import freeze_json, thaw_json
-from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
+from pulsara_agent.primitives.tool_observation import (
+    MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES,
+    ToolObservationOrigin,
+)
+from pulsara_agent.primitives.tool_result_projection import (
+    conservative_artifact_page_logical_utf8_bytes,
+)
 from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
 from pulsara_agent.primitives.run_permission import (
     RunPermissionAdmissionSource,
@@ -212,21 +218,21 @@ def test_round1_static_authority_and_count_oracles_remain_closed() -> None:
             id="archive-after",
         ),
         pytest.param(
-            "a" * 31_999,
+            "a" * 39_999,
             ToolOutputArtifactDisposition.AVAILABLE,
             ToolResultDisplayKind.COMPLETE,
             1,
             id="display-before",
         ),
         pytest.param(
-            "a" * 32_000,
+            "a" * 40_000,
             ToolOutputArtifactDisposition.AVAILABLE,
             ToolResultDisplayKind.COMPLETE,
             1,
             id="display-at",
         ),
         pytest.param(
-            "a" * 32_001,
+            "a" * 40_001,
             ToolOutputArtifactDisposition.AVAILABLE,
             ToolResultDisplayKind.HEAD_TAIL,
             1,
@@ -264,6 +270,40 @@ def test_round1_preview_threshold_matrix(
             len(text) - projection.visible_head_chars - projection.visible_tail_chars
         )
         assert len(preview) <= 8_000
+
+
+@pytest.mark.parametrize(
+    ("text", "expected_display"),
+    (
+        ("a" * 39_999, ToolResultDisplayKind.COMPLETE),
+        ("a" * 40_000, ToolResultDisplayKind.COMPLETE),
+        ("a" * 40_001, ToolResultDisplayKind.HEAD_TAIL),
+        ("中" * 13_333, ToolResultDisplayKind.COMPLETE),
+        (("中" * 13_333) + "a", ToolResultDisplayKind.COMPLETE),
+        (("中" * 13_333) + "aa", ToolResultDisplayKind.HEAD_TAIL),
+        ("🙂" * 9_999, ToolResultDisplayKind.COMPLETE),
+        ("🙂" * 10_000, ToolResultDisplayKind.COMPLETE),
+        (("🙂" * 10_000) + "a", ToolResultDisplayKind.HEAD_TAIL),
+        (("\\\"" * 20_000), ToolResultDisplayKind.COMPLETE),
+        (("\\\"" * 20_000) + "a", ToolResultDisplayKind.HEAD_TAIL),
+    ),
+)
+def test_round7_1_canonical_complete_uses_candidate_utf8_bytes(
+    text: str,
+    expected_display: ToolResultDisplayKind,
+) -> None:
+    projection = _processor(_RecordingPublisher()).prepare(
+        workspace_id="workspace",
+        result_entry_id="entry",
+        public_output=text,
+        candidate=None,
+        artifact_source_read=False,
+        deadline_monotonic=monotonic() + 10,
+    )
+    assert projection.candidate_utf8_bytes == len(text.encode("utf-8"))
+    assert projection.display_kind is expected_display
+    assert projection.canonical_preview.size <= CANONICAL_TOOL_RESULT_PREVIEW_HARD_BYTES
+    projection.canonical_preview.canonical_bytes.decode("utf-8")
 
 
 def test_round2_cursor_artifact_replaces_only_the_selected_terminal_delta() -> None:
@@ -606,7 +646,7 @@ def test_round1_terminal_preserves_full_sanitized_candidate_and_envelope(
     assert preview_envelope["cwd"] == str(tmp_path)
     assert preview_envelope["process_id"] == public_envelope["process_id"]
     assert "MIDDLE-SENTINEL" not in preview_envelope["output"]
-    assert "Use artifact_read" in preview_envelope["output"]
+    assert "If the omitted content is necessary" in preview_envelope["output"]
 
 
 class _ScriptedModel(ScriptedKernelModel):
@@ -1123,9 +1163,10 @@ def test_round1_artifact_body_read_scope_pagination_and_nonrecursive_result(
     assert info_payload["artifact_id"] == projection.artifact_id
     assert info_payload["source_coverage"] == "COMPLETE"
 
+    multibyte_call_id = _name("call")
     multibyte_result = ArtifactReadTool(read_port).execute(
         ToolCall(
-            id=_name("call"),
+            id=multibyte_call_id,
             name="artifact_read",
             arguments={
                 "artifact_id": projection.artifact_id,
@@ -1144,6 +1185,39 @@ def test_round1_artifact_body_read_scope_pagination_and_nonrecursive_result(
         source[5 : multibyte_payload["next_offset_chars"]]
         == (multibyte_payload["text"])
     )
+    assert (
+        conservative_artifact_page_logical_utf8_bytes(
+            tool_call_id=multibyte_call_id,
+            body=multibyte_result.output,
+            model_visible_memory_ids=(),
+        )
+        <= MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES
+    )
+    if multibyte_payload["has_more"]:
+        next_character = source[multibyte_payload["next_offset_chars"]]
+        extended = dict(multibyte_payload)
+        extended["text"] += next_character
+        extended["returned_chars"] += 1
+        extended["next_offset_chars"] += 1
+        extended["has_more"] = (
+            extended["next_offset_chars"] < extended["total_chars"]
+        )
+        if not extended["has_more"]:
+            extended["next_offset_chars"] = None
+        extended_body = json.dumps(
+            extended,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        assert (
+            conservative_artifact_page_logical_utf8_bytes(
+                tool_call_id=multibyte_call_id,
+                body=extended_body,
+                model_visible_memory_ids=(),
+            )
+            > MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES
+        )
 
     tool = ArtifactReadTool(read_port)
     invalid_arguments = (

@@ -81,7 +81,16 @@ from pulsara_agent.llm.request import (
 from pulsara_agent.llm.resolution import resolve_model_call, resolve_model_target
 from pulsara_agent.llm.models import ModelRole
 from pulsara_agent.llm.result import TransportUsageReport
-from pulsara_agent.primitives.model_call import ModelCallPurpose
+from pulsara_agent.llm.retry import LLMRetryConfig
+from pulsara_agent.llm.stream_limits import (
+    MAX_CHAT_REASONING_REPLAY_AGGREGATE_BYTES,
+    MAX_CHAT_REASONING_REPLAY_ITEMS_PER_RESPONSE,
+    MAX_COMPLETED_PROVIDER_RESPONSE_AGGREGATE_BYTES,
+)
+from pulsara_agent.primitives.model_call import (
+    ModelCallPurpose,
+    ProviderModelStreamErrorCode,
+)
 from tests.support.model_config import test_llm_config
 
 
@@ -166,7 +175,7 @@ def test_chat_completed_text_reasoning_replay_is_explicit_and_exact() -> None:
     assert terminal.terminal_kind is ProviderAdapterTerminalKind.COMPLETED
     assert terminal.completed_replay_payload is not None
     assert terminal.completed_replay_payload.codec_kind is (
-        ProviderAssistantReplayCodecKind.CHAT_TEXT_REASONING_FIELD
+        ProviderAssistantReplayCodecKind.CHAT_CLOSED_REASONING_FIELDS
     )
     assert thaw_json(terminal.completed_replay_payload.ordered_items[0]) == {
         "role": "assistant",
@@ -185,7 +194,11 @@ def test_chat_null_reasoning_deltas_do_not_erase_or_forge_a_replay_carrier() -> 
         _chat_chunk(
             {"content": "", "reasoning_content": None},
             "tool_calls",
-            message=None,
+            message={
+                "role": "assistant",
+                "content": "",
+                "reasoning_content": None,
+            },
         )
     )
     terminal = accumulator.finish()
@@ -219,38 +232,52 @@ def test_chat_live_thinking_can_remain_disposable_when_replay_is_disabled() -> N
     assert terminal.completed_replay_payload is None
 
 
-def test_chat_closed_field_accumulation_and_final_reconciliation() -> None:
-    profile = _chat_profile(
-        message_field="reasoning_details",
-        fields=(
-            ProviderChatReplayFieldContract(
-                "reasoning_details",
-                ProviderChatFieldAccumulationMode.ORDERED_ARRAY_APPEND,
-                final_value_required=True,
-            ),
-            ProviderChatReplayFieldContract(
-                "reasoning_signature",
-                ProviderChatFieldAccumulationMode.SINGLE_EXACT_VALUE,
-                final_value_required=True,
-            ),
+def test_chat_reasoning_registry_is_closed_and_provider_neutral() -> None:
+    profile = _chat_profile()
+    assert tuple(
+        (item.field_name, item.accumulation_mode)
+        for item in profile.chat_replay_fields
+    ) == (
+        ("reasoning_content", ProviderChatFieldAccumulationMode.TEXT_CONCAT),
+        ("reasoning", ProviderChatFieldAccumulationMode.TEXT_CONCAT),
+        (
+            "reasoning_details",
+            ProviderChatFieldAccumulationMode.ORDERED_ARRAY_APPEND,
         ),
     )
+    with pytest.raises(ValueError, match="outside the closed registry"):
+        _chat_profile(
+            fields=(
+                ProviderChatReplayFieldContract(
+                    "reasoning_signature",
+                    ProviderChatFieldAccumulationMode.ORDERED_ARRAY_APPEND,
+                ),
+            )
+        )
+    with pytest.raises(ValueError, match="message field must be textual"):
+        ThinkingProfile(message_field="reasoning_details")
+
+
+def test_chat_closed_field_accumulation_and_final_reconciliation() -> None:
+    profile = _chat_profile()
     accumulator = ChatCompletionAccumulator(
         builder=ProviderLiveItemBuilder(), provider_profile=profile
     )
     accumulator.apply(
         _chat_chunk(
             {
+                "reasoning_content": "private-",
+                "reasoning": "normalized-",
                 "reasoning_details": [{"type": "a", "value": 1}],
-                "reasoning_signature": {"kind": "sealed"},
             }
         )
     )
     accumulator.apply(
         _chat_chunk(
             {
+                "reasoning_content": "text",
+                "reasoning": "text",
                 "reasoning_details": [{"type": "b", "value": 2}],
-                "reasoning_signature": {"kind": "sealed"},
             }
         )
     )
@@ -261,11 +288,12 @@ def test_chat_closed_field_accumulation_and_final_reconciliation() -> None:
             message={
                 "role": "assistant",
                 "content": "ok",
+                "reasoning_content": "private-text",
+                "reasoning": "normalized-text",
                 "reasoning_details": [
                     {"type": "a", "value": 1},
                     {"type": "b", "value": 2},
                 ],
-                "reasoning_signature": {"kind": "sealed"},
             },
         )
     )
@@ -277,24 +305,166 @@ def test_chat_closed_field_accumulation_and_final_reconciliation() -> None:
         {"type": "a", "value": 1},
         {"type": "b", "value": 2},
     ]
+    assert message["reasoning_content"] == "private-text"
+    assert message["reasoning"] == "normalized-text"
 
 
-def test_chat_conflicting_single_value_and_incomplete_never_complete() -> None:
-    profile = _chat_profile(
-        message_field="reasoning_signature",
-        fields=(
-            ProviderChatReplayFieldContract(
-                "reasoning_signature",
-                ProviderChatFieldAccumulationMode.SINGLE_EXACT_VALUE,
-            ),
-        ),
+def test_chat_opaque_replay_item_limit_fails_before_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "pulsara_agent.llm.adapters.openai.chat_completions."
+        "MAX_CHAT_REASONING_REPLAY_ITEMS_PER_RESPONSE",
+        1_000,
     )
+    accumulator = ChatCompletionAccumulator(
+        builder=ProviderLiveItemBuilder(), provider_profile=_chat_profile()
+    )
+    for index in range(1_000):
+        assert accumulator.apply(
+            _chat_chunk({"reasoning_details": [{"ordinal": index}]})
+        ) == []
+    assert len(accumulator._array_field_items["reasoning_details"]) == 1_000
+
+    with pytest.raises(LLMTransportContractError) as captured:
+        accumulator.apply(
+            _chat_chunk({"reasoning_details": [{"ordinal": 1_000}]})
+        )
+    assert captured.value.reason_code == "transport_source_item_limit_exceeded"
+    assert accumulator.terminal is None
+    assert accumulator._array_field_items == {}
+
+
+def test_chat_reasoning_replay_bounds_are_physical_headroom() -> None:
+    assert (
+        MAX_CHAT_REASONING_REPLAY_AGGREGATE_BYTES
+        == MAX_COMPLETED_PROVIDER_RESPONSE_AGGREGATE_BYTES
+    )
+    assert MAX_CHAT_REASONING_REPLAY_ITEMS_PER_RESPONSE == 65_536
+
+
+def test_chat_text_reasoning_accumulates_chunks_without_repeated_concat() -> None:
+    accumulator = ChatCompletionAccumulator(
+        builder=ProviderLiveItemBuilder(), provider_profile=_chat_profile()
+    )
+    for _index in range(128):
+        accumulator.apply(_chat_chunk({"reasoning_content": "x"}))
+    assert accumulator._text_field_chunks["reasoning_content"] == ["x"] * 128
+    accumulator.apply(
+        _chat_chunk(
+            {"content": "done"},
+            "stop",
+            message={
+                "role": "assistant",
+                "content": "done",
+                "reasoning_content": "x" * 128,
+            },
+        )
+    )
+    terminal = accumulator.finish()
+    assert isinstance(terminal, ProviderAdapterTerminal)
+    assert terminal.completed_replay_payload is not None
+    assert accumulator._text_field_chunks == {}
+
+
+def test_chat_replay_byte_overflow_is_typed_and_not_retried(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "pulsara_agent.llm.adapters.openai.chat_completions."
+        "MAX_CHAT_REASONING_REPLAY_AGGREGATE_BYTES",
+        64,
+    )
+
+    class FakeCompletions:
+        calls = 0
+
+        async def create(self, **_kwargs: object):
+            self.calls += 1
+
+            async def chunks():
+                yield _chat_chunk(
+                    {"reasoning_details": [{"opaque": "x" * 128}]}
+                )
+
+            return chunks()
+
+    class FakeChat:
+        def __init__(self, completions: FakeCompletions) -> None:
+            self.completions = completions
+
+    class FakeClient:
+        def __init__(self, completions: FakeCompletions) -> None:
+            self.chat = FakeChat(completions)
+
+    completions = FakeCompletions()
+    adapter = OpenAIChatCompletionsTransport(
+        api_key="test",
+        timeout_policy=OpenAITransportTimeoutPolicy(1, 1, 1, 1, None),
+        retry_config=LLMRetryConfig(enabled=True, attempts=3),
+    )
+    adapter._client = FakeClient(completions)
+    registry = NormalizedLLMTransportRegistry()
+    registry.register(NormalizedLLMTransport(adapter))
+    profile = _chat_profile()
+    config = test_llm_config(
+        api_key="test",
+        base_url="https://example.invalid/v1",
+        pro_model="test-model",
+        flash_model="test-model",
+        api=OPENAI_CHAT_COMPLETIONS_API,
+        provider_profile=profile,
+    )
+    target = resolve_model_target(
+        config=config,
+        registry=registry,
+        role=ModelRole.PRO,
+        requested_options=LLMOptions(),
+    )
+    call = resolve_model_call(
+        target=target,
+        purpose=ModelCallPurpose.MEMORY_HINT_REVIEW,
+    )
+    context = LLMContext(
+        messages=(LLMMessage.user("bounded"),),
+        context_id="round5a1:opaque-overflow",
+        resolved_model_call_id=call.resolved_model_call_id,
+        target_fingerprint=call.target.fact.target_fingerprint,
+        model_call_index=None,
+    )
+
+    async def exercise() -> list[object]:
+        return [item async for item in adapter.stream(call=call, context=context)]
+
+    output = asyncio.run(exercise())
+    assert completions.calls == 1
+    assert len(output) == 1
+    failure = output[0]
+    assert isinstance(failure, ProviderStreamFailure)
+    assert failure.code_hint == "transport_source_payload_limit_exceeded"
+    assert failure.retry_summary is not None
+    assert failure.retry_summary.final_attempt == 1
+    assert failure.retry_summary.skipped_reason == "unknown_non_retryable"
+
+
+def test_chat_conflicting_array_final_and_incomplete_never_complete() -> None:
+    profile = _chat_profile()
     accumulator = ChatCompletionAccumulator(
         builder=ProviderLiveItemBuilder(), provider_profile=profile
     )
-    accumulator.apply(_chat_chunk({"reasoning_signature": {"v": 1}}))
+    accumulator.apply(_chat_chunk({"reasoning_details": [{"v": 1}]}))
     with pytest.raises(LLMTransportContractError):
-        accumulator.apply(_chat_chunk({"reasoning_signature": {"v": 2}}))
+        accumulator.apply(
+            _chat_chunk(
+                {},
+                "stop",
+                message={
+                    "role": "assistant",
+                    "content": None,
+                    "reasoning_details": [{"v": 2}],
+                },
+            )
+        )
 
     incomplete = ChatCompletionAccumulator(
         builder=ProviderLiveItemBuilder(), provider_profile=profile
@@ -318,6 +488,204 @@ def test_chat_conflicting_single_value_and_incomplete_never_complete() -> None:
     assert terminal.terminal_kind is ProviderAdapterTerminalKind.OUTPUT_INCOMPLETE
     assert terminal.incomplete_reason is ProviderOutputIncompleteReason.OUTPUT_TOKEN_LIMIT
     assert terminal.completed_replay_payload is None
+
+
+def test_chat_tool_response_without_reasoning_carrier_needs_no_replay() -> None:
+    profile = ProviderProfile(
+        wire_api="openai_chat_completions",
+        thinking=ThinkingProfile(
+            enabled=True,
+            replay_policy=ThinkingReplayPolicy.WHEN_TOOL_CALLS,
+        ),
+    )
+    accumulator = ChatCompletionAccumulator(
+        builder=ProviderLiveItemBuilder(), provider_profile=profile
+    )
+    accumulator.apply(
+        _chat_chunk(
+            {
+                "tool_calls": [
+                    {
+                        "index": 0,
+                        "id": "call:no-reasoning",
+                        "type": "function",
+                        "function": {"name": "virtual", "arguments": "{}"},
+                    }
+                ]
+            },
+            "tool_calls",
+        )
+    )
+    terminal = accumulator.finish()
+    assert isinstance(terminal, ProviderAdapterTerminal)
+    assert terminal.terminal_kind is ProviderAdapterTerminalKind.COMPLETED
+    assert terminal.completed_replay_payload is None
+    completion = CompletedProviderModelExecution(
+        terminal=ProviderStreamTerminal(
+            terminal_kind=ProviderNormalizedTerminalKind.COMPLETED,
+            usage=TransportUsageReport(usage_status="missing", usage=None),
+        ),
+        replay_payload=None,
+        replay_scope=ProviderReasoningReplayScope.TOOL_RESPONSES,
+        provider_profile_fingerprint="sha256:" + "1" * 64,
+        resolved_target_fingerprint="sha256:" + "2" * 64,
+    )
+    assert (
+        completion.bind_assistant_entry(
+            assistant_entry_id="entry:no-reasoning",
+            public_projection_fingerprint="sha256:" + "3" * 64,
+            has_tool_calls=True,
+        )
+        is None
+    )
+
+
+def test_chat_structured_reasoning_tool_response_and_terminal_echo_round_trip() -> None:
+    profile = ProviderProfile(
+        wire_api="openai_chat_completions",
+        thinking=ThinkingProfile(
+            enabled=True,
+            replay_policy=ThinkingReplayPolicy.WHEN_TOOL_CALLS,
+        ),
+    )
+    accumulator = ChatCompletionAccumulator(
+        builder=ProviderLiveItemBuilder(), provider_profile=profile
+    )
+    accumulator.apply(
+        _chat_chunk(
+            {
+                "role": "assistant",
+                "content": "",
+                "reasoning": None,
+                "reasoning_details": [
+                    {"type": "reasoning.text", "text": "opaque-test"}
+                ],
+            }
+        )
+    )
+    accumulator.apply(
+        _chat_chunk(
+            {
+                "tool_calls": [
+                    {
+                        "index": 0,
+                        "id": "call:structured",
+                        "type": "function",
+                        "function": {"name": "virtual", "arguments": "{}"},
+                    }
+                ]
+            },
+            "tool_calls",
+        )
+    )
+    assert accumulator.apply(
+        _chat_chunk(
+            {"content": "", "reasoning": None, "reasoning_details": []},
+            "tool_calls",
+        )
+    ) == []
+    terminal = accumulator.finish()
+    assert isinstance(terminal, ProviderAdapterTerminal)
+    assert terminal.completed_replay_payload is not None
+    replay = thaw_json(terminal.completed_replay_payload.ordered_items[0])
+    assert replay["reasoning_details"] == [
+        {"type": "reasoning.text", "text": "opaque-test"}
+    ]
+    assert "reasoning" not in replay
+
+
+def test_chat_unknown_empty_carriers_are_ignorable() -> None:
+    accumulator = ChatCompletionAccumulator(
+        builder=ProviderLiveItemBuilder(), provider_profile=_chat_profile()
+    )
+    accumulator.apply(
+        _chat_chunk(
+            {
+                "future_null": None,
+                "future_text": "",
+                "future_array": [],
+                "future_object": {},
+                "content": "answer",
+            },
+            "stop",
+        )
+    )
+    terminal = accumulator.finish()
+    assert isinstance(terminal, ProviderAdapterTerminal)
+    assert terminal.terminal_kind is ProviderAdapterTerminalKind.COMPLETED
+
+
+def test_chat_unknown_nonempty_final_carrier_is_not_replayed() -> None:
+    profile = ProviderProfile(
+        wire_api="openai_chat_completions",
+        thinking=ThinkingProfile(
+            enabled=True,
+            replay_policy=ThinkingReplayPolicy.WHEN_TOOL_CALLS,
+        ),
+    )
+    accumulator = ChatCompletionAccumulator(
+        builder=ProviderLiveItemBuilder(), provider_profile=profile
+    )
+    accumulator.apply(
+        _chat_chunk(
+            {
+                "future_reasoning_carrier": {"opaque": "bounded"},
+                "content": "supported answer",
+            },
+            "stop",
+        )
+    )
+    terminal = accumulator.finish()
+    assert isinstance(terminal, ProviderAdapterTerminal)
+    assert terminal.terminal_kind is ProviderAdapterTerminalKind.COMPLETED
+    assert terminal.completed_replay_payload is None
+
+
+def test_chat_unknown_nonempty_tool_carrier_fails_before_terminal() -> None:
+    profile = ProviderProfile(
+        wire_api="openai_chat_completions",
+        thinking=ThinkingProfile(
+            enabled=True,
+            replay_policy=ThinkingReplayPolicy.WHEN_TOOL_CALLS,
+        ),
+    )
+    accumulator = ChatCompletionAccumulator(
+        builder=ProviderLiveItemBuilder(), provider_profile=profile
+    )
+    with pytest.raises(LLMTransportContractError) as captured:
+        accumulator.apply(
+            _chat_chunk(
+                {
+                    "future_reasoning_carrier": {"opaque": "bounded"},
+                    "tool_calls": [
+                        {
+                            "index": 0,
+                            "id": "call:unknown-carrier",
+                            "type": "function",
+                            "function": {"name": "virtual", "arguments": "{}"},
+                        }
+                    ],
+                },
+                "tool_calls",
+            )
+        )
+    assert captured.value.reason_code == "transport_chat_replay_field_unsupported"
+    assert accumulator.terminal is None
+
+
+def test_chat_unknown_nonempty_carrier_cannot_be_the_only_output() -> None:
+    accumulator = ChatCompletionAccumulator(
+        builder=ProviderLiveItemBuilder(), provider_profile=_chat_profile()
+    )
+    with pytest.raises(LLMTransportContractError) as captured:
+        accumulator.apply(
+            _chat_chunk(
+                {"future_reasoning_carrier": {"opaque": "bounded"}},
+                "stop",
+            )
+        )
+    assert captured.value.reason_code == "transport_chat_replay_field_unsupported"
+    assert accumulator.terminal is None
 
 
 def test_chat_eof_and_terminal_followed_by_semantic_chunk_fail_closed() -> None:
@@ -956,6 +1324,26 @@ def test_normalized_transport_does_not_reclassify_caller_cancellation() -> None:
             await task
 
     asyncio.run(exercise())
+
+
+def test_normalized_transport_keeps_adapter_contract_failure_typed() -> None:
+    async def stream():
+        raise LLMTransportContractError(
+            "unsupported replay carrier",
+            reason_code="transport_chat_replay_field_unsupported",
+        )
+        yield  # pragma: no cover - retains the async-generator shape
+
+    async def exercise() -> ProviderStreamTerminal:
+        execution = NormalizedProviderTransportExecution(stream())
+        item = await execution.read_next()
+        assert isinstance(item, ProviderStreamTerminal)
+        return item
+
+    terminal = asyncio.run(exercise())
+    assert terminal.terminal_kind is ProviderNormalizedTerminalKind.PROVIDER_ERROR
+    assert terminal.error is not None
+    assert terminal.error.code is ProviderModelStreamErrorCode.TRANSPORT_PROTOCOL_ERROR
 
 
 def test_completed_replay_and_live_payload_share_one_aggregate_bound(

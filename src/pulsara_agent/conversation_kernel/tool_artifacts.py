@@ -36,10 +36,12 @@ from pulsara_agent.storage.postgres_connection_provider import (
     PostgresConnectionLane,
     VerifiedPostgresConnectionProviderProtocol,
 )
+from pulsara_agent.primitives.tool_observation import (
+    MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES,
+)
 
 
 ARTIFACT_ARCHIVE_THRESHOLD_BYTES = 8_000
-COMPLETE_DISPLAY_BODY_CHARS = 32_000
 HEAD_TAIL_PREVIEW_CHARS = 8_000
 ARTIFACT_READ_DEFAULT_CHARS = 20_000
 ARTIFACT_READ_HARD_CHARS = 32_000
@@ -47,6 +49,9 @@ CANONICAL_TOOL_RESULT_PREVIEW_HARD_BYTES = 65_536
 PRIMARY_TOOL_OUTPUT_MEDIA_TYPE = "text/plain"
 PRIMARY_TOOL_OUTPUT_CODEC = "utf-8"
 _HEAD_RATIO = 0.65
+CANONICAL_TOOL_RESULT_PREVIEW_CONTRACT = (
+    "pulsara.canonical-tool-result-preview.v2-utf8-logical-bound"
+)
 
 
 class ToolOutputArtifactPublisher(Protocol):
@@ -283,8 +288,10 @@ def _build_final_preview(
     artifact_unavailability_reason: ToolOutputArtifactUnavailabilityReason | None,
 ) -> _RenderedPreview:
     envelope = _preview_envelope(public_output, candidate)
-    prefer_complete = artifact_source_read or (
-        len(candidate.text) <= COMPLETE_DISPLAY_BODY_CHARS
+    candidate_utf8_bytes = len(candidate.text.encode("utf-8"))
+    prefer_complete = (
+        candidate_utf8_bytes
+        <= MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES
     )
     if prefer_complete:
         complete_body = candidate.text + _complete_footer(
@@ -307,6 +314,11 @@ def _build_final_preview(
             raise ValueError(
                 "artifact_read response exceeds its non-recursive inline bound"
             )
+
+    if artifact_source_read:
+        raise ValueError(
+            "artifact_read response exceeds the provider logical FULL bound"
+        )
 
     maximum_visible = min(HEAD_TAIL_PREVIEW_CHARS, len(candidate.text))
     low = 0
@@ -383,9 +395,11 @@ def _complete_footer(
     if artifact_id is not None:
         parts.append(
             "\n\n[TOOL OUTPUT ARTIFACT: full retained output is available as "
-            f"artifact_id={artifact_id}. Use artifact_read("
+            f"artifact_id={artifact_id}. If an exact reread is necessary for "
+            "the current task, read the retained artifact with artifact_read("
             f'{{"artifact_id":"{artifact_id}","offset_chars":0,'
-            '"max_chars":20000}) to inspect it.]'
+            '"max_chars":20000}); otherwise continue from the complete visible '
+            "result without opening the artifact.]"
         )
     elif disposition is ToolOutputArtifactDisposition.UNAVAILABLE:
         reason = (
@@ -440,9 +454,11 @@ def _omission_marker(
         return (
             f"\n\n[OUTPUT TRUNCATED / PREVIEW: omitted {omitted} chars from the middle.\n"
             f"Full retained output: artifact_id={artifact_id}\n"
-            f'Use artifact_read({{"artifact_id":"{artifact_id}",'
+            "If the omitted content is necessary for the current task, read the "
+            f'retained artifact with artifact_read({{"artifact_id":"{artifact_id}",'
             f'"offset_chars":{head},"max_chars":20000}}) '
-            "to inspect content after the visible head.]\n\n"
+            "to inspect content after the visible head; otherwise continue from "
+            "the visible result without opening the artifact.]\n\n"
         )
     reason = (
         "" if unavailable_reason is None else f" reason={unavailable_reason.value}."
@@ -639,7 +655,7 @@ __all__ = [
     "ARTIFACT_READ_DEFAULT_CHARS",
     "ARTIFACT_READ_HARD_CHARS",
     "CANONICAL_TOOL_RESULT_PREVIEW_HARD_BYTES",
-    "COMPLETE_DISPLAY_BODY_CHARS",
+    "CANONICAL_TOOL_RESULT_PREVIEW_CONTRACT",
     "HEAD_TAIL_PREVIEW_CHARS",
     "KnownArtifactPublicationFailure",
     "PostgresToolArtifactReadPort",

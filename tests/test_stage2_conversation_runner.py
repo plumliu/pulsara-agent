@@ -47,8 +47,11 @@ from pulsara_agent.ports.live_agent_event import (
     live_digest,
 )
 from pulsara_agent.conversation_kernel.repository import (
+    AssistantTextBlock,
+    AssistantToolCallBlock,
     ConversationKernelConflict,
     ConversationKernelRepository,
+    build_prepared_tool_result_acceptance,
 )
 from pulsara_agent.conversation_kernel.reader import CanonicalProviderInputReader
 from pulsara_agent.conversation_kernel.io import KernelSessionIO
@@ -64,7 +67,7 @@ from pulsara_agent.conversation_kernel.tool_artifacts import (
 )
 from pulsara_agent.conversation_kernel.vocabulary import LiveEventType
 from pulsara_agent.llm.input import MessageRole
-from pulsara_agent.primitives.context import thaw_json
+from pulsara_agent.primitives.context import freeze_json, thaw_json
 from pulsara_agent.llm.provider import (
     ProviderProfile,
     ThinkingProfile,
@@ -85,6 +88,12 @@ from pulsara_agent.ports.provider_stream import (
     ProviderModelOutputIncomplete,
     ProviderOutputIncompleteReason,
 )
+from pulsara_agent.ports.artifact import (
+    ToolOutputArtifactDisposition,
+    ToolResultDisplayKind,
+)
+from pulsara_agent.ports.tool_execution import ToolOutputSourceCoverage
+from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 from tests.support.postgres import verified_postgres_provider
 from tests.support.model_config import test_llm_config
@@ -101,6 +110,150 @@ pytestmark = pytest.mark.postgres
 
 def _name(prefix: str) -> str:
     return f"{prefix}:{uuid4().hex}"
+
+
+def _turn_permission_fingerprint(
+    repository: ConversationKernelRepository,
+    *,
+    session_id: str,
+    turn_id: str,
+) -> str:
+    with repository.connection_provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        deadline_monotonic=monotonic() + 10,
+    ) as connection:
+        row = connection.execute(
+            "SELECT permission_snapshot_fingerprint FROM pulsara_v3.turns "
+            "WHERE session_id = %s AND id = %s",
+            (session_id, turn_id),
+        ).fetchone()
+    assert row is not None
+    return str(row[0])
+
+
+def _seed_artifact_result_with_memory_provenance(
+    repository: ConversationKernelRepository,
+    *,
+    lease: object,
+    workspace_id: str,
+    memory_ids: tuple[str, ...],
+) -> str:
+    guard = lease.guard
+    turn_id = _name("turn")
+    repository.start_root_turn(
+        guard,
+        command_id=_name("command"),
+        turn_id=turn_id,
+        entry_id=_name("entry"),
+        context_binding_revision_id=_name("revision"),
+        permission_snapshot_id=_name("permission-snapshot"),
+        requested_permission_mode=DEFAULT_PERMISSION_MODE,
+        content=InlineContent.from_bytes(b"read an artifact page"),
+        occurred_at=datetime.now(timezone.utc),
+        deadline_monotonic=monotonic() + 30,
+    )
+    cut = repository.prepare_provider_input_cut(
+        guard,
+        turn_id=turn_id,
+        deadline_monotonic=monotonic() + 30,
+    )
+    assistant_entry_id = _name("entry")
+    tool_call_id = _name("call")
+    repository.commit_assistant_message(
+        guard,
+        cut=cut,
+        entry_id=assistant_entry_id,
+        parent_content=InlineContent.from_bytes(b"artifact_read"),
+        blocks=(
+            AssistantToolCallBlock(
+                block_id=_name("block"),
+                tool_call_id=tool_call_id,
+                tool_name="artifact_read",
+                arguments=freeze_json(
+                    {"artifact_id": _name("artifact"), "mode": "text"}
+                ),
+            ),
+        ),
+        occurred_at=datetime.now(timezone.utc),
+        actor_id="model:test",
+        deadline_monotonic=monotonic() + 30,
+    )
+    attempt_id = _name("attempt")
+    repository.accept_tool_attempt(
+        guard,
+        attempt_id=attempt_id,
+        assistant_entry_id=assistant_entry_id,
+        tool_call_id=tool_call_id,
+        authorization_kind="policy",
+        authorization_reference="allow",
+        actor_kind="runtime",
+        actor_id="executor",
+        remote_idempotency_key=None,
+        retry_of_attempt_id=None,
+        permission_snapshot_fingerprint=_turn_permission_fingerprint(
+            repository,
+            session_id=guard.session_id,
+            turn_id=turn_id,
+        ),
+        occurred_at=datetime.now(timezone.utc),
+        deadline_monotonic=monotonic() + 30,
+    )
+    result_id = _name("result")
+    observed_at = datetime.now(timezone.utc)
+    candidate = build_prepared_tool_result_acceptance(
+        guard=guard,
+        workspace_id=workspace_id,
+        result_id=result_id,
+        result_entry_id=_name("entry"),
+        turn_id=turn_id,
+        assistant_entry_id=assistant_entry_id,
+        tool_call_id=tool_call_id,
+        attempt_id=attempt_id,
+        result_state="SUCCESS",
+        canonical_preview_content=InlineContent.from_bytes(
+            b'{"status":"success","text":"bounded page"}'
+        ),
+        artifact_disposition=ToolOutputArtifactDisposition.NOT_REQUIRED,
+        artifact_id=None,
+        artifact_blob_descriptor=None,
+        source_coverage=ToolOutputSourceCoverage.COMPLETE,
+        display_kind=ToolResultDisplayKind.COMPLETE,
+        source_coverage_reason=None,
+        artifact_unavailability_reason=None,
+        model_visible_memory_fact_ids=memory_ids,
+        observed_at=observed_at,
+        observation_duration_microseconds=1,
+        observation_origin_kind=ToolObservationOrigin.BUILTIN,
+        trusted_tool_reported_duration_microseconds=None,
+        actor_id="runtime:test",
+    )
+    repository.accept_tool_result(
+        guard,
+        candidate=candidate,
+        deadline_monotonic=monotonic() + 30,
+    )
+    final_cut = repository.prepare_provider_input_cut(
+        guard,
+        turn_id=turn_id,
+        deadline_monotonic=monotonic() + 30,
+    )
+    repository.commit_assistant_message(
+        guard,
+        cut=final_cut,
+        entry_id=_name("entry"),
+        parent_content=InlineContent.from_bytes(b"page observed"),
+        blocks=(
+            AssistantTextBlock(
+                block_id=_name("block"),
+                text=InlineContent.from_bytes(b"page observed"),
+            ),
+        ),
+        complete_turn=True,
+        occurred_at=datetime.now(timezone.utc),
+        actor_id="model:test",
+        deadline_monotonic=monotonic() + 30,
+    )
+    return result_id
 
 
 class _ScriptedModel(ScriptedKernelModel):
@@ -279,6 +432,14 @@ class _OnlyOneSteerCompiler(StructuredModelInputCompiler):
         except StructuredModelInputCompileError as exc:
             self.failures.append((steer_count, exc.kind))
             raise
+
+
+class _FullRequiredBudgetCompiler(StructuredModelInputCompiler):
+    def compile_append(self, request, **kwargs):
+        del request, kwargs
+        raise StructuredModelInputCompileError(
+            ModelInputCompileFailureKind.FULL_REQUIRED_TOOL_RESULT_EXCEEDS_INPUT_BUDGET
+        )
 
 
 class _AssertingTool:
@@ -1457,6 +1618,111 @@ def test_round3_compile_failure_interrupts_after_user_acceptance_with_zero_open(
     assert status == "INTERRUPTED"
 
 
+def test_round7_1_full_required_budget_boundary_has_zero_provider_open(
+    stage2_migrated_postgres_database,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id = _name("session")
+    lease = repository.acquire_host_writer(
+        session_id=session_id,
+        workspace_id=_name("workspace"),
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    model = _ScriptedModel([_text_stream("must not open")])
+    runner = ConversationKernelRunner(
+        repository=repository,
+        writer_lease=lease,
+        model=model,
+        tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
+        live_bus=LiveAgentEventBus(),
+        context_source_collector=StaticContextSourceCollector(),
+        compiler=_FullRequiredBudgetCompiler(),
+    )
+
+    with pytest.raises(StructuredModelInputCompileError) as failure:
+        asyncio.run(runner.run_turn("accepted before required FULL delivery"))
+
+    assert failure.value.kind is (
+        ModelInputCompileFailureKind.FULL_REQUIRED_TOOL_RESULT_EXCEEDS_INPUT_BUDGET
+    )
+    assert model.preparation_requests
+    assert model.requests == []
+    with provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        deadline_monotonic=monotonic() + 30,
+    ) as connection:
+        assert connection.execute(
+            "SELECT status, terminal_reason FROM pulsara_v3.turns "
+            "WHERE session_id = %s",
+            (session_id,),
+        ).fetchone() == ("INTERRUPTED", "PROVIDER_INPUT_RESOURCE_EXHAUSTED")
+
+
+def test_round7_1_real_artifact_result_with_fifty_memory_ids_fails_typed_before_open(
+    stage2_migrated_postgres_database,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id = _name("session")
+    workspace_id = _name("workspace")
+    lease = repository.acquire_host_writer(
+        session_id=session_id,
+        workspace_id=workspace_id,
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    memory_ids = tuple(f"memory:{index:064x}" for index in range(50))
+    result_id = _seed_artifact_result_with_memory_provenance(
+        repository,
+        lease=lease,
+        workspace_id=workspace_id,
+        memory_ids=memory_ids,
+    )
+    model = _ScriptedModel([_text_stream("must not open")])
+    runner = ConversationKernelRunner(
+        repository=repository,
+        writer_lease=lease,
+        model=model,
+        tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
+        live_bus=LiveAgentEventBus(),
+        context_source_collector=StaticContextSourceCollector(),
+        maximum_input_tokens_per_call=100,
+    )
+    command_id = _name("command")
+
+    with pytest.raises(StructuredModelInputCompileError) as failure:
+        asyncio.run(
+            runner.run_turn(
+                "new turn cannot fit the required full artifact page",
+                command_id=command_id,
+            )
+        )
+
+    assert failure.value.kind is (
+        ModelInputCompileFailureKind.FULL_REQUIRED_TOOL_RESULT_EXCEEDS_INPUT_BUDGET
+    )
+    assert model.preparation_requests
+    assert model.requests == []
+    with provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        deadline_monotonic=monotonic() + 30,
+    ) as connection:
+        assert connection.execute(
+            "SELECT result_state, cardinality(model_visible_memory_fact_ids) "
+            "FROM pulsara_v3.tool_results WHERE session_id = %s AND id = %s",
+            (session_id, result_id),
+        ).fetchone() == ("SUCCESS", 50)
+        assert connection.execute(
+            "SELECT status, terminal_reason FROM pulsara_v3.turns "
+            "WHERE session_id = %s AND id = %s",
+            (session_id, _stable_id("turn", session_id, command_id)),
+        ).fetchone() == ("INTERRUPTED", "PROVIDER_INPUT_RESOURCE_EXHAUSTED")
+
+
 def test_round3_compile_failure_observer_cannot_block_turn_interruption(
     stage2_migrated_postgres_database,
 ) -> None:
@@ -2633,7 +2899,7 @@ def test_round1_provider_rematerialization_uses_preview_and_scoped_artifact(
     preview = tool_messages[0].content[0]
     assert len(preview.encode("utf-8")) <= 65_536
     assert "OUTPUT TRUNCATED / PREVIEW" in preview
-    assert "Use artifact_read" in preview
+    assert "If the omitted content is necessary" in preview
     with provider.connection(
         lane=PostgresConnectionLane.INSPECTOR,
         deadline_monotonic=monotonic() + 10,

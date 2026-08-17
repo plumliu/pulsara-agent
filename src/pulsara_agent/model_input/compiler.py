@@ -65,10 +65,14 @@ from pulsara_agent.primitives.context import canonical_json_bytes, context_finge
 from pulsara_agent.primitives.plan_workflow import (
     PlanApprovedMaterializationDisposition,
 )
+from pulsara_agent.primitives.tool_result_projection import (
+    ToolResultDeliveryRequirement,
+    provider_neutral_message_logical_utf8_bytes as _message_logical_utf8_bytes,
+)
 
 
 COMPILER_CONTRACT_VERSION = (
-    "pulsara.structured-model-input-compiler.prefix-continuity.v5"
+    "pulsara.structured-model-input-compiler.prefix-continuity.v6-tool-result-full"
 )
 
 
@@ -320,7 +324,17 @@ class _ToolState:
     def mode(self) -> ToolResultProviderRenderMode:
         return self.lowered.tool_result_variants[self.selected].mode
 
+    def first_mode(self) -> ToolResultProviderRenderMode:
+        return self.lowered.tool_result_variants[0].mode
+
+    def requires_full(self) -> bool:
+        return self.item.tool_result_delivery.requirement is (
+            ToolResultDeliveryRequirement.FULL_REQUIRED
+        )
+
     def advance(self) -> bool:
+        if self.requires_full():
+            return False
         if self.selected + 1 >= len(self.lowered.tool_result_variants):
             return False
         self.selected += 1
@@ -422,6 +436,7 @@ class StructuredModelInputCompiler:
             raise StructuredModelInputCompileError(
                 ModelInputCompileFailureKind.COMPILE_WORKING_SET_EXCEEDED
             )
+        self._validate_tool_delivery_variants(tool_states)
         self._validate_physical_bounds(
             request,
             lowered,
@@ -559,11 +574,14 @@ class StructuredModelInputCompiler:
                 ),
                 current_turn=state.item.source_turn_id
                 == request.canonical_input.identity.turn_id,
+                first_legal_mode=state.first_mode(),
                 selected_mode=state.mode(),
-                estimated_tokens=estimator.estimate_message(state.message()),
-                reason_code=(
-                    "SELECTED_FULL" if state.selected == 0 else "DEGRADED_FOR_BUDGET"
+                delivery_requirement=(
+                    state.item.tool_result_delivery.requirement
                 ),
+                full_delivery_reason=state.item.tool_result_delivery.reason,
+                estimated_tokens=estimator.estimate_message(state.message()),
+                reason_code=self._tool_decision_reason(state),
             )
             for state in tool_states
         )
@@ -618,7 +636,16 @@ class StructuredModelInputCompiler:
                     for d in source_decisions
                 ),
                 "tool_results": tuple(
-                    (d.current_turn, d.selected_mode.value, d.reason_code)
+                    (
+                        d.current_turn,
+                        d.first_legal_mode.value,
+                        d.selected_mode.value,
+                        d.delivery_requirement.value,
+                        None
+                        if d.full_delivery_reason is None
+                        else d.full_delivery_reason.value,
+                        d.reason_code,
+                    )
                     for d in tool_decisions
                 ),
             },
@@ -1139,6 +1166,7 @@ class StructuredModelInputCompiler:
             raise StructuredModelInputCompileError(
                 ModelInputCompileFailureKind.COMPILE_WORKING_SET_EXCEEDED
             )
+        self._validate_tool_delivery_variants(tool_states)
 
         emissions: list[_AppendSourceEmission] = []
         for candidate in request.sources.candidates:
@@ -1330,7 +1358,9 @@ class StructuredModelInputCompiler:
             deadline.check()
             if not heap:
                 failure = (
-                    ModelInputCompileFailureKind.STATEFUL_SOURCE_REPLACEMENT_OVER_BUDGET
+                    ModelInputCompileFailureKind.FULL_REQUIRED_TOOL_RESULT_EXCEEDS_INPUT_BUDGET
+                    if any(state.requires_full() for state in tool_states)
+                    else ModelInputCompileFailureKind.STATEFUL_SOURCE_REPLACEMENT_OVER_BUDGET
                     if any(item.requires_installed_replacement for item in emissions)
                     else ModelInputCompileFailureKind.PREFIX_EPOCH_BUDGET_EXHAUSTED
                 )
@@ -1463,15 +1493,16 @@ class StructuredModelInputCompiler:
             CompiledToolResultDecision(
                 source_entry_fingerprint=_tool_result_source_fingerprint(state.item),
                 current_turn=state.current_turn,
+                first_legal_mode=state.first_mode(),
                 selected_mode=state.mode(),
+                delivery_requirement=(
+                    state.item.tool_result_delivery.requirement
+                ),
+                full_delivery_reason=state.item.tool_result_delivery.reason,
                 estimated_tokens=request.compile_binding.estimator.estimate_message(
                     state.message()
                 ),
-                reason_code=(
-                    "SELECTED_FULL"
-                    if state.selected == 0
-                    else "DEGRADED_FOR_BUDGET"
-                ),
+                reason_code=self._tool_decision_reason(state),
             )
             for state in tool_states
         )
@@ -2087,6 +2118,7 @@ class StructuredModelInputCompiler:
             tool_call_id=original.tool_call_id,
             tool_result_context=original.tool_result_context,
             tool_result_body_text=original.tool_result_body_text,
+            tool_result_delivery=original.tool_result_delivery,
         )
         items = list(request.canonical_input.items)
         items[index] = replacement
@@ -2338,9 +2370,28 @@ class StructuredModelInputCompiler:
 
     @staticmethod
     def _tool_can_advance(state: _ToolState) -> bool:
-        return not state.exhausted and state.selected + 1 < len(
+        return not state.requires_full() and not state.exhausted and state.selected + 1 < len(
             state.lowered.tool_result_variants
         )
+
+    @staticmethod
+    def _validate_tool_delivery_variants(tools: list[_ToolState]) -> None:
+        if any(
+            state.requires_full()
+            and state.first_mode() is not ToolResultProviderRenderMode.FULL
+            for state in tools
+        ):
+            raise StructuredModelInputCompileError(
+                ModelInputCompileFailureKind.FULL_REQUIRED_TOOL_RESULT_NOT_INLINEABLE
+            )
+
+    @staticmethod
+    def _tool_decision_reason(state: _ToolState) -> str:
+        if state.mode() is ToolResultProviderRenderMode.FULL:
+            return "SELECTED_FULL"
+        if state.selected == 0:
+            return "FULL_INELIGIBLE_RESULT_BOUND"
+        return "DEGRADED_FOR_BUDGET"
 
     def _tool_degradation_key(self, state: _ToolState) -> tuple[object, ...]:
         current = state.current_turn
@@ -2376,6 +2427,10 @@ class StructuredModelInputCompiler:
             > request.compile_binding.effective_input_budget_tokens
         ):
             return ModelInputCompileFailureKind.TOOL_SCHEMA_EXCEEDS_BUDGET
+        if any(state.requires_full() for state in tools):
+            return (
+                ModelInputCompileFailureKind.FULL_REQUIRED_TOOL_RESULT_EXCEEDS_INPUT_BUDGET
+            )
         tool_by_identity = {id(state.lowered): state for state in tools}
         protected = tuple(
             item.fixed_message
@@ -2461,18 +2516,6 @@ class StructuredModelInputCompiler:
         if code in diagnostics or len(diagnostics) >= self._limits.maximum_diagnostics:
             return
         diagnostics.append(code)
-
-
-def _message_logical_utf8_bytes(message: LLMMessage) -> int:
-    values = [*message.content, *message.thinking]
-    for call in message.tool_calls:
-        values.extend((call.id, call.name, call.arguments))
-    values.extend(
-        value
-        for value in (message.tool_call_id, message.name, message.arguments)
-        if value is not None
-    )
-    return sum(len(value.encode("utf-8")) for value in values)
 
 
 def _fixed_message_envelope_utf8_bytes(item: LoweredCanonicalItem) -> int:

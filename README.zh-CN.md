@@ -76,8 +76,9 @@ Kernel 当前支持：
   `.venv/bin`、foreground cwd continuity，以及 Host close 时的 physical
   process-group drain；
 - 通过 shared blob store 保留完整 sanitized tool output：中等输出完整
-  展示并附 artifact reference，大输出使用 UTF-8-safe head/tail preview
-  并按需有界读取；
+  provider-neutral logical ToolResult不超过40,000 UTF-8 bytes时可保持FULL
+  （与adapter physical wire bytes相互独立）；更大输出使用UTF-8-safe的8,000字符
+  head/tail preview，并按需有界读取；
 - bounded Host-scoped subagent；
 - bundled/local skills；
 - Host-scoped stdio/Streamable HTTP MCP：bounded discovery、按scope过滤的
@@ -178,6 +179,13 @@ Pulsara-owned provider carrier只保留产品语义与lifecycle，internal contr
 version、fingerprint、generation、schema marker和delimiter式Plan carrier不再进入
 model input。验证记录在
 [`round7_model_visible_failure_and_tool_observation_activation.json`](benchmarks/suites/core/v1/round7_model_visible_failure_and_tool_observation_activation.json)。
+Round 7.1让全部tool origin共用唯一provider-visible projection ladder。40,000-byte
+上限只约束provider-neutral logical ToolResult；Chat/Responses物理request bytes仍由
+exact wire plan拥有。FULL不合法时variant可从COMPACT/REF_ONLY/OMITTED开始；成功的
+`artifact_read` page则必须exact FULL交付，否则在provider open前以typed resource
+boundary停止。Artifact guidance保持conditional，canonical result不因budget被改写，
+same-epoch已安装message仍只允许append suffix。验证证据记录在
+[`round7_1_provider_visible_tool_result_projection_activation.json`](benchmarks/suites/core/v1/round7_1_provider_visible_tool_result_projection_activation.json)。
 Round 8用advisory dataset取代旧memory durability/recovery graph。`remember`会与
 ToolResult同事务接受一个candidate；governance、cheap-hint reflection、
 embedding与reranking均保持可丢失的process-local弱完成。Accepted item只能是

@@ -11,6 +11,7 @@ from pulsara_agent.llm.provider_sanitization import (
     DEFAULT_PROVIDER_ERROR_SANITIZATION_CONTRACT,
     sanitize_provider_failure,
 )
+from pulsara_agent.llm.errors import LLMTransportContractError
 from pulsara_agent.llm.request import LLMContext
 from pulsara_agent.llm.resolution import ResolvedModelCall
 from pulsara_agent.llm.result import TransportUsageReport
@@ -89,7 +90,14 @@ class NormalizedProviderTransportExecution:
                     "transport_protocol_error",
                 )
             except BaseException as exc:
-                return self._terminal_error(exc, None)
+                return self._terminal_error(
+                    exc,
+                    (
+                        exc.reason_code
+                        if isinstance(exc, LLMTransportContractError)
+                        else None
+                    ),
+                )
 
             if isinstance(item, TransportUsageReport):
                 if self._usage is not None:

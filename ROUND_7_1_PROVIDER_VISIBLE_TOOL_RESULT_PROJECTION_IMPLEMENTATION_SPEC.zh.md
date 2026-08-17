@@ -1,18 +1,20 @@
 # Round 7.1：Provider-visible ToolResult Projection 与统一 FULL 边界实施规格
 
-> 状态：**DRAFT — NOT ACTIVATED**
+> 状态：**ACTIVATED — 2026-08-17**
 >
 > 记录日期：2026-08-17
 >
-> 当前代码基线：`ffd0d146f8d7991ff3d1e92dc9ca75e8abf894e8`
+> 实施checkpoint：`572798cf50650d670dfc2bfcb47e3e6e334d80aa`
 >
 > hard-cut 前参考基线：`5b7ad9f7ffc8565bc572180b2bde0c81ab64473a`
 >
 > 上位契约：[Round 1 ToolResult artifact](ROUND_1_TOOL_OUTPUT_ARTIFACT_IMPLEMENTATION_SPEC.zh.md)、[Round 3 structured compiler](ROUND_3_STRUCTURED_MODEL_INPUT_COMPILER_IMPLEMENTATION_SPEC.zh.md)、[Round 3.1 provider-input prefix continuity](ROUND_3_1_PROVIDER_INPUT_PREFIX_CONTINUITY_IMPLEMENTATION_SPEC.zh.md)、[Round 5A execution envelope](ROUND_5_LONG_HORIZON_EXECUTION_ENVELOPE_IMPLEMENTATION_SPEC.zh.md)、[Round 7 model-visible observation](ROUND_7_MODEL_VISIBLE_FAILURE_AND_TOOL_OBSERVATION_IMPLEMENTATION_SPEC.zh.md)、[Gap Index](POST_HARD_CUT_PRODUCT_CAPABILITY_GAP_INDEX.zh.md)
 >
 > 直接下游：[Round 9 unified capability semantics](ROUND_9_UNIFIED_CAPABILITY_SEMANTICS_IMPLEMENTATION_SPEC.zh.md)、[Round 9.1 Agent Skills](ROUND_9_1_AGENT_SKILLS_STANDARD_IMPLEMENTATION_SPEC.zh.md)、[Round 5B compaction](ROUND_5B_LONG_HORIZON_CONTEXT_COMPACTION_IMPLEMENTATION_SPEC.zh.md)
+>
+> 激活证据：[round7_1_provider_visible_tool_result_projection_activation.json](benchmarks/suites/core/v1/round7_1_provider_visible_tool_result_projection_activation.json)
 
-本文只修订**普通、全局、provider-visible ToolResult投影**。它不实施compaction，不改变tool execution authority，也不建立任何ToolResult专用durable recovery machinery。
+本文只修订**普通、全局、provider-visible ToolResult投影**。它不实施compaction，不改变tool execution authority，也不建立任何ToolResult专用durable recovery machinery。R7.1-0～R7.1-F与activation gate均已闭合；实际代码/文档hash、测试、PostgreSQL、real-provider脱敏结果与最终oracle以机器证据为准。
 
 本轮把此前误寄放在Round 5B中的全局阈值与artifact guidance独立出来。完成后，ordinary history、Round 5B retained tail、Builtin、Terminal、MCP、Plan、memory、Skill activation与`artifact_read`全部复用同一个normal ToolResult pipeline；Round 5B不再拥有阈值或新的结果variant。
 
@@ -296,6 +298,7 @@ FULL
 - ordinary/native ToolResult的实际scalar fields只有`content`与`tool_call_id`；
 - late outcome user observation只有实际`content`；
 - `content`内部继续使用Round 7 exact closed envelope：`body`、optional `citation_handle`、model-visible memory IDs、observation timing/origin/freshness与result state；
+- model-visible memory provenance继续服从canonical relation已冻结的`<= 50 items`与canonical JSON aggregate `<= 8 KiB`；该约束由shared renderer/decoder与repository candidate复用同一constant，不能在lowering另加通用2 KiB metadata fence；
 - tool name、display、coverage或任何其他字段只有在现有renderer**确实发出**时才存在并计量；本轮不得为了满足quote文档把它们新增进wire；
 - logical bytes等于上述provider-neutral message中实际存在的string scalar values的UTF-8 bytes之和；role enum、adapter JSON key、HTTP framing不计入这条40K；
 - outer envelope自身的canonical JSON key、quote与framing已经位于`content`字符串内，因此计入；Chat/Responses adapter随后对`content`再次JSON escaping产生的物理膨胀不在此处重复估算。

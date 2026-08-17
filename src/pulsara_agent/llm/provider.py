@@ -23,8 +23,7 @@ class ProviderAssistantReplayCodecKind(StrEnum):
     """Closed process-local codec used for same-epoch assistant replay."""
 
     NONE = "NONE"
-    CHAT_TEXT_REASONING_FIELD = "CHAT_TEXT_REASONING_FIELD"
-    CHAT_OPAQUE_REASONING_FIELDS = "CHAT_OPAQUE_REASONING_FIELDS"
+    CHAT_CLOSED_REASONING_FIELDS = "CHAT_CLOSED_REASONING_FIELDS"
     RESPONSES_EXACT_OUTPUT_ITEMS = "RESPONSES_EXACT_OUTPUT_ITEMS"
 
 
@@ -36,7 +35,6 @@ class ProviderReasoningReplayScope(StrEnum):
 
 class ProviderChatFieldAccumulationMode(StrEnum):
     TEXT_CONCAT = "TEXT_CONCAT"
-    SINGLE_EXACT_VALUE = "SINGLE_EXACT_VALUE"
     ORDERED_ARRAY_APPEND = "ORDERED_ARRAY_APPEND"
 
 
@@ -44,12 +42,34 @@ class ProviderChatFieldAccumulationMode(StrEnum):
 class ProviderChatReplayFieldContract:
     field_name: str
     accumulation_mode: ProviderChatFieldAccumulationMode
-    required_on_selected_response: bool = True
+    required_on_selected_response: bool = False
     final_value_required: bool = False
 
     def __post_init__(self) -> None:
         if not self.field_name or self.field_name != self.field_name.strip():
             raise ValueError("chat replay field name is invalid")
+
+
+# This registry describes wire shapes, not providers.  An OpenAI-compatible
+# Chat endpoint may emit any subset and Pulsara replays only the fields that
+# were actually observed in one completed response.  Native non-OpenAI wire
+# protocols are deliberately outside this contract.
+CHAT_CLOSED_REASONING_FIELD_CONTRACTS = (
+    ProviderChatReplayFieldContract(
+        "reasoning_content", ProviderChatFieldAccumulationMode.TEXT_CONCAT
+    ),
+    ProviderChatReplayFieldContract(
+        "reasoning", ProviderChatFieldAccumulationMode.TEXT_CONCAT
+    ),
+    ProviderChatReplayFieldContract(
+        "reasoning_details",
+        ProviderChatFieldAccumulationMode.ORDERED_ARRAY_APPEND,
+    ),
+)
+_CHAT_TEXT_REASONING_FIELD_NAMES = frozenset({"reasoning_content", "reasoning"})
+_CHAT_CLOSED_REASONING_FIELD_BY_NAME = MappingProxyType(
+    {item.field_name: item for item in CHAT_CLOSED_REASONING_FIELD_CONTRACTS}
+)
 
 
 class ModelIdentityPolicy(StrEnum):
@@ -64,9 +84,20 @@ class ThinkingProfile:
     """Provider-neutral description of thinking/reasoning wire fields."""
 
     enabled: bool = False
-    delta_fields: tuple[str, ...] = ("reasoning_content",)
+    delta_fields: tuple[str, ...] = ("reasoning_content", "reasoning")
     message_field: str | None = "reasoning_content"
     replay_policy: ThinkingReplayPolicy = ThinkingReplayPolicy.NEVER
+
+    def __post_init__(self) -> None:
+        if len(self.delta_fields) != len(set(self.delta_fields)) or any(
+            field_name not in _CHAT_TEXT_REASONING_FIELD_NAMES
+            for field_name in self.delta_fields
+        ):
+            raise ValueError("live Chat thinking fields are outside the closed registry")
+        if self.message_field is not None and (
+            self.message_field not in _CHAT_TEXT_REASONING_FIELD_NAMES
+        ):
+            raise ValueError("legacy Chat thinking message field must be textual")
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,6 +126,20 @@ class ProviderProfile:
             "request_extra_body",
             _freeze_provider_value(self.request_extra_body),
         )
+        configured_names = tuple(
+            item.field_name for item in self.configured_chat_replay_fields
+        )
+        if len(configured_names) != len(set(configured_names)):
+            raise ValueError("chat replay field overrides are duplicated")
+        if self.configured_chat_replay_fields and self.wire_api != (
+            "openai_chat_completions"
+        ):
+            raise ValueError("chat replay field overrides require Chat Completions")
+        for item in self.configured_chat_replay_fields:
+            frozen = _CHAT_CLOSED_REASONING_FIELD_BY_NAME.get(item.field_name)
+            if frozen is None or frozen.accumulation_mode is not item.accumulation_mode:
+                raise ValueError("chat replay field override is outside the closed registry")
+
         fields = self.chat_replay_fields
         names = tuple(item.field_name for item in fields)
         if len(names) != len(set(names)):
@@ -105,18 +150,11 @@ class ProviderProfile:
             scope is ProviderReasoningReplayScope.NEVER
         ):
             raise ValueError("provider replay codec/scope union is invalid")
-        if codec is ProviderAssistantReplayCodecKind.CHAT_TEXT_REASONING_FIELD:
-            if len(fields) != 1 or fields[0].accumulation_mode is not (
-                ProviderChatFieldAccumulationMode.TEXT_CONCAT
-            ) or fields[0].field_name != self.thinking.message_field:
-                raise ValueError("chat text replay requires one concat field")
-        if codec is ProviderAssistantReplayCodecKind.CHAT_OPAQUE_REASONING_FIELDS:
-            if not fields or any(
-                item.accumulation_mode
-                is ProviderChatFieldAccumulationMode.TEXT_CONCAT
-                for item in fields
+        if codec is ProviderAssistantReplayCodecKind.CHAT_CLOSED_REASONING_FIELDS:
+            if self.wire_api != "openai_chat_completions" or names != tuple(
+                item.field_name for item in CHAT_CLOSED_REASONING_FIELD_CONTRACTS
             ):
-                raise ValueError("opaque chat replay fields are invalid")
+                raise ValueError("closed Chat replay registry is invalid")
 
     @property
     def reasoning_replay_scope(self) -> ProviderReasoningReplayScope:
@@ -138,12 +176,7 @@ class ProviderProfile:
             return ProviderAssistantReplayCodecKind.RESPONSES_EXACT_OUTPUT_ITEMS
         if self.reasoning_replay_scope is ProviderReasoningReplayScope.NEVER:
             return ProviderAssistantReplayCodecKind.NONE
-        field_name = self.thinking.message_field
-        if not field_name:
-            raise ValueError("chat replay scope requires a message field")
-        if field_name == "reasoning_content":
-            return ProviderAssistantReplayCodecKind.CHAT_TEXT_REASONING_FIELD
-        return ProviderAssistantReplayCodecKind.CHAT_OPAQUE_REASONING_FIELDS
+        return ProviderAssistantReplayCodecKind.CHAT_CLOSED_REASONING_FIELDS
 
     @property
     def chat_replay_fields(self) -> tuple[ProviderChatReplayFieldContract, ...]:
@@ -151,22 +184,18 @@ class ProviderProfile:
             return ()
         if self.thinking.replay_policy is ThinkingReplayPolicy.NEVER:
             return ()
-        if self.configured_chat_replay_fields:
-            return self.configured_chat_replay_fields
-        field_name = self.thinking.message_field
-        if not field_name:
-            raise ValueError("chat replay scope requires a message field")
-        mode = (
-            ProviderChatFieldAccumulationMode.TEXT_CONCAT
-            if field_name == "reasoning_content"
-            else ProviderChatFieldAccumulationMode.ORDERED_ARRAY_APPEND
+        overrides = {
+            item.field_name: item for item in self.configured_chat_replay_fields
+        }
+        return tuple(
+            overrides.get(item.field_name, item)
+            for item in CHAT_CLOSED_REASONING_FIELD_CONTRACTS
         )
-        return (ProviderChatReplayFieldContract(field_name, mode),)
 
     @property
     def assistant_replay_contract_fingerprint(self) -> str:
         return context_fingerprint(
-            "pulsara.provider-assistant-replay-profile:v2",
+            "pulsara.provider-assistant-replay-profile:v3",
             {
                 "profile": self.id,
                 "wire_api": self.wire_api,

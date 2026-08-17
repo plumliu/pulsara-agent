@@ -26,10 +26,13 @@ _SECRET_RE = re.compile(
 def _contract() -> ProviderErrorSanitizationContractFact:
     payload = {
         "contract_id": "pulsara.provider-error-sanitizer",
-        "contract_version": "v1",
+        "contract_version": "v2",
         "stable_code_mapping_fingerprint": sha256_fingerprint(
-            "provider-error-code-map:v1",
-            tuple(item.value for item in ProviderModelStreamErrorCode),
+            "provider-error-code-map:v2",
+            {
+                "codes": tuple(item.value for item in ProviderModelStreamErrorCode),
+                "transport_contract_hint": "transport_* -> transport_protocol_error",
+            },
         ),
         "sensitive_key_policy_fingerprint": sha256_fingerprint(
             "provider-error-sensitive-keys:v1",
@@ -116,6 +119,8 @@ def sanitize_provider_failure(
             stable_code = (
                 ProviderModelStreamErrorCode.TRANSPORT_SOURCE_PAYLOAD_LIMIT_EXCEEDED
             )
+        elif hint.startswith("transport_"):
+            stable_code = ProviderModelStreamErrorCode.TRANSPORT_PROTOCOL_ERROR
         elif "auth" in hint or "401" in hint:
             stable_code = ProviderModelStreamErrorCode.AUTHENTICATION_FAILED
         elif "permission" in hint or "403" in hint:

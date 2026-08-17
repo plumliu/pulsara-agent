@@ -1445,6 +1445,7 @@ class ConversationKernelRunner:
                             ModelInputCompileFailureKind.REQUIRED_CONTEXT_EXCEEDS_BUDGET,
                             ModelInputCompileFailureKind.PREFIX_EPOCH_BUDGET_EXHAUSTED,
                             ModelInputCompileFailureKind.STATEFUL_SOURCE_REPLACEMENT_OVER_BUDGET,
+                            ModelInputCompileFailureKind.FULL_REQUIRED_TOOL_RESULT_EXCEEDS_INPUT_BUDGET,
                         }:
                             raise
                         continue
@@ -2228,6 +2229,7 @@ class ConversationKernelRunner:
             ModelInputCompileFailureKind.REQUIRED_CONTEXT_EXCEEDS_BUDGET,
             ModelInputCompileFailureKind.PREFIX_EPOCH_BUDGET_EXHAUSTED,
             ModelInputCompileFailureKind.STATEFUL_SOURCE_REPLACEMENT_OVER_BUDGET,
+            ModelInputCompileFailureKind.FULL_REQUIRED_TOOL_RESULT_EXCEEDS_INPUT_BUDGET,
         }
 
         def request_for(
@@ -3357,6 +3359,8 @@ class ConversationKernelRunner:
                 raise
             reason = _provider_incomplete_terminal_reason(error)
             if reason is None:
+                reason = _model_input_terminal_reason(error)
+            if reason is None:
                 reason = (
                     _root_cancellation_terminal_reason(intent)
                     if isinstance(error, asyncio.CancelledError) and cause is not None
@@ -4276,6 +4280,17 @@ def _provider_incomplete_terminal_reason(error: BaseException) -> str | None:
             "MODEL_OUTPUT_INCOMPLETE"
         ),
     }[error.reason]
+
+
+def _model_input_terminal_reason(error: BaseException) -> str | None:
+    if not isinstance(error, StructuredModelInputCompileError):
+        return None
+    if error.kind in {
+        ModelInputCompileFailureKind.FULL_REQUIRED_TOOL_RESULT_NOT_INLINEABLE,
+        ModelInputCompileFailureKind.FULL_REQUIRED_TOOL_RESULT_EXCEEDS_INPUT_BUDGET,
+    }:
+        return "PROVIDER_INPUT_RESOURCE_EXHAUSTED"
+    return None
 
 
 def _stable_id(prefix: str, *parts: str) -> str:

@@ -14,10 +14,20 @@ from pulsara_agent.conversation_kernel.tool_artifacts import (
 from pulsara_agent.message import ToolResultState
 from pulsara_agent.ports.artifact import ArtifactContentError, ToolArtifactReadPort
 from pulsara_agent.ports.tool_execution import ToolCall, ToolExecutionResult
+from pulsara_agent.primitives.tool_observation import (
+    MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES,
+)
+from pulsara_agent.primitives.tool_result_projection import (
+    conservative_artifact_page_logical_utf8_bytes,
+)
 
 
 DEFAULT_ARTIFACT_READ_CHARS = ARTIFACT_READ_DEFAULT_CHARS
 MAX_ARTIFACT_READ_CHARS = ARTIFACT_READ_HARD_CHARS
+
+
+class _ArtifactPageLogicalBoundError(ValueError):
+    pass
 
 
 @dataclass(slots=True)
@@ -45,7 +55,10 @@ class ArtifactReadTool:
                     offset_chars=offset_chars,
                     max_chars=max_chars,
                 )
-                payload = _bounded_text_payload(text_slice)
+                payload = _bounded_text_payload(
+                    text_slice,
+                    tool_call_id=call.id,
+                )
                 record = text_slice.info.record
         except KeyError:
             return self._json_result(
@@ -62,6 +75,17 @@ class ArtifactReadTool:
                     "artifact_id": artifact_id,
                     "error_code": str(exc),
                     "error": "artifact content is unavailable or corrupt",
+                },
+            )
+        except _ArtifactPageLogicalBoundError:
+            return self._json_result(
+                call,
+                status=ToolResultState.ERROR,
+                payload={
+                    "status": "resource_boundary",
+                    "artifact_id": artifact_id,
+                    "error_code": "ARTIFACT_PAGE_NOT_INLINEABLE",
+                    "error": "artifact page metadata exceeds its logical FULL bound",
                 },
             )
         except ValueError as exc:
@@ -162,7 +186,11 @@ def _base_payload(record: object) -> dict[str, Any]:
     }
 
 
-def _bounded_text_payload(text_slice: object) -> dict[str, Any]:
+def _bounded_text_payload(
+    text_slice: object,
+    *,
+    tool_call_id: str,
+) -> dict[str, Any]:
     record = text_slice.info.record
     base = _base_payload(record)
     text = text_slice.text
@@ -184,32 +212,45 @@ def _bounded_text_payload(text_slice: object) -> dict[str, Any]:
         )
         return payload
 
+    def logical_bytes(payload: dict[str, Any]) -> int:
+        body = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return conservative_artifact_page_logical_utf8_bytes(
+            tool_call_id=tool_call_id,
+            body=body,
+            model_visible_memory_ids=record.model_visible_memory_fact_ids,
+        )
+
+    winner = build("")
+    if (
+        logical_bytes(winner)
+        > MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES
+    ):
+        raise _ArtifactPageLogicalBoundError
     candidate = build(text)
-    if _payload_size(candidate) <= CANONICAL_TOOL_RESULT_PREVIEW_HARD_BYTES:
+    if (
+        logical_bytes(candidate)
+        <= MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES
+    ):
         return candidate
     low = 0
     high = len(text)
-    winner = build("")
     while low <= high:
         length = (low + high) // 2
         current = build(text[:length])
-        if _payload_size(current) <= CANONICAL_TOOL_RESULT_PREVIEW_HARD_BYTES:
+        if (
+            logical_bytes(current)
+            <= MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES
+        ):
             winner = current
             low = length + 1
         else:
             high = length - 1
     return winner
-
-
-def _payload_size(payload: dict[str, Any]) -> int:
-    return len(
-        json.dumps(
-            payload,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    )
 
 
 def _not_found_payload(artifact_id: str) -> dict[str, Any]:

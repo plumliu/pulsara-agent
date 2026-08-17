@@ -68,11 +68,11 @@ Round 5A.1冻结：
 11. provider usage/cost observation可以在INCOMPLETE或PROVIDER_ERROR terminal上best-effort记录，但usage不能把语义失败提升为成功。
 12. 本轮不调整默认8,192 output tokens，也不复制Codex“普通请求省略max_output_tokens”的第一方假设。Pulsara继续显式发送output cap，以便compiler为输出保留headroom；数值政策以后独立调整。
 13. **只有COMPLETED response才能产生reasoning continuation。**INCOMPLETE、PROVIDER_ERROR、cancelled或physical BLOCKED response中的thinking仍是disposable live output，绝不进入下一次provider input。
-14. reasoning continuation是provider-profile-bound、process-local、same-epoch的opaque carrier。Chat文本字段、Chat结构化字段与Responses ordered output items分别原样保留，不互相转换，不写入canonical assistant rows。
+14. reasoning continuation是wire-contract-bound、process-local、same-epoch的opaque carrier。Chat使用provider-neutral closed registry：`reasoning_content: TEXT_CONCAT`、`reasoning: TEXT_CONCAT`、`reasoning_details: ORDERED_ARRAY_APPEND`；Responses继续使用typed ordered output items。两者分别原样保留，不互相转换，不写入canonical assistant rows。
 15. reasoning carrier只有在对应assistant entry canonical FULL/compatible confirmation以后才可安装；transient NONE只允许exact retry/confirmation，最终abandon或CONFLICT必须丢弃。安装以后，它成为该epoch provider wire prefix的一部分，后续调用只能原样保留并追加suffix，不能因新USER、tool loop或policy重算而删除/改写。
 16. 手工重放完整provider history是mandatory conformance path。`previous_response_id`、provider session ID与server-side state不进入canonical truth，不承担crash recovery或correctness；adapter以后可把它们作为可丢失优化单独讨论，但本文不实现。
 17. normal ToolResult继续使用真实`role=tool`。禁止为了保住reasoning把tool observation伪装成USER，也禁止把`<think>...</think>`塞进普通assistant content冒充provider reasoning。
-18. capability由resolved provider profile与replay codec决定，不用vendor name写分支。不能证明exact replay的profile必须显式`NONE`并保守失去该优化，不能猜字段或吞掉opaque item。
+18. capability由resolved wire API与replay codec决定，不用vendor name写分支。Chat只接受上述三个known carrier；未知empty/null字段是no-op，未知non-empty字段若伴随完整普通final text则不回传，若伴随tool continuation或成为唯一输出则在assistant acceptance与tool dispatch前typed fail closed。Responses仍按closed typed item allowlist验证。
 19. reasoning payload计入provider-wire quote、epoch logical bytes与compaction trigger/quote；不允许silent truncation。它复用现有completed-response assembly、compiled working-set与64 MiB epoch hard bound，不新建独立大缓存上限。
 20. Round 5B summary使用旧epoch的exact SYSTEM/tools/messages及已安装reasoning carrier；summary正文不得复制或显露hidden reasoning。adoption/cold rebase以后丢弃全部reasoning carrier与remote response ID，新epoch只从canonical summary、retained groups和Runtime重建状态开始。
 21. continuity CAS唯一安装`FrozenProviderWireInputPlan`证明的semantic view与actual wire proof；candidate注册、preflight与physical open不得各自重新materialize input。
@@ -378,7 +378,7 @@ notebook中部分早期示例把`<think>`内联进content以观察模板差异�
 | DeepSeek Responses | reasoning item无可复用opaque body | full history语法可接受，但不能从返回item恢复hidden marker | id-only tool continuation失败 | 不因endpoint叫Responses就假设reasoning可续接；当前优先Chat |
 | DashScope Chat | text `reasoning_content` | 带回可恢复；剥离后UNKNOWN | n/a | Chat显式replay是portable path |
 | DashScope Responses | returned reasoning item近似空壳 | manual history可调用 | id-only continuation能保留仅初始prompt出现的marker | server state真实存在，但不作为Pulsara correctness |
-| OpenRouter Chat | structured opaque `reasoning_details` | current Pulsara无法表达，现会丢失 | n/a | 必须增加opaque chat-fields codec，不能压成字符串 |
+| OpenRouter Chat | structured opaque `reasoning_details` | closed registry按ordered array原样累积并手工重放 | n/a | 使用与provider名称无关的`reasoning_details: ORDERED_ARRAY_APPEND`，不能压成字符串 |
 | OpenRouter Responses (`store=false`) | opaque reasoning item含`encrypted_content` | full-history replay成功 | non-null ID被拒绝 | Responses exact item replay最合适 |
 | bobdong GPT-5.4 Responses | reasoning item含`encrypted_content` | manual full-history replay成功 | HTTP ID被告知仅特定WebSocket版本支持 | 视为stateless/manual replay profile；proxy行为不是规范真源 |
 
@@ -647,8 +647,7 @@ PreparedKernelModelExecution.take_completed_result_once()
 ```python
 class ProviderAssistantReplayCodecKind(StrEnum):
     NONE = "NONE"
-    CHAT_TEXT_REASONING_FIELD = "CHAT_TEXT_REASONING_FIELD"
-    CHAT_OPAQUE_REASONING_FIELDS = "CHAT_OPAQUE_REASONING_FIELDS"
+    CHAT_CLOSED_REASONING_FIELDS = "CHAT_CLOSED_REASONING_FIELDS"
     RESPONSES_EXACT_OUTPUT_ITEMS = "RESPONSES_EXACT_OUTPUT_ITEMS"
 
 
@@ -660,7 +659,6 @@ class ProviderReasoningReplayScope(StrEnum):
 
 class ProviderChatReplayFieldAccumulationKind(StrEnum):
     TEXT_CONCAT = "TEXT_CONCAT"
-    SINGLE_EXACT_VALUE = "SINGLE_EXACT_VALUE"
     ORDERED_ARRAY_APPEND = "ORDERED_ARRAY_APPEND"
 
 
@@ -672,7 +670,15 @@ class ProviderChatReplayFieldContract:
     final_value_required: bool
 ```
 
-profile还必须冻结：
+Chat registry固定为：
+
+```text
+reasoning_content  -> TEXT_CONCAT
+reasoning          -> TEXT_CONCAT
+reasoning_details  -> ORDERED_ARRAY_APPEND
+```
+
+registry描述wire shape而非供应商。adapter在open前已经冻结这三个field的shape，只把本次完整响应实际出现的subset放进replay fragment。profile还必须冻结：
 
 - allowed Chat delta/final fields；
 - allowed replay message field(s)及exact JSON shape；
@@ -681,21 +687,22 @@ profile还必须冻结：
 - codec contract fingerprint；
 - replay scope。
 
-Chat profile还必须冻结ordered、unique field contracts，不能只列allowed field names。三种accumulation的exact语义为：
+Chat contract还必须冻结ordered、unique field contracts，不能只列allowed field names。两种accumulation的exact语义为：
 
 | mode | 每个stream value | 累积规则 | duplicate/conflict |
 |---|---|---|---|
 | TEXT_CONCAT | string | 按wire顺序直接拼接，不插separator | 非string fail |
-| SINGLE_EXACT_VALUE | 任意一个bounded frozen JSON value | 第一项成为唯一值 | exact duplicate no-op；不同第二值fail |
 | ORDERED_ARRAY_APPEND | JSON array | 按chunk顺序展开并append elements | 非array fail；不去重/排序 |
 
 若stream从未提供某field，而complete/final message首次提供它，则final value按该field的accumulation kind初始化唯一accumulator；若stream已经提供过该field，final deep-frozen value必须与累计结果exact equal。`final_value_required=true`时最终缺失fail closed。本文不支持“不断发送越来越大的完整snapshot并以后值覆盖前值”；需要该wire的provider必须以后新增独立、版本化mode，不能把它误解释成array delta。
 
-closed validation：`codec=NONE` iff `scope=NEVER`；其他codec只允许`TOOL_RESPONSES | ALL_COMPLETED_RESPONSES`。COMPLETED response被scope选中时adapter terminal必须携带payload；未被选中时必须为null，禁止“有时有、有时没有”的best-effort分支。
+closed validation：`codec=NONE` iff `scope=NEVER`；其他codec只允许`TOOL_RESPONSES | ALL_COMPLETED_RESPONSES`。Responses COMPLETED必须携带完整typed output payload；Chat只有在scope选中且本次response实际出现至少一个known carrier时才携带payload。没有reasoning carrier的标准Chat tool response仍可完成，不伪造空replay fragment。
 
-`CHAT_TEXT_REASONING_FIELD`只接受一个`TEXT_CONCAT` string field，例如`reasoning_content`。`CHAT_OPAQUE_REASONING_FIELDS`按profile为每个字段选择`SINGLE_EXACT_VALUE`或`ORDERED_ARRAY_APPEND`，例如OpenRouter的`reasoning_details` list，不允许先拼成字符串。`RESPONSES_EXACT_OUTPUT_ITEMS`保留complete response中通过§8.4 closed allowlist与shape validator的全部ordered output items，不只挑reasoning item。
+`CHAT_CLOSED_REASONING_FIELDS`同时接受两个string concat carrier与一个ordered-array carrier，不允许互相转换或把array压成字符串。`RESPONSES_EXACT_OUTPUT_ITEMS`保留complete response中通过§8.4 closed allowlist与shape validator的全部ordered output items，不只挑reasoning item。
 
-profile resolution是closed validation，不允许adapter看到未知field以后临时猜codec。无法验证的shape得到typed provider contract failure；profile为NONE则不声称reasoning continuity。
+adapter不允许看到未知field以后临时猜codec或accumulation。未知field为null/empty时忽略；未知non-empty field只在已有完整supported final text且没有tool continuation时可被丢弃，绝不回传；涉及tool continuation或没有supported public output时得到typed provider contract failure。
+
+三个known Chat carrier在adapter内部必须从首个非null delta起执行增量physical fence，不能等terminal后才依赖normalized transport检查。冻结上界为：reasoning carrier canonical aggregate复用完整provider response的16 MiB physical bound，不建立可独立漂移的第二个byte policy；累计text fragment/ordered-array element（空array delta按一个fragment计）不超过65,536项。item bound为异常碎片流与低byte高对象数的process-local circuit breaker，必须为当前16,384 output-token hard bound保留至少四倍headroom，不能成为正常模型输出的产品上限。`TEXT_CONCAT`保存bounded chunk list，只在final reconcile/freeze时join；`ORDERED_ARRAY_APPEND`在每次freeze/append前先quote新增array；任一上界越界立即产生typed source item/payload-limit failure且不可retry。unknown non-empty field只保留一个bounded boolean，不累计field name或value。
 
 ### 5.5 Exact replay fragment
 
@@ -730,8 +737,7 @@ closed shape：
 
 | codec | ordered_wire_items |
 |---|---|
-| CHAT_TEXT_REASONING_FIELD | exactly one complete assistant message object |
-| CHAT_OPAQUE_REASONING_FIELDS | exactly one complete assistant message object |
+| CHAT_CLOSED_REASONING_FIELDS | exactly one complete assistant message object containing only the observed closed-registry subset |
 | RESPONSES_EXACT_OUTPUT_ITEMS | one or more exact response output item objects in wire order |
 
 `ordered_wire_items`必须使用现有frozen JSON vocabulary深冻结；禁止mutable dict/list。`logical_utf8_bytes`按canonical JSON codec计量，但canonical JSON只用于local bound/fingerprint，不替换实际item字段与顺序。fingerprint使用domain-separated process-local算法，覆盖全部字段与ordered item bytes；不得写入数据库或普通diagnostic。
@@ -1072,7 +1078,7 @@ Chat COMPLETED response的fragment必须是一条完整assistant message，而�
 }
 ```
 
-或profile验证后的opaque shape：
+或同一个closed registry验证后的structured shape：
 
 ```json
 {
@@ -1085,7 +1091,7 @@ Chat COMPLETED response的fragment必须是一条完整assistant message，而�
 
 示例中的值只表示shape；真实opaque body不得出现在文档、日志或fixture snapshot。字段absence与present-empty必须按profile closed contract区分，不能用Python truthiness静默合并。
 
-`TOOL_RESPONSES`要求只有含tool call的completed assistant response安装fragment；`ALL_COMPLETED_RESPONSES`则每个含合法reasoning carrier的completed response都安装。profile resolution以后该选择在epoch内不可变。对于需要stable all-turn template的profile，request defaults必须从epoch**第一次请求**起就固定`preserve_thinking=true`或等价参数；不能等第一段reasoning出现后才加，也不能根据当前最后一条USER动态开关。
+`TOOL_RESPONSES`要求只有含tool call且实际出现known reasoning carrier的completed assistant response安装fragment；`ALL_COMPLETED_RESPONSES`则为每个实际含known carrier的completed response安装。标准Chat response若没有carrier则不安装空fragment。scope resolution以后该选择在epoch内不可变。对于需要stable all-turn template的配置，request defaults必须从epoch**第一次请求**起就固定`preserve_thinking=true`或等价参数；不能等第一段reasoning出现后才加，也不能根据当前最后一条USER动态开关。
 
 ToolResult继续生成：
 
@@ -1563,10 +1569,13 @@ reasoning replay不能成为绕过这些bounds的第二条内存通道：
 | semantic complete, physical BLOCKED | physical failure overrides | 0 | 0 | no acceptance |
 | auxiliary partial valid JSON + incomplete | OUTPUT_INCOMPLETE | n/a | n/a | no parse/no result |
 | compaction summary incomplete | OUTPUT_INCOMPLETE | n/a | n/a | no adoption, old epoch remains |
-| Chat completed tool response + required reasoning | COMPLETED | 1 | normal | FULL后绑定完整assistant replay message |
-| Chat completed但required reasoning field缺失/malformed | PROVIDER_ERROR/CONTRACT | 0 | 0 | 不接受后静默降级 |
-| Chat opaque reasoning shape unknown | PROVIDER_ERROR/CONTRACT | 0 | 0 | 不转成字符串 |
-| Chat field accumulation duplicate/conflict | PROVIDER_ERROR/CONTRACT | 0 | 0 | 按profile exact mode fail closed |
+| Chat completed tool response + known reasoning carrier | COMPLETED | 1 | normal | FULL后绑定只含实际observed fields的完整assistant replay message |
+| Chat completed tool response无reasoning carrier | COMPLETED | 1 | normal | 不伪造空fragment；标准Chat工具循环继续 |
+| Chat known carrier malformed | PROVIDER_ERROR/CONTRACT | 0 | 0 | 不猜shape、不转成字符串 |
+| Chat unknown non-empty carrier + ordinary final text | COMPLETED | 1 | 0 | 接受public text，unknown不进入replay |
+| Chat unknown non-empty carrier + tool/only-output | PROVIDER_ERROR/CONTRACT | 0 | 0 | acceptance/dispatch前fail closed |
+| Chat field accumulation conflict | PROVIDER_ERROR/CONTRACT | 0 | 0 | 按closed field mode fail closed |
+| Chat known carrier在terminal前超过item/16 MiB aggregate bound | PROVIDER_ERROR/PAYLOAD_LIMIT | 0 | 0 | adapter立即清空bounded accumulator；不等待terminal、不retry |
 | Responses completed + canonical-representable exact ordered output | COMPLETED | 1 | normal | FULL后绑定全部output items |
 | Responses function_call先于message或多个message | PROVIDER_ERROR/CONTRACT | 0 | 0 | canonical acceptance前fail closed |
 | Responses含unknown/hosted/effect-bearing item | PROVIDER_ERROR/CONTRACT | 0 | 0 | 不opaque接受、不重放 |
@@ -1604,9 +1613,9 @@ Chat：
 13. absent、present-empty、malformed与unknown reasoning field的closed matrix；
 14. replayed complete assistant message的public projection与canonical assembler exact equal；
 15. TEXT_CONCAT多chunk顺序、empty delta与non-string failure；
-16. SINGLE_EXACT_VALUE exact duplicate no-op、different duplicate failure；
-17. ORDERED_ARRAY_APPEND保持element/chunk顺序，不去重；
-18. final field与accumulator exact reconcile、required final缺失failure。
+16. ORDERED_ARRAY_APPEND保持element/chunk顺序，不去重；
+17. final field与accumulator exact reconcile；
+18. unknown empty、ordinary final ignore、tool continuation fail-closed matrix。
 
 Responses：
 
@@ -1736,7 +1745,7 @@ correctness首先由local provider-shaped fixtures证明；远端probe只做prof
 1. Qwen-style template golden：tool role保留current-turn reasoning；USER role形成新turn；固定`preserve_thinking`时旧assistant representation不随last-user重渲染；
 2. DeepSeek Chat：完整assistant tool call带`reasoning_content`可继续；剥离得到预期provider拒绝，证明Pulsara实现确实带回字段；
 3. DashScope Chat：manual field replay与stripped control产生可区分结果；不使用response ID作为正确性前提；
-4. OpenRouter Chat：fixture/remote probe能识别structured `reasoning_details`，但推荐Responses route前不得丢失或stringify它；
+4. OpenRouter Chat：fixture必须证明structured `reasoning_details`按ordered array原样累积/重放；remote response若实际返回该carrier则记录观测，否则标准无carrier tool response仍必须完成且不得伪造空fragment；
 5. OpenRouter Responses `store=false`：encrypted reasoning item + complete ordered output手工重放成功；`previous_response_id`保持null；
 6. bobdong Responses：手工replay成功即可；不因proxy reported cache/ID行为不稳定改变Runtime contract；
 7. DeepSeek/DashScope Responses空壳reasoning item不得被误报成“reasoning continuity supported”；
@@ -1813,7 +1822,7 @@ remote probe固定使用无副作用virtual empty tool与随机一次性marker�
 - hidden reasoning公开展示、artifact化、memory提取或summary复制；
 - Chat/Responses reasoning carrier互转；
 - 使用`<think>`普通正文伪造reasoning；
-- profile未知时自动猜`reasoning_content`/`reasoning_details`；
+- 根据provider名称、model名称或未注册字段动态猜reasoning carrier；Chat只接受本文冻结的三个全局closed字段及其固定shape；
 - partial provider trace file；
 - output budget价格治理；
 - fallback model；
@@ -1842,8 +1851,8 @@ Round 5A.1只有同时满足以下条件才能标记ACTIVATED：
 12. Round 3.1不变量保持：同epoch SYSTEM相等、tools相等、messages只追加suffix。
 13. adapter/normalized contract version诚实升级。
 14. production output cap继续显式发送，默认数值不在本轮漂移。
-15. Chat text与opaque structured reasoning拥有不同closed codec；任何opaque value都没有string coercion。
-16. Chat每个replay field冻结`TEXT_CONCAT | SINGLE_EXACT_VALUE | ORDERED_ARRAY_APPEND`之一，并exact reconcile final value；重复/冲突shape fail closed。
+15. Chat text与structured reasoning共享一个provider-neutral closed codec，但每个field保持独立shape；任何array value都没有string coercion。
+16. Chat三个replay field分别冻结`TEXT_CONCAT | TEXT_CONCAT | ORDERED_ARRAY_APPEND`并exact reconcile final value；重复/冲突shape fail closed。
 17. Responses V1 accepted output item严格限于`reasoning | message | function_call`，message content也使用closed allowlist；未知或effect-bearing item不被opaque接受。
 18. 对已接受的Responses complete assistant response，全部ordered output items原样重放，不能只重建reasoning或function call的一半。
 19. 只有COMPLETED + canonical assistant FULL能产生BOUND fragment；incomplete/failure/final abandon/CONFLICT均证明fragment absent/discarded，transient NONE只能保留同一prepared candidate继续确认。
@@ -1852,12 +1861,13 @@ Round 5A.1只有同时满足以下条件才能标记ACTIVATED：
 22. continuity CAS原子安装semantic epoch view与matching wire plan proof/bytes/tokens；不存在semantic-only INSTALLED状态。
 23. same scope/epoch后续调用对已安装fragment byte/structure exact equal；provider wire仍满足old input为new input的prefix。
 24. ToolResult保持`role=tool`；Qwen-style template control在epoch内冻结，不因last USER位置动态删旧reasoning。
-25. manual full-history replay是Chat/Responses activation gate；`previous_response_id`、remote session/state均不是correctness依赖。
-26. hidden reasoning不进入canonical row、event、memory、artifact、live public text、summary正文或普通diagnostic/log。
-27. replay fragment bytes/tokens进入wire plan、continuity aggregate与Round 5B pressure quote，且replacement debit/addend不重复计算generic assistant representation。
-28. future compaction summary使用旧epoch exact fragment；adoption/cold rebase后fragment与remote ID全部释放，新epoch只继承semantic handoff。
-29. bounded DeepSeek、DashScope、OpenRouter与bobdong probes验证各自resolved profile；远端cache/ID差异只记录，不改变contract。
-30. 无schema/event/relation/job/guard/subject/Protocol增加；oracle保持`31 / 23 / 13 / 2 / 25 / 1`。
-31. activation evidence包含code hash、targeted/full/PostgreSQL/architecture结果、notebook/endpoint profile checkpoint及无敏感内容的provider-shaped probe记录。
+25. Chat opaque/text reasoning accumulator在terminal前执行共享的16 MiB完整响应byte bound与65,536项fragment/element circuit breaker；text使用chunk list，unknown carrier不累计名称集合，越界为typed non-retryable failure。
+26. manual full-history replay是Chat/Responses activation gate；`previous_response_id`、remote session/state均不是correctness依赖。
+27. hidden reasoning不进入canonical row、event、memory、artifact、live public text、summary正文或普通diagnostic/log。
+28. replay fragment bytes/tokens进入wire plan、continuity aggregate与Round 5B pressure quote，且replacement debit/addend不重复计算generic assistant representation。
+29. future compaction summary使用旧epoch exact fragment；adoption/cold rebase后fragment与remote ID全部释放，新epoch只继承semantic handoff。
+30. bounded DeepSeek、DashScope、OpenRouter与bobdong probes验证各自resolved profile；远端cache/ID差异只记录，不改变contract。
+31. 无schema/event/relation/job/guard/subject/Protocol增加；oracle保持`31 / 23 / 13 / 2 / 25 / 1`。
+32. activation evidence包含code hash、targeted/full/PostgreSQL/architecture结果、notebook/endpoint profile checkpoint及无敏感内容的provider-shaped probe记录。
 
 完成以后，Pulsara才具备两个足够可靠的Round 5B前提：**Runtime不会把模型“说到一半”误认为已经完成，也不会让半个工具调用跨过canonical effect边界；在真正rebase以前，它还能让完整响应形成的provider reasoning/work state沿同一epoch exact prefix继续存在，而不把hidden reasoning升级成durable truth。**

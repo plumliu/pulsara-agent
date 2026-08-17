@@ -15,6 +15,7 @@ from pulsara_agent.primitives.context import context_fingerprint
 
 
 MAXIMUM_TOOL_OBSERVATION_DURATION_MICROSECONDS = 31_536_000_000_000
+MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES = 40_000
 
 
 class ToolObservationDurationDisposition(StrEnum):
@@ -171,6 +172,7 @@ def provider_visible_turn_ref(*, session_id: str, turn_id: str) -> str:
 __all__ = [
     "FrozenToolObservationTimingFact",
     "MAXIMUM_TOOL_OBSERVATION_DURATION_MICROSECONDS",
+    "MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES",
     "PhysicalToolObservationSupplement",
     "ToolObservationDurationDisposition",
     "ToolObservationOrigin",
