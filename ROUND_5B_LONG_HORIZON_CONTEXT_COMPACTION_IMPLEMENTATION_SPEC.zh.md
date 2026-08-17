@@ -1,20 +1,22 @@
-# Pulsara Round 5B：Epoch-scoped MCP Promotion 与 Long-horizon Context Compaction 实施规格
+# Pulsara Round 5B：Long-horizon Context Compaction 与 Successor Capability Rebase 实施规格
 
 > 状态：**DRAFT — NOT ACTIVATED**
 >
-> 记录日期：2026-08-16
+> 记录日期：2026-08-17
 >
-> 当前代码基线：38fc8181d1abc55b123ddd346ca807ccd054dc30（feat: activate advisory memory subsystem）
+> 当前代码基线：ffd0d146f8d7991ff3d1e92dc9ca75e8abf894e8（feat: implement Round 5A.1 output termination）
 >
 > 上位架构：[PULSARA_DURABILITY_SUBTRACTION_REASSESSMENT.zh.md](PULSARA_DURABILITY_SUBTRACTION_REASSESSMENT.zh.md)
 >
 > 产品能力索引：[POST_HARD_CUT_PRODUCT_CAPABILITY_GAP_INDEX.zh.md](POST_HARD_CUT_PRODUCT_CAPABILITY_GAP_INDEX.zh.md)
 >
-> 前置实现：[Round 3 compiler](ROUND_3_STRUCTURED_MODEL_INPUT_COMPILER_IMPLEMENTATION_SPEC.zh.md)、[Round 3.1 prefix continuity](ROUND_3_1_PROVIDER_INPUT_PREFIX_CONTINUITY_IMPLEMENTATION_SPEC.zh.md)、[Round 5A execution envelope](ROUND_5_LONG_HORIZON_EXECUTION_ENVELOPE_IMPLEMENTATION_SPEC.zh.md)、[Round 7 model-visible outcome/timing](ROUND_7_MODEL_VISIBLE_FAILURE_AND_TOOL_OBSERVATION_IMPLEMENTATION_SPEC.zh.md)、[Round 8 advisory memory](ROUND_8_ADVISORY_MEMORY_SUBSYSTEM_IMPLEMENTATION_SPEC.zh.md)
+> 前置实现：[Round 3 compiler](ROUND_3_STRUCTURED_MODEL_INPUT_COMPILER_IMPLEMENTATION_SPEC.zh.md)、[Round 3.1 prefix continuity](ROUND_3_1_PROVIDER_INPUT_PREFIX_CONTINUITY_IMPLEMENTATION_SPEC.zh.md)、[Round 5A execution envelope](ROUND_5_LONG_HORIZON_EXECUTION_ENVELOPE_IMPLEMENTATION_SPEC.zh.md)、[Round 5A.1 provider-neutral output termination](ROUND_5A_1_PROVIDER_NEUTRAL_MODEL_OUTPUT_TERMINATION_IMPLEMENTATION_SPEC.zh.md)、[Round 7 model-visible outcome/timing](ROUND_7_MODEL_VISIBLE_FAILURE_AND_TOOL_OBSERVATION_IMPLEMENTATION_SPEC.zh.md)、[Round 7.1 provider-visible ToolResult projection](ROUND_7_1_PROVIDER_VISIBLE_TOOL_RESULT_PROJECTION_IMPLEMENTATION_SPEC.zh.md)、[Round 8 advisory memory](ROUND_8_ADVISORY_MEMORY_SUBSYSTEM_IMPLEMENTATION_SPEC.zh.md)、[Round 9 unified capability semantics](ROUND_9_UNIFIED_CAPABILITY_SEMANTICS_IMPLEMENTATION_SPEC.zh.md)、[Round 9.1 Agent Skills](ROUND_9_1_AGENT_SKILLS_STANDARD_IMPLEMENTATION_SPEC.zh.md)
 >
 > hard-cut前参考基线：5b7ad9f7ffc8565bc572180b2bde0c81ab64473a
 >
-> 本文先完成一项与strict-prefix直接相关的Round 6 MCP窄修订，再实施Round 5B context compaction：可靠且在epoch boundary完整就绪的MCP cohort在完整native surface fit时与builtin同级direct暴露；cohort越界、当前epoch冻结后才可用或发生semantic replacement的MCP tool只经append-only catalog observation与固定meta tool调用；compaction adoption是它们再次尝试升格进入下一epoch direct tool surface的正常边界。本文不实施新的memory extraction、replacement-history replay、provider context-error reactive retry、durable compaction job或hierarchical subagent graph。
+> 规范归属修订（2026-08-17）：正常epoch MCP direct/meta、`MCP_CATALOG`、`list_mcp_servers`、`inspect_new_mcp_tool`、`use_new_mcp_tool`与direct unavailable gate全部由Round 9唯一拥有；普通ToolResult的40,000-byte logical FULL、8-KiB COMPACT、artifact与conditional guidance全部由Round 7.1唯一拥有。Round 5B只在合法rebase boundary重新消费Round 9/9.1的current source registrations、complete source snapshots、planning cut与普通compiler结果，并复用Round 7.1既有ToolResult variants；它不重新发现能力、不实现meta gateway、不定义第二套MCP exposure DTO，也不定义compaction专用ToolResult阈值。
+>
+> 本文现在只实施Round 5B context compaction：可靠且在successor epoch boundary完整就绪的MCP cohort可依Round 9规则重新冻结；compaction adoption因此是已有NEW MCP再次尝试进入下一epoch direct surface的自然边界。本文不实施新的memory extraction、replacement-history replay、provider context-error reactive retry、durable compaction job或hierarchical subagent graph。
 
 ---
 
@@ -28,31 +30,9 @@ tools[n + 1]    == tools[n]
 messages[n + 1] == messages[n] || append_only_suffix
 ~~~
 
-当前Round 6仍有一个与该不变量冲突的窄缺口：`snapshot_tool_surface()`会把当前所有MCP descriptor直接并入provider `tools`；late-ready、tool新增或schema replacement因此在safe point触发`TOOL_SURFACE_CHANGED`。仅physical reconnect且schema相同已经不会reset，这一点保留；但“新能力出现就热改当前tools”必须在compaction编码前删除。
+Round 9已经先行关闭与该不变量相关的正常capability缺口：fixed Builtin与cold DIRECT MCP组成epoch-stable native `tools[]`；late-ready MCP只追加catalog并走inspect/use meta path；direct断连或schema replacement不热改tools。Round 9.1又把dynamic Skill catalog与activation lookup接入同一append-only dispatch planning。本轮不重复实现这些能力。
 
-Round 5B先冻结以下epoch-scoped MCP语义：
-
-~~~text
-epoch boundary complete READY_CLEAN MCP cohort fits
-    -> DIRECT，与builtin同级冻结进provider tools
-
-epoch boundary complete MCP cohort does not fit
-    -> all MCP tools remain NEW_MCP_META_ONLY
-    -> fixed builtins仍可open
-
-MCP tool becomes available or semantically changes inside the epoch
-    -> NEW_MCP_META_ONLY
-    -> append MCP_CATALOG observation
-    -> inspect_new_mcp_tool
-    -> use_new_mcp_tool
-    -> never mutate current provider tools
-
-next compaction/cold epoch boundary
-    -> refreeze current READY_CLEAN MCP set
-    -> eligible NEW_MCP_META_ONLY tools become DIRECT
-~~~
-
-`list_mcp_servers`、`inspect_new_mcp_tool`与`use_new_mcp_tool`本身是固定builtin descriptors，即使没有配置MCP也始终存在。前一epoch中direct MCP的物理连接中途失效时，descriptor仍保留；调用在local gate得到typed unavailable，same-schema reconnect后才恢复，不能借`use_new_mcp_tool`绕过。
+Round 5B只增加一个合法的**successor boundary**：active compaction已经明确关闭旧epoch并建立新epoch，因此可以用Round 9的current complete registry/planning cut重新选择下一epoch native MCP cohort，并用Round 9.1普通post-compile路径安装下一call的effective Skill activation lookup。这个promotion/rebase结果仍是Round 9标准`FrozenCapabilityExposurePlan`，不是Round 5B私有MCP generation。
 
 另一个剩余缺口是：当这条append-only epoch本身接近当前模型的active input budget时，Runtime没有合法的换代路径。Round 5B冻结唯一例外：
 
@@ -222,14 +202,9 @@ Codex当前另有一个可借鉴但与replacement history正交的普通工具�
 - 不依赖裸XML closing marker承载不可信正文；snapshot和runtime handoff使用closed canonical JSON；
 - 不把current MCP/skill/permission等复制进summary，它们由各自compiler source重建。
 
-grok-build还提供了另一个值得吸收的窄机制：固定`use_tool(tool_name, tool_input)`存在于native tool list，动态MCP descriptor不必全部进入provider `tools`，因此新MCP发现不必破坏KV prefix。Round 5B吸收“固定meta-dispatch”而不照搬它的完整discovery体验：
+grok-build还提供了固定meta-dispatch这一有价值的窄机制：动态MCP descriptor不必全部进入provider `tools`，因此新MCP发现不必破坏KV prefix。该正常epoch产品语义已经完整抽取到Round 9；Round 5B不再拥有search/inspect/use实现，只在合法rebase boundary把Round 9当前NEW cohort确定性重新规划为successor DIRECT或继续META_ONLY。
 
-- 不采用BM25 `search_tool`作为capability correctness入口；top-k ranking不能证明工具不存在，也会因词汇不一致隐藏合法能力；
-- 不增加dense embedding discovery；远端相似度、延迟和top-k同样不能成为工具是否可见的authority；
-- 不物化宿主机descriptor filesystem或第二套文件authority；正常late-ready observation直接列出bounded工具名，精确schema由`inspect_new_mcp_tool`按名称取得；
-- `use_new_mcp_tool`只接受本epoch的`NEW_MCP_META_ONLY` ref，不能变成builtin/direct MCP的通用gateway。
-
-grok-build的普通工具边界也支持同一结论：通用`DEFAULT_TOOL_OUTPUT_BYTES = 40,000`；bash/terminal使用`20,000 chars`特例；MCP使用`20,000 bytes`特例。Round 5B采用其通用40,000-byte量级作为Pulsara统一normal provider projection，而不照搬工具特例，也不创建compaction-only cap。
+grok-build的普通工具边界也支持同一结论：通用`DEFAULT_TOOL_OUTPUT_BYTES = 40,000`；bash/terminal使用`20,000 chars`特例；MCP使用`20,000 bytes`特例。Pulsara对这组prior art的取舍已经由Round 7.1独立冻结：normal logical FULL采用统一40,000-byte量级，但不照搬per-tool lowering特例。Round 5B只消费该已激活contract，不拥有阈值。
 
 ---
 
@@ -296,309 +271,106 @@ messages only append suffix
 - 让`use_new_mcp_tool`调用builtin、当前direct MCP或任意未inspect的名称；
 - 把MCP server instructions、status或catalog提升为SYSTEM authority。
 
-### 2.4 本轮对Round 6的窄supersession
+### 2.4 正常Capability语义全部由Round 9/9.1拥有
 
-Round 6关于semantic/execution identity分离、slot lease、dirty fence、bounded discovery、effect policy、permission、input-required、physical close与same-schema reconnect的契约全部保留。本文只supersede以下一句：
+Round 6的MCP physical semantics与Round 9的统一Capability semantics是本轮硬前置。Round 5B不再supersede Round 6、不再定义正常epoch direct/meta行为；它只消费已经激活的：
 
-> MCP name/description/schema/scope发生变化后，在普通safe point热替换provider `tools`并触发`TOOL_SURFACE_CHANGED`。
+- `FrozenCapabilityRegistrySnapshot`；
+- `FrozenCapabilityPlanningCut`；
+- `CapabilityEpochPredecessor`；
+- `FrozenCapabilityExposurePlan`；
+- `FrozenMcpRouteProjection`与ordinary `MCP_CATALOG` renderer；
+- `FrozenSkillProjectionInput`与compiler最终effective Skill source head；
+- normal `ProcessLocalToolSurfaceAccess`、`PreparedToolExecutionBinding`与`PreparedUnavailableDirectMcpGate`。
 
-新规则是：
+因此late-ready observation、catalog pagination、inspect/use ref、direct unavailable/schema replacement、Skill discovery与activation lookup都不是本轮production修改面。Round 5B只对这些activated contracts做retained regression。
 
-- provider `tools`只在cold bootstrap或compaction adoption这类epoch boundary冻结；
-- 当前epoch中出现的新descriptor不进入direct surface，也不产生普通`TOOL_SURFACE_CHANGED`；
-- 它进入current MCP catalog，追加`MCP_CATALOG` observation，并只经固定meta tools访问；
-- compaction adoption已经明确允许rebase，因此是正常运行中提升new MCP进入direct surface的唯一边界；
-- operator显式切换model/base contract等既有cold reset仍可重建surface，但不得把MCP late-ready伪装成该类reset。
+### 2.5 禁止第二套MCP exposure vocabulary
 
-这项修订不增加canonical relation、event、job、append guard、receipt、checkpoint或cross-Host MCP request recovery。它只改变Host-scoped provider exposure与dispatch routing。
+本文删除并禁止实现`McpEpochExposureKind`、`FrozenEpochMcpExposure`、`McpEpochExposureBorrow`及任何同义compaction-private DTO。DIRECT/NEW/UNAVAILABLE route只能来自Round 9的`FrozenMcpToolExposure`与`FrozenMcpRouteProjection`；native surface只能来自Round 9的`FrozenCapabilityExposurePlan.direct_tool_surface`。
 
-### 2.5 Closed exposure vocabulary
-
-新增process-local closed enum：
-
-~~~text
-McpEpochExposureKind
-    DIRECT
-    NEW_MCP_META_ONLY
-~~~
-
-语义如下：
-
-- `DIRECT`：descriptor在当前provider-input epoch建立时已经完整验证并冻结，存在于native `tools`数组；
-- `NEW_MCP_META_ONLY`：当前scope可见且current catalog可执行，但不在当前epoch direct surface中。正常来源是late-ready、新增tool或schema/description/scope/policy semantic replacement；若本次promotion因native surface hard bound整体未采用，也保持该状态；
-- server不是天然DIRECT或NEW；同一server可同时拥有旧direct tool与后来新增/替换的new tool；
-- physical connection generation不参与该分类；same-schema reconnect不能把DIRECT变成NEW，也不能改变provider fingerprint。
-
-每个scope的continuity owner同时冻结：
-
-~~~text
-FrozenEpochMcpExposure
-    continuity epoch identity
-    ROOT | exact SUBAGENT_TASK scope
-    ordered direct MCP semantic descriptors/fingerprints
-    fixed meta-tool descriptor fingerprints
-    epoch direct-surface fingerprint
-    exposure fingerprint
-~~~
-
-current MCP supervisor另持有最新catalog/executor generations。`NEW_MCP_META_ONLY`由“current scope-visible semantic descriptor减去exact epoch direct descriptors”确定性派生，不持久化第二张catalog或promotion表。
+Current MCP supervisor仍是唯一physical/catalog owner；Round 5B的process-local settlement resources只组合一个Round 9 successor exposure plan与一次normal tool-surface physical access，不保存第二份descriptor tuple、catalog generation、pending/latest generation或slot identity。
 
 ### 2.6 Epoch boundary的DIRECT选择
 
-MCP tool只有同时满足以下条件，才有资格在epoch boundary进入DIRECT：
+Cold/EMPTY cohort selection已经由Round 9定义，本轮不得复制。Active compaction的successor selection是唯一新增规则：
 
-1. server完成initialize；
-2. 全部分页discovery完成并通过pre-parse/body/schema/node/depth/aggregate bounds；
-3. descriptor、scope exposure、effect policy与timeout policy全部冻结；
-4. server为`READY_CLEAN`，没有未reconcile的`listChanged` dirty signal；
-5. exact execution slot lease已经安装；
-6. ROOT/child scope过滤完成；
-7. 与builtin及其他MCP provider name无collision；
-8. 完整native surface不超过Round 3现有`maximum_tool_specs`及provider target bounds。
+1. 以old installed `CapabilityEpochPredecessor`、current exact-scope owner-issued inventories与complete current registry构造一次新的`FrozenCapabilityPlanningCut`；
+2. 保留仍与current READY_CLEAN/config/scope事实exact compatible的旧DIRECT MCP；已removed、dirty、known unavailable或schema-replaced的旧DIRECT不进入successor native candidate；
+3. 计算current `NEW_MCP_META_ONLY`候选全集；
+4. `fixed Builtin + retained compatible DIRECT + complete NEW cohort`在Round 9 count/schema/provider target bounds内全部fit时，NEW cohort整体提升为DIRECT；
+5. 若完整NEW cohort不fit，不提升任何NEW；retained compatible DIRECT继续保留，NEW继续meta，compaction本身仍可成功；
+6. 输出标准`FrozenCapabilityExposurePlan`与`FrozenMcpRouteProjection`，不得输出compaction-private exposure type。
 
-首次cold bootstrap使用deterministic cohort fallback：
-
-1. 先冻结fixed builtin surface，其中包括三个固定MCP catalog/meta descriptors；若fixed builtin自身已超过provider/Runtime hard bound，cold open fail closed；
-2. 再取得freeze cut上全部`READY_CLEAN`、scope-visible、config-visible MCP candidate cohort；
-3. `fixed builtin + complete MCP cohort`全部fit时，该cohort整体成为DIRECT；
-4. complete cohort不fit时，本epoch不把其中任何MCP提升为DIRECT，全部作为`NEW_MCP_META_ONLY`由catalog/meta path使用；
-5. 不得按discovery completion order、名字、server、排名或“先塞到上限”为MCP cohort选择partial winner。
-
-因此，同一个oversized optional server在cold freeze前早READY不会让provider open失败，而在freeze后晚READY也同样进入meta path。现有显式include/exclude exposure policy仍是用户主动缩小candidate cohort的配置入口；它不是Runtime临时排名。
-
-compaction promotion采用更克制的all-or-none规则：先剔除当前不再READY_CLEAN或不再config-visible的旧DIRECT，再尝试把本epoch全部scope-visible NEW集合一起提升；完整candidate fit才全部提升，越界则本次不提升任何NEW工具，它们继续走meta path，compaction本身不得因此失败。不得按BM25、dense score、工具名字典序或最近使用次数选择一个隐式partial winner。未来若需要显式priority，必须进入resolved config contract，不能由Runtime猜测。
-
-无论当前是否配置MCP，以下builtin descriptors都必须自Host open起固定存在：
-
-~~~text
-list_mcp_servers
-inspect_new_mcp_tool
-use_new_mcp_tool
-~~~
-
-因此第一次late-ready也不会改变provider `tools`。
+这条规则有意不同于Round 9的EMPTY cold all-MCP cohort fallback：active compaction已有一个合法old native surface，不能因为新增cohort过大而无故把仍可靠的旧DIRECT全部降级。它只对“是否新增promotion”all-or-none，不按discovery时序、名字、BM25、dense score或recent use选择partial winner。
 
 ### 2.7 `list_mcp_servers`保留总目录语义
 
-`list_mcp_servers`不得改名为`list_new_mcp_servers`。`new`是tool相对当前epoch的exposure，不是server identity；总目录还负责status、failure、instructions、resources/templates/prompts及direct/new诊断。
-
-descriptor升级为：
-
-~~~text
-list_mcp_servers(
-    server_id?: string,
-    cursor?: string,
-    limit: integer = 50, 1..200
-)
-~~~
-
-- 无`server_id`：返回bounded、按server_id排序的server page；
-- 有`server_id`：返回该exact scope-visible server及其tool page；每个tool只含name、`DIRECT | NEW_MCP_META_ONLY`、status与必要omitted metadata，不返回完整schema；
-- cursor绑定current catalog semantic fingerprint、epoch direct-surface fingerprint、scope、server filter与offset；任一变化使旧cursor typed stale；
-- 它只读取已安装的local catalog snapshot，不连接、不refresh、不取得physical operation lane；
-- 空参数旧调用仍合法；
-- 输出必须显式区分`direct_tool_count`、`new_tool_count`、各自本页names、`next_cursor`与总数，不能把当前“最多32个overview”伪装成全集。
-
-DIRECT工具虽然已在provider `tools`中，仍保留在这个按需目录里，因为模型或用户可能询问server归属、连接状态、resources/prompts与failure；这些信息不能从flat native tool array无损恢复。
+完整schema、server/tool page union、cursor identity、DIRECT/NEW/UNAVAILABLE分类与local-snapshot-only行为以Round 9 §6.1为唯一真源。Round 5B只验证successor adoption后该普通工具读取新epoch的current route projection；不修改descriptor、cursor codec或repository。
 
 ### 2.8 Late-ready `MCP_CATALOG` observation
 
-当current catalog相对epoch direct exposure出现NEW tool时，Runtime在provider safe point追加`MCP_CATALOG` typed observation。它不写USER_MESSAGE canonical row，也不改变tool surface；provider adapter仍以固定边界编码为user-role runtime observation。
-
-model-facing body必须明确表达：
-
-~~~text
-MCP tools are available through the new-tool channel for this context.
-They either became ready after the native tool surface was frozen or
-remained meta-only because the complete MCP cohort did not fit.
-
-These tools are not native tools in the current context and must not be
-called directly:
-
-- <qualified tool name>
-- ...
-
-To use one:
-1. Call inspect_new_mcp_tool with its exact server_id and tool_name.
-2. Call use_new_mcp_tool with the returned tool_ref and arguments.
-
-Do not route built-in tools or MCP tools already present in the native
-tools array through use_new_mcp_tool.
-~~~
-
-实际wire沿用Round 7五字段`source/trust/lifecycle/presence/body` observation carrier；上述文字由closed provider renderer生成，server instructions与tool descriptions仍是`UNTRUSTED_DATA`，不能取得system authority。
-
-正常情况下body列出本次NEW server的全部qualified tool names。若最终observation超过现有MCP_CATALOG FULL/COMPACT bound：
-
-- deterministic保留能容纳的完整server/name rows；
-- 明确给出每个server的`total_new_tool_count`与`omitted_new_tool_count`；
-- 固定提示调用`list_mcp_servers(server_id=...)`取得完整分页目录；
-- 不允许无提示截断、BM25/dense top-k或只显示“最相关”工具。
-
-server断连、恢复、tool removal或schema replacement继续通过同一append-only SNAPSHOT/CLEARED/UNAVAILABLE source表达。纯same-schema physical reconnect若catalog presentation未变，可以不追加正文；即使status observation发生变化，也不得reset tools。
+Closed、untrusted、complete-row/omitted-count renderer与inspect→use guidance以Round 9 §5.2/§6.4为唯一真源。Summary request只复用old epoch已经可见的exact observation prefix；active successor首次compile按Round 9 normal renderer构造initial head，安装后到达的新变化继续append successor。Round 5B不生成另一种compaction catalog正文。
 
 ### 2.9 `inspect_new_mcp_tool` exact contract
 
-固定read-only builtin：
-
-~~~text
-inspect_new_mcp_tool(
-    server_id: string,
-    tool_name: string
-)
-~~~
-
-descriptor description必须包含等价语义：
-
-> Inspect an MCP tool announced through the new-tool channel because it is not in the current native tool surface. This includes late-ready tools and an unpromoted MCP cohort. MCP tools already present in the native tools array must be called directly.
-
-它只接受current scope中exact `NEW_MCP_META_ONLY` name。成功返回closed、bounded provider DTO：
-
-~~~json
-{
-  "access_mode": "NEW_MCP_META_ONLY",
-  "server_id": "github",
-  "tool_name": "mcp__github__create_project",
-  "description": "Create a project.",
-  "input_schema": {},
-  "effect_kind": "EXTERNAL_EFFECT",
-  "tool_ref": "mcp-new-tool:..."
-}
-~~~
-
-`tool_ref`是Host-scoped opaque capability，只绑定semantic descriptor与当前epoch exposure，不绑定physical client object：
-
-~~~text
-NewMcpToolRef
-    Host owner authority
-    exact conversation scope
-    current continuity epoch identity
-    server_id / remote tool identity
-    provider tool name
-    descriptor + execution-policy fingerprint
-~~~
-
-`NEW_MCP_META_ONLY`不是调用者可填写的ref字段：`NewMcpToolRef`这一sealed类型本身就只代表new-tool channel。factory和resolver仍必须证明所指descriptor在current epoch中确属`NEW_MCP_META_ONLY`；该固定literal进入ref fingerprint的domain/version，而不是成为第二个可漂移的实例值。
-
-同schema physical reconnect可以换slot而不使ref失效；semantic change、promotion、scope change、Host close/takeover或server removal使ref typed stale。ref不序列化为canonical authority；它作为普通ToolResult正文出现后，跨Host/compaction失效是允许的，调用方得到typed stale并重新按current exposure选择direct或inspect。不得增加durable handle relation、receipt或recovery graph。
-
-builtin、DIRECT MCP、unknown name与dirty-unreconciled descriptor均不得返回ref：
-
-- builtin/DIRECT：`INVALID_ARGUMENTS`，明确提示直接调用native tool；
-- unknown/removed：`NOT_FOUND`；
-- dirty/reconcile中：`MCP_SNAPSHOT_STALE`或typed retryable unavailable；
-- current permission不参与metadata exposure，避免permission切换改变工具目录；真正effect policy在执行前动态应用。
+Closed success DTO、40K普通ToolResult bound、tool-specific route/policy-bound ref与typed rejection以Round 9 §6.5–§6.6及Round 7.1为唯一真源。Compaction只使old-epoch ref在epoch close后自然stale；它不重新签发、持久化或迁移ref。
 
 ### 2.10 `use_new_mcp_tool` exact contract
 
-固定builtin schema：
-
-~~~text
-use_new_mcp_tool(
-    tool_ref: string,
-    arguments: object
-)
-~~~
-
-descriptor description必须包含等价语义：
-
-> Invoke only an MCP tool announced through the new-tool channel because it is not in the current native tool surface. Obtain tool_ref and the exact input schema from inspect_new_mcp_tool. Never use this tool for built-in tools or MCP tools already present in the native tools array; call those tools directly.
-
-一次model-visible `use_new_mcp_tool` call只创建现有的一次ToolExecutionAttempt与一次ToolResult；不得为内部remote tool再创建nested assistant call、第二个attempt或第二个canonical result。Round 7 `observation_origin_kind`必须由resolved MCP binding冻结为MCP，而不是因为outer provider name是builtin descriptor就误记BUILTIN。
-
-local authorize/dispatch顺序：
-
-1. exact resolve ref并证明Host/scope/epoch仍active；
-2. 证明resolved tool仍为`NEW_MCP_META_ONLY`，不是builtin或DIRECT；
-3. exact join descriptor、schema、effect policy与current catalog semantic identity；
-4. 检查listChanged dirty dispatch fence；
-5. 用inspect时冻结的schema验证`arguments`；
-6. 按underlying `McpEffectKind`计算run permission branch；meta builtin本身不得拥有一个掩盖underlying effect的固定permission分类；
-7. 在任何公开human confirmation前取得generation-bound `McpDispatchAdmissionPermit`；它只pin exact NEW semantic generation，不占outbound operation lane、不产生physical effect；
-8. 若需要human confirmation，使用现有Host-wide FIFO；DENY、detach、timeout、disable时释放permit且无attempt；
-9. ALLOW后沿用现有decision + ToolExecutionAttempt原子事务；无需确认的ALLOW同样凭exact permit接受attempt；
-10. 凭同一permit进入slot-owned physical lane并调用一次；
-11. 使用Round 1/3/5A现有known/unknown、artifact、timing与late-outcome settlement。
-
-确定可在physical attempt前拒绝的情况不得留下attempt-without-result：
-
-- ref指向builtin或DIRECT；
-- ref stale/foreign；
-- tool已removed/disconnected且没有exact callable slot；
-- dirty fence；
-- arguments schema mismatch；
-- permission/confirmation deny。
-
-其中builtin/DIRECT误用必须返回针对性纠正：直接调用provider `tools`中同名工具，不得通过meta gateway。`use_new_mcp_tool`也不得接受裸tool name替代ref，防止模型绕过inspect或在schema replacement后按旧描述调用新executor。
+Schema、ref resolution、dirty/permission/admission/attempt/invoke顺序、one-attempt/result与MCP origin以Round 9 §6.7–§6.8为唯一真源。本轮只验证summary期间工具绝对不可执行、successor epoch中仍为NEW的tool继续使用该普通路径，以及promoted tool只能直接调用。
 
 ### 2.11 断连、replacement与dispatch矩阵
 
-| 变化 | 当前epoch provider `tools` | catalog/exposure | 调用语义 |
-|---|---|---|---|
-| DIRECT tool同schema physical reconnect | 不变 | 仍DIRECT | 新slot exact rebind，正常direct调用 |
-| DIRECT tool连接已知失效/正在重连 | 不变 | DIRECT + unavailable status | direct local gate typed unavailable；禁止改走`use_new_mcp_tool` |
-| DIRECT tool发生schema/description/scope semantic replacement | 旧descriptor保留到epoch结束 | 旧DIRECT marked stale；新descriptor为NEW | 旧direct call无attempt stale；inspect/use新descriptor |
-| DIRECT tool被server removal | 旧descriptor保留到epoch结束 | DIRECT marked removed | direct call无attempt unavailable；没有伪造meta fallback |
-| late-ready新server/tool | 不变 | NEW | observation -> inspect -> use |
-| NEW tool same-schema reconnect | 不变 | 仍NEW | existing semantic ref可绑定新slot |
-| NEW tool semantic replacement | 不变 | old ref stale；new ref可inspect | 重新inspect后use |
-| compaction adoption | 允许新surface | current READY_CLEAN NEW可整体promotion | promoted工具下一epoch直接调用，旧ref stale |
-
-DIRECT连接失效时，model-visible denial使用固定语义：
-
-~~~text
-This MCP tool was available when the current context began, but its server
-connection is currently unavailable. The native tool definition remains
-frozen to preserve context continuity. Do not route it through
-use_new_mcp_tool. Check list_mcp_servers or wait for a same-schema reconnect.
-~~~
-
-若physical attempt已经开始后才断线，继续使用Round 5A effect-aware known/unknown结果矩阵；不能把它伪装成上述确定未dispatch的local denial，也不能自动重跑effectful operation。
+普通disconnect、dirty、same-schema reconnect、removal与schema replacement矩阵以Round 9 §6.9/§10为唯一真源。特别冻结一项跨文档冲突的解法：同一`server_id + remote_tool_name`的DIRECT schema replacement在old epoch中只报告pending cold adoption，旧descriptor fenced，新schema不得同时走meta；active compaction successor boundary才可采用new schema。Round 5B不得恢复旧版“old native + replacement meta双版本并存”分支。
 
 ### 2.12 Compaction promotion是正常升格边界
 
 summary call必须继续使用old epoch的exact SYSTEM、direct tools与固定meta tools。summary期间完成的MCP discovery不能插入该request，也不能改变其prefix。
 
-对仍将继续provider loop的active compaction，summary成功后、dry compile前，Runtime冻结successor MCP exposure：
+对仍将继续provider loop的active compaction，summary成功后、dry compile前，Runtime调用§2.6的compaction-specific selection，但输入输出都使用Round 9普通contract：
 
 ~~~text
-old FrozenEpochMcpExposure
-+ current READY_CLEAN scope-visible catalog
-+ current resolved config
--> successor FrozenEpochMcpExposure
+old InstalledCapabilityEpochPredecessor
++ current owner-issued Builtin/MCP/Skill inventories
++ current complete FrozenCapabilityRegistrySnapshot
+-> successor FrozenCapabilityPlanningCut
+-> compaction-specific promotion selection
+-> successor FrozenCapabilityExposurePlan
 ~~~
 
-Host先冻结唯一一份successor semantic exposure与initial catalog projection，作为`ActiveCompactionInstallationResources`的语义资源；随后为其中需要promotion的DIRECT工具取得一个只拥有物理能力的process-local `McpEpochExposureBorrow`：
+Host在`ActiveCompactionInstallationResources`中只保存一次successor `FrozenCapabilityExposurePlan`、compiler最终采用的initial `MCP_CATALOG`/`SKILL_CATALOG` heads与dry compiled input。随后通过Round 9已有physical exact-join seam取得普通`ProcessLocalToolSurfaceAccess`：
 
 ~~~text
-McpEpochExposureBorrow
-    expected_successor_exposure_fingerprint
-    exact slot leases needed by promoted DIRECT tools
+successor FrozenCapabilityExposurePlan.direct_tool_surface
+-> exact PreparedToolExecutionBinding / PreparedUnavailableDirectMcpGate leaves
+-> normal ProcessLocalToolSurfaceAccess
+-> existing slot leases for exact DIRECT MCP bindings
 ~~~
 
-`ActiveCompactionInstallationResources`唯一持有successor `FrozenEpochMcpExposure`和frozen initial `MCP_CATALOG` projection；borrow只以`expected_successor_exposure_fingerprint` exact join它，不复制semantic/catalog generation或完整exposure。现有`McpSlotLease`继续唯一拥有slot、connection generation、admitted discovery generation与execution-binding identity；borrow不再创造第二套physical identity DTO。aggregate process-local tool execution binding由外层physical attempt持有一次。
+Round 5B不包装、重命名或复制这个access。现有`McpSlotLease`继续唯一拥有slot、connection generation、admitted discovery generation与execution-binding identity；Round 9 `FrozenCapabilityExposurePlan`继续唯一拥有successor semantic surface/route。E1→E2 same-schema reconnect只替换normal physical access，不改变successor semantic plan。
 
-current permission、Plan、skill、memory和live state同样只进入process-local semantic installation resource。任何MCP semantic/execution/borrow字段都不进入`PreparedCompactionCanonicalAdoption`或其fingerprint。borrow/callback/slot对象绝不序列化。borrow从dry compile持续到FULL后的installation settlement或attempt discard：
+current permission、Plan、skill、memory和live state同样只进入process-local semantic installation resource。任何capability planning/physical字段都不进入`PreparedCompactionCanonicalAdoption`或其fingerprint。access/callback/slot对象绝不序列化。Normal tool-surface access从dry compile持续到FULL后的installation settlement或attempt discard：
 
 - 若只physical reconnect且semantic fingerprints相同，supervisor可在exact policy下替换physical binding；
-- 新的semantic discovery/listChanged继续只由既有MCP supervisor的`pending/installed` generation拥有，不能原地修改active resources中的successor exposure；borrow不得复制第二个“最新generation”owner；
-- 因此MCP抖动不会让已经validated的summary或canonical adoption无限重做；FULL后Runtime以`supervisor current catalog - frozen successor DIRECT exposure`确定性派生NEW suffix；
-- canonical write前borrow丢失、owner close或没有compatible slot时discard attempt；canonical FULL后则保留snapshot winner，installation按frozen semantic surface尝试exact rebind，失败时不回滚canonical rows并留给下一次cold read；
+- 新的semantic discovery/listChanged继续只由既有MCP supervisor拥有，不能原地修改active resources中的successor plan；physical access不得复制第二个“最新generation”owner；
+- 因此MCP抖动不会让已经validated的summary或canonical adoption无限重做；FULL后Runtime用Round 9 normal planner按`current registry - frozen successor DIRECT versions`派生NEW suffix；
+- canonical write前physical access丢失、owner close或没有compatible binding时discard attempt；canonical FULL后则保留snapshot winner，installation按frozen semantic plan尝试exact rebind，失败时不回滚canonical rows并留给下一次cold read；
 - promotion完成前旧epoch仍按旧direct/meta分类结算已经开始的tool batch。
 
 active adoption FULL后：
 
 - current READY_CLEAN且surface fit的NEW工具成为下一epochDIRECT；
 - old meta refs全部按old epoch失效；
-- `list_mcp_servers`按新epoch重新报告DIRECT/NEW；
-- `use_new_mcp_tool`继续存在，但只接受adoption之后新出现的工具；
+- Round 9 `list_mcp_servers`按新epoch重新报告DIRECT/NEW；
+- Round 9 `use_new_mcp_tool`继续存在，但只接受adoption之后新出现的工具；
 - handoff追加一条bounded guidance：已出现在native tool list的MCP必须直接调用，inspect/use只服务本次rebase之后的新发现工具。
 
-若borrow冻结后某个promoted descriptor被server移除或semantic replacement，冻结的descriptor仍按新epoch DIRECT安装但立即处于stale/unavailable gate；supervisor中的replacement作为NEW出现。不得为了追逐current generation反复废弃已经合法的summary，也不得让旧descriptor调用新schema executor。
+若normal physical access冻结后某个promoted descriptor被server移除或semantic replacement，frozen successor plan仍按新epoch保留该DIRECT descriptor但以Round 9 unavailable gate阻止dispatch；supervisor中的replacement等待后续cold adoption，不能在同一epoch以meta绕过。不得为了追逐current generation反复废弃已经合法的summary，也不得让旧descriptor调用新schema executor。
 
 promotion进入provider `tools` channel，不进入BASE_SYSTEM。MCP server instructions、status、failure与尚未promotion的tool names仍属于untrusted runtime observation。本文所称“把动态内容放回新context root”是按其真实authority重新placement，不是把所有内容字面拼到system message。
 
-idle manual compaction不执行本节promotion：它只canonicalize snapshot base，不知道下一条prompt到达时哪些MCP仍READY，也没有provider call消费continuity permit。下一条same-scope turn以当时current catalog走§2.6 cold cohort selection；这同样是合法epoch boundary，但不由idle settlement提前持有slot lease。
+idle manual compaction不执行本节promotion：它只canonicalize snapshot base，不知道下一条prompt到达时哪些Capability facts仍current，也没有provider call消费continuity permit。下一条same-scope turn以当时owner inventories走Round 9普通EMPTY planning；这同样是合法epoch boundary，但不由idle settlement提前持有tool-surface access或slot lease。
 
 ### 2.13 Prefix与bound不变量
 
@@ -610,14 +382,15 @@ tools[n + 1]    == tools[n]
 messages[n + 1] == messages[n] || append_only_suffix
 ~~~
 
-以下都只追加message observation，不改tool fingerprint：late-ready、新tool、schema replacement、disconnect、reconnect status与removed status。只有compaction/cold epoch boundary才重新冻结DIRECT set。
+以下都只按Round 9追加message observation，不改tool fingerprint：late-ready、新tool、schema replacement、disconnect、reconnect status与removed status。只有compaction/cold epoch boundary才重新冻结DIRECT set。
 
-保留现有MCP physical bounds：每server最多512 discovered tools、2,000 aggregate discovery items、schema/frame/body/node/depth上限、catalog result 64 KiB及source FULL/COMPACT/REF bounds。新增约束：
+所有normal MCP bounds、catalog/list/inspect/use contracts与fixed descriptor fingerprints以Round 9为准；所有normal ToolResult bounds以Round 7.1为准。本轮只新增compaction quote约束：
 
-- `inspect_new_mcp_tool`完整descriptor必须在现有单schema bound内，并作为普通ToolResult继续受统一40,000-byte provider projection；更大可按Round 1 artifact路径保留，但schema主体不能只返回一个无法验证的截断JSON；若exact schema无法在工具自身bound内形成，discovery时即拒绝该tool；
-- observation列名总量越界时显式omitted + paginated `list_mcp_servers`，不使用ranking；
-- `use_new_mcp_tool.arguments`继续服从现有tool-call argument/workingset bounds；
-- fixed meta descriptors的name/description/schema进入Round 3.1 tool-surface fingerprint，activation必须cold-open新Host；之后MCP动态变化不得修改它们。
+- successor `FrozenCapabilityExposurePlan`必须满足Round 9 native tool count/schema/provider target bound；
+- successor initial catalog heads必须经过normal compiler VALUE/CLEARED/UNAVAILABLE/no-op决策，不能把raw projection直接塞进new epoch；
+- successor Skill activation lookup必须在compile后从effective head构造并与continuity CAS安装；
+- retained ToolResult只复用Round 7.1 normal variants，3-group aggregate quote不得建立更高cap；
+- fixed descriptor与lowering contract变化都必须在本轮开始前已由前置round cold-activated，compaction不得兼任它们的migration入口。
 
 ---
 
@@ -668,17 +441,18 @@ Round 5B新增零张relation、零种Committed event、零种Live event、零个
 - CompactionAdopted；
 - blobs，用于超出snapshot inline bound的summary carrier。
 
-### 3.5 MCP exposure同样不成为durable authority
+### 3.5 Capability exposure同样不成为durable authority
 
-MCP supervisor仍是当前Host唯一physical/catalog owner；provider exposure只是在epoch boundary对其validated facts的process-local投影：
+MCP supervisor仍是当前Host唯一physical/catalog owner；provider exposure只由Round 9在epoch boundary对complete registry/planning facts作process-local投影：
 
 ~~~text
-current MCP supervisor catalog/executors
-    -> FrozenEpochMcpExposure
+current owner-issued inventories + complete registry
+    -> FrozenCapabilityPlanningCut
+    -> FrozenCapabilityExposurePlan
     -> provider direct tools + NEW catalog observation/meta refs
 ~~~
 
-不新增“direct promotion row”“new MCP table”或session-level exposure receipt。Host close/takeover后旧meta ref自然失效；replacement Host重新连接、完整discovery并在cold epoch按当前READY_CLEAN truth冻结direct surface。canonical transcript只保留模型实际发出的`inspect_new_mcp_tool`/`use_new_mcp_tool` request及其普通ToolResult，不保留process-local catalog generation。
+不新增“direct promotion row”“new MCP table”或session-level exposure receipt，也不把Round 9 pure DTO复制进compaction package。Host close/takeover后旧meta ref自然失效；replacement Host重新连接、完整discovery并在cold epoch按当前READY_CLEAN truth冻结direct surface。canonical transcript只保留模型实际发出的`inspect_new_mcp_tool`/`use_new_mcp_tool` request及其普通ToolResult，不保留process-local catalog generation。
 
 ---
 
@@ -917,8 +691,8 @@ FrozenCompactionSourceView
     normal_compile_binding: ModelInputCompileBinding
         # owns the one FrozenModelToolSurface
     predecessor_epoch_view: FrozenProviderInputEpochView | None
+    capability_epoch_predecessor: CapabilityEpochPredecessor
     provider_projection: FrozenCompactionProviderProjection
-    frozen old-epoch FrozenEpochMcpExposure
     physical working-set report
     source_view_fingerprint
 ~~~
@@ -928,8 +702,8 @@ FrozenCompactionSourceView
 - `FrozenCanonicalCompileSnapshot`唯一拥有canonical provider items、binding/permission/Plan/outcome/freshness one-cut facts与cut identity；
 - `ModelInputCompileBinding.tool_surface`唯一拥有old provider-visible `FrozenModelToolSurface`，不得同时保存另一份“semantic tool facts + tool specs”；
 - `FrozenProviderInputEpochView`仅在已有predecessor epoch时存在，唯一拥有prior epoch nonce/revision、compatibility、prefix、frontier与source heads；
+- `CapabilityEpochPredecessor`直接复用Round 9 EMPTY/INSTALLED union；INSTALLED时其唯一`FrozenModelToolSurface`必须与`normal_compile_binding.tool_surface`及`predecessor_epoch_view` exact join，不复制MCP descriptor或route tuple；
 - `FrozenCompactionProviderProjection`只拥有无法由上述carrier取得的prospective wire delta/冷投影与其estimate。它不是`FrozenCompiledModelInput`：whole source view允许超过effective input budget，而production `FrozenCompiledModelInput`的closed invariant要求成功输入已经在budget内；
-- `FrozenEpochMcpExposure`保留是必要的额外分类事实：仅凭provider tool specs无法判断哪些MCP descriptor是DIRECT、NEW、stale或可promotion。它必须与`FrozenModelToolSurface` exact join，但不得复制tool specs。
 
 `PreparedProviderInputCut`是reader admission输入，不是source view的第二份identity。factory先验证它与returned canonical snapshot identity exact join，并证明projection由该snapshot、同一one-cut source facts和normal lowering产生，随后不把cut存进view。`exact_safe_canonical_head`也不是独立构造参数，而从`canonical_compile_snapshot.canonical_input.identity.provider_input_through_sequence`派生；COMPATIBLE_APPEND时factory还证明predecessor epoch frontier是该current cut的prefix，不能错误地把predecessor frontier本身当作current safe head。
 
@@ -939,7 +713,7 @@ projection closed union type与source-view compatibility必须exact join；不�
 - EMPTY_COLD与PENDING_NON_COMPACTION_RESET只允许`ColdRebuildCompactionProjection`；SYSTEM/messages由该projection拥有，tools仍只来自`normal_compile_binding.tool_surface`；
 - `projection.final_estimate`与`logical_utf8_bytes`由central factory对materialized SYSTEM、唯一tool surface与materialized messages计算，不是调用者参数；estimate允许超过effective input budget，summary prefix与adoption后的active dry compile仍各自必须满足其真实budget。
 
-`source_view_fingerprint`只组合compatibility discriminator及上述existing carrier/projection的canonical fingerprints，再覆盖old MCP exposure fingerprint与physical working-set report；不得把这些carrier的内部标量重新序列化一遍。`ModelInputCompileBinding`中的estimator object/transport capability不进入fingerprint，只使用其既有binding/target/estimator/tool-surface fingerprints。
+`source_view_fingerprint`只组合compatibility discriminator及上述existing carrier/projection/capability-predecessor的canonical fingerprints，再覆盖physical working-set report；不得把这些carrier的内部标量重新序列化一遍。`ModelInputCompileBinding`中的estimator object/transport capability不进入fingerprint，只使用其既有binding/target/estimator/tool-surface fingerprints。
 
 它表达“在这个safe point正常继续时，当前authority会投影出的完整上下文”，但它不是PreparedProviderInputAppendCandidate，也不能被DirectModel打开。构造规则为：
 
@@ -1238,7 +1012,7 @@ Chat Completions与Responses adapter必须依据prepared call的sealed类型显�
 
 tool specs在这里是纯描述数据，不要求取得live executor borrow，因为physical dispatch被call-purpose gate绝对禁止。COMPATIBLE_APPEND时它们必须与prior epoch完全相等，包括old epoch的DIRECT MCP与三个固定catalog/meta tools；当前catalog中的NEW MCP绝不能插入summary `tools`。PENDING_NON_COMPACTION_RESET时使用普通dispatch本来已经要求的prospective surface，并明确放弃旧cache承诺，但仍不得因MCP late-ready单独进入该状态。
 
-summary request一旦open便不可被中途改写。summary结束后，active branch另行冻结successor `FrozenEpochMcpExposure`、其余current tool surface与Runtime facts并做exact dry compile；idle branch只验证snapshot/post-cut base，不提前建立epoch。successor exposure冻结前发生的MCP变化采用当时最新完整generation；冻结后发生的MCP语义变化继续由supervisor唯一拥有，并在active FULL安装后按`current catalog - frozen DIRECT exposure`成为`NEW_MCP_META_ONLY` suffix，不反复废弃compaction。permission、skill等其他current facts按各自既有freeze规则处理。只有canonical source head漂移、source proof失效或active branch已冻结的successor facts使dry compile失败时才丢弃attempt。
+summary request一旦open便不可被中途改写。summary结束后，active branch另行冻结current owner inventories/registry与successor `FrozenCapabilityExposurePlan`、其余Runtime facts并做exact dry compile；idle branch只验证snapshot/post-cut base，不提前建立epoch。successor plan冻结前发生的MCP/Skill变化采用当时最新complete snapshot；冻结后发生的变化继续由各自owner唯一拥有，并在active FULL安装后按Round 9/9.1 normal compatible-append规则形成NEW catalog或Skill successor，不反复废弃compaction。permission、Plan、memory等其他current facts按各自既有freeze规则处理。只有canonical source head漂移、source proof失效或active branch已冻结的successor facts使dry compile失败时才丢弃attempt。
 
 ### 8.3 Hidden execution gate，不新增permission mode
 
@@ -1488,69 +1262,26 @@ FULL
 -> OMITTED_BODY
 ~~~
 
-不得新增`COMPACTION_FULL`、`COMPACTION_COMPACT`、last-result专用cap、parallel-result公平配额或compaction artifact inventory。planner只按3→2→1→0选择最长完整group suffix，并用normal compiler对每个候选整体quote；一旦选择，new epoch与未发生compaction的普通call对同一个ToolResult必须产生相同ordered variant set和相同provider bytes。
+不得新增`COMPACTION_FULL`、`COMPACTION_COMPACT`、last-result专用cap、parallel-result公平配额或compaction artifact inventory。Planner只按3→2→1→0选择最长完整group suffix，并用normal compiler对每个候选整体quote。等价性必须以Round 7.1定义的`same canonical item + same lowering contract + same call-local augmentation inputs`为前提；不能要求跨epoch opaque citation handle逐字相同。
 
-### 11.3 全局normal ToolResult provider bound
+### 11.3 复用Round 7.1普通ToolResult投影
 
-Codex最新模型的普通tool-output policy是10,000 tokens，grok-build通用工具默认是40,000 bytes。Round 5B借此一次性升级Round 3 lowering contract，将Pulsara所有normal model call统一冻结为：
-
-~~~text
-model-visible ToolResult final-message target    40,000 UTF-8 bytes
-canonical preview final hard bound               65,536 UTF-8 bytes
-artifact archive threshold                        8,000 UTF-8 bytes
-REF_ONLY final-message hard bound                  2,048 UTF-8 bytes
-artifact_read default/hard                        20,000 / 32,000 chars
-~~~
-
-本小节明确supersede Round 1的32,000-char COMPLETE decision与Round 3的8-KiB `maximum_tool_result_compact_bytes`；它不修改8,000-char HEAD_TAIL preview、8,000-byte artifact archive threshold、65,536-byte canonical final hard bound或artifact_read分页契约。
-
-唯一共享semantic常量放在现有provider-neutral `src/pulsara_agent/primitives/tool_observation.py`：
+Round 5B不再修改任何normal ToolResult threshold、canonical preview或artifact contract。Protected tail对每个result只能复用Round 7.1已经冻结的有序variants：
 
 ~~~text
-MODEL_VISIBLE_TOOL_RESULT_MAX_UTF8_BYTES = 40_000
+FULL -> COMPACT -> REF_ONLY -> OMITTED_BODY
 ~~~
 
-`tool_artifacts.py`用它替代`COMPLETE_DISPLAY_BODY_CHARS`，`StructuredModelInputLimits.maximum_tool_result_provider_message_bytes`也直接以它作为default；禁止在两个模块各写一个40,000 literal。`HEAD_TAIL_PREVIEW_CHARS = 8_000`保持独立，REF_ONLY仍有独立2,048-byte hard bound。该常量不是用户可在run中动态切换的config；未来若开放配置，必须在Host open冻结并进入lowering contract，不能热改continuity epoch。
+`MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES`、HEAD_TAIL、COMPACT、REF_ONLY、artifact threshold与`artifact_read`分页的全部精确数值及renderer均以Round 7.1为唯一真源。本文不得再声明同值constant或为last/retained/MCP/Terminal result建立特例。
 
-closed rendering规则：
+同一ToolResult在ordinary call与post-compaction retained tail必须调用同一pure builder。只有canonical item、lowering contract与call-local augmentation输入（包括exact scope/epoch citation mapping及当前artifact-read visibility）全部相同时，ordered variants才要求byte-identical。Successor使用自己的citation snapshot；旧epoch `tool:N`不得迁移、保留或伪造成新epochcapability。除这些closed augmentation外，canonical body、artifact/timing/result-state base projection必须一致。
 
-1. canonical preparation不再按`COMPLETE_DISPLAY_BODY_CHARS = 32,000`判断；sanitized candidate正文不超过40,000 UTF-8 bytes且final canonical envelope不越65,536 bytes时冻结为COMPLETE；
-2. candidate正文超过40,000 bytes时冻结为HEAD_TAIL，继续保留现有8,000-character、65/35 head/tail preview，并在65,536-byte final hard bound内确定性缩小；
-3. final provider ToolResult message不超过40,000 bytes时可以FULL；超过时normal COMPACT再次从已冻结canonical preview生成UTF-8-safe head/tail，连同typed envelope与artifact guidance后的final message必须不超过40,000 bytes；
-4. context仍不足时，normal compiler才继续降为REF_ONLY或OMITTED_BODY；
-5. artifact archive threshold保持8,000 bytes，因此8,001..40,000-byte结果可以“provider FULL + artifact AVAILABLE”，两者并不冲突；
-6. `COMPLETE | HEAD_TAIL`、artifact disposition与canonical preview仍在ToolResult acceptance时冻结，compiler只选择已冻结preview的normal provider variant；
-7. byte计算覆盖最终provider message，而不只统计正文；所有head/tail切分必须UTF-8 safe。
+Planner只按3→2→1→0选择最长完整group suffix，并用normal compiler对每个候选整体quote；如果不fit，减少完整group或让normal compiler选择Round 7.1允许的degraded variant。包含`FULL_REQUIRED` result的group只能保持该result为FULL或从protected suffix整体移除，不能拆pair、重做artifact、迁移opaque handle或发明compaction-only representation。
 
-这是一项全局normal projection contract bump，不是compaction policy。activation必须cold-open新Host；运行中的旧continuity epoch不得热切换阈值。若artifact disposition为UNAVAILABLE，COMPACT仍显示head/tail与明确不可恢复警示，不能伪造artifact ID。
+### 11.4 Compaction不诱导模型遍历artifact
 
-### 11.4 Coupled bounds与明确不联动的边界
-
-以下必须随本次normal projection contract一起修改：
-
-| 层 | 新契约 |
-|---|---|
-| ToolResult preparation | COMPLETE按40,000 UTF-8 bytes判断；更大candidate冻结HEAD_TAIL |
-| canonical preview | COMPLETE改用共享40,000-byte decision；HEAD_TAIL仍为8,000 chars；final hard仍65,536 bytes |
-| live authoritative End | 发送同一个新canonical preview，不保留旧32,000-char COMPLETE分支 |
-| Round 3 lowering | FULL和COMPACT final provider message统一最多40,000 bytes |
-| ordinary/retained history | builtin、Terminal、MCP、Plan、memory、artifact_read等全部ToolResult复用同一normal variants |
-| descriptor/tests/evidence | 不再宣传32,000-char COMPLETE或8-KiB provider COMPACT；HEAD_TAIL仍明确8,000 chars；补充40,000-byte UTF-8 golden |
-
-以下边界不应机械抬到40,000，因为它们拥有不同职责：
-
-- artifact archive threshold保持8,000 bytes：它决定何时保留完整可恢复正文；若抬到40,000，8..40 KB结果在后续budget降级时可能没有artifact escape hatch；
-- canonical preview hard bound保持65,536 bytes：它为40,000-byte正文及typed envelope提供physical safety margin；
-- REF_ONLY保持2,048 bytes：它是context pressure下的最小typed reference，不是普通正文展示阈值；
-- artifact_read的20,000/32,000 chars是分页请求窗口，不是provider final-message cap；返回结果仍经过统一40,000-byte normal projection；
-- Terminal 16-MiB per-process retained raw bytes、MCP pre-parse body/frame caps及各工具自身分页/读取上限仍是physical safety或远端协议边界，不能与model-visible投影混为一谈。
-
-因此本轮不照搬grok-build的bash 20,000-char或MCP 20,000-byte特例。Pulsara已经有统一sanitized candidate、artifact与provider lowering管线；所有工具统一40,000-byte normal projection更小、更可预测。未来若某工具需要更低physical cap，必须在candidate形成前以该工具自身typed contract表达，不能在compaction里静默截断。
-
-### 11.5 不诱导模型遍历artifact
-
-- 只在可见retained ToolResult的existing projection中显示artifact_id；
-- HEAD_TAIL/COMPACT guidance必须使用条件语义：“仅当省略正文对当前任务确有必要时，才调用artifact_read”；不得使用无条件`Use artifact_read...`催促模型读取；
+- 只在可见retained ToolResult的existing Round 7.1 projection中显示artifact_id；
+- guidance复用Round 7.1 conditional语义：“仅当省略正文对当前任务确有必要时，才调用artifact_read”；
 - 首尾已经足以判断成功、失败、主要错误或下一步时，模型应继续主线，不读取artifact；
 - summary prompt禁止枚举全部handle；
 - Runtime handoff不列artifact；
@@ -1607,7 +1338,7 @@ PreparedCompactionCanonicalAdoption
 
 `ContextSnapshotDraft`与`TurnContextBindingRevisionDraft`在物理schema中都必须保存`source_through_sequence`，所以prepared candidate仍保留两个**只读row mirror**并在FULL时逐字段确认；但两者只能由factory input中的同一个source materialization identity派生，不能由调用者分别赋值。next revision ordinal由predecessor + 1派生；turn pointer expected winner直接由`TurnContextBindingRevisionDraft.context_binding_revision_id`派生，不再创建`TurnPointerWinner` wrapper；event type、subject和payload revision ordinal同样由binding draft派生，只有event ID、actor与occurred_at是独立输入。
 
-这里的row mirror都能由`context_snapshots`、`turn_context_binding_revisions`、`turns.current_context_binding_revision_id`、predecessor revision和exact committed event逐字段查询。trigger、source view、prefix proof、retained group IDs、recent-user entry IDs、epoch nonce、MCP exposure、slot/borrow、execution identity、current-source collection与dry-compile fingerprint一律不进入canonical candidate或其fingerprint。
+这里的row mirror都能由`context_snapshots`、`turn_context_binding_revisions`、`turns.current_context_binding_revision_id`、predecessor revision和exact committed event逐字段查询。trigger、source view、prefix proof、retained group IDs、recent-user entry IDs、epoch nonce、capability exposure plan、tool-surface access、execution identity、current-source collection与dry-compile fingerprint一律不进入canonical candidate或其fingerprint。
 
 这些process-local事实进入与candidate分开的closed resource union：
 
@@ -1626,13 +1357,14 @@ CompactionSettlementResources
         ActiveCompactionInstallationResources
             old continuity epoch identity
             frozen current source collection
-            successor semantic FrozenEpochMcpExposure
-            frozen successor initial MCP_CATALOG projection
+            successor FrozenCapabilityPlanningCut
+            successor FrozenCapabilityExposurePlan
+            frozen successor effective MCP_CATALOG / SKILL_CATALOG heads
+            frozen successor Skill activation lookup attachment
             dry_compiled_input: FrozenCompiledModelInput
             semantic_installation_resource_fingerprint
             physical_attempt:
-                McpEpochExposureBorrow
-                process-local tool execution binding
+                normal ProcessLocalToolSurfaceAccess
                 continuity installation authority
                 replaceable physical-attempt identity
 
@@ -1640,33 +1372,34 @@ CompactionSettlementResources
             expected exact terminal target
             validated bounded snapshot/post-cut base quote
             old continuity identity to clear | EMPTY
-            no successor exposure / borrow / dry input / install authority
+            no successor planning/exposure/access/lookup/dry input/install authority
 ~~~
 
 `CompactionCanonicalWritePreconditions`只承载在candidate冻结后仍可能变化、且repository必须在write时重新观察的target status、safe head和provider-safe closure。predecessor pointer与lineage base已经由canonical candidate唯一拥有，不得在preconditions再传一份。
 
-`dry_compiled_input.final_estimate`是唯一target estimate；active resources不得另存`target_estimate`字段。`semantic_installation_resource_fingerprint`覆盖`dry_compiled_input.compiled_semantic_fingerprint`、current source collection、successor semantic exposure和initial catalog projection。MCP semantic exposure/catalog只在active resources出现一次；nested physical attempt只能通过borrow中的expected exposure fingerprint exact join，并可在E1→E2 reconnect时替换slot leases/execution binding而不改变semantic resource。
+`dry_compiled_input.final_estimate`是唯一target estimate；active resources不得另存`target_estimate`字段。`semantic_installation_resource_fingerprint`覆盖`dry_compiled_input.compiled_semantic_fingerprint`、current source collection、successor planning cut/exposure plan、effective catalog heads与Skill lookup attachment fingerprint。Round 9/9.1 semantic values只在active resources出现一次；nested physical attempt只能通过normal tool-surface access exact join direct surface，并可在E1→E2 reconnect时替换compatible physical binding而不改变semantic resource。
 
-该resource fingerprint不是canonical identity，也不参与stateless FULL confirmation。same-schema reconnect从execution identity E1变为E2时，只替换nested physical attempt并重验semantic join；不得改变semantic resource fingerprint或canonical candidate。semantic surface变化则不能按E2重绑，必须让旧DIRECT stale、replacement成为NEW或放弃当前installation。
+该resource fingerprint不是canonical identity，也不参与stateless FULL confirmation。same-schema reconnect从execution identity E1变为E2时，只替换nested physical attempt并重验semantic join；不得改变semantic resource fingerprint或canonical candidate。semantic surface变化则不能按E2重绑：若尚未canonical FULL可放弃当前installation并重新planning；若已经FULL，则frozen旧DIRECT进入stale gate，同identity replacement保持`PENDING_COLD_ADOPTION`且不得走meta，等待下一次合法cold boundary。
 
 HostWriterGuard generation同样不进入canonical candidate。每次write attempt使用可替换guard；ACK unknown先按stable row drafts exact query，NONE时才重新验证process-local write preconditions并绑定current writer重试。
 
 ### 12.2 Active dry compile与idle base validation必须发生在write之前
 
-`ACTIVE_INSTALLATION`分支取得§2.12的exact `McpEpochExposureBorrow`，并使用process-local synthetic canonical snapshot构造：
+`ACTIVE_INSTALLATION`分支取得§2.12的successor Round 9 exposure plan与normal `ProcessLocalToolSurfaceAccess`，并使用process-local synthetic canonical snapshot构造：
 
 ~~~text
 [validated snapshot item]
 + exact canonical items after source boundary through safe head
 + current one-cut compiler facts
-+ successor builtin/direct MCP/fixed-meta tool surface
-+ frozen successor initial MCP_CATALOG with DIRECT | NEW classification
++ successor FrozenCapabilityExposurePlan.direct_tool_surface
++ compiler最终effective MCP_CATALOG / SKILL_CATALOG heads
++ post-compile FrozenSkillActivationCatalogLookup dispatch attachment
 + current COMPACTION_RUNTIME_HANDOFF
 ~~~
 
 调用同一个pure compiler和target estimator。只有dry compile成功、满足post target、`PreparedCompactionCanonicalAdoption`已经冻结且对应`ActiveCompactionInstallationResources`完整时，才允许repository transaction。dry-compile/resource fingerprint不并入canonical candidate。
 
-事务FULL后，reader对真实snapshot/revision和active resources中唯一的frozen initial MCP catalog执行一次exact compile，必须与`dry_compiled_input.compiled_semantic_fingerprint`一致；不一致为implementation conflict，provider open=0。physical borrow只提供与该semantic exposure fingerprint相容的slot leases/execution binding。该首次exact compile/install完成后，再以MCP supervisor当前catalog减去frozen successor DIRECT exposure，形成下一次compatible append中的`NEW_MCP_META_ONLY` observation。
+事务FULL后，reader对真实snapshot/revision和active resources中唯一的effective catalog heads执行一次exact compile，必须与`dry_compiled_input.compiled_semantic_fingerprint`一致；不一致为implementation conflict，provider open=0。Normal tool-surface access只提供与successor native surface相容的execution leaves。该首次exact compile/install完成后，再由Round 9/9.1 normal planning比较current owner snapshots与frozen successor plan，形成下一次compatible append中的NEW MCP或Skill catalog successor。
 
 `IDLE_BASE_ONLY`不冻结successor tool/MCP/current-source surface，因为下一条用户消息到达前这些事实可以合法变化。它只在write前验证：
 
@@ -1675,7 +1408,7 @@ HostWriterGuard generation同样不进入canonical candidate。每次write attem
 - snapshot/post-cut base在当前resolved target下低于hard input boundary；
 - 没有伪造对“未来下一条prompt + 未来current sources”的exact dry-compile承诺。
 
-idle branch绝不创建`McpEpochExposureBorrow`、PreparedProviderInputAppendCandidate、continuity install candidate或permit。下一条same-scope turn才按当时current MCP catalog、permission、skill与memory执行普通cold compile。
+idle branch绝不创建successor Capability planning cut/exposure plan、Skill activation lookup、`ProcessLocalToolSurfaceAccess`、PreparedProviderInputAppendCandidate、continuity install candidate或permit。下一条same-scope turn才按当时current capability catalog、permission、Plan、skill与memory执行普通cold compile。
 
 ### 12.3 Canonical transaction
 
@@ -1692,7 +1425,7 @@ idle branch绝不创建`McpEpochExposureBorrow`、PreparedProviderInputAppendCan
 9. append exact CompactionAdopted event；
 10. commit。
 
-repository API接收`PreparedCompactionCanonicalAdoption`与窄的write-precondition facts，但只把前者作为winner identity。它不读取process-local MCP supervisor、source view、prefix proof、dry compile或borrow。active resources在write前由Host持有`McpEpochExposureBorrow`；FULL后由同一个settlement task按frozen semantic surface exact rebind/install。physical identity冲突时provider open=0，但不能回滚、改写candidate或另写已经FULL的canonical snapshot。idle resources没有borrow或installation side branch。不得分成“先存summary、再更新binding”两个事务；不得产生orphan snapshot或CompactionStarted row。
+repository API接收`PreparedCompactionCanonicalAdoption`与窄的write-precondition facts，但只把前者作为winner identity。它不读取process-local capability owner、source view、prefix proof、dry compile、Skill lookup或tool-surface access。active resources在write前由Host持有Round 9/9.1 semantic plan/attachment与normal physical access；FULL后由同一个settlement task按frozen semantic surface exact rebind/install。physical identity冲突时provider open=0，但不能回滚、改写candidate或另写已经FULL的canonical snapshot。idle resources没有physical access或installation side branch。不得分成“先存summary、再更新binding”两个事务；不得产生orphan snapshot或CompactionStarted row。
 
 ### 12.4 Active与idle target
 
@@ -1729,8 +1462,8 @@ summary完成并形成`PreparedCompactionCanonicalAdoption + CompactionSettlemen
 
 FULL后：
 
-- `ActiveCompactionInstallationResources`且current writer/turn仍exact有效：按frozen semantic surface把E1 exact rebind为当前compatible physical binding E1或E2，再消费同一个install authority并install exact new epoch once；
-- `ACTIVE_INSTALLATION`在FULL后已变为COMPLETED/INTERRUPTED：保留historical winner，释放successor borrow，清除旧scope continuity，不签发/遗留permit且不启动runner；
+- `ActiveCompactionInstallationResources`且current writer/turn仍exact有效：按successor `FrozenCapabilityExposurePlan`把E1 exact rebind为当前compatible normal tool-surface access E1或E2，再消费同一个install authority并install exact new epoch once；
+- `ACTIVE_INSTALLATION`在FULL后已变为COMPLETED/INTERRUPTED：保留historical winner，释放successor access/lookup attachment，清除旧scope continuity，不签发/遗留permit且不启动runner；
 - `IdleCompactionBaseSettlementResources`：释放process-local summary资源，清除旧scope continuity；永远不调用`HostProviderInputContinuityOwner.install()`；
 - writer已stale：旧Host不安装provider epoch，新Host从canonical binding冷读；
 - identity mismatch：CONFLICT。
@@ -1747,13 +1480,13 @@ adoption FULL后：
 
 1. old continuity slot保留到canonical FULL；
 2. compiler看到context base semantic identity变化，产生CONTEXT_BINDING_REWRITE；
-3. Host从`ActiveCompactionInstallationResources`读取唯一的successor `FrozenEpochMcpExposure`与initial catalog projection，并用`McpEpochExposureBorrow`中的expected fingerprint/leases exact join相容physical slots；尚不发布为current，也不撤销old refs；
-4. exact compile snapshot + post-cut rows + current sources + successor direct/meta tool surface；
+3. Host从`ActiveCompactionInstallationResources`读取唯一的successor `FrozenCapabilityPlanningCut/FrozenCapabilityExposurePlan`、effective catalog heads与Skill lookup attachment，并以normal `ProcessLocalToolSurfaceAccess` exact join相容physical bindings；尚不发布为current，也不撤销old refs；
+4. exact compile snapshot + post-cut rows + current sources + successor direct/meta tool surface，并重新证明post-compile effective Skill lookup与dry compile一致；
 5. normal DirectModel为该exact compiled input和tool-surface borrow完成transport-aware preflight，形成one-shot `PreparedKernelModelExecution`，此时尚未打开provider；
-6. Host凭该prepared execution注册incompatible successor candidate并执行continuity CAS；同一Host lock/CAS winner安装successor exposure、撤销old refs并签发exact permit；
+6. Host凭该prepared execution注册incompatible successor candidate并执行continuity CAS；同一Host lock/CAS winner安装successor exposure plan与exact Skill lookup attachment、撤销old refs并签发exact permit；
 7. 同一个prepared execution的`open_once()`消费同一个permit并打开provider；
-8. 读取MCP supervisor current catalog减去frozen DIRECT exposure，后续以compatible suffix发布NEW observation；
-9. 后续同epoch恢复strict prefix，普通MCP discovery只能追加NEW observation。
+8. 由Round 9/9.1 normal planning比较current owner snapshots与frozen successor facts，后续以compatible suffix发布NEW MCP或Skill catalog successor；
+9. 后续同epoch恢复strict prefix，普通Capability refresh只能追加observation，不能修改native tools。
 
 preflight失败发生在continuity install前，不得推进epoch或遗留permit；CAS/install后open失败则按Round 3.1/5A existing physical outcome关闭exact prepared execution，canonical snapshot仍是current binding，下一次dispatch从它cold/read-only重备。
 
@@ -1854,7 +1587,8 @@ Host takeover不会接管旧Host的process-local summary、prefix proof或deferr
 | malformed/truncated/oversized summary | none | discard |
 | MCP late-ready/semantic replacement before summary opens | none | old summary tools不变；catalog observation在exact prefix/tail中，successor另行freeze |
 | MCP late-ready/semantic replacement while summary streams、active successor freeze前 | none yet | summary继续old tools；active完成后freeze最新READY_CLEAN exposure并dry compile；idle不freeze |
-| new semantic discovery在successor borrow/dry compile后完成 | none yet | supervisor继续拥有current generation；active FULL后按current-minus-frozen差集成为NEW suffix，不改candidate |
+| 新identity在successor access/dry compile后完成discovery | none yet | supervisor继续拥有current truth；active FULL后按current-minus-frozen差集成为NEW suffix，不改candidate |
+| frozen successor DIRECT发生same-identity semantic replacement | none yet | old descriptor按frozen plan安装并stale；replacement报告pending cold adoption，不签发meta ref、不改candidate |
 | MCP仅same-schema physical reconnect | none | semantic exposure不变；允许重借current exact slot |
 | other current source/non-MCP tool surface changes during summary | none yet | refreeze and dry compile current facts |
 | canonical source head drifts despite fence | none | conflict, discard summary |
@@ -1866,13 +1600,10 @@ Host takeover不会接管旧Host的process-local summary、prefix proof或deferr
 | active FULL, epoch install fails | snapshot remains canonical | provider open=0；释放borrow且不得遗留permit；same Host可重新cold read，replacement Host也可cold read |
 | idle FULL | snapshot remains canonical | clear old scope continuity；无successor borrow/permit/runner，下一turn cold read |
 | token ratio低但item/post-base bytes/epoch bytes接近hard bound | none before trigger | resource-headroom OR trigger提前compact，不等第4,097项或hard byte rejection |
-| cold MCP cohort整体超过native surface bound | none | fixed builtins cold-open；全部MCP走META_ONLY，不按完成顺序partial、不让Host失败 |
+| active successor完整NEW cohort超过native surface bound | none | compaction继续；compatible old DIRECT保留，NEW全部继续META_ONLY，不按完成顺序partial |
 | new Host has no old Terminal state | none | handoff CLEARED invalidates stale summary claim |
 | deferred client input exists | none until fence release | submit only after success/failure |
-| current epoch DIRECT MCP连接已知失效 | none | native descriptor不变；local typed unavailable，无meta reroute |
-| `inspect_new_mcp_tool`指向DIRECT/builtin | none | targeted INVALID_ARGUMENTS，无attempt |
-| `use_new_mcp_tool` ref stale/foreign/promoted | none | typed stale/invalid，无attempt |
-| new MCP schema/permission/dirty validation拒绝 | none | no physical attempt；普通conversation继续 |
+| Round 9 ordinary direct/meta gate变化 | none | 由Round 9 retained contract结算；不得由compaction package重实现 |
 
 Auto compaction failure不应立即interrupt一个仍能完成当前provider call的turn；如果old input已经无法满足hard provider budget且compaction也失败，使用typed CONTEXT_COMPACTION_FAILED_RESOURCE_BOUNDARY终结，不reactive调用provider。
 
@@ -2048,10 +1779,6 @@ snapshot blob丢失、digest/size/media/codec不符或carrier JSON不合法时pr
 建议新增：
 
 ~~~text
-src/pulsara_agent/conversation_kernel/mcp/
-    exposure.py        epoch DIRECT | NEW projection / refs / fingerprints
-    new_tools.py       inspect/use meta dispatch and exact validation
-
 src/pulsara_agent/conversation_kernel/compaction/
     contracts.py       pure enums/DTO/fingerprints
     planner.py         one-cut groups/boundary/recent-user selection
@@ -2076,10 +1803,10 @@ terminal/todo/subagent
     -> bounded read-only views
     -> runtime_handoff collector
 
-mcp supervisor current catalog
-    -> epoch exposure projector
-    -> fixed inspect/use meta bindings
-    -> tool_runtime provider surface
+Round 9 capability owners/planner
+    -> ordinary FrozenCapabilityPlanningCut / FrozenCapabilityExposurePlan
+    -> compaction successor-selection seam
+    -> ordinary tool-surface access and compiler
 ~~~
 
 禁止：
@@ -2091,27 +1818,15 @@ mcp supervisor current catalog
 - summary call复用normal AGENT_MODEL_LOOP continuity/executor owner；
 - context snapshot保存Python object、borrow、permit或transport；
 - runtime handoff source写canonical row。
-- MCP meta dispatcher按裸name查当前executor、接受DIRECT/builtin或绕过dirty/permission/attempt order；
+- compaction package重新实现MCP meta dispatcher、catalog/list/inspect/use或direct unavailable gate；
 - late-ready callback直接修改已安装`FrozenModelToolSurface`；
-- descriptor filesystem、BM25/dense index或第二套durable MCP catalog成为NEW discovery authority。
+- compaction package定义第二套capability registry/planning cut/exposure DTO或physical borrow。
 
 ---
 
 ## 19. 实施切片
 
-### R5B-0：Epoch-scoped MCP direct/new closure
-
-- 固定`list_mcp_servers`、`inspect_new_mcp_tool`、`use_new_mcp_tool` descriptors并cold bump tool-surface contract；
-- 从`DirectKernelToolPort.snapshot_tool_surface()`移除“每次current MCP generation都直接重建native specs”的热路径，改为使用exact `FrozenEpochMcpExposure`；
-- Host/cold bootstrap对完整READY_CLEAN MCP cohort执行all-DIRECT-or-all-META fallback；普通safe point只安装NEW catalog/executor generation；
-- `list_mcp_servers`增加epoch-relative DIRECT/NEW分类与exact paginated server detail；
-- `MCP_CATALOG` renderer增加new-tool双步骤guidance及explicit omitted counts；
-- `inspect_new_mcp_tool`签发scope/epoch/semantic-bound ref；
-- `use_new_mcp_tool`复用Round 6 permit/dirty/concurrency/input-required/effect policy和Round 1/5A settlement；
-- direct disconnect/schema replacement gate与same-schema reconnect闭合；
-- 不新增schema/event/job/guard或durable MCP owner。
-
-这一slice必须在compaction实现前独立证明：late-ready/new schema不触发TOOL_SURFACE_CHANGED，current epoch strict prefix保持；当前direct happy path仍使用native工具名和native schema。
+Round 7.1、Round 9与Round 9.1必须先各自标记ACTIVATED并具备机器证据；它们不是`R5B-*` slice。Round 5B M0只记录三者的activation hash、ordinary ToolResult/Capability/Skill retained node IDs与public DTO manifest，禁止在本轮重新实现或补丁式完成其production路径。
 
 ### R5B-1：减掉dormant job universe并重算oracle
 
@@ -2151,13 +1866,13 @@ mcp supervisor current catalog
 
 ### R5B-D：Compiler rebase与Runtime handoff
 
-- normal ToolResult provider bound统一升级为40,000 bytes，ordinary/retained共用同一lowering contract；
+- retained ToolResult复用Round 7.1 ordinary pure builder，并在相同call-local augmentation输入下验证byte-identical；successor epoch citation mapping作为显式输入，不迁移旧opaque handle；
 - COMPACTION_RUNTIME_HANDOFF source；
 - Terminal/monitor/TODO/flat subagent snapshots；
 - dry compile；
-- successor MCP exposure refreeze与all-or-none promotion；
-- active resources唯一持有successor semantic exposure/catalog；`McpEpochExposureBorrow`只pin expected exposure fingerprint与slot leases，aggregate execution binding由外层physical attempt持有一次；期间的新semantic generation仍由既有supervisor唯一拥有，FULL后按差集成为NEW；
-- promotion后旧new-tool refs撤销、catalog DIRECT/NEW reclassification与bounded guidance；
+- successor Round 9 planning cut/exposure plan refreeze与all-or-none NEW promotion；
+- active resources唯一组合successor exposure plan/effective catalog heads/post-compile Skill lookup；physical layer直接复用normal `ProcessLocalToolSurfaceAccess`，期间的新semantic facts仍由既有owners唯一拥有；
+- promotion后旧new-tool refs撤销，catalog DIRECT/NEW reclassification继续调用Round 9普通renderer；
 - CONTEXT_BINDING_REWRITE epoch swap；
 - post-adoption strict-prefix proof。
 
@@ -2184,27 +1899,18 @@ mcp supervisor current catalog
 
 ## 20. 测试矩阵
 
-### 20.1 MCP direct/new exposure与meta dispatch
+### 20.1 前置Round retained与successor Capability integration
 
-- zero-MCP时三个fixed catalog/meta descriptors已经存在；
-- Host bootstrap READY_CLEAN MCP与builtin同级DIRECT，真实provider native call只执行一次；
-- cold freeze前READY的完整MCP cohort越native bound时fixed builtins仍可open、全部MCP为META_ONLY，并在initial MCP_CATALOG中说明unpromoted原因与inspect/use路径；同一server在freeze后READY得到相同meta可用性，不出现早1 ms Host失败、晚1 ms成功；
-- late-ready server在safe point安装后，SYSTEM/tools逐字不变，只追加MCP_CATALOG suffix；
-- observation完整列出小server全部qualified names，并固定指示inspect -> use；
-- 名字列表越bound时包含exact total/omitted，`list_mcp_servers(server_id, cursor)`可无遗漏分页遍历全集；
-- `list_mcp_servers`同时报告DIRECT/NEW、status、resources/prompts，不把前32个overview冒充全集；
-- `inspect_new_mcp_tool`只为NEW返回exact schema/ref；builtin、DIRECT、unknown、dirty分别typed拒绝且attempt count=0；
-- `use_new_mcp_tool`对valid ref执行exact一次remote call，只有一个canonical attempt/result，origin=MCP；
-- builtin或DIRECT误走use返回“call directly”纠正，physical call/attempt均为0；
-- forged/foreign/old-scope/promoted/schema-stale ref fail closed；
-- arguments按inspect descriptor校验，effect permission/confirmation使用underlying MCP policy；
-- listChanged后started operation可drain，新use admission被dirty fence拒绝；
-- direct connection known-down时native descriptor不变、typed unavailable且禁止meta reroute；
-- direct same-schema reconnect使用新slot，surface fingerprint与provider prefix不变；
-- direct semantic replacement使旧native call stale、新descriptor变NEW并可inspect/use；
-- ROOT/child exposure与ref严格隔离；
-- Chat Completions与Responses均证明late-ready前后SYSTEM/tools相等、messages suffix-only；
-- 不新增BM25/dense/VFS index、dynamic provider tool spec或durable MCP relation。
+- Round 7.1、Round 9、Round 9.1 activation evidence hash与public DTO manifest exact匹配；
+- Round 9 normal cold/direct/meta/catalog/list/inspect/use/unavailable/schema-replacement suites原样retained，Round 5B不新增同义unit suite；
+- Round 9.1 normal Skill add/change/remove/effective-head activation suites原样retained；
+- summary request始终使用old installed `CapabilityEpochPredecessor`的exact native tools与old catalog message prefix；
+- active successor使用current complete registry形成标准`FrozenCapabilityPlanningCut/FrozenCapabilityExposurePlan`；
+- fit的完整NEW cohort整体promotion；overbound时旧compatible DIRECT保留、NEW全部继续meta，不partial ranking且compaction可成功；
+- old DIRECT schema replacement只在successor boundary采用，不在old epoch以meta双版本绕过；
+- successor compile后Skill activation lookup从effective catalog head构造并与continuity CAS一起安装；
+- freeze后到达的新MCP/Skill facts不改candidate，安装后走Round 9/9.1 normal compatible suffix；
+- no `FrozenEpochMcpExposure`、`McpEpochExposureBorrow`、compaction meta dispatcher或second capability registry exists。
 
 ### 20.2 Pure planner golden
 
@@ -2212,7 +1918,7 @@ mcp supervisor current catalog
 - EMPTY_COLD、COMPATIBLE_APPEND与PENDING_NON_COMPACTION_RESET三态；
 - source view组合`FrozenCanonicalCompileSnapshot`、`ModelInputCompileBinding`、optional predecessor epoch view与最小`FrozenCompactionProviderProjection`；compatible projection只存append suffix，cold/reset projection才存完整SYSTEM/messages，且不存在第二份tools/epoch/frontier/source-head/estimate；current safe head从canonical compile cut派生，predecessor frontier只用于prefix proof；
 - source view超过effective provider budget时仍能形成合法projection/estimate而不能伪造`FrozenCompiledModelInput`；summary slice必须单独回到budget内；
-- `FrozenModelToolSurface`是old provider tool surface唯一owner；source view中的projected tools必须与其逐项相等，MCP exposure只补充DIRECT/NEW/stale分类而不复制spec；
+- `FrozenModelToolSurface`是old provider tool surface唯一owner；source view只组合Round 9 `CapabilityEpochPredecessor`，不复制MCP exposure/spec tuple；
 - source view whole-budget可超soft input limit但不越physical working-set，实际summary slice必须可open；
 - 0/1/2/3/4+ tool groups；
 - parallel 3-call batch保持原子；
@@ -2227,6 +1933,8 @@ mcp supervisor current catalog
 - first compaction从FULL_HISTORY effective floor=0计算lineage digest；repeated compaction只读取prior snapshot floor之后的bounded delta；
 - lineage digest对post-base row drift、prior snapshot/base binding漂移敏感；
 - reader与repository hydrate同一`FrozenCompactionCanonicalRange` envelope并复用normal provider-item/closure/late-outcome leaf fingerprints产生逐字相同digest；ordered blocks、artifact/timing/closure及cut内late result任一语义变化都会改变digest，cut后late result不会提前改变；
+- retained result以successor epoch自己的memory citation snapshot重建call-local augmentation；同augmentation下variants逐字相等，不同epoch旧`tool:N`不会迁移；
+- retained group包含Round 7.1 `FULL_REQUIRED` result时，该result不得降级；候选整体不fit则按3→2→1→0移除整个group而不拆pair；
 - `ProviderPrefixCutProof`只保存source-view fingerprint、prefix count/fingerprint、source boundary和protected-tail-selection fingerprint；retained group/tool-call anchors只存在于`ProtectedTailSelectionFact`；
 - 大量短entry在4096-item hard stop前由resource headroom触发；16 MiB reader与64 MiB epoch边界各保留一次maximum legal admission quote。
 
@@ -2275,7 +1983,7 @@ summary last message == synthetic summary request
 - sealed canonical factory只接收一次source materialization identity，并派生snapshot/binding row mirrors、next ordinal、turn pointer expected value和event type/subject/payload；无法传入互相矛盾的duplicate values；
 - `FrozenCompiledModelInput.final_estimate`是active dry compile唯一estimate；不存在并列target estimate；
 - same-schema reconnect E1 -> E2不改变canonical candidate fingerprint，active FULL可按frozen semantic surface rebind E2；
-- same-schema reconnect只替换physical borrow中的slot leases/execution binding；successor semantic exposure与initial catalog在active resources中恰好一份；
+- same-schema reconnect只替换normal tool-surface access中的compatible physical binding；successor planning cut/exposure plan与effective catalog heads在active resources中恰好一份；
 - snapshot/revision/event/pointer原子；
 - ACK unknown FULL/NONE/CONFLICT；
 - expected lineage base/prior digest mismatch为CONFLICT，不能用相同delta嫁接到另一snapshot winner；
@@ -2325,23 +2033,13 @@ summary last message == synthetic summary request
 - 3次auto failure circuit；
 - one compaction per dispatch。
 
-### 20.9 ToolResult/artifact
+### 20.9 Round 7.1 ToolResult retained integration
 
-- candidate正文39,999/40,000/40,001-byte COMPLETE/HEAD_TAIL boundary golden；
-- provider final-message 40,000-byte boundary golden，单独覆盖typed envelope开销；
-- final provider message <=40,000 bytes时normal/retained path都可FULL；
-- 8,001..40,000-byte result可同时FULL并拥有artifact_id；
-- >40,000-byte candidate冻结同一个8,000-char canonical HEAD_TAIL + artifact guidance；normal/retained path再由同一ordinary ladder选择FULL或COMPACT；
-- HEAD_TAIL仍为8,000 characters且65/35分配，不因40,000-byte COMPLETE/provider constant漂移；
-- ASCII、中文与emoji均按final UTF-8 bytes计量，40,000-byte切分不破坏code point；
-- artifact unavailable显示loss warning；
+- Round 7.1 boundary、UTF-8、artifact、conditional guidance与all-origin suites原样retained；
+- 同一ToolResult在相同lowering contract与call-local augmentation输入下，ordinary call与post-compaction retained tail的ordered variants/provider bytes完全相等；successor epoch自己的citation mapping可使opaque handle合法不同，旧handle不得迁移；
 - parallel batch保持provider-valid，不引入compaction专用公平配额；
-- 同一ToolResult在ordinary call与post-compaction retained tail的ordered variants/provider bytes完全相等；
-- builtin、Terminal、MCP、Plan、memory与artifact_read结果全部经过同一40,000-byte provider bound；
-- live authoritative End与repository canonical preview使用同一个COMPLETE/HEAD_TAIL decision；
-- 不输出artifact inventory；
-- artifact_read仍按visible handle工作；
-- 3 group aggregate quote不越target。
+- 不输出artifact inventory；artifact_read仍只按visible handle工作；
+- 3-group aggregate quote不越target；不fit时只减少完整group或选择Round 7.1允许的normal degraded variant；`FULL_REQUIRED` group只能完整保留或整体移除。
 
 ### 20.10 Continuity retained regression
 
@@ -2357,7 +2055,7 @@ summary last message == synthetic summary request
 - late-ready/new schema不单独rebase；
 - compaction successor将fit的current READY_CLEAN NEW整体promote为DIRECT，旧refs失效；
 - successor promotion全量越native bound时不partial选取，NEW集合继续meta且compaction可成功；
-- successor exposure borrow后完成的新discovery不作废adoption；supervisor仍是唯一latest-generation owner，安装后按current-minus-frozen差集成为NEW append；
+- successor exposure plan/normal physical access冻结后完成的新discovery不作废adoption；各source owner仍唯一拥有current truth，安装后按current-minus-frozen差集成为NEW append；
 - Plan one-cut与permission snapshot仍exact。
 
 ### 20.11 Job subtraction
@@ -2378,20 +2076,20 @@ Activation必须在ephemeral clean-v0 PostgreSQL完成至少三条：
 
 ### 21.1 Hybrid MCP promotion
 
-1. Host open前连接一个可靠local stdio MCP，证明其tool作为native DIRECT随builtin发送并调用exact一次；
-2. current epoch安装后再启动第二个local MCP；
-3. 下一call的SYSTEM/tools与前call逐字相同，只新增MCP_CATALOG observation；
-4. 模型按observation主动调用`inspect_new_mcp_tool`，随后调用`use_new_mcp_tool`并完成exact一次remote effect；
-5. 断开初始DIRECT server，证明descriptor仍在native surface、调用得到typed unavailable且模型未误走meta；
-6. same-schema reconnect后direct调用恢复且prefix不reset；
-7. 触发compaction，第二个MCP在successor epoch成为native DIRECT；
-8. successor直接调用promoted tool，旧new-tool ref typed stale；
-9. 全程不记录MCP private config、headers、requestState、完整schema参数或result正文。
+Round 9必须已经独立证明cold DIRECT、late NEW、inspect/use、disconnect gate与same-schema reconnect。Round 5B dogfood不重跑整套normal MCP acceptance，只验证rebase集成：
+
+1. 从一个已安装epoch开始，其中至少一个MCP tool为仍compatible的DIRECT，另一个current READY_CLEAN tool为NEW；
+2. 在compaction前证明NEW tool仍通过Round 9 meta route可用，并冻结该事实的bounded sentinel；
+3. 触发active compaction，summary call继续发送old epoch exact native tools；
+4. successor planning保留compatible old DIRECT，并在完整NEW cohort fit时把该cohort整体提升为DIRECT；
+5. successor直接调用promoted tool exact一次，old-epoch `NewMcpToolRef` typed stale；
+6. 另以over-bound cohort证明compaction仍成功、旧compatible DIRECT不降级、NEW cohort全部继续meta且没有partial winner；
+7. 全程不记录MCP private config、headers、requestState、完整schema参数或result正文。
 
 ### 21.2 Mid-turn long task
 
 1. 使用真实provider与当前主模型；
-2. 构造多个完整tool group，其中至少一个>40,000 bytes并拥有artifact；
+2. 构造多个完整tool group，其中至少一个已经由Round 7.1 normal pipeline形成HEAD_TAIL或COMPACT且拥有artifact；
 3. active context达到threshold；
 4. 发生summary call，tools schema保持相同且physical tool count不增加；
 5. adoption FULL；
@@ -2431,37 +2129,33 @@ Activation必须在ephemeral clean-v0 PostgreSQL完成至少三条：
 13. durable_jobs/job attempts/job events/claim guard残留；
 14. compaction调用memory extraction、governance或rerank；
 15. compaction期间user input成为steer或summary source；
-16. 非MCP current-source drift后仍使用旧dry compile，或MCP supervisor变化原地改写已冻结successor exposure；
+16. current-source drift后仍使用旧dry compile，或Capability owner变化原地改写已冻结successor planning/exposure facts；
 17. repeated compaction并列注入多个summary；
-18. summary/raw provider output写入operational log。
-19. compaction新增专用ToolResult variant、cap或artifact inventory。
-20. production另行定义第二个40,000-byte ToolResult semantic constant，或ToolResult preparation/compiler未共同引用`MODEL_VISIBLE_TOOL_RESULT_MAX_UTF8_BYTES`。
-21. ordinary MCP late-ready/listChanged/schema replacement直接修改已安装provider `tools`或触发`TOOL_SURFACE_CHANGED`。
-22. `use_new_mcp_tool`接受builtin、DIRECT MCP、裸tool name、未inspect/foreign/stale ref，或在permission/dirty/schema validation前创建attempt。
-23. `inspect_new_mcp_tool`为DIRECT/builtin签发ref，或ref绑定physical client object而非semantic descriptor。
-24. MCP discovery正确性依赖BM25、dense embedding、top-k或descriptor filesystem。
-25. `list_mcp_servers`把bounded overview冒充全集，或omitted names没有exact paginated recovery path。
-26. compaction summary使用successor promoted tools而不是old epoch exact tools。
-27. successor MCP promotion按ranking/偶然completion order做partial selection，或把server instructions/catalog写入SYSTEM。
-28. 已断连的DIRECT descriptor为保持prefix而被移除，或被`use_new_mcp_tool`静默重新路由。
-29. repository transaction读取process-local MCP supervisor/borrow，或把source view、prefix proof、dry compile、execution binding、borrow、slot lease、catalog callback写入`PreparedCompactionCanonicalAdoption`。
-30. `McpEpochExposureBorrow`复制`pending/installed/latest generation`或successor draft，形成supervisor之外第二个current MCP owner；
-31. idle adoption调用continuity install、签发未被provider消费的permit、持有successor MCP lease或启动runner；
-32. repeated compaction为验证source digest从genesis扫描全部exact-scope rows，而不是验证current lineage base加bounded delta；
-33. auto trigger只看token ratio，使reader item/16 MiB或epoch 64 MiB hard bound先于compaction admission命中；
-34. cold MCP cohort越native bound导致整个provider open失败，或按discovery timing/排名partial选取DIRECT；
-35. summary通过normal `AGENT_MODEL_LOOP` execution取得continuity install authority、executor borrow或tool callback；
-36. exact child/ROOT compaction fence暂停所有无关scope的canonical/provider工作；
-37. canonical candidate fingerprint包含source view、prefix proof、epoch nonce、MCP semantic/execution identity、borrow、retained proof或dry compile等数据库无法逐字段确认的字段；
-38. FULL_HISTORY reader/digest把`initial_entry_sequence - 1` revision marker当成effective materialization floor或digest semantic input，而不是只把它作为predecessor-row bookkeeping；
-39. reader与repository各自实现canonical range fingerprint，或依赖`jsonb::text`/未framed字符串拼接；
-40. idle summary假装复用不存在的normal dispatch target，或为了resolve target创建normal candidate/continuity/tool borrow；
-41. exact-scope fence先于global summary lane安装，或任何lane/DB/provider await期间持有Host lock。
-42. compaction重新声明assistant block、ToolResult、timing、closure或late-outcome leaf DTO/fingerprint，而不是复用normal provider-input carriers与共享helpers；
-43. compatible source view摊平复制`FrozenProviderInputEpochView`的SYSTEM/tools/messages/frontier/source-head，cold/reset source view另存第二份tool surface，projection另存第二份estimate，或者prefix proof再次复制lineage/prior epoch/retained anchors；
-44. canonical adoption允许调用者分别传snapshot/binding source boundary、turn pointer winner、next ordinal或event type/subject/payload，或者write preconditions再次传predecessor/lineage proof；
-45. physical MCP borrow持有完整successor exposure/catalog，或active resources同时保存第二份相同semantic exposure；
-46. `resource_headroom_trigger_enabled=true`、`maximum_summary_tool_repair_rounds=1`、summary purpose/tool suppression或new-MCP ref disposition作为可配置实例字段；resolved hard-bound动态值仍必须由唯一`resolved_hard_bound_set_fingerprint`exact join，不能因本guard被删除。
+18. summary/raw provider output写入operational log；
+19. compaction定义任何ToolResult threshold、variant、artifact renderer、artifact inventory或第二个40,000-byte constant，而不是只消费Round 7.1 normal projection；
+20. Round 5B重新实现Round 9 normal MCP catalog/list/inspect/use/unavailable/schema-replacement逻辑，或重新实现Round 9.1 Skill discovery/activation lookup；
+21. compaction summary使用successor promoted tools而不是old epoch exact tools；
+22. successor MCP promotion按ranking、discovery timing或偶然completion order做partial selection，或把server instructions/catalog写入SYSTEM；
+23. repository transaction读取process-local Capability owner/physical access，或把source view、prefix proof、dry compile、execution binding、slot lease、Skill lookup或catalog callback写入`PreparedCompactionCanonicalAdoption`；
+24. compaction定义`McpEpochExposureKind`、`FrozenEpochMcpExposure`、`McpEpochExposureBorrow`或任何同义second registry/exposure/current-generation owner；
+25. idle adoption调用continuity install、签发未被provider消费的permit、持有successor planning/access/Skill lookup资源或启动runner；
+26. repeated compaction为验证source digest从genesis扫描全部exact-scope rows，而不是验证current lineage base加bounded delta；
+27. auto trigger只看token ratio，使reader item/16 MiB或epoch 64 MiB hard bound先于compaction admission命中；
+28. active successor NEW cohort越native bound导致compaction失败、无故降级仍compatible的old DIRECT，或产生partial promotion；
+29. summary通过normal `AGENT_MODEL_LOOP` execution取得continuity install authority、executor borrow或tool callback；
+30. exact child/ROOT compaction fence暂停所有无关scope的canonical/provider工作；
+31. canonical candidate fingerprint包含source view、prefix proof、epoch nonce、Capability semantic/physical identity、Skill lookup、retained proof或dry compile等数据库无法逐字段确认的字段；
+32. FULL_HISTORY reader/digest把`initial_entry_sequence - 1` revision marker当成effective materialization floor或digest semantic input，而不是只把它作为predecessor-row bookkeeping；
+33. reader与repository各自实现canonical range fingerprint，或依赖`jsonb::text`/未framed字符串拼接；
+34. idle summary假装复用不存在的normal dispatch target，或为了resolve target创建normal candidate/continuity/tool borrow；
+35. exact-scope fence先于global summary lane安装，或任何lane/DB/provider await期间持有Host lock；
+36. compaction重新声明assistant block、ToolResult、timing、closure或late-outcome leaf DTO/fingerprint，而不是复用normal provider-input carriers与共享helpers；
+37. compatible source view摊平复制`FrozenProviderInputEpochView`的SYSTEM/tools/messages/frontier/source-head，cold/reset source view另存第二份tool surface，projection另存第二份estimate，或者prefix proof再次复制lineage/prior epoch/retained anchors；
+38. canonical adoption允许调用者分别传snapshot/binding source boundary、turn pointer winner、next ordinal或event type/subject/payload，或者write preconditions再次传predecessor/lineage proof；
+39. normal tool-surface physical access复制完整successor exposure/catalog，或active resources同时保存第二份相同Round 9/9.1 semantic fact；
+40. `resource_headroom_trigger_enabled=true`、`maximum_summary_tool_repair_rounds=1`、summary purpose/tool suppression作为可配置实例字段；resolved hard-bound动态值仍必须由唯一`resolved_hard_bound_set_fingerprint`exact join，不能因本guard被删除；
+41. retained-equivalence测试要求跨epoch raw citation handle相等、迁移旧`tool:N`，或未把call-local augmentation作为pure builder显式输入；
+42. protected tail把Round 7.1 `FULL_REQUIRED` result降级为COMPACT/REF_ONLY/OMITTED，或保留半个不fit的tool group。
 
 ---
 
@@ -2470,7 +2164,9 @@ Activation必须在ephemeral clean-v0 PostgreSQL完成至少三条：
 至少执行：
 
 ~~~bash
-uv run pytest -q tests/test_round5b_mcp_epoch_exposure.py tests/test_round6_mcp_production.py
+uv run pytest -q tests/test_round7_1_provider_visible_tool_result_projection.py
+uv run pytest -q tests/test_round9_unified_capability_semantics.py tests/test_round9_1_agent_skills_standard.py
+uv run pytest -q tests/test_round6_mcp_production.py
 uv run pytest -q tests/test_round5b_long_horizon_context_compaction.py
 uv run pytest -q -m postgres tests/test_round5b_long_horizon_context_compaction_postgres.py
 uv run pytest -q tests/test_round3_structured_model_input_compiler.py tests/test_round3_1_provider_input_prefix_continuity.py
@@ -2505,14 +2201,11 @@ PULSARA_POSTGRES_DSN=postgresql://pulsara:pulsara@localhost:5432/pulsara
 
 Round 5B只有在以下全部成立时才能标记ACTIVATED：
 
-- cold/bootstrap完整READY_CLEAN MCP cohort fit时与builtin同级DIRECT，越界时fixed builtins正常open且该cohort全部META_ONLY；current epoch内不因late-ready/schema replacement热改tools；
-- `list_mcp_servers`保留全目录/诊断语义并完整表达DIRECT/NEW与paginated omitted recovery；
-- late-ready observation明确指示`inspect_new_mcp_tool -> use_new_mcp_tool`且列名截断不静默；
-- `inspect_new_mcp_tool`只为current exact NEW tool返回schema/ref；`use_new_mcp_tool`只执行该ref且复用Round 6全部permit/dirty/effect/permission contracts；
-- DIRECT中途断连保持native descriptor与strict prefix，known-down调用typed拒绝，same-schema reconnect后恢复；
-- summary继续old epoch exact tools，successor compaction exposure refreeze后才promotion current READY_CLEAN NEW；
-- active successor semantic exposure由`ActiveCompactionInstallationResources`冻结到FULL install，physical borrow只覆盖相容slot/execution能力；latest MCP generation仍只由supervisor拥有，之后到达的semantic变化按current-minus-frozen差集成为new epoch NEW suffix；
-- promoted工具在new epoch direct调用，旧meta ref stale；超native bound时不隐式partial ranking，NEW仍可meta使用；
+- Round 7.1、Round 9与Round 9.1已分别ACTIVATED；普通ToolResult projection、MCP catalog/list/inspect/use/direct gate与Skill discovery/activation不属于Round 5B production slice；
+- summary继续old epoch exact native tools、catalog heads与Skill lookup语义；summary期间current Capability变化不改变旧request；
+- active successor以Round 9 owner inventories、complete registry、planning cut与standard exposure plan重新冻结current capability；compatible old DIRECT保留，完整READY_CLEAN NEW cohort只有在整体fit时才promotion；
+- active successor semantic plan、effective MCP/Skill heads与post-compile Skill lookup在`ActiveCompactionInstallationResources`中各出现一次；normal physical access只覆盖相容slot/execution能力，latest MCP generation仍只由supervisor拥有；
+- promoted工具在new epoch direct调用，旧meta ref stale；NEW cohort超native bound时compaction仍成功、compatible old DIRECT不降级、NEW全部继续meta且没有partial winner；
 - manual、proactive auto与mid-turn safe-point三入口production可达；auto由85% token ratio或可rebase的item/post-base-byte/epoch-byte headroom任一条件触发；
 - provider context-error不会reactive compact；
 - summary使用当前主模型与exact FrozenCompactionSourceView；COMPATIBLE_APPEND时prior SYSTEM/tools/messages重叠prefix逐字不变；
@@ -2522,7 +2215,7 @@ Round 5B只有在以下全部成立时才能标记ACTIVATED：
 - summary只负责语义，Runtime重建current state；
 - protected tail最多3个complete tool groups且pairing-safe；
 - 最近最多3条真实human input由Runtime exact保留；
-- normal与retained ToolResult统一使用40,000-byte normal provider bound及同一artifact-aware projection，不列inventory；
+- normal与retained ToolResult逐字复用Round 7.1同一artifact-aware pure builder；byte equality以相同canonical item、lowering contract与call-local augmentation为前提，successor citation mapping不迁移旧opaque handle。Round 5B没有阈值、variant或artifact renderer，也不列inventory；
 - active/idle snapshot adoption原子且ACK unknown闭合；active才install successor epoch，idle只清除旧continuity并让下一turn cold-open；
 - `PreparedCompactionCanonicalAdoption`只含可由snapshot/revision/pointer/predecessor/event确认的row drafts；所有planning/epoch/MCP/execution/dry-compile事实只存在于process-local resources；
 - current binding唯一决定active summary；
@@ -2532,13 +2225,13 @@ Round 5B只有在以下全部成立时才能标记ACTIVATED：
 - new epoch内恢复strict-prefix；
 - FULL_HISTORY persisted revision marker与effective reader floor分离，首次compaction floor恒为0；repeated compaction source proof使用current binding/base + bounded post-base lineage digest，不从genesis重扫；
 - reader/repository复用一个canonical range fingerprint builder，覆盖ordered blocks、ToolResult timing/artifact、closure与cut-visible late outcome；
-- source view、prefix proof、protected-tail selection、canonical adoption与MCP physical attempt均遵守single-owner DTO contract：existing frozen carriers被组合而不重新摊平，数据库重复列只由central factory派生为只读row mirrors；
+- source view、prefix proof、protected-tail selection、canonical adoption与normal tool-surface physical access均遵守single-owner DTO contract：existing frozen carriers被组合而不重新摊平，数据库重复列只由central factory派生为只读row mirrors；
 - Host-wide只串行summary physical execution，先在锁外取得lane、再recapture并安装exact-scope fence；canonical admission fence仅覆盖target scope及其source-head producers；
 - canonical transcript从未删除或改写；
 - 无replacement history、durable compaction job、receipt、checkpoint、repair、replay或memory double call；
 - durable job universe被删除，oracle为28/23/11/1/23/0；
 - targeted、PostgreSQL、retained、full pytest、static、Go与real-provider dogfood通过；
-- Gap Index同步记录Round 6 epoch-scoped direct/new MCP修订与PHC-07B恢复，不扩大Go高级UI、memory extraction或hierarchical subagent范围。
+- Gap Index同步记录Round 7.1 normal ToolResult投影、Round 9/9.1前置与PHC-07B恢复，不扩大Go高级UI、memory extraction或hierarchical subagent范围。
 
 ---
 
@@ -2546,19 +2239,19 @@ Round 5B只有在以下全部成立时才能标记ACTIVATED：
 
 Coding agent最终汇报必须分开说明：
 
-1. epoch bootstrap MCP cohort的all-DIRECT-or-all-META fallback、late-ready NEW分类及direct disconnect gate；
-2. `list_mcp_servers`、`inspect_new_mcp_tool`、`use_new_mcp_tool`的真实production closure；
-3. 三种compaction入口及token/resource-headroom OR trigger；
-4. `PreparedCompactionSummaryCall`如何取得active/idle target、证明source view exact、禁止execution authority，以及COMPATIBLE_APPEND时old SYSTEM/tools/prefix不变；
-5. successor MCP exposure如何freeze、由supervisor current差集产生NEW、promotion及撤销old refs；
-6. protected tool group与recent human selection；
+1. Round 7.1、Round 9与Round 9.1前置activation evidence如何被retained，而非由Round 5B重复实现；
+2. 三种compaction入口及token/resource-headroom OR trigger；
+3. `PreparedCompactionSummaryCall`如何取得active/idle target、证明source view exact、禁止execution authority，以及COMPATIBLE_APPEND时old SYSTEM/tools/prefix不变；
+4. successor standard capability planning/exposure如何freeze、保留compatible old DIRECT、整体promotion READY_CLEAN NEW cohort并使old refs失效；
+5. post-compile effective MCP/Skill heads与Skill activation lookup如何随continuity CAS安装；
+6. protected tool group、Round 7.1 normal result variants与recent human selection；
 7. FULL_HISTORY floor、shared canonical range fingerprint、bounded lineage digest，以及canonical row-draft candidate与process resources分层后的atomic adoption/ACK unknown；
 8. current Runtime sources与COMPACTION_RUNTIME_HANDOFF的重建；
 9. active install与idle base-only settlement、lane/fence顺序、cross-turn及repeated compaction；
 10. durable job machinery删除后的最终oracle；
 11. exact测试、PostgreSQL、static、Go与三条dogfood证据；
-12. 明确non-goals。
+12. 明确normal MCP/Skill/ToolResult contract不是本轮修改面，并列出其余non-goals。
 
 最终用户可感知行为应是：
 
-> 当前context开始时已可靠就绪且完整cohort可容纳的MCP与builtin一样直接可用；cohort越界或后来发现的MCP不会打断prefix，而会由Runtime明确告知并通过inspect/use新工具通道调用。长程任务接近token或local materialization边界时，Agent先在原prefix上生成一份语义交接；Runtime随后以该交接、最近真实用户原话、最多三个完整工具组、当前精确Runtime状态和重新冻结的direct MCP surface建立新context epoch，并在同一任务中继续。此前new且当前可靠、完整surface可容纳的MCP此时自然升格为direct；idle compaction则只保存下一turn将冷读的base，不制造无人消费的epoch permit。历史仍完整保存在canonical transcript中；compaction不会调用工具、不会抽取memory、不会因provider错误偷偷重试，也不会让模型面对一份artifact/ID清单自行猜测该恢复什么。
+> 长程任务接近token或local materialization边界时，Agent先在原prefix与原生工具面上生成一份语义交接；Runtime随后以该交接、最近真实用户原话、最多三个完整工具组、当前精确Runtime状态，以及按Round 9/9.1重新冻结的Capability surface与catalog heads建立新context epoch，并在同一任务中继续。此前NEW且当前可靠、完整cohort可容纳的MCP会在该合法rebase boundary自然升格为DIRECT；over-bound时则继续走既有meta route，不牺牲可靠的旧DIRECT。idle compaction只保存下一turn将冷读的base，不制造无人消费的epoch permit。历史仍完整保存在canonical transcript中；compaction不会调用工具、不会抽取memory、不会重新定义普通ToolResult或MCP/Skill语义、不会因provider错误偷偷重试，也不会让模型面对一份artifact/ID清单自行猜测该恢复什么。

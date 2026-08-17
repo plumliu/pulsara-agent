@@ -1,6 +1,6 @@
 # Pulsara hard-cut 后产品能力缺失索引
 
-> 状态：WORKING GAP INDEX（产品能力事实索引，不是恢复设计；PHC-02 已通过 Round 1 恢复，PHC-01/03/04/05/06 已通过 Round 2 恢复；PHC-17 的typed compiler与同Host prefix continuity已通过 Round 3 / 3.1完整恢复；PHC-09 的 Python Runtime/Host、canonical/Protocol 后端已通过 Round 4 恢复，Go/TUI 产品闭环明确延期；PHC-07A execution envelope已通过 Round 5A恢复，Round 5A.1已闭合provider-neutral terminal、whole-response atomicity与same-epoch reasoning replay，PHC-07B compaction仍缺失；memory专项已按 Round 8 advisory 边界重构并激活）
+> 状态：WORKING GAP INDEX（产品能力事实索引，不是恢复设计；PHC-02 已通过 Round 1 恢复，PHC-01/03/04/05/06 已通过 Round 2 恢复；PHC-17 的typed compiler与同Host prefix continuity已通过 Round 3 / 3.1完整恢复；PHC-09 的 Python Runtime/Host、canonical/Protocol 后端已通过 Round 4 恢复，Go/TUI 产品闭环明确延期；PHC-07A execution envelope已通过 Round 5A恢复，Round 5A.1已闭合provider-neutral terminal、whole-response atomicity与same-epoch reasoning replay；Round 7.1、Round 9、Round 9.1与PHC-07B Round 5B依次仍为DRAFT；memory专项已按 Round 8 advisory 边界重构并激活）
 >
 > 初始调研：2026-08-10；最近复核：2026-08-16（Round 8 Advisory Memory activation）
 >
@@ -168,7 +168,7 @@ git grep -n 'TerminalMonitorTool' "$PRE_HARD_CUT" -- src tests
 | PHC-04 | Terminal retained-output/cursor 语义 | **已恢复（Round 2）**：16 MiB/process、128 MiB/Host UTF-8 retained hard bound，exact cursor/delta与typed GAP | 当前Host内可可靠增量读取；retention淘汰被显式表示而非重复tail |
 | PHC-05 | Terminal shell/profile/env 产品语义 | **已恢复（Round 2）**：bounded login-shell snapshot、default-deny inert env、single-flight/TTL/fallback、nearest `.venv/bin`与diagnostic | 用户工具链PATH可用；active capability environment默认拒绝且env value不进入diagnostic |
 | PHC-06 | Terminal foreground cwd continuity | **已恢复（Round 2）**：前台命令physical completion后捕获workspace内final cwd；yielded process永不推进session cwd | 后续前台命令从真实final cwd启动，无后台并发竞争 |
-| PHC-07 | Long-horizon execution / context window / compaction | **部分恢复**：Round 5A已删除固定model/tool-call次数与turn-wide wall-clock cap；Round 5A.1已闭合显式provider terminal、whole-response atomicity、manual full-history reasoning replay与actual-wire prefix proof；Round 5B仍拥有context rebase、summary与snapshot adoption | execution envelope与完整response continuation已恢复；当fixed prefix或new suffix命中单次provider-input/resource typed boundary时仍不能主动/自动压缩继续，不能据此宣传compaction |
+| PHC-07 | Long-horizon execution / context window / compaction | **部分恢复**：Round 5A已删除固定model/tool-call次数与turn-wide wall-clock cap；Round 5A.1已闭合显式provider terminal、whole-response atomicity、manual full-history reasoning replay与actual-wire prefix proof；Round 5B只拥有context rebase、summary、snapshot adoption与successor Capability re-freeze，并以前置Round 7.1/9/9.1为输入 | execution envelope与完整response continuation已恢复；当fixed prefix或new suffix命中单次provider-input/resource typed boundary时仍不能主动/自动压缩继续，不能据此宣传compaction |
 | PHC-08 | MCP production capability | **核心已恢复（Round 6）**：stdio/Streamable HTTP、bounded discovery、scope-filtered direct typed tools、resource/prompt读取、MCP_CATALOG、CLI管理与真实执行均已接入；semantic-identical reconnect保持Round 3.1 prefix，schema变化在safe point rebase | Agent可直接使用已配置MCP能力；form/private URL、OAuth、MCP-backed skill activation、server Sampling/Roots、Apps/Tasks与advanced Go UI仍是明确non-goal |
 | PHC-09 | Plan workflow | **Python Runtime/Host 与 Protocol 后端已通过 Round 4 恢复；Go/TUI 延期**：三项ROOT-only control tool、canonical question/draft lifecycle、Plan-scoped read-only overlay、send-time immutable permission snapshot、Host-owned automatic continuation及typed Protocol v3边界已进入production；oracle为`34/23/15/2/26/4` | Headless typed caller已可完成Plan流程；面向用户的permission selector、question/draft review与重连展示仍等待Go/TUI闭环 |
 | PHC-10 | Hierarchical/batch subagent task graph | **显著退化**：只剩 flat spawn/list/wait/stop | 依赖任务、批量调度、child phase/result reporting 与 task-board 语义消失 |
@@ -444,9 +444,25 @@ Round 1 已在新 conversation kernel 内恢复产品能力，没有恢复旧 du
 
 对应机器证据见 [`round1_tool_output_artifact_activation.json`](benchmarks/suites/core/v1/round1_tool_output_artifact_activation.json)。Go artifact viewer/download UI、binary artifact、多 artifact result、artifact 删除/retention UI 与后台 retention retry job 仍是明确 non-goal；PHC-01、PHC-03 至 PHC-17 的状态不因本轮改变。
 
+### 5.6 Round 7.1：全局provider-visible ToolResult投影（未激活）
+
+Round 1恢复了canonical result、artifact与bounded preview，但normal provider lowering仍存在32,000-character旧分界、不同variant的byte/character口径，以及ordinary history与未来compaction retained tail可能各自发明阈值的问题。这不是compaction能力，也不是Capability registry语义；它是所有工具共同依赖的provider-visible ToolResult contract。
+
+[Round 7.1实施规格](ROUND_7_1_PROVIDER_VISIBLE_TOOL_RESULT_PROJECTION_IMPLEMENTATION_SPEC.zh.md)将其独立为Round 9/9.1/5B的编码前置：
+
+- 唯一`MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES = 40_000`同时约束canonical COMPLETE body的normal soft decision与最终provider-neutral typed ToolResult logical message；
+- 这条logical quote只覆盖Round 7实际outer envelope与provider-neutral message中真实存在的scalar values；Chat/Responses role、JSON keys、escaping与整请求物理总量继续由Round 5A.1 `FrozenProviderWireInputPlan`拥有，不能用40K替代wire proof；
+- 40,000只属于FULL量级，既有8,000-character HEAD_TAIL、约8 KiB COMPACT、约2 KiB REF_ONLY、8,000-byte artifact threshold与65,536-byte canonical hard bound保持各自职责；
+- Builtin、Terminal、MCP、Plan、memory、Skill activation与`artifact_read`统一使用同一ordered ladder；合法variant tuple可以没有FULL，compiler按actual mode而非ordinal分类；
+- artifact page、MCP directory page、inspect schema/ref与Skill activation body使用通用process-local `FULL_REQUIRED`交付契约：aggregate不fit时provider open=0，不以降级结果伪装完整交付，不新增durable owner；
+- artifact handle/guidance只在正文确有省略且读取对当前任务可能有帮助时出现，不向模型注入artifact inventory；
+- Round 5B retained group复用同一pure builder；只有canonical item、lowering contract与call-local augmentation相同才要求逐字相等，successor citation mapping不得迁移旧epoch opaque handle；它不能拥有“最后一个结果”或compaction专用cap。
+
+该轮当前为DRAFT/NOT ACTIVATED，不改变Round 1已恢复状态，也不能据此宣传40,000-byte normal output已经进入production。它不新增relation、event、job、receipt、projection或recovery owner。
+
 ## 6. PHC-07：Long-horizon execution、context window 与 compaction
 
-本项不再把“任务能持续工作”与“model-visible context如何换代”视为一个编码切片。当前恢复顺序冻结为：先用PHC-17建立统一的process-local compiled-context测量与source allocation边界；再由Round 5A删除错误层级的step/time保险丝；最后才由Round 5B在provider safe point生成/采用snapshot并重新调用同一个compiler。
+本项不再把“任务能持续工作”与“model-visible context如何换代”视为一个编码切片。当前恢复顺序冻结为：先用PHC-17建立统一的process-local compiled-context测量与source allocation边界；再由Round 5A删除错误层级的step/time保险丝；随后依次激活Round 7.1 normal ToolResult projection、Round 9 unified capability与Round 9.1 Agent Skills；最后Round 5B才在provider safe point生成/采用snapshot、重新调用同一个compiler并消费这些既有normal contracts。
 
 ### 6.0 三个实施切片
 
@@ -454,9 +470,9 @@ Round 1 已在新 conversation kernel 内恢复产品能力，没有恢复旧 du
 |---|---|---|
 | Round 5A：Long-horizon execution envelope | 正常ROOT/child turn无固定model/tool call上限；无turn总deadline；Round 3.1 dispatch planning保留单attempt总上界，foreground canonical transaction、writer renewal、provider、tool、Terminal decision与close按closed owner matrix使用各自watchdog；长循环继续满足append-only prefix | compaction、summary、snapshot adoption、context rebase、rollout account、finalization、128K/16K与256K/1M配置决策 |
 | Round 5A.1：Provider output termination与same-epoch reasoning continuation | Chat/Responses显式`COMPLETED | OUTPUT_INCOMPLETE | PROVIDER_ERROR`；只有完整response可以原子接受assistant并进入tool path；completed reasoning carrier在assistant FULL后绑定，并通过plan-first actual-wire proof原样进入后续manual full-history input | partial-answer continuation、remote response ID正确性、hidden reasoning持久化、reactive compaction或任何Round 5B adoption |
-| Round 5B：Long-horizon context compaction | active-context测量、safe-point compaction、single-turn continuation、protected tail、explicit continuity epoch rebase、manual/proactive auto/mid-turn compact | 恢复旧EventLog/reducer/checkpoint/repair、删除canonical transcript、把累计token误当active context、provider context-error后的reactive compact/retry |
+| Round 5B：Long-horizon context compaction | active-context测量、safe-point compaction、single-turn continuation、protected tail、explicit continuity epoch rebase、manual/proactive auto/mid-turn compact，以及在合法rebase boundary重新冻结Round 9/9.1 successor exposure | 恢复旧EventLog/reducer/checkpoint/repair、删除canonical transcript、把累计token误当active context、provider context-error后的reactive compact/retry、重新实现normal ToolResult/MCP/Skill语义 |
 
-Round 5A实施规格见[`ROUND_5_LONG_HORIZON_EXECUTION_ENVELOPE_IMPLEMENTATION_SPEC.zh.md`](ROUND_5_LONG_HORIZON_EXECUTION_ENVELOPE_IMPLEMENTATION_SPEC.zh.md)，机器证据见[`round5_long_horizon_execution_envelope_activation.json`](benchmarks/suites/core/v1/round5_long_horizon_execution_envelope_activation.json)。Round 5A.1实施规格见[`ROUND_5A_1_PROVIDER_NEUTRAL_MODEL_OUTPUT_TERMINATION_IMPLEMENTATION_SPEC.zh.md`](ROUND_5A_1_PROVIDER_NEUTRAL_MODEL_OUTPUT_TERMINATION_IMPLEMENTATION_SPEC.zh.md)，机器证据见[`round5a1_provider_neutral_model_output_termination_activation.json`](benchmarks/suites/core/v1/round5a1_provider_neutral_model_output_termination_activation.json)。Round 5B当前实施真源见[`ROUND_5B_LONG_HORIZON_CONTEXT_COMPACTION_IMPLEMENTATION_SPEC.zh.md`](ROUND_5B_LONG_HORIZON_CONTEXT_COMPACTION_IMPLEMENTATION_SPEC.zh.md)，状态仍为DRAFT/NOT ACTIVATED。PHC-07A与完整response continuation已恢复；PHC-07B仍保持open，不能据此宣传自动compaction或跨context-window continuation。
+Round 5A实施规格见[`ROUND_5_LONG_HORIZON_EXECUTION_ENVELOPE_IMPLEMENTATION_SPEC.zh.md`](ROUND_5_LONG_HORIZON_EXECUTION_ENVELOPE_IMPLEMENTATION_SPEC.zh.md)，机器证据见[`round5_long_horizon_execution_envelope_activation.json`](benchmarks/suites/core/v1/round5_long_horizon_execution_envelope_activation.json)。Round 5A.1实施规格见[`ROUND_5A_1_PROVIDER_NEUTRAL_MODEL_OUTPUT_TERMINATION_IMPLEMENTATION_SPEC.zh.md`](ROUND_5A_1_PROVIDER_NEUTRAL_MODEL_OUTPUT_TERMINATION_IMPLEMENTATION_SPEC.zh.md)，机器证据见[`round5a1_provider_neutral_model_output_termination_activation.json`](benchmarks/suites/core/v1/round5a1_provider_neutral_model_output_termination_activation.json)。Round 5B当前实施真源见[`ROUND_5B_LONG_HORIZON_CONTEXT_COMPACTION_IMPLEMENTATION_SPEC.zh.md`](ROUND_5B_LONG_HORIZON_CONTEXT_COMPACTION_IMPLEMENTATION_SPEC.zh.md)，状态仍为DRAFT/NOT ACTIVATED；其normal ToolResult、Capability与Skill前置分别由Round 7.1、Round 9与Round 9.1拥有。PHC-07A与完整response continuation已恢复；PHC-07B仍保持open，不能据此宣传自动compaction或跨context-window continuation。
 
 ### 6.1 hard-cut 前已存在的产品能力
 
@@ -577,11 +593,24 @@ Round 6已把核心MCP能力接入当前conversation kernel：
 
 MCP Apps 与 Tasks 在旧 MCP2 文档中本来就是非目标，不列为 hard-cut 回归。
 
-Round 6 V1冻结了一条克制边界：scope-filtered direct MCP tool surface、MCP_CATALOG与`list_mcp_servers`已经恢复，但“MCP-backed skill activation”没有恢复。当前skill resolver会在Host初始allowlist中删除未知tool引用；让late-ready MCP tool重新参与skill dependency resolution需要单独的capability/skill safe-point规格，不能作为MCP supervisor的隐含副作用。该项作为PHC-08的后续capability-integration子项保留，不阻塞direct MCP happy path，也不改变PHC-15当前只剩hierarchical task-graph dead descriptor的统计口径。
+Round 6 V1冻结了一条克制边界：scope-filtered direct MCP tool surface、MCP_CATALOG与`list_mcp_servers`已经恢复，但Skill subsystem尚未迁移到portable Agent Skills或dynamic append-only catalog。进一步研究Codex、Claude Code、Kimi Code与grok-build后，不再把“Skill声明MCP dependency并由Runtime解析route”视为应恢复的独立产品能力：loose Skill只负责指导，真实MCP route由Round 9的独立Tool capability owner表达；必须共同安装的Skill+MCP组合留给future Plugin bundle。该项不阻塞direct MCP happy path，也不改变PHC-15当前只剩hierarchical task-graph dead descriptor的统计口径。
 
 同理，hard-cut前确有form/private URL能力，但Round 6 V1因当前Protocol/Go只有ALLOW/DENY而明确不广告elicitation；MCP direct execution不会把secret form伪装成普通字符串。form/private URL仍是PHC-08未恢复的后续产品子项，不能因核心MCP activation而从本索引消失。
 
-### 7.4 hard-cut前MCP参考代码
+### 7.4 Round 9 / 9.1 规划边界（未激活）
+
+Round 6之后暴露出一个跨PHC-08与Skill子系统的命名/规划缺口：当前tool-only `CapabilityDescriptor/CapabilityExposurePlan`、skill-only `KernelCapabilityComposer/CAPABILITY_CATALOG`与production `FrozenModelToolSurface/PreparedToolExecutionBinding`并不是同一套诚实语义。与此同时，late-ready MCP若热加入native `tools`会破坏Round 3.1 strict prefix，而Skill仍缺少portable filesystem、dynamic discovery与append-only exposure contract。
+
+该缺口按两轮处理，当前均为DRAFT/NOT ACTIVATED，并且都以前述Round 7.1 normal ToolResult projection为硬前置：
+
+- [Round 9 unified capability semantics](ROUND_9_UNIFIED_CAPABILITY_SEMANTICS_IMPLEMENTATION_SPEC.zh.md)：三类能力逻辑上共享`source registration -> complete source snapshot -> pure frozen registry -> exposure planning`；expected registration set只能由exact-scope Builtin/MCP-config/Skill-root三个既有composition owner在同一planning attempt签发的process-local prepared inventory carrier派生，纯semantic fingerprint不能自证现实inventory完整。Built-in是显式composition-sealed、`IMMUTABLE`、execution-backed且catalog-joined的零I/O退化discovery，MCP server与Skill root是`SAFE_POINT_REFRESHABLE` discovery。Built-in tool与MCP tool规范为同一种Tool capability fact并各自exact绑定executor，Skill规范为无executor的Instructional capability fact；它同时从Round 5B前移MCP direct/meta正常epoch语义，冻结closed `MCP_CATALOG` renderer、local-snapshot-only paginated `list_mcp_servers`、完整schema且tool-specific route/policy-bound的`inspect_new_mcp_tool/use_new_mcp_tool`以及direct unavailable/schema-replacement gate。MCP directory/inspect成功结果复用Round 7.1通用FULL-delivery requirement，ref在exact FULL安装前保持dormant。该轮并把skill-only `CAPABILITY_CATALOG`诚实重命名为`SKILL_CATALOG`。
+- [Round 9.1 Agent Skills Standard](ROUND_9_1_AGENT_SKILLS_STANDARD_IMPLEMENTATION_SPEC.zh.md)：在Round 7.1与Round 9均激活后，以Anthropic Agent Skills开放标准替换Pulsara legacy Skill manifest；六个default roots先作为普通Round 9 source registrations进入Host composition，再由同一个registry接纳dynamic scan leaf。该轮严格恢复metadata-first progressive disclosure：每个admitted Skill的完整`name + description + location`以untrusted、不可缩短的append-only catalog进入provider；model-driven activation lookup只能在compiler完成后从本call实际生效的catalog head构造，并与continuity candidate一起CAS安装，CLEARED/UNAVAILABLE不会因旧prefix或raw projection继续放行。正文只通过普通ToolResult COMPLETE/FULL路径读取，不建立48 KiB特权或Skill专用大正文通道；successful activation结果复用Round 7.1 `FULL_REQUIRED/SKILL_ACTIVATION`，只有exact FULL安装后才生效。它同时删除Pulsara legacy tool/binary/service/auth metadata，不在frontmatter或standard metadata中建立替代dependency语言。第三方standard Skill无需改写即可使用；真实Builtin/MCP/Terminal调用继续由各自owner判断。
+
+Plugin不进入上述两轮。未来Round 9.2只把Plugin建模为MCP definitions + Skill roots的bundle/source，不增加第三套tool executor。Round 5B继续延期，并只消费Round 9/9.1已冻结事实做cold rebase，不再拥有正常epoch的MCP meta gateway实现。
+
+两轮都不得增加durable capability relation、event、job、receipt、checkpoint、projection或recovery graph；同一epoch仍必须满足SYSTEM/tools不变、messages只追加suffix。
+
+### 7.5 hard-cut前MCP参考代码
 
 - `5b7ad9f7:src/pulsara_agent/runtime/mcp/types.py`：stdio/streamable-http config、discovered tool/resource/prompt、server snapshot、tool result、name mangling和secret-safe redaction等核心产品DTO。
 - `5b7ad9f7:src/pulsara_agent/runtime/mcp/schema.py`：bounded schema normalization、dialect选择、external `$ref`拒绝和structured output validation。
