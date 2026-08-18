@@ -6,9 +6,9 @@
   "working_tree_semantics": "Round 7.1 was implemented and verified in the current uncommitted worktree. The checkpoint was preserved as the comparison base. No files were staged, committed, or pushed.",
   "source_documents": {
     "ROUND_7_1_PROVIDER_VISIBLE_TOOL_RESULT_PROJECTION_IMPLEMENTATION_SPEC.zh.md_at_start": "bba8778c2b8f259105be1c29371d087b6ec4d9a3c8546725e854233869e3d176",
-    "ROUND_7_1_PROVIDER_VISIBLE_TOOL_RESULT_PROJECTION_IMPLEMENTATION_SPEC.zh.md_after_activation_update": "56326ab872ffb907540d0b067536c3faa535c74730c64cb835a0fb70091638b7",
+    "ROUND_7_1_PROVIDER_VISIBLE_TOOL_RESULT_PROJECTION_IMPLEMENTATION_SPEC.zh.md_after_activation_update": "ef57af98e98e422bd974bd746a0c518e9ad48ac7c15a072f2142a3bf41c02679",
     "POST_HARD_CUT_PRODUCT_CAPABILITY_GAP_INDEX.zh.md_at_start": "021bb3f39a5999e93d93974ad43164bbcd2bb7028d6664defb3371b91f863cfa",
-    "POST_HARD_CUT_PRODUCT_CAPABILITY_GAP_INDEX.zh.md_after_activation_update": "ced58cdd8b453ae18200af3860b3a57172dbb74de673096d2747f0eb9ba14eea",
+    "POST_HARD_CUT_PRODUCT_CAPABILITY_GAP_INDEX.zh.md_after_activation_update": "91d09c3d6dc63a0ccb19d43374498688be07de928a06e1232d028173ef1adf0a",
     "README.md_after_activation_update": "ead362817ce13d8b5073f87b208bdb586f2b15161e1486cc5b00ccf3ef222206",
     "README.zh-CN.md_after_activation_update": "004bdd5662b71e114ceafb92838906147dd8d8828a1ef2157c3cfbc88d60f926"
   },
@@ -65,10 +65,16 @@
       "SKILL_ACTIVATION"
     ],
     "production_reason_enabled_in_round7_1": "ARTIFACT_PAGE",
-    "future_reasons": "interface and synthetic regression only; Round 9, Round 9.1 and Round 5B product features were not implemented",
+    "future_reasons": "MCP reasons remain interface/synthetic until Round 9; SKILL_ACTIVATION is a reserved compatibility value with no producer because Round 9.1 uses ordinary BEST_AVAILABLE read_file",
     "aggregate_nonfit": "FULL_REQUIRED_TOOL_RESULT_EXCEEDS_INPUT_BUDGET; provider execution/open count is zero; canonical result is retained and the physical tool is not rerun",
     "not_inlineable": "FULL_REQUIRED_TOOL_RESULT_NOT_INLINEABLE",
     "artifact_page": "The largest UTF-8/code-point-safe prefix whose conservative final logical message remains FULL-eligible is returned with exact offsets. The result is inline-only and never recursively archived."
+  },
+  "post_activation_contract_amendment": {
+    "amended_at": "2026-08-18",
+    "scope": "documentation-only downstream closure",
+    "production_change": false,
+    "statement": "Round 9.1 does not add a Skill read intent or FULL_REQUIRED producer. SKILL_ACTIVATION remains a reserved enum literal so the activated Round 7.1 code and closed vocabulary are unchanged."
   },
   "deterministic_verification": {
     "pytest_collection": "694_tests_collected_in_1.07s",

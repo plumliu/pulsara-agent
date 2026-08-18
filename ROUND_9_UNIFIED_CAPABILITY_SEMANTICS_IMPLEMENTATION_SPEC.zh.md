@@ -12,7 +12,7 @@
 >
 > 直接下游：[Round 9.1 Agent Skills Standard](ROUND_9_1_AGENT_SKILLS_STANDARD_IMPLEMENTATION_SPEC.zh.md)
 >
-> 后续但不属于本轮：Round 9.2 Plugin capability bundle、[Round 5B compaction](ROUND_5B_LONG_HORIZON_CONTEXT_COMPACTION_IMPLEMENTATION_SPEC.zh.md)
+> 后续但不属于本轮：[Round 9.2 Agent Plugin bundle 与 Hook lifecycle](ROUND_9_2_AGENT_PLUGIN_BUNDLE_AND_HOOK_LIFECYCLE_IMPLEMENTATION_SPEC.zh.md)、[Round 5B compaction](ROUND_5B_LONG_HORIZON_CONTEXT_COMPACTION_IMPLEMENTATION_SPEC.zh.md)
 
 本文重新冻结 Pulsara 中 `capability` 的唯一产品含义，并把当前 Built-in tool、MCP tool 与 Skill 投影到同一个**纯语义规划边界**。本轮统一 discovery identity、semantic fact与provider exposure planning，但不统一 permission、physical binding、transport、Skill activation或文件执行方式。
 
@@ -40,7 +40,7 @@ Pulsara中的`Capability`固定定义为：
 | MCP tool | `TOOL` | native direct tool或new-MCP meta route | MCP supervisor、slot、dirty fence与effect policy |
 | Skill | `SKILL` | `SKILL_CATALOG`与`ACTIVE_SKILL` | 无独立executor；只能指导或引用现有tool capability |
 
-Plugin不属于本轮的capability leaf。未来Plugin是`CapabilityBundle/CapabilitySource`：启用后贡献Skill roots与MCP server definitions，再分别交还既有Skill/MCP owner；Plugin自身不拥有通用`invoke()`。
+Plugin不属于本轮的capability leaf。后续Round 9.2把Plugin定义为`CapabilityBundle/CapabilitySource`：启用后贡献Skill roots、MCP server definitions与process-local Hook definitions，并保留一个dormant Subagent-spec inventory；Skill/MCP仍分别交还既有owner，Hook不进入capability leaf，Plugin自身不拥有通用`invoke()`。
 
 ### 0.2 统一什么，不统一什么
 
@@ -184,7 +184,7 @@ same epoch: Skill catalog changes
 ### 1.2 明确非目标
 
 - 不实施Agent Skills standard parser或progressive resource contract；这些属于Round 9.1；
-- 不实现`read_file(intent=ACTIVATE_SKILL)`或任何Skill声明驱动的permission行为；
+- 不修改ordinary `read_file`或实现任何Skill声明驱动的permission行为；Round 9.1将明确保持read schema无Skill intent；
 - 不扫描`.claude/skills`、Plugin cache或新增Skill root；
 - 不实现Plugin manifest、install、enable、disable或bundle namespace；
 - 不让Plugin动态加载Python代码；
@@ -340,7 +340,7 @@ Built-in不是“没有discovery”的例外，而是`IMMUTABLE` source，其dis
 - Skill固定注册的是logical root；skill leaf仍只由该root中的标准`SKILL.md`拥有；
 - Built-in descriptor catalog与executor inventory不是同一事实；source adapter必须从Host-open时已安装、scope-visible且能与catalog exact join的binding inventory构造registration/snapshot，catalog-only entry不能进入registry；
 - bundled Skill必须先物化到某个registered root再被普通discovery发现；不得走第二条“builtin Skill”leaf通道；
-- future Plugin只贡献MCP server registration与Skill root registration，不注册第三种executor。
+- future Plugin向本文只贡献MCP server registration与Skill root registration；其Hook由独立process-local owner执行，Subagent spec暂时dormant，均不得注册第三种tool executor。
 
 因此，三者在逻辑上共享同一条注册管线，而只在source-owned discovery与tool-only binding处分叉。注册成功只证明fact进入current registry；它不证明该fact已暴露、已授权或可物理执行。
 
@@ -1904,7 +1904,7 @@ Round 9.1只负责：
 - Agent Skills canonical manifest；
 - standard resources/progressive disclosure；
 - 六个default Skill root的owner-specific bindings与dynamic scan；
-- `read_file(intent=ACTIVATE_SKILL)`；
+- ordinary `read_file` progressive disclosure、2,000-line default window与无content-suppressing dedup；
 - Agent Skills标准filesystem与activation；
 - 删除legacy Pulsara metadata且不引入namespaced替代；
 - append-only Skill catalog/active body。
@@ -1913,17 +1913,19 @@ Round 9.1必须让每个default root先适配为本文的`SAFE_POINT_REFRESHABLE
 
 ### 17.2 Round 9.2 Plugin
 
-未来Plugin固定是bundle/source：
+后续[Round 9.2](ROUND_9_2_AGENT_PLUGIN_BUNDLE_AND_HOOK_LIFECYCLE_IMPLEMENTATION_SPEC.zh.md)固定Plugin是bundle/source：
 
 ~~~text
 Enabled Plugin
   -> Skill root source registrations
   -> MCP server source registrations
+  -> process-local Hook definitions
+  -> dormant Subagent-spec inventory
   -> normalize into existing Round 9 source-registration set
   -> existing source owners discover and publish ordinary snapshots
 ~~~
 
-Plugin不成为第三种tool binding，也不扫描任意private cache。具体namespace、enablement与dynamic invalidation留待Round 9.2。
+Plugin不成为第三种tool binding，也不扫描任意private cache。Hook不进入本文capability leaf union；它由Round 9.2独立的process-local lifecycle owner执行。Subagent spec在PHC-10完成层次化/批量编排前只允许dormant discovery。具体portable manifest、Codex/Claude compatibility、namespace、enablement、trust与dynamic invalidation由Round 9.2冻结。
 
 ### 17.3 Round 5B
 

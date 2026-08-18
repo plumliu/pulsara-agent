@@ -14,7 +14,9 @@
 >
 > 上位契约：[Round 3 structured compiler](ROUND_3_STRUCTURED_MODEL_INPUT_COMPILER_IMPLEMENTATION_SPEC.zh.md)、[Round 3.1 provider-input prefix continuity](ROUND_3_1_PROVIDER_INPUT_PREFIX_CONTINUITY_IMPLEMENTATION_SPEC.zh.md)、[Round 6 MCP](ROUND_6_MCP_PRODUCTION_CAPABILITY_IMPLEMENTATION_SPEC.zh.md)、[Round 7.1 provider-visible ToolResult projection](ROUND_7_1_PROVIDER_VISIBLE_TOOL_RESULT_PROJECTION_IMPLEMENTATION_SPEC.zh.md)、[Round 9 unified capability semantics](ROUND_9_UNIFIED_CAPABILITY_SEMANTICS_IMPLEMENTATION_SPEC.zh.md)、[Gap Index](POST_HARD_CUT_PRODUCT_CAPABILITY_GAP_INDEX.zh.md)
 >
-> 下游设计：[Round 5B compaction](ROUND_5B_LONG_HORIZON_CONTEXT_COMPACTION_IMPLEMENTATION_SPEC.zh.md)；Round 9.2 Plugin capability bundle 尚未起草
+> 下游设计：[Round 9.2 Agent Plugin bundle 与 Hook lifecycle](ROUND_9_2_AGENT_PLUGIN_BUNDLE_AND_HOOK_LIFECYCLE_IMPLEMENTATION_SPEC.zh.md)、[Round 5B compaction](ROUND_5B_LONG_HORIZON_CONTEXT_COMPACTION_IMPLEMENTATION_SPEC.zh.md)
+>
+> 收口修订（2026-08-18）：删除`read_file`的`ORDINARY | ACTIVATE_SKILL` intent、model-call activation lookup、continuity dispatch attachment与Skill-specific FULL_REQUIRED。Model-driven progressive disclosure唯一使用ordinary `read_file`；default/max line window冻结为2,000，最终模型可见边界继续由Round 7.1 40,000-byte logical FULL唯一拥有。同run compaction retained语义下移Round 5B。
 
 本文只实施 Pulsara 在 hard-cut 后的 **Agent Skills 标准**、dynamic skill与append-only skill exposure。它必须在 Round 7.1 的normal ToolResult projection以及 Round 9 的统一 source registration、frozen capability registry、semantic fact、MCP direct/meta route与纯 exposure planner均激活后实施；它也是未来 Round 5B 的编码前置，但**不实施 capability ontology、MCP meta gateway、Plugin、compaction summary、adoption、rebase、successor epoch installation或任何 compaction transaction**。
 
@@ -48,7 +50,7 @@ MCP tool
 
 Skill
   -> SKILL_CATALOG routing entry
-  -> read_file(exact listed SKILL.md, intent=ACTIVATE_SKILL)
+  -> ordinary read_file(exact listed SKILL.md)
   -> read scripts/references/assets on demand
   -> 模型按正文使用既有 builtin/MCP/terminal tools
   -> skill 本身不产生 execution authority
@@ -67,7 +69,7 @@ messages[n + 1] == messages[n] || append_only_suffix
 - Host/continuity epoch 开始时冻结完整当前 skill semantic catalog；每个admitted Skill的`name + description + location`必须以唯一、完整、byte-exact表示进入catalog，compiler不得缩短routing metadata；
 - epoch 中新增、修改、删除或变为不可用的 skill，只能通过新的 `SKILL_CATALOG` SNAPSHOT observation 追加表达；
 - `$skill`、`skill:name` 或 Host configured skill 形成 `ACTIVE_SKILL` activation snapshot；同一 activation 内不因文件变化静默改写；
-- 模型因任务匹配选择skill时，必须显式使用`read_file(intent=ACTIVATE_SKILL)`；该调用只能命中本次provider实际生效的`SKILL_CATALOG` head，ordinary read不会建立隐藏的“loaded skill”状态；
+- 模型因任务匹配选择skill时，使用普通`read_file`完整读取catalog列出的exact `SKILL.md`；不存在activation intent、隐藏的“loaded skill”状态或额外authorization；
 - 下一条真实 activation boundary 才从当前文件系统重新解析 active body；
 - BASE_SYSTEM 不拼接动态 skill 内容；provider `tools` 不因 skill 安装、修改或删除而变化。
 
@@ -93,8 +95,9 @@ new/changed/removed skill inside epoch
   -> never rewrite SYSTEM/tools/history
 
 model selects an implicit skill
-  -> read_file(catalog location, intent=ACTIVATE_SKILL), reading the complete SKILL.md
-  -> complete ToolResult itself carries the exact skill once
+  -> ordinary read_file(catalog location), preferably with limit=2000
+  -> follow truncation/artifact guidance until the required content is actually visible
+  -> ordinary ToolResult carries the file content once
   -> optionally search_files for referenced material
   -> execute existing tools under their ordinary permission/effect contracts
 
@@ -104,7 +107,7 @@ explicit/configured activation
   -> next true activation boundary replaces or clears it
 ~~~
 
-### 0.2 为什么最终不增加 `load_skill`
+### 0.2 为什么最终既不增加 `load_skill`，也不增加 read intent
 
 当前 `read_file` 已支持：
 
@@ -113,21 +116,22 @@ explicit/configured activation
 - `~` 下的 host-local ordinary UTF-8 file；
 - line pagination、100,000-character result bound、binary/device rejection与canonical ToolResult。
 
-本轮只给现有`read_file`增加closed intent：`ORDINARY | ACTIVATE_SKILL`。当前catalog会明确告诉模型，采用skill时使用`ACTIVATE_SKILL`完整读取；只是检查文件时使用`ORDINARY`。新增独立`load_skill`仍只会产生：
+Pulsara不需要知道模型是在“检查”还是“采用”一个文件。两者的物理动作都是读取同一份低authority文本；真正有意义的事实只有：哪些bytes通过普通ToolResult实际进入了某次provider input。给`read_file`增加`ORDINARY | ACTIVATE_SKILL`会反而产生：
 
 - 两条读取同一正文的模型路径；
-- 永久增加的 provider tool schema；
-- `read_file` 与 `load_skill` 两套截断、artifact、permission与错误语义；
-- “读过”是否等于“激活”的隐藏状态机；
-- 后续任何history reset是否要追踪所有历史load的额外问题。
+- 一项只服务Skill的provider schema与cold compatibility变化；
+- catalog lookup、continuity attachment与FULL_REQUIRED的第二套状态；
+- “调用声称要激活”与“模型实际收到完整正文”之间的错误等价；
+- 普通文件读取dedup与特殊activation bypass之间的人为分叉。
+
+新增独立`load_skill`也会重复`read_file`的截断、artifact、permission与错误语义，并永久增加provider tool schema。因此两者都删除。普通读取、canonical ToolResult、Round 7.1 representation选择与continuity installation已经足够表达模型实际看到了什么。
 
 因此 normative 分工是：
 
 | 需求 | 唯一路径 |
 |---|---|
 | 发现可用 skill | `SKILL_CATALOG` |
-| 采用并完整读取 `SKILL.md` | `read_file(intent=ACTIVATE_SKILL)` |
-| 普通检查/比较 `SKILL.md` | `read_file(intent=ORDINARY)` |
+| 读取、检查或采用 `SKILL.md` | ordinary `read_file` |
 | 读取/搜索 `scripts/`、`references/`、`assets/` | `read_file` / `search_files` |
 | 执行命令 | `terminal` / `terminal_process` |
 | 调用 direct MCP | native MCP tool |
@@ -164,7 +168,7 @@ explicit/configured activation
 - 不扫描Codex/Claude/plugin manager的私有cache目录；插件若要供Pulsara使用，必须把skill安装到一个声明root；
 - 不建立 session-pinned implicit skill 集；
 - 不持久化“模型曾经读过哪些 skill”；
-- 不自动把普通 `read_file(intent=ORDINARY)`解释为Runtime activation；
+- 不把普通 `read_file`解释为Runtime activation、permission或loaded-state；
 - 不做 embedding/BM25 skill search；
 - 不为 skill 建 durable generation、relation、event、job、receipt或repair owner；
 - 不实现compaction summary、snapshot adoption、rebase、successor dry compile或epoch installation；
@@ -229,10 +233,13 @@ Codex 的 `HostSkillsSnapshot` 在创建 `TurnContext` 时冻结，并在该 tur
 
 - 一个执行上下文使用一份immutable skill snapshot；
 - explicit mention读取同一snapshot，避免一次turn内重复扫描得到不同正文；
+- 模型自主选择Skill时，catalog只指导它使用普通file read完整打开`SKILL.md`，没有`load_skill`或read intent；
 - skill body作为context item进入history，而不是每个skill变成tool；
 - cache invalidation只决定下一snapshot，不改写已经运行的turn。
 
-Codex当前把OpenAI自己的interface、dependency与policy放在独立`agents/openai.yaml` sidecar，而不是扩张portable `SKILL.md`。这证明宿主或发行方确有额外组合需求时，应使用**可选、带明确owner的外部bundle/sidecar**；它不能成为第三方Skill被Pulsara发现或激活的前置条件。Round 9.1不实现该sidecar，future Plugin可在bundle manifest中分别声明Skill roots与MCP/安装配置。
+Codex compaction会重建Skill catalog并保留bounded recent user-role messages；explicit `$skill`注入因此可能自然被保留，但ordinary file ToolResult没有Skill专用重注入保证。Pulsara吸收“普通read + 无loaded-state”，同时把同run compaction是否retained交给Round 5B按actual FULL delivery机械判断。
+
+Codex当前把OpenAI自己的interface、dependency与policy放在独立`agents/openai.yaml` sidecar，而不是扩张portable `SKILL.md`。这证明宿主或发行方确有额外组合需求时，应使用**可选、带明确owner的外部bundle/sidecar**；它不能成为第三方Skill被Pulsara发现或激活的前置条件。Round 9.1不实现该sidecar；Round 9.2 Plugin只按公开/宿主包契约分别贡献Skill roots、MCP与Hook定义，不把Codex sidecar变成portable Skill字段。
 
 不照搬：
 
@@ -261,7 +268,9 @@ grok-build 的 `SkillManager` 保存startup与dynamic discovered skills。file t
 - 不依赖仅path去重而忽略body/metadata变化；
 - 不让全局manager成为tool permission或execution owner。
 
-Kimi Code提供了同样重要的反例：其parser能接受`whenToUse`、`disableModelInvocation`、skill type等宿主扩展，但仓库中的实际Skill几乎全部只使用`name + description`；官方datasource Skill把MCP工具使用方法写在description/body中，MCP server则由plugin manifest独立安装。本文吸收这种“Skill负责指导，bundle负责组成”的边界，不把Kimi的宿主字段升级成Pulsara contract。
+grok-build的专用Skill tool会把正文包装进tool result，但compaction只重建available catalog，不自动重新注入此前tool-loaded body。这个行为证明catalog必须重建，却不能证明Pulsara需要专用activation工具。
+
+Kimi Code提供了同样重要的反例：它也使用专用Skill tool和transient activation record；compaction只可能保留用户slash显式注入，model-tool/nested Skill注入明确被丢弃。其parser能接受`whenToUse`、`disableModelInvocation`、skill type等宿主扩展，但仓库中的实际Skill几乎全部只使用`name + description`；官方datasource Skill把MCP工具使用方法写在description/body中，MCP server则由plugin manifest独立安装。本文吸收这种“Skill负责指导，bundle负责组成”与“activation无需durable state”的边界，不照搬专用tool或宿主字段。
 
 ### 2.4 Anthropic Agent Skills 标准
 
@@ -288,7 +297,7 @@ Agent Skills规范中的实验性host permission字段不属于Pulsara V1的行�
 |---|---|---|---|---|
 | turn/run一致性 | exposure reuse/narrow | turn snapshot | session manager | one-call frozen cut + epoch source head |
 | dynamic install |新run才widen |下一turn snapshot |追加reminder |同epoch追加catalog SNAPSHOT |
-| skill body | active injection/read | explicit injection |专用Skill tool | textual/configured activation或`read_file(intent=ACTIVATE_SKILL)` |
+| skill body | active injection/read | explicit injection或ordinary read |专用Skill tool | textual/configured activation或ordinary `read_file` |
 | Skill引用外部能力 |统一descriptor surface | optional sidecar/bundle |正文指导 + plugin manifest |正文只提供指导；真实能力由Builtin/MCP/Terminal owner拥有 |
 | manifest contract | Pulsara私有frontmatter | Agent Skills + optional sidecar |实际Skill主要是name/description | Agent Skills portable core是唯一文件契约；无Pulsara扩展 |
 | progressive resources |普通file tool | scripts/references/assets按需加载 |专用Skill tool | `read_file`/`search_files`按需读取标准目录资源 |
@@ -322,7 +331,7 @@ Agent Skills规范中的实验性host permission字段不属于Pulsara V1的行�
 1. 旧 `LocalSkillProvider` 解析并传播`provides_tools`、`suggested_tools`、binary/service/auth等Pulsara私有字段；这些字段没有portable author，必须整体删除而不是迁移到新的namespace。
 2. Round 9只把旧Skill输出适配为最小`FrozenSkillCapabilityFact`，不会替本文实现Agent Skills parser或dynamic activation；这些仍是本轮职责。
 3. ordinary provider planning尚未把“不重新解释filesystem”的exact frozen skill projection seam冻结成明确公共契约。
-4. 没有标准的model-invoked activation seam；普通`read_file`若被隐式解释会产生隐藏状态。
+4. 当前workspace-global read dedup会在第二次相同读取时省略正文、第三次拒绝，无法诚实支持progressive disclosure与未来history reset后的重新读取。
 5. 没有删除/修改/invalid skill的完整append-only transition matrix。
 6. 当前parser不接受标准`license`、`compatibility`与`metadata`，name规则也没有证明`name == parent directory basename`。
 7. 当前unknown-frontmatter warning会把合法但Pulsara不解释的宿主字段误报成整个Skill无效。
@@ -372,7 +381,7 @@ class LocalSkillManifest:
 
 `SkillAuthoringDiagnosticCode`至少包含`BODY_OVER_500_LINES`与`BODY_ESTIMATE_OVER_5000_TOKENS`。它们只表达Agent Skills authoring recommendation：前者由exact line count产生，后者可在存在target estimator时产生；二者都不能使manifest invalid、隐藏Skill或改变fingerprint。详细内容应由作者拆到`references/`等resources，但Runtime不得为了满足recommendation而截断body。
 
-`local_skill_manifest_semantic_fingerprint()`必须使用domain-separated、length-prefixed canonical encoding，覆盖标准parsed字段与body；它不覆盖raw document digest、mtime、inode、scan duration、absolute home path的字符串展示、supporting resource当前内容、unsupported/ignored extension值、authoring diagnostic或free-text internal diagnostic。`raw_document_digest`独立证明exact file bytes，供read race/join使用，不能替代semantic fingerprint。Provider-visible catalog fingerprint只覆盖`name + description + location`；active/activation fingerprint只额外覆盖exact body。因而license、compatibility或opaque metadata变化可以更新local manifest identity，但在routing/body均未变化时不得追加冗余provider snapshot。Runtime activation的ToolResult只发送exact parsed Markdown body及closed provider wrapper，不把raw YAML frontmatter重复暴露给模型；ordinary `read_file`仍返回文件真实内容。
+`local_skill_manifest_semantic_fingerprint()`必须使用domain-separated、length-prefixed canonical encoding，覆盖标准parsed字段与body；它不覆盖raw document digest、mtime、inode、scan duration、absolute home path的字符串展示、supporting resource当前内容、unsupported/ignored extension值、authoring diagnostic或free-text internal diagnostic。`raw_document_digest`独立证明exact file bytes，供read race/join使用，不能替代semantic fingerprint。Provider-visible catalog fingerprint只覆盖`name + description + location`；textual/configured active fingerprint只额外覆盖exact body。因而license、compatibility或opaque metadata变化可以更新local manifest identity，但在routing/body均未变化时不得追加冗余provider snapshot。Runtime生成的`ACTIVE_SKILL`只发送exact parsed Markdown body，不重复raw YAML frontmatter；ordinary `read_file`仍返回文件真实内容。
 
 contract identity冻结为：
 
@@ -438,7 +447,7 @@ Skill若依赖CLI、MCP或其他tool，应在portable `description`或Markdown b
 
 Loader在完整YAML成功解析后可以记录一个bounded、closed diagnostic code，但不得解析这些字段的内部语法，也不得把它们保存进canonical manifest DTO。它们不参与manifest semantic fingerprint、catalog、activation、provider wire、tool surface、authorization、effect policy或execution binding；字段变化只会改变证明原始文件bytes的`raw_document_digest`。无论value是否为空、未知或使用其他宿主语法，都不能授予权限、隐藏Skill、禁止用户激活、触发subagent/hook/shell，或让其他部分有效的standard Skill失效。
 
-用户在`$skill`后的文字继续作为ordinary user text保留；Pulsara不执行宿主参数模板展开。模型若通过`read_file(intent=ORDINARY)`读取原始文件，仍可能在opaque文件内容中看到这些frontmatter字段；这只是普通文件内容，不产生Runtime语义。
+用户在`$skill`后的文字继续作为ordinary user text保留；Pulsara不执行宿主参数模板展开。模型若通过普通`read_file`读取原始文件，仍可能在opaque文件内容中看到这些frontmatter字段；这只是普通文件内容，不产生Runtime语义。
 
 ### 4.4 Skill 不拥有 dependency graph
 
@@ -446,7 +455,7 @@ Round 9.1不定义`SkillCapabilityDeclaration`、`FrozenResolvedSkillDependency`
 
 若当前epoch已有对应能力，模型按普通路径使用：Builtin/direct MCP直接调用，late MCP经`inspect_new_mcp_tool`与`use_new_mcp_tool`，CLI经`terminal`。若能力不存在，既有owner返回typed unavailable/failure。Pulsara不得因Skill正文提到某个能力而安装MCP、扩大tool surface、改变permission、执行health probe或影响未来MCP promotion。
 
-Future Plugin若需要保证“安装这个Skill时也安装某个MCP/CLI package”，该关系属于Plugin bundle manifest与installer，不属于`SKILL.md`，也不反向写入Skill manifest。
+Future Plugin若需要保证“安装这个Skill时也提供某个MCP server”，该关系属于Plugin bundle manifest与installer，不属于`SKILL.md`，也不反向写入Skill manifest。CLI dependency resolver与`bin/` PATH injection不属于Round 9.2；Skill只能在正文中指导模型使用ordinary `terminal`检查/调用现有CLI。
 
 ### 4.5 Catalog entry
 
@@ -492,98 +501,50 @@ Skill facts只存在于Round 9 `FrozenCapabilityRegistrySnapshot`引用的Skill 
 
 `manifest semantic fingerprint`只证明该activation来自哪份exact parsed manifest，不直接进入`ACTIVE_SKILL` provider semantic fingerprint。后者只覆盖provider-visible skill identity/location、activation reason与exact body；仅license、compatibility、opaque metadata或unsupported host字段变化时不得追加内容完全相同的active successor。
 
-### 4.8 `read_file` activation intent
+### 4.8 普通 `read_file` progressive disclosure
 
-~~~python
-class FileReadIntent(StrEnum):
-    ORDINARY = "ORDINARY"
-    ACTIVATE_SKILL = "ACTIVATE_SKILL"
+`read_file`不增加intent、Skill lookup、dispatch attachment或activation settlement。它仍是一个普通、read-only executable capability；模型可以读取catalog列出的`SKILL.md`，也可以读取任何其他通过既有path/permission contract允许的文本文件。Runtime不需要机械判断这次读取是“检查”“比较”还是“采用”。
 
-
-@dataclass(frozen=True, slots=True)
-class FrozenSkillActivationCatalogEntry:
-    skill_name: str
-    catalog_location: str
-    source_registration_fingerprint: str
-    source_snapshot_fingerprint: str
-    expected_manifest_semantic_fingerprint: str
-    expected_raw_document_digest: str
-    root_binding_fingerprint: str
-    activation_path: Path = field(repr=False, compare=False)
-    entry_fingerprint: str
-
-
-@dataclass(frozen=True, slots=True)
-class FrozenSkillActivationCatalogLookup:
-    exact_scope: ExactConversationScope
-    effective_presence: SourceObservationPresence | None
-    skill_catalog_source_fingerprint: str | None
-    skill_catalog_observation_fingerprint: str | None
-    entries: tuple[FrozenSkillActivationCatalogEntry, ...]
-    lookup_fingerprint: str
-
-
-@dataclass(frozen=True, slots=True)
-class PreparedSkillActivationRead:
-    exact_scope: ExactConversationScope
-    advertised_entry: FrozenSkillActivationCatalogEntry
-    catalog_lookup_fingerprint: str
-~~~
-
-`FrozenSkillProjectionInput`只是**候选catalog事实**，不能直接签发`FrozenSkillActivationCatalogLookup`。Lookup必须在compiler返回最终`FrozenProviderInputAppendCompileResult`之后，由central post-compile factory基于以下四项一次构造：
-
-1. 最终`append_result.source_heads`中的effective `SKILL_CATALOG` head；
-2. 本次compiler实际选择的exact catalog representation及其provider-visible body；
-3. 同一次planning的`FrozenSkillProjectionInput`与六个root bindings；
-4. predecessor epoch随其安装的exact activation lookup（若有）。
-
-`skill_catalog_source_fingerprint`必须exact equal effective `ProcessLocalSourceHead.semantic_fingerprint`；`skill_catalog_observation_fingerprint`必须exact equal其`installed_observation_fingerprint`。`effective_presence=None`只表达该epoch尚无installed catalog head，此时两个fingerprint都为`None`且`entries=()`。`VALUE`必须拥有两个fingerprint和至少一个entry；`CLEARED | UNAVAILABLE`必须拥有两个fingerprint且`entries=()`。`lookup_fingerprint`覆盖scope、effective presence、两个head fingerprint与ordered entry fingerprints；`activation_path`仍只作为已验证root binding下的physical leaf保存，不进入semantic/provider fingerprint。
-
-Post-compile factory的closed矩阵是：
+本轮只收口普通读取的窗口与重复读取语义：
 
 ~~~text
-compiler实际追加 VALUE_EXACT_FULL
-    -> 从该exact VALUE body逐项反解/核验advertised entries
-    -> exact join current projection与root bindings
-    -> 构造非空lookup
-
-resulting head仍为VALUE，但本次没有追加observation
-    -> 若current projection渲染出的VALUE与effective head/body逐项相等，
-       可以用current physical bindings重建同语义lookup
-    -> 否则只可继承predecessor lookup，且其两个head fingerprint必须exact equal
-    -> predecessor lookup缺失或不匹配则在candidate register前typed internal conflict
-
-resulting head为CLEARED或UNAVAILABLE
-    -> 构造绑定该effective head的空lookup
-
-resulting head不存在
-    -> 构造ABSENT空lookup
+READ_FILE_DEFAULT_LINES = 2_000
+READ_FILE_MAX_LINES     = 2_000
+READ_FILE_MAX_CHARS     = 100_000  # existing physical read bound, unchanged
 ~~~
 
-`NOT_APPLICABLE`与semantic no-op都不是新的effective presence。它们只表示“本次没有发新observation”，必须解析到`append_result`最终保留的installed head：仍有效的VALUE只能按上表重建或继承，CLEARED/UNAVAILABLE/ABSENT只能为空。尤其当raw projection是catalog B、但budget把本次provider-visible状态降为`UNAVAILABLE`时，lookup必须为空；旧VALUE虽仍存在于immutable prefix，已被最新observation失效，不能授权B或旧entry。反过来，same-turn `NOT_APPLICABLE`期间filesystem已经变成B，也不得用raw B替换仍生效的predecessor A lookup。
+2,000行是一次ordinary read的默认/最大物理窗口，不是provider-visible正文承诺。最终模型可见结果仍唯一服从Round 7.1：
 
-Lookup是model-call scoped、process-local dispatch attachment，不进入provider或canonical row。为避免generic continuity层反向import Skill DTO，`PreparedProviderInputAppendCandidate`只增加opaque、process-local `dispatch_attachment_fingerprint`，其值由central runner factory domain-separate覆盖该lookup fingerprint；candidate fingerprint、register/install CAS与install permit都exact join该字段，但它不进入provider semantic-prefix、wire fingerprint或epoch compatibility。
+~~~text
+MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES = 40_000
+ordinary ToolResult policy                       = BEST_AVAILABLE
+~~~
 
-Fingerprint join不能替代physical object join，因为`activation_path`有意不进入semantic fingerprint。Continuity owner的既有PREPARED slot必须同时登记candidate与一个opaque attachment object；它只读取该对象的frozen fingerprint，不解释Skill字段。Install必须消费**登记的同一个lookup对象**，same-shape copy、`dataclasses.replace()`副本、foreign lookup或只提交相同fingerprint都在provider open前拒绝。成功install返回的既有opaque permit同时绑定candidate与attachment object identity；`_PreparedProviderDispatch`只有凭该permit才能把登记的exact lookup随assistant/tool batch贯穿到`KernelToolInvocationContext`。这只是给现有process-local PREPARED/INSTALLED CAS增加一个opaque attachment槽，不是新的continuity owner、lookup registry或durable generation。
+因此：
 
-CAS失败、preflight失败、cancel或discard必须同时丢弃candidate与lookup，并从新的predecessor重新compile/build；禁止把失败attempt的lookup复用到下一call，禁止只携带fingerprint后查询latest discovery，也禁止建立`fingerprint -> snapshot` mutable map。
+- `offset=1`且返回到EOF，只证明file tool完成了完整物理读取；
+- canonical preview为`COMPLETE`，只证明结果没有在canonical acceptance时退化成`HEAD_TAIL`；
+- compiler为该result选择`FULL`并由continuity CAS成功安装，才证明完整结果真正进入该次model call；
+- 任一条件不成立，都不得称为“模型完整看过这个Skill”，但普通read本身仍按既有typed result成功/失败结算；
+- 超过40K logical FULL的valid `SKILL.md`继续使用普通pagination/artifact guidance；不建立Skill专用大正文通道，也不把`HEAD_TAIL`称为完整Skill；
+- Skill read不标记Round 7.1 `FULL_REQUIRED`。若aggregate budget让结果选择COMPACT/REF_ONLY，它就是普通best-available read，不得因此阻断conversation或改写canonical result。
 
-`ACTIVATE_SKILL`只接受**产生该tool call的model call** frozen lookup中唯一entry的exact location；central factory从lookup选择entry并构造`PreparedSkillActivationRead`，调用方不能自由提交expected digest。不得把后续safe-point catalog、新winner或任意Markdown path冒充成已advertised Skill。Runtime一次读取完整bounded `SKILL.md`，重新执行standard parser，并冻结**实际返回bytes**对应的standard manifest与body：
+普通`read_file`也不得继续使用workspace-global“第二次省略正文、第三次拒绝”的content-suppressing dedup。相同path/offset/limit的再次调用必须重新读取current file并返回ordinary bounded result；实现可以记录不影响结果的diagnostic/telemetry，但不能返回`content_returned=false`或因为历史read次数拒绝。否则compaction后未被保留的Skill、文件变化后的复核以及正常分页重试都可能无法取得正文。
 
-- 与expected manifest一致：ToolResult body与activation validation使用同一frozen manifest；
-- 文件发生变化但仍是同name/location的valid standard skill：ToolResult返回current exact parsed body，next safe point同时发布catalog successor；
-- missing/invalid/name mismatch/over-bound：ordinary typed read/activation failure，不安装active head；
-- pagination/partial read不允许使用`ACTIVATE_SKILL`；
-- activation body必须先通过普通`PreparedToolOutputProjection`规则；只有ordinary display kind为`COMPLETE`时才可形成successful activation result。若普通ToolResult会变成`HEAD_TAIL`，则改为小型typed `SKILL_ACTIVATION_UNAVAILABLE/BODY_NOT_INLINEABLE`结果，提示作者将详细内容拆入resources；不得建立Skill专用大正文通道或把HEAD_TAIL称为完整activation；
-- canonical successful ToolResult保存exact parsed Markdown body这个真实activation read outcome，并标记Round 7.1 `FULL_REQUIRED/SKILL_ACTIVATION`；其普通FULL provider projection是model-driven activation body的唯一副本，不再追加raw frontmatter或第二份`ACTIVE_SKILL`正文；
-- 只有下一provider compile为该exact result选择FULL且continuity candidate成功安装时，才能声称模型完整激活了该skill。单条logical result没有FULL时必须在successful result形成前改为上述小型typed unavailable；successful COMPLETE已经canonical accepted、但aggregate provider input装不下时则由Round 7.1返回typed resource boundary、provider open=0并保持activation未生效，不能重写canonical result或静默以COMPACT/REF_ONLY正文代替完整body；
-- activation settlement发生在完整tool batch结算之后、provider open之前，不能影响同一个parallel tool batch中的其他call。
+文件在catalog freeze与read attempt之间变化时，不需要catalog-generation permit：
 
-Activation attachment与frozen catalog lookup同属既有dispatch attachment：FULL安装前为dormant，caller cancellation/CAS conflict不能使其生效或把requirement改成BEST_AVAILABLE；fresh attempt必须从exact canonical result、request intent与同一versioned classifier重建。Host/epoch close可释放未安装attachment，不新增durable loaded state或recovery owner。
+- read成功：canonical ToolResult拥有attempt时真实返回的current bytes；
+- missing/unreadable/binary/device/physical over-bound：返回既有typed read failure；
+- 下一safe point重新scan并通过`SKILL_CATALOG` successor表达current filesystem；
+- 读取任意Markdown path不会安装`ACTIVE_SKILL`、授予permission或建立loaded-state。
 
-`ORDINARY`保持现有raw-file semantics，不安装active head或loaded-skill marker。`ACTIVATE_SKILL`读取必须绕过ordinary read dedup并且不得读取、递增或写入ordinary dedup record；因此“先ORDINARY检查、后ACTIVATE采用”与重复显式activation都仍会重新取得完整current body。只有`ORDINARY`保留现有unchanged/third-read-blocked行为。这不是session loaded-state：每个activation仍是独立ordinary tool attempt/result。
+2026-08-18对当前六个Pulsara roots的真实探针给出实现依据：29个unique `SKILL.md`在`limit=2_000`时全部一次读到EOF并形成Round 7.1 FULL-eligible logical result，最大quote为36,333 UTF-8 bytes；旧默认500行会截断其中5个。扩大到本机已知Codex/plugin roots的106个文件时，104个仍可FULL，两个private plugin-cache文件超过40K并正确退化。后两类目录本来不属于本文六个root；该结果同时证明：
 
-`PreparedSkillActivationRead`是one-call process-local binding，不持有file descriptor、不持久化，也不创建skill receipt。其tool arguments/result仍按普通canonical attempt/result保存；Host重启后successful canonical ToolResult会在下一input cut重现exact parsed body。不得把“row已提交”误称为模型已经看到。
+- 2,000行足以覆盖当前正常Skill，不需要提高40K；
+- “少于500行/约5,000 tokens”仍只是authoring recommendation；
+- 合法64-KiB Skill未来仍可能超过normal FULL，必须诚实分页/拆分resources，不能声称所有standard Skill都保证一次完整进入模型。
+
+本文不建立“已完整读取Skill”的Runtime状态。Round 5B可以从ordinary canonical read/result、当次actual compiler selection与continuity installation中纯派生一个**同一真实user run内**的retained context；其closed条件与预算由Round 5B唯一拥有，不能反向成为本轮provider tool schema或authorization。
 
 ### 4.9 无 durable generation
 
@@ -622,17 +583,15 @@ freeze canonical provider-input cut
 -> resolve trigger-specific ACTIVE_SKILL from the same frozen discovery
 -> collect all other one-cut sources
 -> compile
--> resolve final effective SKILL_CATALOG head from append result
--> build/rebuild/inherit an exact FrozenSkillActivationCatalogLookup for that head
--> construct and PREPARED-register continuity candidate + exact lookup attachment
+-> construct and PREPARED-register ordinary continuity candidate
 -> provider preflight
--> continuity candidate + exact attachment install CAS
--> provider open with the same installed lookup
+-> continuity candidate install CAS
+-> provider open
 ~~~
 
 同一次planning中，registry Skill facts、catalog与active body必须来自同一`LocalSkillDiscovery`和同一组六个source snapshots。不得先注册facts或渲染catalog、随后重新读文件渲染active body。
 
-“compile后构造lookup”不允许重新scan filesystem，也不允许改变compiler决策。它只把本次frozen projection、predecessor installed lookup与final append result做exact join。若这个join失败，整个dispatch attempt在provider open前失败并重建；不得用raw projection猜测模型看到了什么。
+普通`read_file`不依赖model-call catalog lookup；catalog是routing data，不是file-read authorization。Compiler仍须exact安装其最终选择的`SKILL_CATALOG VALUE | CLEARED | UNAVAILABLE`，但continuity candidate不再携带Skill-private dispatch attachment。
 
 Round 3.1 dispatch-planning absolute deadline继续覆盖skill scan/parse/render；每个文件I/O仍使用相应physical bound。不得因每个skill重新签发完整planning deadline。
 
@@ -684,7 +643,7 @@ aggregate active body UTF-8 bytes                 = 512 KiB
 
 Agent Skills关于`SKILL.md`少于500行、activation instructions少于约5,000 tokens是authoring recommendation，不是parser validity条件。Pulsara用closed authoring diagnostic提醒作者拆分resources，但不因此拒绝标准文件。Supporting resources不进入discovery aggregate；它们在ordinary `read_file`/`search_files`/`terminal`调用时分别受既有tool bound约束。
 
-64 KiB只限制parser/filesystem working set，不承诺任意valid body都能在一次activation中进入provider。Model-driven activation完全服从Round 7.1 canonical COMPLETE、canonical preview hard bound与provider-neutral logical FULL quote；单条正文只能产生HEAD_TAIL或没有FULL时，在successful activation result形成前以小型typed unavailable投影结算并提示拆分resources。已经形成合法successful COMPLETE/FULL result但与siblings/history合计不fit时，`FULL_REQUIRED/SKILL_ACTIVATION`触发typed provider-input resource boundary，不得事后重写结果。Textual/configured activation同样必须通过`ACTIVE_SKILL` source的exact body/aggregate/provider quote；放不下时使用既有`UNAVAILABLE` state，而不是专用大正文carrier。
+64 KiB只限制parser/filesystem working set，不承诺任意valid body都能在一次ordinary read中完整进入provider。`read_file`默认/最大读取窗口为2,000行，最终结果继续服从Round 7.1 40K logical FULL与BEST_AVAILABLE选择；超界时使用普通pagination/artifact guidance。Textual/configured activation仍必须通过`ACTIVE_SKILL` source的exact body/aggregate/provider quote；放不下时使用既有`UNAVAILABLE` state，而不是专用大正文carrier。
 
 ---
 
@@ -704,14 +663,14 @@ Agent Skills关于`SKILL.md`少于500行、activation instructions少于约5,000
 }
 ~~~
 
-`SKILL_CATALOG`与`ACTIVE_SKILL`都使用`UNTRUSTED_OBSERVATION`；activation ToolResult继续使用普通untrusted tool-output语义。第三方description/body不会因Runtime选择或包装而升级为授权上下文。在Runtime自动生成的catalog/active/activation projection中，contract/version/fingerprint/generation、raw frontmatter、opaque metadata、absolute resolved path、inode、mtime、Host ID和diagnostic path不得进入provider正文。Provider只看到routing metadata与parsed instruction body。模型若明确用`ORDINARY`读取原始`SKILL.md`，其ToolResult仍按ordinary opaque file content处理；Runtime不递归删改用户主动读取的正文。
+`SKILL_CATALOG`与`ACTIVE_SKILL`都使用`UNTRUSTED_OBSERVATION`；普通file ToolResult继续使用既有untrusted tool-output语义。第三方description/body不会因Runtime选择或包装而升级为授权上下文。在Runtime自动生成的catalog/active projection中，contract/version/fingerprint/generation、raw frontmatter、opaque metadata、absolute resolved path、inode、mtime、Host ID和diagnostic path不得进入provider正文。Provider只看到routing metadata与parsed instruction body。模型用普通`read_file`读取原始`SKILL.md`时，ToolResult仍按ordinary opaque file content处理；Runtime不递归删改用户主动读取的正文。
 
 ### 6.2 稳定 BASE_SYSTEM 说明与纯数据 catalog body
 
 以下Runtime规则必须随本轮global lowering cold bump一次写入稳定`BASE_SYSTEM`，不得混进untrusted catalog/body envelope：
 
 - `SKILL_CATALOG`只是untrusted routing index，不是skill body；
-- 采用skill时用`read_file(intent=ACTIVATE_SKILL)`完整读取列出的`SKILL.md`；只检查/比较时使用`ORDINARY`；
+- 需要采用或检查skill时，用普通`read_file`读取列出的`SKILL.md`；默认2,000行窗口通常覆盖完整正文，若结果明确截断或降级则按普通pagination/artifact guidance继续读取；
 - 相对引用从skill root解析，`scripts/`、`references/`、`assets/`及其他supporting files只按需读取；
 - skill只能使用已存在工具，不能授予工具或权限；
 - Skill正文提到的Builtin、MCP或CLI用法只是指导；真实可用性与调用方式以当前tool/MCP catalog及调用结果为准；
@@ -760,7 +719,7 @@ complete discovery cannot be proven or exact full metadata catalog is overbound
 
 完整replacement放不下时按Round 3.1 stateful-source policy尝试最小`UNAVAILABLE` invalidation；不得继续让旧catalog冒充current。Catalog是advisory capability context，不能因为完整新catalog太大而永久阻断后续所有对话。
 
-该transition matrix同时决定model-call activation eligibility，而不是只决定provider文字。最终head为`VALUE`时，lookup必须与该VALUE exact join；最终head为`CLEARED | UNAVAILABLE`或尚无head时，lookup必须为空。Compiler选择最小UNAVAILABLE后，即使旧VALUE bytes仍位于append-only prefix中，Runtime也不得接受针对旧entry的`ACTIVATE_SKILL` attempt。
+该transition matrix只决定provider-visible catalog当前状态，不创建file-read authorization。Compiler选择最小UNAVAILABLE后，即使旧VALUE bytes仍位于append-only prefix中，BASE_SYSTEM会明确其已失效；模型仍可像读取其他合法文件一样调用普通`read_file`，真实path与permission owner决定结果，而不是旧catalog签发能力。
 
 ---
 
@@ -782,32 +741,26 @@ BODY作为`ACTIVE_SKILL VALUE`进入provider runtime observation。它是本次a
 如果用户没有显式点名、模型仅根据catalog判断task匹配：
 
 ~~~text
-model -> read_file({path: catalog.location, intent: "ACTIVATE_SKILL"})
-Runtime -> exact catalog join + full bounded read + ordinary authorization/attempt/result
-Runtime -> FULL result supplies exact body once
+model -> read_file({path: catalog.location, offset: 1, limit: 2000})
+Runtime -> ordinary bounded read + ordinary authorization/attempt/result
+Runtime -> result exposes FULL/COMPACT/REF_ONLY/HEAD_TAIL and truncation/artifact guidance honestly
 model -> read referenced files as needed
 ~~~
 
-这条路径不产生第二份`ACTIVE_SKILL` successor，也不建立session-wide `loaded_skill_names`。明确区分：
+这条路径不产生第二份`ACTIVE_SKILL` successor，也不建立session-wide `loaded_skill_names`。模型是否采用正文是模型语义，不是Runtime状态；canonical read/result、actual compiler representation与continuity installation只记录模型实际可能看到了什么。
 
-- 模型只是比较skill时必须用`ORDINARY`，不代表采用；
-- 只有provider显式给出`ACTIVATE_SKILL` intent且下一compile选择FULL，才能声称该skill已被完整激活；body由该ToolResult自身承载；
-- canonical ToolResult已经记录模型实际看到了什么；
-- 后续history reset如何保留ongoing workflow属于Round 5B，而不是本轮建立loaded-state的理由。
-
-本文不维护session内“读过的skill”清单。未来Round 5B也不得仅因为一次普通read就自动枚举或重新注入skill；这是一条下游设计约束，不是本轮实现项。
+本文不维护session内“读过的skill”清单。Round 5B只可在compaction attempt内部，从同一真实user run的canonical reads与installed provider-input proof纯派生“完整正文曾经FULL交付”，并且仅在rebase时有界重注入；不能把一次physical read、row提交、HEAD_TAIL或partial page直接视为eligible。
 
 ### 7.3 Read race 的语义
 
 Catalog描述的是其freeze时刻的bounded manifest；`read_file`读取的是tool attempt时文件的current bytes。二者之间文件变化时：
 
-- `ORDINARY`成功：canonical ToolResult中的bytes就是模型实际检查的内容，不activation；
-- `ACTIVATE_SKILL`成功且current file仍是valid same-name standard skill：ToolResult FULL projection使用current exact parsed Markdown body；
+- read成功：canonical ToolResult中的bytes就是模型实际取得的current内容；
 - file不存在/不可读：返回普通typed read failure；
 - 下一safe point重新scan并追加catalog successor；
 - 不因为skill是advisory guidance而建立catalog-generation read permit。
 
-这不是TOCTOU authority漏洞：skill始终只是advisory instruction，不能授予tool schema、permission或physical capability。Textual/configured `ACTIVE_SKILL`使用planning时已经读取的body；model-driven activation使用exact ToolResult bytes；两条路径都不做第三次file read，也不重复正文。
+这不是TOCTOU authority漏洞：skill始终只是advisory instruction，不能授予tool schema、permission或physical capability。Textual/configured `ACTIVE_SKILL`使用planning时已经读取的body；model-driven path只使用ordinary ToolResult，不做第三次file read或重复正文。
 
 ---
 
@@ -819,7 +772,7 @@ Catalog描述的是其freeze时刻的bounded manifest；`read_file`读取的是t
 |---|---:|---:|---|
 | ROOT initial human message | yes | yes | aggregate exact snapshot |
 | ROOT accepted USER_STEER anchor | yes | yes | replace/clear active head |
-| model `ACTIVATE_SKILL` ToolResult | explicit tool intent | inherit configured | FULL result carries body once |
+| model ordinary `read_file(SKILL.md)` | no Runtime activation | inherit configured | ordinary ToolResult carries returned bytes once |
 | same-turn ordinary tool/result loop | no | inherit | `NOT_APPLICABLE`, head不变 |
 | Plan automatic continuation | no | yes | configured-only replacement或clear |
 | ROOT next real human message | yes | yes | new activation epoch |
@@ -828,14 +781,14 @@ Catalog描述的是其freeze时刻的bounded manifest；`read_file`读取的是t
 
 Ordered steer batch继续使用Round 3.1 exact anchor：最后一个accepted ROOT human steer决定textual activation，前序steer仍是canonical delta，但不得各自产生一个active snapshot。
 
-Skill activation不创建任何derived authorization state。旧`ACTIVE_SKILL`或activation ToolResult正文可以留在immutable prefix，但它们只表达模型曾经收到的advisory instruction，不能成为后续tool authorization的输入。
+Skill activation不创建任何derived authorization state。旧`ACTIVE_SKILL`或ordinary Skill-read ToolResult正文可以留在immutable prefix，但它们只表达模型曾经收到的advisory instruction，不能成为后续tool authorization的输入。
 
 ### 8.2 Active file发生变化
 
 同一activation期间，即便active skill文件被修改、删除或被同名winner替换：
 
 - 当前`ACTIVE_SKILL` exact body不变；
-- model-driven activation的canonical ToolResult body同样不变；
+- 已提交的ordinary read ToolResult body同样不变；
 - catalog可追加新snapshot反映current filesystem；
 - same-turn ordinary tool loop不重新activate；
 - 下一真实activation boundary才读取current winner并replace/clear/unavailable。
@@ -895,7 +848,7 @@ Pulsara不为Skill扫描PATH、运行`--version`、检查登录、网络或crede
 
 ### 9.4 Future Plugin bundle
 
-如果发行者需要保证Skill与MCP server/CLI package共同安装，应由future Round 9.2 Plugin manifest分别贡献Skill root与MCP/install配置。Loose Agent Skill始终可以原样安装；缺少Plugin或host sidecar不能让它失去发现、激活或正文指导能力。Pulsara不要求用户补metadata，也不使用规则从正文生成bundle manifest。
+如果发行者需要保证Skill与MCP server共同安装，应由[Round 9.2](ROUND_9_2_AGENT_PLUGIN_BUNDLE_AND_HOOK_LIFECYCLE_IMPLEMENTATION_SPEC.zh.md) Plugin manifest分别贡献Skill root与MCP配置；同一bundle还可包含Codex-compatible Hooks以及一个等待PHC-10定义的dormant Subagent-spec inventory。Loose Agent Skill始终可以原样安装；缺少Plugin或host sidecar不能让它失去发现、激活或正文指导能力。Pulsara不要求用户补metadata，也不使用规则从正文生成bundle manifest；Plugin也不替Skill增加executor或permission语义。
 
 ---
 
@@ -922,14 +875,12 @@ Round 5B未来只能消费本文普通provider planning已经拥有的两类值�
 - active/idle adoption分支；
 - successor dry compile与continuity install；
 - freeze后filesystem变化如何settle；
-- repeated compaction如何去重；
+- ordinary `read_file(SKILL.md)`正文何时满足“同run已完整FULL交付”以及repeated compaction如何去重；
 - compaction-specific tests、failure matrix与activation evidence。
 
 本文只提出兼容性约束：Round 5B不得要求修改BASE_SYSTEM、不得把skill变成tool、不得依赖durable loaded-skill history，也不得重新解释raw filesystem时绕开本文的central manifest/projection builders。
 
-active compaction adoption后的第一次普通compile仍必须执行本文已经冻结的**post-compile effective-head lookup**顺序：先由compiler决定successor `SKILL_CATALOG`的VALUE/CLEARED/UNAVAILABLE/no-op继承结果，再从该次真正provider-visible的effective head构造`FrozenSkillActivationCatalogLookup`，最后把lookup作为opaque exact-object dispatch attachment与successor continuity candidate一起CAS安装。Round 5B不得从compaction前raw filesystem projection、summary正文或pre-compile successor candidate预先构造lookup；idle adoption不构造lookup，下一条真实turn cold compile时再走同一普通路径。
-
-这只是Round 5B复用本文普通接口的下游义务，不扩大本文production修改面，也不建立`CompactionSkillLookup`、loaded-skill ledger或durable activation history。
+active compaction adoption后的第一次普通compile仍须从successor current projection生成完整`SKILL_CATALOG`与`ACTIVE_SKILL` source，并由普通continuity candidate一起安装。Round 5B若保留同run中模型自主读取过的Skill，只能使用其自己的process-local `RETAINED_SKILL_CONTEXT`派生规则；它不得反向添加read intent、catalog lookup、loaded-skill ledger或durable activation history。
 
 ### 10.3 实施顺序
 
@@ -1011,8 +962,7 @@ Skill安装、修改、删除、activation与read都不改变tools。本文任�
 | unsupported host extension | allowed | none | ignore behavior + internal diagnostic；standard skill remains |
 | opaque metadata changes | allowed | none | local manifest可更新；name/description/body不变则provider source no-op |
 | one document >64 KiB | allowed | none | omit invalid/over-bound skill + diagnostic |
-| valid body exceeds ordinary COMPLETE ToolResult or provider FULL quote | allowed | ordinary typed result | catalog仍完整列出；activation明确UNAVAILABLE并提示拆分resources |
-| successful activation FULL单条合法但aggregate input不fit | no | successful canonical ToolResult保持 | `FULL_REQUIRED/SKILL_ACTIVATION` resource boundary；activation保持dormant，不降级/重写/重读文件 |
+| valid body exceeds ordinary COMPLETE ToolResult or provider FULL quote | allowed | ordinary bounded ToolResult | catalog仍完整列出；read按普通HEAD_TAIL/COMPACT/REF_ONLY、pagination与artifact guidance处理 |
 | more than 64 valid winners or exact catalog >384 KiB | allowed if invalidation fits | none | no partial/shortened metadata；catalog UNAVAILABLE/CATALOG_OVERBOUND |
 | aggregate discovery bound exceeded | allowed if invalidation fits | none | no partial snapshot；UNAVAILABLE |
 | duplicate name | allowed | none | deterministic first winner；later duplicate omitted |
@@ -1022,10 +972,7 @@ Skill安装、修改、删除、activation与read都不改变tools。本文任�
 | read_file target changed | allowed | ordinary tool result | model使用真实returned bytes；next scan updates catalog |
 | read_file target removed | allowed | ordinary failed tool result | next scan removes catalog entry |
 | active skill modified mid-run | allowed | none | active head保持；catalog可变 |
-| catalog replacement over input budget | allowed if invalidation fits | none | append UNAVAILABLE；本次activation lookup为空，旧prefix entry不可调用 |
-| post-compile effective-head / lookup join conflict | no | none | candidate注册前丢弃整次dispatch并从fresh predecessor重建 |
-| continuity CAS conflict after lookup freeze | no for stale attempt | none | candidate与lookup一起discard；不得向下一attempt复用 |
-| caller cancel before activation FULL install | no for cancelled waiter | successful canonical ToolResult保持 | waiter detach；activation不生效，Host-owned exact settlement/next attempt仍重建同一requirement |
+| catalog replacement over input budget | allowed if invalidation fits | none | append UNAVAILABLE；旧prefix catalog由新状态明确失效 |
 | active exact body cannot fit but UNAVAILABLE fits | allowed | none | append/安装UNAVAILABLE；不回退旧body |
 | even minimum active invalidation cannot fit | no | none | typed capability resource boundary |
 
@@ -1084,40 +1031,32 @@ Skill安装、修改、删除、activation与read都不改变tools。本文任�
 - `SKILL_CATALOG` source contract升级为`pulsara.skill-catalog.v2`；
 - collector contract升级为`pulsara.skill-catalog-collector.v2`；
 - `ACTIVE_SKILL` source contract升级为`pulsara.active-skill.v2`，因为canonical manifest与parsed-body contract已经改变；
-- `read_file` descriptor/schema contract升级，新增closed intent；只能在Host cold tool-surface construction安装，禁止同epoch热改；
 - complete scan failure映射UNAVAILABLE；empty映射CLEARED；
 - `SKILL_CATALOG`与`ACTIVE_SKILL`使用`UNTRUSTED_OBSERVATION`；stable usage/authority规则只进入BASE_SYSTEM；
 - catalog renderer只有exact full `name + description + location`表示，不再生成缩短description的COMPACT/REF_ONLY variant；
 - same tool loop继续NOT_APPLICABLE；
 - 保持placement：catalog在active之前，不能用degradation priority替代placement ordinal。
 
-### 13.6 `model_input/continuity.py`、`input_continuity.py` 与 Runner safe-point wiring
+### 13.6 Runner safe-point wiring
 
 - provider planning在同一safe-point freeze complete Skill source snapshots；
-- raw projection只产生catalog candidate，不能直接产生activation lookup；
-- compiler完成后，从final append result的effective `SKILL_CATALOG` head、同一projection/root bindings与predecessor installed lookup构造`FrozenSkillActivationCatalogLookup`；
-- `VALUE_EXACT_FULL`新head逐项核验rendered catalog后构造lookup；no-op/`NOT_APPLICABLE`按effective head重建或继承；`CLEARED | UNAVAILABLE | ABSENT`构造空lookup；
-- `PreparedProviderInputAppendCandidate`增加`dispatch_attachment_fingerprint`，其process-local candidate fingerprint domain从`pulsara:prepared-provider-input-append:v2-wire-proof`升级为`pulsara:prepared-provider-input-append:v3-dispatch-attachment`；该字段不进入prefix/wire/compatibility fingerprint；
-- `PreparedProviderInputAppendCandidate.dispatch_attachment_fingerprint` exact join lookup fingerprint；continuity PREPARED slot opaque登记同一lookup对象，register/install CAS与permit同时校验fingerprint和object identity，provider open后由`_PreparedProviderDispatch`把这个exact对象随assistant batch贯穿到每个`KernelToolInvocationContext`；
-- CAS/preflight/cancel/discard失败同时释放lookup，下一attempt必须重新compile与构造；
+- compiler只安装最终effective `SKILL_CATALOG` / `ACTIVE_SKILL` source heads；不构造Skill-private lookup或dispatch attachment；
 - 完整tool batch之后再允许catalog update；
 - ordinary initial、steer与tool-loop dispatch都使用同一个frozen projection factory；
 - 只把普通frozen projection/source head接口暴露给未来consumer；
 - 不导入或创建任何compaction resource；
-- no new provider tool name；仅对既有`read_file`做cold schema revision，同epoch不得热改。
+- continuity/input candidate contracts不因Skill model-driven read而变化。
 
-### 13.7 `read_file` activation wiring
+### 13.7 普通 `read_file` wiring
 
-- 扩展既有`read_file` schema加入optional closed `intent`，默认`ORDINARY`；不新增provider tool name；
-- `ACTIVATE_SKILL`禁止partial pagination并exact join当前model-call `FrozenSkillActivationCatalogLookup`；
-- empty lookup必须在local authorize/attempt之前返回typed `SKILL_NOT_ADVERTISED_FOR_MODEL_CALL`；不能因旧VALUE仍在prefix、调用参数猜中路径或latest projection存在entry而放行；
-- full read、standard parse与ToolResult共享一份immutable returned-byte carrier；
-- activation body必须先通过ordinary ToolResult `COMPLETE`与logical FULL-eligibility边界；HEAD_TAIL/无FULL候选在successful result形成前改为小型typed unavailable；successful result附加Round 7.1 `FULL_REQUIRED/SKILL_ACTIVATION`，aggregate compiler不得降级；
-- activation settlement只在完整tool batch与exact FULL continuity install之后生效；aggregate不fit或cancel保持dormant并走typed resource boundary，不改写canonical result；
-- `_PreparedProviderDispatch`、assistant/tool batch与`KernelToolInvocationContext`贯穿同一个frozen lookup对象；invoke前从该lookup构造selected read，不能用latest scan或单独fingerprint替代；
-- `ACTIVATE_SKILL`绕过且不更新ordinary read dedup；`ORDINARY`继续维持原行为；
-- failure/cancel/non-FULL projection不安装active state，也不把requirement降为BEST_AVAILABLE；
-- provider tool schema在Host cold construction时冻结，同一continuity epoch内仍byte-equal。
+- `read_file`不增加intent字段或新的provider tool name；
+- 将默认line window从500提高到2,000，maximum仍为2,000，100,000-character physical bound保持；
+- 删除workspace-global content-suppressing read dedup；相同read再次执行时返回current bounded result，不再第二次省略、第三次拒绝；
+- full/partial read继续使用同一immutable returned-byte carrier与ordinary ToolResult settlement；
+- Skill read使用Round 7.1 `BEST_AVAILABLE`，不增加`FULL_REQUIRED/SKILL_ACTIVATION` classifier；
+- HEAD_TAIL/COMPACT/REF_ONLY、pagination、artifact与failure保持普通file semantics；
+- read result不安装active state、permission或Skill-private receipt；
+- 若default值进入provider JSON schema，作为本文cold baseline一次升级；同一continuity epoch内tools仍byte-equal。
 
 ### 13.8 Tool authorization保持不变
 
@@ -1185,21 +1124,20 @@ Skill安装、修改、删除、activation与read都不改变tools。本文任�
 
 ### 14.4 Read semantics
 
-- workspace `.pulsara/skills/X/SKILL.md`可由catalog location通过`read_file(intent=ACTIVATE_SKILL)`完整读取，FULL ToolResult只展示正文一次；
+- workspace `.pulsara/skills/X/SKILL.md`可由catalog location通过普通`read_file`读取，默认/最大window均为2,000行；
 - workspace `.agents`/`.claude`、user `.pulsara`/`.agents`/`.claude`同样覆盖；
 - `search_files`可查reference，`terminal rg`不是必需路径；
 - supporting resources不在discovery时读取；relative reference按skill root展示并由ordinary file-tool path policy执行；script不因load自动执行；
-- `ORDINARY` read不创建activation；`ACTIVATE_SKILL`只在FULL result、batch与continuity settlement后算作完整激活，不另建body head或permission state；
+- ordinary read不创建Runtime activation、body head、permission state或loaded-state；
 - read之后文件变化，ToolResult保留old exact output、next catalog显示new state；
-- repeated unchanged `ORDINARY` read继续遵守现有dedup contract；`ORDINARY -> ACTIVATE_SKILL`与repeated `ACTIVATE_SKILL`均绕过且不污染ordinary dedup，并在ordinary COMPLETE边界内返回完整current body；
-- 超出ordinary COMPLETE边界的valid Skill返回typed activation unavailable并提示拆分resources，不返回HEAD_TAIL成功或建立Skill专用大正文通道；
-- successful COMPLETE activation result带`FULL_REQUIRED/SKILL_ACTIVATION`；与一个或多个parallel sibling/长history合计超budget时provider open=0、siblings不丢失、canonical result不重写且activation保持dormant；
-- FULL安装前cancel只detach waiter，不安装active state；fresh attempt从exact request/result重建requirement，绝不重新读取文件或重跑tool；
-- model call看到catalog A后filesystem刷新为B，其tool call仍只可用随该call贯穿的lookup A解析；不能查询latest B补齐未advertised entry，A的exact path已删除时返回typed failure；
-- raw catalog B因provider budget被编译为UNAVAILABLE时，本call lookup为空；即使模型从旧prefix猜出A/B location，`ACTIVATE_SKILL`也在attempt前typed拒绝；
-- catalog CLEARED/UNAVAILABLE后lookup为空；same semantic no-op可从current bindings重建同一VALUE lookup，`NOT_APPLICABLE`且current projection不同则必须继承predecessor VALUE lookup；
-- post-compile lookup与effective source head fingerprint不一致时provider open为0；continuity CAS失败后旧lookup不可被下一attempt复用；
-- `_PreparedProviderDispatch -> assistant/tool batch -> KernelToolInvocationContext`传递同一个lookup object；只传fingerprint、foreign-scope lookup或mutable fingerprint map均由architecture test拒绝；
+- repeated same path/offset/limit重新读取current file并返回正文；不存在第二次`content_returned=false`或第三次拒绝；
+- `offset=1`、EOF、canonical COMPLETE、actual FULL selection与continuity install四项分别测试；只有全部成立时才可对下游声称完整正文已实际交付；
+- 超出ordinary FULL边界的valid Skill诚实返回normal HEAD_TAIL/COMPACT/REF_ONLY与pagination/artifact guidance，不建立Skill专用大正文通道；
+- Skill result保持`BEST_AVAILABLE`；aggregate压力下允许ordinary downgrade，不触发`FULL_REQUIRED/SKILL_ACTIVATION` resource boundary；
+- model call看到catalog A后filesystem刷新为B，ordinary read返回attempt时current bytes或typed missing；next safe point发布B，不查询任何activation lookup；
+- catalog CLEARED/UNAVAILABLE只失效routing metadata，不改变普通file-read authorization；
+- synthetic 501/2,000-line Skill在logical quote不越40K时由default read一次到EOF；2,001-line physical case与40K+ logical case分别诚实截断/退化；
+- 本机六root 29/29、最大36,333-byte quote及broad 104/106 FULL只作为脱敏activation evidence，不成为依赖个人目录内容的portable correctness gate；
 - repository/tool result没有skill-private receipt。
 
 ### 14.5 Activation
@@ -1240,14 +1178,15 @@ old messages byte-for-byte prefix of new messages
 
 路径至少包括：add、modify、remove、explicit activation、tool loop、steer activation、unrelated MCP route change、catalog unavailable。
 
-另对model-driven activation断言：旧messages保持prefix；新增完整tool group中`SKILL.md`正文只出现一次；不得同时在ToolResult与`ACTIVE_SKILL`复制正文；不得创建或注入skill-derived permission state。
+另对model-driven read断言：旧messages保持prefix；新增tool group只使用ordinary ToolResult，不同时追加`ACTIVE_SKILL`正文，也不创建或注入skill-derived permission state。
 
-Provider-wire hygiene还必须断言：catalog/active carrier的trust为`UNTRUSTED_OBSERVATION`，正文不含BASE_SYSTEM usage rules、raw frontmatter、license、metadata、Pulsara contract/fingerprint或absolute path；模型明确发起的`ORDINARY` raw file read不做递归清洗。
+Provider-wire hygiene还必须断言：catalog/active carrier的trust为`UNTRUSTED_OBSERVATION`，正文不含BASE_SYSTEM usage rules、raw frontmatter、license、metadata、Pulsara contract/fingerprint或absolute path；模型明确发起的ordinary raw file read不做递归清洗。
 
 ### 14.8 Round 5B readiness（非compaction测试）
 
 - normal provider planning能返回完整frozen projection input；
 - installed catalog/active source head可由continuity owner只读取得，不创建新owner；
+- ordinary canonical read/result与actual compiler decision可供下游只读判断FULL delivery，但本轮不维护retained/loaded set；
 - capability package不import compaction package；
 - 测试不得构造summary、snapshot adoption、successor epoch或compaction transaction；
 - 一个consumer在相同输入上复用central builders会得到byte-identical catalog/active rendering。
@@ -1255,9 +1194,10 @@ Provider-wire hygiene还必须断言：catalog/active carrier的trust为`UNTRUST
 ### 14.9 Architecture/oracle
 
 - provider tool catalog中不存在`load_skill`、`skill_view`、`skill_use`；
+- `read_file` schema中不存在Skill-specific intent；
 - Skill source通过Round 9 pure registry factory注册，不存在Skill-private mutable registry/generation；
 - `LocalSkillProvider`不自行构造root set，只消费explicit registration/binding tuple；
-- model-call Skill activation lookup只在compiler final append result之后构造，由continuity PREPARED slot作为opaque exact-object attachment与candidate一起CAS安装，再由dispatch exact对象随tool batch传递；same-shape副本、raw-projection shortcut、fingerprint lookup cache、latest-catalog fallback或durable activation receipt均不存在；
+- 不存在`FrozenSkillActivationCatalogLookup`、`PreparedSkillActivationRead`、Skill dispatch attachment、fingerprint lookup cache或durable activation receipt；
 - catalog没有short-description、partial admission或Skill专用大正文provider channel；
 -无skill durable table/relation/event/job/guard；
 -无absolute skill path进入provider diagnostics、event或telemetry；
@@ -1283,16 +1223,16 @@ Provider-wire hygiene还必须断言：catalog/active carrier的trust为`UNTRUST
 - 增加六个root registrations/physical bindings、`.claude/skills` roots与official validation；
 - scanner输出complete per-root source snapshots并进入Round 9 registry；
 - 删除所有旧Skill dependency/health字段与parser，不增加namespaced替代；
-- DTO/fingerprint与`read_file` cold schema升级；
+- DTO/fingerprint升级；`read_file`保持无intent schema，只把默认窗口提升到2,000行并删除content-suppressing dedup；
 - YAML/frontmatter/metadata安全bounds与authoring diagnostics；
 - 保持当前provider output暂不改变；
 - parser与Agent Skills conformance tests通过。
 
-### Slice S2：portable projection与activation read
+### Slice S2：portable projection与ordinary progressive read
 
 - catalog以唯一representation完整渲染每个admitted Skill的name/description/location；
 - active/body projection只渲染exact parsed Markdown；
-- 接入post-compile effective-head activation lookup、continuity dispatch-attachment CAS、dedup bypass与`read_file(intent=ACTIVATE_SKILL)`普通COMPLETE/FULL settlement；
+- 接入ordinary `read_file` 2,000-line window、重复读取current bytes与Round 7.1 BEST_AVAILABLE settlement；不增加lookup、dispatch attachment或FULL_REQUIRED；
 - Round 6 direct/meta保持独立且retained tests通过。
 
 ### Slice S3：dynamic append-only skill
@@ -1308,7 +1248,7 @@ Provider-wire hygiene还必须断言：catalog/active carrier的trust为`UNTRUST
 
 - 更新Gap Index、README与本文activation evidence；
 - full pytest/PostgreSQL/Go/architecture/secret/link checks；
-- gated real-provider smoke验证模型看到catalog后使用`read_file(intent=ACTIVATE_SKILL)`；另用正文指导验证现有direct/meta/terminal路径可正常调用，但Skill没有生成dependency route。
+- gated real-provider smoke验证模型看到catalog后使用普通`read_file`；另用正文指导验证现有direct/meta/terminal路径可正常调用，但Skill没有生成dependency route。
 
 Round 5B compaction在本文ACTIVATED以后另行实施、另行review、另行生成activation evidence。
 
@@ -1322,17 +1262,17 @@ Round 5B compaction在本文ACTIVATED以后另行实施、另行review、另行�
 2. 六个default roots由Host显式注册并exact joinphysical bindings；`LocalSkillProvider`没有hidden root-registration authority。
 3. 每次ordinary provider planning都能从complete per-root source snapshots与Round 9 registry冻结latest semantic catalog的唯一exact full-metadata representation；任何admitted Skill的description不得截断或摘要，overbound时整个catalog明确UNAVAILABLE。
 4. Same-run active body在普通tool loop/automatic continuation中精确保持，不受文件热修改影响。
-5. `read_file(intent=ORDINARY)`不会创建隐藏activation；`ACTIVATE_SKILL`只exact join该call经compiler最终effective catalog head与continuity CAS安装的frozen lookup、绕过ordinary dedup，并只在普通ToolResult COMPLETE、`FULL_REQUIRED/SKILL_ACTIVATION`选择与exact FULL continuity installation均成功时承载完整正文；aggregate不fit或cancel不降级、不改写canonical result且不激活。CLEARED/UNAVAILABLE/ABSENT head对应空lookup，它不创建permission state、durable loaded state或Skill专用大正文通道。
+5. 普通`read_file`没有Skill intent、lookup或activation state；默认/最大窗口为2,000行，相同read重新读取current bytes，不再因workspace-global dedup省略/拒绝。它继续使用Round 7.1 BEST_AVAILABLE；只有EOF + canonical COMPLETE + actual FULL + continuity install可供Round 5B纯派生“完整交付”，其他表示必须诚实分页/使用artifact。
 6. 不存在`load_skill`/`skill_view`/`skill_use` provider tool。
 7. Agent Skills core fields、name/directory约束与progressive resource semantics通过official fixtures；旧Pulsara私有顶层字段不再拥有canonical语义。
 8. 所有unsupported top-level host extension行为inert且不进入manifest semantic fingerprint；standard `metadata`（包括`pulsara.*`键）只可作为opaque local manifest数据进入manifest fingerprint，不进入catalog、activation、provider wire、dependency、health或authorization语义。
 9. 不存在Skill-authored Tool/MCP/CLI dependency graph、health probe或route renderer；第三方standard Skill无需Pulsara改写即可使用。
 10. `SKILL_CATALOG`与`ACTIVE_SKILL`均以`UNTRUSTED_OBSERVATION`进入messages；稳定BASE_SYSTEM单独说明使用规则与authority边界。Skill正文指导不受permission preset改写，真实调用仍走ordinary authorize/effect/attempt/invoke。
 11. Catalog complete-scan failure不发布partial source/registry truth；旧snapshot被最小UNAVAILABLE终止。
-12. Catalog与active来自一个frozen Skill registry/planning cut；MCP route继续由独立Round 9 input拥有；provider open前activation lookup exact joincompiler final effective source head，并作为opaque exact-object dispatch attachment与continuity candidate一起CAS安装。Raw projection或same-shape lookup副本不能越过CLEARED/UNAVAILABLE、NOT_APPLICABLE继承语义或physical root binding签发activation entry。
+12. Catalog与active来自一个frozen Skill registry/planning cut；MCP route继续由独立Round 9 input拥有。Skill model-driven read不改变continuity candidate shape，也不存在可越过CLEARED/UNAVAILABLE的activation permit。
 13. 本轮没有compaction import、summary、adoption、rebase、successor installation或compaction test owner。
 14. 不新增schema、relation、event、job、guard、receipt、checkpoint、repair或cross-Host generation。
-15. Architecture oracle与provider tool name baseline不变；`read_file` schema只在cold construction采用新版本，同epoch tools byte-equal。
+15. Architecture oracle与provider tool name baseline不变；`read_file`没有新增字段。若默认值编码进schema，cold baseline只升级一次，同epoch tools byte-equal。
 16. Round 7.1与Round 9均已ACTIVATED，public contract manifests、activation hashes与retained node IDs exact匹配；本轮没有临时复制normal ToolResult或MCP meta contract。
 
 ---
@@ -1347,10 +1287,10 @@ Agent使用write_file安装 .agents/skills/review/SKILL.md
 -> next safe point发现review
 -> append latest SKILL_CATALOG snapshot
 -> 模型看到review的用途与路径
--> 模型需要时read_file(intent=ACTIVATE_SKILL)完整正文
+-> 模型需要时ordinary read_file(path, limit=2000)读取正文
 ~~~
 
-运行中安装没有SYSTEM rewrite或tool schema change，也没有load_skill；`read_file`的intent字段属于本轮部署后的cold baseline，不能在epoch中热改。
+运行中安装没有SYSTEM rewrite或tool schema change，也没有load_skill/read intent。
 
 ### 17.2 运行中安装提到新MCP的skill
 
@@ -1382,9 +1322,8 @@ next real user message再次$review
 ### 17.4 隐式选择skill
 
 ~~~text
-model sees catalog -> read_file(review/SKILL.md, intent=ACTIVATE_SKILL) -> follows it
--> exact current-run activation
--> ordinary canonical ToolResult records the exact parsed body seen
+model sees catalog -> ordinary read_file(review/SKILL.md) -> follows it
+-> ordinary canonical ToolResult records the exact returned bytes
 -> no derived authorization state is created
 ~~~
 
@@ -1423,7 +1362,7 @@ Use the Firecrawl MCP tools currently exposed by the host. If they were discover
 
 该server在cold epoch已可靠连接时，模型会看到DIRECT tool；epoch中后到时则由独立MCP observation与`inspect_new_mcp_tool`/`use_new_mcp_tool`提供路径；未连接时真实调用不可用。Skill只提供guidance，MCP supervisor、permission、effect、dirty fence和executor拥有全部调用真值。
 
-现有第三方Agent Skill因此可以原样被发现并使用。若某个发行包必须同时安装Skill与MCP/CLI，其作者应提供future Plugin bundle manifest；Pulsara既不要求用户改写`SKILL.md`，也不通过规则匹配生成依赖。
+现有第三方Agent Skill因此可以原样被发现并使用。若某个发行包必须同时提供Skill与MCP，其作者应提供Round 9.2 Plugin bundle manifest；Pulsara既不要求用户改写`SKILL.md`，也不通过规则匹配生成依赖。CLI只作为Skill指导下的ordinary Terminal能力存在，不由Plugin metadata自动安装或加入PATH。
 
 ---
 
@@ -1449,7 +1388,7 @@ explicit activation
     -> exact active instruction snapshot
 
 implicit use
-    -> explicit read_file ACTIVATE_SKILL intent
+    -> ordinary read_file progressive disclosure
 
 permission/effect/execution
     -> existing tool/MCP authorities only
@@ -1482,6 +1421,7 @@ permission/effect/execution
 
 - `/Users/plumliu/Desktop/python_workspace/codex/codex-rs/core/src/session/turn_context.rs`：`TurnSkillsContext`持有`HostSkillsSnapshot`；
 - `/Users/plumliu/Desktop/python_workspace/codex/codex-rs/core/src/session/turn.rs`：显式skill mention与body injection；
+- `/Users/plumliu/Desktop/python_workspace/codex/codex-rs/core-skills/src/injection.rs`与`render.rs`：显式注入与catalog指导ordinary file read；
 - `/Users/plumliu/Desktop/python_workspace/codex/codex-rs/core-skills/src/loader.rs`与sample `agents/openai.yaml`：OpenAI-specific interface/dependency/policy位于可选sidecar，不扩张portable `SKILL.md`；
 - `/Users/plumliu/Desktop/python_workspace/codex/codex-rs/core-skills/src/service.rs`：snapshot cache与clear/reload；
 - `/Users/plumliu/Desktop/python_workspace/codex/codex-rs/core/src/compact.rs`：同一turn context上的inline compaction。
@@ -1492,9 +1432,16 @@ permission/effect/execution
 - `/Users/plumliu/Desktop/python_workspace/grok-build/crates/codegen/xai-grok-tools/src/types/skill_discovery_tracker/mod.rs`：startup/discovered set、pending reconciliation与compaction preservation；
 - `/Users/plumliu/Desktop/python_workspace/grok-build/crates/codegen/xai-grok-tools/src/types/skill_discovery_tracker/listing.rs`：startup/dynamic/compaction共用listing renderer；
 - `/Users/plumliu/Desktop/python_workspace/grok-build/crates/codegen/xai-grok-shell/src/session/helpers/compaction_context.rs`：compaction context重注入available skills；
+- `/Users/plumliu/Desktop/python_workspace/grok-build/crates/codegen/xai-grok-tools/src/implementations/skills/skill.rs`：专用Skill tool包装完整正文，但不构成Pulsara必须复制的标准；
 - `/Users/plumliu/Desktop/python_workspace/grok-build/crates/codegen/xai-grok-tools/src/implementations/opencode/skill/mod.rs`：其专用Skill tool是本文明确不照搬的部分。
 
-### 19.5 Anthropic / Agent Skills normative sources
+### 19.5 Kimi Code
+
+- `/Users/plumliu/Desktop/python_workspace/kimi-code/packages/agent-core-v2/src/agent/tools/skill/skillTool.ts`与`agent/skill/prompt.ts`：专用Skill tool、`<skill-loaded>`低authority正文与transient activation；
+- `/Users/plumliu/Desktop/python_workspace/kimi-code/packages/agent-core-v2/src/agent/contextMemory/compactionHandoff.ts`：user-slash activation可随真实用户输入保留，model-tool/nested Skill注入不自动跨compaction；
+- Kimi实际Skills与plugin manifest：Skill正文说明MCP用法，server/bundle安装由Skill外部owner拥有。
+
+### 19.6 Anthropic / Agent Skills normative sources
 
 - [Agent Skills specification](https://agentskills.io/specification)：canonical directory、frontmatter、name/directory equality、standard fields、supporting resources与progressive disclosure；
 - [Anthropic skills repository](https://github.com/anthropics/skills)：Anthropic公开skills与规范迁移入口；

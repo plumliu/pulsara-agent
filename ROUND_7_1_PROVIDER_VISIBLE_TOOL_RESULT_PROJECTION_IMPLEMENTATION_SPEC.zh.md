@@ -13,10 +13,12 @@
 > 直接下游：[Round 9 unified capability semantics](ROUND_9_UNIFIED_CAPABILITY_SEMANTICS_IMPLEMENTATION_SPEC.zh.md)、[Round 9.1 Agent Skills](ROUND_9_1_AGENT_SKILLS_STANDARD_IMPLEMENTATION_SPEC.zh.md)、[Round 5B compaction](ROUND_5B_LONG_HORIZON_CONTEXT_COMPACTION_IMPLEMENTATION_SPEC.zh.md)
 >
 > 激活证据：[round7_1_provider_visible_tool_result_projection_activation.json](benchmarks/suites/core/v1/round7_1_provider_visible_tool_result_projection_activation.json)
+>
+> 下游收口注记（2026-08-18）：Round 9.1最终不增加`read_file` Skill intent。既有`SKILL_ACTIVATION` enum literal保留为无producer的reserved compatibility value，ordinary `read_file(SKILL.md)`恒为`BEST_AVAILABLE`；本轮activated production行为与其他三类FULL requirement不变。
 
 本文只修订**普通、全局、provider-visible ToolResult投影**。它不实施compaction，不改变tool execution authority，也不建立任何ToolResult专用durable recovery machinery。R7.1-0～R7.1-F与activation gate均已闭合；实际代码/文档hash、测试、PostgreSQL、real-provider脱敏结果与最终oracle以机器证据为准。
 
-本轮把此前误寄放在Round 5B中的全局阈值与artifact guidance独立出来。完成后，ordinary history、Round 5B retained tail、Builtin、Terminal、MCP、Plan、memory、Skill activation与`artifact_read`全部复用同一个normal ToolResult pipeline；Round 5B不再拥有阈值或新的结果variant。
+本轮把此前误寄放在Round 5B中的全局阈值与artifact guidance独立出来。完成后，ordinary history、Round 5B retained tail、Builtin、Terminal、MCP、Plan、memory、ordinary Skill file reads与`artifact_read`全部复用同一个normal ToolResult pipeline；Round 5B不再拥有阈值或新的结果variant。
 
 ---
 
@@ -89,7 +91,7 @@ messages[n + 1] == messages[n] || append_only_suffix
 - compaction、summary、protected tail选择或snapshot adoption；
 - 提高Terminal retained raw bytes、MCP frame/body/schema、blob或compiler working-set hard bound；
 - 为某个tool family设置更大的provider-visible特权；
-- 为Skill activation、MCP inspect或最后一个tool result创建专用大正文通道；
+- 为Skill正文、MCP inspect或最后一个tool result创建专用大正文通道；
 - 枚举所有artifact、自动读取artifact或让模型恢复整个artifact集合；
 - 修改tool permission、effect、attempt、late-outcome或unknown-effect语义；
 - 删除canonical ToolResult或完整artifact；
@@ -380,7 +382,7 @@ class ToolResultFullDeliveryReason(StrEnum):
     ARTIFACT_PAGE = "ARTIFACT_PAGE"
     MCP_DIRECTORY_PAGE = "MCP_DIRECTORY_PAGE"
     MCP_INSPECT_SCHEMA = "MCP_INSPECT_SCHEMA"
-    SKILL_ACTIVATION = "SKILL_ACTIVATION"
+    SKILL_ACTIVATION = "SKILL_ACTIVATION"  # reserved; Round 9.1 has no producer
 ~~~
 
 它的closed classifier只从exact canonical tool request、accepted result state和已经版本化的Builtin/binding contract派生：
@@ -388,8 +390,8 @@ class ToolResultFullDeliveryReason(StrEnum):
 - successful `artifact_read` text page；
 - successful `list_mcp_servers` server/tool directory page；
 - successful `inspect_new_mcp_tool` closed schema/ref result；
-- successful `read_file(intent=ACTIVATE_SKILL)` activation body；
-- typed failure、unavailable、invalid arguments及其他普通ToolResult仍为`BEST_AVAILABLE`。
+- typed failure、unavailable、invalid arguments及其他普通ToolResult仍为`BEST_AVAILABLE`；
+- ordinary `read_file`（包括读取`SKILL.md`）始终为`BEST_AVAILABLE`；Round 9.1不增加Skill-specific intent或delivery requirement。
 
 未知、第三方或MCP tool body不能通过返回字段自行宣称`FULL_REQUIRED`。Reader rehydrate必须由exact canonical request/result与同一versioned classifier重建；不得按当前mutable registry、mangled MCP prefix或正文字符串猜测。Frozen requirement进入该provider input item的lowering/compiler identity与dispatch fingerprint，但不写ToolResult row、不新增relation/event/receipt。
 
@@ -398,10 +400,10 @@ Compiler规则冻结为：
 1. `FULL_REQUIRED` item必须拥有FULL variant并且只能选择FULL；`_ToolState.advance()`对它恒为false；
 2. ordinary `BEST_AVAILABLE` sibling仍可按既有priority降级；parallel batch的call/result order与pairing不变；
 3. 单条requirement没有FULL时返回typed `FULL_REQUIRED_TOOL_RESULT_NOT_INLINEABLE`；
-4. 单条FULL合法但aggregate/provider target budget装不下时返回typed `FULL_REQUIRED_TOOL_RESULT_EXCEEDS_INPUT_BUDGET`，provider open为0；不得用COMPACT/REF_ONLY/OMITTED伪装成功分页、完整inspect或Skill activation；
+4. 单条FULL合法但aggregate/provider target budget装不下时返回typed `FULL_REQUIRED_TOOL_RESULT_EXCEEDS_INPUT_BUDGET`，provider open为0；不得用COMPACT/REF_ONLY/OMITTED伪装成功分页或完整inspect；
 5. requirement与selected FULL必须进入exact compile result、append candidate、dispatch attachment及continuity CAS证明；CAS conflict后从fresh predecessor重建，不得把旧选择提升到新attempt。
 
-Canonical ToolResult可以先按既有事务可靠接受；这不等于模型已经收到完整结果。只有含该exact result FULL representation的continuity candidate成功安装后，Runtime才可发布相应process-local ref、承认Skill完整激活或允许依赖该交付的后续meta invocation。`inspect_new_mcp_tool` ref在此之前保持dormant；caller cancellation只能detach waiter，不能把requirement降为BEST_AVAILABLE或提前激活ref。Host close/epoch close可释放未发布process-local attachment；Host restart后opaque ref本来就按Round 9契约stale，不需要durable handoff。
+Canonical ToolResult可以先按既有事务可靠接受；这不等于模型已经收到完整结果。只有含该exact result FULL representation的continuity candidate成功安装后，Runtime才可发布相应process-local ref或允许依赖该交付的后续meta invocation。`inspect_new_mcp_tool` ref在此之前保持dormant；caller cancellation只能detach waiter，不能把requirement降为BEST_AVAILABLE或提前激活ref。Host close/epoch close可释放未发布process-local attachment；Host restart后opaque ref本来就按Round 9契约stale，不需要durable handoff。
 
 这一规则有意把“单条40K内但当前aggregate放不下”定义为typed provider-input resource boundary。它不回滚canonical result、不重跑工具，也不预先提交compiler receipt；后续Round 5B可通过合法cold rebase创造空间，但Round 7.1本身不实现compaction。
 
@@ -469,7 +471,7 @@ Artifact execution时尚不知道未来model call是否分配memory citation han
 - direct MCP与`use_new_mcp_tool` outer result；
 - Plan工具；
 - memory tools；
-- `read_file(intent=ACTIVATE_SKILL)`；
+- ordinary `read_file`，包括`SKILL.md`；
 - `inspect_new_mcp_tool`；
 - `artifact_read`。
 
@@ -677,16 +679,16 @@ Round 5B不得：
 
 ### 11.6 FULL-delivery requirement
 
-- 四类successful result分别得到`ARTIFACT_PAGE / MCP_DIRECTORY_PAGE / MCP_INSPECT_SCHEMA / SKILL_ACTIVATION`，typed failure仍为BEST_AVAILABLE；
+- 三类successful result分别得到`ARTIFACT_PAGE / MCP_DIRECTORY_PAGE / MCP_INSPECT_SCHEMA`，typed failure仍为BEST_AVAILABLE；`SKILL_ACTIVATION`仅是无producer的reserved enum value；
 - 普通/MCP正文不能通过伪造字段自行取得requirement；rehydrate只从exact request/result与versioned classifier重建；
 - 一个required result与多个可降级sibling并行时，只有siblings可降级，call/result order与pairing不变；
 - 两个或更多required siblings合计超budget时typed resource boundary且provider open=0；
 - FULL variant缺席、aggregate压力、continuity CAS conflict、FULL安装前cancel与Host close矩阵；
-- inspect ref在FULL安装前不可用于`use_new_mcp_tool`，Skill在FULL安装前不得声明完整激活；成功安装后exact一次发布，失败不重跑原工具。
+- inspect ref在FULL安装前不可用于`use_new_mcp_tool`；成功安装后exact一次发布，失败不重跑原工具。Ordinary Skill read不发布activation state。
 
 ### 11.7 Origin与group
 
-- Builtin、Terminal、MCP、Plan、memory、Skill activation、inspect与artifact_read全部同一ladder；
+- Builtin、Terminal、MCP、Plan、memory、ordinary Skill read、inspect与artifact_read全部同一ladder；
 - parallel 1/2/3-call group顺序与pairing保持；
 - origin不同不改变阈值；
 - tool-specific更低physical cap仍在candidate形成前生效。
@@ -742,11 +744,11 @@ go mod verify
 12. canonical ToolResult因provider budget被改写；
 13. 已安装suffix在same epoch更换representation；
 14. 新增ToolResult relation/event/job/guard/receipt/checkpoint/repair/replay；
-15. Round 9 MCP inspect或Round 9.1 Skill activation建立专用大正文通道；
+15. Round 9 MCP inspect或Round 9.1 Skill read建立专用大正文通道；
 16. compiler以`selected == 0`推导FULL、要求variant tuple第0项恒为FULL，或生成`SELECTED_FULL + non-FULL mode`；
-17. `artifact_read`、MCP directory/inspect或Skill activation成功结果在aggregate压力下被降级后仍宣称page/schema/body完整交付；
+17. `artifact_read`或MCP directory/inspect成功结果在aggregate压力下被降级后仍宣称page/schema完整交付；
 18. provider/第三方tool正文自行声明FULL_REQUIRED，或reader依赖current mutable catalog猜测该requirement；
-19. inspect ref或Skill activation在exact FULL continuity installation之前发布生效；
+19. inspect ref在exact FULL continuity installation之前发布生效，或ordinary Skill read错误发布Runtime activation state；
 20. 为FULL delivery新增relation、event、job、receipt、checkpoint或recovery graph。
 
 ---
@@ -785,8 +787,8 @@ Real-provider smoke至少证明：
 7. artifact guidance全部conditional，不诱导遍历artifact。
 8. artifact_read返回largest logical-FULL-eligible完整page、准确next offset且不递归归档。
 9. 合法variant tuple可以没有FULL；compiler按actual mode报告`SELECTED_FULL | FULL_INELIGIBLE_RESULT_BOUND | DEGRADED_FOR_BUDGET`，不从ordinal猜测。
-10. artifact page、MCP directory page、inspect schema/ref与Skill activation body共享一个process-local FULL-delivery requirement；aggregate不fit时typed终止且provider open=0。
-11. FULL安装前ref/activation不生效；cancel/CAS conflict不降级、不重跑工具且不产生durable settlement machinery。
+10. artifact page、MCP directory page与inspect schema/ref共享一个process-local FULL-delivery requirement；aggregate不fit时typed终止且provider open=0。`SKILL_ACTIVATION` reserved value无producer，ordinary Skill read恒为BEST_AVAILABLE。
+11. FULL安装前ref不生效；cancel/CAS conflict不降级、不重跑工具且不产生durable settlement machinery。
 12. 全部tool origin、ordinary history与retained history复用一个logical renderer、quote与variant builder。
 13. live End、canonical row与reader hydrate共用同一prepared preview。
 14. Round 3.1 strict prefix保持，采用只发生在cold contract boundary。
@@ -801,4 +803,4 @@ Real-provider smoke至少证明：
 
 用户可感知行为固定为：
 
-> 普通工具结果在Round 7 provider-neutral logical message不超过40,000 UTF-8 bytes时可以完整展示；更大结果保留一个约8,000字符的canonical首尾预览，并在可用时保存完整artifact。Context紧张时compiler通常可降为约8 KiB的COMPACT、2 KiB的REF_ONLY或仅保留pairing的OMITTED_BODY；但artifact page、MCP目录页、inspect schema/ref与Skill activation这类“完整交付就是成功语义”的结果必须保持FULL，放不下时明确停止本次provider open而不是伪装已经交付。Artifact只在省略内容确实影响当前任务时按需读取；Runtime不会向模型倾倒artifact清单，也不会因为compaction、工具来源或“最后一个结果”改变这套规则。
+> 普通工具结果在Round 7 provider-neutral logical message不超过40,000 UTF-8 bytes时可以完整展示；更大结果保留一个约8,000字符的canonical首尾预览，并在可用时保存完整artifact。Context紧张时compiler通常可降为约8 KiB的COMPACT、2 KiB的REF_ONLY或仅保留pairing的OMITTED_BODY；只有artifact page、MCP目录页与inspect schema/ref这类“完整交付就是成功语义”的结果必须保持FULL，放不下时明确停止本次provider open而不是伪装已经交付。普通Skill file read仍是BEST_AVAILABLE。Artifact只在省略内容确实影响当前任务时按需读取；Runtime不会向模型倾倒artifact清单，也不会因为compaction、工具来源或“最后一个结果”改变这套规则。
