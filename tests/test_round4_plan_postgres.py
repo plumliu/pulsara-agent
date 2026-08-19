@@ -27,6 +27,9 @@ from pulsara_agent.conversation_kernel.repository import (
     PromptDeliveryMode,
 )
 from pulsara_agent.conversation_kernel.runner import ConversationKernelRunner
+from pulsara_agent.conversation_kernel.steer import (
+    QueuedRootTurnAdmissionConfirmationKind,
+)
 from pulsara_agent.conversation_kernel.tool_policy import (
     DefaultToolDispatchAuthorizationPolicy,
 )
@@ -1319,15 +1322,21 @@ def test_round4_draft_cancel_handoff_is_queue_owned_exactly_once(
     assert queued["pending_plan_handoff_kind"] == "CANCELLED_PLAN"
 
     if first_disposition == "CONSUMED":
-        accepted = repository.consume_prompt_head(
-            lease.guard,
-            new_turn_id=_id("turn"),
-            new_entry_id=_id("entry"),
-            new_context_binding_revision_id=_id("context-revision"),
+        candidate = repository.prepare_prompt_head_consumption(
+            session_id=lease.guard.session_id,
             occurred_at=_now(),
             actor_id="runtime:test",
             deadline_monotonic=monotonic() + 30,
         )
+        assert candidate is not None
+        confirmation = repository.consume_prepared_prompt_head(
+            lease.guard,
+            candidate=candidate,
+            deadline_monotonic=monotonic() + 30,
+        )
+        assert confirmation is not None
+        assert confirmation.kind is QueuedRootTurnAdmissionConfirmationKind.FULL
+        accepted = confirmation.accepted
         assert accepted is not None
         with repository.connection_provider.connection(
             lane=PostgresConnectionLane.INSPECTOR,

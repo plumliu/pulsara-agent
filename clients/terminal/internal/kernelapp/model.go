@@ -155,6 +155,7 @@ type Model struct {
 	controlEpoch        uint64
 	controlLiveRevision uint64
 	currentInteraction  *protocolv3.LiveInteractionView
+	currentTodos        map[string]*protocolv3.LiveTodoRunSnapshot
 	content             map[string]*contentState
 	permissionMode      protocolv3.PermissionMode
 	planQuestion        *protocolv3.PlanQuestionContent
@@ -247,6 +248,7 @@ func New(service Service) Model {
 	return Model{
 		service: service, sessionID: sessionID, phase: phaseConnecting, width: 80, height: 24,
 		entries: map[string]*protocolv3.CanonicalEntry{}, live: map[string]*liveDraft{}, content: map[string]*contentState{},
+		currentTodos:   map[string]*protocolv3.LiveTodoRunSnapshot{},
 		trackedPrompts: map[string]pendingCommand{},
 		control:        &protocolv3.CanonicalControl{}, permissionMode: protocolv3.PermissionMode_PERMISSION_MODE_BYPASS_PERMISSIONS,
 		followTail: true, historyIndex: -1,
@@ -315,8 +317,9 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.snapshotCommand()
 			case protocolv3.ObservationGapKind_LIVE_GAP:
 				m.live = map[string]*liveDraft{}
+				m.currentTodos = map[string]*protocolv3.LiveTodoRunSnapshot{}
 				m.liveEpoch, m.liveRevision = value.value.LiveOwnerEpoch, value.value.Gap.LatestSequence
-				return m, m.observeCommand()
+				return m, m.liveControlSnapshotCommand()
 			case protocolv3.ObservationGapKind_LIVE_CONTROL_GAP:
 				m.currentInteraction = nil
 				return m, m.liveControlSnapshotCommand()
@@ -823,6 +826,17 @@ func (m *Model) installLiveControlSnapshot(response *protocolv3.LiveControlSnaps
 		}
 		m.currentInteraction = proto.Clone(response.Snapshot.CurrentInteraction).(*protocolv3.LiveInteractionView)
 	}
+	todos := make(map[string]*protocolv3.LiveTodoRunSnapshot, len(response.Snapshot.CurrentTodos))
+	for _, value := range response.Snapshot.CurrentTodos {
+		if err := validateTodoSnapshot(value, false); err != nil {
+			return err
+		}
+		if _, exists := todos[value.TodoRunId]; exists {
+			return fmt.Errorf("live TODO snapshot contains duplicate run identity")
+		}
+		todos[value.TodoRunId] = proto.Clone(value).(*protocolv3.LiveTodoRunSnapshot)
+	}
+	m.currentTodos = todos
 	return nil
 }
 
@@ -1213,7 +1227,7 @@ func validateLiveInteraction(value *protocolv3.LiveInteractionView) error {
 }
 
 func (m *Model) applyLive(event *protocolv3.LiveEventProjection) error {
-	if event == nil || event.SessionId != m.sessionID || event.TurnId == "" || event.DraftIdentity == "" || event.GenerationId == "" || event.BlockId == "" || event.EventType < protocolv3.LiveEventType_TEXT_START || event.EventType > protocolv3.LiveEventType_SUBAGENT_PROGRESS {
+	if event == nil || event.SessionId != m.sessionID || event.TurnId == "" || event.DraftIdentity == "" || event.GenerationId == "" || event.BlockId == "" || event.EventType < protocolv3.LiveEventType_TEXT_START || event.EventType > protocolv3.LiveEventType_TODO_SNAPSHOT_UPDATED {
 		return fmt.Errorf("live event envelope is invalid")
 	}
 	if err := validateLiveChannel(event.ScopeKind, event.ScopeSubagentTaskId, event.ChannelKind, event.ChannelToolCallId, event.ChannelAttemptId); err != nil {
@@ -1230,6 +1244,9 @@ func (m *Model) applyLive(event *protocolv3.LiveEventProjection) error {
 		return err
 	}
 	if payload.operational {
+		if payload.todo != nil {
+			return m.applyTodoUpdate(event, payload.todo)
+		}
 		return nil
 	}
 	if _, committed := m.entries[event.DraftIdentity]; committed {
@@ -1310,6 +1327,7 @@ type livePayloadView struct {
 	toolStart          bool
 	toolArgumentsFinal bool
 	operational        bool
+	todo               *protocolv3.LiveTodoSnapshotUpdatedPayload
 }
 
 func validateLivePayload(event *protocolv3.LiveEventProjection) (livePayloadView, error) {
@@ -1410,6 +1428,11 @@ func validateLivePayload(event *protocolv3.LiveEventProjection) (livePayloadView
 		view.operational = event.EventType == protocolv3.LiveEventType_TERMINAL_MONITOR_CLOSED && value.TerminalMonitorClosed != nil && value.TerminalMonitorClosed.MonitorId != "" && value.TerminalMonitorClosed.ProcessId != "" && value.TerminalMonitorClosed.Reason != ""
 	case *protocolv3.LiveEventPayload_SubagentProgress:
 		view.operational = event.EventType == protocolv3.LiveEventType_SUBAGENT_PROGRESS && value.SubagentProgress != nil && value.SubagentProgress.TaskId != "" && value.SubagentProgress.Status != "" && validLiveTerminalText(value.SubagentProgress.PublicSummary, value.SubagentProgress.SummaryUtf8Bytes, value.SubagentProgress.SummaryDigest)
+	case *protocolv3.LiveEventPayload_TodoSnapshotUpdated:
+		if event.EventType != protocolv3.LiveEventType_TODO_SNAPSHOT_UPDATED || value.TodoSnapshotUpdated == nil {
+			return view, fmt.Errorf("live TODO branch is invalid")
+		}
+		view.operational, view.todo = true, value.TodoSnapshotUpdated
 	default:
 		return view, fmt.Errorf("live event payload branch is unknown")
 	}
@@ -1420,6 +1443,84 @@ func validateLivePayload(event *protocolv3.LiveEventProjection) (livePayloadView
 		return view, fmt.Errorf("live block payload identity conflict")
 	}
 	return view, nil
+}
+
+func (m *Model) applyTodoUpdate(event *protocolv3.LiveEventProjection, value *protocolv3.LiveTodoSnapshotUpdatedPayload) error {
+	if value == nil || value.TodoRunId == "" || event.GenerationId != "todo:"+value.TodoRunId || event.DraftIdentity != fmt.Sprintf("todo:%s:%d", value.TodoRunId, value.TodoRevision) || event.BlockId != event.DraftIdentity || event.ProposedEntryId != "" || event.ChannelKind != protocolv3.LiveChannelKind_LIVE_CHANNEL_TERMINAL_EXTENSION || event.BlockKind != protocolv3.LiveBlockKind_LIVE_BLOCK_OPERATIONAL {
+		return fmt.Errorf("live TODO attribution is invalid")
+	}
+	snapshot := &protocolv3.LiveTodoRunSnapshot{
+		TodoRunId: value.TodoRunId, TodoRevision: value.TodoRevision,
+		ScopeKind: event.ScopeKind, ScopeSubagentTaskId: event.ScopeSubagentTaskId,
+		Disposition: value.Disposition, OrderedItems: value.OrderedItems,
+		PendingCount: value.PendingCount, InProgressCount: value.InProgressCount,
+		CompletedCount: value.CompletedCount,
+	}
+	if err := validateTodoSnapshot(snapshot, true); err != nil {
+		return err
+	}
+	current := m.currentTodos[value.TodoRunId]
+	if current != nil && value.TodoRevision < current.TodoRevision {
+		return nil
+	}
+	if current != nil && value.TodoRevision == current.TodoRevision {
+		if !proto.Equal(current, snapshot) {
+			return fmt.Errorf("live TODO revision identity conflict")
+		}
+		return nil
+	}
+	if value.Disposition == "CLOSED" {
+		delete(m.currentTodos, value.TodoRunId)
+		return nil
+	}
+	m.currentTodos[value.TodoRunId] = proto.Clone(snapshot).(*protocolv3.LiveTodoRunSnapshot)
+	return nil
+}
+
+func validateTodoSnapshot(value *protocolv3.LiveTodoRunSnapshot, allowClosed bool) error {
+	if value == nil || value.TodoRunId == "" || value.ScopeKind == protocolv3.ConversationScopeKind_CONVERSATION_SCOPE_KIND_UNSPECIFIED || (value.ScopeKind == protocolv3.ConversationScopeKind_ROOT) != (value.ScopeSubagentTaskId == "") || len(value.OrderedItems) > 64 {
+		return fmt.Errorf("live TODO snapshot is invalid")
+	}
+	counts := map[string]uint32{"pending": 0, "in_progress": 0, "completed": 0}
+	seen := map[string]struct{}{}
+	for index, item := range value.OrderedItems {
+		if item == nil || int(item.Ordinal) != index || item.Text == "" || len([]byte(item.Text)) > 512 || strings.TrimSpace(item.Text) != item.Text {
+			return fmt.Errorf("live TODO item is invalid")
+		}
+		for _, character := range item.Text {
+			if character < 0x20 || (character >= 0x7f && character <= 0x9f) || character == '\u2028' || character == '\u2029' {
+				return fmt.Errorf("live TODO item contains a forbidden control")
+			}
+		}
+		if _, exists := seen[item.Text]; exists {
+			return fmt.Errorf("live TODO snapshot contains duplicate text")
+		}
+		seen[item.Text] = struct{}{}
+		if _, known := counts[item.Status]; !known {
+			return fmt.Errorf("live TODO item status is unknown")
+		}
+		counts[item.Status]++
+	}
+	if counts["pending"] != value.PendingCount || counts["in_progress"] != value.InProgressCount || counts["completed"] != value.CompletedCount || value.InProgressCount > 1 {
+		return fmt.Errorf("live TODO counts are invalid")
+	}
+	switch value.Disposition {
+	case "ACTIVE":
+		if len(value.OrderedItems) == 0 {
+			return fmt.Errorf("active TODO snapshot is empty")
+		}
+	case "CLEARED":
+		if len(value.OrderedItems) != 0 {
+			return fmt.Errorf("cleared TODO snapshot carries items")
+		}
+	case "CLOSED":
+		if !allowClosed || len(value.OrderedItems) != 0 {
+			return fmt.Errorf("closed TODO snapshot is invalid")
+		}
+	default:
+		return fmt.Errorf("live TODO disposition is unknown")
+	}
+	return nil
 }
 
 func validLiveTerminalText(value string, size uint64, fingerprint string) bool {
@@ -1690,6 +1791,31 @@ func (m Model) transcriptRows(width int) []string {
 		for _, block := range draft.order {
 			for _, value := range strings.Split(draft.blocks[block], "\n") {
 				rows = append(rows, wrap(value, width)...)
+			}
+		}
+	}
+	todoKeys := make([]string, 0, len(m.currentTodos))
+	for key, snapshot := range m.currentTodos {
+		if snapshot.ScopeKind == protocolv3.ConversationScopeKind_ROOT {
+			todoKeys = append(todoKeys, key)
+		}
+	}
+	sort.Strings(todoKeys)
+	for _, key := range todoKeys {
+		snapshot := m.currentTodos[key]
+		if len(snapshot.OrderedItems) == 0 {
+			continue
+		}
+		rows = append(rows, "TODO · current run")
+		for _, item := range snapshot.OrderedItems {
+			marker := "[ ]"
+			if item.Status == "in_progress" {
+				marker = "[~]"
+			} else if item.Status == "completed" {
+				marker = "[x]"
+			}
+			for _, value := range wrap(marker+" "+publictext.Transform(item.Text), width) {
+				rows = append(rows, value)
 			}
 		}
 	}

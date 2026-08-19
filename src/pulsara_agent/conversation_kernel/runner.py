@@ -84,6 +84,12 @@ from pulsara_agent.conversation_kernel.execution_watchdogs import (
     KernelExecutionDeadlineFactory,
     KernelWatchdogOwner,
 )
+from pulsara_agent.conversation_kernel.todo_runtime import (
+    PreparedTodoChildRunActivation,
+    PreparedTodoRootRunActivation,
+    build_child_activation,
+    build_root_activation,
+)
 from pulsara_agent.ports.live_agent_event import (
     ToolResultDeltaPayload,
     ToolResultEndPayload,
@@ -325,6 +331,14 @@ class AutomaticPlanContinuationPort(Protocol):
     ) -> AcceptedPlanToolBatch: ...
 
 
+class TodoRunAdmissionFinalizer(Protocol):
+    async def __call__(
+        self,
+        prepared: PreparedTodoRootRunActivation | PreparedTodoChildRunActivation,
+        accepted: AcceptedEntry,
+    ) -> None: ...
+
+
 @dataclass(frozen=True, slots=True)
 class KernelToolResult:
     state: str
@@ -360,6 +374,7 @@ class _TurnAdmissionSettlementAttempt:
     candidate: PreparedRootTurnAdmission | PreparedSubagentTurnAdmission
     root: bool
     reissue_allowed: bool
+    todo_activation: PreparedTodoRootRunActivation | PreparedTodoChildRunActivation
     cancellation_requested: bool = False
     cancellation_intent: ActiveTurnCancellationIntent | None = None
 
@@ -466,6 +481,20 @@ class ProcessLocalEffectSettlementToken:
 class ProcessLocalEffectSettlementDisposition(StrEnum):
     COMMITTED = "COMMITTED"
     DISCARDED = "DISCARDED"
+
+
+class ProcessLocalEffectSettlementOutcome(StrEnum):
+    INSTALLED = "INSTALLED"
+    DISCARDED = "DISCARDED"
+
+
+@dataclass(frozen=True, slots=True)
+class ProcessLocalEffectSettlementResult:
+    outcome: ProcessLocalEffectSettlementOutcome
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.outcome, ProcessLocalEffectSettlementOutcome):
+            raise TypeError("process-local settlement outcome must be closed")
 
 
 class KernelToolLiveSink(Protocol):
@@ -678,7 +707,7 @@ class KernelToolPort(Protocol):
         self,
         token: ProcessLocalEffectSettlementToken,
         disposition: ProcessLocalEffectSettlementDisposition,
-    ) -> None: ...
+    ) -> ProcessLocalEffectSettlementResult: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -743,6 +772,7 @@ class ConversationKernelRunner:
         deadline_factory: KernelExecutionDeadlineFactory | None = None,
         memory_projection: MemoryContextProjectionPort | None = None,
         assistant_settlement_owner: AssistantMessageSettlementOwner | None = None,
+        todo_admission_finalizer: TodoRunAdmissionFinalizer | None = None,
     ) -> None:
         if (
             min(
@@ -801,6 +831,7 @@ class ConversationKernelRunner:
         self._maximum_output_tokens_per_call = maximum_output_tokens_per_call
         self._memory_projection = memory_projection
         self._root_memory_use_policy = MemoryUsePolicy.ENABLED
+        self._todo_admission_finalizer = todo_admission_finalizer
 
     def _canonical_deadline(self) -> float:
         return self._deadlines.deadline(KernelWatchdogOwner.FOREGROUND_CANONICAL)
@@ -943,6 +974,19 @@ class ConversationKernelRunner:
             candidate=candidate,
             root=True,
             cancellation_intent=cancellation_intent,
+            todo_activation=build_root_activation(
+                session_id=candidate.session_id,
+                admission_kind="DIRECT",
+                command_id=candidate.command_id,
+                exact_turn_id=candidate.turn_id,
+                exact_initial_entry_id=candidate.entry_id,
+                exact_context_binding_revision_id=(
+                    candidate.context_binding_revision_id
+                ),
+                exact_admission_candidate_fingerprint=(
+                    candidate.candidate_fingerprint
+                ),
+            ),
         )
 
     async def _accept_subagent_turn_exact(
@@ -955,6 +999,18 @@ class ConversationKernelRunner:
             candidate=candidate,
             root=False,
             cancellation_intent=cancellation_intent,
+            todo_activation=build_child_activation(
+                session_id=candidate.session_id,
+                subagent_task_id=candidate.task_id,
+                exact_turn_id=candidate.turn_id,
+                exact_initial_entry_id=candidate.entry_id,
+                exact_context_binding_revision_id=(
+                    candidate.context_binding_revision_id
+                ),
+                exact_admission_candidate_fingerprint=(
+                    candidate.candidate_fingerprint
+                ),
+            ),
         )
 
     async def _accept_turn_exact(
@@ -963,6 +1019,9 @@ class ConversationKernelRunner:
         candidate: PreparedRootTurnAdmission | PreparedSubagentTurnAdmission,
         root: bool,
         cancellation_intent: ActiveTurnCancellationIntent,
+        todo_activation: (
+            PreparedTodoRootRunActivation | PreparedTodoChildRunActivation
+        ),
     ) -> AcceptedEntry:
         accept_operation = (
             self._repository.accept_root_turn
@@ -970,7 +1029,7 @@ class ConversationKernelRunner:
             else self._repository.accept_subagent_turn
         )
         try:
-            return await self._io.run(
+            accepted = await self._io.run(
                 accept_operation,
                 self._writer_lease.guard,
                 candidate=candidate,
@@ -981,6 +1040,7 @@ class ConversationKernelRunner:
                 candidate=candidate,
                 root=root,
                 reissue_allowed=False,
+                todo_activation=todo_activation,
                 cancellation_requested=True,
                 cancellation_intent=cancellation_intent,
             )
@@ -995,6 +1055,7 @@ class ConversationKernelRunner:
                 candidate=candidate,
                 root=root,
                 reissue_allowed=True,
+                todo_activation=todo_activation,
             )
             settlement = asyncio.create_task(
                 self._settle_turn_admission(attempt),
@@ -1008,6 +1069,29 @@ class ConversationKernelRunner:
             if accepted is None:
                 raise ConversationKernelConflict("turn admission did not settle")
             return accepted
+        try:
+            await self._finalize_todo_admission(todo_activation, accepted)
+        except asyncio.CancelledError as cancellation:
+            if root:
+                # The canonical admission is already FULL, but the ordinary
+                # run loop has not started and therefore cannot own failure
+                # settlement. Drain the exact terminalization before the
+                # caller observes cancellation so no RUNNING ROOT is orphaned.
+                terminalization = asyncio.create_task(
+                    self._settle_failed_turn_worker(
+                        accepted.turn_id,
+                        _root_cancellation_terminal_reason(cancellation_intent),
+                    ),
+                    name=(
+                        "kernel-cancelled-post-admission-terminalization:"
+                        f"{accepted.turn_id}"
+                    ),
+                )
+                await _await_started_settlement(terminalization)
+            # SUBAGENT_TASK cancellation remains owned by the child manager's
+            # atomic turn+task settlement.
+            raise cancellation
+        return accepted
 
     async def _settle_turn_admission(
         self,
@@ -1046,6 +1130,9 @@ class ConversationKernelRunner:
                 continue
             if confirmation.kind is TurnAdmissionConfirmationKind.FULL:
                 assert confirmation.accepted is not None
+                await self._finalize_todo_admission(
+                    attempt.todo_activation, confirmation.accepted
+                )
                 if attempt.cancellation_requested:
                     if attempt.root:
                         await self._settle_failed_turn_worker(
@@ -1083,7 +1170,40 @@ class ConversationKernelRunner:
                         ),
                     )
                 return None
+            await self._finalize_todo_admission(
+                attempt.todo_activation, accepted
+            )
             return accepted
+
+    async def _finalize_todo_admission(
+        self,
+        prepared: PreparedTodoRootRunActivation | PreparedTodoChildRunActivation,
+        accepted: AcceptedEntry,
+    ) -> None:
+        finalizer = self._todo_admission_finalizer
+        if finalizer is None:
+            return
+        activation = asyncio.create_task(
+            finalizer(prepared, accepted),
+            name=f"kernel-todo-admission-finalizer:{accepted.turn_id}",
+        )
+        try:
+            await _await_started_settlement(activation)
+        except asyncio.CancelledError:
+            # The accepted turn now owns an exact TODO run.  Preserve the
+            # caller's cancellation after this non-I/O finalizer drains. The
+            # direct-admission caller owns pre-run-loop terminalization; an
+            # already-running turn uses the ordinary failure path.
+            raise
+        except BaseException:
+            terminalization = asyncio.create_task(
+                self._settle_failed_turn_worker(
+                    accepted.turn_id, "FOREGROUND_EXECUTION_INTERRUPTED"
+                ),
+                name=f"kernel-todo-activation-terminalization:{accepted.turn_id}",
+            )
+            await _await_started_settlement(terminalization)
+            raise
 
     async def _prepare_provider_dispatch(
         self,
@@ -4130,10 +4250,17 @@ class ConversationKernelRunner:
         )
         effect_committed = False
         if result.process_local_settlement is not None:
-            await self._tools.settle_process_local_effect(
+            local_settlement = await self._tools.settle_process_local_effect(
                 result.process_local_settlement,
                 ProcessLocalEffectSettlementDisposition.COMMITTED,
             )
+            if (
+                local_settlement.outcome
+                is not ProcessLocalEffectSettlementOutcome.INSTALLED
+            ):
+                raise RuntimeError(
+                    "canonical ToolResult did not install its process-local effect"
+                )
             effect_committed = True
         if attempt_id is not None:
             assert live_attribution is not None

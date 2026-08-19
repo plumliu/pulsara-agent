@@ -22,10 +22,7 @@ from pulsara_agent.storage.migrations.manifest import CONVERSATION_KERNEL_RELATI
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "src/pulsara_agent"
 KERNEL = SOURCE / "conversation_kernel"
-BASELINE = (
-    SOURCE
-    / "storage/migrations/sql/0000_conversation_kernel_baseline.sql"
-)
+BASELINE = SOURCE / "storage/migrations/sql/0000_conversation_kernel_baseline.sql"
 
 PLAN_DESCRIPTORS = {
     CommittedEventType.PLAN_WORKFLOW_ENTERED: SubjectSlot.PLAN_WORKFLOW,
@@ -57,7 +54,7 @@ def _imports(path: Path) -> set[str]:
 
 def test_round4_final_oracles_and_plan_descriptors_are_exact() -> None:
     assert len(COMMITTED_EVENT_DESCRIPTORS) == 31
-    assert len(LIVE_EVENT_TYPES) == 23
+    assert len(LIVE_EVENT_TYPES) == 24
     assert len(SUBJECT_SLOTS) == 13
     assert len(APPEND_GUARDS) == 2
     assert len(CONVERSATION_KERNEL_RELATIONS) == 25
@@ -89,9 +86,9 @@ def test_round4_schema_has_exact_plan_relations_and_required_initial_entry() -> 
     assert "permission_snapshot_id text NOT NULL" in turns
     assert "permission_snapshot_fingerprint text NOT NULL" in turns
     assert "CONSTRAINT ck_turn_permission_overlay_exact CHECK" in turns
-    queue = baseline.split(
-        "CREATE TABLE pulsara_v3.prompt_queue_items (", 1
-    )[1].split("CREATE TABLE ", 1)[0]
+    queue = baseline.split("CREATE TABLE pulsara_v3.prompt_queue_items (", 1)[1].split(
+        "CREATE TABLE ", 1
+    )[0]
     assert "CONSTRAINT ck_prompt_queue_permission_overlay_exact CHECK" in queue
     assert "effective_permission_mode = requested_permission_mode" in turns
     assert "effective_permission_mode = requested_permission_mode" in queue
@@ -114,6 +111,10 @@ def test_round4_every_turn_creator_installs_frozen_permission_columns() -> None:
             flags=re.DOTALL,
         )
     )
+    # The legacy caller-supplied queue mutation was physically removed by the
+    # TODO refinement. All future-turn delivery now uses the stable prepared
+    # candidate plus FULL/NONE/CONFLICT confirmation path.
+    assert "def consume_prompt_head(" not in source
     assert len(turn_inserts) == 7
     required = {
         "initial_entry_id",
@@ -195,9 +196,7 @@ def test_round4_has_no_plan_recovery_job_or_extra_guard() -> None:
 def test_round4_continuation_physical_owner_is_host_local_only() -> None:
     host = (KERNEL / "host.py").read_text(encoding="utf-8")
     runner = (KERNEL / "runner.py").read_text(encoding="utf-8")
-    gateway = (SOURCE / "terminal_protocol/v3_gateway.py").read_text(
-        encoding="utf-8"
-    )
+    gateway = (SOURCE / "terminal_protocol/v3_gateway.py").read_text(encoding="utf-8")
     assert "ContinuationAdmissionOwner()" in host
     assert "self._plan_continuations.start(" in host
     assert "_accept_automatic_plan_continuation" in host
@@ -217,7 +216,9 @@ def test_round4_all_root_producers_use_the_single_host_owned_chain() -> None:
     root_chain_callers: set[str] = set()
     for name, function in functions.items():
         for node in ast.walk(function):
-            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            if not isinstance(node, ast.Call) or not isinstance(
+                node.func, ast.Attribute
+            ):
                 continue
             if node.func.attr == "run_accepted_turn":
                 direct_runner_callers.add(name)
@@ -230,7 +231,7 @@ def test_round4_all_root_producers_use_the_single_host_owned_chain() -> None:
     }
     assert {
         "_bind_plan_review_successor",
-        "_prompt_delivery_loop",
+        "_settle_queued_root_admission",
         "_start_terminal_observation_turn",
         "_start_external_result_turn",
     } <= root_chain_callers

@@ -96,13 +96,17 @@ from pulsara_agent.conversation_kernel.repository import (
     PlanQuestionAnswer,
     PlanContinuationInspection,
     PreparedPlanToolBatch,
+    StaleHostWriter,
     plan_draft_review_semantic_candidate,
     plan_exit_semantic_fingerprint,
     plan_question_resolution_semantic_fingerprint,
 )
 from pulsara_agent.conversation_kernel.steer import (
+    PreparedQueuedRootTurnAdmission,
     PromptIngressConfirmationKind,
     PromptIngressWriteRejection,
+    QueuedRootTurnAdmissionConfirmation,
+    QueuedRootTurnAdmissionConfirmationKind,
     build_prompt_ingress_command,
 )
 from pulsara_agent.conversation_kernel.runner import (
@@ -112,6 +116,13 @@ from pulsara_agent.conversation_kernel.runner import (
 from pulsara_agent.conversation_kernel.safe_point import ExternalSourceNotAtSafePoint
 from pulsara_agent.conversation_kernel.subagent import KernelSubagentManager
 from pulsara_agent.conversation_kernel.tool_runtime import DirectKernelToolPort
+from pulsara_agent.conversation_kernel.todo_runtime import (
+    FrozenTodoCloseProjection,
+    FrozenTodoSnapshot,
+    PreparedTodoChildRunActivation,
+    PreparedTodoRootRunActivation,
+    build_root_activation,
+)
 from pulsara_agent.conversation_kernel.tool_artifacts import (
     PostgresToolArtifactReadPort,
 )
@@ -354,6 +365,8 @@ class KernelHostSession:
             host_owner_id=host_session_id,
             io_owner=self._io,
             live_bus=self.live_bus,
+            todo_owner=self._tools.todo_owner,
+            todo_close_projector=self._tools.offer_todo_close,
             deadline_factory=self._deadlines,
         )
         self._tools.bind_subagent_port(self._subagents)
@@ -437,6 +450,7 @@ class KernelHostSession:
             deadline_factory=self._deadlines,
             memory_projection=self._memory_tools,
             assistant_settlement_owner=self._assistant_settlements,
+            todo_admission_finalizer=self._finalize_todo_run_activation,
         )
         self._subagents.bind_runner_factory(self._new_child_runner)
         self._active_task: asyncio.Task[KernelRunResult] | None = None
@@ -496,6 +510,11 @@ class KernelHostSession:
     @property
     def active_skill_names(self) -> frozenset[str]:
         return self._capabilities.configured_active_skill_names
+
+    def current_todo_snapshots(self) -> tuple[FrozenTodoSnapshot, ...]:
+        """Read the bounded same-Host TODO inventory for live resync."""
+
+        return self._tools.todo_owner.current_snapshots()
 
     def _canonical_deadline(self) -> float:
         """Issue a fresh watchdog for one foreground canonical operation."""
@@ -623,6 +642,11 @@ class KernelHostSession:
                     or asyncio.current_task().cancelling() != 0
                 ):
                     raise asyncio.CancelledError
+                self._tools.todo_owner.bind_continuation(
+                    scope_kind=ModelInputScopeKind.ROOT,
+                    scope_subagent_task_id=None,
+                    turn_id=continuation_turn_id,
+                )
                 self._active_turn_id = continuation_turn_id
                 cancellation_intent = ActiveTurnCancellationIntent(
                     continuation_turn_id, ModelInputScopeKind.ROOT, None
@@ -660,9 +684,7 @@ class KernelHostSession:
         self._retire_done_active_root_locked()
         if self._active_task is not None:
             raise RuntimeError("a canonical ROOT turn is already running")
-        intent = ActiveTurnCancellationIntent(
-            turn_id, ModelInputScopeKind.ROOT, None
-        )
+        intent = ActiveTurnCancellationIntent(turn_id, ModelInputScopeKind.ROOT, None)
         task = asyncio.create_task(
             self._run_owned_root_task(run, intent),
             name=name,
@@ -706,9 +728,7 @@ class KernelHostSession:
                 for token in result.memory_reflection_tokens:
                     self._memory_tools.activate_reflection(token)
 
-    async def _settle_pending_root_successor(
-        self, task: asyncio.Task[object]
-    ) -> None:
+    async def _settle_pending_root_successor(self, task: asyncio.Task[object]) -> None:
         async with self._lock:
             pending = self._pending_root_successor
             if pending is None or pending.owner_task is not task:
@@ -747,7 +767,39 @@ class KernelHostSession:
     async def _settle_active_root_task(self, task: asyncio.Task[object]) -> None:
         async with self._lock:
             if self._active_task is task:
+                active_turn_id = self._active_turn_id
+                if active_turn_id is not None:
+                    self._tools.todo_owner.mark_root_idle(exact_turn_id=active_turn_id)
                 self._clear_active_root_locked()
+
+    async def _finalize_todo_run_activation(
+        self,
+        prepared: PreparedTodoRootRunActivation | PreparedTodoChildRunActivation,
+        accepted: object,
+    ) -> None:
+        async with self._lock:
+            closed = self._finalize_todo_run_activation_locked(prepared, accepted)
+        self._tools.offer_todo_close(closed)
+
+    def _finalize_todo_run_activation_locked(
+        self,
+        prepared: PreparedTodoRootRunActivation | PreparedTodoChildRunActivation,
+        accepted: object,
+    ) -> FrozenTodoCloseProjection | None:
+        """Apply the common admission finalizer while the Host lock is held."""
+
+        if (
+            accepted.turn_id != prepared.exact_turn_id
+            or accepted.entry_id != prepared.exact_initial_entry_id
+        ):
+            raise RuntimeError("TODO activation does not exact-join admission")
+        if isinstance(prepared, PreparedTodoRootRunActivation):
+            return self._tools.todo_owner.activate_root_run(
+                prepared,
+                allow_closing_predecessor=self._closing,
+            )
+        self._tools.todo_owner.activate_child_run(prepared)
+        return None
 
     def _retire_done_active_root_locked(self) -> None:
         task = self._active_task
@@ -1617,6 +1669,11 @@ class KernelHostSession:
                 or self._active_task is not None
             ):
                 return False
+            self._tools.todo_owner.bind_continuation_if_present(
+                scope_kind=ModelInputScopeKind.ROOT,
+                scope_subagent_task_id=None,
+                turn_id=inspection.turn_id,
+            )
             self._install_active_root_task_locked(
                 turn_id=inspection.turn_id,
                 command_id=command_id,
@@ -1750,14 +1807,9 @@ class KernelHostSession:
                         pass
                     continue
                 try:
-                    accepted = await self._io.run(
-                        self.repository.consume_prompt_head,
-                        self._lease.guard,
-                        new_turn_id=f"turn:{uuid4().hex}",
-                        new_entry_id=f"entry:{uuid4().hex}",
-                        new_context_binding_revision_id=(
-                            f"context-revision:{uuid4().hex}"
-                        ),
+                    candidate = await self._io.run(
+                        self.repository.prepare_prompt_head_consumption,
+                        session_id=self.session_id,
                         occurred_at=datetime.now().astimezone(),
                         actor_id=self.host_session_id,
                         deadline_monotonic=self._canonical_deadline(),
@@ -1765,13 +1817,10 @@ class KernelHostSession:
                 except asyncio.CancelledError:
                     raise
                 except Exception:
-                    # The queue row is the level truth.  A transient checkout
-                    # or writer failure must not terminate the only process-
-                    # local delivery loop or create a durable retry owner.
                     await asyncio.sleep(0.1)
                     self._queue_wake.set()
                     break
-                if accepted is None:
+                if candidate is None:
                     try:
                         head_mode = await self._io.run(
                             self.repository.pending_prompt_head_mode,
@@ -1787,7 +1836,105 @@ class KernelHostSession:
                     if head_mode is PromptDeliveryMode.NEW_TURN:
                         continue
                     break
-                async with self._lock:
+                settlement = asyncio.create_task(
+                    self._settle_queued_root_admission(candidate),
+                    name=f"kernel-queued-admission:{candidate.queue_item_id}",
+                )
+                try:
+                    task = await asyncio.shield(settlement)
+                except asyncio.CancelledError:
+                    # Host close detaches the delivery-loop waiter, never the
+                    # exact queue admission settlement owner.
+                    while not settlement.done():
+                        try:
+                            await asyncio.shield(settlement)
+                        except asyncio.CancelledError:
+                            continue
+                    settlement.result()
+                    raise
+                if task is None:
+                    self._queue_wake.set()
+                    break
+                try:
+                    await task
+                except BaseException:
+                    pass
+                finally:
+                    await self._settle_active_root_task(task)
+
+    async def _settle_queued_root_admission(
+        self, candidate: PreparedQueuedRootTurnAdmission
+    ) -> asyncio.Task[KernelRunResult] | None:
+        """Own one queued mutation through confirmation and task installation."""
+
+        activation = build_root_activation(
+            session_id=candidate.session_id,
+            admission_kind="QUEUED",
+            queue_item_id=candidate.queue_item_id,
+            queue_sequence=candidate.queue_sequence,
+            exact_turn_id=candidate.exact_turn_id,
+            exact_initial_entry_id=candidate.exact_initial_entry_id,
+            exact_context_binding_revision_id=(
+                candidate.exact_context_binding_revision_id
+            ),
+            exact_admission_candidate_fingerprint=candidate.candidate_fingerprint,
+        )
+        confirmation: QueuedRootTurnAdmissionConfirmation | None = None
+        delay_seconds = 0.05
+        while confirmation is None:
+            if self._closing:
+                return None
+            try:
+                confirmation = await self._io.run(
+                    self.repository.consume_prepared_prompt_head,
+                    self._lease.guard,
+                    candidate=candidate,
+                    deadline_monotonic=self._canonical_deadline(),
+                )
+                if confirmation is None:
+                    return None
+            except asyncio.CancelledError:
+                raise
+            except StaleHostWriter:
+                return None
+            except Exception:
+                while True:
+                    try:
+                        confirmation = await self._io.run(
+                            self.repository.confirm_prepared_prompt_head_consumption,
+                            candidate=candidate,
+                            deadline_monotonic=self._canonical_deadline(),
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        await asyncio.sleep(delay_seconds)
+                        delay_seconds = min(delay_seconds * 2, 0.5)
+                        continue
+                    if (
+                        confirmation.kind
+                        is QueuedRootTurnAdmissionConfirmationKind.NONE
+                    ):
+                        confirmation = None
+                    break
+        if confirmation.kind is QueuedRootTurnAdmissionConfirmationKind.CONFLICT:
+            return None
+        if confirmation.kind is not QueuedRootTurnAdmissionConfirmationKind.FULL:
+            raise RuntimeError("queued ROOT admission has an invalid disposition")
+        accepted = confirmation.accepted
+        assert accepted is not None
+        closed: FrozenTodoCloseProjection | None = None
+        finalization_failed = False
+        async with self._lock:
+            try:
+                closed = self._finalize_todo_run_activation_locked(
+                    activation, accepted
+                )
+            except BaseException:
+                finalization_failed = True
+                task = None
+            if not finalization_failed and not self._closing:
+                try:
                     task = self._install_active_root_task_locked(
                         turn_id=accepted.turn_id,
                         command_id=None,
@@ -1796,21 +1943,64 @@ class KernelHostSession:
                             accepted.turn_id, intent
                         ),
                     )
-                    if self._closing:
-                        assert self._active_cancellation_intent is not None
-                        self._active_cancellation_intent.install_cause(
-                            ForegroundCancellationCause.HOST_SESSION_CLOSE
-                        )
-                        task.cancel()
-                try:
-                    await task
                 except BaseException:
-                    pass
-                finally:
-                    # Covers cancellation before the task wrapper gets its
-                    # first scheduling turn; the normal path already settled
-                    # itself in ``_run_owned_root_task``.
-                    await self._settle_active_root_task(task)
+                    task = None
+            elif finalization_failed:
+                task = None
+            else:
+                task = None
+        self._tools.offer_todo_close(closed)
+        if task is None:
+            await self._interrupt_queued_admission_until_safe(
+                turn_id=accepted.turn_id,
+                reason=(
+                    "SESSION_CLOSED"
+                    if self._closing
+                    else "FOREGROUND_EXECUTION_INTERRUPTED"
+                ),
+            )
+            if not finalization_failed:
+                self._tools.todo_owner.mark_root_idle(
+                    exact_turn_id=accepted.turn_id
+                )
+        return task
+
+    async def _interrupt_queued_admission_until_safe(
+        self, *, turn_id: str, reason: str
+    ) -> None:
+        delay_seconds = 0.05
+        while True:
+            try:
+                await self._io.run(
+                    self.repository.interrupt_turn,
+                    self._lease.guard,
+                    turn_id=turn_id,
+                    reason=reason,
+                    occurred_at=datetime.now().astimezone(),
+                    actor_id=self.host_session_id,
+                    deadline_monotonic=self._canonical_deadline(),
+                )
+            except StaleHostWriter:
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass
+            try:
+                status = await self._io.run(
+                    self.repository.read_turn_status,
+                    session_id=self.session_id,
+                    turn_id=turn_id,
+                    deadline_monotonic=self._canonical_deadline(),
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                status = None
+            if status is not None and status.value != "RUNNING":
+                return
+            await asyncio.sleep(delay_seconds)
+            delay_seconds = min(delay_seconds * 2, 0.5)
 
     async def _terminal_monitor_delivery_loop(self) -> None:
         """Install process-local monitor drafts through the Host safe point."""
@@ -1973,6 +2163,11 @@ class KernelHostSession:
                 or self._active_task is not None
             ):
                 raise RuntimeError("terminal observation turn lost its local admission")
+            self._tools.todo_owner.bind_continuation_if_present(
+                scope_kind=ModelInputScopeKind.ROOT,
+                scope_subagent_task_id=None,
+                turn_id=turn_id,
+            )
             self._install_active_root_task_locked(
                 turn_id=turn_id,
                 command_id=None,
@@ -2417,6 +2612,11 @@ class KernelHostSession:
                 self._external_new_turn_accepting = False
                 self._external_new_turn_settled.set()
                 raise RuntimeError("external result turn lost its local admission")
+            self._tools.todo_owner.bind_continuation_if_present(
+                scope_kind=ModelInputScopeKind.ROOT,
+                scope_subagent_task_id=None,
+                turn_id=turn_id,
+            )
             self._install_active_root_task_locked(
                 turn_id=turn_id,
                 command_id=command_id,
@@ -2463,6 +2663,10 @@ class KernelHostSession:
                 return
             async with self._lock:
                 self._closing = True
+                self._tools.todo_owner.mark_closing(
+                    scope_kind=ModelInputScopeKind.ROOT,
+                    scope_subagent_task_id=None,
+                )
                 self._close_conversation_requested = (
                     self._close_conversation_requested or close_conversation
                 )
@@ -2480,6 +2684,16 @@ class KernelHostSession:
                 else deadline_monotonic
             )
             close_error: BaseException | None = None
+            self._delivery_task.cancel()
+            try:
+                if await _join_close_task(
+                    self._delivery_task, deadline_monotonic=deadline
+                ):
+                    close_error = TimeoutError(
+                        "prompt delivery settlement exited after close deadline"
+                    )
+            except BaseException as exc:
+                close_error = exc
             try:
                 if await _join_close_task(
                     self._monitor_task, deadline_monotonic=deadline
@@ -2516,12 +2730,8 @@ class KernelHostSession:
                 intent = self._active_cancellation_intent
                 if task is not None and not task.done():
                     if intent is None:
-                        raise RuntimeError(
-                            "active ROOT task lacks cancellation intent"
-                        )
-                    intent.install_cause(
-                        ForegroundCancellationCause.HOST_SESSION_CLOSE
-                    )
+                        raise RuntimeError("active ROOT task lacks cancellation intent")
+                    intent.install_cause(ForegroundCancellationCause.HOST_SESSION_CLOSE)
             if task is not None and not task.done():
                 task.cancel()
                 try:
@@ -2533,14 +2743,22 @@ class KernelHostSession:
                     close_error = close_error or exc
             if task is not None:
                 await self._settle_active_root_task(task)
+            try:
+                # The exact ROOT runner and its shielded ToolResult settlement
+                # owner have already joined. A retained token now has no
+                # legitimate producer that can advance it, so fail closed
+                # instead of sleeping on an ownerless condition.
+                todo_closed = self._tools.todo_owner.close_run(
+                    scope_kind=ModelInputScopeKind.ROOT,
+                    scope_subagent_task_id=None,
+                )
+            except BaseException as exc:
+                todo_closed = None
+                close_error = close_error or exc
+            self._tools.offer_todo_close(todo_closed)
             self._renewal_task.cancel()
             try:
                 await self._renewal_task
-            except BaseException:
-                pass
-            self._delivery_task.cancel()
-            try:
-                await self._delivery_task
             except BaseException:
                 pass
             for close_operation in (
@@ -2559,9 +2777,7 @@ class KernelHostSession:
             except BaseException as exc:
                 close_error = close_error or exc
             try:
-                await self._assistant_settlements.aclose(
-                    deadline_monotonic=deadline
-                )
+                await self._assistant_settlements.aclose(deadline_monotonic=deadline)
             except BaseException as exc:
                 close_error = close_error or exc
             self._input_continuity.close()
@@ -2580,9 +2796,7 @@ class KernelHostSession:
             except BaseException as exc:
                 close_error = close_error or exc
             try:
-                if await _join_close_task(
-                    mcp_close_task, deadline_monotonic=deadline
-                ):
+                if await _join_close_task(mcp_close_task, deadline_monotonic=deadline):
                     close_error = close_error or TimeoutError(
                         "MCP physical owners exited after close deadline"
                     )
@@ -2646,6 +2860,7 @@ class KernelHostSession:
             launch_permission_mode=self._launch_permission_mode,
             deadline_factory=self._deadlines,
             assistant_settlement_owner=self._assistant_settlements,
+            todo_admission_finalizer=self._finalize_todo_run_activation,
         )
 
     def _observe_provider_usage(
@@ -2951,9 +3166,7 @@ class KernelHostCore:
         repository = await self._ensure_resources()
         host_id = f"host:{uuid4().hex}"
         io_owner = KernelSessionIO()
-        deadline = self._deadlines.deadline(
-            KernelWatchdogOwner.FOREGROUND_CANONICAL
-        )
+        deadline = self._deadlines.deadline(KernelWatchdogOwner.FOREGROUND_CANONICAL)
         try:
             writer_lease = await io_owner.run(
                 repository.acquire_host_writer,
@@ -3158,9 +3371,7 @@ class KernelHostCore:
             self._blob_gc_task = None
         if self._blob_gc_io is not None:
             io_close_task = asyncio.create_task(
-                self._blob_gc_io.aclose(
-                    deadline_monotonic=blob_close_deadline
-                ),
+                self._blob_gc_io.aclose(deadline_monotonic=blob_close_deadline),
                 name="kernel-blob-orphan-gc-io-close",
             )
             (

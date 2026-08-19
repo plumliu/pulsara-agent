@@ -67,8 +67,11 @@ Kernel 当前支持：
   frontier；每条accepted tool result携带immutable observed time、monotonic
   duration disposition、execution origin及optional trusted duration，tool body
   无法伪造这些outer timing facts；
-- filesystem、todo、`terminal`、`terminal_process`、`terminal_monitor` 与
-  scoped `artifact_read` tools；
+- filesystem、`terminal`、`terminal_process`、`terminal_monitor` 与 scoped
+  `artifact_read` tools；
+- exact-run、process-local 的 `todo(items=[...])` 工具：一次原子替换一个
+  bounded pending/in_progress/completed snapshot，空list显式清除，ROOT与child
+  相互隔离，Host replacement明确不恢复TODO state；
 - 真实 PIPE/PTY Terminal output streaming、exact process-local cursor、typed
   GAP、same-Host future monitor observation，以及 provider safe-point 上的
   autonomous continuation；
@@ -199,6 +202,12 @@ code/path token与英文contraction语义。明确“不要保存当前内容”
 并在不改变advertised tool surface的前提下拒绝四个memory tool。短输入跳过automatic
 recall仍是独立策略，不会关闭显式memory tool。验证证据记录在
 [`round8_advisory_memory_subsystem_activation.json`](benchmarks/suites/core/v1/round8_advisory_memory_subsystem_activation.json)。
+Lightweight TODO refinement用一次bounded完整snapshot调用替换旧Host-global
+action协议，并由exact ROOT/child process-local owner持有current state。只有
+canonical ToolResult成功结算后才安装snapshot；client接收单个原子live projection，
+LIVE GAP后直接从当前Host owner完整同步。TODO始终是advisory而非durable，Round 5B
+只能消费其只读actionable handoff。验证证据记录在
+[`lightweight_todo_tool_refinement_activation.json`](benchmarks/suites/core/v1/lightweight_todo_tool_refinement_activation.json)。
 旧 v13
 数据库只会得到 `schema_migration_universe_reset_required`，不会被在线导入、
 翻译或升级。请严格遵守

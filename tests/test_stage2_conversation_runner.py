@@ -47,6 +47,7 @@ from pulsara_agent.ports.live_agent_event import (
     live_digest,
 )
 from pulsara_agent.conversation_kernel.repository import (
+    AcceptedEntry,
     AssistantTextBlock,
     AssistantToolCallBlock,
     ConversationKernelConflict,
@@ -64,6 +65,13 @@ from pulsara_agent.conversation_kernel.runner import (
 )
 from pulsara_agent.conversation_kernel.tool_artifacts import (
     PostgresToolArtifactReadPort,
+)
+from pulsara_agent.conversation_kernel.tool_policy import (
+    DefaultToolDispatchAuthorizationPolicy,
+)
+from pulsara_agent.conversation_kernel.tool_runtime import DirectKernelToolPort
+from pulsara_agent.conversation_kernel.todo_runtime import (
+    PreparedTodoRootRunActivation,
 )
 from pulsara_agent.conversation_kernel.vocabulary import LiveEventType
 from pulsara_agent.llm.input import MessageRole
@@ -747,6 +755,30 @@ def _tool_stream() -> list[object]:
             block_identity="call:1",
             tool_call_id="call:1",
             tool_name="terminal",
+            arguments_json=arguments,
+            utf8_bytes=len(arguments.encode("utf-8")),
+            digest=live_digest(arguments),
+        ),
+    ]
+
+
+def _todo_tool_stream() -> list[object]:
+    arguments = json.dumps(
+        {
+            "items": [
+                {"text": "Inspect exact path", "status": "completed"},
+                {"text": "Run retained gates", "status": "in_progress"},
+            ]
+        },
+        separators=(",", ":"),
+    )
+    return [
+        ToolCallStartPayload("call:todo", "call:todo", "todo"),
+        ToolCallDeltaPayload("call:todo", "call:todo", arguments),
+        ToolCallEndPayload(
+            block_identity="call:todo",
+            tool_call_id="call:todo",
+            tool_name="todo",
             arguments_json=arguments,
             utf8_bytes=len(arguments.encode("utf-8")),
             digest=live_digest(arguments),
@@ -1878,6 +1910,88 @@ def test_stage2_runner_commits_tool_message_and_attempt_before_invoke(
         "AssistantMessageAccepted",
         "TurnCompleted",
     )
+
+
+def test_lightweight_todo_runs_through_canonical_tool_result_settlement(
+    stage2_migrated_postgres_database,
+    tmp_path,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id = _name("session")
+    workspace_id = _name("workspace")
+    lease = repository.acquire_host_writer(
+        session_id=session_id,
+        workspace_id=workspace_id,
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    live_bus = LiveAgentEventBus()
+    tools = DirectKernelToolPort(
+        workspace_root=tmp_path,
+        host_owner_id="host:test",
+        session_id=session_id,
+        live_bus=live_bus,
+        authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
+    )
+
+    async def finalize_todo(
+        prepared: PreparedTodoRootRunActivation, accepted: AcceptedEntry
+    ) -> None:
+        assert accepted.turn_id == prepared.exact_turn_id
+        tools.todo_owner.activate_root_run(prepared)
+
+    runner = ConversationKernelRunner(
+        repository=repository,
+        writer_lease=lease,
+        model=_ScriptedModel(
+            [_todo_tool_stream(), _text_stream("done", block="text:todo-final")]
+        ),
+        tools=tools,
+        live_bus=live_bus,
+        context_source_collector=StaticContextSourceCollector(),
+        todo_admission_finalizer=finalize_todo,
+    )
+
+    async def exercise():
+        try:
+            return await runner.run_turn("maintain an exact TODO checklist")
+        finally:
+            await tools.aclose(timeout_seconds=2)
+
+    result = asyncio.run(exercise())
+    assert result.final_text == "done"
+    snapshot = tools.todo_owner.snapshot(
+        scope_kind=ModelInputScopeKind.ROOT,
+        scope_subagent_task_id=None,
+    )
+    assert snapshot is not None and snapshot.revision == 1
+    assert [item.text for item in snapshot.ordered_items] == [
+        "Inspect exact path",
+        "Run retained gates",
+    ]
+    rows = repository.rehydrate_session(
+        session_id=session_id, deadline_monotonic=monotonic() + 30
+    )
+    tool_result = next(row for row in rows if row["entry_kind"] == "TOOL_RESULT")
+    assert b"Inspect exact path" not in tool_result["inline_content"]
+    acknowledgement = json.loads(tool_result["inline_content"])
+    assert acknowledgement == {
+        "counts": {"completed": 1, "in_progress": 1, "pending": 0, "total": 2},
+        "status": "UPDATED",
+    }
+    with provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        deadline_monotonic=monotonic() + 10,
+    ) as connection:
+        artifact = connection.execute(
+            "SELECT output_artifact_disposition, output_display_kind "
+            "FROM pulsara_v3.tool_results "
+            "WHERE session_id = %s AND result_entry_id = %s",
+            (session_id, tool_result["id"]),
+        ).fetchone()
+    assert artifact == ("NOT_REQUIRED", "COMPLETE")
 
 
 def test_stage2_live_bus_overflow_is_nonblocking_and_returns_gap() -> None:

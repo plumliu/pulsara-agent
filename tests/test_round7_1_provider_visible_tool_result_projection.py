@@ -429,7 +429,7 @@ def test_round7_1_logical_quote_is_not_chat_or_responses_wire_bytes() -> None:
 
 def test_round7_1_architecture_and_oracle_guards() -> None:
     assert len(COMMITTED_EVENT_DESCRIPTORS) == 31
-    assert len(LIVE_EVENT_TYPES) == 23
+    assert len(LIVE_EVENT_TYPES) == 24
     assert len(SUBJECT_SLOTS) == 13
     assert len(APPEND_GUARDS) == 2
     assert len(CONVERSATION_KERNEL_RELATIONS) == 25

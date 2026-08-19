@@ -571,21 +571,40 @@ _BUILTIN_DESCRIPTORS: dict[str, CapabilityDescriptor] = {
     ),
     "todo": _descriptor(
         name="todo",
-        description="Track the current runtime task plan.",
+        description=(
+            "Maintain a small checklist for the current run by replacing the "
+            "complete list. Use it for multi-step work, not simple one-step "
+            "answers. Keep at most one item in_progress. Submit an empty list "
+            "to clear it."
+        ),
         input_schema=object_schema(
             properties={
-                "action": {
-                    "type": "string",
-                    "enum": ["add", "update", "list", "clear"],
-                },
-                "text": {"type": "string"},
-                "id": {"type": "string"},
-                "status": {
-                    "type": "string",
-                    "enum": ["pending", "in_progress", "completed"],
+                "items": {
+                    "type": "array",
+                    "maxItems": 64,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "text": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 512,
+                            },
+                            "status": {
+                                "type": "string",
+                                "enum": [
+                                    "pending",
+                                    "in_progress",
+                                    "completed",
+                                ],
+                            },
+                        },
+                        "required": ["text", "status"],
+                        "additionalProperties": False,
+                    },
                 },
             },
-            required=["action"],
+            required=["items"],
         ),
         provider_kind=CapabilityProviderKind.WORKFLOW,
         is_read_only=True,
@@ -1275,6 +1294,7 @@ def _recovery_contract(name: str) -> BuiltinToolRecoveryContract:
         "read_file",
         "read_mcp_resource",
         "search_files",
+        "todo",
     }:
         severity = "read_only"
     else:

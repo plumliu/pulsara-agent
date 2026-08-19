@@ -10,6 +10,7 @@ from pulsara_agent.conversation_kernel.repository import (
     TurnAdmissionConfirmationKind,
 )
 from pulsara_agent.conversation_kernel.subagent import KernelSubagentManager
+from pulsara_agent.conversation_kernel.todo_runtime import TodoRunStateOwner
 
 
 class _Repository:
@@ -46,6 +47,9 @@ def test_host_close_interrupts_subagent_instead_of_user_cancelling_it() -> None:
             host_owner_id="host:test",
             io_owner=KernelSessionIO(),
             live_bus=LiveAgentEventBus(),
+            todo_owner=TodoRunStateOwner(
+                session_id="session:test", owner_epoch="host:test"
+            ),
         )
         manager.bind_runner_factory(lambda: _BlockingRunner())  # type: ignore[arg-type]
         result = await manager.invoke(

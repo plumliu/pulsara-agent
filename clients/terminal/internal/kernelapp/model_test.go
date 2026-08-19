@@ -291,6 +291,114 @@ func liveToolCallEvent(revision uint64, kind protocolv3.LiveEventType, payload *
 	}
 }
 
+func todoLiveEvent(todoRevision, liveRevision uint64, disposition, text, status string) *protocolv3.LiveEventProjection {
+	items := []*protocolv3.LiveTodoItemProjection{}
+	pending, inProgress, completed := uint32(0), uint32(0), uint32(0)
+	if text != "" {
+		items = append(items, &protocolv3.LiveTodoItemProjection{Ordinal: 0, Text: text, Status: status})
+		switch status {
+		case "pending":
+			pending = 1
+		case "in_progress":
+			inProgress = 1
+		case "completed":
+			completed = 1
+		}
+	}
+	runID := "todo-root-run:1"
+	identity := fmt.Sprintf("todo:%s:%d", runID, todoRevision)
+	return &protocolv3.LiveEventProjection{
+		OwnerEpoch: 1, LiveRevision: liveRevision,
+		EventType: protocolv3.LiveEventType_TODO_SNAPSHOT_UPDATED,
+		SessionId: "session:1", TurnId: "turn:1", DraftIdentity: identity,
+		Payload: &protocolv3.LiveEventPayload{Payload: &protocolv3.LiveEventPayload_TodoSnapshotUpdated{
+			TodoSnapshotUpdated: &protocolv3.LiveTodoSnapshotUpdatedPayload{
+				TodoRunId: runID, TodoRevision: todoRevision, Disposition: disposition,
+				OrderedItems: items, PendingCount: pending, InProgressCount: inProgress,
+				CompletedCount: completed,
+			},
+		}},
+		ScopeKind:    protocolv3.ConversationScopeKind_ROOT,
+		ChannelKind:  protocolv3.LiveChannelKind_LIVE_CHANNEL_TERMINAL_EXTENSION,
+		GenerationId: "todo:" + runID,
+		BlockId:      identity, BlockKind: protocolv3.LiveBlockKind_LIVE_BLOCK_OPERATIONAL,
+	}
+}
+
+func TestTodoLiveProjectionIsAtomicRevisionedAndClosed(t *testing.T) {
+	model := New(fakeService{})
+	active := todoLiveEvent(1, 1, "ACTIVE", "inspect repository", "in_progress")
+	if err := model.applyLive(active); err != nil {
+		t.Fatal(err)
+	}
+	current := model.currentTodos["todo-root-run:1"]
+	if current == nil || current.TodoRevision != 1 || len(current.OrderedItems) != 1 {
+		t.Fatal("active TODO snapshot was not installed atomically")
+	}
+
+	stale := todoLiveEvent(0, 2, "CLEARED", "", "")
+	if err := model.applyLive(stale); err != nil {
+		t.Fatal(err)
+	}
+	if model.currentTodos["todo-root-run:1"].TodoRevision != 1 {
+		t.Fatal("stale TODO revision replaced the current snapshot")
+	}
+
+	conflict := todoLiveEvent(1, 3, "ACTIVE", "different text", "pending")
+	if err := model.applyLive(conflict); err == nil {
+		t.Fatal("conflicting equal TODO revision was accepted")
+	}
+
+	closed := todoLiveEvent(2, 4, "CLOSED", "", "")
+	if err := model.applyLive(closed); err != nil {
+		t.Fatal(err)
+	}
+	if model.currentTodos["todo-root-run:1"] != nil {
+		t.Fatal("closed TODO run remained visible")
+	}
+}
+
+func TestTodoLiveControlSnapshotReplacesInventoryAfterGap(t *testing.T) {
+	model := New(fakeService{})
+	model.currentTodos["stale-run"] = &protocolv3.LiveTodoRunSnapshot{
+		TodoRunId: "stale-run", TodoRevision: 1,
+		ScopeKind:   protocolv3.ConversationScopeKind_ROOT,
+		Disposition: "ACTIVE", OrderedItems: []*protocolv3.LiveTodoItemProjection{{
+			Ordinal: 0, Text: "stale", Status: "pending",
+		}}, PendingCount: 1,
+	}
+	updated, command := model.Update(observationMsg{value: &protocolv3.ObservationResponse{
+		ThroughEventSequence: 0, LiveOwnerEpoch: 3,
+		Gap: &protocolv3.ObservationGap{Kind: protocolv3.ObservationGapKind_LIVE_GAP, LatestSequence: 7},
+	}})
+	if command == nil {
+		t.Fatal("LIVE_GAP did not request a live-control snapshot")
+	}
+	next := updated.(Model)
+	if len(next.currentTodos) != 0 || next.liveEpoch != 3 || next.liveRevision != 7 {
+		t.Fatal("LIVE_GAP did not discard the stale TODO inventory")
+	}
+
+	replacement := &protocolv3.LiveTodoRunSnapshot{
+		TodoRunId: "fresh-run", TodoRevision: 2,
+		ScopeKind:   protocolv3.ConversationScopeKind_ROOT,
+		Disposition: "ACTIVE", OrderedItems: []*protocolv3.LiveTodoItemProjection{{
+			Ordinal: 0, Text: "fresh", Status: "in_progress",
+		}}, InProgressCount: 1,
+	}
+	if err := next.installLiveControlSnapshot(&protocolv3.LiveControlSnapshotResponse{
+		Snapshot: &protocolv3.SessionLiveControlSnapshot{
+			SessionId: "session:1", OwnerEpoch: 5, LiveRevision: 9,
+			CurrentTodos: []*protocolv3.LiveTodoRunSnapshot{replacement},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(next.currentTodos) != 1 || next.currentTodos["fresh-run"] == nil {
+		t.Fatal("live-control snapshot did not replace the TODO inventory")
+	}
+}
+
 func TestLiveAndControlFramesAreBoundToTheAuthenticatedSession(t *testing.T) {
 	model := New(fakeService{})
 	model.liveEpoch, model.controlEpoch = 1, 1

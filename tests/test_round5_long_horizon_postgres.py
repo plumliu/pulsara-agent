@@ -34,6 +34,8 @@ from pulsara_agent.conversation_kernel.runner import (
     KernelToolPhysicalInvocationError,
     KernelToolResult,
     ProcessLocalEffectSettlementDisposition,
+    ProcessLocalEffectSettlementOutcome,
+    ProcessLocalEffectSettlementResult,
     ProcessLocalEffectSettlementToken,
 )
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
@@ -326,8 +328,13 @@ class _SettlementTokenTool(_KnownReadOnlyTool):
         self,
         _token: ProcessLocalEffectSettlementToken,
         disposition: ProcessLocalEffectSettlementDisposition,
-    ) -> None:
+    ) -> ProcessLocalEffectSettlementResult:
         self.settlements.append(disposition)
+        return ProcessLocalEffectSettlementResult(
+            ProcessLocalEffectSettlementOutcome.INSTALLED
+            if disposition is ProcessLocalEffectSettlementDisposition.COMMITTED
+            else ProcessLocalEffectSettlementOutcome.DISCARDED
+        )
 
 
 class _RemoteIdentityTool(_KnownReadOnlyTool):

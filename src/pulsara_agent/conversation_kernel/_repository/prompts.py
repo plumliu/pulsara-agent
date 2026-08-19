@@ -5,17 +5,50 @@ from __future__ import annotations
 from datetime import datetime
 from psycopg import Connection, IsolationLevel
 from psycopg.rows import dict_row
-from pulsara_agent.conversation_kernel.contracts import CanonicalContent, ConversationScopeKind, EntryKind, HostWriterGuard, PromptDeliveryMode, TurnStatus, canonical_digest
+from pulsara_agent.conversation_kernel.contracts import (
+    CanonicalContent,
+    ConversationScopeKind,
+    EntryKind,
+    HostWriterGuard,
+    PromptDeliveryMode,
+    TurnStatus,
+    canonical_digest,
+)
 from pulsara_agent.conversation_kernel.limits import STAGE2_LIMITS
 from pulsara_agent.primitives.permission import PermissionMode
-from pulsara_agent.primitives.run_permission import RunPermissionAdmissionSource, RunPermissionOverlay
+from pulsara_agent.primitives.run_permission import (
+    RunPermissionAdmissionSource,
+    RunPermissionOverlay,
+)
 from pulsara_agent.primitives.plan_workflow import PlanHandoffKind
 from pulsara_agent.conversation_kernel.vocabulary import CommittedEventType, SubjectSlot
-from pulsara_agent.conversation_kernel.steer import AcceptedSteerDispatchEntry, MAXIMUM_STEER_ITEMS_PER_SAFE_POINT, PendingPromptSteerFact, PreparedPromptIngressCommand, PreparedSteerConsumptionCandidate, PreparedSteerPlanConflictInterruption, PreparedSteerResourceRejection, PromptIngressConfirmation, PromptIngressConfirmationKind, PromptIngressWriteRejection, SteerConsumptionConfirmation, SteerConsumptionConfirmationKind, SteerPlanConflictConfirmation, SteerPlanConflictConfirmationKind, SteerResourceRejectionConfirmation, SteerResourceRejectionConfirmationKind, build_pending_prompt_steer_fact
+from pulsara_agent.conversation_kernel.steer import (
+    AcceptedSteerDispatchEntry,
+    MAXIMUM_STEER_ITEMS_PER_SAFE_POINT,
+    PendingPromptSteerFact,
+    PreparedPromptIngressCommand,
+    PreparedQueuedRootTurnAdmission,
+    PreparedSteerConsumptionCandidate,
+    PreparedSteerPlanConflictInterruption,
+    PreparedSteerResourceRejection,
+    PromptIngressConfirmation,
+    PromptIngressConfirmationKind,
+    PromptIngressWriteRejection,
+    QueuedRootTurnAdmissionAccepted,
+    QueuedRootTurnAdmissionConfirmation,
+    QueuedRootTurnAdmissionConfirmationKind,
+    SteerConsumptionConfirmation,
+    SteerConsumptionConfirmationKind,
+    SteerPlanConflictConfirmation,
+    SteerPlanConflictConfirmationKind,
+    SteerResourceRejectionConfirmation,
+    SteerResourceRejectionConfirmationKind,
+    build_pending_prompt_steer_fact,
+    build_queued_root_turn_admission,
+)
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 
 from .contracts import (
-    AcceptedEntry,
     ConversationKernelConflict,
     PromptIngressRejected,
     _content_columns,
@@ -27,6 +60,7 @@ from .matching import (
     _prompt_steer_row_matches_candidate,
     _prompt_steer_row_matches_resource_rejection,
 )
+
 
 class _PromptOperations:
     def interrupt_prepared_steer_plan_conflict(
@@ -467,25 +501,95 @@ class _PromptOperations:
             )
             return queue_sequence
 
-    def consume_prompt_head(
+    def prepare_prompt_head_consumption(
         self,
-        guard: HostWriterGuard,
         *,
-        new_turn_id: str,
-        new_entry_id: str,
-        new_context_binding_revision_id: str,
+        session_id: str,
         occurred_at: datetime,
         actor_id: str,
         deadline_monotonic: float,
-    ) -> AcceptedEntry | None:
+    ) -> PreparedQueuedRootTurnAdmission | None:
+        """Freeze the exact future-turn FIFO head without mutating authority."""
+
+        with self._provider.connection(
+            lane=PostgresConnectionLane.HOST_CONTROL,
+            row_factory=dict_row,
+            isolation_level=IsolationLevel.REPEATABLE_READ,
+            deadline_monotonic=deadline_monotonic,
+        ) as connection:
+            active_root = connection.execute(
+                """
+                SELECT 1 FROM pulsara_v3.turns
+                WHERE session_id = %s
+                  AND conversation_scope_kind = 'ROOT'
+                  AND status = 'RUNNING'
+                LIMIT 1
+                """,
+                (session_id,),
+            ).fetchone()
+            if active_root is not None:
+                return None
+            item = connection.execute(
+                """
+                SELECT * FROM pulsara_v3.prompt_queue_items
+                WHERE session_id = %s AND status = 'PENDING'
+                  AND delivery_mode = 'NEW_TURN'
+                ORDER BY queue_sequence, id
+                LIMIT 1
+                """,
+                (session_id,),
+            ).fetchone()
+            if item is None or self._open_plan_interaction(connection, session_id):
+                return None
+            content = self._content_from_row(item)
+            permission = self._permission_from_row(item)
+        return build_queued_root_turn_admission(
+            session_id=session_id,
+            workspace_id=str(item["workspace_id"]),
+            queue_item_id=str(item["id"]),
+            queue_sequence=int(item["queue_sequence"]),
+            command_id=str(item["command_id"]),
+            client_submission_id=str(item["client_submission_id"]),
+            content=content,
+            permission_snapshot=permission,
+            pending_plan_handoff_workflow_id=(
+                None
+                if item["pending_plan_handoff_workflow_id"] is None
+                else str(item["pending_plan_handoff_workflow_id"])
+            ),
+            pending_plan_handoff_interaction_id=(
+                None
+                if item["pending_plan_handoff_interaction_id"] is None
+                else str(item["pending_plan_handoff_interaction_id"])
+            ),
+            pending_plan_handoff_kind=(
+                None
+                if item["pending_plan_handoff_kind"] is None
+                else str(item["pending_plan_handoff_kind"])
+            ),
+            occurred_at=occurred_at,
+            actor_id=actor_id,
+        )
+
+    def consume_prepared_prompt_head(
+        self,
+        guard: HostWriterGuard,
+        *,
+        candidate: PreparedQueuedRootTurnAdmission,
+        deadline_monotonic: float,
+    ) -> QueuedRootTurnAdmissionConfirmation | None:
+        """Consume one exact stable queue candidate in its canonical batch."""
+
+        if candidate.session_id != guard.session_id:
+            raise ValueError("queued ROOT candidate belongs to another session")
         with self._writer_transaction(
             guard, deadline_monotonic=deadline_monotonic
         ) as connection:
             self._reject_terminal_prompt_steer_heads(
                 connection,
                 guard,
-                occurred_at=occurred_at,
-                actor_id=actor_id,
+                occurred_at=candidate.occurred_at,
+                actor_id=candidate.actor_id,
             )
             active_root = connection.execute(
                 """
@@ -498,10 +602,6 @@ class _PromptOperations:
                 (guard.session_id,),
             ).fetchone()
             if active_root is not None:
-                # NEW_TURN is an independent delivery lane, but it is still a
-                # future turn.  It may not overtake the physical ownership of
-                # the current ROOT turn merely because the steer lane was
-                # drained separately.
                 return None
             item = connection.execute(
                 """
@@ -516,10 +616,9 @@ class _PromptOperations:
             ).fetchone()
             if item is None:
                 return None
+            if not self._queued_root_row_matches_candidate(item, candidate):
+                raise ConversationKernelConflict("queued ROOT FIFO candidate drifted")
             if self._open_plan_interaction(connection, guard.session_id) is not None:
-                # A QUESTION keeps its existing turn alive; a DRAFT_REVIEW
-                # must be explicitly resolved.  The FIFO head remains level
-                # truth and is not overtaken or terminalized here.
                 return None
             permission = self._permission_from_row(item)
             latest_plan = connection.execute(
@@ -564,31 +663,27 @@ class _PromptOperations:
                 self._append_events(
                     connection,
                     guard,
-                    workspace_id=str(item["workspace_id"]),
+                    workspace_id=candidate.workspace_id,
                     drafts=(
                         self._event(
                             CommittedEventType.PROMPT_REJECTED,
                             SubjectSlot.QUEUE_ITEM,
-                            str(item["id"]),
-                            occurred_at=occurred_at,
+                            candidate.queue_item_id,
+                            occurred_at=candidate.occurred_at,
                             actor_kind="runtime",
-                            actor_id=actor_id,
+                            actor_id=candidate.actor_id,
                             payload={"reason": "PLAN_CONTEXT_CHANGED_BEFORE_DELIVERY"},
                         ),
                     ),
                 )
                 return None
-            content = self._content_from_row(item)
-            workspace_id = str(item["workspace_id"])
-            turn_id = new_turn_id
-            entry_kind = EntryKind.USER_MESSAGE
             entry_sequence = self._allocate_entry_sequence(connection, guard.session_id)
             connection.execute(
                 """
                 INSERT INTO pulsara_v3.turns (
                     id, session_id, workspace_id, conversation_scope_kind,
-                    status, initial_entry_id, current_context_binding_revision_id
-                    , permission_snapshot_id, requested_permission_mode,
+                    status, initial_entry_id, current_context_binding_revision_id,
+                    permission_snapshot_id, requested_permission_mode,
                     effective_permission_mode, permission_admission_source,
                     permission_overlay, permission_plan_context_ordinal,
                     permission_plan_workflow_id,
@@ -600,11 +695,11 @@ class _PromptOperations:
                           %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
-                    turn_id,
+                    candidate.exact_turn_id,
                     guard.session_id,
-                    workspace_id,
-                    new_entry_id,
-                    new_context_binding_revision_id,
+                    candidate.workspace_id,
+                    candidate.exact_initial_entry_id,
+                    candidate.exact_context_binding_revision_id,
                     *self._permission_columns(permission),
                 ),
             )
@@ -616,29 +711,31 @@ class _PromptOperations:
                 ) VALUES (%s, %s, %s, 0, 'FULL_HISTORY', %s)
                 """,
                 (
-                    new_context_binding_revision_id,
+                    candidate.exact_context_binding_revision_id,
                     guard.session_id,
-                    turn_id,
+                    candidate.exact_turn_id,
                     entry_sequence - 1,
                 ),
             )
             self._insert_entry(
                 connection,
                 session_id=guard.session_id,
-                workspace_id=workspace_id,
-                turn_id=turn_id,
-                entry_id=new_entry_id,
+                workspace_id=candidate.workspace_id,
+                turn_id=candidate.exact_turn_id,
+                entry_id=candidate.exact_initial_entry_id,
                 entry_sequence=entry_sequence,
-                entry_kind=entry_kind,
+                entry_kind=EntryKind.USER_MESSAGE,
                 scope_kind=ConversationScopeKind.ROOT,
                 scope_task_id=None,
-                content=content,
-                source_plan_workflow_id=item["pending_plan_handoff_workflow_id"],
-                source_plan_interaction_id=item["pending_plan_handoff_interaction_id"],
+                content=candidate.content,
+                source_plan_workflow_id=(candidate.pending_plan_handoff_workflow_id),
+                source_plan_interaction_id=(
+                    candidate.pending_plan_handoff_interaction_id
+                ),
                 source_plan_handoff_kind=(
                     None
-                    if item["pending_plan_handoff_kind"] is None
-                    else PlanHandoffKind(str(item["pending_plan_handoff_kind"]))
+                    if candidate.pending_plan_handoff_kind is None
+                    else PlanHandoffKind(candidate.pending_plan_handoff_kind)
                 ),
             )
             updated = connection.execute(
@@ -649,41 +746,247 @@ class _PromptOperations:
                 WHERE session_id = %s AND id = %s AND status = 'PENDING'
                 RETURNING id
                 """,
-                (new_entry_id, guard.session_id, item["id"]),
+                (
+                    candidate.exact_initial_entry_id,
+                    guard.session_id,
+                    candidate.queue_item_id,
+                ),
             ).fetchone()
             if updated is None:
                 raise ConversationKernelConflict("prompt queue terminal CAS lost")
             events = self._append_events(
                 connection,
                 guard,
-                workspace_id=workspace_id,
+                workspace_id=candidate.workspace_id,
                 drafts=(
-                    self._event(
-                        CommittedEventType.PROMPT_CONSUMED,
-                        SubjectSlot.QUEUE_ITEM,
-                        str(item["id"]),
-                        occurred_at=occurred_at,
-                        actor_kind="runtime",
-                        actor_id=actor_id,
-                        payload={"entry_id": new_entry_id},
-                    ),
-                    self._event(
-                        CommittedEventType.USER_MESSAGE_ACCEPTED,
-                        SubjectSlot.ENTRY,
-                        new_entry_id,
-                        occurred_at=occurred_at,
-                        actor_kind="human",
-                        actor_id=actor_id,
-                        payload={"source": "PROMPT_QUEUE"},
-                    ),
+                    candidate.prompt_consumed_occurrence,
+                    candidate.user_message_accepted_occurrence,
                 ),
             )
-            return AcceptedEntry(
-                entry_id=new_entry_id,
-                turn_id=turn_id,
-                entry_sequence=entry_sequence,
-                event_sequence=events[-1].event_sequence,
+            return QueuedRootTurnAdmissionConfirmation(
+                QueuedRootTurnAdmissionConfirmationKind.FULL,
+                QueuedRootTurnAdmissionAccepted(
+                    entry_id=candidate.exact_initial_entry_id,
+                    turn_id=candidate.exact_turn_id,
+                    entry_sequence=entry_sequence,
+                    event_sequence=events[-1].event_sequence,
+                ),
             )
+
+    def confirm_prepared_prompt_head_consumption(
+        self,
+        *,
+        candidate: PreparedQueuedRootTurnAdmission,
+        deadline_monotonic: float,
+    ) -> QueuedRootTurnAdmissionConfirmation:
+        """Statelessly classify the exact queued ROOT mutation winner."""
+
+        with self._provider.connection(
+            lane=PostgresConnectionLane.HOST_CONTROL,
+            row_factory=dict_row,
+            isolation_level=IsolationLevel.REPEATABLE_READ,
+            deadline_monotonic=deadline_monotonic,
+        ) as connection:
+            queue = connection.execute(
+                """SELECT * FROM pulsara_v3.prompt_queue_items
+                   WHERE session_id = %s AND id = %s""",
+                (candidate.session_id, candidate.queue_item_id),
+            ).fetchone()
+            turn = connection.execute(
+                """SELECT * FROM pulsara_v3.turns
+                   WHERE session_id = %s AND id = %s""",
+                (candidate.session_id, candidate.exact_turn_id),
+            ).fetchone()
+            revision = connection.execute(
+                """SELECT * FROM pulsara_v3.turn_context_binding_revisions
+                   WHERE session_id = %s AND id = %s""",
+                (
+                    candidate.session_id,
+                    candidate.exact_context_binding_revision_id,
+                ),
+            ).fetchone()
+            entry = connection.execute(
+                """SELECT * FROM pulsara_v3.transcript_entries
+                   WHERE session_id = %s AND id = %s""",
+                (candidate.session_id, candidate.exact_initial_entry_id),
+            ).fetchone()
+            consumed_event = connection.execute(
+                """SELECT * FROM pulsara_v3.agent_events
+                   WHERE session_id = %s AND event_id = %s""",
+                (
+                    candidate.session_id,
+                    candidate.prompt_consumed_occurrence.event_id,
+                ),
+            ).fetchone()
+            accepted_event = connection.execute(
+                """SELECT * FROM pulsara_v3.agent_events
+                   WHERE session_id = %s AND event_id = %s""",
+                (
+                    candidate.session_id,
+                    candidate.user_message_accepted_occurrence.event_id,
+                ),
+            ).fetchone()
+        winner_rows = (turn, revision, entry, consumed_event, accepted_event)
+        if (
+            queue is not None
+            and self._queued_root_row_matches_candidate(queue, candidate)
+            and str(queue["status"]) == "CONSUMED"
+            and str(queue["consumed_entry_id"]) == candidate.exact_initial_entry_id
+            and self._queued_root_turn_matches_candidate(turn, candidate)
+            and self._queued_root_revision_matches_candidate(revision, candidate, entry)
+            and self._queued_root_entry_matches_candidate(entry, candidate)
+            and _event_row_matches_draft(
+                consumed_event, candidate.prompt_consumed_occurrence
+            )
+            and _event_row_matches_draft(
+                accepted_event, candidate.user_message_accepted_occurrence
+            )
+        ):
+            return QueuedRootTurnAdmissionConfirmation(
+                QueuedRootTurnAdmissionConfirmationKind.FULL,
+                QueuedRootTurnAdmissionAccepted(
+                    entry_id=candidate.exact_initial_entry_id,
+                    turn_id=candidate.exact_turn_id,
+                    entry_sequence=int(entry["entry_sequence"]),
+                    event_sequence=int(accepted_event["event_sequence"]),
+                ),
+            )
+        if (
+            queue is not None
+            and self._queued_root_row_matches_candidate(queue, candidate)
+            and str(queue["status"]) == "PENDING"
+            and queue["consumed_entry_id"] is None
+            and all(row is None for row in winner_rows)
+        ):
+            return QueuedRootTurnAdmissionConfirmation(
+                QueuedRootTurnAdmissionConfirmationKind.NONE
+            )
+        return QueuedRootTurnAdmissionConfirmation(
+            QueuedRootTurnAdmissionConfirmationKind.CONFLICT
+        )
+
+    def _queued_root_row_matches_candidate(
+        self,
+        row: object,
+        candidate: PreparedQueuedRootTurnAdmission,
+    ) -> bool:
+        try:
+            return bool(
+                str(row["id"]) == candidate.queue_item_id
+                and str(row["session_id"]) == candidate.session_id
+                and str(row["workspace_id"]) == candidate.workspace_id
+                and int(row["queue_sequence"]) == candidate.queue_sequence
+                and str(row["command_id"]) == candidate.command_id
+                and str(row["client_submission_id"]) == candidate.client_submission_id
+                and str(row["delivery_mode"]) == PromptDeliveryMode.NEW_TURN.value
+                and row["target_turn_id"] is None
+                and self._content_from_row(row) == candidate.content
+                and self._permission_from_row(row) == candidate.permission_snapshot
+                and (
+                    None
+                    if row["pending_plan_handoff_workflow_id"] is None
+                    else str(row["pending_plan_handoff_workflow_id"])
+                )
+                == candidate.pending_plan_handoff_workflow_id
+                and (
+                    None
+                    if row["pending_plan_handoff_interaction_id"] is None
+                    else str(row["pending_plan_handoff_interaction_id"])
+                )
+                == candidate.pending_plan_handoff_interaction_id
+                and (
+                    None
+                    if row["pending_plan_handoff_kind"] is None
+                    else str(row["pending_plan_handoff_kind"])
+                )
+                == candidate.pending_plan_handoff_kind
+            )
+        except (KeyError, TypeError, ValueError):
+            return False
+
+    def _queued_root_turn_matches_candidate(
+        self,
+        row: object,
+        candidate: PreparedQueuedRootTurnAdmission,
+    ) -> bool:
+        if row is None:
+            return False
+        try:
+            return bool(
+                str(row["id"]) == candidate.exact_turn_id
+                and str(row["session_id"]) == candidate.session_id
+                and str(row["workspace_id"]) == candidate.workspace_id
+                and str(row["conversation_scope_kind"])
+                == ConversationScopeKind.ROOT.value
+                and str(row["status"]) == TurnStatus.RUNNING.value
+                and str(row["initial_entry_id"]) == candidate.exact_initial_entry_id
+                and str(row["current_context_binding_revision_id"])
+                == candidate.exact_context_binding_revision_id
+                and self._permission_from_row(row) == candidate.permission_snapshot
+            )
+        except (KeyError, TypeError, ValueError):
+            return False
+
+    @staticmethod
+    def _queued_root_revision_matches_candidate(
+        row: object,
+        candidate: PreparedQueuedRootTurnAdmission,
+        entry: object,
+    ) -> bool:
+        if row is None or entry is None:
+            return False
+        try:
+            return bool(
+                str(row["id"]) == candidate.exact_context_binding_revision_id
+                and str(row["session_id"]) == candidate.session_id
+                and str(row["turn_id"]) == candidate.exact_turn_id
+                and int(row["revision_ordinal"]) == 0
+                and str(row["base_kind"]) == "FULL_HISTORY"
+                and int(row["source_through_sequence"])
+                == int(entry["entry_sequence"]) - 1
+            )
+        except (KeyError, TypeError, ValueError):
+            return False
+
+    def _queued_root_entry_matches_candidate(
+        self,
+        row: object,
+        candidate: PreparedQueuedRootTurnAdmission,
+    ) -> bool:
+        if row is None:
+            return False
+        try:
+            return bool(
+                str(row["id"]) == candidate.exact_initial_entry_id
+                and str(row["session_id"]) == candidate.session_id
+                and str(row["workspace_id"]) == candidate.workspace_id
+                and str(row["turn_id"]) == candidate.exact_turn_id
+                and str(row["entry_kind"]) == EntryKind.USER_MESSAGE.value
+                and str(row["conversation_scope_kind"])
+                == ConversationScopeKind.ROOT.value
+                and row["scope_subagent_task_id"] is None
+                and self._content_from_row(row) == candidate.content
+                and (
+                    None
+                    if row["source_plan_workflow_id"] is None
+                    else str(row["source_plan_workflow_id"])
+                )
+                == candidate.pending_plan_handoff_workflow_id
+                and (
+                    None
+                    if row["source_plan_interaction_id"] is None
+                    else str(row["source_plan_interaction_id"])
+                )
+                == candidate.pending_plan_handoff_interaction_id
+                and (
+                    None
+                    if row["source_plan_handoff_kind"] is None
+                    else str(row["source_plan_handoff_kind"])
+                )
+                == candidate.pending_plan_handoff_kind
+            )
+        except (KeyError, TypeError, ValueError):
+            return False
 
     def _reject_terminal_prompt_steer_heads(
         self,
@@ -864,8 +1167,7 @@ class _PromptOperations:
             if (
                 str(target["current_context_binding_revision_id"])
                 != fence.context_binding_fact.binding_revision_id
-                or self._permission_from_row(target)
-                != fence.run_permission_snapshot
+                or self._permission_from_row(target) != fence.run_permission_snapshot
             ):
                 raise ConversationKernelConflict(
                     "prepared steer canonical control base drifted"
@@ -887,14 +1189,12 @@ class _PromptOperations:
                 if workflow is None or (
                     str(workflow["id"]) != expected_workflow.workflow_id
                     or str(workflow["session_id"]) != expected_workflow.session_id
-                    or str(workflow["workspace_id"])
-                    != expected_workflow.workspace_id
+                    or str(workflow["workspace_id"]) != expected_workflow.workspace_id
                     or int(workflow["workflow_ordinal"])
                     != expected_workflow.workflow_ordinal
                     or str(workflow["status"])
                     != expected_workflow.workflow_status.value
-                    or str(workflow["entered_by"])
-                    != expected_workflow.entered_by.value
+                    or str(workflow["entered_by"]) != expected_workflow.entered_by.value
                     or str(workflow["resume_permission_mode"])
                     != expected_workflow.resume_permission_mode.value
                     or str(workflow["permission_contract_id"])

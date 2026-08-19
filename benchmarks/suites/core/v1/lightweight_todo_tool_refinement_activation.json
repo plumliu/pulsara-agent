@@ -1,0 +1,129 @@
+{
+  "schema_version": "lightweight-todo-tool-refinement-activation.v1",
+  "status": "activated",
+  "generated_at_utc": "2026-08-19T06:50:10Z",
+  "captured_head": "7a61b8d6c1789f4cb730aa2bcbf910cd56fd9cde",
+  "working_tree_semantics": "The refinement was implemented and verified in the current uncommitted worktree. Pre-existing user document edits were preserved. No files were staged, committed, or pushed.",
+  "source_documents": {
+    "PULSARA_LIGHTWEIGHT_TODO_TOOL_REFINEMENT_IMPLEMENTATION_SPEC.zh.md_at_start": "3c5151fcf47aaf479253ba184d44b9440f86fcb546435fe411a014166776d2b0",
+    "PULSARA_LIGHTWEIGHT_TODO_TOOL_REFINEMENT_IMPLEMENTATION_SPEC.zh.md_after_activation_update": "5f62d4521e5c582c83fea7f4b90acff0fc58a9b60ec4c4f4716a5bdaff80179b",
+    "POST_HARD_CUT_PRODUCT_CAPABILITY_GAP_INDEX.zh.md_at_start": "a39f23b8a6a1437cb237ff1e83e2302fbf3e20ea31ed73aef830b3cf4fe6030b",
+    "POST_HARD_CUT_PRODUCT_CAPABILITY_GAP_INDEX.zh.md_after_activation_update": "05344443601214e45e829f2c530345575c5cac267724d35eddaa593181abebd5",
+    "README.md_after_activation_update": "c9d7d5c84b6f1999afa92c9a48c750cf59b0c2f598da8ed8b32f0fb99b865646",
+    "README.zh-CN.md_after_activation_update": "f46ed03c6bf70f74cd644229369c7f86d418441aff1b2d6198176347e6d648e9"
+  },
+  "post_activation_code_sha256": {
+    "tools/builtins/todo.py": "e4a3b7a6ca1600234e3599936344f30024d7b8477cc9c8ce90dac4336e474b24",
+    "primitives/todo.py": "be2c39086d0a04205e21fe40be1a074b41fac83c48682d356c393b1f10c0e6fb",
+    "conversation_kernel/todo_runtime.py": "48082ebef3819880b11760e982b37cb188b7c46248226cdfff2010ba60581fea",
+    "conversation_kernel/runner.py": "5f1fbdd0b7e87934f6db168a3783215116942c94d6dd84a55cb597f8db642266",
+    "conversation_kernel/host.py": "8d7710054831487f6a61222fcd6cd96609da88b15356113af49615be6aa5f2cc",
+    "conversation_kernel/subagent.py": "07728b65a0dc9685a8b2917fee005aae479d574ff4723b5a12f1931fa264ed2f",
+    "conversation_kernel/tool_runtime.py": "e33bf0010049358ab668d0ccbf0f79d95c81e4da1647801ece67195e3e066013",
+    "conversation_kernel/_repository/prompts.py": "c73f23cddd03738839d5583ed4f83c2efc8b29e52c49ecef54ff870587e8b9ef",
+    "conversation_kernel/steer.py": "f11776ab29f7050f18291afbc2bd5e2f64807a09ac8ae1e94cc43fda9e37396d",
+    "ports/live_agent_event.py": "3f84dc8e1932daa53de23fc3dbfe168da7cb30e870c4e553c39603170f7005f1",
+    "conversation_kernel/live.py": "8ec2ea5dc835a910b0dc16fda2775a0d817841e1c74cfb80032728ce2cace503",
+    "terminal_protocol/schema/terminal_kernel_v3.proto": "c44a6673d760cbb9cccdec8e41f6b202df13152b2dd93d26cef60a2f3bd7ff1b",
+    "terminal_protocol/v3_gateway.py": "21c8ba15cfbd738c8ea77b87c52123edaba57ee0bf1ec5d364049a3f2532288b",
+    "clients/terminal/internal/kernelapp/model.go": "99bc000aaca81e490745842119f039a11112af097ca733d507c67863d5f2056d"
+  },
+  "todo_contract": {
+    "mutation": "one complete immutable snapshot replacement",
+    "statuses": [
+      "pending",
+      "in_progress",
+      "completed"
+    ],
+    "maximum_items": 64,
+    "maximum_item_utf8_bytes": 512,
+    "maximum_snapshot_canonical_json_bytes": 32768,
+    "maximum_in_progress_items": 1,
+    "empty_items": "explicit clear",
+    "scope": "exact ROOT or SUBAGENT_TASK logical run",
+    "authority": "single Host-owned process-local TodoRunStateOwner",
+    "durability": "advisory; intentionally lost on Host replacement",
+    "model_visible_result": "bounded count/status acknowledgement without item text or artifact",
+    "strict_prefix": "TODO changes never mutate BASE_SYSTEM, tools, or an installed message; ordinary canonical tool call/result facts append only"
+  },
+  "admission_and_settlement": {
+    "root_finalizer": "direct fast path, direct ACK confirmation, and queued exact confirmation share one shielded idempotent activation finalizer",
+    "queued_confirmation": "stable prepared candidate with FULL | NONE | CONFLICT stateless confirmation",
+    "child_birth": "revision-0 TODO run exists only after exact initial child admission FULL",
+    "local_effect_outcomes": [
+      "INSTALLED",
+      "DISCARDED"
+    ],
+    "closing": "Host close stops queued admission, drains active and pending settlement owners, installs any canonical FULL replacement, then closes each exact run at final revision plus one",
+    "unknown_effect": false
+  },
+  "post_review_closure": {
+    "direct_admission_cancellation": "After a direct admission FULL, cancellation during the shielded TODO finalizer drains the finalizer and exact turn interruption before cancellation is re-raised.",
+    "close_pending_tokens": "Host and child close join the exact runner and shielded result settlement first, then close_run mechanically rejects any ownerless retained token; there is no unbounded condition wait.",
+    "queued_mutation_surface": "The legacy caller-supplied consume_prompt_head mutation was physically removed. Production and retained tests use only prepared consume plus stateless FULL | NONE | CONFLICT confirmation.",
+    "host_replacement_continuation": "Plan review, Terminal observation, and external-result continuations bind an existing TODO run when present but remain available after Host-local TODO state is intentionally lost; the same-Host automatic successor path remains strict."
+  },
+  "live_and_compaction_boundary": {
+    "new_live_event": "TodoSnapshotUpdated",
+    "event_shape": "one atomic full snapshot or CLOSED projection",
+    "initial_attach_and_gap": "establish live baseline first, then replace from current Host owner inventory",
+    "current_state_from_event_replay": false,
+    "round5b_implemented": false,
+    "round5b_retained_interface": "read-only actionable pending/in_progress snapshot with UNTRUSTED_OBSERVATION trust"
+  },
+  "deterministic_verification": {
+    "pytest_collection": "737_tests_collected_by_full_run",
+    "lightweight_todo_targeted": "26_passed_in_0.75s",
+    "retained_round3_round3_1_round5a_round5a1_round7_round7_1_protocol_and_subagent": "243_passed",
+    "architecture_round6_round8_retained": "105_passed",
+    "host_and_lifetime_retained": "20_passed",
+    "full_pytest": "737_passed_in_120.67s_after_post-review_closure",
+    "post_review_adjacent": "39_passed_in_5.19s; 4_PostgreSQL_cases_passed_in_1.50s",
+    "post_review_full_coverage": "737 tests passed in one clean run after closing the Host-replacement continuation finding; no failures, skips, or xfails were added.",
+    "postgres_marker": "185_passed_549_deselected_in_90.26s",
+    "ruff": "passed_all_repository_files",
+    "compileall": "passed_src_tests_tools",
+    "terminal_protocol_generation": "passed",
+    "go_test": "passed_all_packages",
+    "go_vet": "passed",
+    "go_mod_verify": "passed_all_modules",
+    "uv_lock_check": "passed",
+    "git_diff_check": "passed",
+    "new_skip_or_xfail": 0
+  },
+  "diff": {
+    "production_tracked_additions": 2590,
+    "production_tracked_deletions": 710,
+    "production_new_module_additions": 766,
+    "production_total_additions": 3356,
+    "production_total_deletions": 710,
+    "production_net_lines": 2646,
+    "generated_protocol_code_included": true
+  },
+  "oracles": {
+    "committed_event_types": 31,
+    "live_event_types": 24,
+    "subject_slots": 13,
+    "append_guards": 2,
+    "product_relations": 25,
+    "durable_job_handlers": 1,
+    "new_product_relations": 0,
+    "new_committed_events": 0,
+    "new_live_events": 1,
+    "new_subject_slots": 0,
+    "new_append_guards": 0,
+    "new_durable_jobs": 0
+  },
+  "non_goals": [
+    "Round 5B compaction, summary, snapshot adoption, or context rebase",
+    "durable TODO relation, event, job, receipt, replay, or recovery",
+    "cross-Host TODO restoration",
+    "Plan workflow or hierarchical task-graph replacement",
+    "hidden TODO reminders or TODO compiler source"
+  ],
+  "secret_scan": {
+    "api_key_or_dsn_recorded": false,
+    "full_prompt_or_tool_result_recorded": false,
+    "todo_item_text_recorded": false
+  }
+}

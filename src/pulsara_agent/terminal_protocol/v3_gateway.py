@@ -38,6 +38,7 @@ from pulsara_agent.ports.live_agent_event import (
     ThinkingDeltaPayload,
     ThinkingEndPayload,
     ThinkingStartPayload,
+    TodoSnapshotUpdatedPayload,
     ToolCallDeltaPayload,
     ToolCallEndPayload,
     ToolCallStartPayload,
@@ -76,7 +77,7 @@ from pulsara_agent.terminal_protocol.generated_v3 import terminal_kernel_v3_pb2 
 PROTOCOL_MAJOR = 3
 PROTOCOL_MINOR = 0
 PROTOCOL_SCHEMA_FINGERPRINT = (
-    "sha256:718ceb75d0261f8916ff6604b980345fdabd7c8e51ff3e065c1960f9c4d72b44"
+    "sha256:c44a6673d760cbb9cccdec8e41f6b202df13152b2dd93d26cef60a2f3bd7ff1b"
 )
 MAXIMUM_FRAME_BYTES = 8 << 20
 MAXIMUM_OBSERVATION_WAIT_MS = STAGE2_LIMITS.committed_observation_hard_wait_ms
@@ -115,9 +116,12 @@ def install_fingerprint(namespace: str, message: Message, field: str) -> str:
     clone = type(message)()
     clone.CopyFrom(message)
     setattr(clone, field, "")
-    value = "sha256:" + sha256(
-        namespace.encode() + b"\0" + clone.SerializeToString(deterministic=True)
-    ).hexdigest()
+    value = (
+        "sha256:"
+        + sha256(
+            namespace.encode() + b"\0" + clone.SerializeToString(deterministic=True)
+        ).hexdigest()
+    )
     setattr(message, field, value)
     return value
 
@@ -213,9 +217,7 @@ class TerminalKernelProtocolServer:
             if state.host_session is not None and state.live_observer_id:
                 state.host_session.live_bus.detach(state.live_observer_id)
             if state.host_session is not None and state.live_control_subscriber_id:
-                state.host_session.live_control.detach(
-                    state.live_control_subscriber_id
-                )
+                state.host_session.live_control.detach(state.live_control_subscriber_id)
             if (
                 state.host_session is not None
                 and state.granted_role == wire.ATTACHMENT_ROLE_CONTROLLER
@@ -329,7 +331,9 @@ class TerminalKernelProtocolServer:
             live_revision=state.live_revision,
             live_snapshot=_live_snapshot_to_wire(live_snapshot),
         )
-        install_fingerprint("terminal-v3-hello-accepted:v1", accepted, "result_fingerprint")
+        install_fingerprint(
+            "terminal-v3-hello-accepted:v1", accepted, "result_fingerprint"
+        )
         return wire.ServerFrame(hello=accepted)
 
     async def _snapshot(
@@ -411,7 +415,9 @@ class TerminalKernelProtocolServer:
         return wire.ServerFrame(
             live_control_snapshot=wire.LiveControlSnapshotResponse(
                 request_id=request.request_id,
-                snapshot=_live_control_snapshot_to_wire(snapshot),
+                snapshot=_live_control_snapshot_to_wire(
+                    snapshot, state.host_session.current_todo_snapshots()
+                ),
             )
         )
 
@@ -445,7 +451,9 @@ class TerminalKernelProtocolServer:
             live = state.host_session.live_bus.observe(
                 state.live_observer_id,
                 after_revision=request.after_live_revision,
-                maximum_events=max(1, min(request.maximum_events, MAXIMUM_OBSERVATION_EVENTS)),
+                maximum_events=max(
+                    1, min(request.maximum_events, MAXIMUM_OBSERVATION_EVENTS)
+                ),
             )
             if batch.gap_reason is not None:
                 return wire.ServerFrame(
@@ -482,10 +490,11 @@ class TerminalKernelProtocolServer:
                         ),
                     )
                 )
-            live_wire = tuple(_live_to_wire(state.live_epoch, item) for item in live.events)
+            live_wire = tuple(
+                _live_to_wire(state.live_epoch, item) for item in live.events
+            )
             settlements = tuple(
-                _settlement_to_wire(state.live_epoch, item)
-                for item in live.settlements
+                _settlement_to_wire(state.live_epoch, item) for item in live.settlements
             )
             if not state.live_control_subscriber_id:
                 return wire.ServerFrame(
@@ -527,7 +536,9 @@ class TerminalKernelProtocolServer:
                         ),
                     )
                 )
-            control_wire = tuple(_live_control_event_to_wire(item) for item in control.events)
+            control_wire = tuple(
+                _live_control_event_to_wire(item) for item in control.events
+            )
             if (
                 batch.projections
                 or live_wire
@@ -567,13 +578,10 @@ class TerminalKernelProtocolServer:
             state.granted_role != wire.ATTACHMENT_ROLE_CONTROLLER
         ):
             return _error(request.request_id, "CONTROLLER_REQUIRED")
-        requested_permission = _permission_from_wire(
-            request.requested_permission_mode
-        )
+        requested_permission = _permission_from_wire(request.requested_permission_mode)
         if (
             request.command_kind not in (wire.SUBMIT_PROMPT, wire.ENTER_PLAN)
-            and request.requested_permission_mode
-            != wire.PERMISSION_MODE_UNSPECIFIED
+            and request.requested_permission_mode != wire.PERMISSION_MODE_UNSPECIFIED
         ):
             return _error(request.request_id, "PERMISSION_FIELD_NOT_ALLOWED")
         plan_command = request.command_kind in (
@@ -582,8 +590,7 @@ class TerminalKernelProtocolServer:
             wire.FORCE_EXIT_PLAN,
         )
         if not plan_command and (
-            request.target_plan_workflow_id
-            or request.expected_plan_workflow_revision
+            request.target_plan_workflow_id or request.expected_plan_workflow_revision
         ):
             return _error(request.request_id, "PLAN_COMMAND_FIELDS_NOT_ALLOWED")
         if request.command_kind == wire.SUBMIT_PROMPT:
@@ -778,9 +785,7 @@ class TerminalKernelProtocolServer:
                 outcome = await state.host_session.resolve_plan_question(
                     command_id=request.command_id,
                     workflow_id=request.workflow_id,
-                    expected_workflow_revision=(
-                        request.expected_workflow_revision
-                    ),
+                    expected_workflow_revision=(request.expected_workflow_revision),
                     interaction_id=request.interaction_id,
                     answer=answer,
                     write_expected_writer_generation=(
@@ -800,14 +805,11 @@ class TerminalKernelProtocolServer:
                     if request.draft.HasField("feedback")
                     else None
                 )
-                if (
-                    decision
-                    in {PlanDraftDecision.APPROVE, PlanDraftDecision.CANCEL}
-                    and request.draft.HasField("feedback")
-                ):
-                    return _error(
-                        request.request_id, "PLAN_DRAFT_FEEDBACK_NOT_ALLOWED"
-                    )
+                if decision in {
+                    PlanDraftDecision.APPROVE,
+                    PlanDraftDecision.CANCEL,
+                } and request.draft.HasField("feedback"):
+                    return _error(request.request_id, "PLAN_DRAFT_FEEDBACK_NOT_ALLOWED")
                 if feedback is not None and len(feedback.encode("utf-8")) > 32 * 1024:
                     return _error(request.request_id, "PLAN_DRAFT_FEEDBACK_INVALID")
                 # Missing and present-empty REVISE feedback have one semantic
@@ -817,9 +819,7 @@ class TerminalKernelProtocolServer:
                 outcome = await state.host_session.resolve_plan_draft_review(
                     command_id=request.command_id,
                     workflow_id=request.workflow_id,
-                    expected_workflow_revision=(
-                        request.expected_workflow_revision
-                    ),
+                    expected_workflow_revision=(request.expected_workflow_revision),
                     interaction_id=request.interaction_id,
                     decision=decision,
                     feedback=feedback,
@@ -1062,7 +1062,10 @@ class TerminalKernelProtocolServer:
         await writer.drain()
 
     def _fits_frame(self, frame: wire.ServerFrame) -> bool:
-        return len(frame.SerializeToString(deterministic=True)) <= self._maximum_frame_bytes
+        return (
+            len(frame.SerializeToString(deterministic=True))
+            <= self._maximum_frame_bytes
+        )
 
 
 def _live_to_wire(owner_epoch: int, event: object) -> wire.LiveEventProjection:
@@ -1091,9 +1094,7 @@ def _live_to_wire(owner_epoch: int, event: object) -> wire.LiveEventProjection:
 def _live_payload_to_wire(payload: object) -> wire.LiveEventPayload:
     if isinstance(payload, TextStartPayload):
         return wire.LiveEventPayload(
-            text_start=wire.LiveTextStartPayload(
-                block_identity=payload.block_identity
-            )
+            text_start=wire.LiveTextStartPayload(block_identity=payload.block_identity)
         )
     if isinstance(payload, TextDeltaPayload):
         return wire.LiveEventPayload(
@@ -1276,6 +1277,25 @@ def _live_payload_to_wire(payload: object) -> wire.LiveEventPayload:
                 summary_digest=payload.summary_digest,
             )
         )
+    if isinstance(payload, TodoSnapshotUpdatedPayload):
+        return wire.LiveEventPayload(
+            todo_snapshot_updated=wire.LiveTodoSnapshotUpdatedPayload(
+                todo_run_id=payload.todo_run_id,
+                todo_revision=payload.todo_revision,
+                disposition=payload.disposition,
+                ordered_items=tuple(
+                    wire.LiveTodoItemProjection(
+                        ordinal=item.ordinal,
+                        text=item.text,
+                        status=item.status,
+                    )
+                    for item in payload.ordered_items
+                ),
+                pending_count=payload.pending_count,
+                in_progress_count=payload.in_progress_count,
+                completed_count=payload.completed_count,
+            )
+        )
     raise TypeError("live payload vocabulary is not closed")
 
 
@@ -1316,9 +1336,7 @@ def _settlement_to_wire(
             wire.ROOT if settlement.scope_kind == "ROOT" else wire.SUBAGENT_TASK
         ),
         scope_subagent_task_id=settlement.scope_subagent_task_id or "",
-        channel_kind=getattr(
-            wire, f"LIVE_CHANNEL_{settlement.channel_kind.value}"
-        ),
+        channel_kind=getattr(wire, f"LIVE_CHANNEL_{settlement.channel_kind.value}"),
         channel_tool_call_id=settlement.channel_tool_call_id or "",
         channel_attempt_id=settlement.channel_attempt_id or "",
         generation_id=settlement.generation_id,
@@ -1336,11 +1354,38 @@ def _interaction_to_wire(value: CurrentInteractionView) -> wire.LiveInteractionV
     )
 
 
-def _live_control_snapshot_to_wire(snapshot: object) -> wire.SessionLiveControlSnapshot:
+def _live_control_snapshot_to_wire(
+    snapshot: object, todo_snapshots: tuple[object, ...]
+) -> wire.SessionLiveControlSnapshot:
     result = wire.SessionLiveControlSnapshot(
         session_id=snapshot.session_id,
         owner_epoch=snapshot.owner_epoch,
         live_revision=snapshot.revision,
+        current_todos=tuple(
+            wire.LiveTodoRunSnapshot(
+                todo_run_id=item.run_identity.todo_run_id,
+                todo_revision=item.revision,
+                scope_kind=(
+                    wire.ROOT
+                    if item.run_identity.scope_kind.value == "ROOT"
+                    else wire.SUBAGENT_TASK
+                ),
+                scope_subagent_task_id=item.run_identity.subagent_task_id or "",
+                disposition="ACTIVE" if item.ordered_items else "CLEARED",
+                ordered_items=tuple(
+                    wire.LiveTodoItemProjection(
+                        ordinal=todo.ordinal,
+                        text=todo.text,
+                        status=todo.status.value,
+                    )
+                    for todo in item.ordered_items
+                ),
+                pending_count=item.pending_count,
+                in_progress_count=item.in_progress_count,
+                completed_count=item.completed_count,
+            )
+            for item in todo_snapshots
+        ),
     )
     if snapshot.current_interaction is not None:
         result.current_interaction.CopyFrom(

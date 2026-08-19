@@ -163,6 +163,200 @@ class PromptIngressConfirmation:
             raise ValueError("prompt ingress confirmation conflict union is invalid")
 
 
+@dataclass(frozen=True, slots=True)
+class PreparedQueuedRootTurnAdmission:
+    """Stable candidate for consuming one future-turn queue head.
+
+    PostgreSQL remains the queue/turn authority.  This carrier only makes a
+    single physical mutation confirmable after an unknown acknowledgement.
+    """
+
+    session_id: str
+    workspace_id: str
+    queue_item_id: str
+    queue_sequence: int
+    command_id: str
+    client_submission_id: str
+    content: CanonicalContent = field(repr=False)
+    permission_snapshot: FrozenRunPermissionSnapshot
+    pending_plan_handoff_workflow_id: str | None
+    pending_plan_handoff_interaction_id: str | None
+    pending_plan_handoff_kind: str | None
+    exact_turn_id: str
+    exact_initial_entry_id: str
+    exact_context_binding_revision_id: str
+    occurred_at: datetime
+    actor_id: str
+    prompt_consumed_occurrence: CommittedEventDraft
+    user_message_accepted_occurrence: CommittedEventDraft
+    candidate_fingerprint: str
+
+    def __post_init__(self) -> None:
+        if (
+            not all(
+                (
+                    self.session_id,
+                    self.workspace_id,
+                    self.queue_item_id,
+                    self.command_id,
+                    self.client_submission_id,
+                    self.exact_turn_id,
+                    self.exact_initial_entry_id,
+                    self.exact_context_binding_revision_id,
+                    self.actor_id,
+                )
+            )
+            or self.queue_sequence < 1
+        ):
+            raise ValueError("queued ROOT admission identity is incomplete")
+        handoff_values = (
+            self.pending_plan_handoff_workflow_id,
+            self.pending_plan_handoff_interaction_id,
+            self.pending_plan_handoff_kind,
+        )
+        if any(value is None for value in handoff_values) != all(
+            value is None for value in handoff_values
+        ):
+            raise ValueError("queued ROOT admission Plan handoff union is invalid")
+        if self.candidate_fingerprint != queued_root_turn_admission_fingerprint(self):
+            raise ValueError("queued ROOT admission fingerprint mismatch")
+
+
+def queued_root_turn_admission_fingerprint(
+    candidate: PreparedQueuedRootTurnAdmission,
+) -> str:
+    return context_fingerprint(
+        "pulsara:prepared-queued-root-turn-admission:v1",
+        {
+            "session_id": candidate.session_id,
+            "workspace_id": candidate.workspace_id,
+            "queue_item_id": candidate.queue_item_id,
+            "queue_sequence": candidate.queue_sequence,
+            "command_id": candidate.command_id,
+            "client_submission_id": candidate.client_submission_id,
+            "content": _content_manifest(candidate.content),
+            "permission": candidate.permission_snapshot.snapshot_fingerprint,
+            "plan_handoff": {
+                "workflow_id": candidate.pending_plan_handoff_workflow_id,
+                "interaction_id": candidate.pending_plan_handoff_interaction_id,
+                "kind": candidate.pending_plan_handoff_kind,
+            },
+            "turn_id": candidate.exact_turn_id,
+            "entry_id": candidate.exact_initial_entry_id,
+            "context_binding_revision_id": (
+                candidate.exact_context_binding_revision_id
+            ),
+            "prompt_consumed": _event_manifest(candidate.prompt_consumed_occurrence),
+            "user_message_accepted": _event_manifest(
+                candidate.user_message_accepted_occurrence
+            ),
+        },
+    )
+
+
+def build_queued_root_turn_admission(
+    *,
+    session_id: str,
+    workspace_id: str,
+    queue_item_id: str,
+    queue_sequence: int,
+    command_id: str,
+    client_submission_id: str,
+    content: CanonicalContent,
+    permission_snapshot: FrozenRunPermissionSnapshot,
+    pending_plan_handoff_workflow_id: str | None,
+    pending_plan_handoff_interaction_id: str | None,
+    pending_plan_handoff_kind: str | None,
+    occurred_at: datetime,
+    actor_id: str,
+) -> PreparedQueuedRootTurnAdmission:
+    turn_id = _stable_id("turn", session_id, queue_item_id)
+    entry_id = _stable_id("entry", session_id, queue_item_id)
+    revision_id = _stable_id("context-revision", session_id, queue_item_id)
+    consumed = CommittedEventDraft(
+        event_id=_stable_id(
+            "event", queue_item_id, CommittedEventType.PROMPT_CONSUMED.value
+        ),
+        event_type=CommittedEventType.PROMPT_CONSUMED,
+        subject=CommittedEventSubject(SubjectSlot.QUEUE_ITEM, queue_item_id),
+        actor_kind="runtime",
+        actor_id=actor_id,
+        sensitivity_class="PUBLIC",
+        projection_profile="DEFAULT",
+        occurred_at=occurred_at,
+        payload={"entry_id": entry_id},
+    )
+    accepted = CommittedEventDraft(
+        event_id=_stable_id(
+            "event", entry_id, CommittedEventType.USER_MESSAGE_ACCEPTED.value
+        ),
+        event_type=CommittedEventType.USER_MESSAGE_ACCEPTED,
+        subject=CommittedEventSubject(SubjectSlot.ENTRY, entry_id),
+        actor_kind="human",
+        actor_id=actor_id,
+        sensitivity_class="PUBLIC",
+        projection_profile="DEFAULT",
+        occurred_at=occurred_at,
+        payload={"source": "PROMPT_QUEUE"},
+    )
+    values = {
+        "session_id": session_id,
+        "workspace_id": workspace_id,
+        "queue_item_id": queue_item_id,
+        "queue_sequence": queue_sequence,
+        "command_id": command_id,
+        "client_submission_id": client_submission_id,
+        "content": content,
+        "permission_snapshot": permission_snapshot,
+        "pending_plan_handoff_workflow_id": pending_plan_handoff_workflow_id,
+        "pending_plan_handoff_interaction_id": pending_plan_handoff_interaction_id,
+        "pending_plan_handoff_kind": pending_plan_handoff_kind,
+        "exact_turn_id": turn_id,
+        "exact_initial_entry_id": entry_id,
+        "exact_context_binding_revision_id": revision_id,
+        "occurred_at": occurred_at,
+        "actor_id": actor_id,
+        "prompt_consumed_occurrence": consumed,
+        "user_message_accepted_occurrence": accepted,
+    }
+    provisional = PreparedQueuedRootTurnAdmission.__new__(
+        PreparedQueuedRootTurnAdmission
+    )
+    for name, value in values.items():
+        object.__setattr__(provisional, name, value)
+    object.__setattr__(provisional, "candidate_fingerprint", "")
+    return PreparedQueuedRootTurnAdmission(
+        **values,
+        candidate_fingerprint=queued_root_turn_admission_fingerprint(provisional),
+    )
+
+
+class QueuedRootTurnAdmissionConfirmationKind(StrEnum):
+    FULL = "FULL"
+    NONE = "NONE"
+    CONFLICT = "CONFLICT"
+
+
+@dataclass(frozen=True, slots=True)
+class QueuedRootTurnAdmissionAccepted:
+    entry_id: str
+    turn_id: str
+    entry_sequence: int
+    event_sequence: int
+
+
+@dataclass(frozen=True, slots=True)
+class QueuedRootTurnAdmissionConfirmation:
+    kind: QueuedRootTurnAdmissionConfirmationKind
+    accepted: QueuedRootTurnAdmissionAccepted | None = None
+
+    def __post_init__(self) -> None:
+        if (self.kind is QueuedRootTurnAdmissionConfirmationKind.FULL) != (
+            self.accepted is not None
+        ):
+            raise ValueError("queued ROOT confirmation union is invalid")
+
+
 def build_prompt_ingress_command(
     *,
     session_id: str,
@@ -538,8 +732,7 @@ class AcceptedSteerDispatchBatch:
             )
         )
         if any(
-            item.user_steer_event_sequence
-            != item.prompt_consumed_event_sequence + 1
+            item.user_steer_event_sequence != item.prompt_consumed_event_sequence + 1
             for item in self.entries
         ) or event_sequences != tuple(sorted(set(event_sequences))):
             raise ValueError("accepted steer batch event order is invalid")
@@ -570,9 +763,7 @@ class SteerSuffixAdmissionQuote:
     estimator_fingerprint: str
     predecessor_prefix_fingerprint: str | None
     memory_recall_reservation: "MemorySourceInvalidationReservation | None"
-    memory_response_preference_reservation: (
-        "MemorySourceInvalidationReservation | None"
-    )
+    memory_response_preference_reservation: "MemorySourceInvalidationReservation | None"
     quote_fingerprint: str
 
     def __post_init__(self) -> None:
@@ -614,7 +805,10 @@ class SteerSuffixAdmissionQuote:
             item.invalidation_epoch_bytes_ceiling for item in reservations
         ) > (64 << 20):
             raise ValueError("steer quote epoch reservation is invalid")
-        if any(item.estimator_fingerprint != self.estimator_fingerprint for item in reservations):
+        if any(
+            item.estimator_fingerprint != self.estimator_fingerprint
+            for item in reservations
+        ):
             raise ValueError("steer quote memory estimator differs")
         if (
             self.memory_recall_reservation is not None
@@ -716,13 +910,17 @@ class MemorySourceInvalidationReservation:
         ):
             if not value.startswith("sha256:"):
                 raise ValueError("memory invalidation fingerprint is invalid")
-        if self.invalidation_provider_item_ceiling != 1 or min(
-            self.invalidation_encoded_utf8_bytes_ceiling,
-            self.invalidation_input_token_ceiling,
-            self.invalidation_epoch_bytes_ceiling,
-            self.full_encoded_utf8_bytes,
-            self.full_input_token_cost,
-        ) < 0:
+        if (
+            self.invalidation_provider_item_ceiling != 1
+            or min(
+                self.invalidation_encoded_utf8_bytes_ceiling,
+                self.invalidation_input_token_ceiling,
+                self.invalidation_epoch_bytes_ceiling,
+                self.full_encoded_utf8_bytes,
+                self.full_input_token_cost,
+            )
+            < 0
+        ):
             raise ValueError("memory invalidation quote is outside its bound")
         if self.reservation_fingerprint != memory_invalidation_reservation_fingerprint(
             self
@@ -1275,6 +1473,7 @@ __all__ = [
     "MAXIMUM_STEER_PLANNING_CANONICAL_WORK_BYTES",
     "PendingPromptSteerFact",
     "PreparedPromptIngressCommand",
+    "PreparedQueuedRootTurnAdmission",
     "PreparedSteerCanonicalBaseFence",
     "PreparedSteerConsumptionCandidate",
     "PreparedSteerPlanConflictInterruption",
@@ -1283,6 +1482,9 @@ __all__ = [
     "PromptIngressConfirmation",
     "PromptIngressConfirmationKind",
     "PromptIngressWriteRejection",
+    "QueuedRootTurnAdmissionAccepted",
+    "QueuedRootTurnAdmissionConfirmation",
+    "QueuedRootTurnAdmissionConfirmationKind",
     "SteerConsumptionConfirmation",
     "SteerConsumptionConfirmationKind",
     "SteerPlanConflictConfirmation",
@@ -1291,6 +1493,7 @@ __all__ = [
     "SteerResourceRejectionConfirmationKind",
     "SteerSuffixAdmissionQuote",
     "build_prompt_ingress_command",
+    "build_queued_root_turn_admission",
     "build_steer_canonical_base_fence",
     "build_pending_prompt_steer_fact",
     "build_accepted_steer_dispatch_batch",

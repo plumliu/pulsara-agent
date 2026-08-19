@@ -92,6 +92,7 @@ enum LiveEventType {
   TERMINAL_MONITOR_OBSERVATION = 21;
   TERMINAL_MONITOR_CLOSED = 22;
   SUBAGENT_PROGRESS = 23;
+  TODO_SNAPSHOT_UPDATED = 24;
 }
 
 enum ConversationScopeKind {
@@ -449,6 +450,15 @@ message LiveSubagentProgressPayload {
   string task_id = 1; string status = 2; string public_summary = 3;
   uint64 summary_utf8_bytes = 4; string summary_digest = 5;
 }
+message LiveTodoItemProjection {
+  uint32 ordinal = 1; string text = 2; string status = 3;
+}
+message LiveTodoSnapshotUpdatedPayload {
+  string todo_run_id = 1; uint64 todo_revision = 2; string disposition = 3;
+  repeated LiveTodoItemProjection ordered_items = 4;
+  uint32 pending_count = 5; uint32 in_progress_count = 6;
+  uint32 completed_count = 7;
+}
 
 message LiveEventPayload {
   oneof payload {
@@ -475,6 +485,7 @@ message LiveEventPayload {
     LiveTerminalMonitorObservationPayload terminal_monitor_observation = 21;
     LiveTerminalMonitorClosedPayload terminal_monitor_closed = 22;
     LiveSubagentProgressPayload subagent_progress = 23;
+    LiveTodoSnapshotUpdatedPayload todo_snapshot_updated = 24;
   }
 }
 
@@ -539,11 +550,24 @@ message LiveInteractionView {
   string expires_at_utc = 5;
 }
 
+message LiveTodoRunSnapshot {
+  string todo_run_id = 1;
+  uint64 todo_revision = 2;
+  ConversationScopeKind scope_kind = 3;
+  string scope_subagent_task_id = 4;
+  string disposition = 5;
+  repeated LiveTodoItemProjection ordered_items = 6;
+  uint32 pending_count = 7;
+  uint32 in_progress_count = 8;
+  uint32 completed_count = 9;
+}
+
 message SessionLiveControlSnapshot {
   string session_id = 1;
   uint64 owner_epoch = 2;
   uint64 live_revision = 3;
   LiveInteractionView current_interaction = 4;
+  repeated LiveTodoRunSnapshot current_todos = 5;
 }
 
 enum LiveControlEventKind {

@@ -1,6 +1,6 @@
 """Closed conversation-kernel event vocabulary and subject/guard descriptor.
 
-The descriptor is the single Python owner for the exact 31/23/13/2 oracle.
+The descriptor is the single Python owner for the exact 31/24/13/2 oracle.
 SQL checks, repository validation, protocol projection mapping, and generated
 test fixtures consume these values; callers cannot register new entries.
 """
@@ -90,6 +90,7 @@ class LiveEventType(StrEnum):
     TERMINAL_MONITOR_OBSERVATION = "TerminalMonitorObservation"
     TERMINAL_MONITOR_CLOSED = "TerminalMonitorClosed"
     SUBAGENT_PROGRESS = "SubagentProgress"
+    TODO_SNAPSHOT_UPDATED = "TodoSnapshotUpdated"
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,8 +191,8 @@ DESCRIPTOR_BY_TYPE = {item.event_type: item for item in COMMITTED_EVENT_DESCRIPT
 
 if len(COMMITTED_EVENT_DESCRIPTORS) != 31 or len(DESCRIPTOR_BY_TYPE) != 31:
     raise RuntimeError("committed event descriptor must contain exact 31 types")
-if len(LIVE_EVENT_TYPES) != 23 or len(set(LIVE_EVENT_TYPES)) != 23:
-    raise RuntimeError("live event registry must contain exact 23 types")
+if len(LIVE_EVENT_TYPES) != 24 or len(set(LIVE_EVENT_TYPES)) != 24:
+    raise RuntimeError("live event registry must contain exact 24 types")
 if len(SUBJECT_SLOTS) != 13 or len(set(SUBJECT_SLOTS)) != 13:
     raise RuntimeError("subject registry must contain exact 13 slots")
 if len(APPEND_GUARDS) != 2:

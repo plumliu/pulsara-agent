@@ -80,7 +80,7 @@ def _fixed_live_producers() -> dict[str, set[Path]]:
 
 def test_round2_closed_oracles_and_no_durable_terminal_authority() -> None:
     assert len(COMMITTED_EVENT_DESCRIPTORS) == 31
-    assert len(LIVE_EVENT_TYPES) == 23
+    assert len(LIVE_EVENT_TYPES) == 24
     assert len(SUBJECT_SLOTS) == 13
     assert len(APPEND_GUARDS) == 2
     assert len(CONVERSATION_KERNEL_RELATIONS) == 25

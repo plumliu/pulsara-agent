@@ -156,6 +156,16 @@ _ROUND8_RUNTIME_CHANGED_DATACLASSES = {
     "PreparedMemoryProposalSideBranch",
     "PreparedToolResultAcceptance",
 }
+_TODO_REFINEMENT_ADDED_METHODS = {
+    "_queued_root_entry_matches_candidate",
+    "_queued_root_revision_matches_candidate",
+    "_queued_root_row_matches_candidate",
+    "_queued_root_turn_matches_candidate",
+    "confirm_prepared_prompt_head_consumption",
+    "consume_prepared_prompt_head",
+    "prepare_prompt_head_consumption",
+}
+_TODO_REFINEMENT_REMOVED_METHODS = {"consume_prompt_head"}
 _ROUND8_REPOSITORY_DELTA_SHA256 = (
     "03fc3abf3c68104b8c7b018b330d7c661bc66ea8e84d99d862fb021f75275536"
 )
@@ -230,9 +240,7 @@ def _without_source_modules(value: list[dict[str, object]]) -> list[dict[str, ob
     ]
 
 
-def _closed_owner_calls(
-    calls: list[str], renames: dict[str, str]
-) -> list[str]:
+def _closed_owner_calls(calls: list[str], renames: dict[str, str]) -> list[str]:
     return sorted(renames.get(call, call) for call in calls)
 
 
@@ -251,19 +259,13 @@ def _round7_repository_delta(current: dict[str, object]) -> dict[str, object]:
             name: current["top_level_functions"][name]
             for name in sorted(changed_functions)
         },
-        "methods": {
-            name: current["methods"][name] for name in sorted(changed_methods)
-        },
+        "methods": {name: current["methods"][name] for name in sorted(changed_methods)},
         "runtime_dataclasses": {
-            "PreparedToolResultAcceptance": dataclasses[
-                "PreparedToolResultAcceptance"
-            ]
+            "PreparedToolResultAcceptance": dataclasses["PreparedToolResultAcceptance"]
         },
         "runtime_methods": {
             name: methods[name]
-            for name in sorted(
-                _ROUND7_ADDED_METHODS | _ROUND7_RUNTIME_CHANGED_METHODS
-            )
+            for name in sorted(_ROUND7_ADDED_METHODS | _ROUND7_RUNTIME_CHANGED_METHODS)
         },
         "database_calls": _without_source_modules(
             [
@@ -303,9 +305,7 @@ def _round8_repository_delta(current: dict[str, object]) -> dict[str, object]:
             name: current["top_level_functions"][name]
             for name in sorted(changed_functions)
         },
-        "methods": {
-            name: current["methods"][name] for name in sorted(changed_methods)
-        },
+        "methods": {name: current["methods"][name] for name in sorted(changed_methods)},
         "runtime_exceptions": runtime["exceptions"],
         "runtime_dataclasses": runtime["dataclasses"],
         "runtime_methods": {
@@ -345,17 +345,24 @@ def test_repository_modularization_baseline_is_exact_at_checkpoint() -> None:
     assert len(baseline["all"]) == 34
     assert len(baseline["observed_imports"]) == 41
     assert len(baseline["runtime"]["owned_observed_symbols"]) == 39
-    assert len(
-        set(baseline["pytest_node_ids"]) - set(baseline["m0_gate_node_ids"])
-    ) == 541
+    assert (
+        len(set(baseline["pytest_node_ids"]) - set(baseline["m0_gate_node_ids"])) == 541
+    )
     checkouts = baseline["physical_checkouts"]
     assert len(checkouts) == 39
     assert sum(item["classification"] == "direct_operation" for item in checkouts) == 34
-    assert sum(
-        item["classification"] == "writer_bootstrap_or_renew"
-        for item in checkouts
-    ) == 2
-    assert sum(item["owner"] in {"_writer_transaction", "_job_transaction", "_event_transaction"} for item in checkouts) == 3
+    assert (
+        sum(item["classification"] == "writer_bootstrap_or_renew" for item in checkouts)
+        == 2
+    )
+    assert (
+        sum(
+            item["owner"]
+            in {"_writer_transaction", "_job_transaction", "_event_transaction"}
+            for item in checkouts
+        )
+        == 3
+    )
 
 
 def test_repository_modularization_current_contract_matches_baseline() -> None:
@@ -364,12 +371,15 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
     baseline = _baseline()
     for key in ("observed_imports", "closed_owner_renames", "override_seams"):
         assert current[key] == baseline[key], key
-    assert set(current["all"]) == (
-        set(baseline["all"]) - _ROUND8_REMOVED_ALL
-    ) | _ROUND8_ADDED_ALL
-    assert set(current["top_level_classes"]) == (
-        set(baseline["top_level_classes"]) - _ROUND8_REMOVED_TOP_LEVEL_CLASSES
-    ) | _ROUND8_ADDED_TOP_LEVEL_CLASSES
+    assert (
+        set(current["all"])
+        == (set(baseline["all"]) - _ROUND8_REMOVED_ALL) | _ROUND8_ADDED_ALL
+    )
+    assert (
+        set(current["top_level_classes"])
+        == (set(baseline["top_level_classes"]) - _ROUND8_REMOVED_TOP_LEVEL_CLASSES)
+        | _ROUND8_ADDED_TOP_LEVEL_CLASSES
+    )
     for key, added, changed in (
         (
             "top_level_functions",
@@ -378,11 +388,17 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
         ),
         (
             "methods",
-            _ROUND7_ADDED_METHODS | _ROUND8_ADDED_METHODS,
+            _ROUND7_ADDED_METHODS
+            | _ROUND8_ADDED_METHODS
+            | _TODO_REFINEMENT_ADDED_METHODS,
             _ROUND7_CHANGED_METHODS | _ROUND8_CHANGED_METHODS,
         ),
     ):
-        removed = _ROUND8_REMOVED_METHODS if key == "methods" else set()
+        removed = (
+            _ROUND8_REMOVED_METHODS | _TODO_REFINEMENT_REMOVED_METHODS
+            if key == "methods"
+            else set()
+        )
         assert set(current[key]) == (set(baseline[key]) - removed) | added
         for name in set(baseline[key]) - changed:
             if name in removed:
@@ -392,37 +408,45 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
     baseline_runtime = baseline["runtime"]
     for key in set(baseline_runtime) - {"dataclasses", "exceptions", "methods"}:
         assert current_runtime[key] == baseline_runtime[key], ("runtime", key)
-    assert set(current_runtime["exceptions"]) == set(
-        baseline_runtime["exceptions"]
-    ) | _ROUND8_RUNTIME_ADDED_EXCEPTIONS
+    assert (
+        set(current_runtime["exceptions"])
+        == set(baseline_runtime["exceptions"]) | _ROUND8_RUNTIME_ADDED_EXCEPTIONS
+    )
     for name in baseline_runtime["exceptions"]:
-        assert current_runtime["exceptions"][name] == baseline_runtime["exceptions"][
-            name
-        ]
+        assert (
+            current_runtime["exceptions"][name] == baseline_runtime["exceptions"][name]
+        )
     assert set(current_runtime["dataclasses"]) == (
-        set(baseline_runtime["dataclasses"])
-        - _ROUND8_RUNTIME_REMOVED_DATACLASSES
+        set(baseline_runtime["dataclasses"]) - _ROUND8_RUNTIME_REMOVED_DATACLASSES
     )
     for name in (
         set(baseline_runtime["dataclasses"])
         - _ROUND8_RUNTIME_REMOVED_DATACLASSES
         - _ROUND8_RUNTIME_CHANGED_DATACLASSES
     ):
-        assert current_runtime["dataclasses"][name] == baseline_runtime[
-            "dataclasses"
-        ][name]
-    assert set(current_runtime["methods"]) == (
-        set(baseline_runtime["methods"]) - _ROUND8_REMOVED_METHODS
-    ) | _ROUND7_ADDED_METHODS | _ROUND8_ADDED_METHODS
+        assert (
+            current_runtime["dataclasses"][name]
+            == baseline_runtime["dataclasses"][name]
+        )
+    assert (
+        set(current_runtime["methods"])
+        == (
+            set(baseline_runtime["methods"])
+            - _ROUND8_REMOVED_METHODS
+            - _TODO_REFINEMENT_REMOVED_METHODS
+        )
+        | _ROUND7_ADDED_METHODS
+        | _ROUND8_ADDED_METHODS
+        | _TODO_REFINEMENT_ADDED_METHODS
+    )
     for name in (
         set(baseline_runtime["methods"])
         - _ROUND7_RUNTIME_CHANGED_METHODS
         - _ROUND8_CHANGED_METHODS
         - _ROUND8_REMOVED_METHODS
+        - _TODO_REFINEMENT_REMOVED_METHODS
     ):
-        assert current_runtime["methods"][name] == baseline_runtime["methods"][
-            name
-        ]
+        assert current_runtime["methods"][name] == baseline_runtime["methods"][name]
     assert _closed_owner_calls(
         current["class_qualified_calls"], baseline["closed_owner_renames"]
     ) == _closed_owner_calls(
@@ -434,6 +458,8 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
         | _ROUND8_ADDED_METHODS
         | _ROUND8_CHANGED_METHODS
         | _ROUND8_REMOVED_METHODS
+        | _TODO_REFINEMENT_ADDED_METHODS
+        | _TODO_REFINEMENT_REMOVED_METHODS
     )
     for key in ("database_calls", "physical_checkouts"):
         current_unchanged = _without_source_modules(
@@ -499,22 +525,24 @@ def test_repository_modularization_facade_and_internal_owner_shape() -> None:
         assert "def _load_root_transcript_cut(" in (
             implementation / "jobs.py"
         ).read_text(encoding="utf-8")
-        assert "def _content_from_row(" in (
-            implementation / "matching.py"
-        ).read_text(encoding="utf-8")
+        assert "def _content_from_row(" in (implementation / "matching.py").read_text(
+            encoding="utf-8"
+        )
 
     assert ConversationKernelRepository.__module__ == (
         "pulsara_agent.conversation_kernel.repository"
     )
     assert len(COMMITTED_EVENT_DESCRIPTORS) == 31
-    assert len(LIVE_EVENT_TYPES) == 23
+    assert len(LIVE_EVENT_TYPES) == 24
     assert len(SUBJECT_SLOTS) == 13
     assert len(APPEND_GUARDS) == 2
     assert len(CONVERSATION_KERNEL_RELATIONS) == 25
     assert len(JOB_HANDLER_CATALOG) == 1
 
 
-def test_repository_modularization_internal_package_is_not_a_second_public_api() -> None:
+def test_repository_modularization_internal_package_is_not_a_second_public_api() -> (
+    None
+):
     implementation = ROOT / "src/pulsara_agent/conversation_kernel/_repository"
     production = ROOT / "src/pulsara_agent"
     relative_targets = _absolute_import_targets(

@@ -36,6 +36,10 @@ from pulsara_agent.ports.live_agent_event import (
     live_digest,
 )
 from pulsara_agent.conversation_kernel.vocabulary import LiveEventType
+from pulsara_agent.conversation_kernel.todo_runtime import (
+    FrozenTodoCloseProjection,
+    TodoRunStateOwner,
+)
 from pulsara_agent.conversation_kernel.repository import (
     AcceptedEntry,
     ConversationKernelConflict,
@@ -80,6 +84,9 @@ class KernelSubagentManager:
         host_owner_id: str,
         io_owner: KernelSessionIO,
         live_bus: LiveAgentEventBus,
+        todo_owner: TodoRunStateOwner,
+        todo_close_projector: Callable[[FrozenTodoCloseProjection | None], None]
+        | None = None,
         deadline_factory: KernelExecutionDeadlineFactory | None = None,
     ) -> None:
         self._repository = repository
@@ -87,6 +94,8 @@ class KernelSubagentManager:
         self._host_owner_id = host_owner_id
         self._io = io_owner
         self._live_bus = live_bus
+        self._todo_owner = todo_owner
+        self._todo_close_projector = todo_close_projector or (lambda _value: None)
         self._deadlines = deadline_factory or KernelExecutionDeadlineFactory()
         self._runner_factory: Callable[[], ConversationKernelRunner] | None = None
         self._tasks: dict[str, _LiveTask] = {}
@@ -204,15 +213,11 @@ class KernelSubagentManager:
                 live = _LiveTask(task_id, parent_turn_id, objective, task, intent)
                 self._tasks[task_id] = live
         if closing_after_accept:
-            await self._terminalize_best_effort(
-                task_id, "INTERRUPTED", "HOST_CLOSING"
-            )
+            await self._terminalize_best_effort(task_id, "INTERRUPTED", "HOST_CLOSING")
             self._offer_progress(
                 task_id, parent_turn_id, "INTERRUPTED", "Subagent interrupted"
             )
-            return _result(
-                "TOOL_UNAVAILABLE", {"error": "subagent owner is closed"}
-            )
+            return _result("TOOL_UNAVAILABLE", {"error": "subagent owner is closed"})
         return _result(
             "SUCCESS",
             {
@@ -349,6 +354,23 @@ class KernelSubagentManager:
                     parent_turn_id = task_id
             self._offer_progress(task_id, parent_turn_id, "FAILED", code)
             raise
+        finally:
+            await self._close_todo_child_run(task_id)
+
+    async def _close_todo_child_run(self, task_id: str) -> None:
+        if not self._todo_owner.mark_closing(
+            scope_kind=ModelInputScopeKind.SUBAGENT_TASK,
+            scope_subagent_task_id=task_id,
+        ):
+            return
+        # The child runner and its shielded result settlement have joined.
+        # Any remaining token is an invariant failure, not independently
+        # runnable work that a condition wait could advance.
+        projection = self._todo_owner.close_run(
+            scope_kind=ModelInputScopeKind.SUBAGENT_TASK,
+            scope_subagent_task_id=task_id,
+        )
+        self._todo_close_projector(projection)
 
     async def _terminalize_best_effort(
         self, task_id: str, status: str, reason: str
@@ -527,9 +549,7 @@ class KernelSubagentManager:
                 deadline_monotonic=self._canonical_deadline(),
             )
             if durable is None:
-                return _result(
-                    "APPLICATION_ERROR", {"error": "subagent is unknown"}
-                )
+                return _result("APPLICATION_ERROR", {"error": "subagent is unknown"})
             return _durable_wait_result(durable)
         try:
             await asyncio.wait_for(asyncio.shield(live.task), timeout=timeout)
@@ -604,6 +624,10 @@ class KernelSubagentManager:
             )
             for item in self._tasks.values():
                 if not item.task.done():
+                    self._todo_owner.mark_closing(
+                        scope_kind=ModelInputScopeKind.SUBAGENT_TASK,
+                        scope_subagent_task_id=item.task_id,
+                    )
                     cause = item.cancellation_intent.install_cause(
                         ForegroundCancellationCause.HOST_SESSION_CLOSE
                     )

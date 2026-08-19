@@ -781,10 +781,11 @@ class StructuredToolPort:
     async def invoke(self, **kwargs: object):
         return await self.delegate.invoke(**kwargs)
 
-    async def settle_process_local_effect(self, *args: object) -> None:
+    async def settle_process_local_effect(self, *args: object):
         method = getattr(self.delegate, "settle_process_local_effect", None)
         if method is not None:
-            await method(*args)
+            return await method(*args)
+        raise RuntimeError("test tool emitted an unowned process-local settlement")
 
 
 def direct_tool_invocation_context(

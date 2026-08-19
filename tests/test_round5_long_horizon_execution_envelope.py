@@ -75,7 +75,7 @@ def test_round5_architecture_removes_turn_budget_and_preserves_oracles() -> None
     assert "model-call limit exhausted" not in runner_source
 
     assert len(COMMITTED_EVENT_DESCRIPTORS) == 31
-    assert len(LIVE_EVENT_TYPES) == 23
+    assert len(LIVE_EVENT_TYPES) == 24
     assert len(SUBJECT_SLOTS) == 13
     assert len(APPEND_GUARDS) == 2
     assert len(CONVERSATION_KERNEL_RELATIONS) == 25

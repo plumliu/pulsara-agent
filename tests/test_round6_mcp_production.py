@@ -3134,7 +3134,7 @@ def test_round6_wire_bounds_and_result_type_presence_fail_closed(
 
 def test_round6_does_not_expand_durable_or_protocol_oracles() -> None:
     assert len(COMMITTED_EVENT_DESCRIPTORS) == 31
-    assert len(LIVE_EVENT_TYPES) == 23
+    assert len(LIVE_EVENT_TYPES) == 24
     assert len(SUBJECT_SLOTS) == 13
     assert len(APPEND_GUARDS) == 2
     assert len(CONVERSATION_KERNEL_RELATIONS) == 25

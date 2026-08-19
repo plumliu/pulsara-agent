@@ -1,4 +1,4 @@
-"""Renderer-neutral payload vocabulary for the exact 23 live events.
+"""Renderer-neutral payload vocabulary for the exact 24 live events.
 
 This module is the final type owner shared by provider adapters, the Runtime
 live bus, hooks, and Protocol v3.  Keeping these values in ``ports`` prevents
@@ -11,6 +11,14 @@ from dataclasses import asdict, dataclass
 from hashlib import sha256
 import json
 from typing import Mapping, TypeAlias, TypeGuard
+import unicodedata
+
+from pulsara_agent.primitives.todo import (
+    MAXIMUM_TODO_CANONICAL_JSON_BYTES,
+    MAXIMUM_TODO_ITEMS,
+    MAXIMUM_TODO_TEXT_UTF8_BYTES,
+    todo_snapshot_canonical_json,
+)
 
 
 def live_digest(value: str) -> str:
@@ -309,6 +317,84 @@ class SubagentProgressPayload:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class TodoLiveItemProjection:
+    ordinal: int
+    text: str
+    status: str
+
+    def __post_init__(self) -> None:
+        encoded = self.text.encode("utf-8")
+        if (
+            self.ordinal < 0
+            or not encoded
+            or len(encoded) > MAXIMUM_TODO_TEXT_UTF8_BYTES
+            or self.text != self.text.strip()
+            or self.text != unicodedata.normalize("NFC", self.text)
+            or self.status not in {"pending", "in_progress", "completed"}
+            or any(
+                character in {"\r", "\n", "\u2028", "\u2029"}
+                or ord(character) < 0x20
+                or 0x7F <= ord(character) <= 0x9F
+                for character in self.text
+            )
+        ):
+            raise ValueError("TODO live item is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class TodoSnapshotUpdatedPayload:
+    todo_run_id: str
+    todo_revision: int
+    disposition: str
+    ordered_items: tuple[TodoLiveItemProjection, ...]
+    pending_count: int
+    in_progress_count: int
+    completed_count: int
+
+    def __post_init__(self) -> None:
+        _require_identity(self.todo_run_id, self.disposition)
+        if self.todo_revision < 0 or self.disposition not in {
+            "ACTIVE",
+            "CLEARED",
+            "CLOSED",
+        }:
+            raise ValueError("TODO live snapshot identity is invalid")
+        if len(self.ordered_items) > MAXIMUM_TODO_ITEMS or tuple(
+            item.ordinal for item in self.ordered_items
+        ) != tuple(range(len(self.ordered_items))):
+            raise ValueError("TODO live item ordering is invalid")
+        if len({item.text for item in self.ordered_items}) != len(
+            self.ordered_items
+        ):
+            raise ValueError("TODO live snapshot contains duplicate text")
+        actual = {
+            status: sum(item.status == status for item in self.ordered_items)
+            for status in ("pending", "in_progress", "completed")
+        }
+        if (
+            self.pending_count != actual["pending"]
+            or self.in_progress_count != actual["in_progress"]
+            or self.completed_count != actual["completed"]
+            or self.in_progress_count > 1
+        ):
+            raise ValueError("TODO live counts are invalid")
+        if self.disposition == "ACTIVE" and not self.ordered_items:
+            raise ValueError("ACTIVE TODO projection must contain items")
+        if self.disposition in {"CLEARED", "CLOSED"} and (
+            self.ordered_items
+            or self.pending_count
+            or self.in_progress_count
+            or self.completed_count
+        ):
+            raise ValueError("empty TODO disposition carries items")
+        canonical_items = todo_snapshot_canonical_json(
+            tuple((item.text, item.status) for item in self.ordered_items)
+        )
+        if len(canonical_items) > MAXIMUM_TODO_CANONICAL_JSON_BYTES:
+            raise ValueError("TODO live snapshot exceeds its aggregate bound")
+
+
 LivePayload: TypeAlias = (
     TextStartPayload
     | TextDeltaPayload
@@ -333,6 +419,7 @@ LivePayload: TypeAlias = (
     | TerminalMonitorObservationPayload
     | TerminalMonitorClosedPayload
     | SubagentProgressPayload
+    | TodoSnapshotUpdatedPayload
 )
 
 
@@ -385,6 +472,8 @@ __all__ = [
     "LivePayload",
     "ProviderStreamPayload",
     "SubagentProgressPayload",
+    "TodoLiveItemProjection",
+    "TodoSnapshotUpdatedPayload",
     "TerminalMonitorClosedPayload",
     "TerminalMonitorObservationPayload",
     "TerminalMonitorOpenedPayload",

@@ -36,6 +36,7 @@ from pulsara_agent.ports.live_agent_event import (
     ThinkingDeltaPayload,
     ThinkingEndPayload,
     ThinkingStartPayload,
+    TodoSnapshotUpdatedPayload,
     ToolCallDeltaPayload,
     ToolCallEndPayload,
     ToolCallStartPayload,
@@ -70,10 +71,11 @@ LIVE_PAYLOAD_TYPE_BY_EVENT: dict[LiveEventType, type[object]] = {
     LiveEventType.TERMINAL_MONITOR_OBSERVATION: TerminalMonitorObservationPayload,
     LiveEventType.TERMINAL_MONITOR_CLOSED: TerminalMonitorClosedPayload,
     LiveEventType.SUBAGENT_PROGRESS: SubagentProgressPayload,
+    LiveEventType.TODO_SNAPSHOT_UPDATED: TodoSnapshotUpdatedPayload,
 }
 
 if set(LIVE_PAYLOAD_TYPE_BY_EVENT) != set(LiveEventType):
-    raise RuntimeError("live payload registry must cover exact 23 event types")
+    raise RuntimeError("live payload registry must cover exact 24 event types")
 
 
 class LiveObservationKind(StrEnum):
@@ -569,6 +571,7 @@ def _block_kind(event_type: LiveEventType) -> LiveBlockKind:
         "TerminalMonitorObservation": LiveBlockKind.OPERATIONAL,
         "TerminalMonitorClosed": LiveBlockKind.OPERATIONAL,
         "SubagentProgress": LiveBlockKind.OPERATIONAL,
+        "TodoSnapshotUpdated": LiveBlockKind.OPERATIONAL,
         "InteractionOpened": LiveBlockKind.OPERATIONAL,
         "InteractionReplaced": LiveBlockKind.OPERATIONAL,
         "InteractionClosed": LiveBlockKind.OPERATIONAL,

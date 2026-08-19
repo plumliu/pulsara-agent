@@ -69,8 +69,12 @@ The current Kernel supports:
   freshness frontiers; each accepted tool result carries an immutable observed
   time, monotonic duration disposition, execution origin, and optional trusted
   duration that the tool body cannot forge;
-- filesystem, todo, `terminal`, `terminal_process`, `terminal_monitor`, and
-  scoped `artifact_read` tools;
+- filesystem, `terminal`, `terminal_process`, `terminal_monitor`, and scoped
+  `artifact_read` tools;
+- an exact-run, process-local `todo(items=[...])` tool that atomically replaces
+  one bounded pending/in-progress/completed snapshot; an empty list clears it,
+  ROOT and child runs remain isolated, and Host replacement intentionally starts
+  without recovered TODO state;
 - real PIPE/PTY terminal output streaming, exact process-local cursors and
   typed GAP, same-Host future monitor observations, and autonomous
   continuation at a provider-safe point;
@@ -224,6 +228,13 @@ skipping remains independent and does not disable explicit memory tools.
 Verification
 is recorded in
 [`round8_advisory_memory_subsystem_activation.json`](benchmarks/suites/core/v1/round8_advisory_memory_subsystem_activation.json).
+The lightweight TODO refinement replaces the old Host-global action protocol
+with one bounded full-snapshot call and an exact ROOT/child process-local owner.
+Canonical ToolResult success is settled before the snapshot is installed;
+clients receive one atomic live projection and resynchronize from the current
+Host owner after a live gap. TODO is advisory, never durable, and Round 5B may
+only consume its read-only actionable handoff. Verification is recorded in
+[`lightweight_todo_tool_refinement_activation.json`](benchmarks/suites/core/v1/lightweight_todo_tool_refinement_activation.json).
 An old v13 database is rejected with
 `schema_migration_universe_reset_required`; Pulsara never imports, translates,
 or upgrades it in place. Follow

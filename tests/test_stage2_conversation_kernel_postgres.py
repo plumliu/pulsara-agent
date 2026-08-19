@@ -48,6 +48,7 @@ from pulsara_agent.conversation_kernel.repository import (
 )
 from pulsara_agent.conversation_kernel.steer import (
     PromptIngressConfirmationKind,
+    QueuedRootTurnAdmissionConfirmationKind,
     SteerConsumptionConfirmationKind,
     SteerResourceRejectionConfirmationKind,
     build_prompt_ingress_command,
@@ -86,6 +87,64 @@ from tests.support.postgres import verified_postgres_provider
 
 
 pytestmark = pytest.mark.postgres
+
+
+def test_lightweight_todo_queued_root_admission_has_exact_confirmation(
+    stage2_migrated_postgres_database,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id = f"session:{uuid4().hex}"
+    workspace_id = f"workspace:{uuid4().hex}"
+    lease = repository.acquire_host_writer(
+        session_id=session_id,
+        workspace_id=workspace_id,
+        writer_owner_id=f"host:{uuid4().hex}",
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    queue_item_id = f"queue:{uuid4().hex}"
+    command_id = f"command:{uuid4().hex}"
+    repository.enqueue_prompt(
+        lease.guard,
+        command_id=command_id,
+        queue_item_id=queue_item_id,
+        client_submission_id=f"submission:{uuid4().hex}",
+        delivery_mode=PromptDeliveryMode.NEW_TURN,
+        target_turn_id=None,
+        permission_snapshot_id=f"permission:{uuid4().hex}",
+        requested_permission_mode=DEFAULT_PERMISSION_MODE,
+        content=InlineContent.from_bytes(b"queued TODO run"),
+        occurred_at=datetime.now(timezone.utc),
+        actor_id="test",
+        deadline_monotonic=monotonic() + 30,
+    )
+    candidate = repository.prepare_prompt_head_consumption(
+        session_id=session_id,
+        occurred_at=datetime.now(timezone.utc),
+        actor_id="host:test",
+        deadline_monotonic=monotonic() + 30,
+    )
+    assert candidate is not None and candidate.queue_item_id == queue_item_id
+    before = repository.confirm_prepared_prompt_head_consumption(
+        candidate=candidate,
+        deadline_monotonic=monotonic() + 30,
+    )
+    assert before.kind is QueuedRootTurnAdmissionConfirmationKind.NONE
+    consumed = repository.consume_prepared_prompt_head(
+        lease.guard,
+        candidate=candidate,
+        deadline_monotonic=monotonic() + 30,
+    )
+    assert consumed is not None
+    assert consumed.kind is QueuedRootTurnAdmissionConfirmationKind.FULL
+    confirmed = repository.confirm_prepared_prompt_head_consumption(
+        candidate=candidate,
+        deadline_monotonic=monotonic() + 30,
+    )
+    assert confirmed == consumed
+    assert confirmed.accepted is not None
+    assert confirmed.accepted.turn_id == candidate.exact_turn_id
 
 
 def _name(prefix: str) -> str:
@@ -322,7 +381,7 @@ def test_stage2_schema_and_descriptor_oracles_are_exact(
     assert len(CONVERSATION_KERNEL_RELATIONS) == 25
     assert len(set(CONVERSATION_KERNEL_RELATIONS)) == 25
     assert len(COMMITTED_EVENT_DESCRIPTORS) == 31
-    assert len(LIVE_EVENT_TYPES) == 23
+    assert len(LIVE_EVENT_TYPES) == 24
     assert len(SUBJECT_SLOTS) == 13
     assert len(APPEND_GUARDS) == 2
 
@@ -1520,6 +1579,7 @@ def test_stage2_memory_refresh_exhaustion_is_stable_and_query_is_unavailable(
             """
         ).fetchone() == (0,)
 
+
 def test_stage2_memory_governance_is_async_and_postgres_only(
     stage2_migrated_postgres_database,
 ) -> None:
@@ -1540,13 +1600,14 @@ def test_stage2_memory_governance_is_async_and_postgres_only(
             ).fetchall()
         }
     assert relations == {
-        'memory_candidates',
-        'memory_candidate_tool_result_refs',
-        'memory_candidate_basis_refs',
-        'memory_facts',
-        'memory_relations',
-        'memory_embeddings',
+        "memory_candidates",
+        "memory_candidate_tool_result_refs",
+        "memory_candidate_basis_refs",
+        "memory_facts",
+        "memory_relations",
+        "memory_embeddings",
     }
+
 
 def test_stage2_memory_lifecycle_change_has_one_canonical_occurrence(
     stage2_migrated_postgres_database,
@@ -1555,9 +1616,10 @@ def test_stage2_memory_lifecycle_change_has_one_canonical_occurrence(
 
     del stage2_migrated_postgres_database
     assert {item.event_type.value for item in COMMITTED_EVENT_DESCRIPTORS}.isdisjoint(
-        {'MemoryFactAccepted', 'MemoryFactLifecycleChanged', 'MemoryRelationAccepted'}
+        {"MemoryFactAccepted", "MemoryFactLifecycleChanged", "MemoryRelationAccepted"}
     )
-    assert all('memory' not in slot.lower() for slot in SUBJECT_SLOTS)
+    assert all("memory" not in slot.lower() for slot in SUBJECT_SLOTS)
+
 
 def test_stage2_postgres_memory_preserves_bounded_direct_and_two_hop_paths(
     stage2_migrated_postgres_database,
@@ -1565,13 +1627,14 @@ def test_stage2_postgres_memory_preserves_bounded_direct_and_two_hop_paths(
     """Round 8 successor: only exact rows and direct relations remain public."""
 
     del stage2_migrated_postgres_database
-    assert 'max_hops' not in PostgresMemoryQuery.search.__code__.co_varnames
+    assert "max_hops" not in PostgresMemoryQuery.search.__code__.co_varnames
     source = (
-        __import__('pathlib').Path(__file__).resolve().parents[1]
-        / 'src/pulsara_agent/conversation_kernel/memory/recall.py'
-    ).read_text(encoding='utf-8')
-    assert 'WITH RECURSIVE' not in source
-    assert 'max_hops' not in source
+        __import__("pathlib").Path(__file__).resolve().parents[1]
+        / "src/pulsara_agent/conversation_kernel/memory/recall.py"
+    ).read_text(encoding="utf-8")
+    assert "WITH RECURSIVE" not in source
+    assert "max_hops" not in source
+
 
 def test_stage2_prompt_queue_has_stable_fifo_and_frozen_terminal_steer_target(
     stage2_migrated_postgres_database,
@@ -1651,11 +1714,8 @@ def test_stage2_prompt_queue_has_stable_fifo_and_frozen_terminal_steer_target(
     )
     assert initial.turn_id == root_turn
     assert (
-        repository.consume_prompt_head(
-            lease.guard,
-            new_turn_id=_name("turn"),
-            new_entry_id=_name("entry"),
-            new_context_binding_revision_id=_name("revision"),
+        repository.prepare_prompt_head_consumption(
+            session_id=session_id,
             occurred_at=datetime.now(timezone.utc),
             actor_id="runtime",
             deadline_monotonic=deadline,
@@ -1672,17 +1732,22 @@ def test_stage2_prompt_queue_has_stable_fifo_and_frozen_terminal_steer_target(
     )
     # One coalesced wake rejects the entire consecutive stale-steer prefix,
     # then consumes the next global NEW_TURN head in the same call.
-    next_turn = _name("turn")
-    consumed = repository.consume_prompt_head(
-        lease.guard,
-        new_turn_id=next_turn,
-        new_entry_id=_name("entry"),
-        new_context_binding_revision_id=_name("revision"),
+    candidate = repository.prepare_prompt_head_consumption(
+        session_id=session_id,
         occurred_at=datetime.now(timezone.utc),
         actor_id="runtime",
         deadline_monotonic=deadline,
     )
-    assert consumed is not None and consumed.turn_id == next_turn
+    assert candidate is not None
+    consumed = repository.consume_prepared_prompt_head(
+        lease.guard,
+        candidate=candidate,
+        deadline_monotonic=deadline,
+    )
+    assert consumed is not None
+    assert consumed.kind is QueuedRootTurnAdmissionConfirmationKind.FULL
+    assert consumed.accepted is not None
+    assert consumed.accepted.turn_id == candidate.exact_turn_id
     with verified_postgres_provider(
         stage2_migrated_postgres_database.runtime_dsn
     ).connection(

@@ -60,7 +60,11 @@ from pulsara_agent.tools.builtins.filesystem import (
     SearchFilesTool,
     WriteFileTool,
 )
-from pulsara_agent.tools.builtins.todo import TodoTool
+from pulsara_agent.tools.builtins.todo import (
+    TodoTool,
+    TodoValidationError,
+    parse_todo_replacement,
+)
 from pulsara_agent.tools.builtins.artifact import ArtifactReadTool
 from pulsara_agent.conversation_kernel.io import (
     KernelSessionIO,
@@ -83,6 +87,8 @@ from pulsara_agent.conversation_kernel.live import (
 )
 from pulsara_agent.ports.live_agent_event import (
     TerminalProcessCompletedPayload,
+    TodoLiveItemProjection,
+    TodoSnapshotUpdatedPayload,
     live_digest,
 )
 from pulsara_agent.primitives.model_call import sha256_fingerprint
@@ -126,7 +132,15 @@ from .runner import (
     KernelToolPhysicalInvocationError,
     KernelToolResult,
     ProcessLocalEffectSettlementDisposition,
+    ProcessLocalEffectSettlementOutcome,
+    ProcessLocalEffectSettlementResult,
     ProcessLocalEffectSettlementToken,
+)
+from .todo_runtime import (
+    FrozenTodoCloseProjection,
+    PreparedTodoReplacement,
+    TodoInstallation,
+    TodoRunStateOwner,
 )
 from .mcp.supervisor import (
     McpBoundToolExecutor,
@@ -240,9 +254,7 @@ def _production_executor_binding(
         "is_read_only": descriptor.is_read_only,
         "is_concurrency_safe": descriptor.is_concurrency_safe,
         "permission_category": descriptor.permission_category,
-        "physical_effect_contract_fingerprint": (
-            physical_effect_contract_fingerprint
-        ),
+        "physical_effect_contract_fingerprint": (physical_effect_contract_fingerprint),
         "executor_identity": executor_identity,
     }
     return ProductionBuiltinExecutorBinding(
@@ -263,9 +275,7 @@ def _production_executor_binding(
         is_read_only=descriptor.is_read_only,
         is_concurrency_safe=descriptor.is_concurrency_safe,
         permission_category=descriptor.permission_category,
-        physical_effect_contract_fingerprint=(
-            physical_effect_contract_fingerprint
-        ),
+        physical_effect_contract_fingerprint=(physical_effect_contract_fingerprint),
         executor_identity=executor_identity,
         binding_fingerprint=sha256_fingerprint(
             "production-builtin-executor-binding:v1", payload
@@ -508,6 +518,11 @@ class _PreparedMonitorSettlement:
 
 
 @dataclass(frozen=True, slots=True)
+class _PreparedTodoSettlement:
+    prepared: PreparedTodoReplacement
+
+
+@dataclass(frozen=True, slots=True)
 class _PendingMcpConfirmationAdmission:
     generation: int
     executor: McpBoundToolExecutor
@@ -590,6 +605,11 @@ class DirectKernelToolPort:
         self._terminal_release_task: asyncio.Task[object] | None = None
         self._terminal_monitor_close_task: asyncio.Task[object] | None = None
         self._process_local_settlements: dict[str, _PreparedMonitorSettlement] = {}
+        self._todo_settlements: dict[str, _PreparedTodoSettlement] = {}
+        self._todo_owner = TodoRunStateOwner(
+            session_id=session_id,
+            owner_epoch=host_owner_id,
+        )
         self._subagent: KernelSubagentToolPort | None = None
         self._memory: KernelMemoryToolPort | None = None
         self._interaction: KernelToolInteractionPort | None = None
@@ -654,9 +674,7 @@ class DirectKernelToolPort:
                 for key in tuple(self._prepared_surfaces):
                     if key[0] == previous_generation:
                         self._prepared_surfaces.pop(key, None)
-                self._mcp_runtime_by_surface_generation.pop(
-                    previous_generation, None
-                )
+                self._mcp_runtime_by_surface_generation.pop(previous_generation, None)
                 previous.release()
 
     async def reload_mcp_configs(
@@ -677,10 +695,7 @@ class DirectKernelToolPort:
             for server_id in changed
             if old_configs.get(server_id) is not None
             and old_configs[server_id].enabled
-            and (
-                server_id not in new_configs
-                or not new_configs[server_id].enabled
-            )
+            and (server_id not in new_configs or not new_configs[server_id].enabled)
         )
         owner_keys = frozenset(
             f"mcp-server:{server_id}" for server_id in disabled_or_removed
@@ -709,6 +724,10 @@ class DirectKernelToolPort:
     @property
     def terminal_monitor_coordinator(self) -> TerminalMonitorCoordinator:
         return self._terminal_monitor
+
+    @property
+    def todo_owner(self) -> TodoRunStateOwner:
+        return self._todo_owner
 
     def _executor_bindings_locked(self) -> tuple[ProductionBuiltinExecutorBinding, ...]:
         identities = {
@@ -777,11 +796,7 @@ class DirectKernelToolPort:
             execution_bindings: list[PreparedToolExecutionBinding] = []
             for binding in bindings:
                 entry = builtin_tool_catalog_entry(binding.tool_name)
-                schema = freeze_json(
-                    _json_schema_value(
-                        entry.descriptor.input_schema
-                    )
-                )
+                schema = freeze_json(_json_schema_value(entry.descriptor.input_schema))
                 if not isinstance(schema, FrozenJsonObjectFact):
                     raise TypeError("tool schema did not freeze to an object")
                 specs.append(
@@ -828,13 +843,10 @@ class DirectKernelToolPort:
                     else mcp_runtime.subagent_tool_specs
                 )
                 mcp_binding_by_name = {
-                    item.tool_name: item
-                    for item in mcp_runtime.execution_bindings
+                    item.tool_name: item for item in mcp_runtime.execution_bindings
                 }
                 for semantic in mcp_semantics:
-                    if semantic.provider_tool_name in {
-                        item.name for item in specs
-                    }:
+                    if semantic.provider_tool_name in {item.name for item in specs}:
                         raise RuntimeError("MCP provider tool collides with a builtin")
                     specs.append(semantic.provider_spec())
                     execution_bindings.append(
@@ -1014,7 +1026,10 @@ class DirectKernelToolPort:
                 f"tool unavailable: {tool_name}",
             )
         if memory and (
-            (tool_name == "remember" and not memory_context.memory_use_policy.allows_writes)
+            (
+                tool_name == "remember"
+                and not memory_context.memory_use_policy.allows_writes
+            )
             or (
                 tool_name != "remember"
                 and not memory_context.memory_use_policy.allows_reads
@@ -1043,6 +1058,28 @@ class DirectKernelToolPort:
                 f"descriptor:{entry.descriptor.id}",
                 f"invalid tool arguments: {exc.message}",
             )
+        if tool_name == "todo":
+            try:
+                parse_todo_replacement(arguments)
+            except TodoValidationError as exc:
+                return KernelToolAuthorization(
+                    KernelToolAuthorizationKind.INVALID_ARGUMENTS,
+                    f"descriptor:{entry.descriptor.id}",
+                    str(exc),
+                )
+            access = surface_borrow.prepared.access
+            try:
+                self._todo_owner.require_active(
+                    scope_kind=access.conversation_scope_kind,
+                    scope_subagent_task_id=access.scope_subagent_task_id,
+                    exact_turn_id=turn_id,
+                )
+            except LookupError:
+                return KernelToolAuthorization(
+                    KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
+                    "todo-run:inactive",
+                    "todo scope is no longer active",
+                )
         decision = await self._authorization_policy.decide(
             ToolDispatchAuthorizationRequest(
                 tool_name=tool_name,
@@ -1082,9 +1119,7 @@ class DirectKernelToolPort:
                     arguments=arguments,
                     descriptor_fingerprint=entry.descriptor.fingerprint(),
                     session_id=self._session_id,
-                    scope_kind=(
-                        surface_borrow.prepared.access.conversation_scope_kind
-                    ),
+                    scope_kind=(surface_borrow.prepared.access.conversation_scope_kind),
                     scope_subagent_task_id=(
                         surface_borrow.prepared.access.scope_subagent_task_id
                     ),
@@ -1178,23 +1213,19 @@ class DirectKernelToolPort:
             or key in self._mcp_confirmation_admissions
         ):
             raise RuntimeError("MCP tool call was authorized twice")
-        if (
-            policy.effect_kind is McpEffectKind.EXTERNAL_EFFECT
-            and mode in {PermissionMode.ASK_PERMISSIONS, PermissionMode.ACCEPT_EDITS}
-        ):
-            self._mcp_confirmation_admissions[key] = (
-                _PendingMcpConfirmationAdmission(
-                    generation=generation,
-                    executor=executor,
-                    scope_kind=(
-                        surface_borrow.prepared.access.conversation_scope_kind
-                    ),
-                    scope_subagent_task_id=(
-                        surface_borrow.prepared.access.scope_subagent_task_id
-                    ),
-                    turn_id=turn_id,
-                    tool_call_id=tool_call_id,
-                )
+        if policy.effect_kind is McpEffectKind.EXTERNAL_EFFECT and mode in {
+            PermissionMode.ASK_PERMISSIONS,
+            PermissionMode.ACCEPT_EDITS,
+        }:
+            self._mcp_confirmation_admissions[key] = _PendingMcpConfirmationAdmission(
+                generation=generation,
+                executor=executor,
+                scope_kind=(surface_borrow.prepared.access.conversation_scope_kind),
+                scope_subagent_task_id=(
+                    surface_borrow.prepared.access.scope_subagent_task_id
+                ),
+                turn_id=turn_id,
+                tool_call_id=tool_call_id,
             )
             return KernelToolAuthorization(
                 KernelToolAuthorizationKind.REQUIRE_CONFIRMATION,
@@ -1281,9 +1312,7 @@ class DirectKernelToolPort:
         def discard_admission() -> None:
             if admission_entry is not None:
                 self._mcp_confirmation_admissions.pop(admission_entry[0], None)
-                current = self._mcp_dispatch_permits.pop(
-                    admission_entry[0], None
-                )
+                current = self._mcp_dispatch_permits.pop(admission_entry[0], None)
                 if current is not None and current.state.value == "ADMITTED":
                     current.release()
 
@@ -1298,8 +1327,7 @@ class DirectKernelToolPort:
                     before_publish=admit_before_publish,
                     discard=discard_admission,
                     owner_key=(
-                        "mcp-server:"
-                        + admission_entry[1].executor.semantic.server_id
+                        "mcp-server:" + admission_entry[1].executor.semantic.server_id
                     ),
                 )
                 if admission_entry is not None
@@ -1417,9 +1445,7 @@ class DirectKernelToolPort:
                     ),
                     error=exc,
                     timing="ON_TIME",
-                    caller_cancelled=bool(
-                        getattr(exc, "caller_cancelled", False)
-                    ),
+                    caller_cancelled=bool(getattr(exc, "caller_cancelled", False)),
                     physical_observation=observation,
                 ) from exc
             except BaseException as exc:
@@ -1457,8 +1483,7 @@ class DirectKernelToolPort:
                 caller_cancelled_while_running=caller_cancelled,
                 effect_class=(
                     "read_only"
-                    if binding.execution_policy.effect_kind
-                    is McpEffectKind.READ_ONLY
+                    if binding.execution_policy.effect_kind is McpEffectKind.READ_ONLY
                     else "unknown_effect"
                 ),
                 physical_observation=_freeze_physical_observation(
@@ -1479,9 +1504,7 @@ class DirectKernelToolPort:
             runtime = self._mcp_runtime_by_surface_generation.get(generation)
             if runtime is None:
                 raise RuntimeError("MCP runtime generation was retired")
-            permit = self._mcp_dispatch_permits.pop(
-                (generation, tool_call_id), None
-            )
+            permit = self._mcp_dispatch_permits.pop((generation, tool_call_id), None)
             operation_task = asyncio.create_task(
                 runtime.invoke_standard(
                     tool_name=tool_name,
@@ -1494,9 +1517,7 @@ class DirectKernelToolPort:
                 name=f"mcp-standard-operation:{tool_call_id}",
             )
             try:
-                known, caller_cancelled = await _await_mcp_operation(
-                    operation_task
-                )
+                known, caller_cancelled = await _await_mcp_operation(operation_task)
             except BaseException as exc:
                 if permit is not None and permit.state.value != "RELEASED":
                     with suppress(RuntimeError):
@@ -1555,6 +1576,58 @@ class DirectKernelToolPort:
         tool = self._tools[tool_name]
         if isinstance(tool, _DirectPlanControlTool):
             raise RuntimeError("Plan control escaped the runner batch barrier")
+        if isinstance(tool, TodoTool):
+            candidate = parse_todo_replacement(arguments)
+            counts = {
+                "pending": candidate.pending_count,
+                "in_progress": candidate.in_progress_count,
+                "completed": candidate.completed_count,
+                "total": len(candidate.ordered_items),
+            }
+            acknowledgement = json.dumps(
+                {
+                    "status": ("CLEARED" if not candidate.ordered_items else "UPDATED"),
+                    "counts": counts,
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+            try:
+                prepared = self._todo_owner.prepare_replace(
+                    scope_kind=(
+                        invocation_context.surface_borrow.prepared.access.conversation_scope_kind
+                    ),
+                    scope_subagent_task_id=(invocation_context.scope_subagent_task_id),
+                    exact_turn_id=turn_id,
+                    attempt_id=attempt_id,
+                    proposed_result_entry_id=invocation_context.result_entry_id,
+                    candidate=candidate,
+                    acknowledgement=acknowledgement,
+                )
+            except LookupError:
+                return KernelToolResult(
+                    state="TOOL_UNAVAILABLE",
+                    content=b'{"error":"todo scope is no longer active"}',
+                    effect_class="read_only",
+                    physical_observation=_freeze_physical_observation(
+                        invocation_started, observation_origin
+                    ),
+                )
+            self._todo_settlements[prepared.token_id] = _PreparedTodoSettlement(
+                prepared
+            )
+            return KernelToolResult(
+                state="SUCCESS",
+                content=acknowledgement,
+                process_local_settlement=ProcessLocalEffectSettlementToken(
+                    prepared.token_id, prepared.token_fingerprint
+                ),
+                effect_class="read_only",
+                physical_observation=_freeze_physical_observation(
+                    invocation_started, observation_origin
+                ),
+            )
         call = ToolCall(
             id=tool_call_id,
             name=tool_name,
@@ -1654,9 +1727,7 @@ class DirectKernelToolPort:
                 else physical.caller_cancelled
             ),
             physical_observation=(
-                _freeze_physical_observation(
-                    invocation_started, observation_origin
-                )
+                _freeze_physical_observation(invocation_started, observation_origin)
                 if isinstance(tool, _DirectTerminalMonitorTool)
                 else None
                 if physical.observation is None
@@ -1808,10 +1879,29 @@ class DirectKernelToolPort:
         self,
         token: ProcessLocalEffectSettlementToken,
         disposition: ProcessLocalEffectSettlementDisposition,
-    ) -> None:
+    ) -> ProcessLocalEffectSettlementResult:
+        todo = self._todo_settlements.get(token.token_id)
+        if todo is not None:
+            if todo.prepared.token_fingerprint != token.token_fingerprint:
+                raise RuntimeError("process-local TODO settlement token conflicts")
+            if disposition is ProcessLocalEffectSettlementDisposition.COMMITTED:
+                installation = self._todo_owner.commit(todo.prepared)
+                outcome = ProcessLocalEffectSettlementOutcome.INSTALLED
+            else:
+                self._todo_owner.discard(todo.prepared)
+                installation = None
+                outcome = ProcessLocalEffectSettlementOutcome.DISCARDED
+            self._todo_settlements.pop(token.token_id, None)
+            if installation is not None:
+                self._offer_todo_installation(installation)
+            return ProcessLocalEffectSettlementResult(outcome)
         settlement = self._process_local_settlements.get(token.token_id)
         if settlement is None:
-            return
+            if disposition is ProcessLocalEffectSettlementDisposition.COMMITTED:
+                raise RuntimeError("committed process-local settlement token is absent")
+            return ProcessLocalEffectSettlementResult(
+                ProcessLocalEffectSettlementOutcome.DISCARDED
+            )
         if settlement.prepared.token_fingerprint != token.token_fingerprint:
             raise RuntimeError("process-local settlement token conflicts")
         self._process_local_settlements.pop(token.token_id, None)
@@ -1822,6 +1912,93 @@ class DirectKernelToolPort:
                 disposition is ProcessLocalEffectSettlementDisposition.COMMITTED
             ),
         )
+        return ProcessLocalEffectSettlementResult(
+            ProcessLocalEffectSettlementOutcome.INSTALLED
+            if disposition is ProcessLocalEffectSettlementDisposition.COMMITTED
+            else ProcessLocalEffectSettlementOutcome.DISCARDED
+        )
+
+    def offer_todo_close(self, projection: FrozenTodoCloseProjection | None) -> None:
+        """Best-effort projection of an exact owner-controlled run closure."""
+
+        if projection is None:
+            return
+        identity = projection.run_identity
+        self._offer_todo_snapshot(
+            todo_run_id=identity.todo_run_id,
+            todo_revision=projection.closing_revision,
+            disposition="CLOSED",
+            ordered_items=(),
+            pending_count=0,
+            in_progress_count=0,
+            completed_count=0,
+            turn_id=projection.last_turn_id,
+            scope_kind=identity.scope_kind,
+            scope_subagent_task_id=identity.subagent_task_id,
+        )
+
+    def _offer_todo_installation(self, installation: TodoInstallation) -> None:
+        snapshot = installation.installed_snapshot
+        identity = snapshot.run_identity
+        self._offer_todo_snapshot(
+            todo_run_id=identity.todo_run_id,
+            todo_revision=snapshot.revision,
+            disposition=installation.disposition.value,
+            ordered_items=tuple(
+                TodoLiveItemProjection(item.ordinal, item.text, item.status.value)
+                for item in snapshot.ordered_items
+            ),
+            pending_count=snapshot.pending_count,
+            in_progress_count=snapshot.in_progress_count,
+            completed_count=snapshot.completed_count,
+            turn_id=installation.turn_id,
+            scope_kind=identity.scope_kind,
+            scope_subagent_task_id=identity.subagent_task_id,
+        )
+
+    def _offer_todo_snapshot(
+        self,
+        *,
+        todo_run_id: str,
+        todo_revision: int,
+        disposition: str,
+        ordered_items: tuple[TodoLiveItemProjection, ...],
+        pending_count: int,
+        in_progress_count: int,
+        completed_count: int,
+        turn_id: str,
+        scope_kind: ModelInputScopeKind,
+        scope_subagent_task_id: str | None,
+    ) -> None:
+        draft_identity = f"todo:{todo_run_id}:{todo_revision}"
+        try:
+            self._live_bus.offer_nowait(
+                event_type=LiveEventType.TODO_SNAPSHOT_UPDATED,
+                session_id=self._session_id,
+                turn_id=turn_id,
+                draft_identity=draft_identity,
+                payload=TodoSnapshotUpdatedPayload(
+                    todo_run_id=todo_run_id,
+                    todo_revision=todo_revision,
+                    disposition=disposition,
+                    ordered_items=ordered_items,
+                    pending_count=pending_count,
+                    in_progress_count=in_progress_count,
+                    completed_count=completed_count,
+                ),
+                scope_kind=scope_kind.value,
+                scope_subagent_task_id=scope_subagent_task_id,
+                channel_kind=LiveChannelKind.TERMINAL_EXTENSION,
+                generation_id=f"todo:{todo_run_id}",
+                proposed_entry_id=None,
+                block_id=draft_identity,
+                block_ordinal=0,
+                block_kind=LiveBlockKind.OPERATIONAL,
+            )
+        except BaseException:
+            # Live delivery is a disposable observation plane.  It cannot
+            # roll back the already-installed process-local snapshot.
+            pass
 
     async def aclose(self, *, timeout_seconds: float = 5.0) -> None:
         if timeout_seconds <= 0:
@@ -1845,9 +2022,7 @@ class DirectKernelToolPort:
             except BaseException as exc:
                 close_error = exc
             try:
-                if await asyncio.to_thread(
-                    self._wait_for_surface_borrows, deadline
-                ):
+                if await asyncio.to_thread(self._wait_for_surface_borrows, deadline):
                     close_error = close_error or TimeoutError(
                         "tool surface borrows exited after close deadline"
                     )
@@ -1937,23 +2112,17 @@ class DirectKernelToolPort:
         if monitor_late or release_late:
             raise TimeoutError("Terminal owner exited after close deadline")
 
-    async def _close_terminal_monitor_worker(
-        self, deadline_monotonic: float
-    ) -> None:
+    async def _close_terminal_monitor_worker(self, deadline_monotonic: float) -> None:
         try:
             await asyncio.to_thread(
                 self._terminal_monitor.stop_admission_and_close,
                 timeout_seconds=max(0.001, deadline_monotonic - monotonic()),
             )
         except TimeoutError:
-            await asyncio.to_thread(
-                self._terminal_monitor.join_physical_after_close
-            )
+            await asyncio.to_thread(self._terminal_monitor.join_physical_after_close)
             raise
 
-    async def _release_terminal_owner_worker(
-        self, deadline_monotonic: float
-    ) -> None:
+    async def _release_terminal_owner_worker(self, deadline_monotonic: float) -> None:
         try:
             await asyncio.to_thread(
                 self._terminal.release_owner,
@@ -2037,9 +2206,7 @@ def _execute_tool_call(
     return tool.execute(call)
 
 
-def _physical_effect_class(
-    tool_name: str, arguments: Mapping[str, object]
-) -> str:
+def _physical_effect_class(tool_name: str, arguments: Mapping[str, object]) -> str:
     if tool_name == "terminal_process":
         action = arguments.get("action")
         for candidate, effect_class in _TERMINAL_PROCESS_ACTION_EFFECTS:
@@ -2102,9 +2269,7 @@ def _terminal_execution_result(
         else ToolResultState.ERROR
     )
     trusted_duration = (
-        normalize_observation_duration(
-            result.trusted_process_duration_microseconds
-        )
+        normalize_observation_duration(result.trusted_process_duration_microseconds)
         if action in {"start", "log", "poll", "wait"}
         else None
     )
@@ -2143,9 +2308,7 @@ def _validated_terminal_observation_supplement(
         return None
     if tool_name == "terminal" and isinstance(tool, _DirectTerminalTool):
         return claimed
-    if tool_name == "terminal_process" and isinstance(
-        tool, _DirectTerminalProcessTool
-    ):
+    if tool_name == "terminal_process" and isinstance(tool, _DirectTerminalProcessTool):
         action = parse_terminal_process_input(arguments).action
         if action in {"log", "poll", "wait"}:
             return claimed

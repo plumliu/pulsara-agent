@@ -10,7 +10,7 @@
 >
 > 产品能力索引：[POST_HARD_CUT_PRODUCT_CAPABILITY_GAP_INDEX.zh.md](POST_HARD_CUT_PRODUCT_CAPABILITY_GAP_INDEX.zh.md)
 >
-> 前置实现：[Round 3 compiler](ROUND_3_STRUCTURED_MODEL_INPUT_COMPILER_IMPLEMENTATION_SPEC.zh.md)、[Round 3.1 prefix continuity](ROUND_3_1_PROVIDER_INPUT_PREFIX_CONTINUITY_IMPLEMENTATION_SPEC.zh.md)、[Round 5A execution envelope](ROUND_5_LONG_HORIZON_EXECUTION_ENVELOPE_IMPLEMENTATION_SPEC.zh.md)、[Round 5A.1 provider-neutral output termination](ROUND_5A_1_PROVIDER_NEUTRAL_MODEL_OUTPUT_TERMINATION_IMPLEMENTATION_SPEC.zh.md)、[Round 7 model-visible outcome/timing](ROUND_7_MODEL_VISIBLE_FAILURE_AND_TOOL_OBSERVATION_IMPLEMENTATION_SPEC.zh.md)、[Round 7.1 provider-visible ToolResult projection](ROUND_7_1_PROVIDER_VISIBLE_TOOL_RESULT_PROJECTION_IMPLEMENTATION_SPEC.zh.md)、[Round 8 advisory memory](ROUND_8_ADVISORY_MEMORY_SUBSYSTEM_IMPLEMENTATION_SPEC.zh.md)、[Round 9 unified capability semantics](ROUND_9_UNIFIED_CAPABILITY_SEMANTICS_IMPLEMENTATION_SPEC.zh.md)、[Round 9.1 Agent Skills](ROUND_9_1_AGENT_SKILLS_STANDARD_IMPLEMENTATION_SPEC.zh.md)
+> 前置实现：[Round 3 compiler](ROUND_3_STRUCTURED_MODEL_INPUT_COMPILER_IMPLEMENTATION_SPEC.zh.md)、[Round 3.1 prefix continuity](ROUND_3_1_PROVIDER_INPUT_PREFIX_CONTINUITY_IMPLEMENTATION_SPEC.zh.md)、[Round 5A execution envelope](ROUND_5_LONG_HORIZON_EXECUTION_ENVELOPE_IMPLEMENTATION_SPEC.zh.md)、[Round 5A.1 provider-neutral output termination](ROUND_5A_1_PROVIDER_NEUTRAL_MODEL_OUTPUT_TERMINATION_IMPLEMENTATION_SPEC.zh.md)、[Round 7 model-visible outcome/timing](ROUND_7_MODEL_VISIBLE_FAILURE_AND_TOOL_OBSERVATION_IMPLEMENTATION_SPEC.zh.md)、[Round 7.1 provider-visible ToolResult projection](ROUND_7_1_PROVIDER_VISIBLE_TOOL_RESULT_PROJECTION_IMPLEMENTATION_SPEC.zh.md)、[Round 8 advisory memory](ROUND_8_ADVISORY_MEMORY_SUBSYSTEM_IMPLEMENTATION_SPEC.zh.md)、[Round 9 unified capability semantics](ROUND_9_UNIFIED_CAPABILITY_SEMANTICS_IMPLEMENTATION_SPEC.zh.md)、[Round 9.1 Agent Skills](ROUND_9_1_AGENT_SKILLS_STANDARD_IMPLEMENTATION_SPEC.zh.md)、[Lightweight TODO refinement](PULSARA_LIGHTWEIGHT_TODO_TOOL_REFINEMENT_IMPLEMENTATION_SPEC.zh.md)
 >
 > hard-cut前参考基线：5b7ad9f7ffc8565bc572180b2bde0c81ab64473a
 >
@@ -1172,14 +1172,16 @@ canonical snapshot只保存validated carrier。private analysis、tool-call repa
 
 ~~~text
 channel       RUNTIME_OBSERVATION
-trust         TRUSTED_RUNTIME_FACT
+trust         UNTRUSTED_OBSERVATION
 lifecycle     SNAPSHOT_ON_CHANGE
 budget        MUST_KEEP
 variants      FULL | COMPACT
 applicable    current context base is SNAPSHOT
 ~~~
 
-它只表达当前Host可证明的live/control state，不表达历史输出。首次cold compile必须安装VALUE或显式CLEARED；后续无变化no-op，状态变化append新snapshot，全部清空append CLEARED。新Host从snapshot resume时，即使所有旧Terminal owner已消失，也必须append CLEARED，终止semantic summary里可能存在的stale running claim。
+它只表达当前Host可机械证明的live/control **结构、identity、status与currentness**，不表达历史输出。但`command_preview`、`cwd`、TODO text与subagent objective仍可来自用户、工具或模型，不能因为Runtime完成了bounded freeze就被提升为可信指令。当前source只有一个整体trust字段，因此V1将整个`COMPACTION_RUNTIME_HANDOFF`冻结为`UNTRUSTED_OBSERVATION`，不分裂第二个source。
+
+首次cold compile必须安装VALUE或显式CLEARED；后续无变化no-op，状态变化append新snapshot，全部清空append CLEARED。新Host从snapshot resume时，即使所有旧Terminal owner已消失，也必须append CLEARED，终止semantic summary里可能存在的stale running claim。
 
 ### 10.3 Closed provider body
 
@@ -1205,8 +1207,13 @@ FULL body最多包含：
     }
   ],
   "todos": [
-    {"id": "...", "status": "in_progress", "text": "..."}
+    {"ordinal": 0, "status": "in_progress", "text": "..."}
   ],
+  "todo_counts": {
+    "pending": 0,
+    "in_progress": 1,
+    "completed_omitted": 3
+  },
   "flat_subagents": [
     {"task_id": "...", "status": "ACTIVE", "objective_preview": "..."}
   ],
@@ -1236,16 +1243,18 @@ FULL body最多包含：
 - TODO只投影pending/in_progress，最多64项、每项text最多512 UTF-8 bytes；
 - flat subagent只投影当前Host ACTIVE，最多当前existing capacity；
 - FULL aggregate <=32 KiB；
-- COMPACT只保留actionable IDs、status与omitted counts；
-- ordering按kind后stable ID；
+- COMPACT对Terminal process、monitor与flat subagent保留其actionable public identity、status与exact omitted count；
+- TODO没有item ID：其COMPACT必须从FULL ordered actionable items中选择能完整放入的最长前缀，每个保留项仍逐字携带`ordinal + status + text`，并在`omitted.todos`给出未保留的exact数量；不得逐项截断text、只留ordinal/status，或把ordinal描述为稳定ID；
+- TODO的`todo_counts`在FULL/COMPACT中都表达原snapshot的exact pending/in_progress与`completed_omitted`总数，不随prefix裁剪而伪造较小current state；
+- top-level ordering按固定kind；TODO内部保持owner snapshot order/ordinal，其他kind内部按其public stable ID；
 - 路径使用现有public-safe workspace-relative projection；
-- body超过COMPACT bound或无法生成最小truth时provider open=0。
+- 若COMPACT连固定counts/omitted envelope都放不下，或存在actionable TODO但连一个whole item都无法诚实表达，则typed resource boundary、provider open=0；不得发送“有TODO但正文为空”的伪交接。
 
 active branch的live state在summary完成后、dry compile前冻结；adoption FULL后再次读取并要求fingerprint相同，或重新dry compile。idle branch不冻结未来turn的live state。不得在summary开始前抓取一次然后盲用几分钟后的状态。
 
 ### 10.5 TODO与Terminal owner修改面
 
-TodoTool增加只读bounded snapshot方法；不得把_items持久化或复制进repository。Terminal manager/monitor增加Host-scoped只读snapshot方法，必须在各自lock内freeze，不读raw output。Subagent manager只提供现有flat task的bounded只读view；hierarchical graph后续另行扩展同一source。
+`TodoRunStateOwner`提供exact-run、只读bounded snapshot方法；不得把current items持久化或复制进repository。TODO subshape不携带durable item ID；`ordinal`只是当次projection中的ordered position，completed正文不注入，只进入`completed_omitted`计数。Terminal manager/monitor增加Host-scoped只读snapshot方法，必须在各自lock内freeze，不读raw output。Subagent manager只提供现有flat task的bounded只读view；hierarchical graph后续另行扩展同一source。
 
 ### 10.6 `RETAINED_SKILL_CONTEXT`：只保留同run中真正完整交付的Skill
 
@@ -1764,11 +1773,11 @@ purpose-neutral AuxiliaryJsonModelPort仍由Round 8 governor使用，不得随jo
 
 ### 16.3 最终oracle
 
-从当前Round 8 oracle减去唯一job family：
+从Round 8加已激活Lightweight TODO refinement的oracle减去唯一job family：
 
 ~~~text
 Committed events       31 - 3 = 28
-Live events            23
+Live events            24
 Subject slots          13 - 2 = 11
 Append guards           2 - 1 = 1
 Product relations      25 - 2 = 23
@@ -1892,14 +1901,14 @@ Round 9.1 manifest/read contracts + old installed epoch view
 
 ## 19. 实施切片
 
-Round 7.1、Round 9与Round 9.1必须先各自标记ACTIVATED并具备机器证据；它们不是`R5B-*` slice。Round 5B M0只记录三者的activation hash、ordinary ToolResult/Capability/Skill retained node IDs与public DTO manifest，禁止在本轮重新实现或补丁式完成其production路径。
+Round 7.1、Round 9、Round 9.1与Lightweight TODO refinement必须先各自标记ACTIVATED并具备机器证据；它们不是`R5B-*` slice。Round 5B M0只记录四者的activation hash、ordinary ToolResult/Capability/Skill/TODO retained node IDs与public DTO manifest，禁止在本轮重新实现或补丁式完成其production路径。
 
 ### R5B-1：减掉dormant job universe并重算oracle
 
 - 删除BACKGROUND_COMPACTION及job tables/events/guard/Protocol；
 - 保留purpose-neutral auxiliary JSON model；
 - 更新clean-v0 manifest、grants、expected catalog与architecture guards；
-- oracle冻结28/23/11/1/23/0。
+- oracle冻结28/24/11/1/23/0。
 
 ### R5B-A：Pure contracts与one-cut planner
 
@@ -1934,8 +1943,9 @@ Round 7.1、Round 9与Round 9.1必须先各自标记ACTIVATED并具备机器证�
 
 - retained ToolResult复用Round 7.1 ordinary pure builder，并在相同call-local augmentation输入下验证byte-identical；successor epoch citation mapping作为显式输入，不迁移旧opaque handle；
 - COMPACTION_RUNTIME_HANDOFF source；
+- 整个handoff使用`UNTRUSTED_OBSERVATION`，Runtime只证明结构/identity/status/currentness；
 - `RETAINED_SKILL_CONTEXT`从old installed FULL ordinary reads与current manifest纯派生，最多8项；
-- Terminal/monitor/TODO/flat subagent snapshots；
+- Terminal/monitor/TODO/flat subagent snapshots；TODO只使用ordinal/status/text与counts，不伪造item ID；
 - dry compile；
 - successor Round 9 planning cut/exposure plan refreeze与all-or-none NEW promotion；
 - active resources唯一组合successor exposure plan/effective catalog heads/retained Skill selection；physical layer直接复用normal `ProcessLocalToolSurfaceAccess`，期间的新semantic facts仍由既有owners唯一拥有；
@@ -1968,7 +1978,7 @@ Round 7.1、Round 9与Round 9.1必须先各自标记ACTIVATED并具备机器证�
 
 ### 20.1 前置Round retained与successor Capability integration
 
-- Round 7.1、Round 9、Round 9.1 activation evidence hash与public DTO manifest exact匹配；
+- Round 7.1、Round 9、Round 9.1与Lightweight TODO refinement activation evidence hash与public DTO manifest exact匹配；
 - Round 9 normal cold/direct/meta/catalog/list/inspect/use/unavailable/schema-replacement suites原样retained，Round 5B不新增同义unit suite；
 - Round 9.1 normal Skill add/change/remove、textual/configured activation与ordinary read suites原样retained；
 - summary request始终使用old installed `CapabilityEpochPredecessor`的exact native tools与old catalog message prefix；
@@ -2081,7 +2091,7 @@ summary last message == synthetic summary request
 - flat subagent bounded；
 - MCP/skill/permission/Plan/memory不重复进handoff；
 - promoted MCP进入successor native tools而非SYSTEM/handoff正文；仍NEW的工具只由MCP_CATALOG说明；
-- FULL到COMPACT deterministic；
+- FULL到COMPACT deterministic；TODO按ordered whole-item prefix降级并保留exact counts/omitted，不存在item ID或text-free TODO表示；
 - 32 KiB hard bound。
 
 ### 20.8 Retained Skill context
@@ -2148,7 +2158,7 @@ summary last message == synthetic summary request
 - source tree无BACKGROUND_COMPACTION production binding；
 - blob GC仍正确保护snapshot/tool-result/memory引用；
 - auxiliary governor model保留；
-- oracle exact 28/23/11/1/23/0。
+- oracle exact 28/24/11/1/23/0。
 
 ---
 
@@ -2249,6 +2259,7 @@ Round 9必须已经独立证明cold DIRECT、late NEW、inspect/use、disconnect
 41. retained-equivalence测试要求跨epoch raw citation handle相等、迁移旧`tool:N`，或未把call-local augmentation作为pure builder显式输入；
 42. protected tail把Round 7.1 `FULL_REQUIRED` result降级为COMPACT/REF_ONLY/OMITTED，或保留半个不fit的tool group。
 43. `RETAINED_SKILL_CONTEXT`因physical read、canonical row存在、HEAD_TAIL/COMPACT/REF_ONLY或partial page而接纳Skill；跨真实ROOT user message继承；重注入已修改/删除manifest；或建立durable loaded-skill ledger。
+44. TODO COMPACT只保留ordinal/status、伪造稳定item ID、截断单项text、让counts随prefix缩小，或在一个whole actionable item都无法容纳时仍发送空正文声称current TODO已交接。
 
 ---
 
@@ -2294,7 +2305,7 @@ PULSARA_POSTGRES_DSN=postgresql://pulsara:pulsara@localhost:5432/pulsara
 
 Round 5B只有在以下全部成立时才能标记ACTIVATED：
 
-- Round 7.1、Round 9与Round 9.1已分别ACTIVATED；普通ToolResult projection、MCP catalog/list/inspect/use/direct gate与Skill discovery/read不属于Round 5B production slice；
+- Round 7.1、Round 9、Round 9.1与Lightweight TODO refinement已分别ACTIVATED；普通ToolResult projection、MCP catalog/list/inspect/use/direct gate、Skill discovery/read与TODO owner/live projection不属于Round 5B production slice；
 - summary继续old epoch exact native tools、catalog heads与ordinary Skill ToolResult prefix；summary期间current Capability变化不改变旧request；
 - active successor以Round 9 owner inventories、complete registry、planning cut与standard exposure plan重新冻结current capability；compatible old DIRECT保留，完整READY_CLEAN NEW cohort只有在整体fit时才promotion；
 - active successor semantic plan、effective MCP/Skill heads与retained Skill selection在`ActiveCompactionInstallationResources`中各出现一次；normal physical access只覆盖相容slot/execution能力，latest MCP generation仍只由supervisor拥有；
@@ -2314,7 +2325,7 @@ Round 5B只有在以下全部成立时才能标记ACTIVATED：
 - `PreparedCompactionCanonicalAdoption`只含可由snapshot/revision/pointer/predecessor/event确认的row drafts；所有planning/epoch/MCP/execution/dry-compile事实只存在于process-local resources；
 - current binding唯一决定active summary；
 - new ROOT producers全部继承latest exact ROOT snapshot；
-- current Terminal/monitor/TODO/flat subagent由bounded handoff重建；
+- current Terminal/monitor/TODO/flat subagent由bounded `UNTRUSTED_OBSERVATION` handoff重建；Runtime只证明其结构与currentness，TODO不携带item ID且completed正文只计数不注入；TODO COMPACT只选择完整的ordered `ordinal/status/text`前缀并保留原snapshot exact counts/omitted；
 - old epoch只在adoption FULL后关闭；
 - new epoch内恢复strict-prefix；
 - FULL_HISTORY persisted revision marker与effective reader floor分离，首次compaction floor恒为0；repeated compaction source proof使用current binding/base + bounded post-base lineage digest，不从genesis重扫；
@@ -2323,9 +2334,9 @@ Round 5B只有在以下全部成立时才能标记ACTIVATED：
 - Host-wide只串行summary physical execution，先在锁外取得lane、再recapture并安装exact-scope fence；canonical admission fence仅覆盖target scope及其source-head producers；
 - canonical transcript从未删除或改写；
 - 无replacement history、durable compaction job、receipt、checkpoint、repair、replay或memory double call；
-- durable job universe被删除，oracle为28/23/11/1/23/0；
+- durable job universe被删除，oracle为28/24/11/1/23/0；
 - targeted、PostgreSQL、retained、full pytest、static、Go与real-provider dogfood通过；
-- Gap Index同步记录Round 7.1 normal ToolResult投影、Round 9/9.1前置与PHC-07B恢复，不扩大Go高级UI、memory extraction或hierarchical subagent范围。
+- Gap Index同步记录Round 7.1 normal ToolResult投影、Round 9/9.1与Lightweight TODO前置、PHC-07B恢复，不扩大Go高级UI、memory extraction或hierarchical subagent范围。
 
 ---
 
@@ -2333,14 +2344,14 @@ Round 5B只有在以下全部成立时才能标记ACTIVATED：
 
 Coding agent最终汇报必须分开说明：
 
-1. Round 7.1、Round 9与Round 9.1前置activation evidence如何被retained，而非由Round 5B重复实现；
+1. Round 7.1、Round 9、Round 9.1与Lightweight TODO refinement前置activation evidence如何被retained，而非由Round 5B重复实现；
 2. 三种compaction入口及token/resource-headroom OR trigger；
 3. `PreparedCompactionSummaryCall`如何取得active/idle target、证明source view exact、禁止execution authority，以及COMPATIBLE_APPEND时old SYSTEM/tools/prefix不变；
 4. successor standard capability planning/exposure如何freeze、保留compatible old DIRECT、整体promotion READY_CLEAN NEW cohort并使old refs失效；
 5. post-compile effective MCP/Skill heads与`RETAINED_SKILL_CONTEXT`如何随continuity CAS安装；
 6. protected tool group、Round 7.1 normal result variants与recent human selection；
 7. FULL_HISTORY floor、shared canonical range fingerprint、bounded lineage digest，以及canonical row-draft candidate与process resources分层后的atomic adoption/ACK unknown；
-8. current Runtime sources、`RETAINED_SKILL_CONTEXT`与COMPACTION_RUNTIME_HANDOFF的重建；
+8. current Runtime sources、`RETAINED_SKILL_CONTEXT`与`UNTRUSTED_OBSERVATION` COMPACTION_RUNTIME_HANDOFF的重建，以及TODO无ID actionable subshape；
 9. active install与idle base-only settlement、lane/fence顺序、cross-turn及repeated compaction；
 10. durable job machinery删除后的最终oracle；
 11. exact测试、PostgreSQL、static、Go与四条dogfood证据；
