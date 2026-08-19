@@ -15,6 +15,9 @@ from uuid import uuid4
 
 from jsonschema import validators
 
+from pulsara_agent.llm.adapters.openai.function_tools import (
+    lower_openai_function_parameters,
+)
 from pulsara_agent.mcp_config import (
     McpConfiguredEffect,
     McpInvalidToolPolicy,
@@ -1964,6 +1967,11 @@ async def _discover(
             input_dialect = _mcp_schema_dialect(item.input_schema)
             input_validator = validators.validator_for(item.input_schema)
             input_validator.check_schema(item.input_schema)
+            # Direct MCP tools share the exact pure wire-lowerability contract
+            # used later by both OpenAI-compatible APIs.  A valid JSON Schema
+            # outside that portable subset is handled here by the configured
+            # per-tool discovery policy; it can never poison a whole dispatch.
+            lower_openai_function_parameters(item.input_schema)
             frozen = freeze_json(item.input_schema)
             if not isinstance(frozen, FrozenJsonObjectFact):
                 raise TypeError("MCP tool schema did not freeze to an object")

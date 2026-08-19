@@ -28,7 +28,7 @@ Python KernelHostCore
         └── Go terminal client
 
 PostgreSQL
-├── pulsara_v3: 25 product relations
+├── pulsara_v3: 26 product relations
 ├── selective agent_events occurrence journal
 ├── public.vector capability
 └── public.pulsara_schema_migrations (universe metadata only)
@@ -60,7 +60,8 @@ The current Kernel supports:
 - OpenAI-compatible Responses and Chat Completions transports;
 - explicit provider-neutral `COMPLETED | OUTPUT_INCOMPLETE | PROVIDER_ERROR`
   model terminals, whole-response atomic assistant acceptance, and exact
-  same-epoch manual reasoning replay without provider-held response state;
+  Chat/Responses native replay for accepted responses across Host and process
+  restart without provider-held response state or remote response IDs;
 - a provider-neutral structured input compiler over the exact canonical cut,
   with closed typed first-party sources, scope-frozen tool schemas, exact target
   token estimation, deterministic source/tool-result degradation, and one
@@ -167,8 +168,9 @@ within one exact ROOT or child scope, the system prompt and tool surface remain
 stable while canonical conversation facts and typed runtime observations are
 appended as a strict message suffix. Busy `Enter` steers the exact active ROOT
 turn; `Tab` queues a future new turn. A replacement Host cold-starts from
-canonical rows—there is no durable provider conversation, prefix replay, or
-remote response identity. Steer-prefix planning shares the installed prefix
+canonical rows. Round 5A.2 persists only an accepted assistant entry's bounded,
+private Chat/Responses native replay carrier; it does not persist a compiled
+provider conversation, remote response identity, or in-flight stream. Steer-prefix planning shares the installed prefix
 estimate, observes one absolute cooperative deadline, and is capped by a
 process-local unique-work quote that never recharges the same immutable base
 for each nested-prefix trial. Provider open additionally requires the exact
@@ -177,6 +179,8 @@ enforces exactly one value-or-absence branch for every first-party source.
 Plan handoff display text is
 separate from its exact canonical transition identity. Verification is recorded in
 [`round3_1_provider_input_prefix_continuity_activation.json`](benchmarks/suites/core/v1/round3_1_provider_input_prefix_continuity_activation.json).
+Cross-process replay verification is recorded in
+[`round5a2_durable_provider_replay_and_cross_restart_thread_continuation_activation.json`](benchmarks/suites/core/v1/round5a2_durable_provider_replay_and_cross_restart_thread_continuation_activation.json).
 Round 4 extends clean-v0 to 26 product relations and 34 selective occurrences;
 its Plan workflow, run-bound permission, Protocol v3, and real-provider
 verification are recorded in

@@ -21,6 +21,9 @@ from pulsara_agent.llm.adapters.openai.events import (
     sdk_event_to_dict,
     transport_usage_report_from_mapping,
 )
+from pulsara_agent.llm.adapters.openai.function_tools import (
+    openai_chat_function_tool,
+)
 from pulsara_agent.llm.adapters.openai.retrying import (
     build_provider_retry_summary,
     log_retry_attempt,
@@ -34,7 +37,6 @@ from pulsara_agent.llm.provider import (
     CHAT_CLOSED_REASONING_FIELD_CONTRACTS,
     ProviderChatFieldAccumulationMode,
     ProviderProfile,
-    ProviderReasoningReplayScope,
     ThinkingReplayPolicy,
     mutable_provider_value,
 )
@@ -601,22 +603,13 @@ class ChatCompletionAccumulator:
         return True
 
     def _reconcile_final_message(self, raw_message: object) -> None:
-        selected = (
-            self.provider_profile.reasoning_replay_scope
-            is ProviderReasoningReplayScope.ALL_COMPLETED_RESPONSES
-            or (
-                self.provider_profile.reasoning_replay_scope
-                is ProviderReasoningReplayScope.TOOL_RESPONSES
-                and bool(self.tool_calls.completed_calls)
-            )
-        )
         known_contracts = CHAT_CLOSED_REASONING_FIELD_CONTRACTS
         replay_contracts = {
             item.field_name: item
             for item in self.provider_profile.chat_replay_fields
         }
         if raw_message is None:
-            if selected and any(
+            if any(
                 item.final_value_required for item in replay_contracts.values()
             ):
                 raise LLMTransportContractError(
@@ -661,8 +654,7 @@ class ChatCompletionAccumulator:
             present = contract.field_name in raw_message
             replay_contract = replay_contracts.get(contract.field_name)
             if (
-                selected
-                and replay_contract is not None
+                replay_contract is not None
                 and replay_contract.final_value_required
                 and not present
             ):
@@ -675,8 +667,7 @@ class ChatCompletionAccumulator:
             raw_value = raw_message[contract.field_name]
             if raw_value is None:
                 if (
-                    selected
-                    and replay_contract is not None
+                    replay_contract is not None
                     and replay_contract.final_value_required
                 ):
                     raise LLMTransportContractError(
@@ -908,16 +899,6 @@ class ChatCompletionAccumulator:
         self._replay_item_count = 0
 
     def _freeze_completed_replay(self):
-        scope = self.provider_profile.reasoning_replay_scope
-        selected = (
-            scope is ProviderReasoningReplayScope.ALL_COMPLETED_RESPONSES
-            or (
-                scope is ProviderReasoningReplayScope.TOOL_RESPONSES
-                and bool(self.tool_calls.completed_calls)
-            )
-        )
-        if not selected:
-            return None
         contracts = self.provider_profile.chat_replay_fields
         for contract in contracts:
             if contract.required_on_selected_response and (
@@ -1230,11 +1211,4 @@ def _should_replay_thinking(
 
 
 def _tool_to_chat_tool(tool: ToolSpec) -> dict[str, Any]:
-    return {
-        "type": "function",
-        "function": {
-            "name": tool.name,
-            "description": tool.description,
-            "parameters": tool.parameters,
-        },
-    }
+    return openai_chat_function_tool(tool)

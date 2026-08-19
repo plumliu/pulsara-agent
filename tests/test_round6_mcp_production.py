@@ -91,6 +91,9 @@ from pulsara_agent.conversation_kernel.tool_policy import (
     DefaultToolDispatchAuthorizationPolicy,
 )
 from pulsara_agent.conversation_kernel.tool_runtime import DirectKernelToolPort
+from pulsara_agent.llm.adapters.openai.function_tools import (
+    lower_openai_function_parameters,
+)
 from pulsara_agent.mcp_config import (
     McpConfiguredEffect,
     McpHttpNetworkPolicy,
@@ -183,6 +186,7 @@ def _config(
     enabled: bool = True,
     default_tool_timeout_ms: int | None = None,
     default_effect: str = "AUTO",
+    invalid_tool_policy: str = "FAIL_SERVER",
 ):
     config = tmp_path / "mcp.yaml"
     if endpoint is None:
@@ -209,6 +213,10 @@ def _config(
         if default_effect != "AUTO"
         else ""
     )
+    exposure_lines = (
+        "    exposure_policy:\n"
+        f"      invalid_tool_policy: {invalid_tool_policy}\n"
+    )
     config.write_text(
         "servers:\n"
         "  fixture:\n"
@@ -219,6 +227,7 @@ def _config(
         "    catalog_refresh_interval_ms: DISABLED\n"
         f"{timeout_line}"
         f"{effect_lines}"
+        f"{exposure_lines}"
         f"    transport: {json.dumps(transport)}\n",
         encoding="utf-8",
     )
@@ -412,6 +421,42 @@ def test_round6_discovery_calls_only_negotiated_listing_capabilities(
             assert candidate.discovery_snapshot.resource_templates == ()
             assert candidate.discovery_snapshot.prompts == ()
             assert supervisor.catalog_snapshot().servers[0].status is McpServerState.READY
+        finally:
+            runtime.release()
+            await supervisor.aclose()
+
+    asyncio.run(exercise())
+
+
+def test_round6_discovery_omits_only_wire_incompatible_mcp_tool(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        supervisor = McpHostSupervisor(
+            session_id="session:mixed-schema",
+            workspace_root=tmp_path,
+            configs=(_config(tmp_path, invalid_tool_policy="OMIT_INVALID"),),
+            client_factory=_MixedSchemaFakeMcpClient,  # type: ignore[arg-type]
+        )
+        await supervisor.start()
+        runtime = supervisor.install_pending_at_safe_point()
+        assert runtime is not None
+        try:
+            candidate = runtime.candidates["fixture"]
+            snapshot = candidate.discovery_snapshot
+            assert snapshot.discovered_tool_count == 2
+            assert snapshot.invalid_tool_count == 1
+            assert tuple(item.remote_tool_name for item in snapshot.tools) == (
+                "fake_echo",
+            )
+            for semantic in runtime.root_tool_specs:
+                lowered = lower_openai_function_parameters(
+                    thaw_json(semantic.input_schema)
+                )
+                assert lowered["type"] == "object"
+            assert "intersecting_unions" not in {
+                item.remote_tool_name for item in runtime.root_tool_specs
+            }
         finally:
             runtime.release()
             await supervisor.aclose()
@@ -696,6 +741,37 @@ class _ToolsOnlyFakeMcpClient(_FakeMcpClient):
             resources=False,
             prompts=False,
         )
+
+
+class _MixedSchemaFakeMcpSession(_FakeMcpSession):
+    async def list_tools(self, *, params=None):
+        result = await super().list_tools(params=params)
+        return types.ListToolsResult(
+            resultType="complete",
+            tools=[
+                *result.tools,
+                types.Tool(
+                    name="intersecting_unions",
+                    description="A valid JSON Schema outside the wire subset.",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "value": {
+                                "oneOf": [{"type": "string"}],
+                                "anyOf": [{"minLength": 1}],
+                            }
+                        },
+                    },
+                    annotations=types.ToolAnnotations(readOnlyHint=True),
+                ),
+            ],
+        )
+
+
+class _MixedSchemaFakeMcpClient(_FakeMcpClient):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.session = _MixedSchemaFakeMcpSession()
 
 
 class _LongNameFakeMcpSession(_FakeMcpSession):
@@ -3137,7 +3213,7 @@ def test_round6_does_not_expand_durable_or_protocol_oracles() -> None:
     assert len(LIVE_EVENT_TYPES) == 24
     assert len(SUBJECT_SLOTS) == 13
     assert len(APPEND_GUARDS) == 2
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 25
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 26
     assert len(JOB_HANDLER_CATALOG) == 1
 
     root = Path(__file__).parents[1]

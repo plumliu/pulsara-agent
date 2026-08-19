@@ -25,7 +25,7 @@ from pulsara_agent.model_input.continuity import (
     provider_input_logical_utf8_bytes,
     provider_input_prefix_fingerprint,
 )
-from pulsara_agent.llm.request import ProviderAssistantReplayFragment
+from pulsara_agent.llm.provider_replay import ProviderAssistantReplayFragment
 from pulsara_agent.llm.request import FrozenProviderWireInputPlan
 
 

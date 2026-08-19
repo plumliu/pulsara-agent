@@ -55,8 +55,12 @@ from pulsara_agent.conversation_kernel.direct_model import (
 from pulsara_agent.llm.input import LLMToolCall
 from pulsara_agent.llm.request import (
     FrozenProviderWireInputPlan,
-    ProviderAssistantReplayFragment,
     provider_assistant_public_projection_fingerprint,
+)
+from pulsara_agent.llm.provider_replay import (
+    PreparedDurableProviderAssistantReplay,
+    ProviderReplayDisposition,
+    build_provider_replay_target_compatibility,
 )
 from pulsara_agent.ports.provider_stream import (
     ProviderModelExecutionFailed,
@@ -252,6 +256,12 @@ from pulsara_agent.model_input.continuity import (
     SourceObservationPresence,
     prepared_provider_input_append_candidate_fingerprint,
 )
+from pulsara_agent.model_input.provider_replay import (
+    FrozenCanonicalProviderDispatchRead,
+    FrozenSelectedDurableProviderReplayHydration,
+    ProviderReplayHydrationError,
+    ProviderReplayHydrationFailureKind,
+)
 from pulsara_agent.primitives.model_call import ModelCallPurpose
 from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE, PermissionMode
 from pulsara_agent.primitives.run_permission import FrozenRunPermissionSnapshot
@@ -294,6 +304,7 @@ class KernelModelPort(Protocol):
         prepared_call: PreparedKernelModelCall,
         compiled_input: FrozenCompiledModelInput,
         predecessor_view: FrozenProviderInputEpochView | None,
+        replay_hydration: FrozenSelectedDurableProviderReplayHydration | None = None,
     ) -> FrozenProviderWireInputPlan: ...
 
 
@@ -726,6 +737,7 @@ class KernelRunResult:
 @dataclass(frozen=True, slots=True)
 class _PreparedProviderDispatch:
     handle: PreparedProviderInputHandle
+    canonical_read: FrozenCanonicalProviderDispatchRead
     canonical_facts: FrozenCanonicalCompileSnapshot
     planning: FrozenProviderInputAppendPlanningInput
     prepared_call: PreparedKernelModelCall
@@ -740,7 +752,9 @@ class _PreparedProviderDispatch:
 class _CollectedModelResponse:
     completed: CompletedAssistantMessage
     provider_completion: CompletedProviderModelExecution
-    replay_fragment: ProviderAssistantReplayFragment | None = dataclass_field(
+    provider_wire_api: str
+    provider_replay_disposition: ProviderReplayDisposition
+    provider_replay: PreparedDurableProviderAssistantReplay | None = dataclass_field(
         default=None, repr=False
     )
 
@@ -1225,9 +1239,9 @@ class ConversationKernelRunner:
         )
         borrow: ProcessLocalToolSurfaceBorrow | None = None
         try:
-            base_facts = await self._read_compile_snapshot(
-                handle.cut, deadline=deadline
-            )
+            await self._resolved_workspace_id(deadline=deadline)
+            base_read = await self._read_dispatch_read(handle.cut, deadline=deadline)
+            base_facts = base_read.compile_snapshot
             base_input = base_facts.canonical_input
             identity = base_input.identity
             scope = ProviderInputContinuityScope(
@@ -1724,16 +1738,16 @@ class ConversationKernelRunner:
                     ) from exc
                 accepted_entries = await self._consume_prepared_steer_plan(selected_plan)
                 try:
-                    canonical_deadline = self._canonical_deadline()
                     handle = await self._io.run(
                         self._safe_point.rotate_provider_input,
                         handle,
                         turn_id=turn_id,
-                        deadline_monotonic=canonical_deadline,
+                        deadline_monotonic=deadline,
                     )
-                    actual = await self._read_compile_snapshot(
-                        handle.cut, deadline=canonical_deadline
+                    actual_read = await self._read_dispatch_read(
+                        handle.cut, deadline=deadline
                     )
+                    actual = actual_read.compile_snapshot
                     if (
                         actual.canonical_read_cut_fingerprint
                         != selected_facts.canonical_read_cut_fingerprint
@@ -1832,6 +1846,7 @@ class ConversationKernelRunner:
                 )
                 return _PreparedProviderDispatch(
                     handle=handle,
+                    canonical_read=actual_read,
                     canonical_facts=actual,
                     planning=selected_plan.predecessor,
                     prepared_call=prepared_call,
@@ -2021,6 +2036,7 @@ class ConversationKernelRunner:
             )
             return _PreparedProviderDispatch(
                 handle=handle,
+                canonical_read=base_read,
                 canonical_facts=base_facts,
                 planning=planning,
                 prepared_call=prepared_call,
@@ -2041,6 +2057,20 @@ class ConversationKernelRunner:
         try:
             return await self._io.run(
                 self._input_reader.read_frozen_compile_snapshot,
+                cut,
+                deadline_monotonic=deadline,
+            )
+        except TimeoutError as exc:
+            raise StructuredModelInputCompileError(
+                ModelInputCompileFailureKind.DEADLINE_EXPIRED
+            ) from exc
+
+    async def _read_dispatch_read(
+        self, cut: PreparedProviderInputCut, *, deadline: float
+    ) -> FrozenCanonicalProviderDispatchRead:
+        try:
+            return await self._io.run(
+                self._input_reader.read_frozen_dispatch,
                 cut,
                 deadline_monotonic=deadline,
             )
@@ -2784,6 +2814,41 @@ class ConversationKernelRunner:
                         model_call_index=model_call_count,
                         compiled=compiled_input,
                     )
+                    profile = (
+                        prepared_call.call.target.model_profile.provider_profile
+                    )
+                    replay_target = build_provider_replay_target_compatibility(
+                        wire_api=profile.wire_api,
+                        endpoint_identity_fingerprint=(
+                            prepared_call.call.target.fact.endpoint_fingerprint
+                        ),
+                        normalized_model_identifier=(
+                            prepared_call.call.target.fact.model_id
+                        ),
+                        transport_binding_id=(
+                            prepared_call.call.target.fact.transport_binding_id
+                        ),
+                    )
+                    try:
+                        replay_hydration = await self._io.run(
+                            self._input_reader.hydrate_selected_provider_replays,
+                            dispatch_read=dispatch.canonical_read,
+                            compiled_input=compiled_input,
+                            replay_target=replay_target,
+                            deadline_monotonic=planning_deadline,
+                        )
+                    except TimeoutError as exc:
+                        raise StructuredModelInputCompileError(
+                            ModelInputCompileFailureKind.DEADLINE_EXPIRED
+                        ) from exc
+                    except ProviderReplayHydrationError as exc:
+                        kind = (
+                            ModelInputCompileFailureKind.COMPILE_WORKING_SET_EXCEEDED
+                            if exc.kind
+                            is ProviderReplayHydrationFailureKind.RESOURCE_BOUNDARY
+                            else ModelInputCompileFailureKind.CANONICAL_PREFIX_CONFLICT
+                        )
+                        raise StructuredModelInputCompileError(kind) from exc
                     wire_input_plan = self._model.plan_wire_input(
                         prepared_call=prepared_call,
                         compiled_input=compiled_input,
@@ -2792,6 +2857,7 @@ class ConversationKernelRunner:
                             if append_result.reset_reason is not None
                             else planning.predecessor_view
                         ),
+                        replay_hydration=replay_hydration,
                     )
                     append_candidate = _prepared_append_candidate(
                         planning=planning,
@@ -2905,7 +2971,11 @@ class ConversationKernelRunner:
                                 continuity_scope=permit.scope,
                                 continuity_epoch_nonce=permit.epoch_nonce,
                                 continuity_epoch_revision=permit.epoch_revision,
-                                replay_fragment=collected.replay_fragment,
+                                provider_wire_api=collected.provider_wire_api,
+                                provider_replay_disposition=(
+                                    collected.provider_replay_disposition
+                                ),
+                                provider_replay=collected.provider_replay,
                             )
                         ),
                         guard=self._writer_lease.guard,
@@ -2919,7 +2989,11 @@ class ConversationKernelRunner:
                         continuity_scope=permit.scope,
                         continuity_epoch_nonce=permit.epoch_nonce,
                         continuity_epoch_revision=permit.epoch_revision,
-                        replay_fragment=collected.replay_fragment,
+                        provider_wire_api=collected.provider_wire_api,
+                        provider_replay_disposition=(
+                            collected.provider_replay_disposition
+                        ),
+                        provider_replay=collected.provider_replay,
                     )
                     accepted = await self._assistant_settlements.settle(settlement)
                     self._live_bus.offer_settlement_nowait(
@@ -3927,21 +4001,27 @@ class ConversationKernelRunner:
                 )
                 for block in completed.blocks
             )
-            replay = provider_completion.bind_assistant_entry(
-                assistant_entry_id=proposed_entry_id,
-                public_projection_fingerprint=(
-                    provider_assistant_public_projection_fingerprint(
-                        text=public_text,
-                        tool_calls=public_calls,
-                        ordered_blocks=public_blocks,
-                    )
-                ),
-                has_tool_calls=bool(public_calls),
+            public_projection_fingerprint = (
+                provider_assistant_public_projection_fingerprint(
+                    text=public_text,
+                    tool_calls=public_calls,
+                    ordered_blocks=public_blocks,
+                )
+            )
+            replay_disposition, provider_replay = (
+                provider_completion.bind_durable_assistant_entry(
+                    session_id=request.session_id,
+                    workspace_id=await self._resolved_workspace_id(),
+                    assistant_entry_id=proposed_entry_id,
+                    public_projection_fingerprint=public_projection_fingerprint,
+                )
             )
             return _CollectedModelResponse(
                 completed=completed,
                 provider_completion=provider_completion,
-                replay_fragment=replay,
+                provider_wire_api=provider_completion.replay_target.wire_api,
+                provider_replay_disposition=replay_disposition,
+                provider_replay=provider_replay,
             )
         except BaseException as exc:
             self._live_bus.offer_settlement_nowait(
@@ -4084,12 +4164,14 @@ class ConversationKernelRunner:
             deadline_monotonic=deadline,
         )
 
-    async def _resolved_workspace_id(self) -> str:
+    async def _resolved_workspace_id(self, *, deadline: float | None = None) -> str:
         if self._workspace_id is None:
             self._workspace_id = await self._io.run(
                 self._repository.read_session_workspace_id,
                 self._writer_lease.guard,
-                deadline_monotonic=self._canonical_deadline(),
+                deadline_monotonic=(
+                    self._canonical_deadline() if deadline is None else deadline
+                ),
             )
         return self._workspace_id
 

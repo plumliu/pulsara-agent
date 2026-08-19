@@ -8,6 +8,10 @@ from psycopg import IsolationLevel
 from psycopg.rows import dict_row
 from pulsara_agent.conversation_kernel.contracts import AssistantBlockKind, CanonicalContent, CommittedEventDraft, CommittedEventSubject, ConversationScopeKind, EntryKind, HostWriterGuard, InlineContent, TurnStatus
 from pulsara_agent.model_input.contracts import PreparedProviderInputCut
+from pulsara_agent.llm.provider_replay import (
+    PreparedDurableProviderAssistantReplay,
+    ProviderReplayDisposition,
+)
 from pulsara_agent.ports.terminal_observation import ExistingTurnInstallation, NewTurnInstallation, TerminalObservationInstallationAttempt
 from pulsara_agent.primitives.context import FrozenJsonObjectFact, freeze_json
 from pulsara_agent.primitives.permission import PermissionMode
@@ -780,6 +784,11 @@ class _ConversationOperations:
         entry_id: str,
         parent_content: CanonicalContent,
         blocks: Sequence[AssistantBlock],
+        provider_wire_api: str = "openai_chat_completions",
+        provider_replay_disposition: ProviderReplayDisposition = (
+            ProviderReplayDisposition.PUBLIC_SEMANTIC_ONLY
+        ),
+        provider_replay: PreparedDurableProviderAssistantReplay | None = None,
         complete_turn: bool = False,
         occurred_at: datetime,
         actor_id: str,
@@ -792,6 +801,24 @@ class _ConversationOperations:
         tool_request = any(isinstance(item, AssistantToolCallBlock) for item in blocks)
         if complete_turn and tool_request:
             raise ValueError("a tool-request message cannot complete its turn")
+        if (
+            (provider_replay is not None)
+            != (provider_replay_disposition is ProviderReplayDisposition.NATIVE_REPLAY)
+            or provider_wire_api
+            not in {"openai_chat_completions", "openai_responses"}
+            or (
+                provider_wire_api == "openai_responses"
+                and provider_replay_disposition
+                is not ProviderReplayDisposition.NATIVE_REPLAY
+            )
+        ):
+            raise ValueError("assistant provider replay union is invalid")
+        if provider_replay is not None and (
+            provider_replay.session_id != guard.session_id
+            or provider_replay.assistant_entry_id != entry_id
+            or provider_replay.wire_api != provider_wire_api
+        ):
+            raise ValueError("assistant provider replay does not exact-join")
         event_type = (
             CommittedEventType.ASSISTANT_TOOL_REQUEST_ACCEPTED
             if tool_request
@@ -837,6 +864,11 @@ class _ConversationOperations:
                 content=parent_content,
                 context_binding_revision_id=cut.context_binding_revision_id,
                 provider_input_through_sequence=cut.provider_input_through_sequence,
+                provider_wire_api=provider_wire_api,
+                provider_replay_disposition=provider_replay_disposition.value,
+                provider_replay_fragment_id=(
+                    None if provider_replay is None else provider_replay.replay_id
+                ),
             )
             for ordinal, block in enumerate(blocks):
                 self._insert_assistant_block(
@@ -846,6 +878,41 @@ class _ConversationOperations:
                     entry_id=entry_id,
                     ordinal=ordinal,
                     block=block,
+                )
+            if provider_replay is not None:
+                if provider_replay.workspace_id != str(turn["workspace_id"]):
+                    raise ConversationKernelConflict(
+                        "assistant provider replay workspace drifted"
+                    )
+                connection.execute(
+                    """
+                    INSERT INTO pulsara_v3.provider_assistant_replay_fragments (
+                        id, session_id, workspace_id, assistant_entry_id,
+                        wire_api, codec_kind,
+                        provider_replay_contract_fingerprint,
+                        replay_target_fingerprint,
+                        public_projection_fingerprint,
+                        payload_bytes, payload_digest, payload_size,
+                        item_count, fragment_fingerprint
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s,
+                              %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        provider_replay.replay_id,
+                        provider_replay.session_id,
+                        provider_replay.workspace_id,
+                        provider_replay.assistant_entry_id,
+                        provider_replay.wire_api,
+                        provider_replay.codec_kind.value,
+                        provider_replay.provider_replay_contract_fingerprint,
+                        provider_replay.replay_target_fingerprint,
+                        provider_replay.public_projection_fingerprint,
+                        provider_replay.payload_bytes,
+                        provider_replay.payload_digest,
+                        provider_replay.payload_size,
+                        provider_replay.item_count,
+                        provider_replay.fragment_fingerprint,
+                    ),
                 )
             subagent_message: tuple[str, int, str] | None = None
             if (
@@ -971,6 +1038,11 @@ class _ConversationOperations:
         entry_id: str,
         parent_content: CanonicalContent,
         blocks: Sequence[AssistantBlock],
+        provider_wire_api: str = "openai_chat_completions",
+        provider_replay_disposition: ProviderReplayDisposition = (
+            ProviderReplayDisposition.PUBLIC_SEMANTIC_ONLY
+        ),
+        provider_replay: PreparedDurableProviderAssistantReplay | None = None,
         complete_turn: bool,
         occurred_at: datetime,
         actor_id: str,
@@ -1035,6 +1107,13 @@ class _ConversationOperations:
                 != cut.context_binding_revision_id
                 or int(row["provider_input_through_sequence"])
                 != cut.provider_input_through_sequence
+                or str(row["provider_wire_api"]) != provider_wire_api
+                or str(row["provider_replay_disposition"])
+                != provider_replay_disposition.value
+                or row["provider_replay_fragment_id"]
+                != (
+                    None if provider_replay is None else provider_replay.replay_id
+                )
                 or self._content_from_row(row) != parent_content
                 or str(row["event_type"]) != expected_event_type.value
                 or str(row["actor_kind"]) != "model"
@@ -1044,6 +1123,48 @@ class _ConversationOperations:
             ):
                 raise ConversationKernelConflict(
                     "assistant entry identity names a different winner"
+                )
+            replay_rows = connection.execute(
+                """
+                SELECT * FROM pulsara_v3.provider_assistant_replay_fragments
+                WHERE session_id = %s AND assistant_entry_id = %s
+                """,
+                (guard.session_id, entry_id),
+            ).fetchall()
+            if provider_replay is None:
+                if replay_rows:
+                    raise ConversationKernelConflict(
+                        "assistant winner owns an unexpected provider replay"
+                    )
+            elif (
+                len(replay_rows) != 1
+                or str(replay_rows[0]["id"]) != provider_replay.replay_id
+                or str(replay_rows[0]["workspace_id"])
+                != provider_replay.workspace_id
+                or str(replay_rows[0]["wire_api"]) != provider_replay.wire_api
+                or str(replay_rows[0]["codec_kind"])
+                != provider_replay.codec_kind.value
+                or str(
+                    replay_rows[0]["provider_replay_contract_fingerprint"]
+                )
+                != provider_replay.provider_replay_contract_fingerprint
+                or str(replay_rows[0]["replay_target_fingerprint"])
+                != provider_replay.replay_target_fingerprint
+                or str(replay_rows[0]["public_projection_fingerprint"])
+                != provider_replay.public_projection_fingerprint
+                or bytes(replay_rows[0]["payload_bytes"])
+                != provider_replay.payload_bytes
+                or str(replay_rows[0]["payload_digest"])
+                != provider_replay.payload_digest
+                or int(replay_rows[0]["payload_size"])
+                != provider_replay.payload_size
+                or int(replay_rows[0]["item_count"])
+                != provider_replay.item_count
+                or str(replay_rows[0]["fragment_fingerprint"])
+                != provider_replay.fragment_fingerprint
+            ):
+                raise ConversationKernelConflict(
+                    "assistant provider replay differs from the stable candidate"
                 )
             block_rows = connection.execute(
                 """

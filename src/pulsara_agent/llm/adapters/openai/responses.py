@@ -22,6 +22,9 @@ from pulsara_agent.llm.adapters.openai.events import (
     responses_reported_model,
     transport_usage_report_from_mapping,
 )
+from pulsara_agent.llm.adapters.openai.function_tools import (
+    openai_responses_function_tool,
+)
 from pulsara_agent.llm.adapters.openai.retrying import (
     build_provider_retry_summary,
     log_retry_attempt,
@@ -645,7 +648,18 @@ def _project_completed_response(
                 streamed_reasoning_content.get(output_index, ())
             )
             if output_index in reasoning_content_done or streamed_content:
-                if content_text != streamed_content:
+                # Some OpenAI-compatible Responses implementations stream the
+                # public reasoning summary under ``reasoning_text`` and place
+                # that exact text in the final ``summary`` array.  Accept only
+                # the unambiguous byte-exact alias: no actual final reasoning
+                # content and no separate summary stream may coexist with it.
+                exact_summary_alias = (
+                    not content_text
+                    and not streamed_summary
+                    and output_index not in reasoning_summary_done
+                    and summary_text == streamed_content
+                )
+                if content_text != streamed_content and not exact_summary_alias:
                     raise LLMTransportContractError(
                         "final Responses reasoning content differs from the stream",
                         reason_code="transport_responses_output_mismatch",
@@ -1047,12 +1061,7 @@ def _tool_call_to_responses_input(tool_call: LLMToolCall) -> dict[str, Any]:
 
 
 def _tool_to_responses_tool(tool: ToolSpec) -> dict[str, Any]:
-    return {
-        "type": "function",
-        "name": tool.name,
-        "description": tool.description,
-        "parameters": tool.parameters,
-    }
+    return openai_responses_function_tool(tool)
 
 
 def _response_error_message(provider_data: dict[str, Any]) -> str:

@@ -28,7 +28,7 @@ Python KernelHostCore
         └── Go terminal client
 
 PostgreSQL
-├── pulsara_v3：25 张产品关系
+├── pulsara_v3：26 张产品关系
 ├── selective agent_events occurrence journal
 ├── public.vector capability
 └── public.pulsara_schema_migrations（只保存 universe metadata）
@@ -58,7 +58,8 @@ Kernel 当前支持：
 - OpenAI-compatible Responses 与 Chat Completions transport；
 - 显式provider-neutral `COMPLETED | OUTPUT_INCOMPLETE | PROVIDER_ERROR`
   model terminal、whole-response atomic assistant acceptance，以及不依赖
-  provider-held response state的same-epoch exact manual reasoning replay；
+  provider-held response state或remote response ID、可跨Host/进程重启恢复的
+  accepted Chat/Responses exact native replay；
 - 基于 exact canonical cut 的 provider-neutral structured input compiler：
   closed typed first-party source、按 scope 冻结的 tool schema、目标 estimator
   精确计量、source/tool-result 的确定性降级，以及一次冻结的
@@ -155,14 +156,17 @@ Round 3.1 增加 Host-scoped、process-local provider-input continuity epoch：�
 同一 exact ROOT 或 child scope 内，system prompt 与 tool surface 保持不变，
 canonical conversation fact 和 typed runtime observation 只作为 message suffix
 追加。busy `Enter` steer exact active ROOT turn，`Tab`排队 future new turn。
-Host replacement 只从 canonical rows 冷启动，不持久化 provider conversation、
-prefix replay 或 remote response identity。Steer prefix planning复用已安装prefix
+Host replacement 只从 canonical rows 冷启动。Round 5A.2只持久化已接受
+assistant entry的bounded private Chat/Responses native replay carrier；不持久化
+compiled provider conversation、remote response identity或in-flight stream。Steer prefix planning复用已安装prefix
 estimate，共享一个cooperative absolute deadline；unique-work quote不会为每个
 nested-prefix trial重复收取同一immutable base。provider open还必须消费Host
 continuity owner密封签发的exact one-shot permit对象，compiler则强制每种
 first-party source恰好一个VALUE或ABSENT branch；
 Plan handoff显示正文与exact canonical transition identity相互分离。证据记录在
 [`round3_1_provider_input_prefix_continuity_activation.json`](benchmarks/suites/core/v1/round3_1_provider_input_prefix_continuity_activation.json)。
+Round 5A.2跨进程replay验证记录在
+[`round5a2_durable_provider_replay_and_cross_restart_thread_continuation_activation.json`](benchmarks/suites/core/v1/round5a2_durable_provider_replay_and_cross_restart_thread_continuation_activation.json)。
 Round 4将clean-v0扩展为26张产品关系和34类selective occurrence；Plan
 workflow、run-bound permission、Protocol v3与real-provider证据记录在
 [`round4_plan_workflow_and_run_permission_activation.json`](benchmarks/suites/core/v1/round4_plan_workflow_and_run_permission_activation.json)。

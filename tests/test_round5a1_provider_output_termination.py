@@ -10,6 +10,7 @@ from threading import Thread
 
 import pytest
 
+from pulsara_agent.capability.builtin_catalog import builtin_tool_catalog
 from pulsara_agent.conversation_kernel.auxiliary_model import (
     DirectKernelAuxiliaryJsonModel,
 )
@@ -23,12 +24,18 @@ from pulsara_agent.conversation_kernel.direct_model import (
 from pulsara_agent.llm.adapters.openai.chat_completions import (
     ChatCompletionAccumulator,
     OpenAIChatCompletionsTransport,
+    chat_tool_wire_items,
 )
 from pulsara_agent.llm.adapters.openai.events import ProviderLiveItemBuilder
 from pulsara_agent.llm.adapters.openai.events import sdk_event_to_dict
 from pulsara_agent.llm.adapters.openai.responses import (
     OpenAIResponsesTransport,
     ResponsesCompletionAccumulator,
+    responses_tool_wire_items,
+)
+from pulsara_agent.llm.adapters.openai.function_tools import (
+    OpenAIFunctionSchemaIncompatible,
+    lower_openai_function_parameters,
 )
 from pulsara_agent.llm.adapters.openai.client import (
     OPENAI_CHAT_COMPLETIONS_API,
@@ -41,15 +48,18 @@ from pulsara_agent.llm.normalized_transport import (
     NormalizedLLMTransportRegistry,
     NormalizedProviderTransportExecution,
 )
-from pulsara_agent.llm.input import LLMMessage, LLMToolCall
+from pulsara_agent.llm.input import LLMMessage, LLMToolCall, ToolSpec
 from pulsara_agent.llm.provider import (
     ProviderAssistantReplayCodecKind,
     ProviderChatFieldAccumulationMode,
     ProviderChatReplayFieldContract,
     ProviderProfile,
-    ProviderReasoningReplayScope,
     ThinkingProfile,
     ThinkingReplayPolicy,
+)
+from pulsara_agent.llm.provider_replay import (
+    ProviderReplayDisposition,
+    build_provider_replay_target_compatibility,
 )
 from pulsara_agent.ports.live_agent_event import (
     TextDeltaPayload,
@@ -67,6 +77,7 @@ from pulsara_agent.ports.provider_stream import (
     ProviderStreamFailure,
     ProviderStreamTerminal,
 )
+from pulsara_agent.ports.tool_execution import thaw_tool_json_object
 from pulsara_agent.primitives.context import thaw_json
 from pulsara_agent.model_input.contracts import (
     ModelInputScopeKind,
@@ -98,6 +109,7 @@ def _chat_profile(
     *,
     message_field: str = "reasoning_content",
     fields: tuple[ProviderChatReplayFieldContract, ...] = (),
+    replay_policy: ThinkingReplayPolicy = ThinkingReplayPolicy.ALWAYS,
 ) -> ProviderProfile:
     return ProviderProfile(
         id=f"test:{message_field}",
@@ -105,7 +117,7 @@ def _chat_profile(
         thinking=ThinkingProfile(
             enabled=True,
             message_field=message_field,
-            replay_policy=ThinkingReplayPolicy.ALWAYS,
+            replay_policy=replay_policy,
         ),
         configured_chat_replay_fields=fields,
     )
@@ -125,6 +137,138 @@ def _chat_chunk(
     if message is not None:
         choice["message"] = message
     return {"choices": [choice]}
+
+
+def test_openai_function_tools_share_one_explicit_non_strict_wire_contract() -> None:
+    for catalog_entry in builtin_tool_catalog():
+        descriptor = catalog_entry.descriptor
+        if not descriptor.is_model_callable or descriptor.input_schema is None:
+            continue
+        canonical_schema = thaw_tool_json_object(descriptor.input_schema)
+        tool = ToolSpec(
+            descriptor.name,
+            descriptor.description,
+            canonical_schema,
+        )
+        chat = chat_tool_wire_items((tool,))[0]
+        responses = responses_tool_wire_items((tool,))[0]
+        assert chat["type"] == responses["type"] == "function"
+        assert chat["function"] == {
+            key: responses[key]
+            for key in ("name", "description", "parameters", "strict")
+        }
+        assert chat["function"]["strict"] is False
+        assert responses["strict"] is False
+        assert chat["function"]["parameters"]["type"] == "object"
+        assert responses["parameters"] == chat["function"]["parameters"]
+        assert canonical_schema == thaw_tool_json_object(descriptor.input_schema)
+
+    monitor = next(
+        item
+        for item in builtin_tool_catalog()
+        if item.descriptor.name == "terminal_monitor"
+    )
+    monitor_schema = thaw_tool_json_object(monitor.descriptor.input_schema)
+    monitor_wire = responses_tool_wire_items(
+        (
+            ToolSpec(
+                monitor.descriptor.name,
+                monitor.descriptor.description,
+                monitor_schema,
+            ),
+        )
+    )[0]
+    monitor_parameters = monitor_wire["parameters"]
+    assert "oneOf" not in monitor_parameters
+    assert "anyOf" not in monitor_parameters
+    assert "discriminator" not in monitor_parameters
+    assert monitor_parameters["required"] == ["action"]
+    assert monitor_parameters["properties"]["action"]["enum"] == [
+        "register",
+        "list",
+        "cancel",
+    ]
+    assert "process_id" in monitor_parameters["properties"]
+    assert "monitor_id" in monitor_parameters["properties"]
+    assert "When action is 'register'" in monitor_parameters["description"]
+
+
+def test_openai_function_tool_declares_object_root_without_mutating_schema() -> None:
+    schema = {
+        "oneOf": [
+            {
+                "type": "object",
+                "properties": {"action": {"const": "one"}},
+                "required": ["action"],
+                "additionalProperties": False,
+            },
+            {
+                "type": "object",
+                "properties": {"action": {"const": "two"}},
+                "required": ["action"],
+                "additionalProperties": False,
+            },
+        ]
+    }
+    tool = ToolSpec("union_tool", "A closed union.", schema)
+    chat = chat_tool_wire_items((tool,))[0]["function"]
+    responses = responses_tool_wire_items((tool,))[0]
+    assert "type" not in schema
+    assert chat["parameters"]["type"] == "object"
+    assert responses["parameters"] == chat["parameters"]
+    assert chat["strict"] is responses["strict"] is False
+    assert chat["parameters"]["properties"]["action"]["enum"] == ["one", "two"]
+    assert chat["parameters"]["required"] == ["action"]
+    assert "oneOf" not in chat["parameters"]
+
+
+def test_openai_function_tool_rejects_non_object_argument_root() -> None:
+    tool = ToolSpec("invalid", "Invalid function arguments.", {"type": "string"})
+    with pytest.raises(ValueError, match="object root"):
+        chat_tool_wire_items((tool,))
+    with pytest.raises(ValueError, match="object root"):
+        responses_tool_wire_items((tool,))
+
+
+def test_openai_function_root_union_inherits_base_object_contract() -> None:
+    schema = {
+        "type": "object",
+        "properties": {
+            "a": {"type": "string"},
+            "b": {"type": "integer"},
+        },
+        "oneOf": [
+            {"required": ["a"]},
+            {"required": ["b"]},
+        ],
+        "additionalProperties": True,
+    }
+
+    lowered = lower_openai_function_parameters(schema)
+
+    assert lowered["type"] == "object"
+    assert lowered["properties"] == schema["properties"]
+    assert lowered["required"] == []
+    assert lowered["additionalProperties"] is True
+    assert schema["oneOf"] == [{"required": ["a"]}, {"required": ["b"]}]
+
+
+def test_openai_function_lowering_rejects_intersecting_nested_unions() -> None:
+    schema = {
+        "type": "object",
+        "properties": {
+            "value": {
+                "oneOf": [{"type": "string"}],
+                "anyOf": [{"minLength": 1}],
+            }
+        },
+    }
+
+    with pytest.raises(
+        OpenAIFunctionSchemaIncompatible,
+        match="cannot combine oneOf and anyOf",
+    ):
+        lower_openai_function_parameters(schema)
 
 
 def test_assistant_settlement_identity_covers_scope_and_epoch() -> None:
@@ -152,7 +296,11 @@ def test_assistant_settlement_identity_covers_scope_and_epoch() -> None:
             continuity_scope=scope,
             continuity_epoch_nonce=nonce,
             continuity_epoch_revision=revision,
-            replay_fragment=None,
+            provider_wire_api="openai_chat_completions",
+            provider_replay_disposition=(
+                ProviderReplayDisposition.PUBLIC_SEMANTIC_ONLY
+            ),
+            provider_replay=None,
         )
 
     baseline = fingerprint(root, "epoch:root", 1)
@@ -208,7 +356,7 @@ def test_chat_null_reasoning_deltas_do_not_erase_or_forge_a_replay_carrier() -> 
     assert replay["reasoning_content"] == "exact"
 
 
-def test_chat_live_thinking_can_remain_disposable_when_replay_is_disabled() -> None:
+def test_chat_observed_known_reasoning_is_retained_despite_legacy_policy() -> None:
     profile = ProviderProfile(
         id="test:live-thinking-only",
         wire_api="openai_chat_completions",
@@ -229,7 +377,7 @@ def test_chat_live_thinking_can_remain_disposable_when_replay_is_disabled() -> N
     assert any(isinstance(item, ThinkingEndPayload) for item in events)
     terminal = accumulator.finish()
     assert isinstance(terminal, ProviderAdapterTerminal)
-    assert terminal.completed_replay_payload is None
+    assert terminal.completed_replay_payload is not None
 
 
 def test_chat_reasoning_registry_is_closed_and_provider_neutral() -> None:
@@ -526,9 +674,12 @@ def test_chat_tool_response_without_reasoning_carrier_needs_no_replay() -> None:
             usage=TransportUsageReport(usage_status="missing", usage=None),
         ),
         replay_payload=None,
-        replay_scope=ProviderReasoningReplayScope.TOOL_RESPONSES,
-        provider_profile_fingerprint="sha256:" + "1" * 64,
-        resolved_target_fingerprint="sha256:" + "2" * 64,
+        replay_target=build_provider_replay_target_compatibility(
+            wire_api="openai_chat_completions",
+            endpoint_identity_fingerprint="sha256:" + "1" * 64,
+            normalized_model_identifier="test-model",
+            transport_binding_id="openai_chat_completions",
+        ),
     )
     assert (
         completion.bind_assistant_entry(
@@ -918,6 +1069,60 @@ def test_chat_replay_field_absence_empty_and_final_contract_are_distinct() -> No
         )
 
 
+def test_chat_final_value_required_is_independent_of_legacy_replay_policy() -> None:
+    profile = _chat_profile(
+        replay_policy=ThinkingReplayPolicy.NEVER,
+        fields=(
+            ProviderChatReplayFieldContract(
+                "reasoning_content",
+                ProviderChatFieldAccumulationMode.TEXT_CONCAT,
+                final_value_required=True,
+            ),
+        ),
+    )
+    accumulator = ChatCompletionAccumulator(
+        builder=ProviderLiveItemBuilder(), provider_profile=profile
+    )
+    accumulator.apply(_chat_chunk({"reasoning_content": "sealed carrier"}))
+    accumulator.apply(
+        _chat_chunk(
+            {
+                "tool_calls": [
+                    {
+                        "index": 0,
+                        "id": "call:never-final",
+                        "type": "function",
+                        "function": {"name": "virtual", "arguments": "{}"},
+                    }
+                ]
+            }
+        )
+    )
+
+    with pytest.raises(
+        LLMTransportContractError,
+        match="lacks a required replay field",
+    ):
+        accumulator.apply(
+            _chat_chunk(
+                {},
+                "tool_calls",
+                message={
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call:never-final",
+                            "type": "function",
+                            "function": {"name": "virtual", "arguments": "{}"},
+                        }
+                    ],
+                },
+            )
+        )
+    assert accumulator.terminal is None
+
+
 def _completed_response(output: list[dict[str, object]]) -> dict[str, object]:
     return {
         "type": "response.completed",
@@ -1125,6 +1330,83 @@ def test_responses_reasoning_summary_and_content_are_separate_exact_streams() ->
         )
     )
     assert isinstance(accumulator.finish(), ProviderAdapterTerminal)
+
+
+def test_responses_exact_reasoning_text_to_summary_alias_is_provider_neutral() -> None:
+    accumulator = ResponsesCompletionAccumulator(builder=ProviderLiveItemBuilder())
+    accumulator.apply(
+        {
+            "type": "response.reasoning_text.delta",
+            "output_index": 0,
+            "delta": "public summary",
+        }
+    )
+    accumulator.apply(
+        {
+            "type": "response.reasoning_text.done",
+            "output_index": 0,
+            "text": "public summary",
+        }
+    )
+    accumulator.apply(
+        _completed_response(
+            [
+                {
+                    "type": "reasoning",
+                    "id": "reasoning:alias",
+                    "status": "completed",
+                    "summary": [
+                        {"type": "summary_text", "text": "public summary"}
+                    ],
+                }
+            ]
+        )
+    )
+    terminal = accumulator.finish()
+    assert isinstance(terminal, ProviderAdapterTerminal)
+    assert terminal.completed_replay_payload is not None
+    assert thaw_json(terminal.completed_replay_payload.ordered_items[0]) == {
+        "type": "reasoning",
+        "id": "reasoning:alias",
+        "status": "completed",
+        "summary": [{"type": "summary_text", "text": "public summary"}],
+    }
+
+
+def test_responses_reasoning_text_to_summary_alias_must_be_exact() -> None:
+    accumulator = ResponsesCompletionAccumulator(builder=ProviderLiveItemBuilder())
+    accumulator.apply(
+        {
+            "type": "response.reasoning_text.delta",
+            "output_index": 0,
+            "delta": "streamed",
+        }
+    )
+    accumulator.apply(
+        {
+            "type": "response.reasoning_text.done",
+            "output_index": 0,
+            "text": "streamed",
+        }
+    )
+    with pytest.raises(
+        LLMTransportContractError,
+        match="reasoning content differs",
+    ):
+        accumulator.apply(
+            _completed_response(
+                [
+                    {
+                        "type": "reasoning",
+                        "id": "reasoning:alias-conflict",
+                        "status": "completed",
+                        "summary": [
+                            {"type": "summary_text", "text": "different"}
+                        ],
+                    }
+                ]
+            )
+        )
 
 
 @pytest.mark.parametrize(
@@ -1426,9 +1708,12 @@ def test_completed_replay_must_exactly_match_public_projection() -> None:
             completed_replay_payload=payload,
         ),
         replay_payload=payload,
-        replay_scope=ProviderReasoningReplayScope.ALL_COMPLETED_RESPONSES,
-        provider_profile_fingerprint="sha256:" + "1" * 64,
-        resolved_target_fingerprint="sha256:" + "2" * 64,
+        replay_target=build_provider_replay_target_compatibility(
+            wire_api="openai_chat_completions",
+            endpoint_identity_fingerprint="sha256:" + "1" * 64,
+            normalized_model_identifier="test-model",
+            transport_binding_id="openai_chat_completions",
+        ),
     )
     with pytest.raises(RuntimeError, match="public projection"):
         completion.bind_assistant_entry(
@@ -1507,9 +1792,12 @@ def test_responses_accepts_message_before_ordered_function_calls() -> None:
             completed_replay_payload=payload,
         ),
         replay_payload=payload,
-        replay_scope=ProviderReasoningReplayScope.ALL_COMPLETED_RESPONSES,
-        provider_profile_fingerprint="sha256:" + "4" * 64,
-        resolved_target_fingerprint="sha256:" + "5" * 64,
+        replay_target=build_provider_replay_target_compatibility(
+            wire_api="openai_responses",
+            endpoint_identity_fingerprint="sha256:" + "4" * 64,
+            normalized_model_identifier="test-model",
+            transport_binding_id="openai_responses",
+        ),
     )
     calls = (
         LLMToolCall("call:1", "virtual", "{}"),

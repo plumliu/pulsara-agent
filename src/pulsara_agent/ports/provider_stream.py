@@ -9,18 +9,21 @@ per-item envelope, adoption acknowledgement, or second draft vocabulary.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
+from hashlib import sha256
 from typing import TYPE_CHECKING, AsyncIterator, Protocol, TypeAlias
 
 from pulsara_agent.llm.provider import ProviderAssistantReplayCodecKind
+from pulsara_agent.llm.provider_replay import (
+    MAXIMUM_PROVIDER_REPLAY_PAYLOAD_BYTES,
+    provider_replay_payload_bytes,
+)
 from pulsara_agent.llm.result import TransportUsageReport
 from pulsara_agent.ports.live_agent_event import ProviderStreamPayload
 from pulsara_agent.primitives.context import (
     FrozenJsonObjectFact,
-    canonical_json_bytes,
     context_fingerprint,
-    thaw_json,
 )
 from pulsara_agent.primitives.model_call import (
     ProviderRetrySummaryFact,
@@ -62,7 +65,8 @@ class ProviderAdapterCompletedReplayPayload:
     """Bounded, provider-shaped replay payload produced only at COMPLETED."""
 
     codec_kind: ProviderAssistantReplayCodecKind
-    ordered_items: tuple[FrozenJsonObjectFact, ...]
+    ordered_items: tuple[FrozenJsonObjectFact, ...] = field(repr=False)
+    payload_bytes: bytes = field(repr=False)
     logical_utf8_bytes: int
     local_fingerprint: str
 
@@ -71,16 +75,19 @@ class ProviderAdapterCompletedReplayPayload:
             raise ValueError("completed replay payload cannot use the NONE codec")
         if not self.ordered_items:
             raise ValueError("completed replay payload is empty")
-        logical = sum(
-            len(canonical_json_bytes(thaw_json(item))) for item in self.ordered_items
-        )
-        if logical != self.logical_utf8_bytes or logical > (16 << 20):
+        payload_bytes = provider_replay_payload_bytes(self.ordered_items)
+        logical = len(payload_bytes)
+        if (
+            self.payload_bytes != payload_bytes
+            or logical != self.logical_utf8_bytes
+            or logical > MAXIMUM_PROVIDER_REPLAY_PAYLOAD_BYTES
+        ):
             raise ValueError("completed replay payload size is invalid")
         expected = context_fingerprint(
             "pulsara.provider-adapter-completed-replay:v1",
             {
                 "codec": self.codec_kind.value,
-                "items": tuple(thaw_json(item) for item in self.ordered_items),
+                "payload_digest": "sha256:" + sha256(payload_bytes).hexdigest(),
                 "bytes": logical,
             },
         )
@@ -93,18 +100,20 @@ def freeze_provider_adapter_completed_replay_payload(
     codec_kind: ProviderAssistantReplayCodecKind,
     ordered_items: tuple[FrozenJsonObjectFact, ...],
 ) -> ProviderAdapterCompletedReplayPayload:
-    logical = sum(len(canonical_json_bytes(thaw_json(item))) for item in ordered_items)
+    payload_bytes = provider_replay_payload_bytes(ordered_items)
+    logical = len(payload_bytes)
     fingerprint = context_fingerprint(
         "pulsara.provider-adapter-completed-replay:v1",
         {
             "codec": codec_kind.value,
-            "items": tuple(thaw_json(item) for item in ordered_items),
+            "payload_digest": "sha256:" + sha256(payload_bytes).hexdigest(),
             "bytes": logical,
         },
     )
     return ProviderAdapterCompletedReplayPayload(
         codec_kind=codec_kind,
         ordered_items=ordered_items,
+        payload_bytes=payload_bytes,
         logical_utf8_bytes=logical,
         local_fingerprint=fingerprint,
     )

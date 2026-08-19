@@ -7,6 +7,7 @@
   "relation_grants": {
     "agent_events": ["SELECT", "INSERT"],
     "assistant_message_blocks": ["SELECT", "INSERT"],
+    "provider_assistant_replay_fragments": ["SELECT", "INSERT"],
     "blobs": ["SELECT", "INSERT", "DELETE"],
     "context_snapshots": ["SELECT", "INSERT"],
     "durable_job_attempts": ["SELECT", "INSERT", "UPDATE"],

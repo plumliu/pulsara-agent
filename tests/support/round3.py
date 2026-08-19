@@ -288,17 +288,10 @@ def completed_provider_execution_for_test(
         terminal_kind=ProviderNormalizedTerminalKind.COMPLETED,
         usage=TransportUsageReport(usage_status="missing", usage=None),
     )
-    profile = request.prepared_call.call.target.model_profile.provider_profile
     return CompletedProviderModelExecution(
         terminal=terminal,
         replay_payload=None,
-        replay_scope=profile.reasoning_replay_scope,
-        provider_profile_fingerprint=(
-            request.wire_input_plan.provider_profile_fingerprint
-        ),
-        resolved_target_fingerprint=(
-            request.prepared_call.call.target.fact.target_fingerprint
-        ),
+        replay_target=DirectKernelModelPort.replay_target(request.prepared_call),
     )
 
 

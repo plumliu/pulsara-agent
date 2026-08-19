@@ -3,11 +3,16 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 import json
+import os
+from pathlib import Path
+import subprocess
+import sys
 from threading import Event
 from time import monotonic
 from uuid import uuid4
 
 import pytest
+import psycopg
 
 from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
 from pulsara_agent.conversation_kernel.contracts import (
@@ -730,12 +735,48 @@ class _FailingPostConsumptionReader:
         self.calls = 0
 
     def read_frozen_compile_snapshot(self, cut, *, deadline_monotonic):
-        self.calls += 1
-        if self.calls == 2:
-            raise RuntimeError("injected post-consumption canonical mismatch")
         return self._delegate.read_frozen_compile_snapshot(
             cut, deadline_monotonic=deadline_monotonic
         )
+
+    def read_frozen_dispatch(self, cut, *, deadline_monotonic):
+        self.calls += 1
+        if self.calls == 2:
+            raise RuntimeError("injected post-consumption canonical mismatch")
+        return self._delegate.read_frozen_dispatch(
+            cut, deadline_monotonic=deadline_monotonic
+        )
+
+    def hydrate_selected_provider_replays(self, **kwargs):
+        return self._delegate.hydrate_selected_provider_replays(**kwargs)
+
+
+class _RecordingReplayHydrationReader:
+    def __init__(
+        self, delegate: CanonicalProviderInputReader, *, fail_hydration: bool = False
+    ) -> None:
+        self._delegate = delegate
+        self._fail_hydration = fail_hydration
+        self.dispatch_deadlines: list[float] = []
+        self.hydration_deadlines: list[float] = []
+
+    def read_frozen_compile_snapshot(self, cut, *, deadline_monotonic):
+        return self._delegate.read_frozen_compile_snapshot(
+            cut, deadline_monotonic=deadline_monotonic
+        )
+
+    def read_frozen_dispatch(self, cut, *, deadline_monotonic):
+        self.dispatch_deadlines.append(deadline_monotonic)
+        return self._delegate.read_frozen_dispatch(
+            cut, deadline_monotonic=deadline_monotonic
+        )
+
+    def hydrate_selected_provider_replays(self, **kwargs):
+        deadline = kwargs["deadline_monotonic"]
+        self.hydration_deadlines.append(deadline)
+        if self._fail_hydration:
+            raise TimeoutError("injected selected hydration deadline")
+        return self._delegate.hydrate_selected_provider_replays(**kwargs)
 
 
 def _text_stream(text: str, *, block: str = "text:1") -> list[object]:
@@ -2554,6 +2595,356 @@ def test_round5a1_complete_tool_loop_replays_exact_reasoning_on_second_call(
             "SELECT count(*) FROM pulsara_v3.tool_results WHERE session_id = %s",
             (session_id,),
         ).fetchone() == (1,)
+
+
+@pytest.mark.parametrize(
+    ("api", "script"),
+    (
+        ("openai_chat_completions", _round5a1_chat_scripts()[1]),
+        ("openai_responses", _round5a1_responses_scripts()[1]),
+    ),
+)
+def test_round5a2_fresh_host_rehydrates_durable_native_replay(
+    stage2_migrated_postgres_database,
+    api: str,
+    script: tuple[dict[str, object], ...],
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id = _name("session")
+    workspace_id = _name("workspace")
+    first_lease = repository.acquire_host_writer(
+        session_id=session_id,
+        workspace_id=workspace_id,
+        writer_owner_id=_name("host-one"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    profile = ProviderProfile(
+        id=f"test:{api}:durable-restart",
+        wire_api=api,
+        thinking=(
+            ThinkingProfile(
+                enabled=True,
+                message_field="reasoning_content",
+                replay_policy=ThinkingReplayPolicy.ALWAYS,
+            )
+            if api == "openai_chat_completions"
+            else ThinkingProfile()
+        ),
+    )
+
+    def model() -> _SequencedDirectKernelModel:
+        return _SequencedDirectKernelModel(
+            config=test_llm_config(
+                api_key="test",
+                base_url="https://example.invalid/v1",
+                pro_model="test-pro",
+                flash_model="test-flash",
+                api=api,
+                provider_profile=profile,
+            ),
+            scripts=(script,),
+        )
+
+    first_model = model()
+    first_runner = ConversationKernelRunner(
+        repository=repository,
+        writer_lease=first_lease,
+        model=first_model,
+        tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
+        live_bus=LiveAgentEventBus(),
+        context_source_collector=StaticContextSourceCollector(),
+    )
+    first = asyncio.run(first_runner.run_turn("first native answer"))
+    with provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        deadline_monotonic=monotonic() + 10,
+    ) as connection:
+        assert connection.execute(
+            "SELECT count(*) FROM pulsara_v3.provider_assistant_replay_fragments "
+            "WHERE session_id = %s AND assistant_entry_id = %s",
+            (session_id, first.final_entry_id),
+        ).fetchone() == (1,)
+
+    replacement_repository = ConversationKernelRepository(provider)
+    replacement_lease = replacement_repository.acquire_host_writer(
+        session_id=session_id,
+        workspace_id=workspace_id,
+        writer_owner_id=_name("host-two"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    second_model = model()
+    replacement_runner = ConversationKernelRunner(
+        repository=replacement_repository,
+        writer_lease=replacement_lease,
+        model=second_model,
+        tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
+        live_bus=LiveAgentEventBus(),
+        context_source_collector=StaticContextSourceCollector(),
+    )
+    asyncio.run(replacement_runner.run_turn("continue after restart"))
+
+    assert len(second_model.requests) == 1
+    wire_plan = second_model.requests[0].wire_input_plan
+    assert wire_plan.provider_replay_hydration_fingerprint is not None
+    assert tuple(item.assistant_entry_id for item in wire_plan.replacements) == (
+        first.final_entry_id,
+    )
+
+
+def test_round5a2_selected_corruption_fails_before_open_but_incompatible_target_is_cold(
+    stage2_migrated_postgres_database,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id = _name("session")
+    workspace_id = _name("workspace")
+    lease = repository.acquire_host_writer(
+        session_id=session_id,
+        workspace_id=workspace_id,
+        writer_owner_id=_name("host-one"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    profile = ProviderProfile(
+        id="test:chat:durable-corruption",
+        wire_api="openai_chat_completions",
+        thinking=ThinkingProfile(
+            enabled=True,
+            message_field="reasoning_content",
+            replay_policy=ThinkingReplayPolicy.ALWAYS,
+        ),
+    )
+
+    def model(*, base_url: str) -> _SequencedDirectKernelModel:
+        return _SequencedDirectKernelModel(
+            config=test_llm_config(
+                api_key="test",
+                base_url=base_url,
+                pro_model="test-pro",
+                flash_model="test-flash",
+                api="openai_chat_completions",
+                provider_profile=profile,
+            ),
+            scripts=(_round5a1_chat_scripts()[1],),
+        )
+
+    first_runner = ConversationKernelRunner(
+        repository=repository,
+        writer_lease=lease,
+        model=model(base_url="https://example.invalid/v1"),
+        tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
+        live_bus=LiveAgentEventBus(),
+        context_source_collector=StaticContextSourceCollector(),
+    )
+    first = asyncio.run(first_runner.run_turn("create native replay"))
+    with psycopg.connect(stage2_migrated_postgres_database.admin_dsn) as connection:
+        connection.execute(
+            "UPDATE pulsara_v3.provider_assistant_replay_fragments "
+            "SET payload_digest = %s WHERE session_id = %s AND assistant_entry_id = %s",
+            ("sha256:" + "0" * 64, session_id, first.final_entry_id),
+        )
+
+    exact_repository = ConversationKernelRepository(provider)
+    exact_lease = exact_repository.acquire_host_writer(
+        session_id=session_id,
+        workspace_id=workspace_id,
+        writer_owner_id=_name("host-two"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    exact_model = model(base_url="https://example.invalid/v1")
+    exact_runner = ConversationKernelRunner(
+        repository=exact_repository,
+        writer_lease=exact_lease,
+        model=exact_model,
+        tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
+        live_bus=LiveAgentEventBus(),
+        context_source_collector=StaticContextSourceCollector(),
+    )
+    with pytest.raises(StructuredModelInputCompileError) as captured:
+        asyncio.run(exact_runner.run_turn("same target must fail closed"))
+    assert captured.value.kind is ModelInputCompileFailureKind.CANONICAL_PREFIX_CONFLICT
+    assert exact_model.requests == []
+
+    cold_repository = ConversationKernelRepository(provider)
+    cold_lease = cold_repository.acquire_host_writer(
+        session_id=session_id,
+        workspace_id=workspace_id,
+        writer_owner_id=_name("host-three"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    cold_model = model(base_url="https://different.example.invalid/v1")
+    cold_runner = ConversationKernelRunner(
+        repository=cold_repository,
+        writer_lease=cold_lease,
+        model=cold_model,
+        tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
+        live_bus=LiveAgentEventBus(),
+        context_source_collector=StaticContextSourceCollector(),
+    )
+    cold = asyncio.run(cold_runner.run_turn("incompatible target uses public history"))
+    assert cold.final_text == "chat final"
+    assert len(cold_model.requests) == 1
+    assert cold_model.requests[0].wire_input_plan.replacements == ()
+    assert (
+        cold_model.requests[0].wire_input_plan.provider_replay_hydration_fingerprint
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    ("api", "abrupt"),
+    (
+        ("openai_chat_completions", False),
+        ("openai_responses", True),
+    ),
+)
+def test_round5a2_os_process_restart_uses_only_durable_native_replay(
+    stage2_migrated_postgres_database,
+    api: str,
+    abrupt: bool,
+) -> None:
+    session_id = _name("session")
+    workspace_id = _name("workspace")
+    probe = Path(__file__).parent / "fixtures" / "round5a2_restart_probe.py"
+    environment = os.environ.copy()
+    environment["ROUND5A2_TEST_RUNTIME_DSN"] = (
+        stage2_migrated_postgres_database.runtime_dsn
+    )
+    repository_root = str(Path(__file__).parents[1])
+    environment["PYTHONPATH"] = os.pathsep.join(
+        item
+        for item in (repository_root, environment.get("PYTHONPATH", ""))
+        if item
+    )
+
+    def invoke(mode: str, *, kill_after_commit: bool = False) -> dict[str, object]:
+        command = [
+            sys.executable,
+            str(probe),
+            mode,
+            api,
+            session_id,
+            workspace_id,
+        ]
+        if kill_after_commit:
+            command.append("--abrupt")
+        completed = subprocess.run(
+            command,
+            cwd=repository_root,
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        assert completed.returncode == 0, completed.stderr[-2000:]
+        return json.loads(completed.stdout.strip().splitlines()[-1])
+
+    created = invoke("create", kill_after_commit=abrupt)
+    assert created["completed"] is True
+    assert created["hydrated"] is False
+    continued = invoke("continue")
+    assert continued["completed"] is True
+    assert continued["hydrated"] is True
+    assert continued["replacement_count"] == 1
+
+
+@pytest.mark.parametrize("fail_hydration", (False, True))
+def test_round5a2_selected_hydration_reuses_dispatch_deadline_and_opens_once_or_zero(
+    stage2_migrated_postgres_database,
+    fail_hydration: bool,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id = _name("session")
+    workspace_id = _name("workspace")
+    profile = ProviderProfile(
+        id="test:chat:one-planning-deadline",
+        wire_api="openai_chat_completions",
+        thinking=ThinkingProfile(
+            enabled=True,
+            message_field="reasoning_content",
+            replay_policy=ThinkingReplayPolicy.ALWAYS,
+        ),
+    )
+
+    def model() -> _SequencedDirectKernelModel:
+        return _SequencedDirectKernelModel(
+            config=test_llm_config(
+                api_key="test",
+                base_url="https://example.invalid/v1",
+                pro_model="test-pro",
+                flash_model="test-flash",
+                api="openai_chat_completions",
+                provider_profile=profile,
+            ),
+            scripts=(_round5a1_chat_scripts()[1],),
+        )
+
+    first_lease = repository.acquire_host_writer(
+        session_id=session_id,
+        workspace_id=workspace_id,
+        writer_owner_id=_name("host-one"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    asyncio.run(
+        ConversationKernelRunner(
+            repository=repository,
+            writer_lease=first_lease,
+            model=model(),
+            tools=StructuredToolPort(
+                _AssertingTool(provider, session_id), tool_names=()
+            ),
+            live_bus=LiveAgentEventBus(),
+            context_source_collector=StaticContextSourceCollector(),
+        ).run_turn("create selected replay")
+    )
+
+    replacement_repository = ConversationKernelRepository(provider)
+    replacement_lease = replacement_repository.acquire_host_writer(
+        session_id=session_id,
+        workspace_id=workspace_id,
+        writer_owner_id=_name("host-two"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    reader = _RecordingReplayHydrationReader(
+        CanonicalProviderInputReader(provider), fail_hydration=fail_hydration
+    )
+    replacement_model = model()
+    runner = ConversationKernelRunner(
+        repository=replacement_repository,
+        writer_lease=replacement_lease,
+        model=replacement_model,
+        tools=StructuredToolPort(
+            _AssertingTool(provider, session_id), tool_names=()
+        ),
+        live_bus=LiveAgentEventBus(),
+        context_source_collector=StaticContextSourceCollector(),
+        input_reader=reader,
+    )
+    if fail_hydration:
+        with pytest.raises(StructuredModelInputCompileError) as captured:
+            asyncio.run(runner.run_turn("deadline expires before provider open"))
+        assert captured.value.kind is ModelInputCompileFailureKind.DEADLINE_EXPIRED
+        assert replacement_model.requests == []
+    else:
+        asyncio.run(runner.run_turn("same deadline continues into hydration"))
+        assert len(replacement_model.requests) == 1
+        assert (
+            replacement_model.requests[0]
+            .wire_input_plan.provider_replay_hydration_fingerprint
+            is not None
+        )
+    assert len(reader.dispatch_deadlines) == 1
+    assert len(reader.hydration_deadlines) == 1
+    assert reader.dispatch_deadlines == reader.hydration_deadlines
 
 
 def test_round5a1_replay_fragment_capacity_fails_before_assistant_commit(

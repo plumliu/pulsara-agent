@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from hashlib import sha256
 import json
+from time import monotonic
 from typing import Mapping, Protocol, Sequence
 
 from psycopg import IsolationLevel
@@ -26,6 +27,7 @@ from pulsara_agent.model_input.contracts import (
     CanonicalModelInputIdentity,
     CanonicalModelInputSnapshot,
     FrozenCanonicalCompileSnapshot,
+    FrozenCompiledModelInput,
     ContextBindingBaseKind,
     FrozenContextBindingCompileFact,
     FrozenPlanHandoffCompileFact,
@@ -55,6 +57,19 @@ from pulsara_agent.model_input.contracts import (
     provider_input_item_fingerprint,
     previous_turn_outcome_fingerprint,
     tool_observation_freshness_fingerprint,
+)
+from pulsara_agent.model_input.continuity import ProviderInputContinuityScope
+from pulsara_agent.model_input.provider_replay import (
+    FrozenCanonicalProviderDispatchRead,
+    FrozenSelectedDurableProviderReplayHydration,
+    ProviderReplayHydrationError,
+    ProviderReplayHydrationFailureKind,
+    decode_provider_replay_fragment,
+    freeze_provider_replay_manifest,
+    freeze_provider_replay_manifest_cut,
+    freeze_selected_provider_replay_hydration,
+    quote_provider_dispatch_composite_bytes,
+    select_compatible_provider_replay_manifests,
 )
 from pulsara_agent.model_input.continuity import (
     FULL_HISTORY_CONTEXT_BASE_IDENTITY,
@@ -104,6 +119,7 @@ from pulsara_agent.ports.terminal_observation import (
     TerminalObservationContentV1,
     TerminalObservationKind,
 )
+from pulsara_agent.llm.provider_replay import ProviderReplayTargetCompatibilityFact
 from pulsara_agent.storage.postgres_connection_provider import (
     PostgresConnectionLane,
     VerifiedPostgresConnectionProviderProtocol,
@@ -180,6 +196,16 @@ class CanonicalProviderInputReader:
         *,
         deadline_monotonic: float,
     ) -> FrozenCanonicalCompileSnapshot:
+        return self.read_frozen_dispatch(
+            cut, deadline_monotonic=deadline_monotonic
+        ).compile_snapshot
+
+    def read_frozen_dispatch(
+        self,
+        cut: PreparedProviderInputCut,
+        *,
+        deadline_monotonic: float,
+    ) -> FrozenCanonicalProviderDispatchRead:
         with self._provider.connection(
             lane=PostgresConnectionLane.INSPECTOR,
             row_factory=dict_row,
@@ -781,7 +807,7 @@ class CanonicalProviderInputReader:
                 provisional, "tool_observation_freshness_fact", freshness_fact
             )
             object.__setattr__(provisional, "canonical_read_cut_fingerprint", "")
-            return FrozenCanonicalCompileSnapshot(
+            compile_snapshot = FrozenCanonicalCompileSnapshot(
                 canonical_input=canonical_input,
                 context_binding_fact=binding_fact,
                 run_permission_snapshot=permission,
@@ -794,6 +820,276 @@ class CanonicalProviderInputReader:
                     canonical_compile_snapshot_fingerprint(provisional)
                 ),
             )
+            manifest_rows = connection.execute(
+                """
+                SELECT e.id AS assistant_entry_id, e.entry_sequence,
+                       e.provider_wire_api, e.provider_replay_disposition,
+                       e.provider_replay_fragment_id,
+                       r.id AS replay_id, r.wire_api, r.codec_kind,
+                       r.provider_replay_contract_fingerprint,
+                       r.replay_target_fingerprint,
+                       r.public_projection_fingerprint,
+                       r.payload_digest, r.payload_size, r.item_count,
+                       r.fragment_fingerprint
+                FROM pulsara_v3.transcript_entries AS e
+                LEFT JOIN pulsara_v3.provider_assistant_replay_fragments AS r
+                  ON r.session_id = e.session_id
+                 AND r.assistant_entry_id = e.id
+                WHERE e.session_id = %s
+                  AND e.entry_sequence > %s
+                  AND e.entry_sequence <= %s
+                  AND e.conversation_scope_kind = %s
+                  AND e.scope_subagent_task_id IS NOT DISTINCT FROM %s
+                  AND e.entry_kind IN (
+                    'ASSISTANT_MESSAGE', 'ASSISTANT_TOOL_REQUEST'
+                  )
+                ORDER BY e.entry_sequence
+                LIMIT %s
+                """,
+                (
+                    cut.session_id,
+                    source_floor,
+                    cut.provider_input_through_sequence,
+                    scope_kind,
+                    scope_task_id,
+                    self._maximum_items + 1,
+                ),
+            ).fetchall()
+            if len(manifest_rows) > self._maximum_items:
+                raise ConversationKernelConflict(
+                    "provider replay manifest item bound exceeded"
+                )
+            manifests = []
+            for row in manifest_rows:
+                disposition = str(row["provider_replay_disposition"])
+                pointer = row["provider_replay_fragment_id"]
+                native = disposition == "NATIVE_REPLAY"
+                if disposition not in {"PUBLIC_SEMANTIC_ONLY", "NATIVE_REPLAY"}:
+                    raise ConversationKernelConflict(
+                        "assistant replay disposition is not closed"
+                    )
+                if native != (pointer is not None) or native != (
+                    row["replay_id"] is not None
+                ):
+                    raise ConversationKernelConflict(
+                        "assistant replay pointer/row join is partial"
+                    )
+                if not native:
+                    if str(row["provider_wire_api"]) != "openai_chat_completions":
+                        raise ConversationKernelConflict(
+                            "Responses assistant lacks required replay"
+                        )
+                    continue
+                if (
+                    str(pointer) != str(row["replay_id"])
+                    or str(row["provider_wire_api"]) != str(row["wire_api"])
+                ):
+                    raise ConversationKernelConflict(
+                        "assistant replay cyclic identity drifted"
+                    )
+                manifests.append(
+                    freeze_provider_replay_manifest(
+                        replay_id=str(row["replay_id"]),
+                        assistant_entry_id=str(row["assistant_entry_id"]),
+                        wire_api=str(row["wire_api"]),
+                        codec_kind=str(row["codec_kind"]),
+                        provider_replay_contract_fingerprint=str(
+                            row["provider_replay_contract_fingerprint"]
+                        ),
+                        replay_target_fingerprint=str(
+                            row["replay_target_fingerprint"]
+                        ),
+                        public_projection_fingerprint=str(
+                            row["public_projection_fingerprint"]
+                        ),
+                        payload_digest=str(row["payload_digest"]),
+                        payload_size=int(row["payload_size"]),
+                        item_count=int(row["item_count"]),
+                        fragment_fingerprint=str(row["fragment_fingerprint"]),
+                    )
+                )
+            scope = ProviderInputContinuityScope(
+                session_id=cut.session_id,
+                scope_kind=ModelInputScopeKind(scope_kind),
+                scope_subagent_task_id=(
+                    None if scope_task_id is None else str(scope_task_id)
+                ),
+            )
+            manifest_cut = freeze_provider_replay_manifest_cut(
+                session_id=cut.session_id,
+                scope=scope,
+                context_binding_revision_id=cut.context_binding_revision_id,
+                provider_input_through_sequence=(
+                    cut.provider_input_through_sequence
+                ),
+                manifests=tuple(manifests),
+            )
+            if manifest_cut.aggregate_manifest_utf8_bytes > self._maximum_canonical_bytes:
+                raise ConversationKernelConflict(
+                    "provider replay manifest metadata bound exceeded"
+                )
+            return FrozenCanonicalProviderDispatchRead(
+                compile_snapshot=compile_snapshot,
+                replay_manifest_cut=manifest_cut,
+                composite_fingerprint=context_fingerprint(
+                    "pulsara.canonical-provider-dispatch-read:v1",
+                    {
+                        "compile": (
+                            compile_snapshot.canonical_read_cut_fingerprint
+                        ),
+                        "replay_manifest_cut": manifest_cut.cut_fingerprint,
+                    },
+                ),
+            )
+
+    def hydrate_selected_provider_replays(
+        self,
+        *,
+        dispatch_read: FrozenCanonicalProviderDispatchRead,
+        compiled_input: FrozenCompiledModelInput,
+        replay_target: ProviderReplayTargetCompatibilityFact,
+        deadline_monotonic: float,
+    ) -> FrozenSelectedDurableProviderReplayHydration | None:
+        """Hydrate only final, target-compatible native replay bodies."""
+
+        if monotonic() >= deadline_monotonic:
+            raise TimeoutError("provider replay hydration deadline expired")
+        manifest_cut = dispatch_read.replay_manifest_cut
+        if (
+            dispatch_read.compile_snapshot.canonical_input.identity
+            != compiled_input.canonical_input_identity
+        ):
+            raise ProviderReplayHydrationError(
+                ProviderReplayHydrationFailureKind.CANONICAL_CORRUPTION
+            )
+        try:
+            selected, placements = select_compatible_provider_replay_manifests(
+                manifest_cut=manifest_cut,
+                compiled_input=compiled_input,
+                replay_target=replay_target,
+            )
+        except ValueError as exc:
+            raise ProviderReplayHydrationError(
+                ProviderReplayHydrationFailureKind.CANONICAL_CORRUPTION
+            ) from exc
+        if not selected:
+            return None
+        aggregate_payload_bytes = sum(item.payload_size for item in selected)
+        quote_provider_dispatch_composite_bytes(
+            canonical_compile_bytes=(
+                dispatch_read.compile_snapshot.canonical_input.canonical_utf8_bytes
+            ),
+            manifest_metadata_bytes=manifest_cut.aggregate_manifest_utf8_bytes,
+            selected_payload_bytes=aggregate_payload_bytes,
+        )
+
+        replay_ids = [item.replay_id for item in selected]
+        entry_ids = [item.assistant_entry_id for item in selected]
+        payload_digests = [item.payload_digest for item in selected]
+        fragment_fingerprints = [item.fragment_fingerprint for item in selected]
+        with self._provider.connection(
+            lane=PostgresConnectionLane.INSPECTOR,
+            row_factory=dict_row,
+            deadline_monotonic=deadline_monotonic,
+            isolation_level=IsolationLevel.REPEATABLE_READ,
+        ) as connection:
+            connection.execute("SET TRANSACTION READ ONLY")
+            rows = connection.execute(
+                """
+                SELECT selected.ordinal, r.id, r.session_id, r.workspace_id,
+                       r.assistant_entry_id, r.wire_api, r.codec_kind,
+                       r.provider_replay_contract_fingerprint,
+                       r.replay_target_fingerprint,
+                       r.public_projection_fingerprint, r.payload_bytes,
+                       r.payload_digest, r.payload_size, r.item_count,
+                       r.fragment_fingerprint
+                FROM unnest(%s::text[], %s::text[], %s::text[], %s::text[])
+                     WITH ORDINALITY AS selected(
+                         replay_id, assistant_entry_id, payload_digest,
+                         fragment_fingerprint, ordinal
+                     )
+                JOIN pulsara_v3.provider_assistant_replay_fragments AS r
+                  ON r.session_id = %s
+                 AND r.id = selected.replay_id
+                 AND r.assistant_entry_id = selected.assistant_entry_id
+                 AND r.payload_digest = selected.payload_digest
+                 AND r.fragment_fingerprint = selected.fragment_fingerprint
+                ORDER BY selected.ordinal
+                """,
+                (
+                    replay_ids,
+                    entry_ids,
+                    payload_digests,
+                    fragment_fingerprints,
+                    manifest_cut.scope.session_id,
+                ),
+            ).fetchall()
+        if len(rows) != len(selected):
+            raise ProviderReplayHydrationError(
+                ProviderReplayHydrationFailureKind.CANONICAL_CORRUPTION
+            )
+
+        fragments = []
+        hydrated_bytes = 0
+        for manifest, row in zip(selected, rows, strict=True):
+            if monotonic() >= deadline_monotonic:
+                raise TimeoutError("provider replay hydration deadline expired")
+            if (
+                str(row["id"]) != manifest.replay_id
+                or str(row["session_id"]) != manifest_cut.scope.session_id
+                or str(row["assistant_entry_id"])
+                != manifest.assistant_entry_id
+                or str(row["wire_api"]) != manifest.wire_api
+                or str(row["codec_kind"]) != manifest.codec_kind
+                or str(row["provider_replay_contract_fingerprint"])
+                != manifest.provider_replay_contract_fingerprint
+                or str(row["replay_target_fingerprint"])
+                != manifest.replay_target_fingerprint
+                or str(row["public_projection_fingerprint"])
+                != manifest.public_projection_fingerprint
+                or str(row["payload_digest"]) != manifest.payload_digest
+                or int(row["payload_size"]) != manifest.payload_size
+                or int(row["item_count"]) != manifest.item_count
+                or str(row["fragment_fingerprint"])
+                != manifest.fragment_fingerprint
+            ):
+                raise ProviderReplayHydrationError(
+                    ProviderReplayHydrationFailureKind.CANONICAL_CORRUPTION
+                )
+            payload = bytes(row["payload_bytes"])
+            hydrated_bytes += len(payload)
+            if hydrated_bytes > aggregate_payload_bytes:
+                raise ProviderReplayHydrationError(
+                    ProviderReplayHydrationFailureKind.CANONICAL_CORRUPTION
+                )
+            try:
+                fragments.append(
+                    decode_provider_replay_fragment(
+                        manifest=manifest,
+                        payload_bytes=payload,
+                    )
+                )
+            except (TypeError, ValueError) as exc:
+                raise ProviderReplayHydrationError(
+                    ProviderReplayHydrationFailureKind.CANONICAL_CORRUPTION
+                ) from exc
+        if hydrated_bytes != aggregate_payload_bytes:
+            raise ProviderReplayHydrationError(
+                ProviderReplayHydrationFailureKind.CANONICAL_CORRUPTION
+            )
+        try:
+            return freeze_selected_provider_replay_hydration(
+                manifest_cut=manifest_cut,
+                compiled_input=compiled_input,
+                replay_target=replay_target,
+                selected_manifests=selected,
+                selected_placements=placements,
+                fragments=tuple(fragments),
+            )
+        except ValueError as exc:
+            raise ProviderReplayHydrationError(
+                ProviderReplayHydrationFailureKind.CANONICAL_CORRUPTION
+            ) from exc
 
     def _load_block_metadata(
         self, connection, session_id: str, entry_ids: Sequence[str]

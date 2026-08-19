@@ -4,7 +4,11 @@
 >
 > 记录日期：2026-08-17
 >
-> 当前代码基线：`ffd0d146f8d7991ff3d1e92dc9ca75e8abf894e8`
+> 编码基线：**待Round 9 ACTIVATED后冻结**。必须把Round 9 activation commit SHA、public contract manifest与evidence hash写回此处；不得使用Round 9之前的起草输入开始编码。
+>
+> 历史起草输入：`ffd0d146f8d7991ff3d1e92dc9ca75e8abf894e8`
+>
+> 继承Round 9最终oracle：`31 Committed / 24 Live / 13 subjects / 2 guards / 26 product relations / 1 durable job`；本轮不得改变该数量。
 >
 > hard-cut 前参考基线：`5b7ad9f7ffc8565bc572180b2bde0c81ab64473a`
 >
@@ -18,7 +22,7 @@
 >
 > 收口修订（2026-08-18）：删除`read_file`的`ORDINARY | ACTIVATE_SKILL` intent、model-call activation lookup、continuity dispatch attachment与Skill-specific FULL_REQUIRED。Model-driven progressive disclosure唯一使用ordinary `read_file`；default/max line window冻结为2,000，最终模型可见边界继续由Round 7.1 40,000-byte logical FULL唯一拥有。同run compaction retained语义下移Round 5B。
 
-本文只实施 Pulsara 在 hard-cut 后的 **Agent Skills 标准**、dynamic skill与append-only skill exposure。它必须在 Round 7.1 的normal ToolResult projection以及 Round 9 的统一 source registration、frozen capability registry、semantic fact、MCP direct/meta route与纯 exposure planner均激活后实施；它也是未来 Round 5B 的编码前置，但**不实施 capability ontology、MCP meta gateway、Plugin、compaction summary、adoption、rebase、successor epoch installation或任何 compaction transaction**。
+本文只实施 Pulsara 在 hard-cut 后的 **Agent Skills 标准**、dynamic skill与append-only skill exposure。它必须在 Round 7.1 的normal ToolResult projection以及 Round 9 的统一source registration、frozen capability registry、semantic fact、父dispatch cut、MCP direct/meta route与窄Tool/Skill consumers均激活后实施；它也是未来 Round 5B 的编码前置，但**不实施 capability ontology、MCP meta gateway、Plugin、compaction summary、adoption、rebase、successor epoch installation或任何 compaction transaction**。
 
 本文把 Anthropic 发布并迁移到 [Agent Skills specification](https://agentskills.io/specification) 的开放契约视为 Pulsara skill 的**唯一规范格式**，而不是额外兼容格式：
 
@@ -79,17 +83,17 @@ messages[n + 1] == messages[n] || append_only_suffix
 
 ~~~text
 Host/cold epoch
-  -> compose six default SAFE_POINT_REFRESHABLE Skill root registrations
-  -> exact join each registration to one process-local root binding
-  -> bounded scan registered Agent Skills roots
+  -> Host composition freezes the ordered Round 9 four-kind physical root policy
+  -> LocalSkillProvider bounded-scans that exact policy once
   -> validate standard frontmatter and directory name without pre-reading resources
-  -> freeze complete per-root source snapshots and enter Round 9 registry
+  -> globally resolve duplicate precedence and freeze one LOCAL_SKILL_CATALOG snapshot
+  -> enter the Round 9 registry through its aggregate Skill owner carrier
   -> freeze exact manifest bytes and portable standard fields
   -> compile SKILL_CATALOG snapshot
 
 new/changed/removed skill inside epoch
   -> next complete tool-batch/provider safe point re-scan
-  -> build successor Skill source snapshots and one successor capability registry
+  -> build one successor LOCAL_SKILL_CATALOG snapshot and one successor capability registry
   -> same semantic snapshot: no-op
   -> changed semantic snapshot: append successor SKILL_CATALOG
   -> never rewrite SYSTEM/tools/history
@@ -147,8 +151,8 @@ Pulsara不需要知道模型是在“检查”还是“采用”一个文件。�
 ### 1.1 本轮恢复
 
 - Agent Skills standard `SKILL.md` parser与directory/resource contract；
-- workspace skill roots：`.pulsara/skills`、`.agents/skills`、`.claude/skills`；
-- user skill roots：`${PULSARA_HOME}/skills`（默认 `~/.pulsara/skills`）、`~/.agents/skills`、`~/.claude/skills`；
+- workspace skill roots：`.pulsara/skills`、`.agents/skills`；
+- 启用user skills时的user roots：`${PULSARA_HOME}/skills`（默认 `~/.pulsara/skills`）、`~/.agents/skills`；
 - catalog 在同 epoch 中响应新增、修改、删除与invalid/unavailable变化；
 - configured 与显式 textual skill activation；
 - ROOT initial prompt、ordered steer batch、tool loop、Plan automatic continuation和child scope的 closed activation matrix；
@@ -166,6 +170,7 @@ Pulsara不需要知道模型是在“检查”还是“采用”一个文件。�
 - 不把Claude Code host extensions误称为Agent Skills core；
 - 不执行Claude Code动态`!command`预处理，不允许skill load本身产生shell effect；
 - 不扫描Codex/Claude/plugin manager的私有cache目录；插件若要供Pulsara使用，必须把skill安装到一个声明root；
+- 不扫描workspace或user `.claude/skills`；Claude来源的portable Skill必须安装到上述四种既有root之一；
 - 不建立 session-pinned implicit skill 集；
 - 不持久化“模型曾经读过哪些 skill”；
 - 不把普通 `read_file`解释为Runtime activation、permission或loaded-state；
@@ -211,7 +216,7 @@ Registry / Discovery
 
 `CapabilityExposurePlan` 同时描述 direct/deferred/hidden/callable tool、skill catalog与active injection。它正确证明：
 
-- skill catalog 与 active injection可以和 tool exposure来自同一个 semantic planning cut；
+- skill catalog与active injection可以和tool exposure来自同一个父dispatch cut，同时由两个窄consumer分别处理；
 - descriptor不等于executor；
 - skill引用工具不能创建schema或权限；
 - continuation只能exact reuse或monotonic narrowing，不能静默widen；
@@ -222,8 +227,8 @@ Registry / Discovery
 - durable capability exposure fact/event/artifact；
 - run working set中的original/effective exposure lineage；
 - continuation exposure receipt与recovery；
--跨 Host registry generation；
--为了证明prompt内容而持久化完整projection artifact。
+- 跨 Host registry generation；
+- 为了证明prompt内容而持久化完整projection artifact。
 
 当前 Round 3/3.1 的 compiler source head、continuity epoch与tool-surface borrow已经是更小的替代品。
 
@@ -239,7 +244,7 @@ Codex 的 `HostSkillsSnapshot` 在创建 `TurnContext` 时冻结，并在该 tur
 
 Codex compaction会重建Skill catalog并保留bounded recent user-role messages；explicit `$skill`注入因此可能自然被保留，但ordinary file ToolResult没有Skill专用重注入保证。Pulsara吸收“普通read + 无loaded-state”，同时把同run compaction是否retained交给Round 5B按actual FULL delivery机械判断。
 
-Codex当前把OpenAI自己的interface、dependency与policy放在独立`agents/openai.yaml` sidecar，而不是扩张portable `SKILL.md`。这证明宿主或发行方确有额外组合需求时，应使用**可选、带明确owner的外部bundle/sidecar**；它不能成为第三方Skill被Pulsara发现或激活的前置条件。Round 9.1不实现该sidecar；Round 9.2 Plugin只按公开/宿主包契约分别贡献Skill roots、MCP与Hook定义，不把Codex sidecar变成portable Skill字段。
+Codex当前把OpenAI自己的interface、dependency与policy放在独立`agents/openai.yaml` sidecar，而不是扩张portable `SKILL.md`。这证明宿主或发行方确有额外组合需求时，应使用**可选、带明确owner的外部bundle/sidecar**；它不能成为第三方Skill被Pulsara发现或激活的前置条件。Round 9.1不实现该sidecar；Round 9.2 Plugin只按公开/宿主包契约把portable Skill物化到四个既有physical roots之一，并贡献MCP与Hook定义，不把Codex sidecar变成portable Skill字段，也不新增Runtime Skill root。
 
 不照搬：
 
@@ -255,7 +260,7 @@ grok-build 的 `SkillManager` 保存startup与dynamic discovered skills。file t
 值得吸收：
 
 - dynamic discovery只在完整tool result之后形成提醒，不插入并行tool batch中间；
--同一skill按canonical path/name去重；
+- 同一skill按canonical path/name去重；
 - catalog正文有独立预算；
 - 在history reset后使用同一个renderer重建完整current semantic catalog，而不是依赖旧delta；这只是值得保留的下游经验，不是本文实施项；
 - conditional/path-related discovery可以作为未来优化，但不能改变基础 correctness。
@@ -310,12 +315,12 @@ Agent Skills规范中的实验性host permission字段不属于Pulsara V1的行�
 
 ### 3.1 已经正确的部分
 
-当前基线已经拥有旧命名的 `FrozenKernelCapabilityProjectionInput`、`KernelCapabilityComposer` 与 `CAPABILITY_CATALOG`；它们实际只处理Skill。Round 9必须在本轮编码开始前把这三者分别收窄为`FrozenSkillProjectionInput`、`KernelSkillProjectionComposer`与`SKILL_CATALOG`，并提供统一的source registration、`FrozenCapabilityRegistrySnapshot`与`FrozenCapabilityPlanningCut`。本轮不得自己兼容两套名称，也不得在Round 9未激活时临时复制其DTO。
+当前基线已经拥有旧命名的 `FrozenKernelCapabilityProjectionInput`、`KernelCapabilityComposer` 与 `CAPABILITY_CATALOG`；它们实际只处理Skill。Round 9必须在本轮编码开始前把这三者分别收窄为`FrozenSkillProjectionInput`、`KernelSkillProjectionComposer`与`SKILL_CATALOG`，并提供统一的source registration、`FrozenCapabilityRegistrySnapshot`与父`FrozenCapabilityDispatchCut`。本轮不得自己兼容两套名称，也不得在Round 9未激活时临时复制其DTO。
 
 完成该前置后，本轮可以直接复用：
 
 - `LocalSkillProvider` 的四个legacy root、UTF-8读取、64 KiB/file bound、symlink containment与deterministic root/name precedence；
-- `FrozenSkillProjectionInput`，覆盖skill discovery metadata/content digest并引用registry-owned Skill source snapshots；
+- `FrozenSkillProjectionInput`，覆盖skill discovery metadata/content digest并引用registry-owned唯一聚合Skill source snapshot；
 - `SKILL_CATALOG`：`IMPORTANT + SNAPSHOT_ON_CHANGE`；
 - `ACTIVE_SKILL`：`MUST_KEEP + ACTIVATION_SNAPSHOT`；
 - same-turn tool loop用`NOT_APPLICABLE`保持active head；
@@ -348,6 +353,14 @@ Agent Skills规范中的实验性host permission字段不属于Pulsara V1的行�
 `LocalSkillManifest`继续是唯一filesystem-backed leaf，但它必须直接表达Agent Skills标准，而不是保留一套Pulsara私有frontmatter schema。
 
 ~~~python
+class SkillSource(StrEnum):
+    WORKSPACE = "workspace"
+    USER = "user"
+
+
+# LocalSkillRootKind is imported from the activated Round 9 contract.
+
+
 @dataclass(frozen=True, slots=True)
 class LocalSkillManifest:
     name: str
@@ -360,8 +373,18 @@ class LocalSkillManifest:
     location: str             # model-visible stable display path
     body: str                 # exact Markdown body after frontmatter
     raw_document_digest: str  # digest of exact bounded UTF-8 SKILL.md bytes
-    source: SkillSource
+    root_kind: LocalSkillRootKind
     authoring_diagnostic_codes: tuple[SkillAuthoringDiagnosticCode, ...]
+
+    @property
+    def source(self) -> SkillSource:
+        """Mechanically derived coarse WORKSPACE | USER product source."""
+        if self.root_kind in {
+            LocalSkillRootKind.WORKSPACE_PULSARA,
+            LocalSkillRootKind.WORKSPACE_AGENTS,
+        }:
+            return SkillSource.WORKSPACE
+        return SkillSource.USER
 ~~~
 
 标准validation必须exact执行：
@@ -374,14 +397,14 @@ class LocalSkillManifest:
 6. `compatibility`若存在必须为1–500字符；
 7. `metadata`若存在必须为mapping，最多64项；所有key必须是1–128 UTF-8 bytes的string，value必须是0–1,024 UTF-8 bytes的string，key-sorted canonical aggregate最多16 KiB；不得把任意nested YAML object偷渡为metadata value；
 8. 整个UTF-8 `SKILL.md`最多64 KiB，YAML frontmatter最多32 KiB；parse前的event/node scan最多512 nodes、最大depth 16，duplicate key、anchor、alias、custom tag与multi-document YAML全部拒绝；
-9. body与标准resources继续受§5.4 physical bounds约束；supporting resources不在discovery时读取；
+9. body与标准resources继续受§5.5 physical bounds约束；supporting resources不在discovery时读取；
 10. unsupported top-level extension只进入bounded internal diagnostic，不产生Pulsara语义；`license`、`compatibility`与`metadata`绝不能再被标为unknown。
 
 旧顶层`provides_tools`、`suggested_tools`、`required_binaries`、`optional_binaries`、`external_services`、`network_required`、`auth_required`、`cli_usage_kind`、`when_to_use`、`disable_model_invocation`与`user_invocable`全部失去canonical语义。clean-v0不得悄悄恢复alias、双读或迁移逻辑，也不得把这些字段搬进`metadata.pulsara.*`继续解释。
 
 `SkillAuthoringDiagnosticCode`至少包含`BODY_OVER_500_LINES`与`BODY_ESTIMATE_OVER_5000_TOKENS`。它们只表达Agent Skills authoring recommendation：前者由exact line count产生，后者可在存在target estimator时产生；二者都不能使manifest invalid、隐藏Skill或改变fingerprint。详细内容应由作者拆到`references/`等resources，但Runtime不得为了满足recommendation而截断body。
 
-`local_skill_manifest_semantic_fingerprint()`必须使用domain-separated、length-prefixed canonical encoding，覆盖标准parsed字段与body；它不覆盖raw document digest、mtime、inode、scan duration、absolute home path的字符串展示、supporting resource当前内容、unsupported/ignored extension值、authoring diagnostic或free-text internal diagnostic。`raw_document_digest`独立证明exact file bytes，供read race/join使用，不能替代semantic fingerprint。Provider-visible catalog fingerprint只覆盖`name + description + location`；textual/configured active fingerprint只额外覆盖exact body。因而license、compatibility或opaque metadata变化可以更新local manifest identity，但在routing/body均未变化时不得追加冗余provider snapshot。Runtime生成的`ACTIVE_SKILL`只发送exact parsed Markdown body，不重复raw YAML frontmatter；ordinary `read_file`仍返回文件真实内容。
+`local_skill_manifest_semantic_fingerprint()`必须使用domain-separated、length-prefixed canonical encoding，覆盖标准parsed字段与body；它不覆盖raw document digest、root kind、mtime、inode、scan duration、absolute home path的字符串展示、supporting resource当前内容、unsupported/ignored extension值、authoring diagnostic或free-text internal diagnostic。`root_kind`是owner provenance而不是Agent Skills文件语义；它与precedence ordinal、stable location prefix共同进入Round 9 `winning_root_provenance_fingerprint`，继而进入Skill `fact_semantic_fingerprint`。`source`不是第二个可提交字段，而是由root kind机械降格的只读property：两个workspace kind恒为`WORKSPACE`，两个user kind恒为`USER`；因此不存在`source/root_kind`不一致，也不能反向用粗粒度source区分四种root。旧`BUNDLED`只描述installer provenance，不再是Skill discovery source；bundled Skill必须先物化到四个root之一并按该root降格。`raw_document_digest`独立证明exact file bytes，供read race/join使用，不能替代semantic fingerprint。Provider-visible catalog fingerprint只覆盖`name + description + location`；textual/configured active fingerprint只额外覆盖exact body。因而license、compatibility或opaque metadata变化可以更新local manifest identity，但在routing/body均未变化时不得追加冗余provider snapshot。Runtime生成的`ACTIVE_SKILL`只发送exact parsed Markdown body，不重复raw YAML frontmatter；ordinary `read_file`仍返回文件真实内容。
 
 contract identity冻结为：
 
@@ -395,35 +418,44 @@ root discovery是Host policy，不属于Agent Skills文件格式。Pulsara deter
 
 1. workspace `.pulsara/skills`；
 2. workspace `.agents/skills`；
-3. workspace `.claude/skills`；
-4. user `${PULSARA_HOME}/skills` / `~/.pulsara/skills`；
-5. user `~/.agents/skills`；
-6. user `~/.claude/skills`。
+3. 启用user skills时的user `${PULSARA_HOME}/skills` / `~/.pulsara/skills`；
+4. 启用user skills时的user `~/.agents/skills`。
 
 同名时first valid winner生效，后续项只产生internal diagnostic。不得按最近mtime或目录遍历偶然顺序选winner。
 
-六个条目不是scanner内部的hidden常量。Host composition必须先通过Round 9 central adapter为它们构造六个`SAFE_POINT_REFRESHABLE + LOCAL_SKILL_ROOT` source registrations，再分别exact join一个process-local physical root binding：
+四种root不是scanner内部的hidden常量，也不是四个generic capability sources。Host composition必须通过`LocalSkillProvider`的private owner factory冻结一个exact-scope、ordered physical root policy；workspace roots始终存在，两个user roots仅在user skills启用时进入policy。Round 9 registry始终只看到exact one `SAFE_POINT_REFRESHABLE + LOCAL_SKILL_CATALOG` registration/snapshot：
 
 ~~~python
 @dataclass(frozen=True, slots=True)
-class PreparedSkillRootSourceBinding:
-    registration_fingerprint: str
+class PreparedSkillRootBinding:
+    root_kind: LocalSkillRootKind
     path: Path
     containment_root: Path
     location_prefix: str
     precedence_ordinal: int
-    source_scope: SkillSource
     binding_fingerprint: str
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedLocalSkillRootPolicy:
+    conversation_scope_kind: ModelInputScopeKind
+    scope_subagent_task_id: str | None
+    roots: tuple[PreparedSkillRootBinding, ...]
+    root_policy_fingerprint: str
 ~~~
 
 约束如下：
 
-- generic registration保存logical root identity、scope/precedence contract fingerprint与refresh mode，不保存absolute path；
-- binding保存scan所需path/containment，但不进入provider、generic registry fingerprint或durable state；
-- `LocalSkillProvider`必须消费ordered registrations + exact bindings，不得自行重新发明默认roots；
-- Round 9.1的default Host composition精确产生上述六项；测试可显式传较小集合，但必须仍经过同一registration adapter；
-- filesystem新增、修改、删除Skill只更新registered root的source snapshot，不重新注册root；
-- 本轮不允许运行时新增第七root；future Plugin只能在Round 9.2通过同一个source-registration入口贡献root，不能向scanner注入private cache path。
+- `PreparedLocalSkillRootPolicy`是Skill owner的process-local physical input，不是generic registration、durable row或第二个registry；
+- policy exact绑定ROOT/child scope，`roots`按连续`precedence_ordinal`排序且四值`LocalSkillRootKind`、display prefix与resolved physical binding均unique；foreign scope、path-swapped binding或重复ordinal在scan前拒绝；
+- binding保存scan所需path/containment；absolute path及其fingerprint不进入provider、generic registry fingerprint或durable state；
+- `binding_fingerprint`以process-local domain覆盖root kind、resolved path、containment、location prefix与precedence；`root_policy_fingerprint`覆盖exact scope及ordered binding fingerprints。二者只服务Skill owner内部exact join，并由Round 9 `PreparedLocalSkillCatalogSourceSnapshot.root_policy_fingerprint`引用；
+- `LocalSkillProvider`只消费这份owner policy，不在scanner内部重新发明默认roots；
+- Round 9.1的Host composition只使用上述四种root：user skills关闭时exact two bindings，开启时exact four bindings；测试可通过同一private factory显式传较小集合；
+- scanner对整份policy执行一次bounded global scan与precedence resolution，随后直接签发Round 9 `PreparedLocalSkillCatalogSourceSnapshot`；不得把winner拆回per-root generic snapshots；
+- filesystem新增、修改、删除Skill只更新下一safe point的聚合source snapshot，不重新注册`LOCAL_SKILL_CATALOG`；
+- physical root policy未来合法变化时同样保持聚合source identity/registration不变，只形成新的owner carrier与聚合source snapshot；
+- 本轮不允许运行时新增第五种physical root。Future Plugin不得借Round 9.2让Runtime直接扫描plugin cache；portable Skill仍须安装到这四种既有root之一，且不能改变Round 9 registry接口。
 
 Codex/Claude/plugin cache不是skill root。插件installer必须把skill物化到上述一个声明root；Runtime不得扫描`~/.codex/plugins/cache`、Claude plugin internals或任意包管理器cache来猜安装状态。
 
@@ -480,13 +512,13 @@ Catalog严格遵守standard progressive disclosure：只展示任务选择所需
 @dataclass(frozen=True, slots=True)
 class FrozenSkillProjectionInput:
     discovery: LocalSkillDiscovery
-    source_snapshot_fingerprints: tuple[str, ...]
+    source_snapshot_fingerprint: str
     snapshot_fingerprint: str
 ~~~
 
-Skill facts只存在于Round 9 `FrozenCapabilityRegistrySnapshot`引用的Skill source snapshots；`FrozenSkillProjectionInput`不得保存第二份caller-supplied fact tuple。`source_snapshot_fingerprints`按registered-root precedence排列，并必须全部resolve到同一次planning cut的`LOCAL_SKILL_ROOT` snapshots。`LocalSkillDiscovery`是standard manifest renderer/activation需要的source-specific carrier；central factory必须证明winning manifests、source snapshot facts与registry flattened Skill view exact join。
+Skill facts只存在于Round 9 `FrozenCapabilityRegistrySnapshot`引用的唯一聚合Skill source snapshot；`FrozenSkillProjectionInput`不得保存第二份caller-supplied fact tuple。`source_snapshot_fingerprint`必须resolve到同一父`FrozenCapabilityDispatchCut`中exact one `LOCAL_SKILL_CATALOG` snapshot。`LocalSkillDiscovery`是standard manifest renderer/activation需要的source-specific carrier；central factory必须证明global winning manifests、每项root provenance、聚合source facts与registry flattened Skill view逐项exact join。
 
-`FrozenSkillProjectionInput.snapshot_fingerprint`覆盖ordered source snapshot refs、`(manifest semantic fingerprint, raw_document_digest, location)`与closed parse-result codes，但它**不得直接作为**`SKILL_CATALOG` source semantic fingerprint。后者由ordered `ResolvedSkillCatalogEntry`及exact rendered body独立计算，只覆盖provider-visible`name/description/location`。因而license、compatibility、opaque/ignored metadata或supporting-resource变化可更新local discovery/下一activation，却不会在provider-visible catalog与body完全相同时追加冗余snapshot。Internal diagnostic的path/free-text不进入provider semantic fingerprint；public closed status若实际进入catalog body才进入。
+`FrozenSkillProjectionInput.snapshot_fingerprint`覆盖聚合source snapshot ref、`(manifest semantic fingerprint, raw_document_digest, location)`与closed parse-result codes，但它**不得直接作为**`SKILL_CATALOG` source semantic fingerprint。后者由ordered `ResolvedSkillCatalogEntry`及exact rendered body独立计算，只覆盖provider-visible`name/description/location`。因而license、compatibility、opaque/ignored metadata或supporting-resource变化可更新local discovery/下一activation，却不会在provider-visible catalog与body完全相同时追加冗余snapshot。Internal diagnostic的path/free-text不进入provider semantic fingerprint；public closed status若实际进入catalog body才进入。
 
 ### 4.7 Active skill activation snapshot
 
@@ -538,7 +570,7 @@ ordinary ToolResult policy                       = BEST_AVAILABLE
 - 下一safe point重新scan并通过`SKILL_CATALOG` successor表达current filesystem；
 - 读取任意Markdown path不会安装`ACTIVE_SKILL`、授予permission或建立loaded-state。
 
-2026-08-18对当前六个Pulsara roots的真实探针给出实现依据：29个unique `SKILL.md`在`limit=2_000`时全部一次读到EOF并形成Round 7.1 FULL-eligible logical result，最大quote为36,333 UTF-8 bytes；旧默认500行会截断其中5个。扩大到本机已知Codex/plugin roots的106个文件时，104个仍可FULL，两个private plugin-cache文件超过40K并正确退化。后两类目录本来不属于本文六个root；该结果同时证明：
+2026-08-19对Round 9当前四种root policy的真实探针给出实现依据：在user skills启用、workspace两root当前为空的环境中，两个user roots产生29个unique `SKILL.md`；它们在`limit=2_000`时全部一次读到EOF并形成Round 7.1 FULL-eligible logical result，最大quote为36,333 UTF-8 bytes，旧默认500行会截断其中5个。扩大到本机已知Codex/plugin private roots的106个文件时，104个仍可FULL，两个private plugin-cache文件超过40K并正确退化；这些额外目录不属于本文discovery policy。该结果同时证明：
 
 - 2,000行足以覆盖当前正常Skill，不需要提高40K；
 - “少于500行/约5,000 tokens”仍只是authoring recommendation；
@@ -568,36 +600,50 @@ filesystem是当前skill内容来源；provider input continuity owner是当前�
 
 ### 5.1 每次 prospective provider dispatch
 
-顺序固定为：
+全局normative顺序唯一归Round 9 §8.1/§8.2拥有；本文不得复制或改写另一套dispatch pipeline。以下只标出Skill步骤在该顺序中的插入点，任何实现都必须先完成registry与target-aware native preflight，才能构造parent cut：
 
 ~~~text
-freeze canonical provider-input cut
--> compose exact current Builtin/MCP/Skill source registrations
--> exact join six Skill root registrations to physical root bindings
--> freeze current Builtin/MCP source snapshots
--> bounded scan and parse registered Skill roots
--> apply cross-root precedence and split winners into complete per-root source snapshots
--> freeze one Round 9 capability registry snapshot
--> freeze current epoch native tool surface / MCP NEW-META exposure from that registry
--> freeze FrozenSkillProjectionInput referencing exact registry source snapshots
--> resolve trigger-specific ACTIVE_SKILL from the same frozen discovery
--> collect all other one-cut sources
--> compile
--> construct and PREPARED-register ordinary continuity candidate
--> provider preflight
--> continuity candidate install CAS
--> provider open
+Round 9 one absolute dispatch deadline / exact scope / canonical cut
+-> freeze the three exact-scope owner snapshots
+     Skill branch:
+       PreparedLocalSkillRootPolicy
+       -> one bounded global scan
+       -> PreparedLocalSkillCatalogSourceSnapshot
+-> freeze FrozenCapabilityRegistrySnapshot
+-> resolve exact model target/profile
+-> adapter-owned native-wire preflight
+-> freeze FrozenCapabilityDispatchCut
+-> mechanically derive Tool and Skill dispatch views
+     Skill view -> resolve trigger-specific ACTIVE_SKILL from the same discovery
+                -> KernelSkillProjectionComposer
+-> resume Round 9 compiler / preflight / continuity CAS / provider open
 ~~~
 
-同一次planning中，registry Skill facts、catalog与active body必须来自同一`LocalSkillDiscovery`和同一组六个source snapshots。不得先注册facts或渲染catalog、随后重新读文件渲染active body。
+同一次planning中，registry Skill facts、catalog与active body必须来自同一`LocalSkillDiscovery`、同一个aggregate Skill snapshot与同一个父dispatch cut。不得先注册facts或渲染catalog、随后重新读文件渲染active body。Tool planner不得取得Skill lineage；Skill composer不得取得native/MCP execution view。Composer只接受Round 9从parent机械派生的`FrozenSkillCapabilityDispatchView`，输出同时引用parent与Skill view fingerprint。
+
+三项owner snapshot按当前absolute dispatch deadline顺序冻结，不使用共同attempt token，也不在末尾重新询问三个owner是否“仍current”。freeze后发生的filesystem/MCP变化只进入下一safe-point successor；MCP执行前仍由其既有generation/slot/binding fence独立exact join。
 
 普通`read_file`不依赖model-call catalog lookup；catalog是routing data，不是file-read authorization。Compiler仍须exact安装其最终选择的`SKILL_CATALOG VALUE | CLEARED | UNAVAILABLE`，但continuity candidate不再携带Skill-private dispatch attachment。
 
 Round 3.1 dispatch-planning absolute deadline继续覆盖skill scan/parse/render；每个文件I/O仍使用相应physical bound。不得因每个skill重新签发完整planning deadline。
 
-### 5.2 为什么保持safe-point rescan
+### 5.2 Complete global scan 的顺序观察语义
 
-当前实现每次provider planning都bounded scan skill roots。本轮把roots改成显式registration/binding输入，但继续保留每次planning对这些registered roots的complete scan。这一行为直接覆盖：
+Filesystem不提供跨目录事务，本文也不伪造“所有root同一瞬间”的snapshot。一次`COMPLETE` Skill scan固定表示下面这条bounded、deterministic顺序观察：
+
+1. 按`LocalSkillRootKind` precedence处理当前policy中的root；每个root只执行一次bounded direct-child enumeration，并冻结该次实际存在的sorted `child/SKILL.md` candidate tuple。enumeration时root不存在等价于该root本次为空；root不可访问、无法完成bounded enumeration或返回不完整listing则整次scan不可证明；
+2. enumeration完成后出现的新root、child或`SKILL.md`不属于本cut，进入下一safe-point scan；没有`SKILL.md`的普通child不是candidate，也不构成race；enumeration中已经冻结的candidate不能因为后续目录列表变化被静默增删；
+3. 按冻结的root/candidate顺序读取每个`SKILL.md`一次；每项只采用该次成功取得且满足64 KiB/UTF-8/YAML bounds的exact bytes，并立即冻结`raw_document_digest`；
+4. 已枚举candidate在读取前消失、读取失败、超出absolute dispatch deadline，或无法形成一份exact bounded byte string时，整次aggregate source snapshot为`UNAVAILABLE/DISCOVERY_RACED + facts=()`；不得把它当作invalid manifest跳过后继续声称COMPLETE；
+5. 成功读取但standard-invalid的exact document仍按既有closed validation规则确定性忽略并记录bounded diagnostic；这与I/O/race导致无法证明读取集合完整不同；
+6. atomic replace恰好发生在open前后时，以该次成功file read实际取得的exact bytes为准；snapshot证明的是上述顺序观察，不声称这些bytes曾同时存在；
+7. 一次cut不因race无限重试，也不取得新planning deadline。Watcher若观察到后续变化，只唤醒下一safe-point scan。
+
+因此`COMPLETE`的机械含义是“对该次每root bounded enumeration冻结的全部`child/SKILL.md` candidate，都得到exact bytes并完成closed validation/precedence resolution”，不是filesystem-wide point-in-time transaction。
+
+### 5.3 为什么保持safe-point rescan
+
+当前实现每次provider planning都bounded scan skill roots。本轮把roots改成一个显式、owner-internal physical policy，但继续保留每次planning对整份policy的complete global scan。这一行为直接覆盖：
 
 - Agent通过filesystem tool安装/修改skill；
 - 用户或外部installer在进程外修改skill；
@@ -611,9 +657,9 @@ V1继续保留这一正确性路径。未来可以增加Codex式watcher/cache，
 - missed watcher event不得成为skill永远不可见的原因；
 - correctness tests必须能关闭cache并得到相同projection。
 
-Watcher/cache即使存在，也只能帮助某个`SAFE_POINT_REFRESHABLE` registration更快产生相同source snapshot。它不得直接向generic registry调用`register()`、删除leaf或改变root precedence。
+Watcher/cache即使存在，也只能唤醒`LocalSkillProvider`或帮助它更快产生相同的aggregate source snapshot。它不得直接向generic registry调用`register()`、删除leaf、发布per-root partial snapshot或改变root precedence。
 
-### 5.3 Tool batch边界
+### 5.4 Tool batch边界
 
 如果skill文件由某个tool batch创建或修改：
 
@@ -623,13 +669,15 @@ Watcher/cache即使存在，也只能帮助某个`SAFE_POINT_REFRESHABLE` regist
 - 绝不能插在某个tool call与其result之间；
 - parallel batch只追加一个catalog successor，不按每个result重复扫描/通知。
 
-### 5.4 扫描物理上界
+### 5.5 扫描物理上界
 
 沿用64 KiB单个`SKILL.md`上界，并补齐aggregate工作集：
 
 ~~~text
-default registered skill roots                   = exactly 6
-maximum registered skill roots in Round 9.1      = 6
+generic LOCAL_SKILL_CATALOG sources per scope     = exactly 1
+physical root kinds admitted by Round 9.1         = exactly 4
+physical root bindings when user skills disabled = exactly 2
+physical root bindings when user skills enabled  = exactly 4
 maximum direct child directories inspected       = 1,024 total
 maximum admitted valid manifests per cut         = 64
 aggregate SKILL.md bytes read per discovery cut  = 16 MiB
@@ -848,7 +896,7 @@ Pulsara不为Skill扫描PATH、运行`--version`、检查登录、网络或crede
 
 ### 9.4 Future Plugin bundle
 
-如果发行者需要保证Skill与MCP server共同安装，应由[Round 9.2](ROUND_9_2_AGENT_PLUGIN_BUNDLE_AND_HOOK_LIFECYCLE_IMPLEMENTATION_SPEC.zh.md) Plugin manifest分别贡献Skill root与MCP配置；同一bundle还可包含Codex-compatible Hooks以及一个等待PHC-10定义的dormant Subagent-spec inventory。Loose Agent Skill始终可以原样安装；缺少Plugin或host sidecar不能让它失去发现、激活或正文指导能力。Pulsara不要求用户补metadata，也不使用规则从正文生成bundle manifest；Plugin也不替Skill增加executor或permission语义。
+如果发行者需要保证Skill与MCP server共同安装，应由[Round 9.2](ROUND_9_2_AGENT_PLUGIN_BUNDLE_AND_HOOK_LIFECYCLE_IMPLEMENTATION_SPEC.zh.md) Plugin manifest声明portable Skill内容与MCP配置；installer必须把Skill物化到四个既有physical roots之一，Runtime不得为Plugin新增root或扫描Plugin cache。同一bundle还可包含Codex-compatible Hooks以及一个等待PHC-10定义的dormant Subagent-spec inventory。Loose Agent Skill始终可以原样安装；缺少Plugin或host sidecar不能让它失去发现、激活或正文指导能力。Pulsara不要求用户补metadata，也不使用规则从正文生成bundle manifest；Plugin也不替Skill增加executor或permission语义。
 
 ---
 
@@ -893,7 +941,7 @@ Round 7.1 global provider-visible ToolResult projection
 -> Round 5B compaction implementation
 ~~~
 
-因此本文只复用Round 9提供的`CapabilityIdentity`、`FrozenToolCapabilityFact`、`FrozenSkillCapabilityFact`、`NewMcpToolRef`、fixed meta tools与纯exposure planner，不重新定义任何这些类型，也不调用任何compaction service。若Round 9尚未激活，不得以临时string ref、第二套meta tool或skill-private capability基类绕过。
+因此本文只复用Round 9提供的`CapabilityIdentity`、`FrozenToolCapabilityFact`、`FrozenSkillCapabilityFact`、`NewMcpToolRef`、fixed meta tools、父dispatch cut与窄Tool/Skill consumers，不重新定义任何这些类型，也不调用任何compaction service。若Round 9尚未激活，不得以临时string ref、第二套meta tool或skill-private capability基类绕过。
 
 ---
 
@@ -965,6 +1013,7 @@ Skill安装、修改、删除、activation与read都不改变tools。本文任�
 | valid body exceeds ordinary COMPLETE ToolResult or provider FULL quote | allowed | ordinary bounded ToolResult | catalog仍完整列出；read按普通HEAD_TAIL/COMPACT/REF_ONLY、pagination与artifact guidance处理 |
 | more than 64 valid winners or exact catalog >384 KiB | allowed if invalidation fits | none | no partial/shortened metadata；catalog UNAVAILABLE/CATALOG_OVERBOUND |
 | aggregate discovery bound exceeded | allowed if invalidation fits | none | no partial snapshot；UNAVAILABLE |
+| root enumeration/read raced or planning deadline expired | allowed if invalidation fits | none | whole aggregate `UNAVAILABLE/DISCOVERY_RACED`；no partial facts、no retry/new deadline |
 | duplicate name | allowed | none | deterministic first winner；later duplicate omitted |
 | body mentions missing CLI/tool/MCP | allowed | only on real call | Skill remains valid；existing execution owner returns typed unavailable/failure |
 | unrelated MCP route changes | allowed | none | MCP catalog may change；Skill catalog no-op |
@@ -984,9 +1033,10 @@ Skill安装、修改、删除、activation与read都不改变tools。本文任�
 
 ### 13.1 `capability/local_skills.py`
 
-- 增加六个default logical-root registration factory与`PreparedSkillRootSourceBinding`；
-- `LocalSkillProvider`只消费ordered registrations/bindings，不在scanner内部自行选择roots；
-- root registration exact join path/containment/scope/precedence binding，generic registration不保存absolute path；
+- 增加Round 9四种physical-root policy factory、`PreparedSkillRootBinding`与`PreparedLocalSkillRootPolicy`；
+- 复用Round 9 closed `LocalSkillRootKind = WORKSPACE_PULSARA | WORKSPACE_AGENTS | USER_PULSARA | USER_AGENTS`；本轮不得重定义或扩张它；`SkillSource`继续只表达粗粒度WORKSPACE/USER；
+- `LocalSkillProvider`只消费owner-internal ordered root policy，不在scanner内部自行选择roots；
+- root policy exact join path/containment/scope/precedence binding；generic registry始终只有一个`LOCAL_SKILL_CATALOG` registration且不保存absolute path；
 - 以Agent Skills core parser替换Pulsara私有顶层schema；
 - exact验证name、directory、description、license、compatibility与string metadata，包括license/metadata/aggregate closed bounds；
 - 在YAML对象materialize前执行frontmatter bytes、node、depth、duplicate key、anchor/alias、custom tag与multi-document scan；
@@ -996,14 +1046,16 @@ Skill安装、修改、删除、activation与read都不改变tools。本文任�
 - 任意valid standard skill无需Pulsara补丁即可正常发现；
 - discovery不枚举或预读supporting resources；
 - 增加aggregate scan reservation与complete/incomplete result；
-- 增加`.claude/skills`两root并保持deterministic precedence、symlink containment、UTF-8与64 KiB bound；
-- complete scan按winning logical root发布Round 9 `FrozenCapabilitySourceSnapshot`，然后只通过pure registry factory注册Skill facts；
+- 实现§5.2单次sorted `child/SKILL.md` candidate enumeration + exact bounded byte read顺序；enumerated candidate消失/read失败/deadline耗尽使整个aggregate source为`UNAVAILABLE/DISCOVERY_RACED`，不无限重试；
+- 保持Round 9现有workspace `.pulsara/.agents`与可选user `.pulsara/.agents`四种root policy、deterministic precedence、symlink containment、UTF-8与64 KiB bound；不得加入`.claude/skills`；
+- complete global scan按winning logical root直接发布一个Round 9 `PreparedLocalSkillCatalogSourceSnapshot`；不得先发布per-root generic snapshots再重组；
 - central manifest semantic fingerprint与raw document digest；authoring diagnostics不进入semantic fingerprint。
 
 ### 13.2 `capability/types.py`
 
 - 删除旧Skill tool/binary/service/auth字段及相关enum/DTO；
 - 新增最小standard manifest DTO；不增加Anthropic host profile、Pulsara extension或dependency route DTO；
+- `LocalSkillManifest`只保存closed `root_kind` provenance；coarse `source`是机械派生的只读property，`SkillSource`只保留`WORKSPACE | USER`且不得用于区分四个physical roots；
 - `ResolvedSkillCatalogEntry`只保存name/description/location/source；
 - `ActiveSkillInjection`绑定manifest/body fingerprint、reason与source/location；
 - 所有 provider DTO 保持frozen、无mutable dict。
@@ -1021,9 +1073,10 @@ Skill安装、修改、删除、activation与read都不改变tools。本文任�
 
 - 删除Host-startup `_available_tool_names`作为动态semantic交集；
 - 保留static product allowlist只用于Host未配置某builtin的硬排除；
-- Host composition构造default Skill root registrations与physical bindings，并与Round 9 Builtin/MCP registrations共同进入planning；
-- `freeze_projection_input()`只消费exact Skill discovery与registry source refs，不需要native/MCP exposure参数；
-- 复用Round 9的`FrozenSkillProjectionInput`，只保存registry-owned Skill source snapshot refs，并把skill-specific fingerprint domain升级为`pulsara:frozen-skill-projection-input:v2`；
+- Host composition构造Round 9 four-kind physical policy，并从Skill owner取得一个`PreparedLocalSkillCatalogSourceSnapshot`；它不为每个root构造generic registration；
+- `freeze_projection_input()`只消费exact Skill discovery与registry中唯一aggregate Skill source ref，不需要native/MCP exposure参数；
+- 复用Round 9的`FrozenSkillProjectionInput`，只保存一个registry-owned `source_snapshot_fingerprint`，并把skill-specific fingerprint domain升级为`pulsara:frozen-skill-projection-input:v2`；
+- 与Tool planner共享父`FrozenCapabilityDispatchCut`，但Skill composer只消费central factory从cut机械派生的`FrozenSkillCapabilityDispatchView`；
 - freeze后不再读取filesystem/MCP supervisor。
 
 ### 13.5 `conversation_kernel/context_sources.py`
@@ -1039,7 +1092,7 @@ Skill安装、修改、删除、activation与read都不改变tools。本文任�
 
 ### 13.6 Runner safe-point wiring
 
-- provider planning在同一safe-point freeze complete Skill source snapshots；
+- provider planning在同一safe-point freeze complete aggregate Skill source snapshot；
 - compiler只安装最终effective `SKILL_CATALOG` / `ACTIVE_SKILL` source heads；不构造Skill-private lookup或dispatch attachment；
 - 完整tool batch之后再允许catalog update；
 - ordinary initial、steer与tool-loop dispatch都使用同一个frozen projection factory；
@@ -1083,11 +1136,12 @@ Skill安装、修改、删除、activation与read都不改变tools。本文任�
 
 ### 14.1 Parser/discovery golden
 
-- default Host composition精确产生六个SAFE_POINT_REFRESHABLE root registrations；scanner不含hidden default-root lookup；
-- registration与physical root binding fingerprint exact join，foreign/path-swapped binding在scan前拒绝；
-- 同registration重复composition idempotent，同logical root不同registration冲突；
-- 六root precedence exact，并覆盖`.claude/skills`；
--同root按child name排序；
+- default Host composition在user skills关闭/开启时分别精确产生exact two/four physical bindings，并始终产生一个aggregate `LOCAL_SKILL_CATALOG` registration；scanner不含hidden default-root lookup；
+- root policy与physical binding fingerprint exact join，foreign-scope/path-swapped binding、重复ordinal或重复logical root在scan前拒绝；
+- `LocalSkillRootKind`四值、precedence ordinal、coarse `SkillSource`降格与winner provenance fingerprint逐项golden；
+- 同root policy重复freeze idempotent；root binding变化只改变owner policy/successor snapshot，不创建第二个generic Skill source；
+- 四种root precedence exact；`.claude/skills`即使存在也不得被扫描；
+- 同root按child name排序；
 - symlink escape、invalid UTF-8、missing frontmatter、whole-file/frontmatter oversize；
 - YAML 512-node、depth-16、duplicate-key、anchor/alias、custom-tag与multi-document边界；
 - `name`首尾/连续连字符、uppercase、directory mismatch全部拒绝；
@@ -1099,9 +1153,11 @@ Skill安装、修改、删除、activation与read都不改变tools。本文任�
 - mtime变化但bytes/metadata相同，semantic fingerprint相等；
 - name/description/body变化时相应manifest/catalog/activation fingerprint按字段覆盖规则变化；
 - license/compatibility/opaque metadata单独变化不会追加provider catalog或active successor；
+- 同一exact document在四个允许root之间移动时，manifest semantic fingerprint保持不变；`root_kind`、winner provenance、Skill `fact_semantic_fingerprint`与aggregate source snapshot必须变化。Provider catalog/active fingerprints仍只按各自可见的location/body字段变化；
 - duplicate name first winner稳定；
-- winning manifests按root拆成complete source snapshots并与Round 9 registry Skill view exact join；
-- empty root发布COMPLETE空snapshot；global scan无法证明完整时不发布任何partial Skill facts；
+- winning manifests直接形成一个complete aggregate source snapshot并与Round 9 registry Skill view exact join；不得按root拆分后再重组；
+- 当前policy全部root为空时发布一个`COMPLETE + facts=()` snapshot；global scan无法证明完整时发布单个`UNAVAILABLE + facts=()`且不发布任何partial Skill facts；
+- concurrent fixture覆盖enumeration后新增member只进入下一cut、enumerated member读取前删除/permission failure导致本cut `UNAVAILABLE/DISCOVERY_RACED`、atomic replace采用该次read exact bytes；所有分支共用原absolute deadline且retry count为0；
 - 1,025 dirs、65 valid winners、16 MiB+1 aggregate或384 KiB+1 exact catalog产生complete-scan/catalog unavailable，不发布partial catalog或缩短description；
 - 500 lines/5,000-token recommendation只产生closed authoring diagnostic，manifest仍valid且fingerprint不变。
 
@@ -1121,11 +1177,12 @@ Skill安装、修改、删除、activation与read都不改变tools。本文任�
 - MCP READY/disconnect/same-schema reconnect/schema replacement不改变Skill semantic fingerprint；
 - permission mode切换不改变Skill catalog或active body；
 - Skill add/change/remove不改变MCP route或provider tools。
+- `KernelSkillProjectionComposer`只接受Round 9 central-derived `FrozenSkillCapabilityDispatchView`；cut A parent + cut B Skill view、foreign registry facts或单独伪造parent fingerprint均在compile前拒绝。
 
 ### 14.4 Read semantics
 
 - workspace `.pulsara/skills/X/SKILL.md`可由catalog location通过普通`read_file`读取，默认/最大window均为2,000行；
-- workspace `.agents`/`.claude`、user `.pulsara`/`.agents`/`.claude`同样覆盖；
+- workspace `.agents`与启用后的user `.pulsara`/`.agents`同样覆盖；workspace/user `.claude`明确返回不在catalog，不能通过catalog location触发读取；
 - `search_files`可查reference，`terminal rg`不是必需路径；
 - supporting resources不在discovery时读取；relative reference按skill root展示并由ordinary file-tool path policy执行；script不因load自动执行；
 - ordinary read不创建Runtime activation、body head、permission state或loaded-state；
@@ -1137,7 +1194,7 @@ Skill安装、修改、删除、activation与read都不改变tools。本文任�
 - model call看到catalog A后filesystem刷新为B，ordinary read返回attempt时current bytes或typed missing；next safe point发布B，不查询任何activation lookup；
 - catalog CLEARED/UNAVAILABLE只失效routing metadata，不改变普通file-read authorization；
 - synthetic 501/2,000-line Skill在logical quote不越40K时由default read一次到EOF；2,001-line physical case与40K+ logical case分别诚实截断/退化；
-- 本机六root 29/29、最大36,333-byte quote及broad 104/106 FULL只作为脱敏activation evidence，不成为依赖个人目录内容的portable correctness gate；
+- 本机Round 9四种root policy下29/29、最大36,333-byte quote及private-root broad probe 104/106 FULL只作为脱敏activation evidence，不成为依赖个人目录内容的portable correctness gate；
 - repository/tool result没有skill-private receipt。
 
 ### 14.5 Activation
@@ -1150,21 +1207,21 @@ Skill安装、修改、删除、activation与read都不改变tools。本文任�
 - tool loop保持active head；
 - Plan nonhuman successor投影configured-only或clear；
 - active文件mid-run修改不改变active head；
--下一真实activation boundary读取new body；
+- 下一真实activation boundary读取new body；
 - missing/over-bound active产生UNAVAILABLE，不沿用旧body；
 - failure -> clear -> clear只追加一次clear。
 
 ### 14.6 Dynamic catalog
 
 - model call N后安装skill，N+1只追加catalog snapshot；
-- add/change/remove先形成registered-root source snapshot successor与registry successor，旧registry仍immutable；
+- add/change/remove先形成一个aggregate `LOCAL_SKILL_CATALOG` snapshot successor与registry successor，旧registry仍immutable；
 - watcher/cache不能旁路source snapshot直接注册leaf；
 - parallel tool batch安装多个skill，只在完整batch后追加一个snapshot；
 - modify/remove/disable分别产生确定性successor；
--无semantic变化不追加；
+- 无semantic变化不追加；
 - complete replacement over budget使用UNAVAILABLE invalidation，不永久阻断对话；
 - 每个VALUE entry保留完整description；64个admitted skills的exact catalog deterministic，任何description缩短、partial prefix admission或第65项静默丢弃均拒绝；
--外部filesystem修改无需watcher也能在next planning被发现。
+- 外部filesystem修改无需watcher也能在next planning被发现。
 
 ### 14.7 Prefix tests
 
@@ -1196,13 +1253,14 @@ Provider-wire hygiene还必须断言：catalog/active carrier的trust为`UNTRUST
 - provider tool catalog中不存在`load_skill`、`skill_view`、`skill_use`；
 - `read_file` schema中不存在Skill-specific intent；
 - Skill source通过Round 9 pure registry factory注册，不存在Skill-private mutable registry/generation；
-- `LocalSkillProvider`不自行构造root set，只消费explicit registration/binding tuple；
+- `LocalSkillProvider`不自行构造root set，只消费Host composition冻结的explicit physical root policy；generic registry中exact one aggregate Skill source；
+- Skill composer不接受分离的parent fingerprint/registry/projection input，只接受Round 9签发的narrow Skill dispatch view并返回parent/view-bound result；
 - 不存在`FrozenSkillActivationCatalogLookup`、`PreparedSkillActivationRead`、Skill dispatch attachment、fingerprint lookup cache或durable activation receipt；
 - catalog没有short-description、partial admission或Skill专用大正文provider channel；
--无skill durable table/relation/event/job/guard；
--无absolute skill path进入provider diagnostics、event或telemetry；
+- 无skill durable table/relation/event/job/guard；
+- 无absolute skill path进入provider diagnostics、event或telemetry；
 - no reverse import from capability package into conversation repository；
--现有architecture oracle数量保持不变；
+- architecture oracle精确保持`31 Committed / 24 Live / 13 subjects / 2 guards / 26 product relations / 1 durable job`；
 - Round 3/3.1/6/7/7.1/8 retained tests通过；Round 5B仍为draft，不作为本轮production test dependency。
 
 ---
@@ -1211,17 +1269,17 @@ Provider-wire hygiene还必须断言：catalog/active carrier的trust为`UNTRUST
 
 ### Slice S0：机器基线
 
-- 验证Round 7.1与Round 9均已ACTIVATED，冻结其public contract manifest、activation hash与retained node IDs；
+- 验证Round 7.1与Round 9均已ACTIVATED，把Round 9 activation commit SHA写回本文编码基线，并冻结其public contract manifest、activation hash与retained node IDs；
 - 记录实际HEAD、本文/上位文档hash；
-- 记录pytest node IDs、architecture oracle与provider tool names；
+- 记录pytest node IDs、`31/24/13/2/26/1` architecture oracle与provider tool names；
 - 锁定当前catalog/active golden；
 - 不修改production。
 
 ### Slice S1：Agent Skills standard parser
 
 - 以core standard替换Pulsara私有顶层schema；
-- 增加六个root registrations/physical bindings、`.claude/skills` roots与official validation；
-- scanner输出complete per-root source snapshots并进入Round 9 registry；
+- 复用Round 9 four-kind physical policy并增加official Agent Skills validation；明确拒绝把`.claude/skills`加入discovery；
+- scanner输出一个complete/unavailable aggregate Skill source snapshot并进入Round 9 registry；
 - 删除所有旧Skill dependency/health字段与parser，不增加namespaced替代；
 - DTO/fingerprint升级；`read_file`保持无intent schema，只把默认窗口提升到2,000行并删除content-suppressing dedup；
 - YAML/frontmatter/metadata安全bounds与authoring diagnostics；
@@ -1259,8 +1317,8 @@ Round 5B compaction在本文ACTIVATED以后另行实施、另行review、另行�
 只有全部满足才可标记ACTIVATED：
 
 1. 同epoch所有skill add/change/remove/activation路径保持SYSTEM/tools不变、messages只追加suffix。
-2. 六个default roots由Host显式注册并exact joinphysical bindings；`LocalSkillProvider`没有hidden root-registration authority。
-3. 每次ordinary provider planning都能从complete per-root source snapshots与Round 9 registry冻结latest semantic catalog的唯一exact full-metadata representation；任何admitted Skill的description不得截断或摘要，overbound时整个catalog明确UNAVAILABLE。
+2. Round 9四种physical roots由Host composition显式冻结为一个exact-scope ordered policy：user skills关闭时两个workspace bindings，开启时再加入两个user bindings；`.claude/skills`不扫描。`LocalSkillProvider`没有hidden root-policy authority，Round 9 generic registry始终只有一个aggregate `LOCAL_SKILL_CATALOG` source。
+3. 每次ordinary provider planning都能从complete aggregate Skill source snapshot与Round 9 registry冻结latest semantic catalog的唯一exact full-metadata representation；任何admitted Skill的description不得截断或摘要，overbound时整个catalog明确UNAVAILABLE。
 4. Same-run active body在普通tool loop/automatic continuation中精确保持，不受文件热修改影响。
 5. 普通`read_file`没有Skill intent、lookup或activation state；默认/最大窗口为2,000行，相同read重新读取current bytes，不再因workspace-global dedup省略/拒绝。它继续使用Round 7.1 BEST_AVAILABLE；只有EOF + canonical COMPLETE + actual FULL + continuity install可供Round 5B纯派生“完整交付”，其他表示必须诚实分页/使用artifact。
 6. 不存在`load_skill`/`skill_view`/`skill_use` provider tool。
@@ -1268,11 +1326,11 @@ Round 5B compaction在本文ACTIVATED以后另行实施、另行review、另行�
 8. 所有unsupported top-level host extension行为inert且不进入manifest semantic fingerprint；standard `metadata`（包括`pulsara.*`键）只可作为opaque local manifest数据进入manifest fingerprint，不进入catalog、activation、provider wire、dependency、health或authorization语义。
 9. 不存在Skill-authored Tool/MCP/CLI dependency graph、health probe或route renderer；第三方standard Skill无需Pulsara改写即可使用。
 10. `SKILL_CATALOG`与`ACTIVE_SKILL`均以`UNTRUSTED_OBSERVATION`进入messages；稳定BASE_SYSTEM单独说明使用规则与authority边界。Skill正文指导不受permission preset改写，真实调用仍走ordinary authorize/effect/attempt/invoke。
-11. Catalog complete-scan failure不发布partial source/registry truth；旧snapshot被最小UNAVAILABLE终止。
-12. Catalog与active来自一个frozen Skill registry/planning cut；MCP route继续由独立Round 9 input拥有。Skill model-driven read不改变continuity candidate shape，也不存在可越过CLEARED/UNAVAILABLE的activation permit。
+11. Catalog scan遵守§5.2顺序观察：每root一次bounded candidate enumeration、每个已冻结`child/SKILL.md`一次exact byte read；enumerated candidate读取失败/race/deadline耗尽不发布partial truth，而以`UNAVAILABLE/DISCOVERY_RACED`终止旧snapshot，且不重置deadline或无限重试。
+12. Catalog与active来自同一个父`FrozenCapabilityDispatchCut`中的aggregate Skill snapshot；parent只在Round 9 target/native preflight之后构造，Tool planner与Skill composer只消费central-derived sibling view，输出exact引用parent/view fingerprints。MCP route继续由Round 9 Tool input拥有；Skill model-driven read不改变continuity candidate shape，也不存在可越过CLEARED/UNAVAILABLE的activation permit。
 13. 本轮没有compaction import、summary、adoption、rebase、successor installation或compaction test owner。
 14. 不新增schema、relation、event、job、guard、receipt、checkpoint、repair或cross-Host generation。
-15. Architecture oracle与provider tool name baseline不变；`read_file`没有新增字段。若默认值编码进schema，cold baseline只升级一次，同epoch tools byte-equal。
+15. Architecture oracle精确保持`31/24/13/2/26/1`，provider tool name baseline不变；`read_file`没有新增字段。若默认值编码进schema，cold baseline只升级一次，同epoch tools byte-equal。
 16. Round 7.1与Round 9均已ACTIVATED，public contract manifests、activation hashes与retained node IDs exact匹配；本轮没有临时复制normal ToolResult或MCP meta contract。
 
 ---

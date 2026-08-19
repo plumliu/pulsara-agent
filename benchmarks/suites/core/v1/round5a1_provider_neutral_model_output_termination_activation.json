@@ -16,6 +16,48 @@
     "preterminal_accumulator": "Chat adapter v5 reuses the 16777216-byte completed-response physical bound and allows 65536 fragments/elements before freeze/append; text uses chunk lists; unknown non-empty fields retain one boolean only; overflow is typed and non-retryable",
     "direct_native_non_openai_carriers": "out_of_scope"
   },
+  "post_activation_universal_function_tool_wire_amendment": {
+    "completed_at_utc": "2026-08-19T12:52:26Z",
+    "checkpoint_head": "a39e537fa56f6685c677496d0eb11628337675c0",
+    "contract_version": "v2-explicit-non-strict-prevalidated-lowering",
+    "scope": "All Chat and Responses function tools use one provider-neutral wire adapter; canonical schemas and local strict parsers are unchanged.",
+    "openai_documented_profile": "explicit strict=false; root is one object; root object unions are lowered to a non-narrowing provider superset; nested oneOf becomes anyOf; const becomes a single-value enum",
+    "provider_or_tool_name_branches": 0,
+    "post_review_p1_closure": {
+      "chat_final_confirmation": "final_value_required applies to every completed response independently of legacy reasoning replay policy; a missing or null final carrier fails before assistant acceptance or tool execution",
+      "mcp_wire_lowerability": "the same pure lowering contract runs during MCP discovery; non-portable tools follow FAIL_SERVER or OMIT_INVALID and never enter an installed provider surface",
+      "schema_safety": "additionalProperties is never silently narrowed, intersecting oneOf plus anyOf at one node is typed incompatible, and root union branches may inherit the base object contract"
+    },
+    "responses_reasoning_alias": "reasoning_text stream may exact-join final summary only when no separate summary stream or final reasoning content exists; mismatch remains a pre-acceptance protocol error",
+    "code_sha256": {
+      "llm/adapters/openai/function_tools.py": "4a2dd201725bcd2bb24da563622a56186d8c27ff943d2cacb4d105e9e3ac400b",
+      "llm/adapters/openai/chat_completions.py": "4b0df5b2a041f7040e02e2afb6fbd77b86e1f9e4fcd24030cd0a6bcd415331e6",
+      "llm/adapters/openai/responses.py": "c1946abb2b8ecdabe988f466c0a2e12e0793f68a22caf0ef8493653acc0dd6eb",
+      "conversation_kernel/direct_model.py": "1ba0fe8f6cdc31f06f163b9fcbc5f11c64efae60c822bab4465bad75f9d1b31b",
+      "conversation_kernel/mcp/supervisor.py": "7c205b78ab06e533a96095e62fd6f1b675544728a50734db393e57bd5190dd6a",
+      "test_round5a1_provider_output_termination.py": "7354a8bf12ecc21c5bb4403902eb207515292340d8899f73c2b0b6af74f15ec7",
+      "test_round5a1_architecture.py": "c2e81ca7b1d377c9127bb548f8697feabacdc9b54a17baa30326eed96cb57e9b",
+      "test_round6_mcp_production.py": "54f9c9613633a33657e9e2c4578378307a38007ec4bc0926dedfad3166a9ae13"
+    },
+    "verification": {
+      "targeted_and_retained": "145 passed in 15.47s",
+      "full_pytest": "766 passed in 124.60s",
+      "ruff_compileall_protocol_go_lock_diff": "passed",
+      "real_provider_routes": "retained prior 8/8 result with 31 production function tools and fresh-process create/resume; not reissued for the local post-review P1 closure",
+      "providers": [
+        "bobdong:gpt-5.4",
+        "deepseek:deepseek-v4-flash",
+        "dashscope:qwen3.7-plus",
+        "openrouter:openai/gpt-5.6-luna"
+      ],
+      "apis": [
+        "openai_chat_completions",
+        "openai_responses"
+      ],
+      "responses_native_replay": "each provider installed one row on Host A, selected one exact replacement on Host B, and ended with two rows",
+      "secrets_or_private_content_recorded": false
+    }
+  },
   "source_documents": {
     "ROUND_5A_1_PROVIDER_NEUTRAL_MODEL_OUTPUT_TERMINATION_IMPLEMENTATION_SPEC.zh.md_at_start": "ef01d8fac727456237c318124a172ecbeb7c682ee03b0f9dbfba4f9e58af4ef2",
     "ROUND_5A_1_PROVIDER_NEUTRAL_MODEL_OUTPUT_TERMINATION_IMPLEMENTATION_SPEC.zh.md_after_activation_update": "a235d0440abaac55e3e82ddf52cc5ab9b200409b888e8faaf5cd4f4d282ef26e",

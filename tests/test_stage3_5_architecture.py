@@ -58,8 +58,8 @@ def test_stage3_5_final_oracles_are_exact() -> None:
     assert len(LIVE_EVENT_TYPES) == 24
     assert len(SUBJECT_SLOTS) == 13
     assert len(APPEND_GUARDS) == 2
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 25
-    assert len(set(CONVERSATION_KERNEL_RELATIONS)) == 25
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 26
+    assert len(set(CONVERSATION_KERNEL_RELATIONS)) == 26
     assert len(JOB_HANDLER_CATALOG) == 1
     assert len({item.handler_type for item in JOB_HANDLER_CATALOG}) == 1
 
@@ -160,7 +160,7 @@ def test_stage3_5_clean_migration_universe_is_the_only_packaged_universe() -> No
     )
 
     baseline = (sql_root / BASELINE_RESOURCE).read_text(encoding="utf-8")
-    assert baseline.count("CREATE TABLE pulsara_v3.") == 25
+    assert baseline.count("CREATE TABLE pulsara_v3.") == 26
     assert "CREATE TABLE public.pulsara_schema_migrations" in baseline
     assert "CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public" in baseline
     for token in (

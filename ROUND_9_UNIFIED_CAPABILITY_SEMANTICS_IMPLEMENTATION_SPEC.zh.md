@@ -2,13 +2,13 @@
 
 > 状态：**DRAFT — NOT ACTIVATED**
 >
-> 记录日期：2026-08-17
+> 记录日期：2026-08-17；本次架构校准：2026-08-19
 >
-> 当前代码基线：`ffd0d146f8d7991ff3d1e92dc9ca75e8abf894e8`
+> 编码基线：**待冻结**。必须先把Round 5A.2 durable replay与OpenAI function-tool wire contract v2形成经过review的clean checkpoint，再把该提交SHA写回此处；当前审阅输入HEAD `a39e537fa56f6685c677496d0eb11628337675c0`带有dirty worktree，只是规格修订证据，**不得**冒充coding baseline。
 >
 > hard-cut 前参考基线：`5b7ad9f7ffc8565bc572180b2bde0c81ab64473a`
 >
-> 上位契约：[Round 3 structured compiler](ROUND_3_STRUCTURED_MODEL_INPUT_COMPILER_IMPLEMENTATION_SPEC.zh.md)、[Round 3.1 provider-input prefix continuity](ROUND_3_1_PROVIDER_INPUT_PREFIX_CONTINUITY_IMPLEMENTATION_SPEC.zh.md)、[Round 5A execution envelope](ROUND_5_LONG_HORIZON_EXECUTION_ENVELOPE_IMPLEMENTATION_SPEC.zh.md)、[Round 5A.1 provider-neutral output termination](ROUND_5A_1_PROVIDER_NEUTRAL_MODEL_OUTPUT_TERMINATION_IMPLEMENTATION_SPEC.zh.md)、[Round 6 MCP](ROUND_6_MCP_PRODUCTION_CAPABILITY_IMPLEMENTATION_SPEC.zh.md)、[Round 7 model-visible observation](ROUND_7_MODEL_VISIBLE_FAILURE_AND_TOOL_OBSERVATION_IMPLEMENTATION_SPEC.zh.md)、[Round 7.1 provider-visible ToolResult projection](ROUND_7_1_PROVIDER_VISIBLE_TOOL_RESULT_PROJECTION_IMPLEMENTATION_SPEC.zh.md)、[Gap Index](POST_HARD_CUT_PRODUCT_CAPABILITY_GAP_INDEX.zh.md)
+> 上位契约：[Round 3 structured compiler](ROUND_3_STRUCTURED_MODEL_INPUT_COMPILER_IMPLEMENTATION_SPEC.zh.md)、[Round 3.1 provider-input prefix continuity](ROUND_3_1_PROVIDER_INPUT_PREFIX_CONTINUITY_IMPLEMENTATION_SPEC.zh.md)、[Round 5A execution envelope](ROUND_5_LONG_HORIZON_EXECUTION_ENVELOPE_IMPLEMENTATION_SPEC.zh.md)、[Round 5A.1 provider-neutral output termination](ROUND_5A_1_PROVIDER_NEUTRAL_MODEL_OUTPUT_TERMINATION_IMPLEMENTATION_SPEC.zh.md)、[Round 5A.2 durable provider replay](ROUND_5A_2_DURABLE_PROVIDER_REPLAY_AND_CROSS_RESTART_THREAD_CONTINUATION_IMPLEMENTATION_SPEC.zh.md)、[Round 6 MCP](ROUND_6_MCP_PRODUCTION_CAPABILITY_IMPLEMENTATION_SPEC.zh.md)、[Round 7 model-visible observation](ROUND_7_MODEL_VISIBLE_FAILURE_AND_TOOL_OBSERVATION_IMPLEMENTATION_SPEC.zh.md)、[Round 7.1 provider-visible ToolResult projection](ROUND_7_1_PROVIDER_VISIBLE_TOOL_RESULT_PROJECTION_IMPLEMENTATION_SPEC.zh.md)、[Gap Index](POST_HARD_CUT_PRODUCT_CAPABILITY_GAP_INDEX.zh.md)
 >
 > 直接下游：[Round 9.1 Agent Skills Standard](ROUND_9_1_AGENT_SKILLS_STANDARD_IMPLEMENTATION_SPEC.zh.md)
 >
@@ -16,11 +16,17 @@
 
 本文重新冻结 Pulsara 中 `capability` 的唯一产品含义，并把当前 Built-in tool、MCP tool 与 Skill 投影到同一个**纯语义规划边界**。本轮统一 discovery identity、semantic fact与provider exposure planning，但不统一 permission、physical binding、transport、Skill activation或文件执行方式。
 
-本轮同时把原先寄放在 Round 5B 中、但与compaction无关的 MCP direct/meta 混合能力独立落地：cold epoch 建立时可靠且完整可容纳的MCP cohort进入provider native `tools[]`；epoch中后到的MCP工具只通过固定`inspect_new_mcp_tool`与`use_new_mcp_tool`使用。Round 9.1随后只需把Skill正文作为指导数据接入同一registry/catalog，不需要建立Skill→Tool dependency graph。
+本轮同时把原先寄放在 Round 5B 中、但与compaction无关的 MCP direct/meta 混合能力独立落地：cold epoch 建立时canonical-valid、native-wire eligible且完整可容纳的MCP cohort进入provider native `tools[]`；wire-incompatible或epoch中后到的MCP工具通过固定`inspect_new_mcp_tool`与`use_new_mcp_tool`使用，无法完整inspect的工具诚实标为unavailable。Round 9.1随后只需把Skill正文作为指导数据接入同一registry/catalog，不需要建立Skill→Tool dependency graph。
 
 本轮不建立统一抽象基类，不恢复hard-cut前的durable capability graph，也不让“统一capability”成为新的execution authority。
 
-Round 7.1是本轮编码硬前置，而不只是引用文档：`list_mcp_servers`、`inspect_new_mcp_tool`、`use_new_mcp_tool`与所有direct MCP结果都必须进入已经激活的normal ToolResult projection。Round 9不得临时复制40,000-byte logical FULL、HEAD_TAIL/COMPACT/REF_ONLY、artifact、FULL-delivery requirement或provider envelope逻辑；若Round 7.1尚未ACTIVATED，本轮不得开始production slice。
+Round 5A.2与Round 7.1都是本轮编码硬前置，而不只是引用文档：
+
+- Round 5A.2必须已经冻结assistant/blocks/required replay row同事务接受、metadata/body两阶段hydration、replay target/placement/final wire plan exact join与Chat/Responses cross-restart native replay；Round 9不得以capability planning为由绕过、重排或重新合成durable replay carrier；
+- Round 7.1必须已经冻结normal ToolResult projection；`list_mcp_servers`、`inspect_new_mcp_tool`、`use_new_mcp_tool`与所有direct MCP结果都进入该路径。Round 9不得复制40,000-byte logical FULL、HEAD_TAIL/COMPACT/REF_ONLY、artifact、FULL-delivery requirement或provider envelope逻辑；
+- clean checkpoint还必须包含当前`OPENAI_FUNCTION_TOOL_WIRE_CONTRACT_VERSION = v2-explicit-non-strict-prevalidated-lowering`及其Chat/Responses shared lowering tests。该版本只属于adapter wire contract，不能进入canonical capability semantic identity。
+
+上述任一前置未ACTIVATED、activation evidence hash与代码不一致，或clean checkpoint尚未冻结时，本轮不得开始production slice。
 
 ---
 
@@ -40,7 +46,7 @@ Pulsara中的`Capability`固定定义为：
 | MCP tool | `TOOL` | native direct tool或new-MCP meta route | MCP supervisor、slot、dirty fence与effect policy |
 | Skill | `SKILL` | `SKILL_CATALOG`与`ACTIVE_SKILL` | 无独立executor；只能指导或引用现有tool capability |
 
-Plugin不属于本轮的capability leaf。后续Round 9.2把Plugin定义为`CapabilityBundle/CapabilitySource`：启用后贡献Skill roots、MCP server definitions与process-local Hook definitions，并保留一个dormant Subagent-spec inventory；Skill/MCP仍分别交还既有owner，Hook不进入capability leaf，Plugin自身不拥有通用`invoke()`。
+Plugin不属于本轮的capability leaf。后续Round 9.2把Plugin定义为`CapabilityBundle/CapabilitySource`：启用后把portable Skill物化到本文冻结的四个既有physical roots之一，并贡献MCP server definitions与process-local Hook definitions，同时保留一个dormant Subagent-spec inventory；Skill/MCP仍分别交还既有owner，Hook不进入capability leaf，Plugin自身不拥有通用`invoke()`。Plugin不得新增第五个Skill root或让Runtime扫描Plugin cache。
 
 ### 0.2 统一什么，不统一什么
 
@@ -129,15 +135,20 @@ messages[n + 1] == messages[n] || append_only_suffix
 
 ~~~text
 Host/cold epoch planning
-  -> create one exact-scope composition-attempt token
-  -> obtain Builtin / MCP-config / Skill-root owner-issued prepared inventories
-  -> validate all three current owner seals and derive the complete registered source set
-  -> freeze execution-backed builtin zero-I/O source snapshot
-  -> freeze one COMPLETE or UNAVAILABLE snapshot for every registered scope-visible MCP source
-  -> freeze one scope-bound snapshot for every registered local Skill source
+  -> obtain three exact-scope owner-issued immutable snapshots
+       Builtin: one sealed execution-backed snapshot
+       MCP: one complete snapshot set covering every registered server
+       Skill: one globally resolved LOCAL_SKILL_CATALOG snapshot
+  -> central factory consumes the three named inputs and derives the complete registered source set
   -> pure registry admission and FrozenCapabilityRegistrySnapshot
-  -> pure KernelCapabilityPlanner
-  -> select fixed direct tool cohort
+  -> prepare exact model target/profile without opening provider
+  -> adapter-owned pure native-wire preflight over canonical Tool facts
+  -> freeze one parent FrozenCapabilityDispatchCut
+  -> mechanically derive two narrow sibling dispatch views
+       tool view  -> KernelToolCapabilityPlanner
+       skill view -> KernelSkillProjectionComposer
+  -> pure KernelToolCapabilityPlanner consumes frozen eligibility facts
+  -> select fixed direct tool cohort and exact native wire projections
   -> build FrozenModelToolSurface
   -> exact join existing physical tool-surface access
   -> compiler / preflight / continuity install / provider open
@@ -153,7 +164,7 @@ same epoch: new MCP becomes READY_CLEAN
   -> never mutate provider tools
 
 same epoch: Skill catalog changes
-  -> publish complete successor Skill source snapshots at safe point
+  -> publish one complete/unavailable successor LOCAL_SKILL_CATALOG snapshot at safe point
   -> freeze a successor registry snapshot; do not mutate the installed one
   -> append SKILL_CATALOG successor or invalidation
   -> never mutate provider tools
@@ -166,13 +177,15 @@ same epoch: Skill catalog changes
 ### 1.1 本轮实施
 
 - capability领域词汇与closed contracts；
-- Built-in catalog、MCP server config与Skill root的统一source-registration adapter；
+- Built-in catalog、MCP server config与聚合local Skill catalog的统一source-registration adapter；
 - `IMMUTABLE | SAFE_POINT_REFRESHABLE` source policy、complete source snapshot与pure registry admission；
 - Built-in/MCP tool到统一`FrozenToolCapabilityFact`的无损adapter；
 - current Skill projection到最小`FrozenSkillCapabilityFact`的adapter；
 - `CapabilityIdentity`、version reference与MCP resolved route；
-- process-local `FrozenCapabilityRegistrySnapshot`、`FrozenCapabilityPlanningCut`与pure `KernelCapabilityPlanner`；
+- process-local `FrozenCapabilityRegistrySnapshot`、父`FrozenCapabilityDispatchCut`与pure `KernelToolCapabilityPlanner`；
 - cold MCP direct cohort的deterministic all-or-none selection；
+- canonical Tool capability与adapter-native wire eligibility的显式分层；
+- 单一pure native-wire projection contract、closed incompatibility reason与final wire exact join；
 - late-ready MCP meta-only exposure；
 - fixed `inspect_new_mcp_tool`与`use_new_mcp_tool` builtin descriptors；
 - `list_mcp_servers`的DIRECT/NEW分类与bounded pagination；
@@ -186,6 +199,7 @@ same epoch: Skill catalog changes
 - 不实施Agent Skills standard parser或progressive resource contract；这些属于Round 9.1；
 - 不修改ordinary `read_file`或实现任何Skill声明驱动的permission行为；Round 9.1将明确保持read schema无Skill intent；
 - 不扫描`.claude/skills`、Plugin cache或新增Skill root；
+- Round 9与Round 9.1共同冻结同一套四种physical root policy：workspace `.pulsara/skills`、workspace `.agents/skills`，以及启用user skills时的user `.pulsara/skills`与`.agents/skills`；`.claude/skills`不属于Pulsara root policy；
 - 不实现Plugin manifest、install、enable、disable或bundle namespace；
 - 不让Plugin动态加载Python代码；
 - 不实施compaction summary、snapshot adoption、rebase或MCP promotion；
@@ -195,7 +209,9 @@ same epoch: Skill catalog changes
 - 不把MCP resources/prompts/elicitation重分类为新的capability leaf；它们继续由Round 6现有fixed tools访问；
 - 不建立durable capability table、event、job、generation、receipt、checkpoint、projection或repair graph；
 - 不承诺跨Host保持同一个capability exposure epoch；replacement Host仍cold build；
-- 不修改canonical transcript schema。
+- 不修改canonical transcript schema；
+- 不把OpenAI lowered schema写回MCP discovery fact、generic registry或capability semantic fingerprint；
+- 不建立通用JSON Schema translator或第二套schema authority；native projection只允许本文冻结的closed、bounded transformation，不能诚实投影的MCP走meta/unavailable。
 
 ### 1.3 Clean-v0纪律
 
@@ -203,7 +219,7 @@ same epoch: Skill catalog changes
 
 本轮尤其不得同时保留：
 
-- 旧`CapabilityExposurePlan`与新`FrozenCapabilityExposurePlan`两套planner；
+- 旧`CapabilityExposurePlan`与新`FrozenToolCapabilityExposurePlan`两套planner；
 - 旧skill-only`CapabilityProjectionOutput`与新`SkillProjectionOutput`两套projection；
 - 旧`CAPABILITY_CATALOG`与新`SKILL_CATALOG`两个source kind；
 - MCP semantic fact与generic tool fact两份可独立漂移的schema truth。
@@ -220,7 +236,9 @@ same epoch: Skill catalog changes
 - `_BUILTIN_TOOL_CATALOG`这一零I/O、确定性的descriptor/policy catalog；它当前是production executor inventory的超集，不能直接冒充provider-visible capability全集；
 - `mcp_config.py::load_mcp_server_configs()`把user/workspace/Host override组合成显式server registrations，MCP supervisor再负责initialize/discovery/listChanged；
 - `capability/local_skills.py::LocalSkillProvider`先使用固定root policy，再bounded scan/parse其中的`SKILL.md`；
-- `model_input/contracts.py::FrozenToolSpec`与`FrozenModelToolSurface`，它们是provider-visible typed tool schema的唯一frozen truth；
+- `model_input/contracts.py::FrozenToolSpec`与`FrozenModelToolSurface`，它们是provider-neutral canonical typed tool schema的唯一frozen truth；actual native wire projection由adapter另行拥有且不得回写；
+- Round 5A.2 `provider_assistant_replay_fragments`、metadata/body hydration与`FrozenProviderWireInputPlan` actual-wire proof；
+- `llm/adapters/openai/function_tools.py`中的共享Chat/Responses显式`strict:false`、bounded prevalidated lowering与`OPENAI_FUNCTION_TOOL_WIRE_CONTRACT_VERSION`；
 - `conversation_kernel/tool_surface.py::PreparedToolExecutionBinding`与`ProcessLocalToolSurfaceAccess`，它们把semantic descriptor exact join到Host authority与executor；
 - `conversation_kernel/mcp/contracts.py::McpToolSemanticFact`、discovery snapshot与catalog snapshot；
 - MCP supervisor作为唯一connection、slot、dirty generation与physical close owner；
@@ -229,6 +247,10 @@ same epoch: Skill catalog changes
 - structured compiler的64 tool / 1 MiB aggregate tool-schema bound；
 - continuity owner的same-epoch SYSTEM/tools/messages proof；
 - Round 7 provider-wire hygiene，不把internal fingerprint/generation写入模型正文。
+
+当前Round 6 direct-only路径还在MCP discovery中直接import并调用OpenAI lowering；wire-incompatible tool会被既有`FAIL_SERVER | OMIT_INVALID`分支当作invalid schema处理。该临时边界在Round 9必须删除：canonical JSON Schema validity与native-wire compatibility是两个不同判断，generic registry与MCP discovery均不得import OpenAI adapter。否则合法但wire-incompatible的MCP capability会在进入meta planner前被永久丢弃。
+
+`McpInvalidToolPolicy`的既有公开配置枚举固定保持`FAIL_SERVER | OMIT_INVALID`。本轮不得把`OMIT_INVALID`重命名为`SKIP_TOOL`，不得增加YAML alias、translator或兼容双读；文中的“omit/丢弃”只是行为描述，不是第三个配置值。
 
 当前compiled builtin catalog共有31项，其中`create_agent_tasks`、`wait_agent_tasks`、`stop_agent_task`、`report_agent_phase`与`report_agent_result`尚无production executor；它们属于后续hierarchical task graph的dormant descriptor。`DirectKernelToolPort.snapshot_tool_surface()`当前正确地从实际安装的executor bindings出发，再逐项查询catalog并按ROOT/child scope过滤。因此Round 9必须继承这条真实方向：**binding-backed inventory -> catalog join -> semantic fact**，而不能反向把整个compiled catalog暴露为可执行能力。
 
@@ -279,7 +301,7 @@ Source composition / registration
     -> Execution / Result
 ~~~
 
-Built-in不是“没有discovery”的例外，而是`IMMUTABLE` source，其discovery退化为对Host-open时**execution-backed descriptor inventory**的纯snapshot。Compiled catalog仍可以保存尚未接入production composition的descriptor，但这些dead/dormant entries不是capability source leaf。MCP server与Skill root是`SAFE_POINT_REFRESHABLE` source；它们可以反复发现新leaf，但每次都必须先形成完整、immutable source snapshot，再进入与Built-in相同的leaf admission。不得让MCP supervisor或filesystem scanner绕过registry直接修改planner集合。
+Built-in不是“没有discovery”的例外，而是`IMMUTABLE` source，其discovery退化为对Host-open时**execution-backed descriptor inventory**的纯snapshot。Compiled catalog仍可以保存尚未接入production composition的descriptor，但这些dead/dormant entries不是capability source leaf。MCP server与聚合`LOCAL_SKILL_CATALOG`是`SAFE_POINT_REFRESHABLE` source；它们可以反复发现新leaf，但每次都必须先形成完整、immutable source snapshot，再进入与Built-in相同的leaf admission。不得让MCP supervisor或filesystem scanner绕过registry直接修改planner集合。
 
 ---
 
@@ -292,7 +314,7 @@ Built-in不是“没有discovery”的例外，而是`IMMUTABLE` source，其dis
 | `CapabilitySourceRegistration` | Host当前承认哪些bounded source及其refresh policy | 否 |
 | `CapabilitySourceSnapshot` | 一个registered source在一次complete freeze/discovery后的immutable leaf集合 | 否 |
 | `CapabilityFact` | 某项能力是什么的immutable semantic fact | 否 |
-| `CapabilityRegistrySnapshot` | 对同一safe point下全部complete source snapshots的pure、closed合并 | 否 |
+| `CapabilityRegistrySnapshot` | 对同一parent dispatch cut中三个owner-issued immutable source inputs的pure、closed合并 | 否 |
 | `CapabilityExposure` | 该fact如何进入provider输入 | 否 |
 | `CapabilityBinding` | tool capability如何exact绑定到本地执行器 | 仅tool有 |
 | `CapabilityBundle` | 一组source/contribution的安装组合 | 否；留给Round 9.2 |
@@ -308,20 +330,21 @@ Built-in不是“没有discovery”的例外，而是`IMMUTABLE` source，其dis
 | MCP discovery/catalog/status | MCP supervisor |
 | MCP physical connection/slot | MCP supervisor |
 | MCP dirty fence/effect policy | MCP supervisor + existing tool runtime |
-| Skill root source registration | Host skill-root composition policy |
-| Skill filesystem manifest | Skill source snapshot |
+| Local Skill catalog source registration/snapshot | Host local-Skill composition policy + `LocalSkillProvider` |
+| Skill filesystem manifest与winning-root provenance | aggregate Skill source snapshot |
 | Skill active body | existing `ACTIVE_SKILL` projection |
 | Capability registry snapshot | pure central factory；没有long-lived mutable owner |
 | Provider direct tool surface | `FrozenModelToolSurface` + continuity epoch |
+| Provider native tool wire eligibility/projection | resolved model adapter的single pure factory + frozen planning value |
 | Capability exposure selection | pure planner result；不是authority |
 | Tool attempt/result | existing canonical repository transaction |
 
-`KernelCapabilityPlanner`只能消费上述owner已经冻结的事实。它不能自行connect MCP、读Skill文件、检查permission、创建attempt或关闭slot。
+`KernelToolCapabilityPlanner`只能消费上述owner已经冻结的Tool事实。`KernelSkillProjectionComposer`只消费同一个父dispatch cut中的Skill view。二者都不能自行connect MCP、读Skill文件、检查permission、创建attempt或关闭slot。
 
 ### 3.3 Trust
 
 - Built-in descriptor是Pulsara-owned schema，但是否可调用仍由permission与binding决定；
-- MCP descriptor来自远端server，schema经过bounded normalization但不成为本地policy；
+- MCP descriptor来自远端server，schema只经过bounded canonical validation/freeze且不成为本地policy；provider-specific lowering不属于discovery normalization；
 - Skill是untrusted instructional data；
 - provider exposure只表示“模型可以看到或引用”，不表示“物理操作已授权”；
 - Runtime permission、Plan、memory opt-out、MCP dirty fence与effect confirmation始终优先。
@@ -332,15 +355,15 @@ Built-in不是“没有discovery”的例外，而是`IMMUTABLE` source，其dis
 |---|---|---|---|---|
 | Built-in tool | Host-open execution-backed builtin source | 对已安装binding与catalog exact join后的inventory做零I/O pure snapshot | `IMMUTABLE` | Builtin binding |
 | MCP tool | resolved MCP server source | bounded initialize/list tools/catalog snapshot | `SAFE_POINT_REFRESHABLE` | MCP slot/binding |
-| Skill | registered Agent Skills root | bounded filesystem scan/parse snapshot | `SAFE_POINT_REFRESHABLE` | 无 |
+| Skill | one exact-scope local Skill catalog source | bounded ordered-root filesystem scan/parse snapshot | `SAFE_POINT_REFRESHABLE` | 无 |
 
 这里的“固定注册”不是为MCP复制一份静态remote schema，也不是为Skill发明inline Python manifest：
 
 - MCP固定注册的是server source；remote tool schema仍只由negotiated discovery拥有；
-- Skill固定注册的是logical root；skill leaf仍只由该root中的标准`SKILL.md`拥有；
+- Skill固定注册的是聚合`LOCAL_SKILL_CATALOG` source；current root集合、precedence与physical paths由Skill owner内部policy拥有，skill leaf仍只由winning root中的标准`SKILL.md`拥有；
 - Built-in descriptor catalog与executor inventory不是同一事实；source adapter必须从Host-open时已安装、scope-visible且能与catalog exact join的binding inventory构造registration/snapshot，catalog-only entry不能进入registry；
-- bundled Skill必须先物化到某个registered root再被普通discovery发现；不得走第二条“builtin Skill”leaf通道；
-- future Plugin向本文只贡献MCP server registration与Skill root registration；其Hook由独立process-local owner执行，Subagent spec暂时dormant，均不得注册第三种tool executor。
+- bundled Skill必须先物化到Skill owner当前root policy中的某个physical root再被普通discovery发现；不得走第二条“builtin Skill”leaf通道；
+- future Plugin向本文只贡献MCP server registration，并由installer把portable Skill物化到四个既有physical roots之一；它不得修改local Skill catalog的root policy或让Runtime扫描Plugin cache。其Hook由独立process-local owner执行，Subagent spec暂时dormant，均不得注册第三种tool executor。
 
 因此，三者在逻辑上共享同一条注册管线，而只在source-owned discovery与tool-only binding处分叉。注册成功只证明fact进入current registry；它不证明该fact已暴露、已授权或可物理执行。
 
@@ -359,7 +382,14 @@ class CapabilityKind(StrEnum):
 class CapabilitySourceKind(StrEnum):
     BUILTIN_REGISTRY = "BUILTIN_REGISTRY"
     MCP_SERVER = "MCP_SERVER"
-    LOCAL_SKILL_ROOT = "LOCAL_SKILL_ROOT"
+    LOCAL_SKILL_CATALOG = "LOCAL_SKILL_CATALOG"
+
+
+class LocalSkillRootKind(StrEnum):
+    WORKSPACE_PULSARA = "WORKSPACE_PULSARA"
+    WORKSPACE_AGENTS = "WORKSPACE_AGENTS"
+    USER_PULSARA = "USER_PULSARA"
+    USER_AGENTS = "USER_AGENTS"
 
 
 @dataclass(frozen=True, slots=True)
@@ -379,11 +409,13 @@ class CapabilityIdentity:
 
 `source_identity_fingerprint`只覆盖`source.kind + stable_source_id`，不覆盖MCP discovery revision、filesystem digest或Host generation。`identity_fingerprint`使用domain-separated canonical encoding覆盖`kind + source.kind + stable_source_id + stable_name`。
 
+`LocalSkillRootKind`属于Round 9的local Skill source policy，而不是Agent Skills文件格式或generic source kind。它exact区分本文冻结的四种physical roots，进入winner provenance与Skill fact semantic fingerprint，但不增加四个generic registrations；Round 9.1只能复用该enum，不能扩张第五种root或另建同名closed union。
+
 身份规则：
 
 - Built-in tool：`stable_source_id = pulsara-builtin-tools`，`stable_name = exact tool name`；
 - MCP tool：`stable_source_id = exact server_id`，`stable_name = complete remote_tool_name`；
-- Skill：`stable_source_id = logical skill root identity`，`stable_name = current skill name`；
+- Skill：`stable_source_id = pulsara-local-skill-catalog`，`stable_name = current winning skill name`；winning root/location只作为fact provenance，不改变public identity；
 - MCP provider-mangled tool name不是canonical identity；
 - filesystem absolute path不是public identity；
 - owner epoch、slot generation、connection object、mtime与writer generation不进入identity。
@@ -407,21 +439,22 @@ class FrozenCapabilitySourceRegistration:
 
 
 @dataclass(frozen=True, slots=True)
-class FrozenCapabilitySourceRegistrationInventory:
-    source_kind: CapabilitySourceKind
-    conversation_scope_kind: ModelInputScopeKind
-    scope_subagent_task_id: str | None
-    registrations: tuple[FrozenCapabilitySourceRegistration, ...]
-    inventory_fingerprint: str
-
-
-@dataclass(frozen=True, slots=True)
 class FrozenCapabilitySourceRegistrationSet:
     conversation_scope_kind: ModelInputScopeKind
     scope_subagent_task_id: str | None
-    registrations: tuple[FrozenCapabilitySourceRegistration, ...]
-    source_inventory_fingerprints: tuple[str, str, str]
+    builtin_registration: FrozenCapabilitySourceRegistration
+    mcp_registrations: tuple[FrozenCapabilitySourceRegistration, ...]
+    local_skill_catalog_registration: FrozenCapabilitySourceRegistration
     registration_set_fingerprint: str
+
+    @property
+    def registrations(self) -> tuple[FrozenCapabilitySourceRegistration, ...]:
+        """Derived deterministic BUILTIN + MCP + LOCAL_SKILL_CATALOG view."""
+        return (
+            self.builtin_registration,
+            *self.mcp_registrations,
+            self.local_skill_catalog_registration,
+        )
 ~~~
 
 closed matrix固定为：
@@ -430,69 +463,45 @@ closed matrix固定为：
 |---|---|---|
 | `BUILTIN_REGISTRY` | `IMMUTABLE` | Host-open execution-backed builtin inventory + joined catalog contract |
 | `MCP_SERVER` | `SAFE_POINT_REFRESHABLE` | one resolved server config identity |
-| `LOCAL_SKILL_ROOT` | `SAFE_POINT_REFRESHABLE` | one logical root、scope与precedence policy |
+| `LOCAL_SKILL_CATALOG` | `SAFE_POINT_REFRESHABLE` | one exact-scope aggregate catalog；ordered root policy由Skill owner内部持有 |
 
-`source_contract_fingerprint`只引用source owner已经冻结的非秘密semantic registration identity。Builtin branch覆盖由完整binding input选出的ordered descriptor/catalog contract identities，但不覆盖executor object/identity或binding generation。Generic contract不保存MCP headers/auth/request state/transport object，也不保存Skill absolute private path、directory handle或watcher。Owner-specific config/root binding仍由MCP supervisor或Skill provider持有；generic registration只证明“这个source被Host composition承认”。
+`source_contract_fingerprint`只引用source owner已经冻结的非秘密semantic registration identity。Builtin branch覆盖由完整binding input选出的ordered descriptor/catalog contract identities，但不覆盖executor object/identity或binding generation。Generic contract不保存MCP headers/auth/request state/transport object，也不保存Skill absolute private path、directory handle、root count或watcher。Owner-specific config/root policy仍由MCP supervisor或Skill provider持有；generic registration只证明“这个source被Host composition承认”。
 
-`FrozenCapabilitySourceRegistrationInventory`只是可fingerprint的semantic inventory value；它**不能仅凭自身字段证明现实中的owner inventory完整**。任何调用方都能重算一份内部一致但漏项的tuple，因此不得把`inventory_fingerprint`称为owner signature。完整性由三个既有composition owner在同一次planning attempt签发的process-local admission carrier证明：
+仅凭可重算的semantic tuple仍不能证明现实owner inventory完整，因此保留三个**owner-issued、private-constructor、immutable snapshot carrier**；但删除共同attempt token、跨owner current-seal握手与“同一瞬间”的承诺：
 
-| required inventory | 唯一producer | 完整性的含义 |
+| required owner snapshot | 唯一producer | 完整性的含义 |
 |---|---|---|
-| `BUILTIN_REGISTRY` | Host tool composition + builtin adapter | exact scope下恰有一个immutable builtin source registration；该source的leaf completeness另由完整execution-backed binding input证明 |
-| `MCP_SERVER` | resolved MCP config composition | exact scope下当前全部enabled/registered server configs；允许合法空tuple |
-| `LOCAL_SKILL_ROOT` | Host Skill-root composition policy | exact scope下当前全部registered logical roots；允许合法空tuple |
+| `SealedBuiltinCapabilitySnapshot` | Host tool composition + builtin adapter | exact scope下完整、immutable、execution-backed且catalog-joined的Builtin集合 |
+| `PreparedMcpCapabilitySourceSnapshotSet` | resolved MCP config composition + MCP supervisor | exact scope下当前全部enabled server registrations，且每项恰有一个`COMPLETE | UNAVAILABLE` snapshot；允许合法空server tuple |
+| `PreparedLocalSkillCatalogSourceSnapshot` | Host Skill composition + `LocalSkillProvider` | exact scope下按当前registered root policy全局解析precedence后的一个`LOCAL_SKILL_CATALOG` snapshot |
 
-Host先创建exact-scope `CapabilityCompositionAttemptToken`，并把同一个opaque token分别交给三个现有owner。它们各自返回private-constructor carrier：
+三种carrier各自在自身owner lock/safe-point内一次性签发，携带exact scope、generic registration/snapshot与不序列化的owner authenticity。Builtin carrier额外持有composition seal和完整execution binding input；MCP carrier持有resolved-config completeness proof；Skill carrier持有ordered-root policy fingerprint、bounded diagnostics与`LocalSkillDiscovery`。这些opaque字段使用`repr=False, compare=False`，不进入semantic fingerprint，也不形成跨owner lease、generation或新authority。
 
-~~~python
-@dataclass(frozen=True, slots=True)
-class PreparedBuiltinCapabilitySourceInventory:
-    inventory: FrozenCapabilitySourceRegistrationInventory
-    attempt_token: object = field(repr=False, compare=False)
-    builtin_composition_seal: object = field(repr=False, compare=False)
-
-
-@dataclass(frozen=True, slots=True)
-class PreparedMcpCapabilitySourceInventory:
-    inventory: FrozenCapabilitySourceRegistrationInventory
-    attempt_token: object = field(repr=False, compare=False)
-    resolved_config_composition_seal: object = field(repr=False, compare=False)
-
-
-@dataclass(frozen=True, slots=True)
-class PreparedSkillRootCapabilitySourceInventory:
-    inventory: FrozenCapabilitySourceRegistrationInventory
-    attempt_token: object = field(repr=False, compare=False)
-    root_composition_seal: object = field(repr=False, compare=False)
-~~~
-
-这些carrier分别exact引用现有sealed Builtin composition、MCP current resolved-config composition与六root composition；seal/token都不序列化、不进入semantic fingerprint，也不成为新的long-lived owner。Production central API固定为：
+Production central API固定为三个named参数：
 
 ~~~python
-def prepare_capability_source_registration_set(
+def freeze_capability_registry_from_owner_snapshots(
     *,
-    builtin_inventory: PreparedBuiltinCapabilitySourceInventory,
-    mcp_inventory: PreparedMcpCapabilitySourceInventory,
-    skill_root_inventory: PreparedSkillRootCapabilitySourceInventory,
-) -> FrozenCapabilitySourceRegistrationSet: ...
+    builtin: SealedBuiltinCapabilitySnapshot,
+    mcp: PreparedMcpCapabilitySourceSnapshotSet,
+    skills: PreparedLocalSkillCatalogSourceSnapshot,
+) -> FrozenCapabilityRegistrySnapshot: ...
 ~~~
 
-Central seam必须先以object identity验证三个carrier的attempt token相同且scope相同，再分别要求真实owner确认seal仍是current/exact；然后才把其中三个frozen inventory交给capability package内部pure `_freeze_capability_source_registration_set(...)`。Production其他模块不得直接调用该pure helper或提交任意`registrations` tuple。这样“semantic tuple内部一致”“真实owner inventory没有漏掉”与“每个expected registration有snapshot”成为三个独立证明；同时漏掉registration与snapshot无法靠重算fingerprint伪装完整。
+Central seam验证三个carrier均由其真实owner构造、exact scope一致，并分别满足自身完整性；它不重新询问owner“是否仍current”，也不声称获得跨owner原子瞬间。三项immutable snapshot按既有dispatch absolute deadline顺序冻结即可；freeze后发生的MCP/Skill变化只进入下一个safe-point successor。Production其他模块不得提交raw registration/snapshot tuple或自行重建owner carrier。
 
-Inventory本身不包含secret、transport、filesystem handle或executor object。Prepared carrier只借用existing owner seal并在planning完成/取消时释放引用；它不是新的generic registry、lease、generation或durable composition owner。MCP/Skill source变化后旧seal validation失败，调用方必须从三个owner重新准备同一attempt，而不能将旧MCP inventory拼到当前Skill inventory。
-
-每个inventory fingerprint覆盖exact scope、source kind与ordered registration fingerprints；其中每个registration的`source.kind`必须与inventory kind一致。Builtin inventory恰有一个registration；MCP与Skill-root inventory允许bounded empty。三个prepared carrier必须来自同一次Host composition/safe-point planning attempt；不能缓存旧MCP inventory再拼当前Skill inventory。
+`FrozenCapabilitySourceRegistrationSet`由上述三个named carrier中的registrations机械派生，而不是调用者传入：exact one Builtin、bounded MCP tuple、exact one aggregate Skill catalog。其fingerprint覆盖exact scope、Builtin registration、按`server_id`排序的MCP registrations与Skill catalog registration；opaque owner authenticity不进入结果。
 
 注册规则：
 
 - exact同一`source + registration_fingerprint`重复输入是idempotent；
 - 同一`source`在一个registration set中出现两个不同fingerprint是conflict；
 - Built-in registration及其execution-backed leaf inventory在Host open后不得替换、删除或新增；compiled catalog中没有production binding的descriptor允许继续作为dormant catalog entry存在，但不得进入source snapshot；
-- MCP server/Skill root registration set只能在safe point采纳current complete composition；
+- MCP server composition与Skill catalog snapshot只能在safe point采纳owner-issued complete cut；
+- aggregate Skill registration始终恰有一个；owner root policy合法为空时发布`COMPLETE + facts=()`，不通过删除generic source表达空catalog；
 - source registration的新增/删除不直接改provider输入，必须经过successor registry与exposure planner；
-- 每个source inventory与最终registration set都exact绑定`conversation_scope_kind + scope_subagent_task_id`；ROOT inventory不能复用于child，反之亦然；
-- registration set按`(source.kind, stable_source_id)`排序且unique，并且exact等于三个已通过current-seal admission的semantic inventory之scope-filtered并集；
-- `source_inventory_fingerprints`固定按`BUILTIN_REGISTRY, MCP_SERVER, LOCAL_SKILL_ROOT`顺序保存三个已验证semantic inventory fingerprint；opaque admission seal不进入结果；
+- 每个owner snapshot与最终registration set都exact绑定`conversation_scope_kind + scope_subagent_task_id`；ROOT snapshot不能复用于child，反之亦然；
+- derived registration view固定为`Builtin singleton + MCP按server_id排序 + aggregate Skill singleton`且unique，并且exact等于三个named owner snapshot中的scope-filtered registrations；
 - source-set变化产生新的immutable registration set，旧set不得原地修改；
 - generic registry不执行config load、filesystem scan、network connect或secret resolution。
 
@@ -508,36 +517,152 @@ class ToolCapabilityOrigin(StrEnum):
 class FrozenToolCapabilityFact:
     identity: CapabilityIdentity
     origin: ToolCapabilityOrigin
-    provider_spec: FrozenToolSpec
+    canonical_tool_spec: FrozenToolSpec
     semantic_fingerprint: str
+
+    @property
+    def fact_semantic_fingerprint(self) -> str:
+        return self.semantic_fingerprint
+
+
+@dataclass(frozen=True, slots=True)
+class ToolCapabilityVersionRef:
+    identity_fingerprint: str
+    semantic_fingerprint: str
+    provider_name: str
+    version_fingerprint: str
 ~~~
 
 Central factory规则：
 
 - Built-in adapter从Host tool-surface owner在同一surface lock下冻结的exact-scope executor binding inventory出发，逐项exact join现有catalog entry后转换`FrozenToolSpec`；禁止从catalog keys正向枚举leaf；
-- MCP直接复用`McpToolSemanticFact.provider_spec()`；
-- `semantic_fingerprint`覆盖identity、provider-visible name/description/schema和descriptor fingerprint；
+- MCP adapter从`McpToolSemanticFact.provider_spec()`无损冻结`canonical_tool_spec`；现有owner方法名不改变这里的canonical归属；
+- `semantic_fingerprint`覆盖identity、canonical public name/description/schema和descriptor fingerprint；
 - 不复制effect、permission、availability、slot lease或executor；
-- 同一identity/semantic fingerprint必须产生byte-identical `provider_spec`；
+- 同一identity/semantic fingerprint必须产生byte-identical `canonical_tool_spec`；
 - 同一provider name不得映射到两个identity。
 
-`FrozenToolCapabilityFact`不是`PreparedToolExecutionBinding`的父类。二者通过`provider_spec.descriptor_fingerprint`与capability identity exact join。
+`FrozenToolCapabilityFact`不是`PreparedToolExecutionBinding`的父类。二者通过`canonical_tool_spec.descriptor_fingerprint`与capability identity exact join。
+
+`canonical_tool_spec`是唯一capability schema truth：local argument validator、effect/permission descriptor与physical execution binding都必须exact join它。任何OpenAI/Chat/Responses lowering结果、`strict`成员、wire wrapper、provider profile或wire contract version均不得写回该字段、registry/source fingerprint或`semantic_fingerprint`。
+
+#### 4.3.1 Adapter-owned native wire eligibility
+
+Native exposure使用一个窄、pure、process-local的adapter contract，不把OpenAI adapter导入generic registry/planner，也不建立第二套schema authority：
+
+~~~python
+class NativeToolWireEligibilityKind(StrEnum):
+    ELIGIBLE = "ELIGIBLE"
+    INCOMPATIBLE = "INCOMPATIBLE"
+
+
+class NativeToolWireIncompatibilityReason(StrEnum):
+    ROOT_SHAPE_UNSUPPORTED = "ROOT_SHAPE_UNSUPPORTED"
+    COMPOSITION_UNSUPPORTED = "COMPOSITION_UNSUPPORTED"
+    CONSTRAINT_UNSUPPORTED = "CONSTRAINT_UNSUPPORTED"
+    PROJECTION_OVERBOUND = "PROJECTION_OVERBOUND"
+
+
+@dataclass(frozen=True, slots=True)
+class FrozenNativeToolWireProjection:
+    capability_version_fingerprint: str
+    canonical_tool_spec_fingerprint: str
+    native_function_tool_wire_contract_fingerprint: str
+    wire_tool: FrozenJsonObjectFact
+    projection_fingerprint: str
+
+    @property
+    def wire_utf8_bytes(self) -> int:
+        return len(canonical_json_bytes(self.wire_tool))
+
+
+@dataclass(frozen=True, slots=True)
+class FrozenNativeToolWireIncompatibility:
+    capability_version_fingerprint: str
+    canonical_tool_spec_fingerprint: str
+    native_function_tool_wire_contract_fingerprint: str
+    reason: NativeToolWireIncompatibilityReason
+    decision_fingerprint: str
+
+
+NativeToolWireEligibility = (
+    FrozenNativeToolWireProjection
+    | FrozenNativeToolWireIncompatibility
+)
+
+
+@dataclass(frozen=True, slots=True)
+class FrozenNativeToolWireEligibilitySet:
+    conversation_scope_kind: ModelInputScopeKind
+    scope_subagent_task_id: str | None
+    native_function_tool_wire_contract_fingerprint: str
+    entries: tuple[NativeToolWireEligibility, ...]
+    eligibility_set_fingerprint: str
+
+
+@dataclass(frozen=True, slots=True)
+class FrozenNativeToolProjectionSet:
+    conversation_scope_kind: ModelInputScopeKind
+    scope_subagent_task_id: str | None
+    native_function_tool_wire_contract_fingerprint: str
+    tool_versions: tuple[ToolCapabilityVersionRef, ...]
+    projections: tuple[FrozenNativeToolWireProjection, ...]
+    projection_set_fingerprint: str
+~~~
+
+Adapter-owned pure factory固定为以下语义：
+
+~~~text
+canonical Tool facts + exact resolved adapter profile
+  -> NativeEligible(exact frozen wire projection, fingerprint)
+   | NativeIncompatible(closed reason)
+~~~
+
+规则：
+
+- resolved model target/profile必须在该factory前冻结，但factory不得打开provider、读取transport、调用MCP、查询repository或取得executor；
+- cold/compatible planning时，eligibility set对current registry中每个`TOOL` fact恰有一项；installed contract-change reset时，还必须对central factory从predecessor `direct_projection_set.tool_versions + tool_surface`机械配对得到的每个retained direct canonical input恰有一项。同一exact version/spec在两组输入中只保留一项，任何同version不同spec均conflict；Skill没有entry；
+- 每个entry exact绑定scope、capability version、canonical spec fingerprint与opaque `native_function_tool_wire_contract_fingerprint`。Retained direct projection input不是新的capability fact或schema truth，只是旧installed canonical surface的process-local typed view；caller不得补写当前registry中不存在的任意tool；
+- OpenAI adapter以唯一factory产生该narrow fingerprint，覆盖`OPENAI_FUNCTION_TOOL_WIRE_CONTRACT_VERSION`、wire API与tool-relevant request-shape contract，但不覆盖assistant replay、model target token budget或capability semantic fields；generic capability package只消费fingerprint和frozen结果，不import常量或adapter模块；
+- projection可以是在non-strict native wire上诚实的受控superset，因为canonical local validator仍是attempt/invoke前的exact authority；projection不得更窄、静默删除canonical admissible arguments或改变tool identity；
+- `wire_utf8_bytes`是`wire_tool`的机械派生值，固定等于`len(canonical_json_bytes(wire_tool))`；caller/factory不得单独提交、覆盖或fingerprint一个独立count，所有capacity quote都调用这一派生值；`projection_fingerprint`覆盖canonical wire bytes本身，不重复接受count作为独立语义输入；
+- projection factory只允许closed、已测试的bounded transformation，不发展成任意JSON Schema translator。遇到无法证明受控projection的合法canonical schema，返回`INCOMPATIBLE`；
+- selected direct cohort必须由central factory从eligibility set冻结成唯一`FrozenNativeToolProjectionSet`，逐项exact join Tool version、canonical spec与wire projection；predecessor、planner output与final wire plan只引用该对象，不得各自复制version/projection tuple；
+- final `FrozenProviderWireInputPlan`必须复用或重新执行同一pure projection并对`wire_tool` canonical bytes、projection fingerprint、profile fingerprint逐项exact join；不能只比较version字符串；
+- eligibility/projection只存于本次planning与installed process-local epoch view；不写registry、canonical rows、event、activation catalog或durable replay row。
+
+Builtin与MCP策略不同：
+
+- Pulsara-owned Builtin若存在精确的OpenAI-portable canonical表达，应直接收窄其authored canonical schema，减少projection工作；无精确portable等价时仍保留exact canonical schema，并允许上述受控wire superset；任何execution-backed Builtin返回`INCOMPATIBLE`都使整个cold planning在provider open前fail closed，不能skip或走MCP meta；
+- MCP始终保留server发布且通过canonical validation的原始schema。Native-compatible工具可成为DIRECT候选；native-incompatible工具只有在完整`inspect_new_mcp_tool` DTO能通过Round 7.1 FULL quote时才成为`NEW_MCP_META_ONLY`，否则为`UNAVAILABLE/DESCRIPTOR_OVERBOUND`；
+- canonical invalid与native-wire incompatible是互斥分类。只有前者进入既有`FAIL_SERVER | OMIT_INVALID`与`invalid_tool_count`；后者必须保留在complete canonical source snapshot中，供planner决定meta/unavailable。
+
+MCP route matrix固定为：
+
+| canonical schema | native wire | inspect FULL | route / policy |
+|---|---|---|---|
+| invalid | — | — | `FAIL_SERVER | OMIT_INVALID`；不产生capability fact |
+| valid | incompatible | fits | `NEW_MCP_META_ONLY / NATIVE_WIRE_INCOMPATIBLE` |
+| valid | incompatible | overbound | `UNAVAILABLE / DESCRIPTOR_OVERBOUND` |
+| valid | compatible | 不适用 | native DIRECT cohort candidate；若aggregate fallback到meta，再要求inspect FULL |
+
+表中“compatible”只表示当前adapter contract有诚实native projection，不授予permission或physical availability。Aggregate fallback后的compatible tool若inspect overbound，同样必须转为`UNAVAILABLE/DESCRIPTOR_OVERBOUND`，不能声称meta可用。
 
 Built-in adapter的双向不变量固定为：每个进入snapshot的builtin fact恰有一个installed binding与一个matching catalog entry；每个该scope可见的installed builtin binding恰好产生一个fact。Catalog-only dormant descriptor不要求有binding，也不产生fact；binding没有catalog entry、descriptor fingerprint不一致或同名多binding均在provider open前fail closed。Round 9新增的`inspect_new_mcp_tool/use_new_mcp_tool`若要成为fixed tools，必须同时实现真实local executor binding，不能只在catalog加schema。
 
-这条不变量由现有tool-surface owner签发的窄process-local carrier实现，而不是让pure registry读取executor：
+这条不变量由现有tool-surface owner签发的唯一process-local Builtin snapshot实现，而不是让pure registry读取executor，也不再建立“prepared source input → inventory → snapshot”三层相同tuple：
 
 ~~~python
 @dataclass(frozen=True, slots=True)
-class PreparedBuiltinCapabilitySourceInput:
+class SealedBuiltinCapabilitySnapshot:
     conversation_scope_kind: ModelInputScopeKind
     scope_subagent_task_id: str | None
-    builtin_composition_seal_fingerprint: str
-    executor_bindings: tuple[ProductionBuiltinExecutorBinding, ...]
-    source_input_fingerprint: str
+    source_snapshot: "FrozenCapabilitySourceSnapshot"
+    executor_bindings: tuple[ProductionBuiltinExecutorBinding, ...] = field(repr=False)
+    builtin_composition_seal: object = field(repr=False, compare=False)
 ~~~
 
-`DirectKernelToolPort`必须在同一surface lock下、复用当前ROOT/child过滤规则冻结这份完整binding tuple；adapter逐项读取matching catalog entry并构造generic facts。Seal fingerprint只覆盖full sealed base的ordered binding fingerprints；`source_input_fingerprint`再覆盖seal、scope与ordered projected binding fingerprints。ROOT/child input必须持有同一个seal fingerprint。该carrier可包含process-local executor identity用于preflight join，但这些字段不进入`FrozenToolCapabilityFact`、registry fingerprint或provider body；generic registry package也不得import它。
+`DirectKernelToolPort`必须在同一surface lock下、复用当前ROOT/child过滤规则冻结这份完整binding tuple；adapter逐项读取matching catalog entry并一次性派生Builtin registration、generic facts与`COMPLETE` source snapshot。ROOT/child snapshot来自同一个sealed base tuple，但各自拥有exact scope envelope。`executor_bindings`与opaque seal只用于owner真实性及后续physical preflight join，不进入`FrozenToolCapabilityFact`、registry fingerprint或provider body；generic registry package也不得import该Host-facing carrier。
 
 Builtin composition不能只依赖Host构造调用顺序，必须有显式process-local seal：
 
@@ -555,7 +680,7 @@ class BuiltinCompositionState(StrEnum):
 - 所有composition-affecting `bind_*`、seal与sealed snapshot admission都由同一surface lock串行化；`bind_interaction_port`也不得继续作为无锁例外；
 - 重复seal只返回同一个既有seal/input identity，不增加generation；
 - `SEALED`后所有会改变Builtin executor inventory或其required port的`bind_*`调用typed拒绝；不存在unseal、late builtin registration或自动cold reset；
-- ROOT/child `PreparedBuiltinCapabilitySourceInput`都只能从同一个sealed base tuple做closed scope projection，不能重新读取mutable ports；
+- ROOT/child `SealedBuiltinCapabilitySnapshot`都只能从同一个sealed base tuple做closed scope projection，不能重新读取mutable ports；
 - MCP `install_pending_at_safe_point()`、same-schema reconnect与dynamic route变化仍可在seal后运行，因为它们只改变MCP owner state，不得修改sealed Builtin tuple；
 - close把状态置为`CLOSED`，之后seal/bind/snapshot均拒绝。
 
@@ -572,14 +697,18 @@ class FrozenSkillCapabilityFact:
     public_name: str
     description: str
     location: str
+    winning_root_provenance_fingerprint: str
     catalog_semantic_fingerprint: str
     activation_semantic_fingerprint: str
+    fact_semantic_fingerprint: str
 ~~~
 
 其中：
 
 - `catalog_semantic_fingerprint`只覆盖provider catalog可见字段；
 - `activation_semantic_fingerprint`可额外覆盖当前body/version，但body本身不进入catalog；
+- `winning_root_provenance_fingerprint`由Skill owner覆盖logical root kind、precedence ordinal与stable location prefix；它只证明winner来源，不包含absolute path、不进入provider body，也不改变`CapabilityIdentity`；
+- `fact_semantic_fingerprint`使用domain-separated canonical encoding覆盖identity fingerprint、catalog semantic fingerprint、activation semantic fingerprint与winning-root provenance fingerprint；central Skill adapter必须逐字段重算并拒绝caller-supplied mismatch。它是generic source snapshot唯一使用的Skill leaf version，不替代两项provider-visible fingerprint；
 - 当前legacy parser通过adapter产生该fact；
 - Round 9.1替换parser后必须保持此leaf contract，不得再造`AgentSkillCapabilityBase`；
 - Skill没有execution binding、permission、tool requirement、CLI health或route字段；
@@ -613,18 +742,42 @@ class FrozenCapabilityRegistrySnapshot:
     registry_fingerprint: str
 ~~~
 
+另外两个refreshable owner carrier的closed physical shape固定为：
+
+~~~python
+@dataclass(frozen=True, slots=True)
+class PreparedMcpCapabilitySourceSnapshotSet:
+    conversation_scope_kind: ModelInputScopeKind
+    scope_subagent_task_id: str | None
+    source_snapshots: tuple[FrozenCapabilitySourceSnapshot, ...]
+    resolved_config_inventory_fingerprint: str
+    owner_authenticity: object = field(repr=False, compare=False)
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedLocalSkillCatalogSourceSnapshot:
+    conversation_scope_kind: ModelInputScopeKind
+    scope_subagent_task_id: str | None
+    source_snapshot: FrozenCapabilitySourceSnapshot
+    discovery: LocalSkillDiscovery
+    root_policy_fingerprint: str
+    owner_authenticity: object = field(repr=False, compare=False)
+~~~
+
+MCP carrier必须证明`source_snapshots`的registrations exact等于resolved config inventory；Skill carrier必须证明`source_snapshot`是唯一`LOCAL_SKILL_CATALOG` registration的完整global-scan结果，且`discovery`与facts逐项exact join。它们都不提供renew/current-check API；owner后续变化形成新carrier。
+
 `freeze_capability_registry_snapshot(...)`是唯一leaf admission factory。它是pure、一次性、bounded的builder，不是Host-lived registry owner，也没有自增generation、callback、`register/unregister` side effect或跨Host identity。
 
-`source_snapshot_fingerprint`使用closed domain覆盖registration fingerprint、exact scope、disposition与ordered fact semantic fingerprints；`registry_fingerprint`覆盖derived registration-set fingerprint与ordered source-snapshot fingerprints。任何owner-specific physical identity都不进入这两个semantic fingerprints。
+`source_snapshot_fingerprint`使用closed domain覆盖registration fingerprint、exact scope、disposition与ordered `fact.fact_semantic_fingerprint`；`registry_fingerprint`覆盖derived registration-set fingerprint与ordered source-snapshot fingerprints。`FrozenToolCapabilityFact.fact_semantic_fingerprint`是既有`semantic_fingerprint`的机械property，`FrozenSkillCapabilityFact`则保存上述closed组合值；generic factory不按leaf kind临场选择catalog/activation/provenance字段。任何owner-specific physical identity都不进入这两个semantic fingerprints。
 
 Source snapshot规则：
 
 - 每个snapshot必须exact绑定registration set的scope；snapshot fingerprint覆盖scope，ROOT snapshot不能在child registry复用；
 - Built-in snapshot必须`COMPLETE`，只从Host-open时冻结的scope-visible、execution-backed且catalog-joined inventory确定性产生；这就是零I/O退化discovery；
-- MCP每个registered server只在**全部远端分页/枚举成功读取**、aggregate/bounds验证完成且既有include/exclude/invalid-tool policy被完整应用后发布`COMPLETE`。`SKIP_TOOL`丢弃单个invalid schema、或include/exclude过滤tool，属于对完整raw listing的确定性normalization，所得集合仍是`COMPLETE`，不是partial；只有连接失败、分页未完成、frame/parse/aggregate/bounds失败或无法证明完整枚举时才发布`UNAVAILABLE + facts=()`；
-- Skill root由一次跨全部registered roots的bounded scan统一解析precedence，输出再按winning root拆回source snapshots；invalid/duplicate loser不注册leaf；若任一会影响全局precedence/completeness的枚举或aggregate步骤失败，则该planning cut中**全部registered Skill roots**都发布`UNAVAILABLE + facts=()`，不得保留其他root的partial facts伪装完整catalog；
+- MCP每个registered server只在**全部远端分页/枚举成功读取**、aggregate/bounds验证完成且既有include/exclude/canonical-invalid-tool policy被完整应用后发布`COMPLETE`。`OMIT_INVALID`只丢弃未通过MCP dialect/schema/bounds/local-validator canonical admission的schema；include/exclude过滤仍属于对完整raw listing的确定性normalization，所得集合是`COMPLETE`而不是partial。Native-wire lowerability不在discovery或source snapshot阶段判断，不触发`FAIL_SERVER | OMIT_INVALID`、不增加`invalid_tool_count`，合法但wire-incompatible的fact必须保留到adapter eligibility与planner。只有连接失败、分页未完成、frame/parse/aggregate/bounds失败或无法证明完整枚举时才发布`UNAVAILABLE + facts=()`；
+- Skill owner对当前已注册root集合执行一次bounded ordered scan并全局解析precedence，只发布一个exact-scope `LOCAL_SKILL_CATALOG` snapshot；invalid/duplicate loser不注册leaf。完整scan/parse/aggregate成功时发布`COMPLETE + globally resolved winners`，任何会破坏全局completeness的失败发布单个`UNAVAILABLE + facts=()`，不得先按root拆分再重组；
 - `COMPLETE + facts=()`表示合法空source，和`UNAVAILABLE`不同；
-- registry factory必须为central composition seam产生的registration set中每一项接收exact one snapshot，且不得接受unregistered snapshot；expected source完整性来自此前的owner-seal admission，snapshot exact-one只证明每个expected source都有明确`COMPLETE | UNAVAILABLE`结果；
+- registry factory必须从三个named owner carrier取得exact one Builtin snapshot、每个derived MCP registration的exact one snapshot，以及exact one aggregate Skill snapshot；不得接受unregistered snapshot。Owner-issued carrier证明现实inventory完整，generic factory只证明derived registration与snapshot exact覆盖；
 - 每个fact的`identity.source`必须exact equal其snapshot registration的`source`；
 - source-kind、leaf-kind与origin使用以下closed matrix，任何其他组合均拒绝：
 
@@ -632,22 +785,23 @@ Source snapshot规则：
   |---|---|---|
   | `BUILTIN_REGISTRY` | `FrozenToolCapabilityFact` | `identity.kind=TOOL`且`origin=BUILTIN` |
   | `MCP_SERVER` | `FrozenToolCapabilityFact` | `identity.kind=TOOL`且`origin=MCP` |
-  | `LOCAL_SKILL_ROOT` | `FrozenSkillCapabilityFact` | `identity.kind=SKILL`，且不存在execution origin/binding |
+  | `LOCAL_SKILL_CATALOG` | `FrozenSkillCapabilityFact` | `identity.kind=SKILL`，且不存在execution origin/binding |
 
-- visibility不由generic registry按名字或当前配置重算：Builtin adapter复用现有ROOT/child binding过滤；MCP adapter按owner fact中的`root_visible/subagent_visible`为exact scope筛选并与owner projection exact join；Skill root inventory/scan同样先按scope冻结。Generic fact无需再复制visibility字段，因为scope-bound snapshot就是其唯一admission envelope；脱离该snapshot不得复用leaf。
+- visibility不由generic registry按名字或当前配置重算：Builtin adapter复用现有ROOT/child binding过滤；MCP adapter按owner fact中的`root_visible/subagent_visible`为exact scope筛选并与owner projection exact join；Skill owner同样先按exact scope冻结聚合catalog。Generic fact无需再复制visibility字段，因为scope-bound snapshot就是其唯一admission envelope；脱离该snapshot不得复用leaf。
 - 一个registry内source identity、capability identity均unique；Tool provider name全局unique；Skill同名winner必须在进入generic factory前由closed root precedence确定；
-- facts按`(kind, identity_fingerprint, semantic_fingerprint)`确定性排序；同输入得到byte-identical snapshot/fingerprint；
+- facts按`(kind, identity_fingerprint, fact_semantic_fingerprint)`确定性排序；同输入得到byte-identical snapshot/fingerprint；
 - registry的Tool/Skill flattened view由`source_snapshots`纯派生，禁止再保存一份caller可独立传值的`builtin_tools/mcp_tools/skill_facts`。
 
 Safe-point refresh不修改旧registry：owner冻结新的complete/unavailable source snapshot，central factory重建新的`FrozenCapabilityRegistrySnapshot`，planner再结合installed epoch决定append-only successor。Watcher/listChanged只负责唤醒；它们不是registry truth。
 
-### 4.6 Capability version 与 MCP tool reference
+### 4.6 MCP tool reference 与 route
 
 ~~~python
 class CapabilityRouteReasonCode(StrEnum):
     DIRECT_NATIVE_SURFACE = "DIRECT_NATIVE_SURFACE"
     NEW_NOT_IN_NATIVE_SURFACE = "NEW_NOT_IN_NATIVE_SURFACE"
     NEW_COLD_COHORT_META_FALLBACK = "NEW_COLD_COHORT_META_FALLBACK"
+    NATIVE_WIRE_INCOMPATIBLE = "NATIVE_WIRE_INCOMPATIBLE"
     SOURCE_UNAVAILABLE = "SOURCE_UNAVAILABLE"
     SCOPE_INVISIBLE = "SCOPE_INVISIBLE"
     DIRTY_FENCED = "DIRTY_FENCED"
@@ -663,18 +817,9 @@ class McpToolCapabilityRef:
     server_id: str
     remote_tool_name: str
 
-
-@dataclass(frozen=True, slots=True)
-class CapabilityVersionRef:
-    identity_fingerprint: str
-    semantic_fingerprint: str
-    provider_name: str
-    version_fingerprint: str
-
-
 ~~~
 
-`CapabilityVersionRef`是Tool/Skill当前semantic version的唯一小型引用：Tool使用fact `semantic_fingerprint + provider_spec.name`；Skill使用`catalog_semantic_fingerprint + public_name`。`version_fingerprint`只覆盖上述三个独立字段，不覆盖scope、status、policy、registry/catalog fingerprint、executor或physical generation。
+`ToolCapabilityVersionRef`是Tool当前semantic version的唯一小型引用，使用fact `fact_semantic_fingerprint + canonical_tool_spec.name`；其既有字段名`semantic_fingerprint`保存的就是该机械property值，不另建第二份Tool version input。`version_fingerprint`只覆盖上述三个独立字段，不覆盖scope、status、policy、registry/catalog fingerprint、executor、native-wire projection或physical generation。Skill已有catalog/activation identity，不为了形式统一复用Tool version DTO。
 
 `McpToolCapabilityRef`只服务Round 9 MCP direct/meta route与`NewMcpToolRef`签发，不由Skill manifest构造。Round 9 adapter必须停止按startup available-tool allowlist删除或过滤整个Skill，但无需保存legacy `provides_tools/suggested_tools`：这些字段行为inert，并在Round 9.1 clean cut从parser/DTO删除。
 
@@ -690,7 +835,7 @@ class ToolCapabilityRouteKind(StrEnum):
 @dataclass(frozen=True, slots=True)
 class FrozenMcpToolExposure:
     target: McpToolCapabilityRef
-    version: CapabilityVersionRef
+    version: ToolCapabilityVersionRef
     route: ToolCapabilityRouteKind
     public_reason_code: CapabilityRouteReasonCode
     route_fingerprint: str
@@ -709,6 +854,8 @@ class FrozenMcpRouteProjection:
 - `FrozenMcpRouteProjection.projection_fingerprint`覆盖ordered tool-specific route fingerprints与joined catalog semantic fingerprint；它服务catalog renderer/current lineage，可以因无关server状态变化而变化，但不进入native compatibility或`NewMcpToolRef`。
 
 `DIRECT | NEW_MCP_META_ONLY`必须有exact target version。MCP exposure只能引用`TOOL/MCP` version。所有ordered tuple由central factory排序，caller顺序不进入语义。
+
+`NATIVE_WIRE_INCOMPATIBLE`只表示canonical-valid MCP schema无法由当前adapter contract诚实投影到native `tools[]`，但完整inspect DTO仍可FULL交付；它不能表示canonical invalid，也不能与aggregate overbound的`NEW_COLD_COHORT_META_FALLBACK`混用。Canonical-valid但inspect DTO overbound使用`UNAVAILABLE + DESCRIPTOR_OVERBOUND`。
 
 `NEW_MCP_META_ONLY` route只冻结exact target version与公开`server_id/remote_tool_name` locator。Planning、Skill catalog与MCP catalog均不得预先准备或持有`NewMcpToolRef`；只有模型实际调用`inspect_new_mcp_tool`后，Runtime才为该次inspect result准备process-local dormant ref，并在其Round 7.1 exact FULL成功安装后使其callable。
 
@@ -738,11 +885,11 @@ class FrozenMcpCapabilityProjectionInput:
 @dataclass(frozen=True, slots=True)
 class FrozenSkillProjectionInput:
     discovery: LocalSkillDiscovery
-    source_snapshot_fingerprints: tuple[str, ...]
+    source_snapshot_fingerprint: str
     snapshot_fingerprint: str
 ~~~
 
-Round 9 adapter保持当前visible body/catalog behavior，不借机实现Agent Skills parser。`source_snapshot_fingerprints`只能引用同一registry中的`LOCAL_SKILL_ROOT` snapshots；Skill facts不在projection与registry各保存一份。`LocalSkillDiscovery`保留renderer/activation需要的source-specific parsed carrier，central factory必须证明其中winning manifests与registry Skill view exact join。Round 9.1随后以portable Agent Skills manifest替换legacy parser，并删除旧metadata，不扩展dependency surface。
+Round 9 adapter保持当前visible body/catalog behavior，不借机实现Agent Skills parser。`source_snapshot_fingerprint`必须exact引用同一registry中唯一`LOCAL_SKILL_CATALOG` snapshot；Skill facts不在projection与registry各保存一份。`LocalSkillDiscovery`保留renderer/activation需要的source-specific parsed carrier，central factory必须证明其中winning manifests、root provenance与registry Skill view exact join。Round 9.1随后以portable Agent Skills manifest替换legacy parser、保留本文冻结的四种physical root policy并删除旧metadata，不改变Round 9 registry接口。
 
 ### 4.10 Epoch predecessor
 
@@ -757,8 +904,7 @@ class InstalledCapabilityEpochPredecessor:
     expected_continuity_revision: int
     continuity_epoch_nonce: str
     tool_surface: FrozenModelToolSurface
-    direct_tool_versions: tuple[CapabilityVersionRef, ...]
-    native_surface_compatibility_fingerprint: str
+    direct_projection_set: FrozenNativeToolProjectionSet
 
 
 CapabilityEpochPredecessor = (
@@ -767,60 +913,132 @@ CapabilityEpochPredecessor = (
 )
 ~~~
 
-`InstalledCapabilityEpochPredecessor.tool_surface`必须是continuity owner已有epoch view中的同一frozen值或fingerprint-exact value，不允许caller重建第二份surface。`native_surface_compatibility_fingerprint`只覆盖exact scope、ordered native tool specs、direct capability versions与相关fixed tool/lowering contract；它是Capability唯一进入continuity epoch compatibility的fingerprint。
+`InstalledCapabilityEpochPredecessor.tool_surface`与`direct_projection_set`必须直接引用continuity owner已有epoch view中的同一frozen值或fingerprint-exact value，不允许caller重建第二份surface、version或projection tuple。`ToolCapabilityVersionRef`只保存identity fingerprint、semantic fingerprint与provider name；不保存executor binding。
 
-`CapabilityVersionRef`只保存identity fingerprint、semantic fingerprint与provider name；不保存executor binding。
+Round 9不建立公开native transition enum，也不向`ProviderInputEpochCompatibility`增加第二个native compatibility字段。分支由已有真值机械派生：
 
-### 4.11 Planning cut
+~~~text
+EMPTY predecessor
+  -> cold install
+
+installed predecessor + existing compatibility says same target/lowering
+  -> exact reuse predecessor direct_projection_set and actual wire tool_items
+
+installed predecessor + existing MODEL_TARGET_CHANGED | PROVIDER_LOWERING_CHANGED reset
+  -> reproject exact predecessor canonical direct cohort under the new adapter contract
+  -> install only through that existing cold-reset/CAS path
+~~~
+
+窄`native_function_tool_wire_contract_fingerprint`继续由adapter拥有，但它必须无条件进入既有`ProviderInputEpochCompatibility.provider_message_lowering_contract`：compatibility factory使用domain-separated hash覆盖既有message-lowering contract与该narrow function-tool wire contract。不得只把它放入final provider-wire profile，也不保留“二者任选其一”的实现自由。该narrow contract变化必须机械产生既有`PROVIDER_LOWERING_CHANGED` reset；若没有形成matching reset，属于internal contract conflict，不得靠Round 9新增状态字段补偿。
+
+### 4.11 Parent dispatch cut 与两个consumer view
 
 ~~~python
 @dataclass(frozen=True, slots=True)
-class FrozenCapabilityPlanningCut:
+class FrozenToolCapabilityPlanningInput:
+    predecessor: CapabilityEpochPredecessor
+    native_wire: FrozenNativeToolWireEligibilitySet
+    mcp: FrozenMcpCapabilityProjectionInput
+    tool_view_fingerprint: str
+
+
+@dataclass(frozen=True, slots=True)
+class FrozenCapabilityDispatchCut:
     conversation_scope_kind: ModelInputScopeKind
     scope_subagent_task_id: str | None
-    predecessor: CapabilityEpochPredecessor
     registry: FrozenCapabilityRegistrySnapshot
-    mcp: FrozenMcpCapabilityProjectionInput
+    tools: FrozenToolCapabilityPlanningInput
     skills: FrozenSkillProjectionInput
-    planning_cut_fingerprint: str
+    dispatch_cut_fingerprint: str
+
+
+@dataclass(frozen=True, slots=True)
+class FrozenToolCapabilityDispatchView:
+    parent_dispatch_cut_fingerprint: str
+    registry_fingerprint: str
+    registry_tool_facts: tuple[FrozenToolCapabilityFact, ...]
+    planning_input: FrozenToolCapabilityPlanningInput
+    view_fingerprint: str
+
+
+@dataclass(frozen=True, slots=True)
+class FrozenSkillCapabilityDispatchView:
+    parent_dispatch_cut_fingerprint: str
+    registry_fingerprint: str
+    registry_skill_facts: tuple[FrozenSkillCapabilityFact, ...]
+    projection_input: FrozenSkillProjectionInput
+    view_fingerprint: str
+
+
+def freeze_capability_dispatch_cut_and_views(
+    *,
+    conversation_scope_kind: ModelInputScopeKind,
+    scope_subagent_task_id: str | None,
+    registry: FrozenCapabilityRegistrySnapshot,
+    tools: FrozenToolCapabilityPlanningInput,
+    skills: FrozenSkillProjectionInput,
+) -> tuple[
+    FrozenCapabilityDispatchCut,
+    FrozenToolCapabilityDispatchView,
+    FrozenSkillCapabilityDispatchView,
+]: ...
 ~~~
 
-它是一次provider dispatch planning的immutable semantic input，不是durable snapshot。它不查询数据库，不读取filesystem，不打开MCP连接。
+Parent cut是一次provider dispatch planning的immutable value，不是durable snapshot。它不查询数据库，不读取filesystem，不打开MCP连接。唯一central factory必须先冻结parent fingerprint，再从该parent机械派生两个narrow view；production caller不得分别提交fingerprint、registry与planning input：
+
+~~~text
+FrozenCapabilityDispatchCut
+  ├─ FrozenToolCapabilityDispatchView
+  │    -> KernelToolCapabilityPlanner
+  └─ FrozenSkillCapabilityDispatchView
+       -> KernelSkillProjectionComposer
+~~~
+
+`registry_tool_facts`与`registry_skill_facts`只引用parent registry已经冻结的对应closed-union leaf，不复制schema/body，也不能由caller另传tuple。Tool view fingerprint覆盖parent fingerprint、registry fingerprint、ordered Tool fact `fact_semantic_fingerprint`与`planning_input.tool_view_fingerprint`；Skill view fingerprint同样覆盖parent、registry、ordered Skill fact `fact_semantic_fingerprint`与`projection_input.snapshot_fingerprint`。Factory逐项证明两组facts恰好等于parent registry的derived Tool/Skill view。
+
+Tool exposure result和Skill projection result都必须exact引用同一个parent fingerprint及各自view fingerprint，随后一起进入compiler/continuity candidate。最终组合validator同时取得parent与两个结果，拒绝wrong-parent、wrong-view或只替换一侧的混合。Tool planner不得读取Skill discovery/catalog lineage；Skill composer不得读取MCP route、native projection、executor或physical binding。
 
 Central factory必须证明：
 
 - exact scope一致；
 - registry exact scope与planning scope一致；
+- native-wire eligibility exact scope与dispatch scope一致，并对registry中的每个Tool fact恰有一项；若predecessor为installed，还对其retained direct version/spec pair恰有一项，且该扩展集合只能由central factory从predecessor机械派生；
+- eligibility的native-function-tool contract exact等于本次已经resolved的model target/adapter tool-wire contract；
 - identity unique；
 - provider tool names不冲突；
-- Built-in/MCP/Skill facts都只来自registry的current complete source snapshots；
+- Built-in/MCP/Skill facts都只来自registry中三个owner-issued carrier的complete source snapshots；
 - registry必须包含exact one immutable Built-in source snapshot；
-- MCP/Skill projection refs分别是registry source snapshot的closed子集，并与owner-specific catalog/discovery carrier exact join；
+- MCP projection refs是registry中MCP snapshots的closed子集；Skill projection exact引用唯一aggregate Skill snapshot；二者分别与owner-specific catalog/discovery carrier exact join；
 - predecessor revision/nonce与continuity owner一致；
-- source projection均在同一个safe point冻结；
+- 三项owner snapshot均在本次absolute dispatch deadline内从各自合法lock/safe-point冻结；不要求虚构跨owner原子瞬间；
 - fingerprint覆盖全部独立输入。
 
-### 4.12 Exposure plan
+### 4.12 Tool exposure plan
 
 ~~~python
 @dataclass(frozen=True, slots=True)
-class FrozenCapabilityExposurePlan:
-    planning_cut_fingerprint: str
+class FrozenToolCapabilityExposurePlan:
+    dispatch_cut_fingerprint: str
+    tool_dispatch_view_fingerprint: str
     direct_tool_surface: FrozenModelToolSurface
-    direct_tool_versions: tuple[CapabilityVersionRef, ...]
+    direct_projection_set: FrozenNativeToolProjectionSet
     mcp_catalog_route_projection: FrozenMcpRouteProjection
-    native_surface_compatibility_fingerprint: str
-    catalog_lineage_fingerprint: str
     exposure_plan_fingerprint: str
+
+
+@dataclass(frozen=True, slots=True)
+class FrozenSkillCapabilityProjectionResult:
+    dispatch_cut_fingerprint: str
+    skill_dispatch_view_fingerprint: str
+    output: SkillProjectionOutput
+    result_fingerprint: str
 ~~~
 
-三个fingerprint职责必须分离：
+`direct_projection_set`是canonical Tool version到exact native wire projection的唯一selected mapping；plan不得再次保存独立versions/projections tuple。`exposure_plan_fingerprint`覆盖parent/view、direct canonical surface、projection set与MCP route projection，只证明本次Tool planning result完整，不成为新的continuity compatibility key。Skill result fingerprint覆盖parent/view与existing bounded `SkillProjectionOutput`的closed semantic encoding；internal free-text diagnostics若不进入provider source input则不得影响该fingerprint。
 
-- `native_surface_compatibility_fingerprint`由`direct_tool_surface + direct_tool_versions + fixed contract`确定；cold install后成为epoch-stable compatibility fact，installed planning必须byte-equal复用；
-- `catalog_lineage_fingerprint`覆盖current registry、MCP DIRECT/NEW/UNAVAILABLE routes、catalog route projection与`cut.skills.snapshot_fingerprint`；它允许在same epoch随complete successor snapshot变化，只用于本次append-only source/renderer/execution-ref的exact join；
-- `exposure_plan_fingerprint`组合planning cut与前两者，证明一次planning result完整，但**不得**整体写成continuity compatibility key。
+`ProviderInputEpochCompatibility.tool_surface_fingerprint`继续表达provider-neutral canonical `FrozenModelToolSurface`；model target与既有provider-lowering compatibility继续拥有reset分类。Final `FrozenProviderWireInputPlan`逐项比较`direct_projection_set.projections[*].wire_tool`与actual materialized `tool_items`并重算`wire_tools_fingerprint`。因此actual wire plan承担最终strict-prefix byte proof，projection set承担canonical-version→wire exact join；二者职责互补，但不需要第三个compatibility字段。
 
-因此late MCP、Skill refresh、server status或catalog presentation变化可以改变`catalog_lineage_fingerprint/exposure_plan_fingerprint`并追加message suffix，却不能改变`native_surface_compatibility_fingerprint`、触发cold reset或重写provider `tools[]`。
+Late MCP或server status变化只改变`mcp_catalog_route_projection`并追加MCP source successor；Skill refresh只改变独立Skill composer output。两者都不能触发same-epoch rebase或重写provider `tools[]`，Tool plan也不再保存Skill lineage。
 
 `FrozenMcpRouteProjection.routes`是MCP tool-specific route的唯一tuple；Exposure plan不得再保存第二份`mcp_routes`。Projection只额外保存所join的existing catalog semantic fingerprint；完整server instructions/resources/prompts/status仍由MCP catalog owner/renderer拥有。该plan是pure value，不持有authority。它的字段不包含：
 
@@ -832,19 +1050,31 @@ class FrozenCapabilityExposurePlan:
 - continuity install permit；
 - canonical repository connection。
 
-Exposure plan不再复制`skill_versions`：registry与`FrozenSkillProjectionInput`已经拥有同一完整Skill semantic cut，central planning-cut factory负责exact-equivalence validation，catalog lineage直接引用`cut.skills.snapshot_fingerprint`。Planner不解析Skill dependency、不渲染final Skill catalog，也不根据当前user text选择active Skill。`KernelSkillProjectionComposer`继续以同一`FrozenSkillProjectionInput`与closed activation subject形成`SKILL_CATALOG`/`ACTIVE_SKILL`；这样generic planner不获得Skill renderer、CLI health或user-message interpretation authority。
+Tool exposure plan不保存`skill_versions`、Skill snapshot或Skill lineage。`KernelSkillProjectionComposer`只接受`FrozenSkillCapabilityDispatchView`与既有closed activation subject，形成`SKILL_CATALOG`/`ACTIVE_SKILL`并返回上述result。这样same-call join由parent/view双重证明，而Tool planner不获得Skill renderer、CLI health或user-message interpretation authority。
 
-### 4.13 KernelCapabilityPlanner
+### 4.13 KernelToolCapabilityPlanner
 
 ~~~python
-class KernelCapabilityPlanner:
+class KernelToolCapabilityPlanner:
     def plan(
         self,
-        cut: FrozenCapabilityPlanningCut,
-    ) -> FrozenCapabilityExposurePlan: ...
+        *,
+        view: FrozenToolCapabilityDispatchView,
+    ) -> FrozenToolCapabilityExposurePlan: ...
+
+
+class KernelSkillProjectionComposer:
+    def compose(
+        self,
+        *,
+        view: FrozenSkillCapabilityDispatchView,
+        activation_subject: SkillProjectionResolveContext,
+    ) -> FrozenSkillCapabilityProjectionResult: ...
 ~~~
 
-Planner必须pure、deterministic且bounded。相同cut fingerprint必须产生byte-identical plan。Planner不得接受自由`dict`、callback或resolver object；所有输入均为frozen DTO。
+Planner与composer必须pure、deterministic且bounded。相同view与activation subject必须产生byte-identical结果。二者不得接受分离的parent fingerprint、registry、leaf tuple或自由`dict`/callback/resolver object；所有capability输入均来自central factory签发的frozen view。Planner只能读取registry-derived Tool view，不能读取或fingerprint Skill facts；composer反之亦然。
+
+Planner不执行OpenAI lowering：adapter-owned factory已经把每个Tool fact冻结为eligible projection或closed incompatibility。Planner只验证eligibility set的exact coverage/join并进行route与capacity决策；generic registry/planner package对OpenAI、Chat、Responses及具体provider name均为零import。
 
 ### 4.14 Physical exact join
 
@@ -906,6 +1136,8 @@ no foreign Host authority
 - cold epoch选中的direct MCP tool capabilities。
 
 同一continuity epoch中逐项byte-identical。Skill永远不进入`tools[]`。
+
+`FrozenModelToolSurface`保存ordered canonical Tool specs；adapter-derived `direct_projection_set.projections`保存本epoch实际发送的ordered native definitions。二者必须一一exact join但职责不同：前者服务canonical capability/local validation/execution binding，后者服务Chat/Responses actual-wire prefix。Native projection不得写回前者，final wire planner也不得绕过前者直接赋予执行权限。
 
 ### 5.2 `MCP_CATALOG`
 
@@ -1048,7 +1280,7 @@ McpServerToolDirectoryRow
 - 无`server_id`时按`server_id`排序返回server page；有`server_id`时只返回该exact scope-visible server的tool page；
 - tool page按`(remote_tool_name, provider_tool_name)`排序，不返回完整input/output schema；
 - 空参数旧调用继续合法；`cursor`与显式filter不匹配时typed stale，不偷偷从第一页重启；
-- opaque cursor内部exact绑定current catalog semantic fingerprint、current epoch native-surface compatibility fingerprint、ROOT/child exact scope、server filter、page kind、limit与next offset；这些内部字段不得进入provider正文；
+- opaque cursor内部exact绑定current catalog semantic fingerprint、current epoch installed direct projection-set fingerprint、ROOT/child exact scope、server filter、page kind、limit与next offset；这些内部字段不得进入provider正文；
 - catalog/surface/scope/filter变化使旧cursor返回`STALE_CURSOR`，unknown/invisible server返回`NOT_FOUND`，非法limit/cursor shape返回`INVALID_ARGUMENTS`；
 - 它只读取一次已经安装的local catalog/route snapshot，不连接server、不refresh、不触发discovery、不取得MCP physical operation lane；
 - `limit`是maximum row count，不是必须返回的数量；page factory复用Round 7.1唯一logical ToolResult renderer/quote，按ordered rows选择不超过limit且在最大合法call-local augmentation下必有FULL variant的最长prefix，并据此准备exact `next_cursor`；它不反向调用compiler，也不依赖未来actual citation碰巧更短；
@@ -1060,28 +1292,36 @@ McpServerToolDirectoryRow
 在`EMPTY` predecessor上：
 
 1. 冻结fixed builtin surface；
-2. 由MCP config的既有`exposure_policy.include/exclude`、scope policy与schema validity先得到完整可暴露集合；被配置排除的tool既不direct也不meta；
-3. 取得其中当前READY_CLEAN的完整MCP tool cohort；
-4. 将完整cohort与builtins合并、按provider name排序；
-5. 若总数不超过64且canonical tool bytes不超过1 MiB，完整cohort全部`DIRECT`；
-6. 若任一bound超出，全部MCP为`NEW_MCP_META_ONLY`，仅builtins进入native surface；
-7. 若builtins自身超限，provider open=0，返回typed tool-surface resource boundary。
+2. 对每个execution-backed builtin exact join adapter eligibility；任一Builtin为`INCOMPATIBLE`、canonical aggregate超限或exact wire projection超限时，provider open=0并返回typed internal tool-contract/resource boundary；Builtin不得skip或走MCP meta；
+3. 由MCP config既有`exposure_policy.include/exclude`、scope policy与**canonical** schema validity得到完整可暴露集合；被配置排除的tool既不direct也不meta，canonical invalid仍独占`FAIL_SERVER | OMIT_INVALID`；
+4. 取得其中当前READY_CLEAN的完整MCP Tool fact cohort，并逐项exact join adapter eligibility；
+5. canonical-valid、native-wire `INCOMPATIBLE`且完整inspect DTO可通过Round 7.1 FULL quote的tool直接归为`NEW_MCP_META_ONLY + NATIVE_WIRE_INCOMPATIBLE`；若inspect overbound则归为`UNAVAILABLE + DESCRIPTOR_OVERBOUND`；
+6. 其余native-eligible MCP构成唯一direct candidate cohort，与builtins合并后按provider name排序；同时计算provider-neutral canonical 64-tool/1 MiB bounds与adapter exact lowered wire 64-tool/1 MiB bounds；二者是数值相同但独立计量的hard fences；
+7. 若完整native-eligible cohort同时满足两组bounds，全部eligible MCP为`DIRECT`；
+8. 若任一aggregate bound超出，全部native-eligible MCP退为`NEW_MCP_META_ONLY + NEW_COLD_COHORT_META_FALLBACK`，但每项仍须通过inspect FULL quote；无法inspect FULL的单项改为`UNAVAILABLE + DESCRIPTOR_OVERBOUND`；仅builtins进入native surface；
+9. final direct surface、唯一`FrozenNativeToolProjectionSet`与两组quote必须由同一plan冻结。
 
-禁止按发现时序、前N个、词法排名或embedding挑选部分MCP。用户若需要缩小集合，只能使用Round 6既有per-server exposure include/exclude；这会缩小整个可暴露集合，而不是把明确排除的工具偷偷保留在meta gateway。
+禁止按发现时序、前N个、词法排名或embedding挑选部分native-eligible MCP。Native-wire incompatibility是逐tool closed分类，不属于任意挑选；aggregate fallback仍对全部native-eligible MCP all-or-none。用户若需要缩小集合，只能使用Round 6既有per-server exposure include/exclude；这会缩小整个可暴露集合，而不是把明确排除的工具偷偷保留在meta gateway。
 
-该all-or-none fallback保证同一server早1毫秒READY或晚1毫秒READY不会分别造成Host失败与成功：过大的MCP集合无论cold或late都可经meta使用。
+该all-or-none fallback保证同一server早1毫秒READY或晚1毫秒READY不会分别造成Host失败与成功：过大的native-eligible MCP集合无论cold或late都经meta使用；wire-incompatible schema也不会毒化整个provider tool surface。Canonical aggregate与actual wire aggregate必须分别计量，任何一方不得被另一方的quote替代。
 
 ### 6.3 Installed epoch
 
 在`INSTALLED` predecessor上：
 
-- 直接复用predecessor `FrozenModelToolSurface`；
+- 无论本次adapter contract是否变化，都保留predecessor exact `FrozenModelToolSurface + direct_projection_set.tool_versions` canonical cohort；late/current MCP不得借epoch reset进入direct cohort；
+- existing compatibility没有reset：必须直接复用predecessor `direct_projection_set`与actual wire `tool_items`；adapter revalidation只能证明byte-equal，不能产生新projection替换已安装值；
+- existing compatibility给出`MODEL_TARGET_CHANGED | PROVIDER_LOWERING_CHANGED` reset：只对predecessor direct canonical version/spec cohort执行同一pure adapter projection，冻结一组完整new-contract `FrozenNativeToolProjectionSet`；不得沿用任一old-contract wire item；
+- reset reprojection中任一predecessor direct Builtin或MCP无法诚实native projection、actual wire bounds不fit、retained version/spec无法exact配对，均在provider open前typed fail closed。不得drop旧direct tool、将其改为meta、缩窄schema或用current late MCP补位；operator若要采用不同cohort，必须创建replacement Host进行真正cold planning；
+- successful reprojection必须与compiler已有`MODEL_TARGET_CHANGED | PROVIDER_LOWERING_CHANGED` epoch reset exact join：新epoch nonce、revision与完整wire plan经continuity CAS安装后才可provider open。该分支由existing reset reason机械派生，不新增公开transition enum、relation、event、receipt、checkpoint或recovery owner；
 - 不重新选择direct cohort；
 - current MCP fact与predecessor direct versions exact相同：`DIRECT`；
-- current新增identity：`NEW_MCP_META_ONLY`；
+- current新增identity：若完整inspect DTO可FULL交付则`NEW_MCP_META_ONLY`，否则`UNAVAILABLE/DESCRIPTOR_OVERBOUND`；其native-wire eligibility只决定closed reason，不允许same-epoch提升为DIRECT；
 - predecessor direct identity消失或连接不可用：provider descriptor仍为DIRECT，local execution state为typed unavailable；
 - predecessor direct identity发生schema replacement：旧descriptor继续保留但禁止physical dispatch，新版本不能通过meta绕过；下个cold epoch才可采用新schema；
 - same-schema reconnect只换physical binding，不改semantic route。
+
+这里不把model target/API profile冻结为Host-lifetime常量。既有compiler已经把model target/provider lowering变化定义为合法epoch reset；Round 9只补齐reset前的native projection ownership与exact join。该reset开启新epoch，因此不违反“同Host、同scope、同epoch”的strict-prefix契约；但它不等价于一次新的capability cold discovery，故不能promotion late MCP。
 
 ### 6.4 Late-ready observation
 
@@ -1313,23 +1553,25 @@ Skill fact和`SKILL_CATALOG`不保存或渲染DIRECT/META_ONLY/UNAVAILABLE依赖
 ### 8.1 Cold/EMPTY
 
 ~~~text
-start one provider-dispatch planning attempt deadline and composition-attempt token
+start one provider-dispatch absolute planning deadline
 -> freeze exact scope and EMPTY continuity predecessor
--> require Builtin composition SEALED and freeze scope projection from sealed base
--> obtain exact Builtin/MCP-config/Skill-root owner-issued prepared inventories
--> validate same attempt/current seals and derive exact current source registration set
--> freeze immutable execution-backed Built-in zero-I/O source snapshot
--> freeze complete/unavailable MCP server source snapshots at safe point
--> freeze complete/unavailable Skill root source snapshots at safe point
--> pure freeze_capability_registry_snapshot(...)
--> freeze MCP/Skill owner-specific projections referencing that registry
--> construct FrozenCapabilityPlanningCut
--> pure planner selects direct/meta and catalog projections
+-> obtain SealedBuiltinCapabilitySnapshot from the sealed base
+-> obtain PreparedMcpCapabilitySourceSnapshotSet at an MCP safe point
+-> obtain one PreparedLocalSkillCatalogSourceSnapshot from a complete global root scan
+-> central factory validates owner authenticity/exact scope and freezes registry snapshot
+-> freeze MCP and Skill owner-specific projections referencing that registry
+-> resolve exact model target/profile without opening provider
+-> adapter-owned pure native-wire preflight produces exact eligibility/projection set
+-> construct one parent FrozenCapabilityDispatchCut
+-> mechanically derive FrozenToolCapabilityDispatchView and FrozenSkillCapabilityDispatchView
+-> KernelToolCapabilityPlanner selects direct/meta/unavailable and exact native projection set from Tool view
+-> KernelSkillProjectionComposer independently renders the Skill view from Skill dispatch view
 -> prepare exact physical tool-surface access for direct surface
 -> collect remaining runtime sources from same dispatch planning attempt
 -> compile semantic provider input
--> build provider-wire plan / DirectModel preflight
--> continuity candidate exact joins native-surface compatibility + current catalog lineage/compiled suffix
+-> hydrate Round 5A.2 replay metadata/body against the same cut and target
+-> build provider-wire plan / DirectModel preflight; exact-join planned native wire projections
+-> continuity candidate exact joins canonical tool surface + parent/view-bound Tool/Skill outputs + replay hydration proof + actual wire plan
 -> continuity CAS install
 -> provider open_once
 ~~~
@@ -1339,23 +1581,25 @@ start one provider-dispatch planning attempt deadline and composition-attempt to
 ### 8.2 Installed epoch
 
 ~~~text
-freeze exact installed continuity epoch view and one composition-attempt token
--> require the same Builtin composition seal fingerprint
--> obtain all three exact-scope owner-issued prepared inventories at safe point
--> validate same attempt/current seals and derive current registration set
+freeze exact installed continuity epoch view and one absolute planning deadline
+-> obtain the exact-scope immutable Builtin/MCP/aggregate-Skill owner snapshots
 -> reuse identical immutable Built-in source snapshot
--> freeze current complete/unavailable MCP/Skill successor source snapshots
+-> freeze current complete/unavailable MCP and aggregate-Skill successor snapshots
 -> build a new frozen registry snapshot; never mutate predecessor registry
 -> exact join MCP/Skill owner-specific projections to that registry
--> planner reuses predecessor native surface byte-for-byte
--> prove native-surface compatibility fingerprint unchanged
--> derive current NEW MCP routes and catalog successor
--> derive current Skill catalog successor
--> compiler compatible append
--> preflight / continuity CAS / provider open
+-> resolve exact model target/profile and existing compatibility reset reason
+-> adapter preflight classifies current facts and the central-derived retained direct version/spec pairs
+-> construct one parent FrozenCapabilityDispatchCut and mechanically derive the two sibling views
+-> if existing compatibility is unchanged: reuse predecessor canonical surface/direct_projection_set/tool_items byte-for-byte
+-> if existing MODEL_TARGET_CHANGED | PROVIDER_LOWERING_CHANGED reset applies: reproject only the exact predecessor direct canonical cohort
+-> prove exact reuse, or freeze a complete new-contract projection set without direct cohort change
+-> Tool planner derives current NEW MCP routes/catalog successor from Tool view
+-> Skill composer derives current Skill catalog successor from Skill view
+-> compiler compatible append, or exact MODEL_TARGET_CHANGED/PROVIDER_LOWERING_CHANGED reset matching the derived branch
+-> Round 5A.2 replay hydration + final wire plan exact join / continuity CAS / provider open
 ~~~
 
-Planner若生成不同native surface，属于internal contract conflict，provider open=0。
+Compatible reuse若生成不同native surface/projection/tool items，属于internal contract conflict，provider open=0。Existing reset branch允许wire projection变化，但canonical surface/version cohort必须exact equal predecessor；任一late MCP promotion、old direct omission或compiler未形成matching reset都使provider open=0。分支不作为caller字段或第二套状态机持久存在。
 
 ### 8.3 Safe point
 
@@ -1375,6 +1619,8 @@ MCP catalog/Skill rescan与refreshable source-registration set采纳只能在既
 - MCP semantic snapshot borrow只保护当前normalized facts，不把planner变成close owner；
 - provider/tool-surface physical borrow仍由现有Host owner管理；
 - planner input freeze与physical binding可以分层，但provider open前必须exact join；
+- adapter native-wire eligibility/projection必须在同一dispatch absolute deadline内完成；不得在final wire阶段重新发现另一组tool或启动第二个planning deadline；
+- Round 5A.2 metadata/body hydration继续使用同一dispatch deadline，并exact join已经冻结的native tools；capability planner不得读取或改写durable replay carrier；
 - waiter cancellation不得遗留prepared continuity candidate或MCP permit。
 
 ---
@@ -1408,15 +1654,19 @@ Meta gateway在attempt前解析真实MCP capability，再使用该MCP tool的eff
 | 场景 | Native tools | Append-only source | Execution结果 |
 |---|---|---|---|
 | Builtin installed binding缺catalog/mismatch/漏入snapshot | no provider open | none | internal contract conflict；catalog-only dormant entry本身合法 |
+| Builtin canonical fact无法由current adapter contract诚实投影 | no provider open | none | typed internal native-tool contract conflict；不得skip/meta |
 | Builtin composition seal后再次bind fixed/support port | installed surface不变 | none | typed local composition rejection；不增generation |
-| 三项owner-issued prepared inventory缺失、错scope、attempt token不一致、owner seal stale或registration union不完整 | no provider open | none | planning conflict |
+| 三项named owner snapshot任一缺失、foreign、错scope或owner内部inventory不完整 | no provider open | none | planning conflict |
 | duplicate identical source registration | 按唯一项处理 | none | idempotent |
 | same source在同一cut出现不同registration | no provider open | none | planning conflict |
 | refreshable source完成相同snapshot | 不变 | no-op | current route保持 |
-| MCP/Skill无法证明complete snapshot | installed surface不变 | catalog UNAVAILABLE/invalidation | 不发布partial leaf truth |
+| MCP/aggregate Skill source无法证明complete snapshot | installed surface不变 | catalog UNAVAILABLE/invalidation | 不发布partial leaf truth |
 | no MCP config | fixed builtins | empty/cleared MCP catalog | list返回空 |
-| cold READY MCP cohort fits | builtins + all selected MCP | catalog标DIRECT | direct invoke |
-| cold cohort overbound | builtins only | catalog标NEW/meta | inspect/use |
+| cold READY native-eligible MCP cohort双quote fits | builtins + all eligible MCP | eligible catalog标DIRECT；incompatible按meta/unavailable | direct invoke或inspect/use |
+| MCP canonical schema invalid | 该tool不进入surface | 按`FAIL_SERVER | OMIT_INVALID` | 仅canonical invalid count增加 |
+| MCP canonical-valid但native-wire incompatible，inspect FULL fits | builtins/其他eligible cohort不变 | catalog标NEW/meta + native-incompatible | inspect/use |
+| MCP canonical-valid但native-wire incompatible，inspect overbound | 不变 | catalog标UNAVAILABLE/descriptor-overbound | 无ref、无remote attempt |
+| cold native-eligible cohort aggregate overbound | builtins only | eligible MCP catalog标NEW/meta；inspect-overbound单项UNAVAILABLE | inspect/use或typed unavailable |
 | optional MCP late-ready | 不变 | MCP_CATALOG VALUE | inspect/use |
 | new remote tool added | 不变 | MCP_CATALOG successor | inspect/use |
 | meta tool removed | 不变 | MCP_CATALOG successor |旧ref stale，无attempt |
@@ -1430,6 +1680,10 @@ Meta gateway在attempt前解析真实MCP capability，再使用该MCP tool的eff
 | Skill正文提到late MCP | 不变 | Skill catalog no-op；MCP catalog追加NEW |模型依据MCP observation inspect/use |
 | Skill正文提到unknown能力 | 不变 | Skill catalog no-op |真实调用typed unavailable；不创建tool |
 | planner/source fingerprint mismatch | no provider open | none | discard candidate |
+| planned native projection与final actual wire tool不一致 | no provider open | none | discard candidate；不回写canonical schema |
+| existing target/provider-lowering compatibility要求reset，retained direct cohort可完整重投影 | predecessor canonical cohort、new-contract exact wire projections | current catalog successor按需 | compiler/CAS安装matching新epoch后provider open |
+| contract变化但retained direct cohort无法完整重投影、超界或发生late promotion | no provider open | none | typed compatibility/resource conflict；不得drop/meta/替换旧direct，需replacement Host cold planning |
+| 无existing matching reset却重投影，或compatible reuse时wire bytes变化 | no provider open | none | discard candidate；不得same-epoch替换wire |
 | physical surface foreign/missing | no provider open | none | typed preflight conflict |
 | invalid meta ref | 不变 | none | no attempt |
 | meta effect outcome unknown | 不变 | ordinary ToolResult/turn interruption contract | never retry automatically |
@@ -1454,15 +1708,17 @@ Advisory catalog不得让旧snapshot永久冒充current，也不得因为完整c
 
 - provider native tool count：64；
 - aggregate canonical tool schema：1 MiB；
+- aggregate actual native wire tool definitions：1 MiB，并由provider-wire plan独立quote；canonical 1 MiB通过不代表wire quote通过，反之亦然；
 - compiler working set：64 MiB；
 - configured MCP servers：64；
-- generic source registrations：1个Builtin + 最多64个MCP server + current registered Skill roots；Round 9.1激活后Skill roots上限为6；
+- generic source registrations：exact 1个Builtin + 最多64个MCP server + exact 1个聚合`LOCAL_SKILL_CATALOG`；固定four-root policy及Round 9.1 parser替换只属于Skill owner内部bounded实现，不改变generic source数量；
 - discovered tools per MCP server：512；
 - MCP discovery page/item/body/schema与Host aggregate：继续服从Round 6；
 - MCP catalog FULL/COMPACT/REF：32/8/2 KiB；
 - single inspected schema必须在既有schema working-set bound内形成exact JSON，并且完整closed inspect DTO必须通过Round 7.1 provider-neutral logical FULL 40,000-byte quote；
 - process-local issued new-MCP refs：每scope每epoch最多1,024个unique live token；不做LRU eviction，达到上限时inspect typed capacity failure；
 - capability planner canonical fingerprint input：不得复制schema/body；引用既有frozen facts后的额外framing最多4 MiB；
+- native-wire eligibility set只为每个Tool保存exact one frozen projection或小型closed incompatibility；其wire bytes计入provider-wire working set与Host planning budget，不得在registry再复制；
 - registry snapshot只组合既有bounded source facts，不把MCP catalog或Skill manifest body复制为第二份generic payload；
 - Skill discovery/body bounds保持现状，Round 9.1另行收紧。
 
@@ -1478,34 +1734,40 @@ Advisory catalog不得让旧snapshot永久冒充current，也不得因为完整c
 
 - `CapabilityKind`；
 - `CapabilitySourceKind/Ref`；
-- `CapabilitySourceRefreshMode`、`FrozenCapabilitySourceRegistration`、semantic inventory与derived registration set；process-local prepared admission carrier不放入pure contracts模块；
+- four-value `LocalSkillRootKind`；它是local Skill owner provenance contract，不产生四个generic sources；
+- `CapabilitySourceRefreshMode`、`FrozenCapabilitySourceRegistration`与三个named branch的derived registration set；process-local owner-issued snapshot carrier不放入pure contracts模块；
 - `CapabilityIdentity`；
 - `FrozenToolCapabilityFact`；
+- `FrozenToolCapabilityFact.canonical_tool_spec`明确保存未lower的provider-neutral canonical schema；
 - `FrozenSkillCapabilityFact`；
 - `CapabilitySourceSnapshotDisposition`、`FrozenCapabilitySourceSnapshot`与`FrozenCapabilityRegistrySnapshot`；
-- `CapabilityVersionRef`、`McpToolCapabilityRef`、`FrozenMcpToolExposure`、`FrozenMcpRouteProjection`、planning cut与拆分native compatibility/catalog lineage的exposure plan。
+- `ToolCapabilityVersionRef`、`McpToolCapabilityRef`、`FrozenMcpToolExposure`、`FrozenMcpRouteProjection`；
+- adapter-neutral `FrozenNativeToolWireProjection | FrozenNativeToolWireIncompatibility`、eligibility/projection set、父dispatch cut、两个central-derived narrow dispatch views、Tool planning input/plan与Skill projection result wrapper。
 
-该模块只能依赖primitives与`model_input` frozen contracts；禁止importconversation repository、`conversation_kernel.mcp`（包括其pure-looking DTO）、MCP transport、Host、tool runtime或compaction。MCP adapter只能向内构造这里的neutral generic facts。
+该模块只能依赖primitives与`model_input` frozen contracts；禁止import conversation repository、`conversation_kernel.mcp`（包括其pure-looking DTO）、MCP transport、Host、tool runtime或compaction。MCP adapter只能向内构造这里的neutral generic facts。
 
 ### 12.2 `capability/registry.py`
 
 现有mutable tool-descriptor registry执行clean replacement：
 
 - 不保留Host-lived自增generation或原地`register/unregister` authority；
-- 提供module-private pure `_freeze_capability_source_registration_set(...)`，只处理已经由Host central composition验证过的三个semantic inventory；production不得直接调用；
+- registration set只能由Host central seam从三个named owner snapshot中的registration机械派生；不提供接受raw `registrations` tuple的production API；
 - 提供pure `freeze_capability_registry_snapshot(...)` central factory；
-- 输入只接受complete/unavailable frozen source snapshots；
-- exact验证source inventory/set完整性、每项registration恰有一个scope-bound snapshot、source-kind/leaf-kind/origin matrix、source/fact join、identity/provider-name uniqueness与deterministic ordering；
+- internal pure helper只接受central seam提取的complete/unavailable frozen source snapshots；
+- exact验证三个named branch完整性、每项derived registration恰有一个scope-bound snapshot、source-kind/leaf-kind/origin matrix、source/fact join、identity/provider-name uniqueness与deterministic ordering；
 - flattened Tool/Skill view由source snapshots纯派生；
 - Built-in、MCP与Skill均必须经过该factory，禁止planner接受旁路leaf tuple；
 - 不读取builtin module、MCP supervisor、filesystem、Host或repository。
 
 ### 12.3 `capability/planner.py`
 
-- 实现pure `KernelCapabilityPlanner`；
-- cold direct cohort all-or-none；
-- installed surface exact reuse；
-- 以`cut.skills.snapshot_fingerprint`exact joinSkill catalog lineage，不复制ordered Skill version tuple；
+- 实现pure `KernelToolCapabilityPlanner`；
+- 消费adapter签发的frozen eligibility set；禁止import/call OpenAI lowerer或接收callback；
+- Builtin native eligibility fail-closed；MCP native-incompatible/inspectable进入meta、inspect-overbound进入unavailable；
+- cold native-eligible MCP cohort aggregate all-or-none；
+- canonical aggregate与actual native-wire aggregate独立quote；
+- installed canonical surface/version cohort exact reuse；existing target/provider-lowering reset只允许重投影同一cohort；
+- 输出唯一`FrozenNativeToolProjectionSet`与MCP route projection，不读取或fingerprint Skill view；
 - deterministic ordering/fingerprint/bounds；
 - 无I/O、无callback、无mutable dict。
 
@@ -1559,7 +1821,8 @@ RenderedCapabilityPrompt            -> RenderedSkillPrompt
 ### 12.7 MCP contracts/supervisor
 
 - 将每个resolved MCP server config适配为`SAFE_POINT_REFRESHABLE` source registration；
-- discovery candidate按server发布complete/unavailable source snapshot；只有完整wire enumeration经过既有include/exclude与`FAIL_SERVER | SKIP_TOOL` normalization后才能发布COMPLETE，未完成分页/parse/aggregate/bounds验证不得进入registry；
+- discovery candidate按server发布complete/unavailable source snapshot；只有完整wire enumeration经过既有include/exclude与canonical `FAIL_SERVER | OMIT_INVALID` normalization后才能发布COMPLETE，未完成分页/parse/aggregate/bounds验证不得进入registry；
+- 删除MCP supervisor/discovery对`llm.adapters.openai.function_tools`的import与`lower_openai_function_parameters()`调用；native-wire incompatibility不得再触发invalid policy或删除canonical fact；
 - 暴露`FrozenMcpCapabilityProjectionInput`；
 - 复用`McpToolSemanticFact`生成generic tool fact；
 - projection只引用registry-owned MCP source snapshot fingerprints，不再持有第二份Tool facts；
@@ -1572,13 +1835,14 @@ RenderedCapabilityPrompt            -> RenderedSkillPrompt
 
 - 以一个`IMMUTABLE` Built-in source registration和零I/O source snapshot接入统一registry；
 - compiled catalog保留descriptor/policy catalog职责，不再被解释为executable leaf全集；
-- Host tool-surface owner通过`PreparedBuiltinCapabilitySourceInput`在同一surface lock下冻结exact-scope installed builtin binding inventory；adapter逐项join catalog并从binding侧穷尽构造facts，catalog-only dormant entries不进入snapshot；
+- Host tool-surface owner通过唯一`SealedBuiltinCapabilitySnapshot`在同一surface lock下冻结exact-scope installed builtin binding inventory、derived registration与generic source snapshot；adapter逐项join catalog并从binding侧穷尽构造facts，catalog-only dormant entries不进入snapshot；
 - `DirectKernelToolPort`增加`PREPARING | SEALED | CLOSED` composition state与`seal_builtin_composition()`；seal前完成所有fixed/support port binding，seal后surface-changing bind typed拒绝，scope snapshot只投影sealed base tuple；
 - 永久加入`inspect_new_mcp_tool`与`use_new_mcp_tool`；
 - `list_mcp_servers`保留；
 - 新fixed descriptor进入其closed scope允许矩阵并必须同时存在真实local executor binding；
 - availability即使无MCP配置也保持descriptor存在；实际调用返回empty/unavailable；
 - build generic tool facts的central adapter。
+- 审计每个production builtin canonical schema：存在精确portable等价时直接使用该canonical shape；需要受控wire superset时保留exact canonical schema与local validator；任何adapter incompatibility在composition/preflight fail closed，不新增skip/meta分支。
 
 ### 12.9 Tool runtime
 
@@ -1596,25 +1860,43 @@ RenderedCapabilityPrompt            -> RenderedSkillPrompt
 - `CAPABILITY_CATALOG` clean rename为`SKILL_CATALOG`；
 - 更新source policy、collector、renderer、BASE_SYSTEM source说明与golden；
 - MCP renderer加入DIRECT/NEW指导；
-- global lowering、BASE_SYSTEM、tool-surface与source contract/domain version执行一次cold bump；activation只支持clean-v0/新Host epoch，不迁移或热改已安装epoch；
+- 本轮代码部署时global lowering、BASE_SYSTEM、tool-surface与source contract/domain version执行一次cold bump；activation只支持clean-v0/新Host，不在旧进程中热替换Python contract。部署后的同一Host若resolved model/API profile令narrow tool-wire contract变化，则复用compiler既有reset机制并严格走§6.3 reproject branch；两者不得混为migration/compat逻辑；
 - 禁止internal identity/fingerprint进入provider body。
+- `FrozenModelToolSurface`与compiler继续持有canonical specs；不得用lowered wire projection替换tool-surface semantic fingerprint或local validation input。
 
 ### 12.11 Continuity/runner/Host
 
 - Host composition不直接手写registration tuple；
-- Host创建一个exact-scope `CapabilityCompositionAttemptToken`，分别从tool-surface owner、resolved MCP config composition与Skill-root composition取得三项private-constructor prepared inventory carrier；
-- 新增窄Host-facing `capability_composition.py` seam（或同等现有Host composition模块），负责以object identity验证同一attempt token、Builtin composition seal、current MCP resolved-config seal与exact six-root composition seal；这些opaque值不进入`capability/contracts.py`或fingerprint；
-- 只有该seam能把验证后的三项semantic inventory交给registry internal pure factory并派生union；其他production调用点直接使用raw frozen inventory或caller tuple必须由architecture gate拒绝；
+- Host分别从tool-surface owner、resolved MCP config/supervisor与Skill composition owner取得`SealedBuiltinCapabilitySnapshot`、`PreparedMcpCapabilitySourceSnapshotSet`与`PreparedLocalSkillCatalogSourceSnapshot`；不创建共同attempt token；
+- 新增窄Host-facing `capability_composition.py` seam（或同等现有Host composition模块），只验证三个private-constructor carrier的owner authenticity、exact scope与各自inventory completeness，并派生registration set/registry；不做跨owner current-seal二次握手；
+- 只有该seam能把三项named snapshot交给registry internal pure helper；其他production调用点直接使用raw frozen snapshot或caller tuple必须由architecture gate拒绝；
 - Host必须在interaction/subagent/memory/MCP support与fixed meta binding完成后、任何capability/source/tool snapshot前seal Builtin composition；动态MCP safe-point refresh不属于Builtin unseal；
-- capability registry snapshot与planning cut加入provider dispatch planning；
-- Built-in退化discovery、MCP discovery与Skill scan在同一planning attempt下先各自freeze，再由pure registry factory合并；
-- cold continuity candidate exact joinexposure plan、native-surface compatibility与current catalog lineage；
-- installed epoch只以native-surface compatibility判定工具前缀复用；registry/route/catalog lineage变化只能驱动append-only source successor；
+- capability registry snapshot与父`FrozenCapabilityDispatchCut`加入provider dispatch planning；
+- exact model target/profile在native-wire preflight前冻结；adapter以唯一pure factory把registry Tool facts投影为eligibility set，generic registry/planner不import adapter；
+- Built-in退化discovery、MCP discovery与聚合Skill scan在同一absolute planning deadline内顺序freeze，再由central factory合并；不要求共同capture瞬间；
+- parent dispatch cut通过唯一pure factory机械派生`FrozenToolCapabilityDispatchView`与`FrozenSkillCapabilityDispatchView`；planner/composer只接受对应view，二者输出都exact引用parent及view fingerprint，Tool plan不保存Skill lineage；
+- cold continuity candidate exact join parent cut、两项view-bound Tool/Skill outputs、canonical tool surface、Round 5A.2 replay hydration proof与actual wire plan；
+- 不向`ProviderInputEpochCompatibility`新增native-wire字段；compatibility factory必须把base message-lowering contract与narrow function-tool contract组合进唯一`provider_message_lowering_contract`，从而让任一narrow contract变化机械产生既有`PROVIDER_LOWERING_CHANGED`；final wire profile不能单独承担reset authority；
+- `FrozenProviderWireInputPlan`逐项exact join唯一`FrozenNativeToolProjectionSet`中的wire bytes、opaque native-function-tool contract与Round 5A.2 selected hydration；final planner不得独立重lower成不同shape；
+- installed epoch的reuse/reproject分支由predecessor kind、existing compatibility reset reason与installed direct cohort机械派生；registry/MCP route/Skill snapshot变化只能驱动append-only source successor，不能触发reproject或late promotion；
+- reproject branch必须exact joincompiler `MODEL_TARGET_CHANGED | PROVIDER_LOWERING_CHANGED` reset reason、新epoch nonce、predecessor canonical direct cohort与new-contract projection set；失败时provider open=0；
 - safe-point current catalog变化只成为append-only source；
 - cancellation/discard释放ref preparation/physical borrow；
 - ROOT/child各有独立scope exposure。
 
-### 12.12 Inspector/CLI
+### 12.12 Provider adapters、DirectModel与Round 5A.2
+
+- `llm/adapters/openai/function_tools.py`继续是Chat/Responses共享wire projection的唯一实现与contract-version owner；显式`strict:false`保持；
+- adapter暴露窄pure preflight factory，输入canonical frozen Tool specs与exact resolved profile，输出frozen eligibility/projection set；不接受MCP supervisor、registry owner、executor或transport；
+- factory允许central planning seam把predecessor direct version/spec pair作为retained projection input，用于contract-change reset；该输入只能从installed predecessor机械派生，不能成为caller新增tool入口；
+- same-contract exact reuse与contract-change full reprojection共享同一factory/goldens；任何部分复用、部分新投影、旧direct omission或late MCP promotion均拒绝；
+- 当前closed transformation之外的canonical schema返回typed incompatibility，不扩展成任意JSON Schema翻译器；
+- adapter新增窄`native_function_tool_wire_contract_fingerprint`作为`OPENAI_FUNCTION_TOOL_WIRE_CONTRACT_VERSION`、wire API与tool-relevant request-shape的唯一hash owner；现有`_provider_wire_profile_fingerprint`可继续组合该值与assistant replay contract服务完整wire plan，但generic capability代码只能接收前者，不能因assistant replay变化伪造tool-surface变化；
+- DirectModel final wire materialization复用或重算同一pure projection并byte-exact确认；Chat/Responses wrapper差异由adapter拥有，不进入capability semantic fingerprint；
+- Round 5A.2 selected replay metadata/body hydration、placement join与final wire prefix证明保持原顺序；native tools在hydration前冻结，historical assistant carrier不得因route/catalog变化重写；
+- capability planning、native projection、replay hydration与final wire plan共用同一个absolute dispatch planning deadline。
+
+### 12.13 Inspector/CLI
 
 bounded inspect可以展示：
 
@@ -1634,22 +1916,31 @@ bounded inspect可以展示：
 ### 13.1 Contract tests
 
 - closed source-kind/refresh matrix：Builtin只能IMMUTABLE，MCP/Skill只能SAFE_POINT_REFRESHABLE；
-- source-kind/leaf-kind/origin closed matrix：Builtin snapshot只能接纳`TOOL/BUILTIN`，MCP只能`TOOL/MCP`，Skill root只能`SKILL`；
+- source-kind/leaf-kind/origin closed matrix：Builtin snapshot只能接纳`TOOL/BUILTIN`，MCP只能`TOOL/MCP`，aggregate Skill catalog只能`SKILL`；
 - exact duplicate source registration idempotent，同source不同registration fingerprint conflict；
-- Host composition seam缺少三项named prepared inventory中的任一项、attempt token不同、owner seal stale/foreign、inventory scope不一致、source kind错位或遗漏真实owner registration均拒绝；重算一份内部一致但漏项的semantic inventory不能通过owner seal validation；
-- internal pure registry factory继续拒绝inventory中的registration遗漏、同source两个snapshot或unregistered snapshot；只有Host composition seam可作为production caller；
+- Host composition seam缺少三项named owner snapshot中的任一项、carrier foreign、scope不一致、source kind错位或owner内部inventory不完整均拒绝；调用方重算的普通frozen tuple不能冒充private-constructor carrier；
+- freeze后MCP/Skill owner发生变化不使本次immutable cut retroactively stale；变化只能进入下一safe-point snapshot。Internal pure registry helper继续拒绝derived registration遗漏、同source两个snapshot或unregistered snapshot，只有Host composition seam可作为production caller；
 - ROOT source snapshot不能复用于child registry；MCP scope visibility与current owner fact exact join；
 - Built-in zero-I/O snapshot与scope-visible installed binding inventory byte-identical；catalog-only dormant descriptor不进入snapshot；binding缺catalog、descriptor mismatch或duplicate binding均拒绝；
 - Builtin composition在PREPARING完成全部bind后seal；seal前snapshot拒绝，seal后late subagent/memory/MCP-support/fixed-tool bind拒绝，重复seal幂等，ROOT/child均投影同一sealed base；dynamic MCP refresh仍可运行且不改seal；
 - complete empty与unavailable source snapshot严格区分；
-- unavailable snapshot禁止携带facts；MCP分页/聚合未完成不得发布，但完整listing经include/exclude或`SKIP_TOOL`确定性过滤后仍发布COMPLETE并保留exact invalid count；
+- current Round 9 four-root policy完整扫描当前启用的两个workspace bindings与可选两个user bindings，且只产生一个`LOCAL_SKILL_CATALOG` snapshot；不扫描`.claude/skills`、不增加第五个root；全局precedence、winner provenance、complete-empty与whole-catalog UNAVAILABLE均有golden；
+- unavailable snapshot禁止携带facts；MCP分页/聚合未完成不得发布，但完整listing经include/exclude或`OMIT_INVALID`确定性过滤后仍发布COMPLETE并保留exact invalid count；
+- canonical-invalid MCP触发既有`FAIL_SERVER | OMIT_INVALID` policy；公开YAML中的`OMIT_INVALID`保持可解析且不存在`SKIP_TOOL` alias；同一canonical-valid schema的native-wire incompatibility仍保留在COMPLETE snapshot、invalid count不变；
 - source snapshot中的每个fact exact join同一source registration；
+- Tool与Skill leaf都暴露统一`fact_semantic_fingerprint`；Tool property等于既有semantic fingerprint，Skill closed value精确覆盖identity/catalog/activation/provenance，任一漏项或伪造值拒绝；
+- Skill仅body变化、仅catalog字段变化或same-name winner移到另一root时，`fact_semantic_fingerprint`与aggregate source snapshot均变化；provider catalog/active fingerprints仍只按各自可见字段变化；
 - pure registry snapshot跨三类source确定性排序，flattened view无第二份caller输入；
 - Tool/Skill closed union穷尽；
 - Plugin不是leaf kind；
 - no public `Capability(ABC)`；
 - identity与provider-mangled name分离；
 - same MCP remote identity在same-schema reconnect后semantic fingerprint不变；
+- `FrozenToolCapabilityFact`只保存canonical schema；同一canonical fact在不同adapter contract下semantic fingerprint不变；
+- eligibility set对每个Tool fact exact one、Skill exact zero，wrong scope/profile/version/canonical-spec fingerprint均拒绝；
+- generic registry/planner AST guard禁止import OpenAI adapter、`OPENAI_FUNCTION_TOOL_WIRE_CONTRACT_VERSION`或MCP physical package；
+- native projection不得比canonical schema更窄；无法证明受控superset时返回closed incompatibility而非静默改写；
+- `wire_utf8_bytes`只能由`len(canonical_json_bytes(wire_tool))`派生；不存在可伪造constructor字段，multibyte/escaping near-bound quote与实际wire bytes相等；
 - meta ref exact绑定MCP execution policy fingerprint；policy变化使旧ref stale，same-schema/same-policy物理reconnect仍可rebind；
 - unrelated MCP server status/instructions/count变化只改变scope-wide catalog projection，不改变未变tool的route fingerprint或重复inspect token；
 - legacy Skill private tool/binary/service fields不进入generic fact、planner或MCP identity；
@@ -1660,22 +1951,33 @@ bounded inspect可以展示：
 ### 13.2 Planner tests
 
 - cold builtin-only；
-- planner只能消费registry snapshot，拒绝旁路builtin/MCP/Skill leaf tuples；
+- execution-backed Builtin wire-compatible成功；任一Builtin incompatible时provider open=0且不skip/meta；
+- planner/composer只能消费central factory从parent cut机械派生的对应narrow view，拒绝直接消费registry、分离planning input或旁路builtin/MCP/Skill leaf tuples；
+- parent cut只能在registry、exact model target/profile及adapter native-wire preflight全部冻结后构造；placeholder eligibility、post-freeze mutation或第二个replacement cut均拒绝；
 - 相同source snapshots无论producer构造顺序如何都得到同一registry/plan fingerprint；
 - safe-point refresh构造successor registry但不修改旧snapshot；
-- cold MCP cohort fit -> all direct；
-- count overbound -> all MCP meta；
-- byte overbound -> all MCP meta；
+- cold native-eligible MCP cohort且canonical/actual-wire双quote fit -> all eligible direct；
+- canonical-valid/native-wire incompatible且inspect FULL fits -> meta + `NATIVE_WIRE_INCOMPATIBLE`；
+- canonical-valid/native-wire incompatible且inspect overbound -> unavailable + `DESCRIPTOR_OVERBOUND`；
+- canonical-invalid与native-incompatible不共享policy、count或reason；
+- native-eligible count overbound -> all eligible MCP meta；
+- canonical byte overbound或actual lowered wire byte overbound -> all eligible MCP meta；两种quote分别有near-bound golden；
 - existing exposure include/exclude缩小完整visible cohort后fit，excluded tool不进入meta；
-- installed epoch无论current catalog变化都复用exact native surface；
-- registry/route/Skill catalog变化只改变catalog lineage/exposure-plan fingerprint，不改变native-surface compatibility或触发cold reset；
-- `CapabilityVersionRef/FrozenMcpToolExposure/FrozenMcpRouteProjection`字段与fingerprint golden固定，禁止status/policy/registry进入version或native compatibility；
+- installed epoch无论current catalog变化都复用exact canonical direct cohort；same contract复用exact wire projection；
+- narrow contract变化且retained cohort可投影时，既有provider-lowering compatibility必须形成matching reset，compiler/CAS安装新epoch且不promotion late MCP；
+- `provider_message_lowering_contract` golden必须由base message-lowering contract与narrow function-tool contract共同确定；只改变后者必定形成`PROVIDER_LOWERING_CHANGED`。与model target同时变化时接受`MODEL_TARGET_CHANGED` precedence，其他reset reason不能授权wire重投影；
+- reproject中任一old direct无法投影、actual-wire超界、遗漏/替换old direct、混入late MCP或compiler reset reason不匹配均provider open=0；
+- registry/MCP route/Skill catalog变化只改变各自sibling output，不触发cold reset；Tool exposure plan不得保存Skill lineage；
+- base lowering contract、narrow function-tool contract或任一actual wire projection变化不改变capability semantic fingerprint；前两者的合法变化只能经composed `provider_message_lowering_contract`、existing compatibility reset与新epoch安装，final wire profile的其他字段变化不能授权Tool重投影；
+- `ToolCapabilityVersionRef/FrozenMcpToolExposure/FrozenMcpRouteProjection`字段与fingerprint golden固定，禁止status/policy/registry进入Tool version；
+- Tool planner与Skill composer分别只接受central-derived narrow view；分离传入parent fingerprint/registry/planning input的旧API不存在。输出exact引用同一parent dispatch-cut fingerprint及各自view fingerprint，wrong-parent/wrong-view/foreign registry facts混合在compiler/CAS前拒绝；
 - deterministic order与plan fingerprint；
 - pure planner禁止I/O/import physical packages。
 
 ### 13.3 MCP lifecycle
 
 - optional server在initial freeze前READY与freeze后READY都可用；overbound时均走meta，不出现时序性Host failure；
+- MCP discovery不import/callOpenAI lowerer；合法但native-incompatible schema不会被`OMIT_INVALID`删除或毒化其他tool dispatch；
 - late new tool追加MCP_CATALOG且tools byte-equal；
 - 小catalog完整列出所有qualified names；overbound只截完整row并给出逐server exact total/omitted counts与分页指引，不使用ranking或缩短identity；
 - `MCP_CATALOG` provider carrier是canonical JSON、trust为UNTRUSTED_OBSERVATION，正文含DIRECT/NEW/UNAVAILABLE与固定inspect→use guidance，且不含内部fingerprint/generation/secret；
@@ -1711,7 +2013,7 @@ bounded inspect可以展示：
 
 ### 13.5 Skill relationship
 
-- current fixed roots先适配为source registrations，再由scan snapshot进入同一registry；
+- current fixed root policy由Skill owner一次性冻结并完成global scan，再以单一aggregate source snapshot进入registry；
 - current Skill适配成SKILL fact；
 - legacy private metadata不产生Builtin/MCP/CLI requirement或route；
 - Skill catalog只来自name/description/location，active来自exact body；
@@ -1727,7 +2029,11 @@ bounded inspect可以展示：
 - catalog变化只追加successor；
 - direct disconnect只追加status；
 - Chat Completions与Responses均证明SYSTEM/tools相等、messages只追加suffix；
-- provider actual-wire plan/continuity proof包含固定tool surface；
+- provider actual-wire plan/continuity proof同时包含固定canonical tool surface、ordered actual native wire projections与opaque adapter contract；
+- Chat与Responses分别证明planned projection与最终wire tools byte-exact；same-contract CAS/projection mismatch时provider open=0；
+- Chat↔Responses或narrow function-tool contract变化必须先改变composed `provider_message_lowering_contract`，再通过matching compiler reset重投影同一predecessor canonical direct cohort并安装新epoch；late MCP仍为meta/unavailable。无法完整重投影时provider open=0；
+- direct MCP tool call/result提交后fresh Host读取Round 5A.2 durable replay carrier，metadata/body hydration、assistant placement、native tool surface与final wire plan exact join后继续；
+- meta `inspect/use`作为fixed builtin native call提交后fresh Host同样exact replay，不合成placeholder reasoning或改写historical tool call；
 - foreign physical binding在provider open前拒绝。
 
 ### 13.7 Scope
@@ -1735,12 +2041,13 @@ bounded inspect可以展示：
 - ROOT与child只看到各自允许的MCP facts；
 - child不继承ROOT-only direct MCP；
 - ref不能跨scope；
-- Skill snapshots按exact scope注册/投影；
--一个scope新增MCP/Skill不改变另一scope native surface或catalog head。
+- aggregate Skill catalog snapshot按exact scope注册/投影；
+- 一个scope新增MCP/Skill不改变另一scope native surface或catalog head。
 
 ### 13.8 Bounds与security
 
 - 64 tool/1 MiB schema bound；
+- actual native wire tool aggregate独立64-tool/1 MiB bound；canonical与wire quote任一超限都在provider open前处理；
 - large remote name仍使用bounded provider name与full canonical identity；
 - schema不能静默截断；
 - ref live cap；
@@ -1753,6 +2060,7 @@ bounded inspect可以展示：
 
 - Round 3/3.1 compiler/continuity；
 - Round 5A/5A.1 ownership与wire proof；
+- Round 5A.2 transaction、metadata/body hydration、fresh-process Chat/Responses native replay、bounds/deadline/corruption/privacy与actual-wire CAS proof；
 - Round 6 MCP全部retained；
 - Round 7 ToolResult observation；
 - Round 8 memory/permission；
@@ -1769,6 +2077,9 @@ bounded inspect可以展示：
 3. provider actual tools数组在late-ready前后byte-identical；
 4. meta invocation canonical attempt/result count精确为1；
 5. 断连direct tool得到typed unavailable而非Host整体失败。
+6. 一个canonical-valid但native-wire incompatible且inspectable的MCP tool不进入native数组，模型经inspect/use成功调用；
+7. Chat与Responses各完成一次direct或meta tool call、fresh Host hydration与manual full-history continuation；证明不依赖remote response ID；
+8. dogfood只记录非敏感canonical/native projection fingerprints与route，不记录schema正文、arguments或replay private carrier。
 
 Dogfood不得记录API key、DSN、完整prompt、MCP arguments/body、headers、tool ref或secret。
 
@@ -1780,7 +2091,7 @@ Dogfood不得记录API key、DSN、完整prompt、MCP arguments/body、headers�
 
 - capability package不importMCP physical transport、repository、Host或compaction；
 - Built-in/MCP/Skill均只通过一个pure registry factory进入planner；
-- registration set只能由exact-scope Builtin/MCP-config/Skill-root三个owner-issued prepared inventory carrier在同一attempt下验证后派生；semantic inventory fingerprint不能替代owner completeness seal；
+- registration set只能由exact-scope Builtin/MCP/aggregate-Skill三个owner-issued private snapshot carrier派生；不得接受raw registration tuple、共同attempt token或跨owner current-seal握手；
 - no mutable Host-lived generic capability registry/generation；
 - Built-in source snapshot不执行I/O且只包含execution-backed catalog-joined bindings；MCP/Skill source refresh只在safe point发布完整successor；
 - Builtin inventory只能从sealed Host composition投影；seal后不存在late builtin bind或第二个builtin generation；
@@ -1794,12 +2105,20 @@ Dogfood不得记录API key、DSN、完整prompt、MCP arguments/body、headers�
 - `FrozenModelToolSurface`仍唯一provider tools semantic carrier；
 - `PreparedToolExecutionBinding`仍唯一direct execution binding leaf；
 - `McpToolSemanticFact`与generic fact通过central adapter，schema不重复声明；
+- canonical Tool schema只存在于owner fact/generic fact无损view；lowered OpenAI schema只存在于adapter-owned process-local projection，registry、semantic fingerprint与MCP discovery不得保存它；
+- MCP supervisor/generic capability package对OpenAI adapter与function-tool contract常量为零import；
+- native-wire projection factory是pure、bounded、closed且无provider-name分支；没有mutable translator registry、callback、generation或第二套schema authority；
+- Builtin native incompatibility fail closed；MCP native incompatibility只能meta/unavailable，不能进入canonical invalid policy；
 - no arbitrary provider tool gateway；
 - no permission-based tool-surface mutation；
 - New-MCP ref只绑定tool-specific semantic/policy/route proof，不绑定scope-wide catalog lineage；
-- continuity compatibility只覆盖native surface；registry/route/catalog lineage变化不能触发same-epoch rebase；
+- existing continuity compatibility继续覆盖canonical tool surface、model target与provider lowering；registry/MCP route/Skill source变化不能触发same-epoch rebase；
+- selected `FrozenNativeToolProjectionSet`保留canonical Tool version到wire projection的exact join，final wire plan逐项证明actual tool bytes；不得新增第二个native compatibility字段或transition enum；
+- parent cut只在target/profile-aware native preflight之后冻结；Tool/Skill consumers只接受central-derived sibling views，两个结果的parent/view fingerprints必须在compiler/continuity assembly处成对验证；
+- native wire contract变化只能通过既有process-local continuity reset重投影predecessor direct cohort；没有第三个epoch owner、durable generation或replacement receipt；
+- Round 5A.2 durable replay relation/hydration owner保持唯一，capability package不能import repository/replay codec，final wire plan必须exact join selected hydration与native projections；
 - no compaction import；
-- oracle保持`31 Committed / 23 Live / 13 subjects / 2 guards / 25 product relations / 1 durable job`。
+- oracle保持`31 Committed / 24 Live / 13 subjects / 2 guards / 26 product relations / 1 durable job`。
 
 ---
 
@@ -1807,18 +2126,21 @@ Dogfood不得记录API key、DSN、完整prompt、MCP arguments/body、headers�
 
 ### Slice C0：机器基线
 
-- 验证Round 7.1已ACTIVATED，冻结其public DTO/constant manifest、activation hash与retained node IDs；
+- 首先形成并记录Round 5A.2 + OpenAI function-tool wire contract v2的reviewed clean checkpoint；若仍是dirty/TBD baseline立即停止；
+- 验证Round 5A.2与Round 7.1均已ACTIVATED，冻结各自public DTO/constant/schema/replay manifest、activation hash与retained node IDs；
 - 保存pytest node-ID集合、architecture oracle、source enum、tool descriptors与module/FQCN manifest；
 - 保存Chat/Responses fixed-prefix golden；
 - 保存Round 6 direct MCP happy path；
--记录旧capability registry/exposure真实调用点，区分production与dormant。
+- 记录旧capability registry/exposure真实调用点，区分production与dormant。
 
 ### Slice C1：Pure semantics与命名减法
 
 - 新建contracts/planner；
 - 用pure frozen registry factory替换旧mutable descriptor registry；
-- 三项owner-issued process-local inventory admission carrier、derived semantic registration set、execution-backed zero-I/O Built-in snapshot与scope/leaf closed admission；
-- Builtin composition seal与四个closed version/route/projection DTO；
+- 三项owner-issued process-local snapshot carrier、fixed named registration-set derivation、execution-backed zero-I/O Builtin snapshot与scope/leaf closed admission；不实现共同attempt token/current-seal handshake；
+- Builtin composition seal、聚合`LOCAL_SKILL_CATALOG` source与closed Tool-version/route/projection DTO；
+- canonical Tool fact字段与adapter-neutral native eligibility/projection DTO；
+- 统一`fact_semantic_fingerprint`与parent-derived Tool/Skill dispatch views；
 - tool/skill facts与adapters；
 - 删除开放行为基类可能性；
 - skill-only/tool-only旧名收窄；
@@ -1828,12 +2150,14 @@ Dogfood不得记录API key、DSN、完整prompt、MCP arguments/body、headers�
 ### Slice C2：MCP exposure planning
 
 - MCP server registrations、per-server source snapshots与projection refs；
-- 完整raw discovery与既有normalization policy的COMPLETE/UNAVAILABLE分界；
-- cold all-or-none cohort；
-- installed surface reuse；
+- 删除discovery中的OpenAI lowerer gate；完整raw discovery与仅canonical-invalid normalization policy的COMPLETE/UNAVAILABLE分界；
+- adapter-owned native preflight、Builtin fail-closed与MCP direct/meta/unavailable分类；
+- cold native-eligible cohort all-or-none及canonical/actual-wire双quote；
+- installed canonical cohort reuse、same-contract wire reuse与contract-change reset reprojection；
 - catalog DIRECT/NEW；
 - physical exact join；
-- Round 6 retained通过。
+- final wire projection byte proof与existing continuity reset/CAS exact join；
+- Round 5A.2/6 retained通过。
 
 ### Slice C3：Meta gateway
 
@@ -1846,8 +2170,8 @@ Dogfood不得记录API key、DSN、完整prompt、MCP arguments/body、headers�
 
 ### Slice C4：Skill relationship
 
-- current Skill root registrations、complete scan snapshots与Skill adapter；
-- minimal Skill versions与catalog/active projection join；
+- current registered root policy的complete global scan、单一aggregate snapshot与Skill adapter；
+- Skill catalog/activation identity与catalog/active projection join；不复用Tool version DTO；
 - legacy private metadata不进入generic capability语义；
 - honest Skill names；
 - catalog/active placement与prefix；
@@ -1868,13 +2192,13 @@ Dogfood不得记录API key、DSN、完整prompt、MCP arguments/body、headers�
 以下全部成立才可激活：
 
 1. `Capability`拥有本文唯一语义定义，代码中不存在公开行为型generic base class。
-2. Built-in、MCP与Skill共享source registration、complete source snapshot、leaf admission与frozen registry流程；registration set由三个既有owner的exact-scope complete inventory派生，不能由调用方手写不完整集合。
-3. Built-in以IMMUTABLE零I/O、execution-backed退化discovery接入，且在Host open显式seal composition；catalog-only dead descriptor与seal后的late binding不进入provider surface。MCP/Skill以SAFE_POINT_REFRESHABLE discovery接入，三者均不能旁路registry进入planner。
-4. Built-in与MCP共享`FrozenToolCapabilityFact`，但各自execution authority不变。
-5. Skill是独立`FrozenSkillCapabilityFact`，没有executor。
+2. Built-in、MCP与Skill共享source registration、complete source snapshot、leaf admission与frozen registry流程；registration set由三个既有owner的exact-scope private snapshot carrier派生，不能由调用方手写不完整集合，也不存在共同attempt token/current-seal handshake。
+3. Built-in以IMMUTABLE零I/O、execution-backed退化discovery接入，且在Host open显式seal composition；catalog-only dead descriptor与seal后的late binding不进入provider surface。MCP server snapshots与单一aggregate Skill catalog以SAFE_POINT_REFRESHABLE discovery接入，三者均不能旁路registry进入planner。
+4. Built-in与MCP共享只含canonical schema的`FrozenToolCapabilityFact`，但各自execution authority不变；lowered wire projection不进入registry或semantic fingerprint。
+5. Skill是独立`FrozenSkillCapabilityFact`，没有executor；Tool/Skill leaf均暴露统一`fact_semantic_fingerprint`，Skill版本机械覆盖identity、catalog、activation与winner provenance。
 6. Plugin未进入leaf union、runtime或provider surface。
 7. 当前legacy Skill仅通过adapter接入；其private tool/binary/service metadata不进入generic fact/planner，Agent Skills standard与彻底删除这些字段明确留给Round 9.1。
-8. Cold MCP cohort在完整fit时all direct，overbound时all meta；builtins不受影响。
+8. Cold native-eligible MCP cohort在canonical与actual-wire bounds均完整fit时all direct，任一aggregate overbound时all eligible MCP meta；native-incompatible MCP在inspect FULL合法时meta、否则unavailable；builtins任何incompatibility都fail closed。
 9. Late-ready MCP只追加catalog并经inspect/use执行。
 10. Direct MCP断连/dirty/schema replacement不修改native tools且不能用meta绕过。
 11. `NewMcpToolRef` exact绑定inspect时展示的真实MCP policy与tool-specific NEW route，但不绑定scope-wide catalog；无关server变化保持token稳定，真实tool/policy/route变化要求重新inspect。`use_new_mcp_tool`只有一次canonical attempt/result。
@@ -1884,14 +2208,15 @@ Dogfood不得记录API key、DSN、完整prompt、MCP arguments/body、headers�
 15. 已进入DIRECT的MCP在known-down时返回固定typed说明；same-schema reconnect恢复，schema replacement只等待cold adoption且不能meta绕过。
 16. `CAPABILITY_CATALOG`已彻底clean rename为`SKILL_CATALOG`。
 17. 当前generic Skill类和tool-only类名实相符。
-18. Planner pure、bounded、deterministic、无physical/durable authority。
-19. Provider preflight exact joinplan surface与current physical access。
+18. `KernelToolCapabilityPlanner`与`KernelSkillProjectionComposer`分别pure、bounded、deterministic、无physical/durable authority；parent cut只在registry、exact target/profile与native preflight完成后冻结，二者只接受central-derived sibling view，输出exact引用同一parent及各自view fingerprint。Tool planner只消费adapter签发的frozen eligibility，不import/callOpenAI lowerer，也不拥有Skill lineage。
+19. Provider preflight exact join canonical Tool surface、唯一native projection set、opaque adapter contract与current physical access；`wire_utf8_bytes`只能从canonical wire JSON派生，final wire bytes不一致时provider open=0。
 20. ROOT/child scope、foreign ref、foreign borrow均fail closed。
-21. same epoch SYSTEM/tools不变、messages只追加suffix；catalog lineage变化不得被误作native-surface compatibility变化。
+21. same epoch SYSTEM/tools不变、messages只追加suffix；MCP route或Skill catalog successor不得被误作continuity compatibility变化。Adapter wire contract变化不得在same epoch静默替换tools，只能重投影predecessor exact direct cohort并经existing matching compiler/CAS reset安装新epoch；不得借reset promotion late MCP，也不得新增native transition状态机。
 22. 没有新增schema、event、job、guard、subject、receipt、checkpoint、projection或repair。
-23. Oracle保持`31/23/13/2/25/1`。
-24. Round 7.1已ACTIVATED且其public contract manifest/activation hash exact匹配；Round 3/3.1/5A/5A.1/6/7/7.1/8 retained与全量tests通过。
+23. Oracle保持`31/24/13/2/26/1`。
+24. Round 5A.2与Round 7.1已ACTIVATED且其public contract/schema/replay manifest与activation hash exact匹配；Round 3/3.1/5A/5A.1/5A.2/6/7/7.1/8 retained与全量tests通过。
 25. Round 9.1不再需要从Round 5B反向导入MCP meta DTO。
+26. `McpInvalidToolPolicy`公开值仍精确为`FAIL_SERVER | OMIT_INVALID`；不存在`SKIP_TOOL` rename、alias或兼容解析分支。
 
 ---
 
@@ -1903,13 +2228,13 @@ Round 9.1只负责：
 
 - Agent Skills canonical manifest；
 - standard resources/progressive disclosure；
-- 六个default Skill root的owner-specific bindings与dynamic scan；
+- 保持Skill owner内部由Round 9冻结的四种physical root bindings，并继续执行一次global precedence scan；
 - ordinary `read_file` progressive disclosure、2,000-line default window与无content-suppressing dedup；
 - Agent Skills标准filesystem与activation；
 - 删除legacy Pulsara metadata且不引入namespaced替代；
 - append-only Skill catalog/active body。
 
-Round 9.1必须让每个default root先适配为本文的`SAFE_POINT_REFRESHABLE` source registration，再把complete scan结果作为source snapshots进入同一个registry。它必须复用本文的identity、fact、registry、Skill versions与planner，不能创建Skill-private registry、MCP identity、dependency graph或第二个meta gateway。
+Round 9.1不得把四个physical root暴露成四个generic capability sources，也不得新增第五个root或扫描`.claude/skills`。它保持`LocalSkillProvider`内部的ordered four-root policy，并把完整global scan结果作为本文唯一`SAFE_POINT_REFRESHABLE + LOCAL_SKILL_CATALOG` successor snapshot进入registry。它必须复用本文的identity、fact、registry与parent dispatch cut，不能创建Skill-private registry、MCP identity、dependency graph或第二个meta gateway。
 
 ### 17.2 Round 9.2 Plugin
 
@@ -1917,22 +2242,23 @@ Round 9.1必须让每个default root先适配为本文的`SAFE_POINT_REFRESHABLE
 
 ~~~text
 Enabled Plugin
-  -> Skill root source registrations
+  -> installer materializes portable Skills into one of the four existing roots
   -> MCP server source registrations
   -> process-local Hook definitions
   -> dormant Subagent-spec inventory
-  -> normalize into existing Round 9 source-registration set
+  -> existing four-root Skill owner observes installed files at the next safe point
+  -> normalize MCP definitions into existing registrations
   -> existing source owners discover and publish ordinary snapshots
 ~~~
 
-Plugin不成为第三种tool binding，也不扫描任意private cache。Hook不进入本文capability leaf union；它由Round 9.2独立的process-local lifecycle owner执行。Subagent spec在PHC-10完成层次化/批量编排前只允许dormant discovery。具体portable manifest、Codex/Claude compatibility、namespace、enablement、trust与dynamic invalidation由Round 9.2冻结。
+Plugin不成为第三种tool binding，不贡献第五个Skill root，也不让Runtime扫描任意private cache。Hook不进入本文capability leaf union；它由Round 9.2独立的process-local lifecycle owner执行。Subagent spec在PHC-10完成层次化/批量编排前只允许dormant discovery。具体portable manifest、Codex/Claude compatibility、namespace、enablement、trust与dynamic invalidation由Round 9.2冻结。
 
 ### 17.3 Round 5B
 
 未来compaction/rebase只能消费本文已经存在的：
 
 - current `FrozenCapabilityRegistrySnapshot`、其registration/source snapshots及owner-specific MCP/Skill projections；
-- current `FrozenCapabilityPlanningCut`与exposure result；
+- current `FrozenCapabilityDispatchCut`、Tool exposure与Skill projection result；
 - installed direct tool exposure；
 - current MCP catalog；
 - current Skill projection/source heads。
@@ -1947,11 +2273,11 @@ Compaction可以在cold successor boundary重新选择MCP direct cohort，但本
 
 ~~~text
 Host cold open
--> obtain and validate exact-scope builtin/MCP-config/Skill-root owner-issued prepared inventories
--> derive immutable builtin、docs MCP server与current Skill root registrations
+-> obtain exact-scope Builtin/MCP/aggregate-Skill owner-issued snapshots
+-> derive immutable Builtin、docs MCP registrations与one LOCAL_SKILL_CATALOG registration
 -> builtin zero-I/O snapshot emits read_file / terminal / memory_search facts
 -> docs MCP discovery snapshot emits 4 tool facts
--> Skill scan snapshots emit current Skill facts
+-> one global Skill scan snapshot emits current winning Skill facts
 -> one frozen registry snapshot
 -> aggregate fits
 -> all four MCP tools进入native tools
@@ -2012,17 +2338,20 @@ Round 9不是恢复hard-cut前的统一durable capability registry，而是给�
 
 ~~~text
 CapabilitySourceRegistration
-  <- derived only after three exact-scope owner-issued prepared inventories pass current-seal admission
+  <- derived from three exact-scope owner-issued immutable snapshot carriers
   -> scope-bound complete CapabilitySourceSnapshot
   -> pure FrozenCapabilityRegistrySnapshot
   -> FrozenCapabilityFact views
-  -> pure ExposurePlan
+  -> exact model target/profile + adapter native-wire preflight
+  -> one parent FrozenCapabilityDispatchCut
+       -> central-derived Tool dispatch view -> pure Tool exposure plan
+       -> central-derived Skill dispatch view -> pure Skill projection
   -> provider channel
   -> TOOL only: existing local gate/binding/execution owner
   -> SKILL only: catalog/activation
 ~~~
 
-Built-in与MCP统一为Tool capability，Skill作为Instructional capability引用Tool，但不拥有Tool。三者的注册、snapshot与leaf admission逻辑完全共用：Builtin只把discovery退化为对execution-backed inventory的immutable pure snapshot，MCP/Skill则允许safe-point refresh；三项expected source集合分别来自现有composition owner签发的complete inventory，而不是generic caller自报。Plugin未来只作为Bundle/Source registration contributor加入。这个形状既能为Round 9.1提供稳定依赖，也能让Round 5B在真正需要rebase时消费当前事实，而无需恢复任何durable capability/recovery graph。
+Built-in与MCP统一为Tool capability，Skill作为Instructional capability引用Tool，但不拥有Tool。三者的注册、snapshot与leaf admission逻辑完全共用：Builtin把discovery退化为execution-backed immutable snapshot，MCP按server发布refreshable snapshots，Skill以一个聚合catalog source发布global-precedence snapshot；三项输入分别由现有owner签发，而不是generic caller自报。它们不需要共同attempt token或跨owner原子瞬间。Plugin未来只作为Bundle/Source input contributor加入。这个形状既能为Round 9.1提供稳定依赖，也能让Round 5B在真正需要rebase时消费当前事实，而无需恢复任何durable capability/recovery graph。
 
 ---
 
@@ -2037,6 +2366,10 @@ Built-in与MCP统一为Tool capability，Skill作为Instructional capability引�
 - `src/pulsara_agent/capability/types.py`：当前skill-only DTO使用generic capability命名；
 - `src/pulsara_agent/conversation_kernel/capability.py`：current skill composer与startup allowlist交集；
 - `src/pulsara_agent/model_input/contracts.py`：`FrozenToolSpec`、`FrozenModelToolSurface`与64/1 MiB bounds；
+- `src/pulsara_agent/model_input/continuity.py`与`conversation_kernel/input_continuity.py`：canonical surface、actual-wire plan与same-epoch CAS；
+- `src/pulsara_agent/llm/adapters/openai/function_tools.py`：Chat/Responses共享显式non-strict native wire projection与唯一contract version owner；
+- `src/pulsara_agent/conversation_kernel/direct_model.py`：opaque provider-wire profile、final wire materialization与Round 5A.2 hydration exact join；
+- `src/pulsara_agent/llm/provider_replay.py`、`model_input/provider_replay.py`与`provider_assistant_replay_fragments`：durable native replay codec/target/hydration truth；
 - `src/pulsara_agent/conversation_kernel/tool_surface.py`：semantic surface与exact physical binding/Host authority；
 - `src/pulsara_agent/conversation_kernel/mcp/contracts.py`：MCP semantic tool/discovery/catalog facts；
 - `src/pulsara_agent/conversation_kernel/mcp/supervisor.py`：唯一connection/slot/discovery/close owner；
@@ -2056,6 +2389,14 @@ Built-in与MCP统一为Tool capability，Skill作为Instructional capability引�
 ### 20.3 已有规格
 
 - [Round 3.1](ROUND_3_1_PROVIDER_INPUT_PREFIX_CONTINUITY_IMPLEMENTATION_SPEC.zh.md)：same-epoch strict prefix、tool surface borrow与stateful source successor；
+- [Round 5A.2](ROUND_5A_2_DURABLE_PROVIDER_REPLAY_AND_CROSS_RESTART_THREAD_CONTINUATION_IMPLEMENTATION_SPEC.zh.md)：assistant native replay同事务接受、两阶段hydration、final wire plan/CAS exact join与cross-restart continuation；
 - [Round 6](ROUND_6_MCP_PRODUCTION_CAPABILITY_IMPLEMENTATION_SPEC.zh.md)：MCP supervisor、bounded discovery、dirty fence、effect、scope与direct execution；
 - [Round 5B draft](ROUND_5B_LONG_HORIZON_CONTEXT_COMPACTION_IMPLEMENTATION_SPEC.zh.md)：其中§2的non-compaction direct/meta设计被本轮提取；Round 5B后续应删除重复实现，只保留rebase promotion消费；
 - [Round 9.1](ROUND_9_1_AGENT_SKILLS_STANDARD_IMPLEMENTATION_SPEC.zh.md)：本轮激活后的直接下游。
+
+### 20.4 Provider wire协议锚点
+
+- [OpenAI Function Calling](https://developers.openai.com/api/docs/guides/function-calling)：`strict:true`的required/`additionalProperties:false`约束，以及Responses省略strict时尝试strict normalization、Chat默认non-strict、显式`strict:false`统一选择best-effort的协议差异；
+- [OpenAI Structured Outputs](https://developers.openai.com/api/docs/guides/structured-outputs)：root必须是object且不能是root `anyOf`、supported subset及nested union限制。
+
+这些外部文档只定义adapter native wire contract，不定义Pulsara canonical MCP schema validity。Activation以checked-in `OPENAI_FUNCTION_TOOL_WIRE_CONTRACT_VERSION`、golden与real-provider conformance evidence冻结当时行为；外部页面后续变化不能静默改变same-epoch projection。

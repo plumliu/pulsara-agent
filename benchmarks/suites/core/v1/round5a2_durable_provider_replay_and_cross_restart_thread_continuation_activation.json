@@ -1,0 +1,229 @@
+{
+  "schema_version": "round5a2-durable-provider-replay-and-cross-restart-thread-continuation-activation.v1",
+  "status": "activated",
+  "generated_at_utc": "2026-08-19T10:08:31Z",
+  "captured_head": "a39e537fa56f6685c677496d0eb11628337675c0",
+  "working_tree_semantics": "Round 5A.2 was implemented and verified in the current uncommitted worktree while pre-existing dirty documentation was preserved. No files were staged, committed, or pushed.",
+  "post_activation_universal_function_tool_wire_amendment": {
+    "completed_at_utc": "2026-08-19T12:52:26Z",
+    "checkpoint_head": "a39e537fa56f6685c677496d0eb11628337675c0",
+    "supersedes": "The earlier DashScope Responses InvalidParameter disposition in cross_provider_carrier_matrix_reprobe.",
+    "wire_contract": "All 31 production function tools share v2 explicit non-strict prevalidated root-object lowering with no provider or tool-name branch; MCP incompatibility is resolved before surface installation.",
+    "post_review_p1_closure": "Chat final-value confirmation is policy-independent, and MCP discovery shares the exact pure lowering contract used by final wire materialization.",
+    "post_review_remote_reprobe": "not rerun; the prior eight-route matrix is retained evidence and this closure was verified deterministically plus by the full local suite",
+    "responses_stream_reconciliation": "An exact reasoning_text-to-final-summary alias is accepted only under a closed non-conflicting matrix.",
+    "final_eight_route_matrix": {
+      "bobdong_chat": "passed; fresh-process create/resume",
+      "bobdong_responses": "passed; native replay rows 1 -> 2; one selected replacement",
+      "deepseek_chat": "passed; fresh-process create/resume",
+      "deepseek_responses": "passed; native replay rows 1 -> 2; one selected replacement",
+      "dashscope_chat": "passed; fresh-process create/resume",
+      "dashscope_responses": "passed; native replay rows 1 -> 2; one selected replacement",
+      "openrouter_chat": "passed; fresh-process create/resume",
+      "openrouter_responses": "passed; native replay rows 1 -> 2; one selected replacement"
+    },
+    "full_pytest": "766 passed in 124.60s",
+    "private_content_credentials_urls_headers_or_dsn_recorded": false
+  },
+  "source_documents": {
+    "ROUND_5A_2_DURABLE_PROVIDER_REPLAY_AND_CROSS_RESTART_THREAD_CONTINUATION_IMPLEMENTATION_SPEC.zh.md_at_start": "eceb2e6b3f794ece5329d5a2185b300dd2571a4bc359927d36c92d1465945f10",
+    "ROUND_5A_2_DURABLE_PROVIDER_REPLAY_AND_CROSS_RESTART_THREAD_CONTINUATION_IMPLEMENTATION_SPEC.zh.md_after_activation_update": "97781e938d6fec9c5773039dc0fb58deed702e3928ff8b64b33ae92febaffb7d",
+    "POST_HARD_CUT_PRODUCT_CAPABILITY_GAP_INDEX.zh.md_after_activation_update": "4a20b9515cc717b41dffa0f9fa8a535792c63d3a6d1a6c7ff4646b2aaf614eb5",
+    "ROUND_5A_1_PROVIDER_NEUTRAL_MODEL_OUTPUT_TERMINATION_IMPLEMENTATION_SPEC.zh.md_after_supersession_update": "50235f2bbaf3c61a2b0b4bd2e68394c71c91e1b11ee76d3bf58b56ce2f597a94",
+    "ROUND_5B_LONG_HORIZON_CONTEXT_COMPACTION_IMPLEMENTATION_SPEC.zh.md_after_consumer_contract_update": "81ecfc3f8187ffb88134e961c67790363281aceecd9cd05321b8520e2dd98927",
+    "README.md_after_activation_update": "511e068d93b695d1e226812e06c803c6261a3b3850df726762bff23ee64505d5",
+    "README.zh-CN.md_after_activation_update": "0d12fb19325448f97a5bad5469d388ac5147b8e373db3195a254c8da6c867f23"
+  },
+  "production_code_sha256": {
+    "conversation_kernel/_repository/conversation.py": "6a746b23356c26780618944c1f0c9dbe8de3afbfaaa93c304c0d2b5cb2d7129e",
+    "conversation_kernel/_repository/kernel.py": "82d59672e60617218a2c1b917183339254826687cd9f0f7be966aa16ec774d42",
+    "conversation_kernel/assistant_settlement.py": "a42762cd8481c17c4d63b9c7d8ef709a1f001c328ec9d3152fa35b5496d8d810",
+    "conversation_kernel/direct_model.py": "c72c15d1be0ae6b9d13bce388aae775f88af4e5b13abf343435d36e6ed0815cc",
+    "conversation_kernel/input_continuity.py": "725a28cb66e9586a44c433cd3fc64910c5dd301e881444a21f38c96c478f706c",
+    "conversation_kernel/reader.py": "1bc5f3de8310e5d5f0189df602d6514796cc270418c6920ea4da498201322904",
+    "conversation_kernel/runner.py": "933f2e9532d4f33b7bba36ba8ff484feedc8d3107073090c1b83607fb429869a",
+    "llm/adapters/openai/chat_completions.py": "1fae059024e15820039a3ae1635e77382ff3f72fde4f9cc9f91983cf31526215",
+    "llm/provider.py": "4444a23a73a4926df62bceb5ea68ea65d2826af1a9c1fc6ad3b516a4c8b10033",
+    "llm/provider_replay.py": "1b5e66acbf467f7a836f5a57db97d60e0cfd9a3b2baae8764b504629fc0c03b1",
+    "llm/request.py": "5fd7a6d8bd90f82920029186ff53a013036281f143b761e2035ecb7dfc6063fc",
+    "model_input/continuity.py": "5432cc477d7421e00127e3e7a03782cfeacc15e709c9285586cc6d5010c42d42",
+    "model_input/provider_replay.py": "9ef285d423854e4406a4ba37ef0b4421d54875ed05afde266eb0d0cabcba163d",
+    "ports/provider_stream.py": "8b34e78ca5caafb30cbea54b4d99f09eab75f1f52f1651ee03004d797d3d060e",
+    "primitives/bounded_json.py": "dc4f879633abc18914599026a6274c334ea81abcaee57315c28e674a63f2c984",
+    "storage/migrations/manifest.py": "ea102273286dc8a9489e86513fd5afbc8606cde6a05b983f2a469628b490bb52",
+    "storage/migrations/resources/0000_conversation_kernel_expected_catalog_v1.json": "9be1a3998285c8314c876ae3591ee63aeb3f4e1f05ea1157d7a00ca924c5eb11",
+    "storage/migrations/resources/0000_conversation_kernel_runtime_grants_v1.json": "1e2144bd38ad0940d15b883007d0f5dd325144c69618df9fad661d3548f03b79",
+    "storage/migrations/sql/0000_conversation_kernel_baseline.sql": "92a146634350541abb71c63c9f82c3d8de12436e46398286185d3dc023ae8800"
+  },
+  "canonical_composite": {
+    "relation": "pulsara_v3.provider_assistant_replay_fragments",
+    "assistant_replay_atomic_transaction": true,
+    "native_pointer_present_on_first_entry_insert": true,
+    "runtime_update_or_delete_privilege": false,
+    "closed_entry_dispositions": [
+      "PUBLIC_SEMANTIC_ONLY",
+      "NATIVE_REPLAY"
+    ],
+    "ack_unknown_confirmation": "FULL | NONE | CONFLICT exact-checks assistant, ordered blocks, occurrence, turn state and optional replay row/body",
+    "rollback_partial_composite": true
+  },
+  "replay_contract": {
+    "wire_apis": [
+      "openai_chat_completions",
+      "openai_responses"
+    ],
+    "chat": "Only actually observed closed fields are retained; an absent native field yields PUBLIC_SEMANTIC_ONLY without a placeholder.",
+    "responses": "Exact ordered allowlisted reasoning/message/function_call output items are retained without previous_response_id.",
+    "target_compatibility": "Exact API, endpoint, normalized model, semantic transport binding, codec and replay-contract fingerprint; no vendor-name branch or open-world request option hash.",
+    "remote_response_id_as_authority": false,
+    "synthetic_or_placeholder_reasoning": false,
+    "partial_stream_persistence": false
+  },
+  "hydration_and_wire_proof": {
+    "metadata_and_body_two_stage": true,
+    "manifest_read_selects_payload_bytes": false,
+    "selected_body_read_is_read_only": true,
+    "selected_hydration_exact_join": [
+      "session",
+      "scope",
+      "manifest cut",
+      "replay target",
+      "ordered compiled assistant placements"
+    ],
+    "single_dispatch_planning_absolute_deadline": true,
+    "wire_plan_and_continuity_share_hydration_fingerprint": true,
+    "zero_native_replacement_has_no_empty_hydration": true,
+    "incompatible_target": "cold semantic continuation without body hydration"
+  },
+  "physical_bounds_and_privacy": {
+    "maximum_replay_row_bytes": 16777216,
+    "maximum_responses_items": 4096,
+    "maximum_selected_dispatch_composite_bytes": 67108864,
+    "bounded_json_before_and_after_parse": true,
+    "private_carrier_fields_repr_false": true,
+    "payload_in_events_artifacts_memory_protocol_logs_or_evidence": false
+  },
+  "deterministic_verification": {
+    "pytest_collection": "756 tests collected in 0.73s",
+    "round5a2_and_retained_round3_3_1_5a_5a1_5b_contract": "296 passed in 49.90s",
+    "round5a2_codec_target_bounds_architecture": "9 passed",
+    "round5a2_postgres_transaction_and_confirmation": "3 passed",
+    "fresh_object_and_true_os_process_restart": "Chat graceful, Responses abrupt-after-commit, selected corruption, incompatible target and one-deadline cases passed",
+    "full_pytest": "756 passed in 126.02s",
+    "postgres_marker": "195 passed, 561 deselected in 91.81s",
+    "clean_v0_fresh_repeat_deep_verify": "passed within the PostgreSQL marker suite",
+    "ruff": "passed",
+    "compileall": "passed_src_tests_tools",
+    "terminal_protocol_generation": "passed",
+    "go_test": "passed_all_packages",
+    "go_vet": "passed",
+    "go_mod_verify": "passed_all_modules",
+    "uv_lock_check": "passed",
+    "git_diff_check": "passed",
+    "new_skip_or_xfail": 0
+  },
+  "real_restart_and_provider_dogfood": {
+    "database": "ephemeral loopback database derived from an operator-authorized local database; no DSN recorded",
+    "process_boundary": "Host A and Host B were independent operating-system processes; Host A exported no process-local continuity object",
+    "openai_chat_completions": {
+      "first_request_completed": true,
+      "host_a_disposition": "PUBLIC_SEMANTIC_ONLY",
+      "native_rows_after_host_a": 0,
+      "host_b_request_completed": true,
+      "selected_native_hydration": false,
+      "disposition": "The configured endpoint returned no recognized private Chat carrier; semantic continuation remained honest and successful. Deterministic tests cover a closed native Chat carrier across restart."
+    },
+    "openai_responses": {
+      "first_request_completed": true,
+      "host_a_native_rows": 1,
+      "host_a_replay_bytes": 199,
+      "host_a_replay_items": 1,
+      "host_a_exit": "abrupt after canonical commit",
+      "host_b_selected_native_hydration": true,
+      "host_b_native_replacement_count": 1,
+      "host_b_request_completed": true,
+      "native_rows_after_host_b": 2,
+      "replay_bytes_after_host_b": 398,
+      "replay_items_after_host_b": 2
+    },
+    "additional_non_generic_credential_probe": {
+      "completed_at_utc": "2026-08-19T10:19:14Z",
+      "credential_source": "The dedicated embedding and rerank environment variables resolved to one identical non-generic credential; PULSARA_API_KEY from the env file was not used.",
+      "provider_profile": "DashScope-compatible qwen3.7-plus; endpoint and credential values are omitted",
+      "openai_chat_completions": {
+        "status": "passed",
+        "host_a_disposition": "NATIVE_REPLAY",
+        "host_a_native_rows": 1,
+        "host_a_replay_bytes": 229,
+        "host_a_replay_items": 1,
+        "host_a_exit": "abrupt after canonical commit",
+        "host_b_selected_native_hydration": true,
+        "host_b_native_replacement_count": 1,
+        "host_b_request_completed": true,
+        "native_rows_after_host_b": 2,
+        "replay_bytes_after_host_b": 477,
+        "replay_items_after_host_b": 2
+      },
+      "openai_responses": {
+        "status": "external_failure",
+        "failure_type": "ProviderModelExecutionFailed",
+        "failure_code": "unknown_provider_error",
+        "canonical_native_replay_claimed": false
+      }
+    },
+    "cross_provider_carrier_matrix_reprobe": {
+      "completed_at_utc": "2026-08-19T10:42:00Z",
+      "dogfood_tool_sha256": "d887daca32d308b3a0fc39ffc13572db29525baf44ad260ff019021f0a2394de",
+      "common_shape": "Each passing cell used two independent operating-system processes; Host A exited abruptly after canonical commit and Host B resumed from PostgreSQL without process-local continuity state.",
+      "bobdong_gpt_5_4": {
+        "configured_base_disposition": "The unprefixed configured base returned HTTP 200 text/html for both API paths, producing an honest transport_protocol_error.",
+        "temporary_v1_prefix_probe": {
+          "openai_chat_completions": "passed; PUBLIC_SEMANTIC_ONLY in both accepted responses",
+          "openai_responses": "passed; Host B hydrated one native replacement; two rows, 194 aggregate replay bytes and two aggregate items after continuation"
+        },
+        "env_file_modified": false
+      },
+      "deepseek_v4_flash": {
+        "openai_chat_completions": "passed; Host B hydrated one native replacement; two rows, 357 aggregate replay bytes and two aggregate items",
+        "openai_responses": "passed; Host B hydrated one native replacement; two rows, 1164 aggregate replay bytes and four aggregate items"
+      },
+      "dashscope_qwen3_7_plus": {
+        "openai_chat_completions": "passed; Host B hydrated one native replacement; two rows, 524 aggregate replay bytes and two aggregate items",
+        "openai_responses": "external endpoint/profile incompatibility before assistant acceptance; provider returned response.failed with InvalidParameter",
+        "responses_differential": "No-tools and each individual terminal_monitor action schema completed. The full terminal_monitor and terminal_process discriminated oneOf action unions each failed with InvalidParameter. No canonical replay was claimed."
+      },
+      "openrouter_openai_gpt_5_6_luna": {
+        "openai_chat_completions": "passed; PUBLIC_SEMANTIC_ONLY in both accepted responses",
+        "openai_responses": "passed; Host B hydrated one native replacement; two rows, 397 aggregate replay bytes and two aggregate items"
+      },
+      "provider_names_participate_in_production_replay_selection": false,
+      "api_key_dsn_endpoint_headers_prompt_reasoning_tool_arguments_or_raw_response_recorded": false
+    },
+    "api_key_dsn_headers_prompt_reasoning_tool_arguments_or_raw_response_recorded": false
+  },
+  "oracles": {
+    "committed_agent_events": 31,
+    "live_agent_events": 24,
+    "typed_subject_slots": 13,
+    "append_guards": 2,
+    "product_relations": 26,
+    "durable_job_handlers": 1,
+    "observed_catalog_fingerprint": "sha256:2fcfc6bcf1680e99b89ee0ef8d6c42b8f0f10daf74cdd538483e3b3c231f7f43"
+  },
+  "production_diff": {
+    "added_lines": 2152,
+    "deleted_lines": 219,
+    "net_lines": 1933,
+    "new_relations": 1,
+    "new_events_jobs_subjects_or_guards": 0
+  },
+  "remaining_blockers": [],
+  "non_goals": [
+    "Round 5B compaction, summary generation or snapshot adoption",
+    "partial provider stream or physical tool recovery",
+    "remote response ID or provider-held session authority",
+    "durable compiled-input snapshot or historical HTTP request audit",
+    "provider-vendor branching or Chat/Responses carrier translation",
+    "replay payload exposure through artifact, memory, Protocol or event surfaces"
+  ]
+}

@@ -57,7 +57,7 @@ def test_round4_final_oracles_and_plan_descriptors_are_exact() -> None:
     assert len(LIVE_EVENT_TYPES) == 24
     assert len(SUBJECT_SLOTS) == 13
     assert len(APPEND_GUARDS) == 2
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 25
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 26
     assert len(JOB_HANDLER_CATALOG) == 1
 
     observed = {
@@ -74,7 +74,7 @@ def test_round4_final_oracles_and_plan_descriptors_are_exact() -> None:
 
 def test_round4_schema_has_exact_plan_relations_and_required_initial_entry() -> None:
     baseline = BASELINE.read_text(encoding="utf-8")
-    assert baseline.count("CREATE TABLE pulsara_v3.") == 25
+    assert baseline.count("CREATE TABLE pulsara_v3.") == 26
     assert set(CONVERSATION_KERNEL_RELATIONS) >= {
         "plan_workflows",
         "plan_interactions",

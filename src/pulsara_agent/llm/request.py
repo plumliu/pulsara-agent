@@ -5,10 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from pulsara_agent.llm.input import LLMMessage, LLMToolCall, MessageRole, ToolSpec
-from pulsara_agent.llm.provider import (
-    ProviderAssistantReplayCodecKind,
-    ProviderReasoningReplayScope,
-)
 from pulsara_agent.llm.user_carrier import compose_provider_root_policy
 from pulsara_agent.primitives.context import (
     FrozenJsonObjectFact,
@@ -68,53 +64,6 @@ def provider_assistant_message_public_projection_fingerprint(
             ),
         ),
     )
-
-
-@dataclass(frozen=True, slots=True)
-class ProviderAssistantReplayFragment:
-    codec_kind: ProviderAssistantReplayCodecKind
-    replay_scope: ProviderReasoningReplayScope
-    provider_profile_fingerprint: str
-    resolved_target_fingerprint: str
-    assistant_entry_id: str
-    public_projection_fingerprint: str
-    ordered_items: tuple[FrozenJsonObjectFact, ...] = field(repr=False)
-    logical_utf8_bytes: int = 0
-    fragment_fingerprint: str = ""
-
-    def __post_init__(self) -> None:
-        if (
-            self.codec_kind is ProviderAssistantReplayCodecKind.NONE
-            or self.replay_scope is ProviderReasoningReplayScope.NEVER
-            or not self.assistant_entry_id
-        ):
-            raise ValueError("provider assistant replay fragment is invalid")
-        values = tuple(thaw_json(item) for item in self.ordered_items)
-        logical = sum(len(canonical_json_bytes(item)) for item in values)
-        if logical != self.logical_utf8_bytes or logical > (16 << 20):
-            raise ValueError("provider assistant replay fragment size is invalid")
-        for value in (
-            self.provider_profile_fingerprint,
-            self.resolved_target_fingerprint,
-            self.public_projection_fingerprint,
-        ):
-            if not value.startswith("sha256:"):
-                raise ValueError("provider assistant replay identity is invalid")
-        expected = context_fingerprint(
-            "pulsara.provider-assistant-replay-fragment:v1",
-            {
-                "codec": self.codec_kind.value,
-                "scope": self.replay_scope.value,
-                "profile": self.provider_profile_fingerprint,
-                "target": self.resolved_target_fingerprint,
-                "entry": self.assistant_entry_id,
-                "public": self.public_projection_fingerprint,
-                "items": values,
-                "bytes": logical,
-            },
-        )
-        if self.fragment_fingerprint != expected:
-            raise ValueError("provider assistant replay fingerprint mismatch")
 
 
 @dataclass(frozen=True, slots=True)
@@ -270,6 +219,7 @@ class FrozenProviderWireInputPlan:
     resolved_target_semantic_fingerprint: str
     materialization: FrozenProviderWireMaterialization = field(repr=False)
     replacements: tuple[FrozenProviderWireReplacementIdentity, ...]
+    provider_replay_hydration_fingerprint: str | None
     wire_system_fingerprint: str
     wire_tools_fingerprint: str
     wire_input_prefix_fingerprint: str
@@ -288,6 +238,14 @@ class FrozenProviderWireInputPlan:
             if index and item.first_message_ordinal < previous_end:
                 raise ValueError("provider wire replacements overlap")
             previous_end = item.first_message_ordinal + item.message_count
+        if bool(self.replacements) != bool(
+            self.provider_replay_hydration_fingerprint
+        ):
+            raise ValueError("provider replay hydration proof union is invalid")
+        if self.provider_replay_hydration_fingerprint is not None and not (
+            self.provider_replay_hydration_fingerprint.startswith("sha256:")
+        ):
+            raise ValueError("provider replay hydration fingerprint is invalid")
         for value in (
             self.compiled_semantic_fingerprint,
             self.message_placements_fingerprint,
@@ -345,7 +303,7 @@ class FrozenProviderWireInputPlan:
         if self.wire_input_prefix_fingerprint != expected_prefix:
             raise ValueError("provider wire input prefix proof drifted")
         expected = context_fingerprint(
-            "pulsara.provider-wire-input-plan:v1",
+            "pulsara.provider-wire-input-plan:v2-durable-replay",
             {
                 "context": self.context_id,
                 "compiled": self.compiled_semantic_fingerprint,
@@ -368,6 +326,9 @@ class FrozenProviderWireInputPlan:
                         item.replay_addend_tokens,
                     )
                     for item in self.replacements
+                ),
+                "provider_replay_hydration": (
+                    self.provider_replay_hydration_fingerprint
                 ),
                 "wire_system": self.wire_system_fingerprint,
                 "wire_tools": self.wire_tools_fingerprint,

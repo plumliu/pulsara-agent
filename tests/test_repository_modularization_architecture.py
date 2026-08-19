@@ -166,6 +166,11 @@ _TODO_REFINEMENT_ADDED_METHODS = {
     "prepare_prompt_head_consumption",
 }
 _TODO_REFINEMENT_REMOVED_METHODS = {"consume_prompt_head"}
+_ROUND5A2_CHANGED_METHODS = {
+    "_insert_entry",
+    "commit_assistant_message",
+    "confirm_assistant_message_winner",
+}
 _ROUND8_REPOSITORY_DELTA_SHA256 = (
     "03fc3abf3c68104b8c7b018b330d7c661bc66ea8e84d99d862fb021f75275536"
 )
@@ -391,7 +396,9 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
             _ROUND7_ADDED_METHODS
             | _ROUND8_ADDED_METHODS
             | _TODO_REFINEMENT_ADDED_METHODS,
-            _ROUND7_CHANGED_METHODS | _ROUND8_CHANGED_METHODS,
+            _ROUND7_CHANGED_METHODS
+            | _ROUND8_CHANGED_METHODS
+            | _ROUND5A2_CHANGED_METHODS,
         ),
     ):
         removed = (
@@ -443,6 +450,7 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
         set(baseline_runtime["methods"])
         - _ROUND7_RUNTIME_CHANGED_METHODS
         - _ROUND8_CHANGED_METHODS
+        - _ROUND5A2_CHANGED_METHODS
         - _ROUND8_REMOVED_METHODS
         - _TODO_REFINEMENT_REMOVED_METHODS
     ):
@@ -460,6 +468,7 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
         | _ROUND8_REMOVED_METHODS
         | _TODO_REFINEMENT_ADDED_METHODS
         | _TODO_REFINEMENT_REMOVED_METHODS
+        | _ROUND5A2_CHANGED_METHODS
     )
     for key in ("database_calls", "physical_checkouts"):
         current_unchanged = _without_source_modules(
@@ -536,7 +545,7 @@ def test_repository_modularization_facade_and_internal_owner_shape() -> None:
     assert len(LIVE_EVENT_TYPES) == 24
     assert len(SUBJECT_SLOTS) == 13
     assert len(APPEND_GUARDS) == 2
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 25
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 26
     assert len(JOB_HANDLER_CATALOG) == 1
 
 

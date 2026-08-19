@@ -14,9 +14,13 @@
 >
 > 前置实现：[Round 3 compiler](ROUND_3_STRUCTURED_MODEL_INPUT_COMPILER_IMPLEMENTATION_SPEC.zh.md)、[Round 3.1 prefix continuity](ROUND_3_1_PROVIDER_INPUT_PREFIX_CONTINUITY_IMPLEMENTATION_SPEC.zh.md)、[Round 5A execution envelope](ROUND_5_LONG_HORIZON_EXECUTION_ENVELOPE_IMPLEMENTATION_SPEC.zh.md)、[Round 7 model-visible outcome/timing](ROUND_7_MODEL_VISIBLE_FAILURE_AND_TOOL_OBSERVATION_IMPLEMENTATION_SPEC.zh.md)
 >
-> 后续依赖：**Round 5B compaction在激活前必须依赖本文。**尤其是compaction summary只有在本文定义的完整provider terminal后才可成为adoption candidate；summary call还必须看到旧epoch已经安装的exact reasoning continuation，adoption以后则明确丢弃这些process-local carrier并开始cold rebase。
+> 后续修订（2026-08-19）：[Round 5A.2 durable provider replay](ROUND_5A_2_DURABLE_PROVIDER_REPLAY_AND_CROSS_RESTART_THREAD_CONTINUATION_IMPLEMENTATION_SPEC.zh.md)已ACTIVATED，并接管本文关于`ProviderAssistantReplayFragment`生命周期、存储、Host loss/cold reset与跨进程续接的规范。本文的terminal、whole-response atomicity、closed Chat fields、Responses item allowlist、wire plan与assistant settlement owner继续有效；“fragment仅process-local、Host loss后generic semantic rebuild、repository不得存储fragment”只描述5A.1激活时的历史实现，不再是后续目标契约。
 >
-> 本文统一两条并列边界：provider输出的完成、截断、失败、重试与canonical acceptance；以及**完整响应**中的reasoning如何在同一Host、同一scope、同一provider-input epoch内原样进入后续调用。本文不实施compaction、半截答案自动续写、provider-error reactive compaction、remote response ID continuation、hidden reasoning durable persistence或新的durable recovery machinery。
+> OpenAI function-tool wire兼容修订（2026-08-19）：Chat与Responses的全部function tool统一经过同一个provider-neutral adapter，显式发送`strict: false`，并按OpenAI官方root-object约束把根级object union确定性lower为单一object schema；nested `oneOf`使用`anyOf`、`const`使用单值`enum`。provider wire只允许成为canonical schema的安全超集，不能静默收窄`additionalProperties`或覆盖组合约束；无法诚实lower的MCP tool必须在discovery阶段按既有`FAIL_SERVER | OMIT_INVALID`策略处置，不能进入已安装surface后毒化整次dispatch。canonical frozen descriptor与本地strict parser保持唯一执行真源，wire lowering不按provider或tool name分支。Responses还允许一种byte-exact stream/final reconciliation：`reasoning_text`流只有在没有独立summary流、没有final reasoning content且其正文与final summary完全相等时，才可作为该summary的transport alias；任何冲突仍在assistant acceptance前fail closed。Chat closed carrier的`final_value_required`对每个completed response无条件生效，不再受旧`NEVER | WHEN_TOOL_CALLS | ALWAYS` replay policy影响；因此缺少final confirmation的stream carrier不能随assistant/tool call一起被接受。
+>
+> Round 5B compaction在激活前必须同时依赖本文与Round 5A.2。compaction summary只有在本文定义的完整provider terminal后才可成为adoption candidate；重启后的summary prefix由Round 5A.2恢复，adoption后旧floor以前的durable replay不再进入active epoch。
+>
+> 本文统一两条并列边界：provider输出的完成、截断、失败、重试与canonical acceptance；以及**完整响应**中的reasoning如何在同一Host、同一scope、同一provider-input epoch内原样进入后续调用。5A.1激活切片本身不实施compaction、半截答案自动续写、provider-error reactive compaction、remote response ID continuation或hidden reasoning durable persistence；其中最后一项现由Round 5A.2窄化恢复，而不恢复通用durable recovery machinery。
 
 ---
 
@@ -68,16 +72,16 @@ Round 5A.1冻结：
 11. provider usage/cost observation可以在INCOMPLETE或PROVIDER_ERROR terminal上best-effort记录，但usage不能把语义失败提升为成功。
 12. 本轮不调整默认8,192 output tokens，也不复制Codex“普通请求省略max_output_tokens”的第一方假设。Pulsara继续显式发送output cap，以便compiler为输出保留headroom；数值政策以后独立调整。
 13. **只有COMPLETED response才能产生reasoning continuation。**INCOMPLETE、PROVIDER_ERROR、cancelled或physical BLOCKED response中的thinking仍是disposable live output，绝不进入下一次provider input。
-14. reasoning continuation是wire-contract-bound、process-local、same-epoch的opaque carrier。Chat使用provider-neutral closed registry：`reasoning_content: TEXT_CONCAT`、`reasoning: TEXT_CONCAT`、`reasoning_details: ORDERED_ARRAY_APPEND`；Responses继续使用typed ordered output items。两者分别原样保留，不互相转换，不写入canonical assistant rows。
+14. 在5A.1激活实现中，reasoning continuation是wire-contract-bound、process-local、same-epoch的opaque carrier。Chat使用provider-neutral closed registry：`reasoning_content: TEXT_CONCAT`、`reasoning: TEXT_CONCAT`、`reasoning_details: ORDERED_ARRAY_APPEND`；Responses继续使用typed ordered output items。两者分别原样保留，不互相转换，不写入canonical assistant正文。Round 5A.2只把completed、entry-bound carrier提升为独立durable provider-replay row。
 15. reasoning carrier只有在对应assistant entry canonical FULL/compatible confirmation以后才可安装；transient NONE只允许exact retry/confirmation，最终abandon或CONFLICT必须丢弃。安装以后，它成为该epoch provider wire prefix的一部分，后续调用只能原样保留并追加suffix，不能因新USER、tool loop或policy重算而删除/改写。
 16. 手工重放完整provider history是mandatory conformance path。`previous_response_id`、provider session ID与server-side state不进入canonical truth，不承担crash recovery或correctness；adapter以后可把它们作为可丢失优化单独讨论，但本文不实现。
 17. normal ToolResult继续使用真实`role=tool`。禁止为了保住reasoning把tool observation伪装成USER，也禁止把`<think>...</think>`塞进普通assistant content冒充provider reasoning。
 18. capability由resolved wire API与replay codec决定，不用vendor name写分支。Chat只接受上述三个known carrier；未知empty/null字段是no-op，未知non-empty字段若伴随完整普通final text则不回传，若伴随tool continuation或成为唯一输出则在assistant acceptance与tool dispatch前typed fail closed。Responses仍按closed typed item allowlist验证。
 19. reasoning payload计入provider-wire quote、epoch logical bytes与compaction trigger/quote；不允许silent truncation。它复用现有completed-response assembly、compiled working-set与64 MiB epoch hard bound，不新建独立大缓存上限。
-20. Round 5B summary使用旧epoch的exact SYSTEM/tools/messages及已安装reasoning carrier；summary正文不得复制或显露hidden reasoning。adoption/cold rebase以后丢弃全部reasoning carrier与remote response ID，新epoch只从canonical summary、retained groups和Runtime重建状态开始。
+20. Round 5B summary使用旧epoch的exact SYSTEM/tools/messages及已安装reasoning carrier；summary正文不得复制或显露hidden reasoning。adoption/cold rebase以后，旧floor以前的carrier不再进入active epoch，remote response ID仍全部丢弃；Round 5A.2 durable row可以保留为历史subordinate fact，但不会越过snapshot floor重新注入。
 21. continuity CAS唯一安装`FrozenProviderWireInputPlan`证明的semantic view与actual wire proof；candidate注册、preflight与physical open不得各自重新materialize input。
 22. assistant commit由新增的process-local shielded settlement attempt拥有；caller cancellation只能detach，只有FULL并完成optional fragment binding以后才能进入tool path。
-23. 不新增table、relation、Committed/Live event、subject、append guard、durable job、Protocol message、receipt、checkpoint、projection、repair或durable replay owner。activation oracle保持`31 / 23 / 13 / 2 / 25 / 1`。
+23. 5A.1激活切片不新增table、relation、Committed/Live event、subject、append guard、durable job、Protocol message、receipt、checkpoint、projection、repair或durable replay owner；其历史activation oracle保持`31 / 23 / 13 / 2 / 25 / 1`。Round 5A.2后续新增一张subordinate replay relation，不改写本轮历史证据。
 
 最终边界为：
 
@@ -153,7 +157,7 @@ Round 5B adoption
   -> new epoch starts from canonical semantic handoff
 ```
 
-这不是hidden reasoning durability。Host crash、scope cold reset或compaction adoption都允许失去Qn；Round 3.1本来就没有承诺跨Host provider-input continuity。它只是把**同一物理epoch内已经发送过的provider prefix**保持不变，并确保compaction发生前最后一次summary call仍能沿用它。
+以上是5A.1激活时的process-local边界。Round 5A.2已经明确取代“Host crash/cold reset允许失去Qn”的产品决定：completed并与assistant同事务接受的Qn会成为private durable provider-replay fact；新Host只向同一compatible target原样恢复。compaction adoption仍会让旧floor以前的Qn退出active epoch，且summary正文永不复制hidden reasoning。
 
 ---
 
@@ -406,7 +410,7 @@ history ownership
     CLIENT_EXPLICIT
 ```
 
-当前配置的建议route只是实验结论而非hard-coded policy：DeepSeek与DashScope优先使用Chat显式reasoning replay；OpenRouter优先使用`store=false` Responses exact item replay；bobdong Responses也必须走manual replay。任何endpoint若改变返回shape，contract/profile fingerprint变化并触发cold epoch，而不是在已安装epoch热换codec。
+这些实验只证明manual history与remote response ID不能互相替代，不形成任何endpoint推荐表。Round 5A.2进一步冻结：production replay选择只按`openai_chat_completions | openai_responses`两种wire codec及actual observed carrier执行；不得按DeepSeek、Kimi、DashScope、OpenRouter、bobdong或其他vendor/model名称分支。任何endpoint若改变返回shape，closed contract validation必须显式成功或typed失败，不能在已安装epoch热猜codec。
 
 ---
 
@@ -470,7 +474,7 @@ partial live正文不写入parent content、assistant blocks、artifact、memory
 | carrier | 内容 | 生命周期 | authority |
 |---|---|---|---|
 | `CompletedAssistantMessage` | public text/data/tool calls | canonical durable | conversation truth |
-| `ProviderAssistantReplayFragment` | exact reusable provider assistant message/output items，可能含opaque reasoning | process-local、same epoch | provider-wire continuity only |
+| `ProviderAssistantReplayFragment` | exact reusable provider assistant message/output items，可能含opaque reasoning | 5A.1为process-local；5A.2在assistant FULL时durable | provider-wire continuity only |
 | live Thinking blocks | streaming display/telemetry | disposable live | no replay authority |
 
 Responses不能只冻结一个reasoning item，再让下一请求从canonical rows重造同一response的function calls。官方手工history契约要求重放全部output items；而且provider item order、item ID、call ID与opaque fields都可能参与续接。最小正确carrier因此是**一整个completed assistant response的可重放wire fragment**：
@@ -495,9 +499,9 @@ Runtime对hidden reasoning不做以下事情：
 - 不把encrypted blob解密或改写；
 - 不把reasoning当成permission、tool effect、memory或Plan authority；
 - 不用reasoning补造canonical assistant text；
-- 不在durable digest、event payload、activation evidence或普通日志里保存正文。
+- 不在event payload、activation evidence、普通日志或conversation semantic body里保存正文；Round 5A.2唯一允许其进入受限的durable replay row及其body digest。
 
-Runtime只证明：“这组bounded opaque bytes/items确实来自一个完整响应；其public projection与已经接受的assistant entry一致；当前resolved profile声明可在同一epoch原样重放。”process-local fingerprint只用于内存中的exact join，Host结束即消失。
+Runtime只证明：“这组bounded opaque bytes/items确实来自一个完整响应；其public projection与已经接受的assistant entry一致；当前resolved profile声明可原样重放。”5A.1的process-local fingerprint继续服务same-epoch exact join；Round 5A.2另以stable durable fingerprint和entry pointer支持cold read，不把payload提升为其他authority。
 
 ### 4.6 same-epoch边界
 
@@ -511,7 +515,7 @@ accepted assistant entry/public semantic projection
 replay codec contract fingerprint
 ```
 
-same-schema physical reconnect可重新绑定transport，但不能改变fragment bytes或codec；profile/model/API变化、Host loss、cold reset与compaction adoption都会结束旧epoch并丢弃fragments。丢失fragment不改变canonical transcript，只意味着新epoch从公开语义重新开始。
+same-schema physical reconnect可重新绑定transport，但不能改变fragment bytes或codec。profile/model/API变化会结束旧epoch，且旧carrier不得跨target翻译；Host loss/cold reset由Round 5A.2从durable entry-bound row重建compatible carrier。compaction adoption以后，旧floor以前的carrier退出active materialization，但历史row不由5A.1删除。
 
 ---
 
@@ -753,7 +757,7 @@ opaque reasoning fields excluded from public projection
 
 ### 5.6 Binding与安装状态机
 
-fragment不是独立durable candidate，不需要receipt。它借用既有assistant commit与continuity CAS形成closed process-local状态：
+在5A.1激活实现中，fragment不是独立durable candidate，也不需要receipt；它借用既有assistant commit与continuity CAS形成closed process-local状态。Round 5A.2保留同一状态机作为当前Host的安装过程，同时把COMPLETED_UNBOUND候选与assistant row在一个transaction中持久化：
 
 ```text
 COLLECTING
@@ -797,11 +801,11 @@ CONFLICT          -> DISCARD
 
 该owner确保caller cancellation只能detach waiter，不能形成“canonical FULL但同一Host settlement尚未检查fragment”的窗口。它复用既有stable assistant candidate与repository confirmation API，但承认process-local settlement task是本轮新增的物理owner；不新增durable receipt或第二个writer。
 
-只有`FULL + optional fragment promoted to BOUND`才能把`AcceptedEntry`交还Runner，随后才允许live COMMITTED settlement与tool authorize/attempt/invoke。transient NONE由同一task在bounded canonical deadline/confirmation policy内继续；final NONE或CONFLICT终结attempt并丢弃fragment。Host进程直接丢失仍允许attempt/fragment消失，因为下一Host必然建立cold epoch；repository中的assistant winner仍由canonical rows表达。
+只有`FULL + optional fragment promoted to BOUND`才能把`AcceptedEntry`交还Runner，随后才允许live COMMITTED settlement与tool authorize/attempt/invoke。transient NONE由同一task在bounded canonical deadline/confirmation policy内继续；final NONE或CONFLICT终结attempt并丢弃unaccepted fragment。5A.1激活时Host进程丢失会失去BOUND fragment；Round 5A.2把optional replay纳入同一assistant transaction与confirmation，因此下一Host可从exact durable composite重建。
 
 assistant entry使用现有stable proposed ID，因此FULL confirmation以后无需修改frozen fragment；只需证明winner entry ID与public semantic fingerprint exact join。BOUND fragment在下一次dispatch planning中与对应assistant canonical item一起加入provider replay overlay；continuity install以后，其fingerprint成为epoch prefix proof的一部分。
 
-若response没有后续model call，BOUND fragment可由scope continuity owner持有到epoch close；它不创建后台task、lease、job或durable row。
+若response没有后续model call，BOUND fragment仍可由scope continuity owner持有到epoch close；Round 5A.2同时保存其subordinate durable row，但仍不创建后台task、lease、job或recovery owner。
 
 ### 5.7 Frozen provider-wire plan、continuity CAS与preflight
 
@@ -1407,7 +1411,8 @@ summary输出只允许公开语义handoff。Runtime不得要求模型“列出�
 
 ```text
 close old continuity epoch
-discard all ProviderAssistantReplayFragment
+discard all process-local ProviderAssistantReplayFragment
+leave old-floor durable replay rows inactive and private
 discard optional remote response/session identities
 materialize new summary + retained groups + rebuilt Runtime sources
 start new epoch with no inherited hidden reasoning
@@ -1587,8 +1592,8 @@ reasoning replay不能成为绕过这些bounds的第二条内存通道：
 | semantic candidate与wire plan不exact join | n/a | 0 | 0 | register/preflight前fail；provider open=0 |
 | preflight尝试rematerialize不同wire | n/a | 0 | 0 | plan fingerprint conflict；provider open=0 |
 | installed fragment遇到same-schema physical reconnect | n/a | existing | existing | exact bytes不变，仅重绑compatible transport |
-| Host loss/cold epoch | n/a | canonical rows仍在 | existing results仍在 | fragment允许丢失，generic semantic rebuild |
-| compaction summary COMPLETED/adopted | COMPLETED | summary authority另见5B | no summary tools | old fragments全部丢弃，新epoch无hidden inheritance |
+| Host loss/cold epoch | n/a | canonical rows与5A.2 replay row仍在 | existing results仍在 | compatible carrier由新Host exact rehydrate |
+| compaction summary COMPLETED/adopted | COMPLETED | summary authority另见5B | no summary tools | old-floor fragments退出active epoch；不继承到summary正文 |
 
 ---
 
@@ -1671,7 +1676,7 @@ Responses：
 - next tool-loop dispatch把fragment放在exact assistant位置，随后才是tool result；
 - installed fragment在后续USER、tool loop与automatic continuation中byte/structure equal；
 - same-schema reconnect只更换physical transport，不更换fragment；
-- Host close/cold reset释放全部fragment；
+- Host close/cold reset释放process-local fragment；Round 5A.2 compatible durable row可由下一Host重新hydrate；
 - fragment token/byte计量进入provider-wire quote与continuity proof，且不双计被替换的assistant representation。
 - `plan_wire_input`在candidate/register以前完成，且不取得transport/open authority；
 - candidate、preflight、install与physical open全部exact join同一个plan fingerprint/materialization identity；
@@ -1721,7 +1726,8 @@ Runner cannot call commit_assistant_message without COMPLETED
 tool attempt/invoke cannot be reached from incomplete terminal
 auxiliary JSON parse cannot run on incomplete terminal
 provider terminal cannot trigger compaction
-canonical repository cannot import/store ProviderAssistantReplayFragment
+5A.1 historical repository did not store ProviderAssistantReplayFragment;
+Round 5A.2 repository stores only its sealed durable row contract
 replay fragment cannot be built before COMPLETED terminal
 replay fragment cannot install before assistant FULL confirmation
 installed replay fragment cannot be omitted/degraded inside an epoch
@@ -1734,8 +1740,8 @@ tool authorize/attempt/invoke cannot precede FULL + optional fragment BOUND
 Responses replay cannot use previous_response_id as history authority
 Responses accepted output item types are exactly reasoning/message/function_call
 opaque reasoning cannot enter live text, canonical assistant blocks or public diagnostics
-no new schema/event/job/guard/subject/relation
-oracle == 31 / 23 / 13 / 2 / 25 / 1
+5A.1 historical activation added no schema/event/job/guard/subject/relation
+5A.1 historical oracle == 31 / 23 / 13 / 2 / 25 / 1
 ```
 
 ### 17.8 Notebook与multi-provider conformance probes
@@ -1818,7 +1824,7 @@ remote probe固定使用无副作用virtual empty tool与随机一次性marker�
 - provider-error reactive compact；
 - context compaction或snapshot adoption；
 - 自动提高output cap后重试；
-- hidden reasoning canonical/durable persistence、cross-Host recovery或compaction reinjection；
+- hidden reasoning作为conversation semantic truth、event、memory、artifact或summary正文；跨Host private provider-replay persistence现由Round 5A.2单独拥有；
 - hidden reasoning公开展示、artifact化、memory提取或summary复制；
 - Chat/Responses reasoning carrier互转；
 - 使用`<think>`普通正文伪造reasoning；
@@ -1863,11 +1869,11 @@ Round 5A.1只有同时满足以下条件才能标记ACTIVATED：
 24. ToolResult保持`role=tool`；Qwen-style template control在epoch内冻结，不因last USER位置动态删旧reasoning。
 25. Chat opaque/text reasoning accumulator在terminal前执行共享的16 MiB完整响应byte bound与65,536项fragment/element circuit breaker；text使用chunk list，unknown carrier不累计名称集合，越界为typed non-retryable failure。
 26. manual full-history replay是Chat/Responses activation gate；`previous_response_id`、remote session/state均不是correctness依赖。
-27. hidden reasoning不进入canonical row、event、memory、artifact、live public text、summary正文或普通diagnostic/log。
+27. hidden reasoning不进入conversation semantic row、event、memory、artifact、live public text、summary正文或普通diagnostic/log；Round 5A.2只允许独立private provider-replay row。
 28. replay fragment bytes/tokens进入wire plan、continuity aggregate与Round 5B pressure quote，且replacement debit/addend不重复计算generic assistant representation。
-29. future compaction summary使用旧epoch exact fragment；adoption/cold rebase后fragment与remote ID全部释放，新epoch只继承semantic handoff。
-30. bounded DeepSeek、DashScope、OpenRouter与bobdong probes验证各自resolved profile；远端cache/ID差异只记录，不改变contract。
+29. future compaction summary使用旧epoch exact fragment；adoption后process-local fragment与remote ID释放，旧floor durable row不进入新epoch；普通Host restart则由Round 5A.2 exact rehydrate compatible fragment。
+30. bounded DeepSeek、DashScope、OpenRouter与bobdong probes只验证两种OpenAI wire codec；远端cache/ID差异只记录，不形成vendor分支、preset或不同persistence policy。
 31. 无schema/event/relation/job/guard/subject/Protocol增加；oracle保持`31 / 23 / 13 / 2 / 25 / 1`。
 32. activation evidence包含code hash、targeted/full/PostgreSQL/architecture结果、notebook/endpoint profile checkpoint及无敏感内容的provider-shaped probe记录。
 
-完成以后，Pulsara才具备两个足够可靠的Round 5B前提：**Runtime不会把模型“说到一半”误认为已经完成，也不会让半个工具调用跨过canonical effect边界；在真正rebase以前，它还能让完整响应形成的provider reasoning/work state沿同一epoch exact prefix继续存在，而不把hidden reasoning升级成durable truth。**
+完成5A.1以后，Pulsara具备第一个Round 5B前提：**Runtime不会把模型“说到一半”误认为已经完成，也不会让半个工具调用跨过canonical effect边界。**Round 5A.2进一步补齐第二个前提：completed provider reasoning/work carrier可跨进程恢复，但仍只是private provider-replay truth，不进入assistant正文、summary或其他业务authority。

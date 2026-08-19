@@ -10,13 +10,15 @@
 >
 > 产品能力索引：[POST_HARD_CUT_PRODUCT_CAPABILITY_GAP_INDEX.zh.md](POST_HARD_CUT_PRODUCT_CAPABILITY_GAP_INDEX.zh.md)
 >
-> 前置实现：[Round 3 compiler](ROUND_3_STRUCTURED_MODEL_INPUT_COMPILER_IMPLEMENTATION_SPEC.zh.md)、[Round 3.1 prefix continuity](ROUND_3_1_PROVIDER_INPUT_PREFIX_CONTINUITY_IMPLEMENTATION_SPEC.zh.md)、[Round 5A execution envelope](ROUND_5_LONG_HORIZON_EXECUTION_ENVELOPE_IMPLEMENTATION_SPEC.zh.md)、[Round 5A.1 provider-neutral output termination](ROUND_5A_1_PROVIDER_NEUTRAL_MODEL_OUTPUT_TERMINATION_IMPLEMENTATION_SPEC.zh.md)、[Round 7 model-visible outcome/timing](ROUND_7_MODEL_VISIBLE_FAILURE_AND_TOOL_OBSERVATION_IMPLEMENTATION_SPEC.zh.md)、[Round 7.1 provider-visible ToolResult projection](ROUND_7_1_PROVIDER_VISIBLE_TOOL_RESULT_PROJECTION_IMPLEMENTATION_SPEC.zh.md)、[Round 8 advisory memory](ROUND_8_ADVISORY_MEMORY_SUBSYSTEM_IMPLEMENTATION_SPEC.zh.md)、[Round 9 unified capability semantics](ROUND_9_UNIFIED_CAPABILITY_SEMANTICS_IMPLEMENTATION_SPEC.zh.md)、[Round 9.1 Agent Skills](ROUND_9_1_AGENT_SKILLS_STANDARD_IMPLEMENTATION_SPEC.zh.md)、[Lightweight TODO refinement](PULSARA_LIGHTWEIGHT_TODO_TOOL_REFINEMENT_IMPLEMENTATION_SPEC.zh.md)
+> 前置实现：[Round 3 compiler](ROUND_3_STRUCTURED_MODEL_INPUT_COMPILER_IMPLEMENTATION_SPEC.zh.md)、[Round 3.1 prefix continuity](ROUND_3_1_PROVIDER_INPUT_PREFIX_CONTINUITY_IMPLEMENTATION_SPEC.zh.md)、[Round 5A execution envelope](ROUND_5_LONG_HORIZON_EXECUTION_ENVELOPE_IMPLEMENTATION_SPEC.zh.md)、[Round 5A.1 provider-neutral output termination](ROUND_5A_1_PROVIDER_NEUTRAL_MODEL_OUTPUT_TERMINATION_IMPLEMENTATION_SPEC.zh.md)、[Round 5A.2 durable provider replay/cross-restart continuation](ROUND_5A_2_DURABLE_PROVIDER_REPLAY_AND_CROSS_RESTART_THREAD_CONTINUATION_IMPLEMENTATION_SPEC.zh.md)、[Round 7 model-visible outcome/timing](ROUND_7_MODEL_VISIBLE_FAILURE_AND_TOOL_OBSERVATION_IMPLEMENTATION_SPEC.zh.md)、[Round 7.1 provider-visible ToolResult projection](ROUND_7_1_PROVIDER_VISIBLE_TOOL_RESULT_PROJECTION_IMPLEMENTATION_SPEC.zh.md)、[Round 8 advisory memory](ROUND_8_ADVISORY_MEMORY_SUBSYSTEM_IMPLEMENTATION_SPEC.zh.md)、[Round 9 unified capability semantics](ROUND_9_UNIFIED_CAPABILITY_SEMANTICS_IMPLEMENTATION_SPEC.zh.md)、[Round 9.1 Agent Skills](ROUND_9_1_AGENT_SKILLS_STANDARD_IMPLEMENTATION_SPEC.zh.md)、[Lightweight TODO refinement](PULSARA_LIGHTWEIGHT_TODO_TOOL_REFINEMENT_IMPLEMENTATION_SPEC.zh.md)
 >
 > hard-cut前参考基线：5b7ad9f7ffc8565bc572180b2bde0c81ab64473a
 >
 > 规范归属修订（2026-08-17）：正常epoch MCP direct/meta、`MCP_CATALOG`、`list_mcp_servers`、`inspect_new_mcp_tool`、`use_new_mcp_tool`与direct unavailable gate全部由Round 9唯一拥有；普通ToolResult的40,000-byte logical FULL、8-KiB COMPACT、artifact与conditional guidance全部由Round 7.1唯一拥有。Round 5B只在合法rebase boundary重新消费Round 9/9.1的current source registrations、complete source snapshots、planning cut与普通compiler结果，并复用Round 7.1既有ToolResult variants；它不重新发现能力、不实现meta gateway、不定义第二套MCP exposure DTO，也不定义compaction专用ToolResult阈值。
 >
 > Skill收口修订（2026-08-18）：Round 9.1不再定义`read_file` activation intent/lookup。Round 5B只为同一真实user run中已经ordinary COMPLETE + actual FULL + continuity-installed、且current manifest未变化的Skill纯派生bounded `RETAINED_SKILL_CONTEXT`；不建立loaded-state、receipt或跨turn activation history。
+>
+> Provider replay收口修订（2026-08-19）：Round 5A.2已经ACTIVATED；Round 5B不再假设Host loss以后只能从generic public semantics重建summary prefix。Round 5A.2负责把completed、entry-bound Chat/Responses native carrier与assistant同事务持久化；summary call只消费其现有`FrozenCanonicalProviderDispatchRead`、selected hydration与`FrozenProviderWireInputPlan`接口，可使用当前Host安装或restart后rehydrate的exact old-prefix replay。adoption以后，snapshot floor以前的replay row不再active materialize，但Round 5B不删除row、不把hidden carrier复制进summary，也不建立第二套replay DTO。
 >
 > 本文现在只实施Round 5B context compaction：可靠且在successor epoch boundary完整就绪的MCP cohort可依Round 9规则重新冻结；compaction adoption因此是已有NEW MCP再次尝试进入下一epoch direct surface的自然边界。本文不实施新的memory extraction、replacement-history replay、provider context-error reactive retry、durable compaction job或hierarchical subagent graph。
 
@@ -183,7 +185,7 @@ Pulsara不复制该设计。理由是：
 2. snapshot + source cut + exact-scope post-cut rows可确定性重建provider-neutral input；
 3. 持久化完整provider messages会复制tool grouping、source placement与adapter lowering真值；
 4. provider adapter或compiler升级后，旧replacement history会成为第二套历史wire authority；
-5. 它会重新引入exact provider-input replay与跨Host generation承诺。
+5. 它会重新引入**完整compiled provider-input/replacement history**与跨Host generation承诺。Round 5A.2新增的entry-bound private native carrier不复制SYSTEM、tools、Runtime observations或完整compiled request，因此不构成本条所拒绝的replacement history。
 
 本轮因此不增加replacement_history、retained_group_manifest列或provider message blob。受保护group identity只存在于process-local `CompactionSettlementResources`，用于采用前验证；采用后，source cut和canonical rows就是唯一truth。
 
@@ -231,12 +233,16 @@ summary是derived continuity handoff，不是用户消息，不是accepted memor
 ~~~text
 summary.SYSTEM == source_view.materialized_system_prompt()
 summary.tools  == source_view.normal_compile_binding.tool_surface.tool_specs
-summary.messages
+summary.semantic_messages
     == source_view.materialized_messages()[:exact_summary_prefix_count]
        || [synthetic_summary_request]
+
+summary.actual_wire_input
+    == Round 5A.2 FrozenProviderWireInputPlan.materialization
+       for that exact semantic slice and selected durable native replay
 ~~~
 
-source_view不是另一个已安装epoch。它是safe point处对“如果现在正常发起下一次model call，模型应看到什么”的只读、不可执行物化，必须覆盖当前exact canonical head，包括尚未进入上一版continuity epoch的最新USER_MESSAGE、USER_STEER与已完成tool group。summary call不得宣称覆盖自己从未看到的canonical suffix。
+source_view不是另一个已安装epoch。它是safe point处对“如果现在正常发起下一次model call，模型应看到什么”的只读、不可执行semantic物化，必须覆盖当前exact canonical head，包括尚未进入上一版continuity epoch的最新USER_MESSAGE、USER_STEER与已完成tool group。semantic messages只用于boundary与public projection；adapter实际发送`actual_wire_input`。已有Responses/Chat native carrier不能因为Host重启、idle summary或不存在predecessor epoch而退化为generic semantic history。summary call不得宣称覆盖自己从未看到的canonical suffix。
 
 采用成功后，旧epoch与新epoch不要求prefix关系：
 
@@ -689,7 +695,8 @@ FrozenCompactionSourceView
         EMPTY_COLD
       | COMPATIBLE_APPEND
       | PENDING_NON_COMPACTION_RESET
-    canonical_compile_snapshot: FrozenCanonicalCompileSnapshot
+    canonical_dispatch_read: FrozenCanonicalProviderDispatchRead
+        # Round 5A.2: canonical compile snapshot + metadata-only replay manifest cut
     normal_compile_binding: ModelInputCompileBinding
         # owns the one FrozenModelToolSurface
     predecessor_epoch_view: FrozenProviderInputEpochView | None
@@ -701,13 +708,13 @@ FrozenCompactionSourceView
 
 这些existing frozen carriers是组合关系，不是把字段重新摊平：
 
-- `FrozenCanonicalCompileSnapshot`唯一拥有canonical provider items、binding/permission/Plan/outcome/freshness one-cut facts与cut identity；
+- `FrozenCanonicalProviderDispatchRead`唯一组合`FrozenCanonicalCompileSnapshot`与同一RR cut中的metadata-only durable replay manifest；其`compile_snapshot`拥有canonical provider items、binding/permission/Plan/outcome/freshness one-cut facts与cut identity。source view不得读取或复制private replay body；
 - `ModelInputCompileBinding.tool_surface`唯一拥有old provider-visible `FrozenModelToolSurface`，不得同时保存另一份“semantic tool facts + tool specs”；
 - `FrozenProviderInputEpochView`仅在已有predecessor epoch时存在，唯一拥有prior epoch nonce/revision、compatibility、prefix、frontier与source heads；
 - `CapabilityEpochPredecessor`直接复用Round 9 EMPTY/INSTALLED union；INSTALLED时其唯一`FrozenModelToolSurface`必须与`normal_compile_binding.tool_surface`及`predecessor_epoch_view` exact join，不复制MCP descriptor或route tuple；
 - `FrozenCompactionProviderProjection`只拥有无法由上述carrier取得的prospective wire delta/冷投影与其estimate。它不是`FrozenCompiledModelInput`：whole source view允许超过effective input budget，而production `FrozenCompiledModelInput`的closed invariant要求成功输入已经在budget内；
 
-`PreparedProviderInputCut`是reader admission输入，不是source view的第二份identity。factory先验证它与returned canonical snapshot identity exact join，并证明projection由该snapshot、同一one-cut source facts和normal lowering产生，随后不把cut存进view。`exact_safe_canonical_head`也不是独立构造参数，而从`canonical_compile_snapshot.canonical_input.identity.provider_input_through_sequence`派生；COMPATIBLE_APPEND时factory还证明predecessor epoch frontier是该current cut的prefix，不能错误地把predecessor frontier本身当作current safe head。
+`PreparedProviderInputCut`是reader admission输入，不是source view的第二份identity。factory先验证它与returned `canonical_dispatch_read.compile_snapshot` identity及replay manifest cut exact join，并证明projection由该snapshot、同一one-cut source facts和normal lowering产生，随后不把cut存进view。`exact_safe_canonical_head`也不是独立构造参数，而从`canonical_dispatch_read.compile_snapshot.canonical_input.identity.provider_input_through_sequence`派生；COMPATIBLE_APPEND时factory还证明predecessor epoch frontier是该current cut的prefix，不能错误地把predecessor frontier本身当作current safe head。
 
 projection closed union type与source-view compatibility必须exact join；不存在调用者可填写的第二个branch enum：
 
@@ -715,9 +722,9 @@ projection closed union type与source-view compatibility必须exact join；不�
 - EMPTY_COLD与PENDING_NON_COMPACTION_RESET只允许`ColdRebuildCompactionProjection`；SYSTEM/messages由该projection拥有，tools仍只来自`normal_compile_binding.tool_surface`；
 - `projection.final_estimate`与`logical_utf8_bytes`由central factory对materialized SYSTEM、唯一tool surface与materialized messages计算，不是调用者参数；estimate允许超过effective input budget，summary prefix与adoption后的active dry compile仍各自必须满足其真实budget。
 
-`source_view_fingerprint`只组合compatibility discriminator及上述existing carrier/projection/capability-predecessor的canonical fingerprints，再覆盖physical working-set report；不得把这些carrier的内部标量重新序列化一遍。`ModelInputCompileBinding`中的estimator object/transport capability不进入fingerprint，只使用其既有binding/target/estimator/tool-surface fingerprints。
+`source_view_fingerprint`只组合compatibility discriminator及上述existing carrier/projection/capability-predecessor的canonical fingerprints，再覆盖physical working-set report；其中replay部分只组合5A.2 manifest-cut fingerprint，不组合尚未hydrate的private body。不得把这些carrier的内部标量重新序列化一遍。`ModelInputCompileBinding`中的estimator object/transport capability不进入fingerprint，只使用其既有binding/target/estimator/tool-surface fingerprints。
 
-它表达“在这个safe point正常继续时，当前authority会投影出的完整上下文”，但它不是PreparedProviderInputAppendCandidate，也不能被DirectModel打开。构造规则为：
+它表达“在这个safe point正常继续时，当前authority会投影出的完整**semantic**上下文”，但它不是PreparedProviderInputAppendCandidate，也不能被DirectModel打开；尤其`materialized_messages()`只是tail/boundary规划输入，不是可直接发送给Chat/Responses的physical history。构造规则为：
 
 1. COMPATIBLE_APPEND必须以`predecessor_epoch_view`逐字验证projection只追加exact canonical delta和本次冻结的source observations；
 2. EMPTY_COLD从当前one-cut事实冷构造；
@@ -788,7 +795,7 @@ ProtectedTailSelectionFact
     protected_tail_selection_fingerprint
 ~~~
 
-它由longest-suffix planner一次生成。`ProviderPrefixCutProof`、summary call与settlement resources只能引用这一fact或其fingerprint，不得分别保存retained group IDs、tool-call anchors或tail start。fact不写库；其目的只是让prefix cut、source boundary与post-summary exact tail在异步阶段exact join。
+它由longest-suffix planner一次生成。`ProviderPrefixCutProof`、summary call与settlement resources只能引用这一fact或其fingerprint，不得分别保存retained group IDs、tool-call anchors或tail start。fact不写库；其目的只是让semantic prefix cut、source boundary与post-summary exact tail在异步阶段exact join。真正发送的native wire prefix另由§8.2唯一`FrozenProviderWireInputPlan`证明，不能把该fact或proof的semantic message fingerprint冒充actual wire fingerprint。
 
 ### 6.3 Boundary表示
 
@@ -900,11 +907,11 @@ ProviderPrefixCutProof
 
 有retained group时，Runtime以`ProtectedTailSelectionFact`的ordered tool_call_ids在source view的ordered messages中定位唯一preceding assistant tool-call message，summary prefix在该message之前结束。无group时，summary prefix就是source view messages全量。找不到唯一match、canonical attribution漂移、safe head未被覆盖或fingerprint不符均fail closed。
 
-当compatibility=COMPATIBLE_APPEND时，proof还必须证明summary prefix与prior installed epoch的重叠部分逐项、逐字相等。source boundary只能覆盖summary prefix实际含有的canonical rows；任何已在safe head内但不在summary prefix、也不在post-cut exact tail中的row都会使planning失败。
+当compatibility=COMPATIBLE_APPEND时，proof先证明summary semantic prefix与prior installed epoch的重叠部分逐项、逐字相等；随后summary wire-plan factory还必须证明对应actual native wire materialization与`predecessor_epoch_view.wire_input_plan`重叠prefix逐项、逐字相等。source boundary只能覆盖summary prefix实际含有的canonical rows；任何已在safe head内但不在summary prefix、也不在post-cut exact tail中的row都会使planning失败。
 
 ### 6.5 Summary输入与tail互斥
 
-summary model只看到FrozenCompactionSourceView的prefix；retained tail不进入summary request。successor只看到summary snapshot + retained tail。因此同一canonical entry不会同时作为summary source和exact tail source，也不会出现“summary声称覆盖了cut，但实际没看到刚接纳suffix”的窗口。
+summary model只看到FrozenCompactionSourceView所选prefix经Round 5A.2 native wire materialization后的actual prefix；retained tail不进入summary request。successor只看到summary snapshot + retained tail。因此同一canonical entry不会同时作为summary source和exact tail source，也不会出现“summary声称覆盖了cut，但实际没看到刚接纳suffix”的窗口。
 
 ---
 
@@ -978,13 +985,27 @@ active不得在summary factory里第二次解析出另一个target；idle没有n
 summary request必须使用：
 
 ~~~text
-SYSTEM = FrozenCompactionSourceView.materialized_system_prompt() exactly
-tools  = FrozenCompactionSourceView.normal_compile_binding.tool_surface exactly
-messages = exact prefix of FrozenCompactionSourceView.materialized_messages()
-           selected by ProviderPrefixCutProof
-           + one synthetic user-role summary request
+semantic SYSTEM = FrozenCompactionSourceView.materialized_system_prompt() exactly
+semantic tools  = FrozenCompactionSourceView.normal_compile_binding.tool_surface exactly
+semantic messages = exact prefix of FrozenCompactionSourceView.materialized_messages()
+                    selected by ProviderPrefixCutProof
+                    + one synthetic user-role summary request
+
+actual provider input = Round 5A.2 FrozenProviderWireInputPlan.materialization
+    built from the exact semantic slice above
+    + source_view.canonical_dispatch_read.replay_manifest_cut
+    + current summary replay-target/contract gate
+    + selected exact-body hydration
 purpose = CONTEXT_COMPACTION_SUMMARY
 ~~~
+
+`materialized_messages()`只决定semantic boundary、ToolResult variant与canonical attribution，绝不能直接传给adapter。summary factory必须在prefix/tail确定后复用Round 5A.2标准路径：从manifest中选择本prefix实际含有的assistant entries，先做replay-target compatibility，再仅hydrate selected-compatible body，构造最终`FrozenProviderWireInputPlan`。因此Responses `reasoning/message/function_call`与Chat actual closed fields按正常dispatch exact重放；synthetic summary request只作为该actual wire prefix之后的新user-role suffix加入。
+
+exact summary slice已经低于真实budget后，factory才构造一份不安装continuity的`FrozenCompiledModelInput`：prefix中的既有messages复用source view的exact placements；synthetic request取得唯一sealed call-local placement，`origin_entry_id=None`，其item fingerprint由summary prompt contract、exact request text与`ProviderPrefixCutProof` domain-separated生成，ordinal固定为最后一项。它明确不声称synthetic request是canonical transcript row。这样Round 5A.2低层wire planner仍能按existing assistant entry placements做native replacement，又不会要求给summary instruction伪造entry ID、CommittedEvent或source owner。
+
+active且有predecessor epoch时，wire-plan factory必须证明其重叠materialization与`predecessor_epoch_view.wire_input_plan`逐项、逐字相等。idle restart没有predecessor epoch时，从PostgreSQL manifest/body重新构造同一native形状；不得以“没有live epoch”为由退化成generic messages。target不兼容时只允许Round 5A.2定义的显式cold semantic continuation，不允许Chat/Responses互译。
+
+summary target必须调用Round 5A.2同一个closed `ProviderReplayTargetCompatibilityFact` builder。`CONTEXT_COMPACTION_SUMMARY` purpose、synthetic request、`tool_choice=none`、无physical executor以及summary output cap都不进入replay target fingerprint；因此普通`AGENT_MODEL_LOOP`产生的same endpoint/model/semantic transport binding/codec/replay contract carrier可以合法用于summary。API、endpoint、normalized model、semantic transport binding、codec或provider replay contract变化仍必须使其不兼容；与historical replay无关的完整transport-version变化不得单独撤销carrier。不得为了summary另建“宽松target”或把open-world provider request options重新hash进compatibility。
 
 现有`KernelModelPort.prepare_call()`/normal `PreparedKernelModelExecution`不能被含糊复用，因为它们绑定`AGENT_MODEL_LOOP`、continuity install permit和physical tool-surface borrow。本轮冻结一个独立、process-local、one-shot seam：
 
@@ -993,24 +1014,29 @@ PreparedCompactionSummaryCall
     exact resolved primary-model target/transport binding
     FrozenCompactionSourceView identity
     ProviderPrefixCutProof
-    frozen final LLMContext:
+    frozen semantic LLMContext:
         exact SYSTEM
         semantic-only frozen tool specs
         exact message prefix + synthetic request
+    FrozenProviderWireInputPlan actual_wire_input_plan (private body repr=False)
     final target estimate / request fingerprint
     one-shot open authority
 ~~~
 
 `purpose = CONTEXT_COMPACTION_SUMMARY`与`wire tool_choice = none`是sealed type/constructor行为，不是调用者可传的实例字段。factory直接将这两个固定literal写入request fingerprint的domain/version；adapter只接收prepared call并按该类型编码`tool_choice=none`。调用者既不能传普通purpose，也不能把suppression改成AUTO/REQUIRED。
 
-factory必须在任何physical open前完成target identity、request bytes、final estimate及adapter capability preflight。`open_once()`只消费同一个prepared对象。它可以持有provider transport capability，但绝不能持有或取得：
+factory必须在任何physical open前完成target identity、selected replay hydration、actual wire materialization、request bytes、final estimate及adapter capability preflight。`open_once()`只消费同一个prepared对象，并且只能发送`actual_wire_input_plan.materialization + sealed tool suppression`；它不能从semantic `LLMContext.messages`重新lower另一份history。
+
+存在native replay replacement时，`actual_wire_input_plan.provider_replay_hydration_fingerprint`必须等于本次summary slice的Round 5A.2 hydration fingerprint；不存在replacement时二者均不存在。该proof已绑定source manifest cut、exact scope、summary replay target与selected assistant placements，并由final wire-plan fingerprint覆盖；summary call不得再保存第二份fragments或另建summary-specific hydration identity。
+
+prepared call可以持有provider transport capability，但绝不能持有或取得：
 
 - normal continuity candidate/install permit；
 - tool-surface executor borrow；
 - tool authorization/invocation callback；
 - canonical assistant/tool-result acceptance authority。
 
-Chat Completions与Responses adapter必须依据prepared call的sealed类型显式编码各自wire的`tool_choice = none`等价形状，并由constructor/wire golden验证；不能只依赖prompt说“不要调用工具”。未来adapter若无法证明等价wire suppression，必须在closed adapter capability中声明unsupported并拒绝summary open，不能静默退回普通agent loop。
+Chat Completions与Responses adapter必须依据prepared call的sealed类型，在Round 5A.2 actual materialization之外显式编码各自wire的`tool_choice = none`等价形状，并由constructor/wire golden验证；不能只依赖prompt说“不要调用工具”。未来adapter若无法证明等价wire suppression，必须在closed adapter capability中声明unsupported并拒绝summary open，不能静默退回普通agent loop。
 
 tool specs在这里是纯描述数据，不要求取得live executor borrow，因为physical dispatch被call-purpose gate绝对禁止。COMPATIBLE_APPEND时它们必须与prior epoch完全相等，包括old epoch的DIRECT MCP与三个固定catalog/meta tools；当前catalog中的NEW MCP绝不能插入summary `tools`。PENDING_NON_COMPACTION_RESET时使用普通dispatch本来已经要求的prospective surface，并明确放弃旧cache承诺，但仍不得因MCP late-ready单独进入该状态。
 
@@ -1618,7 +1644,7 @@ PREPARING
 
 attempt持有Host-wide summary execution-lane token与一个exact-scope admission fence。前者防止同一Host并行占用多个长时provider summary stream，后者只保护target source cut；两者在DISCARDED/INSTALLED/CLOSED路径确定释放，waiter cancellation只能detach。
 
-planning使用一个120秒absolute deadline，贯穿cut read、tail trials、prefix proof与quote。summary stream使用Round 5A typed connect/write/pool/read-idle policy，另有20分钟reasoning-runaway backstop；持续健康输出仍必须在20分钟内完成本次compaction。canonical write/confirmation各取fresh foreground canonical deadline。
+planning使用一个120秒absolute deadline，贯穿cut read、tail trials、prefix proof、Round 5A.2 selected hydration/decode与final wire quote。selected hydration只能开启新的read-only transaction，不能调用deadline factory或重新获得120秒；其physical deadline不得晚于该compaction attempt已有planning deadline。summary stream使用Round 5A typed connect/write/pool/read-idle policy，另有20分钟reasoning-runaway backstop；持续健康输出仍必须在20分钟内完成本次compaction。canonical write/confirmation各取fresh foreground canonical deadline。
 
 ### 14.2 User stop
 
@@ -1773,14 +1799,14 @@ purpose-neutral AuxiliaryJsonModelPort仍由Round 8 governor使用，不得随jo
 
 ### 16.3 最终oracle
 
-从Round 8加已激活Lightweight TODO refinement的oracle减去唯一job family：
+从Round 8加已激活Lightweight TODO refinement、再加Round 5A.2唯一provider replay relation的oracle，减去唯一job family：
 
 ~~~text
 Committed events       31 - 3 = 28
 Live events            24
 Subject slots          13 - 2 = 11
 Append guards           2 - 1 = 1
-Product relations      25 - 2 = 23
+Product relations      26 - 2 = 24
 Durable jobs            1 - 1 = 0
 ~~~
 
@@ -1901,18 +1927,18 @@ Round 9.1 manifest/read contracts + old installed epoch view
 
 ## 19. 实施切片
 
-Round 7.1、Round 9、Round 9.1与Lightweight TODO refinement必须先各自标记ACTIVATED并具备机器证据；它们不是`R5B-*` slice。Round 5B M0只记录四者的activation hash、ordinary ToolResult/Capability/Skill/TODO retained node IDs与public DTO manifest，禁止在本轮重新实现或补丁式完成其production路径。
+Round 5A.2、Round 7.1、Round 9、Round 9.1与Lightweight TODO refinement必须先各自标记ACTIVATED并具备机器证据；它们不是`R5B-*` slice。Round 5B M0只记录五者的activation hash、durable replay/ordinary ToolResult/Capability/Skill/TODO retained node IDs与public DTO manifest，禁止在本轮重新实现或补丁式完成其production路径。
 
 ### R5B-1：减掉dormant job universe并重算oracle
 
 - 删除BACKGROUND_COMPACTION及job tables/events/guard/Protocol；
 - 保留purpose-neutral auxiliary JSON model；
 - 更新clean-v0 manifest、grants、expected catalog与architecture guards；
-- oracle冻结28/24/11/1/23/0。
+- oracle冻结28/24/11/1/24/0。
 
 ### R5B-A：Pure contracts与one-cut planner
 
-- FrozenCompactionSourceView只读物化与三态compatibility；
+- FrozenCompactionSourceView组合Round 5A.2 semantic + metadata-only manifest cut的只读物化与三态compatibility；
 - FULL_HISTORY persisted marker/effective floor分离；
 - 复用`FrozenProviderInputItem`/closure/late-outcome carriers的shared `FrozenCompactionCanonicalRange` envelope与bounded lineage digest；
 - complete tool group parser；
@@ -1925,7 +1951,9 @@ Round 7.1、Round 9、Round 9.1与Lightweight TODO refinement必须先各自标�
 
 - `PreparedCompactionSummaryCall` one-shot seam；
 - active target exact reuse与idle purpose-neutral one-shot resolution；
-- main model exact SYSTEM/semantic-only tools/prefix；
+- main model exact SYSTEM/semantic-only tools/semantic prefix；
+- 对exact summary slice复用Round 5A.2 selected hydration与`FrozenProviderWireInputPlan`，发送native actual prefix；
+- native replacement、summary actual wire plan与one-shot open exact join同一个cut/scope/target/placement-bound hydration fingerprint；零replacement不构造empty hydration；
 - purpose gate与tool_choice none；
 - one repair ephemeral denial；
 - prompt/output validator；
@@ -1978,7 +2006,8 @@ Round 7.1、Round 9、Round 9.1与Lightweight TODO refinement必须先各自标�
 
 ### 20.1 前置Round retained与successor Capability integration
 
-- Round 7.1、Round 9、Round 9.1与Lightweight TODO refinement activation evidence hash与public DTO manifest exact匹配；
+- Round 5A.2、Round 7.1、Round 9、Round 9.1与Lightweight TODO refinement activation evidence hash与public DTO manifest exact匹配；
+- Round 5A.2 metadata-only manifest read、selected hydration、replay-target gate与restart suites原样retained；Round 5B不定义第二套replay DTO/reader；
 - Round 9 normal cold/direct/meta/catalog/list/inspect/use/unavailable/schema-replacement suites原样retained，Round 5B不新增同义unit suite；
 - Round 9.1 normal Skill add/change/remove、textual/configured activation与ordinary read suites原样retained；
 - summary request始终使用old installed `CapabilityEpochPredecessor`的exact native tools与old catalog message prefix；
@@ -1993,7 +2022,7 @@ Round 7.1、Round 9、Round 9.1与Lightweight TODO refinement必须先各自标�
 
 - prior epoch之后又接纳USER_MESSAGE/USER_STEER/tool result时，source view覆盖到exact safe head；
 - EMPTY_COLD、COMPATIBLE_APPEND与PENDING_NON_COMPACTION_RESET三态；
-- source view组合`FrozenCanonicalCompileSnapshot`、`ModelInputCompileBinding`、optional predecessor epoch view与最小`FrozenCompactionProviderProjection`；compatible projection只存append suffix，cold/reset projection才存完整SYSTEM/messages，且不存在第二份tools/epoch/frontier/source-head/estimate；current safe head从canonical compile cut派生，predecessor frontier只用于prefix proof；
+- source view组合Round 5A.2 `FrozenCanonicalProviderDispatchRead`、`ModelInputCompileBinding`、optional predecessor epoch view与最小`FrozenCompactionProviderProjection`；dispatch read唯一组合canonical compile snapshot与同RR metadata-only replay manifest，source view不hydrate body；compatible projection只存append suffix，cold/reset projection才存完整SYSTEM/messages，且不存在第二份tools/epoch/frontier/source-head/estimate；current safe head从canonical compile cut派生，predecessor frontier只用于prefix proof；
 - source view超过effective provider budget时仍能形成合法projection/estimate而不能伪造`FrozenCompiledModelInput`；summary slice必须单独回到budget内；
 - `FrozenModelToolSurface`是old provider tool surface唯一owner；source view只组合Round 9 `CapabilityEpochPredecessor`，不复制MCP exposure/spec tuple；
 - source view whole-budget可超soft input limit但不越physical working-set，实际summary slice必须可open；
@@ -2022,11 +2051,20 @@ Chat Completions与Responses分别证明：
 ~~~text
 summary SYSTEM == exact source-view materialized_system_prompt()
 summary tools == exact source-view normal_compile_binding.tool_surface.tool_specs
-summary messages[:-1] == exact source-view materialized_messages() prefix
-summary last message == synthetic summary request
+summary semantic messages[:-1] == exact source-view materialized_messages() prefix
+summary semantic last message == synthetic summary request
+summary actual input == exact FrozenProviderWireInputPlan materialization
 ~~~
 
 - COMPATIBLE_APPEND时，与prior epoch重叠的SYSTEM/tools/messages逐字相等；
+- actual input只hydrate semantic prefix中selected + replay-compatible assistant bodies；Responses reasoning/message/function_call与Chat closed fields保持native shape；
+- hydration exact绑定session、scope、source manifest cut、summary replay target与selected assistant placements；cross-session/child/cut carrier拒绝；
+- ordinary AGENT call与same endpoint/model/semantic transport binding/codec/replay contract的summary call得到相同replay target fingerprint；purpose与`tool_choice=none`不参与compatibility；
+- cut read、tail trials、selected hydration与wire quote共享一个compaction-planning absolute deadline，hydration transaction不重置预算；
+- summary native replacements iff final wire plan携带本次selected hydration fingerprint；cross-session/scope/cut/tail proof及CAS失败后的hydration不可复用；
+- COMPATIBLE_APPEND actual wire overlap与predecessor epoch wire plan逐项、逐字相等；
+- idle restart没有predecessor epoch时也从Round 5A.2 durable manifest/body重建native summary prefix，不退化为generic semantic messages；
+- target incompatible时按Round 5A.2显式cold semantic continuation，不跨Chat/Responses翻译；
 - canonical suffix在prior epoch之后、summary freeze之前提交时，summary prefix或retained tail必须exact覆盖，不得提前推进source cut；
 - EMPTY_COLD/PENDING_NON_COMPACTION_RESET语义正确但不伪造remote-cache命中承诺；
 - current MCP physical reconnect但semantic schema相同不改变summary prefix；
@@ -2158,7 +2196,7 @@ summary last message == synthetic summary request
 - source tree无BACKGROUND_COMPACTION production binding；
 - blob GC仍正确保护snapshot/tool-result/memory引用；
 - auxiliary governor model保留；
-- oracle exact 28/24/11/1/23/0。
+- oracle exact 28/24/11/1/24/0。
 
 ---
 
@@ -2305,7 +2343,7 @@ PULSARA_POSTGRES_DSN=postgresql://pulsara:pulsara@localhost:5432/pulsara
 
 Round 5B只有在以下全部成立时才能标记ACTIVATED：
 
-- Round 7.1、Round 9、Round 9.1与Lightweight TODO refinement已分别ACTIVATED；普通ToolResult projection、MCP catalog/list/inspect/use/direct gate、Skill discovery/read与TODO owner/live projection不属于Round 5B production slice；
+- Round 5A.2、Round 7.1、Round 9、Round 9.1与Lightweight TODO refinement已分别ACTIVATED；durable replay、普通ToolResult projection、MCP catalog/list/inspect/use/direct gate、Skill discovery/read与TODO owner/live projection不属于Round 5B production slice；
 - summary继续old epoch exact native tools、catalog heads与ordinary Skill ToolResult prefix；summary期间current Capability变化不改变旧request；
 - active successor以Round 9 owner inventories、complete registry、planning cut与standard exposure plan重新冻结current capability；compatible old DIRECT保留，完整READY_CLEAN NEW cohort只有在整体fit时才promotion；
 - active successor semantic plan、effective MCP/Skill heads与retained Skill selection在`ActiveCompactionInstallationResources`中各出现一次；normal physical access只覆盖相容slot/execution能力，latest MCP generation仍只由supervisor拥有；
@@ -2314,7 +2352,7 @@ Round 5B只有在以下全部成立时才能标记ACTIVATED：
 - provider context-error不会reactive compact；
 - summary使用当前主模型与exact FrozenCompactionSourceView；COMPATIBLE_APPEND时prior SYSTEM/tools/messages重叠prefix逐字不变；
 - source view覆盖safe canonical head且不注册/推进normal continuity candidate；
-- summary通过独立`PreparedCompactionSummaryCall`发送旧exact prefix与semantic tool specs，wire tool_choice=none，且没有continuity permit、executor borrow或tool callback；physical tools绝对不可执行；
+- summary通过独立`PreparedCompactionSummaryCall`复用Round 5A.2 cut/scope/target/placement-bound selected hydration与`FrozenProviderWireInputPlan`发送旧exact native prefix和semantic tool specs；same endpoint/model/semantic transport binding/codec/replay contract下purpose与wire tool_choice=none不改变replay target fingerprint；summary没有continuity permit、executor borrow或tool callback，`materialized_messages()`不能被直接发送，physical tools绝对不可执行；
 - active summary exact复用dispatch target；idle summary由同一purpose-neutral resolver独立冻结current Host primary target，不制造normal dispatch state；
 - summary只负责语义，Runtime重建current state；
 - protected tail最多3个complete tool groups且pairing-safe；
@@ -2332,9 +2370,10 @@ Round 5B只有在以下全部成立时才能标记ACTIVATED：
 - reader/repository复用一个canonical range fingerprint builder，覆盖ordered blocks、ToolResult timing/artifact、closure与cut-visible late outcome；
 - source view、prefix proof、protected-tail selection、canonical adoption与normal tool-surface physical access均遵守single-owner DTO contract：existing frozen carriers被组合而不重新摊平，数据库重复列只由central factory派生为只读row mirrors；
 - Host-wide只串行summary physical execution，先在锁外取得lane、再recapture并安装exact-scope fence；canonical admission fence仅覆盖target scope及其source-head producers；
+- 每个compaction planning attempt只有一个120秒absolute deadline，贯穿cut、tail、selected replay hydration与wire quote；hydration的新read-only transaction不得重置预算；
 - canonical transcript从未删除或改写；
-- 无replacement history、durable compaction job、receipt、checkpoint、repair、replay或memory double call；
-- durable job universe被删除，oracle为28/24/11/1/23/0；
+- 无compiled replacement history、durable compaction job、receipt、checkpoint、repair、event replay/replay worker或memory double call；Round 5A.2唯一entry-bound provider replay relation作为前置能力保留；
+- durable job universe被删除，Round 5A.2 replay relation保留，oracle为28/24/11/1/24/0；
 - targeted、PostgreSQL、retained、full pytest、static、Go与real-provider dogfood通过；
 - Gap Index同步记录Round 7.1 normal ToolResult投影、Round 9/9.1与Lightweight TODO前置、PHC-07B恢复，不扩大Go高级UI、memory extraction或hierarchical subagent范围。
 

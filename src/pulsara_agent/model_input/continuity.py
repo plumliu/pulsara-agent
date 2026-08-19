@@ -13,10 +13,8 @@ import json
 
 from pulsara_agent.llm.input import LLMMessage, MessageRole
 from pulsara_agent.llm.estimator import TokenEstimate
-from pulsara_agent.llm.request import (
-    FrozenProviderWireInputPlan,
-    ProviderAssistantReplayFragment,
-)
+from pulsara_agent.llm.provider_replay import ProviderAssistantReplayFragment
+from pulsara_agent.llm.request import FrozenProviderWireInputPlan
 from pulsara_agent.model_input.contracts import (
     ContextSourceKind,
     ContextTrustClass,

@@ -2,13 +2,15 @@
 
 > 状态：**DRAFT — NOT ACTIVATED**
 >
-> 记录日期：2026-08-18
+> 记录日期：2026-08-19
 >
 > 当前代码基线：`e97f1b11ff31aa2b029d78677e41fa90fd62a585`
 >
 > Codex 本地参考基线：`6138909d6ec58b2fbe635ef973e02caecad5a5aa`
 >
 > Claude Code 本地参考基线：`5a774a2b62d7949c1d94e0b726281554d7893cfd`
+>
+> Claude Plugin 市场样本基线：`anthropics/claude-plugins-official@49b5ab1a022e9f7daa72e35ec10bff3ee20a4a52`
 >
 > 公开包规范：[Agent Plugins Specification 1.0.0](https://agent-plugins.org/specification)（Working Draft）
 >
@@ -31,7 +33,7 @@
 
 - **portable core**：严格遵循 Agent Plugins 1.0.0；
 - **primary host profile**：优先兼容 Codex `.codex-plugin/plugin.json`、`.mcp.json`、`hooks/hooks.json` 与 Codex 11 个 Hook event；
-- **secondary host profile**：读取 Claude Code `.claude-plugin/plugin.json` 中与上述四类组件重叠的固定目录与路径声明，不复制 Claude 的 LSP、monitor、PATH injection、settings、theme、output-style 或 marketplace authority。
+- **secondary host profile**：读取 Claude Code `.claude-plugin/plugin.json` 中与上述四类组件重叠的固定目录与路径声明；Hook 按 Codex-compatible event/handler 最小单元接纳，不复制 Claude 的 LSP、monitor、PATH injection、settings、theme、output-style 或 marketplace authority。
 
 Agent Plugins 1.0.0 只标准化 `skills/` 与 `mcp.json`。Hooks 与 Subagent 是明确的 client extension；本文绝不把它们伪称为 portable 1.0 core。
 
@@ -178,7 +180,7 @@ Hook lifecycle types   11   # 独立process-local vocabulary，不计入前述or
 - remote marketplace、Git clone、auto-update、publisher signing或dependency resolver；
 - Codex Apps / `.app.json`、UI、assets rendering；
 - Claude LSP、monitors、`bin/` PATH injection、settings、themes、output styles、commands；
-- Hook `prompt` 或 `agent` handler；
+- Hook `prompt`、`agent`、`http` 或 `mcp_tool` handler；
 - Hook `updatedInput` argument rewrite；
 - Hook `updatedMCPToolOutput`、`updatedPermissions` 或 `suppressOutput`；
 - Plugin Python entry point、dynamic import、shared-library injection；
@@ -273,7 +275,62 @@ CLAUDE_PLUGIN_DATA = PLUGIN_DATA
 
 以支持大量只依赖路径变量的existing Hook脚本。Claude专属frontmatter、permission、model、LSP与PATH semantics不进入Pulsara。
 
-### 2.4 不照搬的部分
+### 2.4 Claude 官方市场第三方 Plugin 实证
+
+为避免只根据两家宿主文档推断生态形状，本文对 `anthropics/claude-plugins-official` 在固定提交
+`49b5ab1a022e9f7daa72e35ec10bff3ee20a4a52` 的 marketplace 做了一次只读、可复核的静态样本调查。
+
+#### 2.4.1 样本与方法
+
+样本单位是 marketplace entry 对应的**外部 Plugin source root**，不是独立作者，也不是整个去中心化 Claude Plugin 生态：
+
+~~~text
+marketplace entries                         286
+local-source entries                         53
+external object-source entries              233
+unique external repositories                205
+
+external source roots with .claude-plugin   225 / 233
+external source roots with .codex-plugin     87 / 233  ~= 37.3%
+external source roots with hooks/hooks.json  42 / 233  ~= 18.0%
+~~~
+
+对 42 个 exact source-root `hooks/hooks.json`，继续按 external event name 与 handler type 静态分类：
+
+~~~text
+only Codex 11 event names + command handlers  37 / 42  ~= 88.1%
+command-only hook files                       40 / 42
+files containing prompt handlers               2 / 42
+Claude-only event or non-command outliers       5 / 42
+~~~
+
+若把没有 root Hook 的 191 个外部 entry 与上述 37 个 Codex-subset Hook entry 合并，则 `228 / 233 ~= 97.9%` 的样本在**静态 Hook vocabulary/handler shape**上不要求 Claude-only 执行能力。这个比例不能外推为完整 Plugin 兼容率：同一 repository 可贡献多个 entry；脚本可能读取 Claude-only stdin/env；相同 JSON 字段也可能有不同控制语义。
+
+#### 2.4.2 代表性兼容策略
+
+样本并不支持“第三方作者普遍只写一份天然跨宿主 Hook”的强结论。实际出现了三类策略：
+
+1. **显式双轨**：Dash0 同时提供 `.claude-plugin` 与 `.codex-plugin`，Codex manifest 指向独立 `codex/hooks.json`；Claude 文件可以使用更多事件，而 Codex 文件只保留其支持子集。
+2. **脚本内宿主分支**：PostHog 的 Hook 脚本检测 Plugin root/runtime 环境，在 Codex 无法忠实表达 Claude `permissionDecision="ask"` 时主动 no-op。
+3. **核心能力可移植、Hook 增强可降级**：AWS、Expo 等包同时提供 Codex manifest，但个别 Claude Hook 使用 `prompt` handler或 `UserPromptExpansion`；Skills/MCP 仍可工作，不应因该 Hook 不受支持而拒绝整个包。
+
+另有 Semgrep 使用 Claude-only `PostToolBatch`、PayPal 使用 `prompt` handler；这些例子证明 11-event command profile覆盖的是主流交集，不是完整 Claude Hook 语义。Railway 等包也说明“事件名与 handler type相同”仍不等于控制输出语义完全相同。
+
+#### 2.4.3 对 Pulsara 的冻结结论
+
+调查只支持以下克制结论：
+
+- Skills/MCP 是跨宿主最可靠的 Plugin 核心；Hook 是可选、宿主相关的横切增强；
+- Pulsara 应完整实现 Codex 11-event command-hook profile，而不是扩张到 Claude 全量 Hook vocabulary；
+- `.codex-plugin/plugin.json` 存在时，使用 Codex manifest及其显式 Hook path，不与 Claude manifest/default Hook 合并；
+- 只有 `.claude-plugin/plugin.json` 时，Skill、MCP、`agents/`照各自 overlap contract导入，Hook则按event、matcher group、handler最小失败边界normalize；
+- 一个 Claude-only event、`prompt`/`agent` handler或不受支持的matcher只使exact entry不可运行，不能使同文件的受支持command handler、整个Hook component或Plugin core失效；
+- `agents/` package component 与 Hook `type="agent"` 是两个不同概念：前者是PHC-10前的dormant inventory，后者仍为unsupported Hook handler；
+- “Codex-compatible”只表示本文冻结的event、command input/output与控制矩阵；不承诺执行Claude `ask`、Codex `updatedInput`或任意脚本中的宿主私有假设。
+
+这也与OpenAI的Claude Plugin转换指南一致：转换时应适配Codex支持的command hooks，并且不应让Hook成为ChatGPT/Plugin核心工作流的必需条件。
+
+### 2.5 不照搬的部分
 
 | Prior art | 不照搬 | 原因 |
 |---|---|---|
@@ -387,6 +444,25 @@ agents/
 ~~~
 
 Claude custom path若不是plugin-contained `./` path则typed reject对应component。commands、LSP、monitors、output styles、settings、themes与`bin/`不加载，也不让Plugin整体失败。
+
+Claude adapter不是“把Claude Hook JSON整体当作Codex Hook JSON”。它先冻结package/component cut，再对Hook执行以下窄化：
+
+~~~text
+Claude hook file
+  -> bounded structural parse
+  -> for each event entry in configured order
+       unsupported external event -> diagnostic + skip exact event entry
+       supported Codex event      -> continue
+  -> for each matcher group in configured order
+       invalid/unsupported matcher -> diagnostic + skip exact group
+  -> for each handler in configured order
+       type=command                -> normalize into FrozenHookHandlerDefinition
+       type=prompt|agent|http|mcp_tool|unknown
+                                   -> diagnostic + skip exact handler
+  -> publish remaining runnable command definitions
+~~~
+
+只要文件root与`hooks`容器可完整、有界解析，一个不受支持的event或handler不得把同文件中合法的command handler判为`INVALID`。只有JSON损坏、root shape错误、bounds失败或无法确定ordered entry boundary，才把exact Hook file标为`INVALID`。若`.codex-plugin/plugin.json`已按profile precedence胜出，则只读取Codex manifest声明/default选出的Hook source；不得再旁路合并`.claude-plugin`或Claude default Hook。
 
 ### 3.5 Bounds
 
@@ -554,6 +630,9 @@ PluginComponentDisposition
 | MCP top-level invalid | keep | unaffected | INVALID | unaffected | unaffected |
 | one MCP server invalid/unsupported | keep | unaffected | skip exact server | unaffected | unaffected |
 | Hook file invalid | keep | unaffected | unaffected | INVALID file | unaffected |
+| one Hook event unsupported | keep | unaffected | unaffected | skip exact event entry | unaffected |
+| one Hook matcher group unsupported | keep | unaffected | unaffected | skip exact group | unaffected |
+| one Hook handler type unsupported | keep | unaffected | unaffected | skip exact handler | unaffected |
 | one Hook handler invalid | keep | unaffected | unaffected | skip exact handler | unaffected |
 | agents dir present | keep | unaffected | unaffected | unaffected | DEFERRED |
 | symlink escape | keep/reject narrow target | narrow skip | narrow skip | narrow skip | narrow skip |
@@ -673,6 +752,17 @@ Plugin禁用：
 ~~~
 
 V1 handler type只允许`command`。`prompt`与`agent`可parse为`UNSUPPORTED_HANDLER_TYPE`，不得运行。
+
+兼容接纳的单位不是整个文件，而是exact event entry / matcher group / handler：
+
+- event name必须属于本文11个external Codex names；Claude-only `PostToolBatch`、`UserPromptExpansion`、`Notification`、`ConfigChange`、Task lifecycle等均typed skip exact event entry；
+- supported event下的`command` handler继续正常接纳，即使同文件另有unsupported event；
+- `prompt`、`agent`、`http`、`mcp_tool`及unknown handler只typed skip exact handler；同matcher group内其他合法`command` handler保留configured order；
+- handler被跳过后若group为空，group成为diagnostic-only；event下全部group为空时，该event无runnable definition；
+- unsupported definition永远不进入runtime registry、selected-handler count或command trust authority；review/doctor必须仍展示其source location与typed reason；
+- 不因市场样本中某个字段“通常能工作”而推断语义兼容。尤其Claude `permissionDecision="ask"`、Codex `updatedInput`及任意host-private output继续按本文closed output matrix处理。
+
+Hook component aggregate disposition固定为：至少一个runnable command definition则`COMPLETE`并附带窄化diagnostics；没有runnable definition且至少发现一个结构合法但不受支持的entry则`UNSUPPORTED`；文件不存在为`ABSENT`；所有已声明Hook file均因结构/bound错误无法normalize时为`INVALID`。无论哪种disposition，都不影响同Plugin的Skill、MCP或dormant Subagent component。
 
 ### 7.2 Definition bounds
 
@@ -1354,7 +1444,12 @@ src/pulsara_agent/plugins/
 - multiple manifests precedence；
 - selected invalid manifest不得fallback；
 - unsupported Apps/LSP/monitor/bin/settings只诊断；
-- `CLAUDE_PLUGIN_ROOT/DATA` aliases exact。
+- `CLAUDE_PLUGIN_ROOT/DATA` aliases exact；
+- 同包同时存在Codex/Claude manifest时只消费selected profile，Hook source不跨profile merge；
+- Dash0-style Codex manifest显式指向独立Codex Hook file时，以该file为唯一Hook source；
+- Claude-only package的supported command event与unsupported event混合时，只跳过exact unsupported event；
+- Claude-only package的command与prompt/agent/http/mcp_tool混合时，只跳过exact unsupported handler；
+- `agents/` inventory与Hook `type="agent"`分别得到DEFERRED与UNSUPPORTED，不得混淆。
 
 ### 16.3 Install/composition
 
@@ -1373,6 +1468,9 @@ src/pulsara_agent/plugins/
 - exact definition hash变化撤销trust；
 - enable不自动trust；
 - unsupported prompt/agent handlers不运行；
+- unsupported http/mcp_tool handlers不运行；
+- mixed file中合法command handler仍进入registry，unsupported sibling只进入diagnostic；
+- PostToolBatch/UserPromptExpansion等Claude-only event不进入11-event registry；
 - unsafe regex/backreference拒绝；
 - matcher aliases；
 - JSON preparse bounds。
@@ -1453,11 +1551,11 @@ Architecture guards：
 Round 9.2只有同时满足以下条件才可标记`ACTIVATED`：
 
 1. Agent Plugins 1.0 portable manifest、skills与MCP conformance通过；
-2. Codex profile是primary兼容层，Claude overlap profile可加载；
+2. Codex profile是primary兼容层，Claude overlap profile可按event/group/handler最小边界加载；
 3. Plugin固定为bundle/source contributor，不是leaf/executor；
 4. Skill/MCP exact进入Round 9/9.1既有owner；
 5. 11项`HookEventType`全部存在且带`Event`后缀；
-6. external Codex event name与JSON config可用；
+6. external Codex event name与JSON config可用；Claude-only event/handler只窄化exact entry；
 7. command Hook exact trust、bounds、concurrency、kill/join闭合；
 8. Hook不能改写BASE_SYSTEM、provider tools、canonical ToolResult或repository rows；
 9. model-visible Hook output只为append-only `UNTRUSTED_OBSERVATION`；
@@ -1525,6 +1623,17 @@ Round 5B只需：
 - `/Users/plumliu/Desktop/python_workspace/claude-code/src/utils/plugins/loadPluginAgents.ts`：Agent component；
 - `/Users/plumliu/Desktop/python_workspace/claude-code/src/utils/hooks/hookEvents.ts`：Claude lifecycle Hook vocabulary。
 
+### 19.4 Claude 官方市场固定样本
+
+- [官方marketplace固定提交](https://github.com/anthropics/claude-plugins-official/blob/49b5ab1a022e9f7daa72e35ec10bff3ee20a4a52/.claude-plugin/marketplace.json)：本文§2.4的286项总体inventory与233项external-source sample；
+- [Dash0 agent plugin](https://github.com/dash0hq/dash0-agent-plugin)：`.claude-plugin`与`.codex-plugin`双轨manifest、独立Codex Hook file；
+- [PostHog AI plugin Hook](https://github.com/PostHog/ai-plugin/blob/main/hooks/gate-exec-write.sh)：脚本内识别宿主并对Codex不支持的Claude permission语义降级；
+- [AWS databases-on-aws Hook](https://github.com/awslabs/agent-plugins/blob/main/plugins/databases-on-aws/hooks/hooks.json)：common `PostToolUse` event搭配Claude `prompt` handler；
+- [Expo Hook](https://github.com/expo/skills/blob/main/plugins/expo/hooks/hooks.json)：common events与Claude-only `UserPromptExpansion`混合；
+- [Semgrep Guardian Hook](https://github.com/semgrep/guardian/blob/main/plugin/hooks/hooks.json)：Claude-only `PostToolBatch`代表样本。
+
+这些repository链接是代表性证据，不替代固定marketplace inventory。第三方repository `main` 会变化；activation evidence若重新声称相同统计值，必须记录重新探测的exact commit、entry source root与计数脚本摘要，不能把本文数字当作永久生态事实。
+
 ---
 
 ## 20. 最终冻结
@@ -1554,4 +1663,4 @@ never
   -> durable plugin/hook recovery graph
 ~~~
 
-它既不是把Claude Code的整个生态复制进Pulsara，也不是发明一个只供Pulsara使用的新Plugin格式；它以Agent Plugins 1.0为portable core，以Codex为主要运行时兼容目标，并把Pulsara真正拥有authority的部分交还已有owner。
+它既不是把Claude Code的整个生态复制进Pulsara，也不是发明一个只供Pulsara使用的新Plugin格式；它以Agent Plugins 1.0为portable core，以Codex-compatible command-hook profile为主要运行时兼容目标，对Claude包使用逐entry overlap admission，并把Pulsara真正拥有authority的部分交还已有owner。

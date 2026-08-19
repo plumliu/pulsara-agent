@@ -34,7 +34,10 @@ from pulsara_agent.conversation_kernel.repository import (
     ConversationKernelRepository,
     StaleHostWriter,
 )
-from pulsara_agent.llm.request import ProviderAssistantReplayFragment
+from pulsara_agent.llm.provider_replay import (
+    PreparedDurableProviderAssistantReplay,
+    ProviderReplayDisposition,
+)
 from pulsara_agent.model_input.contracts import PreparedProviderInputCut
 from pulsara_agent.model_input.continuity import ProviderInputContinuityScope
 from pulsara_agent.primitives.context import context_fingerprint, thaw_json
@@ -61,7 +64,9 @@ class PreparedAssistantMessageSettlement:
     continuity_scope: ProviderInputContinuityScope
     continuity_epoch_nonce: str
     continuity_epoch_revision: int
-    replay_fragment: ProviderAssistantReplayFragment | None = field(
+    provider_wire_api: str
+    provider_replay_disposition: ProviderReplayDisposition
+    provider_replay: PreparedDurableProviderAssistantReplay | None = field(
         default=None, repr=False
     )
 
@@ -76,10 +81,21 @@ class PreparedAssistantMessageSettlement:
             or self.continuity_scope.session_id != self.cut.session_id
         ):
             raise ValueError("assistant settlement candidate is invalid")
-        if self.replay_fragment is not None and (
-            self.replay_fragment.assistant_entry_id != self.entry_id
+        if (
+            (self.provider_replay is not None)
+            != (
+                self.provider_replay_disposition
+                is ProviderReplayDisposition.NATIVE_REPLAY
+            )
+            or (
+                self.provider_replay is not None
+                and (
+                    self.provider_replay.assistant_entry_id != self.entry_id
+                    or self.provider_replay.wire_api != self.provider_wire_api
+                )
+            )
         ):
-            raise ValueError("assistant replay fragment targets another entry")
+            raise ValueError("assistant replay composite is invalid")
         expected = assistant_settlement_candidate_fingerprint(
             cut=self.cut,
             entry_id=self.entry_id,
@@ -91,7 +107,9 @@ class PreparedAssistantMessageSettlement:
             continuity_scope=self.continuity_scope,
             continuity_epoch_nonce=self.continuity_epoch_nonce,
             continuity_epoch_revision=self.continuity_epoch_revision,
-            replay_fragment=self.replay_fragment,
+            provider_wire_api=self.provider_wire_api,
+            provider_replay_disposition=self.provider_replay_disposition,
+            provider_replay=self.provider_replay,
         )
         if self.candidate_fingerprint != expected:
             raise ValueError("assistant settlement candidate fingerprint mismatch")
@@ -109,7 +127,9 @@ def assistant_settlement_candidate_fingerprint(
     continuity_scope: ProviderInputContinuityScope,
     continuity_epoch_nonce: str,
     continuity_epoch_revision: int,
-    replay_fragment: ProviderAssistantReplayFragment | None,
+    provider_wire_api: str,
+    provider_replay_disposition: ProviderReplayDisposition,
+    provider_replay: PreparedDurableProviderAssistantReplay | None,
 ) -> str:
     def content_value(value: CanonicalContent) -> tuple[object, ...]:
         return (
@@ -162,10 +182,10 @@ def assistant_settlement_candidate_fingerprint(
                 continuity_epoch_nonce,
                 continuity_epoch_revision,
             ),
-            "replay": (
-                None
-                if replay_fragment is None
-                else replay_fragment.fragment_fingerprint
+            "provider_wire_api": provider_wire_api,
+            "provider_replay_disposition": provider_replay_disposition.value,
+            "provider_replay": (
+                None if provider_replay is None else provider_replay.fragment_fingerprint
             ),
         },
     )
@@ -290,7 +310,7 @@ class AssistantMessageSettlementOwner:
         self, candidate: PreparedAssistantMessageSettlement
     ) -> AcceptedEntry:
         reservation: ProcessLocalAssistantReplayFragmentReservation | None = None
-        if candidate.replay_fragment is not None:
+        if candidate.provider_replay is not None:
             # This is the last fallible capacity gate.  It runs before any
             # canonical assistant mutation and remains charged across
             # ACK-unknown confirmation/reissue of the same stable candidate.
@@ -298,7 +318,7 @@ class AssistantMessageSettlementOwner:
                 scope=candidate.continuity_scope,
                 epoch_nonce=candidate.continuity_epoch_nonce,
                 epoch_revision=candidate.continuity_epoch_revision,
-                fragment=candidate.replay_fragment,
+                fragment=candidate.provider_replay.fragment(),
             )
         try:
             for attempt in range(
@@ -312,6 +332,11 @@ class AssistantMessageSettlementOwner:
                         entry_id=candidate.entry_id,
                         parent_content=candidate.parent_content,
                         blocks=candidate.blocks,
+                        provider_wire_api=candidate.provider_wire_api,
+                        provider_replay_disposition=(
+                            candidate.provider_replay_disposition
+                        ),
+                        provider_replay=candidate.provider_replay,
                         complete_turn=candidate.complete_turn,
                         occurred_at=candidate.occurred_at,
                         actor_id=candidate.actor_id,
@@ -332,6 +357,11 @@ class AssistantMessageSettlementOwner:
                             entry_id=candidate.entry_id,
                             parent_content=candidate.parent_content,
                             blocks=candidate.blocks,
+                            provider_wire_api=candidate.provider_wire_api,
+                            provider_replay_disposition=(
+                                candidate.provider_replay_disposition
+                            ),
+                            provider_replay=candidate.provider_replay,
                             complete_turn=candidate.complete_turn,
                             occurred_at=candidate.occurred_at,
                             actor_id=candidate.actor_id,
@@ -379,7 +409,7 @@ class AssistantMessageSettlementOwner:
                     # Scope close/takeover may already have retired the claim.
                     # Reservation cleanup must not mask the canonical outcome.
                     pass
-            if candidate.replay_fragment is not None:
+            if candidate.provider_replay is not None:
                 # A canonical assistant winner without its required opaque
                 # carrier cannot remain in the same strict-prefix epoch.  A
                 # cold, process-local scope reset is the only safe fallback;

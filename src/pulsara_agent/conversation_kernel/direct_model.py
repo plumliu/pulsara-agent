@@ -25,6 +25,9 @@ from pulsara_agent.llm.adapters.openai.chat_completions import (
     chat_semantic_wire_group,
     chat_tool_wire_items,
 )
+from pulsara_agent.llm.adapters.openai.function_tools import (
+    OPENAI_FUNCTION_TOOL_WIRE_CONTRACT_VERSION,
+)
 from pulsara_agent.llm.adapters.openai.responses import (
     OpenAIResponsesTransport,
     responses_semantic_wire_group,
@@ -33,9 +36,14 @@ from pulsara_agent.llm.adapters.openai.responses import (
 from pulsara_agent.llm.config import LLMConfig
 from pulsara_agent.llm.input import LLMToolCall, ToolSpec
 from pulsara_agent.llm.models import ModelRole
-from pulsara_agent.llm.provider import (
-    ProviderAssistantReplayCodecKind,
-    ProviderReasoningReplayScope,
+from pulsara_agent.llm.provider import ProviderAssistantReplayCodecKind
+from pulsara_agent.llm.provider_replay import (
+    PreparedDurableProviderAssistantReplay,
+    ProviderAssistantReplayFragment,
+    ProviderReplayDisposition,
+    ProviderReplayTargetCompatibilityFact,
+    build_prepared_durable_provider_assistant_replay,
+    build_provider_replay_target_compatibility,
 )
 from pulsara_agent.llm.normalized_transport import (
     NormalizedLLMTransport,
@@ -48,7 +56,6 @@ from pulsara_agent.llm.request import (
     FrozenProviderWireReplacementIdentity,
     LLMContext,
     LLMOptions,
-    ProviderAssistantReplayFragment,
     provider_assistant_public_projection_fingerprint,
     provider_assistant_message_public_projection_fingerprint,
 )
@@ -69,6 +76,10 @@ from pulsara_agent.model_input.contracts import (
 from pulsara_agent.model_input.continuity import (
     FrozenProviderInputEpochView,
     ProcessLocalProviderInputInstallPermit,
+)
+from pulsara_agent.model_input.provider_replay import (
+    FrozenSelectedDurableProviderReplayHydration,
+    selected_message_placements_fingerprint,
 )
 from pulsara_agent.ports.live_agent_event import ProviderStreamPayload
 from pulsara_agent.ports.provider_stream import (
@@ -210,9 +221,7 @@ class CompletedProviderModelExecution:
     replay_payload: ProviderAdapterCompletedReplayPayload | None = field(
         repr=False
     )
-    replay_scope: ProviderReasoningReplayScope
-    provider_profile_fingerprint: str
-    resolved_target_fingerprint: str
+    replay_target: ProviderReplayTargetCompatibilityFact
 
     def bind_assistant_entry(
         self,
@@ -221,13 +230,10 @@ class CompletedProviderModelExecution:
         public_projection_fingerprint: str,
         has_tool_calls: bool,
     ) -> ProviderAssistantReplayFragment | None:
+        """Compatibility helper for retained process-local contract tests."""
+
+        del has_tool_calls
         payload = self.replay_payload
-        profile_scope = self.replay_scope
-        selected = profile_scope.value == "ALL_COMPLETED_RESPONSES" or (
-            profile_scope.value == "TOOL_RESPONSES" and has_tool_calls
-        )
-        if payload is not None and not selected:
-            raise RuntimeError("completed response replay selection drifted")
         if payload is None:
             return None
         if (
@@ -237,31 +243,48 @@ class CompletedProviderModelExecution:
             raise RuntimeError(
                 "completed provider replay differs from its public projection"
             )
-        logical = payload.logical_utf8_bytes
-        values = tuple(thaw_json(item) for item in payload.ordered_items)
-        fragment_fingerprint = context_fingerprint(
-            "pulsara.provider-assistant-replay-fragment:v1",
-            {
-                "codec": payload.codec_kind.value,
-                "scope": profile_scope.value,
-                "profile": self.provider_profile_fingerprint,
-                "target": self.resolved_target_fingerprint,
-                "entry": assistant_entry_id,
-                "public": public_projection_fingerprint,
-                "items": values,
-                "bytes": logical,
-            },
-        )
-        return ProviderAssistantReplayFragment(
-            codec_kind=payload.codec_kind,
-            replay_scope=profile_scope,
-            provider_profile_fingerprint=self.provider_profile_fingerprint,
-            resolved_target_fingerprint=self.resolved_target_fingerprint,
+        return build_prepared_durable_provider_assistant_replay(
+            session_id="process-local-replay",
+            workspace_id="process-local-replay",
             assistant_entry_id=assistant_entry_id,
+            target=self.replay_target,
             public_projection_fingerprint=public_projection_fingerprint,
             ordered_items=payload.ordered_items,
-            logical_utf8_bytes=logical,
-            fragment_fingerprint=fragment_fingerprint,
+        ).fragment()
+
+    def bind_durable_assistant_entry(
+        self,
+        *,
+        session_id: str,
+        workspace_id: str,
+        assistant_entry_id: str,
+        public_projection_fingerprint: str,
+    ) -> tuple[
+        ProviderReplayDisposition,
+        PreparedDurableProviderAssistantReplay | None,
+    ]:
+        payload = self.replay_payload
+        if payload is None:
+            if self.replay_target.wire_api == "openai_responses":
+                raise RuntimeError("Responses completion lacks required native replay")
+            return ProviderReplayDisposition.PUBLIC_SEMANTIC_ONLY, None
+        if (
+            _completed_replay_public_projection_fingerprint(payload)
+            != public_projection_fingerprint
+        ):
+            raise RuntimeError(
+                "completed provider replay differs from its public projection"
+            )
+        return (
+            ProviderReplayDisposition.NATIVE_REPLAY,
+            build_prepared_durable_provider_assistant_replay(
+                session_id=session_id,
+                workspace_id=workspace_id,
+                assistant_entry_id=assistant_entry_id,
+                target=self.replay_target,
+                public_projection_fingerprint=public_projection_fingerprint,
+                ordered_items=payload.ordered_items,
+            ),
         )
 
 
@@ -393,12 +416,19 @@ class PreparedKernelModelExecution:
                             self._completed = CompletedProviderModelExecution(
                                 terminal=item,
                                 replay_payload=item.completed_replay_payload,
-                                replay_scope=profile.reasoning_replay_scope,
-                                provider_profile_fingerprint=(
-                                    _provider_wire_profile_fingerprint(call)
-                                ),
-                                resolved_target_fingerprint=(
-                                    call.target.fact.target_fingerprint
+                                replay_target=(
+                                    build_provider_replay_target_compatibility(
+                                        wire_api=profile.wire_api,
+                                        endpoint_identity_fingerprint=(
+                                            call.target.fact.endpoint_fingerprint
+                                        ),
+                                        normalized_model_identifier=(
+                                            call.target.fact.model_id
+                                        ),
+                                        transport_binding_id=(
+                                            call.target.fact.transport_binding_id
+                                        ),
+                                    )
                                 ),
                             )
                     elif item.terminal_kind is (
@@ -696,6 +726,7 @@ class DirectKernelModelPort:
         prepared_call: PreparedKernelModelCall,
         compiled_input: FrozenCompiledModelInput,
         predecessor_view: FrozenProviderInputEpochView | None,
+        replay_hydration: FrozenSelectedDurableProviderReplayHydration | None = None,
     ) -> FrozenProviderWireInputPlan:
         """Purely freeze the exact provider wire subtree before preflight."""
 
@@ -703,6 +734,20 @@ class DirectKernelModelPort:
             prepared_call=prepared_call,
             compiled_input=compiled_input,
             predecessor_view=predecessor_view,
+            replay_hydration=replay_hydration,
+        )
+
+    @staticmethod
+    def replay_target(
+        prepared_call: PreparedKernelModelCall,
+    ) -> ProviderReplayTargetCompatibilityFact:
+        call = prepared_call.call
+        profile = call.target.model_profile.provider_profile
+        return build_provider_replay_target_compatibility(
+            wire_api=profile.wire_api,
+            endpoint_identity_fingerprint=call.target.fact.endpoint_fingerprint,
+            normalized_model_identifier=call.target.fact.model_id,
+            transport_binding_id=call.target.fact.transport_binding_id,
         )
 
 
@@ -743,6 +788,7 @@ def _provider_wire_profile_fingerprint(call: ResolvedModelCall) -> str:
                 call.target.fact.provider_request_shape_fingerprint
             ),
             "assistant_replay": profile.assistant_replay_contract_fingerprint,
+            "function_tools": OPENAI_FUNCTION_TOOL_WIRE_CONTRACT_VERSION,
         },
     )
 
@@ -897,7 +943,9 @@ def _plan_provider_wire_input(
     prepared_call: PreparedKernelModelCall,
     compiled_input: FrozenCompiledModelInput,
     predecessor_view: FrozenProviderInputEpochView | None,
+    replay_hydration: FrozenSelectedDurableProviderReplayHydration | None,
 ) -> FrozenProviderWireInputPlan:
+    del predecessor_view
     call = prepared_call.call
     binding = prepared_call.compile_binding
     if (
@@ -918,11 +966,20 @@ def _plan_provider_wire_input(
     )
     profile = call.target.model_profile.provider_profile
     profile_fingerprint = _provider_wire_profile_fingerprint(call)
-    fragments = (
-        ()
-        if predecessor_view is None
-        else predecessor_view.assistant_replay_fragments
-    )
+    replay_target = DirectKernelModelPort.replay_target(prepared_call)
+    fragments = () if replay_hydration is None else replay_hydration.fragments
+    if replay_hydration is not None:
+        identity = compiled_input.canonical_input_identity
+        if (
+            replay_hydration.scope.session_id != identity.session_id
+            or replay_hydration.scope.scope_kind
+            is not identity.conversation_scope_kind
+            or replay_hydration.scope.scope_subagent_task_id
+            != identity.scope_subagent_task_id
+            or replay_hydration.replay_target_fingerprint
+            != replay_target.replay_target_fingerprint
+        ):
+            raise ValueError("provider replay hydration does not join wire plan")
     fragment_by_entry = {item.assistant_entry_id: item for item in fragments}
     if len(fragment_by_entry) != len(fragments):
         raise ValueError("provider replay fragments are duplicated")
@@ -967,18 +1024,13 @@ def _plan_provider_wire_input(
         if (
             provider_assistant_message_public_projection_fingerprint(message)
             != fragment.public_projection_fingerprint
-            or fragment.provider_profile_fingerprint != profile_fingerprint
-            or fragment.resolved_target_fingerprint
-            != call.target.fact.target_fingerprint
-            or fragment.codec_kind is not profile.assistant_replay_codec_kind
-            or fragment.replay_scope is not profile.reasoning_replay_scope
+            or fragment.replay_target_fingerprint
+            != replay_target.replay_target_fingerprint
+            or fragment.codec_kind is not replay_target.codec_kind
+            or fragment.provider_replay_contract_fingerprint
+            != replay_target.provider_replay_contract_fingerprint
         ):
             raise ValueError("provider replay fragment does not exact-join input")
-        if (
-            fragment.replay_scope.value == "TOOL_RESPONSES"
-            and not message.tool_calls
-        ):
-            raise ValueError("tool-only replay fragment targets a text response")
         generic = tuple(
             item for ordinal in range(index, end) for item in generic_groups[ordinal]
         )
@@ -1020,6 +1072,24 @@ def _plan_provider_wire_input(
         index = end
     if used_entries != set(fragment_by_entry):
         raise ValueError("an installed provider replay fragment was omitted")
+    hydration_fingerprint = (
+        None
+        if replay_hydration is None
+        else replay_hydration.hydration_fingerprint
+    )
+    if replay_hydration is not None:
+        replay_placements = tuple(
+            item
+            for item in compiled_input.message_placements
+            if item.origin_entry_id in used_entries
+        )
+        if (
+            selected_message_placements_fingerprint(replay_placements)
+            != replay_hydration.selected_message_placements_fingerprint
+            or tuple(item.assistant_entry_id for item in replay_hydration.fragments)
+            != tuple(item.assistant_entry_id for item in replacements)
+        ):
+            raise ValueError("provider replay hydration placements drifted")
 
     root_value = freeze_json(compose_provider_root_policy(compiled_input.system_prompt))
     frozen_tools = tuple(_freeze_wire_object(item) for item in wire_tools)
@@ -1125,6 +1195,7 @@ def _plan_provider_wire_input(
             )
             for item in replacements
         ),
+        "provider_replay_hydration": hydration_fingerprint,
         "wire_system": wire_system,
         "wire_tools": wire_tools_fingerprint,
         "wire_input": wire_input,
@@ -1141,12 +1212,13 @@ def _plan_provider_wire_input(
         resolved_target_semantic_fingerprint=call.target.fact.target_fingerprint,
         materialization=materialization,
         replacements=tuple(replacements),
+        provider_replay_hydration_fingerprint=hydration_fingerprint,
         wire_system_fingerprint=wire_system,
         wire_tools_fingerprint=wire_tools_fingerprint,
         wire_input_prefix_fingerprint=wire_input,
         quote=quote,
         plan_fingerprint=context_fingerprint(
-            "pulsara.provider-wire-input-plan:v1", plan_values
+            "pulsara.provider-wire-input-plan:v2-durable-replay", plan_values
         ),
     )
 

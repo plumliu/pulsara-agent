@@ -280,6 +280,9 @@ CREATE TABLE pulsara_v3.transcript_entries (
     scope_subagent_task_id text,
     context_binding_revision_id text,
     provider_input_through_sequence bigint,
+    provider_wire_api text,
+    provider_replay_disposition text,
+    provider_replay_fragment_id text,
     source_job_id text,
     source_subagent_result_id text,
     source_plan_workflow_id text,
@@ -296,6 +299,7 @@ CREATE TABLE pulsara_v3.transcript_entries (
     content_codec text NOT NULL,
     accepted_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     UNIQUE (session_id, id),
+    UNIQUE (session_id, id, provider_wire_api, provider_replay_fragment_id),
     UNIQUE (session_id, entry_sequence),
     UNIQUE (session_id, source_job_id),
     UNIQUE (session_id, source_subagent_result_id),
@@ -320,11 +324,24 @@ CREATE TABLE pulsara_v3.transcript_entries (
         (entry_kind IN ('ASSISTANT_MESSAGE', 'ASSISTANT_TOOL_REQUEST')
             AND context_binding_revision_id IS NOT NULL
             AND provider_input_through_sequence IS NOT NULL
-            AND provider_input_through_sequence < entry_sequence)
+            AND provider_input_through_sequence < entry_sequence
+            AND provider_wire_api IN (
+                'openai_chat_completions', 'openai_responses'
+            )
+            AND provider_replay_disposition IN (
+                'PUBLIC_SEMANTIC_ONLY', 'NATIVE_REPLAY'
+            )
+            AND (provider_replay_fragment_id IS NOT NULL) =
+                (provider_replay_disposition = 'NATIVE_REPLAY')
+            AND (provider_wire_api <> 'openai_responses'
+                OR provider_replay_disposition = 'NATIVE_REPLAY'))
         OR
         (entry_kind NOT IN ('ASSISTANT_MESSAGE', 'ASSISTANT_TOOL_REQUEST')
             AND context_binding_revision_id IS NULL
-            AND provider_input_through_sequence IS NULL)
+            AND provider_input_through_sequence IS NULL
+            AND provider_wire_api IS NULL
+            AND provider_replay_disposition IS NULL
+            AND provider_replay_fragment_id IS NULL)
     ),
     CHECK (num_nonnulls(source_job_id, source_subagent_result_id) <= 1),
     CHECK ((source_job_id IS NULL AND source_subagent_result_id IS NULL) OR
@@ -412,6 +429,66 @@ CREATE TABLE pulsara_v3.assistant_message_blocks (
             AND content_media_type IS NOT NULL AND content_codec IS NOT NULL)
     )
 );
+
+CREATE TABLE pulsara_v3.provider_assistant_replay_fragments (
+    id text PRIMARY KEY,
+    session_id text NOT NULL,
+    workspace_id text NOT NULL,
+    assistant_entry_id text NOT NULL,
+    wire_api text NOT NULL CHECK (wire_api IN (
+        'openai_chat_completions', 'openai_responses'
+    )),
+    codec_kind text NOT NULL CHECK (codec_kind IN (
+        'CHAT_CLOSED_REASONING_FIELDS', 'RESPONSES_EXACT_OUTPUT_ITEMS'
+    )),
+    provider_replay_contract_fingerprint text NOT NULL,
+    replay_target_fingerprint text NOT NULL,
+    public_projection_fingerprint text NOT NULL,
+    payload_bytes bytea NOT NULL,
+    payload_digest text NOT NULL,
+    payload_size bigint NOT NULL,
+    item_count integer NOT NULL,
+    fragment_fingerprint text NOT NULL,
+    accepted_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    UNIQUE (session_id, id),
+    UNIQUE (session_id, assistant_entry_id),
+    UNIQUE (session_id, assistant_entry_id, id),
+    UNIQUE (session_id, assistant_entry_id, wire_api, id),
+    FOREIGN KEY (session_id, workspace_id)
+        REFERENCES pulsara_v3.sessions (id, workspace_id) ON DELETE RESTRICT,
+    CHECK ((wire_api = 'openai_chat_completions') =
+           (codec_kind = 'CHAT_CLOSED_REASONING_FIELDS')),
+    CHECK (payload_size = octet_length(payload_bytes)),
+    CHECK (payload_size BETWEEN 2 AND 16777216),
+    CHECK (
+        (wire_api = 'openai_chat_completions' AND item_count = 1)
+        OR
+        (wire_api = 'openai_responses' AND item_count BETWEEN 1 AND 4096)
+    ),
+    CHECK (payload_digest ~ '^sha256:[0-9a-f]{64}$'),
+    CHECK (provider_replay_contract_fingerprint ~ '^sha256:[0-9a-f]{64}$'),
+    CHECK (replay_target_fingerprint ~ '^sha256:[0-9a-f]{64}$'),
+    CHECK (public_projection_fingerprint ~ '^sha256:[0-9a-f]{64}$'),
+    CHECK (fragment_fingerprint ~ '^sha256:[0-9a-f]{64}$')
+);
+
+ALTER TABLE pulsara_v3.transcript_entries
+ADD CONSTRAINT transcript_entries_provider_replay_fk
+FOREIGN KEY (
+    session_id, id, provider_wire_api, provider_replay_fragment_id
+)
+REFERENCES pulsara_v3.provider_assistant_replay_fragments (
+    session_id, assistant_entry_id, wire_api, id
+)
+DEFERRABLE INITIALLY DEFERRED;
+
+ALTER TABLE pulsara_v3.provider_assistant_replay_fragments
+ADD CONSTRAINT provider_replay_assistant_entry_fk
+FOREIGN KEY (session_id, assistant_entry_id, wire_api, id)
+REFERENCES pulsara_v3.transcript_entries (
+    session_id, id, provider_wire_api, provider_replay_fragment_id
+)
+DEFERRABLE INITIALLY DEFERRED;
 
 CREATE TABLE pulsara_v3.tool_execution_attempts (
     id text PRIMARY KEY,

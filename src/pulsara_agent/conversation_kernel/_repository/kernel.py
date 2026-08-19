@@ -914,6 +914,9 @@ class _RepositoryKernel:
         content: CanonicalContent,
         context_binding_revision_id: str | None = None,
         provider_input_through_sequence: int | None = None,
+        provider_wire_api: str | None = None,
+        provider_replay_disposition: str | None = None,
+        provider_replay_fragment_id: str | None = None,
         source_job_id: str | None = None,
         source_subagent_result_id: str | None = None,
         source_plan_workflow_id: str | None = None,
@@ -926,13 +929,16 @@ class _RepositoryKernel:
                 id, session_id, workspace_id, turn_id, entry_sequence,
                 entry_kind, conversation_scope_kind, scope_subagent_task_id,
                 context_binding_revision_id, provider_input_through_sequence,
+                provider_wire_api, provider_replay_disposition,
+                provider_replay_fragment_id,
                 source_job_id, source_subagent_result_id,
                 source_plan_workflow_id, source_plan_interaction_id,
                 source_plan_handoff_kind,
                 inline_content, blob_id, content_digest, content_size,
                 content_media_type, content_codec
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                      %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                      %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                      %s, %s, %s, %s)
             """,
             (
                 entry_id,
@@ -945,6 +951,9 @@ class _RepositoryKernel:
                 scope_task_id,
                 context_binding_revision_id,
                 provider_input_through_sequence,
+                provider_wire_api,
+                provider_replay_disposition,
+                provider_replay_fragment_id,
                 source_job_id,
                 source_subagent_result_id,
                 source_plan_workflow_id,

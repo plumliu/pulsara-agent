@@ -8,6 +8,10 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Any
 
+from pulsara_agent.llm.provider_replay import (
+    ProviderAssistantReplayCodecKind,
+    provider_replay_contract_fingerprint,
+)
 from pulsara_agent.primitives.context import context_fingerprint
 
 
@@ -17,14 +21,6 @@ class ThinkingReplayPolicy(StrEnum):
     NEVER = "never"
     WHEN_TOOL_CALLS = "when_tool_calls"
     ALWAYS = "always"
-
-
-class ProviderAssistantReplayCodecKind(StrEnum):
-    """Closed process-local codec used for same-epoch assistant replay."""
-
-    NONE = "NONE"
-    CHAT_CLOSED_REASONING_FIELDS = "CHAT_CLOSED_REASONING_FIELDS"
-    RESPONSES_EXACT_OUTPUT_ITEMS = "RESPONSES_EXACT_OUTPUT_ITEMS"
 
 
 class ProviderReasoningReplayScope(StrEnum):
@@ -145,11 +141,6 @@ class ProviderProfile:
         if len(names) != len(set(names)):
             raise ValueError("chat replay field contracts are duplicated")
         codec = self.assistant_replay_codec_kind
-        scope = self.reasoning_replay_scope
-        if (codec is ProviderAssistantReplayCodecKind.NONE) != (
-            scope is ProviderReasoningReplayScope.NEVER
-        ):
-            raise ValueError("provider replay codec/scope union is invalid")
         if codec is ProviderAssistantReplayCodecKind.CHAT_CLOSED_REASONING_FIELDS:
             if self.wire_api != "openai_chat_completions" or names != tuple(
                 item.field_name for item in CHAT_CLOSED_REASONING_FIELD_CONTRACTS
@@ -174,15 +165,13 @@ class ProviderProfile:
     def assistant_replay_codec_kind(self) -> ProviderAssistantReplayCodecKind:
         if self.wire_api == "openai_responses":
             return ProviderAssistantReplayCodecKind.RESPONSES_EXACT_OUTPUT_ITEMS
-        if self.reasoning_replay_scope is ProviderReasoningReplayScope.NEVER:
-            return ProviderAssistantReplayCodecKind.NONE
-        return ProviderAssistantReplayCodecKind.CHAT_CLOSED_REASONING_FIELDS
+        if self.wire_api == "openai_chat_completions":
+            return ProviderAssistantReplayCodecKind.CHAT_CLOSED_REASONING_FIELDS
+        return ProviderAssistantReplayCodecKind.NONE
 
     @property
     def chat_replay_fields(self) -> tuple[ProviderChatReplayFieldContract, ...]:
         if self.wire_api != "openai_chat_completions":
-            return ()
-        if self.thinking.replay_policy is ThinkingReplayPolicy.NEVER:
             return ()
         overrides = {
             item.field_name: item for item in self.configured_chat_replay_fields
@@ -194,29 +183,12 @@ class ProviderProfile:
 
     @property
     def assistant_replay_contract_fingerprint(self) -> str:
-        return context_fingerprint(
-            "pulsara.provider-assistant-replay-profile:v3",
-            {
-                "profile": self.id,
-                "wire_api": self.wire_api,
-                "codec": self.assistant_replay_codec_kind.value,
-                "scope": self.reasoning_replay_scope.value,
-                "fields": tuple(
-                    (
-                        item.field_name,
-                        item.accumulation_mode.value,
-                        item.required_on_selected_response,
-                        item.final_value_required,
-                    )
-                    for item in self.chat_replay_fields
-                ),
-                "responses_items": ("reasoning", "message", "function_call"),
-                "responses_message_content": ("output_text", "text"),
-                "responses_public_order": (
-                    "optional_single_message_before_ordered_function_calls:v1"
-                ),
-            },
-        )
+        codec = self.assistant_replay_codec_kind
+        if codec is ProviderAssistantReplayCodecKind.NONE:
+            return context_fingerprint(
+                "pulsara.provider-replay-contract:unsupported:v1", self.wire_api
+            )
+        return provider_replay_contract_fingerprint(codec)
 
     def copy_for_api(self, api: str) -> "ProviderProfile":
         return ProviderProfile(

@@ -65,6 +65,10 @@ from pulsara_agent.llm.provider import (
     ThinkingProfile,
     ThinkingReplayPolicy,
 )
+from pulsara_agent.llm.provider_replay import (
+    ProviderAssistantReplayFragment,
+    provider_replay_id,
+)
 from pulsara_agent.llm.request import (
     provider_assistant_message_public_projection_fingerprint,
 )
@@ -136,6 +140,13 @@ from pulsara_agent.model_input.continuity import (
 from pulsara_agent.model_input.lowering import (
     lower_canonical_item,
     source_variant_message,
+)
+from pulsara_agent.model_input.provider_replay import (
+    FrozenDurableProviderReplayManifestCut,
+    freeze_provider_replay_manifest,
+    freeze_provider_replay_manifest_cut,
+    freeze_selected_provider_replay_hydration,
+    select_compatible_provider_replay_manifests,
 )
 from pulsara_agent.model_input.diagnostics import (
     CompileDecisionSampleKind,
@@ -871,6 +882,8 @@ def _compile_and_install_append(
     owner: HostProviderInputContinuityOwner,
     request: StructuredModelInputCompileRequest,
     dispatch_anchor=None,
+    replay_manifest_cut: FrozenDurableProviderReplayManifestCut | None = None,
+    replay_fragments: tuple[ProviderAssistantReplayFragment, ...] = (),
 ):
     scope = ProviderInputContinuityScope(
         session_id=request.canonical_input.identity.session_id,
@@ -895,10 +908,27 @@ def _compile_and_install_append(
     model, prepared_call = _PREPARED_MODEL_CALLS[
         request.compile_binding.binding_fingerprint
     ]
+    replay_hydration = None
+    if replay_manifest_cut is not None:
+        replay_target = DirectKernelModelPort.replay_target(prepared_call)
+        selected, placements = select_compatible_provider_replay_manifests(
+            manifest_cut=replay_manifest_cut,
+            compiled_input=result.compiled_input,
+            replay_target=replay_target,
+        )
+        replay_hydration = freeze_selected_provider_replay_hydration(
+            manifest_cut=replay_manifest_cut,
+            compiled_input=result.compiled_input,
+            replay_target=replay_target,
+            selected_manifests=selected,
+            selected_placements=placements,
+            fragments=replay_fragments,
+        )
     wire_input_plan = model.plan_wire_input(
         prepared_call=prepared_call,
         compiled_input=result.compiled_input,
         predecessor_view=(None if result.reset_reason is not None else planning.predecessor_view),
+        replay_hydration=replay_hydration,
     )
     candidate = _prepared_append_candidate(
         planning=planning,
@@ -916,6 +946,50 @@ def _compile_and_install_append(
     view = owner.current_view(scope)
     assert view is not None
     return result, view
+
+
+def _replay_manifest_cut(
+    snapshot: CanonicalModelInputSnapshot,
+    fragment: ProviderAssistantReplayFragment,
+    *,
+    wire_api: str,
+) -> FrozenDurableProviderReplayManifestCut:
+    replay_id = provider_replay_id(
+        session_id=snapshot.identity.session_id,
+        assistant_entry_id=fragment.assistant_entry_id,
+        wire_api=wire_api,
+    )
+    manifest = freeze_provider_replay_manifest(
+        replay_id=replay_id,
+        assistant_entry_id=fragment.assistant_entry_id,
+        wire_api=wire_api,
+        codec_kind=fragment.codec_kind.value,
+        provider_replay_contract_fingerprint=(
+            fragment.provider_replay_contract_fingerprint
+        ),
+        replay_target_fingerprint=fragment.replay_target_fingerprint,
+        public_projection_fingerprint=fragment.public_projection_fingerprint,
+        payload_digest=fragment.payload_digest,
+        payload_size=fragment.payload_size,
+        item_count=fragment.item_count,
+        fragment_fingerprint=fragment.fragment_fingerprint,
+    )
+    scope = ProviderInputContinuityScope(
+        session_id=snapshot.identity.session_id,
+        scope_kind=snapshot.identity.conversation_scope_kind,
+        scope_subagent_task_id=snapshot.identity.scope_subagent_task_id,
+    )
+    return freeze_provider_replay_manifest_cut(
+        session_id=snapshot.identity.session_id,
+        scope=scope,
+        context_binding_revision_id=(
+            snapshot.identity.context_binding_revision_id
+        ),
+        provider_input_through_sequence=(
+            snapshot.identity.provider_input_through_sequence
+        ),
+        manifests=(manifest,),
+    )
 
 
 def _permission_snapshot():
@@ -2904,7 +2978,7 @@ def test_round3_source_decision_and_compiled_fingerprints_are_golden() -> None:
         "sha256:caee1ae23a161f2c862947ef5b7b2b9a4ae3093bce6117e00bc13a3a19058fbd"
     )
     assert compiled.compiled_semantic_fingerprint == (
-        "sha256:5a5225952d34cd6089dacbd9ebe563bd513523e63909312b8610f8f66fbd53e0"
+        "sha256:61cd8b30cc6b44ade98b950c589004ee90a0ab58bd44ca19d1e3f7536588c0db"
     )
     assert compiled.final_estimate.total_input_tokens == 268
 
@@ -3006,13 +3080,7 @@ def test_round5a1_reasoning_replay_replaces_exact_assistant_and_keeps_wire_prefi
             completed_replay_payload=replay_payload,
         ),
         replay_payload=replay_payload,
-        replay_scope=profile.reasoning_replay_scope,
-        provider_profile_fingerprint=(
-            installed.wire_input_plan.provider_profile_fingerprint
-        ),
-        resolved_target_fingerprint=(
-            first_prepared.call.target.fact.target_fingerprint
-        ),
+        replay_target=DirectKernelModelPort.replay_target(first_prepared),
     )
     public_message = LLMMessage.assistant("answer")
     fragment = completion.bind_assistant_entry(
@@ -3052,6 +3120,12 @@ def test_round5a1_reasoning_replay_replaces_exact_assistant_and_keeps_wire_prefi
         compiler=compiler,
         owner=owner,
         request=second_request,
+        replay_manifest_cut=_replay_manifest_cut(
+            second_request.canonical_input,
+            fragment,
+            wire_api="openai_chat_completions",
+        ),
+        replay_fragments=(fragment,),
     )
     first_wire = installed.wire_input_plan.materialization
     second_wire = successor.wire_input_plan.materialization
@@ -3077,6 +3151,12 @@ def test_round5a1_reasoning_replay_replaces_exact_assistant_and_keeps_wire_prefi
         compiler=compiler,
         owner=owner,
         request=third_request,
+        replay_manifest_cut=_replay_manifest_cut(
+            third_request.canonical_input,
+            fragment,
+            wire_api="openai_chat_completions",
+        ),
+        replay_fragments=(fragment,),
     )
     third_wire = third_view.wire_input_plan.materialization
     assert third_wire.ordered_input_items[
@@ -3131,11 +3211,7 @@ def test_round5a1_responses_replay_preserves_ordered_items_after_wire_prefix() -
             completed_replay_payload=payload,
         ),
         replay_payload=payload,
-        replay_scope=profile.reasoning_replay_scope,
-        provider_profile_fingerprint=(
-            installed.wire_input_plan.provider_profile_fingerprint
-        ),
-        resolved_target_fingerprint=prepared.call.target.fact.target_fingerprint,
+        replay_target=DirectKernelModelPort.replay_target(prepared),
     )
     public_message = LLMMessage.assistant("answer")
     fragment = completion.bind_assistant_entry(
@@ -3173,6 +3249,12 @@ def test_round5a1_responses_replay_preserves_ordered_items_after_wire_prefix() -
         compiler=compiler,
         owner=owner,
         request=second_request,
+        replay_manifest_cut=_replay_manifest_cut(
+            second_request.canonical_input,
+            fragment,
+            wire_api="openai_responses",
+        ),
+        replay_fragments=(fragment,),
     )
     first_wire = installed.wire_input_plan.materialization.ordered_input_items
     second_wire = successor.wire_input_plan.materialization.ordered_input_items

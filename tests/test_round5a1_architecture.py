@@ -41,7 +41,7 @@ def _call_sites(attribute_name: str) -> tuple[Path, ...]:
     return tuple(result)
 
 
-def test_round5a1_assistant_mutation_and_replay_have_single_process_owners() -> None:
+def test_round5a2_assistant_mutation_and_replay_have_closed_owners() -> None:
     assert _call_sites("commit_assistant_message") == (
         KERNEL / "assistant_settlement.py",
     )
@@ -61,10 +61,13 @@ def test_round5a1_assistant_mutation_and_replay_have_single_process_owners() -> 
             for node in ast.walk(tree)
         ):
             replay_constructors.append(path)
-    assert replay_constructors == [KERNEL / "direct_model.py"]
+    assert replay_constructors == [
+        PRODUCTION / "llm/provider_replay.py",
+        PRODUCTION / "model_input/provider_replay.py",
+    ]
 
 
-def test_round5a1_replay_is_process_local_and_remote_history_is_not_authority() -> None:
+def test_round5a2_replay_is_entry_bound_and_remote_history_is_not_authority() -> None:
     forbidden = {
         "previous_response_id": [],
         "ProviderAssistantReplayFragment": [],
@@ -88,6 +91,13 @@ def test_round5a1_replay_is_process_local_and_remote_history_is_not_authority() 
         "previous_response_id": [],
         "ProviderAssistantReplayFragment": [],
     }
+    replay_insert_paths = tuple(
+        path
+        for path in _python_sources()
+        if "INSERT INTO pulsara_v3.provider_assistant_replay_fragments"
+        in path.read_text(encoding="utf-8")
+    )
+    assert replay_insert_paths == (KERNEL / "_repository/conversation.py",)
 
 
 def test_round5a1_responses_allowlist_and_oracles_remain_closed() -> None:
@@ -100,7 +110,7 @@ def test_round5a1_responses_allowlist_and_oracles_remain_closed() -> None:
     assert len(LIVE_EVENT_TYPES) == 24
     assert len(SUBJECT_SLOTS) == 13
     assert len(APPEND_GUARDS) == 2
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 25
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 26
     assert len(JOB_HANDLER_CATALOG) == 1
 
 
@@ -147,3 +157,29 @@ def test_round5a1_terminal_path_does_not_import_compaction_or_recovery() -> None
             for token in forbidden
             for value in (*imports, *identifiers)
         ), path
+
+
+def test_openai_tool_wire_adapters_have_one_shared_function_contract() -> None:
+    chat = (
+        PRODUCTION / "llm/adapters/openai/chat_completions.py"
+    ).read_text(encoding="utf-8")
+    responses = (
+        PRODUCTION / "llm/adapters/openai/responses.py"
+    ).read_text(encoding="utf-8")
+    shared = (
+        PRODUCTION / "llm/adapters/openai/function_tools.py"
+    ).read_text(encoding="utf-8")
+    mcp_supervisor = (
+        PRODUCTION / "conversation_kernel/mcp/supervisor.py"
+    ).read_text(encoding="utf-8")
+    assert "openai_chat_function_tool(tool)" in chat
+    assert "openai_responses_function_tool(tool)" in responses
+    assert '"parameters": tool.parameters' not in chat
+    assert '"parameters": tool.parameters' not in responses
+    assert '"strict": False' in shared
+    assert "lower_openai_function_parameters(item.input_schema)" in mcp_supervisor
+    assert "provider" not in {
+        node.id
+        for node in ast.walk(ast.parse(shared))
+        if isinstance(node, ast.Name)
+    }

@@ -297,7 +297,7 @@ def test_round8_closed_taxonomy_tokenizer_and_process_local_architecture() -> No
     assert len(LIVE_EVENT_TYPES) == 24
     assert len(SUBJECT_SLOTS) == 13
     assert len(APPEND_GUARDS) == 2
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 25
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 26
     tokenizer = MemoryRetrievalTokenizerV1()
     terms = tokenizer.tokenize(
         "请记住 FastAPI routes live at src/api/user_profile.py and error E_CONN_42"
