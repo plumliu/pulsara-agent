@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from pulsara_agent.capability.descriptor import CapabilityDescriptor
+from pulsara_agent.capability.descriptor import BuiltinToolDescriptor
 from pulsara_agent.capability.builtin_catalog import (
     builtin_action_permission_override,
     builtin_tool_catalog_entry,
@@ -13,7 +13,7 @@ from pulsara_agent.capability.builtin_catalog import (
 
 
 @dataclass(frozen=True, slots=True)
-class CapabilityCallClassification:
+class BuiltinToolCallClassification:
     descriptor_id: str
     tool_name: str
     effective_read_only: bool
@@ -48,24 +48,24 @@ class CapabilityCallClassification:
         }
 
 
-class CapabilityCallClassifier(Protocol):
+class BuiltinToolCallClassifier(Protocol):
     def classify(
         self,
         call: Any,
-        descriptor: CapabilityDescriptor,
-    ) -> CapabilityCallClassification: ...
+        descriptor: BuiltinToolDescriptor,
+    ) -> BuiltinToolCallClassification: ...
 
 
-class DefaultCapabilityCallClassifier:
-    def classify_builtin(self, call: Any) -> CapabilityCallClassification:
+class DefaultBuiltinToolCallClassifier:
+    def classify_builtin(self, call: Any) -> BuiltinToolCallClassification:
         entry = builtin_tool_catalog_entry(call.name)
         return self.classify(call, entry.descriptor)
 
     def classify(
         self,
         call: Any,
-        descriptor: CapabilityDescriptor,
-    ) -> CapabilityCallClassification:
+        descriptor: BuiltinToolDescriptor,
+    ) -> BuiltinToolCallClassification:
         try:
             entry = builtin_tool_catalog_entry(call.name)
         except KeyError:
@@ -81,7 +81,7 @@ class DefaultCapabilityCallClassifier:
             else None
         )
         if override is not None:
-            return CapabilityCallClassification(
+            return BuiltinToolCallClassification(
                 descriptor_id=descriptor.id,
                 tool_name=call.name,
                 effective_read_only=override.allowed_in_read_only,
@@ -97,7 +97,7 @@ class DefaultCapabilityCallClassifier:
                     "builtin_catalog_entry_fingerprint": entry.entry_fingerprint,
                 },
             )
-        return CapabilityCallClassification(
+        return BuiltinToolCallClassification(
             descriptor_id=descriptor.id,
             tool_name=call.name,
             effective_read_only=descriptor.is_read_only,

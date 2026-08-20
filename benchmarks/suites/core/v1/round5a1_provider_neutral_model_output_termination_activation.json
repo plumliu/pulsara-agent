@@ -4,6 +4,48 @@
   "generated_at_utc": "2026-08-17T15:26:15Z",
   "captured_head": "e375b5be3a493cf42ec6a7d4aed3392b937935d1",
   "working_tree_semantics": "Round 5A.1 was implemented and verified in the current uncommitted worktree. The clean checkpoint was preserved as the comparison base. No files were staged, committed, or pushed.",
+  "post_round9_responses_terminal_operational_elision_followup": {
+    "completed_at_utc": "2026-08-20T13:31:37Z",
+    "spec_sha256": "7aca2605805b11224749ff47e15367019be1c6ed427fa2dd9994bb243edb93d9",
+    "contract": "A non-empty terminal output item may omit only id and status when the same-index output_item.done is fully settled and every remaining field is exact; the richer done item becomes the replay carrier. Any explicit id/status conflict, other omission or semantic drift fails before assistant acceptance.",
+    "provider_or_model_name_branches": 0,
+    "transport_contract_version": "v5-explicit-terminal-operational-elision",
+    "code_sha256": {
+      "llm/adapters/openai/responses.py": "d734472c9e9012e20f683bc5e5fd3c9c48b539e161b731b68e8cc524c0b81158",
+      "llm/provider_replay.py": "4c65359c38a546c71d170fab537eb2ec74096d6a427ccb9d9a3b4e336e6f15e4",
+      "tests/test_round5a1_provider_output_termination.py": "c3848043a815b91a7daa34137b3a6ea598a5bfb81a711b6159826836b4f42870"
+    },
+    "verification": {
+      "terminal_and_empty_terminal_targeted": "10 passed, 73 deselected",
+      "round5a1_plus_round5a2": "92 passed in 4.55s",
+      "real_bob_responses": "The observed non-empty terminal function_call omitted id/status while the settled done item retained them; after the provider-neutral join, direct MCP, inspect_new_mcp_tool, use_new_mcp_tool and fresh-Host continuation all passed.",
+      "api_key_recorded": false
+    }
+  },
+  "post_round9_responses_empty_terminal_followup": {
+    "completed_at_utc": "2026-08-20T12:46:47Z",
+    "spec_sha256": "87d513ff46beb998e7783a6715b05b140688313dbad0bfbf2947a0384653800e",
+    "contract": "A non-empty response.completed.output remains authoritative. An empty array is accepted only from a zero-based contiguous closed output_item.done sequence with no outstanding item/content and exact delta/done reconciliation; every other shape fails before assistant acceptance.",
+    "provider_or_model_name_branches": 0,
+    "remote_operational_item_fields_excluded": [
+      "metadata",
+      "internal_chat_message_metadata_passthrough"
+    ],
+    "transport_contract_version": "v4-explicit-terminal-done-fallback",
+    "code_sha256": {
+      "llm/adapters/openai/responses.py": "46ac4e92979a9c96943d157f560a2b928ca654bdd9c32b8e1f511a8ddf0a2113",
+      "llm/provider_replay.py": "eaac6ef0559af1da2eabdfee64aeaaa09ef520d6fb0896fb2e425d744865fae0",
+      "tests/test_round5a1_provider_output_termination.py": "38c396efb808bea6ef91166ca20b72aa29bc3d3b2323ee406148068007673cb0"
+    },
+    "verification": {
+      "round5a1": "79 passed",
+      "round5a2": "12 passed",
+      "full_pytest": "793 passed in 115.22s",
+      "postgres_marker": "196 passed, 597 deselected in 78.30s",
+      "real_bob_responses": "DIRECT tool attempt/result, the next model call and fresh-Host durable replay continuation completed; no response body, prompt, arguments, credentials or remote metadata were recorded",
+      "real_probe_completed_at_utc": "2026-08-20T12:48:11.623840Z"
+    }
+  },
   "post_activation_closed_chat_carrier_amendment": {
     "checkpoint_head": "572798cf50650d670dfc2bfcb47e3e6e334d80aa",
     "scope": "Provider-neutral Chat reasoning carrier closure; no schema, durable owner, provider-name branch, or Responses item-contract expansion.",

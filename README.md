@@ -90,10 +90,15 @@ The current Kernel supports:
   remain FULL (independent of adapter wire bytes), while larger output uses a
   UTF-8-safe 8,000-character head/tail preview and bounded on-demand reads;
 - bounded Host-scoped subagents;
-- bundled and local skills;
+- bundled and local skills, projected through one aggregate, append-only
+  `SKILL_CATALOG` source without execution or permission authority;
+- unified, process-local capability discovery: execution-backed Builtins,
+  per-server MCP snapshots, and the aggregate Skill catalog enter one pure
+  frozen registry while their original owners retain physical authority;
 - Host-scoped MCP over stdio and Streamable HTTP, with bounded discovery,
-  scope-filtered direct typed tools, catalog/resource/prompt reads, local
-  authorization, and CLI lifecycle management;
+  cold direct tools, late/native-incompatible meta inspection and invocation,
+  typed unavailable gates, catalog/resource/prompt reads, local authorization,
+  and CLI lifecycle management;
 - advisory PostgreSQL memory with one-candidate `remember`, five closed item
   kinds, USER/domain and exact WORKSPACE scope isolation, best-effort
   governance, multilingual sparse recall, optional 1024-dimensional dense
@@ -212,6 +217,19 @@ or stop before provider open. Artifact guidance is conditional, canonical
 results are never rewritten for budget, and installed same-epoch messages
 remain append-only. Verification is recorded in
 [`round7_1_provider_visible_tool_result_projection_activation.json`](benchmarks/suites/core/v1/round7_1_provider_visible_tool_result_projection_activation.json).
+Round 9 replaces the old parallel tool/Skill exposure structures with one pure,
+provider-neutral capability registry assembled only from owner-issued Builtin,
+MCP, and aggregate-Skill snapshots. Exact target-aware native preflight occurs
+before the parent dispatch cut; Tool planning and Skill projection consume
+sibling views from that same cut. A cold MCP cohort is either wholly admitted
+within both canonical and actual-wire bounds or kept meta-only. Late-ready and
+native-wire-incompatible tools use bounded `inspect_new_mcp_tool` then
+`use_new_mcp_tool`; a policy/route-bound ref becomes callable only after the
+inspection result is installed FULL. Same-epoch SYSTEM and tools remain
+byte-stable, and catalog/route changes append messages only. No capability
+relation, event, job, receipt, generation, or recovery graph was added.
+Verification is recorded in
+[`round9_unified_capability_semantics_activation.json`](benchmarks/suites/core/v1/round9_unified_capability_semantics_activation.json).
 Round 8 replaces the old memory durability/recovery graph with an advisory
 dataset. `remember` atomically accepts one candidate with its ToolResult, while
 governance, cheap-hint reflection, embedding, and reranking remain lossy

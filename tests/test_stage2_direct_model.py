@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from pulsara_agent.capability.contracts import FrozenMcpRouteProjection
 from pulsara_agent.conversation_kernel.direct_model import (
     DirectKernelModelPort,
     KernelModelExecutionRequest,
@@ -63,6 +64,7 @@ from tests.support.model_config import test_llm_config
 from tests.support.round3 import (
     StaticContextSourceCollector,
     StructuredToolPort,
+    prepare_test_model_call,
     static_canonical_compile_facts,
 )
 
@@ -308,7 +310,8 @@ def _prepared_execution(
         conversation_scope_kind=scope_kind,
         scope_subagent_task_id=scope_subagent_task_id,
     )
-    prepared = port.prepare_call(
+    prepared = prepare_test_model_call(
+        port,
         KernelModelPreparationRequest(
             session_id=session_id,
             turn_id=turn_id,
@@ -467,6 +470,26 @@ def _continuity_candidate(request: KernelModelExecutionRequest):
             reset_reason=None,
         ),
         wire_input_plan=request.wire_input_plan,
+        capability_dispatch_cut_fingerprint=context_fingerprint(
+            "test:capability-dispatch-cut:v1",
+            request.prepared_call.native_projection_set.projection_set_fingerprint,
+        ),
+        direct_native_projection_set=request.prepared_call.native_projection_set,
+        mcp_route_projection=FrozenMcpRouteProjection(
+            routes=(),
+            joined_catalog_semantic_fingerprint=context_fingerprint(
+                "test:empty-mcp-catalog:v1", ()
+            ),
+            projection_fingerprint=context_fingerprint(
+                "mcp-route-projection:v1",
+                {
+                    "routes": (),
+                    "catalog": context_fingerprint(
+                        "test:empty-mcp-catalog:v1", ()
+                    ),
+                },
+            ),
+        ),
     )
     owner.register(candidate)
     return owner, candidate

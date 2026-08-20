@@ -28,6 +28,18 @@ MAXIMUM_PROVIDER_REPLAY_JSON_NODES = 65_536
 MAXIMUM_PROVIDER_REPLAY_JSON_DEPTH = 128
 MAXIMUM_PROVIDER_REPLAY_STRING_UTF8_BYTES = 16 << 20
 MAXIMUM_PROVIDER_DISPATCH_COMPOSITE_BYTES = 64 << 20
+RESPONSES_REPLAYABLE_OUTPUT_ITEM_TYPES = frozenset(
+    {"reasoning", "message", "function_call"}
+)
+RESPONSES_NON_REPLAY_OPERATIONAL_ITEM_FIELDS = frozenset(
+    {"metadata", "internal_chat_message_metadata_passthrough"}
+)
+RESPONSES_TERMINAL_ELIDABLE_OPERATIONAL_ITEM_FIELDS = frozenset(
+    {"id", "status"}
+)
+RESPONSES_COMPLETED_OUTPUT_SOURCE_CONTRACT = (
+    "terminal-output-or-contiguous-settled-item-done-with-operational-elision:v3"
+)
 
 PROVIDER_REPLAY_COMPATIBILITY_CONTRACT_VERSION = (
     "pulsara.provider-replay-target-compatibility.v1"
@@ -75,9 +87,16 @@ def provider_replay_contract_fingerprint(
         contract = {
             "wire_api": "openai_responses",
             "codec": codec_kind.value,
-            "items": ("reasoning", "message", "function_call"),
+            "items": tuple(sorted(RESPONSES_REPLAYABLE_OUTPUT_ITEM_TYPES)),
             "message_content": ("output_text", "text"),
             "public_order": "optional_single_message_before_function_calls:v1",
+            "completed_output_source": RESPONSES_COMPLETED_OUTPUT_SOURCE_CONTRACT,
+            "excluded_operational_item_fields": tuple(
+                sorted(RESPONSES_NON_REPLAY_OPERATIONAL_ITEM_FIELDS)
+            ),
+            "terminal_elidable_operational_item_fields": tuple(
+                sorted(RESPONSES_TERMINAL_ELIDABLE_OPERATIONAL_ITEM_FIELDS)
+            ),
             "canonical_array": "pulsara.canonical-json.v1",
         }
     else:
@@ -473,7 +492,7 @@ def _validate_provider_replay_payload_shape(
             raise ValueError("Responses provider replay item count is invalid")
         if any(
             not isinstance(item, dict)
-            or item.get("type") not in {"reasoning", "message", "function_call"}
+            or item.get("type") not in RESPONSES_REPLAYABLE_OUTPUT_ITEM_TYPES
             for item in decoded
         ):
             raise ValueError("Responses provider replay item type is invalid")
@@ -496,6 +515,10 @@ __all__ = [
     "MAXIMUM_PROVIDER_REPLAY_RESPONSES_ITEMS",
     "MAXIMUM_PROVIDER_REPLAY_STRING_UTF8_BYTES",
     "PROVIDER_REPLAY_COMPATIBILITY_CONTRACT_VERSION",
+    "RESPONSES_COMPLETED_OUTPUT_SOURCE_CONTRACT",
+    "RESPONSES_NON_REPLAY_OPERATIONAL_ITEM_FIELDS",
+    "RESPONSES_TERMINAL_ELIDABLE_OPERATIONAL_ITEM_FIELDS",
+    "RESPONSES_REPLAYABLE_OUTPUT_ITEM_TYPES",
     "PreparedDurableProviderAssistantReplay",
     "ProviderAssistantReplayFragment",
     "ProviderAssistantReplayCodecKind",

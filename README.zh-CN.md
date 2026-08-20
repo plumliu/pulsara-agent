@@ -83,10 +83,14 @@ Kernel 当前支持：
   （与adapter physical wire bytes相互独立）；更大输出使用UTF-8-safe的8,000字符
   head/tail preview，并按需有界读取；
 - bounded Host-scoped subagent；
-- bundled/local skills；
-- Host-scoped stdio/Streamable HTTP MCP：bounded discovery、按scope过滤的
-  direct typed tools、catalog/resource/prompt读取、local authorization与CLI
-  lifecycle管理；
+- bundled/local skills，通过单一聚合、append-only的`SKILL_CATALOG` source投影，
+  不获得execution或permission authority；
+- 统一的process-local capability discovery：execution-backed Builtin、每server
+  MCP snapshot与聚合Skill catalog进入同一个pure frozen registry，physical
+  authority仍由原owner持有；
+- Host-scoped stdio/Streamable HTTP MCP：bounded discovery、cold direct tools、
+  late/native-incompatible meta inspect/use、typed unavailable gate、
+  catalog/resource/prompt读取、local authorization与CLI lifecycle管理；
 - advisory PostgreSQL memory：每次`remember`只提交一个candidate，五类closed
   taxonomy，USER/domain与exact WORKSPACE scope隔离，best-effort governance，
   多语种sparse recall，optional 1024维dense recall与explicit rerank，以及
@@ -192,6 +196,16 @@ exact wire plan拥有。FULL不合法时variant可从COMPACT/REF_ONLY/OMITTED开
 boundary停止。Artifact guidance保持conditional，canonical result不因budget被改写，
 same-epoch已安装message仍只允许append suffix。验证证据记录在
 [`round7_1_provider_visible_tool_result_projection_activation.json`](benchmarks/suites/core/v1/round7_1_provider_visible_tool_result_projection_activation.json)。
+Round 9用一个pure、provider-neutral capability registry替换旧Tool/Skill平行
+exposure结构；registry只能由Builtin、MCP与聚合Skill三个原owner签发的snapshot组装。
+Exact target-aware native preflight先于parent dispatch cut，Tool planner与Skill
+projection只消费该cut派生的sibling views。Cold MCP cohort必须同时满足canonical与
+actual-wire双界才整体direct，否则整体meta；late-ready和native-wire-incompatible
+tool通过bounded `inspect_new_mcp_tool`再`use_new_mcp_tool`执行，policy/route-bound
+ref只有在inspect result以FULL安装后才可调用。同epoch的SYSTEM/tools保持byte-stable，
+catalog/route变化只追加message。本轮没有新增capability relation、event、job、
+receipt、generation或recovery graph。验证证据记录在
+[`round9_unified_capability_semantics_activation.json`](benchmarks/suites/core/v1/round9_unified_capability_semantics_activation.json)。
 Round 8用advisory dataset取代旧memory durability/recovery graph。`remember`会与
 ToolResult同事务接受一个candidate；governance、cheap-hint reflection、
 embedding与reranking均保持可丢失的process-local弱完成。Accepted item只能是

@@ -1,4 +1,10 @@
-"""Deterministic ASCII provider naming for direct MCP tools."""
+"""Deterministic flat provider naming for MCP tools.
+
+The model-visible spelling is always ``mcp__<server>__<tool>``.  Both
+separators are exactly two underscores; this is one flat function name, not a
+provider namespace plus a function name.  Raw MCP server/tool identities stay
+separate and are used for physical dispatch.
+"""
 
 from __future__ import annotations
 

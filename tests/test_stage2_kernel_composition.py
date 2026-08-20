@@ -6,41 +6,93 @@ from types import SimpleNamespace
 import pytest
 
 from pulsara_agent.capability.builtin_catalog import builtin_tool_descriptors
-from pulsara_agent.conversation_kernel.capability import KernelCapabilityComposer
-from pulsara_agent.conversation_kernel.host import (
-    KernelHostCore,
+from pulsara_agent.capability.contracts import (
+    FrozenSkillCapabilityDispatchView,
+    skill_capability_dispatch_view_fingerprint,
 )
+from pulsara_agent.capability.local_skills import LocalSkillDiscovery
+from pulsara_agent.conversation_kernel.capability import (
+    KernelSkillProjectionComposer,
+)
+from pulsara_agent.conversation_kernel.host import KernelHostCore
+from pulsara_agent.model_input.contracts import ModelInputScopeKind
+from pulsara_agent.primitives.context import context_fingerprint
 from pulsara_agent.workspace_identity import HostWorkspaceInput
 
 
-class _CapabilityProvider:
+class _SkillProjectionProvider:
     def __init__(self) -> None:
         self.snapshot_calls = 0
 
-    def resolve_projection_for_available_tools(self, context, *, available_tool_names):
+    def snapshot_projection_input(
+        self, *, workspace_root, available_tool_names, deadline_monotonic=None
+    ):
+        del workspace_root, deadline_monotonic
+        self.snapshot_calls += 1
+        assert available_tool_names == frozenset()
+        return LocalSkillDiscovery(skills=(), diagnostics=())
+
+    def resolve_projection_from_snapshot(
+        self, context, *, available_tool_names, discovery
+    ):
         assert context.active_skill_names == frozenset({"review"})
-        assert available_tool_names == frozenset({"read_file"})
+        assert available_tool_names == frozenset()
+        assert discovery == LocalSkillDiscovery(skills=(), diagnostics=())
         return SimpleNamespace(
-            catalog_entries=(SimpleNamespace(name="review"),),
-            active_injections=(SimpleNamespace(name="review"),),
+            catalog_entries=(
+                SimpleNamespace(
+                    name="review", description="Review changes", location="test"
+                ),
+            ),
+            active_injections=(
+                SimpleNamespace(
+                    name="review",
+                    location="test",
+                    content="Review body",
+                    reason="configured",
+                ),
+            ),
             diagnostics=(SimpleNamespace(code="skill_ready"),),
             catalog_prompt="<skills>review</skills>",
             active_skill_prompt="<active-skill>review body</active-skill>",
         )
 
-    def snapshot_projection_input(self, *, workspace_root, available_tool_names):
-        del workspace_root
-        self.snapshot_calls += 1
-        assert available_tool_names == frozenset({"read_file"})
-        return SimpleNamespace(skills=(), diagnostics=())
 
-    def resolve_projection_from_snapshot(
-        self, context, *, available_tool_names, discovery
-    ):
-        assert discovery.skills == ()
-        return self.resolve_projection_for_available_tools(
-            context, available_tool_names=available_tool_names
+def _composer(tmp_path, provider: _SkillProjectionProvider):
+    return KernelSkillProjectionComposer(
+        workspace_root=tmp_path,
+        workspace_kind="project",
+        memory_domain=None,  # type: ignore[arg-type]
+        configured_active_skill_names=frozenset({"review"}),
+        provider=provider,  # type: ignore[arg-type]
+    )
+
+
+def _skill_view(composer: KernelSkillProjectionComposer):
+    owner = composer.freeze_owner_snapshot(
+        conversation_scope_kind=ModelInputScopeKind.ROOT,
+        scope_subagent_task_id=None,
+    )
+    projection = composer.freeze_projection_input(owner)
+    parent = context_fingerprint(
+            "test:parent-capability-cut:v1", "parent"
         )
+    registry = context_fingerprint(
+            "test:capability-registry:v1", "registry"
+        )
+    view = FrozenSkillCapabilityDispatchView(
+        parent_dispatch_cut_fingerprint=parent,
+        registry_fingerprint=registry,
+        registry_skill_facts=(),
+        projection_input=projection,
+        view_fingerprint=skill_capability_dispatch_view_fingerprint(
+            parent_dispatch_cut_fingerprint=parent,
+            registry_fingerprint=registry,
+            registry_skill_facts=(),
+            projection_input=projection,
+        ),
+    )
+    return owner, view
 
 
 def test_every_model_callable_builtin_has_provider_object_schema() -> None:
@@ -56,17 +108,13 @@ def test_every_model_callable_builtin_has_provider_object_schema() -> None:
 def test_kernel_composition_preserves_root_catalog_and_active_skill_prompt(
     tmp_path,
 ) -> None:
-    composer = KernelCapabilityComposer(
-        workspace_root=tmp_path,
-        workspace_kind="project",
-        memory_domain=None,  # type: ignore[arg-type]
-        available_tool_names=frozenset({"read_file"}),
-        configured_active_skill_names=frozenset({"review"}),
-        provider=_CapabilityProvider(),  # type: ignore[arg-type]
-    )
-    projection = composer.resolve_projection(
-        user_input="please review",
-        available_tool_names=frozenset({"read_file"}),
+    provider = _SkillProjectionProvider()
+    composer = _composer(tmp_path, provider)
+    owner, view = _skill_view(composer)
+    projection = composer.compose(
+        view=view,
+        owner=owner,
+        activation_subject=composer.activation_context(user_input="please review"),
     )
     assert projection.catalog_prompt == "<skills>review</skills>"
     assert projection.active_skill_prompt == "<active-skill>review body</active-skill>"
@@ -78,20 +126,19 @@ def test_kernel_composition_preserves_root_catalog_and_active_skill_prompt(
 def test_round3_1_capability_input_is_sampled_once_for_multiple_prefix_trials(
     tmp_path,
 ) -> None:
-    provider = _CapabilityProvider()
-    composer = KernelCapabilityComposer(
-        workspace_root=tmp_path,
-        workspace_kind="project",
-        memory_domain=None,  # type: ignore[arg-type]
-        available_tool_names=frozenset({"read_file"}),
-        configured_active_skill_names=frozenset({"review"}),
-        provider=provider,  # type: ignore[arg-type]
+    provider = _SkillProjectionProvider()
+    composer = _composer(tmp_path, provider)
+    owner, frozen_view = _skill_view(composer)
+    first = composer.compose(
+        view=frozen_view,
+        owner=owner,
+        activation_subject=composer.activation_context(user_input="first"),
     )
-    frozen = composer.freeze_projection_input(
-        available_tool_names=frozenset({"read_file"})
+    second = composer.compose(
+        view=frozen_view,
+        owner=owner,
+        activation_subject=composer.activation_context(user_input="second"),
     )
-    first = composer.resolve_projection_from_frozen(frozen, user_input="first")
-    second = composer.resolve_projection_from_frozen(frozen, user_input="second")
 
     assert provider.snapshot_calls == 1
     assert first.catalog_prompt == second.catalog_prompt == "<skills>review</skills>"
@@ -121,10 +168,10 @@ def test_enabled_mcp_enters_kernel_resource_activation(
         with pytest.raises(RuntimeError, match="resource activation observed"):
             await core.open_session(
                 HostWorkspaceInput(
-                    workspace_kind="project",
                     workspace_root=tmp_path,
+                    workspace_kind="project",
                 )
             )
 
     asyncio.run(exercise())
-    assert activated is True
+    assert activated

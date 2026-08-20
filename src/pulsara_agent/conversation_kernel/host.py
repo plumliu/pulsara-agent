@@ -38,7 +38,7 @@ from pulsara_agent.conversation_kernel.blob import (
     CanonicalContentPublisher,
     PostgresCanonicalBlobStore,
 )
-from pulsara_agent.conversation_kernel.capability import KernelCapabilityComposer
+from pulsara_agent.conversation_kernel.capability import KernelSkillProjectionComposer
 from pulsara_agent.conversation_kernel.contracts import (
     PromptDeliveryMode,
     StoredCommittedEvent,
@@ -407,13 +407,11 @@ class KernelHostSession:
             configs=mcp_configs,
         )
         self._tools.bind_mcp_supervisor(self._mcp_supervisor)
-        self._capabilities = KernelCapabilityComposer(
+        self._tools.seal_builtin_composition()
+        self._capabilities = KernelSkillProjectionComposer(
             workspace_root=workspace.workspace_root,
             workspace_kind=workspace.workspace_kind,
             memory_domain=workspace.memory_domain,
-            available_tool_names=frozenset(
-                spec.name for spec in self._tools.tool_specs
-            ),
             configured_active_skill_names=active_skill_names,
         )
         self._model = DirectKernelModelPort(

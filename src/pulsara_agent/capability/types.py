@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 
 WorkspaceKind = Literal["project", "transient"]
-CapabilityDiagnosticSeverity = Literal["info", "warning", "error"]
+SkillDiagnosticSeverity = Literal["info", "warning", "error"]
 SkillSource = Literal["workspace", "user", "bundled"]
 ActiveSkillReason = Literal["explicit_user_mention", "host_command"]
 SkillAuthRequired = Literal["none", "optional", "required"]
@@ -21,8 +21,8 @@ SkillCliUsageKind = Literal["none", "read", "write", "mixed"]
 
 
 @dataclass(frozen=True, slots=True)
-class CapabilityDiagnostic:
-    severity: CapabilityDiagnosticSeverity
+class SkillDiagnostic:
+    severity: SkillDiagnosticSeverity
     code: str
     message: str
     path: Path | None = None
@@ -39,17 +39,8 @@ class CapabilityDiagnostic:
 
 
 @dataclass(frozen=True, slots=True)
-class CapabilityExecutionSurfaceSnapshotContext:
-    """Pre-RunStart context: static declarations and frozen bindings only."""
-
-    workspace_root: Path
-    workspace_kind: WorkspaceKind
-    available_tool_names: frozenset[str]
-
-
-@dataclass(frozen=True, slots=True)
-class CapabilityProjectionResolveContext:
-    """Post-RunStart context used only for model-visible projections."""
+class SkillProjectionResolveContext:
+    """Post-RunStart context used only for model-visible Skill projections."""
 
     workspace_root: Path
     workspace_kind: WorkspaceKind
@@ -119,15 +110,15 @@ class ActiveSkillInjection:
 
 
 @dataclass(frozen=True, slots=True)
-class RenderedCapabilityPrompt:
+class RenderedSkillPrompt:
     text: str | None
-    diagnostics: tuple[CapabilityDiagnostic, ...] = ()
-    fragments: tuple["RenderedCapabilityPromptFragment", ...] = ()
+    diagnostics: tuple[SkillDiagnostic, ...] = ()
+    fragments: tuple["RenderedSkillPromptFragment", ...] = ()
     source_entry_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
-class RenderedCapabilityPromptFragment:
+class RenderedSkillPromptFragment:
     container_id: str
     fragment_role: Literal["prefix", "entry", "suffix", "static"]
     static_scope: Literal["container_wrapper", "projection_wrapper"] | None

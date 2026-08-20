@@ -15,6 +15,11 @@ from pulsara_agent.llm.input import LLMMessage, MessageRole
 from pulsara_agent.llm.estimator import TokenEstimate
 from pulsara_agent.llm.provider_replay import ProviderAssistantReplayFragment
 from pulsara_agent.llm.request import FrozenProviderWireInputPlan
+from pulsara_agent.capability.contracts import (
+    FrozenMcpRouteProjection,
+    FrozenNativeToolProjectionSet,
+    frozen_tool_spec_fingerprint,
+)
 from pulsara_agent.model_input.contracts import (
     ContextSourceKind,
     ContextTrustClass,
@@ -27,7 +32,7 @@ from pulsara_agent.primitives.context import canonical_json_bytes, context_finge
 
 
 PROVIDER_MESSAGE_LOWERING_CONTRACT = (
-    "pulsara.provider-message-lowering.prefix-continuity.v3-tool-result-full"
+    "pulsara.provider-message-lowering.prefix-continuity.v4-unified-capability"
 )
 FULL_HISTORY_CONTEXT_BASE_IDENTITY = context_fingerprint(
     "pulsara:context-base-semantic-identity:v1",
@@ -342,6 +347,9 @@ class FrozenProviderInputEpochView:
         repr=False
     )
     wire_input_plan: FrozenProviderWireInputPlan = field(repr=False)
+    capability_dispatch_cut_fingerprint: str
+    direct_native_projection_set: FrozenNativeToolProjectionSet = field(repr=False)
+    mcp_route_projection: FrozenMcpRouteProjection = field(repr=False)
     canonical_frontier: ProcessLocalCanonicalFrontier
     source_heads: tuple[ProcessLocalSourceHead, ...]
     final_estimate: TokenEstimate
@@ -362,6 +370,32 @@ class FrozenProviderInputEpochView:
             self.wire_input_plan.compiled_semantic_fingerprint,
             "compiled semantic input",
         )
+        _fingerprint(
+            self.capability_dispatch_cut_fingerprint,
+            "capability dispatch cut",
+        )
+        if (
+            tuple(item.name for item in self.tools)
+            != tuple(
+                item.provider_name
+                for item in self.direct_native_projection_set.tool_versions
+            )
+            or any(
+                frozen_tool_spec_fingerprint(spec)
+                != projection.canonical_tool_spec_fingerprint
+                for spec, projection in zip(
+                    self.tools,
+                    self.direct_native_projection_set.projections,
+                    strict=True,
+                )
+            )
+            or self.wire_input_plan.materialization.tool_items
+            != tuple(
+                item.wire_tool
+                for item in self.direct_native_projection_set.projections
+            )
+        ):
+            raise ValueError("installed native tool proof drifted")
         if self.logical_utf8_bytes != provider_input_logical_utf8_bytes(
             system_prompt=self.system_prompt, tools=self.tools, messages=self.messages
         ):
@@ -471,6 +505,9 @@ class PreparedProviderInputAppendCandidate:
     dispatch_anchor: ProviderInputDispatchAnchor
     resulting_compiled_input: FrozenCompiledModelInput = field(repr=False)
     wire_input_plan: FrozenProviderWireInputPlan = field(repr=False)
+    capability_dispatch_cut_fingerprint: str
+    direct_native_projection_set: FrozenNativeToolProjectionSet = field(repr=False)
+    mcp_route_projection: FrozenMcpRouteProjection = field(repr=False)
     resulting_canonical_frontier: ProcessLocalCanonicalFrontier
     resulting_source_heads: tuple[ProcessLocalSourceHead, ...]
     appended_message_count: int
@@ -494,6 +531,11 @@ class PreparedProviderInputAppendCandidate:
             dispatch_anchor=self.dispatch_anchor,
             resulting_compiled_input=self.resulting_compiled_input,
             wire_input_plan=self.wire_input_plan,
+            capability_dispatch_cut_fingerprint=(
+                self.capability_dispatch_cut_fingerprint
+            ),
+            direct_native_projection_set=self.direct_native_projection_set,
+            mcp_route_projection=self.mcp_route_projection,
             resulting_canonical_frontier=self.resulting_canonical_frontier,
             resulting_source_heads=self.resulting_source_heads,
             appended_message_count=self.appended_message_count,
@@ -574,6 +616,9 @@ def prepared_provider_input_append_candidate_fingerprint(
     dispatch_anchor: ProviderInputDispatchAnchor,
     resulting_compiled_input: FrozenCompiledModelInput,
     wire_input_plan: FrozenProviderWireInputPlan,
+    capability_dispatch_cut_fingerprint: str,
+    direct_native_projection_set: FrozenNativeToolProjectionSet,
+    mcp_route_projection: FrozenMcpRouteProjection,
     resulting_canonical_frontier: ProcessLocalCanonicalFrontier,
     resulting_source_heads: tuple[ProcessLocalSourceHead, ...],
     appended_message_count: int,
@@ -596,6 +641,11 @@ def prepared_provider_input_append_candidate_fingerprint(
             "compiled": resulting_compiled_input.compiled_semantic_fingerprint,
             "wire_plan": wire_input_plan.plan_fingerprint,
             "wire_quote": wire_input_plan.quote.quote_fingerprint,
+            "capability_dispatch_cut": capability_dispatch_cut_fingerprint,
+            "direct_native_projection_set": (
+                direct_native_projection_set.projection_set_fingerprint
+            ),
+            "mcp_route_projection": mcp_route_projection.projection_fingerprint,
             "frontier": {
                 "binding_revision": (
                     resulting_canonical_frontier.latest_context_binding_revision_id

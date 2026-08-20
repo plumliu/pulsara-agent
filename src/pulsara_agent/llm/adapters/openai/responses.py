@@ -39,6 +39,12 @@ from pulsara_agent.llm.provider import (
     ProviderAssistantReplayCodecKind,
     mutable_provider_value,
 )
+from pulsara_agent.llm.provider_replay import (
+    MAXIMUM_PROVIDER_REPLAY_RESPONSES_ITEMS,
+    RESPONSES_NON_REPLAY_OPERATIONAL_ITEM_FIELDS,
+    RESPONSES_REPLAYABLE_OUTPUT_ITEM_TYPES,
+    RESPONSES_TERMINAL_ELIDABLE_OPERATIONAL_ITEM_FIELDS,
+)
 from pulsara_agent.llm.resolution import ResolvedModelCall
 from pulsara_agent.llm.result import TransportUsageReport
 from pulsara_agent.ports.provider_stream import (
@@ -51,8 +57,14 @@ from pulsara_agent.ports.provider_stream import (
 )
 from pulsara_agent.primitives.context import (
     FrozenJsonObjectFact,
+    canonical_json_bytes,
+    context_fingerprint,
     freeze_json,
     thaw_json,
+)
+from pulsara_agent.llm.stream_limits import (
+    MAX_COMPLETED_PROVIDER_RESPONSE_AGGREGATE_BYTES,
+    MAX_PROVIDER_DECODED_JSON_NODES,
 )
 from pulsara_agent.llm.retry import (
     LLMRetryConfig,
@@ -60,11 +72,6 @@ from pulsara_agent.llm.retry import (
     RetryDecisionKind,
     apply_retry_after_cap,
     compute_retry_delay,
-)
-
-
-RESPONSES_REPLAYABLE_OUTPUT_ITEM_TYPES = frozenset(
-    {"reasoning", "message", "function_call"}
 )
 
 
@@ -76,7 +83,7 @@ class OpenAIResponsesTransport:
     timeout_policy: OpenAITransportTimeoutPolicy
     api: str = OPENAI_RESPONSES_API
     binding_id: str = "pulsara.openai.responses"
-    contract_version: str = "v3-explicit-terminal-canonical-order"
+    contract_version: str = "v5-explicit-terminal-operational-elision"
     retry_config: LLMRetryConfig = field(default_factory=LLMRetryConfig)
     openai_sdk_max_retries: int | None = None
     retry_sleep: Callable[[float], Awaitable[None]] = field(
@@ -347,6 +354,16 @@ class ResponsesCompletionAccumulator:
     _text_done: set[int] = field(default_factory=set)
     _reasoning_summary_done: set[int] = field(default_factory=set)
     _reasoning_content_done: set[int] = field(default_factory=set)
+    _output_item_added: dict[int, str] = field(default_factory=dict)
+    _output_item_done: dict[int, FrozenJsonObjectFact] = field(
+        default_factory=dict
+    )
+    _content_part_added: dict[tuple[int, int], str] = field(default_factory=dict)
+    _content_part_done: dict[tuple[int, int], str] = field(
+        default_factory=dict
+    )
+    _stream_item_index_invalid: bool = False
+    _done_output_aggregate_bytes: int = 2
 
     def apply(self, raw_event: Any) -> list[ProviderAdapterStreamItem]:
         event = sdk_event_to_dict(raw_event)
@@ -374,8 +391,9 @@ class ResponsesCompletionAccumulator:
                     "response.completed carried a non-completed response",
                     reason_code="transport_responses_completed_invalid",
                 )
+            completed_output = self._select_completed_output(response)
             events, output_items = _project_completed_response(
-                response,
+                completed_output,
                 builder=self.builder,
                 streamed_text=self._text_parts,
                 text_done=self._text_done,
@@ -431,6 +449,9 @@ class ResponsesCompletionAccumulator:
                     "Responses emitted an unsupported output item",
                     reason_code="transport_responses_output_type_unsupported",
                 )
+            self._record_output_item(event_type=event_type, event=event, item=item)
+        if event_type in {"response.content_part.added", "response.content_part.done"}:
+            self._record_content_part(event_type=event_type, event=event)
         if event_type == "response.output_text.delta":
             output_index = _responses_output_index(event)
             delta = event.get("delta")
@@ -493,6 +514,282 @@ class ResponsesCompletionAccumulator:
             self._reasoning_content_done.add(output_index)
         return translate_responses_event(event, builder=self.builder)
 
+    def _record_output_item(
+        self,
+        *,
+        event_type: str,
+        event: dict[str, Any],
+        item: dict[str, Any],
+    ) -> None:
+        output_index = _optional_responses_output_index(event)
+        if output_index is None:
+            self._stream_item_index_invalid = True
+            return
+        identity = _response_output_item_identity_fingerprint(item)
+        if event_type == "response.output_item.added":
+            if (
+                output_index in self._output_item_added
+                or output_index in self._output_item_done
+            ):
+                raise LLMTransportContractError(
+                    "Responses repeated an output-item added event",
+                    reason_code="transport_responses_output_mismatch",
+                )
+            self._output_item_added[output_index] = identity
+            return
+        if output_index in self._output_item_done:
+            raise LLMTransportContractError(
+                "Responses repeated an output-item done event",
+                reason_code="transport_responses_output_mismatch",
+            )
+        added_identity = self._output_item_added.get(output_index)
+        if added_identity is not None and added_identity != identity:
+            raise LLMTransportContractError(
+                "Responses output-item identity changed before done",
+                reason_code="transport_responses_output_mismatch",
+            )
+        self._output_item_added.pop(output_index, None)
+        normalized = _normalize_response_output_item(item)
+        additional_bytes = len(canonical_json_bytes(normalized)) + (
+            1 if self._output_item_done else 0
+        )
+        if (
+            self._done_output_aggregate_bytes + additional_bytes
+            > MAX_COMPLETED_PROVIDER_RESPONSE_AGGREGATE_BYTES
+        ):
+            raise LLMTransportContractError(
+                "Responses item.done aggregate exceeds its byte bound",
+                reason_code="transport_source_payload_limit_exceeded",
+            )
+        frozen = freeze_json(normalized)
+        if not isinstance(frozen, FrozenJsonObjectFact):
+            raise AssertionError("Responses output item did not freeze")
+        self._output_item_done[output_index] = frozen
+        self._done_output_aggregate_bytes += additional_bytes
+
+    def _record_content_part(
+        self,
+        *,
+        event_type: str,
+        event: dict[str, Any],
+    ) -> None:
+        output_index = _optional_responses_output_index(event)
+        content_index = event.get("content_index")
+        part = event.get("part")
+        if (
+            output_index is None
+            or not isinstance(content_index, int)
+            or isinstance(content_index, bool)
+            or content_index < 0
+            or content_index >= MAXIMUM_PROVIDER_REPLAY_RESPONSES_ITEMS
+            or not isinstance(part, dict)
+        ):
+            self._stream_item_index_invalid = True
+            return
+        key = (output_index, content_index)
+        if (
+            key not in self._content_part_added
+            and key not in self._content_part_done
+            and len(self._content_part_added) + len(self._content_part_done)
+            >= MAX_PROVIDER_DECODED_JSON_NODES
+        ):
+            raise LLMTransportContractError(
+                "Responses content-part sequence exceeds its item bound",
+                reason_code="transport_source_item_limit_exceeded",
+            )
+        identity = _response_content_part_identity_fingerprint(event, part)
+        if event_type == "response.content_part.added":
+            if key in self._content_part_added or key in self._content_part_done:
+                raise LLMTransportContractError(
+                    "Responses repeated a content-part added event",
+                    reason_code="transport_responses_output_mismatch",
+                )
+            self._content_part_added[key] = identity
+            return
+        if key in self._content_part_done:
+            raise LLMTransportContractError(
+                "Responses repeated a content-part done event",
+                reason_code="transport_responses_output_mismatch",
+            )
+        added_identity = self._content_part_added.get(key)
+        if added_identity is not None and added_identity != identity:
+            raise LLMTransportContractError(
+                "Responses content-part identity changed before done",
+                reason_code="transport_responses_output_mismatch",
+            )
+        self._content_part_added.pop(key, None)
+        self._content_part_done[key] = _response_content_part_fingerprint(
+            item_id=event.get("item_id"), part=part
+        )
+
+    def _select_completed_output(
+        self, response: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        raw_output = response.get("output")
+        if not isinstance(raw_output, list):
+            raise LLMTransportContractError(
+                "completed Responses output is absent",
+                reason_code="transport_responses_output_invalid",
+            )
+        if len(raw_output) > MAXIMUM_PROVIDER_REPLAY_RESPONSES_ITEMS:
+            raise LLMTransportContractError(
+                "completed Responses output exceeds its item bound",
+                reason_code="transport_source_item_limit_exceeded",
+            )
+        if raw_output:
+            output = [
+                _normalize_response_output_item(item)
+                if isinstance(item, dict)
+                else item
+                for item in raw_output
+            ]
+            return self._validate_streamed_completion(output)
+
+        # Some Responses-compatible transports emit the complete ordered
+        # output exclusively through output_item.done and leave the terminal
+        # response.output array empty.  Adopt that sequence only when it can
+        # prove the same closed, contiguous, fully-settled response that a
+        # non-empty terminal snapshot would have supplied.
+        if response.get("status") != "completed":
+            raise LLMTransportContractError(
+                "empty terminal Responses output lacks completed status",
+                reason_code="transport_responses_completed_invalid",
+            )
+        output = self._validate_streamed_completion(None)
+        if not self._output_item_done:
+            raise LLMTransportContractError(
+                "completed Responses output is absent",
+                reason_code="transport_responses_output_invalid",
+            )
+        return output
+
+    def _validate_streamed_completion(
+        self, terminal_output: list[dict[str, Any] | object] | None
+    ) -> list[dict[str, Any]]:
+        if self._stream_item_index_invalid:
+            raise LLMTransportContractError(
+                "Responses streamed output lacks a bounded exact index",
+                reason_code="transport_responses_output_mismatch",
+            )
+        if terminal_output is None:
+            if set(self._output_item_added).difference(self._output_item_done):
+                raise LLMTransportContractError(
+                    "Responses completed with an outstanding output item",
+                    reason_code="transport_responses_output_mismatch",
+                )
+            if set(self._content_part_added).difference(self._content_part_done):
+                raise LLMTransportContractError(
+                    "Responses completed with an outstanding content part",
+                    reason_code="transport_responses_output_mismatch",
+                )
+            for parts, done in (
+                (self._text_parts, self._text_done),
+                (self._reasoning_summary_parts, self._reasoning_summary_done),
+                (self._reasoning_content_parts, self._reasoning_content_done),
+            ):
+                if set(parts).difference(done):
+                    raise LLMTransportContractError(
+                        "Responses completed before a streamed semantic item was done",
+                        reason_code="transport_responses_output_mismatch",
+                    )
+
+            expected_indexes = set(range(len(self._output_item_done)))
+            if set(self._output_item_done) != expected_indexes:
+                raise LLMTransportContractError(
+                    "Responses output-item done sequence is not contiguous",
+                    reason_code="transport_responses_output_mismatch",
+                )
+            output = [
+                _thaw_frozen_object(self._output_item_done[index])
+                for index in range(len(self._output_item_done))
+            ]
+        else:
+            output = terminal_output
+            if self._output_item_done:
+                expected_indexes = set(range(len(output)))
+                if set(self._output_item_done) != expected_indexes:
+                    raise LLMTransportContractError(
+                        "terminal Responses output differs from streamed items",
+                        reason_code="transport_responses_output_mismatch",
+                    )
+                selected_output: list[dict[str, Any]] = []
+                for index, item in enumerate(output):
+                    if not isinstance(item, dict):
+                        raise LLMTransportContractError(
+                            "Responses output item is not an object",
+                            reason_code="transport_responses_output_invalid",
+                        )
+                    streamed = _thaw_frozen_object(
+                        self._output_item_done[index]
+                    )
+                    selected = _select_terminal_or_streamed_output_item(
+                        terminal=item,
+                        streamed=streamed,
+                    )
+                    if selected is None:
+                        raise LLMTransportContractError(
+                            "terminal Responses output differs from item.done",
+                            reason_code="transport_responses_output_mismatch",
+                        )
+                    selected_output.append(selected)
+                output = selected_output
+
+        self._validate_done_content_parts(output)
+        if not all(isinstance(item, dict) for item in output):
+            raise LLMTransportContractError(
+                "Responses output item is not an object",
+                reason_code="transport_responses_output_invalid",
+            )
+        return [item for item in output if isinstance(item, dict)]
+
+    def _validate_done_content_parts(
+        self, output: list[dict[str, Any] | object]
+    ) -> None:
+        if self._content_part_done:
+            expected_parts = {
+                (output_index, content_index)
+                for output_index, item in enumerate(output)
+                if isinstance(item, dict) and item.get("type") == "message"
+                for content_index, _part in enumerate(
+                    item.get("content")
+                    if isinstance(item.get("content"), list)
+                    else ()
+                )
+            }
+            if set(self._content_part_done) != expected_parts:
+                raise LLMTransportContractError(
+                    "Responses content-part done sequence is incomplete",
+                    reason_code="transport_responses_output_mismatch",
+                )
+        for (output_index, content_index), part_fingerprint in (
+            self._content_part_done.items()
+        ):
+            if output_index >= len(output):
+                raise LLMTransportContractError(
+                    "Responses content part has no final output item",
+                    reason_code="transport_responses_output_mismatch",
+                )
+            item = output[output_index]
+            if not isinstance(item, dict) or item.get("type") != "message":
+                raise LLMTransportContractError(
+                    "Responses content part is not owned by a message item",
+                    reason_code="transport_responses_output_mismatch",
+                )
+            content = item.get("content")
+            if not isinstance(content, list) or content_index >= len(content):
+                raise LLMTransportContractError(
+                    "Responses content part is absent from its final message",
+                    reason_code="transport_responses_output_mismatch",
+                )
+            final_fingerprint = _response_content_part_fingerprint(
+                item_id=item.get("id"), part=content[content_index]
+            )
+            if final_fingerprint != part_fingerprint:
+                raise LLMTransportContractError(
+                    "final Responses content differs from content_part.done",
+                    reason_code="transport_responses_output_mismatch",
+                )
+
     def finish(self) -> ProviderAdapterTerminal | ProviderStreamFailure:
         if self.failure is not None:
             return self.failure
@@ -538,7 +835,12 @@ def _responses_incomplete_reason(
 
 def _responses_output_index(event: dict[str, Any]) -> int:
     value = event.get("output_index")
-    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+    if (
+        not isinstance(value, int)
+        or isinstance(value, bool)
+        or value < 0
+        or value >= MAXIMUM_PROVIDER_REPLAY_RESPONSES_ITEMS
+    ):
         raise LLMTransportContractError(
             "Responses semantic event lacks a bounded output index",
             reason_code="transport_responses_event_invalid",
@@ -546,8 +848,91 @@ def _responses_output_index(event: dict[str, Any]) -> int:
     return value
 
 
+def _optional_responses_output_index(event: dict[str, Any]) -> int | None:
+    try:
+        return _responses_output_index(event)
+    except LLMTransportContractError:
+        return None
+
+
+def _normalize_response_output_item(item: dict[str, Any]) -> dict[str, Any]:
+    # Remote request/session bookkeeping cannot become replay correctness
+    # authority.  This is a field contract shared by every Responses endpoint,
+    # not a provider-name branch.
+    normalized = dict(item)
+    for field_name in RESPONSES_NON_REPLAY_OPERATIONAL_ITEM_FIELDS:
+        normalized.pop(field_name, None)
+    return normalized
+
+
+def _select_terminal_or_streamed_output_item(
+    *,
+    terminal: dict[str, Any],
+    streamed: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Join one terminal item to its richer exact-settled stream carrier."""
+
+    if terminal == streamed:
+        return terminal
+    terminal_keys = set(terminal)
+    streamed_keys = set(streamed)
+    if terminal_keys.difference(streamed_keys):
+        return None
+    omitted = streamed_keys.difference(terminal_keys)
+    if not omitted or not omitted.issubset(
+        RESPONSES_TERMINAL_ELIDABLE_OPERATIONAL_ITEM_FIELDS
+    ):
+        return None
+    if any(terminal[key] != streamed[key] for key in terminal_keys):
+        return None
+    return streamed
+
+
+def _response_output_item_identity_fingerprint(item: dict[str, Any]) -> str:
+    item_type = item.get("type")
+    identity: dict[str, Any] = {"type": item_type, "id": item.get("id")}
+    if item_type == "message":
+        identity.update({"role": item.get("role"), "phase": item.get("phase")})
+    elif item_type == "function_call":
+        identity.update(
+            {
+                "call_id": item.get("call_id"),
+                "name": item.get("name"),
+            }
+        )
+    elif item_type == "reasoning":
+        identity["format"] = item.get("format")
+    return context_fingerprint("pulsara.responses-output-item-identity:v1", identity)
+
+
+def _response_content_part_identity_fingerprint(
+    event: dict[str, Any], part: dict[str, Any]
+) -> str:
+    identity = {
+        "item_id": event.get("item_id"),
+        "type": part.get("type"),
+    }
+    return context_fingerprint(
+        "pulsara.responses-content-part-identity:v1", identity
+    )
+
+
+def _response_content_part_fingerprint(*, item_id: object, part: object) -> str:
+    return context_fingerprint(
+        "pulsara.responses-content-part:v1",
+        {"item_id": item_id, "part": part},
+    )
+
+
+def _thaw_frozen_object(value: FrozenJsonObjectFact) -> dict[str, Any]:
+    thawed = thaw_json(value)
+    if not isinstance(thawed, dict):
+        raise AssertionError("frozen Responses item did not thaw to an object")
+    return thawed
+
+
 def _project_completed_response(
-    response: dict[str, Any],
+    output: list[dict[str, Any] | object],
     *,
     builder: ProviderLiveItemBuilder,
     streamed_text: dict[int, list[str]],
@@ -557,13 +942,12 @@ def _project_completed_response(
     streamed_reasoning_content: dict[int, list[str]],
     reasoning_content_done: set[int],
 ) -> tuple[list[ProviderAdapterStreamItem], tuple[dict[str, Any], ...]]:
-    output = response.get("output")
-    if not isinstance(output, list) or not output:
+    if not output:
         raise LLMTransportContractError(
             "completed Responses output is absent",
             reason_code="transport_responses_output_invalid",
         )
-    if len(output) > 4096:
+    if len(output) > MAXIMUM_PROVIDER_REPLAY_RESPONSES_ITEMS:
         raise LLMTransportContractError(
             "completed Responses output exceeds its item bound",
             reason_code="transport_source_item_limit_exceeded",

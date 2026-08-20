@@ -182,7 +182,11 @@ _ROUND5A2_CHANGED_METHODS = {
     "confirm_assistant_message_winner",
 }
 _ROUND8_REPOSITORY_DELTA_SHA256 = (
-    "03fc3abf3c68104b8c7b018b330d7c661bc66ea8e84d99d862fb021f75275536"
+    # Round 9 four-provider dogfood exercised the already-allowlisted
+    # renew_host_writer owner with memory_domain_id=None.  Its PostgreSQL
+    # placeholder now carries the explicit text type needed for that closed
+    # optional branch; no method, checkout, lane or result shape changed.
+    "89432941891904de8511879be1b7ebe6bb5a07864921ac78781a31cc95bca846"
 )
 
 

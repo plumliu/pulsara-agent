@@ -1,64 +1,30 @@
-"""Split capability provider protocols.
+"""Local Skill projection output and source-owner protocol.
 
-Execution descriptors are frozen before ``RunStart``. Model-visible catalog and
-active-skill projections are resolved only after that execution surface exists.
-There is intentionally no mixed ``resolve()`` protocol.
+Tool execution discovery no longer passes through a generic provider protocol;
+Builtin and MCP retain their physical owners.  This narrow module remains only
+for the source-specific Skill renderer used by the Round 9 sibling view.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
-
-from pulsara_agent.capability.descriptor import CapabilityDescriptor
 from pulsara_agent.capability.types import (
     ActiveSkillInjection,
-    CapabilityDiagnostic,
-    CapabilityExecutionSurfaceSnapshotContext,
-    CapabilityProjectionResolveContext,
-    RenderedCapabilityPrompt,
+    SkillDiagnostic,
+    RenderedSkillPrompt,
     ResolvedSkillCatalogEntry,
 )
-from pulsara_agent.primitives.capability import CapabilityExecutionSurfaceIdentityFact
 
 
 @dataclass(frozen=True, slots=True)
-class CapabilityDescriptorSnapshotOutput:
-    descriptors: tuple[CapabilityDescriptor, ...] = ()
-    diagnostics: tuple[CapabilityDiagnostic, ...] = ()
-
-
-@dataclass(frozen=True, slots=True)
-class CapabilityProjectionOutput:
+class SkillProjectionOutput:
     catalog_entries: tuple[ResolvedSkillCatalogEntry, ...] = ()
     active_injections: tuple[ActiveSkillInjection, ...] = ()
-    diagnostics: tuple[CapabilityDiagnostic, ...] = ()
+    diagnostics: tuple[SkillDiagnostic, ...] = ()
     catalog_prompt: str | None = None
     active_skill_prompt: str | None = None
-    catalog_rendered: RenderedCapabilityPrompt | None = None
-    active_skill_rendered: RenderedCapabilityPrompt | None = None
+    catalog_rendered: RenderedSkillPrompt | None = None
+    active_skill_rendered: RenderedSkillPrompt | None = None
 
 
-class CapabilityExecutionSurfaceProvider(Protocol):
-    provider_id: str
-
-    def snapshot_descriptors(
-        self,
-        context: CapabilityExecutionSurfaceSnapshotContext,
-    ) -> CapabilityDescriptorSnapshotOutput: ...
-
-
-class CapabilityProjectionProvider(Protocol):
-    provider_id: str
-
-    def resolve_projection(
-        self,
-        context: CapabilityProjectionResolveContext,
-        *,
-        execution_surface: CapabilityExecutionSurfaceIdentityFact,
-    ) -> CapabilityProjectionOutput: ...
-
-
-type CapabilityProviderComponent = (
-    CapabilityExecutionSurfaceProvider | CapabilityProjectionProvider
-)
+__all__ = ["SkillProjectionOutput"]

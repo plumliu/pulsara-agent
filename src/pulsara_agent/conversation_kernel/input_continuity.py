@@ -12,6 +12,10 @@ from enum import StrEnum
 from threading import RLock
 from uuid import uuid4
 
+from pulsara_agent.capability.contracts import (
+    FrozenMcpRouteProjection,
+    FrozenNativeToolProjectionSet,
+)
 from pulsara_agent.model_input.continuity import (
     FrozenProviderInputAppendPlanningInput,
     FrozenProviderInputEpochView,
@@ -75,12 +79,20 @@ class ProcessLocalProviderInputInstallAuthority:
         *,
         candidate_fingerprint: str,
         wire_input_plan: FrozenProviderWireInputPlan,
+        capability_dispatch_cut_fingerprint: str,
+        direct_native_projection_set: FrozenNativeToolProjectionSet,
+        mcp_route_projection: FrozenMcpRouteProjection | None,
     ) -> None:
         """Prove that preflight owns the exact plan registered for this CAS."""
 
         self._owner._require_registered_plan(
             candidate_fingerprint=candidate_fingerprint,
             wire_input_plan=wire_input_plan,
+            capability_dispatch_cut_fingerprint=(
+                capability_dispatch_cut_fingerprint
+            ),
+            direct_native_projection_set=direct_native_projection_set,
+            mcp_route_projection=mcp_route_projection,
         )
 
 
@@ -264,6 +276,11 @@ class HostProviderInputContinuityOwner:
                 != candidate.resulting_compiled_input.message_placements_fingerprint
                 or candidate.wire_input_plan.context_id
                 != candidate.resulting_compiled_input.context_id
+                or candidate.wire_input_plan.materialization.tool_items
+                != tuple(
+                    item.wire_tool
+                    for item in candidate.direct_native_projection_set.projections
+                )
             ):
                 raise ProviderInputContinuityConflict(
                     "provider wire plan does not exact-join compiled input"
@@ -354,6 +371,13 @@ class HostProviderInputContinuityOwner:
                             "successor rewrote the installed tool surface"
                         )
                     if (
+                        candidate.direct_native_projection_set
+                        != installed.direct_native_projection_set
+                    ):
+                        raise ProviderInputContinuityConflict(
+                            "successor rewrote the installed native tool projection"
+                        )
+                    if (
                         compiled.messages[: len(installed.messages)]
                         != installed.messages
                     ):
@@ -424,6 +448,13 @@ class HostProviderInputContinuityOwner:
                 messages=compiled.messages,
                 message_placements=compiled.message_placements,
                 wire_input_plan=candidate.wire_input_plan,
+                capability_dispatch_cut_fingerprint=(
+                    candidate.capability_dispatch_cut_fingerprint
+                ),
+                direct_native_projection_set=(
+                    candidate.direct_native_projection_set
+                ),
+                mcp_route_projection=candidate.mcp_route_projection,
                 canonical_frontier=candidate.resulting_canonical_frontier,
                 source_heads=candidate.resulting_source_heads,
                 final_estimate=compiled.final_estimate,
@@ -648,6 +679,9 @@ class HostProviderInputContinuityOwner:
         *,
         candidate_fingerprint: str,
         wire_input_plan: FrozenProviderWireInputPlan,
+        capability_dispatch_cut_fingerprint: str,
+        direct_native_projection_set: FrozenNativeToolProjectionSet,
+        mcp_route_projection: FrozenMcpRouteProjection | None,
     ) -> None:
         with self._lock:
             if self._closed:
@@ -658,7 +692,19 @@ class HostProviderInputContinuityOwner:
                 if slot.prepared is not None
                 and slot.prepared.candidate_fingerprint == candidate_fingerprint
             )
-            if len(matches) != 1 or matches[0].wire_input_plan is not wire_input_plan:
+            if (
+                len(matches) != 1
+                or matches[0].wire_input_plan is not wire_input_plan
+                or matches[0].capability_dispatch_cut_fingerprint
+                != capability_dispatch_cut_fingerprint
+                or matches[0].direct_native_projection_set
+                != direct_native_projection_set
+                or (
+                    matches[0].mcp_route_projection != mcp_route_projection
+                    if mcp_route_projection is not None
+                    else bool(matches[0].mcp_route_projection.routes)
+                )
+            ):
                 raise ProviderInputContinuityConflict(
                     "provider wire plan was not registered for this candidate"
                 )

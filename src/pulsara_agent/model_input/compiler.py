@@ -38,6 +38,7 @@ from pulsara_agent.model_input.contracts import (
     StructuredModelInputLimits,
     STRUCTURED_MODEL_INPUT_LIMITS,
     ToolResultProviderRenderMode,
+    compiled_tool_result_source_fingerprint,
     compiled_message_placements_fingerprint,
     frozen_compiled_model_input_fingerprint,
     provider_input_item_fingerprint,
@@ -72,7 +73,7 @@ from pulsara_agent.primitives.tool_result_projection import (
 
 
 COMPILER_CONTRACT_VERSION = (
-    "pulsara.structured-model-input-compiler.prefix-continuity.v6-tool-result-full"
+    "pulsara.structured-model-input-compiler.prefix-continuity.v7-unified-capability"
 )
 
 
@@ -85,7 +86,7 @@ class _SacrificeRank(IntEnum):
 
 _SOURCE_POLICY = {
     ContextSourceKind.BASE_SYSTEM: (
-        "pulsara.base-system.prefix-continuity.v4",
+        "pulsara.base-system.prefix-continuity.v5-unified-capability",
         ContextChannel.SYSTEM,
         ContextTrustClass.ROOT_INSTRUCTION,
         ContextBudgetClass.MUST_KEEP,
@@ -134,8 +135,8 @@ _SOURCE_POLICY = {
         (ContextRenderMode.FULL, ContextRenderMode.COMPACT),
         ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
     ),
-    ContextSourceKind.CAPABILITY_CATALOG: (
-        "pulsara.capability-catalog.v2",
+    ContextSourceKind.SKILL_CATALOG: (
+        "pulsara.skill-catalog.v1",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.AUTHORIZED_CAPABILITY_CONTEXT,
         ContextBudgetClass.IMPORTANT,
@@ -149,7 +150,7 @@ _SOURCE_POLICY = {
         ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
     ),
     ContextSourceKind.MCP_CATALOG: (
-        "pulsara.mcp-catalog.v2",
+        "pulsara.mcp-catalog.v3-round9-routes",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.UNTRUSTED_OBSERVATION,
         ContextBudgetClass.IMPORTANT,
@@ -241,7 +242,7 @@ _SOURCE_ABSENCE_POLICY = {
     ContextSourceKind.PLAN_WORKFLOW: frozenset(
         {ContextSourceAbsenceKind.EXPLICIT_EMPTY}
     ),
-    ContextSourceKind.CAPABILITY_CATALOG: frozenset(
+    ContextSourceKind.SKILL_CATALOG: frozenset(
         {
             ContextSourceAbsenceKind.EXPLICIT_EMPTY,
             ContextSourceAbsenceKind.UNAVAILABLE,
@@ -1491,7 +1492,9 @@ class StructuredModelInputCompiler:
         )
         tool_decisions = tuple(
             CompiledToolResultDecision(
-                source_entry_fingerprint=_tool_result_source_fingerprint(state.item),
+                source_entry_fingerprint=compiled_tool_result_source_fingerprint(
+                    state.item
+                ),
                 current_turn=state.current_turn,
                 first_legal_mode=state.first_mode(),
                 selected_mode=state.mode(),
@@ -2597,17 +2600,6 @@ def _compiled_message_placements(
     return tuple(placements)
 
 
-def _tool_result_source_fingerprint(item: FrozenProviderInputItem) -> str:
-    return context_fingerprint(
-        "compiled-tool-result-source:v1",
-        {
-            "entry_id": item.source_entry_id,
-            "sequence": item.source_entry_sequence,
-            "tool_call_id": item.tool_call_id,
-        },
-    )
-
-
 def _selected_lowered_message(
     item: LoweredCanonicalItem,
     *,
@@ -2615,7 +2607,7 @@ def _selected_lowered_message(
 ) -> LLMMessage:
     if item.fixed_message is not None:
         return item.fixed_message
-    mode = tool_modes.get(_tool_result_source_fingerprint(item.source))
+    mode = tool_modes.get(compiled_tool_result_source_fingerprint(item.source))
     if mode is None:
         raise StructuredModelInputCompileError(
             ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID

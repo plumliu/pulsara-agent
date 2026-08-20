@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Mapping
 
@@ -119,6 +119,58 @@ class McpDiscoverySnapshot:
     catalog_semantic_fingerprint: str
     presentation_fingerprint: str
     sdk_conformance_contract_fingerprint: str
+
+
+def scope_mcp_discovery_snapshot(
+    snapshot: McpDiscoverySnapshot,
+    scope: ModelInputScopeKind,
+) -> McpDiscoverySnapshot:
+    """Derive the exact scope-visible semantic catalog from one discovery.
+
+    The remote listing is still frozen once.  Child scope filtering is a pure
+    projection over that immutable value; it must not expose ROOT-only names
+    or reuse the ROOT aggregate fingerprints/counts.
+    """
+
+    if scope is ModelInputScopeKind.ROOT:
+        return snapshot
+    tools = tuple(item for item in snapshot.tools if item.subagent_visible)
+    tool_fingerprint = context_fingerprint(
+        "mcp-server-tool-surface:v1",
+        tuple(item.descriptor_fingerprint for item in tools),
+    )
+    catalog_fingerprint = context_fingerprint(
+        "mcp-server-catalog:v1",
+        {
+            "server_id": snapshot.server_id,
+            "display_name": snapshot.display_name,
+            "instructions": snapshot.sanitized_instructions,
+            "tools": tuple(item.descriptor_fingerprint for item in tools),
+            "resources": tuple(
+                item.semantic_fingerprint for item in snapshot.resources
+            ),
+            "templates": tuple(
+                item.semantic_fingerprint for item in snapshot.resource_templates
+            ),
+            "prompts": tuple(
+                item.semantic_fingerprint for item in snapshot.prompts
+            ),
+        },
+    )
+    return replace(
+        snapshot,
+        # Raw invalid/filtered tool counts have no child visibility
+        # attribution.  Only admitted child-visible leaves are exposed.
+        discovered_tool_count=len(tools),
+        invalid_tool_count=0,
+        tools=tools,
+        tool_surface_semantic_fingerprint=tool_fingerprint,
+        catalog_semantic_fingerprint=catalog_fingerprint,
+        presentation_fingerprint=context_fingerprint(
+            "mcp-server-presentation:v1",
+            (snapshot.server_id, snapshot.display_name, len(tools)),
+        ),
+    )
 
 
 @dataclass(frozen=True, slots=True)

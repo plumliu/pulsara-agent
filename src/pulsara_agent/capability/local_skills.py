@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from time import monotonic
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -12,7 +13,7 @@ from typing import Any, cast
 import yaml
 
 from pulsara_agent.capability.types import (
-    CapabilityDiagnostic,
+    SkillDiagnostic,
     LocalSkillManifest,
     SkillAuthRequired,
     SkillCliUsageKind,
@@ -58,7 +59,7 @@ _IGNORED_SCOPE_FRONTMATTER = {"allowed_scopes", "blocked_scopes"}
 @dataclass(frozen=True, slots=True)
 class LocalSkillDiscovery:
     skills: tuple[LocalSkillManifest, ...]
-    diagnostics: tuple[CapabilityDiagnostic, ...]
+    diagnostics: tuple[SkillDiagnostic, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +68,11 @@ class _SkillRoot:
     source: SkillSource
     location_prefix: str
     containment_root: Path
+
+
+def _check_discovery_deadline(deadline_monotonic: float | None) -> None:
+    if deadline_monotonic is not None and monotonic() >= deadline_monotonic:
+        raise TimeoutError("local Skill discovery deadline expired")
 
 
 class LocalSkillProvider:
@@ -88,19 +94,22 @@ class LocalSkillProvider:
         workspace_root: Path,
         *,
         available_tool_names: frozenset[str],
+        deadline_monotonic: float | None = None,
     ) -> LocalSkillDiscovery:
+        _check_discovery_deadline(deadline_monotonic)
         workspace_root = workspace_root.expanduser().resolve()
         skill_roots = self._skill_roots(workspace_root)
-        diagnostics: list[CapabilityDiagnostic] = []
+        diagnostics: list[SkillDiagnostic] = []
         skills: list[LocalSkillManifest] = []
         seen_names: set[str] = set()
 
         for root in skill_roots:
+            _check_discovery_deadline(deadline_monotonic)
             if not root.path.exists():
                 continue
             if not _is_within(root.path, root.containment_root):
                 diagnostics.append(
-                    CapabilityDiagnostic(
+                    SkillDiagnostic(
                         severity="warning",
                         code="skill_symlink_escape",
                         message=f"Skill root resolves outside allowed root: {root.path}",
@@ -110,7 +119,7 @@ class LocalSkillProvider:
                 continue
             if not root.path.is_dir():
                 diagnostics.append(
-                    CapabilityDiagnostic(
+                    SkillDiagnostic(
                         severity="warning",
                         code="skill_root_not_directory",
                         message=f"Skill root is not a directory: {root.path}",
@@ -120,13 +129,14 @@ class LocalSkillProvider:
                 continue
 
             for child in sorted(root.path.iterdir(), key=lambda path: path.name):
+                _check_discovery_deadline(deadline_monotonic)
                 if child.name.startswith("."):
                     continue
                 if not child.is_dir():
                     continue
                 if not _is_within(child, root.containment_root):
                     diagnostics.append(
-                        CapabilityDiagnostic(
+                        SkillDiagnostic(
                             severity="warning",
                             code="skill_symlink_escape",
                             message=f"Skill directory resolves outside skill root: {child}",
@@ -137,7 +147,7 @@ class LocalSkillProvider:
                 skill_file = child / SKILL_FILE_NAME
                 if not skill_file.exists():
                     diagnostics.append(
-                        CapabilityDiagnostic(
+                        SkillDiagnostic(
                             severity="warning",
                             code="skill_missing_file",
                             message=f"Skill directory has no {SKILL_FILE_NAME}: {child}",
@@ -147,7 +157,7 @@ class LocalSkillProvider:
                     continue
                 if not _is_within(skill_file, root.containment_root):
                     diagnostics.append(
-                        CapabilityDiagnostic(
+                        SkillDiagnostic(
                             severity="warning",
                             code="skill_symlink_escape",
                             message=f"Skill file resolves outside skill root: {skill_file}",
@@ -165,7 +175,7 @@ class LocalSkillProvider:
                     continue
                 if skill.name in seen_names:
                     diagnostics.append(
-                        CapabilityDiagnostic(
+                        SkillDiagnostic(
                             severity="warning",
                             code="skill_duplicate_name",
                             message=f"Duplicate skill name ignored: {skill.name}",
@@ -175,6 +185,7 @@ class LocalSkillProvider:
                     continue
                 seen_names.add(skill.name)
                 skills.append(skill)
+        _check_discovery_deadline(deadline_monotonic)
         return LocalSkillDiscovery(skills=tuple(skills), diagnostics=tuple(diagnostics))
 
     def _skill_roots(self, workspace_root: Path) -> tuple[_SkillRoot, ...]:
@@ -223,15 +234,15 @@ class LocalSkillProvider:
         *,
         root: _SkillRoot,
         available_tool_names: frozenset[str],
-    ) -> tuple[LocalSkillManifest | None, tuple[CapabilityDiagnostic, ...]]:
-        diagnostics: list[CapabilityDiagnostic] = []
+    ) -> tuple[LocalSkillManifest | None, tuple[SkillDiagnostic, ...]]:
+        diagnostics: list[SkillDiagnostic] = []
         try:
             content, too_large = _read_bounded_utf8(
                 path, max_bytes=self.max_skill_file_bytes
             )
         except UnicodeDecodeError:
             return None, (
-                CapabilityDiagnostic(
+                SkillDiagnostic(
                     severity="error",
                     code="skill_invalid_utf8",
                     message=f"Skill file is not valid UTF-8: {path}",
@@ -240,7 +251,7 @@ class LocalSkillProvider:
             )
         if too_large:
             diagnostics.append(
-                CapabilityDiagnostic(
+                SkillDiagnostic(
                     severity="warning",
                     code="skill_body_too_large",
                     message=f"Skill file exceeds {self.max_skill_file_bytes} bytes and cannot be activated.",
@@ -252,7 +263,7 @@ class LocalSkillProvider:
         if not has_frontmatter:
             return None, (
                 *diagnostics,
-                CapabilityDiagnostic(
+                SkillDiagnostic(
                     severity="warning",
                     code="skill_missing_frontmatter",
                     message=f"Skill file has no YAML frontmatter: {path}",
@@ -267,7 +278,7 @@ class LocalSkillProvider:
         description = _string_field(raw_fields, "description")
         if not name:
             diagnostics.append(
-                CapabilityDiagnostic(
+                SkillDiagnostic(
                     severity="warning",
                     code="skill_missing_name",
                     message="Skill frontmatter is missing required field: name",
@@ -276,7 +287,7 @@ class LocalSkillProvider:
             )
         elif len(name) > MAX_SKILL_NAME_CHARS or not _NAME_RE.fullmatch(name):
             diagnostics.append(
-                CapabilityDiagnostic(
+                SkillDiagnostic(
                     severity="warning",
                     code="skill_invalid_name",
                     message="Skill name must be lowercase letters, digits, and hyphens, starting with a letter or digit.",
@@ -287,7 +298,7 @@ class LocalSkillProvider:
 
         if not description:
             diagnostics.append(
-                CapabilityDiagnostic(
+                SkillDiagnostic(
                     severity="warning",
                     code="skill_missing_description",
                     message="Skill frontmatter is missing required field: description",
@@ -443,12 +454,12 @@ def _extract_frontmatter(content: str) -> tuple[str, bool]:
 
 def _parse_frontmatter(
     frontmatter: str, *, path: Path
-) -> tuple[dict[str, Any], tuple[CapabilityDiagnostic, ...]]:
+) -> tuple[dict[str, Any], tuple[SkillDiagnostic, ...]]:
     try:
         parsed = yaml.safe_load(frontmatter) if frontmatter.strip() else {}
     except yaml.YAMLError as exc:
         return {}, (
-            CapabilityDiagnostic(
+            SkillDiagnostic(
                 severity="warning",
                 code="skill_invalid_frontmatter_yaml",
                 message=f"Ignoring invalid YAML frontmatter: {exc}",
@@ -459,7 +470,7 @@ def _parse_frontmatter(
         return {}, ()
     if not isinstance(parsed, dict):
         return {}, (
-            CapabilityDiagnostic(
+            SkillDiagnostic(
                 severity="warning",
                 code="skill_invalid_frontmatter_type",
                 message="Skill frontmatter must be a YAML mapping.",
@@ -471,12 +482,12 @@ def _parse_frontmatter(
 
 def _frontmatter_key_diagnostics(
     fields: dict[str, Any], *, path: Path
-) -> tuple[CapabilityDiagnostic, ...]:
-    diagnostics: list[CapabilityDiagnostic] = []
+) -> tuple[SkillDiagnostic, ...]:
+    diagnostics: list[SkillDiagnostic] = []
     for key in sorted(fields):
         if key in _IGNORED_SCOPE_FRONTMATTER:
             diagnostics.append(
-                CapabilityDiagnostic(
+                SkillDiagnostic(
                     severity="warning",
                     code="skill_scope_frontmatter_ignored_in_v1",
                     message=f"Ignoring V1 scope frontmatter field: {key}",
@@ -485,7 +496,7 @@ def _frontmatter_key_diagnostics(
             )
         elif key not in _KNOWN_FRONTMATTER:
             diagnostics.append(
-                CapabilityDiagnostic(
+                SkillDiagnostic(
                     severity="warning",
                     code="skill_unknown_frontmatter",
                     message=f"Ignoring unknown skill frontmatter field: {key}",
@@ -516,14 +527,14 @@ def _bool_field_with_diagnostic(
     *,
     default: bool,
     path: Path,
-) -> tuple[bool, tuple[CapabilityDiagnostic, ...]]:
+) -> tuple[bool, tuple[SkillDiagnostic, ...]]:
     if key not in fields:
         return default, ()
     value = fields.get(key)
     if isinstance(value, bool):
         return value, ()
     return default, (
-        CapabilityDiagnostic(
+        SkillDiagnostic(
             severity="warning",
             code="skill_invalid_frontmatter_type",
             message=f"{key} must be a boolean.",
@@ -539,7 +550,7 @@ def _enum_field(
     allowed_values: frozenset[str],
     default: str,
     path: Path,
-) -> tuple[str, tuple[CapabilityDiagnostic, ...]]:
+) -> tuple[str, tuple[SkillDiagnostic, ...]]:
     if key not in fields:
         return default, ()
     value = fields.get(key)
@@ -548,7 +559,7 @@ def _enum_field(
         if normalized in allowed_values:
             return normalized, ()
     return default, (
-        CapabilityDiagnostic(
+        SkillDiagnostic(
             severity="warning",
             code="skill_invalid_frontmatter_enum",
             message=f"{key} must be one of: {', '.join(sorted(allowed_values))}.",
@@ -568,7 +579,7 @@ def _provides_tools(
     *,
     available_tool_names: frozenset[str],
     path: Path,
-) -> tuple[tuple[str, ...], tuple[CapabilityDiagnostic, ...]]:
+) -> tuple[tuple[str, ...], tuple[SkillDiagnostic, ...]]:
     return _tool_references(
         raw_value,
         field_name="provides_tools",
@@ -583,11 +594,15 @@ def _tool_references(
     field_name: str,
     available_tool_names: frozenset[str],
     path: Path,
-) -> tuple[tuple[str, ...], tuple[CapabilityDiagnostic, ...]]:
+) -> tuple[tuple[str, ...], tuple[SkillDiagnostic, ...]]:
+    # Round 9 keeps legacy metadata readable but deliberately inert.  A Host
+    # startup tool allowlist must not add/remove a Skill leaf or alter its
+    # provider-visible catalog/body.  Round 9.1 removes these fields entirely.
+    del available_tool_names
     if raw_value is None:
         return (), ()
     values: list[str]
-    diagnostics: list[CapabilityDiagnostic] = []
+    diagnostics: list[SkillDiagnostic] = []
     if isinstance(raw_value, str):
         values = [raw_value.strip()]
     elif isinstance(raw_value, list):
@@ -595,7 +610,7 @@ def _tool_references(
         for item in raw_value:
             if not isinstance(item, str):
                 diagnostics.append(
-                    CapabilityDiagnostic(
+                    SkillDiagnostic(
                         severity="warning",
                         code="skill_invalid_frontmatter_type",
                         message=f"{field_name} must be a string or list of strings.",
@@ -608,7 +623,7 @@ def _tool_references(
                 values.append(stripped)
     else:
         return (), (
-            CapabilityDiagnostic(
+            SkillDiagnostic(
                 severity="warning",
                 code="skill_invalid_frontmatter_type",
                 message=f"{field_name} must be a string or list of strings.",
@@ -617,12 +632,12 @@ def _tool_references(
         )
     filtered: list[str] = []
     for name in values:
-        if name not in available_tool_names:
+        if not _BINARY_TOKEN_RE.fullmatch(name):
             diagnostics.append(
-                CapabilityDiagnostic(
+                SkillDiagnostic(
                     severity="warning",
-                    code="skill_unknown_tool_reference",
-                    message=f"Skill references unknown tool: {name}",
+                    code="skill_invalid_tool_reference",
+                    message=f"Skill contains an invalid legacy tool reference: {name}",
                     path=path,
                 )
             )
@@ -639,10 +654,10 @@ def _validated_token_tuple(
     token_kind: str,
     token_re: re.Pattern[str],
     path: Path,
-) -> tuple[tuple[str, ...], tuple[CapabilityDiagnostic, ...]]:
+) -> tuple[tuple[str, ...], tuple[SkillDiagnostic, ...]]:
     if raw_value is None:
         return (), ()
-    diagnostics: list[CapabilityDiagnostic] = []
+    diagnostics: list[SkillDiagnostic] = []
     if isinstance(raw_value, str):
         values = [raw_value.strip()]
     elif isinstance(raw_value, list):
@@ -650,7 +665,7 @@ def _validated_token_tuple(
         for item in raw_value:
             if not isinstance(item, str):
                 diagnostics.append(
-                    CapabilityDiagnostic(
+                    SkillDiagnostic(
                         severity="warning",
                         code="skill_invalid_frontmatter_type",
                         message=f"{field_name} must be a string or list of strings.",
@@ -663,7 +678,7 @@ def _validated_token_tuple(
                 values.append(stripped)
     else:
         return (), (
-            CapabilityDiagnostic(
+            SkillDiagnostic(
                 severity="warning",
                 code="skill_invalid_frontmatter_type",
                 message=f"{field_name} must be a string or list of strings.",
@@ -674,7 +689,7 @@ def _validated_token_tuple(
     for value in values:
         if not token_re.fullmatch(value):
             diagnostics.append(
-                CapabilityDiagnostic(
+                SkillDiagnostic(
                     severity="warning",
                     code=f"skill_invalid_{token_kind}_reference",
                     message=f"Ignoring invalid {token_kind} reference in {field_name}: {value}",

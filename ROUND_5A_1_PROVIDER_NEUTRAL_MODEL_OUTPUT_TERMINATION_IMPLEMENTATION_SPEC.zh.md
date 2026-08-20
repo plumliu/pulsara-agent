@@ -18,6 +18,8 @@
 >
 > OpenAI function-tool wire兼容修订（2026-08-19）：Chat与Responses的全部function tool统一经过同一个provider-neutral adapter，显式发送`strict: false`，并按OpenAI官方root-object约束把根级object union确定性lower为单一object schema；nested `oneOf`使用`anyOf`、`const`使用单值`enum`。provider wire只允许成为canonical schema的安全超集，不能静默收窄`additionalProperties`或覆盖组合约束；无法诚实lower的MCP tool必须在discovery阶段按既有`FAIL_SERVER | OMIT_INVALID`策略处置，不能进入已安装surface后毒化整次dispatch。canonical frozen descriptor与本地strict parser保持唯一执行真源，wire lowering不按provider或tool name分支。Responses还允许一种byte-exact stream/final reconciliation：`reasoning_text`流只有在没有独立summary流、没有final reasoning content且其正文与final summary完全相等时，才可作为该summary的transport alias；任何冲突仍在assistant acceptance前fail closed。Chat closed carrier的`final_value_required`对每个completed response无条件生效，不再受旧`NEVER | WHEN_TOOL_CALLS | ALWAYS` replay policy影响；因此缺少final confirmation的stream carrier不能随assistant/tool call一起被接受。
 >
+> Responses terminal兼容修订（2026-08-20）：非空`response.completed.response.output`继续是最终语义真源，并与已观察的streamed item/content逐项join。若terminal item只省略`id | status`，但同索引closed `output_item.done`已经完整settled、全部其余字段逐值exact相等，则Runtime采用更完整的done item作为native replay carrier；terminal显式给出但冲突的`id/status`、省略任何其他字段或任何语义字段冲突仍在assistant acceptance前fail closed。若terminal output数组**恰好为空**，Runtime只在terminal status为`completed`、`output_index`从0连续、每个item均有closed `output_item.done`、所有已开始item/content均已done、text/reasoning delta与done逐字节一致、且不存在active item/content时，才从ordered done items构造同一closed carrier。两种兼容均不按provider名称分支，也不依赖remote response/session ID。`metadata`与`internal_chat_message_metadata_passthrough`被closed定义为remote operational bookkeeping，从terminal与done source统一剔除，不进入manual-history correctness carrier；其余未知字段仍fail closed。
+>
 > Round 5B compaction在激活前必须同时依赖本文与Round 5A.2。compaction summary只有在本文定义的完整provider terminal后才可成为adoption candidate；重启后的summary prefix由Round 5A.2恢复，adoption后旧floor以前的durable replay不再进入active epoch。
 >
 > 本文统一两条并列边界：provider输出的完成、截断、失败、重试与canonical acceptance；以及**完整响应**中的reasoning如何在同一Host、同一scope、同一provider-input epoch内原样进入后续调用。5A.1激活切片本身不实施compaction、半截答案自动续写、provider-error reactive compaction、remote response ID continuation或hidden reasoning durable persistence；其中最后一项现由Round 5A.2窄化恢复，而不恢复通用durable recovery machinery。
@@ -1031,7 +1033,7 @@ INCOMPLETE / failure / EOF / cancel / physical BLOCKED
 
 normalized live payload仍只承载可展示Thinking/Text/ToolCall事件；opaque `reasoning_details`或encrypted item不得塞进live text。fragment通过DirectModel的completed-result carrier交付给Runner，不作为额外stream delta，也不需要Protocol/TUI消息。
 
-streaming Responses必须从`output_item.added/done`与最终`response.completed.response.output`建立exact equality；若SDK只在final response对象中提供完整opaque fields，以final object为真源并重验先前stream projection。Chat必须由complete accumulated message与finish reason构造single assistant replay message。
+streaming Responses必须从`output_item.added/done`与最终`response.completed.response.output`建立closed equality；terminal不得改写任何语义字段。唯一允许的非字节相等是terminal item省略`id | status`而同索引done item提供完整值，此时以更完整的exact-settled done item冻结replay carrier；若SDK只在final response对象中提供完整opaque fields，以final object为真源并重验先前stream projection。Chat必须由complete accumulated message与finish reason构造single assistant replay message。
 
 ---
 
@@ -1169,6 +1171,8 @@ function_call
 V1还必须把provider item order限制在当前canonical assistant blocks能够无损表达的closed subset：`message`最多一个；若存在，必须位于全部`function_call`之前。`reasoning`可出现在任意位置且不参与public block order。`function_call -> message`、多个message或其他无法经canonical commit/read保持public顺序的shape，必须在assistant acceptance前以typed provider contract failure拒绝。该限制是fail-closed capability boundary，不允许先执行tool、再在下一次replay join时发现顺序漂移。
 
 在该allowlist内，Responses COMPLETED fragment必须冻结最终`response.output`的**全部**ordered item tuple。下一次input builder直接把该tuple放回原位置，再追加对应`function_call_output`与后续items：
+
+部分Responses-compatible backend会在`output_item.done`给出完整item，却在非空terminal snapshot中省略同一item的`id`与`status`。这两个字段只能作为terminal-side operational elision处理：同索引、同closed type、其余key集合与value必须exact，且done item必须已经通过added/delta/content settlement；最终tuple保存更完整的done item。禁止合成缺失ID、接受terminal额外字段、忽略`call_id/name/arguments/content/reasoning`差异或按endpoint名称放宽。
 
 ```text
 old inputs

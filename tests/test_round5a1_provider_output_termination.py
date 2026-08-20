@@ -1130,6 +1130,331 @@ def _completed_response(output: list[dict[str, object]]) -> dict[str, object]:
     }
 
 
+def test_responses_empty_terminal_reconstructs_exact_completed_message() -> None:
+    accumulator = ResponsesCompletionAccumulator(builder=ProviderLiveItemBuilder())
+    initial_item = {
+        "type": "message",
+        "id": "message:streamed",
+        "status": "in_progress",
+        "role": "assistant",
+        "phase": "final_answer",
+        "content": [],
+        "metadata": {"remote_turn": "not-a-correctness-authority"},
+        "internal_chat_message_metadata_passthrough": {
+            "remote_turn": "not-a-correctness-authority"
+        },
+    }
+    final_part = {
+        "type": "output_text",
+        "text": "done",
+        "annotations": [],
+        "logprobs": [],
+    }
+    final_item = {
+        **initial_item,
+        "status": "completed",
+        "content": [final_part],
+    }
+    events = (
+        {
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": initial_item,
+        },
+        {
+            "type": "response.content_part.added",
+            "output_index": 0,
+            "content_index": 0,
+            "item_id": "message:streamed",
+            "part": {**final_part, "text": ""},
+        },
+        {
+            "type": "response.output_text.delta",
+            "output_index": 0,
+            "content_index": 0,
+            "delta": "done",
+        },
+        {
+            "type": "response.output_text.done",
+            "output_index": 0,
+            "content_index": 0,
+            "text": "done",
+        },
+        {
+            "type": "response.content_part.done",
+            "output_index": 0,
+            "content_index": 0,
+            "item_id": "message:streamed",
+            "part": final_part,
+        },
+        {
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "item": final_item,
+        },
+        {
+            "type": "response.completed",
+            "response": {"id": "response:test", "status": "completed", "output": []},
+        },
+    )
+
+    for event in events:
+        accumulator.apply(event)
+
+    terminal = accumulator.finish()
+    assert isinstance(terminal, ProviderAdapterTerminal)
+    assert terminal.terminal_kind is ProviderAdapterTerminalKind.COMPLETED
+    assert terminal.completed_replay_payload is not None
+    assert tuple(
+        thaw_json(item) for item in terminal.completed_replay_payload.ordered_items
+    ) == (
+        {
+            "type": "message",
+            "id": "message:streamed",
+            "status": "completed",
+            "role": "assistant",
+            "phase": "final_answer",
+            "content": [final_part],
+        },
+    )
+
+
+def test_responses_empty_terminal_reconstructs_exact_completed_tool_call() -> None:
+    accumulator = ResponsesCompletionAccumulator(builder=ProviderLiveItemBuilder())
+    initial_item = {
+        "type": "function_call",
+        "id": "item:streamed",
+        "status": "in_progress",
+        "call_id": "call:streamed",
+        "name": "virtual",
+        "arguments": "",
+    }
+    final_item = {**initial_item, "status": "completed", "arguments": "{}"}
+    events = (
+        {
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": initial_item,
+        },
+        {
+            "type": "response.function_call_arguments.delta",
+            "output_index": 0,
+            "item_id": "item:streamed",
+            "delta": "{}",
+        },
+        {
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "item": final_item,
+        },
+        {
+            "type": "response.completed",
+            "response": {"status": "completed", "output": []},
+        },
+    )
+
+    for event in events:
+        accumulator.apply(event)
+
+    terminal = accumulator.finish()
+    assert isinstance(terminal, ProviderAdapterTerminal)
+    assert terminal.terminal_kind is ProviderAdapterTerminalKind.COMPLETED
+    assert terminal.completed_replay_payload is not None
+    assert tuple(
+        thaw_json(item) for item in terminal.completed_replay_payload.ordered_items
+    ) == (final_item,)
+
+
+@pytest.mark.parametrize(
+    "events",
+    (
+        (
+            {
+                "type": "response.output_item.done",
+                "output_index": 1,
+                "item": {
+                    "type": "message",
+                    "id": "message:gap",
+                    "status": "completed",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "gap"}],
+                },
+            },
+        ),
+        (
+            {
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {
+                    "type": "message",
+                    "id": "message:outstanding",
+                    "status": "in_progress",
+                    "role": "assistant",
+                    "content": [],
+                },
+            },
+        ),
+        (
+            {
+                "type": "response.output_text.delta",
+                "output_index": 0,
+                "content_index": 0,
+                "delta": "unfinished",
+            },
+            {
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": {
+                    "type": "message",
+                    "id": "message:unfinished",
+                    "status": "completed",
+                    "role": "assistant",
+                    "content": [
+                        {"type": "output_text", "text": "unfinished"}
+                    ],
+                },
+            },
+        ),
+    ),
+)
+def test_responses_empty_terminal_requires_closed_stream_evidence(
+    events: tuple[dict[str, object], ...],
+) -> None:
+    accumulator = ResponsesCompletionAccumulator(builder=ProviderLiveItemBuilder())
+    for event in events:
+        accumulator.apply(event)
+
+    with pytest.raises(LLMTransportContractError):
+        accumulator.apply(
+            {
+                "type": "response.completed",
+                "response": {"status": "completed", "output": []},
+            }
+        )
+    assert accumulator.terminal is None
+
+
+def test_responses_terminal_snapshot_exact_joins_streamed_done_items() -> None:
+    accumulator = ResponsesCompletionAccumulator(builder=ProviderLiveItemBuilder())
+    streamed = {
+        "type": "message",
+        "id": "message:streamed",
+        "status": "completed",
+        "role": "assistant",
+        "content": [{"type": "output_text", "text": "streamed"}],
+    }
+    accumulator.apply(
+        {
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "item": streamed,
+        }
+    )
+    with pytest.raises(
+        LLMTransportContractError,
+        match="differs from item.done",
+    ):
+        accumulator.apply(
+            _completed_response(
+                [
+                    {
+                        **streamed,
+                        "content": [
+                            {"type": "output_text", "text": "terminal"}
+                        ],
+                    }
+                ]
+            )
+        )
+
+
+def test_responses_terminal_may_elide_settled_operational_item_fields() -> None:
+    accumulator = ResponsesCompletionAccumulator(builder=ProviderLiveItemBuilder())
+    streamed = {
+        "type": "function_call",
+        "id": "item:bob",
+        "status": "completed",
+        "call_id": "call:bob",
+        "name": "virtual",
+        "arguments": '{"text":"bob"}',
+    }
+    accumulator.apply(
+        {
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "item": streamed,
+        }
+    )
+    accumulator.apply(
+        _completed_response(
+            [
+                {
+                    "type": "function_call",
+                    "call_id": "call:bob",
+                    "name": "virtual",
+                    "arguments": '{"text":"bob"}',
+                }
+            ]
+        )
+    )
+
+    terminal = accumulator.finish()
+    assert isinstance(terminal, ProviderAdapterTerminal)
+    assert terminal.completed_replay_payload is not None
+    assert tuple(
+        thaw_json(item) for item in terminal.completed_replay_payload.ordered_items
+    ) == (streamed,)
+
+
+@pytest.mark.parametrize(
+    "terminal_item",
+    (
+        {
+            "type": "function_call",
+            "call_id": "call:other",
+            "name": "virtual",
+            "arguments": "{}",
+        },
+        {
+            "type": "function_call",
+            "name": "virtual",
+            "arguments": "{}",
+        },
+        {
+            "type": "function_call",
+            "id": "item:other",
+            "status": "completed",
+            "call_id": "call:bob",
+            "name": "virtual",
+            "arguments": "{}",
+        },
+    ),
+)
+def test_responses_terminal_operational_elision_does_not_hide_semantic_drift(
+    terminal_item: dict[str, object],
+) -> None:
+    accumulator = ResponsesCompletionAccumulator(builder=ProviderLiveItemBuilder())
+    accumulator.apply(
+        {
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "item": {
+                "type": "function_call",
+                "id": "item:bob",
+                "status": "completed",
+                "call_id": "call:bob",
+                "name": "virtual",
+                "arguments": "{}",
+            },
+        }
+    )
+    with pytest.raises(
+        LLMTransportContractError,
+        match="differs from item.done",
+    ):
+        accumulator.apply(_completed_response([terminal_item]))
+
+
 def test_responses_completed_replay_preserves_all_allowed_items_in_order() -> None:
     output = [
         {

@@ -143,7 +143,7 @@ class _AuthorityOperations:
                 SET writer_lease_expires_at = %s, updated_at = clock_timestamp()
                 WHERE id = %s AND writer_generation = %s
                   AND writer_lease_owner_id = %s AND lifecycle = 'OPEN'
-                  AND (%s IS NULL OR memory_domain_id = %s)
+                  AND (%s::text IS NULL OR memory_domain_id = %s::text)
                   AND writer_lease_expires_at > clock_timestamp()
                 RETURNING writer_generation
                 """,

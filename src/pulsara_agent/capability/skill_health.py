@@ -7,7 +7,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from pulsara_agent.capability.types import ActiveSkillInjection, CapabilityDiagnostic
+from pulsara_agent.capability.types import ActiveSkillInjection, SkillDiagnostic
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,8 +41,8 @@ class SkillHealthResolver:
     def diagnostics_for_active_skills(
         self,
         injections: tuple[ActiveSkillInjection, ...],
-    ) -> tuple[CapabilityDiagnostic, ...]:
-        diagnostics: list[CapabilityDiagnostic] = []
+    ) -> tuple[SkillDiagnostic, ...]:
+        diagnostics: list[SkillDiagnostic] = []
         for injection in injections:
             for binary in injection.required_binaries:
                 found, path_source, health_diagnostic = self._binary_found(binary)
@@ -51,7 +51,7 @@ class SkillHealthResolver:
                     continue
                 if not found:
                     diagnostics.append(
-                        CapabilityDiagnostic(
+                        SkillDiagnostic(
                             severity="warning",
                             code="skill_required_binary_missing",
                             message=f"Active skill requires CLI binary not found on {path_source}: {binary}",
@@ -65,7 +65,7 @@ class SkillHealthResolver:
                     continue
                 if not found:
                     diagnostics.append(
-                        CapabilityDiagnostic(
+                        SkillDiagnostic(
                             severity="info",
                             code="skill_optional_binary_missing",
                             message=f"Active skill optional CLI binary not found on {path_source}: {binary}",
@@ -74,7 +74,7 @@ class SkillHealthResolver:
                     )
             if injection.auth_required != "none":
                 diagnostics.append(
-                    CapabilityDiagnostic(
+                    SkillDiagnostic(
                         severity="info",
                         code="skill_auth_required",
                         message=f"Active skill declares auth_required={injection.auth_required}.",
@@ -83,7 +83,7 @@ class SkillHealthResolver:
                 )
             if injection.network_required:
                 diagnostics.append(
-                    CapabilityDiagnostic(
+                    SkillDiagnostic(
                         severity="info",
                         code="skill_network_required",
                         message="Active skill declares network_required=true.",
@@ -94,7 +94,7 @@ class SkillHealthResolver:
 
     def _binary_found(
         self, binary: str
-    ) -> tuple[bool, str, CapabilityDiagnostic | None]:
+    ) -> tuple[bool, str, SkillDiagnostic | None]:
         now = self._monotonic()
         lookup_path = self._lookup_path()
         cache_key = (binary, lookup_path.path, lookup_path.source)
@@ -110,7 +110,7 @@ class SkillHealthResolver:
             return (
                 False,
                 lookup_path.source,
-                CapabilityDiagnostic(
+                SkillDiagnostic(
                     severity="warning",
                     code="skill_binary_health_check_failed",
                     message=f"Could not check active skill CLI binary on {lookup_path.source}: {binary}: {exc}",
@@ -136,11 +136,11 @@ class SkillHealthResolver:
 
 
 def _with_skill_path(
-    diagnostic: CapabilityDiagnostic, injection: ActiveSkillInjection
-) -> CapabilityDiagnostic:
+    diagnostic: SkillDiagnostic, injection: ActiveSkillInjection
+) -> SkillDiagnostic:
     if diagnostic.path is not None:
         return diagnostic
-    return CapabilityDiagnostic(
+    return SkillDiagnostic(
         severity=diagnostic.severity,
         code=diagnostic.code,
         message=diagnostic.message,

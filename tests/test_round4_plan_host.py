@@ -85,6 +85,18 @@ class _PreparedTestExecution:
 
 
 class _PreflightModel:
+    def prepare_target(self, request):
+        return self._preparer.prepare_target(request)
+
+    def freeze_native_tool_eligibility(self, **kwargs):
+        return self._preparer.freeze_native_tool_eligibility(**kwargs)
+
+    def materialize_native_tool_projection_set(self, **kwargs):
+        return self._preparer.materialize_native_tool_projection_set(**kwargs)
+
+    def bind_tool_surface(self, **kwargs):
+        return self._preparer.bind_tool_surface(**kwargs)
+
     def plan_wire_input(self, **kwargs):
         return self._preparer.plan_wire_input(**kwargs)
 

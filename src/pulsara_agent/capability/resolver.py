@@ -7,7 +7,7 @@ import re
 from pulsara_agent.capability.local_skills import LocalSkillProvider
 from pulsara_agent.capability.local_skills import LocalSkillDiscovery
 from pulsara_agent.capability.provider import (
-    CapabilityProjectionOutput,
+    SkillProjectionOutput,
 )
 from pulsara_agent.capability.render import (
     DEFAULT_CATALOG_BUDGET_CHARS,
@@ -17,12 +17,11 @@ from pulsara_agent.capability.render import (
 from pulsara_agent.capability.skill_health import SkillHealthResolver
 from pulsara_agent.capability.types import (
     ActiveSkillInjection,
-    CapabilityDiagnostic,
-    CapabilityProjectionResolveContext,
+    SkillDiagnostic,
+    SkillProjectionResolveContext,
     LocalSkillManifest,
     ResolvedSkillCatalogEntry,
 )
-from pulsara_agent.primitives.capability import CapabilityExecutionSurfaceIdentityFact
 
 
 class LocalSkillCapabilityProvider:
@@ -41,11 +40,11 @@ class LocalSkillCapabilityProvider:
 
     def _resolve_projection_output(
         self,
-        context: CapabilityProjectionResolveContext,
+        context: SkillProjectionResolveContext,
         *,
         available_tool_names: frozenset[str],
         discovery: LocalSkillDiscovery | None = None,
-    ) -> CapabilityProjectionOutput:
+    ) -> SkillProjectionOutput:
         if discovery is None:
             discovery = self.snapshot_projection_input(
                 workspace_root=context.workspace_root,
@@ -76,7 +75,7 @@ class LocalSkillCapabilityProvider:
             *catalog.diagnostics,
             *active.diagnostics,
         )
-        return CapabilityProjectionOutput(
+        return SkillProjectionOutput(
             catalog_entries=catalog_entries,
             active_injections=active_injections,
             diagnostics=diagnostics,
@@ -91,21 +90,23 @@ class LocalSkillCapabilityProvider:
         *,
         workspace_root,
         available_tool_names: frozenset[str],
+        deadline_monotonic: float | None = None,
     ) -> LocalSkillDiscovery:
         """Freeze all filesystem-backed projection inputs for one plan."""
 
         return self.provider.discover(
             workspace_root,
             available_tool_names=available_tool_names,
+            deadline_monotonic=deadline_monotonic,
         )
 
     def resolve_projection_from_snapshot(
         self,
-        context: CapabilityProjectionResolveContext,
+        context: SkillProjectionResolveContext,
         *,
         available_tool_names: frozenset[str],
         discovery: LocalSkillDiscovery,
-    ) -> CapabilityProjectionOutput:
+    ) -> SkillProjectionOutput:
         """Resolve a trigger against an already frozen discovery cut."""
 
         return self._resolve_projection_output(
@@ -113,33 +114,6 @@ class LocalSkillCapabilityProvider:
             available_tool_names=available_tool_names,
             discovery=discovery,
         )
-
-    def resolve_projection(
-        self,
-        context: CapabilityProjectionResolveContext,
-        *,
-        execution_surface: CapabilityExecutionSurfaceIdentityFact,
-    ) -> CapabilityProjectionOutput:
-        return self._resolve_projection_output(
-            context,
-            available_tool_names=frozenset(
-                entry.capability_name for entry in execution_surface.entries
-            ),
-        )
-
-    def resolve_projection_for_available_tools(
-        self,
-        context: CapabilityProjectionResolveContext,
-        *,
-        available_tool_names: frozenset[str],
-    ) -> CapabilityProjectionOutput:
-        """Narrow public seam for the canonical capability projection."""
-
-        return self._resolve_projection_output(
-            context,
-            available_tool_names=available_tool_names,
-        )
-
 
 def _catalog_entry(skill: LocalSkillManifest) -> ResolvedSkillCatalogEntry:
     return ResolvedSkillCatalogEntry(
@@ -164,15 +138,15 @@ def _active_injections(
     *,
     user_input: str,
     active_skill_names: frozenset[str],
-) -> tuple[tuple[ActiveSkillInjection, ...], tuple[CapabilityDiagnostic, ...]]:
-    diagnostics: list[CapabilityDiagnostic] = []
+) -> tuple[tuple[ActiveSkillInjection, ...], tuple[SkillDiagnostic, ...]]:
+    diagnostics: list[SkillDiagnostic] = []
     active_names: list[str] = []
     for name in sorted(skills_by_name):
         if name in active_skill_names or _explicitly_mentions_skill(user_input, name):
             active_names.append(name)
     for name in sorted(active_skill_names - set(skills_by_name)):
         diagnostics.append(
-            CapabilityDiagnostic(
+            SkillDiagnostic(
                 severity="warning",
                 code="skill_activation_not_found",
                 message=f"Requested skill was not found: {name}",

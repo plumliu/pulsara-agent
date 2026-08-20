@@ -17,6 +17,8 @@
 > 后续依赖：[Round 5B compaction](ROUND_5B_LONG_HORIZON_CONTEXT_COMPACTION_IMPLEMENTATION_SPEC.zh.md)必须在本文激活以后实施；Round 5B只能消费本文恢复的exact replay prefix，不能另建summary专用reasoning persistence。
 >
 > 本文只支持`openai_chat_completions`与`openai_responses`两种wire family。本文不实现Anthropic Messages、Gemini、Claude、Google或任何vendor命名分支，也不建立provider下拉框、供应商能力表、在线探测或用户填写的“是否需要回放思考”选项。
+>
+> 后续Responses terminal修订（2026-08-20）：Round 5A.1允许在`response.completed.output=[]`时，以连续、closed、全部settled且与delta exact一致的ordered `output_item.done`序列构造最终carrier；也允许非空terminal item只省略`id | status`时，在其余字段与同索引settled done item exact一致的前提下采用更完整done carrier。该选择只改变完整响应carrier的provider-neutral采集证据，不改变本文的durable authority：落库内容仍是经过同一closed validator与public projection join的canonical ordered item tuple，且call/item ID由真实done item保留而非合成；remote metadata、response/session ID和raw chunk boundary仍不进入correctness。`provider_replay_contract_fingerprint`已覆盖这条source contract及closed operational-field规则。
 
 ---
 
@@ -350,7 +352,7 @@ function_call
 - remote response/session ID；
 - provider-side stored conversation；
 - SDK object identity；
-- raw SSE event顺序；
+- raw SSE chunk boundary及未settled event；terminal output为空时，只有从0连续且全部settled的`output_item.done`索引序列可作为最终closed carrier的有界替代证据；非空terminal item只允许省略`id | status`，并只能从同索引settled done item保留真实值；
 - unknown/hosted/effect-bearing output item。
 
 ### 5.4 payload编码

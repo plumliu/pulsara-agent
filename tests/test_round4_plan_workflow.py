@@ -66,6 +66,7 @@ from pulsara_agent.terminal_protocol.v3_gateway import (
     _Connection,
     _outcome_to_wire,
 )
+from tests.support.round3 import prepare_test_direct_tool_surface
 
 
 def _binding(tool_name: str) -> PlanInteractionBinding:
@@ -411,11 +412,13 @@ def test_round4_root_plan_tools_are_absent_from_subagent_surface(tmp_path: Path)
             authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
         )
         try:
-            root = port.snapshot_tool_surface(
+            root = prepare_test_direct_tool_surface(
+                port,
                 conversation_scope_kind=ModelInputScopeKind.ROOT,
                 scope_subagent_task_id=None,
             )
-            child = port.snapshot_tool_surface(
+            child = prepare_test_direct_tool_surface(
+                port,
                 conversation_scope_kind=ModelInputScopeKind.SUBAGENT_TASK,
                 scope_subagent_task_id="task:child",
             )

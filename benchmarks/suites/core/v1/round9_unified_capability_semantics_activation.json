@@ -1,0 +1,265 @@
+{
+  "schema_version": "round9-unified-capability-semantics-activation.v1",
+  "status": "activated",
+  "generated_at_utc": "2026-08-20T15:18:49Z",
+  "captured_head": "20daa64ffbcd60924baf64da3f332d1e82168756",
+  "working_tree_semantics": "Round 9 was implemented and verified in the current uncommitted worktree rooted at the exact clean coding baseline. No files were staged, committed, or pushed. Round 9.1, Round 9.2, Round 5B, Round 10, Plugin, compaction and Agent Skills standard were not implemented. The already-removed bundled Go/TUI client was not restored.",
+  "source_documents": {
+    "ROUND_9_UNIFIED_CAPABILITY_SEMANTICS_IMPLEMENTATION_SPEC.zh.md_at_start": "bc6cff75b49c7bf56b91ecb23528d479ea6ee03d63d743323130050d05feddee",
+    "ROUND_9_UNIFIED_CAPABILITY_SEMANTICS_IMPLEMENTATION_SPEC.zh.md_after_activation_update": "14bc86f664b9ca103aa82dbd23e7d9c2ba99ae139de53f5ca2bff4cd64ece022",
+    "ROUND_5A_1_PROVIDER_NEUTRAL_MODEL_OUTPUT_TERMINATION_IMPLEMENTATION_SPEC.zh.md": "7aca2605805b11224749ff47e15367019be1c6ed427fa2dd9994bb243edb93d9",
+    "ROUND_5A_2_DURABLE_PROVIDER_REPLAY_AND_CROSS_RESTART_THREAD_CONTINUATION_IMPLEMENTATION_SPEC.zh.md": "f04aede4748854a1686e1cc3393171857b31ec6f18b16f1129a9520249e9b096",
+    "ROUND_7_1_PROVIDER_VISIBLE_TOOL_RESULT_PROJECTION_IMPLEMENTATION_SPEC.zh.md": "ef57af98e98e422bd974bd746a0c518e9ad48ac7c15a072f2142a3bf41c02679",
+    "POST_HARD_CUT_PRODUCT_CAPABILITY_GAP_INDEX.zh.md_at_start": "91e9571e3a0c1ac0994470b24a2a18d7c825637c679a6950de863062db894d70",
+    "POST_HARD_CUT_PRODUCT_CAPABILITY_GAP_INDEX.zh.md_after_activation_update": "f08635f9f0966e53a37ac9a743c080bb38e7ced70e78427af5b5cc89267ae998",
+    "README.md_at_start": "312ded72f6f424c22ad51e3c6d7de16e58db24688a97a8bae311992b9a725d3f",
+    "README.md_after_activation_update": "85736b6539741671e0d33da75020ddd261be0b52c8fb3faf0992c1304c11fcdc",
+    "README.zh-CN.md_at_start": "e7c98ebd60e2c9656a8de0e67c422fd6e7dbd34690ccb5de4336c0cb2903568b",
+    "README.zh-CN.md_after_activation_update": "4a2f2c2003ad99e039c6875706d0b01593021e556cd620b78596c0597dd9a1f1"
+  },
+  "post_activation_code_sha256": {
+    "capability/builtin_catalog.py": "2f3581fae05e0145de914c57d119fe7d21ffcd86ee34d39de52450197a18fe63",
+    "capability/contracts.py": "856c21d7fb4c7488345c5f730b6b2123bb7cf46031bb2168822671261faf0314",
+    "capability/registry.py": "2524cd72b92cb3192f1fe4b47377e7b621f5f89011c72e690f5fcdcff1fe985a",
+    "capability/planner.py": "dcd303c2941bdc3f3a55b5ce6e86758ed7eb24d8acb49e46343030ef7199cbda",
+    "capability/mcp_projection.py": "f1e18723f4fa095978082b25d0a80a36a90b06753fd7044976de94eabb8af728",
+    "conversation_kernel/capability_composition.py": "c149ce7e39e0c472e970c10bace8385246e8693cc034bf80e616e903e2098d9e",
+    "conversation_kernel/direct_model.py": "aa4d50f5e937078dd5939bd9c80ff9c0d5e6e33fffe1fea65a68e599cb6d7501",
+    "conversation_kernel/input_continuity.py": "25af156b12abb3ae0838a1cc786eece35f7c3f25429b61154b404c978bbd74cd",
+    "conversation_kernel/runner.py": "a2bf3adfeff35494e4a6dd15fa4ad3c6b9c2653b9c38057f2d1d2cef6599cd5b",
+    "conversation_kernel/context_sources.py": "97bff53cf4e897fee72bf5dea2e704f570eb4620cf4ab3c032a0e62b91187d2b",
+    "conversation_kernel/tool_runtime.py": "3b0477110ed69b83f3bc861920fd1e7cd73ac32dc3ef69e00bcddb4c84a879b6",
+    "conversation_kernel/mcp/supervisor.py": "8160508072fb3457cbc4b2d3883bc3ee526667e9b9b788727e7b558418aa3fee",
+    "conversation_kernel/mcp/directory.py": "3b152717325bb9ab43d6795c81d7b1eb15176e78dad1dc66657b0827bd5c717b",
+    "conversation_kernel/mcp/meta.py": "6e7b57dfef48c1b08136c7d15148047ccc42850a0cabff6bec2da691159897bf",
+    "conversation_kernel/_repository/authority.py": "6aeab895aee96a965c26b03b9b7fa5407ae4f887d0d940b5bf2d0d9842128954",
+    "model_input/compiler.py": "0f1ad8f8539411193be862a1fa41565093aa32c71f528a2ef91078123646e2cb",
+    "model_input/continuity.py": "3d9f453dcec21d871881156bc1266b70247fd769425a6d09a41acb389add5ae1",
+    "llm/adapters/openai/function_tools.py": "cfb92c416549ec31b9f4fcf965d863ad652b4ba43bed0d0c5a0d0d6ead8a7f1f",
+    "llm/adapters/openai/responses.py": "d734472c9e9012e20f683bc5e5fd3c9c48b539e161b731b68e8cc524c0b81158",
+    "llm/provider_replay.py": "4c65359c38a546c71d170fab537eb2ec74096d6a427ccb9d9a3b4e336e6f15e4",
+    "tests/test_round5a1_provider_output_termination.py": "c3848043a815b91a7daa34137b3a6ea598a5bfb81a711b6159826836b4f42870",
+    "tests/test_round6_mcp_production.py": "1d187d10e4468bc97ee7ffe6fabc323ed1c917557425764346869f046d5c3bcd",
+    "tests/test_round9_unified_capability_semantics.py": "d95e3cf39b5f72eef8068c3d4664d747d8e5c1b61c00b5d3f1248cc0b5663b16",
+    "tests/test_stage2_conversation_kernel_postgres.py": "6e404ede75e74d2ad776c8924ffb3377d3578b1c544fbc12a9572d43c78d500e",
+    "tests/test_stage2_conversation_runner.py": "633bc30890640a9b61abc9afcbe2ce394fd85b34ade76279864a2abf0176cbc2",
+    "tests/test_repository_modularization_architecture.py": "913b026bba06b32159fbb238fd71d4990fd5095e727ea76f13735f938c0ab1e9",
+    "tools/run_round9_capability_dogfood.py": "2441f81bdcd98c442f97e516d1eb4ec42daba260338cec2b05ca98ef27611eac",
+    "tools/fixtures/round9_mcp_server.py": "680e58d6a3113c595ad1ce2fcb9b8c732cb568e0f6f5df81503f3db0926cb2b6"
+  },
+  "capability_authority_contract": {
+    "composition": "one exact-scope SealedBuiltinCapabilitySnapshot, one PreparedMcpCapabilitySourceSnapshotSet and one PreparedLocalSkillCatalogSourceSnapshot are the only inputs to the Host-facing pure composition seam; no caller-supplied registration tuple, common attempt token or current-seal handshake exists",
+    "registry": "one pure immutable registry validates registration/source completeness, source-kind/leaf-kind/origin matrices, deterministic ordering, exact scope, unique identity/provider names and a 4 MiB schema-free planner framing bound",
+    "dispatch_cut": "exact model target/profile-aware lightweight native quotes are frozen before one parent FrozenCapabilityDispatchCut; Tool selects routes from its sibling view, the adapter materializes only the bounded DIRECT cohort, and context assembly exact-joins the Tool plan to the Skill sibling view through their shared parent",
+    "builtin": "one sealed execution-backed inventory exact-joins installed bindings to the compiled catalog; dormant catalog-only descriptors are not executable leaves and adapter incompatibility fails the whole provider dispatch before open",
+    "mcp": "canonical MCP schema stays in the MCP/generic fact; adapter preflight retains only lightweight eligibility quotes until the bounded DIRECT cohort is selected; direct execution exact-joins the current slot/executor/policy generation, while meta execution uses one FULL-installed scope/epoch/tool/policy/route-bound ref",
+    "skill": "one aggregate LOCAL_SKILL_CATALOG snapshot retains winning-root provenance but owns no executor, permission, Tool route or physical filesystem authority",
+    "continuity": "the existing provider-input epoch and final wire plan prove stable SYSTEM and actual tools plus append-only input/messages; the installed process-local MCP route projection only keeps an exact inspect-to-use route identity and is not a second prefix or recovery authority"
+  },
+  "mcp_exposure_contract": {
+    "cold": "native-eligible MCP tools are all DIRECT only when the complete MCP cohort plus Builtins fits both canonical and actual-wire count/byte bounds; otherwise the eligible MCP cohort is all NEW_MCP_META_ONLY",
+    "late": "late-ready tools never change same-epoch native tools and append a NEW_NOT_IN_NATIVE_SURFACE catalog route",
+    "native_incompatible": "canonical-valid but native-wire-incompatible MCP tools remain in the registry and route through FULL inspect/use when inspectable; they are not counted as canonical-invalid",
+    "unavailable": "descriptor overbound, schema replacement, dirty/disconnected physical generation and exact binding drift fail with closed unavailable outcomes; installed native descriptors remain frozen",
+    "directory_and_ref": "list and inspect use the Round 7.1 FULL_REQUIRED contract; cursor/ref are bounded, opaque, scope/epoch-bound and never persisted; use_new_mcp_tool resolves the actual inner effect policy before the one canonical attempt/result",
+    "invalid_tool_policy": [
+      "FAIL_SERVER",
+      "OMIT_INVALID"
+    ]
+  },
+  "clean_schema_identity": {
+    "universe_id": "pulsara.conversation-kernel.v1",
+    "universe_generation": 1,
+    "baseline_version": 0,
+    "baseline_sql_sha256": "92a146634350541abb71c63c9f82c3d8de12436e46398286185d3dc023ae8800",
+    "catalog_sha256": "9be1a3998285c8314c876ae3591ee63aeb3f4e1f05ea1157d7a00ca924c5eb11",
+    "grant_sha256": "1e2144bd38ad0940d15b883007d0f5dd325144c69618df9fad661d3548f03b79",
+    "observed_catalog_fingerprint": "sha256:2fcfc6bcf1680e99b89ee0ef8d6c42b8f0f10daf74cdd538483e3b3c231f7f43",
+    "manifest_fingerprint": "sha256:e26f5d51daf98a724771b64ef3457b0b195f0f3137c036141f74e23546f69dc6",
+    "round9_schema_changes": 0
+  },
+  "deterministic_verification": {
+    "pytest_collection": "806_tests_collected",
+    "round9_review_followup_targeted": "28_passed_53_deselected_in_2.61s",
+    "round9_final_premerge_fixes": "83_passed_across_round9_round6_and_native_planning_deadline_targets",
+    "round9_round3_direct_round6_runner_round5a1_round7_targeted": "313_passed_in_28.59s",
+    "round5a2_round7_1_round9_and_clean_v0_selected": "57_passed_in_4.06s",
+    "full_pytest": "806_passed_in_116.85s",
+    "postgres_marker": "198_passed_608_deselected_in_79.47s",
+    "clean_v0": "fresh install, second migrate, binding-v2 checkout, catalog/grant/function/trigger drift and deep verification nodes passed within full and PostgreSQL suites",
+    "strict_prefix": "cold direct, compatible successor, late meta, native-incompatible meta, provider-contract reset reprojection and actual-wire mismatch provider-open-zero tests passed; semantic MCP changes publish a catalog-only successor without changing native tools, while same-semantic runtime-only reconnect remains catalog-invisible and fences dirty physical execution",
+    "scope_and_authority": "ROOT/child catalogs, foreign ref, foreign borrow, owner-carrier forgery, duplicate/conflicting registration and executor/policy/route drift tests passed",
+    "architecture": "generic capability package has zero provider-adapter, MCP physical, repository, Host and compaction imports; eligibility retains no full wire schema, selected materialization is bounded to DIRECT tools, decorative owner/Skill proof wrappers are absent, and old mutable registry/exposure and pre-registry surface bypasses are absent",
+    "ruff": "passed_all_files",
+    "compileall": "passed_src_tests_tools",
+    "terminal_protocol_generation": "passed",
+    "go_test_vet_module_verify": "not_applicable_bundled_client_physically_absent_at_baseline_and_not_restored",
+    "uv_lock_check": "passed",
+    "writer_renewal": "a real slow-provider probe exposed an untyped optional PostgreSQL parameter; the query now uses the existing explicit text cast, its PostgreSQL regression passed, and DashScope completed both multi-renewal trajectories",
+    "responses_empty_terminal_followup": "79 Round 5A.1 tests and 12 Round 5A.2 tests passed; an empty terminal output is accepted only from a contiguous fully-settled exact output_item.done sequence, while non-empty terminal output remains authoritative and exact-joins any streamed done sequence",
+    "grok_meta_and_bob_terminal_followup": "4 MCP qualified-default/exact-alias/few-shot tests, 10 Responses terminal tests and 92 combined Round 5A.1/5A.2 tests passed; Ruff, compileall and diff check passed",
+    "git_diff_check": "passed",
+    "new_skip_or_xfail": 0
+  },
+  "real_provider_dogfood": {
+    "status": "passed_with_bob_model_tool-selection_variance",
+    "provider_profile": "four configured OpenAI-compatible provider profiles were exercised; credentials, endpoints and private response content are not recorded here",
+    "database": "fresh clean-v0 ephemeral loopback PostgreSQL database force-dropped after every probe",
+    "chat_direct_late_meta": {
+      "api": "openai_chat_completions",
+      "cold_direct_count": 1,
+      "late_meta_count": 1,
+      "inspect_attempts": 1,
+      "meta_use_attempts": 1,
+      "meta_use_results": 1,
+      "wire_tools_stable": true,
+      "wire_tools_fingerprint": "sha256:b909bb8238158d0f38178205ab58a514aa1bb48eda85ce15f08275f53d1b3a96",
+      "fresh_host_manual_continuation_completed": true,
+      "remote_response_id_used": false
+    },
+    "responses_direct_native_incompatible_meta": {
+      "api": "openai_responses",
+      "cold_direct_count": 1,
+      "native_wire_incompatible_meta_count": 1,
+      "route_reason": "NATIVE_WIRE_INCOMPATIBLE",
+      "inspect_attempts": 1,
+      "meta_use_attempts": 1,
+      "meta_use_results": 1,
+      "wire_tools_stable": true,
+      "wire_tools_fingerprint": "sha256:3a37c270236df5ae204aae94a847ffb297c28436c94bd3918f06b96c84bcfeba",
+      "fresh_host_selected_native_replay_fragments": 1,
+      "remote_response_id_used": false
+    },
+    "chat_direct_physical_unavailable": {
+      "api": "openai_chat_completions",
+      "installed_direct_descriptor_retained": true,
+      "wire_tools_stable": true,
+      "typed_result": "TOOL_UNAVAILABLE",
+      "host_continued_and_finalized": true
+    },
+    "bob_responses_qualified_meta_followup": {
+      "api": "openai_responses",
+      "model_profile": "gpt-5.4",
+      "endpoint_profile": "bob-api.com/v1",
+      "canonical_trajectory": [
+        "mcp__direct__direct_echo:SUCCESS",
+        "inspect_new_mcp_tool:SUCCESS",
+        "use_new_mcp_tool:SUCCESS"
+      ],
+      "attempts": 3,
+      "results": 3,
+      "meta_remote_invocations": 1,
+      "qualified_name_is_catalog_default": true,
+      "exact_remote_name_is_implicit_compatibility": true,
+      "wire_tools_stable": true,
+      "wire_tools_fingerprint": "sha256:8121c0f34a5a3dbbfbd8673f34eeb018ba9898c4e39bb7306743da093aaa7f54",
+      "fresh_host_manual_continuation_completed": true,
+      "selected_native_replay_fragments": 1,
+      "remote_response_id_used": false
+    },
+    "extended_four_provider_matrix": {
+      "bob_responses": {
+        "provider_neutral_terminal_contract": "passed",
+        "raw_conformance_observation": "response.output_item.done carried complete closed output while response.completed reported completed with an empty output array; the generic contiguous fully-settled done fallback reconstructed the same bounded carrier",
+        "round9_direct_late_meta": "passed after qualified-name default guidance plus exact remote-name compatibility: namespaced direct MCP tool, inspect_new_mcp_tool and use_new_mcp_tool each produced one SUCCESS result; fresh-Host continuation passed",
+        "round9_direct_native_incompatible_meta": "DIRECT and inspect_new_mcp_tool exact canonical attempt/results passed; the model did not select use_new_mcp_tool",
+        "canonical_tool_arguments_exact": true,
+        "fresh_host_continuation_completed": true,
+        "remote_operational_metadata_excluded_from_replay": true,
+        "pulsara_disposition": "protocol compatible: a non-empty terminal item that elides only id/status exact-joins the richer fully settled output_item.done carrier without a provider-name branch"
+      },
+      "deepseek_chat_completions": {
+        "direct_late_meta": "passed",
+        "direct_native_incompatible_meta": "passed",
+        "canonical_trajectory": [
+          "namespaced_direct_mcp_tool:SUCCESS",
+          "inspect_new_mcp_tool:SUCCESS",
+          "use_new_mcp_tool:SUCCESS"
+        ],
+        "all_arguments_exact": true,
+        "expected_fixture_results_verified": true,
+        "fresh_host_continuation_completed": true,
+        "wire_tools_stable": true
+      },
+      "dashscope_chat_completions": {
+        "direct_late_meta": "passed",
+        "direct_native_incompatible_meta": "passed",
+        "canonical_trajectory": [
+          "namespaced_direct_mcp_tool:SUCCESS",
+          "inspect_new_mcp_tool:SUCCESS",
+          "use_new_mcp_tool:SUCCESS"
+        ],
+        "all_arguments_exact": true,
+        "expected_fixture_results_verified": true,
+        "fresh_host_continuation_completed": true,
+        "wire_tools_stable": true,
+        "writer_renewal_cycles_exercised": true
+      },
+      "openrouter_chat_completions": {
+        "direct_late_meta": "passed",
+        "direct_native_incompatible_meta": "passed",
+        "canonical_trajectory": [
+          "namespaced_direct_mcp_tool:SUCCESS",
+          "inspect_new_mcp_tool:SUCCESS",
+          "use_new_mcp_tool:SUCCESS"
+        ],
+        "all_arguments_exact": true,
+        "expected_fixture_results_verified": true,
+        "fresh_host_continuation_completed": true,
+        "wire_tools_stable": true
+      }
+    },
+    "api_key_dsn_headers_prompt_schema_arguments_tool_ref_replay_body_or_provider_response_recorded": false
+  },
+  "oracles": {
+    "committed_agent_events": 31,
+    "live_agent_events": 24,
+    "typed_subject_slots": 13,
+    "append_guards": 2,
+    "product_relations": 26,
+    "durable_job_handlers": 1,
+    "new_capability_relations": 0,
+    "new_committed_events": 0,
+    "new_live_events": 0,
+    "new_subject_slots": 0,
+    "new_append_guards": 0,
+    "new_durable_jobs": 0,
+    "new_protocol_types": 0
+  },
+  "production_diff": {
+    "tracked_modified_or_deleted_files_under_src": 34,
+    "new_python_files_under_src": 6,
+    "lines_added": 7141,
+    "lines_deleted": 1294,
+    "net_lines": 5847,
+    "counting_scope": "git numstat under src plus wc -l for untracked production Python modules; tests, tools, documentation and machine evidence are excluded"
+  },
+  "deleted_old_authority_or_compatibility": [
+    "mutable Host-lived generic CapabilityRegistry generation",
+    "legacy CapabilityExposurePlan and event-shaped exposure projection",
+    "tool-only names that falsely claimed generic capability semantics",
+    "skill-only CAPABILITY_CATALOG and generic composer names",
+    "dormant CapabilityExecutionSurfaceIdentityFact descriptor-artifact carrier",
+    "DirectKernelToolPort pre-registry snapshot_tool_surface/tool_specs bypass",
+    "MCP discovery dependency on OpenAI native-schema lowering"
+  ],
+  "permanent_absences": {
+    "durable_capability_relation_generation_or_registry": true,
+    "capability_event_receipt_checkpoint_projection_repair_or_recovery": true,
+    "generic_capability_invoke_or_skill_executor": true,
+    "provider_lowered_schema_as_canonical_authority": true,
+    "same_epoch_late_mcp_native_promotion": true,
+    "cross_host_mcp_ref_or_physical_binding_restore": true,
+    "round9_1_round9_2_round5b_round10_plugin_or_compaction_implementation": true
+  },
+  "remaining_blockers": [],
+  "non_goals": [
+    "Round 9.1 Agent Skills standard manifest, resources or progressive disclosure",
+    "Round 9.2 Plugin bundles, Hooks or Subagent-spec packages",
+    "Round 5B compaction, snapshot adoption, context rebase or MCP promotion",
+    "MCP elicitation forms, private URLs, OAuth, Sampling, Roots, Apps or Tasks",
+    "MCP-backed Skill activation or Skill-authored permission/effect policy",
+    "durable or cross-Host capability/MCP execution recovery",
+    "restoring the deleted bundled Go/TUI client"
+  ]
+}

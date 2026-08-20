@@ -39,6 +39,7 @@ from tests.support.round3 import (
     authorize_direct_tool,
     direct_tool_invocation_context,
     invoke_direct_tool,
+    prepare_test_direct_tool_surface,
 )
 
 
@@ -661,7 +662,8 @@ def test_round2_terminal_monitor_tool_root_settlement_and_subagent_rejection(
                 mismatch_borrow.close()
         assert port.terminal_monitor_coordinator.list_current() == ()
 
-        child_surface = port.snapshot_tool_surface(
+        child_surface = prepare_test_direct_tool_surface(
+            port,
             conversation_scope_kind=ModelInputScopeKind.SUBAGENT_TASK,
             scope_subagent_task_id="task:child",
         )

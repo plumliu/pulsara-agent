@@ -16,12 +16,36 @@ from uuid import uuid4
 from jsonschema import ValidationError, validators
 
 from pulsara_agent.capability.builtin_catalog import builtin_tool_catalog_entry
+from pulsara_agent.capability.contracts import (
+    CapabilityKind,
+    CapabilitySourceKind,
+    CapabilitySourceRefreshMode,
+    CapabilitySourceSnapshotDisposition,
+    FrozenToolCapabilityExposurePlan,
+    ToolCapabilityRouteKind,
+    ToolCapabilityOrigin,
+    capability_identity,
+    capability_source_ref,
+    capability_source_registration,
+    freeze_capability_source_snapshot,
+    freeze_tool_capability_fact,
+    tool_capability_version_ref,
+)
+from pulsara_agent.capability.mcp_projection import (
+    McpInspectionDescriptorValues,
+    conservative_mcp_inspection_logical_utf8_bytes,
+    render_inspected_new_mcp_tool_provider_result,
+)
 from pulsara_agent.model_input.contracts import (
-    FrozenModelToolSurface,
+    FrozenCanonicalCompileSnapshot,
+    FrozenCompiledModelInput,
     FrozenToolSpec,
     ModelInputScopeKind,
-    STRUCTURED_MODEL_INPUT_LIMITS,
-    model_tool_surface_fingerprint,
+    ToolResultProviderRenderMode,
+    compiled_tool_result_source_fingerprint,
+)
+from pulsara_agent.model_input.continuity import (
+    ProcessLocalProviderInputInstallPermit,
 )
 from pulsara_agent.message import ToolResultState
 from pulsara_agent.mcp_config import McpServerConfig
@@ -70,6 +94,11 @@ from pulsara_agent.conversation_kernel.io import (
     KernelSessionIO,
     PhysicalToolInvocationDisposition,
 )
+from pulsara_agent.conversation_kernel.capability_composition import (
+    BuiltinCompositionState,
+    SealedBuiltinCapabilitySnapshot,
+    issue_sealed_builtin_capability_snapshot,
+)
 from pulsara_agent.conversation_kernel.interaction_arbiter import (
     InteractionAdmissionHooks,
 )
@@ -94,16 +123,21 @@ from pulsara_agent.ports.live_agent_event import (
 from pulsara_agent.primitives.model_call import sha256_fingerprint
 from pulsara_agent.primitives.context import (
     FrozenJsonObjectFact,
+    canonical_json_bytes,
     context_fingerprint,
     freeze_json,
     thaw_json,
 )
 from pulsara_agent.primitives.run_permission import FrozenRunPermissionSnapshot
 from pulsara_agent.primitives.tool_observation import (
+    MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES,
     PhysicalToolObservationSupplement,
     ToolObservationOrigin,
     TrustedToolObservationSupplement,
     normalize_observation_duration,
+)
+from pulsara_agent.primitives.tool_result_projection import (
+    ToolResultFullDeliveryReason,
 )
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.conversation_kernel.vocabulary import LiveEventType
@@ -114,10 +148,12 @@ from pulsara_agent.conversation_kernel.tool_policy import (
 )
 from pulsara_agent.conversation_kernel.tool_surface import (
     BuiltinExecutionPolicyRef,
+    DirectToolAccessLeaf,
     McpEffectKind,
     McpToolExecutionPolicyFact,
     PreparedKernelToolSurface,
     PreparedToolExecutionBinding,
+    PreparedUnavailableDirectMcpGate,
     ProcessLocalToolSurfaceAccess,
     ProcessLocalToolSurfaceBorrow,
     tool_observation_origin_for_binding,
@@ -151,6 +187,12 @@ from .mcp.supervisor import (
     McpPhysicalOutcomeUnknown,
     McpSnapshotStale,
 )
+from .mcp.directory import McpDirectoryPageFactory
+from .mcp.meta import (
+    McpToolRefCapacityExceeded,
+    NewMcpToolRef,
+    ProcessLocalNewMcpToolRefOwner,
+)
 
 
 DIRECT_KERNEL_TOOL_NAMES = frozenset(
@@ -169,6 +211,8 @@ DIRECT_KERNEL_TOOL_NAMES = frozenset(
         "list_mcp_resource_templates",
         "list_mcp_resources",
         "list_mcp_servers",
+        "inspect_new_mcp_tool",
+        "use_new_mcp_tool",
         "read_mcp_resource",
     }
 )
@@ -532,6 +576,21 @@ class _PendingMcpConfirmationAdmission:
     tool_call_id: str
 
 
+@dataclass(frozen=True, slots=True)
+class _InstalledBorrowEpoch:
+    conversation_scope_kind: ModelInputScopeKind
+    scope_subagent_task_id: str | None
+    epoch_nonce: str
+    epoch_revision: int
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedMcpMetaInvocation:
+    executor: McpBoundToolExecutor
+    ref: NewMcpToolRef
+    arguments: FrozenJsonObjectFact
+
+
 class DirectKernelToolPort:
     """Permission-before-attempt and process-local physical execution owner."""
 
@@ -578,6 +637,8 @@ class DirectKernelToolPort:
             _DirectPlanControlTool("ask_plan_question"),
             _DirectPlanControlTool("exit_plan"),
             _DirectMcpCatalogTool("list_mcp_servers"),
+            _DirectMcpCatalogTool("inspect_new_mcp_tool"),
+            _DirectMcpCatalogTool("use_new_mcp_tool"),
             _DirectMcpCatalogTool("list_mcp_resources"),
             _DirectMcpCatalogTool("list_mcp_resource_templates"),
             _DirectMcpCatalogTool("read_mcp_resource"),
@@ -599,6 +660,11 @@ class DirectKernelToolPort:
             tuple[int, ModelInputScopeKind, str | None], PreparedKernelToolSurface
         ] = {}
         self._closed = False
+        self._builtin_composition_state = BuiltinCompositionState.PREPARING
+        self._builtin_composition_seal: object | None = None
+        self._sealed_builtin_bindings: tuple[
+            ProductionBuiltinExecutorBinding, ...
+        ] | None = None
         self._physically_closed = False
         self._terminal_physically_closed = False
         self._close_async_lock = asyncio.Lock()
@@ -624,9 +690,16 @@ class DirectKernelToolPort:
         self._mcp_confirmation_admissions: dict[
             tuple[int, str], _PendingMcpConfirmationAdmission
         ] = {}
+        self._mcp_meta_invocations: dict[
+            tuple[int, str], _PreparedMcpMetaInvocation
+        ] = {}
+        self._mcp_meta_refs = ProcessLocalNewMcpToolRefOwner()
+        self._mcp_directory = McpDirectoryPageFactory()
+        self._installed_epoch_by_borrow: dict[str, _InstalledBorrowEpoch] = {}
 
     def bind_subagent_port(self, port: KernelSubagentToolPort) -> None:
         with self._surface_lock:
+            self._require_builtin_composition_preparing_locked()
             if self._subagent is not None:
                 raise RuntimeError("subagent tool port is already bound")
             self._subagent = port
@@ -634,23 +707,145 @@ class DirectKernelToolPort:
 
     def bind_memory_port(self, port: KernelMemoryToolPort) -> None:
         with self._surface_lock:
+            self._require_builtin_composition_preparing_locked()
             if self._memory is not None:
                 raise RuntimeError("memory tool port is already bound")
             self._memory = port
             self._surface_generation += 1
 
     def bind_interaction_port(self, port: KernelToolInteractionPort) -> None:
-        if self._interaction is not None:
-            raise RuntimeError("interaction tool port is already bound")
-        self._interaction = port
+        with self._surface_lock:
+            self._require_builtin_composition_preparing_locked()
+            if self._interaction is not None:
+                raise RuntimeError("interaction tool port is already bound")
+            self._interaction = port
 
     def bind_mcp_supervisor(self, supervisor: McpHostSupervisor) -> None:
         with self._surface_lock:
+            self._require_builtin_composition_preparing_locked()
             if self._mcp_supervisor is not None:
                 raise RuntimeError("MCP supervisor is already bound")
             if self._closed:
                 raise RuntimeError("tool surface is closed")
             self._mcp_supervisor = supervisor
+
+    def _require_builtin_composition_preparing_locked(self) -> None:
+        if self._builtin_composition_state is not BuiltinCompositionState.PREPARING:
+            raise RuntimeError("builtin composition is already sealed or closed")
+
+    def seal_builtin_composition(self) -> object:
+        with self._surface_lock:
+            if self._builtin_composition_state is BuiltinCompositionState.CLOSED:
+                raise RuntimeError("builtin composition is closed")
+            if self._builtin_composition_state is BuiltinCompositionState.SEALED:
+                assert self._builtin_composition_seal is not None
+                return self._builtin_composition_seal
+            if any(
+                item is None
+                for item in (
+                    self._interaction,
+                    self._subagent,
+                    self._memory,
+                    self._mcp_supervisor,
+                )
+            ):
+                raise RuntimeError("builtin composition required ports are incomplete")
+            self._sealed_builtin_bindings = self._executor_bindings_locked()
+            self._builtin_composition_seal = object()
+            self._builtin_composition_state = BuiltinCompositionState.SEALED
+            return self._builtin_composition_seal
+
+    def sealed_builtin_capability_snapshot(
+        self,
+        *,
+        conversation_scope_kind: ModelInputScopeKind,
+        scope_subagent_task_id: str | None,
+    ) -> SealedBuiltinCapabilitySnapshot:
+        if (conversation_scope_kind is ModelInputScopeKind.ROOT) != (
+            scope_subagent_task_id is None
+        ):
+            raise ValueError("builtin capability scope identity is invalid")
+        with self._surface_lock:
+            if self._builtin_composition_state is not BuiltinCompositionState.SEALED:
+                raise RuntimeError("builtin composition is not sealed")
+            assert self._sealed_builtin_bindings is not None
+            assert self._builtin_composition_seal is not None
+            bindings = self._sealed_builtin_bindings
+            if conversation_scope_kind is ModelInputScopeKind.SUBAGENT_TASK:
+                bindings = tuple(
+                    item
+                    for item in bindings
+                    if item.tool_name
+                    not in {
+                        "terminal_monitor",
+                        "enter_plan",
+                        "ask_plan_question",
+                        "exit_plan",
+                    }
+                )
+            source = capability_source_ref(
+                CapabilitySourceKind.BUILTIN_REGISTRY,
+                "pulsara-builtin-tools",
+            )
+            registration = capability_source_registration(
+                source=source,
+                refresh_mode=CapabilitySourceRefreshMode.IMMUTABLE,
+                source_contract_fingerprint=context_fingerprint(
+                    "builtin-capability-source-contract:v1",
+                    tuple(
+                        (
+                            item.tool_name,
+                            item.descriptor_fingerprint,
+                            item.binding_contract_fingerprint,
+                        )
+                        for item in bindings
+                    ),
+                ),
+            )
+            facts = []
+            for binding in bindings:
+                entry = builtin_tool_catalog_entry(binding.tool_name)
+                if (
+                    entry.descriptor.fingerprint()
+                    != binding.descriptor_fingerprint
+                    or entry.entry_fingerprint
+                    != binding.catalog_entry_fingerprint
+                ):
+                    raise RuntimeError("builtin catalog/executor binding drifted")
+                schema = freeze_json(_json_schema_value(entry.descriptor.input_schema))
+                if not isinstance(schema, FrozenJsonObjectFact):
+                    raise TypeError("builtin tool schema did not freeze to an object")
+                spec = FrozenToolSpec(
+                    name=binding.tool_name,
+                    description=entry.descriptor.description,
+                    parameters=schema,
+                    descriptor_fingerprint=binding.descriptor_fingerprint,
+                )
+                facts.append(
+                    freeze_tool_capability_fact(
+                        identity=capability_identity(
+                            kind=CapabilityKind.TOOL,
+                            source=source,
+                            stable_name=binding.tool_name,
+                        ),
+                        origin=ToolCapabilityOrigin.BUILTIN,
+                        canonical_tool_spec=spec,
+                    )
+                )
+            source_snapshot = freeze_capability_source_snapshot(
+                registration=registration,
+                conversation_scope_kind=conversation_scope_kind,
+                scope_subagent_task_id=scope_subagent_task_id,
+                disposition=CapabilitySourceSnapshotDisposition.COMPLETE,
+                facts=tuple(facts),
+            )
+            return issue_sealed_builtin_capability_snapshot(
+                conversation_scope_kind=conversation_scope_kind,
+                scope_subagent_task_id=scope_subagent_task_id,
+                source_snapshot=source_snapshot,
+                executor_bindings=bindings,
+                builtin_composition_seal=self._builtin_composition_seal,
+            )
 
     def prepare_tool_surface_safe_point(self) -> None:
         supervisor = self._mcp_supervisor
@@ -676,6 +871,26 @@ class DirectKernelToolPort:
                         self._prepared_surfaces.pop(key, None)
                 self._mcp_runtime_by_surface_generation.pop(previous_generation, None)
                 previous.release()
+
+    def freeze_mcp_capability_source_snapshot_set(
+        self,
+        *,
+        conversation_scope_kind: ModelInputScopeKind,
+        scope_subagent_task_id: str | None,
+    ):
+        supervisor = self._mcp_supervisor
+        if supervisor is None:
+            raise RuntimeError("MCP supervisor is not bound")
+        return supervisor.freeze_capability_source_snapshot_set(
+            conversation_scope_kind=conversation_scope_kind,
+            scope_subagent_task_id=scope_subagent_task_id,
+        )
+
+    def freeze_mcp_capability_projection_input(self, owner):
+        supervisor = self._mcp_supervisor
+        if supervisor is None:
+            raise RuntimeError("MCP supervisor is not bound")
+        return supervisor.freeze_capability_projection_input(owner)
 
     async def reload_mcp_configs(
         self, configs: tuple[McpServerConfig, ...]
@@ -712,12 +927,14 @@ class DirectKernelToolPort:
         for key, admission in tuple(self._mcp_confirmation_admissions.items()):
             if admission.executor.semantic.server_id in disabled_or_removed:
                 self._mcp_confirmation_admissions.pop(key, None)
+                self._mcp_meta_invocations.pop(key, None)
         for key, permit in tuple(self._mcp_dispatch_permits.items()):
             if (
                 permit.lease._slot.server_id in disabled_or_removed  # noqa: SLF001
                 and permit.state.value == "ADMITTED"
             ):
                 self._mcp_dispatch_permits.pop(key, None)
+                self._mcp_meta_invocations.pop(key, None)
                 permit.release()
         return changed
 
@@ -730,6 +947,8 @@ class DirectKernelToolPort:
         return self._todo_owner
 
     def _executor_bindings_locked(self) -> tuple[ProductionBuiltinExecutorBinding, ...]:
+        if self._sealed_builtin_bindings is not None:
+            return self._sealed_builtin_bindings
         identities = {
             name: _qualified_executor_identity(tool, name)
             for name, tool in self._tools.items()
@@ -754,150 +973,162 @@ class DirectKernelToolPort:
         with self._surface_lock:
             return self._executor_bindings_locked()
 
-    @property
-    def tool_specs(self) -> tuple[FrozenToolSpec, ...]:
-        return self.snapshot_tool_surface(
-            conversation_scope_kind=ModelInputScopeKind.ROOT,
-            scope_subagent_task_id=None,
-        ).model_surface.tool_specs
-
     def snapshot_terminal_cwd(self) -> Path:
         return self._terminal.snapshot_default_cwd(
             owner_host_session_id=self._host_owner_id
         )
 
-    def snapshot_tool_surface(
+    def prepare_planned_tool_surface(
         self,
         *,
-        conversation_scope_kind: ModelInputScopeKind,
-        scope_subagent_task_id: str | None,
+        plan: FrozenToolCapabilityExposurePlan,
+        builtin: SealedBuiltinCapabilitySnapshot,
     ) -> PreparedKernelToolSurface:
-        if (conversation_scope_kind is ModelInputScopeKind.ROOT) != (
-            scope_subagent_task_id is None
+        """Exact-join one semantic plan to this Host's physical owners."""
+
+        surface = plan.direct_tool_surface
+        scope = surface.conversation_scope_kind
+        task_id = builtin.scope_subagent_task_id
+        if (
+            builtin.conversation_scope_kind is not scope
+            or plan.direct_projection_set.scope_subagent_task_id != task_id
+            or plan.dispatch_cut_fingerprint == ""
         ):
-            raise ValueError("tool surface scope identity is invalid")
+            raise ValueError("planned tool surface scope is invalid")
         with self._surface_lock:
             if self._closed:
                 raise RuntimeError("tool surface is closed")
-            bindings = self._executor_bindings_locked()
-            if conversation_scope_kind is ModelInputScopeKind.SUBAGENT_TASK:
-                bindings = tuple(
-                    binding
-                    for binding in bindings
-                    if binding.tool_name
-                    not in {
-                        "terminal_monitor",
-                        "enter_plan",
-                        "ask_plan_question",
-                        "exit_plan",
-                    }
-                )
-            specs: list[FrozenToolSpec] = []
-            execution_bindings: list[PreparedToolExecutionBinding] = []
-            for binding in bindings:
-                entry = builtin_tool_catalog_entry(binding.tool_name)
-                schema = freeze_json(_json_schema_value(entry.descriptor.input_schema))
-                if not isinstance(schema, FrozenJsonObjectFact):
-                    raise TypeError("tool schema did not freeze to an object")
-                specs.append(
-                    FrozenToolSpec(
-                        name=binding.tool_name,
-                        description=entry.descriptor.description,
-                        parameters=schema,
-                        descriptor_fingerprint=binding.descriptor_fingerprint,
+            if (
+                self._builtin_composition_state is not BuiltinCompositionState.SEALED
+                or builtin.builtin_composition_seal
+                is not self._builtin_composition_seal
+            ):
+                raise RuntimeError("foreign or unsealed builtin snapshot")
+            builtin_by_name = {
+                item.tool_name: item for item in builtin.executor_bindings
+            }
+            current_mcp = self._mcp_current
+            mcp_binding_by_name = (
+                {}
+                if current_mcp is None
+                else {
+                    item.tool_name: item
+                    for item in current_mcp.execution_bindings
+                }
+            )
+            mcp_executor_by_name = (
+                {} if current_mcp is None else current_mcp.executors
+            )
+            version_by_name = {
+                item.provider_name: item
+                for item in plan.direct_projection_set.tool_versions
+            }
+            leaves: list[DirectToolAccessLeaf] = []
+            for spec in surface.tool_specs:
+                builtin_binding = builtin_by_name.get(spec.name)
+                if builtin_binding is not None:
+                    if builtin_binding.descriptor_fingerprint != spec.descriptor_fingerprint:
+                        raise RuntimeError("planned builtin descriptor drifted")
+                    policy = BuiltinExecutionPolicyRef(
+                        tool_name=spec.name,
+                        catalog_entry_fingerprint=(
+                            builtin_binding.catalog_entry_fingerprint
+                        ),
+                        policy_fingerprint=context_fingerprint(
+                            "builtin-execution-policy-ref:v1",
+                            {
+                                "tool_name": spec.name,
+                                "catalog_entry_fingerprint": (
+                                    builtin_binding.catalog_entry_fingerprint
+                                ),
+                            },
+                        ),
                     )
-                )
-                policy = BuiltinExecutionPolicyRef(
-                    tool_name=binding.tool_name,
-                    catalog_entry_fingerprint=binding.catalog_entry_fingerprint,
-                    policy_fingerprint=context_fingerprint(
-                        "builtin-execution-policy-ref:v1",
-                        {
-                            "tool_name": binding.tool_name,
-                            "catalog_entry_fingerprint": (
-                                binding.catalog_entry_fingerprint
+                    leaves.append(
+                        PreparedToolExecutionBinding(
+                            tool_name=spec.name,
+                            descriptor_fingerprint=spec.descriptor_fingerprint,
+                            executor_binding_fingerprint=(
+                                builtin_binding.binding_fingerprint
                             ),
-                        },
-                    ),
+                            execution_policy=policy,
+                            memory_citation_visibility="WORKSPACE_BOUND",
+                            memory_citation_evidence_kind=(
+                                "MEMORY_READ_EXPOSURE"
+                                if spec.name
+                                in {"memory_search", "memory_get", "memory_explain"}
+                                else "PRIMARY_OBSERVATION"
+                            ),
+                        )
+                    )
+                    continue
+                version = version_by_name.get(spec.name)
+                mcp_binding = mcp_binding_by_name.get(spec.name)
+                mcp_executor = mcp_executor_by_name.get(spec.name)
+                if (
+                    version is not None
+                    and mcp_binding is not None
+                    and mcp_executor is not None
+                    and mcp_binding.descriptor_fingerprint
+                    == spec.descriptor_fingerprint
+                    and _mcp_executor_capability_version(mcp_executor) == version
+                    and mcp_executor.policy is mcp_binding.execution_policy
+                ):
+                    leaves.append(mcp_binding)
+                    continue
+                if version is None:
+                    raise RuntimeError("planned MCP version is absent")
+                reason = (
+                    "SCHEMA_REPLACED_PENDING_COLD_ADOPTION"
+                    if mcp_binding is not None
+                    else "MCP_DIRECT_CURRENTLY_UNAVAILABLE"
                 )
-                execution_bindings.append(
-                    PreparedToolExecutionBinding(
-                        tool_name=binding.tool_name,
-                        descriptor_fingerprint=binding.descriptor_fingerprint,
-                        executor_binding_fingerprint=binding.binding_fingerprint,
-                        execution_policy=policy,
-                        memory_citation_visibility="WORKSPACE_BOUND",
-                        memory_citation_evidence_kind=(
-                            "MEMORY_READ_EXPOSURE"
-                            if binding.tool_name
-                            in {"memory_search", "memory_get", "memory_explain"}
-                            else "PRIMARY_OBSERVATION"
+                gate_payload = {
+                    "identity": version.identity_fingerprint,
+                    "semantic": spec.descriptor_fingerprint,
+                    "provider_name": spec.name,
+                    "reason": reason,
+                }
+                leaves.append(
+                    PreparedUnavailableDirectMcpGate(
+                        capability_identity_fingerprint=(
+                            version.identity_fingerprint
+                        ),
+                        tool_semantic_fingerprint=spec.descriptor_fingerprint,
+                        provider_tool_name=spec.name,
+                        unavailable_reason_code=reason,
+                        supervisor_authority_identity=self._mcp_supervisor,
+                        gate_fingerprint=context_fingerprint(
+                            "unavailable-direct-mcp-gate:v1", gate_payload
                         ),
                     )
                 )
-            mcp_runtime = self._mcp_current
-            if mcp_runtime is not None:
-                mcp_semantics = (
-                    mcp_runtime.root_tool_specs
-                    if conversation_scope_kind is ModelInputScopeKind.ROOT
-                    else mcp_runtime.subagent_tool_specs
-                )
-                mcp_binding_by_name = {
-                    item.tool_name: item for item in mcp_runtime.execution_bindings
-                }
-                for semantic in mcp_semantics:
-                    if semantic.provider_tool_name in {item.name for item in specs}:
-                        raise RuntimeError("MCP provider tool collides with a builtin")
-                    specs.append(semantic.provider_spec())
-                    execution_bindings.append(
-                        mcp_binding_by_name[semantic.provider_tool_name]
-                    )
-                paired = sorted(
-                    zip(specs, execution_bindings, strict=True),
-                    key=lambda item: item[0].name,
-                )
-                specs = [item[0] for item in paired]
-                execution_bindings = [item[1] for item in paired]
-            frozen_specs = tuple(specs)
-            if len(frozen_specs) > STRUCTURED_MODEL_INPUT_LIMITS.maximum_tool_specs:
-                raise RuntimeError("MCP_DIRECT_TOOL_SURFACE_BOUND_EXCEEDED")
-            fingerprint = model_tool_surface_fingerprint(
-                conversation_scope_kind, frozen_specs
-            )
-            surface = FrozenModelToolSurface(
-                conversation_scope_kind=conversation_scope_kind,
-                tool_specs=frozen_specs,
-                surface_fingerprint=fingerprint,
-            )
-            frozen_execution_bindings = tuple(execution_bindings)
+            frozen_leaves = tuple(leaves)
             execution_fingerprint = tool_execution_surface_fingerprint(
                 owner_epoch=self._surface_owner_epoch,
                 surface_generation=self._surface_generation,
-                semantic_surface_fingerprint=fingerprint,
-                bindings=frozen_execution_bindings,
+                semantic_surface_fingerprint=surface.surface_fingerprint,
+                bindings=frozen_leaves,
             )
             access = ProcessLocalToolSurfaceAccess(
                 owner_epoch=self._surface_owner_epoch,
                 surface_generation=self._surface_generation,
-                conversation_scope_kind=conversation_scope_kind,
-                scope_subagent_task_id=scope_subagent_task_id,
-                semantic_surface_fingerprint=fingerprint,
+                conversation_scope_kind=scope,
+                scope_subagent_task_id=task_id,
+                semantic_surface_fingerprint=surface.surface_fingerprint,
                 execution_surface_fingerprint=execution_fingerprint,
                 _authority=self._surface_authority,
             )
             prepared = PreparedKernelToolSurface(
                 model_surface=surface,
-                execution_bindings=frozen_execution_bindings,
+                execution_bindings=frozen_leaves,
                 execution_surface_fingerprint=execution_fingerprint,
                 access=access,
+                capability_exposure_plan=plan,
             )
-            self._prepared_surfaces[
-                (
-                    self._surface_generation,
-                    conversation_scope_kind,
-                    scope_subagent_task_id,
-                )
-            ] = prepared
+            self._prepared_surfaces[(self._surface_generation, scope, task_id)] = (
+                prepared
+            )
             return prepared
 
     def borrow_tool_surface(
@@ -934,6 +1165,82 @@ class DirectKernelToolPort:
                 raise RuntimeError("tool surface borrow is not active")
             self._require_prepared_surface_locked(prepared)
 
+    def install_provider_input_tool_result_deliveries(
+        self,
+        *,
+        permit: ProcessLocalProviderInputInstallPermit,
+        canonical_facts: FrozenCanonicalCompileSnapshot,
+        compiled_input: FrozenCompiledModelInput,
+        surface_borrow: ProcessLocalToolSurfaceBorrow,
+    ) -> None:
+        """Install process-local capabilities only after the exact continuity CAS.
+
+        The canonical inspect result may already be durable while its opaque ref
+        is still dormant.  Only a FULL compiler decision installed into this
+        exact scope/epoch makes the ref callable.  This method owns no database
+        mutation and cannot select a different tool generation.
+        """
+
+        access = surface_borrow.prepared.access
+        if (
+            permit.scope.session_id != self._session_id
+            or permit.scope.scope_kind is not access.conversation_scope_kind
+            or permit.scope.scope_subagent_task_id
+            != access.scope_subagent_task_id
+        ):
+            raise RuntimeError("provider-input install scope does not join tool borrow")
+        self.validate_tool_surface_borrow(surface_borrow, surface_borrow.prepared)
+        canonical_by_source = {
+            compiled_tool_result_source_fingerprint(item): item
+            for item in canonical_facts.canonical_input.items
+            if item.source_entry_id is not None and item.tool_call_id is not None
+        }
+        decision_by_source = {
+            item.source_entry_fingerprint: item
+            for item in compiled_input.tool_result_decisions
+        }
+        if len(decision_by_source) != len(compiled_input.tool_result_decisions):
+            raise RuntimeError("compiled ToolResult delivery decisions are duplicated")
+        full_inspect_entry_ids: list[str] = []
+        for source_fingerprint, decision in decision_by_source.items():
+            if (
+                decision.full_delivery_reason
+                is not ToolResultFullDeliveryReason.MCP_INSPECT_SCHEMA
+            ):
+                continue
+            item = canonical_by_source.get(source_fingerprint)
+            if (
+                item is None
+                or item.tool_result_delivery.reason
+                is not ToolResultFullDeliveryReason.MCP_INSPECT_SCHEMA
+                or decision.selected_mode is not ToolResultProviderRenderMode.FULL
+            ):
+                raise RuntimeError("MCP inspect result was not installed as exact FULL")
+            assert item.source_entry_id is not None
+            full_inspect_entry_ids.append(item.source_entry_id)
+        epoch = _InstalledBorrowEpoch(
+            conversation_scope_kind=access.conversation_scope_kind,
+            scope_subagent_task_id=access.scope_subagent_task_id,
+            epoch_nonce=permit.epoch_nonce,
+            epoch_revision=permit.epoch_revision,
+        )
+        with self._surface_lock:
+            if surface_borrow.borrow_id not in self._surface_borrows:
+                raise RuntimeError("provider-input install borrow was released")
+            self._installed_epoch_by_borrow[surface_borrow.borrow_id] = epoch
+        self._mcp_meta_refs.retire_scope_except_epoch(
+            conversation_scope_kind=epoch.conversation_scope_kind,
+            scope_subagent_task_id=epoch.scope_subagent_task_id,
+            continuity_epoch_nonce=epoch.epoch_nonce,
+        )
+        for entry_id in full_inspect_entry_ids:
+            self._mcp_meta_refs.install_full_result(
+                result_entry_id=entry_id,
+                conversation_scope_kind=epoch.conversation_scope_kind,
+                scope_subagent_task_id=epoch.scope_subagent_task_id,
+                continuity_epoch_nonce=epoch.epoch_nonce,
+            )
+
     def _require_prepared_surface_locked(
         self, prepared: PreparedKernelToolSurface
     ) -> None:
@@ -955,7 +1262,7 @@ class DirectKernelToolPort:
 
     def _validate_surface_borrow(
         self, borrow: ProcessLocalToolSurfaceBorrow, tool_name: str
-    ) -> PreparedToolExecutionBinding:
+    ) -> DirectToolAccessLeaf:
         with self._surface_lock:
             if (
                 borrow._closed
@@ -974,6 +1281,7 @@ class DirectKernelToolPort:
             if borrow._authority is not self._surface_authority:
                 raise RuntimeError("tool surface borrow authority conflicts")
             generation = self._surface_borrows.pop(borrow.borrow_id, None)
+            self._installed_epoch_by_borrow.pop(borrow.borrow_id, None)
             if generation is not None and generation != self._surface_generation:
                 if generation not in self._surface_borrows.values():
                     for key in tuple(self._prepared_surfaces):
@@ -1005,6 +1313,18 @@ class DirectKernelToolPort:
                 KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
                 "tool-surface:revoked",
                 f"tool unavailable: {tool_name}",
+            )
+        if isinstance(binding, PreparedUnavailableDirectMcpGate):
+            return KernelToolAuthorization(
+                KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
+                f"mcp-direct:{binding.unavailable_reason_code}",
+                (
+                    "This MCP tool was available when the current context began, "
+                    "but its server connection is currently unavailable. The native "
+                    "tool definition remains frozen to preserve context continuity. "
+                    "Do not route it through use_new_mcp_tool. Check list_mcp_servers "
+                    "or wait for a same-schema reconnect."
+                ),
             )
         if isinstance(binding.execution_policy, McpToolExecutionPolicyFact):
             return self._authorize_mcp(
@@ -1080,6 +1400,14 @@ class DirectKernelToolPort:
                     "todo-run:inactive",
                     "todo scope is no longer active",
                 )
+        if tool_name == "use_new_mcp_tool":
+            return self._authorize_meta_mcp(
+                arguments=arguments,
+                tool_call_id=tool_call_id,
+                turn_id=turn_id,
+                permission_snapshot=permission_snapshot,
+                surface_borrow=surface_borrow,
+            )
         decision = await self._authorization_policy.decide(
             ToolDispatchAuthorizationRequest(
                 tool_name=tool_name,
@@ -1148,6 +1476,174 @@ class DirectKernelToolPort:
         return KernelToolAuthorization(
             KernelToolAuthorizationKind.ALLOW,
             f"descriptor:{entry.descriptor.id}:{entry.entry_fingerprint}",
+        )
+
+    def _installed_epoch_for_borrow(
+        self, surface_borrow: ProcessLocalToolSurfaceBorrow
+    ) -> _InstalledBorrowEpoch:
+        with self._surface_lock:
+            epoch = self._installed_epoch_by_borrow.get(surface_borrow.borrow_id)
+        if epoch is None:
+            raise LookupError("MCP_TOOL_REF_PROVIDER_EPOCH_NOT_INSTALLED")
+        access = surface_borrow.prepared.access
+        if (
+            epoch.conversation_scope_kind is not access.conversation_scope_kind
+            or epoch.scope_subagent_task_id != access.scope_subagent_task_id
+        ):
+            raise RuntimeError("installed MCP ref epoch scope drifted")
+        return epoch
+
+    def _resolve_meta_ref_executor(
+        self,
+        *,
+        ref: NewMcpToolRef,
+        surface_borrow: ProcessLocalToolSurfaceBorrow,
+    ) -> tuple[McpBoundToolExecutor, int]:
+        plan = surface_borrow.prepared.capability_exposure_plan
+        if plan is None:
+            raise LookupError("MCP_TOOL_REF_ROUTE_UNAVAILABLE")
+        matches = tuple(
+            item
+            for item in plan.mcp_catalog_route_projection.routes
+            if item.route_fingerprint == ref.tool_route_fingerprint
+            and item.version.identity_fingerprint
+            == ref.capability_identity_fingerprint
+            and item.version.semantic_fingerprint == ref.tool_semantic_fingerprint
+        )
+        if len(matches) != 1:
+            raise LookupError("MCP_TOOL_REF_STALE_OR_FOREIGN")
+        route = matches[0]
+        if route.route is not ToolCapabilityRouteKind.NEW_MCP_META_ONLY:
+            raise LookupError("MCP_TOOL_REF_NOT_META_CALLABLE")
+        generation = surface_borrow.prepared.access.surface_generation
+        runtime = self._mcp_runtime_by_surface_generation.get(generation)
+        if runtime is None:
+            raise LookupError("MCP_TOOL_REF_RUNTIME_UNAVAILABLE")
+        executor = runtime.executors.get(route.version.provider_name)
+        if executor is None:
+            raise LookupError("MCP_TOOL_REF_EXECUTOR_UNAVAILABLE")
+        version = _mcp_executor_capability_version(executor)
+        if (
+            version != route.version
+            or executor.policy.policy_fingerprint
+            != ref.mcp_execution_policy_fingerprint
+        ):
+            raise LookupError("MCP_TOOL_REF_BINDING_STALE")
+        return executor, generation
+
+    def _authorize_meta_mcp(
+        self,
+        *,
+        arguments: Mapping[str, object],
+        tool_call_id: str,
+        turn_id: str,
+        permission_snapshot: FrozenRunPermissionSnapshot,
+        surface_borrow: ProcessLocalToolSurfaceBorrow,
+    ) -> KernelToolAuthorization:
+        token = arguments.get("tool_ref")
+        inner = arguments.get("arguments")
+        if not isinstance(token, str) or not isinstance(inner, Mapping):
+            return KernelToolAuthorization(
+                KernelToolAuthorizationKind.INVALID_ARGUMENTS,
+                "mcp-meta:arguments-invalid",
+                "invalid new MCP tool reference or arguments",
+            )
+        try:
+            epoch = self._installed_epoch_for_borrow(surface_borrow)
+            ref = self._mcp_meta_refs.resolve_callable(
+                token,
+                conversation_scope_kind=epoch.conversation_scope_kind,
+                scope_subagent_task_id=epoch.scope_subagent_task_id,
+                continuity_epoch_nonce=epoch.epoch_nonce,
+            )
+            executor, generation = self._resolve_meta_ref_executor(
+                ref=ref, surface_borrow=surface_borrow
+            )
+        except LookupError as exc:
+            return KernelToolAuthorization(
+                KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
+                "mcp-meta:ref-unavailable",
+                str(exc),
+            )
+        schema = thaw_json(executor.semantic.input_schema)
+        if not isinstance(schema, dict):
+            raise RuntimeError("MCP meta schema did not thaw to an object")
+        try:
+            validator = validators.validator_for(schema)
+            validator.check_schema(schema)
+            validator(schema).validate(dict(inner))
+        except ValidationError:
+            return KernelToolAuthorization(
+                KernelToolAuthorizationKind.INVALID_ARGUMENTS,
+                f"mcp-meta:{executor.semantic.descriptor_fingerprint}",
+                "invalid MCP tool arguments",
+            )
+        mode = permission_snapshot.effective_mode
+        if (
+            executor.policy.effect_kind is McpEffectKind.EXTERNAL_EFFECT
+            and mode is PermissionMode.READ_ONLY
+        ):
+            return KernelToolAuthorization(
+                KernelToolAuthorizationKind.PERMISSION_DENIED,
+                f"mcp-policy:{executor.policy.policy_fingerprint}",
+                "external MCP effects are denied in read-only mode",
+            )
+        key = (generation, tool_call_id)
+        if (
+            key in self._mcp_dispatch_permits
+            or key in self._mcp_confirmation_admissions
+            or key in self._mcp_meta_invocations
+        ):
+            raise RuntimeError("MCP meta tool call was authorized twice")
+        frozen_arguments = freeze_json(dict(inner))
+        if not isinstance(frozen_arguments, FrozenJsonObjectFact):
+            raise TypeError("MCP meta arguments did not freeze to an object")
+        prepared = _PreparedMcpMetaInvocation(
+            executor=executor,
+            ref=ref,
+            arguments=frozen_arguments,
+        )
+        self._mcp_meta_invocations[key] = prepared
+        if executor.policy.effect_kind is McpEffectKind.EXTERNAL_EFFECT and mode in {
+            PermissionMode.ASK_PERMISSIONS,
+            PermissionMode.ACCEPT_EDITS,
+        }:
+            self._mcp_confirmation_admissions[key] = _PendingMcpConfirmationAdmission(
+                generation=generation,
+                executor=executor,
+                scope_kind=surface_borrow.prepared.access.conversation_scope_kind,
+                scope_subagent_task_id=(
+                    surface_borrow.prepared.access.scope_subagent_task_id
+                ),
+                turn_id=turn_id,
+                tool_call_id=tool_call_id,
+            )
+            return KernelToolAuthorization(
+                KernelToolAuthorizationKind.REQUIRE_CONFIRMATION,
+                f"mcp-policy:{executor.policy.policy_fingerprint}",
+                f"Allow external MCP action {executor.semantic.remote_tool_name}?",
+            )
+        try:
+            permit = executor.admit(
+                session_id=self._session_id,
+                scope_kind=surface_borrow.prepared.access.conversation_scope_kind,
+                scope_subagent_task_id=(
+                    surface_borrow.prepared.access.scope_subagent_task_id
+                ),
+                turn_id=turn_id,
+                tool_call_id=tool_call_id,
+            )
+        except McpSnapshotStale:
+            self._mcp_meta_invocations.pop(key, None)
+            return KernelToolAuthorization(
+                KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
+                "mcp-runtime:snapshot-stale",
+                "MCP_SNAPSHOT_STALE",
+            )
+        self._mcp_dispatch_permits[key] = permit
+        return KernelToolAuthorization(
+            KernelToolAuthorizationKind.ALLOW,
+            f"mcp-policy:{executor.policy.policy_fingerprint}",
         )
 
     def _authorize_mcp(
@@ -1282,6 +1778,7 @@ class DirectKernelToolPort:
         if self._interaction is None:
             if admission_entry is not None:
                 self._mcp_confirmation_admissions.pop(admission_entry[0], None)
+                self._mcp_meta_invocations.pop(admission_entry[0], None)
             if permit_entry is not None:
                 self._mcp_dispatch_permits.pop(permit_entry[0], None)
                 permit_entry[1].release()
@@ -1312,6 +1809,7 @@ class DirectKernelToolPort:
         def discard_admission() -> None:
             if admission_entry is not None:
                 self._mcp_confirmation_admissions.pop(admission_entry[0], None)
+                self._mcp_meta_invocations.pop(admission_entry[0], None)
                 current = self._mcp_dispatch_permits.pop(admission_entry[0], None)
                 if current is not None and current.state.value == "ADMITTED":
                     current.release()
@@ -1357,6 +1855,7 @@ class DirectKernelToolPort:
         if resolution.decision == "DENY":
             if permit_entry is not None:
                 self._mcp_dispatch_permits.pop(permit_entry[0], None)
+                self._mcp_meta_invocations.pop(permit_entry[0], None)
                 if permit_entry[1].state.value == "ADMITTED":
                     permit_entry[1].release()
             return KernelToolAuthorization(
@@ -1366,6 +1865,123 @@ class DirectKernelToolPort:
                 accepted_result_entry_id=resolution.result_entry_id,
             )
         raise RuntimeError("interaction resolution vocabulary is invalid")
+
+    def _list_mcp_servers_result(
+        self,
+        *,
+        arguments: Mapping[str, object],
+        surface_borrow: ProcessLocalToolSurfaceBorrow,
+    ) -> KernelToolResult:
+        generation = surface_borrow.prepared.access.surface_generation
+        runtime = self._mcp_runtime_by_surface_generation.get(generation)
+        plan = surface_borrow.prepared.capability_exposure_plan
+        if runtime is None or plan is None:
+            return _local_mcp_application_error("MCP_CATALOG_UNAVAILABLE")
+        scope_kind = surface_borrow.prepared.access.conversation_scope_kind
+        catalog = runtime.catalog_for_scope(scope_kind)
+        if (
+            catalog.semantic_fingerprint
+            != plan.mcp_catalog_route_projection.joined_catalog_semantic_fingerprint
+        ):
+            return _local_mcp_application_error("MCP_CATALOG_STALE")
+        page = self._mcp_directory.render(
+            arguments=arguments,
+            scope_kind=scope_kind,
+            scope_subagent_task_id=(
+                surface_borrow.prepared.access.scope_subagent_task_id
+            ),
+            catalog=catalog,
+            candidates=runtime.candidates,
+            routes=plan.mcp_catalog_route_projection,
+            direct_projection_set=plan.direct_projection_set,
+        )
+        return KernelToolResult(
+            state=page.state,
+            content=page.content,
+            effect_class="read_only",
+        )
+
+    def _inspect_new_mcp_tool_result(
+        self,
+        *,
+        arguments: Mapping[str, object],
+        invocation_context: KernelToolInvocationContext,
+    ) -> KernelToolResult:
+        server_id = arguments.get("server_id")
+        remote_name = arguments.get("tool_name")
+        if not isinstance(server_id, str) or not isinstance(remote_name, str):
+            return _local_mcp_application_error("INVALID_ARGUMENTS")
+        borrow = invocation_context.surface_borrow
+        plan = borrow.prepared.capability_exposure_plan
+        if plan is None:
+            return _local_mcp_application_error("MCP_CATALOG_UNAVAILABLE")
+        matches = tuple(
+            item
+            for item in plan.mcp_catalog_route_projection.routes
+            if item.target.server_id == server_id
+            and remote_name
+            in {
+                item.target.remote_tool_name,
+                item.version.provider_name,
+            }
+        )
+        if len(matches) != 1:
+            return _local_mcp_application_error("MCP_TOOL_NOT_FOUND")
+        route = matches[0]
+        if route.route is ToolCapabilityRouteKind.DIRECT:
+            return _local_mcp_application_error("MCP_TOOL_IS_NATIVE_DIRECT")
+        if route.route is ToolCapabilityRouteKind.UNAVAILABLE:
+            return _local_mcp_application_error(route.public_reason_code.value)
+        generation = borrow.prepared.access.surface_generation
+        runtime = self._mcp_runtime_by_surface_generation.get(generation)
+        if runtime is None:
+            return _local_mcp_application_error("MCP_RUNTIME_UNAVAILABLE")
+        executor = runtime.executors.get(route.version.provider_name)
+        if executor is None or _mcp_executor_capability_version(executor) != route.version:
+            return _local_mcp_application_error("MCP_TOOL_BINDING_STALE")
+        values = _mcp_inspection_values(executor)
+        quote = conservative_mcp_inspection_logical_utf8_bytes(values)
+        if quote > MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES:
+            return _local_mcp_application_error("MCP_DESCRIPTOR_OVERBOUND")
+        epoch = self._installed_epoch_for_borrow(borrow)
+        try:
+            prepared = self._mcp_meta_refs.prepare(
+                conversation_scope_kind=epoch.conversation_scope_kind,
+                scope_subagent_task_id=epoch.scope_subagent_task_id,
+                continuity_epoch_nonce=epoch.epoch_nonce,
+                capability_identity_fingerprint=(
+                    route.version.identity_fingerprint
+                ),
+                tool_semantic_fingerprint=route.version.semantic_fingerprint,
+                mcp_execution_policy_fingerprint=(
+                    executor.policy.policy_fingerprint
+                ),
+                tool_route_fingerprint=route.route_fingerprint,
+                result_entry_id=invocation_context.result_entry_id,
+            )
+        except McpToolRefCapacityExceeded:
+            return _local_mcp_application_error("MCP_REF_CAPACITY_EXCEEDED")
+        try:
+            body = render_inspected_new_mcp_tool_provider_result(
+                values,
+                tool_ref=prepared.ref.opaque_token,
+            ).encode("utf-8")
+        except BaseException:
+            self._mcp_meta_refs.settle(
+                settlement_token_id=prepared.settlement_token_id,
+                settlement_token_fingerprint=prepared.settlement_token_fingerprint,
+                committed=False,
+            )
+            raise
+        return KernelToolResult(
+            state="SUCCESS",
+            content=body,
+            process_local_settlement=ProcessLocalEffectSettlementToken(
+                prepared.settlement_token_id,
+                prepared.settlement_token_fingerprint,
+            ),
+            effect_class="read_only",
+        )
 
     async def invoke(
         self,
@@ -1408,8 +2024,119 @@ class DirectKernelToolPort:
         ):
             raise RuntimeError("tool invocation surface binding does not exact-join")
         binding = invocation_context.surface_borrow.execution_binding(tool_name)
+        if isinstance(binding, PreparedUnavailableDirectMcpGate):
+            raise RuntimeError("unavailable MCP gate cannot invoke a physical tool")
         invocation_started = monotonic()
         observation_origin = tool_observation_origin_for_binding(binding)
+        if tool_name == "list_mcp_servers":
+            return replace(
+                self._list_mcp_servers_result(
+                    arguments=arguments,
+                    surface_borrow=invocation_context.surface_borrow,
+                ),
+                physical_observation=_freeze_physical_observation(
+                    invocation_started, observation_origin
+                ),
+            )
+        if tool_name == "inspect_new_mcp_tool":
+            return replace(
+                self._inspect_new_mcp_tool_result(
+                    arguments=arguments,
+                    invocation_context=invocation_context,
+                ),
+                physical_observation=_freeze_physical_observation(
+                    invocation_started, observation_origin
+                ),
+            )
+        if tool_name == "use_new_mcp_tool":
+            generation = (
+                invocation_context.surface_borrow.prepared.access.surface_generation
+            )
+            key = (generation, tool_call_id)
+            prepared_meta = self._mcp_meta_invocations.pop(key, None)
+            permit = self._mcp_dispatch_permits.pop(key, None)
+            if prepared_meta is None or permit is None:
+                if permit is not None and permit.state.value == "ADMITTED":
+                    permit.release()
+                raise RuntimeError("MCP meta invocation admission is incomplete")
+            token = arguments.get("tool_ref")
+            inner = arguments.get("arguments")
+            frozen_inner = freeze_json(dict(inner)) if isinstance(inner, Mapping) else None
+            try:
+                epoch = self._installed_epoch_for_borrow(
+                    invocation_context.surface_borrow
+                )
+                resolved_ref = self._mcp_meta_refs.resolve_callable(
+                    str(token),
+                    conversation_scope_kind=epoch.conversation_scope_kind,
+                    scope_subagent_task_id=epoch.scope_subagent_task_id,
+                    continuity_epoch_nonce=epoch.epoch_nonce,
+                )
+                resolved_executor, resolved_generation = (
+                    self._resolve_meta_ref_executor(
+                        ref=resolved_ref,
+                        surface_borrow=invocation_context.surface_borrow,
+                    )
+                )
+                if (
+                    resolved_generation != generation
+                    or resolved_ref != prepared_meta.ref
+                    or resolved_executor != prepared_meta.executor
+                    or frozen_inner != prepared_meta.arguments
+                ):
+                    raise RuntimeError("MCP meta invocation changed after authorization")
+            except BaseException:
+                if permit.state.value == "ADMITTED":
+                    permit.release()
+                raise
+            if permit.state.value == "ADMITTED":
+                permit.mark_attempt_accepted()
+            operation_task = asyncio.create_task(
+                prepared_meta.executor.invoke(
+                    permit, thaw_json(prepared_meta.arguments)
+                ),
+                name=f"mcp-meta-operation:{tool_call_id}",
+            )
+            try:
+                known, caller_cancelled = await _await_mcp_operation(operation_task)
+            except McpPhysicalOutcomeUnknown as exc:
+                raise KernelToolPhysicalInvocationError(
+                    effect_class=(
+                        "read_only"
+                        if prepared_meta.executor.policy.effect_kind
+                        is McpEffectKind.READ_ONLY
+                        else "unknown_effect"
+                    ),
+                    error=exc,
+                    timing="ON_TIME",
+                    caller_cancelled=bool(getattr(exc, "caller_cancelled", False)),
+                    physical_observation=_freeze_physical_observation(
+                        invocation_started, observation_origin
+                    ),
+                ) from exc
+            except BaseException as exc:
+                raise KernelToolPhysicalInvocationError(
+                    effect_class=(
+                        "read_only"
+                        if prepared_meta.executor.policy.effect_kind
+                        is McpEffectKind.READ_ONLY
+                        else "unknown_effect"
+                    ),
+                    error=exc,
+                    timing="ON_TIME",
+                    caller_cancelled=False,
+                    physical_observation=_freeze_physical_observation(
+                        invocation_started, observation_origin
+                    ),
+                ) from exc
+            return _kernel_result_from_mcp_known(
+                known,
+                caller_cancelled=caller_cancelled,
+                effect_kind=prepared_meta.executor.policy.effect_kind,
+                physical_observation=_freeze_physical_observation(
+                    invocation_started, observation_origin
+                ),
+            )
         if isinstance(binding.execution_policy, McpToolExecutionPolicyFact):
             generation = (
                 invocation_context.surface_borrow.prepared.access.surface_generation
@@ -1880,6 +2607,19 @@ class DirectKernelToolPort:
         token: ProcessLocalEffectSettlementToken,
         disposition: ProcessLocalEffectSettlementDisposition,
     ) -> ProcessLocalEffectSettlementResult:
+        if token.token_id.startswith("mcp-ref-settlement:"):
+            self._mcp_meta_refs.settle(
+                settlement_token_id=token.token_id,
+                settlement_token_fingerprint=token.token_fingerprint,
+                committed=(
+                    disposition is ProcessLocalEffectSettlementDisposition.COMMITTED
+                ),
+            )
+            return ProcessLocalEffectSettlementResult(
+                ProcessLocalEffectSettlementOutcome.INSTALLED
+                if disposition is ProcessLocalEffectSettlementDisposition.COMMITTED
+                else ProcessLocalEffectSettlementOutcome.DISCARDED
+            )
         todo = self._todo_settlements.get(token.token_id)
         if todo is not None:
             if todo.prepared.token_fingerprint != token.token_fingerprint:
@@ -2009,6 +2749,7 @@ class DirectKernelToolPort:
             deadline = monotonic() + timeout_seconds
             with self._surface_condition:
                 self._closed = True
+                self._builtin_composition_state = BuiltinCompositionState.CLOSED
                 self._surface_condition.notify_all()
             # A surface borrow can be held by an in-flight Terminal call whose
             # bounded physical wait only exits after its process group is
@@ -2032,11 +2773,14 @@ class DirectKernelToolPort:
                 permits = tuple(self._mcp_dispatch_permits.values())
                 self._mcp_dispatch_permits.clear()
                 self._mcp_confirmation_admissions.clear()
+                self._mcp_meta_invocations.clear()
+                self._installed_epoch_by_borrow.clear()
                 runtimes = tuple(
                     dict.fromkeys(self._mcp_runtime_by_surface_generation.values())
                 )
                 self._mcp_runtime_by_surface_generation.clear()
                 self._mcp_current = None
+            self._mcp_meta_refs.close()
             for permit in permits:
                 try:
                     permit.release()
@@ -2347,6 +3091,76 @@ def _json_schema_value(value: Mapping[str, object]) -> dict[str, object]:
     """Lower recursively frozen catalog values to JSON Schema containers."""
 
     return {str(key): _thaw_json(item) for key, item in value.items()}
+
+
+def _mcp_executor_capability_version(executor: McpBoundToolExecutor):
+    semantic = executor.semantic
+    source = capability_source_ref(
+        CapabilitySourceKind.MCP_SERVER,
+        semantic.server_id,
+    )
+    fact = freeze_tool_capability_fact(
+        identity=capability_identity(
+            kind=CapabilityKind.TOOL,
+            source=source,
+            stable_name=semantic.remote_tool_name,
+        ),
+        origin=ToolCapabilityOrigin.MCP,
+        canonical_tool_spec=semantic.provider_spec(),
+    )
+    return tool_capability_version_ref(fact)
+
+
+def _mcp_inspection_values(
+    executor: McpBoundToolExecutor,
+) -> McpInspectionDescriptorValues:
+    semantic = executor.semantic
+    return McpInspectionDescriptorValues(
+        server_id=semantic.server_id,
+        remote_tool_name=semantic.remote_tool_name,
+        provider_tool_name=semantic.provider_tool_name,
+        description=semantic.description,
+        input_schema=semantic.input_schema,
+        output_schema=semantic.output_schema,
+        effect_kind=executor.policy.effect_kind.value,
+    )
+
+
+def _local_mcp_application_error(code: str) -> KernelToolResult:
+    return KernelToolResult(
+        state="APPLICATION_ERROR",
+        content=canonical_json_bytes({"status": code}),
+        effect_class="read_only",
+    )
+
+
+def _kernel_result_from_mcp_known(
+    known: McpKnownToolResult,
+    *,
+    caller_cancelled: bool,
+    effect_kind: McpEffectKind,
+    physical_observation: PhysicalToolObservationSupplement,
+) -> KernelToolResult:
+    text = known.content.decode("utf-8")
+    return KernelToolResult(
+        state=known.state,
+        content=known.content,
+        remote_identity=known.remote_identity,
+        output_artifact_candidate=ToolOutputArtifactCandidate(
+            role="OUTPUT",
+            text=text,
+            source_coverage=ToolOutputSourceCoverage.COMPLETE,
+            original_utf8_bytes=len(known.content),
+            source_format_hint=ToolOutputSourceFormatHint.TEXT,
+        ),
+        caller_cancelled_while_running=caller_cancelled,
+        effect_class=(
+            "read_only"
+            if effect_kind is McpEffectKind.READ_ONLY
+            else "unknown_effect"
+        ),
+        physical_observation=physical_observation,
+    )
 
 
 def _freeze_physical_observation(

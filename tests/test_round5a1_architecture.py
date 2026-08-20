@@ -177,7 +177,11 @@ def test_openai_tool_wire_adapters_have_one_shared_function_contract() -> None:
     assert '"parameters": tool.parameters' not in chat
     assert '"parameters": tool.parameters' not in responses
     assert '"strict": False' in shared
-    assert "lower_openai_function_parameters(item.input_schema)" in mcp_supervisor
+    # Round 9 keeps canonical-valid MCP schemas in the provider-neutral
+    # registry. Native-wire eligibility is classified only by the adapter
+    # preflight after the exact target is known.
+    assert "lower_openai_function_parameters" not in mcp_supervisor
+    assert "llm.adapters.openai.function_tools" not in mcp_supervisor
     assert "provider" not in {
         node.id
         for node in ast.walk(ast.parse(shared))

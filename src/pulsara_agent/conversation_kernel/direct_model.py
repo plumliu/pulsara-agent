@@ -13,6 +13,13 @@ from pulsara_agent.conversation_kernel.tool_surface import (
     PreparedKernelToolSurface,
     ProcessLocalToolSurfaceBorrow,
 )
+from pulsara_agent.capability.contracts import (
+    FrozenNativeToolProjectionSet,
+    FrozenNativeToolWireEligibilitySet,
+    FrozenToolCapabilityFact,
+    ToolCapabilityVersionRef,
+    frozen_tool_spec_fingerprint,
+)
 from pulsara_agent.conversation_kernel.input_continuity import (
     ProcessLocalProviderInputInstallAuthority,
 )
@@ -23,15 +30,15 @@ from pulsara_agent.conversation_kernel.execution_watchdogs import (
 from pulsara_agent.llm.adapters.openai.chat_completions import (
     OpenAIChatCompletionsTransport,
     chat_semantic_wire_group,
-    chat_tool_wire_items,
 )
 from pulsara_agent.llm.adapters.openai.function_tools import (
-    OPENAI_FUNCTION_TOOL_WIRE_CONTRACT_VERSION,
+    freeze_openai_native_tool_eligibility,
+    materialize_openai_native_tool_projection_set,
+    openai_native_function_tool_contract_fingerprint,
 )
 from pulsara_agent.llm.adapters.openai.responses import (
     OpenAIResponsesTransport,
     responses_semantic_wire_group,
-    responses_tool_wire_items,
 )
 from pulsara_agent.llm.config import LLMConfig
 from pulsara_agent.llm.input import LLMToolCall, ToolSpec
@@ -61,6 +68,7 @@ from pulsara_agent.llm.request import (
 )
 from pulsara_agent.llm.resolution import (
     ResolvedModelCall,
+    ResolvedModelTarget,
     resolve_model_call,
     resolve_model_target,
 )
@@ -69,6 +77,8 @@ from pulsara_agent.llm.user_carrier import compose_provider_root_policy
 from pulsara_agent.llm.validation import validate_model_context_for_call
 from pulsara_agent.model_input.contracts import (
     FrozenCompiledModelInput,
+    FrozenToolSpec,
+    ModelInputScopeKind,
     ModelInputCompileBinding,
     PreparedProviderInputCut,
     model_input_compile_binding_fingerprint,
@@ -106,7 +116,76 @@ from pulsara_agent.conversation_kernel.memory.contracts import (
 
 
 @dataclass(frozen=True, slots=True)
+class KernelModelTargetPreparationRequest:
+    session_id: str
+    turn_id: str
+    model_call_index: int
+    purpose: ModelCallPurpose
+    maximum_input_tokens: int
+    maximum_output_tokens: int
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedKernelModelTarget:
+    session_id: str
+    turn_id: str
+    model_call_index: int
+    purpose: ModelCallPurpose
+    target: ResolvedModelTarget = field(repr=False)
+    call: ResolvedModelCall = field(repr=False)
+    maximum_input_tokens: int
+    maximum_output_tokens: int
+    effective_input_budget_tokens: int
+    native_function_tool_wire_contract_fingerprint: str
+    transport_timeout_policy_fingerprint: str
+    preparation_fingerprint: str
+
+    def __post_init__(self) -> None:
+        if (
+            not self.session_id
+            or not self.turn_id
+            or self.model_call_index < 1
+            or self.purpose is not ModelCallPurpose.AGENT_MODEL_LOOP
+            or self.call.target is not self.target
+            or self.effective_input_budget_tokens < 1
+            or self.target.context_budget.effective_output_tokens
+            > self.maximum_output_tokens
+        ):
+            raise ValueError("prepared model target facts do not exact-join")
+        expected_contract = openai_native_function_tool_contract_fingerprint(
+            self.target.model_profile.provider_profile.wire_api
+        )
+        if (
+            self.native_function_tool_wire_contract_fingerprint
+            != expected_contract
+        ):
+            raise ValueError("prepared model target native contract drifted")
+        expected = _prepared_model_target_fingerprint(
+            session_id=self.session_id,
+            turn_id=self.turn_id,
+            model_call_index=self.model_call_index,
+            resolved_model_call_id=self.call.resolved_model_call_id,
+            effective_input_budget_tokens=self.effective_input_budget_tokens,
+            maximum_output_tokens=self.maximum_output_tokens,
+            native_function_tool_wire_contract_fingerprint=expected_contract,
+            transport_timeout_policy_fingerprint=(
+                self.transport_timeout_policy_fingerprint
+            ),
+        )
+        if self.preparation_fingerprint != expected:
+            raise ValueError("prepared model target fingerprint mismatch")
+
+
+@dataclass(frozen=True, slots=True)
 class KernelModelPreparationRequest:
+    """Retained source-compatible request for direct component callers.
+
+    Production dispatch uses ``prepare_target`` followed by
+    ``bind_tool_surface`` so native eligibility is frozen before the parent
+    capability cut.  This value remains a convenience at the adapter unit-test
+    boundary only.
+    """
+
     session_id: str
     turn_id: str
     model_call_index: int
@@ -123,11 +202,15 @@ class PreparedKernelModelCall:
     model_call_index: int
     call: ResolvedModelCall = field(repr=False)
     tool_surface: PreparedKernelToolSurface = field(repr=False)
+    native_projection_set: FrozenNativeToolProjectionSet = field(repr=False)
     compile_binding: ModelInputCompileBinding
     transport_timeout_policy_fingerprint: str
     preparation_fingerprint: str
 
     def __post_init__(self) -> None:
+        specs = self.tool_surface.model_surface.tool_specs
+        versions = self.native_projection_set.tool_versions
+        projections = self.native_projection_set.projections
         if (
             not self.session_id
             or not self.turn_id
@@ -135,9 +218,19 @@ class PreparedKernelModelCall:
             or self.call.fact != self.compile_binding.call_fact
             or self.call.target.fact != self.compile_binding.target_fact
             or self.tool_surface.model_surface != self.compile_binding.tool_surface
+            or tuple(item.name for item in specs)
+            != tuple(item.provider_name for item in versions)
+            or self.tool_surface.model_surface.conversation_scope_kind
+            is not self.native_projection_set.conversation_scope_kind
             or not self.transport_timeout_policy_fingerprint.startswith("sha256:")
         ):
             raise ValueError("prepared model call facts do not exact-join")
+        for spec, projection in zip(specs, projections, strict=True):
+            if (
+                frozen_tool_spec_fingerprint(spec)
+                != projection.canonical_tool_spec_fingerprint
+            ):
+                raise ValueError("prepared native projection changed canonical schema")
         expected = _prepared_model_call_fingerprint(
             session_id=self.session_id,
             turn_id=self.turn_id,
@@ -147,6 +240,9 @@ class PreparedKernelModelCall:
             surface_fingerprint=self.tool_surface.model_surface.surface_fingerprint,
             execution_surface_fingerprint=(
                 self.tool_surface.execution_surface_fingerprint
+            ),
+            native_projection_set_fingerprint=(
+                self.native_projection_set.projection_set_fingerprint
             ),
             transport_timeout_policy_fingerprint=(
                 self.transport_timeout_policy_fingerprint
@@ -200,6 +296,11 @@ class KernelModelExecutionRequest:
             != self.compiled_input.message_placements_fingerprint
             or self.wire_input_plan.resolved_target_semantic_fingerprint
             != self.prepared_call.call.target.fact.target_fingerprint
+            or self.wire_input_plan.materialization.tool_items
+            != tuple(
+                item.wire_tool
+                for item in self.prepared_call.native_projection_set.projections
+            )
             or not self.surface_borrow.exactly_joins(
                 self.prepared_call.tool_surface
             )
@@ -508,9 +609,9 @@ class DirectKernelModelPort:
             transport_timeout.policy_fingerprint
         )
 
-    def prepare_call(
-        self, request: KernelModelPreparationRequest
-    ) -> PreparedKernelModelCall:
+    def prepare_target(
+        self, request: KernelModelTargetPreparationRequest
+    ) -> PreparedKernelModelTarget:
         if request.purpose is not ModelCallPurpose.AGENT_MODEL_LOOP:
             raise ValueError("foreground model preparation purpose is invalid")
         if (
@@ -540,15 +641,113 @@ class DirectKernelModelPort:
             raise ValueError(
                 "resolved provider output exceeds the foreground attempt cap"
             )
-        surface = request.tool_surface.model_surface
-        if surface.tool_specs and not target.fact.supports_tools:
-            raise ValueError(
-                "resolved model target does not support the prepared tools"
-            )
         input_budget = min(
             request.maximum_input_tokens,
             target.context_budget.input_budget_tokens,
         )
+        native_contract = openai_native_function_tool_contract_fingerprint(
+            target.model_profile.provider_profile.wire_api
+        )
+        fingerprint = _prepared_model_target_fingerprint(
+            session_id=request.session_id,
+            turn_id=request.turn_id,
+            model_call_index=request.model_call_index,
+            resolved_model_call_id=call.resolved_model_call_id,
+            effective_input_budget_tokens=input_budget,
+            maximum_output_tokens=request.maximum_output_tokens,
+            native_function_tool_wire_contract_fingerprint=native_contract,
+            transport_timeout_policy_fingerprint=(
+                self._transport_timeout_policy_fingerprint
+            ),
+        )
+        return PreparedKernelModelTarget(
+            session_id=request.session_id,
+            turn_id=request.turn_id,
+            model_call_index=request.model_call_index,
+            purpose=request.purpose,
+            target=target,
+            call=call,
+            maximum_input_tokens=request.maximum_input_tokens,
+            maximum_output_tokens=request.maximum_output_tokens,
+            effective_input_budget_tokens=input_budget,
+            native_function_tool_wire_contract_fingerprint=native_contract,
+            transport_timeout_policy_fingerprint=(
+                self._transport_timeout_policy_fingerprint
+            ),
+            preparation_fingerprint=fingerprint,
+        )
+
+    @staticmethod
+    def freeze_native_tool_eligibility(
+        *,
+        prepared_target: PreparedKernelModelTarget,
+        conversation_scope_kind: ModelInputScopeKind,
+        scope_subagent_task_id: str | None,
+        tool_facts: tuple[FrozenToolCapabilityFact, ...],
+        retained_direct_inputs: tuple[
+            tuple[ToolCapabilityVersionRef, FrozenToolSpec], ...
+        ] = (),
+        deadline_monotonic: float | None = None,
+    ) -> FrozenNativeToolWireEligibilitySet:
+        return freeze_openai_native_tool_eligibility(
+            conversation_scope_kind=conversation_scope_kind,
+            scope_subagent_task_id=scope_subagent_task_id,
+            wire_api=(
+                prepared_target.target.model_profile.provider_profile.wire_api
+            ),
+            tool_facts=tool_facts,
+            retained_direct_inputs=retained_direct_inputs,
+            deadline_monotonic=deadline_monotonic,
+        )
+
+    @staticmethod
+    def materialize_native_tool_projection_set(
+        *,
+        prepared_target: PreparedKernelModelTarget,
+        conversation_scope_kind: ModelInputScopeKind,
+        scope_subagent_task_id: str | None,
+        tool_versions: tuple[ToolCapabilityVersionRef, ...],
+        tool_specs: tuple[FrozenToolSpec, ...],
+        eligibility: FrozenNativeToolWireEligibilitySet,
+        deadline_monotonic: float | None = None,
+    ) -> FrozenNativeToolProjectionSet:
+        return materialize_openai_native_tool_projection_set(
+            conversation_scope_kind=conversation_scope_kind,
+            scope_subagent_task_id=scope_subagent_task_id,
+            wire_api=(
+                prepared_target.target.model_profile.provider_profile.wire_api
+            ),
+            tool_versions=tool_versions,
+            tool_specs=tool_specs,
+            eligibility=eligibility,
+            deadline_monotonic=deadline_monotonic,
+        )
+
+    def bind_tool_surface(
+        self,
+        *,
+        prepared_target: PreparedKernelModelTarget,
+        tool_surface: PreparedKernelToolSurface,
+        native_projection_set: FrozenNativeToolProjectionSet,
+    ) -> PreparedKernelModelCall:
+        if (
+            prepared_target.transport_timeout_policy_fingerprint
+            != self._transport_timeout_policy_fingerprint
+        ):
+            raise ValueError("prepared model target belongs to another adapter")
+        surface = tool_surface.model_surface
+        if surface.tool_specs and not prepared_target.target.fact.supports_tools:
+            raise ValueError("resolved model target does not support prepared tools")
+        if (
+            native_projection_set.native_function_tool_wire_contract_fingerprint
+            != prepared_target.native_function_tool_wire_contract_fingerprint
+            or native_projection_set.conversation_scope_kind
+            is not surface.conversation_scope_kind
+        ):
+            raise ValueError("native projection set does not join resolved target")
+        call = prepared_target.call
+        target = prepared_target.target
+        input_budget = prepared_target.effective_input_budget_tokens
         estimator_fingerprint = target.token_estimator.fact.estimator_fingerprint
         binding_fingerprint = model_input_compile_binding_fingerprint(
             call_fact=call.fact,
@@ -569,25 +768,29 @@ class DirectKernelModelPort:
             binding_fingerprint=binding_fingerprint,
         )
         preparation_fingerprint = _prepared_model_call_fingerprint(
-            session_id=request.session_id,
-            turn_id=request.turn_id,
-            model_call_index=request.model_call_index,
+            session_id=prepared_target.session_id,
+            turn_id=prepared_target.turn_id,
+            model_call_index=prepared_target.model_call_index,
             resolved_model_call_id=call.resolved_model_call_id,
             compile_binding_fingerprint=binding_fingerprint,
             surface_fingerprint=surface.surface_fingerprint,
             execution_surface_fingerprint=(
-                request.tool_surface.execution_surface_fingerprint
+                tool_surface.execution_surface_fingerprint
+            ),
+            native_projection_set_fingerprint=(
+                native_projection_set.projection_set_fingerprint
             ),
             transport_timeout_policy_fingerprint=(
                 self._transport_timeout_policy_fingerprint
             ),
         )
         return PreparedKernelModelCall(
-            session_id=request.session_id,
-            turn_id=request.turn_id,
-            model_call_index=request.model_call_index,
+            session_id=prepared_target.session_id,
+            turn_id=prepared_target.turn_id,
+            model_call_index=prepared_target.model_call_index,
             call=call,
-            tool_surface=request.tool_surface,
+            tool_surface=tool_surface,
+            native_projection_set=native_projection_set,
             compile_binding=compile_binding,
             transport_timeout_policy_fingerprint=(
                 self._transport_timeout_policy_fingerprint
@@ -639,6 +842,10 @@ class DirectKernelModelPort:
             != prepared.call.target.fact.target_fingerprint
             or plan.provider_profile_fingerprint
             != _provider_wire_profile_fingerprint(prepared.call)
+            or plan.materialization.tool_items
+            != tuple(
+                item.wire_tool for item in prepared.native_projection_set.projections
+            )
             or plan.quote.estimator_fingerprint
             != prepared.compile_binding.estimator_fingerprint
             or plan.quote.effective_input_budget_tokens
@@ -648,6 +855,20 @@ class DirectKernelModelPort:
         install_authority.require_registered_plan(
             candidate_fingerprint=expected_append_candidate_fingerprint,
             wire_input_plan=plan,
+            capability_dispatch_cut_fingerprint=(
+                prepared.tool_surface.capability_exposure_plan.dispatch_cut_fingerprint
+                if prepared.tool_surface.capability_exposure_plan is not None
+                else context_fingerprint(
+                    "test:capability-dispatch-cut:v1",
+                    prepared.native_projection_set.projection_set_fingerprint,
+                )
+            ),
+            direct_native_projection_set=prepared.native_projection_set,
+            mcp_route_projection=(
+                prepared.tool_surface.capability_exposure_plan.mcp_catalog_route_projection
+                if prepared.tool_surface.capability_exposure_plan is not None
+                else None
+            ),
         )
         if not request.surface_borrow.exactly_joins(prepared.tool_surface):
             raise ValueError("model execution surface borrow does not join preparation")
@@ -751,6 +972,34 @@ class DirectKernelModelPort:
         )
 
 
+def _prepared_model_target_fingerprint(
+    *,
+    session_id: str,
+    turn_id: str,
+    model_call_index: int,
+    resolved_model_call_id: str,
+    effective_input_budget_tokens: int,
+    maximum_output_tokens: int,
+    native_function_tool_wire_contract_fingerprint: str,
+    transport_timeout_policy_fingerprint: str,
+) -> str:
+    return context_fingerprint(
+        "prepared-kernel-model-target:v1",
+        {
+            "session_id": session_id,
+            "turn_id": turn_id,
+            "model_call_index": model_call_index,
+            "call_id": resolved_model_call_id,
+            "input_budget": effective_input_budget_tokens,
+            "output_cap": maximum_output_tokens,
+            "native_tool_contract": (
+                native_function_tool_wire_contract_fingerprint
+            ),
+            "transport_timeout_policy": transport_timeout_policy_fingerprint,
+        },
+    )
+
+
 def _prepared_model_call_fingerprint(
     *,
     session_id: str,
@@ -760,6 +1009,7 @@ def _prepared_model_call_fingerprint(
     compile_binding_fingerprint: str,
     surface_fingerprint: str,
     execution_surface_fingerprint: str,
+    native_projection_set_fingerprint: str,
     transport_timeout_policy_fingerprint: str,
 ) -> str:
     return context_fingerprint(
@@ -772,6 +1022,7 @@ def _prepared_model_call_fingerprint(
             "compile_binding": compile_binding_fingerprint,
             "surface": surface_fingerprint,
             "execution_surface": execution_surface_fingerprint,
+            "native_projection_set": native_projection_set_fingerprint,
             "transport_timeout_policy": transport_timeout_policy_fingerprint,
         },
     )
@@ -788,7 +1039,9 @@ def _provider_wire_profile_fingerprint(call: ResolvedModelCall) -> str:
                 call.target.fact.provider_request_shape_fingerprint
             ),
             "assistant_replay": profile.assistant_replay_contract_fingerprint,
-            "function_tools": OPENAI_FUNCTION_TOOL_WIRE_CONTRACT_VERSION,
+            "function_tools": openai_native_function_tool_contract_fingerprint(
+                profile.wire_api
+            ),
         },
     )
 
@@ -916,7 +1169,7 @@ def _semantic_wire_groups(
     *,
     call: ResolvedModelCall,
     compiled_input: FrozenCompiledModelInput,
-    thawed_tools: tuple[ToolSpec, ...],
+    native_projection_set: FrozenNativeToolProjectionSet,
 ) -> tuple[tuple[tuple[dict[str, object], ...], ...], tuple[dict[str, object], ...]]:
     profile = call.target.model_profile.provider_profile
     if profile.wire_api == "openai_chat_completions":
@@ -924,15 +1177,26 @@ def _semantic_wire_groups(
             tuple(chat_semantic_wire_group(item, provider_profile=profile))
             for item in compiled_input.messages
         )
-        tools = tuple(chat_tool_wire_items(thawed_tools))
     elif profile.wire_api == "openai_responses":
         groups = tuple(
             tuple(responses_semantic_wire_group(item))
             for item in compiled_input.messages
         )
-        tools = tuple(responses_tool_wire_items(thawed_tools))
     else:  # pragma: no cover - resolved transport registry is closed
         raise ValueError("provider wire API is unsupported")
+    expected_contract = openai_native_function_tool_contract_fingerprint(
+        profile.wire_api
+    )
+    if (
+        native_projection_set.native_function_tool_wire_contract_fingerprint
+        != expected_contract
+        or tuple(item.name for item in compiled_input.tools)
+        != tuple(item.provider_name for item in native_projection_set.tool_versions)
+    ):
+        raise ValueError("native tool projection set does not join compiled tools")
+    tools = tuple(thaw_json(item.wire_tool) for item in native_projection_set.projections)
+    if any(not isinstance(item, dict) for item in tools):
+        raise TypeError("native tool projection did not thaw to an object")
     if any(not group for group in groups):
         raise ValueError("compiled message lowered to an empty provider wire group")
     return groups, tools
@@ -953,16 +1217,10 @@ def _plan_provider_wire_input(
         or compiled_input.tools != binding.tool_surface.tool_specs
     ):
         raise ValueError("provider wire planning input does not join preparation")
-    thawed_tools: list[ToolSpec] = []
-    for item in compiled_input.tools:
-        parameters = thaw_json(item.parameters)
-        if not isinstance(parameters, dict):
-            raise TypeError("frozen tool schema did not thaw to an object")
-        thawed_tools.append(ToolSpec(item.name, item.description, parameters))
     generic_groups, wire_tools = _semantic_wire_groups(
         call=call,
         compiled_input=compiled_input,
-        thawed_tools=tuple(thawed_tools),
+        native_projection_set=prepared_call.native_projection_set,
     )
     profile = call.target.model_profile.provider_profile
     profile_fingerprint = _provider_wire_profile_fingerprint(call)

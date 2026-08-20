@@ -48,9 +48,29 @@ from pulsara_agent.conversation_kernel.cancellation import (
 from pulsara_agent.conversation_kernel.direct_model import (
     CompletedProviderModelExecution,
     KernelModelExecutionRequest,
-    KernelModelPreparationRequest,
+    KernelModelTargetPreparationRequest,
     PreparedKernelModelCall,
     PreparedKernelModelExecution,
+    PreparedKernelModelTarget,
+)
+from pulsara_agent.capability.contracts import (
+    EmptyCapabilityEpochPredecessor,
+    FrozenCapabilityDispatchCut,
+    FrozenMcpCapabilityProjectionInput,
+    FrozenNativeToolProjectionSet,
+    FrozenNativeToolWireEligibilitySet,
+    FrozenToolCapabilityExposurePlan,
+    InstalledCapabilityEpochPredecessor,
+)
+from pulsara_agent.capability.planner import KernelToolCapabilityPlanner
+from pulsara_agent.capability.registry import (
+    freeze_capability_dispatch_cut_and_views,
+    freeze_tool_planning_input,
+)
+from pulsara_agent.conversation_kernel.capability_composition import (
+    PreparedMcpCapabilitySourceSnapshotSet,
+    SealedBuiltinCapabilitySnapshot,
+    freeze_capability_registry_from_owner_snapshots,
 )
 from pulsara_agent.llm.input import LLMToolCall
 from pulsara_agent.llm.request import (
@@ -226,6 +246,7 @@ from pulsara_agent.model_input.contracts import (
     CanonicalModelInputSnapshot,
     FrozenProviderInputItem,
     FrozenProviderInputItemKind,
+    FrozenModelToolSurface,
     PreparedProviderInputCut,
     FrozenCompiledModelInput,
     ModelInputCompileFailureKind,
@@ -286,8 +307,39 @@ class _PreparedSteerPlanStale(ConversationKernelConflict):
 
 
 class KernelModelPort(Protocol):
-    def prepare_call(
-        self, request: KernelModelPreparationRequest
+    def prepare_target(
+        self, request: KernelModelTargetPreparationRequest
+    ) -> PreparedKernelModelTarget: ...
+
+    def freeze_native_tool_eligibility(
+        self,
+        *,
+        prepared_target: PreparedKernelModelTarget,
+        conversation_scope_kind: ModelInputScopeKind,
+        scope_subagent_task_id: str | None,
+        tool_facts: tuple,
+        retained_direct_inputs: tuple = (),
+        deadline_monotonic: float | None = None,
+    ) -> FrozenNativeToolWireEligibilitySet: ...
+
+    def materialize_native_tool_projection_set(
+        self,
+        *,
+        prepared_target: PreparedKernelModelTarget,
+        conversation_scope_kind: ModelInputScopeKind,
+        scope_subagent_task_id: str | None,
+        tool_versions: tuple,
+        tool_specs: tuple,
+        eligibility: FrozenNativeToolWireEligibilitySet,
+        deadline_monotonic: float | None = None,
+    ) -> FrozenNativeToolProjectionSet: ...
+
+    def bind_tool_surface(
+        self,
+        *,
+        prepared_target: PreparedKernelModelTarget,
+        tool_surface: PreparedKernelToolSurface,
+        native_projection_set,
     ) -> PreparedKernelModelCall: ...
 
     def preflight_execution(
@@ -661,11 +713,29 @@ class KernelToolAuthorization:
 
 
 class KernelToolPort(Protocol):
-    def snapshot_tool_surface(
+    def sealed_builtin_capability_snapshot(
         self,
         *,
         conversation_scope_kind: ModelInputScopeKind,
         scope_subagent_task_id: str | None,
+    ) -> SealedBuiltinCapabilitySnapshot: ...
+
+    def freeze_mcp_capability_source_snapshot_set(
+        self,
+        *,
+        conversation_scope_kind: ModelInputScopeKind,
+        scope_subagent_task_id: str | None,
+    ) -> PreparedMcpCapabilitySourceSnapshotSet: ...
+
+    def freeze_mcp_capability_projection_input(
+        self, owner: PreparedMcpCapabilitySourceSnapshotSet
+    ) -> FrozenMcpCapabilityProjectionInput: ...
+
+    def prepare_planned_tool_surface(
+        self,
+        *,
+        plan: FrozenToolCapabilityExposurePlan,
+        builtin: SealedBuiltinCapabilitySnapshot,
     ) -> PreparedKernelToolSurface: ...
 
     def borrow_tool_surface(
@@ -676,6 +746,15 @@ class KernelToolPort(Protocol):
         self,
         borrow: ProcessLocalToolSurfaceBorrow,
         prepared: PreparedKernelToolSurface,
+    ) -> None: ...
+
+    def install_provider_input_tool_result_deliveries(
+        self,
+        *,
+        permit: ProcessLocalProviderInputInstallPermit,
+        canonical_facts: FrozenCanonicalCompileSnapshot,
+        compiled_input: FrozenCompiledModelInput,
+        surface_borrow: ProcessLocalToolSurfaceBorrow,
     ) -> None: ...
 
     async def authorize(
@@ -741,6 +820,8 @@ class _PreparedProviderDispatch:
     canonical_facts: FrozenCanonicalCompileSnapshot
     planning: FrozenProviderInputAppendPlanningInput
     prepared_call: PreparedKernelModelCall
+    capability_dispatch_cut: FrozenCapabilityDispatchCut
+    tool_exposure_plan: FrozenToolCapabilityExposurePlan
     surface_borrow: ProcessLocalToolSurfaceBorrow
     sources: CollectedContextSources
     append_result: FrozenProviderInputAppendCompileResult
@@ -825,6 +906,7 @@ class ConversationKernelRunner:
         self._deadlines = deadline_factory or KernelExecutionDeadlineFactory()
         self._context_source_collector = context_source_collector
         self._compiler = compiler or StructuredModelInputCompiler()
+        self._capability_planner = KernelToolCapabilityPlanner()
         self._continuity = continuity_owner or HostProviderInputContinuityOwner(
             session_id=writer_lease.guard.session_id
         )
@@ -1265,36 +1347,172 @@ class ConversationKernelRunner:
             )
 
             try:
-                surface = self._tools.snapshot_tool_surface(
+                builtin_owner = self._tools.sealed_builtin_capability_snapshot(
                     conversation_scope_kind=identity.conversation_scope_kind,
                     scope_subagent_task_id=identity.scope_subagent_task_id,
                 )
-                borrow = self._tools.borrow_tool_surface(surface)
+                _require_dispatch_planning_deadline(deadline)
+                mcp_owner = self._tools.freeze_mcp_capability_source_snapshot_set(
+                    conversation_scope_kind=identity.conversation_scope_kind,
+                    scope_subagent_task_id=identity.scope_subagent_task_id,
+                )
+                _require_dispatch_planning_deadline(deadline)
+                skill_owner = await self._io.run(
+                    self._context_source_collector.freeze_skill_capability_source_snapshot,
+                    conversation_scope_kind=identity.conversation_scope_kind,
+                    scope_subagent_task_id=identity.scope_subagent_task_id,
+                    deadline_monotonic=deadline,
+                )
+                registry = freeze_capability_registry_from_owner_snapshots(
+                    builtin=builtin_owner,
+                    mcp=mcp_owner,
+                    skills=skill_owner,
+                )
+                _require_dispatch_planning_deadline(deadline)
+            except StructuredModelInputCompileError:
+                raise
+            except TimeoutError as exc:
+                raise StructuredModelInputCompileError(
+                    ModelInputCompileFailureKind.DEADLINE_EXPIRED
+                ) from exc
             except Exception as exc:
                 raise StructuredModelInputCompileError(
                     ModelInputCompileFailureKind.TOOL_SURFACE_INVALID
                 ) from exc
             try:
-                prepared_call = self._model.prepare_call(
-                    KernelModelPreparationRequest(
+                prepared_target = self._model.prepare_target(
+                    KernelModelTargetPreparationRequest(
                         session_id=self._writer_lease.guard.session_id,
                         turn_id=turn_id,
                         model_call_index=model_call_index,
                         purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
                         maximum_input_tokens=self._maximum_input_tokens_per_call,
                         maximum_output_tokens=self._maximum_output_tokens_per_call,
-                        tool_surface=surface,
                     )
                 )
+                _require_dispatch_planning_deadline(deadline)
             except Exception as exc:
                 raise StructuredModelInputCompileError(
                     ModelInputCompileFailureKind.MODEL_TARGET_PREPARATION_FAILED
+                ) from exc
+            try:
+                if current_epoch is None:
+                    capability_predecessor = EmptyCapabilityEpochPredecessor(0)
+                    retained_direct_inputs = ()
+                else:
+                    predecessor_surface = FrozenModelToolSurface(
+                        conversation_scope_kind=identity.conversation_scope_kind,
+                        tool_specs=current_epoch.tools,
+                        surface_fingerprint=(
+                            current_epoch.compatibility.tool_surface_fingerprint
+                        ),
+                    )
+                    capability_predecessor = InstalledCapabilityEpochPredecessor(
+                        expected_continuity_revision=current_epoch.epoch_revision,
+                        continuity_epoch_nonce=current_epoch.epoch_nonce,
+                        tool_surface=predecessor_surface,
+                        direct_projection_set=(
+                            current_epoch.direct_native_projection_set
+                        ),
+                        mcp_route_projection=current_epoch.mcp_route_projection,
+                    )
+                    retained_direct_inputs = tuple(
+                        zip(
+                            current_epoch.direct_native_projection_set.tool_versions,
+                            current_epoch.tools,
+                            strict=True,
+                        )
+                    )
+                native_eligibility = self._model.freeze_native_tool_eligibility(
+                    prepared_target=prepared_target,
+                    conversation_scope_kind=identity.conversation_scope_kind,
+                    scope_subagent_task_id=identity.scope_subagent_task_id,
+                    tool_facts=registry.tool_facts,
+                    retained_direct_inputs=retained_direct_inputs,
+                    deadline_monotonic=deadline,
+                )
+                _require_dispatch_planning_deadline(deadline)
+                mcp_projection_input = (
+                    self._tools.freeze_mcp_capability_projection_input(mcp_owner)
+                )
+                skill_projection_input = (
+                    self._context_source_collector.freeze_skill_capability_projection_input(
+                        skill_owner
+                    )
+                )
+                tool_planning_input = freeze_tool_planning_input(
+                    predecessor=capability_predecessor,
+                    native_wire=native_eligibility,
+                    mcp=mcp_projection_input,
+                )
+                capability_dispatch_cut, tool_view, skill_view = (
+                    freeze_capability_dispatch_cut_and_views(
+                        conversation_scope_kind=identity.conversation_scope_kind,
+                        scope_subagent_task_id=identity.scope_subagent_task_id,
+                        registry=registry,
+                        tools=tool_planning_input,
+                        skills=skill_projection_input,
+                    )
+                )
+                tool_selection = self._capability_planner.select(view=tool_view)
+                direct_projection_set = (
+                    tool_selection.reusable_direct_projection_set
+                )
+                if direct_projection_set is None:
+                    direct_projection_set = (
+                        self._model.materialize_native_tool_projection_set(
+                            prepared_target=prepared_target,
+                            conversation_scope_kind=(
+                                identity.conversation_scope_kind
+                            ),
+                            scope_subagent_task_id=(
+                                identity.scope_subagent_task_id
+                            ),
+                            tool_versions=tool_selection.direct_tool_versions,
+                            tool_specs=(
+                                tool_selection.direct_tool_surface.tool_specs
+                            ),
+                            eligibility=native_eligibility,
+                            deadline_monotonic=deadline,
+                        )
+                    )
+                tool_exposure_plan = self._capability_planner.finalize(
+                    selection=tool_selection,
+                    direct_projection_set=direct_projection_set,
+                )
+                _require_dispatch_planning_deadline(deadline)
+                surface = self._tools.prepare_planned_tool_surface(
+                    plan=tool_exposure_plan,
+                    builtin=builtin_owner,
+                )
+                prepared_call = self._model.bind_tool_surface(
+                    prepared_target=prepared_target,
+                    tool_surface=surface,
+                    native_projection_set=(
+                        tool_exposure_plan.direct_projection_set
+                    ),
+                )
+                borrow = self._tools.borrow_tool_surface(surface)
+                _require_dispatch_planning_deadline(deadline)
+            except StructuredModelInputCompileError:
+                raise
+            except TimeoutError as exc:
+                raise StructuredModelInputCompileError(
+                    ModelInputCompileFailureKind.DEADLINE_EXPIRED
+                ) from exc
+            except Exception as exc:
+                raise StructuredModelInputCompileError(
+                    ModelInputCompileFailureKind.TOOL_SURFACE_INVALID
                 ) from exc
             try:
                 frozen_sources = await self._io.run(
                     self._context_source_collector.freeze_non_trigger_sources,
                     tool_surface=surface.model_surface,
                     canonical_facts=base_facts,
+                    tool_exposure_plan=tool_exposure_plan,
+                    skill_dispatch_view=skill_view,
+                    skill_owner_snapshot=skill_owner,
+                    mcp_catalog_snapshot=mcp_owner.catalog_snapshot,
                     deadline_monotonic=deadline,
                 )
             except StructuredModelInputCompileError:
@@ -1850,6 +2068,8 @@ class ConversationKernelRunner:
                     canonical_facts=actual,
                     planning=selected_plan.predecessor,
                     prepared_call=prepared_call,
+                    capability_dispatch_cut=capability_dispatch_cut,
+                    tool_exposure_plan=tool_exposure_plan,
                     surface_borrow=borrow,
                     sources=final_sources,
                     append_result=final_append,
@@ -2040,6 +2260,8 @@ class ConversationKernelRunner:
                 canonical_facts=base_facts,
                 planning=planning,
                 prepared_call=prepared_call,
+                capability_dispatch_cut=capability_dispatch_cut,
+                tool_exposure_plan=tool_exposure_plan,
                 surface_borrow=borrow,
                 sources=final_sources,
                 append_result=append,
@@ -2864,6 +3086,15 @@ class ConversationKernelRunner:
                         compatibility=compatibility,
                         compiled_result=append_result,
                         wire_input_plan=wire_input_plan,
+                        capability_dispatch_cut_fingerprint=(
+                            dispatch.capability_dispatch_cut.dispatch_cut_fingerprint
+                        ),
+                        direct_native_projection_set=(
+                            dispatch.tool_exposure_plan.direct_projection_set
+                        ),
+                        mcp_route_projection=(
+                            dispatch.tool_exposure_plan.mcp_catalog_route_projection
+                        ),
                     )
                     self._continuity.register(append_candidate)
                     request = KernelModelExecutionRequest(
@@ -2918,6 +3149,12 @@ class ConversationKernelRunner:
                             execution_fingerprint=execution.execution_fingerprint,
                         )
                         installed = True
+                        self._tools.install_provider_input_tool_result_deliveries(
+                            permit=permit,
+                            canonical_facts=canonical_facts,
+                            compiled_input=compiled_input,
+                            surface_borrow=active_surface_borrow,
+                        )
                         entry_id = _id("entry")
                         collected = await self._collect_model(
                             request,
@@ -4594,6 +4831,15 @@ def _compile_structured_input(
     return compiler.compile(request)
 
 
+def _require_dispatch_planning_deadline(deadline_monotonic: float) -> None:
+    """Fail before another synchronous planning stage starts after expiry."""
+
+    if monotonic() >= deadline_monotonic:
+        raise StructuredModelInputCompileError(
+            ModelInputCompileFailureKind.DEADLINE_EXPIRED
+        )
+
+
 def _compile_structured_append(
     compiler: StructuredModelInputCompiler,
     request: StructuredModelInputCompileRequest,
@@ -4849,7 +5095,15 @@ def _provider_input_compatibility(
         tool_surface_fingerprint=binding.tool_surface.surface_fingerprint,
         model_target_fingerprint=binding.target_fact.target_fingerprint,
         estimator_fingerprint=binding.estimator_fingerprint,
-        provider_message_lowering_contract=PROVIDER_MESSAGE_LOWERING_CONTRACT,
+        provider_message_lowering_contract=context_fingerprint(
+            "provider-message-and-native-tool-lowering-contract:v1",
+            {
+                "messages": PROVIDER_MESSAGE_LOWERING_CONTRACT,
+                "native_tools": (
+                    prepared_call.native_projection_set.native_function_tool_wire_contract_fingerprint
+                ),
+            },
+        ),
         context_base_semantic_identity=(
             canonical_facts.context_binding_fact.context_base_semantic_identity
         ),
@@ -4866,6 +5120,9 @@ def _prepared_append_candidate(
     compatibility: ProviderInputEpochCompatibility,
     compiled_result: FrozenProviderInputAppendCompileResult,
     wire_input_plan: FrozenProviderWireInputPlan,
+    capability_dispatch_cut_fingerprint: str,
+    direct_native_projection_set,
+    mcp_route_projection,
 ) -> PreparedProviderInputAppendCandidate:
     predecessor = planning.predecessor_view
     epoch_nonce = (
@@ -4891,6 +5148,11 @@ def _prepared_append_candidate(
         reset_reason=compiled_result.reset_reason,
         compatibility=compatibility,
         planning_fingerprint=planning.planning_fingerprint,
+        capability_dispatch_cut_fingerprint=(
+            capability_dispatch_cut_fingerprint
+        ),
+        direct_native_projection_set=direct_native_projection_set,
+        mcp_route_projection=mcp_route_projection,
     )
     return PreparedProviderInputAppendCandidate(
         scope=planning.scope,
@@ -4906,6 +5168,11 @@ def _prepared_append_candidate(
         reset_reason=compiled_result.reset_reason,
         compatibility=compatibility,
         planning_fingerprint=planning.planning_fingerprint,
+        capability_dispatch_cut_fingerprint=(
+            capability_dispatch_cut_fingerprint
+        ),
+        direct_native_projection_set=direct_native_projection_set,
+        mcp_route_projection=mcp_route_projection,
         candidate_fingerprint=candidate_fingerprint,
     )
 

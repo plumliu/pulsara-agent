@@ -1,6 +1,5 @@
-"""Static capability and local-skill public surface."""
+"""Unified pure capability semantics and local Skill support."""
 
-from pulsara_agent.capability.builtin_provider import BuiltinToolCapabilityProvider
 from pulsara_agent.capability.bundled_skills import (
     BUNDLED_MANIFEST_FILE_NAME,
     BUNDLED_OPT_OUT_MARKER_NAME,
@@ -16,24 +15,33 @@ from pulsara_agent.capability.bundled_skills import (
     user_product_skills_root,
 )
 from pulsara_agent.capability.call_classifier import (
-    CapabilityCallClassification,
-    DefaultCapabilityCallClassifier,
+    BuiltinToolCallClassification,
+    DefaultBuiltinToolCallClassifier,
 )
 from pulsara_agent.capability.descriptor import (
-    CapabilityAdvertisePolicy,
-    CapabilityAvailability,
-    CapabilityDescriptor,
-    CapabilityProviderKind,
-    CapabilityProvenance,
+    BuiltinToolAdvertisePolicy,
+    BuiltinToolAvailability,
+    BuiltinToolDescriptor,
+    BuiltinToolDomainKind,
+    BuiltinToolProvenance,
 )
-from pulsara_agent.capability.exposure import CapabilityExposurePlan
+from pulsara_agent.capability.contracts import (
+    CapabilityIdentity,
+    CapabilityKind,
+    CapabilitySourceKind,
+    CapabilitySourceRef,
+    FrozenCapabilityDispatchCut,
+    FrozenCapabilityRegistrySnapshot,
+    FrozenSkillCapabilityDispatchView,
+    FrozenSkillCapabilityFact,
+    FrozenToolCapabilityDispatchView,
+    FrozenToolCapabilityExposurePlan,
+    FrozenToolCapabilityFact,
+    LocalSkillRootKind,
+)
 from pulsara_agent.capability.local_skills import LocalSkillProvider
 from pulsara_agent.capability.provider import (
-    CapabilityDescriptorSnapshotOutput,
-    CapabilityExecutionSurfaceProvider,
-    CapabilityProjectionOutput,
-    CapabilityProjectionProvider,
-    CapabilityProviderComponent,
+    SkillProjectionOutput,
 )
 from pulsara_agent.capability.render import (
     render_active_skill_prompt,
@@ -46,11 +54,10 @@ from pulsara_agent.capability.skill_health import (
 )
 from pulsara_agent.capability.types import (
     ActiveSkillInjection,
-    CapabilityDiagnostic,
-    CapabilityExecutionSurfaceSnapshotContext,
-    CapabilityProjectionResolveContext,
+    SkillDiagnostic,
+    SkillProjectionResolveContext,
     LocalSkillManifest,
-    RenderedCapabilityPrompt,
+    RenderedSkillPrompt,
     ResolvedSkillCatalogEntry,
 )
 from pulsara_agent.ports.artifact import ToolArtifactMode
@@ -64,27 +71,32 @@ __all__ = [
     "BundledSkillStatusResult",
     "BundledSkillSyncItem",
     "BundledSkillSyncResult",
-    "BuiltinToolCapabilityProvider",
-    "CapabilityAdvertisePolicy",
-    "CapabilityAvailability",
-    "CapabilityCallClassification",
-    "CapabilityDescriptor",
-    "CapabilityDescriptorSnapshotOutput",
-    "CapabilityDiagnostic",
-    "CapabilityExecutionSurfaceProvider",
-    "CapabilityExecutionSurfaceSnapshotContext",
-    "CapabilityExposurePlan",
-    "CapabilityProjectionOutput",
-    "CapabilityProjectionProvider",
-    "CapabilityProjectionResolveContext",
-    "CapabilityProviderComponent",
-    "CapabilityProviderKind",
-    "CapabilityProvenance",
-    "DefaultCapabilityCallClassifier",
+    "BuiltinToolAdvertisePolicy",
+    "BuiltinToolAvailability",
+    "BuiltinToolCallClassification",
+    "BuiltinToolDescriptor",
+    "SkillDiagnostic",
+    "CapabilityIdentity",
+    "CapabilityKind",
+    "CapabilitySourceKind",
+    "CapabilitySourceRef",
+    "FrozenCapabilityDispatchCut",
+    "FrozenCapabilityRegistrySnapshot",
+    "FrozenSkillCapabilityDispatchView",
+    "FrozenSkillCapabilityFact",
+    "FrozenToolCapabilityDispatchView",
+    "FrozenToolCapabilityExposurePlan",
+    "FrozenToolCapabilityFact",
+    "LocalSkillRootKind",
+    "SkillProjectionOutput",
+    "SkillProjectionResolveContext",
+    "BuiltinToolDomainKind",
+    "BuiltinToolProvenance",
+    "DefaultBuiltinToolCallClassifier",
     "LocalSkillCapabilityProvider",
     "LocalSkillManifest",
     "LocalSkillProvider",
-    "RenderedCapabilityPrompt",
+    "RenderedSkillPrompt",
     "ResolvedSkillCatalogEntry",
     "SkillBinaryLookupPath",
     "SkillHealthResolver",

@@ -1,4 +1,4 @@
-"""Capability descriptors for the unified capability surface."""
+"""Builtin Tool descriptors and their closed catalog metadata."""
 
 from __future__ import annotations
 
@@ -15,29 +15,27 @@ from pulsara_agent.ports.tool_execution import (
 )
 
 
-class CapabilityProviderKind(StrEnum):
+class BuiltinToolDomainKind(StrEnum):
     BUILTIN = "builtin"
     WORKFLOW = "workflow"
     MEMORY = "memory"
-    SKILL = "skill"
-    MCP = "mcp"
 
 
-class CapabilityAvailability(StrEnum):
+class BuiltinToolAvailability(StrEnum):
     AVAILABLE = "available"
     DEGRADED = "degraded"
     UNAVAILABLE = "unavailable"
 
 
-class CapabilityAdvertisePolicy(StrEnum):
+class BuiltinToolAdvertisePolicy(StrEnum):
     DIRECT = "direct"
     DEFERRED = "deferred"
     HIDDEN = "hidden"
 
 
 @dataclass(frozen=True, slots=True)
-class CapabilityProvenance:
-    provider_kind: CapabilityProviderKind
+class BuiltinToolProvenance:
+    provider_kind: BuiltinToolDomainKind
     provider_id: str
     source: str | None = None
     version: str | None = None
@@ -45,13 +43,13 @@ class CapabilityProvenance:
 
 
 @dataclass(frozen=True, slots=True)
-class CapabilityDescriptor:
+class BuiltinToolDescriptor:
     id: str
     name: str
     description: str
     input_schema: FrozenToolJsonDict | None
     namespace: str | None
-    provider_kind: CapabilityProviderKind
+    provider_kind: BuiltinToolDomainKind
     provider_id: str
     is_model_callable: bool
     is_read_only: bool
@@ -63,13 +61,13 @@ class CapabilityDescriptor:
     requires_user_interaction: bool = False
     permission_category: str = "general"
     approval_policy_hint: str | None = None
-    advertise_policy: CapabilityAdvertisePolicy = CapabilityAdvertisePolicy.DIRECT
+    advertise_policy: BuiltinToolAdvertisePolicy = BuiltinToolAdvertisePolicy.DIRECT
     artifact_mode: ToolArtifactMode = ToolArtifactMode.DEFAULT
     max_inline_chars: int | None = None
     timeout_ms: int | None = None
-    availability: CapabilityAvailability = CapabilityAvailability.AVAILABLE
+    availability: BuiltinToolAvailability = BuiltinToolAvailability.AVAILABLE
     health_message: str | None = None
-    provenance: CapabilityProvenance | None = None
+    provenance: BuiltinToolProvenance | None = None
     metadata: FrozenToolJsonDict = field(default_factory=FrozenToolJsonDict)
 
     def __post_init__(self) -> None:

@@ -563,6 +563,30 @@ def test_stage2_stale_writer_cannot_mutate_after_takeover(
         )
 
 
+def test_round9_host_writer_renewal_accepts_unconstrained_memory_domain(
+    stage2_migrated_postgres_database,
+) -> None:
+    repository = _repository(stage2_migrated_postgres_database)
+    deadline = monotonic() + 30
+    lease = repository.acquire_host_writer(
+        session_id=_name("session"),
+        workspace_id=_name("workspace"),
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=deadline,
+    )
+
+    renewed = repository.renew_host_writer(
+        lease.guard,
+        lease_seconds=30,
+        memory_domain_id=None,
+        deadline_monotonic=deadline,
+    )
+
+    assert renewed.guard == lease.guard
+    assert renewed.expires_at > lease.expires_at
+
+
 def test_stage2_host_takeover_rejects_pending_exact_turn_steer(
     stage2_migrated_postgres_database,
 ) -> None:

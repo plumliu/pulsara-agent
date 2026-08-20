@@ -90,7 +90,7 @@ class ContextSourceKind(StrEnum):
     RUN_PERMISSION = "RUN_PERMISSION"
     PLAN_HANDOFF = "PLAN_HANDOFF"
     PLAN_WORKFLOW = "PLAN_WORKFLOW"
-    CAPABILITY_CATALOG = "CAPABILITY_CATALOG"
+    SKILL_CATALOG = "SKILL_CATALOG"
     MCP_CATALOG = "MCP_CATALOG"
     ACTIVE_SKILL = "ACTIVE_SKILL"
     PREVIOUS_TURN_OUTCOME = "PREVIOUS_TURN_OUTCOME"
@@ -1623,6 +1623,23 @@ def provider_input_item_fingerprint(item: FrozenProviderInputItem) -> str:
                     item.tool_result_delivery.classifier_contract
                 ),
             },
+        },
+    )
+
+
+def compiled_tool_result_source_fingerprint(
+    item: FrozenProviderInputItem,
+) -> str:
+    """Stable join from a canonical ToolResult item to compiler decisions."""
+
+    if item.source_entry_id is None or item.tool_call_id is None:
+        raise ValueError("compiled tool-result source lacks canonical identity")
+    return context_fingerprint(
+        "compiled-tool-result-source:v1",
+        {
+            "entry_id": item.source_entry_id,
+            "sequence": item.source_entry_sequence,
+            "tool_call_id": item.tool_call_id,
         },
     )
 

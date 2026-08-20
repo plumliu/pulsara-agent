@@ -115,6 +115,7 @@ from tests.support.round3 import (
     ScriptedKernelModel,
     StaticContextSourceCollector,
     StructuredToolPort,
+    seal_test_direct_tool_port,
 )
 
 
@@ -271,6 +272,12 @@ def _seed_artifact_result_with_memory_provenance(
 
 class _ScriptedModel(ScriptedKernelModel):
     pass
+
+
+class _NativePlanningDeadlineModel(_ScriptedModel):
+    def freeze_native_tool_eligibility(self, **kwargs):
+        del kwargs
+        raise TimeoutError("injected native Tool planning deadline")
 
 
 class _ChangingRegistryCollector(StaticContextSourceCollector):
@@ -1893,6 +1900,34 @@ def test_round3_surface_revoked_before_borrow_has_zero_provider_open(
     assert model.requests == []
 
 
+def test_round9_native_planning_timeout_is_typed_before_provider_open(
+    stage2_migrated_postgres_database,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id = _name("session")
+    lease = repository.acquire_host_writer(
+        session_id=session_id,
+        workspace_id=_name("workspace"),
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    model = _NativePlanningDeadlineModel([_text_stream("must not open")])
+    runner = ConversationKernelRunner(
+        repository=repository,
+        writer_lease=lease,
+        model=model,
+        tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
+        live_bus=LiveAgentEventBus(),
+        context_source_collector=StaticContextSourceCollector(),
+    )
+    with pytest.raises(StructuredModelInputCompileError) as failure:
+        asyncio.run(runner.run_turn("native planning expires"))
+    assert failure.value.kind is ModelInputCompileFailureKind.DEADLINE_EXPIRED
+    assert model.requests == []
+
+
 def test_stage2_runner_commits_tool_message_and_attempt_before_invoke(
     stage2_migrated_postgres_database,
 ) -> None:
@@ -1976,6 +2011,7 @@ def test_lightweight_todo_runs_through_canonical_tool_result_settlement(
         live_bus=live_bus,
         authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
     )
+    seal_test_direct_tool_port(tools)
 
     async def finalize_todo(
         prepared: PreparedTodoRootRunActivation, accepted: AcceptedEntry

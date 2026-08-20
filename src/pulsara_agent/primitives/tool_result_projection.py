@@ -101,12 +101,21 @@ def classify_tool_result_delivery(
 ) -> FrozenToolResultDeliveryRequirement:
     """Rebuild the closed requirement from exact canonical request/result facts.
 
-    Round 7.1 activates only the existing ``artifact_read`` text page.  The
-    remaining reason values are frozen for later rounds and can be exercised
-    synthetically without advertising or implementing those capabilities now.
+    Round 9 activates the two MCP results whose product contract is meaningful
+    only when the exact closed page/schema reaches the model in FULL.
     """
 
-    if result_state != "SUCCESS" or tool_name != "artifact_read":
+    if result_state != "SUCCESS":
+        return BEST_AVAILABLE_TOOL_RESULT_DELIVERY
+    if tool_name == "list_mcp_servers":
+        return full_required_tool_result_delivery(
+            ToolResultFullDeliveryReason.MCP_DIRECTORY_PAGE
+        )
+    if tool_name == "inspect_new_mcp_tool":
+        return full_required_tool_result_delivery(
+            ToolResultFullDeliveryReason.MCP_INSPECT_SCHEMA
+        )
+    if tool_name != "artifact_read":
         return BEST_AVAILABLE_TOOL_RESULT_DELIVERY
     values = {entry.key: entry.value for entry in arguments.entries}
     mode = values.get("mode", "text")

@@ -7,9 +7,9 @@ from enum import StrEnum
 from typing import Any, Literal
 
 from pulsara_agent.capability.descriptor import (
-    CapabilityAdvertisePolicy,
-    CapabilityDescriptor,
-    CapabilityProviderKind,
+    BuiltinToolAdvertisePolicy,
+    BuiltinToolDescriptor,
+    BuiltinToolDomainKind,
 )
 from pulsara_agent.ports.artifact import ToolArtifactMode
 from pulsara_agent.capability.result_contracts import result_render_contract_for_tool
@@ -87,6 +87,8 @@ _LONG_HORIZON_POLICY_KIND_BY_NAME = {
     "list_mcp_resource_templates": BuiltinToolLongHorizonPolicyKind.EVIDENCE_HYDRATION,
     "list_mcp_resources": BuiltinToolLongHorizonPolicyKind.EVIDENCE_HYDRATION,
     "list_mcp_servers": BuiltinToolLongHorizonPolicyKind.EVIDENCE_HYDRATION,
+    "inspect_new_mcp_tool": BuiltinToolLongHorizonPolicyKind.EVIDENCE_HYDRATION,
+    "use_new_mcp_tool": BuiltinToolLongHorizonPolicyKind.EVIDENCE_ACQUISITION,
     "read_file": BuiltinToolLongHorizonPolicyKind.EVIDENCE_ACQUISITION,
     "read_mcp_resource": BuiltinToolLongHorizonPolicyKind.EVIDENCE_ACQUISITION,
     "remember": BuiltinToolLongHorizonPolicyKind.SYNTHESIS_MUTATION,
@@ -125,7 +127,7 @@ def object_schema(*, properties: dict[str, Any], required: list[str]) -> dict[st
     }
 
 
-def builtin_tool_descriptors() -> tuple[CapabilityDescriptor, ...]:
+def builtin_tool_descriptors() -> tuple[BuiltinToolDescriptor, ...]:
     return tuple(_BUILTIN_DESCRIPTORS[name] for name in sorted(_BUILTIN_DESCRIPTORS))
 
 
@@ -134,15 +136,15 @@ def _descriptor(
     name: str,
     description: str,
     input_schema: dict[str, Any],
-    provider_kind: CapabilityProviderKind = CapabilityProviderKind.BUILTIN,
+    provider_kind: BuiltinToolDomainKind = BuiltinToolDomainKind.BUILTIN,
     is_read_only: bool,
     is_concurrency_safe: bool,
     permission_category: str,
     artifact_mode: ToolArtifactMode = ToolArtifactMode.DEFAULT,
     is_destructive: bool = False,
     is_open_world: bool = False,
-) -> CapabilityDescriptor:
-    return CapabilityDescriptor(
+) -> BuiltinToolDescriptor:
+    return BuiltinToolDescriptor(
         id=f"{provider_kind.value}:{name}",
         name=name,
         description=description,
@@ -158,7 +160,7 @@ def _descriptor(
         permission_category=permission_category,
         result_render_contract=result_render_contract_for_tool(name),
         long_horizon_policy=_long_horizon_policy(name),
-        advertise_policy=CapabilityAdvertisePolicy.DIRECT,
+        advertise_policy=BuiltinToolAdvertisePolicy.DIRECT,
         artifact_mode=artifact_mode,
         metadata={"source": "explicit_builtin_descriptor"},
     )
@@ -328,7 +330,7 @@ _MEMORY_EXPLAIN_PARAMETERS = object_schema(
 _REMEMBER_PARAMETERS = _remember_parameters()
 
 
-_BUILTIN_DESCRIPTORS: dict[str, CapabilityDescriptor] = {
+_BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "artifact_read": _descriptor(
         name="artifact_read",
         description=(
@@ -362,10 +364,107 @@ _BUILTIN_DESCRIPTORS: dict[str, CapabilityDescriptor] = {
             "List the bounded, scope-visible MCP server catalog. This is a "
             "read-only local snapshot and never connects or refreshes a server."
         ),
-        input_schema=object_schema(properties={}, required=[]),
+        input_schema=object_schema(
+            properties={
+                "server_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256,
+                },
+                "cursor": {"type": "string", "minLength": 1, "maxLength": 512},
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 200,
+                    "default": 50,
+                },
+            },
+            required=[],
+        ),
         is_read_only=True,
         is_concurrency_safe=True,
         permission_category="mcp_read",
+    ),
+    "inspect_new_mcp_tool": _descriptor(
+        name="inspect_new_mcp_tool",
+        description=(
+            "Inspect one NEW_MCP_META_ONLY tool that is absent from the native "
+            "tools array, returning its exact input schema and a process-local "
+            "tool_ref for use_new_mcp_tool. Pass the exact qualified name shown "
+            "in MCP catalog new_tool_names. Example: if server_id is 'late' "
+            "and new_tool_names contains 'mcp__late__bulk_00', call "
+            "inspect_new_mcp_tool with {\"server_id\":\"late\",\"tool_name\":"
+            "\"mcp__late__bulk_00\"}. After SUCCESS, read input_schema and pass "
+            "the returned tool_ref verbatim to use_new_mcp_tool. Do not inspect "
+            "Builtin or DIRECT MCP tools; call those tools directly."
+        ),
+        input_schema=object_schema(
+            properties={
+                "server_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256,
+                    "description": (
+                        "Exact server_id from the MCP catalog, for example 'late'."
+                    ),
+                },
+                "tool_name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096,
+                    "description": (
+                        "Exact qualified value from catalog new_tool_names, for "
+                        "example 'mcp__late__bulk_00'. Do not invent or shorten it."
+                    ),
+                },
+            },
+            required=["server_id", "tool_name"],
+        ),
+        is_read_only=True,
+        is_concurrency_safe=True,
+        permission_category="mcp_read",
+        artifact_mode=ToolArtifactMode.NEVER,
+    ),
+    "use_new_mcp_tool": _descriptor(
+        name="use_new_mcp_tool",
+        description=(
+            "Invoke one NEW_MCP_META_ONLY tool only after a successful "
+            "inspect_new_mcp_tool result. Copy the returned opaque tool_ref "
+            "verbatim and construct arguments exactly from that result's "
+            "input_schema. Example: if inspect returns tool_ref "
+            "'mcpref_RETURNED_VALUE' and its schema requires string field "
+            "'text', call use_new_mcp_tool with {\"tool_ref\":"
+            "\"mcpref_RETURNED_VALUE\","
+            "\"arguments\":{\"text\":\"round9\"}}. This call performs the "
+            "actual remote MCP invocation and remains subject to its resolved "
+            "permission/effect policy. Never route Builtin or DIRECT MCP tools "
+            "through this tool; call those tools directly."
+        ),
+        input_schema=object_schema(
+            properties={
+                "tool_ref": {
+                    "type": "string",
+                    "pattern": "^mcpref_[A-Za-z0-9_-]+$",
+                    "maxLength": 160,
+                    "description": (
+                        "Opaque tool_ref copied verbatim from the successful "
+                        "inspect_new_mcp_tool result in this process-local epoch."
+                    ),
+                },
+                "arguments": {
+                    "type": "object",
+                    "description": (
+                        "Exact arguments object conforming to the input_schema "
+                        "returned by inspect_new_mcp_tool; never guess fields."
+                    ),
+                },
+            },
+            required=["tool_ref", "arguments"],
+        ),
+        is_read_only=False,
+        is_concurrency_safe=False,
+        permission_category="mcp_dynamic",
+        artifact_mode=ToolArtifactMode.DEFAULT,
     ),
     "list_mcp_resources": _descriptor(
         name="list_mcp_resources",
@@ -606,7 +705,7 @@ _BUILTIN_DESCRIPTORS: dict[str, CapabilityDescriptor] = {
             },
             required=["items"],
         ),
-        provider_kind=CapabilityProviderKind.WORKFLOW,
+        provider_kind=BuiltinToolDomainKind.WORKFLOW,
         is_read_only=True,
         is_concurrency_safe=False,
         permission_category="agent_local",
@@ -629,7 +728,7 @@ _BUILTIN_DESCRIPTORS: dict[str, CapabilityDescriptor] = {
             },
             required=["task"],
         ),
-        provider_kind=CapabilityProviderKind.WORKFLOW,
+        provider_kind=BuiltinToolDomainKind.WORKFLOW,
         is_read_only=False,
         is_concurrency_safe=False,
         permission_category="subagent_runtime",
@@ -646,7 +745,7 @@ _BUILTIN_DESCRIPTORS: dict[str, CapabilityDescriptor] = {
             },
             required=["subagent_run_id"],
         ),
-        provider_kind=CapabilityProviderKind.WORKFLOW,
+        provider_kind=BuiltinToolDomainKind.WORKFLOW,
         is_read_only=False,
         is_concurrency_safe=False,
         permission_category="subagent_runtime",
@@ -661,7 +760,7 @@ _BUILTIN_DESCRIPTORS: dict[str, CapabilityDescriptor] = {
             },
             required=["subagent_run_id"],
         ),
-        provider_kind=CapabilityProviderKind.WORKFLOW,
+        provider_kind=BuiltinToolDomainKind.WORKFLOW,
         is_read_only=False,
         is_concurrency_safe=False,
         permission_category="subagent_runtime",
@@ -680,7 +779,7 @@ _BUILTIN_DESCRIPTORS: dict[str, CapabilityDescriptor] = {
             },
             required=[],
         ),
-        provider_kind=CapabilityProviderKind.WORKFLOW,
+        provider_kind=BuiltinToolDomainKind.WORKFLOW,
         is_read_only=True,
         is_concurrency_safe=True,
         permission_category="subagent_runtime",
@@ -723,7 +822,7 @@ _BUILTIN_DESCRIPTORS: dict[str, CapabilityDescriptor] = {
             },
             required=["tasks"],
         ),
-        provider_kind=CapabilityProviderKind.WORKFLOW,
+        provider_kind=BuiltinToolDomainKind.WORKFLOW,
         is_read_only=False,
         is_concurrency_safe=False,
         permission_category="subagent_runtime",
@@ -743,7 +842,7 @@ _BUILTIN_DESCRIPTORS: dict[str, CapabilityDescriptor] = {
             },
             required=["task_ids"],
         ),
-        provider_kind=CapabilityProviderKind.WORKFLOW,
+        provider_kind=BuiltinToolDomainKind.WORKFLOW,
         is_read_only=False,
         is_concurrency_safe=False,
         permission_category="subagent_runtime",
@@ -755,7 +854,7 @@ _BUILTIN_DESCRIPTORS: dict[str, CapabilityDescriptor] = {
             properties={"task_id": {"type": "string"}, "reason": {"type": "string"}},
             required=["task_id"],
         ),
-        provider_kind=CapabilityProviderKind.WORKFLOW,
+        provider_kind=BuiltinToolDomainKind.WORKFLOW,
         is_read_only=False,
         is_concurrency_safe=False,
         permission_category="subagent_runtime",
@@ -772,7 +871,7 @@ _BUILTIN_DESCRIPTORS: dict[str, CapabilityDescriptor] = {
             },
             required=["phase"],
         ),
-        provider_kind=CapabilityProviderKind.WORKFLOW,
+        provider_kind=BuiltinToolDomainKind.WORKFLOW,
         is_read_only=False,
         is_concurrency_safe=False,
         permission_category="agent_local",
@@ -791,7 +890,7 @@ _BUILTIN_DESCRIPTORS: dict[str, CapabilityDescriptor] = {
             },
             required=["summary"],
         ),
-        provider_kind=CapabilityProviderKind.WORKFLOW,
+        provider_kind=BuiltinToolDomainKind.WORKFLOW,
         is_read_only=False,
         is_concurrency_safe=False,
         permission_category="agent_local",
@@ -803,7 +902,7 @@ _BUILTIN_DESCRIPTORS: dict[str, CapabilityDescriptor] = {
             properties={"reason": {"type": "string", "maxLength": 4096}},
             required=[],
         ),
-        provider_kind=CapabilityProviderKind.WORKFLOW,
+        provider_kind=BuiltinToolDomainKind.WORKFLOW,
         is_read_only=False,
         is_concurrency_safe=False,
         permission_category="plan_workflow",
@@ -846,7 +945,7 @@ _BUILTIN_DESCRIPTORS: dict[str, CapabilityDescriptor] = {
             },
             required=["question", "allow_free_text"],
         ),
-        provider_kind=CapabilityProviderKind.WORKFLOW,
+        provider_kind=BuiltinToolDomainKind.WORKFLOW,
         is_read_only=False,
         is_concurrency_safe=False,
         permission_category="plan_workflow",
@@ -861,7 +960,7 @@ _BUILTIN_DESCRIPTORS: dict[str, CapabilityDescriptor] = {
             },
             required=["plan"],
         ),
-        provider_kind=CapabilityProviderKind.WORKFLOW,
+        provider_kind=BuiltinToolDomainKind.WORKFLOW,
         is_read_only=False,
         is_concurrency_safe=False,
         permission_category="plan_workflow",
@@ -870,7 +969,7 @@ _BUILTIN_DESCRIPTORS: dict[str, CapabilityDescriptor] = {
         name="memory_search",
         description="Search saved memory.",
         input_schema=_MEMORY_SEARCH_PARAMETERS,
-        provider_kind=CapabilityProviderKind.MEMORY,
+        provider_kind=BuiltinToolDomainKind.MEMORY,
         is_read_only=True,
         is_concurrency_safe=True,
         permission_category="memory_read",
@@ -879,7 +978,7 @@ _BUILTIN_DESCRIPTORS: dict[str, CapabilityDescriptor] = {
         name="memory_get",
         description="Fetch one saved memory by id with status, evidence ids, and direct relations.",
         input_schema=_MEMORY_GET_PARAMETERS,
-        provider_kind=CapabilityProviderKind.MEMORY,
+        provider_kind=BuiltinToolDomainKind.MEMORY,
         is_read_only=True,
         is_concurrency_safe=True,
         permission_category="memory_read",
@@ -888,7 +987,7 @@ _BUILTIN_DESCRIPTORS: dict[str, CapabilityDescriptor] = {
         name="memory_explain",
         description="Explain one saved memory using its fields, relations, and recall signals.",
         input_schema=_MEMORY_EXPLAIN_PARAMETERS,
-        provider_kind=CapabilityProviderKind.MEMORY,
+        provider_kind=BuiltinToolDomainKind.MEMORY,
         is_read_only=True,
         is_concurrency_safe=True,
         permission_category="memory_read",
@@ -900,7 +999,7 @@ _BUILTIN_DESCRIPTORS: dict[str, CapabilityDescriptor] = {
             "and governed; this never promises that the statement will be saved."
         ),
         input_schema=_REMEMBER_PARAMETERS,
-        provider_kind=CapabilityProviderKind.MEMORY,
+        provider_kind=BuiltinToolDomainKind.MEMORY,
         is_read_only=False,
         is_concurrency_safe=False,
         permission_category="memory_write",
@@ -981,7 +1080,7 @@ class BuiltinToolRecoveryContract:
 @dataclass(frozen=True, slots=True)
 class BuiltinToolCatalogEntry:
     name: str
-    descriptor: CapabilityDescriptor
+    descriptor: BuiltinToolDescriptor
     binding_contract: BuiltinToolBindingContract
     execution_binding_kind: BuiltinToolBindingKind
     availability_requirement: BuiltinToolAvailabilityRequirement
@@ -1055,7 +1154,7 @@ def builtin_action_permission_override(
 
 
 def _catalog_entry(
-    name: str, descriptor: CapabilityDescriptor
+    name: str, descriptor: BuiltinToolDescriptor
 ) -> BuiltinToolCatalogEntry:
     binding_kind, availability_kind, owners, family = _catalog_shape(name)
     availability_payload = {
@@ -1132,6 +1231,8 @@ def _catalog_shape(name: str):
         "list_mcp_resource_templates",
         "list_mcp_resources",
         "list_mcp_servers",
+        "inspect_new_mcp_tool",
+        "use_new_mcp_tool",
         "read_mcp_resource",
     }:
         return (
@@ -1291,6 +1392,7 @@ def _recovery_contract(name: str) -> BuiltinToolRecoveryContract:
         "list_mcp_resource_templates",
         "list_mcp_resources",
         "list_mcp_servers",
+        "inspect_new_mcp_tool",
         "read_file",
         "read_mcp_resource",
         "search_files",

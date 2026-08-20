@@ -11,6 +11,10 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Callable
 
+from pulsara_agent.capability.contracts import (
+    FrozenToolCapabilityExposurePlan,
+    PreparedUnavailableDirectMcpGate,
+)
 from pulsara_agent.model_input.contracts import (
     FrozenModelToolSurface,
     ModelInputScopeKind,
@@ -22,11 +26,13 @@ from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
 _MCP_STANDARD_TOOL_NAMES = frozenset(
     {
         "get_mcp_prompt",
+        "inspect_new_mcp_tool",
         "list_mcp_prompts",
         "list_mcp_resource_templates",
         "list_mcp_resources",
         "list_mcp_servers",
         "read_mcp_resource",
+        "use_new_mcp_tool",
     }
 )
 _TERMINAL_TOOL_NAMES = frozenset(
@@ -161,6 +167,32 @@ class PreparedToolExecutionBinding:
             raise ValueError("memory citation evidence kind is not closed")
 
 
+DirectToolAccessLeaf = PreparedToolExecutionBinding | PreparedUnavailableDirectMcpGate
+
+
+def _access_leaf_fingerprint_payload(
+    item: DirectToolAccessLeaf,
+) -> dict[str, object]:
+    if isinstance(item, PreparedUnavailableDirectMcpGate):
+        return {
+            "kind": "UNAVAILABLE_MCP_GATE",
+            "tool_name": item.provider_tool_name,
+            "descriptor_fingerprint": item.tool_semantic_fingerprint,
+            "gate_fingerprint": item.gate_fingerprint,
+        }
+    return {
+        "kind": "EXECUTION_BINDING",
+        "tool_name": item.tool_name,
+        "descriptor_fingerprint": item.descriptor_fingerprint,
+        "executor_binding_fingerprint": item.executor_binding_fingerprint,
+        "execution_policy_fingerprint": execution_policy_fingerprint(
+            item.execution_policy
+        ),
+        "memory_citation_visibility": item.memory_citation_visibility,
+        "memory_citation_evidence_kind": item.memory_citation_evidence_kind,
+    }
+
+
 def tool_observation_origin_for_binding(
     binding: PreparedToolExecutionBinding,
 ) -> ToolObservationOrigin:
@@ -186,7 +218,7 @@ def tool_execution_surface_fingerprint(
     owner_epoch: int,
     surface_generation: int,
     semantic_surface_fingerprint: str,
-    bindings: tuple[PreparedToolExecutionBinding, ...],
+    bindings: tuple[DirectToolAccessLeaf, ...],
 ) -> str:
     return context_fingerprint(
         "kernel-tool-execution-surface:v1",
@@ -194,23 +226,7 @@ def tool_execution_surface_fingerprint(
             "owner_epoch": owner_epoch,
             "surface_generation": surface_generation,
             "semantic_surface_fingerprint": semantic_surface_fingerprint,
-            "bindings": tuple(
-                {
-                    "tool_name": item.tool_name,
-                    "descriptor_fingerprint": item.descriptor_fingerprint,
-                    "executor_binding_fingerprint": (
-                        item.executor_binding_fingerprint
-                    ),
-                    "execution_policy_fingerprint": execution_policy_fingerprint(
-                        item.execution_policy
-                    ),
-                    "memory_citation_visibility": item.memory_citation_visibility,
-                    "memory_citation_evidence_kind": (
-                        item.memory_citation_evidence_kind
-                    ),
-                }
-                for item in bindings
-            ),
+            "bindings": tuple(_access_leaf_fingerprint_payload(item) for item in bindings),
         },
     )
 
@@ -248,9 +264,12 @@ class ProcessLocalToolSurfaceAccess:
 @dataclass(frozen=True, slots=True)
 class PreparedKernelToolSurface:
     model_surface: FrozenModelToolSurface
-    execution_bindings: tuple[PreparedToolExecutionBinding, ...]
+    execution_bindings: tuple[DirectToolAccessLeaf, ...]
     execution_surface_fingerprint: str
     access: ProcessLocalToolSurfaceAccess = field(repr=False)
+    capability_exposure_plan: FrozenToolCapabilityExposurePlan | None = field(
+        default=None, repr=False
+    )
 
     def __post_init__(self) -> None:
         if (
@@ -284,6 +303,10 @@ class PreparedKernelToolSurface:
             != self.execution_surface_fingerprint
         ):
             raise ValueError("prepared surface access fingerprint mismatch")
+        if self.capability_exposure_plan is not None and (
+            self.capability_exposure_plan.direct_tool_surface != self.model_surface
+        ):
+            raise ValueError("prepared surface does not join capability plan")
 
     @property
     def executor_binding_fingerprints(self) -> tuple[str, ...]:
@@ -291,7 +314,7 @@ class PreparedKernelToolSurface:
             item.executor_binding_fingerprint for item in self.execution_bindings
         )
 
-    def binding(self, tool_name: str) -> PreparedToolExecutionBinding:
+    def binding(self, tool_name: str) -> DirectToolAccessLeaf:
         for item in self.execution_bindings:
             if item.tool_name == tool_name:
                 return item
@@ -304,6 +327,7 @@ class PreparedKernelToolSurface:
             and self.execution_surface_fingerprint
             == other.execution_surface_fingerprint
             and self.access.exactly_joins(other.access)
+            and self.capability_exposure_plan == other.capability_exposure_plan
         )
 
 
@@ -313,7 +337,7 @@ class ProcessLocalToolSurfaceBorrow:
     borrow_id: str
     _authority: object = field(repr=False)
     _validate: Callable[
-        ["ProcessLocalToolSurfaceBorrow", str], PreparedToolExecutionBinding
+        ["ProcessLocalToolSurfaceBorrow", str], DirectToolAccessLeaf
     ] = field(repr=False)
     _release: Callable[["ProcessLocalToolSurfaceBorrow"], None] = field(repr=False)
     _closed: bool = False
@@ -325,7 +349,7 @@ class ProcessLocalToolSurfaceBorrow:
             and self.prepared.exactly_joins(prepared)
         )
 
-    def execution_binding(self, tool_name: str) -> PreparedToolExecutionBinding:
+    def execution_binding(self, tool_name: str) -> DirectToolAccessLeaf:
         if self._closed:
             raise RuntimeError("tool surface borrow is closed")
         return self._validate(self, tool_name)
@@ -342,6 +366,7 @@ class ProcessLocalToolSurfaceBorrow:
 
 __all__ = [
     "BuiltinExecutionPolicyRef",
+    "DirectToolAccessLeaf",
     "McpEffectKind",
     "McpPolicyClassificationSource",
     "McpToolExecutionPolicyFact",

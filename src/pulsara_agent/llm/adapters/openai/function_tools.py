@@ -11,10 +11,32 @@ documented non-strict function-calling mode on both wire APIs.
 from __future__ import annotations
 
 from copy import deepcopy
+from time import monotonic
 from typing import Any
 
+from pulsara_agent.capability.contracts import (
+    FrozenNativeToolProjectionSet,
+    FrozenNativeToolWireEligibilityQuote,
+    FrozenNativeToolWireEligibilitySet,
+    FrozenNativeToolWireIncompatibility,
+    FrozenNativeToolWireProjection,
+    FrozenToolCapabilityFact,
+    ToolCapabilityVersionRef,
+    NativeToolWireIncompatibilityReason,
+    canonical_tool_spec_fingerprint,
+    frozen_tool_spec_fingerprint,
+    native_tool_projection_set_fingerprint,
+    tool_capability_version_ref,
+)
 from pulsara_agent.llm.input import ToolSpec
-from pulsara_agent.primitives.context import canonical_json_bytes
+from pulsara_agent.model_input.contracts import FrozenToolSpec, ModelInputScopeKind
+from pulsara_agent.primitives.context import (
+    FrozenJsonObjectFact,
+    canonical_json_bytes,
+    context_fingerprint,
+    freeze_json,
+    thaw_json,
+)
 
 
 OPENAI_FUNCTION_TOOL_WIRE_CONTRACT_VERSION = (
@@ -347,10 +369,259 @@ def openai_responses_function_tool(tool: ToolSpec) -> dict[str, Any]:
     return {"type": "function", **openai_function_definition(tool)}
 
 
+def openai_native_function_tool_contract_fingerprint(wire_api: str) -> str:
+    if wire_api not in {"openai_chat_completions", "openai_responses"}:
+        raise ValueError("OpenAI function tool wire API is unsupported")
+    return context_fingerprint(
+        "openai-native-function-tool-contract:v1",
+        {
+            "wire_api": wire_api,
+            "contract_version": OPENAI_FUNCTION_TOOL_WIRE_CONTRACT_VERSION,
+        },
+    )
+
+
+def freeze_openai_native_tool_eligibility(
+    *,
+    conversation_scope_kind: ModelInputScopeKind,
+    scope_subagent_task_id: str | None,
+    wire_api: str,
+    tool_facts: tuple[FrozenToolCapabilityFact, ...],
+    retained_direct_inputs: tuple[
+        tuple[ToolCapabilityVersionRef, FrozenToolSpec], ...
+    ] = (),
+    deadline_monotonic: float | None = None,
+) -> FrozenNativeToolWireEligibilitySet:
+    """Quote every canonical tool without retaining its complete wire schema.
+
+    The generic capability registry never sees this projection.  It remains a
+    process-local adapter fact and therefore cannot replace the canonical MCP
+    schema or local argument validator.  Full wire values are materialized
+    only after the pure planner selects the bounded DIRECT cohort.
+    """
+
+    contract = openai_native_function_tool_contract_fingerprint(wire_api)
+    entries: list[
+        FrozenNativeToolWireEligibilityQuote | FrozenNativeToolWireIncompatibility
+    ] = []
+    inputs = [
+        (
+            tool_capability_version_ref(fact),
+            fact.canonical_tool_spec,
+            canonical_tool_spec_fingerprint(fact),
+        )
+        for fact in tool_facts
+    ]
+    seen_versions = {item[0].version_fingerprint: item[2] for item in inputs}
+    for version, raw_spec in retained_direct_inputs:
+        if not isinstance(version, ToolCapabilityVersionRef) or not isinstance(
+            raw_spec, FrozenToolSpec
+        ):
+            raise TypeError("retained direct tool input is not frozen")
+        if version.provider_name != raw_spec.name:
+            raise ValueError("retained direct tool version/spec name drifted")
+        spec_fingerprint = frozen_tool_spec_fingerprint(raw_spec)
+        existing = seen_versions.get(version.version_fingerprint)
+        if existing is not None:
+            if existing != spec_fingerprint:
+                raise ValueError("retained direct tool schema conflicts")
+            continue
+        seen_versions[version.version_fingerprint] = spec_fingerprint
+        inputs.append((version, raw_spec, spec_fingerprint))
+
+    for version, canonical_spec, spec_fingerprint in inputs:
+        _require_native_planning_deadline(deadline_monotonic)
+        try:
+            frozen_wire = _materialize_openai_function_wire(
+                wire_api=wire_api, canonical_spec=canonical_spec
+            )
+            wire_bytes = len(canonical_json_bytes(frozen_wire))
+            if wire_bytes > 1024 * 1024:
+                raise OverflowError("native function tool projection is overbound")
+            wire_fingerprint = context_fingerprint(
+                "native-tool-wire-value:v1", frozen_wire
+            )
+            payload = {
+                "capability_version_fingerprint": version.version_fingerprint,
+                "canonical_tool_spec_fingerprint": spec_fingerprint,
+                "native_function_tool_wire_contract_fingerprint": contract,
+                "wire_tool_fingerprint": wire_fingerprint,
+                "wire_utf8_bytes": wire_bytes,
+            }
+            entries.append(
+                FrozenNativeToolWireEligibilityQuote(
+                    **payload,
+                    eligibility_fingerprint=context_fingerprint(
+                        "native-tool-wire-eligibility-quote:v1", payload
+                    ),
+                )
+            )
+        except (OpenAIFunctionSchemaIncompatible, OverflowError) as exc:
+            if isinstance(exc, OverflowError):
+                reason = NativeToolWireIncompatibilityReason.PROJECTION_OVERBOUND
+            elif "root" in str(exc).lower():
+                reason = NativeToolWireIncompatibilityReason.ROOT_SHAPE_UNSUPPORTED
+            elif "union" in str(exc).lower() or "combine" in str(exc).lower():
+                reason = NativeToolWireIncompatibilityReason.COMPOSITION_UNSUPPORTED
+            else:
+                reason = NativeToolWireIncompatibilityReason.CONSTRAINT_UNSUPPORTED
+            payload = {
+                "capability_version_fingerprint": version.version_fingerprint,
+                "canonical_tool_spec_fingerprint": spec_fingerprint,
+                "native_function_tool_wire_contract_fingerprint": contract,
+                "reason": reason.value,
+            }
+            entries.append(
+                FrozenNativeToolWireIncompatibility(
+                    capability_version_fingerprint=version.version_fingerprint,
+                    canonical_tool_spec_fingerprint=spec_fingerprint,
+                    native_function_tool_wire_contract_fingerprint=contract,
+                    reason=reason,
+                    decision_fingerprint=context_fingerprint(
+                        "native-tool-wire-incompatibility:v1", payload
+                    ),
+                )
+            )
+        _require_native_planning_deadline(deadline_monotonic)
+    ordered = tuple(sorted(entries, key=lambda item: item.capability_version_fingerprint))
+    fingerprint = context_fingerprint(
+        "native-tool-wire-eligibility-set:v1",
+        {
+            "scope": conversation_scope_kind.value,
+            "scope_subagent_task_id": scope_subagent_task_id,
+            "contract": contract,
+            "entries": tuple(
+                item.eligibility_fingerprint
+                if isinstance(item, FrozenNativeToolWireEligibilityQuote)
+                else item.decision_fingerprint
+                for item in ordered
+            ),
+        },
+    )
+    return FrozenNativeToolWireEligibilitySet(
+        conversation_scope_kind=conversation_scope_kind,
+        scope_subagent_task_id=scope_subagent_task_id,
+        native_function_tool_wire_contract_fingerprint=contract,
+        entries=ordered,
+        eligibility_set_fingerprint=fingerprint,
+    )
+
+
+def materialize_openai_native_tool_projection_set(
+    *,
+    conversation_scope_kind: ModelInputScopeKind,
+    scope_subagent_task_id: str | None,
+    wire_api: str,
+    tool_versions: tuple[ToolCapabilityVersionRef, ...],
+    tool_specs: tuple[FrozenToolSpec, ...],
+    eligibility: FrozenNativeToolWireEligibilitySet,
+    deadline_monotonic: float | None = None,
+) -> FrozenNativeToolProjectionSet:
+    """Materialize only the exact bounded cohort selected by the planner."""
+
+    contract = openai_native_function_tool_contract_fingerprint(wire_api)
+    if (
+        eligibility.conversation_scope_kind is not conversation_scope_kind
+        or eligibility.scope_subagent_task_id != scope_subagent_task_id
+        or eligibility.native_function_tool_wire_contract_fingerprint != contract
+        or len(tool_versions) != len(tool_specs)
+    ):
+        raise ValueError("native materialization input does not exact-join quote")
+    quoted = {
+        item.capability_version_fingerprint: item
+        for item in eligibility.entries
+    }
+    projections: list[FrozenNativeToolWireProjection] = []
+    for version, spec in zip(tool_versions, tool_specs, strict=True):
+        _require_native_planning_deadline(deadline_monotonic)
+        item = quoted.get(version.version_fingerprint)
+        spec_fingerprint = frozen_tool_spec_fingerprint(spec)
+        if (
+            not isinstance(item, FrozenNativeToolWireEligibilityQuote)
+            or version.provider_name != spec.name
+            or item.canonical_tool_spec_fingerprint != spec_fingerprint
+        ):
+            raise ValueError("selected native Tool is not eligible")
+        frozen_wire = _materialize_openai_function_wire(
+            wire_api=wire_api, canonical_spec=spec
+        )
+        wire_bytes = len(canonical_json_bytes(frozen_wire))
+        wire_fingerprint = context_fingerprint(
+            "native-tool-wire-value:v1", frozen_wire
+        )
+        if (
+            wire_bytes != item.wire_utf8_bytes
+            or wire_fingerprint != item.wire_tool_fingerprint
+        ):
+            raise ValueError("native Tool materialization drifted from quote")
+        payload = {
+            "capability_version_fingerprint": version.version_fingerprint,
+            "canonical_tool_spec_fingerprint": spec_fingerprint,
+            "native_function_tool_wire_contract_fingerprint": contract,
+            "wire_tool": frozen_wire,
+        }
+        projections.append(
+            FrozenNativeToolWireProjection(
+                **payload,
+                projection_fingerprint=context_fingerprint(
+                    "native-tool-wire-projection:v1", payload
+                ),
+            )
+        )
+        _require_native_planning_deadline(deadline_monotonic)
+    projection_tuple = tuple(projections)
+    return FrozenNativeToolProjectionSet(
+        conversation_scope_kind=conversation_scope_kind,
+        scope_subagent_task_id=scope_subagent_task_id,
+        native_function_tool_wire_contract_fingerprint=contract,
+        tool_versions=tool_versions,
+        projections=projection_tuple,
+        projection_set_fingerprint=native_tool_projection_set_fingerprint(
+            conversation_scope_kind=conversation_scope_kind,
+            scope_subagent_task_id=scope_subagent_task_id,
+            native_function_tool_wire_contract_fingerprint=contract,
+            tool_versions=tool_versions,
+            projections=projection_tuple,
+        ),
+    )
+
+
+def _materialize_openai_function_wire(
+    *, wire_api: str, canonical_spec: FrozenToolSpec
+) -> FrozenJsonObjectFact:
+    parameters = thaw_json(canonical_spec.parameters)
+    if not isinstance(parameters, dict):
+        raise OpenAIFunctionSchemaIncompatible(
+            "OpenAI function parameters are not an object"
+        )
+    tool = ToolSpec(
+        name=canonical_spec.name,
+        description=canonical_spec.description,
+        parameters=parameters,
+    )
+    wire_value = (
+        openai_chat_function_tool(tool)
+        if wire_api == "openai_chat_completions"
+        else openai_responses_function_tool(tool)
+    )
+    frozen_wire = freeze_json(wire_value)
+    if not isinstance(frozen_wire, FrozenJsonObjectFact):
+        raise TypeError("native function tool wire did not freeze to an object")
+    return frozen_wire
+
+
+def _require_native_planning_deadline(deadline_monotonic: float | None) -> None:
+    if deadline_monotonic is not None and monotonic() >= deadline_monotonic:
+        raise TimeoutError("native Tool planning deadline expired")
+
+
 __all__ = [
     "OPENAI_FUNCTION_TOOL_WIRE_CONTRACT_VERSION",
     "OpenAIFunctionSchemaIncompatible",
+    "freeze_openai_native_tool_eligibility",
+    "materialize_openai_native_tool_projection_set",
     "lower_openai_function_parameters",
+    "openai_native_function_tool_contract_fingerprint",
     "openai_chat_function_tool",
     "openai_function_definition",
     "openai_responses_function_tool",

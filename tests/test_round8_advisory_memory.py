@@ -89,6 +89,7 @@ from pulsara_agent.primitives.run_permission import (
     RunPermissionAdmissionSource,
     build_run_permission_snapshot,
 )
+from tests.support.round3 import prepare_test_direct_tool_surface
 from pulsara_agent.model_input.contracts import ModelInputScopeKind
 from pulsara_agent.retrieval.tokenizer import MemoryRetrievalTokenizerV1
 from pulsara_agent.retrieval.config import (
@@ -436,7 +437,8 @@ def test_round8_memory_use_policy_is_enforced_without_changing_tool_surface(
             authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
         )
         port.bind_memory_port(MemoryPort())  # type: ignore[arg-type]
-        surface = port.snapshot_tool_surface(
+        surface = prepare_test_direct_tool_surface(
+            port,
             conversation_scope_kind=ModelInputScopeKind.ROOT,
             scope_subagent_task_id=None,
         )

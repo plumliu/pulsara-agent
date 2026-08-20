@@ -15,8 +15,33 @@ from uuid import uuid4
 
 from jsonschema import validators
 
-from pulsara_agent.llm.adapters.openai.function_tools import (
-    lower_openai_function_parameters,
+from pulsara_agent.capability.contracts import (
+    CapabilityKind,
+    CapabilitySourceKind,
+    CapabilitySourceRefreshMode,
+    CapabilitySourceSnapshotDisposition,
+    FrozenMcpCapabilityProjectionInput,
+    FrozenToolCapabilityFact,
+    McpInspectEffectKind,
+    McpToolCapabilityRef,
+    capability_identity,
+    capability_source_ref,
+    capability_source_registration,
+    freeze_capability_source_snapshot,
+    freeze_mcp_inspectability_fact,
+    freeze_tool_capability_fact,
+    tool_capability_version_ref,
+    ToolCapabilityOrigin,
+)
+from pulsara_agent.capability.mcp_projection import (
+    McpInspectionDescriptorValues,
+    conservative_mcp_inspection_logical_utf8_bytes,
+    mcp_inspection_descriptor_payload_fingerprint,
+)
+from pulsara_agent.conversation_kernel.capability_composition import (
+    PreparedMcpCapabilitySourceSnapshotSet,
+    PreparedMcpInspectionInput,
+    issue_mcp_capability_source_snapshot_set,
 )
 from pulsara_agent.mcp_config import (
     McpConfiguredEffect,
@@ -59,6 +84,7 @@ from .contracts import (
     McpServerState,
     McpToolSemanticFact,
     build_catalog_snapshot,
+    scope_mcp_discovery_snapshot,
 )
 from .naming import mangle_mcp_tool_names
 from .input_required import (
@@ -279,6 +305,11 @@ class McpConnectionSlot:
         self._leases: set[McpSlotLease] = set()
         self._permits: dict[str, McpDispatchAdmissionPermit] = {}
         self._active_operation_count = 0
+
+    @property
+    def dispatch_fence_state(self) -> McpDispatchFenceState:
+        with self._lock:
+            return self._dispatch_fence
 
     def report_transport_failure(
         self, category: str, *, retryable: bool
@@ -672,6 +703,7 @@ class McpInstalledRuntimeGeneration:
     execution_bindings: tuple[PreparedToolExecutionBinding, ...]
     executors: Mapping[str, McpBoundToolExecutor] = field(repr=False, compare=False)
     catalog_snapshot: McpCatalogSnapshot
+    subagent_catalog_snapshot: McpCatalogSnapshot
     slot_leases: tuple[McpSlotLease, ...] = field(repr=False, compare=False)
     slot_lease_by_server: Mapping[str, McpSlotLease] = field(
         repr=False, compare=False
@@ -679,6 +711,15 @@ class McpInstalledRuntimeGeneration:
     candidates: Mapping[str, McpInstallationCandidate] = field(
         repr=False, compare=False
     )
+
+    def catalog_for_scope(
+        self, scope: ModelInputScopeKind
+    ) -> McpCatalogSnapshot:
+        return (
+            self.catalog_snapshot
+            if scope is ModelInputScopeKind.ROOT
+            else self.subagent_catalog_snapshot
+        )
 
     def release(self) -> None:
         for lease in self.slot_leases:
@@ -746,7 +787,7 @@ class McpInstalledRuntimeGeneration:
             return None
         visible_server_ids = {
             item.server_id
-            for item in self.catalog_snapshot.for_scope(scope_kind).servers
+            for item in self.catalog_for_scope(scope_kind).servers
         }
         if server_id not in visible_server_ids:
             raise ValueError("MCP server is not visible in this scope")
@@ -806,7 +847,7 @@ class McpInstalledRuntimeGeneration:
     ) -> McpKnownToolResult:
         if tool_name == "list_mcp_servers":
             payload = _bounded_server_catalog_payload(
-                self.catalog_snapshot.for_scope(scope_kind)
+                self.catalog_for_scope(scope_kind)
             )
             return _local_known(payload, tool_name)
         if tool_name in {
@@ -1085,6 +1126,7 @@ class McpHostSupervisor:
         self._host_operation_lane = asyncio.Semaphore(MAXIMUM_MCP_HOST_IN_FLIGHT)
         self._periodic_tasks: dict[str, asyncio.Task[None]] = {}
         self._closed = False
+        self._capability_owner_authenticity = object()
 
     @property
     def owner_epoch(self) -> int:
@@ -1176,6 +1218,8 @@ class McpHostSupervisor:
                     and new_config is not None
                     and old_config.enabled
                     and new_config.enabled
+                    and old_config.semantic_config_fingerprint
+                    == new_config.semantic_config_fingerprint
                 )
                 if not retain_semantic_surface:
                     self._surface_rebuild_required = True
@@ -1221,13 +1265,14 @@ class McpHostSupervisor:
                     self._retry_counts.pop(server_id, None)
                     self._refresh_generation.pop(server_id, None)
                 else:
-                    self._failure.pop(server_id, None)
                     self._retry_counts[server_id] = 0
-                    self._state[server_id] = (
-                        McpServerState.CONNECTING
-                        if config.enabled
-                        else McpServerState.DISABLED
-                    )
+                    if not retain_semantic_surface:
+                        self._failure.pop(server_id, None)
+                        self._state[server_id] = (
+                            McpServerState.CONNECTING
+                            if config.enabled
+                            else McpServerState.DISABLED
+                        )
                     if config.enabled:
                         reconnect.append(server_id)
             for server_id, config in updated.items():
@@ -1277,12 +1322,14 @@ class McpHostSupervisor:
             self._attempt_generation[server_id] += 1
             generation = self._attempt_generation[server_id]
             refresh_generation = self._refresh_generation[server_id]
-            # A replacement attempt is operational state only while an exact
-            # installed generation remains usable.  Publishing CONNECTING here
-            # would create a false catalog semantic transition on every
-            # periodic refresh even when discovery is identical.
-            if not self._installed_available_locked(server_id):
-                self._state[server_id] = McpServerState.CONNECTING
+            # A same-semantic replacement attempt is physical state only.  Its
+            # installed catalog remains provider-visible while execution is
+            # independently fenced, so CONNECTING would create a false catalog
+            # transition on every runtime-only reconnect.
+            if not self._installed_semantic_surface_retained_locked(server_id):
+                self._set_catalog_state_locked(
+                    server_id, McpServerState.CONNECTING
+                )
             task = asyncio.create_task(
                 self._connect(server_id, generation, refresh_generation),
                 name=f"mcp-connect:{server_id}:{generation}",
@@ -1302,6 +1349,37 @@ class McpHostSupervisor:
         return candidate is not None and candidate.slot_lease._slot.lease_is_current(  # noqa: SLF001
             candidate.slot_lease
         )
+
+    def _installed_semantic_surface_retained_locked(self, server_id: str) -> bool:
+        """Return whether an installed catalog remains valid during physical rebind."""
+
+        candidate = self._installed.get(server_id)
+        config = self._config_by_id.get(server_id)
+        return (
+            candidate is not None
+            and config is not None
+            and config.enabled
+            and candidate.expected_semantic_config_fingerprint
+            == config.semantic_config_fingerprint
+        )
+
+    def _set_catalog_state_locked(
+        self,
+        server_id: str,
+        state: McpServerState,
+        *,
+        failure: str | None = None,
+    ) -> None:
+        """Request a catalog-only successor for a visible state transition."""
+
+        previous = (self._state.get(server_id), self._failure.get(server_id))
+        self._state[server_id] = state
+        if failure is None:
+            self._failure.pop(server_id, None)
+        else:
+            self._failure[server_id] = failure
+        if self._runtime_generation > 0 and previous != (state, failure):
+            self._surface_rebuild_required = True
 
     async def _connect(
         self,
@@ -1394,8 +1472,12 @@ class McpHostSupervisor:
                             != refresh_generation
                         ):
                             raise RuntimeError("stale MCP connection attempt")
-                        if not self._installed_available_locked(server_id):
-                            self._state[server_id] = McpServerState.DISCOVERING
+                        if not self._installed_semantic_surface_retained_locked(
+                            server_id
+                        ):
+                            self._set_catalog_state_locked(
+                                server_id, McpServerState.DISCOVERING
+                            )
                     snapshot, policies = await _discover(client, config)
                     candidate_lease = slot.issue_lease(0)
                     candidate = _candidate(
@@ -1437,8 +1519,9 @@ class McpHostSupervisor:
                         self._slots[server_id] = slot
                         self._all_slots.add(slot)
                         self._pending[server_id] = candidate
-                        self._state[server_id] = McpServerState.READY
-                        self._failure.pop(server_id, None)
+                        self._set_catalog_state_locked(
+                            server_id, McpServerState.READY
+                        )
                         self._retry_counts[server_id] = 0
             if superseded_pending is not None:
                 superseded_pending.slot_lease.release()
@@ -1461,20 +1544,26 @@ class McpHostSupervisor:
                     not self._closed
                     and self._attempt_generation[server_id] == attempt_generation
                 ):
-                    installed_available = self._installed_available_locked(server_id)
-                    if installed_available:
-                        # A failed replacement must not withdraw the still-live
-                        # installed surface or publish an operational failure as
-                        # catalog semantics.
-                        self._state[server_id] = McpServerState.READY
-                        self._failure.pop(server_id, None)
-                    else:
-                        self._state[server_id] = (
-                            McpServerState.FAILED_TERMINAL
-                            if isinstance(exc, ValueError)
-                            else McpServerState.FAILED_RETRYABLE
+                    semantic_surface_retained = (
+                        self._installed_semantic_surface_retained_locked(server_id)
+                    )
+                    if semantic_surface_retained:
+                        # A failed replacement must not withdraw the retained
+                        # semantic catalog or publish an operational failure as
+                        # catalog semantics.  Physical execution remains fenced.
+                        self._set_catalog_state_locked(
+                            server_id, McpServerState.READY
                         )
-                        self._failure[server_id] = type(exc).__name__
+                    else:
+                        self._set_catalog_state_locked(
+                            server_id,
+                            (
+                                McpServerState.FAILED_TERMINAL
+                                if isinstance(exc, ValueError)
+                                else McpServerState.FAILED_RETRYABLE
+                            ),
+                            failure=type(exc).__name__,
+                        )
                     if not isinstance(exc, ValueError):
                         self._schedule_retry_locked(server_id)
 
@@ -1531,14 +1620,18 @@ class McpHostSupervisor:
                 # The failed exact slot is operational history.  A healthy
                 # installed surface (or ready pending replacement) remains the
                 # semantic catalog truth.
-                self._state[server_id] = McpServerState.READY
-                self._failure.pop(server_id, None)
+                self._set_catalog_state_locked(
+                    server_id, McpServerState.READY
+                )
             else:
-                self._failure[server_id] = category
-                self._state[server_id] = (
-                    McpServerState.FAILED_RETRYABLE
-                    if retryable
-                    else McpServerState.FAILED_TERMINAL
+                self._set_catalog_state_locked(
+                    server_id,
+                    (
+                        McpServerState.FAILED_RETRYABLE
+                        if retryable
+                        else McpServerState.FAILED_TERMINAL
+                    ),
+                    failure=category,
                 )
             if retryable:
                 self._schedule_retry_locked(server_id)
@@ -1687,7 +1780,10 @@ class McpHostSupervisor:
                 self._catalog_revision += 1
             self._runtime_generation += 1
             runtime_generation = self._runtime_generation
-            catalog = self._catalog_locked()
+            catalog = self._catalog_locked(ModelInputScopeKind.ROOT)
+            subagent_catalog = self._catalog_locked(
+                ModelInputScopeKind.SUBAGENT_TASK
+            )
         child = tuple(
             item for item in root if item.subagent_visible
         )
@@ -1743,6 +1839,7 @@ class McpHostSupervisor:
             execution_bindings=tuple(bindings),
             executors=executors,
             catalog_snapshot=catalog,
+            subagent_catalog_snapshot=subagent_catalog,
             slot_leases=leases,
             slot_lease_by_server=lease_by_server,
             candidates={item.server_id: item for item in candidates},
@@ -1750,13 +1847,280 @@ class McpHostSupervisor:
 
     def catalog_snapshot(self) -> McpCatalogSnapshot:
         with self._lock:
-            return self._catalog_locked()
+            return self._catalog_locked(ModelInputScopeKind.ROOT)
 
-    def _catalog_locked(self) -> McpCatalogSnapshot:
+    def freeze_capability_source_snapshot_set(
+        self,
+        *,
+        conversation_scope_kind: ModelInputScopeKind,
+        scope_subagent_task_id: str | None,
+    ) -> PreparedMcpCapabilitySourceSnapshotSet:
+        """Freeze every enabled config source under the supervisor lock."""
+
+        if (conversation_scope_kind is ModelInputScopeKind.ROOT) != (
+            scope_subagent_task_id is None
+        ):
+            raise ValueError("MCP capability scope identity is invalid")
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("MCP supervisor is closed")
+            snapshots = []
+            inspection_inputs: list[PreparedMcpInspectionInput] = []
+            for config in self.configs:
+                if not config.enabled:
+                    continue
+                if (
+                    conversation_scope_kind is ModelInputScopeKind.SUBAGENT_TASK
+                    and config.scope_policy is not McpScopePolicy.ROOT_AND_SUBAGENTS
+                ):
+                    continue
+                source = capability_source_ref(
+                    CapabilitySourceKind.MCP_SERVER, config.server_id
+                )
+                registration = capability_source_registration(
+                    source=source,
+                    refresh_mode=CapabilitySourceRefreshMode.SAFE_POINT_REFRESHABLE,
+                    source_contract_fingerprint=context_fingerprint(
+                        "mcp-capability-source-contract:v1",
+                        {
+                            "semantic_config": config.semantic_config_fingerprint,
+                            "scope_policy": config.scope_policy.value,
+                            "exposure_policy": {
+                                "include": config.exposure_policy.include_tool_names,
+                                "exclude": config.exposure_policy.exclude_tool_names,
+                                "invalid": config.exposure_policy.invalid_tool_policy.value,
+                            },
+                        },
+                    ),
+                )
+                candidate = self._installed.get(config.server_id)
+                clean = (
+                    candidate is not None
+                    and self._state[config.server_id] is McpServerState.READY
+                    and candidate.slot_lease._slot.dispatch_fence_state  # noqa: SLF001
+                    is McpDispatchFenceState.OPEN
+                )
+                facts = ()
+                if clean and candidate is not None:
+                    scoped_semantics = tuple(
+                        item
+                        for item in candidate.discovery_snapshot.tools
+                        if (
+                            item.root_visible
+                            if conversation_scope_kind is ModelInputScopeKind.ROOT
+                            else item.subagent_visible
+                        )
+                    )
+                    facts = tuple(
+                        freeze_tool_capability_fact(
+                            identity=capability_identity(
+                                kind=CapabilityKind.TOOL,
+                                source=source,
+                                stable_name=item.remote_tool_name,
+                            ),
+                            origin=ToolCapabilityOrigin.MCP,
+                            canonical_tool_spec=item.provider_spec(),
+                        )
+                        for item in scoped_semantics
+                    )
+                disposition = (
+                    CapabilitySourceSnapshotDisposition.COMPLETE
+                    if clean
+                    else CapabilitySourceSnapshotDisposition.UNAVAILABLE
+                )
+                source_snapshot = freeze_capability_source_snapshot(
+                        registration=registration,
+                        conversation_scope_kind=conversation_scope_kind,
+                        scope_subagent_task_id=scope_subagent_task_id,
+                        disposition=disposition,
+                        facts=facts,
+                    )
+                snapshots.append(source_snapshot)
+                if clean and candidate is not None:
+                    semantic_by_remote = {
+                        item.remote_tool_name: item for item in scoped_semantics
+                    }
+                    policy_by_name = {
+                        item.provider_tool_name: item
+                        for item in candidate.ordered_tool_execution_policies
+                    }
+                    for fact in source_snapshot.facts:
+                        if not isinstance(fact, FrozenToolCapabilityFact):
+                            raise TypeError("MCP source emitted a non-Tool fact")
+                        semantic = semantic_by_remote.get(
+                            fact.identity.stable_name
+                        )
+                        policy = policy_by_name.get(
+                            fact.canonical_tool_spec.name
+                        )
+                        if (
+                            semantic is None
+                            or policy is None
+                            or semantic.descriptor_fingerprint
+                            != fact.canonical_tool_spec.descriptor_fingerprint
+                            or policy.tool_semantic_fingerprint
+                            != fact.canonical_tool_spec.descriptor_fingerprint
+                        ):
+                            raise RuntimeError(
+                                "MCP inspection input does not join source fact"
+                            )
+                        inspection_inputs.append(
+                            PreparedMcpInspectionInput(
+                                source_snapshot_fingerprint=(
+                                    source_snapshot.source_snapshot_fingerprint
+                                ),
+                                tool_fact_semantic_fingerprint=(
+                                    fact.fact_semantic_fingerprint
+                                ),
+                                semantic=semantic,
+                                policy=policy,
+                            )
+                        )
+            ordered = tuple(
+                sorted(
+                    snapshots,
+                    key=lambda item: item.registration.source.stable_source_id,
+                )
+            )
+            catalog = self._catalog_locked(conversation_scope_kind)
+            return issue_mcp_capability_source_snapshot_set(
+                conversation_scope_kind=conversation_scope_kind,
+                scope_subagent_task_id=scope_subagent_task_id,
+                source_snapshots=ordered,
+                catalog_snapshot=catalog,
+                inspection_inputs=tuple(
+                    sorted(
+                        inspection_inputs,
+                        key=lambda item: (
+                            item.semantic.server_id,
+                            item.semantic.remote_tool_name,
+                        ),
+                    )
+                ),
+                owner_authenticity=self._capability_owner_authenticity,
+            )
+
+    def freeze_capability_projection_input(
+        self, owner: PreparedMcpCapabilitySourceSnapshotSet
+    ) -> FrozenMcpCapabilityProjectionInput:
+        if owner.owner_authenticity is not self._capability_owner_authenticity:
+            raise ValueError("foreign MCP capability source snapshot")
+        catalog = owner.catalog_snapshot
+        sources = tuple(
+            sorted(item.source_snapshot_fingerprint for item in owner.source_snapshots)
+        )
+        inspectability = []
+        for item in owner.inspection_inputs:
+            semantic = item.semantic
+            policy = item.policy
+            source_snapshot = next(
+                (
+                    snapshot
+                    for snapshot in owner.source_snapshots
+                    if snapshot.source_snapshot_fingerprint
+                    == item.source_snapshot_fingerprint
+                ),
+                None,
+            )
+            if source_snapshot is None:
+                raise ValueError("MCP inspection source snapshot is absent")
+            fact = next(
+                (
+                    candidate
+                    for candidate in source_snapshot.facts
+                    if candidate.fact_semantic_fingerprint
+                    == item.tool_fact_semantic_fingerprint
+                ),
+                None,
+            )
+            if not isinstance(fact, FrozenToolCapabilityFact):
+                raise ValueError("MCP inspection Tool fact is absent")
+            if (
+                semantic.server_id
+                != fact.identity.source.stable_source_id
+                or semantic.remote_tool_name != fact.identity.stable_name
+                or semantic.provider_spec() != fact.canonical_tool_spec
+                or policy.provider_tool_name
+                != fact.canonical_tool_spec.name
+                or policy.tool_semantic_fingerprint
+                != fact.canonical_tool_spec.descriptor_fingerprint
+            ):
+                raise ValueError("MCP inspection owner input drifted")
+            values = McpInspectionDescriptorValues(
+                server_id=semantic.server_id,
+                remote_tool_name=semantic.remote_tool_name,
+                provider_tool_name=semantic.provider_tool_name,
+                description=semantic.description,
+                input_schema=semantic.input_schema,
+                output_schema=semantic.output_schema,
+                effect_kind=policy.effect_kind.value,
+            )
+            inspectability.append(
+                freeze_mcp_inspectability_fact(
+                    target=McpToolCapabilityRef(
+                        server_id=semantic.server_id,
+                        remote_tool_name=semantic.remote_tool_name,
+                    ),
+                    version=tool_capability_version_ref(fact),
+                    descriptor_payload_fingerprint=(
+                        mcp_inspection_descriptor_payload_fingerprint(values)
+                    ),
+                    mcp_execution_policy_fingerprint=policy.policy_fingerprint,
+                    effect_kind=McpInspectEffectKind(policy.effect_kind.value),
+                    conservative_logical_utf8_bytes=(
+                        conservative_mcp_inspection_logical_utf8_bytes(values)
+                    ),
+                )
+            )
+        ordered_inspectability = tuple(
+            sorted(
+                inspectability,
+                key=lambda item: (
+                    item.target.server_id,
+                    item.target.remote_tool_name,
+                ),
+            )
+        )
+        fingerprint = context_fingerprint(
+            "mcp-capability-projection-input:v1",
+            {
+                "scope": owner.conversation_scope_kind.value,
+                "scope_subagent_task_id": owner.scope_subagent_task_id,
+                "sources": sources,
+                "catalog": catalog.semantic_fingerprint,
+                "inspectability": tuple(
+                    item.fact_fingerprint for item in ordered_inspectability
+                ),
+            },
+        )
+        return FrozenMcpCapabilityProjectionInput(
+            conversation_scope_kind=owner.conversation_scope_kind,
+            scope_subagent_task_id=owner.scope_subagent_task_id,
+            source_snapshot_fingerprints=sources,
+            catalog_semantic_fingerprint=catalog.semantic_fingerprint,
+            inspectability_facts=ordered_inspectability,
+            projection_fingerprint=fingerprint,
+        )
+
+    def _catalog_locked(
+        self, scope: ModelInputScopeKind
+    ) -> McpCatalogSnapshot:
         entries: list[McpServerCatalogEntry] = []
         for config in self.configs:
+            if (
+                scope is ModelInputScopeKind.SUBAGENT_TASK
+                and config.scope_policy is not McpScopePolicy.ROOT_AND_SUBAGENTS
+            ):
+                continue
             candidate = self._installed.get(config.server_id)
-            snapshot = candidate.discovery_snapshot if candidate is not None else None
+            snapshot = (
+                scope_mcp_discovery_snapshot(
+                    candidate.discovery_snapshot,
+                    scope,
+                )
+                if candidate is not None
+                else None
+            )
             entries.append(
                 McpServerCatalogEntry(
                     server_id=config.server_id,
@@ -1967,11 +2331,6 @@ async def _discover(
             input_dialect = _mcp_schema_dialect(item.input_schema)
             input_validator = validators.validator_for(item.input_schema)
             input_validator.check_schema(item.input_schema)
-            # Direct MCP tools share the exact pure wire-lowerability contract
-            # used later by both OpenAI-compatible APIs.  A valid JSON Schema
-            # outside that portable subset is handled here by the configured
-            # per-tool discovery policy; it can never poison a whole dispatch.
-            lower_openai_function_parameters(item.input_schema)
             frozen = freeze_json(item.input_schema)
             if not isinstance(frozen, FrozenJsonObjectFact):
                 raise TypeError("MCP tool schema did not freeze to an object")
@@ -2792,9 +3151,10 @@ def _list_catalog_items(
     arguments: Mapping[str, object],
     scope_kind: ModelInputScopeKind,
 ) -> object:
+    scoped_catalog = runtime.catalog_for_scope(scope_kind)
     visible = {
         item.server_id
-        for item in runtime.catalog_snapshot.for_scope(scope_kind).servers
+        for item in scoped_catalog.servers
     }
     server_filter = arguments.get("server_id")
     if server_filter is not None:
@@ -2807,7 +3167,7 @@ def _list_catalog_items(
     cursor = arguments.get("cursor")
     offset = 0
     if cursor is not None:
-        prefix = f"catalog:{runtime.catalog_snapshot.semantic_fingerprint}:offset:"
+        prefix = f"catalog:{scoped_catalog.semantic_fingerprint}:offset:"
         if not isinstance(cursor, str) or not cursor.startswith(prefix):
             raise ValueError("MCP catalog cursor is invalid")
         try:
@@ -2845,7 +3205,7 @@ def _list_catalog_items(
             "items": candidate_page,
             "next_cursor": (
                 "catalog:"
-                f"{runtime.catalog_snapshot.semantic_fingerprint}:offset:"
+                f"{scoped_catalog.semantic_fingerprint}:offset:"
                 f"{candidate_offset}"
                 if candidate_offset < total
                 else None
@@ -2864,7 +3224,7 @@ def _list_catalog_items(
         "items": page,
         "next_cursor": (
             "catalog:"
-            f"{runtime.catalog_snapshot.semantic_fingerprint}:offset:{next_offset}"
+            f"{scoped_catalog.semantic_fingerprint}:offset:{next_offset}"
             if next_offset < total
             else None
         ),

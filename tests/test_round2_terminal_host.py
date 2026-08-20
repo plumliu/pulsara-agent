@@ -73,6 +73,18 @@ class _TerminalMonitorDogfoodModel:
     def prepare_call(self, request):
         return self._delegate.prepare_call(request)
 
+    def prepare_target(self, request):
+        return self._delegate.prepare_target(request)
+
+    def freeze_native_tool_eligibility(self, **kwargs):
+        return self._delegate.freeze_native_tool_eligibility(**kwargs)
+
+    def materialize_native_tool_projection_set(self, **kwargs):
+        return self._delegate.materialize_native_tool_projection_set(**kwargs)
+
+    def bind_tool_surface(self, **kwargs):
+        return self._delegate.bind_tool_surface(**kwargs)
+
     def plan_wire_input(self, **kwargs):
         return self._delegate.plan_wire_input(**kwargs)
 

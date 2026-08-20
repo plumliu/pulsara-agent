@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from pulsara_agent.capability import (
-    CapabilityProjectionResolveContext,
+    SkillProjectionResolveContext,
     LocalSkillCapabilityProvider,
     LocalSkillProvider,
     SkillBinaryLookupPath,
@@ -16,10 +16,6 @@ from pulsara_agent.capability.types import (
     ResolvedSkillCatalogEntry,
 )
 from pulsara_agent.memory.scope import MemoryDomainContext, workspace_scope
-from pulsara_agent.primitives.capability import (
-    CapabilityDescriptorBindingIdentityFact,
-    build_capability_execution_surface_identity,
-)
 
 
 def _projection_context(
@@ -29,8 +25,8 @@ def _projection_context(
     memory_domain: MemoryDomainContext | None = None,
     workspace_kind: str = "transient",
     active_skill_names: frozenset[str] = frozenset(),
-) -> CapabilityProjectionResolveContext:
-    return CapabilityProjectionResolveContext(
+) -> SkillProjectionResolveContext:
+    return SkillProjectionResolveContext(
         workspace_root=tmp_path,
         workspace_kind=workspace_kind,  # type: ignore[arg-type]
         memory_domain=memory_domain,
@@ -39,22 +35,18 @@ def _projection_context(
     )
 
 
-def _execution_surface(*tool_names: str):
-    return build_capability_execution_surface_identity(
-        surface_contract_version="test:v1",
-        entries=tuple(
-            CapabilityDescriptorBindingIdentityFact(
-                capability_name=name,
-                provider_id="test",
-                descriptor_id=f"test:{name}",
-                descriptor_fingerprint=f"sha256:{name}",
-                descriptor_artifact_id=f"artifact:{name}",
-                binding_fingerprint=None,
-                binding_contract_id=None,
-                binding_contract_version=None,
-            )
-            for name in sorted(tool_names)
-        ),
+def _resolve_skill_projection(
+    provider: LocalSkillCapabilityProvider,
+    context: SkillProjectionResolveContext,
+):
+    discovery = provider.snapshot_projection_input(
+        workspace_root=context.workspace_root,
+        available_tool_names=frozenset(),
+    )
+    return provider.resolve_projection_from_snapshot(
+        context,
+        available_tool_names=frozenset(),
+        discovery=discovery,
     )
 
 
@@ -91,12 +83,13 @@ Read the diff before commenting.
     assert skill.path == skill_file
     assert skill.base_dir == skill_file.parent
     assert skill.location == ".agents/skills/review-pr/SKILL.md"
-    assert skill.provides_tools == ("read_file",)
+    # Round 9 keeps legacy tool metadata inert: the startup surface must not
+    # add/remove a Skill leaf or rewrite its catalog projection.
+    assert skill.provides_tools == ("read_file", "missing_tool")
     assert "# Review PR" in skill.content
     assert {diagnostic.code for diagnostic in discovery.diagnostics} == {
         "skill_scope_frontmatter_ignored_in_v1",
         "skill_unknown_frontmatter",
-        "skill_unknown_tool_reference",
     }
 
 
@@ -173,7 +166,7 @@ cli_usage_kind: admin
 
     assert len(discovery.skills) == 1
     skill = discovery.skills[0]
-    assert skill.suggested_tools == ("terminal",)
+    assert skill.suggested_tools == ("terminal", "missing_tool")
     assert skill.required_binaries == ("firecrawl",)
     assert skill.optional_binaries == ()
     assert skill.external_services == ("firecrawl",)
@@ -181,7 +174,6 @@ cli_usage_kind: admin
     assert skill.auth_required == "none"
     assert skill.cli_usage_kind == "none"
     assert [diagnostic.code for diagnostic in discovery.diagnostics] == [
-        "skill_unknown_tool_reference",
         "skill_invalid_binary_reference",
         "skill_invalid_binary_reference",
         "skill_invalid_frontmatter_type",
@@ -277,6 +269,56 @@ description: User product-home skill.
     assert skill.path == skill_file
     assert skill.location == "~/.pulsara/skills/user-product-skill/SKILL.md"
     assert discovery.diagnostics == ()
+
+
+def test_round9_local_skill_catalog_scans_exact_four_roots_with_global_precedence(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    user_product = tmp_path / "user-home" / ".pulsara" / "skills"
+    user_agents = tmp_path / "user-home" / ".agents" / "skills"
+    sources = (
+        (workspace / ".pulsara" / "skills", "workspace-product"),
+        (workspace / ".agents" / "skills", "workspace-agents"),
+        (user_product, "user-product"),
+        (user_agents, "user-agents"),
+    )
+    for root, marker in sources:
+        _write_skill_at_root(
+            root,
+            "shared",
+            "---\nname: shared\ndescription: " + marker + "\n---\n# " + marker,
+        )
+        _write_skill_at_root(
+            root,
+            marker,
+            "---\nname: " + marker + "\ndescription: " + marker + "\n---\n# " + marker,
+        )
+    _write_skill_at_root(
+        workspace / ".claude" / "skills",
+        "claude-only",
+        "---\nname: claude-only\ndescription: ignored\n---\n# ignored",
+    )
+
+    discovery = LocalSkillProvider(
+        user_product_skills_root=user_product,
+        user_agents_skills_root=user_agents,
+    ).discover(workspace, available_tool_names=frozenset())
+
+    by_name = {item.name: item for item in discovery.skills}
+    assert set(by_name) == {
+        "shared",
+        "workspace-product",
+        "workspace-agents",
+        "user-product",
+        "user-agents",
+    }
+    assert by_name["shared"].description == "workspace-product"
+    assert by_name["shared"].location == ".pulsara/skills/shared/SKILL.md"
+    assert "claude-only" not in by_name
+    assert sum(
+        item.code == "skill_duplicate_name" for item in discovery.diagnostics
+    ) == 3
 
 
 def test_local_skill_provider_uses_pulsara_home_for_user_product_skills(
@@ -812,9 +854,9 @@ provides_tools: [read_file]
         user_input="$review-pr please inspect this",
     )
 
-    resolved = _workspace_only_capability_provider().resolve_projection(
+    resolved = _resolve_skill_projection(
+        _workspace_only_capability_provider(),
         context,
-        execution_surface=_execution_surface("read_file", "terminal"),
     )
 
     assert [entry.name for entry in resolved.catalog_entries] == ["review-pr"]
@@ -853,9 +895,9 @@ external_services: [firecrawl]
         user_input="$firecrawl-search",
     )
 
-    resolved = _workspace_only_capability_provider().resolve_projection(
+    resolved = _resolve_skill_projection(
+        _workspace_only_capability_provider(),
         context,
-        execution_surface=_execution_surface("terminal"),
     )
 
     assert not hasattr(resolved, "descriptors")
@@ -894,9 +936,9 @@ auth_required: optional
         skill_health_resolver=SkillHealthResolver(which=fake_which),
     )
 
-    resolved = provider.resolve_projection(
+    resolved = _resolve_skill_projection(
+        provider,
         _projection_context(tmp_path, user_input="$hf-cli"),
-        execution_surface=_execution_surface(),
     )
 
     assert seen == ["hf", "git"]
@@ -953,10 +995,8 @@ required_binaries: [catalog-bin]
     )
     context = _projection_context(tmp_path, user_input="$active-skill")
 
-    first = provider.resolve_projection(context, execution_surface=_execution_surface())
-    second = provider.resolve_projection(
-        context, execution_surface=_execution_surface()
-    )
+    first = _resolve_skill_projection(provider, context)
+    second = _resolve_skill_projection(provider, context)
 
     assert seen == ["missing-bin"]
     assert "catalog-bin" not in seen
@@ -1022,9 +1062,9 @@ disable_model_invocation: true
         active_skill_names=frozenset({"private-skill"}),
     )
 
-    resolved = _workspace_only_capability_provider().resolve_projection(
+    resolved = _resolve_skill_projection(
+        _workspace_only_capability_provider(),
         context,
-        execution_surface=_execution_surface(),
     )
 
     assert resolved.catalog_entries == ()
@@ -1051,9 +1091,9 @@ xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
         provider=LocalSkillProvider(max_skill_file_bytes=40, include_user_skills=False)
     )
 
-    resolved = provider.resolve_projection(
+    resolved = _resolve_skill_projection(
+        provider,
         _projection_context(tmp_path, user_input="$big"),
-        execution_surface=_execution_surface(),
     )
 
     assert resolved.active_injections == ()

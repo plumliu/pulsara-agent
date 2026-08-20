@@ -7,12 +7,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Literal, Mapping, Protocol
 
-from pulsara_agent.capability.call_classifier import (
-    CapabilityCallClassifier,
-    DefaultCapabilityCallClassifier,
-)
-from pulsara_agent.capability.descriptor import CapabilityAvailability
-from pulsara_agent.capability.exposure import CapabilityExposurePlan
+from pulsara_agent.capability.call_classifier import DefaultBuiltinToolCallClassifier
 from pulsara_agent.primitives.permission import (
     DEFAULT_PERMISSION_MODE as _DEFAULT_PERMISSION_MODE,
     PermissionMode as _PermissionMode,
@@ -188,34 +183,6 @@ def resolve_permission_policy(
     return resolved
 
 
-def evaluate_capability_exposure_access(
-    call: ToolCall,
-    exposure: CapabilityExposurePlan,
-) -> PermissionDecision | None:
-    descriptor = exposure.descriptors_by_name.get(call.name)
-    if descriptor is None:
-        return PermissionDecision(
-            kind=PermissionDecisionKind.DENY,
-            reason=f"Unknown tool: {call.name} (capability_descriptor_missing)",
-        )
-    if descriptor.availability is CapabilityAvailability.UNAVAILABLE:
-        return PermissionDecision(
-            kind=PermissionDecisionKind.DENY,
-            reason=f"capability_unavailable: {call.name}",
-        )
-    if call.name in exposure.hidden_names:
-        return PermissionDecision(
-            kind=PermissionDecisionKind.DENY,
-            reason=f"capability_hidden_in_current_exposure: {call.name}",
-        )
-    if call.name not in exposure.callable_names:
-        return PermissionDecision(
-            kind=PermissionDecisionKind.DENY,
-            reason=f"capability_not_callable_in_current_exposure: {call.name}",
-        )
-    return None
-
-
 class PolicyPermissionGate:
     def __init__(
         self,
@@ -239,140 +206,17 @@ class PolicyPermissionGate:
     async def evaluate(
         self,
         calls: list[ToolCall],
-        *,
-        exposure: CapabilityExposurePlan | None = None,
-        classifier: CapabilityCallClassifier | None = None,
     ) -> PermissionDecision:
         for call in calls:
-            decision = (
-                self._evaluate_capability_call(
-                    call, exposure, classifier or DefaultCapabilityCallClassifier()
-                )
-                if exposure is not None
-                else self._evaluate_call(call)
-            )
+            decision = self._evaluate_call(call)
             if decision.kind is not PermissionDecisionKind.ALLOW:
                 return decision
         base = await self.inner.evaluate(calls)
         return base
 
-    def evaluate_local_capability_call(
-        self,
-        call: ToolCall,
-        *,
-        exposure: CapabilityExposurePlan,
-        classifier: CapabilityCallClassifier | None = None,
-    ) -> PermissionDecision:
-        """Evaluate only Pulsara-owned per-call capability/policy rules.
-
-        This intentionally does not call ``inner.evaluate``. AgentRuntime uses
-        it to build per-call gate facts before the single batch-level custom
-        permission gate invocation.
-        """
-        return self._evaluate_capability_call(
-            call, exposure, classifier or DefaultCapabilityCallClassifier()
-        )
-
-    def _evaluate_capability_call(
-        self,
-        call: ToolCall,
-        exposure: CapabilityExposurePlan,
-        classifier: CapabilityCallClassifier,
-    ) -> PermissionDecision:
-        exposure_decision = evaluate_capability_exposure_access(call, exposure)
-        if exposure_decision is not None:
-            return exposure_decision
-        descriptor = exposure.descriptors_by_name[call.name]
-        classification = classifier.classify(call, descriptor)
-        if (
-            classification.builtin_tool_family == "subagent_parent"
-            and self._state.mode is not _PermissionMode.BYPASS_PERMISSIONS
-        ):
-            return PermissionDecision(
-                kind=PermissionDecisionKind.DENY,
-                reason="subagent_requires_bypass_mode",
-            )
-        if classification.builtin_execution_binding_kind == "terminal_command":
-            command = call.arguments.get("command")
-            if isinstance(command, str) and is_hardline_terminal_command(command):
-                return PermissionDecision(
-                    kind=PermissionDecisionKind.DENY,
-                    reason="terminal command blocked by hardline permission policy",
-                    suggested_rules=[
-                        {
-                            "tool": "terminal",
-                            "reason": "hardline_terminal_command",
-                            "command": command,
-                        }
-                    ],
-                )
-        if classification.builtin_execution_binding_kind == "terminal_process":
-            terminal_input = _terminal_process_input(call)
-            if terminal_input is not None and is_hardline_terminal_command(
-                terminal_input
-            ):
-                return PermissionDecision(
-                    kind=PermissionDecisionKind.DENY,
-                    reason="terminal process input blocked by hardline permission policy",
-                    suggested_rules=[
-                        {
-                            "tool": "terminal_process",
-                            "reason": "hardline_terminal_process_input",
-                        }
-                    ],
-                )
-        if self.policy.profile is PermissionProfile.READ_ONLY:
-            if not classification.effective_read_only:
-                return PermissionDecision(
-                    kind=PermissionDecisionKind.DENY,
-                    reason=f"tool '{call.name}' is not allowed by permission policy",
-                )
-            return PermissionDecision.allow()
-        elif self.policy.terminal is TerminalAccess.OFF and (
-            classification.builtin_tool_family == "terminal"
-        ):
-            return PermissionDecision(
-                kind=PermissionDecisionKind.DENY,
-                reason=f"tool '{call.name}' is not allowed by permission policy",
-            )
-
-        if (
-            classification.builtin_tool_family == "terminal"
-            and classification.effective_read_only
-        ):
-            return PermissionDecision.allow()
-        if (
-            classification.builtin_tool_family == "terminal"
-            or classification.effective_permission_category == "terminal"
-        ):
-            return self._evaluate_terminal_call(call, classification)
-        if (
-            self.policy.approval is ApprovalPolicy.ON_REQUEST
-            and classification.effective_permission_category == "filesystem_write"
-        ):
-            return PermissionDecision(
-                kind=PermissionDecisionKind.WAIT_FOR_USER,
-                reason="file write tool requires user confirmation by approval policy",
-                suggested_rules=[
-                    {"tool": call.name, "reason": "write_tool_on_request"}
-                ],
-            )
-        if (
-            self.policy.approval is ApprovalPolicy.ON_REQUEST
-            and classification.effective_is_destructive
-        ):
-            return PermissionDecision(
-                kind=PermissionDecisionKind.WAIT_FOR_USER,
-                reason="destructive tool requires user confirmation by approval policy",
-                suggested_rules=[
-                    {"tool": call.name, "reason": "destructive_tool_on_request"}
-                ],
-            )
-        return PermissionDecision.allow()
-
     def _evaluate_call(self, call: ToolCall) -> PermissionDecision:
         try:
-            classification = DefaultCapabilityCallClassifier().classify_builtin(call)
+            classification = DefaultBuiltinToolCallClassifier().classify_builtin(call)
         except KeyError:
             classification = None
         if (

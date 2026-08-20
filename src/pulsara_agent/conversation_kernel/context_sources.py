@@ -8,11 +8,18 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Protocol
 
-from pulsara_agent.capability.provider import CapabilityProjectionOutput
-from pulsara_agent.capability.types import CapabilityDiagnostic
+from pulsara_agent.capability.contracts import (
+    CapabilitySourceSnapshotDisposition,
+    FrozenSkillCapabilityDispatchView,
+    FrozenToolCapabilityExposurePlan,
+)
+from pulsara_agent.capability.provider import SkillProjectionOutput
+from pulsara_agent.capability.types import SkillDiagnostic
 from pulsara_agent.conversation_kernel.capability import (
-    FrozenKernelCapabilityProjectionInput,
-    KernelCapabilityComposer,
+    KernelSkillProjectionComposer,
+)
+from pulsara_agent.conversation_kernel.capability_composition import (
+    PreparedLocalSkillCatalogSourceSnapshot,
 )
 from pulsara_agent.model_input.contracts import (
     CapabilityActivationSubjectKind,
@@ -56,6 +63,18 @@ class ContextSourceCollectorPort(Protocol):
     @property
     def registry_fingerprint(self) -> str: ...
 
+    def freeze_skill_capability_source_snapshot(
+        self,
+        *,
+        conversation_scope_kind: object,
+        scope_subagent_task_id: str | None,
+        deadline_monotonic: float | None = None,
+    ) -> PreparedLocalSkillCatalogSourceSnapshot: ...
+
+    def freeze_skill_capability_projection_input(
+        self, owner: PreparedLocalSkillCatalogSourceSnapshot
+    ): ...
+
     def collect(
         self,
         *,
@@ -63,6 +82,10 @@ class ContextSourceCollectorPort(Protocol):
         activation_text: str,
         tool_surface: FrozenModelToolSurface,
         canonical_facts: FrozenCanonicalCompileSnapshot,
+        tool_exposure_plan: FrozenToolCapabilityExposurePlan,
+        skill_dispatch_view: FrozenSkillCapabilityDispatchView,
+        skill_owner_snapshot: PreparedLocalSkillCatalogSourceSnapshot,
+        mcp_catalog_snapshot: "McpCatalogSnapshot | None" = None,
         deadline_monotonic: float | None = None,
     ) -> CollectedContextSources: ...
 
@@ -71,6 +94,10 @@ class ContextSourceCollectorPort(Protocol):
         *,
         tool_surface: FrozenModelToolSurface,
         canonical_facts: FrozenCanonicalCompileSnapshot,
+        tool_exposure_plan: FrozenToolCapabilityExposurePlan,
+        skill_dispatch_view: FrozenSkillCapabilityDispatchView,
+        skill_owner_snapshot: PreparedLocalSkillCatalogSourceSnapshot,
+        mcp_catalog_snapshot: "McpCatalogSnapshot | None" = None,
         deadline_monotonic: float | None = None,
     ) -> "FrozenNonTriggerContextSources": ...
 
@@ -120,18 +147,19 @@ class FrozenNonTriggerContextSources:
     candidates: tuple[ContextSourceCandidate, ...]
     absent_facts: tuple[ContextSourceAbsentFact, ...]
     diagnostics: tuple[ContextSourceCollectionDiagnostic, ...]
-    available_tool_names: frozenset[str]
     registry_fingerprint: str
     freeze_fingerprint: str
-    capability_projection_input: FrozenKernelCapabilityProjectionInput | None = field(
-        default=None, repr=False
+    tool_exposure_plan: FrozenToolCapabilityExposurePlan = field(repr=False)
+    skill_dispatch_view: FrozenSkillCapabilityDispatchView = field(repr=False)
+    skill_owner_snapshot: PreparedLocalSkillCatalogSourceSnapshot = field(
+        repr=False, compare=False
     )
 
 
 _BINDINGS = (
     _SourceBinding(
         ContextSourceKind.BASE_SYSTEM,
-        "pulsara.base-system.prefix-continuity.v4",
+        "pulsara.base-system.prefix-continuity.v5-unified-capability",
         ContextChannel.SYSTEM,
         ContextTrustClass.ROOT_INSTRUCTION,
         ContextBudgetClass.MUST_KEEP,
@@ -214,20 +242,20 @@ _BINDINGS = (
         ContextSourceLifecycle.TURN_APPEND,
     ),
     _SourceBinding(
-        ContextSourceKind.CAPABILITY_CATALOG,
-        "pulsara.capability-catalog.v2",
+        ContextSourceKind.SKILL_CATALOG,
+        "pulsara.skill-catalog.v1",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.AUTHORIZED_CAPABILITY_CONTEXT,
         ContextBudgetClass.IMPORTANT,
         50,
         30,
         (ContextRenderMode.FULL, ContextRenderMode.COMPACT, ContextRenderMode.REF_ONLY),
-        "pulsara.capability-catalog-collector.v1",
+        "pulsara.skill-catalog-collector.v1",
         ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
     ),
     _SourceBinding(
         ContextSourceKind.MCP_CATALOG,
-        "pulsara.mcp-catalog.v2",
+        "pulsara.mcp-catalog.v3-round9-routes",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.UNTRUSTED_OBSERVATION,
         ContextBudgetClass.IMPORTANT,
@@ -238,7 +266,7 @@ _BINDINGS = (
             ContextRenderMode.COMPACT,
             ContextRenderMode.REF_ONLY,
         ),
-        "pulsara.mcp-catalog-collector.v1",
+        "pulsara.mcp-catalog-collector.v2-round9-routes",
         ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
     ),
     _SourceBinding(
@@ -327,7 +355,7 @@ class KernelContextSourceCollector:
         workspace_kind: str,
         workspace_root: Path,
         terminal_cwd: TerminalCurrentCwdSnapshotPort,
-        capability_composer: KernelCapabilityComposer,
+        capability_composer: KernelSkillProjectionComposer,
         base_system_prompt: str,
         display_timezone: tzinfo,
         mcp_catalog: McpCatalogSnapshotPort | None = None,
@@ -364,6 +392,24 @@ class KernelContextSourceCollector:
     def registry_fingerprint(self) -> str:
         return self._registry.fingerprint
 
+    def freeze_skill_capability_source_snapshot(
+        self,
+        *,
+        conversation_scope_kind,
+        scope_subagent_task_id: str | None,
+        deadline_monotonic: float | None = None,
+    ) -> PreparedLocalSkillCatalogSourceSnapshot:
+        return self._capability.freeze_owner_snapshot(
+            conversation_scope_kind=conversation_scope_kind,
+            scope_subagent_task_id=scope_subagent_task_id,
+            deadline_monotonic=deadline_monotonic,
+        )
+
+    def freeze_skill_capability_projection_input(
+        self, owner: PreparedLocalSkillCatalogSourceSnapshot
+    ):
+        return self._capability.freeze_projection_input(owner)
+
     def collect(
         self,
         *,
@@ -371,11 +417,19 @@ class KernelContextSourceCollector:
         activation_text: str,
         tool_surface: FrozenModelToolSurface,
         canonical_facts: FrozenCanonicalCompileSnapshot,
+        tool_exposure_plan: FrozenToolCapabilityExposurePlan,
+        skill_dispatch_view: FrozenSkillCapabilityDispatchView,
+        skill_owner_snapshot: PreparedLocalSkillCatalogSourceSnapshot,
+        mcp_catalog_snapshot: "McpCatalogSnapshot | None" = None,
         deadline_monotonic: float | None = None,
     ) -> CollectedContextSources:
         frozen = self.freeze_non_trigger_sources(
             tool_surface=tool_surface,
             canonical_facts=canonical_facts,
+            tool_exposure_plan=tool_exposure_plan,
+            skill_dispatch_view=skill_dispatch_view,
+            skill_owner_snapshot=skill_owner_snapshot,
+            mcp_catalog_snapshot=mcp_catalog_snapshot,
             deadline_monotonic=deadline_monotonic,
         )
         return self.complete_frozen_sources(
@@ -389,9 +443,18 @@ class KernelContextSourceCollector:
         *,
         tool_surface: FrozenModelToolSurface,
         canonical_facts: FrozenCanonicalCompileSnapshot,
+        tool_exposure_plan: FrozenToolCapabilityExposurePlan,
+        skill_dispatch_view: FrozenSkillCapabilityDispatchView,
+        skill_owner_snapshot: PreparedLocalSkillCatalogSourceSnapshot,
+        mcp_catalog_snapshot: "McpCatalogSnapshot | None" = None,
         deadline_monotonic: float | None = None,
     ) -> FrozenNonTriggerContextSources:
         del deadline_monotonic
+        if (
+            tool_exposure_plan.dispatch_cut_fingerprint
+            != skill_dispatch_view.parent_dispatch_cut_fingerprint
+        ):
+            raise ValueError("capability sibling views do not share one parent cut")
         candidates: list[ContextSourceCandidate] = []
         absent: list[ContextSourceAbsentFact] = []
         diagnostics: list[ContextSourceCollectionDiagnostic] = []
@@ -528,11 +591,9 @@ class KernelContextSourceCollector:
                 )
             )
 
-        tool_names = frozenset(tool.name for tool in tool_surface.tool_specs)
-        capability_projection_input = self._capability.freeze_projection_input(
-            available_tool_names=tool_names
-        )
-        if self._mcp_catalog is None:
+        if tool_surface != tool_exposure_plan.direct_tool_surface:
+            raise ValueError("context tool surface does not join capability plan")
+        if self._mcp_catalog is None and mcp_catalog_snapshot is None:
             absent.append(
                 self._absent(
                     ContextSourceKind.MCP_CATALOG,
@@ -540,15 +601,29 @@ class KernelContextSourceCollector:
                 )
             )
         else:
-            catalog = self._mcp_catalog.catalog_snapshot().for_scope(
-                canonical_facts.canonical_input.identity.conversation_scope_kind
-            )
+            catalog = mcp_catalog_snapshot
+            if catalog is None:
+                assert self._mcp_catalog is not None
+                catalog = self._mcp_catalog.catalog_snapshot().for_scope(
+                    canonical_facts.canonical_input.identity.conversation_scope_kind
+                )
+            if (
+                catalog.semantic_fingerprint
+                != tool_exposure_plan.mcp_catalog_route_projection.joined_catalog_semantic_fingerprint
+            ):
+                raise ValueError("MCP catalog does not join capability route plan")
             if catalog.servers:
                 candidates.append(
                     self._candidate(
                         ContextSourceKind.MCP_CATALOG,
-                        _render_mcp_catalog(catalog),
-                        domain_identity=catalog.semantic_fingerprint,
+                        _render_mcp_catalog(
+                            catalog,
+                            tool_exposure_plan.mcp_catalog_route_projection,
+                        ),
+                        domain_identity={
+                            "catalog": catalog.semantic_fingerprint,
+                            "routes": tool_exposure_plan.mcp_catalog_route_projection.projection_fingerprint,
+                        },
                     )
                 )
             else:
@@ -568,10 +643,8 @@ class KernelContextSourceCollector:
                 "diagnostics": tuple(
                     (item.code.value, item.severity) for item in diagnostics
                 ),
-                "tools": tuple(sorted(tool_names)),
-                "capability_projection_input": (
-                    capability_projection_input.snapshot_fingerprint
-                ),
+                "tool_exposure_plan": tool_exposure_plan.exposure_plan_fingerprint,
+                "skill_dispatch_view": skill_dispatch_view.view_fingerprint,
                 "registry": self._registry.fingerprint,
             },
         )
@@ -579,10 +652,11 @@ class KernelContextSourceCollector:
             candidates=tuple(candidates),
             absent_facts=tuple(absent),
             diagnostics=tuple(diagnostics),
-            available_tool_names=tool_names,
             registry_fingerprint=self._registry.fingerprint,
             freeze_fingerprint=fingerprint,
-            capability_projection_input=capability_projection_input,
+            tool_exposure_plan=tool_exposure_plan,
+            skill_dispatch_view=skill_dispatch_view,
+            skill_owner_snapshot=skill_owner_snapshot,
         )
 
     def complete_frozen_sources(
@@ -604,21 +678,35 @@ class KernelContextSourceCollector:
             if activation_subject is CapabilityActivationSubjectKind.ROOT_HUMAN_PROMPT
             else ""
         )
-        if frozen.capability_projection_input is None:
-            raise ValueError("capability projection input was not frozen")
-        output = self._capability.resolve_projection_from_frozen(
-            frozen.capability_projection_input,
-            user_input=user_input,
+        output = self._capability.compose(
+            view=frozen.skill_dispatch_view,
+            owner=frozen.skill_owner_snapshot,
+            activation_subject=self._capability.activation_context(
+                user_input=user_input
+            ),
         )
         diagnostics.extend(_public_capability_diagnostics(output.diagnostics))
-        if output.catalog_prompt:
+        skill_source_unavailable = (
+            frozen.skill_owner_snapshot.source_snapshot.disposition
+            is CapabilitySourceSnapshotDisposition.UNAVAILABLE
+        )
+        if skill_source_unavailable:
+            if output.catalog_prompt or output.catalog_entries or output.active_injections:
+                raise ValueError("unavailable Skill catalog produced visible facts")
+            absent.append(
+                self._absent(
+                    ContextSourceKind.SKILL_CATALOG,
+                    ContextSourceAbsenceKind.UNAVAILABLE,
+                )
+            )
+        elif output.catalog_prompt:
             compact_catalog = _compact_catalog(
                 output,
                 maximum_characters=len(output.catalog_prompt),
             )
             candidates.append(
                 self._candidate(
-                    ContextSourceKind.CAPABILITY_CATALOG,
+                    ContextSourceKind.SKILL_CATALOG,
                     (
                         output.catalog_prompt,
                         compact_catalog,
@@ -632,18 +720,25 @@ class KernelContextSourceCollector:
         else:
             absent.append(
                 self._absent(
-                    ContextSourceKind.CAPABILITY_CATALOG,
+                    ContextSourceKind.SKILL_CATALOG,
                     ContextSourceAbsenceKind.EXPLICIT_EMPTY,
                 )
             )
         if activation_subject is None:
             # A same-turn tool/result follow-up is not a new activation
             # boundary.  Keep the installed ACTIVE_SKILL head unchanged while
-            # still allowing the capability catalog to advance.
+            # still allowing the Skill catalog to advance.
             absent.append(
                 self._absent(
                     ContextSourceKind.ACTIVE_SKILL,
                     ContextSourceAbsenceKind.NOT_APPLICABLE,
+                )
+            )
+        elif skill_source_unavailable:
+            absent.append(
+                self._absent(
+                    ContextSourceKind.ACTIVE_SKILL,
+                    ContextSourceAbsenceKind.UNAVAILABLE,
                 )
             )
         elif output.active_skill_prompt:
@@ -1173,7 +1268,7 @@ def _render_tool_observation_freshness(
 
 
 def _compact_catalog(
-    output: CapabilityProjectionOutput,
+    output: SkillProjectionOutput,
     *,
     maximum_characters: int,
 ) -> str:
@@ -1228,7 +1323,7 @@ def _compact_catalog(
 
 
 def _reference_catalog(
-    output: CapabilityProjectionOutput,
+    output: SkillProjectionOutput,
     *,
     maximum_characters: int,
 ) -> str:
@@ -1247,13 +1342,13 @@ def _reference_catalog(
 
 
 def _public_capability_diagnostics(
-    diagnostics: tuple[CapabilityDiagnostic, ...],
+    diagnostics: tuple[SkillDiagnostic, ...],
 ) -> tuple[ContextSourceCollectionDiagnostic, ...]:
     result: list[ContextSourceCollectionDiagnostic] = []
     for item in diagnostics:
         if item.code == "skill_catalog_budget_truncated":
             code = ContextPublicDiagnosticCode.CATALOG_TRUNCATED
-            kind = ContextSourceKind.CAPABILITY_CATALOG
+            kind = ContextSourceKind.SKILL_CATALOG
         elif item.code in {
             "active_skill_not_found",
             "skill_not_found",
@@ -1265,7 +1360,7 @@ def _public_capability_diagnostics(
             kind = ContextSourceKind.ACTIVE_SKILL
         else:
             code = ContextPublicDiagnosticCode.CAPABILITY_DISCOVERY_INCOMPLETE
-            kind = ContextSourceKind.CAPABILITY_CATALOG
+            kind = ContextSourceKind.SKILL_CATALOG
         severity = {
             "info": "INFO",
             "warning": "WARNING",
@@ -1275,97 +1370,132 @@ def _public_capability_diagnostics(
     return tuple(result)
 
 
-def _render_mcp_catalog(catalog: "McpCatalogSnapshot") -> tuple[str, str, str]:
-    servers = [
-        {
-            "server_id": item.server_id,
-            "display_name": item.display_name,
-            "status": item.status.value,
-            "required": item.required,
-            "tools": item.bounded_tool_name_overview,
-            "resource_count": item.resource_count,
-            "resource_template_count": item.resource_template_count,
-            "prompt_count": item.prompt_count,
-            "instructions": item.sanitized_instructions,
-            "failure_category": item.stable_failure_category,
-        }
-        for item in catalog.servers
-    ]
-    full = _bounded_mcp_catalog_json(
-        base={
-            "permission_note": (
-                "Availability does not grant physical permission; local run policy "
-                "remains authoritative."
-            ),
-        },
-        servers=servers,
-        maximum_bytes=32 * 1024,
+def _render_mcp_catalog(
+    catalog: "McpCatalogSnapshot",
+    routes,
+) -> tuple[str, str, str]:
+    return tuple(
+        _bounded_mcp_catalog_provider_body(catalog, routes, maximum_bytes=bound)
+        for bound in (32 * 1024, 8 * 1024, 2 * 1024)
     )
-    compact = _bounded_mcp_catalog_json(
-        base={},
-        servers=[
-            {
-                "server_id": item["server_id"],
-                "status": item["status"],
-                "tools": item["tools"],
-                "resource_count": item["resource_count"],
-                "prompt_count": item["prompt_count"],
-            }
-            for item in servers
-        ],
-        maximum_bytes=8 * 1024,
-    )
-    reference = _bounded_mcp_catalog_json(
-        # REF_ONLY must be a strict degradation of COMPACT for every target
-        # estimator.  Keeping an extra prose instruction here made the empty
-        # or one-server reference larger than the compact projection under
-        # some production tokenizers, so the compiler correctly rejected the
-        # entire source contract before provider open.  The capability catalog
-        # already advertises list_mcp_servers; this carrier only needs stable
-        # server identity and availability.
-        base={},
-        servers=[
-            {"server_id": item["server_id"], "status": item["status"]}
-            for item in servers
-        ],
-        maximum_bytes=2 * 1024,
-    )
-    return full, compact, reference
 
 
-def _bounded_catalog_json(value: object, maximum_bytes: int) -> str:
-    text = json.dumps(
-        value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-    )
-    if len(text.encode("utf-8")) > maximum_bytes:
-        raise ValueError("MCP catalog context source exceeds its bound")
-    return text
+_NEW_MCP_TOOL_USAGE = (
+    "For a NEW_MCP_META_ONLY tool absent from native tools, call "
+    "inspect_new_mcp_tool first, then invoke the returned tool_ref with "
+    "use_new_mcp_tool. Call Builtin and DIRECT MCP tools directly. Use "
+    "the exact qualified new_tool_names value shown by this catalog as "
+    "tool_name and never guess its schema. Example: server_id=late with "
+    "new_tool_names=[mcp__late__bulk_00] means inspect_new_mcp_tool("
+    "{\"server_id\":\"late\",\"tool_name\":\"mcp__late__bulk_00\"}), then "
+    "use_new_mcp_tool({\"tool_ref\":\"mcpref_RETURNED_VALUE\",\"arguments\":"
+    "{\"text\":\"round9\"}}) when that exact input_schema requires text. Use "
+    "list_mcp_servers(server_id=..., cursor=...) for omitted rows."
+)
 
 
-def _bounded_mcp_catalog_json(
+def _bounded_mcp_catalog_provider_body(
+    catalog: "McpCatalogSnapshot",
+    routes,
     *,
-    base: dict[str, object],
-    servers: list[dict[str, object]],
     maximum_bytes: int,
 ) -> str:
-    included: list[dict[str, object]] = []
-    for server in servers:
-        candidate = {
-            **base,
-            "servers": [*included, server],
-            "omitted_server_count": len(servers) - len(included) - 1,
+    server_by_id = {item.server_id: item for item in catalog.servers}
+    names_by_server: dict[str, dict[str, tuple[str, ...]]] = {}
+    mutable_names: dict[str, dict[str, list[str]]] = {}
+    for server_id in server_by_id:
+        mutable_names[server_id] = {
+            "direct_tool_names": [],
+            "new_tool_names": [],
+            "unavailable_tool_names": [],
         }
-        encoded = json.dumps(
-            candidate, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-        ).encode("utf-8")
-        if len(encoded) > maximum_bytes:
+    field_by_route = {
+        "DIRECT": "direct_tool_names",
+        "NEW_MCP_META_ONLY": "new_tool_names",
+        "UNAVAILABLE": "unavailable_tool_names",
+    }
+    for route in routes.routes:
+        bucket = mutable_names.get(route.target.server_id)
+        if bucket is None:
+            raise ValueError("MCP route escaped its joined catalog")
+        bucket[field_by_route[route.route.value]].append(route.version.provider_name)
+    for server_id, values in mutable_names.items():
+        names_by_server[server_id] = {
+            key: tuple(sorted(value)) for key, value in values.items()
+        }
+
+    total_direct = sum(
+        len(item["direct_tool_names"]) for item in names_by_server.values()
+    )
+    total_new = sum(len(item["new_tool_names"]) for item in names_by_server.values())
+    total_unavailable = sum(
+        len(item["unavailable_tool_names"]) for item in names_by_server.values()
+    )
+    included: list[dict[str, object]] = []
+
+    def render(rows: list[dict[str, object]]) -> str:
+        return json.dumps(
+            {
+                "direct_tool_count": total_direct,
+                "new_tool_count": total_new,
+                "new_tool_usage": _NEW_MCP_TOOL_USAGE,
+                "omitted_server_count": len(catalog.servers) - len(rows),
+                "servers": rows,
+                "total_server_count": len(catalog.servers),
+                "unavailable_tool_count": total_unavailable,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    empty = render([])
+    if len(empty.encode("utf-8")) > maximum_bytes:
+        raise ValueError("MCP catalog fixed provider body exceeds its bound")
+    for server in catalog.servers:
+        names = names_by_server[server.server_id]
+        row: dict[str, object] = {
+            "direct_tool_names": [],
+            "new_tool_names": [],
+            "omitted_direct_tool_count": len(names["direct_tool_names"]),
+            "omitted_new_tool_count": len(names["new_tool_names"]),
+            "omitted_unavailable_tool_count": len(names["unavailable_tool_names"]),
+            "prompt_count": server.prompt_count,
+            "public_status": server.status.value,
+            "public_status_detail": server.stable_failure_category,
+            "resource_count": server.resource_count,
+            "resource_template_count": server.resource_template_count,
+            "server_id": server.server_id,
+            "total_direct_tool_count": len(names["direct_tool_names"]),
+            "total_new_tool_count": len(names["new_tool_names"]),
+            "total_unavailable_tool_count": len(names["unavailable_tool_names"]),
+            "unavailable_tool_names": [],
+        }
+        if len(render([*included, row]).encode("utf-8")) > maximum_bytes:
             break
-        included.append(server)
-    final = {**base, "servers": included}
-    omitted = len(servers) - len(included)
-    if omitted:
-        final["omitted_server_count"] = omitted
-    return _bounded_catalog_json(final, maximum_bytes)
+        included.append(row)
+        for names_field, omitted_field in (
+            ("direct_tool_names", "omitted_direct_tool_count"),
+            ("new_tool_names", "omitted_new_tool_count"),
+            ("unavailable_tool_names", "omitted_unavailable_tool_count"),
+        ):
+            for name in names[names_field]:
+                candidate_row = {
+                    **row,
+                    names_field: [*row[names_field], name],
+                }
+                candidate_row[omitted_field] = int(row[omitted_field]) - 1
+                if (
+                    len(render([*included[:-1], candidate_row]).encode("utf-8"))
+                    > maximum_bytes
+                ):
+                    break
+                row = candidate_row
+                included[-1] = row
+    result = render(included)
+    if len(result.encode("utf-8")) > maximum_bytes:
+        raise AssertionError("bounded MCP catalog renderer exceeded its quote")
+    return result
 
 
 def _freeze_display_timezone(value: tzinfo) -> tuple[tzinfo, str]:

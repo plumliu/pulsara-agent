@@ -4,6 +4,41 @@
   "generated_at_utc": "2026-08-19T10:08:31Z",
   "captured_head": "a39e537fa56f6685c677496d0eb11628337675c0",
   "working_tree_semantics": "Round 5A.2 was implemented and verified in the current uncommitted worktree while pre-existing dirty documentation was preserved. No files were staged, committed, or pushed.",
+  "post_round9_responses_terminal_operational_elision_followup": {
+    "completed_at_utc": "2026-08-20T13:31:37Z",
+    "spec_sha256": "f04aede4748854a1686e1cc3393171857b31ec6f18b16f1129a9520249e9b096",
+    "durable_contract": "The stored ordered item tuple keeps the real id/status supplied by the fully settled output_item.done carrier when a non-empty terminal snapshot elides only those fields; no value is synthesized and all semantic fields remain exact.",
+    "provider_replay_contract_fingerprint_bumped": true,
+    "metadata_first_hydration_and_fresh_host_contract_changed": false,
+    "code_sha256": {
+      "llm/adapters/openai/responses.py": "d734472c9e9012e20f683bc5e5fd3c9c48b539e161b731b68e8cc524c0b81158",
+      "llm/provider_replay.py": "4c65359c38a546c71d170fab537eb2ec74096d6a427ccb9d9a3b4e336e6f15e4"
+    },
+    "verification": {
+      "round5a1_plus_round5a2": "92 passed in 4.55s",
+      "real_bob_fresh_host": "selected one compatible native replay fragment and completed after a direct plus inspect/use MCP trajectory without previous_response_id",
+      "api_key_recorded": false
+    }
+  },
+  "post_round9_responses_empty_terminal_followup": {
+    "completed_at_utc": "2026-08-20T12:46:47Z",
+    "spec_sha256": "8c7a7996355316ee8a24f278e38cbc1a9fddf1ca57437b1b8daa369cf36af37b",
+    "durable_contract": "The stored authority remains the closed canonical ordered item tuple. A fully settled output_item.done sequence may supply that tuple only when terminal output is empty; raw chunk boundaries and remote response/session metadata remain non-authoritative.",
+    "provider_replay_contract_fingerprint_bumped": true,
+    "metadata_first_hydration_and_fresh_host_contract_changed": false,
+    "code_sha256": {
+      "llm/adapters/openai/responses.py": "46ac4e92979a9c96943d157f560a2b928ca654bdd9c32b8e1f511a8ddf0a2113",
+      "llm/provider_replay.py": "eaac6ef0559af1da2eabdfee64aeaaa09ef520d6fb0896fb2e425d744865fae0"
+    },
+    "verification": {
+      "deterministic_round5a2": "12 passed",
+      "full_pytest": "793 passed in 115.22s",
+      "postgres_marker": "196 passed, 597 deselected in 78.30s",
+      "real_bob_fresh_host": "selected one compatible native replay fragment and completed the continuation without a remote response ID",
+      "real_probe_completed_at_utc": "2026-08-20T12:48:11.623840Z"
+    },
+    "private_content_credentials_remote_metadata_or_raw_response_recorded": false
+  },
   "post_activation_universal_function_tool_wire_amendment": {
     "completed_at_utc": "2026-08-19T12:52:26Z",
     "checkpoint_head": "a39e537fa56f6685c677496d0eb11628337675c0",

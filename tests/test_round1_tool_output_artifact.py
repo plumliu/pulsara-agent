@@ -57,6 +57,7 @@ from tests.support.round3 import (
     StaticContextSourceCollector,
     StructuredToolPort,
     direct_tool_invocation_context,
+    prepare_test_direct_tool_surface,
 )
 from pulsara_agent.primitives.context import freeze_json, thaw_json
 from pulsara_agent.primitives.tool_observation import (
@@ -1685,7 +1686,8 @@ def test_round1_production_descriptor_executor_closure(tmp_path: Path) -> None:
         authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
         artifact_read_port=_MissingReadPort(),
     )
-    specs = {item.name: item for item in port.tool_specs}
+    surface = prepare_test_direct_tool_surface(port)
+    specs = {item.name: item for item in surface.model_surface.tool_specs}
     bindings = {item.tool_name: item for item in port.executor_bindings}
     assert "artifact_read" in specs
     assert set(specs) == set(bindings)
@@ -1716,5 +1718,8 @@ def test_round1_production_descriptor_executor_closure(tmp_path: Path) -> None:
         live_bus=LiveAgentEventBus(),
         authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
     )
-    assert "artifact_read" not in {item.name for item in hidden.tool_specs}
+    hidden_surface = prepare_test_direct_tool_surface(hidden)
+    assert "artifact_read" not in {
+        item.name for item in hidden_surface.model_surface.tool_specs
+    }
     asyncio.run(hidden.aclose())

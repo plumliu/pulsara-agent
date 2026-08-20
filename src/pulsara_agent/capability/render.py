@@ -7,9 +7,9 @@ from html import escape
 
 from pulsara_agent.capability.types import (
     ActiveSkillInjection,
-    CapabilityDiagnostic,
-    RenderedCapabilityPrompt,
-    RenderedCapabilityPromptFragment,
+    SkillDiagnostic,
+    RenderedSkillPrompt,
+    RenderedSkillPromptFragment,
     ResolvedSkillCatalogEntry,
 )
 
@@ -28,10 +28,10 @@ def render_catalog_prompt(
     max_description_chars: int = MAX_CATALOG_DESCRIPTION_CHARS,
     compact_description_chars: int = COMPACT_CATALOG_DESCRIPTION_CHARS,
     detail_description_chars: int = DETAIL_CATALOG_DESCRIPTION_CHARS,
-) -> RenderedCapabilityPrompt:
+) -> RenderedSkillPrompt:
     if not entries:
-        return RenderedCapabilityPrompt(text=None)
-    diagnostics: list[CapabilityDiagnostic] = []
+        return RenderedSkillPrompt(text=None)
+    diagnostics: list[SkillDiagnostic] = []
     header = (
         "Available Skills:\n"
         "A skill is a local bundle of instructions stored in SKILL.md. This catalog is a routing index, "
@@ -72,7 +72,7 @@ def render_catalog_prompt(
         omitted_details = len(entries) - len(rendered_details)
         if omitted_details:
             diagnostics.append(
-                CapabilityDiagnostic(
+                SkillDiagnostic(
                     severity="info",
                     code="skill_catalog_details_omitted",
                     message=f"Skill detail entries omitted due to catalog budget: {omitted_details}",
@@ -84,7 +84,7 @@ def render_catalog_prompt(
             detail_truncated=detail_truncated,
         )
         diagnostics.append(
-            CapabilityDiagnostic(
+            SkillDiagnostic(
                 severity="info",
                 code="skill_catalog_mode",
                 message=(
@@ -121,14 +121,14 @@ def render_catalog_prompt(
     )
     if len(header) + len(compact_no_description) + len(footer) <= budget_chars:
         diagnostics.append(
-            CapabilityDiagnostic(
+            SkillDiagnostic(
                 severity="warning",
                 code="skill_catalog_details_omitted",
                 message=f"Skill catalog fell back to name/location-only index due to budget: {len(entries)}",
             )
         )
         diagnostics.append(
-            CapabilityDiagnostic(
+            SkillDiagnostic(
                 severity="info",
                 code="skill_catalog_mode",
                 message=f"mode=compact budget_chars={budget_chars} indexed={len(entries)} detailed=0",
@@ -157,7 +157,7 @@ def render_catalog_prompt(
         rendered = _render_index_entry(entry, description=None)
         if current_len + len(rendered) > budget_chars:
             diagnostics.append(
-                CapabilityDiagnostic(
+                SkillDiagnostic(
                     severity="warning",
                     code="skill_catalog_budget_truncated",
                     message=f"Skill catalog budget exhausted before entry: {entry.name}",
@@ -167,9 +167,9 @@ def render_catalog_prompt(
         rendered_entries.append(rendered)
         current_len += len(rendered)
     if not rendered_entries:
-        return RenderedCapabilityPrompt(text=None, diagnostics=tuple(diagnostics))
+        return RenderedSkillPrompt(text=None, diagnostics=tuple(diagnostics))
     diagnostics.append(
-        CapabilityDiagnostic(
+        SkillDiagnostic(
             severity="info",
             code="skill_catalog_mode",
             message=f"mode=truncated budget_chars={budget_chars} indexed={len(rendered_entries)} total={len(entries)} detailed=0",
@@ -192,10 +192,10 @@ def render_active_skill_prompt(
     injections: tuple[ActiveSkillInjection, ...],
     *,
     max_delimiter_attempts: int = DEFAULT_SENTINEL_ATTEMPTS,
-) -> RenderedCapabilityPrompt:
+) -> RenderedSkillPrompt:
     if not injections:
-        return RenderedCapabilityPrompt(text=None)
-    diagnostics: list[CapabilityDiagnostic] = []
+        return RenderedSkillPrompt(text=None)
+    diagnostics: list[SkillDiagnostic] = []
     rendered: list[tuple[ActiveSkillInjection, str]] = []
     for injection in injections:
         sentinel = _collision_free_sentinel(
@@ -205,7 +205,7 @@ def render_active_skill_prompt(
         )
         if sentinel is None:
             diagnostics.append(
-                CapabilityDiagnostic(
+                SkillDiagnostic(
                     severity="warning",
                     code="skill_body_delimiter_collision",
                     message=f"Could not find collision-free skill body delimiter: {injection.name}",
@@ -238,9 +238,9 @@ def render_active_skill_prompt(
             )
         )
     if not rendered:
-        return RenderedCapabilityPrompt(text=None, diagnostics=tuple(diagnostics))
+        return RenderedSkillPrompt(text=None, diagnostics=tuple(diagnostics))
     fragments = tuple(
-        RenderedCapabilityPromptFragment(
+        RenderedSkillPromptFragment(
             container_id="active-skills",
             fragment_role="entry",
             static_scope=None,
@@ -249,7 +249,7 @@ def render_active_skill_prompt(
         )
         for index, (injection, text) in enumerate(rendered)
     )
-    return RenderedCapabilityPrompt(
+    return RenderedSkillPrompt(
         text="".join(fragment.text for fragment in fragments),
         diagnostics=tuple(diagnostics),
         fragments=fragments,
@@ -266,17 +266,17 @@ def _catalog_rendered_prompt(
     index_texts: tuple[str, ...],
     detail_entries: tuple[ResolvedSkillCatalogEntry, ...],
     detail_texts: tuple[str, ...],
-    diagnostics: tuple[CapabilityDiagnostic, ...],
-) -> RenderedCapabilityPrompt:
-    fragments: list[RenderedCapabilityPromptFragment] = [
-        RenderedCapabilityPromptFragment(
+    diagnostics: tuple[SkillDiagnostic, ...],
+) -> RenderedSkillPrompt:
+    fragments: list[RenderedSkillPromptFragment] = [
+        RenderedSkillPromptFragment(
             container_id="skill-catalog",
             fragment_role="static",
             static_scope="projection_wrapper",
             source_stable_name=None,
             text=header,
         ),
-        RenderedCapabilityPromptFragment(
+        RenderedSkillPromptFragment(
             container_id="available-skill-index",
             fragment_role="prefix",
             static_scope=None,
@@ -285,7 +285,7 @@ def _catalog_rendered_prompt(
         ),
     ]
     fragments.extend(
-        RenderedCapabilityPromptFragment(
+        RenderedSkillPromptFragment(
             container_id="available-skill-index",
             fragment_role="entry",
             static_scope=None,
@@ -295,7 +295,7 @@ def _catalog_rendered_prompt(
         for entry, text in zip(index_entries, index_texts, strict=True)
     )
     fragments.append(
-        RenderedCapabilityPromptFragment(
+        RenderedSkillPromptFragment(
             container_id="available-skill-index",
             fragment_role="suffix",
             static_scope=None,
@@ -305,7 +305,7 @@ def _catalog_rendered_prompt(
     )
     if detail_texts:
         fragments.append(
-            RenderedCapabilityPromptFragment(
+            RenderedSkillPromptFragment(
                 container_id="skill-details",
                 fragment_role="prefix",
                 static_scope=None,
@@ -314,7 +314,7 @@ def _catalog_rendered_prompt(
             )
         )
         fragments.extend(
-            RenderedCapabilityPromptFragment(
+            RenderedSkillPromptFragment(
                 container_id="skill-details",
                 fragment_role="entry",
                 static_scope=None,
@@ -324,7 +324,7 @@ def _catalog_rendered_prompt(
             for entry, text in zip(detail_entries, detail_texts, strict=True)
         )
         fragments.append(
-            RenderedCapabilityPromptFragment(
+            RenderedSkillPromptFragment(
                 container_id="skill-details",
                 fragment_role="suffix",
                 static_scope=None,
@@ -333,7 +333,7 @@ def _catalog_rendered_prompt(
             )
         )
     fragments.append(
-        RenderedCapabilityPromptFragment(
+        RenderedSkillPromptFragment(
             container_id="skill-catalog",
             fragment_role="static",
             static_scope="projection_wrapper",
@@ -342,7 +342,7 @@ def _catalog_rendered_prompt(
         )
     )
     frozen = tuple(fragments)
-    return RenderedCapabilityPrompt(
+    return RenderedSkillPrompt(
         text="".join(fragment.text for fragment in frozen),
         diagnostics=diagnostics,
         fragments=frozen,
@@ -411,14 +411,14 @@ def _truncate_description(
 
 
 def _append_description_truncation_diagnostics(
-    diagnostics: list[CapabilityDiagnostic],
+    diagnostics: list[SkillDiagnostic],
     *,
     compact_truncated: int,
     detail_truncated: int,
 ) -> None:
     if compact_truncated:
         diagnostics.append(
-            CapabilityDiagnostic(
+            SkillDiagnostic(
                 severity="info",
                 code="skill_catalog_compact_descriptions_truncated",
                 message=f"Skill compact index descriptions truncated: {compact_truncated}",
@@ -426,7 +426,7 @@ def _append_description_truncation_diagnostics(
         )
     if detail_truncated:
         diagnostics.append(
-            CapabilityDiagnostic(
+            SkillDiagnostic(
                 severity="info",
                 code="skill_catalog_detail_descriptions_truncated",
                 message=f"Skill detail descriptions truncated: {detail_truncated}",

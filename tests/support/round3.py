@@ -11,8 +11,41 @@ from pulsara_agent.conversation_kernel.direct_model import (
     DirectKernelModelPort,
     KernelModelExecutionRequest,
     KernelModelPreparationRequest,
+    KernelModelTargetPreparationRequest,
     PreparedKernelModelCall,
+    PreparedKernelModelTarget,
 )
+from pulsara_agent.capability.contracts import (
+    CapabilityKind,
+    CapabilitySourceKind,
+    CapabilitySourceRefreshMode,
+    CapabilitySourceSnapshotDisposition,
+    EmptyCapabilityEpochPredecessor,
+    FrozenMcpCapabilityProjectionInput,
+    FrozenSkillProjectionInput,
+    FrozenToolCapabilityExposurePlan,
+    ToolCapabilityOrigin,
+    capability_identity,
+    capability_source_ref,
+    capability_source_registration,
+    freeze_capability_source_snapshot,
+    freeze_tool_capability_fact,
+    skill_projection_input_fingerprint,
+    tool_capability_version_ref,
+)
+from pulsara_agent.capability.local_skills import LocalSkillDiscovery
+from pulsara_agent.capability.planner import KernelToolCapabilityPlanner
+from pulsara_agent.capability.registry import (
+    freeze_capability_dispatch_cut_and_views,
+    freeze_tool_planning_input,
+)
+from pulsara_agent.conversation_kernel.capability_composition import (
+    freeze_capability_registry_from_owner_snapshots,
+    issue_local_skill_catalog_source_snapshot,
+    issue_mcp_capability_source_snapshot_set,
+    issue_sealed_builtin_capability_snapshot,
+)
+from pulsara_agent.conversation_kernel.mcp.contracts import build_catalog_snapshot
 from pulsara_agent.conversation_kernel.input_continuity import (
     ProcessLocalProviderInputInstallAuthority,
 )
@@ -62,6 +95,10 @@ from pulsara_agent.model_input.contracts import (
 from pulsara_agent.model_input.continuity import FULL_HISTORY_CONTEXT_BASE_IDENTITY
 from pulsara_agent.model_input.continuity import ProcessLocalProviderInputInstallPermit
 from pulsara_agent.primitives.context import context_fingerprint, freeze_json
+from pulsara_agent.llm.adapters.openai.function_tools import (
+    freeze_openai_native_tool_eligibility,
+    materialize_openai_native_tool_projection_set,
+)
 from pulsara_agent.llm.result import TransportUsageReport
 from pulsara_agent.ports.provider_stream import (
     ProviderNormalizedTerminalKind,
@@ -91,11 +128,26 @@ class ScriptedKernelModel:
             )
         )
 
+    def prepare_target(
+        self, request: KernelModelTargetPreparationRequest
+    ) -> PreparedKernelModelTarget:
+        self.preparation_requests.append(request)  # type: ignore[arg-type]
+        return self._preparer.prepare_target(request)
+
+    def freeze_native_tool_eligibility(self, **kwargs):
+        return self._preparer.freeze_native_tool_eligibility(**kwargs)
+
+    def materialize_native_tool_projection_set(self, **kwargs):
+        return self._preparer.materialize_native_tool_projection_set(**kwargs)
+
+    def bind_tool_surface(self, **kwargs):
+        return self._preparer.bind_tool_surface(**kwargs)
+
     def prepare_call(
         self, request: KernelModelPreparationRequest
     ) -> PreparedKernelModelCall:
         self.preparation_requests.append(request)
-        return self._preparer.prepare_call(request)
+        return prepare_test_model_call(self._preparer, request)
 
     def plan_wire_input(self, **kwargs):
         return self._preparer.plan_wire_input(**kwargs)
@@ -141,10 +193,22 @@ class CallbackScriptedKernelModel:
             )
         )
 
+    def prepare_target(self, request):
+        return self._preparer.prepare_target(request)
+
+    def freeze_native_tool_eligibility(self, **kwargs):
+        return self._preparer.freeze_native_tool_eligibility(**kwargs)
+
+    def materialize_native_tool_projection_set(self, **kwargs):
+        return self._preparer.materialize_native_tool_projection_set(**kwargs)
+
+    def bind_tool_surface(self, **kwargs):
+        return self._preparer.bind_tool_surface(**kwargs)
+
     def prepare_call(
         self, request: KernelModelPreparationRequest
     ) -> PreparedKernelModelCall:
-        return self._preparer.prepare_call(request)
+        return prepare_test_model_call(self._preparer, request)
 
     def plan_wire_input(self, **kwargs):
         return self._preparer.plan_wire_input(**kwargs)
@@ -307,13 +371,70 @@ class StaticContextSourceCollector:
     def registry_fingerprint(self) -> str:
         return ContextSourceRegistry().fingerprint
 
+    def freeze_skill_capability_source_snapshot(
+        self,
+        *,
+        conversation_scope_kind,
+        scope_subagent_task_id,
+        deadline_monotonic=None,
+    ):
+        del deadline_monotonic
+        source = capability_source_ref(
+            CapabilitySourceKind.LOCAL_SKILL_CATALOG, "test-skill-catalog"
+        )
+        registration = capability_source_registration(
+            source=source,
+            refresh_mode=CapabilitySourceRefreshMode.SAFE_POINT_REFRESHABLE,
+            source_contract_fingerprint=context_fingerprint(
+                "test:skill-source-contract:v1", "empty"
+            ),
+        )
+        snapshot = freeze_capability_source_snapshot(
+            registration=registration,
+            conversation_scope_kind=conversation_scope_kind,
+            scope_subagent_task_id=scope_subagent_task_id,
+            disposition=CapabilitySourceSnapshotDisposition.COMPLETE,
+            facts=(),
+        )
+        return issue_local_skill_catalog_source_snapshot(
+            conversation_scope_kind=conversation_scope_kind,
+            scope_subagent_task_id=scope_subagent_task_id,
+            source_snapshot=snapshot,
+            discovery=LocalSkillDiscovery((), ()),
+            owner_authenticity=self,
+        )
+
+    def freeze_skill_capability_projection_input(self, owner):
+        from pulsara_agent.capability.contracts import (
+            FrozenSkillProjectionInput,
+            skill_projection_input_fingerprint,
+        )
+        from pulsara_agent.conversation_kernel.capability import (
+            skill_discovery_semantic_fingerprint,
+        )
+
+        discovery_fingerprint = skill_discovery_semantic_fingerprint(owner.discovery)
+        fingerprint = skill_projection_input_fingerprint(
+            discovery_semantic_fingerprint=discovery_fingerprint,
+            source_snapshot_fingerprint=(
+                owner.source_snapshot.source_snapshot_fingerprint
+            ),
+        )
+        return FrozenSkillProjectionInput(
+            discovery_semantic_fingerprint=discovery_fingerprint,
+            source_snapshot_fingerprint=(
+                owner.source_snapshot.source_snapshot_fingerprint
+            ),
+            snapshot_fingerprint=fingerprint,
+        )
+
     def collect(self, **_kwargs: object) -> CollectedContextSources:
         canonical_facts = _kwargs["canonical_facts"]
         permission = canonical_facts.run_permission_snapshot  # type: ignore[union-attr]
         candidates: tuple[ContextSourceCandidate, ...] = (
             _candidate(
                 kind=ContextSourceKind.BASE_SYSTEM,
-                version="pulsara.base-system.prefix-continuity.v4",
+                version="pulsara.base-system.prefix-continuity.v5-unified-capability",
                 channel=ContextChannel.SYSTEM,
                 trust=ContextTrustClass.ROOT_INSTRUCTION,
                 budget=ContextBudgetClass.MUST_KEEP,
@@ -438,7 +559,7 @@ class StaticContextSourceCollector:
             ContextSourceKind.RUNTIME_CLOCK: ContextSourceAbsenceKind.UNAVAILABLE,
             ContextSourceKind.PLAN_HANDOFF: ContextSourceAbsenceKind.NOT_APPLICABLE,
             ContextSourceKind.PLAN_WORKFLOW: ContextSourceAbsenceKind.EXPLICIT_EMPTY,
-            ContextSourceKind.CAPABILITY_CATALOG: ContextSourceAbsenceKind.EXPLICIT_EMPTY,
+            ContextSourceKind.SKILL_CATALOG: ContextSourceAbsenceKind.EXPLICIT_EMPTY,
             ContextSourceKind.MCP_CATALOG: ContextSourceAbsenceKind.NOT_APPLICABLE,
             ContextSourceKind.ACTIVE_SKILL: ContextSourceAbsenceKind.EXPLICIT_EMPTY,
             ContextSourceKind.PREVIOUS_TURN_OUTCOME: (
@@ -490,15 +611,14 @@ class StaticContextSourceCollector:
             candidates=collection.candidates,
             absent_facts=collection.absent_facts,
             diagnostics=collection.diagnostics,
-            available_tool_names=frozenset(
-                tool.name
-                for tool in kwargs["tool_surface"].tool_specs  # type: ignore[union-attr]
-            ),
             registry_fingerprint=collection.registry_fingerprint,
             freeze_fingerprint=context_fingerprint(
                 "test:frozen-non-trigger-sources:v1",
                 collection.collection_fingerprint,
             ),
+            tool_exposure_plan=kwargs["tool_exposure_plan"],  # type: ignore[arg-type]
+            skill_dispatch_view=kwargs["skill_dispatch_view"],  # type: ignore[arg-type]
+            skill_owner_snapshot=kwargs["skill_owner_snapshot"],  # type: ignore[arg-type]
         )
 
     def complete_frozen_sources(
@@ -640,6 +760,7 @@ class StructuredToolPort:
         self.delegate = delegate
         self._authority = object()
         self._active: set[str] = set()
+        self._mcp_owner = object()
         specs = tuple(
             FrozenToolSpec(
                 name=name,
@@ -661,6 +782,102 @@ class StructuredToolPort:
             )
             for scope in ModelInputScopeKind
         }
+
+    def sealed_builtin_capability_snapshot(
+        self, *, conversation_scope_kind, scope_subagent_task_id
+    ):
+        surface = self._surfaces[conversation_scope_kind]
+        source = capability_source_ref(
+            CapabilitySourceKind.BUILTIN_REGISTRY, "test-builtin-registry"
+        )
+        registration = capability_source_registration(
+            source=source,
+            refresh_mode=CapabilitySourceRefreshMode.IMMUTABLE,
+            source_contract_fingerprint=context_fingerprint(
+                "test:builtin-source-contract:v1", "sealed"
+            ),
+        )
+        facts = tuple(
+            freeze_tool_capability_fact(
+                identity=capability_identity(
+                    kind=CapabilityKind.TOOL,
+                    source=source,
+                    stable_name=spec.name,
+                ),
+                origin=ToolCapabilityOrigin.BUILTIN,
+                canonical_tool_spec=spec,
+            )
+            for spec in surface.tool_specs
+        )
+        snapshot = freeze_capability_source_snapshot(
+            registration=registration,
+            conversation_scope_kind=conversation_scope_kind,
+            scope_subagent_task_id=scope_subagent_task_id,
+            disposition=CapabilitySourceSnapshotDisposition.COMPLETE,
+            facts=facts,
+        )
+        return issue_sealed_builtin_capability_snapshot(
+            conversation_scope_kind=conversation_scope_kind,
+            scope_subagent_task_id=scope_subagent_task_id,
+            source_snapshot=snapshot,
+            executor_bindings=(),
+            builtin_composition_seal=self._authority,
+        )
+
+    def freeze_mcp_capability_source_snapshot_set(
+        self, *, conversation_scope_kind, scope_subagent_task_id
+    ):
+        return issue_mcp_capability_source_snapshot_set(
+            conversation_scope_kind=conversation_scope_kind,
+            scope_subagent_task_id=scope_subagent_task_id,
+            source_snapshots=(),
+            catalog_snapshot=build_catalog_snapshot(
+                owner_epoch=1, catalog_revision=1, entries=()
+            ).for_scope(conversation_scope_kind),
+            inspection_inputs=(),
+            owner_authenticity=self._mcp_owner,
+        )
+
+    def freeze_mcp_capability_projection_input(self, owner):
+        sources = tuple(
+            sorted(
+                item.source_snapshot_fingerprint for item in owner.source_snapshots
+            )
+        )
+        payload = {
+            "scope": owner.conversation_scope_kind.value,
+            "scope_subagent_task_id": owner.scope_subagent_task_id,
+            "sources": sources,
+            "catalog": owner.catalog_snapshot.semantic_fingerprint,
+            "inspectability": (),
+        }
+        return FrozenMcpCapabilityProjectionInput(
+            conversation_scope_kind=owner.conversation_scope_kind,
+            scope_subagent_task_id=owner.scope_subagent_task_id,
+            source_snapshot_fingerprints=sources,
+            catalog_semantic_fingerprint=owner.catalog_snapshot.semantic_fingerprint,
+            inspectability_facts=(),
+            projection_fingerprint=context_fingerprint(
+                "mcp-capability-projection-input:v1", payload
+            ),
+        )
+
+    def prepare_planned_tool_surface(
+        self, *, plan: FrozenToolCapabilityExposurePlan, builtin
+    ) -> PreparedKernelToolSurface:
+        prepared = self.snapshot_tool_surface(
+            conversation_scope_kind=plan.direct_tool_surface.conversation_scope_kind,
+            scope_subagent_task_id=builtin.scope_subagent_task_id,
+        )
+        if prepared.model_surface != plan.direct_tool_surface:
+            raise RuntimeError("test planned surface drifted")
+        return PreparedKernelToolSurface(
+            model_surface=prepared.model_surface,
+            execution_bindings=prepared.execution_bindings,
+            execution_surface_fingerprint=prepared.execution_surface_fingerprint,
+            access=prepared.access,
+            capability_exposure_plan=plan,
+        )
 
     def snapshot_tool_surface(
         self,
@@ -757,6 +974,15 @@ class StructuredToolPort:
         if prepared.model_surface.tool_specs:
             borrow.binding_fingerprint(prepared.model_surface.tool_specs[0].name)
 
+    def install_provider_input_tool_result_deliveries(self, **kwargs: object) -> None:
+        permit = kwargs["permit"]
+        borrow = kwargs["surface_borrow"]
+        if not isinstance(permit, ProcessLocalProviderInputInstallPermit):
+            raise TypeError("test provider-input install permit is invalid")
+        if not isinstance(borrow, ProcessLocalToolSurfaceBorrow):
+            raise TypeError("test provider-input install borrow is invalid")
+        self.validate_tool_surface_borrow(borrow, borrow.prepared)
+
     async def authorize(self, **kwargs: object):
         kwargs.pop("surface_borrow")
         permission = kwargs.pop("permission_snapshot")
@@ -781,6 +1007,244 @@ class StructuredToolPort:
         raise RuntimeError("test tool emitted an unowned process-local settlement")
 
 
+class _EmptyTestMcpCapabilityOwner:
+    """Zero-server MCP owner used only to complete real-port test composition."""
+
+    def __init__(self) -> None:
+        self._authority = object()
+        self._catalog = build_catalog_snapshot(
+            owner_epoch=1, catalog_revision=1, entries=()
+        )
+
+    def freeze_capability_source_snapshot_set(
+        self, *, conversation_scope_kind, scope_subagent_task_id
+    ):
+        return issue_mcp_capability_source_snapshot_set(
+            conversation_scope_kind=conversation_scope_kind,
+            scope_subagent_task_id=scope_subagent_task_id,
+            source_snapshots=(),
+            catalog_snapshot=self._catalog.for_scope(conversation_scope_kind),
+            inspection_inputs=(),
+            owner_authenticity=self._authority,
+        )
+
+    def install_pending_at_safe_point(self):
+        return None
+
+    def freeze_capability_projection_input(self, owner):
+        sources = tuple(
+            sorted(
+                item.source_snapshot_fingerprint for item in owner.source_snapshots
+            )
+        )
+        payload = {
+            "scope": owner.conversation_scope_kind.value,
+            "scope_subagent_task_id": owner.scope_subagent_task_id,
+            "sources": sources,
+            "catalog": owner.catalog_snapshot.semantic_fingerprint,
+            "inspectability": (),
+        }
+        return FrozenMcpCapabilityProjectionInput(
+            conversation_scope_kind=owner.conversation_scope_kind,
+            scope_subagent_task_id=owner.scope_subagent_task_id,
+            source_snapshot_fingerprints=sources,
+            catalog_semantic_fingerprint=owner.catalog_snapshot.semantic_fingerprint,
+            inspectability_facts=(),
+            projection_fingerprint=context_fingerprint(
+                "mcp-capability-projection-input:v1", payload
+            ),
+        )
+
+
+def seal_test_direct_tool_port(port: DirectKernelToolPort) -> None:
+    """Complete the production composition boundary for a standalone test port."""
+
+    port.bind_interaction_port(object())  # type: ignore[arg-type]
+    port.bind_subagent_port(  # type: ignore[arg-type]
+        type("_EmptySubagentPort", (), {"tool_names": ()})()
+    )
+    port.bind_memory_port(  # type: ignore[arg-type]
+        type("_EmptyMemoryPort", (), {"tool_names": ()})()
+    )
+    port.bind_mcp_supervisor(_EmptyTestMcpCapabilityOwner())  # type: ignore[arg-type]
+    port.seal_builtin_composition()
+
+
+def prepare_test_model_call(
+    port: DirectKernelModelPort,
+    request: KernelModelPreparationRequest,
+) -> PreparedKernelModelCall:
+    """Bind a component-test surface through the split Round 9 model API."""
+
+    target = port.prepare_target(
+        KernelModelTargetPreparationRequest(
+            session_id=request.session_id,
+            turn_id=request.turn_id,
+            model_call_index=request.model_call_index,
+            purpose=request.purpose,
+            maximum_input_tokens=request.maximum_input_tokens,
+            maximum_output_tokens=request.maximum_output_tokens,
+        )
+    )
+    source = capability_source_ref(
+        CapabilitySourceKind.BUILTIN_REGISTRY,
+        "direct-model-component-test",
+    )
+    facts = tuple(
+        freeze_tool_capability_fact(
+            identity=capability_identity(
+                kind=CapabilityKind.TOOL,
+                source=source,
+                stable_name=spec.name,
+            ),
+            origin=ToolCapabilityOrigin.BUILTIN,
+            canonical_tool_spec=spec,
+        )
+        for spec in request.tool_surface.model_surface.tool_specs
+    )
+    eligibility = freeze_openai_native_tool_eligibility(
+        conversation_scope_kind=(
+            request.tool_surface.model_surface.conversation_scope_kind
+        ),
+        scope_subagent_task_id=request.tool_surface.access.scope_subagent_task_id,
+        wire_api=target.target.model_profile.provider_profile.wire_api,
+        tool_facts=facts,
+    )
+    ordered = tuple(
+        sorted(facts, key=lambda item: item.canonical_tool_spec.name)
+    )
+    projection_set = materialize_openai_native_tool_projection_set(
+        conversation_scope_kind=(
+            request.tool_surface.model_surface.conversation_scope_kind
+        ),
+        scope_subagent_task_id=request.tool_surface.access.scope_subagent_task_id,
+        wire_api=target.target.model_profile.provider_profile.wire_api,
+        tool_versions=tuple(tool_capability_version_ref(item) for item in ordered),
+        tool_specs=tuple(item.canonical_tool_spec for item in ordered),
+        eligibility=eligibility,
+    )
+    return port.bind_tool_surface(
+        prepared_target=target,
+        tool_surface=request.tool_surface,
+        native_projection_set=projection_set,
+    )
+
+
+def prepare_test_direct_tool_surface(
+    port: DirectKernelToolPort,
+    *,
+    conversation_scope_kind: ModelInputScopeKind = ModelInputScopeKind.ROOT,
+    scope_subagent_task_id: str | None = None,
+    wire_api: str = "openai_chat_completions",
+) -> PreparedKernelToolSurface:
+    """Plan a real port through the Round 9 authority path for component tests."""
+
+    # Standalone tool tests do not construct a Host. Complete only missing
+    # support owners, then seal exactly once; tests with real owners already
+    # arrive sealed and are left untouched.
+    if port._builtin_composition_state.value == "PREPARING":  # noqa: SLF001
+        if port._interaction is None:  # noqa: SLF001
+            port.bind_interaction_port(object())  # type: ignore[arg-type]
+        if port._subagent is None:  # noqa: SLF001
+            port.bind_subagent_port(  # type: ignore[arg-type]
+                type("_EmptySubagentPort", (), {"tool_names": ()})()
+            )
+        if port._memory is None:  # noqa: SLF001
+            port.bind_memory_port(  # type: ignore[arg-type]
+                type("_EmptyMemoryPort", (), {"tool_names": ()})()
+            )
+        if port._mcp_supervisor is None:  # noqa: SLF001
+            port.bind_mcp_supervisor(  # type: ignore[arg-type]
+                _EmptyTestMcpCapabilityOwner()
+            )
+        port.seal_builtin_composition()
+
+    builtin = port.sealed_builtin_capability_snapshot(
+        conversation_scope_kind=conversation_scope_kind,
+        scope_subagent_task_id=scope_subagent_task_id,
+    )
+    mcp = port.freeze_mcp_capability_source_snapshot_set(
+        conversation_scope_kind=conversation_scope_kind,
+        scope_subagent_task_id=scope_subagent_task_id,
+    )
+    skill_source = capability_source_ref(
+        CapabilitySourceKind.LOCAL_SKILL_CATALOG,
+        "pulsara-local-skill-catalog",
+    )
+    skill_registration = capability_source_registration(
+        source=skill_source,
+        refresh_mode=CapabilitySourceRefreshMode.SAFE_POINT_REFRESHABLE,
+        source_contract_fingerprint=context_fingerprint(
+            "test:local-skill-source-contract:v1", ()
+        ),
+    )
+    skill_snapshot = freeze_capability_source_snapshot(
+        registration=skill_registration,
+        conversation_scope_kind=conversation_scope_kind,
+        scope_subagent_task_id=scope_subagent_task_id,
+        disposition=CapabilitySourceSnapshotDisposition.COMPLETE,
+        facts=(),
+    )
+    discovery = LocalSkillDiscovery(skills=(), diagnostics=())
+    skill_owner = issue_local_skill_catalog_source_snapshot(
+        conversation_scope_kind=conversation_scope_kind,
+        scope_subagent_task_id=scope_subagent_task_id,
+        source_snapshot=skill_snapshot,
+        discovery=discovery,
+        owner_authenticity=object(),
+    )
+    registry = freeze_capability_registry_from_owner_snapshots(
+        builtin=builtin,
+        mcp=mcp,
+        skills=skill_owner,
+    )
+    native = freeze_openai_native_tool_eligibility(
+        conversation_scope_kind=conversation_scope_kind,
+        scope_subagent_task_id=scope_subagent_task_id,
+        wire_api=wire_api,
+        tool_facts=registry.tool_facts,
+    )
+    mcp_input = port.freeze_mcp_capability_projection_input(mcp)
+    tool_input = freeze_tool_planning_input(
+        predecessor=EmptyCapabilityEpochPredecessor(0),
+        native_wire=native,
+        mcp=mcp_input,
+    )
+    discovery_fingerprint = context_fingerprint(
+        "test:local-skill-discovery:v1", ()
+    )
+    skill_input = FrozenSkillProjectionInput(
+        discovery_semantic_fingerprint=discovery_fingerprint,
+        source_snapshot_fingerprint=skill_snapshot.source_snapshot_fingerprint,
+        snapshot_fingerprint=skill_projection_input_fingerprint(
+            discovery_semantic_fingerprint=discovery_fingerprint,
+            source_snapshot_fingerprint=skill_snapshot.source_snapshot_fingerprint,
+        ),
+    )
+    _parent, tool_view, _skill_view = freeze_capability_dispatch_cut_and_views(
+        conversation_scope_kind=conversation_scope_kind,
+        scope_subagent_task_id=scope_subagent_task_id,
+        registry=registry,
+        tools=tool_input,
+        skills=skill_input,
+    )
+    planner = KernelToolCapabilityPlanner()
+    selection = planner.select(view=tool_view)
+    projection_set = materialize_openai_native_tool_projection_set(
+        conversation_scope_kind=conversation_scope_kind,
+        scope_subagent_task_id=scope_subagent_task_id,
+        wire_api=wire_api,
+        tool_versions=selection.direct_tool_versions,
+        tool_specs=selection.direct_tool_surface.tool_specs,
+        eligibility=native,
+    )
+    plan = planner.finalize(
+        selection=selection,
+        direct_projection_set=projection_set,
+    )
+    return port.prepare_planned_tool_surface(plan=plan, builtin=builtin)
+
+
 def direct_tool_invocation_context(
     port: DirectKernelToolPort,
     *,
@@ -798,7 +1262,8 @@ def direct_tool_invocation_context(
 ) -> tuple[ProcessLocalToolSurfaceBorrow, KernelToolInvocationContext]:
     """Acquire the same narrow surface authority used by the runner."""
 
-    prepared = port.snapshot_tool_surface(
+    prepared = prepare_test_direct_tool_surface(
+        port,
         conversation_scope_kind=conversation_scope_kind,
         scope_subagent_task_id=scope_subagent_task_id,
     )
@@ -899,7 +1364,8 @@ async def authorize_direct_tool(
 ):
     """Authorize under a formally acquired immutable surface borrow."""
 
-    prepared = port.snapshot_tool_surface(
+    prepared = prepare_test_direct_tool_surface(
+        port,
         conversation_scope_kind=conversation_scope_kind,
         scope_subagent_task_id=scope_subagent_task_id,
     )
@@ -952,7 +1418,7 @@ def _candidate(
         ContextSourceKind.RUN_PERMISSION: ContextSourceLifecycle.TURN_APPEND,
         ContextSourceKind.PLAN_HANDOFF: ContextSourceLifecycle.ONE_SHOT,
         ContextSourceKind.PLAN_WORKFLOW: ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
-        ContextSourceKind.CAPABILITY_CATALOG: ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
+        ContextSourceKind.SKILL_CATALOG: ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
         ContextSourceKind.MCP_CATALOG: ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
         ContextSourceKind.ACTIVE_SKILL: ContextSourceLifecycle.ACTIVATION_SNAPSHOT,
         ContextSourceKind.PREVIOUS_TURN_OUTCOME: ContextSourceLifecycle.TURN_APPEND,

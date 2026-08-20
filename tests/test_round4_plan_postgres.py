@@ -60,7 +60,11 @@ from pulsara_agent.storage.postgres_connection_provider import PostgresConnectio
 from pulsara_agent.terminal_protocol.canonical_v3 import CanonicalProtocolReader
 from pulsara_agent.terminal_protocol.generated_v3 import terminal_kernel_v3_pb2 as wire
 from tests.support.postgres import verified_postgres_provider
-from tests.support.round3 import ScriptedKernelModel, StaticContextSourceCollector
+from tests.support.round3 import (
+    ScriptedKernelModel,
+    StaticContextSourceCollector,
+    seal_test_direct_tool_port,
+)
 
 
 pytestmark = pytest.mark.postgres
@@ -758,6 +762,7 @@ def test_round4_runner_plan_barrier_prevents_earlier_sibling_dispatch(
         session_id=lease.guard.session_id,
         live_bus=live_bus,
     )
+    seal_test_direct_tool_port(tools)
     model = ScriptedKernelModel([_runner_plan_batch_stream()])
 
     async def accept_automatic_plan(
@@ -860,6 +865,7 @@ def test_round4_rejected_plan_call_owns_batch_and_continues_without_dispatch(
         session_id=lease.guard.session_id,
         live_bus=live_bus,
     )
+    seal_test_direct_tool_port(tools)
     model = ScriptedKernelModel(
         [
             _runner_rejected_plan_batch_stream(plan_arguments),

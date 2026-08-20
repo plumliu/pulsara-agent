@@ -16,16 +16,40 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from pulsara_agent.capability.provider import CapabilityProjectionOutput
+from pulsara_agent.capability.provider import SkillProjectionOutput
 from pulsara_agent.capability.builtin_catalog import builtin_tool_catalog_entry
+from pulsara_agent.capability.contracts import (
+    CapabilitySourceKind,
+    CapabilitySourceRefreshMode,
+    CapabilitySourceSnapshotDisposition,
+    FrozenMcpRouteProjection,
+    FrozenNativeToolProjectionSet,
+    FrozenNativeToolWireProjection,
+    FrozenSkillCapabilityDispatchView,
+    FrozenSkillProjectionInput,
+    FrozenToolCapabilityExposurePlan,
+    ToolCapabilityVersionRef,
+    capability_source_ref,
+    capability_source_registration,
+    freeze_capability_source_snapshot,
+    frozen_tool_spec_fingerprint,
+    native_tool_projection_set_fingerprint,
+    skill_capability_dispatch_view_fingerprint,
+    skill_projection_input_fingerprint,
+    tool_capability_exposure_plan_fingerprint,
+)
+from pulsara_agent.capability.local_skills import LocalSkillDiscovery
 from pulsara_agent.capability.types import (
-    CapabilityDiagnostic,
+    SkillDiagnostic,
     ResolvedSkillCatalogEntry,
 )
 from pulsara_agent.conversation_kernel.assembler import CompletedToolCallBlock
 from pulsara_agent.conversation_kernel.context_sources import (
     ContextSourceRegistry,
     KernelContextSourceCollector,
+)
+from pulsara_agent.conversation_kernel.capability_composition import (
+    issue_local_skill_catalog_source_snapshot,
 )
 from pulsara_agent.conversation_kernel.direct_model import (
     CompletedProviderModelExecution,
@@ -100,6 +124,7 @@ from pulsara_agent.model_input.contracts import (
     ContextBindingBaseKind,
     FrozenContextBindingCompileFact,
     FrozenCanonicalCompileSnapshot,
+    FrozenModelToolSurface,
     FrozenPlanHandoffCompileFact,
     FrozenPreviousTurnOutcomeCompileFact,
     FrozenProviderInputItem,
@@ -196,7 +221,11 @@ from pulsara_agent.primitives.tool_observation import (
 )
 from pulsara_agent.terminal_process.models import TerminalRequest, TerminalStatus
 from tests.support.model_config import test_llm_config
-from tests.support.round3 import StructuredToolPort
+from tests.support.round3 import (
+    StructuredToolPort,
+    prepare_test_direct_tool_surface,
+    prepare_test_model_call,
+)
 
 
 _PREPARED_MODEL_CALLS: dict[
@@ -204,9 +233,152 @@ _PREPARED_MODEL_CALLS: dict[
 ] = {}
 
 
+def _test_round9_tool_exposure_plan(
+    surface: FrozenModelToolSurface,
+    *,
+    dispatch_cut_fingerprint: str,
+) -> FrozenToolCapabilityExposurePlan:
+    contract = context_fingerprint("test:round9-native-wire-contract:v1", "test")
+    versions: list[ToolCapabilityVersionRef] = []
+    projections: list[FrozenNativeToolWireProjection] = []
+    for spec in surface.tool_specs:
+        identity = context_fingerprint("test:round9-tool-identity:v1", spec.name)
+        semantic = context_fingerprint(
+            "test:round9-tool-semantic:v1",
+            (spec.name, spec.descriptor_fingerprint),
+        )
+        version_payload = {
+            "identity_fingerprint": identity,
+            "semantic_fingerprint": semantic,
+            "provider_name": spec.name,
+        }
+        version = ToolCapabilityVersionRef(
+            **version_payload,
+            version_fingerprint=context_fingerprint(
+                "tool-capability-version:v1", version_payload
+            ),
+        )
+        wire_tool = freeze_json(
+            {
+                "type": "function",
+                "function": {
+                    "name": spec.name,
+                    "description": spec.description,
+                    "parameters": thaw_json(spec.parameters),
+                    "strict": False,
+                },
+            }
+        )
+        projection_payload = {
+            "capability_version_fingerprint": version.version_fingerprint,
+            "canonical_tool_spec_fingerprint": frozen_tool_spec_fingerprint(spec),
+            "native_function_tool_wire_contract_fingerprint": contract,
+            "wire_tool": wire_tool,
+        }
+        projection = FrozenNativeToolWireProjection(
+            **projection_payload,
+            projection_fingerprint=context_fingerprint(
+                "native-tool-wire-projection:v1", projection_payload
+            ),
+        )
+        versions.append(version)
+        projections.append(projection)
+    frozen_versions = tuple(versions)
+    frozen_projections = tuple(projections)
+    projection_set = FrozenNativeToolProjectionSet(
+        conversation_scope_kind=surface.conversation_scope_kind,
+        scope_subagent_task_id=None,
+        native_function_tool_wire_contract_fingerprint=contract,
+        tool_versions=frozen_versions,
+        projections=frozen_projections,
+        projection_set_fingerprint=native_tool_projection_set_fingerprint(
+            conversation_scope_kind=surface.conversation_scope_kind,
+            scope_subagent_task_id=None,
+            native_function_tool_wire_contract_fingerprint=contract,
+            tool_versions=frozen_versions,
+            projections=frozen_projections,
+        ),
+    )
+    catalog = context_fingerprint("test:round9-empty-mcp-catalog:v1", ())
+    route_projection = FrozenMcpRouteProjection(
+        routes=(),
+        joined_catalog_semantic_fingerprint=catalog,
+        projection_fingerprint=context_fingerprint(
+            "mcp-route-projection:v1", {"routes": (), "catalog": catalog}
+        ),
+    )
+    view = context_fingerprint(
+        "test:round9-tool-dispatch-view:v1", surface.surface_fingerprint
+    )
+    return FrozenToolCapabilityExposurePlan(
+        dispatch_cut_fingerprint=dispatch_cut_fingerprint,
+        tool_dispatch_view_fingerprint=view,
+        direct_tool_surface=surface,
+        direct_projection_set=projection_set,
+        mcp_catalog_route_projection=route_projection,
+        exposure_plan_fingerprint=tool_capability_exposure_plan_fingerprint(
+            dispatch_cut_fingerprint=dispatch_cut_fingerprint,
+            tool_dispatch_view_fingerprint=view,
+            direct_tool_surface=surface,
+            direct_projection_set=projection_set,
+            mcp_catalog_route_projection=route_projection,
+        ),
+    )
+
+
+def _collect_context_sources(
+    collector: KernelContextSourceCollector,
+    *,
+    activation_subject: CapabilityActivationSubjectKind | None,
+    activation_text: str,
+    tool_surface: FrozenModelToolSurface,
+    canonical_facts: FrozenCanonicalCompileSnapshot,
+) -> CollectedContextSources:
+    owner = collector.freeze_skill_capability_source_snapshot(
+        conversation_scope_kind=tool_surface.conversation_scope_kind,
+        scope_subagent_task_id=None,
+    )
+    projection = collector.freeze_skill_capability_projection_input(owner)
+    parent = context_fingerprint(
+        "test:round9-parent-dispatch-cut:v1",
+        (
+            tool_surface.surface_fingerprint,
+            owner.source_snapshot.source_snapshot_fingerprint,
+        ),
+    )
+    registry = context_fingerprint(
+        "test:round9-registry:v1",
+        owner.source_snapshot.source_snapshot_fingerprint,
+    )
+    skill_view = FrozenSkillCapabilityDispatchView(
+        parent_dispatch_cut_fingerprint=parent,
+        registry_fingerprint=registry,
+        registry_skill_facts=(),
+        projection_input=projection,
+        view_fingerprint=skill_capability_dispatch_view_fingerprint(
+            parent_dispatch_cut_fingerprint=parent,
+            registry_fingerprint=registry,
+            registry_skill_facts=(),
+            projection_input=projection,
+        ),
+    )
+    return collector.collect(
+        activation_subject=activation_subject,
+        activation_text=activation_text,
+        tool_surface=tool_surface,
+        canonical_facts=canonical_facts,
+        tool_exposure_plan=_test_round9_tool_exposure_plan(
+            tool_surface,
+            dispatch_cut_fingerprint=parent,
+        ),
+        skill_dispatch_view=skill_view,
+        skill_owner_snapshot=owner,
+    )
+
+
 _SOURCE_FACTS = {
     ContextSourceKind.BASE_SYSTEM: (
-        "pulsara.base-system.prefix-continuity.v4",
+        "pulsara.base-system.prefix-continuity.v5-unified-capability",
         ContextChannel.SYSTEM,
         ContextTrustClass.ROOT_INSTRUCTION,
         ContextBudgetClass.MUST_KEEP,
@@ -245,8 +417,8 @@ _SOURCE_FACTS = {
         (ContextRenderMode.FULL, ContextRenderMode.COMPACT),
         ContextSourceLifecycle.TURN_APPEND,
     ),
-    ContextSourceKind.CAPABILITY_CATALOG: (
-        "pulsara.capability-catalog.v2",
+    ContextSourceKind.SKILL_CATALOG: (
+        "pulsara.skill-catalog.v1",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.AUTHORIZED_CAPABILITY_CONTEXT,
         ContextBudgetClass.IMPORTANT,
@@ -260,7 +432,7 @@ _SOURCE_FACTS = {
         ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
     ),
     ContextSourceKind.MCP_CATALOG: (
-        "pulsara.mcp-catalog.v2",
+        "pulsara.mcp-catalog.v3-round9-routes",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.UNTRUSTED_OBSERVATION,
         ContextBudgetClass.IMPORTANT,
@@ -455,7 +627,7 @@ def _sources(
         ContextSourceKind.RUNTIME_CLOCK: ContextSourceAbsenceKind.UNAVAILABLE,
         ContextSourceKind.PLAN_HANDOFF: ContextSourceAbsenceKind.NOT_APPLICABLE,
         ContextSourceKind.PLAN_WORKFLOW: ContextSourceAbsenceKind.EXPLICIT_EMPTY,
-        ContextSourceKind.CAPABILITY_CATALOG: ContextSourceAbsenceKind.EXPLICIT_EMPTY,
+        ContextSourceKind.SKILL_CATALOG: ContextSourceAbsenceKind.EXPLICIT_EMPTY,
         ContextSourceKind.MCP_CATALOG: ContextSourceAbsenceKind.NOT_APPLICABLE,
         ContextSourceKind.ACTIVE_SKILL: ContextSourceAbsenceKind.EXPLICIT_EMPTY,
         ContextSourceKind.PREVIOUS_TURN_OUTCOME: (
@@ -705,7 +877,8 @@ def _prepared_request(
             provider_profile=provider_profile,
         )
     )
-    prepared = model.prepare_call(
+    prepared = prepare_test_model_call(
+        model,
         KernelModelPreparationRequest(
             session_id=snapshot.identity.session_id,
             turn_id=snapshot.identity.turn_id,
@@ -935,6 +1108,26 @@ def _compile_and_install_append(
         compatibility=compatibility,
         compiled_result=result,
         wire_input_plan=wire_input_plan,
+        capability_dispatch_cut_fingerprint=context_fingerprint(
+            "test:capability-dispatch-cut:v1",
+            prepared_call.native_projection_set.projection_set_fingerprint,
+        ),
+        direct_native_projection_set=prepared_call.native_projection_set,
+        mcp_route_projection=FrozenMcpRouteProjection(
+            routes=(),
+            joined_catalog_semantic_fingerprint=context_fingerprint(
+                "test:empty-mcp-catalog:v1", ()
+            ),
+            projection_fingerprint=context_fingerprint(
+                "mcp-route-projection:v1",
+                {
+                    "routes": (),
+                    "catalog": context_fingerprint(
+                        "test:empty-mcp-catalog:v1", ()
+                    ),
+                },
+            ),
+        ),
     )
     owner.register(candidate)
     owner.install(
@@ -1287,7 +1480,7 @@ def test_round3_1_plan_handoff_occurrence_uses_canonical_transition_identity(
     )
 
     def collect(facts: FrozenCanonicalCompileSnapshot) -> CollectedContextSources:
-        return collector.collect(
+        return _collect_context_sources(collector,
             activation_subject=None,
             activation_text="",
             tool_surface=surface,
@@ -1468,7 +1661,7 @@ def test_round3_1_two_plan_revisions_in_one_epoch_have_distinct_occurrences(
     )
     candidates = []
     for item in (facts(2, "6"), facts(3, "7")):
-        collected = collector.collect(
+        collected = _collect_context_sources(collector,
             activation_subject=None,
             activation_text="",
             tool_surface=surface,
@@ -1530,7 +1723,7 @@ def test_round3_1_compiler_requires_exact_value_or_absent_for_every_source() -> 
     absent = tuple(
         item
         for item in valid.absent_facts
-        if item.source_kind is not ContextSourceKind.CAPABILITY_CATALOG
+        if item.source_kind is not ContextSourceKind.SKILL_CATALOG
     )
     collection = context_fingerprint(
         "collected-context-sources:v1",
@@ -1616,7 +1809,7 @@ def test_round3_system_placement_is_independent_of_input_order() -> None:
     candidates = (
         _candidate(ContextSourceKind.ACTIVE_SKILL, ("ACTIVE",)),
         _candidate(
-            ContextSourceKind.CAPABILITY_CATALOG,
+            ContextSourceKind.SKILL_CATALOG,
             ("CATALOG FULL LONG", "CATALOG", "CAT"),
         ),
         _candidate(
@@ -1636,7 +1829,7 @@ def test_round3_system_placement_is_independent_of_input_order() -> None:
     assert tuple(item.source_kind for item in observations) == (
         ContextSourceKind.RUNTIME_ENVIRONMENT,
         ContextSourceKind.RUN_PERMISSION,
-        ContextSourceKind.CAPABILITY_CATALOG,
+        ContextSourceKind.SKILL_CATALOG,
         ContextSourceKind.ACTIVE_SKILL,
         ContextSourceKind.TOOL_OBSERVATION_FRESHNESS,
     )
@@ -1978,7 +2171,7 @@ def test_round3_nonprogress_variant_is_bounded_and_then_omitted() -> None:
 
 def test_round3_catalog_walks_full_compact_reference_then_omitted() -> None:
     catalog = _candidate(
-        ContextSourceKind.CAPABILITY_CATALOG,
+        ContextSourceKind.SKILL_CATALOG,
         ("FULL " * 800, "COMPACT " * 180, "REF " * 20),
     )
 
@@ -1996,7 +2189,7 @@ def test_round3_catalog_walks_full_compact_reference_then_omitted() -> None:
         decision = next(
             item
             for item in current.source_decisions
-            if item.source_kind is ContextSourceKind.CAPABILITY_CATALOG
+            if item.source_kind is ContextSourceKind.SKILL_CATALOG
         )
         decisions.append(decision.selected_mode)
         if decision.selected_mode is None:
@@ -2225,31 +2418,81 @@ class _TerminalCwd:
 class _Capability:
     def __init__(self) -> None:
         self.inputs: list[tuple[str, frozenset[str]]] = []
+        self._owner_authenticity = object()
 
     def resolve_projection(self, *, user_input: str, available_tool_names):
         self.inputs.append((user_input, available_tool_names))
-        return CapabilityProjectionOutput()
+        return SkillProjectionOutput()
 
-    def freeze_projection_input(self, *, available_tool_names):
-        return SimpleNamespace(
-            available_tool_names=available_tool_names,
-            snapshot_fingerprint=context_fingerprint(
-                "test:frozen-capability-input:v1",
-                {"tools": tuple(sorted(available_tool_names))},
+    def freeze_owner_snapshot(
+        self,
+        *,
+        conversation_scope_kind,
+        scope_subagent_task_id,
+        deadline_monotonic=None,
+    ):
+        del deadline_monotonic
+        source = capability_source_ref(
+            CapabilitySourceKind.LOCAL_SKILL_CATALOG,
+            "test-round3-skill-catalog",
+        )
+        registration = capability_source_registration(
+            source=source,
+            refresh_mode=CapabilitySourceRefreshMode.SAFE_POINT_REFRESHABLE,
+            source_contract_fingerprint=context_fingerprint(
+                "test:round3-skill-source-contract:v1", "empty"
             ),
         )
-
-    def resolve_projection_from_frozen(self, frozen, *, user_input: str):
-        return self.resolve_projection(
-            user_input=user_input,
-            available_tool_names=frozen.available_tool_names,
+        snapshot = freeze_capability_source_snapshot(
+            registration=registration,
+            conversation_scope_kind=conversation_scope_kind,
+            scope_subagent_task_id=scope_subagent_task_id,
+            disposition=CapabilitySourceSnapshotDisposition.COMPLETE,
+            facts=(),
         )
+        return issue_local_skill_catalog_source_snapshot(
+            conversation_scope_kind=conversation_scope_kind,
+            scope_subagent_task_id=scope_subagent_task_id,
+            source_snapshot=snapshot,
+            discovery=LocalSkillDiscovery((), ()),
+            owner_authenticity=self._owner_authenticity,
+        )
+
+    def freeze_projection_input(self, owner):
+        if owner.owner_authenticity is not self._owner_authenticity:
+            raise ValueError("foreign test Skill owner")
+        discovery = context_fingerprint("test:round3-skill-discovery:v1", ())
+        snapshot = skill_projection_input_fingerprint(
+            discovery_semantic_fingerprint=discovery,
+            source_snapshot_fingerprint=(
+                owner.source_snapshot.source_snapshot_fingerprint
+            ),
+        )
+        return FrozenSkillProjectionInput(
+            discovery_semantic_fingerprint=discovery,
+            source_snapshot_fingerprint=(
+                owner.source_snapshot.source_snapshot_fingerprint
+            ),
+            snapshot_fingerprint=snapshot,
+        )
+
+    def activation_context(self, *, user_input: str):
+        return SimpleNamespace(user_input=user_input)
+
+    def compose(self, *, view, owner, activation_subject):
+        if owner.owner_authenticity is not self._owner_authenticity:
+            raise ValueError("foreign test Skill owner")
+        output = self.resolve_projection(
+            user_input=activation_subject.user_input,
+            available_tool_names=frozenset(),
+        )
+        return output
 
 
 class _SensitiveCapability(_Capability):
     def resolve_projection(self, *, user_input: str, available_tool_names):
         self.inputs.append((user_input, available_tool_names))
-        return CapabilityProjectionOutput(
+        return SkillProjectionOutput(
             catalog_entries=(
                 ResolvedSkillCatalogEntry(
                     name="demo",
@@ -2258,7 +2501,7 @@ class _SensitiveCapability(_Capability):
                 ),
             ),
             diagnostics=(
-                CapabilityDiagnostic(
+                SkillDiagnostic(
                     severity="error",
                     code="unknown_private_failure",
                     message="secret diagnostic detail",
@@ -2267,6 +2510,44 @@ class _SensitiveCapability(_Capability):
             ),
             catalog_prompt="CATALOG FULL",
             active_skill_prompt="ACTIVE FULL",
+        )
+
+
+class _UnavailableCapability(_Capability):
+    def freeze_owner_snapshot(
+        self,
+        *,
+        conversation_scope_kind,
+        scope_subagent_task_id,
+        deadline_monotonic=None,
+    ):
+        owner = super().freeze_owner_snapshot(
+            conversation_scope_kind=conversation_scope_kind,
+            scope_subagent_task_id=scope_subagent_task_id,
+            deadline_monotonic=deadline_monotonic,
+        )
+        snapshot = freeze_capability_source_snapshot(
+            registration=owner.source_snapshot.registration,
+            conversation_scope_kind=conversation_scope_kind,
+            scope_subagent_task_id=scope_subagent_task_id,
+            disposition=CapabilitySourceSnapshotDisposition.UNAVAILABLE,
+            facts=(),
+        )
+        return issue_local_skill_catalog_source_snapshot(
+            conversation_scope_kind=conversation_scope_kind,
+            scope_subagent_task_id=scope_subagent_task_id,
+            source_snapshot=snapshot,
+            discovery=LocalSkillDiscovery(
+                (),
+                (
+                    SkillDiagnostic(
+                        severity="error",
+                        code="skill_catalog_unavailable",
+                        message="private discovery failure",
+                    ),
+                ),
+            ),
+            owner_authenticity=self._owner_authenticity,
         )
 
 
@@ -2281,10 +2562,48 @@ class _LargeCatalogCapability(_Capability):
             )
             for index in range(40)
         )
-        return CapabilityProjectionOutput(
+        return SkillProjectionOutput(
             catalog_entries=entries,
             catalog_prompt="FULL-CATALOG\n" + ("catalog context " * 560),
         )
+
+
+def test_round9_unavailable_skill_catalog_is_not_misreported_as_empty(
+    tmp_path: Path,
+) -> None:
+    collector = KernelContextSourceCollector(
+        workspace_kind="project",
+        workspace_root=tmp_path,
+        terminal_cwd=_TerminalCwd(tmp_path),
+        capability_composer=_UnavailableCapability(),  # type: ignore[arg-type]
+        base_system_prompt="BASE",
+        display_timezone=timezone.utc,
+        clock=lambda: datetime(2026, 8, 12, tzinfo=timezone.utc),
+    )
+    surface = (
+        StructuredToolPort(object(), tool_names=())
+        .snapshot_tool_surface(
+            conversation_scope_kind=ModelInputScopeKind.ROOT,
+            scope_subagent_task_id=None,
+        )
+        .model_surface
+    )
+    collected = _collect_context_sources(
+        collector,
+        activation_subject=CapabilityActivationSubjectKind.ROOT_HUMAN_PROMPT,
+        activation_text="skill:missing",
+        tool_surface=surface,
+        canonical_facts=_canonical_facts(),
+    )
+    absence = {
+        item.source_kind: item.absence_kind for item in collected.absent_facts
+    }
+    assert absence[ContextSourceKind.SKILL_CATALOG] is (
+        ContextSourceAbsenceKind.UNAVAILABLE
+    )
+    assert absence[ContextSourceKind.ACTIVE_SKILL] is (
+        ContextSourceAbsenceKind.UNAVAILABLE
+    )
 
 
 def test_round3_temporal_capture_is_single_and_dst_consistent(tmp_path: Path) -> None:
@@ -2314,7 +2633,7 @@ def test_round3_temporal_capture_is_single_and_dst_consistent(tmp_path: Path) ->
         )
         .model_surface
     )
-    collected = collector.collect(
+    collected = _collect_context_sources(collector,
         activation_subject=CapabilityActivationSubjectKind.ROOT_HUMAN_PROMPT,
         activation_text="$skill demo",
         tool_surface=surface,
@@ -2322,7 +2641,9 @@ def test_round3_temporal_capture_is_single_and_dst_consistent(tmp_path: Path) ->
     )
     assert clock_calls == 1
     assert terminal.calls == 1
-    assert capability.inputs == [("$skill demo", frozenset({"terminal"}))]
+    # Round 9 Skill discovery is independent from the startup Tool allowlist;
+    # Tool capability routing is owned by the sibling Tool view.
+    assert capability.inputs == [("$skill demo", frozenset())]
     by_kind = {candidate.source_kind: candidate for candidate in collected.candidates}
     environment = by_kind[ContextSourceKind.RUNTIME_ENVIRONMENT].variants[0].text
     clock_text = by_kind[ContextSourceKind.RUNTIME_CLOCK].variants[0].text
@@ -2367,7 +2688,7 @@ def test_round3_unkeyed_timezone_is_frozen_to_opening_offset(tmp_path: Path) -> 
         )
         .model_surface
     )
-    collected = collector.collect(
+    collected = _collect_context_sources(collector,
         activation_subject=CapabilityActivationSubjectKind.ROOT_HUMAN_PROMPT,
         activation_text="hello",
         tool_surface=surface,
@@ -2407,7 +2728,7 @@ def test_round3_temporal_failure_samples_once_and_omits_clock(tmp_path: Path) ->
         )
         .model_surface
     )
-    collected = collector.collect(
+    collected = _collect_context_sources(collector,
         activation_subject=CapabilityActivationSubjectKind.ROOT_HUMAN_PROMPT,
         activation_text="hello",
         tool_surface=surface,
@@ -2450,14 +2771,14 @@ def test_round3_capability_sources_and_public_diagnostics_are_separate(
         )
         .model_surface
     )
-    collected = collector.collect(
+    collected = _collect_context_sources(collector,
         activation_subject=CapabilityActivationSubjectKind.ROOT_HUMAN_PROMPT,
         activation_text="skill:demo",
         tool_surface=surface,
         canonical_facts=_canonical_facts(),
     )
     by_kind = {candidate.source_kind: candidate for candidate in collected.candidates}
-    assert by_kind[ContextSourceKind.CAPABILITY_CATALOG].variants[0].text == (
+    assert by_kind[ContextSourceKind.SKILL_CATALOG].variants[0].text == (
         "CATALOG FULL"
     )
     assert by_kind[ContextSourceKind.ACTIVE_SKILL].variants[0].text == "ACTIVE FULL"
@@ -2489,7 +2810,7 @@ def test_round3_large_catalog_renderer_never_inverts_declared_variants(
         )
         .model_surface
     )
-    collected = collector.collect(
+    collected = _collect_context_sources(collector,
         activation_subject=CapabilityActivationSubjectKind.ROOT_HUMAN_PROMPT,
         activation_text="hello",
         tool_surface=surface,
@@ -2500,7 +2821,7 @@ def test_round3_large_catalog_renderer_never_inverts_declared_variants(
     catalog = next(
         item
         for item in collected.candidates
-        if item.source_kind is ContextSourceKind.CAPABILITY_CATALOG
+        if item.source_kind is ContextSourceKind.SKILL_CATALOG
     )
     costs = tuple(
         request.compile_binding.estimator.estimate_text(variant.text)
@@ -2511,7 +2832,7 @@ def test_round3_large_catalog_renderer_never_inverts_declared_variants(
         next(
             item
             for item in compiled.source_decisions
-            if item.source_kind is ContextSourceKind.CAPABILITY_CATALOG
+            if item.source_kind is ContextSourceKind.SKILL_CATALOG
         ).selected_mode
         is ContextRenderMode.FULL
     )
@@ -2540,7 +2861,7 @@ def test_round3_runtime_path_is_fixed_escaped_and_cannot_leave_workspace(
         )
         .model_surface
     )
-    collected = collector.collect(
+    collected = _collect_context_sources(collector,
         activation_subject=CapabilityActivationSubjectKind.ROOT_HUMAN_PROMPT,
         activation_text="hello",
         tool_surface=surface,
@@ -2560,7 +2881,7 @@ def test_round3_runtime_path_is_fixed_escaped_and_cannot_leave_workspace(
 
     terminal.value = tmp_path.parent
     with pytest.raises(ValueError, match="outside"):
-        collector.collect(
+        _collect_context_sources(collector,
             activation_subject=CapabilityActivationSubjectKind.ROOT_HUMAN_PROMPT,
             activation_text="hello",
             tool_surface=surface,
@@ -2619,10 +2940,11 @@ def test_round3_runtime_source_tracks_foreground_cwd_but_not_yielded_cwd(
             display_timezone=timezone.utc,
             clock=lambda: datetime(2026, 8, 12, tzinfo=timezone.utc),
         )
-        collected = collector.collect(
+        collected = _collect_context_sources(collector,
             activation_subject=CapabilityActivationSubjectKind.ROOT_HUMAN_PROMPT,
             activation_text="hello",
-            tool_surface=port.snapshot_tool_surface(
+            tool_surface=prepare_test_direct_tool_surface(
+                port,
                 conversation_scope_kind=ModelInputScopeKind.ROOT,
                 scope_subagent_task_id=None,
             ).model_surface,
@@ -2687,11 +3009,13 @@ def test_round3_tool_owner_rejects_foreign_host_surface_borrow(tmp_path: Path) -
             for name in ("a", "b")
         )
         owner, foreign = ports
-        owner_surface = owner.snapshot_tool_surface(
+        owner_surface = prepare_test_direct_tool_surface(
+            owner,
             conversation_scope_kind=ModelInputScopeKind.ROOT,
             scope_subagent_task_id=None,
         )
-        foreign_surface = foreign.snapshot_tool_surface(
+        foreign_surface = prepare_test_direct_tool_surface(
+            foreign,
             conversation_scope_kind=ModelInputScopeKind.ROOT,
             scope_subagent_task_id=None,
         )
@@ -2766,11 +3090,13 @@ def test_round3_tool_surface_excludes_root_only_monitor_and_schema_is_frozen(
         live_bus=LiveAgentEventBus(),
         authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
     )
-    root = port.snapshot_tool_surface(
+    root = prepare_test_direct_tool_surface(
+        port,
         conversation_scope_kind=ModelInputScopeKind.ROOT,
         scope_subagent_task_id=None,
     )
-    child = port.snapshot_tool_surface(
+    child = prepare_test_direct_tool_surface(
+        port,
         conversation_scope_kind=ModelInputScopeKind.SUBAGENT_TASK,
         scope_subagent_task_id="task:test",
     )
@@ -2788,17 +3114,11 @@ def test_round3_tool_surface_excludes_root_only_monitor_and_schema_is_frozen(
         terminal.parameters["type"] = "array"  # type: ignore[index]
     borrow = port.borrow_tool_surface(root)
     old_binding = borrow.binding_fingerprint("terminal")
-    port.bind_subagent_port(SimpleNamespace(tool_names=frozenset({"spawn_agent"})))
+    with pytest.raises(RuntimeError, match="sealed"):
+        port.bind_subagent_port(
+            SimpleNamespace(tool_names=frozenset({"spawn_agent"}))
+        )
     assert borrow.binding_fingerprint("terminal") == old_binding
-    with pytest.raises(RuntimeError, match="retiring"):
-        port.borrow_tool_surface(root)
-    replacement = port.snapshot_tool_surface(
-        conversation_scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
-    )
-    assert "spawn_agent" in {
-        tool.name for tool in replacement.model_surface.tool_specs
-    }
     borrow.close()
     asyncio.run(port.aclose(timeout_seconds=2))
 
@@ -2972,13 +3292,13 @@ def test_round3_source_decision_and_compiled_fingerprints_are_golden() -> None:
     )
     compiled = StructuredModelInputCompiler().compile(request)
     assert compiled.source_collection_fingerprint == (
-        "sha256:c36805247bf57d3ad481b791cc683a94ad63ed35ea8f64fb394719f4ec8513a3"
+        "sha256:7412c61d4445cc67e0cfbcf91269cd2775bae9431783006723ba51bf19f4186d"
     )
     assert compiled.budget_report.decision_digest == (
         "sha256:caee1ae23a161f2c862947ef5b7b2b9a4ae3093bce6117e00bc13a3a19058fbd"
     )
     assert compiled.compiled_semantic_fingerprint == (
-        "sha256:61cd8b30cc6b44ade98b950c589004ee90a0ab58bd44ca19d1e3f7536588c0db"
+        "sha256:b8d4c4b647b9d4374c6ab99f7f61f38f3a03560484ee002d6fb3de4668c3f48d"
     )
     assert compiled.final_estimate.total_input_tokens == 268
 
@@ -3544,7 +3864,7 @@ def test_round3_1_stateful_source_presence_matrix_is_exact(
 ) -> None:
     """Cover the complete VALUE/CLEARED/UNAVAILABLE replacement matrix."""
 
-    kind = ContextSourceKind.CAPABILITY_CATALOG
+    kind = ContextSourceKind.SKILL_CATALOG
 
     def source_state(presence: str, semantic: str):
         if presence == "VALUE":
