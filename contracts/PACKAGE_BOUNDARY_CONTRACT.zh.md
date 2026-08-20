@@ -3,8 +3,8 @@
 ## 1. Production roots
 
 Production Host唯一入口是 `conversation_kernel.host.KernelHostCore`，公共 facade
-`pulsara_agent.host.HostCore`只是 exact alias。CLI `host run/repl/tui`只构造 Kernel与 Protocol
-v3。
+`pulsara_agent.host.HostCore`只是 exact alias。CLI `host run/repl`只构造
+`KernelHostCore`。
 
 Canonical implementation位于：
 
@@ -12,7 +12,7 @@ Canonical implementation位于：
 - `terminal_protocol/` v3；
 - `storage/migrations/` clean universe；
 - `storage/postgres_connection_provider.py` binding v2；
-- neutral `terminal_process/`与`terminal_client/` supervision；
+- `terminal_process/`工具的process-local execution owner；
 - current `llm/` normalized transport与 `capability/` catalog。
 
 ## 2. Forbidden production packages
@@ -37,6 +37,6 @@ Obsolete test只有在对应 production owner同一 slice删除且 canonical suc
 
 ## 4. CLI 与 settings
 
-CLI只公开 Host run/repl/tui/inspect、skills、db status/migrate/verify与config-check。Settings只
+CLI只公开Host run/repl、skills、MCP配置管理、db status/migrate/verify与config-check。Settings只
 接受 LLM、PostgreSQL与embedding配置，不接受 Oxigraph、SPARQL、projection worker或runtime-write
 epoch配置。

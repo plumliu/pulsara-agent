@@ -157,7 +157,7 @@ def test_stage2_production_imports_do_not_initialize_legacy_authority_graphs() -
 import json
 import sys
 import pulsara_agent.conversation_kernel.host
-import pulsara_agent.terminal_client.v3_launcher
+import pulsara_agent.terminal_protocol.v3_gateway
 
 forbidden = (
     "pulsara_agent.event",
@@ -262,30 +262,29 @@ def test_stage2_product_contract_survives_the_clean_migration_universe() -> None
     }
 
 
-def test_stage2_ordinary_host_and_terminal_binary_select_only_kernel_v3() -> None:
+def test_stage2_ordinary_host_and_renderer_neutral_protocol_select_kernel_v3() -> None:
     from pulsara_agent.conversation_kernel.host import KernelHostCore
-    from pulsara_agent.terminal_client import launch_terminal_kernel_client as public
-    from pulsara_agent.terminal_client.v3_launcher import (
-        launch_terminal_kernel_client,
-    )
+    from pulsara_agent.terminal_protocol import TerminalKernelProtocolServer
 
     assert KernelHostCore.__module__ == "pulsara_agent.conversation_kernel.host"
+    assert TerminalKernelProtocolServer.__module__ == (
+        "pulsara_agent.terminal_protocol.v3_gateway"
+    )
     assert not (ROOT / "src/pulsara_agent/host").exists()
-    assert public is launch_terminal_kernel_client
+    assert not (ROOT / "src/pulsara_agent/terminal_client").exists()
+    assert not (ROOT / "clients/terminal").exists()
     cli = (ROOT / "src/pulsara_agent/cli.py").read_text(encoding="utf-8")
     assert "result = asyncio.run(_kernel_host_run(args))" in cli
     assert "asyncio.run(_kernel_host_repl(args))" in cli
-    assert "asyncio.run(_kernel_host_tui(args))" in cli
-    binary = (ROOT / "clients/terminal/cmd/pulsara-tui/main.go").read_text(
-        encoding="utf-8"
-    )
-    assert "kernelbootstrap.Run" in binary
-    assert "internal/bootstrap" not in binary
-    launcher = (ROOT / "src/pulsara_agent/terminal_client/v3_launcher.py").read_text(
-        encoding="utf-8"
-    )
-    assert "TerminalKernelProtocolServer" in launcher
-    assert "terminal_presentation" not in launcher
+    assert "_kernel_host_tui" not in cli
+    assert "_host_inspect" not in cli
+    assert 'host_commands.add_parser("tui")' not in cli
+    assert 'host_commands.add_parser("inspect")' not in cli
+    gateway = (
+        ROOT / "src/pulsara_agent/terminal_protocol/v3_gateway.py"
+    ).read_text(encoding="utf-8")
+    assert "class TerminalKernelProtocolServer" in gateway
+    assert "terminal_presentation" not in gateway
 
 
 def test_stage2_protocol_v3_does_not_expose_durable_event_or_blob_identity() -> None:
@@ -293,6 +292,7 @@ def test_stage2_protocol_v3_does_not_expose_durable_event_or_blob_identity() -> 
         ROOT / "src/pulsara_agent/terminal_protocol/schema/terminal_kernel_v3.proto"
     ).read_text(encoding="utf-8")
     assert "package pulsara.terminal.v3;" in proto
+    assert "go_package" not in proto
     assert "StoredCommittedEvent" not in proto
     assert "RawStoredEvent" not in proto
     assert "string blob_id" not in proto

@@ -24,8 +24,7 @@ Python KernelHostCore
 ├── exact-one durable job executor
 ├── advisory memory governor + retrieval
 ├── process-local live event bus
-└── Terminal Protocol v3 gateway
-        └── Go terminal client
+└── renderer-neutral Protocol v3 gateway
 
 PostgreSQL
 ├── pulsara_v3: 26 product relations
@@ -41,7 +40,7 @@ The durable boundary is intentionally narrow:
   the advisory dataset;
 - a closed 31-type `agent_events` journal records accepted occurrences but is
   never replayed to reconstruct execution;
-- 23 live event types exist only in memory and may be lost at process exit;
+- 24 live event types exist only in memory and may be lost at process exit;
 - tool requests are committed before dispatch and a physical attempt is
   committed before an effect is invoked;
 - a crash interrupts the active turn; reopening rehydrates accepted
@@ -108,7 +107,8 @@ The current Kernel supports:
 Round 6 intentionally does not add durable MCP connection or request recovery.
 Host replacement reconnects from configuration. Form/private-URL elicitation,
 OAuth, MCP-backed skill activation, server-initiated Sampling/Roots, Apps/Tasks,
-and an advanced Go MCP UI remain explicit non-goals.
+and a bundled terminal UI remain explicit non-goals. A future Web or desktop
+client may consume Protocol v3 without becoming a second canonical authority.
 Workspace-owned MCP entries remain disabled during ordinary Host startup unless
 the user explicitly passes `--trust-workspace-mcp`; merely opening a repository
 can never execute its stdio command or resolve its HTTP secret references.
@@ -118,7 +118,6 @@ can never execute its stdio command or resolve its HTTP secret references.
 - Python 3.12+
 - [`uv`](https://docs.astral.sh/uv/)
 - PostgreSQL with `public.vector >= 0.5.0`
-- Go only when building the optional terminal client
 
 ## Setup
 
@@ -273,33 +272,13 @@ uv run pulsara host repl \
   --continue
 ```
 
-Inspect the available composition without opening a session:
+## Client boundary
 
-```sh
-uv run pulsara host inspect \
-  --env-file .env \
-  --workspace /path/to/project
-```
-
-## Terminal client
-
-Build the Protocol v3 Go client:
-
-```sh
-cd clients/terminal
-mkdir -p bin
-go build -trimpath -o bin/pulsara-tui ./cmd/pulsara-tui
-cd ../..
-
-uv run pulsara host tui \
-  --env-file .env \
-  --workspace /path/to/project \
-  --tui-binary "$PWD/clients/terminal/bin/pulsara-tui"
-```
-
-Python owns canonical state, commands, policy, secrets, and recovery. The Go
-client owns rendering and interaction only. Protocol v2 and Presentation
-Foundation are not retained.
+The bundled Go TUI has been removed. Protocol v3 remains the renderer-neutral
+transport boundary for a future Web or desktop client. Python continues to own
+canonical state, commands, policy, secrets, and recovery; a client may only
+render snapshots, consume live events, and submit the typed commands admitted
+by the gateway. Protocol v2 and Presentation Foundation are not retained.
 
 ## Development
 
@@ -308,7 +287,6 @@ uv run ruff check .
 uv run pytest -q
 uv run python -m compileall -q src tests
 uv run python tools/generate_terminal_protocol_contract.py --check
-(cd clients/terminal && go test ./... && go vet ./...)
 git diff --check
 ```
 

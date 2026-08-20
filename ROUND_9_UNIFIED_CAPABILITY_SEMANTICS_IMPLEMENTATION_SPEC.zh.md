@@ -2065,7 +2065,7 @@ bounded inspect可以展示：
 - Round 7 ToolResult observation；
 - Round 8 memory/permission；
 - full PostgreSQL suite；
-- Go tests/vet/module verify；
+- Protocol v3 Python contract/generator与architecture gates；
 - clean-v0 fresh/repeat/deep verify。
 
 ### 13.10 Real provider dogfood
@@ -2179,7 +2179,7 @@ Dogfood不得记录API key、DSN、完整prompt、MCP arguments/body、headers�
 
 ### Slice C5：Activation证据
 
-- targeted、full、PostgreSQL、architecture、Go；
+- targeted、full、PostgreSQL、Protocol与architecture；
 - real provider direct/meta dogfood；
 - README/Gap Index更新；
 - activation evidence hashes与oracle；

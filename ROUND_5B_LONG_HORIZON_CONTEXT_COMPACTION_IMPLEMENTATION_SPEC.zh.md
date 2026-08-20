@@ -656,11 +656,10 @@ lane与fence的取得顺序固定为：
 
 ### 5.4 Compaction期间的用户输入
 
-产品语义不是“steer compaction model”。对安装了fence的exact target scope，在compaction期间：
+产品语义不是“steer compaction model”。Pulsara当前不随Runtime发布交互式client；对安装了fence的exact target scope，在compaction期间，Protocol/Host边界固定为：
 
-- TUI composer仍允许用户输入；
-- Enter/Tab不发送STEER、SUBMIT_PROMPT或QUEUE_PROMPT wire command；
-- client将文本和stable command candidate保留在bounded process-local deferred lane；
+- Server拒绝目标scope的STEER、SUBMIT_PROMPT或QUEUE_PROMPT并返回`COMPACTION_IN_PROGRESS`；
+- 外部Web/Desktop/headless client可以继续编辑，并自行把文本和stable command candidate保留在bounded process-local deferred lane；
 - 文本不进入summary request、source cut、snapshot或runtime handoff；
 - compaction FULL后，client才按当时正常session状态提交；
 - compaction失败后，旧turn恢复，client同样按普通routing提交；
@@ -1795,7 +1794,7 @@ Auto compaction failure不应立即interrupt一个仍能完成当前provider cal
 
 ---
 
-## 15. Protocol、Host API与最小TUI语义
+## 15. Protocol与Host API
 
 ### 15.1 Manual command
 
@@ -1837,19 +1836,11 @@ input_admission_deferred
 
 不新增LiveEventType。字段只用于当前Host UX，disconnect/reconnect后从Host owner重建；不得写PostgreSQL。
 
-### 15.3 Go/TUI最小闭环
+### 15.3 Client集成边界
 
-Round 5B activation至少要求：
+Round 5B只要求headless Host API与Protocol能够发出manual compact、重建bounded compaction状态，并对fence期间的目标scope command给出typed拒绝。仓库不随本轮提供Go/TUI、Web或Desktop实现，也不把client-local draft/deferred lane计入activation。
 
-- 能发出manual compact；
-- 显示compaction进行中/完成/失败的bounded status；
-- composer目标为正在compact的exact scope时可编辑但不发wire；无关scope正常提交；
-- fence释放后提交local deferred input；
-- 不把deferred input显示成已accepted steer；
-- publictext.Transform处理summary/status preview；
-- 不实现snapshot diff、artifact inventory或advanced dashboard。
-
-如果Python activation先于Go polished UI，Gap Index必须明确“headless/Protocol manual入口已闭合，完整TUI UX待补”，不能宣传用户已获得无感deferred composer。
+未来client可以基于现有Protocol实现编辑、状态展示与fence释放后的重新提交，但不得把未发送draft显示成accepted steer，不得要求Server为local draft建立receipt或durable queue，也不得为snapshot diff、artifact inventory或dashboard反向扩张compaction authority。
 
 ---
 
@@ -2104,7 +2095,7 @@ Round 5A.2、Round 7.1、Round 9、Round 9.1与Lightweight TODO refinement必须
 - Host-owned settlement/cancel/close；
 - deferred input live control。
 
-### R5B-F：Protocol/minimal Go/activation evidence
+### R5B-F：Protocol/renderer-neutral projection/activation evidence
 
 - COMPACT_CONTEXT；
 - live status/deferred composer；
@@ -2283,7 +2274,7 @@ summary actual input == exact FrozenProviderWireInputPlan materialization
 - compaction中steer/new-turn/monitor installation不进入source cut；
 - child compaction期间ROOT与其他child可继续；只有会改变exact target source head/binding的external result installation被延后；
 - scope B在scope A持有global lane时不会提前安装fence；取得lane后必须recapture B target，所有DB/provider await均证明未持Host lock；
-- TUI local input不发wire，success/failure后再正常提交；
+- external client的local draft不发wire，success/failure后可按普通routing重新提交；
 - no provider context-error reactive retry；
 - 3次auto failure circuit；
 - one compaction per dispatch。
@@ -2446,9 +2437,6 @@ uv run ruff check src tests
 uv run python -m compileall -q src tests
 uv lock --check
 git diff --check
-go test ./...
-go vet ./...
-go mod verify
 ~~~
 
 实际文件名以coding agent新增node为准；activation evidence必须保存pytest collection前后node-ID集合，不能用“总数相等”替代retained tests。

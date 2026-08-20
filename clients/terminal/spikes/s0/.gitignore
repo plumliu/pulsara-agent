@@ -1,5 +1,0 @@
-/.tools/
-/.ruff_cache/
-/dist/
-/evidence/*.tmp
-/probe_wire/__pycache__/

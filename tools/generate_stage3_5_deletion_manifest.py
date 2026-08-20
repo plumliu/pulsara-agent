@@ -47,10 +47,10 @@ RULES = (
     Rule(
         "src/pulsara_agent/terminal_client/process_supervision.py",
         3,
-        "extract-neutral-leaf",
-        "Protocol v3 child/TTY supervision",
-        "same v3-only supervision leaf",
-        "tests/test_stage2_tui_cross_language.py",
+        "delete",
+        "retired bundled client process/TTY supervision",
+        "renderer-neutral Protocol v3 Gateway; no bundled client",
+        "tests/test_stage2_architecture.py",
     ),
     Rule(
         "src/pulsara_agent/mcp_config.py",
@@ -242,7 +242,7 @@ RULES = (
         "delete",
         "Protocol v2 generated carriers",
         "Protocol v3 generated carriers",
-        "tests/test_stage2_tui_cross_language.py",
+        "tests/test_stage2_protocol_v3.py",
     ),
     Rule(
         "src/pulsara_agent/terminal_protocol/schema/terminal_client.proto",
@@ -250,7 +250,7 @@ RULES = (
         "delete",
         "Protocol v2 wire schema",
         "terminal_kernel_v3.proto",
-        "tests/test_stage2_tui_cross_language.py",
+        "tests/test_stage2_protocol_v3.py",
     ),
     Rule(
         "src/pulsara_agent/storage/runtime_write_admission.py",
@@ -273,24 +273,24 @@ RULES = (
         3,
         "delete",
         "Protocol v2 root-indexed client presentation",
-        "kernelapp Protocol v3 sequence state",
-        "clients/terminal/internal/kernelapp/model_test.go",
+        "no bundled client; Protocol v3 projection remains in Python",
+        "tests/test_stage2_architecture.py",
     ),
     Rule(
         "clients/terminal/internal/protocolvalue/",
         3,
         "delete",
         "Protocol v2 value carriers",
-        "protocolv3 generated carriers",
-        "clients/terminal/internal/kernelapp/model_test.go",
+        "Protocol v3 Python generated carriers",
+        "tests/test_stage2_protocol_v3.py",
     ),
     Rule(
         "clients/terminal/internal/protocol/",
         3,
         "delete",
         "Protocol v2 client codec",
-        "protocolv3 generated carriers",
-        "clients/terminal/internal/kernelapp/model_test.go",
+        "Protocol v3 Python generated carriers",
+        "tests/test_stage2_protocol_v3.py",
     ),
     Rule(
         "src/pulsara_agent/runtime/terminal/manager.py",
@@ -311,10 +311,10 @@ RULES = (
     Rule(
         "src/pulsara_agent/terminal_client/launcher.py",
         3,
-        "extract-neutral-leaf",
+        "delete",
         "legacy launcher supervision helper",
-        "v3-only process/TTY supervision",
-        "tests/test_stage2_tui_cross_language.py",
+        "renderer-neutral Protocol v3 Gateway; no bundled client",
+        "tests/test_stage2_architecture.py",
     ),
     Rule(
         "src/pulsara_agent/storage/migrations/sql/",
@@ -415,9 +415,9 @@ def _fallback_deleted_rule(relative: str) -> Rule:
             relative,
             3,
             "delete",
-            "Protocol v2 Go client surface",
-            "Protocol v3 kernel client",
-            "clients/terminal/internal/kernelapp/model_test.go",
+            "retired bundled Go/TUI client surface",
+            "renderer-neutral Protocol v3 Gateway; no bundled client",
+            "tests/test_stage2_architecture.py",
         )
     if relative.startswith("tests/"):
         stage4_terms = (

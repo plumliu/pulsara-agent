@@ -2,8 +2,6 @@ syntax = "proto3";
 
 package pulsara.terminal.v3;
 
-option go_package = "github.com/plumliu/pulsara-agent/clients/terminal/internal/protocolv3;protocolv3";
-
 message ProtocolIdentity {
   uint32 major = 1;
   uint32 minor = 2;

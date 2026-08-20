@@ -821,7 +821,7 @@ Runtime提取一个reply中的全部tool blocks，再以其原顺序安装`ToolB
 | context-input audit view | provider request/canonical transcript；exact source detail可能丢失 | semantic view可重建，exact audit未必 | opt-in diagnostic |
 | final-output materialization | accepted assistant reply + terminal status | 是 | query/view，不是 commit prerequisite |
 
-EventLog replay 本身已能构建 message、timeline 与 provenance：[message_assembler.py](src/pulsara_agent/replay/message_assembler.py#L180)、[timeline.py](src/pulsara_agent/replay/timeline.py#L160)。事故文档也实测 terminal notification reducer 可以从 durable checkpoint 之后的 ledger exact replay：[PULSARA_TERMINAL_COMPLETION_FINALIZATION_FAILURE_INCIDENT.zh.md](PULSARA_TERMINAL_COMPLETION_FINALIZATION_FAILURE_INCIDENT.zh.md#L463)。
+EventLog replay 本身已能构建 message、timeline 与 provenance：[message_assembler.py](src/pulsara_agent/replay/message_assembler.py#L180)、[timeline.py](src/pulsara_agent/replay/timeline.py#L160)。已删除的历史事故文档曾实测terminal notification reducer可以从durable checkpoint之后的ledger exact replay；原文保存在删除前checkpoint `a3131c5b636fb3a354c5770ca70409b974eb4095:PULSARA_TERMINAL_COMPLETION_FINALIZATION_FAILURE_INCIDENT.zh.md:463`。
 
 #### 2.4.2 proof-of-proof
 
@@ -968,7 +968,7 @@ HostSession.aclose 目前约 193 行、45 个 await、4 次 committed-reducer ba
      多个 reducer barrier、provider quiesce 与 temporary recovery teardown
 ~~~
 
-事故代码证据和现场因果在 [PULSARA_TERMINAL_COMPLETION_FINALIZATION_FAILURE_INCIDENT.zh.md](PULSARA_TERMINAL_COMPLETION_FINALIZATION_FAILURE_INCIDENT.zh.md#L19)、[PULSARA_TERMINAL_COMPLETION_FINALIZATION_FAILURE_INCIDENT.zh.md](PULSARA_TERMINAL_COMPLETION_FINALIZATION_FAILURE_INCIDENT.zh.md#L257)、[PULSARA_TERMINAL_COMPLETION_FINALIZATION_FAILURE_INCIDENT.zh.md](PULSARA_TERMINAL_COMPLETION_FINALIZATION_FAILURE_INCIDENT.zh.md#L350)、[PULSARA_TERMINAL_COMPLETION_FINALIZATION_FAILURE_INCIDENT.zh.md](PULSARA_TERMINAL_COMPLETION_FINALIZATION_FAILURE_INCIDENT.zh.md#L402)。
+事故代码证据和现场因果保存在删除前checkpoint `a3131c5b636fb3a354c5770ca70409b974eb4095:PULSARA_TERMINAL_COMPLETION_FINALIZATION_FAILURE_INCIDENT.zh.md`的19、257、350与402行附近。
 
 本次新提交形成了同构的小链：
 
@@ -993,7 +993,7 @@ HostSession.aclose 目前约 193 行、45 个 await、4 次 committed-reducer ba
 
 | 类别 | 代表证据 | 局部触发 | 共同架构选择 |
 |---|---|---|---|
-| 1. durable FULL，但 reducer/checkpoint失败 | 当前 terminal finalization 事故；[incident](PULSARA_TERMINAL_COMPLETION_FINALIZATION_FAILURE_INCIDENT.zh.md#L257) | JSONB tuple/list successor drift | Event durability 后仍要求 derived reducer/checkpoint同步健康 |
+| 1. durable FULL，但 reducer/checkpoint失败 | 删除前checkpoint中的terminal finalization incident | JSONB tuple/list successor drift | Event durability 后仍要求 derived reducer/checkpoint同步健康 |
 | 2. physical operation 未退出，logical owner已关闭或 waiter 已取消 | model worker cancellation、unknown commit close tests；[test_llm_runtime.py](tests/test_llm_runtime.py#L2468)、[test_llm_runtime.py](tests/test_llm_runtime.py#L2543) | cancellation/transport I/O晚退 | caller、logical task与physical I/O被拆成多代 owner |
 | 3. candidate 已提交，confirmation 丢失 | tool/model terminal UNKNOWN、same-candidate retry；[test_llm_runtime.py](tests/test_llm_runtime.py#L1806)、[test_terminal_completion_finalization_incident.py](tests/test_terminal_completion_finalization_incident.py#L403) | commit ack/connection不确定 | 每个 domain 都复制确认状态机 |
 | 4. restart 恢复出另一 terminal outcome | incomplete stream合成 ModelEnd/ReplyEnd，dangling run合成 recovered RunEnd；[resume.py](src/pulsara_agent/host/resume.py#L110)、[resume.py](src/pulsara_agent/host/resume.py#L293) | crash window | 恢复 execution transition，不只记录 interruption |

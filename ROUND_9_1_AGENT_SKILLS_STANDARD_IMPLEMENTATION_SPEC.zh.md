@@ -1305,7 +1305,7 @@ Provider-wire hygiene还必须断言：catalog/active carrier的trust为`UNTRUST
 ### Slice S4：证据与文档
 
 - 更新Gap Index、README与本文activation evidence；
-- full pytest/PostgreSQL/Go/architecture/secret/link checks；
+- full pytest/PostgreSQL/Protocol/architecture/secret/link checks；
 - gated real-provider smoke验证模型看到catalog后使用普通`read_file`；另用正文指导验证现有direct/meta/terminal路径可正常调用，但Skill没有生成dependency route。
 
 Round 5B compaction在本文ACTIVATED以后另行实施、另行review、另行生成activation evidence。

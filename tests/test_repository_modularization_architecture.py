@@ -26,6 +26,16 @@ ROOT = Path(__file__).resolve().parents[1]
 TOOL = ROOT / "tools/repository_modularization_inventory.py"
 BASELINE = ROOT / "tests/fixtures/repository_modularization_baseline.json"
 _INTERNAL_REPOSITORY_PACKAGE = "pulsara_agent.conversation_kernel._repository"
+_FRONTEND_HARD_CUT_RETIRED_PYTEST_NODES = {
+    (
+        "tests/test_stage2_architecture.py::"
+        "test_stage2_ordinary_host_and_terminal_binary_select_only_kernel_v3"
+    ),
+    (
+        "tests/test_stage2_tui_cross_language.py::"
+        "test_stage2_python_gateway_to_go_tui_fresh_snapshot_and_detach"
+    ),
+}
 _ROUND7_ADDED_TOP_LEVEL_FUNCTIONS = {"_plan_question_response"}
 _ROUND7_CHANGED_TOP_LEVEL_FUNCTIONS = {
     "_prepared_tool_result_manifest",
@@ -502,7 +512,11 @@ def test_repository_modularization_preserves_every_existing_pytest_node() -> Non
     module = _inventory_module()
     baseline_nodes = set(_baseline()["pytest_node_ids"])
     current_nodes = set(module._pytest_node_ids())
-    assert baseline_nodes <= current_nodes
+    assert baseline_nodes - current_nodes == _FRONTEND_HARD_CUT_RETIRED_PYTEST_NODES
+    assert (
+        "tests/test_stage2_architecture.py::"
+        "test_stage2_ordinary_host_and_renderer_neutral_protocol_select_kernel_v3"
+    ) in current_nodes
 
 
 def test_repository_modularization_facade_and_internal_owner_shape() -> None:

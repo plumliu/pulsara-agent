@@ -17,12 +17,7 @@ from pulsara_agent.capability import (
     reset_bundled_skill,
     sync_bundled_skills,
 )
-from pulsara_agent.capability.builtin_catalog import builtin_tool_catalog_entry
-from pulsara_agent.conversation_kernel.capability import KernelCapabilityComposer
 from pulsara_agent.conversation_kernel.host import KernelHostCore
-from pulsara_agent.conversation_kernel.memory_tools import MEMORY_TOOL_NAMES
-from pulsara_agent.conversation_kernel.subagent import SUBAGENT_TOOL_NAMES
-from pulsara_agent.conversation_kernel.tool_runtime import DIRECT_KERNEL_TOOL_NAMES
 from pulsara_agent.llm.models import ModelRole
 from pulsara_agent.mcp_config import (
     McpServerConfig,
@@ -38,17 +33,11 @@ from pulsara_agent.primitives.permission import (
     parse_permission_mode,
 )
 from pulsara_agent.repl import ReplPrompt, build_repl_prompt
-from pulsara_agent.tool_permission import mode_for_policy, preset_to_policy
+from pulsara_agent.tool_permission import preset_to_policy
 from pulsara_agent.settings import PulsaraSettings, load_env_file
-from pulsara_agent.terminal_client import (
-    TerminalClientBinaryError,
-    TerminalClientLaunchError,
-)
-from pulsara_agent.terminal_client.v3_launcher import launch_terminal_kernel_client
 from pulsara_agent.workspace_identity import (
     HostWorkspaceInput,
     normalize_workspace_kind,
-    resolve_workspace,
 )
 
 
@@ -61,22 +50,11 @@ def build_parser() -> argparse.ArgumentParser:
     host_commands = host.add_subparsers(dest="host_command")
     run = _add_host_common_args(host_commands.add_parser("run"))
     run.add_argument("prompt")
-    for name in ("repl", "tui"):
-        command = _add_host_common_args(host_commands.add_parser(name))
-        resume = command.add_mutually_exclusive_group()
-        resume.add_argument("--resume", default=None)
-        resume.add_argument("--continue", dest="continue_session", action="store_true")
-        command.add_argument("--list-sessions", action="store_true")
-        if name == "tui":
-            command.add_argument("--tui-binary", default=None)
-            command.add_argument(
-                "--clear-scrollback",
-                action="store_true",
-                help="Irreversibly erase display and scrollback before launch.",
-            )
-    inspect_host = _add_host_common_args(host_commands.add_parser("inspect"))
-    inspect_host.set_defaults(permission_mode=PermissionMode.READ_ONLY.value)
-
+    repl = _add_host_common_args(host_commands.add_parser("repl"))
+    resume = repl.add_mutually_exclusive_group()
+    resume.add_argument("--resume", default=None)
+    resume.add_argument("--continue", dest="continue_session", action="store_true")
+    repl.add_argument("--list-sessions", action="store_true")
     skills = commands.add_parser("skills")
     skill_commands = skills.add_subparsers(dest="skills_command")
     sync = _add_env_args(skill_commands.add_parser("sync-bundled"))
@@ -190,18 +168,7 @@ def main() -> None:
             if args.host_command == "repl":
                 asyncio.run(_kernel_host_repl(args))
                 return
-            if args.host_command == "tui":
-                asyncio.run(_kernel_host_tui(args))
-                return
-            if args.host_command == "inspect":
-                print(json.dumps(_host_inspect(args), indent=2, ensure_ascii=False))
-                return
-        except (
-            ValueError,
-            KeyError,
-            TerminalClientBinaryError,
-            TerminalClientLaunchError,
-        ) as exc:
+        except (ValueError, KeyError) as exc:
             parser.error(_public_error(exc))
         parser.error("host requires a subcommand")
     if args.command == "skills":
@@ -265,7 +232,7 @@ async def _kernel_host_run(args) -> object:
         session = await core.open_session(
             _workspace_input_from_args(args),
             model_role=ModelRole(args.model_role),
-            permission_policy=_permission_policy(args, intent="run"),
+            permission_policy=_permission_policy(args),
             active_skill_names=_active_skill_names_from_args(args),
         )
         return await session.run_turn(args.prompt)
@@ -278,7 +245,7 @@ async def _kernel_host_run(args) -> object:
 async def _open_initial_session(core: KernelHostCore, args):
     common = {
         "model_role": ModelRole(args.model_role),
-        "permission_policy": _permission_policy(args, intent="run"),
+        "permission_policy": _permission_policy(args),
         "active_skill_names": _active_skill_names_from_args(args),
     }
     workspace = _workspace_input_from_args(args)
@@ -347,7 +314,7 @@ async def _kernel_host_repl(args) -> None:
                     command.removeprefix(":resume ").strip(),
                     workspace_input=workspace,
                     model_role=ModelRole(args.model_role),
-                    permission_policy=_permission_policy(args, intent="run"),
+                    permission_policy=_permission_policy(args),
                     active_skill_names=_active_skill_names_from_args(args),
                 )
                 await core.close_session(
@@ -359,7 +326,7 @@ async def _kernel_host_repl(args) -> None:
                 next_session = await core.resume_most_recent_session(
                     workspace,
                     model_role=ModelRole(args.model_role),
-                    permission_policy=_permission_policy(args, intent="run"),
+                    permission_policy=_permission_policy(args),
                     active_skill_names=_active_skill_names_from_args(args),
                 )
                 if next_session.host_session_id != session.host_session_id:
@@ -371,79 +338,6 @@ async def _kernel_host_repl(args) -> None:
             _print_agent_run_result(await session.run_turn(prompt))
     finally:
         await core.shutdown()
-
-
-async def _kernel_host_tui(args) -> None:
-    if not (sys.stdin.isatty() and sys.stdout.isatty()):
-        raise ValueError("host tui requires an interactive terminal")
-    settings = _settings_from_args(args)
-    _best_effort_sync_bundled_skills()
-    core = KernelHostCore.production(settings=settings)
-    try:
-        workspace = _workspace_input_from_args(args)
-        if args.list_sessions:
-            summaries = await core.list_resumable_sessions(workspace_input=workspace)
-            print(json.dumps([item.to_dict() for item in summaries], indent=2))
-            return
-        session = await _open_initial_session(core, args)
-        await launch_terminal_kernel_client(
-            host_session=session,
-            binary_path=args.tui_binary,
-            clear_scrollback=args.clear_scrollback,
-        )
-    finally:
-        await core.shutdown()
-
-
-def _host_inspect(args) -> dict[str, object]:
-    workspace = resolve_workspace(_workspace_input_from_args(args))
-    permission = _permission_policy(args, intent="inspect")
-    names = sorted(DIRECT_KERNEL_TOOL_NAMES | SUBAGENT_TOOL_NAMES | MEMORY_TOOL_NAMES)
-    capability_composer = KernelCapabilityComposer(
-        workspace_root=workspace.workspace_root,
-        workspace_kind=workspace.workspace_kind,
-        memory_domain=workspace.memory_domain,
-        available_tool_names=frozenset(names),
-        configured_active_skill_names=_active_skill_names_from_args(args),
-    )
-    capability = capability_composer.resolve_projection(
-        user_input="", available_tool_names=frozenset(names)
-    )
-    enabled_mcp = [
-        item.server_id
-        for item in load_mcp_server_configs(
-            workspace_root=workspace.workspace_root,
-            trust_workspace_config=workspace.trust_workspace_mcp_config,
-        )
-        if item.enabled
-    ]
-    return {
-        "inspect_kind": "canonical_kernel_static_workspace_capability.v3",
-        "conversation_authority": "pulsara_v3",
-        "protocol_major": 3,
-        "workspace": {
-            "workspace_kind": workspace.workspace_kind,
-            "workspace_root": str(workspace.workspace_root),
-            "workspace_key": workspace.workspace_key,
-        },
-        "tools": names,
-        "descriptors": [
-            builtin_tool_catalog_entry(name).descriptor.to_diagnostic_dict()
-            for name in names
-        ],
-        "permissions": permission.to_dict(),
-        "current_mode": (
-            mode_for_policy(permission).value
-            if mode_for_policy(permission) is not None
-            else "custom"
-        ),
-        "skills": [item.name for item in capability.catalog_entries],
-        "active_skills": [item.name for item in capability.active_injections],
-        "mcp": {
-            "composition_status": ("CONFIGURED" if enabled_mcp else "NOT_CONFIGURED"),
-            "configured_enabled_servers": enabled_mcp,
-        },
-    }
 
 
 async def _mcp_command(args: argparse.Namespace) -> dict[str, object]:
@@ -701,13 +595,11 @@ def _active_skill_names_from_args(args) -> frozenset[str]:
     return frozenset(item.strip() for item in args.skill if item.strip())
 
 
-def _permission_policy(args, *, intent: str):
+def _permission_policy(args):
     raw = args.permission_mode or os.getenv(f"{args.prefix}_PERMISSION_MODE")
     if raw:
         return preset_to_policy(parse_permission_mode(raw.strip()))
-    return preset_to_policy(
-        PermissionMode.READ_ONLY if intent == "inspect" else DEFAULT_PERMISSION_MODE
-    )
+    return preset_to_policy(DEFAULT_PERMISSION_MODE)
 
 
 def _best_effort_sync_bundled_skills() -> None:

@@ -76,9 +76,7 @@ def main() -> int:
         else:
             print(f"Installed skill: {installed.name}")
             print(f"Destination: {dest}")
-            print(
-                "Discovery: start a new Pulsara turn or run `pulsara host inspect` to refresh the skill catalog."
-            )
+            print("Discovery: start a new Pulsara turn to refresh the skill catalog.")
         return 0
     except SkillValidationError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)

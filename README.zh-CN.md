@@ -24,8 +24,7 @@ Python KernelHostCore
 ├── exact-one durable job executor
 ├── advisory memory governor + retrieval
 ├── process-local live event bus
-└── Terminal Protocol v3 gateway
-        └── Go terminal client
+└── renderer-neutral Protocol v3 gateway
 
 PostgreSQL
 ├── pulsara_v3：26 张产品关系
@@ -40,7 +39,7 @@ Durable 边界有意保持狭窄：
   当前语义真值；accepted memory row只拥有advisory dataset当前包含的内容；
 - closed 31-type `agent_events` journal 只记录 accepted occurrence，不用于恢复
   execution；
-- 23 种 live event 只存在于内存，进程退出即可丢失；
+- 24 种 live event 只存在于内存，进程退出即可丢失；
 - tool request 在 dispatch 前提交，physical attempt 在 effect invoke 前提交；
 - crash 会中断 active turn；reopen 只 rehydrate 已接受的 conversation facts，
   不恢复 coroutine 或 provider stream；
@@ -98,8 +97,9 @@ Kernel 当前支持：
 
 Round 6不增加durable MCP连接或request recovery；Host换代只按配置fresh
 connect。form/private URL elicitation、OAuth、MCP-backed skill activation、
-server-initiated Sampling/Roots、Apps/Tasks与advanced Go MCP UI仍是明确
-non-goal。
+server-initiated Sampling/Roots、Apps/Tasks与bundled terminal UI仍是明确
+non-goal。未来Web或desktop client可以消费Protocol v3，但不得成为第二套
+canonical authority。
 普通Host启动时，workspace自带的MCP entry默认保持disabled；只有用户显式传入
 `--trust-workspace-mcp`才会激活。仅仅打开一个仓库不会执行其中的stdio command，
 也不会解析其HTTP secret reference。
@@ -109,7 +109,6 @@ non-goal。
 - Python 3.12+
 - [`uv`](https://docs.astral.sh/uv/)
 - PostgreSQL，且 `public.vector >= 0.5.0`
-- 仅在构建可选 Terminal client 时需要 Go
 
 ## 初始化
 
@@ -246,32 +245,12 @@ uv run pulsara host repl \
   --continue
 ```
 
-只读检查 composition：
+## Client 边界
 
-```sh
-uv run pulsara host inspect \
-  --env-file .env \
-  --workspace /path/to/project
-```
-
-## Terminal client
-
-构建 Protocol v3 Go 客户端：
-
-```sh
-cd clients/terminal
-mkdir -p bin
-go build -trimpath -o bin/pulsara-tui ./cmd/pulsara-tui
-cd ../..
-
-uv run pulsara host tui \
-  --env-file .env \
-  --workspace /path/to/project \
-  --tui-binary "$PWD/clients/terminal/bin/pulsara-tui"
-```
-
-Python 拥有 canonical state、command、policy、secret 与 recovery；Go 只拥有
-rendering 与 interaction。Protocol v2 与 Presentation Foundation 已完全退役。
+bundled Go TUI已经删除。Protocol v3继续作为未来Web或desktop client的
+renderer-neutral传输边界。Python仍拥有canonical state、command、policy、
+secret与recovery；client只能渲染snapshot、消费live event，并提交gateway
+允许的typed command。Protocol v2与Presentation Foundation已完全退役。
 
 ## 开发门控
 
@@ -280,7 +259,6 @@ uv run ruff check .
 uv run pytest -q
 uv run python -m compileall -q src tests
 uv run python tools/generate_terminal_protocol_contract.py --check
-(cd clients/terminal && go test ./... && go vet ./...)
 git diff --check
 ```
 

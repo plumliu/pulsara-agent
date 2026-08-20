@@ -87,16 +87,8 @@ def test_stage3_5_obsolete_authority_paths_are_physically_absent() -> None:
         SOURCE / "terminal_protocol" / "schema" / "terminal_client.proto",
     )
     assert not [str(path) for path in forbidden_files if path.exists()]
-
-    for relative in (
-        "internal/app",
-        "internal/client",
-        "internal/presentation",
-        "internal/protocol",
-        "internal/protocolvalue",
-        "internal/wire",
-    ):
-        assert not tuple((CLIENT / relative).rglob("*.go")), relative
+    assert not (SOURCE / "terminal_client").exists()
+    assert not CLIENT.exists()
 
 
 def test_stage3_5_production_import_graph_cannot_reach_deleted_authority() -> None:
@@ -211,7 +203,6 @@ def test_stage3_5_process_local_task_sites_are_closed() -> None:
         "src/pulsara_agent/conversation_kernel/runner.py",
         "src/pulsara_agent/conversation_kernel/subagent.py",
         "src/pulsara_agent/conversation_kernel/tool_runtime.py",
-        "src/pulsara_agent/terminal_client/binary.py",
     }
     observed: set[str] = set()
     for path in _production_python():

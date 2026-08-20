@@ -10,7 +10,7 @@
 - [POSTGRES_SCHEMA_MIGRATION_CONTRACT.zh.md](POSTGRES_SCHEMA_MIGRATION_CONTRACT.zh.md)
   — clean migration universe、binding v2、extension、grant 与 reset-required。
 - [TERMINAL_CLIENT_PROTOCOL_V3_CONTRACT.zh.md](TERMINAL_CLIENT_PROTOCOL_V3_CONTRACT.zh.md)
-  — Python/Go ownership、snapshot、observation、live plane 与 GAP。
+  — Python authority、renderer-neutral snapshot/observation、live plane 与 GAP。
 - [MEMORY_RELATIONAL_CONTRACT.zh.md](MEMORY_RELATIONAL_CONTRACT.zh.md)
   — PostgreSQL memory、governance、index freshness 与 bounded two-hop。
 - [PROCESS_LOCAL_EXECUTION_CONTRACT.zh.md](PROCESS_LOCAL_EXECUTION_CONTRACT.zh.md)

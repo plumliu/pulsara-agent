@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-"""Generate or verify the sole Protocol v3 cross-language contract."""
+"""Generate or verify the renderer-neutral Protocol v3 Python contract."""
 
 from __future__ import annotations
 
 import argparse
 from hashlib import sha256
 import json
-import os
 from pathlib import Path
 import re
 import subprocess
@@ -20,11 +19,8 @@ PY_PROTO = (
     ROOT
     / "src/pulsara_agent/terminal_protocol/generated_v3/terminal_kernel_v3_pb2.py"
 )
-GO_PROTO = ROOT / "clients/terminal/internal/protocolv3/terminal_kernel_v3.pb.go"
-GO_BUILD = ROOT / "clients/terminal/internal/buildinfo/buildinfo.go"
 GATEWAY = ROOT / "src/pulsara_agent/terminal_protocol/v3_gateway.py"
-GO_CLIENT = ROOT / "clients/terminal/internal/kernelclient/client.go"
-FIXTURE = ROOT / "tests/fixtures/stage2_protocol_v3_cross_language.json"
+FIXTURE = ROOT / "tests/fixtures/stage2_protocol_v3_wire.json"
 
 
 def main() -> None:
@@ -32,64 +28,46 @@ def main() -> None:
     parser.add_argument("--check", action="store_true")
     args = parser.parse_args()
     if not args.check:
-        subprocess.run(
-            [str(ROOT / "clients/terminal/scripts/generate_protocol.sh")],
-            cwd=ROOT,
-            check=True,
-        )
+        _generate_python(PY_PROTO.parent)
     _verify()
 
 
 def _verify() -> None:
     identity = "sha256:" + sha256(SCHEMA.read_bytes()).hexdigest()
-    for path in (GO_BUILD, GATEWAY, GO_CLIENT):
-        if re.search(re.escape(identity), path.read_text(encoding="utf-8")) is None:
-            raise SystemExit(f"Protocol v3 schema identity is stale in {path}")
+    if re.search(re.escape(identity), GATEWAY.read_text(encoding="utf-8")) is None:
+        raise SystemExit(f"Protocol v3 schema identity is stale in {GATEWAY}")
     _verify_generated()
     _verify_fixture(identity)
+
+
+def _generate_python(output: Path) -> None:
+    output.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        [
+            "protoc",
+            "-I",
+            str(SCHEMA.parent),
+            f"--python_out={output}",
+            str(SCHEMA),
+        ],
+        cwd=ROOT,
+        check=True,
+    )
 
 
 def _verify_generated() -> None:
     with tempfile.TemporaryDirectory(prefix="pulsara-terminal-v3-") as raw:
         temporary = Path(raw)
-        environment = os.environ.copy()
-        tools = ROOT / "clients/terminal/spikes/s0/.tools"
-        environment["PATH"] = str(tools) + os.pathsep + environment.get("PATH", "")
-        subprocess.run(
-            [
-                "protoc",
-                "-I",
-                str(SCHEMA.parent),
-                f"--python_out={temporary}",
-                str(SCHEMA),
-            ],
-            check=True,
-            env=environment,
-        )
+        _generate_python(temporary)
         python_generated = temporary / "terminal_kernel_v3_pb2.py"
         if python_generated.read_bytes() != PY_PROTO.read_bytes():
             raise SystemExit("generated Protocol v3 Python binding is stale")
-        subprocess.run(
-            [
-                "protoc",
-                "-I",
-                str(SCHEMA.parent),
-                f"--go_out={temporary}",
-                "--go_opt=module=github.com/plumliu/pulsara-agent/clients/terminal",
-                str(SCHEMA),
-            ],
-            check=True,
-            env=environment,
-        )
-        go_generated = temporary / "internal/protocolv3/terminal_kernel_v3.pb.go"
-        if go_generated.read_bytes() != GO_PROTO.read_bytes():
-            raise SystemExit("generated Protocol v3 Go binding is stale")
 
 
 def _verify_fixture(identity: str) -> None:
     fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))
     if fixture.get("schema_fingerprint") != identity:
-        raise SystemExit("Protocol v3 cross-language fixture schema is stale")
+        raise SystemExit("Protocol v3 wire fixture schema is stale")
     sys.path.insert(0, str(ROOT / "src"))
     from pulsara_agent.terminal_protocol.generated_v3 import (
         terminal_kernel_v3_pb2 as wire,

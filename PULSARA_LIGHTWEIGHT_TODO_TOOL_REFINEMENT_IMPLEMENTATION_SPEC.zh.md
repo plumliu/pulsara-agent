@@ -1057,10 +1057,10 @@ TODO不得把“worker已返回”当作“current state已安装”。它复用
   - 新增`TODO_SNAPSHOT_UPDATED = 24`、payload、`LiveTodoRunSnapshot`与`SessionLiveControlSnapshot.current_todos`；
   - 保留现有interaction live-control revision语义；
   - initial attach/LIVE_GAP严格先建立live baseline、再读TODO owner snapshot；
-- `clients/terminal/internal/kernelapp`
-  - 验证并安装atomic TODO event；
+- Protocol v3 renderer-neutral consumer contract
+  - consumer验证并安装atomic TODO event；
   - initial attach或`LIVE_GAP`后暂停observe，从current snapshot整体resync后再从新baseline继续；
-  - 用`todo_run_id + todo_revision`拒绝stale/duplicate update；
+  - consumer用`todo_run_id + todo_revision`拒绝stale/duplicate update；
 - Round 5B future implementation
   - 读取本文snapshot API；
   - 使用无ID actionable TODO subshape；
@@ -1194,7 +1194,7 @@ in_progress. Submit an empty list to clear it.
 - Round 7/7.1 ToolResult projection；
 - ROOT/child subagent scope；
 - full pytest/PostgreSQL marker；
-- Ruff、compileall、Protocol generator、Go test/vet/module verify；
+- Ruff、compileall、Protocol generator与architecture gates；
 - `uv lock --check`、`git diff --check`；
 - architecture oracle`31 / 24 / 13 / 2 / 25 / 1`。
 

@@ -1217,7 +1217,7 @@ dependency_status
 
 ### 11.3 用户控制
 
-Round 10不新增TUI直接给child发message或编辑DAG的UI。Controller继续支持list/stop/result accept；model工具先完成产品面。高级task-board交互属于后续UI round。
+Round 10不新增client直接给child发message或编辑DAG的UI。Controller继续支持list/stop/result accept；model工具先完成产品面。高级task-board交互属于后续Web/Desktop UI round。
 
 ---
 
@@ -1269,7 +1269,7 @@ Round 10不新增TUI直接给child发message或编辑DAG的UI。Controller继续
 
 ### R10-5：Protocol、compaction contract与activation
 
-- Protocol v3/Go projections；
+- Protocol v3 renderer-neutral projections；
 - Round 5B handoff wording；
 - Gap Index标记ACTIVATED；
 - architecture/oracle/evidence；
@@ -1412,7 +1412,6 @@ src/pulsara_agent/ports/live_agent_event.py
 src/pulsara_agent/terminal_protocol/schema/terminal_kernel_v3.proto
 src/pulsara_agent/terminal_protocol/canonical_v3.py
 src/pulsara_agent/terminal_protocol/v3_gateway.py
-clients/terminal/...
 ~~~
 
 预计新增subagent-specific production Python module不超过4个，建议：
@@ -1449,7 +1448,7 @@ Neutral `conversation_kernel/cold_epoch.py`属于Round 5B `R5B-A0`共享基础�
 - raw child transcript自动注入ROOT；
 - model-authoredtool allowlist/permission；
 - Plugin subagent manifest execution；
-- advanced task-board TUI。
+- advanced Web/Desktop task-board UI。
 
 ---
 
@@ -1469,7 +1468,7 @@ Round 10只有同时满足以下条件才可ACTIVATED：
 10. context contract只有`NONE | LAST_N(1..8)`；parent context绑定spawn-producing ROOT cut、完整group与creation-time selection，且使用untrusted quote projection；
 11. Child first open用`SubagentInitialSeed`调用唯一shared assembler，按启动时current capability cold reconstruction并复用既有compiled/wire/continuity artifacts；没有subagent-private prompt builder；
 12. Child不继承ROOT prefix；Chat Completions与Responses均证明child first-open wire来自same assembly，随后same-epoch SYSTEM/tools不变、messages只追加suffix；
-13. Protocol/Go、full pytest、PostgreSQL、Ruff、compileall、generator、Go test/vet/module verify全部通过；
+13. Protocol v3 Python contract、full pytest、PostgreSQL、Ruff、compileall、generator与architecture gates全部通过；
 14. clean-v0 fresh/repeat/deep verify/reset-required通过；
 15. architecture oracle为`32 / 24 / 13 / 2 / 27 / 1`；
 16. real-provider dogfood至少覆盖ROOT batch workers、`NONE`、`LAST_N`、pre-start MCP promotion、active message steer、dependency chain与explicit result；

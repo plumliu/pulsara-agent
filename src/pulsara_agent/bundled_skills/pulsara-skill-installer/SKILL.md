@@ -27,7 +27,7 @@ python <this-skill-directory>/scripts/install-local-skill.py --workspace <worksp
 python <this-skill-directory>/scripts/list-installed-skills.py --workspace <workspace-root>
 ```
 
-5. Tell the user the installed destination and that a new Pulsara turn or `pulsara host inspect` should discover the skill.
+5. Tell the user the installed destination and that a new Pulsara turn will discover the skill.
 
 ## Guardrails
 
