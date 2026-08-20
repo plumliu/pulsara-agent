@@ -38,10 +38,16 @@ from pulsara_agent.capability.contracts import (
     skill_projection_input_fingerprint,
     tool_capability_exposure_plan_fingerprint,
 )
-from pulsara_agent.capability.local_skills import LocalSkillDiscovery
+from pulsara_agent.capability.local_skills import (
+    LocalSkillDiscovery,
+    SkillDiscoveryDisposition,
+)
 from pulsara_agent.capability.types import (
-    SkillDiagnostic,
     ResolvedSkillCatalogEntry,
+    SkillCatalogUnavailableReason,
+    SkillDiagnostic,
+    SkillDiagnosticSeverity,
+    SkillSource,
 )
 from pulsara_agent.conversation_kernel.assembler import CompletedToolCallBlock
 from pulsara_agent.conversation_kernel.context_sources import (
@@ -378,7 +384,7 @@ def _collect_context_sources(
 
 _SOURCE_FACTS = {
     ContextSourceKind.BASE_SYSTEM: (
-        "pulsara.base-system.prefix-continuity.v5-unified-capability",
+        "pulsara.base-system.prefix-continuity.v6-agent-skills",
         ContextChannel.SYSTEM,
         ContextTrustClass.ROOT_INSTRUCTION,
         ContextBudgetClass.MUST_KEEP,
@@ -418,17 +424,13 @@ _SOURCE_FACTS = {
         ContextSourceLifecycle.TURN_APPEND,
     ),
     ContextSourceKind.SKILL_CATALOG: (
-        "pulsara.skill-catalog.v1",
+        "pulsara.skill-catalog.v2",
         ContextChannel.RUNTIME_OBSERVATION,
-        ContextTrustClass.AUTHORIZED_CAPABILITY_CONTEXT,
+        ContextTrustClass.UNTRUSTED_OBSERVATION,
         ContextBudgetClass.IMPORTANT,
         50,
         30,
-        (
-            ContextRenderMode.FULL,
-            ContextRenderMode.COMPACT,
-            ContextRenderMode.REF_ONLY,
-        ),
+        (ContextRenderMode.FULL, ContextRenderMode.UNAVAILABLE_MINIMAL),
         ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
     ),
     ContextSourceKind.MCP_CATALOG: (
@@ -466,13 +468,13 @@ _SOURCE_FACTS = {
         ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
     ),
     ContextSourceKind.ACTIVE_SKILL: (
-        "pulsara.active-skill.v1",
+        "pulsara.active-skill.v2",
         ContextChannel.RUNTIME_OBSERVATION,
-        ContextTrustClass.AUTHORIZED_CAPABILITY_CONTEXT,
+        ContextTrustClass.UNTRUSTED_OBSERVATION,
         ContextBudgetClass.MUST_KEEP,
         60,
         20,
-        (ContextRenderMode.FULL,),
+        (ContextRenderMode.FULL, ContextRenderMode.UNAVAILABLE_MINIMAL),
         ContextSourceLifecycle.ACTIVATION_SNAPSHOT,
     ),
     ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD: (
@@ -528,6 +530,7 @@ def _candidate(
     *,
     trust: ContextTrustClass | None = None,
     channel: ContextChannel | None = None,
+    initial_mode: ContextRenderMode = ContextRenderMode.FULL,
 ) -> ContextSourceCandidate:
     (
         version,
@@ -568,14 +571,16 @@ def _candidate(
         },
     )
     instance = f"source:{kind.value.lower()}"
+    semantic_payload: dict[str, object] = {
+        "source_kind": kind.value,
+        "source_instance_id": instance,
+        "source_contract_fingerprint": contract,
+        "variants": tuple(item.semantic_fingerprint for item in variants),
+    }
+    if initial_mode is not ContextRenderMode.FULL:
+        semantic_payload["initial_mode"] = initial_mode.value
     semantic = context_fingerprint(
-        "context-source-candidate:v1",
-        {
-            "source_kind": kind.value,
-            "source_instance_id": instance,
-            "source_contract_fingerprint": contract,
-            "variants": tuple(item.semantic_fingerprint for item in variants),
-        },
+        "context-source-candidate:v1", semantic_payload
     )
     return ContextSourceCandidate(
         source_kind=kind,
@@ -591,6 +596,7 @@ def _candidate(
         variants=variants,
         lifecycle=lifecycle,
         domain_semantic_fingerprint=semantic,
+        initial_mode=initial_mode,
     )
 
 
@@ -1807,10 +1813,10 @@ def test_round3_source_variants_must_not_increase_exact_estimator_cost() -> None
 
 def test_round3_system_placement_is_independent_of_input_order() -> None:
     candidates = (
-        _candidate(ContextSourceKind.ACTIVE_SKILL, ("ACTIVE",)),
+        _candidate(ContextSourceKind.ACTIVE_SKILL, ("ACTIVE", "")),
         _candidate(
             ContextSourceKind.SKILL_CATALOG,
-            ("CATALOG FULL LONG", "CATALOG", "CAT"),
+            ("CATALOG FULL LONG", ""),
         ),
         _candidate(
             ContextSourceKind.RUNTIME_ENVIRONMENT,
@@ -1876,7 +1882,9 @@ def test_round3_must_keep_source_never_omits_and_fails_before_provider() -> None
 
 
 def test_round3_active_skill_and_tool_schema_fail_with_closed_budget_kind() -> None:
-    active = _candidate(ContextSourceKind.ACTIVE_SKILL, ("active " * 100,))
+    active = _candidate(
+        ContextSourceKind.ACTIVE_SKILL, ("active " * 100, "")
+    )
     with pytest.raises(StructuredModelInputCompileError) as failure:
         StructuredModelInputCompiler().compile(
             _prepared_request(_snapshot(), _sources(active), budget=4)
@@ -2172,7 +2180,7 @@ def test_round3_nonprogress_variant_is_bounded_and_then_omitted() -> None:
 def test_round3_catalog_walks_full_compact_reference_then_omitted() -> None:
     catalog = _candidate(
         ContextSourceKind.SKILL_CATALOG,
-        ("FULL " * 800, "COMPACT " * 180, "REF " * 20),
+        ("FULL " * 800, ""),
     )
 
     def compile_at(budget: int):
@@ -2185,7 +2193,7 @@ def test_round3_catalog_walks_full_compact_reference_then_omitted() -> None:
     full = compile_at(100_000)
     decisions = []
     current = full
-    for _ in range(4):
+    for _ in range(2):
         decision = next(
             item
             for item in current.source_decisions
@@ -2197,9 +2205,7 @@ def test_round3_catalog_walks_full_compact_reference_then_omitted() -> None:
         current = compile_at(current.final_estimate.total_input_tokens - 1)
     assert decisions == [
         ContextRenderMode.FULL,
-        ContextRenderMode.COMPACT,
-        ContextRenderMode.REF_ONLY,
-        None,
+        ContextRenderMode.UNAVAILABLE_MINIMAL,
     ]
 
 
@@ -2450,11 +2456,21 @@ class _Capability:
             disposition=CapabilitySourceSnapshotDisposition.COMPLETE,
             facts=(),
         )
+        root_policy_fingerprint = context_fingerprint(
+            "test:round3-skill-root-policy:v1",
+            {
+                "scope": conversation_scope_kind.value,
+                "task": scope_subagent_task_id,
+            },
+        )
         return issue_local_skill_catalog_source_snapshot(
             conversation_scope_kind=conversation_scope_kind,
             scope_subagent_task_id=scope_subagent_task_id,
             source_snapshot=snapshot,
-            discovery=LocalSkillDiscovery((), ()),
+            root_policy_fingerprint=root_policy_fingerprint,
+            discovery=LocalSkillDiscovery(
+                (), (), root_policy_fingerprint=root_policy_fingerprint
+            ),
             owner_authenticity=self._owner_authenticity,
         )
 
@@ -2498,11 +2514,12 @@ class _SensitiveCapability(_Capability):
                     name="demo",
                     description="Demo capability",
                     location="private/path/SKILL.md",
+                    source=SkillSource.WORKSPACE,
                 ),
             ),
             diagnostics=(
                 SkillDiagnostic(
-                    severity="error",
+                    severity=SkillDiagnosticSeverity.ERROR,
                     code="unknown_private_failure",
                     message="secret diagnostic detail",
                     path=Path("/private/skill/path"),
@@ -2537,15 +2554,19 @@ class _UnavailableCapability(_Capability):
             conversation_scope_kind=conversation_scope_kind,
             scope_subagent_task_id=scope_subagent_task_id,
             source_snapshot=snapshot,
+            root_policy_fingerprint=owner.root_policy_fingerprint,
             discovery=LocalSkillDiscovery(
                 (),
                 (
                     SkillDiagnostic(
-                        severity="error",
+                        severity=SkillDiagnosticSeverity.ERROR,
                         code="skill_catalog_unavailable",
                         message="private discovery failure",
                     ),
                 ),
+                disposition=SkillDiscoveryDisposition.UNAVAILABLE,
+                unavailable_reason=SkillCatalogUnavailableReason.DISCOVERY_RACED,
+                root_policy_fingerprint=owner.root_policy_fingerprint,
             ),
             owner_authenticity=self._owner_authenticity,
         )
@@ -2559,6 +2580,7 @@ class _LargeCatalogCapability(_Capability):
                 name=f"catalog-{index:02d}",
                 description="descriptive context " * 30,
                 location=f".agents/skills/catalog-{index:02d}/SKILL.md",
+                source=SkillSource.WORKSPACE,
             )
             for index in range(40)
         )
@@ -2595,14 +2617,15 @@ def test_round9_unavailable_skill_catalog_is_not_misreported_as_empty(
         tool_surface=surface,
         canonical_facts=_canonical_facts(),
     )
-    absence = {
-        item.source_kind: item.absence_kind for item in collected.absent_facts
+    unavailable = {
+        item.source_kind: item.initial_mode for item in collected.candidates
+        if item.initial_mode is ContextRenderMode.UNAVAILABLE_MINIMAL
     }
-    assert absence[ContextSourceKind.SKILL_CATALOG] is (
-        ContextSourceAbsenceKind.UNAVAILABLE
+    assert unavailable[ContextSourceKind.SKILL_CATALOG] is (
+        ContextRenderMode.UNAVAILABLE_MINIMAL
     )
-    assert absence[ContextSourceKind.ACTIVE_SKILL] is (
-        ContextSourceAbsenceKind.UNAVAILABLE
+    assert unavailable[ContextSourceKind.ACTIVE_SKILL] is (
+        ContextRenderMode.UNAVAILABLE_MINIMAL
     )
 
 
@@ -3292,13 +3315,13 @@ def test_round3_source_decision_and_compiled_fingerprints_are_golden() -> None:
     )
     compiled = StructuredModelInputCompiler().compile(request)
     assert compiled.source_collection_fingerprint == (
-        "sha256:7412c61d4445cc67e0cfbcf91269cd2775bae9431783006723ba51bf19f4186d"
+        "sha256:a7b0bfefb9b9b5ccd2d2f5b04fcf020c404bed7fef139ecac5d2e0df289c9332"
     )
     assert compiled.budget_report.decision_digest == (
         "sha256:caee1ae23a161f2c862947ef5b7b2b9a4ae3093bce6117e00bc13a3a19058fbd"
     )
     assert compiled.compiled_semantic_fingerprint == (
-        "sha256:b8d4c4b647b9d4374c6ab99f7f61f38f3a03560484ee002d6fb3de4668c3f48d"
+        "sha256:0c1efe1ef61c1889905190282cb9e8ebb67580f4d248f7721c6eda466f736c8e"
     )
     assert compiled.final_estimate.total_input_tokens == 268
 
@@ -3588,7 +3611,9 @@ def test_round3_1_active_skill_no_change_and_clear_are_causal_once() -> None:
     initial = _user("$skill:alpha", sequence=1)
     first_request = _prepared_request(
         _snapshot(initial),
-        _sources(_candidate(ContextSourceKind.ACTIVE_SKILL, ("skill=alpha",))),
+        _sources(
+            _candidate(ContextSourceKind.ACTIVE_SKILL, ("skill=alpha", ""))
+        ),
     )
     _first, first_view = _compile_and_install_append(
         compiler=compiler, owner=owner, request=first_request
@@ -3692,6 +3717,138 @@ def test_round3_1_active_skill_no_change_and_clear_are_causal_once() -> None:
         sum(
             observation.source_kind is ContextSourceKind.ACTIVE_SKILL
             and observation.presence.value == "CLEARED"
+            for observation in (
+                decode_runtime_observation(message)
+                for message in fourth_view.messages
+                if message.role is MessageRole.USER
+                and message.content
+                and "pulsara_runtime_observation" in message.content[0]
+            )
+        )
+        == 1
+    )
+
+
+def test_round9_1_skill_catalog_successors_are_append_only_and_unavailable_once() -> (
+    None
+):
+    compiler = StructuredModelInputCompiler()
+    owner = HostProviderInputContinuityOwner(session_id="session:test")
+    initial = _user("initial", sequence=1)
+    first_request = _prepared_request(
+        _snapshot(initial),
+        _sources(_candidate(ContextSourceKind.SKILL_CATALOG, ('{"skills":["a"]}', ""))),
+    )
+    _first, first_view = _compile_and_install_append(
+        compiler=compiler, owner=owner, request=first_request
+    )
+
+    assistant = FrozenProviderInputItem(
+        FrozenProviderInputItemKind.ASSISTANT,
+        "entry:2",
+        2,
+        "turn:test",
+        "done",
+    )
+    followup = _user("follow up", sequence=3)
+    second_request = replace(
+        _prepared_request(
+            _snapshot(initial, assistant, followup),
+            _sources(
+                _candidate(
+                    ContextSourceKind.SKILL_CATALOG,
+                    ('{"skills":["a","b"]}', ""),
+                )
+            ),
+        ),
+        context_id="context:skill-catalog-successor",
+        model_call_index=2,
+    )
+    _second, second_view = _compile_and_install_append(
+        compiler=compiler, owner=owner, request=second_request
+    )
+    assert second_view.system_prompt == first_view.system_prompt
+    assert second_view.tools == first_view.tools
+    assert second_view.messages[: len(first_view.messages)] == first_view.messages
+
+    next_assistant = FrozenProviderInputItem(
+        FrozenProviderInputItemKind.ASSISTANT,
+        "entry:4",
+        4,
+        "turn:test",
+        "done again",
+    )
+    next_user = _user("one more", sequence=5)
+    unavailable = _candidate(
+        ContextSourceKind.SKILL_CATALOG,
+        ("", ""),
+        initial_mode=ContextRenderMode.UNAVAILABLE_MINIMAL,
+    )
+    third_request = replace(
+        _prepared_request(
+            _snapshot(initial, assistant, followup, next_assistant, next_user),
+            _sources(unavailable),
+        ),
+        context_id="context:skill-catalog-unavailable",
+        model_call_index=3,
+    )
+    _third, third_view = _compile_and_install_append(
+        compiler=compiler, owner=owner, request=third_request
+    )
+    assert third_view.system_prompt == second_view.system_prompt
+    assert third_view.tools == second_view.tools
+    assert third_view.messages[: len(second_view.messages)] == second_view.messages
+    catalog_observations = tuple(
+        observation
+        for observation in (
+            decode_runtime_observation(message)
+            for message in third_view.messages
+            if message.role is MessageRole.USER
+            and message.content
+            and "pulsara_runtime_observation" in message.content[0]
+        )
+        if observation.source_kind is ContextSourceKind.SKILL_CATALOG
+    )
+    assert [item.presence.value for item in catalog_observations] == [
+        "VALUE",
+        "VALUE",
+        "UNAVAILABLE",
+    ]
+
+    final_assistant = FrozenProviderInputItem(
+        FrozenProviderInputItemKind.ASSISTANT,
+        "entry:6",
+        6,
+        "turn:test",
+        "final",
+    )
+    final_user = _user("last", sequence=7)
+    fourth_request = replace(
+        _prepared_request(
+            _snapshot(
+                initial,
+                assistant,
+                followup,
+                next_assistant,
+                next_user,
+                final_assistant,
+                final_user,
+            ),
+            _sources(unavailable),
+        ),
+        context_id="context:skill-catalog-unavailable-repeat",
+        model_call_index=4,
+    )
+    _fourth, fourth_view = _compile_and_install_append(
+        compiler=compiler, owner=owner, request=fourth_request
+    )
+    assert fourth_view.system_prompt == third_view.system_prompt
+    assert fourth_view.tools == third_view.tools
+    assert fourth_view.messages[: len(third_view.messages)] == third_view.messages
+    assert (
+        sum(
+            observation.source_kind is ContextSourceKind.SKILL_CATALOG
+            and observation.presence.value == "UNAVAILABLE"
             for observation in (
                 decode_runtime_observation(message)
                 for message in fourth_view.messages
@@ -3873,8 +4030,7 @@ def test_round3_1_stateful_source_presence_matrix_is_exact(
                     kind,
                     (
                         f"catalog={semantic}:" + "full-detail " * 20,
-                        f"catalog={semantic}:compact",
-                        f"ref={semantic}",
+                        "",
                     ),
                 )
             )

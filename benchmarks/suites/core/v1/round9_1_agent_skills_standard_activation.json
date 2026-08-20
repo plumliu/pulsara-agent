@@ -1,0 +1,160 @@
+{
+  "schema_version": "round9-1-agent-skills-standard-activation.v1",
+  "status": "activated",
+  "generated_at_utc": "2026-08-20T17:17:42Z",
+  "captured_head": "7dbb54ea51d1ff5cfa927d92fa181eb4b8ce3876",
+  "working_tree_semantics": "Round 9.1 was implemented and verified in the current uncommitted worktree rooted at the exact activated Round 9 clean baseline. No files were staged, committed, or pushed. Round 5B, Round 9.2, Plugin, Hooks, hierarchical Subagent work and compaction retained-skill rebase were not implemented.",
+  "source_documents": {
+    "ROUND_9_1_AGENT_SKILLS_STANDARD_IMPLEMENTATION_SPEC.zh.md_at_start": "f46626a672e23f5f9d308f0ba300a911e2089d1f167a9a4531a9c58bebabb338",
+    "ROUND_9_1_AGENT_SKILLS_STANDARD_IMPLEMENTATION_SPEC.zh.md_after_activation_update": "f0171cc4b3c3e15a62f8ec006f0f2d02990f842b0eb21aa22d9594def1eb3cac",
+    "ROUND_9_UNIFIED_CAPABILITY_SEMANTICS_IMPLEMENTATION_SPEC.zh.md": "14bc86f664b9ca103aa82dbd23e7d9c2ba99ae139de53f5ca2bff4cd64ece022",
+    "ROUND_9_UNIFIED_CAPABILITY_SEMANTICS_activation_evidence": "1f46f42cfce848b23d8bd9a8993657b80e513f1debf648f155b93511398dcc40",
+    "ROUND_7_1_PROVIDER_VISIBLE_TOOL_RESULT_PROJECTION_IMPLEMENTATION_SPEC.zh.md": "ef57af98e98e422bd974bd746a0c518e9ad48ac7c15a072f2142a3bf41c02679",
+    "POST_HARD_CUT_PRODUCT_CAPABILITY_GAP_INDEX.zh.md_at_start": "f08635f9f0966e53a37ac9a743c080bb38e7ced70e78427af5b5cc89267ae998",
+    "POST_HARD_CUT_PRODUCT_CAPABILITY_GAP_INDEX.zh.md_after_activation_update": "75c1f818b8448b9ab41ace900b52a48bdf88df92a52cb50b71532c0470ffc28b",
+    "README.md_at_start": "85736b6539741671e0d33da75020ddd261be0b52c8fb3faf0992c1304c11fcdc",
+    "README.md_after_activation_update": "d010d73813c42286781a6909fd66728c8035d18b8f7633e02d8892c5d26aafa2",
+    "README.zh-CN.md_at_start": "4a2f2c2003ad99e039c6875706d0b01593021e556cd620b78596c0597dd9a1f1",
+    "README.zh-CN.md_after_activation_update": "7cb0106074f36197c51f3eb361c9745911e3c386ac078597559f7ea281921ddd"
+  },
+  "round9_prerequisite": {
+    "activation_commit": "7dbb54ea51d1ff5cfa927d92fa181eb4b8ce3876",
+    "public_contract_manifest_fingerprint": "sha256:e26f5d51daf98a724771b64ef3457b0b195f0f3137c036141f74e23546f69dc6",
+    "retained_pytest_nodes": 806
+  },
+  "post_activation_code_sha256": {
+    "capability/__init__.py": "507facea747ebb053283802e0fe908a011de05460c7a6757d0255d3de38aeceb",
+    "capability/types.py": "573c8bb87671f565485d64771b2bf2942a8e2a5481626cc3d146ab99c1ed355e",
+    "capability/local_skills.py": "aebee7e4d07a707b75f672c457cdbd8f46c9c9dda51fb0ece8d989c77fe108e8",
+    "capability/render.py": "e378d7cb756ae19044f4acc7950cc22202e092f6fb114e1eb1a84ea35dcdab69",
+    "capability/resolver.py": "350363a4d74ddaefe8a542482851395dfe056ddf0d17ac94d5ba38c6e035d10e",
+    "capability/provider.py": "1ab3b6e4e196677c805a43ddcbde64bf70c3612165613c1c3331e9e9626c614b",
+    "capability/contracts.py": "f9277d33f10bc1c736772b9e2ad689a123ec8b2c54a7d209612b52f931fcb25f",
+    "capability/builtin_catalog.py": "88cfbb00311be5866a6a038aa3dcdd805b975d7ce964651ee76605fda9748d8a",
+    "conversation_kernel/capability.py": "8fdc9a04b58614a9c2a4d2e8de28bfe347cb904d4acba670c1b5cb5496d700e0",
+    "conversation_kernel/capability_composition.py": "ddf9e9b7e7a4232a85491f3b4e842db455066a79f3356e8a357e2418976ba873",
+    "conversation_kernel/context_sources.py": "91beb10e6315d1faceba130c6b34e526789b36a31c25b2d9bde6aef504de65ea",
+    "conversation_kernel/host.py": "d6224504876e3daef921d5a46c2f6bb3baaf34b4973aa68b31f859dd6c58e768",
+    "model_input/contracts.py": "8f87264fd2f2e80a990f8eabb4e7a6505f2bd53f7185a701a3765a44e723840e",
+    "model_input/compiler.py": "1bcafc5badc9d065e158d7c720bb8265dce64322056e0ec97e6fe5b0c1483863",
+    "model_input/lowering.py": "8739715dd25eb8481fefd2fea0655774772349199c54b7c6980f48b7b7be7a61",
+    "tools/builtins/filesystem.py": "62b10c15b6b48ec1df3e9224f85ccc3528f6f6a97ea63546530add1672840f18",
+    "tools/builtins/workspace.py": "2cf378d964ba3ffeff3261ad2d89918e6da09aae193229beb213fdc2b3c38f3d",
+    "bundled_skills/pulsara-skill-creator/SKILL.md": "4702e836ecad2da38ad53f6e1799a1658be4486f5f75fb8f44398a07344a340b",
+    "bundled_skills/pulsara-skill-installer/SKILL.md": "e7b3d1b9d940e9da8f58914c65407c98aef09f8fcbf667e51d79b4e1d35728f0",
+    "tests/test_bundled_skills.py": "2c5a8f181d9d51e6248a8a8e9a48d419a61e892c4e4d3b3bde0d691210b77d9c",
+    "tests/test_capability_skills.py": "5cf1d1eae9c7b3449ec0e769925321cb403baa22cd0236fc97c7ffb7e8b4645a",
+    "tests/test_round9_1_agent_skills_standard.py": "e936c5cd2fc1b0b7c5b5641ff0e0efcba921011e7ac4aa2d3279926087c57c95",
+    "tests/test_stage2_kernel_composition.py": "33e3b6dc375623b55f348bce9600f44a8ff70affc487c05ceadce78a5d7ef4d6"
+  },
+  "agent_skills_contract": {
+    "portable_manifest_contract": "pulsara.agent-skills-core.v1",
+    "physical_root_kinds": [
+      "WORKSPACE_PULSARA",
+      "WORKSPACE_AGENTS",
+      "USER_PULSARA",
+      "USER_AGENTS"
+    ],
+    "generic_source_count": 1,
+    "generic_source_kind": "LOCAL_SKILL_CATALOG",
+    "catalog_source_contract": "pulsara.skill-catalog.v2",
+    "active_source_contract": "pulsara.active-skill.v2",
+    "compiler_contract": "pulsara.structured-model-input-compiler.prefix-continuity.v8-agent-skills",
+    "catalog_projection": "exact ordered name + description + location or UNAVAILABLE; no partial, COMPACT or REF_ONLY routing metadata",
+    "active_projection": "exact parsed Markdown body at explicit/configured activation boundaries; same-turn tool loops do not refresh it",
+    "authority": "Skill remains untrusted guidance with no executor, permission, dependency, health, route, loaded-state or durable generation authority",
+    "ordinary_read_file": "the sole progressive-disclosure path; no Skill intent; default and maximum line windows are 2000; repeated reads return current bounded bytes; ${PULSARA_HOME} catalog aliases exact-resolve through the ordinary read path",
+    "builtin_tool_count": 33,
+    "builtin_tool_names_fingerprint": "sha256:1113334bf3bf353f5ef6b126e902fa73e2ed3951d882bad97aaaee4012c76fea",
+    "provider_tool_name_set_changed": false
+  },
+  "strict_prefix": {
+    "system_unchanged_within_compatible_epoch": true,
+    "tools_unchanged_within_compatible_epoch": true,
+    "messages_append_only": true,
+    "catalog_value_clear_unavailable_heads_are_append_only": true,
+    "cold_and_compatible_budget_fallback_is_minimal_unavailable": true,
+    "filesystem_change_does_not_rewrite_frozen_active_body": true
+  },
+  "deterministic_verification": {
+    "pytest_collection": "823_tests_collected",
+    "new_round9_1_nodes": 17,
+    "round9_1_round9_compiler_continuity_targeted": "181_passed_in_7.17s",
+    "full_pytest": "823_passed_in_118.64s",
+    "postgres_marker": "198_passed_625_deselected_in_79.80s",
+    "clean_v0": "fresh install, repeat migration, deep binding verification and schema/grant drift gates passed inside the PostgreSQL/full suites; baseline SQL was unchanged",
+    "filesystem_race_and_bounds": "enumeration-after-add, enumerated-member-loss, descriptor-relative non-regular-file rejection, exact-scope/foreign-owner, 1025-direct-child, 65-winner, custom PULSARA_HOME catalog-to-read and catalog-unavailable tests passed without partial facts",
+    "strict_prefix": "catalog VALUE successor, UNAVAILABLE invalidation, repeated invalidation no-op, active same-turn retention and Round 3.1 compatible append tests passed",
+    "ruff": "passed_all_files",
+    "compileall": "passed_src_tests_tools",
+    "terminal_protocol_generation": "passed",
+    "uv_lock_check": "passed",
+    "git_diff_check": "passed",
+    "new_skip_or_xfail": 0
+  },
+  "real_provider_dogfood": {
+    "status": "passed",
+    "api": "openai_chat_completions",
+    "workspace": "temporary isolated workspace with one Agent Skills-standard manifest and one referenced ordinary text file",
+    "model_calls": 3,
+    "tool_calls": 2,
+    "canonical_tool_trajectory": [
+      {
+        "tool_name": "read_file",
+        "path_kind": "catalog_listed_skill_manifest",
+        "result_state": "SUCCESS"
+      },
+      {
+        "tool_name": "read_file",
+        "path_kind": "skill_referenced_supporting_file",
+        "result_state": "SUCCESS"
+      }
+    ],
+    "final_verification_token_observed": true,
+    "skill_executor_or_activation_tool_used": false,
+    "ephemeral_database_dropped": true,
+    "api_key_headers_or_provider_private_response_recorded": false
+  },
+  "clean_schema_identity": {
+    "baseline_version": 0,
+    "baseline_sql_sha256": "92a146634350541abb71c63c9f82c3d8de12436e46398286185d3dc023ae8800",
+    "round9_1_schema_changes": 0
+  },
+  "oracles": {
+    "committed_agent_events": 31,
+    "live_agent_events": 24,
+    "typed_subject_slots": 13,
+    "append_guards": 2,
+    "product_relations": 26,
+    "durable_job_handlers": 1,
+    "new_capability_relations": 0,
+    "new_committed_events": 0,
+    "new_live_events": 0,
+    "new_subject_slots": 0,
+    "new_append_guards": 0,
+    "new_durable_jobs": 0,
+    "new_protocol_types": 0
+  },
+  "production_diff": {
+    "tracked_modified_or_deleted_files_under_src": 20,
+    "lines_added": 1671,
+    "lines_deleted": 1824,
+    "net_lines": -153,
+    "counting_scope": "git numstat under src; tests, tools, documentation and machine evidence are excluded"
+  },
+  "deleted_or_replaced_legacy_structures": [
+    "Pulsara-private Skill dependency/tool/binary/service/auth frontmatter semantics",
+    "Skill health subsystem and CLI availability projection",
+    "short-description COMPACT/REF_ONLY Skill routing catalog",
+    "workspace-global read_file content-suppressing dedup",
+    "BUNDLED as a Runtime Skill source kind"
+  ],
+  "permanent_absences": {
+    "skill_executor_permission_or_dependency_authority": true,
+    "skill_private_read_intent_or_loaded_state": true,
+    "durable_skill_relation_event_job_receipt_checkpoint_repair_or_recovery": true,
+    "fifth_skill_root_or_private_plugin_cache_scan": true,
+    "round5b_round9_2_plugin_hooks_or_compaction_implementation": true
+  },
+  "remaining_blockers": []
+}

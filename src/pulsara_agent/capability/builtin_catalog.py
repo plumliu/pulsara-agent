@@ -38,7 +38,7 @@ from pulsara_agent.ports.terminal import (
 
 
 DEFAULT_ARTIFACT_READ_CHARS = 20_000
-DEFAULT_READ_LINES = 500
+DEFAULT_READ_LINES = 2_000
 MAX_READ_LINES = 2_000
 DEFAULT_SEARCH_LIMIT = 50
 DEFAULT_MAX_OUTPUT_CHARS = 32_000
@@ -547,13 +547,14 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
         name="read_file",
         description=(
             "Read a UTF-8 text file with line numbers and pagination. Relative paths resolve from "
-            "workspace_root; absolute paths and ~ may read host-local ordinary text files."
+            "workspace_root; absolute paths, ~, and the literal ${PULSARA_HOME} Skill-catalog "
+            "alias may read host-local ordinary text files."
         ),
         input_schema=object_schema(
             properties={
                 "path": {
                     "type": "string",
-                    "description": "Relative paths resolve from workspace_root; absolute paths and ~ are allowed for text reads.",
+                    "description": "Relative paths resolve from workspace_root; absolute paths, ~, and the literal ${PULSARA_HOME} Skill-catalog alias are allowed for text reads.",
                 },
                 "offset": {"type": "integer", "default": 1},
                 "limit": {

@@ -410,8 +410,6 @@ class KernelHostSession:
         self._tools.seal_builtin_composition()
         self._capabilities = KernelSkillProjectionComposer(
             workspace_root=workspace.workspace_root,
-            workspace_kind=workspace.workspace_kind,
-            memory_domain=workspace.memory_domain,
             configured_active_skill_names=active_skill_names,
         )
         self._model = DirectKernelModelPort(

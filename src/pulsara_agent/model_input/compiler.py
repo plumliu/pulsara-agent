@@ -73,7 +73,7 @@ from pulsara_agent.primitives.tool_result_projection import (
 
 
 COMPILER_CONTRACT_VERSION = (
-    "pulsara.structured-model-input-compiler.prefix-continuity.v7-unified-capability"
+    "pulsara.structured-model-input-compiler.prefix-continuity.v8-agent-skills"
 )
 
 
@@ -86,7 +86,7 @@ class _SacrificeRank(IntEnum):
 
 _SOURCE_POLICY = {
     ContextSourceKind.BASE_SYSTEM: (
-        "pulsara.base-system.prefix-continuity.v5-unified-capability",
+        "pulsara.base-system.prefix-continuity.v6-agent-skills",
         ContextChannel.SYSTEM,
         ContextTrustClass.ROOT_INSTRUCTION,
         ContextBudgetClass.MUST_KEEP,
@@ -136,17 +136,13 @@ _SOURCE_POLICY = {
         ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
     ),
     ContextSourceKind.SKILL_CATALOG: (
-        "pulsara.skill-catalog.v1",
+        "pulsara.skill-catalog.v2",
         ContextChannel.RUNTIME_OBSERVATION,
-        ContextTrustClass.AUTHORIZED_CAPABILITY_CONTEXT,
+        ContextTrustClass.UNTRUSTED_OBSERVATION,
         ContextBudgetClass.IMPORTANT,
         50,
         30,
-        (
-            ContextRenderMode.FULL,
-            ContextRenderMode.COMPACT,
-            ContextRenderMode.REF_ONLY,
-        ),
+        (ContextRenderMode.FULL, ContextRenderMode.UNAVAILABLE_MINIMAL),
         ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
     ),
     ContextSourceKind.MCP_CATALOG: (
@@ -164,13 +160,13 @@ _SOURCE_POLICY = {
         ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
     ),
     ContextSourceKind.ACTIVE_SKILL: (
-        "pulsara.active-skill.v1",
+        "pulsara.active-skill.v2",
         ContextChannel.RUNTIME_OBSERVATION,
-        ContextTrustClass.AUTHORIZED_CAPABILITY_CONTEXT,
+        ContextTrustClass.UNTRUSTED_OBSERVATION,
         ContextBudgetClass.MUST_KEEP,
         60,
         20,
-        (ContextRenderMode.FULL,),
+        (ContextRenderMode.FULL, ContextRenderMode.UNAVAILABLE_MINIMAL),
         ContextSourceLifecycle.ACTIVATION_SNAPSHOT,
     ),
     ContextSourceKind.PREVIOUS_TURN_OUTCOME: (
@@ -289,13 +285,34 @@ class _SourceState:
     omitted: bool = False
     exhausted: bool = False
 
+    def __post_init__(self) -> None:
+        self.selected = tuple(
+            item.mode for item in self.candidate.variants
+        ).index(self.candidate.initial_mode)
+
+    def variant(self):
+        return self.candidate.variants[self.selected]
+
     def text(self) -> str | None:
-        return None if self.omitted else self.candidate.variants[self.selected].text
+        return None if self.omitted else self.variant().text
 
     def mode(self) -> ContextRenderMode | None:
-        return None if self.omitted else self.candidate.variants[self.selected].mode
+        return None if self.omitted else self.variant().mode
+
+    def is_unavailable(self) -> bool:
+        return self.mode() is ContextRenderMode.UNAVAILABLE_MINIMAL
+
+    def message(self) -> LLMMessage:
+        if self.omitted or self.candidate.channel is ContextChannel.SYSTEM:
+            raise ValueError("source state has no runtime observation message")
+        variant = self.variant()
+        return source_variant_message(
+            self.candidate, variant.text, mode=variant.mode
+        )
 
     def advance(self) -> bool:
+        if self.is_unavailable():
+            return False
         if self.selected + 1 < len(self.candidate.variants):
             self.selected += 1
             return True
@@ -373,10 +390,33 @@ class _AppendSourceEmission:
     state: _SourceState | None = None
     fixed_message: LLMMessage | None = None
     requires_installed_replacement: bool = False
+    unavailable_semantic_fingerprint: str | None = None
 
     def __post_init__(self) -> None:
         if (self.state is None) == (self.fixed_message is None):
             raise ValueError("append source emission union is invalid")
+        if (
+            self.unavailable_semantic_fingerprint is not None
+            and self.state is None
+        ):
+            raise ValueError("fixed source emission has unavailable fallback")
+
+    def effective_presence(self) -> SourceObservationPresence:
+        if self.state is not None and self.state.is_unavailable():
+            return SourceObservationPresence.UNAVAILABLE
+        return self.presence
+
+    def effective_lifecycle(self) -> SourceObservationLifecycle:
+        if self.state is not None and self.state.is_unavailable():
+            return SourceObservationLifecycle.UNAVAILABLE
+        return self.lifecycle
+
+    def effective_semantic_fingerprint(self) -> str:
+        if self.state is not None and self.state.is_unavailable():
+            if self.unavailable_semantic_fingerprint is None:
+                raise ValueError("minimal unavailable emission lacks identity")
+            return self.unavailable_semantic_fingerprint
+        return self.semantic_fingerprint
 
 
 class StructuredModelInputCompiler:
@@ -554,8 +594,14 @@ class StructuredModelInputCompiler:
                 reason_code=(
                     "OMITTED_FOR_BUDGET"
                     if state.omitted
+                    else "SELECTED_UNAVAILABLE"
+                    if state.is_unavailable()
+                    and state.candidate.initial_mode
+                    is ContextRenderMode.UNAVAILABLE_MINIMAL
+                    else "UNAVAILABLE_FOR_BUDGET"
+                    if state.is_unavailable()
                     else "SELECTED_FULL"
-                    if state.selected == 0
+                    if state.mode() is ContextRenderMode.FULL
                     else "DEGRADED_FOR_BUDGET"
                 ),
             )
@@ -876,14 +922,29 @@ class StructuredModelInputCompiler:
                     raise StructuredModelInputCompileError(
                         ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
                     )
-                presence = SourceObservationPresence.VALUE
-                lifecycle = _observation_lifecycle(candidate.lifecycle)
-                body = selected.text
+                if selected.mode is ContextRenderMode.UNAVAILABLE_MINIMAL:
+                    presence = SourceObservationPresence.UNAVAILABLE
+                    lifecycle = SourceObservationLifecycle.UNAVAILABLE
+                    body = ""
+                    semantic_domain = context_fingerprint(
+                        "pulsara:minimal-unavailable-source:v1",
+                        {
+                            "source_kind": candidate.source_kind.value,
+                            "source_semantic_fingerprint": (
+                                candidate.domain_semantic_fingerprint
+                            ),
+                        },
+                    )
+                else:
+                    presence = SourceObservationPresence.VALUE
+                    lifecycle = _observation_lifecycle(candidate.lifecycle)
+                    body = selected.text
+                    semantic_domain = candidate.domain_semantic_fingerprint
                 contract_version = candidate.source_contract_version
                 trust = candidate.trust_class
                 placement = candidate.placement_ordinal
                 semantic = _source_occurrence_fingerprint(
-                    candidate.domain_semantic_fingerprint,
+                    semantic_domain,
                     lifecycle=candidate.lifecycle,
                     turn_id=identity.turn_id,
                     model_call_index=request.model_call_index,
@@ -1175,6 +1236,7 @@ class StructuredModelInputCompiler:
             if candidate.source_kind is ContextSourceKind.BASE_SYSTEM:
                 continue
             previous = previous_heads.get(candidate.source_kind)
+            state = _SourceState(candidate)
             semantic = _source_occurrence_fingerprint(
                 candidate.domain_semantic_fingerprint,
                 lifecycle=candidate.lifecycle,
@@ -1182,21 +1244,53 @@ class StructuredModelInputCompiler:
                 model_call_index=request.model_call_index,
                 dispatch_anchor=planning.dispatch_anchor,
             )
-            presence = SourceObservationPresence.VALUE
+            unavailable_semantic = (
+                _source_occurrence_fingerprint(
+                    context_fingerprint(
+                        "pulsara:minimal-unavailable-source:v1",
+                        {
+                            "source_kind": candidate.source_kind.value,
+                            "source_semantic_fingerprint": (
+                                candidate.domain_semantic_fingerprint
+                            ),
+                        },
+                    ),
+                    lifecycle=candidate.lifecycle,
+                    turn_id=request.canonical_input.identity.turn_id,
+                    model_call_index=request.model_call_index,
+                    dispatch_anchor=planning.dispatch_anchor,
+                )
+                if any(
+                    variant.mode is ContextRenderMode.UNAVAILABLE_MINIMAL
+                    for variant in candidate.variants
+                )
+                else None
+            )
+            initial_presence = (
+                SourceObservationPresence.UNAVAILABLE
+                if state.is_unavailable()
+                else SourceObservationPresence.VALUE
+            )
+            initial_semantic = (
+                unavailable_semantic if state.is_unavailable() else semantic
+            )
+            if initial_semantic is None:
+                raise StructuredModelInputCompileError(
+                    ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
+                )
             should_append = (
                 candidate.lifecycle is ContextSourceLifecycle.CALL_APPEND
                 or previous is None
-                or previous.presence is not presence
-                or previous.semantic_fingerprint != semantic
+                or previous.presence is not initial_presence
+                or previous.semantic_fingerprint != initial_semantic
             )
             if not should_append:
                 continue
-            state = _SourceState(candidate)
             emissions.append(
                 _AppendSourceEmission(
                     source_kind=candidate.source_kind,
                     placement_ordinal=candidate.placement_ordinal,
-                    presence=presence,
+                    presence=SourceObservationPresence.VALUE,
                     lifecycle=_observation_lifecycle(candidate.lifecycle),
                     semantic_fingerprint=semantic,
                     contract_version=candidate.source_contract_version,
@@ -1212,6 +1306,7 @@ class StructuredModelInputCompiler:
                             ContextSourceLifecycle.ACTIVATION_SNAPSHOT,
                         }
                     ),
+                    unavailable_semantic_fingerprint=unavailable_semantic,
                 )
             )
 
@@ -1329,6 +1424,8 @@ class StructuredModelInputCompiler:
 
         def source_can_advance(state: _SourceState) -> bool:
             emission = next(item for item in emissions if item.state is state)
+            if state.is_unavailable():
+                return False
             if state.selected + 1 < len(state.candidate.variants):
                 return not state.exhausted
             return (
@@ -1473,16 +1570,22 @@ class StructuredModelInputCompiler:
                     else 0
                     if item.state.omitted
                     else request.compile_binding.estimator.estimate_message(
-                        source_variant_message(
-                            item.state.candidate, item.state.text() or ""
-                        )
+                        item.state.message()
                     )
                 ),
                 reason_code=(
                     "OMITTED_FOR_BUDGET"
                     if item.state is not None and item.state.omitted
+                    else "SELECTED_UNAVAILABLE"
+                    if item.state is not None
+                    and item.state.is_unavailable()
+                    and item.state.candidate.initial_mode
+                    is ContextRenderMode.UNAVAILABLE_MINIMAL
+                    else "UNAVAILABLE_FOR_BUDGET"
+                    if item.state is not None and item.state.is_unavailable()
                     else "SELECTED_FULL"
-                    if item.state is None or item.state.selected == 0
+                    if item.state is None
+                    or item.state.mode() is ContextRenderMode.FULL
                     else "DEGRADED_FOR_BUDGET"
                 ),
             )
@@ -1626,13 +1729,13 @@ class StructuredModelInputCompiler:
             message = (
                 item.fixed_message
                 if item.fixed_message is not None
-                else source_variant_message(item.state.candidate, item.state.text() or "")
+                else item.state.message()
             )
             assert message is not None
             resulting_heads[item.source_kind] = ProcessLocalSourceHead(
                 source_kind=item.source_kind,
-                presence=item.presence,
-                semantic_fingerprint=item.semantic_fingerprint,
+                presence=item.effective_presence(),
+                semantic_fingerprint=item.effective_semantic_fingerprint(),
                 installed_observation_fingerprint=context_fingerprint(
                     "pulsara:installed-runtime-observation:v1",
                     {"message": _llm_message_value(message)},
@@ -1681,9 +1784,7 @@ class StructuredModelInputCompiler:
                         if item.fixed_message is not None
                         else None
                         if item.state is None or item.state.omitted
-                        else source_variant_message(
-                            item.state.candidate, item.state.text() or ""
-                        ),
+                        else item.state.message(),
                     )
                     for item in emissions
                 ),
@@ -1766,9 +1867,7 @@ class StructuredModelInputCompiler:
                         if item.fixed_message is not None
                         else None
                         if item.state is None or item.state.omitted
-                        else source_variant_message(
-                            item.state.candidate, item.state.text() or ""
-                        ),
+                        else item.state.message(),
                     )
                     for item in emissions
                 ),
@@ -1897,10 +1996,21 @@ class StructuredModelInputCompiler:
                     ModelInputCompileFailureKind.SOURCE_PHYSICAL_BOUND_EXCEEDED
                 )
             costs = tuple(
-                self._source_variant_tokens(request, candidate, variant.text)
+                self._source_variant_tokens(
+                    request, candidate, variant.text, variant.mode
+                )
                 for variant in candidate.variants
             )
-            if any(after > before for before, after in zip(costs, costs[1:])):
+            initial_position = tuple(
+                variant.mode for variant in candidate.variants
+            ).index(candidate.initial_mode)
+            selectable_costs = costs[initial_position:]
+            if any(
+                after > before
+                for before, after in zip(
+                    selectable_costs, selectable_costs[1:]
+                )
+            ):
                 raise StructuredModelInputCompileError(
                     ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
                 )
@@ -2011,7 +2121,9 @@ class StructuredModelInputCompiler:
             max(
                 0,
                 _message_logical_utf8_bytes(
-                    source_variant_message(candidate, variant.text)
+                    source_variant_message(
+                        candidate, variant.text, mode=variant.mode
+                    )
                 )
                 - variant.utf8_bytes,
             )
@@ -2186,14 +2298,7 @@ class StructuredModelInputCompiler:
     ) -> int:
         estimator = request.compile_binding.estimator
         if state.candidate.channel is not ContextChannel.SYSTEM:
-            text = state.text()
-            return (
-                0
-                if text is None
-                else estimator.estimate_message(
-                    source_variant_message(state.candidate, text)
-                )
-            )
+            return 0 if state.omitted else estimator.estimate_message(state.message())
         prompt = "\n\n".join(
             text
             for item in sorted(
@@ -2213,11 +2318,14 @@ class StructuredModelInputCompiler:
         request: StructuredModelInputCompileRequest,
         candidate: ContextSourceCandidate,
         text: str,
+        mode: ContextRenderMode,
     ) -> int:
         estimator = request.compile_binding.estimator
         if candidate.channel is ContextChannel.SYSTEM:
             return estimator.estimate_text(text)
-        return estimator.estimate_message(source_variant_message(candidate, text))
+        return estimator.estimate_message(
+            source_variant_message(candidate, text, mode=mode)
+        )
 
     def _layout(
         self,
@@ -2241,18 +2349,18 @@ class StructuredModelInputCompiler:
         system_prompt = "\n\n".join(system_fragments)
         observations = tuple(
             (
-                source_variant_message(state.candidate, text),
+                state.message(),
                 _observation_origin_fingerprint(
                     source_kind=state.candidate.source_kind,
                     semantic_fingerprint=state.candidate.domain_semantic_fingerprint,
-                    text=text,
+                    text="\n".join(state.message().content),
                 ),
             )
             for state in sorted(
                 sources, key=lambda item: self._placement_key(item.candidate)
             )
             if state.candidate.channel is ContextChannel.RUNTIME_OBSERVATION
-            and (text := state.text()) is not None
+            and not state.omitted
         )
         tool_by_identity = {id(state.lowered): state for state in tools}
         transcript = tuple(
@@ -2365,6 +2473,7 @@ class StructuredModelInputCompiler:
         return (
             not state.omitted
             and not state.exhausted
+            and not state.is_unavailable()
             and (
                 state.selected + 1 < len(state.candidate.variants)
                 or state.candidate.budget_class is not ContextBudgetClass.MUST_KEEP
@@ -2475,9 +2584,7 @@ class StructuredModelInputCompiler:
             return 0
         estimator = request.compile_binding.estimator
         if state.candidate.channel is not ContextChannel.SYSTEM:
-            return estimator.estimate_message(
-                source_variant_message(state.candidate, text)
-            )
+            return estimator.estimate_message(state.message())
         # System fragments are not individually additive because joining them
         # can change text token rounding.  Attribute the deterministic marginal
         # cost in provider placement order.
@@ -2504,10 +2611,10 @@ class StructuredModelInputCompiler:
     ) -> int:
         estimator = request.compile_binding.estimator
         observation = sum(
-            estimator.estimate_message(source_variant_message(state.candidate, text))
+            estimator.estimate_message(state.message())
             for state in states
             if state.candidate.channel is not ContextChannel.SYSTEM
-            and (text := state.text()) is not None
+            and not state.omitted
         )
         return layout.estimate.system_tokens + observation
 

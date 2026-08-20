@@ -9,6 +9,7 @@ from typing import Mapping
 from pulsara_agent.llm.input import LLMMessage, LLMToolCall
 from pulsara_agent.model_input.contracts import (
     ContextChannel,
+    ContextRenderMode,
     ContextSourceCandidate,
     FrozenProviderInputItem,
     FrozenProviderInputItemKind,
@@ -161,9 +162,31 @@ def lower_canonical_item(
     raise TypeError(kind)
 
 
-def source_variant_message(candidate: ContextSourceCandidate, text: str) -> LLMMessage:
+def source_variant_message(
+    candidate: ContextSourceCandidate,
+    text: str,
+    *,
+    mode: ContextRenderMode | None = None,
+) -> LLMMessage:
     if candidate.channel is ContextChannel.SYSTEM:
         raise ValueError("SYSTEM source is not an ordered message")
+    selected_mode = mode
+    if selected_mode is None:
+        matches = tuple(
+            variant.mode for variant in candidate.variants if variant.text == text
+        )
+        selected_mode = matches[0] if len(matches) == 1 else ContextRenderMode.FULL
+    if selected_mode is ContextRenderMode.UNAVAILABLE_MINIMAL:
+        if text:
+            raise ValueError("minimal unavailable source has a non-empty body")
+        return encode_runtime_observation(
+            source_kind=candidate.source_kind,
+            trust_class=candidate.trust_class,
+            lifecycle=SourceObservationLifecycle.UNAVAILABLE,
+            presence=SourceObservationPresence.UNAVAILABLE,
+            contract_version=candidate.source_contract_version,
+            body="",
+        )
     lifecycle = {
         "SNAPSHOT_ON_CHANGE": SourceObservationLifecycle.SNAPSHOT,
         "CALL_APPEND": SourceObservationLifecycle.CALL,

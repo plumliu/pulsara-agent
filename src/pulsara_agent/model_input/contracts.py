@@ -140,6 +140,7 @@ class ContextRenderMode(StrEnum):
     COMPACT = "COMPACT"
     SUMMARY = "SUMMARY"
     REF_ONLY = "REF_ONLY"
+    UNAVAILABLE_MINIMAL = "UNAVAILABLE_MINIMAL"
 
 
 class ToolResultProviderRenderMode(StrEnum):
@@ -406,6 +407,11 @@ class ContextRenderVariant:
         encoded = self.text.encode("utf-8")
         if len(encoded) != self.utf8_bytes:
             raise ValueError("source variant byte count mismatch")
+        if (
+            self.mode is ContextRenderMode.UNAVAILABLE_MINIMAL
+            and self.text
+        ):
+            raise ValueError("minimal unavailable source variant must have no body")
         expected = context_fingerprint(
             "context-render-variant:v1",
             {"mode": self.mode.value, "text": self.text},
@@ -430,6 +436,7 @@ class ContextSourceCandidate:
     lifecycle: ContextSourceLifecycle = ContextSourceLifecycle.SNAPSHOT_ON_CHANGE
     domain_semantic_fingerprint: str = ""
     model_visible_memory_fact_ids: tuple[str, ...] = ()
+    initial_mode: ContextRenderMode = ContextRenderMode.FULL
 
     def __post_init__(self) -> None:
         if not self.source_instance_id or not self.source_contract_version:
@@ -460,6 +467,19 @@ class ContextSourceCandidate:
         positions = tuple(order.index(mode) for mode in modes)
         if positions != tuple(sorted(set(positions))):
             raise ValueError("source render variants are duplicated or unordered")
+        if self.initial_mode not in modes:
+            raise ValueError("source initial render mode is not available")
+        if ContextRenderMode.UNAVAILABLE_MINIMAL in modes:
+            if (
+                modes[-1] is not ContextRenderMode.UNAVAILABLE_MINIMAL
+                or self.channel is not ContextChannel.RUNTIME_OBSERVATION
+                or self.source_kind
+                not in {
+                    ContextSourceKind.SKILL_CATALOG,
+                    ContextSourceKind.ACTIVE_SKILL,
+                }
+            ):
+                raise ValueError("minimal unavailable source variant is not closed")
         if (
             self.trust_class is ContextTrustClass.ROOT_INSTRUCTION
             and self.channel is not ContextChannel.SYSTEM
@@ -496,14 +516,16 @@ class ContextSourceCandidate:
         )
         if self.source_contract_fingerprint != expected_contract:
             raise ValueError("source contract fingerprint mismatch")
+        semantic_payload: dict[str, object] = {
+            "source_kind": self.source_kind.value,
+            "source_instance_id": self.source_instance_id,
+            "source_contract_fingerprint": self.source_contract_fingerprint,
+            "variants": tuple(v.semantic_fingerprint for v in self.variants),
+        }
+        if self.initial_mode is not ContextRenderMode.FULL:
+            semantic_payload["initial_mode"] = self.initial_mode.value
         expected_semantic = context_fingerprint(
-            "context-source-candidate:v1",
-            {
-                "source_kind": self.source_kind.value,
-                "source_instance_id": self.source_instance_id,
-                "source_contract_fingerprint": self.source_contract_fingerprint,
-                "variants": tuple(v.semantic_fingerprint for v in self.variants),
-            },
+            "context-source-candidate:v1", semantic_payload
         )
         if self.source_semantic_fingerprint != expected_semantic:
             raise ValueError("source candidate semantic fingerprint mismatch")
@@ -1738,7 +1760,9 @@ class CompiledSourceDecision:
     def __post_init__(self) -> None:
         if self.estimated_tokens < 0 or self.reason_code not in {
             "SELECTED_FULL",
+            "SELECTED_UNAVAILABLE",
             "DEGRADED_FOR_BUDGET",
+            "UNAVAILABLE_FOR_BUDGET",
             "OMITTED_FOR_BUDGET",
         }:
             raise ValueError("compiled source decision is invalid")

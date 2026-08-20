@@ -83,8 +83,12 @@ Kernel 当前支持：
   （与adapter physical wire bytes相互独立）；更大输出使用UTF-8-safe的8,000字符
   head/tail preview，并按需有界读取；
 - bounded Host-scoped subagent；
-- bundled/local skills，通过单一聚合、append-only的`SKILL_CATALOG` source投影，
-  不获得execution或permission authority；
+- 符合Agent Skills标准的bundled/local skills，只扫描workspace/user各自的
+  `.pulsara/skills`与`.agents/skills`四种exact root，通过单一聚合、append-only
+  `SKILL_CATALOG` source投影，不获得execution或permission authority；catalog
+  routing metadata只能完整发布或明确UNAVAILABLE，explicit/configured activation
+  携带exact parsed Markdown，模型驱动的progressive disclosure只使用普通
+  `read_file`及其2,000行窗口；
 - 统一的process-local capability discovery：execution-backed Builtin、每server
   MCP snapshot与聚合Skill catalog进入同一个pure frozen registry，physical
   authority仍由原owner持有；
@@ -206,6 +210,16 @@ ref只有在inspect result以FULL安装后才可调用。同epoch的SYSTEM/tools
 catalog/route变化只追加message。本轮没有新增capability relation、event、job、
 receipt、generation或recovery graph。验证证据记录在
 [`round9_unified_capability_semantics_activation.json`](benchmarks/suites/core/v1/round9_unified_capability_semantics_activation.json)。
+Round 9.1以portable Agent Skills core替换legacy Pulsara Skill frontmatter契约。
+Skill owner通过一个scope-bound policy扫描exact four roots、全局解析precedence，并只向
+既有Round 9 registry贡献一个聚合`LOCAL_SKILL_CATALOG` snapshot。单个invalid manifest
+只产生bounded diagnostic；complete scan无法证明或overbound时发布一个UNAVAILABLE
+successor，不发布partial catalog。Catalog与active body变化只追加messages，SYSTEM和
+tools保持稳定。`allowed-tools`等host-specific字段保持inert，Skill正文不能授予tool、
+permission、MCP route或execution authority。普通`read_file`是唯一progressive
+disclosure路径：它没有Skill intent或loaded-state，重复读取返回current bounded bytes。
+验证证据记录在
+[`round9_1_agent_skills_standard_activation.json`](benchmarks/suites/core/v1/round9_1_agent_skills_standard_activation.json)。
 Round 8用advisory dataset取代旧memory durability/recovery graph。`remember`会与
 ToolResult同事务接受一个candidate；governance、cheap-hint reflection、
 embedding与reranking均保持可丢失的process-local弱完成。Accepted item只能是

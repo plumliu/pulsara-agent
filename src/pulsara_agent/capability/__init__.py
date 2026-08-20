@@ -39,7 +39,13 @@ from pulsara_agent.capability.contracts import (
     FrozenToolCapabilityFact,
     LocalSkillRootKind,
 )
-from pulsara_agent.capability.local_skills import LocalSkillProvider
+from pulsara_agent.capability.local_skills import (
+    LocalSkillDiscovery,
+    LocalSkillProvider,
+    PreparedLocalSkillRootPolicy,
+    PreparedSkillRootBinding,
+    SkillDiscoveryDisposition,
+)
 from pulsara_agent.capability.provider import (
     SkillProjectionOutput,
 )
@@ -48,22 +54,22 @@ from pulsara_agent.capability.render import (
     render_catalog_prompt,
 )
 from pulsara_agent.capability.resolver import LocalSkillCapabilityProvider
-from pulsara_agent.capability.skill_health import (
-    SkillBinaryLookupPath,
-    SkillHealthResolver,
-)
 from pulsara_agent.capability.types import (
+    ActiveSkillReason,
     ActiveSkillInjection,
+    SkillAuthoringDiagnosticCode,
+    SkillCatalogUnavailableReason,
     SkillDiagnostic,
+    SkillSource,
     SkillProjectionResolveContext,
     LocalSkillManifest,
-    RenderedSkillPrompt,
     ResolvedSkillCatalogEntry,
 )
 from pulsara_agent.ports.artifact import ToolArtifactMode
 
 __all__ = [
     "ActiveSkillInjection",
+    "ActiveSkillReason",
     "BUNDLED_MANIFEST_FILE_NAME",
     "BUNDLED_OPT_OUT_MARKER_NAME",
     "BundledSkillResetResult",
@@ -94,12 +100,16 @@ __all__ = [
     "BuiltinToolProvenance",
     "DefaultBuiltinToolCallClassifier",
     "LocalSkillCapabilityProvider",
+    "LocalSkillDiscovery",
     "LocalSkillManifest",
     "LocalSkillProvider",
-    "RenderedSkillPrompt",
+    "PreparedLocalSkillRootPolicy",
+    "PreparedSkillRootBinding",
     "ResolvedSkillCatalogEntry",
-    "SkillBinaryLookupPath",
-    "SkillHealthResolver",
+    "SkillAuthoringDiagnosticCode",
+    "SkillCatalogUnavailableReason",
+    "SkillDiscoveryDisposition",
+    "SkillSource",
     "ToolArtifactMode",
     "bundled_skills_status",
     "default_pulsara_home",

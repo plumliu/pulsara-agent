@@ -81,6 +81,7 @@ class PreparedLocalSkillCatalogSourceSnapshot:
     conversation_scope_kind: ModelInputScopeKind
     scope_subagent_task_id: str | None
     source_snapshot: FrozenCapabilitySourceSnapshot
+    root_policy_fingerprint: str
     discovery: LocalSkillDiscovery = field(repr=False)
     owner_authenticity: object = field(repr=False, compare=False)
     _issuer: object = field(repr=False, compare=False)
@@ -129,6 +130,7 @@ def issue_local_skill_catalog_source_snapshot(
     conversation_scope_kind: ModelInputScopeKind,
     scope_subagent_task_id: str | None,
     source_snapshot: FrozenCapabilitySourceSnapshot,
+    root_policy_fingerprint: str,
     discovery: LocalSkillDiscovery,
     owner_authenticity: object,
 ) -> PreparedLocalSkillCatalogSourceSnapshot:
@@ -136,6 +138,7 @@ def issue_local_skill_catalog_source_snapshot(
         conversation_scope_kind=conversation_scope_kind,
         scope_subagent_task_id=scope_subagent_task_id,
         source_snapshot=source_snapshot,
+        root_policy_fingerprint=root_policy_fingerprint,
         discovery=discovery,
         owner_authenticity=owner_authenticity,
         _issuer=_SKILL_ISSUER,

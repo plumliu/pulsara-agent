@@ -177,11 +177,23 @@ def _planning_view(
         inspection_inputs=(),
         owner_authenticity=object(),
     )
-    discovery = LocalSkillDiscovery(skills=(), diagnostics=())
+    root_policy_fingerprint = context_fingerprint(
+        "test:round9.1-skill-root-policy:v1",
+        {
+            "scope": conversation_scope_kind.value,
+            "task": scope_subagent_task_id,
+        },
+    )
+    discovery = LocalSkillDiscovery(
+        skills=(),
+        diagnostics=(),
+        root_policy_fingerprint=root_policy_fingerprint,
+    )
     skill_owner = issue_local_skill_catalog_source_snapshot(
         conversation_scope_kind=conversation_scope_kind,
         scope_subagent_task_id=scope_subagent_task_id,
         source_snapshot=skill_snapshot,
+        root_policy_fingerprint=root_policy_fingerprint,
         discovery=discovery,
         owner_authenticity=object(),
     )
@@ -305,11 +317,19 @@ def test_round9_owner_snapshot_authenticity_rejects_same_shape_forgery() -> None
         source_id="local-skills",
         facts=(),
     )
+    root_policy_fingerprint = context_fingerprint(
+        "test:round9.1-skill-root-policy:v1", "root"
+    )
     forged = PreparedLocalSkillCatalogSourceSnapshot(
         conversation_scope_kind=ModelInputScopeKind.ROOT,
         scope_subagent_task_id=None,
         source_snapshot=snapshot,
-        discovery=LocalSkillDiscovery(skills=(), diagnostics=()),
+        root_policy_fingerprint=root_policy_fingerprint,
+        discovery=LocalSkillDiscovery(
+            skills=(),
+            diagnostics=(),
+            root_policy_fingerprint=root_policy_fingerprint,
+        ),
         owner_authenticity=object(),
         _issuer=object(),
     )
@@ -1037,7 +1057,7 @@ def test_round9_owner_carriers_do_not_retain_decorative_proof_fields() -> None:
     assert "resolved_config_inventory_fingerprint" not in {
         item.name for item in fields(PreparedMcpCapabilitySourceSnapshotSet)
     }
-    assert "root_policy_fingerprint" not in {
+    assert "root_policy_fingerprint" in {
         item.name for item in fields(PreparedLocalSkillCatalogSourceSnapshot)
     }
 

@@ -11,8 +11,8 @@ from dataclasses import dataclass
 from pulsara_agent.capability.types import (
     ActiveSkillInjection,
     SkillDiagnostic,
-    RenderedSkillPrompt,
     ResolvedSkillCatalogEntry,
+    SkillCatalogUnavailableReason,
 )
 
 
@@ -23,8 +23,8 @@ class SkillProjectionOutput:
     diagnostics: tuple[SkillDiagnostic, ...] = ()
     catalog_prompt: str | None = None
     active_skill_prompt: str | None = None
-    catalog_rendered: RenderedSkillPrompt | None = None
-    active_skill_rendered: RenderedSkillPrompt | None = None
+    catalog_unavailable_reason: SkillCatalogUnavailableReason | None = None
+    active_unavailable_reason: SkillCatalogUnavailableReason | None = None
 
 
 __all__ = ["SkillProjectionOutput"]

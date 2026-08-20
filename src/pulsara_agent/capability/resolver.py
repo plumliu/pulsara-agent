@@ -1,134 +1,125 @@
-"""Local skill capability provider for one user-message boundary."""
+"""Resolve one frozen Agent Skills discovery into catalog and active data."""
 
 from __future__ import annotations
 
+from hashlib import sha256
 import re
 
-from pulsara_agent.capability.local_skills import LocalSkillProvider
-from pulsara_agent.capability.local_skills import LocalSkillDiscovery
-from pulsara_agent.capability.provider import (
-    SkillProjectionOutput,
+from pulsara_agent.capability.local_skills import (
+    LocalSkillDiscovery,
+    LocalSkillProvider,
+    PreparedLocalSkillRootPolicy,
+    SkillDiscoveryDisposition,
 )
+from pulsara_agent.capability.provider import SkillProjectionOutput
 from pulsara_agent.capability.render import (
-    DEFAULT_CATALOG_BUDGET_CHARS,
+    SkillProjectionOverbound,
+    projection_overbound_diagnostic,
     render_active_skill_prompt,
     render_catalog_prompt,
 )
-from pulsara_agent.capability.skill_health import SkillHealthResolver
 from pulsara_agent.capability.types import (
     ActiveSkillInjection,
-    SkillDiagnostic,
-    SkillProjectionResolveContext,
+    ActiveSkillReason,
     LocalSkillManifest,
     ResolvedSkillCatalogEntry,
+    SkillCatalogUnavailableReason,
+    SkillDiagnostic,
+    SkillDiagnosticSeverity,
+    SkillProjectionResolveContext,
+)
+
+
+_EXPLICIT_DOLLAR = re.compile(
+    r"(?<![A-Za-z0-9_-])\$([a-z0-9]+(?:-[a-z0-9]+)*)(?![A-Za-z0-9_-])"
+)
+_EXPLICIT_PREFIX = re.compile(
+    r"(?<![A-Za-z0-9_-])skill:([a-z0-9]+(?:-[a-z0-9]+)*)(?![A-Za-z0-9_-])",
+    flags=re.IGNORECASE,
 )
 
 
 class LocalSkillCapabilityProvider:
     provider_id = "local-skills"
 
-    def __init__(
-        self,
-        *,
-        provider: LocalSkillProvider | None = None,
-        skill_health_resolver: SkillHealthResolver | None = None,
-        catalog_budget_chars: int = DEFAULT_CATALOG_BUDGET_CHARS,
-    ) -> None:
+    def __init__(self, *, provider: LocalSkillProvider | None = None) -> None:
         self.provider = provider or LocalSkillProvider()
-        self.skill_health_resolver = skill_health_resolver or SkillHealthResolver()
-        self.catalog_budget_chars = catalog_budget_chars
-
-    def _resolve_projection_output(
-        self,
-        context: SkillProjectionResolveContext,
-        *,
-        available_tool_names: frozenset[str],
-        discovery: LocalSkillDiscovery | None = None,
-    ) -> SkillProjectionOutput:
-        if discovery is None:
-            discovery = self.snapshot_projection_input(
-                workspace_root=context.workspace_root,
-                available_tool_names=available_tool_names,
-            )
-        skills_by_name = {skill.name: skill for skill in discovery.skills}
-        catalog_entries = tuple(
-            _catalog_entry(skill)
-            for skill in discovery.skills
-            if not skill.disable_model_invocation
-        )
-        active_injections, active_diagnostics = _active_injections(
-            skills_by_name,
-            user_input=context.user_input,
-            active_skill_names=context.active_skill_names,
-        )
-        catalog = render_catalog_prompt(
-            catalog_entries, budget_chars=self.catalog_budget_chars
-        )
-        active = render_active_skill_prompt(active_injections)
-        health_diagnostics = self.skill_health_resolver.diagnostics_for_active_skills(
-            active_injections
-        )
-        diagnostics = (
-            *discovery.diagnostics,
-            *active_diagnostics,
-            *health_diagnostics,
-            *catalog.diagnostics,
-            *active.diagnostics,
-        )
-        return SkillProjectionOutput(
-            catalog_entries=catalog_entries,
-            active_injections=active_injections,
-            diagnostics=diagnostics,
-            catalog_prompt=catalog.text,
-            active_skill_prompt=active.text,
-            catalog_rendered=catalog,
-            active_skill_rendered=active,
-        )
 
     def snapshot_projection_input(
         self,
         *,
-        workspace_root,
-        available_tool_names: frozenset[str],
+        root_policy: PreparedLocalSkillRootPolicy,
         deadline_monotonic: float | None = None,
     ) -> LocalSkillDiscovery:
-        """Freeze all filesystem-backed projection inputs for one plan."""
-
         return self.provider.discover(
-            workspace_root,
-            available_tool_names=available_tool_names,
-            deadline_monotonic=deadline_monotonic,
+            root_policy, deadline_monotonic=deadline_monotonic
         )
 
     def resolve_projection_from_snapshot(
         self,
         context: SkillProjectionResolveContext,
         *,
-        available_tool_names: frozenset[str],
         discovery: LocalSkillDiscovery,
     ) -> SkillProjectionOutput:
-        """Resolve a trigger against an already frozen discovery cut."""
+        return self._resolve_projection_output(context, discovery=discovery)
 
-        return self._resolve_projection_output(
-            context,
-            available_tool_names=available_tool_names,
-            discovery=discovery,
+    def _resolve_projection_output(
+        self,
+        context: SkillProjectionResolveContext,
+        *,
+        discovery: LocalSkillDiscovery,
+    ) -> SkillProjectionOutput:
+        if discovery.disposition is SkillDiscoveryDisposition.UNAVAILABLE:
+            return SkillProjectionOutput(
+                diagnostics=discovery.diagnostics,
+                catalog_unavailable_reason=discovery.unavailable_reason,
+                active_unavailable_reason=discovery.unavailable_reason,
+            )
+        skills_by_name = {skill.name: skill for skill in discovery.skills}
+        catalog_entries = tuple(
+            sorted(
+                (_catalog_entry(skill) for skill in discovery.skills),
+                key=lambda item: item.name,
+            )
         )
+        active_injections, active_diagnostics, active_unavailable = (
+            _active_injections(
+                skills_by_name,
+                user_input=context.user_input,
+                active_skill_names=context.active_skill_names,
+            )
+        )
+        diagnostics = [*discovery.diagnostics, *active_diagnostics]
+        catalog_unavailable: SkillCatalogUnavailableReason | None = None
+        try:
+            catalog = render_catalog_prompt(catalog_entries)
+        except SkillProjectionOverbound as exc:
+            catalog_unavailable = exc.reason
+            diagnostics.append(projection_overbound_diagnostic(exc.reason))
+            catalog = None
+        active = None
+        if active_unavailable is None:
+            try:
+                active = render_active_skill_prompt(active_injections)
+            except SkillProjectionOverbound as exc:
+                active_unavailable = exc.reason
+                diagnostics.append(projection_overbound_diagnostic(exc.reason))
+        return SkillProjectionOutput(
+            catalog_entries=catalog_entries,
+            active_injections=active_injections if active_unavailable is None else (),
+            diagnostics=tuple(diagnostics),
+            catalog_prompt=catalog,
+            active_skill_prompt=active,
+            catalog_unavailable_reason=catalog_unavailable,
+            active_unavailable_reason=active_unavailable,
+        )
+
 
 def _catalog_entry(skill: LocalSkillManifest) -> ResolvedSkillCatalogEntry:
     return ResolvedSkillCatalogEntry(
         name=skill.name,
         description=skill.description,
         location=skill.location,
-        provides_tools=skill.provides_tools,
-        suggested_tools=skill.suggested_tools,
-        required_binaries=skill.required_binaries,
-        optional_binaries=skill.optional_binaries,
-        external_services=skill.external_services,
-        network_required=skill.network_required,
-        auth_required=skill.auth_required,
-        cli_usage_kind=skill.cli_usage_kind,
-        when_to_use=skill.when_to_use,
         source=skill.source,
     )
 
@@ -138,57 +129,62 @@ def _active_injections(
     *,
     user_input: str,
     active_skill_names: frozenset[str],
-) -> tuple[tuple[ActiveSkillInjection, ...], tuple[SkillDiagnostic, ...]]:
-    diagnostics: list[SkillDiagnostic] = []
-    active_names: list[str] = []
-    for name in sorted(skills_by_name):
-        if name in active_skill_names or _explicitly_mentions_skill(user_input, name):
-            active_names.append(name)
-    for name in sorted(active_skill_names - set(skills_by_name)):
-        diagnostics.append(
-            SkillDiagnostic(
-                severity="warning",
-                code="skill_activation_not_found",
-                message=f"Requested skill was not found: {name}",
-            )
+) -> tuple[
+    tuple[ActiveSkillInjection, ...],
+    tuple[SkillDiagnostic, ...],
+    SkillCatalogUnavailableReason | None,
+]:
+    explicit = _explicit_skill_names(user_input)
+    selected = tuple(sorted(set(active_skill_names) | set(explicit)))
+    missing = tuple(name for name in selected if name not in skills_by_name)
+    if missing:
+        return (
+            (),
+            (
+                SkillDiagnostic(
+                    severity=SkillDiagnosticSeverity.WARNING,
+                    code="active_skill_not_found",
+                    message="One or more requested Skills were not found",
+                ),
+            ),
+            SkillCatalogUnavailableReason.ACTIVE_SELECTION_UNAVAILABLE,
         )
     injections: list[ActiveSkillInjection] = []
-    for name in active_names:
+    for name in selected:
         skill = skills_by_name[name]
-        if skill.body_too_large:
-            continue
+        body_digest = "sha256:" + sha256(skill.body.encode("utf-8")).hexdigest()
         injections.append(
             ActiveSkillInjection(
                 name=skill.name,
                 path=skill.path,
                 base_dir=skill.base_dir,
                 location=skill.location,
-                content=skill.content,
-                reason="host_command"
-                if name in active_skill_names
-                else "explicit_user_mention",
-                suggested_tools=skill.suggested_tools,
-                required_binaries=skill.required_binaries,
-                optional_binaries=skill.optional_binaries,
-                external_services=skill.external_services,
-                network_required=skill.network_required,
-                auth_required=skill.auth_required,
-                cli_usage_kind=skill.cli_usage_kind,
+                body=skill.body,
+                reason=(
+                    ActiveSkillReason.HOST_COMMAND
+                    if name in active_skill_names
+                    else ActiveSkillReason.EXPLICIT_USER_MENTION
+                ),
                 source=skill.source,
+                manifest_semantic_fingerprint=(
+                    skill.manifest_semantic_fingerprint
+                ),
+                body_digest=body_digest,
+                raw_document_digest=skill.raw_document_digest,
             )
         )
-    return tuple(injections), tuple(diagnostics)
+    return tuple(injections), (), None
 
 
-def _explicitly_mentions_skill(user_input: str, skill_name: str) -> bool:
-    escaped = re.escape(skill_name)
-    token_boundary = r"(?![A-Za-z0-9_-])"
-    prefix_boundary = r"(?<![A-Za-z0-9_-])"
-    return bool(
-        re.search(prefix_boundary + r"\$" + escaped + token_boundary, user_input)
-        or re.search(
-            prefix_boundary + r"skill:" + escaped + token_boundary,
-            user_input,
-            flags=re.IGNORECASE,
-        )
-    )
+def _explicit_skill_names(user_input: str) -> tuple[str, ...]:
+    values = {
+        *(_match.group(1) for _match in _EXPLICIT_DOLLAR.finditer(user_input)),
+        *(
+            _match.group(1).lower()
+            for _match in _EXPLICIT_PREFIX.finditer(user_input)
+        ),
+    }
+    return tuple(sorted(values))
+
+
+__all__ = ["LocalSkillCapabilityProvider"]

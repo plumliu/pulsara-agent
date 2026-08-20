@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +12,10 @@ from pulsara_agent.ports.tool_execution import (
     ToolCall,
     ToolExecutionResult,
 )
+
+
+_PULSARA_HOME_ENV = "PULSARA_HOME"
+_PULSARA_HOME_READ_PREFIX = "${PULSARA_HOME}"
 
 
 @dataclass(slots=True)
@@ -43,6 +48,17 @@ class WorkspaceTool:
         if not raw_path or not raw_path.strip():
             raise ValueError("path is required")
         raw = raw_path.strip()
+        if raw == _PULSARA_HOME_READ_PREFIX or raw.startswith(
+            _PULSARA_HOME_READ_PREFIX + "/"
+        ):
+            configured = os.getenv(_PULSARA_HOME_ENV)
+            base = (
+                Path(configured).expanduser()
+                if configured
+                else Path.home() / ".pulsara"
+            ).resolve()
+            suffix = raw[len(_PULSARA_HOME_READ_PREFIX) :].lstrip("/")
+            return (base / suffix).resolve()
         if raw.startswith("~"):
             return Path(raw).expanduser().resolve()
         path = Path(raw)

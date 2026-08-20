@@ -1,16 +1,11 @@
 ---
 name: pulsara-skill-creator
-description: Create or improve Pulsara local skills that follow the SKILL.md bundle contract. Use when the user asks to design a new skill, review a skill bundle, or turn a repeated workflow into a local skill.
-provides_tools:
-  - read_file
-  - write_file
-  - edit_file
-  - search_files
+description: Create or improve portable local skills that follow the Agent Skills SKILL.md contract. Use when the user asks to design a new skill, review a skill bundle, or turn a repeated workflow into a local skill.
 ---
 
 # Pulsara Skill Creator
 
-Use this skill to create or improve a Pulsara local skill bundle.
+Use this skill to create or improve a portable Agent Skills bundle for Pulsara.
 
 ## Workflow
 
@@ -31,6 +26,6 @@ description: A concise sentence that explains when to use the skill.
 
 ## Guardrails
 
-- Do not add tool schemas to a skill. `provides_tools` is only a suggested/common tool list.
+- Do not add tool schemas, permission declarations, or Pulsara dependency fields to a skill. Describe how to use ordinary available tools in the Markdown body.
 - Do not invent a `.system` root or graph entry for the skill.
 - Prefer ordinary files that `read_file` and `terminal` can inspect naturally.

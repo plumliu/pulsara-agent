@@ -1,10 +1,12 @@
 # Round 9.1：Agent Skills Standard 与 Append-only Skill Capability 实施规格
 
-> 状态：**DRAFT — NOT ACTIVATED**
+> 状态：**ACTIVATED**
 >
-> 记录日期：2026-08-17
+> 记录日期：2026-08-21
 >
-> 编码基线：**待Round 9 ACTIVATED后冻结**。必须把Round 9 activation commit SHA、public contract manifest与evidence hash写回此处；不得使用Round 9之前的起草输入开始编码。
+> 编码基线：`7dbb54ea51d1ff5cfa927d92fa181eb4b8ce3876`（已激活Round 9的clean commit）。Round 9 public contract manifest为`sha256:e26f5d51daf98a724771b64ef3457b0b195f0f3137c036141f74e23546f69dc6`，activation evidence SHA-256为`1f46f42cfce848b23d8bd9a8993657b80e513f1debf648f155b93511398dcc40`。
+>
+> 激活证据：[Round 9.1 activation evidence](benchmarks/suites/core/v1/round9_1_agent_skills_standard_activation.json)。实现保留Round 9的owner-issued聚合`LOCAL_SKILL_CATALOG`、parent dispatch cut与continuity CAS；没有新增durable owner、schema、event或tool。
 >
 > 历史起草输入：`ffd0d146f8d7991ff3d1e92dc9ca75e8abf894e8`
 >
@@ -152,7 +154,7 @@ Pulsara不需要知道模型是在“检查”还是“采用”一个文件。�
 
 - Agent Skills standard `SKILL.md` parser与directory/resource contract；
 - workspace skill roots：`.pulsara/skills`、`.agents/skills`；
-- 启用user skills时的user roots：`${PULSARA_HOME}/skills`（默认 `~/.pulsara/skills`）、`~/.agents/skills`；
+- 启用user skills时的user roots：`${PULSARA_HOME}/skills`（未配置时物理默认 `~/.pulsara/skills`）、`~/.agents/skills`；catalog始终使用普通`read_file`可解析的`${PULSARA_HOME}/skills/...`稳定alias，不把非默认home错误显示为`~/.pulsara`，也不暴露resolved absolute home；
 - catalog 在同 epoch 中响应新增、修改、删除与invalid/unavailable变化；
 - configured 与显式 textual skill activation；
 - ROOT initial prompt、ordered steer batch、tool loop、Plan automatic continuation和child scope的 closed activation matrix；
@@ -395,10 +397,10 @@ class LocalSkillManifest:
 4. `description`trim后长度1–1024；它是唯一portable routing description，不再读取顶层`when_to_use`；
 5. `license`若存在必须是non-empty string，canonical UTF-8最多1,024 bytes；它仍只是license name或bundled license file reference；
 6. `compatibility`若存在必须为1–500字符；
-7. `metadata`若存在必须为mapping，最多64项；所有key必须是1–128 UTF-8 bytes的string，value必须是0–1,024 UTF-8 bytes的string，key-sorted canonical aggregate最多16 KiB；不得把任意nested YAML object偷渡为metadata value；
+7. `metadata`若存在必须为mapping，最多64项；显式`metadata: null`不是“字段不存在”而是invalid；所有key必须是1–128 UTF-8 bytes的string，value必须是0–1,024 UTF-8 bytes的string，key-sorted canonical aggregate最多16 KiB；不得把任意nested YAML object偷渡为metadata value；
 8. 整个UTF-8 `SKILL.md`最多64 KiB，YAML frontmatter最多32 KiB；parse前的event/node scan最多512 nodes、最大depth 16，duplicate key、anchor、alias、custom tag与multi-document YAML全部拒绝；
 9. body与标准resources继续受§5.5 physical bounds约束；supporting resources不在discovery时读取；
-10. unsupported top-level extension只进入bounded internal diagnostic，不产生Pulsara语义；`license`、`compatibility`与`metadata`绝不能再被标为unknown。
+10. unsupported top-level extension只进入bounded internal diagnostic，不产生Pulsara语义，也不得映射成provider/compiler可见的`CAPABILITY_DISCOVERY_INCOMPLETE`；`license`、`compatibility`与`metadata`绝不能再被标为unknown。
 
 旧顶层`provides_tools`、`suggested_tools`、`required_binaries`、`optional_binaries`、`external_services`、`network_required`、`auth_required`、`cli_usage_kind`、`when_to_use`、`disable_model_invocation`与`user_invocable`全部失去canonical语义。clean-v0不得悄悄恢复alias、双读或迁移逻辑，也不得把这些字段搬进`metadata.pulsara.*`继续解释。
 
@@ -633,7 +635,7 @@ Filesystem不提供跨目录事务，本文也不伪造“所有root同一瞬间
 
 1. 按`LocalSkillRootKind` precedence处理当前policy中的root；每个root只执行一次bounded direct-child enumeration，并冻结该次实际存在的sorted `child/SKILL.md` candidate tuple。enumeration时root不存在等价于该root本次为空；root不可访问、无法完成bounded enumeration或返回不完整listing则整次scan不可证明；
 2. enumeration完成后出现的新root、child或`SKILL.md`不属于本cut，进入下一safe-point scan；没有`SKILL.md`的普通child不是candidate，也不构成race；enumeration中已经冻结的candidate不能因为后续目录列表变化被静默增删；
-3. 按冻结的root/candidate顺序读取每个`SKILL.md`一次；每项只采用该次成功取得且满足64 KiB/UTF-8/YAML bounds的exact bytes，并立即冻结`raw_document_digest`；
+3. 按冻结的root/candidate顺序读取每个`SKILL.md`一次；root directory、skill child和最终文件必须通过同一descriptor-relative、no-follow acquisition chain取得，最终对象必须是regular file；FIFO/device/socket不得阻塞planning deadline。每项只采用该次成功取得且满足64 KiB/UTF-8/YAML bounds的exact bytes，并立即冻结`raw_document_digest`；
 4. 已枚举candidate在读取前消失、读取失败、超出absolute dispatch deadline，或无法形成一份exact bounded byte string时，整次aggregate source snapshot为`UNAVAILABLE/DISCOVERY_RACED + facts=()`；不得把它当作invalid manifest跳过后继续声称COMPLETE；
 5. 成功读取但standard-invalid的exact document仍按既有closed validation规则确定性忽略并记录bounded diagnostic；这与I/O/race导致无法证明读取集合完整不同；
 6. atomic replace恰好发生在open前后时，以该次成功file read实际取得的exact bytes为准；snapshot证明的是上述顺序观察，不声称这些bytes曾同时存在；
@@ -1046,7 +1048,7 @@ Skill安装、修改、删除、activation与read都不改变tools。本文任�
 - 任意valid standard skill无需Pulsara补丁即可正常发现；
 - discovery不枚举或预读supporting resources；
 - 增加aggregate scan reservation与complete/incomplete result；
-- 实现§5.2单次sorted `child/SKILL.md` candidate enumeration + exact bounded byte read顺序；enumerated candidate消失/read失败/deadline耗尽使整个aggregate source为`UNAVAILABLE/DISCOVERY_RACED`，不无限重试；
+- 实现§5.2单次sorted `child/SKILL.md` candidate enumeration + descriptor-relative regular-file exact bounded byte read顺序；enumerated candidate消失、变成symlink/non-regular file、read失败或deadline耗尽使整个aggregate source为`UNAVAILABLE/DISCOVERY_RACED`，不无限重试；
 - 保持Round 9现有workspace `.pulsara/.agents`与可选user `.pulsara/.agents`四种root policy、deterministic precedence、symlink containment、UTF-8与64 KiB bound；不得加入`.claude/skills`；
 - complete global scan按winning logical root直接发布一个Round 9 `PreparedLocalSkillCatalogSourceSnapshot`；不得先发布per-root generic snapshots再重组；
 - central manifest semantic fingerprint与raw document digest；authoring diagnostics不进入semantic fingerprint。
@@ -1058,6 +1060,8 @@ Skill安装、修改、删除、activation与read都不改变tools。本文任�
 - `LocalSkillManifest`只保存closed `root_kind` provenance；coarse `source`是机械派生的只读property，`SkillSource`只保留`WORKSPACE | USER`且不得用于区分四个physical roots；
 - `ResolvedSkillCatalogEntry`只保存name/description/location/source；
 - `ActiveSkillInjection`绑定manifest/body fingerprint、reason与source/location；
+- `SkillProjectionResolveContext`只保留resolver实际消费的`user_input + active_skill_names`；不得保留workspace、memory、prior-message或Plan legacy baggage；
+- renderer直接返回唯一`str | None`，`SkillProjectionOutput`不同时保存prompt string与第二份`RenderedSkillPrompt/fragments/source_entry_count`；
 - 所有 provider DTO 保持frozen、无mutable dict。
 
 ### 13.3 `capability/resolver.py`
@@ -1103,6 +1107,7 @@ Skill安装、修改、删除、activation与read都不改变tools。本文任�
 ### 13.7 普通 `read_file` wiring
 
 - `read_file`不增加intent字段或新的provider tool name；
+- ordinary read path resolver exact支持`${PULSARA_HOME}/...`稳定alias；未配置env时只把该alias映射到物理默认`~/.pulsara`，不做任意环境变量展开；
 - 将默认line window从500提高到2,000，maximum仍为2,000，100,000-character physical bound保持；
 - 删除workspace-global content-suppressing read dedup；相同read再次执行时返回current bounded result，不再第二次省略、第三次拒绝；
 - full/partial read继续使用同一immutable returned-byte carrier与ordinary ToolResult settlement；

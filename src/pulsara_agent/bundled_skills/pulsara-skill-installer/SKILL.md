@@ -1,8 +1,6 @@
 ---
 name: pulsara-skill-installer
-description: Install a local OpenAI/Codex-style skill folder into this workspace's Pulsara skill directory. Use when the user says they placed a SKILL in the repository root, asks to install a local skill, asks to list installed Pulsara skills, or asks to verify local skill installation.
-provides_tools:
-  - terminal
+description: Install a portable Agent Skills folder into this workspace's Pulsara skill directory. Use when the user says they placed a SKILL in the repository root, asks to install a local skill, asks to list installed Pulsara skills, or asks to verify local skill installation.
 ---
 
 # Pulsara Skill Installer

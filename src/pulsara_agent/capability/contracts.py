@@ -1133,7 +1133,7 @@ def skill_projection_input_fingerprint(
     source_snapshot_fingerprint: str,
 ) -> str:
     return context_fingerprint(
-        "frozen-skill-projection-input:v1",
+        "frozen-skill-projection-input:v2-agent-skills",
         {
             "source_snapshot": source_snapshot_fingerprint,
             "discovery_semantic_fingerprint": discovery_semantic_fingerprint,

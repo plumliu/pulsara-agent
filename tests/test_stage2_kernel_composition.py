@@ -11,6 +11,8 @@ from pulsara_agent.capability.contracts import (
     skill_capability_dispatch_view_fingerprint,
 )
 from pulsara_agent.capability.local_skills import LocalSkillDiscovery
+from pulsara_agent.capability.local_skills import LocalSkillProvider
+from pulsara_agent.capability.provider import SkillProjectionOutput
 from pulsara_agent.conversation_kernel.capability import (
     KernelSkillProjectionComposer,
 )
@@ -23,22 +25,25 @@ from pulsara_agent.workspace_identity import HostWorkspaceInput
 class _SkillProjectionProvider:
     def __init__(self) -> None:
         self.snapshot_calls = 0
+        self.provider = LocalSkillProvider(include_user_skills=False)
 
     def snapshot_projection_input(
-        self, *, workspace_root, available_tool_names, deadline_monotonic=None
+        self, *, root_policy, deadline_monotonic=None
     ):
-        del workspace_root, deadline_monotonic
+        del deadline_monotonic
         self.snapshot_calls += 1
-        assert available_tool_names == frozenset()
-        return LocalSkillDiscovery(skills=(), diagnostics=())
+        return LocalSkillDiscovery(
+            skills=(),
+            diagnostics=(),
+            root_policy_fingerprint=root_policy.root_policy_fingerprint,
+        )
 
     def resolve_projection_from_snapshot(
-        self, context, *, available_tool_names, discovery
+        self, context, *, discovery
     ):
         assert context.active_skill_names == frozenset({"review"})
-        assert available_tool_names == frozenset()
-        assert discovery == LocalSkillDiscovery(skills=(), diagnostics=())
-        return SimpleNamespace(
+        assert discovery.disposition.value == "COMPLETE"
+        return SkillProjectionOutput(
             catalog_entries=(
                 SimpleNamespace(
                     name="review", description="Review changes", location="test"
@@ -48,7 +53,7 @@ class _SkillProjectionProvider:
                 SimpleNamespace(
                     name="review",
                     location="test",
-                    content="Review body",
+                    body="Review body",
                     reason="configured",
                 ),
             ),
@@ -61,8 +66,6 @@ class _SkillProjectionProvider:
 def _composer(tmp_path, provider: _SkillProjectionProvider):
     return KernelSkillProjectionComposer(
         workspace_root=tmp_path,
-        workspace_kind="project",
-        memory_domain=None,  # type: ignore[arg-type]
         configured_active_skill_names=frozenset({"review"}),
         provider=provider,  # type: ignore[arg-type]
     )

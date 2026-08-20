@@ -5,6 +5,7 @@ import shutil
 from pathlib import Path
 
 from pulsara_agent.capability import LocalSkillProvider
+from pulsara_agent.capability.types import SkillSource
 from pulsara_agent.capability.bundled_skills import (
     BUNDLED_MANIFEST_FILE_NAME,
     BUNDLED_OPT_OUT_MARKER_NAME,
@@ -13,6 +14,7 @@ from pulsara_agent.capability.bundled_skills import (
     reset_bundled_skill,
     sync_bundled_skills,
 )
+from pulsara_agent.model_input.contracts import ModelInputScopeKind
 
 
 def test_sync_bundled_skills_installs_manifest_provenance_and_runtime_discovery(
@@ -38,15 +40,23 @@ def test_sync_bundled_skills_installs_manifest_provenance_and_runtime_discovery(
     assert provenance["source"] == "bundled"
     assert provenance["bundled_from"] == "pulsara-agent"
 
-    discovery = LocalSkillProvider(
+    provider = LocalSkillProvider(
         user_product_skills_root=pulsara_home / "skills",
         user_agents_skills_root=tmp_path / "empty-agents",
-    ).discover(tmp_path / "workspace", available_tool_names=frozenset())
+    )
+    policy = provider.prepare_root_policy(
+        tmp_path / "workspace",
+        conversation_scope_kind=ModelInputScopeKind.ROOT,
+        scope_subagent_task_id=None,
+    )
+    discovery = provider.discover(policy)
 
     assert len(discovery.skills) == 1
     assert discovery.skills[0].name == "pulsara-alpha"
-    assert discovery.skills[0].source == "bundled"
-    assert discovery.skills[0].location == "~/.pulsara/skills/pulsara-alpha/SKILL.md"
+    assert discovery.skills[0].source is SkillSource.USER
+    assert discovery.skills[0].location == (
+        "${PULSARA_HOME}/skills/pulsara-alpha/SKILL.md"
+    )
 
 
 def test_runtime_discovery_classifies_bundled_skill_from_user_product_root(
@@ -68,14 +78,20 @@ def test_runtime_discovery_classifies_bundled_skill_from_user_product_root(
         encoding="utf-8",
     )
 
-    discovery = LocalSkillProvider(
+    provider = LocalSkillProvider(
         user_product_skills_root=pulsara_home / "skills",
         user_agents_skills_root=tmp_path / "empty-agents",
-    ).discover(tmp_path / "workspace", available_tool_names=frozenset())
+    )
+    policy = provider.prepare_root_policy(
+        tmp_path / "workspace",
+        conversation_scope_kind=ModelInputScopeKind.ROOT,
+        scope_subagent_task_id=None,
+    )
+    discovery = provider.discover(policy)
 
     assert len(discovery.skills) == 1
     assert discovery.skills[0].name == "pulsara-alpha"
-    assert discovery.skills[0].source == "bundled"
+    assert discovery.skills[0].source is SkillSource.USER
 
 
 def test_sync_bundled_skills_second_sync_is_unchanged_noop(tmp_path) -> None:

@@ -32,15 +32,11 @@ from pulsara_agent.tools.builtins.workspace import WorkspaceTool
 
 
 MAX_READ_LINES = 2_000
-DEFAULT_READ_LINES = 500
+DEFAULT_READ_LINES = 2_000
 MAX_READ_CHARS = 100_000
 DEFAULT_SEARCH_LIMIT = 50
 MAX_SEARCH_LIMIT = 1_000
 UTF8_BOM = "\ufeff"
-READ_DEDUP_MESSAGE = (
-    "File unchanged since last read. The content from the earlier read_file "
-    "result in this conversation is still current."
-)
 BLOCKED_DEVICE_PATHS = {
     "/dev/zero",
     "/dev/random",
@@ -92,16 +88,9 @@ BINARY_EXTENSIONS = {
 
 
 @dataclass(slots=True)
-class _ReadRecord:
-    mtime_ns: int
-    dedup_hits: int = 0
-
-
-@dataclass(slots=True)
 class _WorkspaceFileState:
     lock: threading.Lock = field(default_factory=threading.Lock)
     path_locks: dict[Path, threading.Lock] = field(default_factory=dict)
-    read_cache: dict[tuple[Path, int, int], _ReadRecord] = field(default_factory=dict)
     read_timestamps: dict[Path, int] = field(default_factory=dict)
     last_lookup_key: tuple | None = None
     consecutive_lookup_count: int = 0
@@ -153,57 +142,6 @@ class ReadFileTool(WorkspaceTool):
             raise ValueError(f"path is not a file: {path}")
 
         state = _state_for_workspace(self.workspace_root)
-        mtime_ns = path.stat().st_mtime_ns
-        dedup_key = (path, offset, limit)
-        with state.lock:
-            record = state.read_cache.get(dedup_key)
-            if record is not None and record.mtime_ns == mtime_ns:
-                record.dedup_hits += 1
-                if record.dedup_hits >= 2:
-                    return self._result(
-                        call,
-                        status=ToolResultState.ERROR,
-                        output=json_text(
-                            {
-                                "error": (
-                                    "Repeated read blocked: this exact file region has already "
-                                    "been returned and the file has not changed."
-                                ),
-                                "path": _relpath(path, self.workspace_root),
-                                "access_scope": access_scope,
-                                "workspace_relative": workspace_relative,
-                                "already_read": record.dedup_hits + 1,
-                            }
-                        ),
-                        metadata={
-                            "path": str(path),
-                            "dedup": True,
-                            "access_scope": access_scope,
-                            "workspace_relative": workspace_relative,
-                        },
-                    )
-                return self._result(
-                    call,
-                    status=ToolResultState.SUCCESS,
-                    output=json_text(
-                        {
-                            "status": "unchanged",
-                            "message": READ_DEDUP_MESSAGE,
-                            "path": _relpath(path, self.workspace_root),
-                            "access_scope": access_scope,
-                            "workspace_relative": workspace_relative,
-                            "content_returned": False,
-                            "dedup": True,
-                        }
-                    ),
-                    metadata={
-                        "path": str(path),
-                        "dedup": True,
-                        "access_scope": access_scope,
-                        "workspace_relative": workspace_relative,
-                    },
-                )
-
         raw_text = path.read_text(encoding="utf-8", errors="replace")
         text, had_bom = _strip_bom(raw_text)
         lines = text.splitlines()
@@ -240,8 +178,8 @@ class ReadFileTool(WorkspaceTool):
             )
 
         truncated = end_index < total_lines
+        mtime_ns = path.stat().st_mtime_ns
         with state.lock:
-            state.read_cache[dedup_key] = _ReadRecord(mtime_ns=mtime_ns)
             state.read_timestamps[path] = mtime_ns
             _track_lookup(state, ("read", path, offset, limit))
             consecutive = state.consecutive_lookup_count
@@ -919,9 +857,6 @@ def _stale_warning(state: _WorkspaceFileState, path: Path) -> str | None:
 def _note_write(state: _WorkspaceFileState, path: Path) -> None:
     mtime_ns = path.stat().st_mtime_ns
     with state.lock:
-        stale_keys = [key for key in state.read_cache if key[0] == path]
-        for key in stale_keys:
-            del state.read_cache[key]
         state.read_timestamps[path] = mtime_ns
 
 

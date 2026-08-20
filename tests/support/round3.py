@@ -396,11 +396,21 @@ class StaticContextSourceCollector:
             disposition=CapabilitySourceSnapshotDisposition.COMPLETE,
             facts=(),
         )
+        root_policy_fingerprint = context_fingerprint(
+            "test:skill-root-policy:v1",
+            {
+                "scope": conversation_scope_kind.value,
+                "task": scope_subagent_task_id,
+            },
+        )
         return issue_local_skill_catalog_source_snapshot(
             conversation_scope_kind=conversation_scope_kind,
             scope_subagent_task_id=scope_subagent_task_id,
             source_snapshot=snapshot,
-            discovery=LocalSkillDiscovery((), ()),
+            root_policy_fingerprint=root_policy_fingerprint,
+            discovery=LocalSkillDiscovery(
+                (), (), root_policy_fingerprint=root_policy_fingerprint
+            ),
             owner_authenticity=self,
         )
 
@@ -434,7 +444,7 @@ class StaticContextSourceCollector:
         candidates: tuple[ContextSourceCandidate, ...] = (
             _candidate(
                 kind=ContextSourceKind.BASE_SYSTEM,
-                version="pulsara.base-system.prefix-continuity.v5-unified-capability",
+                version="pulsara.base-system.prefix-continuity.v6-agent-skills",
                 channel=ContextChannel.SYSTEM,
                 trust=ContextTrustClass.ROOT_INSTRUCTION,
                 budget=ContextBudgetClass.MUST_KEEP,
@@ -1185,11 +1195,23 @@ def prepare_test_direct_tool_surface(
         disposition=CapabilitySourceSnapshotDisposition.COMPLETE,
         facts=(),
     )
-    discovery = LocalSkillDiscovery(skills=(), diagnostics=())
+    root_policy_fingerprint = context_fingerprint(
+        "test:skill-root-policy:v1",
+        {
+            "scope": conversation_scope_kind.value,
+            "task": scope_subagent_task_id,
+        },
+    )
+    discovery = LocalSkillDiscovery(
+        skills=(),
+        diagnostics=(),
+        root_policy_fingerprint=root_policy_fingerprint,
+    )
     skill_owner = issue_local_skill_catalog_source_snapshot(
         conversation_scope_kind=conversation_scope_kind,
         scope_subagent_task_id=scope_subagent_task_id,
         source_snapshot=skill_snapshot,
+        root_policy_fingerprint=root_policy_fingerprint,
         discovery=discovery,
         owner_authenticity=object(),
     )

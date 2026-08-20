@@ -90,8 +90,12 @@ The current Kernel supports:
   remain FULL (independent of adapter wire bytes), while larger output uses a
   UTF-8-safe 8,000-character head/tail preview and bounded on-demand reads;
 - bounded Host-scoped subagents;
-- bundled and local skills, projected through one aggregate, append-only
-  `SKILL_CATALOG` source without execution or permission authority;
+- Agent Skills-standard bundled and local skills across the exact workspace/user
+  `.pulsara/skills` and `.agents/skills` roots, projected through one aggregate,
+  append-only `SKILL_CATALOG` source without execution or permission authority;
+  catalog routing metadata is complete-or-unavailable, explicit/configured
+  activation carries the exact parsed Markdown body, and model-driven
+  progressive disclosure uses ordinary `read_file` with a 2,000-line window;
 - unified, process-local capability discovery: execution-backed Builtins,
   per-server MCP snapshots, and the aggregate Skill catalog enter one pure
   frozen registry while their original owners retain physical authority;
@@ -230,6 +234,19 @@ byte-stable, and catalog/route changes append messages only. No capability
 relation, event, job, receipt, generation, or recovery graph was added.
 Verification is recorded in
 [`round9_unified_capability_semantics_activation.json`](benchmarks/suites/core/v1/round9_unified_capability_semantics_activation.json).
+Round 9.1 replaces the legacy Pulsara Skill frontmatter contract with the
+portable Agent Skills core. The Skill owner scans the exact four roots through
+one scope-bound policy, resolves global precedence, and contributes one
+aggregate `LOCAL_SKILL_CATALOG` snapshot to the existing Round 9 registry.
+Invalid individual manifests are omitted with bounded diagnostics; an
+unprovable or overbound complete scan publishes one UNAVAILABLE successor and
+never a partial catalog. Catalog and active-body changes append messages only;
+SYSTEM and tools remain stable. Host-specific fields including `allowed-tools`
+are inert data, and Skill text cannot grant tools, permissions, MCP routes, or
+execution authority. Ordinary `read_file` is the only progressive-disclosure
+path: it has no Skill intent or loaded-state and repeated reads return current
+bounded bytes. Verification is recorded in
+[`round9_1_agent_skills_standard_activation.json`](benchmarks/suites/core/v1/round9_1_agent_skills_standard_activation.json).
 Round 8 replaces the old memory durability/recovery graph with an advisory
 dataset. `remember` atomically accepts one candidate with its ToolResult, while
 governance, cheap-hint reflection, embedding, and reranking remain lossy

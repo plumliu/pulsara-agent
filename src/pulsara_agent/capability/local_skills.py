@@ -1,24 +1,43 @@
-"""Local SKILL.md discovery and V1 frontmatter parsing."""
+"""Bounded Agent Skills discovery for the four Round 9 physical roots."""
 
 from __future__ import annotations
 
-import json
+from dataclasses import dataclass, field
+from enum import StrEnum
+from hashlib import sha256
 import os
-import re
-from time import monotonic
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+import re
+import stat
+from time import monotonic
+from typing import Any
 
 import yaml
-
-from pulsara_agent.capability.types import (
-    SkillDiagnostic,
-    LocalSkillManifest,
-    SkillAuthRequired,
-    SkillCliUsageKind,
-    SkillSource,
+from yaml.events import (
+    AliasEvent,
+    DocumentStartEvent,
+    MappingEndEvent,
+    MappingStartEvent,
+    ScalarEvent,
+    SequenceEndEvent,
+    SequenceStartEvent,
 )
+
+from pulsara_agent.capability.contracts import LocalSkillRootKind
+from pulsara_agent.capability.types import (
+    LocalSkillManifest,
+    ResolvedSkillCatalogEntry,
+    SkillAuthoringDiagnosticCode,
+    SkillCatalogUnavailableReason,
+    SkillDiagnostic,
+    SkillDiagnosticSeverity,
+)
+from pulsara_agent.capability.render import (
+    SkillProjectionOverbound,
+    render_catalog_prompt,
+)
+from pulsara_agent.model_input.contracts import ModelInputScopeKind
+from pulsara_agent.primitives.context import canonical_json_bytes, context_fingerprint
 
 
 WORKSPACE_PRODUCT_SKILL_ROOT_PARTS = (".pulsara", "skills")
@@ -26,56 +45,204 @@ WORKSPACE_AGENTS_SKILL_ROOT_PARTS = (".agents", "skills")
 USER_PRODUCT_SKILL_ROOT_PARTS = (".pulsara", "skills")
 USER_AGENTS_SKILL_ROOT_PARTS = (".agents", "skills")
 PULSARA_HOME_ENV = "PULSARA_HOME"
-USER_PRODUCT_LOCATION_PREFIX = "~/.pulsara/skills"
+USER_PRODUCT_LOCATION_PREFIX = "${PULSARA_HOME}/skills"
 SKILL_FILE_NAME = "SKILL.md"
 BUNDLED_SKILL_PROVENANCE_FILE_NAME = ".pulsara-skill-source.json"
-MAX_SKILL_FILE_BYTES = 64 * 1024
-MAX_SKILL_NAME_CHARS = 64
-MAX_FRONTMATTER_TEXT_CHARS = 1024
 
-_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
-_BINARY_TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$")
-_SERVICE_TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
-_AUTH_REQUIRED_VALUES = frozenset({"none", "optional", "required"})
-_CLI_USAGE_KIND_VALUES = frozenset({"none", "read", "write", "mixed"})
-_KNOWN_FRONTMATTER = {
-    "name",
-    "description",
-    "when_to_use",
-    "provides_tools",
-    "suggested_tools",
-    "required_binaries",
-    "optional_binaries",
-    "external_services",
-    "network_required",
-    "auth_required",
-    "cli_usage_kind",
-    "disable_model_invocation",
-    "user_invocable",
+AGENT_SKILLS_CONTRACT_ID = "pulsara.agent-skills-core.v1"
+MAX_SKILL_FILE_BYTES = 64 * 1024
+MAX_SKILL_FRONTMATTER_BYTES = 32 * 1024
+MAX_SKILL_YAML_NODES = 512
+MAX_SKILL_YAML_DEPTH = 16
+MAX_SKILL_NAME_BYTES = 64
+MAX_SKILL_DESCRIPTION_CHARS = 1024
+MAX_SKILL_LICENSE_BYTES = 1024
+MAX_SKILL_COMPATIBILITY_CHARS = 500
+MAX_SKILL_METADATA_ITEMS = 64
+MAX_SKILL_METADATA_KEY_BYTES = 128
+MAX_SKILL_METADATA_VALUE_BYTES = 1024
+MAX_SKILL_METADATA_BYTES = 16 * 1024
+MAX_SKILL_LOCATION_BYTES = 1024
+MAX_SKILL_DIRECT_CHILDREN = 1024
+MAX_ADMITTED_SKILLS = 64
+MAX_DISCOVERY_SKILL_BYTES = 16 * 1024 * 1024
+MAX_INTERNAL_DIAGNOSTICS = 128
+
+_NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+_STANDARD_FIELDS = frozenset(
+    {"name", "description", "license", "compatibility", "metadata"}
+)
+_HOST_EXTENSION_FIELDS = frozenset(
+    {
+        "when_to_use",
+        "when-to-use",
+        "disable-model-invocation",
+        "disable_model_invocation",
+        "user-invocable",
+        "user_invocable",
+        "argument-hint",
+        "argument_hint",
+        "arguments",
+        "allowed-tools",
+        "allowed_tools",
+        "model",
+        "effort",
+        "context",
+        "agent",
+        "hooks",
+        "shell",
+        "paths",
+        "provides_tools",
+        "suggested_tools",
+        "required_binaries",
+        "optional_binaries",
+        "external_services",
+        "network_required",
+        "auth_required",
+        "cli_usage_kind",
+        "allowed_scopes",
+        "blocked_scopes",
+    }
+)
+_ROOT_ORDER = (
+    LocalSkillRootKind.WORKSPACE_PULSARA,
+    LocalSkillRootKind.WORKSPACE_AGENTS,
+    LocalSkillRootKind.USER_PULSARA,
+    LocalSkillRootKind.USER_AGENTS,
+)
+_ROOT_LOCATION_PREFIX = {
+    LocalSkillRootKind.WORKSPACE_PULSARA: ".pulsara/skills",
+    LocalSkillRootKind.WORKSPACE_AGENTS: ".agents/skills",
+    LocalSkillRootKind.USER_PULSARA: USER_PRODUCT_LOCATION_PREFIX,
+    LocalSkillRootKind.USER_AGENTS: "~/.agents/skills",
 }
-_IGNORED_SCOPE_FRONTMATTER = {"allowed_scopes", "blocked_scopes"}
+
+
+class SkillDiscoveryDisposition(StrEnum):
+    COMPLETE = "COMPLETE"
+    UNAVAILABLE = "UNAVAILABLE"
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedSkillRootBinding:
+    root_kind: LocalSkillRootKind
+    path: Path
+    containment_root: Path
+    location_prefix: str
+    precedence_ordinal: int
+    binding_fingerprint: str
+    _owner_authority: object = field(repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.root_kind, LocalSkillRootKind):
+            raise TypeError("Skill root kind is not closed")
+        if self.location_prefix != _ROOT_LOCATION_PREFIX[self.root_kind]:
+            raise ValueError("Skill root location prefix conflicts")
+        if self.precedence_ordinal != _ROOT_ORDER.index(self.root_kind):
+            raise ValueError("Skill root precedence conflicts")
+        expected = _root_binding_fingerprint(
+            root_kind=self.root_kind,
+            path=self.path,
+            containment_root=self.containment_root,
+            location_prefix=self.location_prefix,
+            precedence_ordinal=self.precedence_ordinal,
+        )
+        if self.binding_fingerprint != expected:
+            raise ValueError("Skill root binding fingerprint mismatch")
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedLocalSkillRootPolicy:
+    conversation_scope_kind: ModelInputScopeKind
+    scope_subagent_task_id: str | None
+    roots: tuple[PreparedSkillRootBinding, ...]
+    root_policy_fingerprint: str
+    _owner_authority: object = field(repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        _validate_scope(
+            self.conversation_scope_kind, self.scope_subagent_task_id
+        )
+        if len(self.roots) > len(_ROOT_ORDER):
+            raise ValueError("Skill root policy exceeds the closed root set")
+        kinds = tuple(item.root_kind for item in self.roots)
+        ordinals = tuple(item.precedence_ordinal for item in self.roots)
+        if (
+            kinds != tuple(sorted(kinds, key=_ROOT_ORDER.index))
+            or len(kinds) != len(set(kinds))
+            or len(ordinals) != len(set(ordinals))
+            or len({item.path for item in self.roots}) != len(self.roots)
+            or len({item.location_prefix for item in self.roots}) != len(self.roots)
+        ):
+            raise ValueError("Skill root policy is not ordered and unique")
+        if any(item._owner_authority is not self._owner_authority for item in self.roots):
+            raise ValueError("Skill root policy contains a foreign binding")
+        expected = _root_policy_fingerprint(
+            conversation_scope_kind=self.conversation_scope_kind,
+            scope_subagent_task_id=self.scope_subagent_task_id,
+            roots=self.roots,
+        )
+        if self.root_policy_fingerprint != expected:
+            raise ValueError("Skill root policy fingerprint mismatch")
 
 
 @dataclass(frozen=True, slots=True)
 class LocalSkillDiscovery:
     skills: tuple[LocalSkillManifest, ...]
     diagnostics: tuple[SkillDiagnostic, ...]
+    disposition: SkillDiscoveryDisposition = SkillDiscoveryDisposition.COMPLETE
+    unavailable_reason: SkillCatalogUnavailableReason | None = None
+    root_policy_fingerprint: str = ""
+    enumerated_candidate_count: int = 0
+    observed_utf8_bytes: int = 0
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.disposition, SkillDiscoveryDisposition):
+            raise TypeError("Skill discovery disposition is not closed")
+        if (
+            self.disposition is SkillDiscoveryDisposition.COMPLETE
+        ) != (self.unavailable_reason is None):
+            raise ValueError("Skill discovery disposition/reason conflicts")
+        if self.disposition is SkillDiscoveryDisposition.UNAVAILABLE and self.skills:
+            raise ValueError("unavailable Skill discovery contains partial facts")
+        if len(self.skills) > MAX_ADMITTED_SKILLS:
+            raise ValueError("Skill discovery admitted too many manifests")
+        names = tuple(item.name for item in self.skills)
+        if len(names) != len(set(names)):
+            raise ValueError("Skill discovery contains duplicate winners")
+        if self.enumerated_candidate_count < 0 or self.observed_utf8_bytes < 0:
+            raise ValueError("Skill discovery counters are invalid")
 
 
-@dataclass(frozen=True, slots=True)
-class _SkillRoot:
-    path: Path
-    source: SkillSource
-    location_prefix: str
-    containment_root: Path
+class _DuplicateYamlKey(ValueError):
+    pass
 
 
-def _check_discovery_deadline(deadline_monotonic: float | None) -> None:
-    if deadline_monotonic is not None and monotonic() >= deadline_monotonic:
-        raise TimeoutError("local Skill discovery deadline expired")
+class _UniqueKeySafeLoader(yaml.SafeLoader):
+    pass
+
+
+def _construct_unique_mapping(
+    loader: _UniqueKeySafeLoader, node: yaml.nodes.MappingNode, deep: bool = False
+) -> dict[Any, Any]:
+    mapping: dict[Any, Any] = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        if key in mapping:
+            raise _DuplicateYamlKey("duplicate YAML mapping key")
+        mapping[key] = loader.construct_object(value_node, deep=deep)
+    return mapping
+
+
+_UniqueKeySafeLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+    _construct_unique_mapping,
+)
 
 
 class LocalSkillProvider:
+    """The sole physical root-policy and bounded scanner owner."""
+
     def __init__(
         self,
         *,
@@ -83,619 +250,797 @@ class LocalSkillProvider:
         user_product_skills_root: Path | None = None,
         user_agents_skills_root: Path | None = None,
         include_user_skills: bool = True,
+        maximum_direct_child_directories: int = MAX_SKILL_DIRECT_CHILDREN,
+        maximum_admitted_skills: int = MAX_ADMITTED_SKILLS,
+        maximum_discovery_skill_bytes: int = MAX_DISCOVERY_SKILL_BYTES,
     ) -> None:
+        if not 1 <= max_skill_file_bytes <= MAX_SKILL_FILE_BYTES:
+            raise ValueError("Skill file bound is outside the closed maximum")
+        if not (
+            1
+            <= maximum_direct_child_directories
+            <= MAX_SKILL_DIRECT_CHILDREN
+        ):
+            raise ValueError("Skill direct-child bound is outside the closed maximum")
+        if not 1 <= maximum_admitted_skills <= MAX_ADMITTED_SKILLS:
+            raise ValueError("Skill winner bound is outside the closed maximum")
+        if not (
+            1
+            <= maximum_discovery_skill_bytes
+            <= MAX_DISCOVERY_SKILL_BYTES
+        ):
+            raise ValueError("Skill discovery byte bound is outside the closed maximum")
         self.max_skill_file_bytes = max_skill_file_bytes
         self.user_product_skills_root = user_product_skills_root
         self.user_agents_skills_root = user_agents_skills_root
         self.include_user_skills = include_user_skills
+        self.maximum_direct_child_directories = maximum_direct_child_directories
+        self.maximum_admitted_skills = maximum_admitted_skills
+        self.maximum_discovery_skill_bytes = maximum_discovery_skill_bytes
+        self._owner_authority = object()
 
-    def discover(
+    def prepare_root_policy(
         self,
         workspace_root: Path,
         *,
-        available_tool_names: frozenset[str],
+        conversation_scope_kind: ModelInputScopeKind,
+        scope_subagent_task_id: str | None,
+        root_kinds: tuple[LocalSkillRootKind, ...] | None = None,
+    ) -> PreparedLocalSkillRootPolicy:
+        _validate_scope(conversation_scope_kind, scope_subagent_task_id)
+        workspace = workspace_root.expanduser().resolve()
+        selected = root_kinds
+        if selected is None:
+            selected = _ROOT_ORDER if self.include_user_skills else _ROOT_ORDER[:2]
+        if selected != tuple(sorted(selected, key=_ROOT_ORDER.index)) or len(
+            selected
+        ) != len(set(selected)):
+            raise ValueError("Skill root selection is not ordered and unique")
+        roots = tuple(
+            self._prepare_root_binding(workspace, root_kind) for root_kind in selected
+        )
+        return PreparedLocalSkillRootPolicy(
+            conversation_scope_kind=conversation_scope_kind,
+            scope_subagent_task_id=scope_subagent_task_id,
+            roots=roots,
+            root_policy_fingerprint=_root_policy_fingerprint(
+                conversation_scope_kind=conversation_scope_kind,
+                scope_subagent_task_id=scope_subagent_task_id,
+                roots=roots,
+            ),
+            _owner_authority=self._owner_authority,
+        )
+
+    def discover(
+        self,
+        policy: PreparedLocalSkillRootPolicy,
+        *,
         deadline_monotonic: float | None = None,
     ) -> LocalSkillDiscovery:
-        _check_discovery_deadline(deadline_monotonic)
-        workspace_root = workspace_root.expanduser().resolve()
-        skill_roots = self._skill_roots(workspace_root)
+        if (
+            type(policy) is not PreparedLocalSkillRootPolicy
+            or policy._owner_authority is not self._owner_authority
+        ):
+            raise ValueError("foreign Skill root policy")
         diagnostics: list[SkillDiagnostic] = []
+        candidates: list[tuple[PreparedSkillRootBinding, Path]] = []
+        try:
+            _check_discovery_deadline(deadline_monotonic)
+            for root in policy.roots:
+                _check_discovery_deadline(deadline_monotonic)
+                try:
+                    root_metadata = root.path.stat()
+                except FileNotFoundError:
+                    continue
+                if not _is_within(root.path, root.containment_root):
+                    return _unavailable_discovery(
+                        policy,
+                        SkillCatalogUnavailableReason.DISCOVERY_RACED,
+                        "skill_root_escape",
+                        diagnostics,
+                    )
+                if not stat.S_ISDIR(root_metadata.st_mode):
+                    return _unavailable_discovery(
+                        policy,
+                        SkillCatalogUnavailableReason.DISCOVERY_RACED,
+                        "skill_root_not_directory",
+                        diagnostics,
+                    )
+                child_directories: list[Path] = []
+                for child in root.path.iterdir():
+                    _check_discovery_deadline(deadline_monotonic)
+                    if child.name.startswith("."):
+                        continue
+                    child_metadata = child.stat()
+                    if not stat.S_ISDIR(child_metadata.st_mode):
+                        continue
+                    child_directories.append(child)
+                    if len(child_directories) > self.maximum_direct_child_directories:
+                        return _unavailable_discovery(
+                            policy,
+                            SkillCatalogUnavailableReason.DISCOVERY_OVERBOUND,
+                            "skill_direct_child_bound_exceeded",
+                            diagnostics,
+                        )
+                for child in sorted(child_directories, key=lambda item: item.name):
+                    _check_discovery_deadline(deadline_monotonic)
+                    if not _is_within(child, root.containment_root):
+                        return _unavailable_discovery(
+                            policy,
+                            SkillCatalogUnavailableReason.DISCOVERY_RACED,
+                            "skill_directory_escape",
+                            diagnostics,
+                        )
+                    skill_file = child / SKILL_FILE_NAME
+                    try:
+                        skill_file.lstat()
+                    except FileNotFoundError:
+                        continue
+                    if not _is_within(skill_file, root.containment_root):
+                        return _unavailable_discovery(
+                            policy,
+                            SkillCatalogUnavailableReason.DISCOVERY_RACED,
+                            "skill_file_escape",
+                            diagnostics,
+                        )
+                    candidates.append((root, skill_file))
+        except (OSError, RuntimeError, TimeoutError):
+            return _unavailable_discovery(
+                policy,
+                SkillCatalogUnavailableReason.DISCOVERY_RACED,
+                "skill_enumeration_raced",
+                diagnostics,
+            )
+
         skills: list[LocalSkillManifest] = []
         seen_names: set[str] = set()
-
-        for root in skill_roots:
-            _check_discovery_deadline(deadline_monotonic)
-            if not root.path.exists():
-                continue
-            if not _is_within(root.path, root.containment_root):
-                diagnostics.append(
-                    SkillDiagnostic(
-                        severity="warning",
-                        code="skill_symlink_escape",
-                        message=f"Skill root resolves outside allowed root: {root.path}",
-                        path=root.path,
-                    )
-                )
-                continue
-            if not root.path.is_dir():
-                diagnostics.append(
-                    SkillDiagnostic(
-                        severity="warning",
-                        code="skill_root_not_directory",
-                        message=f"Skill root is not a directory: {root.path}",
-                        path=root.path,
-                    )
-                )
-                continue
-
-            for child in sorted(root.path.iterdir(), key=lambda path: path.name):
+        observed_bytes = 0
+        for root, skill_file in candidates:
+            try:
                 _check_discovery_deadline(deadline_monotonic)
-                if child.name.startswith("."):
-                    continue
-                if not child.is_dir():
-                    continue
-                if not _is_within(child, root.containment_root):
-                    diagnostics.append(
-                        SkillDiagnostic(
-                            severity="warning",
-                            code="skill_symlink_escape",
-                            message=f"Skill directory resolves outside skill root: {child}",
-                            path=child,
-                        )
-                    )
-                    continue
-                skill_file = child / SKILL_FILE_NAME
-                if not skill_file.exists():
-                    diagnostics.append(
-                        SkillDiagnostic(
-                            severity="warning",
-                            code="skill_missing_file",
-                            message=f"Skill directory has no {SKILL_FILE_NAME}: {child}",
-                            path=child,
-                        )
-                    )
-                    continue
-                if not _is_within(skill_file, root.containment_root):
-                    diagnostics.append(
-                        SkillDiagnostic(
-                            severity="warning",
-                            code="skill_symlink_escape",
-                            message=f"Skill file resolves outside skill root: {skill_file}",
-                            path=skill_file,
-                        )
-                    )
-                    continue
-                skill, parse_diagnostics = self._parse_skill_file(
-                    skill_file,
-                    root=root,
-                    available_tool_names=available_tool_names,
+                data = _read_bounded_bytes(
+                    skill_file, maximum=self.max_skill_file_bytes
                 )
-                diagnostics.extend(parse_diagnostics)
-                if skill is None:
-                    continue
-                if skill.name in seen_names:
-                    diagnostics.append(
-                        SkillDiagnostic(
-                            severity="warning",
-                            code="skill_duplicate_name",
-                            message=f"Duplicate skill name ignored: {skill.name}",
-                            path=skill.path,
-                        )
-                    )
-                    continue
-                seen_names.add(skill.name)
-                skills.append(skill)
-        _check_discovery_deadline(deadline_monotonic)
-        return LocalSkillDiscovery(skills=tuple(skills), diagnostics=tuple(diagnostics))
-
-    def _skill_roots(self, workspace_root: Path) -> tuple[_SkillRoot, ...]:
-        roots = [
-            _SkillRoot(
-                path=workspace_root.joinpath(*WORKSPACE_PRODUCT_SKILL_ROOT_PARTS),
-                source="workspace",
-                location_prefix=".pulsara/skills",
-                containment_root=workspace_root,
-            ),
-            _SkillRoot(
-                path=workspace_root.joinpath(*WORKSPACE_AGENTS_SKILL_ROOT_PARTS),
-                source="workspace",
-                location_prefix=".agents/skills",
-                containment_root=workspace_root,
-            ),
-        ]
-        if self.include_user_skills:
-            user_product_root = self.user_product_skills_root
-            if user_product_root is None:
-                user_product_root = _default_user_product_skills_root()
-            user_agents_root = self.user_agents_skills_root
-            if user_agents_root is None:
-                user_agents_root = Path.home().joinpath(*USER_AGENTS_SKILL_ROOT_PARTS)
-            roots.append(
-                _SkillRoot(
-                    path=user_product_root.expanduser().resolve(),
-                    source="user",
-                    location_prefix=USER_PRODUCT_LOCATION_PREFIX,
-                    containment_root=user_product_root.expanduser().resolve(),
+            except (OSError, RuntimeError, TimeoutError):
+                return _unavailable_discovery(
+                    policy,
+                    SkillCatalogUnavailableReason.DISCOVERY_RACED,
+                    "skill_read_raced",
+                    diagnostics,
+                    candidate_count=len(candidates),
+                    observed_bytes=observed_bytes,
                 )
+            observed_bytes += len(data)
+            if observed_bytes > self.maximum_discovery_skill_bytes:
+                return _unavailable_discovery(
+                    policy,
+                    SkillCatalogUnavailableReason.DISCOVERY_OVERBOUND,
+                    "skill_discovery_byte_bound_exceeded",
+                    diagnostics,
+                    candidate_count=len(candidates),
+                    observed_bytes=observed_bytes,
+                )
+            manifest, item_diagnostics = _parse_skill_document(
+                data,
+                path=skill_file,
+                root=root,
+                maximum_file_bytes=self.max_skill_file_bytes,
             )
-            roots.append(
-                _SkillRoot(
-                    path=user_agents_root.expanduser().resolve(),
-                    source="user",
-                    location_prefix="~/.agents/skills",
-                    containment_root=user_agents_root.expanduser().resolve(),
+            diagnostics.extend(item_diagnostics)
+            if manifest is None:
+                continue
+            if manifest.name in seen_names:
+                diagnostics.append(
+                    _diagnostic(
+                        SkillDiagnosticSeverity.WARNING,
+                        "skill_duplicate_name",
+                        "Duplicate Skill name ignored by deterministic precedence",
+                        path=skill_file,
+                    )
                 )
-            )
-        return tuple(roots)
-
-    def _parse_skill_file(
-        self,
-        path: Path,
-        *,
-        root: _SkillRoot,
-        available_tool_names: frozenset[str],
-    ) -> tuple[LocalSkillManifest | None, tuple[SkillDiagnostic, ...]]:
-        diagnostics: list[SkillDiagnostic] = []
+                continue
+            seen_names.add(manifest.name)
+            skills.append(manifest)
+            if len(skills) > self.maximum_admitted_skills:
+                return _unavailable_discovery(
+                    policy,
+                    SkillCatalogUnavailableReason.CATALOG_OVERBOUND,
+                    "skill_winner_bound_exceeded",
+                    diagnostics,
+                    candidate_count=len(candidates),
+                    observed_bytes=observed_bytes,
+                )
         try:
-            content, too_large = _read_bounded_utf8(
-                path, max_bytes=self.max_skill_file_bytes
+            _check_discovery_deadline(deadline_monotonic)
+        except TimeoutError:
+            return _unavailable_discovery(
+                policy,
+                SkillCatalogUnavailableReason.DISCOVERY_RACED,
+                "skill_discovery_deadline_expired",
+                diagnostics,
+                candidate_count=len(candidates),
+                observed_bytes=observed_bytes,
             )
-        except UnicodeDecodeError:
-            return None, (
-                SkillDiagnostic(
-                    severity="error",
-                    code="skill_invalid_utf8",
-                    message=f"Skill file is not valid UTF-8: {path}",
-                    path=path,
-                ),
-            )
-        if too_large:
-            diagnostics.append(
-                SkillDiagnostic(
-                    severity="warning",
-                    code="skill_body_too_large",
-                    message=f"Skill file exceeds {self.max_skill_file_bytes} bytes and cannot be activated.",
-                    path=path,
+        try:
+            render_catalog_prompt(
+                tuple(
+                    ResolvedSkillCatalogEntry(
+                        name=item.name,
+                        description=item.description,
+                        location=item.location,
+                        source=item.source,
+                    )
+                    for item in skills
                 )
             )
-
-        frontmatter, has_frontmatter = _extract_frontmatter(content)
-        if not has_frontmatter:
-            return None, (
-                *diagnostics,
-                SkillDiagnostic(
-                    severity="warning",
-                    code="skill_missing_frontmatter",
-                    message=f"Skill file has no YAML frontmatter: {path}",
-                    path=path,
-                ),
+        except SkillProjectionOverbound:
+            return _unavailable_discovery(
+                policy,
+                SkillCatalogUnavailableReason.CATALOG_OVERBOUND,
+                "skill_catalog_projection_bound_exceeded",
+                diagnostics,
+                candidate_count=len(candidates),
+                observed_bytes=observed_bytes,
             )
-        raw_fields, field_diagnostics = _parse_frontmatter(frontmatter, path=path)
-        diagnostics.extend(field_diagnostics)
-        diagnostics.extend(_frontmatter_key_diagnostics(raw_fields, path=path))
+        return LocalSkillDiscovery(
+            skills=tuple(skills),
+            diagnostics=_bounded_diagnostics(diagnostics),
+            disposition=SkillDiscoveryDisposition.COMPLETE,
+            unavailable_reason=None,
+            root_policy_fingerprint=policy.root_policy_fingerprint,
+            enumerated_candidate_count=len(candidates),
+            observed_utf8_bytes=observed_bytes,
+        )
 
-        name = _string_field(raw_fields, "name")
-        description = _string_field(raw_fields, "description")
-        if not name:
-            diagnostics.append(
-                SkillDiagnostic(
-                    severity="warning",
-                    code="skill_missing_name",
-                    message="Skill frontmatter is missing required field: name",
-                    path=path,
-                )
+    def _prepare_root_binding(
+        self, workspace_root: Path, root_kind: LocalSkillRootKind
+    ) -> PreparedSkillRootBinding:
+        if root_kind is LocalSkillRootKind.WORKSPACE_PULSARA:
+            path = workspace_root.joinpath(*WORKSPACE_PRODUCT_SKILL_ROOT_PARTS)
+            containment = workspace_root
+        elif root_kind is LocalSkillRootKind.WORKSPACE_AGENTS:
+            path = workspace_root.joinpath(*WORKSPACE_AGENTS_SKILL_ROOT_PARTS)
+            containment = workspace_root
+        elif root_kind is LocalSkillRootKind.USER_PULSARA:
+            path = self.user_product_skills_root or _default_user_product_skills_root()
+            path = path.expanduser().resolve()
+            containment = path
+        elif root_kind is LocalSkillRootKind.USER_AGENTS:
+            path = self.user_agents_skills_root or Path.home().joinpath(
+                *USER_AGENTS_SKILL_ROOT_PARTS
             )
-        elif len(name) > MAX_SKILL_NAME_CHARS or not _NAME_RE.fullmatch(name):
-            diagnostics.append(
-                SkillDiagnostic(
-                    severity="warning",
-                    code="skill_invalid_name",
-                    message="Skill name must be lowercase letters, digits, and hyphens, starting with a letter or digit.",
-                    path=path,
-                )
-            )
-            name = None
-
-        if not description:
-            diagnostics.append(
-                SkillDiagnostic(
-                    severity="warning",
-                    code="skill_missing_description",
-                    message="Skill frontmatter is missing required field: description",
-                    path=path,
-                )
-            )
-        if not name or not description:
-            return None, tuple(diagnostics)
-
-        description = _clip_frontmatter_text(description)
-        when_to_use = _string_field(raw_fields, "when_to_use")
-        if when_to_use:
-            when_to_use = _clip_frontmatter_text(when_to_use)
-        provides_tools, tool_diagnostics = _provides_tools(
-            raw_fields.get("provides_tools"),
-            available_tool_names=available_tool_names,
+            path = path.expanduser().resolve()
+            containment = path
+        else:  # pragma: no cover - the StrEnum is closed
+            raise TypeError("unknown Skill root kind")
+        path = path.expanduser().resolve()
+        containment = containment.expanduser().resolve()
+        ordinal = _ROOT_ORDER.index(root_kind)
+        prefix = _ROOT_LOCATION_PREFIX[root_kind]
+        return PreparedSkillRootBinding(
+            root_kind=root_kind,
             path=path,
-        )
-        diagnostics.extend(tool_diagnostics)
-        suggested_tools, suggested_tool_diagnostics = _tool_references(
-            raw_fields.get("suggested_tools"),
-            field_name="suggested_tools",
-            available_tool_names=available_tool_names,
-            path=path,
-        )
-        diagnostics.extend(suggested_tool_diagnostics)
-        required_binaries, required_binary_diagnostics = _validated_token_tuple(
-            raw_fields.get("required_binaries"),
-            field_name="required_binaries",
-            token_kind="binary",
-            token_re=_BINARY_TOKEN_RE,
-            path=path,
-        )
-        diagnostics.extend(required_binary_diagnostics)
-        optional_binaries, optional_binary_diagnostics = _validated_token_tuple(
-            raw_fields.get("optional_binaries"),
-            field_name="optional_binaries",
-            token_kind="binary",
-            token_re=_BINARY_TOKEN_RE,
-            path=path,
-        )
-        diagnostics.extend(optional_binary_diagnostics)
-        external_services, service_diagnostics = _validated_token_tuple(
-            raw_fields.get("external_services"),
-            field_name="external_services",
-            token_kind="service",
-            token_re=_SERVICE_TOKEN_RE,
-            path=path,
-        )
-        diagnostics.extend(service_diagnostics)
-        network_required, network_diagnostics = _bool_field_with_diagnostic(
-            raw_fields,
-            "network_required",
-            default=False,
-            path=path,
-        )
-        diagnostics.extend(network_diagnostics)
-        auth_required, auth_diagnostics = _enum_field(
-            raw_fields,
-            "auth_required",
-            allowed_values=_AUTH_REQUIRED_VALUES,
-            default="none",
-            path=path,
-        )
-        diagnostics.extend(auth_diagnostics)
-        cli_usage_kind, usage_diagnostics = _enum_field(
-            raw_fields,
-            "cli_usage_kind",
-            allowed_values=_CLI_USAGE_KIND_VALUES,
-            default="none",
-            path=path,
-        )
-        diagnostics.extend(usage_diagnostics)
-        return (
-            LocalSkillManifest(
-                name=name,
-                description=description,
+            containment_root=containment,
+            location_prefix=prefix,
+            precedence_ordinal=ordinal,
+            binding_fingerprint=_root_binding_fingerprint(
+                root_kind=root_kind,
                 path=path,
-                base_dir=path.parent,
-                location=_skill_location(path, root=root),
-                content=content,
-                source=_skill_source(path.parent, root=root),
-                when_to_use=when_to_use,
-                provides_tools=provides_tools,
-                suggested_tools=suggested_tools,
-                required_binaries=required_binaries,
-                optional_binaries=optional_binaries,
-                external_services=external_services,
-                network_required=network_required,
-                auth_required=cast(SkillAuthRequired, auth_required),
-                cli_usage_kind=cast(SkillCliUsageKind, cli_usage_kind),
-                disable_model_invocation=_bool_field(
-                    raw_fields, "disable_model_invocation", default=False
-                ),
-                user_invocable=_bool_field(raw_fields, "user_invocable", default=True),
-                body_too_large=too_large,
+                containment_root=containment,
+                location_prefix=prefix,
+                precedence_ordinal=ordinal,
             ),
-            tuple(diagnostics),
+            _owner_authority=self._owner_authority,
         )
+
+
+def local_skill_manifest_semantic_fingerprint(
+    *,
+    name: str,
+    description: str,
+    license: str | None,
+    compatibility: str | None,
+    metadata: tuple[tuple[str, str], ...],
+    body: str,
+) -> str:
+    return context_fingerprint(
+        "local-skill-manifest-semantic:v2-agent-skills-core",
+        {
+            "contract": AGENT_SKILLS_CONTRACT_ID,
+            "name": name,
+            "description": description,
+            "license": license,
+            "compatibility": compatibility,
+            "metadata": metadata,
+            "body": body,
+        },
+    )
+
+
+def _parse_skill_document(
+    data: bytes,
+    *,
+    path: Path,
+    root: PreparedSkillRootBinding,
+    maximum_file_bytes: int,
+) -> tuple[LocalSkillManifest | None, tuple[SkillDiagnostic, ...]]:
+    diagnostics: list[SkillDiagnostic] = []
+    if len(data) > maximum_file_bytes:
+        return None, (
+            _diagnostic(
+                SkillDiagnosticSeverity.WARNING,
+                "skill_document_overbound",
+                "Skill document exceeds the 64 KiB parser bound",
+                path=path,
+            ),
+        )
+    try:
+        document = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return None, (
+            _diagnostic(
+                SkillDiagnosticSeverity.ERROR,
+                "skill_invalid_utf8",
+                "Skill document is not valid UTF-8",
+                path=path,
+            ),
+        )
+    frontmatter, body = _extract_frontmatter(document)
+    if frontmatter is None or body is None:
+        return None, (
+            _diagnostic(
+                SkillDiagnosticSeverity.WARNING,
+                "skill_missing_frontmatter",
+                "Skill document has no closed YAML frontmatter",
+                path=path,
+            ),
+        )
+    if len(frontmatter.encode("utf-8")) > MAX_SKILL_FRONTMATTER_BYTES:
+        return None, (
+            _diagnostic(
+                SkillDiagnosticSeverity.WARNING,
+                "skill_frontmatter_overbound",
+                "Skill frontmatter exceeds its physical bound",
+                path=path,
+            ),
+        )
+    try:
+        _validate_yaml_shape(frontmatter)
+        raw_fields = _load_unique_yaml_mapping(frontmatter)
+    except (ValueError, yaml.YAMLError, _DuplicateYamlKey) as exc:
+        return None, (
+            _diagnostic(
+                SkillDiagnosticSeverity.WARNING,
+                "skill_invalid_frontmatter_yaml",
+                f"Skill frontmatter is invalid: {type(exc).__name__}",
+                path=path,
+            ),
+        )
+    unsupported = tuple(sorted(set(raw_fields) - _STANDARD_FIELDS))
+    for key in unsupported[:MAX_INTERNAL_DIAGNOSTICS]:
+        code = (
+            "skill_host_extension_ignored"
+            if key in _HOST_EXTENSION_FIELDS
+            else "skill_unknown_extension_ignored"
+        )
+        diagnostics.append(
+            _diagnostic(
+                SkillDiagnosticSeverity.INFO,
+                code,
+                "Unsupported Skill frontmatter field is behaviorally inert",
+                path=path,
+            )
+        )
+
+    name = _required_trimmed_string(raw_fields, "name")
+    description = _required_trimmed_string(raw_fields, "description")
+    invalid = False
+    if (
+        name is None
+        or len(name.encode("utf-8")) > MAX_SKILL_NAME_BYTES
+        or _NAME_RE.fullmatch(name) is None
+    ):
+        diagnostics.append(
+            _diagnostic(
+                SkillDiagnosticSeverity.WARNING,
+                "skill_invalid_name",
+                "Skill name does not satisfy the Agent Skills core contract",
+                path=path,
+            )
+        )
+        invalid = True
+    elif name != path.parent.name:
+        diagnostics.append(
+            _diagnostic(
+                SkillDiagnosticSeverity.WARNING,
+                "skill_directory_name_mismatch",
+                "Skill name must exactly equal its parent directory name",
+                path=path,
+            )
+        )
+        invalid = True
+    if (
+        description is None
+        or not 1 <= len(description) <= MAX_SKILL_DESCRIPTION_CHARS
+    ):
+        diagnostics.append(
+            _diagnostic(
+                SkillDiagnosticSeverity.WARNING,
+                "skill_invalid_description",
+                "Skill description is outside the Agent Skills core bound",
+                path=path,
+            )
+        )
+        invalid = True
+    license_value = _optional_trimmed_string(raw_fields, "license")
+    if "license" in raw_fields and (
+        license_value is None
+        or len(license_value.encode("utf-8")) > MAX_SKILL_LICENSE_BYTES
+    ):
+        diagnostics.append(
+            _diagnostic(
+                SkillDiagnosticSeverity.WARNING,
+                "skill_invalid_license",
+                "Skill license is outside its closed string bound",
+                path=path,
+            )
+        )
+        invalid = True
+    compatibility = _optional_trimmed_string(raw_fields, "compatibility")
+    if "compatibility" in raw_fields and (
+        compatibility is None
+        or not 1 <= len(compatibility) <= MAX_SKILL_COMPATIBILITY_CHARS
+    ):
+        diagnostics.append(
+            _diagnostic(
+                SkillDiagnosticSeverity.WARNING,
+                "skill_invalid_compatibility",
+                "Skill compatibility is outside its closed character bound",
+                path=path,
+            )
+        )
+        invalid = True
+    if "metadata" in raw_fields:
+        metadata, metadata_valid = _parse_metadata(raw_fields["metadata"])
+    else:
+        metadata, metadata_valid = (), True
+    if not metadata_valid:
+        diagnostics.append(
+            _diagnostic(
+                SkillDiagnosticSeverity.WARNING,
+                "skill_invalid_metadata",
+                "Skill metadata must be a bounded string-to-string mapping",
+                path=path,
+            )
+        )
+        invalid = True
+    location = _skill_location(path, root=root)
+    if len(location.encode("utf-8")) > MAX_SKILL_LOCATION_BYTES:
+        diagnostics.append(
+            _diagnostic(
+                SkillDiagnosticSeverity.WARNING,
+                "skill_location_overbound",
+                "Skill model-visible location exceeds its bound",
+                path=path,
+            )
+        )
+        invalid = True
+    if invalid or name is None or description is None:
+        return None, _bounded_diagnostics(diagnostics)
+
+    authoring: list[SkillAuthoringDiagnosticCode] = []
+    if len(body.splitlines()) > 500:
+        authoring.append(SkillAuthoringDiagnosticCode.BODY_OVER_500_LINES)
+        diagnostics.append(
+            _diagnostic(
+                SkillDiagnosticSeverity.INFO,
+                SkillAuthoringDiagnosticCode.BODY_OVER_500_LINES.value,
+                "Skill body exceeds the portable authoring recommendation",
+                path=path,
+            )
+        )
+    raw_digest = "sha256:" + sha256(data).hexdigest()
+    semantic = local_skill_manifest_semantic_fingerprint(
+        name=name,
+        description=description,
+        license=license_value,
+        compatibility=compatibility,
+        metadata=metadata,
+        body=body,
+    )
+    return (
+        LocalSkillManifest(
+            name=name,
+            description=description,
+            license=license_value,
+            compatibility=compatibility,
+            metadata=metadata,
+            path=path,
+            base_dir=path.parent,
+            location=location,
+            body=body,
+            raw_document_digest=raw_digest,
+            manifest_semantic_fingerprint=semantic,
+            root_kind=root.root_kind,
+            authoring_diagnostic_codes=tuple(authoring),
+        ),
+        _bounded_diagnostics(diagnostics),
+    )
+
+
+def _validate_yaml_shape(frontmatter: str) -> None:
+    node_count = 0
+    depth = 0
+    maximum_depth = 0
+    documents = 0
+    for event in yaml.parse(frontmatter, Loader=yaml.SafeLoader):
+        if isinstance(event, DocumentStartEvent):
+            documents += 1
+            if documents > 1:
+                raise ValueError("multi-document YAML is forbidden")
+        if isinstance(event, AliasEvent) or getattr(event, "anchor", None) is not None:
+            raise ValueError("YAML anchors and aliases are forbidden")
+        if getattr(event, "tag", None) is not None:
+            raise ValueError("explicit YAML tags are forbidden")
+        if isinstance(event, (MappingStartEvent, SequenceStartEvent)):
+            node_count += 1
+            depth += 1
+            maximum_depth = max(maximum_depth, depth)
+        elif isinstance(event, ScalarEvent):
+            node_count += 1
+        elif isinstance(event, (MappingEndEvent, SequenceEndEvent)):
+            depth -= 1
+        if node_count > MAX_SKILL_YAML_NODES or maximum_depth > MAX_SKILL_YAML_DEPTH:
+            raise ValueError("YAML physical shape exceeds its bound")
+    if documents != 1 or depth != 0:
+        raise ValueError("YAML document shape is incomplete")
+
+
+def _load_unique_yaml_mapping(frontmatter: str) -> dict[str, Any]:
+    loader = _UniqueKeySafeLoader(frontmatter)
+    try:
+        parsed = loader.get_single_data()
+    finally:
+        loader.dispose()
+    if not isinstance(parsed, dict) or any(not isinstance(key, str) for key in parsed):
+        raise ValueError("Skill frontmatter must be a string-keyed mapping")
+    return parsed
+
+
+def _extract_frontmatter(document: str) -> tuple[str | None, str | None]:
+    lines = document.splitlines(keepends=True)
+    if not lines or lines[0].rstrip("\r\n") != "---":
+        return None, None
+    for index, line in enumerate(lines[1:], start=1):
+        if line.rstrip("\r\n") == "---" and not line[:1].isspace():
+            return "".join(lines[1:index]), "".join(lines[index + 1 :])
+    return None, None
+
+
+def _parse_metadata(raw: Any) -> tuple[tuple[tuple[str, str], ...], bool]:
+    if not isinstance(raw, dict) or len(raw) > MAX_SKILL_METADATA_ITEMS:
+        return (), False
+    values: list[tuple[str, str]] = []
+    for key, value in raw.items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            return (), False
+        key_bytes = len(key.encode("utf-8"))
+        value_bytes = len(value.encode("utf-8"))
+        if (
+            not 1 <= key_bytes <= MAX_SKILL_METADATA_KEY_BYTES
+            or value_bytes > MAX_SKILL_METADATA_VALUE_BYTES
+        ):
+            return (), False
+        values.append((key, value))
+    frozen = tuple(sorted(values))
+    if len(canonical_json_bytes(frozen)) > MAX_SKILL_METADATA_BYTES:
+        return (), False
+    return frozen, True
+
+
+def _required_trimmed_string(fields: dict[str, Any], key: str) -> str | None:
+    value = fields.get(key)
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    return value or None
+
+
+def _optional_trimmed_string(fields: dict[str, Any], key: str) -> str | None:
+    if key not in fields:
+        return None
+    return _required_trimmed_string(fields, key)
+
+
+def _read_bounded_bytes(path: Path, *, maximum: int) -> bytes:
+    """Read one lexical ``root/skill/SKILL.md`` candidate without path races.
+
+    Discovery is planning-deadline bounded.  In particular, a local FIFO must
+    not turn the supposedly bounded scan into an unbounded blocking open.  The
+    root, child directory, and final regular file are therefore opened as one
+    descriptor-relative, no-follow chain; the opened file identity must remain
+    stable for the duration of the bounded read.
+    """
+
+    root = path.parent.parent
+    if path.name != SKILL_FILE_NAME or path.parent == root:
+        raise OSError("invalid Skill candidate shape")
+    directory_flags = os.O_RDONLY
+    directory_flags |= getattr(os, "O_CLOEXEC", 0)
+    directory_flags |= getattr(os, "O_DIRECTORY", 0)
+    directory_flags |= getattr(os, "O_NOFOLLOW", 0)
+    file_flags = os.O_RDONLY
+    file_flags |= getattr(os, "O_CLOEXEC", 0)
+    file_flags |= getattr(os, "O_NONBLOCK", 0)
+    file_flags |= getattr(os, "O_NOFOLLOW", 0)
+
+    root_fd = os.open(root, directory_flags)
+    try:
+        child_fd = os.open(path.parent.name, directory_flags, dir_fd=root_fd)
+        try:
+            file_fd = os.open(path.name, file_flags, dir_fd=child_fd)
+            try:
+                before = os.fstat(file_fd)
+                if not stat.S_ISREG(before.st_mode):
+                    raise OSError("Skill candidate is not a regular file")
+                remaining = maximum + 1
+                chunks: list[bytes] = []
+                while remaining:
+                    chunk = os.read(file_fd, remaining)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    remaining -= len(chunk)
+                after = os.fstat(file_fd)
+                identity_before = (
+                    before.st_dev,
+                    before.st_ino,
+                    before.st_size,
+                    before.st_mtime_ns,
+                    before.st_ctime_ns,
+                )
+                identity_after = (
+                    after.st_dev,
+                    after.st_ino,
+                    after.st_size,
+                    after.st_mtime_ns,
+                    after.st_ctime_ns,
+                )
+                if identity_after != identity_before:
+                    raise OSError("Skill candidate changed during read")
+                return b"".join(chunks)
+            finally:
+                os.close(file_fd)
+        finally:
+            os.close(child_fd)
+    finally:
+        os.close(root_fd)
+
+
+def _skill_location(path: Path, *, root: PreparedSkillRootBinding) -> str:
+    if path.name != SKILL_FILE_NAME or path.parent.parent != root.path:
+        raise ValueError("Skill candidate does not match its frozen lexical root")
+    relative = path.relative_to(root.path).as_posix()
+    return f"{root.location_prefix}/{relative}"
 
 
 def _is_within(path: Path, root: Path) -> bool:
     try:
         path.resolve(strict=True).relative_to(root.resolve(strict=True))
-    except (FileNotFoundError, ValueError):
+    except (FileNotFoundError, OSError, RuntimeError, ValueError):
         return False
     return True
-
-
-def _skill_location(path: Path, *, root: _SkillRoot) -> str:
-    relative = path.resolve().relative_to(root.path.resolve()).as_posix()
-    return f"{root.location_prefix}/{relative}"
-
-
-def _skill_source(skill_dir: Path, *, root: _SkillRoot) -> SkillSource:
-    if root.source != "user" or root.location_prefix != USER_PRODUCT_LOCATION_PREFIX:
-        return root.source
-    provenance_path = skill_dir / BUNDLED_SKILL_PROVENANCE_FILE_NAME
-    try:
-        data = json.loads(provenance_path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return root.source
-    if isinstance(data, dict) and data.get("source") == "bundled":
-        return "bundled"
-    return root.source
 
 
 def _default_user_product_skills_root() -> Path:
     pulsara_home = os.getenv(PULSARA_HOME_ENV)
     if pulsara_home:
-        return Path(pulsara_home).expanduser() / "skills"
-    return Path.home().joinpath(*USER_PRODUCT_SKILL_ROOT_PARTS)
+        return Path(pulsara_home).expanduser().resolve() / "skills"
+    return Path.home().joinpath(*USER_PRODUCT_SKILL_ROOT_PARTS).resolve()
 
 
-def _read_bounded_utf8(path: Path, *, max_bytes: int) -> tuple[str, bool]:
-    with path.open("rb") as handle:
-        data = handle.read(max_bytes + 1)
-    too_large = len(data) > max_bytes
-    if too_large:
-        data = data[:max_bytes]
-    return data.decode("utf-8"), too_large
+def _check_discovery_deadline(deadline_monotonic: float | None) -> None:
+    if deadline_monotonic is not None and monotonic() >= deadline_monotonic:
+        raise TimeoutError("local Skill discovery deadline expired")
 
 
-def _extract_frontmatter(content: str) -> tuple[str, bool]:
-    lines = content.splitlines()
-    if not lines or lines[0].strip() != "---":
-        return "", False
-    for index, line in enumerate(lines[1:], start=1):
-        if line.strip() == "---" and not line[:1].isspace():
-            return "\n".join(lines[1:index]), True
-    return "", False
+def _validate_scope(
+    scope: ModelInputScopeKind, scope_subagent_task_id: str | None
+) -> None:
+    if not isinstance(scope, ModelInputScopeKind):
+        raise TypeError("Skill root policy scope is not closed")
+    if (scope is ModelInputScopeKind.ROOT) != (scope_subagent_task_id is None):
+        raise ValueError("Skill root policy scope identity is invalid")
 
 
-def _parse_frontmatter(
-    frontmatter: str, *, path: Path
-) -> tuple[dict[str, Any], tuple[SkillDiagnostic, ...]]:
-    try:
-        parsed = yaml.safe_load(frontmatter) if frontmatter.strip() else {}
-    except yaml.YAMLError as exc:
-        return {}, (
-            SkillDiagnostic(
-                severity="warning",
-                code="skill_invalid_frontmatter_yaml",
-                message=f"Ignoring invalid YAML frontmatter: {exc}",
-                path=path,
-            ),
-        )
-    if parsed is None:
-        return {}, ()
-    if not isinstance(parsed, dict):
-        return {}, (
-            SkillDiagnostic(
-                severity="warning",
-                code="skill_invalid_frontmatter_type",
-                message="Skill frontmatter must be a YAML mapping.",
-                path=path,
-            ),
-        )
-    return {str(key): value for key, value in parsed.items()}, ()
+def _root_binding_fingerprint(
+    *,
+    root_kind: LocalSkillRootKind,
+    path: Path,
+    containment_root: Path,
+    location_prefix: str,
+    precedence_ordinal: int,
+) -> str:
+    return context_fingerprint(
+        "local-skill-root-binding:v1",
+        {
+            "root_kind": root_kind.value,
+            "path": str(path),
+            "containment_root": str(containment_root),
+            "location_prefix": location_prefix,
+            "precedence_ordinal": precedence_ordinal,
+        },
+    )
 
 
-def _frontmatter_key_diagnostics(
-    fields: dict[str, Any], *, path: Path
+def _root_policy_fingerprint(
+    *,
+    conversation_scope_kind: ModelInputScopeKind,
+    scope_subagent_task_id: str | None,
+    roots: tuple[PreparedSkillRootBinding, ...],
+) -> str:
+    return context_fingerprint(
+        "local-skill-root-policy:v2-agent-skills",
+        {
+            "scope": conversation_scope_kind.value,
+            "scope_subagent_task_id": scope_subagent_task_id,
+            "roots": tuple(item.binding_fingerprint for item in roots),
+        },
+    )
+
+
+def _diagnostic(
+    severity: SkillDiagnosticSeverity,
+    code: str,
+    message: str,
+    *,
+    path: Path | None = None,
+) -> SkillDiagnostic:
+    return SkillDiagnostic(severity=severity, code=code, message=message, path=path)
+
+
+def _bounded_diagnostics(
+    values: list[SkillDiagnostic] | tuple[SkillDiagnostic, ...],
 ) -> tuple[SkillDiagnostic, ...]:
-    diagnostics: list[SkillDiagnostic] = []
-    for key in sorted(fields):
-        if key in _IGNORED_SCOPE_FRONTMATTER:
-            diagnostics.append(
-                SkillDiagnostic(
-                    severity="warning",
-                    code="skill_scope_frontmatter_ignored_in_v1",
-                    message=f"Ignoring V1 scope frontmatter field: {key}",
-                    path=path,
-                )
-            )
-        elif key not in _KNOWN_FRONTMATTER:
-            diagnostics.append(
-                SkillDiagnostic(
-                    severity="warning",
-                    code="skill_unknown_frontmatter",
-                    message=f"Ignoring unknown skill frontmatter field: {key}",
-                    path=path,
-                )
-            )
-    return tuple(diagnostics)
+    return tuple(values[:MAX_INTERNAL_DIAGNOSTICS])
 
 
-def _string_field(fields: dict[str, Any], key: str) -> str | None:
-    value = fields.get(key)
-    if isinstance(value, str):
-        value = value.strip()
-        return value or None
-    return None
-
-
-def _bool_field(fields: dict[str, Any], key: str, *, default: bool) -> bool:
-    value = fields.get(key)
-    if isinstance(value, bool):
-        return value
-    return default
-
-
-def _bool_field_with_diagnostic(
-    fields: dict[str, Any],
-    key: str,
+def _unavailable_discovery(
+    policy: PreparedLocalSkillRootPolicy,
+    reason: SkillCatalogUnavailableReason,
+    code: str,
+    diagnostics: list[SkillDiagnostic],
     *,
-    default: bool,
-    path: Path,
-) -> tuple[bool, tuple[SkillDiagnostic, ...]]:
-    if key not in fields:
-        return default, ()
-    value = fields.get(key)
-    if isinstance(value, bool):
-        return value, ()
-    return default, (
-        SkillDiagnostic(
-            severity="warning",
-            code="skill_invalid_frontmatter_type",
-            message=f"{key} must be a boolean.",
-            path=path,
+    candidate_count: int = 0,
+    observed_bytes: int = 0,
+) -> LocalSkillDiscovery:
+    return LocalSkillDiscovery(
+        skills=(),
+        diagnostics=_bounded_diagnostics(
+            [
+                *diagnostics,
+                _diagnostic(
+                    SkillDiagnosticSeverity.ERROR,
+                    code,
+                    "The complete local Skill catalog could not be proven",
+                ),
+            ]
         ),
+        disposition=SkillDiscoveryDisposition.UNAVAILABLE,
+        unavailable_reason=reason,
+        root_policy_fingerprint=policy.root_policy_fingerprint,
+        enumerated_candidate_count=candidate_count,
+        observed_utf8_bytes=observed_bytes,
     )
 
 
-def _enum_field(
-    fields: dict[str, Any],
-    key: str,
-    *,
-    allowed_values: frozenset[str],
-    default: str,
-    path: Path,
-) -> tuple[str, tuple[SkillDiagnostic, ...]]:
-    if key not in fields:
-        return default, ()
-    value = fields.get(key)
-    if isinstance(value, str):
-        normalized = value.strip().lower()
-        if normalized in allowed_values:
-            return normalized, ()
-    return default, (
-        SkillDiagnostic(
-            severity="warning",
-            code="skill_invalid_frontmatter_enum",
-            message=f"{key} must be one of: {', '.join(sorted(allowed_values))}.",
-            path=path,
-        ),
-    )
-
-
-def _clip_frontmatter_text(value: str) -> str:
-    if len(value) <= MAX_FRONTMATTER_TEXT_CHARS:
-        return value
-    return value[:MAX_FRONTMATTER_TEXT_CHARS]
-
-
-def _provides_tools(
-    raw_value: Any,
-    *,
-    available_tool_names: frozenset[str],
-    path: Path,
-) -> tuple[tuple[str, ...], tuple[SkillDiagnostic, ...]]:
-    return _tool_references(
-        raw_value,
-        field_name="provides_tools",
-        available_tool_names=available_tool_names,
-        path=path,
-    )
-
-
-def _tool_references(
-    raw_value: Any,
-    *,
-    field_name: str,
-    available_tool_names: frozenset[str],
-    path: Path,
-) -> tuple[tuple[str, ...], tuple[SkillDiagnostic, ...]]:
-    # Round 9 keeps legacy metadata readable but deliberately inert.  A Host
-    # startup tool allowlist must not add/remove a Skill leaf or alter its
-    # provider-visible catalog/body.  Round 9.1 removes these fields entirely.
-    del available_tool_names
-    if raw_value is None:
-        return (), ()
-    values: list[str]
-    diagnostics: list[SkillDiagnostic] = []
-    if isinstance(raw_value, str):
-        values = [raw_value.strip()]
-    elif isinstance(raw_value, list):
-        values = []
-        for item in raw_value:
-            if not isinstance(item, str):
-                diagnostics.append(
-                    SkillDiagnostic(
-                        severity="warning",
-                        code="skill_invalid_frontmatter_type",
-                        message=f"{field_name} must be a string or list of strings.",
-                        path=path,
-                    )
-                )
-                continue
-            stripped = item.strip()
-            if stripped:
-                values.append(stripped)
-    else:
-        return (), (
-            SkillDiagnostic(
-                severity="warning",
-                code="skill_invalid_frontmatter_type",
-                message=f"{field_name} must be a string or list of strings.",
-                path=path,
-            ),
-        )
-    filtered: list[str] = []
-    for name in values:
-        if not _BINARY_TOKEN_RE.fullmatch(name):
-            diagnostics.append(
-                SkillDiagnostic(
-                    severity="warning",
-                    code="skill_invalid_tool_reference",
-                    message=f"Skill contains an invalid legacy tool reference: {name}",
-                    path=path,
-                )
-            )
-            continue
-        if name not in filtered:
-            filtered.append(name)
-    return tuple(filtered), tuple(diagnostics)
-
-
-def _validated_token_tuple(
-    raw_value: Any,
-    *,
-    field_name: str,
-    token_kind: str,
-    token_re: re.Pattern[str],
-    path: Path,
-) -> tuple[tuple[str, ...], tuple[SkillDiagnostic, ...]]:
-    if raw_value is None:
-        return (), ()
-    diagnostics: list[SkillDiagnostic] = []
-    if isinstance(raw_value, str):
-        values = [raw_value.strip()]
-    elif isinstance(raw_value, list):
-        values = []
-        for item in raw_value:
-            if not isinstance(item, str):
-                diagnostics.append(
-                    SkillDiagnostic(
-                        severity="warning",
-                        code="skill_invalid_frontmatter_type",
-                        message=f"{field_name} must be a string or list of strings.",
-                        path=path,
-                    )
-                )
-                continue
-            stripped = item.strip()
-            if stripped:
-                values.append(stripped)
-    else:
-        return (), (
-            SkillDiagnostic(
-                severity="warning",
-                code="skill_invalid_frontmatter_type",
-                message=f"{field_name} must be a string or list of strings.",
-                path=path,
-            ),
-        )
-    filtered: set[str] = set()
-    for value in values:
-        if not token_re.fullmatch(value):
-            diagnostics.append(
-                SkillDiagnostic(
-                    severity="warning",
-                    code=f"skill_invalid_{token_kind}_reference",
-                    message=f"Ignoring invalid {token_kind} reference in {field_name}: {value}",
-                    path=path,
-                )
-            )
-            continue
-        filtered.add(value)
-    return tuple(sorted(filtered)), tuple(diagnostics)
+__all__ = [
+    "AGENT_SKILLS_CONTRACT_ID",
+    "BUNDLED_SKILL_PROVENANCE_FILE_NAME",
+    "LocalSkillDiscovery",
+    "LocalSkillProvider",
+    "PreparedLocalSkillRootPolicy",
+    "PreparedSkillRootBinding",
+    "SkillDiscoveryDisposition",
+    "local_skill_manifest_semantic_fingerprint",
+]

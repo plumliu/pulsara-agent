@@ -326,7 +326,7 @@ def test_round7_source_registry_wire_and_oracle_architecture_guards() -> None:
     )
     assert (
         COMPILER_CONTRACT_VERSION
-        == "pulsara.structured-model-input-compiler.prefix-continuity.v7-unified-capability"
+        == "pulsara.structured-model-input-compiler.prefix-continuity.v8-agent-skills"
     )
     assert (
         PROVIDER_MESSAGE_LOWERING_CONTRACT
