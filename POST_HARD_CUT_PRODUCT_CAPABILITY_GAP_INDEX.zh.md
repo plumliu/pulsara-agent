@@ -737,6 +737,8 @@ Round 4刻意停在“Python authority与typed wire已经可用”，没有把�
 
 ## 9. PHC-10：Hierarchical / batch subagent task graph
 
+> 设计草案：[Round 10 ROOT-Orchestrated Subagent Task Graph](ROUND_10_HIERARCHICAL_SUBAGENT_ORCHESTRATION_IMPLEMENTATION_SPEC.zh.md)。该文档恢复ROOT-only batch/dependency/phase/result/task-board产品语义，并新增ROOT向active worker的boundary-safe `send_agent_message`；subagent不能继续创建subagent。当前仍为DRAFT，本Gap在activation前保持OPEN。
+
 ### 9.1 当前仍保留的 flat subagent 能力
 
 当前新 Kernel 正式暴露四个工具：
