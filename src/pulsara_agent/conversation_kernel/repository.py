@@ -14,8 +14,6 @@ from pulsara_agent.conversation_kernel.contracts import (
     CommittedEventDraft,
     HostWriterGuard,
     InlineContent,
-    JobAttemptClaimGuard,
-    JobSafetyClass,
     PromptDeliveryMode,
 )
 from pulsara_agent.conversation_kernel.memory.contracts import (
@@ -51,8 +49,6 @@ from ._repository.contracts import (
     AcceptedCapabilityDecision,
     AcceptedEntry,
     AcceptedInteractionDecision,
-    AcceptedJobAttempt,
-    AcceptedJobSettlement,
     AcceptedPlanResolution,
     AcceptedPlanToolBatch,
     AcceptedPlanWorkflowCommand,
@@ -62,8 +58,6 @@ from ._repository.contracts import (
     AssistantTextBlock,
     AssistantToolCallBlock,
     ConversationKernelConflict,
-    JobAttemptTerminalized,
-    JobCancellationRequested,
     NoToolResultSideBranch,
     PlanContinuationDisposition,
     PlanContinuationInspection,
@@ -80,7 +74,6 @@ from ._repository.contracts import (
     PreparedToolResultAcceptance,
     PromptIngressRejected,
     StaleHostWriter,
-    StaleJobClaim,
     ToolRemoteIdentityConfirmationKind,
     ToolResultSideBranch,
     ToolResultSideBranchKind,
@@ -97,7 +90,6 @@ from ._repository.contracts import (
 from ._repository.authority import _AuthorityOperations
 from ._repository.conversation import _ConversationOperations
 from ._repository.external_results import _ExternalResultOperations
-from ._repository.jobs import _JobOperations
 from ._repository.kernel import _RepositoryKernel
 from ._repository.matching import _MatchingOperations
 from ._repository.memory import AcceptedMemoryGovernance, _MemoryOperations
@@ -116,7 +108,6 @@ class ConversationKernelRepository(
     _PromptOperations,
     _SubagentOperations,
     _ExternalResultOperations,
-    _JobOperations,
     _MemoryOperations,
     _RepositoryKernel,
 ):
@@ -127,8 +118,6 @@ _FACADE_OWNED_SYMBOLS = (
     "AcceptedCapabilityDecision",
     "AcceptedEntry",
     "AcceptedInteractionDecision",
-    "AcceptedJobAttempt",
-    "AcceptedJobSettlement",
     "AcceptedPlanResolution",
     "AcceptedPlanToolBatch",
     "AcceptedPlanWorkflowCommand",
@@ -137,8 +126,6 @@ _FACADE_OWNED_SYMBOLS = (
     "AssistantTextBlock",
     "AssistantToolCallBlock",
     "ConversationKernelConflict",
-    "JobAttemptTerminalized",
-    "JobCancellationRequested",
     "AcceptedMemoryGovernance",
     "NoToolResultSideBranch",
     "PlanContinuationDisposition",
@@ -156,7 +143,6 @@ _FACADE_OWNED_SYMBOLS = (
     "PreparedToolResultAcceptance",
     "PromptIngressRejected",
     "StaleHostWriter",
-    "StaleJobClaim",
     "ToolRemoteIdentityConfirmationKind",
     "ToolResultSideBranchKind",
     "TurnAdmissionConfirmation",
@@ -180,8 +166,6 @@ __all__ = [
     "AcceptedCapabilityDecision",
     "AcceptedEntry",
     "AcceptedInteractionDecision",
-    "AcceptedJobAttempt",
-    "AcceptedJobSettlement",
     "AcceptedToolAttempt",
     "AssistantBlock",
     "AssistantDataBlock",
@@ -189,7 +173,6 @@ __all__ = [
     "AssistantToolCallBlock",
     "ConversationKernelConflict",
     "ConversationKernelRepository",
-    "JobAttemptTerminalized",
     "AcceptedMemoryGovernance",
     "NoToolResultSideBranch",
     "PreparedMemoryProposalSideBranch",
@@ -200,7 +183,6 @@ __all__ = [
     "PreparedSubagentTurnAdmission",
     "PreparedToolRemoteIdentityPublication",
     "StaleHostWriter",
-    "StaleJobClaim",
     "ToolResultSideBranch",
     "ToolResultSideBranchKind",
     "ToolRemoteIdentityConfirmationKind",

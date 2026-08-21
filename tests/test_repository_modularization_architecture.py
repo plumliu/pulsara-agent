@@ -11,7 +11,6 @@ from pathlib import Path
 import pickle
 import typing
 
-from pulsara_agent.conversation_kernel.job_catalog import JOB_HANDLER_CATALOG
 from pulsara_agent.conversation_kernel.repository import ConversationKernelRepository
 from pulsara_agent.conversation_kernel.vocabulary import (
     APPEND_GUARDS,
@@ -35,6 +34,24 @@ _FRONTEND_HARD_CUT_RETIRED_PYTEST_NODES = {
         "tests/test_stage2_tui_cross_language.py::"
         "test_stage2_python_gateway_to_go_tui_fresh_snapshot_and_detach"
     ),
+}
+_ROUND5B_DURABLE_JOB_SUBTRACTION_RETIRED_PYTEST_NODES = {
+    "tests/test_round5_long_horizon_execution_envelope.py::test_round5_job_transport_is_bounded_without_changing_foreground",
+    "tests/test_stage2_architecture.py::test_stage2_registry_schema_and_job_catalog_are_exact",
+    "tests/test_stage2_canonical_reader.py::test_job_result_acceptance_is_explicit_idempotent_and_safe_point_bound",
+    "tests/test_stage2_conversation_kernel_postgres.py::test_stage2_expired_job_reaper_rebinds_normal_claim_append_guard",
+    "tests/test_stage2_conversation_kernel_postgres.py::test_stage2_job_attempt_retry_and_terminal_event_are_finite",
+    "tests/test_stage2_conversation_kernel_postgres.py::test_stage2_job_cancel_is_set_once_and_exact_claim_owner_terminalizes_it",
+    "tests/test_stage2_conversation_kernel_postgres.py::test_stage2_job_claim_ack_unknown_and_host_takeover_keep_one_attempt_owner",
+    "tests/test_stage2_conversation_kernel_postgres.py::test_stage2_job_claim_and_host_cancel_share_session_first_lock_order",
+    "tests/test_stage2_conversation_kernel_postgres.py::test_stage2_memory_refresh_exhaustion_is_stable_and_query_is_unavailable",
+    "tests/test_stage2_conversation_kernel_postgres.py::test_stage2_provider_request_bound_terminalizes_without_retry",
+    "tests/test_stage2_conversation_kernel_postgres.py::test_stage2_tool_message_precedes_attempt_and_job_claim_mints_second_guard",
+    "tests/test_stage2_job_executor.py::test_job_cancellation_settles_only_after_physical_thread_exits",
+    "tests/test_stage2_job_executor.py::test_job_model_prepares_the_final_context_with_target_token_estimator",
+    "tests/test_stage2_job_executor.py::test_job_provider_admission_is_installed_before_the_only_physical_call",
+    "tests/test_stage2_job_executor.py::test_stage2_job_executor_close_joins_active_handler_and_settles_attempt",
+    "tests/test_stage2_protocol_v3.py::test_stage2_host_exposes_job_result_acceptance_to_production_protocol",
 }
 _ROUND7_ADDED_TOP_LEVEL_FUNCTIONS = {"_plan_question_response"}
 _ROUND7_CHANGED_TOP_LEVEL_FUNCTIONS = {
@@ -181,12 +198,97 @@ _ROUND5A2_CHANGED_METHODS = {
     "commit_assistant_message",
     "confirm_assistant_message_winner",
 }
-_ROUND8_REPOSITORY_DELTA_SHA256 = (
+_ROUND5B_REMOVED_OBSERVED_IMPORTS = {
+    "AcceptedJobAttempt",
+    "JobAttemptTerminalized",
+    "JobCancellationRequested",
+    "StaleJobClaim",
+}
+_ROUND5B_REMOVED_ALL = {
+    "AcceptedJobAttempt",
+    "AcceptedJobSettlement",
+    "JobAttemptTerminalized",
+    "StaleJobClaim",
+}
+_ROUND5B_REMOVED_TOP_LEVEL_CLASSES = {
+    "AcceptedJobAttempt",
+    "AcceptedJobSettlement",
+    "JobAttemptTerminalized",
+    "JobCancellationRequested",
+    "StaleJobClaim",
+    # The public FQCN remains repository.ConversationKernelConflict; only the
+    # implementation-package class definition moved to a neutral error leaf so
+    # canonical readers do not bypass the repository facade boundary.
+    "ConversationKernelConflict",
+}
+_ROUND5B_ADDED_TOP_LEVEL_FUNCTIONS = {"_manual_compaction_turn_matches"}
+_ROUND5B_REMOVED_TOP_LEVEL_FUNCTIONS = {"_load_root_transcript_cut"}
+_ROUND5B_ADDED_METHODS = {
+    "_compaction_binding_row_matches",
+    "_compaction_predecessor_row_matches",
+    "_compaction_snapshot_row_matches",
+    "_initial_context_binding_revision_matches",
+    "_insert_initial_context_binding_revision",
+    "_require_compaction_source_digest",
+    "_require_compaction_target",
+    "accept_manual_compaction_command",
+    "confirm_context_snapshot_adoption",
+    "confirm_manual_compaction_command",
+    "prepare_compaction_input_cut",
+    "read_latest_terminal_scope_turn_id",
+}
+_ROUND5B_REMOVED_METHODS = {
+    "_job_transaction",
+    "_require_job_claim",
+    "accept_compaction_job_result",
+    "accept_job_result_into_root",
+    "claim_due_job",
+    "confirm_active_job_claim",
+    "enqueue_background_compaction",
+    "enqueue_job",
+    "mark_job_provider_call_started",
+    "prepare_job_claim_candidate",
+    "read_compaction_job_source",
+    "request_job_cancel",
+    "settle_job_attempt",
+}
+_ROUND5B_CHANGED_METHODS = {
+    "_append_events",
+    "_insert_plan_continuation_turn",
+    "_insert_resolution_plan_continuation",
+    "_prepare_external_result_target",
+    "accept_terminal_observation",
+    "adopt_context_snapshot",
+    "confirm_root_turn_admission",
+    "confirm_subagent_turn_admission",
+    "confirm_terminal_observation_winner",
+    "query_command",
+    "start_root_turn",
+    "start_subagent_turn",
+}
+_ROUND5B_RUNTIME_REMOVED_DATACLASSES = {
+    "AcceptedJobAttempt",
+    "AcceptedJobSettlement",
+}
+_ROUND5B_RUNTIME_REMOVED_EXCEPTIONS = {
+    "ConversationKernelConflict",
+    "JobAttemptTerminalized",
+    "JobCancellationRequested",
+    "StaleJobClaim",
+}
+_ROUND5B_RUNTIME_CHANGED_METHODS = {
+    "_append_events",
+    "adopt_context_snapshot",
+}
+_ROUND8_ROUND5B_REPOSITORY_DELTA_SHA256 = (
     # Round 9 four-provider dogfood exercised the already-allowlisted
     # renew_host_writer owner with memory_domain_id=None.  Its PostgreSQL
     # placeholder now carries the explicit text type needed for that closed
     # optional branch; no method, checkout, lane or result shape changed.
-    "89432941891904de8511879be1b7ebe6bb5a07864921ac78781a31cc95bca846"
+    # Round 5B adds the bounded compaction command/adoption transactions and
+    # removes the entire durable-job method family.  This digest seals that
+    # exact combined delta while the historical M0 fixture remains immutable.
+    "55c75241480abc61ade61fd68c409de197138f129dc2b3b654b80bfc644492e8"
 )
 
 
@@ -278,7 +380,11 @@ def _round7_repository_delta(current: dict[str, object]) -> dict[str, object]:
             name: current["top_level_functions"][name]
             for name in sorted(changed_functions)
         },
-        "methods": {name: current["methods"][name] for name in sorted(changed_methods)},
+        "methods": {
+            name: current["methods"][name]
+            for name in sorted(changed_methods)
+            if name in current["methods"]
+        },
         "runtime_dataclasses": {
             "PreparedToolResultAcceptance": dataclasses["PreparedToolResultAcceptance"]
         },
@@ -308,12 +414,15 @@ def _round8_repository_delta(current: dict[str, object]) -> dict[str, object]:
         _ROUND7_ADDED_TOP_LEVEL_FUNCTIONS
         | _ROUND7_CHANGED_TOP_LEVEL_FUNCTIONS
         | _ROUND8_ADDED_TOP_LEVEL_FUNCTIONS
+        | _ROUND5B_ADDED_TOP_LEVEL_FUNCTIONS
     )
     changed_methods = (
         _ROUND7_ADDED_METHODS
         | _ROUND7_CHANGED_METHODS
         | _ROUND8_ADDED_METHODS
         | _ROUND8_CHANGED_METHODS
+        | _ROUND5B_ADDED_METHODS
+        | _ROUND5B_CHANGED_METHODS
     )
     runtime = current["runtime"]
     assert isinstance(runtime, dict)
@@ -324,7 +433,15 @@ def _round8_repository_delta(current: dict[str, object]) -> dict[str, object]:
             name: current["top_level_functions"][name]
             for name in sorted(changed_functions)
         },
-        "methods": {name: current["methods"][name] for name in sorted(changed_methods)},
+        "methods": {
+            name: current["methods"][name]
+            for name in sorted(changed_methods)
+            if name in current["methods"]
+        },
+        "round5b_removed_observed_imports": sorted(
+            _ROUND5B_REMOVED_OBSERVED_IMPORTS
+        ),
+        "round5b_removed_methods": sorted(_ROUND5B_REMOVED_METHODS),
         "runtime_exceptions": runtime["exceptions"],
         "runtime_dataclasses": runtime["dataclasses"],
         "runtime_methods": {
@@ -334,7 +451,10 @@ def _round8_repository_delta(current: dict[str, object]) -> dict[str, object]:
                 | _ROUND7_RUNTIME_CHANGED_METHODS
                 | _ROUND8_ADDED_METHODS
                 | _ROUND8_CHANGED_METHODS
+                | _ROUND5B_ADDED_METHODS
+                | _ROUND5B_RUNTIME_CHANGED_METHODS
             )
+            if name in runtime["methods"]
         },
         "database_calls": _without_source_modules(
             [
@@ -388,37 +508,55 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
     module = _inventory_module()
     current = module.build_inventory(include_pytest_nodes=False)
     baseline = _baseline()
-    for key in ("observed_imports", "closed_owner_renames", "override_seams"):
+    assert set(current["observed_imports"]) == (
+        set(baseline["observed_imports"]) - _ROUND5B_REMOVED_OBSERVED_IMPORTS
+    )
+    for key in ("closed_owner_renames", "override_seams"):
         assert current[key] == baseline[key], key
     assert (
         set(current["all"])
-        == (set(baseline["all"]) - _ROUND8_REMOVED_ALL) | _ROUND8_ADDED_ALL
+        == (
+            set(baseline["all"])
+            - _ROUND8_REMOVED_ALL
+            - _ROUND5B_REMOVED_ALL
+        )
+        | _ROUND8_ADDED_ALL
     )
     assert (
         set(current["top_level_classes"])
-        == (set(baseline["top_level_classes"]) - _ROUND8_REMOVED_TOP_LEVEL_CLASSES)
+        == (
+            set(baseline["top_level_classes"])
+            - _ROUND8_REMOVED_TOP_LEVEL_CLASSES
+            - _ROUND5B_REMOVED_TOP_LEVEL_CLASSES
+        )
         | _ROUND8_ADDED_TOP_LEVEL_CLASSES
     )
     for key, added, changed in (
         (
             "top_level_functions",
-            _ROUND7_ADDED_TOP_LEVEL_FUNCTIONS | _ROUND8_ADDED_TOP_LEVEL_FUNCTIONS,
+            _ROUND7_ADDED_TOP_LEVEL_FUNCTIONS
+            | _ROUND8_ADDED_TOP_LEVEL_FUNCTIONS
+            | _ROUND5B_ADDED_TOP_LEVEL_FUNCTIONS,
             _ROUND7_CHANGED_TOP_LEVEL_FUNCTIONS,
         ),
         (
             "methods",
             _ROUND7_ADDED_METHODS
             | _ROUND8_ADDED_METHODS
-            | _TODO_REFINEMENT_ADDED_METHODS,
+            | _TODO_REFINEMENT_ADDED_METHODS
+            | _ROUND5B_ADDED_METHODS,
             _ROUND7_CHANGED_METHODS
             | _ROUND8_CHANGED_METHODS
-            | _ROUND5A2_CHANGED_METHODS,
+            | _ROUND5A2_CHANGED_METHODS
+            | _ROUND5B_CHANGED_METHODS,
         ),
     ):
         removed = (
-            _ROUND8_REMOVED_METHODS | _TODO_REFINEMENT_REMOVED_METHODS
+            _ROUND8_REMOVED_METHODS
+            | _TODO_REFINEMENT_REMOVED_METHODS
+            | _ROUND5B_REMOVED_METHODS
             if key == "methods"
-            else set()
+            else _ROUND5B_REMOVED_TOP_LEVEL_FUNCTIONS
         )
         assert set(current[key]) == (set(baseline[key]) - removed) | added
         for name in set(baseline[key]) - changed:
@@ -427,22 +565,44 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
             assert current[key][name] == baseline[key][name], (key, name)
     current_runtime = current["runtime"]
     baseline_runtime = baseline["runtime"]
-    for key in set(baseline_runtime) - {"dataclasses", "exceptions", "methods"}:
+    for key in set(baseline_runtime) - {
+        "dataclasses",
+        "exceptions",
+        "methods",
+        "observed_symbols",
+        "owned_observed_symbols",
+    }:
         assert current_runtime[key] == baseline_runtime[key], ("runtime", key)
+    for key in ("observed_symbols", "owned_observed_symbols"):
+        assert set(current_runtime[key]) == (
+            set(baseline_runtime[key]) - _ROUND5B_REMOVED_OBSERVED_IMPORTS
+        )
+        if isinstance(current_runtime[key], dict):
+            for name in current_runtime[key]:
+                assert current_runtime[key][name] == baseline_runtime[key][name]
     assert (
         set(current_runtime["exceptions"])
-        == set(baseline_runtime["exceptions"]) | _ROUND8_RUNTIME_ADDED_EXCEPTIONS
+        == (
+            set(baseline_runtime["exceptions"])
+            - _ROUND5B_RUNTIME_REMOVED_EXCEPTIONS
+        )
+        | _ROUND8_RUNTIME_ADDED_EXCEPTIONS
     )
-    for name in baseline_runtime["exceptions"]:
+    for name in (
+        set(baseline_runtime["exceptions"]) - _ROUND5B_RUNTIME_REMOVED_EXCEPTIONS
+    ):
         assert (
             current_runtime["exceptions"][name] == baseline_runtime["exceptions"][name]
         )
     assert set(current_runtime["dataclasses"]) == (
-        set(baseline_runtime["dataclasses"]) - _ROUND8_RUNTIME_REMOVED_DATACLASSES
+        set(baseline_runtime["dataclasses"])
+        - _ROUND8_RUNTIME_REMOVED_DATACLASSES
+        - _ROUND5B_RUNTIME_REMOVED_DATACLASSES
     )
     for name in (
         set(baseline_runtime["dataclasses"])
         - _ROUND8_RUNTIME_REMOVED_DATACLASSES
+        - _ROUND5B_RUNTIME_REMOVED_DATACLASSES
         - _ROUND8_RUNTIME_CHANGED_DATACLASSES
     ):
         assert (
@@ -455,25 +615,36 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
             set(baseline_runtime["methods"])
             - _ROUND8_REMOVED_METHODS
             - _TODO_REFINEMENT_REMOVED_METHODS
+            - _ROUND5B_REMOVED_METHODS
         )
         | _ROUND7_ADDED_METHODS
         | _ROUND8_ADDED_METHODS
         | _TODO_REFINEMENT_ADDED_METHODS
+        | _ROUND5B_ADDED_METHODS
     )
     for name in (
         set(baseline_runtime["methods"])
         - _ROUND7_RUNTIME_CHANGED_METHODS
         - _ROUND8_CHANGED_METHODS
         - _ROUND5A2_CHANGED_METHODS
+        - _ROUND5B_RUNTIME_CHANGED_METHODS
         - _ROUND8_REMOVED_METHODS
         - _TODO_REFINEMENT_REMOVED_METHODS
+        - _ROUND5B_REMOVED_METHODS
     ):
         assert current_runtime["methods"][name] == baseline_runtime["methods"][name]
-    assert _closed_owner_calls(
-        current["class_qualified_calls"], baseline["closed_owner_renames"]
-    ) == _closed_owner_calls(
-        baseline["class_qualified_calls"], baseline["closed_owner_renames"]
-    )
+    assert set(
+        _closed_owner_calls(
+            current["class_qualified_calls"], baseline["closed_owner_renames"]
+        )
+    ) == set(
+        _closed_owner_calls(
+            baseline["class_qualified_calls"], baseline["closed_owner_renames"]
+        )
+    ) | {
+        "_RepositoryKernel._initial_context_binding_revision_matches",
+        "_RepositoryKernel._insert_initial_context_binding_revision",
+    }
     changed_owners = (
         _ROUND7_ADDED_METHODS
         | _ROUND7_CHANGED_METHODS
@@ -483,6 +654,11 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
         | _TODO_REFINEMENT_ADDED_METHODS
         | _TODO_REFINEMENT_REMOVED_METHODS
         | _ROUND5A2_CHANGED_METHODS
+        | _ROUND5B_ADDED_METHODS
+        | _ROUND5B_CHANGED_METHODS
+        | _ROUND5B_REMOVED_METHODS
+        | _ROUND5B_ADDED_TOP_LEVEL_FUNCTIONS
+        | _ROUND5B_REMOVED_TOP_LEVEL_FUNCTIONS
     )
     for key in ("database_calls", "physical_checkouts"):
         current_unchanged = _without_source_modules(
@@ -499,11 +675,13 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
         separators=(",", ":"),
     ).encode("utf-8")
     assert hashlib.sha256(encoded_delta).hexdigest() == (
-        _ROUND8_REPOSITORY_DELTA_SHA256
+        _ROUND8_ROUND5B_REPOSITORY_DELTA_SHA256
     )
     import pulsara_agent.conversation_kernel.repository as repository
 
     for name in baseline["runtime"]["owned_observed_symbols"]:
+        if name in _ROUND5B_REMOVED_ALL | _ROUND5B_REMOVED_OBSERVED_IMPORTS:
+            continue
         value = getattr(repository, name)
         assert pickle.loads(pickle.dumps(value)) is value
     for name in repository.__all__:
@@ -516,7 +694,10 @@ def test_repository_modularization_preserves_every_existing_pytest_node() -> Non
     module = _inventory_module()
     baseline_nodes = set(_baseline()["pytest_node_ids"])
     current_nodes = set(module._pytest_node_ids())
-    assert baseline_nodes - current_nodes == _FRONTEND_HARD_CUT_RETIRED_PYTEST_NODES
+    assert baseline_nodes - current_nodes == (
+        _FRONTEND_HARD_CUT_RETIRED_PYTEST_NODES
+        | _ROUND5B_DURABLE_JOB_SUBTRACTION_RETIRED_PYTEST_NODES
+    )
     assert (
         "tests/test_stage2_architecture.py::"
         "test_stage2_ordinary_host_and_renderer_neutral_protocol_select_kernel_v3"
@@ -531,9 +712,12 @@ def test_repository_modularization_facade_and_internal_owner_shape() -> None:
         forbidden = {"_monolith.py", "monolith.py", "legacy.py"}
         assert not {path.name for path in implementation.glob("*.py")} & forbidden
         for path in implementation.glob("*.py"):
-            assert "pulsara_agent.conversation_kernel.repository" not in path.read_text(
-                encoding="utf-8"
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            imports = _absolute_import_targets(
+                tree,
+                current_package=_package_for_source(path),
             )
+            assert "pulsara_agent.conversation_kernel.repository" not in imports
         facade_source = facade.read_text(encoding="utf-8")
         assert len(facade_source.splitlines()) < 256
         assert "pulsara_v3." not in facade_source
@@ -549,8 +733,9 @@ def test_repository_modularization_facade_and_internal_owner_shape() -> None:
             pure = (implementation / pure_name).read_text(encoding="utf-8")
             assert "psycopg" not in pure
             assert "postgres_connection_provider" not in pure
-        assert "def _load_root_transcript_cut(" in (
-            implementation / "jobs.py"
+        assert not (implementation / "jobs.py").exists()
+        assert "def _require_compaction_source_digest(" in (
+            implementation / "conversation.py"
         ).read_text(encoding="utf-8")
         assert "def _content_from_row(" in (implementation / "matching.py").read_text(
             encoding="utf-8"
@@ -559,12 +744,11 @@ def test_repository_modularization_facade_and_internal_owner_shape() -> None:
     assert ConversationKernelRepository.__module__ == (
         "pulsara_agent.conversation_kernel.repository"
     )
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == 31
+    assert len(COMMITTED_EVENT_DESCRIPTORS) == 28
     assert len(LIVE_EVENT_TYPES) == 24
-    assert len(SUBJECT_SLOTS) == 13
-    assert len(APPEND_GUARDS) == 2
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 26
-    assert len(JOB_HANDLER_CATALOG) == 1
+    assert len(SUBJECT_SLOTS) == 11
+    assert len(APPEND_GUARDS) == 1
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 24
 
 
 def test_repository_modularization_internal_package_is_not_a_second_public_api() -> (

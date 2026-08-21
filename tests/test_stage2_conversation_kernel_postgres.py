@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
-from threading import Barrier
-from time import monotonic, sleep
+from time import monotonic
 from uuid import uuid4
 
 import psycopg
@@ -12,7 +10,6 @@ import pytest
 
 from pulsara_agent.conversation_kernel.contracts import (
     InlineContent,
-    JobSafetyClass,
     PromptDeliveryMode,
 )
 from pulsara_agent.conversation_kernel.activation import (
@@ -33,6 +30,20 @@ from pulsara_agent.conversation_kernel.memory.contracts import (
 from pulsara_agent.conversation_kernel.input_continuity import (
     HostProviderInputContinuityOwner,
 )
+from pulsara_agent.conversation_kernel.compaction.contracts import (
+    COMPACTION_MODEL_CONTRACT,
+    COMPACTION_SNAPSHOT_COMPILER_CONTRACT,
+    COMPACTION_SUMMARY_PROMPT_CONTRACT,
+    CompactionCanonicalAdoptionFactoryInput,
+    CompactionCanonicalWritePreconditions,
+    CompactionConfirmationKind,
+    CompactionScope,
+    CompactionTargetBranch,
+    ExpectedCompactionPredecessorRevision,
+    build_prepared_manual_compaction_command,
+    build_prepared_compaction_canonical_adoption,
+    canonical_compaction_range_digest,
+)
 from pulsara_agent.conversation_kernel.reader import CanonicalProviderInputReader
 from pulsara_agent.terminal_protocol.canonical_v3 import CanonicalProtocolReader
 from pulsara_agent.conversation_kernel.repository import (
@@ -40,7 +51,6 @@ from pulsara_agent.conversation_kernel.repository import (
     AssistantToolCallBlock,
     ConversationKernelConflict,
     ConversationKernelRepository,
-    JobAttemptTerminalized,
     StaleHostWriter,
     ToolRemoteIdentityConfirmationKind,
     build_prepared_tool_remote_identity_publication,
@@ -69,6 +79,8 @@ from pulsara_agent.model_input.continuity import (
     ProviderInputContinuityScope,
 )
 from pulsara_agent.model_input.contracts import (
+    ContextBindingBaseKind,
+    FrozenProviderInputItemKind,
     ModelInputScopeKind,
     PreparedProviderInputCut,
 )
@@ -378,12 +390,12 @@ def test_stage2_maximum_blob_is_read_as_exact_bounded_storage_ranges(
 def test_stage2_schema_and_descriptor_oracles_are_exact(
     stage2_migrated_postgres_database,
 ) -> None:
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 26
-    assert len(set(CONVERSATION_KERNEL_RELATIONS)) == 26
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == 31
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 24
+    assert len(set(CONVERSATION_KERNEL_RELATIONS)) == 24
+    assert len(COMMITTED_EVENT_DESCRIPTORS) == 28
     assert len(LIVE_EVENT_TYPES) == 24
-    assert len(SUBJECT_SLOTS) == 13
-    assert len(APPEND_GUARDS) == 2
+    assert len(SUBJECT_SLOTS) == 11
+    assert len(APPEND_GUARDS) == 1
 
     with psycopg.connect(stage2_migrated_postgres_database.admin_dsn) as connection:
         observed = tuple(
@@ -664,7 +676,7 @@ def test_stage2_host_takeover_rejects_pending_exact_turn_steer(
         ]
 
 
-def test_stage2_tool_message_precedes_attempt_and_job_claim_mints_second_guard(
+def test_stage2_tool_message_precedes_attempt_and_remote_identity_is_set_once(
     stage2_migrated_postgres_database,
 ) -> None:
     repository = _repository(stage2_migrated_postgres_database)
@@ -792,36 +804,6 @@ def test_stage2_tool_message_precedes_attempt_and_job_claim_mints_second_guard(
             + sha256(remote_identity.encode("utf-8")).hexdigest(),
         }
 
-    job_id = _name("job")
-    repository.enqueue_job(
-        lease.guard,
-        job_id=job_id,
-        handler_type="BACKGROUND_COMPACTION",
-        intent_schema_version="memory_index_refresh.v1",
-        intent_payload={"workspace_id": "x", "generation": 1},
-        automatic_intent_key=_name("intent"),
-        safety_class=JobSafetyClass.RETRY_SAFE,
-        retry_policy_id="bounded-exponential",
-        retry_policy_version=1,
-        maximum_attempts=3,
-        attempt_timeout_ms=45_000,
-        provider_input_token_limit_per_attempt=32_000,
-        provider_output_token_limit_per_attempt=2_048,
-        next_eligible_at=datetime.now(timezone.utc) - timedelta(seconds=1),
-        occurred_at=datetime.now(timezone.utc),
-        deadline_monotonic=deadline,
-    )
-    claimed = repository.claim_due_job(
-        handler_type="BACKGROUND_COMPACTION",
-        claim_owner_id=_name("worker"),
-        lease_seconds=15,
-        deadline_monotonic=deadline,
-    )
-    assert claimed is not None
-    assert claimed.guard.job_id == job_id
-    assert claimed.guard.claim_generation == 1
-
-
 @pytest.mark.parametrize("decision", ["ALLOW", "DENY"])
 def test_stage2_human_tool_decision_atomically_installs_exact_effect_boundary(
     stage2_migrated_postgres_database,
@@ -830,9 +812,10 @@ def test_stage2_human_tool_decision_atomically_installs_exact_effect_boundary(
     repository = _repository(stage2_migrated_postgres_database)
     deadline = monotonic() + 30
     session_id = _name("session")
+    workspace_id = _name("workspace")
     lease = repository.acquire_host_writer(
         session_id=session_id,
-        workspace_id=_name("workspace"),
+        workspace_id=workspace_id,
         writer_owner_id=_name("host"),
         lease_seconds=30,
         deadline_monotonic=deadline,
@@ -1006,603 +989,8 @@ def test_stage2_unqualified_product_sql_cannot_resolve_a_product_relation(
     )
 
 
-def test_stage2_job_attempt_retry_and_terminal_event_are_finite(
-    stage2_migrated_postgres_database,
-) -> None:
-    repository = _repository(stage2_migrated_postgres_database)
-    deadline = monotonic() + 30
-    session_id = _name("session")
-    lease = repository.acquire_host_writer(
-        session_id=session_id,
-        workspace_id=_name("workspace"),
-        writer_owner_id=_name("host"),
-        lease_seconds=30,
-        deadline_monotonic=deadline,
-    )
-    job_id = _name("job")
-    repository.enqueue_job(
-        lease.guard,
-        job_id=job_id,
-        handler_type="BACKGROUND_COMPACTION",
-        intent_schema_version="memory_governance.v1",
-        intent_payload={"candidate_id": _name("candidate")},
-        automatic_intent_key=None,
-        safety_class=JobSafetyClass.RETRY_SAFE,
-        retry_policy_id="bounded-exponential",
-        retry_policy_version=1,
-        maximum_attempts=3,
-        attempt_timeout_ms=45_000,
-        provider_input_token_limit_per_attempt=32_000,
-        provider_output_token_limit_per_attempt=2_048,
-        next_eligible_at=datetime.now(timezone.utc) - timedelta(seconds=1),
-        occurred_at=datetime.now(timezone.utc),
-        deadline_monotonic=deadline,
-    )
-    first = repository.claim_due_job(
-        handler_type="BACKGROUND_COMPACTION",
-        claim_owner_id=_name("worker"),
-        lease_seconds=15,
-        deadline_monotonic=deadline,
-    )
-    assert first is not None
-    repository.mark_job_provider_call_started(
-        first.guard,
-        input_tokens=100,
-        requested_output_tokens=50,
-        deadline_monotonic=deadline,
-    )
-    with pytest.raises(Exception):
-        repository.mark_job_provider_call_started(
-            first.guard,
-            input_tokens=100,
-            requested_output_tokens=50,
-            deadline_monotonic=deadline,
-        )
-    settlement = repository.settle_job_attempt(
-        first.guard,
-        terminal_status="FAILED",
-        result_payload=None,
-        error_code="PROVIDER_UNAVAILABLE",
-        retryable=True,
-        occurred_at=datetime.now(timezone.utc),
-        deadline_monotonic=deadline,
-    )
-    assert settlement.aggregate_status == "PENDING"
-    assert settlement.retry_scheduled
-    # The retry due is durable and deterministic.  A worker cannot consume the
-    # next attempt early merely because it polls aggressively.
-    assert (
-        repository.prepare_job_claim_candidate(
-            handler_type="BACKGROUND_COMPACTION",
-            deadline_monotonic=deadline,
-        )
-        is None
-    )
-    assert (
-        repository.claim_due_job(
-            handler_type="BACKGROUND_COMPACTION",
-            claim_owner_id=_name("worker"),
-            lease_seconds=15,
-            deadline_monotonic=deadline,
-        )
-        is None
-    )
-    with repository.connection_provider.connection(
-        lane=PostgresConnectionLane.INSPECTOR,
-        deadline_monotonic=deadline,
-    ) as connection:
-        assert connection.execute(
-            """
-            SELECT count(*) FROM pulsara_v3.agent_events
-            WHERE session_id = %s AND event_type = 'JobTerminalAccepted'
-            """,
-            (session_id,),
-        ).fetchone() == (0,)
-        connection.execute(
-            "UPDATE pulsara_v3.durable_jobs SET next_eligible_at = clock_timestamp() - interval '1 second' WHERE id = %s",
-            (job_id,),
-        )
-    terminal = None
-    for ordinal in (2, 3):
-        attempt = repository.claim_due_job(
-            handler_type="BACKGROUND_COMPACTION",
-            claim_owner_id=_name("worker"),
-            lease_seconds=15,
-            deadline_monotonic=deadline,
-        )
-        assert attempt is not None and attempt.attempt_ordinal == ordinal
-        terminal = repository.settle_job_attempt(
-            attempt.guard,
-            terminal_status="FAILED",
-            result_payload=None,
-            error_code="PROVIDER_UNAVAILABLE",
-            retryable=True,
-            occurred_at=datetime.now(timezone.utc),
-            deadline_monotonic=deadline,
-        )
-        if ordinal == 2:
-            assert terminal.aggregate_status == "PENDING"
-            with repository.connection_provider.connection(
-                lane=PostgresConnectionLane.INSPECTOR,
-                deadline_monotonic=deadline,
-            ) as connection:
-                connection.execute(
-                    "UPDATE pulsara_v3.durable_jobs SET next_eligible_at = clock_timestamp() - interval '1 second' WHERE id = %s",
-                    (job_id,),
-                )
-    assert terminal is not None
-    assert terminal.aggregate_status == "FAILED"
-    assert not terminal.retry_scheduled
-    with repository.connection_provider.connection(
-        lane=PostgresConnectionLane.INSPECTOR,
-        deadline_monotonic=deadline,
-    ) as connection:
-        assert connection.execute(
-            """
-            SELECT count(*) FROM pulsara_v3.agent_events
-            WHERE session_id = %s AND event_type = 'JobTerminalAccepted'
-            """,
-            (session_id,),
-        ).fetchone() == (1,)
-
-
-def test_stage2_job_claim_ack_unknown_and_host_takeover_keep_one_attempt_owner(
-    stage2_migrated_postgres_database,
-) -> None:
-    repository = _repository(stage2_migrated_postgres_database)
-    deadline = monotonic() + 30
-    session_id = _name("session")
-    workspace_id = _name("workspace")
-    first_host = repository.acquire_host_writer(
-        session_id=session_id,
-        workspace_id=workspace_id,
-        writer_owner_id=_name("host"),
-        lease_seconds=30,
-        deadline_monotonic=deadline,
-    )
-    job_id = _name("job")
-    repository.enqueue_job(
-        first_host.guard,
-        job_id=job_id,
-        handler_type="BACKGROUND_COMPACTION",
-        intent_schema_version="memory_governance.v1",
-        intent_payload={"candidate_id": _name("candidate")},
-        automatic_intent_key=None,
-        safety_class=JobSafetyClass.RETRY_SAFE,
-        retry_policy_id="bounded-exponential",
-        retry_policy_version=1,
-        maximum_attempts=3,
-        attempt_timeout_ms=45_000,
-        provider_input_token_limit_per_attempt=32_000,
-        provider_output_token_limit_per_attempt=2_048,
-        next_eligible_at=datetime.now(timezone.utc) - timedelta(seconds=1),
-        occurred_at=datetime.now(timezone.utc),
-        deadline_monotonic=deadline,
-    )
-    assert (
-        repository.prepare_job_claim_candidate(
-            handler_type="BACKGROUND_COMPACTION", deadline_monotonic=deadline
-        )
-        == job_id
-    )
-    worker_id = _name("worker")
-    accepted = repository.claim_due_job(
-        handler_type="BACKGROUND_COMPACTION",
-        claim_owner_id=worker_id,
-        lease_seconds=15,
-        expected_job_id=job_id,
-        deadline_monotonic=deadline,
-    )
-    assert accepted is not None
-
-    # Simulate a lost commit ACK: the same worker exact-confirms the installed
-    # guard; a different worker cannot acquire or confirm a second owner.
-    confirmed = repository.confirm_active_job_claim(
-        job_id=job_id,
-        handler_type="BACKGROUND_COMPACTION",
-        claim_owner_id=worker_id,
-        deadline_monotonic=deadline,
-    )
-    assert confirmed is not None
-    assert confirmed.guard == accepted.guard
-    assert (
-        repository.confirm_active_job_claim(
-            job_id=job_id,
-            handler_type="BACKGROUND_COMPACTION",
-            claim_owner_id=_name("other-worker"),
-            deadline_monotonic=deadline,
-        )
-        is None
-    )
-
-    second_host = repository.acquire_host_writer(
-        session_id=session_id,
-        workspace_id=workspace_id,
-        writer_owner_id=_name("host"),
-        lease_seconds=30,
-        deadline_monotonic=deadline,
-    )
-    assert second_host.guard.writer_generation == first_host.guard.writer_generation + 1
-    settlement = repository.settle_job_attempt(
-        confirmed.guard,
-        terminal_status="SUCCEEDED",
-        result_payload={"ok": True},
-        error_code=None,
-        occurred_at=datetime.now(timezone.utc),
-        deadline_monotonic=deadline,
-    )
-    assert settlement.aggregate_status == "SUCCEEDED"
-    with repository.connection_provider.connection(
-        lane=PostgresConnectionLane.INSPECTOR,
-        deadline_monotonic=deadline,
-    ) as connection:
-        assert connection.execute(
-            "SELECT count(*) FROM pulsara_v3.durable_job_attempts WHERE job_id = %s",
-            (job_id,),
-        ).fetchone() == (1,)
-        assert connection.execute(
-            """
-            SELECT count(*) FROM pulsara_v3.agent_events
-            WHERE session_id = %s AND event_type = 'JobAttemptAccepted'
-              AND subject_job_attempt_id = %s
-            """,
-            (session_id, accepted.guard.attempt_id),
-        ).fetchone() == (1,)
-
-
-def test_stage2_job_cancel_is_set_once_and_exact_claim_owner_terminalizes_it(
-    stage2_migrated_postgres_database,
-) -> None:
-    repository = _repository(stage2_migrated_postgres_database)
-    deadline = monotonic() + 30
-    session_id = _name("session")
-    lease = repository.acquire_host_writer(
-        session_id=session_id,
-        workspace_id=_name("workspace"),
-        writer_owner_id=_name("host"),
-        lease_seconds=30,
-        deadline_monotonic=deadline,
-    )
-    job_id = _name("job")
-    repository.enqueue_job(
-        lease.guard,
-        job_id=job_id,
-        handler_type="BACKGROUND_COMPACTION",
-        intent_schema_version="memory_index_refresh.v1",
-        intent_payload={"workspace_id": "workspace:test", "generation": 1},
-        automatic_intent_key=None,
-        safety_class=JobSafetyClass.RETRY_SAFE,
-        retry_policy_id="bounded-exponential",
-        retry_policy_version=1,
-        maximum_attempts=3,
-        attempt_timeout_ms=45_000,
-        provider_input_token_limit_per_attempt=32_000,
-        provider_output_token_limit_per_attempt=2_048,
-        next_eligible_at=datetime.now(timezone.utc) - timedelta(seconds=1),
-        occurred_at=datetime.now(timezone.utc),
-        deadline_monotonic=deadline,
-    )
-    assert (
-        repository.request_job_cancel(
-            lease.guard,
-            job_id=job_id,
-            actor_id="human:test",
-            reason="USER_CANCELLED",
-            deadline_monotonic=deadline,
-        )
-        == "CANCEL_REQUESTED"
-    )
-    assert (
-        repository.request_job_cancel(
-            lease.guard,
-            job_id=job_id,
-            actor_id="human:test",
-            reason="USER_CANCELLED",
-            deadline_monotonic=deadline,
-        )
-        == "CANCEL_REQUESTED"
-    )
-    with pytest.raises(ConversationKernelConflict):
-        repository.request_job_cancel(
-            lease.guard,
-            job_id=job_id,
-            actor_id="human:other",
-            reason="OTHER_REASON",
-            deadline_monotonic=deadline,
-        )
-    attempt = repository.claim_due_job(
-        handler_type="BACKGROUND_COMPACTION",
-        claim_owner_id=_name("worker"),
-        lease_seconds=15,
-        expected_job_id=job_id,
-        deadline_monotonic=deadline,
-    )
-    assert attempt is not None and attempt.cancel_requested
-    settlement = repository.settle_job_attempt(
-        attempt.guard,
-        terminal_status="CANCELLED",
-        result_payload=None,
-        error_code="USER_CANCELLED",
-        retryable=False,
-        occurred_at=datetime.now(timezone.utc),
-        deadline_monotonic=deadline,
-    )
-    assert settlement.aggregate_status == "CANCELLED"
-    with repository.connection_provider.connection(
-        lane=PostgresConnectionLane.INSPECTOR,
-        deadline_monotonic=deadline,
-    ) as connection:
-        assert connection.execute(
-            "SELECT status, terminal_reason FROM pulsara_v3.durable_jobs WHERE id = %s",
-            (job_id,),
-        ).fetchone() == ("CANCELLED", "USER_CANCELLED")
-        assert connection.execute(
-            """
-            SELECT count(*) FROM pulsara_v3.agent_events
-            WHERE session_id = %s AND event_type = 'JobAttemptAccepted'
-              AND subject_job_attempt_id = %s
-            """,
-            (session_id, attempt.guard.attempt_id),
-        ).fetchone() == (1,)
-
-
-def test_stage2_job_claim_and_host_cancel_share_session_first_lock_order(
-    stage2_migrated_postgres_database,
-) -> None:
-    repository = _repository(stage2_migrated_postgres_database)
-    deadline = monotonic() + 30
-    session_id = _name("session")
-    lease = repository.acquire_host_writer(
-        session_id=session_id,
-        workspace_id=_name("workspace"),
-        writer_owner_id=_name("host"),
-        lease_seconds=30,
-        deadline_monotonic=deadline,
-    )
-    job_id = _name("job")
-    repository.enqueue_job(
-        lease.guard,
-        job_id=job_id,
-        handler_type="BACKGROUND_COMPACTION",
-        intent_schema_version="memory_index_refresh.v1",
-        intent_payload={"workspace_id": "workspace:test", "generation": 1},
-        automatic_intent_key=None,
-        safety_class=JobSafetyClass.RETRY_SAFE,
-        retry_policy_id="bounded-exponential",
-        retry_policy_version=1,
-        maximum_attempts=3,
-        attempt_timeout_ms=45_000,
-        provider_input_token_limit_per_attempt=32_000,
-        provider_output_token_limit_per_attempt=2_048,
-        next_eligible_at=datetime.now(timezone.utc) - timedelta(seconds=1),
-        occurred_at=datetime.now(timezone.utc),
-        deadline_monotonic=deadline,
-    )
-    start = Barrier(2)
-
-    def claim():
-        start.wait()
-        return repository.claim_due_job(
-            handler_type="BACKGROUND_COMPACTION",
-            claim_owner_id=_name("worker"),
-            lease_seconds=15,
-            expected_job_id=job_id,
-            deadline_monotonic=monotonic() + 10,
-        )
-
-    def cancel():
-        start.wait()
-        return repository.request_job_cancel(
-            lease.guard,
-            job_id=job_id,
-            actor_id="human:test",
-            reason="USER_CANCELLED",
-            deadline_monotonic=monotonic() + 10,
-        )
-
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        claim_future = executor.submit(claim)
-        cancel_future = executor.submit(cancel)
-        attempt = claim_future.result(timeout=12)
-        assert cancel_future.result(timeout=12) == "CANCEL_REQUESTED"
-    assert attempt is not None
-    settlement = repository.settle_job_attempt(
-        attempt.guard,
-        terminal_status="CANCELLED",
-        result_payload=None,
-        error_code="USER_CANCELLED",
-        retryable=False,
-        occurred_at=datetime.now(timezone.utc),
-        deadline_monotonic=deadline,
-    )
-    assert settlement.aggregate_status == "CANCELLED"
-    with repository.connection_provider.connection(
-        lane=PostgresConnectionLane.INSPECTOR,
-        deadline_monotonic=deadline,
-    ) as connection:
-        assert connection.execute(
-            """
-            SELECT count(*), count(DISTINCT event_sequence)
-            FROM pulsara_v3.agent_events WHERE session_id = %s
-            """,
-            (session_id,),
-        ).fetchone() == (3, 3)
-
-
-def test_stage2_expired_job_reaper_rebinds_normal_claim_append_guard(
-    stage2_migrated_postgres_database,
-) -> None:
-    repository = _repository(stage2_migrated_postgres_database)
-    deadline = monotonic() + 30
-    session_id = _name("session")
-    lease = repository.acquire_host_writer(
-        session_id=session_id,
-        workspace_id=_name("workspace"),
-        writer_owner_id=_name("host"),
-        lease_seconds=30,
-        deadline_monotonic=deadline,
-    )
-    job_id = _name("job")
-    repository.enqueue_job(
-        lease.guard,
-        job_id=job_id,
-        handler_type="BACKGROUND_COMPACTION",
-        intent_schema_version="memory_index_refresh.v1",
-        intent_payload={"workspace_id": "workspace:test", "generation": 1},
-        automatic_intent_key=None,
-        safety_class=JobSafetyClass.RETRY_SAFE,
-        retry_policy_id="bounded-exponential",
-        retry_policy_version=1,
-        maximum_attempts=3,
-        attempt_timeout_ms=45_000,
-        provider_input_token_limit_per_attempt=32_000,
-        provider_output_token_limit_per_attempt=2_048,
-        next_eligible_at=datetime.now(timezone.utc) - timedelta(seconds=1),
-        occurred_at=datetime.now(timezone.utc),
-        deadline_monotonic=deadline,
-    )
-    for ordinal in (1, 2, 3):
-        claimed = repository.claim_due_job(
-            handler_type="BACKGROUND_COMPACTION",
-            claim_owner_id=_name("worker"),
-            lease_seconds=0.01,
-            expected_job_id=job_id,
-            deadline_monotonic=deadline,
-        )
-        assert claimed is not None and claimed.attempt_ordinal == ordinal
-        sleep(0.03)
-        assert (
-            repository.claim_due_job(
-                handler_type="BACKGROUND_COMPACTION",
-                claim_owner_id=_name("reaper"),
-                lease_seconds=15,
-                expected_job_id=job_id,
-                deadline_monotonic=deadline,
-            )
-            is None
-        )
-        if ordinal < 3:
-            with repository.connection_provider.connection(
-                lane=PostgresConnectionLane.BACKGROUND_WORK,
-                deadline_monotonic=deadline,
-            ) as connection:
-                connection.execute(
-                    """
-                    UPDATE pulsara_v3.durable_jobs
-                    SET next_eligible_at = clock_timestamp() - interval '1 second'
-                    WHERE id = %s
-                    """,
-                    (job_id,),
-                )
-    with repository.connection_provider.connection(
-        lane=PostgresConnectionLane.INSPECTOR,
-        deadline_monotonic=deadline,
-    ) as connection:
-        assert connection.execute(
-            "SELECT status, terminal_reason FROM pulsara_v3.durable_jobs WHERE id = %s",
-            (job_id,),
-        ).fetchone() == ("FAILED", "RETRY_EXHAUSTED")
-        assert connection.execute(
-            """
-            SELECT count(*) FROM pulsara_v3.agent_events
-            WHERE session_id = %s AND event_type = 'JobTerminalAccepted'
-              AND subject_job_id = %s
-            """,
-            (session_id, job_id),
-        ).fetchone() == (1,)
-
-
-def test_stage2_provider_request_bound_terminalizes_without_retry(
-    stage2_migrated_postgres_database,
-) -> None:
-    repository = _repository(stage2_migrated_postgres_database)
-    deadline = monotonic() + 30
-    session_id = _name("session")
-    lease = repository.acquire_host_writer(
-        session_id=session_id,
-        workspace_id=_name("workspace"),
-        writer_owner_id=_name("host"),
-        lease_seconds=30,
-        deadline_monotonic=deadline,
-    )
-    job_id = _name("job")
-    repository.enqueue_job(
-        lease.guard,
-        job_id=job_id,
-        handler_type="BACKGROUND_COMPACTION",
-        intent_schema_version="memory_governance.v1",
-        intent_payload={"candidate_id": _name("candidate")},
-        automatic_intent_key=None,
-        safety_class=JobSafetyClass.RETRY_SAFE,
-        retry_policy_id="bounded-exponential",
-        retry_policy_version=1,
-        maximum_attempts=3,
-        attempt_timeout_ms=45_000,
-        provider_input_token_limit_per_attempt=32_000,
-        provider_output_token_limit_per_attempt=2_048,
-        next_eligible_at=datetime.now(timezone.utc) - timedelta(seconds=1),
-        occurred_at=datetime.now(timezone.utc),
-        deadline_monotonic=deadline,
-    )
-    attempt = repository.claim_due_job(
-        handler_type="BACKGROUND_COMPACTION",
-        claim_owner_id=_name("worker"),
-        lease_seconds=15,
-        deadline_monotonic=deadline,
-    )
-    assert attempt is not None
-    with pytest.raises(JobAttemptTerminalized):
-        repository.mark_job_provider_call_started(
-            attempt.guard,
-            input_tokens=32_001,
-            requested_output_tokens=2_048,
-            deadline_monotonic=deadline,
-        )
-    assert (
-        repository.prepare_job_claim_candidate(
-            handler_type="BACKGROUND_COMPACTION", deadline_monotonic=deadline
-        )
-        is None
-    )
-    with repository.connection_provider.connection(
-        lane=PostgresConnectionLane.INSPECTOR,
-        deadline_monotonic=deadline,
-    ) as connection:
-        assert connection.execute(
-            "SELECT status, terminal_reason FROM pulsara_v3.durable_jobs WHERE id = %s",
-            (job_id,),
-        ).fetchone() == ("FAILED", "PROVIDER_REQUEST_LIMIT_EXCEEDED")
-        assert connection.execute(
-            """
-            SELECT count(*) FROM pulsara_v3.agent_events
-            WHERE session_id = %s AND event_type = 'JobTerminalAccepted'
-              AND subject_job_id = %s
-            """,
-            (session_id, job_id),
-        ).fetchone() == (1,)
-
-
-def test_stage2_memory_refresh_exhaustion_is_stable_and_query_is_unavailable(
-    stage2_migrated_postgres_database,
-) -> None:
-    """Round 8 successor: there is no durable refresh debt or retry job."""
-
-    repository = _repository(stage2_migrated_postgres_database)
-    with repository.connection_provider.connection(
-        lane=PostgresConnectionLane.INSPECTOR,
-        deadline_monotonic=monotonic() + 30,
-    ) as connection:
-        assert connection.execute(
-            "SELECT to_regclass('pulsara_v3.memory_index_state')"
-        ).fetchone() == (None,)
-        assert connection.execute(
-            """
-            SELECT count(*) FROM pulsara_v3.durable_jobs
-            WHERE handler_type IN ('MEMORY_INDEX_REFRESH', 'MEMORY_GOVERNANCE',
-                                   'POST_COMPACTION_MEMORY_EXTRACTION')
-            """
-        ).fetchone() == (0,)
-
+# Round 5B removes the entire durable job family; its canonical successor is
+# the Host-owned compaction settlement coverage in the Round 5B suite.
 
 def test_stage2_memory_governance_is_async_and_postgres_only(
     stage2_migrated_postgres_database,
@@ -1962,9 +1350,10 @@ def test_round3_1_steer_consumption_ack_confirmation_is_exact(
     repository = ConversationKernelRepository(provider)
     deadline = monotonic() + 30
     session_id = _name("session")
+    workspace_id = _name("workspace")
     lease = repository.acquire_host_writer(
         session_id=session_id,
-        workspace_id=_name("workspace"),
+        workspace_id=workspace_id,
         writer_owner_id=_name("host"),
         lease_seconds=30,
         deadline_monotonic=deadline,
@@ -2080,9 +1469,10 @@ def test_round3_1_steer_consume_rejects_canonical_base_drift_without_mutation(
     repository = ConversationKernelRepository(provider)
     deadline = monotonic() + 30
     session_id = _name("session")
+    workspace_id = _name("workspace")
     lease = repository.acquire_host_writer(
         session_id=session_id,
-        workspace_id=_name("workspace"),
+        workspace_id=workspace_id,
         writer_owner_id=_name("host"),
         lease_seconds=30,
         deadline_monotonic=deadline,
@@ -2143,7 +1533,7 @@ def test_round3_1_steer_consume_rejects_canonical_base_drift_without_mutation(
         ),
         dispatch_anchor=NoNewTriggerAnchor(None),
     )
-    candidate = build_steer_consumption_candidate(
+    steer_candidate = build_steer_consumption_candidate(
         fact=fact,
         body_utf8=b"must remain pending",
         expected_entry_sequence=2,
@@ -2153,31 +1543,135 @@ def test_round3_1_steer_consume_rejects_canonical_base_drift_without_mutation(
         actor_id=lease.guard.writer_owner_id,
     )
 
-    repository.adopt_context_snapshot(
+    compaction_cut = repository.prepare_compaction_input_cut(
         lease.guard,
         turn_id=turn_id,
-        snapshot_id=_name("snapshot"),
-        context_binding_revision_id=_name("replacement-revision"),
-        source_through_sequence=0,
-        source_digest="sha256:" + sha256(b"summary").hexdigest(),
-        compiler_contract="test:compiler",
-        prompt_contract="test:prompt",
-        model_contract="test:model",
-        content=InlineContent.from_bytes(b"summary"),
-        occurred_at=datetime.now(timezone.utc),
-        actor_id="runtime:test",
+        allow_terminal=False,
         deadline_monotonic=deadline,
+    )
+    compaction_read = CanonicalProviderInputReader(
+        provider
+    ).read_frozen_compaction_cut(
+        compaction_cut,
+        deadline_monotonic=deadline,
+    )
+    scope = CompactionScope(
+        session_id=session_id,
+        workspace_id=workspace_id,
+        turn_id=turn_id,
+        scope_kind=ModelInputScopeKind.ROOT,
+        scope_subagent_task_id=None,
+    )
+    compaction_candidate = build_prepared_compaction_canonical_adoption(
+        CompactionCanonicalAdoptionFactoryInput(
+            scope=scope,
+            target_branch=CompactionTargetBranch.ACTIVE_INSTALLATION,
+            expected_turn_status="RUNNING",
+            predecessor=ExpectedCompactionPredecessorRevision(
+                binding_revision_id=(
+                    compaction_read.lineage_base.binding_revision_id
+                ),
+                revision_ordinal=(
+                    compaction_read.lineage_base.binding_revision_ordinal
+                ),
+                base_kind=(
+                    "FULL_HISTORY"
+                    if compaction_read.lineage_base.snapshot_id is None
+                    else "SNAPSHOT"
+                ),
+                context_snapshot_id=compaction_read.lineage_base.snapshot_id,
+                source_through_sequence=(
+                    compaction_read.lineage_base.persisted_revision_genesis_marker
+                ),
+            ),
+            snapshot_id=_name("snapshot"),
+            binding_revision_id=_name("replacement-revision"),
+            event_id=_name("compaction-event"),
+            source_through_sequence=(
+                compaction_read.safe_head_range.source_through_sequence
+            ),
+            source_digest=canonical_compaction_range_digest(
+                compaction_read.lineage_base,
+                compaction_read.safe_head_range,
+            ),
+            snapshot_content=InlineContent.from_bytes(b"summary"),
+            compiler_contract=COMPACTION_SNAPSHOT_COMPILER_CONTRACT,
+            prompt_contract=COMPACTION_SUMMARY_PROMPT_CONTRACT,
+            model_contract=COMPACTION_MODEL_CONTRACT,
+            occurred_at=datetime.now(timezone.utc),
+            actor_id="runtime:test",
+        )
+    )
+    winner = repository.adopt_context_snapshot(
+        lease.guard,
+        candidate=compaction_candidate,
+        preconditions=CompactionCanonicalWritePreconditions(
+            scope=scope,
+            expected_turn_status="RUNNING",
+            expected_safe_head=(
+                compaction_read.safe_head_range.source_through_sequence
+            ),
+            provider_safe=True,
+        ),
+        deadline_monotonic=deadline,
+    )
+    assert winner.kind is CompactionConfirmationKind.FULL
+    assert (
+        repository.confirm_context_snapshot_adoption(
+            candidate=compaction_candidate,
+            deadline_monotonic=deadline,
+        )
+        == winner
+    )
+    conflicting_compaction = build_prepared_compaction_canonical_adoption(
+        CompactionCanonicalAdoptionFactoryInput(
+            scope=scope,
+            target_branch=CompactionTargetBranch.ACTIVE_INSTALLATION,
+            expected_turn_status="RUNNING",
+            predecessor=ExpectedCompactionPredecessorRevision(
+                binding_revision_id=compaction_read.lineage_base.binding_revision_id,
+                revision_ordinal=compaction_read.lineage_base.binding_revision_ordinal,
+                base_kind="FULL_HISTORY",
+                context_snapshot_id=None,
+                source_through_sequence=(
+                    compaction_read.lineage_base.persisted_revision_genesis_marker
+                ),
+            ),
+            snapshot_id=compaction_candidate.snapshot.snapshot_id,
+            binding_revision_id=compaction_candidate.binding.binding_revision_id,
+            event_id=compaction_candidate.event.event_id,
+            source_through_sequence=(
+                compaction_read.safe_head_range.source_through_sequence
+            ),
+            source_digest=canonical_compaction_range_digest(
+                compaction_read.lineage_base,
+                compaction_read.safe_head_range,
+            ),
+            snapshot_content=InlineContent.from_bytes(b"different summary"),
+            compiler_contract=COMPACTION_SNAPSHOT_COMPILER_CONTRACT,
+            prompt_contract=COMPACTION_SUMMARY_PROMPT_CONTRACT,
+            model_contract=COMPACTION_MODEL_CONTRACT,
+            occurred_at=compaction_candidate.event.occurred_at,
+            actor_id="runtime:test",
+        )
+    )
+    assert (
+        repository.confirm_context_snapshot_adoption(
+            candidate=conflicting_compaction,
+            deadline_monotonic=deadline,
+        ).kind
+        is CompactionConfirmationKind.CONFLICT
     )
 
     with pytest.raises(ConversationKernelConflict, match="control base drifted"):
         repository.consume_prepared_prompt_steer(
             lease.guard,
-            candidate=candidate,
+            candidate=steer_candidate,
             deadline_monotonic=deadline,
         )
     assert (
         repository.confirm_prepared_prompt_steer(
-            candidate=candidate, deadline_monotonic=deadline
+            candidate=steer_candidate, deadline_monotonic=deadline
         ).kind
         is SteerConsumptionConfirmationKind.NONE
     )
@@ -2185,6 +1679,16 @@ def test_round3_1_steer_consume_rejects_canonical_base_drift_without_mutation(
         lane=PostgresConnectionLane.INSPECTOR,
         deadline_monotonic=deadline,
     ) as connection:
+        assert connection.execute(
+            "SELECT count(*) FROM pulsara_v3.context_snapshots "
+            "WHERE session_id = %s",
+            (session_id,),
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT count(*) FROM pulsara_v3.turn_context_binding_revisions "
+            "WHERE session_id = %s AND turn_id = %s",
+            (session_id, turn_id),
+        ).fetchone()[0] == 2
         assert connection.execute(
             "SELECT status, consumed_entry_id FROM pulsara_v3.prompt_queue_items "
             "WHERE session_id = %s AND id = %s",
@@ -2195,6 +1699,218 @@ def test_round3_1_steer_consume_rejects_canonical_base_drift_without_mutation(
             "WHERE session_id = %s AND entry_kind = 'USER_STEER'",
             (session_id,),
         ).fetchone() == (0,)
+
+
+def test_round5b_manual_compaction_command_is_exact_and_ack_confirmable(
+    stage2_migrated_postgres_database,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    deadline = monotonic() + 30
+    session_id = _name("session")
+    lease = repository.acquire_host_writer(
+        session_id=session_id,
+        workspace_id=_name("workspace"),
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=deadline,
+    )
+    turn_id = _name("turn")
+    _start_root_turn(
+        repository,
+        lease.guard,
+        command_id=_name("prompt-command"),
+        turn_id=turn_id,
+        entry_id=_name("entry"),
+        context_binding_revision_id=_name("revision"),
+        content=InlineContent.from_bytes(b"initial"),
+        occurred_at=datetime.now(timezone.utc),
+        deadline_monotonic=deadline,
+    )
+    command_id = _name("compact-command")
+    candidate = build_prepared_manual_compaction_command(
+        session_id=session_id,
+        command_id=command_id,
+        scope_kind=ModelInputScopeKind.ROOT,
+        scope_subagent_task_id=None,
+        target_turn_id=turn_id,
+        expected_active_turn_id=turn_id,
+        force=False,
+    )
+    assert (
+        repository.confirm_manual_compaction_command(
+            candidate=candidate,
+            deadline_monotonic=deadline,
+        )
+        is CompactionConfirmationKind.NONE
+    )
+    assert (
+        repository.accept_manual_compaction_command(
+            lease.guard,
+            candidate=candidate,
+            deadline_monotonic=deadline,
+        )
+        is CompactionConfirmationKind.FULL
+    )
+    assert (
+        repository.confirm_manual_compaction_command(
+            candidate=candidate,
+            deadline_monotonic=deadline,
+        )
+        is CompactionConfirmationKind.FULL
+    )
+    conflict = build_prepared_manual_compaction_command(
+        session_id=session_id,
+        command_id=command_id,
+        scope_kind=ModelInputScopeKind.ROOT,
+        scope_subagent_task_id=None,
+        target_turn_id=turn_id,
+        expected_active_turn_id=turn_id,
+        force=True,
+    )
+    assert (
+        repository.confirm_manual_compaction_command(
+            candidate=conflict,
+            deadline_monotonic=deadline,
+        )
+        is CompactionConfirmationKind.CONFLICT
+    )
+
+
+def test_round5b_next_exact_scope_turn_inherits_latest_snapshot_base(
+    stage2_migrated_postgres_database,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    deadline = monotonic() + 30
+    session_id = _name("session")
+    workspace_id = _name("workspace")
+    lease = repository.acquire_host_writer(
+        session_id=session_id,
+        workspace_id=workspace_id,
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=deadline,
+    )
+    first_turn = _name("first-turn")
+    first_revision = _name("first-revision")
+    _start_root_turn(
+        repository,
+        lease.guard,
+        command_id=_name("first-command"),
+        turn_id=first_turn,
+        entry_id=_name("first-entry"),
+        context_binding_revision_id=first_revision,
+        content=InlineContent.from_bytes(b"old prompt"),
+        occurred_at=datetime.now(timezone.utc),
+        deadline_monotonic=deadline,
+    )
+    cut = repository.prepare_compaction_input_cut(
+        lease.guard,
+        turn_id=first_turn,
+        allow_terminal=False,
+        deadline_monotonic=deadline,
+    )
+    read = CanonicalProviderInputReader(provider).read_frozen_compaction_cut(
+        cut,
+        deadline_monotonic=deadline,
+    )
+    scope = CompactionScope(
+        session_id=session_id,
+        workspace_id=workspace_id,
+        turn_id=first_turn,
+        scope_kind=ModelInputScopeKind.ROOT,
+        scope_subagent_task_id=None,
+    )
+    snapshot_body = (
+        b'{"earlier_context_summary":"old summary",'
+        b'"recent_user_messages":["old prompt"]}'
+    )
+    candidate = build_prepared_compaction_canonical_adoption(
+        CompactionCanonicalAdoptionFactoryInput(
+            scope=scope,
+            target_branch=CompactionTargetBranch.ACTIVE_INSTALLATION,
+            expected_turn_status="RUNNING",
+            predecessor=ExpectedCompactionPredecessorRevision(
+                binding_revision_id=read.lineage_base.binding_revision_id,
+                revision_ordinal=read.lineage_base.binding_revision_ordinal,
+                base_kind="FULL_HISTORY",
+                context_snapshot_id=None,
+                source_through_sequence=(
+                    read.lineage_base.persisted_revision_genesis_marker
+                ),
+            ),
+            snapshot_id=_name("snapshot"),
+            binding_revision_id=_name("snapshot-revision"),
+            event_id=_name("snapshot-event"),
+            source_through_sequence=read.safe_head_range.source_through_sequence,
+            source_digest=canonical_compaction_range_digest(
+                read.lineage_base,
+                read.safe_head_range,
+            ),
+            snapshot_content=InlineContent.from_bytes(
+                snapshot_body,
+                media_type="application/vnd.pulsara.context-snapshot+json",
+            ),
+            compiler_contract=COMPACTION_SNAPSHOT_COMPILER_CONTRACT,
+            prompt_contract=COMPACTION_SUMMARY_PROMPT_CONTRACT,
+            model_contract=COMPACTION_MODEL_CONTRACT,
+            occurred_at=datetime.now(timezone.utc),
+            actor_id="runtime:test",
+        )
+    )
+    assert (
+        repository.adopt_context_snapshot(
+            lease.guard,
+            candidate=candidate,
+            preconditions=CompactionCanonicalWritePreconditions(
+                scope=scope,
+                expected_turn_status="RUNNING",
+                expected_safe_head=read.safe_head_range.source_through_sequence,
+                provider_safe=True,
+            ),
+            deadline_monotonic=deadline,
+        ).kind
+        is CompactionConfirmationKind.FULL
+    )
+    assert repository.interrupt_turn(
+        lease.guard,
+        turn_id=first_turn,
+        reason="TEST_COMPLETE",
+        occurred_at=datetime.now(timezone.utc),
+        actor_id="runtime:test",
+        deadline_monotonic=deadline,
+    )
+
+    second_turn = _name("second-turn")
+    second_revision = _name("second-revision")
+    _start_root_turn(
+        repository,
+        lease.guard,
+        command_id=_name("second-command"),
+        turn_id=second_turn,
+        entry_id=_name("second-entry"),
+        context_binding_revision_id=second_revision,
+        content=InlineContent.from_bytes(b"new prompt"),
+        occurred_at=datetime.now(timezone.utc),
+        deadline_monotonic=deadline,
+    )
+    second_cut = repository.prepare_provider_input_cut(
+        lease.guard,
+        turn_id=second_turn,
+        deadline_monotonic=deadline,
+    )
+    second = CanonicalProviderInputReader(provider).read_frozen_compile_snapshot(
+        second_cut,
+        deadline_monotonic=deadline,
+    )
+    assert second.context_binding_fact.base_kind is ContextBindingBaseKind.SNAPSHOT
+    assert second.context_binding_fact.context_snapshot_id == candidate.snapshot.snapshot_id
+    assert second.canonical_input.items[0].item_kind is (
+        FrozenProviderInputItemKind.CONTEXT_SNAPSHOT
+    )
+    assert second.canonical_input.items[0].text == snapshot_body.decode()
+    assert second.canonical_input.items[-1].text == "new prompt"
 
 
 def test_round3_1_resource_rejection_is_atomic_and_exactly_confirmable(

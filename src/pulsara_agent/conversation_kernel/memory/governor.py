@@ -280,7 +280,7 @@ class AdvisoryMemoryGovernor:
                 remaining = deadline_monotonic - monotonic()
                 if remaining <= 0:
                     return
-                policy = self._deadlines.policy.durable_job_transport(remaining)
+                policy = self._deadlines.policy.bounded_auxiliary_transport(remaining)
                 call = self._model.prepare_json_call(
                     purpose=ModelCallPurpose.MEMORY_GOVERNANCE,
                     prompt=packet,
@@ -632,7 +632,7 @@ class AdvisoryMemoryGovernor:
             remaining = deadline_monotonic - monotonic()
             if remaining <= 0:
                 return
-            policy = self._deadlines.policy.durable_job_transport(remaining)
+            policy = self._deadlines.policy.bounded_auxiliary_transport(remaining)
             call = self._model.prepare_json_call(
                 purpose=ModelCallPurpose.MEMORY_HINT_REVIEW,
                 prompt=prompt.decode("utf-8"),

@@ -2042,19 +2042,14 @@ class _PlanOperations:
                 *_RepositoryKernel._permission_columns(permission),
             ),
         )
-        connection.execute(
-            """
-            INSERT INTO pulsara_v3.turn_context_binding_revisions (
-                id, session_id, turn_id, revision_ordinal,
-                base_kind, source_through_sequence
-            ) VALUES (%s, %s, %s, 0, 'FULL_HISTORY', %s)
-            """,
-            (
-                candidate.continuation_context_binding_revision_id,
-                candidate.session_id,
-                candidate.continuation_turn_id,
-                entry_sequence - 1,
-            ),
+        _RepositoryKernel._insert_initial_context_binding_revision(
+            connection,
+            session_id=candidate.session_id,
+            turn_id=candidate.continuation_turn_id,
+            revision_id=candidate.continuation_context_binding_revision_id,
+            initial_entry_sequence=entry_sequence,
+            scope_kind=ConversationScopeKind.ROOT,
+            scope_subagent_task_id=None,
         )
         _RepositoryKernel._insert_entry(
             connection,
@@ -2665,12 +2660,16 @@ class _PlanOperations:
                 or str(continuation_turn["current_context_binding_revision_id"])
                 != candidate.continuation_context_binding_revision_id
                 or self._permission_from_row(continuation_turn) != expected_permission
-                or str(continuation_revision["turn_id"])
-                != candidate.continuation_turn_id
-                or int(continuation_revision["revision_ordinal"]) != 0
-                or str(continuation_revision["base_kind"]) != "FULL_HISTORY"
-                or int(continuation_revision["source_through_sequence"])
-                != int(continuation["entry_sequence"]) - 1
+                or not _RepositoryKernel._initial_context_binding_revision_matches(
+                    connection,
+                    row=continuation_revision,
+                    session_id=candidate.session_id,
+                    turn_id=candidate.continuation_turn_id,
+                    revision_id=candidate.continuation_context_binding_revision_id,
+                    initial_entry_sequence=int(continuation["entry_sequence"]),
+                    scope_kind=ConversationScopeKind.ROOT,
+                    scope_subagent_task_id=None,
+                )
             ):
                 raise ConversationKernelConflict(
                     "Plan continuation winner identity conflicts"
@@ -2749,19 +2748,14 @@ class _PlanOperations:
                 *_RepositoryKernel._permission_columns(permission),
             ),
         )
-        connection.execute(
-            """
-            INSERT INTO pulsara_v3.turn_context_binding_revisions (
-                id, session_id, turn_id, revision_ordinal,
-                base_kind, source_through_sequence
-            ) VALUES (%s, %s, %s, 0, 'FULL_HISTORY', %s)
-            """,
-            (
-                context_binding_revision_id,
-                session_id,
-                turn_id,
-                entry_sequence - 1,
-            ),
+        _RepositoryKernel._insert_initial_context_binding_revision(
+            connection,
+            session_id=session_id,
+            turn_id=turn_id,
+            revision_id=context_binding_revision_id,
+            initial_entry_sequence=entry_sequence,
+            scope_kind=ConversationScopeKind.ROOT,
+            scope_subagent_task_id=None,
         )
         _RepositoryKernel._insert_entry(
             connection,

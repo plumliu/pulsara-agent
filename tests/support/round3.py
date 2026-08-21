@@ -47,6 +47,7 @@ from pulsara_agent.conversation_kernel.capability_composition import (
 )
 from pulsara_agent.conversation_kernel.mcp.contracts import build_catalog_snapshot
 from pulsara_agent.conversation_kernel.input_continuity import (
+    FrozenProviderInputEpochView,
     ProcessLocalProviderInputInstallAuthority,
 )
 from pulsara_agent.conversation_kernel.memory.contracts import (
@@ -143,6 +144,15 @@ class ScriptedKernelModel:
     def bind_tool_surface(self, **kwargs):
         return self._preparer.bind_tool_surface(**kwargs)
 
+    def bind_semantic_tool_surface(self, **kwargs):
+        return self._preparer.bind_semantic_tool_surface(**kwargs)
+
+    def resolve_compaction_summary_call(self, **kwargs):
+        return self._preparer.resolve_compaction_summary_call(**kwargs)
+
+    def replay_target_for_resolved_call(self, call):
+        return self._preparer.replay_target_for_resolved_call(call)
+
     def prepare_call(
         self, request: KernelModelPreparationRequest
     ) -> PreparedKernelModelCall:
@@ -204,6 +214,15 @@ class CallbackScriptedKernelModel:
 
     def bind_tool_surface(self, **kwargs):
         return self._preparer.bind_tool_surface(**kwargs)
+
+    def bind_semantic_tool_surface(self, **kwargs):
+        return self._preparer.bind_semantic_tool_surface(**kwargs)
+
+    def resolve_compaction_summary_call(self, **kwargs):
+        return self._preparer.resolve_compaction_summary_call(**kwargs)
+
+    def replay_target_for_resolved_call(self, call):
+        return self._preparer.replay_target_for_resolved_call(call)
 
     def prepare_call(
         self, request: KernelModelPreparationRequest
@@ -444,7 +463,7 @@ class StaticContextSourceCollector:
         candidates: tuple[ContextSourceCandidate, ...] = (
             _candidate(
                 kind=ContextSourceKind.BASE_SYSTEM,
-                version="pulsara.base-system.prefix-continuity.v6-agent-skills",
+                version="pulsara.base-system.prefix-continuity.v7-compaction",
                 channel=ContextChannel.SYSTEM,
                 trust=ContextTrustClass.ROOT_INSTRUCTION,
                 budget=ContextBudgetClass.MUST_KEEP,
@@ -581,6 +600,12 @@ class StaticContextSourceCollector:
             ContextSourceKind.MEMORY_RECALL: (
                 ContextSourceAbsenceKind.NOT_APPLICABLE
             ),
+            ContextSourceKind.COMPACTION_RUNTIME_HANDOFF: (
+                ContextSourceAbsenceKind.NOT_APPLICABLE
+            ),
+            ContextSourceKind.RETAINED_SKILL_CONTEXT: (
+                ContextSourceAbsenceKind.NOT_APPLICABLE
+            ),
         }
         absent = tuple(
             _absent_source(kind, absence)
@@ -664,6 +689,24 @@ class StaticContextSourceCollector:
             registry,
             collection,
             frozen.absent_facts,
+        )
+
+    def freeze_compaction_active_skill_source(
+        self,
+        predecessor_epoch: FrozenProviderInputEpochView | None,
+    ) -> ContextSourceAbsentFact:
+        """Static fixtures never synthesize inherited active Skill bodies."""
+
+        if predecessor_epoch is not None and any(
+            head.source_kind is ContextSourceKind.ACTIVE_SKILL
+            for head in predecessor_epoch.source_heads
+        ):
+            raise ValueError(
+                "static source collector cannot inherit an installed active Skill"
+            )
+        return _absent_source(
+            ContextSourceKind.ACTIVE_SKILL,
+            ContextSourceAbsenceKind.NOT_APPLICABLE,
         )
 
 
@@ -992,6 +1035,9 @@ class StructuredToolPort:
         if not isinstance(borrow, ProcessLocalToolSurfaceBorrow):
             raise TypeError("test provider-input install borrow is invalid")
         self.validate_tool_surface_borrow(borrow, borrow.prepared)
+
+    async def freeze_compaction_runtime_handoff(self, **_kwargs: object):
+        return None
 
     async def authorize(self, **kwargs: object):
         kwargs.pop("surface_borrow")

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from time import monotonic
 from uuid import uuid4
 
@@ -8,7 +8,16 @@ import pytest
 
 from pulsara_agent.conversation_kernel.contracts import (
     InlineContent,
-    JobSafetyClass,
+)
+from pulsara_agent.conversation_kernel.compaction.contracts import (
+    CompactionCanonicalAdoptionFactoryInput,
+    CompactionCanonicalWritePreconditions,
+    CompactionScope,
+    CompactionTargetBranch,
+    ExpectedCompactionPredecessorRevision,
+    build_prepared_compaction_canonical_adoption,
+    canonical_compaction_range_digest,
+    freeze_compaction_canonical_range,
 )
 from pulsara_agent.conversation_kernel.reader import (
     CanonicalProviderContinuityError,
@@ -38,7 +47,10 @@ from pulsara_agent.conversation_kernel.safe_point import (
     ExternalSourceNotAtSafePoint,
     ProviderSafePointCoordinator,
 )
-from pulsara_agent.model_input.contracts import CanonicalInputOriginKind
+from pulsara_agent.model_input.contracts import (
+    CanonicalInputOriginKind,
+    ModelInputScopeKind,
+)
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 from pulsara_agent.primitives.context import freeze_json
 from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
@@ -685,22 +697,92 @@ def test_mid_turn_snapshot_revision_keeps_current_user_as_exact_delta(
     current_turn = _start_turn(repository, lease, b"current question")
     safe_point = ProviderSafePointCoordinator(repository=repository, guard=lease.guard)
     with safe_point.exclusive_safe_mutation():
-        ordinal = repository.adopt_context_snapshot(
+        compaction_cut = repository.prepare_compaction_input_cut(
             lease.guard,
             turn_id=current_turn,
-            snapshot_id=_id("snapshot"),
-            context_binding_revision_id=_id("revision"),
-            source_through_sequence=first_answer.entry_sequence,
-            source_digest="sha256:" + "1" * 64,
-            compiler_contract="compiler.v1",
-            prompt_contract="prompt.v1",
-            model_contract="model.v1",
-            content=InlineContent.from_bytes(b"summary of old history"),
-            occurred_at=datetime.now(timezone.utc),
-            actor_id="compactor",
+            allow_terminal=False,
             deadline_monotonic=monotonic() + 30,
         )
-    assert ordinal == 1
+        compaction_read = CanonicalProviderInputReader(
+            provider
+        ).read_frozen_compaction_cut(
+            compaction_cut,
+            deadline_monotonic=monotonic() + 30,
+        )
+        scope = CompactionScope(
+            session_id=lease.guard.session_id,
+            workspace_id=repository.read_session_workspace_id(
+                lease.guard,
+                deadline_monotonic=monotonic() + 30,
+            ),
+            turn_id=current_turn,
+            scope_kind=ModelInputScopeKind.ROOT,
+            scope_subagent_task_id=None,
+        )
+        source_range = freeze_compaction_canonical_range(
+            scope=scope,
+            effective_materialization_lineage_floor=(
+                compaction_read.lineage_base.effective_materialization_lineage_floor
+            ),
+            source_through_sequence=first_answer.entry_sequence,
+            ordered_items=compaction_read.safe_head_range.ordered_items,
+            closures=compaction_read.safe_head_range.closures,
+            late_outcomes=compaction_read.safe_head_range.late_outcomes,
+        )
+        adoption = build_prepared_compaction_canonical_adoption(
+            CompactionCanonicalAdoptionFactoryInput(
+                scope=scope,
+                target_branch=CompactionTargetBranch.ACTIVE_INSTALLATION,
+                expected_turn_status="RUNNING",
+                predecessor=ExpectedCompactionPredecessorRevision(
+                    binding_revision_id=(
+                        compaction_read.lineage_base.binding_revision_id
+                    ),
+                    revision_ordinal=(
+                        compaction_read.lineage_base.binding_revision_ordinal
+                    ),
+                    base_kind=(
+                        "FULL_HISTORY"
+                        if compaction_read.lineage_base.snapshot_id is None
+                        else "SNAPSHOT"
+                    ),
+                    context_snapshot_id=compaction_read.lineage_base.snapshot_id,
+                    source_through_sequence=(
+                        compaction_read.lineage_base.persisted_revision_genesis_marker
+                    ),
+                ),
+                snapshot_id=_id("snapshot"),
+                binding_revision_id=_id("revision"),
+                event_id=_id("compaction-event"),
+                source_through_sequence=first_answer.entry_sequence,
+                source_digest=canonical_compaction_range_digest(
+                    compaction_read.lineage_base,
+                    source_range,
+                ),
+                snapshot_content=InlineContent.from_bytes(
+                    b"summary of old history"
+                ),
+                compiler_contract="compiler.v1",
+                prompt_contract="prompt.v1",
+                model_contract="model.v1",
+                occurred_at=datetime.now(timezone.utc),
+                actor_id="compactor",
+            )
+        )
+        winner = repository.adopt_context_snapshot(
+            lease.guard,
+            candidate=adoption,
+            preconditions=CompactionCanonicalWritePreconditions(
+                scope=scope,
+                expected_turn_status="RUNNING",
+                expected_safe_head=(
+                    compaction_read.safe_head_range.source_through_sequence
+                ),
+                provider_safe=True,
+            ),
+            deadline_monotonic=monotonic() + 30,
+        )
+    assert winner.revision_ordinal == 1
     prepared = safe_point.freeze_provider_input(
         turn_id=current_turn, deadline_monotonic=monotonic() + 30
     )
@@ -898,102 +980,6 @@ def test_subagent_result_acceptance_linearizes_at_provider_safe_point(
             ).fetchone()[0]
             == 1
         )
-
-
-def test_job_result_acceptance_is_explicit_idempotent_and_safe_point_bound(
-    stage2_migrated_postgres_database,
-) -> None:
-    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
-    repository = ConversationKernelRepository(provider)
-    lease = repository.acquire_host_writer(
-        session_id=_id("session"),
-        workspace_id=_id("workspace"),
-        writer_owner_id=_id("host"),
-        lease_seconds=30,
-        deadline_monotonic=monotonic() + 30,
-    )
-    root_turn = _start_turn(repository, lease, b"wait for durable work")
-    job_id = _id("job")
-    repository.enqueue_job(
-        lease.guard,
-        job_id=job_id,
-        handler_type="BACKGROUND_COMPACTION",
-        intent_schema_version="memory_governance.v1",
-        intent_payload={"candidate_id": _id("candidate")},
-        automatic_intent_key=None,
-        safety_class=JobSafetyClass.RETRY_SAFE,
-        retry_policy_id="bounded-exponential",
-        retry_policy_version=1,
-        maximum_attempts=3,
-        attempt_timeout_ms=45_000,
-        provider_input_token_limit_per_attempt=32_000,
-        provider_output_token_limit_per_attempt=2_048,
-        next_eligible_at=datetime.now(timezone.utc) - timedelta(seconds=1),
-        occurred_at=datetime.now(timezone.utc),
-        deadline_monotonic=monotonic() + 30,
-    )
-    attempt = repository.claim_due_job(
-        handler_type="BACKGROUND_COMPACTION",
-        claim_owner_id=_id("worker"),
-        lease_seconds=15,
-        deadline_monotonic=monotonic() + 30,
-    )
-    assert attempt is not None and attempt.guard.job_id == job_id
-    repository.settle_job_attempt(
-        attempt.guard,
-        terminal_status="SUCCEEDED",
-        result_payload={"answer": "durable job result"},
-        error_code=None,
-        retryable=False,
-        occurred_at=datetime.now(timezone.utc),
-        deadline_monotonic=monotonic() + 30,
-    )
-
-    safe_point = ProviderSafePointCoordinator(repository=repository, guard=lease.guard)
-    frozen = safe_point.freeze_provider_input(
-        turn_id=root_turn, deadline_monotonic=monotonic() + 30
-    )
-    command_id = _id("command")
-    with pytest.raises(ExternalSourceNotAtSafePoint):
-        safe_point.accept_job_result(
-            turn_id=root_turn,
-            job_id=job_id,
-            command_id=command_id,
-            actor_id="host:test",
-            deadline_monotonic=monotonic() + 30,
-        )
-    frozen.close()
-    accepted = safe_point.accept_job_result(
-        turn_id=root_turn,
-        job_id=job_id,
-        command_id=command_id,
-        actor_id="host:test",
-        deadline_monotonic=monotonic() + 30,
-    )
-    assert accepted is not None
-    assert (
-        safe_point.accept_job_result(
-            turn_id=root_turn,
-            job_id=job_id,
-            command_id=command_id,
-            actor_id="host:test",
-            deadline_monotonic=monotonic() + 30,
-        )
-        == accepted
-    )
-    next_input = safe_point.freeze_provider_input(
-        turn_id=root_turn, deadline_monotonic=monotonic() + 30
-    )
-    try:
-        materialized = CanonicalProviderInputReader(provider).read_frozen_snapshot(
-            next_input.cut, deadline_monotonic=monotonic() + 30
-        )
-        assert materialized.items[-1].text == '{"answer":"durable job result"}'
-        assert (
-            materialized.items[-1].input_origin is CanonicalInputOriginKind.JOB_RESULT
-        )
-    finally:
-        next_input.close()
 
 
 def test_inspector_reads_canonical_rows_and_selective_events_from_one_kernel(

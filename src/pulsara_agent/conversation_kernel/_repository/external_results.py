@@ -4,18 +4,28 @@ from __future__ import annotations
 
 from datetime import datetime
 from hashlib import sha256
-import json
+
 from psycopg import Connection
-from pulsara_agent.conversation_kernel.contracts import BlobContent, CanonicalContent, ConversationScopeKind, EntryKind, HostWriterGuard, InlineContent, canonical_digest
+
+from pulsara_agent.conversation_kernel.contracts import (
+    ConversationScopeKind,
+    EntryKind,
+    HostWriterGuard,
+    canonical_digest,
+)
+from pulsara_agent.conversation_kernel.vocabulary import (
+    CommittedEventType,
+    SubjectSlot,
+)
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.primitives.run_permission import RunPermissionAdmissionSource
-from pulsara_agent.conversation_kernel.vocabulary import CommittedEventType, SubjectSlot
 
 from .contracts import (
     AcceptedEntry,
     ConversationKernelConflict,
     _stable_identity,
 )
+
 
 class _ExternalResultOperations:
     def accept_subagent_result_into_root(
@@ -179,180 +189,6 @@ class _ExternalResultOperations:
             )[0]
             return AcceptedEntry(entry_id, turn_id, sequence, event.event_sequence)
 
-    def accept_job_result_into_root(
-        self,
-        guard: HostWriterGuard,
-        *,
-        turn_id: str,
-        new_context_binding_revision_id: str | None = None,
-        requested_permission_mode: PermissionMode | None = None,
-        job_id: str,
-        command_id: str,
-        occurred_at: datetime,
-        actor_id: str,
-        deadline_monotonic: float,
-    ) -> AcceptedEntry | None:
-        """Accept one immutable SUCCEEDED job result into an explicit ROOT target."""
-
-        if not job_id or not command_id:
-            raise ValueError("job result acceptance identity is empty")
-        with self._writer_transaction(
-            guard, deadline_monotonic=deadline_monotonic
-        ) as connection:
-            entry_id = "entry:" + sha256(command_id.encode()).hexdigest()
-            job = connection.execute(
-                """
-                SELECT j.workspace_id, j.status, j.result_blob_id,
-                       a.result_payload, accepted.id AS accepted_entry_id
-                FROM pulsara_v3.durable_jobs AS j
-                JOIN pulsara_v3.durable_job_attempts AS a ON a.job_id = j.id
-                LEFT JOIN pulsara_v3.transcript_entries AS accepted
-                  ON accepted.session_id = j.origin_session_id
-                 AND accepted.source_job_id = j.id
-                WHERE j.origin_session_id = %s AND j.id = %s
-                  AND j.status = 'SUCCEEDED'
-                  AND a.terminal_status = 'SUCCEEDED'
-                ORDER BY a.attempt_ordinal DESC
-                LIMIT 1
-                FOR UPDATE OF j, a
-                """,
-                (guard.session_id, job_id),
-            ).fetchone()
-            if job is None:
-                return None
-            if job["result_blob_id"] is not None:
-                blob = connection.execute(
-                    """
-                    SELECT id, logical_digest, logical_size, media_type, codec
-                    FROM pulsara_v3.blobs
-                    WHERE id = %s AND workspace_id = %s
-                    """,
-                    (job["result_blob_id"], job["workspace_id"]),
-                ).fetchone()
-                if blob is None:
-                    raise ConversationKernelConflict("job result blob is absent")
-                content: CanonicalContent = BlobContent(
-                    blob_id=str(blob["id"]),
-                    digest=str(blob["logical_digest"]),
-                    size=int(blob["logical_size"]),
-                    media_type=str(blob["media_type"]),
-                    codec=str(blob["codec"]),
-                )
-            else:
-                encoded = json.dumps(
-                    dict(job["result_payload"] or {}),
-                    ensure_ascii=False,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                ).encode("utf-8")
-                content = InlineContent.from_bytes(
-                    encoded, media_type="application/json", codec="utf-8"
-                )
-            digest = canonical_digest(
-                "pulsara:accept-job-result:v1",
-                {
-                    "turn_id": turn_id,
-                    "new_context_binding_revision_id": (
-                        new_context_binding_revision_id
-                    ),
-                    "requested_permission_mode": (
-                        None
-                        if requested_permission_mode is None
-                        else requested_permission_mode.value
-                    ),
-                    "source_job_id": job_id,
-                    "content_digest": content.digest,
-                },
-            )
-            compatible = connection.execute(
-                """
-                SELECT c.command_kind, c.semantic_digest, c.target_entry_id,
-                       e.turn_id, e.entry_sequence, e.source_job_id,
-                       a.event_sequence
-                FROM pulsara_v3.session_commands AS c
-                LEFT JOIN pulsara_v3.transcript_entries AS e
-                  ON e.session_id = c.session_id AND e.id = c.target_entry_id
-                LEFT JOIN pulsara_v3.agent_events AS a
-                  ON a.session_id = e.session_id
-                 AND a.subject_entry_id = e.id
-                 AND a.event_type = 'UserMessageAccepted'
-                WHERE c.session_id = %s AND c.command_id = %s
-                """,
-                (guard.session_id, command_id),
-            ).fetchone()
-            if compatible is not None:
-                if (
-                    compatible["command_kind"] != "ACCEPT_JOB_RESULT"
-                    or compatible["semantic_digest"] != digest
-                    or compatible["target_entry_id"] != entry_id
-                    or compatible["turn_id"] != turn_id
-                    or compatible["source_job_id"] != job_id
-                    or compatible["event_sequence"] is None
-                ):
-                    raise ConversationKernelConflict(
-                        "job result acceptance command conflict"
-                    )
-                return AcceptedEntry(
-                    entry_id,
-                    turn_id,
-                    int(compatible["entry_sequence"]),
-                    int(compatible["event_sequence"]),
-                )
-            if job["accepted_entry_id"] is not None:
-                return None
-            sequence = self._prepare_external_result_target(
-                connection,
-                guard,
-                turn_id=turn_id,
-                entry_id=entry_id,
-                new_context_binding_revision_id=new_context_binding_revision_id,
-                source_workspace_id=str(job["workspace_id"]),
-                requested_permission_mode=requested_permission_mode,
-            )
-            if sequence is None:
-                return None
-            self._insert_entry(
-                connection,
-                session_id=guard.session_id,
-                workspace_id=str(job["workspace_id"]),
-                turn_id=turn_id,
-                entry_id=entry_id,
-                entry_sequence=sequence,
-                entry_kind=EntryKind.USER_MESSAGE,
-                scope_kind=ConversationScopeKind.ROOT,
-                scope_task_id=None,
-                content=content,
-                source_job_id=job_id,
-            )
-            connection.execute(
-                """
-                INSERT INTO pulsara_v3.session_commands (
-                    session_id, command_id, command_kind,
-                    request_schema_version, semantic_digest,
-                    target_kind, target_entry_id
-                ) VALUES (%s, %s, 'ACCEPT_JOB_RESULT',
-                          'accept_job_result.v1', %s, 'ENTRY', %s)
-                """,
-                (guard.session_id, command_id, digest, entry_id),
-            )
-            event = self._append_events(
-                connection,
-                guard,
-                workspace_id=str(job["workspace_id"]),
-                drafts=(
-                    self._event(
-                        CommittedEventType.USER_MESSAGE_ACCEPTED,
-                        SubjectSlot.ENTRY,
-                        entry_id,
-                        occurred_at=occurred_at,
-                        actor_kind="job",
-                        actor_id=actor_id,
-                        payload={"source_job_id": job_id},
-                    ),
-                ),
-            )[0]
-            return AcceptedEntry(entry_id, turn_id, sequence, event.event_sequence)
-
     def _prepare_external_result_target(
         self,
         connection: Connection,
@@ -443,18 +279,13 @@ class _ExternalResultOperations:
                 *self._permission_columns(permission),
             ),
         )
-        connection.execute(
-            """
-            INSERT INTO pulsara_v3.turn_context_binding_revisions (
-                id, session_id, turn_id, revision_ordinal,
-                base_kind, source_through_sequence
-            ) VALUES (%s, %s, %s, 0, 'FULL_HISTORY', %s)
-            """,
-            (
-                new_context_binding_revision_id,
-                guard.session_id,
-                turn_id,
-                sequence - 1,
-            ),
+        self._insert_initial_context_binding_revision(
+            connection,
+            session_id=guard.session_id,
+            turn_id=turn_id,
+            revision_id=new_context_binding_revision_id,
+            initial_entry_sequence=sequence,
+            scope_kind=ConversationScopeKind.ROOT,
+            scope_subagent_task_id=None,
         )
         return sequence

@@ -10,11 +10,14 @@ import json
 from types import MappingProxyType
 from typing import Mapping
 from uuid import uuid4
-from pulsara_agent.conversation_kernel.contracts import BlobContent, CanonicalContent, CommittedEventDraft, CommittedEventSubject, EntryKind, HostWriterGuard, InlineContent, JobAttemptClaimGuard, JobSafetyClass, canonical_digest
+from pulsara_agent.conversation_kernel.contracts import BlobContent, CanonicalContent, CommittedEventDraft, CommittedEventSubject, EntryKind, HostWriterGuard, InlineContent, canonical_digest
 from pulsara_agent.conversation_kernel.memory.contracts import (
     PreparedMemoryCandidateAcceptance,
 )
 from pulsara_agent.conversation_kernel.limits import STAGE2_LIMITS
+from pulsara_agent.conversation_kernel.repository_errors import (
+    ConversationKernelConflict,
+)
 from pulsara_agent.ports.artifact import ToolOutputArtifactDisposition, ToolOutputArtifactUnavailabilityReason, ToolResultDisplayKind
 from pulsara_agent.ports.tool_execution import ToolOutputSourceCoverage, ToolOutputSourceCoverageReason
 from pulsara_agent.primitives.context import (
@@ -56,10 +59,6 @@ MAXIMUM_PLAN_DRAFT_REVISIONS_PER_WORKFLOW = 8
 MAXIMUM_PLAN_INTERACTIONS_PER_WORKFLOW = 64
 
 
-class ConversationKernelConflict(RuntimeError):
-    """A stable identity already names a different semantic fact."""
-
-
 class PromptIngressRejected(ConversationKernelConflict):
     def __init__(self, reason: PromptIngressWriteRejection) -> None:
         self.reason = reason
@@ -78,18 +77,6 @@ class PlanDraftIdentityConflict(ConversationKernelConflict):
 
 class StaleHostWriter(RuntimeError):
     """The supplied Host generation/owner no longer holds the session lease."""
-
-
-class StaleJobClaim(RuntimeError):
-    """The supplied job-attempt claim is absent, expired, or no longer active."""
-
-
-class JobAttemptTerminalized(RuntimeError):
-    """The requested physical admission was rejected and durably terminalized."""
-
-
-class JobCancellationRequested(RuntimeError):
-    """The aggregate accepted cancellation before another physical step."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -815,30 +802,6 @@ class _EligiblePlanHandoff:
     workflow_id: str
     interaction_id: str | None
     kind: PlanHandoffKind
-
-
-@dataclass(frozen=True, slots=True)
-class AcceptedJobAttempt:
-    guard: JobAttemptClaimGuard
-    attempt_ordinal: int
-    deadline_at: datetime
-    handler_type: str = ""
-    safety_class: JobSafetyClass = JobSafetyClass.RETRY_SAFE
-    intent_payload: Mapping[str, object] | None = None
-    provider_input_token_limit: int | None = None
-    provider_output_token_limit: int | None = None
-    reclaimed_after_expiry: bool = False
-    cancel_requested: bool = False
-
-
-@dataclass(frozen=True, slots=True)
-class AcceptedJobSettlement:
-    job_id: str
-    attempt_id: str
-    attempt_status: str
-    aggregate_status: str
-    retry_scheduled: bool
-    next_eligible_at: datetime | None
 
 
 def _utcnow() -> datetime:

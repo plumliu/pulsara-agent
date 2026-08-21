@@ -1406,6 +1406,120 @@ def test_responses_terminal_may_elide_settled_operational_item_fields() -> None:
     ) == (streamed,)
 
 
+def test_responses_terminal_may_elide_closed_final_answer_phase() -> None:
+    accumulator = ResponsesCompletionAccumulator(builder=ProviderLiveItemBuilder())
+    streamed = {
+        "type": "message",
+        "id": "message:bob",
+        "status": "completed",
+        "role": "assistant",
+        "phase": "final_answer",
+        "content": [
+            {
+                "type": "output_text",
+                "text": "done",
+                "annotations": [],
+                "logprobs": [],
+            }
+        ],
+    }
+    accumulator.apply(
+        {
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "item": streamed,
+        }
+    )
+    accumulator.apply(
+        _completed_response(
+            [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "done"}],
+                }
+            ]
+        )
+    )
+
+    terminal = accumulator.finish()
+    assert isinstance(terminal, ProviderAdapterTerminal)
+    assert terminal.completed_replay_payload is not None
+    assert tuple(
+        thaw_json(item) for item in terminal.completed_replay_payload.ordered_items
+    ) == (streamed,)
+
+
+def test_responses_terminal_cannot_elide_nonempty_message_annotations() -> None:
+    accumulator = ResponsesCompletionAccumulator(builder=ProviderLiveItemBuilder())
+    streamed = {
+        "type": "message",
+        "id": "message:bob",
+        "status": "completed",
+        "role": "assistant",
+        "phase": "final_answer",
+        "content": [
+            {
+                "type": "output_text",
+                "text": "done",
+                "annotations": [{"type": "opaque-citation"}],
+                "logprobs": [],
+            }
+        ],
+    }
+    accumulator.apply(
+        {
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "item": streamed,
+        }
+    )
+    with pytest.raises(LLMTransportContractError, match="differs from item.done"):
+        accumulator.apply(
+            _completed_response(
+                [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "done"}],
+                    }
+                ]
+            )
+        )
+
+
+def test_responses_terminal_phase_conflict_still_fails_closed() -> None:
+    accumulator = ResponsesCompletionAccumulator(builder=ProviderLiveItemBuilder())
+    streamed = {
+        "type": "message",
+        "id": "message:bob",
+        "status": "completed",
+        "role": "assistant",
+        "phase": "final_answer",
+        "content": [{"type": "output_text", "text": "done"}],
+    }
+    accumulator.apply(
+        {
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "item": streamed,
+        }
+    )
+    with pytest.raises(LLMTransportContractError, match="differs from item.done"):
+        accumulator.apply(
+            _completed_response(
+                [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "phase": "commentary",
+                        "content": [{"type": "output_text", "text": "done"}],
+                    }
+                ]
+            )
+        )
+
+
 @pytest.mark.parametrize(
     "terminal_item",
     (

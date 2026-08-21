@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from enum import StrEnum
-from typing import Literal, Protocol
+from typing import Literal, Mapping, Protocol
 
 from pulsara_agent.llm.estimator import TokenEstimate
 from pulsara_agent.llm.input import LLMMessage, MessageRole
@@ -79,7 +79,6 @@ class CanonicalInputOriginKind(StrEnum):
     HUMAN_STEER = "HUMAN_STEER"
     SUBAGENT_OBJECTIVE = "SUBAGENT_OBJECTIVE"
     SUBAGENT_RESULT = "SUBAGENT_RESULT"
-    JOB_RESULT = "JOB_RESULT"
     PLAN_CONTINUATION = "PLAN_CONTINUATION"
 
 
@@ -97,6 +96,8 @@ class ContextSourceKind(StrEnum):
     TOOL_OBSERVATION_FRESHNESS = "TOOL_OBSERVATION_FRESHNESS"
     MEMORY_RESPONSE_PREFERENCE_HEAD = "MEMORY_RESPONSE_PREFERENCE_HEAD"
     MEMORY_RECALL = "MEMORY_RECALL"
+    COMPACTION_RUNTIME_HANDOFF = "COMPACTION_RUNTIME_HANDOFF"
+    RETAINED_SKILL_CONTEXT = "RETAINED_SKILL_CONTEXT"
 
 
 class ContextChannel(StrEnum):
@@ -729,6 +730,7 @@ class FrozenProviderInputItem:
     input_origin: CanonicalInputOriginKind | None = None
     tool_calls: tuple[ProviderToolCall, ...] = field(default=(), repr=False)
     tool_call_id: str | None = None
+    tool_request_entry_id: str | None = None
     tool_result_context: ProviderToolResultContextMetadata | None = field(
         default=None, repr=False
     )
@@ -796,6 +798,8 @@ class FrozenProviderInputItem:
         )
         if call_result_kind != (self.tool_call_id is not None):
             raise ValueError("provider tool-result call identity union is invalid")
+        if call_result_kind != (self.tool_request_entry_id is not None):
+            raise ValueError("provider tool-result request identity union is invalid")
         if (
             self.item_kind is FrozenProviderInputItemKind.TOOL_RESULT
             and self.tool_result_body_text != self.text
@@ -1592,61 +1596,74 @@ def canonical_compile_snapshot_fingerprint(
 
 def provider_input_item_fingerprint(item: FrozenProviderInputItem) -> str:
     return context_fingerprint(
-        "frozen-provider-input-item:v2-tool-result-delivery",
-        {
-            "kind": item.item_kind.value,
-            "entry_id": item.source_entry_id,
-            "sequence": item.source_entry_sequence,
-            "turn_id": item.source_turn_id,
-            "input_origin": (
-                None if item.input_origin is None else item.input_origin.value
-            ),
-            "text": item.text,
-            "calls": tuple(
-                (call.tool_call_id, call.tool_name, call.arguments)
-                for call in item.tool_calls
-            ),
-            "tool_call_id": item.tool_call_id,
-            "tool_result_context": (
-                None
-                if item.tool_result_context is None
-                else {
-                    "result_state": item.tool_result_context.result_state,
-                    "display_kind": item.tool_result_context.display_kind.value,
-                    "artifact_disposition": item.tool_result_context.artifact_disposition.value,
-                    "artifact_id": item.tool_result_context.artifact_id,
-                    "source_coverage": item.tool_result_context.source_coverage.value,
-                    "source_coverage_reason": (
-                        None
-                        if item.tool_result_context.source_coverage_reason is None
-                        else item.tool_result_context.source_coverage_reason.value
-                    ),
-                    "artifact_unavailability_reason": (
-                        None
-                        if item.tool_result_context.artifact_unavailability_reason
-                        is None
-                        else item.tool_result_context.artifact_unavailability_reason.value
-                    ),
-                    "model_visible_memory_fact_ids": (
-                        item.tool_result_context.model_visible_memory_fact_ids
-                    ),
-                    "timing": item.tool_result_context.timing.fact_fingerprint,
-                }
-            ),
-            "tool_result_body_text": item.tool_result_body_text,
-            "tool_result_delivery": {
-                "requirement": item.tool_result_delivery.requirement.value,
-                "reason": (
-                    None
-                    if item.tool_result_delivery.reason is None
-                    else item.tool_result_delivery.reason.value
-                ),
-                "classifier_contract": (
-                    item.tool_result_delivery.classifier_contract
-                ),
-            },
-        },
+        "frozen-provider-input-item:v3-tool-request-owner",
+        provider_input_item_leaf(item),
     )
+
+
+def provider_input_item_leaf(item: FrozenProviderInputItem) -> Mapping[str, object]:
+    """Unique stable semantic framing for one canonical provider item."""
+
+    return {
+        "kind": item.item_kind.value,
+        "entry_id": item.source_entry_id,
+        "sequence": item.source_entry_sequence,
+        "turn_id": item.source_turn_id,
+        "input_origin": (
+            None if item.input_origin is None else item.input_origin.value
+        ),
+        "text": item.text,
+        "calls": tuple(
+            (call.tool_call_id, call.tool_name, call.arguments)
+            for call in item.tool_calls
+        ),
+        "tool_call_id": item.tool_call_id,
+        "tool_request_entry_id": item.tool_request_entry_id,
+        "tool_result_context": (
+            None
+            if item.tool_result_context is None
+            else {
+                "result_state": item.tool_result_context.result_state,
+                "display_kind": item.tool_result_context.display_kind.value,
+                "artifact_disposition": (
+                    item.tool_result_context.artifact_disposition.value
+                ),
+                "artifact_id": item.tool_result_context.artifact_id,
+                "source_coverage": item.tool_result_context.source_coverage.value,
+                "source_coverage_reason": (
+                    None
+                    if item.tool_result_context.source_coverage_reason is None
+                    else item.tool_result_context.source_coverage_reason.value
+                ),
+                "artifact_unavailability_reason": (
+                    None
+                    if item.tool_result_context.artifact_unavailability_reason
+                    is None
+                    else item.tool_result_context.artifact_unavailability_reason.value
+                ),
+                "model_visible_memory_fact_ids": (
+                    item.tool_result_context.model_visible_memory_fact_ids
+                ),
+                "timing": item.tool_result_context.timing.fact_fingerprint,
+            }
+        ),
+        "tool_result_body_text": item.tool_result_body_text,
+        "tool_result_delivery": {
+            "requirement": item.tool_result_delivery.requirement.value,
+            "reason": (
+                None
+                if item.tool_result_delivery.reason is None
+                else item.tool_result_delivery.reason.value
+            ),
+            "classifier_contract": item.tool_result_delivery.classifier_contract,
+        },
+    }
+
+
+def provider_input_item_logical_utf8_bytes(item: FrozenProviderInputItem) -> int:
+    """Quote the complete canonical leaf without inventing another projection."""
+
+    return len(canonical_json_bytes(provider_input_item_leaf(item)))
 
 
 def compiled_tool_result_source_fingerprint(
@@ -1654,13 +1671,18 @@ def compiled_tool_result_source_fingerprint(
 ) -> str:
     """Stable join from a canonical ToolResult item to compiler decisions."""
 
-    if item.source_entry_id is None or item.tool_call_id is None:
+    if (
+        item.source_entry_id is None
+        or item.tool_call_id is None
+        or item.tool_request_entry_id is None
+    ):
         raise ValueError("compiled tool-result source lacks canonical identity")
     return context_fingerprint(
         "compiled-tool-result-source:v1",
         {
             "entry_id": item.source_entry_id,
             "sequence": item.source_entry_sequence,
+            "tool_request_entry_id": item.tool_request_entry_id,
             "tool_call_id": item.tool_call_id,
         },
     )
@@ -1680,26 +1702,38 @@ def canonical_model_input_snapshot_fingerprint(
             "identity": identity.identity_fingerprint,
             "items": tuple(provider_input_item_fingerprint(item) for item in items),
             "canonical_utf8_bytes": canonical_utf8_bytes,
-            "closures": tuple(
-                (
-                    item.assistant_entry_id,
-                    item.tool_call_id,
-                    item.closure_kind.value,
-                    item.target_provider_input_through_sequence,
-                )
-                for item in closures
-            ),
+            "closures": tuple(provider_tool_result_closure_leaf(item) for item in closures),
             "late_outcomes": tuple(
-                (
-                    item.assistant_entry_id,
-                    item.tool_call_id,
-                    item.result_entry_id,
-                    item.result_entry_sequence,
-                    item.result_state,
-                )
-                for item in late_outcomes
+                late_tool_outcome_observation_leaf(item) for item in late_outcomes
             ),
         },
+    )
+
+
+def provider_tool_result_closure_leaf(
+    item: ProviderToolResultClosure,
+) -> tuple[str, str, str, int]:
+    """Unique stable framing for one provider-visible closure leaf."""
+
+    return (
+        item.assistant_entry_id,
+        item.tool_call_id,
+        item.closure_kind.value,
+        item.target_provider_input_through_sequence,
+    )
+
+
+def late_tool_outcome_observation_leaf(
+    item: LateToolOutcomeObservation,
+) -> tuple[str, str, str, int, str]:
+    """Unique stable framing for one provider-visible late-outcome leaf."""
+
+    return (
+        item.assistant_entry_id,
+        item.tool_call_id,
+        item.result_entry_id,
+        item.result_entry_sequence,
+        item.result_state,
     )
 
 

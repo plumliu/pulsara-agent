@@ -8,7 +8,6 @@ from pathlib import Path
 
 import pytest
 
-from pulsara_agent.conversation_kernel.jobs import JOB_HANDLER_CATALOG
 from pulsara_agent.conversation_kernel.vocabulary import (
     APPEND_GUARDS,
     COMMITTED_EVENT_DESCRIPTORS,
@@ -29,6 +28,7 @@ from pulsara_agent.model_input.contracts import (
     StructuredModelInputCompileError,
     StructuredModelInputLimits,
     ToolResultProviderRenderMode,
+    compiled_tool_result_source_fingerprint,
 )
 from pulsara_agent.model_input.lowering import (
     LoweredCanonicalItem,
@@ -127,6 +127,9 @@ def test_round7_1_no_full_variant_reports_actual_first_mode() -> None:
     )
     compiled = StructuredModelInputCompiler().compile(request)
     decision = compiled.tool_result_decisions[0]
+    assert decision.source_entry_fingerprint == (
+        compiled_tool_result_source_fingerprint(item)
+    )
     assert decision.first_legal_mode is ToolResultProviderRenderMode.COMPACT
     assert decision.selected_mode is ToolResultProviderRenderMode.COMPACT
     assert decision.reason_code == "FULL_INELIGIBLE_RESULT_BOUND"
@@ -428,12 +431,11 @@ def test_round7_1_logical_quote_is_not_chat_or_responses_wire_bytes() -> None:
 
 
 def test_round7_1_architecture_and_oracle_guards() -> None:
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == 31
+    assert len(COMMITTED_EVENT_DESCRIPTORS) == 28
     assert len(LIVE_EVENT_TYPES) == 24
-    assert len(SUBJECT_SLOTS) == 13
-    assert len(APPEND_GUARDS) == 2
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 26
-    assert len(JOB_HANDLER_CATALOG) == 1
+    assert len(SUBJECT_SLOTS) == 11
+    assert len(APPEND_GUARDS) == 1
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 24
     assert TOOL_RESULT_LOGICAL_PROJECTION_CONTRACT.endswith(".v2")
 
     production = ROOT / "src/pulsara_agent"

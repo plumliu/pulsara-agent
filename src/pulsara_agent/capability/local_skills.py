@@ -763,6 +763,7 @@ def _parse_skill_document(
             manifest_semantic_fingerprint=semantic,
             root_kind=root.root_kind,
             authoring_diagnostic_codes=tuple(authoring),
+            raw_document=document,
         ),
         _bounded_diagnostics(diagnostics),
     )

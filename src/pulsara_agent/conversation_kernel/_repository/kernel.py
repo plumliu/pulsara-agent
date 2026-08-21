@@ -8,7 +8,7 @@ from typing import Callable, Mapping, Sequence
 from psycopg import Connection
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
-from pulsara_agent.conversation_kernel.contracts import AssistantBlockKind, CanonicalContent, CommittedEventDraft, CommittedEventSubject, ConversationScopeKind, EntryKind, HostWriterGuard, JobAttemptClaimGuard, StoredCommittedEvent
+from pulsara_agent.conversation_kernel.contracts import AssistantBlockKind, CanonicalContent, CommittedEventDraft, CommittedEventSubject, ConversationScopeKind, EntryKind, HostWriterGuard, StoredCommittedEvent
 from pulsara_agent.primitives.context import thaw_json
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.primitives.run_permission import FrozenRunPermissionSnapshot, RunPermissionAdmissionSource, RunPermissionOverlay, build_run_permission_snapshot
@@ -22,9 +22,7 @@ from .contracts import (
     AssistantTextBlock,
     AssistantToolCallBlock,
     ConversationKernelConflict,
-    JobCancellationRequested,
     StaleHostWriter,
-    StaleJobClaim,
     _content_columns,
     _id,
     _utcnow,
@@ -101,75 +99,6 @@ class _RepositoryKernel:
                     raise
                 try:
                     repository._require_writer(connection, guard, lock=True)
-                except BaseException as error:
-                    self._cm.__exit__(type(error), error, error.__traceback__)
-                    repository._finish_event_batch(committed=False)
-                    raise
-                self._connection = connection
-                return connection
-
-            def __exit__(self, exc_type, exc, tb):
-                try:
-                    result = self._cm.__exit__(exc_type, exc, tb)
-                except BaseException:
-                    repository._finish_event_batch(committed=False)
-                    raise
-                repository._finish_event_batch(committed=exc_type is None)
-                return result
-
-        return _Scope()
-
-    def _job_transaction(
-        self,
-        guard: JobAttemptClaimGuard,
-        *,
-        deadline_monotonic: float,
-        allow_cancel_requested: bool = False,
-    ):
-        repository = self
-
-        class _Scope:
-            def __enter__(self) -> Connection:
-                repository._begin_event_batch()
-                self._cm = repository._provider.connection(
-                    lane=PostgresConnectionLane.BACKGROUND_WORK,
-                    row_factory=dict_row,
-                    deadline_monotonic=deadline_monotonic,
-                )
-                try:
-                    connection = self._cm.__enter__()
-                except BaseException:
-                    repository._finish_event_batch(committed=False)
-                    raise
-                try:
-                    if guard.origin_session_id is not None:
-                        session = connection.execute(
-                            """
-                            SELECT id FROM pulsara_v3.sessions
-                            WHERE id = %s
-                            FOR UPDATE
-                            """,
-                            (guard.origin_session_id,),
-                        ).fetchone()
-                        if session is None:
-                            raise StaleJobClaim("job origin session is absent")
-                    repository._require_job_claim(connection, guard, lock=True)
-                    if not allow_cancel_requested:
-                        cancellation = connection.execute(
-                            """
-                            SELECT cancel_requested_at
-                            FROM pulsara_v3.durable_jobs
-                            WHERE id = %s
-                            """,
-                            (guard.job_id,),
-                        ).fetchone()
-                        if (
-                            cancellation is not None
-                            and cancellation["cancel_requested_at"] is not None
-                        ):
-                            raise JobCancellationRequested(
-                                "job cancellation was requested"
-                            )
                 except BaseException as error:
                     self._cm.__exit__(type(error), error, error.__traceback__)
                     repository._finish_event_batch(committed=False)
@@ -271,33 +200,6 @@ class _RepositoryKernel:
         ).fetchone()
         if row is None:
             raise StaleHostWriter("host writer generation is stale")
-        return row
-
-    @staticmethod
-    def _require_job_claim(
-        connection: Connection, guard: JobAttemptClaimGuard, *, lock: bool
-    ) -> Mapping[str, object]:
-        suffix = " FOR UPDATE" if lock else ""
-        row = connection.execute(
-            """
-            SELECT a.*, j.status AS job_status
-            FROM pulsara_v3.durable_job_attempts AS a
-            JOIN pulsara_v3.durable_jobs AS j ON j.id = a.job_id
-            WHERE a.id = %s AND a.job_id = %s
-              AND a.claim_generation = %s AND a.claim_owner_id = %s
-              AND a.lease_expires_at > clock_timestamp()
-              AND a.terminal_status IS NULL AND j.status = 'ACTIVE'
-            """
-            + suffix,
-            (
-                guard.attempt_id,
-                guard.job_id,
-                guard.claim_generation,
-                guard.claim_owner_id,
-            ),
-        ).fetchone()
-        if row is None:
-            raise StaleJobClaim("job attempt claim is stale")
         return row
 
     def _interrupt_prior_generation(
@@ -695,23 +597,16 @@ class _RepositoryKernel:
     def _append_events(
         self,
         connection: Connection,
-        guard: HostWriterGuard | JobAttemptClaimGuard,
+        guard: HostWriterGuard,
         *,
         workspace_id: str,
         drafts: Sequence[CommittedEventDraft],
     ) -> tuple[StoredCommittedEvent, ...]:
         if not drafts:
             return ()
-        if isinstance(guard, HostWriterGuard):
-            self._require_writer(connection, guard, lock=False)
-            session_id = guard.session_id
-            guard_kind = AppendGuardKind.HOST_WRITER
-        else:
-            self._require_job_claim(connection, guard, lock=False)
-            if guard.origin_session_id is None:
-                raise ValueError("global job cannot append a session occurrence")
-            session_id = guard.origin_session_id
-            guard_kind = AppendGuardKind.JOB_ATTEMPT_CLAIM
+        self._require_writer(connection, guard, lock=False)
+        session_id = guard.session_id
+        guard_kind = AppendGuardKind.HOST_WRITER
         for draft in drafts:
             descriptor = DESCRIPTOR_BY_TYPE[draft.event_type]
             if draft.subject.slot is not descriptor.subject_slot:
@@ -759,7 +654,7 @@ class _RepositoryKernel:
                 occurred_at, actor_kind, actor_id, sensitivity_class,
                 projection_profile, payload,
                 subject_turn_id, subject_entry_id, subject_tool_attempt_id,
-                subject_job_id, subject_job_attempt_id, subject_queue_item_id,
+                subject_queue_item_id,
                 subject_interaction_decision_id,
                 subject_context_binding_revision_id,
                 subject_subagent_task_id, subject_subagent_message_id,
@@ -768,8 +663,8 @@ class _RepositoryKernel:
             ) VALUES (
                 %s, %s, %s, %s, 'pulsara.core', %s, 1, 0,
                 %s, %s, %s, %s, %s, %s,
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                %s, %s
+                %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s
             )
             RETURNING accepted_at
             """,
@@ -785,9 +680,9 @@ class _RepositoryKernel:
                 draft.sensitivity_class,
                 draft.projection_profile,
                 Jsonb(dict(draft.payload)),
-                *ordered_slots[:11],
+                *ordered_slots[:9],
                 subagent_child_kind,
-                *ordered_slots[11:],
+                *ordered_slots[9:],
             ),
         ).fetchone()
         assert row is not None
@@ -917,7 +812,6 @@ class _RepositoryKernel:
         provider_wire_api: str | None = None,
         provider_replay_disposition: str | None = None,
         provider_replay_fragment_id: str | None = None,
-        source_job_id: str | None = None,
         source_subagent_result_id: str | None = None,
         source_plan_workflow_id: str | None = None,
         source_plan_interaction_id: str | None = None,
@@ -930,14 +824,13 @@ class _RepositoryKernel:
                 entry_kind, conversation_scope_kind, scope_subagent_task_id,
                 context_binding_revision_id, provider_input_through_sequence,
                 provider_wire_api, provider_replay_disposition,
-                provider_replay_fragment_id,
-                source_job_id, source_subagent_result_id,
+                provider_replay_fragment_id, source_subagent_result_id,
                 source_plan_workflow_id, source_plan_interaction_id,
                 source_plan_handoff_kind,
                 inline_content, blob_id, content_digest, content_size,
                 content_media_type, content_codec
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                      %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                      %s, %s, %s, %s, %s, %s, %s, %s, %s,
                       %s, %s, %s, %s)
             """,
             (
@@ -954,7 +847,6 @@ class _RepositoryKernel:
                 provider_wire_api,
                 provider_replay_disposition,
                 provider_replay_fragment_id,
-                source_job_id,
                 source_subagent_result_id,
                 source_plan_workflow_id,
                 source_plan_interaction_id,
@@ -1026,6 +918,127 @@ class _RepositoryKernel:
             ),
         )
 
+    @staticmethod
+    def _insert_initial_context_binding_revision(
+        connection: Connection,
+        *,
+        session_id: str,
+        turn_id: str,
+        revision_id: str,
+        initial_entry_sequence: int,
+        scope_kind: ConversationScopeKind,
+        scope_subagent_task_id: str | None,
+    ) -> None:
+        """Insert revision zero using the latest exact-scope snapshot, if any."""
+
+        predecessor = connection.execute(
+            """
+            SELECT r.base_kind, r.context_snapshot_id,
+                   r.source_through_sequence
+            FROM pulsara_v3.turns AS t
+            JOIN pulsara_v3.transcript_entries AS initial
+              ON initial.session_id = t.session_id
+             AND initial.id = t.initial_entry_id
+            JOIN pulsara_v3.turn_context_binding_revisions AS r
+              ON r.session_id = t.session_id
+             AND r.id = t.current_context_binding_revision_id
+            WHERE t.session_id = %s AND t.id <> %s
+              AND t.conversation_scope_kind = %s
+              AND t.scope_subagent_task_id IS NOT DISTINCT FROM %s
+            ORDER BY initial.entry_sequence DESC
+            LIMIT 1
+            """,
+            (session_id, turn_id, scope_kind.value, scope_subagent_task_id),
+        ).fetchone()
+        if predecessor is not None and str(predecessor["base_kind"]) == "SNAPSHOT":
+            base_kind = "SNAPSHOT"
+            snapshot_id = str(predecessor["context_snapshot_id"])
+            source_through_sequence = int(predecessor["source_through_sequence"])
+        else:
+            base_kind = "FULL_HISTORY"
+            snapshot_id = None
+            source_through_sequence = initial_entry_sequence - 1
+        connection.execute(
+            """
+            INSERT INTO pulsara_v3.turn_context_binding_revisions (
+                id, session_id, turn_id, revision_ordinal, base_kind,
+                context_snapshot_id, source_through_sequence
+            ) VALUES (%s, %s, %s, 0, %s, %s, %s)
+            """,
+            (
+                revision_id,
+                session_id,
+                turn_id,
+                base_kind,
+                snapshot_id,
+                source_through_sequence,
+            ),
+        )
+
+    @staticmethod
+    def _initial_context_binding_revision_matches(
+        connection: Connection,
+        *,
+        row: object,
+        session_id: str,
+        turn_id: str,
+        revision_id: str,
+        initial_entry_sequence: int,
+        scope_kind: ConversationScopeKind,
+        scope_subagent_task_id: str | None,
+    ) -> bool:
+        if row is None:
+            return False
+        predecessor = connection.execute(
+            """
+            SELECT r.base_kind, r.context_snapshot_id,
+                   r.source_through_sequence
+            FROM pulsara_v3.turns AS t
+            JOIN pulsara_v3.transcript_entries AS initial
+              ON initial.session_id = t.session_id
+             AND initial.id = t.initial_entry_id
+            JOIN pulsara_v3.turn_context_binding_revisions AS r
+              ON r.session_id = t.session_id
+             AND r.id = t.current_context_binding_revision_id
+            WHERE t.session_id = %s AND t.id <> %s
+              AND t.conversation_scope_kind = %s
+              AND t.scope_subagent_task_id IS NOT DISTINCT FROM %s
+              AND initial.entry_sequence < %s
+            ORDER BY initial.entry_sequence DESC
+            LIMIT 1
+            """,
+            (
+                session_id,
+                turn_id,
+                scope_kind.value,
+                scope_subagent_task_id,
+                initial_entry_sequence,
+            ),
+        ).fetchone()
+        inherited = predecessor is not None and str(predecessor["base_kind"]) == "SNAPSHOT"
+        expected_kind = "SNAPSHOT" if inherited else "FULL_HISTORY"
+        expected_snapshot = (
+            str(predecessor["context_snapshot_id"]) if inherited else None
+        )
+        expected_through = (
+            int(predecessor["source_through_sequence"])
+            if inherited
+            else initial_entry_sequence - 1
+        )
+        return bool(
+            str(row["id"]) == revision_id
+            and str(row["session_id"]) == session_id
+            and str(row["turn_id"]) == turn_id
+            and int(row["revision_ordinal"]) == 0
+            and str(row["base_kind"]) == expected_kind
+            and (
+                None
+                if row["context_snapshot_id"] is None
+                else str(row["context_snapshot_id"])
+            )
+            == expected_snapshot
+            and int(row["source_through_sequence"]) == expected_through
+        )
     @staticmethod
     def _accepted_entry(
         connection: Connection, session_id: str, entry_id: str

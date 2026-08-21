@@ -1,6 +1,6 @@
 """Finite, tool-free auxiliary JSON model operations.
 
-This process-local port is shared by durable jobs and advisory-memory owners.
+This process-local port is shared by bounded advisory-memory owners.
 It owns transport setup and physical completion, but has no job claim,
 conversation continuity, canonical mutation, or retry authority.
 """

@@ -3,21 +3,50 @@
 from __future__ import annotations
 
 from datetime import datetime
+from hashlib import sha256
 from typing import Mapping, Sequence
+
+from psycopg import Connection
 from psycopg import IsolationLevel
 from psycopg.rows import dict_row
-from pulsara_agent.conversation_kernel.contracts import AssistantBlockKind, CanonicalContent, CommittedEventDraft, CommittedEventSubject, ConversationScopeKind, EntryKind, HostWriterGuard, InlineContent, TurnStatus
-from pulsara_agent.model_input.contracts import PreparedProviderInputCut
+
+from pulsara_agent.conversation_kernel.compaction.contracts import (
+    CompactionAdoptionConfirmation,
+    CompactionCanonicalWritePreconditions,
+    CompactionConfirmationKind,
+    CompactionLineageBaseKind,
+    CompactionSourceLineageBase,
+    PreparedCompactionCanonicalAdoption,
+    PreparedManualCompactionCommand,
+    canonical_compaction_range_digest,
+    freeze_compaction_canonical_range,
+)
+from pulsara_agent.conversation_kernel.contracts import (
+    AssistantBlockKind,
+    CanonicalContent,
+    CommittedEventDraft,
+    CommittedEventSubject,
+    ConversationScopeKind,
+    EntryKind,
+    HostWriterGuard,
+    InlineContent,
+    TurnStatus,
+)
+from pulsara_agent.conversation_kernel.reader import CanonicalProviderInputReader
+from pulsara_agent.conversation_kernel.vocabulary import (
+    CommittedEventType,
+    SubjectSlot,
+)
 from pulsara_agent.llm.provider_replay import (
     PreparedDurableProviderAssistantReplay,
     ProviderReplayDisposition,
 )
+from pulsara_agent.model_input.contracts import PreparedProviderInputCut
 from pulsara_agent.ports.terminal_observation import ExistingTurnInstallation, NewTurnInstallation, TerminalObservationInstallationAttempt
 from pulsara_agent.primitives.context import FrozenJsonObjectFact, freeze_json
 from pulsara_agent.primitives.permission import PermissionMode
-from pulsara_agent.primitives.run_permission import RunPermissionAdmissionSource
 from pulsara_agent.primitives.plan_workflow import PlanWorkflowStatus
-from pulsara_agent.conversation_kernel.vocabulary import CommittedEventType, SubjectSlot
+from pulsara_agent.primitives.run_permission import RunPermissionAdmissionSource
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 
 from .contracts import (
@@ -41,6 +70,16 @@ from .contracts import (
 from .matching import (
     _event_row_matches_draft,
 )
+
+
+def _manual_compaction_turn_matches(
+    row: Mapping[str, object], candidate: PreparedManualCompactionCommand
+) -> bool:
+    return (
+        str(row["conversation_scope_kind"]) == candidate.scope_kind.value
+        and row["scope_subagent_task_id"] == candidate.scope_subagent_task_id
+    )
+
 
 class _ConversationOperations:
     def start_root_turn(
@@ -146,19 +185,14 @@ class _ConversationOperations:
                     *self._permission_columns(permission),
                 ),
             )
-            connection.execute(
-                """
-                INSERT INTO pulsara_v3.turn_context_binding_revisions (
-                    id, session_id, turn_id, revision_ordinal,
-                    base_kind, source_through_sequence
-                ) VALUES (%s, %s, %s, 0, 'FULL_HISTORY', %s)
-                """,
-                (
-                    context_binding_revision_id,
-                    guard.session_id,
-                    turn_id,
-                    entry_sequence - 1,
-                ),
+            self._insert_initial_context_binding_revision(
+                connection,
+                session_id=guard.session_id,
+                turn_id=turn_id,
+                revision_id=context_binding_revision_id,
+                initial_entry_sequence=entry_sequence,
+                scope_kind=ConversationScopeKind.ROOT,
+                scope_subagent_task_id=None,
             )
             self._insert_entry(
                 connection,
@@ -293,11 +327,16 @@ class _ConversationOperations:
                 == candidate.context_binding_revision_id
                 and permission.snapshot_id == candidate.permission_snapshot_id
                 and permission.requested_mode is candidate.requested_permission_mode
-                and int(revision["revision_ordinal"]) == 0
-                and str(revision["base_kind"]) == "FULL_HISTORY"
-                and revision["context_snapshot_id"] is None
-                and int(revision["source_through_sequence"])
-                == int(entry["entry_sequence"]) - 1
+                and self._initial_context_binding_revision_matches(
+                    connection,
+                    row=revision,
+                    session_id=candidate.session_id,
+                    turn_id=candidate.turn_id,
+                    revision_id=candidate.context_binding_revision_id,
+                    initial_entry_sequence=int(entry["entry_sequence"]),
+                    scope_kind=ConversationScopeKind.ROOT,
+                    scope_subagent_task_id=None,
+                )
                 and str(entry["turn_id"]) == candidate.turn_id
                 and str(entry["entry_kind"]) == EntryKind.USER_MESSAGE.value
                 and str(entry["conversation_scope_kind"]) == "ROOT"
@@ -346,6 +385,81 @@ class _ConversationOperations:
                 ),
                 provider_input_through_sequence=int(row["latest_entry_sequence"]),
             )
+
+    def prepare_compaction_input_cut(
+        self,
+        guard: HostWriterGuard,
+        *,
+        turn_id: str,
+        allow_terminal: bool,
+        deadline_monotonic: float,
+    ) -> PreparedProviderInputCut:
+        """Prepare the exact active/idle compaction cut under the current writer."""
+
+        statuses = ("RUNNING", "COMPLETED", "INTERRUPTED") if allow_terminal else ("RUNNING",)
+        with self._provider.connection(
+            lane=PostgresConnectionLane.HOST_CONTROL,
+            row_factory=dict_row,
+            deadline_monotonic=deadline_monotonic,
+            isolation_level=IsolationLevel.REPEATABLE_READ,
+        ) as connection:
+            self._require_writer(connection, guard, lock=False)
+            row = connection.execute(
+                """
+                SELECT t.current_context_binding_revision_id,
+                       t.status, s.latest_entry_sequence
+                FROM pulsara_v3.turns AS t
+                JOIN pulsara_v3.sessions AS s ON s.id = t.session_id
+                WHERE t.session_id = %s AND t.id = %s
+                  AND t.status = ANY(%s)
+                """,
+                (guard.session_id, turn_id, list(statuses)),
+            ).fetchone()
+            if row is None:
+                raise ConversationKernelConflict(
+                    "compaction target status is not admissible"
+                )
+            return PreparedProviderInputCut(
+                session_id=guard.session_id,
+                turn_id=turn_id,
+                context_binding_revision_id=str(
+                    row["current_context_binding_revision_id"]
+                ),
+                provider_input_through_sequence=int(row["latest_entry_sequence"]),
+            )
+
+    def read_latest_terminal_scope_turn_id(
+        self,
+        guard: HostWriterGuard,
+        *,
+        scope_kind: ConversationScopeKind,
+        scope_subagent_task_id: str | None,
+        deadline_monotonic: float,
+    ) -> str | None:
+        if (scope_kind is ConversationScopeKind.ROOT) != (
+            scope_subagent_task_id is None
+        ):
+            raise ValueError("terminal compaction scope union is invalid")
+        with self._provider.connection(
+            lane=PostgresConnectionLane.HOST_CONTROL,
+            row_factory=dict_row,
+            deadline_monotonic=deadline_monotonic,
+        ) as connection:
+            self._require_writer(connection, guard, lock=False)
+            row = connection.execute(
+                """
+                SELECT id
+                FROM pulsara_v3.turns
+                WHERE session_id = %s
+                  AND conversation_scope_kind = %s
+                  AND scope_subagent_task_id IS NOT DISTINCT FROM %s
+                  AND status IN ('COMPLETED', 'INTERRUPTED')
+                ORDER BY accepted_at DESC, id DESC
+                LIMIT 1
+                """,
+                (guard.session_id, scope_kind.value, scope_subagent_task_id),
+            ).fetchone()
+            return None if row is None else str(row["id"])
 
     def require_provider_safe_turn(
         self,
@@ -489,19 +603,14 @@ class _ConversationOperations:
                         *self._permission_columns(permission),
                     ),
                 )
-                connection.execute(
-                    """
-                    INSERT INTO pulsara_v3.turn_context_binding_revisions (
-                        id, session_id, turn_id, revision_ordinal,
-                        base_kind, source_through_sequence
-                    ) VALUES (%s, %s, %s, 0, 'FULL_HISTORY', %s)
-                    """,
-                    (
-                        target.context_binding_revision_id,
-                        guard.session_id,
-                        turn_id,
-                        entry_sequence - 1,
-                    ),
+                self._insert_initial_context_binding_revision(
+                    connection,
+                    session_id=guard.session_id,
+                    turn_id=turn_id,
+                    revision_id=target.context_binding_revision_id,
+                    initial_entry_sequence=entry_sequence,
+                    scope_kind=ConversationScopeKind.ROOT,
+                    scope_subagent_task_id=None,
                 )
             else:  # pragma: no cover - closed union exhaustiveness
                 raise TypeError("terminal observation installation target is unknown")
@@ -625,12 +734,16 @@ class _ConversationOperations:
                     str(turn["initial_entry_id"]) != target.initial_entry_id
                     or str(turn["current_context_binding_revision_id"])
                     != target.context_binding_revision_id
-                    or revision is None
-                    or str(revision["turn_id"]) != target.turn_id
-                    or int(revision["revision_ordinal"]) != 0
-                    or str(revision["base_kind"]) != "FULL_HISTORY"
-                    or int(revision["source_through_sequence"])
-                    != int(entry["entry_sequence"]) - 1
+                    or not self._initial_context_binding_revision_matches(
+                        connection,
+                        row=revision,
+                        session_id=guard.session_id,
+                        turn_id=target.turn_id,
+                        revision_id=target.context_binding_revision_id,
+                        initial_entry_sequence=int(entry["entry_sequence"]),
+                        scope_kind=ConversationScopeKind.ROOT,
+                        scope_subagent_task_id=None,
+                    )
                 ):
                     raise ConversationKernelConflict(
                         "terminal observation genesis differs from candidate"
@@ -642,76 +755,161 @@ class _ConversationOperations:
                 event_sequence=int(event["event_sequence"]),
             )
 
+    def confirm_manual_compaction_command(
+        self,
+        *,
+        candidate: PreparedManualCompactionCommand,
+        deadline_monotonic: float,
+    ) -> CompactionConfirmationKind:
+        """Classify the stable manual command without process-local state."""
+
+        with self._provider.connection(
+            lane=PostgresConnectionLane.HOST_CONTROL,
+            row_factory=dict_row,
+            isolation_level=IsolationLevel.REPEATABLE_READ,
+            deadline_monotonic=deadline_monotonic,
+        ) as connection:
+            command = connection.execute(
+                "SELECT * FROM pulsara_v3.session_commands "
+                "WHERE session_id = %s AND command_id = %s",
+                (candidate.session_id, candidate.command_id),
+            ).fetchone()
+            turn = connection.execute(
+                "SELECT conversation_scope_kind, scope_subagent_task_id "
+                "FROM pulsara_v3.turns WHERE session_id = %s AND id = %s",
+                (candidate.session_id, candidate.target_turn_id),
+            ).fetchone()
+            if command is None:
+                if turn is None or not _manual_compaction_turn_matches(
+                    turn, candidate
+                ):
+                    return CompactionConfirmationKind.CONFLICT
+                return CompactionConfirmationKind.NONE
+            if turn is None or not _manual_compaction_turn_matches(turn, candidate):
+                return CompactionConfirmationKind.CONFLICT
+            if (
+                str(command["command_kind"]) != "COMPACT_CONTEXT"
+                or str(command["request_schema_version"]) != "compact_context.v1"
+                or str(command["semantic_digest"]) != candidate.semantic_digest
+                or str(command["target_kind"]) != "TURN"
+                or str(command["target_turn_id"]) != candidate.target_turn_id
+            ):
+                return CompactionConfirmationKind.CONFLICT
+            return CompactionConfirmationKind.FULL
+
+    def accept_manual_compaction_command(
+        self,
+        guard: HostWriterGuard,
+        *,
+        candidate: PreparedManualCompactionCommand,
+        deadline_monotonic: float,
+    ) -> CompactionConfirmationKind:
+        """Accept one exact manual command before its process-local attempt."""
+
+        if candidate.session_id != guard.session_id:
+            raise ValueError("manual compaction command belongs to another session")
+        with self._writer_transaction(
+            guard, deadline_monotonic=deadline_monotonic
+        ) as connection:
+            turn = connection.execute(
+                "SELECT conversation_scope_kind, scope_subagent_task_id "
+                "FROM pulsara_v3.turns WHERE session_id = %s AND id = %s FOR SHARE",
+                (guard.session_id, candidate.target_turn_id),
+            ).fetchone()
+            if turn is None or not _manual_compaction_turn_matches(turn, candidate):
+                raise ConversationKernelConflict(
+                    "manual compaction target scope drifted"
+                )
+            existing = connection.execute(
+                "SELECT * FROM pulsara_v3.session_commands "
+                "WHERE session_id = %s AND command_id = %s",
+                (guard.session_id, candidate.command_id),
+            ).fetchone()
+            if existing is not None:
+                if (
+                    str(existing["command_kind"]) != "COMPACT_CONTEXT"
+                    or str(existing["request_schema_version"])
+                    != "compact_context.v1"
+                    or str(existing["semantic_digest"])
+                    != candidate.semantic_digest
+                    or str(existing["target_kind"]) != "TURN"
+                    or str(existing["target_turn_id"])
+                    != candidate.target_turn_id
+                ):
+                    raise ConversationKernelConflict(
+                        "manual compaction command identity conflict"
+                    )
+                return CompactionConfirmationKind.FULL
+            connection.execute(
+                """
+                INSERT INTO pulsara_v3.session_commands (
+                    session_id, command_id, command_kind,
+                    request_schema_version, semantic_digest,
+                    target_kind, target_turn_id
+                ) VALUES (%s, %s, 'COMPACT_CONTEXT', 'compact_context.v1',
+                          %s, 'TURN', %s)
+                """,
+                (
+                    guard.session_id,
+                    candidate.command_id,
+                    candidate.semantic_digest,
+                    candidate.target_turn_id,
+                ),
+            )
+            return CompactionConfirmationKind.FULL
+
     def adopt_context_snapshot(
         self,
         guard: HostWriterGuard,
         *,
-        turn_id: str,
-        snapshot_id: str,
-        context_binding_revision_id: str,
-        source_through_sequence: int,
-        source_digest: str,
-        compiler_contract: str,
-        prompt_contract: str,
-        model_contract: str,
-        content: CanonicalContent,
-        occurred_at: datetime,
-        actor_id: str,
+        candidate: PreparedCompactionCanonicalAdoption,
+        preconditions: CompactionCanonicalWritePreconditions,
         deadline_monotonic: float,
-    ) -> int:
-        """Install one immutable mid-turn binding revision.
+    ) -> CompactionAdoptionConfirmation:
+        """Atomically install the exact prepared snapshot/revision/event winner."""
 
-        The process-local safe-point coordinator owns exclusion from a model
-        operation.  This transaction independently rechecks the canonical
-        predicate and exact current revision before advancing the pointer.
-        """
-
+        if (
+            candidate.scope.session_id != guard.session_id
+            or preconditions.scope != candidate.scope
+            or preconditions.expected_turn_status != candidate.expected_turn_status
+            or candidate.snapshot.source_through_sequence
+            > preconditions.expected_safe_head
+        ):
+            raise ValueError("compaction adoption arguments do not exact-join")
         with self._writer_transaction(
             guard, deadline_monotonic=deadline_monotonic
         ) as connection:
             turn = connection.execute(
                 """
-                SELECT t.workspace_id, t.current_context_binding_revision_id,
-                       current.revision_ordinal,
-                       current.source_through_sequence AS current_source_cut,
-                       initial_entry.entry_sequence AS initial_entry_sequence
+                SELECT t.*, s.latest_entry_sequence,
+                       current.revision_ordinal AS current_revision_ordinal,
+                       current.base_kind AS current_base_kind,
+                       current.context_snapshot_id AS current_snapshot_id,
+                       current.source_through_sequence AS current_source_cut
                 FROM pulsara_v3.turns AS t
+                JOIN pulsara_v3.sessions AS s ON s.id = t.session_id
                 JOIN pulsara_v3.turn_context_binding_revisions AS current
                   ON current.session_id = t.session_id
                  AND current.id = t.current_context_binding_revision_id
-                JOIN pulsara_v3.transcript_entries AS initial_entry
-                  ON initial_entry.session_id = t.session_id
-                 AND initial_entry.id = t.initial_entry_id
-                WHERE t.session_id = %s AND t.id = %s AND t.status = 'RUNNING'
+                WHERE t.session_id = %s AND t.id = %s
                 FOR UPDATE OF t
                 """,
-                (guard.session_id, turn_id),
+                (guard.session_id, candidate.scope.turn_id),
             ).fetchone()
-            if turn is None:
-                raise ConversationKernelConflict("snapshot target turn is not running")
-            missing = connection.execute(
-                """
-                SELECT 1
-                FROM pulsara_v3.assistant_message_blocks AS b
-                LEFT JOIN pulsara_v3.tool_results AS r
-                  ON r.session_id = b.session_id
-                 AND r.tool_call_entry_id = b.assistant_entry_id
-                 AND r.tool_call_id = b.tool_call_id
-                JOIN pulsara_v3.transcript_entries AS e
-                  ON e.session_id = b.session_id AND e.id = b.assistant_entry_id
-                WHERE e.session_id = %s AND e.turn_id = %s
-                  AND b.block_kind = 'TOOL_CALL' AND r.id IS NULL
-                LIMIT 1
-                """,
-                (guard.session_id, turn_id),
-            ).fetchone()
-            if missing is not None:
-                raise ConversationKernelConflict("tool request is not terminal")
-            if source_through_sequence < int(
-                turn["current_source_cut"]
-            ) or source_through_sequence >= int(turn["initial_entry_sequence"]):
-                raise ConversationKernelConflict("snapshot source range is invalid")
-            revision_ordinal = int(turn["revision_ordinal"]) + 1
+            self._require_compaction_target(
+                connection,
+                turn=turn,
+                candidate=candidate,
+                preconditions=preconditions,
+            )
+            self._require_compaction_source_digest(
+                connection,
+                candidate=candidate,
+                safe_head=preconditions.expected_safe_head,
+                deadline_monotonic=deadline_monotonic,
+            )
+            snapshot = candidate.snapshot
+            binding = candidate.binding
             connection.execute(
                 """
                 INSERT INTO pulsara_v3.context_snapshots (
@@ -723,15 +921,15 @@ class _ConversationOperations:
                           %s, %s, %s, %s, %s, %s)
                 """,
                 (
-                    snapshot_id,
-                    guard.session_id,
-                    turn["workspace_id"],
-                    source_through_sequence,
-                    source_digest,
-                    compiler_contract,
-                    prompt_contract,
-                    model_contract,
-                    *_content_columns(content),
+                    snapshot.snapshot_id,
+                    snapshot.session_id,
+                    snapshot.workspace_id,
+                    snapshot.source_through_sequence,
+                    snapshot.source_digest,
+                    snapshot.compiler_contract,
+                    snapshot.prompt_contract,
+                    snapshot.model_contract,
+                    *_content_columns(snapshot.content),
                 ),
             )
             connection.execute(
@@ -742,12 +940,12 @@ class _ConversationOperations:
                 ) VALUES (%s, %s, %s, %s, 'SNAPSHOT', %s, %s)
                 """,
                 (
-                    context_binding_revision_id,
-                    guard.session_id,
-                    turn_id,
-                    revision_ordinal,
-                    snapshot_id,
-                    source_through_sequence,
+                    binding.binding_revision_id,
+                    binding.session_id,
+                    binding.turn_id,
+                    binding.revision_ordinal,
+                    binding.context_snapshot_id,
+                    binding.source_through_sequence,
                 ),
             )
             connection.execute(
@@ -756,25 +954,426 @@ class _ConversationOperations:
                 SET current_context_binding_revision_id = %s
                 WHERE session_id = %s AND id = %s
                 """,
-                (context_binding_revision_id, guard.session_id, turn_id),
+                (
+                    binding.binding_revision_id,
+                    binding.session_id,
+                    binding.turn_id,
+                ),
             )
             self._append_events(
                 connection,
                 guard,
-                workspace_id=str(turn["workspace_id"]),
-                drafts=(
-                    self._event(
-                        CommittedEventType.COMPACTION_ADOPTED,
-                        SubjectSlot.CONTEXT_BINDING_REVISION,
-                        context_binding_revision_id,
-                        occurred_at=occurred_at,
-                        actor_kind="runtime",
-                        actor_id=actor_id,
-                        payload={"revision_ordinal": revision_ordinal},
-                    ),
-                ),
+                workspace_id=candidate.scope.workspace_id,
+                drafts=(candidate.event,),
             )
-            return revision_ordinal
+            return CompactionAdoptionConfirmation(
+                CompactionConfirmationKind.FULL,
+                binding.revision_ordinal,
+            )
+
+    def confirm_context_snapshot_adoption(
+        self,
+        *,
+        candidate: PreparedCompactionCanonicalAdoption,
+        deadline_monotonic: float,
+    ) -> CompactionAdoptionConfirmation:
+        """Statelessly classify the exact prepared compaction winner."""
+
+        with self._provider.connection(
+            lane=PostgresConnectionLane.HOST_CONTROL,
+            row_factory=dict_row,
+            isolation_level=IsolationLevel.REPEATABLE_READ,
+            deadline_monotonic=deadline_monotonic,
+        ) as connection:
+            snapshot = connection.execute(
+                "SELECT * FROM pulsara_v3.context_snapshots "
+                "WHERE session_id = %s AND id = %s",
+                (candidate.scope.session_id, candidate.snapshot.snapshot_id),
+            ).fetchone()
+            revision = connection.execute(
+                "SELECT * FROM pulsara_v3.turn_context_binding_revisions "
+                "WHERE session_id = %s AND id = %s",
+                (
+                    candidate.scope.session_id,
+                    candidate.binding.binding_revision_id,
+                ),
+            ).fetchone()
+            event = connection.execute(
+                "SELECT * FROM pulsara_v3.agent_events "
+                "WHERE session_id = %s AND event_id = %s",
+                (candidate.scope.session_id, candidate.event.event_id),
+            ).fetchone()
+            turn = connection.execute(
+                "SELECT current_context_binding_revision_id FROM pulsara_v3.turns "
+                "WHERE session_id = %s AND id = %s",
+                (candidate.scope.session_id, candidate.scope.turn_id),
+            ).fetchone()
+            predecessor = connection.execute(
+                "SELECT * FROM pulsara_v3.turn_context_binding_revisions "
+                "WHERE session_id = %s AND id = %s",
+                (
+                    candidate.scope.session_id,
+                    candidate.predecessor.binding_revision_id,
+                ),
+            ).fetchone()
+            rows = (snapshot, revision, event)
+            if all(row is None for row in rows):
+                if (
+                    turn is not None
+                    and predecessor is not None
+                    and str(turn["current_context_binding_revision_id"])
+                    == candidate.predecessor.binding_revision_id
+                    and self._compaction_predecessor_row_matches(
+                        predecessor, candidate
+                    )
+                ):
+                    return CompactionAdoptionConfirmation(
+                        CompactionConfirmationKind.NONE
+                    )
+                return CompactionAdoptionConfirmation(
+                    CompactionConfirmationKind.CONFLICT
+                )
+            if (
+                any(row is None for row in rows)
+                or turn is None
+                or predecessor is None
+                or str(turn["current_context_binding_revision_id"])
+                != candidate.binding.binding_revision_id
+                or not self._compaction_snapshot_row_matches(snapshot, candidate)
+                or not self._compaction_binding_row_matches(revision, candidate)
+                or not self._compaction_predecessor_row_matches(
+                    predecessor, candidate
+                )
+                or not _event_row_matches_draft(event, candidate.event)
+            ):
+                return CompactionAdoptionConfirmation(
+                    CompactionConfirmationKind.CONFLICT
+                )
+            return CompactionAdoptionConfirmation(
+                CompactionConfirmationKind.FULL,
+                candidate.binding.revision_ordinal,
+            )
+
+    def _require_compaction_target(
+        self,
+        connection: Connection[Mapping[str, object]],
+        *,
+        turn: Mapping[str, object] | None,
+        candidate: PreparedCompactionCanonicalAdoption,
+        preconditions: CompactionCanonicalWritePreconditions,
+    ) -> None:
+        if turn is None:
+            raise ConversationKernelConflict("compaction target turn is absent")
+        predecessor = candidate.predecessor
+        if (
+            str(turn["workspace_id"]) != candidate.scope.workspace_id
+            or str(turn["conversation_scope_kind"])
+            != candidate.scope.scope_kind.value
+            or (
+                None
+                if turn["scope_subagent_task_id"] is None
+                else str(turn["scope_subagent_task_id"])
+            )
+            != candidate.scope.scope_subagent_task_id
+            or str(turn["status"]) != candidate.expected_turn_status
+            or str(turn["current_context_binding_revision_id"])
+            != predecessor.binding_revision_id
+            or int(turn["current_revision_ordinal"])
+            != predecessor.revision_ordinal
+            or str(turn["current_base_kind"]) != predecessor.base_kind
+            or (
+                None
+                if turn["current_snapshot_id"] is None
+                else str(turn["current_snapshot_id"])
+            )
+            != predecessor.context_snapshot_id
+            or int(turn["current_source_cut"])
+            != predecessor.source_through_sequence
+        ):
+            raise ConversationKernelConflict(
+                "compaction target or predecessor identity drifted"
+            )
+        if candidate.target_branch.value == "IDLE_BASE_ONLY":
+            latest = connection.execute(
+                """
+                SELECT t.id
+                FROM pulsara_v3.turns AS t
+                JOIN pulsara_v3.transcript_entries AS initial_entry
+                  ON initial_entry.session_id = t.session_id
+                 AND initial_entry.id = t.initial_entry_id
+                WHERE t.session_id = %s
+                  AND t.conversation_scope_kind = %s
+                  AND t.scope_subagent_task_id IS NOT DISTINCT FROM %s
+                  AND t.status IN ('COMPLETED', 'INTERRUPTED')
+                ORDER BY initial_entry.entry_sequence DESC, t.id DESC
+                LIMIT 1
+                """,
+                (
+                    candidate.scope.session_id,
+                    candidate.scope.scope_kind.value,
+                    candidate.scope.scope_subagent_task_id,
+                ),
+            ).fetchone()
+            if latest is None or str(latest["id"]) != candidate.scope.turn_id:
+                raise ConversationKernelConflict(
+                    "idle compaction target is not the latest terminal turn"
+                )
+        later = connection.execute(
+            """
+            SELECT 1
+            FROM pulsara_v3.transcript_entries
+            WHERE session_id = %s
+              AND conversation_scope_kind = %s
+              AND scope_subagent_task_id IS NOT DISTINCT FROM %s
+              AND entry_sequence > %s
+            LIMIT 1
+            """,
+            (
+                candidate.scope.session_id,
+                candidate.scope.scope_kind.value,
+                candidate.scope.scope_subagent_task_id,
+                preconditions.expected_safe_head,
+            ),
+        ).fetchone()
+        if later is not None:
+            raise ConversationKernelConflict("compaction canonical head advanced")
+        split_group = connection.execute(
+            """
+            SELECT 1
+            FROM pulsara_v3.assistant_message_blocks AS call
+            JOIN pulsara_v3.transcript_entries AS request
+              ON request.session_id = call.session_id
+             AND request.id = call.assistant_entry_id
+            JOIN pulsara_v3.tool_results AS result
+              ON result.session_id = call.session_id
+             AND result.tool_call_entry_id = call.assistant_entry_id
+             AND result.tool_call_id = call.tool_call_id
+            JOIN pulsara_v3.transcript_entries AS result_entry
+              ON result_entry.session_id = result.session_id
+             AND result_entry.id = result.result_entry_id
+            WHERE request.session_id = %s
+              AND request.conversation_scope_kind = %s
+              AND request.scope_subagent_task_id IS NOT DISTINCT FROM %s
+              AND call.block_kind = 'TOOL_CALL'
+              AND request.entry_sequence <= %s
+              AND result_entry.entry_sequence > %s
+            LIMIT 1
+            """,
+            (
+                candidate.scope.session_id,
+                candidate.scope.scope_kind.value,
+                candidate.scope.scope_subagent_task_id,
+                candidate.snapshot.source_through_sequence,
+                candidate.snapshot.source_through_sequence,
+            ),
+        ).fetchone()
+        if split_group is not None:
+            raise ConversationKernelConflict(
+                "compaction source boundary splits a tool group"
+            )
+
+    def _require_compaction_source_digest(
+        self,
+        connection: Connection[Mapping[str, object]],
+        *,
+        candidate: PreparedCompactionCanonicalAdoption,
+        safe_head: int,
+        deadline_monotonic: float,
+    ) -> None:
+        predecessor = candidate.predecessor
+        if predecessor.base_kind == "FULL_HISTORY":
+            lineage = CompactionSourceLineageBase(
+                kind=CompactionLineageBaseKind.FULL_HISTORY_GENESIS,
+                scope=candidate.scope,
+                binding_revision_id=predecessor.binding_revision_id,
+                binding_revision_ordinal=predecessor.revision_ordinal,
+                persisted_revision_genesis_marker=(
+                    predecessor.source_through_sequence
+                ),
+                effective_materialization_lineage_floor=0,
+            )
+        else:
+            snapshot = connection.execute(
+                """
+                SELECT source_through_sequence, source_digest
+                FROM pulsara_v3.context_snapshots
+                WHERE session_id = %s AND id = %s
+                """,
+                (
+                    candidate.scope.session_id,
+                    predecessor.context_snapshot_id,
+                ),
+            ).fetchone()
+            if snapshot is None or int(snapshot["source_through_sequence"]) != (
+                predecessor.source_through_sequence
+            ):
+                raise ConversationKernelConflict(
+                    "compaction predecessor snapshot drifted"
+                )
+            lineage = CompactionSourceLineageBase(
+                kind=CompactionLineageBaseKind.CURRENT_SNAPSHOT,
+                scope=candidate.scope,
+                binding_revision_id=predecessor.binding_revision_id,
+                binding_revision_ordinal=predecessor.revision_ordinal,
+                persisted_revision_genesis_marker=(
+                    predecessor.source_through_sequence
+                ),
+                effective_materialization_lineage_floor=(
+                    predecessor.source_through_sequence
+                ),
+                snapshot_id=predecessor.context_snapshot_id,
+                prior_source_digest=str(snapshot["source_digest"]),
+            )
+
+        class _TransactionBlobReader:
+            """Read immutable blobs on this exact writer transaction."""
+
+            def read_exact(
+                self,
+                *,
+                blob_id: str,
+                expected_digest: str,
+                expected_size: int,
+                deadline_monotonic: float,
+            ) -> bytes:
+                del deadline_monotonic
+                row = connection.execute(
+                    """
+                    SELECT logical_digest, logical_size, body
+                    FROM pulsara_v3.blobs
+                    WHERE id = %s
+                    """,
+                    (blob_id,),
+                ).fetchone()
+                if row is None:
+                    raise ConversationKernelConflict(
+                        "compaction source blob is absent"
+                    )
+                body = bytes(row["body"])
+                if (
+                    str(row["logical_digest"]) != expected_digest
+                    or int(row["logical_size"]) != expected_size
+                    or len(body) != expected_size
+                    or "sha256:" + sha256(body).hexdigest() != expected_digest
+                ):
+                    raise ConversationKernelConflict(
+                        "compaction source blob integrity drifted"
+                    )
+                return body
+
+        reader = CanonicalProviderInputReader(
+            self._provider,
+            blob_reader=_TransactionBlobReader(),
+        )
+        dispatch = reader.read_frozen_dispatch(
+            PreparedProviderInputCut(
+                session_id=candidate.scope.session_id,
+                turn_id=candidate.scope.turn_id,
+                context_binding_revision_id=(
+                    predecessor.binding_revision_id
+                ),
+                provider_input_through_sequence=(
+                    candidate.snapshot.source_through_sequence
+                ),
+            ),
+            deadline_monotonic=deadline_monotonic,
+            _connection=connection,
+        )
+        canonical = dispatch.compile_snapshot.canonical_input
+        if (
+            canonical.identity.provider_input_through_sequence
+            != candidate.snapshot.source_through_sequence
+            or safe_head < candidate.snapshot.source_through_sequence
+        ):
+            raise ConversationKernelConflict(
+                "compaction source materialization cut drifted"
+            )
+        canonical_range = freeze_compaction_canonical_range(
+            scope=candidate.scope,
+            effective_materialization_lineage_floor=(
+                lineage.effective_materialization_lineage_floor
+            ),
+            source_through_sequence=(
+                candidate.snapshot.source_through_sequence
+            ),
+            ordered_items=canonical.items,
+            closures=canonical.closures,
+            late_outcomes=canonical.late_outcomes,
+        )
+        if (
+            canonical_compaction_range_digest(lineage, canonical_range)
+            != candidate.snapshot.source_digest
+        ):
+            raise ConversationKernelConflict(
+                "compaction source lineage digest drifted"
+            )
+
+    def _compaction_snapshot_row_matches(
+        self,
+        row: Mapping[str, object] | None,
+        candidate: PreparedCompactionCanonicalAdoption,
+    ) -> bool:
+        if row is None:
+            return False
+        snapshot = candidate.snapshot
+        try:
+            content = self._content_from_row(row)
+        except (KeyError, TypeError, ValueError):
+            return False
+        return bool(
+            str(row["id"]) == snapshot.snapshot_id
+            and str(row["session_id"]) == snapshot.session_id
+            and str(row["workspace_id"]) == snapshot.workspace_id
+            and int(row["source_through_sequence"])
+            == snapshot.source_through_sequence
+            and str(row["source_digest"]) == snapshot.source_digest
+            and str(row["compiler_contract"]) == snapshot.compiler_contract
+            and str(row["prompt_contract"]) == snapshot.prompt_contract
+            and str(row["model_contract"]) == snapshot.model_contract
+            and content == snapshot.content
+        )
+
+    @staticmethod
+    def _compaction_binding_row_matches(
+        row: Mapping[str, object] | None,
+        candidate: PreparedCompactionCanonicalAdoption,
+    ) -> bool:
+        if row is None:
+            return False
+        binding = candidate.binding
+        return bool(
+            str(row["id"]) == binding.binding_revision_id
+            and str(row["session_id"]) == binding.session_id
+            and str(row["turn_id"]) == binding.turn_id
+            and int(row["revision_ordinal"]) == binding.revision_ordinal
+            and str(row["base_kind"]) == binding.base_kind
+            and str(row["context_snapshot_id"])
+            == binding.context_snapshot_id
+            and int(row["source_through_sequence"])
+            == binding.source_through_sequence
+        )
+
+    @staticmethod
+    def _compaction_predecessor_row_matches(
+        row: Mapping[str, object] | None,
+        candidate: PreparedCompactionCanonicalAdoption,
+    ) -> bool:
+        if row is None:
+            return False
+        predecessor = candidate.predecessor
+        return bool(
+            str(row["id"]) == predecessor.binding_revision_id
+            and int(row["revision_ordinal"]) == predecessor.revision_ordinal
+            and str(row["base_kind"]) == predecessor.base_kind
+            and (
+                None
+                if row["context_snapshot_id"] is None
+                else str(row["context_snapshot_id"])
+            )
+            == predecessor.context_snapshot_id
+            and int(row["source_through_sequence"])
+            == predecessor.source_through_sequence
+        )
 
     def commit_assistant_message(
         self,
@@ -1447,7 +2046,6 @@ class _ConversationOperations:
                        qt.final_entry_id AS consumed_turn_final_entry_id,
                        qt.terminal_reason AS consumed_turn_terminal_reason,
                        te.turn_id AS target_entry_turn_id,
-                       te.source_job_id AS target_entry_source_job_id,
                        te.source_subagent_result_id AS target_entry_source_subagent_result_id,
                        d.decision AS interaction_decision,
                        d.subject_kind AS interaction_subject_kind,

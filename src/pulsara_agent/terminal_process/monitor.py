@@ -420,6 +420,28 @@ class TerminalMonitorCoordinator:
                 if item.state is not TerminalMonitorState.CLOSED
             )
 
+    def freeze_compaction_handoff(self) -> tuple[dict[str, object], ...]:
+        """Freeze active/dormant public identities without observation bodies."""
+
+        with self._lock:
+            return tuple(
+                {
+                    "monitor_id": item.monitor_id,
+                    "process_id": item.process_id,
+                    "state": item.state.value.lower(),
+                    "pending_observation": (
+                        item.draft is not None
+                        or item.in_flight is not None
+                        or item.successor is not None
+                        or item.completion_pending
+                    ),
+                }
+                for item in sorted(
+                    self._registrations.values(), key=lambda value: value.monitor_id
+                )
+                if item.state is not TerminalMonitorState.CLOSED
+            )
+
     def cancel(self, monitor_id: str) -> str:
         with self._lock:
             registration = self._registrations.get(monitor_id)

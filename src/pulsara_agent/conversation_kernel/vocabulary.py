@@ -1,6 +1,6 @@
 """Closed conversation-kernel event vocabulary and subject/guard descriptor.
 
-The descriptor is the single Python owner for the exact 31/24/13/2 oracle.
+The descriptor is the single Python owner for the exact 28/24/11/1 oracle.
 SQL checks, repository validation, protocol projection mapping, and generated
 test fixtures consume these values; callers cannot register new entries.
 """
@@ -13,15 +13,12 @@ from enum import StrEnum
 
 class AppendGuardKind(StrEnum):
     HOST_WRITER = "HostWriterGuard"
-    JOB_ATTEMPT_CLAIM = "JobAttemptClaimGuard"
 
 
 class SubjectSlot(StrEnum):
     TURN = "subject_turn_id"
     ENTRY = "subject_entry_id"
     TOOL_ATTEMPT = "subject_tool_attempt_id"
-    JOB = "subject_job_id"
-    JOB_ATTEMPT = "subject_job_attempt_id"
     QUEUE_ITEM = "subject_queue_item_id"
     INTERACTION_DECISION = "subject_interaction_decision_id"
     CONTEXT_BINDING_REVISION = "subject_context_binding_revision_id"
@@ -54,9 +51,6 @@ class CommittedEventType(StrEnum):
     SUBAGENT_TASK_STATUS_ACCEPTED = "SubagentTaskStatusAccepted"
     SUBAGENT_MESSAGE_ACCEPTED = "SubagentMessageAccepted"
     SUBAGENT_RESULT_ACCEPTED = "SubagentResultAccepted"
-    JOB_QUEUED = "JobQueued"
-    JOB_ATTEMPT_ACCEPTED = "JobAttemptAccepted"
-    JOB_TERMINAL_ACCEPTED = "JobTerminalAccepted"
     PLAN_WORKFLOW_ENTERED = "PlanWorkflowEntered"
     PLAN_QUESTION_ASKED = "PlanQuestionAsked"
     PLAN_QUESTION_ANSWERED = "PlanQuestionAnswered"
@@ -153,24 +147,6 @@ COMMITTED_EVENT_DESCRIPTORS = (
         CommittedEventType.SUBAGENT_RESULT_ACCEPTED,
         SubjectSlot.SUBAGENT_RESULT,
     ),
-    CommittedEventDescriptor(
-        event_type=CommittedEventType.JOB_QUEUED,
-        subject_slot=SubjectSlot.JOB,
-        append_guards=(
-            AppendGuardKind.HOST_WRITER,
-            AppendGuardKind.JOB_ATTEMPT_CLAIM,
-        ),
-    ),
-    CommittedEventDescriptor(
-        event_type=CommittedEventType.JOB_ATTEMPT_ACCEPTED,
-        subject_slot=SubjectSlot.JOB_ATTEMPT,
-        append_guards=(AppendGuardKind.JOB_ATTEMPT_CLAIM,),
-    ),
-    CommittedEventDescriptor(
-        event_type=CommittedEventType.JOB_TERMINAL_ACCEPTED,
-        subject_slot=SubjectSlot.JOB,
-        append_guards=(AppendGuardKind.JOB_ATTEMPT_CLAIM,),
-    ),
     _host(CommittedEventType.PLAN_WORKFLOW_ENTERED, SubjectSlot.PLAN_WORKFLOW),
     _host(CommittedEventType.PLAN_QUESTION_ASKED, SubjectSlot.PLAN_INTERACTION),
     _host(CommittedEventType.PLAN_QUESTION_ANSWERED, SubjectSlot.PLAN_INTERACTION),
@@ -189,14 +165,14 @@ APPEND_GUARDS = tuple(item.value for item in AppendGuardKind)
 
 DESCRIPTOR_BY_TYPE = {item.event_type: item for item in COMMITTED_EVENT_DESCRIPTORS}
 
-if len(COMMITTED_EVENT_DESCRIPTORS) != 31 or len(DESCRIPTOR_BY_TYPE) != 31:
-    raise RuntimeError("committed event descriptor must contain exact 31 types")
+if len(COMMITTED_EVENT_DESCRIPTORS) != 28 or len(DESCRIPTOR_BY_TYPE) != 28:
+    raise RuntimeError("committed event descriptor must contain exact 28 types")
 if len(LIVE_EVENT_TYPES) != 24 or len(set(LIVE_EVENT_TYPES)) != 24:
     raise RuntimeError("live event registry must contain exact 24 types")
-if len(SUBJECT_SLOTS) != 13 or len(set(SUBJECT_SLOTS)) != 13:
-    raise RuntimeError("subject registry must contain exact 13 slots")
-if len(APPEND_GUARDS) != 2:
-    raise RuntimeError("append guard registry must contain exact 2 guards")
+if len(SUBJECT_SLOTS) != 11 or len(set(SUBJECT_SLOTS)) != 11:
+    raise RuntimeError("subject registry must contain exact 11 slots")
+if len(APPEND_GUARDS) != 1:
+    raise RuntimeError("append guard registry must contain exact 1 guard")
 
 
 __all__ = [

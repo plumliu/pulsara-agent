@@ -787,7 +787,7 @@ Prepared parent context在task admission时冻结；dependency/capacity导致的
 
 `RootSubagentCoordinator`在batch FULL/ACK-confirmed settlement中exact安装这些start materials；caller cancellation只能detach，不能留下已接受task却没有其prepared context。Material在task terminal或Host close后释放。Canonical task row只保存mode与N，不复制parent正文；ROOT canonical transcript仍是语义来源，但Round 10不从它执行跨Host child recovery。
 
-Child真正启动时，coordinator只把immutable objective与optional `PARENT_CONTEXT`封装为Round 5B §10.1.1 closed `SubagentInitialSeed`，再把该seed、exact child scope、resolved target、Round 9 parent/views、current runtime-source candidates与唯一planning deadline交给`KernelColdEpochInputAssembler`。Coordinator不得自行拼接SYSTEM、lower tools/messages、构造第二份wire plan或复制cold continuity candidate逻辑；assembler也不得反向选择N、读取task repository或取得child physical execution authority。
+Child真正启动时，coordinator只把immutable objective与optional `PARENT_CONTEXT`封装为Round 5B §10.1.1 closed `SubagentInitialSeed`。随后按Round 9标准顺序冻结child-scope owner snapshots/registry、resolve exact target/native eligibility、以`EmptyCapabilityEpochPredecessor`构造`FrozenCapabilityDispatchCut`及两个sibling views、完成`FrozenToolCapabilityExposureSelection`与selected native materialization得到final `FrozenToolCapabilityExposurePlan`，再由normal context collector生成exact-joining `FrozenNonTriggerContextSources`。该seed、上述exact semantic results、trigger/current-turn source candidates与唯一planning deadline一起交给`KernelColdEpochInputAssembler`。Coordinator不得自行拼接SYSTEM、lower tools/messages、构造第二份wire plan或复制cold continuity candidate逻辑；assembler也不得反向选择N、查询owner/registry、规划Tool route、读取task repository或取得child physical execution authority。
 
 Child与ROOT之间没有continuity或cache compatibility承诺。Round 3.1 strict-prefix从child第一次provider open之后才开始；因此不存在`FULL_PREFIX_FORK`。Round 10也不提供`FULL_SEMANTIC`/`all`：需要精确旧事实时，ROOT应写入自洽objective、给出canonical file/artifact定位，或在child ACTIVE后使用`send_agent_message`补充，而不是无界复制整个会话。
 
@@ -865,7 +865,9 @@ Coordinator对`PENDING_START`按`accepted_at, task_id`公平排序：
 reserve Host-global slot
 -> consume the task's creation-time frozen parent-context selection
 -> freeze current exact child-scope Builtin/MCP/Skill owner snapshots
--> resolve child model target and construct Round 9 parent/views
+-> resolve child model target/native eligibility
+-> construct Round 9 EMPTY parent cut + Tool/Skill sibling views
+-> finalize Tool exposure plan and FrozenNonTriggerContextSources
 -> CAS task PENDING_START -> ACTIVE
 -> admit initial child turn
 -> construct exact SubagentInitialSeed
@@ -1116,7 +1118,7 @@ messages[n] is strict prefix of messages[n+1]
 
 ### 10.2 Round 9/9.1 capability join与leaf-local refresh
 
-Child permission从创建turn的bypass snapshot冻结；child capability不复制ROOT exposure，而在该task真正启动时从当前owner snapshots构造Round 9 exact child-scope cold cut。该cut及其两个view-bound planner/composer results作为named inputs进入shared assembler，assembler不查询owner或重新决定DIRECT/META/Skill winner。所有worker profile共享同一ordinary child capability policy：
+Child permission从创建turn的bypass snapshot冻结；child capability不复制ROOT exposure，而在该task真正启动时从current owner snapshots构造Round 9 exact child-scope EMPTY cold cut。该cut、两个sibling views、final Tool plan及normal `FrozenNonTriggerContextSources`作为named inputs进入shared assembler；assembler不查询owner或重新决定DIRECT/META/Skill winner。完整child-visible MCP cohort fit时全部DIRECT，否则全部META_ONLY，与ordinary cold-open/compaction successor使用同一Round 9规则。所有worker profile共享同一ordinary child capability policy：
 
 - scope-visible、execution-backed Builtin tools；
 - `subagent_visible`且在child cold epoch被选中的DIRECT MCP tools；
@@ -1234,7 +1236,7 @@ Round 10不新增client直接给child发message或编辑DAG的UI。Controller继
 ### R10-1：统一coordinator与flat API迁移
 
 - 将当前`KernelSubagentManager`收敛为Host-wide coordinator；
-- 复用Round 5B `R5B-A0`唯一neutral `KernelColdEpochInputAssembler`；若编码顺序由Round 10先落该seam，只能在同一neutral module按R5B-A0 contract实现，不得创建subagent-private wrapper或提前实现compaction；
+- 复用Round 5B `R5B-A0`唯一neutral `KernelColdEpochInputAssembler`；Round 10编码前A0必须已经让ordinary cold-open迁移到该production implementation并保存Chat/Responses wire golden。若由Round 10分支补齐尚未合入的A0，只能在同一neutral module按R5B-A0 contract实现并先独立验证，不得创建subagent-private wrapper或提前实现compaction；
 - `spawn_agent`复用single-item batch；
 - provider DTO统一`task_id`；
 - 实现`NONE | LAST_N` parent-context selection、untrusted quote projection与prepared start-material settlement；

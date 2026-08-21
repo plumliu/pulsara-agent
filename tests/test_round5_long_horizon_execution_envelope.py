@@ -27,7 +27,6 @@ from pulsara_agent.conversation_kernel.repository import (
     build_prepared_root_turn_admission,
     build_prepared_subagent_turn_admission,
 )
-from pulsara_agent.conversation_kernel.jobs import JOB_HANDLER_CATALOG
 from pulsara_agent.conversation_kernel.host import KernelHostCore
 from pulsara_agent.conversation_kernel.limits import STAGE2_LIMITS
 from pulsara_agent.conversation_kernel.memory_tools import (
@@ -74,12 +73,11 @@ def test_round5_architecture_removes_turn_budget_and_preserves_oracles() -> None
     assert "while model_call_count <" not in runner_source
     assert "model-call limit exhausted" not in runner_source
 
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == 31
+    assert len(COMMITTED_EVENT_DESCRIPTORS) == 28
     assert len(LIVE_EVENT_TYPES) == 24
-    assert len(SUBJECT_SLOTS) == 13
-    assert len(APPEND_GUARDS) == 2
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 26
-    assert len(JOB_HANDLER_CATALOG) == 1
+    assert len(SUBJECT_SLOTS) == 11
+    assert len(APPEND_GUARDS) == 1
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 24
 
 
 def test_round5_watchdog_policy_is_closed_and_has_no_turn_or_call_budget() -> None:
@@ -167,31 +165,12 @@ def test_round5_turn_admission_candidates_freeze_complete_event_drafts() -> None
 def test_round5_close_owners_use_independent_policy_fields() -> None:
     policy = KernelExecutionWatchdogPolicy(
         host_session_close_join_seconds=41,
-        durable_job_executor_close_seconds=43,
         blob_gc_close_seconds=47,
     )
     factory = KernelExecutionDeadlineFactory(policy, clock=lambda: 100.0)
 
     assert factory.deadline(KernelWatchdogOwner.HOST_SESSION_CLOSE) == 141.0
-    assert (
-        factory.deadline(KernelWatchdogOwner.DURABLE_JOB_EXECUTOR_CLOSE)
-        == 143.0
-    )
     assert factory.deadline(KernelWatchdogOwner.BLOB_GC_CLOSE) == 147.0
-
-
-def test_round5_job_transport_is_bounded_without_changing_foreground() -> None:
-    policy = KernelExecutionWatchdogPolicy()
-    foreground = policy.foreground_transport
-    job = policy.durable_job_transport(45.0)
-
-    assert foreground.total_seconds is None
-    assert job.total_seconds == 45.0
-    assert job.connect_seconds == 45.0
-    assert job.write_seconds == 45.0
-    assert job.pool_seconds == 45.0
-    assert job.read_idle_seconds == 45.0
-    assert foreground.total_seconds is None
 
 
 def test_round5_foreground_openai_timeout_is_typed_and_has_no_total(

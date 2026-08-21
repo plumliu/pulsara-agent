@@ -21,7 +21,6 @@ class KernelWatchdogOwner(StrEnum):
     NONTERMINAL_TOOL_INVOCATION = "NONTERMINAL_TOOL_INVOCATION"
     TERMINAL_FOREGROUND_DECISION = "TERMINAL_FOREGROUND_DECISION"
     HOST_SESSION_CLOSE = "HOST_SESSION_CLOSE"
-    DURABLE_JOB_EXECUTOR_CLOSE = "DURABLE_JOB_EXECUTOR_CLOSE"
     BLOB_GC_CLOSE = "BLOB_GC_CLOSE"
     MEMORY_GOVERNANCE_ATTEMPT = "MEMORY_GOVERNANCE_ATTEMPT"
     MEMORY_HINT_REVIEW_ATTEMPT = "MEMORY_HINT_REVIEW_ATTEMPT"
@@ -47,7 +46,6 @@ class KernelExecutionWatchdogPolicy:
     nonterminal_tool_attempt_seconds: float = 600.0
     terminal_foreground_decision_seconds: float = 120.0
     host_session_close_join_seconds: float = 120.0
-    durable_job_executor_close_seconds: float = 120.0
     blob_gc_close_seconds: float = 120.0
     memory_governance_attempt_seconds: float = 300.0
     memory_hint_review_attempt_seconds: float = 120.0
@@ -83,7 +81,6 @@ class KernelExecutionWatchdogPolicy:
             self.nonterminal_tool_attempt_seconds,
             self.terminal_foreground_decision_seconds,
             self.host_session_close_join_seconds,
-            self.durable_job_executor_close_seconds,
             self.blob_gc_close_seconds,
             self.memory_governance_attempt_seconds,
             self.memory_hint_review_attempt_seconds,
@@ -119,13 +116,13 @@ class KernelExecutionWatchdogPolicy:
             total_seconds=None,
         )
 
-    def durable_job_transport(
+    def bounded_auxiliary_transport(
         self, remaining_attempt_seconds: float
     ) -> OpenAITransportTimeoutPolicy:
-        """Bind wire fields to the existing finite durable-attempt owner."""
+        """Bind wire fields to one finite process-local auxiliary attempt."""
 
         if remaining_attempt_seconds <= 0:
-            raise ValueError("durable job attempt has no transport budget")
+            raise ValueError("auxiliary model attempt has no transport budget")
         return OpenAITransportTimeoutPolicy(
             connect_seconds=min(
                 self.provider_connect_seconds, remaining_attempt_seconds
@@ -148,7 +145,6 @@ class KernelExecutionWatchdogPolicy:
             KernelWatchdogOwner.NONTERMINAL_TOOL_INVOCATION: self.nonterminal_tool_attempt_seconds,
             KernelWatchdogOwner.TERMINAL_FOREGROUND_DECISION: self.terminal_foreground_decision_seconds,
             KernelWatchdogOwner.HOST_SESSION_CLOSE: self.host_session_close_join_seconds,
-            KernelWatchdogOwner.DURABLE_JOB_EXECUTOR_CLOSE: self.durable_job_executor_close_seconds,
             KernelWatchdogOwner.BLOB_GC_CLOSE: self.blob_gc_close_seconds,
             KernelWatchdogOwner.MEMORY_GOVERNANCE_ATTEMPT: self.memory_governance_attempt_seconds,
             KernelWatchdogOwner.MEMORY_HINT_REVIEW_ATTEMPT: self.memory_hint_review_attempt_seconds,

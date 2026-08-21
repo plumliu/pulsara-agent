@@ -29,7 +29,6 @@ class Stage2RuntimeLimits:
     pending_prompt_hard_items: int = 128
     nonterminal_subagent_hard_items: int = 4
     subagent_objective_hard_bytes: int = 64 << 10
-    nonterminal_job_hard_items: int = 128
     active_tool_control_hard_items: int = 128
     live_observer_default_count: int = 16
     live_observer_hard_count: int = 64
@@ -53,12 +52,8 @@ class Stage2RuntimeLimits:
     foreground_io_timeout_ms: int = 30_000
     memory_governance_sla_ms: int = 30_000
     memory_governance_batch_hard_items: int = 32
-    job_claim_lease_ms: int = 60_000
-    job_worker_default_concurrency: int = 4
-    job_worker_hard_concurrency: int = 8
     memory_index_lag_warning_generations: int = 2
     memory_index_lag_error_generations: int = 10
-    provider_input_tokens_per_call_hard: int = 128_000
     provider_output_tokens_per_call_hard: int = 16_384
     prompt_hard_bytes: int = 1 << 20
     tool_result_hard_bytes: int = 4 << 20
@@ -94,7 +89,6 @@ class Stage2RuntimeLimits:
             ("live_snapshot_default_events", "live_snapshot_hard_events"),
             ("live_snapshot_default_bytes", "live_snapshot_hard_bytes"),
             ("content_hydrate_default_concurrency", "content_hydrate_hard_concurrency"),
-            ("job_worker_default_concurrency", "job_worker_hard_concurrency"),
         )
         for default_name, hard_name in pairs:
             if getattr(self, default_name) > getattr(self, hard_name):

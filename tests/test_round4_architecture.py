@@ -6,7 +6,6 @@ import ast
 import re
 from pathlib import Path
 
-from pulsara_agent.conversation_kernel.job_catalog import JOB_HANDLER_CATALOG
 from pulsara_agent.conversation_kernel.vocabulary import (
     APPEND_GUARDS,
     COMMITTED_EVENT_DESCRIPTORS,
@@ -53,12 +52,11 @@ def _imports(path: Path) -> set[str]:
 
 
 def test_round4_final_oracles_and_plan_descriptors_are_exact() -> None:
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == 31
+    assert len(COMMITTED_EVENT_DESCRIPTORS) == 28
     assert len(LIVE_EVENT_TYPES) == 24
-    assert len(SUBJECT_SLOTS) == 13
-    assert len(APPEND_GUARDS) == 2
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 26
-    assert len(JOB_HANDLER_CATALOG) == 1
+    assert len(SUBJECT_SLOTS) == 11
+    assert len(APPEND_GUARDS) == 1
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 24
 
     observed = {
         descriptor.event_type: descriptor
@@ -74,7 +72,7 @@ def test_round4_final_oracles_and_plan_descriptors_are_exact() -> None:
 
 def test_round4_schema_has_exact_plan_relations_and_required_initial_entry() -> None:
     baseline = BASELINE.read_text(encoding="utf-8")
-    assert baseline.count("CREATE TABLE pulsara_v3.") == 26
+    assert baseline.count("CREATE TABLE pulsara_v3.") == 24
     assert set(CONVERSATION_KERNEL_RELATIONS) >= {
         "plan_workflows",
         "plan_interactions",
@@ -171,8 +169,7 @@ def test_round4_compiler_has_no_repository_or_runtime_authority() -> None:
 
 
 def test_round4_has_no_plan_recovery_job_or_extra_guard() -> None:
-    assert not any("PLAN" in item.handler_type for item in JOB_HANDLER_CATALOG)
-    assert APPEND_GUARDS == ("HostWriterGuard", "JobAttemptClaimGuard")
+    assert APPEND_GUARDS == ("HostWriterGuard",)
     production = tuple(sorted(KERNEL.glob("*.py"))) + tuple(
         sorted((SOURCE / "model_input").glob("*.py"))
     )

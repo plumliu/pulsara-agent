@@ -73,7 +73,7 @@ from pulsara_agent.primitives.tool_result_projection import (
 
 
 COMPILER_CONTRACT_VERSION = (
-    "pulsara.structured-model-input-compiler.prefix-continuity.v8-agent-skills"
+    "pulsara.structured-model-input-compiler.prefix-continuity.v9-compaction"
 )
 
 
@@ -86,7 +86,7 @@ class _SacrificeRank(IntEnum):
 
 _SOURCE_POLICY = {
     ContextSourceKind.BASE_SYSTEM: (
-        "pulsara.base-system.prefix-continuity.v6-agent-skills",
+        "pulsara.base-system.prefix-continuity.v7-compaction",
         ContextChannel.SYSTEM,
         ContextTrustClass.ROOT_INSTRUCTION,
         ContextBudgetClass.MUST_KEEP,
@@ -223,6 +223,26 @@ _SOURCE_POLICY = {
         ),
         ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
     ),
+    ContextSourceKind.COMPACTION_RUNTIME_HANDOFF: (
+        "pulsara.compaction-runtime-handoff.v1",
+        ContextChannel.RUNTIME_OBSERVATION,
+        ContextTrustClass.UNTRUSTED_OBSERVATION,
+        ContextBudgetClass.MUST_KEEP,
+        75,
+        15,
+        (ContextRenderMode.FULL, ContextRenderMode.COMPACT),
+        ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
+    ),
+    ContextSourceKind.RETAINED_SKILL_CONTEXT: (
+        "pulsara.retained-skill-context.v1",
+        ContextChannel.RUNTIME_OBSERVATION,
+        ContextTrustClass.UNTRUSTED_OBSERVATION,
+        ContextBudgetClass.MUST_KEEP,
+        61,
+        21,
+        (ContextRenderMode.FULL,),
+        ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
+    ),
 }
 
 _SOURCE_ABSENCE_POLICY = {
@@ -274,6 +294,12 @@ _SOURCE_ABSENCE_POLICY = {
             ContextSourceAbsenceKind.EXPLICIT_EMPTY,
             ContextSourceAbsenceKind.UNAVAILABLE,
         }
+    ),
+    ContextSourceKind.COMPACTION_RUNTIME_HANDOFF: frozenset(
+        {ContextSourceAbsenceKind.NOT_APPLICABLE, ContextSourceAbsenceKind.EXPLICIT_EMPTY}
+    ),
+    ContextSourceKind.RETAINED_SKILL_CONTEXT: frozenset(
+        {ContextSourceAbsenceKind.NOT_APPLICABLE, ContextSourceAbsenceKind.EXPLICIT_EMPTY}
     ),
 }
 
@@ -611,13 +637,8 @@ class StructuredModelInputCompiler:
         )
         tool_decisions = tuple(
             CompiledToolResultDecision(
-                source_entry_fingerprint=context_fingerprint(
-                    "compiled-tool-result-source:v1",
-                    {
-                        "entry_id": state.item.source_entry_id,
-                        "sequence": state.item.source_entry_sequence,
-                        "tool_call_id": state.item.tool_call_id,
-                    },
+                source_entry_fingerprint=compiled_tool_result_source_fingerprint(
+                    state.item
                 ),
                 current_turn=state.item.source_turn_id
                 == request.canonical_input.identity.turn_id,

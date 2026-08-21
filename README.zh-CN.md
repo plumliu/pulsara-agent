@@ -21,13 +21,13 @@ Python KernelHostCore
 ├── canonical conversation runner
 ├── provider-neutral structured model-input compiler
 ├── tool policy + Host-scoped physical tools
-├── exact-one durable job executor
+├── foreground safe-point compaction + snapshot adoption
 ├── advisory memory governor + retrieval
 ├── process-local live event bus
 └── renderer-neutral Protocol v3 gateway
 
 PostgreSQL
-├── pulsara_v3：26 张产品关系
+├── pulsara_v3：24 张产品关系
 ├── selective agent_events occurrence journal
 ├── public.vector capability
 └── public.pulsara_schema_migrations（只保存 universe metadata）
@@ -35,11 +35,12 @@ PostgreSQL
 
 Durable 边界有意保持狭窄：
 
-- canonical relational rows 拥有 conversation、tool、job 与 coordination 的
+- canonical relational rows 拥有 conversation、tool 与 coordination 的
   当前语义真值；accepted memory row只拥有advisory dataset当前包含的内容；
-- closed 31-type `agent_events` journal 只记录 accepted occurrence，不用于恢复
+- closed 28-type `agent_events` journal 只记录 accepted occurrence，不用于恢复
   execution；
 - 24 种 live event 只存在于内存，进程退出即可丢失；
+- 当前不存在durable job handler或job relation；
 - tool request 在 dispatch 前提交，physical attempt 在 effect invoke 前提交；
 - crash 会中断 active turn；reopen 只 rehydrate 已接受的 conversation facts，
   不恢复 coroutine 或 provider stream；
@@ -99,8 +100,9 @@ Kernel 当前支持：
   taxonomy，USER/domain与exact WORKSPACE scope隔离，best-effort governance，
   多语种sparse recall，optional 1024维dense recall与explicit rerank，以及
   direct/reverse/最多two-hop relation read；
-- 只保留一类具名durable compaction job；memory governance、reflection、
-  embedding与recall均为Host-owned best-effort work，不恢复、不replay；
+- foreground safe-point context compaction提供manual、proactive与mid-turn三条
+  入口；summary adoption保留canonical transcript与pairing-safe protected tail，
+  并在标准cold capability epoch中继续，不使用durable compaction job；
 - canonical Inspector 与 Protocol v3 terminal observation。
 
 Round 6不增加durable MCP连接或request recovery；Host换代只按配置fresh
@@ -181,10 +183,17 @@ Round 5A删除ROOT与child turn的固定model/tool-call次数和turn-wide wall-c
 deadline。每次provider-dispatch planning、canonical operation、provider
 transport、physical tool、writer renewal、Terminal decision和close分别使用自己的
 closed watchdog；foreground provider stream只有connect/write/pool/read-idle边界，
-没有total response timeout，finite durable job仍保留30/45秒attempt total。
-本轮只恢复execution envelope；automatic compaction、summary adoption和
-provider-input rebase仍明确延期到Round 5B。证据记录在
+没有total response timeout。该checkpoint中的finite durable job仍保留bounded
+attempt total。证据记录在
 [`round5_long_horizon_execution_envelope_activation.json`](benchmarks/suites/core/v1/round5_long_horizon_execution_envelope_activation.json)。
+Round 5B现已增加manual、proactive与mid-turn safe-point compaction。当前主模型在
+禁用工具的old exact prefix上生成summary；active adoption随后从snapshot、最近真实
+用户输入、pairing-safe protected tail、current Runtime observation与bounded retained
+Skill context建立标准cold epoch，并在同一run继续。canonical history永不改写，
+provider-error reactive retry仍不支持，最后一套durable job machinery已经删除。
+当前oracle为28类Committed event、24类Live event、11个subject slot、1个append
+guard、24张product relation和0类durable job。验证记录在
+[`round5b_long_horizon_context_compaction_activation.json`](benchmarks/suites/core/v1/round5b_long_horizon_context_compaction_activation.json)。
 Round 7在existing `tool_results` relation中增加immutable observation
 timing/origin facts，并为immediate predecessor outcome与per-turn freshness
 frontier增加两个provider-neutral compiler source。同一compatible Host/scope

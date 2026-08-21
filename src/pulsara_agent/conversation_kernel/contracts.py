@@ -76,21 +76,6 @@ class PromptStatus(StrEnum):
     REJECTED = "REJECTED"
 
 
-class JobSafetyClass(StrEnum):
-    RETRY_SAFE = "RETRY_SAFE"
-    REMOTE_QUERYABLE = "REMOTE_QUERYABLE"
-    NON_IDEMPOTENT = "NON_IDEMPOTENT"
-
-
-class JobStatus(StrEnum):
-    PENDING = "PENDING"
-    ACTIVE = "ACTIVE"
-    SUCCEEDED = "SUCCEEDED"
-    FAILED = "FAILED"
-    CANCELLED = "CANCELLED"
-    OUTCOME_UNKNOWN = "OUTCOME_UNKNOWN"
-
-
 class MemoryQueryDisposition(StrEnum):
     COMPLETE = "COMPLETE"
     PARTIAL_STALE = "PARTIAL_STALE"
@@ -114,27 +99,7 @@ class HostWriterGuard:
         return AppendGuardKind.HOST_WRITER
 
 
-@dataclass(frozen=True, slots=True)
-class JobAttemptClaimGuard:
-    job_id: str
-    attempt_id: str
-    claim_generation: int
-    claim_owner_id: str
-    origin_session_id: str | None
-
-    def __post_init__(self) -> None:
-        _required(self.job_id, "job_id")
-        _required(self.attempt_id, "attempt_id")
-        _required(self.claim_owner_id, "claim_owner_id")
-        if self.claim_generation < 1:
-            raise ValueError("claim_generation must be positive")
-
-    @property
-    def kind(self) -> AppendGuardKind:
-        return AppendGuardKind.JOB_ATTEMPT_CLAIM
-
-
-AppendGuard = HostWriterGuard | JobAttemptClaimGuard
+AppendGuard = HostWriterGuard
 
 
 @dataclass(frozen=True, slots=True)
@@ -257,7 +222,6 @@ class CanonicalSessionSnapshot:
     active_turns: tuple[Mapping[str, object], ...]
     prompt_queue: tuple[Mapping[str, object], ...]
     tool_control: tuple[Mapping[str, object], ...]
-    jobs: tuple[Mapping[str, object], ...]
     memory_freshness: tuple[Mapping[str, object], ...]
 
 
@@ -273,9 +237,6 @@ __all__ = [
     "EntryKind",
     "HostWriterGuard",
     "InlineContent",
-    "JobAttemptClaimGuard",
-    "JobSafetyClass",
-    "JobStatus",
     "MemoryQueryDisposition",
     "PromptDeliveryMode",
     "PromptStatus",

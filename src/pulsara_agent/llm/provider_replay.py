@@ -35,10 +35,13 @@ RESPONSES_NON_REPLAY_OPERATIONAL_ITEM_FIELDS = frozenset(
     {"metadata", "internal_chat_message_metadata_passthrough"}
 )
 RESPONSES_TERMINAL_ELIDABLE_OPERATIONAL_ITEM_FIELDS = frozenset(
-    {"id", "status"}
+    {"id", "status", "phase"}
+)
+RESPONSES_TERMINAL_ELIDABLE_EMPTY_MESSAGE_CONTENT_FIELDS = frozenset(
+    {"annotations", "logprobs"}
 )
 RESPONSES_COMPLETED_OUTPUT_SOURCE_CONTRACT = (
-    "terminal-output-or-contiguous-settled-item-done-with-operational-elision:v3"
+    "terminal-output-or-contiguous-settled-item-done-with-operational-elision:v4"
 )
 
 PROVIDER_REPLAY_COMPATIBILITY_CONTRACT_VERSION = (
@@ -96,6 +99,11 @@ def provider_replay_contract_fingerprint(
             ),
             "terminal_elidable_operational_item_fields": tuple(
                 sorted(RESPONSES_TERMINAL_ELIDABLE_OPERATIONAL_ITEM_FIELDS)
+            ),
+            "terminal_elidable_empty_message_content_fields": tuple(
+                sorted(
+                    RESPONSES_TERMINAL_ELIDABLE_EMPTY_MESSAGE_CONTENT_FIELDS
+                )
             ),
             "canonical_array": "pulsara.canonical-json.v1",
         }
@@ -518,6 +526,7 @@ __all__ = [
     "RESPONSES_COMPLETED_OUTPUT_SOURCE_CONTRACT",
     "RESPONSES_NON_REPLAY_OPERATIONAL_ITEM_FIELDS",
     "RESPONSES_TERMINAL_ELIDABLE_OPERATIONAL_ITEM_FIELDS",
+    "RESPONSES_TERMINAL_ELIDABLE_EMPTY_MESSAGE_CONTENT_FIELDS",
     "RESPONSES_REPLAYABLE_OUTPUT_ITEM_TYPES",
     "PreparedDurableProviderAssistantReplay",
     "ProviderAssistantReplayFragment",

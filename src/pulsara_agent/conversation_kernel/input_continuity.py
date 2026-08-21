@@ -474,6 +474,7 @@ class HostProviderInputContinuityOwner:
                     or candidate.epoch_nonce != slot.installed.epoch_nonce
                     else slot.installed.assistant_replay_fragments
                 ),
+                tool_result_decisions=compiled.tool_result_decisions,
             )
             slot.installed = view
             slot.prepared = None

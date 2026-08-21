@@ -21,6 +21,7 @@ from pulsara_agent.capability.contracts import (
     frozen_tool_spec_fingerprint,
 )
 from pulsara_agent.model_input.contracts import (
+    CompiledToolResultDecision,
     ContextSourceKind,
     ContextTrustClass,
     FrozenCompiledModelInput,
@@ -356,6 +357,9 @@ class FrozenProviderInputEpochView:
     logical_utf8_bytes: int
     semantic_prefix_fingerprint: str
     assistant_replay_fragments: tuple[ProviderAssistantReplayFragment, ...] = field(
+        default=(), repr=False
+    )
+    tool_result_decisions: tuple[CompiledToolResultDecision, ...] = field(
         default=(), repr=False
     )
 

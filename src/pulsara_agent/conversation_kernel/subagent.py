@@ -110,6 +110,28 @@ class KernelSubagentManager:
     def tool_names(self) -> frozenset[str]:
         return SUBAGENT_TOOL_NAMES
 
+    def owns_active_compaction_target(
+        self,
+        *,
+        task_id: str,
+        turn_id: str,
+        owner_task: asyncio.Task[object],
+    ) -> bool:
+        """Exact same-loop ownership check used under the Host safe-point lock.
+
+        The map is mutated only by this event loop.  This deliberately performs
+        no await and no canonical read while the Host lock is held; the later
+        repository compaction preconditions still revalidate the durable turn.
+        """
+
+        live = self._tasks.get(task_id)
+        return bool(
+            live is not None
+            and live.status == "ACTIVE"
+            and live.task is owner_task
+            and stable_subagent_turn_id(self._guard.session_id, task_id) == turn_id
+        )
+
     def bind_runner_factory(
         self, factory: Callable[[], ConversationKernelRunner]
     ) -> None:
@@ -133,6 +155,20 @@ class KernelSubagentManager:
         if tool_name == "stop_agent":
             return await self._stop(arguments)
         raise KeyError(tool_name)
+
+    async def freeze_compaction_handoff(self) -> tuple[dict[str, str], ...]:
+        """Return the bounded flat ACTIVE task view owned by this Host."""
+
+        async with self._lock:
+            return tuple(
+                {
+                    "task_id": item.task_id,
+                    "status": item.status,
+                    "objective": item.objective,
+                }
+                for item in sorted(self._tasks.values(), key=lambda value: value.task_id)
+                if item.status == "ACTIVE"
+            )
 
     async def _spawn(
         self,

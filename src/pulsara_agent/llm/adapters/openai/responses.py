@@ -43,6 +43,7 @@ from pulsara_agent.llm.provider_replay import (
     MAXIMUM_PROVIDER_REPLAY_RESPONSES_ITEMS,
     RESPONSES_NON_REPLAY_OPERATIONAL_ITEM_FIELDS,
     RESPONSES_REPLAYABLE_OUTPUT_ITEM_TYPES,
+    RESPONSES_TERMINAL_ELIDABLE_EMPTY_MESSAGE_CONTENT_FIELDS,
     RESPONSES_TERMINAL_ELIDABLE_OPERATIONAL_ITEM_FIELDS,
 )
 from pulsara_agent.llm.resolution import ResolvedModelCall
@@ -306,6 +307,8 @@ def build_responses_payload(
         payload["instructions"] = root
     if planned_tools and provider_profile.supports_tools:
         payload["tools"] = planned_tools
+    if context.tool_choice_none:
+        payload["tool_choice"] = "none"
     payload["max_output_tokens"] = call.target.context_budget.effective_output_tokens
     if options.reasoning_effort is not None:
         payload["reasoning"] = {"effort": options.reasoning_effort}
@@ -883,9 +886,48 @@ def _select_terminal_or_streamed_output_item(
         RESPONSES_TERMINAL_ELIDABLE_OPERATIONAL_ITEM_FIELDS
     ):
         return None
-    if any(terminal[key] != streamed[key] for key in terminal_keys):
-        return None
+    for key in terminal_keys:
+        if terminal[key] == streamed[key]:
+            continue
+        if key != "content" or terminal.get("type") != "message":
+            return None
+        if not _message_content_differs_only_by_empty_operational_elision(
+            terminal[key], streamed[key]
+        ):
+            return None
     return streamed
+
+
+def _message_content_differs_only_by_empty_operational_elision(
+    terminal: object,
+    streamed: object,
+) -> bool:
+    if (
+        not isinstance(terminal, list)
+        or not isinstance(streamed, list)
+        or len(terminal) != len(streamed)
+    ):
+        return False
+    for terminal_part, streamed_part in zip(terminal, streamed, strict=True):
+        if not isinstance(terminal_part, dict) or not isinstance(streamed_part, dict):
+            return False
+        terminal_keys = set(terminal_part)
+        streamed_keys = set(streamed_part)
+        if terminal_keys.difference(streamed_keys):
+            return False
+        omitted = streamed_keys.difference(terminal_keys)
+        if not omitted.issubset(
+            RESPONSES_TERMINAL_ELIDABLE_EMPTY_MESSAGE_CONTENT_FIELDS
+        ):
+            return False
+        if any(streamed_part[key] != [] for key in omitted):
+            return False
+        if any(
+            terminal_part[key] != streamed_part[key]
+            for key in terminal_keys
+        ):
+            return False
+    return True
 
 
 def _response_output_item_identity_fingerprint(item: dict[str, Any]) -> str:

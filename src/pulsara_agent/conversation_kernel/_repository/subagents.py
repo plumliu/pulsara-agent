@@ -516,19 +516,14 @@ class _SubagentOperations:
                     *self._permission_columns(permission),
                 ),
             )
-            connection.execute(
-                """
-                INSERT INTO pulsara_v3.turn_context_binding_revisions (
-                    id, session_id, turn_id, revision_ordinal,
-                    base_kind, source_through_sequence
-                ) VALUES (%s, %s, %s, 0, 'FULL_HISTORY', %s)
-                """,
-                (
-                    context_binding_revision_id,
-                    guard.session_id,
-                    turn_id,
-                    entry_sequence - 1,
-                ),
+            self._insert_initial_context_binding_revision(
+                connection,
+                session_id=guard.session_id,
+                turn_id=turn_id,
+                revision_id=context_binding_revision_id,
+                initial_entry_sequence=entry_sequence,
+                scope_kind=ConversationScopeKind.SUBAGENT_TASK,
+                scope_subagent_task_id=task_id,
             )
             self._insert_entry(
                 connection,
@@ -643,11 +638,16 @@ class _SubagentOperations:
                 and permission.admission_source
                 is RunPermissionAdmissionSource.SUBAGENT_INHERITANCE
                 and permission.inherited_from_turn_id == str(task["parent_turn_id"])
-                and int(revision["revision_ordinal"]) == 0
-                and str(revision["base_kind"]) == "FULL_HISTORY"
-                and revision["context_snapshot_id"] is None
-                and int(revision["source_through_sequence"])
-                == int(entry["entry_sequence"]) - 1
+                and self._initial_context_binding_revision_matches(
+                    connection,
+                    row=revision,
+                    session_id=candidate.session_id,
+                    turn_id=candidate.turn_id,
+                    revision_id=candidate.context_binding_revision_id,
+                    initial_entry_sequence=int(entry["entry_sequence"]),
+                    scope_kind=ConversationScopeKind.SUBAGENT_TASK,
+                    scope_subagent_task_id=candidate.task_id,
+                )
                 and str(entry["turn_id"]) == candidate.turn_id
                 and str(entry["entry_kind"]) == EntryKind.USER_MESSAGE.value
                 and str(entry["conversation_scope_kind"]) == "SUBAGENT_TASK"

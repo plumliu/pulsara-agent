@@ -91,7 +91,6 @@ _EVENT_ONLY_TYPES = frozenset(
     {
         CommittedEventType.SUBAGENT_MESSAGE_ACCEPTED.value,
         CommittedEventType.SUBAGENT_RESULT_ACCEPTED.value,
-        CommittedEventType.JOB_ATTEMPT_ACCEPTED.value,
     }
 )
 _CONTROL_TYPES = frozenset(_COMMITTED_ENUM) - _ENTRY_TYPES - _EVENT_ONLY_TYPES
@@ -108,9 +107,9 @@ COMMITTED_PROJECTION_BRANCH_BY_TYPE: Mapping[str, str] = MappingProxyType(
     }
 )
 
-if len(_COMMITTED_ENUM) != 31 or len(COMMITTED_EVENT_DESCRIPTORS) != 31:
+if len(_COMMITTED_ENUM) != 28 or len(COMMITTED_EVENT_DESCRIPTORS) != 28:
     raise RuntimeError(
-        "Protocol v3 committed projection map must contain exact 31 types"
+        "Protocol v3 committed projection map must contain exact 28 types"
     )
 
 
@@ -571,14 +570,6 @@ class CanonicalProtocolReader:
                ORDER BY t.accepted_at, t.id LIMIT %s""",
             (session_id,),
         )
-        jobs = bounded(
-            """SELECT j.*, count(a.id)::integer AS attempt_count
-               FROM pulsara_v3.durable_jobs AS j
-               LEFT JOIN pulsara_v3.durable_job_attempts AS a ON a.job_id = j.id
-               WHERE j.origin_session_id = %s AND j.status IN ('PENDING', 'ACTIVE')
-               GROUP BY j.id ORDER BY j.accepted_at, j.id LIMIT %s""",
-            (session_id,),
-        )
         active_plan = connection.execute(
             """
             SELECT * FROM pulsara_v3.plan_workflows
@@ -680,14 +671,6 @@ class CanonicalProtocolReader:
                 result_id=str(row["result_id"] or ""),
                 result_entry_id=str(row["result_entry_id"] or ""),
                 result_accepted=row["accepted_root_entry_id"] is not None,
-            )
-        for row in jobs:
-            result.jobs.add(
-                job_id=str(row["id"]),
-                handler_type=str(row["handler_type"]),
-                status=str(row["status"]),
-                maximum_attempts=int(row["maximum_attempts"]),
-                attempt_count=int(row["attempt_count"]),
             )
         if active_plan is not None:
             result.active_plan_workflow.CopyFrom(
@@ -877,8 +860,6 @@ def _event_subject(event: Mapping[str, object]) -> tuple[str, str]:
             "subject_turn_id",
             "subject_entry_id",
             "subject_tool_attempt_id",
-            "subject_job_id",
-            "subject_job_attempt_id",
             "subject_queue_item_id",
             "subject_interaction_decision_id",
             "subject_context_binding_revision_id",

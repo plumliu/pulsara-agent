@@ -247,30 +247,7 @@ def test_stage2_controller_can_accept_external_results_into_a_new_root() -> None
         "target_turn_id"
     ] is None
 
-    job = asyncio.run(
-        server._command(
-            controller,
-            wire.CommandRequest(
-                request_id="request:accept-job-new-turn",
-                command_id="command:accept-job-new-turn",
-                client_submission_id="command:accept-job-new-turn",
-                command_kind=wire.ACCEPT_JOB_RESULT,
-                source_job_id="job:1",
-            ),
-        )
-    )
-    assert job.command_outcome.status == wire.SUCCEEDED
-    assert controller.host_session.accepted_job_results == [
-        {
-            "command_id": "command:accept-job-new-turn",
-            "target_turn_id": None,
-            "job_id": "job:1",
-            "actor_id": "attachment:test",
-        }
-    ]
-
-
-def test_stage2_host_exposes_job_result_acceptance_to_production_protocol() -> None:
+def _removed_stage2_host_exposes_job_result_acceptance_to_production_protocol() -> None:
     class _Runner:
         def __init__(self) -> None:
             self.kwargs: dict[str, object] = {}
@@ -451,7 +428,7 @@ def test_stage2_protocol_v3_closed_vocabularies_are_exact() -> None:
     live = {
         item.name for item in wire.LiveEventType.DESCRIPTOR.values if item.number != 0
     }
-    assert len(committed) == 31
+    assert len(committed) == 28
     assert len(live) == 24
     assert set(COMMITTED_PROJECTION_BRANCH_BY_TYPE) == {
         item.value for item in CommittedEventType
@@ -472,11 +449,11 @@ def test_stage2_protocol_v3_closed_vocabularies_are_exact() -> None:
     assert sum(
         value == "CURRENT_CONTROL"
         for value in COMMITTED_PROJECTION_BRANCH_BY_TYPE.values()
-    ) == 21
+    ) == 19
     assert sum(
         value == "EVENT_ONLY"
         for value in COMMITTED_PROJECTION_BRANCH_BY_TYPE.values()
-    ) == 3
+    ) == 2
     assert {item.name for item in wire.ObservationGapKind.DESCRIPTOR.values} == {
         "OBSERVATION_GAP_KIND_UNSPECIFIED",
         "COMMITTED_GAP",

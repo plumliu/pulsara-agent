@@ -13,12 +13,12 @@ from enum import StrEnum
 from hashlib import sha256
 import json
 from time import monotonic
-from typing import Mapping, Protocol, Sequence
+from typing import TYPE_CHECKING, Mapping, Protocol, Sequence
 
 from psycopg import IsolationLevel
 from psycopg.rows import dict_row
 
-from pulsara_agent.conversation_kernel.repository import (
+from pulsara_agent.conversation_kernel.repository_errors import (
     ConversationKernelConflict,
 )
 from pulsara_agent.model_input.contracts import (
@@ -125,6 +125,12 @@ from pulsara_agent.storage.postgres_connection_provider import (
     VerifiedPostgresConnectionProviderProtocol,
 )
 
+if TYPE_CHECKING:
+    from pulsara_agent.conversation_kernel.compaction.contracts import (
+        FrozenCompactionCanonicalRead,
+        FrozenCompactionHeadroomPreflight,
+    )
+
 
 class CanonicalProviderContinuityFailureKind(StrEnum):
     BLOB_READER_UNAVAILABLE = "BLOB_READER_UNAVAILABLE"
@@ -200,18 +206,303 @@ class CanonicalProviderInputReader:
             cut, deadline_monotonic=deadline_monotonic
         ).compile_snapshot
 
-    def read_frozen_dispatch(
+    def read_compaction_headroom_preflight(
         self,
         cut: PreparedProviderInputCut,
         *,
         deadline_monotonic: float,
-    ) -> FrozenCanonicalProviderDispatchRead:
+    ) -> FrozenCompactionHeadroomPreflight:
+        """Quote reducible input from metadata before hydrating canonical bodies."""
+
+        from pulsara_agent.conversation_kernel.compaction.contracts import (
+            freeze_compaction_headroom_preflight,
+        )
+
         with self._provider.connection(
             lane=PostgresConnectionLane.INSPECTOR,
             row_factory=dict_row,
             deadline_monotonic=deadline_monotonic,
             isolation_level=IsolationLevel.REPEATABLE_READ,
         ) as connection:
+            binding = connection.execute(
+                """
+                SELECT t.conversation_scope_kind, t.scope_subagent_task_id,
+                       r.base_kind, r.source_through_sequence
+                FROM pulsara_v3.turns AS t
+                JOIN pulsara_v3.turn_context_binding_revisions AS r
+                  ON r.session_id = t.session_id
+                 AND r.turn_id = t.id
+                 AND r.id = t.current_context_binding_revision_id
+                WHERE t.session_id = %s AND t.id = %s AND r.id = %s
+                """,
+                (
+                    cut.session_id,
+                    cut.turn_id,
+                    cut.context_binding_revision_id,
+                ),
+            ).fetchone()
+            if binding is None:
+                raise ConversationKernelConflict(
+                    "compaction headroom binding is stale"
+                )
+            scope_kind = ModelInputScopeKind(str(binding["conversation_scope_kind"]))
+            scope_task_id = binding["scope_subagent_task_id"]
+            floor = (
+                0
+                if str(binding["base_kind"]) == "FULL_HISTORY"
+                else int(binding["source_through_sequence"])
+            )
+            if floor > cut.provider_input_through_sequence:
+                raise ConversationKernelConflict(
+                    "compaction headroom floor exceeds its prepared cut"
+                )
+            quote = connection.execute(
+                """
+                WITH selected_entries AS (
+                    SELECT e.id, e.entry_kind, e.content_size
+                    FROM pulsara_v3.transcript_entries AS e
+                    WHERE e.session_id = %s
+                      AND e.conversation_scope_kind = %s
+                      AND e.scope_subagent_task_id IS NOT DISTINCT FROM %s
+                      AND e.entry_sequence > %s
+                      AND e.entry_sequence <= %s
+                    ORDER BY e.entry_sequence
+                    LIMIT %s
+                ),
+                entry_totals AS (
+                    SELECT
+                        count(*) AS total_entries,
+                        count(*) FILTER (
+                            WHERE entry_kind <> 'TOOL_RESULT'
+                        ) AS visible_entry_items,
+                        coalesce(sum(
+                            CASE
+                              WHEN entry_kind IN (
+                                  'USER_MESSAGE', 'USER_STEER',
+                                  'TERMINAL_OBSERVATION', 'PLAN_CONTINUATION'
+                              ) THEN content_size
+                              WHEN entry_kind = 'TOOL_RESULT'
+                                  THEN content_size * 2
+                              ELSE 0
+                            END
+                        ), 0) AS entry_bytes
+                    FROM selected_entries
+                ),
+                selected_blocks AS (
+                    SELECT b.block_kind, b.content_size,
+                           b.tool_arguments, b.tool_call_id
+                    FROM pulsara_v3.assistant_message_blocks AS b
+                    JOIN selected_entries AS e
+                      ON e.id = b.assistant_entry_id
+                    ORDER BY b.assistant_entry_id, b.block_ordinal
+                    LIMIT %s
+                ),
+                block_totals AS (
+                    SELECT
+                        count(*) AS total_blocks,
+                        count(*) FILTER (
+                            WHERE block_kind = 'TOOL_CALL'
+                        ) AS tool_calls,
+                        coalesce(sum(
+                            CASE
+                              WHEN block_kind IN ('TEXT', 'DATA')
+                                  THEN content_size
+                              ELSE octet_length(tool_arguments::text)
+                            END
+                        ), 0) AS block_bytes,
+                        coalesce(sum(
+                            CASE WHEN block_kind = 'TOOL_CALL'
+                              THEN 512 + 6 * octet_length(tool_call_id)
+                              ELSE 0
+                            END
+                        ), 0) AS result_envelope_bytes
+                    FROM selected_blocks
+                )
+                SELECT e.total_entries, e.visible_entry_items, e.entry_bytes,
+                       b.total_blocks, b.tool_calls, b.block_bytes,
+                       b.result_envelope_bytes
+                FROM entry_totals AS e CROSS JOIN block_totals AS b
+                """,
+                (
+                    cut.session_id,
+                    scope_kind.value,
+                    scope_task_id,
+                    floor,
+                    cut.provider_input_through_sequence,
+                    self._maximum_items + 1,
+                    self._maximum_items + 1,
+                ),
+            ).fetchone()
+            if quote is None:
+                raise ConversationKernelConflict(
+                    "compaction headroom quote is absent"
+                )
+            tool_calls = int(quote["tool_calls"])
+            return freeze_compaction_headroom_preflight(
+                session_id=cut.session_id,
+                turn_id=cut.turn_id,
+                context_binding_revision_id=cut.context_binding_revision_id,
+                scope_kind=scope_kind,
+                scope_subagent_task_id=(
+                    None if scope_task_id is None else str(scope_task_id)
+                ),
+                effective_materialization_lineage_floor=floor,
+                provider_input_through_sequence=(
+                    cut.provider_input_through_sequence
+                ),
+                # A request contributes one assistant item and at most one
+                # result/closure plus one cut-visible late correction per call.
+                post_base_item_count=max(
+                    int(quote["total_entries"]),
+                    int(quote["total_blocks"]),
+                    int(quote["visible_entry_items"]) + 2 * tool_calls,
+                ),
+                post_base_canonical_utf8_bytes=(
+                    int(quote["entry_bytes"])
+                    + int(quote["block_bytes"])
+                    + int(quote["result_envelope_bytes"])
+                ),
+            )
+
+    def read_frozen_compaction_cut(
+        self,
+        cut: PreparedProviderInputCut,
+        *,
+        deadline_monotonic: float,
+    ) -> FrozenCompactionCanonicalRead:
+        """Freeze canonical input, replay metadata and lineage in one RR cut."""
+
+        from pulsara_agent.conversation_kernel.compaction.contracts import (
+            CompactionLineageBaseKind,
+            CompactionScope,
+            CompactionSourceLineageBase,
+            freeze_compaction_canonical_range,
+            freeze_compaction_canonical_read,
+        )
+
+        with self._provider.connection(
+            lane=PostgresConnectionLane.INSPECTOR,
+            row_factory=dict_row,
+            deadline_monotonic=deadline_monotonic,
+            isolation_level=IsolationLevel.REPEATABLE_READ,
+        ) as connection:
+            dispatch = self.read_frozen_dispatch(
+                cut,
+                deadline_monotonic=deadline_monotonic,
+                _connection=connection,
+            )
+            row = connection.execute(
+                """
+                SELECT t.workspace_id, t.status, r.revision_ordinal,
+                       r.base_kind, r.context_snapshot_id,
+                       r.source_through_sequence, snapshot.source_digest,
+                       snapshot.source_through_sequence AS snapshot_source_cut
+                FROM pulsara_v3.turns AS t
+                JOIN pulsara_v3.turn_context_binding_revisions AS r
+                  ON r.session_id = t.session_id
+                 AND r.id = t.current_context_binding_revision_id
+                LEFT JOIN pulsara_v3.context_snapshots AS snapshot
+                  ON snapshot.session_id = r.session_id
+                 AND snapshot.id = r.context_snapshot_id
+                WHERE t.session_id = %s AND t.id = %s
+                  AND r.id = %s
+                """,
+                (
+                    cut.session_id,
+                    cut.turn_id,
+                    cut.context_binding_revision_id,
+                ),
+            ).fetchone()
+            if row is None:
+                raise ConversationKernelConflict(
+                    "compaction binding lineage is absent"
+                )
+            canonical = dispatch.compile_snapshot.canonical_input
+            identity = canonical.identity
+            scope = CompactionScope(
+                session_id=identity.session_id,
+                workspace_id=str(row["workspace_id"]),
+                turn_id=identity.turn_id,
+                scope_kind=identity.conversation_scope_kind,
+                scope_subagent_task_id=identity.scope_subagent_task_id,
+            )
+            base_kind = str(row["base_kind"])
+            if base_kind == "FULL_HISTORY":
+                lineage = CompactionSourceLineageBase(
+                    kind=CompactionLineageBaseKind.FULL_HISTORY_GENESIS,
+                    scope=scope,
+                    binding_revision_id=cut.context_binding_revision_id,
+                    binding_revision_ordinal=int(row["revision_ordinal"]),
+                    persisted_revision_genesis_marker=int(
+                        row["source_through_sequence"]
+                    ),
+                    effective_materialization_lineage_floor=0,
+                )
+            elif (
+                base_kind == "SNAPSHOT"
+                and row["context_snapshot_id"] is not None
+                and row["source_digest"] is not None
+                and int(row["snapshot_source_cut"])
+                == int(row["source_through_sequence"])
+            ):
+                lineage = CompactionSourceLineageBase(
+                    kind=CompactionLineageBaseKind.CURRENT_SNAPSHOT,
+                    scope=scope,
+                    binding_revision_id=cut.context_binding_revision_id,
+                    binding_revision_ordinal=int(row["revision_ordinal"]),
+                    persisted_revision_genesis_marker=int(
+                        row["source_through_sequence"]
+                    ),
+                    effective_materialization_lineage_floor=int(
+                        row["source_through_sequence"]
+                    ),
+                    snapshot_id=str(row["context_snapshot_id"]),
+                    prior_source_digest=str(row["source_digest"]),
+                )
+            else:
+                raise ConversationKernelConflict(
+                    "compaction binding lineage is corrupt"
+                )
+            canonical_range = freeze_compaction_canonical_range(
+                scope=scope,
+                effective_materialization_lineage_floor=(
+                    lineage.effective_materialization_lineage_floor
+                ),
+                source_through_sequence=(
+                    identity.provider_input_through_sequence
+                ),
+                ordered_items=canonical.items,
+                closures=canonical.closures,
+                late_outcomes=canonical.late_outcomes,
+            )
+            return freeze_compaction_canonical_read(
+                scope=scope,
+                turn_status=str(row["status"]),
+                dispatch_read=dispatch,
+                lineage_base=lineage,
+                safe_head_range=canonical_range,
+            )
+
+    def read_frozen_dispatch(
+        self,
+        cut: PreparedProviderInputCut,
+        *,
+        deadline_monotonic: float,
+        _connection: object | None = None,
+    ) -> FrozenCanonicalProviderDispatchRead:
+        from contextlib import nullcontext
+
+        manager = (
+            self._provider.connection(
+                lane=PostgresConnectionLane.INSPECTOR,
+                row_factory=dict_row,
+                deadline_monotonic=deadline_monotonic,
+                isolation_level=IsolationLevel.REPEATABLE_READ,
+            )
+            if _connection is None
+            else nullcontext(_connection)
+        )
+        with manager as connection:
             binding = connection.execute(
                 """
                 SELECT t.workspace_id, t.conversation_scope_kind,
@@ -349,7 +640,7 @@ class CanonicalProviderInputReader:
                 SELECT e.id, e.turn_id, e.entry_sequence, e.entry_kind,
                        e.context_binding_revision_id,
                        e.provider_input_through_sequence,
-                       e.source_job_id, e.source_subagent_result_id,
+                       e.source_subagent_result_id,
                        e.source_plan_workflow_id,
                        e.source_plan_interaction_id,
                        e.source_plan_handoff_kind,
@@ -611,6 +902,7 @@ class CanonicalProviderInputReader:
                                     result_content, str(result["content_codec"])
                                 ),
                                 tool_call_id=call.tool_call_id,
+                                tool_request_entry_id=entry_id,
                                 tool_result_context=_tool_result_metadata(result),
                                 tool_result_body_text=_decode_provider_text(
                                     result_content, str(result["content_codec"])
@@ -662,6 +954,7 @@ class CanonicalProviderInputReader:
                             source_turn_id=str(row["turn_id"]),
                             text=closure_text,
                             tool_call_id=call.tool_call_id,
+                            tool_request_entry_id=entry_id,
                         )
                     )
                     if (
@@ -705,6 +998,7 @@ class CanonicalProviderInputReader:
                                     source_turn_id=str(result["result_turn_id"]),
                                     text=late_text,
                                     tool_call_id=call.tool_call_id,
+                                    tool_request_entry_id=entry_id,
                                     tool_result_context=_tool_result_metadata(result),
                                     tool_result_body_text=_decode_provider_text(
                                         result_content,
@@ -1868,8 +2162,6 @@ def _canonical_input_origin(
         return CanonicalInputOriginKind.SUBAGENT_OBJECTIVE
     if row["source_subagent_result_id"] is not None:
         return CanonicalInputOriginKind.SUBAGENT_RESULT
-    if row["source_job_id"] is not None:
-        return CanonicalInputOriginKind.JOB_RESULT
     if row["entry_kind"] == "USER_STEER":
         return CanonicalInputOriginKind.HUMAN_STEER
     return CanonicalInputOriginKind.HUMAN_MESSAGE

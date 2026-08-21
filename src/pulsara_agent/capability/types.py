@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 
@@ -87,6 +87,7 @@ class LocalSkillManifest:
     manifest_semantic_fingerprint: str
     root_kind: LocalSkillRootKind
     authoring_diagnostic_codes: tuple[SkillAuthoringDiagnosticCode, ...] = ()
+    raw_document: str = field(default="", repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.root_kind, LocalSkillRootKind):

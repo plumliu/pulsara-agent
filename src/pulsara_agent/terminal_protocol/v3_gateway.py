@@ -77,7 +77,7 @@ from pulsara_agent.terminal_protocol.generated_v3 import terminal_kernel_v3_pb2 
 PROTOCOL_MAJOR = 3
 PROTOCOL_MINOR = 0
 PROTOCOL_SCHEMA_FINGERPRINT = (
-    "sha256:dc888ef204a1c0188dd7cbcd01f3e8cb9ce96fd9f2503538d678fc828455fb6c"
+    "sha256:015f9e41b53711458dde89d2db521617105cc075f869db96d56f5760daa80097"
 )
 MAXIMUM_FRAME_BYTES = 8 << 20
 MAXIMUM_OBSERVATION_WAIT_MS = STAGE2_LIMITS.committed_observation_hard_wait_ms
@@ -416,7 +416,9 @@ class TerminalKernelProtocolServer:
             live_control_snapshot=wire.LiveControlSnapshotResponse(
                 request_id=request.request_id,
                 snapshot=_live_control_snapshot_to_wire(
-                    snapshot, state.host_session.current_todo_snapshots()
+                    snapshot,
+                    state.host_session.current_todo_snapshots(),
+                    state.host_session.current_compaction_projection(),
                 ),
             )
         )
@@ -569,15 +571,16 @@ class TerminalKernelProtocolServer:
             return _error(request.request_id, "COMMAND_ID_INVALID")
         if request.client_submission_id not in ("", request.command_id):
             return _error(request.request_id, "COMMAND_SUBMISSION_ID_MISMATCH")
-        if request.command_kind not in (
-            wire.ACCEPT_SUBAGENT_RESULT,
-            wire.ACCEPT_JOB_RESULT,
-        ) and (request.source_subagent_result_id or request.source_job_id):
+        if request.command_kind != wire.ACCEPT_SUBAGENT_RESULT and (
+            request.source_subagent_result_id
+        ):
             return _error(request.request_id, "COMMAND_SOURCE_UNION_INVALID")
         if request.command_kind != wire.DETACH and (
             state.granted_role != wire.ATTACHMENT_ROLE_CONTROLLER
         ):
             return _error(request.request_id, "CONTROLLER_REQUIRED")
+        if request.force and request.command_kind != wire.COMPACT_CONTEXT:
+            return _error(request.request_id, "COMMAND_FORCE_FIELD_NOT_ALLOWED")
         requested_permission = _permission_from_wire(request.requested_permission_mode)
         if (
             request.command_kind not in (wire.SUBMIT_PROMPT, wire.ENTER_PLAN)
@@ -627,7 +630,6 @@ class TerminalKernelProtocolServer:
         elif request.command_kind == wire.ACCEPT_SUBAGENT_RESULT:
             if (
                 request.text
-                or request.source_job_id
                 or not request.source_subagent_result_id
             ):
                 return _error(request.request_id, "SUBAGENT_RESULT_REQUEST_INVALID")
@@ -635,19 +637,6 @@ class TerminalKernelProtocolServer:
                 command_id=request.command_id,
                 target_turn_id=request.target_turn_id or None,
                 child_result_id=request.source_subagent_result_id,
-                actor_id=state.attachment_id,
-            )
-        elif request.command_kind == wire.ACCEPT_JOB_RESULT:
-            if (
-                request.text
-                or request.source_subagent_result_id
-                or not request.source_job_id
-            ):
-                return _error(request.request_id, "JOB_RESULT_REQUEST_INVALID")
-            outcome = await state.host_session.accept_job_result(
-                command_id=request.command_id,
-                target_turn_id=request.target_turn_id or None,
-                job_id=request.source_job_id,
                 actor_id=state.attachment_id,
             )
         elif request.command_kind == wire.ENTER_PLAN:
@@ -690,6 +679,34 @@ class TerminalKernelProtocolServer:
                 )
             except (ConversationKernelConflict, ValueError):
                 return _error(request.request_id, "PLAN_EXIT_CONFLICT")
+        elif request.command_kind == wire.COMPACT_CONTEXT:
+            if (
+                request.text
+                or request.source_subagent_result_id
+                or request.target_plan_workflow_id
+                or request.expected_plan_workflow_revision
+            ):
+                return _error(request.request_id, "COMPACTION_REQUEST_INVALID")
+            value = await state.host_session.compact_context(
+                command_id=request.command_id,
+                force=request.force,
+                expected_active_turn_id=request.target_turn_id or None,
+            )
+            from pulsara_agent.conversation_kernel.host import KernelCommandOutcome
+
+            outcome = KernelCommandOutcome(
+                command_id=request.command_id,
+                status=(
+                    "SUCCEEDED"
+                    if value.disposition.value in {"COMPACTED", "NOT_NEEDED"}
+                    else "PENDING"
+                    if value.disposition.value == "DEFERRED_TO_SAFE_POINT"
+                    else "REJECTED"
+                ),
+                target_id=value.target_turn_id,
+                public_code=value.disposition.value,
+                public_message=value.public_code,
+            )
         elif request.command_kind == wire.DETACH:
             if request.text or request.target_turn_id:
                 return _error(request.request_id, "DETACH_REQUEST_INVALID")
@@ -1355,8 +1372,16 @@ def _interaction_to_wire(value: CurrentInteractionView) -> wire.LiveInteractionV
 
 
 def _live_control_snapshot_to_wire(
-    snapshot: object, todo_snapshots: tuple[object, ...]
+    snapshot: object,
+    todo_snapshots: tuple[object, ...],
+    compaction_projection: tuple[bool, str | None, str | None, str | None] = (
+        False,
+        None,
+        None,
+        None,
+    ),
 ) -> wire.SessionLiveControlSnapshot:
+    in_progress, trigger, phase, scope = compaction_projection
     result = wire.SessionLiveControlSnapshot(
         session_id=snapshot.session_id,
         owner_epoch=snapshot.owner_epoch,
@@ -1386,6 +1411,11 @@ def _live_control_snapshot_to_wire(
             )
             for item in todo_snapshots
         ),
+        compaction_in_progress=in_progress,
+        compaction_trigger=trigger or "",
+        compaction_phase=phase or "",
+        compaction_target_scope=scope or "",
+        input_admission_deferred=in_progress,
     )
     if snapshot.current_interaction is not None:
         result.current_interaction.CopyFrom(

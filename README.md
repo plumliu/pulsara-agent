@@ -21,13 +21,13 @@ Python KernelHostCore
 ├── canonical conversation runner
 ├── provider-neutral structured model-input compiler
 ├── tool policy + Host-scoped physical tools
-├── exact-one durable job executor
+├── foreground safe-point compaction + snapshot adoption
 ├── advisory memory governor + retrieval
 ├── process-local live event bus
 └── renderer-neutral Protocol v3 gateway
 
 PostgreSQL
-├── pulsara_v3: 26 product relations
+├── pulsara_v3: 24 product relations
 ├── selective agent_events occurrence journal
 ├── public.vector capability
 └── public.pulsara_schema_migrations (universe metadata only)
@@ -35,12 +35,13 @@ PostgreSQL
 
 The durable boundary is intentionally narrow:
 
-- canonical relational rows own current conversation, tool, job, and
+- canonical relational rows own current conversation, tool, and
   coordination truth; accepted memory rows own only the current contents of
   the advisory dataset;
-- a closed 31-type `agent_events` journal records accepted occurrences but is
+- a closed 28-type `agent_events` journal records accepted occurrences but is
   never replayed to reconstruct execution;
 - 24 live event types exist only in memory and may be lost at process exit;
+- no durable job handler or job relation remains;
 - tool requests are committed before dispatch and a physical attempt is
   committed before an effect is invoked;
 - a crash interrupts the active turn; reopening rehydrates accepted
@@ -108,9 +109,10 @@ The current Kernel supports:
   governance, multilingual sparse recall, optional 1024-dimensional dense
   recall and explicit rerank, direct/reverse relation reads, and at most
   two-hop traversal;
-- one named durable background job for compaction; memory governance,
-  reflection, embedding, and recall remain Host-owned best-effort work and are
-  never recovered or replayed;
+- foreground safe-point context compaction with manual, proactive, and
+  mid-turn entry points; summary adoption preserves the canonical transcript,
+  keeps a pairing-safe protected tail, and continues in a standard cold
+  capability epoch without a durable compaction job;
 - canonical inspection and Protocol v3 terminal observation.
 
 Round 6 intentionally does not add durable MCP connection or request recovery.
@@ -198,10 +200,19 @@ deadline from ROOT and child turns. Each provider-dispatch plan, canonical
 operation, provider transport, physical tool call, writer renewal, Terminal
 decision, and close owner instead has its own closed watchdog. Foreground
 provider streams have connect/write/pool/read-idle bounds but no total response
-timeout; finite durable jobs retain their 30/45-second attempt totals. This is
-an execution-envelope change only: automatic compaction, summary adoption, and
-provider-input rebase remain deferred to Round 5B. Verification is recorded in
+timeout. At that checkpoint finite durable jobs retained their bounded attempt
+totals. Verification is recorded in
 [`round5_long_horizon_execution_envelope_activation.json`](benchmarks/suites/core/v1/round5_long_horizon_execution_envelope_activation.json).
+Round 5B now adds manual, proactive, and mid-turn safe-point compaction. The
+current primary model summarizes the old exact prefix with tools disabled;
+active adoption then continues the same run in a new standard cold epoch built
+from the snapshot, recent human input, a pairing-safe protected tail, current
+Runtime observations, and bounded retained Skill context. Canonical history is
+never rewritten, provider-error reactive retry remains unsupported, and the
+last durable job machinery has been removed. The current oracle is 28 committed
+events, 24 live events, 11 subject slots, one append guard, 24 product
+relations, and zero durable jobs. Verification is recorded in
+[`round5b_long_horizon_context_compaction_activation.json`](benchmarks/suites/core/v1/round5b_long_horizon_context_compaction_activation.json).
 Round 7 extends the existing `tool_results` relation with immutable observation
 timing/origin facts and adds two provider-neutral compiler sources for the
 immediate predecessor outcome and per-turn freshness frontier. Within one

@@ -1,6 +1,6 @@
 {
   "schema_version": "conversation_kernel_expected_catalog.v2",
-  "observed_catalog_fingerprint": "sha256:2fcfc6bcf1680e99b89ee0ef8d6c42b8f0f10daf74cdd538483e3b3c231f7f43",
+  "observed_catalog_fingerprint": "sha256:21644a91bb43962e1ca4e7bd7e0e9e9a896ff356f941a94fe530be952e7d449c",
   "required_extensions": [
     {
       "extension_name": "vector",
@@ -28,8 +28,6 @@
     "plan_interactions",
     "subagent_tasks",
     "subagent_task_children",
-    "durable_jobs",
-    "durable_job_attempts",
     "memory_candidates",
     "memory_candidate_tool_result_refs",
     "memory_candidate_basis_refs",

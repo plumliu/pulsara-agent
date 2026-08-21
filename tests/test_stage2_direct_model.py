@@ -13,6 +13,7 @@ from pulsara_agent.conversation_kernel.direct_model import (
     DirectKernelModelPort,
     KernelModelExecutionRequest,
     KernelModelPreparationRequest,
+    KernelModelTargetPreparationRequest,
 )
 from pulsara_agent.conversation_kernel.input_continuity import (
     HostProviderInputContinuityOwner,
@@ -81,6 +82,32 @@ def test_round5_foreground_model_rejects_a_total_transport_timeout() -> None:
             ),
             timeout_policy=OpenAITransportTimeoutPolicy(1, 1, 1, 1, 30),
         )
+
+
+def test_foreground_target_uses_resolved_model_input_budget_without_implicit_128k_cap() -> None:
+    port = DirectKernelModelPort(
+        config=test_llm_config(
+            api_key="test",
+            base_url="https://example.invalid/v1",
+            pro_model="test-pro",
+            flash_model="test-flash",
+        )
+    )
+    prepared = port.prepare_target(
+        KernelModelTargetPreparationRequest(
+            session_id="session:budget",
+            turn_id="turn:budget",
+            model_call_index=1,
+            purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
+            maximum_input_tokens=None,
+            maximum_output_tokens=16_384,
+        )
+    )
+
+    assert prepared.effective_input_budget_tokens == (
+        prepared.target.context_budget.input_budget_tokens
+    )
+    assert prepared.effective_input_budget_tokens > 128_000
 
 
 def test_round5_preflight_rejects_a_foreign_transport_timeout_binding() -> None:

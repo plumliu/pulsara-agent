@@ -11,7 +11,6 @@ import subprocess
 import sys
 from typing import get_args
 
-from pulsara_agent.conversation_kernel.jobs import JOB_HANDLER_CATALOG
 from pulsara_agent.conversation_kernel.limits import (
     STAGE2_LIMITS,
     STAGE2_STRUCTURAL_BUDGETS,
@@ -41,7 +40,6 @@ PROVIDER_PRODUCTION_MODULES = (
     KERNEL / "assembler.py",
     KERNEL / "runner.py",
     KERNEL / "direct_model.py",
-    KERNEL / "job_model.py",
     ROOT / "src/pulsara_agent/llm/normalized_transport.py",
     ROOT / "src/pulsara_agent/llm/adapters/openai/events.py",
     ROOT / "src/pulsara_agent/llm/adapters/openai/responses.py",
@@ -57,20 +55,12 @@ def _repository_aggregate_source() -> str:
     return "\n".join(path.read_text(encoding="utf-8") for path in paths)
 
 
-def test_stage2_registry_schema_and_job_catalog_are_exact() -> None:
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == 31
+def test_stage2_registry_schema_and_removed_job_universe_are_exact() -> None:
+    assert len(COMMITTED_EVENT_DESCRIPTORS) == 28
     assert len(LIVE_EVENT_TYPES) == 24
-    assert len(SUBJECT_SLOTS) == 13
-    assert len(APPEND_GUARDS) == 2
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 26
-    assert {item.handler_type for item in JOB_HANDLER_CATALOG} == {
-        "BACKGROUND_COMPACTION",
-    }
-    assert not any(
-        token in item.handler_type.lower()
-        for item in JOB_HANDLER_CATALOG
-        for token in ("terminal", "subagent", "extension")
-    )
+    assert len(SUBJECT_SLOTS) == 11
+    assert APPEND_GUARDS == ("HostWriterGuard",)
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 24
 
     policy = build_postgres_runtime_grant_policy()
     assert policy.relation_privileges == CONVERSATION_KERNEL_RUNTIME_PRIVILEGES
@@ -252,9 +242,11 @@ def test_stage2_product_contract_survives_the_clean_migration_universe() -> None
         "contract": "stage2_runtime_limits.v1",
         "named_finite_fields": 62,
     }
-    # Stage 2 evidence is immutable.  Round 5A physically removes the old
-    # Host-close and model-call admission caps from the live limit carrier.
-    assert len(fields(Stage2RuntimeLimits)) == 60
+    # Stage 2 evidence is immutable.  Round 5A removes the old Host-close and
+    # model-call count/deadline admission caps; Round 5B removes the final
+    # durable-job family, its four now-ownerless limits, and the independent
+    # 128K provider-input cap.  The resolved model target now owns input budget.
+    assert len(fields(Stage2RuntimeLimits)) == 55
     assert all(value > 0 for value in asdict(STAGE2_LIMITS).values())
     assert report["structural_budgets"] == {
         "contract": "stage2_structural_budgets.v1",
@@ -318,22 +310,20 @@ def test_stage2_extension_and_tool_policy_have_single_production_owners() -> Non
 
 def test_stage2_provider_admission_and_blob_gc_are_physical_not_heuristic() -> None:
     direct = (KERNEL / "direct_model.py").read_text(encoding="utf-8")
-    jobs = (KERNEL / "job_model.py").read_text(encoding="utf-8")
     auxiliary = (KERNEL / "auxiliary_model.py").read_text(encoding="utf-8")
     reader = (KERNEL / "reader.py").read_text(encoding="utf-8")
     blob = (KERNEL / "blob.py").read_text(encoding="utf-8")
     host = (KERNEL / "host.py").read_text(encoding="utf-8")
 
     # Foreground model input is now estimated by the pure structured compiler
-    # and exact-joined to the transport-aware final validator. Durable jobs
-    # retain their direct estimate seam because they do not consume the
-    # conversation compiler.
+    # and exact-joined to the transport-aware final validator. Auxiliary
+    # advisory model calls retain their own bounded estimate seam.
     assert "validate_model_context_for_call" in direct
     assert "validated.estimate != compiled.final_estimate" in direct
     assert "estimate_model_context_for_call" not in direct
     assert "estimate_model_context_for_call" in auxiliary
     assert "validate_model_context_for_call" in auxiliary
-    for source in (direct, jobs, auxiliary):
+    for source in (direct, auxiliary):
         assert "canonical_bytes / 4" not in source
     assert "CanonicalProviderContinuityError" in reader
     assert "delete_orphans" in blob

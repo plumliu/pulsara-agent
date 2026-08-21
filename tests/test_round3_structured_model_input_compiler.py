@@ -200,6 +200,7 @@ from pulsara_agent.ports.provider_stream import (
 )
 from pulsara_agent.primitives.context import (
     FrozenJsonObjectFact,
+    canonical_json_bytes,
     context_fingerprint,
     freeze_json,
     thaw_json,
@@ -384,7 +385,7 @@ def _collect_context_sources(
 
 _SOURCE_FACTS = {
     ContextSourceKind.BASE_SYSTEM: (
-        "pulsara.base-system.prefix-continuity.v6-agent-skills",
+        "pulsara.base-system.prefix-continuity.v7-compaction",
         ContextChannel.SYSTEM,
         ContextTrustClass.ROOT_INSTRUCTION,
         ContextBudgetClass.MUST_KEEP,
@@ -521,6 +522,26 @@ _SOURCE_FACTS = {
         (ContextRenderMode.FULL,),
         ContextSourceLifecycle.TURN_APPEND,
     ),
+    ContextSourceKind.COMPACTION_RUNTIME_HANDOFF: (
+        "pulsara.compaction-runtime-handoff.v1",
+        ContextChannel.RUNTIME_OBSERVATION,
+        ContextTrustClass.UNTRUSTED_OBSERVATION,
+        ContextBudgetClass.MUST_KEEP,
+        75,
+        15,
+        (ContextRenderMode.FULL, ContextRenderMode.COMPACT),
+        ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
+    ),
+    ContextSourceKind.RETAINED_SKILL_CONTEXT: (
+        "pulsara.retained-skill-context.v1",
+        ContextChannel.RUNTIME_OBSERVATION,
+        ContextTrustClass.UNTRUSTED_OBSERVATION,
+        ContextBudgetClass.MUST_KEEP,
+        61,
+        21,
+        (ContextRenderMode.FULL,),
+        ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
+    ),
 }
 
 
@@ -643,6 +664,12 @@ def _sources(
             ContextSourceAbsenceKind.NOT_APPLICABLE
         ),
         ContextSourceKind.MEMORY_RECALL: ContextSourceAbsenceKind.NOT_APPLICABLE,
+        ContextSourceKind.COMPACTION_RUNTIME_HANDOFF: (
+            ContextSourceAbsenceKind.NOT_APPLICABLE
+        ),
+        ContextSourceKind.RETAINED_SKILL_CONTEXT: (
+            ContextSourceAbsenceKind.NOT_APPLICABLE
+        ),
     }
     for kind, absence_kind in default_absences.items():
         if kind not in candidate_kinds and kind not in absent_by_kind:
@@ -811,6 +838,7 @@ def _tool_result(
         turn_id,
         body,
         tool_call_id=f"call:{sequence}",
+        tool_request_entry_id=f"entry:request:{sequence}",
         tool_result_context=ProviderToolResultContextMetadata(
             result_id=f"result:{sequence}",
             result_state="SUCCESS",
@@ -2025,6 +2053,7 @@ def test_round3_retained_snapshot_reference_keeps_typed_warning() -> None:
         "turn:test",
         "preview",
         tool_call_id="call:retained",
+        tool_request_entry_id="entry:request:retained",
         tool_result_context=metadata,
         tool_result_body_text="preview",
     )
@@ -3315,13 +3344,13 @@ def test_round3_source_decision_and_compiled_fingerprints_are_golden() -> None:
     )
     compiled = StructuredModelInputCompiler().compile(request)
     assert compiled.source_collection_fingerprint == (
-        "sha256:a7b0bfefb9b9b5ccd2d2f5b04fcf020c404bed7fef139ecac5d2e0df289c9332"
+        "sha256:789c3a280be3ca3692f57629bcc7d60eec6dd3a0404c154a21fdd4b8cdadd7dc"
     )
     assert compiled.budget_report.decision_digest == (
         "sha256:caee1ae23a161f2c862947ef5b7b2b9a4ae3093bce6117e00bc13a3a19058fbd"
     )
     assert compiled.compiled_semantic_fingerprint == (
-        "sha256:0c1efe1ef61c1889905190282cb9e8ebb67580f4d248f7721c6eda466f736c8e"
+        "sha256:9de85b76e07c9c004c841af6a3a317bdcdec642950967878fd61dd548115b524"
     )
     assert compiled.final_estimate.total_input_tokens == 268
 
@@ -3727,6 +3756,49 @@ def test_round3_1_active_skill_no_change_and_clear_are_causal_once() -> None:
         )
         == 1
     )
+
+
+def test_round5b_compaction_inherits_exact_installed_active_skill_body(
+    tmp_path: Path,
+) -> None:
+    compiler = StructuredModelInputCompiler()
+    owner = HostProviderInputContinuityOwner(session_id="session:test")
+    body = canonical_json_bytes(
+        {
+            "skills": (
+                {
+                    "name": "alpha",
+                    "location": ".agents/skills/alpha/SKILL.md",
+                    "reason": "explicit_user_mention",
+                    "body": "old exact body",
+                },
+            )
+        }
+    ).decode("utf-8")
+    request = _prepared_request(
+        _snapshot(_user("$alpha", sequence=1)),
+        _sources(_candidate(ContextSourceKind.ACTIVE_SKILL, (body, ""))),
+    )
+    _compiled, installed = _compile_and_install_append(
+        compiler=compiler,
+        owner=owner,
+        request=request,
+    )
+    collector = KernelContextSourceCollector(
+        workspace_kind="project",
+        workspace_root=tmp_path,
+        terminal_cwd=_TerminalCwd(tmp_path),
+        capability_composer=_Capability(),  # type: ignore[arg-type]
+        base_system_prompt="BASE",
+        display_timezone=timezone.utc,
+        clock=lambda: datetime(2026, 8, 21, tzinfo=timezone.utc),
+    )
+
+    inherited = collector.freeze_compaction_active_skill_source(installed)
+
+    assert isinstance(inherited, ContextSourceCandidate)
+    assert inherited.variants[0].text == body
+    assert inherited.domain_semantic_fingerprint.startswith("sha256:")
 
 
 def test_round9_1_skill_catalog_successors_are_append_only_and_unavailable_once() -> (

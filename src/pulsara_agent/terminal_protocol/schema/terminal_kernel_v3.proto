@@ -51,10 +51,7 @@ enum CommittedEventType {
   SUBAGENT_TASK_STATUS_ACCEPTED = 18;
   SUBAGENT_MESSAGE_ACCEPTED = 19;
   SUBAGENT_RESULT_ACCEPTED = 20;
-  JOB_QUEUED = 21;
-  JOB_ATTEMPT_ACCEPTED = 22;
-  JOB_TERMINAL_ACCEPTED = 23;
-  reserved 24 to 26;
+  reserved 21 to 26;
   TERMINAL_OBSERVATION_ACCEPTED = 27;
   PLAN_WORKFLOW_ENTERED = 28;
   PLAN_QUESTION_ASKED = 29;
@@ -254,14 +251,6 @@ message SubagentTaskControl {
   bool result_accepted = 7;
 }
 
-message JobControl {
-  string job_id = 1;
-  string handler_type = 2;
-  string status = 3;
-  uint32 maximum_attempts = 4;
-  uint32 attempt_count = 5;
-}
-
 message CanonicalControl {
   string session_lifecycle = 1;
   repeated ActiveTurnControl active_turns = 2;
@@ -269,8 +258,7 @@ message CanonicalControl {
   uint64 prompt_queue_total_count = 4;
   repeated ToolAttemptControl tool_attempts = 5;
   repeated SubagentTaskControl subagent_tasks = 6;
-  repeated JobControl jobs = 7;
-  reserved 8;
+  reserved 7, 8;
   PlanWorkflowControl active_plan_workflow = 9;
   PlanInteractionControl open_plan_interaction = 10;
   PlanHandoffControl latest_plan_handoff = 11;
@@ -566,6 +554,11 @@ message SessionLiveControlSnapshot {
   uint64 live_revision = 3;
   LiveInteractionView current_interaction = 4;
   repeated LiveTodoRunSnapshot current_todos = 5;
+  bool compaction_in_progress = 6;
+  string compaction_trigger = 7;
+  string compaction_phase = 8;
+  string compaction_target_scope = 9;
+  bool input_admission_deferred = 10;
 }
 
 enum LiveControlEventKind {
@@ -643,10 +636,11 @@ enum CommandKind {
   CLOSE_SESSION = 4;
   STEER_ACTIVE_TURN = 5;
   ACCEPT_SUBAGENT_RESULT = 6;
-  ACCEPT_JOB_RESULT = 7;
+  reserved 7;
   ENTER_PLAN = 8;
   CANCEL_PLAN = 9;
   FORCE_EXIT_PLAN = 10;
+  COMPACT_CONTEXT = 11;
 }
 
 message CommandRequest {
@@ -659,10 +653,11 @@ message CommandRequest {
   string text = 7;
   string target_turn_id = 8;
   string source_subagent_result_id = 9;
-  string source_job_id = 10;
+  reserved 10;
   PermissionMode requested_permission_mode = 11;
   string target_plan_workflow_id = 12;
   uint64 expected_plan_workflow_revision = 13;
+  bool force = 14;
 }
 
 enum CommandStatus {

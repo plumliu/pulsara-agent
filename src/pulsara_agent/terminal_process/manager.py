@@ -773,6 +773,25 @@ class ProcessRegistry:
                 result.append(_info(state))
         return sorted(result, key=lambda item: item.started_at_monotonic)
 
+    def freeze_compaction_handoff(
+        self, *, owner_host_session_id: str
+    ) -> tuple[TerminalProcessInfo, ...]:
+        """Freeze running public process facts without reading retained output."""
+
+        with self._lock:
+            if self._closed or owner_host_session_id in self._released_owners:
+                return ()
+            frozen: list[TerminalProcessInfo] = []
+            for state in self._states.values():
+                if state.owner_host_session_id != owner_host_session_id:
+                    continue
+                state.refresh()
+                if _process_is_live(state):
+                    frozen.append(_info(state))
+            return tuple(
+                sorted(frozen, key=lambda item: item.process_id)
+            )
+
     def log(
         self,
         process_id: str,
@@ -1193,6 +1212,11 @@ class TerminalSessionManager:
 
     def list_processes(self, **kwargs):
         return self.process_registry.list_processes(**kwargs)
+
+    def freeze_compaction_handoff(self, *, owner_host_session_id: str):
+        return self.process_registry.freeze_compaction_handoff(
+            owner_host_session_id=owner_host_session_id
+        )
 
     def log_process(self, process_id: str, **kwargs):
         return self.process_registry.log(process_id, **kwargs)

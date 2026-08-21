@@ -217,21 +217,20 @@ CREATE TABLE pulsara_v3.session_commands (
     command_id text NOT NULL,
     command_kind text NOT NULL CHECK (command_kind IN (
         'SUBMIT_PROMPT', 'STEER', 'QUEUE_PROMPT', 'CANCEL_PROMPT',
-        'RESOLVE_INTERACTION', 'ACCEPT_JOB_RESULT', 'ACCEPT_SUBAGENT_RESULT',
+        'RESOLVE_INTERACTION', 'ACCEPT_SUBAGENT_RESULT',
         'ENTER_PLAN', 'CANCEL_PLAN', 'FORCE_EXIT_PLAN',
-        'RESOLVE_PLAN_INTERACTION'
+        'RESOLVE_PLAN_INTERACTION', 'COMPACT_CONTEXT'
     )),
     request_schema_version text NOT NULL,
     semantic_digest text NOT NULL CHECK (semantic_digest ~ '^sha256:[0-9a-f]{64}$'),
     target_kind text NOT NULL CHECK (target_kind IN (
-        'TURN', 'ENTRY', 'QUEUE_ITEM', 'INTERACTION_DECISION', 'JOB',
+        'TURN', 'ENTRY', 'QUEUE_ITEM', 'INTERACTION_DECISION',
         'PLAN_WORKFLOW', 'PLAN_INTERACTION'
     )),
     target_turn_id text,
     target_entry_id text,
     target_queue_item_id text,
     target_interaction_decision_id text,
-    target_job_id text,
     target_plan_workflow_id text,
     target_plan_interaction_id text,
     accepted_at timestamptz NOT NULL DEFAULT clock_timestamp(),
@@ -239,7 +238,7 @@ CREATE TABLE pulsara_v3.session_commands (
     FOREIGN KEY (session_id) REFERENCES pulsara_v3.sessions (id) ON DELETE RESTRICT,
     CHECK (num_nonnulls(
         target_turn_id, target_entry_id, target_queue_item_id,
-        target_interaction_decision_id, target_job_id,
+        target_interaction_decision_id,
         target_plan_workflow_id, target_plan_interaction_id
     ) = 1),
     CHECK (
@@ -247,7 +246,6 @@ CREATE TABLE pulsara_v3.session_commands (
         (target_kind = 'ENTRY' AND target_entry_id IS NOT NULL) OR
         (target_kind = 'QUEUE_ITEM' AND target_queue_item_id IS NOT NULL) OR
         (target_kind = 'INTERACTION_DECISION' AND target_interaction_decision_id IS NOT NULL) OR
-        (target_kind = 'JOB' AND target_job_id IS NOT NULL) OR
         (target_kind = 'PLAN_WORKFLOW' AND target_plan_workflow_id IS NOT NULL) OR
         (target_kind = 'PLAN_INTERACTION' AND target_plan_interaction_id IS NOT NULL)
     ),
@@ -256,12 +254,12 @@ CREATE TABLE pulsara_v3.session_commands (
         (command_kind = 'STEER' AND target_kind = 'ENTRY') OR
         (command_kind IN ('QUEUE_PROMPT', 'CANCEL_PROMPT') AND target_kind = 'QUEUE_ITEM') OR
         (command_kind = 'RESOLVE_INTERACTION' AND target_kind = 'INTERACTION_DECISION') OR
-        (command_kind IN ('ACCEPT_JOB_RESULT', 'ACCEPT_SUBAGENT_RESULT')
-            AND target_kind = 'ENTRY') OR
+        (command_kind = 'ACCEPT_SUBAGENT_RESULT' AND target_kind = 'ENTRY') OR
         (command_kind IN ('ENTER_PLAN', 'CANCEL_PLAN', 'FORCE_EXIT_PLAN')
             AND target_kind = 'PLAN_WORKFLOW') OR
         (command_kind = 'RESOLVE_PLAN_INTERACTION'
-            AND target_kind = 'PLAN_INTERACTION')
+            AND target_kind = 'PLAN_INTERACTION') OR
+        (command_kind = 'COMPACT_CONTEXT' AND target_kind = 'TURN')
     )
 );
 
@@ -283,7 +281,6 @@ CREATE TABLE pulsara_v3.transcript_entries (
     provider_wire_api text,
     provider_replay_disposition text,
     provider_replay_fragment_id text,
-    source_job_id text,
     source_subagent_result_id text,
     source_plan_workflow_id text,
     source_plan_interaction_id text,
@@ -301,7 +298,6 @@ CREATE TABLE pulsara_v3.transcript_entries (
     UNIQUE (session_id, id),
     UNIQUE (session_id, id, provider_wire_api, provider_replay_fragment_id),
     UNIQUE (session_id, entry_sequence),
-    UNIQUE (session_id, source_job_id),
     UNIQUE (session_id, source_subagent_result_id),
     FOREIGN KEY (session_id, workspace_id)
         REFERENCES pulsara_v3.sessions (id, workspace_id) ON DELETE RESTRICT,
@@ -343,8 +339,7 @@ CREATE TABLE pulsara_v3.transcript_entries (
             AND provider_replay_disposition IS NULL
             AND provider_replay_fragment_id IS NULL)
     ),
-    CHECK (num_nonnulls(source_job_id, source_subagent_result_id) <= 1),
-    CHECK ((source_job_id IS NULL AND source_subagent_result_id IS NULL) OR
+    CHECK (source_subagent_result_id IS NULL OR
         (conversation_scope_kind = 'ROOT' AND entry_kind = 'USER_MESSAGE')),
     CHECK (
         (entry_kind = 'PLAN_CONTINUATION'
@@ -353,13 +348,11 @@ CREATE TABLE pulsara_v3.transcript_entries (
             AND source_plan_handoff_kind IN (
                 'ENTERED_PLAN', 'REVISION_REQUESTED', 'APPROVED_PLAN'
             )
-            AND source_job_id IS NULL
             AND source_subagent_result_id IS NULL) OR
         (entry_kind = 'USER_MESSAGE'
             AND source_plan_workflow_id IS NOT NULL
             AND conversation_scope_kind = 'ROOT'
             AND source_plan_handoff_kind IN ('CANCELLED_PLAN', 'FORCE_EXITED_PLAN')
-            AND source_job_id IS NULL
             AND source_subagent_result_id IS NULL) OR
         (source_plan_workflow_id IS NULL
             AND source_plan_interaction_id IS NULL
@@ -1054,89 +1047,6 @@ CREATE TABLE pulsara_v3.subagent_task_children (
         REFERENCES pulsara_v3.transcript_entries (session_id, id) ON DELETE RESTRICT
 );
 
-CREATE TABLE pulsara_v3.durable_jobs (
-    id text PRIMARY KEY,
-    workspace_id text NOT NULL,
-    origin_session_id text,
-    origin_command_id text,
-    handler_type text NOT NULL CHECK (handler_type IN (
-        'BACKGROUND_COMPACTION'
-    )),
-    intent_schema_version text NOT NULL,
-    intent_digest text NOT NULL CHECK (intent_digest ~ '^sha256:[0-9a-f]{64}$'),
-    intent_payload jsonb NOT NULL,
-    automatic_intent_key text,
-    safety_class text NOT NULL CHECK (safety_class IN ('RETRY_SAFE', 'REMOTE_QUERYABLE', 'NON_IDEMPOTENT')),
-    status text NOT NULL CHECK (status IN (
-        'PENDING', 'ACTIVE', 'SUCCEEDED', 'FAILED', 'CANCELLED', 'OUTCOME_UNKNOWN'
-    )),
-    retry_policy_id text NOT NULL,
-    retry_policy_version integer NOT NULL CHECK (retry_policy_version >= 1),
-    maximum_attempts integer NOT NULL CHECK (maximum_attempts >= 1),
-    attempt_timeout_ms integer NOT NULL CHECK (attempt_timeout_ms > 0),
-    provider_input_token_limit_per_attempt integer,
-    provider_output_token_limit_per_attempt integer,
-    next_eligible_at timestamptz NOT NULL,
-    result_blob_id text,
-    terminal_reason text,
-    cancel_requested_at timestamptz,
-    cancel_requested_by text,
-    cancel_request_reason text,
-    accepted_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-    terminal_at timestamptz,
-    UNIQUE (origin_session_id, id),
-    UNIQUE (handler_type, automatic_intent_key),
-    FOREIGN KEY (origin_session_id) REFERENCES pulsara_v3.sessions (id) ON DELETE RESTRICT,
-    FOREIGN KEY (result_blob_id, workspace_id)
-        REFERENCES pulsara_v3.blobs (id, workspace_id) ON DELETE RESTRICT,
-    CHECK ((handler_type = 'BACKGROUND_COMPACTION') = (provider_input_token_limit_per_attempt IS NOT NULL
-        AND provider_output_token_limit_per_attempt IS NOT NULL)),
-    CHECK (provider_input_token_limit_per_attempt IS NULL OR provider_input_token_limit_per_attempt > 0),
-    CHECK (provider_output_token_limit_per_attempt IS NULL OR provider_output_token_limit_per_attempt > 0),
-    CHECK ((status IN ('SUCCEEDED', 'FAILED', 'CANCELLED', 'OUTCOME_UNKNOWN')) = (terminal_at IS NOT NULL)),
-    CHECK (
-        (cancel_requested_at IS NULL AND cancel_requested_by IS NULL
-            AND cancel_request_reason IS NULL)
-        OR
-        (cancel_requested_at IS NOT NULL AND cancel_requested_by IS NOT NULL
-            AND cancel_request_reason IS NOT NULL)
-    )
-);
-
-CREATE TABLE pulsara_v3.durable_job_attempts (
-    id text PRIMARY KEY,
-    job_id text NOT NULL,
-    origin_session_id text,
-    attempt_ordinal integer NOT NULL CHECK (attempt_ordinal >= 1),
-    claim_generation bigint NOT NULL CHECK (claim_generation >= 1),
-    claim_owner_id text NOT NULL,
-    lease_expires_at timestamptz NOT NULL,
-    deadline_at timestamptz NOT NULL,
-    retry_of_attempt_id text,
-    provider_call_started_at timestamptz,
-    provider_input_tokens integer,
-    provider_requested_output_tokens integer,
-    remote_identity text,
-    terminal_status text CHECK (terminal_status IN ('SUCCEEDED', 'FAILED', 'CANCELLED', 'OUTCOME_UNKNOWN')),
-    result_payload jsonb,
-    error_code text,
-    accepted_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-    terminal_at timestamptz,
-    UNIQUE (job_id, attempt_ordinal),
-    UNIQUE (origin_session_id, id),
-    FOREIGN KEY (job_id) REFERENCES pulsara_v3.durable_jobs (id) ON DELETE RESTRICT,
-    FOREIGN KEY (retry_of_attempt_id) REFERENCES pulsara_v3.durable_job_attempts (id) ON DELETE RESTRICT,
-    CHECK ((provider_call_started_at IS NULL) = (provider_input_tokens IS NULL)),
-    CHECK ((provider_call_started_at IS NULL) = (provider_requested_output_tokens IS NULL)),
-    CHECK (provider_input_tokens IS NULL OR provider_input_tokens >= 0),
-    CHECK (provider_requested_output_tokens IS NULL OR provider_requested_output_tokens > 0),
-    CHECK ((terminal_status IS NULL) = (terminal_at IS NULL))
-);
-
-ALTER TABLE pulsara_v3.transcript_entries ADD CONSTRAINT transcript_entries_source_job_fk
-    FOREIGN KEY (session_id, source_job_id)
-    REFERENCES pulsara_v3.durable_jobs (origin_session_id, id) ON DELETE RESTRICT
-    DEFERRABLE INITIALLY DEFERRED;
 ALTER TABLE pulsara_v3.transcript_entries ADD CONSTRAINT transcript_entries_source_subagent_result_fk
     FOREIGN KEY (session_id, source_subagent_result_id)
     REFERENCES pulsara_v3.subagent_task_children (session_id, id) ON DELETE RESTRICT
@@ -1713,7 +1623,6 @@ CREATE TABLE pulsara_v3.agent_events (
         'ToolRemoteIdentityPublished', 'PromptQueued', 'PromptConsumed', 'PromptCancelled',
         'PromptRejected', 'CompactionAdopted', 'SubagentTaskAccepted',
         'SubagentTaskStatusAccepted', 'SubagentMessageAccepted', 'SubagentResultAccepted',
-        'JobQueued', 'JobAttemptAccepted', 'JobTerminalAccepted',
         'TerminalObservationAccepted', 'PlanWorkflowEntered',
         'PlanQuestionAsked', 'PlanQuestionAnswered', 'PlanDraftSubmitted',
         'PlanDraftDecisionAccepted', 'PlanWorkflowExited',
@@ -1731,8 +1640,6 @@ CREATE TABLE pulsara_v3.agent_events (
     subject_turn_id text,
     subject_entry_id text,
     subject_tool_attempt_id text,
-    subject_job_id text,
-    subject_job_attempt_id text,
     subject_queue_item_id text,
     subject_interaction_decision_id text,
     subject_context_binding_revision_id text,
@@ -1753,12 +1660,6 @@ CREATE TABLE pulsara_v3.agent_events (
         REFERENCES pulsara_v3.transcript_entries (session_id, id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (session_id, subject_tool_attempt_id)
         REFERENCES pulsara_v3.tool_execution_attempts (session_id, id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
-    FOREIGN KEY (session_id, subject_job_id)
-        REFERENCES pulsara_v3.durable_jobs (origin_session_id, id)
-        ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
-    FOREIGN KEY (session_id, subject_job_attempt_id)
-        REFERENCES pulsara_v3.durable_job_attempts (origin_session_id, id)
-        ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (session_id, subject_queue_item_id)
         REFERENCES pulsara_v3.prompt_queue_items (session_id, id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (session_id, subject_interaction_decision_id)
@@ -1780,8 +1681,8 @@ CREATE TABLE pulsara_v3.agent_events (
         REFERENCES pulsara_v3.plan_interactions (session_id, id)
         ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
     CHECK (num_nonnulls(
-        subject_turn_id, subject_entry_id, subject_tool_attempt_id, subject_job_id,
-        subject_job_attempt_id, subject_queue_item_id, subject_interaction_decision_id,
+        subject_turn_id, subject_entry_id, subject_tool_attempt_id,
+        subject_queue_item_id, subject_interaction_decision_id,
         subject_context_binding_revision_id, subject_subagent_task_id,
         subject_subagent_message_id, subject_subagent_result_id,
         subject_plan_workflow_id, subject_plan_interaction_id
@@ -1809,8 +1710,6 @@ CREATE TABLE pulsara_v3.agent_events (
             AND subject_subagent_task_id IS NOT NULL) OR
         (event_type = 'SubagentMessageAccepted' AND subject_subagent_message_id IS NOT NULL) OR
         (event_type = 'SubagentResultAccepted' AND subject_subagent_result_id IS NOT NULL) OR
-        (event_type IN ('JobQueued', 'JobTerminalAccepted') AND subject_job_id IS NOT NULL) OR
-        (event_type = 'JobAttemptAccepted' AND subject_job_attempt_id IS NOT NULL) OR
         (event_type IN ('PlanWorkflowEntered', 'PlanWorkflowExited')
             AND subject_plan_workflow_id IS NOT NULL)
         OR (event_type IN ('PlanQuestionAsked', 'PlanQuestionAnswered',
@@ -1831,10 +1730,6 @@ ALTER TABLE pulsara_v3.session_commands ADD CONSTRAINT session_commands_target_q
     ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED;
 ALTER TABLE pulsara_v3.session_commands ADD CONSTRAINT session_commands_target_interaction_fk
     FOREIGN KEY (session_id, target_interaction_decision_id) REFERENCES pulsara_v3.interaction_decisions (session_id, id)
-    ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED;
-ALTER TABLE pulsara_v3.session_commands ADD CONSTRAINT session_commands_target_job_fk
-    FOREIGN KEY (session_id, target_job_id)
-    REFERENCES pulsara_v3.durable_jobs (origin_session_id, id)
     ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED;
 ALTER TABLE pulsara_v3.session_commands ADD CONSTRAINT session_commands_target_plan_workflow_fk
     FOREIGN KEY (session_id, target_plan_workflow_id)
@@ -1934,15 +1829,6 @@ BEGIN
     END IF;
 
     IF TG_TABLE_NAME = 'transcript_entries' THEN
-        IF NEW.source_job_id IS NOT NULL THEN
-            SELECT status INTO observed_status
-            FROM pulsara_v3.durable_jobs
-            WHERE origin_session_id = NEW.session_id AND id = NEW.source_job_id;
-            IF observed_status IS DISTINCT FROM 'SUCCEEDED' THEN
-                RAISE EXCEPTION 'conversation source job must be SUCCEEDED'
-                    USING ERRCODE = '23514';
-            END IF;
-        END IF;
         IF NEW.source_subagent_result_id IS NOT NULL THEN
             SELECT child_kind INTO observed_kind
             FROM pulsara_v3.subagent_task_children
@@ -2376,9 +2262,4 @@ CREATE INDEX idx_pulsara_v3_events_session_sequence
     ON pulsara_v3.agent_events (session_id, event_sequence);
 CREATE INDEX idx_pulsara_v3_queue_pending
     ON pulsara_v3.prompt_queue_items (session_id, queue_sequence, id) WHERE status = 'PENDING';
-CREATE INDEX idx_pulsara_v3_jobs_due
-    ON pulsara_v3.durable_jobs (status, next_eligible_at, id) WHERE status = 'PENDING';
-CREATE INDEX idx_pulsara_v3_job_attempt_claim
-    ON pulsara_v3.durable_job_attempts (job_id, claim_generation);
-
 REVOKE ALL ON ALL TABLES IN SCHEMA pulsara_v3 FROM PUBLIC;

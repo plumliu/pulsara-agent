@@ -472,7 +472,7 @@ Round 1恢复了canonical result、artifact与bounded preview，但normal provid
 | Round 5A.2：Durable provider replay与跨重启线程续接 | assistant与optional exact Chat/Responses native carrier同事务提交；新Host从entry-bound replay row重建compatible wire history；只按Chat/Responses codec分支，不按vendor分支 | partial stream/tool recovery、remote response ID authority、durable compiled request、Anthropic/Gemini、provider preset/probe、compaction |
 | Round 5B：Long-horizon context compaction | active-context测量、safe-point compaction、single-turn continuation、protected tail、explicit continuity epoch rebase、manual/proactive auto/mid-turn compact，以及在合法rebase boundary重新冻结Round 9/9.1 successor exposure | 恢复旧EventLog/reducer/checkpoint/repair、删除canonical transcript、把累计token误当active context、provider context-error后的reactive compact/retry、重新实现normal ToolResult/MCP/Skill语义 |
 
-Round 5A实施规格见[`ROUND_5_LONG_HORIZON_EXECUTION_ENVELOPE_IMPLEMENTATION_SPEC.zh.md`](ROUND_5_LONG_HORIZON_EXECUTION_ENVELOPE_IMPLEMENTATION_SPEC.zh.md)，机器证据见[`round5_long_horizon_execution_envelope_activation.json`](benchmarks/suites/core/v1/round5_long_horizon_execution_envelope_activation.json)。Round 5A.1实施规格见[`ROUND_5A_1_PROVIDER_NEUTRAL_MODEL_OUTPUT_TERMINATION_IMPLEMENTATION_SPEC.zh.md`](ROUND_5A_1_PROVIDER_NEUTRAL_MODEL_OUTPUT_TERMINATION_IMPLEMENTATION_SPEC.zh.md)，机器证据见[`round5a1_provider_neutral_model_output_termination_activation.json`](benchmarks/suites/core/v1/round5a1_provider_neutral_model_output_termination_activation.json)。Round 5A.2实施真源见[`ROUND_5A_2_DURABLE_PROVIDER_REPLAY_AND_CROSS_RESTART_THREAD_CONTINUATION_IMPLEMENTATION_SPEC.zh.md`](ROUND_5A_2_DURABLE_PROVIDER_REPLAY_AND_CROSS_RESTART_THREAD_CONTINUATION_IMPLEMENTATION_SPEC.zh.md)，状态为ACTIVATED，机器证据见[`round5a2_durable_provider_replay_and_cross_restart_thread_continuation_activation.json`](benchmarks/suites/core/v1/round5a2_durable_provider_replay_and_cross_restart_thread_continuation_activation.json)。Round 5B当前实施真源见[`ROUND_5B_LONG_HORIZON_CONTEXT_COMPACTION_IMPLEMENTATION_SPEC.zh.md`](ROUND_5B_LONG_HORIZON_CONTEXT_COMPACTION_IMPLEMENTATION_SPEC.zh.md)，状态仍为DRAFT/NOT ACTIVATED；其normal ToolResult、Capability与Skill前置分别由Round 7.1、Round 9与Round 9.1拥有。PHC-07A、同Host完整response continuation与跨Host compatible native replay已恢复；PHC-07B仍保持open，不能据此宣传自动compaction或跨context-window continuation。
+Round 5A实施规格见[`ROUND_5_LONG_HORIZON_EXECUTION_ENVELOPE_IMPLEMENTATION_SPEC.zh.md`](ROUND_5_LONG_HORIZON_EXECUTION_ENVELOPE_IMPLEMENTATION_SPEC.zh.md)，机器证据见[`round5_long_horizon_execution_envelope_activation.json`](benchmarks/suites/core/v1/round5_long_horizon_execution_envelope_activation.json)。Round 5A.1实施规格见[`ROUND_5A_1_PROVIDER_NEUTRAL_MODEL_OUTPUT_TERMINATION_IMPLEMENTATION_SPEC.zh.md`](ROUND_5A_1_PROVIDER_NEUTRAL_MODEL_OUTPUT_TERMINATION_IMPLEMENTATION_SPEC.zh.md)，机器证据见[`round5a1_provider_neutral_model_output_termination_activation.json`](benchmarks/suites/core/v1/round5a1_provider_neutral_model_output_termination_activation.json)。Round 5A.2实施真源见[`ROUND_5A_2_DURABLE_PROVIDER_REPLAY_AND_CROSS_RESTART_THREAD_CONTINUATION_IMPLEMENTATION_SPEC.zh.md`](ROUND_5A_2_DURABLE_PROVIDER_REPLAY_AND_CROSS_RESTART_THREAD_CONTINUATION_IMPLEMENTATION_SPEC.zh.md)，状态为ACTIVATED，机器证据见[`round5a2_durable_provider_replay_and_cross_restart_thread_continuation_activation.json`](benchmarks/suites/core/v1/round5a2_durable_provider_replay_and_cross_restart_thread_continuation_activation.json)。Round 5B实施真源见[`ROUND_5B_LONG_HORIZON_CONTEXT_COMPACTION_IMPLEMENTATION_SPEC.zh.md`](ROUND_5B_LONG_HORIZON_CONTEXT_COMPACTION_IMPLEMENTATION_SPEC.zh.md)，状态为ACTIVATED，机器证据见[`round5b_long_horizon_context_compaction_activation.json`](benchmarks/suites/core/v1/round5b_long_horizon_context_compaction_activation.json)；其normal ToolResult、Capability与Skill前置仍分别由Round 7.1、Round 9与Round 9.1拥有。PHC-07A、同Host完整response continuation、跨Host compatible native replay与PHC-07B context compaction/rebase均已恢复；provider-error reactive compaction、旧CLI/TUI与Round 10层次化subagent仍不在本轮承诺内。
 
 ### 6.1 hard-cut 前已存在的产品能力
 
@@ -499,36 +499,28 @@ Round 5A实施规格见[`ROUND_5_LONG_HORIZON_EXECUTION_ENVELOPE_IMPLEMENTATION_
 
 ### 6.2 当前代码事实
 
-当前 canonical schema 仍包含：
+Round 5B已经把此前dormant的snapshot primitive接入production，并完成相反方向的job减法：
 
-- `context_snapshots`；
-- `turn_context_binding_revisions`；
-- `CompactionAdopted` committed event；
-- `ConversationKernelRepository.adopt_context_snapshot()`；
-- `enqueue_background_compaction()` 与 background compaction job handler。
+- manual、provider-call前proactive auto与mid-turn safe-point三条入口均进入Host/runner；
+- 当前主模型在old exact native prefix上以`tool_choice=none`生成summary，active adoption随后以snapshot、protected tail、recent human、current Runtime handoff和retained Skill建立标准EMPTY cold successor；
+- idle adoption只提交base，下一次ROOT admission按当时current owner truth冷编译；active adoption在同一run中继续；
+- successor复用Round 9 parent dispatch cut、Tool/Skill sibling views、两阶段Tool selection/native materialization和normal tool-surface borrow；MCP完整cohort只会all-DIRECT或all-META_ONLY；
+- current `SKILL_CATALOG`来自current owner discovery，same-activation `ACTIVE_SKILL`继承old installed snapshot，符合exact FULL read条件的Skill正文只作为bounded `RETAINED_SKILL_CONTEXT`派生；
+- canonical transcript与Round 5A.2 native replay row不删除、不改写；adoption只推进`context_snapshots`与`turn_context_binding_revisions`的current binding；
+- 原`BACKGROUND_COMPACTION` handler、job/attempt relation、job occurrence、job subject及claim guard已经物理删除。当前durable job universe为空。
 
-但这些只是 dormant primitives：production Host/runner 没有调用 adoption 或 enqueue path，CLI 也没有manual compact入口。现有唯一durable job就是未接入production的`BACKGROUND_COMPACTION`；Round 5B已决定使用当前主模型在safe point前台生成summary，因此该job及其job/attempt relation、event、subject与claim guard应在实施时删除，不能成为第二套compaction authority。
+### 6.3 恢复结果与明确non-goals
 
-Round 5A已经删除固定model/tool-call次数与turn-wide deadline。当前剩余边界是单次provider-input、compiler working set、canonical read、tool result projection等各自owner的physical/resource hard bound；这些边界命中时，当前仍没有snapshot/rebase continuation：
+PHC-07B现已恢复：长对话可手动或在本地预算边界前主动压缩；运行中完整tool group可在safe point后保留为pairing-safe tail；adoption后同一run继续使用新cold epoch，后续ROOT turn继承latest exact snapshot，重复compaction只读取post-base范围。
 
-- active compiled input接近resolved target budget时没有proactive compaction；
-- fixed prefix或new suffix超过effective input/resource boundary时仍只能typed fail；
-- mid-turn完整tool batch后没有pairing-safe protected-tail rewrite；
-- new turn总是从FULL_HISTORY revision-0开始，不继承已采用snapshot；
-- `adopt_context_snapshot()`当前还禁止source cut进入active turn，因此不能完成single-turn long-agent compaction。
+以下仍不是本轮产品承诺：
 
-### 6.3 具体丢失的用户能力
+- provider已经返回context-length错误后的reactive compact/retry；
+- 删除或重写canonical transcript、持久化compiled replacement history或恢复provider stream；
+- memory extraction、summary作为业务事实authority或任何durable compaction receipt/checkpoint/repair；
+- Round 10层次化subagent编排、Web/Desktop/TUI timeline与旧Legacy REPL命令拼写。
 
-- 长对话不能主动压缩后继续；
-- 运行中增长的 tool output 不能在 safe point 被折叠；
-- 触及 provider input cap 前没有proactive continuation path；provider报错后的reactive compact明确不进入Round 5B；
-- 长程 Agent 不能把稳定历史与当前未完成 tail 分层；
-- 当前有 snapshot 表并不意味着用户实际获得 compaction；
-- transcript 完整保留这一正确 hard-cut 决策仍成立，但“完整保存历史”目前没有配套的“有界选择历史进入下一 call”产品能力。
-
-其中固定model-call与runner总时限造成的task-progress失败已由Round 5A关闭；snapshot、protected tail、summary与context continuation由Round 5B负责。当前仍只能把PHC-07标成“execution envelope已恢复、compaction仍缺失”，不能宣传完整long-horizon context window已经恢复。
-
-以下不计为缺口：不保存 exact context-input audit、不通过 event replay 恢复 execution，以及不删除 canonical transcript。这些是既定减法边界。
+不保存exact context-input audit、不通过event replay恢复execution，以及不删除canonical transcript仍是既定减法边界，不计为缺口。
 
 ### 6.4 hard-cut前compaction参考代码
 
@@ -1399,6 +1391,6 @@ messages[n + 1] == messages[n] || append_only_suffix
 
 PHC-11与PHC-12是例外处置：它们保留在索引中用于审计hard-cut事实，但不进入恢复backlog。前者所需的canonical观察能力、后者所涉及的Plan/MCP/approval等独立产品语义，最终由未来Web/Desktop client及各自Kernel契约承接；不以恢复旧Python产品面为目标。
 
-Round 3与Round 3.1已完整恢复PHC-17的typed compiler和process-local prefix continuity；Round 4已恢复PHC-09的Python Runtime/Host与Protocol后端；Round 5A已恢复PHC-07A execution envelope；Round 5A.2新增一张assistant-entry-bound private replay relation，已兑现accepted线程的compatible Chat/Responses native history跨Host/进程重启续接，不恢复durable compiled request、remote provider state或generation recovery graph；Round 6与Round 7分别闭合MCP、previous-turn outcome与tool observation；Round 8已闭合Advisory Memory。Lightweight TODO refinement进一步把`todo`收敛为exact ROOT/child run的bounded、process-local完整snapshot replacement，并只增加一个atomic live projection；机器证据见[`lightweight_todo_tool_refinement_activation.json`](benchmarks/suites/core/v1/lightweight_todo_tool_refinement_activation.json)。这些已激活轮次仍未恢复durable compiled-input audit、每次dispatch的完整provider-input snapshot或旧generation recovery graph。PHC-07B仍需独立规格化context compaction/rebase truth；它只能把已接受事实投影进compiler，不能让compiler替代其authority。
+Round 3与Round 3.1已完整恢复PHC-17的typed compiler和process-local prefix continuity；Round 4已恢复PHC-09的Python Runtime/Host与Protocol后端；Round 5A已恢复PHC-07A execution envelope；Round 5A.2新增一张assistant-entry-bound private replay relation，已兑现accepted线程的compatible Chat/Responses native history跨Host/进程重启续接，不恢复durable compiled request、remote provider state或generation recovery graph；Round 5B已恢复PHC-07B safe-point summary、snapshot adoption、protected-tail与successor cold rebase，并删除最后一类durable job。Round 6与Round 7分别闭合MCP、previous-turn outcome与tool observation；Round 8已闭合Advisory Memory。Lightweight TODO refinement进一步把`todo`收敛为exact ROOT/child run的bounded、process-local完整snapshot replacement，并只增加一个atomic live projection；机器证据见[`lightweight_todo_tool_refinement_activation.json`](benchmarks/suites/core/v1/lightweight_todo_tool_refinement_activation.json)。这些已激活轮次仍未恢复durable compiled-input audit、每次dispatch的完整provider-input snapshot或旧generation recovery graph；compiler仍只消费已接受事实，不能替代其canonical authority。
 
-同样，后续恢复不能把任何历史oracle当作拒绝真实产品语义的永久配额。当前已激活closed oracle为`31 Committed / 24 Live / 13 subjects / 2 guards / 26 product relations / 1 durable job`；Lightweight TODO refinement的唯一数量变化是process-local `TodoSnapshotUpdated` live projection，Round 5A.2的唯一数量变化是一张provider replay relation。任何数量变化都必须经过上述closed contract审查，但“保持旧数字”不优先于“以正确的canonical/live边界完整表达产品能力”。
+同样，后续恢复不能把任何历史oracle当作拒绝真实产品语义的永久配额。当前已激活closed oracle为`28 Committed / 24 Live / 11 subjects / 1 guard / 24 product relations / 0 durable jobs`；Round 5B保留Round 5A.2的provider replay relation和Lightweight TODO的process-local live projection，同时删除最后一类durable job及其两张relation、三类occurrence、两个subject和claim guard。任何数量变化都必须经过上述closed contract审查，但“保持旧数字”不优先于“以正确的canonical/live边界完整表达产品能力”。

@@ -39,6 +39,8 @@ class PreparedProviderInputHandle:
         self._owner._begin_model(self)
 
     def close(self) -> None:
+        if self._closed:
+            return
         self._owner._close_handle(self)
 
 
@@ -78,6 +80,35 @@ class ProviderSafePointCoordinator:
             cut = self._repository.prepare_provider_input_cut(
                 self._guard,
                 turn_id=turn_id,
+                deadline_monotonic=deadline_monotonic,
+            )
+            self._generation += 1
+            handle = PreparedProviderInputHandle(cut, self, self._generation)
+            self._active_handle = handle
+            return handle
+
+    def freeze_compaction_input(
+        self,
+        *,
+        turn_id: str,
+        allow_terminal: bool,
+        deadline_monotonic: float,
+    ) -> PreparedProviderInputHandle:
+        """Freeze an exact active or terminal turn for compaction planning."""
+
+        with self._lock:
+            if self._active_handle is not None:
+                raise RuntimeError("provider input handle is already active")
+            if not allow_terminal:
+                self._repository.require_provider_safe_turn(
+                    self._guard,
+                    turn_id=turn_id,
+                    deadline_monotonic=deadline_monotonic,
+                )
+            cut = self._repository.prepare_compaction_input_cut(
+                self._guard,
+                turn_id=turn_id,
+                allow_terminal=allow_terminal,
                 deadline_monotonic=deadline_monotonic,
             )
             self._generation += 1
@@ -151,42 +182,6 @@ class ProviderSafePointCoordinator:
                 new_context_binding_revision_id=new_context_binding_revision_id,
                 requested_permission_mode=requested_permission_mode,
                 child_result_id=child_result_id,
-                command_id=command_id,
-                occurred_at=datetime.now(timezone.utc),
-                actor_id=actor_id,
-                deadline_monotonic=deadline_monotonic,
-            )
-
-    def accept_job_result(
-        self,
-        *,
-        turn_id: str,
-        new_context_binding_revision_id: str | None = None,
-        requested_permission_mode: PermissionMode | None = None,
-        job_id: str,
-        command_id: str,
-        actor_id: str,
-        deadline_monotonic: float,
-    ) -> AcceptedEntry | None:
-        """Explicitly accept one durable job result at the provider safe point."""
-
-        with self._lock:
-            if self._active_handle is not None:
-                raise ExternalSourceNotAtSafePoint(
-                    "provider input/model operation is active"
-                )
-            if new_context_binding_revision_id is None:
-                self._repository.require_provider_safe_turn(
-                    self._guard,
-                    turn_id=turn_id,
-                    deadline_monotonic=deadline_monotonic,
-                )
-            return self._repository.accept_job_result_into_root(
-                self._guard,
-                turn_id=turn_id,
-                new_context_binding_revision_id=new_context_binding_revision_id,
-                requested_permission_mode=requested_permission_mode,
-                job_id=job_id,
                 command_id=command_id,
                 occurred_at=datetime.now(timezone.utc),
                 actor_id=actor_id,

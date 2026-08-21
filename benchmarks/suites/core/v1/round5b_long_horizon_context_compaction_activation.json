@@ -1,0 +1,205 @@
+{
+  "schema_version": "round5b-long-horizon-context-compaction-activation.v1",
+  "status": "activated",
+  "generated_at_utc": "2026-08-21T02:09:00Z",
+  "captured_head": "5077144b139aa5f3377e59215b696d7e16a58ce3",
+  "working_tree_semantics": "Round 5B was implemented and verified in the current uncommitted worktree rooted at the exact activated Round 9.1 clean baseline. The pre-existing user edit to the Round 10 specification was preserved. No file was staged, committed, or pushed, and Round 10 orchestration, provider-error reactive compaction, Web/Desktop UI, memory extraction, or a durable compaction recovery graph was not implemented.",
+  "source_documents": {
+    "ROUND_5B_LONG_HORIZON_CONTEXT_COMPACTION_IMPLEMENTATION_SPEC.zh.md_at_start": "d40bec28a3ef2dfc634bf4fffc68239cfcee9edb217520146b0b57f1e4141136",
+    "ROUND_5B_LONG_HORIZON_CONTEXT_COMPACTION_IMPLEMENTATION_SPEC.zh.md_after_activation_update": "2d89846ecb8688dd1b6b7fb8803309d13e41b94f689d85865bb42673ece2a96b",
+    "POST_HARD_CUT_PRODUCT_CAPABILITY_GAP_INDEX.zh.md_at_start": "75c1f818b8448b9ab41ace900b52a48bdf88df92a52cb50b71532c0470ffc28b",
+    "POST_HARD_CUT_PRODUCT_CAPABILITY_GAP_INDEX.zh.md_after_activation_update": "8eb9f44782878fdbf3b4972ce7725bc9b99b5893209d8d867eb65a1c3ccf45bc",
+    "README.md_at_start": "d010d73813c42286781a6909fd66728c8035d18b8f7633e02d8892c5d26aafa2",
+    "README.md_after_activation_update": "d1049cd32248d3c9d773984175900130c214b60236451741e4ebdfc39b597eff",
+    "README.zh-CN.md_at_start": "7cb0106074f36197c51f3eb361c9745911e3c386ac078597559f7ea281921ddd",
+    "README.zh-CN.md_after_activation_update": "53cc3cdc7c1e7b5d1235d0bfc5e63a9e9e06f4e3431398f1b23ee265acfd8284"
+  },
+  "post_activation_code_sha256": {
+    "conversation_kernel/cold_epoch.py": "cee17810bd44ba46a0f3dabfa93ad735d42762805e2ec32b4b763f917d1c2596",
+    "conversation_kernel/compaction/contracts.py": "3b8a314757ad269fff366428167d1e55a181cafd8841ec6cee36eebbe5f08e2d",
+    "conversation_kernel/compaction/model_call.py": "b98904948efd619caa6f0f186ecbeb671937715fc3aad53bc3a8f392f3962af1",
+    "conversation_kernel/compaction/planner.py": "f96cd4e33c0f383f58bde7c0ce7f265ba91541cd59d62b8182c64c11aa06970f",
+    "conversation_kernel/compaction/prompt.py": "7deeba61acc46471e1b31893fd62efa749409ccba7c3f2d6d8d4f6fc61b3aa6f",
+    "conversation_kernel/compaction/retained_skill.py": "d8abd2244e02d161b6268c0e7bec1360dd2e83d29c495ec3af48ddea75a23186",
+    "conversation_kernel/compaction/runtime.py": "eb806f92c8b9949c14fe2cfd444272a2bbcd0fbc9848e7b6071970816137d0d5",
+    "conversation_kernel/compaction/runtime_handoff.py": "ceab6c90b99201175e2327c7c3f4f45496ac613d6289930d8e778ed3b5fd6cc8",
+    "conversation_kernel/_repository/conversation.py": "b3e900227ccd00cf757bde0684d5d0ec66c871c11af942ba2ccc15ca683ed1f8",
+    "conversation_kernel/context_sources.py": "de3b1f787760fbaf1c211eed250b0008e434fcd4ff72055433cbedbfe5af4ec5",
+    "conversation_kernel/direct_model.py": "6efbd8e275df234bc5c0466ced3b1839630e8ae1166737e3858aa3961a35c964",
+    "conversation_kernel/host.py": "b14a580914909c1e110009f206cf7193ad10a6036d19bbb864745a1287d9c1a6",
+    "conversation_kernel/input_continuity.py": "808e1a169c8d64eb128a68fbb6cb678399d70e36e5eee9499f00d089d248312e",
+    "conversation_kernel/reader.py": "ac5acfb831078bb26aac849857950cc33f45300b0464a110e8e9ec624b95683d",
+    "conversation_kernel/runner.py": "d492c8f2059df8ed17029375cab197785343aa7a00e317bcf6e84a355a640c9a",
+    "conversation_kernel/safe_point.py": "45d04119986def14fe075b1c9353f2c5abc7fbec48665239fe2a65277d61cac4",
+    "conversation_kernel/tool_runtime.py": "f16434784a85e73564c5caa6f16834705f1604defd0fa8a767a2084655f463f4",
+    "conversation_kernel/vocabulary.py": "66287da3af1d3ba2f2eb9e8c6e60a4bd8ce23e7212e73eb09f3d0e8e2871b232",
+    "model_input/compiler.py": "3f59401a378302ad24afe367d76eab7e7c2dc4e600e933737316d294ee5a6e88",
+    "model_input/contracts.py": "6ba470039e1713030ac98906dacfb9e2326153d64469966ac2849cd812aba974",
+    "model_input/continuity.py": "23d36f8ee5724124ed4f70565b2c72f190a93dbcd6710088a3fcadf84503dc4c",
+    "storage/migrations/sql/0000_conversation_kernel_baseline.sql": "002ad9219c00eeb39040f097cbf68afcbd03b76b892ca4bbd52f2fd263800d5f",
+    "tests/test_round5b_long_horizon_context_compaction.py": "daa47a81e1f6da1d26a188704f530d88facc635d3a1146bd8cff5c4dc0b7fb7f",
+    "tools/run_round5b_compaction_dogfood.py": "72e1be0b496b0fa63d692f69f850431dfbc30eaed24c4d302911817a6b4559a3",
+    "conversation_kernel/assembler.py": "4a179e10cc16c05df34608c061b4fd11fb6065b3bd1781232eb9b3583a3053cb",
+    "conversation_kernel/limits.py": "4954e667039242d1535bf0b23fd644f76eba8403d02d65279063bf91a8835103",
+    "tests/test_stage2_conversation_runner.py": "a307eea901bcf2e296477e54f137fa032ac305edb126ac61492ec41a2483d837"
+  },
+  "contracts": {
+    "structured_model_input_compiler": "pulsara.structured-model-input-compiler.prefix-continuity.v9-compaction",
+    "canonical_range": "pulsara.compaction-canonical-range.v1",
+    "source_lineage": "pulsara.compaction-source-lineage.v1",
+    "snapshot_carrier": "pulsara.context-snapshot-carrier.v1-round5b",
+    "summary_prompt": "pulsara.context-compaction-summary.v1",
+    "summary_model_call": "pulsara.primary-model-compaction.v1",
+    "cold_epoch_assembler": "one pure KernelColdEpochInputAssembler shared by ordinary cold open and CompactionContinuationSeed; SubagentInitialSeed remains a retained Round 10 consumer contract only"
+  },
+  "implementation": {
+    "entry_points": [
+      "manual active or idle compaction",
+      "proactive provider-dispatch preflight compaction",
+      "mid-turn post-tool safe-point compaction"
+    ],
+    "summary": "The current primary model receives the exact old native replay prefix with the old tool surface and tool_choice=none. No ProcessLocalToolSurfaceBorrow, tool callback, continuity permit, or canonical assistant acceptance is available to the summary call.",
+    "adoption": "PreparedCompactionCanonicalAdoption atomically accepts the snapshot, binding revision and CompactionAdopted occurrence. FULL/NONE/CONFLICT confirmation covers the exact row composite; active settlement installs one standard EMPTY cold successor and idle settlement leaves the next ROOT admission to cold-open current owner truth.",
+    "protected_material": "At most three complete pairing-safe tool groups, recent exact human input, current bounded Runtime handoff and eligible retained Skill bodies are recompiled after the snapshot without rewriting the canonical transcript.",
+    "capability_rebase": "The successor consumes the activated Round 9 parent dispatch cut and sibling Tool/Skill views, EmptyCapabilityEpochPredecessor, two-stage selection/native materialization, FrozenToolCapabilityExposurePlan, FrozenNonTriggerContextSources, PreparedKernelToolSurface and ProcessLocalToolSurfaceBorrow. A complete MCP cohort is all DIRECT or all META_ONLY.",
+    "skill_rebase": "SKILL_CATALOG comes from current owner discovery; same-activation ACTIVE_SKILL is inherited from the old installed exact snapshot. RETAINED_SKILL_CONTEXT is derived only from exact same-run ordinary COMPLETE/FULL installed reads, or the immediately installed retained predecessor, after current manifest revalidation.",
+    "strict_prefix": "Every old epoch and every successor epoch independently keeps SYSTEM and tools exact and messages append-only. Compaction is the explicit cold epoch boundary; it never mutates an installed prefix.",
+    "job_subtraction": "BACKGROUND_COMPACTION, the job executor/model/catalog, durable_jobs, durable_job_attempts, three job occurrences, two job subjects and JobClaimGuard were removed. No replacement receipt, checkpoint, repair, replay worker, or durable compaction owner was added."
+  },
+  "oracle": {
+    "committed_events": 28,
+    "live_events": 24,
+    "subject_slots": 11,
+    "append_guards": 1,
+    "product_relations": 24,
+    "durable_jobs": 0,
+    "schema_manifest_fingerprint": "sha256:d6f589930432c4c91b961ff04987b78f8fe3cbcf03b784f098d5c077bb4387a0",
+    "observed_catalog_fingerprint": "sha256:21644a91bb43962e1ca4e7bd7e0e9e9a896ff356f941a94fe530be952e7d449c",
+    "baseline_sql_sha256": "002ad9219c00eeb39040f097cbf68afcbd03b76b892ca4bbd52f2fd263800d5f",
+    "expected_catalog_resource_sha256": "48b6fb4d864345b556f1eb9ccd9471a885bedf7c64e5dc41311b0e7bd8d81005",
+    "runtime_grants_resource_sha256": "28dd1b21ee30b42b7fa49ed2082346b99146748c00968914d76a3844f2b93e91"
+  },
+  "pytest_node_inventory": {
+    "path": "benchmarks/suites/core/v1/round5b_long_horizon_context_compaction_pytest_nodes.json",
+    "sha256": "890f1994c0c77b69a1e52a8e19203cacf138e77c0935537b5c39e315011f8da4",
+    "baseline_count": 823,
+    "baseline_fingerprint": "sha256:924c9fdd91ce18f6a0f14344decfb1852264b8afecc73ec5cecfe40b6e938bcf",
+    "activated_count": 838,
+    "activated_fingerprint": "sha256:a5ed282068083904893141b4998d68208f8158fd77a7496444979e294459514b",
+    "removed_nodes": 16,
+    "added_nodes": 31,
+    "disposition": "All removed nodes are obsolete durable-job tests or old job-shaped seams. Their exact IDs and every activated node ID are stored in the referenced inventory; replacement architecture, schema, ordering and compaction nodes are in the added set."
+  },
+  "deterministic_verification": {
+    "round5b_clean_v0_round9_round9_1_round7_1_round5a2_todo_targeted": "169 passed across Round 3/7/5B canonical/runner retained suites after review closure",
+    "adjacent_round5b_runner_regression_after_final_fix": "17 pure Round 5B passed; terminal-call manual handoff race included",
+    "pytest_collection": "838 tests collected in 0.78s",
+    "full_pytest": "838 passed in 117.91s",
+    "postgres_marker": "109 relevant PostgreSQL canonical/runner/Plan/kernel nodes passed in 18.71s; full pytest also included the complete PostgreSQL collection",
+    "clean_v0": "fresh install, second migrate, deep Binding v2 verification, shared-public preservation, catalog/grant drift and old-universe RESET_REQUIRED passed in the targeted/full PostgreSQL suites",
+    "ruff": "passed all files after review closure",
+    "compileall": "passed src tests tools after review closure",
+    "terminal_protocol_generator": "passed",
+    "uv_lock_check": "passed",
+    "git_diff_check": "passed after review closure",
+    "new_skip_or_xfail": 0
+  },
+  "real_provider_dogfood": {
+    "status": "passed",
+    "completed_at_utc": "2026-08-21T01:20:08.907394+00:00",
+    "api": "openai_chat_completions",
+    "model": "openai/gpt-5.6-luna",
+    "database": "ephemeral clean-v0 database on an exact loopback PostgreSQL server; dropped after each scenario",
+    "retained_and_repeated": {
+      "summary_calls": 2,
+      "summary_input_tokens": [
+        75200,
+        87362
+      ],
+      "summary_tool_choice_none": true,
+      "summary_old_tools_exact": true,
+      "summary_old_wire_prefix_exact": true,
+      "snapshot_counts_after_first_and_second_adoption": [
+        1,
+        2
+      ],
+      "late_mcp_route_before_compaction": "NEW_MCP_META_ONLY",
+      "successor_route_counts": {
+        "DIRECT": 2,
+        "NEW_MCP_META_ONLY": 0,
+        "UNAVAILABLE": 0
+      },
+      "old_meta_ref_stale": true,
+      "canonical_tool_trajectory": [
+        "inspect_new_mcp_tool",
+        "read_file",
+        "search_files",
+        "search_files",
+        "search_files",
+        "search_files",
+        "mcp__late__direct_echo"
+      ],
+      "retained_skill_presence": "VALUE",
+      "retained_skill_exact_body_observed": true,
+      "next_true_root_retained_skill_presence": null,
+      "latest_correction_won": true,
+      "latest_snapshot_binding_won": true,
+      "agentic_mid_turn": {
+        "trigger": "MID_TURN_FOLLOWUP",
+        "disposition": "COMPACTED",
+        "same_root_turn": true,
+        "model_call_count": 7,
+        "snapshot_count_before_and_after": [
+          0,
+          1
+        ],
+        "tool_calls_before_compaction": 5,
+        "tool_names_before_compaction": [
+          "read_file",
+          "search_files",
+          "search_files",
+          "search_files",
+          "search_files"
+        ],
+        "post_compaction_tool_suffix": [
+          "mcp__late__direct_echo"
+        ],
+        "same_turn_final_answer_nonempty": true
+      }
+    },
+    "overbound_mcp": {
+      "summary_calls": 1,
+      "summary_input_tokens": 77532,
+      "summary_tool_choice_none": true,
+      "summary_old_tools_exact": true,
+      "summary_old_wire_prefix_exact": true,
+      "builtin_direct_count": 28,
+      "mcp_route_counts": {
+        "DIRECT": 0,
+        "NEW_MCP_META_ONLY": 49,
+        "UNAVAILABLE": 0
+      },
+      "partial_mcp_direct_count": 0,
+      "canonical_tool_trajectory": [
+        "inspect_new_mcp_tool",
+        "use_new_mcp_tool"
+      ],
+      "final_answer_nonempty": true
+    },
+    "sensitive_material_recorded": false
+  },
+  "production_diff": {
+    "added_lines": 9656,
+    "deleted_lines": 3241,
+    "net_lines": 6415,
+    "counting_rule": "git diff --numstat for tracked src files plus 4662 lines in untracked production src files"
+  },
+  "non_goals": [
+    "provider-error reactive compaction or retry",
+    "Round 10 hierarchical subagent orchestration beyond the retained SubagentInitialSeed contract",
+    "memory extraction or summary-as-memory authority",
+    "Web/Desktop/TUI compaction timeline",
+    "canonical transcript deletion or rewrite",
+    "durable compiled replacement history, provider stream recovery, receipt, checkpoint, repair or replay worker"
+  ]
+}

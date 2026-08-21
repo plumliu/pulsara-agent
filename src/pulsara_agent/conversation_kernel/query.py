@@ -57,7 +57,6 @@ class CanonicalInspectorView:
     tool_attempts: tuple[Mapping[str, object], ...]
     prompt_queue: tuple[Mapping[str, object], ...]
     subagent_tasks: tuple[Mapping[str, object], ...]
-    jobs: tuple[Mapping[str, object], ...]
     selective_events: tuple[Mapping[str, object], ...]
 
     def to_dict(self) -> dict[str, object]:
@@ -68,7 +67,6 @@ class CanonicalInspectorView:
             "tool_attempts": [_public_row(item) for item in self.tool_attempts],
             "prompt_queue": [_public_row(item) for item in self.prompt_queue],
             "subagent_tasks": [_public_row(item) for item in self.subagent_tasks],
-            "jobs": [_public_row(item) for item in self.jobs],
             "selective_events": [_public_row(item) for item in self.selective_events],
         }
 
@@ -132,7 +130,7 @@ class CanonicalConversationQuery:
                        e.conversation_scope_kind, e.scope_subagent_task_id,
                        e.context_binding_revision_id,
                        e.provider_input_through_sequence,
-                       e.source_job_id, e.source_subagent_result_id,
+                       e.source_subagent_result_id,
                        e.content_digest, e.content_size, e.content_media_type,
                        e.content_codec, e.accepted_at,
                        COALESCE(
@@ -224,10 +222,6 @@ class CanonicalConversationQuery:
                 """SELECT * FROM pulsara_v3.subagent_tasks
                    WHERE session_id = %s ORDER BY accepted_at, id"""
             )
-            jobs = rows(
-                """SELECT * FROM pulsara_v3.durable_jobs
-                   WHERE origin_session_id = %s ORDER BY accepted_at, id"""
-            )
             events = tuple(
                 dict(item)
                 for item in connection.execute(
@@ -246,7 +240,6 @@ class CanonicalConversationQuery:
             tool_attempts=attempts,
             prompt_queue=queue,
             subagent_tasks=tasks,
-            jobs=jobs,
             selective_events=events,
         )
 
@@ -303,7 +296,6 @@ class CanonicalConversationQuery:
                 ]
 
             sessions = grouped("sessions", "lifecycle")
-            jobs = grouped("durable_jobs", "status")
             queue = grouped("prompt_queue_items", "status")
             task = grouped("subagent_tasks", "status")
             memory_candidates = grouped("memory_candidates", "status")
@@ -312,7 +304,6 @@ class CanonicalConversationQuery:
             "conversation_authority": "pulsara_v3",
             "protocol_major": 3,
             "sessions": sessions,
-            "jobs": jobs,
             "prompt_queue": queue,
             "subagent_tasks": task,
             "memory_candidates": memory_candidates,

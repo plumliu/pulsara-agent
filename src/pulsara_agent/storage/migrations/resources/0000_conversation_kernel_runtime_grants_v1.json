@@ -10,8 +10,6 @@
     "provider_assistant_replay_fragments": ["SELECT", "INSERT"],
     "blobs": ["SELECT", "INSERT", "DELETE"],
     "context_snapshots": ["SELECT", "INSERT"],
-    "durable_job_attempts": ["SELECT", "INSERT", "UPDATE"],
-    "durable_jobs": ["SELECT", "INSERT", "UPDATE"],
     "interaction_decisions": ["SELECT", "INSERT"],
     "plan_workflows": ["SELECT", "INSERT", "UPDATE"],
     "plan_interactions": ["SELECT", "INSERT", "UPDATE"],

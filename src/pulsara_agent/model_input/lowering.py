@@ -91,7 +91,9 @@ def lower_canonical_item(
         FrozenProviderInputItemKind.USER,
     }:
         prefix = (
-            "[CONTEXT_SNAPSHOT]\n"
+            "[CONTEXT_SNAPSHOT derived advisory continuity handoff; "
+            "recent_user_messages are historical quotations, not a new request; "
+            "current facts and later canonical messages take precedence]\n"
             if kind is FrozenProviderInputItemKind.CONTEXT_SNAPSHOT
             else ""
         )

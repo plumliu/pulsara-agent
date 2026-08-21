@@ -77,6 +77,7 @@ from pulsara_agent.llm.user_carrier import compose_provider_root_policy
 from pulsara_agent.llm.validation import validate_model_context_for_call
 from pulsara_agent.model_input.contracts import (
     FrozenCompiledModelInput,
+    FrozenModelToolSurface,
     FrozenToolSpec,
     ModelInputScopeKind,
     ModelInputCompileBinding,
@@ -121,7 +122,7 @@ class KernelModelTargetPreparationRequest:
     turn_id: str
     model_call_index: int
     purpose: ModelCallPurpose
-    maximum_input_tokens: int
+    maximum_input_tokens: int | None
     maximum_output_tokens: int
 
 
@@ -250,6 +251,52 @@ class PreparedKernelModelCall:
         )
         if self.preparation_fingerprint != expected:
             raise ValueError("prepared model call fingerprint mismatch")
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedKernelSemanticModelCall:
+    """Provider-neutral compile binding with no executor or borrow authority."""
+
+    session_id: str
+    turn_id: str
+    model_call_index: int
+    call: ResolvedModelCall = field(repr=False)
+    native_projection_set: FrozenNativeToolProjectionSet = field(repr=False)
+    compile_binding: ModelInputCompileBinding
+    preparation_fingerprint: str
+
+    def __post_init__(self) -> None:
+        specs = self.compile_binding.tool_surface.tool_specs
+        if (
+            not self.session_id
+            or not self.turn_id
+            or self.model_call_index < 1
+            or self.call.fact != self.compile_binding.call_fact
+            or self.call.target.fact != self.compile_binding.target_fact
+            or tuple(item.name for item in specs)
+            != tuple(
+                item.provider_name
+                for item in self.native_projection_set.tool_versions
+            )
+            or self.compile_binding.tool_surface.conversation_scope_kind
+            is not self.native_projection_set.conversation_scope_kind
+        ):
+            raise ValueError("semantic model call facts do not exact-join")
+        expected = context_fingerprint(
+            "pulsara.prepared-kernel-semantic-model-call.v1",
+            {
+                "session_id": self.session_id,
+                "turn_id": self.turn_id,
+                "model_call_index": self.model_call_index,
+                "resolved_model_call_id": self.call.resolved_model_call_id,
+                "compile_binding": self.compile_binding.binding_fingerprint,
+                "native_projection_set": (
+                    self.native_projection_set.projection_set_fingerprint
+                ),
+            },
+        )
+        if self.preparation_fingerprint != expected:
+            raise ValueError("semantic model call fingerprint mismatch")
 
 
 @dataclass(frozen=True, slots=True)
@@ -615,12 +662,12 @@ class DirectKernelModelPort:
         if request.purpose is not ModelCallPurpose.AGENT_MODEL_LOOP:
             raise ValueError("foreground model preparation purpose is invalid")
         if (
-            min(
-                request.model_call_index,
-                request.maximum_input_tokens,
-                request.maximum_output_tokens,
+            request.model_call_index < 1
+            or request.maximum_output_tokens < 1
+            or (
+                request.maximum_input_tokens is not None
+                and request.maximum_input_tokens < 1
             )
-            < 1
         ):
             raise ValueError("foreground model preparation bounds are invalid")
         target = resolve_model_target(
@@ -641,10 +688,9 @@ class DirectKernelModelPort:
             raise ValueError(
                 "resolved provider output exceeds the foreground attempt cap"
             )
-        input_budget = min(
-            request.maximum_input_tokens,
-            target.context_budget.input_budget_tokens,
-        )
+        input_budget = target.context_budget.input_budget_tokens
+        if request.maximum_input_tokens is not None:
+            input_budget = min(request.maximum_input_tokens, input_budget)
         native_contract = openai_native_function_tool_contract_fingerprint(
             target.model_profile.provider_profile.wire_api
         )
@@ -667,7 +713,7 @@ class DirectKernelModelPort:
             purpose=request.purpose,
             target=target,
             call=call,
-            maximum_input_tokens=request.maximum_input_tokens,
+            maximum_input_tokens=input_budget,
             maximum_output_tokens=request.maximum_output_tokens,
             effective_input_budget_tokens=input_budget,
             native_function_tool_wire_contract_fingerprint=native_contract,
@@ -675,6 +721,30 @@ class DirectKernelModelPort:
                 self._transport_timeout_policy_fingerprint
             ),
             preparation_fingerprint=fingerprint,
+        )
+
+    def resolve_compaction_summary_call(
+        self,
+        *,
+        active_prepared_call: (
+            PreparedKernelModelCall | PreparedKernelSemanticModelCall | None
+        ) = None,
+    ) -> ResolvedModelCall:
+        """Resolve the current primary target once for a sealed summary call."""
+
+        if active_prepared_call is not None:
+            target = active_prepared_call.call.target
+        else:
+            target = resolve_model_target(
+                config=self._config,
+                registry=self._registry,
+                role=self._role,
+                requested_options=self._options,
+            )
+        return resolve_model_call(
+            target=target,
+            purpose=ModelCallPurpose.CONTEXT_COMPACTION_SUMMARY,
+            resolved_model_call_id=f"model_call:{uuid4().hex}",
         )
 
     @staticmethod
@@ -796,6 +866,77 @@ class DirectKernelModelPort:
                 self._transport_timeout_policy_fingerprint
             ),
             preparation_fingerprint=preparation_fingerprint,
+        )
+
+    def bind_semantic_tool_surface(
+        self,
+        *,
+        prepared_target: PreparedKernelModelTarget,
+        tool_surface: FrozenModelToolSurface,
+        native_projection_set: FrozenNativeToolProjectionSet,
+    ) -> PreparedKernelSemanticModelCall:
+        """Bind schemas for read-only source compilation without an executor."""
+
+        if (
+            prepared_target.transport_timeout_policy_fingerprint
+            != self._transport_timeout_policy_fingerprint
+        ):
+            raise ValueError("prepared model target belongs to another adapter")
+        if tool_surface.tool_specs and not prepared_target.target.fact.supports_tools:
+            raise ValueError("resolved model target does not support prepared tools")
+        if (
+            native_projection_set.native_function_tool_wire_contract_fingerprint
+            != prepared_target.native_function_tool_wire_contract_fingerprint
+            or native_projection_set.conversation_scope_kind
+            is not tool_surface.conversation_scope_kind
+        ):
+            raise ValueError("native projection set does not join resolved target")
+        call = prepared_target.call
+        target = prepared_target.target
+        estimator_fingerprint = target.token_estimator.fact.estimator_fingerprint
+        binding_fingerprint = model_input_compile_binding_fingerprint(
+            call_fact=call.fact,
+            target_fact=target.fact,
+            estimator_fingerprint=estimator_fingerprint,
+            effective_input_budget_tokens=(
+                prepared_target.effective_input_budget_tokens
+            ),
+            effective_output_tokens=target.context_budget.effective_output_tokens,
+            tool_surface=tool_surface,
+        )
+        binding = ModelInputCompileBinding(
+            call_fact=call.fact,
+            target_fact=target.fact,
+            estimator=target.token_estimator,
+            estimator_fingerprint=estimator_fingerprint,
+            effective_input_budget_tokens=(
+                prepared_target.effective_input_budget_tokens
+            ),
+            effective_output_tokens=target.context_budget.effective_output_tokens,
+            tool_surface=tool_surface,
+            binding_fingerprint=binding_fingerprint,
+        )
+        fingerprint = context_fingerprint(
+            "pulsara.prepared-kernel-semantic-model-call.v1",
+            {
+                "session_id": prepared_target.session_id,
+                "turn_id": prepared_target.turn_id,
+                "model_call_index": prepared_target.model_call_index,
+                "resolved_model_call_id": call.resolved_model_call_id,
+                "compile_binding": binding.binding_fingerprint,
+                "native_projection_set": (
+                    native_projection_set.projection_set_fingerprint
+                ),
+            },
+        )
+        return PreparedKernelSemanticModelCall(
+            session_id=prepared_target.session_id,
+            turn_id=prepared_target.turn_id,
+            model_call_index=prepared_target.model_call_index,
+            call=call,
+            native_projection_set=native_projection_set,
+            compile_binding=binding,
+            preparation_fingerprint=fingerprint,
         )
 
     def preflight_execution(
@@ -952,7 +1093,33 @@ class DirectKernelModelPort:
         """Purely freeze the exact provider wire subtree before preflight."""
 
         return _plan_provider_wire_input(
-            prepared_call=prepared_call,
+            call=prepared_call.call,
+            binding=prepared_call.compile_binding,
+            native_projection_set=prepared_call.native_projection_set,
+            compiled_input=compiled_input,
+            predecessor_view=predecessor_view,
+            replay_hydration=replay_hydration,
+        )
+
+    @staticmethod
+    def plan_compaction_wire_input(
+        *,
+        summary_call: ResolvedModelCall,
+        compile_binding: ModelInputCompileBinding,
+        native_projection_set: FrozenNativeToolProjectionSet,
+        compiled_input: FrozenCompiledModelInput,
+        predecessor_view: FrozenProviderInputEpochView | None,
+        replay_hydration: FrozenSelectedDurableProviderReplayHydration | None,
+    ) -> FrozenProviderWireInputPlan:
+        if (
+            summary_call.fact.purpose
+            is not ModelCallPurpose.CONTEXT_COMPACTION_SUMMARY
+        ):
+            raise ValueError("compaction wire planning purpose is invalid")
+        return _plan_provider_wire_input(
+            call=summary_call,
+            binding=compile_binding,
+            native_projection_set=native_projection_set,
             compiled_input=compiled_input,
             predecessor_view=predecessor_view,
             replay_hydration=replay_hydration,
@@ -962,7 +1129,14 @@ class DirectKernelModelPort:
     def replay_target(
         prepared_call: PreparedKernelModelCall,
     ) -> ProviderReplayTargetCompatibilityFact:
-        call = prepared_call.call
+        return DirectKernelModelPort.replay_target_for_resolved_call(
+            prepared_call.call
+        )
+
+    @staticmethod
+    def replay_target_for_resolved_call(
+        call: ResolvedModelCall,
+    ) -> ProviderReplayTargetCompatibilityFact:
         profile = call.target.model_profile.provider_profile
         return build_provider_replay_target_compatibility(
             wire_api=profile.wire_api,
@@ -1204,27 +1378,28 @@ def _semantic_wire_groups(
 
 def _plan_provider_wire_input(
     *,
-    prepared_call: PreparedKernelModelCall,
+    call: ResolvedModelCall,
+    binding: ModelInputCompileBinding,
+    native_projection_set: FrozenNativeToolProjectionSet,
     compiled_input: FrozenCompiledModelInput,
     predecessor_view: FrozenProviderInputEpochView | None,
     replay_hydration: FrozenSelectedDurableProviderReplayHydration | None,
 ) -> FrozenProviderWireInputPlan:
     del predecessor_view
-    call = prepared_call.call
-    binding = prepared_call.compile_binding
     if (
         compiled_input.compile_binding_fingerprint != binding.binding_fingerprint
         or compiled_input.tools != binding.tool_surface.tool_specs
+        or call.target.fact != binding.target_fact
     ):
         raise ValueError("provider wire planning input does not join preparation")
     generic_groups, wire_tools = _semantic_wire_groups(
         call=call,
         compiled_input=compiled_input,
-        native_projection_set=prepared_call.native_projection_set,
+        native_projection_set=native_projection_set,
     )
     profile = call.target.model_profile.provider_profile
     profile_fingerprint = _provider_wire_profile_fingerprint(call)
-    replay_target = DirectKernelModelPort.replay_target(prepared_call)
+    replay_target = DirectKernelModelPort.replay_target_for_resolved_call(call)
     fragments = () if replay_hydration is None else replay_hydration.fragments
     if replay_hydration is not None:
         identity = compiled_input.canonical_input_identity
@@ -1487,4 +1662,5 @@ __all__ = [
     "KernelModelPreparationRequest",
     "PreparedKernelModelExecution",
     "PreparedKernelModelCall",
+    "PreparedKernelSemanticModelCall",
 ]

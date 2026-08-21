@@ -8,7 +8,6 @@ from pathlib import Path
 
 import pytest
 
-from pulsara_agent.conversation_kernel.jobs import JOB_HANDLER_CATALOG
 from pulsara_agent.conversation_kernel.reader import CanonicalProviderInputReader
 from pulsara_agent.conversation_kernel.vocabulary import (
     APPEND_GUARDS,
@@ -291,9 +290,8 @@ def test_round5a2_has_no_vendor_or_remote_state_branch_and_oracle_is_exact() -> 
             for token in ("checkpoint", "receipt", "repair")
             for name in authority_names
         ), path
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == 31
+    assert len(COMMITTED_EVENT_DESCRIPTORS) == 28
     assert len(LIVE_EVENT_TYPES) == 24
-    assert len(SUBJECT_SLOTS) == 13
-    assert len(APPEND_GUARDS) == 2
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 26
-    assert len(JOB_HANDLER_CATALOG) == 1
+    assert len(SUBJECT_SLOTS) == 11
+    assert len(APPEND_GUARDS) == 1
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 24

@@ -194,6 +194,7 @@ def _tool_result_item(body: str) -> FrozenProviderInputItem:
         source_turn_id="turn:test",
         text=body,
         tool_call_id="call:test",
+        tool_request_entry_id="entry:request",
         tool_result_context=ProviderToolResultContextMetadata(
             result_id="result:test",
             result_state="SUCCESS",
@@ -326,7 +327,7 @@ def test_round7_source_registry_wire_and_oracle_architecture_guards() -> None:
     )
     assert (
         COMPILER_CONTRACT_VERSION
-        == "pulsara.structured-model-input-compiler.prefix-continuity.v8-agent-skills"
+        == "pulsara.structured-model-input-compiler.prefix-continuity.v9-compaction"
     )
     assert (
         PROVIDER_MESSAGE_LOWERING_CONTRACT
@@ -360,10 +361,10 @@ def test_round7_source_registry_wire_and_oracle_architecture_guards() -> None:
     assert "observed_at -" not in reader
     assert "attempt.started_at" not in reader
 
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == len(CommittedEventType) == 31
+    assert len(COMMITTED_EVENT_DESCRIPTORS) == len(CommittedEventType) == 28
     assert len(LiveEventType) == 24
-    assert len(SUBJECT_SLOTS) == 13
-    assert len(APPEND_GUARDS) == 2
+    assert len(SUBJECT_SLOTS) == 11
+    assert len(APPEND_GUARDS) == 1
 
 
 def test_round7_result_visibility_helper_exactly_joins_cut() -> None:

@@ -13,7 +13,9 @@ from pulsara_agent.conversation_kernel.contracts import (
     InlineContent,
 )
 from pulsara_agent.conversation_kernel.limits import STAGE2_LIMITS
-from pulsara_agent.conversation_kernel.repository import ConversationKernelConflict
+from pulsara_agent.conversation_kernel.repository_errors import (
+    ConversationKernelConflict,
+)
 from pulsara_agent.storage.postgres_connection_provider import (
     PostgresConnectionLane,
     VerifiedPostgresConnectionProviderProtocol,
@@ -237,10 +239,6 @@ class PostgresCanonicalBlobStore:
                       AND NOT EXISTS (
                           SELECT 1 FROM pulsara_v3.prompt_queue_items AS q
                           WHERE q.blob_id = b.id
-                      )
-                      AND NOT EXISTS (
-                          SELECT 1 FROM pulsara_v3.durable_jobs AS j
-                          WHERE j.result_blob_id = b.id
                       )
                       AND NOT EXISTS (
                           SELECT 1 FROM pulsara_v3.tool_results AS r

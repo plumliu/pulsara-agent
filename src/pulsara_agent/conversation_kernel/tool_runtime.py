@@ -94,6 +94,14 @@ from pulsara_agent.conversation_kernel.io import (
     KernelSessionIO,
     PhysicalToolInvocationDisposition,
 )
+from pulsara_agent.conversation_kernel.compaction.runtime_handoff import (
+    FrozenCompactionRuntimeHandoff,
+    FrozenFlatSubagentHandoffFact,
+    FrozenTerminalMonitorHandoffFact,
+    FrozenTerminalProcessHandoffFact,
+    bounded_handoff_preview,
+    freeze_compaction_runtime_handoff,
+)
 from pulsara_agent.conversation_kernel.capability_composition import (
     BuiltinCompositionState,
     SealedBuiltinCapabilitySnapshot,
@@ -343,6 +351,8 @@ class KernelSubagentToolPort(Protocol):
         arguments: Mapping[str, object],
         parent_turn_id: str,
     ) -> KernelToolResult: ...
+
+    async def freeze_compaction_handoff(self) -> tuple[dict[str, str], ...]: ...
 
 
 class KernelMemoryToolPort(Protocol):
@@ -976,6 +986,76 @@ class DirectKernelToolPort:
     def snapshot_terminal_cwd(self) -> Path:
         return self._terminal.snapshot_default_cwd(
             owner_host_session_id=self._host_owner_id
+        )
+
+    async def freeze_compaction_runtime_handoff(
+        self,
+        *,
+        conversation_scope_kind: ModelInputScopeKind,
+        scope_subagent_task_id: str | None,
+        maximum_utf8_bytes: int,
+    ) -> FrozenCompactionRuntimeHandoff | None:
+        """Compose exact bounded views frozen by the existing live owners."""
+
+        if (conversation_scope_kind is ModelInputScopeKind.ROOT) != (
+            scope_subagent_task_id is None
+        ):
+            raise ValueError("runtime handoff scope union is invalid")
+        root = self._terminal.workspace_root
+        process_facts = tuple(
+            FrozenTerminalProcessHandoffFact(
+                process_id=item.process_id,
+                terminal_session_id=item.terminal_session_id,
+                status="running",
+                command_preview=bounded_handoff_preview(item.command),
+                cwd=_workspace_relative_handoff_path(Path(item.cwd), root),
+            )
+            for item in self._terminal.freeze_compaction_handoff(
+                owner_host_session_id=self._host_owner_id
+            )
+            if (
+                item.origin.conversation_scope_kind
+                == conversation_scope_kind.value
+                and item.origin.scope_subagent_task_id == scope_subagent_task_id
+            )
+        )
+        monitor_facts = tuple(
+            FrozenTerminalMonitorHandoffFact(
+                monitor_id=str(item["monitor_id"]),
+                process_id=str(item["process_id"]),
+                state=str(item["state"]),
+                pending_observation=bool(item["pending_observation"]),
+            )
+            for item in (
+                self._terminal_monitor.freeze_compaction_handoff()
+                if conversation_scope_kind is ModelInputScopeKind.ROOT
+                else ()
+            )
+        )
+        todo = self._todo_owner.freeze_compaction_handoff(
+            scope_kind=conversation_scope_kind,
+            scope_subagent_task_id=scope_subagent_task_id,
+        )
+        subagents: tuple[dict[str, str], ...] = ()
+        if (
+            conversation_scope_kind is ModelInputScopeKind.ROOT
+            and self._subagent is not None
+        ):
+            subagents = await self._subagent.freeze_compaction_handoff()
+        subagent_facts = tuple(
+            FrozenFlatSubagentHandoffFact(
+                task_id=item["task_id"],
+                status=item["status"],
+                objective_preview=bounded_handoff_preview(item["objective"]),
+            )
+            for item in subagents
+        )
+        return freeze_compaction_runtime_handoff(
+            terminal_processes=process_facts,
+            terminal_monitors=monitor_facts,
+            todo=todo,
+            flat_subagents=subagent_facts,
+            maximum_utf8_bytes=maximum_utf8_bytes,
         )
 
     def prepare_planned_tool_surface(
@@ -3085,6 +3165,18 @@ def _terminal_monitor_rejected(call: ToolCall, reason: str) -> ToolExecutionResu
             sort_keys=True,
         ),
     )
+
+
+def _workspace_relative_handoff_path(value: Path, root: Path) -> str:
+    """Project a Terminal cwd without exposing a path outside the workspace."""
+
+    resolved = value.expanduser().resolve()
+    if resolved == root:
+        return "."
+    try:
+        return resolved.relative_to(root).as_posix()
+    except ValueError:
+        return "<outside-workspace>"
 
 
 def _json_schema_value(value: Mapping[str, object]) -> dict[str, object]:

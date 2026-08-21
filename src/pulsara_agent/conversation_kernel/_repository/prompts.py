@@ -703,19 +703,14 @@ class _PromptOperations:
                     *self._permission_columns(permission),
                 ),
             )
-            connection.execute(
-                """
-                INSERT INTO pulsara_v3.turn_context_binding_revisions (
-                    id, session_id, turn_id, revision_ordinal, base_kind,
-                    source_through_sequence
-                ) VALUES (%s, %s, %s, 0, 'FULL_HISTORY', %s)
-                """,
-                (
-                    candidate.exact_context_binding_revision_id,
-                    guard.session_id,
-                    candidate.exact_turn_id,
-                    entry_sequence - 1,
-                ),
+            self._insert_initial_context_binding_revision(
+                connection,
+                session_id=guard.session_id,
+                turn_id=candidate.exact_turn_id,
+                revision_id=candidate.exact_context_binding_revision_id,
+                initial_entry_sequence=entry_sequence,
+                scope_kind=ConversationScopeKind.ROOT,
+                scope_subagent_task_id=None,
             )
             self._insert_entry(
                 connection,
@@ -826,6 +821,9 @@ class _PromptOperations:
                     candidate.user_message_accepted_occurrence.event_id,
                 ),
             ).fetchone()
+            revision_matches = self._queued_root_revision_matches_candidate(
+                connection, revision, candidate, entry
+            )
         winner_rows = (turn, revision, entry, consumed_event, accepted_event)
         if (
             queue is not None
@@ -833,7 +831,7 @@ class _PromptOperations:
             and str(queue["status"]) == "CONSUMED"
             and str(queue["consumed_entry_id"]) == candidate.exact_initial_entry_id
             and self._queued_root_turn_matches_candidate(turn, candidate)
-            and self._queued_root_revision_matches_candidate(revision, candidate, entry)
+            and revision_matches
             and self._queued_root_entry_matches_candidate(entry, candidate)
             and _event_row_matches_draft(
                 consumed_event, candidate.prompt_consumed_occurrence
@@ -927,8 +925,9 @@ class _PromptOperations:
         except (KeyError, TypeError, ValueError):
             return False
 
-    @staticmethod
     def _queued_root_revision_matches_candidate(
+        self,
+        connection: Connection,
         row: object,
         candidate: PreparedQueuedRootTurnAdmission,
         entry: object,
@@ -937,13 +936,16 @@ class _PromptOperations:
             return False
         try:
             return bool(
-                str(row["id"]) == candidate.exact_context_binding_revision_id
-                and str(row["session_id"]) == candidate.session_id
-                and str(row["turn_id"]) == candidate.exact_turn_id
-                and int(row["revision_ordinal"]) == 0
-                and str(row["base_kind"]) == "FULL_HISTORY"
-                and int(row["source_through_sequence"])
-                == int(entry["entry_sequence"]) - 1
+                self._initial_context_binding_revision_matches(
+                    connection,
+                    row=row,
+                    session_id=candidate.session_id,
+                    turn_id=candidate.exact_turn_id,
+                    revision_id=candidate.exact_context_binding_revision_id,
+                    initial_entry_sequence=int(entry["entry_sequence"]),
+                    scope_kind=ConversationScopeKind.ROOT,
+                    scope_subagent_task_id=None,
+                )
             )
         except (KeyError, TypeError, ValueError):
             return False

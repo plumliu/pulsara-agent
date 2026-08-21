@@ -358,6 +358,7 @@ class LLMContext:
     provider_wire_input_plan: FrozenProviderWireInputPlan | None = field(
         default=None, repr=False
     )
+    tool_choice_none: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -371,7 +372,7 @@ def llm_context_fingerprint(context: LLMContext) -> str:
     """Canonical provider-neutral identity for one fully resolved input."""
 
     return context_fingerprint(
-        "provider-neutral-llm-context:v1",
+        "provider-neutral-llm-context:v2-compaction-tool-suppression",
         {
             "system_prompt": context.system_prompt,
             "messages": tuple(
@@ -408,6 +409,7 @@ def llm_context_fingerprint(context: LLMContext) -> str:
             "compiler_estimated_input_tokens": (
                 context.compiler_estimated_input_tokens
             ),
+            "tool_choice_none": context.tool_choice_none,
             "provider_wire_input_plan": (
                 None
                 if context.provider_wire_input_plan is None

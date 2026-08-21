@@ -84,7 +84,6 @@ from pulsara_agent.conversation_kernel.vocabulary import (
     LIVE_EVENT_TYPES,
     SUBJECT_SLOTS,
 )
-from pulsara_agent.conversation_kernel.job_catalog import JOB_HANDLER_CATALOG
 from pulsara_agent.conversation_kernel.repository import (
     AcceptedInteractionDecision,
     ConversationKernelRepository,
@@ -3580,12 +3579,11 @@ def test_round6_wire_bounds_and_result_type_presence_fail_closed(
 
 
 def test_round6_does_not_expand_durable_or_protocol_oracles() -> None:
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == 31
+    assert len(COMMITTED_EVENT_DESCRIPTORS) == 28
     assert len(LIVE_EVENT_TYPES) == 24
-    assert len(SUBJECT_SLOTS) == 13
-    assert len(APPEND_GUARDS) == 2
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 26
-    assert len(JOB_HANDLER_CATALOG) == 1
+    assert len(SUBJECT_SLOTS) == 11
+    assert len(APPEND_GUARDS) == 1
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 24
 
     root = Path(__file__).parents[1]
     mcp_root = root / "src" / "pulsara_agent" / "conversation_kernel" / "mcp"
@@ -3679,10 +3677,6 @@ def test_round6_does_not_expand_durable_or_protocol_oracles() -> None:
         for descriptor in COMMITTED_EVENT_DESCRIPTORS
     )
     assert not any("mcp" in relation.lower() for relation in CONVERSATION_KERNEL_RELATIONS)
-    assert not any(
-        "mcp" in contract.handler_type.lower()
-        for contract in JOB_HANDLER_CATALOG
-    )
     baseline = (
         root
         / "src"

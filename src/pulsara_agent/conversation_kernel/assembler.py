@@ -29,6 +29,9 @@ from pulsara_agent.conversation_kernel.vocabulary import LiveEventType
 from pulsara_agent.primitives.context import FrozenJsonObjectFact, freeze_json
 
 
+MAXIMUM_COMPLETED_ASSISTANT_MESSAGE_UTF8_BYTES = 4 << 20
+
+
 @dataclass(frozen=True, slots=True)
 class CompletedTextBlock:
     block_id: str
@@ -83,7 +86,7 @@ class ProviderStreamAssembler:
         proposed_entry_id: str,
         conversation_scope_kind: str = "ROOT",
         scope_subagent_task_id: str | None = None,
-        maximum_completed_bytes: int = 4 << 20,
+        maximum_completed_bytes: int = MAXIMUM_COMPLETED_ASSISTANT_MESSAGE_UTF8_BYTES,
     ) -> None:
         if maximum_completed_bytes < 1:
             raise ValueError("assembler bound must be positive")
@@ -402,5 +405,6 @@ __all__ = [
     "CompletedDataBlock",
     "CompletedTextBlock",
     "CompletedToolCallBlock",
+    "MAXIMUM_COMPLETED_ASSISTANT_MESSAGE_UTF8_BYTES",
     "ProviderStreamAssembler",
 ]

@@ -96,7 +96,6 @@ from pulsara_agent.ports.tool_execution import (
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 from pulsara_agent.memory.scope import CTX_USER, MemoryScopeKind
 from pulsara_agent.storage.migrations.manifest import CONVERSATION_KERNEL_RELATIONS
-from pulsara_agent.conversation_kernel.jobs import JOB_HANDLER_CATALOG
 from pulsara_agent.terminal_process.output import TerminalOutputOwner
 from pulsara_agent.tools.builtins.artifact import ArtifactReadTool
 from tests.support.postgres import verified_postgres_provider
@@ -148,13 +147,12 @@ def _processor(publisher: _RecordingPublisher) -> ToolOutputArtifactProcessor:
 
 
 def test_round1_static_authority_and_count_oracles_remain_closed() -> None:
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 26
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 24
     assert "tool_result_artifacts" not in CONVERSATION_KERNEL_RELATIONS
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == 31
+    assert len(COMMITTED_EVENT_DESCRIPTORS) == 28
     assert len(LIVE_EVENT_TYPES) == 24
-    assert len(SUBJECT_SLOTS) == 13
-    assert len(APPEND_GUARDS) == 2
-    assert len(JOB_HANDLER_CATALOG) == 1
+    assert len(SUBJECT_SLOTS) == 11
+    assert len(APPEND_GUARDS) == 1
 
     root = Path(__file__).resolve().parents[1]
     sql = (

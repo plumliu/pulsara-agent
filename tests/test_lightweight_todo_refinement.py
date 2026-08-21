@@ -36,7 +36,6 @@ from pulsara_agent.conversation_kernel.vocabulary import (
     COMMITTED_EVENT_DESCRIPTORS,
     SUBJECT_SLOTS,
 )
-from pulsara_agent.conversation_kernel.job_catalog import JOB_HANDLER_CATALOG
 from pulsara_agent.ports.live_agent_event import (
     TodoLiveItemProjection,
     TodoSnapshotUpdatedPayload,
@@ -627,15 +626,14 @@ def test_todo_read_only_authorization_and_invoke_close_race_are_known(
 
 
 def test_todo_refinement_preserves_the_closed_durability_oracle() -> None:
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == 31
+    assert len(COMMITTED_EVENT_DESCRIPTORS) == 28
     assert len(LiveEventType) == 24
     assert tuple(item for item in LiveEventType if "TODO" in item.name) == (
         LiveEventType.TODO_SNAPSHOT_UPDATED,
     )
-    assert len(SUBJECT_SLOTS) == 13
-    assert len(APPEND_GUARDS) == 2
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 26
-    assert len(JOB_HANDLER_CATALOG) == 1
+    assert len(SUBJECT_SLOTS) == 11
+    assert len(APPEND_GUARDS) == 1
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 24
 
     root = Path(__file__).resolve().parents[1]
     migration = (

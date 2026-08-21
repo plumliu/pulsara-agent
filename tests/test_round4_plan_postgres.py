@@ -14,6 +14,16 @@ import pytest
 
 from pulsara_agent.capability.builtin_catalog import builtin_tool_catalog_entry
 from pulsara_agent.conversation_kernel.contracts import InlineContent
+from pulsara_agent.conversation_kernel.compaction.contracts import (
+    CompactionCanonicalAdoptionFactoryInput,
+    CompactionCanonicalWritePreconditions,
+    CompactionScope,
+    CompactionTargetBranch,
+    ExpectedCompactionPredecessorRevision,
+    build_prepared_compaction_canonical_adoption,
+    canonical_compaction_range_digest,
+    freeze_compaction_canonical_range,
+)
 from pulsara_agent.conversation_kernel.live import LiveAgentEventBus
 from pulsara_agent.conversation_kernel.reader import CanonicalProviderInputReader
 from pulsara_agent.conversation_kernel.repository import (
@@ -43,8 +53,11 @@ from pulsara_agent.ports.live_agent_event import (
     ToolCallStartPayload,
     live_digest,
 )
-from pulsara_agent.model_input.contracts import FrozenProviderInputItemKind
-from pulsara_agent.model_input.contracts import ProviderToolResultClosureKind
+from pulsara_agent.model_input.contracts import (
+    FrozenProviderInputItemKind,
+    ModelInputScopeKind,
+    ProviderToolResultClosureKind,
+)
 from pulsara_agent.primitives.context import FrozenJsonObjectFact, freeze_json
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.primitives.plan_workflow import (
@@ -1161,19 +1174,87 @@ def test_round4_question_revise_approve_and_one_cut_materialization(
                 (lease.guard.session_id, implementation_entry),
             ).fetchone()["entry_sequence"]
         )
-    repository.adopt_context_snapshot(
+    compaction_cut = repository.prepare_compaction_input_cut(
         lease.guard,
         turn_id=implementation_turn,
-        snapshot_id=_id("context-snapshot"),
-        context_binding_revision_id=_id("context-revision"),
-        source_through_sequence=initial_sequence - 1,
-        source_digest="sha256:" + "4" * 64,
-        compiler_contract="test.compiler.v1",
-        prompt_contract="test.prompt.v1",
-        model_contract="test.model.v1",
-        content=InlineContent.from_bytes(b"bounded adopted summary"),
-        occurred_at=_now(),
-        actor_id="test:compaction",
+        allow_terminal=False,
+        deadline_monotonic=monotonic() + 30,
+    )
+    compaction_read = CanonicalProviderInputReader(
+        repository.connection_provider
+    ).read_frozen_compaction_cut(
+        compaction_cut,
+        deadline_monotonic=monotonic() + 30,
+    )
+    scope = CompactionScope(
+        session_id=lease.guard.session_id,
+        workspace_id=workspace_id,
+        turn_id=implementation_turn,
+        scope_kind=ModelInputScopeKind.ROOT,
+        scope_subagent_task_id=None,
+    )
+    source_through_sequence = initial_sequence - 1
+    source_range = freeze_compaction_canonical_range(
+        scope=scope,
+        effective_materialization_lineage_floor=(
+            compaction_read.lineage_base.effective_materialization_lineage_floor
+        ),
+        source_through_sequence=source_through_sequence,
+        ordered_items=compaction_read.safe_head_range.ordered_items,
+        closures=compaction_read.safe_head_range.closures,
+        late_outcomes=compaction_read.safe_head_range.late_outcomes,
+    )
+    adoption = build_prepared_compaction_canonical_adoption(
+        CompactionCanonicalAdoptionFactoryInput(
+            scope=scope,
+            target_branch=CompactionTargetBranch.ACTIVE_INSTALLATION,
+            expected_turn_status="RUNNING",
+            predecessor=ExpectedCompactionPredecessorRevision(
+                binding_revision_id=(
+                    compaction_read.lineage_base.binding_revision_id
+                ),
+                revision_ordinal=(
+                    compaction_read.lineage_base.binding_revision_ordinal
+                ),
+                base_kind=(
+                    "FULL_HISTORY"
+                    if compaction_read.lineage_base.snapshot_id is None
+                    else "SNAPSHOT"
+                ),
+                context_snapshot_id=compaction_read.lineage_base.snapshot_id,
+                source_through_sequence=(
+                    compaction_read.lineage_base.persisted_revision_genesis_marker
+                ),
+            ),
+            snapshot_id=_id("context-snapshot"),
+            binding_revision_id=_id("context-revision"),
+            event_id=_id("compaction-event"),
+            source_through_sequence=source_through_sequence,
+            source_digest=canonical_compaction_range_digest(
+                compaction_read.lineage_base,
+                source_range,
+            ),
+            snapshot_content=InlineContent.from_bytes(
+                b"bounded adopted summary"
+            ),
+            compiler_contract="test.compiler.v1",
+            prompt_contract="test.prompt.v1",
+            model_contract="test.model.v1",
+            occurred_at=_now(),
+            actor_id="test:compaction",
+        )
+    )
+    repository.adopt_context_snapshot(
+        lease.guard,
+        candidate=adoption,
+        preconditions=CompactionCanonicalWritePreconditions(
+            scope=scope,
+            expected_turn_status="RUNNING",
+            expected_safe_head=(
+                compaction_read.safe_head_range.source_through_sequence
+            ),
+            provider_safe=True,
+        ),
         deadline_monotonic=monotonic() + 30,
     )
     materialized_cut = repository.prepare_provider_input_cut(

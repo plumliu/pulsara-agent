@@ -5,7 +5,6 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-from pulsara_agent.conversation_kernel.jobs import JOB_HANDLER_CATALOG
 from pulsara_agent.conversation_kernel.vocabulary import (
     APPEND_GUARDS,
     COMMITTED_EVENT_DESCRIPTORS,
@@ -106,12 +105,11 @@ def test_round5a1_responses_allowlist_and_oracles_remain_closed() -> None:
         "message",
         "function_call",
     }
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == 31
+    assert len(COMMITTED_EVENT_DESCRIPTORS) == 28
     assert len(LIVE_EVENT_TYPES) == 24
-    assert len(SUBJECT_SLOTS) == 13
-    assert len(APPEND_GUARDS) == 2
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 26
-    assert len(JOB_HANDLER_CATALOG) == 1
+    assert len(SUBJECT_SLOTS) == 11
+    assert len(APPEND_GUARDS) == 1
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 24
 
 
 def test_round5a1_terminal_path_does_not_import_compaction_or_recovery() -> None:
