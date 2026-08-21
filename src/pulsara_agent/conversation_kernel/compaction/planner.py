@@ -269,6 +269,102 @@ def build_synthetic_compaction_dispatch_read(
     )
 
 
+def rebase_compaction_dispatch_read_through_sequence(
+    dispatch: FrozenCanonicalProviderDispatchRead,
+    *,
+    provider_input_through_sequence: int,
+) -> FrozenCanonicalProviderDispatchRead:
+    """Re-quote one synthetic scope cut after foreign-scope session writes.
+
+    PostgreSQL entry sequence is session-global while canonical provider input
+    is exact-scope.  A concurrently running child may therefore advance the
+    next ROOT cut without adding any ROOT item or replay manifest.  This helper
+    changes only that global cut coordinate; the caller must compare the whole
+    rebuilt value to the authoritative reader result before using it.
+    """
+
+    facts = dispatch.compile_snapshot
+    old_input = facts.canonical_input
+    old_identity = old_input.identity
+    if provider_input_through_sequence < old_identity.provider_input_through_sequence:
+        raise ValueError("compaction dispatch cut cannot move backwards")
+    identity_values = {
+        "session_id": old_identity.session_id,
+        "turn_id": old_identity.turn_id,
+        "initial_entry_id": old_identity.initial_entry_id,
+        "context_binding_revision_id": old_identity.context_binding_revision_id,
+        "provider_input_through_sequence": provider_input_through_sequence,
+        "conversation_scope_kind": old_identity.conversation_scope_kind,
+        "scope_subagent_task_id": old_identity.scope_subagent_task_id,
+    }
+    identity = CanonicalModelInputIdentity(
+        **identity_values,
+        identity_fingerprint=canonical_model_input_identity_fingerprint(
+            **identity_values
+        ),
+    )
+    canonical_input = CanonicalModelInputSnapshot(
+        identity=identity,
+        items=old_input.items,
+        canonical_utf8_bytes=old_input.canonical_utf8_bytes,
+        snapshot_fingerprint=canonical_model_input_snapshot_fingerprint(
+            identity=identity,
+            items=old_input.items,
+            canonical_utf8_bytes=old_input.canonical_utf8_bytes,
+            closures=old_input.closures,
+            late_outcomes=old_input.late_outcomes,
+        ),
+        closures=old_input.closures,
+        late_outcomes=old_input.late_outcomes,
+    )
+    fact_values = {
+        "canonical_input": canonical_input,
+        "context_binding_fact": facts.context_binding_fact,
+        "run_permission_snapshot": facts.run_permission_snapshot,
+        "plan_workflow_fact": facts.plan_workflow_fact,
+        "plan_handoff_fact": facts.plan_handoff_fact,
+        "approved_plan_materialization_fact": (
+            facts.approved_plan_materialization_fact
+        ),
+        "previous_turn_outcome_fact": facts.previous_turn_outcome_fact,
+        "tool_observation_freshness_fact": (
+            facts.tool_observation_freshness_fact
+        ),
+    }
+    provisional_facts = FrozenCanonicalCompileSnapshot.__new__(
+        FrozenCanonicalCompileSnapshot
+    )
+    for name, value in fact_values.items():
+        object.__setattr__(provisional_facts, name, value)
+    object.__setattr__(provisional_facts, "canonical_read_cut_fingerprint", "")
+    rebased_facts = FrozenCanonicalCompileSnapshot(
+        **fact_values,
+        canonical_read_cut_fingerprint=canonical_compile_snapshot_fingerprint(
+            provisional_facts
+        ),
+    )
+    old_manifest = dispatch.replay_manifest_cut
+    manifest_cut = freeze_provider_replay_manifest_cut(
+        session_id=old_manifest.session_id,
+        scope=old_manifest.scope,
+        context_binding_revision_id=old_manifest.context_binding_revision_id,
+        provider_input_through_sequence=provider_input_through_sequence,
+        manifests=old_manifest.manifests,
+    )
+    composite = context_fingerprint(
+        "pulsara.canonical-provider-dispatch-read:v1",
+        {
+            "compile": rebased_facts.canonical_read_cut_fingerprint,
+            "replay_manifest_cut": manifest_cut.cut_fingerprint,
+        },
+    )
+    return FrozenCanonicalProviderDispatchRead(
+        compile_snapshot=rebased_facts,
+        replay_manifest_cut=manifest_cut,
+        composite_fingerprint=composite,
+    )
+
+
 def _synthetic_approved_plan_fact(
     fact: ApprovedPlanMaterializationFact | None,
     *,

@@ -80,6 +80,7 @@ class CanonicalInputOriginKind(StrEnum):
     SUBAGENT_OBJECTIVE = "SUBAGENT_OBJECTIVE"
     SUBAGENT_RESULT = "SUBAGENT_RESULT"
     PLAN_CONTINUATION = "PLAN_CONTINUATION"
+    INTER_AGENT_MESSAGE = "INTER_AGENT_MESSAGE"
 
 
 class ContextSourceKind(StrEnum):
@@ -98,6 +99,8 @@ class ContextSourceKind(StrEnum):
     MEMORY_RECALL = "MEMORY_RECALL"
     COMPACTION_RUNTIME_HANDOFF = "COMPACTION_RUNTIME_HANDOFF"
     RETAINED_SKILL_CONTEXT = "RETAINED_SKILL_CONTEXT"
+    PARENT_CONTEXT = "PARENT_CONTEXT"
+    DEPENDENCY_RESULTS = "DEPENDENCY_RESULTS"
 
 
 class ContextChannel(StrEnum):
@@ -695,6 +698,7 @@ class FrozenProviderInputItemKind(StrEnum):
     TOOL_RESULT_CLOSURE = "TOOL_RESULT_CLOSURE"
     LATE_TOOL_OUTCOME = "LATE_TOOL_OUTCOME"
     PLAN_CONTINUATION = "PLAN_CONTINUATION"
+    INTER_AGENT_MESSAGE = "INTER_AGENT_MESSAGE"
 
 
 class ProviderToolResultClosureKind(StrEnum):
@@ -772,6 +776,7 @@ class FrozenProviderInputItem:
         has_origin = self.item_kind in {
             FrozenProviderInputItemKind.USER,
             FrozenProviderInputItemKind.PLAN_CONTINUATION,
+            FrozenProviderInputItemKind.INTER_AGENT_MESSAGE,
         }
         if has_origin != (
             self.input_origin is not None

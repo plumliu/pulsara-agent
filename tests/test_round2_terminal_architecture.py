@@ -78,11 +78,11 @@ def _fixed_live_producers() -> dict[str, set[Path]]:
 
 
 def test_round2_closed_oracles_and_no_durable_terminal_authority() -> None:
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == 28
+    assert len(COMMITTED_EVENT_DESCRIPTORS) == 29
     assert len(LIVE_EVENT_TYPES) == 24
     assert len(SUBJECT_SLOTS) == 11
     assert len(APPEND_GUARDS) == 1
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 24
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 25
     terminal_names = {
         "terminal",
         "terminal_process",

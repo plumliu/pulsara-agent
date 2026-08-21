@@ -51,7 +51,8 @@ enum CommittedEventType {
   SUBAGENT_TASK_STATUS_ACCEPTED = 18;
   SUBAGENT_MESSAGE_ACCEPTED = 19;
   SUBAGENT_RESULT_ACCEPTED = 20;
-  reserved 21 to 26;
+  INTER_AGENT_MESSAGE_ACCEPTED = 21;
+  reserved 22 to 26;
   TERMINAL_OBSERVATION_ACCEPTED = 27;
   PLAN_WORKFLOW_ENTERED = 28;
   PLAN_QUESTION_ASKED = 29;
@@ -105,6 +106,7 @@ enum EntryKind {
   TOOL_RESULT = 5;
   TERMINAL_OBSERVATION = 6;
   PLAN_CONTINUATION = 7;
+  INTER_AGENT_MESSAGE = 8;
 }
 
 enum PermissionMode {
@@ -249,6 +251,18 @@ message SubagentTaskControl {
   string result_id = 5;
   string result_entry_id = 6;
   bool result_accepted = 7;
+  string batch_id = 8;
+  string task_key = 9;
+  string label = 10;
+  string profile = 11;
+  string display_role = 12;
+  string context_mode = 13;
+  uint32 context_last_n_turns = 14;
+  string pending_reason = 15;
+  string terminal_reason = 16;
+  string result_source = 17;
+  string result_summary = 18;
+  repeated string dependency_task_ids = 19;
 }
 
 message CanonicalControl {

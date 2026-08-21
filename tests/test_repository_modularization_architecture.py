@@ -280,15 +280,59 @@ _ROUND5B_RUNTIME_CHANGED_METHODS = {
     "_append_events",
     "adopt_context_snapshot",
 }
-_ROUND8_ROUND5B_REPOSITORY_DELTA_SHA256 = (
+_ROUND10_ADDED_TOP_LEVEL_FUNCTIONS = {
+    "_explicit_result_arguments_match",
+    "_subagent_batch_arguments_match",
+    "_subagent_batch_subject_matches",
+    "_subagent_context_arguments_match",
+}
+_ROUND10_ADDED_METHODS = {
+    "_explicit_result_events",
+    "_subagent_batch_task_event",
+    "_subagent_task_start_event",
+    "_subagent_task_terminal_event",
+    "accept_explicit_subagent_result",
+    "accept_inter_agent_mailbox_batch",
+    "accept_subagent_task_batch",
+    "accept_subagent_task_start",
+    "accept_subagent_task_terminal_settlement",
+    "confirm_explicit_subagent_result",
+    "confirm_inter_agent_mailbox_batch",
+    "confirm_subagent_task_batch",
+    "confirm_subagent_task_start",
+    "confirm_subagent_task_terminal_settlement",
+    "list_runnable_subagent_tasks",
+    "read_subagent_dependencies",
+    "read_subagent_task_board",
+    "settle_subagent_dependency_frontier",
+}
+_ROUND10_CHANGED_METHODS = {
+    "_interrupt_prior_generation",
+    "list_subagent_tasks",
+    "query_subagent_task",
+}
+_ROUND10_REMOVED_METHODS = {
+    "accept_subagent_child",
+    "accept_subagent_task",
+    "set_subagent_task_status",
+}
+_ROUND8_ROUND10_REPOSITORY_DELTA_SHA256 = (
     # Round 9 four-provider dogfood exercised the already-allowlisted
     # renew_host_writer owner with memory_domain_id=None.  Its PostgreSQL
     # placeholder now carries the explicit text type needed for that closed
     # optional branch; no method, checkout, lane or result shape changed.
     # Round 5B adds the bounded compaction command/adoption transactions and
-    # removes the entire durable-job method family.  This digest seals that
-    # exact combined delta while the historical M0 fixture remains immutable.
-    "55c75241480abc61ade61fd68c409de197138f129dc2b3b654b80bfc644492e8"
+    # removes the entire durable-job method family.  Round 10 adds only the
+    # closed hierarchical task-board/message/result transactions and updates
+    # the existing subagent owners in place.  The compaction verifier reads the
+    # exact safe-head composite before applying the shared pure range cut, so a
+    # first FULL_HISTORY snapshot can cover history before the revision-zero
+    # marker without weakening normal provider cuts.  The Round 10 list owner
+    # now also accepts its bounded `(accepted_at,id)` keyset and one-row
+    # lookahead instead of making the first 50 historical tasks an inventory
+    # cap.  This digest seals that exact combined delta while the historical M0
+    # fixture remains immutable.
+    "32d975937475e0f6d6a5f703c5ad868d340b1ae8d866acca3e10e10663e33a0e"
 )
 
 
@@ -415,6 +459,7 @@ def _round8_repository_delta(current: dict[str, object]) -> dict[str, object]:
         | _ROUND7_CHANGED_TOP_LEVEL_FUNCTIONS
         | _ROUND8_ADDED_TOP_LEVEL_FUNCTIONS
         | _ROUND5B_ADDED_TOP_LEVEL_FUNCTIONS
+        | _ROUND10_ADDED_TOP_LEVEL_FUNCTIONS
     )
     changed_methods = (
         _ROUND7_ADDED_METHODS
@@ -423,6 +468,8 @@ def _round8_repository_delta(current: dict[str, object]) -> dict[str, object]:
         | _ROUND8_CHANGED_METHODS
         | _ROUND5B_ADDED_METHODS
         | _ROUND5B_CHANGED_METHODS
+        | _ROUND10_ADDED_METHODS
+        | _ROUND10_CHANGED_METHODS
     )
     runtime = current["runtime"]
     assert isinstance(runtime, dict)
@@ -453,6 +500,7 @@ def _round8_repository_delta(current: dict[str, object]) -> dict[str, object]:
                 | _ROUND8_CHANGED_METHODS
                 | _ROUND5B_ADDED_METHODS
                 | _ROUND5B_RUNTIME_CHANGED_METHODS
+                | _ROUND10_ADDED_METHODS
             )
             if name in runtime["methods"]
         },
@@ -536,7 +584,8 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
             "top_level_functions",
             _ROUND7_ADDED_TOP_LEVEL_FUNCTIONS
             | _ROUND8_ADDED_TOP_LEVEL_FUNCTIONS
-            | _ROUND5B_ADDED_TOP_LEVEL_FUNCTIONS,
+            | _ROUND5B_ADDED_TOP_LEVEL_FUNCTIONS
+            | _ROUND10_ADDED_TOP_LEVEL_FUNCTIONS,
             _ROUND7_CHANGED_TOP_LEVEL_FUNCTIONS,
         ),
         (
@@ -544,17 +593,20 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
             _ROUND7_ADDED_METHODS
             | _ROUND8_ADDED_METHODS
             | _TODO_REFINEMENT_ADDED_METHODS
-            | _ROUND5B_ADDED_METHODS,
+            | _ROUND5B_ADDED_METHODS
+            | _ROUND10_ADDED_METHODS,
             _ROUND7_CHANGED_METHODS
             | _ROUND8_CHANGED_METHODS
             | _ROUND5A2_CHANGED_METHODS
-            | _ROUND5B_CHANGED_METHODS,
+            | _ROUND5B_CHANGED_METHODS
+            | _ROUND10_CHANGED_METHODS,
         ),
     ):
         removed = (
             _ROUND8_REMOVED_METHODS
             | _TODO_REFINEMENT_REMOVED_METHODS
             | _ROUND5B_REMOVED_METHODS
+            | _ROUND10_REMOVED_METHODS
             if key == "methods"
             else _ROUND5B_REMOVED_TOP_LEVEL_FUNCTIONS
         )
@@ -616,11 +668,13 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
             - _ROUND8_REMOVED_METHODS
             - _TODO_REFINEMENT_REMOVED_METHODS
             - _ROUND5B_REMOVED_METHODS
+            - _ROUND10_REMOVED_METHODS
         )
         | _ROUND7_ADDED_METHODS
         | _ROUND8_ADDED_METHODS
         | _TODO_REFINEMENT_ADDED_METHODS
         | _ROUND5B_ADDED_METHODS
+        | _ROUND10_ADDED_METHODS
     )
     for name in (
         set(baseline_runtime["methods"])
@@ -628,9 +682,11 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
         - _ROUND8_CHANGED_METHODS
         - _ROUND5A2_CHANGED_METHODS
         - _ROUND5B_RUNTIME_CHANGED_METHODS
+        - _ROUND10_CHANGED_METHODS
         - _ROUND8_REMOVED_METHODS
         - _TODO_REFINEMENT_REMOVED_METHODS
         - _ROUND5B_REMOVED_METHODS
+        - _ROUND10_REMOVED_METHODS
     ):
         assert current_runtime["methods"][name] == baseline_runtime["methods"][name]
     assert set(
@@ -657,6 +713,10 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
         | _ROUND5B_ADDED_METHODS
         | _ROUND5B_CHANGED_METHODS
         | _ROUND5B_REMOVED_METHODS
+        | _ROUND10_ADDED_METHODS
+        | _ROUND10_CHANGED_METHODS
+        | _ROUND10_REMOVED_METHODS
+        | _ROUND10_ADDED_TOP_LEVEL_FUNCTIONS
         | _ROUND5B_ADDED_TOP_LEVEL_FUNCTIONS
         | _ROUND5B_REMOVED_TOP_LEVEL_FUNCTIONS
     )
@@ -675,7 +735,7 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
         separators=(",", ":"),
     ).encode("utf-8")
     assert hashlib.sha256(encoded_delta).hexdigest() == (
-        _ROUND8_ROUND5B_REPOSITORY_DELTA_SHA256
+        _ROUND8_ROUND10_REPOSITORY_DELTA_SHA256
     )
     import pulsara_agent.conversation_kernel.repository as repository
 
@@ -744,11 +804,11 @@ def test_repository_modularization_facade_and_internal_owner_shape() -> None:
     assert ConversationKernelRepository.__module__ == (
         "pulsara_agent.conversation_kernel.repository"
     )
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == 28
+    assert len(COMMITTED_EVENT_DESCRIPTORS) == 29
     assert len(LIVE_EVENT_TYPES) == 24
     assert len(SUBJECT_SLOTS) == 11
     assert len(APPEND_GUARDS) == 1
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 24
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 25
 
 
 def test_repository_modularization_internal_package_is_not_a_second_public_api() -> (

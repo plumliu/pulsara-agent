@@ -1,12 +1,12 @@
 # Round 10：ROOT-Orchestrated Subagent Task Graph 与 ROOT-to-Worker Messaging 实施规格
 
-> 状态：**DRAFT — NOT ACTIVATED**
+> 状态：**ACTIVATED**
 >
 > 记录日期：2026-08-20
 >
 > 本次产品收口修订：2026-08-21
 >
-> 当前起草与编码基线：`aa39deb74e6e52226c10b77a32be80feedd1eabc`（Round 5B ACTIVATED clean checkpoint）
+> 实际编码基线：`504b8c8fe509ec55c12acad97f32ee6d24687932`（Round 5B ACTIVATED clean checkpoint）
 >
 > hard-cut 前产品参考基线：`5b7ad9f7ffc8565bc572180b2bde0c81ab64473a`
 >
@@ -607,11 +607,16 @@ depends_on[]
 ~~~json
 {
   "max_items": 50,
-  "include_dependencies": true
+  "include_dependencies": true,
+  "cursor": "optional opaque next_cursor"
 }
 ~~~
 
-结果按`accepted_at, task_id`确定性排序，返回：
+结果按`accepted_at, task_id`确定性排序并使用keyset pagination。第一页不传`cursor`；存在后续行时返回bounded opaque `next_cursor`，下一页必须原样复用同一`max_items`与`include_dependencies`。Cursor由当前Host签发并绑定exact session、query shape、ordering key、last accepted row与已返回数量；伪造、跨session、改变query或Host重启后的cursor返回typed `INVALID_CURSOR | STALE_CURSOR`。它不是durable cursor row、offset registry或恢复authority。
+
+Cursor的签名与lineage校验发生在schema验证和canonical attempt acceptance之后，因此两类typed拒绝的outer ToolResult state统一为`APPLICATION_ERROR`，正文保留精确error code；不得返回只允许no-attempt路径使用的`INVALID_ARGUMENTS`并制造attempt/result union冲突。
+
+每页返回：
 
 - task id；
 - task key/label/profile；
@@ -620,7 +625,8 @@ depends_on[]
 - dependency ids/status；
 - terminal result id、source与bounded summary；
 - pending ROOT-message count（只在当前Host存在时）；
-- total/omitted counts。
+- page/total/remaining omitted counts；
+- `next_cursor | null`。
 
 它从不返回child raw transcript、full diagnostics、hidden reasoning或process-local executor对象。
 
@@ -849,7 +855,7 @@ body        ordered direct-dependency result summaries
 
 Prepared parent context在task admission时冻结；dependency/capacity导致的延迟启动不能改用较新的ROOT history。为了避免batch中多task重复复制正文，同一assistant tool-call batch只引用一个private、repr-safe `FrozenSubagentParentContextCallSubject`，每个task保存自己的selection与projection fingerprint。它是Host-local start material；Host close后nonterminal task统一`INTERRUPTED`，新Host不恢复该body。
 
-`RootSubagentCoordinator`在batch FULL/ACK-confirmed settlement中exact安装这些start materials；caller cancellation只能detach，不能留下已接受task却没有其prepared context。Material在task terminal或Host close后释放。Canonical task row只保存mode与N，不复制parent正文；ROOT canonical transcript仍是语义来源，但Round 10不从它执行跨Host child recovery。
+`RootSubagentCoordinator`在batch FULL/ACK-confirmed settlement中exact安装这些start materials；caller cancellation只能detach，不能留下已接受task却没有其prepared context。Material在task terminal或Host close后释放；该规则同样覆盖从未启动的`PENDING_START/WAITING_DEPENDENCY` task：显式stop、start failure、dependency failure cascade及其ACK-unknown confirmation一旦得到canonical terminal winner，必须从同一个coordinator lock移除start material、mailbox、mailbox ordinal与completion marker。已经拥有physical child task的carrier只能由其done callback退休，不能被cascade路径提前清除。Canonical task row只保存mode与N，不复制parent正文；ROOT canonical transcript仍是语义来源，但Round 10不从它执行跨Host child recovery。
 
 Child真正启动时，coordinator通过Round 10 sealed factory把immutable objective、optional `PARENT_CONTEXT`与optional `DEPENDENCY_RESULTS`封装为修订后的`SubagentInitialSeed`。Round 5B原始consumer seam只提供粗粒度字段，本轮必须在同一production `conversation_kernel/cold_epoch.py`中收紧并bump process-local cold-assembler contract：seed显式引用task/scope、objective item fingerprint、parent call subject/selection/effective source fingerprint或NONE，以及exact dependency-result context/effective source fingerprint或NONE。Factory证明objective逐对象等于child initial canonical USER_MESSAGE，`LAST_N`逐项等于本次effective `PARENT_CONTEXT VALUE`，`NONE`时不存在parent source；dependency carrier逐项等于direct edges指向的terminal result facts，零依赖iff该source absent。不得接受调用者手写hash或建立mutable fingerprint lookup。
 
@@ -1062,6 +1068,8 @@ mailbox non-empty
 
 `send_agent_message`与completion permit使用同一个coordinator lock：permit先赢则send typed拒绝；send先赢则mailbox非空、completion拿不到permit。Repository不假装读取或验证process-local mailbox generation。
 
+`SubagentCompletionPermit`只携带exact `task_id`；`COMPLETING`集合本身是其唯一one-shot owner，不再保存一个从未被consume/revalidate的装饰性nonce。Live physical carrier只保存调度与取消真正消费的`task_id、parent_turn_id、Task、cancellation intent、status、cancellation_reason`；objective继续只属于start material，terminal result与failure truth只从canonical task/result读取。
+
 Permit持有者使用shielded canonical settlement：
 
 - `FULL`：task/turn terminal winner成立，consume permit；
@@ -1134,6 +1142,8 @@ sender固定为`ROOT`；不发送contract version、fingerprint、writer generat
 - ROOT wait/list读取同一row的bounded public projection。
 
 `report_agent_result`的sole-call约束在assistant batch进入ordinary tool loop前执行。mixed/multiple batch整体产生no-attempt `INVALID_ARGUMENTS` results并保持task ACTIVE；不能允许先执行一个有副作用的sibling，再由result call终结task。
+
+Production只有这条runner specialized settlement会消费`report_agent_result`。普通Builtin invoke seam若收到该名称必须fail closed为internal invariant error；不得保留一个只返回“accepted”却不提交ToolResult/result/turn/task的第二条伪happy path。Batch/start confirmation DTO也只返回`FULL | NONE | CONFLICT`，不重复携带调用方已经持有且没有消费者的task-id tuple。
 
 ### 8.2 Inferred result
 
@@ -1426,6 +1436,7 @@ Round 10不新增client直接给child发message或编辑DAG的UI。Controller继
 - task admission后、child实际启动前READY的child-visible MCP可进入child DIRECT surface；child cut之后READY的同类MCP只能走该leaf meta route；
 - ROOT与child第一call不要求SYSTEM/tools/messages prefix相等；child first open完成后，同一child epoch继续满足strict prefix；
 - ROOT list只读且bounded；
+- `list_agents`跨越50条历史task时通过opaque `(accepted_at,id)` keyset cursor到达后续ACTIVE/terminal rows；cursor跨session、改filter、改page size、伪造与Host重启均typed stale/invalid，且不创建cursor owner；
 - cross-session/workspace/task id拒绝；
 - 所有child profile都看不到七个ROOT orchestration tools；
 - ROOT/child/different child continuity完全隔离。
@@ -1437,6 +1448,7 @@ Round 10不新增client直接给child发message或编辑DAG的UI。Controller继
 - unknown/self/cycle rejection且零row；
 - cross-session/workspace dependency rejection；
 - upstream FAILED/CANCELLED/INTERRUPTED/BLOCKED逐项cascade；
+- never-started downstream在failure cascade、显式stop、start failure及frontier commit ACK-unknown后立即释放全部process-local start/mailbox/completion carrier，canonical task/result history仍可分页查询；
 - concurrent dependency completion只有一个start winner；
 - downstream start按dependency ordinal完整获得所有direct terminal result summaries；explicit/inferred producer产生同一provider shape；
 - one-to-many fan-out复用同一result fingerprint且不写delivery row；later-created direct downstream也可消费已经terminal的result；

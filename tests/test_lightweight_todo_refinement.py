@@ -626,14 +626,14 @@ def test_todo_read_only_authorization_and_invoke_close_race_are_known(
 
 
 def test_todo_refinement_preserves_the_closed_durability_oracle() -> None:
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == 28
+    assert len(COMMITTED_EVENT_DESCRIPTORS) == 29
     assert len(LiveEventType) == 24
     assert tuple(item for item in LiveEventType if "TODO" in item.name) == (
         LiveEventType.TODO_SNAPSHOT_UPDATED,
     )
     assert len(SUBJECT_SLOTS) == 11
     assert len(APPEND_GUARDS) == 1
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 24
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 25
 
     root = Path(__file__).resolve().parents[1]
     migration = (

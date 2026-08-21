@@ -116,6 +116,8 @@ def lower_canonical_item(
             item,
             LLMMessage.user(_project_plan_continuation(item.text)),
         )
+    if kind is FrozenProviderInputItemKind.INTER_AGENT_MESSAGE:
+        return LoweredCanonicalItem(item, LLMMessage.user(item.text))
     if kind is FrozenProviderInputItemKind.ASSISTANT:
         return LoweredCanonicalItem(item, LLMMessage.assistant(item.text))
     if kind is FrozenProviderInputItemKind.ASSISTANT_TOOL_REQUEST:

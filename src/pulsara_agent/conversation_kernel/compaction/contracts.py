@@ -814,7 +814,8 @@ def freeze_compaction_canonical_range(
     selected_closures = tuple(
         item
         for item in closures
-        if any(
+        if item.target_provider_input_through_sequence <= source_through_sequence
+        and any(
             candidate.item_kind.value == "ASSISTANT_TOOL_REQUEST"
             and candidate.source_entry_id == item.assistant_entry_id
             and candidate.source_entry_sequence is not None
@@ -1078,6 +1079,19 @@ class ExpectedCompactionPredecessorRevision:
         ):
             raise ValueError("compaction predecessor revision is invalid")
 
+    @property
+    def effective_materialization_lineage_floor(self) -> int:
+        """Return the semantic range floor without weakening row-exact CAS.
+
+        A FULL_HISTORY revision-zero row stores the turn-local genesis marker
+        (initial entry sequence minus one) for exact predecessor confirmation.
+        It is not the lower bound of the same-scope history that a first
+        compaction may summarize.  Snapshot successors, by contrast, start at
+        the immutable source cut of the installed snapshot.
+        """
+
+        return 0 if self.base_kind == "FULL_HISTORY" else self.source_through_sequence
+
 
 @dataclass(frozen=True, slots=True)
 class CompactionCanonicalAdoptionFactoryInput:
@@ -1157,7 +1171,7 @@ def build_prepared_compaction_canonical_adoption(
 ) -> PreparedCompactionCanonicalAdoption:
     if (
         value.source_through_sequence
-        < value.predecessor.source_through_sequence
+        < value.predecessor.effective_materialization_lineage_floor
         or not value.source_digest.startswith("sha256:")
         or not value.actor_id
     ):

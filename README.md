@@ -27,7 +27,7 @@ Python KernelHostCore
 └── renderer-neutral Protocol v3 gateway
 
 PostgreSQL
-├── pulsara_v3: 24 product relations
+├── pulsara_v3: 25 product relations
 ├── selective agent_events occurrence journal
 ├── public.vector capability
 └── public.pulsara_schema_migrations (universe metadata only)
@@ -38,7 +38,7 @@ The durable boundary is intentionally narrow:
 - canonical relational rows own current conversation, tool, and
   coordination truth; accepted memory rows own only the current contents of
   the advisory dataset;
-- a closed 28-type `agent_events` journal records accepted occurrences but is
+- a closed 29-type `agent_events` journal records accepted occurrences but is
   never replayed to reconstruct execution;
 - 24 live event types exist only in memory and may be lost at process exit;
 - no durable job handler or job relation remains;
@@ -90,7 +90,10 @@ The current Kernel supports:
   a provider-neutral ToolResult logical message up to 40,000 UTF-8 bytes may
   remain FULL (independent of adapter wire bytes), while larger output uses a
   UTF-8-safe 8,000-character head/tail preview and bounded on-demand reads;
-- bounded Host-scoped subagents;
+- ROOT-orchestrated Host-scoped worker graphs with batch DAG admission,
+  dependency scheduling, partial multi-wait, exact task stop, boundary-safe
+  ROOT-to-worker messages, explicit/inferred canonical results, and bounded
+  `NONE | LAST_N` parent context; workers remain non-recursive leaves;
 - Agent Skills-standard bundled and local skills across the exact workspace/user
   `.pulsara/skills` and `.agents/skills` roots, projected through one aggregate,
   append-only `SKILL_CATALOG` source without execution or permission authority;
@@ -209,9 +212,9 @@ active adoption then continues the same run in a new standard cold epoch built
 from the snapshot, recent human input, a pairing-safe protected tail, current
 Runtime observations, and bounded retained Skill context. Canonical history is
 never rewritten, provider-error reactive retry remains unsupported, and the
-last durable job machinery has been removed. The current oracle is 28 committed
-events, 24 live events, 11 subject slots, one append guard, 24 product
-relations, and zero durable jobs. Verification is recorded in
+last durable job machinery has been removed. The Round 5B activation oracle was
+28 committed events, 24 live events, 11 subject slots, one append guard, 24
+product relations, and zero durable jobs. Verification is recorded in
 [`round5b_long_horizon_context_compaction_activation.json`](benchmarks/suites/core/v1/round5b_long_horizon_context_compaction_activation.json).
 Round 7 extends the existing `tool_results` relation with immutable observation
 timing/origin facts and adds two provider-neutral compiler sources for the
@@ -258,6 +261,20 @@ execution authority. Ordinary `read_file` is the only progressive-disclosure
 path: it has no Skill intent or loaded-state and repeated reads return current
 bounded bytes. Verification is recorded in
 [`round9_1_agent_skills_standard_activation.json`](benchmarks/suites/core/v1/round9_1_agent_skills_standard_activation.json).
+Round 10 upgrades flat children to one ROOT-owned worker task graph. Seven
+ROOT-only orchestration tools remain provider-visible in every ROOT permission
+mode but execute only under `BYPASS_PERMISSIONS`; workers receive only
+`report_agent_result` and cannot create descendants. Stable task/dependency rows
+own the logical board, while scheduling, capacity, mailbox delivery, and waits
+remain process-local. The four-child limit is physical concurrency rather than
+a task-graph lifetime cap: additional admitted work stays `PENDING_START` and
+starts when capacity frees. Direct dependency results propagate one edge only;
+ROOT observes results explicitly through list/wait/accept paths. Round 5B now
+hands off the same task board during compaction without adding a durable inbox,
+run, receipt, or recovery graph. The current oracle is 29 committed events, 24
+live events, 11 subject slots, one append guard, 25 product relations, and zero
+durable jobs. Verification is recorded in
+[`round10_hierarchical_subagent_orchestration_activation.json`](benchmarks/suites/core/v1/round10_hierarchical_subagent_orchestration_activation.json).
 Round 8 replaces the old memory durability/recovery graph with an advisory
 dataset. `remember` atomically accepts one candidate with its ToolResult, while
 governance, cheap-hint reflection, embedding, and reranking remain lossy

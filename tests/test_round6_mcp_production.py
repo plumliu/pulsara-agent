@@ -2082,8 +2082,9 @@ def test_round6_direct_kernel_surface_executes_exact_mcp_generation(
                 scope_subagent_task_id=None,
                 host_owner_epoch=1,
                 authorization_reference=authorization.reference,
-                permission_snapshot_fingerprint=permission.snapshot_fingerprint,
-                attempt_permission_snapshot_fingerprint=(
+                    permission_snapshot_fingerprint=permission.snapshot_fingerprint,
+                    effective_permission_mode=permission.effective_mode,
+                    attempt_permission_snapshot_fingerprint=(
                     permission.snapshot_fingerprint
                 ),
                 tool_surface_fingerprint=(
@@ -3025,8 +3026,9 @@ def test_round6_mcp_confirmation_admits_before_publish_and_drains_dirty(
                 scope_subagent_task_id=None,
                 host_owner_epoch=1,
                 authorization_reference=allowed.reference,
-                permission_snapshot_fingerprint=permission.snapshot_fingerprint,
-                attempt_permission_snapshot_fingerprint=(
+                    permission_snapshot_fingerprint=permission.snapshot_fingerprint,
+                    effective_permission_mode=permission.effective_mode,
+                    attempt_permission_snapshot_fingerprint=(
                     permission.snapshot_fingerprint
                 ),
                 tool_surface_fingerprint=(
@@ -3579,11 +3581,11 @@ def test_round6_wire_bounds_and_result_type_presence_fail_closed(
 
 
 def test_round6_does_not_expand_durable_or_protocol_oracles() -> None:
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == 28
+    assert len(COMMITTED_EVENT_DESCRIPTORS) == 29
     assert len(LIVE_EVENT_TYPES) == 24
     assert len(SUBJECT_SLOTS) == 11
     assert len(APPEND_GUARDS) == 1
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 24
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 25
 
     root = Path(__file__).parents[1]
     mcp_root = root / "src" / "pulsara_agent" / "conversation_kernel" / "mcp"

@@ -1,6 +1,6 @@
 """Closed conversation-kernel event vocabulary and subject/guard descriptor.
 
-The descriptor is the single Python owner for the exact 28/24/11/1 oracle.
+The descriptor is the single Python owner for the exact 29/24/11/1 oracle.
 SQL checks, repository validation, protocol projection mapping, and generated
 test fixtures consume these values; callers cannot register new entries.
 """
@@ -51,6 +51,7 @@ class CommittedEventType(StrEnum):
     SUBAGENT_TASK_STATUS_ACCEPTED = "SubagentTaskStatusAccepted"
     SUBAGENT_MESSAGE_ACCEPTED = "SubagentMessageAccepted"
     SUBAGENT_RESULT_ACCEPTED = "SubagentResultAccepted"
+    INTER_AGENT_MESSAGE_ACCEPTED = "InterAgentMessageAccepted"
     PLAN_WORKFLOW_ENTERED = "PlanWorkflowEntered"
     PLAN_QUESTION_ASKED = "PlanQuestionAsked"
     PLAN_QUESTION_ANSWERED = "PlanQuestionAnswered"
@@ -147,6 +148,7 @@ COMMITTED_EVENT_DESCRIPTORS = (
         CommittedEventType.SUBAGENT_RESULT_ACCEPTED,
         SubjectSlot.SUBAGENT_RESULT,
     ),
+    _host(CommittedEventType.INTER_AGENT_MESSAGE_ACCEPTED, SubjectSlot.ENTRY),
     _host(CommittedEventType.PLAN_WORKFLOW_ENTERED, SubjectSlot.PLAN_WORKFLOW),
     _host(CommittedEventType.PLAN_QUESTION_ASKED, SubjectSlot.PLAN_INTERACTION),
     _host(CommittedEventType.PLAN_QUESTION_ANSWERED, SubjectSlot.PLAN_INTERACTION),
@@ -165,8 +167,8 @@ APPEND_GUARDS = tuple(item.value for item in AppendGuardKind)
 
 DESCRIPTOR_BY_TYPE = {item.event_type: item for item in COMMITTED_EVENT_DESCRIPTORS}
 
-if len(COMMITTED_EVENT_DESCRIPTORS) != 28 or len(DESCRIPTOR_BY_TYPE) != 28:
-    raise RuntimeError("committed event descriptor must contain exact 28 types")
+if len(COMMITTED_EVENT_DESCRIPTORS) != 29 or len(DESCRIPTOR_BY_TYPE) != 29:
+    raise RuntimeError("committed event descriptor must contain exact 29 types")
 if len(LIVE_EVENT_TYPES) != 24 or len(set(LIVE_EVENT_TYPES)) != 24:
     raise RuntimeError("live event registry must contain exact 24 types")
 if len(SUBJECT_SLOTS) != 11 or len(set(SUBJECT_SLOTS)) != 11:

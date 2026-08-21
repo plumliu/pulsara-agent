@@ -430,9 +430,11 @@ def test_round2_idle_observation_creates_exact_genesis_and_initial_fk_is_strict(
                 """
                 INSERT INTO pulsara_v3.subagent_tasks (
                     id, session_id, workspace_id, parent_turn_id, objective,
+                    profile_kind, context_mode,
                     status, execution_writer_generation, terminal_reason,
                     terminal_at
-                ) VALUES (%s, %s, %s, %s, 'test', 'INTERRUPTED', %s,
+                ) VALUES (%s, %s, %s, %s, 'test', 'general_worker', 'NONE',
+                          'INTERRUPTED', %s,
                           'TEST_INVALID', clock_timestamp())
                 """,
                 (

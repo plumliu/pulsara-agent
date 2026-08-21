@@ -1,6 +1,6 @@
 {
   "schema_version": "conversation_kernel_expected_catalog.v2",
-  "observed_catalog_fingerprint": "sha256:21644a91bb43962e1ca4e7bd7e0e9e9a896ff356f941a94fe530be952e7d449c",
+  "observed_catalog_fingerprint": "sha256:c84a8e07c12c5d97c14bd3587b461848bd970c896b3fdd32554e33ecd282477d",
   "required_extensions": [
     {
       "extension_name": "vector",
@@ -27,6 +27,7 @@
     "plan_workflows",
     "plan_interactions",
     "subagent_tasks",
+    "subagent_task_dependencies",
     "subagent_task_children",
     "memory_candidates",
     "memory_candidate_tool_result_refs",

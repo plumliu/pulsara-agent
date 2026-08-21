@@ -242,7 +242,9 @@ class _RepositoryKernel:
                     terminal_reason = 'HOST_TAKEOVER',
                     terminal_at = clock_timestamp()
                 WHERE session_id = %s
-                  AND status IN ('PENDING', 'ACTIVE')
+                  AND status IN (
+                    'PENDING_START', 'WAITING_DEPENDENCY', 'ACTIVE'
+                  )
                 RETURNING id
                 """,
                 (session_id,),
@@ -813,6 +815,7 @@ class _RepositoryKernel:
         provider_replay_disposition: str | None = None,
         provider_replay_fragment_id: str | None = None,
         source_subagent_result_id: str | None = None,
+        source_inter_agent_tool_attempt_id: str | None = None,
         source_plan_workflow_id: str | None = None,
         source_plan_interaction_id: str | None = None,
         source_plan_handoff_kind: PlanHandoffKind | None = None,
@@ -825,13 +828,14 @@ class _RepositoryKernel:
                 context_binding_revision_id, provider_input_through_sequence,
                 provider_wire_api, provider_replay_disposition,
                 provider_replay_fragment_id, source_subagent_result_id,
+                source_inter_agent_tool_attempt_id,
                 source_plan_workflow_id, source_plan_interaction_id,
                 source_plan_handoff_kind,
                 inline_content, blob_id, content_digest, content_size,
                 content_media_type, content_codec
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                       %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                      %s, %s, %s, %s)
+                      %s, %s, %s, %s, %s)
             """,
             (
                 entry_id,
@@ -848,6 +852,7 @@ class _RepositoryKernel:
                 provider_replay_disposition,
                 provider_replay_fragment_id,
                 source_subagent_result_id,
+                source_inter_agent_tool_attempt_id,
                 source_plan_workflow_id,
                 source_plan_interaction_id,
                 (

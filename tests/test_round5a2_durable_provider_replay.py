@@ -290,8 +290,8 @@ def test_round5a2_has_no_vendor_or_remote_state_branch_and_oracle_is_exact() -> 
             for token in ("checkpoint", "receipt", "repair")
             for name in authority_names
         ), path
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == 28
+    assert len(COMMITTED_EVENT_DESCRIPTORS) == 29
     assert len(LIVE_EVENT_TYPES) == 24
     assert len(SUBJECT_SLOTS) == 11
     assert len(APPEND_GUARDS) == 1
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 24
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 25

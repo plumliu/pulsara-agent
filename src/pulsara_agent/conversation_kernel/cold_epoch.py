@@ -22,14 +22,30 @@ from pulsara_agent.capability.contracts import (
 )
 from pulsara_agent.conversation_kernel.context_sources import (
     FrozenNonTriggerContextSources,
+    build_subagent_context_source,
+)
+from pulsara_agent.conversation_kernel.subagents.contracts import (
+    FrozenDependencyResultContext,
+    FrozenSubagentParentContextCallSubject,
+    FrozenSubagentParentContextSelection,
+    SubagentContextMode,
+    SubagentProfileKind,
+    build_parent_context_selection,
 )
 from pulsara_agent.llm.provider_replay import ProviderReplayTargetCompatibilityFact
 from pulsara_agent.llm.request import FrozenProviderWireInputPlan
 from pulsara_agent.model_input.compiler import StructuredModelInputCompiler
 from pulsara_agent.model_input.contracts import (
+    CanonicalInputOriginKind,
+    ContextSourceAbsentFact,
+    ContextSourceCandidate,
+    ContextSourceKind,
     FrozenCompiledModelInput,
+    FrozenProviderInputItem,
+    FrozenProviderInputItemKind,
     ModelInputScopeKind,
     StructuredModelInputCompileRequest,
+    provider_input_item_fingerprint,
 )
 from pulsara_agent.model_input.continuity import (
     FrozenProviderInputAppendCompileResult,
@@ -69,26 +85,210 @@ class CompactionContinuationSeed:
             raise ValueError("compaction continuation seed is incomplete")
 
 
+_SUBAGENT_SEED_AUTHORITY = object()
+
+
 @dataclass(frozen=True, slots=True)
 class SubagentInitialSeed:
-    """Round 10 retained contract; Round 5B does not admit child work."""
+    """Exact sealed first-open carrier for one fixed worker leaf."""
 
     dispatch_read: FrozenCanonicalProviderDispatchRead = field(repr=False)
+    task_id: str
+    parent_turn_id: str
+    profile_kind: SubagentProfileKind
+    objective: str = field(repr=False)
+    objective_item: FrozenProviderInputItem = field(repr=False)
     objective_item_fingerprint: str
-    parent_context_selection_fingerprint: str | None
+    parent_call_subject: FrozenSubagentParentContextCallSubject = field(repr=False)
+    parent_context_selection: FrozenSubagentParentContextSelection = field(repr=False)
+    parent_context_source: ContextSourceCandidate | ContextSourceAbsentFact = field(
+        repr=False
+    )
+    dependency_context: FrozenDependencyResultContext | None = field(repr=False)
+    dependency_results_source: ContextSourceCandidate | ContextSourceAbsentFact = field(
+        repr=False
+    )
+    seed_fingerprint: str
+    _authority: object = field(repr=False, compare=False)
 
     def __post_init__(self) -> None:
         identity = self.dispatch_read.compile_snapshot.canonical_input.identity
+        canonical = self.dispatch_read.compile_snapshot.canonical_input
+        objective_items = tuple(
+            item
+            for item in canonical.items
+            if item.item_kind is FrozenProviderInputItemKind.USER
+            and item.input_origin is CanonicalInputOriginKind.SUBAGENT_OBJECTIVE
+        )
+        expected_objective_fingerprint = provider_input_item_fingerprint(
+            self.objective_item
+        )
+        expected_selection = build_parent_context_selection(
+            self.parent_call_subject,
+            mode=self.parent_context_selection.mode,
+            last_n_turns=self.parent_context_selection.last_n_turns,
+        )
+        expected_parent_source = build_subagent_context_source(
+            kind=ContextSourceKind.PARENT_CONTEXT,
+            text=expected_selection.rendered_body,
+            domain_identity={
+                "subject": self.parent_call_subject.subject_fingerprint,
+                "selection": expected_selection.selection_fingerprint,
+                "source": expected_selection.source_fingerprint,
+            },
+        )
+        expected_dependency_source = build_subagent_context_source(
+            kind=ContextSourceKind.DEPENDENCY_RESULTS,
+            text=(
+                None
+                if self.dependency_context is None
+                else self.dependency_context.rendered_body
+            ),
+            domain_identity=(
+                None
+                if self.dependency_context is None
+                else self.dependency_context.context_fingerprint
+            ),
+        )
+        parent_present = isinstance(self.parent_context_source, ContextSourceCandidate)
+        dependency_present = isinstance(
+            self.dependency_results_source, ContextSourceCandidate
+        )
         if (
-            identity.conversation_scope_kind is not ModelInputScopeKind.SUBAGENT_TASK
-            or identity.scope_subagent_task_id is None
-            or not self.objective_item_fingerprint.startswith("sha256:")
+            self._authority is not _SUBAGENT_SEED_AUTHORITY
+            or identity.conversation_scope_kind
+            is not ModelInputScopeKind.SUBAGENT_TASK
+            or identity.scope_subagent_task_id != self.task_id
+            or not self.parent_turn_id
+            or self.parent_call_subject.caller_turn_id != self.parent_turn_id
+            or not isinstance(self.profile_kind, SubagentProfileKind)
+            or len(objective_items) != 1
+            or objective_items[0] != self.objective_item
+            or self.objective_item.text != self.objective
+            or self.objective_item.source_turn_id != identity.turn_id
+            or self.objective_item_fingerprint != expected_objective_fingerprint
+            or self.parent_call_subject.session_id != identity.session_id
+            or self.parent_context_selection != expected_selection
+            or self.parent_context_source != expected_parent_source
+            or self.dependency_results_source != expected_dependency_source
             or (
-                self.parent_context_selection_fingerprint is not None
-                and not self.parent_context_selection_fingerprint.startswith("sha256:")
+                self.parent_context_selection.mode is SubagentContextMode.NONE
+                and parent_present
+            )
+            or bool(self.parent_context_selection.selected_units) != parent_present
+            or self.parent_context_source.source_kind is not ContextSourceKind.PARENT_CONTEXT
+            or (self.dependency_context is None) == dependency_present
+            or self.dependency_results_source.source_kind
+            is not ContextSourceKind.DEPENDENCY_RESULTS
+            or (
+                self.dependency_context is not None
+                and self.dependency_context.target_task_id != self.task_id
             )
         ):
             raise ValueError("subagent initial seed is invalid")
+        expected = context_fingerprint(
+            "pulsara:subagent-initial-seed:v4",
+            {
+                "dispatch_read": self.dispatch_read.composite_fingerprint,
+                "task_id": self.task_id,
+                "parent_turn_id": self.parent_turn_id,
+                "profile": self.profile_kind.value,
+                "objective_item": self.objective_item_fingerprint,
+                "parent_subject": self.parent_call_subject.subject_fingerprint,
+                "parent_selection": self.parent_context_selection.selection_fingerprint,
+                "parent_source": self.parent_context_source.domain_semantic_fingerprint,
+                "dependency_context": (
+                    None
+                    if self.dependency_context is None
+                    else self.dependency_context.context_fingerprint
+                ),
+                "dependency_source": (
+                    self.dependency_results_source.domain_semantic_fingerprint
+                ),
+            },
+        )
+        if self.seed_fingerprint != expected:
+            raise ValueError("subagent initial seed fingerprint mismatch")
+
+    @property
+    def source_replacements(
+        self,
+    ) -> tuple[ContextSourceCandidate | ContextSourceAbsentFact, ...]:
+        return self.parent_context_source, self.dependency_results_source
+
+
+def build_subagent_initial_seed(
+    *,
+    dispatch_read: FrozenCanonicalProviderDispatchRead,
+    task_id: str,
+    parent_turn_id: str,
+    profile_kind: SubagentProfileKind,
+    objective: str,
+    parent_call_subject: FrozenSubagentParentContextCallSubject,
+    parent_context_selection: FrozenSubagentParentContextSelection,
+    dependency_context: FrozenDependencyResultContext | None,
+) -> SubagentInitialSeed:
+    canonical = dispatch_read.compile_snapshot.canonical_input
+    objective_items = tuple(
+        item
+        for item in canonical.items
+        if item.item_kind is FrozenProviderInputItemKind.USER
+        and item.input_origin is CanonicalInputOriginKind.SUBAGENT_OBJECTIVE
+    )
+    if len(objective_items) != 1:
+        raise ValueError("child canonical cut lacks one exact objective item")
+    objective_item = objective_items[0]
+    objective_fingerprint = provider_input_item_fingerprint(objective_item)
+    parent_source = build_subagent_context_source(
+        kind=ContextSourceKind.PARENT_CONTEXT,
+        text=parent_context_selection.rendered_body,
+        domain_identity={
+            "subject": parent_call_subject.subject_fingerprint,
+            "selection": parent_context_selection.selection_fingerprint,
+            "source": parent_context_selection.source_fingerprint,
+        },
+    )
+    dependency_source = build_subagent_context_source(
+        kind=ContextSourceKind.DEPENDENCY_RESULTS,
+        text=(None if dependency_context is None else dependency_context.rendered_body),
+        domain_identity=(
+            None
+            if dependency_context is None
+            else dependency_context.context_fingerprint
+        ),
+    )
+    payload = {
+        "dispatch_read": dispatch_read.composite_fingerprint,
+        "task_id": task_id,
+        "parent_turn_id": parent_turn_id,
+        "profile": profile_kind.value,
+        "objective_item": objective_fingerprint,
+        "parent_subject": parent_call_subject.subject_fingerprint,
+        "parent_selection": parent_context_selection.selection_fingerprint,
+        "parent_source": parent_source.domain_semantic_fingerprint,
+        "dependency_context": (
+            None
+            if dependency_context is None
+            else dependency_context.context_fingerprint
+        ),
+        "dependency_source": dependency_source.domain_semantic_fingerprint,
+    }
+    return SubagentInitialSeed(
+        dispatch_read,
+        task_id,
+        parent_turn_id,
+        profile_kind,
+        objective,
+        objective_item,
+        objective_fingerprint,
+        parent_call_subject,
+        parent_context_selection,
+        parent_source,
+        dependency_context,
+        dependency_source,
+        context_fingerprint("pulsara:subagent-initial-seed:v4", payload),
+        _SUBAGENT_SEED_AUTHORITY,
+    )
 
 
 FrozenColdConversationSeed = (
@@ -383,6 +583,18 @@ class KernelColdEpochInputAssembler:
             or not prepared_call_identity.startswith("sha256:")
         ):
             raise ValueError("cold epoch inputs do not exact-join")
+        if isinstance(seed, SubagentInitialSeed):
+            observed = {
+                item.source_kind: item
+                for item in (*non_trigger_sources.candidates, *non_trigger_sources.absent_facts)
+                if item.source_kind
+                in {ContextSourceKind.PARENT_CONTEXT, ContextSourceKind.DEPENDENCY_RESULTS}
+            }
+            expected = {
+                item.source_kind: item for item in seed.source_replacements
+            }
+            if observed != expected or planning.predecessor_view is not None:
+                raise ValueError("subagent cold seed sources do not exact-join")
 
 
 __all__ = [
@@ -395,4 +607,5 @@ __all__ = [
     "PreparedColdEpochSemanticAssembly",
     "SelectedDurableReplayHydrationRequest",
     "SubagentInitialSeed",
+    "build_subagent_initial_seed",
 ]

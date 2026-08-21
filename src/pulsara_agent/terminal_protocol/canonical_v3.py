@@ -85,6 +85,7 @@ _ENTRY_TYPES = frozenset(
         CommittedEventType.USER_STEER_ACCEPTED.value,
         CommittedEventType.TERMINAL_OBSERVATION_ACCEPTED.value,
         CommittedEventType.PLAN_CONTINUATION_ACCEPTED.value,
+        CommittedEventType.INTER_AGENT_MESSAGE_ACCEPTED.value,
     }
 )
 _EVENT_ONLY_TYPES = frozenset(
@@ -107,9 +108,9 @@ COMMITTED_PROJECTION_BRANCH_BY_TYPE: Mapping[str, str] = MappingProxyType(
     }
 )
 
-if len(_COMMITTED_ENUM) != 28 or len(COMMITTED_EVENT_DESCRIPTORS) != 28:
+if len(_COMMITTED_ENUM) != 29 or len(COMMITTED_EVENT_DESCRIPTORS) != 29:
     raise RuntimeError(
-        "Protocol v3 committed projection map must contain exact 28 types"
+        "Protocol v3 committed projection map must contain exact 29 types"
     )
 
 
@@ -554,7 +555,9 @@ class CanonicalProtocolReader:
         )
         tasks = bounded(
             """SELECT t.*, c.id AS result_id,
-                      c.entry_id AS result_entry_id,
+                      c.entry_id AS result_entry_id, c.result_source,
+                      c.summary AS result_summary,
+                      coalesce(deps.ids, ARRAY[]::text[]) AS dependency_task_ids,
                       accepted.id AS accepted_root_entry_id
                FROM pulsara_v3.subagent_tasks AS t
                LEFT JOIN pulsara_v3.subagent_task_children AS c
@@ -563,8 +566,14 @@ class CanonicalProtocolReader:
                LEFT JOIN pulsara_v3.transcript_entries AS accepted
                  ON accepted.session_id = c.session_id
                 AND accepted.source_subagent_result_id = c.id
+               LEFT JOIN LATERAL (
+                 SELECT array_agg(edge.dependency_task_id
+                                  ORDER BY edge.dependency_ordinal) AS ids
+                 FROM pulsara_v3.subagent_task_dependencies AS edge
+                 WHERE edge.session_id = t.session_id AND edge.task_id = t.id
+               ) AS deps ON TRUE
                WHERE t.session_id = %s AND (
-                 t.status IN ('PENDING', 'ACTIVE') OR
+                 t.status IN ('PENDING_START', 'WAITING_DEPENDENCY', 'ACTIVE') OR
                  (t.status = 'COMPLETED' AND c.id IS NOT NULL AND accepted.id IS NULL)
                )
                ORDER BY t.accepted_at, t.id LIMIT %s""",
@@ -671,6 +680,18 @@ class CanonicalProtocolReader:
                 result_id=str(row["result_id"] or ""),
                 result_entry_id=str(row["result_entry_id"] or ""),
                 result_accepted=row["accepted_root_entry_id"] is not None,
+                batch_id=str(row["batch_id"] or ""),
+                task_key=str(row["task_key"] or ""),
+                label=str(row["label"] or ""),
+                profile=str(row["profile_kind"]),
+                display_role=str(row["display_role"] or ""),
+                context_mode=str(row["context_mode"]),
+                context_last_n_turns=int(row["context_last_n_turns"] or 0),
+                pending_reason=str(row["pending_reason"] or ""),
+                terminal_reason=str(row["terminal_reason"] or ""),
+                result_source=str(row["result_source"] or ""),
+                result_summary=str(row["result_summary"] or ""),
+                dependency_task_ids=tuple(row["dependency_task_ids"]),
             )
         if active_plan is not None:
             result.active_plan_workflow.CopyFrom(

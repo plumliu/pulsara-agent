@@ -428,7 +428,7 @@ def test_stage2_protocol_v3_closed_vocabularies_are_exact() -> None:
     live = {
         item.name for item in wire.LiveEventType.DESCRIPTOR.values if item.number != 0
     }
-    assert len(committed) == 28
+    assert len(committed) == 29
     assert len(live) == 24
     assert set(COMMITTED_PROJECTION_BRANCH_BY_TYPE) == {
         item.value for item in CommittedEventType
@@ -444,6 +444,7 @@ def test_stage2_protocol_v3_closed_vocabularies_are_exact() -> None:
         "ToolResultAccepted",
         "UserSteerAccepted",
         "TerminalObservationAccepted",
+        "InterAgentMessageAccepted",
         "PlanContinuationAccepted",
     }
     assert sum(

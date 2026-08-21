@@ -23,6 +23,7 @@
     "session_commands": ["SELECT", "INSERT"],
     "sessions": ["SELECT", "INSERT", "UPDATE"],
     "subagent_task_children": ["SELECT", "INSERT"],
+    "subagent_task_dependencies": ["SELECT", "INSERT"],
     "subagent_tasks": ["SELECT", "INSERT", "UPDATE"],
     "tool_execution_attempts": ["SELECT", "INSERT", "UPDATE"],
     "tool_results": ["SELECT", "INSERT"],

@@ -1,8 +1,8 @@
 # Pulsara hard-cut 后产品能力缺失索引
 
-> 状态：WORKING GAP INDEX（产品能力事实索引，不是恢复设计；PHC-02 已通过 Round 1 恢复，PHC-01/03/04/05/06 已通过 Round 2 恢复；PHC-17 的typed compiler与同Host prefix continuity已通过 Round 3 / 3.1完整恢复；PHC-09 的 Python Runtime/Host、canonical/Protocol 后端已通过 Round 4 恢复；bundled Go/TUI已在2026-08-20明确退役并物理删除，只保留renderer-neutral Protocol v3供未来Web/Desktop client使用；PHC-07A execution envelope已通过 Round 5A恢复，Round 5A.1已闭合provider-neutral terminal、whole-response atomicity与same-epoch reasoning replay，Round 5A.2已恢复已接受线程的exact Chat/Responses native replay跨Host/进程重启；Round 7.1已闭合全局provider-visible ToolResult与FULL-delivery边界；Round 9已激活统一capability registry、MCP cold direct/late-or-incompatible meta与Skill aggregate source，Round 9.1与PHC-07B Round 5B仍为DRAFT；memory专项已按 Round 8 advisory 边界重构并激活）
+> 状态：WORKING GAP INDEX（产品能力事实索引，不是恢复设计；PHC-02 已通过 Round 1 恢复，PHC-01/03/04/05/06 已通过 Round 2 恢复；PHC-17 的typed compiler与同Host prefix continuity已通过 Round 3 / 3.1完整恢复；PHC-09 的 Python Runtime/Host、canonical/Protocol 后端已通过 Round 4 恢复；bundled Go/TUI已在2026-08-20明确退役并物理删除，只保留renderer-neutral Protocol v3供未来Web/Desktop client使用；PHC-07A execution envelope与PHC-07B context compaction已通过Round 5A/5B恢复，Round 5A.1已闭合provider-neutral terminal、whole-response atomicity与same-epoch reasoning replay，Round 5A.2已恢复已接受线程的exact Chat/Responses native replay跨Host/进程重启；Round 7.1已闭合全局provider-visible ToolResult与FULL-delivery边界；Round 9/9.1已激活统一capability registry、MCP cold direct/late-or-incompatible meta与Agent Skills aggregate source；PHC-10已通过Round 10恢复ROOT编排的worker task graph；memory专项已按 Round 8 advisory 边界重构并激活）
 >
-> 初始调研：2026-08-10；最近复核：2026-08-20（Round 9 activation）
+> 初始调研：2026-08-10；最近复核：2026-08-21（Round 10 activation）
 >
 > hard-cut 前代码基线：`5b7ad9f7`
 >
@@ -167,15 +167,15 @@ git grep -n 'TerminalMonitorTool' "$PRE_HARD_CUT" -- src tests
 | PHC-04 | Terminal retained-output/cursor 语义 | **已恢复（Round 2）**：16 MiB/process、128 MiB/Host UTF-8 retained hard bound，exact cursor/delta与typed GAP | 当前Host内可可靠增量读取；retention淘汰被显式表示而非重复tail |
 | PHC-05 | Terminal shell/profile/env 产品语义 | **已恢复（Round 2）**：bounded login-shell snapshot、default-deny inert env、single-flight/TTL/fallback、nearest `.venv/bin`与diagnostic | 用户工具链PATH可用；active capability environment默认拒绝且env value不进入diagnostic |
 | PHC-06 | Terminal foreground cwd continuity | **已恢复（Round 2）**：前台命令physical completion后捕获workspace内final cwd；yielded process永不推进session cwd | 后续前台命令从真实final cwd启动，无后台并发竞争 |
-| PHC-07 | Long-horizon execution / context window / compaction | **部分恢复**：Round 5A已删除固定model/tool-call次数与turn-wide wall-clock cap；Round 5A.1已闭合显式provider terminal、whole-response atomicity、manual full-history reasoning replay与actual-wire prefix proof；Round 5A.2已激活accepted Chat/Responses native replay跨Host/进程重启；Round 5B只拥有context rebase、summary、snapshot adoption与successor Capability re-freeze，并以前置Round 5A.2/7.1/9/9.1为输入 | execution envelope、完整response continuation与compatible native history cold rehydrate已恢复；compaction尚未激活，不能据此宣传自动compaction或跨context-window continuation |
+| PHC-07 | Long-horizon execution / context window / compaction | **已恢复到当前克制边界（Round 5A/5B）**：固定model/tool-call次数与turn-wide wall-clock cap已删除；显式provider terminal、whole-response atomicity、same-epoch replay、cross-restart native replay、manual/proactive/mid-turn compaction、snapshot adoption与successor cold rebase均已闭合 | 长程run不受人为次数/总时限阻断；provider-error reactive compaction、canonical transcript删除和provider stream恢复仍是明确non-goal |
 | PHC-08 | MCP production capability | **核心与统一direct/meta exposure已恢复（Round 6 + Round 9）**：stdio/Streamable HTTP、bounded discovery、scope-filtered direct typed tools、resource/prompt、CLI与真实执行均已接入；cold native cohort、late-ready或native-wire-incompatible meta、policy-bound inspect/use ref、direct unavailable gate与append-only MCP_CATALOG均已闭合 | Agent可直接使用已配置MCP能力；同epoch tools保持不变；form/private URL、OAuth、MCP-backed skill activation、server Sampling/Roots、Apps/Tasks与bundled UI仍是明确non-goal |
 | PHC-09 | Plan workflow | **Python Runtime/Host 与 Protocol 后端已通过 Round 4 恢复；bundled client不再实施**：三项ROOT-only control tool、canonical question/draft lifecycle、Plan-scoped read-only overlay、send-time immutable permission snapshot、Host-owned automatic continuation及typed Protocol v3边界已进入production；oracle为`34/23/15/2/26/4` | Headless typed caller已可完成Plan流程；未来Web/Desktop client可在不改变Plan authority的前提下实现selector、review与重连展示 |
-| PHC-10 | Hierarchical/batch subagent task graph | **显著退化**：只剩 flat spawn/list/wait/stop | 依赖任务、批量调度、child phase/result reporting 与 task-board 语义消失 |
+| PHC-10 | Hierarchical/batch subagent task graph | **已恢复（Round 10）**：七项ROOT-only orchestration tool、batch DAG、dependency scheduler、partial multi-wait、exact task stop、boundary-safe ROOT-to-worker messaging、explicit/inferred canonical result与Round 5B task-board handoff均已进入production；worker仍是不可递归leaf | ROOT可编排长程worker graph；四child只是physical concurrency，额外accepted task保持PENDING_START，不形成总graph/task生命周期上限 |
 | PHC-11 | Standalone Canonical Inspector 产品入口 | **并入未来Web/Desktop client，不单独恢复**：历史Inspector已消失；canonical query/Protocol后端按client需要保留和补齐 | 不建设第二套Inspector read model或durable projection；会话观察由未来独立client呈现 |
 | PHC-12 | Frozen Legacy Python REPL 产品面 | **明确退役，不恢复兼容**：旧命令差异只作hard-cut审计记录 | approval、plan、MCP等仍有价值的产品语义归各自能力族，并最终通过typed Protocol/client交互，不为旧命令表复建Runtime机制 |
 | PHC-13 | 跨 turn 失败/中断提示 | **已恢复（Round 7）**：same-scope immediate predecessor在同一canonical cut中形成bounded、脱敏、typed outcome；成功successor遮蔽更早失败，late result只追加修正 | “继续”时模型可区分user stop、Runtime/provider failure、Host lifecycle、resource boundary与unknown interruption，不把完整canonical entry误称为partial message |
 | PHC-14 | Model-visible tool observation timing/freshness | **已恢复（Round 7）**：既有`tool_results`冻结observed time、monotonic duration、immutable origin与optional trusted duration；每turn追加freshness frontier而不回写旧result | 模型可判断观测时刻、耗时及CURRENT/PREVIOUS/HISTORICAL关系，tool body不能伪造outer timing |
-| PHC-15 | Capability catalog 与真实 executor 一致性 | **execution-backed inventory已由Round 9闭合，产品缺口只剩PHC-10 dormant descriptors**：sealed Builtin owner从实际binding穷尽投影，MCP/Skill经各自owner-issued完整snapshot进入唯一pure registry；catalog-only descriptor不会冒充可执行leaf；31个descriptor中剩余5个仍是未实施的hierarchical task-graph能力 | Round 9没有为dead descriptor伪造executor；artifact、Terminal、Plan、MCP、Memory与TODO的真实binding保持闭合，后续只由PHC-10决定五项任务图descriptor是否实现 |
+| PHC-15 | Capability catalog 与真实 executor 一致性 | **已闭合（Round 9 + Round 10）**：sealed Builtin owner从实际binding穷尽投影，MCP/Skill经各自owner-issued完整snapshot进入唯一pure registry；32个当前descriptor均拥有真实production binding或明确的catalog-only语义，已无dormant subagent descriptor | Tool surface不再以静态descriptor伪装可执行能力；ROOT/child scope与physical owner仍在exact binding处校验 |
 | PHC-16 | Web/Desktop client产品面 | **bundled Go/TUI已退役并物理删除；renderer-neutral Protocol v3保留**：Runtime不再携带具体UI implementation；Round 3.1的typed input binding继续作为Protocol语义 | 未来client承接会话观察、交互与控制；不得成为第二套canonical、recovery或permission authority |
 | PHC-17 | Structured model-input / context compilation | **typed compiler、同Host prefix continuity与cross-restart native replay已恢复**：exact canonical reader、provider-neutral compiler、scope-frozen tool surface、target estimator与typed allocation已恢复；Host-scoped ROOT/child epoch同时证明semantic view与actual provider wire，保证同scope同epoch的SYSTEM/tools不变、wire input只追加；fresh Host可对compatible target从entry-bound private replay row重建exact native replacement | Round 5A.2不恢复durable compiled request、remote provider state、partial stream或generation graph；target不兼容时诚实cold semantic continuation |
 
@@ -472,7 +472,7 @@ Round 1恢复了canonical result、artifact与bounded preview，但normal provid
 | Round 5A.2：Durable provider replay与跨重启线程续接 | assistant与optional exact Chat/Responses native carrier同事务提交；新Host从entry-bound replay row重建compatible wire history；只按Chat/Responses codec分支，不按vendor分支 | partial stream/tool recovery、remote response ID authority、durable compiled request、Anthropic/Gemini、provider preset/probe、compaction |
 | Round 5B：Long-horizon context compaction | active-context测量、safe-point compaction、single-turn continuation、protected tail、explicit continuity epoch rebase、manual/proactive auto/mid-turn compact，以及在合法rebase boundary重新冻结Round 9/9.1 successor exposure | 恢复旧EventLog/reducer/checkpoint/repair、删除canonical transcript、把累计token误当active context、provider context-error后的reactive compact/retry、重新实现normal ToolResult/MCP/Skill语义 |
 
-Round 5A实施规格见[`ROUND_5_LONG_HORIZON_EXECUTION_ENVELOPE_IMPLEMENTATION_SPEC.zh.md`](ROUND_5_LONG_HORIZON_EXECUTION_ENVELOPE_IMPLEMENTATION_SPEC.zh.md)，机器证据见[`round5_long_horizon_execution_envelope_activation.json`](benchmarks/suites/core/v1/round5_long_horizon_execution_envelope_activation.json)。Round 5A.1实施规格见[`ROUND_5A_1_PROVIDER_NEUTRAL_MODEL_OUTPUT_TERMINATION_IMPLEMENTATION_SPEC.zh.md`](ROUND_5A_1_PROVIDER_NEUTRAL_MODEL_OUTPUT_TERMINATION_IMPLEMENTATION_SPEC.zh.md)，机器证据见[`round5a1_provider_neutral_model_output_termination_activation.json`](benchmarks/suites/core/v1/round5a1_provider_neutral_model_output_termination_activation.json)。Round 5A.2实施真源见[`ROUND_5A_2_DURABLE_PROVIDER_REPLAY_AND_CROSS_RESTART_THREAD_CONTINUATION_IMPLEMENTATION_SPEC.zh.md`](ROUND_5A_2_DURABLE_PROVIDER_REPLAY_AND_CROSS_RESTART_THREAD_CONTINUATION_IMPLEMENTATION_SPEC.zh.md)，状态为ACTIVATED，机器证据见[`round5a2_durable_provider_replay_and_cross_restart_thread_continuation_activation.json`](benchmarks/suites/core/v1/round5a2_durable_provider_replay_and_cross_restart_thread_continuation_activation.json)。Round 5B实施真源见[`ROUND_5B_LONG_HORIZON_CONTEXT_COMPACTION_IMPLEMENTATION_SPEC.zh.md`](ROUND_5B_LONG_HORIZON_CONTEXT_COMPACTION_IMPLEMENTATION_SPEC.zh.md)，状态为ACTIVATED，机器证据见[`round5b_long_horizon_context_compaction_activation.json`](benchmarks/suites/core/v1/round5b_long_horizon_context_compaction_activation.json)；其normal ToolResult、Capability与Skill前置仍分别由Round 7.1、Round 9与Round 9.1拥有。PHC-07A、同Host完整response continuation、跨Host compatible native replay与PHC-07B context compaction/rebase均已恢复；provider-error reactive compaction、旧CLI/TUI与Round 10层次化subagent仍不在本轮承诺内。
+Round 5A实施规格见[`ROUND_5_LONG_HORIZON_EXECUTION_ENVELOPE_IMPLEMENTATION_SPEC.zh.md`](ROUND_5_LONG_HORIZON_EXECUTION_ENVELOPE_IMPLEMENTATION_SPEC.zh.md)，机器证据见[`round5_long_horizon_execution_envelope_activation.json`](benchmarks/suites/core/v1/round5_long_horizon_execution_envelope_activation.json)。Round 5A.1实施规格见[`ROUND_5A_1_PROVIDER_NEUTRAL_MODEL_OUTPUT_TERMINATION_IMPLEMENTATION_SPEC.zh.md`](ROUND_5A_1_PROVIDER_NEUTRAL_MODEL_OUTPUT_TERMINATION_IMPLEMENTATION_SPEC.zh.md)，机器证据见[`round5a1_provider_neutral_model_output_termination_activation.json`](benchmarks/suites/core/v1/round5a1_provider_neutral_model_output_termination_activation.json)。Round 5A.2实施真源见[`ROUND_5A_2_DURABLE_PROVIDER_REPLAY_AND_CROSS_RESTART_THREAD_CONTINUATION_IMPLEMENTATION_SPEC.zh.md`](ROUND_5A_2_DURABLE_PROVIDER_REPLAY_AND_CROSS_RESTART_THREAD_CONTINUATION_IMPLEMENTATION_SPEC.zh.md)，状态为ACTIVATED，机器证据见[`round5a2_durable_provider_replay_and_cross_restart_thread_continuation_activation.json`](benchmarks/suites/core/v1/round5a2_durable_provider_replay_and_cross_restart_thread_continuation_activation.json)。Round 5B实施真源见[`ROUND_5B_LONG_HORIZON_CONTEXT_COMPACTION_IMPLEMENTATION_SPEC.zh.md`](ROUND_5B_LONG_HORIZON_CONTEXT_COMPACTION_IMPLEMENTATION_SPEC.zh.md)，状态为ACTIVATED，机器证据见[`round5b_long_horizon_context_compaction_activation.json`](benchmarks/suites/core/v1/round5b_long_horizon_context_compaction_activation.json)；其normal ToolResult、Capability与Skill前置仍分别由Round 7.1、Round 9与Round 9.1拥有。PHC-07A、同Host完整response continuation、跨Host compatible native replay与PHC-07B context compaction/rebase均已恢复；provider-error reactive compaction与旧CLI/TUI仍不在本轮承诺内。
 
 ### 6.1 hard-cut 前已存在的产品能力
 
@@ -518,7 +518,7 @@ PHC-07B现已恢复：长对话可手动或在本地预算边界前主动压缩�
 - provider已经返回context-length错误后的reactive compact/retry；
 - 删除或重写canonical transcript、持久化compiled replacement history或恢复provider stream；
 - memory extraction、summary作为业务事实authority或任何durable compaction receipt/checkpoint/repair；
-- Round 10层次化subagent编排、Web/Desktop/TUI timeline与旧Legacy REPL命令拼写。
+- Web/Desktop/TUI timeline与旧Legacy REPL命令拼写。
 
 不保存exact context-input audit、不通过event replay恢复execution，以及不删除canonical transcript仍是既定减法边界，不计为缺口。
 
@@ -728,60 +728,49 @@ Round 4刻意停在“Python authority与typed wire已经可用”，没有把�
 
 ## 9. PHC-10：Hierarchical / batch subagent task graph
 
-> 设计草案：[Round 10 ROOT-Orchestrated Subagent Task Graph](ROUND_10_HIERARCHICAL_SUBAGENT_ORCHESTRATION_IMPLEMENTATION_SPEC.zh.md)。该文档恢复ROOT-only batch/dependency/phase/result/task-board产品语义，并新增ROOT向active worker的boundary-safe `send_agent_message`；subagent不能继续创建subagent。当前仍为DRAFT，本Gap在activation前保持OPEN。
+> 实施真源：[Round 10 ROOT-Orchestrated Subagent Task Graph](ROUND_10_HIERARCHICAL_SUBAGENT_ORCHESTRATION_IMPLEMENTATION_SPEC.zh.md)。Round 10已ACTIVATED；机器证据见[`round10_hierarchical_subagent_orchestration_activation.json`](benchmarks/suites/core/v1/round10_hierarchical_subagent_orchestration_activation.json)。
 
-### 9.1 当前仍保留的 flat subagent 能力
+### 9.1 当前production工具面
 
-当前新 Kernel 正式暴露四个工具：
+ROOT scope固定暴露七项orchestration tool：
 
 ```text
 spawn_agent
+create_agent_tasks
 list_agents
 wait_agent
+wait_agent_tasks
+send_agent_message
 stop_agent
 ```
 
-它们支持：启动一个 bounded child、列出 child、等待单个 child、停止单个 child；accepted task/result 进入 canonical subagent relations。这个基础面不是缺口。
-
-### 9.2 hard-cut 前额外存在、当前不可达的能力
-
-hard-cut 前还有一套 task-board / graph surface：
+这些descriptor在四种ROOT permission mode的provider tools中保持稳定，但只有exact
+`BYPASS_PERMISSIONS`可以执行。Child scope不获得上述工具，只拥有：
 
 ```text
-create_agent_tasks
-wait_agent_tasks
-stop_agent_task
-report_agent_phase
 report_agent_result
 ```
 
-对应产品语义包括：
+旧`stop_agent_task`语义并入`stop_agent(task_id=...)`；`report_agent_phase`被物理删除，
+进度由canonical task/dependency state与Runtime-derived status表达。
 
-- 一次创建一批具 stable task key 的逻辑任务；
-- task 间显式 dependency；
-- dependency 满足后自动启动 downstream；
-- upstream failure 使 downstream 得到明确 blocked/failed cause；
-- 一次等待多个 task 并返回部分 settled 结果；
-- 以 logical task id 停止 task 与 active child；
-- child 主动报告 phase/progress；
-- child 主动提交结构化 result；
-- parent 读取统一 task board，而不是手工拼多个 flat child。
+### 9.2 当前authority与长程边界
 
-归档和代码证据包括：
+- `subagent_tasks`与`subagent_task_dependencies`拥有logical work、DAG edge、status和result lineage；不新增SubagentRun、durable inbox或result-delivery relation；
+- process-local `RootSubagentCoordinator`唯一拥有physical scheduler、四child并发capacity、mailbox、waiter与cancel intent；四是并发数，不是session graph总量或task lifetime cap；
+- `NONE | LAST_N(1..3)`在actual installed ROOT model call上冻结；只投影ROOT user/steer和assistant public message，不复制tool group；
+- `EXPLICIT | INFERRED`统一产生canonical `SubagentResult`；result只自动投影给direct downstream dependency，ROOT通过list/wait/accept显式读取，不递归传播祖先；
+- `INTER_AGENT_MESSAGE`以独立typed envelope进入active worker mailbox，在provider/tool group safe point追加；它不伪装human prompt；
+- ordinary child cold-open与Round 5B compaction successor继续复用唯一`KernelColdEpochInputAssembler`、Round 9 parent dispatch cut及Tool/Skill sibling views；
+- child不能创建child，Host replacement不恢复physical worker，未增加receipt、checkpoint、repair、replay或cross-Host execution owner。
 
-- [`PULSARA_SUBAGENT_GRAPH_REDUCER_HARD_CUT_IMPLEMENTATION.zh.md`](archived_docs/PULSARA_SUBAGENT_GRAPH_REDUCER_HARD_CUT_IMPLEMENTATION.zh.md)；
-- [`PULSARA_SUBAGENT_SYSTEM_NEXT_STEPS.zh.md`](archived_docs/PULSARA_SUBAGENT_SYSTEM_NEXT_STEPS.zh.md)；
-- hard-cut 前 `runtime/subagent/` 与相应测试。
+### 9.3 恢复结果
 
-### 9.3 当前代码事实与缺失
-
-- 五个旧 descriptor 仍在 builtin catalog；
-- current `KernelSubagentManager.tool_names` 只有四个 flat tools；
-- 五个 task-graph/report 工具没有 production executor；
-- 当前每个 spawn 是独立 live asyncio task；
-- 没有 dependency scheduler、batch wait、child phase reporting 或 graph task board。
-
-[`PULSARA_SUBAGENT_DENO_WORKFLOW_RUNTIME_PLAN.zh.md`](archived_docs/PULSARA_SUBAGENT_DENO_WORKFLOW_RUNTIME_PLAN.zh.md) 主要是下一步计划，不能整体算作“被删能力”；本节只记录 hard-cut 前代码实际存在的 task graph surface。
+PHC-10当前已闭合batch admission、cycle/dependency validation、capacity queueing、
+partial multi-wait、task/active-child stop、ROOT-to-worker message、explicit/inferred
+result、direct-dependency delivery、default NONE、bounded LAST_N以及compaction task-board
+handoff。它没有恢复旧phase chatter、EventLog reducer/projection、child execution replay或
+跨Host resume。
 
 ### 9.4 hard-cut前task-graph参考代码
 
@@ -978,31 +967,24 @@ SYSTEM/tools保持不变，messages严格等于旧prefix或只追加suffix。com
 
 ## 14. PHC-15：Capability catalog 与真实 executor 不一致
 
-当前 builtin catalog 共29个descriptor。Round 4后production model tool surface实际可达24个：
+当前builtin catalog共32个descriptor，均由Round 9 sealed execution-backed inventory穷尽
+重验，并拥有真实production binding或明确catalog-only语义。Round 10删除
+`report_agent_phase`与`stop_agent_task`，为七项ROOT orchestration tool和child
+`report_agent_result`安装真实scope-aware executor；不再存在dormant subagent
+descriptor。
 
-- 9个direct tools：`artifact_read/read_file/search_files/edit_file/write_file/todo/terminal/terminal_process/terminal_monitor`；
-- 4 个 flat subagent tools：`spawn_agent/list_agents/wait_agent/stop_agent`；
-- 8 个 current memory tools（memory 语义不在本轮复核范围）。
-- 3个ROOT-only Plan control tools：`enter_plan/ask_plan_question/exit_plan`。
+ROOT与child仍从同一次owner snapshot得到descriptor/schema/executor binding：
 
-以下5个descriptor没有当前production executor/binding：
+- 七项ROOT orchestration tool只在ROOT surface中出现，local authorize要求exact
+  `BYPASS_PERMISSIONS`；
+- child只获得普通child-visible capability及`report_agent_result`，不能借同名tool
+  切换到ROOT binding；
+- MCP direct/meta physical authority仍归MCP supervisor，Skill仍无executor；
+- static descriptor、tool surface borrow、attempt admission和physical invoke继续exact
+  join同一binding。
 
-```text
-create_agent_tasks
-wait_agent_tasks
-stop_agent_task
-report_agent_phase
-report_agent_result
-```
-
-Round 1已把`artifact_read`descriptor接到scoped production executor；Round 2已让`terminal_monitor`descriptor、tool-action policy、strict schema与production executor闭合；Round 4又让三项Plan descriptor通过scope-frozen tool surface与Runtime control executor闭合。PHC-15仍未整体恢复，只因为PHC-10的五项hierarchical task-graph descriptor尚不可达。
-
-这不是独立用户功能，但它是重要产品缺失证据：
-
-- 静态 descriptor inventory 不能代表实际可用能力；
-- tests 若只检查 descriptor/schema，会漏掉 production binding 缺失；
-- dead descriptor 使 hard-cut 后的真实产品面难以判断；
-- 剩余task-graph缺失仍可能被残留descriptor掩盖。
+因此PHC-15当前没有剩余dead descriptor缺口；未来新增descriptor仍必须先安装真实owner
+binding，不能以catalog presence代替可执行性。
 
 ### 14.1 hard-cut前catalog/executor闭合参考代码
 
@@ -1291,7 +1273,7 @@ messages[n + 1] == messages[n] || append_only_suffix
 - `PULSARA_SUBAGENT_RUNTIME_PRIOR_ART_RESEARCH`；
 - `PULSARA_SUBAGENT_DENO_WORKFLOW_RUNTIME_PLAN`。
 
-结论：flat child 保留；batch/dependency/task reporting 有代码证据并形成 PHC-10。Deno WorkflowScript 的更大设计没有完成证据，不计为被删产品。
+历史审计结论：hard-cut当时只保留flat child，batch/dependency/task reporting由代码证据形成PHC-10；该缺口现已由Round 10恢复。Deno WorkflowScript的更大设计没有完成证据，不计为被删产品。
 
 ### 17.6 Capability / skills / filesystem 标题族
 
@@ -1304,7 +1286,7 @@ messages[n + 1] == messages[n] || append_only_suffix
 - `READ_ONLY_FILESYSTEM_TOOLS_HOME_SCOPE_IMPLEMENTATION`；
 - `PULSARA_DIRECTORY_CONTRACT_CODEX_COMPAT`。
 
-结论：local/bundled skills、active skill选择与薄prompt注入、read-only filesystem home scope和基本directory discovery当前仍存在，不列为整项缺失；这些事实不等于多源Context Compiler仍存在。Catalog/executor的9项漂移形成PHC-15，compiler缺口单独形成PHC-17。
+历史审计结论：当时local/bundled skills、active skill选择与薄prompt注入、read-only filesystem home scope和基本directory discovery仍存在，catalog/executor漂移形成PHC-15，compiler缺口形成PHC-17。PHC-15/17现已分别由Round 9/10与Round 3/3.1闭合。
 
 ### 17.7 Host / conversation / LLM 标题族
 
@@ -1318,7 +1300,7 @@ messages[n + 1] == messages[n] || append_only_suffix
 - `PULSARA_RESOLVED_MODEL_CALL_HARD_CUT_IMPLEMENTATION`；
 - `PULSARA_AGENT_RUNTIME_AND_HOST_SESSION_OWNERSHIP_HARD_CUT_IMPLEMENTATION`。
 
-结论：detach/reattach、conversation resume、Host stop、provider retry、typed model streaming 与 resolved model config 当前仍存在。跨-turn failure note 已实现后被删，形成 PHC-13。
+历史审计结论：detach/reattach、conversation resume、Host stop、provider retry、typed model streaming与resolved model config仍存在；当时缺失的跨-turn failure note形成PHC-13，现已由Round 7恢复。
 
 ### 17.8 Memory / graph 标题族
 
@@ -1391,6 +1373,6 @@ messages[n + 1] == messages[n] || append_only_suffix
 
 PHC-11与PHC-12是例外处置：它们保留在索引中用于审计hard-cut事实，但不进入恢复backlog。前者所需的canonical观察能力、后者所涉及的Plan/MCP/approval等独立产品语义，最终由未来Web/Desktop client及各自Kernel契约承接；不以恢复旧Python产品面为目标。
 
-Round 3与Round 3.1已完整恢复PHC-17的typed compiler和process-local prefix continuity；Round 4已恢复PHC-09的Python Runtime/Host与Protocol后端；Round 5A已恢复PHC-07A execution envelope；Round 5A.2新增一张assistant-entry-bound private replay relation，已兑现accepted线程的compatible Chat/Responses native history跨Host/进程重启续接，不恢复durable compiled request、remote provider state或generation recovery graph；Round 5B已恢复PHC-07B safe-point summary、snapshot adoption、protected-tail与successor cold rebase，并删除最后一类durable job。Round 6与Round 7分别闭合MCP、previous-turn outcome与tool observation；Round 8已闭合Advisory Memory。Lightweight TODO refinement进一步把`todo`收敛为exact ROOT/child run的bounded、process-local完整snapshot replacement，并只增加一个atomic live projection；机器证据见[`lightweight_todo_tool_refinement_activation.json`](benchmarks/suites/core/v1/lightweight_todo_tool_refinement_activation.json)。这些已激活轮次仍未恢复durable compiled-input audit、每次dispatch的完整provider-input snapshot或旧generation recovery graph；compiler仍只消费已接受事实，不能替代其canonical authority。
+Round 3与Round 3.1已完整恢复PHC-17的typed compiler和process-local prefix continuity；Round 4已恢复PHC-09的Python Runtime/Host与Protocol后端；Round 5A已恢复PHC-07A execution envelope；Round 5A.2新增一张assistant-entry-bound private replay relation，已兑现accepted线程的compatible Chat/Responses native history跨Host/进程重启续接，不恢复durable compiled request、remote provider state或generation recovery graph；Round 5B已恢复PHC-07B safe-point summary、snapshot adoption、protected-tail与successor cold rebase，并删除最后一类durable job。Round 6与Round 7分别闭合MCP、previous-turn outcome与tool observation；Round 8已闭合Advisory Memory；Round 9/9.1闭合统一capability与Agent Skills；Round 10闭合ROOT编排的worker task graph与direct dependency result路由。Lightweight TODO refinement进一步把`todo`收敛为exact ROOT/child run的bounded、process-local完整snapshot replacement，并只增加一个atomic live projection；机器证据见[`lightweight_todo_tool_refinement_activation.json`](benchmarks/suites/core/v1/lightweight_todo_tool_refinement_activation.json)。这些已激活轮次仍未恢复durable compiled-input audit、每次dispatch的完整provider-input snapshot或旧generation recovery graph；compiler仍只消费已接受事实，不能替代其canonical authority。
 
-同样，后续恢复不能把任何历史oracle当作拒绝真实产品语义的永久配额。当前已激活closed oracle为`28 Committed / 24 Live / 11 subjects / 1 guard / 24 product relations / 0 durable jobs`；Round 5B保留Round 5A.2的provider replay relation和Lightweight TODO的process-local live projection，同时删除最后一类durable job及其两张relation、三类occurrence、两个subject和claim guard。任何数量变化都必须经过上述closed contract审查，但“保持旧数字”不优先于“以正确的canonical/live边界完整表达产品能力”。
+同样，后续恢复不能把任何历史oracle当作拒绝真实产品语义的永久配额。当前已激活closed oracle为`29 Committed / 24 Live / 11 subjects / 1 guard / 25 product relations / 0 durable jobs`；Round 10只增加一张canonical dependency relation与一类accepted occurrence，没有增加durable run、inbox、receipt、job或recovery owner。任何数量变化都必须经过上述closed contract审查，但“保持旧数字”不优先于“以正确的canonical/live边界完整表达产品能力”。

@@ -73,7 +73,7 @@ from pulsara_agent.primitives.tool_result_projection import (
 
 
 COMPILER_CONTRACT_VERSION = (
-    "pulsara.structured-model-input-compiler.prefix-continuity.v9-compaction"
+    "pulsara.structured-model-input-compiler.prefix-continuity.v10-subagent-context"
 )
 
 
@@ -86,7 +86,7 @@ class _SacrificeRank(IntEnum):
 
 _SOURCE_POLICY = {
     ContextSourceKind.BASE_SYSTEM: (
-        "pulsara.base-system.prefix-continuity.v7-compaction",
+        "pulsara.base-system.prefix-continuity.v8-hierarchical-subagents",
         ContextChannel.SYSTEM,
         ContextTrustClass.ROOT_INSTRUCTION,
         ContextBudgetClass.MUST_KEEP,
@@ -178,6 +178,26 @@ _SOURCE_POLICY = {
         10,
         (ContextRenderMode.FULL, ContextRenderMode.COMPACT),
         ContextSourceLifecycle.TURN_APPEND,
+    ),
+    ContextSourceKind.PARENT_CONTEXT: (
+        "pulsara.subagent-parent-context.v1",
+        ContextChannel.RUNTIME_OBSERVATION,
+        ContextTrustClass.UNTRUSTED_OBSERVATION,
+        ContextBudgetClass.MUST_KEEP,
+        42,
+        5,
+        (ContextRenderMode.FULL,),
+        ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
+    ),
+    ContextSourceKind.DEPENDENCY_RESULTS: (
+        "pulsara.subagent-dependency-results.v1",
+        ContextChannel.RUNTIME_OBSERVATION,
+        ContextTrustClass.UNTRUSTED_OBSERVATION,
+        ContextBudgetClass.MUST_KEEP,
+        43,
+        5,
+        (ContextRenderMode.FULL,),
+        ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
     ),
     ContextSourceKind.TOOL_OBSERVATION_FRESHNESS: (
         "pulsara.tool-observation-freshness.v1",
@@ -279,6 +299,18 @@ _SOURCE_ABSENCE_POLICY = {
     ),
     ContextSourceKind.PREVIOUS_TURN_OUTCOME: frozenset(
         {ContextSourceAbsenceKind.EXPLICIT_EMPTY}
+    ),
+    ContextSourceKind.PARENT_CONTEXT: frozenset(
+        {
+            ContextSourceAbsenceKind.NOT_APPLICABLE,
+            ContextSourceAbsenceKind.EXPLICIT_EMPTY,
+        }
+    ),
+    ContextSourceKind.DEPENDENCY_RESULTS: frozenset(
+        {
+            ContextSourceAbsenceKind.NOT_APPLICABLE,
+            ContextSourceAbsenceKind.EXPLICIT_EMPTY,
+        }
     ),
     ContextSourceKind.TOOL_OBSERVATION_FRESHNESS: frozenset(),
     ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD: frozenset(

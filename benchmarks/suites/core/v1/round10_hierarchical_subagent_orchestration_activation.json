@@ -1,0 +1,156 @@
+{
+  "schema_version": "round10-hierarchical-subagent-orchestration-activation.v1",
+  "status": "activated",
+  "generated_at_utc": "2026-08-21T16:26:02Z",
+  "captured_head": "504b8c8fe509ec55c12acad97f32ee6d24687932",
+  "working_tree_semantics": "Round 10 was implemented and verified in the uncommitted worktree rooted at the exact clean Round 5B checkpoint. No file was staged, committed, or pushed.",
+  "source_documents": {
+    "ROUND_10_HIERARCHICAL_SUBAGENT_ORCHESTRATION_IMPLEMENTATION_SPEC.zh.md": "5962a0866962c6e56659f9b0a03aa57bd76fd948680071650854b5e97a22b683",
+    "POST_HARD_CUT_PRODUCT_CAPABILITY_GAP_INDEX.zh.md": "f08e959cbce68dbd74c1e01f5892265a5381314336e3b87f486f7dd42e0cb63c",
+    "README.md": "98cc506279968706e2d2bb9563eef3309c78b0de1136e645100319115b391cb9",
+    "README.zh-CN.md": "4ab3344fca56c160fc7626d589c2acc55b8d1a3e79ad5c4d0b85ae5ecba8ec93"
+  },
+  "post_activation_code_sha256": {
+    "capability/builtin_catalog.py": "7b2c0685ae58b3076ce9b085eaacb32bb9719fb02d4adb8e3d2b218fb3fc3ca5",
+    "conversation_kernel/_repository/conversation.py": "b6c6bf9189c05db6291ae2ef3835c6da4a2b929d467b86af1eb678c0bd094850",
+    "conversation_kernel/_repository/subagents.py": "1829e90c90e8910b4ed9fb2a5862a7536d3045e18eab9e8fb9765114cfe7a772",
+    "conversation_kernel/cold_epoch.py": "622065ac2590fc6efb7cc2e37db44dc4aeb50be8d47377e7ee24c991bd0bace4",
+    "conversation_kernel/compaction/contracts.py": "bc653673139c422979e77396226da8a406d2ae759a3a97fdfcdf1a917114bd25",
+    "conversation_kernel/compaction/planner.py": "751e64bd2c68862aeb139eaec1a521466d21267fe3595fcb12a6f34d460c9271",
+    "conversation_kernel/compaction/runtime_handoff.py": "855ca851424e7ba23542de012d7e88a0db9c24d37c4e560e151d01840db922a8",
+    "conversation_kernel/context_sources.py": "0ac3d15b762647005f85724e21a91b84f4e7213d1f242a27b5ed9dee98e6e587",
+    "conversation_kernel/reader.py": "e078395a10c80898a6dd4f065d8cb71d97b82674119b1c7b8bd9121a88751e22",
+    "conversation_kernel/runner.py": "189772fec1a44dd834fd96fdb2057f9fd74d2c08c29b1d4fdddbb005f79e3d3a",
+    "conversation_kernel/subagent.py": "0559c32ca6025d24e9d78b070dfb3104502694284d38a541175d75220c9bce48",
+    "conversation_kernel/subagents/contracts.py": "4aabd41690400a7bbd72d8ef58e1a118266521d3bbc50c646c3704aa1c7b55e7",
+    "conversation_kernel/tool_runtime.py": "afec1416d7d11b9caf701a97fa69a17f188e35d21bc6669ad049da83f6aa070e",
+    "conversation_kernel/vocabulary.py": "8a44344568017e6610a5a368f29411d37b836cdd6f18e046920686fdc754a513",
+    "model_input/compiler.py": "04b0d03cda23cc7c98b7e70948c2e14e4ef5202e33f57ff3b88d7316479cd96e",
+    "model_input/contracts.py": "ba57209dc2cd632e6726edab8fa52d129de3877b31b75be6c6689c8820574dac",
+    "storage/migrations/manifest.py": "ff2c189e7c04dfee9125ac25e15ca6cb915eae0955e6f49f1e032f2e9b870030",
+    "storage/migrations/sql/0000_conversation_kernel_baseline.sql": "489693856843a775aadb721e52e809fdeac710176a6e4704aa313befacdaa3d1",
+    "terminal_protocol/schema/terminal_kernel_v3.proto": "3d1e45b0075c86f39704ad021df678632172b2b8b58dc0f9dbcf9c138945debb",
+    "tests/test_repository_modularization_architecture.py": "acab7365f9c8e502db71c06ce01218f73c2114589b961498d3437d911b9eae07",
+    "tests/test_round10_hierarchical_subagent_orchestration.py": "90c6472a19d614c79803afc3350f45a159fdb84a2a12e9f536fdc201c821ad54",
+    "tools/run_round10_subagent_dogfood.py": "ee44ff83a072a44eb41e69efcbdcd93c2b2b3b65788c78ef4e7cef229d69fef1"
+  },
+  "contracts": {
+    "compiler": "pulsara.structured-model-input-compiler.prefix-continuity.v10-subagent-context",
+    "base_system": "pulsara.base-system.prefix-continuity.v8-hierarchical-subagents",
+    "cold_epoch_assembler": "one KernelColdEpochInputAssembler shared by ordinary cold open, CompactionContinuationSeed and exact-object SubagentInitialSeed",
+    "tool_surface": "seven ROOT orchestration tools remain stable across permission modes; execution requires exact BYPASS_PERMISSIONS; child exposes report_agent_result without orchestration authority",
+    "result_routing": "EXPLICIT and INFERRED share one canonical SubagentResult lineage; automatic projection is direct-dependency-only and ROOT observes results explicitly",
+    "strict_prefix": "each ROOT or child epoch independently keeps SYSTEM and tools exact and messages append-only",
+    "task_inventory_pagination": "list_agents uses a Host-signed session/query-bound opaque (accepted_at,id) keyset cursor without a durable cursor owner"
+  },
+  "implementation": {
+    "topology": "one ROOT coordinator to non-recursive worker leaves",
+    "canonical_authority": "subagent_tasks plus subagent_task_dependencies own logical work, DAG edges, lifecycle and result lineage",
+    "process_local_authority": "RootSubagentCoordinator owns physical scheduling, four-worker concurrent capacity, mailbox, waiters, cancellation and the Host-local list cursor signer",
+    "context": "default NONE; LAST_N accepts 1..3 actual installed ROOT turns and excludes tool groups",
+    "messaging": "INTER_AGENT_MESSAGE is a typed mailbox entry consumed only at a provider/tool-group safe point",
+    "compaction": "Round 5B hierarchical subagent_tasks handoff preserves active and bounded pending task-board facts without a durable inbox or execution recovery",
+    "removed": [
+      "report_agent_phase descriptor and executor",
+      "stop_agent_task descriptor; exact task stop is owned by stop_agent",
+      "flat_subagents compaction handoff",
+      "subagent_run_id provider alias",
+      "unused batch-confirmation task-id tuple, completion nonce and live objective/result/failure mirrors",
+      "ordinary report_agent_result invoke path outside the specialized runner settlement"
+    ]
+  },
+  "long_horizon_cap_audit": {
+    "total_session_task_cap": null,
+    "total_graph_cap": null,
+    "worker_lifetime_cap": null,
+    "model_call_cap": null,
+    "tool_call_cap": null,
+    "turn_total_deadline": null,
+    "physical_concurrency": 4,
+    "local_transaction_and_projection_bounds": "16-task/64-edge batch, 16 admissions per caller turn, 32 wait targets, LAST_N at most 3, mailbox 16 items/64 KiB, bounded public result and list projections",
+    "paging_disposition": "dependency hydration is internally paged at 32 rows; the 50-item public page uses an opaque keyset cursor and does not cap or hide the later session task graph",
+    "bounded_wait_disposition": "timeout_seconds bounds only one caller wait; it never cancels or limits worker lifetime"
+  },
+  "oracle": {
+    "committed_events": 29,
+    "live_events": 24,
+    "subject_slots": 11,
+    "append_guards": 1,
+    "product_relations": 25,
+    "durable_jobs": 0,
+    "schema_manifest_fingerprint": "sha256:0670838cf01e2e61c3beb80f5723f2810dc383a7c55666c6c882044a37149999",
+    "observed_catalog_fingerprint": "sha256:c84a8e07c12c5d97c14bd3587b461848bd970c896b3fdd32554e33ecd282477d",
+    "baseline_sql_sha256": "489693856843a775aadb721e52e809fdeac710176a6e4704aa313befacdaa3d1",
+    "new_relation": "subagent_task_dependencies",
+    "new_committed_occurrence": "InterAgentMessageAccepted",
+    "new_durable_run_inbox_receipt_job_or_recovery_owner": 0
+  },
+  "verification": {
+    "round10_and_adjacent_targeted": "21 passed in the Round 10/subagent selection; 34 passed in the adjacent capability/compaction/architecture selection",
+    "full_pytest": "870 passed in 127.95s",
+    "postgres_marker": "212 of 870 collected nodes; all were executed by the full pytest run rather than redundantly rerunning the same database suite",
+    "clean_v0": "12 passed: fresh install, repeat migrate, deep verify, grant/catalog drift and reset-required coverage",
+    "repository_modularization_architecture": "passed with the mechanically refreshed normalized inventory hash",
+    "ruff": "passed all files",
+    "compileall": "passed src tests tools",
+    "terminal_protocol_generator": "passed",
+    "go_client": "not applicable: the previously retired Go/TUI client and go.mod are absent and were not restored",
+    "uv_lock_check": "passed",
+    "git_diff_check": "passed",
+    "new_skip_or_xfail": 0
+  },
+  "real_provider_dogfood": {
+    "status": "the exact uv run python tools/run_round10_subagent_dogfood.py full command exited 0 with status=passed; an additional isolated capacity run also passed",
+    "api": "openai_chat_completions",
+    "model": "stealth/ox-alpha",
+    "graph": {
+      "shape": "A -> B -> C plus F1/F2 -> Join",
+      "task_count": 6,
+      "dependency_edge_count": 4,
+      "result_sources": {
+        "a": "EXPLICIT",
+        "b": "EXPLICIT",
+        "c": "INFERRED",
+        "f1": "EXPLICIT",
+        "f2": "INFERRED",
+        "join": "EXPLICIT"
+      },
+      "direct_dependency_only": true
+    },
+    "last_n_and_message": {
+      "default_none_covered": true,
+      "same_turn_root_steer_count": 2,
+      "canonical_inter_agent_message_count": 1,
+      "message_observed_after_complete_terminal_tool_group": true,
+      "explicit_result_completed": true
+    },
+    "capacity_mcp_compaction": {
+      "frontier": "four ACTIVE plus one PENDING_START",
+      "mcp_became_ready_before_queued_child_start": true,
+      "compaction_disposition": "COMPACTED",
+      "runtime_handoff_has_task_board": true,
+      "runtime_handoff_semantics": "the VALUE handoff contains the bounded current nonterminal task subset frozen after the real summary call; it does not require one earlier frontier member to retain its transient status",
+      "queued_child_native_tool": "mcp__child__direct_echo",
+      "exact_remote_result_observed": "direct:PRESTART_MCP_MARKER",
+      "all_five_tasks_completed": true
+    },
+    "api_key_or_sensitive_environment_recorded": false
+  },
+  "production_diff": {
+    "modified_tracked_src_files": 28,
+    "new_untracked_src_files": 2,
+    "lines_added": 7503,
+    "lines_deleted": 887,
+    "net_lines": 6616,
+    "counting_rule": "git diff --numstat under src plus line counts of untracked production src files; tests, tools, docs and evidence excluded"
+  },
+  "non_goals": [
+    "recursive child orchestration or child-to-child messaging",
+    "cross-Host child continuation or physical recovery",
+    "durable mailbox, result-delivery relation, SubagentRun, receipt, checkpoint, repair or replay",
+    "full ROOT prefix fork or unbounded parent history inheritance",
+    "task retry, reset, redefine or dynamic graph backpatch",
+    "Round 9.2 Plugin contribution or advanced Web/Desktop task-board UI"
+  ],
+  "remaining_blockers": []
+}

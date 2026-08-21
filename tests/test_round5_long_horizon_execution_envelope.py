@@ -73,11 +73,11 @@ def test_round5_architecture_removes_turn_budget_and_preserves_oracles() -> None
     assert "while model_call_count <" not in runner_source
     assert "model-call limit exhausted" not in runner_source
 
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == 28
+    assert len(COMMITTED_EVENT_DESCRIPTORS) == 29
     assert len(LIVE_EVENT_TYPES) == 24
     assert len(SUBJECT_SLOTS) == 11
     assert len(APPEND_GUARDS) == 1
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 24
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 25
 
 
 def test_round5_watchdog_policy_is_closed_and_has_no_turn_or_call_budget() -> None:

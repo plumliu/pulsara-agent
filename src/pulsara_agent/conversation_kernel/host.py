@@ -463,6 +463,7 @@ class KernelHostSession:
             assistant_settlement_owner=self._assistant_settlements,
             todo_admission_finalizer=self._finalize_todo_run_activation,
             compaction_owner=self._compaction,
+            subagent_runtime=self._subagents,
         )
         self._subagents.bind_runner_factory(self._new_child_runner)
         self._active_task: asyncio.Task[KernelRunResult] | None = None
@@ -902,8 +903,8 @@ class KernelHostSession:
             candidate.command_id
         )
         if existing is not None:
-            fingerprint, task = existing
-            if fingerprint != candidate.candidate_fingerprint:
+            semantic_digest, task = existing
+            if semantic_digest != candidate.semantic_digest:
                 return CompactionConfirmationKind.CONFLICT
         else:
             task = self._compaction.start_settlement(
@@ -911,7 +912,7 @@ class KernelHostSession:
                 name=f"kernel-compaction-command:{candidate.command_id}",
             )
             self._manual_compaction_command_attempts[candidate.command_id] = (
-                candidate.candidate_fingerprint,
+                candidate.semantic_digest,
                 task,
             )
 
@@ -3397,6 +3398,7 @@ class KernelHostSession:
             assistant_settlement_owner=self._assistant_settlements,
             todo_admission_finalizer=self._finalize_todo_run_activation,
             compaction_owner=self._compaction,
+            subagent_runtime=self._subagents,
         )
 
     def _observe_provider_usage(

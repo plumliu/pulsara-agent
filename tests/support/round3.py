@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from hashlib import sha256
 import json
 from typing import AsyncIterator, Callable
 
@@ -58,8 +59,24 @@ from pulsara_agent.conversation_kernel.memory.contracts import (
 from pulsara_agent.conversation_kernel.context_sources import (
     ContextSourceRegistry,
     FrozenNonTriggerContextSources,
+    build_subagent_context_source,
 )
-from pulsara_agent.conversation_kernel.runner import KernelToolInvocationContext
+from pulsara_agent.conversation_kernel.cold_epoch import (
+    SubagentInitialSeed,
+    build_subagent_initial_seed,
+)
+from pulsara_agent.conversation_kernel.subagents.contracts import (
+    SubagentContextMode,
+    SubagentProfileKind,
+    SubagentResultSource,
+    build_parent_context_call_subject,
+    build_parent_context_selection,
+    build_subagent_result_public_fact,
+)
+from pulsara_agent.conversation_kernel.runner import (
+    KernelToolInvocationContext,
+    KernelToolResult,
+)
 from pulsara_agent.conversation_kernel.tool_surface import (
     BuiltinExecutionPolicyRef,
     PreparedKernelToolSurface,
@@ -92,6 +109,9 @@ from pulsara_agent.model_input.contracts import (
     build_tool_observation_freshness_fact,
     context_binding_compile_fact_fingerprint,
     model_tool_surface_fingerprint,
+)
+from pulsara_agent.model_input.provider_replay import (
+    FrozenCanonicalProviderDispatchRead,
 )
 from pulsara_agent.model_input.continuity import FULL_HISTORY_CONTEXT_BASE_IDENTITY
 from pulsara_agent.model_input.continuity import ProcessLocalProviderInputInstallPermit
@@ -463,7 +483,7 @@ class StaticContextSourceCollector:
         candidates: tuple[ContextSourceCandidate, ...] = (
             _candidate(
                 kind=ContextSourceKind.BASE_SYSTEM,
-                version="pulsara.base-system.prefix-continuity.v7-compaction",
+                version="pulsara.base-system.prefix-continuity.v8-hierarchical-subagents",
                 channel=ContextChannel.SYSTEM,
                 trust=ContextTrustClass.ROOT_INSTRUCTION,
                 budget=ContextBudgetClass.MUST_KEEP,
@@ -604,6 +624,12 @@ class StaticContextSourceCollector:
                 ContextSourceAbsenceKind.NOT_APPLICABLE
             ),
             ContextSourceKind.RETAINED_SKILL_CONTEXT: (
+                ContextSourceAbsenceKind.NOT_APPLICABLE
+            ),
+            ContextSourceKind.PARENT_CONTEXT: (
+                ContextSourceAbsenceKind.NOT_APPLICABLE
+            ),
+            ContextSourceKind.DEPENDENCY_RESULTS: (
                 ContextSourceAbsenceKind.NOT_APPLICABLE
             ),
         }
@@ -1356,6 +1382,7 @@ def direct_tool_invocation_context(
             scope_subagent_task_id=scope_subagent_task_id,
             host_owner_epoch=1,
             authorization_reference="test:authorized",
+            effective_permission_mode=permission.effective_mode,
             permission_snapshot_fingerprint=permission.snapshot_fingerprint,
             attempt_permission_snapshot_fingerprint=(
                 permission.snapshot_fingerprint
@@ -1368,6 +1395,152 @@ def direct_tool_invocation_context(
     except BaseException:
         borrow.close()
         raise
+
+
+class Round10TestSubagentRuntime:
+    """Exact sealed child seed/result seam for retained runner tests.
+
+    Production child execution is always owned by ``KernelSubagentManager``.
+    Older runner tests exercise admission/transport failure matrices directly,
+    so this test-only carrier supplies the same exact-object cold seed without
+    reintroducing the removed flat prompt path.
+    """
+
+    def __init__(
+        self,
+        *,
+        session_id: str,
+        task_id: str,
+        parent_turn_id: str,
+        objective: str,
+        profile_kind: SubagentProfileKind = SubagentProfileKind.GENERAL_WORKER,
+    ) -> None:
+        self._task_id = task_id
+        self._parent_turn_id = parent_turn_id
+        self._objective = objective
+        self._profile_kind = profile_kind
+        self._subject = build_parent_context_call_subject(
+            session_id=session_id,
+            caller_turn_id=parent_turn_id,
+            provider_input_cut_fingerprint="sha256:test-child-parent-cut",
+            continuity_epoch_nonce="epoch:test-child-parent",
+            continuity_epoch_revision=0,
+            compiled_semantic_input_fingerprint="sha256:test-child-parent-semantic",
+            compiled_message_placements_fingerprint=(
+                "sha256:test-child-parent-placements"
+            ),
+            ordered_eligible_units=(),
+        )
+        self._selection = build_parent_context_selection(
+            self._subject,
+            mode=SubagentContextMode.NONE,
+            last_n_turns=None,
+        )
+
+    def profile_kind(self, *, task_id: str) -> SubagentProfileKind:
+        self._require_task(task_id)
+        return self._profile_kind
+
+    def initial_context_sources(
+        self, *, task_id: str
+    ) -> tuple[ContextSourceCandidate | ContextSourceAbsentFact, ...]:
+        self._require_task(task_id)
+        return (
+            build_subagent_context_source(
+                kind=ContextSourceKind.PARENT_CONTEXT,
+                text=self._selection.rendered_body,
+                domain_identity={
+                    "subject": self._subject.subject_fingerprint,
+                    "selection": self._selection.selection_fingerprint,
+                    "source": self._selection.source_fingerprint,
+                },
+            ),
+            build_subagent_context_source(
+                kind=ContextSourceKind.DEPENDENCY_RESULTS,
+                text=None,
+                domain_identity=None,
+            ),
+        )
+
+    def build_initial_seed(
+        self,
+        *,
+        task_id: str,
+        dispatch_read: FrozenCanonicalProviderDispatchRead,
+    ) -> SubagentInitialSeed:
+        self._require_task(task_id)
+        return build_subagent_initial_seed(
+            dispatch_read=dispatch_read,
+            task_id=task_id,
+            parent_turn_id=self._parent_turn_id,
+            profile_kind=self._profile_kind,
+            objective=self._objective,
+            parent_call_subject=self._subject,
+            parent_context_selection=self._selection,
+            dependency_context=None,
+        )
+
+    async def consume_mailbox_safe_point(self, task_id: str) -> bool:
+        self._require_task(task_id)
+        return False
+
+    async def prepare_inferred_completion(
+        self, *, task_id: str, entry_id: str, public_text: str
+    ):
+        self._require_task(task_id)
+        digest = "sha256:" + sha256(public_text.encode("utf-8")).hexdigest()
+        result = build_subagent_result_public_fact(
+            task_id=task_id,
+            result_id=f"subagent-result:{sha256(entry_id.encode()).hexdigest()}",
+            source=SubagentResultSource.INFERRED,
+            producer_entry_id=entry_id,
+            summary=public_text or "Task completed without public text.",
+            source_assistant_content_digest=digest,
+        )
+        return object(), result
+
+    async def prepare_explicit_completion(
+        self,
+        *,
+        task_id: str,
+        result_entry_id: str,
+        arguments: dict[str, object],
+    ):
+        self._require_task(task_id)
+        summary = arguments.get("summary")
+        preview = arguments.get("output_preview")
+        diagnostics = arguments.get("diagnostics", [])
+        if not isinstance(summary, str) or not summary:
+            return None
+        result = build_subagent_result_public_fact(
+            task_id=task_id,
+            result_id=(
+                "subagent-result:"
+                + sha256(f"{task_id}:{result_entry_id}".encode()).hexdigest()
+            ),
+            source=SubagentResultSource.EXPLICIT,
+            producer_entry_id=result_entry_id,
+            summary=summary,
+            output_preview=preview if isinstance(preview, str) else None,
+            diagnostics=diagnostics if isinstance(diagnostics, list) else (),
+        )
+        acknowledgement = KernelToolResult(
+            state="SUCCESS",
+            content=json.dumps(
+                {"status": "accepted", "task_id": task_id},
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode(),
+        )
+        return object(), result, acknowledgement
+
+    async def finish_completion(self, _permit: object, *, committed: bool) -> None:
+        if not committed:
+            return
+
+    def _require_task(self, task_id: str) -> None:
+        if task_id != self._task_id:
+            raise ValueError("test subagent runtime received another task")
 
 
 async def invoke_direct_tool(
@@ -1546,6 +1719,7 @@ def _candidate(
 
 
 __all__ = [
+    "Round10TestSubagentRuntime",
     "ScriptedKernelModel",
     "StaticContextSourceCollector",
     "StructuredToolPort",

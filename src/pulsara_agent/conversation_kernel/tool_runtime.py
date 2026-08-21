@@ -96,7 +96,6 @@ from pulsara_agent.conversation_kernel.io import (
 )
 from pulsara_agent.conversation_kernel.compaction.runtime_handoff import (
     FrozenCompactionRuntimeHandoff,
-    FrozenFlatSubagentHandoffFact,
     FrozenTerminalMonitorHandoffFact,
     FrozenTerminalProcessHandoffFact,
     bounded_handoff_preview,
@@ -344,12 +343,19 @@ class KernelSubagentToolPort(Protocol):
     @property
     def tool_names(self) -> frozenset[str]: ...
 
+    def validate_arguments(
+        self,
+        *,
+        tool_name: str,
+        arguments: Mapping[str, object],
+    ) -> str | None: ...
+
     async def invoke(
         self,
         *,
         tool_name: str,
         arguments: Mapping[str, object],
-        parent_turn_id: str,
+        invocation_context: KernelToolInvocationContext,
     ) -> KernelToolResult: ...
 
     async def freeze_compaction_handoff(self) -> tuple[dict[str, str], ...]: ...
@@ -791,7 +797,18 @@ class DirectKernelToolPort:
                         "enter_plan",
                         "ask_plan_question",
                         "exit_plan",
+                        "spawn_agent",
+                        "create_agent_tasks",
+                        "list_agents",
+                        "wait_agent",
+                        "wait_agent_tasks",
+                        "send_agent_message",
+                        "stop_agent",
                     }
+                )
+            else:
+                bindings = tuple(
+                    item for item in bindings if item.tool_name != "report_agent_result"
                 )
             source = capability_source_ref(
                 CapabilitySourceKind.BUILTIN_REGISTRY,
@@ -1036,25 +1053,25 @@ class DirectKernelToolPort:
             scope_kind=conversation_scope_kind,
             scope_subagent_task_id=scope_subagent_task_id,
         )
-        subagents: tuple[dict[str, str], ...] = ()
+        subagent_facts = ()
+        subagent_totals = (
+            ("ACTIVE", 0),
+            ("PENDING_START", 0),
+            ("WAITING_DEPENDENCY", 0),
+        )
         if (
             conversation_scope_kind is ModelInputScopeKind.ROOT
             and self._subagent is not None
         ):
-            subagents = await self._subagent.freeze_compaction_handoff()
-        subagent_facts = tuple(
-            FrozenFlatSubagentHandoffFact(
-                task_id=item["task_id"],
-                status=item["status"],
-                objective_preview=bounded_handoff_preview(item["objective"]),
+            subagent_facts, subagent_totals = (
+                await self._subagent.freeze_compaction_handoff()
             )
-            for item in subagents
-        )
         return freeze_compaction_runtime_handoff(
             terminal_processes=process_facts,
             terminal_monitors=monitor_facts,
             todo=todo,
-            flat_subagents=subagent_facts,
+            subagent_tasks=subagent_facts,
+            subagent_task_totals=subagent_totals,
             maximum_utf8_bytes=maximum_utf8_bytes,
         )
 
@@ -1458,6 +1475,46 @@ class DirectKernelToolPort:
                 f"descriptor:{entry.descriptor.id}",
                 f"invalid tool arguments: {exc.message}",
             )
+        if subagent:
+            access = surface_borrow.prepared.access
+            root_tools = {
+                "spawn_agent",
+                "create_agent_tasks",
+                "list_agents",
+                "wait_agent",
+                "wait_agent_tasks",
+                "send_agent_message",
+                "stop_agent",
+            }
+            if tool_name in root_tools and (
+                access.conversation_scope_kind is not ModelInputScopeKind.ROOT
+                or permission_snapshot.effective_mode
+                is not PermissionMode.BYPASS_PERMISSIONS
+            ):
+                return KernelToolAuthorization(
+                    KernelToolAuthorizationKind.PERMISSION_DENIED,
+                    "subagent_requires_bypass_mode",
+                    "ROOT subagent orchestration requires bypass-permissions mode",
+                )
+            if tool_name == "report_agent_result" and (
+                access.conversation_scope_kind is not ModelInputScopeKind.SUBAGENT_TASK
+                or access.scope_subagent_task_id is None
+            ):
+                return KernelToolAuthorization(
+                    KernelToolAuthorizationKind.PERMISSION_DENIED,
+                    "subagent_report_scope_invalid",
+                    "report_agent_result is available only to its worker task",
+                )
+            argument_error = self._subagent.validate_arguments(
+                tool_name=tool_name,
+                arguments=arguments,
+            )
+            if argument_error is not None:
+                return KernelToolAuthorization(
+                    KernelToolAuthorizationKind.INVALID_ARGUMENTS,
+                    f"descriptor:{entry.descriptor.id}",
+                    argument_error,
+                )
         if tool_name == "todo":
             try:
                 parse_todo_replacement(arguments)
@@ -2360,7 +2417,7 @@ class DirectKernelToolPort:
             result = await self._subagent.invoke(
                 tool_name=tool_name,
                 arguments=arguments,
-                parent_turn_id=turn_id,
+                invocation_context=invocation_context,
             )
             return replace(
                 result,

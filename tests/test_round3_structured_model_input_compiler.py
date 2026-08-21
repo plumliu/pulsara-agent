@@ -78,6 +78,7 @@ from pulsara_agent.conversation_kernel.execution_watchdogs import (
 from pulsara_agent.conversation_kernel.io import KernelSessionIO
 from pulsara_agent.conversation_kernel.extensions import OperationalHookType
 from pulsara_agent.conversation_kernel.repository import AssistantToolCallBlock
+from pulsara_agent.conversation_kernel.subagents import build_parent_context_call_subject
 from pulsara_agent.conversation_kernel.runner import (
     ConversationKernelRunner,
     KernelToolAuthorizationKind,
@@ -385,7 +386,7 @@ def _collect_context_sources(
 
 _SOURCE_FACTS = {
     ContextSourceKind.BASE_SYSTEM: (
-        "pulsara.base-system.prefix-continuity.v7-compaction",
+        "pulsara.base-system.prefix-continuity.v8-hierarchical-subagents",
         ContextChannel.SYSTEM,
         ContextTrustClass.ROOT_INSTRUCTION,
         ContextBudgetClass.MUST_KEEP,
@@ -511,6 +512,26 @@ _SOURCE_FACTS = {
         10,
         (ContextRenderMode.FULL, ContextRenderMode.COMPACT),
         ContextSourceLifecycle.TURN_APPEND,
+    ),
+    ContextSourceKind.PARENT_CONTEXT: (
+        "pulsara.subagent-parent-context.v1",
+        ContextChannel.RUNTIME_OBSERVATION,
+        ContextTrustClass.UNTRUSTED_OBSERVATION,
+        ContextBudgetClass.MUST_KEEP,
+        42,
+        5,
+        (ContextRenderMode.FULL,),
+        ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
+    ),
+    ContextSourceKind.DEPENDENCY_RESULTS: (
+        "pulsara.subagent-dependency-results.v1",
+        ContextChannel.RUNTIME_OBSERVATION,
+        ContextTrustClass.UNTRUSTED_OBSERVATION,
+        ContextBudgetClass.MUST_KEEP,
+        43,
+        5,
+        (ContextRenderMode.FULL,),
+        ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
     ),
     ContextSourceKind.TOOL_OBSERVATION_FRESHNESS: (
         "pulsara.tool-observation-freshness.v1",
@@ -668,6 +689,10 @@ def _sources(
             ContextSourceAbsenceKind.NOT_APPLICABLE
         ),
         ContextSourceKind.RETAINED_SKILL_CONTEXT: (
+            ContextSourceAbsenceKind.NOT_APPLICABLE
+        ),
+        ContextSourceKind.PARENT_CONTEXT: ContextSourceAbsenceKind.NOT_APPLICABLE,
+        ContextSourceKind.DEPENDENCY_RESULTS: (
             ContextSourceAbsenceKind.NOT_APPLICABLE
         ),
     }
@@ -3036,6 +3061,7 @@ def test_round3_tool_invocation_rejects_other_subagent_access() -> None:
                 scope_subagent_task_id="subagent-task:b",
                 host_owner_epoch=1,
                 authorization_reference="authorization:test",
+                effective_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
                 permission_snapshot_fingerprint=(
                     _permission_snapshot().snapshot_fingerprint
                 ),
@@ -3102,6 +3128,7 @@ def test_round3_tool_owner_rejects_foreign_host_surface_borrow(tmp_path: Path) -
                 scope_subagent_task_id=None,
                 host_owner_epoch=1,
                 authorization_reference="authorization:test",
+                effective_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
                 permission_snapshot_fingerprint=(
                     _permission_snapshot().snapshot_fingerprint
                 ),
@@ -3113,6 +3140,16 @@ def test_round3_tool_owner_rejects_foreign_host_surface_borrow(tmp_path: Path) -
                 ),
                 executor_binding_fingerprint=borrow.binding_fingerprint("read_file"),
                 surface_borrow=borrow,
+                subagent_parent_context_subject=build_parent_context_call_subject(
+                    session_id="session:test",
+                    caller_turn_id="turn:test",
+                    provider_input_cut_fingerprint="cut:test",
+                    continuity_epoch_nonce="epoch:test",
+                    continuity_epoch_revision=0,
+                    compiled_semantic_input_fingerprint="semantic:test",
+                    compiled_message_placements_fingerprint="placements:test",
+                    ordered_eligible_units=(),
+                ),
             )
             with pytest.raises(RuntimeError, match="surface borrow is not active"):
                 await owner.invoke(
@@ -3344,13 +3381,13 @@ def test_round3_source_decision_and_compiled_fingerprints_are_golden() -> None:
     )
     compiled = StructuredModelInputCompiler().compile(request)
     assert compiled.source_collection_fingerprint == (
-        "sha256:789c3a280be3ca3692f57629bcc7d60eec6dd3a0404c154a21fdd4b8cdadd7dc"
+        "sha256:405eaf35b98d4c6f96f680e87625b14b4ba19e4c338742eab49cd914df1b70aa"
     )
     assert compiled.budget_report.decision_digest == (
         "sha256:caee1ae23a161f2c862947ef5b7b2b9a4ae3093bce6117e00bc13a3a19058fbd"
     )
     assert compiled.compiled_semantic_fingerprint == (
-        "sha256:9de85b76e07c9c004c841af6a3a317bdcdec642950967878fd61dd548115b524"
+        "sha256:65ee3e1e8710ba3c0d1445313a95d82760c9ed6b625f65e9fee1a402fd0b9a17"
     )
     assert compiled.final_estimate.total_input_tokens == 268
 

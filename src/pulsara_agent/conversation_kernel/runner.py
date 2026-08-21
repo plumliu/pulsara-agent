@@ -18,6 +18,7 @@ from typing import Mapping, Protocol, TypeVar
 from uuid import uuid4
 
 from jsonschema import ValidationError, validators
+from psycopg import InterfaceError, OperationalError
 
 from pulsara_agent.conversation_kernel.assembler import (
     MAXIMUM_COMPLETED_ASSISTANT_MESSAGE_UTF8_BYTES,
@@ -42,6 +43,7 @@ from pulsara_agent.conversation_kernel.context_sources import (
     build_memory_context_source,
     replace_compaction_context_sources,
     replace_frozen_compaction_context_sources,
+    replace_frozen_subagent_context_sources,
     replace_memory_context_sources,
 )
 from pulsara_agent.conversation_kernel.compaction.contracts import (
@@ -81,6 +83,7 @@ from pulsara_agent.conversation_kernel.compaction.planner import (
     estimate_unavoidable_compaction_successor_tokens,
     freeze_compaction_source_view,
     freeze_tail_and_prefix,
+    rebase_compaction_dispatch_read_through_sequence,
     select_recent_human_messages,
     should_trigger_compaction,
     validate_compaction_reclaim,
@@ -107,6 +110,13 @@ from pulsara_agent.conversation_kernel.cold_epoch import (
     FrozenColdConversationSeed,
     KernelColdEpochInputAssembler,
     PreparedColdEpochSemanticAssembly,
+    SubagentInitialSeed,
+)
+from pulsara_agent.conversation_kernel.subagents.contracts import (
+    ExplicitSubagentResultConfirmationKind,
+    FrozenSubagentResultPublicFact,
+    SubagentProfileKind,
+    build_explicit_subagent_result_settlement,
 )
 from pulsara_agent.conversation_kernel.cancellation import (
     ActiveTurnCancellationIntent,
@@ -141,7 +151,7 @@ from pulsara_agent.conversation_kernel.capability_composition import (
     SealedBuiltinCapabilitySnapshot,
     freeze_capability_registry_from_owner_snapshots,
 )
-from pulsara_agent.llm.input import LLMToolCall
+from pulsara_agent.llm.input import LLMToolCall, MessageRole
 from pulsara_agent.llm.request import (
     FrozenProviderWireInputPlan,
     provider_assistant_public_projection_fingerprint,
@@ -353,6 +363,7 @@ from pulsara_agent.model_input.provider_replay import (
     ProviderReplayHydrationError,
     ProviderReplayHydrationFailureKind,
 )
+
 from pulsara_agent.primitives.model_call import ModelCallPurpose
 from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE, PermissionMode
 from pulsara_agent.primitives.run_permission import FrozenRunPermissionSnapshot
@@ -367,8 +378,19 @@ from pulsara_agent.conversation_kernel.tool_surface import (
     ProcessLocalToolSurfaceBorrow,
     tool_observation_origin_for_binding,
 )
+from pulsara_agent.conversation_kernel.subagents.contracts import (
+    FrozenSubagentParentContextCallSubject,
+    build_parent_context_call_subject,
+    build_root_context_unit,
+)
 
 
+_RETRYABLE_EXPLICIT_RESULT_SETTLEMENT_ERRORS = (
+    TimeoutError,
+    ConnectionError,
+    InterfaceError,
+    OperationalError,
+)
 _T = TypeVar("_T")
 
 
@@ -564,11 +586,15 @@ class KernelToolInvocationContext:
     host_owner_epoch: int
     authorization_reference: str
     permission_snapshot_fingerprint: str
+    effective_permission_mode: PermissionMode
     attempt_permission_snapshot_fingerprint: str
     tool_surface_fingerprint: str
     executor_binding_fingerprint: str
     surface_borrow: ProcessLocalToolSurfaceBorrow = dataclass_field(
         repr=False, compare=False
+    )
+    subagent_parent_context_subject: FrozenSubagentParentContextCallSubject | None = (
+        dataclass_field(default=None, repr=False)
     )
     memory_context: FrozenModelCallMemoryContext = dataclass_field(
         default_factory=lambda: FrozenModelCallMemoryContext(
@@ -611,12 +637,28 @@ class KernelToolInvocationContext:
             raise ValueError(
                 "tool attempt permission snapshot does not exact-join the run"
             )
+        if not isinstance(self.effective_permission_mode, PermissionMode):
+            raise TypeError("tool invocation permission mode must be closed")
         access = self.surface_borrow.prepared.access
         if (
             access.conversation_scope_kind.value != self.conversation_scope_kind
             or access.scope_subagent_task_id != self.scope_subagent_task_id
         ):
             raise ValueError("kernel tool invocation scope access does not exact-join")
+        if (
+            self.conversation_scope_kind == "SUBAGENT_TASK"
+            and self.subagent_parent_context_subject is not None
+        ):
+            # The sealed call subject is ROOT-only.  Production supplies it to
+            # every ROOT invocation from one installed provider call; ordinary
+            # component callers may omit it because only orchestration tools
+            # consume it, and that port rejects a missing subject explicitly.
+            raise ValueError("kernel invocation parent-call subject union is invalid")
+        if self.subagent_parent_context_subject is not None and (
+            self.subagent_parent_context_subject.session_id != self.session_id
+            or self.subagent_parent_context_subject.caller_turn_id != self.turn_id
+        ):
+            raise ValueError("kernel invocation parent-call subject identity drifted")
 
 
 @dataclass(frozen=True, slots=True)
@@ -896,6 +938,37 @@ class KernelToolPort(Protocol):
     ) -> ProcessLocalEffectSettlementResult: ...
 
 
+class SubagentRuntimePort(Protocol):
+    def profile_kind(self, *, task_id: str) -> SubagentProfileKind: ...
+
+    def build_initial_seed(
+        self,
+        *,
+        task_id: str,
+        dispatch_read: FrozenCanonicalProviderDispatchRead,
+    ) -> SubagentInitialSeed: ...
+
+    def initial_context_sources(
+        self, *, task_id: str
+    ) -> tuple[ContextSourceCandidate | ContextSourceAbsentFact, ...]: ...
+
+    async def consume_mailbox_safe_point(self, task_id: str) -> bool: ...
+
+    async def prepare_inferred_completion(
+        self, *, task_id: str, entry_id: str, public_text: str
+    ) -> tuple[object, FrozenSubagentResultPublicFact] | None: ...
+
+    async def prepare_explicit_completion(
+        self,
+        *,
+        task_id: str,
+        result_entry_id: str,
+        arguments: Mapping[str, object],
+    ) -> tuple[object, FrozenSubagentResultPublicFact, KernelToolResult] | None: ...
+
+    async def finish_completion(self, permit: object, *, committed: bool) -> None: ...
+
+
 @dataclass(frozen=True, slots=True)
 class KernelRunResult:
     turn_id: str
@@ -949,6 +1022,9 @@ class _InstalledProviderOpen:
     append_candidate: PreparedProviderInputAppendCandidate = dataclass_field(
         repr=False
     )
+    subagent_parent_context_subject: FrozenSubagentParentContextCallSubject | None = (
+        dataclass_field(default=None, repr=False)
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -991,6 +1067,7 @@ class ConversationKernelRunner:
         assistant_settlement_owner: AssistantMessageSettlementOwner | None = None,
         todo_admission_finalizer: TodoRunAdmissionFinalizer | None = None,
         compaction_owner: HostCompactionRuntimeOwner | None = None,
+        subagent_runtime: SubagentRuntimePort | None = None,
     ) -> None:
         if (
             maximum_output_tokens_per_call < 1
@@ -1053,6 +1130,7 @@ class ConversationKernelRunner:
         self._root_memory_use_policy = MemoryUsePolicy.ENABLED
         self._todo_admission_finalizer = todo_admission_finalizer
         self._compaction_owner = compaction_owner
+        self._subagent_runtime = subagent_runtime
         self._pending_compaction_dispatch: _PreparedProviderDispatch | None = None
 
     def _canonical_deadline(self) -> float:
@@ -1504,6 +1582,33 @@ class ConversationKernelRunner:
             base_facts = base_read.compile_snapshot
             base_input = base_facts.canonical_input
             identity = base_input.identity
+            subagent_seed: SubagentInitialSeed | None = None
+            subagent_profile_kind: SubagentProfileKind | None = None
+            subagent_source_replacements: tuple[
+                ContextSourceCandidate | ContextSourceAbsentFact, ...
+            ] = ()
+            if identity.conversation_scope_kind is ModelInputScopeKind.SUBAGENT_TASK:
+                task_id = identity.scope_subagent_task_id
+                if self._subagent_runtime is None or task_id is None:
+                    raise StructuredModelInputCompileError(
+                        ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
+                    )
+                try:
+                    subagent_profile_kind = self._subagent_runtime.profile_kind(
+                        task_id=task_id
+                    )
+                    subagent_source_replacements = (
+                        self._subagent_runtime.initial_context_sources(task_id=task_id)
+                    )
+                    if cold_seed_override is None:
+                        subagent_seed = self._subagent_runtime.build_initial_seed(
+                            task_id=task_id,
+                            dispatch_read=base_read,
+                        )
+                except Exception as exc:
+                    raise StructuredModelInputCompileError(
+                        ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
+                    ) from exc
             scope = ProviderInputContinuityScope(
                 session_id=identity.session_id,
                 scope_kind=identity.conversation_scope_kind,
@@ -1742,6 +1847,16 @@ class ConversationKernelRunner:
                 if compaction_source_replacements:
                     frozen_sources = replace_frozen_compaction_context_sources(
                         frozen_sources, compaction_source_replacements
+                    )
+                if subagent_source_replacements:
+                    if subagent_profile_kind is None:
+                        raise StructuredModelInputCompileError(
+                            ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
+                        )
+                    frozen_sources = replace_frozen_subagent_context_sources(
+                        frozen_sources,
+                        subagent_source_replacements,
+                        profile_kind=subagent_profile_kind.value,
                     )
             except StructuredModelInputCompileError:
                 raise
@@ -2431,7 +2546,11 @@ class ConversationKernelRunner:
             if cold_seed is None and (
                 planning.predecessor_view is None or context_base_changed
             ):
-                cold_seed = CanonicalColdContinuationSeed(base_read)
+                cold_seed = (
+                    subagent_seed
+                    if subagent_seed is not None
+                    else CanonicalColdContinuationSeed(base_read)
+                )
             cold_semantic: PreparedColdEpochSemanticAssembly | None = None
             replay_target = _provider_replay_target(prepared_call)
             if cold_seed is not None and preference_source is None:
@@ -4207,35 +4326,52 @@ class ConversationKernelRunner:
                 actual_read = await self._read_dispatch_read(
                     rotated.cut, deadline=successor_deadline
                 )
+                foreign_scope_cut_advanced = False
                 if actual_read != synthetic_read:
-                    actual_facts = actual_read.compile_snapshot
-                    synthetic_facts = synthetic_read.compile_snapshot
-                    differing_fields = tuple(
-                        name
-                        for name in (
-                            "canonical_input",
-                            "context_binding_fact",
-                            "run_permission_snapshot",
-                            "plan_workflow_fact",
-                            "plan_handoff_fact",
-                            "approved_plan_materialization_fact",
-                            "previous_turn_outcome_fact",
-                            "tool_observation_freshness_fact",
-                            "canonical_read_cut_fingerprint",
+                    rebased_synthetic = (
+                        rebase_compaction_dispatch_read_through_sequence(
+                            synthetic_read,
+                            provider_input_through_sequence=(
+                                actual_read.compile_snapshot.canonical_input
+                                .identity.provider_input_through_sequence
+                            ),
                         )
-                        if getattr(actual_facts, name)
-                        != getattr(synthetic_facts, name)
                     )
-                    if (
-                        actual_read.replay_manifest_cut
-                        != synthetic_read.replay_manifest_cut
-                    ):
-                        differing_fields = (*differing_fields, "replay_manifest_cut")
-                    rotated.close()
-                    raise ConversationKernelConflict(
-                        "post-adoption canonical cut differs from dry assembly: "
-                        + ",".join(differing_fields)
-                    )
+                    if actual_read == rebased_synthetic:
+                        synthetic_read = rebased_synthetic
+                        foreign_scope_cut_advanced = True
+                    else:
+                        actual_facts = actual_read.compile_snapshot
+                        synthetic_facts = synthetic_read.compile_snapshot
+                        differing_fields = tuple(
+                            name
+                            for name in (
+                                "canonical_input",
+                                "context_binding_fact",
+                                "run_permission_snapshot",
+                                "plan_workflow_fact",
+                                "plan_handoff_fact",
+                                "approved_plan_materialization_fact",
+                                "previous_turn_outcome_fact",
+                                "tool_observation_freshness_fact",
+                                "canonical_read_cut_fingerprint",
+                            )
+                            if getattr(actual_facts, name)
+                            != getattr(synthetic_facts, name)
+                        )
+                        if (
+                            actual_read.replay_manifest_cut
+                            != synthetic_read.replay_manifest_cut
+                        ):
+                            differing_fields = (
+                                *differing_fields,
+                                "replay_manifest_cut",
+                            )
+                        rotated.close()
+                        raise ConversationKernelConflict(
+                            "post-adoption canonical cut differs from dry assembly: "
+                            + ",".join(differing_fields)
+                        )
                 current_runtime_source, current_runtime_handoff = (
                     await self._freeze_compaction_runtime_source(
                         scope_kind=expected_scope.scope_kind,
@@ -4255,6 +4391,7 @@ class ConversationKernelRunner:
                 if (
                     previous_runtime_handoff_fingerprint
                     != current_handoff_fingerprint
+                    or foreign_scope_cut_advanced
                 ):
                     dry_dispatch.close_surface_borrow()
                     dry_dispatch = await self._prepare_provider_dispatch(
@@ -4617,6 +4754,15 @@ class ConversationKernelRunner:
                 execution=execution,
                 permit=permit,
                 append_candidate=append_candidate,
+                subagent_parent_context_subject=(
+                    _freeze_subagent_parent_context_call_subject(
+                        dispatch=dispatch,
+                        permit=permit,
+                    )
+                    if canonical_facts.canonical_input.identity.conversation_scope_kind
+                    is ModelInputScopeKind.ROOT
+                    else None
+                ),
             )
         except BaseException:
             if not installed:
@@ -4660,6 +4806,14 @@ class ConversationKernelRunner:
                 None
             )
             while True:
+                if (
+                    intent.scope_kind is ModelInputScopeKind.SUBAGENT_TASK
+                    and intent.scope_subagent_task_id is not None
+                    and self._subagent_runtime is not None
+                ):
+                    await self._subagent_runtime.consume_mailbox_safe_point(
+                        intent.scope_subagent_task_id
+                    )
                 manual_request = None
                 if self._compaction_owner is not None:
                     manual_request = await self._compaction_owner.take_manual(
@@ -4821,6 +4975,28 @@ class ConversationKernelRunner:
                         parent_bytes, deadline=self._canonical_deadline()
                     )
                     occurred_at = datetime.now(timezone.utc)
+                    completion_prepared: tuple[
+                        object, FrozenSubagentResultPublicFact
+                    ] | None = None
+                    complete_turn = not calls
+                    if (
+                        complete_turn
+                        and identity.conversation_scope_kind
+                        is ModelInputScopeKind.SUBAGENT_TASK
+                        and identity.scope_subagent_task_id is not None
+                        and self._subagent_runtime is not None
+                    ):
+                        completion_prepared = (
+                            await self._subagent_runtime.prepare_inferred_completion(
+                                task_id=identity.scope_subagent_task_id,
+                                entry_id=entry_id,
+                                public_text=completed.public_text,
+                            )
+                        )
+                        complete_turn = completion_prepared is not None
+                    subagent_result = (
+                        None if completion_prepared is None else completion_prepared[1]
+                    )
                     settlement = PreparedAssistantMessageSettlement(
                         candidate_fingerprint=(
                             assistant_settlement_candidate_fingerprint(
@@ -4828,7 +5004,7 @@ class ConversationKernelRunner:
                                 entry_id=entry_id,
                                 parent_content=parent_content,
                                 blocks=canonical_blocks,
-                                complete_turn=not calls,
+                                complete_turn=complete_turn,
                                 occurred_at=occurred_at,
                                 actor_id="model:foreground",
                                 continuity_scope=permit.scope,
@@ -4839,6 +5015,7 @@ class ConversationKernelRunner:
                                     collected.provider_replay_disposition
                                 ),
                                 provider_replay=collected.provider_replay,
+                                subagent_result=subagent_result,
                             )
                         ),
                         guard=self._writer_lease.guard,
@@ -4846,7 +5023,7 @@ class ConversationKernelRunner:
                         entry_id=entry_id,
                         parent_content=parent_content,
                         blocks=canonical_blocks,
-                        complete_turn=not calls,
+                        complete_turn=complete_turn,
                         occurred_at=occurred_at,
                         actor_id="model:foreground",
                         continuity_scope=permit.scope,
@@ -4857,8 +5034,20 @@ class ConversationKernelRunner:
                             collected.provider_replay_disposition
                         ),
                         provider_replay=collected.provider_replay,
+                        subagent_result=subagent_result,
                     )
-                    accepted = await self._assistant_settlements.settle(settlement)
+                    try:
+                        accepted = await self._assistant_settlements.settle(settlement)
+                    except BaseException:
+                        if completion_prepared is not None:
+                            await self._subagent_runtime.finish_completion(
+                                completion_prepared[0], committed=False
+                            )
+                        raise
+                    if completion_prepared is not None:
+                        await self._subagent_runtime.finish_completion(
+                            completion_prepared[0], committed=accepted.turn_completed
+                        )
                     self._live_bus.offer_settlement_nowait(
                         kind=LiveSettlementKind.COMMITTED,
                         session_id=request.session_id,
@@ -4945,6 +5134,66 @@ class ConversationKernelRunner:
                         continuation_entry_id=outcome.continuation_entry_id,
                         pending_plan_interaction_id=outcome.interaction_id,
                     )
+                report_call_count = sum(
+                    call.tool_name == "report_agent_result" for call in calls
+                )
+                if report_call_count and (
+                    len(calls) != 1 or report_call_count != 1
+                ):
+                    # A report is a terminal protocol choice, not an ordinary
+                    # sibling.  Reject the complete batch before authorization
+                    # or attempt admission so no physical effect can escape.
+                    workspace_id = await self._resolved_workspace_id()
+                    for call in calls:
+                        tool_call_count += 1
+                        binding = active_surface_borrow.execution_binding(
+                            call.tool_name
+                        )
+                        await self._settle_known_tool_result(
+                            session_id=request.session_id,
+                            turn_id=turn_id,
+                            assistant_entry_id=accepted.entry_id,
+                            tool_name=call.tool_name,
+                            tool_call_id=call.tool_call_id,
+                            invocation_arguments={},
+                            result_id=_id("tool-result"),
+                            result_entry_id=_id("entry"),
+                            attempt_id=None,
+                            workspace_id=workspace_id,
+                            result=KernelToolResult(
+                                state="INVALID_ARGUMENTS",
+                                content=(
+                                    "report_agent_result must be the only tool call "
+                                    "in its assistant response"
+                                ).encode("utf-8"),
+                            ),
+                            observed_at=datetime.now(timezone.utc),
+                            observation_origin=ToolObservationOrigin.POLICY,
+                            live_sink=None,
+                            tool_result_block_id=None,
+                            live_attribution=None,
+                            continuity_scope=planning.scope,
+                            memory_citation_visibility=MemoryCitationVisibility(
+                                getattr(
+                                    binding,
+                                    "memory_citation_visibility",
+                                    "WORKSPACE_BOUND",
+                                )
+                            ),
+                            memory_citation_evidence_kind=MemoryCitationEvidenceKind(
+                                getattr(
+                                    binding,
+                                    "memory_citation_evidence_kind",
+                                    "PRIMARY_OBSERVATION",
+                                )
+                            ),
+                            execution_binding_fingerprint=(
+                                binding.executor_binding_fingerprint
+                            ),
+                        )
+                    active_surface_borrow.close()
+                    active_surface_borrow = None
+                    continue
                 for call in calls:
                     tool_call_count += 1
                     observation_origin = ToolObservationOrigin.POLICY
@@ -5019,6 +5268,9 @@ class ConversationKernelRunner:
                     tool_result_block_id: str | None = None
                     workspace_id: str | None = None
                     binding_fingerprint: str | None = None
+                    explicit_completion: tuple[
+                        object, FrozenSubagentResultPublicFact, KernelToolResult
+                    ] | None = None
                     if authorization.kind is KernelToolAuthorizationKind.ALLOW:
                         try:
                             advertised_binding = (
@@ -5194,6 +5446,9 @@ class ConversationKernelRunner:
                             permission_snapshot_fingerprint=(
                                 canonical_facts.run_permission_snapshot.snapshot_fingerprint
                             ),
+                            effective_permission_mode=(
+                                canonical_facts.run_permission_snapshot.effective_mode
+                            ),
                             attempt_permission_snapshot_fingerprint=(
                                 attempt_permission_snapshot_fingerprint
                             ),
@@ -5201,20 +5456,48 @@ class ConversationKernelRunner:
                                 active_surface_borrow.prepared.model_surface.surface_fingerprint
                             ),
                             executor_binding_fingerprint=binding_fingerprint,
+                            subagent_parent_context_subject=(
+                                provider_open.subagent_parent_context_subject
+                            ),
                             surface_borrow=active_surface_borrow,
                             memory_context=request.memory_context,
                         )
                         try:
-                            result = await self._tools.invoke(
-                                tool_name=call.tool_name,
-                                arguments=invocation_arguments,
-                                tool_call_id=call.tool_call_id,
-                                attempt_id=attempt_id,
-                                turn_id=turn_id,
-                                assistant_entry_id=accepted.entry_id,
-                                invocation_context=invocation_context,
-                                live_sink=live_sink,
-                            )
+                            if call.tool_name == "report_agent_result":
+                                task_id = identity.scope_subagent_task_id
+                                if (
+                                    task_id is None
+                                    or self._subagent_runtime is None
+                                ):
+                                    raise RuntimeError(
+                                        "report_agent_result escaped its child runtime"
+                                    )
+                                explicit_completion = await self._subagent_runtime.prepare_explicit_completion(
+                                    task_id=task_id,
+                                    result_entry_id=result_entry_id,
+                                    arguments=invocation_arguments,
+                                )
+                                if explicit_completion is None:
+                                    result = KernelToolResult(
+                                        state="APPLICATION_ERROR",
+                                        content=(
+                                            "result payload is invalid or the task has "
+                                            "pending collaboration input"
+                                        ).encode("utf-8"),
+                                    )
+                                else:
+                                    result = explicit_completion[2]
+                            else:
+                                result = await self._tools.invoke(
+                                    tool_name=call.tool_name,
+                                    arguments=invocation_arguments,
+                                    tool_call_id=call.tool_call_id,
+                                    attempt_id=attempt_id,
+                                    turn_id=turn_id,
+                                    assistant_entry_id=accepted.entry_id,
+                                    invocation_context=invocation_context,
+                                    live_sink=live_sink,
+                                )
                         except asyncio.CancelledError:
                             if live_sink is not None:
                                 await asyncio.shield(live_sink.close())
@@ -5305,6 +5588,54 @@ class ConversationKernelRunner:
                     )
                     if workspace_id is None:
                         workspace_id = await self._resolved_workspace_id()
+                    if explicit_completion is not None:
+                        permit_token, result_fact, acknowledgement = explicit_completion
+                        explicit_task = asyncio.create_task(
+                            self._settle_explicit_subagent_result(
+                                task_id=result_fact.task_id,
+                                turn_id=turn_id,
+                                assistant_entry_id=accepted.entry_id,
+                                tool_call_id=call.tool_call_id,
+                                attempt_id=attempt_id,
+                                result_id=result_id,
+                                result_entry_id=result_entry_id,
+                                workspace_id=workspace_id,
+                                acknowledgement=acknowledgement,
+                                result_fact=result_fact,
+                                observed_at=outcome_observed_at,
+                                observation_origin=observation_origin,
+                            ),
+                            name=f"kernel-explicit-subagent-result:{result_entry_id}",
+                        )
+                        cancellation: asyncio.CancelledError | None = None
+                        while not explicit_task.done():
+                            try:
+                                await asyncio.shield(explicit_task)
+                            except asyncio.CancelledError as exc:
+                                cancellation = exc
+                            except BaseException:
+                                break
+                        try:
+                            explicit_accepted = explicit_task.result()
+                        except BaseException:
+                            await self._subagent_runtime.finish_completion(
+                                permit_token, committed=False
+                            )
+                            raise
+                        await self._subagent_runtime.finish_completion(
+                            permit_token, committed=True
+                        )
+                        active_surface_borrow.close()
+                        active_surface_borrow = None
+                        if cancellation is not None:
+                            raise cancellation
+                        return KernelRunResult(
+                            turn_id=turn_id,
+                            final_entry_id=explicit_accepted.entry_id,
+                            final_text=result_fact.summary,
+                            model_call_count=model_call_count,
+                            tool_call_count=tool_call_count,
+                        )
                     settlement_task = asyncio.create_task(
                         self._settle_known_tool_result(
                             session_id=request.session_id,
@@ -6034,6 +6365,111 @@ class ConversationKernelRunner:
                 ),
             )
         return self._workspace_id
+
+    async def _settle_explicit_subagent_result(
+        self,
+        *,
+        task_id: str,
+        turn_id: str,
+        assistant_entry_id: str,
+        tool_call_id: str,
+        attempt_id: str,
+        result_id: str,
+        result_entry_id: str,
+        workspace_id: str,
+        acknowledgement: KernelToolResult,
+        result_fact: FrozenSubagentResultPublicFact,
+        observed_at: datetime,
+        observation_origin: ToolObservationOrigin,
+    ) -> AcceptedEntry:
+        """Settle the sole-call report result as one exact canonical composite."""
+
+        prepared_output = await self._io.run(
+            self._tool_output_processor.prepare,
+            workspace_id=workspace_id,
+            result_entry_id=result_entry_id,
+            public_output=acknowledgement.content.decode("utf-8"),
+            candidate=None,
+            artifact_source_read=None,
+            deadline_monotonic=self._canonical_deadline(),
+        )
+        tool_candidate = build_prepared_tool_result_acceptance(
+            guard=self._writer_lease.guard,
+            workspace_id=workspace_id,
+            result_id=result_id,
+            result_entry_id=result_entry_id,
+            turn_id=turn_id,
+            assistant_entry_id=assistant_entry_id,
+            tool_call_id=tool_call_id,
+            attempt_id=attempt_id,
+            result_state="SUCCESS",
+            canonical_preview_content=prepared_output.canonical_preview,
+            artifact_disposition=prepared_output.artifact_disposition,
+            artifact_id=prepared_output.artifact_id,
+            artifact_blob_descriptor=prepared_output.artifact_blob,
+            source_coverage=prepared_output.source_coverage,
+            display_kind=prepared_output.display_kind,
+            source_coverage_reason=prepared_output.source_coverage_reason,
+            artifact_unavailability_reason=(
+                prepared_output.artifact_unavailability_reason
+            ),
+            observed_at=observed_at,
+            observation_duration_microseconds=None,
+            observation_origin_kind=observation_origin,
+            trusted_tool_reported_duration_microseconds=None,
+            actor_id="report_agent_result",
+        )
+        candidate = build_explicit_subagent_result_settlement(
+            task_id=task_id,
+            tool_result=tool_candidate,
+            result=result_fact,
+        )
+        while True:
+            try:
+                return await self._io.run(
+                    self._repository.accept_explicit_subagent_result,
+                    self._writer_lease.guard,
+                    candidate=candidate,
+                    deadline_monotonic=self._canonical_deadline(),
+                )
+            except StaleHostWriter:
+                raise
+            except (ConversationKernelConflict, TypeError, ValueError):
+                raise
+            except _RETRYABLE_EXPLICIT_RESULT_SETTLEMENT_ERRORS:
+                pass
+            while True:
+                try:
+                    confirmation = await self._io.run(
+                        self._repository.confirm_explicit_subagent_result,
+                        self._writer_lease.guard,
+                        candidate=candidate,
+                        deadline_monotonic=self._canonical_deadline(),
+                    )
+                    break
+                except StaleHostWriter:
+                    raise
+                except (ConversationKernelConflict, TypeError, ValueError):
+                    raise
+                except _RETRYABLE_EXPLICIT_RESULT_SETTLEMENT_ERRORS:
+                    await asyncio.sleep(0.05)
+            if confirmation.kind is ExplicitSubagentResultConfirmationKind.FULL:
+                assert confirmation.accepted_entry_id is not None
+                assert confirmation.entry_sequence is not None
+                assert confirmation.event_sequence is not None
+                return AcceptedEntry(
+                    entry_id=confirmation.accepted_entry_id,
+                    turn_id=turn_id,
+                    entry_sequence=confirmation.entry_sequence,
+                    event_sequence=confirmation.event_sequence,
+                    turn_completed=True,
+                )
+            if confirmation.kind is ExplicitSubagentResultConfirmationKind.CONFLICT:
+                raise ConversationKernelConflict(
+                    "explicit subagent result has a conflicting canonical winner"
+                )
+            # NONE retries only this immutable composite.  The model and tool
+            # attempt are never reopened or redispatched.
 
     async def _settle_known_tool_result(
         self,
@@ -6830,6 +7266,116 @@ def _prepared_append_candidate(
         direct_native_projection_set=direct_native_projection_set,
         mcp_route_projection=mcp_route_projection,
         candidate_fingerprint=candidate_fingerprint,
+    )
+
+
+def _freeze_subagent_parent_context_call_subject(
+    *,
+    dispatch: _PreparedProviderDispatch,
+    permit: ProcessLocalProviderInputInstallPermit,
+) -> FrozenSubagentParentContextCallSubject:
+    """Derive the bounded public ROOT tail from the exact installed call.
+
+    Placements are the join between compiled messages and canonical entry
+    identity.  Tool roles/groups and all placement-less runtime sources are
+    excluded; assistant messages contribute public text only.
+    """
+
+    compiled = dispatch.append_result.compiled_input
+    canonical = dispatch.canonical_facts.canonical_input
+    by_entry = {
+        item.source_entry_id: item
+        for item in canonical.items
+        if item.source_entry_id is not None
+    }
+    units_buffer: list[tuple[list[str], list[str]]] = []
+    current_entries: list[str] = []
+    current_items: list[str] = []
+    current_has_assistant = False
+
+    def finish_current_unit() -> None:
+        nonlocal current_entries, current_items, current_has_assistant
+        if current_items:
+            units_buffer.append((current_entries, current_items))
+        current_entries = []
+        current_items = []
+        current_has_assistant = False
+
+    for message, placement in zip(
+        compiled.messages, compiled.message_placements, strict=True
+    ):
+        entry_id = placement.origin_entry_id
+        item = None if entry_id is None else by_entry.get(entry_id)
+        if item is None or item.source_turn_id is None:
+            continue
+        rendered: str | None = None
+        is_assistant = False
+        if (
+            message.role is MessageRole.USER
+            and item.item_kind is FrozenProviderInputItemKind.USER
+            and item.input_origin
+            in {
+                CanonicalInputOriginKind.HUMAN_MESSAGE,
+                CanonicalInputOriginKind.HUMAN_STEER,
+            }
+        ):
+            # Several ordinary USER_MESSAGE values can enter one installed
+            # provider call before any assistant response (queue admission),
+            # while USER_STEER extends the current unit.  A later human message
+            # starts a new unit only after public assistant output closed the
+            # preceding one.  Canonical turn ids therefore cannot be used as
+            # the grouping key.
+            if (
+                item.input_origin is CanonicalInputOriginKind.HUMAN_MESSAGE
+                and current_has_assistant
+            ):
+                finish_current_unit()
+            rendered = "USER: " + "".join(message.content)
+        elif (
+            message.role is MessageRole.ASSISTANT
+            and item.item_kind
+            in {
+                FrozenProviderInputItemKind.ASSISTANT,
+                FrozenProviderInputItemKind.ASSISTANT_TOOL_REQUEST,
+            }
+            and any(message.content)
+        ):
+            rendered = "ASSISTANT: " + "".join(message.content)
+            is_assistant = True
+        if rendered is None:
+            continue
+        current_items.append(rendered)
+        if entry_id not in current_entries:
+            current_entries.append(entry_id)
+        current_has_assistant = current_has_assistant or is_assistant
+    finish_current_unit()
+    units = tuple(
+        build_root_context_unit(
+            ordered_entry_ids=entry_ids,
+            ordered_public_items=public_items,
+        )
+        for entry_ids, public_items in units_buffer[-3:]
+    )
+    cut = dispatch.handle.cut
+    return build_parent_context_call_subject(
+        session_id=cut.session_id,
+        caller_turn_id=cut.turn_id,
+        provider_input_cut_fingerprint=context_fingerprint(
+            "pulsara:round10:provider-input-cut:v1",
+            {
+                "session": cut.session_id,
+                "turn": cut.turn_id,
+                "binding": cut.context_binding_revision_id,
+                "through": cut.provider_input_through_sequence,
+            },
+        ),
+        continuity_epoch_nonce=permit.epoch_nonce,
+        continuity_epoch_revision=permit.epoch_revision,
+        compiled_semantic_input_fingerprint=compiled.compiled_semantic_fingerprint,
+        compiled_message_placements_fingerprint=(
+            compiled.message_placements_fingerprint
+        ),
+        ordered_eligible_units=units,
     )
 
 

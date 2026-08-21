@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 from time import monotonic
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -37,6 +38,11 @@ from pulsara_agent.conversation_kernel.repository import (
 )
 from pulsara_agent.conversation_kernel.runner import KernelRunResult
 from pulsara_agent.conversation_kernel.subagent import KernelSubagentManager
+from pulsara_agent.conversation_kernel.subagents.contracts import (
+    SubagentResultSource,
+    build_parent_context_call_subject,
+    build_subagent_result_public_fact,
+)
 from pulsara_agent.conversation_kernel.todo_runtime import TodoRunStateOwner
 from pulsara_agent.conversation_kernel.tool_policy import (
     DefaultToolDispatchAuthorizationPolicy,
@@ -100,6 +106,7 @@ from pulsara_agent.primitives.tool_observation import (
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 from tests.support.postgres import verified_postgres_provider
 from tests.support.round3 import direct_tool_invocation_context
+from tests.support.subagents import accept_active_subagent_fixture
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -107,6 +114,79 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def _id(prefix: str) -> str:
     return f"{prefix}:{uuid4().hex}"
+
+
+def _round10_root_invocation_context(
+    *, repository, lease, workspace_id: str, turn_id: str
+):
+    cut = repository.prepare_provider_input_cut(
+        lease.guard, turn_id=turn_id, deadline_monotonic=monotonic() + 30
+    )
+    assistant_entry_id = _id("entry")
+    tool_call_id = _id("call")
+    arguments = {"task": "perform one bounded task"}
+    repository.commit_assistant_message(
+        lease.guard,
+        cut=cut,
+        entry_id=assistant_entry_id,
+        parent_content=InlineContent.from_bytes(b"spawn child"),
+        blocks=(
+            AssistantToolCallBlock(
+                _id("block"),
+                tool_call_id,
+                "spawn_agent",
+                freeze_json(arguments),
+            ),
+        ),
+        occurred_at=datetime.now(timezone.utc),
+        actor_id="model:test",
+        deadline_monotonic=monotonic() + 30,
+    )
+    attempt_id = _id("attempt")
+    repository.accept_tool_attempt(
+        lease.guard,
+        attempt_id=attempt_id,
+        assistant_entry_id=assistant_entry_id,
+        tool_call_id=tool_call_id,
+        authorization_kind="policy",
+        authorization_reference="allow",
+        actor_kind="runtime",
+        actor_id="executor",
+        remote_idempotency_key=None,
+        retry_of_attempt_id=None,
+        permission_snapshot_fingerprint=_permission_fingerprint(
+            repository, lease, turn_id
+        ),
+        occurred_at=datetime.now(timezone.utc),
+        deadline_monotonic=monotonic() + 30,
+    )
+    subject = build_parent_context_call_subject(
+        session_id=lease.guard.session_id,
+        caller_turn_id=turn_id,
+        provider_input_cut_fingerprint="sha256:round7-cut",
+        continuity_epoch_nonce="epoch:round7",
+        continuity_epoch_revision=0,
+        compiled_semantic_input_fingerprint="sha256:round7-semantic",
+        compiled_message_placements_fingerprint="sha256:round7-placements",
+        ordered_eligible_units=(),
+    )
+    return SimpleNamespace(
+        session_id=lease.guard.session_id,
+        workspace_id=workspace_id,
+        turn_id=turn_id,
+        attempt_id=attempt_id,
+        conversation_scope_kind="ROOT",
+        scope_subagent_task_id=None,
+        host_owner_epoch=lease.guard.writer_generation,
+        effective_permission_mode=DEFAULT_PERMISSION_MODE,
+        permission_snapshot_fingerprint=_permission_fingerprint(
+            repository, lease, turn_id
+        ),
+        attempt_permission_snapshot_fingerprint=_permission_fingerprint(
+            repository, lease, turn_id
+        ),
+        subagent_parent_context_subject=subject,
+    )
 
 
 def _timing(
@@ -327,7 +407,7 @@ def test_round7_source_registry_wire_and_oracle_architecture_guards() -> None:
     )
     assert (
         COMPILER_CONTRACT_VERSION
-        == "pulsara.structured-model-input-compiler.prefix-continuity.v9-compaction"
+        == "pulsara.structured-model-input-compiler.prefix-continuity.v10-subagent-context"
     )
     assert (
         PROVIDER_MESSAGE_LOWERING_CONTRACT
@@ -361,7 +441,7 @@ def test_round7_source_registry_wire_and_oracle_architecture_guards() -> None:
     assert "observed_at -" not in reader
     assert "attempt.started_at" not in reader
 
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == len(CommittedEventType) == 28
+    assert len(COMMITTED_EVENT_DESCRIPTORS) == len(CommittedEventType) == 29
     assert len(LiveEventType) == 24
     assert len(SUBJECT_SLOTS) == 11
     assert len(APPEND_GUARDS) == 1
@@ -468,24 +548,11 @@ def _permission_fingerprint(repository, lease, turn_id: str) -> str:
 
 def _start_active_child(repository, lease) -> tuple[str, str]:
     parent_turn_id = _start_turn(repository, lease, b"delegate")
-    task_id = _id("subagent-task")
-    repository.accept_subagent_task(
-        lease.guard,
-        task_id=task_id,
+    task_id = accept_active_subagent_fixture(
+        repository,
+        lease,
         parent_turn_id=parent_turn_id,
         objective="perform one bounded task",
-        occurred_at=datetime.now(timezone.utc),
-        actor_id="host:test",
-        deadline_monotonic=monotonic() + 30,
-    )
-    assert repository.set_subagent_task_status(
-        lease.guard,
-        task_id=task_id,
-        status="ACTIVE",
-        reason=None,
-        occurred_at=datetime.now(timezone.utc),
-        actor_id="host:test",
-        deadline_monotonic=monotonic() + 30,
     )
     child_turn_id = _id("turn")
     repository.start_subagent_turn(
@@ -793,17 +860,27 @@ class _CanonicalChildRaceRunner:
                 deadline_monotonic=monotonic() + 30,
             )
             final_entry_id = _id("entry")
+            content = InlineContent.from_bytes(b"completed child")
+            result = build_subagent_result_public_fact(
+                task_id=task_id,
+                result_id=_id("result"),
+                source=SubagentResultSource.INFERRED,
+                producer_entry_id=final_entry_id,
+                summary="completed child",
+                source_assistant_content_digest=content.digest,
+            )
             self.repository.commit_assistant_message(
                 self.guard,
                 cut=cut,
                 entry_id=final_entry_id,
-                parent_content=InlineContent.from_bytes(b"completed child"),
+                parent_content=content,
                 blocks=(
                     AssistantTextBlock(
                         block_id=_id("block"),
                         text=InlineContent.from_bytes(b"completed child"),
                     ),
                 ),
+                subagent_result=result,
                 complete_turn=True,
                 occurred_at=datetime.now(timezone.utc),
                 actor_id="model:child",
@@ -833,9 +910,10 @@ def test_round7_child_manager_confirm_first_cancellation_settles_exact_turn(
 ) -> None:
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
+    workspace_id = _id("workspace")
     lease = repository.acquire_host_writer(
         session_id=_id("session"),
-        workspace_id=_id("workspace"),
+        workspace_id=workspace_id,
         writer_owner_id=_id("host"),
         lease_seconds=30,
         deadline_monotonic=monotonic() + 30,
@@ -857,18 +935,24 @@ def test_round7_child_manager_confirm_first_cancellation_settles_exact_turn(
     manager.bind_runner_factory(lambda: runner)  # type: ignore[arg-type]
 
     async def exercise() -> str:
+        context = _round10_root_invocation_context(
+            repository=repository,
+            lease=lease,
+            workspace_id=workspace_id,
+            turn_id=parent_turn_id,
+        )
         spawned = await manager.invoke(
             tool_name="spawn_agent",
             arguments={"task": "perform one bounded task"},
-            parent_turn_id=parent_turn_id,
+            invocation_context=context,
         )
-        task_id = str(json.loads(spawned.content)["subagent_run_id"])
+        task_id = str(json.loads(spawned.content)["task_id"])
         await asyncio.wait_for(runner.started.wait(), timeout=5)
         if operation == "stop":
             stopped = await manager.invoke(
                 tool_name="stop_agent",
-                arguments={"subagent_run_id": task_id},
-                parent_turn_id=parent_turn_id,
+                arguments={"task_id": task_id},
+                invocation_context=context,
             )
             assert json.loads(stopped.content)["status"] == expected_task.lower()
             await manager.aclose(timeout_seconds=5)
@@ -876,8 +960,8 @@ def test_round7_child_manager_confirm_first_cancellation_settles_exact_turn(
             stopping = asyncio.create_task(
                 manager.invoke(
                     tool_name="stop_agent",
-                    arguments={"subagent_run_id": task_id},
-                    parent_turn_id=parent_turn_id,
+                    arguments={"task_id": task_id},
+                    invocation_context=context,
                 )
             )
             await asyncio.sleep(0)
@@ -916,9 +1000,10 @@ def test_round7_late_child_cancel_preserves_completed_winner_and_result_lineage(
 ) -> None:
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
+    workspace_id = _id("workspace")
     lease = repository.acquire_host_writer(
         session_id=_id("session"),
-        workspace_id=_id("workspace"),
+        workspace_id=workspace_id,
         writer_owner_id=_id("host"),
         lease_seconds=30,
         deadline_monotonic=monotonic() + 30,
@@ -940,23 +1025,29 @@ def test_round7_late_child_cancel_preserves_completed_winner_and_result_lineage(
     manager.bind_runner_factory(lambda: runner)  # type: ignore[arg-type]
 
     async def exercise() -> str:
+        context = _round10_root_invocation_context(
+            repository=repository,
+            lease=lease,
+            workspace_id=workspace_id,
+            turn_id=parent_turn_id,
+        )
         spawned = await manager.invoke(
             tool_name="spawn_agent",
             arguments={"task": "perform one bounded task"},
-            parent_turn_id=parent_turn_id,
+            invocation_context=context,
         )
-        task_id = str(json.loads(spawned.content)["subagent_run_id"])
+        task_id = str(json.loads(spawned.content)["task_id"])
         await asyncio.wait_for(runner.started.wait(), timeout=5)
         stopped = await manager.invoke(
             tool_name="stop_agent",
-            arguments={"subagent_run_id": task_id},
-            parent_turn_id=parent_turn_id,
+            arguments={"task_id": task_id},
+            invocation_context=context,
         )
         assert json.loads(stopped.content)["status"] == "completed"
         waited = await manager.invoke(
             tool_name="wait_agent",
-            arguments={"subagent_run_id": task_id, "timeout_seconds": 1},
-            parent_turn_id=parent_turn_id,
+            arguments={"task_id": task_id, "timeout_seconds": 1},
+            invocation_context=context,
         )
         assert json.loads(waited.content)["status"] == "completed"
         await manager.aclose(timeout_seconds=5)

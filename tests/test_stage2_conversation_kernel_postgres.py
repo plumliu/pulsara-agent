@@ -43,6 +43,7 @@ from pulsara_agent.conversation_kernel.compaction.contracts import (
     build_prepared_manual_compaction_command,
     build_prepared_compaction_canonical_adoption,
     canonical_compaction_range_digest,
+    freeze_compaction_canonical_range,
 )
 from pulsara_agent.conversation_kernel.reader import CanonicalProviderInputReader
 from pulsara_agent.terminal_protocol.canonical_v3 import CanonicalProtocolReader
@@ -390,9 +391,9 @@ def test_stage2_maximum_blob_is_read_as_exact_bounded_storage_ranges(
 def test_stage2_schema_and_descriptor_oracles_are_exact(
     stage2_migrated_postgres_database,
 ) -> None:
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 24
-    assert len(set(CONVERSATION_KERNEL_RELATIONS)) == 24
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == 28
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 25
+    assert len(set(CONVERSATION_KERNEL_RELATIONS)) == 25
+    assert len(COMMITTED_EVENT_DESCRIPTORS) == 29
     assert len(LIVE_EVENT_TYPES) == 24
     assert len(SUBJECT_SLOTS) == 11
     assert len(APPEND_GUARDS) == 1
@@ -1662,7 +1663,6 @@ def test_round3_1_steer_consume_rejects_canonical_base_drift_without_mutation(
         ).kind
         is CompactionConfirmationKind.CONFLICT
     )
-
     with pytest.raises(ConversationKernelConflict, match="control base drifted"):
         repository.consume_prepared_prompt_steer(
             lease.guard,
@@ -1700,6 +1700,142 @@ def test_round3_1_steer_consume_rejects_canonical_base_drift_without_mutation(
             (session_id,),
         ).fetchone() == (0,)
 
+
+def test_round5b_first_compaction_can_cut_before_turn_genesis_marker(
+    stage2_migrated_postgres_database,
+) -> None:
+    """A late ROOT turn may summarize earlier same-scope FULL_HISTORY."""
+
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    deadline = monotonic() + 30
+    session_id = _name("session")
+    workspace_id = _name("workspace")
+    lease = repository.acquire_host_writer(
+        session_id=session_id,
+        workspace_id=workspace_id,
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=deadline,
+    )
+    prior_assistant_sequences: list[int] = []
+    for index in range(3):
+        turn_id = _name(f"prior-turn-{index}")
+        _start_root_turn(
+            repository,
+            lease.guard,
+            command_id=_name(f"prior-command-{index}"),
+            turn_id=turn_id,
+            entry_id=_name(f"prior-user-{index}"),
+            context_binding_revision_id=_name(f"prior-revision-{index}"),
+            content=InlineContent.from_bytes(f"prior user {index}".encode()),
+            occurred_at=datetime.now(timezone.utc),
+            deadline_monotonic=deadline,
+        )
+        cut = repository.prepare_provider_input_cut(
+            lease.guard, turn_id=turn_id, deadline_monotonic=deadline
+        )
+        accepted = repository.commit_assistant_message(
+            lease.guard,
+            cut=cut,
+            entry_id=_name(f"prior-assistant-{index}"),
+            parent_content=InlineContent.from_bytes(
+                f"prior assistant {index}".encode()
+            ),
+            blocks=(
+                AssistantTextBlock(
+                    _name(f"prior-block-{index}"),
+                    InlineContent.from_bytes(f"prior assistant {index}".encode()),
+                ),
+            ),
+            complete_turn=True,
+            occurred_at=datetime.now(timezone.utc),
+            actor_id="model:test",
+            deadline_monotonic=deadline,
+        )
+        prior_assistant_sequences.append(accepted.entry_sequence)
+
+    turn_id = _name("current-turn")
+    revision_id = _name("current-revision")
+    current = _start_root_turn(
+        repository,
+        lease.guard,
+        command_id=_name("current-command"),
+        turn_id=turn_id,
+        entry_id=_name("current-user"),
+        context_binding_revision_id=revision_id,
+        content=InlineContent.from_bytes(b"current user"),
+        occurred_at=datetime.now(timezone.utc),
+        deadline_monotonic=deadline,
+    )
+    current_read = CanonicalProviderInputReader(provider).read_frozen_compaction_cut(
+        repository.prepare_compaction_input_cut(
+            lease.guard,
+            turn_id=turn_id,
+            allow_terminal=False,
+            deadline_monotonic=deadline,
+        ),
+        deadline_monotonic=deadline,
+    )
+    lineage = current_read.lineage_base
+    boundary = prior_assistant_sequences[1]
+    assert lineage.persisted_revision_genesis_marker == current.entry_sequence - 1
+    assert boundary < lineage.persisted_revision_genesis_marker
+    assert lineage.effective_materialization_lineage_floor == 0
+
+    canonical = current_read.dispatch_read.compile_snapshot.canonical_input
+    canonical_range = freeze_compaction_canonical_range(
+        scope=current_read.scope,
+        effective_materialization_lineage_floor=0,
+        source_through_sequence=boundary,
+        ordered_items=canonical.items,
+        closures=canonical.closures,
+        late_outcomes=canonical.late_outcomes,
+    )
+    candidate = build_prepared_compaction_canonical_adoption(
+        CompactionCanonicalAdoptionFactoryInput(
+            scope=current_read.scope,
+            target_branch=CompactionTargetBranch.ACTIVE_INSTALLATION,
+            expected_turn_status="RUNNING",
+            predecessor=ExpectedCompactionPredecessorRevision(
+                binding_revision_id=lineage.binding_revision_id,
+                revision_ordinal=lineage.binding_revision_ordinal,
+                base_kind="FULL_HISTORY",
+                context_snapshot_id=None,
+                source_through_sequence=lineage.persisted_revision_genesis_marker,
+            ),
+            snapshot_id=_name("snapshot"),
+            binding_revision_id=_name("replacement-revision"),
+            event_id=_name("compaction-event"),
+            source_through_sequence=boundary,
+            source_digest=canonical_compaction_range_digest(
+                lineage, canonical_range
+            ),
+            snapshot_content=InlineContent.from_bytes(b"summary"),
+            compiler_contract=COMPACTION_SNAPSHOT_COMPILER_CONTRACT,
+            prompt_contract=COMPACTION_SUMMARY_PROMPT_CONTRACT,
+            model_contract=COMPACTION_MODEL_CONTRACT,
+            occurred_at=datetime.now(timezone.utc),
+            actor_id="runtime:test",
+        )
+    )
+    winner = repository.adopt_context_snapshot(
+        lease.guard,
+        candidate=candidate,
+        preconditions=CompactionCanonicalWritePreconditions(
+            scope=current_read.scope,
+            expected_turn_status="RUNNING",
+            expected_safe_head=(
+                current_read.safe_head_range.source_through_sequence
+            ),
+            provider_safe=True,
+        ),
+        deadline_monotonic=deadline,
+    )
+    assert winner.kind is CompactionConfirmationKind.FULL
+    assert repository.confirm_context_snapshot_adoption(
+        candidate=candidate, deadline_monotonic=deadline
+    ) == winner
 
 def test_round5b_manual_compaction_command_is_exact_and_ack_confirmable(
     stage2_migrated_postgres_database,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from hashlib import sha256
 from time import monotonic
 from uuid import uuid4
 
@@ -47,6 +48,10 @@ from pulsara_agent.conversation_kernel.safe_point import (
     ExternalSourceNotAtSafePoint,
     ProviderSafePointCoordinator,
 )
+from pulsara_agent.conversation_kernel.subagents.contracts import (
+    SubagentResultSource,
+    build_subagent_result_public_fact,
+)
 from pulsara_agent.model_input.contracts import (
     CanonicalInputOriginKind,
     ModelInputScopeKind,
@@ -60,6 +65,7 @@ from pulsara_agent.primitives.tool_result_projection import (
     ToolResultFullDeliveryReason,
 )
 from tests.support.postgres import verified_postgres_provider
+from tests.support.subagents import accept_active_subagent_fixture
 
 
 pytestmark = pytest.mark.postgres
@@ -813,24 +819,11 @@ def test_subagent_result_acceptance_linearizes_at_provider_safe_point(
         deadline_monotonic=monotonic() + 30,
     )
     root_turn = _start_turn(repository, lease, b"delegate this")
-    task_id = _id("subagent-task")
-    repository.accept_subagent_task(
-        lease.guard,
-        task_id=task_id,
+    task_id = accept_active_subagent_fixture(
+        repository,
+        lease,
         parent_turn_id=root_turn,
         objective="return one exact result",
-        occurred_at=datetime.now(timezone.utc),
-        actor_id="host:test",
-        deadline_monotonic=monotonic() + 30,
-    )
-    assert repository.set_subagent_task_status(
-        lease.guard,
-        task_id=task_id,
-        status="ACTIVE",
-        reason=None,
-        occurred_at=datetime.now(timezone.utc),
-        actor_id="host:test",
-        deadline_monotonic=monotonic() + 30,
     )
     child_turn = _id("turn")
     repository.start_subagent_turn(
@@ -854,44 +847,37 @@ def test_subagent_result_acceptance_linearizes_at_provider_safe_point(
         turn_id=child_turn,
         deadline_monotonic=monotonic() + 30,
     )
+    child_result_id = _id("subagent-result")
+    child_reply_entry_id = _id("entry")
+    child_result_text = "the exact child result"
+    child_result = build_subagent_result_public_fact(
+        task_id=task_id,
+        result_id=child_result_id,
+        source=SubagentResultSource.INFERRED,
+        producer_entry_id=child_reply_entry_id,
+        summary=child_result_text,
+        source_assistant_content_digest=(
+            "sha256:" + sha256(child_result_text.encode("utf-8")).hexdigest()
+        ),
+    )
     child_reply = repository.commit_assistant_message(
         lease.guard,
         cut=child_cut,
-        entry_id=_id("entry"),
-        parent_content=InlineContent.from_bytes(b"the exact child result"),
+        entry_id=child_reply_entry_id,
+        parent_content=InlineContent.from_bytes(child_result_text.encode("utf-8")),
         blocks=(
             AssistantTextBlock(
                 block_id=_id("block"),
-                text=InlineContent.from_bytes(b"the exact child result"),
+                text=InlineContent.from_bytes(child_result_text.encode("utf-8")),
             ),
         ),
         complete_turn=True,
+        subagent_result=child_result,
         occurred_at=datetime.now(timezone.utc),
         actor_id="model:child",
         deadline_monotonic=monotonic() + 30,
     )
     assert child_reply.turn_id == child_turn
-    child_result_id = _id("subagent-result")
-    repository.accept_subagent_child(
-        lease.guard,
-        child_id=child_result_id,
-        task_id=task_id,
-        child_kind="RESULT",
-        child_ordinal=1,
-        entry_id=child_reply.entry_id,
-        occurred_at=datetime.now(timezone.utc),
-        actor_id="subagent:test",
-        deadline_monotonic=monotonic() + 30,
-    )
-    assert repository.set_subagent_task_status(
-        lease.guard,
-        task_id=task_id,
-        status="COMPLETED",
-        reason=None,
-        occurred_at=datetime.now(timezone.utc),
-        actor_id="host:test",
-        deadline_monotonic=monotonic() + 30,
-    )
 
     # The source domain can finish while a provider handle is active, but it
     # cannot splice a new ROOT entry behind that handle's fixed cut.

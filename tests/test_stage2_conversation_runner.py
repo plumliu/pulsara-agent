@@ -31,6 +31,7 @@ from pulsara_agent.conversation_kernel.context_sources import (
 from pulsara_agent.conversation_kernel.cold_epoch import (
     CanonicalColdContinuationSeed,
     CompactionContinuationSeed,
+    SubagentInitialSeed,
 )
 from pulsara_agent.conversation_kernel.direct_model import DirectKernelModelPort
 import pulsara_agent.conversation_kernel.input_continuity as input_continuity
@@ -133,11 +134,13 @@ from tests.support.postgres import verified_postgres_provider
 from tests.support.model_config import test_llm_config, test_model_limits
 from tests.support.round3 import (
     CallbackScriptedKernelModel,
+    Round10TestSubagentRuntime,
     ScriptedKernelModel,
     StaticContextSourceCollector,
     StructuredToolPort,
     seal_test_direct_tool_port,
 )
+from tests.support.subagents import accept_active_subagent_fixture
 
 
 pytestmark = pytest.mark.postgres
@@ -1009,6 +1012,27 @@ def _tool_stream() -> list[object]:
             arguments_json=arguments,
             utf8_bytes=len(arguments.encode("utf-8")),
             digest=live_digest(arguments),
+        ),
+    ]
+
+
+def _named_tool_stream(
+    *,
+    tool_name: str,
+    tool_call_id: str,
+    arguments: dict[str, object],
+) -> list[object]:
+    encoded = json.dumps(arguments, sort_keys=True, separators=(",", ":"))
+    return [
+        ToolCallStartPayload(tool_call_id, tool_call_id, tool_name),
+        ToolCallDeltaPayload(tool_call_id, tool_call_id, encoded),
+        ToolCallEndPayload(
+            block_identity=tool_call_id,
+            tool_call_id=tool_call_id,
+            tool_name=tool_name,
+            arguments_json=encoded,
+            utf8_bytes=len(encoded.encode("utf-8")),
+            digest=live_digest(encoded),
         ),
     ]
 
@@ -3124,8 +3148,12 @@ def test_round5a1_completed_tool_item_then_incomplete_has_zero_canonical_effect(
         deadline_monotonic=monotonic() + 10,
     ) as connection:
         assert connection.execute(
-            "SELECT count(*) FROM pulsara_v3.tool_execution_attempts "
-            "WHERE session_id = %s",
+            "SELECT count(*) FROM pulsara_v3.tool_execution_attempts AS attempt "
+            "JOIN pulsara_v3.transcript_entries AS entry "
+            "ON entry.session_id = attempt.session_id "
+            "AND entry.id = attempt.assistant_entry_id "
+            "WHERE attempt.session_id = %s "
+            "AND entry.conversation_scope_kind = 'SUBAGENT_TASK'",
             (session_id,),
         ).fetchone() == (0,)
         assert connection.execute(
@@ -3916,24 +3944,11 @@ def test_stage2_subagent_runner_produces_durable_message_child(
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=monotonic() + 30,
     )
-    task_id = _name("subagent-task")
-    repository.accept_subagent_task(
-        lease.guard,
-        task_id=task_id,
+    task_id = accept_active_subagent_fixture(
+        repository,
+        lease,
         parent_turn_id=parent_turn_id,
         objective="produce one message",
-        occurred_at=datetime.now(timezone.utc),
-        actor_id="host:test",
-        deadline_monotonic=monotonic() + 30,
-    )
-    repository.set_subagent_task_status(
-        lease.guard,
-        task_id=task_id,
-        status="ACTIVE",
-        reason=None,
-        occurred_at=datetime.now(timezone.utc),
-        actor_id="host:test",
-        deadline_monotonic=monotonic() + 30,
     )
     runner = ConversationKernelRunner(
         repository=repository,
@@ -3942,20 +3957,15 @@ def test_stage2_subagent_runner_produces_durable_message_child(
         tools=StructuredToolPort(_AssertingTool(provider, session_id)),
         live_bus=LiveAgentEventBus(),
         context_source_collector=StaticContextSourceCollector(),
+        subagent_runtime=Round10TestSubagentRuntime(
+            session_id=session_id,
+            task_id=task_id,
+            parent_turn_id=parent_turn_id,
+            objective="produce one message",
+        ),
     )
     result = asyncio.run(
         runner.run_subagent_turn(task_id=task_id, objective="produce one message")
-    )
-    repository.accept_subagent_child(
-        lease.guard,
-        child_id=_name("subagent-result"),
-        task_id=task_id,
-        child_kind="RESULT",
-        child_ordinal=result.model_call_count,
-        entry_id=result.final_entry_id,
-        occurred_at=datetime.now(timezone.utc),
-        actor_id=task_id,
-        deadline_monotonic=monotonic() + 30,
     )
     with provider.connection(
         lane=PostgresConnectionLane.INSPECTOR,
@@ -3977,6 +3987,326 @@ def test_stage2_subagent_runner_produces_durable_message_child(
             "WHERE session_id = %s AND event_type = 'SubagentMessageAccepted'",
             (session_id,),
         ).fetchone() == (1,)
+
+
+@pytest.mark.parametrize(
+    ("api", "scripts", "expected_text"),
+    (
+        ("openai_chat_completions", _round5a1_chat_scripts(), "chat final"),
+        ("openai_responses", _round5a1_responses_scripts(), "responses final"),
+    ),
+)
+def test_round10_child_cold_seed_then_same_epoch_wire_prefix_is_exact(
+    stage2_migrated_postgres_database,
+    api: str,
+    scripts: tuple[tuple[dict[str, object], ...], ...],
+    expected_text: str,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id = _name("session")
+    lease = repository.acquire_host_writer(
+        session_id=session_id,
+        workspace_id=_name("workspace"),
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    parent_turn_id = _name("turn")
+    repository.start_root_turn(
+        lease.guard,
+        command_id=_name("command"),
+        turn_id=parent_turn_id,
+        entry_id=_name("entry"),
+        context_binding_revision_id=_name("revision"),
+        permission_snapshot_id=_name("permission-snapshot"),
+        requested_permission_mode=DEFAULT_PERMISSION_MODE,
+        content=InlineContent.from_bytes(b"delegate an exact child tool loop"),
+        occurred_at=datetime.now(timezone.utc),
+        deadline_monotonic=monotonic() + 30,
+    )
+    objective = "use the virtual terminal and finish"
+    task_id = accept_active_subagent_fixture(
+        repository,
+        lease,
+        parent_turn_id=parent_turn_id,
+        objective=objective,
+    )
+    profile = ProviderProfile(
+        id=f"test:{api}:round10-child",
+        wire_api=api,
+        thinking=(
+            ThinkingProfile(
+                enabled=True,
+                message_field="reasoning_content",
+                replay_policy=ThinkingReplayPolicy.ALWAYS,
+            )
+            if api == "openai_chat_completions"
+            else ThinkingProfile()
+        ),
+    )
+    model = _SequencedDirectKernelModel(
+        config=test_llm_config(
+            api_key="test",
+            base_url="https://example.invalid/v1",
+            pro_model="test-pro",
+            flash_model="test-flash",
+            api=api,
+            provider_profile=profile,
+        ),
+        scripts=scripts,
+    )
+    tools = _AssertingTool(provider, session_id)
+    runner = ConversationKernelRunner(
+        repository=repository,
+        writer_lease=lease,
+        model=model,
+        tools=StructuredToolPort(tools),
+        live_bus=LiveAgentEventBus(),
+        context_source_collector=StaticContextSourceCollector(),
+        subagent_runtime=Round10TestSubagentRuntime(
+            session_id=session_id,
+            task_id=task_id,
+            parent_turn_id=parent_turn_id,
+            objective=objective,
+        ),
+    )
+    cold = _RecordingColdEpochAssembler(runner._cold_epoch_assembler)
+    runner._cold_epoch_assembler = cold
+
+    result = asyncio.run(
+        runner.run_subagent_turn(task_id=task_id, objective=objective)
+    )
+
+    assert result.final_text == expected_text
+    assert result.model_call_count == 2
+    assert result.tool_call_count == 1
+    assert len(tools.invocations) == 1
+    assert len(cold.semantic_seeds) == 1
+    assert isinstance(cold.semantic_seeds[0], SubagentInitialSeed)
+    assert cold.finalized == 1
+    assert len(model.requests) == 2
+    first, second = model.requests
+    assert first.compiled_input.canonical_input_identity.scope_subagent_task_id == task_id
+    assert first.wire_input_plan.wire_system_fingerprint == (
+        second.wire_input_plan.wire_system_fingerprint
+    )
+    assert first.wire_input_plan.materialization.tool_items == (
+        second.wire_input_plan.materialization.tool_items
+    )
+    first_wire = first.wire_input_plan.materialization.ordered_input_items
+    second_wire = second.wire_input_plan.materialization.ordered_input_items
+    assert second_wire[: len(first_wire)] == first_wire
+    assert len(second_wire) > len(first_wire)
+
+
+def test_round10_sole_report_result_atomically_completes_child_without_second_model_call(
+    stage2_migrated_postgres_database,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id = _name("session")
+    workspace_id = _name("workspace")
+    lease = repository.acquire_host_writer(
+        session_id=session_id,
+        workspace_id=workspace_id,
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    parent_turn_id = _name("turn")
+    repository.start_root_turn(
+        lease.guard,
+        command_id=_name("command"),
+        turn_id=parent_turn_id,
+        entry_id=_name("entry"),
+        context_binding_revision_id=_name("revision"),
+        permission_snapshot_id=_name("permission-snapshot"),
+        requested_permission_mode=DEFAULT_PERMISSION_MODE,
+        content=InlineContent.from_bytes(b"delegate explicit result"),
+        occurred_at=datetime.now(timezone.utc),
+        deadline_monotonic=monotonic() + 30,
+    )
+    objective = "produce a sole explicit result"
+    task_id = accept_active_subagent_fixture(
+        repository,
+        lease,
+        parent_turn_id=parent_turn_id,
+        objective=objective,
+    )
+    model = _ScriptedModel(
+        [
+            _named_tool_stream(
+                tool_name="report_agent_result",
+                tool_call_id="call:report",
+                arguments={
+                    "summary": "exact explicit summary",
+                    "output_preview": "file.py:42",
+                    "diagnostics": [{"code": "CHECKED", "severity": "info"}],
+                },
+            )
+        ]
+    )
+    delegate = _AssertingTool(provider, session_id)
+    runner = ConversationKernelRunner(
+        repository=repository,
+        writer_lease=lease,
+        model=model,
+        tools=StructuredToolPort(
+            delegate,
+            tool_names=("report_agent_result",),
+        ),
+        live_bus=LiveAgentEventBus(),
+        context_source_collector=StaticContextSourceCollector(),
+        subagent_runtime=Round10TestSubagentRuntime(
+            session_id=session_id,
+            task_id=task_id,
+            parent_turn_id=parent_turn_id,
+            objective=objective,
+        ),
+    )
+    original_accept = repository.accept_explicit_subagent_result
+    lost_ack = False
+
+    def commit_then_timeout(*args: object, **kwargs: object):
+        nonlocal lost_ack
+        accepted = original_accept(*args, **kwargs)
+        if not lost_ack:
+            lost_ack = True
+            raise TimeoutError("explicit result commit ACK lost")
+        return accepted
+
+    monkeypatch.setattr(
+        repository,
+        "accept_explicit_subagent_result",
+        commit_then_timeout,
+    )
+    result = asyncio.run(
+        runner.run_subagent_turn(task_id=task_id, objective=objective)
+    )
+    assert lost_ack
+    assert result.final_text == "exact explicit summary"
+    assert result.model_call_count == 1
+    assert result.tool_call_count == 1
+    assert len(model.requests) == 1
+    assert delegate.invocations == []
+    with provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        deadline_monotonic=monotonic() + 10,
+    ) as connection:
+        assert connection.execute(
+            "SELECT status FROM pulsara_v3.turns "
+            "WHERE session_id=%s AND conversation_scope_kind='SUBAGENT_TASK'",
+            (session_id,),
+        ).fetchone() == ("COMPLETED",)
+        assert connection.execute(
+            "SELECT t.status, c.result_source, c.summary, c.output_preview "
+            "FROM pulsara_v3.subagent_tasks AS t "
+            "JOIN pulsara_v3.subagent_task_children AS c "
+            "ON c.session_id=t.session_id AND c.task_id=t.id "
+            "AND c.child_kind='RESULT' "
+            "WHERE t.session_id=%s AND t.id=%s",
+            (session_id, task_id),
+        ).fetchone() == (
+            "COMPLETED",
+            "EXPLICIT",
+            "exact explicit summary",
+            "file.py:42",
+        )
+        assert connection.execute(
+            "SELECT count(*) FROM pulsara_v3.tool_execution_attempts AS a "
+            "JOIN pulsara_v3.transcript_entries AS e "
+            "ON e.session_id=a.session_id AND e.id=a.assistant_entry_id "
+            "WHERE a.session_id=%s AND e.conversation_scope_kind='SUBAGENT_TASK'",
+            (session_id,),
+        ).fetchone() == (1,)
+
+
+def test_round10_mixed_report_batch_has_zero_attempt_and_physical_effect_then_recovers(
+    stage2_migrated_postgres_database,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id = _name("session")
+    lease = repository.acquire_host_writer(
+        session_id=session_id,
+        workspace_id=_name("workspace"),
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    parent_turn_id = _name("turn")
+    repository.start_root_turn(
+        lease.guard,
+        command_id=_name("command"),
+        turn_id=parent_turn_id,
+        entry_id=_name("entry"),
+        context_binding_revision_id=_name("revision"),
+        permission_snapshot_id=_name("permission-snapshot"),
+        requested_permission_mode=DEFAULT_PERMISSION_MODE,
+        content=InlineContent.from_bytes(b"delegate mixed report rejection"),
+        occurred_at=datetime.now(timezone.utc),
+        deadline_monotonic=monotonic() + 30,
+    )
+    objective = "recover after an invalid mixed result batch"
+    task_id = accept_active_subagent_fixture(
+        repository,
+        lease,
+        parent_turn_id=parent_turn_id,
+        objective=objective,
+    )
+    mixed = _named_tool_stream(
+        tool_name="report_agent_result",
+        tool_call_id="call:report-mixed",
+        arguments={"summary": "must not win"},
+    ) + _named_tool_stream(
+        tool_name="terminal",
+        tool_call_id="call:effect-mixed",
+        arguments={"command": "must-not-dispatch"},
+    )
+    model = _ScriptedModel([mixed, _text_stream("recovered inferred result")])
+    delegate = _AssertingTool(provider, session_id)
+    runner = ConversationKernelRunner(
+        repository=repository,
+        writer_lease=lease,
+        model=model,
+        tools=StructuredToolPort(
+            delegate,
+            tool_names=("report_agent_result", "terminal"),
+        ),
+        live_bus=LiveAgentEventBus(),
+        context_source_collector=StaticContextSourceCollector(),
+        subagent_runtime=Round10TestSubagentRuntime(
+            session_id=session_id,
+            task_id=task_id,
+            parent_turn_id=parent_turn_id,
+            objective=objective,
+        ),
+    )
+    result = asyncio.run(
+        runner.run_subagent_turn(task_id=task_id, objective=objective)
+    )
+    assert result.final_text == "recovered inferred result"
+    assert result.model_call_count == 2
+    assert delegate.invocations == []
+    with provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        deadline_monotonic=monotonic() + 10,
+    ) as connection:
+        assert connection.execute(
+            "SELECT count(*) FROM pulsara_v3.tool_execution_attempts AS a "
+            "JOIN pulsara_v3.transcript_entries AS e "
+            "ON e.session_id=a.session_id AND e.id=a.assistant_entry_id "
+            "WHERE a.session_id=%s AND e.conversation_scope_kind='SUBAGENT_TASK'",
+            (session_id,),
+        ).fetchone() == (0,)
+        assert connection.execute(
+            "SELECT result_source, summary "
+            "FROM pulsara_v3.subagent_task_children "
+            "WHERE session_id=%s AND task_id=%s AND child_kind='RESULT'",
+            (session_id, task_id),
+        ).fetchone() == ("INFERRED", "recovered inferred result")
 
 
 def test_round5a1_subagent_incomplete_response_has_no_assistant_or_tool_effect(
@@ -4005,25 +4335,12 @@ def test_round5a1_subagent_incomplete_response_has_no_assistant_or_tool_effect(
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=monotonic() + 30,
     )
-    task_id = _name("subagent-task")
     objective = "produce one bounded answer"
-    repository.accept_subagent_task(
-        lease.guard,
-        task_id=task_id,
+    task_id = accept_active_subagent_fixture(
+        repository,
+        lease,
         parent_turn_id=parent_turn_id,
         objective=objective,
-        occurred_at=datetime.now(timezone.utc),
-        actor_id="host:test",
-        deadline_monotonic=monotonic() + 30,
-    )
-    repository.set_subagent_task_status(
-        lease.guard,
-        task_id=task_id,
-        status="ACTIVE",
-        reason=None,
-        occurred_at=datetime.now(timezone.utc),
-        actor_id="host:test",
-        deadline_monotonic=monotonic() + 30,
     )
 
     async def incomplete_stream(_request):
@@ -4041,6 +4358,12 @@ def test_round5a1_subagent_incomplete_response_has_no_assistant_or_tool_effect(
         tools=StructuredToolPort(tools),
         live_bus=LiveAgentEventBus(),
         context_source_collector=StaticContextSourceCollector(),
+        subagent_runtime=Round10TestSubagentRuntime(
+            session_id=session_id,
+            task_id=task_id,
+            parent_turn_id=parent_turn_id,
+            objective=objective,
+        ),
     )
 
     with pytest.raises(ProviderModelOutputIncomplete):
@@ -4058,8 +4381,12 @@ def test_round5a1_subagent_incomplete_response_has_no_assistant_or_tool_effect(
             (session_id,),
         ).fetchone() == (0,)
         assert connection.execute(
-            "SELECT count(*) FROM pulsara_v3.tool_execution_attempts "
-            "WHERE session_id = %s",
+            "SELECT count(*) FROM pulsara_v3.tool_execution_attempts AS attempt "
+            "JOIN pulsara_v3.transcript_entries AS entry "
+            "ON entry.session_id = attempt.session_id "
+            "AND entry.id = attempt.assistant_entry_id "
+            "WHERE attempt.session_id = %s "
+            "AND entry.conversation_scope_kind = 'SUBAGENT_TASK'",
             (session_id,),
         ).fetchone() == (0,)
 

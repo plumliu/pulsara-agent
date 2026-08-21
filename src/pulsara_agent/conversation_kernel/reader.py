@@ -21,6 +21,7 @@ from psycopg.rows import dict_row
 from pulsara_agent.conversation_kernel.repository_errors import (
     ConversationKernelConflict,
 )
+from pulsara_agent.primitives.context import canonical_json_bytes
 from pulsara_agent.model_input.contracts import (
     ApprovedPlanMaterializationFact,
     CanonicalInputOriginKind,
@@ -279,7 +280,8 @@ class CanonicalProviderInputReader:
                             CASE
                               WHEN entry_kind IN (
                                   'USER_MESSAGE', 'USER_STEER',
-                                  'TERMINAL_OBSERVATION', 'PLAN_CONTINUATION'
+                                  'TERMINAL_OBSERVATION', 'PLAN_CONTINUATION',
+                                  'INTER_AGENT_MESSAGE'
                               ) THEN content_size
                               WHEN entry_kind = 'TOOL_RESULT'
                                   THEN content_size * 2
@@ -700,6 +702,7 @@ class CanonicalProviderInputReader:
                         "TERMINAL_OBSERVATION",
                         "TOOL_RESULT",
                         "PLAN_CONTINUATION",
+                        "INTER_AGENT_MESSAGE",
                     )
                 ),
             )
@@ -814,6 +817,41 @@ class CanonicalProviderInputReader:
                             source_turn_id=str(row["turn_id"]),
                             text=provider_text,
                             input_origin=CanonicalInputOriginKind.PLAN_CONTINUATION,
+                        )
+                    )
+                    continue
+                if kind == "INTER_AGENT_MESSAGE":
+                    if scope_kind != "SUBAGENT_TASK" or scope_task_id is None:
+                        raise ConversationKernelConflict(
+                            "inter-agent message escaped child scope"
+                        )
+                    content = self._read_content(
+                        _with_inline_payload(row, entry_payloads[entry_id]),
+                        deadline_monotonic=deadline_monotonic,
+                        remaining_bytes=remaining_bytes,
+                    )
+                    message = _decode_provider_text(
+                        content, str(row["content_codec"])
+                    )
+                    projected = canonical_json_bytes(
+                        {
+                            "pulsara_inter_agent_message": {
+                                "message_type": "MESSAGE",
+                                "sender": "ROOT",
+                                "recipient_task_id": str(scope_task_id),
+                                "content": message,
+                            }
+                        }
+                    ).decode("utf-8")
+                    canonical_bytes += len(projected.encode("utf-8"))
+                    items.append(
+                        ProviderInputItem(
+                            item_kind=ProviderInputItemKind.INTER_AGENT_MESSAGE,
+                            source_entry_id=entry_id,
+                            source_entry_sequence=sequence,
+                            source_turn_id=str(row["turn_id"]),
+                            text=projected,
+                            input_origin=CanonicalInputOriginKind.INTER_AGENT_MESSAGE,
                         )
                     )
                     continue
@@ -2056,6 +2094,7 @@ class CanonicalProviderInputReader(CanonicalProviderInputReader):
                 "USER_MESSAGE",
                 "USER_STEER",
                 "TERMINAL_OBSERVATION",
+                "INTER_AGENT_MESSAGE",
                 "TOOL_RESULT",
             ):
                 total += int(row["content_size"])

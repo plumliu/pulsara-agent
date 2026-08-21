@@ -92,12 +92,11 @@ _LONG_HORIZON_POLICY_KIND_BY_NAME = {
     "read_file": BuiltinToolLongHorizonPolicyKind.EVIDENCE_ACQUISITION,
     "read_mcp_resource": BuiltinToolLongHorizonPolicyKind.EVIDENCE_ACQUISITION,
     "remember": BuiltinToolLongHorizonPolicyKind.SYNTHESIS_MUTATION,
-    "report_agent_phase": BuiltinToolLongHorizonPolicyKind.PROCESS_CONTROL,
     "report_agent_result": BuiltinToolLongHorizonPolicyKind.SYNTHESIS_MUTATION,
     "search_files": BuiltinToolLongHorizonPolicyKind.EVIDENCE_ACQUISITION,
     "spawn_agent": BuiltinToolLongHorizonPolicyKind.EVIDENCE_ACQUISITION,
     "stop_agent": BuiltinToolLongHorizonPolicyKind.PROCESS_CONTROL,
-    "stop_agent_task": BuiltinToolLongHorizonPolicyKind.PROCESS_CONTROL,
+    "send_agent_message": BuiltinToolLongHorizonPolicyKind.PROCESS_CONTROL,
     "terminal": BuiltinToolLongHorizonPolicyKind.TERMINAL_COMMAND,
     "terminal_monitor": BuiltinToolLongHorizonPolicyKind.TERMINAL_MONITOR,
     "terminal_process": BuiltinToolLongHorizonPolicyKind.TERMINAL_PROCESS,
@@ -714,18 +713,35 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "spawn_agent": _descriptor(
         name="spawn_agent",
         description=(
-            "Start an isolated child agent for a bounded subtask. Use wait_agent "
-            "to explicitly collect its result."
+            "Create one ROOT-owned worker leaf. The worker receives only the task "
+            "by default; request last_n context only when a small amount of public "
+            "ROOT conversation is essential. Use wait_agent to read its result."
         ),
         input_schema=object_schema(
             properties={
-                "task": {"type": "string"},
-                "label": {"type": "string"},
-                "role": {
+                "task": {"type": "string", "minLength": 1, "maxLength": 65536},
+                "task_name": {
                     "type": "string",
-                    "enum": ["worker", "verifier", "synthesizer", "orchestrator"],
+                    "pattern": "^[a-z][a-z0-9_-]{0,63}$",
                 },
-                "context": {"type": "string", "enum": ["isolated", "fork"]},
+                "profile": {
+                    "type": "string",
+                    "enum": [
+                        "general_worker", "research_worker", "review_worker",
+                        "verification_worker", "synthesizer"
+                    ],
+                    "default": "general_worker",
+                },
+                "context": {
+                    "type": "object",
+                    "properties": {
+                        "mode": {"type": "string", "enum": ["none", "last_n"]},
+                        "turns": {"type": "integer", "minimum": 1, "maximum": 3},
+                    },
+                    "required": ["mode"],
+                    "additionalProperties": False,
+                    "default": {"mode": "none"},
+                },
             },
             required=["task"],
         ),
@@ -737,14 +753,15 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "wait_agent": _descriptor(
         name="wait_agent",
         description=(
-            "Collect a completed child agent result and mark that result as explicitly consumed by this tool call."
+            "Wait for one ROOT-owned worker task. Timeout returns its current state "
+            "without cancelling it; terminal results are immutable and repeatable."
         ),
         input_schema=object_schema(
             properties={
-                "subagent_run_id": {"type": "string"},
-                "timeout_seconds": {"type": "number"},
+                "task_id": {"type": "string", "minLength": 1, "maxLength": 512},
+                "timeout_seconds": {"type": "number", "minimum": 0, "maximum": 300},
             },
-            required=["subagent_run_id"],
+            required=["task_id"],
         ),
         provider_kind=BuiltinToolDomainKind.WORKFLOW,
         is_read_only=False,
@@ -753,13 +770,13 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     ),
     "stop_agent": _descriptor(
         name="stop_agent",
-        description="Cancel a running child agent runtime.",
+        description="Cancel one ROOT-owned pending, waiting, or active worker task.",
         input_schema=object_schema(
             properties={
-                "subagent_run_id": {"type": "string"},
-                "reason": {"type": "string"},
+                "task_id": {"type": "string", "minLength": 1, "maxLength": 512},
+                "reason": {"type": "string", "minLength": 1, "maxLength": 4096},
             },
-            required=["subagent_run_id"],
+            required=["task_id"],
         ),
         provider_kind=BuiltinToolDomainKind.WORKFLOW,
         is_read_only=False,
@@ -775,8 +792,22 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
         ),
         input_schema=object_schema(
             properties={
-                "max_items": {"type": "integer", "default": 50},
-                "include_edges": {"type": "boolean", "default": False},
+                "max_items": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 50,
+                    "default": 50,
+                },
+                "include_dependencies": {"type": "boolean", "default": True},
+                "cursor": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 512,
+                    "description": (
+                        "Opaque next_cursor from a preceding list_agents page; "
+                        "reuse the same max_items and include_dependencies values."
+                    ),
+                },
             },
             required=[],
         ),
@@ -795,11 +826,16 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
             properties={
                 "tasks": {
                     "type": "array",
+                    "minItems": 1,
+                    "maxItems": 16,
                     "items": {
                         "type": "object",
                         "properties": {
-                            "task_key": {"type": "string"},
-                            "label": {"type": "string"},
+                            "task_key": {
+                                "type": "string",
+                                "pattern": "^[a-z][a-z0-9_-]{0,63}$",
+                            },
+                            "label": {"type": "string", "minLength": 1, "maxLength": 256},
                             "profile": {
                                 "type": "string",
                                 "enum": [
@@ -807,16 +843,36 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
                                     "review_worker",
                                     "verification_worker",
                                     "general_worker",
+                                    "synthesizer",
                                 ],
                             },
-                            "task": {"type": "string"},
-                            "display_role": {"type": "string"},
+                            "task": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 65536,
+                            },
+                            "display_role": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 256,
+                            },
+                            "context": {
+                                "type": "object",
+                                "properties": {
+                                    "mode": {"type": "string", "enum": ["none", "last_n"]},
+                                    "turns": {"type": "integer", "minimum": 1, "maximum": 3},
+                                },
+                                "required": ["mode"],
+                                "additionalProperties": False,
+                            },
                             "depends_on": {
                                 "type": "array",
-                                "items": {"type": "string"},
+                                "maxItems": 16,
+                                "uniqueItems": True,
+                                "items": {"type": "string", "minLength": 1},
                             },
                         },
-                        "required": ["profile", "task"],
+                        "required": ["task"],
                         "additionalProperties": False,
                     },
                 }
@@ -836,10 +892,15 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
         ),
         input_schema=object_schema(
             properties={
-                "task_ids": {"type": "array", "items": {"type": "string"}},
+                "task_ids": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 32,
+                    "uniqueItems": True,
+                    "items": {"type": "string", "minLength": 1, "maxLength": 512},
+                },
                 "settle": {"type": "string", "enum": ["all", "first"]},
-                "timeout_seconds": {"type": "number"},
-                "include_consumed": {"type": "boolean"},
+                "timeout_seconds": {"type": "number", "minimum": 0, "maximum": 300},
             },
             required=["task_ids"],
         ),
@@ -848,46 +909,37 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
         is_concurrency_safe=False,
         permission_category="subagent_runtime",
     ),
-    "stop_agent_task": _descriptor(
-        name="stop_agent_task",
-        description="Cancel a logical subagent task and its active child attempt, if any.",
+    "send_agent_message": _descriptor(
+        name="send_agent_message",
+        description=(
+            "Queue one untrusted collaboration message from ROOT to an ACTIVE worker. "
+            "The message is delivered at the worker's next safe point after a complete "
+            "tool group; queued does not mean already read."
+        ),
         input_schema=object_schema(
-            properties={"task_id": {"type": "string"}, "reason": {"type": "string"}},
-            required=["task_id"],
+            properties={
+                "task_id": {"type": "string", "minLength": 1, "maxLength": 512},
+                "message": {"type": "string", "minLength": 1, "maxLength": 16384},
+            },
+            required=["task_id", "message"],
         ),
         provider_kind=BuiltinToolDomainKind.WORKFLOW,
         is_read_only=False,
         is_concurrency_safe=False,
         permission_category="subagent_runtime",
-        is_destructive=True,
-    ),
-    "report_agent_phase": _descriptor(
-        name="report_agent_phase",
-        description="Child-only tool for reporting current subagent progress without completing the run.",
-        input_schema=object_schema(
-            properties={
-                "phase": {"type": "string"},
-                "message": {"type": "string"},
-                "progress": {"type": "object"},
-            },
-            required=["phase"],
-        ),
-        provider_kind=BuiltinToolDomainKind.WORKFLOW,
-        is_read_only=False,
-        is_concurrency_safe=False,
-        permission_category="agent_local",
     ),
     "report_agent_result": _descriptor(
         name="report_agent_result",
         description=(
-            "Child-only tool for submitting the explicit final result. "
-            "The child run ends at the next runtime safe point after this succeeds."
+            "Submit this worker's terminal task output. Call it alone in the assistant "
+            "tool batch. The summary must be self-contained because direct downstream "
+            "workers may receive only that summary."
         ),
         input_schema=object_schema(
             properties={
-                "summary": {"type": "string"},
-                "output_preview": {"type": "string"},
-                "diagnostics": {"type": "array", "items": {"type": "object"}},
+                "summary": {"type": "string", "minLength": 1, "maxLength": 16384},
+                "output_preview": {"type": "string", "maxLength": 32768},
+                "diagnostics": {"type": "array", "maxItems": 32, "items": {"type": "object"}},
             },
             required=["summary"],
         ),
@@ -1113,12 +1165,12 @@ _SUBAGENT_PARENT = frozenset(
         "list_agents",
         "spawn_agent",
         "stop_agent",
-        "stop_agent_task",
+        "send_agent_message",
         "wait_agent",
         "wait_agent_tasks",
     }
 )
-_SUBAGENT_CHILD = frozenset({"report_agent_phase", "report_agent_result"})
+_SUBAGENT_CHILD = frozenset({"report_agent_result"})
 _TERMINAL_PROCESS_ACTIONS = (
     "close_stdin",
     "kill",

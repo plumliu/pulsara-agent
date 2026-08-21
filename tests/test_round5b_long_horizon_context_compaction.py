@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,12 +12,19 @@ from types import SimpleNamespace
 import pytest
 
 from pulsara_agent.conversation_kernel.compaction.contracts import (
+    CompactionCanonicalAdoptionFactoryInput,
+    CompactionConfirmationKind,
     CompactionDisposition,
     CompactionOutcome,
     CompactionScope,
+    CompactionTargetBranch,
     CompactionTrigger,
+    ExpectedCompactionPredecessorRevision,
     ResolvedCompactionPolicy,
+    build_prepared_compaction_canonical_adoption,
+    build_prepared_manual_compaction_command,
 )
+from pulsara_agent.conversation_kernel.contracts import InlineContent
 from pulsara_agent.conversation_kernel.assembler import (
     MAXIMUM_COMPLETED_ASSISTANT_MESSAGE_UTF8_BYTES,
 )
@@ -25,6 +33,7 @@ from pulsara_agent.conversation_kernel.compaction.planner import (
     crosses_compaction_resource_headroom,
     estimate_unavoidable_compaction_successor_tokens,
     enumerate_complete_tool_groups,
+    rebase_compaction_dispatch_read_through_sequence,
     resolved_compaction_headroom_bounds,
     should_trigger_compaction,
     validate_compaction_reclaim,
@@ -40,10 +49,10 @@ from pulsara_agent.conversation_kernel.host import KernelHostSession
 from pulsara_agent.conversation_kernel.limits import STAGE2_LIMITS
 from pulsara_agent.conversation_kernel.compaction.runtime_handoff import (
     CompactionRuntimeHandoffBoundError,
-    FrozenFlatSubagentHandoffFact,
     FrozenTerminalMonitorHandoffFact,
     FrozenTerminalProcessHandoffFact,
     freeze_compaction_runtime_handoff,
+    freeze_subagent_task_board_fact,
 )
 from pulsara_agent.conversation_kernel.compaction.retained_skill import (
     FrozenRetainedSkillContextItem,
@@ -60,6 +69,8 @@ from pulsara_agent.conversation_kernel.vocabulary import (
 from pulsara_agent.llm.estimator import PulsaraHeuristicTokenEstimatorV1
 from pulsara_agent.model_input.contracts import (
     CanonicalInputOriginKind,
+    CanonicalModelInputIdentity,
+    CanonicalModelInputSnapshot,
     FrozenProviderInputItem,
     FrozenProviderInputItemKind,
     ModelInputScopeKind,
@@ -67,9 +78,16 @@ from pulsara_agent.model_input.contracts import (
     ProviderToolResultContextMetadata,
     STRUCTURED_MODEL_INPUT_LIMITS,
     ToolResultProviderRenderMode,
+    canonical_model_input_identity_fingerprint,
+    canonical_model_input_snapshot_fingerprint,
     provider_input_item_fingerprint,
 )
+from pulsara_agent.model_input.continuity import ProviderInputContinuityScope
 from pulsara_agent.model_input.lowering import lower_canonical_item
+from pulsara_agent.model_input.provider_replay import (
+    FrozenCanonicalProviderDispatchRead,
+    freeze_provider_replay_manifest_cut,
+)
 from pulsara_agent.ports.artifact import (
     ToolOutputArtifactDisposition,
     ToolOutputSourceCoverage,
@@ -89,9 +107,213 @@ from pulsara_agent.primitives.tool_observation import (
 from pulsara_agent.storage.migrations.manifest import (
     CONVERSATION_KERNEL_RELATIONS,
 )
+from tests.support.round3 import static_canonical_compile_facts
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_round5b_manual_command_settlement_keys_the_exact_semantic_digest() -> None:
+    host = object.__new__(KernelHostSession)
+    host._manual_compaction_command_attempts = {}
+    host._compaction = HostCompactionRuntimeOwner()
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls: list[str] = []
+
+    async def settle(candidate):
+        calls.append(candidate.semantic_digest)
+        started.set()
+        await release.wait()
+        return CompactionConfirmationKind.FULL
+
+    host._settle_manual_compaction_command_worker = settle
+    exact = build_prepared_manual_compaction_command(
+        session_id="session:test",
+        command_id="command:compact",
+        scope_kind=ModelInputScopeKind.ROOT,
+        scope_subagent_task_id=None,
+        target_turn_id="turn:test",
+        expected_active_turn_id="turn:test",
+        force=True,
+    )
+    conflict = build_prepared_manual_compaction_command(
+        session_id="session:test",
+        command_id="command:compact",
+        scope_kind=ModelInputScopeKind.ROOT,
+        scope_subagent_task_id=None,
+        target_turn_id="turn:test",
+        expected_active_turn_id="turn:test",
+        force=False,
+    )
+
+    async def exercise() -> tuple[CompactionConfirmationKind, ...]:
+        first = asyncio.create_task(host._settle_manual_compaction_command(exact))
+        await started.wait()
+        duplicate = asyncio.create_task(
+            host._settle_manual_compaction_command(exact)
+        )
+        conflicting = await host._settle_manual_compaction_command(conflict)
+        release.set()
+        results = (await first, await duplicate, conflicting)
+        await host._compaction.aclose()
+        return results
+
+    assert asyncio.run(exercise()) == (
+        CompactionConfirmationKind.FULL,
+        CompactionConfirmationKind.FULL,
+        CompactionConfirmationKind.CONFLICT,
+    )
+    assert calls == [exact.semantic_digest]
+
+
+def test_round5b_compaction_cut_rebase_only_advances_global_sequence() -> None:
+    item = FrozenProviderInputItem(
+        item_kind=FrozenProviderInputItemKind.USER,
+        source_entry_id="entry:root:1",
+        source_entry_sequence=1,
+        source_turn_id="turn:root",
+        text="root exact-scope history",
+        input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE,
+    )
+    identity_values = {
+        "session_id": "session:test",
+        "turn_id": "turn:root",
+        "initial_entry_id": "entry:root:1",
+        "context_binding_revision_id": "binding:root:1",
+        "provider_input_through_sequence": 1,
+        "conversation_scope_kind": ModelInputScopeKind.ROOT,
+        "scope_subagent_task_id": None,
+    }
+    identity = CanonicalModelInputIdentity(
+        **identity_values,
+        identity_fingerprint=canonical_model_input_identity_fingerprint(
+            **identity_values
+        ),
+    )
+    canonical_bytes = len(item.text.encode("utf-8"))
+    snapshot = CanonicalModelInputSnapshot(
+        identity=identity,
+        items=(item,),
+        canonical_utf8_bytes=canonical_bytes,
+        snapshot_fingerprint=canonical_model_input_snapshot_fingerprint(
+            identity=identity,
+            items=(item,),
+            canonical_utf8_bytes=canonical_bytes,
+            closures=(),
+            late_outcomes=(),
+        ),
+    )
+    compile_snapshot = static_canonical_compile_facts(snapshot)
+    manifest_cut = freeze_provider_replay_manifest_cut(
+        session_id=identity.session_id,
+        scope=ProviderInputContinuityScope(
+            session_id=identity.session_id,
+            scope_kind=ModelInputScopeKind.ROOT,
+            scope_subagent_task_id=None,
+        ),
+        context_binding_revision_id=identity.context_binding_revision_id,
+        provider_input_through_sequence=1,
+        manifests=(),
+    )
+    dispatch = FrozenCanonicalProviderDispatchRead(
+        compile_snapshot=compile_snapshot,
+        replay_manifest_cut=manifest_cut,
+        composite_fingerprint=context_fingerprint(
+            "pulsara.canonical-provider-dispatch-read:v1",
+            {
+                "compile": compile_snapshot.canonical_read_cut_fingerprint,
+                "replay_manifest_cut": manifest_cut.cut_fingerprint,
+            },
+        ),
+    )
+
+    assert (
+        rebase_compaction_dispatch_read_through_sequence(
+            dispatch, provider_input_through_sequence=1
+        )
+        == dispatch
+    )
+    rebased = rebase_compaction_dispatch_read_through_sequence(
+        dispatch, provider_input_through_sequence=9
+    )
+    assert rebased != dispatch
+    assert rebased.compile_snapshot.canonical_input.items == snapshot.items
+    assert rebased.compile_snapshot.canonical_input.closures == snapshot.closures
+    assert (
+        rebased.compile_snapshot.canonical_input.late_outcomes
+        == snapshot.late_outcomes
+    )
+    assert rebased.replay_manifest_cut.manifests == manifest_cut.manifests
+    assert (
+        rebased.compile_snapshot.context_binding_fact
+        == compile_snapshot.context_binding_fact
+    )
+    assert (
+        rebased.compile_snapshot.canonical_input.identity.provider_input_through_sequence
+        == 9
+    )
+    assert rebased.replay_manifest_cut.provider_input_through_sequence == 9
+    assert (
+        rebased.compile_snapshot.canonical_read_cut_fingerprint
+        != compile_snapshot.canonical_read_cut_fingerprint
+    )
+    assert rebased.composite_fingerprint != dispatch.composite_fingerprint
+    with pytest.raises(ValueError, match="cannot move backwards"):
+        rebase_compaction_dispatch_read_through_sequence(
+            dispatch, provider_input_through_sequence=0
+        )
+
+
+def test_round5b_first_full_history_adoption_uses_zero_effective_floor() -> None:
+    """The revision-zero marker is an exact row identity, not a range floor."""
+
+    scope = CompactionScope(
+        session_id="session:test",
+        workspace_id="workspace:test",
+        turn_id="turn:late",
+        scope_kind=ModelInputScopeKind.ROOT,
+        scope_subagent_task_id=None,
+    )
+
+    def prepare(
+        base_kind: str, context_snapshot_id: str | None
+    ) -> object:
+        return build_prepared_compaction_canonical_adoption(
+            CompactionCanonicalAdoptionFactoryInput(
+                scope=scope,
+                target_branch=CompactionTargetBranch.ACTIVE_INSTALLATION,
+                expected_turn_status="RUNNING",
+                predecessor=ExpectedCompactionPredecessorRevision(
+                    binding_revision_id="binding:predecessor",
+                    revision_ordinal=0,
+                    base_kind=base_kind,
+                    context_snapshot_id=context_snapshot_id,
+                    # A late-created turn can have a revision-zero marker above
+                    # the earliest protected same-scope history boundary.
+                    source_through_sequence=100,
+                ),
+                snapshot_id="snapshot:new",
+                binding_revision_id="binding:new",
+                event_id="event:new",
+                source_through_sequence=40,
+                source_digest="sha256:" + "a" * 64,
+                snapshot_content=InlineContent.from_bytes(b"summary"),
+                compiler_contract="compiler:test",
+                prompt_contract="prompt:test",
+                model_contract="model:test",
+                occurred_at=datetime.now(timezone.utc),
+                actor_id="runtime:test",
+            )
+        )
+
+    candidate = prepare("FULL_HISTORY", None)
+    assert candidate.predecessor.source_through_sequence == 100
+    assert candidate.predecessor.effective_materialization_lineage_floor == 0
+    assert candidate.snapshot.source_through_sequence == 40
+
+    with pytest.raises(ValueError, match="factory input"):
+        prepare("SNAPSHOT", "snapshot:existing")
 
 
 def test_round5b_summary_normalizer_and_snapshot_carrier_are_bounded() -> None:
@@ -444,11 +666,17 @@ def test_round5b_runtime_handoff_is_ordered_bounded_and_body_free() -> None:
             ),
         ),
         todo=None,
-        flat_subagents=(
-            FrozenFlatSubagentHandoffFact(
+        subagent_tasks=(
+            freeze_subagent_task_board_fact(
                 task_id="task:1",
+                task_key="inspect",
+                label="Inspect",
                 status="ACTIVE",
                 objective_preview="inspect",
+                dependency_total=0,
+                dependency_remaining=0,
+                pending_message_count=0,
+                accepted_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
             ),
         ),
     )
@@ -476,7 +704,7 @@ def test_round5b_runtime_handoff_never_drops_actionable_identity() -> None:
             ),
             terminal_monitors=(),
             todo=None,
-            flat_subagents=(),
+            subagent_tasks=(),
             maximum_utf8_bytes=32,
         )
 
@@ -817,11 +1045,11 @@ def test_round5b_tool_groups_pair_reused_call_ids_with_exact_request() -> None:
 
 
 def test_round5b_architecture_and_oracle_are_exact() -> None:
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == 28
+    assert len(COMMITTED_EVENT_DESCRIPTORS) == 29
     assert len(LIVE_EVENT_TYPES) == 24
     assert len(SUBJECT_SLOTS) == 11
     assert APPEND_GUARDS == ("HostWriterGuard",)
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 24
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 25
     assert not {
         "durable_jobs",
         "durable_job_attempts",

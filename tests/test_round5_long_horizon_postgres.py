@@ -51,8 +51,10 @@ from pulsara_agent.ports.live_agent_event import (
 from pulsara_agent.llm.input import MessageRole
 from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
 from tests.support.postgres import verified_postgres_provider
+from tests.support.subagents import accept_active_subagent_fixture
 from tests.support.round3 import (
     CallbackScriptedKernelModel,
+    Round10TestSubagentRuntime,
     ScriptedKernelModel,
     StaticContextSourceCollector,
     StructuredToolPort,
@@ -428,6 +430,7 @@ def _runner(
     *,
     tool_names: tuple[str, ...] = ("test_tool",),
     deadline_factory: KernelExecutionDeadlineFactory | None = None,
+    subagent_runtime: Round10TestSubagentRuntime | None = None,
 ):
     return ConversationKernelRunner(
         repository=repository,
@@ -440,6 +443,7 @@ def _runner(
         live_bus=LiveAgentEventBus(),
         context_source_collector=StaticContextSourceCollector(),
         deadline_factory=deadline_factory,
+        subagent_runtime=subagent_runtime,
     )
 
 
@@ -470,26 +474,27 @@ def _prepare_subagent_task(repository, lease) -> str:
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=monotonic() + 30,
     )
-    task_id = _name("subagent-task")
-    repository.accept_subagent_task(
-        lease.guard,
-        task_id=task_id,
+    return accept_active_subagent_fixture(
+        repository,
+        lease,
         parent_turn_id=parent_turn_id,
         objective="answer once",
-        occurred_at=datetime.now(timezone.utc),
-        actor_id="host:test",
-        deadline_monotonic=monotonic() + 30,
     )
-    repository.set_subagent_task_status(
-        lease.guard,
+
+
+def _round10_subagent_runtime(repository, lease, task_id: str):
+    row = repository.query_subagent_task(
+        session_id=lease.guard.session_id,
         task_id=task_id,
-        status="ACTIVE",
-        reason=None,
-        occurred_at=datetime.now(timezone.utc),
-        actor_id="host:test",
-        deadline_monotonic=monotonic() + 30,
+        deadline_monotonic=monotonic() + 10,
     )
-    return task_id
+    assert row is not None
+    return Round10TestSubagentRuntime(
+        session_id=lease.guard.session_id,
+        task_id=task_id,
+        parent_turn_id=str(row["parent_turn_id"]),
+        objective=str(row["objective"]),
+    )
 
 
 def test_round5_sixty_four_model_calls_finalize_without_a_turn_cap(
@@ -900,7 +905,12 @@ def test_round5_subagent_turn_lost_ack_confirms_exact_winner_once(
     model = ScriptedKernelModel(streams)
 
     result = asyncio.run(
-        _runner(repository, lease, model).run_subagent_turn(
+        _runner(
+            repository,
+            lease,
+            model,
+            subagent_runtime=_round10_subagent_runtime(repository, lease, task_id),
+        ).run_subagent_turn(
             task_id=task_id,
             objective="answer once",
         )
@@ -924,7 +934,12 @@ def test_round5_subagent_lost_ack_joins_transient_confirmation_failures(
     model = ScriptedKernelModel([_text_stream("child", block_id="child-answer")])
 
     result = asyncio.run(
-        _runner(repository, lease, model).run_subagent_turn(
+        _runner(
+            repository,
+            lease,
+            model,
+            subagent_runtime=_round10_subagent_runtime(repository, lease, task_id),
+        ).run_subagent_turn(
             task_id=task_id,
             objective="answer once",
         )
@@ -994,22 +1009,23 @@ def test_round5_subagent_admission_exact_joins_immutable_objective(
         ).kind
         is TurnAdmissionConfirmationKind.FULL
     )
-    with provider.connection(
-        lane=PostgresConnectionLane.HOST_CONTROL,
-        deadline_monotonic=monotonic() + 10,
-    ) as connection:
-        connection.execute(
-            "UPDATE pulsara_v3.subagent_tasks SET objective = %s "
-            "WHERE session_id = %s AND id = %s",
-            ("corrupted objective", session_id, task_id),
-        )
+    with pytest.raises(Exception, match="immutable identity or lifecycle"):
+        with provider.connection(
+            lane=PostgresConnectionLane.HOST_CONTROL,
+            deadline_monotonic=monotonic() + 10,
+        ) as connection:
+            connection.execute(
+                "UPDATE pulsara_v3.subagent_tasks SET objective = %s "
+                "WHERE session_id = %s AND id = %s",
+                ("corrupted objective", session_id, task_id),
+            )
     assert (
         repository.confirm_subagent_turn_admission(
             candidate=accepted_candidate,
             guard=lease.guard,
             deadline_monotonic=monotonic() + 10,
         ).kind
-        is TurnAdmissionConfirmationKind.CONFLICT
+        is TurnAdmissionConfirmationKind.FULL
     )
 
 
@@ -1031,7 +1047,12 @@ def test_round5_subagent_turn_admission_none_conflict_matrix(
     _session_id, _workspace_id, lease = _lease(repository)
     task_id = _prepare_subagent_task(repository, lease)
     model = ScriptedKernelModel([_text_stream("child", block_id="child-answer")])
-    runner = _runner(repository, lease, model)
+    runner = _runner(
+        repository,
+        lease,
+        model,
+        subagent_runtime=_round10_subagent_runtime(repository, lease, task_id),
+    )
 
     if should_open:
         result = asyncio.run(
@@ -1056,7 +1077,12 @@ def test_round5_cancelled_subagent_admission_none_never_reissues(
     _session_id, _workspace_id, lease = _lease(repository)
     task_id = _prepare_subagent_task(repository, lease)
     model = ScriptedKernelModel([_text_stream("must-not-open", block_id="answer")])
-    runner = _runner(repository, lease, model)
+    runner = _runner(
+        repository,
+        lease,
+        model,
+        subagent_runtime=_round10_subagent_runtime(repository, lease, task_id),
+    )
 
     async def scenario() -> None:
         operation = asyncio.create_task(

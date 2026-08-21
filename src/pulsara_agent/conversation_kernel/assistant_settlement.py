@@ -40,6 +40,9 @@ from pulsara_agent.llm.provider_replay import (
 )
 from pulsara_agent.model_input.contracts import PreparedProviderInputCut
 from pulsara_agent.model_input.continuity import ProviderInputContinuityScope
+from pulsara_agent.conversation_kernel.subagents.contracts import (
+    FrozenSubagentResultPublicFact,
+)
 from pulsara_agent.primitives.context import context_fingerprint, thaw_json
 
 
@@ -69,6 +72,9 @@ class PreparedAssistantMessageSettlement:
     provider_replay: PreparedDurableProviderAssistantReplay | None = field(
         default=None, repr=False
     )
+    subagent_result: FrozenSubagentResultPublicFact | None = field(
+        default=None, repr=False
+    )
 
     def __post_init__(self) -> None:
         if (
@@ -96,6 +102,15 @@ class PreparedAssistantMessageSettlement:
             )
         ):
             raise ValueError("assistant replay composite is invalid")
+        if self.subagent_result is not None and (
+            not self.complete_turn
+            or self.continuity_scope.scope_kind.value != "SUBAGENT_TASK"
+            or self.continuity_scope.scope_subagent_task_id
+            != self.subagent_result.task_id
+            or self.subagent_result.producer_entry_id != self.entry_id
+            or self.subagent_result.source.value != "INFERRED"
+        ):
+            raise ValueError("inferred subagent result does not exact-join assistant")
         expected = assistant_settlement_candidate_fingerprint(
             cut=self.cut,
             entry_id=self.entry_id,
@@ -110,6 +125,7 @@ class PreparedAssistantMessageSettlement:
             provider_wire_api=self.provider_wire_api,
             provider_replay_disposition=self.provider_replay_disposition,
             provider_replay=self.provider_replay,
+            subagent_result=self.subagent_result,
         )
         if self.candidate_fingerprint != expected:
             raise ValueError("assistant settlement candidate fingerprint mismatch")
@@ -130,6 +146,7 @@ def assistant_settlement_candidate_fingerprint(
     provider_wire_api: str,
     provider_replay_disposition: ProviderReplayDisposition,
     provider_replay: PreparedDurableProviderAssistantReplay | None,
+    subagent_result: FrozenSubagentResultPublicFact | None = None,
 ) -> str:
     def content_value(value: CanonicalContent) -> tuple[object, ...]:
         return (
@@ -186,6 +203,9 @@ def assistant_settlement_candidate_fingerprint(
             "provider_replay_disposition": provider_replay_disposition.value,
             "provider_replay": (
                 None if provider_replay is None else provider_replay.fragment_fingerprint
+            ),
+            "subagent_result": (
+                None if subagent_result is None else subagent_result.result_fingerprint
             ),
         },
     )
@@ -337,6 +357,7 @@ class AssistantMessageSettlementOwner:
                             candidate.provider_replay_disposition
                         ),
                         provider_replay=candidate.provider_replay,
+                        subagent_result=candidate.subagent_result,
                         complete_turn=candidate.complete_turn,
                         occurred_at=candidate.occurred_at,
                         actor_id=candidate.actor_id,
@@ -362,6 +383,7 @@ class AssistantMessageSettlementOwner:
                                 candidate.provider_replay_disposition
                             ),
                             provider_replay=candidate.provider_replay,
+                            subagent_result=candidate.subagent_result,
                             complete_turn=candidate.complete_turn,
                             occurred_at=candidate.occurred_at,
                             actor_id=candidate.actor_id,

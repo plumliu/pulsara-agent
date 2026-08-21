@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from hashlib import sha256
+import json
 from typing import Mapping, Sequence
 
 from psycopg import Connection
@@ -43,7 +44,11 @@ from pulsara_agent.llm.provider_replay import (
 )
 from pulsara_agent.model_input.contracts import PreparedProviderInputCut
 from pulsara_agent.ports.terminal_observation import ExistingTurnInstallation, NewTurnInstallation, TerminalObservationInstallationAttempt
-from pulsara_agent.primitives.context import FrozenJsonObjectFact, freeze_json
+from pulsara_agent.primitives.context import FrozenJsonObjectFact, freeze_json, thaw_json
+from pulsara_agent.conversation_kernel.subagents.contracts import (
+    FrozenSubagentResultPublicFact,
+    SubagentResultSource,
+)
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.primitives.plan_workflow import PlanWorkflowStatus
 from pulsara_agent.primitives.run_permission import RunPermissionAdmissionSource
@@ -1273,7 +1278,7 @@ class _ConversationOperations:
                     predecessor.binding_revision_id
                 ),
                 provider_input_through_sequence=(
-                    candidate.snapshot.source_through_sequence
+                    safe_head
                 ),
             ),
             deadline_monotonic=deadline_monotonic,
@@ -1282,7 +1287,7 @@ class _ConversationOperations:
         canonical = dispatch.compile_snapshot.canonical_input
         if (
             canonical.identity.provider_input_through_sequence
-            != candidate.snapshot.source_through_sequence
+            != safe_head
             or safe_head < candidate.snapshot.source_through_sequence
         ):
             raise ConversationKernelConflict(
@@ -1388,6 +1393,7 @@ class _ConversationOperations:
             ProviderReplayDisposition.PUBLIC_SEMANTIC_ONLY
         ),
         provider_replay: PreparedDurableProviderAssistantReplay | None = None,
+        subagent_result: FrozenSubagentResultPublicFact | None = None,
         complete_turn: bool = False,
         occurred_at: datetime,
         actor_id: str,
@@ -1400,6 +1406,13 @@ class _ConversationOperations:
         tool_request = any(isinstance(item, AssistantToolCallBlock) for item in blocks)
         if complete_turn and tool_request:
             raise ValueError("a tool-request message cannot complete its turn")
+        if subagent_result is not None and (
+            not complete_turn
+            or tool_request
+            or subagent_result.source is not SubagentResultSource.INFERRED
+            or subagent_result.producer_entry_id != entry_id
+        ):
+            raise ValueError("inferred subagent result composite is invalid")
         if (
             (provider_replay is not None)
             != (provider_replay_disposition is ProviderReplayDisposition.NATIVE_REPLAY)
@@ -1574,6 +1587,83 @@ class _ConversationOperations:
                         payload={"child_ordinal": message_ordinal},
                     )
                 )
+            if subagent_result is not None:
+                task_id = str(turn["scope_subagent_task_id"])
+                if (
+                    str(turn["conversation_scope_kind"])
+                    != ConversationScopeKind.SUBAGENT_TASK.value
+                    or subagent_result.task_id != task_id
+                ):
+                    raise ConversationKernelConflict(
+                        "inferred result belongs to another child scope"
+                    )
+                task = connection.execute(
+                    """SELECT status FROM pulsara_v3.subagent_tasks
+                       WHERE session_id = %s AND id = %s FOR UPDATE""",
+                    (guard.session_id, task_id),
+                ).fetchone()
+                if task is None or str(task["status"]) != "ACTIVE":
+                    raise ConversationKernelConflict(
+                        "inferred result task is no longer active"
+                    )
+                connection.execute(
+                    """INSERT INTO pulsara_v3.subagent_task_children (
+                           id, session_id, task_id, child_kind, child_ordinal,
+                           entry_id, result_source, summary, output_preview,
+                           diagnostics, result_fingerprint
+                       ) VALUES (
+                           %s, %s, %s, 'RESULT',
+                           (SELECT count(*) FROM pulsara_v3.subagent_task_children
+                             WHERE session_id = %s AND task_id = %s),
+                           %s, 'INFERRED', %s, %s, %s::jsonb, %s
+                       )""",
+                    (
+                        subagent_result.result_id,
+                        guard.session_id,
+                        task_id,
+                        guard.session_id,
+                        task_id,
+                        entry_id,
+                        subagent_result.summary,
+                        subagent_result.output_preview,
+                        json.dumps(thaw_json(subagent_result.diagnostics)),
+                        subagent_result.result_fingerprint,
+                    ),
+                )
+                updated = connection.execute(
+                    """UPDATE pulsara_v3.subagent_tasks
+                       SET status = 'COMPLETED', pending_reason = NULL,
+                           terminal_reason = NULL, terminal_at = clock_timestamp()
+                       WHERE session_id = %s AND id = %s AND status = 'ACTIVE'
+                       RETURNING id""",
+                    (guard.session_id, task_id),
+                ).fetchone()
+                if updated is None:
+                    raise ConversationKernelConflict(
+                        "inferred result lost its task terminal winner"
+                    )
+                event_drafts.extend(
+                    (
+                        self._event(
+                            CommittedEventType.SUBAGENT_RESULT_ACCEPTED,
+                            SubjectSlot.SUBAGENT_RESULT,
+                            subagent_result.result_id,
+                            occurred_at=occurred_at,
+                            actor_kind="subagent",
+                            actor_id=task_id,
+                            payload={"result_source": "INFERRED"},
+                        ),
+                        self._event(
+                            CommittedEventType.SUBAGENT_TASK_STATUS_ACCEPTED,
+                            SubjectSlot.SUBAGENT_TASK,
+                            task_id,
+                            occurred_at=occurred_at,
+                            actor_kind="runtime",
+                            actor_id="foreground-runner",
+                            payload={"status": "COMPLETED", "reason": None},
+                        ),
+                    )
+                )
             pending_steer = False
             if complete_turn:
                 pending_steer = bool(
@@ -1642,6 +1732,7 @@ class _ConversationOperations:
             ProviderReplayDisposition.PUBLIC_SEMANTIC_ONLY
         ),
         provider_replay: PreparedDurableProviderAssistantReplay | None = None,
+        subagent_result: FrozenSubagentResultPublicFact | None = None,
         complete_turn: bool,
         occurred_at: datetime,
         actor_id: str,
@@ -1842,6 +1933,52 @@ class _ConversationOperations:
                     raise ConversationKernelConflict(
                         "subagent assistant winner lacks its exact message child"
                     )
+            result_rows = connection.execute(
+                """SELECT result.*, task.status,
+                          result_event.event_type AS result_event_type,
+                          status_event.event_type AS status_event_type
+                   FROM pulsara_v3.subagent_task_children AS result
+                   JOIN pulsara_v3.subagent_tasks AS task
+                     ON task.session_id = result.session_id
+                    AND task.id = result.task_id
+                   LEFT JOIN pulsara_v3.agent_events AS result_event
+                     ON result_event.session_id = result.session_id
+                    AND result_event.subject_subagent_result_id = result.id
+                    AND result_event.event_type = 'SubagentResultAccepted'
+                   LEFT JOIN pulsara_v3.agent_events AS status_event
+                     ON status_event.session_id = task.session_id
+                    AND status_event.subject_subagent_task_id = task.id
+                    AND status_event.event_type = 'SubagentTaskStatusAccepted'
+                    AND status_event.payload->>'status' = 'COMPLETED'
+                   WHERE result.session_id = %s AND result.entry_id = %s
+                     AND result.child_kind = 'RESULT'""",
+                (guard.session_id, entry_id),
+            ).fetchall()
+            if subagent_result is None:
+                if result_rows:
+                    raise ConversationKernelConflict(
+                        "assistant winner owns an unexpected inferred result"
+                    )
+            elif (
+                len(result_rows) != 1
+                or str(result_rows[0]["id"]) != subagent_result.result_id
+                or str(result_rows[0]["task_id"]) != subagent_result.task_id
+                or str(result_rows[0]["result_source"]) != "INFERRED"
+                or str(result_rows[0]["summary"]) != subagent_result.summary
+                or result_rows[0]["output_preview"] != subagent_result.output_preview
+                or freeze_json(result_rows[0]["diagnostics"])
+                != subagent_result.diagnostics
+                or str(result_rows[0]["result_fingerprint"])
+                != subagent_result.result_fingerprint
+                or str(result_rows[0]["status"]) != "COMPLETED"
+                or str(result_rows[0]["result_event_type"])
+                != "SubagentResultAccepted"
+                or str(result_rows[0]["status_event_type"])
+                != "SubagentTaskStatusAccepted"
+            ):
+                raise ConversationKernelConflict(
+                    "inferred subagent result differs from stable candidate"
+                )
             terminal = connection.execute(
                 """
                 SELECT event_sequence FROM pulsara_v3.agent_events

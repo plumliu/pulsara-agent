@@ -27,7 +27,7 @@ Python KernelHostCore
 └── renderer-neutral Protocol v3 gateway
 
 PostgreSQL
-├── pulsara_v3：24 张产品关系
+├── pulsara_v3：25 张产品关系
 ├── selective agent_events occurrence journal
 ├── public.vector capability
 └── public.pulsara_schema_migrations（只保存 universe metadata）
@@ -37,7 +37,7 @@ Durable 边界有意保持狭窄：
 
 - canonical relational rows 拥有 conversation、tool 与 coordination 的
   当前语义真值；accepted memory row只拥有advisory dataset当前包含的内容；
-- closed 28-type `agent_events` journal 只记录 accepted occurrence，不用于恢复
+- closed 29-type `agent_events` journal 只记录 accepted occurrence，不用于恢复
   execution；
 - 24 种 live event 只存在于内存，进程退出即可丢失；
 - 当前不存在durable job handler或job relation；
@@ -83,7 +83,10 @@ Kernel 当前支持：
   provider-neutral logical ToolResult不超过40,000 UTF-8 bytes时可保持FULL
   （与adapter physical wire bytes相互独立）；更大输出使用UTF-8-safe的8,000字符
   head/tail preview，并按需有界读取；
-- bounded Host-scoped subagent；
+- ROOT编排的Host-scoped worker task graph：batch DAG admission、dependency
+  scheduling、partial multi-wait、exact task stop、boundary-safe ROOT-to-worker
+  message、explicit/inferred canonical result与bounded `NONE | LAST_N` parent
+  context；worker始终是不可递归的leaf；
 - 符合Agent Skills标准的bundled/local skills，只扫描workspace/user各自的
   `.pulsara/skills`与`.agents/skills`四种exact root，通过单一聚合、append-only
   `SKILL_CATALOG` source投影，不获得execution或permission authority；catalog
@@ -191,8 +194,8 @@ Round 5B现已增加manual、proactive与mid-turn safe-point compaction。当前
 用户输入、pairing-safe protected tail、current Runtime observation与bounded retained
 Skill context建立标准cold epoch，并在同一run继续。canonical history永不改写，
 provider-error reactive retry仍不支持，最后一套durable job machinery已经删除。
-当前oracle为28类Committed event、24类Live event、11个subject slot、1个append
-guard、24张product relation和0类durable job。验证记录在
+Round 5B激活时oracle为28类Committed event、24类Live event、11个subject slot、
+1个append guard、24张product relation和0类durable job。验证记录在
 [`round5b_long_horizon_context_compaction_activation.json`](benchmarks/suites/core/v1/round5b_long_horizon_context_compaction_activation.json)。
 Round 7在existing `tool_results` relation中增加immutable observation
 timing/origin facts，并为immediate predecessor outcome与per-turn freshness
@@ -229,6 +232,17 @@ permission、MCP route或execution authority。普通`read_file`是唯一progres
 disclosure路径：它没有Skill intent或loaded-state，重复读取返回current bounded bytes。
 验证证据记录在
 [`round9_1_agent_skills_standard_activation.json`](benchmarks/suites/core/v1/round9_1_agent_skills_standard_activation.json)。
+Round 10把flat child升级为由唯一ROOT拥有的worker task graph。七项ROOT-only
+orchestration tool在全部ROOT permission mode中保持provider-visible，但只有
+`BYPASS_PERMISSIONS`可执行；worker只获得`report_agent_result`，不能创建后代。
+Stable task/dependency row拥有logical board，scheduler、capacity、mailbox与wait仍为
+process-local。四child只是physical concurrency，不是task graph生命周期上限；更多
+accepted work保持`PENDING_START`，capacity释放后继续启动。Direct dependency result只
+传播一条edge，ROOT通过list/wait/accept显式观察result。Round 5B compaction handoff复用
+同一task board，不增加durable inbox、run、receipt或recovery graph。当前oracle为29类
+Committed event、24类Live event、11个subject slot、1个append guard、25张product
+relation和0类durable job。验证记录在
+[`round10_hierarchical_subagent_orchestration_activation.json`](benchmarks/suites/core/v1/round10_hierarchical_subagent_orchestration_activation.json)。
 Round 8用advisory dataset取代旧memory durability/recovery graph。`remember`会与
 ToolResult同事务接受一个candidate；governance、cheap-hint reflection、
 embedding与reranking均保持可丢失的process-local弱完成。Accepted item只能是
