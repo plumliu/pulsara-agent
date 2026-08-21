@@ -26,6 +26,8 @@
 >
 > Round 9/9.1激活后收口（2026-08-21）：本文只使用已经落地的`FrozenCapabilityDispatchCut`、Tool/Skill sibling views、两阶段Tool selection/materialization、`FrozenToolCapabilityExposurePlan`、`SkillProjectionOutput`与normal `PreparedKernelToolSurface`/`ProcessLocalToolSurfaceBorrow`。已删除的`FrozenCapabilityPlanningCut`、`FrozenCapabilityExposurePlan`及compaction-private hybrid promotion不再是合法实现目标。successor是标准EMPTY cold boundary，完整MCP cohort按Round 9现有all-or-none规则DIRECT或META_ONLY。
 >
+> Round 10 consumer seam修订（2026-08-21）：Round 5B已经激活的`SubagentInitialSeed`只是一条粗粒度closed union预留，不拥有parent-history或dependency-result选择语义。Round 10必须在同一production `conversation_kernel/cold_epoch.py`中以sealed exact-object factory收紧该branch并bump process-local assembler contract；默认`NONE`，可选`LAST_N(1..3)`只包含actual ROOT model-call cut中的user messages、user steers与assistant public messages，排除所有tool groups；direct dependency的统一terminal result另以bounded `DEPENDENCY_RESULTS` snapshot进入seed。该修订不得改变normal cold-open或compaction successor的seed/placement/wire语义，也不得另建child assembler。
+>
 > 本文现在只实施Round 5B context compaction：active adoption在successor cold boundary依Round 9/9.1重新冻结current Capability；同时先独立落地唯一neutral `KernelColdEpochInputAssembler`，供ordinary cold-open、Round 5B successor和Round 10 child first-open共同消费。本文不实施新的memory extraction、replacement-history replay、provider context-error reactive retry、durable compaction job或hierarchical subagent graph。
 
 ---
@@ -1210,11 +1212,14 @@ FrozenColdConversationSeed
     ordered canonical post-boundary items
     protected-tail selection fingerprint
 
-  SubagentInitialSeed                       # Round 10 consumer
-    exact SUBAGENT_TASK scope
-    exact immutable task objective item
-    optional PARENT_CONTEXT snapshot
-    parent-context selection fingerprint | NONE
+  SubagentInitialSeed                       # Round 10 sealed consumer revision
+    exact SUBAGENT_TASK scope / initial turn
+    exact immutable objective item object + fingerprint
+    exact FrozenSubagentParentContextCallSubject object | NONE
+    exact ordered parent-context selection object | NONE
+    expected PARENT_CONTEXT VALUE/source occurrence fingerprint | NONE
+    exact FrozenDependencyResultContext object | NONE
+    expected DEPENDENCY_RESULTS VALUE/source occurrence fingerprint | NONE
 ~~~
 
 Assembler不选择summary boundary、protected tail、recent user、`NONE | LAST_N`、Tool route、Skill retention或task objective；这些都由调用方唯一拥有。它接收的其他named inputs必须已经冻结并相互exact join：
@@ -1234,6 +1239,8 @@ existing compiler/lowering/wire contract identities
 ~~~
 
 这些参数由一个sealed `assemble` factory逐项验证：Tool/Skill views必须引用同一个parent cut；Tool plan必须引用该Tool view并与exact resolved target/native contract匹配；`FrozenNonTriggerContextSources.tool_exposure_plan`与`.skill_dispatch_view`必须逐对象等于上述plan/view，且其中owner-issued Skill snapshot必须能证明catalog source；scope、child task、target和deadline必须一致。Assembler不接受raw owner snapshots并自行规划Capability，也不重新resolve target。它只消费已经完成的Round 9/9.1语义结果与context collector输出。
+
+Round 10的`SubagentInitialSeed`再增加以下closed验证，不适用于其他两个seed branch：objective item必须逐对象等于exact initial child canonical `USER_MESSAGE`；parent call subject必须来自产生task tool call的same-session ROOT actual compiled cut/continuity-installed model call；`NONE` iff seed与`FrozenNonTriggerContextSources`都不存在`PARENT_CONTEXT`；`LAST_N`的selection必须逐项来自该subject，并在`prepare_semantic()`后exact joincompiler选择出的effective `PARENT_CONTEXT VALUE`及source occurrence。`FrozenDependencyResultContext`必须逐项exact jointarget task的direct dependency edges及其唯一terminal result fingerprints，零dependency iff seed/source均NONE；非空时在`prepare_semantic()`后exact joineffective `DEPENDENCY_RESULTS VALUE`。调用方不能只传手写fingerprint，assembler也不得维护`fingerprint -> snapshot` mutable map。任何wrong scope/task/objective/call subject/dependency result/source head均在provider open前typed拒绝。
 
 唯一placement规则继续由既有owner决定：
 
@@ -1277,7 +1284,7 @@ selected durable-replay hydration已经由`FrozenProviderWireInputPlan`exact引�
 
 Normal fresh/restart cold-open使用`CanonicalColdContinuationSeed`；compaction只在`ACTIVE_INSTALLATION`分支使用`CompactionContinuationSeed`；Round 10 child first-open使用`SubagentInitialSeed`。三者必须调用同一`conversation_kernel/cold_epoch.py` production implementation、同一参数validator与同一two-stage wire path，不能只有相似接口却各自复制renderer。Summary call本身必须继续走独立`PreparedCompactionSummaryCall`，不得伪装cold epoch。`IDLE_BASE_ONLY` adoption也不提前调用assembler；下一条真实turn到来时由normal cold-open以当时current authorities构造`CanonicalColdContinuationSeed`。这样shared assembler抽走的是重复的input assembly，而不是把summary、task admission或domain lifecycle合并成一个god object。
 
-`R5B-A0`是可独立激活的前置slice：即使完整Round 5B尚未实施，ordinary cold-open也必须先迁移到该实现并通过byte-for-byte/wire-plan回归，随后Round 10可以只增加`SubagentInitialSeed`消费路径。Round 10仍自行拥有task admission、`NONE | LAST_N`选择、child-scope owner snapshot、target resolution、physical borrow与continuity install；shared assembler既不依赖compaction package，也不要求summary/snapshot schema已经激活。
+`R5B-A0`已经随Round 5B激活：ordinary cold-open与compaction successor均使用该implementation并具备wire-plan回归。Round 10只允许收紧`SubagentInitialSeed` branch与对应pure validator，继续自行拥有task admission、default `NONE` / `LAST_N(1..3)`选择、direct `DEPENDENCY_RESULTS` freeze、child-scope owner snapshot、target resolution、physical borrow与continuity install；shared assembler既不反向读取ROOT transcript/graph，也不拥有task/summary/domain lifecycle。
 
 ### 10.1.2 Skill catalog与active body必须分开重建
 
@@ -1388,6 +1395,23 @@ active branch的live state在summary完成后、dry assembly前冻结；adoption
 ### 10.5 TODO与Terminal owner修改面
 
 `TodoRunStateOwner`提供exact-run、只读bounded snapshot方法；不得把current items持久化或复制进repository。TODO subshape不携带durable item ID；`ordinal`只是当次projection中的ordered position，completed正文不注入，只进入`completed_omitted`计数。Terminal manager/monitor增加Host-scoped只读snapshot方法，必须在各自lock内freeze，不读raw output。Subagent manager只提供现有flat task的bounded只读view；hierarchical graph后续另行扩展同一source。
+
+### 10.5.1 Round 10 hierarchical task-board replacement seam
+
+上段最后一句只描述Round 5B激活时的baseline。Round 10实现hierarchical task graph时，必须**原地替换**同一个`COMPACTION_RUNTIME_HANDOFF`中的`flat_subagents` branch，不新增第二个source或handoff owner：
+
+~~~text
+FrozenRootSubagentTaskBoardHandoffFact
+  task id
+  optional task key / label / objective preview
+  ACTIVE | PENDING_START | WAITING_DEPENDENCY
+  dependency total / remaining
+  pending ROOT-message count
+~~~
+
+provider key固定改为`subagent_tasks`并bump该source renderer/contract identity。最多16个rows；`task_key/label`各最多64 UTF-8 bytes，`objective_preview`为确定性UTF-8-safe HEAD_TAIL且最多512 bytes。全部ACTIVE优先并必须保留，其后依次为PENDING_START、WAITING_DEPENDENCY，各组按`accepted_at, task_id`。FULL/COMPACT均携带status-specific exact total/omitted counts；COMPACT只能删除尾部PENDING/WAITING whole rows，不能删除ACTIVE或截断row。它不携带model-authored phase、mail body、raw child transcript、result正文、hidden reasoning或dependency edge明细。task/mailbox state变化继续使用本source既有`SNAPSHOT_ON_CHANGE` successor/no-op/CLEARED语义。
+
+Round 10直接修改production `conversation_kernel/compaction/runtime_handoff.py`及其tool-runtime snapshot adapter；Round 5B compaction service只继续消费这一统一source，不理解hierarchical scheduler，也不恢复mailbox或task execution。
 
 ### 10.6 `RETAINED_SKILL_CONTEXT`：只保留同run中真正完整交付的Skill
 
@@ -2062,7 +2086,7 @@ Round 5A.2、Round 7.1、Round 9、Round 9.1与Lightweight TODO refinement必须
 - adapter/continuity golden证明本次纯重构不改变现有ordinary cold-open wire；
 - architecture gate证明无DB/Host/owner read、physical borrow、provider open、CAS、durable row或第二套placement policy。
 
-该slice是Round 5B抽出的共享Runtime seam，必须先让ordinary fresh/restart cold-open切换到同一实现并保存Chat/Responses wire golden，随后才可独立供Round 10消费。Round 10只新增`SubagentInitialSeed`调用路径，继续由自身冻结child objective/`NONE | LAST_N` parent context、child-scope owner snapshots、target、views、physical borrow和install authority；它不得依赖summary/adoption实现。A0本身不暴露新产品入口、不改变canonical rows或oracle。
+该slice已经随Round 5B激活，并让ordinary fresh/restart cold-open切换到同一实现且保存Chat/Responses wire golden。Round 10只收紧`SubagentInitialSeed`调用路径，继续由自身冻结child objective/default `NONE | LAST_N(1..3)` parent context、exact parent model-call subject、direct dependency result context、child-scope owner snapshots、target、views、physical borrow和install authority；它不得依赖summary/adoption实现。A0本身不暴露新产品入口、不改变canonical rows或oracle。
 
 ### R5B-A：Pure contracts与one-cut planner
 
@@ -2158,7 +2182,7 @@ Round 5A.2、Round 7.1、Round 9、Round 9.1与Lightweight TODO refinement必须
 - dry synthetic snapshot seed与canonical FULL后的same seed产生逐项相同compiled/wire/candidate inputs；任一canonical/current-source drift使比较失败且provider open为0；
 - 一个planning absolute deadline贯穿compile、selected hydration、wire materialization与candidate inputs，不因assembler内部阶段或第二次exact assembly重置；
 - 直接调用assembler前后repository query、owner snapshot、physical borrow、continuity slot、provider open与canonical row计数均为0。
-- Round 10 child first-open以`SubagentInitialSeed + EmptyCapabilityEpochPredecessor + exact child sibling views`复用该实现；task admission、`NONE | LAST_N`选择、child physical borrow/install仍在assembler外，且无需导入compaction package。
+- Round 10 child first-open以sealed exact-object `SubagentInitialSeed + EmptyCapabilityEpochPredecessor + exact child sibling views`复用该实现；task admission、default `NONE | LAST_N(1..3)`选择、direct dependency result freeze、child physical borrow/install仍在assembler外，且无需导入compaction package。
 
 ### 20.2 Pure planner golden
 
