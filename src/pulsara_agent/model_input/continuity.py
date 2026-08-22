@@ -16,8 +16,10 @@ from pulsara_agent.llm.estimator import TokenEstimate
 from pulsara_agent.llm.provider_replay import ProviderAssistantReplayFragment
 from pulsara_agent.llm.request import FrozenProviderWireInputPlan
 from pulsara_agent.capability.contracts import (
+    FrozenCapabilityDispatchCut,
     FrozenMcpRouteProjection,
     FrozenNativeToolProjectionSet,
+    FrozenToolCapabilityExposurePlan,
     frozen_tool_spec_fingerprint,
 )
 from pulsara_agent.model_input.contracts import (
@@ -348,9 +350,7 @@ class FrozenProviderInputEpochView:
         repr=False
     )
     wire_input_plan: FrozenProviderWireInputPlan = field(repr=False)
-    capability_dispatch_cut_fingerprint: str
-    direct_native_projection_set: FrozenNativeToolProjectionSet = field(repr=False)
-    mcp_route_projection: FrozenMcpRouteProjection = field(repr=False)
+    tool_exposure_plan: FrozenToolCapabilityExposurePlan = field(repr=False)
     canonical_frontier: ProcessLocalCanonicalFrontier
     source_heads: tuple[ProcessLocalSourceHead, ...]
     final_estimate: TokenEstimate
@@ -374,29 +374,26 @@ class FrozenProviderInputEpochView:
             self.wire_input_plan.compiled_semantic_fingerprint,
             "compiled semantic input",
         )
-        _fingerprint(
-            self.capability_dispatch_cut_fingerprint,
-            "capability dispatch cut",
-        )
+        direct_native_projection_set = self.tool_exposure_plan.direct_projection_set
         if (
             tuple(item.name for item in self.tools)
             != tuple(
                 item.provider_name
-                for item in self.direct_native_projection_set.tool_versions
+                for item in direct_native_projection_set.tool_versions
             )
             or any(
                 frozen_tool_spec_fingerprint(spec)
                 != projection.canonical_tool_spec_fingerprint
                 for spec, projection in zip(
                     self.tools,
-                    self.direct_native_projection_set.projections,
+                    direct_native_projection_set.projections,
                     strict=True,
                 )
             )
             or self.wire_input_plan.materialization.tool_items
             != tuple(
                 item.wire_tool
-                for item in self.direct_native_projection_set.projections
+                for item in direct_native_projection_set.projections
             )
         ):
             raise ValueError("installed native tool proof drifted")
@@ -419,6 +416,18 @@ class FrozenProviderInputEpochView:
         )
         if len(fragment_entries) != len(set(fragment_entries)):
             raise ValueError("provider-input replay fragments are duplicated")
+
+    @property
+    def capability_dispatch_cut(self) -> FrozenCapabilityDispatchCut:
+        return self.tool_exposure_plan.dispatch_view.parent_dispatch_cut
+
+    @property
+    def direct_native_projection_set(self) -> FrozenNativeToolProjectionSet:
+        return self.tool_exposure_plan.direct_projection_set
+
+    @property
+    def mcp_route_projection(self) -> FrozenMcpRouteProjection:
+        return self.tool_exposure_plan.mcp_catalog_route_projection
 
 
 class ProviderInputAdmissionPredecessorKind(StrEnum):
@@ -475,80 +484,73 @@ def provider_input_dispatch_anchor_value(
 
 @dataclass(frozen=True, slots=True)
 class FrozenProviderInputAppendPlanningInput:
+    planning_nonce: str
     scope: ProviderInputContinuityScope
     predecessor: ProviderInputAdmissionPredecessorKind
     predecessor_view: FrozenProviderInputEpochView | None = field(repr=False)
     dispatch_anchor: ProviderInputDispatchAnchor
     canonical_delta_fingerprints: tuple[str, ...]
-    planning_fingerprint: str
 
     def __post_init__(self) -> None:
         if (self.predecessor is ProviderInputAdmissionPredecessorKind.EMPTY) != (
             self.predecessor_view is None
         ):
             raise ValueError("provider-input planning predecessor union is invalid")
+        if not self.planning_nonce:
+            raise ValueError("provider-input planning nonce is empty")
         for value in self.canonical_delta_fingerprints:
             _fingerprint(value, "canonical delta")
-        expected = provider_input_append_planning_fingerprint(
-            scope=self.scope,
-            predecessor=self.predecessor,
-            predecessor_view=self.predecessor_view,
-            dispatch_anchor=self.dispatch_anchor,
-            canonical_delta_fingerprints=self.canonical_delta_fingerprints,
-        )
-        if self.planning_fingerprint != expected:
-            raise ValueError("provider-input planning fingerprint mismatch")
 
 
 @dataclass(frozen=True, slots=True)
 class PreparedProviderInputAppendCandidate:
-    scope: ProviderInputContinuityScope
+    planning: FrozenProviderInputAppendPlanningInput = field(repr=False)
     epoch_nonce: str
     expected_epoch_revision: int
-    predecessor_prefix_fingerprint: str | None
-    dispatch_anchor: ProviderInputDispatchAnchor
     resulting_compiled_input: FrozenCompiledModelInput = field(repr=False)
     wire_input_plan: FrozenProviderWireInputPlan = field(repr=False)
-    capability_dispatch_cut_fingerprint: str
-    direct_native_projection_set: FrozenNativeToolProjectionSet = field(repr=False)
-    mcp_route_projection: FrozenMcpRouteProjection = field(repr=False)
+    tool_exposure_plan: FrozenToolCapabilityExposurePlan = field(repr=False)
     resulting_canonical_frontier: ProcessLocalCanonicalFrontier
     resulting_source_heads: tuple[ProcessLocalSourceHead, ...]
     appended_message_count: int
     reset_reason: ProviderInputEpochResetReason | None
     compatibility: ProviderInputEpochCompatibility
-    planning_fingerprint: str
-    candidate_fingerprint: str
 
     def __post_init__(self) -> None:
         if not self.epoch_nonce or self.expected_epoch_revision < 0:
             raise ValueError("provider-input append epoch identity is invalid")
-        if self.predecessor_prefix_fingerprint is not None:
-            _fingerprint(self.predecessor_prefix_fingerprint, "predecessor prefix")
         if self.appended_message_count < 0:
             raise ValueError("provider-input append message count is invalid")
-        expected = prepared_provider_input_append_candidate_fingerprint(
-            scope=self.scope,
-            epoch_nonce=self.epoch_nonce,
-            expected_epoch_revision=self.expected_epoch_revision,
-            predecessor_prefix_fingerprint=self.predecessor_prefix_fingerprint,
-            dispatch_anchor=self.dispatch_anchor,
-            resulting_compiled_input=self.resulting_compiled_input,
-            wire_input_plan=self.wire_input_plan,
-            capability_dispatch_cut_fingerprint=(
-                self.capability_dispatch_cut_fingerprint
-            ),
-            direct_native_projection_set=self.direct_native_projection_set,
-            mcp_route_projection=self.mcp_route_projection,
-            resulting_canonical_frontier=self.resulting_canonical_frontier,
-            resulting_source_heads=self.resulting_source_heads,
-            appended_message_count=self.appended_message_count,
-            reset_reason=self.reset_reason,
-            compatibility=self.compatibility,
-            planning_fingerprint=self.planning_fingerprint,
-        )
-        if self.candidate_fingerprint != expected:
-            raise ValueError("provider-input append candidate fingerprint mismatch")
+        if (
+            self.resulting_compiled_input.tools
+            != self.tool_exposure_plan.direct_tool_surface.tool_specs
+            or self.wire_input_plan.materialization.tool_items
+            != tuple(
+                item.wire_tool
+                for item in self.tool_exposure_plan.direct_projection_set.projections
+            )
+        ):
+            raise ValueError("provider-input append candidate capability plan drifted")
+
+    @property
+    def scope(self) -> ProviderInputContinuityScope:
+        return self.planning.scope
+
+    @property
+    def dispatch_anchor(self) -> ProviderInputDispatchAnchor:
+        return self.planning.dispatch_anchor
+
+    @property
+    def capability_dispatch_cut(self) -> FrozenCapabilityDispatchCut:
+        return self.tool_exposure_plan.dispatch_view.parent_dispatch_cut
+
+    @property
+    def direct_native_projection_set(self) -> FrozenNativeToolProjectionSet:
+        return self.tool_exposure_plan.direct_projection_set
+
+    @property
+    def mcp_route_projection(self) -> FrozenMcpRouteProjection:
+        return self.tool_exposure_plan.mcp_catalog_route_projection
 
 
 @dataclass(frozen=True, slots=True)
@@ -569,125 +571,11 @@ class ProcessLocalProviderInputInstallPermit:
     scope: ProviderInputContinuityScope
     epoch_nonce: str
     epoch_revision: int
-    candidate_fingerprint: str
-    execution_fingerprint: str
     permit_nonce: str
 
     def __post_init__(self) -> None:
         if not self.epoch_nonce or not self.permit_nonce or self.epoch_revision < 1:
             raise ValueError("provider-input install permit is incomplete")
-        _fingerprint(self.candidate_fingerprint, "append candidate")
-        _fingerprint(self.execution_fingerprint, "model execution")
-
-
-def provider_input_append_planning_fingerprint(
-    *,
-    scope: ProviderInputContinuityScope,
-    predecessor: ProviderInputAdmissionPredecessorKind,
-    predecessor_view: FrozenProviderInputEpochView | None,
-    dispatch_anchor: ProviderInputDispatchAnchor,
-    canonical_delta_fingerprints: tuple[str, ...],
-) -> str:
-    return context_fingerprint(
-        "pulsara:provider-input-append-planning:v2-wire-proof",
-        {
-            "scope": (
-                scope.session_id,
-                scope.scope_kind.value,
-                scope.scope_subagent_task_id,
-            ),
-            "predecessor": predecessor.value,
-            "predecessor_prefix": (
-                None
-                if predecessor_view is None
-                else predecessor_view.semantic_prefix_fingerprint
-            ),
-            "predecessor_revision": (
-                None if predecessor_view is None else predecessor_view.epoch_revision
-            ),
-            "anchor": provider_input_dispatch_anchor_value(dispatch_anchor),
-            "delta": canonical_delta_fingerprints,
-        },
-    )
-
-
-def prepared_provider_input_append_candidate_fingerprint(
-    *,
-    scope: ProviderInputContinuityScope,
-    epoch_nonce: str,
-    expected_epoch_revision: int,
-    predecessor_prefix_fingerprint: str | None,
-    dispatch_anchor: ProviderInputDispatchAnchor,
-    resulting_compiled_input: FrozenCompiledModelInput,
-    wire_input_plan: FrozenProviderWireInputPlan,
-    capability_dispatch_cut_fingerprint: str,
-    direct_native_projection_set: FrozenNativeToolProjectionSet,
-    mcp_route_projection: FrozenMcpRouteProjection,
-    resulting_canonical_frontier: ProcessLocalCanonicalFrontier,
-    resulting_source_heads: tuple[ProcessLocalSourceHead, ...],
-    appended_message_count: int,
-    reset_reason: ProviderInputEpochResetReason | None,
-    compatibility: ProviderInputEpochCompatibility,
-    planning_fingerprint: str,
-) -> str:
-    return context_fingerprint(
-        "pulsara:prepared-provider-input-append:v2-wire-proof",
-        {
-            "scope": (
-                scope.session_id,
-                scope.scope_kind.value,
-                scope.scope_subagent_task_id,
-            ),
-            "epoch_nonce": epoch_nonce,
-            "expected_revision": expected_epoch_revision,
-            "predecessor": predecessor_prefix_fingerprint,
-            "anchor": provider_input_dispatch_anchor_value(dispatch_anchor),
-            "compiled": resulting_compiled_input.compiled_semantic_fingerprint,
-            "wire_plan": wire_input_plan.plan_fingerprint,
-            "wire_quote": wire_input_plan.quote.quote_fingerprint,
-            "capability_dispatch_cut": capability_dispatch_cut_fingerprint,
-            "direct_native_projection_set": (
-                direct_native_projection_set.projection_set_fingerprint
-            ),
-            "mcp_route_projection": mcp_route_projection.projection_fingerprint,
-            "frontier": {
-                "binding_revision": (
-                    resulting_canonical_frontier.latest_context_binding_revision_id
-                ),
-                "context_base": (
-                    resulting_canonical_frontier.context_base_semantic_identity
-                ),
-                "through": resulting_canonical_frontier.through_sequence,
-                "items": resulting_canonical_frontier.ordered_item_fingerprints,
-            },
-            "source_heads": tuple(
-                {
-                    "source": item.source_kind.value,
-                    "presence": item.presence.value,
-                    "semantic": item.semantic_fingerprint,
-                    "observation": item.installed_observation_fingerprint,
-                    "turn": item.last_emitted_turn_id,
-                    "call": item.last_emitted_model_call_index,
-                }
-                for item in resulting_source_heads
-            ),
-            "appended": appended_message_count,
-            "reset": None if reset_reason is None else reset_reason.value,
-            "compatibility": {
-                "compiler": compatibility.compiler_contract_version,
-                "base": compatibility.base_system_semantic_fingerprint,
-                "tools": compatibility.tool_surface_fingerprint,
-                "target": compatibility.model_target_fingerprint,
-                "estimator": compatibility.estimator_fingerprint,
-                "lowering": compatibility.provider_message_lowering_contract,
-                "context_base": compatibility.context_base_semantic_identity,
-                "replay_contract": (
-                    compatibility.provider_assistant_replay_contract_fingerprint
-                ),
-            },
-            "planning": planning_fingerprint,
-        },
-    )
 
 
 __all__ = [
@@ -715,8 +603,6 @@ __all__ = [
     "decode_runtime_observation",
     "encode_runtime_observation",
     "provider_input_logical_utf8_bytes",
-    "provider_input_append_planning_fingerprint",
     "provider_input_dispatch_anchor_value",
     "provider_input_prefix_fingerprint",
-    "prepared_provider_input_append_candidate_fingerprint",
 ]

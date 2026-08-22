@@ -164,7 +164,6 @@ class TerminalObservationInstallationAttempt:
     target: PreparedInstallationTarget
     occurred_at: datetime
     actor_id: str
-    candidate_fingerprint: str
 
     def __post_init__(self) -> None:
         if not all(
@@ -175,7 +174,6 @@ class TerminalObservationInstallationAttempt:
                 self.actor_id,
                 self.retained_from_cursor,
                 self.through_cursor,
-                self.candidate_fingerprint,
             )
         ):
             raise ValueError("terminal observation installation is incomplete")

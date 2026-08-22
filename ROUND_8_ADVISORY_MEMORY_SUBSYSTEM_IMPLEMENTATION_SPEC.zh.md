@@ -2,6 +2,8 @@
 
 > 状态：**ACTIVATED — 2026-08-16**
 >
+> Fingerprint hard-cut：[`PULSARA_FINGERPRINT_SUBTRACTION_HARD_CUT_IMPLEMENTATION_SPEC.zh.md`](PULSARA_FINGERPRINT_SUBTRACTION_HARD_CUT_IMPLEMENTATION_SPEC.zh.md)覆盖本文冗余的same-process DTO fingerprint/proof字段以及所有逐文件、文档与activation evidence SHA门禁；durable candidate/fact/relation semantic digest继续有效。
+>
 > 记录日期：2026-08-15
 >
 > 当前代码基线：`327bf86061a04e628dc8e700d7030f4237fbbe5d`（`Remove legacy Host compatibility facade`）

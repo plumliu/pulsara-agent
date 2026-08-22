@@ -270,9 +270,7 @@ def test_round2_monitor_uses_exact_cursor_and_single_pass_head_tail(
             minimum_progress_interval_seconds=1800,
         ),
     )
-    coordinator.settle_registration(
-        prepared.token_id, prepared.token_fingerprint, committed=True
-    )
+    coordinator.settle_registration(prepared, committed=True)
     state.output.append_raw(("HEAD-" + "🙂" * 1_000 + "-TAIL ").encode())
     coordinator._evaluate(prepared.monitor_id, monotonic() + 2_000)  # noqa: SLF001
     target = NewTurnInstallation(
@@ -366,9 +364,7 @@ def test_round2_monitor_registration_cannot_miss_completion_between_snapshot_and
         authorization_reference="policy:race",
         policy=TerminalMonitorPolicy(),
     )
-    coordinator.settle_registration(
-        prepared.token_id, prepared.token_fingerprint, committed=True
-    )
+    coordinator.settle_registration(prepared, committed=True)
     deadline = monotonic() + 1
     while prepared.monitor_id not in coordinator.pending_monitor_ids():
         assert monotonic() < deadline
@@ -426,9 +422,7 @@ def test_round2_monitor_cancel_after_freeze_preserves_exact_attempt_until_settle
             minimum_progress_interval_seconds=1800,
         ),
     )
-    coordinator.settle_registration(
-        prepared.token_id, prepared.token_fingerprint, committed=True
-    )
+    coordinator.settle_registration(prepared, committed=True)
     state.output.append_raw(b"freeze-wins ")
     coordinator._evaluate(prepared.monitor_id, monotonic() + 2_000)  # noqa: SLF001
     attempt = coordinator.freeze(
@@ -489,9 +483,7 @@ def test_round2_monitor_optional_output_heartbeat_expiry_and_cancel_do_not_kill(
             heartbeat_interval_seconds=5,
         ),
     )
-    coordinator.settle_registration(
-        heartbeat.token_id, heartbeat.token_fingerprint, committed=True
-    )
+    coordinator.settle_registration(heartbeat, committed=True)
     heartbeat_process.output.append_raw(b"output-does-not-enable-progress ")
     coordinator._evaluate(heartbeat.monitor_id, monotonic() + 4)  # noqa: SLF001
     assert coordinator.pending_monitor_ids() == ()
@@ -518,9 +510,7 @@ def test_round2_monitor_optional_output_heartbeat_expiry_and_cancel_do_not_kill(
         authorization_reference="policy:expiry",
         policy=TerminalMonitorPolicy(maximum_duration_seconds=1),
     )
-    coordinator.settle_registration(
-        expiry.token_id, expiry.token_fingerprint, committed=True
-    )
+    coordinator.settle_registration(expiry, committed=True)
     coordinator._evaluate(expiry.monitor_id, monotonic() + 2)  # noqa: SLF001
     expiry_attempt = coordinator.freeze(
         monitor_id=expiry.monitor_id,
@@ -569,9 +559,7 @@ def test_round2_monitor_completion_coalesces_pending_progress_and_cursor_advance
             minimum_progress_interval_seconds=5,
         ),
     )
-    coordinator.settle_registration(
-        prepared.token_id, prepared.token_fingerprint, committed=True
-    )
+    coordinator.settle_registration(prepared, committed=True)
     state.output.append_raw(b"first ")
     coordinator._evaluate(prepared.monitor_id, monotonic() + 10)  # noqa: SLF001
     state.output.append_raw(b"second ")
@@ -694,7 +682,7 @@ def test_round2_terminal_monitor_tool_root_settlement_and_subagent_rejection(
         assert token is not None
         assert tuple(token.__dataclass_fields__) == (  # type: ignore[attr-defined]
             "token_id",
-            "token_fingerprint",
+            "prepared",
         )
         await port.settle_process_local_effect(
             token, ProcessLocalEffectSettlementDisposition.COMMITTED
@@ -882,9 +870,7 @@ def test_round2_monitor_dormant_capture_requires_commit_and_discard_is_terminal(
     assert coordinator.pending_monitor_ids() == ()
     assert wake_count == 0
 
-    coordinator.settle_registration(
-        committed.token_id, committed.token_fingerprint, committed=True
-    )
+    coordinator.settle_registration(committed, committed=True)
     coordinator._evaluate(committed.monitor_id, monotonic() + 11)  # noqa: SLF001
     assert coordinator.pending_monitor_ids() == (committed.monitor_id,)
     assert wake_count == 1
@@ -899,9 +885,7 @@ def test_round2_monitor_dormant_capture_requires_commit_and_discard_is_terminal(
         policy=policy,
     )
     discarded_process.output.append_raw(b"must-never-deliver ")
-    coordinator.settle_registration(
-        discarded.token_id, discarded.token_fingerprint, committed=False
-    )
+    coordinator.settle_registration(discarded, committed=False)
     coordinator._evaluate(discarded.monitor_id, monotonic() + 20)  # noqa: SLF001
     assert coordinator.cancel(discarded.monitor_id) == "already_terminal"
     assert coordinator.pending_monitor_ids() == (committed.monitor_id,)
@@ -938,9 +922,7 @@ def test_round2_monitor_successor_is_exactly_after_inflight_and_rejection_retrie
             minimum_progress_interval_seconds=5,
         ),
     )
-    coordinator.settle_registration(
-        prepared.token_id, prepared.token_fingerprint, committed=True
-    )
+    coordinator.settle_registration(prepared, committed=True)
     target = NewTurnInstallation(
         "turn:successor-wake", "revision:successor-wake", "entry:successor-wake"
     )
@@ -974,7 +956,10 @@ def test_round2_monitor_successor_is_exactly_after_inflight_and_rejection_retrie
     )
     assert retried is not None
     assert retried.content == first.content
-    assert retried.candidate_fingerprint == first.candidate_fingerprint
+    assert retried.content_digest == first.content_digest
+    assert retried.retained_from_cursor == first.retained_from_cursor
+    assert retried.through_cursor == first.through_cursor
+    assert retried.target == first.target
     coordinator.settle_installation(retried, accepted=True)
 
     second = coordinator.freeze(
@@ -1020,9 +1005,7 @@ def test_round2_monitor_discards_stale_lock_free_read_after_draft_freeze(
             minimum_progress_interval_seconds=1800,
         ),
     )
-    coordinator.settle_registration(
-        prepared.token_id, prepared.token_fingerprint, committed=True
-    )
+    coordinator.settle_registration(prepared, committed=True)
     target = NewTurnInstallation(
         "turn:successor-race-wake",
         "revision:successor-race-wake",
@@ -1120,9 +1103,7 @@ def test_round2_monitor_capacity_and_autonomy_are_finite_and_idle_observer_is_no
             authorization_reference=f"policy:bound:{index}",
             policy=policy,
         )
-        coordinator.settle_registration(
-            prepared.token_id, prepared.token_fingerprint, committed=True
-        )
+        coordinator.settle_registration(prepared, committed=True)
         registrations.append(prepared)
     with pytest.raises(TerminalMonitorRejected) as rejection:
         coordinator.prepare_registration(

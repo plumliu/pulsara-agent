@@ -116,6 +116,7 @@ _ROOT_LOCATION_PREFIX = {
     LocalSkillRootKind.USER_PULSARA: USER_PRODUCT_LOCATION_PREFIX,
     LocalSkillRootKind.USER_AGENTS: "~/.agents/skills",
 }
+_ROOT_POLICY_CONSTRUCTOR = object()
 
 
 class SkillDiscoveryDisposition(StrEnum):
@@ -123,15 +124,35 @@ class SkillDiscoveryDisposition(StrEnum):
     UNAVAILABLE = "UNAVAILABLE"
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class PreparedSkillRootBinding:
     root_kind: LocalSkillRootKind
     path: Path
     containment_root: Path
     location_prefix: str
     precedence_ordinal: int
-    binding_fingerprint: str
     _owner_authority: object = field(repr=False, compare=False)
+
+    def __init__(
+        self,
+        *,
+        root_kind: LocalSkillRootKind,
+        path: Path,
+        containment_root: Path,
+        location_prefix: str,
+        precedence_ordinal: int,
+        _owner_authority: object,
+        _constructor: object,
+    ) -> None:
+        if _constructor is not _ROOT_POLICY_CONSTRUCTOR:
+            raise TypeError("Skill root bindings are owner-issued")
+        object.__setattr__(self, "root_kind", root_kind)
+        object.__setattr__(self, "path", path)
+        object.__setattr__(self, "containment_root", containment_root)
+        object.__setattr__(self, "location_prefix", location_prefix)
+        object.__setattr__(self, "precedence_ordinal", precedence_ordinal)
+        object.__setattr__(self, "_owner_authority", _owner_authority)
+        self.__post_init__()
 
     def __post_init__(self) -> None:
         if not isinstance(self.root_kind, LocalSkillRootKind):
@@ -140,24 +161,31 @@ class PreparedSkillRootBinding:
             raise ValueError("Skill root location prefix conflicts")
         if self.precedence_ordinal != _ROOT_ORDER.index(self.root_kind):
             raise ValueError("Skill root precedence conflicts")
-        expected = _root_binding_fingerprint(
-            root_kind=self.root_kind,
-            path=self.path,
-            containment_root=self.containment_root,
-            location_prefix=self.location_prefix,
-            precedence_ordinal=self.precedence_ordinal,
-        )
-        if self.binding_fingerprint != expected:
-            raise ValueError("Skill root binding fingerprint mismatch")
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class PreparedLocalSkillRootPolicy:
     conversation_scope_kind: ModelInputScopeKind
     scope_subagent_task_id: str | None
     roots: tuple[PreparedSkillRootBinding, ...]
-    root_policy_fingerprint: str
     _owner_authority: object = field(repr=False, compare=False)
+
+    def __init__(
+        self,
+        *,
+        conversation_scope_kind: ModelInputScopeKind,
+        scope_subagent_task_id: str | None,
+        roots: tuple[PreparedSkillRootBinding, ...],
+        _owner_authority: object,
+        _constructor: object,
+    ) -> None:
+        if _constructor is not _ROOT_POLICY_CONSTRUCTOR:
+            raise TypeError("Skill root policies are owner-issued")
+        object.__setattr__(self, "conversation_scope_kind", conversation_scope_kind)
+        object.__setattr__(self, "scope_subagent_task_id", scope_subagent_task_id)
+        object.__setattr__(self, "roots", roots)
+        object.__setattr__(self, "_owner_authority", _owner_authority)
+        self.__post_init__()
 
     def __post_init__(self) -> None:
         _validate_scope(
@@ -177,26 +205,21 @@ class PreparedLocalSkillRootPolicy:
             raise ValueError("Skill root policy is not ordered and unique")
         if any(item._owner_authority is not self._owner_authority for item in self.roots):
             raise ValueError("Skill root policy contains a foreign binding")
-        expected = _root_policy_fingerprint(
-            conversation_scope_kind=self.conversation_scope_kind,
-            scope_subagent_task_id=self.scope_subagent_task_id,
-            roots=self.roots,
-        )
-        if self.root_policy_fingerprint != expected:
-            raise ValueError("Skill root policy fingerprint mismatch")
 
 
 @dataclass(frozen=True, slots=True)
 class LocalSkillDiscovery:
     skills: tuple[LocalSkillManifest, ...]
     diagnostics: tuple[SkillDiagnostic, ...]
+    root_policy: PreparedLocalSkillRootPolicy = field(repr=False)
     disposition: SkillDiscoveryDisposition = SkillDiscoveryDisposition.COMPLETE
     unavailable_reason: SkillCatalogUnavailableReason | None = None
-    root_policy_fingerprint: str = ""
     enumerated_candidate_count: int = 0
     observed_utf8_bytes: int = 0
 
     def __post_init__(self) -> None:
+        if not isinstance(self.root_policy, PreparedLocalSkillRootPolicy):
+            raise TypeError("Skill discovery root policy is not frozen")
         if not isinstance(self.disposition, SkillDiscoveryDisposition):
             raise TypeError("Skill discovery disposition is not closed")
         if (
@@ -303,12 +326,8 @@ class LocalSkillProvider:
             conversation_scope_kind=conversation_scope_kind,
             scope_subagent_task_id=scope_subagent_task_id,
             roots=roots,
-            root_policy_fingerprint=_root_policy_fingerprint(
-                conversation_scope_kind=conversation_scope_kind,
-                scope_subagent_task_id=scope_subagent_task_id,
-                roots=roots,
-            ),
             _owner_authority=self._owner_authority,
+            _constructor=_ROOT_POLICY_CONSTRUCTOR,
         )
 
     def discover(
@@ -485,9 +504,9 @@ class LocalSkillProvider:
         return LocalSkillDiscovery(
             skills=tuple(skills),
             diagnostics=_bounded_diagnostics(diagnostics),
+            root_policy=policy,
             disposition=SkillDiscoveryDisposition.COMPLETE,
             unavailable_reason=None,
-            root_policy_fingerprint=policy.root_policy_fingerprint,
             enumerated_candidate_count=len(candidates),
             observed_utf8_bytes=observed_bytes,
         )
@@ -523,14 +542,8 @@ class LocalSkillProvider:
             containment_root=containment,
             location_prefix=prefix,
             precedence_ordinal=ordinal,
-            binding_fingerprint=_root_binding_fingerprint(
-                root_kind=root_kind,
-                path=path,
-                containment_root=containment,
-                location_prefix=prefix,
-                precedence_ordinal=ordinal,
-            ),
             _owner_authority=self._owner_authority,
+            _constructor=_ROOT_POLICY_CONSTRUCTOR,
         )
 
 
@@ -974,18 +987,26 @@ def _root_binding_fingerprint(
     )
 
 
-def _root_policy_fingerprint(
-    *,
-    conversation_scope_kind: ModelInputScopeKind,
-    scope_subagent_task_id: str | None,
-    roots: tuple[PreparedSkillRootBinding, ...],
+def local_skill_root_policy_identity_digest(
+    policy: PreparedLocalSkillRootPolicy,
 ) -> str:
+    """Derive catalog lineage without duplicating the owner-issued policy."""
+
     return context_fingerprint(
         "local-skill-root-policy:v2-agent-skills",
         {
-            "scope": conversation_scope_kind.value,
-            "scope_subagent_task_id": scope_subagent_task_id,
-            "roots": tuple(item.binding_fingerprint for item in roots),
+            "scope": policy.conversation_scope_kind.value,
+            "scope_subagent_task_id": policy.scope_subagent_task_id,
+            "roots": tuple(
+                _root_binding_fingerprint(
+                    root_kind=item.root_kind,
+                    path=item.path,
+                    containment_root=item.containment_root,
+                    location_prefix=item.location_prefix,
+                    precedence_ordinal=item.precedence_ordinal,
+                )
+                for item in policy.roots
+            ),
         },
     )
 
@@ -1027,9 +1048,9 @@ def _unavailable_discovery(
                 ),
             ]
         ),
+        root_policy=policy,
         disposition=SkillDiscoveryDisposition.UNAVAILABLE,
         unavailable_reason=reason,
-        root_policy_fingerprint=policy.root_policy_fingerprint,
         enumerated_candidate_count=candidate_count,
         observed_utf8_bytes=observed_bytes,
     )
@@ -1043,5 +1064,6 @@ __all__ = [
     "PreparedLocalSkillRootPolicy",
     "PreparedSkillRootBinding",
     "SkillDiscoveryDisposition",
+    "local_skill_root_policy_identity_digest",
     "local_skill_manifest_semantic_fingerprint",
 ]

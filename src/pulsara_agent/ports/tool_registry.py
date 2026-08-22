@@ -54,14 +54,12 @@ class _BindingView:
 class BuiltinToolBindingContract(_BindingView):
     binding_kind: Literal["builtin"]
     base: ToolBindingContractBase
-    contract_fact_fingerprint: str
 
 
 @dataclass(frozen=True, slots=True)
 class CustomToolBindingContract(_BindingView):
     binding_kind: Literal["custom"]
     base: ToolBindingContractBase
-    contract_fact_fingerprint: str
 
 
 ToolBindingContract: TypeAlias = (
@@ -98,21 +96,24 @@ def build_tool_binding_contract(
         ),
     )
     if resolved_origin is ToolBindingOrigin.CUSTOM:
-        payload = {"binding_kind": "custom", "base": asdict(base)}
         return CustomToolBindingContract(
             binding_kind="custom",
             base=base,
-            contract_fact_fingerprint=sha256_fingerprint(
-                "tool-binding-contract-fact:v1", payload
-            ),
         )
-    payload = {"binding_kind": "builtin", "base": asdict(base)}
     return BuiltinToolBindingContract(
         binding_kind="builtin",
         base=base,
-        contract_fact_fingerprint=sha256_fingerprint(
-            "tool-binding-contract-fact:v1", payload
-        ),
+    )
+
+
+def tool_binding_contract_identity_fingerprint(
+    contract: ToolBindingContract,
+) -> str:
+    """Derive the stable catalog identity without storing a duplicate field."""
+
+    return sha256_fingerprint(
+        "tool-binding-contract-fact:v1",
+        {"binding_kind": contract.binding_kind, "base": asdict(contract.base)},
     )
 
 
@@ -130,4 +131,5 @@ __all__ = [
     "ToolBindingOrigin",
     "ToolRegistryReadPort",
     "build_tool_binding_contract",
+    "tool_binding_contract_identity_fingerprint",
 ]

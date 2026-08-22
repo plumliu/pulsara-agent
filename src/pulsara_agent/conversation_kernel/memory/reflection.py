@@ -12,7 +12,6 @@ from dataclasses import dataclass, field
 from hashlib import sha256
 import re
 import unicodedata
-from typing import Sequence
 
 from pulsara_agent.conversation_kernel.memory.contracts import (
     PreparedMemoryCandidateAcceptance,
@@ -206,18 +205,12 @@ class TurnMemoryUseOptOut:
 class CheapMemoryHint:
     signal_code: str
     normalized_excerpt: str = field(repr=False)
-    excerpt_digest: str
 
     def __post_init__(self) -> None:
         if not self.signal_code.startswith("hint:"):
             raise ValueError("cheap memory hint code is invalid")
         if not 1 <= len(self.normalized_excerpt) <= MAXIMUM_HINT_EXCERPT_CODEPOINTS:
             raise ValueError("cheap memory hint excerpt exceeds its bound")
-        expected = _digest(
-            "pulsara:cheap-memory-hint-excerpt:v1", self.normalized_excerpt
-        )
-        if self.excerpt_digest != expected:
-            raise ValueError("cheap memory hint excerpt digest mismatch")
 
 
 @dataclass(frozen=True, slots=True)
@@ -267,9 +260,6 @@ class CheapMemoryHintSetV1:
                     signal_code="hint:"
                     + sha256(signal.encode("utf-8")).hexdigest()[:20],
                     normalized_excerpt=excerpt,
-                    excerpt_digest=_digest(
-                        "pulsara:cheap-memory-hint-excerpt:v1", excerpt
-                    ),
                 )
             )
         return tuple(result)
@@ -306,7 +296,6 @@ class PreparedCheapHintReflectionHandoff:
     provider_trust_domain_identity: str
     eligible_entries: tuple[CheapHintEligibleEntry, ...] = field(repr=False)
     final_assistant_text: str = field(repr=False)
-    handoff_fingerprint: str
 
     def __post_init__(self) -> None:
         if not all(
@@ -317,7 +306,6 @@ class PreparedCheapHintReflectionHandoff:
                 self.turn_id,
                 self.permission_snapshot_fingerprint,
                 self.provider_trust_domain_identity,
-                self.handoff_fingerprint,
             )
         ):
             raise ValueError("cheap hint handoff identity is incomplete")
@@ -334,36 +322,15 @@ class PreparedCheapHintReflectionHandoff:
             > MAXIMUM_REFLECTION_ADJACENT_ASSISTANT_BYTES
         ):
             raise ValueError("cheap hint final assistant projection exceeds its bound")
-        if self.handoff_fingerprint != cheap_hint_handoff_fingerprint(self):
-            raise ValueError("cheap hint handoff fingerprint mismatch")
 
 
 @dataclass(frozen=True, slots=True)
 class PreparedCheapHintReflectionCandidateBatch:
-    handoff_fingerprint: str
-    model_output_digest: str
     candidates: tuple[PreparedMemoryCandidateAcceptance, ...]
-    batch_fingerprint: str
 
     def __post_init__(self) -> None:
-        if not self.handoff_fingerprint or not self.model_output_digest.startswith(
-            "sha256:"
-        ):
-            raise ValueError("reflection candidate batch identity is invalid")
         if len(self.candidates) > 4:
             raise ValueError("reflection candidate batch exceeds its bound")
-        if self.batch_fingerprint != _digest(
-            "pulsara:cheap-hint-reflection-candidate-batch:v1",
-            {
-                "handoff": self.handoff_fingerprint,
-                "model_output": self.model_output_digest,
-                "candidates": tuple(
-                    (item.candidate_id, item.candidate_acceptance_digest)
-                    for item in self.candidates
-                ),
-            },
-        ):
-            raise ValueError("reflection candidate batch fingerprint mismatch")
 
 
 def prepare_cheap_hint_reflection_handoff(
@@ -473,19 +440,14 @@ def prepare_cheap_hint_reflection_handoff(
         "eligible_entries": tuple(eligible),
         "final_assistant_text": final_assistant,
     }
-    provisional = object.__new__(PreparedCheapHintReflectionHandoff)
-    for name, value in values.items():
-        object.__setattr__(provisional, name, value)
-    object.__setattr__(provisional, "handoff_fingerprint", "")
-    return PreparedCheapHintReflectionHandoff(
-        **values,
-        handoff_fingerprint=cheap_hint_handoff_fingerprint(provisional),
-    )
+    return PreparedCheapHintReflectionHandoff(**values)
 
 
-def cheap_hint_handoff_fingerprint(
+def cheap_hint_handoff_identity_digest(
     handoff: PreparedCheapHintReflectionHandoff,
 ) -> str:
+    """Derive stable reflection IDs at their sole boundary."""
+
     return _digest(
         "pulsara:cheap-hint-reflection-handoff:v1",
         {
@@ -508,7 +470,13 @@ def cheap_hint_handoff_fingerprint(
                         entry.adjacent_assistant_text,
                     ),
                     "hints": tuple(
-                        (hint.signal_code, hint.excerpt_digest)
+                        (
+                            hint.signal_code,
+                            _digest(
+                                "pulsara:cheap-memory-hint-excerpt:v1",
+                                hint.normalized_excerpt,
+                            ),
+                        )
                         for hint in entry.hints
                     ),
                 }
@@ -561,25 +529,6 @@ def _digest(namespace: str, value: object) -> str:
     ).hexdigest()
 
 
-def reflection_batch_fingerprint(
-    *,
-    handoff_fingerprint: str,
-    model_output_digest: str,
-    candidates: Sequence[PreparedMemoryCandidateAcceptance],
-) -> str:
-    return _digest(
-        "pulsara:cheap-hint-reflection-candidate-batch:v1",
-        {
-            "handoff": handoff_fingerprint,
-            "model_output": model_output_digest,
-            "candidates": tuple(
-                (item.candidate_id, item.candidate_acceptance_digest)
-                for item in candidates
-            ),
-        },
-    )
-
-
 __all__ = [
     "CheapHintEligibleEntry",
     "CheapMemoryHint",
@@ -588,8 +537,7 @@ __all__ = [
     "PreparedCheapHintReflectionCandidateBatch",
     "PreparedCheapHintReflectionHandoff",
     "TurnMemoryUseOptOut",
-    "cheap_hint_handoff_fingerprint",
+    "cheap_hint_handoff_identity_digest",
     "normalize_reflection_text",
     "prepare_cheap_hint_reflection_handoff",
-    "reflection_batch_fingerprint",
 ]

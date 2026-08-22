@@ -15,9 +15,9 @@ from pulsara_agent.conversation_kernel.auxiliary_model import (
     DirectKernelAuxiliaryJsonModel,
 )
 from pulsara_agent.conversation_kernel.assistant_settlement import (
-    assistant_settlement_candidate_fingerprint,
+    PreparedAssistantMessageSettlement,
 )
-from pulsara_agent.conversation_kernel.contracts import InlineContent
+from pulsara_agent.conversation_kernel.contracts import HostWriterGuard, InlineContent
 from pulsara_agent.conversation_kernel.direct_model import (
     CompletedProviderModelExecution,
 )
@@ -271,7 +271,7 @@ def test_openai_function_lowering_rejects_intersecting_nested_unions() -> None:
         lower_openai_function_parameters(schema)
 
 
-def test_assistant_settlement_identity_covers_scope_and_epoch() -> None:
+def test_assistant_settlement_exact_candidate_carries_scope_and_epoch() -> None:
     cut = PreparedProviderInputCut("session:test", "turn:test", "revision:test", 1)
     content = InlineContent.from_bytes(b"assistant")
     occurred_at = datetime(2026, 8, 17, tzinfo=timezone.utc)
@@ -282,10 +282,11 @@ def test_assistant_settlement_identity_covers_scope_and_epoch() -> None:
         "session:test", ModelInputScopeKind.SUBAGENT_TASK, "task:test"
     )
 
-    def fingerprint(
+    def candidate(
         scope: ProviderInputContinuityScope, nonce: str, revision: int
-    ) -> str:
-        return assistant_settlement_candidate_fingerprint(
+    ) -> PreparedAssistantMessageSettlement:
+        return PreparedAssistantMessageSettlement(
+            guard=HostWriterGuard("session:test", 1, "host:test"),
             cut=cut,
             entry_id="entry:test",
             parent_content=content,
@@ -303,10 +304,13 @@ def test_assistant_settlement_identity_covers_scope_and_epoch() -> None:
             provider_replay=None,
         )
 
-    baseline = fingerprint(root, "epoch:root", 1)
-    assert fingerprint(root, "epoch:other", 1) != baseline
-    assert fingerprint(root, "epoch:root", 2) != baseline
-    assert fingerprint(child, "epoch:root", 1) != baseline
+    baseline = candidate(root, "epoch:root", 1)
+    assert candidate(root, "epoch:other", 1) != baseline
+    assert candidate(root, "epoch:root", 2) != baseline
+    assert candidate(child, "epoch:root", 1) != baseline
+    assert baseline.continuity_scope is root
+    assert baseline.continuity_epoch_nonce == "epoch:root"
+    assert baseline.continuity_epoch_revision == 1
 
 
 def test_chat_completed_text_reasoning_replay_is_explicit_and_exact() -> None:

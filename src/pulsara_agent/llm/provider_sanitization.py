@@ -10,6 +10,7 @@ from pulsara_agent.primitives.model_call import (
     ProviderModelStreamErrorCode,
     ProviderRetrySummaryFact,
     ProviderSanitizedErrorFact,
+    provider_sanitized_error_identity_fingerprint,
     sha256_fingerprint,
 )
 
@@ -147,11 +148,10 @@ def sanitize_provider_failure(
         provisional = ProviderSanitizedErrorFact.model_construct(
             **payload, error_fingerprint="pending"
         )
-        canonical = provisional.model_dump(mode="json", exclude={"error_fingerprint"})
         return ProviderSanitizedErrorFact(
-            **canonical,
-            error_fingerprint=sha256_fingerprint(
-                "provider-sanitized-error:v2", canonical
+            **payload,
+            error_fingerprint=provider_sanitized_error_identity_fingerprint(
+                provisional
             ),
         )
     except BaseException:
@@ -167,11 +167,10 @@ def sanitize_provider_failure(
         provisional = ProviderSanitizedErrorFact.model_construct(
             **payload, error_fingerprint="pending"
         )
-        canonical = provisional.model_dump(mode="json", exclude={"error_fingerprint"})
         return ProviderSanitizedErrorFact(
-            **canonical,
-            error_fingerprint=sha256_fingerprint(
-                "provider-sanitized-error:v2", canonical
+            **payload,
+            error_fingerprint=provider_sanitized_error_identity_fingerprint(
+                provisional
             ),
         )
 

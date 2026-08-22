@@ -26,7 +26,11 @@ from pulsara_agent.conversation_kernel.compaction.prompt import (
 from pulsara_agent.conversation_kernel.direct_model import DirectKernelModelPort
 from pulsara_agent.llm.input import LLMMessage, LLMToolCall, MessageRole, ToolSpec
 from pulsara_agent.llm.estimator import TokenEstimate
-from pulsara_agent.llm.request import FrozenProviderWireInputPlan, LLMContext
+from pulsara_agent.llm.request import (
+    FrozenProviderWireInputPlan,
+    LLMContext,
+    provider_wire_input_plan_identity_fingerprint,
+)
 from pulsara_agent.llm.resolution import ResolvedModelCall
 from pulsara_agent.llm.validation import validate_model_context_for_call
 from pulsara_agent.model_input.compiler import COMPILER_CONTRACT_VERSION
@@ -97,7 +101,9 @@ class PreparedCompactionSummaryCall:
             or wire_input_plan.compiled_semantic_fingerprint
             != compiled.compiled_semantic_fingerprint
             or wire_input_plan.message_placements_fingerprint
-            != compiled.message_placements_fingerprint
+            != compiled_message_placements_fingerprint(
+                compiled.message_placements
+            )
             or wire_input_plan.resolved_target_semantic_fingerprint
             != call.target.fact.target_fingerprint
             or wire_input_plan.materialization.tool_items
@@ -140,7 +146,9 @@ class PreparedCompactionSummaryCall:
                 "source_view": semantic.source_view.source_view_fingerprint,
                 "prefix": semantic.prefix_proof.proof_fingerprint,
                 "semantic": semantic.semantic_fingerprint,
-                "wire": wire_input_plan.plan_fingerprint,
+                "wire": provider_wire_input_plan_identity_fingerprint(
+                    wire_input_plan
+                ),
                 "estimate": _estimate_value(compiled.final_estimate),
             },
         )
@@ -342,14 +350,12 @@ def prepare_compaction_summary_semantic(
             "prefix": prefix_proof.proof_fingerprint,
         },
     )
-    placement_fingerprint = compiled_message_placements_fingerprint(placements)
     values = {
         "context_id": context_id,
         "canonical_input_identity": source_compiled_input.canonical_input_identity,
         "system_prompt": source_compiled_input.system_prompt,
         "messages": messages,
         "message_placements": placements,
-        "message_placements_fingerprint": placement_fingerprint,
         "tools": source_compiled_input.tools,
         "final_estimate": estimate,
         "source_decisions": source_compiled_input.source_decisions,
@@ -367,11 +373,7 @@ def prepare_compaction_summary_semantic(
             **{
                 key: value
                 for key, value in values.items()
-                if key
-                not in {
-                    "message_placements",
-                    "message_placements_fingerprint",
-                }
+                if key != "message_placements"
             }
         ),
     )
@@ -501,9 +503,6 @@ def prepare_compaction_summary_repair_semantic(
             },
         ),
     )
-    placement_fingerprint = compiled_message_placements_fingerprint(
-        frozen_placements
-    )
     values = {
         "context_id": context_fingerprint(
             "pulsara.compaction-summary-repair-context-id.v1",
@@ -516,7 +515,6 @@ def prepare_compaction_summary_repair_semantic(
         "system_prompt": compiled.system_prompt,
         "messages": messages,
         "message_placements": frozen_placements,
-        "message_placements_fingerprint": placement_fingerprint,
         "tools": compiled.tools,
         "final_estimate": estimate,
         "source_decisions": compiled.source_decisions,
@@ -532,11 +530,7 @@ def prepare_compaction_summary_repair_semantic(
             **{
                 key: value
                 for key, value in values.items()
-                if key
-                not in {
-                    "message_placements",
-                    "message_placements_fingerprint",
-                }
+                if key != "message_placements"
             }
         ),
     )
@@ -610,23 +604,12 @@ def _ephemeral_summary_placement(
         f"pulsara.compaction-summary-ephemeral-{domain}-item.v1",
         identity,
     )
-    fingerprint = context_fingerprint(
-        "pulsara.compiled-message-placement:v1",
-        {
-            "ordinal": message_ordinal,
-            "entry": None,
-            "item": origin,
-            "within": 0,
-            "role": role.value,
-        },
-    )
     return FrozenCompiledMessagePlacement(
         message_ordinal=message_ordinal,
         origin_entry_id=None,
         origin_item_fingerprint=origin,
         within_origin_ordinal=0,
         role=role,
-        placement_fingerprint=fingerprint,
     )
 
 

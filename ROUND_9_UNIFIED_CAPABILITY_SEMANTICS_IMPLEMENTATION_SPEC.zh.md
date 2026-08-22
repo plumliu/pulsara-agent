@@ -2,6 +2,8 @@
 
 > 状态：**ACTIVATED — 2026-08-20**
 >
+> Fingerprint hard-cut：[`PULSARA_FINGERPRINT_SUBTRACTION_HARD_CUT_IMPLEMENTATION_SPEC.zh.md`](PULSARA_FINGERPRINT_SUBTRACTION_HARD_CUT_IMPLEMENTATION_SPEC.zh.md)覆盖本文冗余的same-process DTO fingerprint/proof字段以及所有逐文件、文档与activation evidence SHA门禁；canonical capability identity、native wire、MCP policy/ref与prefix边界digest继续有效。
+>
 > 记录日期：2026-08-17；本次架构校准：2026-08-19
 >
 > 编码基线：`20daa64ffbcd60924baf64da3f332d1e82168756`。该clean checkpoint已经包含activated Round 5A.2 durable replay、Round 7.1 provider-visible ToolResult projection与OpenAI function-tool wire contract v2；本轮只在该exact HEAD上实施Round 9。

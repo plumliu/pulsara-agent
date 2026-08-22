@@ -15,7 +15,12 @@ from uuid import uuid4
 
 from jsonschema import ValidationError, validators
 
-from pulsara_agent.capability.builtin_catalog import builtin_tool_catalog_entry
+from pulsara_agent.capability.builtin_catalog import (
+    BuiltinToolCatalogEntry,
+    builtin_availability_requirement_identity_fingerprint,
+    builtin_permission_contract_identity_fingerprint,
+    builtin_tool_catalog_entry,
+)
 from pulsara_agent.capability.contracts import (
     CapabilityKind,
     CapabilitySourceKind,
@@ -63,6 +68,9 @@ from pulsara_agent.ports.tool_execution import (
     ToolOutputArtifactCandidate,
     ToolOutputSourceCoverage,
     ToolOutputSourceFormatHint,
+)
+from pulsara_agent.ports.tool_registry import (
+    tool_binding_contract_identity_fingerprint,
 )
 from pulsara_agent.terminal_process import (
     TerminalProcessInfo,
@@ -163,8 +171,8 @@ from pulsara_agent.conversation_kernel.tool_surface import (
     PreparedUnavailableDirectMcpGate,
     ProcessLocalToolSurfaceAccess,
     ProcessLocalToolSurfaceBorrow,
+    execution_policy_fingerprint,
     tool_observation_origin_for_binding,
-    tool_execution_surface_fingerprint,
 )
 
 from .runner import (
@@ -198,6 +206,7 @@ from .mcp.directory import McpDirectoryPageFactory
 from .mcp.meta import (
     McpToolRefCapacityExceeded,
     NewMcpToolRef,
+    PreparedNewMcpToolRefSettlement,
     ProcessLocalNewMcpToolRefOwner,
 )
 
@@ -241,22 +250,77 @@ _TERMINAL_PROCESS_ACTION_EFFECTS = (
 class ProductionBuiltinExecutorBinding:
     """Exact descriptor-to-executor closure for one advertised builtin."""
 
-    tool_name: str
-    descriptor_id: str
-    descriptor_contract_version: str
-    descriptor_fingerprint: str
-    input_schema_fingerprint: str
-    binding_contract_fingerprint: str
-    catalog_entry_fingerprint: str
-    availability_requirement_fingerprint: str
-    permission_contract_fingerprint: str
-    execution_binding_kind: str
-    is_read_only: bool
-    is_concurrency_safe: bool
-    permission_category: str
-    physical_effect_contract_fingerprint: str
+    catalog_entry: BuiltinToolCatalogEntry
     executor_identity: str
-    binding_fingerprint: str
+
+    @property
+    def tool_name(self) -> str:
+        return self.catalog_entry.name
+
+
+def _builtin_physical_effect_contract(
+    entry: BuiltinToolCatalogEntry,
+) -> object:
+    return (
+        {"actions": _TERMINAL_PROCESS_ACTION_EFFECTS}
+        if entry.name == "terminal_process"
+        else {
+            "default": (
+                "TERMINAL_EFFECT"
+                if entry.name == "terminal"
+                else entry.recovery_contract.severity
+            )
+        }
+    )
+
+
+def production_builtin_executor_binding_identity_fingerprint(
+    binding: ProductionBuiltinExecutorBinding,
+) -> str:
+    """Derive the stable physical binding identity at its actual consumers."""
+
+    entry = binding.catalog_entry
+    descriptor = entry.descriptor
+    contract = entry.binding_contract
+    input_schema_fingerprint = sha256_fingerprint(
+        "production-builtin-input-schema:v1", descriptor.input_schema
+    )
+    physical_effect_contract_fingerprint = sha256_fingerprint(
+        "production-builtin-physical-effect-contract:v1",
+        _builtin_physical_effect_contract(entry),
+    )
+    return sha256_fingerprint(
+        "production-builtin-executor-binding:v1",
+        {
+            "tool_name": entry.name,
+            "descriptor_id": descriptor.id,
+            "descriptor_contract_version": contract.contract_version,
+            "descriptor_fingerprint": descriptor.fingerprint(),
+            "input_schema_fingerprint": input_schema_fingerprint,
+            "binding_contract_fingerprint": (
+                tool_binding_contract_identity_fingerprint(contract)
+            ),
+            "catalog_entry_fingerprint": entry.entry_fingerprint,
+            "availability_requirement_fingerprint": (
+                builtin_availability_requirement_identity_fingerprint(
+                    entry.availability_requirement
+                )
+            ),
+            "permission_contract_fingerprint": (
+                builtin_permission_contract_identity_fingerprint(
+                    entry.permission_contract
+                )
+            ),
+            "execution_binding_kind": entry.execution_binding_kind.value,
+            "is_read_only": descriptor.is_read_only,
+            "is_concurrency_safe": descriptor.is_concurrency_safe,
+            "permission_category": descriptor.permission_category,
+            "physical_effect_contract_fingerprint": (
+                physical_effect_contract_fingerprint
+            ),
+            "executor_identity": binding.executor_identity,
+        },
+    )
 
 
 def _production_executor_binding(
@@ -269,68 +333,9 @@ def _production_executor_binding(
     contract = entry.binding_contract
     if descriptor.name != tool_name or contract.tool_name != tool_name:
         raise RuntimeError("builtin descriptor and executor name do not join")
-    input_schema_fingerprint = sha256_fingerprint(
-        "production-builtin-input-schema:v1", descriptor.input_schema
-    )
-    physical_effect_contract = (
-        {"actions": _TERMINAL_PROCESS_ACTION_EFFECTS}
-        if tool_name == "terminal_process"
-        else {
-            "default": (
-                "TERMINAL_EFFECT"
-                if tool_name == "terminal"
-                else entry.recovery_contract.severity
-            )
-        }
-    )
-    physical_effect_contract_fingerprint = sha256_fingerprint(
-        "production-builtin-physical-effect-contract:v1",
-        physical_effect_contract,
-    )
-    payload = {
-        "tool_name": tool_name,
-        "descriptor_id": descriptor.id,
-        "descriptor_contract_version": contract.contract_version,
-        "descriptor_fingerprint": descriptor.fingerprint(),
-        "input_schema_fingerprint": input_schema_fingerprint,
-        "binding_contract_fingerprint": contract.contract_fact_fingerprint,
-        "catalog_entry_fingerprint": entry.entry_fingerprint,
-        "availability_requirement_fingerprint": (
-            entry.availability_requirement.requirement_fingerprint
-        ),
-        "permission_contract_fingerprint": (
-            entry.permission_contract.contract_fingerprint
-        ),
-        "execution_binding_kind": entry.execution_binding_kind.value,
-        "is_read_only": descriptor.is_read_only,
-        "is_concurrency_safe": descriptor.is_concurrency_safe,
-        "permission_category": descriptor.permission_category,
-        "physical_effect_contract_fingerprint": (physical_effect_contract_fingerprint),
-        "executor_identity": executor_identity,
-    }
     return ProductionBuiltinExecutorBinding(
-        tool_name=tool_name,
-        descriptor_id=descriptor.id,
-        descriptor_contract_version=contract.contract_version,
-        descriptor_fingerprint=descriptor.fingerprint(),
-        input_schema_fingerprint=input_schema_fingerprint,
-        binding_contract_fingerprint=contract.contract_fact_fingerprint,
-        catalog_entry_fingerprint=entry.entry_fingerprint,
-        availability_requirement_fingerprint=(
-            entry.availability_requirement.requirement_fingerprint
-        ),
-        permission_contract_fingerprint=(
-            entry.permission_contract.contract_fingerprint
-        ),
-        execution_binding_kind=entry.execution_binding_kind.value,
-        is_read_only=descriptor.is_read_only,
-        is_concurrency_safe=descriptor.is_concurrency_safe,
-        permission_category=descriptor.permission_category,
-        physical_effect_contract_fingerprint=(physical_effect_contract_fingerprint),
+        catalog_entry=entry,
         executor_identity=executor_identity,
-        binding_fingerprint=sha256_fingerprint(
-            "production-builtin-executor-binding:v1", payload
-        ),
     )
 
 
@@ -571,18 +576,6 @@ class _DirectMcpCatalogTool:
 
 
 @dataclass(frozen=True, slots=True)
-class _PreparedMonitorSettlement:
-    prepared: PreparedTerminalMonitorRegistration
-    origin_attempt_id: str
-    origin_result_entry_id: str
-
-
-@dataclass(frozen=True, slots=True)
-class _PreparedTodoSettlement:
-    prepared: PreparedTodoReplacement
-
-
-@dataclass(frozen=True, slots=True)
 class _PendingMcpConfirmationAdmission:
     generation: int
     executor: McpBoundToolExecutor
@@ -686,8 +679,13 @@ class DirectKernelToolPort:
         self._close_async_lock = asyncio.Lock()
         self._terminal_release_task: asyncio.Task[object] | None = None
         self._terminal_monitor_close_task: asyncio.Task[object] | None = None
-        self._process_local_settlements: dict[str, _PreparedMonitorSettlement] = {}
-        self._todo_settlements: dict[str, _PreparedTodoSettlement] = {}
+        self._process_local_settlements: dict[
+            str, ProcessLocalEffectSettlementToken
+        ] = {}
+        self._todo_settlements: dict[str, ProcessLocalEffectSettlementToken] = {}
+        self._mcp_ref_settlements: dict[
+            str, ProcessLocalEffectSettlementToken
+        ] = {}
         self._todo_owner = TodoRunStateOwner(
             session_id=session_id,
             owner_epoch=host_owner_id,
@@ -822,8 +820,10 @@ class DirectKernelToolPort:
                     tuple(
                         (
                             item.tool_name,
-                            item.descriptor_fingerprint,
-                            item.binding_contract_fingerprint,
+                            item.catalog_entry.descriptor.fingerprint(),
+                            tool_binding_contract_identity_fingerprint(
+                                item.catalog_entry.binding_contract
+                            ),
                         )
                         for item in bindings
                     ),
@@ -832,12 +832,7 @@ class DirectKernelToolPort:
             facts = []
             for binding in bindings:
                 entry = builtin_tool_catalog_entry(binding.tool_name)
-                if (
-                    entry.descriptor.fingerprint()
-                    != binding.descriptor_fingerprint
-                    or entry.entry_fingerprint
-                    != binding.catalog_entry_fingerprint
-                ):
+                if entry is not binding.catalog_entry:
                     raise RuntimeError("builtin catalog/executor binding drifted")
                 schema = freeze_json(_json_schema_value(entry.descriptor.input_schema))
                 if not isinstance(schema, FrozenJsonObjectFact):
@@ -846,7 +841,7 @@ class DirectKernelToolPort:
                     name=binding.tool_name,
                     description=entry.descriptor.description,
                     parameters=schema,
-                    descriptor_fingerprint=binding.descriptor_fingerprint,
+                    descriptor_fingerprint=entry.descriptor.fingerprint(),
                 )
                 facts.append(
                     freeze_tool_capability_fact(
@@ -1089,7 +1084,10 @@ class DirectKernelToolPort:
         if (
             builtin.conversation_scope_kind is not scope
             or plan.direct_projection_set.scope_subagent_task_id != task_id
-            or plan.dispatch_cut_fingerprint == ""
+            or plan.dispatch_view.parent_dispatch_cut.conversation_scope_kind
+            is not scope
+            or plan.dispatch_view.parent_dispatch_cut.scope_subagent_task_id
+            != task_id
         ):
             raise ValueError("planned tool surface scope is invalid")
         with self._surface_lock:
@@ -1124,29 +1122,21 @@ class DirectKernelToolPort:
             for spec in surface.tool_specs:
                 builtin_binding = builtin_by_name.get(spec.name)
                 if builtin_binding is not None:
-                    if builtin_binding.descriptor_fingerprint != spec.descriptor_fingerprint:
+                    entry = builtin_binding.catalog_entry
+                    if entry.descriptor.fingerprint() != spec.descriptor_fingerprint:
                         raise RuntimeError("planned builtin descriptor drifted")
                     policy = BuiltinExecutionPolicyRef(
                         tool_name=spec.name,
-                        catalog_entry_fingerprint=(
-                            builtin_binding.catalog_entry_fingerprint
-                        ),
-                        policy_fingerprint=context_fingerprint(
-                            "builtin-execution-policy-ref:v1",
-                            {
-                                "tool_name": spec.name,
-                                "catalog_entry_fingerprint": (
-                                    builtin_binding.catalog_entry_fingerprint
-                                ),
-                            },
-                        ),
+                        catalog_entry_fingerprint=entry.entry_fingerprint,
                     )
                     leaves.append(
                         PreparedToolExecutionBinding(
                             tool_name=spec.name,
                             descriptor_fingerprint=spec.descriptor_fingerprint,
                             executor_binding_fingerprint=(
-                                builtin_binding.binding_fingerprint
+                                production_builtin_executor_binding_identity_fingerprint(
+                                    builtin_binding
+                                )
                             ),
                             execution_policy=policy,
                             memory_citation_visibility="WORKSPACE_BOUND",
@@ -1180,12 +1170,6 @@ class DirectKernelToolPort:
                     if mcp_binding is not None
                     else "MCP_DIRECT_CURRENTLY_UNAVAILABLE"
                 )
-                gate_payload = {
-                    "identity": version.identity_fingerprint,
-                    "semantic": spec.descriptor_fingerprint,
-                    "provider_name": spec.name,
-                    "reason": reason,
-                }
                 leaves.append(
                     PreparedUnavailableDirectMcpGate(
                         capability_identity_fingerprint=(
@@ -1195,31 +1179,19 @@ class DirectKernelToolPort:
                         provider_tool_name=spec.name,
                         unavailable_reason_code=reason,
                         supervisor_authority_identity=self._mcp_supervisor,
-                        gate_fingerprint=context_fingerprint(
-                            "unavailable-direct-mcp-gate:v1", gate_payload
-                        ),
                     )
                 )
             frozen_leaves = tuple(leaves)
-            execution_fingerprint = tool_execution_surface_fingerprint(
-                owner_epoch=self._surface_owner_epoch,
-                surface_generation=self._surface_generation,
-                semantic_surface_fingerprint=surface.surface_fingerprint,
-                bindings=frozen_leaves,
-            )
             access = ProcessLocalToolSurfaceAccess(
                 owner_epoch=self._surface_owner_epoch,
                 surface_generation=self._surface_generation,
                 conversation_scope_kind=scope,
                 scope_subagent_task_id=task_id,
-                semantic_surface_fingerprint=surface.surface_fingerprint,
-                execution_surface_fingerprint=execution_fingerprint,
                 _authority=self._surface_authority,
             )
             prepared = PreparedKernelToolSurface(
                 model_surface=surface,
                 execution_bindings=frozen_leaves,
-                execution_surface_fingerprint=execution_fingerprint,
                 access=access,
                 capability_exposure_plan=plan,
             )
@@ -1353,7 +1325,7 @@ class DirectKernelToolPort:
             or access._authority is not self._surface_authority
             or access.owner_epoch != self._surface_owner_epoch
             or retained is None
-            or not retained.exactly_joins(prepared)
+            or retained is not prepared
         ):
             raise RuntimeError("prepared tool surface is revoked")
 
@@ -1662,7 +1634,7 @@ class DirectKernelToolPort:
         version = _mcp_executor_capability_version(executor)
         if (
             version != route.version
-            or executor.policy.policy_fingerprint
+            or execution_policy_fingerprint(executor.policy)
             != ref.mcp_execution_policy_fingerprint
         ):
             raise LookupError("MCP_TOOL_REF_BINDING_STALE")
@@ -1722,7 +1694,7 @@ class DirectKernelToolPort:
         ):
             return KernelToolAuthorization(
                 KernelToolAuthorizationKind.PERMISSION_DENIED,
-                f"mcp-policy:{executor.policy.policy_fingerprint}",
+                f"mcp-policy:{execution_policy_fingerprint(executor.policy)}",
                 "external MCP effects are denied in read-only mode",
             )
         key = (generation, tool_call_id)
@@ -1757,7 +1729,7 @@ class DirectKernelToolPort:
             )
             return KernelToolAuthorization(
                 KernelToolAuthorizationKind.REQUIRE_CONFIRMATION,
-                f"mcp-policy:{executor.policy.policy_fingerprint}",
+                f"mcp-policy:{execution_policy_fingerprint(executor.policy)}",
                 f"Allow external MCP action {executor.semantic.remote_tool_name}?",
             )
         try:
@@ -1780,7 +1752,7 @@ class DirectKernelToolPort:
         self._mcp_dispatch_permits[key] = permit
         return KernelToolAuthorization(
             KernelToolAuthorizationKind.ALLOW,
-            f"mcp-policy:{executor.policy.policy_fingerprint}",
+            f"mcp-policy:{execution_policy_fingerprint(executor.policy)}",
         )
 
     def _authorize_mcp(
@@ -1837,7 +1809,7 @@ class DirectKernelToolPort:
         ):
             return KernelToolAuthorization(
                 KernelToolAuthorizationKind.PERMISSION_DENIED,
-                f"mcp-policy:{policy.policy_fingerprint}",
+                f"mcp-policy:{execution_policy_fingerprint(policy)}",
                 "external MCP effects are denied in read-only mode",
             )
         key = (generation, tool_call_id)
@@ -1862,7 +1834,7 @@ class DirectKernelToolPort:
             )
             return KernelToolAuthorization(
                 KernelToolAuthorizationKind.REQUIRE_CONFIRMATION,
-                f"mcp-policy:{policy.policy_fingerprint}",
+                f"mcp-policy:{execution_policy_fingerprint(policy)}",
                 f"Allow external MCP action {binding.tool_name}?",
             )
         try:
@@ -1884,7 +1856,7 @@ class DirectKernelToolPort:
         self._mcp_dispatch_permits[key] = permit
         return KernelToolAuthorization(
             KernelToolAuthorizationKind.ALLOW,
-            f"mcp-policy:{policy.policy_fingerprint}",
+            f"mcp-policy:{execution_policy_fingerprint(policy)}",
         )
 
     async def request_confirmation(
@@ -2091,7 +2063,7 @@ class DirectKernelToolPort:
                 ),
                 tool_semantic_fingerprint=route.version.semantic_fingerprint,
                 mcp_execution_policy_fingerprint=(
-                    executor.policy.policy_fingerprint
+                    execution_policy_fingerprint(executor.policy)
                 ),
                 tool_route_fingerprint=route.route_fingerprint,
                 result_entry_id=invocation_context.result_entry_id,
@@ -2105,18 +2077,19 @@ class DirectKernelToolPort:
             ).encode("utf-8")
         except BaseException:
             self._mcp_meta_refs.settle(
-                settlement_token_id=prepared.settlement_token_id,
-                settlement_token_fingerprint=prepared.settlement_token_fingerprint,
+                prepared=prepared,
                 committed=False,
             )
             raise
+        token = ProcessLocalEffectSettlementToken(
+            prepared.settlement_token_id,
+            prepared,
+        )
+        self._mcp_ref_settlements[token.token_id] = token
         return KernelToolResult(
             state="SUCCESS",
             content=body,
-            process_local_settlement=ProcessLocalEffectSettlementToken(
-                prepared.settlement_token_id,
-                prepared.settlement_token_fingerprint,
-            ),
+            process_local_settlement=token,
             effect_class="read_only",
         )
 
@@ -2148,18 +2121,13 @@ class DirectKernelToolPort:
             # any other physical effect before being rejected.
             raise RuntimeError("tool invocation context does not exact-join request")
         if (
-            invocation_context.tool_surface_fingerprint
-            != invocation_context.surface_borrow.prepared.model_surface.surface_fingerprint
-            or invocation_context.conversation_scope_kind
+            invocation_context.conversation_scope_kind
             != invocation_context.surface_borrow.prepared.access.conversation_scope_kind.value
             or invocation_context.scope_subagent_task_id
             != invocation_context.surface_borrow.prepared.access.scope_subagent_task_id
-            or self._validate_surface_borrow(
-                invocation_context.surface_borrow, tool_name
-            ).executor_binding_fingerprint
-            != invocation_context.executor_binding_fingerprint
         ):
             raise RuntimeError("tool invocation surface binding does not exact-join")
+        self._validate_surface_borrow(invocation_context.surface_borrow, tool_name)
         binding = invocation_context.surface_borrow.execution_binding(tool_name)
         if isinstance(binding, PreparedUnavailableDirectMcpGate):
             raise RuntimeError("unavailable MCP gate cannot invoke a physical tool")
@@ -2478,15 +2446,15 @@ class DirectKernelToolPort:
                         invocation_started, observation_origin
                     ),
                 )
-            self._todo_settlements[prepared.token_id] = _PreparedTodoSettlement(
-                prepared
+            token = ProcessLocalEffectSettlementToken(
+                prepared.token_id,
+                prepared,
             )
+            self._todo_settlements[token.token_id] = token
             return KernelToolResult(
                 state="SUCCESS",
                 content=acknowledgement,
-                process_local_settlement=ProcessLocalEffectSettlementToken(
-                    prepared.token_id, prepared.token_fingerprint
-                ),
+                process_local_settlement=token,
                 effect_class="read_only",
                 physical_observation=_freeze_physical_observation(
                     invocation_started, observation_origin
@@ -2677,15 +2645,11 @@ class DirectKernelToolPort:
             )
         except TerminalMonitorRejected as exc:
             return _terminal_monitor_rejected(call, exc.reason.value), None
-        settlement = _PreparedMonitorSettlement(
-            prepared=prepared,
-            origin_attempt_id=context.attempt_id,
-            origin_result_entry_id=context.result_entry_id,
-        )
-        self._process_local_settlements[prepared.token_id] = settlement
         token = ProcessLocalEffectSettlementToken(
-            prepared.token_id, prepared.token_fingerprint
+            prepared.token_id,
+            prepared,
         )
+        self._process_local_settlements[token.token_id] = token
         return (
             _success(
                 call,
@@ -2744,10 +2708,17 @@ class DirectKernelToolPort:
         token: ProcessLocalEffectSettlementToken,
         disposition: ProcessLocalEffectSettlementDisposition,
     ) -> ProcessLocalEffectSettlementResult:
-        if token.token_id.startswith("mcp-ref-settlement:"):
+        if isinstance(token.prepared, PreparedNewMcpToolRefSettlement):
+            retained = self._mcp_ref_settlements.get(token.token_id)
+            if retained is not token:
+                if disposition is ProcessLocalEffectSettlementDisposition.COMMITTED:
+                    raise RuntimeError("committed MCP ref settlement token is absent")
+                return ProcessLocalEffectSettlementResult(
+                    ProcessLocalEffectSettlementOutcome.DISCARDED
+                )
+            self._mcp_ref_settlements.pop(token.token_id, None)
             self._mcp_meta_refs.settle(
-                settlement_token_id=token.token_id,
-                settlement_token_fingerprint=token.token_fingerprint,
+                prepared=token.prepared,
                 committed=(
                     disposition is ProcessLocalEffectSettlementDisposition.COMMITTED
                 ),
@@ -2757,34 +2728,39 @@ class DirectKernelToolPort:
                 if disposition is ProcessLocalEffectSettlementDisposition.COMMITTED
                 else ProcessLocalEffectSettlementOutcome.DISCARDED
             )
-        todo = self._todo_settlements.get(token.token_id)
-        if todo is not None:
-            if todo.prepared.token_fingerprint != token.token_fingerprint:
-                raise RuntimeError("process-local TODO settlement token conflicts")
+        if isinstance(token.prepared, PreparedTodoReplacement):
+            retained = self._todo_settlements.get(token.token_id)
+            if retained is not token:
+                if disposition is ProcessLocalEffectSettlementDisposition.COMMITTED:
+                    raise RuntimeError("committed TODO settlement token is absent")
+                return ProcessLocalEffectSettlementResult(
+                    ProcessLocalEffectSettlementOutcome.DISCARDED
+                )
             if disposition is ProcessLocalEffectSettlementDisposition.COMMITTED:
-                installation = self._todo_owner.commit(todo.prepared)
+                installation = self._todo_owner.commit(token.prepared)
                 outcome = ProcessLocalEffectSettlementOutcome.INSTALLED
             else:
-                self._todo_owner.discard(todo.prepared)
+                self._todo_owner.discard(token.prepared)
                 installation = None
                 outcome = ProcessLocalEffectSettlementOutcome.DISCARDED
             self._todo_settlements.pop(token.token_id, None)
             if installation is not None:
                 self._offer_todo_installation(installation)
             return ProcessLocalEffectSettlementResult(outcome)
-        settlement = self._process_local_settlements.get(token.token_id)
-        if settlement is None:
+        if not isinstance(token.prepared, PreparedTerminalMonitorRegistration):
+            raise TypeError("process-local settlement token kind is unknown")
+        retained = self._process_local_settlements.get(token.token_id)
+        if retained is None:
             if disposition is ProcessLocalEffectSettlementDisposition.COMMITTED:
                 raise RuntimeError("committed process-local settlement token is absent")
             return ProcessLocalEffectSettlementResult(
                 ProcessLocalEffectSettlementOutcome.DISCARDED
             )
-        if settlement.prepared.token_fingerprint != token.token_fingerprint:
+        if retained is not token:
             raise RuntimeError("process-local settlement token conflicts")
         self._process_local_settlements.pop(token.token_id, None)
         self._terminal_monitor.settle_registration(
-            token.token_id,
-            token.token_fingerprint,
+            token.prepared,
             committed=(
                 disposition is ProcessLocalEffectSettlementDisposition.COMMITTED
             ),
@@ -2918,6 +2894,8 @@ class DirectKernelToolPort:
                 self._mcp_runtime_by_surface_generation.clear()
                 self._mcp_current = None
             self._mcp_meta_refs.close()
+            self._mcp_ref_settlements.clear()
+            self._todo_settlements.clear()
             for permit in permits:
                 try:
                     permit.release()
@@ -2964,10 +2942,12 @@ class DirectKernelToolPort:
         with self._surface_condition:
             self._closed = True
             self._surface_condition.notify_all()
-        for token_id, settlement in tuple(self._process_local_settlements.items()):
+        for token_id, token in tuple(self._process_local_settlements.items()):
+            prepared = token.prepared
+            if not isinstance(prepared, PreparedTerminalMonitorRegistration):
+                raise RuntimeError("terminal settlement carrier kind drifted")
             self._terminal_monitor.settle_registration(
-                token_id,
-                settlement.prepared.token_fingerprint,
+                prepared,
                 committed=False,
             )
             self._process_local_settlements.pop(token_id, None)
@@ -3339,4 +3319,5 @@ __all__ = [
     "DirectKernelToolPort",
     "KernelToolInteractionPort",
     "ProductionBuiltinExecutorBinding",
+    "production_builtin_executor_binding_identity_fingerprint",
 ]

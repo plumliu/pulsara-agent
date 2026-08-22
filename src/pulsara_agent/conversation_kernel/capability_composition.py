@@ -11,6 +11,7 @@ from pulsara_agent.capability.contracts import (
     CapabilitySourceSnapshotDisposition,
     FrozenCapabilityRegistrySnapshot,
     FrozenCapabilitySourceSnapshot,
+    FrozenToolCapabilityFact,
 )
 from pulsara_agent.capability.local_skills import LocalSkillDiscovery
 from pulsara_agent.capability.registry import (
@@ -70,8 +71,8 @@ class PreparedMcpCapabilitySourceSnapshotSet:
 
 @dataclass(frozen=True, slots=True)
 class PreparedMcpInspectionInput:
-    source_snapshot_fingerprint: str
-    tool_fact_semantic_fingerprint: str
+    source_snapshot: FrozenCapabilitySourceSnapshot = field(repr=False)
+    tool_fact: FrozenToolCapabilityFact = field(repr=False)
     semantic: "McpToolSemanticFact" = field(repr=False)
     policy: "McpToolExecutionPolicyFact" = field(repr=False)
 
@@ -81,7 +82,6 @@ class PreparedLocalSkillCatalogSourceSnapshot:
     conversation_scope_kind: ModelInputScopeKind
     scope_subagent_task_id: str | None
     source_snapshot: FrozenCapabilitySourceSnapshot
-    root_policy_fingerprint: str
     discovery: LocalSkillDiscovery = field(repr=False)
     owner_authenticity: object = field(repr=False, compare=False)
     _issuer: object = field(repr=False, compare=False)
@@ -130,15 +130,19 @@ def issue_local_skill_catalog_source_snapshot(
     conversation_scope_kind: ModelInputScopeKind,
     scope_subagent_task_id: str | None,
     source_snapshot: FrozenCapabilitySourceSnapshot,
-    root_policy_fingerprint: str,
     discovery: LocalSkillDiscovery,
     owner_authenticity: object,
 ) -> PreparedLocalSkillCatalogSourceSnapshot:
+    root_policy = discovery.root_policy
+    if (
+        root_policy.conversation_scope_kind is not conversation_scope_kind
+        or root_policy.scope_subagent_task_id != scope_subagent_task_id
+    ):
+        raise ValueError("Skill discovery scope conflicts")
     return PreparedLocalSkillCatalogSourceSnapshot(
         conversation_scope_kind=conversation_scope_kind,
         scope_subagent_task_id=scope_subagent_task_id,
         source_snapshot=source_snapshot,
-        root_policy_fingerprint=root_policy_fingerprint,
         discovery=discovery,
         owner_authenticity=owner_authenticity,
         _issuer=_SKILL_ISSUER,

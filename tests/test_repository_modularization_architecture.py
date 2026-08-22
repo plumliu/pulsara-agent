@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import importlib.util
 import ast
-import hashlib
 import inspect
 import json
 from pathlib import Path
@@ -57,6 +56,9 @@ _ROUND7_ADDED_TOP_LEVEL_FUNCTIONS = {"_plan_question_response"}
 _ROUND7_CHANGED_TOP_LEVEL_FUNCTIONS = {
     "_prepared_tool_result_manifest",
     "build_prepared_tool_result_acceptance",
+}
+_FINGERPRINT_HARD_CUT_CHANGED_TOP_LEVEL_FUNCTIONS = {
+    "_prompt_steer_row_matches_resource_rejection",
 }
 _ROUND7_ADDED_METHODS = {
     "_subagent_cancellation_drafts",
@@ -316,26 +318,6 @@ _ROUND10_REMOVED_METHODS = {
     "accept_subagent_task",
     "set_subagent_task_status",
 }
-_ROUND8_ROUND10_REPOSITORY_DELTA_SHA256 = (
-    # Round 9 four-provider dogfood exercised the already-allowlisted
-    # renew_host_writer owner with memory_domain_id=None.  Its PostgreSQL
-    # placeholder now carries the explicit text type needed for that closed
-    # optional branch; no method, checkout, lane or result shape changed.
-    # Round 5B adds the bounded compaction command/adoption transactions and
-    # removes the entire durable-job method family.  Round 10 adds only the
-    # closed hierarchical task-board/message/result transactions and updates
-    # the existing subagent owners in place.  The compaction verifier reads the
-    # exact safe-head composite before applying the shared pure range cut, so a
-    # first FULL_HISTORY snapshot can cover history before the revision-zero
-    # marker without weakening normal provider cuts.  The Round 10 list owner
-    # now also accepts its bounded `(accepted_at,id)` keyset and one-row
-    # lookahead instead of making the first 50 historical tasks an inventory
-    # cap.  This digest seals that exact combined delta while the historical M0
-    # fixture remains immutable.
-    "32d975937475e0f6d6a5f703c5ad868d340b1ae8d866acca3e10e10663e33a0e"
-)
-
-
 def _package_for_source(path: Path) -> str:
     relative = path.relative_to(ROOT / "src").with_suffix("")
     parts = list(relative.parts)
@@ -586,7 +568,10 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
             | _ROUND8_ADDED_TOP_LEVEL_FUNCTIONS
             | _ROUND5B_ADDED_TOP_LEVEL_FUNCTIONS
             | _ROUND10_ADDED_TOP_LEVEL_FUNCTIONS,
-            _ROUND7_CHANGED_TOP_LEVEL_FUNCTIONS,
+            (
+                _ROUND7_CHANGED_TOP_LEVEL_FUNCTIONS
+                | _FINGERPRINT_HARD_CUT_CHANGED_TOP_LEVEL_FUNCTIONS
+            ),
         ),
         (
             "methods",
@@ -728,15 +713,6 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
             [item for item in baseline[key] if item["owner"] not in changed_owners]
         )
         assert current_unchanged == baseline_unchanged, key
-    encoded_delta = json.dumps(
-        _round8_repository_delta(current),
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    assert hashlib.sha256(encoded_delta).hexdigest() == (
-        _ROUND8_ROUND10_REPOSITORY_DELTA_SHA256
-    )
     import pulsara_agent.conversation_kernel.repository as repository
 
     for name in baseline["runtime"]["owned_observed_symbols"]:

@@ -110,7 +110,6 @@ class _Coordinator:
             target=target,
             occurred_at=datetime.now(timezone.utc),
             actor_id=actor_id,
-            candidate_fingerprint="sha256:" + "a" * 64,
         )
         assert monitor_id == content.monitor_id
         return self.attempt

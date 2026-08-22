@@ -60,20 +60,10 @@ class BuiltinExecutionPolicyRef:
 
     tool_name: str
     catalog_entry_fingerprint: str
-    policy_fingerprint: str
 
     def __post_init__(self) -> None:
         if not self.tool_name or not self.catalog_entry_fingerprint:
             raise ValueError("builtin execution policy identity is incomplete")
-        expected = context_fingerprint(
-            "builtin-execution-policy-ref:v1",
-            {
-                "tool_name": self.tool_name,
-                "catalog_entry_fingerprint": self.catalog_entry_fingerprint,
-            },
-        )
-        if self.policy_fingerprint != expected:
-            raise ValueError("builtin execution policy fingerprint mismatch")
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,7 +78,6 @@ class McpToolExecutionPolicyFact:
     timeout_ms: int
     parallel_safe: bool
     classification_source: McpPolicyClassificationSource
-    policy_fingerprint: str
 
     def __post_init__(self) -> None:
         if not all(
@@ -102,29 +91,34 @@ class McpToolExecutionPolicyFact:
             raise ValueError("MCP execution policy identity is incomplete")
         if not 1_000 <= self.timeout_ms <= 600_000:
             raise ValueError("MCP execution timeout is out of range")
-        expected = context_fingerprint(
-            "mcp-tool-execution-policy:v1",
-            {
-                "server_id": self.server_id,
-                "remote_tool_name": self.remote_tool_name,
-                "provider_tool_name": self.provider_tool_name,
-                "tool_semantic_fingerprint": self.tool_semantic_fingerprint,
-                "effect_kind": self.effect_kind.value,
-                "timeout_ms": self.timeout_ms,
-                "parallel_safe": self.parallel_safe,
-                "classification_source": self.classification_source.value,
-            },
-        )
-        if self.policy_fingerprint != expected:
-            raise ValueError("MCP execution policy fingerprint mismatch")
 
 
 ToolExecutionPolicy = BuiltinExecutionPolicyRef | McpToolExecutionPolicyFact
 
 
 def execution_policy_fingerprint(policy: ToolExecutionPolicy) -> str:
-    if isinstance(policy, (BuiltinExecutionPolicyRef, McpToolExecutionPolicyFact)):
-        return policy.policy_fingerprint
+    if isinstance(policy, BuiltinExecutionPolicyRef):
+        return context_fingerprint(
+            "builtin-execution-policy-ref:v1",
+            {
+                "tool_name": policy.tool_name,
+                "catalog_entry_fingerprint": policy.catalog_entry_fingerprint,
+            },
+        )
+    if isinstance(policy, McpToolExecutionPolicyFact):
+        return context_fingerprint(
+            "mcp-tool-execution-policy:v1",
+            {
+                "server_id": policy.server_id,
+                "remote_tool_name": policy.remote_tool_name,
+                "provider_tool_name": policy.provider_tool_name,
+                "tool_semantic_fingerprint": policy.tool_semantic_fingerprint,
+                "effect_kind": policy.effect_kind.value,
+                "timeout_ms": policy.timeout_ms,
+                "parallel_safe": policy.parallel_safe,
+                "classification_source": policy.classification_source.value,
+            },
+        )
     raise TypeError("tool execution policy union is open")
 
 
@@ -170,29 +164,6 @@ class PreparedToolExecutionBinding:
 DirectToolAccessLeaf = PreparedToolExecutionBinding | PreparedUnavailableDirectMcpGate
 
 
-def _access_leaf_fingerprint_payload(
-    item: DirectToolAccessLeaf,
-) -> dict[str, object]:
-    if isinstance(item, PreparedUnavailableDirectMcpGate):
-        return {
-            "kind": "UNAVAILABLE_MCP_GATE",
-            "tool_name": item.provider_tool_name,
-            "descriptor_fingerprint": item.tool_semantic_fingerprint,
-            "gate_fingerprint": item.gate_fingerprint,
-        }
-    return {
-        "kind": "EXECUTION_BINDING",
-        "tool_name": item.tool_name,
-        "descriptor_fingerprint": item.descriptor_fingerprint,
-        "executor_binding_fingerprint": item.executor_binding_fingerprint,
-        "execution_policy_fingerprint": execution_policy_fingerprint(
-            item.execution_policy
-        ),
-        "memory_citation_visibility": item.memory_citation_visibility,
-        "memory_citation_evidence_kind": item.memory_citation_evidence_kind,
-    }
-
-
 def tool_observation_origin_for_binding(
     binding: PreparedToolExecutionBinding,
 ) -> ToolObservationOrigin:
@@ -213,59 +184,22 @@ def tool_observation_origin_for_binding(
     raise TypeError("tool execution policy union is open")
 
 
-def tool_execution_surface_fingerprint(
-    *,
-    owner_epoch: int,
-    surface_generation: int,
-    semantic_surface_fingerprint: str,
-    bindings: tuple[DirectToolAccessLeaf, ...],
-) -> str:
-    return context_fingerprint(
-        "kernel-tool-execution-surface:v1",
-        {
-            "owner_epoch": owner_epoch,
-            "surface_generation": surface_generation,
-            "semantic_surface_fingerprint": semantic_surface_fingerprint,
-            "bindings": tuple(_access_leaf_fingerprint_payload(item) for item in bindings),
-        },
-    )
-
-
 @dataclass(frozen=True, slots=True)
 class ProcessLocalToolSurfaceAccess:
     owner_epoch: int
     surface_generation: int
     conversation_scope_kind: ModelInputScopeKind
     scope_subagent_task_id: str | None
-    semantic_surface_fingerprint: str
-    execution_surface_fingerprint: str
     _authority: object = field(repr=False)
 
-    @property
-    def surface_fingerprint(self) -> str:
-        """Compatibility spelling for the provider-semantic fingerprint."""
-
-        return self.semantic_surface_fingerprint
-
     def exactly_joins(self, other: ProcessLocalToolSurfaceAccess) -> bool:
-        return (
-            self.owner_epoch == other.owner_epoch
-            and self.surface_generation == other.surface_generation
-            and self.conversation_scope_kind is other.conversation_scope_kind
-            and self.scope_subagent_task_id == other.scope_subagent_task_id
-            and self.semantic_surface_fingerprint
-            == other.semantic_surface_fingerprint
-            and self.execution_surface_fingerprint
-            == other.execution_surface_fingerprint
-            and self._authority is other._authority
-        )
+        return self is other
 
 
 @dataclass(frozen=True, slots=True)
 class PreparedKernelToolSurface:
     model_surface: FrozenModelToolSurface
     execution_bindings: tuple[DirectToolAccessLeaf, ...]
-    execution_surface_fingerprint: str
     access: ProcessLocalToolSurfaceAccess = field(repr=False)
     capability_exposure_plan: FrozenToolCapabilityExposurePlan | None = field(
         default=None, repr=False
@@ -288,21 +222,6 @@ class PreparedKernelToolSurface:
         ):
             if semantic.descriptor_fingerprint != binding.descriptor_fingerprint:
                 raise ValueError("prepared surface descriptor does not exact-join")
-        expected = tool_execution_surface_fingerprint(
-            owner_epoch=self.access.owner_epoch,
-            surface_generation=self.access.surface_generation,
-            semantic_surface_fingerprint=self.model_surface.surface_fingerprint,
-            bindings=self.execution_bindings,
-        )
-        if self.execution_surface_fingerprint != expected:
-            raise ValueError("prepared execution surface fingerprint mismatch")
-        if (
-            self.access.semantic_surface_fingerprint
-            != self.model_surface.surface_fingerprint
-            or self.access.execution_surface_fingerprint
-            != self.execution_surface_fingerprint
-        ):
-            raise ValueError("prepared surface access fingerprint mismatch")
         if self.capability_exposure_plan is not None and (
             self.capability_exposure_plan.direct_tool_surface != self.model_surface
         ):
@@ -321,14 +240,7 @@ class PreparedKernelToolSurface:
         raise KeyError(tool_name)
 
     def exactly_joins(self, other: PreparedKernelToolSurface) -> bool:
-        return (
-            self.model_surface == other.model_surface
-            and self.execution_bindings == other.execution_bindings
-            and self.execution_surface_fingerprint
-            == other.execution_surface_fingerprint
-            and self.access.exactly_joins(other.access)
-            and self.capability_exposure_plan == other.capability_exposure_plan
-        )
+        return self is other
 
 
 @dataclass(slots=True)
@@ -346,7 +258,7 @@ class ProcessLocalToolSurfaceBorrow:
         return (
             not self._closed
             and self._authority is prepared.access._authority
-            and self.prepared.exactly_joins(prepared)
+            and self.prepared is prepared
         )
 
     def execution_binding(self, tool_name: str) -> DirectToolAccessLeaf:
@@ -377,5 +289,4 @@ __all__ = [
     "ToolExecutionPolicy",
     "execution_policy_fingerprint",
     "tool_observation_origin_for_binding",
-    "tool_execution_surface_fingerprint",
 ]

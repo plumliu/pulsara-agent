@@ -107,22 +107,6 @@ class FrozenProviderWireMaterialization:
     root_policy_value: FrozenJsonValue = field(repr=False)
     tool_items: tuple[FrozenJsonObjectFact, ...] = field(repr=False)
     ordered_input_items: tuple[FrozenJsonObjectFact, ...] = field(repr=False)
-    materialization_fingerprint: str
-
-    def __post_init__(self) -> None:
-        root = thaw_json(self.root_policy_value)
-        tools = tuple(thaw_json(item) for item in self.tool_items)
-        inputs = tuple(thaw_json(item) for item in self.ordered_input_items)
-        expected = context_fingerprint(
-            "pulsara.provider-wire-materialization:v1",
-            {
-                "root": root,
-                "tools": tools,
-                "input": inputs,
-            },
-        )
-        if self.materialization_fingerprint != expected:
-            raise ValueError("provider wire materialization fingerprint mismatch")
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,7 +125,6 @@ class FrozenProviderWireInputQuote:
     final_message_utf8_bytes: int
     final_wire_utf8_bytes: int
     quote_contract_version: str
-    quote_fingerprint: str
 
     def __post_init__(self) -> None:
         values = (
@@ -186,27 +169,6 @@ class FrozenProviderWireInputQuote:
             raise ValueError("provider wire quote exceeds the input budget")
         if self.final_wire_utf8_bytes > MAXIMUM_PROVIDER_WIRE_INPUT_BYTES:
             raise ValueError("provider wire quote exceeds its hard byte bound")
-        expected = context_fingerprint(
-            "pulsara.provider-wire-input-quote:v1",
-            {
-                "estimator": self.estimator_fingerprint,
-                "budget": self.effective_input_budget_tokens,
-                "semantic_total_tokens": self.semantic_total_input_tokens,
-                "semantic_message_tokens": self.semantic_message_tokens,
-                "semantic_message_bytes": self.semantic_message_utf8_bytes,
-                "debit_tokens": self.replaced_semantic_debit_tokens,
-                "addend_tokens": self.replay_addend_tokens,
-                "debit_bytes": self.replaced_semantic_debit_utf8_bytes,
-                "addend_bytes": self.replay_addend_utf8_bytes,
-                "final_message_tokens": self.final_message_tokens,
-                "final_total_tokens": self.final_total_input_tokens,
-                "final_message_bytes": self.final_message_utf8_bytes,
-                "final_wire_bytes": self.final_wire_utf8_bytes,
-                "contract": self.quote_contract_version,
-            },
-        )
-        if self.quote_fingerprint != expected:
-            raise ValueError("provider wire quote fingerprint mismatch")
 
 
 @dataclass(frozen=True, slots=True)
@@ -224,7 +186,6 @@ class FrozenProviderWireInputPlan:
     wire_tools_fingerprint: str
     wire_input_prefix_fingerprint: str
     quote: FrozenProviderWireInputQuote
-    plan_fingerprint: str
 
     def __post_init__(self) -> None:
         if (
@@ -302,42 +263,86 @@ class FrozenProviderWireInputPlan:
         )
         if self.wire_input_prefix_fingerprint != expected_prefix:
             raise ValueError("provider wire input prefix proof drifted")
-        expected = context_fingerprint(
-            "pulsara.provider-wire-input-plan:v2-durable-replay",
-            {
-                "context": self.context_id,
-                "compiled": self.compiled_semantic_fingerprint,
-                "placements": self.message_placements_fingerprint,
-                "api": self.wire_api,
-                "profile": self.provider_profile_fingerprint,
-                "target": self.resolved_target_semantic_fingerprint,
-                "materialization": self.materialization.materialization_fingerprint,
-                "replacements": tuple(
-                    (
-                        item.assistant_entry_id,
-                        item.first_message_ordinal,
-                        item.message_count,
-                        item.generic_message_group_fingerprint,
-                        item.replay_fragment_fingerprint,
-                        item.replacement_wire_fingerprint,
-                        item.semantic_debit_utf8_bytes,
-                        item.replay_addend_utf8_bytes,
-                        item.semantic_debit_tokens,
-                        item.replay_addend_tokens,
-                    )
-                    for item in self.replacements
-                ),
-                "provider_replay_hydration": (
-                    self.provider_replay_hydration_fingerprint
-                ),
-                "wire_system": self.wire_system_fingerprint,
-                "wire_tools": self.wire_tools_fingerprint,
-                "wire_input": self.wire_input_prefix_fingerprint,
-                "quote": self.quote.quote_fingerprint,
-            },
-        )
-        if self.plan_fingerprint != expected:
-            raise ValueError("provider wire input plan fingerprint mismatch")
+
+
+def provider_wire_materialization_identity_fingerprint(
+    materialization: FrozenProviderWireMaterialization,
+) -> str:
+    return context_fingerprint(
+        "pulsara.provider-wire-materialization:v1",
+        {
+            "root": thaw_json(materialization.root_policy_value),
+            "tools": tuple(thaw_json(item) for item in materialization.tool_items),
+            "input": tuple(
+                thaw_json(item) for item in materialization.ordered_input_items
+            ),
+        },
+    )
+
+
+def provider_wire_input_quote_identity_fingerprint(
+    quote: FrozenProviderWireInputQuote,
+) -> str:
+    return context_fingerprint(
+        "pulsara.provider-wire-input-quote:v1",
+        {
+            "estimator": quote.estimator_fingerprint,
+            "budget": quote.effective_input_budget_tokens,
+            "semantic_total_tokens": quote.semantic_total_input_tokens,
+            "semantic_message_tokens": quote.semantic_message_tokens,
+            "semantic_message_bytes": quote.semantic_message_utf8_bytes,
+            "debit_tokens": quote.replaced_semantic_debit_tokens,
+            "addend_tokens": quote.replay_addend_tokens,
+            "debit_bytes": quote.replaced_semantic_debit_utf8_bytes,
+            "addend_bytes": quote.replay_addend_utf8_bytes,
+            "final_message_tokens": quote.final_message_tokens,
+            "final_total_tokens": quote.final_total_input_tokens,
+            "final_message_bytes": quote.final_message_utf8_bytes,
+            "final_wire_bytes": quote.final_wire_utf8_bytes,
+            "contract": quote.quote_contract_version,
+        },
+    )
+
+
+def provider_wire_input_plan_identity_fingerprint(
+    plan: FrozenProviderWireInputPlan,
+) -> str:
+    """Derive the historical stable plan identity at its actual consumers."""
+
+    return context_fingerprint(
+        "pulsara.provider-wire-input-plan:v2-durable-replay",
+        {
+            "context": plan.context_id,
+            "compiled": plan.compiled_semantic_fingerprint,
+            "placements": plan.message_placements_fingerprint,
+            "api": plan.wire_api,
+            "profile": plan.provider_profile_fingerprint,
+            "target": plan.resolved_target_semantic_fingerprint,
+            "materialization": provider_wire_materialization_identity_fingerprint(
+                plan.materialization
+            ),
+            "replacements": tuple(
+                (
+                    item.assistant_entry_id,
+                    item.first_message_ordinal,
+                    item.message_count,
+                    item.generic_message_group_fingerprint,
+                    item.replay_fragment_fingerprint,
+                    item.replacement_wire_fingerprint,
+                    item.semantic_debit_utf8_bytes,
+                    item.replay_addend_utf8_bytes,
+                    item.semantic_debit_tokens,
+                    item.replay_addend_tokens,
+                )
+                for item in plan.replacements
+            ),
+            "provider_replay_hydration": plan.provider_replay_hydration_fingerprint,
+            "wire_system": plan.wire_system_fingerprint,
+            "wire_tools": plan.wire_tools_fingerprint,
+            "wire_input": plan.wire_input_prefix_fingerprint,
+            "quote": provider_wire_input_quote_identity_fingerprint(plan.quote),
+        },
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -413,7 +418,9 @@ def llm_context_fingerprint(context: LLMContext) -> str:
             "provider_wire_input_plan": (
                 None
                 if context.provider_wire_input_plan is None
-                else context.provider_wire_input_plan.plan_fingerprint
+                else provider_wire_input_plan_identity_fingerprint(
+                    context.provider_wire_input_plan
+                )
             ),
         },
     )

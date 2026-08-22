@@ -676,7 +676,7 @@ class _MemoryOperations:
     ) -> AcceptedMemoryGovernance | PreparedExistingSourceRelationSettlement:
         """Settle one sealed duplicate relation without reopening model judgment."""
 
-        if settlement.parent_candidate_fingerprint != prepared.candidate_fingerprint:
+        if settlement.parent is not prepared:
             raise ConversationKernelConflict(
                 "existing memory settlement does not name its parent decision"
             )
@@ -878,8 +878,7 @@ class _MemoryOperations:
                     )
                 if (
                     existing_settlement is None
-                    or existing_settlement.parent_candidate_fingerprint
-                    != prepared.candidate_fingerprint
+                    or existing_settlement.parent is not prepared
                     or existing_settlement.candidate_id != prepared.candidate_id
                     or existing_settlement.existing_source.fact_id != str(winner_id)
                     or existing_settlement.target.fact_id
@@ -1151,8 +1150,7 @@ class _MemoryOperations:
         settlement: PreparedExistingSourceRelationSettlement,
     ) -> MemoryGovernanceConfirmation:
         if (
-            settlement.parent_candidate_fingerprint
-            != prepared.candidate_fingerprint
+            settlement.parent is not prepared
             or settlement.candidate_id != prepared.candidate_id
         ):
             return MemoryGovernanceConfirmation.CONFLICT

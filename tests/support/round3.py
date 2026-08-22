@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from hashlib import sha256
 import json
+from pathlib import Path
 from typing import AsyncIterator, Callable
 
 from pulsara_agent.conversation_kernel.direct_model import (
@@ -31,10 +32,9 @@ from pulsara_agent.capability.contracts import (
     capability_source_registration,
     freeze_capability_source_snapshot,
     freeze_tool_capability_fact,
-    skill_projection_input_fingerprint,
     tool_capability_version_ref,
 )
-from pulsara_agent.capability.local_skills import LocalSkillDiscovery
+from pulsara_agent.capability.local_skills import LocalSkillDiscovery, LocalSkillProvider
 from pulsara_agent.capability.planner import KernelToolCapabilityPlanner
 from pulsara_agent.capability.registry import (
     freeze_capability_dispatch_cut_and_views,
@@ -72,6 +72,9 @@ from pulsara_agent.conversation_kernel.subagents.contracts import (
     build_parent_context_call_subject,
     build_parent_context_selection,
     build_subagent_result_public_fact,
+    parent_context_call_subject_identity_digest,
+    parent_context_selection_identity_digest,
+    parent_context_source_identity_digest,
 )
 from pulsara_agent.conversation_kernel.runner import (
     KernelToolInvocationContext,
@@ -83,7 +86,6 @@ from pulsara_agent.conversation_kernel.tool_surface import (
     PreparedToolExecutionBinding,
     ProcessLocalToolSurfaceAccess,
     ProcessLocalToolSurfaceBorrow,
-    tool_execution_surface_fingerprint,
 )
 from pulsara_agent.conversation_kernel.tool_runtime import DirectKernelToolPort
 from pulsara_agent.model_input.contracts import (
@@ -186,7 +188,7 @@ class ScriptedKernelModel:
         self,
         request: KernelModelExecutionRequest,
         *,
-        expected_append_candidate_fingerprint: str,
+        append_candidate,
         install_authority: ProcessLocalProviderInputInstallAuthority,
     ) -> "_ScriptedPreparedExecution":
         for tool in request.compiled_input.tools:
@@ -197,7 +199,7 @@ class ScriptedKernelModel:
         return _ScriptedPreparedExecution(
             request=request,
             items=self._calls.pop(0),
-            expected_candidate_fingerprint=expected_append_candidate_fingerprint,
+            append_candidate=append_candidate,
             install_authority=install_authority,
         )
 
@@ -256,14 +258,14 @@ class CallbackScriptedKernelModel:
         self,
         request: KernelModelExecutionRequest,
         *,
-        expected_append_candidate_fingerprint: str,
+        append_candidate,
         install_authority: ProcessLocalProviderInputInstallAuthority,
     ) -> "_CallbackPreparedExecution":
         self.requests.append(request)
         return _CallbackPreparedExecution(
             request=request,
             stream_factory=self._stream_factory,
-            expected_candidate_fingerprint=expected_append_candidate_fingerprint,
+            append_candidate=append_candidate,
             install_authority=install_authority,
         )
 
@@ -276,21 +278,14 @@ class _CallbackPreparedExecution:
         stream_factory: Callable[
             [KernelModelExecutionRequest], AsyncIterator[object]
         ],
-        expected_candidate_fingerprint: str,
+        append_candidate,
         install_authority: ProcessLocalProviderInputInstallAuthority,
     ) -> None:
         self._request = request
         self._stream_factory = stream_factory
-        self._expected_candidate_fingerprint = expected_candidate_fingerprint
+        self._append_candidate = append_candidate
         self._install_authority = install_authority
         self._settled = False
-        self.execution_fingerprint = context_fingerprint(
-            "test-callback-prepared-execution:v1",
-            {
-                "compiled": request.compiled_input.compiled_semantic_fingerprint,
-                "candidate": expected_candidate_fingerprint,
-            },
-        )
         self._completion = None
 
     def discard(self) -> None:
@@ -304,15 +299,15 @@ class _CallbackPreparedExecution:
         if self._settled:
             raise RuntimeError("callback execution already settled")
         if (
-            permit.candidate_fingerprint
-            != self._expected_candidate_fingerprint
-            or permit.execution_fingerprint != self.execution_fingerprint
+            permit.epoch_nonce != self._append_candidate.epoch_nonce
+            or permit.epoch_revision
+            != self._append_candidate.expected_epoch_revision + 1
         ):
             raise RuntimeError("callback execution permit mismatch")
         self._install_authority.consume(
             permit,
-            candidate_fingerprint=self._expected_candidate_fingerprint,
-            execution_fingerprint=self.execution_fingerprint,
+            candidate=self._append_candidate,
+            execution=self,
         )
         self._settled = True
         async for item in self._stream_factory(self._request):
@@ -333,21 +328,14 @@ class _ScriptedPreparedExecution:
         *,
         request: KernelModelExecutionRequest,
         items: list[object],
-        expected_candidate_fingerprint: str,
+        append_candidate,
         install_authority: ProcessLocalProviderInputInstallAuthority,
     ) -> None:
         self._request = request
         self._items = items
-        self._expected_candidate_fingerprint = expected_candidate_fingerprint
+        self._append_candidate = append_candidate
         self._install_authority = install_authority
         self._opened = False
-        self.execution_fingerprint = context_fingerprint(
-            "test-scripted-prepared-execution:v1",
-            {
-                "compiled": request.compiled_input.compiled_semantic_fingerprint,
-                "candidate": expected_candidate_fingerprint,
-            },
-        )
         self._completion = None
 
     def discard(self) -> None:
@@ -361,15 +349,15 @@ class _ScriptedPreparedExecution:
         if self._opened:
             raise RuntimeError("scripted execution already opened")
         if (
-            permit.candidate_fingerprint
-            != self._expected_candidate_fingerprint
-            or permit.execution_fingerprint != self.execution_fingerprint
+            permit.epoch_nonce != self._append_candidate.epoch_nonce
+            or permit.epoch_revision
+            != self._append_candidate.expected_epoch_revision + 1
         ):
             raise RuntimeError("scripted execution permit mismatch")
         self._install_authority.consume(
             permit,
-            candidate_fingerprint=self._expected_candidate_fingerprint,
-            execution_fingerprint=self.execution_fingerprint,
+            candidate=self._append_candidate,
+            execution=self,
         )
         self._opened = True
         for item in self._items:
@@ -435,46 +423,28 @@ class StaticContextSourceCollector:
             disposition=CapabilitySourceSnapshotDisposition.COMPLETE,
             facts=(),
         )
-        root_policy_fingerprint = context_fingerprint(
-            "test:skill-root-policy:v1",
-            {
-                "scope": conversation_scope_kind.value,
-                "task": scope_subagent_task_id,
-            },
+        root_policy = LocalSkillProvider(include_user_skills=False).prepare_root_policy(
+            Path.cwd(),
+            conversation_scope_kind=conversation_scope_kind,
+            scope_subagent_task_id=scope_subagent_task_id,
         )
         return issue_local_skill_catalog_source_snapshot(
             conversation_scope_kind=conversation_scope_kind,
             scope_subagent_task_id=scope_subagent_task_id,
             source_snapshot=snapshot,
-            root_policy_fingerprint=root_policy_fingerprint,
-            discovery=LocalSkillDiscovery(
-                (), (), root_policy_fingerprint=root_policy_fingerprint
-            ),
+            discovery=LocalSkillDiscovery((), (), root_policy=root_policy),
             owner_authenticity=self,
         )
 
     def freeze_skill_capability_projection_input(self, owner):
-        from pulsara_agent.capability.contracts import (
-            FrozenSkillProjectionInput,
-            skill_projection_input_fingerprint,
-        )
         from pulsara_agent.conversation_kernel.capability import (
             skill_discovery_semantic_fingerprint,
         )
 
         discovery_fingerprint = skill_discovery_semantic_fingerprint(owner.discovery)
-        fingerprint = skill_projection_input_fingerprint(
-            discovery_semantic_fingerprint=discovery_fingerprint,
-            source_snapshot_fingerprint=(
-                owner.source_snapshot.source_snapshot_fingerprint
-            ),
-        )
         return FrozenSkillProjectionInput(
             discovery_semantic_fingerprint=discovery_fingerprint,
-            source_snapshot_fingerprint=(
-                owner.source_snapshot.source_snapshot_fingerprint
-            ),
-            snapshot_fingerprint=fingerprint,
+            source_snapshot=owner.source_snapshot,
         )
 
     def collect(self, **_kwargs: object) -> CollectedContextSources:
@@ -673,10 +643,6 @@ class StaticContextSourceCollector:
             absent_facts=collection.absent_facts,
             diagnostics=collection.diagnostics,
             registry_fingerprint=collection.registry_fingerprint,
-            freeze_fingerprint=context_fingerprint(
-                "test:frozen-non-trigger-sources:v1",
-                collection.collection_fingerprint,
-            ),
             tool_exposure_plan=kwargs["tool_exposure_plan"],  # type: ignore[arg-type]
             skill_dispatch_view=kwargs["skill_dispatch_view"],  # type: ignore[arg-type]
             skill_owner_snapshot=kwargs["skill_owner_snapshot"],  # type: ignore[arg-type]
@@ -918,27 +884,12 @@ class StructuredToolPort:
         )
 
     def freeze_mcp_capability_projection_input(self, owner):
-        sources = tuple(
-            sorted(
-                item.source_snapshot_fingerprint for item in owner.source_snapshots
-            )
-        )
-        payload = {
-            "scope": owner.conversation_scope_kind.value,
-            "scope_subagent_task_id": owner.scope_subagent_task_id,
-            "sources": sources,
-            "catalog": owner.catalog_snapshot.semantic_fingerprint,
-            "inspectability": (),
-        }
         return FrozenMcpCapabilityProjectionInput(
             conversation_scope_kind=owner.conversation_scope_kind,
             scope_subagent_task_id=owner.scope_subagent_task_id,
-            source_snapshot_fingerprints=sources,
+            source_snapshots=owner.source_snapshots,
             catalog_semantic_fingerprint=owner.catalog_snapshot.semantic_fingerprint,
             inspectability_facts=(),
-            projection_fingerprint=context_fingerprint(
-                "mcp-capability-projection-input:v1", payload
-            ),
         )
 
     def prepare_planned_tool_surface(
@@ -953,7 +904,6 @@ class StructuredToolPort:
         return PreparedKernelToolSurface(
             model_surface=prepared.model_surface,
             execution_bindings=prepared.execution_bindings,
-            execution_surface_fingerprint=prepared.execution_surface_fingerprint,
             access=prepared.access,
             capability_exposure_plan=plan,
         )
@@ -977,38 +927,20 @@ class StructuredToolPort:
                     catalog_entry_fingerprint=context_fingerprint(
                         "test-tool-catalog:v1", item.name
                     ),
-                    policy_fingerprint=context_fingerprint(
-                        "builtin-execution-policy-ref:v1",
-                        {
-                            "tool_name": item.name,
-                            "catalog_entry_fingerprint": context_fingerprint(
-                                "test-tool-catalog:v1", item.name
-                            ),
-                        },
-                    ),
                 ),
             )
             for item in surface.tool_specs
-        )
-        execution_fingerprint = tool_execution_surface_fingerprint(
-            owner_epoch=1,
-            surface_generation=1,
-            semantic_surface_fingerprint=surface.surface_fingerprint,
-            bindings=bindings,
         )
         access = ProcessLocalToolSurfaceAccess(
             owner_epoch=1,
             surface_generation=1,
             conversation_scope_kind=conversation_scope_kind,
             scope_subagent_task_id=scope_subagent_task_id,
-            semantic_surface_fingerprint=surface.surface_fingerprint,
-            execution_surface_fingerprint=execution_fingerprint,
             _authority=self._authority,
         )
         return PreparedKernelToolSurface(
             model_surface=surface,
             execution_bindings=bindings,
-            execution_surface_fingerprint=execution_fingerprint,
             access=access,
         )
 
@@ -1114,27 +1046,12 @@ class _EmptyTestMcpCapabilityOwner:
         return None
 
     def freeze_capability_projection_input(self, owner):
-        sources = tuple(
-            sorted(
-                item.source_snapshot_fingerprint for item in owner.source_snapshots
-            )
-        )
-        payload = {
-            "scope": owner.conversation_scope_kind.value,
-            "scope_subagent_task_id": owner.scope_subagent_task_id,
-            "sources": sources,
-            "catalog": owner.catalog_snapshot.semantic_fingerprint,
-            "inspectability": (),
-        }
         return FrozenMcpCapabilityProjectionInput(
             conversation_scope_kind=owner.conversation_scope_kind,
             scope_subagent_task_id=owner.scope_subagent_task_id,
-            source_snapshot_fingerprints=sources,
+            source_snapshots=owner.source_snapshots,
             catalog_semantic_fingerprint=owner.catalog_snapshot.semantic_fingerprint,
             inspectability_facts=(),
-            projection_fingerprint=context_fingerprint(
-                "mcp-capability-projection-input:v1", payload
-            ),
         )
 
 
@@ -1168,43 +1085,49 @@ def prepare_test_model_call(
             maximum_output_tokens=request.maximum_output_tokens,
         )
     )
-    source = capability_source_ref(
-        CapabilitySourceKind.BUILTIN_REGISTRY,
-        "direct-model-component-test",
-    )
-    facts = tuple(
-        freeze_tool_capability_fact(
-            identity=capability_identity(
-                kind=CapabilityKind.TOOL,
-                source=source,
-                stable_name=spec.name,
-            ),
-            origin=ToolCapabilityOrigin.BUILTIN,
-            canonical_tool_spec=spec,
+    exposure_plan = request.tool_surface.capability_exposure_plan
+    if exposure_plan is not None:
+        projection_set = exposure_plan.direct_projection_set
+    else:
+        source = capability_source_ref(
+            CapabilitySourceKind.BUILTIN_REGISTRY,
+            "direct-model-component-test",
         )
-        for spec in request.tool_surface.model_surface.tool_specs
-    )
-    eligibility = freeze_openai_native_tool_eligibility(
-        conversation_scope_kind=(
-            request.tool_surface.model_surface.conversation_scope_kind
-        ),
-        scope_subagent_task_id=request.tool_surface.access.scope_subagent_task_id,
-        wire_api=target.target.model_profile.provider_profile.wire_api,
-        tool_facts=facts,
-    )
-    ordered = tuple(
-        sorted(facts, key=lambda item: item.canonical_tool_spec.name)
-    )
-    projection_set = materialize_openai_native_tool_projection_set(
-        conversation_scope_kind=(
-            request.tool_surface.model_surface.conversation_scope_kind
-        ),
-        scope_subagent_task_id=request.tool_surface.access.scope_subagent_task_id,
-        wire_api=target.target.model_profile.provider_profile.wire_api,
-        tool_versions=tuple(tool_capability_version_ref(item) for item in ordered),
-        tool_specs=tuple(item.canonical_tool_spec for item in ordered),
-        eligibility=eligibility,
-    )
+        facts = tuple(
+            freeze_tool_capability_fact(
+                identity=capability_identity(
+                    kind=CapabilityKind.TOOL,
+                    source=source,
+                    stable_name=spec.name,
+                ),
+                origin=ToolCapabilityOrigin.BUILTIN,
+                canonical_tool_spec=spec,
+            )
+            for spec in request.tool_surface.model_surface.tool_specs
+        )
+        eligibility = freeze_openai_native_tool_eligibility(
+            conversation_scope_kind=(
+                request.tool_surface.model_surface.conversation_scope_kind
+            ),
+            scope_subagent_task_id=request.tool_surface.access.scope_subagent_task_id,
+            wire_api=target.target.model_profile.provider_profile.wire_api,
+            tool_facts=facts,
+        )
+        ordered = tuple(
+            sorted(facts, key=lambda item: item.canonical_tool_spec.name)
+        )
+        projection_set = materialize_openai_native_tool_projection_set(
+            conversation_scope_kind=(
+                request.tool_surface.model_surface.conversation_scope_kind
+            ),
+            scope_subagent_task_id=request.tool_surface.access.scope_subagent_task_id,
+            wire_api=target.target.model_profile.provider_profile.wire_api,
+            tool_versions=tuple(
+                tool_capability_version_ref(item) for item in ordered
+            ),
+            tool_specs=tuple(item.canonical_tool_spec for item in ordered),
+            eligibility=eligibility,
+        )
     return port.bind_tool_surface(
         prepared_target=target,
         tool_surface=request.tool_surface,
@@ -1224,7 +1147,10 @@ def prepare_test_direct_tool_surface(
     # Standalone tool tests do not construct a Host. Complete only missing
     # support owners, then seal exactly once; tests with real owners already
     # arrive sealed and are left untouched.
-    if port._builtin_composition_state.value == "PREPARING":  # noqa: SLF001
+    if (
+        hasattr(port, "_builtin_composition_state")
+        and port._builtin_composition_state.value == "PREPARING"  # noqa: SLF001
+    ):
         if port._interaction is None:  # noqa: SLF001
             port.bind_interaction_port(object())  # type: ignore[arg-type]
         if port._subagent is None:  # noqa: SLF001
@@ -1267,23 +1193,20 @@ def prepare_test_direct_tool_surface(
         disposition=CapabilitySourceSnapshotDisposition.COMPLETE,
         facts=(),
     )
-    root_policy_fingerprint = context_fingerprint(
-        "test:skill-root-policy:v1",
-        {
-            "scope": conversation_scope_kind.value,
-            "task": scope_subagent_task_id,
-        },
+    root_policy = LocalSkillProvider(include_user_skills=False).prepare_root_policy(
+        Path.cwd(),
+        conversation_scope_kind=conversation_scope_kind,
+        scope_subagent_task_id=scope_subagent_task_id,
     )
     discovery = LocalSkillDiscovery(
         skills=(),
         diagnostics=(),
-        root_policy_fingerprint=root_policy_fingerprint,
+        root_policy=root_policy,
     )
     skill_owner = issue_local_skill_catalog_source_snapshot(
         conversation_scope_kind=conversation_scope_kind,
         scope_subagent_task_id=scope_subagent_task_id,
         source_snapshot=skill_snapshot,
-        root_policy_fingerprint=root_policy_fingerprint,
         discovery=discovery,
         owner_authenticity=object(),
     )
@@ -1309,11 +1232,7 @@ def prepare_test_direct_tool_surface(
     )
     skill_input = FrozenSkillProjectionInput(
         discovery_semantic_fingerprint=discovery_fingerprint,
-        source_snapshot_fingerprint=skill_snapshot.source_snapshot_fingerprint,
-        snapshot_fingerprint=skill_projection_input_fingerprint(
-            discovery_semantic_fingerprint=discovery_fingerprint,
-            source_snapshot_fingerprint=skill_snapshot.source_snapshot_fingerprint,
-        ),
+        source_snapshot=skill_snapshot,
     )
     _parent, tool_view, _skill_view = freeze_capability_dispatch_cut_and_views(
         conversation_scope_kind=conversation_scope_kind,
@@ -1369,7 +1288,7 @@ def direct_tool_invocation_context(
             effective_mode=DEFAULT_PERMISSION_MODE,
             admission_source=RunPermissionAdmissionSource.USER_SUBMISSION,
         )
-        binding_fingerprint = borrow.binding_fingerprint(tool_name)
+        borrow.execution_binding(tool_name)
         return borrow, KernelToolInvocationContext(
             session_id=session_id,
             workspace_id=workspace_id,
@@ -1387,8 +1306,6 @@ def direct_tool_invocation_context(
             attempt_permission_snapshot_fingerprint=(
                 permission.snapshot_fingerprint
             ),
-            tool_surface_fingerprint=prepared.model_surface.surface_fingerprint,
-            executor_binding_fingerprint=binding_fingerprint,
             surface_borrow=borrow,
             memory_context=memory_context or _enabled_memory_context(),
         )
@@ -1450,9 +1367,15 @@ class Round10TestSubagentRuntime:
                 kind=ContextSourceKind.PARENT_CONTEXT,
                 text=self._selection.rendered_body,
                 domain_identity={
-                    "subject": self._subject.subject_fingerprint,
-                    "selection": self._selection.selection_fingerprint,
-                    "source": self._selection.source_fingerprint,
+                    "subject": parent_context_call_subject_identity_digest(
+                        self._subject
+                    ),
+                    "selection": parent_context_selection_identity_digest(
+                        self._subject, self._selection
+                    ),
+                    "source": parent_context_source_identity_digest(
+                        self._subject, self._selection
+                    ),
                 },
             ),
             build_subagent_context_source(

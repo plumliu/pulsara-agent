@@ -8,7 +8,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from pulsara_agent.capability.contracts import FrozenMcpRouteProjection
 from pulsara_agent.conversation_kernel.direct_model import (
     DirectKernelModelPort,
     KernelModelExecutionRequest,
@@ -65,6 +64,7 @@ from tests.support.model_config import test_llm_config
 from tests.support.round3 import (
     StaticContextSourceCollector,
     StructuredToolPort,
+    prepare_test_direct_tool_surface,
     prepare_test_model_call,
     static_canonical_compile_facts,
 )
@@ -132,7 +132,7 @@ def test_round5_preflight_rejects_a_foreign_transport_timeout_binding() -> None:
     with pytest.raises(ValueError, match="does not exact-join preparation"):
         second.preflight_execution(
             request,
-            expected_append_candidate_fingerprint=candidate.candidate_fingerprint,
+            append_candidate=candidate,
             install_authority=owner.install_authority,
         )
     request.surface_borrow.close()
@@ -230,7 +230,7 @@ def test_round5_provider_retries_before_semantic_output(
     owner, candidate = _continuity_candidate(request)
     execution = port.preflight_execution(
         request,
-        expected_append_candidate_fingerprint=candidate.candidate_fingerprint,
+        append_candidate=candidate,
         install_authority=owner.install_authority,
     )
     endpoint = _Round5RetryEndpoint(
@@ -282,7 +282,7 @@ def test_round5_provider_never_retries_after_semantic_output(
     owner, candidate = _continuity_candidate(request)
     execution = port.preflight_execution(
         request,
-        expected_append_candidate_fingerprint=candidate.candidate_fingerprint,
+        append_candidate=candidate,
         install_authority=owner.install_authority,
     )
     endpoint = _Round5RetryEndpoint(
@@ -333,9 +333,11 @@ def _prepared_execution(
     revision_id = "binding:test"
     sequence = 0
     tool_port = StructuredToolPort(object(), tool_names=("read_file",))
-    surface = tool_port.snapshot_tool_surface(
+    surface = prepare_test_direct_tool_surface(
+        tool_port,
         conversation_scope_kind=scope_kind,
         scope_subagent_task_id=scope_subagent_task_id,
+        wire_api=port._config.api,  # noqa: SLF001 - exact test target profile
     )
     prepared = prepare_test_model_call(
         port,
@@ -440,14 +442,12 @@ async def _collect_preflighted(
     owner, append_candidate = _continuity_candidate(request)
     execution = port.preflight_execution(
         request,
-        expected_append_candidate_fingerprint=(
-            append_candidate.candidate_fingerprint
-        ),
+        append_candidate=append_candidate,
         install_authority=owner.install_authority,
     )
     permit = owner.install(
-        candidate_fingerprint=append_candidate.candidate_fingerprint,
-        execution_fingerprint=execution.execution_fingerprint,
+        candidate=append_candidate,
+        execution=execution,
     )
     return [item async for item in execution.open_once(permit)]
 
@@ -486,6 +486,8 @@ def _continuity_candidate(request: KernelModelExecutionRequest):
         provider_message_lowering_contract="test:lowering",
         context_base_semantic_identity=FULL_HISTORY_CONTEXT_BASE_IDENTITY,
     )
+    tool_exposure_plan = request.prepared_call.tool_surface.capability_exposure_plan
+    assert tool_exposure_plan is not None
     candidate = _prepared_append_candidate(
         planning=planning,
         compatibility=compatibility,
@@ -497,26 +499,7 @@ def _continuity_candidate(request: KernelModelExecutionRequest):
             reset_reason=None,
         ),
         wire_input_plan=request.wire_input_plan,
-        capability_dispatch_cut_fingerprint=context_fingerprint(
-            "test:capability-dispatch-cut:v1",
-            request.prepared_call.native_projection_set.projection_set_fingerprint,
-        ),
-        direct_native_projection_set=request.prepared_call.native_projection_set,
-        mcp_route_projection=FrozenMcpRouteProjection(
-            routes=(),
-            joined_catalog_semantic_fingerprint=context_fingerprint(
-                "test:empty-mcp-catalog:v1", ()
-            ),
-            projection_fingerprint=context_fingerprint(
-                "mcp-route-projection:v1",
-                {
-                    "routes": (),
-                    "catalog": context_fingerprint(
-                        "test:empty-mcp-catalog:v1", ()
-                    ),
-                },
-            ),
-        ),
+        tool_exposure_plan=tool_exposure_plan,
     )
     owner.register(candidate)
     return owner, candidate
@@ -565,7 +548,7 @@ def test_round3_1_adapter_wire_items_preserve_strict_prefix_and_steer_order(
     owner, candidate = _continuity_candidate(request)
     execution = port.preflight_execution(
         request,
-        expected_append_candidate_fingerprint=candidate.candidate_fingerprint,
+        append_candidate=candidate,
         install_authority=owner.install_authority,
     )
     first_context = execution.final_context
@@ -636,7 +619,7 @@ def test_round3_1_adapter_preserves_twelve_call_strict_prefix_trajectory(
     owner, candidate = _continuity_candidate(request)
     execution = port.preflight_execution(
         request,
-        expected_append_candidate_fingerprint=candidate.candidate_fingerprint,
+        append_candidate=candidate,
         install_authority=owner.install_authority,
     )
     contexts = [execution.final_context]
@@ -719,12 +702,12 @@ def test_round3_1_open_rejects_forged_same_shape_install_permit() -> None:
     owner, candidate = _continuity_candidate(request)
     execution = port.preflight_execution(
         request,
-        expected_append_candidate_fingerprint=candidate.candidate_fingerprint,
+        append_candidate=candidate,
         install_authority=owner.install_authority,
     )
     permit = owner.install(
-        candidate_fingerprint=candidate.candidate_fingerprint,
-        execution_fingerprint=execution.execution_fingerprint,
+        candidate=candidate,
+        execution=execution,
     )
     forged = replace(permit)
 
@@ -754,7 +737,7 @@ def test_round5a1_preflight_rejects_same_shape_unregistered_wire_plan() -> None:
     ):
         port.preflight_execution(
             forged_request,
-            expected_append_candidate_fingerprint=(candidate.candidate_fingerprint),
+            append_candidate=candidate,
             install_authority=owner.install_authority,
         )
 

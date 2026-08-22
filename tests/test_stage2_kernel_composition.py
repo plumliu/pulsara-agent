@@ -7,8 +7,21 @@ import pytest
 
 from pulsara_agent.capability.builtin_catalog import builtin_tool_descriptors
 from pulsara_agent.capability.contracts import (
-    FrozenSkillCapabilityDispatchView,
-    skill_capability_dispatch_view_fingerprint,
+    CapabilitySourceKind,
+    CapabilitySourceRefreshMode,
+    CapabilitySourceSnapshotDisposition,
+    EmptyCapabilityEpochPredecessor,
+    FrozenMcpCapabilityProjectionInput,
+    FrozenNativeToolWireEligibilitySet,
+    capability_source_ref,
+    capability_source_registration,
+    freeze_capability_source_snapshot,
+)
+from pulsara_agent.capability.registry import (
+    freeze_capability_dispatch_cut_and_views,
+    freeze_capability_registration_set,
+    freeze_capability_registry_snapshot,
+    freeze_tool_planning_input,
 )
 from pulsara_agent.capability.local_skills import LocalSkillDiscovery
 from pulsara_agent.capability.local_skills import LocalSkillProvider
@@ -35,7 +48,7 @@ class _SkillProjectionProvider:
         return LocalSkillDiscovery(
             skills=(),
             diagnostics=(),
-            root_policy_fingerprint=root_policy.root_policy_fingerprint,
+            root_policy=root_policy,
         )
 
     def resolve_projection_from_snapshot(
@@ -77,23 +90,61 @@ def _skill_view(composer: KernelSkillProjectionComposer):
         scope_subagent_task_id=None,
     )
     projection = composer.freeze_projection_input(owner)
-    parent = context_fingerprint(
-            "test:parent-capability-cut:v1", "parent"
-        )
-    registry = context_fingerprint(
-            "test:capability-registry:v1", "registry"
-        )
-    view = FrozenSkillCapabilityDispatchView(
-        parent_dispatch_cut_fingerprint=parent,
-        registry_fingerprint=registry,
-        registry_skill_facts=(),
-        projection_input=projection,
-        view_fingerprint=skill_capability_dispatch_view_fingerprint(
-            parent_dispatch_cut_fingerprint=parent,
-            registry_fingerprint=registry,
-            registry_skill_facts=(),
-            projection_input=projection,
+    builtin_source = capability_source_ref(
+        CapabilitySourceKind.BUILTIN_REGISTRY, "test-builtin"
+    )
+    builtin_registration = capability_source_registration(
+        source=builtin_source,
+        refresh_mode=CapabilitySourceRefreshMode.IMMUTABLE,
+        source_contract_fingerprint=context_fingerprint(
+            "test:builtin-contract:v1", "empty"
         ),
+    )
+    builtin_snapshot = freeze_capability_source_snapshot(
+        registration=builtin_registration,
+        conversation_scope_kind=ModelInputScopeKind.ROOT,
+        scope_subagent_task_id=None,
+        disposition=CapabilitySourceSnapshotDisposition.COMPLETE,
+        facts=(),
+    )
+    registration_set = freeze_capability_registration_set(
+        conversation_scope_kind=ModelInputScopeKind.ROOT,
+        scope_subagent_task_id=None,
+        builtin_registration=builtin_registration,
+        mcp_registrations=(),
+        local_skill_catalog_registration=owner.source_snapshot.registration,
+    )
+    registry = freeze_capability_registry_snapshot(
+        registration_set=registration_set,
+        source_snapshots=(builtin_snapshot, owner.source_snapshot),
+    )
+    native_contract = context_fingerprint("test:native-contract:v1", "empty")
+    native = FrozenNativeToolWireEligibilitySet(
+        conversation_scope_kind=ModelInputScopeKind.ROOT,
+        scope_subagent_task_id=None,
+        native_function_tool_wire_contract_fingerprint=native_contract,
+        entries=(),
+    )
+    mcp = FrozenMcpCapabilityProjectionInput(
+        conversation_scope_kind=ModelInputScopeKind.ROOT,
+        scope_subagent_task_id=None,
+        source_snapshots=(),
+        catalog_semantic_fingerprint=context_fingerprint(
+            "test:mcp-catalog:v1", ()
+        ),
+        inspectability_facts=(),
+    )
+    tools = freeze_tool_planning_input(
+        predecessor=EmptyCapabilityEpochPredecessor(0),
+        native_wire=native,
+        mcp=mcp,
+    )
+    _parent, _tool_view, view = freeze_capability_dispatch_cut_and_views(
+        conversation_scope_kind=ModelInputScopeKind.ROOT,
+        scope_subagent_task_id=None,
+        registry=registry,
+        tools=tools,
+        skills=projection,
     )
     return owner, view
 

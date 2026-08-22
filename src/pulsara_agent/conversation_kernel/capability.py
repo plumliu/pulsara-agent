@@ -19,12 +19,12 @@ from pulsara_agent.capability.contracts import (
     capability_source_registration,
     freeze_capability_source_snapshot,
     skill_capability_fact_fingerprint,
-    skill_projection_input_fingerprint,
 )
 from pulsara_agent.capability.local_skills import (
     AGENT_SKILLS_CONTRACT_ID,
     LocalSkillDiscovery,
     SkillDiscoveryDisposition,
+    local_skill_root_policy_identity_digest,
 )
 from pulsara_agent.capability.provider import SkillProjectionOutput
 from pulsara_agent.capability.resolver import LocalSkillCapabilityProvider
@@ -90,7 +90,7 @@ class KernelSkillProjectionComposer:
             root_policy=root_policy,
             deadline_monotonic=deadline_monotonic,
         )
-        if discovery.root_policy_fingerprint != root_policy.root_policy_fingerprint:
+        if discovery.root_policy is not root_policy:
             raise ValueError("Skill discovery does not join its physical root policy")
         source = capability_source_ref(
             CapabilitySourceKind.LOCAL_SKILL_CATALOG,
@@ -125,7 +125,6 @@ class KernelSkillProjectionComposer:
             conversation_scope_kind=conversation_scope_kind,
             scope_subagent_task_id=scope_subagent_task_id,
             source_snapshot=snapshot,
-            root_policy_fingerprint=root_policy.root_policy_fingerprint,
             discovery=discovery,
             owner_authenticity=self._owner_authenticity,
         )
@@ -135,26 +134,12 @@ class KernelSkillProjectionComposer:
     ) -> FrozenSkillProjectionInput:
         if owner.owner_authenticity is not self._owner_authenticity:
             raise ValueError("foreign Skill source snapshot")
-        if (
-            owner.root_policy_fingerprint
-            != owner.discovery.root_policy_fingerprint
-        ):
-            raise ValueError("Skill owner carrier root policy drifted")
         discovery_fingerprint = skill_discovery_semantic_fingerprint(
             owner.discovery
         )
-        fingerprint = skill_projection_input_fingerprint(
-            discovery_semantic_fingerprint=discovery_fingerprint,
-            source_snapshot_fingerprint=(
-                owner.source_snapshot.source_snapshot_fingerprint
-            ),
-        )
         return FrozenSkillProjectionInput(
             discovery_semantic_fingerprint=discovery_fingerprint,
-            source_snapshot_fingerprint=(
-                owner.source_snapshot.source_snapshot_fingerprint
-            ),
-            snapshot_fingerprint=fingerprint,
+            source_snapshot=owner.source_snapshot,
         )
 
     def compose(
@@ -168,12 +153,9 @@ class KernelSkillProjectionComposer:
             raise ValueError("foreign Skill source snapshot")
         frozen = view.projection_input
         if (
-            owner.source_snapshot.source_snapshot_fingerprint
-            != frozen.source_snapshot_fingerprint
+            owner.source_snapshot is not frozen.source_snapshot
             or skill_discovery_semantic_fingerprint(owner.discovery)
             != frozen.discovery_semantic_fingerprint
-            or owner.root_policy_fingerprint
-            != owner.discovery.root_policy_fingerprint
         ):
             raise ValueError("Skill projection owner does not exact-join sibling view")
         expected_facts = tuple(
@@ -229,7 +211,9 @@ def skill_discovery_semantic_fingerprint(
                 if discovery.unavailable_reason is None
                 else discovery.unavailable_reason.value
             ),
-            "root_policy": discovery.root_policy_fingerprint,
+            "root_policy": local_skill_root_policy_identity_digest(
+                discovery.root_policy
+            ),
             "skills": tuple(
                 {
                     "manifest": skill.manifest_semantic_fingerprint,

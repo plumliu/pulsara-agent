@@ -2,6 +2,8 @@
 
 > 状态：**ACTIVATED**
 >
+> Fingerprint hard-cut：[`PULSARA_FINGERPRINT_SUBTRACTION_HARD_CUT_IMPLEMENTATION_SPEC.zh.md`](PULSARA_FINGERPRINT_SUBTRACTION_HARD_CUT_IMPLEMENTATION_SPEC.zh.md)覆盖本文冗余的same-process DTO fingerprint/proof字段以及所有逐文件、文档与activation evidence SHA门禁；source lineage、canonical adoption与provider-prefix边界的真实digest继续有效。
+>
 > 激活日期：2026-08-21
 >
 > 机器证据：[round5b_long_horizon_context_compaction_activation.json](benchmarks/suites/core/v1/round5b_long_horizon_context_compaction_activation.json)

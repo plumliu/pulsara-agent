@@ -243,6 +243,14 @@ accepted work保持`PENDING_START`，capacity释放后继续启动。Direct depe
 Committed event、24类Live event、11个subject slot、1个append guard、25张product
 relation和0类durable job。验证记录在
 [`round10_hierarchical_subagent_orchestration_activation.json`](benchmarks/suites/core/v1/round10_hierarchical_subagent_orchestration_activation.json)。
+Fingerprint subtraction hard-cut一次性删除same-process self hash、重复的
+child/parent proof字段、依赖fingerprint回查的continuity/settlement路径，以及逐文件
+activation SHA清单。Process-local authority现在由exact frozen object、owner slot、
+nonce/revision与数据库约束表达；content integrity、durable confirmation、provider
+prefix/replay compatibility、stable canonical identity和带密钥opaque token的digest
+保持不变。Provider wire、Protocol v3、canonical rows与architecture oracle均未改变。
+验证记录在
+[`fingerprint_subtraction_hard_cut_activation.json`](benchmarks/suites/core/v1/fingerprint_subtraction_hard_cut_activation.json)。
 Round 8用advisory dataset取代旧memory durability/recovery graph。`remember`会与
 ToolResult同事务接受一个candidate；governance、cheap-hint reflection、
 embedding与reranking均保持可丢失的process-local弱完成。Accepted item只能是

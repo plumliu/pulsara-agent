@@ -807,7 +807,6 @@ class PreparedMemoryGovernanceAcceptance:
     relation_drafts: tuple[PreparedMemoryRelationDraft, ...]
     terminal_draft: PreparedMemoryCandidateTerminalDraft
     compatible_settlement_branches: tuple[MemoryGovernanceSettlementBranch, ...]
-    candidate_fingerprint: str
 
     @property
     def settlement_branch(self) -> MemoryGovernanceSettlementBranch:
@@ -869,14 +868,11 @@ class PreparedMemoryGovernanceAcceptance:
             self.terminal_draft.status is MemoryCandidateStatus.ACCEPTED
         ):
             raise ValueError("governance terminal draft does not join decision")
-        expected = prepared_memory_governance_fingerprint(self)
-        if self.candidate_fingerprint != expected:
-            raise ValueError("prepared memory governance fingerprint mismatch")
 
 
 @dataclass(frozen=True, slots=True)
 class PreparedExistingSourceRelationSettlement:
-    parent_candidate_fingerprint: str
+    parent: PreparedMemoryGovernanceAcceptance = field(repr=False, compare=False)
     candidate_id: str
     existing_source: FrozenMemoryFactSettlementIdentity
     target: FrozenMemoryFactSettlementIdentity
@@ -889,7 +885,6 @@ class PreparedExistingSourceRelationSettlement:
     existing_relation_decision_candidate_id: str | None
     existing_relation_source_fact_id: str | None
     existing_relation_target_fact_id: str | None
-    settlement_fingerprint: str
 
     def __post_init__(self) -> None:
         if self.relation_kind not in {
@@ -936,8 +931,8 @@ class PreparedExistingSourceRelationSettlement:
             raise ValueError("existing-source relation confirmation union is invalid")
         if confirms and self.existing_relation_id != self.prepared_relation_id:
             raise ValueError("existing-source relation identity drifted")
-        if self.settlement_fingerprint != prepared_existing_source_fingerprint(self):
-            raise ValueError("existing-source settlement fingerprint mismatch")
+        if self.parent.candidate_id != self.candidate_id:
+            raise ValueError("existing-source settlement parent conflicts")
 
 
 def prepare_memory_candidate(
@@ -1184,7 +1179,6 @@ def prepare_memory_governance_acceptance(
             applied_existing_fact_id=None,
         )
     )
-    provisional = object.__new__(PreparedMemoryGovernanceAcceptance)
     values = {
         "candidate_id": candidate.candidate_id,
         "candidate_acceptance_digest": candidate.candidate_acceptance_digest,
@@ -1201,104 +1195,7 @@ def prepare_memory_governance_acceptance(
         "terminal_draft": terminal_draft,
         "compatible_settlement_branches": branches,
     }
-    for key, value in values.items():
-        object.__setattr__(provisional, key, value)
-    object.__setattr__(provisional, "candidate_fingerprint", "")
-    fingerprint = prepared_memory_governance_fingerprint(provisional)
-    return PreparedMemoryGovernanceAcceptance(
-        **values, candidate_fingerprint=fingerprint
-    )
-
-
-def prepared_memory_governance_fingerprint(
-    prepared: PreparedMemoryGovernanceAcceptance,
-) -> str:
-    fact = prepared.fact
-    decision = prepared.decision
-    return digest(
-        "pulsara:prepared-memory-governance-acceptance:v1",
-        {
-            "candidate_id": prepared.candidate_id,
-            "candidate_acceptance_digest": prepared.candidate_acceptance_digest,
-            "memory_domain_id": prepared.memory_domain_id,
-            "origin_workspace_id": prepared.origin_workspace_id,
-            "scope_kind": prepared.scope_kind.value,
-            "scope_id": prepared.scope_id,
-            "decision": {
-                "kind": decision.decision_kind.value,
-                "final_kind": None
-                if decision.final_kind is None
-                else decision.final_kind.value,
-                "reason_code": decision.reason_code,
-                "public_summary": decision.public_summary,
-                "target": decision.related_target_fact_id,
-                "supersede_mode": None
-                if decision.supersede_mode is None
-                else decision.supersede_mode.value,
-            },
-            "fact": None
-            if fact is None
-            else {
-                "id": fact.fact_id,
-                "semantic_digest": fact.fact_semantic_digest,
-                "kind": fact.fact_kind.value,
-                "statement": fact.statement,
-                "applies_when": fact.applies_when,
-                "do_not_apply_when": fact.do_not_apply_when,
-                "search_contract": (
-                    fact.search_contract_id,
-                    fact.search_contract_version,
-                    fact.search_terms,
-                ),
-            },
-            "settlement_branch": prepared.settlement_branch.value,
-            "expected_candidate_status": prepared.expected_candidate_status.value,
-            "target": _memory_settlement_identity_payload(prepared.target),
-            "basis_targets": tuple(
-                _memory_settlement_identity_payload(item)
-                for item in prepared.basis_targets
-            ),
-            "relation_drafts": tuple(
-                {
-                    "id": item.relation_id,
-                    "decision_candidate_id": item.decision_candidate_id,
-                    "source": (
-                        item.source_scope_kind.value,
-                        item.source_scope_id,
-                        item.source_fact_id,
-                        item.source_fact_kind.value,
-                    ),
-                    "kind": item.relation_kind.value,
-                    "target": _memory_settlement_identity_payload(item.target),
-                    "supersede_mode": None
-                    if item.supersede_mode is None
-                    else item.supersede_mode.value,
-                    "ordinal": item.ordinal,
-                    "target_lifecycle": (
-                        item.expected_target_lifecycle_before,
-                        item.expected_target_lifecycle_after,
-                    ),
-                }
-                for item in prepared.relation_drafts
-            ),
-            "terminal_draft": {
-                "status": prepared.terminal_draft.status.value,
-                "decision_kind": prepared.terminal_draft.decision_kind.value,
-                "final_kind": None
-                if prepared.terminal_draft.final_kind is None
-                else prepared.terminal_draft.final_kind.value,
-                "reason": prepared.terminal_draft.decision_reason_code,
-                "summary": prepared.terminal_draft.decision_public_summary,
-                "target": prepared.terminal_draft.related_target_fact_id,
-                "duplicate": prepared.terminal_draft.duplicate_winner_fact_id,
-                "accepted_fact": prepared.terminal_draft.accepted_fact_id,
-                "existing_fact": prepared.terminal_draft.applied_existing_fact_id,
-            },
-            "compatible_settlement_branches": tuple(
-                item.value for item in prepared.compatible_settlement_branches
-            ),
-        },
-    )
+    return PreparedMemoryGovernanceAcceptance(**values)
 
 
 def freeze_memory_fact_settlement_identity(
@@ -1358,24 +1255,6 @@ def _prepare_memory_relation_draft(
             else "ACTIVE"
         ),
     )
-
-
-def _memory_settlement_identity_payload(
-    item: FrozenMemoryFactSettlementIdentity | None,
-) -> Mapping[str, object] | None:
-    if item is None:
-        return None
-    return {
-        "id": item.fact_id,
-        "domain": item.memory_domain_id,
-        "scope": (item.scope_kind.value, item.scope_id),
-        "kind": item.fact_kind.value,
-        "statement": item.statement,
-        "applies_when": item.applies_when,
-        "do_not_apply_when": item.do_not_apply_when,
-        "semantic_digest": item.fact_semantic_digest,
-        "lifecycle": item.expected_lifecycle,
-    }
 
 
 def prepare_existing_source_relation_settlement(
@@ -1445,9 +1324,8 @@ def prepare_existing_source_relation_settlement(
         target_fact_id=target.fact_id,
         supersede_mode=decision.supersede_mode,
     )
-    provisional = object.__new__(PreparedExistingSourceRelationSettlement)
     values = {
-        "parent_candidate_fingerprint": parent.candidate_fingerprint,
+        "parent": parent,
         "candidate_id": parent.candidate_id,
         "existing_source": existing_source,
         "target": target,
@@ -1467,62 +1345,7 @@ def prepare_existing_source_relation_settlement(
         "existing_relation_source_fact_id": existing_relation_source_fact_id,
         "existing_relation_target_fact_id": existing_relation_target_fact_id,
     }
-    for key, value in values.items():
-        object.__setattr__(provisional, key, value)
-    object.__setattr__(provisional, "settlement_fingerprint", "")
-    fingerprint = prepared_existing_source_fingerprint(provisional)
-    return PreparedExistingSourceRelationSettlement(
-        **values, settlement_fingerprint=fingerprint
-    )
-
-
-def prepared_existing_source_fingerprint(
-    prepared: PreparedExistingSourceRelationSettlement,
-) -> str:
-    return digest(
-        "pulsara:prepared-existing-source-memory-relation:v1",
-        {
-            "parent": prepared.parent_candidate_fingerprint,
-            "candidate_id": prepared.candidate_id,
-            "source": (
-                prepared.existing_source.fact_id,
-                prepared.existing_source.memory_domain_id,
-                prepared.existing_source.scope_kind.value,
-                prepared.existing_source.scope_id,
-                prepared.existing_source.fact_kind.value,
-                prepared.existing_source.statement,
-                prepared.existing_source.applies_when,
-                prepared.existing_source.do_not_apply_when,
-                prepared.existing_source.fact_semantic_digest,
-                prepared.existing_source.expected_lifecycle,
-            ),
-            "target": (
-                prepared.target.fact_id,
-                prepared.target.memory_domain_id,
-                prepared.target.scope_kind.value,
-                prepared.target.scope_id,
-                prepared.target.fact_kind.value,
-                prepared.target.statement,
-                prepared.target.applies_when,
-                prepared.target.do_not_apply_when,
-                prepared.target.fact_semantic_digest,
-                prepared.target.expected_lifecycle,
-                prepared.settled_target_lifecycle,
-            ),
-            "relation_kind": prepared.relation_kind.value,
-            "supersede_mode": None
-            if prepared.supersede_mode is None
-            else prepared.supersede_mode.value,
-            "disposition": prepared.disposition.value,
-            "prepared_relation_id": prepared.prepared_relation_id,
-            "existing_relation": (
-                prepared.existing_relation_id,
-                prepared.existing_relation_decision_candidate_id,
-                prepared.existing_relation_source_fact_id,
-                prepared.existing_relation_target_fact_id,
-            ),
-        },
-    )
+    return PreparedExistingSourceRelationSettlement(**values)
 
 
 def memory_relation_id(
@@ -1659,9 +1482,7 @@ __all__ = [name for name in globals() if name.startswith("Memory") or name.start
     "prepare_memory_candidate",
     "prepare_existing_source_relation_settlement",
     "prepare_memory_governance_acceptance",
-    "prepared_existing_source_fingerprint",
     "prepared_memory_candidate_digest",
-    "prepared_memory_governance_fingerprint",
     "strongest_memory_use_policy",
     "validate_final_kind_shape",
     "visible_scope_predicate",

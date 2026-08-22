@@ -2,6 +2,8 @@
 
 _状态：ACTIVATED（2026-08-12）；PHC-09 已在 canonical conversation Kernel 上恢复，验证证据见 [`round4_plan_workflow_and_run_permission_activation.json`](benchmarks/suites/core/v1/round4_plan_workflow_and_run_permission_activation.json)。_
 
+> Fingerprint hard-cut：[`PULSARA_FINGERPRINT_SUBTRACTION_HARD_CUT_IMPLEMENTATION_SPEC.zh.md`](PULSARA_FINGERPRINT_SUBTRACTION_HARD_CUT_IMPLEMENTATION_SPEC.zh.md)覆盖本文冗余的same-process DTO fingerprint/proof字段以及逐文件、文档与activation evidence SHA门禁；permission snapshot、canonical Plan identity与ACK-unknown durable semantic digest继续有效。
+
 ## 0. 基线、目标与最终结论
 
 ### 0.1 两个代码基线

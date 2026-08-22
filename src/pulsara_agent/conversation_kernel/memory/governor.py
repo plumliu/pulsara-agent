@@ -51,7 +51,7 @@ from pulsara_agent.conversation_kernel.memory.recall import PostgresMemoryQuery
 from pulsara_agent.conversation_kernel.memory.reflection import (
     PreparedCheapHintReflectionCandidateBatch,
     PreparedCheapHintReflectionHandoff,
-    reflection_batch_fingerprint,
+    cheap_hint_handoff_identity_digest,
 )
 from pulsara_agent.conversation_kernel.repository import (
     ConversationKernelConflict,
@@ -143,7 +143,7 @@ class AdvisoryMemoryGovernor:
         ):
             return None
         token = "memory-reflection:" + sha256(
-            handoff.handoff_fingerprint.encode("utf-8")
+            cheap_hint_handoff_identity_digest(handoff).encode("utf-8")
         ).hexdigest()
         if len(self._dormant) + len(self._reflections) >= MAXIMUM_REFLECTION_QUEUE:
             return None
@@ -860,7 +860,11 @@ def _prepare_reflection_batch(
         )
         candidate_id = "memory-candidate:" + sha256(
             canonical_json_bytes(
-                (handoff.handoff_fingerprint, output_digest, ordinal)
+                (
+                    cheap_hint_handoff_identity_digest(handoff),
+                    output_digest,
+                    ordinal,
+                )
             )
         ).hexdigest()
         candidates.append(
@@ -875,16 +879,8 @@ def _prepare_reflection_batch(
                 producer_candidate_ordinal=ordinal,
             )
         )
-    fingerprint = reflection_batch_fingerprint(
-        handoff_fingerprint=handoff.handoff_fingerprint,
-        model_output_digest=output_digest,
-        candidates=candidates,
-    )
     return PreparedCheapHintReflectionCandidateBatch(
-        handoff_fingerprint=handoff.handoff_fingerprint,
-        model_output_digest=output_digest,
         candidates=tuple(candidates),
-        batch_fingerprint=fingerprint,
     )
 
 

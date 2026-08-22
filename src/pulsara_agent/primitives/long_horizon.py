@@ -72,7 +72,6 @@ class LongHorizonToolPolicyFact(FrozenLongHorizonFact):
     max_rollout_cost_units: int = Field(ge=0)
     allowed_in_phases: tuple[RolloutPhase, ...]
     action_classifier_contract: ToolActionClassifierContractFact
-    policy_fingerprint: str = Field(min_length=1)
 
     @model_validator(mode="after")
     def _policy(self) -> "LongHorizonToolPolicyFact":
@@ -84,12 +83,21 @@ class LongHorizonToolPolicyFact(FrozenLongHorizonFact):
             set(self.allowed_in_phases)
         ):
             raise ValueError("tool policy phases must be non-empty and unique")
-        _validate_fingerprint(
-            self,
-            namespace="long-horizon-tool-policy:v1",
-            field_name="policy_fingerprint",
-        )
         return self
+
+
+def long_horizon_tool_policy_identity_payload(
+    policy: LongHorizonToolPolicyFact,
+) -> dict[str, object]:
+    """Reproduce the historical descriptor payload without storing its hash."""
+
+    semantic = policy.model_dump(mode="json")
+    return {
+        **semantic,
+        "policy_fingerprint": context_fingerprint(
+            "long-horizon-tool-policy:v1", semantic
+        ),
+    }
 
 
 class ToolActionClassificationFact(FrozenLongHorizonFact):
@@ -105,16 +113,6 @@ class ToolActionClassificationFact(FrozenLongHorizonFact):
     classifier_id: str = Field(min_length=1)
     classifier_version: str = Field(min_length=1)
     classifier_contract_fingerprint: str = Field(min_length=1)
-    classification_fingerprint: str = Field(min_length=1)
-
-    @model_validator(mode="after")
-    def _classification(self) -> "ToolActionClassificationFact":
-        _validate_fingerprint(
-            self,
-            namespace="tool-action-classification:v1",
-            field_name="classification_fingerprint",
-        )
-        return self
 
 
 class ObservationRollupRendererContractFact(FrozenLongHorizonFact):
@@ -173,4 +171,5 @@ __all__ = [
     "ToolActionClassificationFact",
     "ToolActionClassifierContractFact",
     "default_observation_rollup_renderer_contract",
+    "long_horizon_tool_policy_identity_payload",
 ]

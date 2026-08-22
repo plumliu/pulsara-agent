@@ -262,20 +262,12 @@ class ResolvedCompactionPolicy:
 
 @dataclass(frozen=True, slots=True)
 class CompatibleAppendCompactionProjection:
-    predecessor_epoch_semantic_prefix_fingerprint: str
     append_only_messages: tuple[LLMMessage, ...] = field(repr=False)
     final_estimate: TokenEstimate
     logical_utf8_bytes: int
-    projection_fingerprint: str
 
     def __post_init__(self) -> None:
-        if (
-            not self.predecessor_epoch_semantic_prefix_fingerprint.startswith(
-                "sha256:"
-            )
-            or self.logical_utf8_bytes < 0
-            or not self.projection_fingerprint.startswith("sha256:")
-        ):
+        if self.logical_utf8_bytes < 0:
             raise ValueError("compatible compaction projection is invalid")
 
 
@@ -285,13 +277,11 @@ class ColdRebuildCompactionProjection:
     full_messages: tuple[LLMMessage, ...] = field(repr=False)
     final_estimate: TokenEstimate
     logical_utf8_bytes: int
-    projection_fingerprint: str
 
     def __post_init__(self) -> None:
         if (
             not self.system_prompt
             or self.logical_utf8_bytes < 0
-            or not self.projection_fingerprint.startswith("sha256:")
         ):
             raise ValueError("cold compaction projection is invalid")
 
@@ -390,7 +380,6 @@ class CompactionPhysicalWorkingSetReport:
     post_base_canonical_utf8_bytes: int
     continuity_epoch_logical_utf8_bytes: int
     resolved_hard_bound_set_fingerprint: str
-    report_fingerprint: str
 
     def __post_init__(self) -> None:
         if min(
@@ -399,19 +388,6 @@ class CompactionPhysicalWorkingSetReport:
             self.continuity_epoch_logical_utf8_bytes,
         ) < 0:
             raise ValueError("compaction working-set report is invalid")
-        expected = context_fingerprint(
-            "pulsara.compaction-working-set-report.v1",
-            {
-                "items": self.post_base_item_count,
-                "canonical_bytes": self.post_base_canonical_utf8_bytes,
-                "epoch_bytes": self.continuity_epoch_logical_utf8_bytes,
-                "resolved_hard_bounds": (
-                    self.resolved_hard_bound_set_fingerprint
-                ),
-            },
-        )
-        if self.report_fingerprint != expected:
-            raise ValueError("compaction working-set report fingerprint mismatch")
 
 
 @dataclass(frozen=True, slots=True)
@@ -428,7 +404,6 @@ class FrozenCompactionHeadroomPreflight:
     post_base_item_count: int
     post_base_canonical_utf8_bytes: int
     resolved_hard_bound_set_fingerprint: str
-    preflight_fingerprint: str
 
     def __post_init__(self) -> None:
         if (
@@ -448,25 +423,6 @@ class FrozenCompactionHeadroomPreflight:
             > self.provider_input_through_sequence
         ):
             raise ValueError("compaction headroom preflight is invalid")
-        expected = context_fingerprint(
-            "pulsara.compaction-headroom-preflight.v1",
-            {
-                "session_id": self.session_id,
-                "turn_id": self.turn_id,
-                "binding_revision_id": self.context_binding_revision_id,
-                "scope_kind": self.scope_kind.value,
-                "scope_subagent_task_id": self.scope_subagent_task_id,
-                "floor": self.effective_materialization_lineage_floor,
-                "through": self.provider_input_through_sequence,
-                "items": self.post_base_item_count,
-                "canonical_bytes": self.post_base_canonical_utf8_bytes,
-                "resolved_hard_bounds": (
-                    self.resolved_hard_bound_set_fingerprint
-                ),
-            },
-        )
-        if self.preflight_fingerprint != expected:
-            raise ValueError("compaction headroom preflight fingerprint mismatch")
 
 
 def freeze_compaction_headroom_preflight(
@@ -482,18 +438,6 @@ def freeze_compaction_headroom_preflight(
     post_base_canonical_utf8_bytes: int,
 ) -> FrozenCompactionHeadroomPreflight:
     bounds = resolved_compaction_headroom_bounds()
-    semantic = {
-        "session_id": session_id,
-        "turn_id": turn_id,
-        "binding_revision_id": context_binding_revision_id,
-        "scope_kind": scope_kind.value,
-        "scope_subagent_task_id": scope_subagent_task_id,
-        "floor": effective_materialization_lineage_floor,
-        "through": provider_input_through_sequence,
-        "items": post_base_item_count,
-        "canonical_bytes": post_base_canonical_utf8_bytes,
-        "resolved_hard_bounds": bounds.resolved_hard_bound_set_fingerprint,
-    }
     return FrozenCompactionHeadroomPreflight(
         session_id=session_id,
         turn_id=turn_id,
@@ -509,9 +453,63 @@ def freeze_compaction_headroom_preflight(
         resolved_hard_bound_set_fingerprint=(
             bounds.resolved_hard_bound_set_fingerprint
         ),
-        preflight_fingerprint=context_fingerprint(
-            "pulsara.compaction-headroom-preflight.v1", semantic
-        ),
+    )
+
+
+def _compaction_projection_identity_digest(
+    projection: FrozenCompactionProviderProjection,
+    compile_binding: ModelInputCompileBinding,
+    predecessor: FrozenProviderInputEpochView | None,
+) -> str:
+    estimate = projection.final_estimate
+    estimate_value = {
+        "system": estimate.system_tokens,
+        "messages": estimate.message_tokens,
+        "message_by_index": estimate.message_tokens_by_index,
+        "tools": estimate.tool_tokens,
+        "envelope": estimate.envelope_tokens,
+        "total": estimate.total_input_tokens,
+    }
+    if isinstance(projection, CompatibleAppendCompactionProjection):
+        return context_fingerprint(
+            "pulsara.compatible-append-compaction-projection.v1",
+            {
+                "predecessor": (
+                    None if predecessor is None else predecessor.semantic_prefix_fingerprint
+                ),
+                "append": provider_input_prefix_fingerprint(
+                    system_prompt="", tools=(), messages=projection.append_only_messages
+                ),
+                "estimate": estimate_value,
+                "logical_bytes": projection.logical_utf8_bytes,
+            },
+        )
+    return context_fingerprint(
+        "pulsara.cold-rebuild-compaction-projection.v1",
+        {
+            "system": projection.system_prompt,
+            "input": provider_input_prefix_fingerprint(
+                system_prompt=projection.system_prompt,
+                tools=compile_binding.tool_surface.tool_specs,
+                messages=projection.full_messages,
+            ),
+            "estimate": estimate_value,
+            "logical_bytes": projection.logical_utf8_bytes,
+        },
+    )
+
+
+def _compaction_working_set_identity_digest(
+    report: CompactionPhysicalWorkingSetReport,
+) -> str:
+    return context_fingerprint(
+        "pulsara.compaction-working-set-report.v1",
+        {
+            "items": report.post_base_item_count,
+            "canonical_bytes": report.post_base_canonical_utf8_bytes,
+            "epoch_bytes": report.continuity_epoch_logical_utf8_bytes,
+            "resolved_hard_bounds": report.resolved_hard_bound_set_fingerprint,
+        },
     )
 
 
@@ -557,8 +555,14 @@ class FrozenCompactionSourceView:
                     if self.predecessor_epoch_view is None
                     else self.predecessor_epoch_view.semantic_prefix_fingerprint
                 ),
-                "projection": self.provider_projection.projection_fingerprint,
-                "working_set": self.physical_working_set.report_fingerprint,
+                "projection": _compaction_projection_identity_digest(
+                    self.provider_projection,
+                    self.normal_compile_binding,
+                    self.predecessor_epoch_view,
+                ),
+                "working_set": _compaction_working_set_identity_digest(
+                    self.physical_working_set
+                ),
             },
         )
         if self.source_view_fingerprint != expected:
@@ -677,7 +681,6 @@ class FrozenCompactionCanonicalRange:
     closures: tuple[ProviderToolResultClosure, ...] = field(repr=False)
     late_outcomes: tuple[LateToolOutcomeObservation, ...] = field(repr=False)
     canonical_utf8_bytes: int
-    range_fingerprint: str
 
     def __post_init__(self) -> None:
         if (
@@ -694,27 +697,6 @@ class FrozenCompactionCanonicalRange:
                 <= self.source_through_sequence
             ):
                 raise ValueError("compaction range contains an out-of-cut item")
-        expected = context_fingerprint(
-            COMPACTION_CANONICAL_RANGE_CONTRACT,
-            {
-                "scope": self.scope.fingerprint,
-                "floor": self.effective_materialization_lineage_floor,
-                "through": self.source_through_sequence,
-                "items": tuple(
-                    provider_input_item_fingerprint(item) for item in self.ordered_items
-                ),
-                "closures": tuple(
-                    provider_tool_result_closure_leaf(item) for item in self.closures
-                ),
-                "late_outcomes": tuple(
-                    late_tool_outcome_observation_leaf(item)
-                    for item in self.late_outcomes
-                ),
-                "canonical_utf8_bytes": self.canonical_utf8_bytes,
-            },
-        )
-        if self.range_fingerprint != expected:
-            raise ValueError("compaction canonical range fingerprint mismatch")
 
 
 @dataclass(frozen=True, slots=True)
@@ -726,7 +708,6 @@ class FrozenCompactionCanonicalRead:
     dispatch_read: FrozenCanonicalProviderDispatchRead = field(repr=False)
     lineage_base: CompactionSourceLineageBase
     safe_head_range: FrozenCompactionCanonicalRange = field(repr=False)
-    read_fingerprint: str
 
     def __post_init__(self) -> None:
         identity = self.dispatch_read.compile_snapshot.canonical_input.identity
@@ -744,18 +725,6 @@ class FrozenCompactionCanonicalRead:
             != self.lineage_base.effective_materialization_lineage_floor
         ):
             raise ValueError("compaction canonical read does not exact-join")
-        expected = context_fingerprint(
-            "pulsara.frozen-compaction-canonical-read.v1",
-            {
-                "scope": self.scope.fingerprint,
-                "turn_status": self.turn_status,
-                "dispatch": self.dispatch_read.composite_fingerprint,
-                "lineage": self.lineage_base.fingerprint,
-                "range": self.safe_head_range.range_fingerprint,
-            },
-        )
-        if self.read_fingerprint != expected:
-            raise ValueError("compaction canonical read fingerprint mismatch")
 
 
 def freeze_compaction_canonical_read(
@@ -766,31 +735,12 @@ def freeze_compaction_canonical_read(
     lineage_base: CompactionSourceLineageBase,
     safe_head_range: FrozenCompactionCanonicalRange,
 ) -> FrozenCompactionCanonicalRead:
-    values = {
-        "scope": scope,
-        "turn_status": turn_status,
-        "dispatch_read": dispatch_read,
-        "lineage_base": lineage_base,
-        "safe_head_range": safe_head_range,
-    }
-    provisional = FrozenCompactionCanonicalRead.__new__(
-        FrozenCompactionCanonicalRead
-    )
-    for name, value in values.items():
-        object.__setattr__(provisional, name, value)
-    object.__setattr__(provisional, "read_fingerprint", "")
     return FrozenCompactionCanonicalRead(
-        **values,
-        read_fingerprint=context_fingerprint(
-            "pulsara.frozen-compaction-canonical-read.v1",
-            {
-                "scope": scope.fingerprint,
-                "turn_status": turn_status,
-                "dispatch": dispatch_read.composite_fingerprint,
-                "lineage": lineage_base.fingerprint,
-                "range": safe_head_range.range_fingerprint,
-            },
-        ),
+        scope=scope,
+        turn_status=turn_status,
+        dispatch_read=dispatch_read,
+        lineage_base=lineage_base,
+        safe_head_range=safe_head_range,
     )
 
 
@@ -844,30 +794,32 @@ def freeze_compaction_canonical_range(
         "late_outcomes": selected_late,
         "canonical_utf8_bytes": canonical_bytes,
     }
-    provisional = FrozenCompactionCanonicalRange.__new__(
-        FrozenCompactionCanonicalRange
-    )
-    for name, value in values.items():
-        object.__setattr__(provisional, name, value)
-    object.__setattr__(provisional, "range_fingerprint", "")
-    fingerprint = context_fingerprint(
+    return FrozenCompactionCanonicalRange(**values)
+
+
+def _compaction_canonical_range_identity_digest(
+    canonical_range: FrozenCompactionCanonicalRange,
+) -> str:
+    return context_fingerprint(
         COMPACTION_CANONICAL_RANGE_CONTRACT,
         {
-            "scope": scope.fingerprint,
-            "floor": effective_materialization_lineage_floor,
-            "through": source_through_sequence,
-            "items": tuple(provider_input_item_fingerprint(item) for item in selected),
+            "scope": canonical_range.scope.fingerprint,
+            "floor": canonical_range.effective_materialization_lineage_floor,
+            "through": canonical_range.source_through_sequence,
+            "items": tuple(
+                provider_input_item_fingerprint(item)
+                for item in canonical_range.ordered_items
+            ),
             "closures": tuple(
-                provider_tool_result_closure_leaf(item) for item in selected_closures
+                provider_tool_result_closure_leaf(item)
+                for item in canonical_range.closures
             ),
             "late_outcomes": tuple(
-                late_tool_outcome_observation_leaf(item) for item in selected_late
+                late_tool_outcome_observation_leaf(item)
+                for item in canonical_range.late_outcomes
             ),
-            "canonical_utf8_bytes": canonical_bytes,
+            "canonical_utf8_bytes": canonical_range.canonical_utf8_bytes,
         },
-    )
-    return FrozenCompactionCanonicalRange(
-        **values, range_fingerprint=fingerprint
     )
 
 
@@ -888,7 +840,7 @@ def canonical_compaction_range_digest(
             "scope": lineage.scope.fingerprint,
             "base": lineage.fingerprint,
             "new_source_through_sequence": canonical_range.source_through_sequence,
-            "range": canonical_range.range_fingerprint,
+            "range": _compaction_canonical_range_identity_digest(canonical_range),
         },
     )
 
@@ -998,7 +950,6 @@ class RecentHumanMessageProof:
     entry_id: str
     entry_sequence: int
     text: str = field(repr=False)
-    item_fingerprint: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -1121,7 +1072,6 @@ class PreparedCompactionCanonicalAdoption:
     snapshot: ContextSnapshotDraft
     binding: TurnContextBindingRevisionDraft
     event: CommittedEventDraft
-    canonical_candidate_fingerprint: str
 
     def __post_init__(self) -> None:
         if (
@@ -1148,10 +1098,6 @@ class PreparedCompactionCanonicalAdoption:
                 raise ValueError("active compaction requires a running turn")
         elif self.expected_turn_status == "RUNNING":
             raise ValueError("idle compaction requires a terminal turn")
-        if self.canonical_candidate_fingerprint != (
-            compaction_canonical_candidate_fingerprint(self)
-        ):
-            raise ValueError("compaction adoption candidate fingerprint mismatch")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1209,76 +1155,14 @@ def build_prepared_compaction_canonical_adoption(
         occurred_at=value.occurred_at,
         payload={"revision_ordinal": binding.revision_ordinal},
     )
-    provisional = PreparedCompactionCanonicalAdoption.__new__(
-        PreparedCompactionCanonicalAdoption
-    )
-    for name, item in (
-        ("scope", value.scope),
-        ("target_branch", value.target_branch),
-        ("expected_turn_status", value.expected_turn_status),
-        ("predecessor", value.predecessor),
-        ("snapshot", snapshot),
-        ("binding", binding),
-        ("event", event),
-        ("canonical_candidate_fingerprint", ""),
-    ):
-        object.__setattr__(provisional, name, item)
     return PreparedCompactionCanonicalAdoption(
-        scope=provisional.scope,
-        target_branch=provisional.target_branch,
-        expected_turn_status=provisional.expected_turn_status,
-        predecessor=provisional.predecessor,
-        snapshot=provisional.snapshot,
-        binding=provisional.binding,
-        event=provisional.event,
-        canonical_candidate_fingerprint=(
-            compaction_canonical_candidate_fingerprint(provisional)
-        ),
-    )
-
-
-def compaction_canonical_candidate_fingerprint(
-    candidate: PreparedCompactionCanonicalAdoption,
-) -> str:
-    content = candidate.snapshot.content
-    return context_fingerprint(
-        "pulsara.prepared-compaction-canonical-adoption.v2",
-        {
-            "scope": candidate.scope.fingerprint,
-            "branch": candidate.target_branch.value,
-            "turn_status": candidate.expected_turn_status,
-            "predecessor": (
-                candidate.predecessor.binding_revision_id,
-                candidate.predecessor.revision_ordinal,
-                candidate.predecessor.base_kind,
-                candidate.predecessor.context_snapshot_id,
-                candidate.predecessor.source_through_sequence,
-            ),
-            "snapshot": (
-                candidate.snapshot.snapshot_id,
-                candidate.snapshot.source_through_sequence,
-                candidate.snapshot.source_digest,
-                candidate.snapshot.compiler_contract,
-                candidate.snapshot.prompt_contract,
-                candidate.snapshot.model_contract,
-                content.digest,
-                content.size,
-                content.media_type,
-                content.codec,
-                getattr(content, "blob_id", None),
-            ),
-            "binding": (
-                candidate.binding.binding_revision_id,
-                candidate.binding.revision_ordinal,
-                candidate.binding.context_snapshot_id,
-                candidate.binding.source_through_sequence,
-            ),
-            "event": (
-                candidate.event.event_id,
-                candidate.event.actor_id,
-                candidate.event.occurred_at.isoformat(),
-            ),
-        },
+        scope=value.scope,
+        target_branch=value.target_branch,
+        expected_turn_status=value.expected_turn_status,
+        predecessor=value.predecessor,
+        snapshot=snapshot,
+        binding=binding,
+        event=event,
     )
 
 
@@ -1349,7 +1233,6 @@ __all__ = [
     "build_prepared_manual_compaction_command",
     "canonical_compaction_range_digest",
     "compaction_summary_message_prefix_fingerprint",
-    "compaction_canonical_candidate_fingerprint",
     "freeze_compaction_canonical_range",
     "freeze_compaction_canonical_read",
     "freeze_compaction_headroom_preflight",

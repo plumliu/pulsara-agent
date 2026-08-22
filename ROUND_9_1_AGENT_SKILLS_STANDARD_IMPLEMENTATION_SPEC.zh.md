@@ -2,9 +2,11 @@
 
 > 状态：**ACTIVATED**
 >
+> Fingerprint hard-cut：[`PULSARA_FINGERPRINT_SUBTRACTION_HARD_CUT_IMPLEMENTATION_SPEC.zh.md`](PULSARA_FINGERPRINT_SUBTRACTION_HARD_CUT_IMPLEMENTATION_SPEC.zh.md)覆盖本文冗余的same-process DTO fingerprint/proof字段以及所有逐文件、文档与activation evidence SHA门禁；Skill body/content identity与provider-visible source lineage digest继续有效。
+>
 > 记录日期：2026-08-21
 >
-> 编码基线：`7dbb54ea51d1ff5cfa927d92fa181eb4b8ce3876`（已激活Round 9的clean commit）。Round 9 public contract manifest为`sha256:e26f5d51daf98a724771b64ef3457b0b195f0f3137c036141f74e23546f69dc6`，activation evidence SHA-256为`1f46f42cfce848b23d8bd9a8993657b80e513f1debf648f155b93511398dcc40`。
+> 编码基线：`7dbb54ea51d1ff5cfa927d92fa181eb4b8ce3876`（已激活Round 9的clean commit）。历史manifest与activation evidence校验值只保留在当时的机器证据中，不再作为当前代码门禁。
 >
 > 激活证据：[Round 9.1 activation evidence](benchmarks/suites/core/v1/round9_1_agent_skills_standard_activation.json)。实现保留Round 9的owner-issued聚合`LOCAL_SKILL_CATALOG`、parent dispatch cut与continuity CAS；没有新增durable owner、schema、event或tool。
 >

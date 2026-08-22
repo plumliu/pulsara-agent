@@ -2,11 +2,13 @@
 
 > 状态：**ACTIVATED — 2026-08-14**
 >
+> Fingerprint hard-cut：[`PULSARA_FINGERPRINT_SUBTRACTION_HARD_CUT_IMPLEMENTATION_SPEC.zh.md`](PULSARA_FINGERPRINT_SUBTRACTION_HARD_CUT_IMPLEMENTATION_SPEC.zh.md)覆盖本文冗余的same-process DTO fingerprint/proof字段以及逐文件、文档与activation evidence SHA门禁；canonical ToolResult timing/freshness与provider-prefix source digest继续有效。
+>
 > 记录日期：2026-08-14
 >
 > 代码真值基线：`acf8cbede97ba9e19146f0e7cb01d3245e64dbea`（`refactor: modularize conversation kernel repository`）
 >
-> 工作树说明：起草时另有一组尚未提交的 `src/pulsara_agent/host/` compatibility-layer 删除变更；本文不拥有、覆盖或评价该变更。coding agent 必须在第一个 production diff 前重新记录 clean checkpoint HEAD 与本文 SHA-256。
+> 工作树说明：起草时另有一组尚未提交的 `src/pulsara_agent/host/` compatibility-layer 删除变更；本文不拥有、覆盖或评价该变更。该历史说明不再要求记录当前文档或逐文件SHA。
 >
 > 本文合并恢复 [PHC-13：跨 turn 失败/中断提示](POST_HARD_CUT_PRODUCT_CAPABILITY_GAP_INDEX.zh.md#12-phc-13跨-turn-失败中断提示) 与 [PHC-14：Model-visible tool observation timing/freshness](POST_HARD_CUT_PRODUCT_CAPABILITY_GAP_INDEX.zh.md#13-phc-14model-visible-tool-observation-timing-与-freshness)。两项共享 canonical reader 与 structured compiler 接缝，但不共享 durable authority。
 >

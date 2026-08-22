@@ -122,7 +122,6 @@ class MutableObservationDraft:
 @dataclass(frozen=True, slots=True)
 class PreparedTerminalMonitorRegistration:
     token_id: str
-    token_fingerprint: str
     monitor_id: str
     process_id: str
     baseline_cursor: str
@@ -185,7 +184,7 @@ class TerminalMonitorCoordinator:
         self._live_bus = live_bus
         self._wake_scheduler = wake_scheduler
         self._registrations: dict[str, _Registration] = {}
-        self._tokens: dict[str, str] = {}
+        self._tokens: dict[str, PreparedTerminalMonitorRegistration] = {}
         self._lock = RLock()
         self._condition = Condition(self._lock)
         self._accepting = True
@@ -266,16 +265,16 @@ class TerminalMonitorCoordinator:
             )
         now = monotonic()
         token_id = f"terminal-monitor-settlement:{uuid4().hex}"
-        token_fingerprint = _fingerprint(
-            "terminal-monitor-registration:v1",
+        expires = datetime.fromtimestamp(
+            datetime.now(timezone.utc).timestamp() + policy.maximum_duration_seconds,
+            tz=timezone.utc,
+        )
+        prepared = PreparedTerminalMonitorRegistration(
             token_id,
             monitor_id,
             process_id,
-            origin_attempt_id,
-            origin_result_entry_id,
-            str(writer_generation),
-            authorization_reference,
             snapshot.output_cursor,
+            expires,
         )
         registration = _Registration(
             monitor_id=monitor_id,
@@ -331,7 +330,7 @@ class TerminalMonitorCoordinator:
                     else TerminalMonitorRejectionReason.CAPACITY_EXHAUSTED
                 )
             self._registrations[monitor_id] = registration
-            self._tokens[token_id] = monitor_id
+            self._tokens[token_id] = prepared
             self._condition.notify_all()
         # Publish the registration before releasing buffered callbacks.  Any
         # callback whose end was already included in the baseline snapshot is
@@ -355,43 +354,22 @@ class TerminalMonitorCoordinator:
                 status=current.process_status,
                 exit_code=current.exit_code,
             )
-        expires = datetime.fromtimestamp(
-            datetime.now(timezone.utc).timestamp() + policy.maximum_duration_seconds,
-            tz=timezone.utc,
-        )
-        return PreparedTerminalMonitorRegistration(
-            token_id,
-            token_fingerprint,
-            monitor_id,
-            process_id,
-            snapshot.output_cursor,
-            expires,
-        )
+        return prepared
 
     def settle_registration(
-        self, token_id: str, token_fingerprint: str, *, committed: bool
+        self, prepared: PreparedTerminalMonitorRegistration, *, committed: bool
     ) -> None:
         with self._lock:
-            monitor_id = self._tokens.get(token_id)
+            retained = self._tokens.get(prepared.token_id)
+            monitor_id = None if retained is None else retained.monitor_id
             registration = (
                 None if monitor_id is None else self._registrations.get(monitor_id)
             )
             if registration is None:
                 return
-            expected = _fingerprint(
-                "terminal-monitor-registration:v1",
-                token_id,
-                registration.monitor_id,
-                registration.process_id,
-                registration.origin_attempt_id,
-                registration.origin_result_entry_id,
-                str(registration.writer_generation),
-                registration.authorization_reference,
-                registration.baseline_cursor,
-            )
-            if expected != token_fingerprint:
+            if retained is not prepared:
                 raise RuntimeError("terminal monitor settlement token conflicts")
-            self._tokens.pop(token_id, None)
+            self._tokens.pop(prepared.token_id, None)
             if registration.state is not TerminalMonitorState.DORMANT:
                 return
             if committed:
@@ -490,16 +468,6 @@ class TerminalMonitorCoordinator:
             draft = registration.draft
             digest = f"sha256:{sha256(draft.content.canonical_bytes()).hexdigest()}"
             occurred_at = datetime.now(timezone.utc)
-            fingerprint = _fingerprint(
-                "terminal-observation-installation:v1",
-                self._session_id,
-                workspace_id,
-                str(writer_generation),
-                registration.origin_turn_id,
-                digest,
-                draft.through_cursor,
-                repr(target),
-            )
             attempt = TerminalObservationInstallationAttempt(
                 session_id=self._session_id,
                 workspace_id=workspace_id,
@@ -512,7 +480,6 @@ class TerminalMonitorCoordinator:
                 target=target,
                 occurred_at=occurred_at,
                 actor_id=actor_id,
-                candidate_fingerprint=fingerprint,
             )
             registration.in_flight = attempt
             registration.draft = None
@@ -729,9 +696,7 @@ class TerminalMonitorCoordinator:
                 else registration.observation_ordinal + 1
             )
             evaluation_identity = (
-                None
-                if registration.in_flight is None
-                else registration.in_flight.candidate_fingerprint,
+                registration.in_flight,
                 registration.last_accepted_cursor,
                 registration.observation_ordinal,
                 registration.draft_revision,
@@ -791,9 +756,7 @@ class TerminalMonitorCoordinator:
             if current is None or current.state is not TerminalMonitorState.ACTIVE:
                 return
             current_identity = (
-                None
-                if current.in_flight is None
-                else current.in_flight.candidate_fingerprint,
+                current.in_flight,
                 current.last_accepted_cursor,
                 current.observation_ordinal,
                 current.draft_revision,
@@ -945,10 +908,6 @@ def _coalesce(
     if current.content.observation_kind is TerminalObservationKind.COMPLETION:
         return current
     return candidate
-
-
-def _fingerprint(namespace: str, *parts: str) -> str:
-    return f"sha256:{sha256((namespace + chr(0) + chr(0).join(parts)).encode()).hexdigest()}"
 
 
 __all__ = [

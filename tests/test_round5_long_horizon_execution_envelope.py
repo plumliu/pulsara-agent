@@ -49,6 +49,7 @@ from pulsara_agent.conversation_kernel.io import (
 from pulsara_agent.conversation_kernel.tool_runtime import (
     _physical_effect_class,
     _production_executor_binding,
+    production_builtin_executor_binding_identity_fingerprint,
 )
 from pulsara_agent.llm.adapters.openai import client as openai_client
 from pulsara_agent.llm.adapters.openai.client import OpenAITransportTimeoutPolicy
@@ -499,7 +500,10 @@ def test_round5_terminal_process_actions_have_closed_effect_semantics() -> None:
     binding = _production_executor_binding(
         "terminal_process", "round5:test-terminal-process-executor"
     )
-    assert binding.physical_effect_contract_fingerprint.startswith("sha256:")
+    assert binding.catalog_entry.name == "terminal_process"
+    assert production_builtin_executor_binding_identity_fingerprint(
+        binding
+    ).startswith("sha256:")
     for action in ("list", "log", "poll", "wait"):
         assert (
             _physical_effect_class("terminal_process", {"action": action})

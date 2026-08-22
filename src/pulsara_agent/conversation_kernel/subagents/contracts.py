@@ -197,7 +197,6 @@ class PreparedToolResultAcceptanceFact(Protocol):
     result_id: str
     attempt_id: str | None
     result_state: str
-    candidate_fingerprint: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -246,7 +245,6 @@ class PreparedSubagentTaskTerminalSettlement:
     occurred_at: datetime
     actor_id: str
     event_id: str
-    candidate_fingerprint: str
 
     def __post_init__(self) -> None:
         for field, value in (
@@ -276,24 +274,8 @@ class PreparedSubagentTaskTerminalSettlement:
             self.status.value,
             self.reason,
         )
-        expected = _fingerprint(
-            "task-terminal-settlement",
-            {
-                "session": self.session_id,
-                "workspace": self.workspace_id,
-                "writer_generation": self.writer_generation,
-                "task": self.task_id,
-                "turn": self.expected_turn_id,
-                "status": self.status.value,
-                "reason": self.reason,
-                "require_absent_turn": self.require_absent_turn,
-                "occurred_at": self.occurred_at.isoformat(),
-                "actor": self.actor_id,
-                "event": expected_event,
-            },
-        )
-        if self.event_id != expected_event or self.candidate_fingerprint != expected:
-            raise ValueError("subagent task terminal settlement fingerprint mismatch")
+        if self.event_id != expected_event:
+            raise ValueError("subagent task terminal settlement identity mismatch")
 
 
 def build_subagent_task_terminal_settlement(
@@ -317,19 +299,6 @@ def build_subagent_task_terminal_settlement(
         status.value,
         reason,
     )
-    payload = {
-        "session": session_id,
-        "workspace": workspace_id,
-        "writer_generation": writer_generation,
-        "task": task_id,
-        "turn": expected_turn_id,
-        "status": status.value,
-        "reason": reason,
-        "require_absent_turn": require_absent_turn,
-        "occurred_at": occurred_at.isoformat(),
-        "actor": actor_id,
-        "event": event_id,
-    }
     return PreparedSubagentTaskTerminalSettlement(
         session_id=session_id,
         workspace_id=workspace_id,
@@ -342,7 +311,6 @@ def build_subagent_task_terminal_settlement(
         occurred_at=occurred_at,
         actor_id=actor_id,
         event_id=event_id,
-        candidate_fingerprint=_fingerprint("task-terminal-settlement", payload),
     )
 
 
@@ -362,7 +330,6 @@ class PreparedSubagentTaskStart:
     occurred_at: datetime
     actor_id: str
     event_id: str
-    candidate_fingerprint: str
 
     def __post_init__(self) -> None:
         for field, value in (
@@ -389,29 +356,8 @@ class PreparedSubagentTaskStart:
             self.task_id,
             str(self.writer_generation),
         )
-        expected = _fingerprint(
-            "task-start",
-            {
-                "session": self.session_id,
-                "workspace": self.workspace_id,
-                "writer_generation": self.writer_generation,
-                "task_id": self.task_id,
-                "parent_turn_id": self.parent_turn_id,
-                "objective": self.objective,
-                "profile": self.profile.value,
-                "parent_context": self.parent_context.selection_fingerprint,
-                "dependency_context": (
-                    None
-                    if self.dependency_context is None
-                    else self.dependency_context.context_fingerprint
-                ),
-                "occurred_at": self.occurred_at.isoformat(),
-                "actor": self.actor_id,
-                "event": expected_event,
-            },
-        )
-        if self.event_id != expected_event or self.candidate_fingerprint != expected:
-            raise ValueError("subagent task start fingerprint mismatch")
+        if self.event_id != expected_event:
+            raise ValueError("subagent task start identity mismatch")
 
 
 def build_subagent_task_start(
@@ -431,22 +377,6 @@ def build_subagent_task_start(
     event_id = _stable_id(
         "subagent-start-event", session_id, task_id, str(writer_generation)
     )
-    payload = {
-        "session": session_id,
-        "workspace": workspace_id,
-        "writer_generation": writer_generation,
-        "task_id": task_id,
-        "parent_turn_id": parent_turn_id,
-        "objective": objective,
-        "profile": profile.value,
-        "parent_context": parent_context.selection_fingerprint,
-        "dependency_context": (
-            None if dependency_context is None else dependency_context.context_fingerprint
-        ),
-        "occurred_at": occurred_at.isoformat(),
-        "actor": actor_id,
-        "event": event_id,
-    }
     return PreparedSubagentTaskStart(
         session_id,
         workspace_id,
@@ -460,7 +390,6 @@ def build_subagent_task_start(
         occurred_at,
         actor_id,
         event_id,
-        _fingerprint("task-start", payload),
     )
 
 
@@ -468,19 +397,12 @@ def build_subagent_task_start(
 class FrozenRootConversationContextUnitFact:
     ordered_entry_ids: tuple[str, ...]
     ordered_public_items: tuple[str, ...]
-    unit_fingerprint: str
 
     def __post_init__(self) -> None:
         if not self.ordered_entry_ids or not self.ordered_public_items:
             raise ValueError("ROOT context unit must contain entries and public items")
         if any(not item for item in self.ordered_entry_ids + self.ordered_public_items):
             raise ValueError("ROOT context unit values must be non-empty")
-        expected = _fingerprint(
-            "parent-context-unit",
-            {"entries": self.ordered_entry_ids, "items": self.ordered_public_items},
-        )
-        if self.unit_fingerprint != expected:
-            raise ValueError("ROOT context unit fingerprint mismatch")
 
 
 def build_root_context_unit(
@@ -488,10 +410,17 @@ def build_root_context_unit(
 ) -> FrozenRootConversationContextUnitFact:
     entries = tuple(ordered_entry_ids)
     items = tuple(ordered_public_items)
-    return FrozenRootConversationContextUnitFact(
-        entries,
-        items,
-        _fingerprint("parent-context-unit", {"entries": entries, "items": items}),
+    return FrozenRootConversationContextUnitFact(entries, items)
+
+
+def _root_context_unit_identity_digest(
+    unit: FrozenRootConversationContextUnitFact,
+) -> str:
+    """Reproduce the historical semantic identity only where a stable ID needs it."""
+
+    return _fingerprint(
+        "parent-context-unit",
+        {"entries": unit.ordered_entry_ids, "items": unit.ordered_public_items},
     )
 
 
@@ -505,8 +434,6 @@ class FrozenSubagentParentContextCallSubject:
     compiled_semantic_input_fingerprint: str
     compiled_message_placements_fingerprint: str
     ordered_eligible_units: tuple[FrozenRootConversationContextUnitFact, ...]
-    eligible_context_units_fingerprint: str
-    subject_fingerprint: str
 
     def __post_init__(self) -> None:
         if any(
@@ -525,25 +452,33 @@ class FrozenSubagentParentContextCallSubject:
             raise ValueError("continuity epoch revision must be non-negative")
         if len(self.ordered_eligible_units) > MAXIMUM_PARENT_CONTEXT_UNITS:
             raise ValueError("parent context subject exceeds its unit bound")
-        units = tuple(item.unit_fingerprint for item in self.ordered_eligible_units)
-        expected_units = _fingerprint("parent-context-units", units)
-        if self.eligible_context_units_fingerprint != expected_units:
-            raise ValueError("eligible parent context fingerprint mismatch")
-        expected = _fingerprint(
-            "parent-context-call-subject",
-            {
-                "session_id": self.session_id,
-                "caller_turn_id": self.caller_turn_id,
-                "cut": self.provider_input_cut_fingerprint,
-                "epoch_nonce": self.continuity_epoch_nonce,
-                "epoch_revision": self.continuity_epoch_revision,
-                "semantic": self.compiled_semantic_input_fingerprint,
-                "placements": self.compiled_message_placements_fingerprint,
-                "units": expected_units,
-            },
-        )
-        if self.subject_fingerprint != expected:
-            raise ValueError("parent context call subject fingerprint mismatch")
+
+
+def parent_context_call_subject_identity_digest(
+    subject: FrozenSubagentParentContextCallSubject,
+) -> str:
+    """Derive the pre-hard-cut subject identity without storing duplicate state."""
+
+    units = _fingerprint(
+        "parent-context-units",
+        tuple(
+            _root_context_unit_identity_digest(item)
+            for item in subject.ordered_eligible_units
+        ),
+    )
+    return _fingerprint(
+        "parent-context-call-subject",
+        {
+            "session_id": subject.session_id,
+            "caller_turn_id": subject.caller_turn_id,
+            "cut": subject.provider_input_cut_fingerprint,
+            "epoch_nonce": subject.continuity_epoch_nonce,
+            "epoch_revision": subject.continuity_epoch_revision,
+            "semantic": subject.compiled_semantic_input_fingerprint,
+            "placements": subject.compiled_message_placements_fingerprint,
+            "units": units,
+        },
+    )
 
 
 def build_parent_context_call_subject(
@@ -557,20 +492,6 @@ def build_parent_context_call_subject(
     compiled_message_placements_fingerprint: str,
     ordered_eligible_units: tuple[FrozenRootConversationContextUnitFact, ...],
 ) -> FrozenSubagentParentContextCallSubject:
-    units = _fingerprint(
-        "parent-context-units",
-        tuple(item.unit_fingerprint for item in ordered_eligible_units),
-    )
-    payload = {
-        "session_id": session_id,
-        "caller_turn_id": caller_turn_id,
-        "cut": provider_input_cut_fingerprint,
-        "epoch_nonce": continuity_epoch_nonce,
-        "epoch_revision": continuity_epoch_revision,
-        "semantic": compiled_semantic_input_fingerprint,
-        "placements": compiled_message_placements_fingerprint,
-        "units": units,
-    }
     return FrozenSubagentParentContextCallSubject(
         session_id,
         caller_turn_id,
@@ -580,8 +501,6 @@ def build_parent_context_call_subject(
         compiled_semantic_input_fingerprint,
         compiled_message_placements_fingerprint,
         ordered_eligible_units,
-        units,
-        _fingerprint("parent-context-call-subject", payload),
     )
 
 
@@ -591,8 +510,6 @@ class FrozenSubagentParentContextSelection:
     last_n_turns: int | None
     selected_units: tuple[FrozenRootConversationContextUnitFact, ...]
     rendered_body: str | None
-    source_fingerprint: str | None
-    selection_fingerprint: str
 
     def __post_init__(self) -> None:
         if self.mode is SubagentContextMode.NONE:
@@ -601,20 +518,15 @@ class FrozenSubagentParentContextSelection:
                 for value in (
                     self.last_n_turns,
                     self.rendered_body,
-                    self.source_fingerprint,
                 )
             ) or self.selected_units:
                 raise ValueError("NONE parent context must be absent")
         elif self.mode is SubagentContextMode.LAST_N:
             if self.last_n_turns is None or not 1 <= self.last_n_turns <= 3:
                 raise ValueError("LAST_N parent context requires 1..3 turns")
-            if self.selected_units and (
-                self.rendered_body is None or self.source_fingerprint is None
-            ):
+            if self.selected_units and self.rendered_body is None:
                 raise ValueError("non-empty LAST_N selection requires a source")
-            if not self.selected_units and (
-                self.rendered_body is not None or self.source_fingerprint is not None
-            ):
+            if not self.selected_units and self.rendered_body is not None:
                 raise ValueError("empty LAST_N selection must remain absent")
         else:
             raise TypeError("unknown parent context mode")
@@ -648,36 +560,52 @@ def build_parent_context_selection(
     if mode is SubagentContextMode.NONE:
         selected: tuple[FrozenRootConversationContextUnitFact, ...] = ()
         body = None
-        source = None
     else:
         if last_n_turns is None or not 1 <= last_n_turns <= 3:
             raise ValueError("LAST_N parent context requires 1..3 turns")
         selected = subject.ordered_eligible_units[-last_n_turns:]
         body = _render_parent_units(selected) if selected else None
-        source = (
-            _fingerprint(
-                "parent-context-source",
-                {
-                    "subject": subject.subject_fingerprint,
-                    "units": tuple(item.unit_fingerprint for item in selected),
-                    "body": body,
-                },
-            )
-            if body is not None
-            else None
-        )
-    selection = _fingerprint(
-        "parent-context-selection",
+    return FrozenSubagentParentContextSelection(mode, last_n_turns, selected, body)
+
+
+def parent_context_source_identity_digest(
+    subject: FrozenSubagentParentContextCallSubject,
+    selection: FrozenSubagentParentContextSelection,
+) -> str | None:
+    if selection.rendered_body is None:
+        return None
+    return _fingerprint(
+        "parent-context-source",
         {
-            "subject": subject.subject_fingerprint,
-            "mode": mode.value,
-            "last_n": last_n_turns,
-            "units": tuple(item.unit_fingerprint for item in selected),
-            "source": source,
+            "subject": parent_context_call_subject_identity_digest(subject),
+            "units": tuple(
+                _root_context_unit_identity_digest(item)
+                for item in selection.selected_units
+            ),
+            "body": selection.rendered_body,
         },
     )
-    return FrozenSubagentParentContextSelection(
-        mode, last_n_turns, selected, body, source, selection
+
+
+def parent_context_selection_identity_digest(
+    subject: FrozenSubagentParentContextCallSubject,
+    selection: FrozenSubagentParentContextSelection,
+) -> str:
+    """Local derivation retained solely to preserve existing stable identities."""
+
+    source = parent_context_source_identity_digest(subject, selection)
+    return _fingerprint(
+        "parent-context-selection",
+        {
+            "subject": parent_context_call_subject_identity_digest(subject),
+            "mode": selection.mode.value,
+            "last_n": selection.last_n_turns,
+            "units": tuple(
+                _root_context_unit_identity_digest(item)
+                for item in selection.selected_units
+            ),
+            "source": source,
+        },
     )
 
 
@@ -694,7 +622,6 @@ class PreparedSubagentTaskDraft:
     initial_status: SubagentTaskStatus
     pending_reason: str | None
     terminal_reason: str | None
-    draft_fingerprint: str
 
     def __post_init__(self) -> None:
         _text(self.task_id, "task_id", 512)
@@ -739,24 +666,6 @@ class PreparedSubagentTaskDraft:
             self.terminal_reason,
         ):
             raise ValueError("subagent task initial disposition is invalid")
-        expected = _fingerprint(
-            "task-draft",
-            {
-                "task_id": self.task_id,
-                "task_key": self.task_key,
-                "label": self.label,
-                "profile": self.profile.value,
-                "display_role": self.display_role,
-                "objective": self.objective,
-                "context": self.context.selection_fingerprint,
-                "dependencies": self.dependency_task_ids,
-                "initial_status": self.initial_status.value,
-                "pending_reason": self.pending_reason,
-                "terminal_reason": self.terminal_reason,
-            },
-        )
-        if self.draft_fingerprint != expected:
-            raise ValueError("subagent task draft fingerprint mismatch")
 
 
 @dataclass(frozen=True, slots=True)
@@ -772,7 +681,6 @@ class PreparedSubagentTaskBatchAdmission:
     ordered_tasks: tuple[PreparedSubagentTaskDraft, ...]
     occurred_at: datetime
     actor_id: str
-    candidate_fingerprint: str
 
     def __post_init__(self) -> None:
         if not 1 <= len(self.ordered_tasks) <= 16:
@@ -823,24 +731,60 @@ class PreparedSubagentTaskBatchAdmission:
             for item in self.ordered_tasks
         ):
             raise ValueError("subagent task context is not derived from the exact call")
-        expected = _fingerprint(
-            "task-batch",
-            {
-                "session": self.session_id,
-                "workspace": self.workspace_id,
-                "writer_generation": self.writer_generation,
-                "turn": self.parent_turn_id,
-                "attempt": self.source_tool_attempt_id,
-                "permission": self.permission_snapshot_fingerprint,
-                "subject": self.parent_call_subject.subject_fingerprint,
-                "batch": self.batch_id,
-                "tasks": tuple(item.draft_fingerprint for item in self.ordered_tasks),
-                "occurred_at": self.occurred_at.isoformat(),
-                "actor": self.actor_id,
-            },
-        )
-        if self.candidate_fingerprint != expected:
-            raise ValueError("subagent batch candidate fingerprint mismatch")
+
+
+def _subagent_task_draft_identity_digest(
+    subject: FrozenSubagentParentContextCallSubject,
+    draft: PreparedSubagentTaskDraft,
+) -> str:
+    return _fingerprint(
+        "task-draft",
+        {
+            "task_id": draft.task_id,
+            "task_key": draft.task_key,
+            "label": draft.label,
+            "profile": draft.profile.value,
+            "display_role": draft.display_role,
+            "objective": draft.objective,
+            "context": parent_context_selection_identity_digest(
+                subject, draft.context
+            ),
+            "dependencies": draft.dependency_task_ids,
+            "initial_status": draft.initial_status.value,
+            "pending_reason": draft.pending_reason,
+            "terminal_reason": draft.terminal_reason,
+        },
+    )
+
+
+def subagent_task_batch_identity_digest(
+    candidate: PreparedSubagentTaskBatchAdmission,
+) -> str:
+    """Preserve accepted event IDs without storing an aggregate candidate hash."""
+
+    return _fingerprint(
+        "task-batch",
+        {
+            "session": candidate.session_id,
+            "workspace": candidate.workspace_id,
+            "writer_generation": candidate.writer_generation,
+            "turn": candidate.parent_turn_id,
+            "attempt": candidate.source_tool_attempt_id,
+            "permission": candidate.permission_snapshot_fingerprint,
+            "subject": parent_context_call_subject_identity_digest(
+                candidate.parent_call_subject
+            ),
+            "batch": candidate.batch_id,
+            "tasks": tuple(
+                _subagent_task_draft_identity_digest(
+                    candidate.parent_call_subject, item
+                )
+                for item in candidate.ordered_tasks
+            ),
+            "occurred_at": candidate.occurred_at.isoformat(),
+            "actor": candidate.actor_id,
+        },
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -924,7 +868,6 @@ class PreparedExplicitSubagentResultSettlement:
     task_id: str
     tool_result: PreparedToolResultAcceptanceFact
     result: FrozenSubagentResultPublicFact
-    candidate_fingerprint: str
 
     def __post_init__(self) -> None:
         if (
@@ -937,16 +880,6 @@ class PreparedExplicitSubagentResultSettlement:
             or self.tool_result.result_state != "SUCCESS"
         ):
             raise ValueError("explicit subagent result composite is invalid")
-        expected = _fingerprint(
-            "explicit-result-settlement",
-            {
-                "task_id": self.task_id,
-                "tool_result": self.tool_result.candidate_fingerprint,
-                "result": self.result.result_fingerprint,
-            },
-        )
-        if self.candidate_fingerprint != expected:
-            raise ValueError("explicit subagent result fingerprint mismatch")
 
 
 def build_explicit_subagent_result_settlement(
@@ -959,14 +892,6 @@ def build_explicit_subagent_result_settlement(
         task_id=task_id,
         tool_result=tool_result,
         result=result,
-        candidate_fingerprint=_fingerprint(
-            "explicit-result-settlement",
-            {
-                "task_id": task_id,
-                "tool_result": tool_result.candidate_fingerprint,
-                "result": result.result_fingerprint,
-            },
-        ),
     )
 
 
@@ -1015,7 +940,6 @@ class FrozenDependencyResultContextItem:
     result_source: SubagentResultSource
     summary: str
     result_fingerprint: str
-    item_fingerprint: str
 
     def __post_init__(self) -> None:
         if self.dependency_ordinal < 0:
@@ -1025,21 +949,6 @@ class FrozenDependencyResultContextItem:
         _text(self.summary, "summary", MAXIMUM_RESULT_SUMMARY_UTF8_BYTES)
         if not self.result_fingerprint.startswith("sha256:"):
             raise ValueError("dependency result fingerprint is invalid")
-        expected = _fingerprint(
-            "dependency-result-item",
-            {
-                "ordinal": self.dependency_ordinal,
-                "task_id": self.dependency_task_id,
-                "task_key": self.task_key,
-                "label": self.label,
-                "result_id": self.result_id,
-                "source": self.result_source.value,
-                "summary": self.summary,
-                "result_fingerprint": self.result_fingerprint,
-            },
-        )
-        if self.item_fingerprint != expected:
-            raise ValueError("dependency result item fingerprint mismatch")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1047,7 +956,6 @@ class FrozenDependencyResultContext:
     target_task_id: str
     ordered_items: tuple[FrozenDependencyResultContextItem, ...]
     rendered_body: str
-    context_fingerprint: str
 
     def __post_init__(self) -> None:
         if not self.ordered_items or len(self.ordered_items) > 16:
@@ -1057,16 +965,36 @@ class FrozenDependencyResultContext:
         ):
             raise ValueError("dependency result ordinals are not contiguous")
         expected_body = _render_dependency_results(self.ordered_items)
-        expected = _fingerprint(
-            "dependency-result-context",
+        if self.rendered_body != expected_body:
+            raise ValueError("dependency result context body mismatch")
+
+
+def dependency_result_context_identity_digest(
+    context: FrozenDependencyResultContext,
+) -> str:
+    def item_digest(item: FrozenDependencyResultContextItem) -> str:
+        return _fingerprint(
+            "dependency-result-item",
             {
-                "target_task_id": self.target_task_id,
-                "items": tuple(item.item_fingerprint for item in self.ordered_items),
-                "body": expected_body,
+                "ordinal": item.dependency_ordinal,
+                "task_id": item.dependency_task_id,
+                "task_key": item.task_key,
+                "label": item.label,
+                "result_id": item.result_id,
+                "source": item.result_source.value,
+                "summary": item.summary,
+                "result_fingerprint": item.result_fingerprint,
             },
         )
-        if self.rendered_body != expected_body or self.context_fingerprint != expected:
-            raise ValueError("dependency result context fingerprint mismatch")
+
+    return _fingerprint(
+        "dependency-result-context",
+        {
+            "target_task_id": context.target_task_id,
+            "items": tuple(item_digest(item) for item in context.ordered_items),
+            "body": context.rendered_body,
+        },
+    )
 
 
 def _render_dependency_results(
@@ -1107,42 +1035,21 @@ def build_dependency_result_context(
         if ordinal != expected_ordinal or str(row["status"]) != "COMPLETED":
             raise ValueError("dependency result set is not ready in exact order")
         source = SubagentResultSource(str(row["result_source"]))
-        payload = {
-            "ordinal": ordinal,
-            "task_id": str(row["dependency_task_id"]),
-            "task_key": row.get("task_key"),
-            "label": row.get("label"),
-            "result_id": str(row["result_id"]),
-            "source": source.value,
-            "summary": str(row["summary"]),
-            "result_fingerprint": str(row["result_fingerprint"]),
-        }
         items.append(
             FrozenDependencyResultContextItem(
                 dependency_ordinal=ordinal,
-                dependency_task_id=payload["task_id"],
-                task_key=payload["task_key"],
-                label=payload["label"],
-                result_id=payload["result_id"],
+                dependency_task_id=str(row["dependency_task_id"]),
+                task_key=row.get("task_key"),
+                label=row.get("label"),
+                result_id=str(row["result_id"]),
                 result_source=source,
-                summary=payload["summary"],
-                result_fingerprint=payload["result_fingerprint"],
-                item_fingerprint=_fingerprint("dependency-result-item", payload),
+                summary=str(row["summary"]),
+                result_fingerprint=str(row["result_fingerprint"]),
             )
         )
     frozen_items = tuple(items)
     body = _render_dependency_results(frozen_items)
-    payload = {
-        "target_task_id": target_task_id,
-        "items": tuple(item.item_fingerprint for item in frozen_items),
-        "body": body,
-    }
-    return FrozenDependencyResultContext(
-        target_task_id,
-        frozen_items,
-        body,
-        _fingerprint("dependency-result-context", payload),
-    )
+    return FrozenDependencyResultContext(target_task_id, frozen_items, body)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1158,7 +1065,6 @@ class PreparedInterAgentMailboxItem:
     message_digest: str
     entry_id: str
     event_id: str
-    item_fingerprint: str
 
     def __post_init__(self) -> None:
         _text(self.message, "message", MAXIMUM_INTER_AGENT_MESSAGE_UTF8_BYTES)
@@ -1180,26 +1086,10 @@ class PreparedInterAgentMailboxItem:
         event_id = _stable_id(
             "inter-agent-event", self.sender_tool_attempt_id, self.recipient_task_id
         )
-        expected = _fingerprint(
-            "inter-agent-item",
-            {
-                "session": self.session_id,
-                "sender_turn": self.sender_turn_id,
-                "attempt": self.sender_tool_attempt_id,
-                "call": self.sender_tool_call_id,
-                "recipient": self.recipient_task_id,
-                "recipient_turn": self.recipient_turn_id,
-                "ordinal": self.ordinal,
-                "digest": digest,
-                "entry": entry_id,
-                "event": event_id,
-            },
-        )
         if (
             self.message_digest != digest
             or self.entry_id != entry_id
             or self.event_id != event_id
-            or self.item_fingerprint != expected
         ):
             raise ValueError("inter-agent mailbox item identity mismatch")
 
@@ -1209,7 +1099,6 @@ class PreparedInterAgentMailboxBatch:
     items: tuple[PreparedInterAgentMailboxItem, ...]
     actor_id: str
     occurred_at: datetime
-    candidate_fingerprint: str
 
     def __post_init__(self) -> None:
         if not 1 <= len(self.items) <= 16:
@@ -1231,16 +1120,6 @@ class PreparedInterAgentMailboxBatch:
             raise ValueError("inter-agent mailbox batch ordinals are not contiguous")
         if sum(len(item.message.encode("utf-8")) for item in self.items) > 65_536:
             raise ValueError("inter-agent mailbox batch exceeds its UTF-8 bound")
-        expected = _fingerprint(
-            "inter-agent-mailbox-batch",
-            {
-                "items": tuple(item.item_fingerprint for item in self.items),
-                "actor": self.actor_id,
-                "occurred_at": self.occurred_at.isoformat(),
-            },
-        )
-        if self.candidate_fingerprint != expected:
-            raise ValueError("inter-agent mailbox batch fingerprint mismatch")
 
 
 def build_inter_agent_mailbox_batch(
@@ -1253,14 +1132,6 @@ def build_inter_agent_mailbox_batch(
         items=items,
         actor_id=actor_id,
         occurred_at=occurred_at,
-        candidate_fingerprint=_fingerprint(
-            "inter-agent-mailbox-batch",
-            {
-                "items": tuple(item.item_fingerprint for item in items),
-                "actor": actor_id,
-                "occurred_at": occurred_at.isoformat(),
-            },
-        ),
     )
 
 

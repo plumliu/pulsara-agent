@@ -32,6 +32,7 @@ from pulsara_agent.conversation_kernel.memory.contracts import (
     MemoryUsePolicy,
     MemoryProducerKind,
     MemorySupersedeMode,
+    PreparedExistingSourceRelationSettlement,
     PreparedMemoryBasisReference,
     memory_fact_semantic_digest,
     prepare_memory_candidate,
@@ -50,7 +51,6 @@ from pulsara_agent.conversation_kernel.memory.reflection import (
     MemoryWriteOptOut,
     PreparedCheapHintReflectionHandoff,
     TurnMemoryUseOptOut,
-    cheap_hint_handoff_fingerprint,
 )
 from pulsara_agent.conversation_kernel.memory.governor import (
     _prepare_reflection_batch,
@@ -266,7 +266,7 @@ def _settle(repository, lease, candidate, decision):
         deadline_monotonic=monotonic() + 30,
     )
     settlement = None
-    while hasattr(result, "settlement_fingerprint"):
+    while isinstance(result, PreparedExistingSourceRelationSettlement):
         settlement = result
         result = repository.settle_existing_source_memory_relation(
             lease.guard,
@@ -537,14 +537,7 @@ def test_round8_reflection_can_select_but_cannot_rewrite_human_text() -> None:
         "eligible_entries": (entry,),
         "final_assistant_text": "ack",
     }
-    provisional = object.__new__(PreparedCheapHintReflectionHandoff)
-    for name, value in values.items():
-        object.__setattr__(provisional, name, value)
-    object.__setattr__(provisional, "handoff_fingerprint", "")
-    handoff = PreparedCheapHintReflectionHandoff(
-        **values,
-        handoff_fingerprint=cheap_hint_handoff_fingerprint(provisional),
-    )
+    handoff = PreparedCheapHintReflectionHandoff(**values)
 
     accepted = _prepare_reflection_batch(
         handoff,

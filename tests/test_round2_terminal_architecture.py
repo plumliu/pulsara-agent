@@ -133,8 +133,11 @@ def test_round2_terminal_observation_descriptor_and_payload_surface_are_narrow()
     assert TerminalObservationInstallationAttempt.__dataclass_params__.frozen is True
     assert [item.name for item in fields(ProcessLocalEffectSettlementToken)] == [
         "token_id",
-        "token_fingerprint",
+        "prepared",
     ]
+    prepared_field = fields(ProcessLocalEffectSettlementToken)[1]
+    assert prepared_field.repr is False
+    assert prepared_field.compare is False
 
 
 def test_round2_live_terminal_events_have_only_real_process_local_producers() -> None:

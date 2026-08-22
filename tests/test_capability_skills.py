@@ -32,7 +32,7 @@ def _discover(provider: LocalSkillProvider, workspace: Path):
         scope_subagent_task_id=None,
     )
     result = provider.discover(policy)
-    assert result.root_policy_fingerprint == policy.root_policy_fingerprint
+    assert result.root_policy is policy
     return result
 
 

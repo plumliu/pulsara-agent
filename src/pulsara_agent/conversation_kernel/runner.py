@@ -31,7 +31,6 @@ from pulsara_agent.conversation_kernel.assembler import (
 from pulsara_agent.conversation_kernel.assistant_settlement import (
     AssistantMessageSettlementOwner,
     PreparedAssistantMessageSettlement,
-    assistant_settlement_candidate_fingerprint,
 )
 from pulsara_agent.conversation_kernel.blob import (
     CanonicalContentPublisher,
@@ -294,6 +293,8 @@ from pulsara_agent.conversation_kernel.steer import (
     build_steer_resource_rejection,
     build_steer_suffix_quote,
     build_memory_source_invalidation_reservation,
+    prepared_steer_suffix_plan_identity_fingerprint,
+    steer_consumption_candidate_identity_fingerprint,
 )
 from pulsara_agent.ports.terminal_observation import PreparedInstallationTarget
 from pulsara_agent.terminal_process.monitor import TerminalMonitorCoordinator
@@ -336,6 +337,7 @@ from pulsara_agent.model_input.contracts import (
     canonical_compile_snapshot_fingerprint,
     canonical_model_input_identity_fingerprint,
     canonical_model_input_snapshot_fingerprint,
+    compiled_message_placements_fingerprint,
     provider_input_item_fingerprint,
 )
 from pulsara_agent.model_input.continuity import (
@@ -355,7 +357,6 @@ from pulsara_agent.model_input.continuity import (
     encode_runtime_observation,
     SourceObservationLifecycle,
     SourceObservationPresence,
-    prepared_provider_input_append_candidate_fingerprint,
 )
 from pulsara_agent.model_input.provider_replay import (
     FrozenCanonicalProviderDispatchRead,
@@ -446,7 +447,7 @@ class KernelModelPort(Protocol):
         self,
         request: KernelModelExecutionRequest,
         *,
-        expected_append_candidate_fingerprint: str,
+        append_candidate: PreparedProviderInputAppendCandidate,
         install_authority: ProcessLocalProviderInputInstallAuthority,
     ) -> PreparedKernelModelExecution: ...
 
@@ -588,8 +589,6 @@ class KernelToolInvocationContext:
     permission_snapshot_fingerprint: str
     effective_permission_mode: PermissionMode
     attempt_permission_snapshot_fingerprint: str
-    tool_surface_fingerprint: str
-    executor_binding_fingerprint: str
     surface_borrow: ProcessLocalToolSurfaceBorrow = dataclass_field(
         repr=False, compare=False
     )
@@ -619,8 +618,6 @@ class KernelToolInvocationContext:
                 self.authorization_reference,
                 self.permission_snapshot_fingerprint,
                 self.attempt_permission_snapshot_fingerprint,
-                self.tool_surface_fingerprint,
-                self.executor_binding_fingerprint,
             )
         ):
             raise ValueError("kernel tool invocation context is incomplete")
@@ -664,10 +661,10 @@ class KernelToolInvocationContext:
 @dataclass(frozen=True, slots=True)
 class ProcessLocalEffectSettlementToken:
     token_id: str
-    token_fingerprint: str
+    prepared: object = dataclass_field(repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        if not self.token_id or not self.token_fingerprint.startswith("sha256:"):
+        if not self.token_id:
             raise ValueError("process-local settlement token is invalid")
 
 
@@ -1283,9 +1280,6 @@ class ConversationKernelRunner:
                 exact_context_binding_revision_id=(
                     candidate.context_binding_revision_id
                 ),
-                exact_admission_candidate_fingerprint=(
-                    candidate.candidate_fingerprint
-                ),
             ),
         )
 
@@ -1306,9 +1300,6 @@ class ConversationKernelRunner:
                 exact_initial_entry_id=candidate.entry_id,
                 exact_context_binding_revision_id=(
                     candidate.context_binding_revision_id
-                ),
-                exact_admission_candidate_fingerprint=(
-                    candidate.candidate_fingerprint
                 ),
             ),
         )
@@ -1515,7 +1506,7 @@ class ConversationKernelRunner:
         allow_steers: bool = True,
         allow_terminal_compaction: bool = False,
         canonical_read_override: FrozenCanonicalProviderDispatchRead | None = None,
-        expected_source_read_fingerprint: str | None = None,
+        expected_source_read: FrozenCanonicalProviderDispatchRead | None = None,
         force_empty_capability_predecessor: bool = False,
         cold_seed_override: FrozenColdConversationSeed | None = None,
         existing_handle: PreparedProviderInputHandle | None = None,
@@ -1565,18 +1556,17 @@ class ConversationKernelRunner:
             )
             if canonical_read_override is not None:
                 if (
-                    expected_source_read_fingerprint is None
-                    or observed_read.composite_fingerprint
-                    != expected_source_read_fingerprint
+                    expected_source_read is None
+                    or observed_read != expected_source_read
                 ):
                     raise StructuredModelInputCompileError(
                         ModelInputCompileFailureKind.CANONICAL_PREFIX_CONFLICT
                     )
                 base_read = canonical_read_override
             else:
-                if expected_source_read_fingerprint is not None:
+                if expected_source_read is not None:
                     raise ValueError(
-                        "source-read fingerprint requires a canonical override"
+                        "expected source read requires a canonical override"
                     )
                 base_read = observed_read
             base_facts = base_read.compile_snapshot
@@ -2105,7 +2095,9 @@ class ConversationKernelRunner:
                             identity.session_id,
                             turn_id,
                             str(model_call_index),
-                            candidates[-1].candidate_fingerprint,
+                            steer_consumption_candidate_identity_fingerprint(
+                                candidates[-1]
+                            ),
                         ),
                         model_call_index=model_call_index,
                         canonical_input=prospective_input,
@@ -2231,8 +2223,8 @@ class ConversationKernelRunner:
                             model_surface.surface_fingerprint
                         ),
                         source_facts_fingerprint=sources.collection_fingerprint,
-                        ordered_pending_queue_fingerprints=tuple(
-                            item.fact_fingerprint for item, _body in all_hydrated
+                        ordered_pending_queue_facts=tuple(
+                            item for item, _body in all_hydrated
                         ),
                         selected_consumption_candidates=candidates,
                         quote=quote,
@@ -2249,30 +2241,7 @@ class ConversationKernelRunner:
                     break
 
                 if selected_plan is None:
-                    source_plan_fingerprint = context_fingerprint(
-                        "pulsara:unfit-steer-source-plan:v1",
-                        {
-                            "scope": (
-                                scope.session_id,
-                                scope.scope_kind.value,
-                                scope.scope_subagent_task_id,
-                            ),
-                            "base_cut": _provider_cut_fingerprint(handle.cut),
-                            "base_frontier": _canonical_frontier_fingerprint(
-                                base_frontier
-                            ),
-                            "base_compile": (base_facts.canonical_read_cut_fingerprint),
-                            "target": prepared_call.compile_binding.binding_fingerprint,
-                            "surface": model_surface.surface_fingerprint,
-                            "sources": frozen_sources.freeze_fingerprint,
-                            "pending": tuple(
-                                item.fact_fingerprint
-                                for item, _body in all_hydrated
-                            ),
-                        },
-                    )
                     rejection = build_steer_resource_rejection(
-                        source_plan_fingerprint=source_plan_fingerprint,
                         fact=all_hydrated[0][0],
                         occurred_at=occurred_at,
                         actor_id=self._writer_lease.guard.writer_owner_id,
@@ -2375,7 +2344,9 @@ class ConversationKernelRunner:
                         identity.session_id,
                         turn_id,
                         str(model_call_index),
-                        selected_plan.plan_fingerprint,
+                        prepared_steer_suffix_plan_identity_fingerprint(
+                            selected_plan
+                        ),
                     ),
                     model_call_index=model_call_index,
                     canonical_input=actual.canonical_input,
@@ -2560,7 +2531,7 @@ class ConversationKernelRunner:
                     compile_request=compile_request,
                     planning=planning,
                     compatibility=compatibility,
-                    prepared_call_identity=prepared_call.preparation_fingerprint,
+                    prepared_call=prepared_call,
                     capability_dispatch_cut=capability_dispatch_cut,
                     tool_view=tool_view,
                     skill_view=skill_view,
@@ -2664,7 +2635,7 @@ class ConversationKernelRunner:
                         compile_request=final_request,
                         planning=planning,
                         compatibility=final_compatibility,
-                        prepared_call_identity=prepared_call.preparation_fingerprint,
+                        prepared_call=prepared_call,
                         capability_dispatch_cut=capability_dispatch_cut,
                         tool_view=tool_view,
                         skill_view=skill_view,
@@ -2730,9 +2701,7 @@ class ConversationKernelRunner:
                         compile_request=final_request,
                         planning=planning,
                         compatibility=final_compatibility,
-                        prepared_call_identity=(
-                            prepared_call.preparation_fingerprint
-                        ),
+                        prepared_call=prepared_call,
                         capability_dispatch_cut=capability_dispatch_cut,
                         tool_view=tool_view,
                         skill_view=skill_view,
@@ -2834,7 +2803,7 @@ class ConversationKernelRunner:
         epoch_nonce = (
             planning.predecessor_view.epoch_nonce
             if planning.predecessor_view is not None
-            else f"cold:{planning.planning_fingerprint}"
+            else f"cold:{planning.planning_nonce}"
         )
         return self._memory_contexts.freeze_call(
             scope=scope,
@@ -3370,7 +3339,9 @@ class ConversationKernelRunner:
         candidate = build_steer_plan_conflict_interruption(
             session_id=first.session_id,
             exact_target_turn_id=first.exact_target_turn_id,
-            source_plan_fingerprint=plan.plan_fingerprint,
+            source_plan_fingerprint=(
+                prepared_steer_suffix_plan_identity_fingerprint(plan)
+            ),
             occurred_at=datetime.now(timezone.utc),
             actor_id=self._writer_lease.guard.writer_owner_id,
         )
@@ -4099,9 +4070,7 @@ class ConversationKernelRunner:
                         deadline=successor_deadline,
                         allow_steers=False,
                         canonical_read_override=synthetic_read,
-                        expected_source_read_fingerprint=(
-                            compaction_read.dispatch_read.composite_fingerprint
-                        ),
+                        expected_source_read=compaction_read.dispatch_read,
                         force_empty_capability_predecessor=True,
                         cold_seed_override=seed,
                         existing_handle=dispatch.handle,
@@ -4401,9 +4370,7 @@ class ConversationKernelRunner:
                         deadline=successor_deadline,
                         allow_steers=False,
                         canonical_read_override=actual_read,
-                        expected_source_read_fingerprint=(
-                            actual_read.composite_fingerprint
-                        ),
+                        expected_source_read=actual_read,
                         force_empty_capability_predecessor=True,
                         cold_seed_override=CompactionContinuationSeed(
                             dispatch_read=actual_read,
@@ -4657,13 +4624,7 @@ class ConversationKernelRunner:
                 compatibility=candidate_inputs.compatibility,
                 compiled_result=candidate_inputs.compiled_result,
                 wire_input_plan=candidate_inputs.wire_input_plan,
-                capability_dispatch_cut_fingerprint=(
-                    candidate_inputs.capability_dispatch_cut_fingerprint
-                ),
-                direct_native_projection_set=(
-                    candidate_inputs.direct_native_projection_set
-                ),
-                mcp_route_projection=candidate_inputs.mcp_route_projection,
+                tool_exposure_plan=candidate_inputs.tool_exposure_plan,
             )
         else:
             compatibility = _provider_input_compatibility(
@@ -4686,15 +4647,7 @@ class ConversationKernelRunner:
                 compatibility=compatibility,
                 compiled_result=dispatch.append_result,
                 wire_input_plan=wire_input_plan,
-                capability_dispatch_cut_fingerprint=(
-                    dispatch.capability_dispatch_cut.dispatch_cut_fingerprint
-                ),
-                direct_native_projection_set=(
-                    dispatch.tool_exposure_plan.direct_projection_set
-                ),
-                mcp_route_projection=(
-                    dispatch.tool_exposure_plan.mcp_catalog_route_projection
-                ),
+                tool_exposure_plan=dispatch.tool_exposure_plan,
             )
         self._continuity.register(append_candidate)
         request = KernelModelExecutionRequest(
@@ -4726,9 +4679,7 @@ class ConversationKernelRunner:
             try:
                 execution = self._model.preflight_execution(
                     request,
-                    expected_append_candidate_fingerprint=(
-                        append_candidate.candidate_fingerprint
-                    ),
+                    append_candidate=append_candidate,
                     install_authority=self._continuity.install_authority,
                 )
             except StructuredModelInputCompileError:
@@ -4739,8 +4690,8 @@ class ConversationKernelRunner:
                 ) from exc
             dispatch.handle.begin_model_operation()
             permit = self._continuity.install(
-                candidate_fingerprint=append_candidate.candidate_fingerprint,
-                execution_fingerprint=execution.execution_fingerprint,
+                candidate=append_candidate,
+                execution=execution,
             )
             installed = True
             self._tools.install_provider_input_tool_result_deliveries(
@@ -4771,7 +4722,7 @@ class ConversationKernelRunner:
                         execution.discard()
                     except RuntimeError:
                         pass
-                self._continuity.discard(append_candidate.candidate_fingerprint)
+                self._continuity.discard(append_candidate)
             raise
 
     async def run_accepted_turn(
@@ -4998,26 +4949,6 @@ class ConversationKernelRunner:
                         None if completion_prepared is None else completion_prepared[1]
                     )
                     settlement = PreparedAssistantMessageSettlement(
-                        candidate_fingerprint=(
-                            assistant_settlement_candidate_fingerprint(
-                                cut=request.cut,
-                                entry_id=entry_id,
-                                parent_content=parent_content,
-                                blocks=canonical_blocks,
-                                complete_turn=complete_turn,
-                                occurred_at=occurred_at,
-                                actor_id="model:foreground",
-                                continuity_scope=permit.scope,
-                                continuity_epoch_nonce=permit.epoch_nonce,
-                                continuity_epoch_revision=permit.epoch_revision,
-                                provider_wire_api=collected.provider_wire_api,
-                                provider_replay_disposition=(
-                                    collected.provider_replay_disposition
-                                ),
-                                provider_replay=collected.provider_replay,
-                                subagent_result=subagent_result,
-                            )
-                        ),
                         guard=self._writer_lease.guard,
                         cut=request.cut,
                         entry_id=entry_id,
@@ -5452,10 +5383,6 @@ class ConversationKernelRunner:
                             attempt_permission_snapshot_fingerprint=(
                                 attempt_permission_snapshot_fingerprint
                             ),
-                            tool_surface_fingerprint=(
-                                active_surface_borrow.prepared.model_surface.surface_fingerprint
-                            ),
-                            executor_binding_fingerprint=binding_fingerprint,
                             subagent_parent_context_subject=(
                                 provider_open.subagent_parent_context_subject
                             ),
@@ -7212,9 +7139,7 @@ def _prepared_append_candidate(
     compatibility: ProviderInputEpochCompatibility,
     compiled_result: FrozenProviderInputAppendCompileResult,
     wire_input_plan: FrozenProviderWireInputPlan,
-    capability_dispatch_cut_fingerprint: str,
-    direct_native_projection_set,
-    mcp_route_projection,
+    tool_exposure_plan: FrozenToolCapabilityExposurePlan,
 ) -> PreparedProviderInputAppendCandidate:
     predecessor = planning.predecessor_view
     epoch_nonce = (
@@ -7223,35 +7148,10 @@ def _prepared_append_candidate(
         else predecessor.epoch_nonce
     )
     expected_revision = 0 if predecessor is None else predecessor.epoch_revision
-    predecessor_fingerprint = (
-        None if predecessor is None else predecessor.semantic_prefix_fingerprint
-    )
-    candidate_fingerprint = prepared_provider_input_append_candidate_fingerprint(
-        scope=planning.scope,
-        epoch_nonce=epoch_nonce,
-        expected_epoch_revision=expected_revision,
-        predecessor_prefix_fingerprint=predecessor_fingerprint,
-        dispatch_anchor=planning.dispatch_anchor,
-        resulting_compiled_input=compiled_result.compiled_input,
-        wire_input_plan=wire_input_plan,
-        resulting_canonical_frontier=compiled_result.canonical_frontier,
-        resulting_source_heads=compiled_result.source_heads,
-        appended_message_count=compiled_result.appended_message_count,
-        reset_reason=compiled_result.reset_reason,
-        compatibility=compatibility,
-        planning_fingerprint=planning.planning_fingerprint,
-        capability_dispatch_cut_fingerprint=(
-            capability_dispatch_cut_fingerprint
-        ),
-        direct_native_projection_set=direct_native_projection_set,
-        mcp_route_projection=mcp_route_projection,
-    )
     return PreparedProviderInputAppendCandidate(
-        scope=planning.scope,
+        planning=planning,
         epoch_nonce=epoch_nonce,
         expected_epoch_revision=expected_revision,
-        predecessor_prefix_fingerprint=predecessor_fingerprint,
-        dispatch_anchor=planning.dispatch_anchor,
         resulting_compiled_input=compiled_result.compiled_input,
         wire_input_plan=wire_input_plan,
         resulting_canonical_frontier=compiled_result.canonical_frontier,
@@ -7259,13 +7159,7 @@ def _prepared_append_candidate(
         appended_message_count=compiled_result.appended_message_count,
         reset_reason=compiled_result.reset_reason,
         compatibility=compatibility,
-        planning_fingerprint=planning.planning_fingerprint,
-        capability_dispatch_cut_fingerprint=(
-            capability_dispatch_cut_fingerprint
-        ),
-        direct_native_projection_set=direct_native_projection_set,
-        mcp_route_projection=mcp_route_projection,
-        candidate_fingerprint=candidate_fingerprint,
+        tool_exposure_plan=tool_exposure_plan,
     )
 
 
@@ -7373,7 +7267,7 @@ def _freeze_subagent_parent_context_call_subject(
         continuity_epoch_revision=permit.epoch_revision,
         compiled_semantic_input_fingerprint=compiled.compiled_semantic_fingerprint,
         compiled_message_placements_fingerprint=(
-            compiled.message_placements_fingerprint
+            compiled_message_placements_fingerprint(compiled.message_placements)
         ),
         ordered_eligible_units=units,
     )

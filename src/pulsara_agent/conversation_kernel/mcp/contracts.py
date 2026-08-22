@@ -238,7 +238,6 @@ class McpInstallationCandidate:
     ordered_tool_execution_policies: tuple[McpToolExecutionPolicyFact, ...]
     standard_read_timeout_ms: int
     normalized_physical_bytes: int
-    candidate_fingerprint: str
 
     def __post_init__(self) -> None:
         if not 1_000 <= self.standard_read_timeout_ms <= 600_000:

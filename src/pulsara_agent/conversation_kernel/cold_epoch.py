@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from time import monotonic
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from pulsara_agent.capability.contracts import (
     FrozenCapabilityDispatchCut,
@@ -31,6 +31,10 @@ from pulsara_agent.conversation_kernel.subagents.contracts import (
     SubagentContextMode,
     SubagentProfileKind,
     build_parent_context_selection,
+    dependency_result_context_identity_digest,
+    parent_context_call_subject_identity_digest,
+    parent_context_selection_identity_digest,
+    parent_context_source_identity_digest,
 )
 from pulsara_agent.llm.provider_replay import ProviderReplayTargetCompatibilityFact
 from pulsara_agent.llm.request import FrozenProviderWireInputPlan
@@ -45,7 +49,6 @@ from pulsara_agent.model_input.contracts import (
     FrozenProviderInputItemKind,
     ModelInputScopeKind,
     StructuredModelInputCompileRequest,
-    provider_input_item_fingerprint,
 )
 from pulsara_agent.model_input.continuity import (
     FrozenProviderInputAppendCompileResult,
@@ -60,7 +63,12 @@ from pulsara_agent.model_input.provider_replay import (
     select_compatible_provider_replay_manifests,
     selected_message_placements_fingerprint,
 )
-from pulsara_agent.primitives.context import context_fingerprint
+
+if TYPE_CHECKING:
+    from pulsara_agent.conversation_kernel.direct_model import (
+        PreparedKernelModelCall,
+        PreparedKernelSemanticModelCall,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,7 +106,6 @@ class SubagentInitialSeed:
     profile_kind: SubagentProfileKind
     objective: str = field(repr=False)
     objective_item: FrozenProviderInputItem = field(repr=False)
-    objective_item_fingerprint: str
     parent_call_subject: FrozenSubagentParentContextCallSubject = field(repr=False)
     parent_context_selection: FrozenSubagentParentContextSelection = field(repr=False)
     parent_context_source: ContextSourceCandidate | ContextSourceAbsentFact = field(
@@ -108,7 +115,6 @@ class SubagentInitialSeed:
     dependency_results_source: ContextSourceCandidate | ContextSourceAbsentFact = field(
         repr=False
     )
-    seed_fingerprint: str
     _authority: object = field(repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -120,9 +126,6 @@ class SubagentInitialSeed:
             if item.item_kind is FrozenProviderInputItemKind.USER
             and item.input_origin is CanonicalInputOriginKind.SUBAGENT_OBJECTIVE
         )
-        expected_objective_fingerprint = provider_input_item_fingerprint(
-            self.objective_item
-        )
         expected_selection = build_parent_context_selection(
             self.parent_call_subject,
             mode=self.parent_context_selection.mode,
@@ -132,9 +135,15 @@ class SubagentInitialSeed:
             kind=ContextSourceKind.PARENT_CONTEXT,
             text=expected_selection.rendered_body,
             domain_identity={
-                "subject": self.parent_call_subject.subject_fingerprint,
-                "selection": expected_selection.selection_fingerprint,
-                "source": expected_selection.source_fingerprint,
+                "subject": parent_context_call_subject_identity_digest(
+                    self.parent_call_subject
+                ),
+                "selection": parent_context_selection_identity_digest(
+                    self.parent_call_subject, expected_selection
+                ),
+                "source": parent_context_source_identity_digest(
+                    self.parent_call_subject, expected_selection
+                ),
             },
         )
         expected_dependency_source = build_subagent_context_source(
@@ -147,7 +156,9 @@ class SubagentInitialSeed:
             domain_identity=(
                 None
                 if self.dependency_context is None
-                else self.dependency_context.context_fingerprint
+                else dependency_result_context_identity_digest(
+                    self.dependency_context
+                )
             ),
         )
         parent_present = isinstance(self.parent_context_source, ContextSourceCandidate)
@@ -166,7 +177,6 @@ class SubagentInitialSeed:
             or objective_items[0] != self.objective_item
             or self.objective_item.text != self.objective
             or self.objective_item.source_turn_id != identity.turn_id
-            or self.objective_item_fingerprint != expected_objective_fingerprint
             or self.parent_call_subject.session_id != identity.session_id
             or self.parent_context_selection != expected_selection
             or self.parent_context_source != expected_parent_source
@@ -186,29 +196,6 @@ class SubagentInitialSeed:
             )
         ):
             raise ValueError("subagent initial seed is invalid")
-        expected = context_fingerprint(
-            "pulsara:subagent-initial-seed:v4",
-            {
-                "dispatch_read": self.dispatch_read.composite_fingerprint,
-                "task_id": self.task_id,
-                "parent_turn_id": self.parent_turn_id,
-                "profile": self.profile_kind.value,
-                "objective_item": self.objective_item_fingerprint,
-                "parent_subject": self.parent_call_subject.subject_fingerprint,
-                "parent_selection": self.parent_context_selection.selection_fingerprint,
-                "parent_source": self.parent_context_source.domain_semantic_fingerprint,
-                "dependency_context": (
-                    None
-                    if self.dependency_context is None
-                    else self.dependency_context.context_fingerprint
-                ),
-                "dependency_source": (
-                    self.dependency_results_source.domain_semantic_fingerprint
-                ),
-            },
-        )
-        if self.seed_fingerprint != expected:
-            raise ValueError("subagent initial seed fingerprint mismatch")
 
     @property
     def source_replacements(
@@ -238,14 +225,19 @@ def build_subagent_initial_seed(
     if len(objective_items) != 1:
         raise ValueError("child canonical cut lacks one exact objective item")
     objective_item = objective_items[0]
-    objective_fingerprint = provider_input_item_fingerprint(objective_item)
     parent_source = build_subagent_context_source(
         kind=ContextSourceKind.PARENT_CONTEXT,
         text=parent_context_selection.rendered_body,
         domain_identity={
-            "subject": parent_call_subject.subject_fingerprint,
-            "selection": parent_context_selection.selection_fingerprint,
-            "source": parent_context_selection.source_fingerprint,
+            "subject": parent_context_call_subject_identity_digest(
+                parent_call_subject
+            ),
+            "selection": parent_context_selection_identity_digest(
+                parent_call_subject, parent_context_selection
+            ),
+            "source": parent_context_source_identity_digest(
+                parent_call_subject, parent_context_selection
+            ),
         },
     )
     dependency_source = build_subagent_context_source(
@@ -254,25 +246,9 @@ def build_subagent_initial_seed(
         domain_identity=(
             None
             if dependency_context is None
-            else dependency_context.context_fingerprint
+            else dependency_result_context_identity_digest(dependency_context)
         ),
     )
-    payload = {
-        "dispatch_read": dispatch_read.composite_fingerprint,
-        "task_id": task_id,
-        "parent_turn_id": parent_turn_id,
-        "profile": profile_kind.value,
-        "objective_item": objective_fingerprint,
-        "parent_subject": parent_call_subject.subject_fingerprint,
-        "parent_selection": parent_context_selection.selection_fingerprint,
-        "parent_source": parent_source.domain_semantic_fingerprint,
-        "dependency_context": (
-            None
-            if dependency_context is None
-            else dependency_context.context_fingerprint
-        ),
-        "dependency_source": dependency_source.domain_semantic_fingerprint,
-    }
     return SubagentInitialSeed(
         dispatch_read,
         task_id,
@@ -280,13 +256,11 @@ def build_subagent_initial_seed(
         profile_kind,
         objective,
         objective_item,
-        objective_fingerprint,
         parent_call_subject,
         parent_context_selection,
         parent_source,
         dependency_context,
         dependency_source,
-        context_fingerprint("pulsara:subagent-initial-seed:v4", payload),
         _SUBAGENT_SEED_AUTHORITY,
     )
 
@@ -300,25 +274,12 @@ FrozenColdConversationSeed = (
 class SelectedDurableReplayHydrationRequest:
     """Metadata-only request for the existing bounded replay body reader."""
 
-    source_dispatch_read_fingerprint: str
     replay_target: ProviderReplayTargetCompatibilityFact
     selected_manifests: tuple[FrozenDurableProviderReplayManifest, ...]
     selected_message_placements_fingerprint: str
-    request_fingerprint: str
 
     def __post_init__(self) -> None:
-        expected = context_fingerprint(
-            "pulsara:cold-epoch-selected-replay-hydration-request:v1",
-            {
-                "source": self.source_dispatch_read_fingerprint,
-                "target": self.replay_target.replay_target_fingerprint,
-                "manifests": tuple(
-                    item.manifest_fingerprint for item in self.selected_manifests
-                ),
-                "placements": self.selected_message_placements_fingerprint,
-            },
-        )
-        if not self.selected_manifests or self.request_fingerprint != expected:
+        if not self.selected_manifests:
             raise ValueError("selected replay hydration request is invalid")
 
 
@@ -328,7 +289,9 @@ class PreparedColdEpochSemanticAssembly:
     planning: FrozenProviderInputAppendPlanningInput = field(repr=False)
     compatibility: ProviderInputEpochCompatibility
     compiled_result: FrozenProviderInputAppendCompileResult = field(repr=False)
-    prepared_call_identity: str
+    prepared_call: "PreparedKernelModelCall | PreparedKernelSemanticModelCall" = field(
+        repr=False
+    )
     capability_dispatch_cut: FrozenCapabilityDispatchCut = field(repr=False)
     tool_view: FrozenToolCapabilityDispatchView = field(repr=False)
     skill_view: FrozenSkillCapabilityDispatchView = field(repr=False)
@@ -346,9 +309,7 @@ class ColdEpochContinuityCandidateInputs:
     compatibility: ProviderInputEpochCompatibility
     compiled_result: FrozenProviderInputAppendCompileResult = field(repr=False)
     wire_input_plan: FrozenProviderWireInputPlan = field(repr=False)
-    capability_dispatch_cut_fingerprint: str
-    direct_native_projection_set: FrozenNativeToolProjectionSet = field(repr=False)
-    mcp_route_projection: FrozenMcpRouteProjection = field(repr=False)
+    tool_exposure_plan: FrozenToolCapabilityExposurePlan = field(repr=False)
 
     def __post_init__(self) -> None:
         if (
@@ -357,11 +318,22 @@ class ColdEpochContinuityCandidateInputs:
             or self.wire_input_plan.materialization.tool_items
             != tuple(
                 item.wire_tool
-                for item in self.direct_native_projection_set.projections
+                for item in self.tool_exposure_plan.direct_projection_set.projections
             )
-            or not self.capability_dispatch_cut_fingerprint.startswith("sha256:")
         ):
             raise ValueError("cold epoch continuity inputs do not exact-join")
+
+    @property
+    def capability_dispatch_cut(self) -> FrozenCapabilityDispatchCut:
+        return self.tool_exposure_plan.dispatch_view.parent_dispatch_cut
+
+    @property
+    def direct_native_projection_set(self) -> FrozenNativeToolProjectionSet:
+        return self.tool_exposure_plan.direct_projection_set
+
+    @property
+    def mcp_route_projection(self) -> FrozenMcpRouteProjection:
+        return self.tool_exposure_plan.mcp_catalog_route_projection
 
 
 @dataclass(frozen=True, slots=True)
@@ -396,7 +368,7 @@ class KernelColdEpochInputAssembler:
         compile_request: StructuredModelInputCompileRequest,
         planning: FrozenProviderInputAppendPlanningInput,
         compatibility: ProviderInputEpochCompatibility,
-        prepared_call_identity: str,
+        prepared_call: "PreparedKernelModelCall | PreparedKernelSemanticModelCall",
         capability_dispatch_cut: FrozenCapabilityDispatchCut,
         tool_view: FrozenToolCapabilityDispatchView,
         skill_view: FrozenSkillCapabilityDispatchView,
@@ -409,7 +381,7 @@ class KernelColdEpochInputAssembler:
             seed=seed,
             compile_request=compile_request,
             planning=planning,
-            prepared_call_identity=prepared_call_identity,
+            prepared_call=prepared_call,
             capability_dispatch_cut=capability_dispatch_cut,
             tool_view=tool_view,
             skill_view=skill_view,
@@ -433,32 +405,17 @@ class KernelColdEpochInputAssembler:
         hydration_request = None
         if selected:
             placement_fingerprint = selected_message_placements_fingerprint(placements)
-            values = {
-                "source_dispatch_read_fingerprint": dispatch_read.composite_fingerprint,
-                "replay_target": replay_target,
-                "selected_manifests": selected,
-                "selected_message_placements_fingerprint": placement_fingerprint,
-            }
             hydration_request = SelectedDurableReplayHydrationRequest(
-                **values,
-                request_fingerprint=context_fingerprint(
-                    "pulsara:cold-epoch-selected-replay-hydration-request:v1",
-                    {
-                        "source": dispatch_read.composite_fingerprint,
-                        "target": replay_target.replay_target_fingerprint,
-                        "manifests": tuple(
-                            item.manifest_fingerprint for item in selected
-                        ),
-                        "placements": placement_fingerprint,
-                    },
-                ),
+                replay_target=replay_target,
+                selected_manifests=selected,
+                selected_message_placements_fingerprint=placement_fingerprint,
             )
         return PreparedColdEpochSemanticAssembly(
             seed=seed,
             planning=planning,
             compatibility=compatibility,
             compiled_result=compiled_result,
-            prepared_call_identity=prepared_call_identity,
+            prepared_call=prepared_call,
             capability_dispatch_cut=capability_dispatch_cut,
             tool_view=tool_view,
             skill_view=skill_view,
@@ -511,15 +468,7 @@ class KernelColdEpochInputAssembler:
             compatibility=prepared.compatibility,
             compiled_result=prepared.compiled_result,
             wire_input_plan=wire_plan,
-            capability_dispatch_cut_fingerprint=(
-                prepared.capability_dispatch_cut.dispatch_cut_fingerprint
-            ),
-            direct_native_projection_set=(
-                prepared.tool_exposure_plan.direct_projection_set
-            ),
-            mcp_route_projection=(
-                prepared.tool_exposure_plan.mcp_catalog_route_projection
-            ),
+            tool_exposure_plan=prepared.tool_exposure_plan,
         )
         return ColdEpochInputAssemblyResult(
             compiled_input=prepared.compiled_result.compiled_input,
@@ -539,7 +488,7 @@ class KernelColdEpochInputAssembler:
         seed: FrozenColdConversationSeed,
         compile_request: StructuredModelInputCompileRequest,
         planning: FrozenProviderInputAppendPlanningInput,
-        prepared_call_identity: str,
+        prepared_call: "PreparedKernelModelCall | PreparedKernelSemanticModelCall",
         capability_dispatch_cut: FrozenCapabilityDispatchCut,
         tool_view: FrozenToolCapabilityDispatchView,
         skill_view: FrozenSkillCapabilityDispatchView,
@@ -568,19 +517,18 @@ class KernelColdEpochInputAssembler:
             is not identity.conversation_scope_kind
             or capability_dispatch_cut.scope_subagent_task_id
             != identity.scope_subagent_task_id
-            or tool_view.parent_dispatch_cut_fingerprint
-            != capability_dispatch_cut.dispatch_cut_fingerprint
-            or skill_view.parent_dispatch_cut_fingerprint
-            != capability_dispatch_cut.dispatch_cut_fingerprint
-            or tool_exposure_plan.dispatch_cut_fingerprint
-            != capability_dispatch_cut.dispatch_cut_fingerprint
-            or tool_exposure_plan.tool_dispatch_view_fingerprint
-            != tool_view.view_fingerprint
+            or tool_view.parent_dispatch_cut is not capability_dispatch_cut
+            or skill_view.parent_dispatch_cut is not capability_dispatch_cut
+            or tool_exposure_plan.dispatch_view is not tool_view
             or non_trigger_sources.tool_exposure_plan != tool_exposure_plan
             or non_trigger_sources.skill_dispatch_view != skill_view
             or compile_request.compile_binding.tool_surface
             != tool_exposure_plan.direct_tool_surface
-            or not prepared_call_identity.startswith("sha256:")
+            or prepared_call.compile_binding is not compile_request.compile_binding
+            or prepared_call.native_projection_set
+            is not tool_exposure_plan.direct_projection_set
+            or prepared_call.session_id != identity.session_id
+            or prepared_call.turn_id != identity.turn_id
         ):
             raise ValueError("cold epoch inputs do not exact-join")
         if isinstance(seed, SubagentInitialSeed):

@@ -2,6 +2,8 @@
 
 > 状态：**ACTIVATED — 2026-08-14（post-activation boundary review closed）**
 >
+> Fingerprint hard-cut：[`PULSARA_FINGERPRINT_SUBTRACTION_HARD_CUT_IMPLEMENTATION_SPEC.zh.md`](PULSARA_FINGERPRINT_SUBTRACTION_HARD_CUT_IMPLEMENTATION_SPEC.zh.md)覆盖本文冗余的same-process installation candidate fingerprint/proof字段以及逐文件、文档与activation evidence SHA门禁；MCP config、catalog/schema、policy、slot/binding与MAC ref边界digest继续有效。
+>
 > 记录日期：2026-08-13
 >
 > 当前编码基线：44ec551f7ae6ff4c98f1b4cdeb222d68ac94f28c（feat: activate long-horizon execution envelope）

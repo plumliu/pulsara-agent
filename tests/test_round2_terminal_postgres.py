@@ -92,7 +92,6 @@ def _candidate(
         target=target,
         occurred_at=datetime.now(timezone.utc),
         actor_id="host:test",
-        candidate_fingerprint="sha256:" + "1" * 64,
     )
 
 

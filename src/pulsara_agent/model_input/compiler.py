@@ -39,7 +39,6 @@ from pulsara_agent.model_input.contracts import (
     STRUCTURED_MODEL_INPUT_LIMITS,
     ToolResultProviderRenderMode,
     compiled_tool_result_source_fingerprint,
-    compiled_message_placements_fingerprint,
     frozen_compiled_model_input_fingerprint,
     provider_input_item_fingerprint,
 )
@@ -794,11 +793,6 @@ class StructuredModelInputCompiler:
             system_prompt=layout.system_prompt,
             messages=layout.messages,
             message_placements=layout.message_placements,
-            message_placements_fingerprint=(
-                compiled_message_placements_fingerprint(
-                    layout.message_placements
-                )
-            ),
             tools=surface.tool_specs,
             final_estimate=full,
             source_decisions=source_decisions,
@@ -1206,9 +1200,6 @@ class StructuredModelInputCompiler:
             system_prompt=system_prompt,
             messages=messages,
             message_placements=message_placements,
-            message_placements_fingerprint=(
-                compiled_message_placements_fingerprint(message_placements)
-            ),
             tools=tools,
             final_estimate=estimate,
             source_decisions=fresh.source_decisions,
@@ -1760,11 +1751,6 @@ class StructuredModelInputCompiler:
             system_prompt=layout.system_prompt,
             messages=layout.messages,
             message_placements=layout.message_placements,
-            message_placements_fingerprint=(
-                compiled_message_placements_fingerprint(
-                    layout.message_placements
-                )
-            ),
             tools=predecessor.tools,
             final_estimate=layout.estimate,
             source_decisions=source_decisions,
@@ -2735,16 +2721,6 @@ def _compiled_message_placements(
             else 0
         )
         message_ordinal = len(placements)
-        fingerprint = context_fingerprint(
-            "pulsara.compiled-message-placement:v1",
-            {
-                "ordinal": message_ordinal,
-                "entry": origin_entry_id,
-                "item": origin_item_fingerprint,
-                "within": within,
-                "role": message.role.value,
-            },
-        )
         placements.append(
             FrozenCompiledMessagePlacement(
                 message_ordinal=message_ordinal,
@@ -2752,7 +2728,6 @@ def _compiled_message_placements(
                 origin_item_fingerprint=origin_item_fingerprint,
                 within_origin_ordinal=within,
                 role=message.role,
-                placement_fingerprint=fingerprint,
             )
         )
         previous_entry = origin_entry_id

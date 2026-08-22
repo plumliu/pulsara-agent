@@ -2,6 +2,8 @@
 
 > 状态：**ACTIVATED**
 >
+> Fingerprint hard-cut：[`PULSARA_FINGERPRINT_SUBTRACTION_HARD_CUT_IMPLEMENTATION_SPEC.zh.md`](PULSARA_FINGERPRINT_SUBTRACTION_HARD_CUT_IMPLEMENTATION_SPEC.zh.md)覆盖本文冗余的candidate/execution fingerprint路由、same-process DTO proof以及逐文件、文档与activation evidence SHA门禁；continuity slot、epoch nonce/revision、exact object、wire prefix与compatibility digest继续有效。
+>
 > 记录日期：2026-08-12；激活复核：2026-08-13（post-review deadline、Plan occurrence、密封continuity permit、steer共享base计量与first-party source closed union复核）
 >
 > 编码基线：`a71aa195f2469701fb078d79f78f4fe234bc0d46`（`feat: restore plan workflow and run permissions`）

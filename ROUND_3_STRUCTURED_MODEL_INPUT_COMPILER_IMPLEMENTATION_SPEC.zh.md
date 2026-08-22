@@ -2,6 +2,8 @@
 
 _状态：ACTIVATED（2026-08-12）；R3-0 至 R3-F 已在当前未提交工作树完成并通过全部 activation gate。机器证据见 [`round3_structured_model_input_compiler_activation.json`](benchmarks/suites/core/v1/round3_structured_model_input_compiler_activation.json)。_
 
+> Fingerprint hard-cut：[`PULSARA_FINGERPRINT_SUBTRACTION_HARD_CUT_IMPLEMENTATION_SPEC.zh.md`](PULSARA_FINGERPRINT_SUBTRACTION_HARD_CUT_IMPLEMENTATION_SPEC.zh.md)覆盖本文冗余的same-process DTO fingerprint/proof字段以及逐文件、文档与activation evidence SHA门禁；compiler source lineage、provider-prefix与canonical item digest继续有效。
+
 ## 0. 基线、目的与最终结论
 
 ### 0.1 两个代码基线
@@ -1437,7 +1439,7 @@ ROOT与current same-Host subagent runner使用同一compiler实例/contract，�
 
 ### 12.6 Durable job模型明确排除
 
-[`DirectKernelJobModel`](src/pulsara_agent/conversation_kernel/job_model.py)的handler-specific single prompt不读取conversation transcript，也不属于本轮PHC-17 happy path。本轮：
+历史`DirectKernelJobModel`（已由Round 5B随最后一套durable job删除）的handler-specific single prompt不读取conversation transcript，也不属于本轮PHC-17 happy path。本轮：
 
 - 保留其现有per-attempt budget与final validation；
 - 不让job调用conversation source collector；

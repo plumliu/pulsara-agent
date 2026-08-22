@@ -189,7 +189,6 @@ class PreparedQueuedRootTurnAdmission:
     actor_id: str
     prompt_consumed_occurrence: CommittedEventDraft
     user_message_accepted_occurrence: CommittedEventDraft
-    candidate_fingerprint: str
 
     def __post_init__(self) -> None:
         if (
@@ -218,40 +217,6 @@ class PreparedQueuedRootTurnAdmission:
             value is None for value in handoff_values
         ):
             raise ValueError("queued ROOT admission Plan handoff union is invalid")
-        if self.candidate_fingerprint != queued_root_turn_admission_fingerprint(self):
-            raise ValueError("queued ROOT admission fingerprint mismatch")
-
-
-def queued_root_turn_admission_fingerprint(
-    candidate: PreparedQueuedRootTurnAdmission,
-) -> str:
-    return context_fingerprint(
-        "pulsara:prepared-queued-root-turn-admission:v1",
-        {
-            "session_id": candidate.session_id,
-            "workspace_id": candidate.workspace_id,
-            "queue_item_id": candidate.queue_item_id,
-            "queue_sequence": candidate.queue_sequence,
-            "command_id": candidate.command_id,
-            "client_submission_id": candidate.client_submission_id,
-            "content": _content_manifest(candidate.content),
-            "permission": candidate.permission_snapshot.snapshot_fingerprint,
-            "plan_handoff": {
-                "workflow_id": candidate.pending_plan_handoff_workflow_id,
-                "interaction_id": candidate.pending_plan_handoff_interaction_id,
-                "kind": candidate.pending_plan_handoff_kind,
-            },
-            "turn_id": candidate.exact_turn_id,
-            "entry_id": candidate.exact_initial_entry_id,
-            "context_binding_revision_id": (
-                candidate.exact_context_binding_revision_id
-            ),
-            "prompt_consumed": _event_manifest(candidate.prompt_consumed_occurrence),
-            "user_message_accepted": _event_manifest(
-                candidate.user_message_accepted_occurrence
-            ),
-        },
-    )
 
 
 def build_queued_root_turn_admission(
@@ -299,35 +264,25 @@ def build_queued_root_turn_admission(
         occurred_at=occurred_at,
         payload={"source": "PROMPT_QUEUE"},
     )
-    values = {
-        "session_id": session_id,
-        "workspace_id": workspace_id,
-        "queue_item_id": queue_item_id,
-        "queue_sequence": queue_sequence,
-        "command_id": command_id,
-        "client_submission_id": client_submission_id,
-        "content": content,
-        "permission_snapshot": permission_snapshot,
-        "pending_plan_handoff_workflow_id": pending_plan_handoff_workflow_id,
-        "pending_plan_handoff_interaction_id": pending_plan_handoff_interaction_id,
-        "pending_plan_handoff_kind": pending_plan_handoff_kind,
-        "exact_turn_id": turn_id,
-        "exact_initial_entry_id": entry_id,
-        "exact_context_binding_revision_id": revision_id,
-        "occurred_at": occurred_at,
-        "actor_id": actor_id,
-        "prompt_consumed_occurrence": consumed,
-        "user_message_accepted_occurrence": accepted,
-    }
-    provisional = PreparedQueuedRootTurnAdmission.__new__(
-        PreparedQueuedRootTurnAdmission
-    )
-    for name, value in values.items():
-        object.__setattr__(provisional, name, value)
-    object.__setattr__(provisional, "candidate_fingerprint", "")
     return PreparedQueuedRootTurnAdmission(
-        **values,
-        candidate_fingerprint=queued_root_turn_admission_fingerprint(provisional),
+        session_id=session_id,
+        workspace_id=workspace_id,
+        queue_item_id=queue_item_id,
+        queue_sequence=queue_sequence,
+        command_id=command_id,
+        client_submission_id=client_submission_id,
+        content=content,
+        permission_snapshot=permission_snapshot,
+        pending_plan_handoff_workflow_id=pending_plan_handoff_workflow_id,
+        pending_plan_handoff_interaction_id=pending_plan_handoff_interaction_id,
+        pending_plan_handoff_kind=pending_plan_handoff_kind,
+        exact_turn_id=turn_id,
+        exact_initial_entry_id=entry_id,
+        exact_context_binding_revision_id=revision_id,
+        occurred_at=occurred_at,
+        actor_id=actor_id,
+        prompt_consumed_occurrence=consumed,
+        user_message_accepted_occurrence=accepted,
     )
 
 
@@ -410,28 +365,10 @@ class PendingPromptSteerFact:
     command_id: str
     exact_target_turn_id: str
     content: CanonicalContent = field(repr=False)
-    fact_fingerprint: str
 
     def __post_init__(self) -> None:
         if self.queue_sequence < 1 or self.content.size < 1:
             raise ValueError("pending steer fact bounds are invalid")
-        if self.fact_fingerprint != pending_prompt_steer_fact_fingerprint(self):
-            raise ValueError("pending steer fact fingerprint mismatch")
-
-
-def pending_prompt_steer_fact_fingerprint(fact: PendingPromptSteerFact) -> str:
-    return context_fingerprint(
-        "pulsara:pending-prompt-steer-fact:v1",
-        {
-            "session_id": fact.session_id,
-            "workspace_id": fact.workspace_id,
-            "queue_item_id": fact.queue_item_id,
-            "queue_sequence": fact.queue_sequence,
-            "command_id": fact.command_id,
-            "target_turn_id": fact.exact_target_turn_id,
-            "content": _content_manifest(fact.content),
-        },
-    )
 
 
 def build_pending_prompt_steer_fact(
@@ -444,22 +381,14 @@ def build_pending_prompt_steer_fact(
     exact_target_turn_id: str,
     content: CanonicalContent,
 ) -> PendingPromptSteerFact:
-    provisional = PendingPromptSteerFact.__new__(PendingPromptSteerFact)
-    values = {
-        "session_id": session_id,
-        "workspace_id": workspace_id,
-        "queue_item_id": queue_item_id,
-        "queue_sequence": queue_sequence,
-        "command_id": command_id,
-        "exact_target_turn_id": exact_target_turn_id,
-        "content": content,
-    }
-    for name, value in values.items():
-        object.__setattr__(provisional, name, value)
-    object.__setattr__(provisional, "fact_fingerprint", "")
     return PendingPromptSteerFact(
-        **values,
-        fact_fingerprint=pending_prompt_steer_fact_fingerprint(provisional),
+        session_id=session_id,
+        workspace_id=workspace_id,
+        queue_item_id=queue_item_id,
+        queue_sequence=queue_sequence,
+        command_id=command_id,
+        exact_target_turn_id=exact_target_turn_id,
+        content=content,
     )
 
 
@@ -474,7 +403,6 @@ class PreparedSteerCanonicalBaseFence:
     run_permission_snapshot: FrozenRunPermissionSnapshot
     plan_workflow_fact: FrozenPlanWorkflowCompileFact | None
     canonical_read_cut_fingerprint: str
-    fence_fingerprint: str
 
     def __post_init__(self) -> None:
         if (
@@ -494,53 +422,20 @@ class PreparedSteerCanonicalBaseFence:
             != self.run_permission_snapshot.snapshot_fingerprint
         ):
             raise ValueError("steer canonical base Plan fact does not exact-join")
-        if self.fence_fingerprint != steer_canonical_base_fence_fingerprint(self):
-            raise ValueError("steer canonical base fence fingerprint mismatch")
-
-
-def steer_canonical_base_fence_fingerprint(
-    fence: PreparedSteerCanonicalBaseFence,
-) -> str:
-    return context_fingerprint(
-        "pulsara:prepared-steer-canonical-base-fence:v1",
-        {
-            "session_id": fence.session_id,
-            "target_turn_id": fence.exact_target_turn_id,
-            "through_sequence": fence.provider_input_through_sequence,
-            "context_binding": fence.context_binding_fact.fact_fingerprint,
-            "run_permission": fence.run_permission_snapshot.snapshot_fingerprint,
-            "plan_workflow": (
-                None
-                if fence.plan_workflow_fact is None
-                else fence.plan_workflow_fact.fact_fingerprint
-            ),
-            "canonical_read_cut": fence.canonical_read_cut_fingerprint,
-        },
-    )
 
 
 def build_steer_canonical_base_fence(
     snapshot: FrozenCanonicalCompileSnapshot,
 ) -> PreparedSteerCanonicalBaseFence:
     identity = snapshot.canonical_input.identity
-    values = {
-        "session_id": identity.session_id,
-        "exact_target_turn_id": identity.turn_id,
-        "provider_input_through_sequence": identity.provider_input_through_sequence,
-        "context_binding_fact": snapshot.context_binding_fact,
-        "run_permission_snapshot": snapshot.run_permission_snapshot,
-        "plan_workflow_fact": snapshot.plan_workflow_fact,
-        "canonical_read_cut_fingerprint": snapshot.canonical_read_cut_fingerprint,
-    }
-    provisional = PreparedSteerCanonicalBaseFence.__new__(
-        PreparedSteerCanonicalBaseFence
-    )
-    for name, value in values.items():
-        object.__setattr__(provisional, name, value)
-    object.__setattr__(provisional, "fence_fingerprint", "")
     return PreparedSteerCanonicalBaseFence(
-        **values,
-        fence_fingerprint=steer_canonical_base_fence_fingerprint(provisional),
+        session_id=identity.session_id,
+        exact_target_turn_id=identity.turn_id,
+        provider_input_through_sequence=identity.provider_input_through_sequence,
+        context_binding_fact=snapshot.context_binding_fact,
+        run_permission_snapshot=snapshot.run_permission_snapshot,
+        plan_workflow_fact=snapshot.plan_workflow_fact,
+        canonical_read_cut_fingerprint=snapshot.canonical_read_cut_fingerprint,
     )
 
 
@@ -561,7 +456,6 @@ class PreparedSteerConsumptionCandidate:
     canonical_base_fence: PreparedSteerCanonicalBaseFence
     prompt_consumed_occurrence: CommittedEventDraft
     user_steer_accepted_occurrence: CommittedEventDraft
-    candidate_fingerprint: str
 
     def __post_init__(self) -> None:
         if self.expected_entry_sequence < 1:
@@ -578,30 +472,6 @@ class PreparedSteerConsumptionCandidate:
             <= self.canonical_base_fence.provider_input_through_sequence
         ):
             raise ValueError("steer candidate canonical base fence does not exact-join")
-        if self.candidate_fingerprint != steer_consumption_candidate_fingerprint(self):
-            raise ValueError("steer consumption candidate fingerprint mismatch")
-
-
-def steer_consumption_candidate_fingerprint(
-    candidate: PreparedSteerConsumptionCandidate,
-) -> str:
-    return context_fingerprint(
-        "pulsara:prepared-steer-consumption:v1",
-        {
-            "session_id": candidate.session_id,
-            "queue_item_id": candidate.queue_item_id,
-            "queue_sequence": candidate.queue_sequence,
-            "command_id": candidate.command_id,
-            "target_turn_id": candidate.exact_target_turn_id,
-            "content": _content_manifest(candidate.content),
-            "entry_id": candidate.new_entry_id,
-            "entry_sequence": candidate.expected_entry_sequence,
-            "predecessor": _predecessor_value(candidate.predecessor),
-            "canonical_base_fence": candidate.canonical_base_fence.fence_fingerprint,
-            "prompt_consumed": _event_manifest(candidate.prompt_consumed_occurrence),
-            "user_steer": _event_manifest(candidate.user_steer_accepted_occurrence),
-        },
-    )
 
 
 def build_steer_consumption_candidate(
@@ -641,32 +511,22 @@ def build_steer_consumption_candidate(
         occurred_at=occurred_at,
         payload={"source": "PROMPT_QUEUE"},
     )
-    provisional = PreparedSteerConsumptionCandidate.__new__(
-        PreparedSteerConsumptionCandidate
-    )
-    values = {
-        "session_id": fact.session_id,
-        "queue_item_id": fact.queue_item_id,
-        "queue_sequence": fact.queue_sequence,
-        "command_id": fact.command_id,
-        "exact_target_turn_id": fact.exact_target_turn_id,
-        "content": fact.content,
-        "body_utf8": bytes(body_utf8),
-        "new_entry_id": entry_id,
-        "expected_entry_sequence": expected_entry_sequence,
-        "occurred_at": occurred_at,
-        "actor_id": actor_id,
-        "predecessor": predecessor,
-        "canonical_base_fence": canonical_base_fence,
-        "prompt_consumed_occurrence": prompt_event,
-        "user_steer_accepted_occurrence": steer_event,
-    }
-    for name, value in values.items():
-        object.__setattr__(provisional, name, value)
-    object.__setattr__(provisional, "candidate_fingerprint", "")
     return PreparedSteerConsumptionCandidate(
-        **values,
-        candidate_fingerprint=steer_consumption_candidate_fingerprint(provisional),
+        session_id=fact.session_id,
+        queue_item_id=fact.queue_item_id,
+        queue_sequence=fact.queue_sequence,
+        command_id=fact.command_id,
+        exact_target_turn_id=fact.exact_target_turn_id,
+        content=fact.content,
+        body_utf8=bytes(body_utf8),
+        new_entry_id=entry_id,
+        expected_entry_sequence=expected_entry_sequence,
+        occurred_at=occurred_at,
+        actor_id=actor_id,
+        predecessor=predecessor,
+        canonical_base_fence=canonical_base_fence,
+        prompt_consumed_occurrence=prompt_event,
+        user_steer_accepted_occurrence=steer_event,
     )
 
 
@@ -710,7 +570,6 @@ class AcceptedSteerDispatchBatch:
     entries: tuple[AcceptedSteerDispatchEntry, ...]
     canonical_utf8_bytes: int
     resulting_epoch_logical_bytes: int
-    batch_fingerprint: str
 
     def __post_init__(self) -> None:
         if not self.entries or len(self.entries) > MAXIMUM_STEER_ITEMS_PER_SAFE_POINT:
@@ -747,13 +606,10 @@ class AcceptedSteerDispatchBatch:
             raise ValueError("accepted steer batch body bound is invalid")
         if not 0 < self.resulting_epoch_logical_bytes <= (64 << 20):
             raise ValueError("accepted steer batch epoch bound is invalid")
-        if self.batch_fingerprint != accepted_steer_dispatch_batch_fingerprint(self):
-            raise ValueError("accepted steer batch fingerprint mismatch")
 
 
 @dataclass(frozen=True, slots=True)
 class SteerSuffixAdmissionQuote:
-    selected_candidate_fingerprints: tuple[str, ...]
     selected_item_count: int
     selected_canonical_utf8_bytes: int
     prospective_snapshot_hydrated_bytes: int
@@ -764,18 +620,10 @@ class SteerSuffixAdmissionQuote:
     predecessor_prefix_fingerprint: str | None
     memory_recall_reservation: "MemorySourceInvalidationReservation | None"
     memory_response_preference_reservation: "MemorySourceInvalidationReservation | None"
-    quote_fingerprint: str
 
     def __post_init__(self) -> None:
         if not 1 <= self.selected_item_count <= MAXIMUM_STEER_ITEMS_PER_SAFE_POINT:
             raise ValueError("steer quote selects no items")
-        if len(self.selected_candidate_fingerprints) != self.selected_item_count:
-            raise ValueError("steer quote candidate count is invalid")
-        if any(
-            not value.startswith("sha256:")
-            for value in self.selected_candidate_fingerprints
-        ):
-            raise ValueError("steer quote candidate fingerprint is invalid")
         if (
             not 0
             < self.selected_canonical_utf8_bytes
@@ -826,44 +674,6 @@ class SteerSuffixAdmissionQuote:
             self.predecessor_prefix_fingerprint.startswith("sha256:")
         ):
             raise ValueError("steer quote predecessor fingerprint is invalid")
-        if self.quote_fingerprint != steer_suffix_quote_fingerprint(self):
-            raise ValueError("steer quote fingerprint mismatch")
-
-
-def steer_suffix_quote_fingerprint(quote: SteerSuffixAdmissionQuote) -> str:
-    if (
-        min(
-            quote.selected_canonical_utf8_bytes,
-            quote.prospective_snapshot_hydrated_bytes,
-            quote.resulting_epoch_logical_bytes,
-        )
-        < 0
-    ):
-        raise ValueError("steer quote byte measure is invalid")
-    return context_fingerprint(
-        "pulsara:steer-suffix-admission-quote:v1",
-        {
-            "candidates": quote.selected_candidate_fingerprints,
-            "selected_items": quote.selected_item_count,
-            "selected_canonical_bytes": quote.selected_canonical_utf8_bytes,
-            "snapshot_bytes": quote.prospective_snapshot_hydrated_bytes,
-            "epoch_bytes": quote.resulting_epoch_logical_bytes,
-            "estimate": _estimate_value(quote.resulting_target_estimate),
-            "effective_budget": quote.effective_target_budget,
-            "estimator": quote.estimator_fingerprint,
-            "predecessor_prefix": quote.predecessor_prefix_fingerprint,
-            "memory_recall_reservation": (
-                None
-                if quote.memory_recall_reservation is None
-                else quote.memory_recall_reservation.reservation_fingerprint
-            ),
-            "memory_response_preference_reservation": (
-                None
-                if quote.memory_response_preference_reservation is None
-                else quote.memory_response_preference_reservation.reservation_fingerprint
-            ),
-        },
-    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -883,7 +693,6 @@ class MemorySourceInvalidationReservation:
     full_encoded_utf8_bytes: int
     full_input_token_cost: int
     estimator_fingerprint: str
-    reservation_fingerprint: str
 
     def __post_init__(self) -> None:
         if self.source_kind not in {
@@ -922,41 +731,6 @@ class MemorySourceInvalidationReservation:
             < 0
         ):
             raise ValueError("memory invalidation quote is outside its bound")
-        if self.reservation_fingerprint != memory_invalidation_reservation_fingerprint(
-            self
-        ):
-            raise ValueError("memory invalidation reservation fingerprint mismatch")
-
-
-def memory_invalidation_reservation_fingerprint(
-    reservation: MemorySourceInvalidationReservation,
-) -> str:
-    return context_fingerprint(
-        "pulsara:memory-source-invalidation-reservation:v1",
-        {
-            "source": reservation.source_kind.value,
-            "prior": (
-                reservation.prior_presence.value,
-                reservation.prior_semantic_fingerprint,
-            ),
-            "desired": (
-                reservation.desired_presence.value,
-                reservation.desired_semantic_fingerprint,
-            ),
-            "contract": reservation.source_contract_fingerprint,
-            "invalidation": (
-                reservation.invalidation_provider_item_ceiling,
-                reservation.invalidation_encoded_utf8_bytes_ceiling,
-                reservation.invalidation_input_token_ceiling,
-                reservation.invalidation_epoch_bytes_ceiling,
-            ),
-            "full": (
-                reservation.full_encoded_utf8_bytes,
-                reservation.full_input_token_cost,
-            ),
-            "estimator": reservation.estimator_fingerprint,
-        },
-    )
 
 
 def build_memory_source_invalidation_reservation(
@@ -974,32 +748,20 @@ def build_memory_source_invalidation_reservation(
     full_input_token_cost: int,
     estimator_fingerprint: str,
 ) -> MemorySourceInvalidationReservation:
-    values = {
-        "source_kind": source_kind,
-        "prior_presence": prior_presence,
-        "prior_semantic_fingerprint": prior_semantic_fingerprint,
-        "desired_presence": desired_presence,
-        "desired_semantic_fingerprint": desired_semantic_fingerprint,
-        "source_contract_fingerprint": source_contract_fingerprint,
-        "invalidation_provider_item_ceiling": 1,
-        "invalidation_encoded_utf8_bytes_ceiling": invalidation_encoded_utf8_bytes_ceiling,
-        "invalidation_input_token_ceiling": invalidation_input_token_ceiling,
-        "invalidation_epoch_bytes_ceiling": invalidation_epoch_bytes_ceiling,
-        "full_encoded_utf8_bytes": full_encoded_utf8_bytes,
-        "full_input_token_cost": full_input_token_cost,
-        "estimator_fingerprint": estimator_fingerprint,
-    }
-    provisional = MemorySourceInvalidationReservation.__new__(
-        MemorySourceInvalidationReservation
-    )
-    for name, value in values.items():
-        object.__setattr__(provisional, name, value)
-    object.__setattr__(provisional, "reservation_fingerprint", "")
     return MemorySourceInvalidationReservation(
-        **values,
-        reservation_fingerprint=memory_invalidation_reservation_fingerprint(
-            provisional
-        ),
+        source_kind=source_kind,
+        prior_presence=prior_presence,
+        prior_semantic_fingerprint=prior_semantic_fingerprint,
+        desired_presence=desired_presence,
+        desired_semantic_fingerprint=desired_semantic_fingerprint,
+        source_contract_fingerprint=source_contract_fingerprint,
+        invalidation_provider_item_ceiling=1,
+        invalidation_encoded_utf8_bytes_ceiling=invalidation_encoded_utf8_bytes_ceiling,
+        invalidation_input_token_ceiling=invalidation_input_token_ceiling,
+        invalidation_epoch_bytes_ceiling=invalidation_epoch_bytes_ceiling,
+        full_encoded_utf8_bytes=full_encoded_utf8_bytes,
+        full_input_token_cost=full_input_token_cost,
+        estimator_fingerprint=estimator_fingerprint,
     )
 
 
@@ -1013,64 +775,47 @@ class PreparedSteerSuffixAdmissionPlan:
     target_binding_fingerprint: str
     tool_surface_fingerprint: str
     source_facts_fingerprint: str
-    ordered_pending_queue_fingerprints: tuple[str, ...]
+    ordered_pending_queue_facts: tuple[PendingPromptSteerFact, ...]
     selected_consumption_candidates: tuple[PreparedSteerConsumptionCandidate, ...]
     quote: SteerSuffixAdmissionQuote
     prospective_compiled_input: FrozenCompiledModelInput = field(repr=False)
-    plan_fingerprint: str
 
     def __post_init__(self) -> None:
         if len(self.selected_consumption_candidates) != self.quote.selected_item_count:
             raise ValueError("steer plan candidate count differs from quote")
         selected = self.selected_consumption_candidates
-        if tuple(item.candidate_fingerprint for item in selected) != (
-            self.quote.selected_candidate_fingerprints
-        ):
-            raise ValueError("steer plan candidates differ from quote")
         sequences = tuple(item.queue_sequence for item in selected)
         if sequences != tuple(sorted(set(sequences))):
             raise ValueError("steer plan candidates are not FIFO")
-        if self.plan_fingerprint != prepared_steer_suffix_plan_fingerprint(self):
-            raise ValueError("steer plan fingerprint mismatch")
+        pending_sequences = tuple(
+            item.queue_sequence for item in self.ordered_pending_queue_facts
+        )
+        if pending_sequences != tuple(sorted(set(pending_sequences))):
+            raise ValueError("steer plan pending facts are not FIFO")
 
 
 @dataclass(frozen=True, slots=True)
 class PreparedSteerResourceRejection:
     session_id: str
-    source_plan_fingerprint: str
     workspace_id: str
     queue_item_id: str
     queue_sequence: int
     command_id: str
     exact_target_turn_id: str
     content: CanonicalContent = field(repr=False)
-    expected_pending_fact_fingerprint: str
     reason: str
     occurred_at: datetime
     actor_id: str
     prompt_rejected_occurrence: CommittedEventDraft
     turn_interrupted_occurrence: CommittedEventDraft
-    candidate_fingerprint: str
 
     def __post_init__(self) -> None:
         if (
             not self.session_id
             or self.queue_sequence < 1
             or self.reason != "STEER_INPUT_RESOURCE_EXHAUSTED"
-            or not self.expected_pending_fact_fingerprint.startswith("sha256:")
         ):
             raise ValueError("steer resource rejection is invalid")
-        expected_fact = build_pending_prompt_steer_fact(
-            session_id=self.session_id,
-            workspace_id=self.workspace_id,
-            queue_item_id=self.queue_item_id,
-            queue_sequence=self.queue_sequence,
-            command_id=self.command_id,
-            exact_target_turn_id=self.exact_target_turn_id,
-            content=self.content,
-        )
-        if expected_fact.fact_fingerprint != self.expected_pending_fact_fingerprint:
-            raise ValueError("steer resource rejection fact identity is invalid")
         if (
             self.prompt_rejected_occurrence.event_type
             is not CommittedEventType.PROMPT_REJECTED
@@ -1078,37 +823,10 @@ class PreparedSteerResourceRejection:
             is not CommittedEventType.TURN_INTERRUPTED
         ):
             raise ValueError("steer resource rejection occurrences are invalid")
-        if self.candidate_fingerprint != steer_resource_rejection_fingerprint(self):
-            raise ValueError("steer resource rejection fingerprint mismatch")
-
-
-def steer_resource_rejection_fingerprint(
-    candidate: PreparedSteerResourceRejection,
-) -> str:
-    return context_fingerprint(
-        "pulsara:prepared-steer-resource-rejection:v1",
-        {
-            "session_id": candidate.session_id,
-            "source_plan": candidate.source_plan_fingerprint,
-            "workspace_id": candidate.workspace_id,
-            "queue_item_id": candidate.queue_item_id,
-            "queue_sequence": candidate.queue_sequence,
-            "command_id": candidate.command_id,
-            "target_turn_id": candidate.exact_target_turn_id,
-            "content": _content_manifest(candidate.content),
-            "pending_fact": candidate.expected_pending_fact_fingerprint,
-            "reason": candidate.reason,
-            "occurred_at": candidate.occurred_at.isoformat(),
-            "actor_id": candidate.actor_id,
-            "prompt_rejected": _event_manifest(candidate.prompt_rejected_occurrence),
-            "turn_interrupted": _event_manifest(candidate.turn_interrupted_occurrence),
-        },
-    )
 
 
 def build_steer_resource_rejection(
     *,
-    source_plan_fingerprint: str,
     fact: PendingPromptSteerFact,
     occurred_at: datetime,
     actor_id: str,
@@ -1142,29 +860,19 @@ def build_steer_resource_rejection(
         occurred_at=occurred_at,
         payload={"reason": turn_reason},
     )
-    provisional = PreparedSteerResourceRejection.__new__(PreparedSteerResourceRejection)
-    values = {
-        "session_id": fact.session_id,
-        "source_plan_fingerprint": source_plan_fingerprint,
-        "workspace_id": fact.workspace_id,
-        "queue_item_id": fact.queue_item_id,
-        "queue_sequence": fact.queue_sequence,
-        "command_id": fact.command_id,
-        "exact_target_turn_id": fact.exact_target_turn_id,
-        "content": fact.content,
-        "expected_pending_fact_fingerprint": fact.fact_fingerprint,
-        "reason": reason,
-        "occurred_at": occurred_at,
-        "actor_id": actor_id,
-        "prompt_rejected_occurrence": prompt_event,
-        "turn_interrupted_occurrence": turn_event,
-    }
-    for name, value in values.items():
-        object.__setattr__(provisional, name, value)
-    object.__setattr__(provisional, "candidate_fingerprint", "")
     return PreparedSteerResourceRejection(
-        **values,
-        candidate_fingerprint=steer_resource_rejection_fingerprint(provisional),
+        session_id=fact.session_id,
+        workspace_id=fact.workspace_id,
+        queue_item_id=fact.queue_item_id,
+        queue_sequence=fact.queue_sequence,
+        command_id=fact.command_id,
+        exact_target_turn_id=fact.exact_target_turn_id,
+        content=fact.content,
+        reason=reason,
+        occurred_at=occurred_at,
+        actor_id=actor_id,
+        prompt_rejected_occurrence=prompt_event,
+        turn_interrupted_occurrence=turn_event,
     )
 
 
@@ -1187,7 +895,6 @@ class PreparedSteerPlanConflictInterruption:
     occurred_at: datetime
     actor_id: str
     turn_interrupted_occurrence: CommittedEventDraft
-    candidate_fingerprint: str
 
     def __post_init__(self) -> None:
         if not all(
@@ -1207,8 +914,6 @@ class PreparedSteerPlanConflictInterruption:
             or event.payload != {"reason": "PROVIDER_INPUT_PLAN_CONFLICT"}
         ):
             raise ValueError("steer plan-conflict interruption event is invalid")
-        if self.candidate_fingerprint != steer_plan_conflict_fingerprint(self):
-            raise ValueError("steer plan-conflict fingerprint mismatch")
 
 
 class SteerPlanConflictConfirmationKind(StrEnum):
@@ -1221,22 +926,6 @@ class SteerPlanConflictConfirmationKind(StrEnum):
 @dataclass(frozen=True, slots=True)
 class SteerPlanConflictConfirmation:
     kind: SteerPlanConflictConfirmationKind
-
-
-def steer_plan_conflict_fingerprint(
-    candidate: PreparedSteerPlanConflictInterruption,
-) -> str:
-    return context_fingerprint(
-        "pulsara:prepared-steer-plan-conflict-interruption:v1",
-        {
-            "session_id": candidate.session_id,
-            "target_turn_id": candidate.exact_target_turn_id,
-            "source_plan": candidate.source_plan_fingerprint,
-            "occurred_at": candidate.occurred_at.isoformat(),
-            "actor_id": candidate.actor_id,
-            "turn_interrupted": _event_manifest(candidate.turn_interrupted_occurrence),
-        },
-    )
 
 
 def build_steer_plan_conflict_interruption(
@@ -1264,23 +953,13 @@ def build_steer_plan_conflict_interruption(
         occurred_at=occurred_at,
         payload={"reason": reason},
     )
-    provisional = PreparedSteerPlanConflictInterruption.__new__(
-        PreparedSteerPlanConflictInterruption
-    )
-    values = {
-        "session_id": session_id,
-        "exact_target_turn_id": exact_target_turn_id,
-        "source_plan_fingerprint": source_plan_fingerprint,
-        "occurred_at": occurred_at,
-        "actor_id": actor_id,
-        "turn_interrupted_occurrence": event,
-    }
-    for name, value in values.items():
-        object.__setattr__(provisional, name, value)
-    object.__setattr__(provisional, "candidate_fingerprint", "")
     return PreparedSteerPlanConflictInterruption(
-        **values,
-        candidate_fingerprint=steer_plan_conflict_fingerprint(provisional),
+        session_id=session_id,
+        exact_target_turn_id=exact_target_turn_id,
+        source_plan_fingerprint=source_plan_fingerprint,
+        occurred_at=occurred_at,
+        actor_id=actor_id,
+        turn_interrupted_occurrence=event,
     )
 
 
@@ -1310,36 +989,155 @@ def build_steer_suffix_quote(
     ) = None,
 ) -> SteerSuffixAdmissionQuote:
     canonical_bytes = sum(item.content.size for item in candidates)
-    values = {
-        "selected_candidate_fingerprints": tuple(
-            item.candidate_fingerprint for item in candidates
-        ),
-        "selected_item_count": len(candidates),
-        "selected_canonical_utf8_bytes": canonical_bytes,
-        "prospective_snapshot_hydrated_bytes": prospective_snapshot_hydrated_bytes,
-        "resulting_epoch_logical_bytes": resulting_epoch_logical_bytes,
-        "resulting_target_estimate": resulting_target_estimate,
-        "effective_target_budget": effective_target_budget,
-        "estimator_fingerprint": estimator_fingerprint,
-        "predecessor_prefix_fingerprint": predecessor_prefix_fingerprint,
-        "memory_recall_reservation": memory_recall_reservation,
-        "memory_response_preference_reservation": (
+    return SteerSuffixAdmissionQuote(
+        selected_item_count=len(candidates),
+        selected_canonical_utf8_bytes=canonical_bytes,
+        prospective_snapshot_hydrated_bytes=prospective_snapshot_hydrated_bytes,
+        resulting_epoch_logical_bytes=resulting_epoch_logical_bytes,
+        resulting_target_estimate=resulting_target_estimate,
+        effective_target_budget=effective_target_budget,
+        estimator_fingerprint=estimator_fingerprint,
+        predecessor_prefix_fingerprint=predecessor_prefix_fingerprint,
+        memory_recall_reservation=memory_recall_reservation,
+        memory_response_preference_reservation=(
             memory_response_preference_reservation
         ),
-    }
-    provisional = SteerSuffixAdmissionQuote.__new__(SteerSuffixAdmissionQuote)
-    for name, value in values.items():
-        object.__setattr__(provisional, name, value)
-    object.__setattr__(provisional, "quote_fingerprint", "")
-    return SteerSuffixAdmissionQuote(
-        **values,
-        quote_fingerprint=steer_suffix_quote_fingerprint(provisional),
     )
 
 
-def prepared_steer_suffix_plan_fingerprint(
+def _legacy_pending_steer_identity(fact: PendingPromptSteerFact) -> str:
+    return context_fingerprint(
+        "pulsara:pending-prompt-steer-fact:v1",
+        {
+            "session_id": fact.session_id,
+            "workspace_id": fact.workspace_id,
+            "queue_item_id": fact.queue_item_id,
+            "queue_sequence": fact.queue_sequence,
+            "command_id": fact.command_id,
+            "target_turn_id": fact.exact_target_turn_id,
+            "content": _content_manifest(fact.content),
+        },
+    )
+
+
+def _legacy_steer_base_fence_identity(
+    fence: PreparedSteerCanonicalBaseFence,
+) -> str:
+    return context_fingerprint(
+        "pulsara:prepared-steer-canonical-base-fence:v1",
+        {
+            "session_id": fence.session_id,
+            "target_turn_id": fence.exact_target_turn_id,
+            "through_sequence": fence.provider_input_through_sequence,
+            "context_binding": fence.context_binding_fact.fact_fingerprint,
+            "run_permission": fence.run_permission_snapshot.snapshot_fingerprint,
+            "plan_workflow": (
+                None
+                if fence.plan_workflow_fact is None
+                else fence.plan_workflow_fact.fact_fingerprint
+            ),
+            "canonical_read_cut": fence.canonical_read_cut_fingerprint,
+        },
+    )
+
+
+def steer_consumption_candidate_identity_fingerprint(
+    candidate: PreparedSteerConsumptionCandidate,
+) -> str:
+    """Reproduce the pre-hard-cut stable identity at context/event ID boundaries."""
+
+    return context_fingerprint(
+        "pulsara:prepared-steer-consumption:v1",
+        {
+            "session_id": candidate.session_id,
+            "queue_item_id": candidate.queue_item_id,
+            "queue_sequence": candidate.queue_sequence,
+            "command_id": candidate.command_id,
+            "target_turn_id": candidate.exact_target_turn_id,
+            "content": _content_manifest(candidate.content),
+            "entry_id": candidate.new_entry_id,
+            "entry_sequence": candidate.expected_entry_sequence,
+            "predecessor": _predecessor_value(candidate.predecessor),
+            "canonical_base_fence": _legacy_steer_base_fence_identity(
+                candidate.canonical_base_fence
+            ),
+            "prompt_consumed": _event_manifest(candidate.prompt_consumed_occurrence),
+            "user_steer": _event_manifest(candidate.user_steer_accepted_occurrence),
+        },
+    )
+
+
+def _legacy_memory_reservation_identity(
+    reservation: MemorySourceInvalidationReservation,
+) -> str:
+    return context_fingerprint(
+        "pulsara:memory-source-invalidation-reservation:v1",
+        {
+            "source": reservation.source_kind.value,
+            "prior": (
+                reservation.prior_presence.value,
+                reservation.prior_semantic_fingerprint,
+            ),
+            "desired": (
+                reservation.desired_presence.value,
+                reservation.desired_semantic_fingerprint,
+            ),
+            "contract": reservation.source_contract_fingerprint,
+            "invalidation": (
+                reservation.invalidation_provider_item_ceiling,
+                reservation.invalidation_encoded_utf8_bytes_ceiling,
+                reservation.invalidation_input_token_ceiling,
+                reservation.invalidation_epoch_bytes_ceiling,
+            ),
+            "full": (
+                reservation.full_encoded_utf8_bytes,
+                reservation.full_input_token_cost,
+            ),
+            "estimator": reservation.estimator_fingerprint,
+        },
+    )
+
+
+def _legacy_steer_quote_identity(plan: PreparedSteerSuffixAdmissionPlan) -> str:
+    quote = plan.quote
+    return context_fingerprint(
+        "pulsara:steer-suffix-admission-quote:v1",
+        {
+            "candidates": tuple(
+                steer_consumption_candidate_identity_fingerprint(item)
+                for item in plan.selected_consumption_candidates
+            ),
+            "selected_items": quote.selected_item_count,
+            "selected_canonical_bytes": quote.selected_canonical_utf8_bytes,
+            "snapshot_bytes": quote.prospective_snapshot_hydrated_bytes,
+            "epoch_bytes": quote.resulting_epoch_logical_bytes,
+            "estimate": _estimate_value(quote.resulting_target_estimate),
+            "effective_budget": quote.effective_target_budget,
+            "estimator": quote.estimator_fingerprint,
+            "predecessor_prefix": quote.predecessor_prefix_fingerprint,
+            "memory_recall_reservation": (
+                None
+                if quote.memory_recall_reservation is None
+                else _legacy_memory_reservation_identity(
+                    quote.memory_recall_reservation
+                )
+            ),
+            "memory_response_preference_reservation": (
+                None
+                if quote.memory_response_preference_reservation is None
+                else _legacy_memory_reservation_identity(
+                    quote.memory_response_preference_reservation
+                )
+            ),
+        },
+    )
+
+
+def prepared_steer_suffix_plan_identity_fingerprint(
     plan: PreparedSteerSuffixAdmissionPlan,
 ) -> str:
+    """Reproduce the pre-hard-cut stable plan identity only at ID boundaries."""
+
     return context_fingerprint(
         "pulsara:prepared-steer-suffix-admission-plan:v1",
         {
@@ -1355,12 +1153,15 @@ def prepared_steer_suffix_plan_fingerprint(
             "target": plan.target_binding_fingerprint,
             "surface": plan.tool_surface_fingerprint,
             "sources": plan.source_facts_fingerprint,
-            "pending": plan.ordered_pending_queue_fingerprints,
+            "pending": tuple(
+                _legacy_pending_steer_identity(item)
+                for item in plan.ordered_pending_queue_facts
+            ),
             "selected": tuple(
-                item.candidate_fingerprint
+                steer_consumption_candidate_identity_fingerprint(item)
                 for item in plan.selected_consumption_candidates
             ),
-            "quote": plan.quote.quote_fingerprint,
+            "quote": _legacy_steer_quote_identity(plan),
             "compiled": plan.prospective_compiled_input.compiled_semantic_fingerprint,
         },
     )
@@ -1376,63 +1177,24 @@ def build_prepared_steer_suffix_plan(
     target_binding_fingerprint: str,
     tool_surface_fingerprint: str,
     source_facts_fingerprint: str,
-    ordered_pending_queue_fingerprints: tuple[str, ...],
+    ordered_pending_queue_facts: tuple[PendingPromptSteerFact, ...],
     selected_consumption_candidates: tuple[PreparedSteerConsumptionCandidate, ...],
     quote: SteerSuffixAdmissionQuote,
     prospective_compiled_input: FrozenCompiledModelInput,
 ) -> PreparedSteerSuffixAdmissionPlan:
-    provisional = PreparedSteerSuffixAdmissionPlan.__new__(
-        PreparedSteerSuffixAdmissionPlan
-    )
-    values = {
-        "scope": scope,
-        "predecessor": predecessor,
-        "base_cut_fingerprint": base_cut_fingerprint,
-        "base_canonical_frontier_fingerprint": base_canonical_frontier_fingerprint,
-        "base_compile_snapshot_fingerprint": base_compile_snapshot_fingerprint,
-        "target_binding_fingerprint": target_binding_fingerprint,
-        "tool_surface_fingerprint": tool_surface_fingerprint,
-        "source_facts_fingerprint": source_facts_fingerprint,
-        "ordered_pending_queue_fingerprints": ordered_pending_queue_fingerprints,
-        "selected_consumption_candidates": selected_consumption_candidates,
-        "quote": quote,
-        "prospective_compiled_input": prospective_compiled_input,
-    }
-    for name, value in values.items():
-        object.__setattr__(provisional, name, value)
-    object.__setattr__(provisional, "plan_fingerprint", "")
     return PreparedSteerSuffixAdmissionPlan(
-        **values,
-        plan_fingerprint=prepared_steer_suffix_plan_fingerprint(provisional),
-    )
-
-
-def accepted_steer_dispatch_batch_fingerprint(
-    batch: AcceptedSteerDispatchBatch,
-) -> str:
-    return context_fingerprint(
-        "pulsara:accepted-steer-dispatch-batch:v1",
-        {
-            "session_id": batch.session_id,
-            "target_turn_id": batch.target_turn_id,
-            "canonical_bytes": batch.canonical_utf8_bytes,
-            "epoch_bytes": batch.resulting_epoch_logical_bytes,
-            "entries": tuple(
-                (
-                    item.queue_item_id,
-                    item.queue_sequence,
-                    item.entry_id,
-                    item.entry_sequence,
-                    item.content_digest,
-                    item.content_size,
-                    item.prompt_consumed_event_id,
-                    item.prompt_consumed_event_sequence,
-                    item.user_steer_event_id,
-                    item.user_steer_event_sequence,
-                )
-                for item in batch.entries
-            ),
-        },
+        scope=scope,
+        predecessor=predecessor,
+        base_cut_fingerprint=base_cut_fingerprint,
+        base_canonical_frontier_fingerprint=base_canonical_frontier_fingerprint,
+        base_compile_snapshot_fingerprint=base_compile_snapshot_fingerprint,
+        target_binding_fingerprint=target_binding_fingerprint,
+        tool_surface_fingerprint=tool_surface_fingerprint,
+        source_facts_fingerprint=source_facts_fingerprint,
+        ordered_pending_queue_facts=ordered_pending_queue_facts,
+        selected_consumption_candidates=selected_consumption_candidates,
+        quote=quote,
+        prospective_compiled_input=prospective_compiled_input,
     )
 
 
@@ -1444,23 +1206,12 @@ def build_accepted_steer_dispatch_batch(
     canonical_utf8_bytes: int,
     resulting_epoch_logical_bytes: int,
 ) -> AcceptedSteerDispatchBatch:
-    provisional = AcceptedSteerDispatchBatch.__new__(AcceptedSteerDispatchBatch)
-    for name, value in {
-        "session_id": session_id,
-        "target_turn_id": target_turn_id,
-        "entries": entries,
-        "canonical_utf8_bytes": canonical_utf8_bytes,
-        "resulting_epoch_logical_bytes": resulting_epoch_logical_bytes,
-    }.items():
-        object.__setattr__(provisional, name, value)
-    object.__setattr__(provisional, "batch_fingerprint", "")
     return AcceptedSteerDispatchBatch(
         session_id=session_id,
         target_turn_id=target_turn_id,
         entries=entries,
         canonical_utf8_bytes=canonical_utf8_bytes,
         resulting_epoch_logical_bytes=resulting_epoch_logical_bytes,
-        batch_fingerprint=accepted_steer_dispatch_batch_fingerprint(provisional),
     )
 
 
@@ -1503,11 +1254,6 @@ __all__ = [
     "build_steer_resource_rejection",
     "build_steer_suffix_quote",
     "build_memory_source_invalidation_reservation",
-    "memory_invalidation_reservation_fingerprint",
-    "pending_prompt_steer_fact_fingerprint",
-    "steer_consumption_candidate_fingerprint",
-    "steer_canonical_base_fence_fingerprint",
-    "steer_plan_conflict_fingerprint",
-    "steer_resource_rejection_fingerprint",
-    "steer_suffix_quote_fingerprint",
+    "prepared_steer_suffix_plan_identity_fingerprint",
+    "steer_consumption_candidate_identity_fingerprint",
 ]

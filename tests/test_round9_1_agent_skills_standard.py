@@ -99,9 +99,9 @@ def test_round9_1_root_policy_is_exactly_two_or_four_and_scope_bound(
     assert child.scope_subagent_task_id == "task:child-a"
     with pytest.raises(ValueError, match="foreign Skill root policy"):
         enabled.discover(child)
-    with pytest.raises(ValueError, match="fingerprint"):
+    with pytest.raises(TypeError, match="_constructor"):
         replace(child, scope_subagent_task_id="task:child-b")
-    with pytest.raises(ValueError, match="fingerprint"):
+    with pytest.raises(TypeError, match="_constructor"):
         replace(child.roots[0], path=tmp_path / "swapped")
 
 

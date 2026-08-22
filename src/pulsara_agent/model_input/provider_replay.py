@@ -24,6 +24,7 @@ from pulsara_agent.model_input.contracts import (
     FrozenCanonicalCompileSnapshot,
     FrozenCompiledModelInput,
     FrozenCompiledMessagePlacement,
+    compiled_message_placement_identity_fingerprint,
 )
 from pulsara_agent.model_input.continuity import ProviderInputContinuityScope
 from pulsara_agent.primitives.bounded_json import bounded_json_loads
@@ -335,7 +336,10 @@ def selected_message_placements_fingerprint(
 ) -> str:
     return context_fingerprint(
         "pulsara.selected-provider-replay-message-placements:v1",
-        tuple(item.placement_fingerprint for item in placements),
+        tuple(
+            compiled_message_placement_identity_fingerprint(item)
+            for item in placements
+        ),
     )
 
 

@@ -12,7 +12,6 @@ from enum import StrEnum
 import unicodedata
 
 from pulsara_agent.ports.tool_execution import ToolCall, ToolExecutionResult
-from pulsara_agent.primitives.context import context_fingerprint
 from pulsara_agent.primitives.todo import (
     MAXIMUM_TODO_CANONICAL_JSON_BYTES,
     MAXIMUM_TODO_ITEMS,
@@ -37,15 +36,12 @@ class FrozenTodoItem:
     ordinal: int
     text: str
     status: TodoStatus
-    item_fingerprint: str
 
     def __post_init__(self) -> None:
         if self.ordinal < 0 or not self.text:
             raise ValueError("frozen TODO item is invalid")
         if not isinstance(self.status, TodoStatus):
             raise TypeError("TODO status must be closed")
-        if not self.item_fingerprint.startswith("sha256:"):
-            raise ValueError("TODO item fingerprint is invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,7 +51,6 @@ class FrozenTodoCandidate:
     in_progress_count: int
     completed_count: int
     canonical_json_utf8_bytes: int
-    candidate_fingerprint: str
 
     def __post_init__(self) -> None:
         if (
@@ -65,7 +60,6 @@ class FrozenTodoCandidate:
             or not 0
             <= self.canonical_json_utf8_bytes
             <= MAXIMUM_TODO_CANONICAL_JSON_BYTES
-            or not self.candidate_fingerprint.startswith("sha256:")
         ):
             raise ValueError("frozen TODO candidate is invalid")
 
@@ -109,10 +103,6 @@ def parse_todo_replacement(arguments: Mapping[str, object]) -> FrozenTodoCandida
                 ordinal=ordinal,
                 text=text,
                 status=status,
-                item_fingerprint=context_fingerprint(
-                    "pulsara:todo-item:v1",
-                    {"ordinal": ordinal, "text": text, "status": status.value},
-                ),
             )
         )
     if counts[TodoStatus.IN_PROGRESS] > 1:
@@ -128,15 +118,6 @@ def parse_todo_replacement(arguments: Mapping[str, object]) -> FrozenTodoCandida
         in_progress_count=counts[TodoStatus.IN_PROGRESS],
         completed_count=counts[TodoStatus.COMPLETED],
         canonical_json_utf8_bytes=size,
-        candidate_fingerprint=context_fingerprint(
-            "pulsara:todo-replacement:v1",
-            {
-                "items": tuple(
-                    {"text": item.text, "status": item.status.value}
-                    for item in frozen
-                )
-            },
-        ),
     )
 
 

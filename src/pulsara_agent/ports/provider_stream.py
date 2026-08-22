@@ -11,7 +11,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-from hashlib import sha256
 from typing import TYPE_CHECKING, AsyncIterator, Protocol, TypeAlias
 
 from pulsara_agent.llm.provider import ProviderAssistantReplayCodecKind
@@ -21,10 +20,7 @@ from pulsara_agent.llm.provider_replay import (
 )
 from pulsara_agent.llm.result import TransportUsageReport
 from pulsara_agent.ports.live_agent_event import ProviderStreamPayload
-from pulsara_agent.primitives.context import (
-    FrozenJsonObjectFact,
-    context_fingerprint,
-)
+from pulsara_agent.primitives.context import FrozenJsonObjectFact
 from pulsara_agent.primitives.model_call import (
     ProviderRetrySummaryFact,
     ProviderSanitizedErrorFact,
@@ -68,7 +64,6 @@ class ProviderAdapterCompletedReplayPayload:
     ordered_items: tuple[FrozenJsonObjectFact, ...] = field(repr=False)
     payload_bytes: bytes = field(repr=False)
     logical_utf8_bytes: int
-    local_fingerprint: str
 
     def __post_init__(self) -> None:
         if self.codec_kind is ProviderAssistantReplayCodecKind.NONE:
@@ -83,16 +78,6 @@ class ProviderAdapterCompletedReplayPayload:
             or logical > MAXIMUM_PROVIDER_REPLAY_PAYLOAD_BYTES
         ):
             raise ValueError("completed replay payload size is invalid")
-        expected = context_fingerprint(
-            "pulsara.provider-adapter-completed-replay:v1",
-            {
-                "codec": self.codec_kind.value,
-                "payload_digest": "sha256:" + sha256(payload_bytes).hexdigest(),
-                "bytes": logical,
-            },
-        )
-        if self.local_fingerprint != expected:
-            raise ValueError("completed replay payload fingerprint mismatch")
 
 
 def freeze_provider_adapter_completed_replay_payload(
@@ -102,20 +87,11 @@ def freeze_provider_adapter_completed_replay_payload(
 ) -> ProviderAdapterCompletedReplayPayload:
     payload_bytes = provider_replay_payload_bytes(ordered_items)
     logical = len(payload_bytes)
-    fingerprint = context_fingerprint(
-        "pulsara.provider-adapter-completed-replay:v1",
-        {
-            "codec": codec_kind.value,
-            "payload_digest": "sha256:" + sha256(payload_bytes).hexdigest(),
-            "bytes": logical,
-        },
-    )
     return ProviderAdapterCompletedReplayPayload(
         codec_kind=codec_kind,
         ordered_items=ordered_items,
         payload_bytes=payload_bytes,
         logical_utf8_bytes=logical,
-        local_fingerprint=fingerprint,
     )
 
 

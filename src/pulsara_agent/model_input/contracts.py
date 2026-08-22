@@ -1929,25 +1929,27 @@ class FrozenCompiledMessagePlacement:
     origin_item_fingerprint: str
     within_origin_ordinal: int
     role: MessageRole
-    placement_fingerprint: str
 
     def __post_init__(self) -> None:
         if self.message_ordinal < 0 or self.within_origin_ordinal < 0:
             raise ValueError("compiled message placement ordinal is invalid")
         if not self.origin_item_fingerprint.startswith(SHA256_PREFIX):
             raise ValueError("compiled message origin fingerprint is invalid")
-        expected = context_fingerprint(
-            "pulsara.compiled-message-placement:v1",
-            {
-                "ordinal": self.message_ordinal,
-                "entry": self.origin_entry_id,
-                "item": self.origin_item_fingerprint,
-                "within": self.within_origin_ordinal,
-                "role": self.role.value,
-            },
-        )
-        if self.placement_fingerprint != expected:
-            raise ValueError("compiled message placement fingerprint mismatch")
+
+
+def compiled_message_placement_identity_fingerprint(
+    placement: FrozenCompiledMessagePlacement,
+) -> str:
+    return context_fingerprint(
+        "pulsara.compiled-message-placement:v1",
+        {
+            "ordinal": placement.message_ordinal,
+            "entry": placement.origin_entry_id,
+            "item": placement.origin_item_fingerprint,
+            "within": placement.within_origin_ordinal,
+            "role": placement.role.value,
+        },
+    )
 
 
 def compiled_message_placements_fingerprint(
@@ -1955,7 +1957,7 @@ def compiled_message_placements_fingerprint(
 ) -> str:
     return context_fingerprint(
         "pulsara.compiled-message-placements:v1",
-        tuple(item.placement_fingerprint for item in placements),
+        tuple(compiled_message_placement_identity_fingerprint(item) for item in placements),
     )
 
 
@@ -1968,7 +1970,6 @@ class FrozenCompiledModelInput:
     message_placements: tuple[FrozenCompiledMessagePlacement, ...] = field(
         repr=False
     )
-    message_placements_fingerprint: str
     tools: tuple[FrozenToolSpec, ...] = field(repr=False)
     final_estimate: TokenEstimate
     source_decisions: tuple[CompiledSourceDecision, ...]
@@ -2012,10 +2013,6 @@ class FrozenCompiledModelInput:
             )
         ):
             raise ValueError("compiled message placement role drifted")
-        if self.message_placements_fingerprint != (
-            compiled_message_placements_fingerprint(self.message_placements)
-        ):
-            raise ValueError("compiled message placements fingerprint mismatch")
         if (
             len(self.tool_result_decisions)
             > STRUCTURED_MODEL_INPUT_LIMITS.maximum_tool_result_decisions
@@ -2172,7 +2169,6 @@ class RuntimeTemporalCapture:
     local_date: date
     timezone_name: str
     utc_offset_minutes: int
-    capture_fingerprint: str
 
     def __post_init__(self) -> None:
         if (
@@ -2183,17 +2179,6 @@ class RuntimeTemporalCapture:
             or not -1_440 < self.utc_offset_minutes < 1_440
         ):
             raise ValueError("runtime temporal capture is invalid")
-        expected = context_fingerprint(
-            "runtime-temporal-capture:v1",
-            {
-                "observed_at_utc": self.observed_at_utc.isoformat(),
-                "local_date": self.local_date.isoformat(),
-                "timezone_name": self.timezone_name,
-                "utc_offset_minutes": self.utc_offset_minutes,
-            },
-        )
-        if self.capture_fingerprint != expected:
-            raise ValueError("runtime temporal capture fingerprint mismatch")
 
 
 @dataclass(frozen=True, slots=True)
@@ -2203,7 +2188,6 @@ class RuntimeEnvironmentSnapshot:
     terminal_current_cwd: str
     timezone_name: str
     utc_offset_minutes: int | None
-    snapshot_fingerprint: str
 
     def __post_init__(self) -> None:
         if (
@@ -2217,18 +2201,6 @@ class RuntimeEnvironmentSnapshot:
             )
         ):
             raise ValueError("runtime environment snapshot is invalid")
-        expected = context_fingerprint(
-            "runtime-environment-snapshot:v1",
-            {
-                "workspace_kind": self.workspace_kind,
-                "workspace_root": self.workspace_root,
-                "terminal_current_cwd": self.terminal_current_cwd,
-                "timezone_name": self.timezone_name,
-                "utc_offset_minutes": self.utc_offset_minutes,
-            },
-        )
-        if self.snapshot_fingerprint != expected:
-            raise ValueError("runtime environment snapshot fingerprint mismatch")
 
 
 @dataclass(frozen=True, slots=True)
@@ -2237,7 +2209,6 @@ class RuntimeClockSnapshot:
     local_date: date
     timezone_name: str
     utc_offset_minutes: int
-    temporal_capture_fingerprint: str
 
     def __post_init__(self) -> None:
         if (
@@ -2248,17 +2219,6 @@ class RuntimeClockSnapshot:
             or not -1_440 < self.utc_offset_minutes < 1_440
         ):
             raise ValueError("runtime clock snapshot is invalid")
-        expected = context_fingerprint(
-            "runtime-temporal-capture:v1",
-            {
-                "observed_at_utc": self.observed_at_utc.isoformat(),
-                "local_date": self.local_date.isoformat(),
-                "timezone_name": self.timezone_name,
-                "utc_offset_minutes": self.utc_offset_minutes,
-            },
-        )
-        if self.temporal_capture_fingerprint != expected:
-            raise ValueError("runtime clock temporal capture does not exact-join")
 
 
 __all__ = [name for name in globals() if not name.startswith("_")]

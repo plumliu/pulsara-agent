@@ -10,7 +10,6 @@ from pulsara_agent.llm.retry import LLMRetryConfig, LLMRetryDecision, RetryAttem
 from pulsara_agent.primitives.model_call import (
     ProviderRetryAttemptSummaryFact,
     ProviderRetrySummaryFact,
-    sha256_fingerprint,
 )
 
 
@@ -100,39 +99,7 @@ def build_provider_retry_summary(
             "retry_after_millis": _seconds_to_millis(trace.retry_after_seconds),
             "retry_after_exceeded": trace.retry_after_exceeded,
         }
-        provisional = ProviderRetryAttemptSummaryFact.model_construct(
-            **payload, attempt_fingerprint="pending"
-        )
-        canonical = provisional.model_dump(mode="json", exclude={"attempt_fingerprint"})
-        attempts.append(
-            ProviderRetryAttemptSummaryFact(
-                **canonical,
-                attempt_fingerprint=sha256_fingerprint(
-                    "provider-retry-attempt-summary:v1", canonical
-                ),
-            )
-        )
-    contract_fingerprint = sha256_fingerprint(
-        "provider-retry-summary-contract:v1",
-        {
-            "max_attempts": 32,
-            "fields": (
-                "attempt",
-                "reason",
-                "status_code",
-                "delay_millis",
-                "retry_after_millis",
-                "retry_after_exceeded",
-            ),
-            "excluded": (
-                "exception_message",
-                "exception_repr",
-                "provider_data",
-                "url",
-                "secret",
-            ),
-        },
-    )
+        attempts.append(ProviderRetryAttemptSummaryFact(**payload))
     payload = {
         "enabled": config.enabled,
         "final_attempt": final_attempt,
@@ -145,16 +112,8 @@ def build_provider_retry_summary(
         "final_status_code": final_decision.status_code,
         "retry_after_exceeded": final_decision.retry_after_exceeded,
         "attempts": tuple(attempts),
-        "summary_contract_fingerprint": contract_fingerprint,
     }
-    provisional = ProviderRetrySummaryFact.model_construct(
-        **payload, summary_fingerprint="pending"
-    )
-    canonical = provisional.model_dump(mode="json", exclude={"summary_fingerprint"})
-    return ProviderRetrySummaryFact(
-        **canonical,
-        summary_fingerprint=sha256_fingerprint("provider-retry-summary:v1", canonical),
-    )
+    return ProviderRetrySummaryFact(**payload)
 
 
 def provider_failure_code_hint(decision: LLMRetryDecision) -> str:

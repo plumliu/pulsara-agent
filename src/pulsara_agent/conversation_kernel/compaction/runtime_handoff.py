@@ -75,7 +75,6 @@ class FrozenRootSubagentTaskBoardHandoffFact:
     dependency_remaining: int
     pending_message_count: int
     accepted_at: datetime
-    fact_fingerprint: str
 
     def __post_init__(self) -> None:
         if (
@@ -94,22 +93,6 @@ class FrozenRootSubagentTaskBoardHandoffFact:
                 raise ValueError("subagent task-board display identity is too large")
         if self.objective_preview is not None:
             _require_text_bound(self.objective_preview)
-        expected = context_fingerprint(
-            "pulsara.root-subagent-task-board-handoff-fact.v1",
-            {
-                "task_id": self.task_id,
-                "task_key": self.task_key,
-                "label": self.label,
-                "objective_preview": self.objective_preview,
-                "status": self.status,
-                "dependency_total": self.dependency_total,
-                "dependency_remaining": self.dependency_remaining,
-                "pending_message_count": self.pending_message_count,
-                "accepted_at": self.accepted_at.isoformat(),
-            },
-        )
-        if self.fact_fingerprint != expected:
-            raise ValueError("subagent task-board handoff fingerprint mismatch")
 
 
 def freeze_subagent_task_board_fact(
@@ -124,17 +107,6 @@ def freeze_subagent_task_board_fact(
     pending_message_count: int,
     accepted_at: datetime,
 ) -> FrozenRootSubagentTaskBoardHandoffFact:
-    payload = {
-        "task_id": task_id,
-        "task_key": task_key,
-        "label": label,
-        "objective_preview": objective_preview,
-        "status": status,
-        "dependency_total": dependency_total,
-        "dependency_remaining": dependency_remaining,
-        "pending_message_count": pending_message_count,
-        "accepted_at": accepted_at.isoformat(),
-    }
     return FrozenRootSubagentTaskBoardHandoffFact(
         task_id=task_id,
         task_key=task_key,
@@ -145,9 +117,6 @@ def freeze_subagent_task_board_fact(
         dependency_remaining=dependency_remaining,
         pending_message_count=pending_message_count,
         accepted_at=accepted_at,
-        fact_fingerprint=context_fingerprint(
-            "pulsara.root-subagent-task-board-handoff-fact.v1", payload
-        ),
     )
 
 

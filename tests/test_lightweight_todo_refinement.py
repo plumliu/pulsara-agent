@@ -70,7 +70,6 @@ def _root_activation(turn: str = "turn:1"):
         exact_turn_id=turn,
         exact_initial_entry_id=f"entry:{turn}",
         exact_context_binding_revision_id=f"context:{turn}",
-        exact_admission_candidate_fingerprint="sha256:" + "a" * 64,
     )
 
 
@@ -214,7 +213,6 @@ def test_todo_owner_isolates_root_children_and_freezes_handoff() -> None:
         exact_turn_id="turn:child",
         exact_initial_entry_id="entry:child",
         exact_context_binding_revision_id="context:child",
-        exact_admission_candidate_fingerprint="sha256:" + "b" * 64,
     )
     owner.activate_child_run(child)
     assert (
@@ -280,7 +278,6 @@ def test_todo_next_root_activation_closes_old_exact_run() -> None:
                 exact_turn_id="turn:premature",
                 exact_initial_entry_id="entry:premature",
                 exact_context_binding_revision_id="context:premature",
-                exact_admission_candidate_fingerprint="sha256:" + "d" * 64,
             )
         )
     owner.mark_root_idle(exact_turn_id="turn:1")
@@ -293,7 +290,6 @@ def test_todo_next_root_activation_closes_old_exact_run() -> None:
             exact_turn_id="turn:2",
             exact_initial_entry_id="entry:2",
             exact_context_binding_revision_id="context:2",
-            exact_admission_candidate_fingerprint="sha256:" + "c" * 64,
         )
     )
     assert closed.last_turn_id == "turn:1"

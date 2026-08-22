@@ -9,9 +9,10 @@ import hashlib
 import hmac
 import secrets
 from threading import RLock
+from uuid import uuid4
 
 from pulsara_agent.model_input.contracts import ModelInputScopeKind
-from pulsara_agent.primitives.context import canonical_json_bytes, context_fingerprint
+from pulsara_agent.primitives.context import canonical_json_bytes
 
 
 MAXIMUM_LIVE_NEW_MCP_TOOL_REFS_PER_EPOCH = 1_024
@@ -38,7 +39,6 @@ class NewMcpToolRef:
     mcp_execution_policy_fingerprint: str
     tool_route_fingerprint: str
     issued_by_host_authority: object = field(repr=False, compare=False)
-    ref_fingerprint: str = ""
 
     def __post_init__(self) -> None:
         if (self.conversation_scope_kind is ModelInputScopeKind.ROOT) != (
@@ -63,7 +63,6 @@ class NewMcpToolRef:
 @dataclass(frozen=True, slots=True)
 class PreparedNewMcpToolRefSettlement:
     settlement_token_id: str
-    settlement_token_fingerprint: str
     result_entry_id: str
     ref: NewMcpToolRef
 
@@ -81,7 +80,6 @@ class ProcessLocalNewMcpToolRefOwner:
     def __init__(self) -> None:
         self._lock = RLock()
         self._authority = object()
-        self._authority_nonce = secrets.token_hex(16)
         self._secret = secrets.token_bytes(32)
         self._refs: dict[str, _RefRecord] = {}
         self._prepared: dict[str, PreparedNewMcpToolRefSettlement] = {}
@@ -114,10 +112,6 @@ class ProcessLocalNewMcpToolRefOwner:
             hashlib.sha256,
         ).digest()
         token = "mcpref_" + base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
-        ref_fingerprint = context_fingerprint(
-            "new-mcp-tool-ref:v1",
-            {**semantic, "host_authority": self._authority_nonce},
-        )
         ref = NewMcpToolRef(
             opaque_token=token,
             conversation_scope_kind=conversation_scope_kind,
@@ -128,23 +122,10 @@ class ProcessLocalNewMcpToolRefOwner:
             mcp_execution_policy_fingerprint=mcp_execution_policy_fingerprint,
             tool_route_fingerprint=tool_route_fingerprint,
             issued_by_host_authority=self._authority,
-            ref_fingerprint=ref_fingerprint,
         )
-        settlement_id = "mcp-ref-settlement:" + context_fingerprint(
-            "new-mcp-ref-result-settlement-id:v1",
-            (result_entry_id, ref_fingerprint),
-        )[7:]
-        settlement_fingerprint = context_fingerprint(
-            "new-mcp-ref-result-settlement:v1",
-            {
-                "settlement_id": settlement_id,
-                "result_entry_id": result_entry_id,
-                "ref": ref_fingerprint,
-            },
-        )
+        settlement_id = f"mcp-ref-settlement:{uuid4().hex}"
         prepared = PreparedNewMcpToolRefSettlement(
             settlement_token_id=settlement_id,
-            settlement_token_fingerprint=settlement_fingerprint,
             result_entry_id=result_entry_id,
             ref=ref,
         )
@@ -168,7 +149,7 @@ class ProcessLocalNewMcpToolRefOwner:
                     state=NewMcpToolRefState.PREPARED,
                     committed_result_entry_ids=set(),
                 )
-            elif record.ref.ref_fingerprint != ref.ref_fingerprint:
+            elif record.ref != ref:
                 raise RuntimeError("new MCP ref token collision")
             existing = self._prepared.get(settlement_id)
             if existing is not None and existing != prepared:
@@ -179,23 +160,19 @@ class ProcessLocalNewMcpToolRefOwner:
     def settle(
         self,
         *,
-        settlement_token_id: str,
-        settlement_token_fingerprint: str,
+        prepared: PreparedNewMcpToolRefSettlement,
         committed: bool,
     ) -> None:
         with self._lock:
-            prepared = self._prepared.pop(settlement_token_id, None)
-            if prepared is None:
+            retained = self._prepared.pop(prepared.settlement_token_id, None)
+            if retained is None:
                 if committed:
                     raise RuntimeError("committed MCP ref settlement is absent")
                 return
-            if (
-                prepared.settlement_token_fingerprint
-                != settlement_token_fingerprint
-            ):
+            if retained is not prepared:
                 raise RuntimeError("MCP ref settlement token conflicts")
             record = self._refs.get(prepared.ref.opaque_token)
-            if record is None or record.ref.ref_fingerprint != prepared.ref.ref_fingerprint:
+            if record is None or record.ref != prepared.ref:
                 raise RuntimeError("MCP ref record is absent")
             if committed:
                 record.committed_result_entry_ids.add(prepared.result_entry_id)

@@ -2094,7 +2094,6 @@ def test_round3_1_resource_rejection_is_atomic_and_exactly_confirmable(
         deadline_monotonic=deadline,
     )[0]
     candidate = build_steer_resource_rejection(
-        source_plan_fingerprint="sha256:" + "1" * 64,
         fact=fact,
         occurred_at=datetime.now(timezone.utc),
         actor_id=lease.guard.writer_owner_id,

@@ -26,7 +26,6 @@ from pulsara_agent.ports.live_agent_event import (
 )
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.model_input.continuity import ProcessLocalProviderInputInstallPermit
-from pulsara_agent.primitives.context import context_fingerprint
 from pulsara_agent.primitives.plan_workflow import (
     PlanDraftDecision,
     PlanQuestionAnswerKind,
@@ -44,18 +43,12 @@ _PLAN_SENTINEL = "ROUND4_APPROVED_PLAN_SENTINEL"
 
 
 class _PreparedTestExecution:
-    def __init__(self, owner, request, candidate: str) -> None:
+    def __init__(self, owner, request, candidate, install_authority) -> None:
         self._owner = owner
         self._request = request
         self._candidate = candidate
+        self._install_authority = install_authority
         self._opened = False
-        self.execution_fingerprint = context_fingerprint(
-            "test:round4-prepared-execution:v1",
-            {
-                "candidate": candidate,
-                "compiled": request.compiled_input.compiled_semantic_fingerprint,
-            },
-        )
         self._completion = None
 
     def discard(self) -> None:
@@ -67,10 +60,16 @@ class _PreparedTestExecution:
         if self._opened:
             raise RuntimeError("test execution already opened")
         if (
-            permit.candidate_fingerprint != self._candidate
-            or permit.execution_fingerprint != self.execution_fingerprint
+            permit.epoch_nonce != self._candidate.epoch_nonce
+            or permit.epoch_revision
+            != self._candidate.expected_epoch_revision + 1
         ):
             raise RuntimeError("test execution permit mismatch")
+        self._install_authority.consume(
+            permit,
+            candidate=self._candidate,
+            execution=self,
+        )
         self._opened = True
         async for item in self._owner.stream(self._request):
             yield item
@@ -104,12 +103,11 @@ class _PreflightModel:
         self,
         request,
         *,
-        expected_append_candidate_fingerprint: str,
+        append_candidate,
         install_authority,
     ) -> _PreparedTestExecution:
-        del install_authority
         return _PreparedTestExecution(
-            self, request, expected_append_candidate_fingerprint
+            self, request, append_candidate, install_authority
         )
 
 

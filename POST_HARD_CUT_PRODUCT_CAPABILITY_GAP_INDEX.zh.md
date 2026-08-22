@@ -1,14 +1,16 @@
 # Pulsara hard-cut 后产品能力缺失索引
 
-> 状态：WORKING GAP INDEX（产品能力事实索引，不是恢复设计；PHC-02 已通过 Round 1 恢复，PHC-01/03/04/05/06 已通过 Round 2 恢复；PHC-17 的typed compiler与同Host prefix continuity已通过 Round 3 / 3.1完整恢复；PHC-09 的 Python Runtime/Host、canonical/Protocol 后端已通过 Round 4 恢复；bundled Go/TUI已在2026-08-20明确退役并物理删除，只保留renderer-neutral Protocol v3供未来Web/Desktop client使用；PHC-07A execution envelope与PHC-07B context compaction已通过Round 5A/5B恢复，Round 5A.1已闭合provider-neutral terminal、whole-response atomicity与same-epoch reasoning replay，Round 5A.2已恢复已接受线程的exact Chat/Responses native replay跨Host/进程重启；Round 7.1已闭合全局provider-visible ToolResult与FULL-delivery边界；Round 9/9.1已激活统一capability registry、MCP cold direct/late-or-incompatible meta与Agent Skills aggregate source；PHC-10已通过Round 10恢复ROOT编排的worker task graph；memory专项已按 Round 8 advisory 边界重构并激活）
+> 状态：WORKING GAP INDEX（产品能力事实索引，不是恢复设计；PHC-02 已通过 Round 1 恢复，PHC-01/03/04/05/06 已通过 Round 2 恢复；PHC-17 的typed compiler与同Host prefix continuity已通过 Round 3 / 3.1完整恢复；PHC-09 的 Python Runtime/Host、canonical/Protocol 后端已通过 Round 4 恢复；bundled Go/TUI已在2026-08-20明确退役并物理删除，只保留renderer-neutral Protocol v3供未来Web/Desktop client使用；PHC-07A execution envelope与PHC-07B context compaction已通过Round 5A/5B恢复，Round 5A.1已闭合provider-neutral terminal、whole-response atomicity与same-epoch reasoning replay，Round 5A.2已恢复已接受线程的exact Chat/Responses native replay跨Host/进程重启；Round 7.1已闭合全局provider-visible ToolResult与FULL-delivery边界；Round 9/9.1已激活统一capability registry、MCP cold direct/late-or-incompatible meta与Agent Skills aggregate source；PHC-10已通过Round 10恢复ROOT编排的worker task graph；memory专项已按 Round 8 advisory 边界重构并激活；fingerprint subtraction hard-cut已删除非边界same-process proof graph与activation文件SHA门禁，不改变任何产品能力）
 >
-> 初始调研：2026-08-10；最近复核：2026-08-21（Round 10 activation）
+> 初始调研：2026-08-10；最近复核：2026-08-22（fingerprint subtraction hard-cut）
 >
 > hard-cut 前代码基线：`5b7ad9f7`
 >
 > frontend删除前checkpoint HEAD：`a3131c5b636fb3a354c5770ca70409b974eb4095`（已推送`origin/main`）；当前client边界见[`PULSARA_RENDERER_NEUTRAL_CLIENT_BOUNDARY_IMPLEMENTATION.zh.md`](PULSARA_RENDERER_NEUTRAL_CLIENT_BOUNDARY_IMPLEMENTATION.zh.md)
 >
 > 范围：Python Agent Runtime / Host及其直接产品能力；仓库不再包含bundled TUI。未来Web/Desktop client复用Protocol v3，但不属于当前Runtime恢复主线。Round 3.1只例外纳入既有Protocol上的busy-steer/queue-next-turn窄输入绑定，因为它直接决定provider-input causal suffix
+>
+> Fingerprint政策：[`PULSARA_FINGERPRINT_SUBTRACTION_HARD_CUT_IMPLEMENTATION_SPEC.zh.md`](PULSARA_FINGERPRINT_SUBTRACTION_HARD_CUT_IMPLEMENTATION_SPEC.zh.md)已取代旧规格中的same-process self/aggregate fingerprint proof与逐文件activation SHA门禁；机器证据见[`fingerprint_subtraction_hard_cut_activation.json`](benchmarks/suites/core/v1/fingerprint_subtraction_hard_cut_activation.json)。内容完整性、durable confirmation、provider prefix/replay、canonical stable identity与MAC边界digest继续有效。
 >
 > 明确排除：旧memory durability/recovery系统、Oxigraph/SPARQL、旧 EventLog execution replay、coroutine/provider transport recovery、exact context-input audit、跨Host provider-input generation/prefix accumulator恢复、跨 Host terminal/subagent execution 恢复、Legacy Python REPL兼容恢复、standalone Canonical Inspector产品
 

@@ -333,7 +333,6 @@ def test_round10_last_n_uses_exact_units_and_none_remains_absent() -> None:
     )
     assert absent.selected_units == ()
     assert absent.rendered_body is None
-    assert absent.source_fingerprint is None
 
 
 @pytest.mark.postgres

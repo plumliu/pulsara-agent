@@ -7,15 +7,12 @@ It never reads or writes PostgreSQL and never opens a provider transport.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field as dataclass_field, replace
 from enum import StrEnum
 from threading import RLock
 from uuid import uuid4
 
-from pulsara_agent.capability.contracts import (
-    FrozenMcpRouteProjection,
-    FrozenNativeToolProjectionSet,
-)
+from pulsara_agent.capability.contracts import FrozenToolCapabilityExposurePlan
 from pulsara_agent.model_input.continuity import (
     FrozenProviderInputAppendPlanningInput,
     FrozenProviderInputEpochView,
@@ -25,12 +22,14 @@ from pulsara_agent.model_input.continuity import (
     ProviderInputAdmissionPredecessorKind,
     ProviderInputContinuityScope,
     ProviderInputDispatchAnchor,
-    provider_input_append_planning_fingerprint,
     provider_input_logical_utf8_bytes,
     provider_input_prefix_fingerprint,
 )
 from pulsara_agent.llm.provider_replay import ProviderAssistantReplayFragment
 from pulsara_agent.llm.request import FrozenProviderWireInputPlan
+from pulsara_agent.model_input.contracts import (
+    compiled_message_placements_fingerprint,
+)
 
 
 class ProviderInputContinuityConflict(RuntimeError):
@@ -65,34 +64,28 @@ class ProcessLocalProviderInputInstallAuthority:
         self,
         permit: ProcessLocalProviderInputInstallPermit,
         *,
-        candidate_fingerprint: str,
-        execution_fingerprint: str,
+        candidate: PreparedProviderInputAppendCandidate,
+        execution: object,
     ) -> None:
         self._owner._consume_install_permit(
             permit,
-            candidate_fingerprint=candidate_fingerprint,
-            execution_fingerprint=execution_fingerprint,
+            candidate=candidate,
+            execution=execution,
         )
 
     def require_registered_plan(
         self,
         *,
-        candidate_fingerprint: str,
+        candidate: PreparedProviderInputAppendCandidate,
         wire_input_plan: FrozenProviderWireInputPlan,
-        capability_dispatch_cut_fingerprint: str,
-        direct_native_projection_set: FrozenNativeToolProjectionSet,
-        mcp_route_projection: FrozenMcpRouteProjection | None,
+        tool_exposure_plan: FrozenToolCapabilityExposurePlan,
     ) -> None:
         """Prove that preflight owns the exact plan registered for this CAS."""
 
         self._owner._require_registered_plan(
-            candidate_fingerprint=candidate_fingerprint,
+            candidate=candidate,
             wire_input_plan=wire_input_plan,
-            capability_dispatch_cut_fingerprint=(
-                capability_dispatch_cut_fingerprint
-            ),
-            direct_native_projection_set=direct_native_projection_set,
-            mcp_route_projection=mcp_route_projection,
+            tool_exposure_plan=tool_exposure_plan,
         )
 
 
@@ -161,6 +154,13 @@ class _Slot:
     replay_reservation: ProcessLocalAssistantReplayFragmentReservation | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _IssuedProviderInputInstallPermit:
+    permit: ProcessLocalProviderInputInstallPermit
+    candidate: PreparedProviderInputAppendCandidate = dataclass_field(repr=False)
+    execution: object = dataclass_field(repr=False)
+
+
 class HostProviderInputContinuityOwner:
     """Own at most one ROOT and four child prefix epochs for one Host."""
 
@@ -176,7 +176,7 @@ class HostProviderInputContinuityOwner:
         self._maximum_child_scopes = maximum_child_scopes
         self._lock = RLock()
         self._slots: dict[ProviderInputContinuityScope, _Slot] = {}
-        self._issued_permits: dict[str, ProcessLocalProviderInputInstallPermit] = {}
+        self._issued_permits: dict[str, _IssuedProviderInputInstallPermit] = {}
         self._install_authority = ProcessLocalProviderInputInstallAuthority(
             self,
             _seal=_INSTALL_AUTHORITY_SEAL,
@@ -236,20 +236,13 @@ class HostProviderInputContinuityOwner:
                     # records the complete rematerialization input; it never
                     # silently repairs a same-base prefix rewrite.
                     delta = canonical_frontier.ordered_item_fingerprints
-            fingerprint = provider_input_append_planning_fingerprint(
-                scope=scope,
-                predecessor=predecessor,
-                predecessor_view=predecessor_view,
-                dispatch_anchor=dispatch_anchor,
-                canonical_delta_fingerprints=delta,
-            )
             return FrozenProviderInputAppendPlanningInput(
+                planning_nonce=f"provider-input-planning:{uuid4().hex}",
                 scope=scope,
                 predecessor=predecessor,
                 predecessor_view=predecessor_view,
                 dispatch_anchor=dispatch_anchor,
                 canonical_delta_fingerprints=delta,
-                planning_fingerprint=fingerprint,
             )
 
     def register(self, candidate: PreparedProviderInputAppendCandidate) -> None:
@@ -273,7 +266,9 @@ class HostProviderInputContinuityOwner:
                 candidate.wire_input_plan.compiled_semantic_fingerprint
                 != candidate.resulting_compiled_input.compiled_semantic_fingerprint
                 or candidate.wire_input_plan.message_placements_fingerprint
-                != candidate.resulting_compiled_input.message_placements_fingerprint
+                != compiled_message_placements_fingerprint(
+                    candidate.resulting_compiled_input.message_placements
+                )
                 or candidate.wire_input_plan.context_id
                 != candidate.resulting_compiled_input.context_id
                 or candidate.wire_input_plan.materialization.tool_items
@@ -336,7 +331,7 @@ class HostProviderInputContinuityOwner:
             if installed is None:
                 if (
                     candidate.expected_epoch_revision != 0
-                    or candidate.predecessor_prefix_fingerprint is not None
+                    or candidate.planning.predecessor_view is not None
                 ):
                     raise ProviderInputContinuityConflict(
                         "initial append candidate has a predecessor"
@@ -344,8 +339,7 @@ class HostProviderInputContinuityOwner:
             else:
                 if (
                     candidate.expected_epoch_revision != installed.epoch_revision
-                    or candidate.predecessor_prefix_fingerprint
-                    != installed.semantic_prefix_fingerprint
+                    or candidate.planning.predecessor_view is not installed
                 ):
                     raise ProviderInputContinuityConflict(
                         "successor append candidate is stale"
@@ -419,23 +413,17 @@ class HostProviderInputContinuityOwner:
     def install(
         self,
         *,
-        candidate_fingerprint: str,
-        execution_fingerprint: str,
+        candidate: PreparedProviderInputAppendCandidate,
+        execution: object,
     ) -> ProcessLocalProviderInputInstallPermit:
+        self._require_scope(candidate.scope)
         with self._lock:
-            matches = tuple(
-                (scope, slot)
-                for scope, slot in self._slots.items()
-                if slot.prepared is not None
-                and slot.prepared.candidate_fingerprint == candidate_fingerprint
-            )
-            if len(matches) != 1:
+            slot = self._slots.get(candidate.scope)
+            if slot is None or slot.prepared is not candidate:
                 raise ProviderInputContinuityConflict(
-                    "prepared append candidate is absent or ambiguous"
+                    "prepared append candidate does not exact-join its scope"
                 )
-            scope, slot = matches[0]
-            candidate = slot.prepared
-            assert candidate is not None
+            scope = candidate.scope
             compiled = candidate.resulting_compiled_input
             revision = candidate.expected_epoch_revision + 1
             view = FrozenProviderInputEpochView(
@@ -448,13 +436,7 @@ class HostProviderInputContinuityOwner:
                 messages=compiled.messages,
                 message_placements=compiled.message_placements,
                 wire_input_plan=candidate.wire_input_plan,
-                capability_dispatch_cut_fingerprint=(
-                    candidate.capability_dispatch_cut_fingerprint
-                ),
-                direct_native_projection_set=(
-                    candidate.direct_native_projection_set
-                ),
-                mcp_route_projection=candidate.mcp_route_projection,
+                tool_exposure_plan=candidate.tool_exposure_plan,
                 canonical_frontier=candidate.resulting_canonical_frontier,
                 source_heads=candidate.resulting_source_heads,
                 final_estimate=compiled.final_estimate,
@@ -483,11 +465,15 @@ class HostProviderInputContinuityOwner:
                 scope=scope,
                 epoch_nonce=view.epoch_nonce,
                 epoch_revision=view.epoch_revision,
-                candidate_fingerprint=candidate_fingerprint,
-                execution_fingerprint=execution_fingerprint,
                 permit_nonce=f"provider-input-permit:{uuid4().hex}",
             )
-            self._issued_permits[permit.permit_nonce] = permit
+            self._issued_permits[permit.permit_nonce] = (
+                _IssuedProviderInputInstallPermit(
+                    permit=permit,
+                    candidate=candidate,
+                    execution=execution,
+                )
+            )
             return permit
 
     def reserve_assistant_replay_fragment(
@@ -658,17 +644,18 @@ class HostProviderInputContinuityOwner:
         self,
         permit: ProcessLocalProviderInputInstallPermit,
         *,
-        candidate_fingerprint: str,
-        execution_fingerprint: str,
+        candidate: PreparedProviderInputAppendCandidate,
+        execution: object,
     ) -> None:
         with self._lock:
             if self._closed:
                 raise ProviderInputContinuityConflict("continuity owner is closed")
             issued = self._issued_permits.get(permit.permit_nonce)
             if (
-                issued is not permit
-                or permit.candidate_fingerprint != candidate_fingerprint
-                or permit.execution_fingerprint != execution_fingerprint
+                issued is None
+                or issued.permit is not permit
+                or issued.candidate is not candidate
+                or issued.execution is not execution
             ):
                 raise ProviderInputContinuityConflict(
                     "provider-input install permit was not issued for this execution"
@@ -678,51 +665,33 @@ class HostProviderInputContinuityOwner:
     def _require_registered_plan(
         self,
         *,
-        candidate_fingerprint: str,
+        candidate: PreparedProviderInputAppendCandidate,
         wire_input_plan: FrozenProviderWireInputPlan,
-        capability_dispatch_cut_fingerprint: str,
-        direct_native_projection_set: FrozenNativeToolProjectionSet,
-        mcp_route_projection: FrozenMcpRouteProjection | None,
+        tool_exposure_plan: FrozenToolCapabilityExposurePlan,
     ) -> None:
+        self._require_scope(candidate.scope)
         with self._lock:
             if self._closed:
                 raise ProviderInputContinuityConflict("continuity owner is closed")
-            matches = tuple(
-                slot.prepared
-                for slot in self._slots.values()
-                if slot.prepared is not None
-                and slot.prepared.candidate_fingerprint == candidate_fingerprint
-            )
+            slot = self._slots.get(candidate.scope)
             if (
-                len(matches) != 1
-                or matches[0].wire_input_plan is not wire_input_plan
-                or matches[0].capability_dispatch_cut_fingerprint
-                != capability_dispatch_cut_fingerprint
-                or matches[0].direct_native_projection_set
-                != direct_native_projection_set
-                or (
-                    matches[0].mcp_route_projection != mcp_route_projection
-                    if mcp_route_projection is not None
-                    else bool(matches[0].mcp_route_projection.routes)
-                )
+                slot is None
+                or slot.prepared is not candidate
+                or candidate.wire_input_plan is not wire_input_plan
+                or candidate.tool_exposure_plan is not tool_exposure_plan
             ):
                 raise ProviderInputContinuityConflict(
                     "provider wire plan was not registered for this candidate"
                 )
 
-    def discard(self, candidate_fingerprint: str) -> None:
+    def discard(self, candidate: PreparedProviderInputAppendCandidate) -> None:
+        self._require_scope(candidate.scope)
         with self._lock:
-            matches = tuple(
-                slot
-                for slot in self._slots.values()
-                if slot.prepared is not None
-                and slot.prepared.candidate_fingerprint == candidate_fingerprint
-            )
-            if len(matches) != 1:
+            slot = self._slots.get(candidate.scope)
+            if slot is None or slot.prepared is not candidate:
                 raise ProviderInputContinuityConflict(
                     "prepared append discard does not exact-join"
                 )
-            slot = matches[0]
             slot.prepared = None
             slot.state = (
                 _SlotState.EMPTY if slot.installed is None else _SlotState.INSTALLED
@@ -746,9 +715,9 @@ class HostProviderInputContinuityOwner:
                 slot.replay_reservation = None
                 slot.state = _SlotState.CLOSED
             self._issued_permits = {
-                nonce: permit
-                for nonce, permit in self._issued_permits.items()
-                if permit.scope != scope
+                nonce: issued
+                for nonce, issued in self._issued_permits.items()
+                if issued.permit.scope != scope
             }
 
     def close(self) -> None:

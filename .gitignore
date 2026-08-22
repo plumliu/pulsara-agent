@@ -37,6 +37,7 @@ ENV/
 # Local IDE/editor files
 .idea/
 .vscode/
+AGENTS.md
 *.swp
 *.swo
 *~

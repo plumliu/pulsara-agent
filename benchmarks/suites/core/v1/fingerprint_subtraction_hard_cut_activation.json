@@ -1,0 +1,90 @@
+{
+  "schema_version": "fingerprint-subtraction-activation-v1",
+  "status": "ACTIVATED",
+  "activated_at_utc": "2026-08-21T21:08:40Z",
+  "implementation_base": "28838be1777cb553ec98153729d7a7f2d357b287",
+  "worktree_at_evidence": "dirty: the complete hard-cut was validated before its final commit",
+  "product_behavior": "UNCHANGED",
+  "policy": {
+    "git_owns_repository_content_identity": true,
+    "historical_activation_reports_untouched": true,
+    "new_file_document_or_report_checksum_inventory": false,
+    "transition_or_dual_path": false
+  },
+  "removed_runtime_fingerprint_classes": [
+    "self_only",
+    "duplicate_child_parent",
+    "process_local_authority_hash"
+  ],
+  "retained_digest_classes": [
+    "content_integrity",
+    "durable_semantic",
+    "prefix_or_replay",
+    "mac",
+    "stable_id_local_derivation"
+  ],
+  "implementation": {
+    "production_files_changed": 56,
+    "production_lines_added": 1898,
+    "production_lines_deleted": 4660,
+    "production_net_lines": -2762,
+    "deleted_generic_fingerprint_registry": true,
+    "continuity_authority": "owner slot, exact candidate and exact one-shot permit",
+    "settlement_authority": "owner token or exact prepared value plus canonical confirmation",
+    "capability_composition": "owner-issued exact snapshots and exact sibling views",
+    "stable_identity_probe": "32 Builtin catalog entries retained byte-identical catalog, descriptor, result-contract and action-contract identities",
+    "provider_contract_version_changed": false,
+    "protocol_changed": false,
+    "postgres_schema_changed": false
+  },
+  "validation": {
+    "targeted_integration": "249 passed",
+    "hard_cut_architecture": "5 passed",
+    "full_pytest": "875 passed",
+    "postgres_marker": "212 passed, 663 deselected",
+    "clean_v0": "12 passed: fresh, repeat, deep verification, drift and reset-required coverage",
+    "ruff": "passed",
+    "compileall": "passed for src, tests and tools",
+    "terminal_protocol_generator": "passed in check mode",
+    "dependency_lock": "passed",
+    "git_diff_check": "passed",
+    "markdown_fence_heading_and_local_links": "passed",
+    "secret_scan": "no new secret-shaped value in added lines",
+    "new_skip_or_xfail": 0
+  },
+  "real_provider_dogfood": {
+    "ordinary_chat_and_cross_restart_replay": "passed",
+    "ordinary_responses_and_cross_restart_replay": "passed",
+    "chat_tool_and_mcp_direct_meta_loop": "passed",
+    "responses_tool_and_mcp_direct_meta_loop": "passed on a configured Responses-native endpoint",
+    "memory": "remember, governance ACCEPTED, one accepted fact and memory_search all passed",
+    "skill_and_compaction": "three real summary calls passed; retained Skill, mid-turn continuation, repeated compaction and 49-tool all-meta fallback passed",
+    "subagent": "the exact uv run python tools/run_round10_subagent_dogfood.py command passed graph, LAST_N/mailbox, capacity, compaction and queued-child MCP scenarios",
+    "provider_compatibility_observation": "one configured OpenRouter model route accepted Responses replay without tools but rejected Responses tool calls; the same provider-neutral tool scenario passed on another configured Responses-native endpoint",
+    "credentials_prompts_private_reasoning_memory_text_vectors_or_remote_payloads_recorded": false
+  },
+  "oracle": {
+    "committed_events": 29,
+    "live_events": 24,
+    "subject_slots": 11,
+    "append_guards": 1,
+    "product_relations": 25,
+    "durable_jobs": 0
+  },
+  "new_durable_machinery": {
+    "relations": 0,
+    "events": 0,
+    "subjects": 0,
+    "guards": 0,
+    "jobs": 0,
+    "receipts_checkpoints_repairs_or_recovery_owners": 0
+  },
+  "non_goals": [
+    "changing digest algorithms at retained real boundaries",
+    "changing provider cache or replay behavior",
+    "changing memory, MCP, Skill, compaction or subagent product semantics",
+    "rewriting historical activation reports",
+    "adding a replacement repository tree checksum"
+  ],
+  "remaining_blockers": []
+}

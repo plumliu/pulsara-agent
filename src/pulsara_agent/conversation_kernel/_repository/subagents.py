@@ -50,6 +50,7 @@ from pulsara_agent.conversation_kernel.subagents.contracts import (
     SubagentTaskStatus,
     build_dependency_result_context,
     derive_subagent_batch_initial_dispositions,
+    subagent_task_batch_identity_digest,
 )
 from pulsara_agent.primitives.context import freeze_json, thaw_json
 
@@ -221,7 +222,7 @@ class _SubagentOperations:
         return CommittedEventDraft(
             event_id=_stable_identity(
                 "event",
-                candidate.candidate_fingerprint,
+                subagent_task_batch_identity_digest(candidate),
                 task_id,
                 "SubagentTaskAccepted",
             ),
@@ -519,7 +520,7 @@ class _SubagentOperations:
                         candidate.session_id,
                         _stable_identity(
                             "event",
-                            candidate.candidate_fingerprint,
+                            subagent_task_batch_identity_digest(candidate),
                             item.task_id,
                             "SubagentTaskAccepted",
                         ),

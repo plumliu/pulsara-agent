@@ -322,7 +322,7 @@ class _SettlementTokenTool(_KnownReadOnlyTool):
             content=b"known exact result",
             process_local_settlement=ProcessLocalEffectSettlementToken(
                 token_id="terminal-monitor-token:test",
-                token_fingerprint="sha256:" + "4" * 64,
+                prepared=self,
             ),
         )
 

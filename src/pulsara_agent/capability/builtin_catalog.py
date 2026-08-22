@@ -24,6 +24,7 @@ from pulsara_agent.ports.tool_registry import (
     BuiltinToolBindingContract,
     ToolBindingOrigin,
     build_tool_binding_contract,
+    tool_binding_contract_identity_fingerprint,
 )
 from pulsara_agent.primitives.context import context_fingerprint
 from pulsara_agent.primitives.long_horizon import LongHorizonActionClass
@@ -1097,7 +1098,6 @@ class BuiltinTerminalPermissionRuleKind(StrEnum):
 class BuiltinToolAvailabilityRequirement:
     kind: BuiltinToolAvailabilityKind
     allowed_invocation_owners: tuple[ToolInvocationOwnerKind, ...]
-    requirement_fingerprint: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -1113,21 +1113,18 @@ class BuiltinTerminalPermissionRule:
     kind: BuiltinTerminalPermissionRuleKind
     ordered_terminal_access_actions: tuple[str, ...]
     ordered_scheduling_permission_actions: tuple[str, ...]
-    rule_fingerprint: str
 
 
 @dataclass(frozen=True, slots=True)
 class BuiltinToolPermissionContract:
     ordered_action_overrides: tuple[BuiltinActionPermissionOverride, ...]
     terminal_rule: BuiltinTerminalPermissionRule
-    contract_fingerprint: str
 
 
 @dataclass(frozen=True, slots=True)
 class BuiltinToolRecoveryContract:
     severity: Literal["read_only", "bounded_write", "terminal", "unknown_effect"]
     include_in_unfinished_recovery: bool
-    contract_fingerprint: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -1206,20 +1203,74 @@ def builtin_action_permission_override(
     return None
 
 
+def builtin_availability_requirement_identity_fingerprint(
+    requirement: BuiltinToolAvailabilityRequirement,
+) -> str:
+    return context_fingerprint(
+        "builtin-tool-availability-requirement:v1",
+        {
+            "kind": requirement.kind.value,
+            "allowed_invocation_owners": tuple(
+                item.value for item in requirement.allowed_invocation_owners
+            ),
+        },
+    )
+
+
+def _terminal_rule_identity_fingerprint(
+    rule: BuiltinTerminalPermissionRule,
+) -> str:
+    return context_fingerprint(
+        "builtin-terminal-permission-rule:v1",
+        {
+            "kind": rule.kind.value,
+            "ordered_terminal_access_actions": (
+                rule.ordered_terminal_access_actions
+            ),
+            "ordered_scheduling_permission_actions": (
+                rule.ordered_scheduling_permission_actions
+            ),
+        },
+    )
+
+
+def builtin_permission_contract_identity_fingerprint(
+    contract: BuiltinToolPermissionContract,
+) -> str:
+    return context_fingerprint(
+        "builtin-tool-permission-contract:v1",
+        {
+            "ordered_action_overrides": tuple(
+                asdict(item) for item in contract.ordered_action_overrides
+            ),
+            "terminal_rule_fingerprint": _terminal_rule_identity_fingerprint(
+                contract.terminal_rule
+            ),
+        },
+    )
+
+
+def _recovery_contract_identity_fingerprint(
+    contract: BuiltinToolRecoveryContract,
+) -> str:
+    return context_fingerprint(
+        "builtin-tool-recovery-contract:v1",
+        {
+            "severity": contract.severity,
+            "include_in_unfinished_recovery": (
+                contract.include_in_unfinished_recovery
+            ),
+        },
+    )
+
+
 def _catalog_entry(
     name: str, descriptor: BuiltinToolDescriptor
 ) -> BuiltinToolCatalogEntry:
     binding_kind, availability_kind, owners, family = _catalog_shape(name)
-    availability_payload = {
-        "kind": availability_kind.value,
-        "allowed_invocation_owners": tuple(item.value for item in owners),
-    }
     availability = BuiltinToolAvailabilityRequirement(
         kind=availability_kind,
         allowed_invocation_owners=owners,
-        requirement_fingerprint=context_fingerprint(
-            "builtin-tool-availability-requirement:v1", availability_payload
-        ),
     )
     origin = (
         ToolBindingOrigin.WORKFLOW
@@ -1244,12 +1295,20 @@ def _catalog_entry(
     payload = {
         "name": name,
         "descriptor_fingerprint": descriptor.fingerprint(),
-        "binding_contract_fingerprint": binding.contract_fact_fingerprint,
+        "binding_contract_fingerprint": (
+            tool_binding_contract_identity_fingerprint(binding)
+        ),
         "execution_binding_kind": binding_kind.value,
-        "availability_requirement_fingerprint": availability.requirement_fingerprint,
-        "permission_contract_fingerprint": permission.contract_fingerprint,
+        "availability_requirement_fingerprint": (
+            builtin_availability_requirement_identity_fingerprint(availability)
+        ),
+        "permission_contract_fingerprint": (
+            builtin_permission_contract_identity_fingerprint(permission)
+        ),
         "long_horizon_policy_kind": long_horizon_policy_kind.value,
-        "recovery_contract_fingerprint": recovery.contract_fingerprint,
+        "recovery_contract_fingerprint": (
+            _recovery_contract_identity_fingerprint(recovery)
+        ),
         "tool_family": family,
     }
     return BuiltinToolCatalogEntry(
@@ -1407,29 +1466,14 @@ def _permission_contract(
         terminal_kind = BuiltinTerminalPermissionRuleKind.NOT_APPLICABLE
         access_actions = ()
         scheduling_actions = ()
-    rule_payload = {
-        "kind": terminal_kind.value,
-        "ordered_terminal_access_actions": access_actions,
-        "ordered_scheduling_permission_actions": scheduling_actions,
-    }
     rule = BuiltinTerminalPermissionRule(
         kind=terminal_kind,
         ordered_terminal_access_actions=access_actions,
         ordered_scheduling_permission_actions=scheduling_actions,
-        rule_fingerprint=context_fingerprint(
-            "builtin-terminal-permission-rule:v1", rule_payload
-        ),
     )
-    payload = {
-        "ordered_action_overrides": tuple(asdict(item) for item in overrides),
-        "terminal_rule_fingerprint": rule.rule_fingerprint,
-    }
     return BuiltinToolPermissionContract(
         ordered_action_overrides=overrides,
         terminal_rule=rule,
-        contract_fingerprint=context_fingerprint(
-            "builtin-tool-permission-contract:v1", payload
-        ),
     )
 
 
@@ -1455,13 +1499,9 @@ def _recovery_contract(name: str) -> BuiltinToolRecoveryContract:
     else:
         severity = "unknown_effect"
     include = name not in _PLAN
-    payload = {"severity": severity, "include_in_unfinished_recovery": include}
     return BuiltinToolRecoveryContract(
         severity=severity,  # type: ignore[arg-type]
         include_in_unfinished_recovery=include,
-        contract_fingerprint=context_fingerprint(
-            "builtin-tool-recovery-contract:v1", payload
-        ),
     )
 
 
@@ -1521,5 +1561,7 @@ __all__ = [
     "builtin_tool_catalog",
     "builtin_tool_catalog_entry",
     "builtin_action_permission_override",
+    "builtin_availability_requirement_identity_fingerprint",
+    "builtin_permission_contract_identity_fingerprint",
     "builtin_tool_descriptors",
 ]

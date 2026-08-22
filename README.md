@@ -275,6 +275,16 @@ run, receipt, or recovery graph. The current oracle is 29 committed events, 24
 live events, 11 subject slots, one append guard, 25 product relations, and zero
 durable jobs. Verification is recorded in
 [`round10_hierarchical_subagent_orchestration_activation.json`](benchmarks/suites/core/v1/round10_hierarchical_subagent_orchestration_activation.json).
+The fingerprint-subtraction hard cut removes same-process self hashes,
+duplicate child/parent proof fields, fingerprint-based continuity/settlement
+lookups, and per-file activation SHA inventories in one incompatible internal
+cut. Exact frozen objects, owner slots, nonce/revision checks, and database
+constraints now carry process-local authority. Content integrity, durable
+confirmation, provider prefix/replay compatibility, stable canonical identity,
+and keyed opaque-token digests remain unchanged; provider wire, Protocol v3,
+canonical rows, and the architecture oracle do not change. Verification is
+recorded in
+[`fingerprint_subtraction_hard_cut_activation.json`](benchmarks/suites/core/v1/fingerprint_subtraction_hard_cut_activation.json).
 Round 8 replaces the old memory durability/recovery graph with an advisory
 dataset. `remember` atomically accepts one candidate with its ToolResult, while
 governance, cheap-hint reflection, embedding, and reranking remain lossy

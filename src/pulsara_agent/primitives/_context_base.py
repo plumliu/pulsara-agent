@@ -15,7 +15,7 @@ from enum import StrEnum
 from hashlib import sha256
 from typing import Any, TypeAlias
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 
 class FrozenContextFact(BaseModel):
@@ -157,64 +157,12 @@ def context_fingerprint(namespace: str, value: object) -> str:
     return f"sha256:{digest.hexdigest()}"
 
 
-class ContextEventReferenceFact(FrozenContextFact):
-    runtime_session_id: str = Field(min_length=1)
-    event_id: str = Field(min_length=1)
-    sequence: int = Field(ge=1)
-    event_type: str = Field(min_length=1)
-    payload_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
-
-
-class ContextEventRangeFact(FrozenContextFact):
-    runtime_session_id: str = Field(min_length=1)
-    first_sequence: int = Field(ge=1)
-    through_sequence: int = Field(ge=1)
-    event_count: int = Field(ge=1)
-    event_ids_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
-    event_payloads_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
-
-    @model_validator(mode="after")
-    def _contiguous(self) -> "ContextEventRangeFact":
-        if self.first_sequence > self.through_sequence:
-            raise ValueError("event range start exceeds end")
-        if self.event_count != self.through_sequence - self.first_sequence + 1:
-            raise ValueError("event range count is not contiguous")
-        return self
-
-
-class CapabilityDescriptorRenderAttributionFact(FrozenContextFact):
-    owner_runtime_session_id: str = Field(min_length=1)
-    exposure_id: str = Field(min_length=1)
-    exposure_fact_fingerprint: str = Field(min_length=1)
-    descriptor_set_fingerprint: str = Field(min_length=1)
-    descriptor_id: str = Field(min_length=1)
-    descriptor_fingerprint: str = Field(min_length=1)
-    result_render_contract_fingerprint: str = Field(min_length=1)
-    descriptor_source_event_id: str = Field(min_length=1)
-    descriptor_source_sequence: int = Field(ge=1)
-    descriptor_source_payload_fingerprint: str = Field(min_length=1)
-    attribution_fingerprint: str = Field(min_length=1)
-
-    @model_validator(mode="after")
-    def _fingerprint(self) -> "CapabilityDescriptorRenderAttributionFact":
-        expected = context_fingerprint(
-            "capability-descriptor-render-attribution:v1",
-            self.model_dump(mode="json", exclude={"attribution_fingerprint"}),
-        )
-        if self.attribution_fingerprint != expected:
-            raise ValueError("descriptor render attribution fingerprint mismatch")
-        return self
-
-
 FrozenJsonArrayFact.model_rebuild()
 FrozenJsonEntryFact.model_rebuild()
 FrozenJsonObjectFact.model_rebuild()
 
 
 __all__ = [
-    "CapabilityDescriptorRenderAttributionFact",
-    "ContextEventRangeFact",
-    "ContextEventReferenceFact",
     "FrozenContextFact",
     "FrozenJsonArrayFact",
     "FrozenJsonEntryFact",

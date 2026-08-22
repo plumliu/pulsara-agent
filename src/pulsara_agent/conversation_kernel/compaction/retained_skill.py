@@ -48,24 +48,11 @@ class FrozenRetainedSkillContextItem:
     catalog_location: str
     body: str = field(repr=False)
     delivery_sequence: int
-    item_fingerprint: str
     evidence_source_entry_fingerprint: str | None = field(
         default=None, repr=False
     )
 
     def __post_init__(self) -> None:
-        expected = context_fingerprint(
-            "pulsara.retained-skill-context-item.v1",
-            {
-                "name": self.name,
-                "catalog_location": self.catalog_location,
-                "body": self.body,
-                "delivery_sequence": self.delivery_sequence,
-                "evidence_source_entry_fingerprint": (
-                    self.evidence_source_entry_fingerprint
-                ),
-            },
-        )
         if (
             not self.name
             or not self.catalog_location
@@ -74,7 +61,6 @@ class FrozenRetainedSkillContextItem:
                 self.evidence_source_entry_fingerprint is not None
                 and not self.evidence_source_entry_fingerprint.startswith("sha256:")
             )
-            or self.item_fingerprint != expected
         ):
             raise ValueError("retained Skill context item is invalid")
 
@@ -98,7 +84,16 @@ class FrozenRetainedSkillContextSelection:
         expected = context_fingerprint(
             "pulsara.retained-skill-context-selection.v1",
             {
-                "items": tuple(item.item_fingerprint for item in self.ordered_items),
+                "items": tuple(
+                    (
+                        item.name,
+                        item.catalog_location,
+                        item.body,
+                        item.delivery_sequence,
+                        item.evidence_source_entry_fingerprint,
+                    )
+                    for item in self.ordered_items
+                ),
                 "body": self.rendered_body,
                 "tokens": self.estimated_tokens,
             },
@@ -395,18 +390,12 @@ def _item(
     delivery_sequence: int,
     evidence_source_entry_fingerprint: str | None = None,
 ) -> FrozenRetainedSkillContextItem:
-    values = {
-        "name": manifest.name,
-        "catalog_location": manifest.location,
-        "body": manifest.body,
-        "delivery_sequence": delivery_sequence,
-        "evidence_source_entry_fingerprint": evidence_source_entry_fingerprint,
-    }
     return FrozenRetainedSkillContextItem(
-        **values,
-        item_fingerprint=context_fingerprint(
-            "pulsara.retained-skill-context-item.v1", values
-        ),
+        name=manifest.name,
+        catalog_location=manifest.location,
+        body=manifest.body,
+        delivery_sequence=delivery_sequence,
+        evidence_source_entry_fingerprint=evidence_source_entry_fingerprint,
     )
 
 
@@ -470,7 +459,16 @@ def _selection(
         selection_fingerprint=context_fingerprint(
             "pulsara.retained-skill-context-selection.v1",
             {
-                "items": tuple(item.item_fingerprint for item in items),
+                "items": tuple(
+                    (
+                        item.name,
+                        item.catalog_location,
+                        item.body,
+                        item.delivery_sequence,
+                        item.evidence_source_entry_fingerprint,
+                    )
+                    for item in items
+                ),
                 "body": body,
                 "tokens": tokens,
             },

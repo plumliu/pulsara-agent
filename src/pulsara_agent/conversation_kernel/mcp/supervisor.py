@@ -63,6 +63,7 @@ from ..tool_surface import (
     McpPolicyClassificationSource,
     McpToolExecutionPolicyFact,
     PreparedToolExecutionBinding,
+    execution_policy_fingerprint,
 )
 from .contracts import (
     MAXIMUM_CONFIGURED_MCP_SERVERS,
@@ -546,7 +547,7 @@ class McpBoundToolExecutor:
             turn_id=turn_id,
             tool_call_id=tool_call_id,
             descriptor_fingerprint=self.semantic.descriptor_fingerprint,
-            policy_fingerprint=self.policy.policy_fingerprint,
+            policy_fingerprint=execution_policy_fingerprint(self.policy),
             runtime_generation_id=self.runtime_generation_id,
         )
 
@@ -558,7 +559,7 @@ class McpBoundToolExecutor:
         if (
             permit.runtime_generation_id != self.runtime_generation_id
             or permit.descriptor_fingerprint != self.semantic.descriptor_fingerprint
-            or permit.policy_fingerprint != self.policy.policy_fingerprint
+            or permit.policy_fingerprint != execution_policy_fingerprint(self.policy)
             or permit.tool_call_id == ""
         ):
             raise RuntimeError("MCP dispatch permit does not exact-join executor")
@@ -1802,7 +1803,7 @@ class McpHostSupervisor:
                 {
                     "provider_tool_name": semantic.provider_tool_name,
                     "descriptor_fingerprint": semantic.descriptor_fingerprint,
-                    "policy_fingerprint": policy.policy_fingerprint,
+                    "policy_fingerprint": execution_policy_fingerprint(policy),
                     "slot_lease_identity": lease.lease_identity,
                     "runtime_generation": runtime_generation,
                 },
@@ -1966,12 +1967,8 @@ class McpHostSupervisor:
                             )
                         inspection_inputs.append(
                             PreparedMcpInspectionInput(
-                                source_snapshot_fingerprint=(
-                                    source_snapshot.source_snapshot_fingerprint
-                                ),
-                                tool_fact_semantic_fingerprint=(
-                                    fact.fact_semantic_fingerprint
-                                ),
+                                source_snapshot=source_snapshot,
+                                tool_fact=fact,
                                 semantic=semantic,
                                 policy=policy,
                             )
@@ -2006,34 +2003,17 @@ class McpHostSupervisor:
         if owner.owner_authenticity is not self._capability_owner_authenticity:
             raise ValueError("foreign MCP capability source snapshot")
         catalog = owner.catalog_snapshot
-        sources = tuple(
-            sorted(item.source_snapshot_fingerprint for item in owner.source_snapshots)
-        )
         inspectability = []
         for item in owner.inspection_inputs:
             semantic = item.semantic
             policy = item.policy
-            source_snapshot = next(
-                (
-                    snapshot
-                    for snapshot in owner.source_snapshots
-                    if snapshot.source_snapshot_fingerprint
-                    == item.source_snapshot_fingerprint
-                ),
-                None,
-            )
-            if source_snapshot is None:
+            source_snapshot = item.source_snapshot
+            fact = item.tool_fact
+            if not any(
+                source_snapshot is candidate for candidate in owner.source_snapshots
+            ):
                 raise ValueError("MCP inspection source snapshot is absent")
-            fact = next(
-                (
-                    candidate
-                    for candidate in source_snapshot.facts
-                    if candidate.fact_semantic_fingerprint
-                    == item.tool_fact_semantic_fingerprint
-                ),
-                None,
-            )
-            if not isinstance(fact, FrozenToolCapabilityFact):
+            if not any(fact is candidate for candidate in source_snapshot.facts):
                 raise ValueError("MCP inspection Tool fact is absent")
             if (
                 semantic.server_id
@@ -2065,7 +2045,7 @@ class McpHostSupervisor:
                     descriptor_payload_fingerprint=(
                         mcp_inspection_descriptor_payload_fingerprint(values)
                     ),
-                    mcp_execution_policy_fingerprint=policy.policy_fingerprint,
+                    mcp_execution_policy_fingerprint=execution_policy_fingerprint(policy),
                     effect_kind=McpInspectEffectKind(policy.effect_kind.value),
                     conservative_logical_utf8_bytes=(
                         conservative_mcp_inspection_logical_utf8_bytes(values)
@@ -2081,25 +2061,12 @@ class McpHostSupervisor:
                 ),
             )
         )
-        fingerprint = context_fingerprint(
-            "mcp-capability-projection-input:v1",
-            {
-                "scope": owner.conversation_scope_kind.value,
-                "scope_subagent_task_id": owner.scope_subagent_task_id,
-                "sources": sources,
-                "catalog": catalog.semantic_fingerprint,
-                "inspectability": tuple(
-                    item.fact_fingerprint for item in ordered_inspectability
-                ),
-            },
-        )
         return FrozenMcpCapabilityProjectionInput(
             conversation_scope_kind=owner.conversation_scope_kind,
             scope_subagent_task_id=owner.scope_subagent_task_id,
-            source_snapshot_fingerprints=sources,
+            source_snapshots=owner.source_snapshots,
             catalog_semantic_fingerprint=catalog.semantic_fingerprint,
             inspectability_facts=ordered_inspectability,
-            projection_fingerprint=fingerprint,
         )
 
     def _catalog_locked(
@@ -2386,19 +2353,6 @@ async def _discover(
         timeout = dict(config.per_tool_timeout_ms).get(
             item.name, config.default_tool_timeout_ms
         )
-        policy_fp = context_fingerprint(
-            "mcp-tool-execution-policy:v1",
-            {
-                "server_id": config.server_id,
-                "remote_tool_name": item.name,
-                "provider_tool_name": provider_name,
-                "tool_semantic_fingerprint": descriptor,
-                "effect_kind": effect.value,
-                "timeout_ms": timeout,
-                "parallel_safe": config.supports_parallel_tool_calls,
-                "classification_source": source.value,
-            },
-        )
         policies.append(
             McpToolExecutionPolicyFact(
                 server_id=config.server_id,
@@ -2409,7 +2363,6 @@ async def _discover(
                 timeout_ms=timeout,
                 parallel_safe=config.supports_parallel_tool_calls,
                 classification_source=source,
-                policy_fingerprint=policy_fp,
             )
         )
     semantic_tuple = tuple(sorted(semantics, key=lambda item: item.provider_tool_name))
@@ -2544,7 +2497,7 @@ def _candidate(
             "tool_surface": snapshot.tool_surface_semantic_fingerprint,
             "catalog": snapshot.catalog_semantic_fingerprint,
             "conformance": snapshot.sdk_conformance_contract_fingerprint,
-            "policies": tuple(item.policy_fingerprint for item in policies),
+            "policies": tuple(execution_policy_fingerprint(item) for item in policies),
             "standard_read_timeout_ms": config.default_tool_timeout_ms,
             "normalized_physical_bytes": normalized_physical_bytes,
         },
@@ -2562,7 +2515,6 @@ def _candidate(
         ordered_tool_execution_policies=policies,
         standard_read_timeout_ms=config.default_tool_timeout_ms,
         normalized_physical_bytes=normalized_physical_bytes,
-        candidate_fingerprint=fingerprint,
     )
 
 

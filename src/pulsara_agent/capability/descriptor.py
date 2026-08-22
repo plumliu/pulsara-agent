@@ -6,8 +6,14 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 
 from pulsara_agent.primitives.model_call import sha256_fingerprint
-from pulsara_agent.primitives.long_horizon import LongHorizonToolPolicyFact
-from pulsara_agent.primitives.tool_result import CapabilityResultRenderContractFact
+from pulsara_agent.primitives.long_horizon import (
+    LongHorizonToolPolicyFact,
+    long_horizon_tool_policy_identity_payload,
+)
+from pulsara_agent.primitives.tool_result import (
+    CapabilityResultRenderContractFact,
+    capability_result_render_contract_identity_payload,
+)
 from pulsara_agent.ports.artifact import ToolArtifactMode
 from pulsara_agent.ports.tool_execution import (
     FrozenToolJsonDict,
@@ -95,10 +101,14 @@ class BuiltinToolDescriptor:
             "is_destructive": self.is_destructive,
             "is_open_world": self.is_open_world,
             "permission_category": self.permission_category,
-            "result_render_contract": self.result_render_contract.model_dump(
-                mode="json"
+            "result_render_contract": (
+                capability_result_render_contract_identity_payload(
+                    self.result_render_contract
+                )
             ),
-            "long_horizon_policy": self.long_horizon_policy.model_dump(mode="json"),
+            "long_horizon_policy": long_horizon_tool_policy_identity_payload(
+                self.long_horizon_policy
+            ),
             "advertise_policy": self.advertise_policy.value,
             "artifact_mode": self.artifact_mode.value,
             "availability": self.availability.value,
@@ -122,10 +132,14 @@ class BuiltinToolDescriptor:
             "is_open_world": self.is_open_world,
             "requires_user_interaction": self.requires_user_interaction,
             "permission_category": self.permission_category,
-            "result_render_contract": self.result_render_contract.model_dump(
-                mode="json"
+            "result_render_contract": (
+                capability_result_render_contract_identity_payload(
+                    self.result_render_contract
+                )
             ),
-            "long_horizon_policy": self.long_horizon_policy.model_dump(mode="json"),
+            "long_horizon_policy": long_horizon_tool_policy_identity_payload(
+                self.long_horizon_policy
+            ),
             "approval_policy_hint": self.approval_policy_hint,
             "advertise_policy": self.advertise_policy.value,
             "artifact_mode": self.artifact_mode.value,

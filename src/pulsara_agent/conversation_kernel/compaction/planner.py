@@ -16,6 +16,8 @@ from pulsara_agent.conversation_kernel.compaction.contracts import (
     ProviderPrefixCutProof,
     RecentHumanMessageProof,
     ResolvedCompactionPolicy,
+    _compaction_projection_identity_digest,
+    _compaction_working_set_identity_digest,
     compaction_summary_message_prefix_fingerprint,
     resolved_compaction_headroom_bounds,
 )
@@ -23,7 +25,6 @@ from pulsara_agent.conversation_kernel.compaction.prompt import (
     build_compaction_snapshot_carrier,
     freeze_compaction_summary_output,
 )
-from pulsara_agent.llm.estimator import TokenEstimate
 from pulsara_agent.llm.input import LLMMessage
 from pulsara_agent.model_input.contracts import (
     ApprovedPlanMaterializationFact,
@@ -50,7 +51,6 @@ from pulsara_agent.model_input.continuity import (
     FrozenProviderInputEpochView,
     PROVIDER_MESSAGE_LOWERING_CONTRACT,
     provider_input_logical_utf8_bytes,
-    provider_input_prefix_fingerprint,
 )
 from pulsara_agent.model_input.provider_replay import (
     FrozenCanonicalProviderDispatchRead,
@@ -436,54 +436,27 @@ def freeze_compaction_source_view(
                 "compatible source view is not an exact append"
             )
         suffix = compiled.messages[prefix_count:]
-        projection_payload = {
-            "predecessor": predecessor_epoch_view.semantic_prefix_fingerprint,
-            "append": provider_input_prefix_fingerprint(
-                system_prompt="", tools=(), messages=suffix
-            ),
-            "estimate": _estimate_value(compiled.final_estimate),
-            "logical_bytes": _logical_input_bytes(
-                compiled.system_prompt, compiled.messages, compiled.tools
-            ),
-        }
+        projection_logical_bytes = _logical_input_bytes(
+            compiled.system_prompt, compiled.messages, compiled.tools
+        )
         from pulsara_agent.conversation_kernel.compaction.contracts import (
             CompatibleAppendCompactionProjection,
         )
 
         projection = CompatibleAppendCompactionProjection(
-            predecessor_epoch_semantic_prefix_fingerprint=(
-                predecessor_epoch_view.semantic_prefix_fingerprint
-            ),
             append_only_messages=suffix,
             final_estimate=compiled.final_estimate,
-            logical_utf8_bytes=projection_payload["logical_bytes"],
-            projection_fingerprint=context_fingerprint(
-                "pulsara.compatible-append-compaction-projection.v1",
-                projection_payload,
-            ),
+            logical_utf8_bytes=projection_logical_bytes,
         )
     else:
-        projection_payload = {
-            "system": compiled.system_prompt,
-            "input": provider_input_prefix_fingerprint(
-                system_prompt=compiled.system_prompt,
-                tools=compiled.tools,
-                messages=compiled.messages,
-            ),
-            "estimate": _estimate_value(compiled.final_estimate),
-            "logical_bytes": _logical_input_bytes(
-                compiled.system_prompt, compiled.messages, compiled.tools
-            ),
-        }
+        projection_logical_bytes = _logical_input_bytes(
+            compiled.system_prompt, compiled.messages, compiled.tools
+        )
         projection = ColdRebuildCompactionProjection(
             system_prompt=compiled.system_prompt,
             full_messages=compiled.messages,
             final_estimate=compiled.final_estimate,
-            logical_utf8_bytes=projection_payload["logical_bytes"],
-            projection_fingerprint=context_fingerprint(
-                "pulsara.cold-rebuild-compaction-projection.v1",
-                projection_payload,
-            ),
+            logical_utf8_bytes=projection_logical_bytes,
         )
     canonical_range = canonical_read.safe_head_range
     working_values = {
@@ -495,24 +468,7 @@ def freeze_compaction_source_view(
             .resolved_hard_bound_set_fingerprint
         ),
     }
-    working = CompactionPhysicalWorkingSetReport(
-        **working_values,
-        report_fingerprint=context_fingerprint(
-            "pulsara.compaction-working-set-report.v1",
-            {
-                "items": working_values["post_base_item_count"],
-                "canonical_bytes": working_values[
-                    "post_base_canonical_utf8_bytes"
-                ],
-                "epoch_bytes": working_values[
-                    "continuity_epoch_logical_utf8_bytes"
-                ],
-                "resolved_hard_bounds": working_values[
-                    "resolved_hard_bound_set_fingerprint"
-                ],
-            },
-        ),
-    )
+    working = CompactionPhysicalWorkingSetReport(**working_values)
     values = {
         "compatibility": compatibility,
         "canonical_dispatch_read": canonical_read.dispatch_read,
@@ -534,8 +490,10 @@ def freeze_compaction_source_view(
                     if predecessor_epoch_view is None
                     else predecessor_epoch_view.semantic_prefix_fingerprint
                 ),
-                "projection": projection.projection_fingerprint,
-                "working_set": working.report_fingerprint,
+                "projection": _compaction_projection_identity_digest(
+                    projection, compile_binding, predecessor_epoch_view
+                ),
+                "working_set": _compaction_working_set_identity_digest(working),
             },
         ),
     )
@@ -716,7 +674,6 @@ def select_recent_human_messages(
                 entry_id=item.source_entry_id,
                 entry_sequence=item.source_entry_sequence,
                 text=item.text,
-                item_fingerprint=provider_input_item_fingerprint(item),
             )
         )
         aggregate += size
@@ -892,17 +849,6 @@ def _logical_input_bytes(
         tools=tools,
         messages=messages,
     )
-
-
-def _estimate_value(estimate: TokenEstimate) -> dict[str, object]:
-    return {
-        "system": estimate.system_tokens,
-        "messages": estimate.message_tokens,
-        "message_by_index": estimate.message_tokens_by_index,
-        "tools": estimate.tool_tokens,
-        "envelope": estimate.envelope_tokens,
-        "total": estimate.total_input_tokens,
-    }
 
 
 __all__ = [

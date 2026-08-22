@@ -31,10 +31,9 @@ from pulsara_agent.capability.contracts import (
     freeze_mcp_inspectability_fact,
     freeze_tool_capability_fact,
     native_tool_projection_set_fingerprint,
-    skill_projection_input_fingerprint,
     tool_capability_version_ref,
 )
-from pulsara_agent.capability.local_skills import LocalSkillDiscovery
+from pulsara_agent.capability.local_skills import LocalSkillDiscovery, LocalSkillProvider
 from pulsara_agent.capability.planner import (
     CapabilityPlanningError,
     KernelToolCapabilityPlanner,
@@ -177,23 +176,20 @@ def _planning_view(
         inspection_inputs=(),
         owner_authenticity=object(),
     )
-    root_policy_fingerprint = context_fingerprint(
-        "test:round9.1-skill-root-policy:v1",
-        {
-            "scope": conversation_scope_kind.value,
-            "task": scope_subagent_task_id,
-        },
+    root_policy = LocalSkillProvider(include_user_skills=False).prepare_root_policy(
+        Path.cwd(),
+        conversation_scope_kind=conversation_scope_kind,
+        scope_subagent_task_id=scope_subagent_task_id,
     )
     discovery = LocalSkillDiscovery(
         skills=(),
         diagnostics=(),
-        root_policy_fingerprint=root_policy_fingerprint,
+        root_policy=root_policy,
     )
     skill_owner = issue_local_skill_catalog_source_snapshot(
         conversation_scope_kind=conversation_scope_kind,
         scope_subagent_task_id=scope_subagent_task_id,
         source_snapshot=skill_snapshot,
-        root_policy_fingerprint=root_policy_fingerprint,
         discovery=discovery,
         owner_authenticity=object(),
     )
@@ -241,22 +237,12 @@ def _planning_view(
         )
         for fact in mcp_facts
     )
-    mcp_payload = {
-        "scope": conversation_scope_kind.value,
-        "scope_subagent_task_id": scope_subagent_task_id,
-        "sources": (mcp_snapshot.source_snapshot_fingerprint,),
-        "catalog": catalog.semantic_fingerprint,
-        "inspectability": tuple(item.fact_fingerprint for item in inspectability),
-    }
     mcp_input = FrozenMcpCapabilityProjectionInput(
         conversation_scope_kind=conversation_scope_kind,
         scope_subagent_task_id=scope_subagent_task_id,
-        source_snapshot_fingerprints=(mcp_snapshot.source_snapshot_fingerprint,),
+        source_snapshots=(mcp_snapshot,),
         catalog_semantic_fingerprint=catalog.semantic_fingerprint,
         inspectability_facts=inspectability,
-        projection_fingerprint=context_fingerprint(
-            "mcp-capability-projection-input:v1", mcp_payload
-        ),
     )
     tools = freeze_tool_planning_input(
         predecessor=predecessor or EmptyCapabilityEpochPredecessor(0),
@@ -266,11 +252,7 @@ def _planning_view(
     discovery_fingerprint = skill_discovery_semantic_fingerprint(discovery)
     skill_input = FrozenSkillProjectionInput(
         discovery_semantic_fingerprint=discovery_fingerprint,
-        source_snapshot_fingerprint=skill_snapshot.source_snapshot_fingerprint,
-        snapshot_fingerprint=skill_projection_input_fingerprint(
-            discovery_semantic_fingerprint=discovery_fingerprint,
-            source_snapshot_fingerprint=skill_snapshot.source_snapshot_fingerprint,
-        ),
+        source_snapshot=skill_snapshot,
     )
     _cut, tool_view, _skill_view = freeze_capability_dispatch_cut_and_views(
         conversation_scope_kind=conversation_scope_kind,
@@ -317,18 +299,19 @@ def test_round9_owner_snapshot_authenticity_rejects_same_shape_forgery() -> None
         source_id="local-skills",
         facts=(),
     )
-    root_policy_fingerprint = context_fingerprint(
-        "test:round9.1-skill-root-policy:v1", "root"
+    root_policy = LocalSkillProvider(include_user_skills=False).prepare_root_policy(
+        Path.cwd(),
+        conversation_scope_kind=ModelInputScopeKind.ROOT,
+        scope_subagent_task_id=None,
     )
     forged = PreparedLocalSkillCatalogSourceSnapshot(
         conversation_scope_kind=ModelInputScopeKind.ROOT,
         scope_subagent_task_id=None,
         source_snapshot=snapshot,
-        root_policy_fingerprint=root_policy_fingerprint,
         discovery=LocalSkillDiscovery(
             skills=(),
             diagnostics=(),
-            root_policy_fingerprint=root_policy_fingerprint,
+            root_policy=root_policy,
         ),
         owner_authenticity=object(),
         _issuer=object(),
@@ -734,8 +717,7 @@ def test_round9_new_mcp_ref_requires_exact_full_install_and_epoch() -> None:
         result_entry_id="entry:inspect-result",
     )
     owner.settle(
-        settlement_token_id=prepared.settlement_token_id,
-        settlement_token_fingerprint=prepared.settlement_token_fingerprint,
+        prepared=prepared,
         committed=True,
     )
     with pytest.raises(LookupError, match="STALE_OR_DORMANT"):
@@ -757,7 +739,7 @@ def test_round9_new_mcp_ref_requires_exact_full_install_and_epoch() -> None:
         scope_subagent_task_id=None,
         continuity_epoch_nonce="epoch:one",
     )
-    assert resolved.ref_fingerprint == prepared.ref.ref_fingerprint
+    assert resolved is prepared.ref
     with pytest.raises(LookupError, match="STALE_OR_DORMANT"):
         owner.resolve_callable(
             prepared.ref.opaque_token,
@@ -798,8 +780,7 @@ def test_round9_new_mcp_ref_capacity_is_closed_and_does_not_evict(
             result_entry_id="entry:second",
         )
     owner.settle(
-        settlement_token_id=first.settlement_token_id,
-        settlement_token_fingerprint=first.settlement_token_fingerprint,
+        prepared=first,
         committed=True,
     )
     assert owner.install_full_result(
@@ -1057,7 +1038,7 @@ def test_round9_owner_carriers_do_not_retain_decorative_proof_fields() -> None:
     assert "resolved_config_inventory_fingerprint" not in {
         item.name for item in fields(PreparedMcpCapabilitySourceSnapshotSet)
     }
-    assert "root_policy_fingerprint" in {
+    assert "root_policy_fingerprint" not in {
         item.name for item in fields(PreparedLocalSkillCatalogSourceSnapshot)
     }
 

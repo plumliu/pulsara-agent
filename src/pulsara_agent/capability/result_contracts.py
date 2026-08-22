@@ -16,6 +16,7 @@ from pulsara_agent.primitives.tool_result import (
     ToolResultRenderVariantCode,
     ToolResultSemanticsBuilderContractFact,
     ToolResultStateFact,
+    capability_result_render_variant_identity_payload,
 )
 
 
@@ -36,12 +37,7 @@ def _variant(
         "execution_phase": phase,
         "terminal_payload_timing_requirement": timing,
     }
-    return CapabilityResultRenderVariantFact(
-        **payload,
-        variant_fingerprint=context_fingerprint(
-            "tool-result-render-variant:v1", payload
-        ),
-    )
+    return CapabilityResultRenderVariantFact(**payload)
 
 
 def _contract(
@@ -67,7 +63,7 @@ def _contract(
         "output_schema_fingerprint": "schema:tool-result-execution-semantics:v2",
         "variant_table_fingerprint": context_fingerprint(
             "tool-result-variant-table:v1",
-            [item.model_dump(mode="json") for item in variants],
+            [capability_result_render_variant_identity_payload(item) for item in variants],
         ),
         "classifier_policy_fingerprint": context_fingerprint(
             "tool-result-classifier-policy:v1",
@@ -102,7 +98,6 @@ def _contract(
         "semantics_builder_id": builder_id,
         "semantics_builder_version": builder_version,
         "semantics_builder_contract": builder,
-        "semantics_builder_contract_fingerprint": builder.contract_fingerprint,
         "rollup_renderer_id": rollup_renderer.renderer_id,
         "rollup_renderer_version": rollup_renderer.renderer_version,
         "rollup_renderer_contract_fingerprint": (
@@ -110,10 +105,22 @@ def _contract(
         ),
         "pre_execution_denial_variant_code": denial,
     }
+    legacy_payload = {
+        **payload,
+        "allowed_operational_kinds": tuple(item.value for item in operational),
+        "allowed_essential_envelope_kinds": tuple(item.value for item in essential),
+        "allowed_variants": tuple(
+            capability_result_render_variant_identity_payload(item)
+            for item in variants
+        ),
+        "semantics_builder_contract": builder.model_dump(mode="json"),
+        "semantics_builder_contract_fingerprint": builder.contract_fingerprint,
+        "pre_execution_denial_variant_code": denial.value,
+    }
     return CapabilityResultRenderContractFact(
         **payload,
         contract_fingerprint=context_fingerprint(
-            "capability-result-render-contract:v1", payload
+            "capability-result-render-contract:v1", legacy_payload
         ),
     )
 

@@ -24,6 +24,7 @@ from pulsara_agent.capability.contracts import (
     McpToolCapabilityRef,
     ToolCapabilityRouteKind,
     ToolCapabilityVersionRef,
+    tool_capability_version_identity_digest,
 )
 from pulsara_agent.capability.builtin_catalog import builtin_tool_catalog_entry
 from pulsara_agent.cli import build_parser, _mcp_command
@@ -1538,16 +1539,11 @@ def test_round9_mcp_catalog_variants_are_bounded_closed_degradations() -> None:
         "semantic_fingerprint": "sha256:" + "6" * 64,
         "provider_name": "mcp__fixture__fixture_echo",
     }
-    version = ToolCapabilityVersionRef(
-        **version_payload,
-        version_fingerprint=context_fingerprint(
-            "tool-capability-version:v1", version_payload
-        ),
-    )
+    version = ToolCapabilityVersionRef(**version_payload)
     route_payload = {
         "server_id": "fixture",
         "remote_tool_name": "fixture_echo",
-        "version": version.version_fingerprint,
+        "version": tool_capability_version_identity_digest(version),
         "route": ToolCapabilityRouteKind.NEW_MCP_META_ONLY.value,
         "reason": CapabilityRouteReasonCode.NEW_NOT_IN_NATIVE_SURFACE.value,
     }
@@ -2086,12 +2082,6 @@ def test_round6_direct_kernel_surface_executes_exact_mcp_generation(
                     effective_permission_mode=permission.effective_mode,
                     attempt_permission_snapshot_fingerprint=(
                     permission.snapshot_fingerprint
-                ),
-                tool_surface_fingerprint=(
-                    surface.model_surface.surface_fingerprint
-                ),
-                executor_binding_fingerprint=borrow.binding_fingerprint(
-                    dynamic.name
                 ),
                 surface_borrow=borrow,
             )
@@ -3031,12 +3021,6 @@ def test_round6_mcp_confirmation_admits_before_publish_and_drains_dirty(
                     attempt_permission_snapshot_fingerprint=(
                     permission.snapshot_fingerprint
                 ),
-                tool_surface_fingerprint=(
-                    surface.model_surface.surface_fingerprint
-                ),
-                executor_binding_fingerprint=borrow.binding_fingerprint(
-                    effect.name
-                ),
                 surface_borrow=borrow,
             )
             result = await port.invoke(
@@ -3651,7 +3635,9 @@ def test_round6_does_not_expand_durable_or_protocol_oracles() -> None:
         / "conversation_kernel"
         / "direct_model.py"
     ).read_text(encoding="utf-8")
-    assert '"execution_surface"' in direct_model_source
+    assert '"execution_surface"' not in direct_model_source
+    assert "tool_surface: PreparedKernelToolSurface" in direct_model_source
+    assert "surface_borrow: ProcessLocalToolSurfaceBorrow" in direct_model_source
 
     assert {item.name for item in fields(FrozenToolSpec)} == {
         "name",

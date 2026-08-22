@@ -2426,7 +2426,6 @@ class KernelHostSession:
             exact_context_binding_revision_id=(
                 candidate.exact_context_binding_revision_id
             ),
-            exact_admission_candidate_fingerprint=candidate.candidate_fingerprint,
         )
         confirmation: QueuedRootTurnAdmissionConfirmation | None = None
         delay_seconds = 0.05

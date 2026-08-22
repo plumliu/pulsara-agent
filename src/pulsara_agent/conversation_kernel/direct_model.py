@@ -82,10 +82,12 @@ from pulsara_agent.model_input.contracts import (
     ModelInputScopeKind,
     ModelInputCompileBinding,
     PreparedProviderInputCut,
+    compiled_message_placements_fingerprint,
     model_input_compile_binding_fingerprint,
 )
 from pulsara_agent.model_input.continuity import (
     FrozenProviderInputEpochView,
+    PreparedProviderInputAppendCandidate,
     ProcessLocalProviderInputInstallPermit,
 )
 from pulsara_agent.model_input.provider_replay import (
@@ -139,7 +141,6 @@ class PreparedKernelModelTarget:
     effective_input_budget_tokens: int
     native_function_tool_wire_contract_fingerprint: str
     transport_timeout_policy_fingerprint: str
-    preparation_fingerprint: str
 
     def __post_init__(self) -> None:
         if (
@@ -161,20 +162,6 @@ class PreparedKernelModelTarget:
             != expected_contract
         ):
             raise ValueError("prepared model target native contract drifted")
-        expected = _prepared_model_target_fingerprint(
-            session_id=self.session_id,
-            turn_id=self.turn_id,
-            model_call_index=self.model_call_index,
-            resolved_model_call_id=self.call.resolved_model_call_id,
-            effective_input_budget_tokens=self.effective_input_budget_tokens,
-            maximum_output_tokens=self.maximum_output_tokens,
-            native_function_tool_wire_contract_fingerprint=expected_contract,
-            transport_timeout_policy_fingerprint=(
-                self.transport_timeout_policy_fingerprint
-            ),
-        )
-        if self.preparation_fingerprint != expected:
-            raise ValueError("prepared model target fingerprint mismatch")
 
 
 @dataclass(frozen=True, slots=True)
@@ -206,7 +193,6 @@ class PreparedKernelModelCall:
     native_projection_set: FrozenNativeToolProjectionSet = field(repr=False)
     compile_binding: ModelInputCompileBinding
     transport_timeout_policy_fingerprint: str
-    preparation_fingerprint: str
 
     def __post_init__(self) -> None:
         specs = self.tool_surface.model_surface.tool_specs
@@ -232,25 +218,6 @@ class PreparedKernelModelCall:
                 != projection.canonical_tool_spec_fingerprint
             ):
                 raise ValueError("prepared native projection changed canonical schema")
-        expected = _prepared_model_call_fingerprint(
-            session_id=self.session_id,
-            turn_id=self.turn_id,
-            model_call_index=self.model_call_index,
-            resolved_model_call_id=self.call.resolved_model_call_id,
-            compile_binding_fingerprint=self.compile_binding.binding_fingerprint,
-            surface_fingerprint=self.tool_surface.model_surface.surface_fingerprint,
-            execution_surface_fingerprint=(
-                self.tool_surface.execution_surface_fingerprint
-            ),
-            native_projection_set_fingerprint=(
-                self.native_projection_set.projection_set_fingerprint
-            ),
-            transport_timeout_policy_fingerprint=(
-                self.transport_timeout_policy_fingerprint
-            ),
-        )
-        if self.preparation_fingerprint != expected:
-            raise ValueError("prepared model call fingerprint mismatch")
 
 
 @dataclass(frozen=True, slots=True)
@@ -263,7 +230,6 @@ class PreparedKernelSemanticModelCall:
     call: ResolvedModelCall = field(repr=False)
     native_projection_set: FrozenNativeToolProjectionSet = field(repr=False)
     compile_binding: ModelInputCompileBinding
-    preparation_fingerprint: str
 
     def __post_init__(self) -> None:
         specs = self.compile_binding.tool_surface.tool_specs
@@ -282,21 +248,6 @@ class PreparedKernelSemanticModelCall:
             is not self.native_projection_set.conversation_scope_kind
         ):
             raise ValueError("semantic model call facts do not exact-join")
-        expected = context_fingerprint(
-            "pulsara.prepared-kernel-semantic-model-call.v1",
-            {
-                "session_id": self.session_id,
-                "turn_id": self.turn_id,
-                "model_call_index": self.model_call_index,
-                "resolved_model_call_id": self.call.resolved_model_call_id,
-                "compile_binding": self.compile_binding.binding_fingerprint,
-                "native_projection_set": (
-                    self.native_projection_set.projection_set_fingerprint
-                ),
-            },
-        )
-        if self.preparation_fingerprint != expected:
-            raise ValueError("semantic model call fingerprint mismatch")
 
 
 @dataclass(frozen=True, slots=True)
@@ -340,7 +291,9 @@ class KernelModelExecutionRequest:
             or self.wire_input_plan.compiled_semantic_fingerprint
             != self.compiled_input.compiled_semantic_fingerprint
             or self.wire_input_plan.message_placements_fingerprint
-            != self.compiled_input.message_placements_fingerprint
+            != compiled_message_placements_fingerprint(
+                self.compiled_input.message_placements
+            )
             or self.wire_input_plan.resolved_target_semantic_fingerprint
             != self.prepared_call.call.target.fact.target_fingerprint
             or self.wire_input_plan.materialization.tool_items
@@ -444,8 +397,7 @@ class PreparedKernelModelExecution:
         *,
         request: KernelModelExecutionRequest,
         final_context: LLMContext,
-        expected_append_candidate_fingerprint: str,
-        execution_fingerprint: str,
+        append_candidate: PreparedProviderInputAppendCandidate,
         transport_timeout_policy_fingerprint: str,
         install_authority: ProcessLocalProviderInputInstallAuthority,
         usage_observer: Callable[
@@ -455,10 +407,7 @@ class PreparedKernelModelExecution:
     ) -> None:
         self.request = request
         self.final_context = final_context
-        self.expected_append_candidate_fingerprint = (
-            expected_append_candidate_fingerprint
-        )
-        self.execution_fingerprint = execution_fingerprint
+        self.append_candidate = append_candidate
         self._transport_timeout_policy_fingerprint = (
             transport_timeout_policy_fingerprint
         )
@@ -502,17 +451,17 @@ class PreparedKernelModelExecution:
             is not request.compiled_input.canonical_input_identity.conversation_scope_kind
             or permit.scope.scope_subagent_task_id
             != request.compiled_input.canonical_input_identity.scope_subagent_task_id
-            or permit.candidate_fingerprint
-            != self.expected_append_candidate_fingerprint
-            or permit.execution_fingerprint != self.execution_fingerprint
+            or permit.epoch_nonce != self.append_candidate.epoch_nonce
+            or permit.epoch_revision
+            != self.append_candidate.expected_epoch_revision + 1
             or request.prepared_call.transport_timeout_policy_fingerprint
             != self._transport_timeout_policy_fingerprint
         ):
             raise RuntimeError("provider-input install permit does not exact-join")
         self._install_authority.consume(
             permit,
-            candidate_fingerprint=self.expected_append_candidate_fingerprint,
-            execution_fingerprint=self.execution_fingerprint,
+            candidate=self.append_candidate,
+            execution=self,
         )
         with self._lock:
             if self._state is not _PreparedExecutionState.PREFLIGHTED:
@@ -694,18 +643,6 @@ class DirectKernelModelPort:
         native_contract = openai_native_function_tool_contract_fingerprint(
             target.model_profile.provider_profile.wire_api
         )
-        fingerprint = _prepared_model_target_fingerprint(
-            session_id=request.session_id,
-            turn_id=request.turn_id,
-            model_call_index=request.model_call_index,
-            resolved_model_call_id=call.resolved_model_call_id,
-            effective_input_budget_tokens=input_budget,
-            maximum_output_tokens=request.maximum_output_tokens,
-            native_function_tool_wire_contract_fingerprint=native_contract,
-            transport_timeout_policy_fingerprint=(
-                self._transport_timeout_policy_fingerprint
-            ),
-        )
         return PreparedKernelModelTarget(
             session_id=request.session_id,
             turn_id=request.turn_id,
@@ -720,7 +657,6 @@ class DirectKernelModelPort:
             transport_timeout_policy_fingerprint=(
                 self._transport_timeout_policy_fingerprint
             ),
-            preparation_fingerprint=fingerprint,
         )
 
     def resolve_compaction_summary_call(
@@ -837,23 +773,6 @@ class DirectKernelModelPort:
             tool_surface=surface,
             binding_fingerprint=binding_fingerprint,
         )
-        preparation_fingerprint = _prepared_model_call_fingerprint(
-            session_id=prepared_target.session_id,
-            turn_id=prepared_target.turn_id,
-            model_call_index=prepared_target.model_call_index,
-            resolved_model_call_id=call.resolved_model_call_id,
-            compile_binding_fingerprint=binding_fingerprint,
-            surface_fingerprint=surface.surface_fingerprint,
-            execution_surface_fingerprint=(
-                tool_surface.execution_surface_fingerprint
-            ),
-            native_projection_set_fingerprint=(
-                native_projection_set.projection_set_fingerprint
-            ),
-            transport_timeout_policy_fingerprint=(
-                self._transport_timeout_policy_fingerprint
-            ),
-        )
         return PreparedKernelModelCall(
             session_id=prepared_target.session_id,
             turn_id=prepared_target.turn_id,
@@ -865,7 +784,6 @@ class DirectKernelModelPort:
             transport_timeout_policy_fingerprint=(
                 self._transport_timeout_policy_fingerprint
             ),
-            preparation_fingerprint=preparation_fingerprint,
         )
 
     def bind_semantic_tool_surface(
@@ -916,19 +834,6 @@ class DirectKernelModelPort:
             tool_surface=tool_surface,
             binding_fingerprint=binding_fingerprint,
         )
-        fingerprint = context_fingerprint(
-            "pulsara.prepared-kernel-semantic-model-call.v1",
-            {
-                "session_id": prepared_target.session_id,
-                "turn_id": prepared_target.turn_id,
-                "model_call_index": prepared_target.model_call_index,
-                "resolved_model_call_id": call.resolved_model_call_id,
-                "compile_binding": binding.binding_fingerprint,
-                "native_projection_set": (
-                    native_projection_set.projection_set_fingerprint
-                ),
-            },
-        )
         return PreparedKernelSemanticModelCall(
             session_id=prepared_target.session_id,
             turn_id=prepared_target.turn_id,
@@ -936,20 +841,17 @@ class DirectKernelModelPort:
             call=call,
             native_projection_set=native_projection_set,
             compile_binding=binding,
-            preparation_fingerprint=fingerprint,
         )
 
     def preflight_execution(
         self,
         request: KernelModelExecutionRequest,
         *,
-        expected_append_candidate_fingerprint: str,
+        append_candidate: PreparedProviderInputAppendCandidate,
         install_authority: ProcessLocalProviderInputInstallAuthority,
     ) -> PreparedKernelModelExecution:
         if type(install_authority) is not ProcessLocalProviderInputInstallAuthority:
             raise TypeError("provider-input install authority is invalid")
-        if not expected_append_candidate_fingerprint.startswith("sha256:"):
-            raise ValueError("append candidate fingerprint is invalid")
         prepared = request.prepared_call
         compiled = request.compiled_input
         plan = request.wire_input_plan
@@ -978,7 +880,7 @@ class DirectKernelModelPort:
             or plan.compiled_semantic_fingerprint
             != compiled.compiled_semantic_fingerprint
             or plan.message_placements_fingerprint
-            != compiled.message_placements_fingerprint
+            != compiled_message_placements_fingerprint(compiled.message_placements)
             or plan.resolved_target_semantic_fingerprint
             != prepared.call.target.fact.target_fingerprint
             or plan.provider_profile_fingerprint
@@ -994,23 +896,17 @@ class DirectKernelModelPort:
         ):
             raise ValueError("compiled model input does not exact-join preparation")
         install_authority.require_registered_plan(
-            candidate_fingerprint=expected_append_candidate_fingerprint,
+            candidate=append_candidate,
             wire_input_plan=plan,
-            capability_dispatch_cut_fingerprint=(
-                prepared.tool_surface.capability_exposure_plan.dispatch_cut_fingerprint
-                if prepared.tool_surface.capability_exposure_plan is not None
-                else context_fingerprint(
-                    "test:capability-dispatch-cut:v1",
-                    prepared.native_projection_set.projection_set_fingerprint,
-                )
-            ),
-            direct_native_projection_set=prepared.native_projection_set,
-            mcp_route_projection=(
-                prepared.tool_surface.capability_exposure_plan.mcp_catalog_route_projection
-                if prepared.tool_surface.capability_exposure_plan is not None
-                else None
-            ),
+            tool_exposure_plan=append_candidate.tool_exposure_plan,
         )
+        if (
+            prepared.tool_surface.capability_exposure_plan
+            is not append_candidate.tool_exposure_plan
+            or prepared.native_projection_set
+            is not append_candidate.direct_native_projection_set
+        ):
+            raise ValueError("model execution capability plan does not exact-join")
         if not request.surface_borrow.exactly_joins(prepared.tool_surface):
             raise ValueError("model execution surface borrow does not join preparation")
         if (
@@ -1047,34 +943,10 @@ class DirectKernelModelPort:
         validated = validate_model_context_for_call(call=call, context=context)
         if validated.estimate != compiled.final_estimate:
             raise RuntimeError("compiler and pre-send input estimates differ")
-        execution_fingerprint = context_fingerprint(
-            "pulsara:prepared-kernel-model-execution:v1",
-            {
-                "preparation": prepared.preparation_fingerprint,
-                "compiled": compiled.compiled_semantic_fingerprint,
-                "wire_plan": plan.plan_fingerprint,
-                "cut": {
-                    "session": request.cut.session_id,
-                    "turn": request.cut.turn_id,
-                    "revision": request.cut.context_binding_revision_id,
-                    "through": request.cut.provider_input_through_sequence,
-                },
-                "append_candidate": expected_append_candidate_fingerprint,
-                "execution_surface": (
-                    prepared.tool_surface.execution_surface_fingerprint
-                ),
-                "transport_timeout_policy": (
-                    prepared.transport_timeout_policy_fingerprint
-                ),
-            },
-        )
         return PreparedKernelModelExecution(
             request=request,
             final_context=context,
-            expected_append_candidate_fingerprint=(
-                expected_append_candidate_fingerprint
-            ),
-            execution_fingerprint=execution_fingerprint,
+            append_candidate=append_candidate,
             transport_timeout_policy_fingerprint=(
                 self._transport_timeout_policy_fingerprint
             ),
@@ -1144,62 +1016,6 @@ class DirectKernelModelPort:
             normalized_model_identifier=call.target.fact.model_id,
             transport_binding_id=call.target.fact.transport_binding_id,
         )
-
-
-def _prepared_model_target_fingerprint(
-    *,
-    session_id: str,
-    turn_id: str,
-    model_call_index: int,
-    resolved_model_call_id: str,
-    effective_input_budget_tokens: int,
-    maximum_output_tokens: int,
-    native_function_tool_wire_contract_fingerprint: str,
-    transport_timeout_policy_fingerprint: str,
-) -> str:
-    return context_fingerprint(
-        "prepared-kernel-model-target:v1",
-        {
-            "session_id": session_id,
-            "turn_id": turn_id,
-            "model_call_index": model_call_index,
-            "call_id": resolved_model_call_id,
-            "input_budget": effective_input_budget_tokens,
-            "output_cap": maximum_output_tokens,
-            "native_tool_contract": (
-                native_function_tool_wire_contract_fingerprint
-            ),
-            "transport_timeout_policy": transport_timeout_policy_fingerprint,
-        },
-    )
-
-
-def _prepared_model_call_fingerprint(
-    *,
-    session_id: str,
-    turn_id: str,
-    model_call_index: int,
-    resolved_model_call_id: str,
-    compile_binding_fingerprint: str,
-    surface_fingerprint: str,
-    execution_surface_fingerprint: str,
-    native_projection_set_fingerprint: str,
-    transport_timeout_policy_fingerprint: str,
-) -> str:
-    return context_fingerprint(
-        "prepared-kernel-model-call:v1",
-        {
-            "session_id": session_id,
-            "turn_id": turn_id,
-            "model_call_index": model_call_index,
-            "call_id": resolved_model_call_id,
-            "compile_binding": compile_binding_fingerprint,
-            "surface": surface_fingerprint,
-            "execution_surface": execution_surface_fingerprint,
-            "native_projection_set": native_projection_set_fingerprint,
-            "transport_timeout_policy": transport_timeout_policy_fingerprint,
-        },
-    )
 
 
 def _provider_wire_profile_fingerprint(call: ResolvedModelCall) -> str:
@@ -1530,15 +1346,10 @@ def _plan_provider_wire_input(
     root_plain = thaw_json(root_value)
     tools_plain = tuple(thaw_json(item) for item in frozen_tools)
     inputs_plain = tuple(thaw_json(item) for item in frozen_inputs)
-    materialization_fingerprint = context_fingerprint(
-        "pulsara.provider-wire-materialization:v1",
-        {"root": root_plain, "tools": tools_plain, "input": inputs_plain},
-    )
     materialization = FrozenProviderWireMaterialization(
         root_policy_value=root_value,
         tool_items=frozen_tools,
         ordered_input_items=frozen_inputs,
-        materialization_fingerprint=materialization_fingerprint,
     )
     final_message_tokens = (
         compiled_input.final_estimate.message_tokens - debit_tokens + addend_tokens
@@ -1554,22 +1365,6 @@ def _plan_provider_wire_input(
             {"root": root_plain, "tools": tools_plain, "input": inputs_plain}
         )
     )
-    quote_values = {
-        "estimator": binding.estimator_fingerprint,
-        "budget": binding.effective_input_budget_tokens,
-        "semantic_total_tokens": compiled_input.final_estimate.total_input_tokens,
-        "semantic_message_tokens": compiled_input.final_estimate.message_tokens,
-        "semantic_message_bytes": semantic_message_bytes,
-        "debit_tokens": debit_tokens,
-        "addend_tokens": addend_tokens,
-        "debit_bytes": debit_bytes,
-        "addend_bytes": addend_bytes,
-        "final_message_tokens": final_message_tokens,
-        "final_total_tokens": final_total_tokens,
-        "final_message_bytes": final_message_bytes,
-        "final_wire_bytes": final_wire_bytes,
-        "contract": "pulsara.provider-wire-input-quote.v1",
-    }
     quote = FrozenProviderWireInputQuote(
         estimator_fingerprint=binding.estimator_fingerprint,
         effective_input_budget_tokens=binding.effective_input_budget_tokens,
@@ -1585,9 +1380,6 @@ def _plan_provider_wire_input(
         final_message_utf8_bytes=final_message_bytes,
         final_wire_utf8_bytes=final_wire_bytes,
         quote_contract_version="pulsara.provider-wire-input-quote.v1",
-        quote_fingerprint=context_fingerprint(
-            "pulsara.provider-wire-input-quote:v1", quote_values
-        ),
     )
     wire_system = context_fingerprint(
         "pulsara.provider-wire-system:v1", root_plain
@@ -1605,40 +1397,13 @@ def _plan_provider_wire_input(
             "input": inputs_plain,
         },
     )
-    plan_values = {
-        "context": compiled_input.context_id,
-        "compiled": compiled_input.compiled_semantic_fingerprint,
-        "placements": compiled_input.message_placements_fingerprint,
-        "api": profile.wire_api,
-        "profile": profile_fingerprint,
-        "target": call.target.fact.target_fingerprint,
-        "materialization": materialization.materialization_fingerprint,
-        "replacements": tuple(
-            (
-                item.assistant_entry_id,
-                item.first_message_ordinal,
-                item.message_count,
-                item.generic_message_group_fingerprint,
-                item.replay_fragment_fingerprint,
-                item.replacement_wire_fingerprint,
-                item.semantic_debit_utf8_bytes,
-                item.replay_addend_utf8_bytes,
-                item.semantic_debit_tokens,
-                item.replay_addend_tokens,
-            )
-            for item in replacements
-        ),
-        "provider_replay_hydration": hydration_fingerprint,
-        "wire_system": wire_system,
-        "wire_tools": wire_tools_fingerprint,
-        "wire_input": wire_input,
-        "quote": quote.quote_fingerprint,
-    }
     return FrozenProviderWireInputPlan(
         context_id=compiled_input.context_id,
         compiled_semantic_fingerprint=compiled_input.compiled_semantic_fingerprint,
         message_placements_fingerprint=(
-            compiled_input.message_placements_fingerprint
+            compiled_message_placements_fingerprint(
+                compiled_input.message_placements
+            )
         ),
         wire_api=profile.wire_api,
         provider_profile_fingerprint=profile_fingerprint,
@@ -1650,9 +1415,6 @@ def _plan_provider_wire_input(
         wire_tools_fingerprint=wire_tools_fingerprint,
         wire_input_prefix_fingerprint=wire_input,
         quote=quote,
-        plan_fingerprint=context_fingerprint(
-            "pulsara.provider-wire-input-plan:v2-durable-replay", plan_values
-        ),
     )
 
 

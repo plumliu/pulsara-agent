@@ -303,17 +303,6 @@ class ProviderSanitizedDiagnosticFact(BaseModel):
     attributes: dict[str, str]
     redaction_count: int = Field(ge=0)
     truncated: bool
-    diagnostic_fingerprint: str = Field(min_length=1)
-
-    @model_validator(mode="after")
-    def _validate_fingerprint(self) -> "ProviderSanitizedDiagnosticFact":
-        expected = sha256_fingerprint(
-            "provider-sanitized-diagnostic:v1",
-            self.model_dump(mode="json", exclude={"diagnostic_fingerprint"}),
-        )
-        if self.diagnostic_fingerprint != expected:
-            raise ValueError("provider sanitized diagnostic fingerprint mismatch")
-        return self
 
 
 class ProviderRetryAttemptSummaryFact(BaseModel):
@@ -326,18 +315,11 @@ class ProviderRetryAttemptSummaryFact(BaseModel):
     delay_millis: int | None = Field(default=None, ge=0, le=600_000)
     retry_after_millis: int | None = Field(default=None, ge=0, le=600_000)
     retry_after_exceeded: bool
-    attempt_fingerprint: str = Field(min_length=1)
 
     @model_validator(mode="after")
     def _validate_attempt(self) -> "ProviderRetryAttemptSummaryFact":
         if self.attempt > self.max_attempts:
             raise ValueError("provider retry attempt exceeds max attempts")
-        expected = sha256_fingerprint(
-            "provider-retry-attempt-summary:v1",
-            self.model_dump(mode="json", exclude={"attempt_fingerprint"}),
-        )
-        if self.attempt_fingerprint != expected:
-            raise ValueError("provider retry attempt summary fingerprint mismatch")
         return self
 
 
@@ -356,8 +338,6 @@ class ProviderRetrySummaryFact(BaseModel):
     final_status_code: int | None = Field(default=None, ge=100, le=599)
     retry_after_exceeded: bool
     attempts: tuple[ProviderRetryAttemptSummaryFact, ...]
-    summary_contract_fingerprint: str = Field(min_length=1)
-    summary_fingerprint: str = Field(min_length=1)
 
     @model_validator(mode="after")
     def _validate_summary(self) -> "ProviderRetrySummaryFact":
@@ -371,36 +351,100 @@ class ProviderRetrySummaryFact(BaseModel):
             raise ValueError("provider retry summary attempts are not contiguous")
         if any(item.max_attempts != self.max_attempts for item in self.attempts):
             raise ValueError("provider retry summary max attempts drifted")
-        expected_contract = sha256_fingerprint(
-            "provider-retry-summary-contract:v1",
-            {
-                "max_attempts": 32,
-                "fields": (
-                    "attempt",
-                    "reason",
-                    "status_code",
-                    "delay_millis",
-                    "retry_after_millis",
-                    "retry_after_exceeded",
-                ),
-                "excluded": (
-                    "exception_message",
-                    "exception_repr",
-                    "provider_data",
-                    "url",
-                    "secret",
-                ),
-            },
-        )
-        if self.summary_contract_fingerprint != expected_contract:
-            raise ValueError("provider retry summary contract mismatch")
-        expected = sha256_fingerprint(
-            "provider-retry-summary:v1",
-            self.model_dump(mode="json", exclude={"summary_fingerprint"}),
-        )
-        if self.summary_fingerprint != expected:
-            raise ValueError("provider retry summary fingerprint mismatch")
         return self
+
+
+def _provider_retry_summary_contract_fingerprint() -> str:
+    return sha256_fingerprint(
+        "provider-retry-summary-contract:v1",
+        {
+            "max_attempts": 32,
+            "fields": (
+                "attempt",
+                "reason",
+                "status_code",
+                "delay_millis",
+                "retry_after_millis",
+                "retry_after_exceeded",
+            ),
+            "excluded": (
+                "exception_message",
+                "exception_repr",
+                "provider_data",
+                "url",
+                "secret",
+            ),
+        },
+    )
+
+
+def _legacy_retry_attempt_payload(
+    attempt: ProviderRetryAttemptSummaryFact,
+) -> dict[str, object]:
+    semantic = attempt.model_dump(mode="json")
+    return {
+        **semantic,
+        "attempt_fingerprint": sha256_fingerprint(
+            "provider-retry-attempt-summary:v1", semantic
+        ),
+    }
+
+
+def _legacy_retry_summary_payload(
+    summary: ProviderRetrySummaryFact,
+) -> dict[str, object]:
+    semantic = summary.model_dump(mode="json", exclude={"attempts"})
+    payload = {
+        **semantic,
+        "attempts": tuple(
+            _legacy_retry_attempt_payload(attempt) for attempt in summary.attempts
+        ),
+        "summary_contract_fingerprint": (
+            _provider_retry_summary_contract_fingerprint()
+        ),
+    }
+    return {
+        **payload,
+        "summary_fingerprint": sha256_fingerprint(
+            "provider-retry-summary:v1", payload
+        ),
+    }
+
+
+def _legacy_diagnostic_payload(
+    diagnostic: ProviderSanitizedDiagnosticFact,
+) -> dict[str, object]:
+    semantic = diagnostic.model_dump(mode="json")
+    return {
+        **semantic,
+        "diagnostic_fingerprint": sha256_fingerprint(
+            "provider-sanitized-diagnostic:v1", semantic
+        ),
+    }
+
+
+def provider_sanitized_error_identity_fingerprint(
+    error: "ProviderSanitizedErrorFact",
+) -> str:
+    """Preserve the public stable failure identity without nested DTO hashes."""
+
+    payload = {
+        "schema_version": error.schema_version,
+        "code": error.code.value,
+        "message": error.message,
+        "diagnostics": tuple(
+            _legacy_diagnostic_payload(item) for item in error.diagnostics
+        ),
+        "redaction_count": error.redaction_count,
+        "truncated": error.truncated,
+        "sanitization_contract": error.sanitization_contract.model_dump(mode="json"),
+        "retry_summary": (
+            None
+            if error.retry_summary is None
+            else _legacy_retry_summary_payload(error.retry_summary)
+        ),
+    }
+    return sha256_fingerprint("provider-sanitized-error:v2", payload)
 
 
 class ProviderSanitizedErrorFact(BaseModel):
@@ -428,10 +472,7 @@ class ProviderSanitizedErrorFact(BaseModel):
             diagnostic.redaction_count for diagnostic in self.diagnostics
         ):
             raise ValueError("provider sanitized error redaction count mismatch")
-        expected = sha256_fingerprint(
-            "provider-sanitized-error:v2",
-            self.model_dump(mode="json", exclude={"error_fingerprint"}),
-        )
+        expected = provider_sanitized_error_identity_fingerprint(self)
         if self.error_fingerprint != expected:
             raise ValueError("provider sanitized error fingerprint mismatch")
         return self
@@ -458,5 +499,6 @@ __all__ = [
     "canonical_json_bytes",
     "resolved_model_options_fingerprint",
     "resolved_model_target_fingerprint",
+    "provider_sanitized_error_identity_fingerprint",
     "sha256_fingerprint",
 ]

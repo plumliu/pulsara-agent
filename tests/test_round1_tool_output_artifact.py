@@ -45,7 +45,10 @@ from pulsara_agent.conversation_kernel.tool_artifacts import (
 from pulsara_agent.conversation_kernel.tool_policy import (
     DefaultToolDispatchAuthorizationPolicy,
 )
-from pulsara_agent.conversation_kernel.tool_runtime import DirectKernelToolPort
+from pulsara_agent.conversation_kernel.tool_runtime import (
+    DirectKernelToolPort,
+    production_builtin_executor_binding_identity_fingerprint,
+)
 from pulsara_agent.conversation_kernel.vocabulary import (
     APPEND_GUARDS,
     COMMITTED_EVENT_DESCRIPTORS,
@@ -1690,18 +1693,19 @@ def test_round1_production_descriptor_executor_closure(tmp_path: Path) -> None:
     assert "artifact_read" in specs
     assert set(specs) == set(bindings)
     binding = bindings["artifact_read"]
-    assert binding.descriptor_id == "builtin:artifact_read"
-    assert binding.descriptor_contract_version == "v1"
-    assert binding.descriptor_fingerprint.startswith("sha256:")
-    assert binding.input_schema_fingerprint.startswith("sha256:")
-    assert binding.catalog_entry_fingerprint.startswith("sha256:")
-    assert binding.availability_requirement_fingerprint.startswith("sha256:")
-    assert binding.permission_contract_fingerprint.startswith("sha256:")
-    assert binding.execution_binding_kind == "artifact_read"
-    assert binding.is_read_only
-    assert binding.is_concurrency_safe
-    assert binding.permission_category == "artifact_read"
+    entry = binding.catalog_entry
+    assert entry.descriptor.id == "builtin:artifact_read"
+    assert entry.binding_contract.contract_version == "v1"
+    assert entry.descriptor.fingerprint().startswith("sha256:")
+    assert entry.entry_fingerprint.startswith("sha256:")
+    assert entry.execution_binding_kind.value == "artifact_read"
+    assert entry.descriptor.is_read_only
+    assert entry.descriptor.is_concurrency_safe
+    assert entry.descriptor.permission_category == "artifact_read"
     assert binding.executor_identity.endswith("ArtifactReadTool#artifact_read")
+    assert production_builtin_executor_binding_identity_fingerprint(
+        binding
+    ).startswith("sha256:")
     schema = thaw_json(specs["artifact_read"].parameters)
     assert isinstance(schema, dict)
     assert schema["additionalProperties"] is False

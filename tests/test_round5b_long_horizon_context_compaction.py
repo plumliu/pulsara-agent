@@ -851,9 +851,6 @@ def test_round5b_retained_skill_drops_body_already_full_in_successor_tail() -> N
     }
     item = FrozenRetainedSkillContextItem(
         **item_values,
-        item_fingerprint=context_fingerprint(
-            "pulsara.retained-skill-context-item.v1", item_values
-        ),
     )
     body = canonical_json_bytes(
         {
@@ -875,7 +872,15 @@ def test_round5b_retained_skill_drops_body_already_full_in_successor_tail() -> N
         selection_fingerprint=context_fingerprint(
             "pulsara.retained-skill-context-selection.v1",
             {
-                "items": (item.item_fingerprint,),
+                "items": (
+                    (
+                        item.name,
+                        item.catalog_location,
+                        item.body,
+                        item.delivery_sequence,
+                        item.evidence_source_entry_fingerprint,
+                    ),
+                ),
                 "body": body,
                 "tokens": tokens,
             },

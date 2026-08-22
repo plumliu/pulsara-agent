@@ -12,6 +12,7 @@ from pulsara_agent.capability.contracts import (
     CapabilitySourceSnapshotDisposition,
     FrozenSkillCapabilityDispatchView,
     FrozenToolCapabilityExposurePlan,
+    capability_source_snapshot_semantic_digest,
 )
 from pulsara_agent.capability.render import (
     MAX_ACTIVE_SKILL_BODY_UTF8_BYTES,
@@ -70,6 +71,38 @@ class TerminalCurrentCwdSnapshotPort(Protocol):
 
 class McpCatalogSnapshotPort(Protocol):
     def catalog_snapshot(self) -> "McpCatalogSnapshot": ...
+
+
+def _tool_exposure_plan_identity(
+    plan: FrozenToolCapabilityExposurePlan,
+) -> str:
+    """Context-source lineage from the exact plan, without a stored plan hash."""
+
+    return context_fingerprint(
+        "tool-capability-exposure-plan:v1-hard-cut",
+        {
+            "surface": plan.direct_tool_surface.surface_fingerprint,
+            "projections": plan.direct_projection_set.projection_set_fingerprint,
+            "mcp_routes": plan.mcp_catalog_route_projection.projection_fingerprint,
+        },
+    )
+
+
+def _skill_dispatch_view_identity(
+    view: FrozenSkillCapabilityDispatchView,
+) -> str:
+    return context_fingerprint(
+        "skill-capability-dispatch-view:v1-hard-cut",
+        {
+            "source": capability_source_snapshot_semantic_digest(
+                view.projection_input.source_snapshot
+            ),
+            "discovery": view.projection_input.discovery_semantic_fingerprint,
+            "facts": tuple(
+                item.fact_semantic_fingerprint for item in view.registry_skill_facts
+            ),
+        },
+    )
 
 
 class ContextSourceCollectorPort(Protocol):
@@ -166,7 +199,6 @@ class FrozenNonTriggerContextSources:
     absent_facts: tuple[ContextSourceAbsentFact, ...]
     diagnostics: tuple[ContextSourceCollectionDiagnostic, ...]
     registry_fingerprint: str
-    freeze_fingerprint: str
     tool_exposure_plan: FrozenToolCapabilityExposurePlan = field(repr=False)
     skill_dispatch_view: FrozenSkillCapabilityDispatchView = field(repr=False)
     skill_owner_snapshot: PreparedLocalSkillCatalogSourceSnapshot = field(
@@ -539,8 +571,8 @@ class KernelContextSourceCollector:
     ) -> FrozenNonTriggerContextSources:
         del deadline_monotonic
         if (
-            tool_exposure_plan.dispatch_cut_fingerprint
-            != skill_dispatch_view.parent_dispatch_cut_fingerprint
+            tool_exposure_plan.dispatch_view.parent_dispatch_cut
+            is not skill_dispatch_view.parent_dispatch_cut
         ):
             raise ValueError("capability sibling views do not share one parent cut")
         candidates: list[ContextSourceCandidate] = []
@@ -676,7 +708,6 @@ class KernelContextSourceCollector:
                 local_date=temporal.local_date,
                 timezone_name=temporal.timezone_name,
                 utc_offset_minutes=temporal.utc_offset_minutes,
-                temporal_capture_fingerprint=temporal.capture_fingerprint,
             )
             candidates.append(
                 self._candidate(
@@ -737,27 +768,11 @@ class KernelContextSourceCollector:
                         ContextSourceAbsenceKind.NOT_APPLICABLE,
                     )
                 )
-        fingerprint = context_fingerprint(
-            "pulsara:frozen-non-trigger-context-sources:v1",
-            {
-                "candidates": tuple(
-                    item.source_semantic_fingerprint for item in candidates
-                ),
-                "absent": tuple(item.domain_semantic_fingerprint for item in absent),
-                "diagnostics": tuple(
-                    (item.code.value, item.severity) for item in diagnostics
-                ),
-                "tool_exposure_plan": tool_exposure_plan.exposure_plan_fingerprint,
-                "skill_dispatch_view": skill_dispatch_view.view_fingerprint,
-                "registry": self._registry.fingerprint,
-            },
-        )
         return FrozenNonTriggerContextSources(
             candidates=tuple(candidates),
             absent_facts=tuple(absent),
             diagnostics=tuple(diagnostics),
             registry_fingerprint=self._registry.fingerprint,
-            freeze_fingerprint=fingerprint,
             tool_exposure_plan=tool_exposure_plan,
             skill_dispatch_view=skill_dispatch_view,
             skill_owner_snapshot=skill_owner_snapshot,
@@ -972,21 +987,11 @@ class KernelContextSourceCollector:
         if offset is None:
             raise ValueError("runtime timezone has no UTC offset")
         offset_minutes = int(offset.total_seconds() // 60)
-        fingerprint = context_fingerprint(
-            "runtime-temporal-capture:v1",
-            {
-                "observed_at_utc": observed_utc.isoformat(),
-                "local_date": local.date().isoformat(),
-                "timezone_name": self._timezone_name,
-                "utc_offset_minutes": offset_minutes,
-            },
-        )
         return RuntimeTemporalCapture(
             observed_at_utc=observed_utc,
             local_date=local.date(),
             timezone_name=self._timezone_name,
             utc_offset_minutes=offset_minutes,
-            capture_fingerprint=fingerprint,
         )
 
     def _environment_snapshot(
@@ -1004,12 +1009,7 @@ class KernelContextSourceCollector:
                 None if temporal is None else temporal.utc_offset_minutes
             ),
         }
-        return RuntimeEnvironmentSnapshot(
-            **payload,
-            snapshot_fingerprint=context_fingerprint(
-                "runtime-environment-snapshot:v1", payload
-            ),
-        )
+        return RuntimeEnvironmentSnapshot(**payload)
 
     def _candidate(
         self,
@@ -1388,29 +1388,11 @@ def replace_frozen_subagent_context_sources(
         diagnostics=collected.diagnostics,
         registry_fingerprint=collected.registry_fingerprint,
     )
-    fingerprint = context_fingerprint(
-        "pulsara:frozen-non-trigger-context-sources:v1",
-        {
-            "candidates": tuple(
-                item.source_semantic_fingerprint for item in collected.candidates
-            ),
-            "absent": tuple(
-                item.domain_semantic_fingerprint for item in collected.absent_facts
-            ),
-            "diagnostics": tuple(
-                (item.code.value, item.severity) for item in sources.diagnostics
-            ),
-            "tool_exposure_plan": sources.tool_exposure_plan.exposure_plan_fingerprint,
-            "skill_dispatch_view": sources.skill_dispatch_view.view_fingerprint,
-            "registry": sources.registry_fingerprint,
-        },
-    )
     return FrozenNonTriggerContextSources(
         candidates=collected.candidates,
         absent_facts=collected.absent_facts,
         diagnostics=sources.diagnostics,
         registry_fingerprint=sources.registry_fingerprint,
-        freeze_fingerprint=fingerprint,
         tool_exposure_plan=sources.tool_exposure_plan,
         skill_dispatch_view=sources.skill_dispatch_view,
         skill_owner_snapshot=sources.skill_owner_snapshot,
@@ -1624,32 +1606,42 @@ def replace_frozen_compaction_context_sources(
     absent = tuple(
         item for item in sources.absent_facts if item.source_kind not in kinds
     ) + tuple(item for item in replacements if isinstance(item, ContextSourceAbsentFact))
-    fingerprint = context_fingerprint(
-        "pulsara:frozen-non-trigger-context-sources:v1",
-        {
-            "candidates": tuple(
-                item.source_semantic_fingerprint for item in candidates
-            ),
-            "absent": tuple(item.domain_semantic_fingerprint for item in absent),
-            "diagnostics": tuple(
-                (item.code.value, item.severity) for item in sources.diagnostics
-            ),
-            "tool_exposure_plan": (
-                sources.tool_exposure_plan.exposure_plan_fingerprint
-            ),
-            "skill_dispatch_view": sources.skill_dispatch_view.view_fingerprint,
-            "registry": sources.registry_fingerprint,
-        },
-    )
     return FrozenNonTriggerContextSources(
         candidates=candidates,
         absent_facts=absent,
         diagnostics=sources.diagnostics,
         registry_fingerprint=sources.registry_fingerprint,
-        freeze_fingerprint=fingerprint,
         tool_exposure_plan=sources.tool_exposure_plan,
         skill_dispatch_view=sources.skill_dispatch_view,
         skill_owner_snapshot=sources.skill_owner_snapshot,
+    )
+
+
+def frozen_non_trigger_context_sources_identity_digest(
+    sources: FrozenNonTriggerContextSources,
+) -> str:
+    """Derive the historical stable rejection-ID input without storing it."""
+
+    return context_fingerprint(
+        "pulsara:frozen-non-trigger-context-sources:v1",
+        {
+            "candidates": tuple(
+                item.source_semantic_fingerprint for item in sources.candidates
+            ),
+            "absent": tuple(
+                item.domain_semantic_fingerprint for item in sources.absent_facts
+            ),
+            "diagnostics": tuple(
+                (item.code.value, item.severity) for item in sources.diagnostics
+            ),
+            "tool_exposure_plan": _tool_exposure_plan_identity(
+                sources.tool_exposure_plan
+            ),
+            "skill_dispatch_view": _skill_dispatch_view_identity(
+                sources.skill_dispatch_view
+            ),
+            "registry": sources.registry_fingerprint,
+        },
     )
 
 
@@ -2102,6 +2094,7 @@ __all__ = [
     "TerminalCurrentCwdSnapshotPort",
     "build_compaction_context_source",
     "build_memory_context_source",
+    "frozen_non_trigger_context_sources_identity_digest",
     "replace_compaction_context_sources",
     "replace_frozen_compaction_context_sources",
     "replace_memory_context_sources",

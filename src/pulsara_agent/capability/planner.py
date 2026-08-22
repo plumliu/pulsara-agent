@@ -23,8 +23,7 @@ from pulsara_agent.capability.contracts import (
     ToolCapabilityVersionRef,
     ToolCapabilityOrigin,
     ToolCapabilityRouteKind,
-    tool_capability_exposure_selection_fingerprint,
-    tool_capability_exposure_plan_fingerprint,
+    tool_capability_version_identity_digest,
     tool_capability_version_ref,
 )
 from pulsara_agent.model_input.contracts import (
@@ -54,7 +53,7 @@ def _route(
         {
             "server_id": target.server_id,
             "remote_tool_name": target.remote_tool_name,
-            "version": version.version_fingerprint,
+            "version": tool_capability_version_identity_digest(version),
             "route": kind.value,
             "reason": reason.value,
         },
@@ -100,8 +99,7 @@ class KernelToolCapabilityPlanner:
     ) -> FrozenToolCapabilityExposureSelection:
         facts = view.registry_tool_facts
         eligibility = {
-            item.capability_version_fingerprint: item
-            for item in view.planning_input.native_wire.entries
+            item.version: item for item in view.planning_input.native_wire.entries
         }
         if len(eligibility) != len(view.planning_input.native_wire.entries):
             raise CapabilityPlanningError("native eligibility versions conflict")
@@ -114,7 +112,7 @@ class KernelToolCapabilityPlanner:
         mcp_eligible: list[FrozenToolCapabilityFact] = []
         mcp_incompatible: list[FrozenToolCapabilityFact] = []
         for fact in facts:
-            item = eligibility.get(tool_capability_version_ref(fact).version_fingerprint)
+            item = eligibility.get(tool_capability_version_ref(fact))
             if item is None:
                 raise CapabilityPlanningError("tool eligibility coverage is incomplete")
             if fact.origin is ToolCapabilityOrigin.BUILTIN:
@@ -139,7 +137,7 @@ class KernelToolCapabilityPlanner:
             > MAXIMUM_NATIVE_TOOL_BYTES
             or sum(
                 eligibility[
-                    tool_capability_version_ref(item).version_fingerprint
+                    tool_capability_version_ref(item)
                 ].wire_utf8_bytes
                 for item in builtin
             )
@@ -166,7 +164,7 @@ class KernelToolCapabilityPlanner:
                 <= MAXIMUM_NATIVE_TOOL_BYTES
                 and sum(
                     eligibility[
-                        tool_capability_version_ref(item).version_fingerprint
+                        tool_capability_version_ref(item)
                     ].wire_utf8_bytes
                     for item in candidate
                 )
@@ -176,13 +174,10 @@ class KernelToolCapabilityPlanner:
             direct_tool_surface, direct_tool_versions = _direct_surface(
                 view=view, selected=selected
             )
-            direct_versions = {
-                item.version_fingerprint
-                for item in direct_tool_versions
-            }
+            direct_versions = set(direct_tool_versions)
             for fact in mcp_eligible:
                 version = tool_capability_version_ref(fact)
-                if version.version_fingerprint in direct_versions:
+                if version in direct_versions:
                     routes.append(
                         _route(
                             fact=fact,
@@ -216,7 +211,7 @@ class KernelToolCapabilityPlanner:
                 reusable_direct_projection_set = predecessor.direct_projection_set
             else:
                 for version in predecessor.direct_projection_set.tool_versions:
-                    item = eligibility.get(version.version_fingerprint)
+                    item = eligibility.get(version)
                     if not isinstance(item, FrozenNativeToolWireEligibilityQuote):
                         raise CapabilityPlanningError(
                             "installed direct cohort cannot be fully reprojected"
@@ -338,32 +333,11 @@ class KernelToolCapabilityPlanner:
                 },
             ),
         )
-        native = view.planning_input.native_wire
-        selection_fingerprint = tool_capability_exposure_selection_fingerprint(
-            dispatch_cut_fingerprint=view.parent_dispatch_cut_fingerprint,
-            tool_dispatch_view_fingerprint=view.view_fingerprint,
-            conversation_scope_kind=native.conversation_scope_kind,
-            scope_subagent_task_id=native.scope_subagent_task_id,
-            native_function_tool_wire_contract_fingerprint=(
-                native.native_function_tool_wire_contract_fingerprint
-            ),
-            direct_tool_surface=direct_tool_surface,
-            direct_tool_versions=direct_tool_versions,
-            reusable_direct_projection_set=reusable_direct_projection_set,
-            mcp_catalog_route_projection=mcp_projection,
-        )
         return FrozenToolCapabilityExposureSelection(
-            dispatch_cut_fingerprint=view.parent_dispatch_cut_fingerprint,
-            tool_dispatch_view_fingerprint=view.view_fingerprint,
-            conversation_scope_kind=native.conversation_scope_kind,
-            scope_subagent_task_id=native.scope_subagent_task_id,
-            native_function_tool_wire_contract_fingerprint=(
-                native.native_function_tool_wire_contract_fingerprint
-            ),
+            dispatch_view=view,
             direct_tool_surface=direct_tool_surface,
             direct_tool_versions=direct_tool_versions,
             mcp_catalog_route_projection=mcp_projection,
-            selection_fingerprint=selection_fingerprint,
             reusable_direct_projection_set=reusable_direct_projection_set,
         )
 
@@ -386,28 +360,9 @@ class KernelToolCapabilityPlanner:
             raise CapabilityPlanningError(
                 "materialized native projection set does not join selection"
             )
-        exposure_fingerprint = tool_capability_exposure_plan_fingerprint(
-            dispatch_cut_fingerprint=selection.dispatch_cut_fingerprint,
-            tool_dispatch_view_fingerprint=(
-                selection.tool_dispatch_view_fingerprint
-            ),
-            direct_tool_surface=selection.direct_tool_surface,
-            direct_projection_set=direct_projection_set,
-            mcp_catalog_route_projection=(
-                selection.mcp_catalog_route_projection
-            ),
-        )
         return FrozenToolCapabilityExposurePlan(
-            dispatch_cut_fingerprint=selection.dispatch_cut_fingerprint,
-            tool_dispatch_view_fingerprint=(
-                selection.tool_dispatch_view_fingerprint
-            ),
-            direct_tool_surface=selection.direct_tool_surface,
+            selection=selection,
             direct_projection_set=direct_projection_set,
-            mcp_catalog_route_projection=(
-                selection.mcp_catalog_route_projection
-            ),
-            exposure_plan_fingerprint=exposure_fingerprint,
         )
 
     @staticmethod

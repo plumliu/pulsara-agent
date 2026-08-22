@@ -143,7 +143,6 @@ class FrozenCapabilitySourceRegistration:
     source: CapabilitySourceRef
     refresh_mode: CapabilitySourceRefreshMode
     source_contract_fingerprint: str
-    registration_fingerprint: str
 
     def __post_init__(self) -> None:
         if not isinstance(self.source, CapabilitySourceRef):
@@ -152,18 +151,6 @@ class FrozenCapabilitySourceRegistration:
             raise TypeError("source refresh mode is not closed")
         if not self.source_contract_fingerprint:
             raise ValueError("source contract fingerprint is empty")
-        expected = context_fingerprint(
-            "capability-source-registration:v1",
-            {
-                "source_identity_fingerprint": (
-                    self.source.source_identity_fingerprint
-                ),
-                "refresh_mode": self.refresh_mode.value,
-                "source_contract_fingerprint": self.source_contract_fingerprint,
-            },
-        )
-        if self.registration_fingerprint != expected:
-            raise ValueError("source registration fingerprint mismatch")
         expected_mode = {
             CapabilitySourceKind.BUILTIN_REGISTRY: (
                 CapabilitySourceRefreshMode.IMMUTABLE
@@ -185,18 +172,27 @@ def capability_source_registration(
     refresh_mode: CapabilitySourceRefreshMode,
     source_contract_fingerprint: str,
 ) -> FrozenCapabilitySourceRegistration:
-    payload = {
-        "source_identity_fingerprint": source.source_identity_fingerprint,
-        "refresh_mode": refresh_mode.value,
-        "source_contract_fingerprint": source_contract_fingerprint,
-    }
     return FrozenCapabilitySourceRegistration(
         source=source,
         refresh_mode=refresh_mode,
         source_contract_fingerprint=source_contract_fingerprint,
-        registration_fingerprint=context_fingerprint(
-            "capability-source-registration:v1", payload
-        ),
+    )
+
+
+def capability_source_registration_identity_digest(
+    registration: FrozenCapabilitySourceRegistration,
+) -> str:
+    """Derive the historical source-registration identity at its sole boundary."""
+
+    return context_fingerprint(
+        "capability-source-registration:v1",
+        {
+            "source_identity_fingerprint": (
+                registration.source.source_identity_fingerprint
+            ),
+            "refresh_mode": registration.refresh_mode.value,
+            "source_contract_fingerprint": registration.source_contract_fingerprint,
+        },
     )
 
 
@@ -216,7 +212,6 @@ class FrozenCapabilitySourceRegistrationSet:
     builtin_registration: FrozenCapabilitySourceRegistration
     mcp_registrations: tuple[FrozenCapabilitySourceRegistration, ...]
     local_skill_catalog_registration: FrozenCapabilitySourceRegistration
-    registration_set_fingerprint: str
 
     def __post_init__(self) -> None:
         _validate_scope(
@@ -241,17 +236,6 @@ class FrozenCapabilitySourceRegistrationSet:
             for item in self.mcp_registrations
         ):
             raise ValueError("non-MCP source entered MCP registrations")
-        expected = capability_registration_set_fingerprint(
-            conversation_scope_kind=self.conversation_scope_kind,
-            scope_subagent_task_id=self.scope_subagent_task_id,
-            builtin_registration=self.builtin_registration,
-            mcp_registrations=self.mcp_registrations,
-            local_skill_catalog_registration=(
-                self.local_skill_catalog_registration
-            ),
-        )
-        if self.registration_set_fingerprint != expected:
-            raise ValueError("capability registration set fingerprint mismatch")
 
     @property
     def registrations(self) -> tuple[FrozenCapabilitySourceRegistration, ...]:
@@ -260,28 +244,6 @@ class FrozenCapabilitySourceRegistrationSet:
             *self.mcp_registrations,
             self.local_skill_catalog_registration,
         )
-
-
-def capability_registration_set_fingerprint(
-    *,
-    conversation_scope_kind: ModelInputScopeKind,
-    scope_subagent_task_id: str | None,
-    builtin_registration: FrozenCapabilitySourceRegistration,
-    mcp_registrations: tuple[FrozenCapabilitySourceRegistration, ...],
-    local_skill_catalog_registration: FrozenCapabilitySourceRegistration,
-) -> str:
-    return context_fingerprint(
-        "capability-source-registration-set:v1",
-        {
-            "scope": conversation_scope_kind.value,
-            "scope_subagent_task_id": scope_subagent_task_id,
-            "builtin": builtin_registration.registration_fingerprint,
-            "mcp": tuple(
-                item.registration_fingerprint for item in mcp_registrations
-            ),
-            "skills": local_skill_catalog_registration.registration_fingerprint,
-        },
-    )
 
 
 class ToolCapabilityOrigin(StrEnum):
@@ -367,38 +329,36 @@ class ToolCapabilityVersionRef:
     identity_fingerprint: str
     semantic_fingerprint: str
     provider_name: str
-    version_fingerprint: str
 
     def __post_init__(self) -> None:
         if not all(
             (self.identity_fingerprint, self.semantic_fingerprint, self.provider_name)
         ):
             raise ValueError("tool capability version is incomplete")
-        expected = context_fingerprint(
-            "tool-capability-version:v1",
-            {
-                "identity_fingerprint": self.identity_fingerprint,
-                "semantic_fingerprint": self.semantic_fingerprint,
-                "provider_name": self.provider_name,
-            },
-        )
-        if self.version_fingerprint != expected:
-            raise ValueError("tool capability version fingerprint mismatch")
+
+
+def tool_capability_version_identity_digest(
+    version: ToolCapabilityVersionRef,
+) -> str:
+    """Derive the historical prefix identity at its unique wire boundary."""
+
+    return context_fingerprint(
+        "tool-capability-version:v1",
+        {
+            "identity_fingerprint": version.identity_fingerprint,
+            "semantic_fingerprint": version.semantic_fingerprint,
+            "provider_name": version.provider_name,
+        },
+    )
 
 
 def tool_capability_version_ref(
     fact: FrozenToolCapabilityFact,
 ) -> ToolCapabilityVersionRef:
-    payload = {
-        "identity_fingerprint": fact.identity.identity_fingerprint,
-        "semantic_fingerprint": fact.fact_semantic_fingerprint,
-        "provider_name": fact.canonical_tool_spec.name,
-    }
     return ToolCapabilityVersionRef(
-        **payload,
-        version_fingerprint=context_fingerprint(
-            "tool-capability-version:v1", payload
-        ),
+        identity_fingerprint=fact.identity.identity_fingerprint,
+        semantic_fingerprint=fact.fact_semantic_fingerprint,
+        provider_name=fact.canonical_tool_spec.name,
     )
 
 
@@ -413,12 +373,11 @@ class NativeToolWireIncompatibilityReason(StrEnum):
 class FrozenNativeToolWireEligibilityQuote:
     """Lightweight proof that one canonical Tool can be lowered natively."""
 
-    capability_version_fingerprint: str
+    version: ToolCapabilityVersionRef
     canonical_tool_spec_fingerprint: str
     native_function_tool_wire_contract_fingerprint: str
     wire_tool_fingerprint: str
     wire_utf8_bytes: int
-    eligibility_fingerprint: str
 
     def __post_init__(self) -> None:
         if (
@@ -426,54 +385,18 @@ class FrozenNativeToolWireEligibilityQuote:
             or not 0 < self.wire_utf8_bytes <= MAXIMUM_NATIVE_TOOL_BYTES
         ):
             raise ValueError("native tool eligibility quote is invalid")
-        expected = context_fingerprint(
-            "native-tool-wire-eligibility-quote:v1",
-            {
-                "capability_version_fingerprint": (
-                    self.capability_version_fingerprint
-                ),
-                "canonical_tool_spec_fingerprint": (
-                    self.canonical_tool_spec_fingerprint
-                ),
-                "native_function_tool_wire_contract_fingerprint": (
-                    self.native_function_tool_wire_contract_fingerprint
-                ),
-                "wire_tool_fingerprint": self.wire_tool_fingerprint,
-                "wire_utf8_bytes": self.wire_utf8_bytes,
-            },
-        )
-        if self.eligibility_fingerprint != expected:
-            raise ValueError("native tool eligibility quote fingerprint mismatch")
 
 
 @dataclass(frozen=True, slots=True)
 class FrozenNativeToolWireProjection:
-    capability_version_fingerprint: str
+    version: ToolCapabilityVersionRef
     canonical_tool_spec_fingerprint: str
     native_function_tool_wire_contract_fingerprint: str
     wire_tool: FrozenJsonObjectFact = field(repr=False)
-    projection_fingerprint: str
 
     def __post_init__(self) -> None:
         if not isinstance(self.wire_tool, FrozenJsonObjectFact):
             raise TypeError("native tool wire projection is not frozen JSON")
-        expected = context_fingerprint(
-            "native-tool-wire-projection:v1",
-            {
-                "capability_version_fingerprint": (
-                    self.capability_version_fingerprint
-                ),
-                "canonical_tool_spec_fingerprint": (
-                    self.canonical_tool_spec_fingerprint
-                ),
-                "native_function_tool_wire_contract_fingerprint": (
-                    self.native_function_tool_wire_contract_fingerprint
-                ),
-                "wire_tool": self.wire_tool,
-            },
-        )
-        if self.projection_fingerprint != expected:
-            raise ValueError("native tool projection fingerprint mismatch")
 
     @property
     def wire_utf8_bytes(self) -> int:
@@ -482,32 +405,14 @@ class FrozenNativeToolWireProjection:
 
 @dataclass(frozen=True, slots=True)
 class FrozenNativeToolWireIncompatibility:
-    capability_version_fingerprint: str
+    version: ToolCapabilityVersionRef
     canonical_tool_spec_fingerprint: str
     native_function_tool_wire_contract_fingerprint: str
     reason: NativeToolWireIncompatibilityReason
-    decision_fingerprint: str
 
     def __post_init__(self) -> None:
         if not isinstance(self.reason, NativeToolWireIncompatibilityReason):
             raise TypeError("native tool incompatibility reason is not closed")
-        expected = context_fingerprint(
-            "native-tool-wire-incompatibility:v1",
-            {
-                "capability_version_fingerprint": (
-                    self.capability_version_fingerprint
-                ),
-                "canonical_tool_spec_fingerprint": (
-                    self.canonical_tool_spec_fingerprint
-                ),
-                "native_function_tool_wire_contract_fingerprint": (
-                    self.native_function_tool_wire_contract_fingerprint
-                ),
-                "reason": self.reason.value,
-            },
-        )
-        if self.decision_fingerprint != expected:
-            raise ValueError("native tool incompatibility fingerprint mismatch")
 
 
 NativeToolWireEligibility = (
@@ -521,14 +426,17 @@ class FrozenNativeToolWireEligibilitySet:
     scope_subagent_task_id: str | None
     native_function_tool_wire_contract_fingerprint: str
     entries: tuple[NativeToolWireEligibility, ...]
-    eligibility_set_fingerprint: str
 
     def __post_init__(self) -> None:
         _validate_scope(
             self.conversation_scope_kind, self.scope_subagent_task_id
         )
-        versions = tuple(item.capability_version_fingerprint for item in self.entries)
-        if versions != tuple(sorted(versions)) or len(versions) != len(set(versions)):
+        versions = tuple(item.version for item in self.entries)
+        keys = tuple(
+            (item.provider_name, item.identity_fingerprint, item.semantic_fingerprint)
+            for item in versions
+        )
+        if keys != tuple(sorted(keys)) or len(versions) != len(set(versions)):
             raise ValueError("native eligibility entries are not sorted and unique")
         if any(
             item.native_function_tool_wire_contract_fingerprint
@@ -536,22 +444,6 @@ class FrozenNativeToolWireEligibilitySet:
             for item in self.entries
         ):
             raise ValueError("native eligibility contract drifted")
-        expected = context_fingerprint(
-            "native-tool-wire-eligibility-set:v1",
-            {
-                "scope": self.conversation_scope_kind.value,
-                "scope_subagent_task_id": self.scope_subagent_task_id,
-                "contract": self.native_function_tool_wire_contract_fingerprint,
-                "entries": tuple(
-                    item.eligibility_fingerprint
-                    if isinstance(item, FrozenNativeToolWireEligibilityQuote)
-                    else item.decision_fingerprint
-                    for item in self.entries
-                ),
-            },
-        )
-        if self.eligibility_set_fingerprint != expected:
-            raise ValueError("native eligibility set fingerprint mismatch")
 
 
 @dataclass(frozen=True, slots=True)
@@ -576,8 +468,7 @@ class FrozenNativeToolProjectionSet:
             self.tool_versions, self.projections, strict=True
         ):
             if (
-                version.version_fingerprint
-                != projection.capability_version_fingerprint
+                version != projection.version
                 or projection.native_function_tool_wire_contract_fingerprint
                 != self.native_function_tool_wire_contract_fingerprint
             ):
@@ -615,9 +506,27 @@ def native_tool_projection_set_fingerprint(
             "scope": conversation_scope_kind.value,
             "scope_subagent_task_id": scope_subagent_task_id,
             "contract": native_function_tool_wire_contract_fingerprint,
-            "versions": tuple(item.version_fingerprint for item in tool_versions),
+            "versions": tuple(
+                tool_capability_version_identity_digest(item)
+                for item in tool_versions
+            ),
             "projections": tuple(
-                item.projection_fingerprint for item in projections
+                context_fingerprint(
+                    "native-tool-wire-projection:v1",
+                    {
+                        "capability_version_fingerprint": (
+                            tool_capability_version_identity_digest(item.version)
+                        ),
+                        "canonical_tool_spec_fingerprint": (
+                            item.canonical_tool_spec_fingerprint
+                        ),
+                        "native_function_tool_wire_contract_fingerprint": (
+                            item.native_function_tool_wire_contract_fingerprint
+                        ),
+                        "wire_tool": item.wire_tool,
+                    },
+                )
+                for item in projections
             ),
         },
     )
@@ -690,7 +599,6 @@ class FrozenCapabilitySourceSnapshot:
     scope_subagent_task_id: str | None
     disposition: CapabilitySourceSnapshotDisposition
     facts: tuple[FrozenCapabilityFact, ...]
-    source_snapshot_fingerprint: str
 
     def __post_init__(self) -> None:
         _validate_scope(
@@ -721,15 +629,6 @@ class FrozenCapabilitySourceSnapshot:
             if fact.identity.source != self.registration.source:
                 raise ValueError("capability fact escaped source registration")
             _validate_source_fact_matrix(self.registration.source.kind, fact)
-        expected = capability_source_snapshot_fingerprint(
-            registration=self.registration,
-            conversation_scope_kind=self.conversation_scope_kind,
-            scope_subagent_task_id=self.scope_subagent_task_id,
-            disposition=self.disposition,
-            facts=self.facts,
-        )
-        if self.source_snapshot_fingerprint != expected:
-            raise ValueError("capability source snapshot fingerprint mismatch")
 
 
 def _validate_source_fact_matrix(
@@ -751,22 +650,23 @@ def _validate_source_fact_matrix(
         raise ValueError("capability source/fact closed matrix conflicts")
 
 
-def capability_source_snapshot_fingerprint(
-    *,
-    registration: FrozenCapabilitySourceRegistration,
-    conversation_scope_kind: ModelInputScopeKind,
-    scope_subagent_task_id: str | None,
-    disposition: CapabilitySourceSnapshotDisposition,
-    facts: tuple[FrozenCapabilityFact, ...],
+def capability_source_snapshot_semantic_digest(
+    snapshot: FrozenCapabilitySourceSnapshot,
 ) -> str:
+    """Derive source lineage only where a context-source boundary needs it."""
+
     return context_fingerprint(
         "capability-source-snapshot:v1",
         {
-            "registration": registration.registration_fingerprint,
-            "scope": conversation_scope_kind.value,
-            "scope_subagent_task_id": scope_subagent_task_id,
-            "disposition": disposition.value,
-            "facts": tuple(item.fact_semantic_fingerprint for item in facts),
+            "registration": capability_source_registration_identity_digest(
+                snapshot.registration
+            ),
+            "scope": snapshot.conversation_scope_kind.value,
+            "scope_subagent_task_id": snapshot.scope_subagent_task_id,
+            "disposition": snapshot.disposition.value,
+            "facts": tuple(
+                item.fact_semantic_fingerprint for item in snapshot.facts
+            ),
         },
     )
 
@@ -795,13 +695,6 @@ def freeze_capability_source_snapshot(
         scope_subagent_task_id=scope_subagent_task_id,
         disposition=disposition,
         facts=ordered,
-        source_snapshot_fingerprint=capability_source_snapshot_fingerprint(
-            registration=registration,
-            conversation_scope_kind=conversation_scope_kind,
-            scope_subagent_task_id=scope_subagent_task_id,
-            disposition=disposition,
-            facts=ordered,
-        ),
     )
 
 
@@ -809,7 +702,6 @@ def freeze_capability_source_snapshot(
 class FrozenCapabilityRegistrySnapshot:
     registration_set: FrozenCapabilitySourceRegistrationSet
     source_snapshots: tuple[FrozenCapabilitySourceSnapshot, ...]
-    registry_fingerprint: str
 
     def __post_init__(self) -> None:
         expected_sources = tuple(
@@ -840,12 +732,6 @@ class FrozenCapabilityRegistrySnapshot:
                     if fact.canonical_tool_spec.name in provider_names:
                         raise ValueError("registry provider tool name is duplicated")
                     provider_names.add(fact.canonical_tool_spec.name)
-        expected = capability_registry_fingerprint(
-            registration_set=self.registration_set,
-            source_snapshots=self.source_snapshots,
-        )
-        if self.registry_fingerprint != expected:
-            raise ValueError("capability registry fingerprint mismatch")
 
     @property
     def tool_facts(self) -> tuple[FrozenToolCapabilityFact, ...]:
@@ -864,22 +750,6 @@ class FrozenCapabilityRegistrySnapshot:
             for fact in snapshot.facts
             if isinstance(fact, FrozenSkillCapabilityFact)
         )
-
-
-def capability_registry_fingerprint(
-    *,
-    registration_set: FrozenCapabilitySourceRegistrationSet,
-    source_snapshots: tuple[FrozenCapabilitySourceSnapshot, ...],
-) -> str:
-    return context_fingerprint(
-        "capability-registry-snapshot:v1",
-        {
-            "registration_set": registration_set.registration_set_fingerprint,
-            "source_snapshots": tuple(
-                item.source_snapshot_fingerprint for item in source_snapshots
-            ),
-        },
-    )
 
 
 class CapabilityRouteReasonCode(StrEnum):
@@ -931,7 +801,7 @@ class FrozenMcpToolExposure:
             {
                 "server_id": self.target.server_id,
                 "remote_tool_name": self.target.remote_tool_name,
-                "version": self.version.version_fingerprint,
+                "version": tool_capability_version_identity_digest(self.version),
                 "route": self.route.value,
                 "reason": self.public_reason_code.value,
             },
@@ -988,7 +858,6 @@ class FrozenMcpInspectabilityFact:
     effect_kind: McpInspectEffectKind
     conservative_logical_utf8_bytes: int
     disposition: McpInspectDeliveryDisposition
-    fact_fingerprint: str
 
     def __post_init__(self) -> None:
         if not isinstance(self.effect_kind, McpInspectEffectKind):
@@ -1009,21 +878,6 @@ class FrozenMcpInspectabilityFact:
             self.disposition is McpInspectDeliveryDisposition.FULL_ELIGIBLE
         ):
             raise ValueError("MCP inspectability disposition conflicts with quote")
-        expected = context_fingerprint(
-            "mcp-inspectability-fact:v1",
-            {
-                "server_id": self.target.server_id,
-                "remote_tool_name": self.target.remote_tool_name,
-                "version": self.version.version_fingerprint,
-                "descriptor_payload": self.descriptor_payload_fingerprint,
-                "execution_policy": self.mcp_execution_policy_fingerprint,
-                "effect_kind": self.effect_kind.value,
-                "logical_utf8_bytes": self.conservative_logical_utf8_bytes,
-                "disposition": self.disposition.value,
-            },
-        )
-        if self.fact_fingerprint != expected:
-            raise ValueError("MCP inspectability fingerprint mismatch")
 
 
 def freeze_mcp_inspectability_fact(
@@ -1041,16 +895,6 @@ def freeze_mcp_inspectability_fact(
         <= MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES
         else McpInspectDeliveryDisposition.DESCRIPTOR_OVERBOUND
     )
-    payload = {
-        "server_id": target.server_id,
-        "remote_tool_name": target.remote_tool_name,
-        "version": version.version_fingerprint,
-        "descriptor_payload": descriptor_payload_fingerprint,
-        "execution_policy": mcp_execution_policy_fingerprint,
-        "effect_kind": effect_kind.value,
-        "logical_utf8_bytes": conservative_logical_utf8_bytes,
-        "disposition": disposition.value,
-    }
     return FrozenMcpInspectabilityFact(
         target=target,
         version=version,
@@ -1059,9 +903,6 @@ def freeze_mcp_inspectability_fact(
         effect_kind=effect_kind,
         conservative_logical_utf8_bytes=conservative_logical_utf8_bytes,
         disposition=disposition,
-        fact_fingerprint=context_fingerprint(
-            "mcp-inspectability-fact:v1", payload
-        ),
     )
 
 
@@ -1069,21 +910,29 @@ def freeze_mcp_inspectability_fact(
 class FrozenMcpCapabilityProjectionInput:
     conversation_scope_kind: ModelInputScopeKind
     scope_subagent_task_id: str | None
-    source_snapshot_fingerprints: tuple[str, ...]
+    source_snapshots: tuple[FrozenCapabilitySourceSnapshot, ...] = field(repr=False)
     catalog_semantic_fingerprint: str
     inspectability_facts: tuple[FrozenMcpInspectabilityFact, ...]
-    projection_fingerprint: str
 
     def __post_init__(self) -> None:
         _validate_scope(
             self.conversation_scope_kind, self.scope_subagent_task_id
         )
-        if self.source_snapshot_fingerprints != tuple(
-            sorted(self.source_snapshot_fingerprints)
-        ) or len(self.source_snapshot_fingerprints) != len(
-            set(self.source_snapshot_fingerprints)
+        source_ids = tuple(
+            item.registration.source.stable_source_id
+            for item in self.source_snapshots
+        )
+        if source_ids != tuple(sorted(source_ids)) or len(source_ids) != len(
+            set(source_ids)
         ):
-            raise ValueError("MCP source snapshot refs are not sorted and unique")
+            raise ValueError("MCP source snapshots are not sorted and unique")
+        if any(
+            item.registration.source.kind is not CapabilitySourceKind.MCP_SERVER
+            or item.conversation_scope_kind is not self.conversation_scope_kind
+            or item.scope_subagent_task_id != self.scope_subagent_task_id
+            for item in self.source_snapshots
+        ):
+            raise ValueError("MCP source snapshot scope or kind conflicts")
         inspect_keys = tuple(
             (item.target.server_id, item.target.remote_tool_name)
             for item in self.inspectability_facts
@@ -1092,53 +941,21 @@ class FrozenMcpCapabilityProjectionInput:
             set(inspect_keys)
         ):
             raise ValueError("MCP inspectability facts are not sorted and unique")
-        expected = context_fingerprint(
-            "mcp-capability-projection-input:v1",
-            {
-                "scope": self.conversation_scope_kind.value,
-                "scope_subagent_task_id": self.scope_subagent_task_id,
-                "sources": self.source_snapshot_fingerprints,
-                "catalog": self.catalog_semantic_fingerprint,
-                "inspectability": tuple(
-                    item.fact_fingerprint for item in self.inspectability_facts
-                ),
-            },
-        )
-        if self.projection_fingerprint != expected:
-            raise ValueError("MCP projection input fingerprint mismatch")
 
 
 @dataclass(frozen=True, slots=True)
 class FrozenSkillProjectionInput:
     discovery_semantic_fingerprint: str
-    source_snapshot_fingerprint: str
-    snapshot_fingerprint: str
+    source_snapshot: FrozenCapabilitySourceSnapshot = field(repr=False)
 
     def __post_init__(self) -> None:
         if not self.discovery_semantic_fingerprint:
             raise ValueError("skill discovery semantic fingerprint is empty")
-        if not self.source_snapshot_fingerprint:
-            raise ValueError("skill source snapshot fingerprint is empty")
-        expected = skill_projection_input_fingerprint(
-            discovery_semantic_fingerprint=self.discovery_semantic_fingerprint,
-            source_snapshot_fingerprint=self.source_snapshot_fingerprint,
-        )
-        if self.snapshot_fingerprint != expected:
-            raise ValueError("skill projection input fingerprint mismatch")
-
-
-def skill_projection_input_fingerprint(
-    *,
-    discovery_semantic_fingerprint: str,
-    source_snapshot_fingerprint: str,
-) -> str:
-    return context_fingerprint(
-        "frozen-skill-projection-input:v2-agent-skills",
-        {
-            "source_snapshot": source_snapshot_fingerprint,
-            "discovery_semantic_fingerprint": discovery_semantic_fingerprint,
-        },
-    )
+        if (
+            self.source_snapshot.registration.source.kind
+            is not CapabilitySourceKind.LOCAL_SKILL_CATALOG
+        ):
+            raise ValueError("skill projection input source kind conflicts")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1182,7 +999,6 @@ class FrozenToolCapabilityPlanningInput:
     predecessor: CapabilityEpochPredecessor
     native_wire: FrozenNativeToolWireEligibilitySet
     mcp: FrozenMcpCapabilityProjectionInput
-    tool_view_fingerprint: str
 
     def __post_init__(self) -> None:
         if not isinstance(
@@ -1204,43 +1020,6 @@ class FrozenToolCapabilityPlanningInput:
             != self.native_wire.scope_subagent_task_id
         ):
             raise ValueError("installed Tool predecessor scope conflicts")
-        if self.tool_view_fingerprint != tool_capability_planning_input_fingerprint(
-            predecessor=self.predecessor,
-            native_wire=self.native_wire,
-            mcp=self.mcp,
-        ):
-            raise ValueError("Tool planning input fingerprint mismatch")
-
-
-def tool_capability_planning_input_fingerprint(
-    *,
-    predecessor: CapabilityEpochPredecessor,
-    native_wire: FrozenNativeToolWireEligibilitySet,
-    mcp: FrozenMcpCapabilityProjectionInput,
-) -> str:
-    return context_fingerprint(
-        "tool-capability-planning-input:v1",
-        {
-            "predecessor": (
-                {"kind": "EMPTY", "revision": 0}
-                if isinstance(predecessor, EmptyCapabilityEpochPredecessor)
-                else {
-                    "kind": "INSTALLED",
-                    "revision": predecessor.expected_continuity_revision,
-                    "epoch_nonce": predecessor.continuity_epoch_nonce,
-                    "tool_surface": predecessor.tool_surface.surface_fingerprint,
-                    "projection_set": (
-                        predecessor.direct_projection_set.projection_set_fingerprint
-                    ),
-                    "mcp_routes": (
-                        predecessor.mcp_route_projection.projection_fingerprint
-                    ),
-                }
-            ),
-            "native_wire": native_wire.eligibility_set_fingerprint,
-            "mcp": mcp.projection_fingerprint,
-        },
-    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1250,7 +1029,6 @@ class FrozenCapabilityDispatchCut:
     registry: FrozenCapabilityRegistrySnapshot
     tools: FrozenToolCapabilityPlanningInput
     skills: FrozenSkillProjectionInput
-    dispatch_cut_fingerprint: str
 
     def __post_init__(self) -> None:
         _validate_scope(
@@ -1267,44 +1045,12 @@ class FrozenCapabilityDispatchCut:
             != self.scope_subagent_task_id
         ):
             raise ValueError("capability dispatch cut scopes conflict")
-        expected = capability_dispatch_cut_fingerprint(
-            conversation_scope_kind=self.conversation_scope_kind,
-            scope_subagent_task_id=self.scope_subagent_task_id,
-            registry=self.registry,
-            tools=self.tools,
-            skills=self.skills,
-        )
-        if self.dispatch_cut_fingerprint != expected:
-            raise ValueError("capability dispatch cut fingerprint mismatch")
-
-
-def capability_dispatch_cut_fingerprint(
-    *,
-    conversation_scope_kind: ModelInputScopeKind,
-    scope_subagent_task_id: str | None,
-    registry: FrozenCapabilityRegistrySnapshot,
-    tools: FrozenToolCapabilityPlanningInput,
-    skills: FrozenSkillProjectionInput,
-) -> str:
-    return context_fingerprint(
-        "capability-dispatch-cut:v1",
-        {
-            "scope": conversation_scope_kind.value,
-            "scope_subagent_task_id": scope_subagent_task_id,
-            "registry": registry.registry_fingerprint,
-            "tools": tools.tool_view_fingerprint,
-            "skills": skills.snapshot_fingerprint,
-        },
-    )
 
 
 @dataclass(frozen=True, slots=True)
 class FrozenToolCapabilityDispatchView:
-    parent_dispatch_cut_fingerprint: str
-    registry_fingerprint: str
+    parent_dispatch_cut: FrozenCapabilityDispatchCut = field(repr=False)
     registry_tool_facts: tuple[FrozenToolCapabilityFact, ...]
-    planning_input: FrozenToolCapabilityPlanningInput
-    view_fingerprint: str
 
     def __post_init__(self) -> None:
         keys = tuple(
@@ -1313,43 +1059,18 @@ class FrozenToolCapabilityDispatchView:
         )
         if len(keys) != len(set(keys)):
             raise ValueError("Tool dispatch facts are not unique")
-        expected = tool_capability_dispatch_view_fingerprint(
-            parent_dispatch_cut_fingerprint=self.parent_dispatch_cut_fingerprint,
-            registry_fingerprint=self.registry_fingerprint,
-            registry_tool_facts=self.registry_tool_facts,
-            planning_input=self.planning_input,
-        )
-        if self.view_fingerprint != expected:
-            raise ValueError("Tool dispatch view fingerprint mismatch")
+        if self.registry_tool_facts != self.parent_dispatch_cut.registry.tool_facts:
+            raise ValueError("Tool dispatch view does not join parent registry")
 
-
-def tool_capability_dispatch_view_fingerprint(
-    *,
-    parent_dispatch_cut_fingerprint: str,
-    registry_fingerprint: str,
-    registry_tool_facts: tuple[FrozenToolCapabilityFact, ...],
-    planning_input: FrozenToolCapabilityPlanningInput,
-) -> str:
-    return context_fingerprint(
-        "tool-capability-dispatch-view:v1",
-        {
-            "parent": parent_dispatch_cut_fingerprint,
-            "registry": registry_fingerprint,
-            "facts": tuple(
-                item.fact_semantic_fingerprint for item in registry_tool_facts
-            ),
-            "planning": planning_input.tool_view_fingerprint,
-        },
-    )
+    @property
+    def planning_input(self) -> FrozenToolCapabilityPlanningInput:
+        return self.parent_dispatch_cut.tools
 
 
 @dataclass(frozen=True, slots=True)
 class FrozenSkillCapabilityDispatchView:
-    parent_dispatch_cut_fingerprint: str
-    registry_fingerprint: str
+    parent_dispatch_cut: FrozenCapabilityDispatchCut = field(repr=False)
     registry_skill_facts: tuple[FrozenSkillCapabilityFact, ...]
-    projection_input: FrozenSkillProjectionInput
-    view_fingerprint: str
 
     def __post_init__(self) -> None:
         keys = tuple(
@@ -1358,60 +1079,34 @@ class FrozenSkillCapabilityDispatchView:
         )
         if len(keys) != len(set(keys)):
             raise ValueError("Skill dispatch facts are not unique")
-        expected = skill_capability_dispatch_view_fingerprint(
-            parent_dispatch_cut_fingerprint=self.parent_dispatch_cut_fingerprint,
-            registry_fingerprint=self.registry_fingerprint,
-            registry_skill_facts=self.registry_skill_facts,
-            projection_input=self.projection_input,
-        )
-        if self.view_fingerprint != expected:
-            raise ValueError("Skill dispatch view fingerprint mismatch")
+        if self.registry_skill_facts != self.parent_dispatch_cut.registry.skill_facts:
+            raise ValueError("Skill dispatch view does not join parent registry")
 
-
-def skill_capability_dispatch_view_fingerprint(
-    *,
-    parent_dispatch_cut_fingerprint: str,
-    registry_fingerprint: str,
-    registry_skill_facts: tuple[FrozenSkillCapabilityFact, ...],
-    projection_input: FrozenSkillProjectionInput,
-) -> str:
-    return context_fingerprint(
-        "skill-capability-dispatch-view:v1",
-        {
-            "parent": parent_dispatch_cut_fingerprint,
-            "registry": registry_fingerprint,
-            "facts": tuple(
-                item.fact_semantic_fingerprint for item in registry_skill_facts
-            ),
-            "projection": projection_input.snapshot_fingerprint,
-        },
-    )
+    @property
+    def projection_input(self) -> FrozenSkillProjectionInput:
+        return self.parent_dispatch_cut.skills
 
 
 @dataclass(frozen=True, slots=True)
 class FrozenToolCapabilityExposureSelection:
     """Pure planner output before selected native wire is materialized."""
 
-    dispatch_cut_fingerprint: str
-    tool_dispatch_view_fingerprint: str
-    conversation_scope_kind: ModelInputScopeKind
-    scope_subagent_task_id: str | None
-    native_function_tool_wire_contract_fingerprint: str
+    dispatch_view: FrozenToolCapabilityDispatchView = field(repr=False)
     direct_tool_surface: FrozenModelToolSurface
     direct_tool_versions: tuple[ToolCapabilityVersionRef, ...]
     mcp_catalog_route_projection: FrozenMcpRouteProjection
-    selection_fingerprint: str
     reusable_direct_projection_set: FrozenNativeToolProjectionSet | None = field(
         default=None, repr=False
     )
 
     def __post_init__(self) -> None:
+        native = self.dispatch_view.planning_input.native_wire
         _validate_scope(
-            self.conversation_scope_kind, self.scope_subagent_task_id
+            native.conversation_scope_kind, native.scope_subagent_task_id
         )
         if (
             self.direct_tool_surface.conversation_scope_kind
-            is not self.conversation_scope_kind
+            is not native.conversation_scope_kind
         ):
             raise ValueError("capability selection Tool surface scope conflicts")
         if tuple(item.name for item in self.direct_tool_surface.tool_specs) != tuple(
@@ -1420,128 +1115,67 @@ class FrozenToolCapabilityExposureSelection:
             raise ValueError("capability selection Tool versions drifted")
         reusable = self.reusable_direct_projection_set
         if reusable is not None and (
-            reusable.conversation_scope_kind is not self.conversation_scope_kind
-            or reusable.scope_subagent_task_id != self.scope_subagent_task_id
+            reusable.conversation_scope_kind is not native.conversation_scope_kind
+            or reusable.scope_subagent_task_id != native.scope_subagent_task_id
             or reusable.native_function_tool_wire_contract_fingerprint
-            != self.native_function_tool_wire_contract_fingerprint
+            != native.native_function_tool_wire_contract_fingerprint
             or reusable.tool_versions != self.direct_tool_versions
         ):
             raise ValueError("reusable native projection set does not join selection")
-        expected = tool_capability_exposure_selection_fingerprint(
-            dispatch_cut_fingerprint=self.dispatch_cut_fingerprint,
-            tool_dispatch_view_fingerprint=self.tool_dispatch_view_fingerprint,
-            conversation_scope_kind=self.conversation_scope_kind,
-            scope_subagent_task_id=self.scope_subagent_task_id,
-            native_function_tool_wire_contract_fingerprint=(
-                self.native_function_tool_wire_contract_fingerprint
-            ),
-            direct_tool_surface=self.direct_tool_surface,
-            direct_tool_versions=self.direct_tool_versions,
-            reusable_direct_projection_set=reusable,
-            mcp_catalog_route_projection=self.mcp_catalog_route_projection,
-        )
-        if self.selection_fingerprint != expected:
-            raise ValueError("capability exposure selection fingerprint mismatch")
 
+    @property
+    def conversation_scope_kind(self) -> ModelInputScopeKind:
+        return self.dispatch_view.planning_input.native_wire.conversation_scope_kind
 
-def tool_capability_exposure_selection_fingerprint(
-    *,
-    dispatch_cut_fingerprint: str,
-    tool_dispatch_view_fingerprint: str,
-    conversation_scope_kind: ModelInputScopeKind,
-    scope_subagent_task_id: str | None,
-    native_function_tool_wire_contract_fingerprint: str,
-    direct_tool_surface: FrozenModelToolSurface,
-    direct_tool_versions: tuple[ToolCapabilityVersionRef, ...],
-    reusable_direct_projection_set: FrozenNativeToolProjectionSet | None,
-    mcp_catalog_route_projection: FrozenMcpRouteProjection,
-) -> str:
-    return context_fingerprint(
-        "tool-capability-exposure-selection:v1",
-        {
-            "dispatch_cut": dispatch_cut_fingerprint,
-            "view": tool_dispatch_view_fingerprint,
-            "scope": conversation_scope_kind.value,
-            "scope_subagent_task_id": scope_subagent_task_id,
-            "contract": native_function_tool_wire_contract_fingerprint,
-            "surface": direct_tool_surface.surface_fingerprint,
-            "versions": tuple(
-                item.version_fingerprint for item in direct_tool_versions
-            ),
-            "reusable_projections": (
-                reusable_direct_projection_set.projection_set_fingerprint
-                if reusable_direct_projection_set is not None
-                else None
-            ),
-            "mcp_routes": mcp_catalog_route_projection.projection_fingerprint,
-        },
-    )
+    @property
+    def scope_subagent_task_id(self) -> str | None:
+        return self.dispatch_view.planning_input.native_wire.scope_subagent_task_id
+
+    @property
+    def native_function_tool_wire_contract_fingerprint(self) -> str:
+        return self.dispatch_view.planning_input.native_wire.native_function_tool_wire_contract_fingerprint
 
 
 @dataclass(frozen=True, slots=True)
 class FrozenToolCapabilityExposurePlan:
-    dispatch_cut_fingerprint: str
-    tool_dispatch_view_fingerprint: str
-    direct_tool_surface: FrozenModelToolSurface
+    selection: FrozenToolCapabilityExposureSelection = field(repr=False)
     direct_projection_set: FrozenNativeToolProjectionSet
-    mcp_catalog_route_projection: FrozenMcpRouteProjection
-    exposure_plan_fingerprint: str
 
     def __post_init__(self) -> None:
-        if tuple(item.name for item in self.direct_tool_surface.tool_specs) != tuple(
+        if tuple(item.name for item in self.selection.direct_tool_surface.tool_specs) != tuple(
             item.provider_name for item in self.direct_projection_set.tool_versions
         ):
             raise ValueError("capability exposure surface/projections drifted")
         if (
-            self.direct_tool_surface.conversation_scope_kind
+            self.selection.direct_tool_surface.conversation_scope_kind
             is not self.direct_projection_set.conversation_scope_kind
         ):
             raise ValueError("capability exposure plan scopes conflict")
-        direct_versions = {
-            item.version_fingerprint
-            for item in self.direct_projection_set.tool_versions
-        }
+        direct_versions = set(self.direct_projection_set.tool_versions)
         if any(
             (
                 route.route is ToolCapabilityRouteKind.DIRECT
-                and route.version.version_fingerprint not in direct_versions
+                and route.version not in direct_versions
             )
             or (
                 route.route is ToolCapabilityRouteKind.NEW_MCP_META_ONLY
-                and route.version.version_fingerprint in direct_versions
+                and route.version in direct_versions
             )
-            for route in self.mcp_catalog_route_projection.routes
+            for route in self.selection.mcp_catalog_route_projection.routes
         ):
             raise ValueError("MCP route conflicts with the selected native cohort")
-        expected = tool_capability_exposure_plan_fingerprint(
-            dispatch_cut_fingerprint=self.dispatch_cut_fingerprint,
-            tool_dispatch_view_fingerprint=self.tool_dispatch_view_fingerprint,
-            direct_tool_surface=self.direct_tool_surface,
-            direct_projection_set=self.direct_projection_set,
-            mcp_catalog_route_projection=self.mcp_catalog_route_projection,
-        )
-        if self.exposure_plan_fingerprint != expected:
-            raise ValueError("capability exposure plan fingerprint mismatch")
 
+    @property
+    def dispatch_view(self) -> FrozenToolCapabilityDispatchView:
+        return self.selection.dispatch_view
 
-def tool_capability_exposure_plan_fingerprint(
-    *,
-    dispatch_cut_fingerprint: str,
-    tool_dispatch_view_fingerprint: str,
-    direct_tool_surface: FrozenModelToolSurface,
-    direct_projection_set: FrozenNativeToolProjectionSet,
-    mcp_catalog_route_projection: FrozenMcpRouteProjection,
-) -> str:
-    return context_fingerprint(
-        "tool-capability-exposure-plan:v1",
-        {
-            "dispatch_cut": dispatch_cut_fingerprint,
-            "view": tool_dispatch_view_fingerprint,
-            "surface": direct_tool_surface.surface_fingerprint,
-            "projections": direct_projection_set.projection_set_fingerprint,
-            "mcp_routes": mcp_catalog_route_projection.projection_fingerprint,
-        },
-    )
+    @property
+    def direct_tool_surface(self) -> FrozenModelToolSurface:
+        return self.selection.direct_tool_surface
+
+    @property
+    def mcp_catalog_route_projection(self) -> FrozenMcpRouteProjection:
+        return self.selection.mcp_catalog_route_projection
 
 
 @dataclass(frozen=True, slots=True)
@@ -1551,20 +1185,6 @@ class PreparedUnavailableDirectMcpGate:
     provider_tool_name: str
     unavailable_reason_code: str
     supervisor_authority_identity: object = field(repr=False, compare=False)
-    gate_fingerprint: str = ""
-
-    def __post_init__(self) -> None:
-        expected = context_fingerprint(
-            "unavailable-direct-mcp-gate:v1",
-            {
-                "identity": self.capability_identity_fingerprint,
-                "semantic": self.tool_semantic_fingerprint,
-                "provider_name": self.provider_tool_name,
-                "reason": self.unavailable_reason_code,
-            },
-        )
-        if self.gate_fingerprint != expected:
-            raise ValueError("unavailable direct MCP gate fingerprint mismatch")
 
     @property
     def tool_name(self) -> str:
@@ -1576,7 +1196,15 @@ class PreparedUnavailableDirectMcpGate:
 
     @property
     def executor_binding_fingerprint(self) -> str:
-        return self.gate_fingerprint
+        return context_fingerprint(
+            "unavailable-direct-mcp-gate:v1",
+            {
+                "identity": self.capability_identity_fingerprint,
+                "semantic": self.tool_semantic_fingerprint,
+                "provider_name": self.provider_tool_name,
+                "reason": self.unavailable_reason_code,
+            },
+        )
 
 
 def frozen_tool_spec_fingerprint(spec: FrozenToolSpec) -> str:

@@ -138,6 +138,7 @@ from tests.support.round3 import (
     ScriptedKernelModel,
     StaticContextSourceCollector,
     StructuredToolPort,
+    completed_provider_execution_for_test,
     seal_test_direct_tool_port,
 )
 from tests.support.subagents import accept_active_subagent_fixture
@@ -821,20 +822,46 @@ class _PolicyMemoryProjection:
 
 
 class _DelayedPreparedExecution:
-    def __init__(self, delegate, started: asyncio.Event, release: asyncio.Event) -> None:
+    def __init__(
+        self,
+        delegate,
+        started: asyncio.Event,
+        release: asyncio.Event,
+        *,
+        append_candidate,
+        install_authority,
+    ) -> None:
         self._delegate = delegate
         self._started = started
         self._release = release
-        self.execution_fingerprint = delegate.execution_fingerprint
+        self._append_candidate = append_candidate
+        self._install_authority = install_authority
 
     def discard(self) -> None:
         self._delegate.discard()
 
     async def open_once(self, permit):
+        if (
+            permit.epoch_nonce != self._append_candidate.epoch_nonce
+            or permit.epoch_revision
+            != self._append_candidate.expected_epoch_revision + 1
+        ):
+            raise RuntimeError("delayed execution permit mismatch")
+        self._install_authority.consume(
+            permit,
+            candidate=self._append_candidate,
+            execution=self,
+        )
         self._started.set()
         await self._release.wait()
-        async for item in self._delegate.open_once(permit):
+        if self._delegate._opened:  # noqa: SLF001
+            raise RuntimeError("scripted execution already opened")
+        self._delegate._opened = True  # noqa: SLF001
+        for item in self._delegate._items:  # noqa: SLF001
             yield item
+        self._delegate._completion = completed_provider_execution_for_test(  # noqa: SLF001
+            self._delegate._request  # noqa: SLF001
+        )
 
     def take_completed_result_once(self):
         return self._delegate.take_completed_result_once()
@@ -850,18 +877,22 @@ class _BlockingFirstCallModel(_ScriptedModel):
         self,
         request,
         *,
-        expected_append_candidate_fingerprint,
+        append_candidate,
         install_authority,
     ):
         prepared = super().preflight_execution(
             request,
-            expected_append_candidate_fingerprint=(
-                expected_append_candidate_fingerprint
-            ),
+            append_candidate=append_candidate,
             install_authority=install_authority,
         )
         if len(self.requests) == 1:
-            return _DelayedPreparedExecution(prepared, self.started, self.release)
+            return _DelayedPreparedExecution(
+                prepared,
+                self.started,
+                self.release,
+                append_candidate=append_candidate,
+                install_authority=install_authority,
+            )
         return prepared
 
 
@@ -899,7 +930,7 @@ class _SequencedDirectKernelModel(DirectKernelModelPort):
         self,
         request,
         *,
-        expected_append_candidate_fingerprint,
+        append_candidate,
         install_authority,
     ):
         self.requests.append(request)
@@ -915,9 +946,7 @@ class _SequencedDirectKernelModel(DirectKernelModelPort):
             adapter._mock_events = script
         return super().preflight_execution(
             request,
-            expected_append_candidate_fingerprint=(
-                expected_append_candidate_fingerprint
-            ),
+            append_candidate=append_candidate,
             install_authority=install_authority,
         )
 
@@ -1366,8 +1395,14 @@ def test_round5b_active_manual_compaction_adopts_and_continues_same_run(
     assert model.requests[0].compiled_input.tools == (
         model.requests[1].compiled_input.tools
     )
-    assert model.requests[0].wire_input_plan.plan_fingerprint != (
-        model.requests[1].wire_input_plan.plan_fingerprint
+    from pulsara_agent.llm.request import (
+        provider_wire_input_plan_identity_fingerprint,
+    )
+
+    assert provider_wire_input_plan_identity_fingerprint(
+        model.requests[0].wire_input_plan
+    ) != provider_wire_input_plan_identity_fingerprint(
+        model.requests[1].wire_input_plan
     )
     assert any(
         isinstance(seed, CompactionContinuationSeed)

@@ -109,6 +109,10 @@ from pulsara_agent.conversation_kernel.subagents.contracts import (
     build_subagent_task_terminal_settlement,
     build_subagent_task_start,
     build_subagent_result_public_fact,
+    dependency_result_context_identity_digest,
+    parent_context_call_subject_identity_digest,
+    parent_context_selection_identity_digest,
+    parent_context_source_identity_digest,
 )
 
 
@@ -177,7 +181,7 @@ class _SubagentListCursor:
 
 @dataclass(slots=True)
 class _BatchAdmissionAttempt:
-    candidate_fingerprint: str
+    candidate: PreparedSubagentTaskBatchAdmission
     task: asyncio.Task[KernelToolResult]
 
 
@@ -319,9 +323,15 @@ class KernelSubagentManager:
                 kind=ContextSourceKind.PARENT_CONTEXT,
                 text=material.context.rendered_body,
                 domain_identity={
-                    "subject": material.parent_call_subject.subject_fingerprint,
-                    "selection": material.context.selection_fingerprint,
-                    "source": material.context.source_fingerprint,
+                    "subject": parent_context_call_subject_identity_digest(
+                        material.parent_call_subject
+                    ),
+                    "selection": parent_context_selection_identity_digest(
+                        material.parent_call_subject, material.context
+                    ),
+                    "source": parent_context_source_identity_digest(
+                        material.parent_call_subject, material.context
+                    ),
                 },
             ),
             build_subagent_context_source(
@@ -334,7 +344,9 @@ class KernelSubagentManager:
                 domain_identity=(
                     None
                     if material.dependency_context is None
-                    else material.dependency_context.context_fingerprint
+                    else dependency_result_context_identity_digest(
+                        material.dependency_context
+                    )
                 ),
             ),
         )
@@ -614,19 +626,6 @@ class KernelSubagentManager:
                 status = disposition.status
                 pending_reason = disposition.pending_reason
                 terminal_reason = disposition.terminal_reason
-                draft_payload = {
-                    "task_id": item["task_id"],
-                    "task_key": item["task_key"],
-                    "label": item["label"],
-                    "profile": item["profile"].value,
-                    "display_role": item["display_role"],
-                    "objective": item["objective"],
-                    "context": item["selection"].selection_fingerprint,
-                    "dependencies": tuple(dependency_ids),
-                    "initial_status": status.value,
-                    "pending_reason": pending_reason,
-                    "terminal_reason": terminal_reason,
-                }
                 drafts.append(
                     PreparedSubagentTaskDraft(
                         task_id=str(item["task_id"]),
@@ -640,24 +639,10 @@ class KernelSubagentManager:
                         initial_status=status,
                         pending_reason=pending_reason,
                         terminal_reason=terminal_reason,
-                        draft_fingerprint=_digest("task-draft", draft_payload),
                     )
                 )
             _require_acyclic(drafts)
             occurred_at = datetime.now(timezone.utc)
-            candidate_payload = {
-                "session": invocation_context.session_id,
-                "workspace": invocation_context.workspace_id,
-                "writer_generation": self._guard.writer_generation,
-                "turn": invocation_context.turn_id,
-                "attempt": invocation_context.attempt_id,
-                "permission": invocation_context.permission_snapshot_fingerprint,
-                "subject": subject.subject_fingerprint,
-                "batch": batch_id,
-                "tasks": tuple(item.draft_fingerprint for item in drafts),
-                "occurred_at": occurred_at.isoformat(),
-                "actor": self._host_owner_id,
-            }
             candidate = PreparedSubagentTaskBatchAdmission(
                 session_id=invocation_context.session_id,
                 workspace_id=invocation_context.workspace_id,
@@ -672,7 +657,6 @@ class KernelSubagentManager:
                 ordered_tasks=tuple(drafts),
                 occurred_at=occurred_at,
                 actor_id=self._host_owner_id,
-                candidate_fingerprint=_digest("task-batch", candidate_payload),
             )
         except (TypeError, ValueError) as exc:
             return _result("INVALID_ARGUMENTS", {"error": str(exc)})
@@ -712,7 +696,7 @@ class KernelSubagentManager:
                 )
             current = self._batch_admissions.get(candidate.batch_id)
             if current is not None:
-                if current.candidate_fingerprint != candidate.candidate_fingerprint:
+                if current.candidate != candidate:
                     raise ConversationKernelConflict(
                         "subagent batch admission identity conflicts"
                     )
@@ -727,7 +711,7 @@ class KernelSubagentManager:
                     name=f"kernel-subagent-batch-admission:{candidate.batch_id}",
                 )
                 self._batch_admissions[candidate.batch_id] = _BatchAdmissionAttempt(
-                    candidate.candidate_fingerprint,
+                    candidate,
                     task,
                 )
                 task.add_done_callback(
@@ -1864,21 +1848,6 @@ class KernelSubagentManager:
             event_id = _stable_id(
                 "inter-agent-event", invocation_context.attempt_id, task_id
             )
-            fingerprint = _digest(
-                "inter-agent-item",
-                {
-                    "session": invocation_context.session_id,
-                    "sender_turn": invocation_context.turn_id,
-                    "attempt": invocation_context.attempt_id,
-                    "call": invocation_context.tool_call_id,
-                    "recipient": task_id,
-                    "recipient_turn": live.cancellation_intent.turn_id,
-                    "ordinal": ordinal,
-                    "digest": digest,
-                    "entry": entry_id,
-                    "event": event_id,
-                },
-            )
             mailbox.append(
                 PreparedInterAgentMailboxItem(
                     session_id=invocation_context.session_id,
@@ -1892,7 +1861,6 @@ class KernelSubagentManager:
                     message_digest=digest,
                     entry_id=entry_id,
                     event_id=event_id,
-                    item_fingerprint=fingerprint,
                 )
             )
             self._notify_state_changed_locked()
@@ -2339,15 +2307,6 @@ def _stable_id(namespace: str, *parts: str) -> str:
         digest.update(part.encode("utf-8"))
         digest.update(b"\0")
     return f"{namespace}:" + digest.hexdigest()
-
-
-def _digest(namespace: str, payload: object) -> str:
-    return (
-        "sha256:"
-        + sha256(
-            f"pulsara:round10:{namespace}:v1\0".encode() + canonical_json_bytes(payload)
-        ).hexdigest()
-    )
 
 
 def _parse_context(value: object) -> tuple[SubagentContextMode, int | None]:

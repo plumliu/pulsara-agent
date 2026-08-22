@@ -28,8 +28,6 @@ from pulsara_agent.conversation_kernel.io import KernelSessionIO
 from pulsara_agent.conversation_kernel.repository import (
     AcceptedEntry,
     AssistantBlock,
-    AssistantDataBlock,
-    AssistantTextBlock,
     ConversationKernelConflict,
     ConversationKernelRepository,
     StaleHostWriter,
@@ -43,7 +41,6 @@ from pulsara_agent.model_input.continuity import ProviderInputContinuityScope
 from pulsara_agent.conversation_kernel.subagents.contracts import (
     FrozenSubagentResultPublicFact,
 )
-from pulsara_agent.primitives.context import context_fingerprint, thaw_json
 
 
 MAXIMUM_ASSISTANT_SETTLEMENT_WRITE_CONFIRM_ATTEMPTS = 4
@@ -55,7 +52,6 @@ class AssistantMessageSettlementAbandoned(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class PreparedAssistantMessageSettlement:
-    candidate_fingerprint: str
     guard: HostWriterGuard
     cut: PreparedProviderInputCut
     entry_id: str
@@ -78,8 +74,7 @@ class PreparedAssistantMessageSettlement:
 
     def __post_init__(self) -> None:
         if (
-            not self.candidate_fingerprint.startswith("sha256:")
-            or not self.entry_id
+            not self.entry_id
             or not self.actor_id
             or not self.continuity_epoch_nonce
             or self.continuity_epoch_revision < 1
@@ -111,104 +106,6 @@ class PreparedAssistantMessageSettlement:
             or self.subagent_result.source.value != "INFERRED"
         ):
             raise ValueError("inferred subagent result does not exact-join assistant")
-        expected = assistant_settlement_candidate_fingerprint(
-            cut=self.cut,
-            entry_id=self.entry_id,
-            parent_content=self.parent_content,
-            blocks=self.blocks,
-            complete_turn=self.complete_turn,
-            occurred_at=self.occurred_at,
-            actor_id=self.actor_id,
-            continuity_scope=self.continuity_scope,
-            continuity_epoch_nonce=self.continuity_epoch_nonce,
-            continuity_epoch_revision=self.continuity_epoch_revision,
-            provider_wire_api=self.provider_wire_api,
-            provider_replay_disposition=self.provider_replay_disposition,
-            provider_replay=self.provider_replay,
-            subagent_result=self.subagent_result,
-        )
-        if self.candidate_fingerprint != expected:
-            raise ValueError("assistant settlement candidate fingerprint mismatch")
-
-
-def assistant_settlement_candidate_fingerprint(
-    *,
-    cut: PreparedProviderInputCut,
-    entry_id: str,
-    parent_content: CanonicalContent,
-    blocks: tuple[AssistantBlock, ...],
-    complete_turn: bool,
-    occurred_at: datetime,
-    actor_id: str,
-    continuity_scope: ProviderInputContinuityScope,
-    continuity_epoch_nonce: str,
-    continuity_epoch_revision: int,
-    provider_wire_api: str,
-    provider_replay_disposition: ProviderReplayDisposition,
-    provider_replay: PreparedDurableProviderAssistantReplay | None,
-    subagent_result: FrozenSubagentResultPublicFact | None = None,
-) -> str:
-    def content_value(value: CanonicalContent) -> tuple[object, ...]:
-        return (
-            type(value).__name__,
-            getattr(value, "blob_id", None),
-            value.digest,
-            value.size,
-            value.media_type,
-            value.codec,
-        )
-
-    block_values: list[tuple[object, ...]] = []
-    for block in blocks:
-        if isinstance(block, AssistantTextBlock):
-            block_values.append(("TEXT", block.block_id, content_value(block.text)))
-        elif isinstance(block, AssistantDataBlock):
-            block_values.append(("DATA", block.block_id, content_value(block.data)))
-        else:
-            block_values.append(
-                (
-                    "TOOL_CALL",
-                    block.block_id,
-                    block.tool_call_id,
-                    block.tool_name,
-                    context_fingerprint(
-                        "pulsara:runner-frozen-json:v1",
-                        thaw_json(block.arguments),
-                    ),
-                )
-            )
-    return context_fingerprint(
-        "pulsara.prepared-assistant-message-settlement:v2",
-        {
-            "cut": (
-                cut.session_id,
-                cut.turn_id,
-                cut.context_binding_revision_id,
-                cut.provider_input_through_sequence,
-            ),
-            "entry": entry_id,
-            "parent": content_value(parent_content),
-            "blocks": tuple(block_values),
-            "complete_turn": complete_turn,
-            "occurred_at": occurred_at.isoformat(),
-            "actor": actor_id,
-            "continuity": (
-                continuity_scope.session_id,
-                continuity_scope.scope_kind.value,
-                continuity_scope.scope_subagent_task_id,
-                continuity_epoch_nonce,
-                continuity_epoch_revision,
-            ),
-            "provider_wire_api": provider_wire_api,
-            "provider_replay_disposition": provider_replay_disposition.value,
-            "provider_replay": (
-                None if provider_replay is None else provider_replay.fragment_fingerprint
-            ),
-            "subagent_result": (
-                None if subagent_result is None else subagent_result.result_fingerprint
-            ),
-        },
-    )
 
 
 @dataclass(slots=True)
@@ -244,11 +141,7 @@ class AssistantMessageSettlementOwner:
                 raise RuntimeError("assistant settlement owner is closed")
             current = self._attempts.get(candidate.entry_id)
             if current is not None:
-                if (
-                    current.candidate.candidate_fingerprint
-                    != candidate.candidate_fingerprint
-                    or current.candidate.guard != candidate.guard
-                ):
+                if current.candidate is not candidate:
                     raise ConversationKernelConflict(
                         "assistant settlement candidate identity conflicts"
                     )
@@ -472,5 +365,4 @@ __all__ = [
     "AssistantMessageSettlementOwner",
     "MAXIMUM_ASSISTANT_SETTLEMENT_WRITE_CONFIRM_ATTEMPTS",
     "PreparedAssistantMessageSettlement",
-    "assistant_settlement_candidate_fingerprint",
 ]

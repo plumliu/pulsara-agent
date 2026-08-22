@@ -25,13 +25,8 @@ from pulsara_agent.capability.contracts import (
     InstalledCapabilityEpochPredecessor,
     MAXIMUM_CAPABILITY_PLANNER_FRAMING_BYTES,
     ToolCapabilityOrigin,
-    capability_dispatch_cut_fingerprint,
-    capability_registration_set_fingerprint,
-    capability_registry_fingerprint,
     frozen_tool_spec_fingerprint,
-    skill_capability_dispatch_view_fingerprint,
-    tool_capability_dispatch_view_fingerprint,
-    tool_capability_planning_input_fingerprint,
+    tool_capability_version_identity_digest,
     tool_capability_version_ref,
 )
 from pulsara_agent.model_input.contracts import ModelInputScopeKind
@@ -58,24 +53,28 @@ def _require_bounded_planner_framing(
         if total > MAXIMUM_CAPABILITY_PLANNER_FRAMING_BYTES:
             raise ValueError("capability planner framing bound exceeded")
 
-    add(registry.registration_set.registration_set_fingerprint)
-    add(registry.registry_fingerprint)
-    add(tools.tool_view_fingerprint)
-    add(skills.snapshot_fingerprint)
+    add(skills.discovery_semantic_fingerprint)
     for registration in registry.registration_set.registrations:
-        add(registration.registration_fingerprint)
+        add(registration.source.source_identity_fingerprint)
+        add(registration.source_contract_fingerprint)
     for snapshot in registry.source_snapshots:
-        add(snapshot.source_snapshot_fingerprint)
+        add(snapshot.registration.source.source_identity_fingerprint)
+        add(snapshot.registration.source_contract_fingerprint)
+        add(snapshot.disposition.value)
         for fact in snapshot.facts:
             add(fact.fact_semantic_fingerprint)
     for item in tools.native_wire.entries:
-        add(
-            item.eligibility_fingerprint
-            if isinstance(item, FrozenNativeToolWireEligibilityQuote)
-            else item.decision_fingerprint
-        )
+        add(tool_capability_version_identity_digest(item.version))
+        add(item.canonical_tool_spec_fingerprint)
+        add(item.native_function_tool_wire_contract_fingerprint)
+        if isinstance(item, FrozenNativeToolWireEligibilityQuote):
+            add(item.wire_tool_fingerprint)
+        else:
+            add(item.reason.value)
     for item in tools.mcp.inspectability_facts:
-        add(item.fact_fingerprint)
+        add(tool_capability_version_identity_digest(item.version))
+        add(item.descriptor_payload_fingerprint)
+        add(item.mcp_execution_policy_fingerprint)
     predecessor = tools.predecessor
     if isinstance(predecessor, InstalledCapabilityEpochPredecessor):
         add(predecessor.direct_projection_set.projection_set_fingerprint)
@@ -103,20 +102,12 @@ def freeze_capability_registration_set(
     ordered_mcp = tuple(
         sorted(by_source.values(), key=lambda item: item.source.stable_source_id)
     )
-    fingerprint = capability_registration_set_fingerprint(
-        conversation_scope_kind=conversation_scope_kind,
-        scope_subagent_task_id=scope_subagent_task_id,
-        builtin_registration=builtin_registration,
-        mcp_registrations=ordered_mcp,
-        local_skill_catalog_registration=local_skill_catalog_registration,
-    )
     return FrozenCapabilitySourceRegistrationSet(
         conversation_scope_kind=conversation_scope_kind,
         scope_subagent_task_id=scope_subagent_task_id,
         builtin_registration=builtin_registration,
         mcp_registrations=ordered_mcp,
         local_skill_catalog_registration=local_skill_catalog_registration,
-        registration_set_fingerprint=fingerprint,
     )
 
 
@@ -154,10 +145,6 @@ def freeze_capability_registry_snapshot(
     return FrozenCapabilityRegistrySnapshot(
         registration_set=registration_set,
         source_snapshots=snapshots,
-        registry_fingerprint=capability_registry_fingerprint(
-            registration_set=registration_set,
-            source_snapshots=snapshots,
-        ),
     )
 
 
@@ -168,16 +155,10 @@ def freeze_tool_planning_input(
     native_wire: FrozenNativeToolWireEligibilitySet,
     mcp: FrozenMcpCapabilityProjectionInput,
 ) -> FrozenToolCapabilityPlanningInput:
-    fingerprint = tool_capability_planning_input_fingerprint(
-        predecessor=predecessor,
-        native_wire=native_wire,
-        mcp=mcp,
-    )
     return FrozenToolCapabilityPlanningInput(
         predecessor=predecessor,
         native_wire=native_wire,
         mcp=mcp,
-        tool_view_fingerprint=fingerprint,
     )
 
 
@@ -212,27 +193,22 @@ def freeze_capability_dispatch_cut_and_views(
 
     tool_facts = registry.tool_facts
     skill_facts = registry.skill_facts
-    expected_versions = {
-        tool_capability_version_ref(fact).version_fingerprint for fact in tool_facts
-    }
-    actual_versions = {
-        item.capability_version_fingerprint for item in tools.native_wire.entries
-    }
+    expected_versions = {tool_capability_version_ref(fact) for fact in tool_facts}
+    actual_versions = {item.version for item in tools.native_wire.entries}
     if not expected_versions <= actual_versions:
         raise ValueError("native eligibility does not cover registry tools")
     if isinstance(tools.predecessor, EmptyCapabilityEpochPredecessor):
         if expected_versions != actual_versions:
             raise ValueError("cold native eligibility contains foreign tools")
     else:
-        retained_versions = {
-            item.version_fingerprint
-            for item in tools.predecessor.direct_projection_set.tool_versions
-        }
+        retained_versions = set(
+            tools.predecessor.direct_projection_set.tool_versions
+        )
         if actual_versions != expected_versions | retained_versions:
             raise ValueError("installed native eligibility coverage conflicts")
 
     expected_spec_fingerprints = {
-        tool_capability_version_ref(fact).version_fingerprint: (
+        tool_capability_version_ref(fact): (
             frozen_tool_spec_fingerprint(fact.canonical_tool_spec)
         )
         for fact in tool_facts
@@ -245,13 +221,13 @@ def freeze_capability_dispatch_cut_and_views(
         ):
             fingerprint = frozen_tool_spec_fingerprint(spec)
             existing = expected_spec_fingerprints.setdefault(
-                version.version_fingerprint, fingerprint
+                version, fingerprint
             )
             if existing != fingerprint:
                 raise ValueError("retained native Tool spec conflicts")
     if any(
         item.canonical_tool_spec_fingerprint
-        != expected_spec_fingerprints[item.capability_version_fingerprint]
+        != expected_spec_fingerprints[item.version]
         for item in tools.native_wire.entries
     ):
         raise ValueError("native eligibility canonical Tool spec drifted")
@@ -261,9 +237,7 @@ def freeze_capability_dispatch_cut_and_views(
         for item in registry.source_snapshots
         if item.registration.source.kind is CapabilitySourceKind.MCP_SERVER
     )
-    if tuple(
-        sorted(item.source_snapshot_fingerprint for item in mcp_snapshots)
-    ) != tools.mcp.source_snapshot_fingerprints:
+    if mcp_snapshots != tools.mcp.source_snapshots:
         raise ValueError("MCP projection does not exact-join registry sources")
     expected_mcp_inspectability = {
         (
@@ -289,51 +263,24 @@ def freeze_capability_dispatch_cut_and_views(
     )
     if (
         len(skill_snapshot) != 1
-        or skill_snapshot[0].source_snapshot_fingerprint
-        != skills.source_snapshot_fingerprint
+        or skill_snapshot[0] is not skills.source_snapshot
     ):
         raise ValueError("skill projection does not exact-join registry source")
 
-    parent_fingerprint = capability_dispatch_cut_fingerprint(
-        conversation_scope_kind=conversation_scope_kind,
-        scope_subagent_task_id=scope_subagent_task_id,
-        registry=registry,
-        tools=tools,
-        skills=skills,
-    )
     parent = FrozenCapabilityDispatchCut(
         conversation_scope_kind=conversation_scope_kind,
         scope_subagent_task_id=scope_subagent_task_id,
         registry=registry,
         tools=tools,
         skills=skills,
-        dispatch_cut_fingerprint=parent_fingerprint,
-    )
-    tool_view_fingerprint = tool_capability_dispatch_view_fingerprint(
-        parent_dispatch_cut_fingerprint=parent_fingerprint,
-        registry_fingerprint=registry.registry_fingerprint,
-        registry_tool_facts=tool_facts,
-        planning_input=tools,
     )
     tool_view = FrozenToolCapabilityDispatchView(
-        parent_dispatch_cut_fingerprint=parent_fingerprint,
-        registry_fingerprint=registry.registry_fingerprint,
+        parent_dispatch_cut=parent,
         registry_tool_facts=tool_facts,
-        planning_input=tools,
-        view_fingerprint=tool_view_fingerprint,
-    )
-    skill_view_fingerprint = skill_capability_dispatch_view_fingerprint(
-        parent_dispatch_cut_fingerprint=parent_fingerprint,
-        registry_fingerprint=registry.registry_fingerprint,
-        registry_skill_facts=skill_facts,
-        projection_input=skills,
     )
     skill_view = FrozenSkillCapabilityDispatchView(
-        parent_dispatch_cut_fingerprint=parent_fingerprint,
-        registry_fingerprint=registry.registry_fingerprint,
+        parent_dispatch_cut=parent,
         registry_skill_facts=skill_facts,
-        projection_input=skills,
-        view_fingerprint=skill_view_fingerprint,
     )
     return parent, tool_view, skill_view
 

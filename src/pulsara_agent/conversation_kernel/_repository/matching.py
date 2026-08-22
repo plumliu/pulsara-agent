@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Mapping
 from pulsara_agent.conversation_kernel.contracts import BlobContent, CanonicalContent, CommittedEventDraft, ConversationScopeKind, EntryKind, InlineContent, PromptDeliveryMode
 from pulsara_agent.conversation_kernel.vocabulary import SubjectSlot
-from pulsara_agent.conversation_kernel.steer import PreparedSteerConsumptionCandidate, PreparedSteerResourceRejection, build_pending_prompt_steer_fact
+from pulsara_agent.conversation_kernel.steer import PreparedSteerConsumptionCandidate, PreparedSteerResourceRejection
 
 from .contracts import (
     ConversationKernelConflict,
@@ -67,27 +67,18 @@ def _prompt_steer_row_matches_resource_rejection(
     if row is None:
         return False
     try:
-        fact = build_pending_prompt_steer_fact(
-            session_id=str(row["session_id"]),
-            workspace_id=str(row["workspace_id"]),
-            queue_item_id=str(row["id"]),
-            queue_sequence=int(row["queue_sequence"]),
-            command_id=str(row["command_id"]),
-            exact_target_turn_id=str(row["target_turn_id"]),
-            content=_MatchingOperations._content_from_row(row),
-        )
+        content = _MatchingOperations._content_from_row(row)
     except (KeyError, TypeError, ValueError):
         return False
     return bool(
         str(row["delivery_mode"]) == PromptDeliveryMode.STEER_ACTIVE_TURN.value
-        and fact.fact_fingerprint == candidate.expected_pending_fact_fingerprint
-        and fact.session_id == candidate.session_id
-        and fact.workspace_id == candidate.workspace_id
-        and fact.queue_item_id == candidate.queue_item_id
-        and fact.queue_sequence == candidate.queue_sequence
-        and fact.command_id == candidate.command_id
-        and fact.exact_target_turn_id == candidate.exact_target_turn_id
-        and fact.content == candidate.content
+        and str(row["session_id"]) == candidate.session_id
+        and str(row["workspace_id"]) == candidate.workspace_id
+        and str(row["id"]) == candidate.queue_item_id
+        and int(row["queue_sequence"]) == candidate.queue_sequence
+        and str(row["command_id"]) == candidate.command_id
+        and str(row["target_turn_id"]) == candidate.exact_target_turn_id
+        and content == candidate.content
     )
 
 

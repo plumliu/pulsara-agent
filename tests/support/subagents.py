@@ -22,7 +22,6 @@ from pulsara_agent.conversation_kernel.subagents.contracts import (
     SubagentContextMode,
     SubagentProfileKind,
     SubagentTaskStatus,
-    _fingerprint,
     _stable_id,
     build_parent_context_call_subject,
     build_parent_context_selection,
@@ -126,19 +125,6 @@ def accept_active_subagent_fixture(
         last_n_turns=None,
     )
     task_id = _stable_id("subagent-task", attempt_id, "0")
-    draft_payload = {
-        "task_id": task_id,
-        "task_key": None,
-        "label": None,
-        "profile": SubagentProfileKind.GENERAL_WORKER.value,
-        "display_role": None,
-        "objective": objective,
-        "context": selection.selection_fingerprint,
-        "dependencies": (),
-        "initial_status": SubagentTaskStatus.PENDING_START.value,
-        "pending_reason": "CAPACITY",
-        "terminal_reason": None,
-    }
     draft = PreparedSubagentTaskDraft(
         task_id=task_id,
         task_key=None,
@@ -151,23 +137,9 @@ def accept_active_subagent_fixture(
         initial_status=SubagentTaskStatus.PENDING_START,
         pending_reason="CAPACITY",
         terminal_reason=None,
-        draft_fingerprint=_fingerprint("task-draft", draft_payload),
     )
     occurred_at = datetime.now(timezone.utc)
     batch_id = _stable_id("subagent-batch", attempt_id, "batch")
-    candidate_payload = {
-        "session": guard.session_id,
-        "workspace": workspace_id,
-        "writer_generation": guard.writer_generation,
-        "turn": parent_turn_id,
-        "attempt": attempt_id,
-        "permission": permission_fingerprint,
-        "subject": subject.subject_fingerprint,
-        "batch": batch_id,
-        "tasks": (draft.draft_fingerprint,),
-        "occurred_at": occurred_at.isoformat(),
-        "actor": "host:test-fixture",
-    }
     candidate = PreparedSubagentTaskBatchAdmission(
         session_id=guard.session_id,
         workspace_id=workspace_id,
@@ -180,7 +152,6 @@ def accept_active_subagent_fixture(
         ordered_tasks=(draft,),
         occurred_at=occurred_at,
         actor_id="host:test-fixture",
-        candidate_fingerprint=_fingerprint("task-batch", candidate_payload),
     )
     assert repository.accept_subagent_task_batch(
         guard,

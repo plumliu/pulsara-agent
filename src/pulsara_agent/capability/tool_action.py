@@ -29,7 +29,6 @@ ToolActionClassifier = Callable[[ToolCall], tuple[LongHorizonActionClass, int]]
 class ToolActionClassifierBinding:
     contract: ToolActionClassifierContractFact
     classify: ToolActionClassifier
-    implementation_build_fingerprint: str | None = None
 
 
 class ToolActionClassifierRegistry:
@@ -42,10 +41,7 @@ class ToolActionClassifierRegistry:
             binding.contract.classifier_version,
         )
         existing = self._bindings.get(key)
-        if existing is not None and (
-            existing.contract.contract_fingerprint
-            != binding.contract.contract_fingerprint
-        ):
+        if existing is not None and existing.contract != binding.contract:
             raise ToolActionClassifierContractError(
                 "same tool-action classifier ID/version has a different contract"
             )
@@ -116,12 +112,7 @@ class ToolActionClassifierRegistry:
             "classifier_version": contract.classifier_version,
             "classifier_contract_fingerprint": contract.contract_fingerprint,
         }
-        return ToolActionClassificationFact(
-            **payload,
-            classification_fingerprint=context_fingerprint(
-                "tool-action-classification:v1", payload
-            ),
-        )
+        return ToolActionClassificationFact(**payload)
 
 
 def fixed_tool_action_policy(
@@ -337,10 +328,7 @@ def _tool_policy(
         "allowed_in_phases": allowed_in_phases,
         "action_classifier_contract": contract,
     }
-    return LongHorizonToolPolicyFact(
-        **payload,
-        policy_fingerprint=context_fingerprint("long-horizon-tool-policy:v1", payload),
-    )
+    return LongHorizonToolPolicyFact(**payload)
 
 
 def _allowed_phases(

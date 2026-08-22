@@ -6,6 +6,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import StrEnum
 from threading import RLock
+from uuid import uuid4
 
 from pulsara_agent.conversation_kernel.limits import STAGE2_LIMITS
 from pulsara_agent.model_input.contracts import ModelInputScopeKind
@@ -35,7 +36,6 @@ class TodoRunIdentity:
     root_run_id: str | None
     subagent_task_id: str | None
     owner_epoch: str
-    identity_fingerprint: str
 
     @property
     def todo_run_id(self) -> str:
@@ -58,7 +58,6 @@ class TodoRunIdentity:
         if (
             not self.session_id
             or not self.owner_epoch
-            or not self.identity_fingerprint.startswith("sha256:")
             or root == child
         ):
             raise ValueError("TODO run identity is invalid")
@@ -72,7 +71,6 @@ class FrozenTodoSnapshot:
     pending_count: int
     in_progress_count: int
     completed_count: int
-    snapshot_fingerprint: str
 
     def __post_init__(self) -> None:
         counts = {"pending": 0, "in_progress": 0, "completed": 0}
@@ -86,7 +84,6 @@ class FrozenTodoSnapshot:
             or counts["in_progress"] != self.in_progress_count
             or counts["completed"] != self.completed_count
             or self.in_progress_count > 1
-            or not self.snapshot_fingerprint.startswith("sha256:")
         ):
             raise ValueError("TODO snapshot is invalid")
 
@@ -102,8 +99,6 @@ class PreparedTodoRootRunActivation:
     exact_initial_entry_id: str
     exact_context_binding_revision_id: str
     proposed_root_run_id: str
-    exact_admission_candidate_fingerprint: str
-    activation_fingerprint: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,8 +108,6 @@ class PreparedTodoChildRunActivation:
     exact_turn_id: str
     exact_initial_entry_id: str
     exact_context_binding_revision_id: str
-    exact_admission_candidate_fingerprint: str
-    activation_fingerprint: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,12 +115,9 @@ class PreparedTodoReplacement:
     run_identity: TodoRunIdentity
     attempt_id: str
     proposed_result_entry_id: str
-    candidate_fingerprint: str
-    acknowledgement_fingerprint: str
     candidate: FrozenTodoCandidate
     acknowledgement: bytes
     token_id: str
-    token_fingerprint: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,16 +138,14 @@ class FrozenTodoCloseProjection:
 @dataclass(frozen=True, slots=True)
 class FrozenTodoCompactionHandoff:
     run_identity: TodoRunIdentity
-    source_snapshot_fingerprint: str
     actionable_items: tuple[FrozenTodoItem, ...]
     completed_omitted: int
-    handoff_fingerprint: str
 
 
 @dataclass(slots=True)
 class _TodoRunRecord:
     run_identity: TodoRunIdentity
-    activation_fingerprint: str
+    activation: PreparedTodoRootRunActivation | PreparedTodoChildRunActivation
     phase: TodoRunPhase
     last_turn_id: str
     current_snapshot: FrozenTodoSnapshot
@@ -188,7 +176,7 @@ class TodoRunStateOwner:
                 self._root.run_identity.root_run_id == prepared.proposed_root_run_id
                 and self._root.last_turn_id == prepared.exact_turn_id
             ):
-                if self._root.activation_fingerprint != prepared.activation_fingerprint:
+                if self._root.activation != prepared:
                     raise RuntimeError("ROOT TODO activation identity conflicts")
                 return None
             old = self._root
@@ -204,9 +192,7 @@ class TodoRunStateOwner:
                 root_run_id=prepared.proposed_root_run_id,
                 owner_epoch=self._owner_epoch,
             )
-            self._root = _new_record(
-                identity, prepared.exact_turn_id, prepared.activation_fingerprint
-            )
+            self._root = _new_record(identity, prepared.exact_turn_id, prepared)
             return closed
 
     def activate_child_run(self, prepared: PreparedTodoChildRunActivation) -> None:
@@ -215,7 +201,7 @@ class TodoRunStateOwner:
             current = self._children.get(prepared.subagent_task_id)
             if current is not None:
                 if current.last_turn_id == prepared.exact_turn_id:
-                    if current.activation_fingerprint != prepared.activation_fingerprint:
+                    if current.activation != prepared:
                         raise RuntimeError("child TODO activation identity conflicts")
                     return
                 raise RuntimeError("child TODO run identity conflicts")
@@ -227,7 +213,7 @@ class TodoRunStateOwner:
                 owner_epoch=self._owner_epoch,
             )
             self._children[prepared.subagent_task_id] = _new_record(
-                identity, prepared.exact_turn_id, prepared.activation_fingerprint
+                identity, prepared.exact_turn_id, prepared
             )
 
     def bind_continuation(
@@ -314,33 +300,14 @@ class TodoRunStateOwner:
                 >= MAXIMUM_PENDING_TODO_SETTLEMENTS_PER_RUN
             ):
                 raise RuntimeError("TODO settlement capacity is exhausted")
-            ack_fingerprint = context_fingerprint(
-                "pulsara:todo-acknowledgement:v1",
-                acknowledgement.decode("utf-8"),
-            )
-            token_fingerprint = context_fingerprint(
-                "pulsara:todo-settlement-token:v1",
-                {
-                    "run": record.run_identity.identity_fingerprint,
-                    "attempt_id": attempt_id,
-                    "result_entry_id": proposed_result_entry_id,
-                    "candidate": candidate.candidate_fingerprint,
-                    "ack": ack_fingerprint,
-                },
-            )
-            token_id = (
-                "todo-settlement:" + token_fingerprint.removeprefix("sha256:")
-            )
+            token_id = f"todo-settlement:{uuid4().hex}"
             prepared = PreparedTodoReplacement(
                 run_identity=record.run_identity,
                 attempt_id=attempt_id,
                 proposed_result_entry_id=proposed_result_entry_id,
-                candidate_fingerprint=candidate.candidate_fingerprint,
-                acknowledgement_fingerprint=ack_fingerprint,
                 candidate=candidate,
                 acknowledgement=acknowledgement,
                 token_id=token_id,
-                token_fingerprint=token_fingerprint,
             )
             existing = record.pending_settlements.get(token_id)
             if existing is not None and existing != prepared:
@@ -453,28 +420,10 @@ class TodoRunStateOwner:
             for item in snapshot.ordered_items
             if item.status.value != "completed"
         )
-        fingerprint = context_fingerprint(
-            "pulsara:todo-compaction-handoff:v1",
-            {
-                "snapshot": snapshot.snapshot_fingerprint,
-                "items": tuple(
-                    {
-                        "ordinal": item.ordinal,
-                        "status": item.status.value,
-                        "text": item.text,
-                    }
-                    for item in actionable
-                ),
-                "completed_omitted": snapshot.completed_count,
-                "trust": "UNTRUSTED_OBSERVATION",
-            },
-        )
         return FrozenTodoCompactionHandoff(
             run_identity=snapshot.run_identity,
-            source_snapshot_fingerprint=snapshot.snapshot_fingerprint,
             actionable_items=actionable,
             completed_omitted=snapshot.completed_count,
-            handoff_fingerprint=fingerprint,
         )
 
     def _record(
@@ -521,7 +470,6 @@ def build_root_activation(
     exact_turn_id: str,
     exact_initial_entry_id: str,
     exact_context_binding_revision_id: str,
-    exact_admission_candidate_fingerprint: str,
     command_id: str | None = None,
     queue_item_id: str | None = None,
     queue_sequence: int | None = None,
@@ -531,7 +479,6 @@ def build_root_activation(
         or not exact_turn_id
         or not exact_initial_entry_id
         or not exact_context_binding_revision_id
-        or not exact_admission_candidate_fingerprint.startswith("sha256:")
     ):
         raise ValueError("TODO ROOT admission identity is incomplete")
     if admission_kind not in {"DIRECT", "QUEUED"}:
@@ -555,18 +502,6 @@ def build_root_activation(
         "pulsara:todo-root-run-id:v1",
         {"session_id": session_id, "turn_id": exact_turn_id},
     ).removeprefix("sha256:")
-    payload = {
-        "session_id": session_id,
-        "admission_kind": admission_kind,
-        "command_id": command_id,
-        "queue_item_id": queue_item_id,
-        "queue_sequence": queue_sequence,
-        "turn_id": exact_turn_id,
-        "entry_id": exact_initial_entry_id,
-        "context_binding_revision_id": exact_context_binding_revision_id,
-        "root_run_id": proposed,
-        "admission_candidate": exact_admission_candidate_fingerprint,
-    }
     return PreparedTodoRootRunActivation(
         session_id=session_id,
         admission_kind=admission_kind,
@@ -577,12 +512,6 @@ def build_root_activation(
         exact_initial_entry_id=exact_initial_entry_id,
         exact_context_binding_revision_id=exact_context_binding_revision_id,
         proposed_root_run_id=proposed,
-        exact_admission_candidate_fingerprint=(
-            exact_admission_candidate_fingerprint
-        ),
-        activation_fingerprint=context_fingerprint(
-            "pulsara:prepared-todo-root-run-activation:v1", payload
-        ),
     )
 
 
@@ -593,7 +522,6 @@ def build_child_activation(
     exact_turn_id: str,
     exact_initial_entry_id: str,
     exact_context_binding_revision_id: str,
-    exact_admission_candidate_fingerprint: str,
 ) -> PreparedTodoChildRunActivation:
     if (
         not session_id
@@ -601,29 +529,14 @@ def build_child_activation(
         or not exact_turn_id
         or not exact_initial_entry_id
         or not exact_context_binding_revision_id
-        or not exact_admission_candidate_fingerprint.startswith("sha256:")
     ):
         raise ValueError("TODO child admission identity is incomplete")
-    payload = {
-        "session_id": session_id,
-        "subagent_task_id": subagent_task_id,
-        "turn_id": exact_turn_id,
-        "entry_id": exact_initial_entry_id,
-        "context_binding_revision_id": exact_context_binding_revision_id,
-        "admission_candidate": exact_admission_candidate_fingerprint,
-    }
     return PreparedTodoChildRunActivation(
         session_id=session_id,
         subagent_task_id=subagent_task_id,
         exact_turn_id=exact_turn_id,
         exact_initial_entry_id=exact_initial_entry_id,
         exact_context_binding_revision_id=exact_context_binding_revision_id,
-        exact_admission_candidate_fingerprint=(
-            exact_admission_candidate_fingerprint
-        ),
-        activation_fingerprint=context_fingerprint(
-            "pulsara:prepared-todo-child-run-activation:v1", payload
-        ),
     )
 
 
@@ -636,15 +549,6 @@ def _root_identity(
         root_run_id=root_run_id,
         subagent_task_id=None,
         owner_epoch=owner_epoch,
-        identity_fingerprint=context_fingerprint(
-            "pulsara:todo-run-identity:v1",
-            {
-                "session_id": session_id,
-                "scope_kind": "ROOT",
-                "root_run_id": root_run_id,
-                "owner_epoch": owner_epoch,
-            },
-        ),
     )
 
 
@@ -657,20 +561,13 @@ def _child_identity(
         root_run_id=None,
         subagent_task_id=task_id,
         owner_epoch=owner_epoch,
-        identity_fingerprint=context_fingerprint(
-            "pulsara:todo-run-identity:v1",
-            {
-                "session_id": session_id,
-                "scope_kind": "SUBAGENT_TASK",
-                "subagent_task_id": task_id,
-                "owner_epoch": owner_epoch,
-            },
-        ),
     )
 
 
 def _new_record(
-    identity: TodoRunIdentity, turn_id: str, activation_fingerprint: str
+    identity: TodoRunIdentity,
+    turn_id: str,
+    activation: PreparedTodoRootRunActivation | PreparedTodoChildRunActivation,
 ) -> _TodoRunRecord:
     empty = FrozenTodoCandidate(
         ordered_items=(),
@@ -678,13 +575,10 @@ def _new_record(
         in_progress_count=0,
         completed_count=0,
         canonical_json_utf8_bytes=len(b'{"items":[]}'),
-        candidate_fingerprint=context_fingerprint(
-            "pulsara:todo-replacement:v1", {"items": ()}
-        ),
     )
     return _TodoRunRecord(
         run_identity=identity,
-        activation_fingerprint=activation_fingerprint,
+        activation=activation,
         phase=TodoRunPhase.ACTIVE,
         last_turn_id=turn_id,
         current_snapshot=_snapshot(identity, 0, empty),
@@ -702,14 +596,6 @@ def _snapshot(
         pending_count=candidate.pending_count,
         in_progress_count=candidate.in_progress_count,
         completed_count=candidate.completed_count,
-        snapshot_fingerprint=context_fingerprint(
-            "pulsara:todo-run-snapshot:v1",
-            {
-                "run": identity.identity_fingerprint,
-                "revision": revision,
-                "candidate": candidate.candidate_fingerprint,
-            },
-        ),
     )
 
 
