@@ -18,7 +18,9 @@ from pulsara_agent.conversation_kernel.input_continuity import (
     HostProviderInputContinuityOwner,
     ProviderInputContinuityConflict,
 )
-from pulsara_agent.conversation_kernel.runner import _prepared_append_candidate
+from pulsara_agent.conversation_kernel.provider_dispatch import (
+    prepared_append_candidate,
+)
 from pulsara_agent.llm.adapters.openai.chat_completions import (
     OpenAIChatCompletionsTransport,
     build_chat_completions_payload,
@@ -488,7 +490,7 @@ def _continuity_candidate(request: KernelModelExecutionRequest):
     )
     tool_exposure_plan = request.prepared_call.tool_surface.capability_exposure_plan
     assert tool_exposure_plan is not None
-    candidate = _prepared_append_candidate(
+    candidate = prepared_append_candidate(
         planning=planning,
         compatibility=compatibility,
         compiled_result=FrozenProviderInputAppendCompileResult(

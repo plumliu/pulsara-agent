@@ -18,7 +18,10 @@ uses a reset-only migration universe while the product is still young.
 
 ```text
 Python KernelHostCore
-├── canonical conversation runner
+├── foreground conversation coordinator
+│   ├── exact turn admission + provider dispatch
+│   ├── compaction + Plan + Tool batch coordinators
+│   └── memory + steer dispatch support
 ├── provider-neutral structured model-input compiler
 ├── tool policy + Host-scoped physical tools
 ├── foreground safe-point compaction + snapshot adoption
@@ -285,6 +288,13 @@ and keyed opaque-token digests remain unchanged; provider wire, Protocol v3,
 canonical rows, and the architecture oracle do not change. Verification is
 recorded in
 [`fingerprint_subtraction_hard_cut_activation.json`](benchmarks/suites/core/v1/fingerprint_subtraction_hard_cut_activation.json).
+The production-code cleanup hard cut keeps the same foreground state machine
+while moving turn admission, provider dispatch, compaction, Plan control, tool
+execution, memory, and steer settlement behind narrow owners. The runner now
+decides the next phase without reimplementing those authorities; no legacy
+facade, compatibility import, new fingerprint, or durable recovery mechanism
+remains. Verification is recorded in
+[`production_code_cleanup_and_runner_decomposition_activation.json`](benchmarks/suites/core/v1/production_code_cleanup_and_runner_decomposition_activation.json).
 Round 8 replaces the old memory durability/recovery graph with an advisory
 dataset. `remember` atomically accepts one candidate with its ToolResult, while
 governance, cheap-hint reflection, embedding, and reranking remain lossy

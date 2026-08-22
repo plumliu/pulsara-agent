@@ -29,7 +29,9 @@ from pulsara_agent.conversation_kernel.execution_watchdogs import (
     KernelWatchdogOwner,
 )
 from pulsara_agent.conversation_kernel.contracts import HostWriterGuard, WriterLease
-from pulsara_agent.conversation_kernel.runner import KernelToolAuthorizationKind
+from pulsara_agent.conversation_kernel.tool_contracts import (
+    KernelToolAuthorizationKind,
+)
 from pulsara_agent.conversation_kernel.tool_runtime import (
     DirectKernelToolPort,
 )

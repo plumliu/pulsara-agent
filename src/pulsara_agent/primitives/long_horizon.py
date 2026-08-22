@@ -100,21 +100,6 @@ def long_horizon_tool_policy_identity_payload(
     }
 
 
-class ToolActionClassificationFact(FrozenLongHorizonFact):
-    schema_version: Literal["tool_action_classification.v1"] = (
-        "tool_action_classification.v1"
-    )
-    tool_call_id: str = Field(min_length=1)
-    descriptor_id: str = Field(min_length=1)
-    descriptor_fingerprint: str = Field(min_length=1)
-    action_class: LongHorizonActionClass
-    rollout_cost_units: int = Field(ge=0)
-    normalized_action_fingerprint: str = Field(min_length=1)
-    classifier_id: str = Field(min_length=1)
-    classifier_version: str = Field(min_length=1)
-    classifier_contract_fingerprint: str = Field(min_length=1)
-
-
 class ObservationRollupRendererContractFact(FrozenLongHorizonFact):
     schema_version: Literal["observation_rollup_renderer_contract.v1"] = (
         "observation_rollup_renderer_contract.v1"
@@ -168,7 +153,6 @@ __all__ = [
     "LongHorizonToolPolicyFact",
     "ObservationRollupRendererContractFact",
     "RolloutPhase",
-    "ToolActionClassificationFact",
     "ToolActionClassifierContractFact",
     "default_observation_rollup_renderer_contract",
     "long_horizon_tool_policy_identity_payload",

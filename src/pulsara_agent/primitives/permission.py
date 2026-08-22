@@ -12,9 +12,6 @@ from hashlib import sha256
 import json
 from typing import Any, Mapping
 
-from pydantic import BaseModel, ConfigDict, field_validator, model_validator
-
-
 class PermissionMode(StrEnum):
     READ_ONLY = "read-only"
     ASK_PERMISSIONS = "ask-permissions"
@@ -131,45 +128,11 @@ def preset_permission_payload(mode: str | PermissionMode) -> dict[str, Any]:
     return _copy_json(_PRESET_PERMISSION_PAYLOADS[parse_permission_mode(mode)])
 
 
-class PresetPermissionPolicyFact(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    mode: PermissionMode
-    expanded_policy: dict[str, Any]
-
-    @field_validator("expanded_policy", mode="before")
-    @classmethod
-    def _copy_expanded_policy(cls, value: object) -> object:
-        if not isinstance(value, Mapping):
-            raise ValueError("expanded_policy must be a JSON object")
-        return _copy_json(value)
-
-    @model_validator(mode="after")
-    def _validate_preset(self) -> "PresetPermissionPolicyFact":
-        if self.expanded_policy != preset_permission_payload(self.mode):
-            raise ValueError(
-                f"expanded_policy must equal the {self.mode.value!r} preset"
-            )
-        return self
-
-
-def preset_permission_policy_fact(
-    mode: str | PermissionMode,
-) -> PresetPermissionPolicyFact:
-    parsed = parse_permission_mode(mode)
-    return PresetPermissionPolicyFact(
-        mode=parsed,
-        expanded_policy=preset_permission_payload(parsed),
-    )
-
-
 __all__ = [
     "DEFAULT_PERMISSION_MODE",
     "PERMISSION_PRESET_CONTRACT_FINGERPRINT",
     "PERMISSION_PRESET_CONTRACT_ID",
     "PermissionMode",
-    "PresetPermissionPolicyFact",
     "parse_permission_mode",
     "preset_permission_payload",
-    "preset_permission_policy_fact",
 ]

@@ -563,7 +563,7 @@ def test_round5b_terminal_provider_race_handoffs_manual_to_idle_owner() -> None:
     host._compaction = owner
     idle_calls: list[tuple[str, str, bool]] = []
 
-    class _Runner:
+    class _Compaction:
         async def compact_idle_turn(
             self, *, turn_id: str, command_id: str, force: bool
         ) -> CompactionOutcome:
@@ -575,6 +575,9 @@ def test_round5b_terminal_provider_race_handoffs_manual_to_idle_owner() -> None:
                 1,
                 "COMPACTED",
             )
+
+    class _Runner:
+        compaction = _Compaction()
 
     idle_marks: list[str] = []
     host._runner = _Runner()

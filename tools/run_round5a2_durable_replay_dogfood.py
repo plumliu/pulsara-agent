@@ -1,8 +1,8 @@
-"""Content-free real-provider restart probe for Round 5A.2.
+"""Observable real-provider restart probe for Round 5A.2.
 
-The report contains only closed API/status values, counts, byte sizes and
-fingerprints.  Credentials, DSNs, prompts, assistant text, private replay
-bodies, provider responses, headers and endpoint URLs are never emitted.
+The configured API key is never emitted. Public prompts, model replies and
+sanitized provider failure details remain visible so endpoint failures can be
+diagnosed from the actual trajectory rather than inferred from a status code.
 """
 
 from __future__ import annotations
@@ -193,6 +193,8 @@ async def _child(args: argparse.Namespace) -> dict[str, object]:
             "api": settings.llm.api,
             "session_id": session.session_id,
             "completed": bool(result.final_entry_id),
+            "prompt": "Reply with a short acknowledgement.",
+            "public_answer": result.final_text,
             "public_answer_utf8_bytes": len(result.final_text.encode("utf-8")),
             "selected_hydration_present": any(
                 present for present, _count in observed_hydrations
@@ -211,6 +213,10 @@ async def _child(args: argparse.Namespace) -> dict[str, object]:
         }
         if isinstance(exc, ProviderModelExecutionFailed):
             report["failure_code"] = exc.error.code.value
+            report["failure_message"] = exc.error.message
+            report["failure_diagnostics"] = [
+                item.model_dump(mode="json") for item in exc.error.diagnostics
+            ]
         elif isinstance(exc, ProviderModelOutputIncomplete):
             report["incomplete_reason"] = exc.reason.value
     print(json.dumps(report, sort_keys=True), flush=True)

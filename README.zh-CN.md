@@ -18,7 +18,10 @@ migration universe。
 
 ```text
 Python KernelHostCore
-├── canonical conversation runner
+├── foreground conversation coordinator
+│   ├── exact turn admission + provider dispatch
+│   ├── compaction + Plan + Tool batch coordinators
+│   └── memory + steer dispatch support
 ├── provider-neutral structured model-input compiler
 ├── tool policy + Host-scoped physical tools
 ├── foreground safe-point compaction + snapshot adoption
@@ -251,6 +254,11 @@ prefix/replay compatibility、stable canonical identity和带密钥opaque token�
 保持不变。Provider wire、Protocol v3、canonical rows与architecture oracle均未改变。
 验证记录在
 [`fingerprint_subtraction_hard_cut_activation.json`](benchmarks/suites/core/v1/fingerprint_subtraction_hard_cut_activation.json)。
+Production code cleanup hard-cut保留同一foreground状态机，同时把turn admission、
+provider dispatch、compaction、Plan control、tool execution、memory与steer settlement
+迁入窄owner。Runner只决定下一阶段，不再重新实现这些authority；production中没有遗留
+旧facade、兼容import、新fingerprint或durable recovery机制。验证记录在
+[`production_code_cleanup_and_runner_decomposition_activation.json`](benchmarks/suites/core/v1/production_code_cleanup_and_runner_decomposition_activation.json)。
 Round 8用advisory dataset取代旧memory durability/recovery graph。`remember`会与
 ToolResult同事务接受一个candidate；governance、cheap-hint reflection、
 embedding与reranking均保持可丢失的process-local弱完成。Accepted item只能是

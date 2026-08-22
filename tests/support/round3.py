@@ -76,7 +76,7 @@ from pulsara_agent.conversation_kernel.subagents.contracts import (
     parent_context_selection_identity_digest,
     parent_context_source_identity_digest,
 )
-from pulsara_agent.conversation_kernel.runner import (
+from pulsara_agent.conversation_kernel.tool_contracts import (
     KernelToolInvocationContext,
     KernelToolResult,
 )

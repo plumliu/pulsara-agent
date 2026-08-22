@@ -92,6 +92,8 @@ from pulsara_agent.conversation_kernel.repository import (
 )
 from pulsara_agent.conversation_kernel.runner import (
     ConversationKernelRunner,
+)
+from pulsara_agent.conversation_kernel.tool_contracts import (
     KernelToolAuthorizationKind,
     KernelToolInvocationContext,
 )

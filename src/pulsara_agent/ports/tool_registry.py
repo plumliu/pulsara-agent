@@ -4,9 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from enum import StrEnum
-from typing import Literal, Protocol, TypeAlias
-
-from pulsara_agent.ports.tool_execution import AsyncTool, Tool
+from typing import Literal, TypeAlias
 from pulsara_agent.primitives.model_call import sha256_fingerprint
 
 
@@ -117,19 +115,12 @@ def tool_binding_contract_identity_fingerprint(
     )
 
 
-class ToolRegistryReadPort(Protocol):
-    def names(self) -> tuple[str, ...]: ...
-    def get(self, name: str) -> Tool | AsyncTool: ...
-    def binding_contract(self, name: str) -> ToolBindingContract | None: ...
-
-
 __all__ = [
     "BuiltinToolBindingContract",
     "CustomToolBindingContract",
     "ToolBindingContract",
     "ToolBindingContractBase",
     "ToolBindingOrigin",
-    "ToolRegistryReadPort",
     "build_tool_binding_contract",
     "tool_binding_contract_identity_fingerprint",
 ]

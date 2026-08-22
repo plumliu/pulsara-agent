@@ -62,6 +62,8 @@ from pulsara_agent.model_input.contracts import (
 from pulsara_agent.conversation_kernel.runner import (
     ConversationKernelRunner,
     KernelRunResult,
+)
+from pulsara_agent.conversation_kernel.tool_contracts import (
     KernelToolInvocationContext,
     KernelToolResult,
 )

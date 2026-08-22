@@ -48,7 +48,7 @@ from pulsara_agent.conversation_kernel.memory.reflection import (
     prepare_cheap_hint_reflection_handoff,
 )
 from pulsara_agent.conversation_kernel.repository import ConversationKernelRepository
-from pulsara_agent.conversation_kernel.runner import (
+from pulsara_agent.conversation_kernel.tool_contracts import (
     KernelToolInvocationContext,
     KernelToolResult,
 )

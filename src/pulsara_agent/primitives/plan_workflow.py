@@ -38,15 +38,6 @@ class PlanInteractionKind(StrEnum):
     DRAFT_REVIEW = "DRAFT_REVIEW"
 
 
-class PlanInteractionStatus(StrEnum):
-    OPEN = "OPEN"
-    ANSWERED = "ANSWERED"
-    APPROVED = "APPROVED"
-    REVISION_REQUESTED = "REVISION_REQUESTED"
-    CANCELLED = "CANCELLED"
-    ABORTED = "ABORTED"
-
-
 class PlanHandoffKind(StrEnum):
     ENTERED_PLAN = "ENTERED_PLAN"
     REVISION_REQUESTED = "REVISION_REQUESTED"
@@ -414,7 +405,6 @@ __all__ = [
     "PlanHandoffKind",
     "PlanInteractionBinding",
     "PlanInteractionKind",
-    "PlanInteractionStatus",
     "PlanQuestionAnswerKind",
     "PlanQuestionContent",
     "PlanQuestionOption",

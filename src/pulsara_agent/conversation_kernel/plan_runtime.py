@@ -9,14 +9,46 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from enum import StrEnum
-from typing import Awaitable, Callable
+from hashlib import sha256
+from typing import Awaitable, Callable, Protocol
+
+from jsonschema import ValidationError, validators
+
+from pulsara_agent.capability.builtin_catalog import builtin_tool_catalog_entry
+from pulsara_agent.conversation_kernel.assembler import CompletedToolCallBlock
+from pulsara_agent.conversation_kernel.contracts import WriterLease
+from pulsara_agent.conversation_kernel.execution_watchdogs import (
+    KernelExecutionDeadlineFactory,
+    KernelWatchdogOwner,
+)
+from pulsara_agent.conversation_kernel.io import KernelSessionIO
 
 from pulsara_agent.conversation_kernel.repository import (
+    AcceptedPlanToolBatch,
     AcceptedPlanResolution,
     ConversationKernelConflict,
+    ConversationKernelRepository,
+    PlanToolBatchDisposition,
+    PlanToolControlKind,
+    PreparedPlanBatchCall,
+    PreparedPlanToolBatch,
 )
-from pulsara_agent.primitives.plan_workflow import PlanQuestionContent
+from pulsara_agent.conversation_kernel.tool_surface import (
+    ProcessLocalToolSurfaceBorrow,
+)
+from pulsara_agent.conversation_kernel.workspace import SessionWorkspaceResolver
+from pulsara_agent.model_input.contracts import FrozenCanonicalCompileSnapshot
+from pulsara_agent.primitives.context import canonical_json_bytes, thaw_json
+from pulsara_agent.primitives.plan_workflow import (
+    PlanInteractionBinding,
+    PlanQuestionContent,
+    extract_plan_draft,
+    extract_plan_entry_reason,
+    extract_plan_question,
+)
+from pulsara_agent.ports.tool_execution import thaw_tool_json_object
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,9 +128,7 @@ class KernelPlanInteractionCoordinator:
             self._open = None
             return True
 
-    async def wait(
-        self, waiter: PlanQuestionWaiter
-    ) -> AcceptedPlanResolution:
+    async def wait(self, waiter: PlanQuestionWaiter) -> AcceptedPlanResolution:
         # Deliberately no operation timeout: waiting for a human is not a
         # physical provider/tool operation deadline.
         try:
@@ -202,9 +232,7 @@ class ContinuationAdmissionOwner:
             task,
         )
         self._attempts[attempt_id] = attempt
-        task.add_done_callback(
-            lambda completed: self._retire(attempt_id, completed)
-        )
+        task.add_done_callback(lambda completed: self._retire(attempt_id, completed))
         return attempt
 
     def mark_terminalizing(
@@ -248,7 +276,326 @@ class ContinuationAdmissionOwner:
             )
 
 
+class AutomaticPlanContinuationPort(Protocol):
+    async def __call__(
+        self,
+        candidate: PreparedPlanToolBatch,
+        deadline_monotonic: float,
+    ) -> AcceptedPlanToolBatch: ...
+
+
+def _stable_id(prefix: str, *parts: str) -> str:
+    return f"{prefix}:{sha256(chr(0).join(parts).encode()).hexdigest()}"
+
+
+def _json_digest(value) -> str:
+    return "sha256:" + sha256(canonical_json_bytes(value)).hexdigest()
+
+
+class PlanToolBatchCoordinator:
+    """Own one complete Plan control batch and its human waiter settlement."""
+
+    def __init__(
+        self,
+        *,
+        repository: ConversationKernelRepository,
+        writer_lease: WriterLease,
+        io_owner: KernelSessionIO,
+        interactions: KernelPlanInteractionCoordinator | None,
+        automatic_continuation: AutomaticPlanContinuationPort | None,
+        workspace_resolver: SessionWorkspaceResolver,
+        deadline_factory: KernelExecutionDeadlineFactory,
+    ) -> None:
+        self._repository = repository
+        self._writer_lease = writer_lease
+        self._io = io_owner
+        self._plan_interactions = interactions
+        self._automatic_plan_continuation = automatic_continuation
+        self._workspace_resolver = workspace_resolver
+        self._deadlines = deadline_factory
+
+    def _canonical_deadline(self) -> float:
+        return self._deadlines.deadline(KernelWatchdogOwner.FOREGROUND_CANONICAL)
+
+    async def _resolved_workspace_id(self) -> str:
+        return await self._workspace_resolver.resolve(
+            deadline=self._canonical_deadline()
+        )
+
+    async def accept_batch(
+        self,
+        *,
+        calls: tuple[CompletedToolCallBlock, ...],
+        selected_call_index: int,
+        assistant_entry_id: str,
+        canonical_facts: FrozenCanonicalCompileSnapshot,
+        surface_borrow: ProcessLocalToolSurfaceBorrow,
+        deadline: float,
+    ) -> AcceptedPlanToolBatch:
+        selected = calls[selected_call_index]
+        kind = {
+            "enter_plan": PlanToolControlKind.ENTER,
+            "ask_plan_question": PlanToolControlKind.QUESTION,
+            "exit_plan": PlanToolControlKind.DRAFT,
+        }[selected.tool_name]
+        workflow_fact = canonical_facts.plan_workflow_fact
+        if kind is PlanToolControlKind.ENTER:
+            if workflow_fact is None:
+                workflow_id = _stable_id(
+                    "plan-workflow",
+                    self._writer_lease.guard.session_id,
+                    assistant_entry_id,
+                    selected.tool_call_id,
+                )
+                expected_revision = None
+            else:
+                workflow_id = workflow_fact.workflow_id
+                expected_revision = workflow_fact.current_workflow_revision
+        else:
+            workflow_id = (
+                workflow_fact.workflow_id
+                if workflow_fact is not None
+                else _stable_id(
+                    "plan-unavailable-workflow",
+                    self._writer_lease.guard.session_id,
+                    assistant_entry_id,
+                    selected.tool_call_id,
+                )
+            )
+            expected_revision = (
+                None
+                if workflow_fact is None
+                else workflow_fact.current_workflow_revision
+            )
+        provisional_interaction_id = (
+            None
+            if kind is PlanToolControlKind.ENTER
+            else _stable_id(
+                "plan-interaction",
+                workflow_id,
+                assistant_entry_id,
+                selected.tool_call_id,
+            )
+        )
+        catalog_entry = builtin_tool_catalog_entry(selected.tool_name)
+        catalog_binding = catalog_entry.binding_contract.base
+        request_binding = PlanInteractionBinding(
+            catalog_binding.contract_id,
+            catalog_binding.contract_version,
+            catalog_binding.binding_fingerprint,
+        )
+        disposition = PlanToolBatchDisposition.APPLY
+        # A Plan call owns the complete batch even when its frozen surface was
+        # revoked or its arguments are invalid.  Classify those conditions
+        # before constructing any workflow/interaction subject so the
+        # repository can install one closed no-attempt result for every call.
+        try:
+            advertised_execution_binding = surface_borrow.execution_binding(
+                selected.tool_name
+            )
+            advertised_spec = next(
+                (
+                    item
+                    for item in surface_borrow.prepared.model_surface.tool_specs
+                    if item.name == selected.tool_name
+                ),
+                None,
+            )
+            if (
+                advertised_spec is None
+                or advertised_execution_binding.descriptor_fingerprint
+                != advertised_spec.descriptor_fingerprint
+                or advertised_spec.descriptor_fingerprint
+                != catalog_entry.descriptor.fingerprint()
+            ):
+                disposition = PlanToolBatchDisposition.TOOL_UNAVAILABLE
+        except (KeyError, RuntimeError):
+            disposition = PlanToolBatchDisposition.TOOL_UNAVAILABLE
+        if disposition is PlanToolBatchDisposition.APPLY:
+            schema_source = catalog_entry.descriptor.input_schema
+            if schema_source is None:
+                disposition = PlanToolBatchDisposition.TOOL_UNAVAILABLE
+            else:
+                schema = thaw_tool_json_object(schema_source)
+                try:
+                    validator = validators.validator_for(schema)
+                    validator.check_schema(schema)
+                except Exception:
+                    disposition = PlanToolBatchDisposition.TOOL_UNAVAILABLE
+                else:
+                    try:
+                        raw_arguments = thaw_json(selected.arguments)
+                        if not isinstance(raw_arguments, dict):
+                            raise ValidationError("arguments must be an object")
+                        validator(schema).validate(raw_arguments)
+                    except ValidationError:
+                        disposition = PlanToolBatchDisposition.INVALID_ARGUMENTS
+        if disposition is PlanToolBatchDisposition.APPLY:
+            try:
+                if kind is PlanToolControlKind.ENTER:
+                    extract_plan_entry_reason(
+                        binding=request_binding,
+                        arguments=selected.arguments,
+                    )
+                elif kind is PlanToolControlKind.QUESTION:
+                    assert provisional_interaction_id is not None
+                    extract_plan_question(
+                        interaction_id=provisional_interaction_id,
+                        binding=request_binding,
+                        arguments=selected.arguments,
+                    )
+                else:
+                    assert provisional_interaction_id is not None
+                    extract_plan_draft(
+                        interaction_id=provisional_interaction_id,
+                        assistant_entry_id=assistant_entry_id,
+                        tool_call_id=selected.tool_call_id,
+                        binding=request_binding,
+                        request_semantic_digest=_json_digest(selected.arguments),
+                        arguments=selected.arguments,
+                    )
+            except ValueError:
+                disposition = PlanToolBatchDisposition.INVALID_ARGUMENTS
+        if disposition is PlanToolBatchDisposition.APPLY:
+            if kind is not PlanToolControlKind.ENTER and workflow_fact is None:
+                disposition = PlanToolBatchDisposition.TOOL_UNAVAILABLE
+            elif (
+                kind is PlanToolControlKind.QUESTION and self._plan_interactions is None
+            ):
+                disposition = PlanToolBatchDisposition.TOOL_UNAVAILABLE
+            elif (
+                kind is PlanToolControlKind.ENTER
+                and workflow_fact is None
+                and self._automatic_plan_continuation is None
+            ):
+                disposition = PlanToolBatchDisposition.TOOL_UNAVAILABLE
+        apply_control = disposition is PlanToolBatchDisposition.APPLY
+        interaction_id = provisional_interaction_id if apply_control else None
+        continuation_turn_id = (
+            _stable_id("plan-continuation-turn", workflow_id, selected.tool_call_id)
+            if apply_control
+            and kind is PlanToolControlKind.ENTER
+            and workflow_fact is None
+            else None
+        )
+        continuation_entry_id = (
+            _stable_id("plan-continuation-entry", workflow_id, selected.tool_call_id)
+            if apply_control
+            and kind is PlanToolControlKind.ENTER
+            and workflow_fact is None
+            else None
+        )
+        continuation_revision_id = (
+            _stable_id("context-revision", continuation_turn_id or "", "0")
+            if continuation_turn_id is not None
+            else None
+        )
+        prepared_calls: list[PreparedPlanBatchCall] = []
+        for index, call in enumerate(calls):
+            selected_question = (
+                apply_control
+                and index == selected_call_index
+                and kind is PlanToolControlKind.QUESTION
+            )
+            prepared_calls.append(
+                PreparedPlanBatchCall(
+                    block_id=call.block_id,
+                    tool_call_id=call.tool_call_id,
+                    tool_name=call.tool_name,
+                    result_id=(
+                        None
+                        if selected_question
+                        else _stable_id(
+                            "tool-result", assistant_entry_id, call.tool_call_id
+                        )
+                    ),
+                    result_entry_id=(
+                        None
+                        if selected_question
+                        else _stable_id(
+                            "tool-result-entry", assistant_entry_id, call.tool_call_id
+                        )
+                    ),
+                )
+            )
+        candidate = PreparedPlanToolBatch(
+            session_id=self._writer_lease.guard.session_id,
+            workspace_id=await self._resolved_workspace_id(),
+            origin_turn_id=canonical_facts.canonical_input.identity.turn_id,
+            assistant_entry_id=assistant_entry_id,
+            selected_call_ordinal=selected_call_index,
+            control_kind=kind,
+            selected_arguments=selected.arguments,
+            request_binding=request_binding,
+            permission_snapshot=canonical_facts.run_permission_snapshot,
+            workflow_id=workflow_id,
+            expected_workflow_revision=expected_revision,
+            interaction_id=interaction_id,
+            continuation_turn_id=continuation_turn_id,
+            continuation_entry_id=continuation_entry_id,
+            continuation_context_binding_revision_id=continuation_revision_id,
+            calls=tuple(prepared_calls),
+            occurred_at=datetime.now(timezone.utc),
+            actor_id="plan-runtime",
+            idempotent_existing=(
+                apply_control
+                and kind is PlanToolControlKind.ENTER
+                and workflow_fact is not None
+            ),
+            selected_disposition=disposition,
+        )
+        waiter: PlanQuestionWaiter | None = None
+        if apply_control and kind is PlanToolControlKind.QUESTION:
+            assert self._plan_interactions is not None
+            assert interaction_id is not None
+            waiter = await self._plan_interactions.prepare_question(
+                interaction_id=interaction_id,
+                origin_turn_id=candidate.origin_turn_id,
+            )
+        try:
+            if (
+                apply_control
+                and kind is PlanToolControlKind.ENTER
+                and not candidate.idempotent_existing
+            ):
+                assert self._automatic_plan_continuation is not None
+                # The Host callback installs its own continuation task before
+                # its first await.  Calling it in the ROOT run-chain task is
+                # essential: an extra shield-created wrapper would become the
+                # observed origin task and could never exact-join Host's ROOT
+                # slot.  The callback itself shields the installed owner.
+                outcome = await self._automatic_plan_continuation(candidate, deadline)
+            else:
+                try:
+                    outcome = await self._io.run(
+                        self._repository.accept_plan_tool_batch,
+                        self._writer_lease.guard,
+                        candidate=candidate,
+                        deadline_monotonic=deadline,
+                    )
+                except Exception:
+                    outcome = await self._io.run(
+                        self._repository.confirm_plan_tool_batch_winner,
+                        candidate=candidate,
+                        deadline_monotonic=self._canonical_deadline(),
+                    )
+                    if outcome is None:
+                        raise
+            if waiter is not None:
+                if outcome.question is None:
+                    raise RuntimeError("accepted Plan question lacks typed content")
+                await self._plan_interactions.publish_open(waiter, outcome.question)
+                await self._plan_interactions.wait(waiter)
+            return outcome
+        except BaseException as error:
+            if waiter is not None and self._plan_interactions is not None:
+                await self._plan_interactions.abandon(waiter, error)
+            raise
+
+
 __all__ = [
+    "AutomaticPlanContinuationPort",
+    "PlanToolBatchCoordinator",
     "ContinuationAdmissionAttempt",
     "ContinuationAdmissionOwner",
     "ContinuationAdmissionPhase",

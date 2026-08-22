@@ -15,7 +15,7 @@ from pulsara_agent.conversation_kernel.live import (
     LiveChannelKind,
     LiveObservationKind,
 )
-from pulsara_agent.conversation_kernel.runner import _ToolResultLiveSink
+from pulsara_agent.conversation_kernel.tool_execution import _ToolResultLiveSink
 from pulsara_agent.ports.tool_execution import ToolOutputSourceCoverageReason
 from pulsara_agent.terminal_process.manager import ProcessRegistry
 from pulsara_agent.terminal_process.manager import TerminalSessionManager

@@ -65,7 +65,9 @@ from pulsara_agent.conversation_kernel.memory_tools import (
     _sensitive_profile_is_eligible,
 )
 from pulsara_agent.conversation_kernel.live import LiveAgentEventBus
-from pulsara_agent.conversation_kernel.runner import KernelToolAuthorizationKind
+from pulsara_agent.conversation_kernel.tool_contracts import (
+    KernelToolAuthorizationKind,
+)
 from pulsara_agent.conversation_kernel.tool_policy import (
     DefaultToolDispatchAuthorizationPolicy,
 )

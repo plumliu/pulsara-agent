@@ -68,11 +68,26 @@ def test_round5_architecture_removes_turn_budget_and_preserves_oracles() -> None
     assert not hasattr(STAGE2_LIMITS, "model_calls_per_turn_hard")
     assert not hasattr(STAGE2_LIMITS, "host_close_hard_ms")
 
-    runner_source = (
-        ROOT / "src/pulsara_agent/conversation_kernel/runner.py"
-    ).read_text(encoding="utf-8")
-    assert "while model_call_count <" not in runner_source
-    assert "model-call limit exhausted" not in runner_source
+    foreground_modules = (
+        "runner.py",
+        "provider_dispatch.py",
+        "tool_execution.py",
+        "turn_admission.py",
+        "steer_consumption.py",
+        "plan_runtime.py",
+        "memory/dispatch.py",
+        "compaction/coordinator.py",
+    )
+    foreground_source = "\n".join(
+        (ROOT / "src/pulsara_agent/conversation_kernel" / relative).read_text(
+            encoding="utf-8"
+        )
+        for relative in foreground_modules
+    )
+    assert "while model_call_count <" not in foreground_source
+    assert "model-call limit exhausted" not in foreground_source
+    assert "maximum_model_calls_per_turn" not in foreground_source
+    assert "maximum_tool_calls_per_turn" not in foreground_source
 
     assert len(COMMITTED_EVENT_DESCRIPTORS) == 29
     assert len(LIVE_EVENT_TYPES) == 24
@@ -94,10 +109,7 @@ def test_round5_watchdog_policy_is_closed_and_has_no_turn_or_call_budget() -> No
         + policy.writer_renew_safety_margin_seconds
         < policy.writer_lease_seconds
     )
-    assert (
-        policy.terminal_foreground_decision_seconds
-        > 30.0
-    )
+    assert policy.terminal_foreground_decision_seconds > 30.0
 
     with pytest.raises(ValueError, match="does not fit inside its lease"):
         KernelExecutionWatchdogPolicy(
@@ -118,18 +130,9 @@ def test_round5_deadline_factory_only_accepts_closed_owners_and_issues_fresh() -
     ticks = iter((100.0, 150.0, 200.0))
     factory = KernelExecutionDeadlineFactory(clock=lambda: next(ticks))
 
-    assert (
-        factory.deadline(KernelWatchdogOwner.FOREGROUND_CANONICAL)
-        == 220.0
-    )
-    assert (
-        factory.deadline(KernelWatchdogOwner.FOREGROUND_CANONICAL)
-        == 270.0
-    )
-    assert (
-        factory.deadline(KernelWatchdogOwner.PROVIDER_DISPATCH_PLANNING)
-        == 320.0
-    )
+    assert factory.deadline(KernelWatchdogOwner.FOREGROUND_CANONICAL) == 220.0
+    assert factory.deadline(KernelWatchdogOwner.FOREGROUND_CANONICAL) == 270.0
+    assert factory.deadline(KernelWatchdogOwner.PROVIDER_DISPATCH_PLANNING) == 320.0
     with pytest.raises(TypeError, match="closed vocabulary"):
         factory.deadline("FOREGROUND_CANONICAL")  # type: ignore[arg-type]
 
@@ -216,7 +219,11 @@ class _SSEHandler(BaseHTTPRequestHandler):
         self.send_header("Connection", "close")
         self.end_headers()
         idle = bool(getattr(self.server, "inject_idle_gap"))
-        frames = _responses_sse_frames() if self.path.endswith("/responses") else _chat_sse_frames()
+        frames = (
+            _responses_sse_frames()
+            if self.path.endswith("/responses")
+            else _chat_sse_frames()
+        )
         for index, frame in enumerate(frames):
             try:
                 self.wfile.write(frame)
@@ -261,9 +268,7 @@ def _responses_sse_frames() -> tuple[bytes, ...]:
     }
 
     def frame(event: str, payload: dict[str, object]) -> bytes:
-        return (
-            f"event: {event}\ndata: {json.dumps(payload)}\n\n"
-        ).encode()
+        return (f"event: {event}\ndata: {json.dumps(payload)}\n\n").encode()
 
     return (
         frame(
@@ -410,9 +415,7 @@ def test_round5_io_close_reports_timeout_only_after_physical_thread_exit() -> No
             owner.run(physical, deadline_monotonic=monotonic() + 1)
         )
         assert await asyncio.to_thread(entered.wait, 1)
-        close = asyncio.create_task(
-            owner.aclose(deadline_monotonic=monotonic() + 0.02)
-        )
+        close = asyncio.create_task(owner.aclose(deadline_monotonic=monotonic() + 0.02))
         await asyncio.sleep(0.05)
         assert not close.done()
         release.set()
@@ -501,9 +504,9 @@ def test_round5_terminal_process_actions_have_closed_effect_semantics() -> None:
         "terminal_process", "round5:test-terminal-process-executor"
     )
     assert binding.catalog_entry.name == "terminal_process"
-    assert production_builtin_executor_binding_identity_fingerprint(
-        binding
-    ).startswith("sha256:")
+    assert production_builtin_executor_binding_identity_fingerprint(binding).startswith(
+        "sha256:"
+    )
     for action in ("list", "log", "poll", "wait"):
         assert (
             _physical_effect_class("terminal_process", {"action": action})
@@ -593,11 +596,14 @@ def test_round5_terminal_decision_watchdog_during_preparing_kills_only_exact_pro
     assert yielded is False
     assert state.killed is True
     assert state.physical_completion.is_set()
-    assert registry.poll(
-        sibling.process_id,
-        max_output_chars=32,
-        owner_host_session_id="round5:host",
-    ).status.value == "running"
+    assert (
+        registry.poll(
+            sibling.process_id,
+            max_output_chars=32,
+            owner_host_session_id="round5:host",
+        ).status.value
+        == "running"
+    )
     registry.settle_foreground_decision("decision:preparing")
     registry.release_owner("round5:host", timeout_seconds=2)
 

@@ -32,11 +32,7 @@ CLIENT = ROOT / "clients" / "terminal"
 
 def _production_python() -> tuple[Path, ...]:
     return tuple(
-        sorted(
-            path
-            for path in SOURCE.rglob("*.py")
-            if "__pycache__" not in path.parts
-        )
+        sorted(path for path in SOURCE.rglob("*.py") if "__pycache__" not in path.parts)
     )
 
 
@@ -198,9 +194,11 @@ def test_stage3_5_process_local_task_sites_are_closed() -> None:
         "src/pulsara_agent/conversation_kernel/memory/governor.py",
         "src/pulsara_agent/conversation_kernel/memory_tools.py",
         "src/pulsara_agent/conversation_kernel/plan_runtime.py",
-        "src/pulsara_agent/conversation_kernel/runner.py",
+        "src/pulsara_agent/conversation_kernel/steer_consumption.py",
         "src/pulsara_agent/conversation_kernel/subagent.py",
+        "src/pulsara_agent/conversation_kernel/tool_execution.py",
         "src/pulsara_agent/conversation_kernel/tool_runtime.py",
+        "src/pulsara_agent/conversation_kernel/turn_admission.py",
     }
     observed: set[str] = set()
     for path in _production_python():

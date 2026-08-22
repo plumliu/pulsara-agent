@@ -8,7 +8,9 @@ from pathlib import Path
 import pytest
 
 from pulsara_agent.llm.input import LLMMessage
-from pulsara_agent.conversation_kernel.runner import _await_started_settlement
+from pulsara_agent.conversation_kernel.process_local_settlement import (
+    await_started_settlement,
+)
 from pulsara_agent.model_input.continuity import (
     ProcessLocalCanonicalFrontier,
     ProviderInputContinuityScope,
@@ -136,7 +138,7 @@ def test_round3_1_started_settlement_outlives_cancelled_waiter() -> None:
             return "settled"
 
         physical = asyncio.create_task(worker())
-        waiter = asyncio.create_task(_await_started_settlement(physical))
+        waiter = asyncio.create_task(await_started_settlement(physical))
         await asyncio.wait_for(started.wait(), timeout=1)
         waiter.cancel()
         await asyncio.sleep(0)
@@ -204,7 +206,9 @@ def test_round3_1_only_base_system_owns_system_channel() -> None:
 
 
 def test_round3_1_activation_uses_only_typed_dispatch_anchor() -> None:
-    path = _REPOSITORY_ROOT / "src/pulsara_agent/conversation_kernel/runner.py"
+    path = (
+        _REPOSITORY_ROOT / "src/pulsara_agent/conversation_kernel/provider_dispatch.py"
+    )
     source = path.read_text(encoding="utf-8")
     tree = ast.parse(source, filename=str(path))
     functions = {

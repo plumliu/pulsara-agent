@@ -272,9 +272,9 @@ def test_stage2_ordinary_host_and_renderer_neutral_protocol_select_kernel_v3() -
     assert "_host_inspect" not in cli
     assert 'host_commands.add_parser("tui")' not in cli
     assert 'host_commands.add_parser("inspect")' not in cli
-    gateway = (
-        ROOT / "src/pulsara_agent/terminal_protocol/v3_gateway.py"
-    ).read_text(encoding="utf-8")
+    gateway = (ROOT / "src/pulsara_agent/terminal_protocol/v3_gateway.py").read_text(
+        encoding="utf-8"
+    )
     assert "class TerminalKernelProtocolServer" in gateway
     assert "terminal_presentation" not in gateway
 
@@ -293,19 +293,203 @@ def test_stage2_protocol_v3_does_not_expose_durable_event_or_blob_identity() -> 
 
 def test_stage2_extension_and_tool_policy_have_single_production_owners() -> None:
     repository = _repository_aggregate_source()
-    runner = (KERNEL / "runner.py").read_text(encoding="utf-8")
+    coordinators = tuple(
+        KERNEL / relative
+        for relative in (
+            "runner.py",
+            "provider_dispatch.py",
+            "tool_execution.py",
+            "turn_admission.py",
+            "steer_consumption.py",
+            "plan_runtime.py",
+            "memory/dispatch.py",
+            "compaction/coordinator.py",
+        )
+    )
+    coordinator_source = "\n".join(
+        path.read_text(encoding="utf-8") for path in coordinators
+    )
     extensions = (KERNEL / "extensions.py").read_text(encoding="utf-8")
     tool_runtime = (KERNEL / "tool_runtime.py").read_text(encoding="utf-8")
     tool_policy = (KERNEL / "tool_policy.py").read_text(encoding="utf-8")
 
     assert "post_commit_tap" in repository
     assert "_finish_event_batch(committed=exc_type is None)" in repository
-    assert "PostCommitHookOffer" not in runner
-    assert "_offer_post_commit" not in runner
+    assert "PostCommitHookOffer" not in coordinator_source
+    assert "_offer_post_commit" not in coordinator_source
     assert "ConversationKernelRepository" not in extensions
     assert "ToolDispatchAuthorizationPolicy" in tool_runtime
     assert "class DefaultToolDispatchAuthorizationPolicy" in tool_policy
     assert "PolicyPermissionGate" not in tool_runtime
+
+
+def test_stage2_runner_decomposition_has_exact_owners_and_import_direction() -> None:
+    coordinator_relatives = (
+        "provider_dispatch.py",
+        "tool_execution.py",
+        "turn_admission.py",
+        "steer_consumption.py",
+        "plan_runtime.py",
+        "memory/dispatch.py",
+        "compaction/coordinator.py",
+    )
+    coordinator_paths = tuple(KERNEL / relative for relative in coordinator_relatives)
+    runner_path = KERNEL / "runner.py"
+    runner_tree = ast.parse(
+        runner_path.read_text(encoding="utf-8"), filename=str(runner_path)
+    )
+    runner_methods = {
+        node.name
+        for node in ast.walk(runner_tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    assert runner_methods.isdisjoint(
+        {
+            "_accept_turn_exact",
+            "_prepare_provider_dispatch",
+            "_execute_active_compaction_fenced",
+            "_accept_plan_control_batch",
+            "_execute_tool_batch",
+            "_settle_known_tool_result",
+            "_apply_memory_sources",
+            "_hydrate_pending_steers",
+        }
+    )
+    runner_imports = {
+        node.module
+        for node in ast.walk(runner_tree)
+        if isinstance(node, ast.ImportFrom) and node.module
+    }
+    assert {
+        "pulsara_agent.conversation_kernel.provider_dispatch",
+        "pulsara_agent.conversation_kernel.tool_execution",
+        "pulsara_agent.conversation_kernel.turn_admission",
+        "pulsara_agent.conversation_kernel.plan_runtime",
+        "pulsara_agent.conversation_kernel.memory.dispatch",
+        "pulsara_agent.conversation_kernel.compaction.coordinator",
+    } <= runner_imports
+
+    imported_by_path: dict[str, set[str]] = {}
+    for path in coordinator_paths:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        imported = {
+            node.module
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom) and node.module
+        }
+        imported.update(
+            alias.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Import)
+            for alias in node.names
+        )
+        imported_by_path[path.relative_to(KERNEL).as_posix()] = imported
+        assert "pulsara_agent.conversation_kernel.runner" not in imported, path
+        class_names = {
+            node.name for node in ast.walk(tree) if isinstance(node, ast.ClassDef)
+        }
+        assert not any(name.endswith("Mixin") for name in class_names), path
+        assert "RunnerContext" not in class_names
+        assert not any(
+            isinstance(node, ast.Attribute) and node.attr == "_runner"
+            for node in ast.walk(tree)
+        ), path
+
+    assert not any(
+        imported == "pulsara_agent.conversation_kernel.provider_dispatch"
+        or imported == "pulsara_agent.model_input.compiler"
+        or imported == "pulsara_agent.conversation_kernel.host"
+        for imported in imported_by_path["tool_execution.py"]
+    )
+    assert not any(
+        imported == "pulsara_agent.conversation_kernel.host"
+        or imported == "pulsara_agent.conversation_kernel.subagent"
+        or imported.startswith("pulsara_agent.llm.adapters")
+        for imported in imported_by_path["compaction/coordinator.py"]
+    )
+
+    tool_contracts_path = KERNEL / "tool_contracts.py"
+    tool_contracts_tree = ast.parse(
+        tool_contracts_path.read_text(encoding="utf-8"),
+        filename=str(tool_contracts_path),
+    )
+    tool_contract_imports = {
+        node.module
+        for node in ast.walk(tool_contracts_tree)
+        if isinstance(node, ast.ImportFrom) and node.module
+    }
+    assert not any(
+        imported == "pulsara_agent.conversation_kernel.repository"
+        or imported == "pulsara_agent.conversation_kernel.host"
+        or imported == "pulsara_agent.conversation_kernel.runner"
+        or imported == "pulsara_agent.conversation_kernel.tool_runtime"
+        or imported.startswith("pulsara_agent.llm.adapters")
+        for imported in tool_contract_imports
+    )
+
+    moved_tool_contracts = {
+        "KernelToolResult",
+        "KernelToolInvocationContext",
+        "KernelToolAuthorization",
+        "KernelToolAuthorizationKind",
+        "KernelToolPhysicalInvocationError",
+        "ProcessLocalEffectSettlementToken",
+        "ProcessLocalEffectSettlementDisposition",
+        "ProcessLocalEffectSettlementOutcome",
+        "ProcessLocalEffectSettlementResult",
+        "KernelToolLiveSink",
+    }
+    for relative in ("tool_runtime.py", "memory_tools.py", "subagent.py"):
+        path = KERNEL / relative
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        runner_imported_names = {
+            alias.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom)
+            and node.module == "pulsara_agent.conversation_kernel.runner"
+            for alias in node.names
+        }
+        assert runner_imported_names.isdisjoint(moved_tool_contracts), path
+
+
+def test_stage2_cleanup_dead_symbols_and_compatibility_paths_cannot_return() -> None:
+    assert not (ROOT / "src/pulsara_agent/tools/registry.py").exists()
+    assert not (ROOT / "src/pulsara_agent/message/message.py").exists()
+    removed_identifiers = {
+        "ToolRegistry",
+        "ToolRegistryReadPort",
+        "ToolActionClassifierBinding",
+        "ToolActionClassifierRegistry",
+        "ToolActionClassifierContractError",
+        "default_tool_action_classifier_registry",
+        "builtin_tool_action_policy",
+        "mcp_tool_action_policy",
+        "ToolActionClassificationFact",
+        "frozen_non_trigger_context_sources_identity_digest",
+        "llm_context_fingerprint",
+        "PresetPermissionPolicyFact",
+        "preset_permission_policy_fact",
+        "postgres_operation_deadline",
+        "DIRECT_KERNEL_TOOL_NAMES",
+        "PromptStatus",
+        "MemoryQueryDisposition",
+        "PlanInteractionStatus",
+    }
+    observed: set[str] = set()
+    for path in sorted((ROOT / "src/pulsara_agent").rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        observed.update(
+            node.id for node in ast.walk(tree) if isinstance(node, ast.Name)
+        )
+        observed.update(
+            node.name
+            for node in ast.walk(tree)
+            if isinstance(
+                node,
+                (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef),
+            )
+        )
+    assert observed.isdisjoint(removed_identifiers)
 
 
 def test_stage2_provider_admission_and_blob_gc_are_physical_not_heuristic() -> None:

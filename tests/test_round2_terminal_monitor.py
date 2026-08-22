@@ -13,8 +13,8 @@ import pytest
 
 from pulsara_agent.conversation_kernel.live import LiveAgentEventBus
 from pulsara_agent.conversation_kernel.vocabulary import LiveEventType
-from pulsara_agent.conversation_kernel.runner import KernelToolLiveSink
-from pulsara_agent.conversation_kernel.runner import (
+from pulsara_agent.conversation_kernel.tool_contracts import (
+    KernelToolLiveSink,
     KernelToolAuthorizationKind,
     ProcessLocalEffectSettlementDisposition,
 )

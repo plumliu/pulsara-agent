@@ -1617,34 +1617,6 @@ def replace_frozen_compaction_context_sources(
     )
 
 
-def frozen_non_trigger_context_sources_identity_digest(
-    sources: FrozenNonTriggerContextSources,
-) -> str:
-    """Derive the historical stable rejection-ID input without storing it."""
-
-    return context_fingerprint(
-        "pulsara:frozen-non-trigger-context-sources:v1",
-        {
-            "candidates": tuple(
-                item.source_semantic_fingerprint for item in sources.candidates
-            ),
-            "absent": tuple(
-                item.domain_semantic_fingerprint for item in sources.absent_facts
-            ),
-            "diagnostics": tuple(
-                (item.code.value, item.severity) for item in sources.diagnostics
-            ),
-            "tool_exposure_plan": _tool_exposure_plan_identity(
-                sources.tool_exposure_plan
-            ),
-            "skill_dispatch_view": _skill_dispatch_view_identity(
-                sources.skill_dispatch_view
-            ),
-            "registry": sources.registry_fingerprint,
-        },
-    )
-
-
 def _collected(
     *,
     candidates: tuple[ContextSourceCandidate, ...],
@@ -2094,7 +2066,6 @@ __all__ = [
     "TerminalCurrentCwdSnapshotPort",
     "build_compaction_context_source",
     "build_memory_context_source",
-    "frozen_non_trigger_context_sources_identity_digest",
     "replace_compaction_context_sources",
     "replace_frozen_compaction_context_sources",
     "replace_memory_context_sources",

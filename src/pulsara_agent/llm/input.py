@@ -60,12 +60,9 @@ class LLMMessage:
     def user(
         cls,
         text: str,
-        *,
-        causal_occurrence_semantic_fingerprint: str | None = None,
     ) -> "LLMMessage":
         # Occurrence attribution belongs to canonical conversation rows.  It is
         # intentionally not duplicated into the process-local provider carrier.
-        del causal_occurrence_semantic_fingerprint
         return cls(role=MessageRole.USER, content=(text,))
 
     @classmethod

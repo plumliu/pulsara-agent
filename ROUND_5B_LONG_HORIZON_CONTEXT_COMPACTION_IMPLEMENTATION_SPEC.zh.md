@@ -30,6 +30,8 @@
 >
 > Round 10 consumer seam修订（2026-08-21）：Round 5B已经激活的`SubagentInitialSeed`只是一条粗粒度closed union预留，不拥有parent-history或dependency-result选择语义。Round 10必须在同一production `conversation_kernel/cold_epoch.py`中以sealed exact-object factory收紧该branch并bump process-local assembler contract；默认`NONE`，可选`LAST_N(1..3)`只包含actual ROOT model-call cut中的user messages、user steers与assistant public messages，排除所有tool groups；direct dependency的统一terminal result另以bounded `DEPENDENCY_RESULTS` snapshot进入seed。该修订不得改变normal cold-open或compaction successor的seed/placement/wire语义，也不得另建child assembler。
 >
+> Round 9.2 downstream seam（DRAFT）：独立[Hook subsystem](ROUND_9_2_HOOK_SUBSYSTEM_IMPLEMENTATION_SPEC.zh.md)只允许让generic `KernelHookDispatcher`在existing compaction lifecycle接收Pre/PostCompact与ROOT SessionStart(compact)，不得建立compaction-private Hook engine/context owner。Round 9.3 downstream seam（DRAFT）：[Plugin implementation](ROUND_9_3_AGENT_PLUGIN_BUNDLE_AND_HOOK_ADAPTER_IMPLEMENTATION_SPEC.zh.md)只向该generic dispatcher贡献definitions，并可为Round 10 child安装一个`PLUGIN_AGENT_CONTEXT` activation snapshot。Active child compaction必须从predecessor已经安装的exact preset snapshot继承该source，不能重新读取current Plugin package；两轮均不得新增cold assembler。本段只冻结未来消费接缝，不把尚未激活的Hook/Plugin行为冒充Round 5B当前production能力。
+>
 > 本文现在只实施Round 5B context compaction：active adoption在successor cold boundary依Round 9/9.1重新冻结current Capability；同时先独立落地唯一neutral `KernelColdEpochInputAssembler`，供ordinary cold-open、Round 5B successor和Round 10 child first-open共同消费。本文不实施新的memory extraction、replacement-history replay、provider context-error reactive retry、durable compaction job或hierarchical subagent graph。
 
 ---

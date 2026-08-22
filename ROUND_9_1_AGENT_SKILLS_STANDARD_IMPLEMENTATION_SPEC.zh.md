@@ -22,7 +22,7 @@
 >
 > 上位契约：[Round 3 structured compiler](ROUND_3_STRUCTURED_MODEL_INPUT_COMPILER_IMPLEMENTATION_SPEC.zh.md)、[Round 3.1 provider-input prefix continuity](ROUND_3_1_PROVIDER_INPUT_PREFIX_CONTINUITY_IMPLEMENTATION_SPEC.zh.md)、[Round 6 MCP](ROUND_6_MCP_PRODUCTION_CAPABILITY_IMPLEMENTATION_SPEC.zh.md)、[Round 7.1 provider-visible ToolResult projection](ROUND_7_1_PROVIDER_VISIBLE_TOOL_RESULT_PROJECTION_IMPLEMENTATION_SPEC.zh.md)、[Round 9 unified capability semantics](ROUND_9_UNIFIED_CAPABILITY_SEMANTICS_IMPLEMENTATION_SPEC.zh.md)、[Gap Index](POST_HARD_CUT_PRODUCT_CAPABILITY_GAP_INDEX.zh.md)
 >
-> 下游设计：[Round 9.2 Agent Plugin bundle 与 Hook lifecycle](ROUND_9_2_AGENT_PLUGIN_BUNDLE_AND_HOOK_LIFECYCLE_IMPLEMENTATION_SPEC.zh.md)、[Round 5B compaction](ROUND_5B_LONG_HORIZON_CONTEXT_COMPACTION_IMPLEMENTATION_SPEC.zh.md)
+> 下游设计：[Round 9.2 independent Hook subsystem](ROUND_9_2_HOOK_SUBSYSTEM_IMPLEMENTATION_SPEC.zh.md)、[Round 9.3 Agent Plugin bundle 与 Hook adapter](ROUND_9_3_AGENT_PLUGIN_BUNDLE_AND_HOOK_ADAPTER_IMPLEMENTATION_SPEC.zh.md)、[Round 5B compaction](ROUND_5B_LONG_HORIZON_CONTEXT_COMPACTION_IMPLEMENTATION_SPEC.zh.md)
 >
 > 收口修订（2026-08-18）：删除`read_file`的`ORDINARY | ACTIVATE_SKILL` intent、model-call activation lookup、continuity dispatch attachment与Skill-specific FULL_REQUIRED。Model-driven progressive disclosure唯一使用ordinary `read_file`；default/max line window冻结为2,000，最终模型可见边界继续由Round 7.1 40,000-byte logical FULL唯一拥有。同run compaction retained语义下移Round 5B。
 
@@ -248,7 +248,7 @@ Codex 的 `HostSkillsSnapshot` 在创建 `TurnContext` 时冻结，并在该 tur
 
 Codex compaction会重建Skill catalog并保留bounded recent user-role messages；explicit `$skill`注入因此可能自然被保留，但ordinary file ToolResult没有Skill专用重注入保证。Pulsara吸收“普通read + 无loaded-state”，同时把同run compaction是否retained交给Round 5B按actual FULL delivery机械判断。
 
-Codex当前把OpenAI自己的interface、dependency与policy放在独立`agents/openai.yaml` sidecar，而不是扩张portable `SKILL.md`。这证明宿主或发行方确有额外组合需求时，应使用**可选、带明确owner的外部bundle/sidecar**；它不能成为第三方Skill被Pulsara发现或激活的前置条件。Round 9.1不实现该sidecar；Round 9.2 Plugin只按公开/宿主包契约把portable Skill物化到四个既有physical roots之一，并贡献MCP与Hook定义，不把Codex sidecar变成portable Skill字段，也不新增Runtime Skill root。
+Codex当前把OpenAI自己的interface、dependency与policy放在独立`agents/openai.yaml` sidecar，而不是扩张portable `SKILL.md`。这证明宿主或发行方确有额外组合需求时，应使用**可选、带明确owner的外部bundle/sidecar**；它不能成为第三方Skill被Pulsara发现或激活的前置条件。Round 9.1不实现该sidecar；Round 9.3 Plugin只按公开/宿主包契约把portable Skill物化到四个既有physical roots之一，并贡献MCP与Round 9.2 Hook definitions，不把Codex sidecar变成portable Skill字段，也不新增Runtime Skill root。
 
 不照搬：
 
@@ -459,9 +459,9 @@ class PreparedLocalSkillRootPolicy:
 - scanner对整份policy执行一次bounded global scan与precedence resolution，随后直接签发Round 9 `PreparedLocalSkillCatalogSourceSnapshot`；不得把winner拆回per-root generic snapshots；
 - filesystem新增、修改、删除Skill只更新下一safe point的聚合source snapshot，不重新注册`LOCAL_SKILL_CATALOG`；
 - physical root policy未来合法变化时同样保持聚合source identity/registration不变，只形成新的owner carrier与聚合source snapshot；
-- 本轮不允许运行时新增第五种physical root。Future Plugin不得借Round 9.2让Runtime直接扫描plugin cache；portable Skill仍须安装到这四种既有root之一，且不能改变Round 9 registry接口。
+- 本轮不允许运行时新增第五种physical root。Future Plugin不得借Round 9.3让Runtime直接扫描plugin cache；portable Skill仍须安装到这四种既有root之一，且不能改变Round 9 registry接口。
 
-Codex/Claude/plugin cache不是skill root。插件installer必须把skill物化到上述一个声明root；Runtime不得扫描`~/.codex/plugins/cache`、Claude plugin internals或任意包管理器cache来猜安装状态。
+Codex/Claude/plugin cache不是skill root。插件installer必须把skill物化到上述一个声明root；Runtime不得扫描`~/.codex/plugins/cache`、Claude plugin internals或任意包管理器cache来猜安装状态。Round 9.3可由Host composition在每次ordinary complete scan前按current Plugin state同步reconcile这些已物化目录；reconciliation complete后仍由不感知Plugin的本`LocalSkillProvider`执行唯一four-root scan，失败则整个聚合source typed `UNAVAILABLE`，不得增加Plugin root、partial winner或后台repair owner。
 
 ### 4.2 Standard resources 与 opaque metadata
 
@@ -491,7 +491,7 @@ Round 9.1不定义`SkillCapabilityDeclaration`、`FrozenResolvedSkillDependency`
 
 若当前epoch已有对应能力，模型按普通路径使用：Builtin/direct MCP直接调用，late MCP经`inspect_new_mcp_tool`与`use_new_mcp_tool`，CLI经`terminal`。若能力不存在，既有owner返回typed unavailable/failure。Pulsara不得因Skill正文提到某个能力而安装MCP、扩大tool surface、改变permission、执行health probe或影响未来MCP promotion。
 
-Future Plugin若需要保证“安装这个Skill时也提供某个MCP server”，该关系属于Plugin bundle manifest与installer，不属于`SKILL.md`，也不反向写入Skill manifest。CLI dependency resolver与`bin/` PATH injection不属于Round 9.2；Skill只能在正文中指导模型使用ordinary `terminal`检查/调用现有CLI。
+Future Plugin若需要保证“安装这个Skill时也提供某个MCP server”，该关系属于Plugin bundle manifest与installer，不属于`SKILL.md`，也不反向写入Skill manifest。CLI dependency resolver与`bin/` PATH injection不属于Round 9.3；Skill只能在正文中指导模型使用ordinary `terminal`检查/调用现有CLI。
 
 ### 4.5 Catalog entry
 
@@ -900,7 +900,7 @@ Pulsara不为Skill扫描PATH、运行`--version`、检查登录、网络或crede
 
 ### 9.4 Future Plugin bundle
 
-如果发行者需要保证Skill与MCP server共同安装，应由[Round 9.2](ROUND_9_2_AGENT_PLUGIN_BUNDLE_AND_HOOK_LIFECYCLE_IMPLEMENTATION_SPEC.zh.md) Plugin manifest声明portable Skill内容与MCP配置；installer必须把Skill物化到四个既有physical roots之一，Runtime不得为Plugin新增root或扫描Plugin cache。同一bundle还可包含Codex-compatible Hooks以及一个等待PHC-10定义的dormant Subagent-spec inventory。Loose Agent Skill始终可以原样安装；缺少Plugin或host sidecar不能让它失去发现、激活或正文指导能力。Pulsara不要求用户补metadata，也不使用规则从正文生成bundle manifest；Plugin也不替Skill增加executor或permission语义。
+如果发行者需要保证Skill与MCP server共同安装，应由[Round 9.3](ROUND_9_3_AGENT_PLUGIN_BUNDLE_AND_HOOK_ADAPTER_IMPLEMENTATION_SPEC.zh.md) Plugin manifest声明portable Skill内容与MCP配置；installer必须把Skill物化到四个既有physical roots之一，Runtime不得为Plugin新增root或扫描Plugin cache。同一bundle还可包含经Round 9.2 generic runtime执行的Codex-compatible Hooks与Claude simple Subagent presets；preset只进入Round 10现有child cold seed，不改变Skill、Tool或permission authority。Loose Agent Skill始终可以原样安装；缺少Plugin或host sidecar不能让它失去发现、激活或正文指导能力。Pulsara不要求用户补metadata，也不使用规则从正文生成bundle manifest；Plugin也不替Skill增加executor或permission语义。
 
 ---
 
@@ -1427,7 +1427,7 @@ Use the Firecrawl MCP tools currently exposed by the host. If they were discover
 
 该server在cold epoch已可靠连接时，模型会看到DIRECT tool；epoch中后到时则由独立MCP observation与`inspect_new_mcp_tool`/`use_new_mcp_tool`提供路径；未连接时真实调用不可用。Skill只提供guidance，MCP supervisor、permission、effect、dirty fence和executor拥有全部调用真值。
 
-现有第三方Agent Skill因此可以原样被发现并使用。若某个发行包必须同时提供Skill与MCP，其作者应提供Round 9.2 Plugin bundle manifest；Pulsara既不要求用户改写`SKILL.md`，也不通过规则匹配生成依赖。CLI只作为Skill指导下的ordinary Terminal能力存在，不由Plugin metadata自动安装或加入PATH。
+现有第三方Agent Skill因此可以原样被发现并使用。若某个发行包必须同时提供Skill与MCP，其作者应提供Round 9.3 Plugin bundle manifest；Pulsara既不要求用户改写`SKILL.md`，也不通过规则匹配生成依赖。CLI只作为Skill指导下的ordinary Terminal能力存在，不由Plugin metadata自动安装或加入PATH。
 
 ---
 

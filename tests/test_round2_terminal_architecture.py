@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import ast
 from dataclasses import fields
 from pathlib import Path
@@ -8,10 +9,14 @@ import pytest
 from pydantic import ValidationError
 
 from pulsara_agent.capability.builtin_catalog import builtin_tool_catalog_entry
-from pulsara_agent.conversation_kernel.runner import (
+from pulsara_agent.conversation_kernel.live import LiveAgentEventBus
+from pulsara_agent.conversation_kernel.tool_policy import (
+    DefaultToolDispatchAuthorizationPolicy,
+)
+from pulsara_agent.conversation_kernel.tool_runtime import DirectKernelToolPort
+from pulsara_agent.conversation_kernel.tool_contracts import (
     ProcessLocalEffectSettlementToken,
 )
-from pulsara_agent.conversation_kernel.tool_runtime import DIRECT_KERNEL_TOOL_NAMES
 from pulsara_agent.conversation_kernel.vocabulary import (
     APPEND_GUARDS,
     COMMITTED_EVENT_DESCRIPTORS,
@@ -39,11 +44,7 @@ from pulsara_agent.terminal_process.output import (
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src" / "pulsara_agent"
 BASELINE = (
-    SRC
-    / "storage"
-    / "migrations"
-    / "sql"
-    / "0000_conversation_kernel_baseline.sql"
+    SRC / "storage" / "migrations" / "sql" / "0000_conversation_kernel_baseline.sql"
 )
 
 
@@ -61,7 +62,10 @@ def _fixed_live_producers() -> dict[str, set[Path]]:
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
-            if not isinstance(node.func, ast.Attribute) or node.func.attr != "offer_nowait":
+            if (
+                not isinstance(node.func, ast.Attribute)
+                or node.func.attr != "offer_nowait"
+            ):
                 continue
             keyword = next(
                 (item for item in node.keywords if item.arg == "event_type"), None
@@ -77,7 +81,9 @@ def _fixed_live_producers() -> dict[str, set[Path]]:
     return result
 
 
-def test_round2_closed_oracles_and_no_durable_terminal_authority() -> None:
+def test_round2_closed_oracles_and_no_durable_terminal_authority(
+    tmp_path: Path,
+) -> None:
     assert len(COMMITTED_EVENT_DESCRIPTORS) == 29
     assert len(LIVE_EVENT_TYPES) == 24
     assert len(SUBJECT_SLOTS) == 11
@@ -88,9 +94,24 @@ def test_round2_closed_oracles_and_no_durable_terminal_authority() -> None:
         "terminal_process",
         "terminal_monitor",
     }
-    assert terminal_names <= DIRECT_KERNEL_TOOL_NAMES
-    for name in terminal_names:
-        assert builtin_tool_catalog_entry(name).descriptor.name == name
+    tool_owner = DirectKernelToolPort(
+        workspace_root=tmp_path,
+        host_owner_id="host:terminal-architecture",
+        authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
+        session_id="session:terminal-architecture",
+        live_bus=LiveAgentEventBus(),
+    )
+    try:
+        execution_bindings = {
+            item.tool_name: item for item in tool_owner.executor_bindings
+        }
+        assert terminal_names <= set(execution_bindings)
+        for name in terminal_names:
+            binding = execution_bindings[name]
+            assert binding.catalog_entry is builtin_tool_catalog_entry(name)
+            assert binding.executor_identity
+    finally:
+        asyncio.run(tool_owner.aclose())
     assert not any(
         any(token in relation for token in ("terminal", "monitor", "notification"))
         for relation in CONVERSATION_KERNEL_RELATIONS
@@ -106,7 +127,9 @@ def test_round2_closed_oracles_and_no_durable_terminal_authority() -> None:
         assert forbidden not in baseline
 
 
-def test_round2_terminal_observation_descriptor_and_payload_surface_are_narrow() -> None:
+def test_round2_terminal_observation_descriptor_and_payload_surface_are_narrow() -> (
+    None
+):
     descriptor = next(
         item
         for item in COMMITTED_EVENT_DESCRIPTORS
@@ -145,9 +168,7 @@ def test_round2_live_terminal_events_have_only_real_process_local_producers() ->
     assert producers["TERMINAL_PROCESS_COMPLETED"] == {
         Path("src/pulsara_agent/conversation_kernel/tool_runtime.py")
     }
-    expected_monitor = {
-        Path("src/pulsara_agent/terminal_process/monitor.py")
-    }
+    expected_monitor = {Path("src/pulsara_agent/terminal_process/monitor.py")}
     for name in (
         "TERMINAL_MONITOR_OPENED",
         "TERMINAL_MONITOR_OBSERVATION",

@@ -84,9 +84,13 @@ from pulsara_agent.conversation_kernel.repository import AssistantToolCallBlock
 from pulsara_agent.conversation_kernel.subagents import build_parent_context_call_subject
 from pulsara_agent.conversation_kernel.runner import (
     ConversationKernelRunner,
+)
+from pulsara_agent.conversation_kernel.provider_dispatch import (
+    prepared_append_candidate,
+)
+from pulsara_agent.conversation_kernel.tool_contracts import (
     KernelToolAuthorizationKind,
     KernelToolInvocationContext,
-    _prepared_append_candidate,
 )
 from pulsara_agent.conversation_kernel.tool_policy import (
     DefaultToolDispatchAuthorizationPolicy,
@@ -1185,7 +1189,7 @@ def _compile_and_install_append(
     )
     tool_exposure_plan = prepared_call.tool_surface.capability_exposure_plan
     assert tool_exposure_plan is not None
-    candidate = _prepared_append_candidate(
+    candidate = prepared_append_candidate(
         planning=planning,
         compatibility=compatibility,
         compiled_result=result,

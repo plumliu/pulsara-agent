@@ -14,7 +14,7 @@
 >
 > 直接下游：[Round 9.1 Agent Skills Standard](ROUND_9_1_AGENT_SKILLS_STANDARD_IMPLEMENTATION_SPEC.zh.md)
 >
-> 后续但不属于本轮：[Round 9.2 Agent Plugin bundle 与 Hook lifecycle](ROUND_9_2_AGENT_PLUGIN_BUNDLE_AND_HOOK_LIFECYCLE_IMPLEMENTATION_SPEC.zh.md)、[Round 5B compaction](ROUND_5B_LONG_HORIZON_CONTEXT_COMPACTION_IMPLEMENTATION_SPEC.zh.md)
+> 后续但不属于本轮：[Round 9.2 independent Hook subsystem](ROUND_9_2_HOOK_SUBSYSTEM_IMPLEMENTATION_SPEC.zh.md)、[Round 9.3 Agent Plugin bundle 与 Hook adapter](ROUND_9_3_AGENT_PLUGIN_BUNDLE_AND_HOOK_ADAPTER_IMPLEMENTATION_SPEC.zh.md)、[Round 5B compaction](ROUND_5B_LONG_HORIZON_CONTEXT_COMPACTION_IMPLEMENTATION_SPEC.zh.md)
 >
 > 激活证据：[round9_unified_capability_semantics_activation.json](benchmarks/suites/core/v1/round9_unified_capability_semantics_activation.json)
 
@@ -50,7 +50,7 @@ Pulsara中的`Capability`固定定义为：
 | MCP tool | `TOOL` | native direct tool或new-MCP meta route | MCP supervisor、slot、dirty fence与effect policy |
 | Skill | `SKILL` | `SKILL_CATALOG`与`ACTIVE_SKILL` | 无独立executor；只能指导或引用现有tool capability |
 
-Plugin不属于本轮的capability leaf。后续Round 9.2把Plugin定义为`CapabilityBundle/CapabilitySource`：启用后把portable Skill物化到本文冻结的四个既有physical roots之一，并贡献MCP server definitions与process-local Hook definitions，同时保留一个dormant Subagent-spec inventory；Skill/MCP仍分别交还既有owner，Hook不进入capability leaf，Plugin自身不拥有通用`invoke()`。Plugin不得新增第五个Skill root或让Runtime扫描Plugin cache。
+Plugin不属于本轮的capability leaf。Round 9.2先独立实现USER/WORKSPACE Hook subsystem；后续Round 9.3再把Plugin定义为installable bundle/source contributor：启用后把portable Skill物化到本文冻结的四个既有physical roots之一，向现有MCP config inventory贡献server definitions，并把归一化Hook definitions交给与`plugins/`平级的Round 9.2 generic runtime；Claude simple Subagent preset只作为Round 10既有worker cold seed的可选低authority输入。Round 9.3新增的`reload_plugins`/preset directory只允许作为从cold Host起固定存在的Builtin descriptor，不能在已安装epoch中热增删tools。Skill/MCP仍分别交还既有owner，Hook和preset都不进入capability leaf，Plugin自身不拥有通用`invoke()`、Hook trust或dispatcher。Plugin不得新增第五个Skill root或让Runtime扫描Plugin cache。
 
 ### 0.2 统一什么，不统一什么
 
@@ -321,7 +321,7 @@ Built-in不是“没有discovery”的例外，而是`IMMUTABLE` source，其dis
 | `CapabilityRegistrySnapshot` | 对同一parent dispatch cut中三个owner-issued immutable source inputs的pure、closed合并 | 否 |
 | `CapabilityExposure` | 该fact如何进入provider输入 | 否 |
 | `CapabilityBinding` | tool capability如何exact绑定到本地执行器 | 仅tool有 |
-| `CapabilityBundle` | 一组source/contribution的安装组合 | 否；留给Round 9.2 |
+| `CapabilityBundle` | 一组source/contribution的安装组合 | 否；留给Round 9.3 |
 
 ### 3.2 Authority矩阵
 
@@ -367,7 +367,7 @@ Built-in不是“没有discovery”的例外，而是`IMMUTABLE` source，其dis
 - Skill固定注册的是聚合`LOCAL_SKILL_CATALOG` source；current root集合、precedence与physical paths由Skill owner内部policy拥有，skill leaf仍只由winning root中的标准`SKILL.md`拥有；
 - Built-in descriptor catalog与executor inventory不是同一事实；source adapter必须从Host-open时已安装、scope-visible且能与catalog exact join的binding inventory构造registration/snapshot，catalog-only entry不能进入registry；
 - bundled Skill必须先物化到Skill owner当前root policy中的某个physical root再被普通discovery发现；不得走第二条“builtin Skill”leaf通道；
-- future Plugin向本文只贡献MCP server registration，并由installer把portable Skill物化到四个既有physical roots之一；它不得修改local Skill catalog的root policy或让Runtime扫描Plugin cache。其Hook由独立process-local owner执行，Subagent spec暂时dormant，均不得注册第三种tool executor。
+- future Plugin向本文只贡献MCP server config input，并由installer把portable Skill物化到四个既有physical roots之一；它不得修改local Skill catalog的root policy或让Runtime扫描Plugin cache。其Hook adapter只向与`plugins/`平级的generic process-local Hook owner贡献完整normalized definitions，Claude simple Subagent preset只进入Round 10 child cold seed；二者均不得注册第三种tool executor或capability leaf。
 
 因此，三者在逻辑上共享同一条注册管线，而只在source-owned discovery与tool-only binding处分叉。注册成功只证明fact进入current registry；它不证明该fact已暴露、已授权或可物理执行。
 
@@ -2317,22 +2317,23 @@ Round 9.1只负责：
 
 Round 9.1不得把四个physical root暴露成四个generic capability sources，也不得新增第五个root或扫描`.claude/skills`。它保持`LocalSkillProvider`内部的ordered four-root policy，并把完整global scan结果作为本文唯一`SAFE_POINT_REFRESHABLE + LOCAL_SKILL_CATALOG` successor snapshot进入registry。它必须复用本文的identity、fact、registry与parent dispatch cut，不能创建Skill-private registry、MCP identity、dependency graph或第二个meta gateway。
 
-### 17.2 Round 9.2 Plugin
+### 17.2 Round 9.2 Hook 与 Round 9.3 Plugin
 
-后续[Round 9.2](ROUND_9_2_AGENT_PLUGIN_BUNDLE_AND_HOOK_LIFECYCLE_IMPLEMENTATION_SPEC.zh.md)固定Plugin是bundle/source：
+后续[Round 9.2](ROUND_9_2_HOOK_SUBSYSTEM_IMPLEMENTATION_SPEC.zh.md)先实现与Plugin无关的USER/WORKSPACE Hook source、generic trust、11项lifecycle event、唯一dispatcher/executor与`HOOK_CONTEXT`。随后[Round 9.3](ROUND_9_3_AGENT_PLUGIN_BUNDLE_AND_HOOK_ADAPTER_IMPLEMENTATION_SPEC.zh.md)固定Plugin是bundle/source：
 
 ~~~text
 Enabled Plugin
   -> installer materializes portable Skills into one of the four existing roots
-  -> MCP server source registrations
+  -> MCP server config inputs
   -> process-local Hook definitions
-  -> dormant Subagent-spec inventory
+  -> optional Round 10 Subagent preset input
+  -> Host composition reconciles Plugin-managed Skill projection from current state
   -> existing four-root Skill owner observes installed files at the next safe point
-  -> normalize MCP definitions into existing registrations
+  -> existing Host composition normalizes MCP config into the ordinary supervisor inventory
   -> existing source owners discover and publish ordinary snapshots
 ~~~
 
-Plugin不成为第三种tool binding，不贡献第五个Skill root，也不让Runtime扫描任意private cache。Hook不进入本文capability leaf union；它由Round 9.2独立的process-local lifecycle owner执行。Subagent spec在PHC-10完成层次化/批量编排前只允许dormant discovery。具体portable manifest、Codex/Claude compatibility、namespace、enablement、trust与dynamic invalidation由Round 9.2冻结。
+Plugin不成为第三种tool binding，不贡献第五个Skill root，也不让Runtime扫描任意private cache。Plugin reconciliation只允许作为Host composition在existing complete Skill scan之前的projection-maintenance seam；`LocalSkillProvider`不得反向导入Plugin runtime，reconciliation失败只能令该次聚合Skill source `UNAVAILABLE`。Hook不进入本文capability leaf union；Round 9.2让generic `hooks/`成为独立Runtime subsystem，Round 9.3 Plugin只解析/验证并贡献definitions与environment overlay，不拥有trust/dispatcher，Hook core不得反向导入Plugin runtime。Round 10已经拥有task graph与shared cold assembler后，Round 9.3只允许把安全子集的Claude Subagent preset作为optional untrusted child seed消费，不得建立第二套agent executor。具体portable manifest、Codex/Claude compatibility、namespace、enablement与dynamic invalidation由Round 9.3冻结。
 
 ### 17.3 Round 5B
 

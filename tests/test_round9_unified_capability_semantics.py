@@ -1087,9 +1087,9 @@ def test_round9_owner_snapshot_issuers_and_registry_merge_have_closed_callers() 
         "issue_local_skill_catalog_source_snapshot": {
             "conversation_kernel/capability.py",
         },
-        "freeze_capability_registry_from_owner_snapshots": {
-            "conversation_kernel/runner.py",
-        },
+            "freeze_capability_registry_from_owner_snapshots": {
+                "conversation_kernel/provider_dispatch.py",
+            },
     }
     observed = {name: set() for name in allowed}
     for path in src.rglob("*.py"):

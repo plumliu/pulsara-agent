@@ -15,14 +15,16 @@ from pulsara_agent.primitives.run_permission import (
 )
 from pulsara_agent.conversation_kernel.live import LiveAgentEventBus
 from pulsara_agent.conversation_kernel.live_control import LiveControlSnapshot
-from pulsara_agent.conversation_kernel.runner import (
-    ActiveTurnCancellationIntent,
-    ConversationKernelRunner,
+from pulsara_agent.conversation_kernel.tool_contracts import (
     KernelToolAuthorizationKind,
     ProcessLocalEffectSettlementDisposition,
     ProcessLocalEffectSettlementOutcome,
 )
+from pulsara_agent.conversation_kernel.turn_admission import (
+    TurnAdmissionCoordinator,
+)
 from pulsara_agent.conversation_kernel.cancellation import (
+    ActiveTurnCancellationIntent,
     ForegroundCancellationCause,
 )
 from pulsara_agent.conversation_kernel.repository import AcceptedEntry
@@ -656,10 +658,10 @@ def test_todo_admission_finalizer_is_not_detached_by_waiter_cancellation() -> No
             await release.wait()
             installed = True
 
-        runner = object.__new__(ConversationKernelRunner)
-        runner._todo_admission_finalizer = finalizer
+        coordinator = object.__new__(TurnAdmissionCoordinator)
+        coordinator._todo_finalizer = finalizer
         task = asyncio.create_task(
-            runner._finalize_todo_admission(
+            coordinator._finalize_todo(
                 _root_activation(),
                 AcceptedEntry("entry:turn:1", "turn:1", 1, 1),
             )
@@ -695,22 +697,24 @@ def test_direct_admission_cancellation_terminalizes_full_winner_after_finalizer(
         async def terminalize(turn_id: str, reason: str) -> None:
             terminalized.append((turn_id, reason))
 
-        runner = object.__new__(ConversationKernelRunner)
-        runner._io = _ImmediateAdmissionIO()
-        runner._deadlines = SimpleNamespace(deadline=lambda _owner: 999_999_999.0)
-        runner._repository = SimpleNamespace(
+        coordinator = object.__new__(TurnAdmissionCoordinator)
+        coordinator._io = _ImmediateAdmissionIO()
+        coordinator._deadlines = SimpleNamespace(
+            deadline=lambda _owner: 999_999_999.0
+        )
+        coordinator._repository = SimpleNamespace(
             accept_root_turn=object(),
             accept_subagent_turn=object(),
         )
-        runner._writer_lease = SimpleNamespace(guard=object())
-        runner._todo_admission_finalizer = finalizer
-        runner._settle_failed_turn_worker = terminalize
+        coordinator._writer_lease = SimpleNamespace(guard=object())
+        coordinator._todo_finalizer = finalizer
+        coordinator.interrupt_turn = terminalize
         intent = ActiveTurnCancellationIntent(
             "turn:1", ModelInputScopeKind.ROOT, None
         )
         candidate = SimpleNamespace(turn_id="turn:1")
         task = asyncio.create_task(
-            runner._accept_turn_exact(
+            coordinator._accept(
                 candidate=candidate,
                 root=True,
                 cancellation_intent=intent,

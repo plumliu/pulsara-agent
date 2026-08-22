@@ -18,7 +18,7 @@
 >
 > 共享Runtime seam：[Round 5B §10.1.1 shared cold-epoch assembler](ROUND_5B_LONG_HORIZON_CONTEXT_COMPACTION_IMPLEMENTATION_SPEC.zh.md#1011-shared-kernelcoldepochinputassembler)。Round 10是该已激活production seam的第三个consumer：它只新增sealed subagent seed与child-scope frozen inputs，继续复用同一semantic compile、wire plan与continuity candidate路径。
 >
-> 本轮集成：将Round 5B已激活的flat-subagent runtime handoff原地升级为hierarchical task-board carrier。下游仅保留future Round 9.2 Plugin Subagent contribution。
+> 本轮集成：将Round 5B已激活的flat-subagent runtime handoff原地升级为hierarchical task-board carrier。下游Round 9.2 Hook只能复用本轮SubagentStart/Stop exact lifecycle seam；下游Round 9.3 Plugin只能通过optional opaque preset ref与一个untrusted child cold source复用本轮task/start-material/assembler seam。两者均不得建立第二套agent registry、executor、permission或task relation。
 
 本文恢复 hard-cut 前已经存在的 **batch task、dependency、terminal result 与 task board** 产品能力，并把当前单个 flat child 扩展成由ROOT统一管理的有界并行task graph。这里的“层次化”严格表示一个星型拓扑：`one ROOT parent -> many worker leaves`。**不允许subagent继续创建subagent，也不存在worker作为另一个worker的parent。**旧实现只作为产品状态机和测试语义的参考；其模型主动上报phase、EventLog reducer、projection/hydration、checkpoint、repair、child execution recovery、跨 Host resume 一律不恢复。
 
@@ -863,6 +863,8 @@ Child真正启动时，coordinator通过Round 10 sealed factory把immutable obje
 
 随后按Round 9标准顺序冻结child-scope owner snapshots/registry、resolve exact target/native eligibility、以`EmptyCapabilityEpochPredecessor`构造`FrozenCapabilityDispatchCut`及两个sibling views、完成`FrozenToolCapabilityExposureSelection`与selected native materialization得到final `FrozenToolCapabilityExposurePlan`，再由normal context collector生成exact-joining `FrozenNonTriggerContextSources`。该seed、上述exact semantic results、trigger/current-turn source candidates与唯一planning deadline一起交给`KernelColdEpochInputAssembler`。Coordinator不得自行拼接SYSTEM、lower tools/messages、构造第二份wire plan或复制cold continuity candidate逻辑；assembler也不得反向选择N、查询owner/registry、规划Tool route、读取task repository或取得child physical execution authority。
 
+> Round 9.3 downstream seam（DRAFT）：未来Plugin adapter可给`spawn_agent`/`create_agent_tasks`增加optional opaque `agent_preset_ref`。Ref必须在task admission前解析为current exact preset，完整Markdown body随existing process-local start material冻结；child first-open把它作为placement 44、`MUST_KEEP + FULL + UNTRUSTED_OBSERVATION`的`PLUGIN_AGENT_CONTEXT`交给同一assembler。没有preset时该kind明确`NOT_APPLICABLE`。Queued task不因Plugin replace偷换body，active child compaction继承predecessor已安装snapshot；Host loss仍按本轮既有`INTERRUPTED`语义处理。该扩展不得新增task字段以持久化正文、第二套agent profile/executor、preset fingerprint或cold prompt builder。Round 9.2 Hook独立复用本轮SubagentStart/Stop seam，不拥有preset或task admission。
+
 Child与ROOT之间没有continuity或cache compatibility承诺。Round 3.1 strict-prefix从child第一次provider open之后才开始；因此不存在`FULL_PREFIX_FORK`。Round 10也不提供`FULL_SEMANTIC`/`all`：需要精确旧事实时，ROOT应写入自洽objective、给出canonical file/artifact定位，或在child ACTIVE后使用`send_agent_message`补充，而不是无界复制整个会话。
 
 ### 5.4 Orchestration bounds
@@ -1597,7 +1599,7 @@ Neutral `conversation_kernel/cold_epoch.py`属于Round 5B已激活共享基础�
 - child直接human interaction或Plan mode；
 - raw child transcript自动注入ROOT；
 - model-authoredtool allowlist/permission；
-- Plugin subagent manifest execution；
+- Plugin subagent manifest parsing/execution；本轮不实现，但为Round 9.3保留的唯一合法扩展是把安全子集preset冻结进existing process-local start material与shared cold assembler；
 - advanced Web/Desktop task-board UI。
 
 ---

@@ -273,8 +273,8 @@ def _seed_completed_history(session, *, segments: int = 5) -> None:
 def _install_compaction_exception_probe(
     session, failures: list[dict[str, str]]
 ) -> None:
-    runner = session._runner  # noqa: SLF001
-    original = runner._execute_active_compaction_fenced  # noqa: SLF001
+    coordinator = session._runner.compaction  # noqa: SLF001
+    original = coordinator._execute_active_compaction_fenced  # noqa: SLF001
 
     async def execute(**kwargs):
         try:
@@ -283,7 +283,7 @@ def _install_compaction_exception_probe(
             failures.append({"type": type(exc).__name__, "message": str(exc)[:1024]})
             raise
 
-    runner._execute_active_compaction_fenced = execute  # noqa: SLF001
+    coordinator._execute_active_compaction_fenced = execute  # noqa: SLF001
 
 
 def _write_child_mcp_config(workspace: Path) -> None:

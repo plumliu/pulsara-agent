@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import StrEnum
 from threading import RLock
-from time import monotonic
 from typing import ContextManager, Iterator, Protocol
 from uuid import uuid4
 
@@ -293,12 +292,6 @@ class VerifiedPostgresConnectionProvider:
             raise
 
 
-def postgres_operation_deadline(
-    deadline_monotonic: float | None, *, timeout_seconds: float = 30.0
-) -> float:
-    return deadline_monotonic if deadline_monotonic is not None else monotonic() + timeout_seconds
-
-
 __all__ = [
     "BorrowedVerifiedPostgresConnectionProvider",
     "PostgresConnectionLane",
@@ -306,5 +299,4 @@ __all__ = [
     "PostgresRuntimeConnectionFactory",
     "VerifiedPostgresConnectionProvider",
     "VerifiedPostgresConnectionProviderProtocol",
-    "postgres_operation_deadline",
 ]

@@ -9,7 +9,7 @@ from pathlib import Path
 from pulsara_agent.capability.contracts import (
     FrozenToolCapabilityExposureSelection,
 )
-from pulsara_agent.capability.tool_action import ToolActionClassifierBinding
+from pulsara_agent.capability import tool_action
 from pulsara_agent.conversation_kernel.assistant_settlement import (
     PreparedAssistantMessageSettlement,
 )
@@ -54,7 +54,6 @@ def _field_names(value: type[object]) -> set[str]:
 
 def test_hard_cut_mandatory_process_local_fingerprint_fields_are_absent() -> None:
     forbidden_by_type = {
-        ToolActionClassifierBinding: {"implementation_build_fingerprint"},
         FrozenToolCapabilityExposureSelection: {"selection_fingerprint"},
         McpInstallationCandidate: {"candidate_fingerprint"},
         PreparedLocalSkillCatalogSourceSnapshot: {"root_policy_fingerprint"},
@@ -76,6 +75,7 @@ def test_hard_cut_mandatory_process_local_fingerprint_fields_are_absent() -> Non
     }
     for value, forbidden in forbidden_by_type.items():
         assert _field_names(value).isdisjoint(forbidden), value.__name__
+    assert not hasattr(tool_action, "ToolActionClassifierBinding")
 
 
 def test_hard_cut_subagent_process_local_aggregate_fields_are_absent() -> None:

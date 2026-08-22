@@ -361,13 +361,14 @@ def _install_compaction_trigger_recorder(
 ) -> None:
     """Record the exact safe-point trigger without observing model content."""
 
-    runner = session._runner  # noqa: SLF001
-    original = runner._execute_active_compaction  # noqa: SLF001
+    coordinator = session._runner.compaction  # noqa: SLF001
+    original = coordinator.execute_active
 
     async def execute(**kwargs):
         before = _snapshot_fingerprints(session)
         observed_before = tuple(observed_tools)
-        outcome = await original(**kwargs)
+        result = await original(**kwargs)
+        outcome = result.outcome
         after = _snapshot_fingerprints(session)
         records.append(
             {
@@ -383,9 +384,9 @@ def _install_compaction_trigger_recorder(
                 "revision_ordinal": outcome.revision_ordinal,
             }
         )
-        return outcome
+        return result
 
-    runner._execute_active_compaction = execute  # noqa: SLF001
+    coordinator.execute_active = execute
 
 
 def _snapshot_fingerprints(session) -> tuple[str, ...]:

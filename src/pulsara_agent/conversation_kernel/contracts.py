@@ -70,19 +70,6 @@ class PromptDeliveryMode(StrEnum):
     STEER_ACTIVE_TURN = "STEER_ACTIVE_TURN"
 
 
-class PromptStatus(StrEnum):
-    PENDING = "PENDING"
-    CONSUMED = "CONSUMED"
-    CANCELLED = "CANCELLED"
-    REJECTED = "REJECTED"
-
-
-class MemoryQueryDisposition(StrEnum):
-    COMPLETE = "COMPLETE"
-    PARTIAL_STALE = "PARTIAL_STALE"
-    PARTIAL_UNAVAILABLE = "PARTIAL_UNAVAILABLE"
-
-
 @dataclass(frozen=True, slots=True)
 class HostWriterGuard:
     session_id: str
@@ -238,9 +225,7 @@ __all__ = [
     "EntryKind",
     "HostWriterGuard",
     "InlineContent",
-    "MemoryQueryDisposition",
     "PromptDeliveryMode",
-    "PromptStatus",
     "SessionLifecycle",
     "StoredCommittedEvent",
     "TurnStatus",

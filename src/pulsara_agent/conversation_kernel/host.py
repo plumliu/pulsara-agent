@@ -863,7 +863,7 @@ class KernelHostSession:
             )
         else:
             try:
-                outcome = await self._runner.compact_idle_turn(
+                outcome = await self._runner.compaction.compact_idle_turn(
                     turn_id=target_turn_id,
                     command_id=request.command_id,
                     force=request.force,

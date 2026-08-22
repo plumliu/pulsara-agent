@@ -80,10 +80,12 @@ from pulsara_agent.conversation_kernel.reader import CanonicalProviderInputReade
 from pulsara_agent.conversation_kernel.io import KernelSessionIO
 from pulsara_agent.conversation_kernel.runner import (
     ConversationKernelRunner,
+    _stable_id,
+)
+from pulsara_agent.conversation_kernel.tool_contracts import (
     KernelToolAuthorization,
     KernelToolAuthorizationKind,
     KernelToolResult,
-    _stable_id,
 )
 from pulsara_agent.conversation_kernel.tool_artifacts import (
     PostgresToolArtifactReadPort,
@@ -406,9 +408,7 @@ class _CompactionScriptedModel(_ScriptedModel):
     def resolve_compaction_summary_call(self, **kwargs):
         call = super().resolve_compaction_summary_call(**kwargs)
         self.summary_transport.binding_id = call.target.transport.binding_id
-        self.summary_transport.contract_version = (
-            call.target.transport.contract_version
-        )
+        self.summary_transport.contract_version = call.target.transport.contract_version
         return replace(
             call,
             target=replace(call.target, transport=self.summary_transport),
@@ -610,8 +610,7 @@ class _OnlyOneSteerCompiler(StructuredModelInputCompiler):
 
     def compile_append(self, request, **kwargs):
         steer_count = sum(
-            item.input_origin is not None
-            and item.input_origin.value == "HUMAN_STEER"
+            item.input_origin is not None and item.input_origin.value == "HUMAN_STEER"
             for item in request.canonical_input.items
         )
         if steer_count > 1:
@@ -901,17 +900,13 @@ class _HeadroomOrderingReader(CanonicalProviderInputReader):
         super().__init__(provider, blob_reader=blob_reader)
         self.operations: list[str] = []
 
-    def read_compaction_headroom_preflight(
-        self, cut, *, deadline_monotonic: float
-    ):
+    def read_compaction_headroom_preflight(self, cut, *, deadline_monotonic: float):
         self.operations.append("headroom")
         return super().read_compaction_headroom_preflight(
             cut, deadline_monotonic=deadline_monotonic
         )
 
-    def read_frozen_dispatch(
-        self, cut, *, deadline_monotonic: float, _connection=None
-    ):
+    def read_frozen_dispatch(self, cut, *, deadline_monotonic: float, _connection=None):
         self.operations.append("dispatch")
         return super().read_frozen_dispatch(
             cut,
@@ -1185,9 +1180,7 @@ def _round5a1_responses_scripts() -> tuple[tuple[dict[str, object], ...], ...]:
                             "id": "message:tool",
                             "status": "completed",
                             "role": "assistant",
-                            "content": [
-                                {"type": "output_text", "text": "checking"}
-                            ],
+                            "content": [{"type": "output_text", "text": "checking"}],
                         },
                         {
                             "type": "function_call",
@@ -1295,14 +1288,14 @@ def test_round5b_ordinary_fresh_open_uses_only_neutral_cold_assembler(
         repository=repository,
         writer_lease=lease,
         model=model,
-        tools=StructuredToolPort(
-            _AssertingTool(provider, session_id), tool_names=()
-        ),
+        tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
         live_bus=LiveAgentEventBus(),
         context_source_collector=StaticContextSourceCollector(),
     )
-    recorder = _RecordingColdEpochAssembler(runner._cold_epoch_assembler)
-    runner._cold_epoch_assembler = recorder
+    recorder = _RecordingColdEpochAssembler(
+        runner._provider_dispatch._cold_epoch_assembler
+    )
+    runner._provider_dispatch._cold_epoch_assembler = recorder
 
     result = asyncio.run(runner.run_turn("question"))
 
@@ -1350,16 +1343,17 @@ def test_round5b_active_manual_compaction_adopts_and_continues_same_run(
         repository=repository,
         writer_lease=lease,
         model=model,
-        tools=StructuredToolPort(
-            _AssertingTool(provider, session_id), tool_names=()
-        ),
+        tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
         live_bus=LiveAgentEventBus(),
         context_source_collector=StaticContextSourceCollector(),
         compaction_owner=owner,
         workspace_id=workspace_id,
     )
-    cold_recorder = _RecordingColdEpochAssembler(runner._cold_epoch_assembler)
-    runner._cold_epoch_assembler = cold_recorder
+    cold_recorder = _RecordingColdEpochAssembler(
+        runner._provider_dispatch._cold_epoch_assembler
+    )
+    runner._provider_dispatch._cold_epoch_assembler = cold_recorder
+
     async def exercise():
         first = await runner.run_turn("first question")
         command_id = _name("second-command")
@@ -1371,9 +1365,7 @@ def test_round5b_active_manual_compaction_adopts_and_continues_same_run(
             expected_turn_id=turn_id,
             force=True,
         )
-        second = await runner.run_turn(
-            "second question", command_id=command_id
-        )
+        second = await runner.run_turn("second question", command_id=command_id)
         compacted = await outcome
         await owner.aclose()
         return first, second, compacted
@@ -1614,9 +1606,7 @@ def test_round5b_cancelled_manual_summary_settles_detached_waiter(
         repository=repository,
         writer_lease=lease,
         model=model,
-        tools=StructuredToolPort(
-            _AssertingTool(provider, session_id), tool_names=()
-        ),
+        tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
         live_bus=LiveAgentEventBus(),
         context_source_collector=StaticContextSourceCollector(),
         compaction_owner=owner,
@@ -1691,13 +1681,13 @@ def test_round5b_mid_turn_tool_followup_compacts_then_finishes(
         workspace_id=workspace_id,
     )
     triggers: list[object] = []
-    execute = runner._execute_active_compaction
+    execute = runner.compaction.execute_active
 
     async def record_trigger(**kwargs):
         triggers.append(kwargs["trigger"])
         return await execute(**kwargs)
 
-    runner._execute_active_compaction = record_trigger
+    runner.compaction.execute_active = record_trigger
 
     async def exercise():
         result = await runner.run_turn("p" * 110_000)
@@ -1751,26 +1741,26 @@ def test_round5b_proactive_auto_compaction_runs_before_next_provider_open(
         repository=repository,
         writer_lease=lease,
         model=model,
-        tools=StructuredToolPort(
-            _AssertingTool(provider, session_id), tool_names=()
-        ),
+        tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
         live_bus=LiveAgentEventBus(),
         context_source_collector=StaticContextSourceCollector(),
         compaction_owner=owner,
         workspace_id=workspace_id,
     )
     input_reader = _HeadroomOrderingReader(
-        provider, blob_reader=runner._input_reader._blob_reader
+        provider,
+        blob_reader=runner._provider_dispatch._input_reader._blob_reader,
     )
-    runner._input_reader = input_reader
+    runner._provider_dispatch._input_reader = input_reader
+    runner.compaction._input_reader = input_reader
     triggers: list[object] = []
-    execute = runner._execute_active_compaction
+    execute = runner.compaction.execute_active
 
     async def record_trigger(**kwargs):
         triggers.append(kwargs["trigger"])
         return await execute(**kwargs)
 
-    runner._execute_active_compaction = record_trigger
+    runner.compaction.execute_active = record_trigger
 
     async def exercise():
         first = await runner.run_turn("first")
@@ -1816,9 +1806,7 @@ def test_round5b_idle_manual_compaction_adopts_without_successor_open(
         repository=repository,
         writer_lease=lease,
         model=model,
-        tools=StructuredToolPort(
-            _AssertingTool(provider, session_id), tool_names=()
-        ),
+        tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
         live_bus=LiveAgentEventBus(),
         context_source_collector=StaticContextSourceCollector(),
         compaction_owner=owner,
@@ -1827,7 +1815,7 @@ def test_round5b_idle_manual_compaction_adopts_without_successor_open(
 
     async def exercise():
         first = await runner.run_turn("question")
-        outcome = await runner.compact_idle_turn(
+        outcome = await runner.compaction.compact_idle_turn(
             turn_id=first.turn_id,
             command_id=_name("idle-compact"),
             force=True,
@@ -1847,11 +1835,14 @@ def test_round5b_idle_manual_compaction_adopts_without_successor_open(
         scope_subagent_task_id=None,
     )
     assert runner._continuity.current_view(scope) is None
-    assert repository.read_turn_status(
-        session_id=session_id,
-        turn_id=first.turn_id,
-        deadline_monotonic=monotonic() + 10,
-    ).value == "COMPLETED"
+    assert (
+        repository.read_turn_status(
+            session_id=session_id,
+            turn_id=first.turn_id,
+            deadline_monotonic=monotonic() + 10,
+        ).value
+        == "COMPLETED"
+    )
 
 
 def test_round3_1_empty_epoch_absorbs_pre_first_call_steers_once(
@@ -1943,9 +1934,7 @@ def test_round8_memory_policy_aggregates_steers_and_resets_on_next_root_message(
         repository=repository,
         writer_lease=lease,
         model=model,
-        tools=StructuredToolPort(
-            _AssertingTool(provider, session_id), tool_names=()
-        ),
+        tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
         live_bus=LiveAgentEventBus(),
         context_source_collector=collector,
         memory_projection=projection,
@@ -2087,7 +2076,7 @@ def test_round3_1_planning_reaches_shorter_fifo_prefix_without_recharging_base(
                 deadline_monotonic=monotonic() + 10,
             )
         monkeypatch.setattr(
-            "pulsara_agent.conversation_kernel.runner.MAXIMUM_STEER_PLANNING_CANONICAL_WORK_BYTES",
+            "pulsara_agent.conversation_kernel.provider_dispatch.MAXIMUM_STEER_PLANNING_CANONICAL_WORK_BYTES",
             512 << 10,
         )
         collector.release.set()
@@ -3207,9 +3196,7 @@ def test_round5a1_completed_tool_item_then_incomplete_has_zero_canonical_effect(
             (session_id,),
         ).fetchone() == ("MODEL_OUTPUT_TOKEN_LIMIT_REACHED",)
     observed = bus.observe(observer_id, after_revision=0, maximum_events=64)
-    assert any(
-        item.kind is LiveSettlementKind.ABORTED for item in observed.settlements
-    )
+    assert any(item.kind is LiveSettlementKind.ABORTED for item in observed.settlements)
 
     recovered = asyncio.run(runner.run_turn("continue after the failed response"))
     assert recovered.final_text == "recovered"
@@ -3351,8 +3338,7 @@ def test_round5a1_replay_fragment_binds_only_after_exact_assistant_winner(
     second_view = runner._continuity.current_view(scope)
     assert second_view is not None
     assert tuple(
-        item.assistant_entry_id
-        for item in second_view.wire_input_plan.replacements
+        item.assistant_entry_id for item in second_view.wire_input_plan.replacements
     ) == (first.final_entry_id,)
     assert tuple(
         item.assistant_entry_id for item in second_view.assistant_replay_fragments
@@ -3452,8 +3438,7 @@ def test_round5a1_complete_tool_loop_replays_exact_reasoning_on_second_call(
             item.get("type")
             for item in second_wire
             if isinstance(item, dict)
-            and item.get("id")
-            in {"reasoning:tool", "message:tool", "function:1"}
+            and item.get("id") in {"reasoning:tool", "message:tool", "function:1"}
         )
         assert replay_types == ("reasoning", "message", "function_call")
     scope = ProviderInputContinuityScope(
@@ -3574,9 +3559,9 @@ def test_round5a2_fresh_host_rehydrates_durable_native_replay(
         context_source_collector=StaticContextSourceCollector(),
     )
     cold_recorder = _RecordingColdEpochAssembler(
-        replacement_runner._cold_epoch_assembler
+        replacement_runner._provider_dispatch._cold_epoch_assembler
     )
-    replacement_runner._cold_epoch_assembler = cold_recorder
+    replacement_runner._provider_dispatch._cold_epoch_assembler = cold_recorder
     asyncio.run(replacement_runner.run_turn("continue after restart"))
 
     assert len(second_model.requests) == 1
@@ -3586,9 +3571,7 @@ def test_round5a2_fresh_host_rehydrates_durable_native_replay(
         first.final_entry_id,
     )
     assert len(cold_recorder.semantic_seeds) == 1
-    assert isinstance(
-        cold_recorder.semantic_seeds[0], CanonicalColdContinuationSeed
-    )
+    assert isinstance(cold_recorder.semantic_seeds[0], CanonicalColdContinuationSeed)
     assert cold_recorder.finalized == 1
 
 
@@ -3715,9 +3698,7 @@ def test_round5a2_os_process_restart_uses_only_durable_native_replay(
     )
     repository_root = str(Path(__file__).parents[1])
     environment["PYTHONPATH"] = os.pathsep.join(
-        item
-        for item in (repository_root, environment.get("PYTHONPATH", ""))
-        if item
+        item for item in (repository_root, environment.get("PYTHONPATH", "")) if item
     )
 
     def invoke(mode: str, *, kill_after_commit: bool = False) -> dict[str, object]:
@@ -3820,9 +3801,7 @@ def test_round5a2_selected_hydration_reuses_dispatch_deadline_and_opens_once_or_
         repository=replacement_repository,
         writer_lease=replacement_lease,
         model=replacement_model,
-        tools=StructuredToolPort(
-            _AssertingTool(provider, session_id), tool_names=()
-        ),
+        tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
         live_bus=LiveAgentEventBus(),
         context_source_collector=StaticContextSourceCollector(),
         input_reader=reader,
@@ -3836,8 +3815,9 @@ def test_round5a2_selected_hydration_reuses_dispatch_deadline_and_opens_once_or_
         asyncio.run(runner.run_turn("same deadline continues into hydration"))
         assert len(replacement_model.requests) == 1
         assert (
-            replacement_model.requests[0]
-            .wire_input_plan.provider_replay_hydration_fingerprint
+            replacement_model.requests[
+                0
+            ].wire_input_plan.provider_replay_hydration_fingerprint
             is not None
         )
     assert len(reader.dispatch_deadlines) == 1
@@ -3883,9 +3863,7 @@ def test_round5a1_replay_fragment_capacity_fails_before_assistant_commit(
         repository=repository,
         writer_lease=lease,
         model=model,
-        tools=StructuredToolPort(
-            _AssertingTool(provider, session_id), tool_names=()
-        ),
+        tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
         live_bus=LiveAgentEventBus(),
         context_source_collector=StaticContextSourceCollector(),
         continuity_owner=continuity,
@@ -4106,12 +4084,10 @@ def test_round10_child_cold_seed_then_same_epoch_wire_prefix_is_exact(
             objective=objective,
         ),
     )
-    cold = _RecordingColdEpochAssembler(runner._cold_epoch_assembler)
-    runner._cold_epoch_assembler = cold
+    cold = _RecordingColdEpochAssembler(runner._provider_dispatch._cold_epoch_assembler)
+    runner._provider_dispatch._cold_epoch_assembler = cold
 
-    result = asyncio.run(
-        runner.run_subagent_turn(task_id=task_id, objective=objective)
-    )
+    result = asyncio.run(runner.run_subagent_turn(task_id=task_id, objective=objective))
 
     assert result.final_text == expected_text
     assert result.model_call_count == 2
@@ -4122,7 +4098,9 @@ def test_round10_child_cold_seed_then_same_epoch_wire_prefix_is_exact(
     assert cold.finalized == 1
     assert len(model.requests) == 2
     first, second = model.requests
-    assert first.compiled_input.canonical_input_identity.scope_subagent_task_id == task_id
+    assert (
+        first.compiled_input.canonical_input_identity.scope_subagent_task_id == task_id
+    )
     assert first.wire_input_plan.wire_system_fingerprint == (
         second.wire_input_plan.wire_system_fingerprint
     )
@@ -4217,9 +4195,7 @@ def test_round10_sole_report_result_atomically_completes_child_without_second_mo
         "accept_explicit_subagent_result",
         commit_then_timeout,
     )
-    result = asyncio.run(
-        runner.run_subagent_turn(task_id=task_id, objective=objective)
-    )
+    result = asyncio.run(runner.run_subagent_turn(task_id=task_id, objective=objective))
     assert lost_ack
     assert result.final_text == "exact explicit summary"
     assert result.model_call_count == 1
@@ -4319,9 +4295,7 @@ def test_round10_mixed_report_batch_has_zero_attempt_and_physical_effect_then_re
             objective=objective,
         ),
     )
-    result = asyncio.run(
-        runner.run_subagent_turn(task_id=task_id, objective=objective)
-    )
+    result = asyncio.run(runner.run_subagent_turn(task_id=task_id, objective=objective))
     assert result.final_text == "recovered inferred result"
     assert result.model_call_count == 2
     assert delegate.invocations == []

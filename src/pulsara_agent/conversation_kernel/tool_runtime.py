@@ -175,7 +175,7 @@ from pulsara_agent.conversation_kernel.tool_surface import (
     tool_observation_origin_for_binding,
 )
 
-from .runner import (
+from .tool_contracts import (
     KernelToolInvocationContext,
     KernelToolLiveSink,
     KernelToolAuthorization,
@@ -208,29 +208,6 @@ from .mcp.meta import (
     NewMcpToolRef,
     PreparedNewMcpToolRefSettlement,
     ProcessLocalNewMcpToolRefOwner,
-)
-
-
-DIRECT_KERNEL_TOOL_NAMES = frozenset(
-    {
-        "artifact_read",
-        "read_file",
-        "search_files",
-        "edit_file",
-        "write_file",
-        "todo",
-        "terminal",
-        "terminal_monitor",
-        "terminal_process",
-        "get_mcp_prompt",
-        "list_mcp_prompts",
-        "list_mcp_resource_templates",
-        "list_mcp_resources",
-        "list_mcp_servers",
-        "inspect_new_mcp_tool",
-        "use_new_mcp_tool",
-        "read_mcp_resource",
-    }
 )
 
 
@@ -3315,7 +3292,6 @@ def _thaw_json(value: object) -> object:
 
 
 __all__ = [
-    "DIRECT_KERNEL_TOOL_NAMES",
     "DirectKernelToolPort",
     "KernelToolInteractionPort",
     "ProductionBuiltinExecutorBinding",
