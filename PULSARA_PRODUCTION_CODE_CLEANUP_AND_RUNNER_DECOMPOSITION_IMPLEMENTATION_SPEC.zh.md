@@ -315,6 +315,8 @@ ToolInvocationPort
 
 DirectKernelToolPort可以同时结构化实现两者；不得为拆Protocol创建第二个physical owner。
 
+ConversationKernelRunner是composition root，因此其单个tools参数必须在类型上同时满足这两个窄Protocol。可以在runner模块内使用仅用于composition annotation的private intersection Protocol；ProviderDispatchCoordinator和CompactionCoordinator仍只消费ToolSurfacePlanningPort，ToolBatchExecutor仍只消费ToolInvocationPort。该组合类型不得成为新的owner、service locator或下游宽port。
+
 ---
 
 ## 4. Turn admission coordinator
@@ -473,6 +475,8 @@ CompactionExecutionResult
 ~~~
 
 完整prepared successor value直接交给当前run loop，不添加fingerprint。Idle compaction没有successor dispatch；active successful adoption可带一个已经安装或待普通open的successor。
+
+一旦active compaction返回successor，该完整value必须成为当前run loop的下一次provider dispatch；在它被消费或由唯一consumer关闭之前，不得poll或执行同scope的后续manual compaction。后来的manual request继续由HostCompactionRuntimeOwner持有：若successor call后turn继续，则在下一provider-safe loop消费；若turn终止，则由Host现有active-to-idle finalization接管。不得用后来的结果覆盖successor，也不得为此增加pending registry、失败队列或durable handoff。
 
 取消或失败时，由唯一当前consumer关闭未采用的dispatch/borrow。不得建立pending dispatch registry、receipt或durable handoff。
 
@@ -741,6 +745,8 @@ uv run python tools/run_round10_subagent_dogfood.py
 同时运行当前core dogfood suite的真实provider路径。
 
 必须观察实际prompt、model reply、ToolResult、compaction summary、subagent result与失败body；只排除PULSARA_API_KEY值，不要过度脱敏。
+
+Round 5A.2 dogfood的child与parent最终JSON render boundary都必须按当前配置值exact scrub PULSARA_API_KEY；不按字段名或泛化secret模式删除其他诊断内容。该约束只加固测试工具输出，不改变conversation product semantics。
 
 Dogfood至少证明：
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import json
 from pathlib import Path
 
 import pytest
@@ -38,6 +39,7 @@ from pulsara_agent.primitives.context import (
     freeze_json,
 )
 from pulsara_agent.storage.migrations.manifest import CONVERSATION_KERNEL_RELATIONS
+from tools.run_round5a2_durable_replay_dogfood import _scrub_exact_api_key
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -79,6 +81,28 @@ def _candidate(
         public_projection_fingerprint="sha256:" + "2" * 64,
         ordered_items=(item,),
     )
+
+
+def test_round5a2_dogfood_report_scrubs_only_the_exact_configured_key() -> None:
+    api_key = "dogfood-exact-secret"
+    report = {
+        "public_answer": "diagnostic body remains visible",
+        "failure": {
+            "message": f"provider echoed {api_key} inside a failure",
+            "unrelated": "Authorization diagnostics remain observable",
+        },
+        f"provider-{api_key}": [api_key, "another-secret-is-not-the-api-key"],
+    }
+
+    scrubbed = _scrub_exact_api_key(report, api_key=api_key)
+    rendered = json.dumps(scrubbed, sort_keys=True)
+
+    assert api_key not in rendered
+    assert rendered.count("<redacted:PULSARA_API_KEY>") == 3
+    assert "diagnostic body remains visible" in rendered
+    assert "Authorization diagnostics remain observable" in rendered
+    assert "another-secret-is-not-the-api-key" in rendered
+    assert api_key in json.dumps(report, sort_keys=True)
 
 
 def test_round5a2_replay_target_is_closed_and_process_stable() -> None:

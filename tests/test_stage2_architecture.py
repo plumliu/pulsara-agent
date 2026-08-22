@@ -338,6 +338,65 @@ def test_stage2_runner_decomposition_has_exact_owners_and_import_direction() -> 
     runner_tree = ast.parse(
         runner_path.read_text(encoding="utf-8"), filename=str(runner_path)
     )
+    runner_classes = {
+        node.name: node for node in runner_tree.body if isinstance(node, ast.ClassDef)
+    }
+    tool_composition = runner_classes["_RunnerToolCompositionPort"]
+    assert {ast.unparse(base) for base in tool_composition.bases} == {
+        "Protocol",
+        "ToolInvocationPort",
+        "ToolSurfacePlanningPort",
+    }
+    runner_init = next(
+        node
+        for node in runner_classes["ConversationKernelRunner"].body
+        if isinstance(node, ast.FunctionDef) and node.name == "__init__"
+    )
+    runner_tools_arg = next(
+        argument
+        for argument in (*runner_init.args.args, *runner_init.args.kwonlyargs)
+        if argument.arg == "tools"
+    )
+    assert ast.unparse(runner_tools_arg.annotation) == "_RunnerToolCompositionPort"
+
+    def constructor_tool_annotation(path: Path, class_name: str) -> str:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        owner = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.ClassDef) and node.name == class_name
+        )
+        constructor = next(
+            node
+            for node in owner.body
+            if isinstance(node, ast.FunctionDef) and node.name == "__init__"
+        )
+        tools_argument = next(
+            argument
+            for argument in (
+                *constructor.args.args,
+                *constructor.args.kwonlyargs,
+            )
+            if argument.arg == "tools"
+        )
+        return ast.unparse(tools_argument.annotation)
+
+    assert (
+        constructor_tool_annotation(
+            KERNEL / "provider_dispatch.py", "ProviderDispatchCoordinator"
+        )
+        == "ToolSurfacePlanningPort"
+    )
+    assert (
+        constructor_tool_annotation(
+            KERNEL / "compaction/coordinator.py", "CompactionCoordinator"
+        )
+        == "ToolSurfacePlanningPort"
+    )
+    assert (
+        constructor_tool_annotation(KERNEL / "tool_execution.py", "ToolBatchExecutor")
+        == "ToolInvocationPort"
+    )
     runner_methods = {
         node.name
         for node in ast.walk(runner_tree)

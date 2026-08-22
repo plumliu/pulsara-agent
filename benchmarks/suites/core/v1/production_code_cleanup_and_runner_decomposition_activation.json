@@ -16,12 +16,22 @@
     "subagent_runtime_port_owner": "conversation_kernel.subagents.runtime_port",
     "runner_back_reference_mixin_or_service_locator": false,
     "pending_compaction_dispatch_shared_slot": false,
+    "successor_dispatch_precedes_later_manual_poll": true,
+    "runner_tool_composition_contract": "private composition-only intersection of ToolSurfacePlanningPort and ToolInvocationPort; downstream consumers remain narrow",
+    "round5a2_exact_api_key_report_scrub": "child and parent final JSON boundaries; tool-only, no product semantic change",
     "production_files_changed": 30,
-    "production_lines_added": 7407,
-    "production_lines_deleted": 7122,
-    "production_net_lines": 285,
+    "production_lines_added": 7414,
+    "production_lines_deleted": 7115,
+    "production_net_lines": 299,
     "runner_lines_before": 7354,
-    "runner_lines_after": 1239
+    "runner_lines_after": 1253
+  },
+  "post_commit_review_fixes": {
+    "validated_at_utc": "2026-08-22T17:49:15Z",
+    "back_to_back_manual_compaction": "an unconsumed successor is the next exact provider dispatch; later manual work stays with the existing Host owner for the next safe loop or terminal idle handoff",
+    "tool_port_typing": "the Runner composition boundary requires both narrow structural ports without widening ProviderDispatchCoordinator, CompactionCoordinator or ToolBatchExecutor",
+    "dogfood_secret_hardening": "the exact configured PULSARA_API_KEY value is removed recursively from JSON-shaped reports while unrelated diagnostics remain visible",
+    "new_durable_machinery_or_total_caps": 0
   },
   "removed_production_surface": [
     "legacy ToolRegistry implementation, export and ToolRegistryReadPort",
@@ -38,9 +48,9 @@
   "validation": {
     "targeted_retained": "164 passed",
     "architecture_and_owner_guards": "37 passed",
-    "full_pytest": "877 passed",
-    "pytest_collection": "877 tests; every one of the 875 baseline nodes retained plus two new architecture guards",
-    "postgres_marker": "212 passed, 665 deselected",
+    "full_pytest": "879 passed",
+    "pytest_collection": "879 tests; every one of the 875 baseline nodes retained plus two architecture guards and two post-review regressions",
+    "postgres_marker": "213 passed in the full run; 213 selected and 666 deselected by marker collection",
     "clean_v0": "12 passed; fresh install, repeat migrate, deep verify, drift and RESET_REQUIRED coverage",
     "live_clean_v0_reset_migrate_and_deep_verify": "passed against localhost:5432/pulsara",
     "ruff": "passed",

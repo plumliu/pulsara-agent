@@ -42,6 +42,30 @@ from pulsara_agent.workspace_identity import HostWorkspaceInput
 
 
 _APIS = ("openai_chat_completions", "openai_responses")
+_API_KEY_REDACTION = "<redacted:PULSARA_API_KEY>"
+
+
+def _scrub_exact_api_key(value: object, *, api_key: str) -> object:
+    """Remove only the configured API-key value from a JSON-shaped report."""
+
+    if not api_key:
+        return value
+    if isinstance(value, str):
+        return value.replace(api_key, _API_KEY_REDACTION)
+    if isinstance(value, list):
+        return [_scrub_exact_api_key(item, api_key=api_key) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_scrub_exact_api_key(item, api_key=api_key) for item in value)
+    if isinstance(value, dict):
+        return {
+            (
+                key.replace(api_key, _API_KEY_REDACTION)
+                if isinstance(key, str)
+                else key
+            ): _scrub_exact_api_key(item, api_key=api_key)
+            for key, item in value.items()
+        }
+    return value
 
 
 def _dsn_with_database(dsn: str, database_name: str) -> str:
@@ -219,11 +243,14 @@ async def _child(args: argparse.Namespace) -> dict[str, object]:
             ]
         elif isinstance(exc, ProviderModelOutputIncomplete):
             report["incomplete_reason"] = exc.reason.value
-    print(json.dumps(report, sort_keys=True), flush=True)
+    scrubbed_report = _scrub_exact_api_key(report, api_key=settings.llm.api_key)
+    if not isinstance(scrubbed_report, dict):
+        raise RuntimeError("dogfood report scrub changed its JSON object shape")
+    print(json.dumps(scrubbed_report, sort_keys=True), flush=True)
     if args.abrupt:
         os._exit(0)
     await core.shutdown()
-    return report
+    return scrubbed_report
 
 
 def _invoke_child(
@@ -354,8 +381,13 @@ def main() -> int:
         return 0
     report = _parent(args)
     report["completed_at_utc"] = datetime.now(timezone.utc).isoformat()
-    print(json.dumps(report, sort_keys=True))
-    return 0 if report["status"] == "passed" else 2
+    scrubbed_report = _scrub_exact_api_key(
+        report, api_key=os.environ.get("PULSARA_API_KEY", "")
+    )
+    if not isinstance(scrubbed_report, dict):
+        raise RuntimeError("dogfood report scrub changed its JSON object shape")
+    print(json.dumps(scrubbed_report, sort_keys=True))
+    return 0 if scrubbed_report["status"] == "passed" else 2
 
 
 if __name__ == "__main__":

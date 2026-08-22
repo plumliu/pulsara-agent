@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from hashlib import sha256
 import json
 from time import monotonic
-from typing import Mapping
+from typing import Mapping, Protocol
 from uuid import uuid4
 
 from pulsara_agent.conversation_kernel.assembler import (
@@ -111,6 +111,7 @@ from pulsara_agent.conversation_kernel.tool_artifacts import (
     ToolOutputArtifactProcessor,
 )
 from pulsara_agent.conversation_kernel.tool_contracts import (
+    ToolInvocationPort,
     ToolSurfacePlanningPort,
 )
 from pulsara_agent.conversation_kernel.subagents.runtime_port import (
@@ -209,6 +210,10 @@ class _CollectedModelResponse:
     )
 
 
+class _RunnerToolCompositionPort(ToolSurfacePlanningPort, ToolInvocationPort, Protocol):
+    """Require one Tool owner to satisfy the runner's two narrow consumers."""
+
+
 class ConversationKernelRunner:
     def __init__(
         self,
@@ -216,7 +221,7 @@ class ConversationKernelRunner:
         repository: ConversationKernelRepository,
         writer_lease: WriterLease,
         model: KernelModelPort,
-        tools: ToolSurfacePlanningPort,
+        tools: _RunnerToolCompositionPort,
         live_bus: LiveAgentEventBus,
         input_reader: CanonicalProviderInputReader | None = None,
         safe_point: ProviderSafePointCoordinator | None = None,
@@ -546,11 +551,20 @@ class ConversationKernelRunner:
                     await self._subagent_runtime.consume_mailbox_safe_point(
                         intent.scope_subagent_task_id
                     )
-                manual_request = await self.compaction.take_manual(
-                    scope_kind=intent.scope_kind,
-                    scope_subagent_task_id=intent.scope_subagent_task_id,
-                    turn_id=turn_id,
-                )
+                # A successful active compaction already owns the next exact
+                # provider dispatch.  Consume that immutable handoff before
+                # polling a later manual request; otherwise a back-to-back
+                # request can overwrite the only process-local owner of its
+                # installed handle and surface borrow.  A later request stays
+                # with HostCompactionRuntimeOwner until the next safe loop, or
+                # the Host hands it to idle settlement when this turn exits.
+                manual_request = None
+                if successor_dispatch is None:
+                    manual_request = await self.compaction.take_manual(
+                        scope_kind=intent.scope_kind,
+                        scope_subagent_task_id=intent.scope_subagent_task_id,
+                        turn_id=turn_id,
+                    )
                 if manual_request is not None:
                     compaction = await self.compaction.execute_active(
                         turn_id=turn_id,

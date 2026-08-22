@@ -1418,6 +1418,103 @@ def test_round5b_active_manual_compaction_adopts_and_continues_same_run(
         assert repository.lost_once
 
 
+def test_round5b_back_to_back_manual_request_cannot_overwrite_successor(
+    stage2_migrated_postgres_database,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id = _name("session")
+    workspace_id = _name("workspace")
+    lease = repository.acquire_host_writer(
+        session_id=session_id,
+        workspace_id=workspace_id,
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    model = _CompactionScriptedModel(
+        [
+            _text_stream("historical answer " + "x" * 80_000),
+            _text_stream("successor was consumed exactly once"),
+        ],
+        "A concise handoff for the first manual compaction.",
+    )
+    owner = HostCompactionRuntimeOwner(
+        policy=ResolvedCompactionPolicy(
+            automatic_enabled=False,
+            minimum_reclaim_tokens=1,
+        )
+    )
+    runner = ConversationKernelRunner(
+        repository=repository,
+        writer_lease=lease,
+        model=model,
+        tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
+        live_bus=LiveAgentEventBus(),
+        context_source_collector=StaticContextSourceCollector(),
+        compaction_owner=owner,
+        workspace_id=workspace_id,
+    )
+    captured_successors: list[object] = []
+    second_waiters: list[asyncio.Future[object]] = []
+
+    async def exercise():
+        await runner.run_turn("first question")
+        command_id = _name("second-command")
+        turn_id = _stable_id("turn", session_id, command_id)
+        first_request, first_waiter = await owner.request_manual(
+            command_id=_name("first-compact-command"),
+            scope_kind=ModelInputScopeKind.ROOT,
+            scope_subagent_task_id=None,
+            expected_turn_id=turn_id,
+            force=True,
+        )
+        execute_active = runner.compaction.execute_active
+
+        async def inject_second_after_first_settlement(**kwargs):
+            execution = await execute_active(**kwargs)
+            manual_request = kwargs["manual_request"]
+            if (
+                manual_request is not None
+                and manual_request.request_id == first_request.request_id
+            ):
+                assert execution.successor_dispatch is not None
+                captured_successors.append(execution.successor_dispatch)
+                _second_request, second_waiter = await owner.request_manual(
+                    command_id=_name("second-compact-command"),
+                    scope_kind=ModelInputScopeKind.ROOT,
+                    scope_subagent_task_id=None,
+                    expected_turn_id=turn_id,
+                    force=True,
+                )
+                second_waiters.append(second_waiter)
+            return execution
+
+        runner.compaction.execute_active = inject_second_after_first_settlement
+        try:
+            result = await runner.run_turn("second question", command_id=command_id)
+            first_outcome = await first_waiter
+            assert len(second_waiters) == 1
+            assert not second_waiters[0].done()
+        finally:
+            await owner.aclose()
+        deferred_outcome = await second_waiters[0]
+        return result, first_outcome, deferred_outcome
+
+    result, first_outcome, deferred_outcome = asyncio.run(exercise())
+
+    assert result.final_text == "successor was consumed exactly once"
+    assert first_outcome.disposition is CompactionDisposition.COMPACTED
+    assert deferred_outcome.public_code == "HOST_CLOSING"
+    assert len(model.summary_transport.contexts) == 1
+    assert len(model.requests) == 2
+    assert len(captured_successors) == 1
+    captured = captured_successors[0]
+    assert captured.handle._closed
+    assert captured.surface_borrow is not None
+    assert captured.surface_borrow._closed
+
+
 def test_round5b_summary_tool_call_gets_one_ephemeral_repair_and_no_dispatch(
     stage2_migrated_postgres_database,
 ) -> None:
