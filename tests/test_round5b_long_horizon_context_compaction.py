@@ -12,14 +12,17 @@ from types import SimpleNamespace
 import pytest
 
 from pulsara_agent.conversation_kernel.compaction.contracts import (
+    CompactionActiveRequestLocation,
     CompactionCanonicalAdoptionFactoryInput,
     CompactionConfirmationKind,
+    CompactionContinuationMode,
     CompactionDisposition,
     CompactionOutcome,
     CompactionScope,
     CompactionTargetBranch,
     CompactionTrigger,
     ExpectedCompactionPredecessorRevision,
+    FrozenCompactionActiveRequest,
     ResolvedCompactionPolicy,
     build_prepared_compaction_canonical_adoption,
     build_prepared_manual_compaction_command,
@@ -33,6 +36,7 @@ from pulsara_agent.conversation_kernel.compaction.planner import (
     crosses_compaction_resource_headroom,
     estimate_unavoidable_compaction_successor_tokens,
     enumerate_complete_tool_groups,
+    freeze_compaction_continuation,
     rebase_compaction_dispatch_read_through_sequence,
     resolved_compaction_headroom_bounds,
     should_trigger_compaction,
@@ -40,7 +44,9 @@ from pulsara_agent.conversation_kernel.compaction.planner import (
 )
 from pulsara_agent.conversation_kernel.compaction.prompt import (
     build_compaction_snapshot_carrier,
+    compaction_summary_request,
     freeze_compaction_summary_output,
+    parse_compaction_snapshot_carrier,
 )
 from pulsara_agent.conversation_kernel.compaction.runtime import (
     HostCompactionRuntimeOwner,
@@ -328,11 +334,144 @@ def test_round5b_summary_normalizer_and_snapshot_carrier_are_bounded() -> None:
     carrier = build_compaction_snapshot_carrier(
         summary=summary,
         recent_user_messages=("第一条", "second"),
+        continuation_mode=CompactionContinuationMode.RESUME_ACTIVE_TURN,
+        active_request=FrozenCompactionActiveRequest(
+            entry_id="entry:active",
+            entry_sequence=7,
+            location=CompactionActiveRequestLocation.SNAPSHOT_EXACT,
+            text="current exact request",
+        ),
     )
     decoded = json.loads(carrier.body)
-    assert set(decoded) == {"earlier_context_summary", "recent_user_messages"}
+    assert set(decoded) == {
+        "continuation",
+        "earlier_context_summary",
+        "recent_user_messages",
+    }
+    assert decoded["continuation"]["mode"] == "RESUME_ACTIVE_TURN"
+    assert decoded["continuation"]["instruction"].startswith(
+        "HANDOFF COMPLETE / RESUME NOW"
+    )
+    assert "newer canonical turn activation" in decoded["continuation"]["instruction"]
+    assert decoded["continuation"]["active_request"] == {
+        "entry_id": "entry:active",
+        "entry_sequence": 7,
+        "location": "SNAPSHOT_EXACT",
+        "text": "current exact request",
+    }
     assert decoded["recent_user_messages"] == ["第一条", "second"]
     assert "body_digest" not in decoded
+    assert parse_compaction_snapshot_carrier(carrier.body) == carrier
+
+    idle = build_compaction_snapshot_carrier(
+        summary=summary,
+        recent_user_messages=("第一条",),
+        continuation_mode=CompactionContinuationMode.AWAIT_NEXT_USER,
+        active_request=None,
+    )
+    idle_decoded = json.loads(idle.body)
+    assert idle_decoded["continuation"]["mode"] == "AWAIT_NEXT_USER"
+    assert idle_decoded["continuation"]["active_request"] is None
+    assert "survives a process restart" in idle_decoded["continuation"]["instruction"]
+    assert parse_compaction_snapshot_carrier(idle.body) == idle
+    with pytest.raises(ValueError, match="fields"):
+        parse_compaction_snapshot_carrier(
+            b'{"earlier_context_summary":"legacy","recent_user_messages":[]}'
+        )
+
+
+def test_round5b_summary_prompt_does_not_turn_response_limits_into_task_state() -> None:
+    active = compaction_summary_request(CompactionTargetBranch.ACTIVE_INSTALLATION)
+    idle = compaction_summary_request(CompactionTargetBranch.IDLE_BASE_ONLY)
+
+    for request in (active, idle):
+        assert "restrictions above" in request
+        assert "end when this summary response" in request
+        assert "Never say that a user request is queued, deferred, blocked" in request
+    assert "immediately open a normal successor call" in active
+    assert "does not create a new active request" in idle
+
+
+def test_round5b_repeated_compaction_carries_runtime_owned_active_request() -> None:
+    summary = freeze_compaction_summary_output("old handoff", maximum_utf8_bytes=100)
+    carrier = build_compaction_snapshot_carrier(
+        summary=summary,
+        recent_user_messages=(),
+        continuation_mode=CompactionContinuationMode.RESUME_ACTIVE_TURN,
+        active_request=FrozenCompactionActiveRequest(
+            entry_id="entry:active",
+            entry_sequence=4,
+            location=CompactionActiveRequestLocation.SNAPSHOT_EXACT,
+            text="exact active request",
+        ),
+    )
+    snapshot_item = FrozenProviderInputItem(
+        item_kind=FrozenProviderInputItemKind.CONTEXT_SNAPSHOT,
+        source_entry_id=None,
+        source_entry_sequence=8,
+        source_turn_id=None,
+        text=carrier.body.decode("utf-8"),
+    )
+    source_view = SimpleNamespace(
+        canonical_dispatch_read=SimpleNamespace(
+            compile_snapshot=SimpleNamespace(
+                canonical_input=SimpleNamespace(
+                    identity=SimpleNamespace(
+                        initial_entry_id="entry:active",
+                        provider_input_through_sequence=12,
+                    ),
+                    items=(snapshot_item,),
+                )
+            )
+        )
+    )
+
+    mode, active = freeze_compaction_continuation(
+        source_view=source_view,
+        target_branch=CompactionTargetBranch.ACTIVE_INSTALLATION,
+        source_through_sequence=12,
+    )
+
+    assert mode is CompactionContinuationMode.RESUME_ACTIVE_TURN
+    assert active is not None
+    assert active.entry_id == "entry:active"
+    assert active.location is CompactionActiveRequestLocation.SNAPSHOT_EXACT
+    assert active.text == "exact active request"
+
+
+def test_round5b_non_human_initial_activation_is_mechanically_resumable() -> None:
+    plan_item = FrozenProviderInputItem(
+        item_kind=FrozenProviderInputItemKind.PLAN_CONTINUATION,
+        source_entry_id="entry:plan",
+        source_entry_sequence=9,
+        source_turn_id="turn:plan",
+        text='{"plan_continuation":"resume approved plan"}',
+        input_origin=CanonicalInputOriginKind.PLAN_CONTINUATION,
+    )
+    source_view = SimpleNamespace(
+        canonical_dispatch_read=SimpleNamespace(
+            compile_snapshot=SimpleNamespace(
+                canonical_input=SimpleNamespace(
+                    identity=SimpleNamespace(
+                        initial_entry_id="entry:plan",
+                        provider_input_through_sequence=9,
+                    ),
+                    items=(plan_item,),
+                )
+            )
+        )
+    )
+
+    mode, active = freeze_compaction_continuation(
+        source_view=source_view,
+        target_branch=CompactionTargetBranch.ACTIVE_INSTALLATION,
+        source_through_sequence=9,
+    )
+
+    assert mode is CompactionContinuationMode.RESUME_ACTIVE_TURN
+    assert active is not None
+    assert active.location is CompactionActiveRequestLocation.SNAPSHOT_EXACT
+    assert active.text == plan_item.text
 
 
 @pytest.mark.parametrize(
@@ -461,12 +600,16 @@ def test_round5b_longest_suffix_skips_impossible_old_tool_tail_before_open() -> 
         source_view=source_view,
         tail=old_group_tail,
         recent_user_messages=(),
+        continuation_mode=CompactionContinuationMode.AWAIT_NEXT_USER,
+        active_request=None,
         deadline_monotonic=deadline,
     )
     compacted_quote = estimate_unavoidable_compaction_successor_tokens(
         source_view=source_view,
         tail=no_group_tail,
         recent_user_messages=(),
+        continuation_mode=CompactionContinuationMode.AWAIT_NEXT_USER,
+        active_request=None,
         deadline_monotonic=deadline,
     )
     policy = ResolvedCompactionPolicy()

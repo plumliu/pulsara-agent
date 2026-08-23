@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Literal
 
 from pulsara_agent.llm.input import LLMMessage, LLMToolCall, MessageRole, ToolSpec
 from pulsara_agent.llm.user_carrier import compose_provider_root_policy
@@ -363,7 +364,7 @@ class LLMContext:
     provider_wire_input_plan: FrozenProviderWireInputPlan | None = field(
         default=None, repr=False
     )
-    tool_choice_none: bool = False
+    tool_choice: Literal["auto", "none"] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(

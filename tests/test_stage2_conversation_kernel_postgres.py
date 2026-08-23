@@ -34,16 +34,23 @@ from pulsara_agent.conversation_kernel.compaction.contracts import (
     COMPACTION_MODEL_CONTRACT,
     COMPACTION_SNAPSHOT_COMPILER_CONTRACT,
     COMPACTION_SUMMARY_PROMPT_CONTRACT,
+    CompactionActiveRequestLocation,
     CompactionCanonicalAdoptionFactoryInput,
     CompactionCanonicalWritePreconditions,
     CompactionConfirmationKind,
+    CompactionContinuationMode,
     CompactionScope,
     CompactionTargetBranch,
     ExpectedCompactionPredecessorRevision,
+    FrozenCompactionActiveRequest,
     build_prepared_manual_compaction_command,
     build_prepared_compaction_canonical_adoption,
     canonical_compaction_range_digest,
     freeze_compaction_canonical_range,
+)
+from pulsara_agent.conversation_kernel.compaction.prompt import (
+    build_compaction_snapshot_carrier,
+    freeze_compaction_summary_output,
 )
 from pulsara_agent.conversation_kernel.reader import CanonicalProviderInputReader
 from pulsara_agent.terminal_protocol.canonical_v3 import CanonicalProtocolReader
@@ -1958,10 +1965,19 @@ def test_round5b_next_exact_scope_turn_inherits_latest_snapshot_base(
         scope_kind=ModelInputScopeKind.ROOT,
         scope_subagent_task_id=None,
     )
-    snapshot_body = (
-        b'{"earlier_context_summary":"old summary",'
-        b'"recent_user_messages":["old prompt"]}'
-    )
+    snapshot_body = build_compaction_snapshot_carrier(
+        summary=freeze_compaction_summary_output(
+            "old summary", maximum_utf8_bytes=100
+        ),
+        recent_user_messages=(),
+        continuation_mode=CompactionContinuationMode.RESUME_ACTIVE_TURN,
+        active_request=FrozenCompactionActiveRequest(
+            entry_id=read.dispatch_read.compile_snapshot.canonical_input.identity.initial_entry_id,
+            entry_sequence=read.safe_head_range.source_through_sequence,
+            location=CompactionActiveRequestLocation.SNAPSHOT_EXACT,
+            text="old prompt",
+        ),
+    ).body
     candidate = build_prepared_compaction_canonical_adoption(
         CompactionCanonicalAdoptionFactoryInput(
             scope=scope,

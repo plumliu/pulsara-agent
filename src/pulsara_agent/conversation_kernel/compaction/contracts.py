@@ -50,10 +50,10 @@ from pulsara_agent.primitives.context import canonical_json_bytes, context_finge
 COMPACTION_SOURCE_LINEAGE_CONTRACT = "pulsara.compaction-source-lineage.v1"
 COMPACTION_CANONICAL_RANGE_CONTRACT = "pulsara.compaction-canonical-range.v1"
 COMPACTION_SNAPSHOT_COMPILER_CONTRACT = (
-    "pulsara.context-snapshot-carrier.v1-round5b"
+    "pulsara.context-snapshot-carrier.v2-durable-continuation"
 )
 COMPACTION_SUMMARY_PROMPT_CONTRACT = (
-    "pulsara.context-compaction-summary.v2-guided-freeform"
+    "pulsara.context-compaction-summary.v4-temporal-handoff"
 )
 COMPACTION_MODEL_CONTRACT = "pulsara.primary-model-compaction.v1"
 CONTEXT_SNAPSHOT_MEDIA_TYPE = "application/vnd.pulsara.context-snapshot+json"
@@ -85,6 +85,16 @@ class CompactionTrigger(StrEnum):
 class CompactionTargetBranch(StrEnum):
     ACTIVE_INSTALLATION = "ACTIVE_INSTALLATION"
     IDLE_BASE_ONLY = "IDLE_BASE_ONLY"
+
+
+class CompactionContinuationMode(StrEnum):
+    RESUME_ACTIVE_TURN = "RESUME_ACTIVE_TURN"
+    AWAIT_NEXT_USER = "AWAIT_NEXT_USER"
+
+
+class CompactionActiveRequestLocation(StrEnum):
+    SNAPSHOT_EXACT = "SNAPSHOT_EXACT"
+    CANONICAL_SUFFIX = "CANONICAL_SUFFIX"
 
 
 class CompactionDisposition(StrEnum):
@@ -969,15 +979,62 @@ class FrozenCompactionSummary:
 
 
 @dataclass(frozen=True, slots=True)
+class FrozenCompactionActiveRequest:
+    """Runtime-owned location of the exact request driving one active turn."""
+
+    entry_id: str
+    entry_sequence: int
+    location: CompactionActiveRequestLocation
+    text: str | None = field(default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        if not self.entry_id or self.entry_sequence < 0:
+            raise ValueError("compaction active request identity is incomplete")
+        snapshot_exact = self.location is CompactionActiveRequestLocation.SNAPSHOT_EXACT
+        if snapshot_exact != (self.text is not None):
+            raise ValueError("compaction active request location/text union is invalid")
+        if self.text is not None:
+            self.text.encode("utf-8")
+            if not self.text:
+                raise ValueError("compaction active request text is empty")
+
+    def canonical_value(self) -> dict[str, object]:
+        return {
+            "entry_id": self.entry_id,
+            "entry_sequence": self.entry_sequence,
+            "location": self.location.value,
+            "text": self.text,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class CompactionSnapshotCarrier:
+    continuation_mode: CompactionContinuationMode
+    handoff_instruction: str = field(repr=False)
+    active_request: FrozenCompactionActiveRequest | None = field(repr=False)
     earlier_context_summary: str = field(repr=False)
     recent_user_messages: tuple[str, ...] = field(repr=False)
     body: bytes = field(repr=False)
     content_digest: str
 
     def __post_init__(self) -> None:
+        resume = self.continuation_mode is CompactionContinuationMode.RESUME_ACTIVE_TURN
+        if resume != (self.active_request is not None):
+            raise ValueError("snapshot continuation/active-request union is invalid")
+        self.handoff_instruction.encode("utf-8")
+        if not self.handoff_instruction:
+            raise ValueError("snapshot handoff instruction is empty")
         expected = canonical_json_bytes(
             {
+                "continuation": {
+                    "mode": self.continuation_mode.value,
+                    "instruction": self.handoff_instruction,
+                    "active_request": (
+                        None
+                        if self.active_request is None
+                        else self.active_request.canonical_value()
+                    ),
+                },
                 "earlier_context_summary": self.earlier_context_summary,
                 "recent_user_messages": self.recent_user_messages,
             }
@@ -1198,9 +1255,11 @@ __all__ = [
     "ColdRebuildCompactionProjection",
     "CompactionAdoptionConfirmation",
     "CompactionAttemptPhase",
+    "CompactionActiveRequestLocation",
     "CompactionCanonicalAdoptionFactoryInput",
     "CompactionCanonicalWritePreconditions",
     "CompactionConfirmationKind",
+    "CompactionContinuationMode",
     "CompactionDisposition",
     "CompactionLineageBaseKind",
     "CompactionOutcome",
@@ -1217,6 +1276,7 @@ __all__ = [
     "ExpectedCompactionPredecessorRevision",
     "FrozenCompactionCanonicalRange",
     "FrozenCompactionCanonicalRead",
+    "FrozenCompactionActiveRequest",
     "FrozenCompactionHeadroomPreflight",
     "FrozenCompactionProviderProjection",
     "FrozenCompactionSourceView",

@@ -1,9 +1,9 @@
 """Run the Round 5B real-provider compaction activation dogfood.
 
 The probe owns an ephemeral clean-v0 database and trusted temporary
-workspaces.  It records only closed states, counts, fingerprints and sentinel
-booleans; credentials, prompts, summaries, ToolResults, Skill bodies, MCP
-schemas and opaque references are never printed or persisted in the report.
+workspaces.  Its diagnostic report retains exact prompts, normalized provider
+blocks, model text, tool arguments/results and compaction outcomes.  Only the
+exact PULSARA_API_KEY value is scrubbed before the report leaves the process.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ import argparse
 import asyncio
 from dataclasses import replace
 from datetime import datetime, timezone
+from enum import Enum
 import json
 import os
 from pathlib import Path
@@ -32,6 +33,18 @@ from pulsara_agent.conversation_kernel.compaction.contracts import (
 from pulsara_agent.conversation_kernel.contracts import InlineContent
 from pulsara_agent.conversation_kernel.host import KernelHostCore
 from pulsara_agent.conversation_kernel.repository import AssistantTextBlock
+from pulsara_agent.llm.input import MessageRole
+from pulsara_agent.ports.live_agent_event import (
+    DataEndPayload,
+    DataStartPayload,
+    TextEndPayload,
+    TextStartPayload,
+    ThinkingEndPayload,
+    ThinkingStartPayload,
+    ToolCallEndPayload,
+    ToolCallStartPayload,
+)
+from pulsara_agent.ports.provider_stream import ProviderStreamTerminal
 from pulsara_agent.model_input.continuity import (
     ProviderInputContinuityScope,
     decode_runtime_observation,
@@ -40,6 +53,7 @@ from pulsara_agent.model_input.contracts import (
     ContextSourceKind,
     ModelInputScopeKind,
 )
+from pulsara_agent.primitives.model_call import ModelCallPurpose
 from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
 from pulsara_agent.settings import PulsaraSettings, StorageConfig, load_env_file
 from pulsara_agent.storage.migrations.runner import PostgresMigrationRunner
@@ -53,6 +67,239 @@ _FIXTURE = Path(__file__).resolve().parent / "fixtures" / "round9_mcp_server.py"
 _SKILL_NAME = "round5b-retained-check"
 _SENTINEL = "ROUND5B_SKILL_SUCCESS"
 _MCP_SENTINEL = "round5b-sentinel"
+_API_KEY_REDACTION = "<PULSARA_API_KEY>"
+
+
+def _scrub_exact(value: object, secret: str) -> object:
+    if isinstance(value, str):
+        return value.replace(secret, _API_KEY_REDACTION) if secret else value
+    if isinstance(value, bytes):
+        return _scrub_exact(value.decode("utf-8"), secret)
+    if isinstance(value, dict):
+        return {
+            str(_scrub_exact(key, secret)): _scrub_exact(item, secret)
+            for key, item in value.items()
+        }
+    if isinstance(value, (tuple, list)):
+        return [_scrub_exact(item, secret) for item in value]
+    if isinstance(value, Enum):
+        return _scrub_exact(value.value, secret)
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return _scrub_exact(str(value), secret)
+
+
+def _message_trace(message) -> dict[str, object]:
+    return {
+        "role": message.role.value,
+        "content": tuple(message.content),
+        "tool_calls": tuple(
+            {
+                "id": item.id,
+                "name": item.name,
+                "arguments": item.arguments,
+            }
+            for item in message.tool_calls
+        ),
+        "tool_call_id": message.tool_call_id,
+    }
+
+
+class _DogfoodTrace:
+    def __init__(self, *, scenario: str, api_key: str) -> None:
+        self._secret = api_key
+        self._active_turn_sequence: int | None = None
+        self._turns: list[dict[str, object]] = []
+        self._model_calls: list[dict[str, object]] = []
+        self._tool_invocations: list[dict[str, object]] = []
+        self._compactions: list[dict[str, object]] = []
+        self._scenario = scenario
+
+    def scrub(self, value: object) -> object:
+        return _scrub_exact(value, self._secret)
+
+    def begin_turn(self, *, command_id: str, prompt: str) -> dict[str, object]:
+        if self._active_turn_sequence is not None:
+            raise RuntimeError("dogfood trace turn overlap")
+        record = {
+            "sequence": len(self._turns) + 1,
+            "command_id": command_id,
+            "user_prompt": self.scrub(prompt),
+            "status": "RUNNING",
+        }
+        self._turns.append(record)
+        self._active_turn_sequence = int(record["sequence"])
+        return record
+
+    def finish_turn(self, record: dict[str, object], result: object) -> None:
+        record.update(
+            {
+                "status": "COMPLETED",
+                "turn_id": result.turn_id,  # type: ignore[attr-defined]
+                "final_model_text": self.scrub(result.final_text),  # type: ignore[attr-defined]
+                "model_call_count": result.model_call_count,  # type: ignore[attr-defined]
+            }
+        )
+        self._active_turn_sequence = None
+
+    def fail_turn(self, record: dict[str, object], error: BaseException) -> None:
+        record.update(
+            {
+                "status": "RAISED",
+                "failure_type": type(error).__name__,
+                "failure_message": self.scrub(str(error)),
+            }
+        )
+        self._active_turn_sequence = None
+
+    def start_model_call(self, *, call, context) -> dict[str, object]:
+        purpose = call.fact.purpose.value
+        if call.fact.purpose is ModelCallPurpose.CONTEXT_COMPACTION_SUMMARY:
+            call_kind = (
+                "REPAIR"
+                if context.messages[-1].role is MessageRole.TOOL_RESULT
+                else "INITIAL"
+            )
+            summary_start = next(
+                (
+                    index
+                    for index, message in enumerate(context.messages)
+                    if message.role is MessageRole.USER
+                    and any("CONTEXT CHECKPOINT COMPACTION" in item for item in message.content)
+                ),
+                len(context.messages) - 1,
+            )
+            ephemeral_input_suffix = tuple(
+                _message_trace(message) for message in context.messages[summary_start:]
+            )
+        else:
+            call_kind = "FOREGROUND"
+            ephemeral_input_suffix = ()
+        record = {
+            "sequence": len(self._model_calls) + 1,
+            "turn_sequence": self._active_turn_sequence,
+            "resolved_model_call_id": call.resolved_model_call_id,
+            "purpose": purpose,
+            "call_kind": call_kind,
+            "model_call_index": context.model_call_index,
+            "tool_choice": context.tool_choice,
+            "compiler_estimated_input_tokens": context.compiler_estimated_input_tokens,
+            "ephemeral_input_suffix": self.scrub(ephemeral_input_suffix),
+            "normalized_blocks": [],
+            "terminal": None,
+        }
+        self._model_calls.append(record)
+        return record
+
+    def record_tool_invocation(self, record: dict[str, object]) -> None:
+        record = {**record, "sequence": len(self._tool_invocations) + 1}
+        scrubbed = self.scrub(record)
+        assert isinstance(scrubbed, dict)
+        self._tool_invocations.append(scrubbed)
+
+    def record_compaction(self, record: dict[str, object]) -> None:
+        scrubbed = self.scrub(record)
+        assert isinstance(scrubbed, dict)
+        self._compactions.append(scrubbed)
+
+    def report(self) -> dict[str, object]:
+        return {
+            "scenario": self._scenario,
+            "turns": self._turns,
+            "model_calls": self._model_calls,
+            "tool_invocations": self._tool_invocations,
+            "compactions": self._compactions,
+        }
+
+
+class _TracingExecution:
+    def __init__(self, delegate, *, trace: _DogfoodTrace, record) -> None:
+        self._delegate = delegate
+        self._trace = trace
+        self._record = record
+        self._blocks: dict[str, dict[str, object]] = {}
+
+    async def read_next(self):
+        item = await self._delegate.read_next()
+        if isinstance(
+            item,
+            (TextStartPayload, ThinkingStartPayload, DataStartPayload, ToolCallStartPayload),
+        ):
+            if isinstance(item, TextStartPayload):
+                block = {"type": "TEXT", "block_identity": item.block_identity}
+            elif isinstance(item, ThinkingStartPayload):
+                block = {"type": "THINKING", "block_identity": item.block_identity}
+            elif isinstance(item, DataStartPayload):
+                block = {
+                    "type": "DATA",
+                    "block_identity": item.block_identity,
+                    "media_type": item.media_type,
+                }
+            else:
+                block = {
+                    "type": "TOOL_CALL",
+                    "block_identity": item.block_identity,
+                    "tool_call_id": item.tool_call_id,
+                    "tool_name": item.tool_name,
+                }
+            self._blocks[item.block_identity] = block
+            self._record["normalized_blocks"].append(block)
+        elif isinstance(
+            item,
+            (TextEndPayload, ThinkingEndPayload, DataEndPayload, ToolCallEndPayload),
+        ):
+            block = self._blocks[item.block_identity]
+            if isinstance(item, (TextEndPayload, ThinkingEndPayload)):
+                block["text"] = self._trace.scrub(item.final_text)
+            elif isinstance(item, DataEndPayload):
+                block["data"] = self._trace.scrub(item.final_data)
+            else:
+                block["tool_call_id"] = item.tool_call_id
+                block["tool_name"] = item.tool_name
+                block["arguments"] = self._trace.scrub(item.arguments_json)
+        elif isinstance(item, ProviderStreamTerminal):
+            self._record["terminal"] = {
+                "kind": item.terminal_kind.value,
+                "incomplete_reason": (
+                    None
+                    if item.incomplete_reason is None
+                    else item.incomplete_reason.value
+                ),
+                "error": (
+                    None
+                    if item.error is None
+                    else self._trace.scrub(item.error.model_dump(mode="json"))
+                ),
+            }
+        return item
+
+    async def request_cancel(self, *, reason: str) -> None:
+        await self._delegate.request_cancel(reason=reason)
+
+    async def aclose(self) -> None:
+        await self._delegate.aclose()
+
+    async def wait_physical_completion(self):
+        return await self._delegate.wait_physical_completion()
+
+
+class _TracingTransport:
+    def __init__(self, delegate, trace: _DogfoodTrace) -> None:
+        self._delegate = delegate
+        self._trace = trace
+        for name in (
+            "api",
+            "binding_id",
+            "contract_version",
+            "sanitizer_contract_fingerprint",
+            "boundary_contract_fingerprint",
+        ):
+            setattr(self, name, getattr(delegate, name))
+
+    def open_stream(self, *, call, context):
+        record = self._trace.start_model_call(call=call, context=context)
+        execution = self._delegate.open_stream(call=call, context=context)
+        return _TracingExecution(execution, trace=self._trace, record=record)
 
 
 def _dsn_with_database(dsn: str, database_name: str) -> str:
@@ -186,6 +433,77 @@ def _isolated_mcp_configs(workspace: Path):
     )
 
 
+def _install_provider_trace(session, trace: _DogfoodTrace) -> None:
+    transports = session._model._registry._transports  # noqa: SLF001
+    for api, transport in tuple(transports.items()):
+        transports[api] = _TracingTransport(transport, trace)
+
+
+def _install_tool_trace(
+    session,
+    trace: _DogfoodTrace,
+    *,
+    observed_tools: list[str] | None = None,
+) -> None:
+    tools = session._tools  # noqa: SLF001
+    original = tools.invoke
+
+    async def invoke(**kwargs):
+        record = {
+            "turn_id": kwargs["turn_id"],
+            "assistant_entry_id": kwargs["assistant_entry_id"],
+            "tool_call_id": kwargs["tool_call_id"],
+            "attempt_id": kwargs["attempt_id"],
+            "tool_name": kwargs["tool_name"],
+            "arguments": dict(kwargs["arguments"]),
+        }
+        try:
+            result = await original(**kwargs)
+        except BaseException as exc:
+            record.update(
+                {
+                    "status": "RAISED",
+                    "failure_type": type(exc).__name__,
+                    "failure_message": str(exc),
+                }
+            )
+            trace.record_tool_invocation(record)
+            raise
+        record.update(
+            {
+                "status": "COMPLETED",
+                "result_state": result.state,
+                "result_content": result.content.decode("utf-8"),
+                "remote_identity": result.remote_identity,
+                "physical_timing": result.physical_timing,
+                "effect_class": result.effect_class,
+            }
+        )
+        trace.record_tool_invocation(record)
+        if observed_tools is not None:
+            observed_tools.append(str(kwargs["tool_name"]))
+        return result
+
+    tools.invoke = invoke
+
+
+async def _run_traced_turn(
+    session,
+    trace: _DogfoodTrace,
+    prompt: str,
+    *,
+    command_id: str,
+):
+    record = trace.begin_turn(command_id=command_id, prompt=prompt)
+    try:
+        result = await session.run_turn(prompt, command_id=command_id)
+    except BaseException as exc:
+        trace.fail_turn(record, exc)
+        raise
+    trace.finish_turn(record, result)
+    return result
+
+
 def _scope(session) -> ProviderInputContinuityScope:
     return ProviderInputContinuityScope(
         session_id=session.session_id,
@@ -299,30 +617,45 @@ class _RecordingTransport:
 def _install_summary_recorder(session, records: list[dict[str, object]]) -> None:
     model = session._model  # noqa: SLF001
     original = model.resolve_compaction_summary_call
+    previous_initial_wire: tuple[object, ...] | None = None
 
     def resolve(**kwargs):
         call = original(**kwargs)
 
         def opened(context) -> None:
+            nonlocal previous_initial_wire
             old = _current_epoch(session)
             materialization = context.provider_wire_input_plan.materialization
             old_wire = old.wire_input_plan.materialization
-            overlap = min(
-                len(materialization.ordered_input_items) - 1,
-                len(old_wire.ordered_input_items),
-            )
+            is_repair = context.messages[-1].role is MessageRole.TOOL_RESULT
+            if is_repair:
+                wire_prefix_exact = bool(
+                    previous_initial_wire is not None
+                    and materialization.ordered_input_items[
+                        : len(previous_initial_wire)
+                    ]
+                    == previous_initial_wire
+                )
+            else:
+                overlap = min(
+                    len(materialization.ordered_input_items) - 1,
+                    len(old_wire.ordered_input_items),
+                )
+                wire_prefix_exact = (
+                    materialization.ordered_input_items[:overlap]
+                    == old_wire.ordered_input_items[:overlap]
+                )
+                previous_initial_wire = materialization.ordered_input_items
             records.append(
                 {
+                    "call_kind": "REPAIR" if is_repair else "INITIAL",
                     "old_epoch_nonce": old.epoch_nonce,
                     "old_epoch_revision": old.epoch_revision,
                     "old_semantic_prefix": old.semantic_prefix_fingerprint,
                     "old_route_counts": _route_counts(old),
-                    "tool_choice_none": context.tool_choice_none,
+                    "tool_choice": context.tool_choice,
                     "tools_exact": materialization.tool_items == old_wire.tool_items,
-                    "wire_prefix_exact": (
-                        materialization.ordered_input_items[:overlap]
-                        == old_wire.ordered_input_items[:overlap]
-                    ),
+                    "wire_prefix_exact": wire_prefix_exact,
                     "input_tokens": context.compiler_estimated_input_tokens,
                 }
             )
@@ -331,6 +664,32 @@ def _install_summary_recorder(session, records: list[dict[str, object]]) -> None
         return replace(call, target=replace(call.target, transport=transport))
 
     model.resolve_compaction_summary_call = resolve
+
+
+def _summary_call_shape(records: list[dict[str, object]]) -> dict[str, object]:
+    initial_calls = 0
+    repair_calls = 0
+    sequence_valid = True
+    previous_kind: str | None = None
+    for item in records:
+        kind = str(item["call_kind"])
+        if kind == "INITIAL":
+            initial_calls += 1
+        elif kind == "REPAIR":
+            repair_calls += 1
+            if previous_kind != "INITIAL":
+                sequence_valid = False
+        else:
+            sequence_valid = False
+        previous_kind = kind
+    return {
+        "physical_calls": len(records),
+        "initial_calls": initial_calls,
+        "repair_calls": repair_calls,
+        "at_most_one_repair_per_initial": (
+            sequence_valid and repair_calls <= initial_calls
+        ),
+    }
 
 
 def _install_read_activation(session, observed_tools: list[str]) -> None:
@@ -358,8 +717,9 @@ def _install_compaction_trigger_recorder(
     session,
     records: list[dict[str, object]],
     observed_tools: list[str],
+    trace: _DogfoodTrace,
 ) -> None:
-    """Record the exact safe-point trigger without observing model content."""
+    """Record every exact safe-point trigger and terminal outcome."""
 
     coordinator = session._runner.compaction  # noqa: SLF001
     original = coordinator.execute_active
@@ -367,23 +727,39 @@ def _install_compaction_trigger_recorder(
     async def execute(**kwargs):
         before = _snapshot_fingerprints(session)
         observed_before = tuple(observed_tools)
-        result = await original(**kwargs)
+        base = {
+            "sequence": len(records) + 1,
+            "trigger": kwargs["trigger"].value,
+            "turn_id": kwargs["turn_id"],
+            "model_call_index": kwargs["model_call_index"],
+            "tool_calls_before_compaction": len(observed_before),
+            "tool_names_before_compaction": observed_before,
+            "snapshot_count_before": len(before),
+        }
+        try:
+            result = await original(**kwargs)
+        except BaseException as exc:
+            failed = {
+                **base,
+                "snapshot_count_after": len(_snapshot_fingerprints(session)),
+                "disposition": "RAISED",
+                "failure_type": type(exc).__name__,
+                "failure_message": str(exc),
+            }
+            records.append(failed)
+            trace.record_compaction(failed)
+            raise
         outcome = result.outcome
         after = _snapshot_fingerprints(session)
-        records.append(
-            {
-                "trigger": kwargs["trigger"].value,
-                "turn_id": kwargs["turn_id"],
-                "model_call_index": kwargs["model_call_index"],
-                "tool_calls_before_compaction": len(observed_before),
-                "tool_names_before_compaction": observed_before,
-                "snapshot_count_before": len(before),
-                "snapshot_count_after": len(after),
-                "disposition": outcome.disposition.value,
-                "snapshot_id_present": outcome.snapshot_id is not None,
-                "revision_ordinal": outcome.revision_ordinal,
-            }
-        )
+        completed = {
+            **base,
+            "snapshot_count_after": len(after),
+            "disposition": outcome.disposition.value,
+            "snapshot_id_present": outcome.snapshot_id is not None,
+            "revision_ordinal": outcome.revision_ordinal,
+        }
+        records.append(completed)
+        trace.record_compaction(completed)
         return result
 
     coordinator.execute_active = execute
@@ -447,6 +823,10 @@ async def _run_retained_and_repeated(
     original_loader = host_module.load_mcp_server_configs
     host_module.load_mcp_server_configs = lambda **_: _isolated_mcp_configs(workspace)
     core = KernelHostCore.production(settings=settings)
+    trace = _DogfoodTrace(
+        scenario="retained_and_repeated",
+        api_key=settings.llm.api_key,
+    )
     summary_records: list[dict[str, object]] = []
     compaction_records: list[dict[str, object]] = []
     observed_tools: list[str] = []
@@ -463,6 +843,8 @@ async def _run_retained_and_repeated(
                 "answers brief."
             ),
         )
+        _install_provider_trace(session, trace)
+        _install_tool_trace(session, trace)
         session._capabilities._provider = LocalSkillCapabilityProvider(  # noqa: SLF001
             provider=LocalSkillProvider(include_user_skills=False)
         )
@@ -475,7 +857,9 @@ async def _run_retained_and_repeated(
         )
         if ready.value != "READY":
             raise RuntimeError("initial MCP fixture did not become READY")
-        await session.run_turn(
+        await _run_traced_turn(
+            session,
+            trace,
             "Acknowledge this integration preflight briefly without using a tool.",
             command_id="command:round5b:preflight",
         )
@@ -491,7 +875,9 @@ async def _run_retained_and_repeated(
         )
         if ready.value != "READY":
             raise RuntimeError("late MCP fixture did not become READY")
-        inspected = await session.run_turn(
+        inspected = await _run_traced_turn(
+            session,
+            trace,
             "Inspect the newly listed late-server direct_echo tool so its exact "
             "argument shape is available for a later task. Do not execute it yet.",
             command_id="command:round5b:inspect",
@@ -509,8 +895,11 @@ async def _run_retained_and_repeated(
             session,
             compaction_records,
             observed_tools,
+            trace,
         )
-        skill_result = await session.run_turn(
+        skill_result = await _run_traced_turn(
+            session,
+            trace,
             f"Use the cataloged {_SKILL_NAME} workflow for this bounded check. "
             "If its exact body is not already present in current model input, "
             f"call read_file on .pulsara/skills/{_SKILL_NAME}/SKILL.md with "
@@ -547,7 +936,9 @@ async def _run_retained_and_repeated(
             automatic_enabled=True,
             minimum_reclaim_tokens=1,
         )
-        corrected = await session.run_turn(
+        corrected = await _run_traced_turn(
+            session,
+            trace,
             "Correction: the current answer sentinel is BLUE. Reply with BLUE "
             "and do not use any tool.",
             command_id="command:round5b:correction",
@@ -585,6 +976,7 @@ async def _run_retained_and_repeated(
                 _route_counts(before_compaction)["NEW_MCP_META_ONLY"] == 1
             ),
             "summary_calls": len(summary_records),
+            "summary_call_shape": _summary_call_shape(summary_records),
             "summary_proofs": tuple(summary_records),
             "first_snapshot_count": len(first_snapshots),
             "final_snapshot_count": len(all_snapshots),
@@ -622,6 +1014,7 @@ async def _run_retained_and_repeated(
             "correction_won": "BLUE" in corrected.final_text,
             "canonical_tool_trajectory": trajectory,
             "tool_attempt_count": len(trajectory),
+            "diagnostic_trace": trace.report(),
             "agentic_mid_turn": {
                 "exactly_one_mid_turn_compaction": len(mid_turn_records) == 1,
                 "same_turn": (
@@ -657,9 +1050,10 @@ async def _run_retained_and_repeated(
         }
         result["passed"] = bool(
             result["late_meta_before_compaction"]
-            and result["summary_calls"] == 2
+            and result["summary_call_shape"]["initial_calls"] == 2
+            and result["summary_call_shape"]["at_most_one_repair_per_initial"]
             and all(
-                item["tool_choice_none"]
+                item["tool_choice"] == "auto"
                 and item["tools_exact"]
                 and item["wire_prefix_exact"]
                 for item in summary_records
@@ -708,7 +1102,13 @@ async def _run_overbound(
     original_loader = host_module.load_mcp_server_configs
     host_module.load_mcp_server_configs = lambda **_: _isolated_mcp_configs(workspace)
     core = KernelHostCore.production(settings=settings)
+    trace = _DogfoodTrace(
+        scenario="overbound_mcp",
+        api_key=settings.llm.api_key,
+    )
     summary_records: list[dict[str, object]] = []
+    compaction_records: list[dict[str, object]] = []
+    observed_tools: list[str] = []
     try:
         session = await core.open_session(
             HostWorkspaceInput(
@@ -721,6 +1121,8 @@ async def _run_overbound(
                 "advertised catalog route and keep the final answer brief."
             ),
         )
+        _install_provider_trace(session, trace)
+        _install_tool_trace(session, trace, observed_tools=observed_tools)
         session._compaction.policy = ResolvedCompactionPolicy(  # noqa: SLF001
             automatic_enabled=False,
             minimum_reclaim_tokens=1,
@@ -730,7 +1132,9 @@ async def _run_overbound(
         )
         if ready.value != "READY":
             raise RuntimeError("overbound initial MCP fixture did not become READY")
-        await session.run_turn(
+        await _run_traced_turn(
+            session,
+            trace,
             "Acknowledge this preflight briefly without a tool.",
             command_id="command:round5b:overbound-preflight",
         )
@@ -749,13 +1153,21 @@ async def _run_overbound(
         if ready.value != "READY":
             raise RuntimeError("overbound MCP fixture did not become READY")
         _install_summary_recorder(session, summary_records)
+        _install_compaction_trigger_recorder(
+            session,
+            compaction_records,
+            observed_tools,
+            trace,
+        )
         session._compaction.policy = ResolvedCompactionPolicy(  # noqa: SLF001
             automatic_enabled=True,
             auto_trigger_ratio=0.30,
             post_compaction_target_ratio=0.20,
             minimum_reclaim_tokens=1,
         )
-        final = await session.run_turn(
+        final = await _run_traced_turn(
+            session,
+            trace,
             "Use bulk_00 from MCP server bulk once with the harmless text value "
             "round5b, following the current catalog route, then report its result.",
             command_id="command:round5b:overbound",
@@ -765,6 +1177,7 @@ async def _run_overbound(
         trajectory = _tool_trajectory(session)
         result = {
             "summary_calls": len(summary_records),
+            "summary_call_shape": _summary_call_shape(summary_records),
             "summary_proofs": tuple(summary_records),
             "snapshot_count": len(_snapshot_fingerprints(session)),
             "route_counts": routes,
@@ -781,9 +1194,11 @@ async def _run_overbound(
             "meta_use_calls": trajectory.count("use_new_mcp_tool"),
             "canonical_tool_trajectory": trajectory,
             "final_nonempty": bool(final.final_text.strip()),
+            "diagnostic_trace": trace.report(),
         }
         result["passed"] = bool(
-            result["summary_calls"] == 1
+            result["summary_call_shape"]["initial_calls"] == 1
+            and result["summary_call_shape"]["at_most_one_repair_per_initial"]
             and result["snapshot_count"] == 1
             and routes["DIRECT"] == 0
             and routes["NEW_MCP_META_ONLY"] == 49
@@ -813,13 +1228,16 @@ async def _run(settings: PulsaraSettings) -> dict[str, object]:
             workspace=Path(second_dir),
         )
     return {
-        "schema_version": "round5b-compaction-dogfood.v1",
+        "schema_version": (
+            "round5b-compaction-dogfood.v3-observable-auto-without-dispatch"
+        ),
         "completed_at_utc": datetime.now(timezone.utc).isoformat(),
         "provider_api": settings.llm.api,
         "provider_model": settings.llm.pro.model_id,
         "retained_and_repeated": retained,
         "overbound_mcp": overbound,
-        "credentials_prompts_summaries_results_skill_bodies_schemas_or_refs_recorded": False,
+        "diagnostic_trace_recorded": True,
+        "pulsara_api_key_recorded": False,
         "status": "passed" if retained["passed"] and overbound["passed"] else "failed",
     }
 
@@ -827,6 +1245,10 @@ async def _run(settings: PulsaraSettings) -> dict[str, object]:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--env-file", default=".env")
+    parser.add_argument(
+        "--trace-output",
+        help="write the exact API-key-scrubbed observable report as JSON",
+    )
     args = parser.parse_args()
     load_env_file(args.env_file, override=False)
     initial = PulsaraSettings.from_env()
@@ -836,17 +1258,35 @@ def main() -> int:
     except BaseException as exc:
         frame = traceback.extract_tb(exc.__traceback__)[-1]
         report = {
-            "schema_version": "round5b-compaction-dogfood.v1",
+            "schema_version": (
+                "round5b-compaction-dogfood.v3-observable-auto-without-dispatch"
+            ),
             "completed_at_utc": datetime.now(timezone.utc).isoformat(),
             "status": "external_or_runtime_failure",
             "failure_type": type(exc).__name__,
-            "failure_message": str(exc)[:512],
+            "failure_message": _scrub_exact(str(exc)[:512], initial.llm.api_key),
             "failure_site": f"{Path(frame.filename).name}:{frame.lineno}:{frame.name}",
-            "credentials_prompts_summaries_results_skill_bodies_schemas_or_refs_recorded": False,
+            "diagnostic_trace_recorded": False,
+            "pulsara_api_key_recorded": False,
         }
     finally:
         _drop_database(admin_root_dsn, database_name)
-    print(json.dumps(report, sort_keys=True))
+    scrubbed_report = _scrub_exact(report, initial.llm.api_key)
+    encoded_report = json.dumps(scrubbed_report, sort_keys=True)
+    if initial.llm.api_key and initial.llm.api_key in encoded_report:
+        raise RuntimeError("dogfood report retained PULSARA_API_KEY")
+    if args.trace_output:
+        Path(args.trace_output).expanduser().resolve().write_text(
+            json.dumps(
+                scrubbed_report,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+    print(encoded_report)
     return 0 if report["status"] == "passed" else 2
 
 

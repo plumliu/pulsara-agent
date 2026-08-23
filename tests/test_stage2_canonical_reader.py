@@ -11,14 +11,21 @@ from pulsara_agent.conversation_kernel.contracts import (
     InlineContent,
 )
 from pulsara_agent.conversation_kernel.compaction.contracts import (
+    CompactionActiveRequestLocation,
     CompactionCanonicalAdoptionFactoryInput,
     CompactionCanonicalWritePreconditions,
+    CompactionContinuationMode,
     CompactionScope,
     CompactionTargetBranch,
     ExpectedCompactionPredecessorRevision,
+    FrozenCompactionActiveRequest,
     build_prepared_compaction_canonical_adoption,
     canonical_compaction_range_digest,
     freeze_compaction_canonical_range,
+)
+from pulsara_agent.conversation_kernel.compaction.prompt import (
+    build_compaction_snapshot_carrier,
+    freeze_compaction_summary_output,
 )
 from pulsara_agent.conversation_kernel.reader import (
     CanonicalProviderContinuityError,
@@ -735,6 +742,26 @@ def test_mid_turn_snapshot_revision_keeps_current_user_as_exact_delta(
             closures=compaction_read.safe_head_range.closures,
             late_outcomes=compaction_read.safe_head_range.late_outcomes,
         )
+        active_item = next(
+            item
+            for item in compaction_read.safe_head_range.ordered_items
+            if item.source_entry_id
+            == compaction_read.dispatch_read.compile_snapshot.canonical_input.identity.initial_entry_id
+        )
+        assert active_item.source_entry_sequence is not None
+        snapshot_carrier = build_compaction_snapshot_carrier(
+            summary=freeze_compaction_summary_output(
+                "summary of old history", maximum_utf8_bytes=100
+            ),
+            recent_user_messages=(),
+            continuation_mode=CompactionContinuationMode.RESUME_ACTIVE_TURN,
+            active_request=FrozenCompactionActiveRequest(
+                entry_id=str(active_item.source_entry_id),
+                entry_sequence=active_item.source_entry_sequence,
+                location=CompactionActiveRequestLocation.CANONICAL_SUFFIX,
+                text=None,
+            ),
+        )
         adoption = build_prepared_compaction_canonical_adoption(
             CompactionCanonicalAdoptionFactoryInput(
                 scope=scope,
@@ -765,9 +792,7 @@ def test_mid_turn_snapshot_revision_keeps_current_user_as_exact_delta(
                     compaction_read.lineage_base,
                     source_range,
                 ),
-                snapshot_content=InlineContent.from_bytes(
-                    b"summary of old history"
-                ),
+                snapshot_content=InlineContent.from_bytes(snapshot_carrier.body),
                 compiler_contract="compiler.v1",
                 prompt_contract="prompt.v1",
                 model_contract="model.v1",
@@ -802,7 +827,7 @@ def test_mid_turn_snapshot_revision_keeps_current_user_as_exact_delta(
         ProviderInputItemKind.CONTEXT_SNAPSHOT,
         ProviderInputItemKind.USER,
     ]
-    assert materialized.items[0].text == "summary of old history"
+    assert materialized.items[0].text == snapshot_carrier.body.decode("utf-8")
     assert materialized.items[1].text == "current question"
 
 

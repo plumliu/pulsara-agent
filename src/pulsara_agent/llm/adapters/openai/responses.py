@@ -307,8 +307,8 @@ def build_responses_payload(
         payload["instructions"] = root
     if planned_tools and provider_profile.supports_tools:
         payload["tools"] = planned_tools
-    if context.tool_choice_none:
-        payload["tool_choice"] = "none"
+    if context.tool_choice is not None:
+        payload["tool_choice"] = context.tool_choice
     payload["max_output_tokens"] = call.target.context_budget.effective_output_tokens
     if options.reasoning_effort is not None:
         payload["reasoning"] = {"effort": options.reasoning_effort}

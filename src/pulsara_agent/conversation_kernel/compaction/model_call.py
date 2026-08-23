@@ -20,7 +20,6 @@ from pulsara_agent.conversation_kernel.compaction.contracts import (
     compaction_summary_message_prefix_fingerprint,
 )
 from pulsara_agent.conversation_kernel.compaction.prompt import (
-    SUMMARY_REQUEST,
     summary_request_fingerprint,
 )
 from pulsara_agent.conversation_kernel.direct_model import DirectKernelModelPort
@@ -39,7 +38,9 @@ from pulsara_agent.model_input.contracts import (
     ContextCompileBudgetReport,
     FrozenCompiledMessagePlacement,
     FrozenCompiledModelInput,
+    FrozenModelInputSemanticProjection,
     ModelInputCompileBinding,
+    ToolResultProviderRenderMode,
     compiled_message_placements_fingerprint,
     frozen_compiled_model_input_fingerprint,
 )
@@ -81,6 +82,7 @@ class PreparedCompactionSummarySemantic:
     prefix_proof: ProviderPrefixCutProof
     compile_binding: ModelInputCompileBinding = field(repr=False)
     native_projection_set: FrozenNativeToolProjectionSet = field(repr=False)
+    summary_request: str = field(repr=False)
     compiled_input: FrozenCompiledModelInput = field(repr=False)
     semantic_fingerprint: str
 
@@ -101,15 +103,12 @@ class PreparedCompactionSummaryCall:
             or wire_input_plan.compiled_semantic_fingerprint
             != compiled.compiled_semantic_fingerprint
             or wire_input_plan.message_placements_fingerprint
-            != compiled_message_placements_fingerprint(
-                compiled.message_placements
-            )
+            != compiled_message_placements_fingerprint(compiled.message_placements)
             or wire_input_plan.resolved_target_semantic_fingerprint
             != call.target.fact.target_fingerprint
             or wire_input_plan.materialization.tool_items
             != tuple(
-                item.wire_tool
-                for item in semantic.native_projection_set.projections
+                item.wire_tool for item in semantic.native_projection_set.projections
             )
         ):
             raise ValueError("prepared summary call does not exact-join")
@@ -127,7 +126,7 @@ class PreparedCompactionSummaryCall:
                 compiled.final_estimate.total_input_tokens
             ),
             provider_wire_input_plan=wire_input_plan,
-            tool_choice_none=True,
+            tool_choice="auto",
         )
         validation = validate_model_context_for_call(call=call, context=context)
         if validation.estimate != compiled.final_estimate:
@@ -141,14 +140,12 @@ class PreparedCompactionSummaryCall:
             "pulsara.prepared-compaction-summary-call.v1",
             {
                 "purpose": ModelCallPurpose.CONTEXT_COMPACTION_SUMMARY.value,
-                "tool_choice": "none",
+                "tool_choice": "auto",
                 "call": call.fact,
                 "source_view": semantic.source_view.source_view_fingerprint,
                 "prefix": semantic.prefix_proof.proof_fingerprint,
                 "semantic": semantic.semantic_fingerprint,
-                "wire": provider_wire_input_plan_identity_fingerprint(
-                    wire_input_plan
-                ),
+                "wire": provider_wire_input_plan_identity_fingerprint(wire_input_plan),
                 "estimate": _estimate_value(compiled.final_estimate),
             },
         )
@@ -200,7 +197,10 @@ class PreparedCompactionSummaryCall:
                 assembler.apply(item)
             if terminal is None:
                 raise RuntimeError("summary stream lacks an explicit terminal")
-            if terminal.terminal_kind is ProviderNormalizedTerminalKind.OUTPUT_INCOMPLETE:
+            if (
+                terminal.terminal_kind
+                is ProviderNormalizedTerminalKind.OUTPUT_INCOMPLETE
+            ):
                 assert terminal.incomplete_reason is not None
                 raise ProviderModelOutputIncomplete(terminal.incomplete_reason)
             if terminal.terminal_kind is ProviderNormalizedTerminalKind.PROVIDER_ERROR:
@@ -213,9 +213,9 @@ class PreparedCompactionSummaryCall:
                 LLMToolCall(
                     id=item.tool_call_id,
                     name=item.tool_name,
-                    arguments=canonical_json_bytes(
-                        thaw_json(item.arguments)
-                    ).decode("utf-8"),
+                    arguments=canonical_json_bytes(thaw_json(item.arguments)).decode(
+                        "utf-8"
+                    ),
                 )
                 for item in completed.blocks
                 if isinstance(item, CompletedToolCallBlock)
@@ -261,40 +261,45 @@ def prepare_compaction_summary_semantic(
     *,
     call: ResolvedModelCall,
     source_view: FrozenCompactionSourceView,
-    source_compiled_input: FrozenCompiledModelInput,
+    source_projection: FrozenModelInputSemanticProjection,
     prefix_proof: ProviderPrefixCutProof,
     native_projection_set: FrozenNativeToolProjectionSet,
+    summary_request: str,
 ) -> PreparedCompactionSummarySemantic:
     if (
         call.fact.purpose is not ModelCallPurpose.CONTEXT_COMPACTION_SUMMARY
         or call.target.fact != source_view.normal_compile_binding.target_fact
-        or source_compiled_input.system_prompt
-        != source_view.materialized_system_prompt()
-        or source_compiled_input.messages != source_view.materialized_messages()
-        or source_compiled_input.tools
+        or source_projection.system_prompt != source_view.materialized_system_prompt()
+        or source_projection.messages != source_view.materialized_messages()
+        or source_projection.tools
         != source_view.normal_compile_binding.tool_surface.tool_specs
-        or prefix_proof.source_view_fingerprint
-        != source_view.source_view_fingerprint
+        or source_projection.compile_binding_fingerprint
+        != source_view.normal_compile_binding.binding_fingerprint
+        or prefix_proof.source_view_fingerprint != source_view.source_view_fingerprint
     ):
         raise ValueError("summary semantic inputs do not exact-join")
     count = prefix_proof.summary_prefix_message_count
-    prefix = source_compiled_input.messages[:count]
-    if compaction_summary_message_prefix_fingerprint(
-        prefix
-    ) != prefix_proof.summary_prefix_messages_fingerprint:
+    prefix = source_projection.messages[:count]
+    if (
+        compaction_summary_message_prefix_fingerprint(prefix)
+        != prefix_proof.summary_prefix_messages_fingerprint
+    ):
         raise ValueError("summary prefix proof changed")
-    messages = prefix + (LLMMessage.user(SUMMARY_REQUEST),)
-    placements = source_compiled_input.message_placements[:count] + (
+    if not summary_request:
+        raise ValueError("summary request is empty")
+    messages = prefix + (LLMMessage.user(summary_request),)
+    placements = source_projection.message_placements[:count] + (
         _synthetic_summary_placement(
             message_ordinal=count,
             proof=prefix_proof,
+            summary_request=summary_request,
         ),
     )
     binding = source_view.normal_compile_binding
     estimate = binding.estimator.estimate_frozen_input(
-        system_prompt=source_compiled_input.system_prompt,
+        system_prompt=source_projection.system_prompt,
         messages=messages,
-        tools=source_compiled_input.tools,
+        tools=source_projection.tools,
     )
     if estimate.total_input_tokens > binding.effective_input_budget_tokens:
         raise ValueError("summary slice exceeds the resolved input budget")
@@ -312,33 +317,34 @@ def prepare_compaction_summary_semantic(
         tool_tokens=estimate.tool_tokens,
         envelope_tokens=estimate.envelope_tokens,
         total_input_tokens=estimate.total_input_tokens,
-        protected_transcript_tokens=sum(
-            estimate.message_tokens_by_index[:count]
-        ),
+        protected_transcript_tokens=sum(estimate.message_tokens_by_index[:count]),
         protected_prefix_message_count=count,
         protected_prefix_logical_utf8_bytes=prefix_bytes,
-        protected_prefix_fingerprint=(
-            prefix_proof.summary_prefix_messages_fingerprint
+        protected_prefix_fingerprint=(prefix_proof.summary_prefix_messages_fingerprint),
+        context_source_tokens=sum(
+            item.estimated_tokens for item in source_projection.source_decisions
         ),
-        context_source_tokens=source_compiled_input.budget_report.context_source_tokens,
-        degraded_source_count=(
-            source_compiled_input.budget_report.degraded_source_count
+        degraded_source_count=sum(
+            item.included and item.reason_code != "SELECTED_FULL"
+            for item in source_projection.source_decisions
         ),
-        omitted_source_count=(
-            source_compiled_input.budget_report.omitted_source_count
+        omitted_source_count=sum(
+            not item.included for item in source_projection.source_decisions
         ),
-        degraded_tool_result_count=(
-            source_compiled_input.budget_report.degraded_tool_result_count
+        degraded_tool_result_count=sum(
+            item.selected_mode is not item.first_legal_mode
+            for item in source_projection.tool_result_decisions
         ),
-        omitted_tool_result_body_count=(
-            source_compiled_input.budget_report.omitted_tool_result_body_count
+        omitted_tool_result_body_count=sum(
+            item.selected_mode is ToolResultProviderRenderMode.OMITTED_BODY
+            for item in source_projection.tool_result_decisions
         ),
         decision_digest=context_fingerprint(
             "pulsara.compaction-summary-compile-decisions.v1",
             {
-                "source": source_compiled_input.compiled_semantic_fingerprint,
+                "source": source_view.source_view_fingerprint,
                 "prefix": prefix_proof.proof_fingerprint,
-                "prompt": summary_request_fingerprint(),
+                "prompt": summary_request_fingerprint(summary_request),
             },
         ),
     )
@@ -352,18 +358,18 @@ def prepare_compaction_summary_semantic(
     )
     values = {
         "context_id": context_id,
-        "canonical_input_identity": source_compiled_input.canonical_input_identity,
-        "system_prompt": source_compiled_input.system_prompt,
+        "canonical_input_identity": source_projection.canonical_input_identity,
+        "system_prompt": source_projection.system_prompt,
         "messages": messages,
         "message_placements": placements,
-        "tools": source_compiled_input.tools,
+        "tools": source_projection.tools,
         "final_estimate": estimate,
-        "source_decisions": source_compiled_input.source_decisions,
-        "tool_result_decisions": source_compiled_input.tool_result_decisions,
+        "source_decisions": source_projection.source_decisions,
+        "tool_result_decisions": source_projection.tool_result_decisions,
         "budget_report": report,
-        "diagnostic_codes": source_compiled_input.diagnostic_codes,
+        "diagnostic_codes": source_projection.diagnostic_codes,
         "source_collection_fingerprint": (
-            source_compiled_input.source_collection_fingerprint
+            source_projection.source_collection_fingerprint
         ),
         "compile_binding_fingerprint": binding.binding_fingerprint,
     }
@@ -384,6 +390,7 @@ def prepare_compaction_summary_semantic(
             "source": source_view.source_view_fingerprint,
             "prefix": prefix_proof.proof_fingerprint,
             "native": native_projection_set.projection_set_fingerprint,
+            "prompt": summary_request_fingerprint(summary_request),
             "compiled": compiled.compiled_semantic_fingerprint,
         },
     )
@@ -393,6 +400,7 @@ def prepare_compaction_summary_semantic(
         prefix_proof=prefix_proof,
         compile_binding=binding,
         native_projection_set=native_projection_set,
+        summary_request=summary_request,
         compiled_input=compiled,
         semantic_fingerprint=semantic_fingerprint,
     )
@@ -432,8 +440,12 @@ def finalize_compaction_summary_call(
 
 
 _SUMMARY_TOOL_DENIAL = (
-    "Context compaction cannot execute tools. Return the requested "
-    "<summary> block directly without any tool calls."
+    "The requested tool was not executed and returned no information. Do not "
+    "retry it or call any other tool. For this response, the current checkpoint "
+    "request supersedes earlier requests to perform task work. Return the requested "
+    "semantic handoff now as plain text and preserve the actual task status. The "
+    "fact that this summary-only call did not execute a tool is not evidence that "
+    "the user's task is queued, deferred, blocked, or waiting for a later turn."
 )
 
 
@@ -458,10 +470,7 @@ def prepare_compaction_summary_repair_semantic(
     placements = list(compiled.message_placements)
     tool_calls_fingerprint = context_fingerprint(
         "pulsara.compaction-summary-repair-tool-calls.v1",
-        tuple(
-            (item.id, item.name, item.arguments)
-            for item in tool_calls
-        ),
+        tuple((item.id, item.name, item.arguments) for item in tool_calls),
     )
     for message in suffix:
         ordinal = len(placements)
@@ -548,6 +557,7 @@ def prepare_compaction_summary_repair_semantic(
         prefix_proof=initial.prefix_proof,
         compile_binding=initial.compile_binding,
         native_projection_set=initial.native_projection_set,
+        summary_request=initial.summary_request,
         compiled_input=repaired,
         semantic_fingerprint=semantic_fingerprint,
     )
@@ -580,14 +590,15 @@ def _synthetic_summary_placement(
     *,
     message_ordinal: int,
     proof: ProviderPrefixCutProof,
+    summary_request: str,
 ) -> FrozenCompiledMessagePlacement:
     return _ephemeral_summary_placement(
         message_ordinal=message_ordinal,
         role=MessageRole.USER,
         domain="request",
         identity={
-            "prompt": summary_request_fingerprint(),
-            "text": SUMMARY_REQUEST,
+            "prompt": summary_request_fingerprint(summary_request),
+            "text": summary_request,
             "prefix": proof.proof_fingerprint,
         },
     )

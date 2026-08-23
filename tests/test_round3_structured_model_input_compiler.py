@@ -78,6 +78,15 @@ from pulsara_agent.conversation_kernel.memory.contracts import (
 from pulsara_agent.conversation_kernel.execution_watchdogs import (
     KernelWatchdogOwner,
 )
+from pulsara_agent.conversation_kernel.compaction.planner import (
+    freeze_tail_and_prefix,
+)
+from pulsara_agent.conversation_kernel.compaction.contracts import (
+    CompactionTargetBranch,
+)
+from pulsara_agent.conversation_kernel.compaction.prompt import (
+    compaction_summary_request,
+)
 from pulsara_agent.conversation_kernel.io import KernelSessionIO
 from pulsara_agent.conversation_kernel.extensions import OperationalHookType
 from pulsara_agent.conversation_kernel.repository import AssistantToolCallBlock
@@ -2441,6 +2450,116 @@ def test_round3_compiler_deadline_physically_exits_before_io_close() -> None:
         await io_owner.aclose(deadline_monotonic=monotonic() + 0.2)
 
     asyncio.run(exercise())
+
+
+def test_round3_1_overbudget_append_can_be_projected_without_execution_authority() -> None:
+    """Compaction can inspect the exact failed append before ordinary compile."""
+
+    compiler = StructuredModelInputCompiler()
+    owner = HostProviderInputContinuityOwner(session_id="session:test")
+    first_item = _user("installed prefix", sequence=1)
+    first_request = _prepared_request(
+        _snapshot(first_item),
+        _sources(),
+        budget=800,
+    )
+    _first, installed = _compile_and_install_append(
+        compiler=compiler,
+        owner=owner,
+        request=first_request,
+    )
+
+    jumped = _user("large canonical jump " * 400, sequence=2)
+    changed_permission = _candidate(
+        ContextSourceKind.RUN_PERMISSION,
+        ("permission=ask", "permission=ask"),
+    )
+    request = replace(
+        _prepared_request(
+            _snapshot(first_item, jumped),
+            _sources(changed_permission),
+            budget=800,
+        ),
+        context_id="context:overbudget-semantic-projection",
+        model_call_index=2,
+    )
+    planning = owner.freeze_planning_input(
+        scope=ProviderInputContinuityScope(
+            session_id="session:test",
+            scope_kind=ModelInputScopeKind.ROOT,
+            scope_subagent_task_id=None,
+        ),
+        canonical_frontier=_append_frontier(request),
+        dispatch_anchor=_append_anchor(request),
+    )
+    compatibility = _append_compatibility(request)
+
+    with pytest.raises(StructuredModelInputCompileError) as failure:
+        compiler.compile_append(
+            request,
+            planning=planning,
+            compatibility=compatibility,
+        )
+    assert failure.value.kind is (
+        ModelInputCompileFailureKind.STATEFUL_SOURCE_REPLACEMENT_OVER_BUDGET
+    )
+
+    projection = compiler.project_append(
+        request,
+        planning=planning,
+        compatibility=compatibility,
+    )
+    projected = projection.projected_input
+    assert projected.final_estimate.total_input_tokens > 800
+    assert projected.system_prompt == installed.system_prompt
+    assert projected.tools == installed.tools
+    assert projected.messages[: len(installed.messages)] == installed.messages
+    assert projection.appended_message_count == (
+        len(projected.messages) - len(installed.messages)
+    )
+    assert projection.reset_reason is None
+
+    source_fingerprint = context_fingerprint(
+        "test:round5b-overbudget-source-view:v1",
+        request.canonical_input.snapshot_fingerprint,
+    )
+    source_view = SimpleNamespace(
+        source_view_fingerprint=source_fingerprint,
+        materialized_messages=lambda: projected.messages,
+        materialized_system_prompt=lambda: projected.system_prompt,
+        normal_compile_binding=request.compile_binding,
+        canonical_dispatch_read=SimpleNamespace(
+            compile_snapshot=request.canonical_facts
+        ),
+        exact_safe_canonical_head=(
+            request.canonical_input.identity.provider_input_through_sequence
+        ),
+    )
+    summary_request = compaction_summary_request(
+        CompactionTargetBranch.ACTIVE_INSTALLATION
+    )
+    tail, prefix = freeze_tail_and_prefix(
+        source_view=source_view,
+        complete_tool_groups=(),
+        retained_group_count=0,
+        source_projection=projected,
+        summary_request=summary_request,
+        deadline_monotonic=monotonic() + 1,
+    )
+    summary_estimate = request.compile_binding.estimator.estimate_frozen_input(
+        system_prompt=projected.system_prompt,
+        messages=(
+            projected.messages[: prefix.summary_prefix_message_count]
+            + (LLMMessage.user(summary_request),)
+        ),
+        tools=projected.tools,
+    )
+    assert summary_estimate.total_input_tokens <= 800
+    assert 0 < prefix.summary_prefix_message_count < len(projected.messages)
+    assert tail.protected_tail_message_start_index == (
+        prefix.summary_prefix_message_count
+    )
+    assert prefix.source_through_sequence < source_view.exact_safe_canonical_head
 
 
 def test_round3_4096_tool_result_degradation_uses_bounded_heap_work() -> None:

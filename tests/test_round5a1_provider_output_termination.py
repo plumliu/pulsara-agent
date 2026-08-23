@@ -67,6 +67,9 @@ from pulsara_agent.ports.live_agent_event import (
     ThinkingDeltaPayload,
     ThinkingEndPayload,
     ThinkingStartPayload,
+    ToolCallDeltaPayload,
+    ToolCallEndPayload,
+    ToolCallStartPayload,
 )
 from pulsara_agent.ports.provider_stream import (
     ProviderAdapterTerminal,
@@ -953,6 +956,58 @@ def test_chat_tool_terminal_usage_echo_does_not_duplicate_tool_semantics() -> No
     terminal = accumulator.finish()
     assert isinstance(terminal, ProviderAdapterTerminal)
     assert terminal.terminal_kind is ProviderAdapterTerminalKind.COMPLETED
+
+
+def test_chat_empty_tool_arguments_emit_exact_synthetic_json_delta() -> None:
+    accumulator = ChatCompletionAccumulator(
+        builder=ProviderLiveItemBuilder(),
+        provider_profile=ProviderProfile(wire_api="openai_chat_completions"),
+    )
+    events = accumulator.apply(
+        _chat_chunk(
+            {
+                "tool_calls": [
+                    {
+                        "index": 0,
+                        "id": "call:enter-plan",
+                        "type": "function",
+                        "function": {"name": "enter_plan"},
+                    }
+                ]
+            },
+            "tool_calls",
+        )
+    )
+    assert [type(item) for item in events] == [
+        ToolCallStartPayload,
+        ToolCallDeltaPayload,
+        ToolCallEndPayload,
+    ]
+    delta = events[1]
+    end = events[2]
+    assert isinstance(delta, ToolCallDeltaPayload)
+    assert isinstance(end, ToolCallEndPayload)
+    assert delta.delta == "{}"
+    assert end.arguments_json == "{}"
+    adapter_terminal = accumulator.finish()
+    assert isinstance(adapter_terminal, ProviderAdapterTerminal)
+
+    async def stream():
+        for item in events:
+            yield item
+        yield adapter_terminal
+
+    async def exercise() -> tuple[object, ...]:
+        execution = NormalizedProviderTransportExecution(stream())
+        observed: list[object] = []
+        while (item := await execution.read_next()) is not None:
+            observed.append(item)
+        return tuple(observed)
+
+    observed = asyncio.run(exercise())
+    terminal = observed[-1]
+    assert isinstance(terminal, ProviderStreamTerminal)
+    assert terminal.terminal_kind is ProviderNormalizedTerminalKind.COMPLETED
 
 
 @pytest.mark.parametrize(

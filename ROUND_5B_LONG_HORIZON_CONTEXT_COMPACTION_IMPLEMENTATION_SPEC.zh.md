@@ -58,7 +58,8 @@ Round 5B只增加一个合法的**successor boundary**：active compaction明确
 
 | 内容 | 唯一owner |
 |---|---|
-| 早期历史的语义压缩、当前工作与下一步 | 当前主模型的compaction summary |
+| 早期历史的语义压缩、已知工作状态与下一步建议 | 当前主模型的compaction summary（advisory） |
+| active/idle continuation mode、完整handoff instruction与当前active request定位 | Runtime branch + canonical initial entry；随snapshot durable持久化 |
 | 哪段历史被覆盖、哪些tool group继续原样保留 | Runtime planner |
 | 最近真实用户原话 | canonical transcript + Runtime selection |
 | 当前SYSTEM、tools、permission、Plan、MCP、skill、memory与timing | 当前各authority + Round 3 compiler |
@@ -91,9 +92,11 @@ Round 5B只允许三个入口：
 freeze safe point and exact prospective normal-dispatch view
 -> choose protected tail first
 -> derive exact summary prefix and source cut
--> append one synthetic summarization user message
+-> append one branch-specific synthetic summarization user message whose
+   response-local restrictions cannot become task state
 -> call the current primary model with the same SYSTEM and tool definitions
 -> validate one semantic summary
+-> freeze RESUME_ACTIVE_TURN | AWAIT_NEXT_USER and mechanical active request
 -> active: freeze current Runtime facts and standard Round 9 cold capability inputs
    idle: validate bounded snapshot/post-cut base only
 -> active: pass the compaction continuation seed and frozen current authorities
@@ -101,7 +104,8 @@ freeze safe point and exact prospective normal-dispatch view
 -> atomically insert snapshot/revision/event and advance exact binding pointer
 -> close old continuity epoch
 -> exact-read, re-run the same pure assembly and install the new cold epoch
--> continue the same canonical turn, or return from an idle manual compact
+-> active: HANDOFF COMPLETE / RESUME NOW and continue the same canonical turn
+   idle: durably AWAIT NEXT USER without opening a provider call
 ~~~
 
 任何summary、planning、active dry assembly或idle base validation失败都保留旧binding与旧epoch。只有active canonical adoption FULL之后，Runtime才允许successor epoch成为当前model-input authority；idle FULL只使snapshot成为下一turn的canonical cold base。
@@ -208,7 +212,7 @@ Codex当前另有一个可借鉴但与replacement history正交的普通工具�
 
 本地grok-build当前证明了两条很有价值的路径：
 
-- summary call在旧history后追加一个synthetic user message，并保持原SYSTEM与tool definitions；支持时使用tool_choice none，以复用大段prefix cache；
+- summary call在旧history后追加一个synthetic user message，并保持原SYSTEM与tool definitions；wire固定显式使用`tool_choice=auto`以兼容只支持AUTO的OpenAI-compatible provider，工具绝对不可执行由独立summary call缺少executor/dispatch authority保证，而不是由provider参数充当安全边界；
 - compacted history由Runtime重新注入project instructions、last real user query、summary与当前active state，而不是要求summary模型记住所有动态事实。
 
 本文吸收这两个原则，但不照搬其所有具体行为：
@@ -525,7 +529,9 @@ ResolvedCompactionPolicy
 自动判断分两阶段，避免为了判断是否接近reader hard bound而先越过该bound：
 
 1. one-cut reader先执行bounded、index-backed headroom preflight，只返回current effective materialization floor之后的item count与canonical bytes；continuity owner提供当前epoch logical bytes；
-2. 若resource headroom尚未触发，再读取或构造`FrozenCompactionSourceView.provider_projection.final_estimate`，并以`normal_compile_binding.effective_input_budget_tokens`判断token ratio。
+2. 在任何普通、可执行`FrozenCompiledModelInput` compile之前，读取或构造`FrozenCompactionSourceView.provider_projection.final_estimate`，并以`normal_compile_binding.effective_input_budget_tokens`判断token ratio；resource headroom已经触发时仍需该projection作为summary boundary真值，未触发时也不能用canonical UTF-8 bytes粗略替代exact token判断。
+
+该pre-compile projection是只读、不可执行的closed结果：它可以诚实报告`STATEFUL_SOURCE_REPLACEMENT_OVER_BUDGET`等普通compile无法表达的完整prospective view，但不得创建continuity candidate、physical tool borrow或provider-open authority。exact projection低于trigger时，同一个frozen cut、target与headroom admission可继续普通compile；projection失败则丢弃该admission并按automatic compaction既有fail-open语义重新走普通路径。只有exact trigger成立时才进入既有compaction owner/fence；不得先让普通compile抛出over-budget，再把该异常当作provider reactive compaction retry。
 
 最近一次完整FrozenCompiledModelInput只有在canonical frontier、binding、target、tool surface与全部source fingerprints都与本次source view exact相等时才可复用：
 
@@ -617,6 +623,8 @@ Runtime不得为了命中target按字符截断summary、用户原话、tool call
 | MID_TURN_FOLLOWUP | 一个完整tool batch接受后、follow-up provider planning前 | 继续same turn follow-up |
 
 manual command可以force低于threshold的compact，但仍必须有可压缩prefix和正reclaim。没有可压缩内容返回typed NOT_NEEDED，不写snapshot/event。
+
+continuation语义按adoption branch而不是按trigger名称决定：mid-turn compact、active manual compact以及“新user message已canonical accepted、随后在ordinary compile前触发”的auto compact都属于`ACTIVE_INSTALLATION / RESUME_ACTIVE_TURN`，当前accepted request必须在adoption后立即驱动successor。真正idle的manual compact属于`IDLE_BASE_ONLY / AWAIT_NEXT_USER`；它不凭snapshot自行open，未来新user message才是驱动。这样“manual compact后是否已有下一条消息”的差异由既有turn owner闭合，不从summary prose推断。
 
 ### 5.2 Provider safe point
 
@@ -915,7 +923,7 @@ ProviderPrefixCutProof
 
 `source_view_compatibility`、lineage base、prior epoch nonce/revision/prefix均由`source_view_fingerprint`所commit的source view拥有，不在proof中复制。`ProtectedTailSelectionFact`唯一拥有earliest assistant/tool-call anchors；proof只引用其fingerprint并重复保存最终`source_through_sequence`这一必要cut coordinate。factory必须验证该coordinate等于selection fact中的值，调用者不能分别提供两个值。
 
-有retained group时，Runtime以`ProtectedTailSelectionFact`的ordered tool_call_ids在source view的ordered messages中定位唯一preceding assistant tool-call message，summary prefix在该message之前结束。无group时，summary prefix就是source view messages全量。找不到唯一match、canonical attribution漂移、safe head未被覆盖或fingerprint不符均fail closed。
+有retained group时，Runtime以`ProtectedTailSelectionFact`的ordered tool_call_ids在source view的ordered messages中定位唯一preceding assistant tool-call message，summary prefix在该message之前结束。无group且whole source view可连同synthetic summary request满足真实input budget时，summary prefix是source view messages全量；whole view已超预算时，planner从同一个frozen projection中选择能满足真实estimator/budget的最长非空、provider-valid canonical prefix，剩余exact canonical suffix成为protected tail。该boundary不得拆开同一canonical origin、assistant tool request/result group，不能在tool result开头，也不能让`source_through_sequence`覆盖summary实际没看到且tail又未保留的row。找不到这种唯一安全prefix、canonical attribution漂移、safe head未被覆盖或fingerprint不符均fail closed。
 
 当compatibility=COMPATIBLE_APPEND时，proof先证明summary semantic prefix与prior installed epoch的重叠部分逐项、逐字相等；随后summary wire-plan factory还必须证明对应actual native wire materialization与`predecessor_epoch_view.wire_input_plan`重叠prefix逐项、逐字相等。source boundary只能覆盖summary prefix实际含有的canonical rows；任何已在safe head内但不在summary prefix、也不在post-cut exact tail中的row都会使planning失败。
 
@@ -925,7 +933,7 @@ summary model只看到FrozenCompactionSourceView所选prefix经Round 5A.2 native
 
 ---
 
-## 7. Runtime保留的最近真实用户原话
+## 7. Runtime保留的最近原话与机械active request
 
 ### 7.1 选择规则
 
@@ -938,6 +946,7 @@ Runtime从exact scope、sequence <= source boundary的canonical rows中选择最
 - 选择满足64 KiB aggregate的longest whole-message suffix；
 - 最新一条本身超过64 KiB时，本carrier不保留任何更老quote，由summary承担语义；
 - sequence > boundary的真实human input已经在canonical tail中，不复制进snapshot。
+- `ACTIVE_INSTALLATION`中，`CanonicalModelInputIdentity.initial_entry_id`指向的当前turn request不进入`recent_user_messages`；它由§7.3的closed active-request projection唯一表达。
 
 明确排除：
 
@@ -952,11 +961,26 @@ Runtime从exact scope、sequence <= source boundary的canonical rows中选择最
 
 semantic summary已经负责完整长期意图。最近3条原话只用于降低summarizer措辞漂移，尤其帮助模型恢复用户最新约束、纠正和当前问题。ALL user messages会让长session无法真正缩短，也会把已被后续用户修正的早期要求重新放大。
 
-本轮不再发明一个单独的“current run prompt”字段。每条真实human input只落入以下一个位置：位于source boundary之后则作为canonical tail原样保留；位于boundary之前且入选最近3条则进入snapshot recent_user_messages；更早者只由semantic summary承接。不得把同一条原话同时放进snapshot与tail。
+除当前active request外，每条真实human input只落入以下一个位置：位于source boundary之后则作为canonical tail原样保留；位于boundary之前且入选最近3条则进入snapshot `recent_user_messages`；更早者只由semantic summary承接。不得把同一条原话同时放进snapshot与tail。
 
-### 7.3 Provider carrier不暴露内部identity
+### 7.3 Active request是Runtime机械projection，不由summary猜测
 
-snapshot carrier只呈现文本和相对顺序，不呈现entry ID、sequence、digest、turn ID或contract version。process-local `CompactionSettlementResources`仍冻结这些identity以验证正文来自exact cut；canonical candidate只保存最终content/source row drafts。
+`ACTIVE_INSTALLATION`必须从当前canonical input的`initial_entry_id`机械找到驱动该turn的exact ROOT `HUMAN_MESSAGE`、child `SUBAGENT_OBJECTIVE`，或既有产品允许的新turn非human activation（`SUBAGENT_RESULT | PLAN_CONTINUATION | TERMINAL_OBSERVATION`），形成closed projection。对普通用户turn，这就是用户当前active request；对非human turn，它是同一mechanical active activation，不能因此让该路径失去compaction可用性：
+
+~~~text
+FrozenCompactionActiveRequest
+    entry_id
+    entry_sequence
+    location = SNAPSHOT_EXACT | CANONICAL_SUFFIX
+    text = exact UTF-8 | null
+~~~
+
+- 若`entry_sequence <= source boundary`，`location=SNAPSHOT_EXACT`，exact正文进入snapshot并从`recent_user_messages`排除；该正文服从既有单prompt admission bound和snapshot physical bound，不新增active-request cap。
+- 若`entry_sequence > source boundary`，`location=CANONICAL_SUFFIX`且`text=null`；exact正文仍只作为post-snapshot canonical user message出现，snapshot不复制它。
+- 重复active compaction中，若initial entry已位于predecessor snapshot floor以下，Runtime必须从旧snapshot的validated `SNAPSHOT_EXACT` projection继承同一entry ID、sequence与exact正文；不得让summary重新命名active objective，也不得从prose猜测。
+- `IDLE_BASE_ONLY`没有active request，projection固定为null。
+
+entry ID与sequence在这里是有消费者的durable join/location coordinate：successor据此区分“exact正文已在snapshot”与“exact正文仍在canonical suffix”，重复compaction据此carry forward。carrier仍不暴露digest、turn ID、contract version、scope proof或fingerprint，也不新增identity registry。
 
 ---
 
@@ -1015,7 +1039,7 @@ exact summary slice已经低于真实budget后，factory才构造一份不安装
 
 active且有predecessor epoch时，wire-plan factory必须证明其重叠materialization与`predecessor_epoch_view.wire_input_plan`逐项、逐字相等。idle restart没有predecessor epoch时，从PostgreSQL manifest/body重新构造同一native形状；不得以“没有live epoch”为由退化成generic messages。target不兼容时只允许Round 5A.2定义的显式cold semantic continuation，不允许Chat/Responses互译。
 
-summary target必须调用Round 5A.2同一个closed `ProviderReplayTargetCompatibilityFact` builder。`CONTEXT_COMPACTION_SUMMARY` purpose、synthetic request、`tool_choice=none`、无physical executor以及summary output cap都不进入replay target fingerprint；因此普通`AGENT_MODEL_LOOP`产生的same endpoint/model/semantic transport binding/codec/replay contract carrier可以合法用于summary。API、endpoint、normalized model、semantic transport binding、codec或provider replay contract变化仍必须使其不兼容；与historical replay无关的完整transport-version变化不得单独撤销carrier。不得为了summary另建“宽松target”或把open-world provider request options重新hash进compatibility。
+summary target必须调用Round 5A.2同一个closed `ProviderReplayTargetCompatibilityFact` builder。`CONTEXT_COMPACTION_SUMMARY` purpose、synthetic request、`tool_choice=auto`、无physical executor以及summary output cap都不进入replay target fingerprint；因此普通`AGENT_MODEL_LOOP`产生的same endpoint/model/semantic transport binding/codec/replay contract carrier可以合法用于summary。API、endpoint、normalized model、semantic transport binding、codec或provider replay contract变化仍必须使其不兼容；与historical replay无关的完整transport-version变化不得单独撤销carrier。不得为了summary另建“宽松target”或把open-world provider request options重新hash进compatibility。
 
 现有`KernelModelPort.prepare_call()`/normal `PreparedKernelModelExecution`不能被含糊复用，因为它们绑定`AGENT_MODEL_LOOP`、continuity install permit和physical tool-surface borrow。本轮冻结一个独立、process-local、one-shot seam：
 
@@ -1033,9 +1057,9 @@ PreparedCompactionSummaryCall
     one-shot open authority
 ~~~
 
-`purpose = CONTEXT_COMPACTION_SUMMARY`与`wire tool_choice = none`是sealed type/constructor行为，不是调用者可传的实例字段。factory直接将这两个固定literal写入request fingerprint的domain/version；adapter只接收prepared call并按该类型编码`tool_choice=none`。调用者既不能传普通purpose，也不能把suppression改成AUTO/REQUIRED。
+`purpose = CONTEXT_COMPACTION_SUMMARY`与`wire tool_choice = auto`是sealed type/constructor行为，不是调用者可传的实例字段。factory直接将这两个固定literal写入request fingerprint的domain/version；adapter只接收prepared call并按该类型显式编码`tool_choice=auto`。调用者既不能传普通purpose，也不能把selection改成NONE/REQUIRED或指定某个tool。
 
-factory必须在任何physical open前完成target identity、selected replay hydration、actual wire materialization、request bytes、final estimate及adapter capability preflight。`open_once()`只消费同一个prepared对象，并且只能发送`actual_wire_input_plan.materialization + sealed tool suppression`；它不能从semantic `LLMContext.messages`重新lower另一份history。
+factory必须在任何physical open前完成target identity、selected replay hydration、actual wire materialization、request bytes、final estimate及adapter capability preflight。`open_once()`只消费同一个prepared对象，并且只能发送`actual_wire_input_plan.materialization + sealed tool selection`；它不能从semantic `LLMContext.messages`重新lower另一份history，也不能取得任何tool dispatch authority。
 
 存在native replay replacement时，`actual_wire_input_plan.provider_replay_hydration_fingerprint`必须等于本次summary slice的Round 5A.2 hydration fingerprint；不存在replacement时二者均不存在。该proof已绑定source manifest cut、exact scope、summary replay target与selected assistant placements，并由final wire-plan fingerprint覆盖；summary call不得再保存第二份fragments或另建summary-specific hydration identity。
 
@@ -1046,7 +1070,7 @@ prepared call可以持有provider transport capability，但绝不能持有或�
 - tool authorization/invocation callback；
 - canonical assistant/tool-result acceptance authority。
 
-Chat Completions与Responses adapter必须依据prepared call的sealed类型，在Round 5A.2 actual materialization之外显式编码各自wire的`tool_choice = none`等价形状，并由constructor/wire golden验证；不能只依赖prompt说“不要调用工具”。未来adapter若无法证明等价wire suppression，必须在closed adapter capability中声明unsupported并拒绝summary open，不能静默退回普通agent loop。
+Chat Completions与Responses adapter必须依据prepared call的sealed类型，在Round 5A.2 actual materialization之外显式编码各自wire的`tool_choice = auto`等价形状，并由constructor/wire golden验证；不能依赖provider默认值，也不能把prompt中的“不要调用工具”当作权限边界。未来adapter若无法显式编码等价AUTO selection，必须在closed adapter capability中声明unsupported并拒绝summary open，不能静默退回普通agent loop。
 
 tool specs在这里是纯描述数据，不要求取得live executor borrow，因为physical dispatch被call-purpose gate绝对禁止。COMPATIBLE_APPEND时它们必须与prior epoch完全相等，包括old epoch的DIRECT MCP与三个固定catalog/meta tools；当前catalog中的NEW MCP绝不能插入summary `tools`。PENDING_NON_COMPACTION_RESET时使用普通dispatch本来已经要求的prospective surface，并明确放弃旧cache承诺，但仍不得因MCP late-ready单独进入该状态。
 
@@ -1068,7 +1092,7 @@ CONTEXT_COMPACTION_SUMMARY
     no physical invoke
 ~~~
 
-Chat Completions与Responses adapter必须显式发送tool_choice none。provider违反该wire约束仍返回tool call时：
+Chat Completions与Responses adapter必须显式发送`tool_choice=auto`。模型选择返回tool call是该wire合同允许的输出，但summary call仍绝对不能执行；收到tool call时：
 
 1. 为同一response的全部tool calls构造provider-valid ephemeral result group；
 2. 每个结果正文固定说明：当前调用正在生成上下文交接，工具不可用，请直接输出summary；
@@ -1083,7 +1107,12 @@ Chat Completions与Responses adapter必须显式发送tool_choice none。provide
 synthetic user message应给出充分、明确的语义交接指导，但不能把建议结构升级为acceptance schema。production prompt必须明确：
 
 ~~~text
-CRITICAL:只返回text，不调用任何tool。你已经拥有生成交接所需的conversation material。
+CRITICAL:只返回text，不调用任何tool。本次checkpoint是temporary summary-only call；只对当前response覆盖更早的inspect/read/search/invoke请求，不得在本response中执行task work。任何tool call都不会执行，也不能取得额外context。
+
+TEMPORAL HANDOFF RULES：
+- 上述no-tool/no-execution约束在summary response结束时终止，不是用户任务的状态；
+- 不得仅因为本次summary不能执行，就把用户请求写成queued、deferred、blocked、waiting for another agent或awaiting a later turn；
+- 必须继承conversation中的真实任务状态；后来的纠正、取消或替换会supersede冲突的旧工作，不能把旧工作重新列为next step。
 
 你正在执行一次CONTEXT CHECKPOINT COMPACTION。为稍后继续同一任务的Agent生成忠实、紧凑但信息充分的语义交接，使它不必重新猜测已经完成的工作、用户意图或当前诊断。
 
@@ -1098,14 +1127,20 @@ CRITICAL:只返回text，不调用任何tool。你已经拥有生成交接所需
 
 Runtime会另行提供最近用户原话、protected tool group和current Runtime facts，因此不要逐条复述消息，不枚举动态catalog，不复制Skill正文，也不声称动态状态在交接后仍current。
 
-内部组织和核对信息，不输出analysis。最终只输出语义交接正文；可自然使用短段落、项目符号或小标题，但没有必需的标题、编号、XML标签或固定格式。不要问候、向用户作答、添加closing text或调用tool。
+ACTIVE_INSTALLATION suffix：target turn仍为RUNNING；summary durable adoption后Runtime会立即打开normal successor call。把真实未完成工作描述为resume-now active objective，不能说因compaction而等待；Runtime会另外机械标出exact active request。
+
+IDLE_BASE_ONLY suffix：target turn已经terminal；本次只生成future user turn的durable base，不创建active request或immediate successor call。只有conversation本身确实留下的工作才可称pending，不能从本次summary restriction推导pending。
+
+内部组织和核对信息，不输出analysis。最终只输出语义交接正文；可自然使用短段落、项目符号或小标题，但没有必需的标题、编号、XML标签或固定格式。不要问候、向用户作答、添加closing text或调用tool。对当前response，checkpoint instruction优先于旧的tool-use instruction。
 ~~~
+
+若AUTO selection产生tool call，唯一ephemeral denial必须明确说明该调用未执行、没有返回信息、不得重试或改调其他tool，并再次要求保持conversation中的真实任务状态；“summary未执行tool”本身不能成为queued/deferred/blocked的证据。该加强只改变prompt contract，不增加repair次数、tool authority或canonical effect。
 
 prompt contract版本独立于BASE_SYSTEM/Compiler contract。修改内容指导、authority说明或tool policy必须升级prompt contract并触发cold compaction attempt；它不进入provider wire正文。
 
 ### 8.5 Previous summary
 
-重复compaction时，old snapshot已经作为old epoch prefix中的CONTEXT_SNAPSHOT被summary model看到。模型应继承仍相关语义，但它不是canonical authority。Runtime不另外查找“最早summary链”，也不把多个旧summary并列注入。
+重复compaction时，old snapshot已经作为old epoch prefix中的CONTEXT_SNAPSHOT被summary model看到。模型应继承仍相关语义，但它不是canonical authority。Runtime不另外查找“最早summary链”，也不把多个旧summary并列注入。若active turn的initial entry已在old snapshot floor以下，Runtime独立解析并验证old closed carrier，只继承其`SNAPSHOT_EXACT` active-request projection；这不是从summary prose恢复任务，也不创建summary history/replay chain。
 
 ---
 
@@ -1128,10 +1163,20 @@ provider whole-response atomicity负责拒绝真正的truncated/incomplete respo
 
 ### 9.2 Snapshot provider DTO
 
-context_snapshots.content使用closed canonical JSON，但不把内部contract、fingerprint、UUID或sequence发送给模型：
+`context_snapshots.content`使用closed canonical JSON，并把跨断电仍然成立的continuation语义与完整Runtime handoff instruction一并持久化：
 
 ~~~json
 {
+  "continuation": {
+    "mode": "RESUME_ACTIVE_TURN | AWAIT_NEXT_USER",
+    "instruction": "HANDOFF COMPLETE / ...",
+    "active_request": {
+      "entry_id": "...",
+      "entry_sequence": 123,
+      "location": "SNAPSHOT_EXACT | CANONICAL_SUFFIX",
+      "text": "exact request or null"
+    }
+  },
   "earlier_context_summary": "...",
   "recent_user_messages": [
     "...",
@@ -1142,14 +1187,17 @@ context_snapshots.content使用closed canonical JSON，但不把内部contract�
 
 规则：
 
-- exact keys固定为earlier_context_summary与recent_user_messages；
+- top-level exact keys固定为`continuation`、`earlier_context_summary`与`recent_user_messages`；`continuation` exact keys固定为`mode`、`instruction`与`active_request`；
+- `RESUME_ACTIVE_TURN`必须携带§7.3的active request；`AWAIT_NEXT_USER`必须令active request为null；
+- `instruction`是Runtime-authored、branch/location-specific完整提示，不来自summary model：active固定以`HANDOFF COMPLETE / RESUME NOW`开头，明确summary-only no-tool约束已经结束并要求immediate successor处理机械active request；同时明确该directive描述snapshot adoption时的target turn，若snapshot后来被newer canonical turn activation/user request继承，newer request会supersede旧resume directive，不能复活旧任务。idle固定以`HANDOFF COMPLETE / AWAIT NEXT USER`开头，明确当前无response due、等待未来canonical user message，且该语义survives process restart；
+- `SNAPSHOT_EXACT`必须携带exact text；`CANONICAL_SUFFIX`必须令text为null，避免同一请求正文在snapshot与tail重复；
 - recent_user_messages可以为[]，数组顺序就是chronological order；
-- 只放完整原文，不增加position、omitted、ID、sequence或digest；
+- recent_user_messages只放完整原文，不增加position、omitted、ID、sequence或digest；active request的entry ID/sequence是唯一有消费者的mechanical location coordinate；
 - summary和user text都作为JSON string编码，不能逸出carrier；
-- provider lowering可以加稳定的简短说明“这是derived continuity handoff，后续current facts优先”，但不得暴露storage contract；
+- provider lowering加稳定的简短说明：这是durable Runtime handoff，应遵循closed continuation mode/instruction，active request由Runtime机械分类，summary为advisory，后续current facts优先；
 - snapshot item仍是runtime-generated user-role observation，不升级为SYSTEM authority。
 
-Round 5B activation必须一次性升级稳定BASE_SYSTEM/lowering contract，告诉模型：CONTEXT_SNAPSHOT是derived advisory handoff；其中recent_user_messages是历史原话，不是新的用户请求；post-cut canonical messages与当前Runtime facts优先。该说明在epoch内不变化，后续每次compaction只追加/替换snapshot base，不把动态summary拼入SYSTEM。升级只在cold Host open生效，不允许运行中的旧epoch热切换BASE_SYSTEM。
+Round 5B activation必须一次性升级稳定BASE_SYSTEM/lowering contract，告诉模型：CONTEXT_SNAPSHOT是durable Runtime-authored handoff；closed continuation与mechanical active request优先于model-written advisory summary；recent user quotations可能纠正/替换更早工作；post-cut canonical messages与当前Runtime facts优先。该说明在epoch内不变化，后续每次compaction只追加/替换snapshot base，不把动态summary拼入SYSTEM。升级只在cold Host open生效，不允许运行中的旧epoch热切换BASE_SYSTEM。
 
 ### 9.3 Canonical snapshot字段语义
 
@@ -1678,7 +1726,7 @@ idle manual compaction必须同时满足：
 - target current binding仍是expected predecessor；
 - transaction只更新该terminal turn的context binding pointer，不改变turn status/final entry。
 
-idle adoption后没有process-local runner continuation。settlement释放summary owner及任何旧scope资源，并以不产生successor permit的`clear_after_idle_adoption(exact scope, old epoch identity)`终结旧continuity：owner原本为EMPTY时是exact no-op；为idle resources绑定的INSTALLED old epoch时关闭并回到EMPTY；safe-point已禁止PREPARED，其他identity为implementation conflict且不得误关foreign scope。下一条same-scope turn按§13继承snapshot并使用当时current catalog普通cold-open。
+idle adoption后没有process-local runner continuation。`AWAIT_NEXT_USER`的完整instruction已经随closed carrier写入现有`context_snapshots.content`；即使用户长时间不再发消息、Host退出或机器断电，下一次Host仍从current binding读取相同语义。settlement释放summary owner及任何旧scope资源，并以不产生successor permit的`clear_after_idle_adoption(exact scope, old epoch identity)`终结旧continuity：owner原本为EMPTY时是exact no-op；为idle resources绑定的INSTALLED old epoch时关闭并回到EMPTY；safe-point已禁止PREPARED，其他identity为implementation conflict且不得误关foreign scope。没有下一条用户消息时provider open仍为0；未来下一条same-scope user turn按§13继承snapshot、由该新消息驱动，并使用当时current catalog普通cold-open。
 
 ### 12.5 FULL | NONE | CONFLICT confirmation
 
@@ -1807,7 +1855,7 @@ Host close：
 - 若已FULL，canonical snapshot可由replacement Host读取；
 - close Terminal/subagent owners按现有顺序执行。
 
-Host takeover不会接管旧Host的process-local summary、prefix proof或deferred user draft。它只读取canonical current binding。
+Host takeover不会接管旧Host的process-local summary、prefix proof或deferred user draft。它只读取canonical current binding；若binding指向idle snapshot，持久化的`AWAIT_NEXT_USER` instruction随snapshot正文恢复，不依赖旧Host内存，也不创建后台resume job。若binding指向active snapshot，持久化的`RESUME_ACTIVE_TURN`与mechanical active request允许replacement Host在既有cold-read路径恢复语义；是否立即open仍由已有turn/run owner决定，snapshot本身不创建provider authority。
 
 ### 14.4 Failure matrix
 
@@ -1821,6 +1869,8 @@ Host takeover不会接管旧Host的process-local summary、prefix proof或deferr
 | summary returns tool call once | none | ephemeral denial + one repair |
 | summary returns tool call twice | none | discard |
 | malformed/truncated/oversized summary | none | discard |
+| summary把response-local restriction写成queued/deferred task state | canonical summary prose仍是advisory | successor遵循durable Runtime handoff：active RESUME NOW；idle AWAIT NEXT USER；不从该措辞推导等待 |
+| active initial request位于summary boundary之后 | snapshot只保存CANONICAL_SUFFIX marker | exact正文只在post-snapshot canonical user message出现一次并立即驱动successor |
 | MCP late-ready/semantic replacement before summary opens | none | old summary tools不变；catalog observation在exact prefix/tail中，successor另行freeze |
 | MCP late-ready/semantic replacement while summary streams、active successor freeze前 | none yet | summary继续old tools；active完成后freeze最新READY_CLEAN exposure并dry assemble；idle不freeze |
 | 新identity在successor access/dry assembly后完成discovery | none yet | supervisor继续拥有current truth；active FULL后按current-minus-frozen差集成为NEW suffix，不改candidate |
@@ -1834,7 +1884,7 @@ Host takeover不会接管旧Host的process-local summary、prefix proof或deferr
 | canonical FULL后active physical identity E1已被same-schema E2替换 | snapshot remains canonical | 按frozen semantic surface exact rebind E2；canonical candidate不变 |
 | canonical FULL后process-local install resources丢失 | snapshot remains canonical | 不伪造FULL resource confirmation；当前/替代Host从binding cold read |
 | active FULL, epoch install fails | snapshot remains canonical | provider open=0；释放borrow且不得遗留permit；same Host可重新cold read，replacement Host也可cold read |
-| idle FULL | snapshot remains canonical | clear old scope continuity；无successor borrow/permit/runner，下一turn cold read |
+| idle FULL / 随后断电 | snapshot remains canonical，含AWAIT_NEXT_USER完整instruction | clear old scope continuity；无successor borrow/permit/runner；replacement Host等待未来user message再cold read |
 | token ratio低但item/post-base bytes/epoch bytes接近hard bound | none before trigger | resource-headroom OR trigger提前compact，不等第4,097项或hard byte rejection |
 | active successor完整current MCP cohort超过native surface bound | none | compaction继续；Builtin保持DIRECT、全部MCP统一META_ONLY，不按old route或完成顺序partial |
 | new Host has no old Terminal state | none | handoff CLEARED invalidates stale summary claim |
@@ -2110,7 +2160,7 @@ Round 5A.2、Round 7.1、Round 9、Round 9.1与Lightweight TODO refinement必须
 - main model exact SYSTEM/semantic-only tools/semantic prefix；
 - 对exact summary slice复用Round 5A.2 selected hydration与`FrozenProviderWireInputPlan`，发送native actual prefix；
 - native replacement、summary actual wire plan与one-shot open exact join同一个cut/scope/target/placement-bound hydration fingerprint；零replacement不构造empty hydration；
-- purpose gate与tool_choice none；
+- purpose gate与显式`tool_choice=auto`；
 - one repair ephemeral denial；
 - prompt guidance与bounded output normalizer；
 - no canonical side effect。
@@ -2229,7 +2279,7 @@ summary actual input == exact FrozenProviderWireInputPlan materialization
 - COMPATIBLE_APPEND时，与prior epoch重叠的SYSTEM/tools/messages逐字相等；
 - actual input只hydrate semantic prefix中selected + replay-compatible assistant bodies；Responses reasoning/message/function_call与Chat closed fields保持native shape；
 - hydration exact绑定session、scope、source manifest cut、summary replay target与selected assistant placements；cross-session/child/cut carrier拒绝；
-- ordinary AGENT call与same endpoint/model/semantic transport binding/codec/replay contract的summary call得到相同replay target fingerprint；purpose与`tool_choice=none`不参与compatibility；
+- ordinary AGENT call与same endpoint/model/semantic transport binding/codec/replay contract的summary call得到相同replay target fingerprint；purpose与`tool_choice=auto`不参与compatibility；
 - cut read、tail trials、selected hydration与wire quote共享一个compaction-planning absolute deadline，hydration transaction不重置预算；
 - summary native replacements iff final wire plan携带本次selected hydration fingerprint；cross-session/scope/cut/tail proof及CAS失败后的hydration不可复用；
 - COMPATIBLE_APPEND actual wire overlap与predecessor epoch wire plan逐项、逐字相等；
@@ -2240,30 +2290,34 @@ summary actual input == exact FrozenProviderWireInputPlan materialization
 - current MCP physical reconnect但semantic schema相同不改变summary prefix；
 - current epoch NEW MCP不进入summary tools；其catalog observation若位于exact summary prefix则保持原位置；
 - `PreparedCompactionSummaryCall`不含continuity candidate/install permit、executor borrow或tool callback，`open_once()`只能消费同一prepared object；
-- `PreparedCompactionSummaryCall` constructor不接受purpose/tool-suppression参数；sealed type恒定编码summary purpose与wire `tool_choice=none`，二者仍进入request fingerprint domain；
+- `PreparedCompactionSummaryCall` constructor不接受purpose/tool-selection参数；sealed type恒定编码summary purpose与wire `tool_choice=auto`，二者仍进入request fingerprint domain；
 - active summary复用upcoming dispatch exact target identity；idle summary独立resolve一次current Host primary target且不创建normal candidate/runner/continuity state；
 - summary不取得executor borrow；
-- tool_choice none进入真实adapter wire；
-- provider tool-call违规只产生ephemeral group，数据库attempt/result/event count不变；
+- `tool_choice=auto`进入真实adapter wire；
+- provider tool call只产生ephemeral group，数据库attempt/result/event count不变；
 - second tool-call repair失败。
 
 ### 20.4 Output/carrier hygiene
 
 - guided free-form plain text、自然段落、bullets与可选小标题均可接受；
+- active/idle summary prompt都明确summary-only限制随response结束；不得把“本次不能执行”写成“用户任务因compaction排队/延期”；
 - BOM/CRLF/Markdown fence与可选summary wrapper normalization；
 - leading analysis stripping；
 - 不存在heading/编号/section validator；
 - incomplete provider response由whole-response terminal contract拒绝；
-- 64 KiB bound；
+- recent-user quote aggregate 64 KiB bound；summary仍只服从共享4 MiB completed-assistant bound，active exact request服从既有prompt/snapshot physical bounds；
 - malicious closing marker/JSON characters；
-- snapshot wire不含contract/fingerprint/generation/UUID/sequence；
-- snapshot wire exact keys只有earlier_context_summary与ordered recent_user_messages；
+- snapshot wire不含contract/fingerprint/generation/UUID；active request只含有消费者的entry ID/sequence/location；
+- snapshot wire exact top-level keys为continuation、earlier_context_summary与ordered recent_user_messages；continuation closed union严格校验；
+- active `SNAPSHOT_EXACT`正文从recent quotes排除；active `CANONICAL_SUFFIX`正文不复制入snapshot且post-cut user message只出现一次；
+- `HANDOFF COMPLETE / RESUME NOW`明确标出active request；`HANDOFF COMPLETE / AWAIT NEXT USER`在idle adoption后持久化；
 - recent user text保持exact UTF-8。
 
 ### 20.5 PostgreSQL adoption
 
 - active same-turn source cut可晚于initial entry；
 - idle latest completed turn manual adoption；
+- idle adoption后创建fresh repository/Host owner模拟断电重启；没有user message时provider open=0，未来user message到达时从durable AWAIT_NEXT_USER snapshot cold-open且正文只出现一次；
 - active FULL只消费一次successor install authority；idle FULL不调用continuity install、不产生permit且清除旧scope continuity；
 - canonical candidate row drafts不含source view/prefix proof/MCP/epoch/execution/dry-assembly identity；ACK FULL在丢弃全部process-local resources后仍可仅凭rows/event确认；
 - sealed canonical factory只接收一次source materialization identity，并派生snapshot/binding row mirrors、next ordinal、turn pointer expected value和event type/subject/payload；无法传入互相矛盾的duplicate values；
@@ -2385,7 +2439,7 @@ Round 9必须已经独立证明cold DIRECT、late NEW、inspect/use、disconnect
 4. successor以`EmptyCapabilityEpochPredecessor`重新规划；完整current eligible MCP cohort fit时全部进入DIRECT；
 5. successor直接调用其中一个此前META_ONLY的tool exact一次，old-epoch `NewMcpToolRef` typed stale；
 6. 另以over-bound cohort证明compaction仍成功、Builtin保持DIRECT、全部MCP（包括old epoch曾为DIRECT者）统一META_ONLY且没有partial winner；重新inspect后可通过meta调用；
-7. 全程不记录MCP private config、headers、requestState、完整schema参数或result正文。
+7. activation dogfood trace必须保存真实user prompt、最终模型正文、ordered normalized text/thinking/tool-call blocks、实际tool arguments/results、每次compaction trigger/disposition，以及summary `INITIAL | REPAIR`物理调用全序；不额外抓取MCP private config、transport headers、requestState或整份process environment。
 
 ### 21.2 Mid-turn long task
 
@@ -2418,7 +2472,7 @@ Round 9必须已经独立证明cold DIRECT、late NEW、inspect/use、disconnect
 7. 不改变manifest时执行第二次mid-turn compaction，证明可从immediate predecessor installed retained observation继续携带正文，而不回扫source floor以下的原始read；
 8. 下一真实ROOT user message不继承model-driven retained body。
 
-证据只能记录：模型/adapter类型、trigger、source/target estimates、selected group count、summary bytes、snapshot/revision fingerprints、tool call count、test sentinel与cache token aggregate。不得记录API key、DSN、完整prompt、user正文、summary正文、tool output、artifact正文、env或private paths。
+证据必须足以重放诊断判断：除既有aggregate外，保存每次真实user prompt与最终模型正文、normalized provider blocks、tool arguments/results、每次compaction trigger/disposition及`INITIAL | REPAIR`完整顺序。该trace是显式activation/dogfood evidence，不是production operational log、conversation recovery authority或durable execution history；它不创建receipt/replay/retry机制。只对`PULSARA_API_KEY`的exact value做精确scrub，不广泛遮蔽summary、ToolResult、schema、临时workspace path或其他诊断正文；不得持久化整份environment、transport headers或requestState。
 
 ---
 
@@ -2443,7 +2497,7 @@ Round 9必须已经独立证明cold DIRECT、late NEW、inspect/use、disconnect
 15. compaction期间user input成为steer或summary source；
 16. current-source drift后仍使用旧dry assembly，或Capability owner变化原地改写已冻结successor dispatch/views/Tool-plan/source-candidate facts；
 17. repeated compaction并列注入多个summary；
-18. summary/raw provider output写入operational log；
+18. summary/raw provider output写入production operational log或durable runtime history；§21显式activation dogfood trace不属于该禁令；
 19. compaction定义任何ToolResult threshold、variant、artifact renderer、artifact inventory或第二个40,000-byte constant，而不是只消费Round 7.1 normal projection；
 20. Round 5B重新实现Round 9 normal MCP catalog/list/inspect/use/unavailable/schema-replacement逻辑，或重新实现Round 9.1 Skill discovery/ordinary read；
 21. compaction summary使用successor selected tools而不是old epoch exact tools；
@@ -2473,6 +2527,7 @@ Round 9必须已经独立证明cold DIRECT、late NEW、inspect/use、disconnect
 45. normal cold-open、compaction或subagent拥有第二个cold prompt/input builder，绕过`KernelColdEpochInputAssembler`，或assembler读取repository/Host/current owner、取得physical borrow/install authority、执行provider open/CAS。
 46. shared assembler引入独立placement policy、aggregate compatibility fingerprint、`ColdEpochState`、generation、relation、event、receipt、job、checkpoint或recovery owner。
 47. compaction从current filesystem重新生成same-activation `ACTIVE_SKILL` body、把current catalog与active body混为一个source candidate，或仅凭`FrozenSkillProjectionInput`在没有owner discovery的情况下验证retained Skill。
+48. Runner先执行普通可执行compile并因over-budget中断，之后才尝试compaction；或用UTF-8 bytes/上一次installed estimate替代same-cut完整semantic projection，导致一次合法canonical jump越过普通compile budget而没有pre-compile successor机会。
 
 ---
 
@@ -2507,7 +2562,7 @@ PULSARA_POSTGRES_DSN=postgresql://pulsara:pulsara@localhost:5432/pulsara
 
 该本地`pulsara`数据库不是需要保留业务数据的环境；coding agent可为Round 5B的clean-v0 fresh install、second migrate、deep verify、PostgreSQL竞态测试和old-universe rejection随时执行完整reset，不必为每次reset再次请求用户确认。但“允许随时reset”只授权上述exact local database：执行任何破坏性操作前仍必须解析最终DSN、证明host为`localhost`或loopback且database name精确等于`pulsara`，并拒绝空database、template database、通配目标、远端host或由未解析变量拼出的目标。不得把该授权泛化到其他DSN、其他数据库或生产环境。
 
-测试日志、activation evidence与dogfood记录不得写入DSN正文、credential或连接环境值；只允许记录经过脱敏的local-resettable database classification及验证结果。
+测试日志、activation evidence与dogfood记录必须精确scrub `PULSARA_API_KEY`的value，且不得dump整份process environment。其他诊断正文不做泛化脱敏；当前probe无需保存连接环境值，并继续记录local-resettable database classification与验证结果。
 
 ---
 
@@ -2525,7 +2580,8 @@ Round 5B只有在以下全部成立时才能标记ACTIVATED：
 - provider context-error不会reactive compact；
 - summary使用当前主模型与exact FrozenCompactionSourceView；COMPATIBLE_APPEND时prior SYSTEM/tools/messages重叠prefix逐字不变；
 - source view覆盖safe canonical head且不注册/推进normal continuity candidate；
-- summary通过独立`PreparedCompactionSummaryCall`复用Round 5A.2 cut/scope/target/placement-bound selected hydration与`FrozenProviderWireInputPlan`发送旧exact native prefix和semantic tool specs；same endpoint/model/semantic transport binding/codec/replay contract下purpose与wire tool_choice=none不改变replay target fingerprint；summary没有continuity permit、executor borrow或tool callback，`materialized_messages()`不能被直接发送，physical tools绝对不可执行；
+- summary通过独立`PreparedCompactionSummaryCall`复用Round 5A.2 cut/scope/target/placement-bound selected hydration与`FrozenProviderWireInputPlan`发送旧exact native prefix和semantic tool specs，并显式发送`tool_choice=auto`；same endpoint/model/semantic transport binding/codec/replay contract下purpose与该wire selection不改变replay target fingerprint；summary没有continuity permit、executor borrow或tool callback，`materialized_messages()`不能被直接发送，physical tools绝对不可执行；
+- active/idle summary prompt明确response-local no-tool restriction不会变成任务状态；closed snapshot carrier持久化`RESUME_ACTIVE_TURN | AWAIT_NEXT_USER`、完整Runtime handoff instruction与机械active-request location，active successor立即resume，idle断电重启后仍等待未来真实user message；
 - active summary exact复用dispatch target；idle summary由同一purpose-neutral resolver独立冻结current Host primary target，不制造normal dispatch state；
 - summary只负责语义，Runtime重建current state；
 - protected tail最多3个complete tool groups且pairing-safe；
@@ -2573,4 +2629,4 @@ Coding agent最终汇报必须分开说明：
 
 最终用户可感知行为应是：
 
-> 长程任务接近token或local materialization边界时，Agent先在原prefix与原生工具面上生成一份语义交接；Runtime随后以该交接、最近真实用户原话、最多三个完整工具组、同run中真正FULL交付且仍未变化的少量Skill正文、当前精确Runtime状态，以及按Round 9/9.1标准EMPTY cold规则重新冻结的Capability surface与catalog heads建立新context epoch，并在同一任务中继续。完整MCP cohort可容纳时全部DIRECT；over-bound时全部继续走既有meta route，不引入保留old DIRECT的compaction私有规则。current Skill catalog反映当前filesystem，而same-activation active Skill正文保持old installed snapshot。ordinary cold-open、这次rebase与Round 10 child first-open共享唯一pure cold-epoch assembler。idle compaction只保存下一turn将冷读的base，不制造无人消费的epoch permit。历史仍完整保存在canonical transcript中；compaction不会调用工具、不会抽取memory、不会重新定义普通ToolResult或MCP/Skill语义、不会因provider错误偷偷重试，也不会让模型面对一份artifact/ID清单自行猜测该恢复什么。
+> 长程任务接近token或local materialization边界时，Agent先在原prefix与原生工具面上生成一份语义交接；summary-only的no-tool限制只属于该response，不能被写成用户任务因compaction排队或延期。Runtime随后持久化closed `RESUME_ACTIVE_TURN | AWAIT_NEXT_USER`、完整`HANDOFF COMPLETE` instruction与机械active-request location，并以该交接、最近真实用户原话、最多三个完整工具组、同run中真正FULL交付且仍未变化的少量Skill正文、当前精确Runtime状态，以及按Round 9/9.1标准EMPTY cold规则重新冻结的Capability surface与catalog heads建立新context epoch。active branch立即继续同一任务；idle branch即使断电重启也只等待未来真实user message，不制造无人消费的epoch permit或后台resume job。完整MCP cohort可容纳时全部DIRECT；over-bound时全部继续走既有meta route，不引入保留old DIRECT的compaction私有规则。current Skill catalog反映当前filesystem，而same-activation active Skill正文保持old installed snapshot。ordinary cold-open、这次rebase与Round 10 child first-open共享唯一pure cold-epoch assembler。历史仍完整保存在canonical transcript中；compaction不会调用工具、不会抽取memory、不会重新定义普通ToolResult或MCP/Skill语义、不会因provider错误偷偷重试，也不会让模型面对一份artifact/ID清单自行猜测该恢复什么。

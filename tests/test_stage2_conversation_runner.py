@@ -41,11 +41,12 @@ from pulsara_agent.conversation_kernel.input_continuity import (
 )
 from pulsara_agent.conversation_kernel.compaction.contracts import (
     CompactionDisposition,
+    CompactionTargetBranch,
     CompactionTrigger,
     ResolvedCompactionPolicy,
 )
 from pulsara_agent.conversation_kernel.compaction.prompt import (
-    SUMMARY_REQUEST,
+    compaction_summary_request,
 )
 from pulsara_agent.conversation_kernel.compaction.runtime import (
     HostCompactionRuntimeOwner,
@@ -436,6 +437,20 @@ class _LimitedCompactionScriptedModel(_CompactionScriptedModel):
                 flash_limits=limits,
             )
         )
+
+
+def _context_snapshot_payload(request) -> dict[str, object]:
+    matches = tuple(
+        message.content[0].split("\n", 1)[1]
+        for message in request.compiled_input.messages
+        if message.role is MessageRole.USER
+        and message.content
+        and message.content[0].startswith("[CONTEXT_SNAPSHOT ")
+    )
+    assert len(matches) == 1
+    value = json.loads(matches[0])
+    assert isinstance(value, dict)
+    return value
 
 
 class _NativePlanningDeadlineModel(_ScriptedModel):
@@ -1378,9 +1393,19 @@ def test_round5b_active_manual_compaction_adopts_and_continues_same_run(
     assert compacted.snapshot_id is not None
     assert len(model.summary_transport.contexts) == 1
     summary_context = model.summary_transport.contexts[0]
-    assert summary_context.tool_choice_none is True
-    assert summary_context.messages[-1].content == (SUMMARY_REQUEST,)
+    assert summary_context.tool_choice == "auto"
+    assert summary_context.messages[-1].content == (
+        compaction_summary_request(CompactionTargetBranch.ACTIVE_INSTALLATION),
+    )
     assert len(model.requests) == 2
+    successor_snapshot = _context_snapshot_payload(model.requests[1])
+    assert successor_snapshot["continuation"]["mode"] == "RESUME_ACTIVE_TURN"
+    assert successor_snapshot["continuation"]["instruction"].startswith(
+        "HANDOFF COMPLETE / RESUME NOW"
+    )
+    assert successor_snapshot["continuation"]["active_request"]["text"] == (
+        "second question"
+    )
     assert model.requests[0].compiled_input.system_prompt == (
         model.requests[1].compiled_input.system_prompt
     )
@@ -1576,7 +1601,9 @@ def test_round5b_summary_tool_call_gets_one_ephemeral_repair_and_no_dispatch(
     assert result.final_text == "final after repaired compaction"
     assert compacted.disposition is CompactionDisposition.COMPACTED
     assert len(model.summary_transport.contexts) == 2
-    assert all(context.tool_choice_none for context in model.summary_transport.contexts)
+    assert all(
+        context.tool_choice == "auto" for context in model.summary_transport.contexts
+    )
     assert len(model.summary_transport.contexts[1].messages) > len(
         model.summary_transport.contexts[0].messages
     )
@@ -1585,12 +1612,16 @@ def test_round5b_summary_tool_call_gets_one_ephemeral_repair_and_no_dispatch(
         lane=PostgresConnectionLane.INSPECTOR,
         deadline_monotonic=monotonic() + 10,
     ) as connection:
-        attempt_count = connection.execute(
-            "SELECT count(*) FROM pulsara_v3.tool_execution_attempts "
-            "WHERE session_id = %s",
-            (session_id,),
-        ).fetchone()[0]
+        attempt_count, tool_result_count = connection.execute(
+            "SELECT "
+            "(SELECT count(*) FROM pulsara_v3.tool_execution_attempts "
+            " WHERE session_id = %s), "
+            "(SELECT count(*) FROM pulsara_v3.transcript_entries "
+            " WHERE session_id = %s AND entry_kind = 'TOOL_RESULT')",
+            (session_id, session_id),
+        ).fetchone()
     assert attempt_count == 0
+    assert tool_result_count == 0
 
 
 def test_round5b_second_summary_tool_call_discards_without_canonical_effect(
@@ -1798,6 +1829,11 @@ def test_round5b_mid_turn_tool_followup_compacts_then_finishes(
     assert result.tool_call_count == 1
     assert triggers == [CompactionTrigger.MID_TURN_FOLLOWUP]
     assert len(model.summary_transport.contexts) == 1
+    successor_snapshot = _context_snapshot_payload(model.requests[-1])
+    assert successor_snapshot["continuation"]["mode"] == "RESUME_ACTIVE_TURN"
+    assert successor_snapshot["continuation"]["active_request"]["text"] == (
+        "p" * 110_000
+    )
     assert len(tool.invocations) == 1
     assert not any(
         message.role is MessageRole.TOOL_RESULT
@@ -1822,7 +1858,7 @@ def test_round5b_proactive_auto_compaction_runs_before_next_provider_open(
     summary = "A concise free-form handoff for the pending manual request."
     model = _LimitedCompactionScriptedModel(
         [
-            _text_stream("historical " + "x" * 140_000),
+            _text_stream("historical " + "x" * 100_000),
             _text_stream("automatic compaction final"),
         ],
         summary,
@@ -1851,6 +1887,22 @@ def test_round5b_proactive_auto_compaction_runs_before_next_provider_open(
     runner._provider_dispatch._input_reader = input_reader
     runner.compaction._input_reader = input_reader
     triggers: list[object] = []
+    overbudget_sources: list[tuple[int, int]] = []
+    prepare_precompile = runner.compaction.prepare_precompile
+
+    async def record_precompile(**kwargs):
+        decision = await prepare_precompile(**kwargs)
+        prepared = decision.compaction
+        if prepared is not None:
+            overbudget_sources.append(
+                (
+                    prepared.source_view.provider_projection.final_estimate.total_input_tokens,
+                    prepared.source_view.normal_compile_binding.effective_input_budget_tokens,
+                )
+            )
+        return decision
+
+    runner.compaction.prepare_precompile = record_precompile
     execute = runner.compaction.execute_active
 
     async def record_trigger(**kwargs):
@@ -1861,7 +1913,7 @@ def test_round5b_proactive_auto_compaction_runs_before_next_provider_open(
 
     async def exercise():
         first = await runner.run_turn("first")
-        second = await runner.run_turn("continue")
+        second = await runner.run_turn("y" * 100_000)
         await owner.aclose()
         return first, second
 
@@ -1870,8 +1922,22 @@ def test_round5b_proactive_auto_compaction_runs_before_next_provider_open(
     assert first.final_text.startswith("historical")
     assert second.final_text == "automatic compaction final"
     assert triggers == [CompactionTrigger.AUTO_ACTIVE_CONTEXT]
+    assert len(overbudget_sources) == 1
+    assert overbudget_sources[0][0] > overbudget_sources[0][1]
     assert len(model.summary_transport.contexts) == 1
+    assert model.summary_transport.contexts[0].compiler_estimated_input_tokens <= (
+        overbudget_sources[0][1]
+    )
     assert len(model.requests) == 2
+    successor_snapshot = _context_snapshot_payload(model.requests[1])
+    active_request = successor_snapshot["continuation"]["active_request"]
+    assert successor_snapshot["continuation"]["mode"] == "RESUME_ACTIVE_TURN"
+    assert active_request["location"] == "CANONICAL_SUFFIX"
+    assert active_request["text"] is None
+    assert sum(
+        message.content == ("y" * 100_000,)
+        for message in model.requests[1].compiled_input.messages
+    ) == 1
     assert input_reader.operations[:2] == ["headroom", "dispatch"]
 
 
@@ -1925,6 +1991,9 @@ def test_round5b_idle_manual_compaction_adopts_without_successor_open(
     assert outcome.disposition is CompactionDisposition.COMPACTED
     assert outcome.snapshot_id is not None
     assert len(model.summary_transport.contexts) == 1
+    assert model.summary_transport.contexts[0].messages[-1].content == (
+        compaction_summary_request(CompactionTargetBranch.IDLE_BASE_ONLY),
+    )
     assert len(model.requests) == 1
     scope = ProviderInputContinuityScope(
         session_id=session_id,
@@ -1940,6 +2009,42 @@ def test_round5b_idle_manual_compaction_adopts_without_successor_open(
         ).value
         == "COMPLETED"
     )
+
+    # A fresh Host has no process-local continuation state. The durable snapshot
+    # must still wait silently and then guide the first user-driven cold open.
+    replacement_repository = ConversationKernelRepository(provider)
+    replacement_lease = replacement_repository.acquire_host_writer(
+        session_id=session_id,
+        workspace_id=workspace_id,
+        writer_owner_id=_name("replacement-host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    replacement_model = _ScriptedModel([_text_stream("answer after restart")])
+    replacement_runner = ConversationKernelRunner(
+        repository=replacement_repository,
+        writer_lease=replacement_lease,
+        model=replacement_model,
+        tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
+        live_bus=LiveAgentEventBus(),
+        context_source_collector=StaticContextSourceCollector(),
+        workspace_id=workspace_id,
+    )
+
+    restarted = asyncio.run(replacement_runner.run_turn("question after restart"))
+
+    assert restarted.final_text == "answer after restart"
+    assert len(replacement_model.requests) == 1
+    restart_snapshot = _context_snapshot_payload(replacement_model.requests[0])
+    assert restart_snapshot["continuation"]["mode"] == "AWAIT_NEXT_USER"
+    assert restart_snapshot["continuation"]["active_request"] is None
+    assert restart_snapshot["continuation"]["instruction"].startswith(
+        "HANDOFF COMPLETE / AWAIT NEXT USER"
+    )
+    assert sum(
+        message.content == ("question after restart",)
+        for message in replacement_model.requests[0].compiled_input.messages
+    ) == 1
 
 
 def test_round3_1_empty_epoch_absorbs_pre_first_call_steers_once(

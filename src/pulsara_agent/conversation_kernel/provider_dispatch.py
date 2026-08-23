@@ -167,6 +167,7 @@ from pulsara_agent.model_input.continuity import (
     NewTriggerAnchor,
     FrozenProviderInputAppendCompileResult,
     FrozenProviderInputAppendPlanningInput,
+    FrozenProviderInputAppendSemanticProjection,
     FrozenProviderInputEpochView,
     NoNewTriggerAnchor,
     PROVIDER_MESSAGE_LOWERING_CONTRACT,
@@ -304,6 +305,36 @@ class PreparedProviderDispatch:
 
 
 @dataclass(frozen=True, slots=True)
+class PreparedProviderHeadroomAdmission:
+    """One safe-point handle and its metadata-only exact-cut quote."""
+
+    handle: PreparedProviderInputHandle
+    preflight: FrozenCompactionHeadroomPreflight
+    prepared_target: PreparedKernelModelTarget = dataclass_field(repr=False)
+
+    def close(self) -> None:
+        self.handle.close()
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedCompactionSourceDispatch:
+    """Non-executable normal semantic projection for compaction planning."""
+
+    handle: PreparedProviderInputHandle
+    canonical_read: FrozenCanonicalProviderDispatchRead
+    canonical_facts: FrozenCanonicalCompileSnapshot
+    planning: FrozenProviderInputAppendPlanningInput
+    prepared_call: PreparedKernelModelCall | PreparedKernelSemanticModelCall
+    capability_dispatch_cut: FrozenCapabilityDispatchCut
+    tool_exposure_plan: FrozenToolCapabilityExposurePlan
+    sources: CollectedContextSources
+    projection: FrozenProviderInputAppendSemanticProjection = dataclass_field(
+        repr=False
+    )
+    memory_context: FrozenModelCallMemoryContext
+
+
+@dataclass(frozen=True, slots=True)
 class InstalledProviderOpen:
     request: KernelModelExecutionRequest = dataclass_field(repr=False)
     execution: PreparedKernelModelExecution = dataclass_field(repr=False)
@@ -372,6 +403,71 @@ class ProviderDispatchCoordinator:
     def _canonical_deadline(self) -> float:
         return self._deadlines.deadline(KernelWatchdogOwner.FOREGROUND_CANONICAL)
 
+    async def prepare_headroom_admission(
+        self,
+        *,
+        turn_id: str,
+        model_call_index: int,
+        deadline: float,
+    ) -> PreparedProviderHeadroomAdmission:
+        """Freeze one cut and quote compaction headroom before body hydration."""
+
+        prepare_surface = getattr(self._tools, "prepare_tool_surface_safe_point", None)
+        if prepare_surface is not None:
+            prepare_surface()
+        handle = await self._io.run(
+            self._safe_point.freeze_provider_input,
+            turn_id=turn_id,
+            deadline_monotonic=deadline,
+        )
+        try:
+            prepared_target = self._model.prepare_target(
+                KernelModelTargetPreparationRequest(
+                    session_id=self._writer_lease.guard.session_id,
+                    turn_id=turn_id,
+                    model_call_index=model_call_index,
+                    purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
+                    maximum_input_tokens=self._maximum_input_tokens_per_call,
+                    maximum_output_tokens=self._maximum_output_tokens_per_call,
+                )
+            )
+            _require_dispatch_planning_deadline(deadline)
+            preflight = await self.read_compaction_headroom_preflight(
+                handle.cut, deadline=deadline
+            )
+            return PreparedProviderHeadroomAdmission(handle, preflight, prepared_target)
+        except BaseException:
+            handle.close()
+            raise
+
+    async def prepare_compaction_source(
+        self,
+        *,
+        turn_id: str,
+        model_call_index: int,
+        inherited_memory_use_policy: MemoryUsePolicy,
+        deadline: float,
+        allow_terminal_compaction: bool = False,
+        existing_handle: PreparedProviderInputHandle | None = None,
+        headroom_preflight_override: FrozenCompactionHeadroomPreflight | None = None,
+        prepared_target_override: PreparedKernelModelTarget | None = None,
+    ) -> PreparedCompactionSourceDispatch:
+        result = await self.prepare(
+            turn_id=turn_id,
+            model_call_index=model_call_index,
+            inherited_memory_use_policy=inherited_memory_use_policy,
+            deadline=deadline,
+            allow_steers=False,
+            allow_terminal_compaction=allow_terminal_compaction,
+            existing_handle=existing_handle,
+            headroom_preflight_override=headroom_preflight_override,
+            prepared_target_override=prepared_target_override,
+            semantic_only=True,
+            _compaction_source_projection=True,
+        )
+        assert isinstance(result, PreparedCompactionSourceDispatch)
+        return result
+
     async def prepare(
         self,
         *,
@@ -386,14 +482,21 @@ class ProviderDispatchCoordinator:
         force_empty_capability_predecessor: bool = False,
         cold_seed_override: FrozenColdConversationSeed | None = None,
         existing_handle: PreparedProviderInputHandle | None = None,
+        headroom_preflight_override: FrozenCompactionHeadroomPreflight | None = None,
+        prepared_target_override: PreparedKernelModelTarget | None = None,
         compaction_source_replacements: tuple[
             ContextSourceCandidate | ContextSourceAbsentFact, ...
         ] = (),
         compaction_retained_skill_read: FrozenCompactionCanonicalRead | None = None,
         semantic_only: bool = False,
-    ) -> PreparedProviderDispatch:
+        _compaction_source_projection: bool = False,
+    ) -> PreparedProviderDispatch | PreparedCompactionSourceDispatch:
         """Freeze, quote and (when present) consume one exact steer suffix."""
 
+        if _compaction_source_projection and (allow_steers or not semantic_only):
+            raise ValueError(
+                "compaction source projection must be semantic and steer-free"
+            )
         prepare_surface = getattr(self._tools, "prepare_tool_surface_safe_point", None)
         if prepare_surface is not None:
             prepare_surface()
@@ -403,6 +506,8 @@ class ProviderDispatchCoordinator:
             else self._safe_point.freeze_provider_input
         )
         handle = existing_handle
+        if headroom_preflight_override is not None and handle is None:
+            raise ValueError("headroom override requires its prepared handle")
         if handle is None:
             handle = await self._io.run(
                 freeze_operation,
@@ -413,8 +518,21 @@ class ProviderDispatchCoordinator:
         borrow: ProcessLocalToolSurfaceBorrow | None = None
         try:
             await self._resolved_workspace_id(deadline=deadline)
-            headroom_preflight = None
-            if (
+            headroom_preflight = headroom_preflight_override
+            if headroom_preflight is not None:
+                cut = handle.cut
+                if (
+                    headroom_preflight.session_id != cut.session_id
+                    or headroom_preflight.turn_id != cut.turn_id
+                    or headroom_preflight.context_binding_revision_id
+                    != cut.context_binding_revision_id
+                    or headroom_preflight.provider_input_through_sequence
+                    != cut.provider_input_through_sequence
+                ):
+                    raise StructuredModelInputCompileError(
+                        ModelInputCompileFailureKind.CANONICAL_PREFIX_CONFLICT
+                    )
+            elif (
                 self._compaction_owner is not None
                 and self._compaction_owner.policy.automatic_enabled
                 and allow_steers
@@ -526,16 +644,27 @@ class ProviderDispatchCoordinator:
                     ModelInputCompileFailureKind.TOOL_SURFACE_INVALID
                 ) from exc
             try:
-                prepared_target = self._model.prepare_target(
-                    KernelModelTargetPreparationRequest(
-                        session_id=self._writer_lease.guard.session_id,
-                        turn_id=turn_id,
-                        model_call_index=model_call_index,
-                        purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
-                        maximum_input_tokens=self._maximum_input_tokens_per_call,
-                        maximum_output_tokens=self._maximum_output_tokens_per_call,
+                prepared_target = prepared_target_override
+                if prepared_target is None:
+                    prepared_target = self._model.prepare_target(
+                        KernelModelTargetPreparationRequest(
+                            session_id=self._writer_lease.guard.session_id,
+                            turn_id=turn_id,
+                            model_call_index=model_call_index,
+                            purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
+                            maximum_input_tokens=self._maximum_input_tokens_per_call,
+                            maximum_output_tokens=self._maximum_output_tokens_per_call,
+                        )
                     )
-                )
+                elif (
+                    prepared_target.session_id != self._writer_lease.guard.session_id
+                    or prepared_target.turn_id != turn_id
+                    or prepared_target.model_call_index != model_call_index
+                    or prepared_target.purpose is not ModelCallPurpose.AGENT_MODEL_LOOP
+                ):
+                    raise StructuredModelInputCompileError(
+                        ModelInputCompileFailureKind.MODEL_TARGET_PREPARATION_FAILED
+                    )
                 _require_dispatch_planning_deadline(deadline)
             except Exception as exc:
                 raise StructuredModelInputCompileError(
@@ -1363,6 +1492,57 @@ class ProviderDispatchCoordinator:
                     if subagent_seed is not None
                     else CanonicalColdContinuationSeed(base_read)
                 )
+            if _compaction_source_projection:
+                projection_sources = base_sources
+                if preference_source is not None and trigger_disposition is not None:
+                    projection_sources = await self._memory_support.apply_sources(
+                        sources,
+                        activation_subject=activation_subject,
+                        activation_text=activation_text,
+                        include_recall=True,
+                        frozen_preference=preference_source,
+                        trigger_disposition=trigger_disposition,
+                    )
+                projection_memory = self._memory_support.freeze_call_context(
+                    scope=scope,
+                    planning=planning,
+                    canonical_facts=base_facts,
+                    sources=projection_sources,
+                    memory_use_policy=memory_use_policy,
+                )
+                projection_request = replace(
+                    compile_request,
+                    sources=projection_sources,
+                    memory_citation_handles=projection_memory[1],
+                )
+                projection = await self._io.run(
+                    project_structured_append,
+                    self._compiler,
+                    projection_request,
+                    planning=planning,
+                    compatibility=provider_input_compatibility(
+                        prepared_call=prepared_call,
+                        canonical_facts=base_facts,
+                        sources=projection_sources,
+                    ),
+                    deadline_monotonic=deadline,
+                )
+                if borrow is not None:
+                    raise RuntimeError(
+                        "semantic compaction projection acquired a physical borrow"
+                    )
+                return PreparedCompactionSourceDispatch(
+                    handle=handle,
+                    canonical_read=base_read,
+                    canonical_facts=base_facts,
+                    planning=planning,
+                    prepared_call=prepared_call,
+                    capability_dispatch_cut=capability_dispatch_cut,
+                    tool_exposure_plan=tool_exposure_plan,
+                    sources=projection_sources,
+                    projection=projection,
+                    memory_context=projection_memory[0],
+                )
             cold_semantic: PreparedColdEpochSemanticAssembly | None = None
             replay_target = provider_replay_target(prepared_call)
             if cold_seed is not None and preference_source is None:
@@ -1887,6 +2067,24 @@ def compile_structured_append(
     if monotonic() >= deadline_monotonic:
         raise TimeoutError("structured model input deadline expired")
     return compiler.compile_append(
+        request,
+        planning=planning,
+        compatibility=compatibility,
+        deadline_monotonic=deadline_monotonic,
+    )
+
+
+def project_structured_append(
+    compiler: StructuredModelInputCompiler,
+    request: StructuredModelInputCompileRequest,
+    *,
+    planning: FrozenProviderInputAppendPlanningInput,
+    compatibility: ProviderInputEpochCompatibility,
+    deadline_monotonic: float,
+) -> FrozenProviderInputAppendSemanticProjection:
+    if monotonic() >= deadline_monotonic:
+        raise TimeoutError("structured model input deadline expired")
+    return compiler.project_append(
         request,
         planning=planning,
         compatibility=compatibility,

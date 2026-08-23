@@ -1051,7 +1051,7 @@ MCP provider-facing name 必须由 central deterministic mangler 生成，例如
 mcp__<server-slug>__<tool-slug>
 ~~~
 
-规则必须冻结：UTF-8 输入、ASCII 输出、长度上限、reserved builtin 冲突、normalization collision 与 hash suffix。相同 semantic server/tool 跨 reconnect 保持同名；collision 不能因发现顺序改变名称。
+规则必须冻结：UTF-8 输入经NFKD ASCII小写化，连字符及其他非`[a-z0-9]`分隔符折叠为单个`_`并去除首尾`_`；provider-visible name不得追加原始server/tool identity的digest或hash suffix。`server-slug`最多24个ASCII字节，完整`mcp__<server-slug>__<tool-slug>`由Runtime按剩余tool预算截断并且必须不超过64个ASCII字节。相同semantic server/tool跨reconnect保持同名；normalize或截断后的同名必须在candidate/registry安装前显式拒绝，不能按发现顺序覆盖、编号或悄悄重绑。
 
 mapping 属于 discovery snapshot，并且 executor 只能从 exact snapshot lookup remote name。不得在调用时重新按字符串解析并查询全局 latest server。
 

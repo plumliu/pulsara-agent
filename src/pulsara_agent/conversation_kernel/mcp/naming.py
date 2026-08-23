@@ -3,17 +3,20 @@
 The model-visible spelling is always ``mcp__<server>__<tool>``.  Both
 separators are exactly two underscores; this is one flat function name, not a
 provider namespace plus a function name.  Raw MCP server/tool identities stay
-separate and are used for physical dispatch.
+separate and are used for physical dispatch.  Provider names are normalized
+and truncated only; they never carry identity hashes.
 """
 
 from __future__ import annotations
 
-import hashlib
 import re
 import unicodedata
 
 
-MAXIMUM_MCP_PROVIDER_TOOL_NAME_BYTES = 96
+MAXIMUM_MCP_PROVIDER_TOOL_NAME_BYTES = 64
+_MAXIMUM_MCP_SERVER_SLUG_BYTES = 24
+_MCP_PROVIDER_PREFIX = "mcp__"
+_MCP_PROVIDER_SEPARATOR = "__"
 
 
 def mangle_mcp_tool_names(
@@ -21,46 +24,27 @@ def mangle_mcp_tool_names(
 ) -> dict[str, str]:
     if len(remote_names) != len(set(remote_names)):
         raise ValueError("MCP remote tool names are not unique")
-    server = _slug(server_id, 24)
-    preliminary = {name: f"mcp__{server}__{_slug(name, 48)}" for name in remote_names}
-    groups: dict[str, list[str]] = {}
-    for remote, provider in preliminary.items():
-        groups.setdefault(provider, []).append(remote)
-    result: dict[str, str] = {}
-    for provider, remotes in groups.items():
-        for remote in remotes:
-            candidate = provider
-            if len(remotes) > 1:
-                suffix = hashlib.sha256(remote.encode("utf-8")).hexdigest()[:10]
-                candidate = f"{provider[:83]}__{suffix}"
-            encoded = candidate.encode("ascii")
-            if len(encoded) > MAXIMUM_MCP_PROVIDER_TOOL_NAME_BYTES:
-                suffix = hashlib.sha256(remote.encode("utf-8")).hexdigest()[:10]
-                candidate = f"{candidate[:83]}__{suffix}"
-            result[remote] = candidate
+    server = _slug(server_id)[:_MAXIMUM_MCP_SERVER_SLUG_BYTES]
+    prefix = f"{_MCP_PROVIDER_PREFIX}{server}{_MCP_PROVIDER_SEPARATOR}"
+    remaining = MAXIMUM_MCP_PROVIDER_TOOL_NAME_BYTES - len(prefix.encode("ascii"))
+    if remaining < 1:  # pragma: no cover - closed by the frozen server bound.
+        raise AssertionError("MCP provider name has no tool-name budget")
+    result = {remote: f"{prefix}{_slug(remote)[:remaining]}" for remote in remote_names}
     if len(set(result.values())) != len(result):
         raise ValueError("MCP provider tool normalization collision")
+    if any(
+        len(provider.encode("ascii")) > MAXIMUM_MCP_PROVIDER_TOOL_NAME_BYTES
+        for provider in result.values()
+    ):  # pragma: no cover - construction owns the exact bound.
+        raise AssertionError("MCP provider tool name exceeded its byte bound")
     return result
 
 
-def _slug(value: str, maximum: int) -> str:
+def _slug(value: str) -> str:
     normalized = unicodedata.normalize("NFKD", value)
     ascii_value = normalized.encode("ascii", "ignore").decode("ascii").lower()
     slug = re.sub(r"[^a-z0-9]+", "_", ascii_value).strip("_")
-    if not slug:
-        slug = "x_" + hashlib.sha256(value.encode("utf-8")).hexdigest()[:10]
-    is_canonical = bool(
-        re.fullmatch(r"[a-z0-9]+(?:_[a-z0-9]+)*", value)
-        and value == value.lower()
-        and len(value) <= maximum
-    )
-    if not is_canonical:
-        suffix = hashlib.sha256(value.encode("utf-8")).hexdigest()[:10]
-        slug = f"{slug[: maximum - 12]}__{suffix}"
-    elif len(slug) > maximum:
-        suffix = hashlib.sha256(value.encode("utf-8")).hexdigest()[:10]
-        slug = f"{slug[: maximum - 12]}__{suffix}"
-    return slug
+    return slug or "x"
 
 
 __all__ = ["MAXIMUM_MCP_PROVIDER_TOOL_NAME_BYTES", "mangle_mcp_tool_names"]

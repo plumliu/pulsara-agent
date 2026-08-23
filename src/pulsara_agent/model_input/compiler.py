@@ -29,6 +29,7 @@ from pulsara_agent.model_input.contracts import (
     ContextTrustClass,
     FrozenCompiledMessagePlacement,
     FrozenCompiledModelInput,
+    FrozenModelInputSemanticProjection,
     FrozenToolSpec,
     FrozenProviderInputItem,
     FrozenProviderInputItemKind,
@@ -45,6 +46,7 @@ from pulsara_agent.model_input.contracts import (
 from pulsara_agent.model_input.continuity import (
     FrozenProviderInputAppendCompileResult,
     FrozenProviderInputAppendPlanningInput,
+    FrozenProviderInputAppendSemanticProjection,
     NewTriggerAnchor,
     ProcessLocalCanonicalFrontier,
     ProcessLocalSourceHead,
@@ -267,9 +269,7 @@ _SOURCE_POLICY = {
 _SOURCE_ABSENCE_POLICY = {
     ContextSourceKind.BASE_SYSTEM: frozenset(),
     ContextSourceKind.RUNTIME_ENVIRONMENT: frozenset(),
-    ContextSourceKind.RUNTIME_CLOCK: frozenset(
-        {ContextSourceAbsenceKind.UNAVAILABLE}
-    ),
+    ContextSourceKind.RUNTIME_CLOCK: frozenset({ContextSourceAbsenceKind.UNAVAILABLE}),
     ContextSourceKind.RUN_PERMISSION: frozenset(),
     ContextSourceKind.PLAN_HANDOFF: frozenset(
         {ContextSourceAbsenceKind.NOT_APPLICABLE}
@@ -327,10 +327,16 @@ _SOURCE_ABSENCE_POLICY = {
         }
     ),
     ContextSourceKind.COMPACTION_RUNTIME_HANDOFF: frozenset(
-        {ContextSourceAbsenceKind.NOT_APPLICABLE, ContextSourceAbsenceKind.EXPLICIT_EMPTY}
+        {
+            ContextSourceAbsenceKind.NOT_APPLICABLE,
+            ContextSourceAbsenceKind.EXPLICIT_EMPTY,
+        }
     ),
     ContextSourceKind.RETAINED_SKILL_CONTEXT: frozenset(
-        {ContextSourceAbsenceKind.NOT_APPLICABLE, ContextSourceAbsenceKind.EXPLICIT_EMPTY}
+        {
+            ContextSourceAbsenceKind.NOT_APPLICABLE,
+            ContextSourceAbsenceKind.EXPLICIT_EMPTY,
+        }
     ),
 }
 
@@ -343,9 +349,9 @@ class _SourceState:
     exhausted: bool = False
 
     def __post_init__(self) -> None:
-        self.selected = tuple(
-            item.mode for item in self.candidate.variants
-        ).index(self.candidate.initial_mode)
+        self.selected = tuple(item.mode for item in self.candidate.variants).index(
+            self.candidate.initial_mode
+        )
 
     def variant(self):
         return self.candidate.variants[self.selected]
@@ -363,9 +369,7 @@ class _SourceState:
         if self.omitted or self.candidate.channel is ContextChannel.SYSTEM:
             raise ValueError("source state has no runtime observation message")
         variant = self.variant()
-        return source_variant_message(
-            self.candidate, variant.text, mode=variant.mode
-        )
+        return source_variant_message(self.candidate, variant.text, mode=variant.mode)
 
     def advance(self) -> bool:
         if self.is_unavailable():
@@ -452,10 +456,7 @@ class _AppendSourceEmission:
     def __post_init__(self) -> None:
         if (self.state is None) == (self.fixed_message is None):
             raise ValueError("append source emission union is invalid")
-        if (
-            self.unavailable_semantic_fingerprint is not None
-            and self.state is None
-        ):
+        if self.unavailable_semantic_fingerprint is not None and self.state is None:
             raise ValueError("fixed source emission has unavailable fallback")
 
     def effective_presence(self) -> SourceObservationPresence:
@@ -490,6 +491,37 @@ class StructuredModelInputCompiler:
         *,
         deadline_monotonic: float | None = None,
     ) -> FrozenCompiledModelInput:
+        result = self._compile(
+            request,
+            deadline_monotonic=deadline_monotonic,
+            semantic_projection=False,
+        )
+        assert isinstance(result, FrozenCompiledModelInput)
+        return result
+
+    def project(
+        self,
+        request: StructuredModelInputCompileRequest,
+        *,
+        deadline_monotonic: float | None = None,
+    ) -> FrozenModelInputSemanticProjection:
+        """Run normal lowering without granting execution or requiring token fit."""
+
+        result = self._compile(
+            request,
+            deadline_monotonic=deadline_monotonic,
+            semantic_projection=True,
+        )
+        assert isinstance(result, FrozenModelInputSemanticProjection)
+        return result
+
+    def _compile(
+        self,
+        request: StructuredModelInputCompileRequest,
+        *,
+        deadline_monotonic: float | None,
+        semantic_projection: bool,
+    ) -> FrozenCompiledModelInput | FrozenModelInputSemanticProjection:
         deadline = _CompileDeadline(deadline_monotonic)
         deadline.check()
         self._validate_canonical_input_bound(request)
@@ -579,6 +611,8 @@ class StructuredModelInputCompiler:
         while current_total > budget:
             deadline.check()
             if not candidates:
+                if semantic_projection:
+                    break
                 raise StructuredModelInputCompileError(
                     self._minimum_budget_failure(
                         request, lowered, source_states, tool_states
@@ -675,9 +709,7 @@ class StructuredModelInputCompiler:
                 == request.canonical_input.identity.turn_id,
                 first_legal_mode=state.first_mode(),
                 selected_mode=state.mode(),
-                delivery_requirement=(
-                    state.item.tool_result_delivery.requirement
-                ),
+                delivery_requirement=(state.item.tool_result_delivery.requirement),
                 full_delivery_reason=state.item.tool_result_delivery.reason,
                 estimated_tokens=estimator.estimate_message(state.message()),
                 reason_code=self._tool_decision_reason(state),
@@ -721,6 +753,23 @@ class StructuredModelInputCompiler:
         ):
             raise StructuredModelInputCompileError(
                 ModelInputCompileFailureKind.COMPILE_WORKING_SET_EXCEEDED
+            )
+        if semantic_projection:
+            deadline.check()
+            return FrozenModelInputSemanticProjection(
+                canonical_input_identity=request.canonical_input.identity,
+                system_prompt=layout.system_prompt,
+                messages=layout.messages,
+                message_placements=layout.message_placements,
+                tools=surface.tool_specs,
+                final_estimate=full,
+                source_decisions=source_decisions,
+                tool_result_decisions=tool_decisions,
+                diagnostic_codes=diagnostic_codes,
+                source_collection_fingerprint=(request.sources.collection_fingerprint),
+                compile_binding_fingerprint=(
+                    request.compile_binding.binding_fingerprint
+                ),
             )
         decision_digest = context_fingerprint(
             "model-input-decisions-public:v1",
@@ -814,6 +863,48 @@ class StructuredModelInputCompiler:
     ) -> FrozenProviderInputAppendCompileResult:
         """Compile one causally appended input without relowering old messages."""
 
+        result = self._compile_append(
+            request,
+            planning=planning,
+            compatibility=compatibility,
+            deadline_monotonic=deadline_monotonic,
+            semantic_projection=False,
+        )
+        assert isinstance(result, FrozenProviderInputAppendCompileResult)
+        return result
+
+    def project_append(
+        self,
+        request: StructuredModelInputCompileRequest,
+        *,
+        planning: FrozenProviderInputAppendPlanningInput,
+        compatibility: ProviderInputEpochCompatibility,
+        deadline_monotonic: float | None = None,
+    ) -> FrozenProviderInputAppendSemanticProjection:
+        """Freeze a prospective append without creating executable input."""
+
+        result = self._compile_append(
+            request,
+            planning=planning,
+            compatibility=compatibility,
+            deadline_monotonic=deadline_monotonic,
+            semantic_projection=True,
+        )
+        assert isinstance(result, FrozenProviderInputAppendSemanticProjection)
+        return result
+
+    def _compile_append(
+        self,
+        request: StructuredModelInputCompileRequest,
+        *,
+        planning: FrozenProviderInputAppendPlanningInput,
+        compatibility: ProviderInputEpochCompatibility,
+        deadline_monotonic: float | None,
+        semantic_projection: bool,
+    ) -> (
+        FrozenProviderInputAppendCompileResult
+        | FrozenProviderInputAppendSemanticProjection
+    ):
         deadline = _CompileDeadline(deadline_monotonic)
         deadline.check()
         self._validate_canonical_input_bound(request)
@@ -835,8 +926,10 @@ class StructuredModelInputCompiler:
             fingerprints_list.append(provider_input_item_fingerprint(item))
         fingerprints = tuple(fingerprints_list)
         predecessor = planning.predecessor_view
-        predecessor_count = 0 if predecessor is None else len(
-            predecessor.canonical_frontier.ordered_item_fingerprints
+        predecessor_count = (
+            0
+            if predecessor is None
+            else len(predecessor.canonical_frontier.ordered_item_fingerprints)
         )
         reset_reason = _compatibility_reset_reason(predecessor, compatibility)
         same_base = predecessor is None or (
@@ -887,12 +980,17 @@ class StructuredModelInputCompiler:
                 predecessor=predecessor,
                 frontier=frontier,
                 deadline=deadline,
+                semantic_projection=semantic_projection,
             )
 
         # The ordinary compiler remains the unique suffix allocator.  Its
         # decisions are applied only to new canonical items and newly emitted
         # source observations; installed messages are never taken from it.
-        fresh = self.compile(request, deadline_monotonic=deadline.value)
+        fresh = (
+            self.project(request, deadline_monotonic=deadline.value)
+            if semantic_projection
+            else self.compile(request, deadline_monotonic=deadline.value)
+        )
         deadline.check()
         all_materialized, _ = self._materialize_approved_plan(request)
         old_count = 0 if reset_reason is not None else predecessor_count
@@ -931,14 +1029,10 @@ class StructuredModelInputCompiler:
                 else predecessor.source_heads
             )
         }
-        source_decisions = {
-            item.source_kind: item for item in fresh.source_decisions
-        }
+        source_decisions = {item.source_kind: item for item in fresh.source_decisions}
         observation_messages: list[tuple[int, str, LLMMessage]] = []
         resulting_heads = dict(previous_heads)
-        candidates = {
-            item.source_kind: item for item in request.sources.candidates
-        }
+        candidates = {item.source_kind: item for item in request.sources.candidates}
         absent = {item.source_kind: item for item in request.sources.absent_facts}
         for kind in ContextSourceKind:
             if kind is ContextSourceKind.BASE_SYSTEM:
@@ -1030,7 +1124,9 @@ class StructuredModelInputCompiler:
                 # Empty/unavailable state has no provider-visible meaning until
                 # it invalidates an installed value.  Repeating the same closed
                 # absence is a no-op even across a later turn/activation.
-                should_append = previous is not None and previous.presence is not presence
+                should_append = (
+                    previous is not None and previous.presence is not presence
+                )
             else:
                 continue
             if not should_append or presence is None or lifecycle is None:
@@ -1060,8 +1156,10 @@ class StructuredModelInputCompiler:
             item[2] for item in sorted(observation_messages, key=lambda item: item[:2])
         )
 
-        prefix_messages = () if predecessor is None or reset_reason is not None else (
-            predecessor.messages
+        prefix_messages = (
+            ()
+            if predecessor is None or reset_reason is not None
+            else (predecessor.messages)
         )
         system_prompt = (
             fresh.system_prompt
@@ -1140,7 +1238,11 @@ class StructuredModelInputCompiler:
             tools=tools,
             deadline=deadline,
         )
-        if estimate.total_input_tokens > request.compile_binding.effective_input_budget_tokens:
+        if (
+            not semantic_projection
+            and estimate.total_input_tokens
+            > request.compile_binding.effective_input_budget_tokens
+        ):
             raise StructuredModelInputCompileError(
                 ModelInputCompileFailureKind.PROTECTED_TRANSCRIPT_EXCEEDS_BUDGET
             )
@@ -1149,6 +1251,29 @@ class StructuredModelInputCompiler:
         ) > (64 << 20):
             raise StructuredModelInputCompileError(
                 ModelInputCompileFailureKind.COMPILE_WORKING_SET_EXCEEDED
+            )
+        if semantic_projection:
+            return FrozenProviderInputAppendSemanticProjection(
+                projected_input=FrozenModelInputSemanticProjection(
+                    canonical_input_identity=identity,
+                    system_prompt=system_prompt,
+                    messages=messages,
+                    message_placements=message_placements,
+                    tools=tools,
+                    final_estimate=estimate,
+                    source_decisions=fresh.source_decisions,
+                    tool_result_decisions=fresh.tool_result_decisions,
+                    diagnostic_codes=fresh.diagnostic_codes,
+                    source_collection_fingerprint=(
+                        request.sources.collection_fingerprint
+                    ),
+                    compile_binding_fingerprint=(
+                        request.compile_binding.binding_fingerprint
+                    ),
+                ),
+                canonical_frontier=frontier,
+                appended_message_count=len(suffix_messages),
+                reset_reason=reset_reason,
             )
         decision_digest = context_fingerprint(
             "pulsara:model-input-append-decisions:v1",
@@ -1229,7 +1354,11 @@ class StructuredModelInputCompiler:
         predecessor: object,
         frontier: ProcessLocalCanonicalFrontier,
         deadline: _CompileDeadline,
-    ) -> FrozenProviderInputAppendCompileResult:
+        semantic_projection: bool,
+    ) -> (
+        FrozenProviderInputAppendCompileResult
+        | FrozenProviderInputAppendSemanticProjection
+    ):
         """Allocate only the not-yet-installed suffix of a compatible epoch."""
 
         deadline.check()
@@ -1499,6 +1628,8 @@ class StructuredModelInputCompiler:
         while current_total > budget:
             deadline.check()
             if not heap:
+                if semantic_projection:
+                    break
                 failure = (
                     ModelInputCompileFailureKind.FULL_REQUIRED_TOOL_RESULT_EXCEEDS_INPUT_BUDGET
                     if any(state.requires_full() for state in tool_states)
@@ -1601,9 +1732,7 @@ class StructuredModelInputCompiler:
                 ),
                 channel=ContextChannel.RUNTIME_OBSERVATION,
                 selected_mode=(
-                    ContextRenderMode.FULL
-                    if item.state is None
-                    else item.state.mode()
+                    ContextRenderMode.FULL if item.state is None else item.state.mode()
                 ),
                 included=(item.state is None or not item.state.omitted),
                 estimated_tokens=(
@@ -1628,13 +1757,13 @@ class StructuredModelInputCompiler:
                     else "UNAVAILABLE_FOR_BUDGET"
                     if item.state is not None and item.state.is_unavailable()
                     else "SELECTED_FULL"
-                    if item.state is None
-                    or item.state.mode() is ContextRenderMode.FULL
+                    if item.state is None or item.state.mode() is ContextRenderMode.FULL
                     else "DEGRADED_FOR_BUDGET"
                 ),
             )
             for item in sorted(
-                emissions, key=lambda value: (value.placement_ordinal, value.source_kind.value)
+                emissions,
+                key=lambda value: (value.placement_ordinal, value.source_kind.value),
             )
         )
         tool_decisions = tuple(
@@ -1645,9 +1774,7 @@ class StructuredModelInputCompiler:
                 current_turn=state.current_turn,
                 first_legal_mode=state.first_mode(),
                 selected_mode=state.mode(),
-                delivery_requirement=(
-                    state.item.tool_result_delivery.requirement
-                ),
+                delivery_requirement=(state.item.tool_result_delivery.requirement),
                 full_delivery_reason=state.item.tool_result_delivery.reason,
                 estimated_tokens=request.compile_binding.estimator.estimate_message(
                     state.message()
@@ -1682,6 +1809,29 @@ class StructuredModelInputCompiler:
         diagnostic_codes = tuple(dict.fromkeys(diagnostics))[
             : self._limits.maximum_diagnostics
         ]
+        if semantic_projection:
+            return FrozenProviderInputAppendSemanticProjection(
+                projected_input=FrozenModelInputSemanticProjection(
+                    canonical_input_identity=request.canonical_input.identity,
+                    system_prompt=layout.system_prompt,
+                    messages=layout.messages,
+                    message_placements=layout.message_placements,
+                    tools=predecessor.tools,
+                    final_estimate=layout.estimate,
+                    source_decisions=source_decisions,
+                    tool_result_decisions=tool_decisions,
+                    diagnostic_codes=diagnostic_codes,
+                    source_collection_fingerprint=(
+                        request.sources.collection_fingerprint
+                    ),
+                    compile_binding_fingerprint=(
+                        request.compile_binding.binding_fingerprint
+                    ),
+                ),
+                canonical_frontier=frontier,
+                appended_message_count=(len(layout.messages) - len(previous_messages)),
+                reset_reason=None,
+            )
         prefix_message_tokens = predecessor.final_estimate.message_tokens
         prefix_fingerprint = predecessor.semantic_prefix_fingerprint
         source_tokens = sum(decision.estimated_tokens for decision in source_decisions)
@@ -1692,7 +1842,9 @@ class StructuredModelInputCompiler:
                 "sources": tuple(
                     (
                         item.source_kind.value,
-                        None if item.selected_mode is None else item.selected_mode.value,
+                        None
+                        if item.selected_mode is None
+                        else item.selected_mode.value,
                         item.included,
                         item.reason_code,
                     )
@@ -2046,9 +2198,7 @@ class StructuredModelInputCompiler:
             selectable_costs = costs[initial_position:]
             if any(
                 after > before
-                for before, after in zip(
-                    selectable_costs, selectable_costs[1:]
-                )
+                for before, after in zip(selectable_costs, selectable_costs[1:])
             ):
                 raise StructuredModelInputCompileError(
                     ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
@@ -2091,8 +2241,7 @@ class StructuredModelInputCompiler:
                 or fact.placement_ordinal != placement
                 or fact.degradation_priority != degradation
                 or fact.lifecycle is not lifecycle
-                or fact.absence_kind
-                not in _SOURCE_ABSENCE_POLICY[fact.source_kind]
+                or fact.absence_kind not in _SOURCE_ABSENCE_POLICY[fact.source_kind]
             ):
                 raise StructuredModelInputCompileError(
                     ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
@@ -2160,9 +2309,7 @@ class StructuredModelInputCompiler:
             max(
                 0,
                 _message_logical_utf8_bytes(
-                    source_variant_message(
-                        candidate, variant.text, mode=variant.mode
-                    )
+                    source_variant_message(candidate, variant.text, mode=variant.mode)
                 )
                 - variant.utf8_bytes,
             )
@@ -2415,7 +2562,10 @@ class StructuredModelInputCompiler:
             for item in lowered
         )
         if request.dispatch_anchor_entry_id is None:
-            ordered = (*transcript, *((item[0], item[1], None) for item in observations))
+            ordered = (
+                *transcript,
+                *((item[0], item[1], None) for item in observations),
+            )
         else:
             indexes = tuple(
                 index
@@ -2521,8 +2671,10 @@ class StructuredModelInputCompiler:
 
     @staticmethod
     def _tool_can_advance(state: _ToolState) -> bool:
-        return not state.requires_full() and not state.exhausted and state.selected + 1 < len(
-            state.lowered.tool_result_variants
+        return (
+            not state.requires_full()
+            and not state.exhausted
+            and state.selected + 1 < len(state.lowered.tool_result_variants)
         )
 
     @staticmethod
@@ -2579,9 +2731,7 @@ class StructuredModelInputCompiler:
         ):
             return ModelInputCompileFailureKind.TOOL_SCHEMA_EXCEEDS_BUDGET
         if any(state.requires_full() for state in tools):
-            return (
-                ModelInputCompileFailureKind.FULL_REQUIRED_TOOL_RESULT_EXCEEDS_INPUT_BUDGET
-            )
+            return ModelInputCompileFailureKind.FULL_REQUIRED_TOOL_RESULT_EXCEEDS_INPUT_BUDGET
         tool_by_identity = {id(state.lowered): state for state in tools}
         protected = tuple(
             item.fixed_message

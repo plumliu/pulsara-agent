@@ -585,16 +585,88 @@ class ConversationKernelRunner:
                 dispatch = successor_dispatch
                 successor_dispatch = None
                 if dispatch is None:
+                    headroom_admission = None
+                    if self.compaction.automatic_allowed(
+                        scope_kind=intent.scope_kind,
+                        scope_subagent_task_id=intent.scope_subagent_task_id,
+                    ):
+                        headroom_admission = (
+                            await self.compaction.prepare_precompile_admission(
+                                turn_id=turn_id,
+                                model_call_index=model_call_count,
+                                deadline=planning_deadline,
+                            )
+                        )
+                        auto_trigger = (
+                            CompactionTrigger.MID_TURN_FOLLOWUP
+                            if completed_tool_batch
+                            else CompactionTrigger.AUTO_ACTIVE_CONTEXT
+                        )
+                        precompile = await self.compaction.prepare_precompile(
+                            turn_id=turn_id,
+                            model_call_index=model_call_count,
+                            inherited_memory_use_policy=current_memory_use_policy,
+                            trigger=auto_trigger,
+                            scope_kind=intent.scope_kind,
+                            scope_subagent_task_id=intent.scope_subagent_task_id,
+                            headroom_admission=headroom_admission,
+                        )
+                        headroom_admission = precompile.ordinary_admission
+                        prepared_compaction = precompile.compaction
+                        if prepared_compaction is not None:
+                            compaction = await self.compaction.execute_active(
+                                turn_id=turn_id,
+                                model_call_index=model_call_count,
+                                inherited_memory_use_policy=(
+                                    current_memory_use_policy
+                                ),
+                                trigger=auto_trigger,
+                                force=False,
+                                manual_request=None,
+                                scope_kind=intent.scope_kind,
+                                scope_subagent_task_id=(
+                                    intent.scope_subagent_task_id
+                                ),
+                                prepared_source=prepared_compaction,
+                            )
+                            if compaction.successor_dispatch is not None:
+                                model_call_count -= 1
+                                successor_dispatch = compaction.successor_dispatch
+                                completed_tool_batch = False
+                                continue
                     while True:
                         try:
-                            dispatch = await self._provider_dispatch.prepare(
+                            prepared_dispatch = await self._provider_dispatch.prepare(
                                 turn_id=turn_id,
                                 model_call_index=model_call_count,
                                 inherited_memory_use_policy=(current_memory_use_policy),
                                 deadline=planning_deadline,
+                                existing_handle=(
+                                    None
+                                    if headroom_admission is None
+                                    else headroom_admission.handle
+                                ),
+                                headroom_preflight_override=(
+                                    None
+                                    if headroom_admission is None
+                                    else headroom_admission.preflight
+                                ),
+                                prepared_target_override=(
+                                    None
+                                    if headroom_admission is None
+                                    else headroom_admission.prepared_target
+                                ),
                             )
+                            if not isinstance(
+                                prepared_dispatch, PreparedProviderDispatch
+                            ):
+                                raise RuntimeError(
+                                    "normal provider preparation returned a projection"
+                                )
+                            dispatch = prepared_dispatch
                             break
                         except PreparedSteerPlanStale:
+                            headroom_admission = None
                             steer_plan_retries += 1
                             if (
                                 steer_plan_retries >= 3

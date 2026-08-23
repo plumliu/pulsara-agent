@@ -34,6 +34,7 @@ from pulsara_agent.conversation_kernel.compaction.contracts import (
     CONTEXT_SNAPSHOT_MEDIA_TYPE,
     CompactionCanonicalAdoptionFactoryInput,
     CompactionCanonicalWritePreconditions,
+    CompactionContinuationMode,
     CompactionAttemptPhase,
     CompactionConfirmationKind,
     CompactionDisposition,
@@ -43,6 +44,8 @@ from pulsara_agent.conversation_kernel.compaction.contracts import (
     CompactionTrigger,
     ExpectedCompactionPredecessorRevision,
     FrozenCompactionCanonicalRead,
+    FrozenCompactionActiveRequest,
+    FrozenCompactionSourceView,
     PreparedCompactionCanonicalAdoption,
     manual_compaction_stable_suffix,
     build_prepared_compaction_canonical_adoption,
@@ -62,6 +65,7 @@ from pulsara_agent.conversation_kernel.compaction.planner import (
     crosses_compaction_resource_headroom,
     enumerate_complete_tool_groups,
     estimate_unavoidable_compaction_successor_tokens,
+    freeze_compaction_continuation,
     freeze_compaction_source_view,
     freeze_tail_and_prefix,
     rebase_compaction_dispatch_read_through_sequence,
@@ -72,6 +76,7 @@ from pulsara_agent.conversation_kernel.compaction.planner import (
 
 from pulsara_agent.conversation_kernel.compaction.prompt import (
     build_compaction_snapshot_carrier,
+    compaction_summary_request,
     freeze_compaction_summary_output,
 )
 
@@ -127,7 +132,9 @@ from pulsara_agent.conversation_kernel.repository import (
 
 from pulsara_agent.conversation_kernel.provider_dispatch import (
     KernelModelPort,
+    PreparedCompactionSourceDispatch,
     PreparedProviderDispatch,
+    PreparedProviderHeadroomAdmission,
     ProviderDispatchCoordinator,
     canonical_frontier,
     compile_structured_append,
@@ -204,6 +211,34 @@ class CompactionExecutionResult:
     )
 
 
+@dataclass(frozen=True, slots=True)
+class PreparedPrecompileCompaction:
+    """Exact non-executable source retained across the decision/attempt seam."""
+
+    dispatch: PreparedCompactionSourceDispatch = dataclass_field(repr=False)
+    canonical_read: FrozenCompactionCanonicalRead = dataclass_field(repr=False)
+    source_view: FrozenCompactionSourceView = dataclass_field(repr=False)
+
+    def close(self) -> None:
+        self.dispatch.handle.close()
+
+
+@dataclass(frozen=True, slots=True)
+class PrecompileCompactionDecision:
+    """Closed result of the exact projection before an ordinary compile."""
+
+    compaction: PreparedPrecompileCompaction | None = dataclass_field(
+        default=None, repr=False
+    )
+    ordinary_admission: PreparedProviderHeadroomAdmission | None = dataclass_field(
+        default=None, repr=False
+    )
+
+    def __post_init__(self) -> None:
+        if self.compaction is not None and self.ordinary_admission is not None:
+            raise ValueError("precompile decision owns two continuations")
+
+
 class CompactionCoordinator:
     """Own active/idle compaction planning, adoption and successor installation."""
 
@@ -258,6 +293,19 @@ class CompactionCoordinator:
             turn_id=turn_id,
         )
 
+    async def prepare_precompile_admission(
+        self,
+        *,
+        turn_id: str,
+        model_call_index: int,
+        deadline: float,
+    ) -> PreparedProviderHeadroomAdmission:
+        return await self._provider_dispatch.prepare_headroom_admission(
+            turn_id=turn_id,
+            model_call_index=model_call_index,
+            deadline=deadline,
+        )
+
     def automatic_allowed(
         self,
         *,
@@ -304,9 +352,140 @@ class CompactionCoordinator:
         manual_request: ManualCompactionRequest | None,
         scope_kind: ModelInputScopeKind,
         scope_subagent_task_id: str | None,
+        prepared_source: PreparedPrecompileCompaction | None = None,
+    ) -> CompactionExecutionResult:
+        return await self._execute_active(
+            turn_id=turn_id,
+            model_call_index=model_call_index,
+            inherited_memory_use_policy=inherited_memory_use_policy,
+            trigger=trigger,
+            force=force,
+            manual_request=manual_request,
+            scope_kind=scope_kind,
+            scope_subagent_task_id=scope_subagent_task_id,
+            prepared_source=prepared_source,
+        )
+
+    async def prepare_precompile(
+        self,
+        *,
+        turn_id: str,
+        model_call_index: int,
+        inherited_memory_use_policy: MemoryUsePolicy,
+        trigger: CompactionTrigger,
+        scope_kind: ModelInputScopeKind,
+        scope_subagent_task_id: str | None,
+        headroom_admission: PreparedProviderHeadroomAdmission,
+    ) -> PrecompileCompactionDecision:
+        owner = self._compaction_owner
+        if owner is None:
+            headroom_admission.close()
+            return PrecompileCompactionDecision()
+        try:
+            scope = CompactionScope(
+                session_id=self._writer_lease.guard.session_id,
+                workspace_id=await self._resolved_workspace_id(),
+                turn_id=turn_id,
+                scope_kind=scope_kind,
+                scope_subagent_task_id=scope_subagent_task_id,
+            )
+        except BaseException:
+            headroom_admission.close()
+            raise
+
+        async def operation() -> PreparedPrecompileCompaction | None:
+            deadline = monotonic() + owner.policy.planning_attempt_seconds
+            dispatch = await self._provider_dispatch.prepare_compaction_source(
+                turn_id=turn_id,
+                model_call_index=model_call_index,
+                inherited_memory_use_policy=inherited_memory_use_policy,
+                deadline=deadline,
+                existing_handle=headroom_admission.handle,
+                headroom_preflight_override=headroom_admission.preflight,
+                prepared_target_override=headroom_admission.prepared_target,
+            )
+            try:
+                canonical_read = await self._io.run(
+                    self._input_reader.read_frozen_compaction_cut,
+                    dispatch.handle.cut,
+                    deadline_monotonic=deadline,
+                )
+                if (
+                    canonical_read.scope != scope
+                    or canonical_read.turn_status != "RUNNING"
+                ):
+                    raise CompactionPlanningError(
+                        "precompile compaction target changed at admission"
+                    )
+                preflight = headroom_admission.preflight
+                canonical_range = canonical_read.safe_head_range
+                if (
+                    preflight.effective_materialization_lineage_floor
+                    != canonical_range.effective_materialization_lineage_floor
+                ):
+                    raise CompactionPlanningError(
+                        "compaction headroom quote differs from its frozen source"
+                    )
+                source_view = freeze_compaction_source_view(
+                    canonical_read=canonical_read,
+                    compile_binding=dispatch.prepared_call.compile_binding,
+                    semantic_projection=dispatch.projection,
+                    predecessor_epoch_view=dispatch.planning.predecessor_view,
+                )
+                if not should_trigger_compaction(
+                    source_view=source_view,
+                    policy=owner.policy,
+                    force=False,
+                ):
+                    return None
+                return PreparedPrecompileCompaction(
+                    dispatch=dispatch,
+                    canonical_read=canonical_read,
+                    source_view=source_view,
+                )
+            except BaseException:
+                dispatch.handle.close()
+                raise
+
+        try:
+            prepared = await owner.run_fenced(
+                scope=scope,
+                trigger=trigger,
+                operation=operation,
+            )
+            if prepared is None:
+                return PrecompileCompactionDecision(
+                    ordinary_admission=headroom_admission
+                )
+            return PrecompileCompactionDecision(compaction=prepared)
+        except (asyncio.CancelledError, StaleHostWriter):
+            headroom_admission.close()
+            raise
+        except BaseException:
+            headroom_admission.close()
+            owner.record_automatic_failure(
+                scope_kind=scope_kind,
+                scope_subagent_task_id=scope_subagent_task_id,
+            )
+            return PrecompileCompactionDecision()
+
+    async def _execute_active(
+        self,
+        *,
+        turn_id: str,
+        model_call_index: int,
+        inherited_memory_use_policy: MemoryUsePolicy,
+        trigger: CompactionTrigger,
+        force: bool,
+        manual_request: ManualCompactionRequest | None,
+        scope_kind: ModelInputScopeKind,
+        scope_subagent_task_id: str | None,
+        prepared_source: PreparedPrecompileCompaction | None,
     ) -> CompactionExecutionResult:
         owner = self._compaction_owner
         if owner is None:
+            if prepared_source is not None:
+                prepared_source.close()
             return CompactionExecutionResult(
                 CompactionOutcome(
                     CompactionDisposition.NOT_NEEDED,
@@ -322,13 +501,18 @@ class CompactionCoordinator:
         ):
             raise RuntimeError("manual compaction belongs to another scope")
         scope_task_id = scope_subagent_task_id
-        provisional_scope = CompactionScope(
-            session_id=self._writer_lease.guard.session_id,
-            workspace_id=await self._resolved_workspace_id(),
-            turn_id=turn_id,
-            scope_kind=scope_kind,
-            scope_subagent_task_id=scope_task_id,
-        )
+        try:
+            provisional_scope = CompactionScope(
+                session_id=self._writer_lease.guard.session_id,
+                workspace_id=await self._resolved_workspace_id(),
+                turn_id=turn_id,
+                scope_kind=scope_kind,
+                scope_subagent_task_id=scope_task_id,
+            )
+        except BaseException:
+            if prepared_source is not None:
+                prepared_source.close()
+            raise
 
         async def operation() -> CompactionExecutionResult:
             return await self._execute_active_compaction_fenced(
@@ -342,6 +526,7 @@ class CompactionCoordinator:
                 stable_command_id=(
                     None if manual_request is None else manual_request.command_id
                 ),
+                prepared_source=prepared_source,
             )
 
         try:
@@ -390,10 +575,13 @@ class CompactionCoordinator:
             )
         else:
             execution = outcome
+        finally:
+            if prepared_source is not None:
+                prepared_source.close()
         outcome = execution.outcome
         if manual_request is not None:
             await owner.settle_manual(manual_request, outcome)
-        elif outcome.disposition is not CompactionDisposition.COMPACTED:
+        elif outcome.disposition is CompactionDisposition.FAILED:
             owner.record_automatic_failure(
                 scope_kind=scope_kind,
                 scope_subagent_task_id=scope_task_id,
@@ -474,7 +662,7 @@ class CompactionCoordinator:
     async def _quote_idle_compaction_base(
         self,
         *,
-        dispatch: PreparedProviderDispatch,
+        dispatch: PreparedCompactionSourceDispatch,
         synthetic_read: FrozenCanonicalProviderDispatchRead,
         deadline: float,
     ) -> FrozenProviderInputAppendCompileResult:
@@ -557,30 +745,48 @@ class CompactionCoordinator:
         target_branch: CompactionTargetBranch,
         stable_command_id: str | None,
         maximum_retained_tool_groups: int | None = None,
+        prepared_source: PreparedPrecompileCompaction | None = None,
     ) -> CompactionExecutionResult:
         owner = self._compaction_owner
         if owner is None:
             raise RuntimeError("active compaction lacks its Host owner")
         deadline = monotonic() + owner.policy.planning_attempt_seconds
-        dispatch = await self._provider_dispatch.prepare(
-            turn_id=turn_id,
-            model_call_index=model_call_index,
-            inherited_memory_use_policy=inherited_memory_use_policy,
-            deadline=deadline,
-            allow_steers=False,
-            allow_terminal_compaction=(
-                target_branch is CompactionTargetBranch.IDLE_BASE_ONLY
-            ),
-            semantic_only=(target_branch is CompactionTargetBranch.IDLE_BASE_ONLY),
-        )
+        if prepared_source is None:
+            dispatch = await self._provider_dispatch.prepare_compaction_source(
+                turn_id=turn_id,
+                model_call_index=model_call_index,
+                inherited_memory_use_policy=inherited_memory_use_policy,
+                deadline=deadline,
+                allow_terminal_compaction=(
+                    target_branch is CompactionTargetBranch.IDLE_BASE_ONLY
+                ),
+            )
+            try:
+                compaction_read = await self._io.run(
+                    self._input_reader.read_frozen_compaction_cut,
+                    dispatch.handle.cut,
+                    deadline_monotonic=deadline,
+                )
+                source_view = freeze_compaction_source_view(
+                    canonical_read=compaction_read,
+                    compile_binding=dispatch.prepared_call.compile_binding,
+                    semantic_projection=dispatch.projection,
+                    predecessor_epoch_view=dispatch.planning.predecessor_view,
+                )
+            except BaseException:
+                dispatch.handle.close()
+                raise
+        else:
+            if target_branch is not CompactionTargetBranch.ACTIVE_INSTALLATION:
+                raise ValueError(
+                    "precompile source is only valid for active compaction"
+                )
+            dispatch = prepared_source.dispatch
+            compaction_read = prepared_source.canonical_read
+            source_view = prepared_source.source_view
         dry_dispatch: PreparedProviderDispatch | None = None
         runtime_handoff: FrozenCompactionRuntimeHandoff | None = None
         try:
-            compaction_read = await self._io.run(
-                self._input_reader.read_frozen_compaction_cut,
-                dispatch.handle.cut,
-                deadline_monotonic=deadline,
-            )
             expected_statuses = (
                 {"RUNNING"}
                 if target_branch is CompactionTargetBranch.ACTIVE_INSTALLATION
@@ -591,13 +797,6 @@ class CompactionCoordinator:
                 or compaction_read.turn_status not in expected_statuses
             ):
                 raise CompactionPlanningError("compaction target changed at admission")
-            predecessor = dispatch.planning.predecessor_view
-            source_view = freeze_compaction_source_view(
-                canonical_read=compaction_read,
-                compile_binding=dispatch.prepared_call.compile_binding,
-                compiled_result=dispatch.append_result,
-                predecessor_epoch_view=predecessor,
-            )
             if not should_trigger_compaction(
                 source_view=source_view,
                 policy=owner.policy,
@@ -617,10 +816,15 @@ class CompactionCoordinator:
             tail = None
             prefix = None
             recent = None
+            selected_continuation: tuple[
+                CompactionContinuationMode,
+                FrozenCompactionActiveRequest | None,
+            ] | None = None
             selected_retained_count: int | None = None
             summary_call = self._model.resolve_compaction_summary_call(
                 active_prepared_call=dispatch.prepared_call
             )
+            summary_request = compaction_summary_request(target_branch)
             maximum_retained = min(
                 owner.policy.maximum_retained_tool_groups,
                 len(groups),
@@ -642,6 +846,9 @@ class CompactionCoordinator:
                         source_view=source_view,
                         complete_tool_groups=groups,
                         retained_group_count=retained_count,
+                        source_projection=dispatch.projection.projected_input,
+                        summary_request=summary_request,
+                        deadline_monotonic=deadline,
                     )
                     canonical = (
                         compaction_read.dispatch_read.compile_snapshot.canonical_input
@@ -660,18 +867,33 @@ class CompactionCoordinator:
                         owner.policy.maximum_retained_tail_utf8_bytes
                     ):
                         continue
+                    candidate_continuation = freeze_compaction_continuation(
+                        source_view=source_view,
+                        target_branch=target_branch,
+                        source_through_sequence=(
+                            candidate_prefix.source_through_sequence
+                        ),
+                    )
+                    candidate_active_request = candidate_continuation[1]
                     candidate_recent = select_recent_human_messages(
                         canonical_read=compaction_read,
                         source_through_sequence=(
                             candidate_prefix.source_through_sequence
                         ),
                         policy=owner.policy,
+                        excluded_entry_id=(
+                            None
+                            if candidate_active_request is None
+                            else candidate_active_request.entry_id
+                        ),
                     )
                     unavoidable_tokens = (
                         estimate_unavoidable_compaction_successor_tokens(
                             source_view=source_view,
                             tail=candidate_tail,
                             recent_user_messages=candidate_recent,
+                            continuation_mode=candidate_continuation[0],
+                            active_request=candidate_active_request,
                             deadline_monotonic=deadline,
                         )
                     )
@@ -692,11 +914,12 @@ class CompactionCoordinator:
                     candidate_semantic = prepare_compaction_summary_semantic(
                         call=summary_call,
                         source_view=source_view,
-                        source_compiled_input=dispatch.append_result.compiled_input,
+                        source_projection=dispatch.projection.projected_input,
                         prefix_proof=candidate_prefix,
                         native_projection_set=(
                             dispatch.tool_exposure_plan.direct_projection_set
                         ),
+                        summary_request=summary_request,
                     )
                 except (CompactionPlanningError, ValueError):
                     continue
@@ -704,6 +927,7 @@ class CompactionCoordinator:
                 tail = candidate_tail
                 prefix = candidate_prefix
                 recent = candidate_recent
+                selected_continuation = candidate_continuation
                 selected_retained_count = retained_count
                 break
             if (
@@ -711,6 +935,7 @@ class CompactionCoordinator:
                 or tail is None
                 or prefix is None
                 or recent is None
+                or selected_continuation is None
                 or selected_retained_count is None
             ):
                 return CompactionExecutionResult(
@@ -781,6 +1006,8 @@ class CompactionCoordinator:
             carrier = build_compaction_snapshot_carrier(
                 summary=summary,
                 recent_user_messages=tuple(item.text for item in recent),
+                continuation_mode=selected_continuation[0],
+                active_request=selected_continuation[1],
             )
             content = await self._content(
                 carrier.body,
@@ -883,10 +1110,8 @@ class CompactionCoordinator:
                     scope_subagent_task_id=(expected_scope.scope_subagent_task_id),
                     phase=CompactionAttemptPhase.ADOPTION_PREPARED,
                 )
-                # Summary only borrows the old execution-backed surface as a
-                # semantic replay fact.  The successor must use a fresh Round
-                # 9 EMPTY selection and its own exact physical borrow.
-                dispatch.close_surface_borrow()
+                # The source projection is semantic-only.  The successor uses
+                # a fresh Round 9 EMPTY selection and its own physical borrow.
                 seed = CompactionContinuationSeed(
                     dispatch_read=synthetic_read,
                     binding_rewrite_identity=(candidate.binding.binding_revision_id),
@@ -941,7 +1166,6 @@ class CompactionCoordinator:
                         dry_dispatch.close_surface_borrow()
                         dry_dispatch = None
                     dispatch.handle.close()
-                    dispatch.close_surface_borrow()
                     return await self._execute_active_compaction_fenced(
                         turn_id=turn_id,
                         model_call_index=model_call_index,
@@ -1029,7 +1253,6 @@ class CompactionCoordinator:
                 raise
         finally:
             dispatch.handle.close()
-            dispatch.close_surface_borrow()
             if dry_dispatch is not None:
                 dry_dispatch.handle.close()
                 dry_dispatch.close_surface_borrow()

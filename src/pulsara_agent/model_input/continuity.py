@@ -28,6 +28,7 @@ from pulsara_agent.model_input.contracts import (
     ContextTrustClass,
     FrozenCompiledModelInput,
     FrozenCompiledMessagePlacement,
+    FrozenModelInputSemanticProjection,
     FrozenToolSpec,
     ModelInputScopeKind,
 )
@@ -35,7 +36,7 @@ from pulsara_agent.primitives.context import canonical_json_bytes, context_finge
 
 
 PROVIDER_MESSAGE_LOWERING_CONTRACT = (
-    "pulsara.provider-message-lowering.prefix-continuity.v4-unified-capability"
+    "pulsara.provider-message-lowering.prefix-continuity.v5-durable-handoff"
 )
 FULL_HISTORY_CONTEXT_BASE_IDENTITY = context_fingerprint(
     "pulsara:context-base-semantic-identity:v1",
@@ -81,7 +82,10 @@ class ProviderInputEpochCompatibility:
     )
 
     def __post_init__(self) -> None:
-        if not self.compiler_contract_version or not self.provider_message_lowering_contract:
+        if (
+            not self.compiler_contract_version
+            or not self.provider_message_lowering_contract
+        ):
             raise ValueError("provider-input epoch compatibility is incomplete")
         for value, name in (
             (self.base_system_semantic_fingerprint, "base system"),
@@ -114,13 +118,16 @@ class ProcessLocalCanonicalFrontier:
             _fingerprint(value, "canonical item")
 
     def require_prefix_of(self, successor: "ProcessLocalCanonicalFrontier") -> None:
-        if self.context_base_semantic_identity != successor.context_base_semantic_identity:
+        if (
+            self.context_base_semantic_identity
+            != successor.context_base_semantic_identity
+        ):
             raise ValueError("canonical context base changed inside an epoch")
         if successor.through_sequence < self.through_sequence:
             raise ValueError("canonical frontier sequence moved backwards")
-        if successor.ordered_item_fingerprints[: len(self.ordered_item_fingerprints)] != (
-            self.ordered_item_fingerprints
-        ):
+        if successor.ordered_item_fingerprints[
+            : len(self.ordered_item_fingerprints)
+        ] != (self.ordered_item_fingerprints):
             raise ValueError("canonical provider-input prefix was rewritten")
 
 
@@ -320,7 +327,10 @@ def provider_input_prefix_fingerprint(
 
 
 def provider_input_logical_utf8_bytes(
-    *, system_prompt: str, tools: tuple[FrozenToolSpec, ...], messages: tuple[LLMMessage, ...]
+    *,
+    system_prompt: str,
+    tools: tuple[FrozenToolSpec, ...],
+    messages: tuple[LLMMessage, ...],
 ) -> int:
     values: list[str] = [system_prompt]
     values.extend(item.canonical_bytes.decode("utf-8") for item in tools)
@@ -346,9 +356,7 @@ class FrozenProviderInputEpochView:
     system_prompt: str = field(repr=False)
     tools: tuple[FrozenToolSpec, ...] = field(repr=False)
     messages: tuple[LLMMessage, ...] = field(repr=False)
-    message_placements: tuple[FrozenCompiledMessagePlacement, ...] = field(
-        repr=False
-    )
+    message_placements: tuple[FrozenCompiledMessagePlacement, ...] = field(repr=False)
     wire_input_plan: FrozenProviderWireInputPlan = field(repr=False)
     tool_exposure_plan: FrozenToolCapabilityExposurePlan = field(repr=False)
     canonical_frontier: ProcessLocalCanonicalFrontier
@@ -392,8 +400,7 @@ class FrozenProviderInputEpochView:
             )
             or self.wire_input_plan.materialization.tool_items
             != tuple(
-                item.wire_tool
-                for item in direct_native_projection_set.projections
+                item.wire_tool for item in direct_native_projection_set.projections
             )
         ):
             raise ValueError("installed native tool proof drifted")
@@ -467,18 +474,14 @@ def provider_input_dispatch_anchor_value(
         return {
             "kind": "NEW_TRIGGER",
             "source_entry_id": anchor.source_entry_id,
-            "provider_input_item_fingerprint": (
-                anchor.provider_input_item_fingerprint
-            ),
+            "provider_input_item_fingerprint": (anchor.provider_input_item_fingerprint),
             "provider_group_boundary_fingerprint": (
                 anchor.provider_group_boundary_fingerprint
             ),
         }
     return {
         "kind": "NO_NEW_TRIGGER",
-        "predecessor_frontier_fingerprint": (
-            anchor.predecessor_frontier_fingerprint
-        ),
+        "predecessor_frontier_fingerprint": (anchor.predecessor_frontier_fingerprint),
     }
 
 
@@ -567,6 +570,32 @@ class FrozenProviderInputAppendCompileResult:
 
 
 @dataclass(frozen=True, slots=True)
+class FrozenProviderInputAppendSemanticProjection:
+    """Read-only prospective append; never a continuity install candidate."""
+
+    projected_input: FrozenModelInputSemanticProjection = field(repr=False)
+    canonical_frontier: ProcessLocalCanonicalFrontier
+    appended_message_count: int
+    reset_reason: ProviderInputEpochResetReason | None
+
+    def __post_init__(self) -> None:
+        identity = self.projected_input.canonical_input_identity
+        if (
+            self.appended_message_count < 0
+            or self.appended_message_count > len(self.projected_input.messages)
+            or self.canonical_frontier.latest_context_binding_revision_id
+            != identity.context_binding_revision_id
+            or self.canonical_frontier.through_sequence
+            != identity.provider_input_through_sequence
+            or (
+                self.reset_reason is not None
+                and self.appended_message_count != len(self.projected_input.messages)
+            )
+        ):
+            raise ValueError("projected append message count is invalid")
+
+
+@dataclass(frozen=True, slots=True)
 class ProcessLocalProviderInputInstallPermit:
     scope: ProviderInputContinuityScope
     epoch_nonce: str
@@ -582,6 +611,7 @@ __all__ = [
     "FULL_HISTORY_CONTEXT_BASE_IDENTITY",
     "FrozenProviderInputAppendPlanningInput",
     "FrozenProviderInputAppendCompileResult",
+    "FrozenProviderInputAppendSemanticProjection",
     "FrozenProviderInputEpochView",
     "MAXIMUM_PROVIDER_INPUT_EPOCH_BYTES",
     "NewTriggerAnchor",

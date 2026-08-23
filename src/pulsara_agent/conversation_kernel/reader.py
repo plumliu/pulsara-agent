@@ -21,6 +21,9 @@ from psycopg.rows import dict_row
 from pulsara_agent.conversation_kernel.repository_errors import (
     ConversationKernelConflict,
 )
+from pulsara_agent.conversation_kernel.compaction.prompt import (
+    parse_compaction_snapshot_carrier,
+)
 from pulsara_agent.primitives.context import canonical_json_bytes
 from pulsara_agent.model_input.contracts import (
     ApprovedPlanMaterializationFact,
@@ -727,6 +730,12 @@ class CanonicalProviderInputReader:
                     remaining_bytes=remaining_bytes,
                 )
                 text = _decode_provider_text(content, str(snapshot["content_codec"]))
+                try:
+                    parse_compaction_snapshot_carrier(content)
+                except ValueError as error:
+                    raise ConversationKernelConflict(
+                        "context snapshot carrier is invalid"
+                    ) from error
                 items.append(
                     ProviderInputItem(
                         item_kind=ProviderInputItemKind.CONTEXT_SNAPSHOT,

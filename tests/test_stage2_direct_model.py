@@ -528,6 +528,40 @@ def test_stage2_direct_model_freezes_output_budget_system_and_tools() -> None:
 
 
 @pytest.mark.parametrize(
+    ("api", "payload_builder"),
+    (
+        ("openai_chat_completions", build_chat_completions_payload),
+        ("openai_responses", build_responses_payload),
+    ),
+)
+def test_round5b_adapter_encodes_explicit_summary_tool_choice_auto(
+    api,
+    payload_builder,
+) -> None:
+    port = _port(api=api)
+    request, _tool_port = _prepared_execution(port)
+    owner, candidate = _continuity_candidate(request)
+    execution = port.preflight_execution(
+        request,
+        append_candidate=candidate,
+        install_authority=owner.install_authority,
+    )
+
+    ordinary_payload = payload_builder(
+        call=request.prepared_call.call,
+        context=execution.final_context,
+    )
+    summary_payload = payload_builder(
+        call=request.prepared_call.call,
+        context=replace(execution.final_context, tool_choice="auto"),
+    )
+
+    assert "tool_choice" not in ordinary_payload
+    assert summary_payload["tool_choice"] == "auto"
+    request.surface_borrow.close()
+
+
+@pytest.mark.parametrize(
     ("api", "payload_builder", "message_key", "system_key"),
     (
         (

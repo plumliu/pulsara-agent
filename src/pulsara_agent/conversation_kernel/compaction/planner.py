@@ -7,9 +7,13 @@ from time import monotonic
 
 from pulsara_agent.conversation_kernel.compaction.contracts import (
     ColdRebuildCompactionProjection,
+    CompactionActiveRequestLocation,
+    CompactionContinuationMode,
     CompactionPhysicalWorkingSetReport,
     CompactionSourceCompatibility,
+    CompactionTargetBranch,
     CompleteToolGroup,
+    FrozenCompactionActiveRequest,
     FrozenCompactionCanonicalRead,
     FrozenCompactionSourceView,
     ProtectedTailSelectionFact,
@@ -24,6 +28,7 @@ from pulsara_agent.conversation_kernel.compaction.contracts import (
 from pulsara_agent.conversation_kernel.compaction.prompt import (
     build_compaction_snapshot_carrier,
     freeze_compaction_summary_output,
+    parse_compaction_snapshot_carrier,
 )
 from pulsara_agent.llm.input import LLMMessage
 from pulsara_agent.model_input.contracts import (
@@ -36,6 +41,7 @@ from pulsara_agent.model_input.contracts import (
     FrozenContextBindingCompileFact,
     FrozenProviderInputItem,
     FrozenProviderInputItemKind,
+    FrozenModelInputSemanticProjection,
     FrozenToolSpec,
     ModelInputCompileBinding,
     PlanApprovedMaterializationDisposition,
@@ -47,7 +53,7 @@ from pulsara_agent.model_input.contracts import (
     provider_input_item_fingerprint,
 )
 from pulsara_agent.model_input.continuity import (
-    FrozenProviderInputAppendCompileResult,
+    FrozenProviderInputAppendSemanticProjection,
     FrozenProviderInputEpochView,
     PROVIDER_MESSAGE_LOWERING_CONTRACT,
     provider_input_logical_utf8_bytes,
@@ -128,9 +134,7 @@ def build_synthetic_compaction_dispatch_read(
         and item.source_entry_id is not None
     )
     closures = tuple(
-        item
-        for item in old_input.closures
-        if item.assistant_entry_id in request_ids
+        item for item in old_input.closures if item.assistant_entry_id in request_ids
     )
     late_outcomes = tuple(
         item
@@ -207,9 +211,7 @@ def build_synthetic_compaction_dispatch_read(
     object.__setattr__(provisional_binding, "fact_fingerprint", "")
     binding = FrozenContextBindingCompileFact(
         **binding_values,
-        fact_fingerprint=context_binding_compile_fact_fingerprint(
-            provisional_binding
-        ),
+        fact_fingerprint=context_binding_compile_fact_fingerprint(provisional_binding),
     )
     approved = _synthetic_approved_plan_fact(
         old_facts.approved_plan_materialization_fact,
@@ -223,9 +225,7 @@ def build_synthetic_compaction_dispatch_read(
         "plan_handoff_fact": old_facts.plan_handoff_fact,
         "approved_plan_materialization_fact": approved,
         "previous_turn_outcome_fact": old_facts.previous_turn_outcome_fact,
-        "tool_observation_freshness_fact": (
-            old_facts.tool_observation_freshness_fact
-        ),
+        "tool_observation_freshness_fact": (old_facts.tool_observation_freshness_fact),
     }
     provisional_facts = FrozenCanonicalCompileSnapshot.__new__(
         FrozenCanonicalCompileSnapshot
@@ -327,9 +327,7 @@ def rebase_compaction_dispatch_read_through_sequence(
             facts.approved_plan_materialization_fact
         ),
         "previous_turn_outcome_fact": facts.previous_turn_outcome_fact,
-        "tool_observation_freshness_fact": (
-            facts.tool_observation_freshness_fact
-        ),
+        "tool_observation_freshness_fact": (facts.tool_observation_freshness_fact),
     }
     provisional_facts = FrozenCanonicalCompileSnapshot.__new__(
         FrozenCanonicalCompileSnapshot
@@ -404,20 +402,33 @@ def freeze_compaction_source_view(
     *,
     canonical_read: FrozenCompactionCanonicalRead,
     compile_binding: ModelInputCompileBinding,
-    compiled_result: FrozenProviderInputAppendCompileResult,
+    semantic_projection: FrozenProviderInputAppendSemanticProjection,
     predecessor_epoch_view: FrozenProviderInputEpochView | None,
 ) -> FrozenCompactionSourceView:
     """Combine existing carriers without creating another executable input."""
 
-    compiled = compiled_result.compiled_input
+    compiled = semantic_projection.projected_input
     tools = compile_binding.tool_surface.tool_specs
     if compiled.tools != tools:
         raise CompactionPlanningError("compiled tools differ from the source binding")
     if compiled.compile_binding_fingerprint != compile_binding.binding_fingerprint:
         raise CompactionPlanningError("compiled input belongs to another target")
+    canonical = canonical_read.dispatch_read.compile_snapshot.canonical_input
+    if (
+        compiled.canonical_input_identity != canonical.identity
+        or semantic_projection.canonical_frontier.through_sequence
+        != canonical.identity.provider_input_through_sequence
+        or semantic_projection.canonical_frontier.latest_context_binding_revision_id
+        != canonical.identity.context_binding_revision_id
+        or semantic_projection.canonical_frontier.ordered_item_fingerprints
+        != tuple(provider_input_item_fingerprint(item) for item in canonical.items)
+    ):
+        raise CompactionPlanningError(
+            "semantic projection differs from the frozen canonical cut"
+        )
     if predecessor_epoch_view is None:
         compatibility = CompactionSourceCompatibility.EMPTY_COLD
-    elif compiled_result.reset_reason is None:
+    elif semantic_projection.reset_reason is None:
         compatibility = CompactionSourceCompatibility.COMPATIBLE_APPEND
     else:
         compatibility = CompactionSourceCompatibility.PENDING_NON_COMPACTION_RESET
@@ -429,7 +440,7 @@ def freeze_compaction_source_view(
             predecessor_epoch_view.system_prompt != compiled.system_prompt
             or predecessor_epoch_view.tools != compiled.tools
             or compiled.messages[:prefix_count] != predecessor_epoch_view.messages
-            or compiled_result.appended_message_count
+            or semantic_projection.appended_message_count
             != len(compiled.messages) - prefix_count
         ):
             raise CompactionPlanningError(
@@ -464,8 +475,7 @@ def freeze_compaction_source_view(
         "post_base_canonical_utf8_bytes": canonical_range.canonical_utf8_bytes,
         "continuity_epoch_logical_utf8_bytes": projection.logical_utf8_bytes,
         "resolved_hard_bound_set_fingerprint": (
-            resolved_compaction_headroom_bounds()
-            .resolved_hard_bound_set_fingerprint
+            resolved_compaction_headroom_bounds().resolved_hard_bound_set_fingerprint
         ),
     }
     working = CompactionPhysicalWorkingSetReport(**working_values)
@@ -530,9 +540,7 @@ def enumerate_complete_tool_groups(
         ):
             key = (item.tool_request_entry_id, item.tool_call_id)
             if key in results:
-                raise CompactionPlanningError(
-                    "tool result attribution is duplicated"
-                )
+                raise CompactionPlanningError("tool result attribution is duplicated")
             results[key] = provider_input_item_fingerprint(item)
     groups: list[CompleteToolGroup] = []
     for item in items:
@@ -564,21 +572,18 @@ def freeze_tail_and_prefix(
     source_view: FrozenCompactionSourceView,
     complete_tool_groups: tuple[CompleteToolGroup, ...],
     retained_group_count: int,
+    source_projection: FrozenModelInputSemanticProjection | None = None,
+    summary_request: str | None = None,
+    deadline_monotonic: float | None = None,
 ) -> tuple[ProtectedTailSelectionFact, ProviderPrefixCutProof]:
     """Freeze one of the closed longest-suffix tail candidates."""
 
     if not 0 <= retained_group_count <= len(complete_tool_groups):
         raise ValueError("retained compaction group count is out of bounds")
     retained = (
-        complete_tool_groups[-retained_group_count:]
-        if retained_group_count
-        else ()
+        complete_tool_groups[-retained_group_count:] if retained_group_count else ()
     )
     messages = source_view.materialized_messages()
-    placements = (
-        source_view.canonical_dispatch_read.compile_snapshot.canonical_input.items
-    )
-    del placements
     if retained:
         earliest = retained[0]
         call_ids = earliest.ordered_tool_call_ids
@@ -598,6 +603,95 @@ def freeze_tail_and_prefix(
         tail_start = len(messages)
         boundary = source_view.exact_safe_canonical_head
         earliest_id = None
+    budgeted = source_projection is not None
+    if budgeted != (summary_request is not None) or budgeted != (
+        deadline_monotonic is not None
+    ):
+        raise ValueError("budgeted prefix inputs are incomplete")
+    if source_projection is not None:
+        if (
+            source_projection.messages != messages
+            or source_projection.system_prompt
+            != source_view.materialized_system_prompt()
+            or source_projection.tools
+            != source_view.normal_compile_binding.tool_surface.tool_specs
+            or source_projection.compile_binding_fingerprint
+            != source_view.normal_compile_binding.binding_fingerprint
+        ):
+            raise CompactionPlanningError(
+                "budgeted prefix projection differs from its source view"
+            )
+        assert summary_request is not None
+        assert deadline_monotonic is not None
+        if monotonic() >= deadline_monotonic:
+            raise TimeoutError("compaction prefix planning deadline expired")
+        canonical = source_view.canonical_dispatch_read.compile_snapshot.canonical_input
+        sequence_by_entry = {
+            item.source_entry_id: item.source_entry_sequence
+            for item in canonical.items
+            if item.source_entry_id is not None
+            and item.source_entry_sequence is not None
+        }
+        placements = source_projection.message_placements
+        safe: list[tuple[int, int]] = []
+        if tail_start == len(messages):
+            safe.append((tail_start, boundary))
+        for count in range(1, tail_start + 1):
+            placement = placements[count - 1]
+            entry_id = placement.origin_entry_id
+            sequence = None if entry_id is None else sequence_by_entry.get(entry_id)
+            if sequence is None or messages[count - 1].tool_calls:
+                continue
+            if count < len(messages):
+                next_message = messages[count]
+                next_placement = placements[count]
+                if (
+                    next_message.tool_call_id is not None
+                    or next_placement.origin_entry_id == entry_id
+                ):
+                    continue
+            if any(
+                later.origin_entry_id is not None
+                and sequence_by_entry.get(later.origin_entry_id, sequence + 1)
+                <= sequence
+                for later in placements[count:]
+            ):
+                continue
+            safe.append((count, sequence))
+        safe_by_count = {count: through for count, through in safe}
+        if tail_start == len(messages):
+            safe_by_count[tail_start] = source_view.exact_safe_canonical_head
+        safe = sorted(safe_by_count.items())
+        if not safe:
+            raise CompactionPlanningError("source view has no safe summary prefix")
+        binding = source_view.normal_compile_binding
+
+        def fits(count: int) -> bool:
+            if monotonic() >= deadline_monotonic:
+                raise TimeoutError("compaction prefix planning deadline expired")
+            estimate = binding.estimator.estimate_frozen_input(
+                system_prompt=source_projection.system_prompt,
+                messages=messages[:count] + (LLMMessage.user(summary_request),),
+                tools=source_projection.tools,
+            )
+            return estimate.total_input_tokens <= binding.effective_input_budget_tokens
+
+        low = 0
+        high = len(safe) - 1
+        selected: tuple[int, int] | None = None
+        while low <= high:
+            middle = (low + high) // 2
+            candidate = safe[middle]
+            if fits(candidate[0]):
+                selected = candidate
+                low = middle + 1
+            else:
+                high = middle - 1
+        if selected is None:
+            raise CompactionPlanningError(
+                "no non-empty summary prefix fits the resolved input budget"
+            )
+        tail_start, boundary = selected
     tail_values = {
         "source_view_fingerprint": source_view.source_view_fingerprint,
         "retained_groups": retained,
@@ -647,6 +741,7 @@ def select_recent_human_messages(
     canonical_read: FrozenCompactionCanonicalRead,
     source_through_sequence: int,
     policy: ResolvedCompactionPolicy,
+    excluded_entry_id: str | None = None,
 ) -> tuple[RecentHumanMessageProof, ...]:
     items = tuple(
         item
@@ -658,6 +753,7 @@ def select_recent_human_messages(
             CanonicalInputOriginKind.HUMAN_STEER,
         }
         and item.source_entry_id is not None
+        and item.source_entry_id != excluded_entry_id
         and item.source_entry_sequence is not None
         and item.source_entry_sequence <= source_through_sequence
     )
@@ -682,6 +778,98 @@ def select_recent_human_messages(
     return tuple(reversed(selected))
 
 
+def freeze_compaction_continuation(
+    *,
+    source_view: FrozenCompactionSourceView,
+    target_branch: CompactionTargetBranch,
+    source_through_sequence: int,
+) -> tuple[CompactionContinuationMode, FrozenCompactionActiveRequest | None]:
+    """Classify the successor from canonical ownership, never summary prose."""
+
+    if target_branch is CompactionTargetBranch.IDLE_BASE_ONLY:
+        return CompactionContinuationMode.AWAIT_NEXT_USER, None
+    if target_branch is not CompactionTargetBranch.ACTIVE_INSTALLATION:
+        raise ValueError("unsupported compaction target branch")
+    canonical = source_view.canonical_dispatch_read.compile_snapshot.canonical_input
+    if not 0 <= source_through_sequence <= canonical.identity.provider_input_through_sequence:
+        raise ValueError("compaction continuation boundary is out of range")
+    active_entry_id = canonical.identity.initial_entry_id
+    matches = tuple(
+        item for item in canonical.items if item.source_entry_id == active_entry_id
+    )
+    if len(matches) > 1:
+        raise CompactionPlanningError("active request attribution is duplicated")
+    if matches:
+        item = matches[0]
+        request_like = (
+            item.item_kind is FrozenProviderInputItemKind.USER
+            and item.input_origin
+            in {
+                CanonicalInputOriginKind.HUMAN_MESSAGE,
+                CanonicalInputOriginKind.SUBAGENT_OBJECTIVE,
+                CanonicalInputOriginKind.SUBAGENT_RESULT,
+            }
+        ) or item.item_kind in {
+            FrozenProviderInputItemKind.PLAN_CONTINUATION,
+            FrozenProviderInputItemKind.TERMINAL_OBSERVATION,
+        }
+        if not request_like or item.source_entry_sequence is None:
+            raise CompactionPlanningError("active request is not a canonical request")
+        location = (
+            CompactionActiveRequestLocation.SNAPSHOT_EXACT
+            if item.source_entry_sequence <= source_through_sequence
+            else CompactionActiveRequestLocation.CANONICAL_SUFFIX
+        )
+        return (
+            CompactionContinuationMode.RESUME_ACTIVE_TURN,
+            FrozenCompactionActiveRequest(
+                entry_id=active_entry_id,
+                entry_sequence=item.source_entry_sequence,
+                location=location,
+                text=(
+                    item.text
+                    if location is CompactionActiveRequestLocation.SNAPSHOT_EXACT
+                    else None
+                ),
+            ),
+        )
+
+    snapshots = tuple(
+        item
+        for item in canonical.items
+        if item.item_kind is FrozenProviderInputItemKind.CONTEXT_SNAPSHOT
+    )
+    if len(snapshots) != 1:
+        raise CompactionPlanningError("active request is absent without one snapshot")
+    try:
+        predecessor = parse_compaction_snapshot_carrier(snapshots[0].text)
+    except ValueError as error:
+        raise CompactionPlanningError(
+            "predecessor snapshot continuation is invalid"
+        ) from error
+    active = predecessor.active_request
+    if (
+        predecessor.continuation_mode
+        is not CompactionContinuationMode.RESUME_ACTIVE_TURN
+        or active is None
+        or active.entry_id != active_entry_id
+        or active.location is not CompactionActiveRequestLocation.SNAPSHOT_EXACT
+        or active.text is None
+    ):
+        raise CompactionPlanningError(
+            "predecessor snapshot does not carry the active request"
+        )
+    return (
+        CompactionContinuationMode.RESUME_ACTIVE_TURN,
+        FrozenCompactionActiveRequest(
+            entry_id=active.entry_id,
+            entry_sequence=active.entry_sequence,
+            location=CompactionActiveRequestLocation.SNAPSHOT_EXACT,
+            text=active.text,
+        ),
+    )
+
+
 def should_trigger_compaction(
     *,
     source_view: FrozenCompactionSourceView,
@@ -696,9 +884,7 @@ def should_trigger_compaction(
     working = source_view.physical_working_set
     headroom_trigger = crosses_compaction_resource_headroom(
         post_base_item_count=working.post_base_item_count,
-        post_base_canonical_utf8_bytes=(
-            working.post_base_canonical_utf8_bytes
-        ),
+        post_base_canonical_utf8_bytes=(working.post_base_canonical_utf8_bytes),
         continuity_epoch_logical_utf8_bytes=(
             working.continuity_epoch_logical_utf8_bytes
         ),
@@ -715,8 +901,7 @@ def crosses_compaction_resource_headroom(
     bounds = resolved_compaction_headroom_bounds()
     return (
         post_base_item_count >= bounds.soft_canonical_item_limit
-        or post_base_canonical_utf8_bytes
-        >= bounds.soft_canonical_utf8_byte_limit
+        or post_base_canonical_utf8_bytes >= bounds.soft_canonical_utf8_byte_limit
         or continuity_epoch_logical_utf8_bytes
         >= bounds.soft_epoch_logical_utf8_byte_limit
     )
@@ -746,9 +931,7 @@ def validate_compaction_reclaim(
         )
     reclaim = source_tokens - successor_tokens
     if reclaim <= 0:
-        raise CompactionPlanningError(
-            "compaction successor does not reclaim context"
-        )
+        raise CompactionPlanningError("compaction successor does not reclaim context")
     if (
         reclaim < policy.minimum_reclaim_tokens
         and source_tokens <= hard_input_budget_tokens
@@ -762,9 +945,7 @@ def validate_compaction_reclaim(
         and successor_tokens
         > int(hard_input_budget_tokens * policy.post_compaction_target_ratio)
     ):
-        raise CompactionPlanningError(
-            "compaction successor exceeds its post target"
-        )
+        raise CompactionPlanningError("compaction successor exceeds its post target")
     return reclaim
 
 
@@ -773,6 +954,8 @@ def estimate_unavoidable_compaction_successor_tokens(
     source_view: FrozenCompactionSourceView,
     tail: ProtectedTailSelectionFact,
     recent_user_messages: tuple[RecentHumanMessageProof, ...],
+    continuation_mode: CompactionContinuationMode,
+    active_request: FrozenCompactionActiveRequest | None,
     deadline_monotonic: float,
 ) -> int:
     """Quote a conservative lower bound before opening the summary provider.
@@ -812,6 +995,8 @@ def estimate_unavoidable_compaction_successor_tokens(
     carrier = build_compaction_snapshot_carrier(
         summary=minimal_summary,
         recent_user_messages=tuple(item.text for item in recent_user_messages),
+        continuation_mode=continuation_mode,
+        active_request=active_request,
     )
     messages = (LLMMessage.user(carrier.body.decode("utf-8")), *unavoidable_messages)
     estimator = source_view.normal_compile_binding.estimator
@@ -856,6 +1041,7 @@ __all__ = [
     "crosses_compaction_resource_headroom",
     "enumerate_complete_tool_groups",
     "estimate_unavoidable_compaction_successor_tokens",
+    "freeze_compaction_continuation",
     "freeze_compaction_source_view",
     "freeze_tail_and_prefix",
     "select_recent_human_messages",

@@ -256,10 +256,16 @@ class ProviderLiveItemBuilder:
         if not tool_call_id or tool_call_id not in self.active_tool_call_ids:
             return []
         self.has_semantic_output = True
+        events: list[ProviderStreamPayload] = []
+        parts = self.tool_call_argument_parts.get(tool_call_id, ())
+        if not parts:
+            events.extend(
+                self.tool_call_delta(tool_call_id=tool_call_id, delta="{}")
+            )
         self.active_tool_call_ids.pop(tool_call_id)
-        arguments = "".join(self.tool_call_argument_parts.get(tool_call_id, ())) or "{}"
+        arguments = "".join(self.tool_call_argument_parts[tool_call_id])
         tool_name = self.tool_call_names[tool_call_id]
-        return [
+        events.append(
             ToolCallEndPayload(
                 block_identity=tool_call_id,
                 tool_call_id=tool_call_id,
@@ -268,7 +274,8 @@ class ProviderLiveItemBuilder:
                 utf8_bytes=len(arguments.encode("utf-8")),
                 digest=live_digest(arguments),
             )
-        ]
+        )
+        return events
 
     def tool_call(
         self, *, tool_call_id: str, tool_call_name: str, arguments: str

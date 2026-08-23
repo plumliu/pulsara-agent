@@ -180,9 +180,7 @@ class ModelInputCompileFailureKind(StrEnum):
     PREFIX_EPOCH_BUDGET_EXHAUSTED = "PREFIX_EPOCH_BUDGET_EXHAUSTED"
     CANONICAL_PREFIX_CONFLICT = "CANONICAL_PREFIX_CONFLICT"
     CANONICAL_DELTA_NOT_PROVIDER_SAFE = "CANONICAL_DELTA_NOT_PROVIDER_SAFE"
-    STATEFUL_SOURCE_REPLACEMENT_OVER_BUDGET = (
-        "STATEFUL_SOURCE_REPLACEMENT_OVER_BUDGET"
-    )
+    STATEFUL_SOURCE_REPLACEMENT_OVER_BUDGET = "STATEFUL_SOURCE_REPLACEMENT_OVER_BUDGET"
     REQUIRED_CONTEXT_EXCEEDS_BUDGET = "REQUIRED_CONTEXT_EXCEEDS_BUDGET"
     TOOL_SCHEMA_EXCEEDS_BUDGET = "TOOL_SCHEMA_EXCEEDS_BUDGET"
     FINAL_ESTIMATE_MISMATCH = "FINAL_ESTIMATE_MISMATCH"
@@ -411,10 +409,7 @@ class ContextRenderVariant:
         encoded = self.text.encode("utf-8")
         if len(encoded) != self.utf8_bytes:
             raise ValueError("source variant byte count mismatch")
-        if (
-            self.mode is ContextRenderMode.UNAVAILABLE_MINIMAL
-            and self.text
-        ):
+        if self.mode is ContextRenderMode.UNAVAILABLE_MINIMAL and self.text:
             raise ValueError("minimal unavailable source variant must have no body")
         expected = context_fingerprint(
             "context-render-variant:v1",
@@ -778,9 +773,7 @@ class FrozenProviderInputItem:
             FrozenProviderInputItemKind.PLAN_CONTINUATION,
             FrozenProviderInputItemKind.INTER_AGENT_MESSAGE,
         }
-        if has_origin != (
-            self.input_origin is not None
-        ):
+        if has_origin != (self.input_origin is not None):
             raise ValueError("provider input origin union is invalid")
         if self.source_entry_sequence is not None and self.source_entry_sequence < 0:
             raise ValueError("provider input entry sequence is invalid")
@@ -1028,11 +1021,14 @@ class FrozenPlanHandoffCompileFact:
     fact_fingerprint: str
 
     def __post_init__(self) -> None:
-        if min(
-            self.carrier_entry_sequence,
-            self.workflow_ordinal,
-            self.workflow_revision_at_transition,
-        ) < 1:
+        if (
+            min(
+                self.carrier_entry_sequence,
+                self.workflow_ordinal,
+                self.workflow_revision_at_transition,
+            )
+            < 1
+        ):
             raise ValueError("compiled Plan handoff sequence is invalid")
         if (
             self.handoff_kind is PlanHandoffKind.ENTERED_PLAN
@@ -1072,9 +1068,7 @@ def plan_handoff_compile_fact_fingerprint(
             "carrier_entry_sequence": fact.carrier_entry_sequence,
             "workflow_id": fact.workflow_id,
             "workflow_ordinal": fact.workflow_ordinal,
-            "workflow_revision_at_transition": (
-                fact.workflow_revision_at_transition
-            ),
+            "workflow_revision_at_transition": (fact.workflow_revision_at_transition),
             "interaction_id": fact.interaction_id,
             "handoff_kind": fact.handoff_kind.value,
             "workflow_status": fact.workflow_status.value,
@@ -1287,9 +1281,7 @@ class FrozenToolObservationFreshnessCompileFact:
     current_initial_entry_sequence: int
     immediate_predecessor_turn_id: str | None
     immediate_predecessor_turn_ref: str | None
-    classification_contract: Literal[
-        "pulsara.tool-observation-freshness.v1"
-    ]
+    classification_contract: Literal["pulsara.tool-observation-freshness.v1"]
     fact_fingerprint: str
 
     def __post_init__(self) -> None:
@@ -1307,9 +1299,7 @@ class FrozenToolObservationFreshnessCompileFact:
             if value is not None and (
                 len(value) != 71
                 or not value.startswith(SHA256_PREFIX)
-                or any(
-                    character not in "0123456789abcdef" for character in value[7:]
-                )
+                or any(character not in "0123456789abcdef" for character in value[7:])
             ):
                 raise ValueError("tool freshness turn reference is invalid")
         if self.classification_contract != "pulsara.tool-observation-freshness.v1":
@@ -1422,12 +1412,10 @@ class FrozenCanonicalCompileSnapshot:
             or workflow.permission_snapshot_fingerprint
             != permission.snapshot_fingerprint
             or workflow.workflow_id != permission.plan_workflow_id
-            or workflow.workflow_ordinal
-            != permission.plan_context_ordinal_at_admission
+            or workflow.workflow_ordinal != permission.plan_context_ordinal_at_admission
             or workflow.current_workflow_revision
             < int(permission.plan_workflow_revision_at_admission or 0)
-            or workflow.permission_contract_id
-            != permission.permission_contract_id
+            or workflow.permission_contract_id != permission.permission_contract_id
             or workflow.permission_contract_fingerprint
             != permission.permission_contract_fingerprint
         ):
@@ -1480,19 +1468,16 @@ class FrozenCanonicalCompileSnapshot:
                 or approved.tool_call_id != content.tool_call_id
                 or approved.interaction_id != content.interaction_id
                 or approved.request_contract_id != content.request_contract_id
-                or approved.request_contract_version
-                != content.request_contract_version
+                or approved.request_contract_version != content.request_contract_version
                 or approved.request_contract_fingerprint
                 != content.request_contract_fingerprint
-                or approved.request_semantic_digest
-                != content.request_semantic_digest
+                or approved.request_semantic_digest != content.request_semantic_digest
             ):
                 raise ValueError("approved Plan materialization does not exact-join")
             matching_items = tuple(
                 item
                 for item in self.canonical_input.items
-                if item.item_kind
-                is FrozenProviderInputItemKind.ASSISTANT_TOOL_REQUEST
+                if item.item_kind is FrozenProviderInputItemKind.ASSISTANT_TOOL_REQUEST
                 and item.source_entry_id == approved.assistant_entry_id
                 and any(
                     call.tool_call_id == approved.tool_call_id
@@ -1536,7 +1521,9 @@ class FrozenCanonicalCompileSnapshot:
                 ):
                     raise ValueError("approved Plan pinned carrier does not exact-join")
             elif matching_items:
-                raise ValueError("approved Plan materialization would duplicate content")
+                raise ValueError(
+                    "approved Plan materialization would duplicate content"
+                )
         previous = self.previous_turn_outcome_fact
         freshness = self.tool_observation_freshness_fact
         if (
@@ -1551,8 +1538,7 @@ class FrozenCanonicalCompileSnapshot:
             or previous.current_turn_id != identity.turn_id
             or previous.current_scope_kind is not identity.conversation_scope_kind
             or previous.scope_subagent_task_id != identity.scope_subagent_task_id
-            or previous.predecessor_turn_id
-            != freshness.immediate_predecessor_turn_id
+            or previous.predecessor_turn_id != freshness.immediate_predecessor_turn_id
         ):
             raise ValueError("previous-turn fact does not exact-join freshness")
         if self.canonical_read_cut_fingerprint != (
@@ -1569,9 +1555,7 @@ def canonical_compile_snapshot_fingerprint(
         {
             "canonical_input": snapshot.canonical_input.snapshot_fingerprint,
             "context_binding": snapshot.context_binding_fact.fact_fingerprint,
-            "run_permission": (
-                snapshot.run_permission_snapshot.snapshot_fingerprint
-            ),
+            "run_permission": (snapshot.run_permission_snapshot.snapshot_fingerprint),
             "plan_workflow": (
                 None
                 if snapshot.plan_workflow_fact is None
@@ -1642,8 +1626,7 @@ def provider_input_item_leaf(item: FrozenProviderInputItem) -> Mapping[str, obje
                 ),
                 "artifact_unavailability_reason": (
                     None
-                    if item.tool_result_context.artifact_unavailability_reason
-                    is None
+                    if item.tool_result_context.artifact_unavailability_reason is None
                     else item.tool_result_context.artifact_unavailability_reason.value
                 ),
                 "model_visible_memory_fact_ids": (
@@ -1707,7 +1690,9 @@ def canonical_model_input_snapshot_fingerprint(
             "identity": identity.identity_fingerprint,
             "items": tuple(provider_input_item_fingerprint(item) for item in items),
             "canonical_utf8_bytes": canonical_utf8_bytes,
-            "closures": tuple(provider_tool_result_closure_leaf(item) for item in closures),
+            "closures": tuple(
+                provider_tool_result_closure_leaf(item) for item in closures
+            ),
             "late_outcomes": tuple(
                 late_tool_outcome_observation_leaf(item) for item in late_outcomes
             ),
@@ -1751,9 +1736,7 @@ class StructuredModelInputCompileRequest:
     compile_binding: ModelInputCompileBinding = field(repr=False)
     sources: CollectedContextSources = field(repr=False)
     dispatch_anchor_entry_id: str | None = None
-    memory_citation_handles: tuple[tuple[str, str], ...] = field(
-        default=(), repr=False
-    )
+    memory_citation_handles: tuple[tuple[str, str], ...] = field(default=(), repr=False)
 
     def __post_init__(self) -> None:
         if not self.context_id or self.model_call_index < 1:
@@ -1957,7 +1940,9 @@ def compiled_message_placements_fingerprint(
 ) -> str:
     return context_fingerprint(
         "pulsara.compiled-message-placements:v1",
-        tuple(compiled_message_placement_identity_fingerprint(item) for item in placements),
+        tuple(
+            compiled_message_placement_identity_fingerprint(item) for item in placements
+        ),
     )
 
 
@@ -1967,9 +1952,7 @@ class FrozenCompiledModelInput:
     canonical_input_identity: CanonicalModelInputIdentity
     system_prompt: str = field(repr=False)
     messages: tuple[LLMMessage, ...] = field(repr=False)
-    message_placements: tuple[FrozenCompiledMessagePlacement, ...] = field(
-        repr=False
-    )
+    message_placements: tuple[FrozenCompiledMessagePlacement, ...] = field(repr=False)
     tools: tuple[FrozenToolSpec, ...] = field(repr=False)
     final_estimate: TokenEstimate
     source_decisions: tuple[CompiledSourceDecision, ...]
@@ -2048,6 +2031,59 @@ class FrozenCompiledModelInput:
         )
         if self.compiled_semantic_fingerprint != expected:
             raise ValueError("compiled model input fingerprint mismatch")
+
+
+@dataclass(frozen=True, slots=True)
+class FrozenModelInputSemanticProjection:
+    """Non-executable normal-lowering result that may exceed token budget.
+
+    Compaction uses this complete frozen value only to choose an exact semantic
+    prefix.  It is deliberately not a ``FrozenCompiledModelInput`` and carries
+    no install candidate or provider-open authority.
+    """
+
+    canonical_input_identity: CanonicalModelInputIdentity
+    system_prompt: str = field(repr=False)
+    messages: tuple[LLMMessage, ...] = field(repr=False)
+    message_placements: tuple[FrozenCompiledMessagePlacement, ...] = field(repr=False)
+    tools: tuple[FrozenToolSpec, ...] = field(repr=False)
+    final_estimate: TokenEstimate
+    source_decisions: tuple[CompiledSourceDecision, ...]
+    tool_result_decisions: tuple[CompiledToolResultDecision, ...]
+    diagnostic_codes: tuple[ContextPublicDiagnosticCode, ...]
+    source_collection_fingerprint: str
+    compile_binding_fingerprint: str
+
+    def __post_init__(self) -> None:
+        if len(self.message_placements) != len(self.messages):
+            raise ValueError("semantic projection placements are not parallel")
+        if tuple(item.message_ordinal for item in self.message_placements) != tuple(
+            range(len(self.messages))
+        ):
+            raise ValueError("semantic projection placement order is invalid")
+        if any(
+            item.role is not message.role
+            for item, message in zip(
+                self.message_placements, self.messages, strict=True
+            )
+        ):
+            raise ValueError("semantic projection placement role drifted")
+        if len(self.final_estimate.message_tokens_by_index) != len(self.messages):
+            raise ValueError("semantic projection token breakdown is invalid")
+        if (
+            len(self.tool_result_decisions)
+            > STRUCTURED_MODEL_INPUT_LIMITS.maximum_tool_result_decisions
+            or len(self.diagnostic_codes)
+            > STRUCTURED_MODEL_INPUT_LIMITS.maximum_diagnostics
+            or len(self.diagnostic_codes) != len(set(self.diagnostic_codes))
+        ):
+            raise ValueError("semantic projection diagnostics exceed their bounds")
+        for value in (
+            self.source_collection_fingerprint,
+            self.compile_binding_fingerprint,
+        ):
+            if not value.startswith(SHA256_PREFIX):
+                raise ValueError("semantic projection fingerprint is invalid")
 
 
 def frozen_compiled_model_input_fingerprint(

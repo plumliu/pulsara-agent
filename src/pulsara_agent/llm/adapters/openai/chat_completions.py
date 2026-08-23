@@ -308,8 +308,8 @@ def build_chat_completions_payload(
         payload.setdefault(key, mutable_provider_value(value))
     if planned_tools and provider_profile.supports_tools:
         payload["tools"] = planned_tools
-    if context.tool_choice_none:
-        payload["tool_choice"] = "none"
+    if context.tool_choice is not None:
+        payload["tool_choice"] = context.tool_choice
     payload["max_completion_tokens"] = (
         call.target.context_budget.effective_output_tokens
     )

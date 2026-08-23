@@ -15,14 +15,21 @@ import pytest
 from pulsara_agent.capability.builtin_catalog import builtin_tool_catalog_entry
 from pulsara_agent.conversation_kernel.contracts import InlineContent
 from pulsara_agent.conversation_kernel.compaction.contracts import (
+    CompactionActiveRequestLocation,
     CompactionCanonicalAdoptionFactoryInput,
     CompactionCanonicalWritePreconditions,
+    CompactionContinuationMode,
     CompactionScope,
     CompactionTargetBranch,
     ExpectedCompactionPredecessorRevision,
+    FrozenCompactionActiveRequest,
     build_prepared_compaction_canonical_adoption,
     canonical_compaction_range_digest,
     freeze_compaction_canonical_range,
+)
+from pulsara_agent.conversation_kernel.compaction.prompt import (
+    build_compaction_snapshot_carrier,
+    freeze_compaction_summary_output,
 )
 from pulsara_agent.conversation_kernel.live import LiveAgentEventBus
 from pulsara_agent.conversation_kernel.reader import CanonicalProviderInputReader
@@ -1204,6 +1211,21 @@ def test_round4_question_revise_approve_and_one_cut_materialization(
         closures=compaction_read.safe_head_range.closures,
         late_outcomes=compaction_read.safe_head_range.late_outcomes,
     )
+    snapshot_carrier = build_compaction_snapshot_carrier(
+        summary=freeze_compaction_summary_output(
+            "bounded adopted summary", maximum_utf8_bytes=100
+        ),
+        recent_user_messages=(),
+        continuation_mode=CompactionContinuationMode.RESUME_ACTIVE_TURN,
+        active_request=FrozenCompactionActiveRequest(
+            entry_id=(
+                compaction_read.dispatch_read.compile_snapshot.canonical_input.identity.initial_entry_id
+            ),
+            entry_sequence=initial_sequence,
+            location=CompactionActiveRequestLocation.CANONICAL_SUFFIX,
+            text=None,
+        ),
+    )
     adoption = build_prepared_compaction_canonical_adoption(
         CompactionCanonicalAdoptionFactoryInput(
             scope=scope,
@@ -1234,9 +1256,7 @@ def test_round4_question_revise_approve_and_one_cut_materialization(
                 compaction_read.lineage_base,
                 source_range,
             ),
-            snapshot_content=InlineContent.from_bytes(
-                b"bounded adopted summary"
-            ),
+            snapshot_content=InlineContent.from_bytes(snapshot_carrier.body),
             compiler_contract="test.compiler.v1",
             prompt_contract="test.prompt.v1",
             model_contract="test.model.v1",

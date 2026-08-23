@@ -438,6 +438,14 @@ qualified name及`inspect_new_mcp_tool`默认展示/输入；physical MCP dispat
 snapshot中独立冻结的原始`server_id + remote_tool_name`，不得通过拆解provider name
 恢复远端identity。
 
+唯一Round 6 naming owner只做无digest的ASCII slug normalization与Runtime截断：例如
+`docs-langchain`机械归一化为`docs_langchain`，不得变成携带hash suffix的另一项公开名字。
+完整flat name的hard bound是64个ASCII字节；server slug最多24字节，tool slug使用完整
+前缀后的剩余预算。normalize或截断导致的within-server或cross-server provider-name
+collision必须在immutable candidate/registry安装前显式失败，不能last-write-wins、按
+发现ordinal改名或把identity fingerprint泄漏回provider name。canonical identity仍由
+独立的exact `server_id + complete remote_tool_name`拥有。
+
 同一identity可以在不同semantic fingerprint下出现新版本。Identity回答“是哪项能力”，semantic fingerprint回答“当前版本是什么”。
 
 ### 4.2 Source registration

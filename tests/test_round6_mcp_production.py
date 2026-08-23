@@ -3183,11 +3183,26 @@ def test_round6_naming_disambiguates_normalization_collisions() -> None:
     assert mangle_mcp_tool_names("late", ("bulk_00",)) == {
         "bulk_00": "mcp__late__bulk_00"
     }
+    docs_name = mangle_mcp_tool_names(
+        "docs-langchain", ("query_docs_filesystem_docs_by_lang_chain",)
+    )["query_docs_filesystem_docs_by_lang_chain"]
+    assert docs_name == (
+        "mcp__docs_langchain__query_docs_filesystem_docs_by_lang_chain"
+    )
+    assert len(docs_name.encode("ascii")) == 61
     canonical = mangle_mcp_tool_names("foo_bar", ("get_issue",))
     normalized = mangle_mcp_tool_names("foo-bar", ("get_issue",))
-    assert canonical["get_issue"] != normalized["get_issue"]
-    within_server = mangle_mcp_tool_names("server", ("x-y", "x_y"))
-    assert len(set(within_server.values())) == 2
+    assert canonical == normalized
+    with pytest.raises(ValueError, match="normalization collision"):
+        mangle_mcp_tool_names("server", ("x-y", "x_y"))
+    long_name = mangle_mcp_tool_names("server", ("x" * 512,))["x" * 512]
+    assert len(long_name.encode("ascii")) == 64
+    assert long_name.startswith("mcp__server__")
+    with pytest.raises(ValueError, match="normalization collision"):
+        mangle_mcp_tool_names(
+            "server",
+            ("x" * 512 + "a", "x" * 512 + "b"),
+        )
 
 
 def _free_port() -> int:
