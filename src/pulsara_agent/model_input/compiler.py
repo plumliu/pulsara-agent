@@ -245,7 +245,7 @@ _SOURCE_POLICY = {
         ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
     ),
     ContextSourceKind.COMPACTION_RUNTIME_HANDOFF: (
-        "pulsara.compaction-runtime-handoff.v1",
+        "pulsara.compaction-runtime-handoff.v2-complete-todo",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.UNTRUSTED_OBSERVATION,
         ContextBudgetClass.MUST_KEEP,

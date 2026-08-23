@@ -111,7 +111,10 @@ def parse_todo_replacement(arguments: Mapping[str, object]) -> FrozenTodoCandida
     canonical = todo_candidate_canonical_json(tuple(frozen))
     size = len(canonical)
     if size > MAXIMUM_TODO_CANONICAL_JSON_BYTES:
-        raise TodoValidationError("todo snapshot exceeds 32 KiB")
+        raise TodoValidationError(
+            "todo snapshot exceeds "
+            f"{MAXIMUM_TODO_CANONICAL_JSON_BYTES // 1024} KiB"
+        )
     return FrozenTodoCandidate(
         ordered_items=tuple(frozen),
         pending_count=counts[TodoStatus.PENDING],

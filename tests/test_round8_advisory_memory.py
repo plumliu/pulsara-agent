@@ -115,7 +115,9 @@ def _name(prefix: str) -> str:
 
 
 def _repository(database) -> ConversationKernelRepository:
-    return ConversationKernelRepository(verified_postgres_provider(database.runtime_dsn))
+    return ConversationKernelRepository(
+        verified_postgres_provider(database.runtime_dsn)
+    )
 
 
 def _lease(repository, *, workspace_id: str, domain: str = "u_local"):
@@ -153,11 +155,7 @@ def _completed_human_entry(repository, lease, text: str) -> str:
         cut=cut,
         entry_id=_name("entry"),
         parent_content=InlineContent.from_bytes(b"ack"),
-        blocks=(
-            AssistantTextBlock(
-                _name("block"), InlineContent.from_bytes(b"ack")
-            ),
-        ),
+        blocks=(AssistantTextBlock(_name("block"), InlineContent.from_bytes(b"ack")),),
         complete_turn=True,
         occurred_at=now,
         actor_id="model:test",
@@ -324,9 +322,9 @@ def test_round8_closed_taxonomy_tokenizer_and_process_local_architecture() -> No
     root = Path(__file__).resolve().parents[1] / "src/pulsara_agent"
     production = "\n".join(path.read_text() for path in root.rglob("*.py"))
     for forbidden in (
-        "MEMORY_GOVERNANCE\"",
-        "MEMORY_INDEX_REFRESH\"",
-        "POST_COMPACTION_MEMORY_EXTRACTION\"",
+        'MEMORY_GOVERNANCE"',
+        'MEMORY_INDEX_REFRESH"',
+        'POST_COMPACTION_MEMORY_EXTRACTION"',
         "MemoryFactAccepted",
         "MemoryRelationAccepted",
         "MemoryFactLifecycleChanged",
@@ -470,10 +468,7 @@ def test_round8_memory_use_policy_is_enforced_without_changing_tool_surface(
                 surface_borrow=borrow,
                 memory_context=context(MemoryUsePolicy.WRITE_DISABLED_BY_USER),
             )
-            assert (
-                write_denied.kind
-                is KernelToolAuthorizationKind.PERMISSION_DENIED
-            )
+            assert write_denied.kind is KernelToolAuthorizationKind.PERMISSION_DENIED
             read_allowed = await port.authorize(
                 tool_name="memory_search",
                 arguments={"query": "deployment preference"},
@@ -989,21 +984,30 @@ def test_round8_workspace_domain_visibility_origin_claim_and_relation_endpoints(
         host_workspace_id=workspace_a,
     )
     query = PostgresMemoryQuery(repository.connection_provider)
-    assert query.get(
-        read_binding=binding_b,
-        fact_id=user_fact.fact_id,
-        deadline_monotonic=monotonic() + 30,
-    ) is not None
-    assert query.get(
-        read_binding=binding_b,
-        fact_id=workspace_fact.fact_id,
-        deadline_monotonic=monotonic() + 30,
-    ) is None
-    assert query.get(
-        read_binding=binding_foreign_domain,
-        fact_id=user_fact.fact_id,
-        deadline_monotonic=monotonic() + 30,
-    ) is None
+    assert (
+        query.get(
+            read_binding=binding_b,
+            fact_id=user_fact.fact_id,
+            deadline_monotonic=monotonic() + 30,
+        )
+        is not None
+    )
+    assert (
+        query.get(
+            read_binding=binding_b,
+            fact_id=workspace_fact.fact_id,
+            deadline_monotonic=monotonic() + 30,
+        )
+        is None
+    )
+    assert (
+        query.get(
+            read_binding=binding_foreign_domain,
+            fact_id=user_fact.fact_id,
+            deadline_monotonic=monotonic() + 30,
+        )
+        is None
+    )
 
     decision_candidate = _claim_candidate(
         repository,
@@ -1029,11 +1033,14 @@ def test_round8_workspace_domain_visibility_origin_claim_and_relation_endpoints(
         fact_id=user_fact.fact_id,
         deadline_monotonic=monotonic() + 30,
     )
-    assert query.direct_relations(
-        read_binding=binding_b,
-        fact_id=user_fact.fact_id,
-        deadline_monotonic=monotonic() + 30,
-    ) == ()
+    assert (
+        query.direct_relations(
+            read_binding=binding_b,
+            fact_id=user_fact.fact_id,
+            deadline_monotonic=monotonic() + 30,
+        )
+        == ()
+    )
 
     trigger_entry_id = _completed_human_entry(
         repository, lease_a, "Please remember my editor setting"
@@ -1058,18 +1065,24 @@ def test_round8_workspace_domain_visibility_origin_claim_and_relation_endpoints(
         candidates=(pending,),
         deadline_monotonic=monotonic() + 30,
     )
-    assert repository.claim_memory_candidate_for_governance(
-        lease_b.guard,
-        candidate_id=pending.candidate_id,
-        processing_started_at=datetime.now(timezone.utc),
-        deadline_monotonic=monotonic() + 30,
-    ) is None
-    assert repository.claim_memory_candidate_for_governance(
-        lease_a.guard,
-        candidate_id=pending.candidate_id,
-        processing_started_at=datetime.now(timezone.utc),
-        deadline_monotonic=monotonic() + 30,
-    ) is not None
+    assert (
+        repository.claim_memory_candidate_for_governance(
+            lease_b.guard,
+            candidate_id=pending.candidate_id,
+            processing_started_at=datetime.now(timezone.utc),
+            deadline_monotonic=monotonic() + 30,
+        )
+        is None
+    )
+    assert (
+        repository.claim_memory_candidate_for_governance(
+            lease_a.guard,
+            candidate_id=pending.candidate_id,
+            processing_started_at=datetime.now(timezone.utc),
+            deadline_monotonic=monotonic() + 30,
+        )
+        is not None
+    )
 
 
 def test_round8_response_preference_capacity_and_atomic_replacement(
@@ -1448,9 +1461,7 @@ def test_round8_preference_head_and_automatic_recall_are_separate_advisory_sourc
                                 ModelVisibleMemoryProvenanceDisposition.COMPLETE,
                                 (),
                             ),
-                            memory_use_policy=(
-                                MemoryUsePolicy.ALL_DISABLED_BY_USER
-                            ),
+                            memory_use_policy=(MemoryUsePolicy.ALL_DISABLED_BY_USER),
                         ),
                     ),
                 )
@@ -1472,9 +1483,7 @@ def test_round8_preference_head_and_automatic_recall_are_separate_advisory_sourc
         AutomaticMemoryTriggerDisposition.ELIGIBLE
     )
     assert write_opt_out.memory_use is MemoryUsePolicy.WRITE_DISABLED_BY_USER
-    all_opt_out = port.classify_memory_trigger(
-        "don't use saved memory for this answer"
-    )
+    all_opt_out = port.classify_memory_trigger("don't use saved memory for this answer")
     assert all_opt_out.automatic_recall is (
         AutomaticMemoryTriggerDisposition.DISABLED_BY_EXPLICIT_USER_DIRECTIVE
     )
@@ -1489,9 +1498,7 @@ def test_round8_preference_head_and_automatic_recall_are_separate_advisory_sourc
 def test_round8_preference_head_uses_one_repeatable_read_composite(
     stage2_migrated_postgres_database,
 ) -> None:
-    delegate = verified_postgres_provider(
-        stage2_migrated_postgres_database.runtime_dsn
-    )
+    delegate = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     calls: list[dict[str, object]] = []
 
     class TracingProvider:
@@ -1504,9 +1511,7 @@ def test_round8_preference_head_uses_one_repeatable_read_composite(
     query = PostgresMemoryQuery(TracingProvider())
     snapshot = query.response_preference_snapshot(
         read_binding=freeze_memory_read_scope_binding(
-            domain=MemoryDomainContext(
-                _name("domain").replace(":", "_"), "transient"
-            ),
+            domain=MemoryDomainContext(_name("domain").replace(":", "_"), "transient"),
             host_workspace_id=_name("workspace"),
         ),
         deadline_monotonic=monotonic() + 30,
@@ -1606,11 +1611,33 @@ def test_round8_optional_provider_and_relation_failures_remain_advisory(
     assert automatic.model_visible_memory_fact_ids == (fact.fact_id,)
     explicit_payload = json.loads(explicit.content)
     assert explicit.state == "SUCCESS"
-    assert explicit_payload["dense_result"] == "UNAVAILABLE"
-    assert explicit_payload["rerank"] == "FAILED_FALLBACK"
-    assert explicit_payload["relation_enrichment"] == "COMPLETE"
+    assert explicit.model_visible_memory_fact_ids == (fact.fact_id,)
+    assert set(explicit_payload) == {
+        "advisory",
+        "may_be_stale_or_incomplete",
+        "memories",
+        "relation_warnings",
+        "requested_filters",
+        "retrieval_summary",
+    }
+    assert explicit_payload["retrieval_summary"] == {
+        "expanded_filters": [],
+        "match": "EXACT",
+        "ranking": "SPARSE_ONLY",
+        "relation_check": "COMPLETE",
+        "status": "COMPLETE",
+    }
+    assert set(explicit_payload["memories"][0]) == {
+        "applies_when",
+        "do_not_apply_when",
+        "filter_match",
+        "kind",
+        "memory_id",
+        "scope",
+        "statement",
+    }
     assert unavailable.absence_kind.value == "UNAVAILABLE"
     relation_payload = json.loads(explicit_without_relations.content)
     assert explicit_without_relations.state == "SUCCESS"
     assert relation_payload["memories"]
-    assert relation_payload["relation_enrichment"] == "UNAVAILABLE"
+    assert relation_payload["retrieval_summary"]["relation_check"] == "UNAVAILABLE"

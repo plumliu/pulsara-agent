@@ -119,6 +119,7 @@ def test_round2_terminal_streams_before_physical_completion_for_pipe_and_pty(
         result = await invocation
         payload = json.loads(result.content)
         assert payload["status"] == "success"
+        assert "shell_diagnostic" not in payload
         assert "BEFORE-SLEEP" in "".join(sink.values)
         assert "AFTER-SLEEP" in payload["output"]
         await port.aclose(timeout_seconds=5)
@@ -719,7 +720,20 @@ def test_round2_terminal_monitor_tool_root_settlement_and_subagent_rejection(
         processes = await invoke_root(
             "list-processes", "terminal_process", {"action": "list"}
         )
-        assert json.loads(processes.content)["processes"][0]["status"] == "running"
+        process = json.loads(processes.content)["processes"][0]
+        assert process["status"] == "running"
+        assert set(process) == {
+            "command",
+            "cwd",
+            "duration_seconds",
+            "exit_code",
+            "output_cursor",
+            "process_id",
+            "retained_from_cursor",
+            "status",
+            "stdin_closed",
+            "timed_out",
+        }
         await invoke_root(
             "kill-process",
             "terminal_process",

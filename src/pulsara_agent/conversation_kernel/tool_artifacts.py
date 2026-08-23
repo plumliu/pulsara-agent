@@ -19,7 +19,6 @@ from pulsara_agent.conversation_kernel.contracts import BlobContent, InlineConte
 from pulsara_agent.conversation_kernel.repository import ConversationKernelConflict
 from pulsara_agent.ports.artifact import (
     ArtifactContentError,
-    ToolArtifactInfoView,
     ToolArtifactRecordView,
     ToolArtifactTextSliceView,
     ToolOutputArtifactDisposition,
@@ -504,24 +503,12 @@ class PostgresToolArtifactReadPort:
         self._workspace_id = workspace_id
         self._timeout = operation_timeout_seconds
 
-    def lookup(self, artifact_id: str) -> ToolArtifactRecordView | None:
-        row = self._fetch(artifact_id, include_body=False)
-        return None if row is None else self._record(row)
-
-    def info(self, artifact_id: str) -> ToolArtifactInfoView:
-        row = self._fetch(artifact_id, include_body=True)
-        if row is None:
-            raise KeyError(artifact_id)
-        record = self._record(row)
-        self._verified_text(row, record)
-        return ToolArtifactInfoView(record)
-
     def read_text(
         self, artifact_id: str, *, offset_chars: int, max_chars: int
     ) -> ToolArtifactTextSliceView:
         if offset_chars < 0 or not 1 <= max_chars <= ARTIFACT_READ_HARD_CHARS:
             raise ValueError("artifact text range is outside the closed bound")
-        row = self._fetch(artifact_id, include_body=True)
+        row = self._fetch(artifact_id)
         if row is None:
             raise KeyError(artifact_id)
         record = self._record(row)
@@ -532,7 +519,7 @@ class PostgresToolArtifactReadPort:
         next_offset = offset_chars + returned
         has_more = next_offset < total
         return ToolArtifactTextSliceView(
-            info=ToolArtifactInfoView(record),
+            record=record,
             text=value,
             offset_chars=offset_chars,
             returned_chars=returned,
@@ -555,20 +542,17 @@ class PostgresToolArtifactReadPort:
         except UnicodeDecodeError as exc:
             raise ArtifactContentError("artifact_content_codec_failed") from exc
 
-    def _fetch(
-        self, artifact_id: str, *, include_body: bool
-    ) -> Mapping[str, object] | None:
+    def _fetch(self, artifact_id: str) -> Mapping[str, object] | None:
         if not artifact_id:
             return None
-        body_column = ", b.body" if include_body else ""
-        query = f"""
+        query = """
             SELECT r.output_artifact_id, r.output_artifact_disposition,
                    r.output_source_coverage, r.output_display_kind,
                    r.output_source_coverage_reason,
                    r.output_artifact_unavailability_reason,
                    r.model_visible_memory_fact_ids, r.accepted_at,
                    b.id AS blob_id, b.logical_digest, b.logical_size,
-                   b.media_type, b.codec{body_column}
+                   b.media_type, b.codec, b.body
             FROM pulsara_v3.tool_results AS r
             JOIN pulsara_v3.sessions AS s
               ON s.id = r.session_id AND s.workspace_id = r.workspace_id

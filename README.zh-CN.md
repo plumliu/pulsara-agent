@@ -281,7 +281,7 @@ LIVE GAP后直接从当前Host owner完整同步。TODO始终是advisory而非du
 旧 v13
 数据库只会得到 `schema_migration_universe_reset_required`，不会被在线导入、
 翻译或升级。请严格遵守
-[clean-baseline runbook](STAGE_5_CLEAN_BASELINE_RUNBOOK.zh.md)，没有针对 exact
+[clean-baseline runbook](archived_docs/STAGE_5_CLEAN_BASELINE_RUNBOOK.zh.md)，没有针对 exact
 endpoint/database 的 operator 授权时，不得重置真实环境。
 
 ## 运行

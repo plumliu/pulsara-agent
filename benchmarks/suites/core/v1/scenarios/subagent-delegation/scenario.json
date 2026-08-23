@@ -27,7 +27,7 @@
     "min_tool_calls": 12,
     "max_tool_calls": 32,
     "committed_event_minimums": [
-      {"event_type": "AssistantMessageAccepted", "minimum": 2},
+      {"event_type": "AssistantMessageAccepted", "minimum": 1},
       {"event_type": "SubagentResultAccepted", "minimum": 1},
       {"event_type": "SubagentTaskAccepted", "minimum": 1},
       {"event_type": "ToolResultAccepted", "minimum": 12},

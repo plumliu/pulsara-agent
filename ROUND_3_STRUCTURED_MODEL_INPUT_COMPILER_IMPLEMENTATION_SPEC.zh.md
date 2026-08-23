@@ -856,6 +856,17 @@ owner：Host构造参数`system_prompt`或[`DEFAULT_SYSTEM_PROMPT`](src/pulsara_
 - 不允许compiler自动summary/ref/omit；
 - custom prompt若超过physical source bound，在provider open前fail closed；
 - 不把permission mode、Plan state或current date拼入base source。
+- 默认prompt只声明稳定、runtime-neutral的Pulsara工作契约：按请求类型决定只读或
+  修改、先核对实际workspace事实、只陈述已观察到的工具/验证结果、尊重typed
+  permission/effect gate、在明确请求下持续完成工作，以及采用简洁且结果优先的
+  沟通方式。它不得假定某个provider、搜索器、connector、artifact、UI或其他
+  可选tool一定存在。
+- 默认prompt保留现有Pulsara Memory的advisory authority、taxonomy与`remember`
+  candidate语义，但不得从外部agent prompt导入另一套memory filesystem、过去聊天
+  检索、持久化格式、写入策略或application规则。动态memory projection仍由自己的
+  typed source负责，不能借default prompt获得更高authority。
+- 默认prompt文本的版本变化只影响尚未安装prefix的合法cold epoch；不得回写同一
+  epoch已经安装的SYSTEM，也不得以prompt措辞代替physical permission enforcement。
 
 ### 8.3 单次`RuntimeTemporalCapture`
 

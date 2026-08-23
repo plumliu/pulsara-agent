@@ -15,10 +15,7 @@ import json
 from typing import Mapping
 
 from pulsara_agent.llm.input import LLMMessage
-from pulsara_agent.primitives.context import (
-    FrozenJsonObjectFact,
-    canonical_json_bytes,
-)
+from pulsara_agent.primitives.context import canonical_json_bytes
 from pulsara_agent.primitives.tool_observation import (
     FrozenToolObservationTimingFact,
     MAXIMUM_TOOL_OBSERVATION_DURATION_MICROSECONDS,
@@ -96,18 +93,22 @@ def full_required_tool_result_delivery(
 def classify_tool_result_delivery(
     *,
     tool_name: str,
-    arguments: FrozenJsonObjectFact,
     result_state: str,
 ) -> FrozenToolResultDeliveryRequirement:
-    """Rebuild the closed requirement from exact canonical request/result facts.
+    """Rebuild the closed requirement from exact tool identity and result state.
 
-    Round 9 activates the two MCP results whose product contract is meaningful
-    only when the exact closed page/schema reaches the model in FULL.
+    MCP directory pages and inspection schemas are meaningful only when their
+    exact closed payload reaches the model in FULL.
     """
 
     if result_state != "SUCCESS":
         return BEST_AVAILABLE_TOOL_RESULT_DELIVERY
-    if tool_name == "list_mcp_servers":
+    if tool_name in {
+        "list_mcp_prompts",
+        "list_mcp_resource_templates",
+        "list_mcp_resources",
+        "list_mcp_servers",
+    }:
         return full_required_tool_result_delivery(
             ToolResultFullDeliveryReason.MCP_DIRECTORY_PAGE
         )
@@ -117,13 +118,9 @@ def classify_tool_result_delivery(
         )
     if tool_name != "artifact_read":
         return BEST_AVAILABLE_TOOL_RESULT_DELIVERY
-    values = {entry.key: entry.value for entry in arguments.entries}
-    mode = values.get("mode", "text")
-    if mode == "text":
-        return full_required_tool_result_delivery(
-            ToolResultFullDeliveryReason.ARTIFACT_PAGE
-        )
-    return BEST_AVAILABLE_TOOL_RESULT_DELIVERY
+    return full_required_tool_result_delivery(
+        ToolResultFullDeliveryReason.ARTIFACT_PAGE
+    )
 
 
 @dataclass(frozen=True, slots=True)

@@ -60,6 +60,7 @@ from pulsara_agent.model_input.continuity import (
 )
 from pulsara_agent.primitives.context import canonical_json_bytes, context_fingerprint
 from pulsara_agent.primitives.permission import preset_permission_payload
+from pulsara_agent.primitives.plan_workflow import PlanHandoffKind
 
 if TYPE_CHECKING:
     from pulsara_agent.conversation_kernel.mcp.contracts import McpCatalogSnapshot
@@ -397,14 +398,14 @@ _BINDINGS = (
     ),
     _SourceBinding(
         ContextSourceKind.COMPACTION_RUNTIME_HANDOFF,
-        "pulsara.compaction-runtime-handoff.v1",
+        "pulsara.compaction-runtime-handoff.v2-complete-todo",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.UNTRUSTED_OBSERVATION,
         ContextBudgetClass.MUST_KEEP,
         75,
         15,
         (ContextRenderMode.FULL, ContextRenderMode.COMPACT),
-        "pulsara.compaction-runtime-handoff-collector.v1",
+        "pulsara.compaction-runtime-handoff-collector.v2-complete-todo",
         ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
     ),
     _SourceBinding(
@@ -1407,7 +1408,7 @@ _SUBAGENT_PROFILE_GUIDANCE = {
     "research_worker": "Investigate the delegated objective carefully, distinguish evidence from inference, and report sources or file locations that matter.",
     "review_worker": "Review the delegated subject critically, prioritize concrete defects and risks, and state the evidence for each conclusion.",
     "verification_worker": "Verify the delegated claim with reproducible checks, report exact observed outcomes, and distinguish passed checks from untested assumptions.",
-    "synthesizer": "Synthesize the supplied direct dependency results into one coherent answer without assuming access to their hidden transcripts.",
+    "synthesizer": "Synthesize the prerequisite summaries provided to you into one coherent answer without assuming access to the other agents' working conversations.",
 }
 
 
@@ -1422,14 +1423,13 @@ def _profiled_subagent_base_system(
     ):
         raise ValueError("subagent profile BASE_SYSTEM input is invalid")
     supplement = (
-        "You are a worker leaf in a ROOT-orchestrated task graph. You cannot "
-        "create, manage, message, wait for, or cancel other workers, and you "
-        "cannot ask the human directly. "
+        "You are handling one delegated task. You cannot delegate work to other "
+        "agents, manage their tasks, or ask the user directly. If required "
+        "information is unavailable, explain that clearly in your result. "
         + _SUBAGENT_PROFILE_GUIDANCE[profile_kind]
-        + " Your terminal result summary may be the only automatic input seen by "
-        "direct downstream workers. Make it self-contained: state the conclusion, "
-        "important constraints, and actionable file or artifact locations. Do not "
-        "assume downstream workers can see this transcript or its tool results."
+        + " Your result summary may be given directly to another task without your "
+        "working conversation or tool outputs. Make it self-contained: state the "
+        "conclusion, important constraints, and actionable file or artifact locations."
     )
     variant = _variant(
         ContextRenderMode.FULL,
@@ -1715,19 +1715,71 @@ def _render_plan_handoff(
 ) -> tuple[str, str]:
     fact = facts.plan_handoff_fact
     assert fact is not None
+    full_guidance = {
+        PlanHandoffKind.ENTERED_PLAN: (
+            "Planning is now active. Continue by inspecting what you need without "
+            "making changes. Ask the user only when a missing choice blocks a correct "
+            "plan, then submit one complete plan with exit_plan."
+        ),
+        PlanHandoffKind.REVISION_REQUESTED: (
+            "The user requested changes to the submitted plan. Incorporate their "
+            "feedback from the conversation, investigate further without making "
+            "changes if needed, and submit a complete replacement with exit_plan. Do "
+            "not implement the earlier draft."
+        ),
+        PlanHandoffKind.APPROVED_PLAN: (
+            "The user approved the submitted plan. Planning is complete: resume now "
+            "and carry out the exact approved plan available in the conversation, "
+            "within the permissions currently available. Do not ask for plan approval "
+            "again merely because work resumed after approval."
+        ),
+        PlanHandoffKind.CANCELLED_PLAN: (
+            "The plan was cancelled. Do not implement it. Treat the user's current "
+            "message as a new request unless they explicitly ask to revive that plan."
+        ),
+        PlanHandoffKind.FORCE_EXITED_PLAN: (
+            "Planning ended without approval. Do not implement the unapproved draft. "
+            "Address the user's current message normally."
+        ),
+    }[fact.handoff_kind]
+    compact_guidance = {
+        PlanHandoffKind.ENTERED_PLAN: (
+            "Planning is active: inspect without changing anything, then submit the "
+            "complete plan with exit_plan."
+        ),
+        PlanHandoffKind.REVISION_REQUESTED: (
+            "Revise the plan from the user's feedback without implementing it, then "
+            "submit a complete replacement with exit_plan."
+        ),
+        PlanHandoffKind.APPROVED_PLAN: (
+            "The plan is approved. Resume now and implement the exact approved plan "
+            "within the permissions currently available."
+        ),
+        PlanHandoffKind.CANCELLED_PLAN: (
+            "The plan was cancelled; do not implement it. Address the current request."
+        ),
+        PlanHandoffKind.FORCE_EXITED_PLAN: (
+            "Planning ended without approval; do not implement the draft."
+        ),
+    }[fact.handoff_kind]
+    planning_update = {
+        PlanHandoffKind.ENTERED_PLAN: "started",
+        PlanHandoffKind.REVISION_REQUESTED: "revision_requested",
+        PlanHandoffKind.APPROVED_PLAN: "approved",
+        PlanHandoffKind.CANCELLED_PLAN: "cancelled",
+        PlanHandoffKind.FORCE_EXITED_PLAN: "ended_without_approval",
+    }[fact.handoff_kind]
     payload: dict[str, object] = {
-        "transition": fact.handoff_kind.value,
-        "workflow_status": fact.workflow_status.value,
-        "resume_permission_mode": fact.resume_permission_mode.value,
-        "guidance": "This transition cannot widen run permission.",
+        "planning_update": planning_update,
+        "guidance": full_guidance,
     }
     full = json.dumps(
         payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     )
     compact = json.dumps(
         {
-            "transition": fact.handoff_kind.value,
-            "status": fact.workflow_status.value,
+            "planning_update": planning_update,
+            "guidance": compact_guidance,
         },
         ensure_ascii=False,
         sort_keys=True,
@@ -1744,10 +1796,14 @@ def _render_plan_workflow(
     full = json.dumps(
         {
             "guidance": (
-                "This ROOT run is read-only. Use ask_plan_question only for "
-                "blocking choices and exit_plan to submit the complete draft."
+                "You are preparing a plan, not implementing it. You may inspect and "
+                "reason, but do not make changes. Resolve discoverable facts yourself; "
+                "use ask_plan_question only when a user choice materially affects the "
+                "plan. When ready, call exit_plan by itself with one complete, "
+                "self-contained proposal."
             ),
-            "status": "ACTIVE",
+            "planning_mode": "active",
+            "changes_allowed": False,
         },
         ensure_ascii=False,
         sort_keys=True,
@@ -1755,8 +1811,11 @@ def _render_plan_workflow(
     )
     compact = json.dumps(
         {
-            "guidance": "Read-only; ask for blockers; exit_plan submits the draft.",
-            "status": "ACTIVE",
+            "guidance": (
+                "Prepare the plan without making changes. Ask only blocking questions; "
+                "submit the complete proposal with exit_plan."
+            ),
+            "planning_mode": "active",
         },
         ensure_ascii=False,
         sort_keys=True,
@@ -1924,16 +1983,16 @@ def _render_mcp_catalog(
 
 
 _NEW_MCP_TOOL_USAGE = (
-    "For a NEW_MCP_META_ONLY tool absent from native tools, call "
-    "inspect_new_mcp_tool first, then invoke the returned tool_ref with "
-    "use_new_mcp_tool. Call Builtin and DIRECT MCP tools directly. Use "
-    "the exact qualified new_tool_names value shown by this catalog as "
-    "tool_name and never guess its schema. Example: server_id=late with "
-    "new_tool_names=[mcp__late__bulk_00] means inspect_new_mcp_tool("
-    "{\"server_id\":\"late\",\"tool_name\":\"mcp__late__bulk_00\"}), then "
-    "use_new_mcp_tool({\"tool_ref\":\"mcpref_RETURNED_VALUE\",\"arguments\":"
-    "{\"text\":\"round9\"}}) when that exact input_schema requires text. Use "
-    "list_mcp_servers(server_id=..., cursor=...) for omitted rows."
+    "Tools under new_tool_names use two steps: first call inspect_new_mcp_tool "
+    "with server_id and the complete listed name; then read its input_schema and "
+    "call use_new_mcp_tool with the returned tool_ref and matching arguments. "
+    "Inspection does not run the remote tool. Copy names and references exactly; "
+    "never guess a schema. If an MCP tool already appears as its own callable tool, "
+    "call it directly. MCP resources and prompts use their dedicated tools. Use "
+    "list_mcp_servers(server_id=..., cursor=...) to read omitted tool rows; for a "
+    "row whose route is NEW_MCP_META_ONLY, pass provider_tool_name unchanged to "
+    "inspect_new_mcp_tool. For example, inspect provider_tool_name "
+    "mcp__late__bulk_00 from server_id late with that exact name."
 )
 
 

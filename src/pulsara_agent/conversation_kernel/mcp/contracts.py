@@ -103,6 +103,47 @@ class McpPromptSemanticFact:
     semantic_fingerprint: str
 
 
+def mcp_resource_public_item(
+    server_id: str,
+    item: McpResourceSemanticFact,
+) -> dict[str, object]:
+    return {
+        "server_id": server_id,
+        "uri": item.uri,
+        "name": item.name,
+        "description": item.description,
+        "mime_type": item.mime_type,
+    }
+
+
+def mcp_resource_template_public_item(
+    server_id: str,
+    item: McpResourceTemplateSemanticFact,
+) -> dict[str, object]:
+    return {
+        "server_id": server_id,
+        "uri_template": item.uri_template,
+        "name": item.name,
+        "description": item.description,
+        "mime_type": item.mime_type,
+    }
+
+
+def mcp_prompt_public_item(
+    server_id: str,
+    item: McpPromptSemanticFact,
+) -> dict[str, object]:
+    return {
+        "server_id": server_id,
+        "name": item.name,
+        "description": item.description,
+        "arguments": [
+            {"name": name, "description": description, "required": required}
+            for name, description, required in item.arguments
+        ],
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class McpDiscoverySnapshot:
     server_id: str
@@ -296,4 +337,10 @@ def _catalog_semantic_payload(item: McpServerCatalogEntry) -> Mapping[str, objec
     }
 
 
-__all__ = [name for name in globals() if name.startswith("Mcp") or name.startswith("MAXIMUM_")]
+__all__ = [
+    name
+    for name in globals()
+    if name.startswith("Mcp")
+    or name.startswith("MAXIMUM_")
+    or name.startswith("mcp_")
+]

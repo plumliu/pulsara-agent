@@ -2,6 +2,8 @@
 
 _状态：ACTIVATED（2026-08-11，含两轮反向审阅修缮）；physical-completion wait、linearized launching admission、独立sanitizer reason与公共malformed-input语义均已通过新增故障门控。_
 
+_2026-08-23 模型可见输出收敛：Terminal内部继续拥有session/backend/I/O/stream/revision/physical retirement与shell snapshot诊断；`terminal_process list`只投影模型可操作的process状态，ordinary Terminal ToolResult不再暴露raw `shell_diagnostic`。_
+
 ## 0. 基线、目标与结论
 
 ### 0.1 两个代码基线
@@ -435,6 +437,23 @@ TerminalOutputReadDisposition
 
 public tool schema使用opaque `since_cursor: string | null`与`output_cursor: string`，不要求模型拼装内部字段。token必须绑定owner epoch、process与stream，但不需要成为bearer secret。
 
+`terminal_process list`的每条公开process只返回：
+
+```text
+process_id
+command
+cwd
+status
+exit_code
+timed_out
+stdin_closed
+duration_seconds
+output_cursor
+retained_from_cursor
+```
+
+`terminal_session_id`、`backend_type`、`io_mode`、`stream_id`、`output_revision`与`physical_state`继续存在于process-local owner，但不是模型可选择或可行动的参数，禁止进入公开inventory body。
+
 ### 5.3 Retention与内存预算
 
 本轮将单process sanitized retained hard bound与Round 1 blob hard bound对齐为16 MiB，并增加Host aggregate hard bound：
@@ -530,6 +549,8 @@ runner ToolResultStart
 ```
 
 `terminal`与`terminal_process.wait`必须接入真实sink。`poll/log/write/submit/close_stdin/kill`是即时操作，不要求制造长stream，但其final ToolResult仍有正常Start/End。
+
+Shell检测、snapshot来源、被default-deny移除的变量数量以及PATH/venv计数属于process-local诊断。ordinary Terminal ToolResult不得暴露结构化`shell_diagnostic`；若环境构造确有影响当前调用、且模型存在可行动的修复方式，只返回一条bounded自然语言warning，不能把内部统计表当作工具产品字段。
 
 ### 6.2 Thread与backpressure
 

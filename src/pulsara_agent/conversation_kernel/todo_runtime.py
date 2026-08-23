@@ -135,13 +135,6 @@ class FrozenTodoCloseProjection:
     disposition: TodoLiveDisposition = TodoLiveDisposition.CLOSED
 
 
-@dataclass(frozen=True, slots=True)
-class FrozenTodoCompactionHandoff:
-    run_identity: TodoRunIdentity
-    actionable_items: tuple[FrozenTodoItem, ...]
-    completed_omitted: int
-
-
 @dataclass(slots=True)
 class _TodoRunRecord:
     run_identity: TodoRunIdentity
@@ -408,22 +401,10 @@ class TodoRunStateOwner:
         *,
         scope_kind: ModelInputScopeKind,
         scope_subagent_task_id: str | None,
-    ) -> FrozenTodoCompactionHandoff | None:
-        snapshot = self.snapshot(
+    ) -> FrozenTodoSnapshot | None:
+        return self.snapshot(
             scope_kind=scope_kind,
             scope_subagent_task_id=scope_subagent_task_id,
-        )
-        if snapshot is None:
-            return None
-        actionable = tuple(
-            item
-            for item in snapshot.ordered_items
-            if item.status.value != "completed"
-        )
-        return FrozenTodoCompactionHandoff(
-            run_identity=snapshot.run_identity,
-            actionable_items=actionable,
-            completed_omitted=snapshot.completed_count,
         )
 
     def _record(
@@ -601,7 +582,6 @@ def _snapshot(
 
 __all__ = [
     "FrozenTodoCloseProjection",
-    "FrozenTodoCompactionHandoff",
     "FrozenTodoSnapshot",
     "PreparedTodoChildRunActivation",
     "PreparedTodoReplacement",

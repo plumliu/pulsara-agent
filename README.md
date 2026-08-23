@@ -324,7 +324,7 @@ only consume its read-only actionable handoff. Verification is recorded in
 An old v13 database is rejected with
 `schema_migration_universe_reset_required`; Pulsara never imports, translates,
 or upgrades it in place. Follow
-[the clean-baseline runbook](STAGE_5_CLEAN_BASELINE_RUNBOOK.zh.md) and never
+[the clean-baseline runbook](archived_docs/STAGE_5_CLEAN_BASELINE_RUNBOOK.zh.md) and never
 reset a real endpoint without explicit operator authorization.
 
 ## Run

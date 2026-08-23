@@ -241,7 +241,6 @@ class SearchFilesTool(WorkspaceTool):
         offset = max(0, int_arg(call.arguments, "offset", 0))
         file_glob = str_arg(call.arguments, "file_glob")
         output_mode = str_arg(call.arguments, "output_mode") or "content"
-        context = max(0, int_arg(call.arguments, "context", 0))
         if output_mode not in {"content", "files_only", "count"}:
             raise ValueError(f"unsupported output_mode: {output_mode}")
         if not path.exists():
@@ -262,7 +261,6 @@ class SearchFilesTool(WorkspaceTool):
             limit,
             offset,
             output_mode,
-            context,
         )
         with state.lock:
             _track_lookup(state, search_key)
@@ -298,7 +296,6 @@ class SearchFilesTool(WorkspaceTool):
                 limit=limit,
                 offset=offset,
                 output_mode=output_mode,
-                context=context,
             )
         if consecutive >= 3:
             payload["_warning"] = (
@@ -351,7 +348,6 @@ class SearchFilesTool(WorkspaceTool):
         limit: int,
         offset: int,
         output_mode: str,
-        context: int,
     ) -> dict[str, Any]:
         if which("rg"):
             return self._search_content_with_rg(
@@ -361,7 +357,6 @@ class SearchFilesTool(WorkspaceTool):
                 limit=limit,
                 offset=offset,
                 output_mode=output_mode,
-                context=context,
             )
         return self._search_content_with_python(
             pattern,
@@ -370,7 +365,6 @@ class SearchFilesTool(WorkspaceTool):
             limit=limit,
             offset=offset,
             output_mode=output_mode,
-            context=context,
         )
 
     def _search_content_with_rg(
@@ -382,7 +376,6 @@ class SearchFilesTool(WorkspaceTool):
         limit: int,
         offset: int,
         output_mode: str,
-        context: int,
     ) -> dict[str, Any]:
         cmd = [
             "rg",
@@ -392,8 +385,6 @@ class SearchFilesTool(WorkspaceTool):
             "--color",
             "never",
         ]
-        if context > 0:
-            cmd.extend(["-C", str(context)])
         if file_glob:
             cmd.extend(["--glob", file_glob])
         if output_mode == "files_only":
@@ -465,9 +456,7 @@ class SearchFilesTool(WorkspaceTool):
         limit: int,
         offset: int,
         output_mode: str,
-        context: int,
     ) -> dict[str, Any]:
-        del context
         regex = re.compile(pattern)
         files = (
             [path] if path.is_file() else [p for p in path.rglob("*") if p.is_file()]
@@ -612,7 +601,6 @@ class WriteFileTool(WorkspaceTool):
         content = str_arg(call.arguments, "content")
         if content is None:
             raise ValueError("content must be a string")
-        create_dirs = bool_arg(call.arguments, "create_dirs", True)
         state = _state_for_workspace(self.workspace_root)
         path_lock = state.lock_for_path(path)
         with path_lock:
@@ -628,8 +616,6 @@ class WriteFileTool(WorkspaceTool):
                     content = _normalize_line_endings(content, line_ending)
                 if _has_bom(before) and not _has_bom(content):
                     content = UTF8_BOM + content
-            if create_dirs:
-                path.parent.mkdir(parents=True, exist_ok=True)
             _atomic_write_text(path, content)
             _note_write(state, path)
         payload: dict[str, Any] = {

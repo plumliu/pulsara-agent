@@ -956,7 +956,6 @@ class CanonicalProviderInputReader:
                                 ),
                                 tool_result_delivery=classify_tool_result_delivery(
                                     tool_name=call.tool_name,
-                                    arguments=call.arguments,
                                     result_state=str(result["result_state"]),
                                 ),
                             )
@@ -1054,7 +1053,6 @@ class CanonicalProviderInputReader:
                                     tool_result_delivery=(
                                         classify_tool_result_delivery(
                                             tool_name=call.tool_name,
-                                            arguments=call.arguments,
                                             result_state=str(result["result_state"]),
                                         )
                                     ),

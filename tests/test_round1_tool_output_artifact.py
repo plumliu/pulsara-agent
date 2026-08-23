@@ -1026,6 +1026,7 @@ def test_round1_artifact_body_read_scope_pagination_and_nonrecursive_result(
         artifact_source_read=False,
         deadline_monotonic=monotonic() + 30,
     )
+    memory_id = _name("memory")
     candidate = build_prepared_tool_result_acceptance(
         guard=lease.guard,
         workspace_id=workspace_id,
@@ -1049,6 +1050,7 @@ def test_round1_artifact_body_read_scope_pagination_and_nonrecursive_result(
         observation_duration_microseconds=None,
         observation_origin_kind=ToolObservationOrigin.TERMINAL_PROCESS,
         trusted_tool_reported_duration_microseconds=None,
+        model_visible_memory_fact_ids=(memory_id,),
     )
     repository.accept_tool_result(
         lease.guard,
@@ -1100,9 +1102,11 @@ def test_round1_artifact_body_read_scope_pagination_and_nonrecursive_result(
     read_port = PostgresToolArtifactReadPort(
         provider, session_id=lease.guard.session_id, workspace_id=workspace_id
     )
-    info = read_port.info(projection.artifact_id).record
-    assert info.size_bytes == len(source.encode())
-    assert info.source_coverage is ToolOutputSourceCoverage.COMPLETE
+    record = read_port.read_text(
+        projection.artifact_id, offset_chars=0, max_chars=1
+    ).record
+    assert record.size_bytes == len(source.encode())
+    assert record.source_coverage is ToolOutputSourceCoverage.COMPLETE
     pieces: list[str] = []
     offset = 0
     while True:
@@ -1130,13 +1134,13 @@ def test_round1_artifact_body_read_scope_pagination_and_nonrecursive_result(
             provider,
             session_id=other_session.guard.session_id,
             workspace_id=workspace_id,
-        ).info(projection.artifact_id)
+        ).read_text(projection.artifact_id, offset_chars=0, max_chars=1)
     with pytest.raises(KeyError):
         PostgresToolArtifactReadPort(
             provider,
             session_id=lease.guard.session_id,
             workspace_id=_name("workspace"),
-        ).info(projection.artifact_id)
+        ).read_text(projection.artifact_id, offset_chars=0, max_chars=1)
 
     read_result = ArtifactReadTool(read_port).execute(
         ToolCall(
@@ -1154,18 +1158,10 @@ def test_round1_artifact_body_read_scope_pagination_and_nonrecursive_result(
     assert read_result.output_artifact_candidate is None
     response = json.loads(read_result.output)
     assert response["text"] == source[3:10]
-
-    info_result = ArtifactReadTool(read_port).execute(
-        ToolCall(
-            id=_name("call"),
-            name="artifact_read",
-            arguments={"artifact_id": projection.artifact_id, "mode": "info"},
-        )
-    )
-    info_payload = json.loads(info_result.output)
-    assert info_payload["status"] == "success"
-    assert info_payload["artifact_id"] == projection.artifact_id
-    assert info_payload["source_coverage"] == "COMPLETE"
+    assert response["artifact_id"] == projection.artifact_id
+    assert response["source_coverage"] == "COMPLETE"
+    assert "model_visible_memory_ids" not in response
+    assert read_result.model_visible_memory_fact_ids == (memory_id,)
 
     multibyte_call_id = _name("call")
     multibyte_result = ArtifactReadTool(read_port).execute(
@@ -1193,7 +1189,7 @@ def test_round1_artifact_body_read_scope_pagination_and_nonrecursive_result(
         conservative_artifact_page_logical_utf8_bytes(
             tool_call_id=multibyte_call_id,
             body=multibyte_result.output,
-            model_visible_memory_ids=(),
+            model_visible_memory_ids=(memory_id,),
         )
         <= MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES
     )
@@ -1218,14 +1214,14 @@ def test_round1_artifact_body_read_scope_pagination_and_nonrecursive_result(
             conservative_artifact_page_logical_utf8_bytes(
                 tool_call_id=multibyte_call_id,
                 body=extended_body,
-                model_visible_memory_ids=(),
+                model_visible_memory_ids=(memory_id,),
             )
             > MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES
         )
 
     tool = ArtifactReadTool(read_port)
     invalid_arguments = (
-        {"artifact_id": projection.artifact_id, "mode": "binary"},
+        {"artifact_id": projection.artifact_id, "mode": "text"},
         {"artifact_id": projection.artifact_id, "offset_chars": -1},
         {"artifact_id": projection.artifact_id, "max_chars": 0},
         {"artifact_id": projection.artifact_id, "max_chars": 32_001},
@@ -1463,10 +1459,10 @@ def test_round1_retained_snapshot_artifact_offset_zero_is_retained_body_start(
     ).read_text(projection.artifact_id, offset_chars=0, max_chars=32_000)
     assert page.text == retained.text
     assert page.text.startswith("RETAINED-BODY-START")
-    assert page.info.record.source_coverage is (
+    assert page.record.source_coverage is (
         ToolOutputSourceCoverage.RETAINED_SNAPSHOT
     )
-    assert page.info.record.source_coverage_reason is (
+    assert page.record.source_coverage_reason is (
         ToolOutputSourceCoverageReason.TERMINAL_RETENTION_GAP
     )
 
@@ -1528,12 +1524,12 @@ def test_round1_corrupt_blob_is_one_typed_content_error(
         provider, session_id=lease.guard.session_id, workspace_id=workspace_id
     )
     with pytest.raises(ArtifactContentError, match="artifact_content_integrity_failed"):
-        port.info(projection.artifact_id or "")
+        port.read_text(projection.artifact_id or "", offset_chars=0, max_chars=1)
     result = ArtifactReadTool(port).execute(
         ToolCall(
             id=_name("call"),
             name="artifact_read",
-            arguments={"artifact_id": projection.artifact_id, "mode": "info"},
+            arguments={"artifact_id": projection.artifact_id},
         )
     )
     assert json.loads(result.output)["status"] == "content_error"
@@ -1554,7 +1550,7 @@ def test_round1_corrupt_blob_is_one_typed_content_error(
         )
         connection.commit()
     with pytest.raises(ArtifactContentError, match="artifact_content_codec_failed"):
-        port.info(projection.artifact_id or "")
+        port.read_text(projection.artifact_id or "", offset_chars=0, max_chars=1)
 
     # A physically missing blob is canonical corruption, not a not-found
     # scope result.  Fault injection bypasses the FK only for this ephemeral
@@ -1575,7 +1571,7 @@ def test_round1_corrupt_blob_is_one_typed_content_error(
         ToolCall(
             id=_name("call"),
             name="artifact_read",
-            arguments={"artifact_id": projection.artifact_id, "mode": "info"},
+            arguments={"artifact_id": projection.artifact_id},
         )
     )
     missing_payload = json.loads(missing.output)
@@ -1670,13 +1666,6 @@ def test_round1_memory_side_branch_confirmation_is_all_or_none(
 
 def test_round1_production_descriptor_executor_closure(tmp_path: Path) -> None:
     class _MissingReadPort:
-        def info(self, artifact_id: str):
-            raise KeyError(artifact_id)
-
-        def lookup(self, artifact_id: str):
-            del artifact_id
-            return None
-
         def read_text(self, artifact_id: str, *, offset_chars: int, max_chars: int):
             del offset_chars, max_chars
             raise KeyError(artifact_id)
@@ -1711,6 +1700,7 @@ def test_round1_production_descriptor_executor_closure(tmp_path: Path) -> None:
     schema = thaw_json(specs["artifact_read"].parameters)
     assert isinstance(schema, dict)
     assert schema["additionalProperties"] is False
+    assert "mode" not in schema["properties"]
     assert schema["properties"]["offset_chars"]["minimum"] == 0
     assert schema["properties"]["max_chars"]["maximum"] == 32_000
     asyncio.run(port.aclose())

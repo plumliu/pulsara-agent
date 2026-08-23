@@ -10,7 +10,7 @@
 >
 > hard-cut 前参考基线：`5b7ad9f7ffc8565bc572180b2bde0c81ab64473a`
 >
-> 上位契约：[Round 3 structured compiler](ROUND_3_STRUCTURED_MODEL_INPUT_COMPILER_IMPLEMENTATION_SPEC.zh.md)、[Round 3.1 provider-input prefix continuity](ROUND_3_1_PROVIDER_INPUT_PREFIX_CONTINUITY_IMPLEMENTATION_SPEC.zh.md)、[Round 5A execution envelope](ROUND_5_LONG_HORIZON_EXECUTION_ENVELOPE_IMPLEMENTATION_SPEC.zh.md)、[Round 5A.1 provider-neutral output termination](ROUND_5A_1_PROVIDER_NEUTRAL_MODEL_OUTPUT_TERMINATION_IMPLEMENTATION_SPEC.zh.md)、[Round 5A.2 durable provider replay](ROUND_5A_2_DURABLE_PROVIDER_REPLAY_AND_CROSS_RESTART_THREAD_CONTINUATION_IMPLEMENTATION_SPEC.zh.md)、[Round 6 MCP](ROUND_6_MCP_PRODUCTION_CAPABILITY_IMPLEMENTATION_SPEC.zh.md)、[Round 7 model-visible observation](ROUND_7_MODEL_VISIBLE_FAILURE_AND_TOOL_OBSERVATION_IMPLEMENTATION_SPEC.zh.md)、[Round 7.1 provider-visible ToolResult projection](ROUND_7_1_PROVIDER_VISIBLE_TOOL_RESULT_PROJECTION_IMPLEMENTATION_SPEC.zh.md)、[Gap Index](POST_HARD_CUT_PRODUCT_CAPABILITY_GAP_INDEX.zh.md)
+> 上位契约：[Round 3 structured compiler](ROUND_3_STRUCTURED_MODEL_INPUT_COMPILER_IMPLEMENTATION_SPEC.zh.md)、[Round 3.1 provider-input prefix continuity](ROUND_3_1_PROVIDER_INPUT_PREFIX_CONTINUITY_IMPLEMENTATION_SPEC.zh.md)、[Round 5A execution envelope](ROUND_5_LONG_HORIZON_EXECUTION_ENVELOPE_IMPLEMENTATION_SPEC.zh.md)、[Round 5A.1 provider-neutral output termination](archived_docs/ROUND_5A_1_PROVIDER_NEUTRAL_MODEL_OUTPUT_TERMINATION_IMPLEMENTATION_SPEC.zh.md)、[Round 5A.2 durable provider replay](archived_docs/ROUND_5A_2_DURABLE_PROVIDER_REPLAY_AND_CROSS_RESTART_THREAD_CONTINUATION_IMPLEMENTATION_SPEC.zh.md)、[Round 6 MCP](ROUND_6_MCP_PRODUCTION_CAPABILITY_IMPLEMENTATION_SPEC.zh.md)、[Round 7 model-visible observation](ROUND_7_MODEL_VISIBLE_FAILURE_AND_TOOL_OBSERVATION_IMPLEMENTATION_SPEC.zh.md)、[Round 7.1 provider-visible ToolResult projection](ROUND_7_1_PROVIDER_VISIBLE_TOOL_RESULT_PROJECTION_IMPLEMENTATION_SPEC.zh.md)、[Gap Index](archived_docs/POST_HARD_CUT_PRODUCT_CAPABILITY_GAP_INDEX.zh.md)
 >
 > 直接下游：[Round 9.1 Agent Skills Standard](ROUND_9_1_AGENT_SKILLS_STANDARD_IMPLEMENTATION_SPEC.zh.md)
 >
@@ -1425,6 +1425,9 @@ Provider-visible默认与grok-build的`search_tool -> use_tool`契约一致：ca
 两种exact spelling：上述`provider_tool_name`，或该server发布的完整
 `remote_tool_name`。Bare remote name只是兼容既有caller/user输入，不进入默认catalog、
 descriptor示例或provider guidance。
+若bounded `MCP_CATALOG`省略名字，provider guidance必须明确调用
+`list_mcp_servers(server_id=...)`并只从`route=NEW_MCP_META_ONLY`的tool row复制
+`provider_tool_name`；不得声称`list_mcp_servers`返回`new_tool_names`字段。
 Runtime必须在同一`server_id`内对每条route的
 `{remote_tool_name, provider_tool_name}`集合做exact比较；0个或多于1个winner均返回
 `NOT_FOUND`。禁止prefix stripping、模糊匹配、跨server搜索、调用方自行demangle或把
@@ -1933,7 +1936,7 @@ RenderedCapabilityPrompt            -> RenderedSkillPrompt
 ### 12.9 Tool runtime
 
 - 增加inspect/use fixed binding；
-- `list_mcp_servers`使用closed page factory，从current installed local snapshot选择Round 7.1 logical FULL可容纳的最长ordered page，并将successful result标记`FULL_REQUIRED/MCP_DIRECTORY_PAGE`；不得把normal HEAD_TAIL/COMPACT当作成功分页；
+- `list_mcp_servers`与Round 6固定的resource/resource-template/prompt list tools使用同一个closed page factory与Host-local cursor signer，从current installed local snapshot选择Round 7.1 logical FULL可容纳的最长ordered page，并将successful result标记`FULL_REQUIRED/MCP_DIRECTORY_PAGE`；每种page仍保留自己的closed row vocabulary，cursor exact绑定list kind与query shape；不得把normal HEAD_TAIL/COMPACT当作成功分页；
 - inspect从current route projection定位tool-specific route并准备process-local、policy/route-bound dormant ref；successful result标记`FULL_REQUIRED/MCP_INSPECT_SCHEMA`，只有exact FULL continuity install后ref才callable；scope-wide catalog fingerprint不进入ref；
 - use在attempt前解析到MCP policy/binding；
 - one attempt/result；
@@ -2479,7 +2482,7 @@ Built-in与MCP统一为Tool capability，Skill作为Instructional capability引�
 ### 20.3 已有规格
 
 - [Round 3.1](ROUND_3_1_PROVIDER_INPUT_PREFIX_CONTINUITY_IMPLEMENTATION_SPEC.zh.md)：same-epoch strict prefix、tool surface borrow与stateful source successor；
-- [Round 5A.2](ROUND_5A_2_DURABLE_PROVIDER_REPLAY_AND_CROSS_RESTART_THREAD_CONTINUATION_IMPLEMENTATION_SPEC.zh.md)：assistant native replay同事务接受、两阶段hydration、final wire plan/CAS exact join与cross-restart continuation；
+- [Round 5A.2](archived_docs/ROUND_5A_2_DURABLE_PROVIDER_REPLAY_AND_CROSS_RESTART_THREAD_CONTINUATION_IMPLEMENTATION_SPEC.zh.md)：assistant native replay同事务接受、两阶段hydration、final wire plan/CAS exact join与cross-restart continuation；
 - [Round 6](ROUND_6_MCP_PRODUCTION_CAPABILITY_IMPLEMENTATION_SPEC.zh.md)：MCP supervisor、bounded discovery、dirty fence、effect、scope与direct execution；
 - [Round 5B draft](ROUND_5B_LONG_HORIZON_CONTEXT_COMPACTION_IMPLEMENTATION_SPEC.zh.md)：其中§2的non-compaction direct/meta设计被本轮提取；Round 5B后续应删除重复实现，只保留rebase promotion消费；
 - [Round 9.1](ROUND_9_1_AGENT_SKILLS_STANDARD_IMPLEMENTATION_SPEC.zh.md)：本轮激活后的直接下游。

@@ -4,6 +4,7 @@ from dataclasses import fields, replace
 import ast
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -51,8 +52,14 @@ from pulsara_agent.conversation_kernel.capability_composition import (
     issue_mcp_capability_source_snapshot_set,
     issue_sealed_builtin_capability_snapshot,
 )
-from pulsara_agent.conversation_kernel.mcp.contracts import build_catalog_snapshot
-from pulsara_agent.conversation_kernel.mcp.contracts import McpServerCatalogEntry
+from pulsara_agent.conversation_kernel.mcp.contracts import (
+    McpDiscoverySnapshot,
+    McpPromptSemanticFact,
+    McpResourceSemanticFact,
+    McpResourceTemplateSemanticFact,
+    McpServerCatalogEntry,
+    build_catalog_snapshot,
+)
 from pulsara_agent.conversation_kernel.mcp.directory import McpDirectoryPageFactory
 from pulsara_agent.conversation_kernel.capability import (
     skill_discovery_semantic_fingerprint,
@@ -903,6 +910,144 @@ def test_round9_mcp_directory_cursor_is_scope_and_catalog_bound() -> None:
     )
     assert stale_cut.state == "APPLICATION_ERROR"
     assert b"MCP_CATALOG_STALE" in stale_cut.content
+
+
+def test_round9_mcp_item_directory_cursor_is_list_and_query_bound() -> None:
+    server_catalog_fingerprint = context_fingerprint(
+        "test:round9-item-server-catalog:v1",
+        "server",
+    )
+    snapshot = McpDiscoverySnapshot(
+        server_id="server",
+        display_name="Server",
+        protocol_version="2025-11-25",
+        sanitized_instructions="",
+        discovered_tool_count=0,
+        invalid_tool_count=0,
+        tools=(),
+        resources=tuple(
+            McpResourceSemanticFact(
+                server_id="server",
+                uri=f"fixture://resource/{index}",
+                name=f"Resource {index}",
+                description="",
+                mime_type="text/plain",
+                semantic_fingerprint=context_fingerprint(
+                    "test:round9-resource:v1", index
+                ),
+            )
+            for index in range(2)
+        ),
+        resource_templates=tuple(
+            McpResourceTemplateSemanticFact(
+                server_id="server",
+                uri_template=f"fixture://template/{index}/{{id}}",
+                name=f"Template {index}",
+                description="",
+                mime_type="text/plain",
+                semantic_fingerprint=context_fingerprint(
+                    "test:round9-resource-template:v1", index
+                ),
+            )
+            for index in range(2)
+        ),
+        prompts=tuple(
+            McpPromptSemanticFact(
+                server_id="server",
+                name=f"prompt-{index}",
+                description="",
+                arguments=(),
+                semantic_fingerprint=context_fingerprint(
+                    "test:round9-prompt:v1", index
+                ),
+            )
+            for index in range(2)
+        ),
+        tool_surface_semantic_fingerprint=context_fingerprint(
+            "test:round9-item-tool-surface:v1", ()
+        ),
+        catalog_semantic_fingerprint=server_catalog_fingerprint,
+        presentation_fingerprint=context_fingerprint(
+            "test:round9-item-presentation:v1", "server"
+        ),
+        sdk_conformance_contract_fingerprint=context_fingerprint(
+            "test:round9-item-sdk-contract:v1", "fixture"
+        ),
+    )
+    catalog = build_catalog_snapshot(
+        owner_epoch=1,
+        catalog_revision=1,
+        entries=(
+            McpServerCatalogEntry(
+                server_id="server",
+                display_name="Server",
+                status=McpServerState.READY,
+                required=False,
+                exposed_tool_count=0,
+                discovered_tool_count=0,
+                resource_count=2,
+                resource_template_count=2,
+                prompt_count=2,
+                bounded_tool_name_overview=(),
+                sanitized_instructions="",
+                stable_failure_category=None,
+                tool_surface_semantic_fingerprint=(
+                    snapshot.tool_surface_semantic_fingerprint
+                ),
+                catalog_semantic_fingerprint=server_catalog_fingerprint,
+                scope_subagents=True,
+            ),
+        ),
+    )
+    candidates = {
+        "server": SimpleNamespace(
+            server_id="server",
+            discovery_snapshot=snapshot,
+        )
+    }
+    factory = McpDirectoryPageFactory()
+    first = factory.render_items(
+        tool_name="list_mcp_resources",
+        arguments={"server_id": "server", "limit": 1},
+        scope_kind=ModelInputScopeKind.ROOT,
+        scope_subagent_task_id=None,
+        catalog=catalog,
+        candidates=candidates,
+    )
+    assert first.state == "SUCCESS"
+    first_payload = json.loads(first.content)
+    assert first_payload["page_kind"] == "RESOURCE_PAGE"
+    assert first_payload["items"][0]["uri"] == "fixture://resource/0"
+    cursor = first_payload["next_cursor"]
+    assert isinstance(cursor, str)
+
+    second = factory.render_items(
+        tool_name="list_mcp_resources",
+        arguments={"server_id": "server", "limit": 1, "cursor": cursor},
+        scope_kind=ModelInputScopeKind.ROOT,
+        scope_subagent_task_id=None,
+        catalog=catalog,
+        candidates=candidates,
+    )
+    assert json.loads(second.content)["items"][0]["uri"] == (
+        "fixture://resource/1"
+    )
+
+    for tool_name, arguments in (
+        ("list_mcp_prompts", {"server_id": "server", "limit": 1}),
+        ("list_mcp_resources", {"server_id": "server", "limit": 2}),
+        ("list_mcp_resources", {"limit": 1}),
+    ):
+        stale = factory.render_items(
+            tool_name=tool_name,
+            arguments={**arguments, "cursor": cursor},
+            scope_kind=ModelInputScopeKind.ROOT,
+            scope_subagent_task_id=None,
+            catalog=catalog,
+            candidates=candidates,
+        )
+        assert stale.state == "APPLICATION_ERROR"
+        assert b"STALE_CURSOR" in stale.content
 
 
 def test_round9_projection_wire_bytes_are_derived_not_caller_supplied() -> None:

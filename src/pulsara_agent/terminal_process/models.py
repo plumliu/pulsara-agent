@@ -129,21 +129,15 @@ class TerminalProcessInfo:
     def to_payload(self) -> dict[str, Any]:
         return {
             "process_id": self.process_id,
-            "terminal_session_id": self.terminal_session_id,
             "command": self.command,
             "cwd": self.cwd,
-            "backend_type": self.backend_type,
-            "io_mode": self.io_mode,
             "status": self.status,
             "exit_code": self.exit_code,
             "timed_out": self.timed_out,
             "stdin_closed": self.stdin_closed,
             "duration_seconds": self.duration_seconds,
-            "stream_id": self.stream_id,
-            "output_revision": self.output_revision,
             "output_cursor": self.output_cursor,
             "retained_from_cursor": self.retained_from_cursor,
-            "physical_state": self.physical_state,
         }
 
 

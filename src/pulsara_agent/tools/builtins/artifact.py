@@ -43,23 +43,18 @@ class ArtifactReadTool:
                 status=ToolResultState.ERROR,
                 payload={"status": "error", "error": request},
             )
-        artifact_id, mode, offset_chars, max_chars = request
+        artifact_id, offset_chars, max_chars = request
         try:
-            if mode == "info":
-                info = self.artifact_read_port.info(artifact_id)
-                record = info.record
-                payload: dict[str, Any] = _base_payload(record)
-            else:
-                text_slice = self.artifact_read_port.read_text(
-                    artifact_id,
-                    offset_chars=offset_chars,
-                    max_chars=max_chars,
-                )
-                payload = _bounded_text_payload(
-                    text_slice,
-                    tool_call_id=call.id,
-                )
-                record = text_slice.info.record
+            text_slice = self.artifact_read_port.read_text(
+                artifact_id,
+                offset_chars=offset_chars,
+                max_chars=max_chars,
+            )
+            payload = _bounded_text_payload(
+                text_slice,
+                tool_call_id=call.id,
+            )
+            record = text_slice.record
         except KeyError:
             return self._json_result(
                 call,
@@ -135,20 +130,17 @@ class ArtifactReadTool:
 
 def _request(
     arguments: object,
-) -> tuple[str, str, int, int] | str:
+) -> tuple[str, int, int] | str:
     if not isinstance(arguments, dict):
         # FrozenToolJsonDict is a dict subclass; keep the check deliberately
         # closed so arbitrary Mapping implementations cannot smuggle values.
         return "artifact_read arguments must be an object"
-    allowed_keys = {"artifact_id", "mode", "offset_chars", "max_chars"}
+    allowed_keys = {"artifact_id", "offset_chars", "max_chars"}
     if not set(arguments).issubset(allowed_keys):
         return "artifact_read arguments contain unknown properties"
     artifact_id = arguments.get("artifact_id")
     if not isinstance(artifact_id, str) or not artifact_id:
         return "artifact_id must be a non-empty string"
-    mode = arguments.get("mode", "text")
-    if mode not in {"text", "info"}:
-        return "mode must be text or info"
     offset = arguments.get("offset_chars", 0)
     maximum = arguments.get("max_chars", DEFAULT_ARTIFACT_READ_CHARS)
     if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
@@ -159,7 +151,7 @@ def _request(
         or not 1 <= maximum <= MAX_ARTIFACT_READ_CHARS
     ):
         return f"max_chars must be between 1 and {MAX_ARTIFACT_READ_CHARS}"
-    return artifact_id, str(mode), offset, maximum
+    return artifact_id, offset, maximum
 
 
 def _base_payload(record: object) -> dict[str, Any]:
@@ -182,7 +174,6 @@ def _base_payload(record: object) -> dict[str, Any]:
             if record.artifact_unavailability_reason is None
             else record.artifact_unavailability_reason.value
         ),
-        "model_visible_memory_ids": list(record.model_visible_memory_fact_ids),
     }
 
 
@@ -191,7 +182,7 @@ def _bounded_text_payload(
     *,
     tool_call_id: str,
 ) -> dict[str, Any]:
-    record = text_slice.info.record
+    record = text_slice.record
     base = _base_payload(record)
     text = text_slice.text
 

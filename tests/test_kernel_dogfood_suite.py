@@ -52,3 +52,22 @@ def test_kernel_dogfood_has_no_deleted_runtime_evidence_path() -> None:
     )
     assert all(token not in source for source in active_sources for token in forbidden)
     assert not (ROOT / "benchmarks" / "suites" / "durable_projection_pipeline.py").exists()
+
+
+def test_subagent_dogfood_accepts_the_explicit_terminal_result_shape() -> None:
+    suite = load_suite(SUITE_ROOT)
+    scenario = next(
+        item
+        for item in suite.scenarios
+        if item.contract.scenario_id == "subagent-delegation"
+    )
+    event_minimums = {
+        item.event_type: item.minimum
+        for item in scenario.contract.evidence_gate.committed_event_minimums
+    }
+
+    # The ROOT still produces one ordinary final answer.  A child may instead
+    # terminalize through report_agent_result, whose canonical evidence is the
+    # SubagentResultAccepted occurrence rather than a second assistant message.
+    assert event_minimums["AssistantMessageAccepted"] == 1
+    assert event_minimums["SubagentResultAccepted"] == 1

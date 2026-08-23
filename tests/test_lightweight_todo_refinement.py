@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from types import SimpleNamespace
 import unicodedata
@@ -62,6 +63,10 @@ from pulsara_agent.conversation_kernel.todo_runtime import (
     build_child_activation,
     build_root_activation,
 )
+from pulsara_agent.conversation_kernel.compaction.runtime_handoff import (
+    CompactionRuntimeHandoffBoundError,
+    freeze_compaction_runtime_handoff,
+)
 
 
 def _root_activation(turn: str = "turn:1"):
@@ -95,7 +100,7 @@ def test_todo_complete_snapshot_contract_and_byte_truth() -> None:
     assert parse_todo_replacement({"items": []}).ordered_items == ()
 
 
-@pytest.mark.parametrize("text", ["x" * 512, "界" * 170, "😀" * 128])
+@pytest.mark.parametrize("text", ["x" * 192, "界" * 64, "😀" * 48])
 def test_todo_text_accepts_exact_utf8_boundaries(text: str) -> None:
     candidate = parse_todo_replacement(
         {"items": [{"text": text, "status": "pending"}]}
@@ -104,35 +109,35 @@ def test_todo_text_accepts_exact_utf8_boundaries(text: str) -> None:
 
 
 def test_todo_item_and_aggregate_bounds_are_independent() -> None:
-    sixty_four = [
-        {"text": f"{index:02d}-" + "x" * 380, "status": "pending"}
-        for index in range(64)
+    sixteen = [
+        {"text": f"{index:02d}-" + "x" * 157, "status": "pending"}
+        for index in range(16)
     ]
-    assert len(parse_todo_replacement({"items": sixty_four}).ordered_items) == 64
-    with pytest.raises(TodoValidationError, match="at most 64"):
+    assert len(parse_todo_replacement({"items": sixteen}).ordered_items) == 16
+    with pytest.raises(TodoValidationError, match="at most 16"):
         parse_todo_replacement(
             {
-                "items": sixty_four
+                "items": sixteen
                 + [{"text": "one too many", "status": "pending"}]
             }
         )
     oversized = [
-        {"text": f"{index:02d}" + "x" * 510, "status": "pending"}
-        for index in range(64)
+        {"text": f"{index:02d}" + "\\" * 190, "status": "pending"}
+        for index in range(16)
     ]
-    with pytest.raises(TodoValidationError, match="32 KiB"):
+    with pytest.raises(TodoValidationError, match="4 KiB"):
         parse_todo_replacement({"items": oversized})
 
     near_bound = parse_todo_replacement(
         {
             "items": [
-                {"text": f"{index:02d}" + "x" * 478, "status": "pending"}
-                for index in range(64)
+                {"text": f"{index:02d}" + "x" * 190, "status": "pending"}
+                for index in range(16)
             ]
         }
     )
-    assert near_bound.canonical_json_utf8_bytes == 32715
-    # Live framing adds transport metadata, but the sole 32 KiB product quote
+    assert near_bound.canonical_json_utf8_bytes == 3579
+    # Live framing adds transport metadata, but the sole 4 KiB product quote
     # remains the provider-neutral ordered-item snapshot rather than the outer
     # observation envelope.
     TodoSnapshotUpdatedPayload(
@@ -143,7 +148,7 @@ def test_todo_item_and_aggregate_bounds_are_independent() -> None:
             TodoLiveItemProjection(item.ordinal, item.text, item.status.value)
             for item in near_bound.ordered_items
         ),
-        pending_count=64,
+        pending_count=16,
         in_progress_count=0,
         completed_count=0,
     )
@@ -179,12 +184,12 @@ def test_todo_item_and_aggregate_bounds_are_independent() -> None:
             "requires only",
         ),
         (
-            {"items": [{"text": "x" * 513, "status": "pending"}]},
-            "512 UTF-8 bytes",
+            {"items": [{"text": "x" * 193, "status": "pending"}]},
+            "192 UTF-8 bytes",
         ),
         (
-            {"items": [{"text": "😀" * 129, "status": "pending"}]},
-            "512 UTF-8 bytes",
+            {"items": [{"text": "😀" * 49, "status": "pending"}]},
+            "192 UTF-8 bytes",
         ),
         (
             {
@@ -261,8 +266,39 @@ def test_todo_owner_isolates_root_children_and_freezes_handoff() -> None:
     handoff = owner.freeze_compaction_handoff(
         scope_kind=ModelInputScopeKind.ROOT, scope_subagent_task_id=None
     )
-    assert [item.text for item in handoff.actionable_items] == ["Work now"]
-    assert handoff.completed_omitted == 1
+    assert handoff is not None
+    assert [item.text for item in handoff.ordered_items] == [
+        "Work now",
+        "Already done",
+    ]
+    runtime_handoff = freeze_compaction_runtime_handoff(
+        terminal_processes=(),
+        terminal_monitors=(),
+        todo=handoff,
+        subagent_tasks=(),
+    )
+    assert runtime_handoff is not None
+    for rendered in (runtime_handoff.full_text, runtime_handoff.compact_text):
+        payload = json.loads(rendered)
+        assert payload["todos"] == [
+            {"ordinal": 0, "status": "in_progress", "text": "Work now"},
+            {"ordinal": 1, "status": "completed", "text": "Already done"},
+        ]
+        assert payload["todo_counts"] == {
+            "completed": 1,
+            "in_progress": 1,
+            "pending": 0,
+            "total": 2,
+        }
+        assert payload["omitted"]["todos"] == 0
+    with pytest.raises(CompactionRuntimeHandoffBoundError):
+        freeze_compaction_runtime_handoff(
+            terminal_processes=(),
+            terminal_monitors=(),
+            todo=handoff,
+            subagent_tasks=(),
+            maximum_utf8_bytes=32,
+        )
 
 
 def test_todo_next_root_activation_closes_old_exact_run() -> None:

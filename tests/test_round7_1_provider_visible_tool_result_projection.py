@@ -378,23 +378,27 @@ def test_round7_1_full_required_has_closed_not_inlineable_and_budget_failures() 
 
 
 def test_round7_1_full_delivery_classifier_is_request_and_result_derived() -> None:
-    text = freeze_json({"artifact_id": "artifact:1", "mode": "text"})
-    info = freeze_json({"artifact_id": "artifact:1", "mode": "info"})
-    forged = freeze_json(
-        {"delivery_requirement": "FULL_REQUIRED", "reason": "ARTIFACT_PAGE"}
-    )
     assert classify_tool_result_delivery(
-        tool_name="artifact_read", arguments=text, result_state="SUCCESS"
+        tool_name="artifact_read", result_state="SUCCESS"
     ) == full_required_tool_result_delivery(ToolResultFullDeliveryReason.ARTIFACT_PAGE)
     assert classify_tool_result_delivery(
-        tool_name="artifact_read", arguments=info, result_state="SUCCESS"
+        tool_name="artifact_read", result_state="ERROR"
     ) == BEST_AVAILABLE_TOOL_RESULT_DELIVERY
     assert classify_tool_result_delivery(
-        tool_name="artifact_read", arguments=text, result_state="ERROR"
+        tool_name="third_party_tool", result_state="SUCCESS"
     ) == BEST_AVAILABLE_TOOL_RESULT_DELIVERY
-    assert classify_tool_result_delivery(
-        tool_name="third_party_tool", arguments=forged, result_state="SUCCESS"
-    ) == BEST_AVAILABLE_TOOL_RESULT_DELIVERY
+    for tool_name in (
+        "list_mcp_prompts",
+        "list_mcp_resource_templates",
+        "list_mcp_resources",
+        "list_mcp_servers",
+    ):
+        assert classify_tool_result_delivery(
+            tool_name=tool_name,
+            result_state="SUCCESS",
+        ) == full_required_tool_result_delivery(
+            ToolResultFullDeliveryReason.MCP_DIRECTORY_PAGE
+        )
 
     for reason in ToolResultFullDeliveryReason:
         requirement = full_required_tool_result_delivery(reason)

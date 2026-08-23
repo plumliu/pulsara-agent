@@ -13,6 +13,8 @@
 > 上位契约：[Round 3 structured compiler](ROUND_3_STRUCTURED_MODEL_INPUT_COMPILER_IMPLEMENTATION_SPEC.zh.md)、[Round 3.1 provider-input prefix continuity](ROUND_3_1_PROVIDER_INPUT_PREFIX_CONTINUITY_IMPLEMENTATION_SPEC.zh.md)、[Round 5A execution envelope](ROUND_5_LONG_HORIZON_EXECUTION_ENVELOPE_IMPLEMENTATION_SPEC.zh.md)、[Round 7.1 ToolResult projection](ROUND_7_1_PROVIDER_VISIBLE_TOOL_RESULT_PROJECTION_IMPLEMENTATION_SPEC.zh.md)
 >
 > 下游集成：[Round 5B compaction](ROUND_5B_LONG_HORIZON_CONTEXT_COMPACTION_IMPLEMENTATION_SPEC.zh.md)
+>
+> 轻量化与完整交接hard-cut（2026-08-23）：公开工具保持单一完整replacement，边界收紧为16项、192 UTF-8 bytes/item与4 KiB整表；Round 5B successor由Runtime重新注入包含completed rows的完整current snapshot，删除旧actionable-only compaction DTO与TODO prefix裁剪。既有activation JSON是初次激活的历史证据，不作为本次修订后的代码或规格fingerprint authority。
 
 本文把现有`todo`从Host-global、action-by-action的可变list原型，收敛为一个**exact run-scoped、bounded、process-local、完整snapshot替换**的轻量模型工具。
 
@@ -284,7 +286,7 @@ Claude Code轻量工具是`TodoWrite`：
 - turn-count hidden reminder可能制造噪音；
 - transcript replay不应成为Pulsara新的current-state authority。
 
-### 2.3 grok-build：稳定state owner与compaction actionable handoff
+### 2.3 grok-build：稳定state owner与compaction handoff
 
 grok-build的`todo_write`支持稳定ID、merge与full replace；`TodoState`位于session Resources，另行向模型返回summary、向ACP/UI发送结构化Plan，并持久化`resources_state.json`。
 
@@ -309,8 +311,7 @@ read current TodoState
 
 - state owner与UI分离；
 - bounded snapshot API；
-- compaction从current owner重建，而非让summary模型猜；
-- 只交接actionable items。
+- compaction从current owner重建，而非让summary模型猜。
 
 不照搬：
 
@@ -318,7 +319,8 @@ read current TodoState
 - priority/meta；
 - position-generated compatibility ID；
 - filesystem persistence；
-- ACP Plan展示协议作为state authority。
+- ACP Plan展示协议作为state authority；
+- compaction只交接actionable子集。Pulsara的模型API是完整替换，successor若看不到完整current snapshot，下一次replacement可能无意删除被省略项。
 
 ### 2.4 综合选择
 
@@ -328,10 +330,10 @@ Codex / Claude
 
 grok-build
   -> explicit state owner
-  -> bounded actionable compaction projection
+  -> Runtime-owned compaction projection
 
 Pulsara
-  -> full snapshot + exact-run owner + Runtime compaction handoff
+  -> lightweight full snapshot + exact-run owner + exact Runtime compaction handoff
   -> no durable task board
 ~~~
 
@@ -427,9 +429,9 @@ count(status == IN_PROGRESS) <= 1
 ### 4.2 Runtime bounds
 
 ~~~text
-maximum items                         64
-maximum text UTF-8 bytes/item        512
-maximum aggregate canonical JSON     32 KiB
+maximum items                         16
+maximum text UTF-8 bytes/item        192
+maximum aggregate canonical JSON      4 KiB
 maximum in_progress items              1
 maximum exact duplicate texts          1
 ~~~
@@ -442,7 +444,7 @@ Text规则：
 - 不得包含NUL、C0 control、line separator或多行正文；
 - duplicate按NFC exact、case-sensitive text判断；不casefold代码标识符。
 
-32 KiB quote使用唯一canonical compact JSON encoder，覆盖ordered items、field names、status与UTF-8正文；不能只加总text长度。
+4 KiB quote使用唯一canonical compact JSON encoder，覆盖ordered items、field names、status、JSON escaping与UTF-8正文；不能只加总text长度。16项足以覆盖一轮较长的轻量工作清单，192 UTF-8 bytes仍可容纳约192个ASCII字符或64个常用中文字符。该边界让完整TODO可以在Round 5B既有32 KiB runtime handoff内与必要的Terminal/Subagent状态共同交接，而不扩张compaction envelope；更复杂的长期分解应使用Plan/Subagent或分阶段滚动更新TODO。
 
 ### 4.3 Validation order
 
@@ -755,7 +757,7 @@ ToolResult不重复items、不产生artifact、不携带run/owner/revision/finge
 
 ~~~text
 todo accepts at most one in_progress item
-todo item text exceeds 512 UTF-8 bytes
+todo item text exceeds 192 UTF-8 bytes
 todo contains duplicate item text
 todo scope is no longer active
 ~~~
@@ -789,7 +791,7 @@ TodoSnapshotUpdatedPayload
   completed_count
 ~~~
 
-不使用`TODO_START / TODO_DELTA / TODO_END`，也不发per-item event。一次accepted replacement只产生一个原子full-snapshot payload；它本身已受64 items、512 UTF-8 bytes/item与32 KiB aggregate bound限制。
+不使用`TODO_START / TODO_DELTA / TODO_END`，也不发per-item event。一次accepted replacement只产生一个原子full-snapshot payload；它本身已受16 items、192 UTF-8 bytes/item与4 KiB aggregate bound限制。
 
 Disposition语义：
 
@@ -892,35 +894,25 @@ current TODO snapshot  Runtime-owned
 {
   "todos": [
     {"ordinal": 0, "status": "in_progress", "text": "Inspect failure"},
-    {"ordinal": 1, "status": "pending", "text": "Implement fix"}
+    {"ordinal": 1, "status": "pending", "text": "Implement fix"},
+    {"ordinal": 2, "status": "completed", "text": "Reproduce failure"}
   ],
   "todo_counts": {
     "pending": 1,
     "in_progress": 1,
-    "completed_omitted": 3
+    "completed": 1,
+    "total": 3
   }
 }
 ~~~
 
 旧Round 5B示例中的TODO `id`不再存在；`ordinal`只表达本次投影的ordered position，模型后续仍提交完整snapshot，不引用ordinal做mutation。
 
-### 7.3 Selection
+### 7.3 Complete selection
 
-Compaction只注入：
+只要current TODO snapshot存在，Runtime必须按owner顺序注入完整`PENDING | IN_PROGRESS | COMPLETED`表。FULL与COMPACT携带同一组TODO rows；不得截断尾部、只交接actionable子集或把completed降成count-only表示。`todo_counts`必须与完整rows逐项一致，且`omitted.todos = 0`。
 
-- `PENDING`；
-- `IN_PROGRESS`。
-
-`COMPLETED`正文不注入，只给`completed_omitted` count。若没有actionable item：
-
-~~~text
-todos = []
-pending = 0
-in_progress = 0
-completed_omitted may be non-zero
-~~~
-
-Runtime renderer可在整个handoff不存在其他live state时省略空TODO section。不得为展示completed历史挤占rebase预算。
+这是完整替换API的必要读写对称性：compaction丢失任何current row，都会让successor在下一次`todo(items=[...])`时可能把不可见row误当作应删除项。若完整TODO连同mandatory runtime facts不能进入既有32 KiB handoff或successor input，则该次compaction走typed resource boundary、provider open=0；不得发送部分表后声称current TODO已交接。
 
 ### 7.4 Exact freeze与adoption
 
@@ -943,8 +935,8 @@ Idle compaction不冻结未来run TODO；下一条真实ROOT user message开启�
 
 ### 7.5 Bounds与trust
 
-- 仍使用最多64项、每项512 UTF-8 bytes；
-- 因只选择actionable，结果必为原snapshot子序列；
+- 最多16项、每项192 UTF-8 bytes、整表canonical JSON最多4 KiB；
+- FULL与COMPACT都逐项等于owner的完整ordered snapshot，包括completed rows；
 - TODO handoff与其他runtime state一起受Round 5B aggregate 32 KiB bound；
 - `trust=UNTRUSTED_OBSERVATION`；
 - 不进入BASE_SYSTEM或provider tools；
@@ -1065,19 +1057,13 @@ TODO不得把“worker已返回”当作“current state已安装”。它复用
   - consumer用`todo_run_id + todo_revision`拒绝stale/duplicate update；
 - Round 5B future implementation
   - 读取本文snapshot API；
-  - 使用无ID actionable TODO subshape；
+  - 使用无ID、完整有序的TODO subshape；
   - 将整个`COMPACTION_RUNTIME_HANDOFF`冻结为`UNTRUSTED_OBSERVATION`；
   - 不复制第二套TODO owner。
 
 ### 9.2 Prompt/description
 
-Tool description必须足以让模型知道：
-
-~~~text
-Maintain a small checklist for the current run by replacing the complete list.
-Use it for multi-step work, not simple one-step answers. Keep at most one item
-in_progress. Submit an empty list to clear it.
-~~~
+Tool description必须使用模型可直接操作的自然语言说明：这是当前任务的小型有序清单；每次调用原子替换整张表；想保留的项目必须全部重发，省略即删除；进度推进通常在一次调用中把当前项标为completed并把下一项标为in_progress；最多一个in_progress；`items=[]`清空。不得要求模型理解exact run、owner、settlement或compaction等Runtime内部术语。`items/text/status`字段分别解释完整表而非patch、顺序、唯一单行文本及三个status的含义。
 
 不需要长篇few-shot或隐藏system protocol。状态、bounds与错误由Runtime保证。
 
@@ -1097,13 +1083,13 @@ in_progress. Submit an empty list to clear it.
 ### 10.1 Pure contract
 
 - empty list合法并清空；
-- 1..64项合法；第65项在attempt前拒绝；
+- 1..16项合法；第17项在attempt前拒绝；
 - pending/in_progress/completed enum；
 - two in_progress拒绝；
 - exact duplicate拒绝；
 - NFC、leading/trailing whitespace、newline/control拒绝；
-- 512 UTF-8 bytes边界覆盖ASCII/CJK/emoji；
-- 32 KiB canonical JSON quote边界；
+- 192 UTF-8 bytes边界覆盖ASCII/CJK/emoji；
+- 4 KiB canonical JSON quote边界，包括JSON escaping；
 - unknown fields拒绝。
 
 ### 10.2 Mutation与ack
@@ -1176,15 +1162,13 @@ in_progress. Submit an empty list to clear it.
 
 在Round 5B实现时必须覆盖：
 
-- pending/in_progress按原顺序注入；
-- completed正文不注入，只计数；
-- `COMPACT`只保留能完整放入的ordered whole-item prefix；每项必须同时包含ordinal/status/text，并给出exact omitted count；
+- pending/in_progress/completed全部按原顺序注入；
+- FULL与COMPACT携带同一张完整TODO表，`omitted.todos = 0`；
 - 不允许把ordinal伪装成稳定ID，也不允许删除text后仍声称交接current TODO；
-- no actionable items不产生TODO正文；
 - ROOT/child exact scope；
 - summary模型输出不决定TODO；
 - summary期间state fingerprint变化导致dry compile重建；
-- successor input包含current actionable snapshot；
+- successor input包含current complete snapshot；
 - 整个`COMPACTION_RUNTIME_HANDOFF`的trust为`UNTRUSTED_OBSERVATION`；
 - old epoch SYSTEM/tools保持；cold successor使用正常rebase；
 - no durable TODO row/CommittedEvent/job。
@@ -1219,7 +1203,7 @@ in_progress. Submit an empty list to clear it.
 11. ToolResult只返回small ack，不复制全表、不产生artifact；
 12. TODO不进入unknown external effect路径；
 13. Host crash/takeover丢失TODO被明确接受，不建立durable recovery；丢失后的Plan/Terminal/external-result continuation继续运行但不重建TODO，下一accepted human message才创建新run；
-14. Round 5B消费同一个snapshot owner，只交接actionable items；
+14. Round 5B消费同一个snapshot owner，并在FULL/COMPACT中完整交接所有current items；
 15. 整个`COMPACTION_RUNTIME_HANDOFF`使用`UNTRUSTED_OBSERVATION`，summary模型不拥有或改写current TODO；
 16. BASE_SYSTEM/tools在运行epoch内不因TODO更新而改变；
 17. messages只通过普通assistant tool call/ToolResult追加suffix；
@@ -1261,8 +1245,8 @@ model calls todo with complete bounded snapshot
 mid-run compaction
   -> summary model handles semantic history only
   -> Runtime reads exact current TODO owner
-  -> pending/in_progress enter COMPACTION_RUNTIME_HANDOFF
-  -> completed text omitted
+  -> complete ordered TODO enters COMPACTION_RUNTIME_HANDOFF
+  -> FULL/COMPACT retain identical TODO rows with omitted.todos = 0
   -> successor continues current small task
 
 never

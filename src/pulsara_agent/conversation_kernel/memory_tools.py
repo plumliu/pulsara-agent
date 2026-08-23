@@ -160,7 +160,11 @@ class KernelMemoryToolPort:
 
         if self._deadline_factory_bound:
             raise RuntimeError("memory deadline factory is already bound")
-        if self._remote_tasks or self._embedding is not None or self._rerank is not None:
+        if (
+            self._remote_tasks
+            or self._embedding is not None
+            or self._rerank is not None
+        ):
             raise RuntimeError("memory deadline factory was bound after admission")
         self._deadlines = deadline_factory
         self._deadline_factory_bound = True
@@ -264,12 +268,8 @@ class KernelMemoryToolPort:
         if invocation_context.session_id != self._session_id:
             return _json_result("SYSTEM_ERROR", {"error": "memory session mismatch"})
         policy = invocation_context.memory_context.memory_use_policy
-        if (
-            tool_name in MEMORY_READ_TOOL_NAMES
-            and not policy.allows_reads
-        ) or (
-            tool_name in MEMORY_WRITE_TOOL_NAMES
-            and not policy.allows_writes
+        if (tool_name in MEMORY_READ_TOOL_NAMES and not policy.allows_reads) or (
+            tool_name in MEMORY_WRITE_TOOL_NAMES and not policy.allows_writes
         ):
             raise RuntimeError("memory tool escaped its frozen user opt-out policy")
         try:
@@ -292,7 +292,11 @@ class KernelMemoryToolPort:
     ) -> KernelToolResult:
         scope_kind = MemoryScopeKind(str(arguments.get("scope") or "USER"))
         scope = next(
-            (item for item in self._read_binding.readable_scopes if item.kind is scope_kind),
+            (
+                item
+                for item in self._read_binding.readable_scopes
+                if item.kind is scope_kind
+            ),
             None,
         )
         if scope is None:
@@ -320,9 +324,7 @@ class KernelMemoryToolPort:
             reference.citation_visibility.value != "USER_SAFE"
             for reference in citation_refs
         ):
-            raise ValueError(
-                "USER memory cannot cite a workspace-bound ToolResult"
-            )
+            raise ValueError("USER memory cannot cite a workspace-bound ToolResult")
         candidate_id = _stable_id(
             "memory-candidate",
             context.session_id,
@@ -368,7 +370,9 @@ class KernelMemoryToolPort:
                 ),
             )
             if item is None:
-                raise ValueError("based_on memory is absent or outside the visible scope")
+                raise ValueError(
+                    "based_on memory is absent or outside the visible scope"
+                )
             refs.append(
                 PreparedMemoryBasisReference(
                     target_fact_id=item.fact_id,
@@ -397,23 +401,13 @@ class KernelMemoryToolPort:
         # query must not open the optional embedding or rerank transports.
         query_terms = self._query.tokenize_query(query)
         embedding = None
-        provider_acquisition_failed = False
         try:
             embedding = await self._embedding_provider()
         except Exception:
             # Optional remote retrieval must never become the authority for an
             # otherwise valid sparse memory search.
-            provider_acquisition_failed = True
+            pass
         query_embedding = None
-        dense_reason = (
-            "DISABLED_CONTRACT_MISMATCH"
-            if not MEMORY_EMBEDDING_CONTRACT.accepts(self._embedding_config)
-            else (
-                "UNAVAILABLE"
-                if provider_acquisition_failed
-                else "NOT_CONFIGURED"
-            )
-        )
         if embedding is not None:
             try:
                 query_embedding = await self._run_remote_exact(
@@ -424,14 +418,15 @@ class KernelMemoryToolPort:
                     ),
                     name="memory-explicit-query-embedding",
                 )
-                dense_reason = "AVAILABLE"
             except Exception:
-                dense_reason = "UNAVAILABLE"
+                pass
         result = await self._parallel_recall(
             terms=query_terms,
             limit=limit,
             requested_scope=(
-                None if requested_scope is None else MemoryScopeKind(str(requested_scope))
+                None
+                if requested_scope is None
+                else MemoryScopeKind(str(requested_scope))
             ),
             requested_kind=(None if requested_kind is None else str(requested_kind)),
             query_embedding=query_embedding,
@@ -466,49 +461,20 @@ class KernelMemoryToolPort:
                 "applies_when": item.applies_when,
                 "do_not_apply_when": list(item.do_not_apply_when),
                 "filter_match": _filter_match(item.match_tier),
-                "advisory": True,
-                "may_be_stale_or_incomplete": True,
             }
             for item in result.facts
         ]
         return _json_result(
             "SUCCESS",
             {
-                "disposition": result.disposition.value,
                 "requested_filters": {
                     "scope": requested_scope,
                     "kind": requested_kind,
                 },
-                "exact_result_count": sum(item.match_tier == 0 for item in result.facts),
-                "relaxed_result_count": sum(
-                    item.match_tier > 0 for item in result.facts
+                "retrieval_summary": _retrieval_summary(
+                    result,
+                    relation_check=relation_enrichment,
                 ),
-                "fallback_applied": any(item.match_tier > 0 for item in result.facts),
-                "relaxed_fields": list(result.relaxed_fields),
-                "attempted_stages": [
-                    {
-                        "ordinal": item.ordinal,
-                        "scope": item.scope,
-                        "kind": item.kind,
-                        "new_results": item.new_results,
-                    }
-                    for item in result.attempted_stages
-                ],
-                "retrieval_channels": _retrieval_channels(result),
-                "vector_cache": _vector_cache(result.dense_disposition),
-                "dense_result": (
-                    result.dense_disposition.value
-                    if query_embedding is not None
-                    else dense_reason
-                ),
-                "dense_match_policy": (
-                    "COARSE_V1"
-                    if query_embedding is not None
-                    else "NOT_APPLICABLE"
-                ),
-                "rerank": result.rerank_disposition,
-                "relation_enrichment": relation_enrichment,
-                "filter_fallback": _filter_fallback(result),
                 "memories": memories,
                 "relation_warnings": [
                     {
@@ -580,9 +546,7 @@ class KernelMemoryToolPort:
                 ),
             )
             if provenance is None:
-                return _json_result(
-                    "APPLICATION_ERROR", {"error": "memory not found"}
-                )
+                return _json_result("APPLICATION_ERROR", {"error": "memory not found"})
             projection: dict[str, object] = {
                 "disposition": provenance.provenance_disposition,
                 "producer_kind": provenance.producer_kind,
@@ -708,13 +672,12 @@ class KernelMemoryToolPort:
             for row in rows:
                 item = selected[row.index]
                 by_tier.setdefault(item.match_tier, []).append(item)
-            reranked = tuple(
-                item
-                for tier in sorted(by_tier)
-                for item in by_tier[tier]
-            )
+            reranked = tuple(item for tier in sorted(by_tier) for item in by_tier[tier])
             selected_ids = {item.fact_id for item in selected}
-            ordered = (*reranked, *(item for item in result.facts if item.fact_id not in selected_ids))
+            ordered = (
+                *reranked,
+                *(item for item in result.facts if item.fact_id not in selected_ids),
+            )
             disposition = "APPLIED"
         return type(result)(
             disposition=result.disposition,
@@ -764,9 +727,10 @@ class KernelMemoryToolPort:
                 )
                 for item in scoped_rows
             )
-            if len(scoped_rows) > 16 or len(
-                canonical_json_bytes(scoped_projection)
-            ) > 7 * 1024:
+            if (
+                len(scoped_rows) > 16
+                or len(canonical_json_bytes(scoped_projection)) > 7 * 1024
+            ):
                 return build_memory_context_source(
                     kind=ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD,
                     texts=None,
@@ -821,19 +785,27 @@ class KernelMemoryToolPort:
                 dict.fromkeys(
                     [
                         *(item.fact_id for item in effective),
-                        *(value for relation in relations for value in (
-                            relation.source_fact_id,
-                            relation.target_fact_id,
-                        )),
+                        *(
+                            value
+                            for relation in relations
+                            for value in (
+                                relation.source_fact_id,
+                                relation.target_fact_id,
+                            )
+                        ),
                     ]
                 )
             ),
             domain_identity={
                 "items": tuple(
-                    sorted((item.fact_id, item.fact_semantic_digest) for item in effective)
+                    sorted(
+                        (item.fact_id, item.fact_semantic_digest) for item in effective
+                    )
                 ),
                 "warnings": tuple(
-                    sorted((item.source_fact_id, item.target_fact_id) for item in relations)
+                    sorted(
+                        (item.source_fact_id, item.target_fact_id) for item in relations
+                    )
                 ),
             },
         )
@@ -928,6 +900,7 @@ class KernelMemoryToolPort:
                 texts=None,
                 absence_kind=ContextSourceAbsenceKind.UNAVAILABLE,
             )
+
         def item_payload(item):
             return {
                 "memory_id": item.fact_id,
@@ -1209,7 +1182,9 @@ class KernelMemoryToolPort:
 def _string_sequence(value: object) -> tuple[str, ...]:
     if value is None:
         return ()
-    if not isinstance(value, (list, tuple)) or any(not isinstance(item, str) for item in value):
+    if not isinstance(value, (list, tuple)) or any(
+        not isinstance(item, str) for item in value
+    ):
         raise ValueError("memory reference list is invalid")
     return tuple(value)
 
@@ -1233,9 +1208,7 @@ def _memory_search_stage_result(
 ) -> MemorySearchStageResult:
     return MemorySearchStageResult(
         ordinal=ordinal,
-        scope=(
-            "REQUESTED" if label in {"EXACT", "RELAX_KIND"} else "ALL_VISIBLE"
-        ),
+        scope=("REQUESTED" if label in {"EXACT", "RELAX_KIND"} else "ALL_VISIBLE"),
         kind=("REQUESTED" if label in {"EXACT", "RELAX_SCOPE"} else "ANY"),
         new_results=new_results,
     )
@@ -1265,42 +1238,54 @@ def _aggregate_dense_dispositions(
     return MemoryDenseCandidateDisposition.UNAVAILABLE
 
 
-def _vector_cache(disposition: MemoryDenseCandidateDisposition) -> str:
-    if disposition is MemoryDenseCandidateDisposition.PARTIAL_BOUNDED_SCAN:
-        return "PARTIAL"
-    if disposition in {
-        MemoryDenseCandidateDisposition.BOUNDED_TOP_K,
-        MemoryDenseCandidateDisposition.EXHAUSTED_VISIBLE_SET,
-        MemoryDenseCandidateDisposition.NO_ELIGIBLE_MATCH,
-    }:
-        return "AVAILABLE"
-    return "NOT_AVAILABLE"
-
-
-def _retrieval_channels(result: MemoryQueryResult) -> list[str]:
-    channels: list[str] = []
-    if result.sparse_available:
-        channels.append("SPARSE_FTS")
-    if _vector_cache(result.dense_disposition) != "NOT_AVAILABLE":
-        channels.append("VECTOR")
-    if result.rerank_disposition == "APPLIED":
-        channels.append("RERANK")
-    return channels
-
-
-def _filter_fallback(result: MemoryQueryResult) -> str:
-    values = set(result.relaxed_fields)
-    if not values:
-        return "NOT_NEEDED"
+def _retrieval_summary(
+    result: MemoryQueryResult,
+    *,
+    relation_check: str,
+) -> dict[str, object]:
+    status = {
+        MemoryRetrievalDisposition.COMPLETE: "COMPLETE",
+        MemoryRetrievalDisposition.PARTIAL: "PARTIAL",
+        MemoryRetrievalDisposition.UNAVAILABLE: "UNAVAILABLE",
+        MemoryRetrievalDisposition.NO_MATCH: "COMPLETE",
+    }[result.disposition]
     if not result.facts:
-        return "EXHAUSTED"
-    if "scope+kind" in values or values == {"scope", "kind"}:
-        return "KIND_AND_SCOPE"
-    if "scope" in values:
-        return "SCOPE"
-    if "kind" in values:
-        return "KIND"
-    return "EXHAUSTED"
+        match = "NONE"
+    elif any(item.match_tier > 0 for item in result.facts):
+        match = "INCLUDES_RELAXED"
+    else:
+        match = "EXACT"
+
+    relaxed = set(result.relaxed_fields)
+    expanded_filters = [
+        field
+        for field, present in (
+            ("KIND", "kind" in relaxed or "scope+kind" in relaxed),
+            ("SCOPE", "scope" in relaxed or "scope+kind" in relaxed),
+        )
+        if present
+    ]
+
+    if result.rerank_disposition == "APPLIED":
+        ranking = "RERANKED"
+    elif result.sparse_available and result.dense_available:
+        ranking = "HYBRID"
+    elif result.dense_available:
+        ranking = "VECTOR_ONLY"
+    elif result.sparse_available:
+        ranking = "SPARSE_ONLY"
+    else:
+        ranking = "UNAVAILABLE"
+
+    if relation_check not in {"COMPLETE", "UNAVAILABLE"}:
+        raise ValueError("memory relation check disposition is invalid")
+    return {
+        "status": status,
+        "match": match,
+        "expanded_filters": expanded_filters,
+        "ranking": ranking,
+        "relation_check": relation_check,
+    }
 
 
 def _bounded_memory_relations(fact_ids, relations):
@@ -1331,20 +1316,10 @@ def _json_result(
     memory_candidate: PreparedMemoryCandidateAcceptance | None = None,
     model_visible_memory_fact_ids: tuple[str, ...] = (),
 ) -> KernelToolResult:
-    ordered_payload: dict[str, object] = {}
-    if model_visible_memory_fact_ids:
-        # The exposure header is an independent canonical column as well as
-        # the first bytes of the public JSON body.  A Round 1 HEAD_TAIL preview
-        # therefore cannot hide the IDs that its body exposed to the model.
-        ordered_payload["model_visible_memory_ids"] = list(
-            model_visible_memory_fact_ids
-        )
-    for key in sorted(payload):
-        ordered_payload[key] = payload[key]
     encoded = json.dumps(
-        ordered_payload,
+        payload,
         ensure_ascii=False,
-        sort_keys=False,
+        sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
     if len(encoded) > MAXIMUM_MEMORY_TOOL_OUTPUT_BYTES:
@@ -1435,9 +1410,7 @@ def _utf8_head_tail(value: bytes, maximum_bytes: int) -> bytes:
     return head + marker + tail
 
 
-_SENSITIVE_PROFILE_RELEVANCE: tuple[
-    tuple[frozenset[str], frozenset[str]], ...
-] = (
+_SENSITIVE_PROFILE_RELEVANCE: tuple[tuple[frozenset[str], frozenset[str]], ...] = (
     (
         frozenset(
             {

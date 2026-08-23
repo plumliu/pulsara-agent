@@ -68,13 +68,8 @@ class ToolArtifactRecordView:
 
 
 @dataclass(frozen=True, slots=True)
-class ToolArtifactInfoView:
-    record: ToolArtifactRecordView
-
-
-@dataclass(frozen=True, slots=True)
 class ToolArtifactTextSliceView:
-    info: ToolArtifactInfoView
+    record: ToolArtifactRecordView
     text: str
     offset_chars: int
     returned_chars: int
@@ -86,10 +81,6 @@ class ToolArtifactTextSliceView:
 class ToolArtifactReadPort(Protocol):
     """Session/workspace-scoped, read-only canonical artifact capability."""
 
-    def lookup(self, artifact_id: str) -> ToolArtifactRecordView | None: ...
-
-    def info(self, artifact_id: str) -> ToolArtifactInfoView: ...
-
     def read_text(
         self, artifact_id: str, *, offset_chars: int, max_chars: int
     ) -> ToolArtifactTextSliceView: ...
@@ -97,7 +88,6 @@ class ToolArtifactReadPort(Protocol):
 
 __all__ = [
     "ArtifactContentError",
-    "ToolArtifactInfoView",
     "ToolArtifactMode",
     "ToolArtifactReadPort",
     "ToolArtifactRecordView",

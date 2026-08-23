@@ -10,11 +10,11 @@
 >
 > 本文是设计意图与实施落地的共同真源。Post-activation review 提出的 URI-template 线性匹配、`json.loads`前结构扫描、bounded remote identity 与从 `client.open()` 开始的 Host discovery reservation 已全部闭合；机器可读证据已按最终工作树刷新。PHC-08 后续 non-goal 不随核心 activation 隐式关闭。
 >
-> 上位架构：[PULSARA_DURABILITY_SUBTRACTION_REASSESSMENT.zh.md](PULSARA_DURABILITY_SUBTRACTION_REASSESSMENT.zh.md)
+> 上位架构：[PULSARA_DURABILITY_SUBTRACTION_REASSESSMENT.zh.md](archived_docs/PULSARA_DURABILITY_SUBTRACTION_REASSESSMENT.zh.md)
 >
-> 产品能力索引：[POST_HARD_CUT_PRODUCT_CAPABILITY_GAP_INDEX.zh.md](POST_HARD_CUT_PRODUCT_CAPABILITY_GAP_INDEX.zh.md)
+> 产品能力索引：[POST_HARD_CUT_PRODUCT_CAPABILITY_GAP_INDEX.zh.md](archived_docs/POST_HARD_CUT_PRODUCT_CAPABILITY_GAP_INDEX.zh.md)
 >
-> Catalog 先行设计：[PULSARA_MCP_CATALOG_AND_LIST_FALLBACK_DESIGN.zh.md](PULSARA_MCP_CATALOG_AND_LIST_FALLBACK_DESIGN.zh.md)
+> Catalog 先行设计：[PULSARA_MCP_CATALOG_AND_LIST_FALLBACK_DESIGN.zh.md](archived_docs/PULSARA_MCP_CATALOG_AND_LIST_FALLBACK_DESIGN.zh.md)
 >
 > 前置规格：[Round 3 compiler](ROUND_3_STRUCTURED_MODEL_INPUT_COMPILER_IMPLEMENTATION_SPEC.zh.md)、[Round 3.1 prefix continuity](ROUND_3_1_PROVIDER_INPUT_PREFIX_CONTINUITY_IMPLEMENTATION_SPEC.zh.md)、[Round 5 long-horizon envelope](ROUND_5_LONG_HORIZON_EXECUTION_ENVELOPE_IMPLEMENTATION_SPEC.zh.md)
 
@@ -1212,6 +1212,12 @@ list_mcp_prompts(server_id?, cursor?, limit?)
 get_mcp_prompt(server_id, prompt_name, frozen_arguments)
 ~~~
 
+三个list入口返回各自的closed item page：`page_kind`分别为
+`RESOURCE_PAGE | RESOURCE_TEMPLATE_PAGE | PROMPT_PAGE`，共同字段只有
+`items / returned_item_count / total / next_cursor`。Resource row只携带fixed `uri`，
+template row只携带`uri_template`，prompt row只携带prompt name与declared arguments；
+不得把三类row合并成带optional字段的generic item，也不得用一种list的cursor读取另一种。
+
 这些不是generic search_tool/use_tool：
 
 - server、resource URI、prompt name与argument schema来自exact discovery snapshot；resource URI可以exact命中静态descriptor，或被同一snapshot中的bounded RFC6570 template保守匹配；matcher必须线性消费literal/expression，拒绝不能唯一切分的adjacent expression，并对query/matrix expansion exact校验advertised variable name；malformed/unsupported template只能作为不可执行metadata，不能授权open-ended URI；
@@ -1219,7 +1225,8 @@ get_mcp_prompt(server_id, prompt_name, frozen_arguments)
 - resource body与prompt content一律作为UNTRUSTED_OBSERVATION tool result进入模型，不能提升为system/root instruction；
 - resource read是一次bounded远端读取；MCP wire不提供稳定offset/limit，因此不同调用间不承诺远端byte坐标或snapshot identity；
 - 完整接受的large body复用Round 1 artifact，后续只通过artifact_read在canonical blob上稳定分页；不得把artifact offset重新发送为第二次远端resources/read；
-- list/template/prompt listing的pagination cursor有单次operation上限，不成为durable cursor；
+- list/template/prompt listing复用同一个Host-local directory page factory与cursor signer；每个opaque cursor exact绑定current scoped catalog、exact list kind、ROOT/child task scope、server filter、limit与next offset，跨工具、跨scope或改变query shape必须typed stale，不得按共享offset继续另一份目录；cursor有单次operation上限且不成为durable cursor、registry或恢复authority；
+- successful list/template/prompt page与`list_mcp_servers`一致标记既有`FULL_REQUIRED/MCP_DIRECTORY_PAGE`，page factory只签发可被共享Round 7.1 renderer完整容纳的最长ordered page；不得让模型只看到截断page或尾部cursor后跳过未交付items；
 - resource/prompt list-changed只推进`DIRTY_FENCED`并触发full reconcile，不直接改写snapshot；
 - 即使协议方法名看起来read-only，transport outcome未知时V1仍不自动重放；
 - input-required只进入第11章bounded keyed state-only/unsupported owner；不打开human interaction。

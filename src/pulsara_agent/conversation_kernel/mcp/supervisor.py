@@ -85,6 +85,9 @@ from .contracts import (
     McpServerState,
     McpToolSemanticFact,
     build_catalog_snapshot,
+    mcp_prompt_public_item,
+    mcp_resource_public_item,
+    mcp_resource_template_public_item,
     scope_mcp_discovery_snapshot,
 )
 from .naming import mangle_mcp_tool_names
@@ -846,20 +849,6 @@ class McpInstalledRuntimeGeneration:
         permit: McpDispatchAdmissionPermit | None,
         scope_kind: ModelInputScopeKind,
     ) -> McpKnownToolResult:
-        if tool_name == "list_mcp_servers":
-            payload = _bounded_server_catalog_payload(
-                self.catalog_for_scope(scope_kind)
-            )
-            return _local_known(payload, tool_name)
-        if tool_name in {
-            "list_mcp_resources",
-            "list_mcp_resource_templates",
-            "list_mcp_prompts",
-        }:
-            return _local_known(
-                _list_catalog_items(self, tool_name, arguments, scope_kind),
-                tool_name,
-            )
         if permit is None:
             raise RuntimeError("MCP remote read lost its dispatch permit")
         if permit.scope_kind is not scope_kind:
@@ -2561,7 +2550,7 @@ def _resource(server_id: str, item: types.Resource) -> McpResourceSemanticFact:
         **payload,
         semantic_fingerprint=context_fingerprint("mcp-resource:v1", payload),
     )
-    _assert_catalog_item_bound(_resource_public_item(server_id, fact))
+    _assert_catalog_item_bound(mcp_resource_public_item(server_id, fact))
     return fact
 
 
@@ -2583,7 +2572,7 @@ def _resource_template(
         **payload,
         semantic_fingerprint=context_fingerprint("mcp-resource-template:v1", payload),
     )
-    _assert_catalog_item_bound(_resource_template_public_item(server_id, fact))
+    _assert_catalog_item_bound(mcp_resource_template_public_item(server_id, fact))
     return fact
 
 
@@ -2606,46 +2595,8 @@ def _prompt(server_id: str, item: types.Prompt) -> McpPromptSemanticFact:
         **payload,
         semantic_fingerprint=context_fingerprint("mcp-prompt:v1", payload),
     )
-    _assert_catalog_item_bound(_prompt_public_item(server_id, fact))
+    _assert_catalog_item_bound(mcp_prompt_public_item(server_id, fact))
     return fact
-
-
-def _resource_public_item(
-    server_id: str, item: McpResourceSemanticFact
-) -> dict[str, object]:
-    return {
-        "server_id": server_id,
-        "uri": item.uri,
-        "name": item.name,
-        "description": item.description,
-        "mime_type": item.mime_type,
-    }
-
-
-def _resource_template_public_item(
-    server_id: str, item: McpResourceTemplateSemanticFact
-) -> dict[str, object]:
-    return {
-        "server_id": server_id,
-        "uri_template": item.uri_template,
-        "name": item.name,
-        "description": item.description,
-        "mime_type": item.mime_type,
-    }
-
-
-def _prompt_public_item(
-    server_id: str, item: McpPromptSemanticFact
-) -> dict[str, object]:
-    return {
-        "server_id": server_id,
-        "name": item.name,
-        "description": item.description,
-        "arguments": [
-            {"name": name, "description": description, "required": required}
-            for name, description, required in item.arguments
-        ],
-    }
 
 
 def _assert_catalog_item_bound(item: object) -> None:
@@ -3050,138 +3001,6 @@ def _known_mcp_system_failure(
         ),
         remote_identity=remote_identity,
     )
-
-
-def _local_known(payload: object, tool_name: str) -> McpKnownToolResult:
-    body = canonical_json_bytes(payload)
-    if len(body) > MAXIMUM_MCP_CATALOG_RESULT_BYTES:
-        raise RuntimeError("MCP catalog result exceeds the product bound")
-    return McpKnownToolResult(
-        state="SUCCESS",
-        content=body,
-        remote_identity=f"mcp-catalog:{tool_name}",
-    )
-
-
-def _server_catalog_item(item: McpServerCatalogEntry) -> dict[str, object]:
-    return {
-        "server_id": item.server_id,
-        "display_name": item.display_name,
-        "status": item.status.value,
-        "required": item.required,
-        "exposed_tool_count": item.exposed_tool_count,
-        "resource_count": item.resource_count,
-        "resource_template_count": item.resource_template_count,
-        "prompt_count": item.prompt_count,
-        "tool_names": item.bounded_tool_name_overview,
-        "instructions": item.sanitized_instructions,
-        "failure_category": item.stable_failure_category,
-    }
-
-
-def _bounded_server_catalog_payload(catalog: McpCatalogSnapshot) -> object:
-    servers: list[dict[str, object]] = []
-    total = len(catalog.servers)
-    for item in catalog.servers:
-        candidate = [*servers, _server_catalog_item(item)]
-        payload = {
-            "servers": candidate,
-            "omitted_server_count": total - len(candidate),
-        }
-        if len(canonical_json_bytes(payload)) > MAXIMUM_MCP_CATALOG_RESULT_BYTES:
-            break
-        servers = candidate
-    return {
-        "servers": servers,
-        "omitted_server_count": total - len(servers),
-    }
-
-
-def _list_catalog_items(
-    runtime: McpInstalledRuntimeGeneration,
-    tool_name: str,
-    arguments: Mapping[str, object],
-    scope_kind: ModelInputScopeKind,
-) -> object:
-    scoped_catalog = runtime.catalog_for_scope(scope_kind)
-    visible = {
-        item.server_id
-        for item in scoped_catalog.servers
-    }
-    server_filter = arguments.get("server_id")
-    if server_filter is not None:
-        if not isinstance(server_filter, str) or server_filter not in visible:
-            raise ValueError("MCP server is not scope-visible")
-        visible = {server_filter}
-    limit = arguments.get("limit", 50)
-    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 200:
-        raise ValueError("MCP catalog list limit is invalid")
-    cursor = arguments.get("cursor")
-    offset = 0
-    if cursor is not None:
-        prefix = f"catalog:{scoped_catalog.semantic_fingerprint}:offset:"
-        if not isinstance(cursor, str) or not cursor.startswith(prefix):
-            raise ValueError("MCP catalog cursor is invalid")
-        try:
-            offset = int(cursor.removeprefix(prefix))
-        except ValueError as exc:
-            raise ValueError("MCP catalog cursor is invalid") from exc
-        if offset < 0:
-            raise ValueError("MCP catalog cursor is invalid")
-    def iter_items():
-        for server_id in sorted(visible):
-            candidate = runtime.candidates.get(server_id)
-            if candidate is None:
-                continue
-            snapshot = candidate.discovery_snapshot
-            if tool_name == "list_mcp_resources":
-                for item in snapshot.resources:
-                    yield _resource_public_item(server_id, item)
-            elif tool_name == "list_mcp_resource_templates":
-                for item in snapshot.resource_templates:
-                    yield _resource_template_public_item(server_id, item)
-            else:
-                for item in snapshot.prompts:
-                    yield _prompt_public_item(server_id, item)
-
-    total = sum(1 for _ in iter_items())
-    page: list[dict[str, object]] = []
-    for index, item in enumerate(iter_items()):
-        if index < offset:
-            continue
-        if len(page) >= limit:
-            break
-        candidate_page = [*page, item]
-        candidate_offset = offset + len(candidate_page)
-        candidate_payload = {
-            "items": candidate_page,
-            "next_cursor": (
-                "catalog:"
-                f"{scoped_catalog.semantic_fingerprint}:offset:"
-                f"{candidate_offset}"
-                if candidate_offset < total
-                else None
-            ),
-            "total": total,
-        }
-        if len(canonical_json_bytes(candidate_payload)) > (
-            MAXIMUM_MCP_CATALOG_RESULT_BYTES
-        ):
-            break
-        page = candidate_page
-    if offset < total and not page:
-        raise RuntimeError("MCP catalog item exceeds the product result bound")
-    next_offset = offset + len(page)
-    return {
-        "items": page,
-        "next_cursor": (
-            "catalog:"
-            f"{scoped_catalog.semantic_fingerprint}:offset:{next_offset}"
-            if next_offset < total
-            else None
-        ),
-        "total": total,
-    }
 
 
 __all__ = [

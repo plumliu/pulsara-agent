@@ -1987,6 +1987,34 @@ class DirectKernelToolPort:
             effect_class="read_only",
         )
 
+    def _list_mcp_items_result(
+        self,
+        *,
+        tool_name: str,
+        arguments: Mapping[str, object],
+        surface_borrow: ProcessLocalToolSurfaceBorrow,
+    ) -> KernelToolResult:
+        generation = surface_borrow.prepared.access.surface_generation
+        runtime = self._mcp_runtime_by_surface_generation.get(generation)
+        if runtime is None:
+            return _local_mcp_application_error("MCP_CATALOG_UNAVAILABLE")
+        scope_kind = surface_borrow.prepared.access.conversation_scope_kind
+        page = self._mcp_directory.render_items(
+            tool_name=tool_name,
+            arguments=arguments,
+            scope_kind=scope_kind,
+            scope_subagent_task_id=(
+                surface_borrow.prepared.access.scope_subagent_task_id
+            ),
+            catalog=runtime.catalog_for_scope(scope_kind),
+            candidates=runtime.candidates,
+        )
+        return KernelToolResult(
+            state=page.state,
+            content=page.content,
+            effect_class="read_only",
+        )
+
     def _inspect_new_mcp_tool_result(
         self,
         *,
@@ -2113,6 +2141,21 @@ class DirectKernelToolPort:
         if tool_name == "list_mcp_servers":
             return replace(
                 self._list_mcp_servers_result(
+                    arguments=arguments,
+                    surface_borrow=invocation_context.surface_borrow,
+                ),
+                physical_observation=_freeze_physical_observation(
+                    invocation_started, observation_origin
+                ),
+            )
+        if tool_name in {
+            "list_mcp_prompts",
+            "list_mcp_resource_templates",
+            "list_mcp_resources",
+        }:
+            return replace(
+                self._list_mcp_items_result(
+                    tool_name=tool_name,
                     arguments=arguments,
                     surface_borrow=invocation_context.surface_borrow,
                 ),
@@ -2301,10 +2344,6 @@ class DirectKernelToolPort:
             )
         if tool_name in {
             "get_mcp_prompt",
-            "list_mcp_prompts",
-            "list_mcp_resource_templates",
-            "list_mcp_resources",
-            "list_mcp_servers",
             "read_mcp_resource",
         }:
             generation = (
@@ -3099,7 +3138,6 @@ def _terminal_execution_result(
         "gap_before_output": result.gap_before_output,
         "truncated_by_response_bound": result.truncated_by_response_bound,
         "source_coverage": result.source_coverage.value,
-        "shell_diagnostic": result.shell_diagnostic,
     }
     state = (
         ToolResultState.SUCCESS

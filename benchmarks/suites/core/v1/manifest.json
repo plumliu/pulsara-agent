@@ -29,7 +29,7 @@
     {
       "scenario_id": "subagent-delegation",
       "path": "scenarios/subagent-delegation",
-      "scenario_contract_fingerprint": "3908913750595ef65afbd5e8e23f906aef928d039d0c16419f3521c42ed37526"
+      "scenario_contract_fingerprint": "66d210cff5d0ddc48810d79d13224c14c3ab8f945ed67f0fdc66ed556765a877"
     },
     {
       "scenario_id": "workspace-patch",

@@ -230,20 +230,13 @@ def extract_plan_question(
     raw = thaw_json(arguments)
     if not isinstance(raw, dict):
         raise ValueError("Plan question arguments must be an object")
-    if set(raw) - {"question", "options", "allow_free_text", "reason"}:
+    if set(raw) - {"question", "options", "allow_free_text"}:
         raise ValueError("Plan question arguments contain unknown fields")
     question = _bounded_text(
         raw.get("question"),
         name="question",
         maximum_bytes=MAXIMUM_PLAN_QUESTION_BYTES,
     )
-    if "reason" in raw:
-        _bounded_text(
-            raw["reason"],
-            name="reason",
-            maximum_bytes=MAXIMUM_PLAN_ENTRY_REASON_BYTES,
-            allow_empty=True,
-        )
     option_values = raw.get("options", [])
     if not isinstance(option_values, list) or len(option_values) not in {0, 2, 3}:
         raise ValueError("Plan question must provide zero or two-to-three options")

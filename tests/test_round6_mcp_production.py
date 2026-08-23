@@ -1587,6 +1587,9 @@ def test_round9_meta_tool_descriptors_define_inspect_then_use_few_shot() -> None
     use = builtin_tool_catalog_entry("use_new_mcp_tool").descriptor
 
     assert "mcp__late__bulk_00" in inspect.description
+    assert "route=NEW_MCP_META_ONLY" in inspect.description
+    assert "provider_tool_name" in inspect.description
+    assert "listed under new_tool_names by list_mcp_servers" not in inspect.description
     assert '{"server_id":"late","tool_name":"mcp__late__bulk_00"}' in (
         inspect.description
     )

@@ -2,6 +2,8 @@
 
 _状态：IMPLEMENTED / ACTIVATED（2026-08-11）；实现、clean-v0 identity、回归与real-provider dogfood证据见 [`round1_tool_output_artifact_activation.json`](benchmarks/suites/core/v1/round1_tool_output_artifact_activation.json)。_
 
+_2026-08-23 输出收敛：`artifact_read`沿exact origin ToolResult继承memory exposure ID，但该集合只出现在公共ToolResult envelope header，不在artifact page JSON body重复；page容量计算仍必须把header算入。_
+
 ## 0. 基线、目的与结论
 
 ### 0.1 两个代码基线
@@ -109,7 +111,7 @@ single Host-writer acceptance transaction
 - [`src/pulsara_agent/conversation_kernel/reader.py`](src/pulsara_agent/conversation_kernel/reader.py)：从canonical transcript entry重建provider input；
 - [`src/pulsara_agent/conversation_kernel/runner.py`](src/pulsara_agent/conversation_kernel/runner.py)：tool-request commit、attempt acceptance、physical invoke、ToolResult live lifecycle与canonical result acceptance的顺序owner；
 - [`src/pulsara_agent/conversation_kernel/tool_runtime.py`](src/pulsara_agent/conversation_kernel/tool_runtime.py)：当前真实production tool surface；
-- [`src/pulsara_agent/tools/builtins/artifact.py`](src/pulsara_agent/tools/builtins/artifact.py)：仍保留`artifact_read`的`info | text`产品形状；
+- [`src/pulsara_agent/tools/builtins/artifact.py`](src/pulsara_agent/tools/builtins/artifact.py)：提供`artifact_read`单一bounded text page产品形状；
 - [`src/pulsara_agent/capability/builtin_catalog.py`](src/pulsara_agent/capability/builtin_catalog.py)：仍保留`artifact_read` descriptor；
 - [`src/pulsara_agent/ports/artifact.py`](src/pulsara_agent/ports/artifact.py)与[`src/pulsara_agent/message/blocks.py`](src/pulsara_agent/message/blocks.py)：仍保留adaptive preview和artifact ref的大部分旧DTO，但当前production Kernel没有使用它们。
 
@@ -182,7 +184,7 @@ git show "$PRE_HARD_CUT:tests/test_artifact_store_contract.py"
 - 中等输出可完整展示，避免无意义的额外read；
 - 大输出展示head与tail，中间有明确omission marker；
 - marker明确告诉Agent完整artifact id及如何调用`artifact_read`；
-- `artifact_read`支持info与offset/limit text slice；
+- `artifact_read`支持offset/limit text slice，并在同一response携带完整读取metadata；
 - artifact read跨session表现为not found；
 - read result不递归产生新artifact；
 - terminal preview保留status、exit code、cwd与process id等小型结构字段；
@@ -214,7 +216,7 @@ git show "$PRE_HARD_CUT:tests/test_artifact_store_contract.py"
 5. 将artifact handle、blob FK、availability与source coverage直接并入canonical `tool_results`；不增加新表。
 6. 在现有`accept_tool_result()` transaction中原子接受entry、tool result artifact edge与existing occurrence。
 7. 将`artifact_read`绑定到production tool surface。
-8. 支持session-scoped `info | text(offset_chars, max_chars)`读取。
+8. 支持session-scoped `text(offset_chars, max_chars)`读取；不增加重复的metadata-only mode。
 9. detach/attach后仍可从canonical preview调用`artifact_read`读取同一内容。
 10. generic tools与当前terminal/terminal_process至少在它们实际拥有完整sanitized observation时共享同一协议。
 11. 建立descriptor-to-executor闭合guard，避免再次出现“catalog有名字、production不可达”。
@@ -709,12 +711,11 @@ read-only/concurrency/permission contract
 
 ### 9.2 Request
 
-Round 1保留两个mode：
+`artifact_read`只保留一个text-page operation：
 
 ```text
 artifact_read(
   artifact_id,
-  mode = "text" | "info",
   offset_chars = 0,
   max_chars = 20_000,
 )
@@ -725,8 +726,10 @@ artifact_read(
 - `artifact_id`非空；
 - `offset_chars >= 0`；
 - `1 <= max_chars <= 32_000`；
-- `mode=info`忽略offset/max但仍校验scope；
-- 未知mode、负offset、超限max返回typed application error，不抛出未处理异常。
+- 旧`mode`字段与任何其他unknown property都被拒绝，不保留compatibility alias；
+- 负offset、超限max返回typed application error，不抛出未处理异常。
+
+metadata-only `info`没有独立产品价值：text page已经携带相同metadata，保留它只会增加schema分支和一次潜在模型调用。因此本轮hard cut直接删除该mode及只为它存在的port方法。
 
 这些bound必须物理进入advertised JSON Schema，而不只在executor中二次校验。最小wire schema为：
 
@@ -735,7 +738,6 @@ artifact_read(
   "type": "object",
   "properties": {
     "artifact_id": {"type": "string", "minLength": 1},
-    "mode": {"type": "string", "enum": ["text", "info"], "default": "text"},
     "offset_chars": {"type": "integer", "minimum": 0, "default": 0},
     "max_chars": {"type": "integer", "minimum": 1, "maximum": 32000, "default": 20000}
   },
@@ -767,7 +769,7 @@ current session
 
 ### 9.4 Response
 
-`mode=info`最少返回：
+每次成功读取在同一个response中返回metadata与text page：
 
 ```text
 status
@@ -780,11 +782,6 @@ source_coverage
 display_kind
 source_coverage_reason?
 artifact_unavailability_reason?
-```
-
-`mode=text`额外返回：
-
-```text
 text
 offset_chars
 returned_chars
@@ -792,6 +789,8 @@ total_chars
 has_more
 next_offset_chars?
 ```
+
+若origin ToolResult携带model-visible memory exposure，`artifact_read`结果通过公共ToolResult envelope继承同一`model_visible_memory_ids` header。该header不是page metadata，JSON body不得重复；reader不得从artifact正文猜测ID。
 
 `artifact_read`只接受`AVAILABLE | INCOMPLETE`且有exact blob edge的handle。`INCOMPLETE` response必须持续携带`source_coverage=RETAINED_SNAPSHOT`与`source_coverage_reason`，不得因slice本身完整返回而改称原始source完整。`UNAVAILABLE | NOT_REQUIRED`没有可调用handle，因此正常read response的`artifact_unavailability_reason`为NULL；该字段仅为了保持typed projection闭合。
 
@@ -938,7 +937,7 @@ artifact retention失败本身不得制造第二类unknown。
 - 把`ArtifactReadTool`加入`DirectKernelToolPort`真实tool set；
 - 更新descriptor description与minimum/maximum JSON Schema；
 - descriptor/schema fingerprint与executor binding closure guard全绿；
-- info/text、pagination、not-found、cross-session、corruption与no-recursive tests通过。
+- single text page、pagination、not-found、cross-session、corruption与no-recursive tests通过；旧mode字段被拒绝。
 
 ### R1-E：Terminal primary candidate
 
@@ -1017,12 +1016,11 @@ artifact retention失败本身不得制造第二类unknown。
 
 ### 14.3 `artifact_read`
 
-- info；
 - default text slice；
 - nonzero offset；
 - end-of-content、has_more与next offset；
 - max boundary；
-- invalid mode/offset/max；
+- removed mode additional property、invalid offset/max；
 - unknown与cross-session indistinguishable；
 - cross-workspace denied；
 - binary/non-UTF8 typed unsupported（本轮不生产binary artifact）；
@@ -1153,7 +1151,7 @@ Real-provider dogfood不是unit gate的替代品，但最终应至少运行一�
 - terminal retention gap显式`RETAINED_SNAPSHOT + INCOMPLETE`，不冒充完整原始stream；
 - retention gap与artifact publication failure叠加时，coverage reason与artifact-unavailability reason同时保留；
 - `artifact_read`真实出现在production model tool specs并可执行；
-- info/text、offset/limit、cross-session与corruption语义闭合；
+- text page、offset/limit、cross-session与corruption语义闭合；
 - detach/attach后artifact仍可读；
 - accepted result、nullable artifact edge与existing occurrence同transaction；
 - blob/event都不被用作canonical row proof；

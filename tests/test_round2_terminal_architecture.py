@@ -27,9 +27,15 @@ from pulsara_agent.conversation_kernel.vocabulary import (
     SubjectSlot,
 )
 from pulsara_agent.ports.terminal import (
+    TERMINAL_MONITOR_TOOL_DESCRIPTION,
+    TERMINAL_PROCESS_TOOL_DESCRIPTION,
+    TERMINAL_TOOL_DESCRIPTION,
     parse_terminal_input,
     parse_terminal_monitor_input,
     parse_terminal_process_input,
+    terminal_input_schema,
+    terminal_monitor_input_schema,
+    terminal_process_input_schema,
 )
 from pulsara_agent.ports.terminal_observation import (
     TerminalObservationInstallationAttempt,
@@ -79,6 +85,24 @@ def _fixed_live_producers() -> dict[str, set[Path]]:
                 continue
             result.setdefault(keyword.value.attr, set()).add(path.relative_to(ROOT))
     return result
+
+
+def _schema_descriptions(value: object) -> tuple[str, ...]:
+    descriptions: list[str] = []
+
+    def visit(item: object) -> None:
+        if isinstance(item, dict):
+            description = item.get("description")
+            if isinstance(description, str):
+                descriptions.append(description)
+            for nested in item.values():
+                visit(nested)
+        elif isinstance(item, list):
+            for nested in item:
+                visit(nested)
+
+    visit(value)
+    return tuple(descriptions)
 
 
 def test_round2_closed_oracles_and_no_durable_terminal_authority(
@@ -231,6 +255,97 @@ def test_round2_strict_three_tool_input_contracts_fail_closed() -> None:
         parse_terminal_monitor_input(
             {"action": "cancel", "monitor_id": "m", "extra": "open"}
         )
+
+
+def test_round2_three_terminal_prompts_teach_the_closed_lifecycle_roles() -> None:
+    assert "does not stop or limit the command" in TERMINAL_TOOL_DESCRIPTION
+    assert "status=running" in TERMINAL_TOOL_DESCRIPTION
+    assert "copy its process_id exactly" in TERMINAL_TOOL_DESCRIPTION
+    assert "In the main conversation" in TERMINAL_TOOL_DESCRIPTION
+    assert "Prefer file tools for file reads and edits" in TERMINAL_TOOL_DESCRIPTION
+
+    assert "Perform one immediate follow-up action" in TERMINAL_PROCESS_TOOL_DESCRIPTION
+    assert "since_cursor may be copied" in TERMINAL_PROCESS_TOOL_DESCRIPTION
+    assert "do not send another update later" in TERMINAL_PROCESS_TOOL_DESCRIPTION
+    assert "Avoid repeated polling" in TERMINAL_PROCESS_TOOL_DESCRIPTION
+    assert "environment closes or is replaced" in TERMINAL_PROCESS_TOOL_DESCRIPTION
+    assert "wait once" not in TERMINAL_PROCESS_TOOL_DESCRIPTION
+
+    assert TERMINAL_MONITOR_TOOL_DESCRIPTION.startswith(
+        "Available only in the main conversation"
+    )
+    assert "only a completion update" in TERMINAL_MONITOR_TOOL_DESCRIPTION
+    assert "may cause the agent to run again" in TERMINAL_MONITOR_TOOL_DESCRIPTION
+    assert "do not poll merely to wait" in TERMINAL_MONITOR_TOOL_DESCRIPTION
+    assert "does not stop the command" in TERMINAL_MONITOR_TOOL_DESCRIPTION
+    assert "environment closes or is replaced" in TERMINAL_MONITOR_TOOL_DESCRIPTION
+
+    terminal_properties = terminal_input_schema()["properties"]
+    assert (
+        "this is not a process_id"
+        in terminal_properties["terminal_session_id"]["description"]
+    )
+    assert (
+        "does not stop the command"
+        in terminal_properties["yield_time_ms"]["description"]
+    )
+
+    process_input_schema = terminal_process_input_schema()
+    process_descriptions = " ".join(_schema_descriptions(process_input_schema))
+    for required_guidance in (
+        "without adding a newline",
+        "without the final newline",
+        "without arranging a later update",
+        "output_cursor copied unchanged",
+    ):
+        assert required_guidance in process_descriptions
+
+    monitor_input_schema = terminal_monitor_input_schema()
+    monitor_descriptions = " ".join(_schema_descriptions(monitor_input_schema))
+    for required_guidance in (
+        "receive only a completion update",
+        "Completion updates remain enabled",
+        "Closing or replacing the current terminal environment",
+        "Controls output size",
+    ):
+        assert required_guidance in monitor_descriptions
+
+    for schema in (process_input_schema, monitor_input_schema):
+        for branch in schema["oneOf"]:
+            assert "description" not in branch["properties"]["action"]
+
+    public_prompt_surface = " ".join(
+        (
+            TERMINAL_TOOL_DESCRIPTION,
+            TERMINAL_PROCESS_TOOL_DESCRIPTION,
+            TERMINAL_MONITOR_TOOL_DESCRIPTION,
+            *tuple(_schema_descriptions(terminal_input_schema())),
+            *tuple(_schema_descriptions(process_input_schema)),
+            *tuple(_schema_descriptions(monitor_input_schema)),
+        )
+    ).lower()
+    for runtime_term in (
+        "host-scoped",
+        "host-local",
+        "host replacement",
+        "host close",
+        "root-only",
+        "root turn",
+        "root agent",
+        "toolresult",
+        "future wake",
+        "durable resume token",
+        "physical completion",
+        "physically join",
+        "process group",
+        "process identity",
+        "cwd lane",
+        "retention gap",
+        "sanitized output",
+        "accepted progress observation",
+        "bounded policy",
+    ):
+        assert runtime_term not in public_prompt_surface
 
 
 def test_round2_named_memory_and_process_bounds_are_exact() -> None:

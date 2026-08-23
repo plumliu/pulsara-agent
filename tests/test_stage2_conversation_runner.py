@@ -211,9 +211,7 @@ def _seed_artifact_result_with_memory_provenance(
                 block_id=_name("block"),
                 tool_call_id=tool_call_id,
                 tool_name="artifact_read",
-                arguments=freeze_json(
-                    {"artifact_id": _name("artifact"), "mode": "text"}
-                ),
+                arguments=freeze_json({"artifact_id": _name("artifact")}),
             ),
         ),
         occurred_at=datetime.now(timezone.utc),

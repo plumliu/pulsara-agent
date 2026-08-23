@@ -430,7 +430,6 @@ def test_round7_1_reader_rebuilds_artifact_page_full_requirement_from_exact_rows
                 arguments=freeze_json(
                     {
                         "artifact_id": "artifact:test",
-                        "mode": "text",
                         "offset_chars": 0,
                         "max_chars": 20_000,
                     }

@@ -10,9 +10,9 @@
 >
 > 工作树说明：起草时另有一组尚未提交的 `src/pulsara_agent/host/` compatibility-layer 删除变更；本文不拥有、覆盖或评价该变更。该历史说明不再要求记录当前文档或逐文件SHA。
 >
-> 本文合并恢复 [PHC-13：跨 turn 失败/中断提示](POST_HARD_CUT_PRODUCT_CAPABILITY_GAP_INDEX.zh.md#12-phc-13跨-turn-失败中断提示) 与 [PHC-14：Model-visible tool observation timing/freshness](POST_HARD_CUT_PRODUCT_CAPABILITY_GAP_INDEX.zh.md#13-phc-14model-visible-tool-observation-timing-与-freshness)。两项共享 canonical reader 与 structured compiler 接缝，但不共享 durable authority。
+> 本文合并恢复 [PHC-13：跨 turn 失败/中断提示](archived_docs/POST_HARD_CUT_PRODUCT_CAPABILITY_GAP_INDEX.zh.md#12-phc-13跨-turn-失败中断提示) 与 [PHC-14：Model-visible tool observation timing/freshness](archived_docs/POST_HARD_CUT_PRODUCT_CAPABILITY_GAP_INDEX.zh.md#13-phc-14model-visible-tool-observation-timing-与-freshness)。两项共享 canonical reader 与 structured compiler 接缝，但不共享 durable authority。
 >
-> 上位架构：[PULSARA_DURABILITY_SUBTRACTION_REASSESSMENT.zh.md](PULSARA_DURABILITY_SUBTRACTION_REASSESSMENT.zh.md)
+> 上位架构：[PULSARA_DURABILITY_SUBTRACTION_REASSESSMENT.zh.md](archived_docs/PULSARA_DURABILITY_SUBTRACTION_REASSESSMENT.zh.md)
 >
 > 前置规格：[Round 3 compiler](ROUND_3_STRUCTURED_MODEL_INPUT_COMPILER_IMPLEMENTATION_SPEC.zh.md)、[Round 3.1 prefix continuity](ROUND_3_1_PROVIDER_INPUT_PREFIX_CONTINUITY_IMPLEMENTATION_SPEC.zh.md)、[Round 5A long-horizon envelope](ROUND_5_LONG_HORIZON_EXECUTION_ENVELOPE_IMPLEMENTATION_SPEC.zh.md)
 >

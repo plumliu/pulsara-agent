@@ -541,7 +541,7 @@ _SOURCE_FACTS = {
         ContextSourceLifecycle.TURN_APPEND,
     ),
     ContextSourceKind.COMPACTION_RUNTIME_HANDOFF: (
-        "pulsara.compaction-runtime-handoff.v1",
+        "pulsara.compaction-runtime-handoff.v2-complete-todo",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.UNTRUSTED_OBSERVATION,
         ContextBudgetClass.MUST_KEEP,
@@ -3482,13 +3482,13 @@ def test_round3_source_decision_and_compiled_fingerprints_are_golden() -> None:
     )
     compiled = StructuredModelInputCompiler().compile(request)
     assert compiled.source_collection_fingerprint == (
-        "sha256:405eaf35b98d4c6f96f680e87625b14b4ba19e4c338742eab49cd914df1b70aa"
+        "sha256:d0adaaffa8fcee834be28737ca2b18130efc8470873b209f9ee920da4703478d"
     )
     assert compiled.budget_report.decision_digest == (
         "sha256:caee1ae23a161f2c862947ef5b7b2b9a4ae3093bce6117e00bc13a3a19058fbd"
     )
     assert compiled.compiled_semantic_fingerprint == (
-        "sha256:65ee3e1e8710ba3c0d1445313a95d82760c9ed6b625f65e9fee1a402fd0b9a17"
+        "sha256:c2cfdcf3c5279ff5800d3714eb8ca689eee5bb2ab8ccdafd0d178090410b0274"
     )
     assert compiled.final_estimate.total_input_tokens == 268
 

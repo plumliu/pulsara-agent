@@ -1,4 +1,4 @@
-"""Bounded, local-only Round 9 MCP directory pagination."""
+"""Bounded, local-only MCP directory pagination."""
 
 from __future__ import annotations
 
@@ -28,6 +28,9 @@ from pulsara_agent.primitives.tool_result_projection import (
 from .contracts import (
     McpCatalogSnapshot,
     McpInstallationCandidate,
+    mcp_prompt_public_item,
+    mcp_resource_public_item,
+    mcp_resource_template_public_item,
     scope_mcp_discovery_snapshot,
 )
 
@@ -36,6 +39,11 @@ from .contracts import (
 # its offset and an HMAC.  It needs no process-local cursor registry.
 _MAXIMUM_CURSOR_BYTES = 512
 _MAXIMUM_PUBLIC_INSTRUCTIONS_BYTES = 8 * 1024
+_ITEM_PAGE_KIND_BY_TOOL = {
+    "list_mcp_resources": "RESOURCE_PAGE",
+    "list_mcp_resource_templates": "RESOURCE_TEMPLATE_PAGE",
+    "list_mcp_prompts": "PROMPT_PAGE",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -218,6 +226,88 @@ class McpDirectoryPageFactory:
             ),
         )
 
+    def render_items(
+        self,
+        *,
+        tool_name: str,
+        arguments: Mapping[str, object],
+        scope_kind: ModelInputScopeKind,
+        scope_subagent_task_id: str | None,
+        catalog: McpCatalogSnapshot,
+        candidates: Mapping[str, McpInstallationCandidate],
+    ) -> McpDirectoryRenderResult:
+        page_kind = _ITEM_PAGE_KIND_BY_TOOL.get(tool_name)
+        if page_kind is None:
+            raise ValueError("unknown MCP catalog list tool")
+        try:
+            server_filter, limit, offset = self._parse_item_request(
+                arguments=arguments,
+                scope_kind=scope_kind,
+                scope_subagent_task_id=scope_subagent_task_id,
+                catalog=catalog,
+                page_kind=page_kind,
+            )
+        except _DirectoryTypedError as exc:
+            return _error(exc.code)
+        server_by_id = {item.server_id: item for item in catalog.servers}
+        if server_filter is not None and server_filter not in server_by_id:
+            return _error("NOT_FOUND")
+        selected_server_ids = (
+            (server_filter,)
+            if server_filter is not None
+            else tuple(sorted(server_by_id))
+        )
+        rows: list[dict[str, object]] = []
+        for server_id in selected_server_ids:
+            server = server_by_id[server_id]
+            candidate = candidates.get(server_id)
+            if candidate is None:
+                continue
+            snapshot = scope_mcp_discovery_snapshot(
+                candidate.discovery_snapshot,
+                scope_kind,
+            )
+            if (
+                candidate.server_id != server_id
+                or snapshot.server_id != server_id
+                or snapshot.catalog_semantic_fingerprint
+                != server.catalog_semantic_fingerprint
+            ):
+                return _error("MCP_CATALOG_STALE")
+            if tool_name == "list_mcp_resources":
+                rows.extend(
+                    mcp_resource_public_item(server_id, item)
+                    for item in snapshot.resources
+                )
+            elif tool_name == "list_mcp_resource_templates":
+                rows.extend(
+                    mcp_resource_template_public_item(server_id, item)
+                    for item in snapshot.resource_templates
+                )
+            else:
+                rows.extend(
+                    mcp_prompt_public_item(server_id, item)
+                    for item in snapshot.prompts
+                )
+        frozen_rows = tuple(rows)
+        return self._page(
+            page_kind=page_kind,
+            row_key="items",
+            rows=frozen_rows,
+            offset=offset,
+            limit=limit,
+            total=len(frozen_rows),
+            base={"total": len(frozen_rows)},
+            cursor_context=self._item_cursor_context(
+                scope_kind=scope_kind,
+                scope_subagent_task_id=scope_subagent_task_id,
+                catalog=catalog,
+                server_filter=server_filter,
+                page_kind=page_kind,
+                limit=limit,
+            ),
+        )
+
     def _parse_request(
         self,
         *,
@@ -263,6 +353,47 @@ class McpDirectoryPageFactory:
             raise _DirectoryTypedError("STALE_CURSOR")
         return server, limit, offset
 
+    def _parse_item_request(
+        self,
+        *,
+        arguments: Mapping[str, object],
+        scope_kind: ModelInputScopeKind,
+        scope_subagent_task_id: str | None,
+        catalog: McpCatalogSnapshot,
+        page_kind: str,
+    ) -> tuple[str | None, int, int]:
+        allowed = {"server_id", "cursor", "limit"}
+        if set(arguments) - allowed:
+            raise _DirectoryTypedError("INVALID_ARGUMENTS")
+        server = arguments.get("server_id")
+        if server is not None and (not isinstance(server, str) or not server):
+            raise _DirectoryTypedError("INVALID_ARGUMENTS")
+        limit = arguments.get("limit", 50)
+        if (
+            not isinstance(limit, int)
+            or isinstance(limit, bool)
+            or not 1 <= limit <= 200
+        ):
+            raise _DirectoryTypedError("INVALID_ARGUMENTS")
+        cursor = arguments.get("cursor")
+        if cursor is None:
+            return server, limit, 0
+        if not isinstance(cursor, str) or not cursor:
+            raise _DirectoryTypedError("INVALID_ARGUMENTS")
+        expected = self._item_cursor_context(
+            scope_kind=scope_kind,
+            scope_subagent_task_id=scope_subagent_task_id,
+            catalog=catalog,
+            server_filter=server,
+            page_kind=page_kind,
+            limit=limit,
+        )
+        payload = self._decode_cursor(cursor)
+        offset = payload.pop("offset", None)
+        if payload != expected or not isinstance(offset, int) or offset < 0:
+            raise _DirectoryTypedError("STALE_CURSOR")
+        return server, limit, offset
+
     @staticmethod
     def _cursor_context(
         *,
@@ -290,6 +421,30 @@ class McpDirectoryPageFactory:
                     "limit": limit,
                     "page_kind": page_kind,
                     "routes": routes.projection_fingerprint,
+                    "scope": scope_kind.value,
+                    "scope_subagent_task_id": scope_subagent_task_id,
+                    "server_filter": server_filter,
+                },
+            )
+        }
+
+    @staticmethod
+    def _item_cursor_context(
+        *,
+        scope_kind: ModelInputScopeKind,
+        scope_subagent_task_id: str | None,
+        catalog: McpCatalogSnapshot,
+        server_filter: str | None,
+        page_kind: str,
+        limit: int,
+    ) -> dict[str, object]:
+        return {
+            "context_fingerprint": context_fingerprint(
+                "mcp-item-directory-cursor-context:v1",
+                {
+                    "catalog": catalog.semantic_fingerprint,
+                    "limit": limit,
+                    "page_kind": page_kind,
                     "scope": scope_kind.value,
                     "scope_subagent_task_id": scope_subagent_task_id,
                     "server_filter": server_filter,

@@ -10,7 +10,7 @@
 >
 > hard-cut 前参考基线：`5b7ad9f7ffc8565bc572180b2bde0c81ab64473a`
 >
-> 上位契约：[Round 1 ToolResult artifact](ROUND_1_TOOL_OUTPUT_ARTIFACT_IMPLEMENTATION_SPEC.zh.md)、[Round 3 structured compiler](ROUND_3_STRUCTURED_MODEL_INPUT_COMPILER_IMPLEMENTATION_SPEC.zh.md)、[Round 3.1 provider-input prefix continuity](ROUND_3_1_PROVIDER_INPUT_PREFIX_CONTINUITY_IMPLEMENTATION_SPEC.zh.md)、[Round 5A execution envelope](ROUND_5_LONG_HORIZON_EXECUTION_ENVELOPE_IMPLEMENTATION_SPEC.zh.md)、[Round 7 model-visible observation](ROUND_7_MODEL_VISIBLE_FAILURE_AND_TOOL_OBSERVATION_IMPLEMENTATION_SPEC.zh.md)、[Gap Index](POST_HARD_CUT_PRODUCT_CAPABILITY_GAP_INDEX.zh.md)
+> 上位契约：[Round 1 ToolResult artifact](archived_docs/ROUND_1_TOOL_OUTPUT_ARTIFACT_IMPLEMENTATION_SPEC.zh.md)、[Round 3 structured compiler](ROUND_3_STRUCTURED_MODEL_INPUT_COMPILER_IMPLEMENTATION_SPEC.zh.md)、[Round 3.1 provider-input prefix continuity](ROUND_3_1_PROVIDER_INPUT_PREFIX_CONTINUITY_IMPLEMENTATION_SPEC.zh.md)、[Round 5A execution envelope](ROUND_5_LONG_HORIZON_EXECUTION_ENVELOPE_IMPLEMENTATION_SPEC.zh.md)、[Round 7 model-visible observation](ROUND_7_MODEL_VISIBLE_FAILURE_AND_TOOL_OBSERVATION_IMPLEMENTATION_SPEC.zh.md)、[Gap Index](archived_docs/POST_HARD_CUT_PRODUCT_CAPABILITY_GAP_INDEX.zh.md)
 >
 > 直接下游：[Round 9 unified capability semantics](ROUND_9_UNIFIED_CAPABILITY_SEMANTICS_IMPLEMENTATION_SPEC.zh.md)、[Round 9.1 Agent Skills](ROUND_9_1_AGENT_SKILLS_STANDARD_IMPLEMENTATION_SPEC.zh.md)、[Round 5B compaction](ROUND_5B_LONG_HORIZON_CONTEXT_COMPACTION_IMPLEMENTATION_SPEC.zh.md)
 >
@@ -387,10 +387,10 @@ class ToolResultFullDeliveryReason(StrEnum):
     SKILL_ACTIVATION = "SKILL_ACTIVATION"  # reserved; Round 9.1 has no producer
 ~~~
 
-它的closed classifier只从exact canonical tool request、accepted result state和已经版本化的Builtin/binding contract派生：
+它的closed classifier只从exact canonical tool identity、accepted result state和已经版本化的Builtin/binding contract派生：
 
-- successful `artifact_read` text page；
-- successful `list_mcp_servers` server/tool directory page；
+- successful `artifact_read` page；
+- successful `list_mcp_servers` server/tool directory page，以及Round 6固定的`list_mcp_resources`、`list_mcp_resource_templates`、`list_mcp_prompts` item directory page；
 - successful `inspect_new_mcp_tool` closed schema/ref result；
 - typed failure、unavailable、invalid arguments及其他普通ToolResult仍为`BEST_AVAILABLE`；
 - ordinary `read_file`（包括读取`SKILL.md`）始终为`BEST_AVAILABLE`；Round 9.1不增加Skill-specific intent或delivery requirement。
