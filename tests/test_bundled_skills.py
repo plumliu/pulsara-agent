@@ -14,7 +14,6 @@ from pulsara_agent.capability.bundled_skills import (
     reset_bundled_skill,
     sync_bundled_skills,
 )
-from pulsara_agent.model_input.contracts import ModelInputScopeKind
 
 
 def test_sync_bundled_skills_installs_manifest_provenance_and_runtime_discovery(
@@ -44,11 +43,7 @@ def test_sync_bundled_skills_installs_manifest_provenance_and_runtime_discovery(
         user_product_skills_root=pulsara_home / "skills",
         user_agents_skills_root=tmp_path / "empty-agents",
     )
-    policy = provider.prepare_root_policy(
-        tmp_path / "workspace",
-        conversation_scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
-    )
+    policy = provider.prepare_root_policy(tmp_path / "workspace")
     discovery = provider.discover(policy)
 
     assert len(discovery.skills) == 1
@@ -82,11 +77,7 @@ def test_runtime_discovery_classifies_bundled_skill_from_user_product_root(
         user_product_skills_root=pulsara_home / "skills",
         user_agents_skills_root=tmp_path / "empty-agents",
     )
-    policy = provider.prepare_root_policy(
-        tmp_path / "workspace",
-        conversation_scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
-    )
+    policy = provider.prepare_root_policy(tmp_path / "workspace")
     discovery = provider.discover(policy)
 
     assert len(discovery.skills) == 1

@@ -22,9 +22,7 @@ from pulsara_agent.capability.contracts import (
 )
 from pulsara_agent.capability.local_skills import (
     AGENT_SKILLS_CONTRACT_ID,
-    LocalSkillDiscovery,
     SkillDiscoveryDisposition,
-    local_skill_root_policy_identity_digest,
 )
 from pulsara_agent.capability.provider import SkillProjectionOutput
 from pulsara_agent.capability.resolver import LocalSkillCapabilityProvider
@@ -83,8 +81,6 @@ class KernelSkillProjectionComposer:
     ) -> PreparedLocalSkillCatalogSourceSnapshot:
         root_policy = self._provider.provider.prepare_root_policy(
             self._workspace_root,
-            conversation_scope_kind=conversation_scope_kind,
-            scope_subagent_task_id=scope_subagent_task_id,
         )
         discovery = self._provider.snapshot_projection_input(
             root_policy=root_policy,
@@ -134,12 +130,9 @@ class KernelSkillProjectionComposer:
     ) -> FrozenSkillProjectionInput:
         if owner.owner_authenticity is not self._owner_authenticity:
             raise ValueError("foreign Skill source snapshot")
-        discovery_fingerprint = skill_discovery_semantic_fingerprint(
-            owner.discovery
-        )
         return FrozenSkillProjectionInput(
-            discovery_semantic_fingerprint=discovery_fingerprint,
             source_snapshot=owner.source_snapshot,
+            discovery=owner.discovery,
         )
 
     def compose(
@@ -154,8 +147,7 @@ class KernelSkillProjectionComposer:
         frozen = view.projection_input
         if (
             owner.source_snapshot is not frozen.source_snapshot
-            or skill_discovery_semantic_fingerprint(owner.discovery)
-            != frozen.discovery_semantic_fingerprint
+            or owner.discovery is not frozen.discovery
         ):
             raise ValueError("Skill projection owner does not exact-join sibling view")
         expected_facts = tuple(
@@ -177,9 +169,7 @@ class KernelSkillProjectionComposer:
                 ),
             )
         )
-        if tuple(
-            item.fact_semantic_fingerprint for item in expected_facts
-        ) != tuple(
+        if tuple(item.fact_semantic_fingerprint for item in expected_facts) != tuple(
             item.fact_semantic_fingerprint for item in view.registry_skill_facts
         ):
             raise ValueError("Skill projection discovery does not join registry")
@@ -188,51 +178,14 @@ class KernelSkillProjectionComposer:
             discovery=owner.discovery,
         )
 
-    def activation_context(
-        self, *, user_input: str
-    ) -> SkillProjectionResolveContext:
+    def activation_context(self, *, user_input: str) -> SkillProjectionResolveContext:
         return SkillProjectionResolveContext(
             user_input=user_input,
             active_skill_names=self._configured,
         )
 
 
-def skill_discovery_semantic_fingerprint(
-    discovery: LocalSkillDiscovery,
-) -> str:
-    if not isinstance(discovery, LocalSkillDiscovery):
-        raise TypeError("Skill discovery carrier is not frozen")
-    return context_fingerprint(
-        "local-skill-discovery-semantic:v2-agent-skills",
-        {
-            "disposition": discovery.disposition.value,
-            "unavailable_reason": (
-                None
-                if discovery.unavailable_reason is None
-                else discovery.unavailable_reason.value
-            ),
-            "root_policy": local_skill_root_policy_identity_digest(
-                discovery.root_policy
-            ),
-            "skills": tuple(
-                {
-                    "manifest": skill.manifest_semantic_fingerprint,
-                    "raw_document": skill.raw_document_digest,
-                    "location": skill.location,
-                    "root_kind": skill.root_kind.value,
-                }
-                for skill in discovery.skills
-            ),
-            "diagnostics": tuple(
-                (item.severity.value, item.code) for item in discovery.diagnostics
-            ),
-        },
-    )
-
-
-def _skill_fact(
-    source, skill: LocalSkillManifest
-) -> FrozenSkillCapabilityFact:
+def _skill_fact(source, skill: LocalSkillManifest) -> FrozenSkillCapabilityFact:
     kind = skill.root_kind
     ordinal = _ROOT_ORDER.index(kind)
     prefix = _ROOT_PREFIX[kind]
@@ -263,8 +216,7 @@ def _skill_fact(
             "name": skill.name,
             "location": skill.location,
             "source": skill.source.value,
-            "body_digest": "sha256:"
-            + sha256(skill.body.encode("utf-8")).hexdigest(),
+            "body_digest": "sha256:" + sha256(skill.body.encode("utf-8")).hexdigest(),
         },
     )
     fact_fingerprint = skill_capability_fact_fingerprint(
@@ -287,5 +239,4 @@ def _skill_fact(
 
 __all__ = [
     "KernelSkillProjectionComposer",
-    "skill_discovery_semantic_fingerprint",
 ]

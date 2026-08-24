@@ -11,11 +11,13 @@ from pulsara_agent.capability.contracts import LocalSkillRootKind
 from pulsara_agent.capability.local_skills import (
     LocalSkillProvider,
     SkillDiscoveryDisposition,
+    discovery_diagnostics,
 )
 from pulsara_agent.capability.resolver import LocalSkillCapabilityProvider
 from pulsara_agent.capability.types import (
     SkillCatalogUnavailableReason,
     SkillDiagnostic,
+    SkillDiagnosticCode,
     SkillDiagnosticSeverity,
 )
 from pulsara_agent.conversation_kernel.capability import (
@@ -41,10 +43,7 @@ def _document(
     body: str = "# Instructions\n",
     extra: str = "",
 ) -> str:
-    return (
-        f"---\nname: {name}\ndescription: {description}\n"
-        f"{extra}---\n{body}"
-    )
+    return f"---\nname: {name}\ndescription: {description}\n{extra}---\n{body}"
 
 
 def _write_skill(
@@ -62,15 +61,8 @@ def _write_skill(
 def _policy(
     provider: LocalSkillProvider,
     workspace: Path,
-    *,
-    scope: ModelInputScopeKind = ModelInputScopeKind.ROOT,
-    task_id: str | None = None,
 ):
-    return provider.prepare_root_policy(
-        workspace,
-        conversation_scope_kind=scope,
-        scope_subagent_task_id=task_id,
-    )
+    return provider.prepare_root_policy(workspace)
 
 
 def test_round9_1_root_policy_is_exactly_two_or_four_and_scope_bound(
@@ -90,17 +82,11 @@ def test_round9_1_root_policy_is_exactly_two_or_four_and_scope_bound(
         LocalSkillRootKind
     )
 
-    child = _policy(
-        disabled,
-        workspace,
-        scope=ModelInputScopeKind.SUBAGENT_TASK,
-        task_id="task:child-a",
-    )
-    assert child.scope_subagent_task_id == "task:child-a"
+    child = _policy(disabled, workspace)
+    assert not hasattr(child, "conversation_scope_kind")
+    assert not hasattr(child, "scope_subagent_task_id")
     with pytest.raises(ValueError, match="foreign Skill root policy"):
         enabled.discover(child)
-    with pytest.raises(TypeError, match="_constructor"):
-        replace(child, scope_subagent_task_id="task:child-b")
     with pytest.raises(TypeError, match="_constructor"):
         replace(child.roots[0], path=tmp_path / "swapped")
 
@@ -115,7 +101,7 @@ def test_round9_1_root_policy_bounds_cannot_be_relaxed() -> None:
             LocalSkillProvider(**kwargs)
 
 
-def test_round9_1_enumeration_freezes_candidates_until_next_cut(
+def test_round9_1_membership_change_before_final_revalidation_invalidates_cut(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import pulsara_agent.capability.local_skills as local_skills
@@ -124,20 +110,29 @@ def test_round9_1_enumeration_freezes_candidates_until_next_cut(
     first = _write_skill(workspace, "alpha")
     provider = LocalSkillProvider(include_user_skills=False)
     policy = _policy(provider, workspace)
-    original = local_skills._read_bounded_bytes
+    original = local_skills._read_discovery_skill_document
     installed = False
 
-    def read_and_install(path: Path, *, maximum: int) -> bytes:
+    def read_and_install(child, *, maximum: int, deadline_monotonic) -> bytes:
         nonlocal installed
         if not installed:
             installed = True
             _write_skill(workspace, "beta")
-        return original(path, maximum=maximum)
+        return original(
+            child,
+            maximum=maximum,
+            deadline_monotonic=deadline_monotonic,
+        )
 
-    monkeypatch.setattr(local_skills, "_read_bounded_bytes", read_and_install)
+    monkeypatch.setattr(
+        local_skills,
+        "_read_discovery_skill_document",
+        read_and_install,
+    )
     current = provider.discover(policy)
     assert first.exists()
-    assert [item.name for item in current.skills] == ["alpha"]
+    assert current.disposition is SkillDiscoveryDisposition.UNAVAILABLE
+    assert current.skills == ()
     successor = provider.discover(policy)
     assert [item.name for item in successor.skills] == ["alpha", "beta"]
 
@@ -152,18 +147,24 @@ def test_round9_1_enumerated_member_loss_invalidates_whole_scan(
     victim = _write_skill(workspace, "beta")
     provider = LocalSkillProvider(include_user_skills=False)
     policy = _policy(provider, workspace)
-    original = local_skills._read_bounded_bytes
+    original = local_skills._read_discovery_skill_document
     reads = 0
 
-    def remove_before_second_read(path: Path, *, maximum: int) -> bytes:
+    def remove_before_second_read(child, *, maximum: int, deadline_monotonic) -> bytes:
         nonlocal reads
         reads += 1
         if reads == 1:
             victim.unlink()
-        return original(path, maximum=maximum)
+        return original(
+            child,
+            maximum=maximum,
+            deadline_monotonic=deadline_monotonic,
+        )
 
     monkeypatch.setattr(
-        local_skills, "_read_bounded_bytes", remove_before_second_read
+        local_skills,
+        "_read_discovery_skill_document",
+        remove_before_second_read,
     )
     discovery = provider.discover(policy)
     assert discovery.disposition is SkillDiscoveryDisposition.UNAVAILABLE
@@ -202,14 +203,17 @@ def test_round9_1_explicit_null_metadata_is_not_standard_valid(
 
     assert discovery.disposition is SkillDiscoveryDisposition.COMPLETE
     assert discovery.skills == ()
-    assert any(item.code == "skill_invalid_metadata" for item in discovery.diagnostics)
+    assert any(
+        item.code == "skill_invalid_metadata"
+        for item in discovery_diagnostics(discovery)
+    )
 
 
 def test_round9_1_inert_skill_diagnostics_are_not_public_degradation() -> None:
     diagnostics = (
         SkillDiagnostic(
             severity=SkillDiagnosticSeverity.INFO,
-            code="skill_host_extension_ignored",
+            code=SkillDiagnosticCode.HOST_EXTENSION_IGNORED,
             message="behaviorally inert",
         ),
     )
@@ -227,7 +231,9 @@ def test_round9_1_1025_directories_and_65_winners_publish_no_partial_catalog(
     direct_provider = LocalSkillProvider(include_user_skills=False)
     direct = direct_provider.discover(_policy(direct_provider, direct_workspace))
     assert direct.disposition is SkillDiscoveryDisposition.UNAVAILABLE
-    assert direct.unavailable_reason is SkillCatalogUnavailableReason.DISCOVERY_OVERBOUND
+    assert (
+        direct.unavailable_reason is SkillCatalogUnavailableReason.DISCOVERY_OVERBOUND
+    )
     assert direct.skills == ()
 
     winner_workspace = tmp_path / "winners"
@@ -262,7 +268,7 @@ def test_round9_1_yaml_alias_tag_duplicate_and_multidoc_are_rejected(
     provider = LocalSkillProvider(include_user_skills=False)
     discovery = provider.discover(_policy(provider, workspace))
     assert discovery.skills == ()
-    assert [item.code for item in discovery.diagnostics] == [
+    assert [item.code for item in discovery_diagnostics(discovery)] == [
         "skill_invalid_frontmatter_yaml"
     ]
 
@@ -303,11 +309,11 @@ def test_round9_1_read_file_repeats_current_bytes_with_2000_line_window(
 ) -> None:
     assert DEFAULT_READ_LINES == MAX_READ_LINES == 2_000
     path = tmp_path / "skill.md"
-    path.write_text("\n".join(f"old-{index}" for index in range(2_001)), encoding="utf-8")
-    tool = ReadFileTool(tmp_path)
-    first = tool.execute(
-        ToolCall("call:first", "read_file", {"path": "skill.md"})
+    path.write_text(
+        "\n".join(f"old-{index}" for index in range(2_001)), encoding="utf-8"
     )
+    tool = ReadFileTool(tmp_path)
+    first = tool.execute(ToolCall("call:first", "read_file", {"path": "skill.md"}))
     first_payload = json.loads(first.output)
     assert first.status is ToolResultState.SUCCESS
     assert first_payload["limit"] == 2_000
@@ -315,9 +321,7 @@ def test_round9_1_read_file_repeats_current_bytes_with_2000_line_window(
     assert "2000|old-1999" in first_payload["content"]
 
     path.write_text("new-first\nsecond\n", encoding="utf-8")
-    second = tool.execute(
-        ToolCall("call:second", "read_file", {"path": "skill.md"})
-    )
+    second = tool.execute(ToolCall("call:second", "read_file", {"path": "skill.md"}))
     second_payload = json.loads(second.output)
     assert second.status is ToolResultState.SUCCESS
     assert second_payload["content"] == "1|new-first\n2|second"
@@ -356,8 +360,7 @@ def test_round9_1_pulsara_home_catalog_location_is_ordinary_readable(
 def test_round9_1_production_has_no_fifth_root_or_skill_execution_authority() -> None:
     package_root = Path(__file__).parents[1] / "src" / "pulsara_agent"
     production = "\n".join(
-        path.read_text(encoding="utf-8")
-        for path in sorted(package_root.rglob("*.py"))
+        path.read_text(encoding="utf-8") for path in sorted(package_root.rglob("*.py"))
     )
     assert ".claude/skills" not in production
     assert "ACTIVATE_SKILL" not in production

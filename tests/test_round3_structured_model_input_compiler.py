@@ -49,6 +49,7 @@ from pulsara_agent.capability.types import (
     ResolvedSkillCatalogEntry,
     SkillCatalogUnavailableReason,
     SkillDiagnostic,
+    SkillDiagnosticCode,
     SkillDiagnosticSeverity,
     SkillSource,
 )
@@ -90,7 +91,9 @@ from pulsara_agent.conversation_kernel.compaction.prompt import (
 from pulsara_agent.conversation_kernel.io import KernelSessionIO
 from pulsara_agent.conversation_kernel.extensions import OperationalHookType
 from pulsara_agent.conversation_kernel.repository import AssistantToolCallBlock
-from pulsara_agent.conversation_kernel.subagents import build_parent_context_call_subject
+from pulsara_agent.conversation_kernel.subagents import (
+    build_parent_context_call_subject,
+)
 from pulsara_agent.conversation_kernel.runner import (
     ConversationKernelRunner,
 )
@@ -628,9 +631,7 @@ def _candidate(
     }
     if initial_mode is not ContextRenderMode.FULL:
         semantic_payload["initial_mode"] = initial_mode.value
-    semantic = context_fingerprint(
-        "context-source-candidate:v1", semantic_payload
-    )
+    semantic = context_fingerprint("context-source-candidate:v1", semantic_payload)
     return ContextSourceCandidate(
         source_kind=kind,
         source_instance_id=instance,
@@ -700,9 +701,7 @@ def _sources(
             ContextSourceAbsenceKind.NOT_APPLICABLE
         ),
         ContextSourceKind.PARENT_CONTEXT: ContextSourceAbsenceKind.NOT_APPLICABLE,
-        ContextSourceKind.DEPENDENCY_RESULTS: (
-            ContextSourceAbsenceKind.NOT_APPLICABLE
-        ),
+        ContextSourceKind.DEPENDENCY_RESULTS: (ContextSourceAbsenceKind.NOT_APPLICABLE),
     }
     for kind, absence_kind in default_absences.items():
         if kind not in candidate_kinds and kind not in absent_by_kind:
@@ -948,13 +947,18 @@ def _prepared_request(
         disposition=CapabilitySourceSnapshotDisposition.COMPLETE,
         facts=(),
     )
+    skill_root_policy = LocalSkillProvider(
+        include_user_skills=False
+    ).prepare_root_policy(Path.cwd())
+    skill_discovery = LocalSkillDiscovery(
+        root_policy=skill_root_policy,
+        disposition=SkillDiscoveryDisposition.COMPLETE,
+    )
     tool_plan, _skill_view = _test_round9_capability_views(
         prepared_surface.model_surface,
         skill_projection=FrozenSkillProjectionInput(
-            discovery_semantic_fingerprint=context_fingerprint(
-                "test:round3-request-skill-discovery:v1", ()
-            ),
             source_snapshot=skill_snapshot,
+            discovery=skill_discovery,
         ),
         scope_subagent_task_id=snapshot.identity.scope_subagent_task_id,
         wire_api=(
@@ -991,7 +995,7 @@ def _prepared_request(
             maximum_input_tokens=max(budget, 1),
             maximum_output_tokens=16_384,
             tool_surface=prepared_surface,
-        )
+        ),
     )
     binding = prepared.compile_binding
     effective = min(budget, binding.effective_input_budget_tokens)
@@ -1110,8 +1114,7 @@ def _append_compatibility(
             request.canonical_facts.context_binding_fact.context_base_semantic_identity
         ),
         provider_assistant_replay_contract_fingerprint=(
-            prepared.call.target.model_profile.provider_profile
-            .assistant_replay_contract_fingerprint
+            prepared.call.target.model_profile.provider_profile.assistant_replay_contract_fingerprint
         ),
     )
 
@@ -1204,7 +1207,9 @@ def _compile_and_install_append(
     wire_input_plan = model.plan_wire_input(
         prepared_call=prepared_call,
         compiled_input=result.compiled_input,
-        predecessor_view=(None if result.reset_reason is not None else planning.predecessor_view),
+        predecessor_view=(
+            None if result.reset_reason is not None else planning.predecessor_view
+        ),
         replay_hydration=replay_hydration,
     )
     tool_exposure_plan = prepared_call.tool_surface.capability_exposure_plan
@@ -1257,9 +1262,7 @@ def _replay_manifest_cut(
     return freeze_provider_replay_manifest_cut(
         session_id=snapshot.identity.session_id,
         scope=scope,
-        context_binding_revision_id=(
-            snapshot.identity.context_binding_revision_id
-        ),
+        context_binding_revision_id=(snapshot.identity.context_binding_revision_id),
         provider_input_through_sequence=(
             snapshot.identity.provider_input_through_sequence
         ),
@@ -1290,9 +1293,7 @@ def _round7_previous_fact(
         "predecessor_initial_entry_sequence": 1,
         "predecessor_terminal_at_utc": "2026-08-14T03:04:05.123456Z",
         "outcome_kind": PreviousTurnOutcomeKind.EXECUTION_FAILED,
-        "accepted_assistant_disposition": (
-            AcceptedAssistantDisposition.NONE_ACCEPTED
-        ),
+        "accepted_assistant_disposition": (AcceptedAssistantDisposition.NONE_ACCEPTED),
         "accepted_assistant_entry_count": 0,
         "definitely_not_dispatched_tool_count": 0,
         "outcome_unknown_tool_count": 0,
@@ -1323,24 +1324,18 @@ def _with_round7_previous(
     }
     values["previous_turn_outcome_fact"] = previous
     freshness = facts.tool_observation_freshness_fact
-    values["tool_observation_freshness_fact"] = (
-        build_tool_observation_freshness_fact(
-            session_id=freshness.session_id,
-            workspace_id=freshness.workspace_id,
-            current_turn_id=freshness.current_turn_id,
-            current_scope_kind=freshness.current_scope_kind,
-            scope_subagent_task_id=freshness.scope_subagent_task_id,
-            current_initial_entry_sequence=(
-                freshness.current_initial_entry_sequence
-            ),
-            immediate_predecessor_turn_id=(
-                None if previous is None else previous.predecessor_turn_id
-            ),
-        )
+    values["tool_observation_freshness_fact"] = build_tool_observation_freshness_fact(
+        session_id=freshness.session_id,
+        workspace_id=freshness.workspace_id,
+        current_turn_id=freshness.current_turn_id,
+        current_scope_kind=freshness.current_scope_kind,
+        scope_subagent_task_id=freshness.scope_subagent_task_id,
+        current_initial_entry_sequence=(freshness.current_initial_entry_sequence),
+        immediate_predecessor_turn_id=(
+            None if previous is None else previous.predecessor_turn_id
+        ),
     )
-    provisional = FrozenCanonicalCompileSnapshot.__new__(
-        FrozenCanonicalCompileSnapshot
-    )
+    provisional = FrozenCanonicalCompileSnapshot.__new__(FrozenCanonicalCompileSnapshot)
     for name, value in values.items():
         object.__setattr__(provisional, name, value)
     object.__setattr__(provisional, "canonical_read_cut_fingerprint", "")
@@ -1562,7 +1557,8 @@ def test_round3_1_plan_handoff_occurrence_uses_canonical_transition_identity(
     )
 
     def collect(facts: FrozenCanonicalCompileSnapshot) -> CollectedContextSources:
-        return _collect_context_sources(collector,
+        return _collect_context_sources(
+            collector,
             activation_subject=None,
             activation_text="",
             tool_surface=surface,
@@ -1617,9 +1613,7 @@ def test_round3_1_plan_handoff_occurrence_uses_canonical_transition_identity(
         compiler=compiler,
         owner=owner,
         request=first_request,
-        dispatch_anchor=NoNewTriggerAnchor(
-            predecessor_frontier_fingerprint=None
-        ),
+        dispatch_anchor=NoNewTriggerAnchor(predecessor_frontier_fingerprint=None),
     )
     second_request = replace(
         _prepared_request(
@@ -1634,9 +1628,7 @@ def test_round3_1_plan_handoff_occurrence_uses_canonical_transition_identity(
         compiler=compiler,
         owner=owner,
         request=second_request,
-        dispatch_anchor=NoNewTriggerAnchor(
-            predecessor_frontier_fingerprint=None
-        ),
+        dispatch_anchor=NoNewTriggerAnchor(predecessor_frontier_fingerprint=None),
     )
     appended = second_view.messages[len(first_view.messages) :]
     observations = tuple(
@@ -1695,9 +1687,7 @@ def test_round3_1_two_plan_revisions_in_one_epoch_have_distinct_occurrences(
         object.__setattr__(provisional_handoff, "fact_fingerprint", "")
         handoff = FrozenPlanHandoffCompileFact(
             **values,
-            fact_fingerprint=plan_handoff_compile_fact_fingerprint(
-                provisional_handoff
-            ),
+            fact_fingerprint=plan_handoff_compile_fact_fingerprint(provisional_handoff),
         )
         compiled_values = {
             "canonical_input": base.canonical_input,
@@ -1707,9 +1697,7 @@ def test_round3_1_two_plan_revisions_in_one_epoch_have_distinct_occurrences(
             "plan_handoff_fact": handoff,
             "approved_plan_materialization_fact": None,
             "previous_turn_outcome_fact": base.previous_turn_outcome_fact,
-            "tool_observation_freshness_fact": (
-                base.tool_observation_freshness_fact
-            ),
+            "tool_observation_freshness_fact": (base.tool_observation_freshness_fact),
         }
         provisional = FrozenCanonicalCompileSnapshot.__new__(
             FrozenCanonicalCompileSnapshot
@@ -1743,7 +1731,8 @@ def test_round3_1_two_plan_revisions_in_one_epoch_have_distinct_occurrences(
     )
     candidates = []
     for item in (facts(2, "6"), facts(3, "7")):
-        collected = _collect_context_sources(collector,
+        collected = _collect_context_sources(
+            collector,
             activation_subject=None,
             activation_text="",
             tool_surface=surface,
@@ -1835,9 +1824,7 @@ def test_round3_1_compiler_requires_exact_value_or_absent_for_every_source() -> 
     )
 
     with pytest.raises(StructuredModelInputCompileError) as failure:
-        StructuredModelInputCompiler().compile(
-            _prepared_request(_snapshot(), missing)
-        )
+        StructuredModelInputCompiler().compile(_prepared_request(_snapshot(), missing))
     assert failure.value.kind is ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
 
 
@@ -1958,9 +1945,7 @@ def test_round3_must_keep_source_never_omits_and_fails_before_provider() -> None
 
 
 def test_round3_active_skill_and_tool_schema_fail_with_closed_budget_kind() -> None:
-    active = _candidate(
-        ContextSourceKind.ACTIVE_SKILL, ("active " * 100, "")
-    )
+    active = _candidate(ContextSourceKind.ACTIVE_SKILL, ("active " * 100, ""))
     with pytest.raises(StructuredModelInputCompileError) as failure:
         StructuredModelInputCompiler().compile(
             _prepared_request(_snapshot(), _sources(active), budget=4)
@@ -2463,7 +2448,9 @@ def test_round3_compiler_deadline_physically_exits_before_io_close() -> None:
     asyncio.run(exercise())
 
 
-def test_round3_1_overbudget_append_can_be_projected_without_execution_authority() -> None:
+def test_round3_1_overbudget_append_can_be_projected_without_execution_authority() -> (
+    None
+):
     """Compaction can inspect the exact failed append before ordinary compile."""
 
     compiler = StructuredModelInputCompiler()
@@ -2645,24 +2632,24 @@ class _Capability:
         )
         root_policy = LocalSkillProvider(include_user_skills=False).prepare_root_policy(
             Path.cwd(),
-            conversation_scope_kind=conversation_scope_kind,
-            scope_subagent_task_id=scope_subagent_task_id,
         )
         return issue_local_skill_catalog_source_snapshot(
             conversation_scope_kind=conversation_scope_kind,
             scope_subagent_task_id=scope_subagent_task_id,
             source_snapshot=snapshot,
-            discovery=LocalSkillDiscovery((), (), root_policy=root_policy),
+            discovery=LocalSkillDiscovery(
+                root_policy=root_policy,
+                disposition=SkillDiscoveryDisposition.COMPLETE,
+            ),
             owner_authenticity=self._owner_authenticity,
         )
 
     def freeze_projection_input(self, owner):
         if owner.owner_authenticity is not self._owner_authenticity:
             raise ValueError("foreign test Skill owner")
-        discovery = context_fingerprint("test:round3-skill-discovery:v1", ())
         return FrozenSkillProjectionInput(
-            discovery_semantic_fingerprint=discovery,
             source_snapshot=owner.source_snapshot,
+            discovery=owner.discovery,
         )
 
     def activation_context(self, *, user_input: str):
@@ -2693,7 +2680,7 @@ class _SensitiveCapability(_Capability):
             diagnostics=(
                 SkillDiagnostic(
                     severity=SkillDiagnosticSeverity.ERROR,
-                    code="unknown_private_failure",
+                    code=SkillDiagnosticCode.ROOT_ESCAPE,
                     message="secret diagnostic detail",
                     path=Path("/private/skill/path"),
                 ),
@@ -2728,17 +2715,16 @@ class _UnavailableCapability(_Capability):
             scope_subagent_task_id=scope_subagent_task_id,
             source_snapshot=snapshot,
             discovery=LocalSkillDiscovery(
-                (),
-                (
+                root_policy=owner.discovery.root_policy,
+                disposition=SkillDiscoveryDisposition.UNAVAILABLE,
+                unavailable_reason=SkillCatalogUnavailableReason.DISCOVERY_RACED,
+                unavailable_diagnostics=(
                     SkillDiagnostic(
                         severity=SkillDiagnosticSeverity.ERROR,
-                        code="skill_catalog_unavailable",
+                        code=SkillDiagnosticCode.ENUMERATION_RACED,
                         message="private discovery failure",
                     ),
                 ),
-                disposition=SkillDiscoveryDisposition.UNAVAILABLE,
-                unavailable_reason=SkillCatalogUnavailableReason.DISCOVERY_RACED,
-                root_policy=owner.discovery.root_policy,
             ),
             owner_authenticity=self._owner_authenticity,
         )
@@ -2790,7 +2776,8 @@ def test_round9_unavailable_skill_catalog_is_not_misreported_as_empty(
         canonical_facts=_canonical_facts(),
     )
     unavailable = {
-        item.source_kind: item.initial_mode for item in collected.candidates
+        item.source_kind: item.initial_mode
+        for item in collected.candidates
         if item.initial_mode is ContextRenderMode.UNAVAILABLE_MINIMAL
     }
     assert unavailable[ContextSourceKind.SKILL_CATALOG] is (
@@ -2828,7 +2815,8 @@ def test_round3_temporal_capture_is_single_and_dst_consistent(tmp_path: Path) ->
         )
         .model_surface
     )
-    collected = _collect_context_sources(collector,
+    collected = _collect_context_sources(
+        collector,
         activation_subject=CapabilityActivationSubjectKind.ROOT_HUMAN_PROMPT,
         activation_text="$skill demo",
         tool_surface=surface,
@@ -2883,7 +2871,8 @@ def test_round3_unkeyed_timezone_is_frozen_to_opening_offset(tmp_path: Path) -> 
         )
         .model_surface
     )
-    collected = _collect_context_sources(collector,
+    collected = _collect_context_sources(
+        collector,
         activation_subject=CapabilityActivationSubjectKind.ROOT_HUMAN_PROMPT,
         activation_text="hello",
         tool_surface=surface,
@@ -2923,7 +2912,8 @@ def test_round3_temporal_failure_samples_once_and_omits_clock(tmp_path: Path) ->
         )
         .model_surface
     )
-    collected = _collect_context_sources(collector,
+    collected = _collect_context_sources(
+        collector,
         activation_subject=CapabilityActivationSubjectKind.ROOT_HUMAN_PROMPT,
         activation_text="hello",
         tool_surface=surface,
@@ -2966,16 +2956,15 @@ def test_round3_capability_sources_and_public_diagnostics_are_separate(
         )
         .model_surface
     )
-    collected = _collect_context_sources(collector,
+    collected = _collect_context_sources(
+        collector,
         activation_subject=CapabilityActivationSubjectKind.ROOT_HUMAN_PROMPT,
         activation_text="skill:demo",
         tool_surface=surface,
         canonical_facts=_canonical_facts(),
     )
     by_kind = {candidate.source_kind: candidate for candidate in collected.candidates}
-    assert by_kind[ContextSourceKind.SKILL_CATALOG].variants[0].text == (
-        "CATALOG FULL"
-    )
+    assert by_kind[ContextSourceKind.SKILL_CATALOG].variants[0].text == ("CATALOG FULL")
     assert by_kind[ContextSourceKind.ACTIVE_SKILL].variants[0].text == "ACTIVE FULL"
     assert collected.registry_fingerprint == collector.registry_fingerprint
     assert collected.diagnostics[0].code is (
@@ -3005,7 +2994,8 @@ def test_round3_large_catalog_renderer_never_inverts_declared_variants(
         )
         .model_surface
     )
-    collected = _collect_context_sources(collector,
+    collected = _collect_context_sources(
+        collector,
         activation_subject=CapabilityActivationSubjectKind.ROOT_HUMAN_PROMPT,
         activation_text="hello",
         tool_surface=surface,
@@ -3056,7 +3046,8 @@ def test_round3_runtime_path_is_fixed_escaped_and_cannot_leave_workspace(
         )
         .model_surface
     )
-    collected = _collect_context_sources(collector,
+    collected = _collect_context_sources(
+        collector,
         activation_subject=CapabilityActivationSubjectKind.ROOT_HUMAN_PROMPT,
         activation_text="hello",
         tool_surface=surface,
@@ -3076,7 +3067,8 @@ def test_round3_runtime_path_is_fixed_escaped_and_cannot_leave_workspace(
 
     terminal.value = tmp_path.parent
     with pytest.raises(ValueError, match="outside"):
-        _collect_context_sources(collector,
+        _collect_context_sources(
+            collector,
             activation_subject=CapabilityActivationSubjectKind.ROOT_HUMAN_PROMPT,
             activation_text="hello",
             tool_surface=surface,
@@ -3135,7 +3127,8 @@ def test_round3_runtime_source_tracks_foreground_cwd_but_not_yielded_cwd(
             display_timezone=timezone.utc,
             clock=lambda: datetime(2026, 8, 12, tzinfo=timezone.utc),
         )
-        collected = _collect_context_sources(collector,
+        collected = _collect_context_sources(
+            collector,
             activation_subject=CapabilityActivationSubjectKind.ROOT_HUMAN_PROMPT,
             activation_text="hello",
             tool_surface=prepare_test_direct_tool_surface(
@@ -3190,6 +3183,8 @@ def test_round3_tool_invocation_rejects_other_subagent_access() -> None:
             )
     finally:
         borrow.close()
+
+
 def test_round3_tool_owner_rejects_foreign_host_surface_borrow(tmp_path: Path) -> None:
     async def scenario() -> None:
         ports = tuple(
@@ -3316,9 +3311,7 @@ def test_round3_tool_surface_excludes_root_only_monitor_and_schema_is_frozen(
     borrow = port.borrow_tool_surface(root)
     old_binding = borrow.binding_fingerprint("terminal")
     with pytest.raises(RuntimeError, match="sealed"):
-        port.bind_subagent_port(
-            SimpleNamespace(tool_names=frozenset({"spawn_agent"}))
-        )
+        port.bind_subagent_port(SimpleNamespace(tool_names=frozenset({"spawn_agent"})))
     assert borrow.binding_fingerprint("terminal") == old_binding
     borrow.close()
     asyncio.run(port.aclose(timeout_seconds=2))
@@ -3622,17 +3615,22 @@ def test_round9_2_hook_context_is_one_shot_user_suffix_with_exact_prefix() -> No
     assert third_view.system_prompt == successor.system_prompt
     assert third_view.tools == successor.tools
     assert third_view.messages[: len(successor.messages)] == successor.messages
-    assert sum(
-        decode_runtime_observation(message).source_kind
-        is ContextSourceKind.HOOK_CONTEXT
-        for message in third_view.messages
-        if message.role is MessageRole.USER
-        and message.content
-        and "pulsara_runtime_observation" in message.content[0]
-    ) == 1
+    assert (
+        sum(
+            decode_runtime_observation(message).source_kind
+            is ContextSourceKind.HOOK_CONTEXT
+            for message in third_view.messages
+            if message.role is MessageRole.USER
+            and message.content
+            and "pulsara_runtime_observation" in message.content[0]
+        )
+        == 1
+    )
 
 
-def test_round5a1_reasoning_replay_replaces_exact_assistant_and_keeps_wire_prefix() -> None:
+def test_round5a1_reasoning_replay_replaces_exact_assistant_and_keeps_wire_prefix() -> (
+    None
+):
     profile = ProviderProfile(
         id="test:chat-replay",
         wire_api="openai_chat_completions",
@@ -3754,9 +3752,10 @@ def test_round5a1_reasoning_replay_replaces_exact_assistant_and_keeps_wire_prefi
         replay_fragments=(fragment,),
     )
     third_wire = third_view.wire_input_plan.materialization
-    assert third_wire.ordered_input_items[
-        : len(second_wire.ordered_input_items)
-    ] == second_wire.ordered_input_items
+    assert (
+        third_wire.ordered_input_items[: len(second_wire.ordered_input_items)]
+        == second_wire.ordered_input_items
+    )
 
 
 def test_round5a1_responses_replay_preserves_ordered_items_after_wire_prefix() -> None:
@@ -3863,9 +3862,7 @@ def test_round3_1_active_skill_no_change_and_clear_are_causal_once() -> None:
     initial = _user("$skill:alpha", sequence=1)
     first_request = _prepared_request(
         _snapshot(initial),
-        _sources(
-            _candidate(ContextSourceKind.ACTIVE_SKILL, ("skill=alpha", ""))
-        ),
+        _sources(_candidate(ContextSourceKind.ACTIVE_SKILL, ("skill=alpha", ""))),
     )
     _first, first_view = _compile_and_install_append(
         compiler=compiler, owner=owner, request=first_request
@@ -4206,11 +4203,14 @@ def test_round7_previous_outcome_value_clears_once_without_prefix_rewrite() -> N
         and message.content
         and "pulsara_runtime_observation" in message.content[0]
     )
-    assert sum(
-        item.source_kind is ContextSourceKind.PREVIOUS_TURN_OUTCOME
-        and item.presence.value == "CLEARED"
-        for item in clear_observations
-    ) == 1
+    assert (
+        sum(
+            item.source_kind is ContextSourceKind.PREVIOUS_TURN_OUTCOME
+            and item.presence.value == "CLEARED"
+            for item in clear_observations
+        )
+        == 1
+    )
 
     final = FrozenProviderInputItem(
         FrozenProviderInputItemKind.ASSISTANT,
@@ -4248,9 +4248,7 @@ def test_round7_freshness_frontier_appends_without_reclassifying_old_messages() 
         ContextSourceKind.TOOL_OBSERVATION_FRESHNESS,
         ('{"current_turn_ref":"sha256:first"}',),
     )
-    first_request = _prepared_request(
-        _snapshot(initial), _sources(first_freshness)
-    )
+    first_request = _prepared_request(_snapshot(initial), _sources(first_freshness))
     _first, first_view = _compile_and_install_append(
         compiler=compiler, owner=owner, request=first_request
     )
@@ -4264,9 +4262,7 @@ def test_round7_freshness_frontier_appends_without_reclassifying_old_messages() 
         ),
     )
     second_request = replace(
-        _prepared_request(
-            _snapshot(initial, result), _sources(second_freshness)
-        ),
+        _prepared_request(_snapshot(initial, result), _sources(second_freshness)),
         context_id="context:round7-freshness",
         model_call_index=2,
     )
@@ -4590,7 +4586,9 @@ def test_round3_1_compatibility_reset_starts_a_new_epoch_without_prefix_join() -
     assert reset_view.system_prompt == "BASE v2"
 
 
-def test_round3_1_append_quotes_canonical_item_and_snapshot_bounds_before_install() -> None:
+def test_round3_1_append_quotes_canonical_item_and_snapshot_bounds_before_install() -> (
+    None
+):
     request = _prepared_request(
         _snapshot(_user("one", sequence=1), _user("two", sequence=2)),
         _sources(),
@@ -4604,7 +4602,9 @@ def test_round3_1_append_quotes_canonical_item_and_snapshot_bounds_before_instal
     )
     with pytest.raises(StructuredModelInputCompileError) as failure:
         item_limited.compile(request)
-    assert failure.value.kind is ModelInputCompileFailureKind.COMPILE_WORKING_SET_EXCEEDED
+    assert (
+        failure.value.kind is ModelInputCompileFailureKind.COMPILE_WORKING_SET_EXCEEDED
+    )
 
     byte_limited = StructuredModelInputCompiler(
         limits=replace(
@@ -4615,7 +4615,9 @@ def test_round3_1_append_quotes_canonical_item_and_snapshot_bounds_before_instal
     )
     with pytest.raises(StructuredModelInputCompileError) as failure:
         byte_limited.compile(request)
-    assert failure.value.kind is ModelInputCompileFailureKind.COMPILE_WORKING_SET_EXCEEDED
+    assert (
+        failure.value.kind is ModelInputCompileFailureKind.COMPILE_WORKING_SET_EXCEEDED
+    )
 
 
 def test_round3_pure_compiler_import_graph_has_no_kernel_transport_or_io() -> None:

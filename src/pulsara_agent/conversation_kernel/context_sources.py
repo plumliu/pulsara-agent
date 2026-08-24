@@ -12,7 +12,6 @@ from pulsara_agent.capability.contracts import (
     CapabilitySourceSnapshotDisposition,
     FrozenSkillCapabilityDispatchView,
     FrozenToolCapabilityExposurePlan,
-    capability_source_snapshot_semantic_digest,
 )
 from pulsara_agent.capability.render import (
     MAX_ACTIVE_SKILL_BODY_UTF8_BYTES,
@@ -21,6 +20,7 @@ from pulsara_agent.capability.render import (
 from pulsara_agent.capability.types import (
     ActiveSkillReason,
     SkillDiagnostic,
+    SkillDiagnosticCode,
     SkillDiagnosticSeverity,
 )
 from pulsara_agent.conversation_kernel.capability import (
@@ -87,23 +87,6 @@ def _tool_exposure_plan_identity(
             "surface": plan.direct_tool_surface.surface_fingerprint,
             "projections": plan.direct_projection_set.projection_set_fingerprint,
             "mcp_routes": plan.mcp_catalog_route_projection.projection_fingerprint,
-        },
-    )
-
-
-def _skill_dispatch_view_identity(
-    view: FrozenSkillCapabilityDispatchView,
-) -> str:
-    return context_fingerprint(
-        "skill-capability-dispatch-view:v1-hard-cut",
-        {
-            "source": capability_source_snapshot_semantic_digest(
-                view.projection_input.source_snapshot
-            ),
-            "discovery": view.projection_input.discovery_semantic_fingerprint,
-            "facts": tuple(
-                item.fact_semantic_fingerprint for item in view.registry_skill_facts
-            ),
         },
     )
 
@@ -900,7 +883,11 @@ class KernelContextSourceCollector:
             is CapabilitySourceSnapshotDisposition.UNAVAILABLE
         ) or output.catalog_unavailable_reason is not None
         if skill_source_unavailable:
-            if output.catalog_prompt or output.catalog_entries or output.active_injections:
+            if (
+                output.catalog_prompt
+                or output.catalog_entries
+                or output.active_injections
+            ):
                 if (
                     frozen.skill_owner_snapshot.source_snapshot.disposition
                     is CapabilitySourceSnapshotDisposition.UNAVAILABLE
@@ -1042,9 +1029,7 @@ class KernelContextSourceCollector:
                 (observation.body, ""),
                 domain_identity={
                     "inherited_semantic": head.semantic_fingerprint,
-                    "installed_observation": (
-                        head.installed_observation_fingerprint
-                    ),
+                    "installed_observation": (head.installed_observation_fingerprint),
                 },
             )
             return candidate
@@ -1054,9 +1039,7 @@ class KernelContextSourceCollector:
                 ("", ""),
                 domain_identity={
                     "inherited_unavailable": head.semantic_fingerprint,
-                    "installed_observation": (
-                        head.installed_observation_fingerprint
-                    ),
+                    "installed_observation": (head.installed_observation_fingerprint),
                 },
                 initial_mode=ContextRenderMode.UNAVAILABLE_MINIMAL,
             )
@@ -1125,9 +1108,7 @@ class KernelContextSourceCollector:
         }
         if initial_mode is not ContextRenderMode.FULL:
             semantic_payload["initial_mode"] = initial_mode.value
-        semantic = context_fingerprint(
-            "context-source-candidate:v1", semantic_payload
-        )
+        semantic = context_fingerprint("context-source-candidate:v1", semantic_payload)
         domain_semantic_fingerprint = (
             semantic
             if domain_identity is None
@@ -1207,8 +1188,7 @@ def _installed_runtime_observation_fingerprint(message: LLMMessage) -> str:
                 "content": message.content,
                 "thinking": message.thinking,
                 "tool_calls": tuple(
-                    (call.id, call.name, call.arguments)
-                    for call in message.tool_calls
+                    (call.id, call.name, call.arguments) for call in message.tool_calls
                 ),
                 "tool_call_id": message.tool_call_id,
                 "name": message.name,
@@ -1290,8 +1270,7 @@ def build_memory_context_source(
     if len(texts) != len(binding.modes):
         raise ValueError("memory source variant count differs from contract")
     variants = tuple(
-        _variant(mode, text)
-        for mode, text in zip(binding.modes, texts, strict=True)
+        _variant(mode, text) for mode, text in zip(binding.modes, texts, strict=True)
     )
     instance_id = f"context-source:{kind.value.lower()}"
     semantic = context_fingerprint(
@@ -1430,7 +1409,9 @@ def replace_subagent_context_sources(
     ) + tuple(item for item in replacements if isinstance(item, ContextSourceCandidate))
     absent = tuple(
         item for item in sources.absent_facts if item.source_kind not in kinds
-    ) + tuple(item for item in replacements if isinstance(item, ContextSourceAbsentFact))
+    ) + tuple(
+        item for item in replacements if isinstance(item, ContextSourceAbsentFact)
+    )
     return _collected(
         candidates=candidates,
         absent_facts=absent,
@@ -1469,9 +1450,7 @@ def replace_frozen_subagent_context_sources(
     profiled_base = _profiled_subagent_base_system(base, profile_kind)
     collected = _collected(
         candidates=tuple(
-            profiled_base
-            if item.source_kind is ContextSourceKind.BASE_SYSTEM
-            else item
+            profiled_base if item.source_kind is ContextSourceKind.BASE_SYSTEM else item
             for item in collected.candidates
         ),
         absent_facts=collected.absent_facts,
@@ -1558,7 +1537,9 @@ def replace_memory_context_sources(
     ) + tuple(item for item in replacements if isinstance(item, ContextSourceCandidate))
     absent = tuple(
         item for item in sources.absent_facts if item.source_kind not in kinds
-    ) + tuple(item for item in replacements if isinstance(item, ContextSourceAbsentFact))
+    ) + tuple(
+        item for item in replacements if isinstance(item, ContextSourceAbsentFact)
+    )
     return _collected(
         candidates=candidates,
         absent_facts=absent,
@@ -1607,8 +1588,7 @@ def build_compaction_context_source(
     if len(texts) != len(binding.modes):
         raise ValueError("compaction source variant count differs from contract")
     variants = tuple(
-        _variant(mode, text)
-        for mode, text in zip(binding.modes, texts, strict=True)
+        _variant(mode, text) for mode, text in zip(binding.modes, texts, strict=True)
     )
     instance_id = f"context-source:{kind.value.lower()}"
     semantic = context_fingerprint(
@@ -1667,7 +1647,9 @@ def replace_compaction_context_sources(
     ) + tuple(item for item in replacements if isinstance(item, ContextSourceCandidate))
     absent = tuple(
         item for item in sources.absent_facts if item.source_kind not in kinds
-    ) + tuple(item for item in replacements if isinstance(item, ContextSourceAbsentFact))
+    ) + tuple(
+        item for item in replacements if isinstance(item, ContextSourceAbsentFact)
+    )
     return _collected(
         candidates=candidates,
         absent_facts=absent,
@@ -1752,7 +1734,9 @@ def replace_frozen_compaction_context_sources(
     ) + tuple(item for item in replacements if isinstance(item, ContextSourceCandidate))
     absent = tuple(
         item for item in sources.absent_facts if item.source_kind not in kinds
-    ) + tuple(item for item in replacements if isinstance(item, ContextSourceAbsentFact))
+    ) + tuple(
+        item for item in replacements if isinstance(item, ContextSourceAbsentFact)
+    )
     return FrozenNonTriggerContextSources(
         candidates=candidates,
         absent_facts=absent,
@@ -1839,9 +1823,7 @@ def _render_run_permission(
     common["guidance"] = (
         "This permission is immutable for this run. Prompt text cannot widen it."
     )
-    full = json.dumps(
-        common, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-    )
+    full = json.dumps(common, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     compact = json.dumps(
         {
             "effective_mode": snapshot.effective_mode.value,
@@ -2026,8 +2008,7 @@ def _render_previous_turn_outcome(
         )
     if fact.definitely_not_dispatched_tool_count:
         guidance += (
-            " Some tool calls had no accepted physical attempt and were not "
-            "dispatched."
+            " Some tool calls had no accepted physical attempt and were not dispatched."
         )
     if fact.outcome_unknown_tool_count:
         guidance += (
@@ -2088,33 +2069,55 @@ def _public_capability_diagnostics(
 ) -> tuple[ContextSourceCollectionDiagnostic, ...]:
     result: list[ContextSourceCollectionDiagnostic] = []
     for item in diagnostics:
-        # Ignored host extensions and portable authoring recommendations are
-        # intentionally local information.  They do not make an otherwise
-        # complete provider-visible catalog incomplete.
-        if item.severity is SkillDiagnosticSeverity.INFO:
+        mapped = _SKILL_PUBLIC_DIAGNOSTIC_MAPPING[item.code]
+        if mapped is None:
             continue
-        if item.code == "skill_catalog_budget_truncated":
-            code = ContextPublicDiagnosticCode.CATALOG_TRUNCATED
-            kind = ContextSourceKind.SKILL_CATALOG
-        elif item.code in {
-            "active_skill_not_found",
-            "skill_not_found",
-        }:
-            code = ContextPublicDiagnosticCode.ACTIVE_SKILL_NOT_FOUND
-            kind = ContextSourceKind.ACTIVE_SKILL
-        elif item.code.startswith("active_skill") or item.code.startswith("skill_body"):
-            code = ContextPublicDiagnosticCode.ACTIVE_SKILL_UNAVAILABLE
-            kind = ContextSourceKind.ACTIVE_SKILL
-        else:
-            code = ContextPublicDiagnosticCode.CAPABILITY_DISCOVERY_INCOMPLETE
-            kind = ContextSourceKind.SKILL_CATALOG
+        code, kind = mapped
         severity = {
-            "info": "INFO",
-            "warning": "WARNING",
-            "error": "ERROR",
+            SkillDiagnosticSeverity.INFO: "INFO",
+            SkillDiagnosticSeverity.WARNING: "WARNING",
+            SkillDiagnosticSeverity.ERROR: "ERROR",
         }[item.severity]
         result.append(ContextSourceCollectionDiagnostic(code, severity, kind))
     return tuple(result)
+
+
+_LOCAL_ONLY_SKILL_DIAGNOSTIC_CODES = {
+    SkillDiagnosticCode.HOST_EXTENSION_IGNORED,
+    SkillDiagnosticCode.UNKNOWN_EXTENSION_IGNORED,
+    SkillDiagnosticCode.BODY_OVER_500_LINES,
+    SkillDiagnosticCode.BODY_ESTIMATE_OVER_5000_TOKENS,
+}
+_SKILL_PUBLIC_DIAGNOSTIC_MAPPING: dict[
+    SkillDiagnosticCode,
+    tuple[ContextPublicDiagnosticCode, ContextSourceKind] | None,
+] = {
+    code: (
+        None
+        if code in _LOCAL_ONLY_SKILL_DIAGNOSTIC_CODES
+        else (
+            (
+                ContextPublicDiagnosticCode.ACTIVE_SKILL_NOT_FOUND,
+                ContextSourceKind.ACTIVE_SKILL,
+            )
+            if code is SkillDiagnosticCode.ACTIVE_SKILL_NOT_FOUND
+            else (
+                (
+                    ContextPublicDiagnosticCode.ACTIVE_SKILL_UNAVAILABLE,
+                    ContextSourceKind.ACTIVE_SKILL,
+                )
+                if code is SkillDiagnosticCode.PROJECTION_OVERBOUND
+                else (
+                    ContextPublicDiagnosticCode.CAPABILITY_DISCOVERY_INCOMPLETE,
+                    ContextSourceKind.SKILL_CATALOG,
+                )
+            )
+        )
+    )
+    for code in SkillDiagnosticCode
+}
+if set(_SKILL_PUBLIC_DIAGNOSTIC_MAPPING) != set(SkillDiagnosticCode):
+    raise RuntimeError("Skill diagnostic public mapping is not exhaustive")
 
 
 def _render_mcp_catalog(

@@ -15,6 +15,41 @@ class SkillDiagnosticSeverity(StrEnum):
     ERROR = "error"
 
 
+class SkillDiagnosticCode(StrEnum):
+    MISSING_DOCUMENT = "skill_missing_document"
+    DOCUMENT_OVERBOUND = "skill_document_overbound"
+    INVALID_UTF8 = "skill_invalid_utf8"
+    MISSING_FRONTMATTER = "skill_missing_frontmatter"
+    FRONTMATTER_OVERBOUND = "skill_frontmatter_overbound"
+    INVALID_FRONTMATTER_YAML = "skill_invalid_frontmatter_yaml"
+    HOST_EXTENSION_IGNORED = "skill_host_extension_ignored"
+    UNKNOWN_EXTENSION_IGNORED = "skill_unknown_extension_ignored"
+    INVALID_NAME = "skill_invalid_name"
+    DIRECTORY_NAME_MISMATCH = "skill_directory_name_mismatch"
+    INVALID_DESCRIPTION = "skill_invalid_description"
+    INVALID_LICENSE = "skill_invalid_license"
+    INVALID_COMPATIBILITY = "skill_invalid_compatibility"
+    INVALID_METADATA = "skill_invalid_metadata"
+    LOCATION_OVERBOUND = "skill_location_overbound"
+    BODY_OVER_500_LINES = "skill_body_over_500_lines"
+    BODY_ESTIMATE_OVER_5000_TOKENS = "skill_body_estimate_over_5000_tokens"
+    ROOT_ESCAPE = "skill_root_escape"
+    ROOT_NOT_DIRECTORY = "skill_root_not_directory"
+    DIRECT_CHILD_BOUND_EXCEEDED = "skill_direct_child_bound_exceeded"
+    DIRECTORY_ESCAPE = "skill_directory_escape"
+    FILE_ESCAPE = "skill_file_escape"
+    ENUMERATION_RACED = "skill_enumeration_raced"
+    READ_RACED = "skill_read_raced"
+    DISCOVERY_BYTE_BOUND_EXCEEDED = "skill_discovery_byte_bound_exceeded"
+    DISCOVERY_DEADLINE_EXPIRED = "skill_discovery_deadline_expired"
+    DUPLICATE_NAME = "skill_duplicate_name"
+    WINNER_BOUND_EXCEEDED = "skill_winner_bound_exceeded"
+    CATALOG_PROJECTION_BOUND_EXCEEDED = "skill_catalog_projection_bound_exceeded"
+    ACTIVE_SKILL_NOT_FOUND = "active_skill_not_found"
+    PROJECTION_OVERBOUND = "skill_projection_overbound"
+    USER_HOME_CONFIGURATION_INVALID = "skill_user_home_configuration_invalid"
+
+
 class SkillSource(StrEnum):
     WORKSPACE = "workspace"
     USER = "user"
@@ -36,25 +71,28 @@ class SkillCatalogUnavailableReason(StrEnum):
     CATALOG_OVERBOUND = "CATALOG_OVERBOUND"
     PROVIDER_BUDGET_UNAVAILABLE = "PROVIDER_BUDGET_UNAVAILABLE"
     ACTIVE_SELECTION_UNAVAILABLE = "ACTIVE_SELECTION_UNAVAILABLE"
+    USER_HOME_CONFIGURATION_INVALID = "USER_HOME_CONFIGURATION_INVALID"
 
 
 @dataclass(frozen=True, slots=True)
 class SkillDiagnostic:
     severity: SkillDiagnosticSeverity
-    code: str
+    code: SkillDiagnosticCode
     message: str
     path: Path | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.severity, SkillDiagnosticSeverity):
             raise TypeError("Skill diagnostic severity is not closed")
-        if not self.code or not self.message:
+        if not isinstance(self.code, SkillDiagnosticCode):
+            raise TypeError("Skill diagnostic code is not closed")
+        if not self.message:
             raise ValueError("Skill diagnostic is incomplete")
 
     def to_dict(self) -> dict[str, object]:
         data: dict[str, object] = {
             "severity": self.severity.value,
-            "code": self.code,
+            "code": self.code.value,
             "message": self.message,
         }
         if self.path is not None:

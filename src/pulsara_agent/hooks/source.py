@@ -8,7 +8,7 @@ from pathlib import Path
 import stat
 from time import monotonic
 
-from pulsara_agent.capability import default_pulsara_home
+from pulsara_agent.capability.pulsara_home import require_pulsara_home
 from pulsara_agent.hooks.config_parser import (
     HookConfigParseError,
     MAXIMUM_HOOK_CONFIG_BYTES,
@@ -56,14 +56,20 @@ class LocalHookSourceProvider:
         self._workspace_root = workspace_root.expanduser().resolve()
         self._workspace_kind = workspace_kind
         self._workspace_state_key = workspace_state_key
-        self._pulsara_home = (pulsara_home or default_pulsara_home()).expanduser().resolve()
+        self._pulsara_home = (
+            require_pulsara_home()
+            if pulsara_home is None
+            else require_pulsara_home(str(pulsara_home))
+        )
         self._trust = trust_store or HookTrustStore(self._pulsara_home)
 
     @property
     def trust_store(self) -> HookTrustStore:
         return self._trust
 
-    def discover(self, *, deadline_monotonic: float | None = None) -> FrozenHookDefinitionView:
+    def discover(
+        self, *, deadline_monotonic: float | None = None
+    ) -> FrozenHookDefinitionView:
         snapshots = [
             self._read_source(
                 kind=HookSourceKind.USER_FILE,
@@ -122,7 +128,9 @@ class LocalHookSourceProvider:
         try:
             _require_deadline(deadline_monotonic)
             raw = _read_regular_file_no_follow(
-                expected, allowed_root=allowed_root, deadline_monotonic=deadline_monotonic
+                expected,
+                allowed_root=allowed_root,
+                deadline_monotonic=deadline_monotonic,
             )
             _require_deadline(deadline_monotonic)
         except _MissingSource:
@@ -155,9 +163,7 @@ class LocalHookSourceProvider:
                 "HOOK_SOURCE_UNAVAILABLE",
                 detail=type(exc).__name__,
             )
-        digest = normalized_definition_digest(
-            parsed.provenance, parsed.definitions
-        )
+        digest = normalized_definition_digest(parsed.provenance, parsed.definitions)
         diagnostics = list(parsed.diagnostics)
         try:
             _require_deadline(deadline_monotonic)
@@ -268,7 +274,9 @@ def _read_regular_file_no_follow(
         total = 0
         while True:
             _require_deadline(deadline_monotonic)
-            chunk = os.read(file_fd, min(64 * 1024, MAXIMUM_HOOK_CONFIG_BYTES + 1 - total))
+            chunk = os.read(
+                file_fd, min(64 * 1024, MAXIMUM_HOOK_CONFIG_BYTES + 1 - total)
+            )
             if not chunk:
                 break
             chunks.append(chunk)

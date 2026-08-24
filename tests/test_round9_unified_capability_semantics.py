@@ -34,7 +34,11 @@ from pulsara_agent.capability.contracts import (
     native_tool_projection_set_fingerprint,
     tool_capability_version_ref,
 )
-from pulsara_agent.capability.local_skills import LocalSkillDiscovery, LocalSkillProvider
+from pulsara_agent.capability.local_skills import (
+    LocalSkillDiscovery,
+    LocalSkillProvider,
+    SkillDiscoveryDisposition,
+)
 from pulsara_agent.capability.planner import (
     CapabilityPlanningError,
     KernelToolCapabilityPlanner,
@@ -61,9 +65,6 @@ from pulsara_agent.conversation_kernel.mcp.contracts import (
     build_catalog_snapshot,
 )
 from pulsara_agent.conversation_kernel.mcp.directory import McpDirectoryPageFactory
-from pulsara_agent.conversation_kernel.capability import (
-    skill_discovery_semantic_fingerprint,
-)
 from pulsara_agent.conversation_kernel.mcp.meta import (
     McpToolRefCapacityExceeded,
     ProcessLocalNewMcpToolRefOwner,
@@ -93,8 +94,12 @@ def _spec(name: str, schema: dict[str, object]) -> FrozenToolSpec:
 
 
 def _fact(
-    *, source_kind: CapabilitySourceKind, source_id: str, name: str,
-    origin: ToolCapabilityOrigin, schema: dict[str, object],
+    *,
+    source_kind: CapabilitySourceKind,
+    source_id: str,
+    name: str,
+    origin: ToolCapabilityOrigin,
+    schema: dict[str, object],
 ):
     source = capability_source_ref(source_kind, source_id)
     return freeze_tool_capability_fact(
@@ -185,13 +190,10 @@ def _planning_view(
     )
     root_policy = LocalSkillProvider(include_user_skills=False).prepare_root_policy(
         Path.cwd(),
-        conversation_scope_kind=conversation_scope_kind,
-        scope_subagent_task_id=scope_subagent_task_id,
     )
     discovery = LocalSkillDiscovery(
-        skills=(),
-        diagnostics=(),
         root_policy=root_policy,
+        disposition=SkillDiscoveryDisposition.COMPLETE,
     )
     skill_owner = issue_local_skill_catalog_source_snapshot(
         conversation_scope_kind=conversation_scope_kind,
@@ -256,10 +258,9 @@ def _planning_view(
         native_wire=native,
         mcp=mcp_input,
     )
-    discovery_fingerprint = skill_discovery_semantic_fingerprint(discovery)
     skill_input = FrozenSkillProjectionInput(
-        discovery_semantic_fingerprint=discovery_fingerprint,
         source_snapshot=skill_snapshot,
+        discovery=discovery,
     )
     _cut, tool_view, _skill_view = freeze_capability_dispatch_cut_and_views(
         conversation_scope_kind=conversation_scope_kind,
@@ -308,17 +309,14 @@ def test_round9_owner_snapshot_authenticity_rejects_same_shape_forgery() -> None
     )
     root_policy = LocalSkillProvider(include_user_skills=False).prepare_root_policy(
         Path.cwd(),
-        conversation_scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
     )
     forged = PreparedLocalSkillCatalogSourceSnapshot(
         conversation_scope_kind=ModelInputScopeKind.ROOT,
         scope_subagent_task_id=None,
         source_snapshot=snapshot,
         discovery=LocalSkillDiscovery(
-            skills=(),
-            diagnostics=(),
             root_policy=root_policy,
+            disposition=SkillDiscoveryDisposition.COMPLETE,
         ),
         owner_authenticity=object(),
         _issuer=object(),
@@ -424,7 +422,9 @@ def test_round9_native_incompatible_mcp_routes_meta_without_poisoning_builtin() 
     assert len(plan.mcp_catalog_route_projection.routes) == 1
     route = plan.mcp_catalog_route_projection.routes[0]
     assert route.route is ToolCapabilityRouteKind.NEW_MCP_META_ONLY
-    assert route.public_reason_code is CapabilityRouteReasonCode.NATIVE_WIRE_INCOMPATIBLE
+    assert (
+        route.public_reason_code is CapabilityRouteReasonCode.NATIVE_WIRE_INCOMPATIBLE
+    )
 
 
 def test_round9_native_incompatible_builtin_fails_entire_dispatch() -> None:
@@ -439,9 +439,7 @@ def test_round9_native_incompatible_builtin_fails_entire_dispatch() -> None:
         CapabilityPlanningError,
         match="builtin is not native-wire compatible",
     ):
-        _finalized_plan(
-            view=_planning_view(builtin_facts=(builtin,), mcp_facts=())
-        )
+        _finalized_plan(view=_planning_view(builtin_facts=(builtin,), mcp_facts=()))
 
 
 def test_round9_builtin_aggregate_bound_never_diverts_to_meta(
@@ -454,24 +452,19 @@ def test_round9_builtin_aggregate_bound_never_diverts_to_meta(
         origin=ToolCapabilityOrigin.BUILTIN,
         schema={"type": "object", "properties": {}},
     )
-    monkeypatch.setattr(
-        "pulsara_agent.capability.planner.MAXIMUM_NATIVE_TOOL_BYTES", 1
-    )
+    monkeypatch.setattr("pulsara_agent.capability.planner.MAXIMUM_NATIVE_TOOL_BYTES", 1)
     with pytest.raises(
         CapabilityPlanningError,
         match="builtin surface exceeds native bounds",
     ):
-        _finalized_plan(
-            view=_planning_view(builtin_facts=(builtin,), mcp_facts=())
-        )
+        _finalized_plan(view=_planning_view(builtin_facts=(builtin,), mcp_facts=()))
 
 
 def test_round9_parent_cut_rejects_overbound_planner_framing_before_plan(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "pulsara_agent.capability.registry."
-        "MAXIMUM_CAPABILITY_PLANNER_FRAMING_BYTES",
+        "pulsara_agent.capability.registry.MAXIMUM_CAPABILITY_PLANNER_FRAMING_BYTES",
         1,
     )
     with pytest.raises(ValueError, match="planner framing bound"):
@@ -602,9 +595,7 @@ def test_round9_provider_contract_reset_reprojects_only_installed_cohort() -> No
     assert reset.direct_tool_surface == cold.direct_tool_surface
     assert tuple(
         item.provider_name for item in reset.direct_projection_set.tool_versions
-    ) == tuple(
-        item.provider_name for item in cold.direct_projection_set.tool_versions
-    )
+    ) == tuple(item.provider_name for item in cold.direct_projection_set.tool_versions)
     assert (
         reset.direct_projection_set.native_function_tool_wire_contract_fingerprint
         != cold.direct_projection_set.native_function_tool_wire_contract_fingerprint
@@ -625,9 +616,7 @@ def test_round9_installed_schema_replacement_cannot_bypass_native_via_meta() -> 
         origin=ToolCapabilityOrigin.MCP,
         schema={"type": "object", "properties": {"old": {"type": "string"}}},
     )
-    cold = _finalized_plan(
-        view=_planning_view(builtin_facts=(), mcp_facts=(old,))
-    )
+    cold = _finalized_plan(view=_planning_view(builtin_facts=(), mcp_facts=(old,)))
     predecessor = InstalledCapabilityEpochPredecessor(
         expected_continuity_revision=1,
         continuity_epoch_nonce="epoch:installed",
@@ -682,9 +671,9 @@ def test_round9_cold_mcp_native_aggregate_is_all_direct_or_all_meta() -> None:
         "builtin_echo",
     )
     assert len(plan.mcp_catalog_route_projection.routes) == 64
-    assert {
-        item.route for item in plan.mcp_catalog_route_projection.routes
-    } == {ToolCapabilityRouteKind.NEW_MCP_META_ONLY}
+    assert {item.route for item in plan.mcp_catalog_route_projection.routes} == {
+        ToolCapabilityRouteKind.NEW_MCP_META_ONLY
+    }
     assert {
         item.public_reason_code for item in plan.mcp_catalog_route_projection.routes
     } == {CapabilityRouteReasonCode.NEW_COLD_COHORT_META_FALLBACK}
@@ -796,12 +785,15 @@ def test_round9_new_mcp_ref_capacity_is_closed_and_does_not_evict(
         scope_subagent_task_id=None,
         continuity_epoch_nonce="epoch:one",
     )
-    assert owner.resolve_callable(
-        first.ref.opaque_token,
-        conversation_scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
-        continuity_epoch_nonce="epoch:one",
-    ) == first.ref
+    assert (
+        owner.resolve_callable(
+            first.ref.opaque_token,
+            conversation_scope_kind=ModelInputScopeKind.ROOT,
+            scope_subagent_task_id=None,
+            continuity_epoch_nonce="epoch:one",
+        )
+        == first.ref
+    )
 
 
 def test_round9_mcp_directory_cursor_is_scope_and_catalog_bound() -> None:
@@ -829,9 +821,7 @@ def test_round9_mcp_directory_cursor_is_scope_and_catalog_bound() -> None:
         )
         for index in range(3)
     )
-    catalog = build_catalog_snapshot(
-        owner_epoch=1, catalog_revision=1, entries=entries
-    )
+    catalog = build_catalog_snapshot(owner_epoch=1, catalog_revision=1, entries=entries)
     contract = context_fingerprint("test:round9-wire-contract:v1", "chat")
     direct = FrozenNativeToolProjectionSet(
         conversation_scope_kind=ModelInputScopeKind.ROOT,
@@ -1029,9 +1019,7 @@ def test_round9_mcp_item_directory_cursor_is_list_and_query_bound() -> None:
         catalog=catalog,
         candidates=candidates,
     )
-    assert json.loads(second.content)["items"][0]["uri"] == (
-        "fixture://resource/1"
-    )
+    assert json.loads(second.content)["items"][0]["uri"] == ("fixture://resource/1")
 
     for tool_name, arguments in (
         ("list_mcp_prompts", {"server_id": "server", "limit": 1}),
@@ -1108,9 +1096,9 @@ def test_round9_large_mcp_cohort_quotes_before_meta_fallback() -> None:
     selection = KernelToolCapabilityPlanner().select(view=view)
     assert selection.direct_tool_versions == ()
     assert len(selection.mcp_catalog_route_projection.routes) == 65
-    assert {
-        item.route for item in selection.mcp_catalog_route_projection.routes
-    } == {ToolCapabilityRouteKind.NEW_MCP_META_ONLY}
+    assert {item.route for item in selection.mcp_catalog_route_projection.routes} == {
+        ToolCapabilityRouteKind.NEW_MCP_META_ONLY
+    }
     projection_set = materialize_openai_native_tool_projection_set(
         conversation_scope_kind=ModelInputScopeKind.ROOT,
         scope_subagent_task_id=None,
@@ -1204,12 +1192,12 @@ def test_round9_generic_capability_package_has_no_physical_authority_imports() -
 
 def test_round9_production_has_no_pre_registry_tool_surface_bypass() -> None:
     root = Path(__file__).parents[1] / "src" / "pulsara_agent"
-    tool_runtime = (
-        root / "conversation_kernel" / "tool_runtime.py"
-    ).read_text(encoding="utf-8")
-    direct_model = (
-        root / "conversation_kernel" / "direct_model.py"
-    ).read_text(encoding="utf-8")
+    tool_runtime = (root / "conversation_kernel" / "tool_runtime.py").read_text(
+        encoding="utf-8"
+    )
+    direct_model = (root / "conversation_kernel" / "direct_model.py").read_text(
+        encoding="utf-8"
+    )
 
     # Every production surface must now pass through owner snapshots, the
     # sole registry composition seam, adapter-native preflight, and the parent
@@ -1232,9 +1220,9 @@ def test_round9_owner_snapshot_issuers_and_registry_merge_have_closed_callers() 
         "issue_local_skill_catalog_source_snapshot": {
             "conversation_kernel/capability.py",
         },
-            "freeze_capability_registry_from_owner_snapshots": {
-                "conversation_kernel/provider_dispatch.py",
-            },
+        "freeze_capability_registry_from_owner_snapshots": {
+            "conversation_kernel/provider_dispatch.py",
+        },
     }
     observed = {name: set() for name in allowed}
     for path in src.rglob("*.py"):

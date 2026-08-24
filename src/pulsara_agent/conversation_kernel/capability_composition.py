@@ -62,9 +62,7 @@ class PreparedMcpCapabilitySourceSnapshotSet:
     scope_subagent_task_id: str | None
     source_snapshots: tuple[FrozenCapabilitySourceSnapshot, ...]
     catalog_snapshot: "McpCatalogSnapshot" = field(repr=False)
-    inspection_inputs: tuple["PreparedMcpInspectionInput", ...] = field(
-        repr=False
-    )
+    inspection_inputs: tuple["PreparedMcpInspectionInput", ...] = field(repr=False)
     owner_authenticity: object = field(repr=False, compare=False)
     _issuer: object = field(repr=False, compare=False)
 
@@ -133,12 +131,6 @@ def issue_local_skill_catalog_source_snapshot(
     discovery: LocalSkillDiscovery,
     owner_authenticity: object,
 ) -> PreparedLocalSkillCatalogSourceSnapshot:
-    root_policy = discovery.root_policy
-    if (
-        root_policy.conversation_scope_kind is not conversation_scope_kind
-        or root_policy.scope_subagent_task_id != scope_subagent_task_id
-    ):
-        raise ValueError("Skill discovery scope conflicts")
     return PreparedLocalSkillCatalogSourceSnapshot(
         conversation_scope_kind=conversation_scope_kind,
         scope_subagent_task_id=scope_subagent_task_id,
@@ -195,9 +187,7 @@ def freeze_capability_registry_from_owner_snapshots(
         conversation_scope_kind=scope,
         scope_subagent_task_id=task_id,
         builtin_registration=builtin_snapshot.registration,
-        mcp_registrations=tuple(
-            item.registration for item in mcp.source_snapshots
-        ),
+        mcp_registrations=tuple(item.registration for item in mcp.source_snapshots),
         local_skill_catalog_registration=skill_snapshot.registration,
     )
     return freeze_capability_registry_snapshot(

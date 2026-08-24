@@ -674,6 +674,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "google-re2" },
+    { name = "httpx" },
     { name = "jieba" },
     { name = "mcp", extra = ["cli"] },
     { name = "mcp-types" },
@@ -695,6 +696,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "google-re2", specifier = ">=1.1.20240702" },
+    { name = "httpx", specifier = ">=0.28.1,<1" },
     { name = "jieba", specifier = "==0.42.1" },
     { name = "mcp", extras = ["cli"], specifier = "==2.0.0" },
     { name = "mcp-types", specifier = "==2.0.0" },

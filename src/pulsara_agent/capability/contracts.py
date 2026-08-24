@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from pulsara_agent.model_input.contracts import (
     FrozenModelToolSurface,
@@ -26,6 +26,9 @@ from pulsara_agent.primitives.context import (
 from pulsara_agent.primitives.tool_observation import (
     MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES,
 )
+
+if TYPE_CHECKING:
+    from pulsara_agent.capability.local_skills import LocalSkillDiscovery
 
 MAXIMUM_CAPABILITY_MCP_SOURCES = 64
 MAXIMUM_CAPABILITY_SOURCE_REGISTRATIONS = 66
@@ -196,9 +199,7 @@ def capability_source_registration_identity_digest(
     )
 
 
-def _validate_scope(
-    scope: ModelInputScopeKind, subagent_task_id: str | None
-) -> None:
+def _validate_scope(scope: ModelInputScopeKind, subagent_task_id: str | None) -> None:
     if not isinstance(scope, ModelInputScopeKind):
         raise TypeError("capability scope kind is not closed")
     if (scope is ModelInputScopeKind.ROOT) != (subagent_task_id is None):
@@ -214,9 +215,7 @@ class FrozenCapabilitySourceRegistrationSet:
     local_skill_catalog_registration: FrozenCapabilitySourceRegistration
 
     def __post_init__(self) -> None:
-        _validate_scope(
-            self.conversation_scope_kind, self.scope_subagent_task_id
-        )
+        _validate_scope(self.conversation_scope_kind, self.scope_subagent_task_id)
         if (
             self.builtin_registration.source.kind
             is not CapabilitySourceKind.BUILTIN_REGISTRY
@@ -226,9 +225,7 @@ class FrozenCapabilitySourceRegistrationSet:
             raise ValueError("capability registration singleton kinds conflict")
         if len(self.mcp_registrations) > MAXIMUM_CAPABILITY_MCP_SOURCES:
             raise ValueError("MCP source registration bound exceeded")
-        mcp_ids = tuple(
-            item.source.stable_source_id for item in self.mcp_registrations
-        )
+        mcp_ids = tuple(item.source.stable_source_id for item in self.mcp_registrations)
         if mcp_ids != tuple(sorted(mcp_ids)) or len(mcp_ids) != len(set(mcp_ids)):
             raise ValueError("MCP source registrations are not sorted and unique")
         if any(
@@ -299,9 +296,7 @@ def tool_capability_semantic_fingerprint(
             "name": canonical_tool_spec.name,
             "description": canonical_tool_spec.description,
             "parameters": canonical_tool_spec.parameters,
-            "descriptor_fingerprint": (
-                canonical_tool_spec.descriptor_fingerprint
-            ),
+            "descriptor_fingerprint": (canonical_tool_spec.descriptor_fingerprint),
         },
     )
 
@@ -428,9 +423,7 @@ class FrozenNativeToolWireEligibilitySet:
     entries: tuple[NativeToolWireEligibility, ...]
 
     def __post_init__(self) -> None:
-        _validate_scope(
-            self.conversation_scope_kind, self.scope_subagent_task_id
-        )
+        _validate_scope(self.conversation_scope_kind, self.scope_subagent_task_id)
         versions = tuple(item.version for item in self.entries)
         keys = tuple(
             (item.provider_name, item.identity_fingerprint, item.semantic_fingerprint)
@@ -456,9 +449,7 @@ class FrozenNativeToolProjectionSet:
     projection_set_fingerprint: str
 
     def __post_init__(self) -> None:
-        _validate_scope(
-            self.conversation_scope_kind, self.scope_subagent_task_id
-        )
+        _validate_scope(self.conversation_scope_kind, self.scope_subagent_task_id)
         if len(self.tool_versions) != len(self.projections):
             raise ValueError("native projection set pair count conflicts")
         names = tuple(item.provider_name for item in self.tool_versions)
@@ -507,8 +498,7 @@ def native_tool_projection_set_fingerprint(
             "scope_subagent_task_id": scope_subagent_task_id,
             "contract": native_function_tool_wire_contract_fingerprint,
             "versions": tuple(
-                tool_capability_version_identity_digest(item)
-                for item in tool_versions
+                tool_capability_version_identity_digest(item) for item in tool_versions
             ),
             "projections": tuple(
                 context_fingerprint(
@@ -546,8 +536,7 @@ class FrozenSkillCapabilityFact:
     def __post_init__(self) -> None:
         if (
             self.identity.kind is not CapabilityKind.SKILL
-            or self.identity.source.kind
-            is not CapabilitySourceKind.LOCAL_SKILL_CATALOG
+            or self.identity.source.kind is not CapabilitySourceKind.LOCAL_SKILL_CATALOG
         ):
             raise ValueError("skill capability identity/source matrix conflicts")
         if self.identity.stable_name != self.public_name:
@@ -601,9 +590,7 @@ class FrozenCapabilitySourceSnapshot:
     facts: tuple[FrozenCapabilityFact, ...]
 
     def __post_init__(self) -> None:
-        _validate_scope(
-            self.conversation_scope_kind, self.scope_subagent_task_id
-        )
+        _validate_scope(self.conversation_scope_kind, self.scope_subagent_task_id)
         if not isinstance(self.disposition, CapabilitySourceSnapshotDisposition):
             raise TypeError("capability source disposition is not closed")
         if (
@@ -664,9 +651,7 @@ def capability_source_snapshot_semantic_digest(
             "scope": snapshot.conversation_scope_kind.value,
             "scope_subagent_task_id": snapshot.scope_subagent_task_id,
             "disposition": snapshot.disposition.value,
-            "facts": tuple(
-                item.fact_semantic_fingerprint for item in snapshot.facts
-            ),
+            "facts": tuple(item.fact_semantic_fingerprint for item in snapshot.facts),
         },
     )
 
@@ -817,7 +802,10 @@ class FrozenMcpRouteProjection:
     projection_fingerprint: str
 
     def __post_init__(self) -> None:
-        keys = tuple((item.target.server_id, item.target.remote_tool_name) for item in self.routes)
+        keys = tuple(
+            (item.target.server_id, item.target.remote_tool_name)
+            for item in self.routes
+        )
         if keys != tuple(sorted(keys)) or len(keys) != len(set(keys)):
             raise ValueError("MCP routes are not sorted and unique")
         expected = context_fingerprint(
@@ -874,9 +862,7 @@ class FrozenMcpInspectabilityFact:
             self.conservative_logical_utf8_bytes
             <= MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES
         )
-        if fits != (
-            self.disposition is McpInspectDeliveryDisposition.FULL_ELIGIBLE
-        ):
+        if fits != (self.disposition is McpInspectDeliveryDisposition.FULL_ELIGIBLE):
             raise ValueError("MCP inspectability disposition conflicts with quote")
 
 
@@ -915,12 +901,9 @@ class FrozenMcpCapabilityProjectionInput:
     inspectability_facts: tuple[FrozenMcpInspectabilityFact, ...]
 
     def __post_init__(self) -> None:
-        _validate_scope(
-            self.conversation_scope_kind, self.scope_subagent_task_id
-        )
+        _validate_scope(self.conversation_scope_kind, self.scope_subagent_task_id)
         source_ids = tuple(
-            item.registration.source.stable_source_id
-            for item in self.source_snapshots
+            item.registration.source.stable_source_id for item in self.source_snapshots
         )
         if source_ids != tuple(sorted(source_ids)) or len(source_ids) != len(
             set(source_ids)
@@ -945,17 +928,19 @@ class FrozenMcpCapabilityProjectionInput:
 
 @dataclass(frozen=True, slots=True)
 class FrozenSkillProjectionInput:
-    discovery_semantic_fingerprint: str
     source_snapshot: FrozenCapabilitySourceSnapshot = field(repr=False)
+    discovery: "LocalSkillDiscovery" = field(repr=False)
 
     def __post_init__(self) -> None:
-        if not self.discovery_semantic_fingerprint:
-            raise ValueError("skill discovery semantic fingerprint is empty")
+        from pulsara_agent.capability.local_skills import LocalSkillDiscovery
+
         if (
             self.source_snapshot.registration.source.kind
             is not CapabilitySourceKind.LOCAL_SKILL_CATALOG
         ):
             raise ValueError("skill projection input source kind conflicts")
+        if type(self.discovery) is not LocalSkillDiscovery:
+            raise TypeError("skill projection input discovery is not frozen")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1031,13 +1016,10 @@ class FrozenCapabilityDispatchCut:
     skills: FrozenSkillProjectionInput
 
     def __post_init__(self) -> None:
-        _validate_scope(
-            self.conversation_scope_kind, self.scope_subagent_task_id
-        )
+        _validate_scope(self.conversation_scope_kind, self.scope_subagent_task_id)
         registration = self.registry.registration_set
         if (
-            registration.conversation_scope_kind
-            is not self.conversation_scope_kind
+            registration.conversation_scope_kind is not self.conversation_scope_kind
             or registration.scope_subagent_task_id != self.scope_subagent_task_id
             or self.tools.native_wire.conversation_scope_kind
             is not self.conversation_scope_kind
@@ -1101,9 +1083,7 @@ class FrozenToolCapabilityExposureSelection:
 
     def __post_init__(self) -> None:
         native = self.dispatch_view.planning_input.native_wire
-        _validate_scope(
-            native.conversation_scope_kind, native.scope_subagent_task_id
-        )
+        _validate_scope(native.conversation_scope_kind, native.scope_subagent_task_id)
         if (
             self.direct_tool_surface.conversation_scope_kind
             is not native.conversation_scope_kind
@@ -1142,7 +1122,9 @@ class FrozenToolCapabilityExposurePlan:
     direct_projection_set: FrozenNativeToolProjectionSet
 
     def __post_init__(self) -> None:
-        if tuple(item.name for item in self.selection.direct_tool_surface.tool_specs) != tuple(
+        if tuple(
+            item.name for item in self.selection.direct_tool_surface.tool_specs
+        ) != tuple(
             item.provider_name for item in self.direct_projection_set.tool_versions
         ):
             raise ValueError("capability exposure surface/projections drifted")
@@ -1228,6 +1210,21 @@ def canonical_tool_spec_fingerprint(fact: FrozenToolCapabilityFact) -> str:
 __all__ = [
     name
     for name in globals()
-    if name.startswith(("Capability", "Empty", "Frozen", "Installed", "Local", "Mcp", "Native", "Prepared", "Tool", "MAXIMUM_"))
-    or name.startswith(("capability_", "canonical_", "freeze_", "native_", "skill_", "tool_"))
+    if name.startswith(
+        (
+            "Capability",
+            "Empty",
+            "Frozen",
+            "Installed",
+            "Local",
+            "Mcp",
+            "Native",
+            "Prepared",
+            "Tool",
+            "MAXIMUM_",
+        )
+    )
+    or name.startswith(
+        ("capability_", "canonical_", "freeze_", "native_", "skill_", "tool_")
+    )
 ]

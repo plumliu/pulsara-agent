@@ -4,14 +4,27 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
+import signal
 import sys
 from time import monotonic
 
 from pulsara_agent import __version__
 from pulsara_agent.capability import (
+    EventLocalSkillCancellationProbe,
+    InspectLocalSkillCatalogRequest,
+    InstallLooseLocalSkillRequest,
+    InvalidLocalSkillCandidateIssue,
+    LocalSkillInstallDisposition,
+    LocalSkillInstallScope,
+    LocalSkillManagementService,
+    LocalSkillValidationDisposition,
+    ShadowedLocalSkillCandidateIssue,
+    SkillDiscoveryDisposition,
+    ValidateLocalSkillSourceRequest,
     bundled_skills_status,
     default_pulsara_home,
     reset_bundled_skill,
@@ -66,6 +79,18 @@ def build_parser() -> argparse.ArgumentParser:
     _add_env_args(skill_commands.add_parser("status"))
     reset = _add_env_args(skill_commands.add_parser("reset"))
     reset.add_argument("name")
+    validate = _add_env_args(skill_commands.add_parser("validate"))
+    validate.add_argument("path")
+    validate.add_argument("--json", action="store_true")
+    install = _add_env_args(skill_commands.add_parser("install"))
+    install.add_argument("path")
+    install.add_argument("--scope", choices=("workspace", "user"), required=True)
+    install.add_argument("--workspace", default=None)
+    install.add_argument("--json", action="store_true")
+    for name in ("list", "doctor"):
+        command = _add_env_args(skill_commands.add_parser(name))
+        command.add_argument("--workspace", default=None)
+        command.add_argument("--json", action="store_true")
 
     mcp = commands.add_parser("mcp", help="Manage MCP server configuration.")
     mcp_commands = mcp.add_subparsers(dest="mcp_command")
@@ -189,16 +214,15 @@ def main() -> None:
             parser.error(_public_error(exc))
         parser.error("host requires a subcommand")
     if args.command == "skills":
-        _load_env_file_from_args(args)
-        if args.skills_command == "sync-bundled":
-            result = sync_bundled_skills(override_opt_out=args.override_opt_out)
-        elif args.skills_command == "status":
-            result = bundled_skills_status()
-        elif args.skills_command == "reset":
-            result = reset_bundled_skill(args.name)
-        else:
-            parser.error("skills requires a subcommand")
-        print(json.dumps(result.to_dict(), indent=2, ensure_ascii=False))
+        try:
+            output, exit_status = _skills_command(args)
+        except _SkillCliUsageError as exc:
+            parser.error(str(exc))
+        except ValueError as exc:
+            parser.error(_public_error(exc))
+        print(output)
+        if exit_status:
+            raise SystemExit(exit_status)
         return
     if args.command == "mcp":
         try:
@@ -366,6 +390,342 @@ async def _kernel_host_repl(args) -> None:
         await core.shutdown()
 
 
+class _SkillCliUsageError(ValueError):
+    pass
+
+
+def _skills_command(args: argparse.Namespace) -> tuple[str, int]:
+    _load_env_file_from_args(args)
+    command = args.skills_command
+    if command == "sync-bundled":
+        result = sync_bundled_skills(override_opt_out=args.override_opt_out)
+        return json.dumps(result.to_dict(), indent=2, ensure_ascii=False), 0
+    if command == "status":
+        result = bundled_skills_status()
+        return json.dumps(result.to_dict(), indent=2, ensure_ascii=False), 0
+    if command == "reset":
+        result = reset_bundled_skill(args.name)
+        return json.dumps(result.to_dict(), indent=2, ensure_ascii=False), 0
+    if command is None:
+        raise _SkillCliUsageError("skills requires a subcommand")
+
+    service = LocalSkillManagementService()
+    if command == "validate":
+        result = service.validate_local_skill_source(
+            ValidateLocalSkillSourceRequest(_resolved_local_source(args.path))
+        )
+        payload = _skill_validation_payload(result)
+        rendered = (
+            json.dumps(payload, indent=2, ensure_ascii=False)
+            if args.json
+            else _skill_validation_text(payload)
+        )
+        status = {
+            LocalSkillValidationDisposition.VALID: 0,
+            LocalSkillValidationDisposition.INVALID: 1,
+            LocalSkillValidationDisposition.UNAVAILABLE: 2,
+        }[result.disposition]
+        return rendered, status
+
+    if command == "install":
+        scope = LocalSkillInstallScope(args.scope)
+        if scope is LocalSkillInstallScope.USER and args.workspace is not None:
+            raise _SkillCliUsageError("--workspace is not valid with --scope user")
+        workspace = (
+            _resolved_skill_workspace(args.workspace)
+            if scope is LocalSkillInstallScope.WORKSPACE
+            else None
+        )
+        probe = EventLocalSkillCancellationProbe()
+        with _bridge_skill_sigint(probe):
+            result = service.install_loose_local_skill(
+                InstallLooseLocalSkillRequest(
+                    source_path=_resolved_local_source(args.path),
+                    scope=scope,
+                    workspace_root=workspace,
+                ),
+                cancellation=probe,
+            )
+        payload = _skill_install_payload(result)
+        rendered = (
+            json.dumps(payload, indent=2, ensure_ascii=False)
+            if args.json
+            else _skill_install_text(payload)
+        )
+        status = _SKILL_INSTALL_EXIT_STATUS[result.disposition]
+        return rendered, status
+
+    if command in {"list", "doctor"}:
+        workspace = _resolved_skill_workspace(args.workspace)
+        inspection = service.inspect_local_skill_catalog(
+            InspectLocalSkillCatalogRequest(workspace)
+        )
+        payload = _skill_inspection_payload(inspection, doctor=command == "doctor")
+        rendered = (
+            json.dumps(payload, indent=2, ensure_ascii=False)
+            if args.json
+            else _skill_inspection_text(payload, doctor=command == "doctor")
+        )
+        status = (
+            0 if inspection.disposition is SkillDiscoveryDisposition.COMPLETE else 2
+        )
+        return rendered, status
+    raise _SkillCliUsageError("unknown skills command")
+
+
+def _resolved_skill_workspace(raw: str | None) -> Path:
+    root = Path(raw) if raw is not None else Path.cwd()
+    return resolve_workspace(
+        HostWorkspaceInput(workspace_kind="project", workspace_root=root)
+    ).workspace_root
+
+
+def _resolved_local_source(raw: str) -> Path:
+    source = Path(raw).expanduser()
+    if not source.is_absolute():
+        source = Path.cwd() / source
+    return Path(os.path.normpath(os.fspath(source)))
+
+
+@contextmanager
+def _bridge_skill_sigint(probe: EventLocalSkillCancellationProbe):
+    previous = signal.getsignal(signal.SIGINT)
+
+    def request_cancel(_signum, _frame) -> None:
+        probe.cancel()
+
+    signal.signal(signal.SIGINT, request_cancel)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGINT, previous)
+
+
+def _skill_validation_payload(result) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "operation": "validate_local_skill_source",
+        "disposition": result.disposition.value,
+        "source_path": str(result.source_path),
+    }
+    if result.parsed is not None:
+        payload["manifest"] = {
+            "name": result.parsed.name,
+            "description": result.parsed.description,
+            "license": result.parsed.license,
+            "compatibility": result.parsed.compatibility,
+            "metadata": dict(result.parsed.metadata),
+            "body": result.parsed.body,
+            "raw_document_digest": result.parsed.raw_document_digest,
+            "manifest_semantic_fingerprint": (
+                result.parsed.manifest_semantic_fingerprint
+            ),
+            "authoring_diagnostic_codes": [
+                item.value for item in result.parsed.authoring_diagnostic_codes
+            ],
+        }
+    if result.diagnostics:
+        payload["diagnostics"] = [item.to_dict() for item in result.diagnostics]
+    if result.unavailable_reason is not None:
+        payload["unavailable_reason"] = result.unavailable_reason.value
+    return payload
+
+
+def _skill_validation_text(payload: dict[str, object]) -> str:
+    lines = [
+        f"Validation: {payload['disposition']}",
+        f"Source: {payload['source_path']}",
+    ]
+    manifest = payload.get("manifest")
+    if isinstance(manifest, dict):
+        lines.append(f"Skill: {manifest['name']} — {manifest['description']}")
+    for diagnostic in payload.get("diagnostics", []):
+        if isinstance(diagnostic, dict):
+            lines.append(f"- {diagnostic['code']}: {diagnostic['message']}")
+    if "unavailable_reason" in payload:
+        lines.append(f"Reason: {payload['unavailable_reason']}")
+    return "\n".join(lines)
+
+
+def _skill_install_payload(result) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "operation": "install_loose_local_skill",
+        "disposition": result.disposition.value,
+        "source_path": str(result.source_path),
+    }
+    if result.destination_path is not None:
+        payload["destination_path"] = str(result.destination_path)
+        payload["discovery"] = "next_legal_provider_safe_point"
+    if result.diagnostics:
+        payload["diagnostics"] = [item.to_dict() for item in result.diagnostics]
+    if result.target_configuration_reason is not None:
+        payload["target_configuration_reason"] = (
+            result.target_configuration_reason.value
+        )
+    if result.publish_unavailable_reason is not None:
+        payload["publish_unavailable_reason"] = result.publish_unavailable_reason.value
+    if result.entry_path is not None:
+        payload["entry_path"] = result.entry_path.as_posix()
+    if result.prior_disposition is not None:
+        payload["prior_disposition"] = result.prior_disposition.value
+    if result.attempted_staging_path is not None:
+        payload["attempted_staging_path"] = str(result.attempted_staging_path)
+    if result.cleanup_location_status is not None:
+        payload["cleanup_location_status"] = result.cleanup_location_status.value
+    return payload
+
+
+def _skill_install_text(payload: dict[str, object]) -> str:
+    lines = [
+        f"Installation: {payload['disposition']}",
+        f"Source: {payload['source_path']}",
+    ]
+    if "destination_path" in payload:
+        lines.extend(
+            (
+                f"Destination: {payload['destination_path']}",
+                "Discovery: the next legal provider safe point.",
+            )
+        )
+    for name in (
+        "target_configuration_reason",
+        "publish_unavailable_reason",
+        "entry_path",
+        "prior_disposition",
+        "attempted_staging_path",
+        "cleanup_location_status",
+    ):
+        if name in payload:
+            lines.append(f"{name}: {payload[name]}")
+    for diagnostic in payload.get("diagnostics", []):
+        if isinstance(diagnostic, dict):
+            lines.append(f"- {diagnostic['code']}: {diagnostic['message']}")
+    return "\n".join(lines)
+
+
+def _skill_inspection_payload(inspection, *, doctor: bool) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "operation": "inspect_effective_local_skill_catalog",
+        "projection": "doctor" if doctor else "list",
+        "disposition": inspection.disposition.value,
+        "roots": [
+            {
+                "root_kind": item.root_kind.value,
+                "path": str(item.path),
+                "location_prefix": item.location_prefix,
+                "precedence_ordinal": item.precedence_ordinal,
+            }
+            for item in inspection.root_policy.roots
+        ],
+        "excluded_root_kinds": [
+            item.value for item in inspection.root_policy.excluded_root_kinds
+        ],
+        "skills": [
+            {
+                "name": item.name,
+                "description": item.description,
+                "location": item.location,
+                "source": item.source.value,
+                "root_kind": item.root_kind.value,
+            }
+            for item in inspection.skills
+        ],
+    }
+    if inspection.unavailable_reason is not None:
+        payload["unavailable_reason"] = inspection.unavailable_reason.value
+        payload["diagnostics"] = [
+            item.to_dict() for item in inspection.unavailable_diagnostics
+        ]
+    if doctor and inspection.disposition is SkillDiscoveryDisposition.COMPLETE:
+        issues: list[dict[str, object]] = []
+        for item in inspection.candidate_issues:
+            if isinstance(item, InvalidLocalSkillCandidateIssue):
+                issues.append(
+                    {
+                        "kind": item.kind.value,
+                        "path": str(item.path),
+                        "root_kind": item.root_kind.value,
+                        "declared_name": item.declared_name,
+                        "diagnostics": [
+                            diagnostic.to_dict() for diagnostic in item.diagnostics
+                        ],
+                    }
+                )
+            elif isinstance(item, ShadowedLocalSkillCandidateIssue):
+                issues.append(
+                    {
+                        "kind": item.kind.value,
+                        "path": str(item.path),
+                        "root_kind": item.root_kind.value,
+                        "name": item.name,
+                        "winner_ordinal": item.winner_ordinal,
+                        "local_diagnostic_codes": [
+                            code.value for code in item.local_diagnostic_codes
+                        ],
+                    }
+                )
+        payload["candidate_issues"] = issues
+        payload["winner_local_diagnostics"] = [
+            {
+                "winner_ordinal": item.winner_ordinal,
+                "diagnostic_codes": [code.value for code in item.diagnostic_codes],
+            }
+            for item in inspection.winner_local_diagnostics
+        ]
+    return payload
+
+
+def _skill_inspection_text(payload: dict[str, object], *, doctor: bool) -> str:
+    lines = [f"Catalog: {payload['disposition']}"]
+    skills = payload.get("skills", [])
+    if (
+        not skills
+        and payload["disposition"] == SkillDiscoveryDisposition.COMPLETE.value
+    ):
+        lines.append("No effective local Skills.")
+    for item in skills:
+        if isinstance(item, dict):
+            lines.append(
+                f"- {item['name']}: {item['description']} ({item['location']})"
+            )
+    if "unavailable_reason" in payload:
+        lines.append(f"Unavailable: {payload['unavailable_reason']}")
+    if doctor:
+        for root in payload.get("roots", []):
+            if isinstance(root, dict):
+                lines.append(
+                    f"Root {root['precedence_ordinal']}: "
+                    f"{root['root_kind']} {root['path']}"
+                )
+        for issue in payload.get("candidate_issues", []):
+            if isinstance(issue, dict):
+                lines.append(f"Issue {issue['kind']}: {issue['path']}")
+                for diagnostic in issue.get("diagnostics", []):
+                    if isinstance(diagnostic, dict):
+                        lines.append(
+                            f"  - {diagnostic['code']}: {diagnostic['message']}"
+                        )
+        for diagnostic in payload.get("diagnostics", []):
+            if isinstance(diagnostic, dict):
+                lines.append(f"- {diagnostic['code']}: {diagnostic['message']}")
+    return "\n".join(lines)
+
+
+_SKILL_INSTALL_EXIT_STATUS = {
+    LocalSkillInstallDisposition.INSTALLED: 0,
+    LocalSkillInstallDisposition.SOURCE_INVALID: 1,
+    LocalSkillInstallDisposition.UNSUPPORTED_ENTRY: 1,
+    LocalSkillInstallDisposition.RESERVED_CONTROL: 1,
+    LocalSkillInstallDisposition.DESTINATION_EXISTS: 1,
+    LocalSkillInstallDisposition.CANCELLED: 1,
+    LocalSkillInstallDisposition.SOURCE_UNAVAILABLE: 2,
+    LocalSkillInstallDisposition.SOURCE_RACED: 2,
+    LocalSkillInstallDisposition.TARGET_CONFIGURATION_UNAVAILABLE: 2,
+    LocalSkillInstallDisposition.STAGING_UNAVAILABLE: 2,
+    LocalSkillInstallDisposition.PUBLISH_UNAVAILABLE: 2,
+    LocalSkillInstallDisposition.CLEANUP_UNAVAILABLE: 2,
+}
+
+
 async def _mcp_command(args: argparse.Namespace) -> dict[str, object]:
     _load_env_file_from_args(args)
     workspace_root = (
@@ -399,9 +759,7 @@ async def _mcp_command(args: argparse.Namespace) -> dict[str, object]:
                 "endpoint": args.url,
                 "allow_http_localhost": args.allow_http_localhost,
                 "network_policy": (
-                    "ALLOW_PRIVATE"
-                    if args.allow_private_network
-                    else "PUBLIC_ONLY"
+                    "ALLOW_PRIVATE" if args.allow_private_network else "PUBLIC_ONLY"
                 ),
                 "proved_stateless": args.proved_stateless,
             }
@@ -451,9 +809,7 @@ async def _mcp_command(args: argparse.Namespace) -> dict[str, object]:
         results: list[dict[str, object]] = []
         for config in configs:
             if not config.enabled:
-                results.append(
-                    {"server_id": config.server_id, "status": "disabled"}
-                )
+                results.append({"server_id": config.server_id, "status": "disabled"})
                 continue
             supervisor = McpHostSupervisor(
                 session_id=f"mcp-doctor:{config.server_id}",
@@ -526,15 +882,16 @@ def _hooks_command(args: argparse.Namespace) -> dict[str, object]:
     def current_snapshot(kind: HookSourceKind):
         view = provider.discover()
         return next(
-            item for item in view.source_snapshots if item.provenance.identity.kind is kind
+            item
+            for item in view.source_snapshots
+            if item.provenance.identity.kind is kind
         )
 
     command = args.hooks_command
     if command in {"list", "inspect", "doctor"}:
         snapshots = tuple(current_snapshot(kind) for kind in kinds)
         values = [
-            _hook_snapshot_public(item, inspect=command != "list")
-            for item in snapshots
+            _hook_snapshot_public(item, inspect=command != "list") for item in snapshots
         ]
         result: dict[str, object] = {"status": "ok", "sources": values}
         if command == "doctor":
@@ -739,9 +1096,7 @@ def _workspace_input_from_args(args) -> HostWorkspaceInput:
         workspace_root=Path(args.workspace or "."),
         display_label=args.display_label,
         memory_domain_id=args.memory_domain_id or "u_local",
-        trust_workspace_mcp_config=bool(
-            getattr(args, "trust_workspace_mcp", False)
-        ),
+        trust_workspace_mcp_config=bool(getattr(args, "trust_workspace_mcp", False)),
     )
 
 

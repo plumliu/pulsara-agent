@@ -23,7 +23,10 @@ from pulsara_agent.capability.registry import (
     freeze_capability_registry_snapshot,
     freeze_tool_planning_input,
 )
-from pulsara_agent.capability.local_skills import LocalSkillDiscovery
+from pulsara_agent.capability.local_skills import (
+    LocalSkillDiscovery,
+    SkillDiscoveryDisposition,
+)
 from pulsara_agent.capability.local_skills import LocalSkillProvider
 from pulsara_agent.capability.provider import SkillProjectionOutput
 from pulsara_agent.conversation_kernel.capability import (
@@ -40,20 +43,15 @@ class _SkillProjectionProvider:
         self.snapshot_calls = 0
         self.provider = LocalSkillProvider(include_user_skills=False)
 
-    def snapshot_projection_input(
-        self, *, root_policy, deadline_monotonic=None
-    ):
+    def snapshot_projection_input(self, *, root_policy, deadline_monotonic=None):
         del deadline_monotonic
         self.snapshot_calls += 1
         return LocalSkillDiscovery(
-            skills=(),
-            diagnostics=(),
             root_policy=root_policy,
+            disposition=SkillDiscoveryDisposition.COMPLETE,
         )
 
-    def resolve_projection_from_snapshot(
-        self, context, *, discovery
-    ):
+    def resolve_projection_from_snapshot(self, context, *, discovery):
         assert context.active_skill_names == frozenset({"review"})
         assert discovery.disposition.value == "COMPLETE"
         return SkillProjectionOutput(
@@ -129,9 +127,7 @@ def _skill_view(composer: KernelSkillProjectionComposer):
         conversation_scope_kind=ModelInputScopeKind.ROOT,
         scope_subagent_task_id=None,
         source_snapshots=(),
-        catalog_semantic_fingerprint=context_fingerprint(
-            "test:mcp-catalog:v1", ()
-        ),
+        catalog_semantic_fingerprint=context_fingerprint("test:mcp-catalog:v1", ()),
         inspectability_facts=(),
     )
     tools = freeze_tool_planning_input(

@@ -10,11 +10,13 @@ from pulsara_agent.capability.local_skills import (
     LocalSkillProvider,
     PreparedLocalSkillRootPolicy,
     SkillDiscoveryDisposition,
+    discovery_diagnostics,
 )
 from pulsara_agent.capability.provider import SkillProjectionOutput
 from pulsara_agent.capability.render import (
     SkillProjectionOverbound,
-    projection_overbound_diagnostic,
+    active_projection_overbound_diagnostic,
+    catalog_projection_overbound_diagnostic,
     render_active_skill_prompt,
     render_catalog_prompt,
 )
@@ -25,6 +27,7 @@ from pulsara_agent.capability.types import (
     ResolvedSkillCatalogEntry,
     SkillCatalogUnavailableReason,
     SkillDiagnostic,
+    SkillDiagnosticCode,
     SkillDiagnosticSeverity,
     SkillProjectionResolveContext,
 )
@@ -71,7 +74,7 @@ class LocalSkillCapabilityProvider:
     ) -> SkillProjectionOutput:
         if discovery.disposition is SkillDiscoveryDisposition.UNAVAILABLE:
             return SkillProjectionOutput(
-                diagnostics=discovery.diagnostics,
+                diagnostics=discovery_diagnostics(discovery),
                 catalog_unavailable_reason=discovery.unavailable_reason,
                 active_unavailable_reason=discovery.unavailable_reason,
             )
@@ -82,20 +85,18 @@ class LocalSkillCapabilityProvider:
                 key=lambda item: item.name,
             )
         )
-        active_injections, active_diagnostics, active_unavailable = (
-            _active_injections(
-                skills_by_name,
-                user_input=context.user_input,
-                active_skill_names=context.active_skill_names,
-            )
+        active_injections, active_diagnostics, active_unavailable = _active_injections(
+            skills_by_name,
+            user_input=context.user_input,
+            active_skill_names=context.active_skill_names,
         )
-        diagnostics = [*discovery.diagnostics, *active_diagnostics]
+        diagnostics = [*discovery_diagnostics(discovery), *active_diagnostics]
         catalog_unavailable: SkillCatalogUnavailableReason | None = None
         try:
             catalog = render_catalog_prompt(catalog_entries)
         except SkillProjectionOverbound as exc:
             catalog_unavailable = exc.reason
-            diagnostics.append(projection_overbound_diagnostic(exc.reason))
+            diagnostics.append(catalog_projection_overbound_diagnostic())
             catalog = None
         active = None
         if active_unavailable is None:
@@ -103,7 +104,7 @@ class LocalSkillCapabilityProvider:
                 active = render_active_skill_prompt(active_injections)
             except SkillProjectionOverbound as exc:
                 active_unavailable = exc.reason
-                diagnostics.append(projection_overbound_diagnostic(exc.reason))
+                diagnostics.append(active_projection_overbound_diagnostic())
         return SkillProjectionOutput(
             catalog_entries=catalog_entries,
             active_injections=active_injections if active_unavailable is None else (),
@@ -143,7 +144,7 @@ def _active_injections(
             (
                 SkillDiagnostic(
                     severity=SkillDiagnosticSeverity.WARNING,
-                    code="active_skill_not_found",
+                    code=SkillDiagnosticCode.ACTIVE_SKILL_NOT_FOUND,
                     message="One or more requested Skills were not found",
                 ),
             ),
@@ -166,9 +167,7 @@ def _active_injections(
                     else ActiveSkillReason.EXPLICIT_USER_MENTION
                 ),
                 source=skill.source,
-                manifest_semantic_fingerprint=(
-                    skill.manifest_semantic_fingerprint
-                ),
+                manifest_semantic_fingerprint=(skill.manifest_semantic_fingerprint),
                 body_digest=body_digest,
                 raw_document_digest=skill.raw_document_digest,
             )
@@ -179,10 +178,7 @@ def _active_injections(
 def _explicit_skill_names(user_input: str) -> tuple[str, ...]:
     values = {
         *(_match.group(1) for _match in _EXPLICIT_DOLLAR.finditer(user_input)),
-        *(
-            _match.group(1).lower()
-            for _match in _EXPLICIT_PREFIX.finditer(user_input)
-        ),
+        *(_match.group(1).lower() for _match in _EXPLICIT_PREFIX.finditer(user_input)),
     }
     return tuple(sorted(values))
 

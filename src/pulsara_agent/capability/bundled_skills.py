@@ -18,8 +18,13 @@ from uuid import uuid4
 from pulsara_agent import __version__
 from pulsara_agent.capability.local_skills import (
     BUNDLED_SKILL_PROVENANCE_FILE_NAME,
-    PULSARA_HOME_ENV,
     SKILL_FILE_NAME,
+)
+from pulsara_agent.capability.pulsara_home import (
+    PulsaraHomeDisposition,
+    PulsaraHomeResolutionError,
+    require_pulsara_home,
+    resolve_pulsara_home,
 )
 
 
@@ -176,15 +181,23 @@ class BundledSkillResetResult:
         )
 
 
+def _requested_pulsara_home(pulsara_home: Path | None) -> Path:
+    if pulsara_home is None:
+        return require_pulsara_home()
+    resolution = resolve_pulsara_home(str(pulsara_home))
+    if resolution.disposition is PulsaraHomeDisposition.INVALID:
+        raise PulsaraHomeResolutionError(resolution)
+    if resolution.path is None:  # pragma: no cover - closed resolution invariant
+        raise RuntimeError("resolved Pulsara home has no path")
+    return resolution.path
+
+
 def default_pulsara_home() -> Path:
-    raw = os.getenv(PULSARA_HOME_ENV)
-    if raw:
-        return Path(raw).expanduser().resolve()
-    return Path.home().joinpath(".pulsara").resolve()
+    return require_pulsara_home()
 
 
 def user_product_skills_root(pulsara_home: Path | None = None) -> Path:
-    return (pulsara_home or default_pulsara_home()).expanduser().resolve() / "skills"
+    return _requested_pulsara_home(pulsara_home) / "skills"
 
 
 def sync_bundled_skills(
@@ -195,7 +208,7 @@ def sync_bundled_skills(
     bundled_from: str = DEFAULT_BUNDLED_FROM,
     bundled_version: str = __version__,
 ) -> BundledSkillSyncResult:
-    home = (pulsara_home or default_pulsara_home()).expanduser().resolve()
+    home = _requested_pulsara_home(pulsara_home)
     skills_root = user_product_skills_root(home)
     manifest_path = skills_root / BUNDLED_MANIFEST_FILE_NAME
     if _is_opted_out(home) and not override_opt_out:
@@ -379,7 +392,7 @@ def bundled_skills_status(
     pulsara_home: Path | None = None,
     source_root: Path | None = None,
 ) -> BundledSkillStatusResult:
-    home = (pulsara_home or default_pulsara_home()).expanduser().resolve()
+    home = _requested_pulsara_home(pulsara_home)
     skills_root = user_product_skills_root(home)
     manifest_path = skills_root / BUNDLED_MANIFEST_FILE_NAME
     with _bundled_source_root(source_root) as resolved_source_root:
@@ -440,7 +453,7 @@ def reset_bundled_skill(
 ) -> BundledSkillResetResult:
     if not name or "/" in name or name.startswith("."):
         raise ValueError(f"Invalid bundled skill name: {name!r}")
-    home = (pulsara_home or default_pulsara_home()).expanduser().resolve()
+    home = _requested_pulsara_home(pulsara_home)
     skills_root = user_product_skills_root(home)
     target_dir = skills_root / name
     manifest_path = skills_root / BUNDLED_MANIFEST_FILE_NAME

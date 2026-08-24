@@ -34,7 +34,11 @@ from pulsara_agent.capability.contracts import (
     freeze_tool_capability_fact,
     tool_capability_version_ref,
 )
-from pulsara_agent.capability.local_skills import LocalSkillDiscovery, LocalSkillProvider
+from pulsara_agent.capability.local_skills import (
+    LocalSkillDiscovery,
+    LocalSkillProvider,
+    SkillDiscoveryDisposition,
+)
 from pulsara_agent.capability.planner import KernelToolCapabilityPlanner
 from pulsara_agent.capability.registry import (
     freeze_capability_dispatch_cut_and_views,
@@ -216,9 +220,7 @@ class CallbackScriptedKernelModel:
 
     def __init__(
         self,
-        stream_factory: Callable[
-            [KernelModelExecutionRequest], AsyncIterator[object]
-        ],
+        stream_factory: Callable[[KernelModelExecutionRequest], AsyncIterator[object]],
     ) -> None:
         self._stream_factory = stream_factory
         self.requests: list[KernelModelExecutionRequest] = []
@@ -282,9 +284,7 @@ class _CallbackPreparedExecution:
         self,
         *,
         request: KernelModelExecutionRequest,
-        stream_factory: Callable[
-            [KernelModelExecutionRequest], AsyncIterator[object]
-        ],
+        stream_factory: Callable[[KernelModelExecutionRequest], AsyncIterator[object]],
         append_candidate,
         install_authority: ProcessLocalProviderInputInstallAuthority,
     ) -> None:
@@ -432,26 +432,22 @@ class StaticContextSourceCollector:
         )
         root_policy = LocalSkillProvider(include_user_skills=False).prepare_root_policy(
             Path.cwd(),
-            conversation_scope_kind=conversation_scope_kind,
-            scope_subagent_task_id=scope_subagent_task_id,
         )
         return issue_local_skill_catalog_source_snapshot(
             conversation_scope_kind=conversation_scope_kind,
             scope_subagent_task_id=scope_subagent_task_id,
             source_snapshot=snapshot,
-            discovery=LocalSkillDiscovery((), (), root_policy=root_policy),
+            discovery=LocalSkillDiscovery(
+                root_policy=root_policy,
+                disposition=SkillDiscoveryDisposition.COMPLETE,
+            ),
             owner_authenticity=self,
         )
 
     def freeze_skill_capability_projection_input(self, owner):
-        from pulsara_agent.conversation_kernel.capability import (
-            skill_discovery_semantic_fingerprint,
-        )
-
-        discovery_fingerprint = skill_discovery_semantic_fingerprint(owner.discovery)
         return FrozenSkillProjectionInput(
-            discovery_semantic_fingerprint=discovery_fingerprint,
             source_snapshot=owner.source_snapshot,
+            discovery=owner.discovery,
         )
 
     def collect(self, **_kwargs: object) -> CollectedContextSources:
@@ -544,9 +540,7 @@ class StaticContextSourceCollector:
                     "definitely_not_dispatched_tool_count": (
                         previous.definitely_not_dispatched_tool_count
                     ),
-                    "outcome_unknown_tool_count": (
-                        previous.outcome_unknown_tool_count
-                    ),
+                    "outcome_unknown_tool_count": (previous.outcome_unknown_tool_count),
                 },
                 ensure_ascii=False,
                 sort_keys=True,
@@ -594,18 +588,14 @@ class StaticContextSourceCollector:
             ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD: (
                 ContextSourceAbsenceKind.NOT_APPLICABLE
             ),
-            ContextSourceKind.MEMORY_RECALL: (
-                ContextSourceAbsenceKind.NOT_APPLICABLE
-            ),
+            ContextSourceKind.MEMORY_RECALL: (ContextSourceAbsenceKind.NOT_APPLICABLE),
             ContextSourceKind.COMPACTION_RUNTIME_HANDOFF: (
                 ContextSourceAbsenceKind.NOT_APPLICABLE
             ),
             ContextSourceKind.RETAINED_SKILL_CONTEXT: (
                 ContextSourceAbsenceKind.NOT_APPLICABLE
             ),
-            ContextSourceKind.PARENT_CONTEXT: (
-                ContextSourceAbsenceKind.NOT_APPLICABLE
-            ),
+            ContextSourceKind.PARENT_CONTEXT: (ContextSourceAbsenceKind.NOT_APPLICABLE),
             ContextSourceKind.DEPENDENCY_RESULTS: (
                 ContextSourceAbsenceKind.NOT_APPLICABLE
             ),
@@ -772,13 +762,9 @@ def static_canonical_compile_facts(
     object.__setattr__(provisional_binding, "fact_fingerprint", "")
     binding = FrozenContextBindingCompileFact(
         **binding_values,
-        fact_fingerprint=context_binding_compile_fact_fingerprint(
-            provisional_binding
-        ),
+        fact_fingerprint=context_binding_compile_fact_fingerprint(provisional_binding),
     )
-    provisional = FrozenCanonicalCompileSnapshot.__new__(
-        FrozenCanonicalCompileSnapshot
-    )
+    provisional = FrozenCanonicalCompileSnapshot.__new__(FrozenCanonicalCompileSnapshot)
     object.__setattr__(provisional, "canonical_input", canonical_input)
     object.__setattr__(provisional, "context_binding_fact", binding)
     object.__setattr__(provisional, "run_permission_snapshot", permission)
@@ -1158,18 +1144,14 @@ def prepare_test_model_call(
             wire_api=target.target.model_profile.provider_profile.wire_api,
             tool_facts=facts,
         )
-        ordered = tuple(
-            sorted(facts, key=lambda item: item.canonical_tool_spec.name)
-        )
+        ordered = tuple(sorted(facts, key=lambda item: item.canonical_tool_spec.name))
         projection_set = materialize_openai_native_tool_projection_set(
             conversation_scope_kind=(
                 request.tool_surface.model_surface.conversation_scope_kind
             ),
             scope_subagent_task_id=request.tool_surface.access.scope_subagent_task_id,
             wire_api=target.target.model_profile.provider_profile.wire_api,
-            tool_versions=tuple(
-                tool_capability_version_ref(item) for item in ordered
-            ),
+            tool_versions=tuple(tool_capability_version_ref(item) for item in ordered),
             tool_specs=tuple(item.canonical_tool_spec for item in ordered),
             eligibility=eligibility,
         )
@@ -1242,13 +1224,10 @@ def prepare_test_direct_tool_surface(
     )
     root_policy = LocalSkillProvider(include_user_skills=False).prepare_root_policy(
         Path.cwd(),
-        conversation_scope_kind=conversation_scope_kind,
-        scope_subagent_task_id=scope_subagent_task_id,
     )
     discovery = LocalSkillDiscovery(
-        skills=(),
-        diagnostics=(),
         root_policy=root_policy,
+        disposition=SkillDiscoveryDisposition.COMPLETE,
     )
     skill_owner = issue_local_skill_catalog_source_snapshot(
         conversation_scope_kind=conversation_scope_kind,
@@ -1274,12 +1253,9 @@ def prepare_test_direct_tool_surface(
         native_wire=native,
         mcp=mcp_input,
     )
-    discovery_fingerprint = context_fingerprint(
-        "test:local-skill-discovery:v1", ()
-    )
     skill_input = FrozenSkillProjectionInput(
-        discovery_semantic_fingerprint=discovery_fingerprint,
         source_snapshot=skill_snapshot,
+        discovery=discovery,
     )
     _parent, tool_view, _skill_view = freeze_capability_dispatch_cut_and_views(
         conversation_scope_kind=conversation_scope_kind,
@@ -1350,9 +1326,7 @@ def direct_tool_invocation_context(
             authorization_reference="test:authorized",
             effective_permission_mode=permission.effective_mode,
             permission_snapshot_fingerprint=permission.snapshot_fingerprint,
-            attempt_permission_snapshot_fingerprint=(
-                permission.snapshot_fingerprint
-            ),
+            attempt_permission_snapshot_fingerprint=(permission.snapshot_fingerprint),
             surface_borrow=borrow,
             memory_context=memory_context or _enabled_memory_context(),
         )
@@ -1513,9 +1487,7 @@ class Round10TestSubagentRuntime:
                 separators=(",", ":"),
             ).encode(),
         )
-        return PreparedExplicitSubagentCompletion(
-            object(), result, acknowledgement
-        )
+        return PreparedExplicitSubagentCompletion(object(), result, acknowledgement)
 
     async def finish_completion(self, _permit: object, *, committed: bool) -> None:
         if not committed:

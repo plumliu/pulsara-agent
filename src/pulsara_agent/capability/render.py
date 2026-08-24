@@ -7,6 +7,7 @@ from pulsara_agent.capability.types import (
     ResolvedSkillCatalogEntry,
     SkillCatalogUnavailableReason,
     SkillDiagnostic,
+    SkillDiagnosticCode,
     SkillDiagnosticSeverity,
 )
 from pulsara_agent.primitives.context import canonical_json_bytes
@@ -50,9 +51,7 @@ def render_catalog_prompt(
         }
     ).decode("utf-8")
     if len(text.encode("utf-8")) > MAX_SKILL_CATALOG_UTF8_BYTES:
-        raise SkillProjectionOverbound(
-            SkillCatalogUnavailableReason.CATALOG_OVERBOUND
-        )
+        raise SkillProjectionOverbound(SkillCatalogUnavailableReason.CATALOG_OVERBOUND)
     return text
 
 
@@ -95,13 +94,19 @@ def render_active_skill_prompt(
     return text
 
 
-def projection_overbound_diagnostic(
-    reason: SkillCatalogUnavailableReason,
-) -> SkillDiagnostic:
+def catalog_projection_overbound_diagnostic() -> SkillDiagnostic:
     return SkillDiagnostic(
         severity=SkillDiagnosticSeverity.WARNING,
-        code="skill_projection_overbound",
-        message=f"Skill projection is unavailable: {reason.value}",
+        code=SkillDiagnosticCode.CATALOG_PROJECTION_BOUND_EXCEEDED,
+        message="Skill catalog projection exceeds its physical bound",
+    )
+
+
+def active_projection_overbound_diagnostic() -> SkillDiagnostic:
+    return SkillDiagnostic(
+        severity=SkillDiagnosticSeverity.WARNING,
+        code=SkillDiagnosticCode.PROJECTION_OVERBOUND,
+        message="Active Skill projection exceeds its physical bound",
     )
 
 
@@ -110,7 +115,8 @@ __all__ = [
     "MAX_ACTIVE_SKILLS",
     "MAX_SKILL_CATALOG_UTF8_BYTES",
     "SkillProjectionOverbound",
-    "projection_overbound_diagnostic",
+    "active_projection_overbound_diagnostic",
+    "catalog_projection_overbound_diagnostic",
     "render_active_skill_prompt",
     "render_catalog_prompt",
 ]

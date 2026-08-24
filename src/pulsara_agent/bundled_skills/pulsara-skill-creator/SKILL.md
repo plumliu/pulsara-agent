@@ -16,16 +16,26 @@ Use this skill to create or improve a portable Agent Skills bundle for Pulsara.
 ```yaml
 ---
 name: example-skill
-description: A concise sentence that explains when to use the skill.
+description: A concise sentence that explains what the skill does and when to use it.
 ---
 ```
 
-4. Put long guidance in the body, not in frontmatter.
-5. Use `references/` for detailed instructions, `scripts/` for repeatable commands, and `assets/` for reusable templates.
+   Optional portable fields are `license`, `compatibility`, and bounded string-to-string `metadata`. Do not add them unless they carry real information.
+4. Put long guidance in the body, not in frontmatter. When editing an existing skill, preserve valid portable fields and resources that still have consumers.
+5. Create `references/`, `scripts/`, or `assets/` only when the workflow genuinely needs them.
 6. Keep the skill progressive: the root `SKILL.md` should route to deeper files instead of inlining every detail.
+7. Validate the finished directory with the installed Pulsara launcher:
+
+```bash
+pulsara skills validate <skill-directory>
+```
+
+Report the real result. If `pulsara` is not on `PATH`, report a Pulsara distribution or launcher setup problem; do not fall back to a repository `.venv`, `uv run`, or a private validator.
 
 ## Guardrails
 
-- Do not add tool schemas, permission declarations, or Pulsara dependency fields to a skill. Describe how to use ordinary available tools in the Markdown body.
+- A Skill is portable, untrusted guidance; it does not grant tools, permissions, Hooks, MCP access, or execution authority.
+- Do not add `agents/openai.yaml`, tool schemas, permission declarations, Hooks, MCP configuration, Pulsara metadata, or dependency fields to a loose skill.
+- If the product needs a Skill plus MCP, Hook, or preset as one installable unit, that is a future Plugin rather than extra loose-Skill frontmatter.
 - Do not invent a `.system` root or graph entry for the skill.
 - Prefer ordinary files that `read_file` and `terminal` can inspect naturally.

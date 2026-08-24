@@ -14,6 +14,7 @@ from pulsara_agent.capability import (
 )
 from pulsara_agent.capability.contracts import LocalSkillRootKind
 from pulsara_agent.capability.local_skills import SkillDiscoveryDisposition
+from pulsara_agent.capability.local_skills import discovery_diagnostics
 from pulsara_agent.capability.render import SkillProjectionOverbound
 from pulsara_agent.capability.types import (
     ActiveSkillInjection,
@@ -22,15 +23,10 @@ from pulsara_agent.capability.types import (
     SkillCatalogUnavailableReason,
     SkillSource,
 )
-from pulsara_agent.model_input.contracts import ModelInputScopeKind
 
 
 def _discover(provider: LocalSkillProvider, workspace: Path):
-    policy = provider.prepare_root_policy(
-        workspace,
-        conversation_scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
-    )
+    policy = provider.prepare_root_policy(workspace)
     result = provider.discover(policy)
     assert result.root_policy is policy
     return result
@@ -43,11 +39,7 @@ def _resolve_skill_projection(
     user_input: str,
     active_skill_names: frozenset[str] = frozenset(),
 ):
-    policy = provider.provider.prepare_root_policy(
-        workspace,
-        conversation_scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
-    )
+    policy = provider.provider.prepare_root_policy(workspace)
     discovery = provider.snapshot_projection_input(root_policy=policy)
     return provider.resolve_projection_from_snapshot(
         SkillProjectionResolveContext(
@@ -90,7 +82,7 @@ Read the diff before commenting.
     assert skill.metadata == (("owner", "platform"),)
     assert skill.body.startswith("# Review PR")
     assert not hasattr(skill, "provides_tools")
-    assert {item.code for item in discovery.diagnostics} == {
+    assert {item.code for item in discovery_diagnostics(discovery)} == {
         "skill_host_extension_ignored",
         "skill_unknown_extension_ignored",
     }
@@ -124,7 +116,7 @@ cli_usage_kind: read
         "cli_usage_kind",
     ):
         assert not hasattr(skill, field)
-    assert {item.code for item in discovery.diagnostics} == {
+    assert {item.code for item in discovery_diagnostics(discovery)} == {
         "skill_host_extension_ignored"
     }
 
@@ -146,7 +138,7 @@ auth_required: maybe
     )
     discovery = _discover(_workspace_only_provider(), tmp_path)
     assert [item.name for item in discovery.skills] == ["bad-cli"]
-    assert {item.code for item in discovery.diagnostics} == {
+    assert {item.code for item in discovery_diagnostics(discovery)} == {
         "skill_host_extension_ignored"
     }
 
@@ -226,11 +218,7 @@ def test_round9_local_skill_catalog_scans_exact_four_roots_with_global_precedenc
         user_product_skills_root=user_product,
         user_agents_skills_root=user_agents,
     )
-    policy = provider.prepare_root_policy(
-        workspace,
-        conversation_scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
-    )
+    policy = provider.prepare_root_policy(workspace)
     discovery = provider.discover(policy)
     assert tuple(item.root_kind for item in policy.roots) == tuple(LocalSkillRootKind)
     by_name = {item.name: item for item in discovery.skills}
@@ -243,7 +231,13 @@ def test_round9_local_skill_catalog_scans_exact_four_roots_with_global_precedenc
     }
     assert by_name["shared"].description == "workspace-product"
     assert "claude-only" not in by_name
-    assert sum(item.code == "skill_duplicate_name" for item in discovery.diagnostics) == 3
+    assert (
+        sum(
+            item.code == "skill_duplicate_name"
+            for item in discovery_diagnostics(discovery)
+        )
+        == 3
+    )
 
 
 def test_local_skill_provider_uses_pulsara_home_for_user_product_skills(
@@ -283,7 +277,7 @@ def test_local_skill_provider_rejects_missing_required_frontmatter_fields(
     _write_skill(tmp_path, "bad", "---\nname: bad\n---\nbody\n")
     discovery = _discover(_workspace_only_provider(), tmp_path)
     assert discovery.skills == ()
-    assert [item.code for item in discovery.diagnostics] == [
+    assert [item.code for item in discovery_diagnostics(discovery)] == [
         "skill_invalid_description"
     ]
 
@@ -338,7 +332,7 @@ def test_local_skill_provider_diagnoses_invalid_yaml_frontmatter(tmp_path) -> No
     )
     discovery = _discover(_workspace_only_provider(), tmp_path)
     assert discovery.skills == ()
-    assert [item.code for item in discovery.diagnostics] == [
+    assert [item.code for item in discovery_diagnostics(discovery)] == [
         "skill_invalid_frontmatter_yaml"
     ]
 
@@ -347,7 +341,7 @@ def test_local_skill_provider_diagnoses_non_mapping_yaml_frontmatter(tmp_path) -
     _write_skill(tmp_path, "list", "---\n- name\n- description\n---\nbody\n")
     discovery = _discover(_workspace_only_provider(), tmp_path)
     assert discovery.skills == ()
-    assert [item.code for item in discovery.diagnostics] == [
+    assert [item.code for item in discovery_diagnostics(discovery)] == [
         "skill_invalid_frontmatter_yaml"
     ]
 
@@ -363,7 +357,7 @@ def test_local_skill_provider_marks_oversized_body_not_active(tmp_path) -> None:
         tmp_path,
     )
     assert discovery.skills == ()
-    assert [item.code for item in discovery.diagnostics] == [
+    assert [item.code for item in discovery_diagnostics(discovery)] == [
         "skill_document_overbound"
     ]
 
@@ -528,9 +522,7 @@ def test_local_skill_cli_hints_do_not_generate_callable_cli_descriptors(
         user_input="$firecrawl-search",
     )
     assert not hasattr(resolved, "descriptors")
-    assert [item.name for item in resolved.active_injections] == [
-        "firecrawl-search"
-    ]
+    assert [item.name for item in resolved.active_injections] == ["firecrawl-search"]
 
 
 def test_local_skill_capability_provider_reports_active_skill_health_diagnostics(
@@ -560,17 +552,11 @@ def test_skill_health_checks_only_active_skills_and_uses_ttl(tmp_path) -> None:
     _write_skill(
         tmp_path,
         "active-skill",
-        _document(
-            "active-skill", "Active.", extra="required_binaries: [missing]\n"
-        ),
+        _document("active-skill", "Active.", extra="required_binaries: [missing]\n"),
     )
     provider = _workspace_only_capability_provider()
-    first = _resolve_skill_projection(
-        provider, tmp_path, user_input="$active-skill"
-    )
-    second = _resolve_skill_projection(
-        provider, tmp_path, user_input="$active-skill"
-    )
+    first = _resolve_skill_projection(provider, tmp_path, user_input="$active-skill")
+    second = _resolve_skill_projection(provider, tmp_path, user_input="$active-skill")
     assert first.active_skill_prompt == second.active_skill_prompt
     assert all("binary" not in item.code for item in first.diagnostics)
 
@@ -579,9 +565,7 @@ def test_skill_health_uses_supplied_terminal_path_for_binary_lookup(tmp_path) ->
     _write_skill(
         tmp_path,
         "terminal-cli",
-        _document(
-            "terminal-cli", "CLI.", extra="required_binaries: [missing]\n"
-        ),
+        _document("terminal-cli", "CLI.", extra="required_binaries: [missing]\n"),
     )
     resolved = _resolve_skill_projection(
         _workspace_only_capability_provider(),
@@ -589,7 +573,9 @@ def test_skill_health_uses_supplied_terminal_path_for_binary_lookup(tmp_path) ->
         user_input="$terminal-cli",
     )
     assert [item.name for item in resolved.active_injections] == ["terminal-cli"]
-    assert all("terminal path" not in item.message.lower() for item in resolved.diagnostics)
+    assert all(
+        "terminal path" not in item.message.lower() for item in resolved.diagnostics
+    )
 
 
 def test_local_skill_capability_provider_hides_disabled_model_catalog_but_allows_host_activation(
@@ -624,13 +610,9 @@ def test_local_skill_capability_provider_does_not_activate_oversized_skill_body(
         _document("big", "Big skill.", body="x" * 80),
     )
     provider = LocalSkillCapabilityProvider(
-        provider=LocalSkillProvider(
-            max_skill_file_bytes=64, include_user_skills=False
-        )
+        provider=LocalSkillProvider(max_skill_file_bytes=64, include_user_skills=False)
     )
-    resolved = _resolve_skill_projection(
-        provider, tmp_path, user_input="$big"
-    )
+    resolved = _resolve_skill_projection(provider, tmp_path, user_input="$big")
     assert resolved.active_injections == ()
     assert resolved.active_skill_prompt is None
 
@@ -642,10 +624,7 @@ def _document(
     body: str = "# Body\n",
     extra: str = "",
 ) -> str:
-    return (
-        f"---\nname: {name}\ndescription: {description}\n"
-        f"{extra}---\n{body}"
-    )
+    return f"---\nname: {name}\ndescription: {description}\n{extra}---\n{body}"
 
 
 def _write_skill(root: Path, name: str, content: str) -> Path:

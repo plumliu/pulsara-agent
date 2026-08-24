@@ -53,7 +53,6 @@ def _require_bounded_planner_framing(
         if total > MAXIMUM_CAPABILITY_PLANNER_FRAMING_BYTES:
             raise ValueError("capability planner framing bound exceeded")
 
-    add(skills.discovery_semantic_fingerprint)
     for registration in registry.registration_set.registrations:
         add(registration.source.source_identity_fingerprint)
         add(registration.source_contract_fingerprint)
@@ -130,9 +129,7 @@ def freeze_capability_registry_snapshot(
 
     ordered: list[FrozenCapabilitySourceSnapshot] = []
     for registration in registration_set.registrations:
-        snapshot = by_source.pop(
-            registration.source.source_identity_fingerprint, None
-        )
+        snapshot = by_source.pop(registration.source.source_identity_fingerprint, None)
         if snapshot is None:
             raise ValueError("capability registry source snapshot is missing")
         if snapshot.registration != registration:
@@ -150,8 +147,7 @@ def freeze_capability_registry_snapshot(
 
 def freeze_tool_planning_input(
     *,
-    predecessor: EmptyCapabilityEpochPredecessor
-    | InstalledCapabilityEpochPredecessor,
+    predecessor: EmptyCapabilityEpochPredecessor | InstalledCapabilityEpochPredecessor,
     native_wire: FrozenNativeToolWireEligibilitySet,
     mcp: FrozenMcpCapabilityProjectionInput,
 ) -> FrozenToolCapabilityPlanningInput:
@@ -201,9 +197,7 @@ def freeze_capability_dispatch_cut_and_views(
         if expected_versions != actual_versions:
             raise ValueError("cold native eligibility contains foreign tools")
     else:
-        retained_versions = set(
-            tools.predecessor.direct_projection_set.tool_versions
-        )
+        retained_versions = set(tools.predecessor.direct_projection_set.tool_versions)
         if actual_versions != expected_versions | retained_versions:
             raise ValueError("installed native eligibility coverage conflicts")
 
@@ -220,14 +214,11 @@ def freeze_capability_dispatch_cut_and_views(
             strict=True,
         ):
             fingerprint = frozen_tool_spec_fingerprint(spec)
-            existing = expected_spec_fingerprints.setdefault(
-                version, fingerprint
-            )
+            existing = expected_spec_fingerprints.setdefault(version, fingerprint)
             if existing != fingerprint:
                 raise ValueError("retained native Tool spec conflicts")
     if any(
-        item.canonical_tool_spec_fingerprint
-        != expected_spec_fingerprints[item.version]
+        item.canonical_tool_spec_fingerprint != expected_spec_fingerprints[item.version]
         for item in tools.native_wire.entries
     ):
         raise ValueError("native eligibility canonical Tool spec drifted")
@@ -258,13 +249,9 @@ def freeze_capability_dispatch_cut_and_views(
     skill_snapshot = tuple(
         item
         for item in registry.source_snapshots
-        if item.registration.source.kind
-        is CapabilitySourceKind.LOCAL_SKILL_CATALOG
+        if item.registration.source.kind is CapabilitySourceKind.LOCAL_SKILL_CATALOG
     )
-    if (
-        len(skill_snapshot) != 1
-        or skill_snapshot[0] is not skills.source_snapshot
-    ):
+    if len(skill_snapshot) != 1 or skill_snapshot[0] is not skills.source_snapshot:
         raise ValueError("skill projection does not exact-join registry source")
 
     parent = FrozenCapabilityDispatchCut(

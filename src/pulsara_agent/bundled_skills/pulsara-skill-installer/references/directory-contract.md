@@ -1,12 +1,13 @@
-# Pulsara Local Skill Directory Contract
+# Pulsara Loose Local Skill Directory Contract
 
-Installed workspace skills live at:
+Official destinations are:
 
 ```text
 <workspace>/.pulsara/skills/<skill-name>/SKILL.md
+${PULSARA_HOME}/skills/<skill-name>/SKILL.md
 ```
 
-A user-provided skill can start somewhere else, such as the repository root. It is not considered installed until its full directory has been copied under `.pulsara/skills`.
+The production Runtime discovers these roots together with workspace and user `.agents/skills` roots. Direct user copy, edit, rename, and deletion remain valid filesystem paths; no receipt or marker makes a Skill authoritative.
 
 ## Skill Folder Rules
 
@@ -14,6 +15,10 @@ A user-provided skill can start somewhere else, such as the repository root. It 
 - `SKILL.md` must begin with YAML frontmatter.
 - The frontmatter must include string fields named `name` and `description`.
 - Skill names use lowercase letters, digits, and hyphens only.
-- `scripts/`, `references/`, and `assets/` are copied as part of the skill.
+- Optional `license`, `compatibility`, and bounded string-to-string `metadata` remain portable data.
+- Ordinary files and directories are copied, including useful `scripts/`, `references/`, and `assets/` resources.
+- Symlinks, sockets, devices, FIFOs, bundled provenance, `__pycache__`, and `.DS_Store` are outside the official loose-copy domain.
 
-The installer refuses overwrites so installation remains easy to reason about.
+The official installer validates and copies one frozen source observation into a hidden sibling stage, verifies exact contents and portable modes, and publishes with the platform's exclusive no-replace directory rename. Existing destinations are never overwritten. The exclusive primitive guarantees final-name no-replace within the held root; it is not a sandbox or a power-loss durability promise, and same-UID replacement of the private stage or target-root namespace after the final binding cut is outside the product concurrency contract.
+
+After installation, use `pulsara skills list` for effective winners and `pulsara skills doctor` for invalid, shadowed, or unavailable candidates. Filesystem changes become model-visible only at the next legal provider safe point.
