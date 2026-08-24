@@ -53,7 +53,11 @@ from pulsara_agent.ports.live_agent_event import (
 from pulsara_agent.llm.input import MessageRole
 from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
 from tests.support.postgres import verified_postgres_provider
-from tests.support.subagents import accept_active_subagent_fixture
+from tests.support.subagents import (
+    ActiveSubagentFixtureId,
+    accept_active_subagent_fixture,
+    run_admitted_subagent_fixture,
+)
 from tests.support.round3 import (
     CallbackScriptedKernelModel,
     Round10TestSubagentRuntime,
@@ -462,7 +466,7 @@ def _lease(repository: ConversationKernelRepository) -> tuple[str, str, object]:
     return session_id, workspace_id, lease
 
 
-def _prepare_subagent_task(repository, lease) -> str:
+def _prepare_subagent_task(repository, lease) -> ActiveSubagentFixtureId:
     parent_turn_id = _name("parent-turn")
     repository.start_root_turn(
         lease.guard,
@@ -906,17 +910,13 @@ def test_round5_subagent_turn_lost_ack_confirms_exact_winner_once(
     streams.append(_text_stream("child", block_id="child-answer"))
     model = ScriptedKernelModel(streams)
 
-    result = asyncio.run(
-        _runner(
+    runner = _runner(
             repository,
             lease,
             model,
             subagent_runtime=_round10_subagent_runtime(repository, lease, task_id),
-        ).run_subagent_turn(
-            task_id=task_id,
-            objective="answer once",
         )
-    )
+    result = asyncio.run(run_admitted_subagent_fixture(runner, task_id))
 
     assert result.final_text == "child"
     assert result.model_call_count == 64
@@ -935,17 +935,13 @@ def test_round5_subagent_lost_ack_joins_transient_confirmation_failures(
     task_id = _prepare_subagent_task(repository, lease)
     model = ScriptedKernelModel([_text_stream("child", block_id="child-answer")])
 
-    result = asyncio.run(
-        _runner(
+    runner = _runner(
             repository,
             lease,
             model,
             subagent_runtime=_round10_subagent_runtime(repository, lease, task_id),
-        ).run_subagent_turn(
-            task_id=task_id,
-            objective="answer once",
         )
-    )
+    result = asyncio.run(run_admitted_subagent_fixture(runner, task_id))
 
     assert result.final_text == "child"
     assert repository.calls == 1
@@ -968,6 +964,10 @@ def test_round5_subagent_admission_exact_joins_immutable_objective(
         entry_id=_name("mismatched-entry"),
         context_binding_revision_id=_name("mismatched-revision"),
         permission_snapshot_id=_name("mismatched-permission"),
+        task_start_event_id=task_id.launch.task_start.event_id,
+        expected_parent_permission_snapshot=(
+            task_id.launch.parent_permission_snapshot
+        ),
         content=InlineContent.from_bytes(b"different objective"),
         occurred_at=occurred_at,
         actor_id="subagent-manager",
@@ -994,6 +994,10 @@ def test_round5_subagent_admission_exact_joins_immutable_objective(
         entry_id=_name("accepted-entry"),
         context_binding_revision_id=_name("accepted-revision"),
         permission_snapshot_id=_name("accepted-permission"),
+        task_start_event_id=task_id.launch.task_start.event_id,
+        expected_parent_permission_snapshot=(
+            task_id.launch.parent_permission_snapshot
+        ),
         content=InlineContent.from_bytes(b"answer once"),
         occurred_at=datetime.now(timezone.utc),
         actor_id="subagent-manager",
@@ -1057,15 +1061,13 @@ def test_round5_subagent_turn_admission_none_conflict_matrix(
     )
 
     if should_open:
-        result = asyncio.run(
-            runner.run_subagent_turn(task_id=task_id, objective="answer once")
-        )
+        result = asyncio.run(run_admitted_subagent_fixture(runner, task_id))
         assert result.final_text == "child"
         assert len(model.requests) == 1
     else:
         with pytest.raises(Exception, match="conflicting winner"):
             asyncio.run(
-                runner.run_subagent_turn(task_id=task_id, objective="answer once")
+                run_admitted_subagent_fixture(runner, task_id)
             )
         assert model.requests == []
     assert repository.calls == expected_calls
@@ -1088,7 +1090,7 @@ def test_round5_cancelled_subagent_admission_none_never_reissues(
 
     async def scenario() -> None:
         operation = asyncio.create_task(
-            runner.run_subagent_turn(task_id=task_id, objective="answer once")
+            run_admitted_subagent_fixture(runner, task_id)
         )
         assert await asyncio.to_thread(repository.started.wait, 5)
         operation.cancel()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import Mapping, Protocol
 
 from pulsara_agent.conversation_kernel.cold_epoch import SubagentInitialSeed
@@ -10,6 +11,7 @@ from pulsara_agent.conversation_kernel.subagents.contracts import (
     SubagentProfileKind,
 )
 from pulsara_agent.conversation_kernel.tool_contracts import KernelToolResult
+from pulsara_agent.primitives.run_permission import FrozenRunPermissionSnapshot
 from pulsara_agent.model_input.contracts import (
     ContextSourceAbsentFact,
     ContextSourceCandidate,
@@ -36,8 +38,14 @@ class SubagentRuntimePort(Protocol):
     async def consume_mailbox_safe_point(self, task_id: str) -> bool: ...
 
     async def prepare_inferred_completion(
-        self, *, task_id: str, entry_id: str, public_text: str
-    ) -> tuple[object, FrozenSubagentResultPublicFact] | None: ...
+        self,
+        *,
+        task_id: str,
+        entry_id: str,
+        public_text: str,
+        model_id: str,
+        permission_snapshot: FrozenRunPermissionSnapshot,
+    ) -> "PreparedInferredSubagentCompletion | None": ...
 
     async def prepare_explicit_completion(
         self,
@@ -45,9 +53,29 @@ class SubagentRuntimePort(Protocol):
         task_id: str,
         result_entry_id: str,
         arguments: Mapping[str, object],
-    ) -> tuple[object, FrozenSubagentResultPublicFact, KernelToolResult] | None: ...
+        last_assistant_message: str | None,
+        model_id: str,
+        permission_snapshot: FrozenRunPermissionSnapshot,
+    ) -> "PreparedExplicitSubagentCompletion | None": ...
 
     async def finish_completion(self, permit: object, *, committed: bool) -> None: ...
 
 
-__all__ = ["SubagentRuntimePort"]
+@dataclass(frozen=True, slots=True)
+class PreparedInferredSubagentCompletion:
+    permit: object = field(repr=False, compare=False)
+    result: FrozenSubagentResultPublicFact | None
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedExplicitSubagentCompletion:
+    permit: object = field(repr=False, compare=False)
+    result: FrozenSubagentResultPublicFact | None
+    tool_result: KernelToolResult
+
+
+__all__ = [
+    "PreparedExplicitSubagentCompletion",
+    "PreparedInferredSubagentCompletion",
+    "SubagentRuntimePort",
+]

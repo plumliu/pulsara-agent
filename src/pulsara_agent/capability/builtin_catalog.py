@@ -97,6 +97,7 @@ _LONG_HORIZON_POLICY_KIND_BY_NAME = {
     "inspect_new_mcp_tool": BuiltinToolLongHorizonPolicyKind.EVIDENCE_HYDRATION,
     "use_new_mcp_tool": BuiltinToolLongHorizonPolicyKind.EVIDENCE_ACQUISITION,
     "read_file": BuiltinToolLongHorizonPolicyKind.EVIDENCE_ACQUISITION,
+    "reload_hooks": BuiltinToolLongHorizonPolicyKind.PROCESS_CONTROL,
     "read_mcp_resource": BuiltinToolLongHorizonPolicyKind.EVIDENCE_ACQUISITION,
     "remember": BuiltinToolLongHorizonPolicyKind.SYNTHESIS_MUTATION,
     "report_agent_result": BuiltinToolLongHorizonPolicyKind.SYNTHESIS_MUTATION,
@@ -525,6 +526,22 @@ _SUBAGENT_CONTEXT_TURNS_DESCRIPTION = (
 
 
 _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
+    "reload_hooks": _descriptor(
+        name="reload_hooks",
+        description=(
+            "Reload this running Host's USER and exact-workspace Hook definitions "
+            "and trust dispositions for future lifecycle events. This does not edit "
+            "or trust configuration, does not rerun prior Hooks, and does not change "
+            "the installed SYSTEM, tool definitions, or earlier messages. It is "
+            "available only in the ROOT conversation while bypass-permissions mode "
+            "is active."
+        ),
+        input_schema=object_schema(properties={}, required=[]),
+        is_read_only=True,
+        is_concurrency_safe=False,
+        permission_category="hook_control",
+        artifact_mode=ToolArtifactMode.NEVER,
+    ),
     "artifact_read": _descriptor(
         name="artifact_read",
         description=(
@@ -1872,6 +1889,7 @@ class BuiltinToolBindingKind(StrEnum):
     TODO_LOCAL_STATE = "todo_local_state"
     SUBAGENT_CONTROL = "subagent_control"
     MCP_CATALOG = "mcp_catalog"
+    HOOK_CONTROL = "hook_control"
 
 
 class BuiltinToolAvailabilityKind(StrEnum):
@@ -2135,6 +2153,13 @@ def _catalog_shape(name: str):
             both,
             "artifact",
         )
+    if name == "reload_hooks":
+        return (
+            BuiltinToolBindingKind.HOOK_CONTROL,
+            BuiltinToolAvailabilityKind.ALWAYS,
+            (ToolInvocationOwnerKind.HOST_MAIN_RUN,),
+            "hook_control",
+        )
     if name in {
         "get_mcp_prompt",
         "list_mcp_prompts",
@@ -2290,6 +2315,7 @@ def _recovery_contract(name: str) -> BuiltinToolRecoveryContract:
         "inspect_new_mcp_tool",
         "read_file",
         "read_mcp_resource",
+        "reload_hooks",
         "search_files",
         "todo",
     }:

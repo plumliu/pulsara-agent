@@ -38,8 +38,17 @@ from pulsara_agent.conversation_kernel.repository import (
 from pulsara_agent.conversation_kernel.tool_surface import (
     ProcessLocalToolSurfaceBorrow,
 )
+from pulsara_agent.conversation_kernel.tool_contracts import (
+    AcceptedCanonicalToolResultSettlement,
+    PreparedResolvedToolInvocation,
+)
 from pulsara_agent.conversation_kernel.workspace import SessionWorkspaceResolver
-from pulsara_agent.model_input.contracts import FrozenCanonicalCompileSnapshot
+from pulsara_agent.model_input.contracts import (
+    FrozenCanonicalCompileSnapshot,
+    FrozenProviderInputItem,
+    FrozenProviderInputItemKind,
+)
+from pulsara_agent.model_input.lowering import project_tool_result_public_value
 from pulsara_agent.primitives.context import canonical_json_bytes, thaw_json
 from pulsara_agent.primitives.plan_workflow import (
     PlanInteractionBinding,
@@ -49,6 +58,20 @@ from pulsara_agent.primitives.plan_workflow import (
     extract_plan_question,
 )
 from pulsara_agent.ports.tool_execution import thaw_tool_json_object
+from pulsara_agent.hooks.context import HookContextOwner
+from pulsara_agent.hooks.contracts import (
+    FrozenHookDefinitionView,
+    GateDecision,
+    HookDispatchEnvelope,
+    HookDispatchScopeRef,
+    PostToolRef,
+    PostToolUseInput,
+    PreToolRef,
+    PreToolUseInput,
+    external_permission_mode,
+)
+from pulsara_agent.hooks.dispatcher import KernelHookDispatcher
+from pulsara_agent.hooks.matcher import event_matcher_subject, tool_matcher_subject
 
 
 @dataclass(frozen=True, slots=True)
@@ -305,6 +328,9 @@ class PlanToolBatchCoordinator:
         automatic_continuation: AutomaticPlanContinuationPort | None,
         workspace_resolver: SessionWorkspaceResolver,
         deadline_factory: KernelExecutionDeadlineFactory,
+        hook_dispatcher: KernelHookDispatcher | None = None,
+        hook_context_owner: HookContextOwner | None = None,
+        hook_scope: HookDispatchScopeRef | None = None,
     ) -> None:
         self._repository = repository
         self._writer_lease = writer_lease
@@ -313,6 +339,136 @@ class PlanToolBatchCoordinator:
         self._automatic_plan_continuation = automatic_continuation
         self._workspace_resolver = workspace_resolver
         self._deadlines = deadline_factory
+        self._hooks = hook_dispatcher
+        self._hook_context = hook_context_owner
+        self._hook_scope = hook_scope
+
+    async def _dispatch_pre(
+        self,
+        *,
+        view: FrozenHookDefinitionView,
+        prepared: PreparedResolvedToolInvocation,
+        turn_id: str,
+        assistant_entry_id: str,
+        tool_call_id: str,
+        model: str,
+        cwd: str,
+        canonical_facts: FrozenCanonicalCompileSnapshot,
+        deadline: float,
+    ):
+        if self._hooks is None or self._hook_scope is None:
+            raise RuntimeError("Plan Hook dispatch is not composed")
+        subject = tool_matcher_subject(prepared.requested_tool_name)
+        public_input = PreToolUseInput(
+            session_id=self._writer_lease.guard.session_id,
+            cwd=cwd,
+            model=model,
+            turn_id=turn_id,
+            tool_name=subject.external_primary,
+            tool_use_id=tool_call_id,
+            tool_input=thaw_json(prepared.resolved_arguments),
+            permission_mode=external_permission_mode(
+                canonical_facts.run_permission_snapshot.effective_mode.value,
+                active_plan_workflow=(
+                    canonical_facts.run_permission_snapshot.plan_workflow_id
+                    is not None
+                ),
+            ),
+        )
+        causal_ref = PreToolRef(
+            turn_id,
+            assistant_entry_id,
+            tool_call_id,
+            prepared.canonical_tool_name,
+        )
+        outcome = await self._hooks.dispatch(
+            HookDispatchEnvelope(
+                view,
+                self._hook_scope,
+                public_input,
+                causal_ref,
+                deadline,
+            ),
+            matcher_subject=event_matcher_subject(
+                public_input.event_type, tool=subject
+            ),
+        )
+        return outcome, causal_ref
+
+    async def _dispatch_post(
+        self,
+        *,
+        settlement: AcceptedCanonicalToolResultSettlement,
+        model: str,
+        cwd: str,
+        canonical_facts: FrozenCanonicalCompileSnapshot,
+        continuity_epoch_nonce: object,
+        context_allowed: bool,
+    ) -> None:
+        if self._hooks is None or self._hook_scope is None:
+            return
+        view = self._hooks.capture_view()
+        subject = tool_matcher_subject(settlement.tool_name)
+        item = FrozenProviderInputItem(
+            item_kind=FrozenProviderInputItemKind.TOOL_RESULT,
+            source_entry_id=settlement.result_entry_id,
+            source_entry_sequence=settlement.accepted_entry_sequence,
+            source_turn_id=settlement.turn_id,
+            text=settlement.public_projection.canonical_body,
+            tool_call_id=settlement.tool_call_id,
+            tool_request_entry_id=settlement.assistant_entry_id,
+            tool_result_context=settlement.public_projection.metadata,
+            tool_result_body_text=settlement.public_projection.canonical_body,
+            tool_result_delivery=settlement.public_projection.delivery,
+        )
+        projected = project_tool_result_public_value(
+            item, artifact_read_available=True
+        )
+        causal_ref = PostToolRef(
+            settlement.turn_id,
+            settlement.tool_call_id,
+            settlement.result_id,
+            settlement.result_entry_id,
+            settlement.result_state,
+            continuity_epoch_nonce,
+        )
+        public_input = PostToolUseInput(
+            session_id=self._writer_lease.guard.session_id,
+            cwd=cwd,
+            model=model,
+            turn_id=settlement.turn_id,
+            tool_name=subject.external_primary,
+            tool_use_id=settlement.tool_call_id,
+            tool_input=thaw_json(settlement.public_arguments),
+            tool_response=projected.value,
+            permission_mode=external_permission_mode(
+                canonical_facts.run_permission_snapshot.effective_mode.value,
+                active_plan_workflow=(
+                    canonical_facts.run_permission_snapshot.plan_workflow_id
+                    is not None
+                ),
+            ),
+        )
+        outcome = await self._hooks.dispatch(
+            HookDispatchEnvelope(
+                view,
+                self._hook_scope,
+                public_input,
+                causal_ref,
+                self._deadlines.deadline(
+                    KernelWatchdogOwner.NONTERMINAL_TOOL_INVOCATION
+                ),
+            ),
+            matcher_subject=event_matcher_subject(
+                public_input.event_type, tool=subject
+            ),
+        )
+        if context_allowed and self._hook_context is not None:
+            self._hook_context.accept_sync(
+                scope=self._hook_scope,
+                causal_ref=causal_ref,
+                entries=outcome.context_entries,
+            )
 
     def _canonical_deadline(self) -> float:
         return self._deadlines.deadline(KernelWatchdogOwner.FOREGROUND_CANONICAL)
@@ -331,6 +487,9 @@ class PlanToolBatchCoordinator:
         canonical_facts: FrozenCanonicalCompileSnapshot,
         surface_borrow: ProcessLocalToolSurfaceBorrow,
         deadline: float,
+        hook_model: str = "pulsara-model",
+        hook_cwd: str = ".",
+        continuity_epoch_nonce: object | None = None,
     ) -> AcceptedPlanToolBatch:
         selected = calls[selected_call_index]
         kind = {
@@ -469,6 +628,38 @@ class PlanToolBatchCoordinator:
                 and self._automatic_plan_continuation is None
             ):
                 disposition = PlanToolBatchDisposition.TOOL_UNAVAILABLE
+        pre_context_reservation = None
+        if (
+            disposition is PlanToolBatchDisposition.APPLY
+            and self._hooks is not None
+            and self._hook_scope is not None
+        ):
+            selected_prepared = PreparedResolvedToolInvocation(
+                selected.tool_name,
+                selected.tool_name,
+                selected.tool_name,
+                None,
+                selected.arguments,
+            )
+            pre_outcome, pre_causal_ref = await self._dispatch_pre(
+                view=self._hooks.capture_view(),
+                prepared=selected_prepared,
+                turn_id=canonical_facts.canonical_input.identity.turn_id,
+                assistant_entry_id=assistant_entry_id,
+                tool_call_id=selected.tool_call_id,
+                model=hook_model,
+                cwd=hook_cwd,
+                canonical_facts=canonical_facts,
+                deadline=deadline,
+            )
+            if self._hook_context is not None:
+                pre_context_reservation = self._hook_context.prepare_sync(
+                    scope=self._hook_scope,
+                    causal_ref=pre_causal_ref,
+                    entries=pre_outcome.context_entries,
+                )
+            if pre_outcome.decision is GateDecision.BLOCK:
+                disposition = PlanToolBatchDisposition.HOOK_BLOCKED
         apply_control = disposition is PlanToolBatchDisposition.APPLY
         interaction_id = provisional_interaction_id if apply_control else None
         continuation_turn_id = (
@@ -502,6 +693,7 @@ class PlanToolBatchCoordinator:
                     block_id=call.block_id,
                     tool_call_id=call.tool_call_id,
                     tool_name=call.tool_name,
+                    arguments=call.arguments,
                     result_id=(
                         None
                         if selected_question
@@ -582,12 +774,63 @@ class PlanToolBatchCoordinator:
                     if outcome is None:
                         raise
             if waiter is not None:
+                context_allowed = not outcome.origin_turn_completed
+                if pre_context_reservation is not None:
+                    if context_allowed:
+                        pre_context_reservation.commit()
+                    else:
+                        pre_context_reservation.retire()
+                if self._hooks is not None:
+                    if continuity_epoch_nonce is None:
+                        raise RuntimeError("Plan PostTool lost continuity epoch")
+                    for settlement in outcome.tool_result_settlements:
+                        await self._dispatch_post(
+                            settlement=settlement,
+                            model=hook_model,
+                            cwd=hook_cwd,
+                            canonical_facts=canonical_facts,
+                            continuity_epoch_nonce=continuity_epoch_nonce,
+                            context_allowed=context_allowed,
+                        )
                 if outcome.question is None:
                     raise RuntimeError("accepted Plan question lacks typed content")
                 await self._plan_interactions.publish_open(waiter, outcome.question)
-                await self._plan_interactions.wait(waiter)
+                resolution = await self._plan_interactions.wait(waiter)
+                if resolution.tool_result_settlement is None:
+                    raise RuntimeError(
+                        "answered Plan question lost its ToolResult settlement"
+                    )
+                await self._dispatch_post(
+                    settlement=resolution.tool_result_settlement,
+                    model=hook_model,
+                    cwd=hook_cwd,
+                    canonical_facts=canonical_facts,
+                    continuity_epoch_nonce=continuity_epoch_nonce,
+                    context_allowed=True,
+                )
+            else:
+                context_allowed = not outcome.origin_turn_completed
+                if pre_context_reservation is not None:
+                    if context_allowed:
+                        pre_context_reservation.commit()
+                    else:
+                        pre_context_reservation.retire()
+                if self._hooks is not None:
+                    if continuity_epoch_nonce is None:
+                        raise RuntimeError("Plan PostTool lost continuity epoch")
+                    for settlement in outcome.tool_result_settlements:
+                        await self._dispatch_post(
+                            settlement=settlement,
+                            model=hook_model,
+                            cwd=hook_cwd,
+                            canonical_facts=canonical_facts,
+                            continuity_epoch_nonce=continuity_epoch_nonce,
+                            context_allowed=context_allowed,
+                        )
             return outcome
         except BaseException as error:
+            if pre_context_reservation is not None:
+                pre_context_reservation.retire()
             if waiter is not None and self._plan_interactions is not None:
                 await self._plan_interactions.abandon(waiter, error)
             raise

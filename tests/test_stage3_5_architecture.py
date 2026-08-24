@@ -199,6 +199,10 @@ def test_stage3_5_process_local_task_sites_are_closed() -> None:
         "src/pulsara_agent/conversation_kernel/tool_execution.py",
         "src/pulsara_agent/conversation_kernel/tool_runtime.py",
         "src/pulsara_agent/conversation_kernel/turn_admission.py",
+        # Round 9.2 owns bounded physical command attempts and the dispatch
+        # aggregation tasks inside the independent process-local Hook core.
+        "src/pulsara_agent/hooks/dispatcher.py",
+        "src/pulsara_agent/hooks/executor.py",
     }
     observed: set[str] = set()
     for path in _production_python():

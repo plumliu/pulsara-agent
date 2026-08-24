@@ -9,14 +9,16 @@ from __future__ import annotations
 
 import asyncio
 import base64
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field as dataclass_field, replace
 from datetime import datetime, timezone
 import hmac
 import json
 from hashlib import sha256
 import math
+from pathlib import Path
 import re
 import secrets
+from time import monotonic
 from typing import Callable, Mapping
 
 from psycopg import InterfaceError, OperationalError
@@ -60,6 +62,7 @@ from pulsara_agent.model_input.contracts import (
     ModelInputScopeKind,
 )
 from pulsara_agent.conversation_kernel.runner import (
+    ChildCompactionContinuationBlocked,
     ConversationKernelRunner,
     KernelRunResult,
 )
@@ -84,6 +87,7 @@ from pulsara_agent.model_input.provider_replay import (
 )
 from pulsara_agent.primitives.context import canonical_json_bytes
 from pulsara_agent.primitives.permission import PermissionMode
+from pulsara_agent.primitives.run_permission import FrozenRunPermissionSnapshot
 from pulsara_agent.conversation_kernel.subagents.contracts import (
     FrozenDependencyResultContext,
     FrozenSubagentParentContextCallSubject,
@@ -98,6 +102,7 @@ from pulsara_agent.conversation_kernel.subagents.contracts import (
     PreparedInterAgentMailboxItem,
     PreparedSubagentTaskBatchAdmission,
     PreparedSubagentTaskDraft,
+    PreparedSubagentLaunch,
     SubagentBatchConfirmationKind,
     SubagentContextMode,
     SubagentProfileKind,
@@ -116,6 +121,33 @@ from pulsara_agent.conversation_kernel.subagents.contracts import (
     parent_context_selection_identity_digest,
     parent_context_source_identity_digest,
 )
+from pulsara_agent.conversation_kernel.subagents.launch import (
+    SubagentLaunchPreparationPort,
+)
+from pulsara_agent.conversation_kernel.subagents.runtime_port import (
+    PreparedExplicitSubagentCompletion,
+    PreparedInferredSubagentCompletion,
+)
+from pulsara_agent.hooks.context import (
+    HookContextOwner,
+    PendingHookContextReservation,
+)
+from pulsara_agent.hooks.contracts import (
+    ContinuationDecision,
+    ContinuationOutcome,
+    ContextOutcome,
+    HookDispatchEnvelope,
+    HookDispatchScopeRef,
+    HookContextEntry,
+    HookScopeKind,
+    SubagentStartInput,
+    SubagentStartRef,
+    SubagentStopInput,
+    SubagentStopRef,
+    external_permission_mode,
+)
+from pulsara_agent.hooks.dispatcher import KernelHookDispatcher
+from pulsara_agent.hooks.matcher import event_matcher_subject
 
 
 SUBAGENT_TOOL_NAMES = frozenset(
@@ -153,8 +185,11 @@ class _LiveTask:
     parent_turn_id: str
     task: asyncio.Task[KernelRunResult]
     cancellation_intent: ActiveTurnCancellationIntent
+    launch: PreparedSubagentLaunch
+    hook_scope: HookDispatchScopeRef | None
     status: str = "ACTIVE"
     cancellation_reason: str | None = None
+    completion_continuation_used: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,9 +204,26 @@ class _TaskStartMaterial:
     dependency_context: FrozenDependencyResultContext | None = None
 
 
+@dataclass(slots=True)
+class _SubagentLaunchPermit:
+    material: _TaskStartMaterial
+    cancellation_signal: asyncio.Event = dataclass_field(default_factory=asyncio.Event)
+    settled: asyncio.Event = dataclass_field(default_factory=asyncio.Event)
+    stop_claimed: bool = False
+    launching: bool = False
+    start_committed: bool = False
+    cancellation_reason: str | None = None
+
+
 @dataclass(frozen=True, slots=True)
 class _CompletionPermit:
     task_id: str
+    continuation_requested: bool
+    causal_ref: SubagentStopRef
+    continuation_source: HookContextEntry | None = dataclass_field(
+        default=None, repr=False
+    )
+    continuation_reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,9 +249,14 @@ class KernelSubagentManager:
         io_owner: KernelSessionIO,
         live_bus: LiveAgentEventBus,
         todo_owner: TodoRunStateOwner,
+        launch_preparation: SubagentLaunchPreparationPort,
+        terminal_cwd: Callable[[], Path],
         todo_close_projector: Callable[[FrozenTodoCloseProjection | None], None]
         | None = None,
         deadline_factory: KernelExecutionDeadlineFactory | None = None,
+        hook_dispatcher: KernelHookDispatcher | None = None,
+        hook_context_owner: HookContextOwner | None = None,
+        hook_root_scope: HookDispatchScopeRef | None = None,
     ) -> None:
         self._repository = repository
         self._guard = guard
@@ -207,11 +264,15 @@ class KernelSubagentManager:
         self._io = io_owner
         self._live_bus = live_bus
         self._todo_owner = todo_owner
+        self._launch_preparation = launch_preparation
+        self._terminal_cwd = terminal_cwd
         self._todo_close_projector = todo_close_projector or (lambda _value: None)
         self._deadlines = deadline_factory or KernelExecutionDeadlineFactory()
-        self._runner_factory: Callable[[], ConversationKernelRunner] | None = None
+        self._runner_factory: (
+            Callable[[HookDispatchScopeRef | None], ConversationKernelRunner] | None
+        ) = None
         self._tasks: dict[str, _LiveTask] = {}
-        self._spawning: set[str] = set()
+        self._launch_permits: dict[str, _SubagentLaunchPermit] = {}
         self._start_materials: dict[str, _TaskStartMaterial] = {}
         self._mailboxes: dict[str, list[PreparedInterAgentMailboxItem]] = {}
         self._mailbox_ordinals: dict[str, int] = {}
@@ -224,6 +285,13 @@ class KernelSubagentManager:
         self._state_revision = 0
         self._closed = False
         self._list_cursor_secret = secrets.token_bytes(32)
+        self._hook_dispatcher = hook_dispatcher
+        self._hook_context_owner = hook_context_owner
+        self._hook_root_scope = hook_root_scope
+        if (hook_dispatcher is None) != (hook_context_owner is None) or (
+            hook_dispatcher is None
+        ) != (hook_root_scope is None):
+            raise ValueError("subagent Hook composition must be complete or absent")
 
     def _canonical_deadline(self) -> float:
         return self._deadlines.deadline(KernelWatchdogOwner.FOREGROUND_CANONICAL)
@@ -278,7 +346,8 @@ class KernelSubagentManager:
         )
 
     def bind_runner_factory(
-        self, factory: Callable[[], ConversationKernelRunner]
+        self,
+        factory: Callable[[HookDispatchScopeRef | None], ConversationKernelRunner],
     ) -> None:
         if self._runner_factory is not None:
             raise RuntimeError("subagent runner factory is already bound")
@@ -864,7 +933,7 @@ class KernelSubagentManager:
                 # blocks the next accepted task merely because its coroutine
                 # has not returned from final settlement yet.
                 active = sum(item.status == "ACTIVE" for item in self._tasks.values())
-                reserved = len(self._spawning)
+                reserved = len(self._launch_permits)
                 available = MAXIMUM_LIVE_SUBAGENTS - active - reserved
                 if available <= 0:
                     return
@@ -881,11 +950,14 @@ class KernelSubagentManager:
                 task_id = str(row["id"])
                 async with self._lock:
                     material = self._start_materials.get(task_id)
-                    if material is None or task_id in self._spawning:
+                    if material is None or task_id in self._launch_permits:
                         continue
-                    self._spawning.add(task_id)
-                changed = False
-                start_committed = False
+                    permit = _SubagentLaunchPermit(material)
+                    self._launch_permits[task_id] = permit
+                admission_full = False
+                live_installed = False
+                hook_scope: HookDispatchScopeRef | None = None
+                hook_reservation: PendingHookContextReservation | None = None
                 try:
                     dependencies = ()
                     if material.dependency_task_ids:
@@ -910,7 +982,12 @@ class KernelSubagentManager:
                     )
                     material = replace(material, dependency_context=dependency_context)
                     async with self._lock:
+                        if self._launch_permits.get(task_id) is not permit:
+                            continue
+                        permit.material = material
                         self._start_materials[task_id] = material
+                        if self._closed or permit.stop_claimed:
+                            continue
                     candidate = build_subagent_task_start(
                         session_id=self._guard.session_id,
                         workspace_id=str(row["workspace_id"]),
@@ -952,24 +1029,147 @@ class KernelSubagentManager:
                                 continue
                             confirmation_kind = confirmation.kind
                         if confirmation_kind is SubagentBatchConfirmationKind.FULL:
-                            start_committed = True
+                            permit.start_committed = True
                             break
                         if confirmation_kind is SubagentBatchConfirmationKind.CONFLICT:
                             raise ConversationKernelConflict(
                                 "subagent start has a conflicting canonical winner"
                             )
                         async with self._lock:
-                            if self._closed:
+                            if self._closed or permit.stop_claimed:
                                 return
                         await asyncio.sleep(0)
                     async with self._lock:
-                        closed = self._closed
-                    if not closed:
-                        await self._install_live_task(material)
-                        started_any = True
+                        if self._closed or permit.stop_claimed:
+                            continue
+                    launch = await self._launch_preparation.prepare_launch(candidate)
+                    if launch.task_start != candidate:
+                        raise ConversationKernelConflict(
+                            "subagent launch port returned another task start"
+                        )
+                    hook_scope = self._register_child_hook_scope(task_id)
+                    if (
+                        self._hook_dispatcher is not None
+                        and self._hook_context_owner is not None
+                        and hook_scope is not None
+                    ):
+                        public_input = SubagentStartInput(
+                            session_id=self._guard.session_id,
+                            cwd=str(self._terminal_cwd()),
+                            model=launch.configured_model_identity,
+                            turn_id=launch.child_turn_id,
+                            agent_id=task_id,
+                            agent_type=material.profile.value,
+                            permission_mode=external_permission_mode(
+                                launch.parent_permission_snapshot.effective_mode.value,
+                                active_plan_workflow=(
+                                    launch.parent_permission_snapshot.plan_workflow_id
+                                    is not None
+                                ),
+                            ),
+                        )
+                        causal_ref = SubagentStartRef(
+                            candidate.event_id,
+                            task_id,
+                            launch.child_turn_id,
+                        )
+                        outcome = await self._hook_dispatcher.dispatch(
+                            HookDispatchEnvelope(
+                                self._hook_dispatcher.capture_view(),
+                                hook_scope,
+                                public_input,
+                                causal_ref,
+                                self._canonical_deadline(),
+                                permit.cancellation_signal,
+                            ),
+                            matcher_subject=event_matcher_subject(
+                                public_input.event_type,
+                                agent_type=material.profile.value,
+                            ),
+                        )
+                        if not isinstance(outcome, ContextOutcome):
+                            raise RuntimeError(
+                                "SubagentStart returned another outcome family"
+                            )
+                        hook_reservation = self._hook_context_owner.prepare_sync(
+                            scope=hook_scope,
+                            causal_ref=causal_ref,
+                            entries=outcome.context_entries,
+                        )
+                    async with self._lock:
+                        if (
+                            self._closed
+                            or permit.stop_claimed
+                            or self._launch_permits.get(task_id) is not permit
+                            or permit.material != material
+                        ):
+                            continue
+                        permit.launching = True
+                    runner_factory = self._runner_factory
+                    if runner_factory is None:
+                        raise RuntimeError("subagent runner factory is not bound")
+                    runner = runner_factory(hook_scope)
+                    intent = ActiveTurnCancellationIntent(
+                        turn_id=launch.child_turn_id,
+                        scope_kind=ModelInputScopeKind.SUBAGENT_TASK,
+                        scope_subagent_task_id=task_id,
+                    )
+                    await runner.admit_subagent_turn(
+                        launch=launch,
+                        cancellation_intent=intent,
+                    )
+                    admission_full = True
+                    if hook_reservation is not None:
+                        hook_reservation.commit()
+                    live_installed = await self._install_live_task(
+                        material=material,
+                        launch=launch,
+                        runner=runner,
+                        intent=intent,
+                        hook_scope=hook_scope,
+                        permit=permit,
+                    )
+                    if not live_installed:
+                        raise ConversationKernelConflict(
+                            "admitted child lost its exact launch permit"
+                        )
+                    started_any = True
                 except StaleHostWriter:
                     return
+                except asyncio.CancelledError:
+                    if admission_full and not live_installed:
+                        await asyncio.shield(
+                            self._settle_cancelled_child(
+                                task_id=task_id,
+                                turn_id=stable_subagent_turn_id(
+                                    session_id=self._guard.session_id,
+                                    task_id=task_id,
+                                ),
+                                task_status="INTERRUPTED",
+                                task_reason="HOST_CLOSING",
+                                turn_reason="SESSION_CLOSED",
+                            )
+                        )
+                    raise
                 except BaseException as exc:
+                    if permit.cancellation_reason is not None:
+                        if admission_full and not live_installed:
+                            explicit = permit.cancellation_reason == "USER_CANCELLED"
+                            await self._settle_cancelled_child(
+                                task_id=task_id,
+                                turn_id=stable_subagent_turn_id(
+                                    session_id=self._guard.session_id,
+                                    task_id=task_id,
+                                ),
+                                task_status=(
+                                    "CANCELLED" if explicit else "INTERRUPTED"
+                                ),
+                                task_reason=permit.cancellation_reason,
+                                turn_reason=(
+                                    "USER_STOPPED" if explicit else "SESSION_CLOSED"
+                                ),
+                            )
+                        continue
                     code = (
                         "DEPENDENCY_RESULT_INVARIANT"
                         if isinstance(exc, (TypeError, ValueError))
@@ -977,12 +1177,24 @@ class KernelSubagentManager:
                         else f"CHILD_START_{type(exc).__name__.upper()}"
                     )
                     try:
-                        await self._settle_task_terminal_exact(
-                            task_id,
-                            SubagentTaskStatus.FAILED,
-                            code,
-                            require_absent_turn=not start_committed,
-                        )
+                        if admission_full:
+                            await self._settle_cancelled_child(
+                                task_id=task_id,
+                                turn_id=stable_subagent_turn_id(
+                                    session_id=self._guard.session_id,
+                                    task_id=task_id,
+                                ),
+                                task_status="FAILED",
+                                task_reason=code,
+                                turn_reason=code,
+                            )
+                        else:
+                            await self._settle_task_terminal_exact(
+                                task_id,
+                                SubagentTaskStatus.FAILED,
+                                code,
+                                require_absent_turn=True,
+                            )
                         await self._settle_dependency_frontier(
                             task_id, schedule_after=False
                         )
@@ -993,44 +1205,95 @@ class KernelSubagentManager:
                         task_id, material.parent_turn_id, "FAILED", code
                     )
                 finally:
+                    if hook_reservation is not None and not live_installed:
+                        hook_reservation.retire()
+                    if hook_scope is not None and not live_installed:
+                        assert self._hook_context_owner is not None
+                        self._hook_context_owner.retire_scope(hook_scope)
                     async with self._lock:
-                        self._spawning.discard(task_id)
+                        if self._launch_permits.get(task_id) is permit:
+                            self._launch_permits.pop(task_id, None)
+                        permit.settled.set()
+                        self._notify_state_changed_locked()
             if not started_any:
                 return
 
-    async def _install_live_task(self, material: _TaskStartMaterial) -> None:
-        intent = ActiveTurnCancellationIntent(
-            turn_id=stable_subagent_turn_id(
-                session_id=self._guard.session_id, task_id=material.task_id
-            ),
-            scope_kind=ModelInputScopeKind.SUBAGENT_TASK,
-            scope_subagent_task_id=material.task_id,
+    def _register_child_hook_scope(self, task_id: str) -> HookDispatchScopeRef | None:
+        root = self._hook_root_scope
+        owner = self._hook_context_owner
+        if root is None or owner is None:
+            return None
+        scope = HookDispatchScopeRef(
+            root.host_session_owner,
+            root.workspace_owner,
+            HookScopeKind.CHILD,
+            task_id,
         )
-        task = asyncio.create_task(
-            self._run_child(material.task_id, material.objective, intent),
-            name=f"kernel-subagent:{material.task_id}",
-        )
-        task.add_done_callback(
-            lambda completed, task_id=material.task_id: self._retire_live_task(
-                task_id, completed
-            )
-        )
+        owner.register_scope(scope)
+        return scope
+
+    async def _install_live_task(
+        self,
+        *,
+        material: _TaskStartMaterial,
+        launch: PreparedSubagentLaunch,
+        runner: ConversationKernelRunner,
+        intent: ActiveTurnCancellationIntent,
+        hook_scope: HookDispatchScopeRef | None,
+        permit: _SubagentLaunchPermit,
+    ) -> bool:
         async with self._state_changed:
-            if self._closed:
-                task.cancel()
-            self._tasks[material.task_id] = _LiveTask(
+            if (
+                self._launch_permits.get(material.task_id) is not permit
+                or not permit.launching
+                or permit.material != material
+                or material.task_id in self._tasks
+            ):
+                return False
+            task = asyncio.create_task(
+                self._run_child(
+                    launch=launch,
+                    runner=runner,
+                    cancellation_intent=intent,
+                ),
+                name=f"kernel-subagent:{material.task_id}",
+            )
+            task.add_done_callback(
+                lambda completed, task_id=material.task_id: self._retire_live_task(
+                    task_id, completed
+                )
+            )
+            live = _LiveTask(
                 material.task_id,
                 material.parent_turn_id,
                 task,
                 intent,
+                launch,
+                hook_scope,
             )
+            if permit.cancellation_reason is not None:
+                cause = intent.install_cause(
+                    ForegroundCancellationCause.USER_REQUEST
+                    if permit.cancellation_reason == "USER_CANCELLED"
+                    else ForegroundCancellationCause.HOST_SESSION_CLOSE
+                )
+                live.cancellation_reason = (
+                    "USER_CANCELLED"
+                    if cause is ForegroundCancellationCause.USER_REQUEST
+                    else "HOST_CLOSING"
+                )
+            self._tasks[material.task_id] = live
             self._notify_state_changed_locked()
-        self._offer_progress(
-            material.task_id,
-            material.parent_turn_id,
-            "ACTIVE",
-            "Subagent started",
-        )
+        if live.cancellation_reason is not None:
+            task.cancel()
+        else:
+            self._offer_progress(
+                material.task_id,
+                material.parent_turn_id,
+                "ACTIVE",
+                "Subagent started",
+            )
+        return True
 
     def _retire_live_task(
         self,
@@ -1121,16 +1384,15 @@ class KernelSubagentManager:
 
     async def _run_child(
         self,
-        task_id: str,
-        objective: str,
+        *,
+        launch: PreparedSubagentLaunch,
+        runner: ConversationKernelRunner,
         cancellation_intent: ActiveTurnCancellationIntent,
     ) -> KernelRunResult:
-        runner_factory = self._runner_factory
-        assert runner_factory is not None
+        task_id = launch.task_start.task_id
         try:
-            result = await runner_factory().run_subagent_turn(
-                task_id=task_id,
-                objective=objective,
+            result = await runner.run_admitted_subagent_turn(
+                launch=launch,
                 cancellation_intent=cancellation_intent,
             )
             while True:
@@ -1215,6 +1477,30 @@ class KernelSubagentManager:
             )
             await self._settle_dependency_frontier(task_id)
             raise
+        except ChildCompactionContinuationBlocked:
+            await self._settle_cancelled_child(
+                task_id=task_id,
+                turn_id=cancellation_intent.turn_id,
+                task_status="INTERRUPTED",
+                task_reason="HOOK_COMPACTION_BLOCKED",
+                turn_reason="HOOK_COMPACTION_BLOCKED",
+            )
+            async with self._state_changed:
+                live = self._tasks.get(task_id)
+                if live is not None:
+                    live.status = "INTERRUPTED"
+                    parent_turn_id = live.parent_turn_id
+                else:
+                    parent_turn_id = task_id
+                self._notify_state_changed_locked()
+            self._offer_progress(
+                task_id,
+                parent_turn_id,
+                "INTERRUPTED",
+                "HOOK_COMPACTION_BLOCKED",
+            )
+            await self._settle_dependency_frontier(task_id)
+            raise
         except BaseException as exc:
             code = f"CHILD_{type(exc).__name__.upper()}"
             await self._settle_task_terminal_exact(
@@ -1236,6 +1522,11 @@ class KernelSubagentManager:
             raise
         finally:
             await self._close_todo_child_run(task_id)
+            async with self._lock:
+                live = self._tasks.get(task_id)
+                hook_scope = None if live is None else live.hook_scope
+            if hook_scope is not None and self._hook_context_owner is not None:
+                self._hook_context_owner.retire_scope(hook_scope)
 
     async def _close_todo_child_run(self, task_id: str) -> None:
         if not self._todo_owner.mark_closing(
@@ -1663,6 +1954,17 @@ class KernelSubagentManager:
             return _result("INVALID_ARGUMENTS", {"error": "task_id is required"})
         async with self._lock:
             live = self._tasks.get(task_id)
+            permit = self._launch_permits.get(task_id)
+            if live is None and permit is not None:
+                if permit.cancellation_reason is None:
+                    permit.cancellation_reason = "USER_CANCELLED"
+                if not permit.launching:
+                    permit.stop_claimed = True
+                permit.cancellation_signal.set()
+        if live is None and permit is not None:
+            await asyncio.shield(permit.settled.wait())
+            async with self._lock:
+                live = self._tasks.get(task_id)
         if live is None:
             durable = await self._io.run(
                 self._repository.query_subagent_task,
@@ -1704,6 +2006,14 @@ class KernelSubagentManager:
                     )
             live.task.cancel()
             await asyncio.gather(live.task, return_exceptions=True)
+        if live.status == "ACTIVE":
+            await self._settle_never_started_live_cancellation(
+                live,
+                task_status="CANCELLED",
+                task_reason="USER_CANCELLED",
+                turn_reason="USER_STOPPED",
+                schedule_after=True,
+            )
         return _result("SUCCESS", {"status": live.status.lower(), "task_id": task_id})
 
     async def _wait_many(self, arguments: Mapping[str, object]) -> KernelToolResult:
@@ -1874,7 +2184,10 @@ class KernelSubagentManager:
         task_id: str,
         result_entry_id: str,
         arguments: Mapping[str, object],
-    ) -> tuple[_CompletionPermit, object, KernelToolResult] | None:
+        last_assistant_message: str | None,
+        model_id: str,
+        permission_snapshot: FrozenRunPermissionSnapshot,
+    ) -> PreparedExplicitSubagentCompletion | None:
         """Freeze a sole-call explicit result before canonical settlement.
 
         The runner has already accepted the exact assistant request and tool
@@ -1910,6 +2223,47 @@ class KernelSubagentManager:
             ):
                 return None
             self._completing.add(task_id)
+        try:
+            continuation = await self._dispatch_subagent_stop(
+                live=live,
+                completion_kind="EXPLICIT",
+                completion_entry_id=result_entry_id,
+                last_assistant_message=last_assistant_message,
+                model_id=model_id,
+                permission_snapshot=permission_snapshot,
+            )
+        except BaseException:
+            async with self._state_changed:
+                self._completing.discard(task_id)
+                self._notify_state_changed_locked()
+            raise
+        causal_ref = SubagentStopRef(task_id, "EXPLICIT", result_entry_id)
+        continuation_requested = (
+            continuation.decision is ContinuationDecision.CONTINUE_ONCE
+        )
+        permit = _CompletionPermit(
+            task_id,
+            continuation_requested,
+            causal_ref,
+            continuation.continuation_source,
+            continuation.reason,
+        )
+        if continuation_requested:
+            return PreparedExplicitSubagentCompletion(
+                permit,
+                None,
+                _result(
+                    "SUCCESS",
+                    {
+                        "status": "not_accepted",
+                        "task_id": task_id,
+                        "reason": (
+                            continuation.reason
+                            or "Lifecycle Hook requested one additional pass."
+                        ),
+                    },
+                ),
+            )
         result_id = _stable_child_id(task_id, result_entry_id)
         fact = build_subagent_result_public_fact(
             task_id=task_id,
@@ -1920,12 +2274,11 @@ class KernelSubagentManager:
             output_preview=preview,
             diagnostics=diagnostics,
         )
-        permit = _CompletionPermit(task_id)
         acknowledgement = _result(
             "SUCCESS",
             {"status": "accepted", "task_id": task_id},
         )
-        return permit, fact, acknowledgement
+        return PreparedExplicitSubagentCompletion(permit, fact, acknowledgement)
 
     async def consume_mailbox_safe_point(self, task_id: str) -> bool:
         """Commit the exact queued prefix before the child's next model call."""
@@ -2017,8 +2370,14 @@ class KernelSubagentManager:
         return True
 
     async def prepare_inferred_completion(
-        self, *, task_id: str, entry_id: str, public_text: str
-    ) -> tuple[_CompletionPermit, object] | None:
+        self,
+        *,
+        task_id: str,
+        entry_id: str,
+        public_text: str,
+        model_id: str,
+        permission_snapshot: FrozenRunPermissionSnapshot,
+    ) -> PreparedInferredSubagentCompletion | None:
         from pulsara_agent.conversation_kernel.subagents.contracts import (
             SubagentResultSource,
             build_subagent_result_public_fact,
@@ -2034,6 +2393,33 @@ class KernelSubagentManager:
             ):
                 return None
             self._completing.add(task_id)
+        try:
+            continuation = await self._dispatch_subagent_stop(
+                live=live,
+                completion_kind="INFERRED",
+                completion_entry_id=entry_id,
+                last_assistant_message=public_text,
+                model_id=model_id,
+                permission_snapshot=permission_snapshot,
+            )
+        except BaseException:
+            async with self._state_changed:
+                self._completing.discard(task_id)
+                self._notify_state_changed_locked()
+            raise
+        causal_ref = SubagentStopRef(task_id, "INFERRED", entry_id)
+        continuation_requested = (
+            continuation.decision is ContinuationDecision.CONTINUE_ONCE
+        )
+        permit = _CompletionPermit(
+            task_id,
+            continuation_requested,
+            causal_ref,
+            continuation.continuation_source,
+            continuation.reason,
+        )
+        if continuation_requested:
+            return PreparedInferredSubagentCompletion(permit, None)
         result_id = _stable_child_id(task_id, entry_id)
         summary = _bounded_text(
             public_text or "Task completed without public text.", 16_384
@@ -2048,19 +2434,112 @@ class KernelSubagentManager:
                 "sha256:" + sha256(public_text.encode("utf-8")).hexdigest()
             ),
         )
-        return _CompletionPermit(task_id), fact
+        return PreparedInferredSubagentCompletion(permit, fact)
+
+    async def _dispatch_subagent_stop(
+        self,
+        *,
+        live: _LiveTask,
+        completion_kind: str,
+        completion_entry_id: str,
+        last_assistant_message: str | None,
+        model_id: str,
+        permission_snapshot: FrozenRunPermissionSnapshot,
+    ) -> ContinuationOutcome:
+        launch = live.launch
+        if (
+            not model_id
+            or permission_snapshot.inherited_from_turn_id
+            != launch.task_start.parent_turn_id
+            or permission_snapshot.effective_mode
+            is not launch.parent_permission_snapshot.effective_mode
+        ):
+            raise ConversationKernelConflict(
+                "SubagentStop carrier drifted from child launch truth"
+            )
+        dispatcher = self._hook_dispatcher
+        scope = live.hook_scope
+        if dispatcher is None or scope is None:
+            return ContinuationOutcome()
+        public_input = SubagentStopInput(
+            session_id=self._guard.session_id,
+            cwd=str(self._terminal_cwd()),
+            model=model_id,
+            turn_id=launch.child_turn_id,
+            agent_id=launch.task_start.task_id,
+            agent_type=launch.task_start.profile.value,
+            stop_hook_active=live.completion_continuation_used,
+            last_assistant_message=last_assistant_message,
+            permission_mode=external_permission_mode(
+                permission_snapshot.effective_mode.value,
+                active_plan_workflow=(permission_snapshot.plan_workflow_id is not None),
+            ),
+        )
+        causal_ref = SubagentStopRef(
+            live.task_id,
+            completion_kind,
+            completion_entry_id,
+        )
+        return await dispatcher.dispatch(
+            HookDispatchEnvelope(
+                dispatcher.capture_view(),
+                scope,
+                public_input,
+                causal_ref,
+                self._canonical_deadline(),
+            ),
+            matcher_subject=event_matcher_subject(
+                public_input.event_type,
+                agent_type=launch.task_start.profile.value,
+            ),
+            continuation_already_used=live.completion_continuation_used,
+        )
 
     async def finish_completion(
         self, permit: _CompletionPermit, *, committed: bool
     ) -> None:
+        continuation: (
+            tuple[HookDispatchScopeRef, SubagentStopRef, HookContextEntry, str | None]
+            | None
+        ) = None
+        terminal_scope: HookDispatchScopeRef | None = None
         async with self._state_changed:
             if permit.task_id not in self._completing:
                 raise ConversationKernelConflict("subagent completion permit is stale")
             self._completing.remove(permit.task_id)
             live = self._tasks.get(permit.task_id)
-            if committed and live is not None:
-                live.status = "COMPLETED"
+            if committed and live is not None and live.status == "ACTIVE":
+                if permit.continuation_requested:
+                    if (
+                        live.completion_continuation_used
+                        or live.hook_scope is None
+                        or permit.continuation_source is None
+                    ):
+                        raise ConversationKernelConflict(
+                            "SubagentStop continuation permit is stale"
+                        )
+                    live.completion_continuation_used = True
+                    continuation = (
+                        live.hook_scope,
+                        permit.causal_ref,
+                        permit.continuation_source,
+                        permit.continuation_reason,
+                    )
+                else:
+                    live.status = "COMPLETED"
+                    terminal_scope = live.hook_scope
             self._notify_state_changed_locked()
+        if terminal_scope is not None and self._hook_context_owner is not None:
+            self._hook_context_owner.retire_scope(terminal_scope)
+        if continuation is not None:
+            scope, causal_ref, source, reason = continuation
+            assert self._hook_context_owner is not None
+            self._hook_context_owner.accept_continuation(
+                scope=scope,
+                causal_ref=causal_ref,
+                source_entry=source,
+                reason=reason,
+            )
 
     async def _settle_dependency_frontier(
         self, task_id: str, *, schedule_after: bool = True
@@ -2120,42 +2599,40 @@ class KernelSubagentManager:
         )
         await _join_child_settlement(settlement)
 
-    async def aclose(self, *, timeout_seconds: float) -> None:
-        admission_error: BaseException | None = None
-        scheduler_error: BaseException | None = None
+    async def aclose(self, *, deadline_monotonic: float) -> None:
+        close_error: BaseException | None = None
+        close_deadline_expired = monotonic() >= deadline_monotonic
         async with self._lock:
             if self._closed:
                 return
             self._closed = True
+            for permit in self._launch_permits.values():
+                if permit.cancellation_reason is None:
+                    permit.cancellation_reason = "HOST_CLOSING"
+                if not permit.launching:
+                    permit.stop_claimed = True
+                permit.cancellation_signal.set()
             admissions = tuple(
                 attempt.task for attempt in self._batch_admissions.values()
             )
             mailbox_consumptions = tuple(self._mailbox_consumptions.values())
             scheduler = self._scheduler_task
-        for settlement in (*admissions, *mailbox_consumptions):
-            while not settlement.done():
-                try:
-                    await asyncio.shield(settlement)
-                except asyncio.CancelledError:
-                    continue
-                except BaseException:
-                    break
-            try:
-                settlement.result()
-            except BaseException as exc:
-                admission_error = admission_error or exc
-        if scheduler is not None:
-            while not scheduler.done():
-                try:
-                    await asyncio.shield(scheduler)
-                except asyncio.CancelledError:
-                    continue
-                except BaseException:
-                    break
-            try:
-                scheduler.result()
-            except BaseException as exc:
-                scheduler_error = exc
+        producer_tasks = tuple(
+            dict.fromkeys(
+                (
+                    *admissions,
+                    *mailbox_consumptions,
+                    *((scheduler,) if scheduler is not None else ()),
+                )
+            )
+        )
+        if producer_tasks:
+            expired, error = await _cancel_and_join_at_absolute_deadline(
+                producer_tasks,
+                deadline_monotonic=deadline_monotonic,
+            )
+            close_deadline_expired = close_deadline_expired or expired
+            close_error = error
         async with self._lock:
             tasks = tuple(
                 item.task for item in self._tasks.values() if not item.task.done()
@@ -2176,18 +2653,13 @@ class KernelSubagentManager:
                     )
         for task in tasks:
             task.cancel()
-        close_deadline_expired = False
         if tasks:
-            done, pending = await asyncio.wait(tasks, timeout=timeout_seconds)
-            close_deadline_expired = bool(pending)
-            if pending:
-                # A child owns process-local tool/provider resources until its
-                # task is terminal.  The watchdog selects the close outcome;
-                # it never authorizes detaching those physical owners.
-                await asyncio.gather(*pending, return_exceptions=True)
-            for task in done:
-                if not task.cancelled():
-                    task.exception()
+            expired, error = await _cancel_and_join_at_absolute_deadline(
+                tasks,
+                deadline_monotonic=deadline_monotonic,
+            )
+            close_deadline_expired = close_deadline_expired or expired
+            close_error = close_error or error
         # asyncio can cancel a newly-created Task before its coroutine body
         # executes, in which case _run_child() never observes CancelledError.
         # The Host owner still has to install the frozen close disposition for
@@ -2197,22 +2669,12 @@ class KernelSubagentManager:
                 item for item in self._tasks.values() if item.status == "ACTIVE"
             )
         for item in unterminalized:
-            await self._settle_cancelled_child(
-                task_id=item.task_id,
-                turn_id=item.cancellation_intent.turn_id,
+            await self._settle_never_started_live_cancellation(
+                item,
                 task_status="INTERRUPTED",
                 task_reason="HOST_CLOSING",
                 turn_reason="SESSION_CLOSED",
-            )
-            async with self._lock:
-                current = self._tasks.get(item.task_id)
-                if current is not None and current.status == "ACTIVE":
-                    current.status = "INTERRUPTED"
-            self._offer_progress(
-                item.task_id,
-                item.parent_turn_id,
-                "INTERRUPTED",
-                "HOST_CLOSING",
+                schedule_after=False,
             )
         async with self._lock:
             dormant_ids = tuple(
@@ -2237,11 +2699,15 @@ class KernelSubagentManager:
                     await asyncio.sleep(0.05)
             if dormant is None or SubagentTaskStatus(str(dormant["status"])).terminal:
                 continue
-            await self._settle_task_terminal_exact(
-                task_id,
-                SubagentTaskStatus.INTERRUPTED,
-                "HOST_CLOSING",
-                require_absent_turn=True,
+            await self._settle_cancelled_child(
+                task_id=task_id,
+                turn_id=stable_subagent_turn_id(
+                    session_id=self._guard.session_id,
+                    task_id=task_id,
+                ),
+                task_status="INTERRUPTED",
+                task_reason="HOST_CLOSING",
+                turn_reason="SESSION_CLOSED",
             )
         async with self._state_changed:
             self._tasks.clear()
@@ -2249,15 +2715,62 @@ class KernelSubagentManager:
             self._mailbox_ordinals.clear()
             self._mailbox_consumptions.clear()
             self._start_materials.clear()
-            self._spawning.clear()
+            self._launch_permits.clear()
             self._completing.clear()
             self._notify_state_changed_locked()
         if close_deadline_expired:
             raise TimeoutError("subagent owner exited after close deadline")
-        if scheduler_error is not None:
-            raise scheduler_error
-        if admission_error is not None:
-            raise admission_error
+        if close_error is not None:
+            raise close_error
+
+    async def _settle_never_started_live_cancellation(
+        self,
+        live: _LiveTask,
+        *,
+        task_status: str,
+        task_reason: str,
+        turn_reason: str,
+        schedule_after: bool,
+    ) -> None:
+        """Settle a child cancelled before ``_run_child`` entered its body."""
+
+        if not live.task.done() or live.status != "ACTIVE":
+            raise RuntimeError("pre-start child cancellation carrier is not terminal")
+        historical = await self._settle_cancelled_child(
+            task_id=live.task_id,
+            turn_id=live.cancellation_intent.turn_id,
+            task_status=task_status,
+            task_reason=task_reason,
+            turn_reason=turn_reason,
+        )
+        final_status = "COMPLETED" if historical is not None else task_status
+        summary = (
+            "Subagent completed before cancellation"
+            if historical is not None
+            else task_reason
+        )
+        async with self._state_changed:
+            current = self._tasks.get(live.task_id)
+            if current is not live or current.status != "ACTIVE":
+                raise ConversationKernelConflict(
+                    "pre-start child cancellation carrier changed"
+                )
+            live.status = final_status
+            self._tasks.pop(live.task_id)
+            self._retire_dormant_carriers_locked(live.task_id)
+            self._notify_state_changed_locked()
+        self._offer_progress(
+            live.task_id,
+            live.parent_turn_id,
+            final_status,
+            summary,
+        )
+        await self._settle_dependency_frontier(
+            live.task_id, schedule_after=schedule_after
+        )
+        await self._close_todo_child_run(live.task_id)
+        if live.hook_scope is not None and self._hook_context_owner is not None:
+            self._hook_context_owner.retire_scope(live.hook_scope)
 
     def _offer_progress(
         self, task_id: str, parent_turn_id: str, status: str, summary: str
@@ -2624,6 +3137,50 @@ async def _join_child_settlement(
             # Additional stop/close calls only detach their waiter and cannot
             # cancel or replace the exact settlement owner.
             continue
+
+
+async def _cancel_and_join_at_absolute_deadline(
+    tasks: tuple[asyncio.Task[object], ...],
+    *,
+    deadline_monotonic: float,
+) -> tuple[bool, BaseException | None]:
+    """Select the logical close outcome once, then retain physical ownership."""
+
+    pending = {task for task in tasks if not task.done()}
+    waiter_cancellation: asyncio.CancelledError | None = None
+    while pending:
+        remaining = deadline_monotonic - monotonic()
+        if remaining <= 0:
+            break
+        try:
+            done, pending = await asyncio.wait(pending, timeout=remaining)
+        except asyncio.CancelledError as exc:
+            waiter_cancellation = waiter_cancellation or exc
+            continue
+        if not done:
+            break
+    deadline_expired = bool(pending)
+    for task in pending:
+        task.cancel()
+    for task in tasks:
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError as exc:
+                if task.done():
+                    break
+                waiter_cancellation = waiter_cancellation or exc
+            except BaseException:
+                break
+    task_error: BaseException | None = None
+    for task in tasks:
+        if task.cancelled():
+            continue
+        try:
+            task.result()
+        except BaseException as exc:
+            task_error = task_error or exc
+    return deadline_expired, waiter_cancellation or task_error
 
 
 __all__ = ["KernelSubagentManager", "MAXIMUM_LIVE_SUBAGENTS", "SUBAGENT_TOOL_NAMES"]

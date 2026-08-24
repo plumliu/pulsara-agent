@@ -7,11 +7,17 @@ from typing import Mapping
 from psycopg import Connection, IsolationLevel
 from psycopg.rows import dict_row
 from pulsara_agent.conversation_kernel.contracts import CommittedEventDraft, CommittedEventSubject, ConversationScopeKind, EntryKind, HostWriterGuard, InlineContent, canonical_digest
-from pulsara_agent.primitives.context import FrozenJsonObjectFact, freeze_json, thaw_json
+from pulsara_agent.primitives.context import FrozenJsonObjectFact, canonical_json_bytes, freeze_json, thaw_json
 from pulsara_agent.primitives.permission import PERMISSION_PRESET_CONTRACT_FINGERPRINT, PERMISSION_PRESET_CONTRACT_ID, PermissionMode
 from pulsara_agent.primitives.run_permission import FrozenRunPermissionSnapshot, RunPermissionAdmissionSource, RunPermissionOverlay, build_run_permission_snapshot
 from pulsara_agent.primitives.plan_workflow import ExtractedPlanDraft, PlanDraftTextChunk, PlanDraftDecision, PlanHandoffKind, PlanInteractionBinding, PlanInteractionKind, PlanQuestionAnswerKind, PlanQuestionContent, PlanWorkflowStatus, extract_plan_entry_reason, extract_plan_draft, extract_plan_question, read_plan_draft_chunk
 from pulsara_agent.conversation_kernel.vocabulary import CommittedEventType, SubjectSlot
+from pulsara_agent.conversation_kernel.tool_contracts import (
+    AcceptedCanonicalToolResultSettlement,
+    build_accepted_canonical_tool_result_settlement,
+)
+from pulsara_agent.model_input.contracts import ModelInputScopeKind
+from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 
 from .contracts import (
@@ -56,6 +62,43 @@ def _plan_question_response(
     if not content.allow_free_text:
         raise ConversationKernelConflict("Plan question does not allow free text")
     return {"answer_kind": "FREE_TEXT", "answer": answer.free_text}
+
+
+def _plan_tool_result_settlement(
+    *,
+    candidate: PreparedPlanToolBatch,
+    call_ordinal: int,
+    payload: Mapping[str, object],
+    result_state: str,
+    result_origin_kind: str,
+    accepted_entry_sequence: int,
+) -> AcceptedCanonicalToolResultSettlement:
+    call = candidate.calls[call_ordinal]
+    if call.result_id is None or call.result_entry_id is None:
+        raise ValueError("Plan settlement call has no canonical result")
+    return build_accepted_canonical_tool_result_settlement(
+        session_id=candidate.session_id,
+        scope_kind=ModelInputScopeKind.ROOT,
+        scope_subagent_task_id=None,
+        turn_id=candidate.origin_turn_id,
+        assistant_entry_id=candidate.assistant_entry_id,
+        call_ordinal=call_ordinal,
+        tool_name=call.tool_name,
+        tool_call_id=call.tool_call_id,
+        public_arguments=call.arguments,
+        result_id=call.result_id,
+        result_entry_id=call.result_entry_id,
+        accepted_entry_sequence=accepted_entry_sequence,
+        result_state=result_state,
+        result_origin_kind=result_origin_kind,
+        canonical_body=canonical_json_bytes(payload).decode("utf-8"),
+        observed_at=candidate.occurred_at,
+        observation_origin=(
+            ToolObservationOrigin.PLAN_CONTROL
+            if result_origin_kind == "PLAN_CONTROL"
+            else ToolObservationOrigin.POLICY
+        ),
+    )
 
 
 class _PlanOperations:
@@ -108,10 +151,15 @@ class _PlanOperations:
                 (guard.session_id, candidate.assistant_entry_id),
             ).fetchall()
             if tuple(
-                (str(row["id"]), str(row["tool_call_id"]), str(row["tool_name"]))
+                (
+                    str(row["id"]),
+                    str(row["tool_call_id"]),
+                    str(row["tool_name"]),
+                    freeze_json(dict(row["tool_arguments"])),
+                )
                 for row in block_rows
             ) != tuple(
-                (item.block_id, item.tool_call_id, item.tool_name)
+                (item.block_id, item.tool_call_id, item.tool_name, item.arguments)
                 for item in candidate.calls
             ):
                 raise ConversationKernelConflict("prepared Plan batch blocks drifted")
@@ -171,6 +219,7 @@ class _PlanOperations:
                 )
 
             event_drafts: list[CommittedEventDraft] = []
+            settlements: list[AcceptedCanonicalToolResultSettlement] = []
             selected_result_entry_id: str | None = None
             final_entry_id: str | None = None
             for ordinal, call in enumerate(candidate.calls):
@@ -272,6 +321,16 @@ class _PlanOperations:
                             "tool_call_id": call.tool_call_id,
                             "result_state": result_state,
                         },
+                    )
+                )
+                settlements.append(
+                    _plan_tool_result_settlement(
+                        candidate=candidate,
+                        call_ordinal=ordinal,
+                        payload=payload,
+                        result_state=result_state,
+                        result_origin_kind=origin_kind,
+                        accepted_entry_sequence=entry_sequence,
                     )
                 )
                 final_entry_id = call.result_entry_id
@@ -389,6 +448,7 @@ class _PlanOperations:
                 continuation_turn_id=candidate.continuation_turn_id,
                 continuation_entry_id=continuation_entry_id,
                 origin_turn_completed=origin_completed,
+                tool_result_settlements=tuple(settlements),
             )
 
     def _accept_rejected_plan_tool_batch_in_transaction(
@@ -405,17 +465,23 @@ class _PlanOperations:
                 "applied Plan batch entered rejection path"
             )
         event_drafts: list[CommittedEventDraft] = []
+        settlements: list[AcceptedCanonicalToolResultSettlement] = []
         selected_result_entry_id: str | None = None
         for ordinal, call in enumerate(candidate.calls):
             assert call.result_id is not None
             assert call.result_entry_id is not None
             selected = ordinal == candidate.selected_call_ordinal
             if selected:
-                result_state = candidate.selected_disposition.value
+                result_state = (
+                    "PERMISSION_DENIED"
+                    if candidate.selected_disposition
+                    is PlanToolBatchDisposition.HOOK_BLOCKED
+                    else candidate.selected_disposition.value
+                )
                 payload: Mapping[str, object] = {
                     "status": "error",
                     "plan_control": "REJECTED",
-                    "error_kind": result_state,
+                    "error_kind": candidate.selected_disposition.value,
                 }
                 selected_result_entry_id = call.result_entry_id
             else:
@@ -477,6 +543,16 @@ class _PlanOperations:
                     },
                 )
             )
+            settlements.append(
+                _plan_tool_result_settlement(
+                    candidate=candidate,
+                    call_ordinal=ordinal,
+                    payload=payload,
+                    result_state=result_state,
+                    result_origin_kind="POLICY_NO_ATTEMPT",
+                    accepted_entry_sequence=entry_sequence,
+                )
+            )
         self._append_events(
             connection,
             guard,
@@ -494,6 +570,7 @@ class _PlanOperations:
             continuation_turn_id=None,
             continuation_entry_id=None,
             origin_turn_completed=False,
+            tool_result_settlements=tuple(settlements),
         )
 
     def confirm_plan_tool_batch_winner(
@@ -570,7 +647,16 @@ class _PlanOperations:
                 """
                 SELECT i.*, w.status AS workflow_status,
                        w.workflow_revision, w.resume_permission_mode,
-                       b.tool_arguments, t.permission_snapshot_fingerprint
+                       b.tool_arguments, t.permission_snapshot_fingerprint,
+                       (
+                         SELECT COUNT(*) - 1
+                         FROM pulsara_v3.assistant_message_blocks AS prior
+                         WHERE prior.session_id = b.session_id
+                           AND prior.assistant_entry_id = b.assistant_entry_id
+                           AND prior.block_kind = 'TOOL_CALL'
+                           AND (prior.block_ordinal, prior.id)
+                               <= (b.block_ordinal, b.id)
+                       ) AS selected_call_ordinal
                 FROM pulsara_v3.plan_interactions AS i
                 JOIN pulsara_v3.plan_workflows AS w
                   ON w.session_id = i.session_id AND w.id = i.plan_workflow_id
@@ -753,6 +839,27 @@ class _PlanOperations:
                 handoff_created_at_commit=False,
                 question_result_entry_id=result_entry_id,
                 workflow_revision=revision,
+                tool_result_settlement=(
+                    build_accepted_canonical_tool_result_settlement(
+                        session_id=guard.session_id,
+                        scope_kind=ModelInputScopeKind.ROOT,
+                        scope_subagent_task_id=None,
+                        turn_id=str(interaction["origin_turn_id"]),
+                        assistant_entry_id=str(interaction["assistant_entry_id"]),
+                        call_ordinal=int(interaction["selected_call_ordinal"]),
+                        tool_name="ask_plan_question",
+                        tool_call_id=str(interaction["tool_call_id"]),
+                        public_arguments=frozen,
+                        result_id=result_id,
+                        result_entry_id=result_entry_id,
+                        accepted_entry_sequence=entry_sequence,
+                        result_state="SUCCESS",
+                        result_origin_kind="PLAN_CONTROL",
+                        canonical_body=result_content.canonical_bytes.decode("utf-8"),
+                        observed_at=occurred_at,
+                        observation_origin=ToolObservationOrigin.PLAN_CONTROL,
+                    )
+                ),
             )
 
     def confirm_plan_question_winner(
@@ -2151,11 +2258,16 @@ class _PlanOperations:
             or str(assistant["entry_kind"]) != EntryKind.ASSISTANT_TOOL_REQUEST.value
             or str(assistant["conversation_scope_kind"]) != "ROOT"
             or tuple(
-                (str(row["id"]), str(row["tool_call_id"]), str(row["tool_name"]))
+                (
+                    str(row["id"]),
+                    str(row["tool_call_id"]),
+                    str(row["tool_name"]),
+                    freeze_json(dict(row["tool_arguments"])),
+                )
                 for row in block_rows
             )
             != tuple(
-                (item.block_id, item.tool_call_id, item.tool_name)
+                (item.block_id, item.tool_call_id, item.tool_name, item.arguments)
                 for item in candidate.calls
             )
             or freeze_json(
@@ -2208,13 +2320,19 @@ class _PlanOperations:
                 )
             result_by_id = {str(row["id"]): row for row in result_rows}
             selected_result_entry_id: str | None = None
+            settlements: list[AcceptedCanonicalToolResultSettlement] = []
             for ordinal, item in enumerate(candidate.calls):
                 assert item.result_id is not None
                 assert item.result_entry_id is not None
                 row = result_by_id.get(item.result_id)
                 selected = ordinal == candidate.selected_call_ordinal
                 expected_state = (
-                    candidate.selected_disposition.value
+                    (
+                        "PERMISSION_DENIED"
+                        if candidate.selected_disposition
+                        is PlanToolBatchDisposition.HOOK_BLOCKED
+                        else candidate.selected_disposition.value
+                    )
                     if selected
                     else "CANCELLED_BEFORE_DISPATCH"
                 )
@@ -2244,7 +2362,7 @@ class _PlanOperations:
                     expected_payload = {
                         "status": "error",
                         "plan_control": "REJECTED",
-                        "error_kind": expected_state,
+                        "error_kind": candidate.selected_disposition.value,
                     }
                     selected_result_entry_id = item.result_entry_id
                 else:
@@ -2286,6 +2404,16 @@ class _PlanOperations:
                     session_id=candidate.session_id,
                     workspace_id=candidate.workspace_id,
                 )
+                settlements.append(
+                    _plan_tool_result_settlement(
+                        candidate=candidate,
+                        call_ordinal=ordinal,
+                        payload=expected_payload,
+                        result_state=expected_state,
+                        result_origin_kind="POLICY_NO_ATTEMPT",
+                        accepted_entry_sequence=int(entry["entry_sequence"]),
+                    )
+                )
             turn = connection.execute(
                 "SELECT status FROM pulsara_v3.turns WHERE session_id = %s AND id = %s",
                 (candidate.session_id, candidate.origin_turn_id),
@@ -2305,6 +2433,7 @@ class _PlanOperations:
                 continuation_turn_id=None,
                 continuation_entry_id=None,
                 origin_turn_completed=False,
+                tool_result_settlements=tuple(settlements),
             )
         if (
             candidate.idempotent_existing
@@ -2320,6 +2449,7 @@ class _PlanOperations:
         result_by_id = {str(row["id"]): row for row in result_rows}
         selected_result_entry_id: str | None = None
         final_entry_id: str | None = None
+        settlements: list[AcceptedCanonicalToolResultSettlement] = []
         for ordinal, item in enumerate(candidate.calls):
             if item.result_id is None:
                 continue
@@ -2420,6 +2550,20 @@ class _PlanOperations:
                 ),
                 session_id=candidate.session_id,
                 workspace_id=candidate.workspace_id,
+            )
+            settlements.append(
+                _plan_tool_result_settlement(
+                    candidate=candidate,
+                    call_ordinal=ordinal,
+                    payload=expected_payload,
+                    result_state=expected_state,
+                    result_origin_kind=(
+                        "PLAN_CONTROL"
+                        if expected_selected
+                        else "POLICY_NO_ATTEMPT"
+                    ),
+                    accepted_entry_sequence=int(entry["entry_sequence"]),
+                )
             )
             final_entry_id = item.result_entry_id
         question: PlanQuestionContent | None = None
@@ -2705,6 +2849,7 @@ class _PlanOperations:
             continuation_turn_id=candidate.continuation_turn_id,
             continuation_entry_id=candidate.continuation_entry_id,
             origin_turn_completed=origin_completed,
+            tool_result_settlements=tuple(settlements),
         )
 
     @staticmethod
@@ -2871,7 +3016,16 @@ class _PlanOperations:
                    w.workflow_revision,
                    e.turn_id AS continuation_turn_id,
                    b.tool_arguments,
-                   t.permission_snapshot_fingerprint
+                   t.permission_snapshot_fingerprint,
+                   (
+                     SELECT COUNT(*) - 1
+                     FROM pulsara_v3.assistant_message_blocks AS prior
+                     WHERE prior.session_id = b.session_id
+                       AND prior.assistant_entry_id = b.assistant_entry_id
+                       AND prior.block_kind = 'TOOL_CALL'
+                       AND (prior.block_ordinal, prior.id)
+                           <= (b.block_ordinal, b.id)
+                   ) AS selected_call_ordinal
             FROM pulsara_v3.session_commands AS c
             JOIN pulsara_v3.plan_interactions AS i
               ON i.session_id = c.session_id
@@ -2902,6 +3056,7 @@ class _PlanOperations:
             if interaction_status == "ANSWERED"
             else None
         )
+        question_settlement: AcceptedCanonicalToolResultSettlement | None = None
         if question_result is not None:
             if (
                 expected_question_answer is None
@@ -3017,6 +3172,25 @@ class _PlanOperations:
                     "Plan question occurrence is partially installed"
                 )
             question_result_entry_id = expected_result_entry_id
+            question_settlement = build_accepted_canonical_tool_result_settlement(
+                session_id=session_id,
+                scope_kind=ModelInputScopeKind.ROOT,
+                scope_subagent_task_id=None,
+                turn_id=str(row["origin_turn_id"]),
+                assistant_entry_id=str(row["assistant_entry_id"]),
+                call_ordinal=int(row["selected_call_ordinal"]),
+                tool_name="ask_plan_question",
+                tool_call_id=str(row["tool_call_id"]),
+                public_arguments=frozen_arguments,
+                result_id=expected_result_id,
+                result_entry_id=expected_result_entry_id,
+                accepted_entry_sequence=int(result_entry["entry_sequence"]),
+                result_state="SUCCESS",
+                result_origin_kind="PLAN_CONTROL",
+                canonical_body=expected_content.canonical_bytes.decode("utf-8"),
+                observed_at=result["observed_at"],
+                observation_origin=ToolObservationOrigin.PLAN_CONTROL,
+            )
         else:
             if any(
                 value is not None
@@ -3060,6 +3234,7 @@ class _PlanOperations:
                 == PlanInteractionKind.DRAFT_REVIEW.value
                 else None
             ),
+            tool_result_settlement=question_settlement,
         )
 
     @staticmethod

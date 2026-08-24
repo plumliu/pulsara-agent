@@ -119,9 +119,12 @@ from pulsara_agent.conversation_kernel.steer import (
     PreparedPromptIngressCommand,
     PromptIngressConfirmationKind,
     PromptIngressWriteRejection,
+    PreparedRootTurnIdentity,
     QueuedRootTurnAdmissionConfirmation,
     QueuedRootTurnAdmissionConfirmationKind,
+    build_direct_root_turn_identity,
     build_prompt_ingress_command,
+    build_queued_root_turn_identity,
 )
 from pulsara_agent.conversation_kernel.runner import (
     ConversationKernelRunner,
@@ -129,6 +132,9 @@ from pulsara_agent.conversation_kernel.runner import (
 )
 from pulsara_agent.conversation_kernel.safe_point import ExternalSourceNotAtSafePoint
 from pulsara_agent.conversation_kernel.subagent import KernelSubagentManager
+from pulsara_agent.conversation_kernel.subagents.launch import (
+    CanonicalSubagentLaunchPreparationPort,
+)
 from pulsara_agent.conversation_kernel.tool_runtime import DirectKernelToolPort
 from pulsara_agent.conversation_kernel.todo_runtime import (
     FrozenTodoCloseProjection,
@@ -157,6 +163,7 @@ from pulsara_agent.tool_permission import (
     mode_for_policy,
 )
 from pulsara_agent.primitives.permission import PermissionMode
+from pulsara_agent.primitives.run_permission import FrozenRunPermissionSnapshot
 from pulsara_agent.primitives.plan_workflow import PlanDraftDecision, PlanHandoffKind
 from pulsara_agent.ports.system_prompt import DEFAULT_SYSTEM_PROMPT
 from pulsara_agent.ports.terminal_observation import (
@@ -166,6 +173,30 @@ from pulsara_agent.ports.terminal_observation import (
 from pulsara_agent.mcp_config import McpServerConfig, load_mcp_server_configs
 from pulsara_agent.conversation_kernel.mcp import McpHostSupervisor
 from pulsara_agent.settings import PulsaraSettings
+from pulsara_agent.hooks.context import (
+    HookContextOwner,
+    PendingHookContextReservation,
+)
+from pulsara_agent.hooks.contracts import (
+    DirectPromptRef,
+    FrozenHookDefinitionView,
+    GateDecision,
+    HookDispatchEnvelope,
+    HookDispatchScopeRef,
+    HookScopeKind,
+    QueuedPromptRef,
+    SessionEndInput,
+    SessionEndRef,
+    UserPromptSubmitInput,
+    external_permission_mode,
+)
+from pulsara_agent.hooks.dispatcher import (
+    KernelHookDispatcher,
+    LoggingHookDiagnosticAdapter,
+)
+from pulsara_agent.hooks.executor import HookSecretScrubSet
+from pulsara_agent.hooks.source import LocalHookSourceProvider
+from pulsara_agent.hooks.matcher import event_matcher_subject
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 from pulsara_agent.storage.schema_verification_service import (
     VerifiedPostgresAccessLease,
@@ -215,6 +246,32 @@ class KernelCommandOutcome:
     plan_workflow_revision: int | None = None
     plan_draft_decision: PlanDraftDecision | None = None
     plan_continuation_turn_id: str | None = None
+
+
+class PromptBlockedByHook(RuntimeError):
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(reason)
+
+
+class _IngressHookApiVariant(StrEnum):
+    DIRECT = "DIRECT"
+    QUEUED = "QUEUED"
+
+
+@dataclass(frozen=True, slots=True)
+class _IngressHookReservationKey:
+    api_variant: _IngressHookApiVariant
+    command_id: str
+    prompt_utf8: bytes
+    requested_permission_mode: PermissionMode | None
+    queue_item_id: str | None
+
+
+@dataclass(slots=True)
+class _IngressHookAttempt:
+    key: _IngressHookReservationKey
+    future: asyncio.Future[KernelRunResult | KernelCommandOutcome]
 
 
 class RootChainPhase(StrEnum):
@@ -298,6 +355,9 @@ class KernelHostSession:
         active_skill_names: frozenset[str],
         authenticated_first_party_extension_ids: frozenset[str],
         deadline_factory: KernelExecutionDeadlineFactory,
+        session_start_source: str,
+        hook_source_provider: LocalHookSourceProvider,
+        initial_hook_view: FrozenHookDefinitionView,
         mcp_configs: tuple[McpServerConfig, ...] = (),
     ) -> None:
         self.settings = settings
@@ -355,6 +415,27 @@ class KernelHostSession:
             )
         self._launch_permission_mode = launch_permission_mode
         self._monitor_wake = asyncio.Event()
+        self._configured_root_model_identity = (
+            settings.llm.pro_model
+            if model_role is ModelRole.PRO
+            else settings.llm.flash_model
+        )
+        self._hook_diagnostics = LoggingHookDiagnosticAdapter()
+        self._hook_context = HookContextOwner(self._hook_diagnostics)
+        self._hook_root_scope = HookDispatchScopeRef(
+            self,
+            workspace,
+            HookScopeKind.ROOT,
+        )
+        self._hook_context.register_scope(self._hook_root_scope)
+        self._hook_source_provider = hook_source_provider
+        self._hooks = KernelHookDispatcher(
+            initial_view=initial_hook_view,
+            workspace_root=workspace.workspace_root,
+            source_provider=self._hook_source_provider,
+            diagnostic_adapter=self._hook_diagnostics,
+            background_context=self._hook_context,
+        )
 
         def wake_terminal_monitor_scheduler() -> None:
             self._event_loop.call_soon_threadsafe(self._monitor_wake.set)
@@ -374,6 +455,7 @@ class KernelHostSession:
             deadline_factory=self._deadlines,
         )
         self._tools.bind_interaction_port(self._interactions)
+        self._tools.bind_hook_reload_port(self)
         self._subagents = KernelSubagentManager(
             repository=repository,
             guard=self._lease.guard,
@@ -381,8 +463,19 @@ class KernelHostSession:
             io_owner=self._io,
             live_bus=self.live_bus,
             todo_owner=self._tools.todo_owner,
+            launch_preparation=CanonicalSubagentLaunchPreparationPort(
+                repository=repository,
+                guard=self._lease.guard,
+                io_owner=self._io,
+                configured_model_identity=self._configured_root_model_identity,
+                deadline_factory=self._deadlines,
+            ),
+            terminal_cwd=self._tools.snapshot_terminal_cwd,
             todo_close_projector=self._tools.offer_todo_close,
             deadline_factory=self._deadlines,
+            hook_dispatcher=self._hooks,
+            hook_context_owner=self._hook_context,
+            hook_root_scope=self._hook_root_scope,
         )
         self._tools.bind_subagent_port(self._subagents)
         memory_read_binding = freeze_memory_read_scope_binding(
@@ -444,6 +537,7 @@ class KernelHostSession:
             base_system_prompt=system_prompt or DEFAULT_SYSTEM_PROMPT,
             display_timezone=display_timezone,
             mcp_catalog=self._mcp_supervisor,
+            hook_context_owner=self._hook_context,
         )
         self._runner = ConversationKernelRunner(
             repository=repository,
@@ -458,12 +552,18 @@ class KernelHostSession:
             workspace_id=workspace.workspace_key,
             plan_interactions=self._plan_interactions,
             automatic_plan_continuation=(self._accept_automatic_plan_continuation),
+            launch_permission_mode=self._launch_permission_mode,
             deadline_factory=self._deadlines,
             memory_projection=self._memory_tools,
             assistant_settlement_owner=self._assistant_settlements,
             todo_admission_finalizer=self._finalize_todo_run_activation,
             compaction_owner=self._compaction,
             subagent_runtime=self._subagents,
+            hook_dispatcher=self._hooks,
+            hook_context_owner=self._hook_context,
+            hook_scope=self._hook_root_scope,
+            session_start_source=session_start_source,
+            configured_model_identity=self._configured_root_model_identity,
         )
         self._subagents.bind_runner_factory(self._new_child_runner)
         self._active_task: asyncio.Task[KernelRunResult] | None = None
@@ -479,6 +579,7 @@ class KernelHostSession:
         self._external_new_turn_settled.set()
         self._command_failures: dict[str, KernelCommandOutcome] = {}
         self._lock = asyncio.Lock()
+        self._ingress_hook_attempts: dict[str, _IngressHookAttempt] = {}
         self._compaction_write_reservations: dict[
             tuple[ModelInputScopeKind, str | None], int
         ] = {}
@@ -608,6 +709,40 @@ class KernelHostSession:
         self._require_open()
         return await self._tools.reload_mcp_configs(configs)
 
+    async def reload_hooks(
+        self, *, deadline_monotonic: float | None
+    ) -> dict[str, object]:
+        """Replace only the future-event USER/WORKSPACE Hook source slices."""
+
+        async def publish_scanned_view(predecessor, replacement) -> bool:
+            async with self._lock:
+                if self._closing or self._closed:
+                    return False
+                return self._hooks.publish_scanned_view(predecessor, replacement)
+
+        view = await self._hooks.reload(
+            deadline_monotonic=deadline_monotonic,
+            publish_scanned_view=publish_scanned_view,
+        )
+        result = {
+            "status": "RELOADED",
+            "sources": [
+                {
+                    "source": snapshot.provenance.identity.kind.value,
+                    "path": str(snapshot.provenance.identity.canonical_path),
+                    "scan": snapshot.disposition.value,
+                    "trust": snapshot.trust.disposition.value,
+                    "enabled": snapshot.trust.enabled,
+                    "definitions": len(snapshot.definitions),
+                }
+                for snapshot in view.source_snapshots
+            ],
+        }
+        safe = HookSecretScrubSet.capture().scrub_json(result)
+        if not isinstance(safe, dict):
+            raise RuntimeError("Hook reload result lost its JSON object shape")
+        return safe
+
     def reconnect_mcp_server(self, server_id: str) -> None:
         """Request a fresh physical generation for future safe-point borrows."""
 
@@ -631,6 +766,105 @@ class KernelHostSession:
         """Issue a fresh watchdog for one foreground canonical operation."""
 
         return self._deadlines.deadline(KernelWatchdogOwner.FOREGROUND_CANONICAL)
+
+    async def _claim_ingress_hook_attempt(
+        self, key: _IngressHookReservationKey
+    ) -> tuple[_IngressHookAttempt, bool]:
+        async with self._lock:
+            self._require_open()
+            current = self._ingress_hook_attempts.get(key.command_id)
+            if current is not None:
+                if current.key != key:
+                    raise ConversationKernelConflict(
+                        "in-flight prompt command has a different Hook candidate"
+                    )
+                return current, False
+            attempt = _IngressHookAttempt(
+                key,
+                asyncio.get_running_loop().create_future(),
+            )
+            self._ingress_hook_attempts[key.command_id] = attempt
+            return attempt, True
+
+    async def _settle_ingress_hook_attempt(
+        self,
+        attempt: _IngressHookAttempt,
+        *,
+        result: KernelRunResult | KernelCommandOutcome | None = None,
+        error: BaseException | None = None,
+    ) -> None:
+        async with self._lock:
+            if self._ingress_hook_attempts.get(attempt.key.command_id) is attempt:
+                self._ingress_hook_attempts.pop(attempt.key.command_id, None)
+            if attempt.future.done():
+                return
+            if error is None:
+                if result is None:
+                    raise RuntimeError("ingress Hook attempt settlement is incomplete")
+                attempt.future.set_result(result)
+            elif isinstance(error, asyncio.CancelledError):
+                attempt.future.cancel()
+            else:
+                attempt.future.set_exception(error)
+                # The owner has already observed the exception.  Mark the shared
+                # future as retrieved even when no exact retry joined it.
+                attempt.future.exception()
+
+    async def _dispatch_user_prompt_hook(
+        self,
+        *,
+        key: _IngressHookReservationKey,
+        identity: PreparedRootTurnIdentity,
+        permission: FrozenRunPermissionSnapshot,
+    ) -> tuple[str | None, PendingHookContextReservation | None]:
+        view = self._hooks.capture_view()
+        cwd = self._tools.snapshot_terminal_cwd()
+        public_input = UserPromptSubmitInput(
+            session_id=self.session_id,
+            cwd=str(cwd),
+            model=self._configured_root_model_identity,
+            turn_id=identity.turn_id,
+            prompt=key.prompt_utf8.decode("utf-8"),
+            permission_mode=external_permission_mode(
+                permission.effective_mode.value,
+                active_plan_workflow=permission.plan_workflow_id is not None,
+            ),
+        )
+        if key.api_variant is _IngressHookApiVariant.DIRECT:
+            causal_ref = DirectPromptRef(
+                key.command_id,
+                identity.turn_id,
+                identity.entry_id,
+                identity.context_revision_id,
+            )
+        else:
+            assert key.queue_item_id is not None
+            causal_ref = QueuedPromptRef(
+                key.command_id,
+                key.queue_item_id,
+                identity.turn_id,
+                identity.entry_id,
+                identity.context_revision_id,
+            )
+        outcome = await self._hooks.dispatch(
+            HookDispatchEnvelope(
+                view,
+                self._hook_root_scope,
+                public_input,
+                causal_ref,
+                self._deadlines.deadline(
+                    KernelWatchdogOwner.PROVIDER_DISPATCH_PLANNING
+                ),
+            ),
+            matcher_subject=event_matcher_subject(public_input.event_type),
+        )
+        if outcome.decision is GateDecision.BLOCK:
+            return outcome.reason or "UserPromptSubmit Hook blocked", None
+        return None, self._hook_context.prepare_sync(
+            scope=self._hook_root_scope,
+            causal_ref=causal_ref,
+            entries=outcome.context_entries,
+        )
 
     async def register_extension(
         self, request: ExtensionRegistrationRequest
@@ -663,41 +897,89 @@ class KernelHostSession:
     ) -> KernelRunResult:
         _validate_prompt(text)
         command = command_id or f"command:{uuid4().hex}"
-        turn_id = _stable_id("turn", self.session_id, command)
-        existing = await self._query_command_row(command)
-        if existing is not None:
-            raise RuntimeError("command was already accepted; query its outcome")
-        async with self._lock:
-            self._require_open()
-            if self._compaction.is_fenced(
-                scope_kind=ModelInputScopeKind.ROOT,
-                scope_subagent_task_id=None,
-            ):
-                raise RuntimeError("COMPACTION_IN_PROGRESS")
-            self._retire_done_active_root_locked()
-            if (
-                self._plan_exit_fence
-                or self._external_new_turn_accepting
-                or self._active_task is not None
-            ):
-                raise RuntimeError("a canonical ROOT turn is already running")
-            task = self._install_active_root_task_locked(
-                turn_id=turn_id,
-                command_id=command,
-                name=f"kernel-turn:{command}",
-                run=lambda intent: self._run_root_turn_chain(
-                    text,
-                    command_id=command,
-                    requested_permission_mode=(
-                        requested_permission_mode or self._launch_permission_mode
-                    ),
-                    cancellation_intent=intent,
-                ),
+        requested = requested_permission_mode or self._launch_permission_mode
+        identity = build_direct_root_turn_identity(self.session_id, command)
+        key = _IngressHookReservationKey(
+            _IngressHookApiVariant.DIRECT,
+            command,
+            text.encode("utf-8"),
+            requested_permission_mode,
+            None,
+        )
+        attempt, owner = await self._claim_ingress_hook_attempt(key)
+        if not owner:
+            joined = await asyncio.shield(attempt.future)
+            if not isinstance(joined, KernelRunResult):
+                raise RuntimeError("direct prompt joined a queued ingress attempt")
+            return joined
+        try:
+            existing = await self._query_command_row(command)
+            if existing is not None:
+                raise RuntimeError("command was already accepted; query its outcome")
+            async with self._lock:
+                self._require_open()
+                self._retire_done_active_root_locked()
+                if (
+                    self._compaction.is_fenced(
+                        scope_kind=ModelInputScopeKind.ROOT,
+                        scope_subagent_task_id=None,
+                    )
+                    or self._plan_exit_fence
+                    or self._external_new_turn_accepting
+                    or self._active_task is not None
+                ):
+                    raise RuntimeError("a canonical ROOT turn is already running")
+            permission = await self._io.run(
+                self.repository.prepare_root_permission_snapshot,
+                self._lease.guard,
+                snapshot_id=identity.permission_snapshot_id,
+                requested_mode=requested,
+                deadline_monotonic=self._canonical_deadline(),
             )
-        # The Host owns the run chain.  A gateway/request cancellation detaches
-        # only this waiter; the task itself settles the ROOT slot when its full
-        # continuation lineage physically exits.
-        return await asyncio.shield(task)
+            block_reason, context_reservation = (
+                await self._dispatch_user_prompt_hook(
+                    key=key,
+                    identity=identity,
+                    permission=permission,
+                )
+            )
+            if block_reason is not None:
+                raise PromptBlockedByHook(block_reason)
+            async with self._lock:
+                self._require_open()
+                self._retire_done_active_root_locked()
+                if (
+                    self._ingress_hook_attempts.get(command) is not attempt
+                    or self._compaction.is_fenced(
+                        scope_kind=ModelInputScopeKind.ROOT,
+                        scope_subagent_task_id=None,
+                    )
+                    or self._plan_exit_fence
+                    or self._external_new_turn_accepting
+                    or self._active_task is not None
+                ):
+                    if context_reservation is not None:
+                        context_reservation.retire()
+                    raise RuntimeError("prompt Hook admission became stale")
+                task = self._install_active_root_task_locked(
+                    turn_id=identity.turn_id,
+                    command_id=command,
+                    name=f"kernel-turn:{command}",
+                    run=lambda intent: self._run_root_turn_chain(
+                        text,
+                        command_id=command,
+                        requested_permission_mode=requested,
+                        expected_permission_snapshot=permission,
+                        hook_context_reservation=context_reservation,
+                        cancellation_intent=intent,
+                    ),
+                )
+            result = await asyncio.shield(task)
+        except BaseException as exc:
+            await self._settle_ingress_hook_attempt(attempt, error=exc)
+            raise
+        await self._settle_ingress_hook_attempt(attempt, result=result)
+        return result
 
     async def compact_context(
         self,
@@ -863,7 +1145,7 @@ class KernelHostSession:
             )
         else:
             try:
-                outcome = await self._runner.compaction.compact_idle_turn(
+                outcome = await self._runner.compact_idle_turn(
                     turn_id=target_turn_id,
                     command_id=request.command_id,
                     force=request.force,
@@ -981,12 +1263,16 @@ class KernelHostSession:
         *,
         command_id: str,
         requested_permission_mode: PermissionMode,
+        expected_permission_snapshot: FrozenRunPermissionSnapshot,
+        hook_context_reservation: PendingHookContextReservation | None,
         cancellation_intent: ActiveTurnCancellationIntent,
     ) -> KernelRunResult:
         result = await self._runner.run_turn(
             text,
             command_id=command_id,
             requested_permission_mode=requested_permission_mode,
+            expected_permission_snapshot=expected_permission_snapshot,
+            hook_context_reservation=hook_context_reservation,
             cancellation_intent=cancellation_intent,
         )
         return await self._finish_root_chain(result, cancellation_intent)
@@ -1428,6 +1714,84 @@ class KernelHostSession:
         target_turn_id: str | None = None,
         requested_permission_mode: PermissionMode | None = None,
     ) -> KernelCommandOutcome:
+        if (
+            not command_id
+            or (delivery_mode is PromptDeliveryMode.NEW_TURN)
+            != (target_turn_id is None)
+        ):
+            return await self._submit_prompt_owner(
+                command_id=command_id,
+                text=text,
+                delivery_mode=delivery_mode,
+                target_turn_id=target_turn_id,
+                requested_permission_mode=requested_permission_mode,
+            )
+        try:
+            _validate_prompt(text)
+        except ValueError:
+            return await self._submit_prompt_owner(
+                command_id=command_id,
+                text=text,
+                delivery_mode=delivery_mode,
+                target_turn_id=target_turn_id,
+                requested_permission_mode=requested_permission_mode,
+            )
+        if delivery_mode is PromptDeliveryMode.STEER_ACTIVE_TURN:
+            return await self._submit_prompt_owner(
+                command_id=command_id,
+                text=text,
+                delivery_mode=delivery_mode,
+                target_turn_id=target_turn_id,
+                requested_permission_mode=requested_permission_mode,
+            )
+        queue_item_id = _stable_id("queue-item", self.session_id, command_id)
+        key = _IngressHookReservationKey(
+            _IngressHookApiVariant.QUEUED,
+            command_id,
+            text.encode("utf-8"),
+            requested_permission_mode,
+            queue_item_id,
+        )
+        try:
+            attempt, owner = await self._claim_ingress_hook_attempt(key)
+        except ConversationKernelConflict:
+            return KernelCommandOutcome(
+                command_id,
+                "REJECTED",
+                queue_item_id,
+                "COMMAND_CONFLICT",
+                "The command identity names a different in-flight prompt.",
+            )
+        if not owner:
+            joined = await asyncio.shield(attempt.future)
+            if not isinstance(joined, KernelCommandOutcome):
+                raise RuntimeError("queued prompt joined a direct ingress attempt")
+            return joined
+        try:
+            result = await self._submit_prompt_owner(
+                command_id=command_id,
+                text=text,
+                delivery_mode=delivery_mode,
+                target_turn_id=target_turn_id,
+                requested_permission_mode=requested_permission_mode,
+                hook_attempt=attempt,
+            )
+        except BaseException as exc:
+            await self._settle_ingress_hook_attempt(attempt, error=exc)
+            raise
+        await self._settle_ingress_hook_attempt(attempt, result=result)
+        return result
+
+    async def _submit_prompt_owner(
+        self,
+        *,
+        command_id: str,
+        text: str,
+        delivery_mode: PromptDeliveryMode = PromptDeliveryMode.NEW_TURN,
+        target_turn_id: str | None = None,
+        requested_permission_mode: PermissionMode | None = None,
+        hook_attempt: _IngressHookAttempt | None = None,
+    ) -> KernelCommandOutcome:
         if not command_id:
             return KernelCommandOutcome(
                 command_id, "REJECTED", "", "INVALID_REQUEST", "Command is invalid."
@@ -1493,8 +1857,51 @@ class KernelHostSession:
             if existing is None:
                 raise RuntimeError("compatible prompt command has no canonical outcome")
             return existing
+        permission_projection: FrozenRunPermissionSnapshot | None = None
+        hook_context_reservation: PendingHookContextReservation | None = None
+        if delivery_mode is PromptDeliveryMode.NEW_TURN:
+            if hook_attempt is None:
+                raise RuntimeError("queued new turn lacks its Hook reservation owner")
+            identity = build_queued_root_turn_identity(
+                self.session_id, queue_item_id
+            )
+            if permission_snapshot_id != identity.permission_snapshot_id:
+                raise RuntimeError("queued prompt permission identity drifted")
+            assert effective_requested_permission is not None
+            permission_projection = await self._io.run(
+                self.repository.prepare_root_permission_snapshot,
+                self._lease.guard,
+                snapshot_id=identity.permission_snapshot_id,
+                requested_mode=effective_requested_permission,
+                deadline_monotonic=self._canonical_deadline(),
+            )
+            block_reason, hook_context_reservation = (
+                await self._dispatch_user_prompt_hook(
+                    key=hook_attempt.key,
+                    identity=identity,
+                    permission=permission_projection,
+                )
+            )
+            if block_reason is not None:
+                return KernelCommandOutcome(
+                    command_id,
+                    "REJECTED",
+                    queue_item_id,
+                    "HOOK_BLOCKED",
+                    block_reason,
+                )
         async with self._lock:
-            if self._plan_exit_fence:
+            if (
+                self._closing
+                or self._plan_exit_fence
+                or (
+                    hook_attempt is not None
+                    and self._ingress_hook_attempts.get(command_id)
+                    is not hook_attempt
+                )
+            ):
+                if hook_context_reservation is not None:
+                    hook_context_reservation.retire()
                 return KernelCommandOutcome(
                     command_id,
                     "REJECTED",
@@ -1508,6 +1915,8 @@ class KernelHostSession:
                     scope_subagent_task_id=None,
                 )
             except RuntimeError:
+                if hook_context_reservation is not None:
+                    hook_context_reservation.retire()
                 return KernelCommandOutcome(
                     command_id,
                     "REJECTED",
@@ -1516,16 +1925,23 @@ class KernelHostSession:
                     "Context compaction is in progress for the ROOT scope.",
                 )
         try:
-            return await self._submit_prompt_reserved(
-                command_id=command_id,
-                queue_item_id=queue_item_id,
-                delivery_mode=delivery_mode,
-                target_turn_id=target_turn_id,
-                permission_snapshot_id=permission_snapshot_id,
-                effective_requested_permission=effective_requested_permission,
-                content_utf8=content_utf8,
-                ingress=ingress,
-            )
+            try:
+                return await self._submit_prompt_reserved(
+                    command_id=command_id,
+                    queue_item_id=queue_item_id,
+                    delivery_mode=delivery_mode,
+                    target_turn_id=target_turn_id,
+                    permission_snapshot_id=permission_snapshot_id,
+                    effective_requested_permission=effective_requested_permission,
+                    content_utf8=content_utf8,
+                    ingress=ingress,
+                    expected_permission_snapshot=permission_projection,
+                    hook_context_reservation=hook_context_reservation,
+                )
+            except BaseException:
+                if hook_context_reservation is not None:
+                    hook_context_reservation.retire()
+                raise
         finally:
             await self._release_compaction_write_reservation(reservation)
 
@@ -1540,6 +1956,8 @@ class KernelHostSession:
         effective_requested_permission: PermissionMode | None,
         content_utf8: bytes,
         ingress: PreparedPromptIngressCommand,
+        expected_permission_snapshot: FrozenRunPermissionSnapshot | None,
+        hook_context_reservation: PendingHookContextReservation | None,
     ) -> KernelCommandOutcome:
         content = await self._io.run(
             self._content_publisher.materialize,
@@ -1564,8 +1982,11 @@ class KernelHostSession:
                 occurred_at=datetime.now().astimezone(),
                 actor_id=self.host_session_id,
                 deadline_monotonic=self._canonical_deadline(),
+                _expected_permission_snapshot=expected_permission_snapshot,
             )
         except PromptIngressRejected as exc:
+            if hook_context_reservation is not None:
+                hook_context_reservation.retire()
             if exc.reason is PromptIngressWriteRejection.COMMAND_CONFLICT:
                 return KernelCommandOutcome(
                     command_id,
@@ -1581,6 +2002,16 @@ class KernelHostSession:
                     queue_item_id,
                     "PROMPT_CAPACITY_EXHAUSTED",
                     "The session prompt queue is full.",
+                )
+            if exc.reason is (
+                PromptIngressWriteRejection.INGRESS_PRECONDITION_CHANGED
+            ):
+                return KernelCommandOutcome(
+                    command_id,
+                    "REJECTED",
+                    queue_item_id,
+                    "INGRESS_PRECONDITION_CHANGED",
+                    "The Plan or permission cut changed while the Hook ran.",
                 )
             if exc.reason is (
                 PromptIngressWriteRejection.TARGET_STALE_OR_NON_STEERABLE
@@ -1600,6 +2031,8 @@ class KernelHostSession:
                 deadline_monotonic=self._canonical_deadline(),
             )
             if confirmation.kind is PromptIngressConfirmationKind.FULL_COMPATIBLE:
+                if hook_context_reservation is not None:
+                    hook_context_reservation.commit_prompt_bound(queue_item_id)
                 self._queue_wake.set()
                 existing = await self.query_command(command_id)
                 if existing is None:
@@ -1608,6 +2041,8 @@ class KernelHostSession:
                     )
                 return existing
             if confirmation.kind is PromptIngressConfirmationKind.CONFLICT:
+                if hook_context_reservation is not None:
+                    hook_context_reservation.retire()
                 return KernelCommandOutcome(
                     command_id,
                     "REJECTED",
@@ -1616,6 +2051,8 @@ class KernelHostSession:
                     "The command identity names a different prompt.",
                 )
             raise
+        if hook_context_reservation is not None:
+            hook_context_reservation.commit_prompt_bound(queue_item_id)
         self._queue_wake.set()
         return KernelCommandOutcome(
             command_id,
@@ -2491,6 +2928,10 @@ class KernelHostSession:
                             accepted.turn_id, intent
                         ),
                     )
+                    self._hook_context.activate_prompt_candidate(
+                        scope=self._hook_root_scope,
+                        prompt_candidate_id=candidate.queue_item_id,
+                    )
                 except BaseException:
                     task = None
             elif finalization_failed:
@@ -2499,6 +2940,10 @@ class KernelHostSession:
                 task = None
         self._tools.offer_todo_close(closed)
         if task is None:
+            self._hook_context.retire_prompt_candidate(
+                scope=self._hook_root_scope,
+                prompt_candidate_id=candidate.queue_item_id,
+            )
             await self._interrupt_queued_admission_until_safe(
                 turn_id=accepted.turn_id,
                 reason=(
@@ -3195,6 +3640,11 @@ class KernelHostSession:
         async with self._close_async_lock:
             if self._closed:
                 return
+            deadline = (
+                self._deadlines.deadline(KernelWatchdogOwner.HOST_SESSION_CLOSE)
+                if deadline_monotonic is None
+                else deadline_monotonic
+            )
             async with self._lock:
                 self._closing = True
                 self._tools.todo_owner.mark_closing(
@@ -3206,16 +3656,17 @@ class KernelHostSession:
                 )
                 self._queue_wake.set()
                 self._monitor_wake.set()
+            # SessionEnd consumes the exact close-attempt carrier.  Freeze the
+            # current owner-held cwd before Terminal process termination can
+            # retire that process-local owner; never reopen or query it from
+            # the later terminal Hook lane.
+            session_end_cwd = self._tools.snapshot_terminal_cwd()
+            self._hooks.begin_host_close(deadline_monotonic=deadline)
             self.extensions.stop_admission()
             self._mcp_supervisor.stop_admission()
             mcp_close_task = asyncio.create_task(
                 self._mcp_supervisor.aclose(),
                 name=f"kernel-mcp-close:{self.host_session_id}",
-            )
-            deadline = (
-                self._deadlines.deadline(KernelWatchdogOwner.HOST_SESSION_CLOSE)
-                if deadline_monotonic is None
-                else deadline_monotonic
             )
             close_error: BaseException | None = None
             self._delivery_task.cancel()
@@ -3307,7 +3758,7 @@ class KernelHostSession:
                     close_error = close_error or exc
             try:
                 await self._subagents.aclose(
-                    timeout_seconds=max(0.001, deadline - monotonic())
+                    deadline_monotonic=deadline
                 )
             except BaseException as exc:
                 close_error = close_error or exc
@@ -3315,6 +3766,33 @@ class KernelHostSession:
                 await self._assistant_settlements.aclose(deadline_monotonic=deadline)
             except BaseException as exc:
                 close_error = close_error or exc
+            try:
+                terminal_view = await self._hooks.fence_ordinary()
+                terminal_input = SessionEndInput(
+                    session_id=self.session_id,
+                    cwd=str(session_end_cwd),
+                    model=self._configured_root_model_identity,
+                    reason="other",
+                )
+                await self._hooks.dispatch_terminal(
+                    HookDispatchEnvelope(
+                        terminal_view,
+                        self._hook_root_scope,
+                        terminal_input,
+                        SessionEndRef(object()),
+                        deadline,
+                    ),
+                    matcher_subject=event_matcher_subject(
+                        terminal_input.event_type, reason=terminal_input.reason
+                    ),
+                )
+            except BaseException as exc:
+                close_error = close_error or exc
+            try:
+                await self._hooks.aclose(deadline_monotonic=deadline)
+            except BaseException as exc:
+                close_error = close_error or exc
+            self._hook_context.close()
             self._input_continuity.close()
             try:
                 await self._memory_governor.aclose(deadline_monotonic=deadline)
@@ -3380,7 +3858,9 @@ class KernelHostSession:
                 ),
             )
 
-    def _new_child_runner(self) -> ConversationKernelRunner:
+    def _new_child_runner(
+        self, hook_scope: HookDispatchScopeRef | None
+    ) -> ConversationKernelRunner:
         return ConversationKernelRunner(
             repository=self.repository,
             writer_lease=self._lease,
@@ -3398,6 +3878,10 @@ class KernelHostSession:
             todo_admission_finalizer=self._finalize_todo_run_activation,
             compaction_owner=self._compaction,
             subagent_runtime=self._subagents,
+            hook_dispatcher=self._hooks,
+            hook_context_owner=self._hook_context,
+            hook_scope=hook_scope,
+            configured_model_identity=self._configured_root_model_identity,
         )
 
     def _observe_provider_usage(
@@ -3642,6 +4126,7 @@ class KernelHostCore:
             permission_policy=permission_policy,
             system_prompt=system_prompt,
             active_skill_names=active_skill_names,
+            session_start_source="startup",
         )
 
     async def resume_session(
@@ -3661,6 +4146,7 @@ class KernelHostCore:
             permission_policy=permission_policy,
             system_prompt=system_prompt,
             active_skill_names=active_skill_names,
+            session_start_source="resume",
         )
 
     async def resume_most_recent_session(
@@ -3686,8 +4172,19 @@ class KernelHostCore:
         permission_policy: EffectivePermissionPolicy | None,
         system_prompt: str | None,
         active_skill_names: frozenset[str],
+        session_start_source: str,
     ) -> KernelHostSession:
         workspace = resolve_workspace(workspace_input)
+        deadline = self._deadlines.deadline(KernelWatchdogOwner.FOREGROUND_CANONICAL)
+        hook_source_provider = LocalHookSourceProvider(
+            workspace_root=workspace.workspace_root,
+            workspace_kind=workspace.workspace_kind,
+            workspace_state_key=workspace.workspace_key,
+        )
+        initial_hook_view = await asyncio.to_thread(
+            hook_source_provider.discover,
+            deadline_monotonic=deadline,
+        )
         mcp_configs = await asyncio.to_thread(
             load_mcp_server_configs,
             workspace_root=workspace.workspace_root,
@@ -3696,7 +4193,6 @@ class KernelHostCore:
         repository = await self._ensure_resources()
         host_id = f"host:{uuid4().hex}"
         io_owner = KernelSessionIO()
-        deadline = self._deadlines.deadline(KernelWatchdogOwner.FOREGROUND_CANONICAL)
         try:
             writer_lease = await io_owner.run(
                 repository.acquire_host_writer,
@@ -3723,6 +4219,9 @@ class KernelHostCore:
                     self._authenticated_first_party_extension_ids
                 ),
                 deadline_factory=self._deadlines,
+                session_start_source=session_start_source,
+                hook_source_provider=hook_source_provider,
+                initial_hook_view=initial_hook_view,
                 mcp_configs=mcp_configs,
             )
             await session.start_mcp()

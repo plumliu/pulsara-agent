@@ -144,7 +144,10 @@ from tests.support.round3 import (
     completed_provider_execution_for_test,
     seal_test_direct_tool_port,
 )
-from tests.support.subagents import accept_active_subagent_fixture
+from tests.support.subagents import (
+    accept_active_subagent_fixture,
+    run_admitted_subagent_fixture,
+)
 
 
 pytestmark = pytest.mark.postgres
@@ -989,6 +992,11 @@ class _FailingPostConsumptionReader:
             cut, deadline_monotonic=deadline_monotonic
         )
 
+    def read_compaction_headroom_preflight(self, cut, *, deadline_monotonic):
+        return self._delegate.read_compaction_headroom_preflight(
+            cut, deadline_monotonic=deadline_monotonic
+        )
+
     def read_frozen_dispatch(self, cut, *, deadline_monotonic):
         self.calls += 1
         if self.calls == 2:
@@ -1012,6 +1020,11 @@ class _RecordingReplayHydrationReader:
 
     def read_frozen_compile_snapshot(self, cut, *, deadline_monotonic):
         return self._delegate.read_frozen_compile_snapshot(
+            cut, deadline_monotonic=deadline_monotonic
+        )
+
+    def read_compaction_headroom_preflight(self, cut, *, deadline_monotonic):
+        return self._delegate.read_compaction_headroom_preflight(
             cut, deadline_monotonic=deadline_monotonic
         )
 
@@ -4178,7 +4191,7 @@ def test_stage2_subagent_runner_produces_durable_message_child(
         ),
     )
     result = asyncio.run(
-        runner.run_subagent_turn(task_id=task_id, objective="produce one message")
+        run_admitted_subagent_fixture(runner, task_id)
     )
     with provider.connection(
         lane=PostgresConnectionLane.INSPECTOR,
@@ -4287,7 +4300,7 @@ def test_round10_child_cold_seed_then_same_epoch_wire_prefix_is_exact(
     cold = _RecordingColdEpochAssembler(runner._provider_dispatch._cold_epoch_assembler)
     runner._provider_dispatch._cold_epoch_assembler = cold
 
-    result = asyncio.run(runner.run_subagent_turn(task_id=task_id, objective=objective))
+    result = asyncio.run(run_admitted_subagent_fixture(runner, task_id))
 
     assert result.final_text == expected_text
     assert result.model_call_count == 2
@@ -4395,7 +4408,7 @@ def test_round10_sole_report_result_atomically_completes_child_without_second_mo
         "accept_explicit_subagent_result",
         commit_then_timeout,
     )
-    result = asyncio.run(runner.run_subagent_turn(task_id=task_id, objective=objective))
+    result = asyncio.run(run_admitted_subagent_fixture(runner, task_id))
     assert lost_ack
     assert result.final_text == "exact explicit summary"
     assert result.model_call_count == 1
@@ -4495,7 +4508,7 @@ def test_round10_mixed_report_batch_has_zero_attempt_and_physical_effect_then_re
             objective=objective,
         ),
     )
-    result = asyncio.run(runner.run_subagent_turn(task_id=task_id, objective=objective))
+    result = asyncio.run(run_admitted_subagent_fixture(runner, task_id))
     assert result.final_text == "recovered inferred result"
     assert result.model_call_count == 2
     assert delegate.invocations == []
@@ -4576,7 +4589,7 @@ def test_round5a1_subagent_incomplete_response_has_no_assistant_or_tool_effect(
     )
 
     with pytest.raises(ProviderModelOutputIncomplete):
-        asyncio.run(runner.run_subagent_turn(task_id=task_id, objective=objective))
+        asyncio.run(run_admitted_subagent_fixture(runner, task_id))
     assert tools.invocations == []
     with provider.connection(
         lane=PostgresConnectionLane.INSPECTOR,

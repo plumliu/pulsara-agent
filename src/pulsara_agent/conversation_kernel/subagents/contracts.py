@@ -15,6 +15,7 @@ import re
 from typing import Iterable, Mapping, Protocol
 
 from pulsara_agent.conversation_kernel.contracts import canonical_digest
+from pulsara_agent.conversation_kernel.cancellation import stable_subagent_turn_id
 from pulsara_agent.primitives.context import (
     FrozenJsonArrayFact,
     FrozenJsonObjectFact,
@@ -22,6 +23,7 @@ from pulsara_agent.primitives.context import (
     canonical_json_bytes,
     freeze_json,
 )
+from pulsara_agent.primitives.run_permission import FrozenRunPermissionSnapshot
 
 
 MAXIMUM_TASK_OBJECTIVE_UTF8_BYTES = 65_536
@@ -358,6 +360,29 @@ class PreparedSubagentTaskStart:
         )
         if self.event_id != expected_event:
             raise ValueError("subagent task start identity mismatch")
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedSubagentLaunch:
+    """Call-local launch truth frozen after the task-start winner is FULL."""
+
+    task_start: PreparedSubagentTaskStart = dataclass_field(repr=False)
+    child_turn_id: str
+    configured_model_identity: str
+    parent_permission_snapshot: FrozenRunPermissionSnapshot = dataclass_field(
+        repr=False
+    )
+
+    def __post_init__(self) -> None:
+        _text(self.child_turn_id, "child_turn_id", 512)
+        _text(self.configured_model_identity, "configured_model_identity", 512)
+        if self.parent_permission_snapshot.inherited_from_turn_id is not None:
+            raise ValueError("subagent launch parent permission fact is invalid")
+        if self.child_turn_id != stable_subagent_turn_id(
+            session_id=self.task_start.session_id,
+            task_id=self.task_start.task_id,
+        ):
+            raise ValueError("subagent launch child turn identity drifted")
 
 
 def build_subagent_task_start(

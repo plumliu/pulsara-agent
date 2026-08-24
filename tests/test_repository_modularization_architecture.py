@@ -185,6 +185,19 @@ _ROUND8_RUNTIME_CHANGED_DATACLASSES = {
     "PreparedMemoryProposalSideBranch",
     "PreparedToolResultAcceptance",
 }
+_ROUND9_2_RUNTIME_CHANGED_DATACLASSES = {
+    # Process-local Hook carriers and the shared accepted ToolResult
+    # settlement are fields on existing repository DTOs; no durable schema or
+    # replay authority is introduced.
+    "AcceptedCapabilityDecision",
+    "AcceptedEntry",
+    "AcceptedInteractionDecision",
+    "AcceptedPlanResolution",
+    "AcceptedPlanToolBatch",
+    "PreparedPlanBatchCall",
+    "PreparedRootTurnAdmission",
+    "PreparedSubagentTurnAdmission",
+}
 _TODO_REFINEMENT_ADDED_METHODS = {
     "_queued_root_entry_matches_candidate",
     "_queued_root_revision_matches_candidate",
@@ -288,6 +301,21 @@ _ROUND10_ADDED_TOP_LEVEL_FUNCTIONS = {
     "_subagent_batch_subject_matches",
     "_subagent_context_arguments_match",
 }
+_ROUND9_2_ADDED_TOP_LEVEL_FUNCTIONS = {
+    # Round 9.2 hard-cuts the compiler-private Plan storage conversion into
+    # the one pure public ToolResult settlement/projection constructor shared
+    # by the Plan owner, compiler, and Hook lifecycle seam.
+    "_plan_tool_result_settlement",
+}
+_ROUND9_2_CHANGED_TOP_LEVEL_FUNCTIONS = {
+    # The prompt admission candidate now freezes the exact permission snapshot
+    # used by the shared direct/queued UserPromptSubmit Hook gate.
+    "build_prepared_root_turn_admission",
+    # SubagentStart uses the exact accepted task-start event and permission
+    # carrier prepared by the repository admission owner.
+    "_subagent_turn_admission_payload",
+    "build_prepared_subagent_turn_admission",
+}
 _ROUND10_ADDED_METHODS = {
     "_explicit_result_events",
     "_subagent_batch_task_event",
@@ -312,6 +340,19 @@ _ROUND10_CHANGED_METHODS = {
     "_interrupt_prior_generation",
     "list_subagent_tasks",
     "query_subagent_task",
+}
+_ROUND9_2_ADDED_METHODS = {
+    # Lifecycle owners freeze the exact permission carriers before any Hook
+    # command runs; neither method creates a new durable authority.
+    "prepare_root_permission_snapshot",
+    "prepare_subagent_launch_permission",
+}
+_ROUND9_2_CHANGED_METHODS = {
+    # Both canonical prompt admission owners now consume exact Hook-gated
+    # candidates while retaining their distinct stable-ID formulas.
+    "accept_subagent_turn",
+    "enqueue_prompt",
+    "start_subagent_turn",
 }
 _ROUND10_REMOVED_METHODS = {
     "accept_subagent_child",
@@ -442,6 +483,8 @@ def _round8_repository_delta(current: dict[str, object]) -> dict[str, object]:
         | _ROUND8_ADDED_TOP_LEVEL_FUNCTIONS
         | _ROUND5B_ADDED_TOP_LEVEL_FUNCTIONS
         | _ROUND10_ADDED_TOP_LEVEL_FUNCTIONS
+        | _ROUND9_2_ADDED_TOP_LEVEL_FUNCTIONS
+        | _ROUND9_2_CHANGED_TOP_LEVEL_FUNCTIONS
     )
     changed_methods = (
         _ROUND7_ADDED_METHODS
@@ -452,6 +495,8 @@ def _round8_repository_delta(current: dict[str, object]) -> dict[str, object]:
         | _ROUND5B_CHANGED_METHODS
         | _ROUND10_ADDED_METHODS
         | _ROUND10_CHANGED_METHODS
+        | _ROUND9_2_ADDED_METHODS
+        | _ROUND9_2_CHANGED_METHODS
     )
     runtime = current["runtime"]
     assert isinstance(runtime, dict)
@@ -483,6 +528,7 @@ def _round8_repository_delta(current: dict[str, object]) -> dict[str, object]:
                 | _ROUND5B_ADDED_METHODS
                 | _ROUND5B_RUNTIME_CHANGED_METHODS
                 | _ROUND10_ADDED_METHODS
+                | _ROUND9_2_ADDED_METHODS
             )
             if name in runtime["methods"]
         },
@@ -567,10 +613,12 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
             _ROUND7_ADDED_TOP_LEVEL_FUNCTIONS
             | _ROUND8_ADDED_TOP_LEVEL_FUNCTIONS
             | _ROUND5B_ADDED_TOP_LEVEL_FUNCTIONS
-            | _ROUND10_ADDED_TOP_LEVEL_FUNCTIONS,
+            | _ROUND10_ADDED_TOP_LEVEL_FUNCTIONS
+            | _ROUND9_2_ADDED_TOP_LEVEL_FUNCTIONS,
             (
                 _ROUND7_CHANGED_TOP_LEVEL_FUNCTIONS
                 | _FINGERPRINT_HARD_CUT_CHANGED_TOP_LEVEL_FUNCTIONS
+                | _ROUND9_2_CHANGED_TOP_LEVEL_FUNCTIONS
             ),
         ),
         (
@@ -579,12 +627,14 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
             | _ROUND8_ADDED_METHODS
             | _TODO_REFINEMENT_ADDED_METHODS
             | _ROUND5B_ADDED_METHODS
-            | _ROUND10_ADDED_METHODS,
+            | _ROUND10_ADDED_METHODS
+            | _ROUND9_2_ADDED_METHODS,
             _ROUND7_CHANGED_METHODS
             | _ROUND8_CHANGED_METHODS
             | _ROUND5A2_CHANGED_METHODS
             | _ROUND5B_CHANGED_METHODS
-            | _ROUND10_CHANGED_METHODS,
+            | _ROUND10_CHANGED_METHODS
+            | _ROUND9_2_CHANGED_METHODS,
         ),
     ):
         removed = (
@@ -639,8 +689,9 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
     for name in (
         set(baseline_runtime["dataclasses"])
         - _ROUND8_RUNTIME_REMOVED_DATACLASSES
-        - _ROUND5B_RUNTIME_REMOVED_DATACLASSES
-        - _ROUND8_RUNTIME_CHANGED_DATACLASSES
+            - _ROUND5B_RUNTIME_REMOVED_DATACLASSES
+            - _ROUND8_RUNTIME_CHANGED_DATACLASSES
+            - _ROUND9_2_RUNTIME_CHANGED_DATACLASSES
     ):
         assert (
             current_runtime["dataclasses"][name]
@@ -660,6 +711,7 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
         | _TODO_REFINEMENT_ADDED_METHODS
         | _ROUND5B_ADDED_METHODS
         | _ROUND10_ADDED_METHODS
+        | _ROUND9_2_ADDED_METHODS
     )
     for name in (
         set(baseline_runtime["methods"])
@@ -668,6 +720,7 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
         - _ROUND5A2_CHANGED_METHODS
         - _ROUND5B_RUNTIME_CHANGED_METHODS
         - _ROUND10_CHANGED_METHODS
+        - _ROUND9_2_CHANGED_METHODS
         - _ROUND8_REMOVED_METHODS
         - _TODO_REFINEMENT_REMOVED_METHODS
         - _ROUND5B_REMOVED_METHODS
@@ -700,8 +753,12 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
         | _ROUND5B_REMOVED_METHODS
         | _ROUND10_ADDED_METHODS
         | _ROUND10_CHANGED_METHODS
+        | _ROUND9_2_ADDED_METHODS
+        | _ROUND9_2_CHANGED_METHODS
         | _ROUND10_REMOVED_METHODS
         | _ROUND10_ADDED_TOP_LEVEL_FUNCTIONS
+        | _ROUND9_2_ADDED_TOP_LEVEL_FUNCTIONS
+        | _ROUND9_2_CHANGED_TOP_LEVEL_FUNCTIONS
         | _ROUND5B_ADDED_TOP_LEVEL_FUNCTIONS
         | _ROUND5B_REMOVED_TOP_LEVEL_FUNCTIONS
     )

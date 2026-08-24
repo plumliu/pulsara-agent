@@ -38,7 +38,11 @@ from pulsara_agent.settings import PulsaraSettings, load_env_file
 from pulsara_agent.workspace_identity import (
     HostWorkspaceInput,
     normalize_workspace_kind,
+    resolve_workspace,
 )
+from pulsara_agent.hooks.contracts import HookSourceKind
+from pulsara_agent.hooks.executor import HookSecretScrubSet
+from pulsara_agent.hooks.source import LocalHookSourceProvider
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -96,6 +100,19 @@ def build_parser() -> argparse.ArgumentParser:
         command = _add_env_args(mcp_commands.add_parser(name))
         command.add_argument("server_id")
         command.add_argument("--workspace", default=None)
+
+    hooks = commands.add_parser("hooks", help="Inspect and trust command Hooks.")
+    hook_commands = hooks.add_subparsers(dest="hooks_command")
+    for name in ("list", "inspect", "trust", "revoke", "enable", "disable", "doctor"):
+        command = _add_env_args(hook_commands.add_parser(name))
+        command.add_argument("--workspace", default=None)
+        command.add_argument(
+            "--scope",
+            choices=("user", "workspace"),
+            required=name not in {"list", "doctor"},
+        )
+        if name == "trust":
+            command.add_argument("--expected-definition-digest", required=True)
 
     database = commands.add_parser("db")
     database_commands = database.add_subparsers(dest="db_command")
@@ -189,6 +206,15 @@ def main() -> None:
         except (ValueError, KeyError, RuntimeError) as exc:
             parser.error(_public_error(exc))
         print(json.dumps(result, indent=2, ensure_ascii=False))
+        return
+    if args.command == "hooks":
+        try:
+            result = _hooks_command(args)
+        except (ValueError, KeyError, RuntimeError) as exc:
+            parser.error(_public_error(exc))
+        scrub = HookSecretScrubSet.capture()
+        safe = scrub.scrub_json(result)
+        print(json.dumps(safe, indent=2, ensure_ascii=False))
         return
     if args.command == "config-check":
         try:
@@ -473,6 +499,134 @@ async def _mcp_command(args: argparse.Namespace) -> dict[str, object]:
             "a standalone CLI process cannot control another Host"
         )
     raise ValueError("mcp requires a subcommand")
+
+
+def _hooks_command(args: argparse.Namespace) -> dict[str, object]:
+    _load_env_file_from_args(args)
+    workspace_root = Path(args.workspace or Path.cwd()).expanduser().resolve()
+    workspace = resolve_workspace(
+        HostWorkspaceInput(workspace_kind="project", workspace_root=workspace_root)
+    )
+    provider = LocalHookSourceProvider(
+        workspace_root=workspace.workspace_root,
+        workspace_kind=workspace.workspace_kind,
+        workspace_state_key=workspace.workspace_key,
+    )
+    requested_scope = getattr(args, "scope", None)
+    kinds = (
+        (HookSourceKind.USER_FILE, HookSourceKind.WORKSPACE_FILE)
+        if requested_scope is None
+        else (
+            HookSourceKind.USER_FILE
+            if requested_scope == "user"
+            else HookSourceKind.WORKSPACE_FILE,
+        )
+    )
+
+    def current_snapshot(kind: HookSourceKind):
+        view = provider.discover()
+        return next(
+            item for item in view.source_snapshots if item.provenance.identity.kind is kind
+        )
+
+    command = args.hooks_command
+    if command in {"list", "inspect", "doctor"}:
+        snapshots = tuple(current_snapshot(kind) for kind in kinds)
+        values = [
+            _hook_snapshot_public(item, inspect=command != "list")
+            for item in snapshots
+        ]
+        result: dict[str, object] = {"status": "ok", "sources": values}
+        if command == "doctor":
+            result["compatibility_profile"] = {
+                "events": 11,
+                "clear_producer": False,
+                "transcript_path": None,
+                "supported_handlers": ["command"],
+                "unsupported_handlers": ["prompt", "agent", "http", "mcp_tool"],
+                "output_spill": False,
+                "argument_rewrite": False,
+                "tool_result_rewrite_or_suppression": False,
+                "filesystem_alias": "edit_file/write_file expose apply_patch matcher aliases but retain Pulsara arguments",
+                "terminal_transport": "only terminal exposes Bash; terminal_process and terminal_monitor remain independent",
+                "permission_allow": "PermissionRequest only",
+                "post_tool_exit_2_replacement": False,
+                "context_channel": "untrusted user-role append-only suffix",
+                "trust_boundary": (
+                    "exact normalized command definitions only; scripts, PATH, "
+                    "imports and dependencies are not recursively verified"
+                ),
+                "running_host_refresh": "reload_hooks or restart required",
+            }
+        return result
+    if command is None:
+        raise ValueError("hooks requires a subcommand")
+    kind = kinds[0]
+    subject = provider.source_subject(kind)
+    if command == "trust":
+        expected = args.expected_definition_digest
+
+        def read_current_digest() -> str:
+            snapshot = current_snapshot(kind)
+            digest = snapshot.trust.current_definition_digest
+            if digest is None:
+                raise ValueError("current Hook source is unavailable")
+            return digest
+
+        provider.trust_store.trust_after_revalidation(
+            subject,
+            expected_digest=expected,
+            current_digest_reader=read_current_digest,
+        )
+    elif command == "revoke":
+        provider.trust_store.revoke(subject)
+    elif command == "enable":
+        provider.trust_store.set_enabled(subject, enabled=True)
+    elif command == "disable":
+        provider.trust_store.set_enabled(subject, enabled=False)
+    else:
+        raise ValueError("unknown hooks command")
+    snapshot = current_snapshot(kind)
+    return {
+        "status": "ok",
+        "source": _hook_snapshot_public(snapshot, inspect=False),
+        "notice": "running Hosts require reload_hooks or restart",
+    }
+
+
+def _hook_snapshot_public(snapshot, *, inspect: bool) -> dict[str, object]:
+    value: dict[str, object] = {
+        "scope": snapshot.provenance.identity.visibility_scope.value.lower(),
+        "path": str(snapshot.provenance.identity.canonical_path),
+        "description": snapshot.provenance.description,
+        "source_disposition": snapshot.disposition.value,
+        "trust_disposition": snapshot.trust.disposition.value,
+        "enabled": snapshot.trust.enabled,
+        "definition_digest": snapshot.trust.current_definition_digest,
+        "trusted_definition_digest": snapshot.trust.trusted_definition_digest,
+        "trusted_at": snapshot.trust.trusted_at,
+        "runnable_handler_count": len(snapshot.definitions) if snapshot.runnable else 0,
+        "diagnostics": [
+            {"code": item.code, "message": item.message}
+            for item in snapshot.diagnostics
+        ],
+    }
+    if inspect:
+        value["definitions"] = [
+            {
+                "ordinal": item.source_local_definition_ordinal,
+                "event": item.event_type.external_name,
+                "matcher": item.matcher.pattern,
+                "command": item.command,
+                "commandWindows": item.command_windows,
+                "timeout": item.timeout_seconds,
+                "async": item.asynchronous,
+                "statusMessage": item.status_message,
+                "additionalContextLimit": item.additional_context_limit,
+            }
+            for item in snapshot.definitions
+        ]
+    return value
 
 
 def _mcp_config_public(config: McpServerConfig) -> dict[str, object]:

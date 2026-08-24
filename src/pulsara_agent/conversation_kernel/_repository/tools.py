@@ -52,6 +52,7 @@ class _ToolOperations:
             raise ValueError("machine capability decision is not closed")
         allow = decision == "ALLOW"
         deny = decision == "DENY"
+        result_entry_sequence: int | None = None
         require_confirmation = decision == "REQUIRE_CONFIRMATION"
         if allow != (
             attempt_id is not None
@@ -181,7 +182,7 @@ class _ToolOperations:
                 assert result_id is not None
                 assert result_entry_id is not None
                 assert denial_content is not None
-                entry_sequence = self._allocate_entry_sequence(
+                result_entry_sequence = self._allocate_entry_sequence(
                     connection, guard.session_id
                 )
                 self._insert_entry(
@@ -190,7 +191,7 @@ class _ToolOperations:
                     workspace_id=str(subject["workspace_id"]),
                     turn_id=str(subject["turn_id"]),
                     entry_id=result_entry_id,
-                    entry_sequence=entry_sequence,
+                    entry_sequence=result_entry_sequence,
                     entry_kind=EntryKind.TOOL_RESULT,
                     scope_kind=ConversationScopeKind(
                         str(subject["conversation_scope_kind"])
@@ -252,6 +253,9 @@ class _ToolOperations:
             attempt_id=attempt_id,
             result_entry_id=result_entry_id,
             permission_snapshot_fingerprint=permission_snapshot_fingerprint,
+            result_id=result_id,
+            result_entry_sequence=result_entry_sequence,
+            result_observed_at=occurred_at if deny else None,
         )
 
     def accept_tool_attempt(
@@ -938,6 +942,7 @@ class _ToolOperations:
 
         allow = decision == "ALLOW"
         deny = decision == "DENY"
+        result_entry_sequence: int | None = None
         if not (allow or deny):
             raise ValueError("tool interaction decision must be ALLOW or DENY")
         if allow != (
@@ -973,7 +978,9 @@ class _ToolOperations:
                        d.decision, d.subject_tool_call_entry_id,
                        d.subject_tool_call_id,
                        d.permission_snapshot_fingerprint,
-                       a.id AS attempt_id, r.result_entry_id
+                       a.id AS attempt_id, r.id AS result_id,
+                       r.result_entry_id, r.observed_at AS result_observed_at,
+                       result_entry.entry_sequence AS result_entry_sequence
                 FROM pulsara_v3.session_commands AS c
                 JOIN pulsara_v3.interaction_decisions AS d
                   ON d.session_id = c.session_id
@@ -986,6 +993,9 @@ class _ToolOperations:
                   ON r.session_id = d.session_id
                  AND r.tool_call_entry_id = d.subject_tool_call_entry_id
                  AND r.tool_call_id = d.subject_tool_call_id
+                LEFT JOIN pulsara_v3.transcript_entries AS result_entry
+                  ON result_entry.session_id = r.session_id
+                 AND result_entry.id = r.result_entry_id
                 WHERE c.session_id = %s AND c.command_id = %s
                   AND c.command_kind = 'RESOLVE_INTERACTION'
                 """,
@@ -1013,6 +1023,13 @@ class _ToolOperations:
                     attempt_id,
                     result_entry_id,
                     str(existing["permission_snapshot_fingerprint"]),
+                    None if existing["result_id"] is None else str(existing["result_id"]),
+                    (
+                        None
+                        if existing["result_entry_sequence"] is None
+                        else int(existing["result_entry_sequence"])
+                    ),
+                    existing["result_observed_at"],
                 )
             subject = connection.execute(
                 """
@@ -1150,7 +1167,7 @@ class _ToolOperations:
                 assert result_id is not None
                 assert result_entry_id is not None
                 assert denial_content is not None
-                entry_sequence = self._allocate_entry_sequence(
+                result_entry_sequence = self._allocate_entry_sequence(
                     connection, guard.session_id
                 )
                 self._insert_entry(
@@ -1159,7 +1176,7 @@ class _ToolOperations:
                     workspace_id=str(subject["workspace_id"]),
                     turn_id=str(subject["turn_id"]),
                     entry_id=result_entry_id,
-                    entry_sequence=entry_sequence,
+                    entry_sequence=result_entry_sequence,
                     entry_kind=EntryKind.TOOL_RESULT,
                     scope_kind=ConversationScopeKind(
                         str(subject["conversation_scope_kind"])
@@ -1222,4 +1239,7 @@ class _ToolOperations:
             attempt_id,
             result_entry_id,
             permission_snapshot_fingerprint,
+            result_id,
+            result_entry_sequence,
+            occurred_at if deny else None,
         )

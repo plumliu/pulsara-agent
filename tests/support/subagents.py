@@ -16,7 +16,12 @@ from pulsara_agent.conversation_kernel.repository import (
     ConversationKernelRepository,
     build_prepared_tool_result_acceptance,
 )
+from pulsara_agent.conversation_kernel.cancellation import stable_subagent_turn_id
+from pulsara_agent.conversation_kernel.cancellation import (
+    ActiveTurnCancellationIntent,
+)
 from pulsara_agent.conversation_kernel.subagents.contracts import (
+    PreparedSubagentLaunch,
     PreparedSubagentTaskBatchAdmission,
     PreparedSubagentTaskDraft,
     SubagentContextMode,
@@ -29,6 +34,11 @@ from pulsara_agent.conversation_kernel.subagents.contracts import (
 )
 from pulsara_agent.conversation_kernel.contracts import InlineContent
 from pulsara_agent.primitives.context import freeze_json
+from pulsara_agent.primitives.permission import PermissionMode
+from pulsara_agent.primitives.run_permission import (
+    RunPermissionAdmissionSource,
+    build_run_permission_snapshot,
+)
 from pulsara_agent.ports.artifact import (
     ToolOutputArtifactDisposition,
     ToolResultDisplayKind,
@@ -42,13 +52,74 @@ def _fixture_id(prefix: str) -> str:
     return f"{prefix}:{uuid4().hex}"
 
 
+class ActiveSubagentFixtureId(str):
+    """String-compatible task identity carrying its exact test launch fact."""
+
+    launch: PreparedSubagentLaunch
+
+    def __new__(
+        cls, value: str, launch: PreparedSubagentLaunch
+    ) -> "ActiveSubagentFixtureId":
+        instance = super().__new__(cls, value)
+        instance.launch = launch
+        return instance
+
+
+class StaticSubagentLaunchPreparationPort:
+    """Repository-free launch carrier for isolated manager tests."""
+
+    def __init__(
+        self,
+        *,
+        configured_model_identity: str = "test-pro",
+        permission_mode: PermissionMode = PermissionMode.BYPASS_PERMISSIONS,
+    ) -> None:
+        self._model = configured_model_identity
+        self._permission_mode = permission_mode
+
+    async def prepare_launch(self, candidate):
+        permission = build_run_permission_snapshot(
+            snapshot_id=f"parent-permission:{candidate.parent_turn_id}",
+            requested_mode=self._permission_mode,
+            effective_mode=self._permission_mode,
+            admission_source=RunPermissionAdmissionSource.USER_SUBMISSION,
+        )
+        return PreparedSubagentLaunch(
+            task_start=candidate,
+            child_turn_id=stable_subagent_turn_id(
+                session_id=candidate.session_id,
+                task_id=candidate.task_id,
+            ),
+            configured_model_identity=self._model,
+            parent_permission_snapshot=permission,
+        )
+
+
+async def run_admitted_subagent_fixture(
+    runner: object,
+    task_id: ActiveSubagentFixtureId,
+    *,
+    cancellation_intent: ActiveTurnCancellationIntent | None = None,
+):
+    """Exercise the production two-stage child topology in retained tests."""
+
+    intent = await runner.admit_subagent_turn(  # type: ignore[attr-defined]
+        launch=task_id.launch,
+        cancellation_intent=cancellation_intent,
+    )
+    return await runner.run_admitted_subagent_turn(  # type: ignore[attr-defined]
+        launch=task_id.launch,
+        cancellation_intent=intent,
+    )
+
+
 def accept_active_subagent_fixture(
     repository: ConversationKernelRepository,
     lease: object,
     *,
     parent_turn_id: str,
     objective: str,
-) -> str:
+) -> ActiveSubagentFixtureId:
     """Accept and activate one worker through Round 10's exact product seam."""
 
     guard = lease.guard
@@ -177,6 +248,20 @@ def accept_active_subagent_fixture(
         candidate=start,
         deadline_monotonic=monotonic() + 30,
     )
+    parent_permission = repository.prepare_subagent_launch_permission(
+        guard,
+        candidate=start,
+        deadline_monotonic=monotonic() + 30,
+    )
+    launch = PreparedSubagentLaunch(
+        task_start=start,
+        child_turn_id=stable_subagent_turn_id(
+            session_id=guard.session_id,
+            task_id=task_id,
+        ),
+        configured_model_identity="test-pro",
+        parent_permission_snapshot=parent_permission,
+    )
     observed_at = datetime.now(timezone.utc)
     result = build_prepared_tool_result_acceptance(
         guard=guard,
@@ -211,7 +296,12 @@ def accept_active_subagent_fixture(
         candidate=result,
         deadline_monotonic=monotonic() + 30,
     )
-    return task_id
+    return ActiveSubagentFixtureId(task_id, launch)
 
 
-__all__ = ["accept_active_subagent_fixture"]
+__all__ = [
+    "ActiveSubagentFixtureId",
+    "StaticSubagentLaunchPreparationPort",
+    "accept_active_subagent_fixture",
+    "run_admitted_subagent_fixture",
+]

@@ -244,6 +244,16 @@ _SOURCE_POLICY = {
         ),
         ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
     ),
+    ContextSourceKind.HOOK_CONTEXT: (
+        "pulsara.hook-context.v1",
+        ContextChannel.RUNTIME_OBSERVATION,
+        ContextTrustClass.UNTRUSTED_OBSERVATION,
+        ContextBudgetClass.IMPORTANT,
+        68,
+        60,
+        (ContextRenderMode.FULL, ContextRenderMode.COMPACT),
+        ContextSourceLifecycle.ONE_SHOT,
+    ),
     ContextSourceKind.COMPACTION_RUNTIME_HANDOFF: (
         "pulsara.compaction-runtime-handoff.v2-complete-todo",
         ContextChannel.RUNTIME_OBSERVATION,
@@ -325,6 +335,9 @@ _SOURCE_ABSENCE_POLICY = {
             ContextSourceAbsenceKind.EXPLICIT_EMPTY,
             ContextSourceAbsenceKind.UNAVAILABLE,
         }
+    ),
+    ContextSourceKind.HOOK_CONTEXT: frozenset(
+        {ContextSourceAbsenceKind.EXPLICIT_EMPTY}
     ),
     ContextSourceKind.COMPACTION_RUNTIME_HANDOFF: frozenset(
         {
@@ -1099,6 +1112,10 @@ class StructuredModelInputCompiler:
                         or previous.semantic_fingerprint != semantic
                     )
             elif absence is not None:
+                if absence.source_kind is ContextSourceKind.HOOK_CONTEXT:
+                    # HOOK_CONTEXT is advisory ONE_SHOT data.  An empty future
+                    # slot has no provider-visible clearing semantics.
+                    continue
                 contract_version = absence.source_contract_version
                 trust = absence.trust_class
                 placement = absence.placement_ordinal
@@ -1489,6 +1506,11 @@ class StructuredModelInputCompiler:
                 raise StructuredModelInputCompileError(
                     ModelInputCompileFailureKind.REQUIRED_SOURCE_UNAVAILABLE
                 )
+            if absence.source_kind is ContextSourceKind.HOOK_CONTEXT:
+                # HOOK_CONTEXT is an advisory ONE_SHOT suffix.  Its absence on
+                # a later call must neither clear the installed observation nor
+                # synthesize a second provider-visible message.
+                continue
             previous = previous_heads.get(absence.source_kind)
             if (
                 absence.lifecycle is ContextSourceLifecycle.CALL_APPEND

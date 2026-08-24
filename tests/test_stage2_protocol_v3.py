@@ -325,6 +325,9 @@ class _InteractionRepository:
             kwargs["attempt_id"],
             kwargs["result_entry_id"],
             str(kwargs["permission_snapshot_fingerprint"]),
+            kwargs.get("result_id"),
+            1 if kwargs["result_entry_id"] is not None else None,
+            kwargs["occurred_at"] if kwargs["result_entry_id"] is not None else None,
         )
 
 

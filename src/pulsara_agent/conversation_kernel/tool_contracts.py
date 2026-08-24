@@ -7,7 +7,9 @@ Tool owners.  It owns no repository, provider adapter, Host, or executor.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import StrEnum
+from pathlib import Path
 from typing import Mapping, Protocol
 
 from pulsara_agent.conversation_kernel.capability_composition import (
@@ -35,6 +37,7 @@ from pulsara_agent.model_input.contracts import (
     FrozenCanonicalCompileSnapshot,
     FrozenCompiledModelInput,
     ModelInputScopeKind,
+    ProviderToolResultContextMetadata,
 )
 from pulsara_agent.model_input.continuity import (
     ProcessLocalProviderInputInstallPermit,
@@ -44,12 +47,26 @@ from pulsara_agent.conversation_kernel.subagents.contracts import (
 )
 from pulsara_agent.ports.tool_execution import (
     ToolOutputArtifactCandidate,
+    ToolOutputSourceCoverage,
+    ToolOutputSourceCoverageReason,
+)
+from pulsara_agent.ports.artifact import (
+    ToolOutputArtifactDisposition,
+    ToolOutputArtifactUnavailabilityReason,
+    ToolResultDisplayKind,
 )
 from pulsara_agent.primitives.permission import PermissionMode
+from pulsara_agent.primitives.context import FrozenJsonObjectFact
+from pulsara_agent.primitives.tool_result_projection import (
+    FrozenToolResultDeliveryRequirement,
+    classify_tool_result_delivery,
+)
 from pulsara_agent.primitives.run_permission import FrozenRunPermissionSnapshot
 from pulsara_agent.primitives.tool_observation import (
     PhysicalToolObservationSupplement,
+    ToolObservationOrigin,
     TrustedToolObservationSupplement,
+    freeze_tool_observation_timing_fact,
 )
 
 
@@ -224,6 +241,10 @@ class KernelToolAuthorization:
     accepted_attempt_id: str | None = None
     accepted_result_entry_id: str | None = None
     accepted_permission_snapshot_fingerprint: str | None = None
+    accepted_result_id: str | None = None
+    accepted_result_entry_sequence: int | None = None
+    accepted_result_observed_at: datetime | None = None
+    accepted_result_public_body: str | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if (
@@ -245,9 +266,234 @@ class KernelToolAuthorization:
             self.accepted_permission_snapshot_fingerprint is not None
         ):
             raise ValueError("accepted attempt permission attribution is incomplete")
+        if (self.accepted_result_entry_id is not None) != all(
+            value is not None
+            for value in (
+                self.accepted_result_id,
+                self.accepted_result_entry_sequence,
+                self.accepted_result_observed_at,
+                self.accepted_result_public_body,
+            )
+        ):
+            raise ValueError("accepted no-attempt ToolResult facts are incomplete")
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedResolvedToolInvocation:
+    requested_tool_name: str
+    canonical_tool_name: str
+    external_tool_name: str
+    pulsara_tool_name: str | None
+    resolved_arguments: FrozenJsonObjectFact
+
+    def __post_init__(self) -> None:
+        if not all(
+            (
+                self.requested_tool_name,
+                self.canonical_tool_name,
+                self.external_tool_name,
+            )
+        ) or not isinstance(self.resolved_arguments, FrozenJsonObjectFact):
+            raise ValueError("prepared resolved Tool invocation is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedToolPreparationRejection:
+    requested_tool_name: str
+    post_tool_name: str
+    post_external_tool_name: str
+    post_pulsara_tool_name: str | None
+    post_arguments: FrozenJsonObjectFact
+    authorization: KernelToolAuthorization
+
+    def __post_init__(self) -> None:
+        if (
+            not self.requested_tool_name
+            or not self.post_tool_name
+            or not self.post_external_tool_name
+            or self.authorization.kind
+            not in {
+                KernelToolAuthorizationKind.INVALID_ARGUMENTS,
+                KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
+            }
+            or not isinstance(self.post_arguments, FrozenJsonObjectFact)
+        ):
+            raise ValueError("prepared Tool rejection is invalid")
+
+
+type PreparedToolInvocation = (
+    PreparedResolvedToolInvocation | PreparedToolPreparationRejection
+)
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedPermissionRequest:
+    """Exact process-local ASK carrier; it is neither a decision nor a permit."""
+
+    tool_call_id: str
+    turn_id: str
+    scope_kind: ModelInputScopeKind
+    scope_subagent_task_id: str | None
+    request_nonce: object = field(repr=False, compare=False)
+    pending_state_key: object | None = field(repr=False, compare=False)
+    pending_admission: object | None = field(repr=False, compare=False)
+    pending_permit: object | None = field(repr=False, compare=False)
+    pending_meta_invocation: object | None = field(repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if (
+            not self.tool_call_id
+            or not self.turn_id
+            or (self.scope_kind is ModelInputScopeKind.ROOT)
+            != (self.scope_subagent_task_id is None)
+            or (self.pending_state_key is None)
+            != (self.pending_admission is None and self.pending_permit is None)
+            or (
+                self.pending_meta_invocation is not None
+                and self.pending_state_key is None
+            )
+        ):
+            raise ValueError("prepared permission request is inconsistent")
+
+
+@dataclass(frozen=True, slots=True)
+class FrozenToolResultPublicProjectionInput:
+    canonical_body: str = field(repr=False)
+    metadata: ProviderToolResultContextMetadata
+    delivery: FrozenToolResultDeliveryRequirement
+
+    def __post_init__(self) -> None:
+        self.canonical_body.encode("utf-8")
+        if not isinstance(self.metadata, ProviderToolResultContextMetadata):
+            raise TypeError("ToolResult public metadata must be frozen")
+        if not isinstance(self.delivery, FrozenToolResultDeliveryRequirement):
+            raise TypeError("ToolResult delivery requirement must be frozen")
+
+
+@dataclass(frozen=True, slots=True)
+class AcceptedCanonicalToolResultSettlement:
+    scope_kind: ModelInputScopeKind
+    scope_subagent_task_id: str | None
+    turn_id: str
+    assistant_entry_id: str
+    call_ordinal: int
+    tool_name: str
+    tool_call_id: str
+    public_arguments: FrozenJsonObjectFact
+    result_id: str
+    result_entry_id: str
+    accepted_entry_sequence: int
+    result_state: str
+    result_origin_kind: str
+    public_projection: FrozenToolResultPublicProjectionInput
+
+    def __post_init__(self) -> None:
+        if (
+            (self.scope_kind is ModelInputScopeKind.ROOT)
+            != (self.scope_subagent_task_id is None)
+            or not all(
+                (
+                    self.turn_id,
+                    self.assistant_entry_id,
+                    self.tool_name,
+                    self.tool_call_id,
+                    self.result_id,
+                    self.result_entry_id,
+                    self.result_state,
+                )
+            )
+            or self.call_ordinal < 0
+            or self.accepted_entry_sequence < 1
+            or self.result_origin_kind
+            not in {"PHYSICAL_ATTEMPT", "POLICY_NO_ATTEMPT", "PLAN_CONTROL"}
+            or not isinstance(self.public_arguments, FrozenJsonObjectFact)
+        ):
+            raise ValueError("accepted canonical ToolResult settlement is invalid")
+
+
+def build_accepted_canonical_tool_result_settlement(
+    *,
+    session_id: str,
+    scope_kind: ModelInputScopeKind,
+    scope_subagent_task_id: str | None,
+    turn_id: str,
+    assistant_entry_id: str,
+    call_ordinal: int,
+    tool_name: str,
+    tool_call_id: str,
+    public_arguments: FrozenJsonObjectFact,
+    result_id: str,
+    result_entry_id: str,
+    accepted_entry_sequence: int,
+    result_state: str,
+    result_origin_kind: str,
+    canonical_body: str,
+    observed_at: datetime,
+    observation_origin: ToolObservationOrigin,
+    observation_duration_microseconds: int | None = None,
+    tool_reported_duration_microseconds: int | None = None,
+    display_kind: ToolResultDisplayKind = ToolResultDisplayKind.COMPLETE,
+    artifact_disposition: ToolOutputArtifactDisposition = (
+        ToolOutputArtifactDisposition.NOT_REQUIRED
+    ),
+    artifact_id: str | None = None,
+    source_coverage: ToolOutputSourceCoverage = ToolOutputSourceCoverage.COMPLETE,
+    source_coverage_reason: ToolOutputSourceCoverageReason | None = None,
+    artifact_unavailability_reason: (
+        ToolOutputArtifactUnavailabilityReason | None
+    ) = None,
+    model_visible_memory_fact_ids: tuple[str, ...] = (),
+) -> AcceptedCanonicalToolResultSettlement:
+    """Freeze the one post-FULL, repository-neutral ToolResult carrier."""
+
+    timing = freeze_tool_observation_timing_fact(
+        session_id=session_id,
+        turn_id=turn_id,
+        observed_at=observed_at,
+        observation_duration_microseconds=observation_duration_microseconds,
+        tool_reported_duration_microseconds=tool_reported_duration_microseconds,
+        observation_origin=observation_origin,
+    )
+    metadata = ProviderToolResultContextMetadata(
+        result_id=result_id,
+        result_state=result_state,
+        display_kind=display_kind,
+        artifact_disposition=artifact_disposition,
+        artifact_id=artifact_id,
+        source_coverage=source_coverage,
+        source_coverage_reason=source_coverage_reason,
+        artifact_unavailability_reason=artifact_unavailability_reason,
+        model_visible_memory_fact_ids=model_visible_memory_fact_ids,
+        timing=timing,
+    )
+    return AcceptedCanonicalToolResultSettlement(
+        scope_kind=scope_kind,
+        scope_subagent_task_id=scope_subagent_task_id,
+        turn_id=turn_id,
+        assistant_entry_id=assistant_entry_id,
+        call_ordinal=call_ordinal,
+        tool_name=tool_name,
+        tool_call_id=tool_call_id,
+        public_arguments=public_arguments,
+        result_id=result_id,
+        result_entry_id=result_entry_id,
+        accepted_entry_sequence=accepted_entry_sequence,
+        result_state=result_state,
+        result_origin_kind=result_origin_kind,
+        public_projection=FrozenToolResultPublicProjectionInput(
+            canonical_body=canonical_body,
+            metadata=metadata,
+            delivery=classify_tool_result_delivery(
+                tool_name=tool_name,
+                result_state=result_state,
+            ),
+        ),
+    )
 
 
 class ToolSurfacePlanningPort(Protocol):
+    def snapshot_terminal_cwd(self) -> Path: ...
+
     def sealed_builtin_capability_snapshot(
         self,
         *,
@@ -302,6 +548,16 @@ class ToolSurfacePlanningPort(Protocol):
 
 
 class ToolInvocationPort(Protocol):
+    def snapshot_terminal_cwd(self) -> Path: ...
+
+    def prepare_resolved_invocation(
+        self,
+        *,
+        tool_name: str,
+        arguments: Mapping[str, object],
+        surface_borrow: ProcessLocalToolSurfaceBorrow,
+    ) -> PreparedToolInvocation: ...
+
     async def authorize(
         self,
         *,
@@ -318,11 +574,22 @@ class ToolInvocationPort(Protocol):
     async def request_confirmation(
         self,
         *,
+        prepared_request: PreparedPermissionRequest,
         tool_name: str,
-        tool_call_id: str,
-        turn_id: str,
         assistant_entry_id: str,
         permission_snapshot: FrozenRunPermissionSnapshot,
+    ) -> KernelToolAuthorization: ...
+
+    def prepare_permission_request(
+        self,
+        *,
+        tool_call_id: str,
+        turn_id: str,
+        surface_borrow: ProcessLocalToolSurfaceBorrow,
+    ) -> PreparedPermissionRequest: ...
+
+    def resolve_hook_permission(
+        self, *, prepared_request: PreparedPermissionRequest, allow: bool
     ) -> KernelToolAuthorization: ...
 
     async def invoke(
@@ -346,6 +613,9 @@ class ToolInvocationPort(Protocol):
 
 
 __all__ = [
+    "AcceptedCanonicalToolResultSettlement",
+    "build_accepted_canonical_tool_result_settlement",
+    "FrozenToolResultPublicProjectionInput",
     "KernelToolAuthorization",
     "KernelToolAuthorizationKind",
     "KernelToolInvocationContext",
@@ -356,6 +626,10 @@ __all__ = [
     "ProcessLocalEffectSettlementOutcome",
     "ProcessLocalEffectSettlementResult",
     "ProcessLocalEffectSettlementToken",
+    "PreparedResolvedToolInvocation",
+    "PreparedPermissionRequest",
+    "PreparedToolInvocation",
+    "PreparedToolPreparationRejection",
     "ToolInvocationPort",
     "ToolSurfacePlanningPort",
 ]

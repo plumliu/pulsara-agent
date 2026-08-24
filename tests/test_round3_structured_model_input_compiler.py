@@ -500,6 +500,16 @@ _SOURCE_FACTS = {
         ),
         ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
     ),
+    ContextSourceKind.HOOK_CONTEXT: (
+        "pulsara.hook-context.v1",
+        ContextChannel.RUNTIME_OBSERVATION,
+        ContextTrustClass.UNTRUSTED_OBSERVATION,
+        ContextBudgetClass.IMPORTANT,
+        68,
+        60,
+        (ContextRenderMode.FULL, ContextRenderMode.COMPACT),
+        ContextSourceLifecycle.ONE_SHOT,
+    ),
     ContextSourceKind.PREVIOUS_TURN_OUTCOME: (
         "pulsara.previous-turn-outcome.v1",
         ContextChannel.RUNTIME_OBSERVATION,
@@ -682,6 +692,7 @@ def _sources(
             ContextSourceAbsenceKind.NOT_APPLICABLE
         ),
         ContextSourceKind.MEMORY_RECALL: ContextSourceAbsenceKind.NOT_APPLICABLE,
+        ContextSourceKind.HOOK_CONTEXT: ContextSourceAbsenceKind.EXPLICIT_EMPTY,
         ContextSourceKind.COMPACTION_RUNTIME_HANDOFF: (
             ContextSourceAbsenceKind.NOT_APPLICABLE
         ),
@@ -3482,13 +3493,13 @@ def test_round3_source_decision_and_compiled_fingerprints_are_golden() -> None:
     )
     compiled = StructuredModelInputCompiler().compile(request)
     assert compiled.source_collection_fingerprint == (
-        "sha256:d0adaaffa8fcee834be28737ca2b18130efc8470873b209f9ee920da4703478d"
+        "sha256:3455b57690a74ddb110a6dd2cc1ced91f372e9836549ef84d83d999e8aaf6e96"
     )
     assert compiled.budget_report.decision_digest == (
         "sha256:caee1ae23a161f2c862947ef5b7b2b9a4ae3093bce6117e00bc13a3a19058fbd"
     )
     assert compiled.compiled_semantic_fingerprint == (
-        "sha256:c2cfdcf3c5279ff5800d3714eb8ca689eee5bb2ab8ccdafd0d178090410b0274"
+        "sha256:82d7a19bdd241275282470799dffd771ced577c8d99888b6ee2e6d88a3e82305"
     )
     assert compiled.final_estimate.total_input_tokens == 268
 
@@ -3545,6 +3556,80 @@ def test_round3_1_compatible_epoch_appends_clock_without_rewriting_prefix() -> N
         "clock=A",
         "clock=B",
     ]
+
+
+def test_round9_2_hook_context_is_one_shot_user_suffix_with_exact_prefix() -> None:
+    compiler = StructuredModelInputCompiler()
+    owner = HostProviderInputContinuityOwner(session_id="session:test")
+    initial = _user("first", sequence=1)
+    first_request = _prepared_request(_snapshot(initial), _sources())
+    _first, installed = _compile_and_install_append(
+        compiler=compiler, owner=owner, request=first_request
+    )
+
+    assistant = FrozenProviderInputItem(
+        FrozenProviderInputItemKind.ASSISTANT,
+        "entry:2",
+        2,
+        "turn:test",
+        "answer",
+    )
+    hook = _candidate(
+        ContextSourceKind.HOOK_CONTEXT,
+        (
+            "HOOK_CONTEXT\nuntrusted full observation",
+            "HOOK_CONTEXT\nuntrusted compact observation",
+        ),
+    )
+    second_request = replace(
+        _prepared_request(_snapshot(initial, assistant), _sources(hook)),
+        context_id="context:hook",
+        model_call_index=2,
+    )
+    _second, successor = _compile_and_install_append(
+        compiler=compiler, owner=owner, request=second_request
+    )
+
+    assert successor.system_prompt == installed.system_prompt
+    assert successor.tools == installed.tools
+    assert successor.messages[: len(installed.messages)] == installed.messages
+    hook_messages = [
+        message
+        for message in successor.messages[len(installed.messages) :]
+        if message.role is MessageRole.USER
+        and message.content
+        and "pulsara_runtime_observation" in message.content[0]
+        and decode_runtime_observation(message).source_kind
+        is ContextSourceKind.HOOK_CONTEXT
+    ]
+    assert len(hook_messages) == 1
+    decoded = decode_runtime_observation(hook_messages[0])
+    assert decoded.trust_class is ContextTrustClass.UNTRUSTED_OBSERVATION
+    assert decoded.body == "HOOK_CONTEXT\nuntrusted full observation"
+
+    follow_up = _user("follow-up", sequence=3)
+    third_request = replace(
+        _prepared_request(
+            _snapshot(initial, assistant, follow_up),
+            _sources(),
+        ),
+        context_id="context:after-hook",
+        model_call_index=3,
+    )
+    _third, third_view = _compile_and_install_append(
+        compiler=compiler, owner=owner, request=third_request
+    )
+    assert third_view.system_prompt == successor.system_prompt
+    assert third_view.tools == successor.tools
+    assert third_view.messages[: len(successor.messages)] == successor.messages
+    assert sum(
+        decode_runtime_observation(message).source_kind
+        is ContextSourceKind.HOOK_CONTEXT
+        for message in third_view.messages
+        if message.role is MessageRole.USER
+        and message.content
+        and "pulsara_runtime_observation" in message.content[0]
+    ) == 1
 
 
 def test_round5a1_reasoning_replay_replaces_exact_assistant_and_keeps_wire_prefix() -> None:

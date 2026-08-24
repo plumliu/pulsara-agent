@@ -231,6 +231,7 @@ def _commit_plan_batch(
                 block_id=block.block_id,
                 tool_call_id=block.tool_call_id,
                 tool_name=block.tool_name,
+                arguments=block.arguments,
                 result_id=(
                     None if is_selected_question else _id("tool-result")
                 ),

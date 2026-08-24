@@ -76,9 +76,16 @@ from pulsara_agent.conversation_kernel.subagents.contracts import (
     parent_context_selection_identity_digest,
     parent_context_source_identity_digest,
 )
+from pulsara_agent.conversation_kernel.subagents.runtime_port import (
+    PreparedExplicitSubagentCompletion,
+    PreparedInferredSubagentCompletion,
+)
 from pulsara_agent.conversation_kernel.tool_contracts import (
+    KernelToolAuthorization,
+    KernelToolAuthorizationKind,
     KernelToolInvocationContext,
     KernelToolResult,
+    PreparedPermissionRequest,
 )
 from pulsara_agent.conversation_kernel.tool_surface import (
     BuiltinExecutionPolicyRef,
@@ -602,6 +609,7 @@ class StaticContextSourceCollector:
             ContextSourceKind.DEPENDENCY_RESULTS: (
                 ContextSourceAbsenceKind.NOT_APPLICABLE
             ),
+            ContextSourceKind.HOOK_CONTEXT: ContextSourceAbsenceKind.EXPLICIT_EMPTY,
         }
         absent = tuple(
             _absent_source(kind, absence)
@@ -699,6 +707,15 @@ class StaticContextSourceCollector:
         return _absent_source(
             ContextSourceKind.ACTIVE_SKILL,
             ContextSourceAbsenceKind.NOT_APPLICABLE,
+        )
+
+    def freeze_hook_context_source(self, **_kwargs: object):
+        return (
+            _absent_source(
+                ContextSourceKind.HOOK_CONTEXT,
+                ContextSourceAbsenceKind.EXPLICIT_EMPTY,
+            ),
+            None,
         )
 
 
@@ -1011,6 +1028,33 @@ class StructuredToolPort:
             raise TypeError("test confirmation lacks a permission snapshot")
         return await self.delegate.request_confirmation(**kwargs)
 
+    def prepare_permission_request(
+        self, *, tool_call_id: str, turn_id: str, surface_borrow
+    ) -> PreparedPermissionRequest:
+        access = surface_borrow.prepared.access
+        return PreparedPermissionRequest(
+            tool_call_id=tool_call_id,
+            turn_id=turn_id,
+            scope_kind=access.conversation_scope_kind,
+            scope_subagent_task_id=access.scope_subagent_task_id,
+            request_nonce=object(),
+            pending_state_key=None,
+            pending_admission=None,
+            pending_permit=None,
+            pending_meta_invocation=None,
+        )
+
+    def resolve_hook_permission(
+        self, *, prepared_request: PreparedPermissionRequest, allow: bool
+    ) -> KernelToolAuthorization:
+        del prepared_request
+        return KernelToolAuthorization(
+            KernelToolAuthorizationKind.ALLOW
+            if allow
+            else KernelToolAuthorizationKind.PERMISSION_DENIED,
+            "test:hook-permission",
+        )
+
     async def invoke(self, **kwargs: object):
         return await self.delegate.invoke(**kwargs)
 
@@ -1066,6 +1110,7 @@ def seal_test_direct_tool_port(port: DirectKernelToolPort) -> None:
         type("_EmptyMemoryPort", (), {"tool_names": ()})()
     )
     port.bind_mcp_supervisor(_EmptyTestMcpCapabilityOwner())  # type: ignore[arg-type]
+    port.bind_hook_reload_port(object())  # type: ignore[arg-type]
     port.seal_builtin_composition()
 
 
@@ -1165,6 +1210,8 @@ def prepare_test_direct_tool_surface(
             port.bind_mcp_supervisor(  # type: ignore[arg-type]
                 _EmptyTestMcpCapabilityOwner()
             )
+        if port._hook_reload is None:  # noqa: SLF001
+            port.bind_hook_reload_port(object())  # type: ignore[arg-type]
         port.seal_builtin_composition()
 
     builtin = port.sealed_builtin_capability_snapshot(
@@ -1408,8 +1455,15 @@ class Round10TestSubagentRuntime:
         return False
 
     async def prepare_inferred_completion(
-        self, *, task_id: str, entry_id: str, public_text: str
+        self,
+        *,
+        task_id: str,
+        entry_id: str,
+        public_text: str,
+        model_id: str,
+        permission_snapshot: FrozenRunPermissionSnapshot,
     ):
+        del model_id, permission_snapshot
         self._require_task(task_id)
         digest = "sha256:" + sha256(public_text.encode("utf-8")).hexdigest()
         result = build_subagent_result_public_fact(
@@ -1420,7 +1474,7 @@ class Round10TestSubagentRuntime:
             summary=public_text or "Task completed without public text.",
             source_assistant_content_digest=digest,
         )
-        return object(), result
+        return PreparedInferredSubagentCompletion(object(), result)
 
     async def prepare_explicit_completion(
         self,
@@ -1428,7 +1482,11 @@ class Round10TestSubagentRuntime:
         task_id: str,
         result_entry_id: str,
         arguments: dict[str, object],
+        last_assistant_message: str | None,
+        model_id: str,
+        permission_snapshot: FrozenRunPermissionSnapshot,
     ):
+        del last_assistant_message, model_id, permission_snapshot
         self._require_task(task_id)
         summary = arguments.get("summary")
         preview = arguments.get("output_preview")
@@ -1455,7 +1513,9 @@ class Round10TestSubagentRuntime:
                 separators=(",", ":"),
             ).encode(),
         )
-        return object(), result, acknowledgement
+        return PreparedExplicitSubagentCompletion(
+            object(), result, acknowledgement
+        )
 
     async def finish_completion(self, _permit: object, *, committed: bool) -> None:
         if not committed:

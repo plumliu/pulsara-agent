@@ -1,0 +1,177 @@
+{
+  "schema_version": "round9-2-hook-subsystem-activation.v1",
+  "status": "activated",
+  "generated_at_utc": "2026-08-24T01:35:29Z",
+  "working_tree_authority": "The 2026-08-24 final merge review closed two additional failure-only paths: post-adoption compaction errors now preserve the canonical winner and cannot fall back to an ordinary provider path, and non-regular Hook sources cannot block before deadline observation. Retained full pytest, PostgreSQL, Ruff, compileall, and diff checks were rerun after these fixes. Clean-v0, protocol, lock, and real-provider/command evidence are retained from the immediately preceding activation because this diff changes no schema, protocol, dependency, or successful provider/Hook path. No file was staged, committed, reset, or pushed.",
+  "evidence_disposition": "current_verified_activation_evidence",
+  "authority": "ROUND_9_2_HOOK_SUBSYSTEM_IMPLEMENTATION_SPEC.zh.md",
+  "product": {
+    "sources": [
+      "USER ${PULSARA_HOME}/hooks.json",
+      "exact WORKSPACE <workspace>/.pulsara/hooks.json"
+    ],
+    "handler_profile": "Codex-compatible command handlers",
+    "event_count": 11,
+    "public_stdin_variant_count": 11,
+    "internal_causal_arm_count": 12,
+    "outcome_family_count": 5,
+    "runtime": "one source-agnostic process-local KernelHookDispatcher with one parser, trust store, matcher, executor, output parser, diagnostic adapter, HookContextOwner, and HOOK_CONTEXT compiler source",
+    "plugin_boundary": "Round 9.3 may contribute definitions and provenance to the single publication lane; no Plugin-private Hook engine exists"
+  },
+  "lifecycle_owners": [
+    {
+      "event": "SessionStart",
+      "owner": "ROOT provider-loop owner; compact uses the runner-issued call-local ROOT-only SessionStartCompactPort inside the CompactionCoordinator fence"
+    },
+    {
+      "event": "SessionEnd",
+      "owner": "KernelHostSession terminal lane after producer quiesce and ordinary fence, before dispatcher/process/repository physical close"
+    },
+    {
+      "event": "UserPromptSubmit",
+      "owner": "KernelHostSession NewTurnHookGate shared by direct and queued ingress while preserving their distinct stable identities"
+    },
+    {
+      "event": "PreToolUse",
+      "owner": "ordinary ToolBatchExecutor after exact prepared resolution; PlanToolBatchCoordinator after selected Plan control and whole-batch barrier freeze"
+    },
+    {
+      "event": "PermissionRequest",
+      "owner": "existing permission owner only after it has selected ASK and issued the exact pending request"
+    },
+    {
+      "event": "PostToolUse",
+      "owner": "ordinary ToolBatchExecutor or Plan immediate/delayed interaction owner after canonical/effect FULL, consuming the shared accepted settlement and Round 7.1 projection"
+    },
+    {
+      "event": "PreCompact",
+      "owner": "CompactionCoordinator after global-lane and exact-scope fence acquisition, before snapshot write or summary provider call"
+    },
+    {
+      "event": "PostCompact",
+      "owner": "CompactionCoordinator after canonical adoption FULL and before any active final successor install/open"
+    },
+    {
+      "event": "SubagentStart",
+      "owner": "subagent scheduler after task FULL and PreparedSubagentLaunch, before live child install and first compile"
+    },
+    {
+      "event": "SubagentStop",
+      "owner": "subagent completion owner after freezing the EXPLICIT/INFERRED candidate and before SubagentResult/composite commit"
+    },
+    {
+      "event": "Stop",
+      "owner": "ROOT runner after freezing a natural final assistant candidate and before PreparedAssistantMessageSettlement commit"
+    }
+  ],
+  "hard_cuts": {
+    "compaction": "Pre-adoption dry dispatch proves only the no-Hook cold base and never installs. After adoption FULL, PostCompact and ROOT-only SessionStart(compact) run inside the coordinator fence; no-Hook/Hook siblings are rebuilt from the same post-adoption facts, and exactly one final continuity install/open path remains. Installed-base augmentation, second CAS, revoke/supersede, runner back-reference, and service locator paths are absent.",
+    "round5b": "The active Round 5B specification and retained tests now assert no-Hook dry-base feasibility plus same-post-adoption-facts final sibling invariants instead of obsolete dry/actual full-field equality.",
+    "plan_tool_result": "Ordinary, Plan immediate/delayed, and subagent composite results keep their canonical transaction owners but converge after FULL on one process-local AcceptedCanonicalToolResultSettlement and one pure Round 7.1 public projection. Plan controls create no physical attempt and Hook never queries storage or rebuilds result bodies.",
+    "subagent_entry": "The combined child admission/loop entry was removed in favor of pre-live admission plus admitted run_accepted_turn, with continuity and memory scope cleanup retained in every terminal branch.",
+    "compatibility": "No legacy alias, dual read/write, migration-period fallback, compatibility flag, generic mutable event bus, or Plugin-private runtime path was retained."
+  },
+  "current_code_defect_closure": {
+    "launch_vs_stop": "A terminal winner cannot install a live child or emit ACTIVE; both SPAWNING and LAUNCHING race sides are covered, including cancellation before the admitted child coroutine body starts.",
+    "subagent_close_deadline": "KernelSubagentManager.aclose applies the Host absolute deadline from the first admission/scheduler join and preserves deadline-after no-detach terminate/kill/drain.",
+    "late_threshold_compaction": "NOT_NEEDED with successor=None is decided once for one planning token/cut and then continues the ordinary provider path without a retry cap."
+  },
+  "activation_review_closure": {
+    "queued_prompt_context": "Queued synchronous context remains in an exact queue_item_id-bound process-local slot through enqueue FULL and moves to the ROOT bucket only after exact queue-head consumption FULL and successful live task installation. Active A cannot freeze queued B context.",
+    "session_start_boundary": "One runner/Host-owned pending cold-boundary slot covers startup/resume, active compact, and idle/historical compact. Adoption FULL arms compact, compact-before-first-open supersedes launch source, and child paths receive no port.",
+    "post_adoption_revalidation": "After PostCompact settles, the coordinator reads turn status once within the inherited successor deadline. A private process-local carrier preserves the exact COMPACTED snapshot/revision through the outer fence/manual seam; the manual waiter sees the canonical winner, the original cancellation/stale/permanent cause propagates to the active caller, and no FAILED result can re-enter ordinary provider planning. BLOCK remains active control only for RUNNING.",
+    "api_key_spawn_sink": "Immediately before process creation the executor re-snapshots the exact active API key and rejects the reviewed command, final environment, or stdin on any current/retained exact match without rewriting the command.",
+    "session_start_deadline": "Initial SessionStart inherits the already-frozen planning deadline and compact SessionStart facts carry the exact successor deadline; neither path refreshes an owner deadline.",
+    "bounded_source_observation": "Cold discovery runs once in a worker thread with the Host-open absolute deadline and injects the exact frozen view. The final component is opened nonblocking before fstat, so FIFO/non-regular sources become UNAVAILABLE without waiting for a peer. dev/inode/size/mtime_ns/ctime_ns changes, including same-inode same-size rewrites, become DISCOVERY_RACED; timeout makes only the exact source UNAVAILABLE."
+  },
+  "continuity_and_durability": {
+    "same_epoch_system_byte_identical": true,
+    "same_epoch_tools_exact_equal": true,
+    "same_epoch_messages_suffix_only": true,
+    "hook_context": "user-role, UNTRUSTED_OBSERVATION, placement 68, one-shot, same-scope, advisory and omittable",
+    "new_rebase_boundary": false,
+    "new_database_relation_column_or_migration": false,
+    "new_durable_hook_receipt_history_replay_checkpoint_queue_or_recovery": false,
+    "new_arbitrary_total_or_lifetime_cap": false,
+    "oracle": {
+      "committed_events": 29,
+      "live_events": 24,
+      "subject_slots": 11,
+      "append_guards": 1,
+      "product_relations": 25,
+      "durable_jobs": 0,
+      "hook_events": 11
+    }
+  },
+  "secret_boundary": {
+    "only_secret": "the exact non-empty PULSARA_API_KEY value",
+    "command_admission_environment_stdin_stdout_stderr_exception_diagnostic_context_and_provider_sinks_closed": true,
+    "reviewed_command_executed_without_rewrite": true,
+    "host_os_identity_execution_not_sandbox_claim": true
+  },
+  "verification": {
+    "retained_full_pytest": "922 passed in 159.52s",
+    "postgres_full": "223 passed, 699 deselected in 119.23s",
+    "clean_v0_reset_migrate_deep_verification": "12 passed in 3.27s; fresh version-0 install, repeat migrate, deep verification, drift and reset-required gates",
+    "round9_2_core_and_postgres_integration": "19 unit and 9 PostgreSQL integration nodes included in the retained full/PostgreSQL runs; the added unit node is the bounded FIFO/non-regular source regression, and the post-adoption test now traverses the outer execution/manual settlement seam",
+    "subagent_race_and_absolute_close_deadline": "included in retained full pytest",
+    "plan_postgres_adjacent": "included in retained full and PostgreSQL runs",
+    "mcp_underlying_identity_adjacent": "included in retained full and PostgreSQL runs",
+    "ruff_all_files": "passed",
+    "compileall_src_tests_tools": "passed",
+    "terminal_protocol_generator_check": "passed",
+    "uv_lock_check": "passed; resolved 64 packages",
+    "git_diff_check": "passed",
+    "new_skip_or_xfail": 0
+  },
+  "real_provider_and_command_dogfood": {
+    "status": "passed",
+    "command": "uv run python tools/run_round9_2_hook_dogfood.py --env-file .env",
+    "provider_api": "openai_chat_completions",
+    "provider_model": "meta/muse-spark-1.2-contributor",
+    "trace": "benchmarks/suites/core/v1/round9_2_hook_subsystem_trace.json",
+    "hook_command_invocations": 70,
+    "provider_requests": 24,
+    "provider_opens": 24,
+    "compaction_summary_provider_requests": 4,
+    "canonical_tool_results": 12,
+    "lifecycle_events_observed": 11,
+    "user_prompt_context_observed": true,
+    "workspace_pretool_deny_then_model_recovery": true,
+    "permission_allow_and_deny_observed": true,
+    "posttool_round7_1_projection_feedback_observed": true,
+    "background_output_delivered_at_later_safe_point": true,
+    "queued_b_context_visible_to_active_a": false,
+    "queued_b_context_visible_to_admitted_b": true,
+    "queued_active_a_provider_request_count": 2,
+    "queued_b_provider_request_count": 1,
+    "active_compaction_disposition": "COMPACTED",
+    "compact_final_successor_open_count": 1,
+    "root_compact_session_start_observed": true,
+    "idle_compaction_disposition": "COMPACTED",
+    "idle_deferred_compact_session_start_open_count": 1,
+    "subagent_start_stop_observed": true,
+    "subagent_stop_active_flags": [
+      false,
+      true
+    ],
+    "root_stop_active_flags": [
+      false,
+      true
+    ],
+    "plan_question_and_exit_result_origin": "PLAN_CONTROL",
+    "plan_physical_attempt_created": false,
+    "reload_user_trust_after_edit": "MODIFIED",
+    "user_invocations_after_modified_view_publication": 0,
+    "hook_child_api_key_present": false,
+    "trace_recursively_scrubbed_and_exact_secret_postchecked": true,
+    "ephemeral_database_dropped": true
+  },
+  "activation_artifacts": [
+    "ROUND_9_2_HOOK_SUBSYSTEM_IMPLEMENTATION_SPEC.zh.md",
+    "benchmarks/suites/core/v1/round9_2_hook_subsystem_trace.json",
+    "benchmarks/suites/core/v1/round9_2_hook_subsystem_activation.json"
+  ],
+  "remaining_blockers": [],
+  "external_availability_observations": []
+}

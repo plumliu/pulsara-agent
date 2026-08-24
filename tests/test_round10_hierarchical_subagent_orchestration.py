@@ -7,6 +7,7 @@ from dataclasses import replace
 from hashlib import sha256
 import json
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from time import monotonic
 from types import SimpleNamespace
 from uuid import uuid4
@@ -16,6 +17,9 @@ import pytest
 from pulsara_agent.capability.builtin_catalog import builtin_tool_catalog
 from pulsara_agent.conversation_kernel.contracts import HostWriterGuard, InlineContent
 from pulsara_agent.conversation_kernel.io import KernelSessionIO
+from pulsara_agent.conversation_kernel.execution_watchdogs import (
+    KernelExecutionDeadlineFactory,
+)
 from pulsara_agent.conversation_kernel.live import LiveAgentEventBus
 from pulsara_agent.conversation_kernel.cancellation import stable_subagent_turn_id
 from pulsara_agent.conversation_kernel.cold_epoch import build_subagent_initial_seed
@@ -31,6 +35,9 @@ from pulsara_agent.conversation_kernel.subagent import (
     ROOT_ORCHESTRATION_TOOL_NAMES,
     SUBAGENT_TOOL_NAMES,
     KernelSubagentManager,
+)
+from pulsara_agent.conversation_kernel.subagents.launch import (
+    CanonicalSubagentLaunchPreparationPort,
 )
 from pulsara_agent.conversation_kernel.tool_policy import (
     DefaultToolDispatchAuthorizationPolicy,
@@ -48,6 +55,10 @@ from pulsara_agent.conversation_kernel.subagents.contracts import (
 from pulsara_agent.conversation_kernel.todo_runtime import TodoRunStateOwner
 from pulsara_agent.primitives.context import freeze_json
 from pulsara_agent.primitives.permission import PermissionMode
+from pulsara_agent.primitives.run_permission import (
+    RunPermissionAdmissionSource,
+    build_run_permission_snapshot,
+)
 from pulsara_agent.model_input.contracts import (
     FrozenProviderInputItemKind,
     ModelInputScopeKind,
@@ -55,7 +66,10 @@ from pulsara_agent.model_input.contracts import (
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 from tests.support.postgres import verified_postgres_provider
 from tests.support.round3 import prepare_test_direct_tool_surface
-from tests.support.subagents import accept_active_subagent_fixture
+from tests.support.subagents import (
+    StaticSubagentLaunchPreparationPort,
+    accept_active_subagent_fixture,
+)
 
 
 def _id(prefix: str) -> str:
@@ -69,6 +83,25 @@ def _round10_id(namespace: str, *parts: str) -> str:
         digest.update(part.encode("utf-8"))
         digest.update(b"\0")
     return f"{namespace}:{digest.hexdigest()}"
+
+
+def _manager_launch_kwargs(
+    repository: ConversationKernelRepository | None = None,
+    guard: HostWriterGuard | None = None,
+) -> dict[str, object]:
+    launch_preparation = StaticSubagentLaunchPreparationPort()
+    if repository is not None and guard is not None:
+        launch_preparation = CanonicalSubagentLaunchPreparationPort(  # type: ignore[assignment]
+            repository=repository,
+            guard=guard,
+            io_owner=KernelSessionIO(),
+            configured_model_identity="test-pro",
+            deadline_factory=KernelExecutionDeadlineFactory(),
+        )
+    return {
+        "launch_preparation": launch_preparation,
+        "terminal_cwd": Path.cwd,
+    }
 
 
 def test_round10_tool_inventory_and_result_fact_are_closed() -> None:
@@ -377,6 +410,8 @@ def test_round10_subagent_initial_seed_exact_joins_child_cut_and_none_sources(
         turn_id=child_turn,
         entry_id=_id("entry"),
         context_binding_revision_id=_id("revision"),
+        task_start_event_id=task_id.launch.task_start.event_id,
+        expected_parent_permission_snapshot=(task_id.launch.parent_permission_snapshot),
         content=InlineContent.from_bytes(objective.encode("utf-8")),
         occurred_at=datetime.now(timezone.utc),
         actor_id=task_id,
@@ -442,6 +477,7 @@ def test_round10_all_root_orchestration_tools_are_bypass_only_before_owner_io(
 ) -> None:
     async def exercise() -> None:
         manager = KernelSubagentManager(
+            **_manager_launch_kwargs(),
             repository=SimpleNamespace(),  # no operation may reach it
             guard=HostWriterGuard("session:test", 7, "host:test"),
             host_owner_id="host:test",
@@ -516,6 +552,7 @@ def test_round10_all_root_orchestration_tools_are_bypass_only_before_owner_io(
 def test_round10_send_and_completion_share_one_exact_linearization() -> None:
     async def exercise() -> None:
         manager = KernelSubagentManager(
+            **_manager_launch_kwargs(),
             repository=SimpleNamespace(),
             guard=HostWriterGuard("session:test", 1, "host:test"),
             host_owner_id="host:test",
@@ -527,12 +564,37 @@ def test_round10_send_and_completion_share_one_exact_linearization() -> None:
             ),
         )
         task_id = "task:test"
+        parent_permission = build_run_permission_snapshot(
+            snapshot_id="permission:parent",
+            requested_mode=PermissionMode.BYPASS_PERMISSIONS,
+            effective_mode=PermissionMode.BYPASS_PERMISSIONS,
+            admission_source=RunPermissionAdmissionSource.USER_SUBMISSION,
+        )
+        child_permission = build_run_permission_snapshot(
+            snapshot_id="permission:child",
+            requested_mode=PermissionMode.BYPASS_PERMISSIONS,
+            effective_mode=PermissionMode.BYPASS_PERMISSIONS,
+            admission_source=RunPermissionAdmissionSource.SUBAGENT_INHERITANCE,
+            inherited_from_turn_id="turn:parent",
+        )
+        launch = SimpleNamespace(
+            configured_model_identity="test-pro",
+            child_turn_id="turn:child",
+            parent_permission_snapshot=parent_permission,
+            task_start=SimpleNamespace(
+                task_id=task_id,
+                parent_turn_id="turn:parent",
+                profile=SubagentProfileKind.GENERAL_WORKER,
+            ),
+        )
         physical = asyncio.create_task(asyncio.Event().wait())
         manager._tasks[task_id] = SimpleNamespace(
             task_id=task_id,
             status="ACTIVE",
             task=physical,
             cancellation_intent=SimpleNamespace(turn_id="turn:child"),
+            launch=launch,
+            hook_scope=None,
         )
         manager._mailboxes[task_id] = []
         context = SimpleNamespace(
@@ -554,6 +616,8 @@ def test_round10_send_and_completion_share_one_exact_linearization() -> None:
                 task_id=task_id,
                 entry_id="entry:first-final",
                 public_text="premature answer",
+                model_id="test-pro",
+                permission_snapshot=child_permission,
             )
             is None
         )
@@ -565,6 +629,8 @@ def test_round10_send_and_completion_share_one_exact_linearization() -> None:
             task_id=task_id,
             entry_id="entry:real-final",
             public_text="final answer",
+            model_id="test-pro",
+            permission_snapshot=child_permission,
         )
         assert prepared is not None
         context.tool_call_id = "call:late"
@@ -574,7 +640,7 @@ def test_round10_send_and_completion_share_one_exact_linearization() -> None:
             context,
         )
         assert late.state == "TOOL_UNAVAILABLE"
-        await manager.finish_completion(prepared[0], committed=False)
+        await manager.finish_completion(prepared.permit, committed=False)
         physical.cancel()
         await asyncio.gather(physical, return_exceptions=True)
 
@@ -582,7 +648,56 @@ def test_round10_send_and_completion_share_one_exact_linearization() -> None:
 
 
 class _BlockingChildRunner:
-    async def run_subagent_turn(self, **_kwargs: object):
+    async def admit_subagent_turn(self, **kwargs: object):
+        return kwargs["cancellation_intent"]
+
+    async def run_admitted_subagent_turn(self, **_kwargs: object):
+        await asyncio.Event().wait()
+
+
+class _BlockingLaunchPreparation:
+    def __init__(self, inner: object) -> None:
+        self._inner = inner
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def prepare_launch(self, candidate):
+        self.entered.set()
+        await self.release.wait()
+        return await self._inner.prepare_launch(candidate)  # type: ignore[attr-defined]
+
+
+class _BlockingCanonicalAdmissionRunner:
+    def __init__(self, repository: ConversationKernelRepository, lease) -> None:
+        self._repository = repository
+        self._lease = lease
+        self.admission_entered = asyncio.Event()
+        self.admission_release = asyncio.Event()
+        self.run_started = 0
+
+    async def admit_subagent_turn(self, *, launch, cancellation_intent):
+        self.admission_entered.set()
+        await self.admission_release.wait()
+        task_id = launch.task_start.task_id
+        self._repository.start_subagent_turn(
+            self._lease.guard,
+            task_id=task_id,
+            turn_id=cancellation_intent.turn_id,
+            entry_id=_id("entry"),
+            context_binding_revision_id=_id("revision"),
+            task_start_event_id=launch.task_start.event_id,
+            expected_parent_permission_snapshot=(launch.parent_permission_snapshot),
+            content=InlineContent.from_bytes(
+                launch.task_start.objective.encode("utf-8")
+            ),
+            occurred_at=datetime.now(timezone.utc),
+            actor_id=task_id,
+            deadline_monotonic=monotonic() + 30,
+        )
+        return cancellation_intent
+
+    async def run_admitted_subagent_turn(self, **_kwargs: object):
+        self.run_started += 1
         await asyncio.Event().wait()
 
 
@@ -591,7 +706,11 @@ class _CountingBlockingChildRunner:
         self.started: list[str] = []
         self.changed = asyncio.Event()
 
-    async def run_subagent_turn(self, *, task_id: str, **_kwargs: object):
+    async def admit_subagent_turn(self, **kwargs: object):
+        return kwargs["cancellation_intent"]
+
+    async def run_admitted_subagent_turn(self, *, launch, **_kwargs: object):
+        task_id = launch.task_start.task_id
         self.started.append(task_id)
         self.changed.set()
         await asyncio.Event().wait()
@@ -603,24 +722,31 @@ class _CanonicalBlockingChildRunner:
         self._lease = lease
         self.started = asyncio.Event()
 
-    async def run_subagent_turn(
+    async def admit_subagent_turn(
         self,
         *,
-        task_id: str,
-        objective: str,
+        launch,
         cancellation_intent,
-    ) -> KernelRunResult:
+    ):
+        task_id = launch.task_start.task_id
         self._repository.start_subagent_turn(
             self._lease.guard,
             task_id=task_id,
             turn_id=cancellation_intent.turn_id,
             entry_id=_id("entry"),
             context_binding_revision_id=_id("revision"),
-            content=InlineContent.from_bytes(objective.encode("utf-8")),
+            task_start_event_id=launch.task_start.event_id,
+            expected_parent_permission_snapshot=(launch.parent_permission_snapshot),
+            content=InlineContent.from_bytes(
+                launch.task_start.objective.encode("utf-8")
+            ),
             occurred_at=datetime.now(timezone.utc),
             actor_id=task_id,
             deadline_monotonic=monotonic() + 30,
         )
+        return cancellation_intent
+
+    async def run_admitted_subagent_turn(self, **_kwargs: object) -> KernelRunResult:
         self.started.set()
         await asyncio.Event().wait()
         raise AssertionError("canonical blocking child unexpectedly resumed")
@@ -644,13 +770,39 @@ class _CompletingChildRunner:
         self._started = started
         self._source_bodies = source_bodies
 
-    async def run_subagent_turn(
+    async def admit_subagent_turn(
         self,
         *,
-        task_id: str,
-        objective: str,
+        launch,
+        cancellation_intent,
+    ):
+        task_id = launch.task_start.task_id
+        objective = launch.task_start.objective
+        turn_id = launch.child_turn_id
+        self._repository.start_subagent_turn(
+            self._lease.guard,
+            task_id=task_id,
+            turn_id=turn_id,
+            entry_id=_id("entry"),
+            context_binding_revision_id=_id("revision"),
+            task_start_event_id=launch.task_start.event_id,
+            expected_parent_permission_snapshot=(launch.parent_permission_snapshot),
+            content=InlineContent.from_bytes(objective.encode("utf-8")),
+            occurred_at=datetime.now(timezone.utc),
+            actor_id=task_id,
+            deadline_monotonic=monotonic() + 30,
+        )
+        return cancellation_intent
+
+    async def run_admitted_subagent_turn(
+        self,
+        *,
+        launch,
         cancellation_intent,
     ) -> KernelRunResult:
+        del cancellation_intent
+        task_id = launch.task_start.task_id
+        objective = launch.task_start.objective
         self._started.append(objective)
         self._source_bodies[objective] = tuple(
             variant.text
@@ -658,21 +810,7 @@ class _CompletingChildRunner:
             if hasattr(source, "variants")
             for variant in source.variants[:1]
         )
-        turn_id = stable_subagent_turn_id(
-            session_id=self._lease.guard.session_id,
-            task_id=task_id,
-        )
-        self._repository.start_subagent_turn(
-            self._lease.guard,
-            task_id=task_id,
-            turn_id=turn_id,
-            entry_id=_id("entry"),
-            context_binding_revision_id=_id("revision"),
-            content=InlineContent.from_bytes(objective.encode("utf-8")),
-            occurred_at=datetime.now(timezone.utc),
-            actor_id=task_id,
-            deadline_monotonic=monotonic() + 30,
-        )
+        turn_id = launch.child_turn_id
         cut = self._repository.prepare_provider_input_cut(
             self._lease.guard,
             turn_id=turn_id,
@@ -940,6 +1078,179 @@ def _prepare_root_tool_batch(
 
 
 @pytest.mark.postgres
+def test_round9_2_subagent_launch_permit_closes_both_stop_race_sides(
+    stage2_migrated_postgres_database,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+
+    async def stop_wins_before_launch_claim() -> None:
+        session_id = _id("session")
+        lease, context = _prepare_root_tool_attempt(
+            repository,
+            session_id=session_id,
+            workspace_id=_id("workspace"),
+            tool_name="spawn_agent",
+            arguments={"task": "stop before child launch claim"},
+        )
+        launch_kwargs = _manager_launch_kwargs(repository, lease.guard)
+        launch = _BlockingLaunchPreparation(launch_kwargs["launch_preparation"])
+        launch_kwargs["launch_preparation"] = launch
+        manager = KernelSubagentManager(
+            **launch_kwargs,
+            repository=repository,
+            guard=lease.guard,
+            host_owner_id=_id("host"),
+            io_owner=KernelSessionIO(),
+            live_bus=LiveAgentEventBus(),
+            todo_owner=TodoRunStateOwner(
+                session_id=session_id, owner_epoch=_id("todo")
+            ),
+        )
+        runner_factory_calls = 0
+        progress: list[tuple[str, str]] = []
+
+        def runner_factory(_scope):
+            nonlocal runner_factory_calls
+            runner_factory_calls += 1
+            return _BlockingChildRunner()
+
+        manager.bind_runner_factory(runner_factory)  # type: ignore[arg-type]
+        manager._offer_progress = (  # type: ignore[method-assign]
+            lambda _task_id, _parent_turn_id, status, summary: progress.append(
+                (status, summary)
+            )
+        )
+        spawning = asyncio.create_task(
+            manager.invoke(
+                tool_name="spawn_agent",
+                arguments={"task": "stop before child launch claim"},
+                invocation_context=context,
+            )
+        )
+        await asyncio.wait_for(launch.entered.wait(), timeout=5)
+        task_id = _round10_id("subagent-task", context.attempt_id, "0")
+        stopping = asyncio.create_task(
+            manager.invoke(
+                tool_name="stop_agent",
+                arguments={"task_id": task_id},
+                invocation_context=context,
+            )
+        )
+        deadline = monotonic() + 5
+        while not manager._launch_permits[task_id].stop_claimed:
+            assert monotonic() < deadline
+            await asyncio.sleep(0)
+        launch.release.set()
+        stopped, _spawned = await asyncio.gather(stopping, spawning)
+        assert json.loads(stopped.content)["status"] == "cancelled"
+        assert runner_factory_calls == 0
+        assert task_id not in manager._tasks
+        assert all(status != "ACTIVE" for status, _summary in progress)
+        durable = repository.query_subagent_task(
+            session_id=session_id,
+            task_id=task_id,
+            deadline_monotonic=monotonic() + 30,
+        )
+        assert durable is not None
+        assert durable["status"] == "CANCELLED"
+        with provider.connection(
+            lane=PostgresConnectionLane.INSPECTOR,
+            deadline_monotonic=monotonic() + 30,
+        ) as connection:
+            assert connection.execute(
+                "SELECT count(*) FROM pulsara_v3.turns "
+                "WHERE session_id=%s AND scope_subagent_task_id=%s",
+                (session_id, task_id),
+            ).fetchone() == (0,)
+        await manager.aclose(deadline_monotonic=monotonic() + 2)
+
+    async def launch_wins_before_stop_claim() -> None:
+        session_id = _id("session")
+        todo_owner = TodoRunStateOwner(session_id=session_id, owner_epoch=_id("todo"))
+        lease, context = _prepare_root_tool_attempt(
+            repository,
+            session_id=session_id,
+            workspace_id=_id("workspace"),
+            tool_name="spawn_agent",
+            arguments={"task": "stop after child launch claim"},
+        )
+        manager = KernelSubagentManager(
+            **_manager_launch_kwargs(repository, lease.guard),
+            repository=repository,
+            guard=lease.guard,
+            host_owner_id=_id("host"),
+            io_owner=KernelSessionIO(),
+            live_bus=LiveAgentEventBus(),
+            todo_owner=todo_owner,
+        )
+        child = _BlockingCanonicalAdmissionRunner(repository, lease)
+        progress: list[tuple[str, str]] = []
+        manager.bind_runner_factory(lambda _scope: child)  # type: ignore[arg-type]
+        manager._offer_progress = (  # type: ignore[method-assign]
+            lambda _task_id, _parent_turn_id, status, summary: progress.append(
+                (status, summary)
+            )
+        )
+        spawning = asyncio.create_task(
+            manager.invoke(
+                tool_name="spawn_agent",
+                arguments={"task": "stop after child launch claim"},
+                invocation_context=context,
+            )
+        )
+        await asyncio.wait_for(child.admission_entered.wait(), timeout=5)
+        task_id = _round10_id("subagent-task", context.attempt_id, "0")
+        assert manager._launch_permits[task_id].launching
+        stopping = asyncio.create_task(
+            manager.invoke(
+                tool_name="stop_agent",
+                arguments={"task_id": task_id},
+                invocation_context=context,
+            )
+        )
+        deadline = monotonic() + 5
+        while manager._launch_permits[task_id].cancellation_reason is None:
+            assert monotonic() < deadline
+            await asyncio.sleep(0)
+        assert not manager._launch_permits[task_id].stop_claimed
+        child.admission_release.set()
+        stopped, _spawned = await asyncio.gather(stopping, spawning)
+        assert json.loads(stopped.content)["status"] == "cancelled"
+        assert child.run_started == 0
+        assert task_id not in manager._tasks
+        assert all(status != "ACTIVE" for status, _summary in progress)
+        assert (
+            todo_owner.snapshot(
+                scope_kind=ModelInputScopeKind.SUBAGENT_TASK,
+                scope_subagent_task_id=task_id,
+            )
+            is None
+        )
+        durable = repository.query_subagent_task(
+            session_id=session_id,
+            task_id=task_id,
+            deadline_monotonic=monotonic() + 30,
+        )
+        assert durable is not None
+        assert durable["status"] == "CANCELLED"
+        with provider.connection(
+            lane=PostgresConnectionLane.INSPECTOR,
+            deadline_monotonic=monotonic() + 30,
+        ) as connection:
+            child_turn = connection.execute(
+                "SELECT status, terminal_reason FROM pulsara_v3.turns "
+                "WHERE session_id=%s AND scope_subagent_task_id=%s",
+                (session_id, task_id),
+            ).fetchall()
+        assert child_turn == [("INTERRUPTED", "USER_STOPPED")]
+        await manager.aclose(deadline_monotonic=monotonic() + 2)
+
+    asyncio.run(stop_wins_before_launch_claim())
+    asyncio.run(launch_wins_before_stop_claim())
+
+
+@pytest.mark.postgres
 def test_round10_batch_admission_exact_joins_args_permission_and_ack_unknown(
     stage2_migrated_postgres_database,
     monkeypatch: pytest.MonkeyPatch,
@@ -974,6 +1285,7 @@ def test_round10_batch_admission_exact_joins_args_permission_and_ack_unknown(
             arguments=arguments,
         )
         manager = KernelSubagentManager(
+            **_manager_launch_kwargs(repository, lease.guard),
             repository=repository,
             guard=lease.guard,
             host_owner_id=_id("host"),
@@ -983,7 +1295,9 @@ def test_round10_batch_admission_exact_joins_args_permission_and_ack_unknown(
                 session_id=session_id, owner_epoch=_id("todo")
             ),
         )
-        manager.bind_runner_factory(lambda: _BlockingChildRunner())  # type: ignore[arg-type]
+        manager.bind_runner_factory(
+            lambda _scope: _BlockingChildRunner()  # type: ignore[arg-type]
+        )
 
         original = repository.accept_subagent_task_batch
         committed = False
@@ -1052,7 +1366,7 @@ def test_round10_batch_admission_exact_joins_args_permission_and_ack_unknown(
             deadline_monotonic=monotonic() + 30,
         )
         assert still_active is not None and still_active["status"] == "ACTIVE"
-        await manager.aclose(timeout_seconds=2)
+        await manager.aclose(deadline_monotonic=monotonic() + 2)
 
         mismatch_session = _id("session")
         mismatch_workspace = _id("workspace")
@@ -1065,6 +1379,7 @@ def test_round10_batch_admission_exact_joins_args_permission_and_ack_unknown(
             arguments=stored,
         )
         mismatch_manager = KernelSubagentManager(
+            **_manager_launch_kwargs(repository, mismatch_lease.guard),
             repository=repository,
             guard=mismatch_lease.guard,
             host_owner_id=_id("host"),
@@ -1074,7 +1389,9 @@ def test_round10_batch_admission_exact_joins_args_permission_and_ack_unknown(
                 session_id=mismatch_session, owner_epoch=_id("todo")
             ),
         )
-        mismatch_manager.bind_runner_factory(lambda: _BlockingChildRunner())  # type: ignore[arg-type]
+        mismatch_manager.bind_runner_factory(
+            lambda _scope: _BlockingChildRunner()  # type: ignore[arg-type]
+        )
         with pytest.raises(ConversationKernelConflict):
             await mismatch_manager.invoke(
                 tool_name="spawn_agent",
@@ -1098,7 +1415,7 @@ def test_round10_batch_admission_exact_joins_args_permission_and_ack_unknown(
         )
         assert stale.state == "PERMISSION_DENIED"
         assert b"subagent_authority_mismatch" in stale.content
-        await mismatch_manager.aclose(timeout_seconds=2)
+        await mismatch_manager.aclose(deadline_monotonic=monotonic() + 2)
 
         with repository.connection_provider.connection(
             lane=PostgresConnectionLane.INSPECTOR,
@@ -1152,6 +1469,7 @@ def test_round10_dependency_chain_routes_only_direct_result_and_retires_physical
             arguments=arguments,
         )
         manager = KernelSubagentManager(
+            **_manager_launch_kwargs(repository, lease.guard),
             repository=repository,
             guard=lease.guard,
             host_owner_id=_id("host"),
@@ -1165,7 +1483,7 @@ def test_round10_dependency_chain_routes_only_direct_result_and_retires_physical
         started: list[str] = []
         source_bodies: dict[str, tuple[str, ...]] = {}
         manager.bind_runner_factory(
-            lambda: _CompletingChildRunner(
+            lambda _scope: _CompletingChildRunner(
                 repository=repository,
                 lease=lease,
                 manager=manager,
@@ -1226,7 +1544,7 @@ def test_round10_dependency_chain_routes_only_direct_result_and_retires_physical
         )
         assert len(rows) == 3
         assert all(row["status"] == "COMPLETED" for row in rows)
-        await manager.aclose(timeout_seconds=2)
+        await manager.aclose(deadline_monotonic=monotonic() + 2)
 
     asyncio.run(exercise())
 
@@ -1259,6 +1577,7 @@ def test_round10_global_four_worker_capacity_queues_without_limiting_task_horizo
             arguments=arguments,
         )
         manager = KernelSubagentManager(
+            **_manager_launch_kwargs(repository, lease.guard),
             repository=repository,
             guard=lease.guard,
             host_owner_id=_id("host"),
@@ -1270,7 +1589,7 @@ def test_round10_global_four_worker_capacity_queues_without_limiting_task_horizo
             ),
         )
         blocker = _CountingBlockingChildRunner()
-        manager.bind_runner_factory(lambda: blocker)  # type: ignore[arg-type]
+        manager.bind_runner_factory(lambda _scope: blocker)  # type: ignore[arg-type]
         created = await manager.invoke(
             tool_name="create_agent_tasks",
             arguments=arguments,
@@ -1311,7 +1630,7 @@ def test_round10_global_four_worker_capacity_queues_without_limiting_task_horizo
         assert (
             len([item for item in manager._tasks.values() if not item.task.done()]) == 4
         )
-        await manager.aclose(timeout_seconds=2)
+        await manager.aclose(deadline_monotonic=monotonic() + 2)
 
     asyncio.run(exercise())
 
@@ -1344,6 +1663,7 @@ def test_round10_wait_agent_waits_for_dormant_dependency_terminalization(
             arguments=arguments,
         )
         manager = KernelSubagentManager(
+            **_manager_launch_kwargs(repository, lease.guard),
             repository=repository,
             guard=lease.guard,
             host_owner_id=_id("host"),
@@ -1355,7 +1675,7 @@ def test_round10_wait_agent_waits_for_dormant_dependency_terminalization(
             ),
         )
         blocker = _CountingBlockingChildRunner()
-        manager.bind_runner_factory(lambda: blocker)  # type: ignore[arg-type]
+        manager.bind_runner_factory(lambda _scope: blocker)  # type: ignore[arg-type]
         created = await manager.invoke(
             tool_name="create_agent_tasks",
             arguments=arguments,
@@ -1404,7 +1724,7 @@ def test_round10_wait_agent_waits_for_dormant_dependency_terminalization(
         assert task_ids[1] not in manager._mailboxes
         assert task_ids[1] not in manager._mailbox_ordinals
         assert task_ids[1] not in manager._completing
-        await manager.aclose(timeout_seconds=2)
+        await manager.aclose(deadline_monotonic=monotonic() + 2)
 
     asyncio.run(exercise())
 
@@ -1452,6 +1772,7 @@ def test_round10_mailbox_exact_fifo_ack_unknown_and_typed_child_projection(
             calls=calls,
         )
         manager = KernelSubagentManager(
+            **_manager_launch_kwargs(repository, lease.guard),
             repository=repository,
             guard=lease.guard,
             host_owner_id=_id("host"),
@@ -1463,7 +1784,7 @@ def test_round10_mailbox_exact_fifo_ack_unknown_and_typed_child_projection(
             ),
         )
         child = _CanonicalBlockingChildRunner(repository, lease)
-        manager.bind_runner_factory(lambda: child)  # type: ignore[arg-type]
+        manager.bind_runner_factory(lambda _scope: child)  # type: ignore[arg-type]
         spawned = await manager.invoke(
             tool_name="spawn_agent",
             arguments=calls[0][3],
@@ -1563,6 +1884,6 @@ def test_round10_mailbox_exact_fifo_ack_unknown_and_typed_child_projection(
                 "AND event_type='InterAgentMessageAccepted'",
                 (session_id,),
             ).fetchone() == (2,)
-        await manager.aclose(timeout_seconds=2)
+        await manager.aclose(deadline_monotonic=monotonic() + 2)
 
     asyncio.run(exercise())

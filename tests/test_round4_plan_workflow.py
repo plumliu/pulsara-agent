@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import FrozenInstanceError
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -30,6 +31,9 @@ from pulsara_agent.conversation_kernel.tool_policy import (
     DefaultToolDispatchAuthorizationPolicy,
 )
 from pulsara_agent.conversation_kernel.tool_runtime import DirectKernelToolPort
+from pulsara_agent.conversation_kernel.tool_contracts import (
+    build_accepted_canonical_tool_result_settlement,
+)
 from pulsara_agent.conversation_kernel.vocabulary import (
     APPEND_GUARDS,
     COMMITTED_EVENT_DESCRIPTORS,
@@ -38,6 +42,7 @@ from pulsara_agent.conversation_kernel.vocabulary import (
 )
 from pulsara_agent.model_input.contracts import ModelInputScopeKind
 from pulsara_agent.primitives.context import freeze_json
+from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
 from pulsara_agent.primitives.permission import (
     PERMISSION_PRESET_CONTRACT_FINGERPRINT,
     PERMISSION_PRESET_CONTRACT_ID,
@@ -79,6 +84,25 @@ def _binding(tool_name: str) -> PlanInteractionBinding:
 
 
 def _accepted_resolution(interaction_id: str) -> AcceptedPlanResolution:
+    settlement = build_accepted_canonical_tool_result_settlement(
+        session_id="session:one",
+        scope_kind=ModelInputScopeKind.ROOT,
+        scope_subagent_task_id=None,
+        turn_id="turn:origin",
+        assistant_entry_id="entry:assistant",
+        call_ordinal=0,
+        tool_name="ask_plan_question",
+        tool_call_id="call:question",
+        public_arguments=freeze_json({"question": "continue?"}),
+        result_id="result:answer",
+        result_entry_id="entry:answer",
+        accepted_entry_sequence=3,
+        result_state="SUCCESS",
+        result_origin_kind="PLAN_CONTROL",
+        canonical_body='{"answer_kind":"OPTION","selected_option_ordinal":0}',
+        observed_at=datetime(2026, 8, 24, tzinfo=timezone.utc),
+        observation_origin=ToolObservationOrigin.PLAN_CONTROL,
+    )
     return AcceptedPlanResolution(
         command_id="command:answer",
         workflow_id="workflow:one",
@@ -91,6 +115,7 @@ def _accepted_resolution(interaction_id: str) -> AcceptedPlanResolution:
         handoff_created_at_commit=False,
         workflow_revision=3,
         question_result_entry_id="entry:answer",
+        tool_result_settlement=settlement,
     )
 
 

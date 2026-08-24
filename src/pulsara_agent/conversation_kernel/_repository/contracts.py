@@ -39,6 +39,9 @@ from pulsara_agent.primitives.tool_result_projection import (
 from pulsara_agent.primitives.plan_workflow import PLAN_ENTRY_CONTRACT, ExtractedPlanDraft, PlanDraftDecision, PlanHandoffKind, PlanInteractionBinding, PlanInteractionKind, PlanQuestionAnswerKind, PlanQuestionContent, PlanWorkflowStatus, require_plan_interaction_contract
 from pulsara_agent.conversation_kernel.vocabulary import CommittedEventType, SubjectSlot
 from pulsara_agent.conversation_kernel.steer import PromptIngressWriteRejection
+from pulsara_agent.conversation_kernel.tool_contracts import (
+    AcceptedCanonicalToolResultSettlement,
+)
 
 
 class _ObservedActiveMemoryDuplicate(Exception):
@@ -69,6 +72,7 @@ class PlanToolBatchDisposition(StrEnum):
     APPLY = "APPLY"
     INVALID_ARGUMENTS = "INVALID_ARGUMENTS"
     TOOL_UNAVAILABLE = "TOOL_UNAVAILABLE"
+    HOOK_BLOCKED = "HOOK_BLOCKED"
 
 
 class PlanDraftIdentityConflict(ConversationKernelConflict):
@@ -113,6 +117,7 @@ class AcceptedEntry:
     entry_sequence: int
     event_sequence: int
     turn_completed: bool = False
+    pending_steer_at_settlement: bool = False
 
 
 class TurnAdmissionConfirmationKind(StrEnum):
@@ -144,6 +149,7 @@ class PreparedRootTurnAdmission:
     semantic_digest: str
     event: CommittedEventDraft
     candidate_fingerprint: str
+    expected_permission_snapshot: FrozenRunPermissionSnapshot | None = None
 
     def __post_init__(self) -> None:
         payload = _root_turn_admission_payload(
@@ -187,6 +193,15 @@ class PreparedRootTurnAdmission:
             or self.event.sensitivity_class != "PUBLIC"
             or self.event.projection_profile != "DEFAULT"
             or self.event.occurred_at != self.occurred_at
+            or (
+                self.expected_permission_snapshot is not None
+                and (
+                    self.expected_permission_snapshot.snapshot_id
+                    != self.permission_snapshot_id
+                    or self.expected_permission_snapshot.requested_mode
+                    is not self.requested_permission_mode
+                )
+            )
             or dict(self.event.payload)
             != {"entry_kind": EntryKind.USER_MESSAGE.value}
         ):
@@ -201,6 +216,10 @@ class PreparedSubagentTurnAdmission:
     entry_id: str
     context_binding_revision_id: str
     permission_snapshot_id: str
+    task_start_event_id: str
+    expected_parent_permission_snapshot: FrozenRunPermissionSnapshot = field(
+        repr=False
+    )
     content: CanonicalContent
     occurred_at: datetime
     actor_id: str
@@ -215,6 +234,10 @@ class PreparedSubagentTurnAdmission:
             entry_id=self.entry_id,
             context_binding_revision_id=self.context_binding_revision_id,
             permission_snapshot_id=self.permission_snapshot_id,
+            task_start_event_id=self.task_start_event_id,
+            expected_parent_permission_snapshot=(
+                self.expected_parent_permission_snapshot
+            ),
             content=self.content,
             occurred_at=self.occurred_at,
             actor_id=self.actor_id,
@@ -229,6 +252,9 @@ class PreparedSubagentTurnAdmission:
             or not self.entry_id
             or not self.context_binding_revision_id
             or not self.permission_snapshot_id
+            or not self.task_start_event_id
+            or self.expected_parent_permission_snapshot.inherited_from_turn_id
+            is not None
             or self.candidate_fingerprint != expected
             or self.event.event_id
             != _stable_identity("event", expected, "UserMessageAccepted")
@@ -530,6 +556,21 @@ class AcceptedCapabilityDecision:
     attempt_id: str | None
     result_entry_id: str | None
     permission_snapshot_fingerprint: str
+    result_id: str | None = None
+    result_entry_sequence: int | None = None
+    result_observed_at: datetime | None = None
+
+    def __post_init__(self) -> None:
+        has_result = self.result_entry_id is not None
+        if has_result != all(
+            value is not None
+            for value in (
+                self.result_id,
+                self.result_entry_sequence,
+                self.result_observed_at,
+            )
+        ):
+            raise ValueError("accepted capability result facts are incomplete")
 
 
 @dataclass(frozen=True, slots=True)
@@ -542,6 +583,21 @@ class AcceptedInteractionDecision:
     attempt_id: str | None
     result_entry_id: str | None
     permission_snapshot_fingerprint: str
+    result_id: str | None = None
+    result_entry_sequence: int | None = None
+    result_observed_at: datetime | None = None
+
+    def __post_init__(self) -> None:
+        has_result = self.result_entry_id is not None
+        if has_result != all(
+            value is not None
+            for value in (
+                self.result_id,
+                self.result_entry_sequence,
+                self.result_observed_at,
+            )
+        ):
+            raise ValueError("accepted interaction result facts are incomplete")
 
 
 class PlanToolControlKind(StrEnum):
@@ -555,12 +611,15 @@ class PreparedPlanBatchCall:
     block_id: str
     tool_call_id: str
     tool_name: str
+    arguments: FrozenJsonObjectFact
     result_id: str | None
     result_entry_id: str | None
 
     def __post_init__(self) -> None:
         if not self.block_id or not self.tool_call_id or not self.tool_name:
             raise ValueError("prepared Plan batch call identity is incomplete")
+        if not isinstance(self.arguments, FrozenJsonObjectFact):
+            raise TypeError("prepared Plan batch call arguments are not frozen")
         if (self.result_id is None) != (self.result_entry_id is None):
             raise ValueError("prepared Plan batch result identity is incomplete")
 
@@ -683,6 +742,7 @@ class PreparedPlanToolBatch:
                     item.block_id,
                     item.tool_call_id,
                     item.tool_name,
+                    thaw_json(item.arguments),
                     item.result_id,
                     item.result_entry_id,
                 )
@@ -712,6 +772,17 @@ class AcceptedPlanToolBatch:
     continuation_turn_id: str | None
     continuation_entry_id: str | None
     origin_turn_completed: bool
+    tool_result_settlements: tuple[
+        AcceptedCanonicalToolResultSettlement, ...
+    ] = ()
+
+    def __post_init__(self) -> None:
+        if tuple(
+            item.call_ordinal for item in self.tool_result_settlements
+        ) != tuple(
+            sorted(item.call_ordinal for item in self.tool_result_settlements)
+        ):
+            raise ValueError("accepted Plan settlements are not in call order")
 
 
 @dataclass(frozen=True, slots=True)
@@ -751,6 +822,13 @@ class AcceptedPlanResolution:
     workflow_revision: int
     question_result_entry_id: str | None = None
     draft_decision: PlanDraftDecision | None = None
+    tool_result_settlement: AcceptedCanonicalToolResultSettlement | None = None
+
+    def __post_init__(self) -> None:
+        if (self.question_result_entry_id is not None) != (
+            self.tool_result_settlement is not None
+        ):
+            raise ValueError("Plan question settlement union is incomplete")
 
 
 @dataclass(frozen=True, slots=True)
@@ -924,6 +1002,7 @@ def build_prepared_root_turn_admission(
     occurred_at: datetime,
     actor_kind: str = "human",
     actor_id: str = "user",
+    expected_permission_snapshot: FrozenRunPermissionSnapshot | None = None,
 ) -> PreparedRootTurnAdmission:
     payload = _root_turn_admission_payload(
         session_id=session_id,
@@ -975,6 +1054,7 @@ def build_prepared_root_turn_admission(
         semantic_digest=semantic_digest,
         event=event,
         candidate_fingerprint=candidate_fingerprint,
+        expected_permission_snapshot=expected_permission_snapshot,
     )
 
 
@@ -986,6 +1066,8 @@ def _subagent_turn_admission_payload(
     entry_id: str,
     context_binding_revision_id: str,
     permission_snapshot_id: str,
+    task_start_event_id: str,
+    expected_parent_permission_snapshot: FrozenRunPermissionSnapshot,
     content: CanonicalContent,
     occurred_at: datetime,
     actor_id: str,
@@ -997,6 +1079,10 @@ def _subagent_turn_admission_payload(
         "entry_id": entry_id,
         "context_binding_revision_id": context_binding_revision_id,
         "permission_snapshot_id": permission_snapshot_id,
+        "task_start_event_id": task_start_event_id,
+        "expected_parent_permission_snapshot": (
+            expected_parent_permission_snapshot.snapshot_fingerprint
+        ),
         "content": _canonical_content_identity(content),
         "occurred_at": occurred_at.isoformat(),
         "actor_id": actor_id,
@@ -1011,6 +1097,8 @@ def build_prepared_subagent_turn_admission(
     entry_id: str,
     context_binding_revision_id: str,
     permission_snapshot_id: str,
+    task_start_event_id: str,
+    expected_parent_permission_snapshot: FrozenRunPermissionSnapshot,
     content: CanonicalContent,
     occurred_at: datetime,
     actor_id: str = "subagent-manager",
@@ -1022,6 +1110,8 @@ def build_prepared_subagent_turn_admission(
         entry_id=entry_id,
         context_binding_revision_id=context_binding_revision_id,
         permission_snapshot_id=permission_snapshot_id,
+        task_start_event_id=task_start_event_id,
+        expected_parent_permission_snapshot=expected_parent_permission_snapshot,
         content=content,
         occurred_at=occurred_at,
         actor_id=actor_id,
@@ -1049,6 +1139,8 @@ def build_prepared_subagent_turn_admission(
         entry_id=entry_id,
         context_binding_revision_id=context_binding_revision_id,
         permission_snapshot_id=permission_snapshot_id,
+        task_start_event_id=task_start_event_id,
+        expected_parent_permission_snapshot=expected_parent_permission_snapshot,
         content=content,
         occurred_at=occurred_at,
         actor_id=actor_id,

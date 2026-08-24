@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
+from time import monotonic
 from types import SimpleNamespace
+
+import pytest
 
 from pulsara_agent.conversation_kernel.contracts import HostWriterGuard
 from pulsara_agent.conversation_kernel.io import KernelSessionIO
@@ -15,6 +19,7 @@ from pulsara_agent.conversation_kernel.subagent import KernelSubagentManager
 from pulsara_agent.conversation_kernel.subagents.contracts import (
     build_parent_context_call_subject,
 )
+from tests.support.subagents import StaticSubagentLaunchPreparationPort
 from pulsara_agent.conversation_kernel.todo_runtime import TodoRunStateOwner
 
 
@@ -64,7 +69,10 @@ class _Repository:
 
 
 class _BlockingRunner:
-    async def run_subagent_turn(self, **_kwargs):
+    async def admit_subagent_turn(self, **kwargs):
+        return kwargs["cancellation_intent"]
+
+    async def run_admitted_subagent_turn(self, **_kwargs):
         await asyncio.Event().wait()
         raise AssertionError("unreachable")
 
@@ -81,8 +89,12 @@ def test_host_close_interrupts_subagent_instead_of_user_cancelling_it() -> None:
             todo_owner=TodoRunStateOwner(
                 session_id="session:test", owner_epoch="host:test"
             ),
+            launch_preparation=StaticSubagentLaunchPreparationPort(),
+            terminal_cwd=Path.cwd,
         )
-        manager.bind_runner_factory(lambda: _BlockingRunner())  # type: ignore[arg-type]
+        manager.bind_runner_factory(
+            lambda _scope: _BlockingRunner()  # type: ignore[arg-type]
+        )
         subject = build_parent_context_call_subject(
             session_id="session:test",
             caller_turn_id="turn:test",
@@ -111,11 +123,58 @@ def test_host_close_interrupts_subagent_instead_of_user_cancelling_it() -> None:
             ),
         )
         assert result.state == "SUCCESS"
-        await manager.aclose(timeout_seconds=1)
+        await manager.aclose(deadline_monotonic=monotonic() + 1)
         assert repository.statuses == [
             ("PENDING_START", None),
             ("ACTIVE", None),
             ("INTERRUPTED", "HOST_CLOSING"),
         ]
+
+    asyncio.run(exercise())
+
+
+def test_round9_2_subagent_close_deadline_applies_to_first_producer_join() -> None:
+    async def exercise() -> None:
+        repository = _Repository()
+        manager = KernelSubagentManager(
+            repository=repository,  # type: ignore[arg-type]
+            guard=HostWriterGuard("session:test", 1, "host:test"),
+            host_owner_id="host:test",
+            io_owner=KernelSessionIO(),
+            live_bus=LiveAgentEventBus(),
+            todo_owner=TodoRunStateOwner(
+                session_id="session:test", owner_epoch="host:test"
+            ),
+            launch_preparation=StaticSubagentLaunchPreparationPort(),
+            terminal_cwd=Path.cwd,
+        )
+        started = asyncio.Event()
+        deadline_cancelled = asyncio.Event()
+        physical_release = asyncio.Event()
+
+        async def stubborn_scheduler() -> None:
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                deadline_cancelled.set()
+                await physical_release.wait()
+                raise
+
+        scheduler = asyncio.create_task(stubborn_scheduler())
+        manager._scheduler_task = scheduler
+        await started.wait()
+        close = asyncio.create_task(
+            manager.aclose(deadline_monotonic=monotonic() + 0.05)
+        )
+        await asyncio.wait_for(deadline_cancelled.wait(), timeout=0.5)
+        assert not close.done()
+        assert not scheduler.done()
+        physical_release.set()
+        with pytest.raises(
+            TimeoutError, match="subagent owner exited after close deadline"
+        ):
+            await asyncio.wait_for(close, timeout=0.5)
+        assert scheduler.done()
 
     asyncio.run(exercise())

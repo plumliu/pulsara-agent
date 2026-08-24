@@ -123,6 +123,58 @@ def classify_tool_result_delivery(
     )
 
 
+def project_tool_result_storage_body(
+    body: str, observation_origin: ToolObservationOrigin
+) -> str:
+    """Project storage-only carriers into the single Round 7 public body."""
+
+    if observation_origin is not ToolObservationOrigin.PLAN_CONTROL:
+        return body
+    try:
+        value = json.loads(body)
+    except json.JSONDecodeError:
+        return canonical_json_bytes(
+            {"plan_control": "REJECTED", "status": "error"}
+        ).decode("utf-8")
+    if not isinstance(value, dict):
+        raise ValueError("Plan result carrier is not an object")
+    status = value.get("status")
+    control = value.get("plan_control")
+    if status != "success" or control not in {
+        "ENTERED_PLAN",
+        "PLAN_ALREADY_ACTIVE",
+        "DRAFT_SUBMITTED_FOR_REVIEW",
+        "QUESTION_ANSWERED",
+    }:
+        raise ValueError("Plan control result storage carrier is invalid")
+    result: dict[str, object] = {"plan_control": control, "status": status}
+    if control == "QUESTION_ANSWERED":
+        answer_kind = value.get("answer_kind")
+        if answer_kind == "OPTION":
+            ordinal = value.get("selected_option_ordinal")
+            label = value.get("selected_label")
+            if (
+                isinstance(ordinal, bool)
+                or not isinstance(ordinal, int)
+                or ordinal < 0
+                or not isinstance(label, str)
+            ):
+                raise ValueError("Plan option answer storage carrier is invalid")
+            result["answer"] = {
+                "kind": "OPTION",
+                "label": label,
+                "ordinal": ordinal,
+            }
+        elif answer_kind == "FREE_TEXT" and isinstance(value.get("answer"), str):
+            result["answer"] = {
+                "kind": "FREE_TEXT",
+                "text": value["answer"],
+            }
+        else:
+            raise ValueError("Plan question answer storage carrier is invalid")
+    return canonical_json_bytes(result).decode("utf-8")
+
+
 @dataclass(frozen=True, slots=True)
 class RenderedProviderToolResultLogicalMessage:
     message: LLMMessage
@@ -402,5 +454,6 @@ __all__ = [
     "decode_provider_tool_result_observation",
     "full_required_tool_result_delivery",
     "provider_neutral_message_logical_utf8_bytes",
+    "project_tool_result_storage_body",
     "render_provider_tool_result_logical_message",
 ]

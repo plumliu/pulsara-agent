@@ -720,7 +720,14 @@ def test_round5b_terminal_provider_race_handoffs_manual_to_idle_owner() -> None:
             )
 
     class _Runner:
-        compaction = _Compaction()
+        async def compact_idle_turn(
+            self, *, turn_id: str, command_id: str, force: bool
+        ) -> CompactionOutcome:
+            return await _Compaction().compact_idle_turn(
+                turn_id=turn_id,
+                command_id=command_id,
+                force=force,
+            )
 
     idle_marks: list[str] = []
     host._runner = _Runner()
@@ -1222,3 +1229,74 @@ def test_round5b_architecture_and_oracle_are_exact() -> None:
     assert not (
         ROOT / "src/pulsara_agent/conversation_kernel/job_model.py"
     ).exists()
+
+
+def test_round9_2_compaction_hard_cut_has_one_post_adoption_install_path() -> None:
+    coordinator = (
+        ROOT / "src/pulsara_agent/conversation_kernel/compaction/coordinator.py"
+    )
+    source = coordinator.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(coordinator))
+    settlement = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "CompactionCoordinator"
+        for node in node.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == "_complete_compaction_settlement"
+    )
+    calls = tuple(node for node in ast.walk(settlement) if isinstance(node, ast.Call))
+
+    def attribute_calls(name: str) -> tuple[ast.Call, ...]:
+        return tuple(
+            call
+            for call in calls
+            if isinstance(call.func, ast.Attribute) and call.func.attr == name
+        )
+
+    def attribute_references(name: str) -> tuple[ast.Attribute, ...]:
+        return tuple(
+            node
+            for node in ast.walk(settlement)
+            if isinstance(node, ast.Attribute) and node.attr == name
+        )
+
+    installs = attribute_calls("install_provider_open")
+    hook_siblings = attribute_calls("prepare_hook_context_sibling")
+    assert len(installs) == 1
+    assert len(hook_siblings) == 1
+    assert len(attribute_calls("_settle_compaction_adoption")) == 1
+    assert len(attribute_calls("_dispatch_post_compact")) == 1
+    rotations = attribute_references("rotate_provider_input")
+    assert len(rotations) == 1
+    assert (
+        attribute_calls("_settle_compaction_adoption")[0].lineno
+        < attribute_calls("_dispatch_post_compact")[0].lineno
+        < rotations[0].lineno
+        < hook_siblings[0].lineno
+        < installs[0].lineno
+    )
+
+    no_hook_prepares = tuple(
+        call
+        for call in ast.walk(tree)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Attribute)
+        and call.func.attr == "prepare"
+        and any(
+            keyword.arg == "include_hook_context"
+            and isinstance(keyword.value, ast.Constant)
+            and keyword.value.value is False
+            for keyword in call.keywords
+        )
+    )
+    assert len(no_hook_prepares) == 2
+    assert "SessionStartCompactPort" in source
+    assert "child compaction received a ROOT start port" in source
+    for forbidden in (
+        "installed_base_augmentation",
+        "revoke_successor",
+        "supersede_successor",
+        "runner_back_reference",
+    ):
+        assert forbidden not in source

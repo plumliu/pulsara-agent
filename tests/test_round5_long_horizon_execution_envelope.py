@@ -56,6 +56,10 @@ from pulsara_agent.llm.adapters.openai.client import OpenAITransportTimeoutPolic
 from pulsara_agent.terminal_process.manager import ProcessRegistry
 from pulsara_agent.storage.migrations.manifest import CONVERSATION_KERNEL_RELATIONS
 from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
+from pulsara_agent.primitives.run_permission import (
+    RunPermissionAdmissionSource,
+    build_run_permission_snapshot,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -157,6 +161,13 @@ def test_round5_turn_admission_candidates_freeze_complete_event_drafts() -> None
         entry_id="entry:child",
         context_binding_revision_id="revision:child:0",
         permission_snapshot_id="permission:child",
+        task_start_event_id="event:task-start:child",
+        expected_parent_permission_snapshot=build_run_permission_snapshot(
+            snapshot_id="permission:parent",
+            requested_mode=DEFAULT_PERMISSION_MODE,
+            effective_mode=DEFAULT_PERMISSION_MODE,
+            admission_source=RunPermissionAdmissionSource.USER_SUBMISSION,
+        ),
         content=InlineContent.from_bytes(b"child"),
         occurred_at=occurred_at,
     )

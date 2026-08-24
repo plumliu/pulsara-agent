@@ -34,23 +34,27 @@ from pulsara_agent.conversation_kernel.context_sources import (
     ContextSourceCollectorPort,
 )
 from pulsara_agent.conversation_kernel.compaction.contracts import (
+    CompactionDisposition,
+    CompactionOutcome,
     CompactionTrigger,
 )
 from pulsara_agent.conversation_kernel.compaction.runtime import (
     HostCompactionRuntimeOwner,
 )
 from pulsara_agent.conversation_kernel.compaction.coordinator import (
+    CompactionAttemptToken,
     CompactionCoordinator,
+    CompactionExecutionResult,
+    PreparedCompactSessionStart,
+    PreparedCompactSessionStartFacts,
+    SessionStartCompactBoundaryPort,
+    SessionStartCompactPort,
 )
 from pulsara_agent.conversation_kernel.cold_epoch import (
     KernelColdEpochInputAssembler,
 )
-from pulsara_agent.conversation_kernel.subagents.contracts import (
-    FrozenSubagentResultPublicFact,
-)
 from pulsara_agent.conversation_kernel.cancellation import (
     ActiveTurnCancellationIntent,
-    stable_subagent_turn_id,
 )
 from pulsara_agent.conversation_kernel.direct_model import (
     CompletedProviderModelExecution,
@@ -115,7 +119,11 @@ from pulsara_agent.conversation_kernel.tool_contracts import (
     ToolSurfacePlanningPort,
 )
 from pulsara_agent.conversation_kernel.subagents.runtime_port import (
+    PreparedInferredSubagentCompletion,
     SubagentRuntimePort,
+)
+from pulsara_agent.conversation_kernel.subagents.contracts import (
+    PreparedSubagentLaunch,
 )
 from pulsara_agent.conversation_kernel.tool_execution import ToolBatchExecutor
 from pulsara_agent.conversation_kernel.repository import (
@@ -146,6 +154,7 @@ from pulsara_agent.conversation_kernel.provider_dispatch import (
 from pulsara_agent.conversation_kernel.steer_consumption import (
     PreparedSteerPlanStale,
 )
+from pulsara_agent.conversation_kernel.steer import build_direct_root_turn_identity
 from pulsara_agent.primitives.plan_workflow import (
     PlanInteractionKind,
 )
@@ -165,6 +174,7 @@ from pulsara_agent.model_input.diagnostics import (
     project_model_input_compile_observation,
 )
 from pulsara_agent.model_input.contracts import (
+    FrozenCanonicalCompileSnapshot,
     FrozenCompiledModelInput,
     ModelInputCompileFailureKind,
     ModelInputScopeKind,
@@ -176,6 +186,7 @@ from pulsara_agent.model_input.continuity import (
 )
 
 from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE, PermissionMode
+from pulsara_agent.primitives.run_permission import FrozenRunPermissionSnapshot
 from pulsara_agent.primitives.context import (
     FrozenJsonObjectFact,
     canonical_json_bytes,
@@ -184,6 +195,23 @@ from pulsara_agent.primitives.context import (
 from pulsara_agent.conversation_kernel.tool_surface import (
     ProcessLocalToolSurfaceBorrow,
 )
+from pulsara_agent.hooks.context import (
+    HookContextOwner,
+    PendingHookContextReservation,
+)
+from pulsara_agent.hooks.contracts import (
+    ContinuationDecision,
+    GateDecision,
+    HookDispatchEnvelope,
+    HookDispatchScopeRef,
+    SessionStartInput,
+    SessionStartRef,
+    StopInput,
+    StopRef,
+    external_permission_mode,
+)
+from pulsara_agent.hooks.dispatcher import KernelHookDispatcher
+from pulsara_agent.hooks.matcher import event_matcher_subject
 
 
 @dataclass(frozen=True, slots=True)
@@ -208,6 +236,175 @@ class _CollectedModelResponse:
     provider_replay: PreparedDurableProviderAssistantReplay | None = dataclass_field(
         default=None, repr=False
     )
+
+
+@dataclass(frozen=True, slots=True)
+class _SessionStartAttemptToken:
+    session_id: str
+    source: str
+    boundary_token: object | None = dataclass_field(
+        default=None, repr=False, compare=False
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingSessionStartBoundary:
+    source: str
+    boundary_token: object = dataclass_field(repr=False, compare=False)
+    compact_attempt_token: object | None = dataclass_field(
+        default=None, repr=False, compare=False
+    )
+    adopted_snapshot_id: str | None = None
+    adopted_binding_revision_id: str | None = None
+
+
+class _SessionStartColdBoundaryOwner(SessionStartCompactBoundaryPort):
+    """One process-local pending SessionStart for the next ROOT cold open."""
+
+    def __init__(self, initial_source: str) -> None:
+        if initial_source not in {"startup", "resume"}:
+            raise ValueError("initial SessionStart source is invalid")
+        self._pending: _PendingSessionStartBoundary | None = (
+            _PendingSessionStartBoundary(initial_source, object())
+        )
+        self._lock = asyncio.Lock()
+
+    @property
+    def has_pending(self) -> bool:
+        return self._pending is not None
+
+    async def arm_compact_boundary(
+        self,
+        *,
+        attempt_token: CompactionAttemptToken,
+        adopted_snapshot_id: str,
+        adopted_binding_revision_id: str,
+    ) -> None:
+        if not adopted_snapshot_id or not adopted_binding_revision_id:
+            raise ValueError("compact SessionStart boundary identity is incomplete")
+        async with self._lock:
+            self._pending = _PendingSessionStartBoundary(
+                "compact",
+                (
+                    attempt_token,
+                    adopted_snapshot_id,
+                    adopted_binding_revision_id,
+                ),
+                attempt_token,
+                adopted_snapshot_id,
+                adopted_binding_revision_id,
+            )
+
+    async def consume_any(self) -> _PendingSessionStartBoundary | None:
+        async with self._lock:
+            pending = self._pending
+            self._pending = None
+            return pending
+
+    async def consume_compact(
+        self, facts: PreparedCompactSessionStartFacts
+    ) -> _PendingSessionStartBoundary | None:
+        async with self._lock:
+            pending = self._pending
+            if pending is None:
+                return None
+            if (
+                pending.source != "compact"
+                or pending.compact_attempt_token is not facts.attempt_token
+                or pending.adopted_snapshot_id != facts.adopted_snapshot_id
+                or pending.adopted_binding_revision_id
+                != facts.adopted_binding_revision_id
+            ):
+                raise RuntimeError("compact SessionStart boundary token drifted")
+            self._pending = None
+            return pending
+
+
+class SessionStartBlocked(RuntimeError):
+    pass
+
+
+class CompactionContinuationBlocked(RuntimeError):
+    pass
+
+
+class ChildCompactionContinuationBlocked(RuntimeError):
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class _RootSessionStartCompactPort(SessionStartCompactPort):
+    dispatcher: KernelHookDispatcher | None = dataclass_field(
+        repr=False, compare=False
+    )
+    context_owner: HookContextOwner | None = dataclass_field(
+        repr=False, compare=False
+    )
+    scope: HookDispatchScopeRef | None = dataclass_field(repr=False, compare=False)
+    boundary_owner: _SessionStartColdBoundaryOwner = dataclass_field(
+        repr=False, compare=False
+    )
+    intent: ActiveTurnCancellationIntent = dataclass_field(repr=False, compare=False)
+    session_id: str
+    cwd: str
+
+    async def __call__(
+        self, facts: PreparedCompactSessionStartFacts
+    ) -> PreparedCompactSessionStart:
+        if facts.scope.session_id != self.session_id or facts.turn_id != self.intent.turn_id:
+            raise RuntimeError("compact SessionStart port received foreign facts")
+        boundary = await self.boundary_owner.consume_compact(facts)
+        if boundary is None:
+            return PreparedCompactSessionStart(True)
+        if self.dispatcher is None or self.context_owner is None or self.scope is None:
+            return PreparedCompactSessionStart(True)
+        public_input = SessionStartInput(
+            session_id=self.session_id,
+            cwd=self.cwd,
+            model=facts.model_id,
+            source="compact",
+            permission_mode=external_permission_mode(
+                facts.permission_snapshot.effective_mode.value,
+                active_plan_workflow=(
+                    facts.permission_snapshot.plan_workflow_id is not None
+                ),
+            ),
+        )
+        causal_ref = SessionStartRef(
+            _SessionStartAttemptToken(
+                self.session_id,
+                "compact",
+                boundary.boundary_token,
+            ),
+            "compact",
+        )
+        outcome = await self.dispatcher.dispatch(
+            HookDispatchEnvelope(
+                self.dispatcher.capture_view(),
+                self.scope,
+                public_input,
+                causal_ref,
+                facts.deadline_monotonic,
+            ),
+            matcher_subject=event_matcher_subject(
+                public_input.event_type, source="compact"
+            ),
+        )
+        if self.intent.cause is not None:
+            raise asyncio.CancelledError
+        if outcome.decision is GateDecision.BLOCK:
+            return PreparedCompactSessionStart(
+                False,
+                outcome.reason or "compact SessionStart Hook blocked",
+            )
+        reservation = self.context_owner.prepare_sync(
+            scope=self.scope,
+            causal_ref=causal_ref,
+            entries=outcome.context_entries,
+        )
+        if reservation is not None:
+            reservation.commit()
+        return PreparedCompactSessionStart(True, reservation=reservation)
 
 
 class _RunnerToolCompositionPort(ToolSurfacePlanningPort, ToolInvocationPort, Protocol):
@@ -244,6 +441,11 @@ class ConversationKernelRunner:
         todo_admission_finalizer: TodoRunAdmissionFinalizer | None = None,
         compaction_owner: HostCompactionRuntimeOwner | None = None,
         subagent_runtime: SubagentRuntimePort | None = None,
+        hook_dispatcher: KernelHookDispatcher | None = None,
+        hook_context_owner: HookContextOwner | None = None,
+        hook_scope: HookDispatchScopeRef | None = None,
+        session_start_source: str = "startup",
+        configured_model_identity: str = "pulsara-model",
     ) -> None:
         if maximum_output_tokens_per_call < 1 or (
             maximum_input_tokens_per_call is not None
@@ -252,6 +454,7 @@ class ConversationKernelRunner:
             raise ValueError("runner limits must be finite and positive")
         self._writer_lease = writer_lease
         self._live_bus = live_bus
+        self._tools = tools
         resolved_input_reader = input_reader or CanonicalProviderInputReader(
             repository.connection_provider,
             blob_reader=PostgresCanonicalBlobStore(repository.connection_provider),
@@ -285,6 +488,9 @@ class ConversationKernelRunner:
             automatic_continuation=automatic_plan_continuation,
             workspace_resolver=self._workspace_resolver,
             deadline_factory=self._deadlines,
+            hook_dispatcher=hook_dispatcher,
+            hook_context_owner=hook_context_owner,
+            hook_scope=hook_scope,
         )
         resolved_compiler = compiler or StructuredModelInputCompiler()
         cold_epoch_assembler = KernelColdEpochInputAssembler(resolved_compiler)
@@ -322,6 +528,13 @@ class ConversationKernelRunner:
             todo_finalizer=todo_admission_finalizer,
         )
         self._subagent_runtime = subagent_runtime
+        self._hook_dispatcher = hook_dispatcher
+        self._hook_context_owner = hook_context_owner
+        self._hook_scope = hook_scope
+        self._session_start_boundary = _SessionStartColdBoundaryOwner(
+            session_start_source
+        )
+        self._configured_model_identity = configured_model_identity
         self._provider_dispatch = ProviderDispatchCoordinator(
             repository=repository,
             writer_lease=writer_lease,
@@ -359,6 +572,8 @@ class ConversationKernelRunner:
             content_publisher=self._content_publisher,
             workspace_resolver=self._workspace_resolver,
             deadline_factory=self._deadlines,
+            hook_dispatcher=hook_dispatcher,
+            hook_root_scope=hook_scope,
         )
         self._tool_batches = ToolBatchExecutor(
             repository=repository,
@@ -375,6 +590,8 @@ class ConversationKernelRunner:
             subagent_runtime=subagent_runtime,
             workspace_resolver=self._workspace_resolver,
             deadline_factory=self._deadlines,
+            hook_dispatcher=hook_dispatcher,
+            hook_context_owner=hook_context_owner,
         )
 
     def _canonical_deadline(self) -> float:
@@ -383,9 +600,65 @@ class ConversationKernelRunner:
     def _planning_deadline(self) -> float:
         return self._deadlines.deadline(KernelWatchdogOwner.PROVIDER_DISPATCH_PLANNING)
 
+    def _compact_session_start_port(
+        self, intent: ActiveTurnCancellationIntent
+    ) -> SessionStartCompactPort | None:
+        if intent.scope_kind is not ModelInputScopeKind.ROOT:
+            return None
+        return _RootSessionStartCompactPort(
+            self._hook_dispatcher,
+            self._hook_context_owner,
+            self._hook_scope,
+            self._session_start_boundary,
+            intent,
+            self._writer_lease.guard.session_id,
+            (
+                str(self._tools.snapshot_terminal_cwd())
+                if self._hook_dispatcher is not None
+                else ""
+            ),
+        )
+
+    def _compact_session_start_boundary_port(
+        self, intent: ActiveTurnCancellationIntent
+    ) -> SessionStartCompactBoundaryPort | None:
+        if intent.scope_kind is not ModelInputScopeKind.ROOT:
+            return None
+        return self._session_start_boundary
+
+    @staticmethod
+    def _require_active_compaction_continuation(
+        execution: CompactionExecutionResult,
+    ) -> None:
+        if execution.active_continuation_blocked_reason is not None:
+            raise CompactionContinuationBlocked(
+                execution.active_continuation_blocked_reason
+            )
+        if (
+            execution.outcome.disposition is CompactionDisposition.COMPACTED
+            and execution.successor_dispatch is None
+        ):
+            raise ConversationKernelConflict(
+                "active compaction adopted without a runnable continuation"
+            )
+
     async def _resolved_workspace_id(self) -> str:
         return await self._workspace_resolver.resolve(
             deadline=self._canonical_deadline()
+        )
+
+    async def compact_idle_turn(
+        self,
+        *,
+        turn_id: str,
+        command_id: str,
+        force: bool,
+    ) -> CompactionOutcome:
+        return await self.compaction.compact_idle_turn(
+            turn_id=turn_id,
+            command_id=command_id,
+            force=force,
+            session_start_boundary_port=self._session_start_boundary,
         )
 
     async def run_turn(
@@ -394,34 +667,80 @@ class ConversationKernelRunner:
         *,
         command_id: str | None = None,
         requested_permission_mode: PermissionMode | None = None,
+        expected_permission_snapshot: FrozenRunPermissionSnapshot | None = None,
+        hook_context_reservation: PendingHookContextReservation | None = None,
         cancellation_intent: ActiveTurnCancellationIntent | None = None,
     ) -> KernelRunResult:
         return await self._run_turn(
             text,
             command_id=command_id,
-            subagent_task_id=None,
             requested_permission_mode=(
                 requested_permission_mode or self._launch_permission_mode
             ),
+            expected_permission_snapshot=expected_permission_snapshot,
+            hook_context_reservation=hook_context_reservation,
             cancellation_intent=cancellation_intent,
         )
 
-    async def run_subagent_turn(
+    async def admit_subagent_turn(
         self,
         *,
-        task_id: str,
-        objective: str,
+        launch: PreparedSubagentLaunch,
         cancellation_intent: ActiveTurnCancellationIntent | None = None,
+    ) -> ActiveTurnCancellationIntent:
+        task_start = launch.task_start
+        if task_start.session_id != self._writer_lease.guard.session_id:
+            raise ValueError("subagent launch belongs to another session")
+        turn_id = launch.child_turn_id
+        task_id = task_start.task_id
+        content = await self._content(
+            task_start.objective.encode("utf-8"), deadline=self._canonical_deadline()
+        )
+        occurred_at = datetime.now(timezone.utc)
+        candidate = build_prepared_subagent_turn_admission(
+            session_id=self._writer_lease.guard.session_id,
+            task_id=task_id,
+            turn_id=turn_id,
+            entry_id=_stable_id("entry", turn_id, "objective"),
+            context_binding_revision_id=_stable_id(
+                "context-revision", turn_id, "0"
+            ),
+            permission_snapshot_id=_stable_id("permission-snapshot", turn_id),
+            task_start_event_id=task_start.event_id,
+            expected_parent_permission_snapshot=(
+                launch.parent_permission_snapshot
+            ),
+            content=content,
+            occurred_at=occurred_at,
+            actor_id="subagent-manager",
+        )
+        intent = cancellation_intent or ActiveTurnCancellationIntent(
+            turn_id, ModelInputScopeKind.SUBAGENT_TASK, task_id
+        )
+        intent.require_exact(
+            turn_id=turn_id,
+            scope_kind=ModelInputScopeKind.SUBAGENT_TASK,
+            scope_subagent_task_id=task_id,
+        )
+        await self._turn_admission.accept_subagent(
+            candidate, cancellation_intent=intent
+        )
+        return intent
+
+    async def run_admitted_subagent_turn(
+        self,
+        *,
+        launch: PreparedSubagentLaunch,
+        cancellation_intent: ActiveTurnCancellationIntent,
     ) -> KernelRunResult:
-        if not task_id:
-            raise ValueError("subagent task identity is required")
+        """Own one admitted child run and its exact process-local cleanup."""
+
+        task_id = launch.task_start.task_id
         try:
-            return await self._run_turn(
-                objective,
-                command_id=None,
-                subagent_task_id=task_id,
-                requested_permission_mode=None,
+            return await self.run_accepted_turn(
+                launch.child_turn_id,
                 cancellation_intent=cancellation_intent,
+                expected_first_model_identity=launch.configured_model_identity,
             )
         finally:
             scope = ProviderInputContinuityScope(
@@ -437,80 +756,54 @@ class ConversationKernelRunner:
         text: str,
         *,
         command_id: str | None,
-        subagent_task_id: str | None,
         requested_permission_mode: PermissionMode | None,
+        expected_permission_snapshot: FrozenRunPermissionSnapshot | None,
+        hook_context_reservation: PendingHookContextReservation | None,
         cancellation_intent: ActiveTurnCancellationIntent | None,
     ) -> KernelRunResult:
         if not text:
             raise ValueError("user message must be non-empty")
-        if subagent_task_id is None:
-            stable_command_id = command_id or _id("command")
-            turn_id = _stable_id(
-                "turn", self._writer_lease.guard.session_id, stable_command_id
-            )
-            content = await self._content(
-                text.encode("utf-8"), deadline=self._canonical_deadline()
-            )
-            occurred_at = datetime.now(timezone.utc)
-            candidate = build_prepared_root_turn_admission(
-                session_id=self._writer_lease.guard.session_id,
-                command_id=stable_command_id,
-                turn_id=turn_id,
-                entry_id=_stable_id("entry", turn_id, "user"),
-                context_binding_revision_id=_stable_id(
-                    "context-revision", turn_id, "0"
-                ),
-                permission_snapshot_id=_stable_id("permission-snapshot", turn_id),
-                requested_permission_mode=(
-                    requested_permission_mode or self._launch_permission_mode
-                ),
-                content=content,
-                occurred_at=occurred_at,
-            )
-            intent = cancellation_intent or ActiveTurnCancellationIntent(
-                turn_id, ModelInputScopeKind.ROOT, None
-            )
-            intent.require_exact(
-                turn_id=turn_id,
-                scope_kind=ModelInputScopeKind.ROOT,
-                scope_subagent_task_id=None,
-            )
+        stable_command_id = command_id or _id("command")
+        identity = build_direct_root_turn_identity(
+            self._writer_lease.guard.session_id, stable_command_id
+        )
+        turn_id = identity.turn_id
+        content = await self._content(
+            text.encode("utf-8"), deadline=self._canonical_deadline()
+        )
+        occurred_at = datetime.now(timezone.utc)
+        candidate = build_prepared_root_turn_admission(
+            session_id=self._writer_lease.guard.session_id,
+            command_id=stable_command_id,
+            turn_id=turn_id,
+            entry_id=identity.entry_id,
+            context_binding_revision_id=identity.context_revision_id,
+            permission_snapshot_id=identity.permission_snapshot_id,
+            requested_permission_mode=(
+                requested_permission_mode or self._launch_permission_mode
+            ),
+            content=content,
+            occurred_at=occurred_at,
+            expected_permission_snapshot=expected_permission_snapshot,
+        )
+        intent = cancellation_intent or ActiveTurnCancellationIntent(
+            turn_id, ModelInputScopeKind.ROOT, None
+        )
+        intent.require_exact(
+            turn_id=turn_id,
+            scope_kind=ModelInputScopeKind.ROOT,
+            scope_subagent_task_id=None,
+        )
+        try:
             await self._turn_admission.accept_root(
                 candidate, cancellation_intent=intent
             )
-        else:
-            turn_id = stable_subagent_turn_id(
-                session_id=self._writer_lease.guard.session_id,
-                task_id=subagent_task_id,
-            )
-            content = await self._content(
-                text.encode("utf-8"), deadline=self._canonical_deadline()
-            )
-            occurred_at = datetime.now(timezone.utc)
-            candidate = build_prepared_subagent_turn_admission(
-                session_id=self._writer_lease.guard.session_id,
-                task_id=subagent_task_id,
-                turn_id=turn_id,
-                entry_id=_stable_id("entry", turn_id, "objective"),
-                context_binding_revision_id=_stable_id(
-                    "context-revision", turn_id, "0"
-                ),
-                permission_snapshot_id=_stable_id("permission-snapshot", turn_id),
-                content=content,
-                occurred_at=occurred_at,
-                actor_id="subagent-manager",
-            )
-            intent = cancellation_intent or ActiveTurnCancellationIntent(
-                turn_id, ModelInputScopeKind.SUBAGENT_TASK, subagent_task_id
-            )
-            intent.require_exact(
-                turn_id=turn_id,
-                scope_kind=ModelInputScopeKind.SUBAGENT_TASK,
-                scope_subagent_task_id=subagent_task_id,
-            )
-            await self._turn_admission.accept_subagent(
-                candidate, cancellation_intent=intent
-            )
+        except BaseException:
+            if hook_context_reservation is not None:
+                hook_context_reservation.retire()
+            raise
+        if hook_context_reservation is not None:
+            hook_context_reservation.commit()
         return await self.run_accepted_turn(turn_id, cancellation_intent=intent)
 
     async def run_accepted_turn(
@@ -518,6 +811,7 @@ class ConversationKernelRunner:
         turn_id: str,
         *,
         cancellation_intent: ActiveTurnCancellationIntent | None = None,
+        expected_first_model_identity: str | None = None,
     ) -> KernelRunResult:
         """Execute a ROOT/task turn whose user entry is already canonical."""
 
@@ -529,6 +823,11 @@ class ConversationKernelRunner:
             scope_kind=intent.scope_kind,
             scope_subagent_task_id=intent.scope_subagent_task_id,
         )
+        if expected_first_model_identity is not None and (
+            intent.scope_kind is not ModelInputScopeKind.SUBAGENT_TASK
+            or not intent.scope_subagent_task_id
+        ):
+            raise ValueError("first-model precondition is child-only")
 
         model_call_count = 0
         tool_call_count = 0
@@ -541,6 +840,7 @@ class ConversationKernelRunner:
         active_surface_borrow: ProcessLocalToolSurfaceBorrow | None = None
         successor_dispatch: PreparedProviderDispatch | None = None
         completed_tool_batch = False
+        stop_continuation_used = False
         try:
             while True:
                 if (
@@ -575,15 +875,23 @@ class ConversationKernelRunner:
                         manual_request=manual_request,
                         scope_kind=intent.scope_kind,
                         scope_subagent_task_id=intent.scope_subagent_task_id,
+                        hook_scope=self._hook_scope,
+                        session_start_compact_port=(
+                            self._compact_session_start_port(intent)
+                        ),
+                        session_start_boundary_port=(
+                            self._compact_session_start_boundary_port(intent)
+                        ),
                     )
+                    self._require_active_compaction_continuation(compaction)
                     successor_dispatch = compaction.successor_dispatch
                     completed_tool_batch = False
                     continue
                 model_call_count += 1
                 planning_deadline = self._planning_deadline()
-                steer_plan_retries = 0
                 dispatch = successor_dispatch
                 successor_dispatch = None
+                automatic_compaction_decided = dispatch is not None
                 if dispatch is None:
                     headroom_admission = None
                     if self.compaction.automatic_allowed(
@@ -614,6 +922,7 @@ class ConversationKernelRunner:
                         headroom_admission = precompile.ordinary_admission
                         prepared_compaction = precompile.compaction
                         if prepared_compaction is not None:
+                            automatic_compaction_decided = True
                             compaction = await self.compaction.execute_active(
                                 turn_id=turn_id,
                                 model_call_index=model_call_count,
@@ -628,12 +937,53 @@ class ConversationKernelRunner:
                                     intent.scope_subagent_task_id
                                 ),
                                 prepared_source=prepared_compaction,
+                                hook_scope=self._hook_scope,
+                                session_start_compact_port=(
+                                    self._compact_session_start_port(intent)
+                                ),
+                                session_start_boundary_port=(
+                                    self._compact_session_start_boundary_port(intent)
+                                ),
                             )
+                            self._require_active_compaction_continuation(compaction)
                             if compaction.successor_dispatch is not None:
                                 model_call_count -= 1
                                 successor_dispatch = compaction.successor_dispatch
                                 completed_tool_batch = False
                                 continue
+                    session_start_context = None
+                    if (
+                        intent.scope_kind is ModelInputScopeKind.ROOT
+                        and self._session_start_boundary.has_pending
+                    ):
+                        if headroom_admission is None:
+                            headroom_admission = (
+                                await self.compaction.prepare_precompile_admission(
+                                    turn_id=turn_id,
+                                    model_call_index=model_call_count,
+                                    deadline=planning_deadline,
+                                )
+                            )
+                        session_start_facts = (
+                            await self._provider_dispatch.read_compile_snapshot(
+                                headroom_admission.handle.cut,
+                                deadline=planning_deadline,
+                            )
+                        )
+                        try:
+                            session_start_context = (
+                                await self._dispatch_initial_session_start(
+                                    intent,
+                                    canonical_facts=session_start_facts,
+                                    model_id=(
+                                        headroom_admission.prepared_target.target.fact.model_id
+                                    ),
+                                    deadline_monotonic=planning_deadline,
+                                )
+                            )
+                        except BaseException:
+                            headroom_admission.close()
+                            raise
                     while True:
                         try:
                             prepared_dispatch = await self._provider_dispatch.prepare(
@@ -664,16 +1014,17 @@ class ConversationKernelRunner:
                                     "normal provider preparation returned a projection"
                                 )
                             dispatch = prepared_dispatch
+                            session_start_context = None
                             break
                         except PreparedSteerPlanStale:
                             headroom_admission = None
-                            steer_plan_retries += 1
-                            if (
-                                steer_plan_retries >= 3
-                                or monotonic() >= planning_deadline
-                            ):
+                            if monotonic() >= planning_deadline:
                                 raise
                             await asyncio.sleep(0)
+                        except BaseException:
+                            if session_start_context is not None:
+                                session_start_context.retire()
+                            raise
                 else:
                     if (
                         dispatch.canonical_facts.canonical_input.identity.turn_id
@@ -684,31 +1035,67 @@ class ConversationKernelRunner:
                         raise ConversationKernelConflict(
                             "compaction successor belongs to another turn"
                         )
+                if (
+                    model_call_count == 1
+                    and expected_first_model_identity is not None
+                    and dispatch.prepared_call.call.target.fact.model_id
+                    != expected_first_model_identity
+                ):
+                    dispatch.handle.close()
+                    dispatch.close_surface_borrow()
+                    raise ConversationKernelConflict(
+                        "child first provider target drifted from launch carrier"
+                    )
                 auto_trigger = (
                     CompactionTrigger.MID_TURN_FOLLOWUP
                     if completed_tool_batch
                     else CompactionTrigger.AUTO_ACTIVE_CONTEXT
                 )
-                if self.compaction.automatic_allowed(
-                    scope_kind=intent.scope_kind,
-                    scope_subagent_task_id=intent.scope_subagent_task_id,
-                ) and self.compaction.dispatch_crosses_threshold(dispatch):
+                if (
+                    not automatic_compaction_decided
+                    and self.compaction.automatic_allowed(
+                        scope_kind=intent.scope_kind,
+                        scope_subagent_task_id=intent.scope_subagent_task_id,
+                    )
+                    and self.compaction.dispatch_crosses_threshold(dispatch)
+                ):
                     dispatch.handle.close()
-                    dispatch.close_surface_borrow()
-                    model_call_count -= 1
+                    dispatch.close_for_canonical_replan()
                     compaction = await self.compaction.execute_active(
                         turn_id=turn_id,
-                        model_call_index=model_call_count + 1,
+                        model_call_index=model_call_count,
                         inherited_memory_use_policy=current_memory_use_policy,
                         trigger=auto_trigger,
                         force=False,
                         manual_request=None,
                         scope_kind=intent.scope_kind,
                         scope_subagent_task_id=intent.scope_subagent_task_id,
+                        hook_scope=self._hook_scope,
+                        session_start_compact_port=(
+                            self._compact_session_start_port(intent)
+                        ),
+                        session_start_boundary_port=(
+                            self._compact_session_start_boundary_port(intent)
+                        ),
                     )
-                    successor_dispatch = compaction.successor_dispatch
-                    completed_tool_batch = False
-                    continue
+                    self._require_active_compaction_continuation(compaction)
+                    if compaction.successor_dispatch is not None:
+                        model_call_count -= 1
+                        successor_dispatch = compaction.successor_dispatch
+                        completed_tool_batch = False
+                        continue
+                    planning_deadline = self._planning_deadline()
+                    prepared_dispatch = await self._provider_dispatch.prepare(
+                        turn_id=turn_id,
+                        model_call_index=model_call_count,
+                        inherited_memory_use_policy=current_memory_use_policy,
+                        deadline=planning_deadline,
+                    )
+                    if not isinstance(prepared_dispatch, PreparedProviderDispatch):
+                        raise RuntimeError(
+                            "ordinary post-compaction decision is not installable"
+                        )
+                    dispatch = prepared_dispatch
                 completed_tool_batch = False
                 prepared = dispatch.handle
                 if dispatch.surface_borrow is None or not isinstance(
@@ -738,14 +1125,18 @@ class ConversationKernelRunner:
                     )
                     provider_open = dispatch.installed_provider_open
                     if provider_open is None:
-                        provider_open = (
-                            await self._provider_dispatch.install_provider_open(
-                                dispatch=dispatch,
-                                turn_id=turn_id,
-                                model_call_index=model_call_count,
-                                deadline=planning_deadline,
+                        try:
+                            provider_open = (
+                                await self._provider_dispatch.install_provider_open(
+                                    dispatch=dispatch,
+                                    turn_id=turn_id,
+                                    model_call_index=model_call_count,
+                                    deadline=planning_deadline,
+                                )
                             )
-                        )
+                        finally:
+                            if dispatch.hook_context_reservation is not None:
+                                dispatch.hook_context_reservation.retire()
                     request = provider_open.request
                     execution = provider_open.execution
                     permit = provider_open.permit
@@ -778,10 +1169,58 @@ class ConversationKernelRunner:
                         parent_bytes, deadline=self._canonical_deadline()
                     )
                     occurred_at = datetime.now(timezone.utc)
-                    completion_prepared: (
-                        tuple[object, FrozenSubagentResultPublicFact] | None
-                    ) = None
+                    completion_prepared: PreparedInferredSubagentCompletion | None = (
+                        None
+                    )
                     complete_turn = not calls
+                    stop_continuation = None
+                    stop_causal_ref = None
+                    if (
+                        complete_turn
+                        and identity.conversation_scope_kind
+                        is ModelInputScopeKind.ROOT
+                        and self._hook_dispatcher is not None
+                        and self._hook_context_owner is not None
+                        and self._hook_scope is not None
+                    ):
+                        stop_public_input = StopInput(
+                            session_id=self._writer_lease.guard.session_id,
+                            cwd=str(self._tools.snapshot_terminal_cwd()),
+                            model=request.prepared_call.call.target.fact.model_id,
+                            turn_id=turn_id,
+                            stop_hook_active=stop_continuation_used,
+                            last_assistant_message=completed.public_text,
+                            permission_mode=external_permission_mode(
+                                canonical_facts.run_permission_snapshot.effective_mode.value,
+                                active_plan_workflow=(
+                                    canonical_facts.run_permission_snapshot.plan_workflow_id
+                                    is not None
+                                ),
+                            ),
+                        )
+                        stop_causal_ref = StopRef(
+                            turn_id=turn_id,
+                            assistant_entry_id=entry_id,
+                            epoch_nonce=permit.epoch_nonce,
+                            binding_revision_id=request.cut.context_binding_revision_id,
+                        )
+                        stop_continuation = await self._hook_dispatcher.dispatch(
+                            HookDispatchEnvelope(
+                                self._hook_dispatcher.capture_view(),
+                                self._hook_scope,
+                                stop_public_input,
+                                stop_causal_ref,
+                                self._planning_deadline(),
+                            ),
+                            matcher_subject=event_matcher_subject(
+                                stop_public_input.event_type
+                            ),
+                            continuation_already_used=stop_continuation_used,
+                        )
+                        complete_turn = (
+                            stop_continuation.decision
+                            is ContinuationDecision.TERMINALIZE
+                        )
                     if (
                         complete_turn
                         and identity.conversation_scope_kind
@@ -794,11 +1233,20 @@ class ConversationKernelRunner:
                                 task_id=identity.scope_subagent_task_id,
                                 entry_id=entry_id,
                                 public_text=completed.public_text,
+                                model_id=request.prepared_call.call.target.fact.model_id,
+                                permission_snapshot=(
+                                    canonical_facts.run_permission_snapshot
+                                ),
                             )
                         )
-                        complete_turn = completion_prepared is not None
+                        complete_turn = (
+                            completion_prepared is not None
+                            and completion_prepared.result is not None
+                        )
                     subagent_result = (
-                        None if completion_prepared is None else completion_prepared[1]
+                        None
+                        if completion_prepared is None
+                        else completion_prepared.result
                     )
                     settlement = PreparedAssistantMessageSettlement(
                         guard=self._writer_lease.guard,
@@ -824,12 +1272,31 @@ class ConversationKernelRunner:
                     except BaseException:
                         if completion_prepared is not None:
                             await self._subagent_runtime.finish_completion(
-                                completion_prepared[0], committed=False
+                                completion_prepared.permit, committed=False
                             )
                         raise
                     if completion_prepared is not None:
                         await self._subagent_runtime.finish_completion(
-                            completion_prepared[0], committed=accepted.turn_completed
+                            completion_prepared.permit, committed=True
+                        )
+                    if (
+                        stop_continuation is not None
+                        and stop_continuation.decision
+                        is ContinuationDecision.CONTINUE_ONCE
+                        and not accepted.pending_steer_at_settlement
+                    ):
+                        if stop_continuation.continuation_source is None:
+                            raise RuntimeError(
+                                "Stop continuation lacks its exact Hook source"
+                            )
+                        if stop_causal_ref is None:
+                            raise RuntimeError("Stop continuation lacks its causal ref")
+                        stop_continuation_used = True
+                        self._hook_context_owner.accept_continuation(
+                            scope=self._hook_scope,
+                            causal_ref=stop_causal_ref,
+                            source_entry=stop_continuation.continuation_source,
+                            reason=stop_continuation.reason,
                         )
                     self._live_bus.offer_settlement_nowait(
                         kind=LiveSettlementKind.COMMITTED,
@@ -886,6 +1353,9 @@ class ConversationKernelRunner:
                     if active_surface_borrow is None:
                         raise RuntimeError("Plan batch lost its tool surface borrow")
                     tool_call_count += len(calls)
+                    plan_epoch = self._continuity.current_view(planning.scope)
+                    if plan_epoch is None:
+                        raise RuntimeError("Plan batch lost continuity epoch")
                     outcome = await self._plan_batches.accept_batch(
                         calls=calls,
                         selected_call_index=plan_call_indexes[0],
@@ -893,6 +1363,9 @@ class ConversationKernelRunner:
                         canonical_facts=canonical_facts,
                         surface_borrow=active_surface_borrow,
                         deadline=self._canonical_deadline(),
+                        hook_model=request.prepared_call.call.target.fact.model_id,
+                        hook_cwd=str(self._tools.snapshot_terminal_cwd()),
+                        continuity_epoch_nonce=plan_epoch.epoch_nonce,
                     )
                     active_surface_borrow.close()
                     active_surface_borrow = None
@@ -933,6 +1406,8 @@ class ConversationKernelRunner:
                     ),
                     continuity_scope=planning.scope,
                     surface_borrow=batch_borrow,
+                    last_assistant_message=(completed.public_text or None),
+                    hook_scope=self._hook_scope,
                 )
                 tool_call_count += batch.tool_call_count
                 remember_requested = remember_requested or batch.remember_requested
@@ -996,6 +1471,13 @@ class ConversationKernelRunner:
             cause = intent.cause
             if (
                 intent.scope_kind is ModelInputScopeKind.SUBAGENT_TASK
+                and isinstance(error, CompactionContinuationBlocked)
+            ):
+                raise ChildCompactionContinuationBlocked(
+                    "HOOK_COMPACTION_BLOCKED"
+                ) from error
+            if (
+                intent.scope_kind is ModelInputScopeKind.SUBAGENT_TASK
                 and cause is not None
             ):
                 # The child manager owns the atomic turn+task settlement.
@@ -1011,6 +1493,69 @@ class ConversationKernelRunner:
                 )
             await self._turn_admission.interrupt_turn(turn_id, reason=reason)
             raise
+
+    async def _dispatch_initial_session_start(
+        self,
+        intent: ActiveTurnCancellationIntent,
+        *,
+        canonical_facts: FrozenCanonicalCompileSnapshot,
+        model_id: str,
+        deadline_monotonic: float,
+    ) -> PendingHookContextReservation | None:
+        boundary = await self._session_start_boundary.consume_any()
+        if boundary is None:
+            return None
+        dispatcher = self._hook_dispatcher
+        context_owner = self._hook_context_owner
+        scope = self._hook_scope
+        if dispatcher is None or context_owner is None or scope is None:
+            return None
+        view = dispatcher.capture_view()
+        source = boundary.source
+        token = _SessionStartAttemptToken(
+            self._writer_lease.guard.session_id,
+            source,
+            boundary.boundary_token,
+        )
+        cwd = self._tools.snapshot_terminal_cwd()
+        public_input = SessionStartInput(
+            session_id=self._writer_lease.guard.session_id,
+            cwd=str(cwd),
+            model=model_id,
+            source=source,
+            permission_mode=external_permission_mode(
+                canonical_facts.run_permission_snapshot.effective_mode.value,
+                active_plan_workflow=(
+                    canonical_facts.run_permission_snapshot.plan_workflow_id
+                    is not None
+                ),
+            ),
+        )
+        causal_ref = SessionStartRef(token, source)
+        outcome = await dispatcher.dispatch(
+            HookDispatchEnvelope(
+                view,
+                scope,
+                public_input,
+                causal_ref,
+                deadline_monotonic,
+            ),
+            matcher_subject=event_matcher_subject(
+                public_input.event_type, source=source
+            ),
+        )
+        if outcome.decision is GateDecision.BLOCK:
+            raise SessionStartBlocked(outcome.reason or "SessionStart Hook blocked")
+        if intent.cause is not None:
+            raise asyncio.CancelledError
+        reservation = context_owner.prepare_sync(
+            scope=scope,
+            causal_ref=causal_ref,
+            entries=outcome.context_entries,
+        )
+        if reservation is not None:
+            reservation.commit()
+        return reservation
 
     async def accept_subagent_result(
         self,
@@ -1301,6 +1846,10 @@ def _provider_incomplete_terminal_reason(error: BaseException) -> str | None:
 
 
 def _model_input_terminal_reason(error: BaseException) -> str | None:
+    if isinstance(error, SessionStartBlocked):
+        return "HOOK_SESSION_START_BLOCKED"
+    if isinstance(error, CompactionContinuationBlocked):
+        return "HOOK_COMPACTION_BLOCKED"
     if not isinstance(error, StructuredModelInputCompileError):
         return None
     if error.kind in {

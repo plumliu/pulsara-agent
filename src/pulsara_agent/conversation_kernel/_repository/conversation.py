@@ -51,7 +51,10 @@ from pulsara_agent.conversation_kernel.subagents.contracts import (
 )
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.primitives.plan_workflow import PlanWorkflowStatus
-from pulsara_agent.primitives.run_permission import RunPermissionAdmissionSource
+from pulsara_agent.primitives.run_permission import (
+    FrozenRunPermissionSnapshot,
+    RunPermissionAdmissionSource,
+)
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 
 from .contracts import (
@@ -87,6 +90,31 @@ def _manual_compaction_turn_matches(
 
 
 class _ConversationOperations:
+    def prepare_root_permission_snapshot(
+        self,
+        guard: HostWriterGuard,
+        *,
+        snapshot_id: str,
+        requested_mode: PermissionMode,
+        deadline_monotonic: float,
+    ) -> FrozenRunPermissionSnapshot:
+        """Read the exact Plan/permission cut required by prompt Hook admission."""
+
+        with self._provider.connection(
+            lane=PostgresConnectionLane.HOST_CONTROL,
+            row_factory=dict_row,
+            isolation_level=IsolationLevel.REPEATABLE_READ,
+            deadline_monotonic=deadline_monotonic,
+        ) as connection:
+            self._require_writer(connection, guard, lock=False)
+            return self._freeze_root_permission_snapshot(
+                connection,
+                session_id=guard.session_id,
+                snapshot_id=snapshot_id,
+                requested_mode=requested_mode,
+                admission_source=RunPermissionAdmissionSource.USER_SUBMISSION,
+            )
+
     def start_root_turn(
         self,
         guard: HostWriterGuard,
@@ -162,6 +190,11 @@ class _ConversationOperations:
                 requested_mode=requested_permission_mode,
                 admission_source=RunPermissionAdmissionSource.USER_SUBMISSION,
             )
+            if (
+                prepared.expected_permission_snapshot is not None
+                and permission != prepared.expected_permission_snapshot
+            ):
+                raise ConversationKernelConflict("INGRESS_PRECONDITION_CHANGED")
             handoff = self._eligible_plan_handoff(
                 connection, session_id=guard.session_id
             )
@@ -1664,21 +1697,19 @@ class _ConversationOperations:
                         ),
                     )
                 )
-            pending_steer = False
-            if complete_turn:
-                pending_steer = bool(
-                    connection.execute(
-                        """
-                        SELECT EXISTS (
-                            SELECT 1 FROM pulsara_v3.prompt_queue_items
-                            WHERE session_id = %s AND status = 'PENDING'
-                              AND delivery_mode = 'STEER_ACTIVE_TURN'
-                              AND target_turn_id = %s
-                        ) AS present
-                        """,
-                        (guard.session_id, cut.turn_id),
-                    ).fetchone()["present"]
-                )
+            pending_steer = bool(
+                connection.execute(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1 FROM pulsara_v3.prompt_queue_items
+                        WHERE session_id = %s AND status = 'PENDING'
+                          AND delivery_mode = 'STEER_ACTIVE_TURN'
+                          AND target_turn_id = %s
+                    ) AS present
+                    """,
+                    (guard.session_id, cut.turn_id),
+                ).fetchone()["present"]
+            )
             turn_completed = complete_turn and not pending_steer
             if turn_completed:
                 terminal = connection.execute(
@@ -1717,6 +1748,7 @@ class _ConversationOperations:
                 entry_sequence=entry_sequence,
                 event_sequence=event.event_sequence,
                 turn_completed=turn_completed,
+                pending_steer_at_settlement=pending_steer,
             )
 
     def confirm_assistant_message_winner(
@@ -1992,12 +2024,26 @@ class _ConversationOperations:
                 raise ConversationKernelConflict(
                     "assistant candidate terminal disposition conflicts"
                 )
+            pending_steer = bool(
+                connection.execute(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1 FROM pulsara_v3.prompt_queue_items
+                        WHERE session_id = %s AND status = 'PENDING'
+                          AND delivery_mode = 'STEER_ACTIVE_TURN'
+                          AND target_turn_id = %s
+                    ) AS present
+                    """,
+                    (guard.session_id, cut.turn_id),
+                ).fetchone()["present"]
+            )
             return AcceptedEntry(
                 entry_id=entry_id,
                 turn_id=cut.turn_id,
                 entry_sequence=int(row["entry_sequence"]),
                 event_sequence=int(row["event_sequence"]),
                 turn_completed=bool(terminal),
+                pending_steer_at_settlement=pending_steer,
             )
 
     def interrupt_turn(

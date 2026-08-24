@@ -53,6 +53,41 @@ def _stable_id(prefix: str, *parts: str) -> str:
     return f"{prefix}:{digest}"
 
 
+@dataclass(frozen=True, slots=True)
+class PreparedRootTurnIdentity:
+    turn_id: str
+    entry_id: str
+    context_revision_id: str
+    permission_snapshot_id: str
+
+
+def build_direct_root_turn_identity(
+    session_id: str, command_id: str
+) -> PreparedRootTurnIdentity:
+    turn_id = _stable_id("turn", session_id, command_id)
+    return PreparedRootTurnIdentity(
+        turn_id=turn_id,
+        entry_id=_stable_id("entry", turn_id, "user"),
+        context_revision_id=_stable_id("context-revision", turn_id, "0"),
+        permission_snapshot_id=_stable_id("permission-snapshot", turn_id),
+    )
+
+
+def build_queued_root_turn_identity(
+    session_id: str, queue_item_id: str
+) -> PreparedRootTurnIdentity:
+    return PreparedRootTurnIdentity(
+        turn_id=_stable_id("turn", session_id, queue_item_id),
+        entry_id=_stable_id("entry", session_id, queue_item_id),
+        context_revision_id=_stable_id(
+            "context-revision", session_id, queue_item_id
+        ),
+        permission_snapshot_id=_stable_id(
+            "permission-snapshot", session_id, queue_item_id
+        ),
+    )
+
+
 def _content_manifest(content: CanonicalContent) -> dict[str, object]:
     value: dict[str, object] = {
         "digest": content.digest,
@@ -145,6 +180,7 @@ class PromptIngressWriteRejection(StrEnum):
     COMMAND_CONFLICT = "COMMAND_CONFLICT"
     TARGET_STALE_OR_NON_STEERABLE = "TARGET_STALE_OR_NON_STEERABLE"
     CAPACITY_EXHAUSTED = "CAPACITY_EXHAUSTED"
+    INGRESS_PRECONDITION_CHANGED = "INGRESS_PRECONDITION_CHANGED"
 
 
 @dataclass(frozen=True, slots=True)
@@ -235,9 +271,10 @@ def build_queued_root_turn_admission(
     occurred_at: datetime,
     actor_id: str,
 ) -> PreparedQueuedRootTurnAdmission:
-    turn_id = _stable_id("turn", session_id, queue_item_id)
-    entry_id = _stable_id("entry", session_id, queue_item_id)
-    revision_id = _stable_id("context-revision", session_id, queue_item_id)
+    identity = build_queued_root_turn_identity(session_id, queue_item_id)
+    turn_id = identity.turn_id
+    entry_id = identity.entry_id
+    revision_id = identity.context_revision_id
     consumed = CommittedEventDraft(
         event_id=_stable_id(
             "event", queue_item_id, CommittedEventType.PROMPT_CONSUMED.value
@@ -1225,6 +1262,7 @@ __all__ = [
     "PendingPromptSteerFact",
     "PreparedPromptIngressCommand",
     "PreparedQueuedRootTurnAdmission",
+    "PreparedRootTurnIdentity",
     "PreparedSteerCanonicalBaseFence",
     "PreparedSteerConsumptionCandidate",
     "PreparedSteerPlanConflictInterruption",
@@ -1244,6 +1282,8 @@ __all__ = [
     "SteerResourceRejectionConfirmationKind",
     "SteerSuffixAdmissionQuote",
     "build_prompt_ingress_command",
+    "build_direct_root_turn_identity",
+    "build_queued_root_turn_identity",
     "build_queued_root_turn_admission",
     "build_steer_canonical_base_fence",
     "build_pending_prompt_steer_fact",

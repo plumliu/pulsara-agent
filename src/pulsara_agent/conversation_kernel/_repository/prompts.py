@@ -17,6 +17,7 @@ from pulsara_agent.conversation_kernel.contracts import (
 from pulsara_agent.conversation_kernel.limits import STAGE2_LIMITS
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.primitives.run_permission import (
+    FrozenRunPermissionSnapshot,
     RunPermissionAdmissionSource,
     RunPermissionOverlay,
 )
@@ -281,6 +282,7 @@ class _PromptOperations:
         occurred_at: datetime,
         actor_id: str,
         deadline_monotonic: float,
+        _expected_permission_snapshot: FrozenRunPermissionSnapshot | None = None,
     ) -> int:
         if (delivery_mode is PromptDeliveryMode.NEW_TURN) != (target_turn_id is None):
             raise ValueError("prompt delivery target union is invalid")
@@ -288,6 +290,10 @@ class _PromptOperations:
             permission_snapshot_id is not None and requested_permission_mode is not None
         ):
             raise ValueError("queued new-turn permission candidate is invalid")
+        if (delivery_mode is PromptDeliveryMode.NEW_TURN) != (
+            _expected_permission_snapshot is not None
+        ) and _expected_permission_snapshot is not None:
+            raise ValueError("queued permission precondition scope is invalid")
         digest = canonical_digest(
             "pulsara:queue-prompt-command:v1",
             {
@@ -417,6 +423,13 @@ class _PromptOperations:
                     admission_source=RunPermissionAdmissionSource.USER_SUBMISSION,
                 )
             )
+            if (
+                _expected_permission_snapshot is not None
+                and permission != _expected_permission_snapshot
+            ):
+                raise PromptIngressRejected(
+                    PromptIngressWriteRejection.INGRESS_PRECONDITION_CHANGED
+                )
             handoff = (
                 None
                 if delivery_mode is PromptDeliveryMode.STEER_ACTIVE_TURN

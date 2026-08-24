@@ -19,7 +19,9 @@ from pulsara_agent.conversation_kernel.context_sources import (
     build_memory_context_source,
     replace_compaction_context_sources,
     replace_frozen_compaction_context_sources,
+    replace_frozen_hook_context_source,
     replace_frozen_subagent_context_sources,
+    replace_hook_context_source,
     replace_memory_context_sources,
 )
 from pulsara_agent.conversation_kernel.compaction.contracts import (
@@ -134,6 +136,7 @@ from pulsara_agent.model_input.compiler import (
     COMPILER_CONTRACT_VERSION,
     StructuredModelInputCompiler,
 )
+from pulsara_agent.hooks.context import HookContextReservation
 from pulsara_agent.model_input.contracts import (
     MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES,
     MAXIMUM_CANONICAL_PROVIDER_INPUT_ITEMS,
@@ -298,10 +301,24 @@ class PreparedProviderDispatch:
     installed_provider_open: InstalledProviderOpen | None = dataclass_field(
         default=None, repr=False
     )
+    hook_context_reservation: HookContextReservation | None = dataclass_field(
+        default=None, repr=False, compare=False
+    )
 
     def close_surface_borrow(self) -> None:
         if self.surface_borrow is not None:
             self.surface_borrow.close()
+        if self.hook_context_reservation is not None:
+            self.hook_context_reservation.retire()
+
+    def close_for_canonical_replan(self) -> None:
+        if self.surface_borrow is not None:
+            self.surface_borrow.close()
+        if self.hook_context_reservation is not None:
+            # HOOK_CONTEXT is one-shot advisory input.  Once a planning cut
+            # freezes it, every abandon/conflict/replan retires that exact
+            # reservation; it is never put back or replayed into another cut.
+            self.hook_context_reservation.retire()
 
 
 @dataclass(frozen=True, slots=True)
@@ -488,6 +505,7 @@ class ProviderDispatchCoordinator:
             ContextSourceCandidate | ContextSourceAbsentFact, ...
         ] = (),
         compaction_retained_skill_read: FrozenCompactionCanonicalRead | None = None,
+        include_hook_context: bool = True,
         semantic_only: bool = False,
         _compaction_source_projection: bool = False,
     ) -> PreparedProviderDispatch | PreparedCompactionSourceDispatch:
@@ -516,6 +534,7 @@ class ProviderDispatchCoordinator:
                 deadline_monotonic=deadline,
             )
         borrow: ProcessLocalToolSurfaceBorrow | None = None
+        hook_context_reservation: HookContextReservation | None = None
         try:
             await self._resolved_workspace_id(deadline=deadline)
             headroom_preflight = headroom_preflight_override
@@ -817,8 +836,14 @@ class ProviderDispatchCoordinator:
                     skill_dispatch_view=skill_view,
                     skill_owner_snapshot=skill_owner,
                     mcp_catalog_snapshot=mcp_owner.catalog_snapshot,
+                    hook_context_estimator=(
+                        None
+                        if semantic_only or not include_hook_context
+                        else prepared_call.compile_binding.estimator
+                    ),
                     deadline_monotonic=deadline,
                 )
+                hook_context_reservation = frozen_sources.hook_context_reservation
                 if compaction_source_replacements:
                     frozen_sources = replace_frozen_compaction_context_sources(
                         frozen_sources, compaction_source_replacements
@@ -1368,6 +1393,7 @@ class ProviderDispatchCoordinator:
                     memory_context=final_memory[0],
                     accepted_steers=batch,
                     retained_skill_selection=retained_skill_selection,
+                    hook_context_reservation=hook_context_reservation,
                 )
 
             planning = self._continuity.freeze_planning_input(
@@ -1768,11 +1794,120 @@ class ProviderDispatchCoordinator:
                 compaction_headroom_preflight=headroom_preflight,
                 cold_semantic=cold_semantic,
                 retained_skill_selection=retained_skill_selection,
+                hook_context_reservation=hook_context_reservation,
             )
         except BaseException:
             handle.close()
             if borrow is not None:
                 borrow.close()
+            if hook_context_reservation is not None:
+                hook_context_reservation.retire()
+            raise
+
+    async def prepare_hook_context_sibling(
+        self,
+        base: PreparedProviderDispatch,
+        *,
+        model_call_index: int,
+        deadline: float,
+    ) -> PreparedProviderDispatch | None:
+        """Compile the optional Hook cold sibling from the base's exact facts.
+
+        The base remains the final fallback and owns the sole physical borrow.
+        This method performs no continuity registration, install, ToolResult
+        delivery, provider preflight, or transport open.
+        """
+
+        semantic = base.cold_semantic
+        if semantic is None or base.hook_context_reservation is not None:
+            raise ValueError("Hook sibling requires one no-Hook cold base")
+        identity = base.canonical_facts.canonical_input.identity
+        replacement, reservation = (
+            self._context_source_collector.freeze_hook_context_source(
+                scope_kind=identity.conversation_scope_kind.value,
+                child_task_id=identity.scope_subagent_task_id,
+                estimator=base.prepared_call.compile_binding.estimator,
+            )
+        )
+        if reservation is None:
+            return None
+        try:
+            hook_sources = replace_hook_context_source(base.sources, replacement)
+            hook_non_trigger = replace_frozen_hook_context_source(
+                semantic.non_trigger_sources,
+                replacement,
+                reservation=reservation,
+            )
+            anchor = semantic.planning.dispatch_anchor
+            compile_request = StructuredModelInputCompileRequest(
+                context_id=f"model-context-hook-sibling:{uuid4().hex}",
+                model_call_index=model_call_index,
+                canonical_input=base.canonical_facts.canonical_input,
+                canonical_facts=base.canonical_facts,
+                compile_binding=base.prepared_call.compile_binding,
+                sources=hook_sources,
+                dispatch_anchor_entry_id=(
+                    anchor.source_entry_id
+                    if isinstance(anchor, NewTriggerAnchor)
+                    else None
+                ),
+                memory_citation_handles=tuple(
+                    (item.reference.tool_result_id, item.handle)
+                    for item in base.memory_context.citation_handles
+                ),
+            )
+            compatibility = provider_input_compatibility(
+                prepared_call=base.prepared_call,
+                canonical_facts=base.canonical_facts,
+                sources=hook_sources,
+            )
+            if compatibility != semantic.compatibility:
+                raise StructuredModelInputCompileError(
+                    ModelInputCompileFailureKind.CANONICAL_PREFIX_CONFLICT
+                )
+            hook_semantic = await self._io.run(
+                self._cold_epoch_assembler.prepare_semantic,
+                seed=semantic.seed,
+                compile_request=compile_request,
+                planning=semantic.planning,
+                compatibility=compatibility,
+                prepared_call=semantic.prepared_call,
+                capability_dispatch_cut=semantic.capability_dispatch_cut,
+                tool_view=semantic.tool_view,
+                skill_view=semantic.skill_view,
+                tool_exposure_plan=semantic.tool_exposure_plan,
+                non_trigger_sources=hook_non_trigger,
+                replay_target=semantic.replay_target,
+                deadline_monotonic=deadline,
+            )
+            compiled = hook_semantic.compiled_result.compiled_input
+            base_compiled = base.append_result.compiled_input
+            if compiled.system_prompt != base_compiled.system_prompt or (
+                compiled.tools != base_compiled.tools
+            ):
+                raise StructuredModelInputCompileError(
+                    ModelInputCompileFailureKind.CANONICAL_PREFIX_CONFLICT
+                )
+            hook_decision = next(
+                (
+                    item
+                    for item in compiled.source_decisions
+                    if item.source_kind is ContextSourceKind.HOOK_CONTEXT
+                ),
+                None,
+            )
+            if hook_decision is None or not hook_decision.included:
+                reservation.retire()
+                return None
+            return replace(
+                base,
+                sources=hook_sources,
+                append_result=hook_semantic.compiled_result,
+                cold_semantic=hook_semantic,
+                hook_context_reservation=reservation,
+            )
+        except BaseException:
+            reservation.retire()
             raise
 
     async def read_compile_snapshot(

@@ -61,6 +61,22 @@ class ToolInteractionResolution:
     attempt_id: str | None = None
     result_entry_id: str | None = None
     permission_snapshot_fingerprint: str | None = None
+    result_id: str | None = None
+    result_entry_sequence: int | None = None
+    result_observed_at: datetime | None = None
+    result_public_body: str | None = None
+
+    def __post_init__(self) -> None:
+        if (self.result_entry_id is not None) != all(
+            value is not None
+            for value in (
+                self.result_id,
+                self.result_entry_sequence,
+                self.result_observed_at,
+                self.result_public_body,
+            )
+        ):
+            raise ValueError("interaction ToolResult settlement facts are incomplete")
 
 
 @dataclass(slots=True)
@@ -317,6 +333,10 @@ class KernelInteractionCoordinator:
                 accepted.attempt_id,
                 accepted.result_entry_id,
                 accepted.permission_snapshot_fingerprint,
+                accepted.result_id,
+                accepted.result_entry_sequence,
+                accepted.result_observed_at,
+                "tool execution denied by user" if decision == "DENY" else None,
             )
             if not pending.future.done():
                 pending.future.set_result(resolution)

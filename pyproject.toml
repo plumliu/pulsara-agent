@@ -12,6 +12,7 @@ dependencies = [
     "pydantic>=2.0",
     "pyyaml>=6.0.3",
     "protobuf>=6.31.1",
+    "google-re2>=1.1.20240702",
     "mcp[cli]==2.0.0",
     "mcp-types==2.0.0",
 ]

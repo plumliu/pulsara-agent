@@ -16,7 +16,10 @@ from pulsara_agent.conversation_kernel.contracts import (
     HostWriterGuard,
     InlineContent,
 )
-from pulsara_agent.primitives.run_permission import RunPermissionAdmissionSource
+from pulsara_agent.primitives.run_permission import (
+    FrozenRunPermissionSnapshot,
+    RunPermissionAdmissionSource,
+)
 from pulsara_agent.conversation_kernel.vocabulary import CommittedEventType, SubjectSlot
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 
@@ -213,6 +216,67 @@ def _subagent_batch_subject_matches(
     )
 
 class _SubagentOperations:
+    def prepare_subagent_launch_permission(
+        self,
+        guard: HostWriterGuard,
+        *,
+        candidate: PreparedSubagentTaskStart,
+        deadline_monotonic: float,
+    ) -> FrozenRunPermissionSnapshot:
+        """Freeze the exact parent permission fact after task-start FULL."""
+
+        if (
+            candidate.session_id != guard.session_id
+            or candidate.writer_generation != guard.writer_generation
+        ):
+            raise ValueError("subagent launch guard mismatch")
+        with self._provider.connection(
+            lane=PostgresConnectionLane.HOST_CONTROL,
+            row_factory=dict_row,
+            deadline_monotonic=deadline_monotonic,
+            isolation_level=IsolationLevel.REPEATABLE_READ,
+        ) as connection:
+            self._require_writer(connection, guard, lock=False)
+            task = connection.execute(
+                "SELECT * FROM pulsara_v3.subagent_tasks "
+                "WHERE session_id=%s AND id=%s",
+                (candidate.session_id, candidate.task_id),
+            ).fetchone()
+            event = connection.execute(
+                "SELECT * FROM pulsara_v3.agent_events "
+                "WHERE session_id=%s AND event_id=%s",
+                (candidate.session_id, candidate.event_id),
+            ).fetchone()
+            expected_event = self._subagent_task_start_event(candidate)
+            if task is None or event is None or not (
+                str(task["workspace_id"]) == candidate.workspace_id
+                and str(task["parent_turn_id"]) == candidate.parent_turn_id
+                and str(task["objective"]) == candidate.objective
+                and str(task["profile_kind"]) == candidate.profile.value
+                and str(task["context_mode"]) == candidate.parent_context.mode.value
+                and task["context_last_n_turns"]
+                == candidate.parent_context.last_n_turns
+                and int(task["execution_writer_generation"])
+                == candidate.writer_generation
+                and str(task["status"]) == "ACTIVE"
+                and task["pending_reason"] is None
+                and task["terminal_reason"] is None
+                and _event_row_matches_draft(event, expected_event)
+            ):
+                raise ConversationKernelConflict(
+                    "subagent launch no longer exact-joins task-start FULL"
+                )
+            parent = connection.execute(
+                "SELECT * FROM pulsara_v3.turns "
+                "WHERE session_id=%s AND id=%s",
+                (candidate.session_id, candidate.parent_turn_id),
+            ).fetchone()
+            if parent is None:
+                raise ConversationKernelConflict(
+                    "subagent launch parent turn is absent"
+                )
+            return self._permission_from_row(parent)
+
     @staticmethod
     def _subagent_batch_task_event(
         candidate: PreparedSubagentTaskBatchAdmission,
@@ -1596,6 +1660,8 @@ class _SubagentOperations:
         turn_id: str,
         entry_id: str,
         context_binding_revision_id: str,
+        task_start_event_id: str,
+        expected_parent_permission_snapshot: FrozenRunPermissionSnapshot,
         content: CanonicalContent,
         occurred_at: datetime,
         actor_id: str,
@@ -1609,6 +1675,10 @@ class _SubagentOperations:
             entry_id=entry_id,
             context_binding_revision_id=context_binding_revision_id,
             permission_snapshot_id=_stable_identity("permission-snapshot", turn_id),
+            task_start_event_id=task_start_event_id,
+            expected_parent_permission_snapshot=(
+                expected_parent_permission_snapshot
+            ),
             content=content,
             occurred_at=occurred_at,
             actor_id=actor_id,
@@ -1620,6 +1690,9 @@ class _SubagentOperations:
             or prepared.entry_id != entry_id
             or prepared.context_binding_revision_id
             != context_binding_revision_id
+            or prepared.task_start_event_id != task_start_event_id
+            or prepared.expected_parent_permission_snapshot
+            != expected_parent_permission_snapshot
             or prepared.content != content
             or prepared.occurred_at != occurred_at
             or prepared.actor_id != actor_id
@@ -1645,6 +1718,19 @@ class _SubagentOperations:
             ):
                 raise ConversationKernelConflict(
                     "subagent initial content conflicts with immutable objective"
+                )
+            parent = connection.execute(
+                "SELECT * FROM pulsara_v3.turns "
+                "WHERE session_id=%s AND id=%s FOR SHARE",
+                (guard.session_id, str(task["parent_turn_id"])),
+            ).fetchone()
+            if (
+                parent is None
+                or self._permission_from_row(parent)
+                != prepared.expected_parent_permission_snapshot
+            ):
+                raise ConversationKernelConflict(
+                    "subagent launch precondition drifted before turn admission"
                 )
             entry_sequence = self._allocate_entry_sequence(connection, guard.session_id)
             permission = self._freeze_subagent_permission_snapshot(
@@ -1727,6 +1813,10 @@ class _SubagentOperations:
             turn_id=candidate.turn_id,
             entry_id=candidate.entry_id,
             context_binding_revision_id=candidate.context_binding_revision_id,
+            task_start_event_id=candidate.task_start_event_id,
+            expected_parent_permission_snapshot=(
+                candidate.expected_parent_permission_snapshot
+            ),
             content=candidate.content,
             occurred_at=candidate.occurred_at,
             actor_id=candidate.actor_id,
@@ -1778,12 +1868,42 @@ class _SubagentOperations:
                    WHERE session_id = %s AND event_id = %s""",
                 (candidate.session_id, candidate.event.event_id),
             ).fetchone()
+            start_event = connection.execute(
+                "SELECT event_type, subject_subagent_task_id "
+                "FROM pulsara_v3.agent_events "
+                "WHERE session_id=%s AND event_id=%s",
+                (candidate.session_id, candidate.task_start_event_id),
+            ).fetchone()
+            parent = (
+                None
+                if task is None
+                else connection.execute(
+                    "SELECT * FROM pulsara_v3.turns "
+                    "WHERE session_id=%s AND id=%s",
+                    (candidate.session_id, str(task["parent_turn_id"])),
+                ).fetchone()
+            )
             required = (turn, revision, entry, event)
-            if task is None or not _canonical_content_matches_utf8_text(
-                candidate.content, str(task["objective"])
+            if (
+                task is None
+                or start_event is None
+                or parent is None
+                or not _canonical_content_matches_utf8_text(
+                    candidate.content, str(task["objective"])
+                )
+                or str(start_event["event_type"])
+                != CommittedEventType.SUBAGENT_TASK_STATUS_ACCEPTED.value
+                or str(start_event["subject_subagent_task_id"])
+                != candidate.task_id
+                or self._permission_from_row(parent)
+                != candidate.expected_parent_permission_snapshot
             ):
                 return TurnAdmissionConfirmation(TurnAdmissionConfirmationKind.CONFLICT)
             if all(row is None for row in required):
+                if str(task["status"]) != "ACTIVE":
+                    return TurnAdmissionConfirmation(
+                        TurnAdmissionConfirmationKind.CONFLICT
+                    )
                 return TurnAdmissionConfirmation(TurnAdmissionConfirmationKind.NONE)
             if any(row is None for row in required):
                 return TurnAdmissionConfirmation(TurnAdmissionConfirmationKind.CONFLICT)

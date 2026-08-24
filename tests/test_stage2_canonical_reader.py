@@ -856,6 +856,10 @@ def test_subagent_result_acceptance_linearizes_at_provider_safe_point(
         turn_id=child_turn,
         entry_id=_id("entry"),
         context_binding_revision_id=_id("revision"),
+        task_start_event_id=task_id.launch.task_start.event_id,
+        expected_parent_permission_snapshot=(
+            task_id.launch.parent_permission_snapshot
+        ),
         content=InlineContent.from_bytes(b"return one exact result"),
         occurred_at=datetime.now(timezone.utc),
         actor_id="subagent:test",

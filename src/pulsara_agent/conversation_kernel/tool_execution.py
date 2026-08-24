@@ -97,6 +97,7 @@ from pulsara_agent.conversation_kernel.tool_artifacts import (
 )
 
 from pulsara_agent.conversation_kernel.tool_contracts import (
+    AcceptedCanonicalToolResultSettlement,
     KernelToolAuthorization,
     KernelToolAuthorizationKind,
     KernelToolInvocationContext,
@@ -105,6 +106,10 @@ from pulsara_agent.conversation_kernel.tool_contracts import (
     ProcessLocalEffectSettlementDisposition,
     ProcessLocalEffectSettlementOutcome,
     ProcessLocalEffectSettlementToken,
+    PreparedResolvedToolInvocation,
+    PreparedPermissionRequest,
+    PreparedToolPreparationRejection,
+    build_accepted_canonical_tool_result_settlement,
 )
 
 from pulsara_agent.conversation_kernel.repository import (
@@ -127,9 +132,7 @@ from pulsara_agent.conversation_kernel.memory.dispatch import (
 from pulsara_agent.capability.builtin_catalog import builtin_tool_catalog_entry
 
 
-from pulsara_agent.primitives.tool_observation import (
-    ToolObservationOrigin,
-)
+from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
 
 
 from pulsara_agent.conversation_kernel.vocabulary import LiveEventType
@@ -138,7 +141,11 @@ from pulsara_agent.conversation_kernel.vocabulary import LiveEventType
 from pulsara_agent.model_input.contracts import (
     CanonicalModelInputIdentity,
     FrozenCanonicalCompileSnapshot,
+    ModelInputScopeKind,
+    FrozenProviderInputItem,
+    FrozenProviderInputItemKind,
 )
+from pulsara_agent.model_input.lowering import project_tool_result_public_value
 
 from pulsara_agent.model_input.continuity import (
     ProviderInputContinuityScope,
@@ -146,6 +153,8 @@ from pulsara_agent.model_input.continuity import (
 
 
 from pulsara_agent.primitives.context import (
+    freeze_json,
+    FrozenJsonObjectFact,
     thaw_json,
 )
 
@@ -159,8 +168,26 @@ from pulsara_agent.conversation_kernel.tool_contracts import (
     ToolInvocationPort,
 )
 from pulsara_agent.conversation_kernel.subagents.runtime_port import (
+    PreparedExplicitSubagentCompletion,
     SubagentRuntimePort,
 )
+from pulsara_agent.hooks.context import HookContextOwner
+from pulsara_agent.hooks.contracts import (
+    GateDecision,
+    FrozenHookDefinitionView,
+    HookDispatchEnvelope,
+    HookDispatchScopeRef,
+    PermissionDecision,
+    PermissionRef,
+    PermissionRequestInput,
+    PostToolRef,
+    PostToolUseInput,
+    PreToolRef,
+    PreToolUseInput,
+    external_permission_mode,
+)
+from pulsara_agent.hooks.dispatcher import KernelHookDispatcher
+from pulsara_agent.hooks.matcher import event_matcher_subject, tool_matcher_subject
 
 
 _RETRYABLE_EXPLICIT_RESULT_SETTLEMENT_ERRORS = (
@@ -173,7 +200,7 @@ _RETRYABLE_EXPLICIT_RESULT_SETTLEMENT_ERRORS = (
 
 @dataclass(frozen=True, slots=True)
 class _KnownToolResultSettlementOutcome:
-    accepted: AcceptedEntry
+    settlement: AcceptedCanonicalToolResultSettlement
     process_local_effect_committed: bool
 
 
@@ -318,6 +345,8 @@ class ToolBatchExecutor:
         subagent_runtime: SubagentRuntimePort | None,
         workspace_resolver: SessionWorkspaceResolver,
         deadline_factory: KernelExecutionDeadlineFactory,
+        hook_dispatcher: KernelHookDispatcher | None = None,
+        hook_context_owner: HookContextOwner | None = None,
     ) -> None:
         self._repository = repository
         self._writer_lease = writer_lease
@@ -333,6 +362,8 @@ class ToolBatchExecutor:
         self._subagent_runtime = subagent_runtime
         self._workspace_resolver = workspace_resolver
         self._deadlines = deadline_factory
+        self._hooks = hook_dispatcher
+        self._hook_context = hook_context_owner
 
     def _canonical_deadline(self) -> float:
         return self._deadlines.deadline(KernelWatchdogOwner.FOREGROUND_CANONICAL)
@@ -367,6 +398,237 @@ class ToolBatchExecutor:
         except Exception:
             return
 
+    def _hook_model_id(self, request: KernelModelExecutionRequest) -> str:
+        return request.prepared_call.call.target.fact.model_id
+
+    async def _dispatch_pre_tool(
+        self,
+        *,
+        view: FrozenHookDefinitionView,
+        scope: HookDispatchScopeRef,
+        prepared: PreparedResolvedToolInvocation,
+        turn_id: str,
+        assistant_entry_id: str,
+        tool_call_id: str,
+        request: KernelModelExecutionRequest,
+        canonical_facts: FrozenCanonicalCompileSnapshot,
+    ):
+        assert self._hooks is not None
+        subject = tool_matcher_subject(
+            prepared.requested_tool_name,
+            resolved_remote_identity=(
+                prepared.canonical_tool_name
+                if prepared.canonical_tool_name != prepared.requested_tool_name
+                else None
+            ),
+        )
+        arguments = thaw_json(prepared.resolved_arguments)
+        causal_ref = PreToolRef(
+            turn_id,
+            assistant_entry_id,
+            tool_call_id,
+            prepared.canonical_tool_name,
+        )
+        public_input = PreToolUseInput(
+            session_id=request.session_id,
+            cwd=str(self._tools.snapshot_terminal_cwd()),
+            model=self._hook_model_id(request),
+            turn_id=turn_id,
+            tool_name=subject.external_primary,
+            tool_use_id=tool_call_id,
+            tool_input=arguments,
+            permission_mode=external_permission_mode(
+                canonical_facts.run_permission_snapshot.effective_mode.value,
+                active_plan_workflow=(
+                    canonical_facts.run_permission_snapshot.plan_workflow_id
+                    is not None
+                ),
+            ),
+            pulsara_tool_name=subject.pulsara_tool_name,
+        )
+        outcome = await self._hooks.dispatch(
+            HookDispatchEnvelope(
+                view,
+                scope,
+                public_input,
+                causal_ref,
+                self._deadlines.deadline(
+                    KernelWatchdogOwner.NONTERMINAL_TOOL_INVOCATION
+                ),
+            ),
+            matcher_subject=event_matcher_subject(
+                public_input.event_type, tool=subject
+            ),
+        )
+        return outcome, causal_ref
+
+    async def _dispatch_permission_request(
+        self,
+        *,
+        view: FrozenHookDefinitionView,
+        scope: HookDispatchScopeRef,
+        prepared: PreparedResolvedToolInvocation,
+        permission_request: PreparedPermissionRequest,
+        turn_id: str,
+        tool_call_id: str,
+        request: KernelModelExecutionRequest,
+        canonical_facts: FrozenCanonicalCompileSnapshot,
+    ):
+        assert self._hooks is not None
+        subject = tool_matcher_subject(
+            prepared.requested_tool_name,
+            resolved_remote_identity=(
+                prepared.canonical_tool_name
+                if prepared.canonical_tool_name != prepared.requested_tool_name
+                else None
+            ),
+        )
+        public_input = PermissionRequestInput(
+            session_id=request.session_id,
+            cwd=str(self._tools.snapshot_terminal_cwd()),
+            model=self._hook_model_id(request),
+            turn_id=turn_id,
+            tool_name=subject.external_primary,
+            tool_input=thaw_json(prepared.resolved_arguments),
+            permission_mode=external_permission_mode(
+                canonical_facts.run_permission_snapshot.effective_mode.value,
+                active_plan_workflow=(
+                    canonical_facts.run_permission_snapshot.plan_workflow_id
+                    is not None
+                ),
+            ),
+            pulsara_tool_name=subject.pulsara_tool_name,
+        )
+        return await self._hooks.dispatch(
+            HookDispatchEnvelope(
+                view,
+                scope,
+                public_input,
+                PermissionRef(
+                    turn_id, tool_call_id, permission_request.request_nonce
+                ),
+                self._deadlines.deadline(
+                    KernelWatchdogOwner.NONTERMINAL_TOOL_INVOCATION
+                ),
+            ),
+            matcher_subject=event_matcher_subject(
+                public_input.event_type, tool=subject
+            ),
+        )
+
+    async def _dispatch_post_tool(
+        self,
+        *,
+        view: FrozenHookDefinitionView,
+        scope: HookDispatchScopeRef,
+        prepared: PreparedResolvedToolInvocation,
+        settlement: AcceptedCanonicalToolResultSettlement,
+        request: KernelModelExecutionRequest,
+        canonical_facts: FrozenCanonicalCompileSnapshot,
+        continuity_scope: ProviderInputContinuityScope,
+    ) -> None:
+        if self._hooks is None:
+            return
+        epoch = self._continuity.current_view(continuity_scope)
+        if epoch is None:
+            raise RuntimeError("PostToolUse lost its provider-input epoch")
+        subject = tool_matcher_subject(
+            prepared.requested_tool_name,
+            resolved_remote_identity=(
+                prepared.canonical_tool_name
+                if prepared.canonical_tool_name != prepared.requested_tool_name
+                else None
+            ),
+        )
+        projection_input = settlement.public_projection
+        item = FrozenProviderInputItem(
+            item_kind=FrozenProviderInputItemKind.TOOL_RESULT,
+            source_entry_id=settlement.result_entry_id,
+            source_entry_sequence=settlement.accepted_entry_sequence,
+            source_turn_id=settlement.turn_id,
+            text=projection_input.canonical_body,
+            tool_call_id=settlement.tool_call_id,
+            tool_request_entry_id=settlement.assistant_entry_id,
+            tool_result_context=projection_input.metadata,
+            tool_result_body_text=projection_input.canonical_body,
+            tool_result_delivery=projection_input.delivery,
+        )
+        projected = project_tool_result_public_value(
+            item, artifact_read_available=True
+        )
+        causal_ref = PostToolRef(
+            settlement.turn_id,
+            settlement.tool_call_id,
+            settlement.result_id,
+            settlement.result_entry_id,
+            settlement.result_state,
+            epoch.epoch_nonce,
+        )
+        public_input = PostToolUseInput(
+            session_id=request.session_id,
+            cwd=str(self._tools.snapshot_terminal_cwd()),
+            model=self._hook_model_id(request),
+            turn_id=settlement.turn_id,
+            tool_name=subject.external_primary,
+            tool_use_id=settlement.tool_call_id,
+            tool_input=thaw_json(settlement.public_arguments),
+            tool_response=projected.value,
+            permission_mode=external_permission_mode(
+                canonical_facts.run_permission_snapshot.effective_mode.value,
+                active_plan_workflow=(
+                    canonical_facts.run_permission_snapshot.plan_workflow_id
+                    is not None
+                ),
+            ),
+            pulsara_tool_name=subject.pulsara_tool_name,
+        )
+        outcome = await self._hooks.dispatch(
+            HookDispatchEnvelope(
+                view,
+                scope,
+                public_input,
+                causal_ref,
+                self._deadlines.deadline(
+                    KernelWatchdogOwner.NONTERMINAL_TOOL_INVOCATION
+                ),
+            ),
+            matcher_subject=event_matcher_subject(
+                public_input.event_type, tool=subject
+            ),
+        )
+        if self._hook_context is not None:
+            self._hook_context.accept_sync(
+                scope=scope,
+                causal_ref=causal_ref,
+                entries=outcome.context_entries,
+            )
+
+    async def _finish_hooked_tool_result(
+        self,
+        *,
+        view: FrozenHookDefinitionView | None,
+        scope: HookDispatchScopeRef | None,
+        prepared: PreparedResolvedToolInvocation,
+        settlement: AcceptedCanonicalToolResultSettlement,
+        pre_context_reservation,
+        request: KernelModelExecutionRequest,
+        canonical_facts: FrozenCanonicalCompileSnapshot,
+        continuity_scope: ProviderInputContinuityScope,
+    ) -> None:
+        if pre_context_reservation is not None:
+            pre_context_reservation.commit()
+        if view is None or scope is None:
+            return
+        await self._dispatch_post_tool(
+            view=view,
+            scope=scope,
+            prepared=prepared,
+            settlement=settlement,
+            request=request,
+            canonical_facts=canonical_facts,
+            continuity_scope=continuity_scope,
+        )
+
     async def execute(
         self,
         *,
@@ -379,10 +641,14 @@ class ToolBatchExecutor:
         subagent_parent_context_subject: FrozenSubagentParentContextCallSubject | None,
         continuity_scope: ProviderInputContinuityScope,
         surface_borrow: ProcessLocalToolSurfaceBorrow,
+        last_assistant_message: str | None,
+        hook_scope: HookDispatchScopeRef | None = None,
     ) -> ToolBatchExecutionResult:
         tool_call_count = 0
         remember_requested = False
         unsettled_process_local_effect: ProcessLocalEffectSettlementToken | None = None
+        pending_hook_context_reservations = []
+        pending_completion_permit: object | None = None
         try:
             report_call_count = sum(
                 call.tool_name == "report_agent_result" for call in calls
@@ -392,16 +658,36 @@ class ToolBatchExecutor:
                 # sibling.  Reject the complete batch before authorization
                 # or attempt admission so no physical effect can escape.
                 workspace_id = await self._resolved_workspace_id()
-                for call in calls:
+                for call_ordinal, call in enumerate(calls):
                     tool_call_count += 1
                     binding = surface_borrow.execution_binding(call.tool_name)
-                    await self._settle_known_tool_result(
+                    rejected_arguments = thaw_json(call.arguments)
+                    if not isinstance(rejected_arguments, dict):
+                        raise RuntimeError("rejected Tool arguments are not an object")
+                    rejected_view = (
+                        self._hooks.capture_view()
+                        if self._hooks is not None and hook_scope is not None
+                        else None
+                    )
+                    rejected_invocation = PreparedResolvedToolInvocation(
+                        call.tool_name,
+                        call.tool_name,
+                        call.tool_name,
+                        None,
+                        call.arguments,
+                    )
+                    rejected = await self._settle_known_tool_result(
                         session_id=request.session_id,
                         turn_id=turn_id,
                         assistant_entry_id=assistant_entry_id,
                         tool_name=call.tool_name,
                         tool_call_id=call.tool_call_id,
-                        invocation_arguments={},
+                        invocation_arguments=rejected_arguments,
+                        call_ordinal=call_ordinal,
+                        scope_kind=canonical_identity.conversation_scope_kind,
+                        scope_subagent_task_id=(
+                            canonical_identity.scope_subagent_task_id
+                        ),
                         result_id=_id("tool-result"),
                         result_entry_id=_id("entry"),
                         attempt_id=None,
@@ -437,11 +723,21 @@ class ToolBatchExecutor:
                             binding.executor_binding_fingerprint
                         ),
                     )
+                    if rejected_view is not None and hook_scope is not None:
+                        await self._dispatch_post_tool(
+                            view=rejected_view,
+                            scope=hook_scope,
+                            prepared=rejected_invocation,
+                            settlement=rejected.settlement,
+                            request=request,
+                            canonical_facts=canonical_facts,
+                            continuity_scope=continuity_scope,
+                        )
                 return ToolBatchExecutionResult(
                     tool_call_count=tool_call_count,
                     remember_requested=remember_requested,
                 )
-            for call in calls:
+            for call_ordinal, call in enumerate(calls):
                 tool_call_count += 1
                 observation_origin = ToolObservationOrigin.POLICY
                 invocation_arguments = thaw_json(call.arguments)
@@ -454,17 +750,102 @@ class ToolBatchExecutor:
                 if surface_borrow is None:
                     raise RuntimeError("model response lost its tool surface borrow")
                 binding = surface_borrow.execution_binding(call.tool_name)
-                authorization = await self._tools.authorize(
-                    tool_name=call.tool_name,
-                    arguments=invocation_arguments,
-                    tool_call_id=call.tool_call_id,
-                    turn_id=turn_id,
-                    assistant_entry_id=assistant_entry_id,
-                    permission_snapshot=(canonical_facts.run_permission_snapshot),
-                    surface_borrow=surface_borrow,
-                    memory_context=request.memory_context,
+                hook_view = (
+                    self._hooks.capture_view()
+                    if self._hooks is not None and hook_scope is not None
+                    else None
                 )
+                prepared_invocation = (
+                    self._tools.prepare_resolved_invocation(
+                        tool_name=call.tool_name,
+                        arguments=invocation_arguments,
+                        surface_borrow=surface_borrow,
+                    )
+                    if hook_view is not None
+                    else PreparedResolvedToolInvocation(
+                        call.tool_name,
+                        call.tool_name,
+                        call.tool_name,
+                        None,
+                        call.arguments,
+                    )
+                )
+                pre_context_reservation = None
+                hook_blocked = False
+                if isinstance(
+                    prepared_invocation, PreparedToolPreparationRejection
+                ):
+                    authorization = prepared_invocation.authorization
+                    post_invocation = PreparedResolvedToolInvocation(
+                        prepared_invocation.requested_tool_name,
+                        prepared_invocation.post_tool_name,
+                        prepared_invocation.post_external_tool_name,
+                        prepared_invocation.post_pulsara_tool_name,
+                        prepared_invocation.post_arguments,
+                    )
+                else:
+                    post_invocation = prepared_invocation
+                    if hook_view is not None and hook_scope is not None:
+                        pre_outcome, pre_causal_ref = await self._dispatch_pre_tool(
+                            view=hook_view,
+                            scope=hook_scope,
+                            prepared=prepared_invocation,
+                            turn_id=turn_id,
+                            assistant_entry_id=assistant_entry_id,
+                            tool_call_id=call.tool_call_id,
+                            request=request,
+                            canonical_facts=canonical_facts,
+                        )
+                        if self._hook_context is not None:
+                            pre_context_reservation = (
+                                self._hook_context.prepare_sync(
+                                    scope=hook_scope,
+                                    causal_ref=pre_causal_ref,
+                                    entries=pre_outcome.context_entries,
+                                )
+                            )
+                            if pre_context_reservation is not None:
+                                pending_hook_context_reservations.append(
+                                    pre_context_reservation
+                                )
+                        if pre_outcome.decision is GateDecision.BLOCK:
+                            hook_blocked = True
+                            authorization = KernelToolAuthorization(
+                                KernelToolAuthorizationKind.PERMISSION_DENIED,
+                                "hook:pre-tool-block",
+                                pre_outcome.reason or "HOOK_BLOCKED",
+                            )
+                        else:
+                            authorization = await self._tools.authorize(
+                                tool_name=call.tool_name,
+                                arguments=invocation_arguments,
+                                tool_call_id=call.tool_call_id,
+                                turn_id=turn_id,
+                                assistant_entry_id=assistant_entry_id,
+                                permission_snapshot=(
+                                    canonical_facts.run_permission_snapshot
+                                ),
+                                surface_borrow=surface_borrow,
+                                memory_context=request.memory_context,
+                            )
+                    else:
+                        authorization = await self._tools.authorize(
+                            tool_name=call.tool_name,
+                            arguments=invocation_arguments,
+                            tool_call_id=call.tool_call_id,
+                            turn_id=turn_id,
+                            assistant_entry_id=assistant_entry_id,
+                            permission_snapshot=(
+                                canonical_facts.run_permission_snapshot
+                            ),
+                            surface_borrow=surface_borrow,
+                            memory_context=request.memory_context,
+                        )
                 machine_policy_kind = authorization.kind
+                if hook_blocked:
+                    # PreTool BLOCK owns a no-attempt ToolResult, not a
+                    # machine permission-decision row.
+                    machine_policy_kind = KernelToolAuthorizationKind.INVALID_ARGUMENTS
                 capability_decision_id = _stable_id(
                     "capability-decision", assistant_entry_id, call.tool_call_id
                 )
@@ -472,34 +853,70 @@ class ToolBatchExecutor:
                     authorization.kind
                     is KernelToolAuthorizationKind.REQUIRE_CONFIRMATION
                 ):
-                    await self._io.run(
-                        self._repository.accept_tool_capability_decision,
-                        self._writer_lease.guard,
-                        decision_id=capability_decision_id,
-                        assistant_entry_id=assistant_entry_id,
-                        tool_call_id=call.tool_call_id,
-                        decision="REQUIRE_CONFIRMATION",
-                        authorization_reference=authorization.reference,
-                        redacted_subject=f"tool:{call.tool_name}",
-                        attempt_id=None,
-                        result_id=None,
-                        result_entry_id=None,
-                        denial_content=None,
-                        denial_result_state=None,
-                        occurred_at=datetime.now(timezone.utc),
-                        actor_id="tool-dispatch-policy",
-                        permission_snapshot_fingerprint=(
-                            canonical_facts.run_permission_snapshot.snapshot_fingerprint
-                        ),
-                        deadline_monotonic=self._canonical_deadline(),
-                    )
-                    authorization = await self._tools.request_confirmation(
-                        tool_name=call.tool_name,
+                    permission_request = self._tools.prepare_permission_request(
                         tool_call_id=call.tool_call_id,
                         turn_id=turn_id,
-                        assistant_entry_id=assistant_entry_id,
-                        permission_snapshot=(canonical_facts.run_permission_snapshot),
+                        surface_borrow=surface_borrow,
                     )
+                    permission_decision = PermissionDecision.ABSTAIN
+                    if (
+                        hook_view is not None
+                        and hook_scope is not None
+                        and isinstance(
+                            prepared_invocation, PreparedResolvedToolInvocation
+                        )
+                    ):
+                        permission_outcome = (
+                            await self._dispatch_permission_request(
+                                view=hook_view,
+                                scope=hook_scope,
+                                prepared=prepared_invocation,
+                                permission_request=permission_request,
+                                turn_id=turn_id,
+                                tool_call_id=call.tool_call_id,
+                                request=request,
+                                canonical_facts=canonical_facts,
+                            )
+                        )
+                        permission_decision = permission_outcome.decision
+                    if permission_decision is PermissionDecision.ALLOW:
+                        authorization = self._tools.resolve_hook_permission(
+                            prepared_request=permission_request, allow=True
+                        )
+                    elif permission_decision is PermissionDecision.DENY:
+                        authorization = self._tools.resolve_hook_permission(
+                            prepared_request=permission_request, allow=False
+                        )
+                    else:
+                        await self._io.run(
+                            self._repository.accept_tool_capability_decision,
+                            self._writer_lease.guard,
+                            decision_id=capability_decision_id,
+                            assistant_entry_id=assistant_entry_id,
+                            tool_call_id=call.tool_call_id,
+                            decision="REQUIRE_CONFIRMATION",
+                            authorization_reference=authorization.reference,
+                            redacted_subject=f"tool:{call.tool_name}",
+                            attempt_id=None,
+                            result_id=None,
+                            result_entry_id=None,
+                            denial_content=None,
+                            denial_result_state=None,
+                            occurred_at=datetime.now(timezone.utc),
+                            actor_id="tool-dispatch-policy",
+                            permission_snapshot_fingerprint=(
+                                canonical_facts.run_permission_snapshot.snapshot_fingerprint
+                            ),
+                            deadline_monotonic=self._canonical_deadline(),
+                        )
+                        authorization = await self._tools.request_confirmation(
+                            prepared_request=permission_request,
+                            tool_name=call.tool_name,
+                            assistant_entry_id=assistant_entry_id,
+                            permission_snapshot=(
+                                canonical_facts.run_permission_snapshot
+                            ),
+                        )
                 attempt_id: str | None = None
                 attempt_permission_snapshot_fingerprint: str | None = (
                     authorization.accepted_permission_snapshot_fingerprint
@@ -509,10 +926,7 @@ class ToolBatchExecutor:
                 tool_result_block_id: str | None = None
                 workspace_id: str | None = None
                 binding_fingerprint: str | None = None
-                explicit_completion: (
-                    tuple[object, FrozenSubagentResultPublicFact, KernelToolResult]
-                    | None
-                ) = None
+                explicit_completion: PreparedExplicitSubagentCompletion | None = None
                 if authorization.kind is KernelToolAuthorizationKind.ALLOW:
                     try:
                         advertised_binding = surface_borrow.execution_binding(
@@ -533,8 +947,69 @@ class ToolBatchExecutor:
                 if authorization.kind is not KernelToolAuthorizationKind.ALLOW:
                     if authorization.accepted_result_entry_id is not None:
                         # Human DENY atomically committed the decision and
-                        # no-attempt result.  It is already available to the
-                        # next provider cut and must not be written twice.
+                        # no-attempt result.  Consume the exact process-local
+                        # FULL carrier without a repository read or second write.
+                        if any(
+                            value is None
+                            for value in (
+                                authorization.accepted_result_id,
+                                authorization.accepted_result_entry_sequence,
+                                authorization.accepted_result_observed_at,
+                                authorization.accepted_result_public_body,
+                            )
+                        ):
+                            raise RuntimeError(
+                                "accepted human denial lost ToolResult facts"
+                            )
+                        human_denial = (
+                            build_accepted_canonical_tool_result_settlement(
+                                session_id=request.session_id,
+                                scope_kind=(
+                                    canonical_identity.conversation_scope_kind
+                                ),
+                                scope_subagent_task_id=(
+                                    canonical_identity.scope_subagent_task_id
+                                ),
+                                turn_id=turn_id,
+                                assistant_entry_id=assistant_entry_id,
+                                call_ordinal=call_ordinal,
+                                tool_name=post_invocation.canonical_tool_name,
+                                tool_call_id=call.tool_call_id,
+                                public_arguments=(
+                                    post_invocation.resolved_arguments
+                                ),
+                                result_id=authorization.accepted_result_id,
+                                result_entry_id=(
+                                    authorization.accepted_result_entry_id
+                                ),
+                                accepted_entry_sequence=(
+                                    authorization.accepted_result_entry_sequence
+                                ),
+                                result_state="PERMISSION_DENIED",
+                                result_origin_kind="POLICY_NO_ATTEMPT",
+                                canonical_body=(
+                                    authorization.accepted_result_public_body
+                                ),
+                                observed_at=(
+                                    authorization.accepted_result_observed_at
+                                ),
+                                observation_origin=ToolObservationOrigin.POLICY,
+                            )
+                        )
+                        await self._finish_hooked_tool_result(
+                            view=hook_view,
+                            scope=hook_scope,
+                            prepared=post_invocation,
+                            settlement=human_denial,
+                            pre_context_reservation=pre_context_reservation,
+                            request=request,
+                            canonical_facts=canonical_facts,
+                            continuity_scope=continuity_scope,
+                        )
+                        if pre_context_reservation is not None:
+                            pending_hook_context_reservations.remove(
+                                pre_context_reservation
+                            )
                         continue
                     result = KernelToolResult(
                         state=authorization.kind.value,
@@ -550,7 +1025,8 @@ class ToolBatchExecutor:
                         denial_content = await self._content(
                             result.content, deadline=self._canonical_deadline()
                         )
-                        await self._io.run(
+                        denial_observed_at = datetime.now(timezone.utc)
+                        accepted_denial = await self._io.run(
                             self._repository.accept_tool_capability_decision,
                             self._writer_lease.guard,
                             decision_id=capability_decision_id,
@@ -560,17 +1036,64 @@ class ToolBatchExecutor:
                             authorization_reference=authorization.reference,
                             redacted_subject=f"tool:{call.tool_name}",
                             attempt_id=None,
-                            result_id=_id("tool-result"),
+                            result_id=result_id,
                             result_entry_id=result_entry_id,
                             denial_content=denial_content,
                             denial_result_state="PERMISSION_DENIED",
-                            occurred_at=datetime.now(timezone.utc),
+                            occurred_at=denial_observed_at,
                             actor_id="tool-dispatch-policy",
                             permission_snapshot_fingerprint=(
                                 canonical_facts.run_permission_snapshot.snapshot_fingerprint
                             ),
                             deadline_monotonic=self._canonical_deadline(),
                         )
+                        if accepted_denial.result_entry_sequence is None:
+                            raise RuntimeError(
+                                "accepted policy denial lost its entry sequence"
+                            )
+                        policy_denial = (
+                            build_accepted_canonical_tool_result_settlement(
+                                session_id=request.session_id,
+                                scope_kind=(
+                                    canonical_identity.conversation_scope_kind
+                                ),
+                                scope_subagent_task_id=(
+                                    canonical_identity.scope_subagent_task_id
+                                ),
+                                turn_id=turn_id,
+                                assistant_entry_id=assistant_entry_id,
+                                call_ordinal=call_ordinal,
+                                tool_name=post_invocation.canonical_tool_name,
+                                tool_call_id=call.tool_call_id,
+                                public_arguments=(
+                                    post_invocation.resolved_arguments
+                                ),
+                                result_id=result_id,
+                                result_entry_id=result_entry_id,
+                                accepted_entry_sequence=(
+                                    accepted_denial.result_entry_sequence
+                                ),
+                                result_state="PERMISSION_DENIED",
+                                result_origin_kind="POLICY_NO_ATTEMPT",
+                                canonical_body=result.content.decode("utf-8"),
+                                observed_at=denial_observed_at,
+                                observation_origin=ToolObservationOrigin.POLICY,
+                            )
+                        )
+                        await self._finish_hooked_tool_result(
+                            view=hook_view,
+                            scope=hook_scope,
+                            prepared=post_invocation,
+                            settlement=policy_denial,
+                            pre_context_reservation=pre_context_reservation,
+                            request=request,
+                            canonical_facts=canonical_facts,
+                            continuity_scope=continuity_scope,
+                        )
+                        if pre_context_reservation is not None:
+                            pending_hook_context_reservations.remove(
+                                pre_context_reservation
+                            )
                         continue
                 else:
                     assert binding_fingerprint is not None
@@ -705,6 +1228,11 @@ class ToolBatchExecutor:
                                 task_id=task_id,
                                 result_entry_id=result_entry_id,
                                 arguments=invocation_arguments,
+                                last_assistant_message=last_assistant_message,
+                                model_id=request.prepared_call.call.target.fact.model_id,
+                                permission_snapshot=(
+                                    canonical_facts.run_permission_snapshot
+                                ),
                             )
                             if explicit_completion is None:
                                 result = KernelToolResult(
@@ -715,7 +1243,10 @@ class ToolBatchExecutor:
                                     ).encode("utf-8"),
                                 )
                             else:
-                                result = explicit_completion[2]
+                                result = explicit_completion.tool_result
+                                pending_completion_permit = (
+                                    explicit_completion.permit
+                                )
                         else:
                             result = await self._tools.invoke(
                                 tool_name=call.tool_name,
@@ -817,10 +1348,16 @@ class ToolBatchExecutor:
                 )
                 if workspace_id is None:
                     workspace_id = await self._resolved_workspace_id()
-                if explicit_completion is not None:
-                    permit_token, result_fact, acknowledgement = explicit_completion
+                if (
+                    explicit_completion is not None
+                    and explicit_completion.result is not None
+                ):
+                    permit_token = explicit_completion.permit
+                    result_fact = explicit_completion.result
+                    acknowledgement = explicit_completion.tool_result
                     explicit_task = asyncio.create_task(
                         self._settle_explicit_subagent_result(
+                            session_id=request.session_id,
                             task_id=result_fact.task_id,
                             turn_id=turn_id,
                             assistant_entry_id=assistant_entry_id,
@@ -828,6 +1365,13 @@ class ToolBatchExecutor:
                             attempt_id=attempt_id,
                             result_id=result_id,
                             result_entry_id=result_entry_id,
+                            call_ordinal=call_ordinal,
+                            scope_kind=canonical_identity.conversation_scope_kind,
+                            scope_subagent_task_id=(
+                                canonical_identity.scope_subagent_task_id
+                            ),
+                            public_tool_name=post_invocation.canonical_tool_name,
+                            public_arguments=post_invocation.resolved_arguments,
                             workspace_id=workspace_id,
                             acknowledgement=acknowledgement,
                             result_fact=result_fact,
@@ -845,7 +1389,9 @@ class ToolBatchExecutor:
                         except BaseException:
                             break
                     try:
-                        explicit_accepted = explicit_task.result()
+                        explicit_accepted, explicit_settlement = (
+                            explicit_task.result()
+                        )
                     except BaseException:
                         await self._subagent_runtime.finish_completion(
                             permit_token, committed=False
@@ -854,6 +1400,21 @@ class ToolBatchExecutor:
                     await self._subagent_runtime.finish_completion(
                         permit_token, committed=True
                     )
+                    pending_completion_permit = None
+                    await self._finish_hooked_tool_result(
+                        view=hook_view,
+                        scope=hook_scope,
+                        prepared=post_invocation,
+                        settlement=explicit_settlement,
+                        pre_context_reservation=pre_context_reservation,
+                        request=request,
+                        canonical_facts=canonical_facts,
+                        continuity_scope=continuity_scope,
+                    )
+                    if pre_context_reservation is not None:
+                        pending_hook_context_reservations.remove(
+                            pre_context_reservation
+                        )
                     if cancellation is not None:
                         raise cancellation
                     return ToolBatchExecutionResult(
@@ -872,6 +1433,13 @@ class ToolBatchExecutor:
                         tool_name=call.tool_name,
                         tool_call_id=call.tool_call_id,
                         invocation_arguments=invocation_arguments,
+                        public_tool_name=post_invocation.canonical_tool_name,
+                        public_arguments=post_invocation.resolved_arguments,
+                        call_ordinal=call_ordinal,
+                        scope_kind=canonical_identity.conversation_scope_kind,
+                        scope_subagent_task_id=(
+                            canonical_identity.scope_subagent_task_id
+                        ),
                         result_id=result_id,
                         result_entry_id=result_entry_id,
                         attempt_id=attempt_id,
@@ -915,6 +1483,25 @@ class ToolBatchExecutor:
                 )
                 if settlement.process_local_effect_committed:
                     unsettled_process_local_effect = None
+                if pending_completion_permit is not None:
+                    await self._subagent_runtime.finish_completion(
+                        pending_completion_permit, committed=True
+                    )
+                    pending_completion_permit = None
+                await self._finish_hooked_tool_result(
+                    view=hook_view,
+                    scope=hook_scope,
+                    prepared=post_invocation,
+                    settlement=settlement.settlement,
+                    pre_context_reservation=pre_context_reservation,
+                    request=request,
+                    canonical_facts=canonical_facts,
+                    continuity_scope=continuity_scope,
+                )
+                if pre_context_reservation is not None:
+                    pending_hook_context_reservations.remove(
+                        pre_context_reservation
+                    )
                 if result.memory_candidate is not None:
                     remember_requested = True
                 if cancellation is not None:
@@ -929,6 +1516,17 @@ class ToolBatchExecutor:
             )
 
         finally:
+            if pending_completion_permit is not None:
+                try:
+                    await asyncio.shield(
+                        self._subagent_runtime.finish_completion(
+                            pending_completion_permit, committed=False
+                        )
+                    )
+                except BaseException:
+                    pass
+            for reservation in pending_hook_context_reservations:
+                reservation.retire()
             surface_borrow.close()
             if unsettled_process_local_effect is not None:
                 try:
@@ -944,6 +1542,7 @@ class ToolBatchExecutor:
     async def _settle_explicit_subagent_result(
         self,
         *,
+        session_id: str,
         task_id: str,
         turn_id: str,
         assistant_entry_id: str,
@@ -951,12 +1550,17 @@ class ToolBatchExecutor:
         attempt_id: str,
         result_id: str,
         result_entry_id: str,
+        call_ordinal: int,
+        scope_kind: ModelInputScopeKind,
+        scope_subagent_task_id: str | None,
+        public_tool_name: str,
+        public_arguments: FrozenJsonObjectFact,
         workspace_id: str,
         acknowledgement: KernelToolResult,
         result_fact: FrozenSubagentResultPublicFact,
         observed_at: datetime,
         observation_origin: ToolObservationOrigin,
-    ) -> AcceptedEntry:
+    ) -> tuple[AcceptedEntry, AcceptedCanonicalToolResultSettlement]:
         """Settle the sole-call report result as one exact canonical composite."""
 
         prepared_output = await self._io.run(
@@ -999,14 +1603,16 @@ class ToolBatchExecutor:
             tool_result=tool_candidate,
             result=result_fact,
         )
+        accepted: AcceptedEntry
         while True:
             try:
-                return await self._io.run(
+                accepted = await self._io.run(
                     self._repository.accept_explicit_subagent_result,
                     self._writer_lease.guard,
                     candidate=candidate,
                     deadline_monotonic=self._canonical_deadline(),
                 )
+                break
             except StaleHostWriter:
                 raise
             except (ConversationKernelConflict, TypeError, ValueError):
@@ -1032,17 +1638,58 @@ class ToolBatchExecutor:
                 assert confirmation.accepted_entry_id is not None
                 assert confirmation.entry_sequence is not None
                 assert confirmation.event_sequence is not None
-                return AcceptedEntry(
+                accepted = AcceptedEntry(
                     entry_id=confirmation.accepted_entry_id,
                     turn_id=turn_id,
                     entry_sequence=confirmation.entry_sequence,
                     event_sequence=confirmation.event_sequence,
                     turn_completed=True,
                 )
+                break
             if confirmation.kind is ExplicitSubagentResultConfirmationKind.CONFLICT:
                 raise ConversationKernelConflict(
                     "explicit subagent result has a conflicting canonical winner"
                 )
+        canonical_body = prepared_output.canonical_preview.canonical_bytes.decode(
+            "utf-8"
+        )
+        settlement = build_accepted_canonical_tool_result_settlement(
+            session_id=session_id,
+            scope_kind=scope_kind,
+            scope_subagent_task_id=scope_subagent_task_id,
+            turn_id=turn_id,
+            assistant_entry_id=assistant_entry_id,
+            call_ordinal=call_ordinal,
+            tool_name=public_tool_name,
+            tool_call_id=tool_call_id,
+            public_arguments=public_arguments,
+            result_id=result_id,
+            result_entry_id=result_entry_id,
+            accepted_entry_sequence=accepted.entry_sequence,
+            result_state=tool_candidate.result_state,
+            result_origin_kind="PHYSICAL_ATTEMPT",
+            canonical_body=canonical_body,
+            observed_at=tool_candidate.observed_at,
+            observation_duration_microseconds=(
+                tool_candidate.observation_duration_microseconds
+            ),
+            tool_reported_duration_microseconds=(
+                tool_candidate.trusted_tool_reported_duration_microseconds
+            ),
+            observation_origin=tool_candidate.observation_origin_kind,
+            display_kind=tool_candidate.display_kind,
+            artifact_disposition=tool_candidate.artifact_disposition,
+            artifact_id=tool_candidate.artifact_id,
+            source_coverage=tool_candidate.source_coverage,
+            source_coverage_reason=tool_candidate.source_coverage_reason,
+            artifact_unavailability_reason=(
+                tool_candidate.artifact_unavailability_reason
+            ),
+            model_visible_memory_fact_ids=(
+                tool_candidate.model_visible_memory_fact_ids
+            ),
+        )
+        return accepted, settlement
 
     async def _settle_known_tool_result(
         self,
@@ -1053,6 +1700,11 @@ class ToolBatchExecutor:
         tool_name: str,
         tool_call_id: str,
         invocation_arguments: Mapping[str, object],
+        public_tool_name: str | None = None,
+        public_arguments: FrozenJsonObjectFact | None = None,
+        call_ordinal: int,
+        scope_kind: ModelInputScopeKind,
+        scope_subagent_task_id: str | None,
         result_id: str,
         result_entry_id: str,
         attempt_id: str | None,
@@ -1235,8 +1887,54 @@ class ToolBatchExecutor:
                     },
                 )
             )
+        selected_arguments = public_arguments
+        if selected_arguments is None:
+            selected_arguments = freeze_json(dict(invocation_arguments))
+        if not isinstance(selected_arguments, FrozenJsonObjectFact):
+            raise TypeError("accepted Tool arguments did not freeze to an object")
+        selected_tool_name = public_tool_name or tool_name
+        settlement = build_accepted_canonical_tool_result_settlement(
+            session_id=session_id,
+            scope_kind=scope_kind,
+            scope_subagent_task_id=scope_subagent_task_id,
+            turn_id=turn_id,
+            assistant_entry_id=assistant_entry_id,
+            call_ordinal=call_ordinal,
+            tool_name=selected_tool_name,
+            tool_call_id=tool_call_id,
+            public_arguments=selected_arguments,
+            result_id=result_id,
+            result_entry_id=result_entry_id,
+            accepted_entry_sequence=accepted.entry_sequence,
+            result_state=prepared_acceptance.result_state,
+            result_origin_kind=(
+                "PHYSICAL_ATTEMPT"
+                if prepared_acceptance.attempt_id is not None
+                else "POLICY_NO_ATTEMPT"
+            ),
+            canonical_body=result_text,
+            observed_at=prepared_acceptance.observed_at,
+            observation_duration_microseconds=(
+                prepared_acceptance.observation_duration_microseconds
+            ),
+            tool_reported_duration_microseconds=(
+                prepared_acceptance.trusted_tool_reported_duration_microseconds
+            ),
+            observation_origin=prepared_acceptance.observation_origin_kind,
+            display_kind=prepared_acceptance.display_kind,
+            artifact_disposition=prepared_acceptance.artifact_disposition,
+            artifact_id=prepared_acceptance.artifact_id,
+            source_coverage=prepared_acceptance.source_coverage,
+            source_coverage_reason=prepared_acceptance.source_coverage_reason,
+            artifact_unavailability_reason=(
+                prepared_acceptance.artifact_unavailability_reason
+            ),
+            model_visible_memory_fact_ids=(
+                prepared_acceptance.model_visible_memory_fact_ids
+            ),
+        )
         return _KnownToolResultSettlementOutcome(
-            accepted=accepted,
+            settlement=settlement,
             process_local_effect_committed=effect_committed,
         )
 

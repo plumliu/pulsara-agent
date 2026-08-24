@@ -28,6 +28,9 @@ from pulsara_agent.conversation_kernel.reader import (
     visible_tool_result_at_cut,
 )
 from pulsara_agent.conversation_kernel.io import KernelSessionIO
+from pulsara_agent.conversation_kernel.execution_watchdogs import (
+    KernelExecutionDeadlineFactory,
+)
 from pulsara_agent.conversation_kernel.live import LiveAgentEventBus
 from pulsara_agent.conversation_kernel.repository import (
     AssistantTextBlock,
@@ -38,6 +41,9 @@ from pulsara_agent.conversation_kernel.repository import (
 )
 from pulsara_agent.conversation_kernel.runner import KernelRunResult
 from pulsara_agent.conversation_kernel.subagent import KernelSubagentManager
+from pulsara_agent.conversation_kernel.subagents.launch import (
+    CanonicalSubagentLaunchPreparationPort,
+)
 from pulsara_agent.conversation_kernel.subagents.contracts import (
     SubagentResultSource,
     build_parent_context_call_subject,
@@ -561,6 +567,10 @@ def _start_active_child(repository, lease) -> tuple[str, str]:
         turn_id=child_turn_id,
         entry_id=_id("entry"),
         context_binding_revision_id=_id("revision"),
+        task_start_event_id=task_id.launch.task_start.event_id,
+        expected_parent_permission_snapshot=(
+            task_id.launch.parent_permission_snapshot
+        ),
         content=InlineContent.from_bytes(b"perform one bounded task"),
         occurred_at=datetime.now(timezone.utc),
         actor_id="subagent:test",
@@ -838,9 +848,9 @@ class _CanonicalChildRaceRunner:
         self.started = asyncio.Event()
         self.final_entry_id: str | None = None
 
-    async def run_subagent_turn(
-        self, *, task_id, objective, cancellation_intent
-    ) -> KernelRunResult:
+    async def admit_subagent_turn(self, *, launch, cancellation_intent):
+        task_id = launch.task_start.task_id
+        objective = launch.task_start.objective
         turn_id = cancellation_intent.turn_id
         self.repository.start_subagent_turn(
             self.guard,
@@ -848,11 +858,22 @@ class _CanonicalChildRaceRunner:
             turn_id=turn_id,
             entry_id=_id("entry"),
             context_binding_revision_id=_id("revision"),
+            task_start_event_id=launch.task_start.event_id,
+            expected_parent_permission_snapshot=(
+                launch.parent_permission_snapshot
+            ),
             content=InlineContent.from_bytes(objective.encode()),
             occurred_at=datetime.now(timezone.utc),
             actor_id=task_id,
             deadline_monotonic=monotonic() + 30,
         )
+        return cancellation_intent
+
+    async def run_admitted_subagent_turn(
+        self, *, launch, cancellation_intent
+    ) -> KernelRunResult:
+        task_id = launch.task_start.task_id
+        turn_id = cancellation_intent.turn_id
         if self.complete_before_wait:
             cut = self.repository.prepare_provider_input_cut(
                 self.guard,
@@ -931,8 +952,16 @@ def test_round7_child_manager_confirm_first_cancellation_settles_exact_turn(
         todo_owner=TodoRunStateOwner(
             session_id=lease.guard.session_id, owner_epoch="host:test"
         ),
+        launch_preparation=CanonicalSubagentLaunchPreparationPort(
+            repository=repository,
+            guard=lease.guard,
+            io_owner=KernelSessionIO(),
+            configured_model_identity="test-pro",
+            deadline_factory=KernelExecutionDeadlineFactory(),
+        ),
+        terminal_cwd=Path.cwd,
     )
-    manager.bind_runner_factory(lambda: runner)  # type: ignore[arg-type]
+    manager.bind_runner_factory(lambda _scope: runner)  # type: ignore[arg-type]
 
     async def exercise() -> str:
         context = _round10_root_invocation_context(
@@ -955,7 +984,7 @@ def test_round7_child_manager_confirm_first_cancellation_settles_exact_turn(
                 invocation_context=context,
             )
             assert json.loads(stopped.content)["status"] == expected_task.lower()
-            await manager.aclose(timeout_seconds=5)
+            await manager.aclose(deadline_monotonic=monotonic() + 5)
         elif operation == "stop_then_close":
             stopping = asyncio.create_task(
                 manager.invoke(
@@ -965,11 +994,11 @@ def test_round7_child_manager_confirm_first_cancellation_settles_exact_turn(
                 )
             )
             await asyncio.sleep(0)
-            await manager.aclose(timeout_seconds=5)
+            await manager.aclose(deadline_monotonic=monotonic() + 5)
             stopped = await stopping
             assert json.loads(stopped.content)["status"] == expected_task.lower()
         else:
-            await manager.aclose(timeout_seconds=5)
+            await manager.aclose(deadline_monotonic=monotonic() + 5)
         return task_id
 
     task_id = asyncio.run(exercise())
@@ -1021,8 +1050,16 @@ def test_round7_late_child_cancel_preserves_completed_winner_and_result_lineage(
         todo_owner=TodoRunStateOwner(
             session_id=lease.guard.session_id, owner_epoch="host:test"
         ),
+        launch_preparation=CanonicalSubagentLaunchPreparationPort(
+            repository=repository,
+            guard=lease.guard,
+            io_owner=KernelSessionIO(),
+            configured_model_identity="test-pro",
+            deadline_factory=KernelExecutionDeadlineFactory(),
+        ),
+        terminal_cwd=Path.cwd,
     )
-    manager.bind_runner_factory(lambda: runner)  # type: ignore[arg-type]
+    manager.bind_runner_factory(lambda _scope: runner)  # type: ignore[arg-type]
 
     async def exercise() -> str:
         context = _round10_root_invocation_context(
@@ -1050,7 +1087,7 @@ def test_round7_late_child_cancel_preserves_completed_winner_and_result_lineage(
             invocation_context=context,
         )
         assert json.loads(waited.content)["status"] == "completed"
-        await manager.aclose(timeout_seconds=5)
+        await manager.aclose(deadline_monotonic=monotonic() + 5)
         return task_id
 
     task_id = asyncio.run(exercise())

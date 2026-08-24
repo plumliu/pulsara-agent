@@ -46,6 +46,7 @@ from pulsara_agent.model_input.contracts import (
     ContextSourceLifecycle,
     ContextTrustClass,
     FrozenModelToolSurface,
+    ModelInputTokenEstimator,
     FrozenCanonicalCompileSnapshot,
     FrozenPreviousTurnOutcomeCompileFact,
     FrozenToolObservationFreshnessCompileFact,
@@ -53,6 +54,7 @@ from pulsara_agent.model_input.contracts import (
     RuntimeEnvironmentSnapshot,
     RuntimeTemporalCapture,
 )
+from pulsara_agent.hooks.context import HookContextOwner, HookContextReservation
 from pulsara_agent.model_input.continuity import (
     FrozenProviderInputEpochView,
     SourceObservationPresence,
@@ -133,6 +135,7 @@ class ContextSourceCollectorPort(Protocol):
         skill_dispatch_view: FrozenSkillCapabilityDispatchView,
         skill_owner_snapshot: PreparedLocalSkillCatalogSourceSnapshot,
         mcp_catalog_snapshot: "McpCatalogSnapshot | None" = None,
+        hook_context_estimator: ModelInputTokenEstimator | None = None,
         deadline_monotonic: float | None = None,
     ) -> CollectedContextSources: ...
 
@@ -145,6 +148,7 @@ class ContextSourceCollectorPort(Protocol):
         skill_dispatch_view: FrozenSkillCapabilityDispatchView,
         skill_owner_snapshot: PreparedLocalSkillCatalogSourceSnapshot,
         mcp_catalog_snapshot: "McpCatalogSnapshot | None" = None,
+        hook_context_estimator: ModelInputTokenEstimator | None = None,
         deadline_monotonic: float | None = None,
     ) -> "FrozenNonTriggerContextSources": ...
 
@@ -161,6 +165,17 @@ class ContextSourceCollectorPort(Protocol):
         self,
         predecessor_epoch: FrozenProviderInputEpochView | None,
     ) -> ContextSourceCandidate | ContextSourceAbsentFact: ...
+
+    def freeze_hook_context_source(
+        self,
+        *,
+        scope_kind: str,
+        child_task_id: str | None,
+        estimator: ModelInputTokenEstimator,
+    ) -> tuple[
+        ContextSourceCandidate | ContextSourceAbsentFact,
+        HookContextReservation | None,
+    ]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -204,6 +219,9 @@ class FrozenNonTriggerContextSources:
     skill_dispatch_view: FrozenSkillCapabilityDispatchView = field(repr=False)
     skill_owner_snapshot: PreparedLocalSkillCatalogSourceSnapshot = field(
         repr=False, compare=False
+    )
+    hook_context_reservation: HookContextReservation | None = field(
+        default=None, repr=False, compare=False
     )
 
 
@@ -397,6 +415,18 @@ _BINDINGS = (
         ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
     ),
     _SourceBinding(
+        ContextSourceKind.HOOK_CONTEXT,
+        "pulsara.hook-context.v1",
+        ContextChannel.RUNTIME_OBSERVATION,
+        ContextTrustClass.UNTRUSTED_OBSERVATION,
+        ContextBudgetClass.IMPORTANT,
+        68,
+        60,
+        (ContextRenderMode.FULL, ContextRenderMode.COMPACT),
+        "pulsara.hook-context-collector.v1",
+        ContextSourceLifecycle.ONE_SHOT,
+    ),
+    _SourceBinding(
         ContextSourceKind.COMPACTION_RUNTIME_HANDOFF,
         "pulsara.compaction-runtime-handoff.v2-complete-todo",
         ContextChannel.RUNTIME_OBSERVATION,
@@ -460,6 +490,7 @@ class KernelContextSourceCollector:
         mcp_catalog: McpCatalogSnapshotPort | None = None,
         clock: Callable[[], datetime] | None = None,
         registry: ContextSourceRegistry | None = None,
+        hook_context_owner: HookContextOwner | None = None,
     ) -> None:
         if workspace_kind not in {"project", "transient"}:
             raise ValueError("context source workspace kind is invalid")
@@ -511,6 +542,7 @@ class KernelContextSourceCollector:
         self._timezone, self._timezone_name = _freeze_display_timezone(display_timezone)
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._registry = registry or ContextSourceRegistry()
+        self._hook_context_owner = hook_context_owner
 
     @property
     def registry_fingerprint(self) -> str:
@@ -545,6 +577,7 @@ class KernelContextSourceCollector:
         skill_dispatch_view: FrozenSkillCapabilityDispatchView,
         skill_owner_snapshot: PreparedLocalSkillCatalogSourceSnapshot,
         mcp_catalog_snapshot: "McpCatalogSnapshot | None" = None,
+        hook_context_estimator: ModelInputTokenEstimator | None = None,
         deadline_monotonic: float | None = None,
     ) -> CollectedContextSources:
         frozen = self.freeze_non_trigger_sources(
@@ -554,6 +587,7 @@ class KernelContextSourceCollector:
             skill_dispatch_view=skill_dispatch_view,
             skill_owner_snapshot=skill_owner_snapshot,
             mcp_catalog_snapshot=mcp_catalog_snapshot,
+            hook_context_estimator=hook_context_estimator,
             deadline_monotonic=deadline_monotonic,
         )
         return self.complete_frozen_sources(
@@ -571,6 +605,7 @@ class KernelContextSourceCollector:
         skill_dispatch_view: FrozenSkillCapabilityDispatchView,
         skill_owner_snapshot: PreparedLocalSkillCatalogSourceSnapshot,
         mcp_catalog_snapshot: "McpCatalogSnapshot | None" = None,
+        hook_context_estimator: ModelInputTokenEstimator | None = None,
         deadline_monotonic: float | None = None,
     ) -> FrozenNonTriggerContextSources:
         del deadline_monotonic
@@ -772,6 +807,16 @@ class KernelContextSourceCollector:
                         ContextSourceAbsenceKind.NOT_APPLICABLE,
                     )
                 )
+        identity = canonical_facts.canonical_input.identity
+        hook_source, hook_context_reservation = self.freeze_hook_context_source(
+            scope_kind=identity.conversation_scope_kind.value,
+            child_task_id=identity.scope_subagent_task_id,
+            estimator=hook_context_estimator,
+        )
+        if isinstance(hook_source, ContextSourceCandidate):
+            candidates.append(hook_source)
+        else:
+            absent.append(hook_source)
         return FrozenNonTriggerContextSources(
             candidates=tuple(candidates),
             absent_facts=tuple(absent),
@@ -780,6 +825,47 @@ class KernelContextSourceCollector:
             tool_exposure_plan=tool_exposure_plan,
             skill_dispatch_view=skill_dispatch_view,
             skill_owner_snapshot=skill_owner_snapshot,
+            hook_context_reservation=hook_context_reservation,
+        )
+
+    def freeze_hook_context_source(
+        self,
+        *,
+        scope_kind: str,
+        child_task_id: str | None,
+        estimator: ModelInputTokenEstimator | None,
+    ) -> tuple[
+        ContextSourceCandidate | ContextSourceAbsentFact,
+        HookContextReservation | None,
+    ]:
+        if self._hook_context_owner is None or estimator is None:
+            return (
+                self._absent(
+                    ContextSourceKind.HOOK_CONTEXT,
+                    ContextSourceAbsenceKind.EXPLICIT_EMPTY,
+                ),
+                None,
+            )
+        prepared = self._hook_context_owner.freeze_for_target(
+            scope_kind=scope_kind,
+            child_task_id=child_task_id,
+            estimator=estimator,
+        )
+        if prepared is None:
+            return (
+                self._absent(
+                    ContextSourceKind.HOOK_CONTEXT,
+                    ContextSourceAbsenceKind.EXPLICIT_EMPTY,
+                ),
+                None,
+            )
+        return (
+            self._candidate(
+                ContextSourceKind.HOOK_CONTEXT,
+                (prepared.full_text, prepared.compact_text),
+                domain_identity=prepared.domain_identity,
+            ),
+            prepared.reservation,
         )
 
     def complete_frozen_sources(
@@ -1400,6 +1486,7 @@ def replace_frozen_subagent_context_sources(
         tool_exposure_plan=sources.tool_exposure_plan,
         skill_dispatch_view=sources.skill_dispatch_view,
         skill_owner_snapshot=sources.skill_owner_snapshot,
+        hook_context_reservation=sources.hook_context_reservation,
     )
 
 
@@ -1589,6 +1676,63 @@ def replace_compaction_context_sources(
     )
 
 
+def replace_hook_context_source(
+    sources: CollectedContextSources,
+    replacement: ContextSourceCandidate | ContextSourceAbsentFact,
+) -> CollectedContextSources:
+    """Build the optional Hook sibling from one frozen non-Hook source set."""
+
+    if replacement.source_kind is not ContextSourceKind.HOOK_CONTEXT:
+        raise ValueError("Hook context replacement has the wrong source kind")
+    candidates = tuple(
+        item
+        for item in sources.candidates
+        if item.source_kind is not ContextSourceKind.HOOK_CONTEXT
+    )
+    absent = tuple(
+        item
+        for item in sources.absent_facts
+        if item.source_kind is not ContextSourceKind.HOOK_CONTEXT
+    )
+    if isinstance(replacement, ContextSourceCandidate):
+        candidates = (*candidates, replacement)
+    else:
+        absent = (*absent, replacement)
+    return _collected(
+        candidates=candidates,
+        absent_facts=absent,
+        diagnostics=sources.diagnostics,
+        registry_fingerprint=sources.registry_fingerprint,
+    )
+
+
+def replace_frozen_hook_context_source(
+    sources: FrozenNonTriggerContextSources,
+    replacement: ContextSourceCandidate | ContextSourceAbsentFact,
+    *,
+    reservation: HookContextReservation | None,
+) -> FrozenNonTriggerContextSources:
+    collected = replace_hook_context_source(
+        _collected(
+            candidates=sources.candidates,
+            absent_facts=sources.absent_facts,
+            diagnostics=sources.diagnostics,
+            registry_fingerprint=sources.registry_fingerprint,
+        ),
+        replacement,
+    )
+    return FrozenNonTriggerContextSources(
+        candidates=collected.candidates,
+        absent_facts=collected.absent_facts,
+        diagnostics=sources.diagnostics,
+        registry_fingerprint=sources.registry_fingerprint,
+        tool_exposure_plan=sources.tool_exposure_plan,
+        skill_dispatch_view=sources.skill_dispatch_view,
+        skill_owner_snapshot=sources.skill_owner_snapshot,
+        hook_context_reservation=reservation,
+    )
+
+
 def replace_frozen_compaction_context_sources(
     sources: FrozenNonTriggerContextSources,
     replacements: tuple[ContextSourceCandidate | ContextSourceAbsentFact, ...],
@@ -1617,6 +1761,7 @@ def replace_frozen_compaction_context_sources(
         tool_exposure_plan=sources.tool_exposure_plan,
         skill_dispatch_view=sources.skill_dispatch_view,
         skill_owner_snapshot=sources.skill_owner_snapshot,
+        hook_context_reservation=sources.hook_context_reservation,
     )
 
 
@@ -2130,5 +2275,7 @@ __all__ = [
     "build_memory_context_source",
     "replace_compaction_context_sources",
     "replace_frozen_compaction_context_sources",
+    "replace_frozen_hook_context_source",
+    "replace_hook_context_source",
     "replace_memory_context_sources",
 ]

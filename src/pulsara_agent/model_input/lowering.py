@@ -30,6 +30,7 @@ from pulsara_agent.primitives.tool_result_projection import (
     ToolResultLogicalMessageKind,
     decode_provider_tool_result_observation,
     provider_neutral_message_logical_utf8_bytes,
+    project_tool_result_storage_body,
     render_provider_tool_result_logical_message,
 )
 
@@ -76,6 +77,40 @@ class LoweredCanonicalItem:
             or modes != tuple(mode for mode in order if mode in modes)
         ):
             raise ValueError("tool-result variants are not a unique ordered subset")
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectedToolResultPublicValue:
+    render_mode: ToolResultProviderRenderMode
+    value: object
+    body: str = ""
+
+
+def project_tool_result_public_value(
+    item: FrozenProviderInputItem,
+    *,
+    artifact_read_available: bool,
+    limits: StructuredModelInputLimits | None = None,
+) -> ProjectedToolResultPublicValue:
+    """Return the first legal Round 7 public body for Hook/compiler reuse."""
+
+    lowered = lower_canonical_item(
+        item,
+        artifact_read_available=artifact_read_available,
+        limits=limits or StructuredModelInputLimits(),
+    )
+    if not lowered.tool_result_variants:
+        raise ValueError("public ToolResult projection requires a ToolResult item")
+    selected = lowered.tool_result_variants[0]
+    payload = decode_provider_tool_result_observation(selected.message.content[0])
+    body = payload["body"]
+    if not isinstance(body, str):
+        raise TypeError("public ToolResult body is not text")
+    try:
+        value: object = json.loads(body)
+    except json.JSONDecodeError:
+        value = body
+    return ProjectedToolResultPublicValue(selected.mode, value, body)
 
 
 def lower_canonical_item(
@@ -295,7 +330,7 @@ def _tool_result_message(
     assert item.tool_call_id is not None
     metadata = item.tool_result_context
     assert metadata is not None
-    projected_body = _project_plan_tool_result_if_owned(
+    projected_body = project_tool_result_storage_body(
         body, metadata.timing.observation_origin
     )
     rendered = render_provider_tool_result_logical_message(
@@ -332,54 +367,6 @@ def _project_tool_result_closure(text: str) -> str:
             raise ValueError("tool result closure disposition is invalid")
         disposition = value["disposition"]
     return canonical_json_bytes({"disposition": disposition}).decode("utf-8")
-
-
-def _project_plan_tool_result_if_owned(body: str, origin: object) -> str:
-    if getattr(origin, "value", origin) != "PLAN_CONTROL":
-        return body
-    try:
-        value = json.loads(body)
-    except json.JSONDecodeError:
-        return canonical_json_bytes(
-            {"plan_control": "REJECTED", "status": "error"}
-        ).decode("utf-8")
-    if not isinstance(value, dict):
-        raise ValueError("Plan result carrier is not an object")
-    status = value.get("status")
-    control = value.get("plan_control")
-    if status != "success" or control not in {
-        "ENTERED_PLAN",
-        "PLAN_ALREADY_ACTIVE",
-        "DRAFT_SUBMITTED_FOR_REVIEW",
-        "QUESTION_ANSWERED",
-    }:
-        raise ValueError("Plan control result storage carrier is invalid")
-    result: dict[str, object] = {"plan_control": control, "status": status}
-    if control == "QUESTION_ANSWERED":
-        answer_kind = value.get("answer_kind")
-        if answer_kind == "OPTION":
-            ordinal = value.get("selected_option_ordinal")
-            label = value.get("selected_label")
-            if (
-                isinstance(ordinal, bool)
-                or not isinstance(ordinal, int)
-                or ordinal < 0
-                or not isinstance(label, str)
-            ):
-                raise ValueError("Plan option answer storage carrier is invalid")
-            result["answer"] = {
-                "kind": "OPTION",
-                "label": label,
-                "ordinal": ordinal,
-            }
-        elif answer_kind == "FREE_TEXT" and isinstance(value.get("answer"), str):
-            result["answer"] = {
-                "kind": "FREE_TEXT",
-                "text": value["answer"],
-            }
-        else:
-            raise ValueError("Plan question answer storage carrier is invalid")
-    return canonical_json_bytes(result).decode("utf-8")
 
 
 def _project_terminal_observation(text: str) -> dict[str, object]:

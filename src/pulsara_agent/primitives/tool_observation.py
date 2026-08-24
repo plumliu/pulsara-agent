@@ -160,6 +160,61 @@ def tool_observation_timing_fingerprint(
     )
 
 
+def freeze_tool_observation_timing_fact(
+    *,
+    session_id: str,
+    turn_id: str,
+    observed_at: datetime,
+    observation_duration_microseconds: int | None,
+    tool_reported_duration_microseconds: int | None,
+    observation_origin: ToolObservationOrigin,
+) -> FrozenToolObservationTimingFact:
+    normalized_duration = normalize_observation_duration(
+        observation_duration_microseconds
+    )
+    duration_disposition = (
+        ToolObservationDurationDisposition.NO_PHYSICAL_ATTEMPT
+        if observation_origin
+        in {ToolObservationOrigin.POLICY, ToolObservationOrigin.PLAN_CONTROL}
+        else (
+            ToolObservationDurationDisposition.MEASURED
+            if normalized_duration is not None
+            else ToolObservationDurationDisposition.MEASUREMENT_UNAVAILABLE
+        )
+    )
+    values = {
+        "source_turn_ref": provider_visible_turn_ref(
+            session_id=session_id, turn_id=turn_id
+        ),
+        "observed_at_utc": canonical_utc_timestamp(observed_at),
+        "observation_duration_microseconds": normalized_duration,
+        "duration_disposition": duration_disposition,
+        "tool_reported_duration_microseconds": normalize_observation_duration(
+            tool_reported_duration_microseconds
+        ),
+        "observation_origin": observation_origin,
+    }
+    fingerprint = context_fingerprint(
+        "pulsara:tool-observation-timing:v1",
+        {
+            "source_turn_ref": values["source_turn_ref"],
+            "observed_at_utc": values["observed_at_utc"],
+            "observation_duration_microseconds": values[
+                "observation_duration_microseconds"
+            ],
+            "duration_disposition": duration_disposition.value,
+            "tool_reported_duration_microseconds": values[
+                "tool_reported_duration_microseconds"
+            ],
+            "observation_origin": observation_origin.value,
+        },
+    )
+    return FrozenToolObservationTimingFact(
+        **values,
+        fact_fingerprint=fingerprint,
+    )
+
+
 def provider_visible_turn_ref(*, session_id: str, turn_id: str) -> str:
     if not session_id or not turn_id:
         raise ValueError("provider-visible turn reference identity is incomplete")
@@ -178,6 +233,7 @@ __all__ = [
     "ToolObservationOrigin",
     "TrustedToolObservationSupplement",
     "canonical_utc_timestamp",
+    "freeze_tool_observation_timing_fact",
     "normalize_observation_duration",
     "provider_visible_turn_ref",
     "tool_observation_timing_fingerprint",
