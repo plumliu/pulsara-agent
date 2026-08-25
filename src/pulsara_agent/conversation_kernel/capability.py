@@ -1,10 +1,15 @@
-"""Agent Skills source owner and Round 9 sibling-view composer."""
+"""Effective Skill source owner and Round 9 sibling-view composer."""
 
 from __future__ import annotations
 
 from hashlib import sha256
 from pathlib import Path
 
+from pulsara_agent.capability.bundled_skills import (
+    BundledSkillDefinitionProducer,
+    BundledSkillDistributionBindingOwner,
+    EXPECTED_BUNDLED_SKILL_NAMES,
+)
 from pulsara_agent.capability.contracts import (
     CapabilityKind,
     CapabilitySourceKind,
@@ -13,7 +18,6 @@ from pulsara_agent.capability.contracts import (
     FrozenSkillCapabilityDispatchView,
     FrozenSkillCapabilityFact,
     FrozenSkillProjectionInput,
-    LocalSkillRootKind,
     capability_identity,
     capability_source_ref,
     capability_source_registration,
@@ -22,50 +26,52 @@ from pulsara_agent.capability.contracts import (
 )
 from pulsara_agent.capability.local_skills import (
     AGENT_SKILLS_CONTRACT_ID,
-    SkillDiscoveryDisposition,
+    LOOSE_SKILL_ROOT_ORDER,
+    SKILL_PLACEMENT_CONTRACT_ID,
+    LooseSkillDefinitionProducer,
+    check_skill_deadline,
 )
 from pulsara_agent.capability.provider import SkillProjectionOutput
-from pulsara_agent.capability.resolver import LocalSkillCapabilityProvider
-from pulsara_agent.capability.types import (
-    LocalSkillManifest,
-    SkillProjectionResolveContext,
+from pulsara_agent.capability.resolver import (
+    CompleteEffectiveSkillCatalogInspection,
+    SkillCatalogCapabilityProvider,
+    SkillCatalogResolver,
 )
+from pulsara_agent.capability.types import SkillManifest, SkillProjectionResolveContext
 from pulsara_agent.conversation_kernel.capability_composition import (
-    PreparedLocalSkillCatalogSourceSnapshot,
-    issue_local_skill_catalog_source_snapshot,
+    PreparedSkillCatalogSourceSnapshot,
+    issue_skill_catalog_source_snapshot,
 )
 from pulsara_agent.model_input.contracts import ModelInputScopeKind
 from pulsara_agent.primitives.context import context_fingerprint
 
 
-_LOCAL_SKILL_SOURCE_ID = "pulsara-local-skill-catalog"
-_ROOT_ORDER = (
-    LocalSkillRootKind.WORKSPACE_PULSARA,
-    LocalSkillRootKind.WORKSPACE_AGENTS,
-    LocalSkillRootKind.USER_PULSARA,
-    LocalSkillRootKind.USER_AGENTS,
-)
-_ROOT_PREFIX = {
-    LocalSkillRootKind.WORKSPACE_PULSARA: ".pulsara/skills",
-    LocalSkillRootKind.WORKSPACE_AGENTS: ".agents/skills",
-    LocalSkillRootKind.USER_PULSARA: "${PULSARA_HOME}/skills",
-    LocalSkillRootKind.USER_AGENTS: "~/.agents/skills",
-}
+_SKILL_SOURCE_ID = "pulsara-local-skill-catalog"
 
 
 class KernelSkillProjectionComposer:
-    """Freeze one aggregate Skill source and compose from its sibling view."""
+    """Freeze one effective bundled+loose source and compose its sibling view."""
 
     def __init__(
         self,
         *,
         workspace_root: Path,
+        bundled_binding_owner: BundledSkillDistributionBindingOwner,
         configured_active_skill_names: frozenset[str] = frozenset(),
-        provider: LocalSkillCapabilityProvider | None = None,
+        loose_producer: LooseSkillDefinitionProducer | None = None,
+        catalog_resolver: SkillCatalogResolver | None = None,
+        projection_provider: SkillCatalogCapabilityProvider | None = None,
     ) -> None:
         self._workspace_root = workspace_root
         self._configured = configured_active_skill_names
-        self._provider = provider or LocalSkillCapabilityProvider()
+        self._loose_producer = loose_producer or LooseSkillDefinitionProducer()
+        self._bundled_producer = BundledSkillDefinitionProducer(
+            bundled_binding_owner
+        )
+        self._resolver = catalog_resolver or SkillCatalogResolver()
+        self._projection_provider = (
+            projection_provider or SkillCatalogCapabilityProvider()
+        )
         self._owner_authenticity = object()
 
     @property
@@ -78,36 +84,51 @@ class KernelSkillProjectionComposer:
         conversation_scope_kind: ModelInputScopeKind,
         scope_subagent_task_id: str | None,
         deadline_monotonic: float | None = None,
-    ) -> PreparedLocalSkillCatalogSourceSnapshot:
-        root_policy = self._provider.provider.prepare_root_policy(
-            self._workspace_root,
+    ) -> PreparedSkillCatalogSourceSnapshot:
+        check_skill_deadline(deadline_monotonic)
+        root_policy = self._loose_producer.prepare_root_policy(self._workspace_root)
+        bundled = self._bundled_producer.observe(
+            deadline_monotonic=deadline_monotonic
         )
-        discovery = self._provider.snapshot_projection_input(
-            root_policy=root_policy,
-            deadline_monotonic=deadline_monotonic,
+        check_skill_deadline(deadline_monotonic)
+        loose = self._loose_producer.observe(
+            root_policy, deadline_monotonic=deadline_monotonic
         )
-        if discovery.root_policy is not root_policy:
-            raise ValueError("Skill discovery does not join its physical root policy")
+        if loose.root_policy is not root_policy:
+            raise ValueError("loose definitions do not join their physical policy")
+        check_skill_deadline(deadline_monotonic)
+        inspection = self._resolver.resolve(loose, bundled)
+        check_skill_deadline(deadline_monotonic)
         source = capability_source_ref(
             CapabilitySourceKind.LOCAL_SKILL_CATALOG,
-            _LOCAL_SKILL_SOURCE_ID,
+            _SKILL_SOURCE_ID,
         )
         registration = capability_source_registration(
             source=source,
             refresh_mode=CapabilitySourceRefreshMode.SAFE_POINT_REFRESHABLE,
             source_contract_fingerprint=context_fingerprint(
-                "local-skill-source-contract:v2-agent-skills",
-                {"parser": AGENT_SKILLS_CONTRACT_ID},
+                "skill-source-contract:v3-bundled-loose-agent-skills",
+                {
+                    "parser_contract": AGENT_SKILLS_CONTRACT_ID,
+                    "placement_contract": SKILL_PLACEMENT_CONTRACT_ID,
+                    "producer_kinds": ("LOOSE", "BUNDLED"),
+                    "precedence": (
+                        *(item.value for item in LOOSE_SKILL_ROOT_ORDER),
+                        "BUNDLED",
+                    ),
+                    "bundled_names": EXPECTED_BUNDLED_SKILL_NAMES,
+                },
             ),
         )
+        complete = isinstance(inspection, CompleteEffectiveSkillCatalogInspection)
         disposition = (
             CapabilitySourceSnapshotDisposition.COMPLETE
-            if discovery.disposition is SkillDiscoveryDisposition.COMPLETE
+            if complete
             else CapabilitySourceSnapshotDisposition.UNAVAILABLE
         )
         facts = (
-            tuple(_skill_fact(source, item) for item in discovery.skills)
-            if disposition is CapabilitySourceSnapshotDisposition.COMPLETE
+            tuple(_skill_fact(source, item) for item in inspection.winners)
+            if complete
             else ()
         )
         snapshot = freeze_capability_source_snapshot(
@@ -117,29 +138,29 @@ class KernelSkillProjectionComposer:
             disposition=disposition,
             facts=facts,
         )
-        return issue_local_skill_catalog_source_snapshot(
+        return issue_skill_catalog_source_snapshot(
             conversation_scope_kind=conversation_scope_kind,
             scope_subagent_task_id=scope_subagent_task_id,
             source_snapshot=snapshot,
-            discovery=discovery,
+            inspection=inspection,
             owner_authenticity=self._owner_authenticity,
         )
 
     def freeze_projection_input(
-        self, owner: PreparedLocalSkillCatalogSourceSnapshot
+        self, owner: PreparedSkillCatalogSourceSnapshot
     ) -> FrozenSkillProjectionInput:
         if owner.owner_authenticity is not self._owner_authenticity:
             raise ValueError("foreign Skill source snapshot")
         return FrozenSkillProjectionInput(
             source_snapshot=owner.source_snapshot,
-            discovery=owner.discovery,
+            inspection=owner.inspection,
         )
 
     def compose(
         self,
         *,
         view: FrozenSkillCapabilityDispatchView,
-        owner: PreparedLocalSkillCatalogSourceSnapshot,
+        owner: PreparedSkillCatalogSourceSnapshot,
         activation_subject: SkillProjectionResolveContext,
     ) -> SkillProjectionOutput:
         if owner.owner_authenticity is not self._owner_authenticity:
@@ -147,7 +168,7 @@ class KernelSkillProjectionComposer:
         frozen = view.projection_input
         if (
             owner.source_snapshot is not frozen.source_snapshot
-            or owner.discovery is not frozen.discovery
+            or owner.inspection is not frozen.inspection
         ):
             raise ValueError("Skill projection owner does not exact-join sibling view")
         expected_facts = tuple(
@@ -156,11 +177,11 @@ class KernelSkillProjectionComposer:
                     _skill_fact(
                         capability_source_ref(
                             CapabilitySourceKind.LOCAL_SKILL_CATALOG,
-                            _LOCAL_SKILL_SOURCE_ID,
+                            _SKILL_SOURCE_ID,
                         ),
                         item,
                     )
-                    for item in owner.discovery.skills
+                    for item in owner.inspection.winners
                 ),
                 key=lambda fact: (
                     fact.identity.kind.value,
@@ -172,10 +193,10 @@ class KernelSkillProjectionComposer:
         if tuple(item.fact_semantic_fingerprint for item in expected_facts) != tuple(
             item.fact_semantic_fingerprint for item in view.registry_skill_facts
         ):
-            raise ValueError("Skill projection discovery does not join registry")
-        return self._provider.resolve_projection_from_snapshot(
+            raise ValueError("Skill projection inspection does not join registry")
+        return self._projection_provider.resolve_projection_from_snapshot(
             activation_subject,
-            discovery=owner.discovery,
+            inspection=owner.inspection,
         )
 
     def activation_context(self, *, user_input: str) -> SkillProjectionResolveContext:
@@ -185,22 +206,11 @@ class KernelSkillProjectionComposer:
         )
 
 
-def _skill_fact(source, skill: LocalSkillManifest) -> FrozenSkillCapabilityFact:
-    kind = skill.root_kind
-    ordinal = _ROOT_ORDER.index(kind)
-    prefix = _ROOT_PREFIX[kind]
+def _skill_fact(source, skill: SkillManifest) -> FrozenSkillCapabilityFact:
     identity = capability_identity(
         kind=CapabilityKind.SKILL,
         source=source,
         stable_name=skill.name,
-    )
-    root_fingerprint = context_fingerprint(
-        "local-skill-winning-root-provenance:v2-agent-skills",
-        {
-            "root_kind": kind.value,
-            "precedence_ordinal": ordinal,
-            "stable_location_prefix": prefix,
-        },
     )
     catalog = context_fingerprint(
         "local-skill-catalog-semantic:v2-agent-skills",
@@ -216,27 +226,26 @@ def _skill_fact(source, skill: LocalSkillManifest) -> FrozenSkillCapabilityFact:
             "name": skill.name,
             "location": skill.location,
             "source": skill.source.value,
-            "body_digest": "sha256:" + sha256(skill.body.encode("utf-8")).hexdigest(),
+            "body_digest": "sha256:"
+            + sha256(skill.body.encode("utf-8")).hexdigest(),
         },
     )
     fact_fingerprint = skill_capability_fact_fingerprint(
         identity_fingerprint=identity.identity_fingerprint,
         catalog_semantic_fingerprint=catalog,
         activation_semantic_fingerprint=activation,
-        winning_root_provenance_fingerprint=root_fingerprint,
+        origin=skill.origin,
     )
     return FrozenSkillCapabilityFact(
         identity=identity,
         public_name=skill.name,
         description=skill.description,
         location=skill.location,
-        winning_root_provenance_fingerprint=root_fingerprint,
+        origin=skill.origin,
         catalog_semantic_fingerprint=catalog,
         activation_semantic_fingerprint=activation,
         fact_semantic_fingerprint=fact_fingerprint,
     )
 
 
-__all__ = [
-    "KernelSkillProjectionComposer",
-]
+__all__ = ["KernelSkillProjectionComposer"]

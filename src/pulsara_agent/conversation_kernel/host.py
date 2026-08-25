@@ -52,6 +52,17 @@ from pulsara_agent.conversation_kernel.blob import (
     PostgresCanonicalBlobStore,
 )
 from pulsara_agent.conversation_kernel.capability import KernelSkillProjectionComposer
+from pulsara_agent.capability.bundled_skills import (
+    BundledSkillDistributionBindingOwner,
+)
+from pulsara_agent.capability.local_skills import LooseSkillDefinitionProducer
+from pulsara_agent.capability.pulsara_home import (
+    PulsaraHomeResolution,
+    PulsaraHomeResolutionError,
+    UserHomeResolution,
+    resolve_pulsara_home,
+    resolve_user_home,
+)
 from pulsara_agent.conversation_kernel.contracts import (
     ConversationScopeKind,
     PromptDeliveryMode,
@@ -306,6 +317,10 @@ class HostSessionCloseDecisionFrozen(RuntimeError):
     """A canonical-close upgrade arrived after its linearization fence."""
 
 
+class KernelHostCoreClosing(RuntimeError):
+    """A new Host session was rejected after process shutdown won admission."""
+
+
 @dataclass(slots=True)
 class HostSessionCloseAttempt:
     """Unique process-local close owner installed by ``KernelHostCore``."""
@@ -358,6 +373,9 @@ class KernelHostSession:
         session_start_source: str,
         hook_source_provider: LocalHookSourceProvider,
         initial_hook_view: FrozenHookDefinitionView,
+        bundled_skill_binding: BundledSkillDistributionBindingOwner,
+        pulsara_home_resolution: PulsaraHomeResolution,
+        user_home_resolution: UserHomeResolution,
         mcp_configs: tuple[McpServerConfig, ...] = (),
     ) -> None:
         self.settings = settings
@@ -453,6 +471,8 @@ class KernelHostSession:
             ),
             terminal_monitor_wake_scheduler=wake_terminal_monitor_scheduler,
             deadline_factory=self._deadlines,
+            pulsara_home_resolution=pulsara_home_resolution,
+            user_home_resolution=user_home_resolution,
         )
         self._tools.bind_interaction_port(self._interactions)
         self._tools.bind_hook_reload_port(self)
@@ -518,7 +538,12 @@ class KernelHostSession:
         self._tools.seal_builtin_composition()
         self._capabilities = KernelSkillProjectionComposer(
             workspace_root=workspace.workspace_root,
+            bundled_binding_owner=bundled_skill_binding,
             configured_active_skill_names=active_skill_names,
+            loose_producer=LooseSkillDefinitionProducer(
+                pulsara_home_resolution=pulsara_home_resolution,
+                user_home_resolution=user_home_resolution,
+            ),
         )
         self._model = DirectKernelModelPort(
             config=settings.llm,
@@ -4053,13 +4078,18 @@ class KernelHostCore:
         self._blob_gc_io: KernelSessionIO | None = None
         self._blob_gc_task: asyncio.Task[None] | None = None
         self._sessions: dict[str, KernelHostSession] = {}
+        self._open_attempts: set[asyncio.Future[None]] = set()
         self._close_attempts: dict[str, HostSessionCloseAttempt] = {}
         self._extension_routes: dict[str, tuple[str, KernelExtensionHost]] = {}
         self._event_loop: asyncio.AbstractEventLoop | None = None
         self._lock = asyncio.Lock()
+        self._closing = False
+        self._closed = False
+        self._shutdown_task: asyncio.Task[None] | None = None
         self._authenticated_first_party_extension_ids = (
             authenticated_first_party_extension_ids
         )
+        self._bundled_skill_binding = BundledSkillDistributionBindingOwner()
 
     def _canonical_deadline(self) -> float:
         return self._deadlines.deadline(KernelWatchdogOwner.FOREGROUND_CANONICAL)
@@ -4174,12 +4204,60 @@ class KernelHostCore:
         active_skill_names: frozenset[str],
         session_start_source: str,
     ) -> KernelHostSession:
+        settlement = await self._admit_session_open()
+        try:
+            return await self._open_admitted(
+                workspace_input,
+                session_id=session_id,
+                model_role=model_role,
+                permission_policy=permission_policy,
+                system_prompt=system_prompt,
+                active_skill_names=active_skill_names,
+                session_start_source=session_start_source,
+            )
+        finally:
+            await self._settle_session_open(settlement)
+
+    async def _admit_session_open(self) -> asyncio.Future[None]:
+        async with self._lock:
+            if self._closing:
+                raise KernelHostCoreClosing("Kernel Host core is closing")
+            settlement = asyncio.get_running_loop().create_future()
+            self._open_attempts.add(settlement)
+            return settlement
+
+    async def _settle_session_open(
+        self, settlement: asyncio.Future[None]
+    ) -> None:
+        async with self._lock:
+            self._open_attempts.discard(settlement)
+            if not settlement.done():
+                settlement.set_result(None)
+
+    async def _open_admitted(
+        self,
+        workspace_input: HostWorkspaceInput,
+        *,
+        session_id: str,
+        model_role: ModelRole,
+        permission_policy: EffectivePermissionPolicy | None,
+        system_prompt: str | None,
+        active_skill_names: frozenset[str],
+        session_start_source: str,
+    ) -> KernelHostSession:
         workspace = resolve_workspace(workspace_input)
         deadline = self._deadlines.deadline(KernelWatchdogOwner.FOREGROUND_CANONICAL)
+        user_home_resolution = resolve_user_home()
+        pulsara_home_resolution = resolve_pulsara_home(
+            user_home_resolution=user_home_resolution
+        )
+        if pulsara_home_resolution.path is None:
+            raise PulsaraHomeResolutionError(pulsara_home_resolution)
         hook_source_provider = LocalHookSourceProvider(
             workspace_root=workspace.workspace_root,
             workspace_kind=workspace.workspace_kind,
             workspace_state_key=workspace.workspace_key,
+            pulsara_home=pulsara_home_resolution.path,
         )
         initial_hook_view = await asyncio.to_thread(
             hook_source_provider.discover,
@@ -4222,19 +4300,26 @@ class KernelHostCore:
                 session_start_source=session_start_source,
                 hook_source_provider=hook_source_provider,
                 initial_hook_view=initial_hook_view,
+                bundled_skill_binding=self._bundled_skill_binding,
+                pulsara_home_resolution=pulsara_home_resolution,
+                user_home_resolution=user_home_resolution,
                 mcp_configs=mcp_configs,
             )
             await session.start_mcp()
+            async with self._lock:
+                if self._closing:
+                    raise KernelHostCoreClosing(
+                        "Kernel Host shutdown won before session registration"
+                    )
+                self._sessions[host_id] = session
+                self._extension_routes[session_id] = (host_id, session.extensions)
+            return session
         except BaseException:
             if "session" in locals():
                 with suppress(BaseException):
                     await session.aclose(deadline_monotonic=deadline)
             await io_owner.aclose(deadline_monotonic=deadline)
             raise
-        async with self._lock:
-            self._sessions[host_id] = session
-            self._extension_routes[session_id] = (host_id, session.extensions)
-        return session
 
     async def list_resumable_sessions(
         self,
@@ -4367,10 +4452,43 @@ class KernelHostCore:
 
     async def shutdown(self) -> None:
         async with self._lock:
+            task = self._shutdown_task
+            if task is None:
+                self._closing = True
+                open_settlements = tuple(self._open_attempts)
+                task = asyncio.create_task(
+                    self._shutdown_owner(open_settlements),
+                    name="kernel-host-core-shutdown",
+                )
+                self._shutdown_task = task
+        waiter_cancellation: asyncio.CancelledError | None = None
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError as exc:
+                if task.done():
+                    break
+                waiter_cancellation = waiter_cancellation or exc
+                continue
+            except BaseException:
+                break
+        if task.cancelled():
+            raise asyncio.CancelledError
+        task.result()
+        if waiter_cancellation is not None:
+            raise waiter_cancellation
+
+    async def _shutdown_owner(
+        self, open_settlements: tuple[asyncio.Future[None], ...]
+    ) -> None:
+        if open_settlements:
+            await asyncio.gather(*open_settlements)
+        async with self._lock:
             session_ids = tuple(self._sessions)
         for host_session_id in session_ids:
             await self.close_session(host_session_id, close_conversation=False)
-        self._extension_routes.clear()
+        async with self._lock:
+            self._extension_routes.clear()
         blob_close_deadline = self._deadlines.deadline(
             KernelWatchdogOwner.BLOB_GC_CLOSE
         )
@@ -4414,6 +4532,9 @@ class KernelHostCore:
             self._access = None
             self._repository = None
             self._event_loop = None
+        await self._bundled_skill_binding.aclose()
+        async with self._lock:
+            self._closed = True
         if blob_close_error is not None:
             raise blob_close_error
         if blob_close_cancellation is not None:

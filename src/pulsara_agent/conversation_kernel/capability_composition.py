@@ -13,7 +13,7 @@ from pulsara_agent.capability.contracts import (
     FrozenCapabilitySourceSnapshot,
     FrozenToolCapabilityFact,
 )
-from pulsara_agent.capability.local_skills import LocalSkillDiscovery
+from pulsara_agent.capability.resolver import EffectiveSkillCatalogInspection
 from pulsara_agent.capability.registry import (
     freeze_capability_registration_set,
     freeze_capability_registry_snapshot,
@@ -76,11 +76,11 @@ class PreparedMcpInspectionInput:
 
 
 @dataclass(frozen=True, slots=True)
-class PreparedLocalSkillCatalogSourceSnapshot:
+class PreparedSkillCatalogSourceSnapshot:
     conversation_scope_kind: ModelInputScopeKind
     scope_subagent_task_id: str | None
     source_snapshot: FrozenCapabilitySourceSnapshot
-    discovery: LocalSkillDiscovery = field(repr=False)
+    inspection: EffectiveSkillCatalogInspection = field(repr=False)
     owner_authenticity: object = field(repr=False, compare=False)
     _issuer: object = field(repr=False, compare=False)
 
@@ -123,19 +123,19 @@ def issue_mcp_capability_source_snapshot_set(
     )
 
 
-def issue_local_skill_catalog_source_snapshot(
+def issue_skill_catalog_source_snapshot(
     *,
     conversation_scope_kind: ModelInputScopeKind,
     scope_subagent_task_id: str | None,
     source_snapshot: FrozenCapabilitySourceSnapshot,
-    discovery: LocalSkillDiscovery,
+    inspection: EffectiveSkillCatalogInspection,
     owner_authenticity: object,
-) -> PreparedLocalSkillCatalogSourceSnapshot:
-    return PreparedLocalSkillCatalogSourceSnapshot(
+) -> PreparedSkillCatalogSourceSnapshot:
+    return PreparedSkillCatalogSourceSnapshot(
         conversation_scope_kind=conversation_scope_kind,
         scope_subagent_task_id=scope_subagent_task_id,
         source_snapshot=source_snapshot,
-        discovery=discovery,
+        inspection=inspection,
         owner_authenticity=owner_authenticity,
         _issuer=_SKILL_ISSUER,
     )
@@ -145,7 +145,7 @@ def freeze_capability_registry_from_owner_snapshots(
     *,
     builtin: SealedBuiltinCapabilitySnapshot,
     mcp: PreparedMcpCapabilitySourceSnapshotSet,
-    skills: PreparedLocalSkillCatalogSourceSnapshot,
+    skills: PreparedSkillCatalogSourceSnapshot,
 ) -> FrozenCapabilityRegistrySnapshot:
     """The sole production merge of the three physical source owners."""
 
@@ -154,7 +154,7 @@ def freeze_capability_registry_from_owner_snapshots(
         or builtin._issuer is not _BUILTIN_ISSUER
         or type(mcp) is not PreparedMcpCapabilitySourceSnapshotSet
         or mcp._issuer is not _MCP_ISSUER
-        or type(skills) is not PreparedLocalSkillCatalogSourceSnapshot
+        or type(skills) is not PreparedSkillCatalogSourceSnapshot
         or skills._issuer is not _SKILL_ISSUER
     ):
         raise TypeError("capability owner snapshot authenticity conflicts")
@@ -207,12 +207,12 @@ def freeze_capability_registry_from_owner_snapshots(
 
 __all__ = [
     "BuiltinCompositionState",
-    "PreparedLocalSkillCatalogSourceSnapshot",
+    "PreparedSkillCatalogSourceSnapshot",
     "PreparedMcpInspectionInput",
     "PreparedMcpCapabilitySourceSnapshotSet",
     "SealedBuiltinCapabilitySnapshot",
     "freeze_capability_registry_from_owner_snapshots",
-    "issue_local_skill_catalog_source_snapshot",
+    "issue_skill_catalog_source_snapshot",
     "issue_mcp_capability_source_snapshot_set",
     "issue_sealed_builtin_capability_snapshot",
 ]

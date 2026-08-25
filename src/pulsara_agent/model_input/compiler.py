@@ -1116,6 +1116,12 @@ class StructuredModelInputCompiler:
                     # HOOK_CONTEXT is advisory ONE_SHOT data.  An empty future
                     # slot has no provider-visible clearing semantics.
                     continue
+                if _preserve_same_turn_retained_source(
+                    previous,
+                    source_kind=absence.source_kind,
+                    turn_id=identity.turn_id,
+                ):
+                    continue
                 contract_version = absence.source_contract_version
                 trust = absence.trust_class
                 placement = absence.placement_ordinal
@@ -1512,6 +1518,12 @@ class StructuredModelInputCompiler:
                 # synthesize a second provider-visible message.
                 continue
             previous = previous_heads.get(absence.source_kind)
+            if _preserve_same_turn_retained_source(
+                previous,
+                source_kind=absence.source_kind,
+                turn_id=request.canonical_input.identity.turn_id,
+            ):
+                continue
             if (
                 absence.lifecycle is ContextSourceLifecycle.CALL_APPEND
                 and absence.absence_kind is ContextSourceAbsenceKind.UNAVAILABLE
@@ -2948,6 +2960,20 @@ def _observation_lifecycle(
         raise StructuredModelInputCompileError(
             ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
         ) from exc
+
+
+def _preserve_same_turn_retained_source(
+    previous: ProcessLocalSourceHead | None,
+    *,
+    source_kind: ContextSourceKind,
+    turn_id: str,
+) -> bool:
+    return bool(
+        source_kind is ContextSourceKind.RETAINED_SKILL_CONTEXT
+        and previous is not None
+        and previous.presence is SourceObservationPresence.VALUE
+        and previous.last_emitted_turn_id == turn_id
+    )
 
 
 def _source_occurrence_fingerprint(

@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from pulsara_agent.capability.types import (
+    ActiveSkillProjectionUnavailableReason,
     ActiveSkillInjection,
     ResolvedSkillCatalogEntry,
-    SkillCatalogUnavailableReason,
     SkillDiagnostic,
     SkillDiagnosticCode,
     SkillDiagnosticSeverity,
+    SkillResolutionUnavailableReason,
 )
 from pulsara_agent.primitives.context import canonical_json_bytes
 
@@ -18,8 +19,13 @@ MAX_ACTIVE_SKILLS = 16
 MAX_ACTIVE_SKILL_BODY_UTF8_BYTES = 512 * 1024
 
 
+SkillProjectionOverboundReason = (
+    SkillResolutionUnavailableReason | ActiveSkillProjectionUnavailableReason
+)
+
+
 class SkillProjectionOverbound(ValueError):
-    def __init__(self, reason: SkillCatalogUnavailableReason) -> None:
+    def __init__(self, reason: SkillProjectionOverboundReason) -> None:
         super().__init__(reason.value)
         self.reason = reason
 
@@ -51,7 +57,9 @@ def render_catalog_prompt(
         }
     ).decode("utf-8")
     if len(text.encode("utf-8")) > MAX_SKILL_CATALOG_UTF8_BYTES:
-        raise SkillProjectionOverbound(SkillCatalogUnavailableReason.CATALOG_OVERBOUND)
+        raise SkillProjectionOverbound(
+            SkillResolutionUnavailableReason.CATALOG_PROJECTION_OVERBOUND
+        )
     return text
 
 
@@ -64,7 +72,7 @@ def render_active_skill_prompt(
         return None
     if len(injections) > MAX_ACTIVE_SKILLS:
         raise SkillProjectionOverbound(
-            SkillCatalogUnavailableReason.ACTIVE_SELECTION_UNAVAILABLE
+            ActiveSkillProjectionUnavailableReason.ACTIVE_PROJECTION_OVERBOUND
         )
     ordered = tuple(sorted(injections, key=lambda item: item.name))
     if len({item.name for item in ordered}) != len(ordered):
@@ -72,7 +80,7 @@ def render_active_skill_prompt(
     body_bytes = sum(len(item.body.encode("utf-8")) for item in ordered)
     if body_bytes > MAX_ACTIVE_SKILL_BODY_UTF8_BYTES:
         raise SkillProjectionOverbound(
-            SkillCatalogUnavailableReason.ACTIVE_SELECTION_UNAVAILABLE
+            ActiveSkillProjectionUnavailableReason.ACTIVE_PROJECTION_OVERBOUND
         )
     text = canonical_json_bytes(
         {
@@ -89,7 +97,7 @@ def render_active_skill_prompt(
     ).decode("utf-8")
     if len(text.encode("utf-8")) > MAX_ACTIVE_SKILL_BODY_UTF8_BYTES:
         raise SkillProjectionOverbound(
-            SkillCatalogUnavailableReason.ACTIVE_SELECTION_UNAVAILABLE
+            ActiveSkillProjectionUnavailableReason.ACTIVE_PROJECTION_OVERBOUND
         )
     return text
 

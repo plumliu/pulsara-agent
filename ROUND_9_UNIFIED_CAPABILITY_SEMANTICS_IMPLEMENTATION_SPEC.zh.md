@@ -12,7 +12,9 @@
 >
 > 上位契约：[Round 3 structured compiler](ROUND_3_STRUCTURED_MODEL_INPUT_COMPILER_IMPLEMENTATION_SPEC.zh.md)、[Round 3.1 provider-input prefix continuity](ROUND_3_1_PROVIDER_INPUT_PREFIX_CONTINUITY_IMPLEMENTATION_SPEC.zh.md)、[Round 5A execution envelope](ROUND_5_LONG_HORIZON_EXECUTION_ENVELOPE_IMPLEMENTATION_SPEC.zh.md)、[Round 5A.1 provider-neutral output termination](archived_docs/ROUND_5A_1_PROVIDER_NEUTRAL_MODEL_OUTPUT_TERMINATION_IMPLEMENTATION_SPEC.zh.md)、[Round 5A.2 durable provider replay](archived_docs/ROUND_5A_2_DURABLE_PROVIDER_REPLAY_AND_CROSS_RESTART_THREAD_CONTINUATION_IMPLEMENTATION_SPEC.zh.md)、[Round 6 MCP](ROUND_6_MCP_PRODUCTION_CAPABILITY_IMPLEMENTATION_SPEC.zh.md)、[Round 7 model-visible observation](ROUND_7_MODEL_VISIBLE_FAILURE_AND_TOOL_OBSERVATION_IMPLEMENTATION_SPEC.zh.md)、[Round 7.1 provider-visible ToolResult projection](ROUND_7_1_PROVIDER_VISIBLE_TOOL_RESULT_PROJECTION_IMPLEMENTATION_SPEC.zh.md)、[Gap Index](archived_docs/POST_HARD_CUT_PRODUCT_CAPABILITY_GAP_INDEX.zh.md)
 >
-> 直接下游：[Round 9.1 Agent Skills Standard](ROUND_9_1_AGENT_SKILLS_STANDARD_IMPLEMENTATION_SPEC.zh.md)
+> 直接下游：[Round 9.1 Agent Skills Standard](ROUND_9_1_AGENT_SKILLS_STANDARD_IMPLEMENTATION_SPEC.zh.md)、[Unified Skill definition producers hard cut](PULSARA_UNIFIED_SKILL_DEFINITION_PRODUCERS_HARD_CUT_IMPLEMENTATION_SPEC.zh.md)
+>
+> Skill接缝同步（2026-08-25）：本文Skill部分的current production carrier是`PreparedSkillCatalogSourceSnapshot + EffectiveSkillCatalogInspection`，输入来自process-pinned bundled definitions与four loose roots的唯一central resolution。已删除`LocalSkillDiscovery`、local-only winner、`discovery_semantic_fingerprint`与carrier-level root-policy digest；stable `LOCAL_SKILL_CATALOG` source kind/ID保持不变。
 >
 > 后续但不属于本轮：[Round 9.2 independent Hook subsystem](ROUND_9_2_HOOK_SUBSYSTEM_IMPLEMENTATION_SPEC.zh.md)、[Round 9.3 Agent Plugin bundle 与 Hook adapter](ROUND_9_3_AGENT_PLUGIN_BUNDLE_AND_HOOK_ADAPTER_IMPLEMENTATION_SPEC.zh.md)、[Round 5B compaction](ROUND_5B_LONG_HORIZON_CONTEXT_COMPACTION_IMPLEMENTATION_SPEC.zh.md)
 >
@@ -50,7 +52,7 @@ Pulsara中的`Capability`固定定义为：
 | MCP tool | `TOOL` | native direct tool或new-MCP meta route | MCP supervisor、slot、dirty fence与effect policy |
 | Skill | `SKILL` | `SKILL_CATALOG`与`ACTIVE_SKILL` | 无独立executor；只能指导或引用现有tool capability |
 
-Plugin不属于本轮的capability leaf。Round 9.2先独立实现USER/WORKSPACE Hook subsystem；后续Round 9.3再把Plugin定义为installable bundle/source contributor：启用后把portable Skill物化到本文冻结的四个既有physical roots之一，向现有MCP config inventory贡献server definitions，并把归一化Hook definitions交给与`plugins/`平级的Round 9.2 generic runtime；Claude simple Subagent preset只作为Round 10既有worker cold seed的可选低authority输入。Round 9.3新增的`reload_plugins`/preset directory只允许作为从cold Host起固定存在的Builtin descriptor，不能在已安装epoch中热增删tools。Skill/MCP仍分别交还既有owner，Hook和preset都不进入capability leaf，Plugin自身不拥有通用`invoke()`、Hook trust或dispatcher。Plugin不得新增第五个Skill root或让Runtime扫描Plugin cache。
+Plugin不属于本轮的capability leaf，也不是当前Skill producer。当前production只接受read-only bundled definitions与four loose roots；任何Plugin Skill接入必须由后续独立规格修订closed producer union、precedence与lifetime，本文不提前规定物化、cache scan或Plugin-private catalog路径。
 
 ### 0.2 统一什么，不统一什么
 
@@ -239,7 +241,7 @@ same epoch: Skill catalog changes
 - `capability/builtin_catalog.py`中的builtin descriptor、availability、permission、result render与long-horizon policy；
 - `_BUILTIN_TOOL_CATALOG`这一零I/O、确定性的descriptor/policy catalog；它当前是production executor inventory的超集，不能直接冒充provider-visible capability全集；
 - `mcp_config.py::load_mcp_server_configs()`把user/workspace/Host override组合成显式server registrations，MCP supervisor再负责initialize/discovery/listChanged；
-- `capability/local_skills.py::LocalSkillProvider`先使用固定root policy，再bounded scan/parse其中的`SKILL.md`；
+- `capability/local_skills.py::LooseSkillDefinitionProducer`使用固定four-root policy做bounded observation，`BundledSkillDefinitionProducer`从process binding读取package defaults，`SkillCatalogResolver`唯一选择effective winners；
 - `model_input/contracts.py::FrozenToolSpec`与`FrozenModelToolSurface`，它们是provider-neutral canonical typed tool schema的唯一frozen truth；actual native wire projection由adapter另行拥有且不得回写；
 - Round 5A.2 `provider_assistant_replay_fragments`、metadata/body hydration与`FrozenProviderWireInputPlan` actual-wire proof；
 - `llm/adapters/openai/function_tools.py`中的共享Chat/Responses显式`strict:false`、bounded prevalidated lowering与`OPENAI_FUNCTION_TOOL_WIRE_CONTRACT_VERSION`；
@@ -334,8 +336,8 @@ Built-in不是“没有discovery”的例外，而是`IMMUTABLE` source，其dis
 | MCP discovery/catalog/status | MCP supervisor |
 | MCP physical connection/slot | MCP supervisor |
 | MCP dirty fence/effect policy | MCP supervisor + existing tool runtime |
-| Local Skill catalog source registration/snapshot | Host local-Skill composition policy + `LocalSkillProvider` |
-| Skill filesystem manifest与winning-root provenance | aggregate Skill source snapshot |
+| Skill catalog source registration/snapshot | Host Skill composition + bundled/loose producers + central resolver |
+| Skill manifest与typed origin | effective Skill source snapshot |
 | Skill active body | existing `ACTIVE_SKILL` projection |
 | Capability registry snapshot | pure central factory；没有long-lived mutable owner |
 | Provider direct tool surface | `FrozenModelToolSurface` + continuity epoch |
@@ -359,15 +361,15 @@ Built-in不是“没有discovery”的例外，而是`IMMUTABLE` source，其dis
 |---|---|---|---|---|
 | Built-in tool | Host-open execution-backed builtin source | 对已安装binding与catalog exact join后的inventory做零I/O pure snapshot | `IMMUTABLE` | Builtin binding |
 | MCP tool | resolved MCP server source | bounded initialize/list tools/catalog snapshot | `SAFE_POINT_REFRESHABLE` | MCP slot/binding |
-| Skill | one exact-scope local Skill catalog source | bounded ordered-root filesystem scan/parse snapshot | `SAFE_POINT_REFRESHABLE` | 无 |
+| Skill | one exact-scope stable Skill catalog source | process-pinned bundled + bounded four-root loose observation + central resolution | `SAFE_POINT_REFRESHABLE` | 无 |
 
 这里的“固定注册”不是为MCP复制一份静态remote schema，也不是为Skill发明inline Python manifest：
 
 - MCP固定注册的是server source；remote tool schema仍只由negotiated discovery拥有；
-- Skill固定注册的是聚合`LOCAL_SKILL_CATALOG` source；current root集合、precedence与physical paths由Skill owner内部policy拥有，skill leaf仍只由winning root中的标准`SKILL.md`拥有；
+- Skill固定注册的是stable aggregate `LOCAL_SKILL_CATALOG` source；process-pinned bundled producer与four-root loose producer分别拥有physical observation，唯一central resolver拥有five-tier precedence与winner；
 - Built-in descriptor catalog与executor inventory不是同一事实；source adapter必须从Host-open时已安装、scope-visible且能与catalog exact join的binding inventory构造registration/snapshot，catalog-only entry不能进入registry；
-- bundled Skill必须先物化到Skill owner当前root policy中的某个physical root再被普通discovery发现；不得走第二条“builtin Skill”leaf通道；
-- future Plugin向本文只贡献MCP server config input，并由installer把portable Skill物化到四个既有physical roots之一；它不得修改local Skill catalog的root policy或让Runtime扫描Plugin cache。其Hook adapter只向与`plugins/`平级的generic process-local Hook owner贡献完整normalized definitions，Claude simple Subagent preset只进入Round 10 child cold seed；二者均不得注册第三种tool executor或capability leaf。
+- bundled Skill直接从installed package的read-only definitions进入同一catalog，不物化到four loose roots，不经过第二条capability leaf通道；
+- 当前没有Plugin Skill producer。后续Plugin边界必须独立修订closed inputs，不得从本文推导four-root materialization、Plugin cache scan或Plugin-private Skill catalog。
 
 因此，三者在逻辑上共享同一条注册管线，而只在source-owned discovery与tool-only binding处分叉。注册成功只证明fact进入current registry；它不证明该fact已暴露、已授权或可物理执行。
 
@@ -499,9 +501,9 @@ closed matrix固定为：
 |---|---|---|
 | `SealedBuiltinCapabilitySnapshot` | Host tool composition + builtin adapter | exact scope下完整、immutable、execution-backed且catalog-joined的Builtin集合 |
 | `PreparedMcpCapabilitySourceSnapshotSet` | resolved MCP config composition + MCP supervisor | exact scope下当前全部enabled server registrations，且每项恰有一个`COMPLETE | UNAVAILABLE` snapshot；允许合法空server tuple |
-| `PreparedLocalSkillCatalogSourceSnapshot` | Host Skill composition + `LocalSkillProvider` | exact scope下按当前registered root policy全局解析precedence后的一个`LOCAL_SKILL_CATALOG` snapshot |
+| `PreparedSkillCatalogSourceSnapshot` | Host Skill composition + bundled/loose producers + `SkillCatalogResolver` | exact scope下从process-pinned bundled definitions与four loose roots全局解析precedence后的一个`LOCAL_SKILL_CATALOG` snapshot |
 
-三种carrier各自在自身owner lock/safe-point内一次性签发，携带exact scope、generic registration/snapshot与不序列化的owner authenticity。Builtin carrier额外持有composition seal和完整execution binding input；MCP carrier持有同锁冻结的catalog与inspection inputs；Skill carrier持有bounded diagnostics与`LocalSkillDiscovery`。Resolved-config穷尽性与ordered four-root policy分别由真实owner factory及source contract保证，不在carrier重复保存装饰性fingerprint。这些opaque字段使用`repr=False, compare=False`，不进入semantic fingerprint，也不形成跨ownerlease、generation或新authority。
+三种carrier各自在自身owner lock/safe-point内一次性签发，携带exact scope、generic registration/snapshot与不序列化的owner authenticity。Builtin carrier额外持有composition seal和完整execution binding input；MCP carrier持有同锁冻结的catalog与inspection inputs；Skill carrier持有同一cut的call-local immutable `EffectiveSkillCatalogInspection`。Resolved-config穷尽性、bundled process binding与ordered four-root policy由各自真实owner保证，不在carrier重复保存装饰性fingerprint。这些opaque字段使用`repr=False, compare=False`，不进入semantic fingerprint，也不形成跨owner lease、generation或新authority。
 
 Production central API固定为三个named参数：
 
@@ -510,7 +512,7 @@ def freeze_capability_registry_from_owner_snapshots(
     *,
     builtin: SealedBuiltinCapabilitySnapshot,
     mcp: PreparedMcpCapabilitySourceSnapshotSet,
-    skills: PreparedLocalSkillCatalogSourceSnapshot,
+    skills: PreparedSkillCatalogSourceSnapshot,
 ) -> FrozenCapabilityRegistrySnapshot: ...
 ~~~
 
@@ -732,7 +734,7 @@ class FrozenSkillCapabilityFact:
     public_name: str
     description: str
     location: str
-    winning_root_provenance_fingerprint: str
+    origin: SkillDefinitionOrigin
     catalog_semantic_fingerprint: str
     activation_semantic_fingerprint: str
     fact_semantic_fingerprint: str
@@ -742,10 +744,9 @@ class FrozenSkillCapabilityFact:
 
 - `catalog_semantic_fingerprint`只覆盖provider catalog可见字段；
 - `activation_semantic_fingerprint`可额外覆盖当前body/version，但body本身不进入catalog；
-- `winning_root_provenance_fingerprint`由Skill owner覆盖logical root kind、precedence ordinal与stable location prefix；它只证明winner来源，不包含absolute path、不进入provider body，也不改变`CapabilityIdentity`；
-- `fact_semantic_fingerprint`使用domain-separated canonical encoding覆盖identity fingerprint、catalog semantic fingerprint、activation semantic fingerprint与winning-root provenance fingerprint；central Skill adapter必须逐字段重算并拒绝caller-supplied mismatch。它是generic source snapshot唯一使用的Skill leaf version，不替代两项provider-visible fingerprint；
-- 当前legacy parser通过adapter产生该fact；
-- Round 9.1替换parser后必须保持此leaf contract，不得再造`AgentSkillCapabilityBase`；
+- `origin` closed为`LooseSkillOrigin | BundledSkillOrigin`，不携带stored fingerprint、coarse source或label；
+- `fact_semantic_fingerprint`使用domain-separated canonical encoding覆盖identity fingerprint、catalog semantic fingerprint、activation semantic fingerprint，并在唯一builder内从typed origin即时导出既有provenance payload slot；central Skill adapter必须逐字段重算并拒绝mismatch。该derived digest不保存回fact/manifest/inspection/registry；
+- 当前唯一Agent Skills parser通过adapter产生该fact，不得再造`AgentSkillCapabilityBase`；
 - Skill没有execution binding、permission、tool requirement、CLI health或route字段；
 - installed valid Skill默认进入model catalog并允许现有textual/configured activation；legacy `user_invocable/disable_model_invocation`不进入generic fact。
 
@@ -791,15 +792,15 @@ class PreparedMcpCapabilitySourceSnapshotSet:
 
 
 @dataclass(frozen=True, slots=True)
-class PreparedLocalSkillCatalogSourceSnapshot:
+class PreparedSkillCatalogSourceSnapshot:
     conversation_scope_kind: ModelInputScopeKind
     scope_subagent_task_id: str | None
     source_snapshot: FrozenCapabilitySourceSnapshot
-    discovery: LocalSkillDiscovery
+    inspection: EffectiveSkillCatalogInspection
     owner_authenticity: object = field(repr=False, compare=False)
 ~~~
 
-MCP carrier只能由supervisor owner在同一owner lock下遍历完整enabled/resolved config inventory并签发；`source_snapshots`、catalog与inspection inputs在签发时逐项exact join。不得再复制一个只写不读的`resolved_config_inventory_fingerprint`。Skill carrier必须证明`source_snapshot`是唯一`LOCAL_SKILL_CATALOG` registration的完整global-scan结果，且`discovery`与facts逐项exact join；four-root policy已经进入source contract，不再复制一个carrier-level `root_policy_fingerprint`。它们都不提供renew/current-check API；owner后续变化形成新carrier。
+MCP carrier只能由supervisor owner在同一owner lock下遍历完整enabled/resolved config inventory并签发；`source_snapshots`、catalog与inspection inputs在签发时逐项exact join。不得再复制一个只写不读的`resolved_config_inventory_fingerprint`。Skill carrier必须证明`source_snapshot`是唯一`LOCAL_SKILL_CATALOG` registration的完整bundled+loose resolution结果，且`inspection.winners`与facts逐项exact join；four-root policy已经由loose owner冻结在inspection中，不再复制carrier-level `root_policy_fingerprint`。它们都不提供renew/current-check API；owner后续变化形成新carrier。
 
 `freeze_capability_registry_snapshot(...)`是唯一leaf admission factory。它是pure、一次性、bounded的builder，不是Host-lived registry owner，也没有自增generation、callback、`register/unregister` side effect或跨Host identity。
 
@@ -810,7 +811,7 @@ Source snapshot规则：
 - 每个snapshot必须exact绑定registration set的scope；snapshot fingerprint覆盖scope，ROOT snapshot不能在child registry复用；
 - Built-in snapshot必须`COMPLETE`，只从Host-open时冻结的scope-visible、execution-backed且catalog-joined inventory确定性产生；这就是零I/O退化discovery；
 - MCP每个registered server只在**全部远端分页/枚举成功读取**、aggregate/bounds验证完成且既有include/exclude/canonical-invalid-tool policy被完整应用后发布`COMPLETE`。`OMIT_INVALID`只丢弃未通过MCP dialect/schema/bounds/local-validator canonical admission的schema；include/exclude过滤仍属于对完整raw listing的确定性normalization，所得集合是`COMPLETE`而不是partial。Native-wire lowerability不在discovery或source snapshot阶段判断，不触发`FAIL_SERVER | OMIT_INVALID`、不增加`invalid_tool_count`，合法但wire-incompatible的fact必须保留到adapter eligibility与planner。只有连接失败、分页未完成、frame/parse/aggregate/bounds失败或无法证明完整枚举时才发布`UNAVAILABLE + facts=()`；
-- Skill owner对当前已注册root集合执行一次bounded ordered scan并全局解析precedence，只发布一个exact-scope `LOCAL_SKILL_CATALOG` snapshot；invalid/duplicate loser不注册leaf。完整scan/parse/aggregate成功时发布`COMPLETE + globally resolved winners`，任何会破坏全局completeness的失败发布单个`UNAVAILABLE + facts=()`，不得先按root拆分再重组；
+- Skill composition owner在同一absolute deadline内先观察process-pinned bundled producer，再观察four-root loose producer，由唯一`SkillCatalogResolver`全局解析five-tier precedence，只发布一个exact-scope `LOCAL_SKILL_CATALOG` snapshot；invalid/shadowed candidate不注册leaf。两个producer观察、parse与resolution完整成功时发布`COMPLETE + effective winners`，任一required producer、winner bound或catalog projection无法形成完整truth时发布单个`UNAVAILABLE + facts=()`，不得发布partial producer winners；
 - `COMPLETE + facts=()`表示合法空source，和`UNAVAILABLE`不同；
 - registry factory必须从三个named owner carrier取得exact one Builtin snapshot、每个derived MCP registration的exact one snapshot，以及exact one aggregate Skill snapshot；不得接受unregistered snapshot。Owner-issued carrier证明现实inventory完整，generic factory只证明derived registration与snapshot exact覆盖；
 - 每个fact的`identity.source`必须exact equal其snapshot registration的`source`；
@@ -936,12 +937,11 @@ class FrozenMcpCapabilityProjectionInput:
 ~~~python
 @dataclass(frozen=True, slots=True)
 class FrozenSkillProjectionInput:
-    discovery_semantic_fingerprint: str
-    source_snapshot_fingerprint: str
-    snapshot_fingerprint: str
+    source_snapshot: FrozenCapabilitySourceSnapshot
+    inspection: EffectiveSkillCatalogInspection
 ~~~
 
-Round 9 adapter保持当前visible body/catalog behavior，不借机实现Agent Skills parser。`source_snapshot_fingerprint`必须exact引用同一registry中唯一`LOCAL_SKILL_CATALOG` snapshot；Skill facts不在projection与registry各保存一份。`discovery_semantic_fingerprint`由Skill owner对本次source-specific parsed carrier机械冻结，pure parent/sibling view只持有该ref；`LocalSkillDiscovery`本体保留在private-constructor owner carrier中，并由`KernelSkillProjectionComposer`在消费sibling view时同时exact joinowner authenticity、source snapshot与discovery fingerprint。这样`capability/contracts.py`不反向依赖filesystem/parser类型，也不需要第二次扫描、owner cache或兼容fallback。Round 9.1随后以portable Agent Skills manifest替换legacy parser、保留本文冻结的四种physical root policy并删除旧metadata，不改变Round 9 registry接口。
+`source_snapshot`必须exact引用同一registry中唯一`LOCAL_SKILL_CATALOG` snapshot；Skill facts不在projection与registry各保存一份。Call-local immutable `EffectiveSkillCatalogInspection`本体保留在private-constructor owner carrier与projection input中，并由`KernelSkillProjectionComposer`在消费sibling view时exact joinowner authenticity、source snapshot object与inspection object，再机械重算facts证明registry join。完整frozen value已直接交付consumer，因此不存储`discovery_semantic_fingerprint`、root-policy digest或fingerprint-to-object map；也不需要第二次扫描、owner cache或兼容fallback。
 
 ### 4.10 Epoch predecessor
 
@@ -1603,7 +1603,7 @@ Skill不能：
 
 ### 7.2 Round 9 adapter
 
-本轮把当前`LocalSkillManifest/ResolvedSkillCatalogEntry/ActiveSkillInjection`适配到最小Skill capability fact，但不改变当前parser格式与root集合。Legacy private metadata只为读取旧文件而暂存于source-specific carrier，不进入generic fact、planner或provider route；Round 9.1会clean cut删除它。
+当前adapter把source-neutral `SkillManifest/ResolvedSkillCatalogEntry/ActiveSkillInjection`适配到最小Skill capability fact。Manifest携带closed `LooseSkillOrigin | BundledSkillOrigin`，coarse source/label只是derived property；typed origin只在唯一fact fingerprint builder中即时导出既有payload slot，不存储provenance fingerprint。
 
 Adapter必须：
 
@@ -1614,9 +1614,7 @@ Adapter必须：
 - 不读取supporting resources；
 - 不实现新permission overlay。
 
-Round 9.1随后一次性替换legacy manifest为Agent Skills standard，并保留Round 9 identity/fact/planner接口。
-
-Round 9 adapter必须停止让startup available-tool allowlist改变Skill leaf。这里不接受Agent Skills新字段；Round 9.1 clean cut时删除legacy `provides_tools/suggested_tools`及其他private metadata语法。
+Agent Skills standard的portable fields、host-extension inert语义与唯一parser由Round 9.1/current unified producer spec拥有。Startup available-tool allowlist不改变Skill leaf；`provides_tools/suggested_tools`等host extension不生成dependency、route或tool identity。
 
 ### 7.3 与Tool/MCP route正交
 
@@ -1641,7 +1639,7 @@ start one provider-dispatch absolute planning deadline
 -> freeze exact scope and EMPTY continuity predecessor
 -> obtain SealedBuiltinCapabilitySnapshot from the sealed base
 -> obtain PreparedMcpCapabilitySourceSnapshotSet at an MCP safe point
--> obtain one PreparedLocalSkillCatalogSourceSnapshot from a complete global root scan
+-> obtain one PreparedSkillCatalogSourceSnapshot from bundled+loose effective inspection
 -> central factory validates owner authenticity/exact scope and freezes registry snapshot
 -> freeze MCP and Skill owner-specific projections referencing that registry
 -> resolve exact model target/profile without opening provider
@@ -1956,7 +1954,7 @@ RenderedCapabilityPrompt            -> RenderedSkillPrompt
 ### 12.11 Continuity/runner/Host
 
 - Host composition不直接手写registration tuple；
-- Host分别从tool-surface owner、resolved MCP config/supervisor与Skill composition owner取得`SealedBuiltinCapabilitySnapshot`、`PreparedMcpCapabilitySourceSnapshotSet`与`PreparedLocalSkillCatalogSourceSnapshot`；不创建共同attempt token；
+- Host分别从tool-surface owner、resolved MCP config/supervisor与Skill composition owner取得`SealedBuiltinCapabilitySnapshot`、`PreparedMcpCapabilitySourceSnapshotSet`与`PreparedSkillCatalogSourceSnapshot`；不创建共同attempt token；
 - 新增窄Host-facing `capability_composition.py` seam（或同等现有Host composition模块），只验证三个private-constructor carrier的owner authenticity、exact scope与各自inventory completeness，并派生registration set/registry；不做跨owner current-seal二次握手；
 - 只有该seam能把三项named snapshot交给registry internal pure helper；其他production调用点直接使用raw frozen snapshot或caller tuple必须由architecture gate拒绝；
 - Host必须在interaction/subagent/memory/MCP support与fixed meta binding完成后、任何capability/source/tool snapshot前seal Builtin composition；动态MCP safe-point refresh不属于Builtin unseal；
@@ -2262,7 +2260,7 @@ Dogfood不得记录API key、DSN、完整prompt、MCP arguments/body、headers�
 
 ### Slice C4：Skill relationship
 
-- current registered root policy的complete global scan、单一aggregate snapshot与Skill adapter；
+- process-pinned bundled batch + complete four-root loose batch、central five-tier resolution、单一aggregate snapshot与Skill adapter；
 - Skill catalog/activation identity与catalog/active projection join；不复用Tool version DTO；
 - legacy private metadata不进入generic capability语义；
 - honest Skill names；
@@ -2320,31 +2318,17 @@ Round 9.1只负责：
 
 - Agent Skills canonical manifest；
 - standard resources/progressive disclosure；
-- 保持Skill owner内部由Round 9冻结的四种physical root bindings，并继续执行一次global precedence scan；
+- 保持four loose physical root bindings，并与process-pinned read-only bundled definitions一起经唯一central resolver执行five-tier precedence；
 - ordinary `read_file` progressive disclosure、2,000-line default window与无content-suppressing dedup；
 - Agent Skills标准filesystem与activation；
 - 删除legacy Pulsara metadata且不引入namespaced替代；
 - append-only Skill catalog/active body。
 
-Round 9.1不得把四个physical root暴露成四个generic capability sources，也不得新增第五个root或扫描`.claude/skills`。它保持`LocalSkillProvider`内部的ordered four-root policy，并把完整global scan结果作为本文唯一`SAFE_POINT_REFRESHABLE + LOCAL_SKILL_CATALOG` successor snapshot进入registry。它必须复用本文的identity、fact、registry与parent dispatch cut，不能创建Skill-private registry、MCP identity、dependency graph或第二个meta gateway。
+Round 9.1不得把四个physical root或bundled package暴露成多个generic capability sources，也不得把bundled package伪装成第五个loose root或扫描`.claude/skills`。它把完整effective inspection作为本文唯一`SAFE_POINT_REFRESHABLE + LOCAL_SKILL_CATALOG` successor snapshot进入registry。它必须复用本文的identity、fact、registry与parent dispatch cut，不能创建Skill-private registry、MCP identity、dependency graph或第二个meta gateway。
 
-### 17.2 Round 9.2 Hook 与 Round 9.3 Plugin
+### 17.2 Hook 与 future Plugin
 
-后续[Round 9.2](ROUND_9_2_HOOK_SUBSYSTEM_IMPLEMENTATION_SPEC.zh.md)先实现与Plugin无关的USER/WORKSPACE Hook source、generic trust、11项lifecycle event、唯一dispatcher/executor与`HOOK_CONTEXT`。随后[Round 9.3](ROUND_9_3_AGENT_PLUGIN_BUNDLE_AND_HOOK_ADAPTER_IMPLEMENTATION_SPEC.zh.md)固定Plugin是bundle/source：
-
-~~~text
-Enabled Plugin
-  -> installer materializes portable Skills into one of the four existing roots
-  -> MCP server config inputs
-  -> process-local Hook definitions
-  -> optional Round 10 Subagent preset input
-  -> Host composition reconciles Plugin-managed Skill projection from current state
-  -> existing four-root Skill owner observes installed files at the next safe point
-  -> existing Host composition normalizes MCP config into the ordinary supervisor inventory
-  -> existing source owners discover and publish ordinary snapshots
-~~~
-
-Plugin不成为第三种tool binding，不贡献第五个Skill root，也不让Runtime扫描任意private cache。Plugin reconciliation只允许作为Host composition在existing complete Skill scan之前的projection-maintenance seam；`LocalSkillProvider`不得反向导入Plugin runtime，reconciliation失败只能令该次聚合Skill source `UNAVAILABLE`。Hook不进入本文capability leaf union；Round 9.2让generic `hooks/`成为独立Runtime subsystem，Round 9.3 Plugin只解析/验证并贡献definitions与environment overlay，不拥有trust/dispatcher，Hook core不得反向导入Plugin runtime。Round 10已经拥有task graph与shared cold assembler后，Round 9.3只允许把安全子集的Claude Subagent preset作为optional untrusted child seed消费，不得建立第二套agent executor。具体portable manifest、Codex/Claude compatibility、namespace、enablement与dynamic invalidation由Round 9.3冻结。
+Round 9.2已以与Plugin无关的USER/WORKSPACE sources实现generic Hook subsystem；Hook不进入本文capability leaf union。当前Skill closed producer set只有bundled与loose。Future Plugin若贡献Skill definitions，必须在其实施前以新active spec明确修订producer union、precedence、binding/lifetime与failure semantics；本文不授权four-root materialization、Plugin cache scan、Plugin-private Skill catalog、第三种tool binding或第二套agent executor。
 
 ### 17.3 Round 5B
 

@@ -26,6 +26,7 @@ from pulsara_agent.capability.contracts import (
     EmptyCapabilityEpochPredecessor,
     FrozenMcpCapabilityProjectionInput,
     FrozenSkillProjectionInput,
+    LocalSkillRootKind,
     ToolCapabilityOrigin,
     capability_identity,
     capability_source_ref,
@@ -41,17 +42,21 @@ from pulsara_agent.capability.registry import (
     freeze_tool_planning_input,
 )
 from pulsara_agent.capability.local_skills import (
-    LocalSkillDiscovery,
-    LocalSkillProvider,
-    SkillDiscoveryDisposition,
+    LooseSkillDefinitionProducer,
+)
+from pulsara_agent.capability.resolver import (
+    CompleteEffectiveSkillCatalogInspection,
+    UnavailableEffectiveSkillCatalogInspection,
 )
 from pulsara_agent.capability.types import (
     ResolvedSkillCatalogEntry,
-    SkillCatalogUnavailableReason,
+    LooseSkillOrigin,
+    ProducerUnavailableCause,
     SkillDiagnostic,
     SkillDiagnosticCode,
     SkillDiagnosticSeverity,
-    SkillSource,
+    SkillProducerKind,
+    SkillProducerUnavailableReason,
 )
 from pulsara_agent.conversation_kernel.assembler import CompletedToolCallBlock
 from pulsara_agent.conversation_kernel.context_sources import (
@@ -59,7 +64,7 @@ from pulsara_agent.conversation_kernel.context_sources import (
     KernelContextSourceCollector,
 )
 from pulsara_agent.conversation_kernel.capability_composition import (
-    issue_local_skill_catalog_source_snapshot,
+    issue_skill_catalog_source_snapshot,
 )
 from pulsara_agent.conversation_kernel.direct_model import (
     CompletedProviderModelExecution,
@@ -189,6 +194,7 @@ from pulsara_agent.model_input.continuity import (
     ProviderInputEpochCompatibility,
     ProviderInputEpochResetReason,
     PROVIDER_MESSAGE_LOWERING_CONTRACT,
+    SourceObservationPresence,
     decode_runtime_observation,
     provider_input_prefix_fingerprint,
 )
@@ -698,7 +704,7 @@ def _sources(
             ContextSourceAbsenceKind.NOT_APPLICABLE
         ),
         ContextSourceKind.RETAINED_SKILL_CONTEXT: (
-            ContextSourceAbsenceKind.NOT_APPLICABLE
+            ContextSourceAbsenceKind.EXPLICIT_EMPTY
         ),
         ContextSourceKind.PARENT_CONTEXT: ContextSourceAbsenceKind.NOT_APPLICABLE,
         ContextSourceKind.DEPENDENCY_RESULTS: (ContextSourceAbsenceKind.NOT_APPLICABLE),
@@ -947,18 +953,20 @@ def _prepared_request(
         disposition=CapabilitySourceSnapshotDisposition.COMPLETE,
         facts=(),
     )
-    skill_root_policy = LocalSkillProvider(
-        include_user_skills=False
+    skill_root_policy = LooseSkillDefinitionProducer(
+        user_product_skills_root=Path.cwd() / ".test-r3-user-product",
+        user_agents_skills_root=Path.cwd() / ".test-r3-user-agents",
     ).prepare_root_policy(Path.cwd())
-    skill_discovery = LocalSkillDiscovery(
+    skill_inspection = CompleteEffectiveSkillCatalogInspection(
         root_policy=skill_root_policy,
-        disposition=SkillDiscoveryDisposition.COMPLETE,
+        winners=(),
+        candidate_issues=(),
     )
     tool_plan, _skill_view = _test_round9_capability_views(
         prepared_surface.model_surface,
         skill_projection=FrozenSkillProjectionInput(
             source_snapshot=skill_snapshot,
-            discovery=skill_discovery,
+            inspection=skill_inspection,
         ),
         scope_subagent_task_id=snapshot.identity.scope_subagent_task_id,
         wire_api=(
@@ -2630,16 +2638,20 @@ class _Capability:
             disposition=CapabilitySourceSnapshotDisposition.COMPLETE,
             facts=(),
         )
-        root_policy = LocalSkillProvider(include_user_skills=False).prepare_root_policy(
-            Path.cwd(),
+        root_policy = LooseSkillDefinitionProducer(
+            user_product_skills_root=Path.cwd() / ".test-r3-user-product",
+            user_agents_skills_root=Path.cwd() / ".test-r3-user-agents",
+        ).prepare_root_policy(
+            Path.cwd()
         )
-        return issue_local_skill_catalog_source_snapshot(
+        return issue_skill_catalog_source_snapshot(
             conversation_scope_kind=conversation_scope_kind,
             scope_subagent_task_id=scope_subagent_task_id,
             source_snapshot=snapshot,
-            discovery=LocalSkillDiscovery(
+            inspection=CompleteEffectiveSkillCatalogInspection(
                 root_policy=root_policy,
-                disposition=SkillDiscoveryDisposition.COMPLETE,
+                winners=(),
+                candidate_issues=(),
             ),
             owner_authenticity=self._owner_authenticity,
         )
@@ -2649,7 +2661,7 @@ class _Capability:
             raise ValueError("foreign test Skill owner")
         return FrozenSkillProjectionInput(
             source_snapshot=owner.source_snapshot,
-            discovery=owner.discovery,
+            inspection=owner.inspection,
         )
 
     def activation_context(self, *, user_input: str):
@@ -2674,7 +2686,7 @@ class _SensitiveCapability(_Capability):
                     name="demo",
                     description="Demo capability",
                     location="private/path/SKILL.md",
-                    source=SkillSource.WORKSPACE,
+                    origin=LooseSkillOrigin(LocalSkillRootKind.WORKSPACE_AGENTS),
                 ),
             ),
             diagnostics=(
@@ -2710,23 +2722,33 @@ class _UnavailableCapability(_Capability):
             disposition=CapabilitySourceSnapshotDisposition.UNAVAILABLE,
             facts=(),
         )
-        return issue_local_skill_catalog_source_snapshot(
+        return issue_skill_catalog_source_snapshot(
             conversation_scope_kind=conversation_scope_kind,
             scope_subagent_task_id=scope_subagent_task_id,
             source_snapshot=snapshot,
-            discovery=LocalSkillDiscovery(
-                root_policy=owner.discovery.root_policy,
-                disposition=SkillDiscoveryDisposition.UNAVAILABLE,
-                unavailable_reason=SkillCatalogUnavailableReason.DISCOVERY_RACED,
-                unavailable_diagnostics=(
-                    SkillDiagnostic(
-                        severity=SkillDiagnosticSeverity.ERROR,
-                        code=SkillDiagnosticCode.ENUMERATION_RACED,
-                        message="private discovery failure",
+            inspection=UnavailableEffectiveSkillCatalogInspection(
+                root_policy=owner.inspection.root_policy,
+                unavailable_causes=(
+                    ProducerUnavailableCause(
+                        SkillProducerKind.LOOSE,
+                        SkillProducerUnavailableReason.LOOSE_DISCOVERY_RACED,
+                        (
+                            SkillDiagnostic(
+                                severity=SkillDiagnosticSeverity.ERROR,
+                                code=SkillDiagnosticCode.ENUMERATION_RACED,
+                                message="private discovery failure",
+                            ),
+                        ),
                     ),
                 ),
             ),
             owner_authenticity=self._owner_authenticity,
+        )
+
+    def compose(self, *, view, owner, activation_subject):
+        del view, activation_subject
+        return SkillProjectionOutput(
+            catalog_unavailable_causes=owner.inspection.unavailable_causes,
         )
 
 
@@ -2738,7 +2760,7 @@ class _LargeCatalogCapability(_Capability):
                 name=f"catalog-{index:02d}",
                 description="descriptive context " * 30,
                 location=f".agents/skills/catalog-{index:02d}/SKILL.md",
-                source=SkillSource.WORKSPACE,
+                origin=LooseSkillOrigin(LocalSkillRootKind.WORKSPACE_AGENTS),
             )
             for index in range(40)
         )
@@ -2967,6 +2989,14 @@ def test_round3_capability_sources_and_public_diagnostics_are_separate(
     assert by_kind[ContextSourceKind.SKILL_CATALOG].variants[0].text == ("CATALOG FULL")
     assert by_kind[ContextSourceKind.ACTIVE_SKILL].variants[0].text == "ACTIVE FULL"
     assert collected.registry_fingerprint == collector.registry_fingerprint
+    retained_absence = next(
+        item
+        for item in collected.absent_facts
+        if item.source_kind is ContextSourceKind.RETAINED_SKILL_CONTEXT
+    )
+    assert retained_absence.absence_kind is (
+        ContextSourceAbsenceKind.EXPLICIT_EMPTY
+    )
     assert collected.diagnostics[0].code is (
         ContextPublicDiagnosticCode.CAPABILITY_DISCOVERY_INCOMPLETE
     )
@@ -3486,13 +3516,13 @@ def test_round3_source_decision_and_compiled_fingerprints_are_golden() -> None:
     )
     compiled = StructuredModelInputCompiler().compile(request)
     assert compiled.source_collection_fingerprint == (
-        "sha256:3455b57690a74ddb110a6dd2cc1ced91f372e9836549ef84d83d999e8aaf6e96"
+        "sha256:2087719dbf411cbdb83e864c0c25d6aca2f8a764bba05090508098cf011e1169"
     )
     assert compiled.budget_report.decision_digest == (
         "sha256:caee1ae23a161f2c862947ef5b7b2b9a4ae3093bce6117e00bc13a3a19058fbd"
     )
     assert compiled.compiled_semantic_fingerprint == (
-        "sha256:82d7a19bdd241275282470799dffd771ced577c8d99888b6ee2e6d88a3e82305"
+        "sha256:7c8c7dd2445d127b415dcceefc72f82d545f026689cd68c1165b31450d6ebb8d"
     )
     assert compiled.final_estimate.total_input_tokens == 268
 
@@ -4492,6 +4522,106 @@ def test_round3_1_root_epoch_spans_turns_and_host_replacement_is_cold() -> None:
     )
     assert planning.predecessor.value == "EMPTY"
     assert planning.predecessor_view is None
+
+
+def test_round5b_retained_skill_survives_same_turn_and_clears_on_next_turn() -> None:
+    compiler = StructuredModelInputCompiler()
+    owner = HostProviderInputContinuityOwner(session_id="session:test")
+    first_user = _user("turn one", sequence=1, turn_id="turn:one")
+    first_request = _prepared_request(
+        _snapshot(first_user, turn_id="turn:one"),
+        _sources(
+            _candidate(
+                ContextSourceKind.RETAINED_SKILL_CONTEXT,
+                ('{"skills":[{"name":"one","body":"exact"}]}',),
+            )
+        ),
+    )
+    _first, first_view = _compile_and_install_append(
+        compiler=compiler,
+        owner=owner,
+        request=first_request,
+    )
+
+    assistant = FrozenProviderInputItem(
+        FrozenProviderInputItemKind.ASSISTANT,
+        "entry:2",
+        2,
+        "turn:one",
+        "continue same run",
+    )
+    same_turn_request = replace(
+        _prepared_request(
+            _snapshot(first_user, assistant, turn_id="turn:one"),
+            _sources(),
+        ),
+        context_id="context:retained-same-turn",
+        model_call_index=2,
+    )
+    _same, same_turn_view = _compile_and_install_append(
+        compiler=compiler,
+        owner=owner,
+        request=same_turn_request,
+    )
+    same_turn_observations = tuple(
+        decode_runtime_observation(message)
+        for message in same_turn_view.messages[len(first_view.messages) :]
+        if message.role is MessageRole.USER
+        and message.content
+        and "pulsara_runtime_observation" in message.content[0]
+    )
+    assert not any(
+        item.source_kind is ContextSourceKind.RETAINED_SKILL_CONTEXT
+        for item in same_turn_observations
+    )
+    same_turn_head = next(
+        item
+        for item in same_turn_view.source_heads
+        if item.source_kind is ContextSourceKind.RETAINED_SKILL_CONTEXT
+    )
+    assert same_turn_head.presence is SourceObservationPresence.VALUE
+    assert same_turn_head.last_emitted_turn_id == "turn:one"
+
+    second_user = _user("turn two", sequence=3, turn_id="turn:two")
+    next_turn_request = replace(
+        _prepared_request(
+            _snapshot(
+                first_user,
+                assistant,
+                second_user,
+                turn_id="turn:two",
+            ),
+            _sources(),
+        ),
+        context_id="context:retained-next-turn",
+        model_call_index=1,
+    )
+    _next, next_turn_view = _compile_and_install_append(
+        compiler=compiler,
+        owner=owner,
+        request=next_turn_request,
+    )
+    next_turn_observations = tuple(
+        decode_runtime_observation(message)
+        for message in next_turn_view.messages[len(same_turn_view.messages) :]
+        if message.role is MessageRole.USER
+        and message.content
+        and "pulsara_runtime_observation" in message.content[0]
+    )
+    retained = tuple(
+        item
+        for item in next_turn_observations
+        if item.source_kind is ContextSourceKind.RETAINED_SKILL_CONTEXT
+    )
+    assert len(retained) == 1
+    assert retained[0].presence is SourceObservationPresence.CLEARED
+    next_turn_head = next(
+        item
+        for item in next_turn_view.source_heads
+        if item.source_kind is ContextSourceKind.RETAINED_SKILL_CONTEXT
+    )
+    assert next_turn_head.presence is SourceObservationPresence.CLEARED
+    assert next_turn_head.last_emitted_turn_id == "turn:two"
 
 
 def test_round3_1_child_epochs_are_exactly_scoped_and_released() -> None:

@@ -596,6 +596,61 @@ def test_round9_2_nonregular_source_cannot_outlive_discovery_deadline(
     )
 
 
+def test_round9_2_user_source_binds_root_alias_before_no_follow(
+    tmp_path: Path,
+) -> None:
+    physical_parent = tmp_path / "private"
+    physical_home = physical_parent / "home"
+    physical_home.mkdir(parents=True)
+    configured_parent = tmp_path / "var"
+    configured_parent.symlink_to(physical_parent, target_is_directory=True)
+    configured_home = configured_parent / "home"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source = physical_home / "hooks.json"
+    source.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "matcher": "read_file",
+                            "hooks": [
+                                {"type": "command", "command": "printf alias"}
+                            ],
+                        }
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    provider = LocalHookSourceProvider(
+        workspace_root=workspace,
+        workspace_kind="transient",
+        workspace_state_key="transient:root-alias",
+        pulsara_home=configured_home,
+    )
+
+    observed = provider.discover(deadline_monotonic=monotonic() + 10)
+    snapshot = observed.source_snapshots[0]
+    assert snapshot.disposition is HookSourceSnapshotDisposition.COMPLETE
+    assert [definition.command for definition in snapshot.definitions] == [
+        "printf alias"
+    ]
+    assert snapshot.trust.current_definition_digest is not None
+
+    outside = tmp_path / "outside-hooks.json"
+    outside.write_text('{"hooks":{}}', encoding="utf-8")
+    source.unlink()
+    source.symlink_to(outside)
+    unavailable = provider.discover(deadline_monotonic=monotonic() + 10)
+    assert (
+        unavailable.source_snapshots[0].disposition
+        is HookSourceSnapshotDisposition.UNAVAILABLE
+    )
+
+
 def test_round9_2_parser_rejects_duplicate_keys_nonfinite_and_source_bounds(
     tmp_path: Path,
 ) -> None:

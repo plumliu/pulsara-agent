@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import datetime, timezone
 from enum import Enum
@@ -68,6 +69,7 @@ _SKILL_NAME = "round5b-retained-check"
 _SENTINEL = "ROUND5B_SKILL_SUCCESS"
 _MCP_SENTINEL = "round5b-sentinel"
 _API_KEY_REDACTION = "<PULSARA_API_KEY>"
+_SCHEMA_VERSION = "round5b-compaction-dogfood.v4-isolated-roots-cache-usage"
 
 
 def _scrub_exact(value: object, secret: str) -> object:
@@ -103,6 +105,92 @@ def _message_trace(message) -> dict[str, object]:
         ),
         "tool_call_id": message.tool_call_id,
     }
+
+
+def _provider_usage_trace(report) -> dict[str, object]:
+    usage = report.usage
+    return {
+        "usage_status": report.usage_status,
+        "input_tokens": None if usage is None else usage.input_tokens,
+        "cached_input_tokens": (
+            None if usage is None else usage.cached_input_tokens
+        ),
+        "output_tokens": None if usage is None else usage.output_tokens,
+        "reasoning_output_tokens": (
+            None if usage is None else usage.reasoning_output_tokens
+        ),
+        "total_tokens": None if usage is None else usage.total_tokens,
+        "reported_model_id": report.reported_model_id,
+        "diagnostics": tuple(
+            item.model_dump(mode="json") for item in report.provider_diagnostics
+        ),
+    }
+
+
+def _cache_usage_totals(
+    records: tuple[dict[str, object], ...],
+) -> dict[str, object]:
+    reports = tuple(
+        item["provider_usage"]
+        for item in records
+        if isinstance(item.get("provider_usage"), dict)
+    )
+    reported = tuple(
+        item for item in reports if item.get("usage_status") == "reported"
+    )
+    cache_observable = tuple(
+        item
+        for item in reported
+        if isinstance(item.get("input_tokens"), int)
+        and isinstance(item.get("cached_input_tokens"), int)
+    )
+    reported_input_tokens = sum(
+        int(item["input_tokens"])
+        for item in reported
+        if isinstance(item.get("input_tokens"), int)
+    )
+    cache_observable_input_tokens = sum(
+        int(item["input_tokens"]) for item in cache_observable
+    )
+    cached_input_tokens = sum(
+        int(item["cached_input_tokens"]) for item in cache_observable
+    )
+    observable_rate = (
+        None
+        if cache_observable_input_tokens == 0
+        else cached_input_tokens / cache_observable_input_tokens
+    )
+    complete = len(cache_observable) == len(records)
+    return {
+        "total_model_calls": len(records),
+        "terminal_usage_observed_calls": len(reports),
+        "usage_reported_calls": len(reported),
+        "usage_missing_calls": len(records) - len(reported),
+        "cache_field_reported_calls": len(cache_observable),
+        "cache_field_missing_calls": len(records) - len(cache_observable),
+        "reported_input_tokens": reported_input_tokens,
+        "cache_observable_input_tokens": cache_observable_input_tokens,
+        "cached_input_tokens": cached_input_tokens,
+        "observable_cache_hit_fraction": (
+            f"{cached_input_tokens}/{cache_observable_input_tokens}"
+        ),
+        "observable_cache_hit_rate": observable_rate,
+        "end_to_end_cache_hit_rate": observable_rate if complete else None,
+    }
+
+
+def _cache_usage_summary(
+    records: tuple[dict[str, object], ...],
+) -> dict[str, object]:
+    result = _cache_usage_totals(records)
+    purposes = sorted({str(item.get("purpose")) for item in records})
+    result["by_purpose"] = {
+        purpose: _cache_usage_totals(
+            tuple(item for item in records if item.get("purpose") == purpose)
+        )
+        for purpose in purposes
+    }
+    return result
 
 
 class _DogfoodTrace:
@@ -209,6 +297,9 @@ class _DogfoodTrace:
             "model_calls": self._model_calls,
             "tool_invocations": self._tool_invocations,
             "compactions": self._compactions,
+            "provider_cache_usage": _cache_usage_summary(
+                tuple(self._model_calls)
+            ),
         }
 
 
@@ -258,6 +349,7 @@ class _TracingExecution:
                 block["tool_name"] = item.tool_name
                 block["arguments"] = self._trace.scrub(item.arguments_json)
         elif isinstance(item, ProviderStreamTerminal):
+            self._record["provider_usage"] = _provider_usage_trace(item.usage)
             self._record["terminal"] = {
                 "kind": item.terminal_kind.value,
                 "incomplete_reason": (
@@ -757,6 +849,7 @@ def _install_compaction_trigger_recorder(
             "disposition": outcome.disposition.value,
             "snapshot_id_present": outcome.snapshot_id is not None,
             "revision_ordinal": outcome.revision_ordinal,
+            "public_code": outcome.public_code,
         }
         records.append(completed)
         trace.record_compaction(completed)
@@ -815,8 +908,6 @@ async def _run_retained_and_repeated(
     *, settings: PulsaraSettings, workspace: Path
 ) -> dict[str, object]:
     import pulsara_agent.conversation_kernel.host as host_module
-    from pulsara_agent.capability.local_skills import LocalSkillProvider
-    from pulsara_agent.capability.resolver import LocalSkillCapabilityProvider
 
     _write_mcp_config(workspace, (("direct", ("direct_echo",)),))
     _write_skill(workspace)
@@ -845,9 +936,6 @@ async def _run_retained_and_repeated(
         )
         _install_provider_trace(session, trace)
         _install_tool_trace(session, trace)
-        session._capabilities._provider = LocalSkillCapabilityProvider(  # noqa: SLF001
-            provider=LocalSkillProvider(include_user_skills=False)
-        )
         session._compaction.policy = ResolvedCompactionPolicy(  # noqa: SLF001
             automatic_enabled=False,
             minimum_reclaim_tokens=1,
@@ -1227,10 +1315,14 @@ async def _run(settings: PulsaraSettings) -> dict[str, object]:
             settings=settings,
             workspace=Path(second_dir),
         )
+    retained_calls = tuple(
+        retained["diagnostic_trace"]["model_calls"]  # type: ignore[index]
+    )
+    overbound_calls = tuple(
+        overbound["diagnostic_trace"]["model_calls"]  # type: ignore[index]
+    )
     return {
-        "schema_version": (
-            "round5b-compaction-dogfood.v3-observable-auto-without-dispatch"
-        ),
+        "schema_version": _SCHEMA_VERSION,
         "completed_at_utc": datetime.now(timezone.utc).isoformat(),
         "provider_api": settings.llm.api,
         "provider_model": settings.llm.pro.model_id,
@@ -1238,8 +1330,38 @@ async def _run(settings: PulsaraSettings) -> dict[str, object]:
         "overbound_mcp": overbound,
         "diagnostic_trace_recorded": True,
         "pulsara_api_key_recorded": False,
+        "provider_cache_usage": _cache_usage_summary(
+            retained_calls + overbound_calls
+        ),
         "status": "passed" if retained["passed"] and overbound["passed"] else "failed",
     }
+
+
+@contextmanager
+def _isolated_user_definition_environment():
+    """Keep this fixed-fixture dogfood independent of operator-owned roots."""
+
+    original_home = os.environ.get("HOME")
+    original_pulsara_home = os.environ.get("PULSARA_HOME")
+    try:
+        with TemporaryDirectory(prefix="pulsara-round5b-home-") as directory:
+            root = Path(directory).resolve(strict=True)
+            home = root / "home"
+            product_home = root / "pulsara-home"
+            home.mkdir()
+            product_home.mkdir()
+            os.environ["HOME"] = os.fspath(home)
+            os.environ["PULSARA_HOME"] = os.fspath(product_home)
+            yield
+    finally:
+        if original_home is None:
+            os.environ.pop("HOME", None)
+        else:
+            os.environ["HOME"] = original_home
+        if original_pulsara_home is None:
+            os.environ.pop("PULSARA_HOME", None)
+        else:
+            os.environ["PULSARA_HOME"] = original_pulsara_home
 
 
 def main() -> int:
@@ -1254,13 +1376,14 @@ def main() -> int:
     initial = PulsaraSettings.from_env()
     admin_root_dsn, database_name, runtime_dsn = _create_database(initial)
     try:
-        report = asyncio.run(_run(_runtime_settings(args.env_file, runtime_dsn)))
+        with _isolated_user_definition_environment():
+            report = asyncio.run(
+                _run(_runtime_settings(args.env_file, runtime_dsn))
+            )
     except BaseException as exc:
         frame = traceback.extract_tb(exc.__traceback__)[-1]
         report = {
-            "schema_version": (
-                "round5b-compaction-dogfood.v3-observable-auto-without-dispatch"
-            ),
+            "schema_version": _SCHEMA_VERSION,
             "completed_at_utc": datetime.now(timezone.utc).isoformat(),
             "status": "external_or_runtime_failure",
             "failure_type": type(exc).__name__,

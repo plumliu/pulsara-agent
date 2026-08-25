@@ -22,7 +22,7 @@
 >
 > 规范归属修订（2026-08-17）：正常epoch MCP direct/meta、`MCP_CATALOG`、`list_mcp_servers`、`inspect_new_mcp_tool`、`use_new_mcp_tool`与direct unavailable gate全部由Round 9唯一拥有；普通ToolResult的40,000-byte logical FULL、8-KiB COMPACT、artifact与conditional guidance全部由Round 7.1唯一拥有。Round 5B只在合法rebase boundary重新消费Round 9/9.1的current owner snapshots、registry、dispatch cut/views与普通compiler结果，并复用Round 7.1既有ToolResult variants；它不重新发现能力、不实现meta gateway、不定义第二套MCP exposure DTO，也不定义compaction专用ToolResult阈值。
 >
-> Skill收口修订（2026-08-18）：Round 9.1不再定义`read_file` activation intent/lookup。Round 5B只为同一真实user run中已经ordinary COMPLETE + actual FULL + continuity-installed、且current manifest未变化的Skill纯派生bounded `RETAINED_SKILL_CONTEXT`；不建立loaded-state、receipt或跨turn activation history。
+> Skill收口修订（2026-08-25）：Round 9.1不再定义`read_file` activation intent/lookup。Round 5B只为同一真实user run中已经ordinary COMPLETE + actual FULL + continuity-installed的Skill纯派生bounded `RETAINED_SKILL_CONTEXT`。资格证明只join该assistant request之前最新的installed historical `SKILL_CATALOG` observation、canonical request/result与old epoch actual FULL placement；不读compaction-time filesystem，不用current manifest重新批准或否决历史已交付正文，也不建立loaded-state、receipt或跨turn activation history。
 >
 > Provider replay收口修订（2026-08-19）：Round 5A.2已经ACTIVATED；Round 5B不再假设Host loss以后只能从generic public semantics重建summary prefix。Round 5A.2负责把completed、entry-bound Chat/Responses native carrier与assistant同事务持久化；summary call只消费其现有`FrozenCanonicalProviderDispatchRead`、selected hydration与`FrozenProviderWireInputPlan`接口，可使用当前Host安装或restart后rehydrate的exact old-prefix replay。adoption以后，snapshot floor以前的replay row不再active materialize，但Round 5B不删除row、不把hidden carrier复制进summary，也不建立第二套replay DTO。
 >
@@ -52,7 +52,7 @@ messages[n + 1] == messages[n] || append_only_suffix
 
 Round 9已经先行关闭与该不变量相关的正常capability缺口：fixed Builtin与cold DIRECT MCP组成epoch-stable native `tools[]`；late-ready MCP只追加catalog并走inspect/use meta path；direct断连或schema replacement不热改tools。Round 9.1又把dynamic Skill catalog、textual/configured `ACTIVE_SKILL`与ordinary `read_file` progressive disclosure接入同一append-only dispatch planning。本轮不重复实现这些能力。
 
-Round 5B只增加一个合法的**successor boundary**：active compaction明确关闭旧epoch并建立新epoch，因此使用Round 9的current owner snapshots、registry、target/native preflight、parent dispatch cut与sibling views重新执行标准cold selection。Successor固定使用`EmptyCapabilityEpochPredecessor`：完整current MCP cohort能与Builtin一起fit时全部DIRECT，否则全部META_ONLY；不保留一套compaction-private hybrid规则。Round 9.1的current `SKILL_CATALOG`从current owner snapshot生成，而同一activation内的`ACTIVE_SKILL`精确继承old installed observation，不因文件变化静默改写。对同一真实user run中已经通过ordinary `read_file`完整FULL交付的Skill，本轮另以低authority `RETAINED_SKILL_CONTEXT`有界重注入；它不是activation lookup或loaded-state。
+Round 5B只增加一个合法的**successor boundary**：active compaction明确关闭旧epoch并建立新epoch，因此使用Round 9的current owner snapshots、registry、target/native preflight、parent dispatch cut与sibling views重新执行标准cold selection。Successor固定使用`EmptyCapabilityEpochPredecessor`：完整current MCP cohort能与Builtin一起fit时全部DIRECT，否则全部META_ONLY；不保留一套compaction-private hybrid规则。Round 9.1的current effective `SKILL_CATALOG`从统一catalog inspection生成，而同一activation内的`ACTIVE_SKILL`精确继承old installed observation，不因文件变化静默改写。对同一真实user run中已经通过ordinary `read_file`完整FULL交付的Skill，本轮另以低authority `RETAINED_SKILL_CONTEXT`有界重注入；它不是activation lookup或loaded-state，也不代表current catalog。
 
 另一个剩余缺口是：当这条append-only epoch本身接近当前模型的active input budget时，Runtime没有合法的换代路径。Round 5B冻结唯一例外：
 
@@ -304,7 +304,7 @@ messages only append suffix
 
 Round 6的MCP physical semantics与Round 9的统一Capability semantics是本轮硬前置。Round 5B不再supersede Round 6、不再定义正常epoch direct/meta行为；它只消费已经激活的：
 
-- `SealedBuiltinCapabilitySnapshot`、`PreparedMcpCapabilitySourceSnapshotSet`与`PreparedLocalSkillCatalogSourceSnapshot`；
+- `SealedBuiltinCapabilitySnapshot`、`PreparedMcpCapabilitySourceSnapshotSet`、`PreparedSkillCatalogSourceSnapshot`与其`EffectiveSkillCatalogInspection`；
 - `FrozenCapabilityRegistrySnapshot`；
 - `FrozenCapabilityDispatchCut`及其`FrozenToolCapabilityDispatchView` / `FrozenSkillCapabilityDispatchView`；
 - `EmptyCapabilityEpochPredecessor`、`FrozenToolCapabilityExposureSelection`与`FrozenToolCapabilityExposurePlan`；
@@ -1348,7 +1348,7 @@ Compaction不是Round 9.1定义的“下一真实activation boundary”。Succes
 
 ~~~text
 SKILL_CATALOG
-    <- current PreparedLocalSkillCatalogSourceSnapshot.discovery
+    <- current EffectiveSkillCatalogInspection
     <- current FrozenSkillCapabilityDispatchView
     <- existing Round 9.1 catalog renderer
 
@@ -1358,9 +1358,9 @@ ACTIVE_SKILL
     <- no filesystem reread and no current-body substitution
 ~~~
 
-Round 5B可在同一个`KernelSkillProjectionComposer`上增加窄的catalog-only pure entry point，或让existing composer产出current catalog后丢弃其activation分支；不得复制Agent Skills parser/renderer。Compaction context collector把current catalog candidate、inherited active candidate、`RETAINED_SKILL_CONTEXT`、runtime handoff与其余non-trigger candidates组装进一个普通`FrozenNonTriggerContextSources`，并继续让该carrier exact引用same parent Skill view与owner snapshot。`ACTIVE_SKILL`的`VALUE/CLEARED/UNAVAILABLE` effective state从old epoch最终source head和对应installed observation机械恢复：`VALUE`逐字继承exact name/location/reason/body，`CLEARED/UNAVAILABLE`继承其终止语义，`NOT_APPLICABLE`只表示本call没有successor，必须解析到仍有效的old installed head。无法exact join old head/body时active adoption fail closed，不能从current file猜测。
+Round 5B复用同一个`KernelSkillProjectionComposer`产出current effective catalog，不得复制Agent Skills parser/renderer。Compaction context collector把current catalog candidate、inherited active candidate、`RETAINED_SKILL_CONTEXT`、runtime handoff与其余non-trigger candidates组装进一个普通`FrozenNonTriggerContextSources`，并继续让该carrier exact引用same parent Skill view与owner snapshot。`ACTIVE_SKILL`的`VALUE/CLEARED/UNAVAILABLE` effective state从old epoch最终source head和对应installed observation机械恢复：`VALUE`逐字继承exact name/location/reason/body，`CLEARED/UNAVAILABLE`继承其终止语义，`NOT_APPLICABLE`只表示本call没有successor，必须解析到仍有效的old installed head。无法exact join old head/body时active adoption fail closed，不能从current file猜测。
 
-Current filesystem变化仍可以改变successor `SKILL_CATALOG`，但不能改写same-activation `ACTIVE_SKILL`。下一条真实ROOT user activation boundary或Round 10新child first-open才由Round 9.1 normal composer从当时current discovery生成新的active snapshot。Compiler最终对catalog/active source选择出的effective heads只由continuity candidate拥有；post-adoption final assembly消费一个`FrozenNonTriggerContextSources`，不再镜像逐source candidate或最终heads。
+Current producer observation变化仍可以改变successor `SKILL_CATALOG`，但不能改写same-activation `ACTIVE_SKILL`。下一条真实ROOT user activation boundary或Round 10新child first-open才由Round 9.1 normal composer从当时current effective inspection生成新的active snapshot。Compiler最终对catalog/active source选择出的effective heads只由continuity candidate拥有；post-adoption final assembly消费一个`FrozenNonTriggerContextSources`，不再镜像逐source candidate或最终heads。
 
 ### 10.2 新source contract
 
@@ -1492,18 +1492,20 @@ Placement固定在successor current `SKILL_CATALOG` / `ACTIVE_SKILL`之后、`CO
 
 一个model-driven Skill只有全部满足时才eligible：
 
-1. ordinary `read_file`的exact path在该次read所属scope中对应一个admitted `SKILL.md`，且call从`offset=1`开始；
-2. ordinary result明确到达EOF，没有truncation或遗漏pagination；
-3. canonical ToolResult preview为`COMPLETE`；
-4. 旧epoch实际compiler为该result选择`FULL`，并且包含该FULL result的provider input已经由continuity CAS成功安装；只提交row、HEAD_TAIL、COMPACT、REF_ONLY、OMITTED或取消中的attempt均不算；
-5. compaction freeze时current Round 9.1 manifest仍是同name/location的valid winner，current parsed body与当时完整read语义一致；
-6. 它属于当前同一真实user run和exact ROOT/child scope，不是更早turn、foreign child或另一Host猜测出的历史read。
+1. canonical assistant request与canonical ToolResult通过exact `tool_call_id`与`tool_request_entry_id`唯一join，且request item在old epoch installed messages/placements中定位到exact one message ordinal；duplicate call ID或ambiguous placement直接ineligible；
+2. 只考虑该assistant request ordinal之前的installed `SKILL_CATALOG` observations，选择ordinal最高的一项；它必须是canonical `SNAPSHOT + VALUE`，body必须解码为exact `{"skills": [...]}` closed shape，name/location均唯一；`CLEARED`、`UNAVAILABLE`、duplicate或unparseable均ineligible，不得回退到更早VALUE；
+3. request必须是ordinary `read_file`，`offset=1`，其`path`上一步historical catalog中exact one matching row的model-visible `location`一致；该location必须以`.../<logical-name>/SKILL.md`结尾；
+4. ToolResult public `path`必须等于该historical location的确定性public-path projection：workspace-relative保持relative，`${PULSARA_HOME}`与`~/.agents`使用该Host为epoch冻结的home bindings展开，bundled absolute location保持absolute；该projection不访问current filesystem；
+5. ordinary result从line 1明确到EOF，`truncated=false`，`limit >= total_lines`，每行严格为连续`N|text`，canonical ToolResult preview为`COMPLETE`；
+6. 旧epoch实际compiler为该result选择`FULL`，并且包含该FULL result的provider input已经由continuity CAS成功安装；只提交row、HEAD_TAIL、COMPACT、REF_ONLY、OMITTED或取消中的attempt均不算；
+7. 从ToolResult反解出provider实际收到的logical document text，复用唯一root-neutral parser，并用historical location中`SKILL.md`的parent basename执行placement validation；parsed name/description必须与historical row exact join，retained body定义为该delivered document的parsed body；
+8. 它属于当前同一真实user run和exact ROOT/child scope，不是更早turn、foreign child或另一Host猜测出的历史read。
 
 V1只接纳**一次ordinary result已经完整覆盖整份文件**的Skill；不把多个partial pages拼成新的proof。超过40K logical FULL而必须分页的valid Skill仍可被模型正常使用，但本轮不会自动retained，compaction后模型按current catalog重新读取。该减法避免page digest、pending assembly与loaded-skill ledger。
 
-首次rebase时，Runtime从old `FrozenProviderInputEpochView`的actual installed messages、canonical call/result，以及current owner-issued `PreparedLocalSkillCatalogSourceSnapshot.discovery`重建上述事实；bare `FrozenSkillProjectionInput`只有fingerprints，不能单独证明current manifest/body。它不得建立跨call mutable“曾加载Skill”表。资格验证必须复用ordinary `read_file`的closed output parser与pure content renderer：严格解析canonical SUCCESS payload，验证exact path/offset/limit/total_lines/truncated/content；再由current discovery中的exact winner/body重建同一line-numbered`content`并逐字段相等。`_warning`、dedup telemetry等非content字段不得成为Skill identity。随后另以old epoch actual selected representation证明该exact result为FULL，不能从artifact preview、tool name或人类可读文本启发式推断。当前文件已修改、删除、失效或winner变化时，不重注入旧正文，只重建current `SKILL_CATALOG`，模型需要时重新读取。Host/reopen若已失去证明old actual FULL installation所需的process-local epoch view，则保守视为ineligible；不得从row存在反推FULL。
+首次rebase时，Runtime只从old `FrozenProviderInputEpochView`的actual installed messages/placements、canonical call/result与该request之前最新historical catalog observation重建上述事实。它不得建立跨call mutable“曾加载Skill”表，不访问current filesystem，也不用compaction-time effective catalog替换、批准或否决历史FULL read。`_warning`、dedup telemetry等非content字段不得成为Skill identity。随后另以old epoch actual selected representation证明该exact result为FULL，不能从artifact preview、tool name或人类可读文本启发式推断。Loose override已删除、bundled/loose winner已变化时，历史上已交付的body仍可retained；current catalog独立呈现新winner，supporting resource未来是否仍可读由ordinary tool决定。Host/reopen若已失去证明old actual FULL installation所需的process-local epoch view，则保守视为ineligible；不得从row存在反推FULL。
 
-Repeated active compaction还允许一种递归但仍纯派生的输入：immediate predecessor epoch中**最终effective且continuity-installed**的`RETAINED_SKILL_CONTEXT VALUE`。Runtime必须从predecessor `ProcessLocalSourceHead.installed_observation_fingerprint`定位exact observation，逐项解析其`name + catalog location + body`，再用current `PreparedLocalSkillCatalogSourceSnapshot.discovery`验证同一winner与exact parsed body仍成立。`CLEARED/UNAVAILABLE`、foreign scope/run、无法join的observation、已修改/删除/换winner的item都不继承。该分支只携带模型上一epoch实际已看到的低authority正文，不携带read/result/epoch ID，也不是durable loaded-state。
+Repeated active compaction还允许一种递归但仍纯派生的输入：immediate predecessor epoch中**最终effective且continuity-installed**的`RETAINED_SKILL_CONTEXT VALUE`。Runtime必须从predecessor `ProcessLocalSourceHead.installed_observation_fingerprint`定位exact observation，逐项解析其closed `name + catalog_location + body` shape并验证existing retained bounds；不重新join current manifest或filesystem。`CLEARED/UNAVAILABLE`、foreign scope/run或无法exact join的observation都不继承；same-run证明必须逐值确认该head的existing `last_emitted_turn_id == canonical_read.scope.turn_id`，仅ROOT/child scope bucket相同不构成run identity。该分支只携带模型上一epoch实际已看到的低authority正文，不携带read/result/epoch ID，也不是durable loaded-state。
 
 选择规则固定为：
 
@@ -1530,7 +1532,7 @@ VALUE body对每项只显示bounded `name + catalog location + exact parsed Mark
 - 在idle compaction中预装到未来run；
 - 新增schema、relation、event、receipt、loaded-skill registry或recovery owner。
 
-active rebase后同一run继续时，successor第一次compile把它与current catalog、inherited active snapshot及其他runtime sources一起安装。下一条真实ROOT user message从空retained set重新开始；child集合在exact child run终结时消失。Repeated mid-turn compaction只从post-base新FULL reads与immediate predecessor installed retained observation合并候选，不复制上一snapshot的内部identity，也不从genesis回扫ordinary reads。
+active rebase后同一run继续时，successor第一次compile把它与current catalog、inherited active snapshot及其他runtime sources一起安装。同一turn的normal compatible append必须保留该head；下一真实ROOT user message的首次normal append则追加exact `CLEARED` suffix，若该turn在provider open前先compaction，则通过上述turn-ID mismatch直接构造无retained的cold successor。两条路径都从空retained set重新开始且不改写旧prefix；child集合在exact child run终结时消失。Repeated mid-turn compaction只从post-base新FULL reads与immediate predecessor installed retained observation合并候选，不复制上一snapshot的内部identity，也不从genesis回扫ordinary reads。
 
 ---
 
@@ -2068,7 +2070,7 @@ src/pulsara_agent/conversation_kernel/compaction/
     prompt.py          summary guidance/output normalization/provider carrier
     model_call.py      PreparedCompactionSummaryCall preflight/open_once
     runtime_handoff.py Host-local live-state projection
-    retained_skills.py pure ordinary-read/FULL/current-manifest eligibility + rendering
+    retained_skills.py pure historical-catalog/ordinary-read/FULL eligibility + rendering
     service.py         process-local attempt orchestration
 ~~~
 
@@ -2178,8 +2180,8 @@ Round 5A.2、Round 7.1、Round 9、Round 9.1与Lightweight TODO refinement必须
 - retained ToolResult复用Round 7.1 ordinary pure builder，并在相同call-local augmentation输入下验证byte-identical；successor epoch citation mapping作为显式输入，不迁移旧opaque handle；
 - COMPACTION_RUNTIME_HANDOFF source；
 - 整个handoff使用`UNTRUSTED_OBSERVATION`，Runtime只证明结构/identity/status/currentness；
-- current `SKILL_CATALOG`从owner-issued discovery生成；`ACTIVE_SKILL`从old effective installed observation精确继承，不把compaction误当activation boundary；
-- `RETAINED_SKILL_CONTEXT`从old installed FULL ordinary reads、immediate predecessor installed retained source与current owner discovery纯派生，最多8项；
+- current `SKILL_CATALOG`从owner-issued effective inspection生成；`ACTIVE_SKILL`从old effective installed observation精确继承，不把compaction误当activation boundary；
+- `RETAINED_SKILL_CONTEXT`从old installed historical catalog + FULL ordinary reads与immediate predecessor installed retained source纯派生，不join current catalog/filesystem，最多8项；
 - Terminal/monitor/TODO/flat subagent snapshots；TODO只使用ordinal/status/text与counts，不伪造item ID；
 - 以`CompactionContinuationSeed`调用shared assembler完成pre-adoption no-Hook dry proof与post-adoption final cold assembly；
 - successor Round 9 EMPTY predecessor、target/native preflight、parent cut/sibling views与两阶段Tool selection/materialization；完整MCP cohort按standard all-or-none DIRECT/META fallback；
@@ -2221,7 +2223,7 @@ Round 5A.2、Round 7.1、Round 9、Round 9.1与Lightweight TODO refinement必须
 - active successor使用current complete registry、exact target/native preflight形成标准`FrozenCapabilityDispatchCut`、两个sibling views、selection与final `FrozenToolCapabilityExposurePlan`；
 - fixed Builtin + 完整current eligible MCP cohort fit时MCP全部DIRECT；overbound时Builtin保持DIRECT、全部MCP为META_ONLY，不partial ranking且compaction可成功；old epoch route不作为successor selection输入；
 - old DIRECT schema replacement只在successor boundary采用，不在old epoch以meta双版本绕过；
-- successor compile从current owner discovery生成`SKILL_CATALOG`、从old effective installed observation继承`ACTIVE_SKILL`，并把它们与`RETAINED_SKILL_CONTEXT`一起纳入continuity CAS；
+- successor compile从current owner-issued effective inspection生成`SKILL_CATALOG`、从old effective installed observation继承`ACTIVE_SKILL`，并把它们与historically proven `RETAINED_SKILL_CONTEXT`一起纳入continuity CAS；
 - freeze后到达的新MCP/Skill facts不改candidate，安装后走Round 9/9.1 normal compatible suffix；
 - no `FrozenEpochMcpExposure`、`McpEpochExposureBorrow`、compaction meta dispatcher或second capability registry exists。
 
@@ -2359,13 +2361,13 @@ summary actual input == exact FrozenProviderWireInputPlan materialization
 
 ### 20.8 Retained Skill context
 
-- ordinary `read_file`从offset 1一次到EOF、canonical COMPLETE、actual FULL并已continuity install时，同run active compaction可重注入current exact parsed body；
+- ordinary `read_file`从offset 1一次到EOF、canonical COMPLETE、actual FULL并已continuity install时，同run active compaction可重注入provider历史上实际收到的exact parsed body；
 - physical read完成但row未提交、row已提交但provider未open、HEAD_TAIL、COMPACT、REF_ONLY、OMITTED与partial page均不eligible；
 - textual/configured `ACTIVE_SKILL`不在retained source重复；
 - protected tail已经为同一read result选择FULL时不重复；tail只保留COMPACT/REF_ONLY时可由retained source补回exact parsed body；
 - 相同Skill重复FULL read只保留一份并更新recentness；多个Skill按recent prefix选择、按原delivery顺序渲染；
 - 9项时只保留最近8项；40,000-token aggregate与overall post-target任一命中时整项缩减，不截断正文；
-- current manifest修改、删除、invalid、same-name winner变化时不重注入旧body，successor catalog仍正常可见；
+- historical read后current filesystem修改、删除、invalid或same-name winner变化不否决已交付body；successor current catalog独立显示当前winner；
 - next real ROOT user message清空；exact child run与ROOT/other child严格隔离；
 - idle compaction不生成retained source；
 - repeated mid-turn compaction合并post-base新FULL reads与immediate predecessor exact installed retained observation；原始read位于source floor以下时不回扫genesis，也不建立loaded ledger；
@@ -2427,7 +2429,7 @@ summary actual input == exact FrozenProviderWireInputPlan materialization
 
 ## 21. Real-provider dogfood
 
-Activation必须在ephemeral clean-v0 PostgreSQL完成至少四条：
+Activation必须在ephemeral clean-v0 PostgreSQL完成至少四条。固定fixture probe必须把`HOME`与`PULSARA_HOME`绑定到call-local临时空目录，只保留package内bundled producer与该probe显式创建的workspace definitions；不得让operator真实user roots改变阈值、catalog或轨迹。该隔离只约束Round 5B固定fixture，user-root产品能力由Round 9.1/统一Skill dogfood独立证明：
 
 ### 21.1 Standard cold MCP selection
 
@@ -2463,16 +2465,16 @@ Round 9必须已经独立证明cold DIRECT、late NEW、inspect/use、disconnect
 
 ### 21.4 Ordinary Skill retained context
 
-1. provider根据`SKILL_CATALOG`用ordinary `read_file(offset=1, limit=2000)`完整读取一个current Skill；
-2. 证明canonical preview为COMPLETE、old epoch actual representation为FULL且continuity已安装；
+1. provider根据已安装的`SKILL_CATALOG`用ordinary `read_file(offset=1, limit=2000)`完整读取一个Skill，并保留该assistant request之前最新historical catalog observation；
+2. 证明canonical preview为COMPLETE、old epoch actual representation为FULL且continuity已安装，request/result/path/parsed name/description与historical row逐项join；
 3. 同一ROOT user run触发active compaction，summary prompt不复制Skill body；
 4. successor以`RETAINED_SKILL_CONTEXT`只重注入该parsed body一次，SYSTEM/tools保持目标new epoch的标准形状；
 5. provider继续遵循该Skill完成任务，不再为恢复上下文重复读取；
-6. 改变manifest后重复场景，旧body不被retained、current catalog仍可用；
-7. 不改变manifest时执行第二次mid-turn compaction，证明可从immediate predecessor installed retained observation继续携带正文，而不回扫source floor以下的原始read；
+6. 改变或删除loose winner后重复场景，旧body仍依historical FULL proof retained，current catalog独立展示新winner或bundled fallback；
+7. 执行第二次mid-turn compaction，证明可从immediate predecessor installed retained observation继续携带正文，不回扫source floor以下的原始read，也不重新join current filesystem；
 8. 下一真实ROOT user message不继承model-driven retained body。
 
-证据必须足以重放诊断判断：除既有aggregate外，保存每次真实user prompt与最终模型正文、normalized provider blocks、tool arguments/results、每次compaction trigger/disposition及`INITIAL | REPAIR`完整顺序。该trace是显式activation/dogfood evidence，不是production operational log、conversation recovery authority或durable execution history；它不创建receipt/replay/retry机制。只对`PULSARA_API_KEY`的exact value做精确scrub，不广泛遮蔽summary、ToolResult、schema、临时workspace path或其他诊断正文；不得持久化整份environment、transport headers或requestState。
+证据必须足以重放诊断判断：除既有aggregate外，保存每次真实user prompt与最终模型正文、normalized provider blocks、tool arguments/results、每次compaction trigger/disposition/public code及`INITIAL | REPAIR`完整顺序；每个provider terminal还保存reported input/cached/output/reasoning/total tokens，并用exact cached/input分子分母分别汇总foreground、summary与全轨迹cache hit，missing usage保持显式且cache仍不是correctness gate。该trace是显式activation/dogfood evidence，不是production operational log、conversation recovery authority或durable execution history；它不创建receipt/replay/retry机制。只对`PULSARA_API_KEY`的exact value做精确scrub，不广泛遮蔽summary、ToolResult、schema、临时workspace path或其他诊断正文；不得持久化整份environment、transport headers或requestState。
 
 ---
 
@@ -2587,8 +2589,8 @@ Round 5B只有在以下全部成立时才能标记ACTIVATED：
 - protected tail最多3个complete tool groups且pairing-safe；
 - 最近最多3条真实human input由Runtime exact保留；
 - normal与retained ToolResult逐字复用Round 7.1同一artifact-aware pure builder；byte equality以相同canonical item、lowering contract与call-local augmentation为前提，successor citation mapping不迁移旧opaque handle。Round 5B没有阈值、variant或artifact renderer，也不列inventory；
-- successor `SKILL_CATALOG`来自current owner-issued discovery；same-activation `ACTIVE_SKILL`来自old effective installed observation并逐字保持，不因current文件变化重写；下一真实activation boundary才读取current body；
-- `RETAINED_SKILL_CONTEXT`只接纳同run、exact scope、一次从offset 1到EOF、canonical COMPLETE、actual FULL且continuity已安装、current manifest仍相同的ordinary Skill read，或immediate predecessor exact installed retained observation中仍通过current owner discovery验证的item；最多8项、40,000-token aggregate，超界按recent prefix整项缩减，不截断body；下一真实ROOT user message、idle compaction或manifest漂移不继承；
+- successor `SKILL_CATALOG`来自current owner-issued effective inspection；same-activation `ACTIVE_SKILL`来自old effective installed observation并逐字保持，不因current文件变化重写；下一真实activation boundary才读取current body；
+- `RETAINED_SKILL_CONTEXT`只接纳同run、exact scope、一次从offset 1到EOF、canonical COMPLETE、actual FULL且continuity已安装，并与该assistant request之前highest-ordinal canonical `SNAPSHOT + VALUE` historical catalog row逐项join的ordinary Skill read，或immediate predecessor exact installed retained observation中符合closed shape/bounds的item；不重新join current manifest/filesystem。最多8项、40,000-token aggregate，超界按recent prefix整项缩减，不截断body；下一真实ROOT user message或idle compaction不继承；
 - active/idle snapshot adoption原子且ACK unknown闭合；active才install successor epoch，idle只清除旧continuity并让下一turn cold-open；
 - `PreparedCompactionCanonicalAdoption`只含可由snapshot/revision/pointer/predecessor/event确认的row drafts；所有planning/epoch/MCP/execution/dry-assembly事实只存在于process-local resources；
 - current binding唯一决定active summary；

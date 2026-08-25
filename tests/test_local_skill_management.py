@@ -17,7 +17,7 @@ from pulsara_agent import cli
 from pulsara_agent.capability.contracts import FrozenSkillProjectionInput
 from pulsara_agent.capability.local_skill_management import (
     EventLocalSkillCancellationProbe,
-    InspectLocalSkillCatalogRequest,
+    InspectEffectiveSkillCatalogRequest,
     InstallLooseLocalSkillRequest,
     LocalSkillInstallDisposition,
     LocalSkillInstallScope,
@@ -26,7 +26,11 @@ from pulsara_agent.capability.local_skill_management import (
     LocalSkillValidationUnavailableReason,
     ValidateLocalSkillSourceRequest,
 )
-from pulsara_agent.capability.bundled_skills import bundled_skills_status
+from pulsara_agent.capability.bundled_skills import (
+    BundledSkillDefinitionProducer,
+    BundledSkillDefinitionsDisposition,
+    BundledSkillDistributionBindingOwner,
+)
 from pulsara_agent.capability.local_skill_publisher import (
     AtomicLocalSkillPublisher,
     LocalSkillCleanupLocationStatus,
@@ -34,23 +38,27 @@ from pulsara_agent.capability.local_skill_publisher import (
     PlatformExclusiveDirectoryPublisher,
 )
 from pulsara_agent.capability.local_skills import (
-    BUNDLED_SKILL_PROVENANCE_FILE_NAME,
-    InvalidLocalSkillCandidateIssue,
-    LocalSkillProvider,
-    ShadowedLocalSkillCandidateIssue,
-    SkillDiscoveryDisposition,
-    discovery_diagnostics,
-    parse_local_skill_document,
+    LooseSkillDefinitionProducer,
+    LooseSkillDefinitionsDisposition,
+    parse_skill_document,
+    validate_skill_candidate_placement,
 )
 from pulsara_agent.capability.pulsara_home import (
     PulsaraHomeDisposition,
-    PulsaraHomeResolutionError,
     PulsaraHomeUnavailableReason,
     resolve_pulsara_home,
 )
+from pulsara_agent.capability.resolver import (
+    CompleteEffectiveSkillCatalogInspection,
+    EffectiveSkillCatalogDisposition,
+    UnavailableEffectiveSkillCatalogInspection,
+    inspection_diagnostics,
+)
 from pulsara_agent.capability.types import (
-    SkillCatalogUnavailableReason,
+    InvalidSkillCandidateIssue,
+    ShadowedSkillCandidateIssue,
     SkillDiagnosticCode,
+    SkillProducerUnavailableReason,
 )
 
 
@@ -87,6 +95,13 @@ def _workspace_request(source: Path, workspace: Path) -> InstallLooseLocalSkillR
     )
 
 
+def _loose_producer(base: Path) -> LooseSkillDefinitionProducer:
+    return LooseSkillDefinitionProducer(
+        user_product_skills_root=base / "test-user-product-skills",
+        user_agents_skills_root=base / "test-user-agent-skills",
+    )
+
+
 def _wait_for_path(path: Path, process: subprocess.Popen[str] | None = None) -> None:
     deadline = time.monotonic() + 10.0
     while not path.exists():
@@ -119,25 +134,26 @@ def test_local_skill_validation_reuses_root_neutral_production_parser(
     validation = service.validate_local_skill_source(
         ValidateLocalSkillSourceRequest(source)
     )
-    runtime_provider = LocalSkillProvider(include_user_skills=False)
+    runtime_provider = _loose_producer(tmp_path / "runtime-user")
     runtime_root = tmp_path / "runtime"
     runtime_source = runtime_root / ".pulsara" / "skills" / extra_name
     runtime_source.parent.mkdir(parents=True)
     os.rename(source, runtime_source)
-    discovery = runtime_provider.discover(
+    discovery = runtime_provider.observe(
         runtime_provider.prepare_root_policy(runtime_root)
     )
 
     assert validation.disposition is LocalSkillValidationDisposition.VALID
     assert validation.parsed is not None
-    assert discovery.skills[0].name == validation.parsed.name
-    assert discovery.skills[0].description == validation.parsed.description
-    assert discovery.skills[0].license == validation.parsed.license
-    assert discovery.skills[0].compatibility == validation.parsed.compatibility
-    assert discovery.skills[0].metadata == validation.parsed.metadata
-    assert discovery.skills[0].body == validation.parsed.body
+    assert discovery.candidates[0].name == validation.parsed.name
+    assert discovery.candidates[0].description == validation.parsed.description
+    assert discovery.candidates[0].license == validation.parsed.license
+    assert discovery.candidates[0].compatibility == validation.parsed.compatibility
+    assert discovery.candidates[0].metadata == validation.parsed.metadata
+    assert discovery.candidates[0].body == validation.parsed.body
     assert (
-        discovery.skills[0].raw_document_digest == validation.parsed.raw_document_digest
+        discovery.candidates[0].raw_document_digest
+        == validation.parsed.raw_document_digest
     )
     assert not hasattr(validation.parsed, "root_kind")
     assert not hasattr(validation.parsed, "location")
@@ -165,7 +181,17 @@ def test_validation_and_runtime_use_exactly_the_same_parser_contract(
     data = document.encode() if isinstance(document, str) else document
     (source / "SKILL.md").write_bytes(data)
 
-    direct = parse_local_skill_document(data, expected_directory_name="parser-case")
+    direct = parse_skill_document(data)
+    placement = (
+        validate_skill_candidate_placement(direct.parsed, "parser-case")
+        if direct.parsed is not None
+        else None
+    )
+    direct_valid = direct.parsed is not None and placement is not None and placement.valid
+    direct_diagnostics = (
+        *direct.diagnostics,
+        *(placement.diagnostics if placement is not None else ()),
+    )
     validation = LocalSkillManagementService().validate_local_skill_source(
         ValidateLocalSkillSourceRequest(source)
     )
@@ -173,25 +199,26 @@ def test_validation_and_runtime_use_exactly_the_same_parser_contract(
     runtime_source = runtime_root / ".pulsara" / "skills" / source.name
     runtime_source.parent.mkdir(parents=True)
     os.rename(source, runtime_source)
-    provider = LocalSkillProvider(include_user_skills=False)
-    discovery = provider.discover(provider.prepare_root_policy(runtime_root))
+    provider = _loose_producer(tmp_path / "runtime-user")
+    discovery = provider.observe(provider.prepare_root_policy(runtime_root))
 
     assert (validation.disposition is LocalSkillValidationDisposition.VALID) == (
-        direct.parsed is not None
+        direct_valid
     )
-    if direct.parsed is None:
+    if not direct_valid:
         assert validation.disposition is LocalSkillValidationDisposition.INVALID
         assert [item.code for item in validation.diagnostics] == [
-            item.code for item in direct.diagnostics
+            item.code for item in direct_diagnostics
         ]
-        assert len(discovery.candidate_issues) == 1
-        issue = discovery.candidate_issues[0]
-        assert isinstance(issue, InvalidLocalSkillCandidateIssue)
+        assert len(discovery.invalid_issues) == 1
+        issue = discovery.invalid_issues[0]
+        assert isinstance(issue, InvalidSkillCandidateIssue)
         assert [item.code for item in issue.diagnostics] == [
-            item.code for item in direct.diagnostics
+            item.code for item in direct_diagnostics
         ]
     else:
-        assert [item.name for item in discovery.skills] == [direct.parsed.name]
+        assert direct.parsed is not None
+        assert [item.name for item in discovery.candidates] == [direct.parsed.name]
 
 
 def test_local_skill_validation_closed_invalid_and_unavailable_outcomes(
@@ -293,20 +320,17 @@ def test_relative_home_is_same_typed_failure_for_runtime_and_bundled_owner(
     monkeypatch.setenv("PULSARA_HOME", "relative-home")
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    provider = LocalSkillProvider()
-    discovery = provider.discover(provider.prepare_root_policy(workspace))
+    provider = LooseSkillDefinitionProducer()
+    discovery = provider.observe(provider.prepare_root_policy(workspace))
 
-    assert discovery.disposition is SkillDiscoveryDisposition.UNAVAILABLE
-    assert (
-        discovery.unavailable_reason
-        is SkillCatalogUnavailableReason.USER_HOME_CONFIGURATION_INVALID
+    assert discovery.disposition is LooseSkillDefinitionsDisposition.UNAVAILABLE
+    assert discovery.unavailable_cause is not None
+    assert discovery.unavailable_cause.reason is (
+        SkillProducerUnavailableReason.LOOSE_CONFIGURATION_INVALID
     )
-    with pytest.raises(PulsaraHomeResolutionError) as raised:
-        bundled_skills_status()
-    assert (
-        raised.value.resolution.unavailable_reason
-        is PulsaraHomeUnavailableReason.RELATIVE_PULSARA_HOME
-    )
+    with BundledSkillDistributionBindingOwner() as binding:
+        bundled = BundledSkillDefinitionProducer(binding).observe()
+    assert bundled.disposition is BundledSkillDefinitionsDisposition.COMPLETE
     assert not (workspace / "relative-home").exists()
 
 
@@ -329,8 +353,8 @@ def test_invalid_user_home_does_not_block_validation_or_workspace_install(
             scope=LocalSkillInstallScope.USER,
         )
     )
-    inspection = service.inspect_local_skill_catalog(
-        InspectLocalSkillCatalogRequest(workspace)
+    inspection = service.inspect_effective_skill_catalog(
+        InspectEffectiveSkillCatalogRequest(workspace)
     )
 
     assert validation.disposition is LocalSkillValidationDisposition.VALID
@@ -343,14 +367,52 @@ def test_invalid_user_home_does_not_block_validation_or_workspace_install(
         user.target_configuration_reason
         is PulsaraHomeUnavailableReason.RELATIVE_PULSARA_HOME
     )
-    assert inspection.disposition is SkillDiscoveryDisposition.UNAVAILABLE
-    assert (
-        inspection.unavailable_reason
-        is SkillCatalogUnavailableReason.USER_HOME_CONFIGURATION_INVALID
+    assert inspection.disposition is EffectiveSkillCatalogDisposition.UNAVAILABLE
+    assert isinstance(inspection, UnavailableEffectiveSkillCatalogInspection)
+    assert len(inspection.unavailable_causes) == 1
+    assert inspection.unavailable_causes[0].reason is (
+        SkillProducerUnavailableReason.LOOSE_CONFIGURATION_INVALID
     )
-    assert [item.code for item in inspection.unavailable_diagnostics] == [
+    assert [item.code for item in inspection_diagnostics(inspection)] == [
         SkillDiagnosticCode.USER_HOME_CONFIGURATION_INVALID
     ]
+
+
+@pytest.mark.parametrize("failure_type", [RuntimeError, MemoryError])
+def test_inspection_closes_one_failed_os_home_observation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_type: type[BaseException],
+) -> None:
+    monkeypatch.delenv("PULSARA_HOME", raising=False)
+    calls = 0
+
+    def unavailable_home(_cls: type[Path]) -> Path:
+        nonlocal calls
+        calls += 1
+        raise failure_type("synthetic OS home failure")
+
+    monkeypatch.setattr(Path, "home", classmethod(unavailable_home))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    inspection = LocalSkillManagementService().inspect_effective_skill_catalog(
+        InspectEffectiveSkillCatalogRequest(workspace)
+    )
+
+    assert calls == 1
+    assert inspection.disposition is EffectiveSkillCatalogDisposition.UNAVAILABLE
+    assert isinstance(inspection, UnavailableEffectiveSkillCatalogInspection)
+    assert [item.reason for item in inspection.unavailable_causes] == [
+        SkillProducerUnavailableReason.LOOSE_CONFIGURATION_INVALID
+    ]
+    assert [item.code for item in inspection_diagnostics(inspection)] == [
+        SkillDiagnosticCode.USER_HOME_CONFIGURATION_INVALID
+    ]
+    assert tuple(item.root_kind.value for item in inspection.root_policy.roots) == (
+        "WORKSPACE_PULSARA",
+        "WORKSPACE_AGENTS",
+    )
 
 
 def test_darwin_system_tmp_and_var_aliases_are_prepared_before_nofollow_walk(
@@ -560,15 +622,25 @@ def test_install_rejects_reserved_control_symlink_and_source_target_overlap(
 ) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    reserved = _source(tmp_path / "reserved", "reserved-skill")
-    (reserved / BUNDLED_SKILL_PROVENANCE_FILE_NAME).write_text(
+    ordinary = _source(tmp_path / "reserved", "reserved-skill")
+    (ordinary / ".pulsara-skill-source.json").write_text(
         "{}",
         encoding="utf-8",
     )
-    reserved_result = LocalSkillManagementService().install_loose_local_skill(
-        _workspace_request(reserved, workspace)
+    ordinary_result = LocalSkillManagementService().install_loose_local_skill(
+        _workspace_request(ordinary, workspace)
     )
-    assert reserved_result.disposition is LocalSkillInstallDisposition.RESERVED_CONTROL
+    if sys.platform == "darwin" or sys.platform.startswith("linux"):
+        assert ordinary_result.disposition is LocalSkillInstallDisposition.INSTALLED
+        assert ordinary_result.destination_path is not None
+        assert (
+            ordinary_result.destination_path / ".pulsara-skill-source.json"
+        ).read_text(encoding="utf-8") == "{}"
+    else:
+        assert (
+            ordinary_result.disposition
+            is LocalSkillInstallDisposition.PUBLISH_UNAVAILABLE
+        )
 
     linked = _source(tmp_path / "linked", "linked-skill")
     target = tmp_path / "outside.txt"
@@ -774,6 +846,35 @@ def test_memory_error_after_stage_creation_is_typed_and_cleans_hidden_stage(
     assert result.disposition is LocalSkillInstallDisposition.STAGING_UNAVAILABLE
     assert not (root / source.name).exists()
     assert not list(root.glob(".pulsara-skill-install-*"))
+
+    second_workspace = tmp_path / "workspace-stage-open-memory-error"
+    second_workspace.mkdir()
+    second_source = _source(tmp_path / "stage-open-sources", "stage-open-skill")
+    original_open = publisher_module.os.open
+    stage_open_failed = False
+
+    def fail_stage_directory_open(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal stage_open_failed
+        if (
+            not stage_open_failed
+            and isinstance(path, str)
+            and path.startswith(".pulsara-skill-install-")
+            and flags & getattr(os, "O_DIRECTORY", 0)
+        ):
+            stage_open_failed = True
+            raise MemoryError("synthetic stage binding allocation failure")
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(publisher_module.os, "open", fail_stage_directory_open)
+    second = LocalSkillManagementService().install_loose_local_skill(
+        _workspace_request(second_source, second_workspace)
+    )
+
+    second_root = second_workspace / ".pulsara" / "skills"
+    assert stage_open_failed is True
+    assert second.disposition is LocalSkillInstallDisposition.STAGING_UNAVAILABLE
+    assert not (second_root / second_source.name).exists()
+    assert not list(second_root.glob(".pulsara-skill-install-*"))
 
 
 def test_resource_read_memory_error_is_typed_and_runs_cleanup(
@@ -1002,9 +1103,9 @@ class _ScanBeforePublish:
         self.delegate = PlatformExclusiveDirectoryPublisher()
 
     def publish(self, root_fd: int, staging_name: str, final_name: str) -> None:
-        provider = LocalSkillProvider(include_user_skills=False)
-        discovery = provider.discover(provider.prepare_root_policy(self.workspace))
-        self.observed_names = tuple(item.name for item in discovery.skills)
+        provider = _loose_producer(self.workspace / "test-user")
+        discovery = provider.observe(provider.prepare_root_policy(self.workspace))
+        self.observed_names = tuple(item.name for item in discovery.candidates)
         self.delegate.publish(root_fd, staging_name, final_name)
 
 
@@ -1024,9 +1125,9 @@ def test_hidden_staging_is_scanner_inert_until_exclusive_publish(
     if sys.platform == "darwin" or sys.platform.startswith("linux"):
         assert result.disposition is LocalSkillInstallDisposition.INSTALLED
         assert adapter.observed_names == ()
-        provider = LocalSkillProvider(include_user_skills=False)
-        visible = provider.discover(provider.prepare_root_policy(workspace))
-        assert [item.name for item in visible.skills] == ["hidden-stage"]
+        provider = _loose_producer(tmp_path / "visible-user")
+        visible = provider.observe(provider.prepare_root_policy(workspace))
+        assert [item.name for item in visible.candidates] == ["hidden-stage"]
     else:
         assert result.disposition is LocalSkillInstallDisposition.PUBLISH_UNAVAILABLE
 
@@ -1305,9 +1406,9 @@ def test_sigkill_publication_weak_guarantee_is_filesystem_truth(
     if phase == "before":
         assert not final.exists()
         assert list(root.glob(".pulsara-skill-install-*"))
-        provider = LocalSkillProvider(include_user_skills=False)
-        discovery = provider.discover(provider.prepare_root_policy(workspace))
-        assert discovery.skills == ()
+        provider = _loose_producer(tmp_path / "sigkill-user")
+        discovery = provider.observe(provider.prepare_root_policy(workspace))
+        assert discovery.candidates == ()
     else:
         assert (final / "SKILL.md").is_file()
         assert not list(root.glob(".pulsara-skill-install-*"))
@@ -1333,29 +1434,32 @@ def test_inspection_preserves_all_invalid_and_shadowed_candidate_issues(
             f"---\nname: {name}\n---\nbody\n",
             encoding="utf-8",
         )
-    provider = LocalSkillProvider(include_user_skills=False)
-    service = LocalSkillManagementService(provider=provider)
+    provider = _loose_producer(tmp_path / "inspection-user")
+    service = LocalSkillManagementService(loose_producer=provider)
 
-    inspection = service.inspect_local_skill_catalog(
-        InspectLocalSkillCatalogRequest(workspace)
+    inspection = service.inspect_effective_skill_catalog(
+        InspectEffectiveSkillCatalogRequest(workspace)
     )
 
-    assert inspection.disposition is SkillDiscoveryDisposition.COMPLETE
+    assert inspection.disposition is EffectiveSkillCatalogDisposition.COMPLETE
+    assert isinstance(inspection, CompleteEffectiveSkillCatalogInspection)
     invalid = [
         item
         for item in inspection.candidate_issues
-        if isinstance(item, InvalidLocalSkillCandidateIssue)
+        if isinstance(item, InvalidSkillCandidateIssue)
     ]
     shadowed = [
         item
         for item in inspection.candidate_issues
-        if isinstance(item, ShadowedLocalSkillCandidateIssue)
+        if isinstance(item, ShadowedSkillCandidateIssue)
     ]
     assert len(invalid) == 129
     assert len(shadowed) == 1
-    assert shadowed[0].winner_ordinal == 0
-    assert shadowed[0].name == inspection.skills[0].name == "shared"
-    assert len(discovery_diagnostics(inspection)) == 130
+    shared = next(item for item in inspection.winners if item.name == "shared")
+    assert shadowed[0].winner_path == shared.path == first / "SKILL.md"
+    assert shadowed[0].winner_origin == shared.origin
+    assert shadowed[0].name == shared.name == "shared"
+    assert len(inspection_diagnostics(inspection)) == 129
     assert not hasattr(inspection, "enumerated_candidate_count")
     assert not hasattr(inspection, "observed_utf8_bytes")
     assert not hasattr(inspection, "diagnostics")
@@ -1368,24 +1472,24 @@ def test_direct_copy_modify_delete_remain_next_scan_filesystem_truth(
     workspace.mkdir()
     root = workspace / ".pulsara" / "skills"
     source = _source(root, "direct-skill")
-    provider = LocalSkillProvider(include_user_skills=False)
+    provider = _loose_producer(tmp_path / "direct-user")
     policy = provider.prepare_root_policy(workspace)
 
-    first = provider.discover(policy)
+    first = provider.observe(policy)
     (source / "SKILL.md").write_text(
         _document("direct-skill", description="Modified."),
         encoding="utf-8",
     )
-    second = provider.discover(policy)
+    second = provider.observe(policy)
     for child in source.iterdir():
         child.unlink()
     source.rmdir()
-    third = provider.discover(policy)
+    third = provider.observe(policy)
 
-    assert first.skills[0].description == "Portable local Skill."
-    assert second.skills[0].description == "Modified."
-    assert third.skills == ()
-    assert third.disposition is SkillDiscoveryDisposition.COMPLETE
+    assert first.candidates[0].description == "Portable local Skill."
+    assert second.candidates[0].description == "Modified."
+    assert third.candidates == ()
+    assert third.disposition is LooseSkillDefinitionsDisposition.COMPLETE
 
 
 def test_root_replacement_cannot_produce_a_mixed_complete_inspection(
@@ -1401,9 +1505,9 @@ def test_root_replacement_cannot_produce_a_mixed_complete_inspection(
         "alpha",
         document=_document("alpha", description="Old observation."),
     )
-    provider = LocalSkillProvider(include_user_skills=False)
+    provider = _loose_producer(tmp_path / "replacement-user")
     policy = provider.prepare_root_policy(workspace)
-    original = local_skills_module._read_discovery_skill_document
+    original = local_skills_module.read_observed_skill_document
     replaced = False
 
     def replace_root_then_read(child, *, maximum: int, deadline_monotonic) -> bytes:
@@ -1426,27 +1530,30 @@ def test_root_replacement_cannot_produce_a_mixed_complete_inspection(
 
     monkeypatch.setattr(
         local_skills_module,
-        "_read_discovery_skill_document",
+        "read_observed_skill_document",
         replace_root_then_read,
     )
-    raced = provider.discover(policy)
+    raced = provider.observe(policy)
 
-    assert raced.disposition is SkillDiscoveryDisposition.UNAVAILABLE
-    assert raced.unavailable_reason is SkillCatalogUnavailableReason.DISCOVERY_RACED
-    assert raced.skills == ()
-    assert raced.candidate_issues == ()
-    assert [item.code for item in raced.unavailable_diagnostics] == [
+    assert raced.disposition is LooseSkillDefinitionsDisposition.UNAVAILABLE
+    assert raced.unavailable_cause is not None
+    assert raced.unavailable_cause.reason is (
+        SkillProducerUnavailableReason.LOOSE_DISCOVERY_RACED
+    )
+    assert raced.candidates == ()
+    assert raced.invalid_issues == ()
+    assert [item.code for item in raced.unavailable_cause.diagnostics] == [
         SkillDiagnosticCode.ENUMERATION_RACED
     ]
 
     monkeypatch.setattr(
         local_skills_module,
-        "_read_discovery_skill_document",
+        "read_observed_skill_document",
         original,
     )
-    successor = provider.discover(policy)
-    assert [item.name for item in successor.skills] == ["alpha", "extra"]
-    assert successor.skills[0].description == "New observation."
+    successor = provider.observe(policy)
+    assert [item.name for item in successor.candidates] == ["alpha", "extra"]
+    assert successor.candidates[0].description == "New observation."
 
 
 def test_direct_filesystem_read_race_makes_the_whole_inspection_unavailable(
@@ -1459,7 +1566,7 @@ def test_direct_filesystem_read_race_makes_the_whole_inspection_unavailable(
     root = workspace / ".pulsara" / "skills"
     _source(root, "first-valid")
     raced = _source(root, "second-raced") / "SKILL.md"
-    original = local_skills_module._read_discovery_skill_document
+    original = local_skills_module.read_observed_skill_document
 
     def fail_one(child, *, maximum: int, deadline_monotonic) -> bytes:
         if child.evidence.name == raced.parent.name:
@@ -1472,17 +1579,19 @@ def test_direct_filesystem_read_race_makes_the_whole_inspection_unavailable(
 
     monkeypatch.setattr(
         local_skills_module,
-        "_read_discovery_skill_document",
+        "read_observed_skill_document",
         fail_one,
     )
-    provider = LocalSkillProvider(include_user_skills=False)
-    discovery = provider.discover(provider.prepare_root_policy(workspace))
+    provider = _loose_producer(tmp_path / "race-user")
+    discovery = provider.observe(provider.prepare_root_policy(workspace))
 
-    assert discovery.disposition is SkillDiscoveryDisposition.UNAVAILABLE
-    assert discovery.skills == ()
-    assert discovery.candidate_issues == ()
-    assert discovery.winner_local_diagnostics == ()
-    assert discovery.unavailable_reason is SkillCatalogUnavailableReason.DISCOVERY_RACED
+    assert discovery.disposition is LooseSkillDefinitionsDisposition.UNAVAILABLE
+    assert discovery.candidates == ()
+    assert discovery.invalid_issues == ()
+    assert discovery.unavailable_cause is not None
+    assert discovery.unavailable_cause.reason is (
+        SkillProducerUnavailableReason.LOOSE_DISCOVERY_RACED
+    )
 
 
 def test_cli_four_loose_commands_project_typed_service_outcomes(
@@ -1542,8 +1651,12 @@ def test_cli_four_loose_commands_project_typed_service_outcomes(
         )
         cli.main()
         payload = json.loads(capsys.readouterr().out)
-        assert payload["operation"] == "inspect_effective_local_skill_catalog"
-        assert [item["name"] for item in payload["skills"]] == ["cli-skill"]
+        assert payload["operation"] == "inspect_effective_skill_catalog"
+        assert {item["name"] for item in payload["skills"]} == {
+            "cli-skill",
+            "pulsara-skill-creator",
+            "pulsara-skill-installer",
+        }
 
 
 def test_cli_user_scope_rejects_workspace_as_usage_error(

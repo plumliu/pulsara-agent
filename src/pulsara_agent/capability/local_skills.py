@@ -1,4 +1,4 @@
-"""Agent Skills parser and sole four-root local catalog scanner."""
+"""Source-neutral Skill parser and the sole four-root loose definition producer."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from pathlib import Path
 import re
 import stat
 from time import monotonic
-from typing import Any, TypeAlias
+from typing import Any
 
 import yaml
 from yaml.events import (
@@ -26,38 +26,40 @@ from yaml.events import (
 from pulsara_agent.capability.contracts import LocalSkillRootKind
 from pulsara_agent.capability.local_skill_source_binding import (
     open_absolute_directory_nofollow,
+    prepare_local_skill_source_path,
 )
 from pulsara_agent.capability.pulsara_home import (
     PulsaraHomeDisposition,
     PulsaraHomeResolution,
     PulsaraHomeUnavailableReason,
+    UserHomeResolution,
     resolve_pulsara_home,
-)
-from pulsara_agent.capability.render import (
-    SkillProjectionOverbound,
-    render_catalog_prompt,
+    resolve_user_home,
 )
 from pulsara_agent.capability.types import (
-    LocalSkillManifest,
-    ResolvedSkillCatalogEntry,
+    InvalidSkillCandidateIssue,
+    LooseSkillOrigin,
+    ProducerUnavailableCause,
     SkillAuthoringDiagnosticCode,
-    SkillCatalogUnavailableReason,
     SkillDiagnostic,
     SkillDiagnosticCode,
     SkillDiagnosticSeverity,
+    SkillDefinitionOrigin,
+    SkillManifest,
+    SkillProducerKind,
+    SkillProducerUnavailableReason,
 )
 from pulsara_agent.primitives.context import canonical_json_bytes, context_fingerprint
 
 
 WORKSPACE_PRODUCT_SKILL_ROOT_PARTS = (".pulsara", "skills")
 WORKSPACE_AGENTS_SKILL_ROOT_PARTS = (".agents", "skills")
-USER_PRODUCT_SKILL_ROOT_PARTS = (".pulsara", "skills")
 USER_AGENTS_SKILL_ROOT_PARTS = (".agents", "skills")
 USER_PRODUCT_LOCATION_PREFIX = "${PULSARA_HOME}/skills"
 SKILL_FILE_NAME = "SKILL.md"
-BUNDLED_SKILL_PROVENANCE_FILE_NAME = ".pulsara-skill-source.json"
 
 AGENT_SKILLS_CONTRACT_ID = "pulsara.agent-skills-core.v1"
+SKILL_PLACEMENT_CONTRACT_ID = "pulsara.skill-placement.v1"
 MAX_SKILL_FILE_BYTES = 64 * 1024
 MAX_SKILL_FRONTMATTER_BYTES = 32 * 1024
 MAX_SKILL_YAML_NODES = 512
@@ -111,26 +113,26 @@ _HOST_EXTENSION_FIELDS = frozenset(
         "blocked_scopes",
     }
 )
-_ROOT_ORDER = (
+LOOSE_SKILL_ROOT_ORDER = (
     LocalSkillRootKind.WORKSPACE_PULSARA,
     LocalSkillRootKind.WORKSPACE_AGENTS,
     LocalSkillRootKind.USER_PULSARA,
     LocalSkillRootKind.USER_AGENTS,
 )
-_ROOT_LOCATION_PREFIX = {
+LOOSE_SKILL_LOCATION_PREFIX = {
     LocalSkillRootKind.WORKSPACE_PULSARA: ".pulsara/skills",
     LocalSkillRootKind.WORKSPACE_AGENTS: ".agents/skills",
     LocalSkillRootKind.USER_PULSARA: USER_PRODUCT_LOCATION_PREFIX,
     LocalSkillRootKind.USER_AGENTS: "~/.agents/skills",
 }
 _ROOT_POLICY_CONSTRUCTOR = object()
-_DISCOVERY_DIRECTORY_FLAGS = (
+_DIRECTORY_FLAGS = (
     os.O_RDONLY
     | getattr(os, "O_CLOEXEC", 0)
     | getattr(os, "O_DIRECTORY", 0)
     | getattr(os, "O_NOFOLLOW", 0)
 )
-_DISCOVERY_FILE_FLAGS = (
+_FILE_FLAGS = (
     os.O_RDONLY
     | getattr(os, "O_CLOEXEC", 0)
     | getattr(os, "O_NONBLOCK", 0)
@@ -138,18 +140,13 @@ _DISCOVERY_FILE_FLAGS = (
 )
 
 
-class SkillDiscoveryDisposition(StrEnum):
+class LooseSkillDefinitionsDisposition(StrEnum):
     COMPLETE = "COMPLETE"
     UNAVAILABLE = "UNAVAILABLE"
 
 
-class LocalSkillCandidateIssueKind(StrEnum):
-    INVALID = "INVALID"
-    SHADOWED = "SHADOWED"
-
-
 @dataclass(frozen=True, slots=True)
-class ParsedLocalSkillDocument:
+class ParsedSkillDocument:
     """Root-neutral result of the one production SKILL.md parser."""
 
     name: str
@@ -176,7 +173,7 @@ class ParsedLocalSkillDocument:
 
 @dataclass(frozen=True, slots=True)
 class SkillDocumentParseResult:
-    parsed: ParsedLocalSkillDocument | None
+    parsed: ParsedSkillDocument | None
     declared_name: str | None
     diagnostics: tuple[SkillDiagnostic, ...]
 
@@ -187,6 +184,18 @@ class SkillDocumentParseResult:
             raise ValueError("parsed Skill declared name conflicts")
         if any(item.path is not None for item in self.diagnostics):
             raise ValueError("root-neutral parser emitted a physical path")
+
+
+@dataclass(frozen=True, slots=True)
+class SkillPlacementValidationResult:
+    valid: bool
+    diagnostics: tuple[SkillDiagnostic, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.valid == bool(self.diagnostics):
+            raise ValueError("Skill placement result is inconsistent")
+        if any(item.path is not None for item in self.diagnostics):
+            raise ValueError("placement validator emitted a physical path")
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -224,202 +233,117 @@ class PreparedSkillRootBinding:
             raise TypeError("Skill root kind is not closed")
         if not self.path.is_absolute() or not self.containment_root.is_absolute():
             raise ValueError("Skill root binding is not absolute")
-        if self.location_prefix != _ROOT_LOCATION_PREFIX[self.root_kind]:
+        if self.location_prefix != LOOSE_SKILL_LOCATION_PREFIX[self.root_kind]:
             raise ValueError("Skill root location prefix conflicts")
-        if self.precedence_ordinal != _ROOT_ORDER.index(self.root_kind):
+        if self.precedence_ordinal != LOOSE_SKILL_ROOT_ORDER.index(self.root_kind):
             raise ValueError("Skill root precedence conflicts")
 
 
-@dataclass(frozen=True, slots=True, init=False)
-class PreparedLocalSkillRootPolicy:
-    """Scope-neutral physical roots issued by one LocalSkillProvider."""
+@dataclass(frozen=True, slots=True)
+class LooseSkillRootAlias:
+    first_root_kind: LocalSkillRootKind
+    first_path: Path
+    second_root_kind: LocalSkillRootKind
+    second_path: Path
+    shared_device: int | None = None
+    shared_inode: int | None = None
 
-    selected_root_kinds: tuple[LocalSkillRootKind, ...]
+    def __post_init__(self) -> None:
+        if self.first_root_kind == self.second_root_kind:
+            raise ValueError("loose root alias must join two roots")
+        if not self.first_path.is_absolute() or not self.second_path.is_absolute():
+            raise ValueError("loose root alias paths are not absolute")
+        if (self.shared_device is None) != (self.shared_inode is None):
+            raise ValueError("loose root alias physical identity is incomplete")
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class PreparedLooseSkillRootPolicy:
+    """The exact, always-four-root loose definition policy."""
+
     roots: tuple[PreparedSkillRootBinding, ...]
     configuration_unavailable_reason: PulsaraHomeUnavailableReason | None
+    lexical_aliases: tuple[LooseSkillRootAlias, ...]
     _owner_authority: object = field(repr=False, compare=False)
 
     def __init__(
         self,
         *,
-        selected_root_kinds: tuple[LocalSkillRootKind, ...],
         roots: tuple[PreparedSkillRootBinding, ...],
         configuration_unavailable_reason: PulsaraHomeUnavailableReason | None,
+        lexical_aliases: tuple[LooseSkillRootAlias, ...],
         _owner_authority: object,
         _constructor: object,
     ) -> None:
         if _constructor is not _ROOT_POLICY_CONSTRUCTOR:
             raise TypeError("Skill root policies are owner-issued")
-        object.__setattr__(self, "selected_root_kinds", selected_root_kinds)
         object.__setattr__(self, "roots", roots)
         object.__setattr__(
-            self,
-            "configuration_unavailable_reason",
-            configuration_unavailable_reason,
+            self, "configuration_unavailable_reason", configuration_unavailable_reason
         )
+        object.__setattr__(self, "lexical_aliases", lexical_aliases)
         object.__setattr__(self, "_owner_authority", _owner_authority)
         self.__post_init__()
 
     def __post_init__(self) -> None:
-        if self.selected_root_kinds != tuple(
-            sorted(self.selected_root_kinds, key=_ROOT_ORDER.index)
-        ) or len(self.selected_root_kinds) != len(set(self.selected_root_kinds)):
-            raise ValueError("Skill root selection is not ordered and unique")
-        if len(self.selected_root_kinds) > len(_ROOT_ORDER):
-            raise ValueError("Skill root policy exceeds the closed root set")
         kinds = tuple(item.root_kind for item in self.roots)
-        if (
-            kinds != tuple(item for item in self.selected_root_kinds if item in kinds)
-            or len(kinds) != len(set(kinds))
-            or len({item.path for item in self.roots}) != len(self.roots)
-            or len({item.location_prefix for item in self.roots}) != len(self.roots)
-        ):
-            raise ValueError("Skill root bindings are not ordered and unique")
+        expected = tuple(item for item in LOOSE_SKILL_ROOT_ORDER if item in kinds)
+        if kinds != expected or len(kinds) != len(set(kinds)):
+            raise ValueError("loose Skill root bindings are not ordered and unique")
         if any(
             item._owner_authority is not self._owner_authority for item in self.roots
         ):
-            raise ValueError("Skill root policy contains a foreign binding")
-        missing = set(self.selected_root_kinds) - set(kinds)
+            raise ValueError("loose Skill root policy contains a foreign binding")
+        missing = set(LOOSE_SKILL_ROOT_ORDER) - set(kinds)
         if bool(missing) != (self.configuration_unavailable_reason is not None):
-            raise ValueError("Skill root configuration state conflicts")
-        if missing and missing != {LocalSkillRootKind.USER_PULSARA}:
-            raise ValueError("unexpected unresolved Skill root binding")
-
-    @property
-    def excluded_root_kinds(self) -> tuple[LocalSkillRootKind, ...]:
-        selected = set(self.selected_root_kinds)
-        return tuple(item for item in _ROOT_ORDER if item not in selected)
-
-
-@dataclass(frozen=True, slots=True)
-class InvalidLocalSkillCandidateIssue:
-    path: Path
-    root_kind: LocalSkillRootKind
-    diagnostics: tuple[SkillDiagnostic, ...]
-    declared_name: str | None = None
-    kind: LocalSkillCandidateIssueKind = field(
-        default=LocalSkillCandidateIssueKind.INVALID, init=False
-    )
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.root_kind, LocalSkillRootKind):
-            raise TypeError("invalid candidate root kind is not closed")
-        if not self.diagnostics or any(
-            item.path != self.path for item in self.diagnostics
+            raise ValueError("loose Skill root configuration state conflicts")
+        if missing and not missing.issubset(
+            {LocalSkillRootKind.USER_PULSARA, LocalSkillRootKind.USER_AGENTS}
         ):
-            raise ValueError("invalid candidate diagnostics are incomplete")
+            raise ValueError("unexpected unresolved loose Skill root binding")
 
 
 @dataclass(frozen=True, slots=True)
-class ShadowedLocalSkillCandidateIssue:
-    path: Path
-    root_kind: LocalSkillRootKind
-    name: str
-    winner_ordinal: int
-    local_diagnostic_codes: tuple[SkillDiagnosticCode, ...] = ()
-    kind: LocalSkillCandidateIssueKind = field(
-        default=LocalSkillCandidateIssueKind.SHADOWED, init=False
-    )
+class FrozenLooseSkillDefinitions:
+    root_policy: PreparedLooseSkillRootPolicy = field(repr=False)
+    disposition: LooseSkillDefinitionsDisposition
+    candidates: tuple[SkillManifest, ...] = ()
+    invalid_issues: tuple[InvalidSkillCandidateIssue, ...] = ()
+    unavailable_cause: ProducerUnavailableCause | None = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.root_kind, LocalSkillRootKind):
-            raise TypeError("shadowed candidate root kind is not closed")
-        if not self.name or self.winner_ordinal < 0:
-            raise ValueError("shadowed candidate identity is incomplete")
-        if any(not _is_local_info_code(item) for item in self.local_diagnostic_codes):
-            raise ValueError("shadowed candidate contains a non-local diagnostic")
-
-
-LocalSkillCandidateIssue: TypeAlias = (
-    InvalidLocalSkillCandidateIssue | ShadowedLocalSkillCandidateIssue
-)
-
-
-@dataclass(frozen=True, slots=True)
-class LocalSkillWinnerDiagnostics:
-    winner_ordinal: int
-    diagnostic_codes: tuple[SkillDiagnosticCode, ...]
-
-    def __post_init__(self) -> None:
-        if self.winner_ordinal < 0 or not self.diagnostic_codes:
-            raise ValueError("winner-local diagnostics are incomplete")
-        allowed = {
-            SkillDiagnosticCode.HOST_EXTENSION_IGNORED,
-            SkillDiagnosticCode.UNKNOWN_EXTENSION_IGNORED,
-        }
-        if any(item not in allowed for item in self.diagnostic_codes):
-            raise ValueError("winner-local diagnostic ownership conflicts")
-
-
-@dataclass(frozen=True, slots=True)
-class LocalSkillDiscovery:
-    """The sole Runtime/management inspection carrier."""
-
-    root_policy: PreparedLocalSkillRootPolicy = field(repr=False)
-    disposition: SkillDiscoveryDisposition
-    skills: tuple[LocalSkillManifest, ...] = ()
-    candidate_issues: tuple[LocalSkillCandidateIssue, ...] = ()
-    winner_local_diagnostics: tuple[LocalSkillWinnerDiagnostics, ...] = ()
-    unavailable_reason: SkillCatalogUnavailableReason | None = None
-    unavailable_diagnostics: tuple[SkillDiagnostic, ...] = ()
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.root_policy, PreparedLocalSkillRootPolicy):
-            raise TypeError("Skill discovery root policy is not frozen")
-        if not isinstance(self.disposition, SkillDiscoveryDisposition):
-            raise TypeError("Skill discovery disposition is not closed")
-        complete = self.disposition is SkillDiscoveryDisposition.COMPLETE
-        if complete != (self.unavailable_reason is None):
-            raise ValueError("Skill discovery disposition/reason conflicts")
-        if complete and self.unavailable_diagnostics:
-            raise ValueError("complete discovery contains aggregate diagnostics")
-        if not complete and (
-            self.skills or self.candidate_issues or self.winner_local_diagnostics
+        if not isinstance(self.root_policy, PreparedLooseSkillRootPolicy):
+            raise TypeError("loose Skill definitions lack a frozen root policy")
+        complete = self.disposition is LooseSkillDefinitionsDisposition.COMPLETE
+        if complete != (self.unavailable_cause is None):
+            raise ValueError("loose Skill definitions disposition conflicts")
+        if not complete and (self.candidates or self.invalid_issues):
+            raise ValueError("unavailable loose definitions contain partial facts")
+        if self.unavailable_cause is not None and (
+            self.unavailable_cause.producer_kind is not SkillProducerKind.LOOSE
         ):
-            raise ValueError("unavailable Skill discovery contains partial facts")
-        if not complete and not self.unavailable_diagnostics:
-            raise ValueError("unavailable discovery has no aggregate diagnostic")
-        if len(self.skills) > MAX_ADMITTED_SKILLS:
-            raise ValueError("Skill discovery admitted too many manifests")
-        names = tuple(item.name for item in self.skills)
-        if len(names) != len(set(names)):
-            raise ValueError("Skill discovery contains duplicate winners")
-        issue_keys = tuple(
-            _candidate_issue_sort_key(item) for item in self.candidate_issues
-        )
-        if issue_keys != tuple(sorted(issue_keys)):
-            raise ValueError("Skill candidate issues are not deterministic")
-        for issue in self.candidate_issues:
-            if isinstance(issue, ShadowedLocalSkillCandidateIssue):
-                if issue.winner_ordinal >= len(self.skills):
-                    raise ValueError(
-                        "shadowed candidate winner ordinal is outside discovery"
-                    )
-                if self.skills[issue.winner_ordinal].name != issue.name:
-                    raise ValueError("shadowed candidate winner name conflicts")
-        ordinals = tuple(item.winner_ordinal for item in self.winner_local_diagnostics)
-        if ordinals != tuple(sorted(ordinals)) or len(ordinals) != len(set(ordinals)):
-            raise ValueError("winner-local diagnostics are not ordered and unique")
-        if any(
-            item.winner_ordinal >= len(self.skills)
-            for item in self.winner_local_diagnostics
+            raise ValueError("loose definitions contain a foreign cause")
+        keys = tuple(_candidate_sort_key(item) for item in self.candidates)
+        if keys != tuple(sorted(keys)) or len(keys) != len(set(keys)):
+            raise ValueError("loose Skill candidates are not deterministic and unique")
+        issue_keys = tuple(_invalid_issue_sort_key(item) for item in self.invalid_issues)
+        if issue_keys != tuple(sorted(issue_keys)) or len(issue_keys) != len(
+            set(issue_keys)
         ):
-            raise ValueError("winner-local diagnostic ordinal is outside discovery")
+            raise ValueError("loose invalid issues are not deterministic and unique")
+        if any(not isinstance(item.origin, LooseSkillOrigin) for item in self.candidates):
+            raise ValueError("loose definitions contain a non-loose candidate")
 
 
-class _DiscoveryUnavailable(RuntimeError):
-    def __init__(
-        self,
-        reason: SkillCatalogUnavailableReason,
-        code: SkillDiagnosticCode,
-    ) -> None:
+class SkillObservationError(RuntimeError):
+    def __init__(self, code: SkillDiagnosticCode, *, overbound: bool = False) -> None:
         super().__init__(code.value)
-        self.reason = reason
         self.code = code
+        self.overbound = overbound
 
 
 @dataclass(frozen=True, slots=True)
-class _DiscoveryChildEvidence:
+class ObservedSkillChildEvidence:
     name: str
     file_type: int
     device: int
@@ -428,37 +352,32 @@ class _DiscoveryChildEvidence:
 
     def __post_init__(self) -> None:
         if not self.name or self.name.startswith("."):
-            raise ValueError("discovery child evidence is not visible")
-        is_directory = self.file_type == stat.S_IFDIR
-        if (self.skill_file_identity is not None) and not is_directory:
-            raise ValueError("non-directory discovery child has a Skill document")
+            raise ValueError("observed child evidence is not visible")
+        if self.skill_file_identity is not None and self.file_type != stat.S_IFDIR:
+            raise ValueError("non-directory child has a Skill document")
 
 
 @dataclass(frozen=True, slots=True)
-class _HeldDiscoveryChild:
-    evidence: _DiscoveryChildEvidence
+class HeldSkillChild:
+    evidence: ObservedSkillChildEvidence
     descriptor: int | None
 
-    def __post_init__(self) -> None:
-        is_directory = self.evidence.file_type == stat.S_IFDIR
-        if self.descriptor is not None and not is_directory:
-            raise ValueError("non-directory discovery child has a descriptor")
-
 
 @dataclass(frozen=True, slots=True)
-class _HeldDiscoveryRoot:
-    binding: PreparedSkillRootBinding
+class HeldSkillRoot:
+    path: Path
+    containment_root: Path
     descriptor: int | None
     device: int | None
     inode: int | None
-    children: tuple[_HeldDiscoveryChild, ...] = ()
+    children: tuple[HeldSkillChild, ...] = ()
 
     def __post_init__(self) -> None:
         present = self.descriptor is not None
         if present != (self.device is not None and self.inode is not None):
-            raise ValueError("discovery root identity conflicts with its descriptor")
+            raise ValueError("observed root identity conflicts")
         if not present and self.children:
-            raise ValueError("absent discovery root has child evidence")
+            raise ValueError("absent observed root has child evidence")
 
 
 class _DuplicateYamlKey(ValueError):
@@ -484,13 +403,12 @@ def _construct_unique_mapping(
 
 
 _UniqueKeySafeLoader.add_constructor(
-    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
-    _construct_unique_mapping,
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _construct_unique_mapping
 )
 
 
-class LocalSkillProvider:
-    """The sole physical root-policy, scan, and precedence owner."""
+class LooseSkillDefinitionProducer:
+    """The sole four-root policy and complete loose observation owner."""
 
     def __init__(
         self,
@@ -499,53 +417,38 @@ class LocalSkillProvider:
         user_product_skills_root: Path | None = None,
         user_agents_skills_root: Path | None = None,
         pulsara_home_resolution: PulsaraHomeResolution | None = None,
-        include_user_skills: bool = True,
+        user_home_resolution: UserHomeResolution | None = None,
         maximum_direct_child_directories: int = MAX_SKILL_DIRECT_CHILDREN,
-        maximum_admitted_skills: int = MAX_ADMITTED_SKILLS,
         maximum_discovery_skill_bytes: int = MAX_DISCOVERY_SKILL_BYTES,
     ) -> None:
         if not 1 <= max_skill_file_bytes <= MAX_SKILL_FILE_BYTES:
             raise ValueError("Skill file bound is outside the closed maximum")
         if not 1 <= maximum_direct_child_directories <= MAX_SKILL_DIRECT_CHILDREN:
             raise ValueError("Skill direct-child bound is outside the closed maximum")
-        if not 1 <= maximum_admitted_skills <= MAX_ADMITTED_SKILLS:
-            raise ValueError("Skill winner bound is outside the closed maximum")
         if not 1 <= maximum_discovery_skill_bytes <= MAX_DISCOVERY_SKILL_BYTES:
             raise ValueError("Skill discovery byte bound is outside the closed maximum")
         self.max_skill_file_bytes = max_skill_file_bytes
         self.user_product_skills_root = user_product_skills_root
         self.user_agents_skills_root = user_agents_skills_root
         self.pulsara_home_resolution = pulsara_home_resolution
-        self.include_user_skills = include_user_skills
+        self.user_home_resolution = user_home_resolution
         self.maximum_direct_child_directories = maximum_direct_child_directories
-        self.maximum_admitted_skills = maximum_admitted_skills
         self.maximum_discovery_skill_bytes = maximum_discovery_skill_bytes
         self._owner_authority = object()
 
-    def prepare_root_policy(
-        self,
-        workspace_root: Path,
-        *,
-        root_kinds: tuple[LocalSkillRootKind, ...] | None = None,
-    ) -> PreparedLocalSkillRootPolicy:
-        workspace = workspace_root.expanduser().resolve()
-        selected = root_kinds
-        if selected is None:
-            selected = _ROOT_ORDER if self.include_user_skills else _ROOT_ORDER[:2]
-        if selected != tuple(sorted(selected, key=_ROOT_ORDER.index)) or len(
-            selected
-        ) != len(set(selected)):
-            raise ValueError("Skill root selection is not ordered and unique")
+    def prepare_root_policy(self, workspace_root: Path) -> PreparedLooseSkillRootPolicy:
+        workspace = prepare_local_skill_source_path(workspace_root)
+        user_home_resolution = self.user_home_resolution
+        if self.user_agents_skills_root is None and user_home_resolution is None:
+            user_home_resolution = resolve_user_home()
         home_resolution = self.pulsara_home_resolution
-        if (
-            LocalSkillRootKind.USER_PULSARA in selected
-            and self.user_product_skills_root is None
-            and home_resolution is None
-        ):
-            home_resolution = resolve_pulsara_home()
+        if self.user_product_skills_root is None and home_resolution is None:
+            home_resolution = resolve_pulsara_home(
+                user_home_resolution=user_home_resolution
+            )
         configuration_reason: PulsaraHomeUnavailableReason | None = None
         roots: list[PreparedSkillRootBinding] = []
-        for root_kind in selected:
+        for root_kind in LOOSE_SKILL_ROOT_ORDER:
             if (
                 root_kind is LocalSkillRootKind.USER_PULSARA
                 and self.user_product_skills_root is None
@@ -554,119 +457,162 @@ class LocalSkillProvider:
             ):
                 configuration_reason = home_resolution.unavailable_reason
                 continue
+            if (
+                root_kind is LocalSkillRootKind.USER_AGENTS
+                and self.user_agents_skills_root is None
+                and user_home_resolution is not None
+                and user_home_resolution.disposition is PulsaraHomeDisposition.INVALID
+            ):
+                configuration_reason = (
+                    configuration_reason
+                    or user_home_resolution.unavailable_reason
+                    or PulsaraHomeUnavailableReason.USER_HOME_UNAVAILABLE
+                )
+                continue
             roots.append(
                 self._prepare_root_binding(
                     workspace,
                     root_kind,
                     home_resolution=home_resolution,
+                    user_home_resolution=user_home_resolution,
                 )
             )
-        return PreparedLocalSkillRootPolicy(
-            selected_root_kinds=selected,
+        aliases: list[LooseSkillRootAlias] = []
+        for ordinal, first in enumerate(roots):
+            for second in roots[ordinal + 1 :]:
+                if first.path == second.path:
+                    aliases.append(
+                        LooseSkillRootAlias(
+                            first.root_kind,
+                            first.path,
+                            second.root_kind,
+                            second.path,
+                        )
+                    )
+        return PreparedLooseSkillRootPolicy(
             roots=tuple(roots),
             configuration_unavailable_reason=configuration_reason,
+            lexical_aliases=tuple(aliases),
             _owner_authority=self._owner_authority,
             _constructor=_ROOT_POLICY_CONSTRUCTOR,
         )
 
-    def discover(
+    def observe(
         self,
-        policy: PreparedLocalSkillRootPolicy,
+        policy: PreparedLooseSkillRootPolicy,
         *,
         deadline_monotonic: float | None = None,
-    ) -> LocalSkillDiscovery:
+    ) -> FrozenLooseSkillDefinitions:
         if (
-            type(policy) is not PreparedLocalSkillRootPolicy
+            type(policy) is not PreparedLooseSkillRootPolicy
             or policy._owner_authority is not self._owner_authority
         ):
-            raise ValueError("foreign Skill root policy")
+            raise ValueError("foreign loose Skill root policy")
+        check_skill_deadline(deadline_monotonic)
         if policy.configuration_unavailable_reason is not None:
-            return _unavailable_discovery(
+            return _unavailable_loose_definitions(
                 policy,
-                SkillCatalogUnavailableReason.USER_HOME_CONFIGURATION_INVALID,
-                SkillDiagnosticCode.USER_HOME_CONFIGURATION_INVALID,
+                SkillProducerUnavailableReason.LOOSE_CONFIGURATION_INVALID,
+                (
+                    skill_diagnostic(
+                        SkillDiagnosticSeverity.ERROR,
+                        SkillDiagnosticCode.USER_HOME_CONFIGURATION_INVALID,
+                    ),
+                ),
+            )
+        if policy.lexical_aliases:
+            return _unavailable_loose_definitions(
+                policy,
+                SkillProducerUnavailableReason.LOOSE_CONFIGURATION_INVALID,
+                tuple(_root_alias_diagnostic(item) for item in policy.lexical_aliases),
             )
 
-        held_roots: list[_HeldDiscoveryRoot] = []
+        followed_aliases = _followed_root_aliases(policy)
+        if followed_aliases:
+            return _unavailable_loose_definitions(
+                policy,
+                SkillProducerUnavailableReason.LOOSE_CONFIGURATION_INVALID,
+                tuple(_root_alias_diagnostic(item) for item in followed_aliases),
+            )
+
+        held_roots: list[HeldSkillRoot] = []
         try:
-            _check_discovery_deadline(deadline_monotonic)
             for root in policy.roots:
                 held_roots.append(
-                    _observe_discovery_root(
-                        root,
+                    observe_skill_root(
+                        root.path,
+                        root.containment_root,
                         maximum_direct_child_directories=(
                             self.maximum_direct_child_directories
                         ),
                         deadline_monotonic=deadline_monotonic,
                     )
                 )
-        except TimeoutError:
-            _close_discovery_roots(held_roots)
-            return _unavailable_discovery(
-                policy,
-                SkillCatalogUnavailableReason.DISCOVERY_RACED,
-                SkillDiagnosticCode.DISCOVERY_DEADLINE_EXPIRED,
-            )
-        except _DiscoveryUnavailable as exc:
-            _close_discovery_roots(held_roots)
-            return _unavailable_discovery(policy, exc.reason, exc.code)
-        except (MemoryError, OSError, RuntimeError):
-            _close_discovery_roots(held_roots)
-            return _unavailable_discovery(
-                policy,
-                SkillCatalogUnavailableReason.DISCOVERY_RACED,
-                SkillDiagnosticCode.ENUMERATION_RACED,
-            )
-        try:
-            skills: list[LocalSkillManifest] = []
-            issues: list[LocalSkillCandidateIssue] = []
-            winner_local: list[LocalSkillWinnerDiagnostics] = []
-            winners_by_name: dict[str, int] = {}
+            inode_aliases = _physical_root_aliases(policy, held_roots)
+            if inode_aliases:
+                return _unavailable_loose_definitions(
+                    policy,
+                    SkillProducerUnavailableReason.LOOSE_CONFIGURATION_INVALID,
+                    tuple(_root_alias_diagnostic(item) for item in inode_aliases),
+                )
+
+            candidates: list[SkillManifest] = []
+            issues: list[InvalidSkillCandidateIssue] = []
             observed_bytes = 0
-            for held_root in held_roots:
+            for binding, held_root in zip(policy.roots, held_roots, strict=True):
                 for child in held_root.children:
                     if child.evidence.skill_file_identity is None:
                         continue
-                    _check_discovery_deadline(deadline_monotonic)
-                    data = _read_discovery_skill_document(
+                    check_skill_deadline(deadline_monotonic)
+                    data = read_observed_skill_document(
                         child,
                         maximum=self.max_skill_file_bytes,
                         deadline_monotonic=deadline_monotonic,
                     )
                     observed_bytes += len(data)
                     if observed_bytes > self.maximum_discovery_skill_bytes:
-                        raise _DiscoveryUnavailable(
-                            SkillCatalogUnavailableReason.DISCOVERY_OVERBOUND,
+                        raise SkillObservationError(
                             SkillDiagnosticCode.DISCOVERY_BYTE_BOUND_EXCEEDED,
+                            overbound=True,
                         )
-                    root = held_root.binding
-                    skill_file = root.path / child.evidence.name / SKILL_FILE_NAME
-                    parsed = parse_local_skill_document(
-                        data,
-                        expected_directory_name=child.evidence.name,
-                        maximum_file_bytes=self.max_skill_file_bytes,
+                    skill_file = binding.path / child.evidence.name / SKILL_FILE_NAME
+                    parsed = parse_skill_document(
+                        data, maximum_file_bytes=self.max_skill_file_bytes
+                    )
+                    placement = (
+                        validate_skill_candidate_placement(
+                            parsed.parsed, child.evidence.name
+                        )
+                        if parsed.parsed is not None
+                        else None
                     )
                     diagnostics = tuple(
-                        _diagnostic_at(item, skill_file) for item in parsed.diagnostics
+                        diagnostic_at(item, skill_file)
+                        for item in (
+                            *parsed.diagnostics,
+                            *((placement.diagnostics) if placement is not None else ()),
+                        )
                     )
-                    if parsed.parsed is None:
+                    if parsed.parsed is None or (
+                        placement is not None and not placement.valid
+                    ):
                         issues.append(
-                            InvalidLocalSkillCandidateIssue(
+                            InvalidSkillCandidateIssue(
                                 path=skill_file,
-                                root_kind=root.root_kind,
+                                origin=LooseSkillOrigin(binding.root_kind),
                                 diagnostics=diagnostics,
                                 declared_name=parsed.declared_name,
                             )
                         )
                         continue
-                    location = _skill_location(skill_file, root=root)
+                    location = skill_location(skill_file, root=binding)
                     if len(location.encode("utf-8")) > MAX_SKILL_LOCATION_BYTES:
                         issues.append(
-                            InvalidLocalSkillCandidateIssue(
+                            InvalidSkillCandidateIssue(
                                 path=skill_file,
-                                root_kind=root.root_kind,
+                                origin=LooseSkillOrigin(binding.root_kind),
                                 diagnostics=(
-                                    _diagnostic(
+                                    skill_diagnostic(
                                         SkillDiagnosticSeverity.WARNING,
                                         SkillDiagnosticCode.LOCATION_OVERBOUND,
                                         path=skill_file,
@@ -676,95 +622,53 @@ class LocalSkillProvider:
                             )
                         )
                         continue
-                    winner_ordinal = winners_by_name.get(parsed.parsed.name)
-                    local_codes = tuple(item.code for item in diagnostics)
-                    if winner_ordinal is not None:
-                        issues.append(
-                            ShadowedLocalSkillCandidateIssue(
-                                path=skill_file,
-                                root_kind=root.root_kind,
-                                name=parsed.parsed.name,
-                                winner_ordinal=winner_ordinal,
-                                local_diagnostic_codes=local_codes,
-                            )
+                    candidates.append(
+                        enrich_skill_document(
+                            parsed.parsed,
+                            path=skill_file,
+                            location=location,
+                            origin=LooseSkillOrigin(binding.root_kind),
+                            diagnostic_codes=tuple(item.code for item in diagnostics),
                         )
-                        continue
-                    manifest = enrich_local_skill_document(
-                        parsed.parsed,
-                        path=skill_file,
-                        root=root,
                     )
-                    winners_by_name[manifest.name] = len(skills)
-                    skills.append(manifest)
-                    ignored_codes = tuple(
-                        item
-                        for item in local_codes
-                        if item
-                        in {
-                            SkillDiagnosticCode.HOST_EXTENSION_IGNORED,
-                            SkillDiagnosticCode.UNKNOWN_EXTENSION_IGNORED,
-                        }
-                    )
-                    if ignored_codes:
-                        winner_local.append(
-                            LocalSkillWinnerDiagnostics(
-                                winner_ordinal=len(skills) - 1,
-                                diagnostic_codes=ignored_codes,
-                            )
-                        )
-                    if len(skills) > self.maximum_admitted_skills:
-                        raise _DiscoveryUnavailable(
-                            SkillCatalogUnavailableReason.CATALOG_OVERBOUND,
-                            SkillDiagnosticCode.WINNER_BOUND_EXCEEDED,
-                        )
-            _check_discovery_deadline(deadline_monotonic)
-            try:
-                render_catalog_prompt(
-                    tuple(
-                        ResolvedSkillCatalogEntry(
-                            name=item.name,
-                            description=item.description,
-                            location=item.location,
-                            source=item.source,
-                        )
-                        for item in skills
-                    )
-                )
-            except SkillProjectionOverbound as exc:
-                raise _DiscoveryUnavailable(
-                    SkillCatalogUnavailableReason.CATALOG_OVERBOUND,
-                    SkillDiagnosticCode.CATALOG_PROJECTION_BOUND_EXCEEDED,
-                ) from exc
-            _revalidate_discovery_roots(
+            revalidate_skill_roots(
                 held_roots,
                 maximum_direct_child_directories=(
                     self.maximum_direct_child_directories
                 ),
                 deadline_monotonic=deadline_monotonic,
             )
-            return LocalSkillDiscovery(
+            check_skill_deadline(deadline_monotonic)
+            return FrozenLooseSkillDefinitions(
                 root_policy=policy,
-                disposition=SkillDiscoveryDisposition.COMPLETE,
-                skills=tuple(skills),
-                candidate_issues=tuple(sorted(issues, key=_candidate_issue_sort_key)),
-                winner_local_diagnostics=tuple(winner_local),
+                disposition=LooseSkillDefinitionsDisposition.COMPLETE,
+                candidates=tuple(sorted(candidates, key=_candidate_sort_key)),
+                invalid_issues=tuple(sorted(issues, key=_invalid_issue_sort_key)),
             )
         except TimeoutError:
-            return _unavailable_discovery(
+            raise
+        except SkillObservationError as exc:
+            return _unavailable_loose_definitions(
                 policy,
-                SkillCatalogUnavailableReason.DISCOVERY_RACED,
-                SkillDiagnosticCode.DISCOVERY_DEADLINE_EXPIRED,
+                (
+                    SkillProducerUnavailableReason.LOOSE_DISCOVERY_OVERBOUND
+                    if exc.overbound
+                    else SkillProducerUnavailableReason.LOOSE_DISCOVERY_RACED
+                ),
+                (skill_diagnostic(SkillDiagnosticSeverity.ERROR, exc.code),),
             )
-        except _DiscoveryUnavailable as exc:
-            return _unavailable_discovery(policy, exc.reason, exc.code)
         except (MemoryError, OSError, RuntimeError):
-            return _unavailable_discovery(
+            return _unavailable_loose_definitions(
                 policy,
-                SkillCatalogUnavailableReason.DISCOVERY_RACED,
-                SkillDiagnosticCode.READ_RACED,
+                SkillProducerUnavailableReason.LOOSE_DISCOVERY_RACED,
+                (
+                    skill_diagnostic(
+                        SkillDiagnosticSeverity.ERROR, SkillDiagnosticCode.READ_RACED
+                    ),
+                ),
             )
         finally:
-            _close_discovery_roots(held_roots)
+            close_skill_roots(held_roots)
 
     def _prepare_root_binding(
         self,
@@ -772,6 +676,7 @@ class LocalSkillProvider:
         root_kind: LocalSkillRootKind,
         *,
         home_resolution: PulsaraHomeResolution | None,
+        user_home_resolution: UserHomeResolution | None,
     ) -> PreparedSkillRootBinding:
         if root_kind is LocalSkillRootKind.WORKSPACE_PULSARA:
             path = workspace_root.joinpath(*WORKSPACE_PRODUCT_SKILL_ROOT_PARTS)
@@ -788,40 +693,33 @@ class LocalSkillProvider:
                 raise ValueError("resolved Pulsara home is required")
             containment = path
         elif root_kind is LocalSkillRootKind.USER_AGENTS:
-            path = self.user_agents_skills_root or Path.home().joinpath(
-                *USER_AGENTS_SKILL_ROOT_PARTS
-            )
+            if self.user_agents_skills_root is not None:
+                path = self.user_agents_skills_root
+            elif user_home_resolution is not None and user_home_resolution.path is not None:
+                path = user_home_resolution.path.joinpath(*USER_AGENTS_SKILL_ROOT_PARTS)
+            else:
+                raise ValueError("resolved user home is required")
             containment = path
         else:  # pragma: no cover - closed enum
             raise TypeError("unknown Skill root kind")
-        path = path.expanduser().resolve()
-        containment = containment.expanduser().resolve()
+        path = prepare_local_skill_source_path(path)
+        containment = prepare_local_skill_source_path(containment)
         return PreparedSkillRootBinding(
             root_kind=root_kind,
             path=path,
             containment_root=containment,
-            location_prefix=_ROOT_LOCATION_PREFIX[root_kind],
-            precedence_ordinal=_ROOT_ORDER.index(root_kind),
+            location_prefix=LOOSE_SKILL_LOCATION_PREFIX[root_kind],
+            precedence_ordinal=LOOSE_SKILL_ROOT_ORDER.index(root_kind),
             _owner_authority=self._owner_authority,
             _constructor=_ROOT_POLICY_CONSTRUCTOR,
         )
 
 
-def parse_local_skill_document(
-    data: bytes,
-    *,
-    expected_directory_name: str,
-    maximum_file_bytes: int = MAX_SKILL_FILE_BYTES,
+def parse_skill_document(
+    data: bytes, *, maximum_file_bytes: int = MAX_SKILL_FILE_BYTES
 ) -> SkillDocumentParseResult:
-    """Parse exact bytes without root, scope, provenance, or filesystem writes."""
+    """Parse exact bytes without root, path, placement, or source knowledge."""
 
-    if (
-        not expected_directory_name
-        or expected_directory_name in {".", ".."}
-        or "/" in expected_directory_name
-        or os.sep in expected_directory_name
-    ):
-        raise ValueError("expected Skill directory basename is invalid")
     if not 1 <= maximum_file_bytes <= MAX_SKILL_FILE_BYTES:
         raise ValueError("Skill file bound is outside the closed maximum")
     diagnostics: list[SkillDiagnostic] = []
@@ -830,7 +728,7 @@ def parse_local_skill_document(
             None,
             None,
             (
-                _diagnostic(
+                skill_diagnostic(
                     SkillDiagnosticSeverity.WARNING,
                     SkillDiagnosticCode.DOCUMENT_OVERBOUND,
                 ),
@@ -843,7 +741,7 @@ def parse_local_skill_document(
             None,
             None,
             (
-                _diagnostic(
+                skill_diagnostic(
                     SkillDiagnosticSeverity.ERROR, SkillDiagnosticCode.INVALID_UTF8
                 ),
             ),
@@ -854,7 +752,7 @@ def parse_local_skill_document(
             None,
             None,
             (
-                _diagnostic(
+                skill_diagnostic(
                     SkillDiagnosticSeverity.WARNING,
                     SkillDiagnosticCode.MISSING_FRONTMATTER,
                 ),
@@ -865,7 +763,7 @@ def parse_local_skill_document(
             None,
             None,
             (
-                _diagnostic(
+                skill_diagnostic(
                     SkillDiagnosticSeverity.WARNING,
                     SkillDiagnosticCode.FRONTMATTER_OVERBOUND,
                 ),
@@ -879,20 +777,23 @@ def parse_local_skill_document(
             None,
             None,
             (
-                _diagnostic(
+                skill_diagnostic(
                     SkillDiagnosticSeverity.WARNING,
                     SkillDiagnosticCode.INVALID_FRONTMATTER_YAML,
                 ),
             ),
         )
-    unsupported = tuple(sorted(set(raw_fields) - _STANDARD_FIELDS))
-    for key in unsupported:
-        code = (
-            SkillDiagnosticCode.HOST_EXTENSION_IGNORED
-            if key in _HOST_EXTENSION_FIELDS
-            else SkillDiagnosticCode.UNKNOWN_EXTENSION_IGNORED
+    for key in sorted(set(raw_fields) - _STANDARD_FIELDS):
+        diagnostics.append(
+            skill_diagnostic(
+                SkillDiagnosticSeverity.INFO,
+                (
+                    SkillDiagnosticCode.HOST_EXTENSION_IGNORED
+                    if key in _HOST_EXTENSION_FIELDS
+                    else SkillDiagnosticCode.UNKNOWN_EXTENSION_IGNORED
+                ),
+            )
         )
-        diagnostics.append(_diagnostic(SkillDiagnosticSeverity.INFO, code))
 
     name = _required_trimmed_string(raw_fields, "name")
     description = _required_trimmed_string(raw_fields, "description")
@@ -903,22 +804,14 @@ def parse_local_skill_document(
         or _NAME_RE.fullmatch(name) is None
     ):
         diagnostics.append(
-            _diagnostic(
+            skill_diagnostic(
                 SkillDiagnosticSeverity.WARNING, SkillDiagnosticCode.INVALID_NAME
-            )
-        )
-        invalid = True
-    elif name != expected_directory_name:
-        diagnostics.append(
-            _diagnostic(
-                SkillDiagnosticSeverity.WARNING,
-                SkillDiagnosticCode.DIRECTORY_NAME_MISMATCH,
             )
         )
         invalid = True
     if description is None or not 1 <= len(description) <= MAX_SKILL_DESCRIPTION_CHARS:
         diagnostics.append(
-            _diagnostic(
+            skill_diagnostic(
                 SkillDiagnosticSeverity.WARNING,
                 SkillDiagnosticCode.INVALID_DESCRIPTION,
             )
@@ -930,7 +823,7 @@ def parse_local_skill_document(
         or len(license_value.encode("utf-8")) > MAX_SKILL_LICENSE_BYTES
     ):
         diagnostics.append(
-            _diagnostic(
+            skill_diagnostic(
                 SkillDiagnosticSeverity.WARNING, SkillDiagnosticCode.INVALID_LICENSE
             )
         )
@@ -941,7 +834,7 @@ def parse_local_skill_document(
         or not 1 <= len(compatibility) <= MAX_SKILL_COMPATIBILITY_CHARS
     ):
         diagnostics.append(
-            _diagnostic(
+            skill_diagnostic(
                 SkillDiagnosticSeverity.WARNING,
                 SkillDiagnosticCode.INVALID_COMPATIBILITY,
             )
@@ -953,7 +846,7 @@ def parse_local_skill_document(
         metadata, metadata_valid = (), True
     if not metadata_valid:
         diagnostics.append(
-            _diagnostic(
+            skill_diagnostic(
                 SkillDiagnosticSeverity.WARNING, SkillDiagnosticCode.INVALID_METADATA
             )
         )
@@ -965,13 +858,12 @@ def parse_local_skill_document(
     if len(body.splitlines()) > 500:
         authoring.append(SkillAuthoringDiagnosticCode.BODY_OVER_500_LINES)
         diagnostics.append(
-            _diagnostic(
-                SkillDiagnosticSeverity.INFO,
-                SkillDiagnosticCode.BODY_OVER_500_LINES,
+            skill_diagnostic(
+                SkillDiagnosticSeverity.INFO, SkillDiagnosticCode.BODY_OVER_500_LINES
             )
         )
     raw_digest = "sha256:" + sha256(data).hexdigest()
-    semantic = local_skill_manifest_semantic_fingerprint(
+    semantic = skill_manifest_semantic_fingerprint(
         name=name,
         description=description,
         license=license_value,
@@ -980,7 +872,7 @@ def parse_local_skill_document(
         body=body,
     )
     return SkillDocumentParseResult(
-        ParsedLocalSkillDocument(
+        ParsedSkillDocument(
             name=name,
             description=description,
             license=license_value,
@@ -997,20 +889,44 @@ def parse_local_skill_document(
     )
 
 
-def enrich_local_skill_document(
-    parsed: ParsedLocalSkillDocument,
+def validate_skill_candidate_placement(
+    parsed: ParsedSkillDocument, expected_immediate_child_name: str
+) -> SkillPlacementValidationResult:
+    if not isinstance(parsed, ParsedSkillDocument):
+        raise TypeError("Skill placement requires a parsed document")
+    if (
+        not expected_immediate_child_name
+        or expected_immediate_child_name in {".", ".."}
+        or "/" in expected_immediate_child_name
+        or os.sep in expected_immediate_child_name
+    ):
+        raise ValueError("expected Skill directory basename is invalid")
+    if parsed.name == expected_immediate_child_name:
+        return SkillPlacementValidationResult(valid=True)
+    return SkillPlacementValidationResult(
+        valid=False,
+        diagnostics=(
+            skill_diagnostic(
+                SkillDiagnosticSeverity.WARNING,
+                SkillDiagnosticCode.DIRECTORY_NAME_MISMATCH,
+            ),
+        ),
+    )
+
+
+def enrich_skill_document(
+    parsed: ParsedSkillDocument,
     *,
     path: Path,
-    root: PreparedSkillRootBinding,
-) -> LocalSkillManifest:
-    if path.name != SKILL_FILE_NAME or path.parent.parent != root.path:
-        raise ValueError("Skill placement does not match its owner-issued root")
-    if path.parent.name != parsed.name:
-        raise ValueError("Skill placement basename conflicts with parsed document")
-    location = _skill_location(path, root=root)
+    location: str,
+    origin: SkillDefinitionOrigin,
+    diagnostic_codes: tuple[SkillDiagnosticCode, ...] = (),
+) -> SkillManifest:
+    if path.name != SKILL_FILE_NAME or path.parent.name != parsed.name:
+        raise ValueError("Skill placement conflicts with parsed document")
     if len(location.encode("utf-8")) > MAX_SKILL_LOCATION_BYTES:
         raise ValueError("Skill placement location is overbound")
-    return LocalSkillManifest(
+    return SkillManifest(
         name=parsed.name,
         description=parsed.description,
         license=parsed.license,
@@ -1022,13 +938,14 @@ def enrich_local_skill_document(
         body=parsed.body,
         raw_document_digest=parsed.raw_document_digest,
         manifest_semantic_fingerprint=parsed.manifest_semantic_fingerprint,
-        root_kind=root.root_kind,
+        origin=origin,
+        diagnostic_codes=tuple(dict.fromkeys(diagnostic_codes)),
         authoring_diagnostic_codes=parsed.authoring_diagnostic_codes,
         raw_document=parsed.raw_document,
     )
 
 
-def local_skill_manifest_semantic_fingerprint(
+def skill_manifest_semantic_fingerprint(
     *,
     name: str,
     description: str,
@@ -1051,52 +968,465 @@ def local_skill_manifest_semantic_fingerprint(
     )
 
 
-def discovery_diagnostics(
-    discovery: LocalSkillDiscovery,
-) -> tuple[SkillDiagnostic, ...]:
-    """Derive a projection without storing a second diagnostics truth."""
-
-    if discovery.disposition is SkillDiscoveryDisposition.UNAVAILABLE:
-        return discovery.unavailable_diagnostics
-    result: list[SkillDiagnostic] = []
-    for issue in discovery.candidate_issues:
-        if isinstance(issue, InvalidLocalSkillCandidateIssue):
-            result.extend(issue.diagnostics)
-            continue
-        result.append(
-            _diagnostic(
-                SkillDiagnosticSeverity.WARNING,
-                SkillDiagnosticCode.DUPLICATE_NAME,
-                path=issue.path,
-            )
+def observe_skill_root(
+    path: Path,
+    containment_root: Path,
+    *,
+    maximum_direct_child_directories: int,
+    deadline_monotonic: float | None,
+    bound_descriptor: int | None = None,
+    bound_identity: tuple[int, int] | None = None,
+    classify_nonregular_skill_document_as_missing: bool = False,
+) -> HeldSkillRoot:
+    try:
+        path.relative_to(containment_root)
+    except ValueError as exc:
+        raise SkillObservationError(SkillDiagnosticCode.ROOT_ESCAPE) from exc
+    check_skill_deadline(deadline_monotonic)
+    try:
+        descriptor = (
+            open_absolute_directory_nofollow(path)
+            if bound_descriptor is None
+            else os.dup(bound_descriptor)
         )
-        result.extend(
-            _diagnostic(SkillDiagnosticSeverity.INFO, code, path=issue.path)
-            for code in issue.local_diagnostic_codes
-        )
-    for ordinal, skill in enumerate(discovery.skills):
-        result.extend(
-            _diagnostic(
-                SkillDiagnosticSeverity.INFO,
-                SkillDiagnosticCode(item.value),
-                path=skill.path,
-            )
-            for item in skill.authoring_diagnostic_codes
-        )
-        winner = next(
-            (
-                item
-                for item in discovery.winner_local_diagnostics
-                if item.winner_ordinal == ordinal
+    except FileNotFoundError:
+        if bound_descriptor is not None:
+            raise SkillObservationError(SkillDiagnosticCode.ENUMERATION_RACED)
+        return HeldSkillRoot(path, containment_root, None, None, None)
+    except NotADirectoryError as exc:
+        raise SkillObservationError(SkillDiagnosticCode.ROOT_NOT_DIRECTORY) from exc
+    except OSError as exc:
+        raise SkillObservationError(SkillDiagnosticCode.ENUMERATION_RACED) from exc
+    children: tuple[HeldSkillChild, ...] = ()
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise SkillObservationError(SkillDiagnosticCode.ROOT_NOT_DIRECTORY)
+        if bound_identity is not None and (metadata.st_dev, metadata.st_ino) != (
+            bound_identity
+        ):
+            raise SkillObservationError(SkillDiagnosticCode.ENUMERATION_RACED)
+        children = _snapshot_skill_children(
+            descriptor,
+            maximum_direct_child_directories=maximum_direct_child_directories,
+            deadline_monotonic=deadline_monotonic,
+            retain_descriptors=True,
+            overbound_code=SkillDiagnosticCode.DIRECT_CHILD_BOUND_EXCEEDED,
+            classify_nonregular_skill_document_as_missing=(
+                classify_nonregular_skill_document_as_missing
             ),
-            None,
         )
-        if winner is not None:
-            result.extend(
-                _diagnostic(SkillDiagnosticSeverity.INFO, code, path=skill.path)
-                for code in winner.diagnostic_codes
+        return HeldSkillRoot(
+            path,
+            containment_root,
+            descriptor,
+            metadata.st_dev,
+            metadata.st_ino,
+            children,
+        )
+    except BaseException:
+        _close_skill_children(children)
+        os.close(descriptor)
+        raise
+
+
+def read_observed_skill_document(
+    child: HeldSkillChild,
+    *,
+    maximum: int,
+    deadline_monotonic: float | None,
+) -> bytes:
+    descriptor = child.descriptor
+    expected = child.evidence.skill_file_identity
+    if descriptor is None or expected is None:
+        raise ValueError("observed candidate has no held Skill document")
+    check_skill_deadline(deadline_monotonic)
+    try:
+        file_fd = os.open(SKILL_FILE_NAME, _FILE_FLAGS, dir_fd=descriptor)
+    except OSError as exc:
+        raise SkillObservationError(SkillDiagnosticCode.READ_RACED) from exc
+    try:
+        before = os.fstat(file_fd)
+        if not stat.S_ISREG(before.st_mode) or _file_identity(before) != expected:
+            raise SkillObservationError(SkillDiagnosticCode.READ_RACED)
+        chunks: list[bytes] = []
+        remaining = maximum + 1
+        while remaining:
+            check_skill_deadline(deadline_monotonic)
+            try:
+                chunk = os.read(file_fd, remaining)
+            except OSError as exc:
+                raise SkillObservationError(SkillDiagnosticCode.READ_RACED) from exc
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if _file_identity(os.fstat(file_fd)) != expected:
+            raise SkillObservationError(SkillDiagnosticCode.READ_RACED)
+        return b"".join(chunks)
+    finally:
+        os.close(file_fd)
+
+
+def revalidate_skill_roots(
+    roots: list[HeldSkillRoot],
+    *,
+    maximum_direct_child_directories: int,
+    deadline_monotonic: float | None,
+) -> None:
+    for observed in roots:
+        check_skill_deadline(deadline_monotonic)
+        if observed.descriptor is None:
+            try:
+                appeared = open_absolute_directory_nofollow(observed.path)
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise SkillObservationError(
+                    SkillDiagnosticCode.ENUMERATION_RACED
+                ) from exc
+            else:
+                os.close(appeared)
+                raise SkillObservationError(SkillDiagnosticCode.ENUMERATION_RACED)
+        try:
+            held_metadata = os.fstat(observed.descriptor)
+            rebound = open_absolute_directory_nofollow(observed.path)
+        except OSError as exc:
+            raise SkillObservationError(SkillDiagnosticCode.ENUMERATION_RACED) from exc
+        current_children: tuple[HeldSkillChild, ...] = ()
+        try:
+            rebound_metadata = os.fstat(rebound)
+            expected_root = (observed.device, observed.inode)
+            if (held_metadata.st_dev, held_metadata.st_ino) != expected_root or (
+                rebound_metadata.st_dev,
+                rebound_metadata.st_ino,
+            ) != expected_root:
+                raise SkillObservationError(SkillDiagnosticCode.ENUMERATION_RACED)
+            for child in observed.children:
+                if child.descriptor is None:
+                    continue
+                child_metadata = os.fstat(child.descriptor)
+                if (child_metadata.st_dev, child_metadata.st_ino) != (
+                    child.evidence.device,
+                    child.evidence.inode,
+                ):
+                    raise SkillObservationError(SkillDiagnosticCode.ENUMERATION_RACED)
+            current_children = _snapshot_skill_children(
+                rebound,
+                maximum_direct_child_directories=maximum_direct_child_directories,
+                deadline_monotonic=deadline_monotonic,
+                retain_descriptors=False,
+                overbound_code=SkillDiagnosticCode.ENUMERATION_RACED,
+                classify_nonregular_skill_document_as_missing=False,
+            )
+            if tuple(item.evidence for item in current_children) != tuple(
+                item.evidence for item in observed.children
+            ):
+                raise SkillObservationError(SkillDiagnosticCode.ENUMERATION_RACED)
+        finally:
+            _close_skill_children(current_children)
+            os.close(rebound)
+
+
+def close_skill_roots(roots: list[HeldSkillRoot]) -> None:
+    for root in roots:
+        _close_skill_children(root.children)
+        if root.descriptor is None:
+            continue
+        try:
+            os.close(root.descriptor)
+        except OSError:
+            pass
+
+
+def check_skill_deadline(deadline_monotonic: float | None) -> None:
+    if deadline_monotonic is not None and monotonic() >= deadline_monotonic:
+        raise TimeoutError("Skill observation owner deadline expired")
+
+
+def skill_location(path: Path, *, root: PreparedSkillRootBinding) -> str:
+    if path.name != SKILL_FILE_NAME or path.parent.parent != root.path:
+        raise ValueError("Skill candidate does not match its frozen lexical root")
+    return f"{root.location_prefix}/{path.relative_to(root.path).as_posix()}"
+
+
+def diagnostic_at(item: SkillDiagnostic, path: Path) -> SkillDiagnostic:
+    return SkillDiagnostic(item.severity, item.code, item.message, path)
+
+
+def skill_diagnostic(
+    severity: SkillDiagnosticSeverity,
+    code: SkillDiagnosticCode,
+    *,
+    path: Path | None = None,
+    message: str | None = None,
+) -> SkillDiagnostic:
+    return SkillDiagnostic(
+        severity=severity,
+        code=code,
+        message=message or SKILL_DIAGNOSTIC_MESSAGES[code],
+        path=path,
+    )
+
+
+SKILL_DIAGNOSTIC_MESSAGES = {
+    code: code.value.replace("skill_", "").replace("_", " ")
+    for code in SkillDiagnosticCode
+}
+SKILL_DIAGNOSTIC_MESSAGES[SkillDiagnosticCode.ACTIVE_SKILL_NOT_FOUND] = (
+    "One or more requested Skills were not found"
+)
+
+
+def _snapshot_skill_children(
+    root_fd: int,
+    *,
+    maximum_direct_child_directories: int,
+    deadline_monotonic: float | None,
+    retain_descriptors: bool,
+    overbound_code: SkillDiagnosticCode,
+    classify_nonregular_skill_document_as_missing: bool = False,
+) -> tuple[HeldSkillChild, ...]:
+    try:
+        names = tuple(
+            sorted(name for name in os.listdir(root_fd) if not name.startswith("."))
+        )
+    except OSError as exc:
+        raise SkillObservationError(SkillDiagnosticCode.ENUMERATION_RACED) from exc
+    children: list[HeldSkillChild] = []
+    directory_count = 0
+    try:
+        for name in names:
+            check_skill_deadline(deadline_monotonic)
+            try:
+                metadata = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+            except OSError as exc:
+                raise SkillObservationError(
+                    SkillDiagnosticCode.ENUMERATION_RACED
+                ) from exc
+            if stat.S_ISLNK(metadata.st_mode):
+                raise SkillObservationError(SkillDiagnosticCode.DIRECTORY_ESCAPE)
+            file_type = stat.S_IFMT(metadata.st_mode)
+            if file_type != stat.S_IFDIR:
+                children.append(
+                    HeldSkillChild(
+                        ObservedSkillChildEvidence(
+                            name, file_type, metadata.st_dev, metadata.st_ino
+                        ),
+                        None,
+                    )
+                )
+                continue
+            directory_count += 1
+            if directory_count > maximum_direct_child_directories:
+                raise SkillObservationError(overbound_code, overbound=True)
+            try:
+                child_fd = os.open(name, _DIRECTORY_FLAGS, dir_fd=root_fd)
+            except OSError as exc:
+                raise SkillObservationError(
+                    SkillDiagnosticCode.ENUMERATION_RACED
+                ) from exc
+            try:
+                opened = os.fstat(child_fd)
+                if (opened.st_dev, opened.st_ino) != (
+                    metadata.st_dev,
+                    metadata.st_ino,
+                ):
+                    raise SkillObservationError(SkillDiagnosticCode.ENUMERATION_RACED)
+                skill_identity = _skill_file_identity(
+                    child_fd,
+                    classify_nonregular_as_missing=(
+                        classify_nonregular_skill_document_as_missing
+                    ),
+                )
+                children.append(
+                    HeldSkillChild(
+                        ObservedSkillChildEvidence(
+                            name,
+                            file_type,
+                            metadata.st_dev,
+                            metadata.st_ino,
+                            skill_identity,
+                        ),
+                        child_fd if retain_descriptors else None,
+                    )
+                )
+                if retain_descriptors:
+                    child_fd = -1
+            finally:
+                if child_fd >= 0:
+                    os.close(child_fd)
+        return tuple(children)
+    except BaseException:
+        _close_skill_children(tuple(children))
+        raise
+
+
+def _skill_file_identity(
+    child_fd: int, *, classify_nonregular_as_missing: bool
+) -> tuple[int, int, int, int, int] | None:
+    try:
+        metadata = os.stat(SKILL_FILE_NAME, dir_fd=child_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise SkillObservationError(SkillDiagnosticCode.ENUMERATION_RACED) from exc
+    if stat.S_ISLNK(metadata.st_mode):
+        raise SkillObservationError(SkillDiagnosticCode.FILE_ESCAPE)
+    if not stat.S_ISREG(metadata.st_mode):
+        if classify_nonregular_as_missing:
+            return None
+        raise SkillObservationError(SkillDiagnosticCode.READ_RACED)
+    return _file_identity(metadata)
+
+
+def _physical_root_aliases(
+    policy: PreparedLooseSkillRootPolicy, roots: list[HeldSkillRoot]
+) -> tuple[LooseSkillRootAlias, ...]:
+    result: list[LooseSkillRootAlias] = []
+    for ordinal, first in enumerate(roots):
+        if first.descriptor is None:
+            continue
+        for second_ordinal, second in enumerate(roots[ordinal + 1 :], ordinal + 1):
+            if second.descriptor is None:
+                continue
+            if (first.device, first.inode) == (second.device, second.inode):
+                first_binding = policy.roots[ordinal]
+                second_binding = policy.roots[second_ordinal]
+                result.append(
+                    LooseSkillRootAlias(
+                        first_binding.root_kind,
+                        first_binding.path,
+                        second_binding.root_kind,
+                        second_binding.path,
+                        first.device,
+                        first.inode,
+                    )
+                )
+    return tuple(result)
+
+
+def _followed_root_aliases(
+    policy: PreparedLooseSkillRootPolicy,
+) -> tuple[LooseSkillRootAlias, ...]:
+    """Identify a symlink/bind alias without using it as scan authority.
+
+    The actual producer still opens every component with ``O_NOFOLLOW``.  This
+    preliminary observation exists only so two configured names for the same
+    directory settle as the closed configuration outcome instead of allowing
+    either name to become a source path.
+    """
+
+    identities: list[tuple[PreparedSkillRootBinding, tuple[int, int]] | None] = []
+    for binding in policy.roots:
+        try:
+            metadata = os.stat(binding.path, follow_symlinks=True)
+        except (FileNotFoundError, NotADirectoryError):
+            identities.append(None)
+            continue
+        except OSError:
+            identities.append(None)
+            continue
+        if not stat.S_ISDIR(metadata.st_mode):
+            identities.append(None)
+            continue
+        identities.append((binding, (metadata.st_dev, metadata.st_ino)))
+
+    result: list[LooseSkillRootAlias] = []
+    for ordinal, first in enumerate(identities):
+        if first is None:
+            continue
+        for second in identities[ordinal + 1 :]:
+            if second is None or first[1] != second[1]:
+                continue
+            result.append(
+                LooseSkillRootAlias(
+                    first[0].root_kind,
+                    first[0].path,
+                    second[0].root_kind,
+                    second[0].path,
+                    *first[1],
+                )
             )
     return tuple(result)
+
+
+def _root_alias_diagnostic(alias: LooseSkillRootAlias) -> SkillDiagnostic:
+    return skill_diagnostic(
+        SkillDiagnosticSeverity.ERROR,
+        SkillDiagnosticCode.LOOSE_ROOT_ALIAS,
+        path=alias.first_path,
+        message=(
+            f"Loose Skill roots {alias.first_root_kind.value} ({alias.first_path}) "
+            f"and {alias.second_root_kind.value} ({alias.second_path}) alias"
+        ),
+    )
+
+
+def _unavailable_loose_definitions(
+    policy: PreparedLooseSkillRootPolicy,
+    reason: SkillProducerUnavailableReason,
+    diagnostics: tuple[SkillDiagnostic, ...],
+) -> FrozenLooseSkillDefinitions:
+    ordered = tuple(
+        sorted(
+            diagnostics,
+            key=lambda item: (
+                item.code.value,
+                "" if item.path is None else item.path.as_posix(),
+                item.message,
+            ),
+        )
+    )
+    return FrozenLooseSkillDefinitions(
+        root_policy=policy,
+        disposition=LooseSkillDefinitionsDisposition.UNAVAILABLE,
+        unavailable_cause=ProducerUnavailableCause(
+            SkillProducerKind.LOOSE, reason, ordered
+        ),
+    )
+
+
+def _candidate_sort_key(item: SkillManifest) -> tuple[int, str, str]:
+    if not isinstance(item.origin, LooseSkillOrigin):
+        raise TypeError("loose candidate has foreign origin")
+    return (
+        LOOSE_SKILL_ROOT_ORDER.index(item.origin.root_kind),
+        item.path.parent.name,
+        item.path.as_posix(),
+    )
+
+
+def _invalid_issue_sort_key(
+    item: InvalidSkillCandidateIssue,
+) -> tuple[int, str, str]:
+    if not isinstance(item.origin, LooseSkillOrigin):
+        raise TypeError("loose invalid issue has foreign origin")
+    return (
+        LOOSE_SKILL_ROOT_ORDER.index(item.origin.root_kind),
+        item.path.as_posix(),
+        item.declared_name or "",
+    )
+
+
+def _close_skill_children(children: tuple[HeldSkillChild, ...]) -> None:
+    for child in children:
+        if child.descriptor is None:
+            continue
+        try:
+            os.close(child.descriptor)
+        except OSError:
+            pass
+
+
+def _file_identity(value: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
 
 
 def _validate_yaml_shape(frontmatter: str) -> None:
@@ -1155,11 +1485,9 @@ def _parse_metadata(raw: Any) -> tuple[tuple[tuple[str, str], ...], bool]:
     for key, value in raw.items():
         if not isinstance(key, str) or not isinstance(value, str):
             return (), False
-        key_bytes = len(key.encode("utf-8"))
-        value_bytes = len(value.encode("utf-8"))
         if (
-            not 1 <= key_bytes <= MAX_SKILL_METADATA_KEY_BYTES
-            or value_bytes > MAX_SKILL_METADATA_VALUE_BYTES
+            not 1 <= len(key.encode("utf-8")) <= MAX_SKILL_METADATA_KEY_BYTES
+            or len(value.encode("utf-8")) > MAX_SKILL_METADATA_VALUE_BYTES
         ):
             return (), False
         values.append((key, value))
@@ -1183,433 +1511,36 @@ def _optional_trimmed_string(fields: dict[str, Any], key: str) -> str | None:
     return _required_trimmed_string(fields, key)
 
 
-def _observe_discovery_root(
-    binding: PreparedSkillRootBinding,
-    *,
-    maximum_direct_child_directories: int,
-    deadline_monotonic: float | None,
-) -> _HeldDiscoveryRoot:
-    try:
-        binding.path.relative_to(binding.containment_root)
-    except ValueError as exc:
-        raise _DiscoveryUnavailable(
-            SkillCatalogUnavailableReason.DISCOVERY_RACED,
-            SkillDiagnosticCode.ROOT_ESCAPE,
-        ) from exc
-    _check_discovery_deadline(deadline_monotonic)
-    try:
-        descriptor = open_absolute_directory_nofollow(binding.path)
-    except FileNotFoundError:
-        return _HeldDiscoveryRoot(binding, None, None, None)
-    except NotADirectoryError as exc:
-        raise _DiscoveryUnavailable(
-            SkillCatalogUnavailableReason.DISCOVERY_RACED,
-            SkillDiagnosticCode.ROOT_NOT_DIRECTORY,
-        ) from exc
-    except OSError as exc:
-        raise _DiscoveryUnavailable(
-            SkillCatalogUnavailableReason.DISCOVERY_RACED,
-            SkillDiagnosticCode.ENUMERATION_RACED,
-        ) from exc
-    children: tuple[_HeldDiscoveryChild, ...] = ()
-    try:
-        metadata = os.fstat(descriptor)
-        if not stat.S_ISDIR(metadata.st_mode):
-            raise _DiscoveryUnavailable(
-                SkillCatalogUnavailableReason.DISCOVERY_RACED,
-                SkillDiagnosticCode.ROOT_NOT_DIRECTORY,
-            )
-        children = _snapshot_discovery_children(
-            descriptor,
-            maximum_direct_child_directories=maximum_direct_child_directories,
-            deadline_monotonic=deadline_monotonic,
-            retain_descriptors=True,
-            overbound_reason=SkillCatalogUnavailableReason.DISCOVERY_OVERBOUND,
-            overbound_code=SkillDiagnosticCode.DIRECT_CHILD_BOUND_EXCEEDED,
-        )
-        return _HeldDiscoveryRoot(
-            binding,
-            descriptor,
-            metadata.st_dev,
-            metadata.st_ino,
-            children,
-        )
-    except BaseException:
-        _close_discovery_children(children)
-        os.close(descriptor)
-        raise
-
-
-def _snapshot_discovery_children(
-    root_fd: int,
-    *,
-    maximum_direct_child_directories: int,
-    deadline_monotonic: float | None,
-    retain_descriptors: bool,
-    overbound_reason: SkillCatalogUnavailableReason,
-    overbound_code: SkillDiagnosticCode,
-) -> tuple[_HeldDiscoveryChild, ...]:
-    try:
-        names = tuple(
-            sorted(name for name in os.listdir(root_fd) if not name.startswith("."))
-        )
-    except OSError as exc:
-        raise _DiscoveryUnavailable(
-            SkillCatalogUnavailableReason.DISCOVERY_RACED,
-            SkillDiagnosticCode.ENUMERATION_RACED,
-        ) from exc
-    children: list[_HeldDiscoveryChild] = []
-    directory_count = 0
-    try:
-        for name in names:
-            _check_discovery_deadline(deadline_monotonic)
-            try:
-                metadata = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
-            except OSError as exc:
-                raise _DiscoveryUnavailable(
-                    SkillCatalogUnavailableReason.DISCOVERY_RACED,
-                    SkillDiagnosticCode.ENUMERATION_RACED,
-                ) from exc
-            if stat.S_ISLNK(metadata.st_mode):
-                raise _DiscoveryUnavailable(
-                    SkillCatalogUnavailableReason.DISCOVERY_RACED,
-                    SkillDiagnosticCode.DIRECTORY_ESCAPE,
-                )
-            file_type = stat.S_IFMT(metadata.st_mode)
-            if file_type != stat.S_IFDIR:
-                children.append(
-                    _HeldDiscoveryChild(
-                        _DiscoveryChildEvidence(
-                            name,
-                            file_type,
-                            metadata.st_dev,
-                            metadata.st_ino,
-                        ),
-                        None,
-                    )
-                )
-                continue
-            directory_count += 1
-            if directory_count > maximum_direct_child_directories:
-                raise _DiscoveryUnavailable(overbound_reason, overbound_code)
-            try:
-                child_fd = os.open(name, _DISCOVERY_DIRECTORY_FLAGS, dir_fd=root_fd)
-            except OSError as exc:
-                raise _DiscoveryUnavailable(
-                    SkillCatalogUnavailableReason.DISCOVERY_RACED,
-                    SkillDiagnosticCode.ENUMERATION_RACED,
-                ) from exc
-            try:
-                opened = os.fstat(child_fd)
-                if (opened.st_dev, opened.st_ino) != (
-                    metadata.st_dev,
-                    metadata.st_ino,
-                ):
-                    raise _DiscoveryUnavailable(
-                        SkillCatalogUnavailableReason.DISCOVERY_RACED,
-                        SkillDiagnosticCode.ENUMERATION_RACED,
-                    )
-                skill_identity = _discovery_skill_file_identity(child_fd)
-                children.append(
-                    _HeldDiscoveryChild(
-                        _DiscoveryChildEvidence(
-                            name,
-                            file_type,
-                            metadata.st_dev,
-                            metadata.st_ino,
-                            skill_identity,
-                        ),
-                        child_fd if retain_descriptors else None,
-                    )
-                )
-                if retain_descriptors:
-                    child_fd = -1
-            finally:
-                if child_fd >= 0:
-                    os.close(child_fd)
-        return tuple(children)
-    except BaseException:
-        _close_discovery_children(tuple(children))
-        raise
-
-
-def _discovery_skill_file_identity(
-    child_fd: int,
-) -> tuple[int, int, int, int, int] | None:
-    try:
-        metadata = os.stat(SKILL_FILE_NAME, dir_fd=child_fd, follow_symlinks=False)
-    except FileNotFoundError:
-        return None
-    except OSError as exc:
-        raise _DiscoveryUnavailable(
-            SkillCatalogUnavailableReason.DISCOVERY_RACED,
-            SkillDiagnosticCode.ENUMERATION_RACED,
-        ) from exc
-    if stat.S_ISLNK(metadata.st_mode):
-        raise _DiscoveryUnavailable(
-            SkillCatalogUnavailableReason.DISCOVERY_RACED,
-            SkillDiagnosticCode.FILE_ESCAPE,
-        )
-    if not stat.S_ISREG(metadata.st_mode):
-        raise _DiscoveryUnavailable(
-            SkillCatalogUnavailableReason.DISCOVERY_RACED,
-            SkillDiagnosticCode.READ_RACED,
-        )
-    return _file_identity(metadata)
-
-
-def _read_discovery_skill_document(
-    child: _HeldDiscoveryChild,
-    *,
-    maximum: int,
-    deadline_monotonic: float | None,
-) -> bytes:
-    descriptor = child.descriptor
-    expected = child.evidence.skill_file_identity
-    if descriptor is None or expected is None:
-        raise ValueError("discovery candidate has no held Skill document")
-    _check_discovery_deadline(deadline_monotonic)
-    try:
-        file_fd = os.open(SKILL_FILE_NAME, _DISCOVERY_FILE_FLAGS, dir_fd=descriptor)
-    except OSError as exc:
-        raise _DiscoveryUnavailable(
-            SkillCatalogUnavailableReason.DISCOVERY_RACED,
-            SkillDiagnosticCode.READ_RACED,
-        ) from exc
-    try:
-        before = os.fstat(file_fd)
-        if not stat.S_ISREG(before.st_mode) or _file_identity(before) != expected:
-            raise _DiscoveryUnavailable(
-                SkillCatalogUnavailableReason.DISCOVERY_RACED,
-                SkillDiagnosticCode.READ_RACED,
-            )
-        chunks: list[bytes] = []
-        remaining = maximum + 1
-        while remaining:
-            _check_discovery_deadline(deadline_monotonic)
-            try:
-                chunk = os.read(file_fd, remaining)
-            except OSError as exc:
-                raise _DiscoveryUnavailable(
-                    SkillCatalogUnavailableReason.DISCOVERY_RACED,
-                    SkillDiagnosticCode.READ_RACED,
-                ) from exc
-            if not chunk:
-                break
-            chunks.append(chunk)
-            remaining -= len(chunk)
-        if _file_identity(os.fstat(file_fd)) != expected:
-            raise _DiscoveryUnavailable(
-                SkillCatalogUnavailableReason.DISCOVERY_RACED,
-                SkillDiagnosticCode.READ_RACED,
-            )
-        return b"".join(chunks)
-    finally:
-        os.close(file_fd)
-
-
-def _revalidate_discovery_roots(
-    roots: list[_HeldDiscoveryRoot],
-    *,
-    maximum_direct_child_directories: int,
-    deadline_monotonic: float | None,
-) -> None:
-    for observed in roots:
-        _check_discovery_deadline(deadline_monotonic)
-        if observed.descriptor is None:
-            try:
-                appeared = open_absolute_directory_nofollow(observed.binding.path)
-            except FileNotFoundError:
-                continue
-            except OSError as exc:
-                raise _DiscoveryUnavailable(
-                    SkillCatalogUnavailableReason.DISCOVERY_RACED,
-                    SkillDiagnosticCode.ENUMERATION_RACED,
-                ) from exc
-            else:
-                os.close(appeared)
-                raise _DiscoveryUnavailable(
-                    SkillCatalogUnavailableReason.DISCOVERY_RACED,
-                    SkillDiagnosticCode.ENUMERATION_RACED,
-                )
-        try:
-            held_metadata = os.fstat(observed.descriptor)
-            rebound = open_absolute_directory_nofollow(observed.binding.path)
-        except OSError as exc:
-            raise _DiscoveryUnavailable(
-                SkillCatalogUnavailableReason.DISCOVERY_RACED,
-                SkillDiagnosticCode.ENUMERATION_RACED,
-            ) from exc
-        current_children: tuple[_HeldDiscoveryChild, ...] = ()
-        try:
-            rebound_metadata = os.fstat(rebound)
-            expected_root = (observed.device, observed.inode)
-            if (held_metadata.st_dev, held_metadata.st_ino) != expected_root or (
-                rebound_metadata.st_dev,
-                rebound_metadata.st_ino,
-            ) != expected_root:
-                raise _DiscoveryUnavailable(
-                    SkillCatalogUnavailableReason.DISCOVERY_RACED,
-                    SkillDiagnosticCode.ENUMERATION_RACED,
-                )
-            for child in observed.children:
-                if child.descriptor is None:
-                    continue
-                child_metadata = os.fstat(child.descriptor)
-                if (child_metadata.st_dev, child_metadata.st_ino) != (
-                    child.evidence.device,
-                    child.evidence.inode,
-                ):
-                    raise _DiscoveryUnavailable(
-                        SkillCatalogUnavailableReason.DISCOVERY_RACED,
-                        SkillDiagnosticCode.ENUMERATION_RACED,
-                    )
-            current_children = _snapshot_discovery_children(
-                rebound,
-                maximum_direct_child_directories=(maximum_direct_child_directories),
-                deadline_monotonic=deadline_monotonic,
-                retain_descriptors=False,
-                overbound_reason=SkillCatalogUnavailableReason.DISCOVERY_RACED,
-                overbound_code=SkillDiagnosticCode.ENUMERATION_RACED,
-            )
-            if tuple(item.evidence for item in current_children) != tuple(
-                item.evidence for item in observed.children
-            ):
-                raise _DiscoveryUnavailable(
-                    SkillCatalogUnavailableReason.DISCOVERY_RACED,
-                    SkillDiagnosticCode.ENUMERATION_RACED,
-                )
-        finally:
-            _close_discovery_children(current_children)
-            os.close(rebound)
-
-
-def _close_discovery_children(children: tuple[_HeldDiscoveryChild, ...]) -> None:
-    for child in children:
-        if child.descriptor is None:
-            continue
-        try:
-            os.close(child.descriptor)
-        except OSError:
-            pass
-
-
-def _close_discovery_roots(roots: list[_HeldDiscoveryRoot]) -> None:
-    for root in roots:
-        _close_discovery_children(root.children)
-        if root.descriptor is None:
-            continue
-        try:
-            os.close(root.descriptor)
-        except OSError:
-            pass
-
-
-def _file_identity(value: os.stat_result) -> tuple[int, int, int, int, int]:
-    return (
-        value.st_dev,
-        value.st_ino,
-        value.st_size,
-        value.st_mtime_ns,
-        value.st_ctime_ns,
-    )
-
-
-def _skill_location(path: Path, *, root: PreparedSkillRootBinding) -> str:
-    if path.name != SKILL_FILE_NAME or path.parent.parent != root.path:
-        raise ValueError("Skill candidate does not match its frozen lexical root")
-    relative = path.relative_to(root.path).as_posix()
-    return f"{root.location_prefix}/{relative}"
-
-
-def _check_discovery_deadline(deadline_monotonic: float | None) -> None:
-    if deadline_monotonic is not None and monotonic() >= deadline_monotonic:
-        raise TimeoutError("local Skill discovery deadline expired")
-
-
-def _candidate_issue_sort_key(
-    issue: LocalSkillCandidateIssue,
-) -> tuple[int, str, str]:
-    return (
-        _ROOT_ORDER.index(issue.root_kind),
-        issue.path.as_posix(),
-        issue.kind.value,
-    )
-
-
-def _is_local_info_code(code: SkillDiagnosticCode) -> bool:
-    return code in {
-        SkillDiagnosticCode.HOST_EXTENSION_IGNORED,
-        SkillDiagnosticCode.UNKNOWN_EXTENSION_IGNORED,
-        SkillDiagnosticCode.BODY_OVER_500_LINES,
-        SkillDiagnosticCode.BODY_ESTIMATE_OVER_5000_TOKENS,
-    }
-
-
-def _diagnostic_at(item: SkillDiagnostic, path: Path) -> SkillDiagnostic:
-    return SkillDiagnostic(
-        severity=item.severity,
-        code=item.code,
-        message=item.message,
-        path=path,
-    )
-
-
-def _diagnostic(
-    severity: SkillDiagnosticSeverity,
-    code: SkillDiagnosticCode,
-    *,
-    path: Path | None = None,
-) -> SkillDiagnostic:
-    return SkillDiagnostic(
-        severity=severity,
-        code=code,
-        message=_DIAGNOSTIC_MESSAGES[code],
-        path=path,
-    )
-
-
-_DIAGNOSTIC_MESSAGES = {
-    code: code.value.replace("skill_", "").replace("_", " ")
-    for code in SkillDiagnosticCode
-}
-_DIAGNOSTIC_MESSAGES[SkillDiagnosticCode.ACTIVE_SKILL_NOT_FOUND] = (
-    "One or more requested Skills were not found"
-)
-
-
-def _unavailable_discovery(
-    policy: PreparedLocalSkillRootPolicy,
-    reason: SkillCatalogUnavailableReason,
-    code: SkillDiagnosticCode,
-) -> LocalSkillDiscovery:
-    return LocalSkillDiscovery(
-        root_policy=policy,
-        disposition=SkillDiscoveryDisposition.UNAVAILABLE,
-        unavailable_reason=reason,
-        unavailable_diagnostics=(_diagnostic(SkillDiagnosticSeverity.ERROR, code),),
-    )
-
-
 __all__ = [
     "AGENT_SKILLS_CONTRACT_ID",
-    "BUNDLED_SKILL_PROVENANCE_FILE_NAME",
-    "InvalidLocalSkillCandidateIssue",
-    "LocalSkillCandidateIssue",
-    "LocalSkillCandidateIssueKind",
-    "LocalSkillDiscovery",
-    "LocalSkillProvider",
-    "LocalSkillWinnerDiagnostics",
+    "FrozenLooseSkillDefinitions",
+    "HeldSkillChild",
+    "HeldSkillRoot",
+    "LOOSE_SKILL_LOCATION_PREFIX",
+    "LOOSE_SKILL_ROOT_ORDER",
+    "LooseSkillDefinitionProducer",
+    "LooseSkillDefinitionsDisposition",
+    "MAX_ADMITTED_SKILLS",
+    "MAX_SKILL_DIRECT_CHILDREN",
     "MAX_SKILL_FILE_BYTES",
-    "ParsedLocalSkillDocument",
-    "PreparedLocalSkillRootPolicy",
+    "MAX_SKILL_LOCATION_BYTES",
+    "ParsedSkillDocument",
+    "PreparedLooseSkillRootPolicy",
     "PreparedSkillRootBinding",
     "SKILL_FILE_NAME",
-    "ShadowedLocalSkillCandidateIssue",
-    "SkillDiscoveryDisposition",
+    "SKILL_PLACEMENT_CONTRACT_ID",
     "SkillDocumentParseResult",
-    "discovery_diagnostics",
-    "enrich_local_skill_document",
-    "local_skill_manifest_semantic_fingerprint",
-    "parse_local_skill_document",
+    "SkillObservationError",
+    "SkillPlacementValidationResult",
+    "check_skill_deadline",
+    "close_skill_roots",
+    "diagnostic_at",
+    "enrich_skill_document",
+    "observe_skill_root",
+    "parse_skill_document",
+    "read_observed_skill_document",
+    "revalidate_skill_roots",
+    "skill_diagnostic",
+    "skill_manifest_semantic_fingerprint",
+    "validate_skill_candidate_placement",
 ]

@@ -1,234 +1,402 @@
 from __future__ import annotations
 
 import json
-import shutil
 from pathlib import Path
+import sys
 
-from pulsara_agent.capability import LocalSkillProvider
-from pulsara_agent.capability.types import SkillSource
 from pulsara_agent.capability.bundled_skills import (
-    BUNDLED_MANIFEST_FILE_NAME,
-    BUNDLED_OPT_OUT_MARKER_NAME,
-    compute_skill_dir_hash,
-    bundled_skills_status,
-    reset_bundled_skill,
-    sync_bundled_skills,
+    EXPECTED_BUNDLED_SKILL_NAMES,
+    BundledInventoryEntry,
+    BundledSkillDefinitionProducer,
+    BundledSkillDefinitionsDisposition,
+    BundledSkillDistributionBindingOwner,
+    classify_bundled_skill_inventory,
 )
+from pulsara_agent.capability.local_skills import LooseSkillDefinitionProducer
+from pulsara_agent.capability.resolver import (
+    CompleteEffectiveSkillCatalogInspection,
+    SkillCatalogResolver,
+)
+from pulsara_agent.capability.types import (
+    BundledSkillOrigin,
+    LooseSkillOrigin,
+    ShadowedSkillCandidateIssue,
+    SkillProducerUnavailableReason,
+    SkillSource,
+)
+from pulsara_agent.message import ToolResultState
+from pulsara_agent.ports.tool_execution import ToolCall
+from pulsara_agent.tools.builtins.filesystem import ReadFileTool
 
 
-def test_sync_bundled_skills_installs_manifest_provenance_and_runtime_discovery(
-    tmp_path,
-) -> None:
-    source = tmp_path / "bundled-source"
-    pulsara_home = tmp_path / "pulsara-home"
-    _write_source_skill(source, "pulsara-alpha", description="Alpha bundled skill.")
-
-    result = sync_bundled_skills(pulsara_home=pulsara_home, source_root=source)
-
-    assert [item.action for item in result.items] == ["installed"]
-    assert result.manifest_written is True
-    target = pulsara_home / "skills" / "pulsara-alpha"
-    assert (target / "SKILL.md").is_file()
-    manifest = (pulsara_home / "skills" / BUNDLED_MANIFEST_FILE_NAME).read_text(
-        encoding="utf-8"
-    )
-    assert "pulsara-alpha:" in manifest
-    provenance = json.loads(
-        (target / ".pulsara-skill-source.json").read_text(encoding="utf-8")
-    )
-    assert provenance["source"] == "bundled"
-    assert provenance["bundled_from"] == "pulsara-agent"
-
-    provider = LocalSkillProvider(
-        user_product_skills_root=pulsara_home / "skills",
-        user_agents_skills_root=tmp_path / "empty-agents",
-    )
-    policy = provider.prepare_root_policy(tmp_path / "workspace")
-    discovery = provider.discover(policy)
-
-    assert len(discovery.skills) == 1
-    assert discovery.skills[0].name == "pulsara-alpha"
-    assert discovery.skills[0].source is SkillSource.USER
-    assert discovery.skills[0].location == (
-        "${PULSARA_HOME}/skills/pulsara-alpha/SKILL.md"
-    )
-
-
-def test_runtime_discovery_classifies_bundled_skill_from_user_product_root(
-    tmp_path,
+def test_bundled_definition_producer_reads_package_without_user_writes(
+    tmp_path: Path,
 ) -> None:
     pulsara_home = tmp_path / "pulsara-home"
-    skill_dir = _write_source_skill(
-        pulsara_home / "skills", "pulsara-alpha", description="Alpha bundled skill."
+    with BundledSkillDistributionBindingOwner() as owner:
+        observed = BundledSkillDefinitionProducer(owner).observe()
+
+    assert observed.disposition is BundledSkillDefinitionsDisposition.COMPLETE
+    assert tuple(item.name for item in observed.candidates) == (
+        EXPECTED_BUNDLED_SKILL_NAMES
     )
-    (skill_dir / ".pulsara-skill-source.json").write_text(
-        json.dumps(
-            {
-                "source": "bundled",
-                "bundled_from": "pulsara-agent",
-                "bundled_version": "0.1.0",
-                "origin_hash": compute_skill_dir_hash(skill_dir),
-            }
-        ),
-        encoding="utf-8",
+    assert all(
+        isinstance(item.origin, BundledSkillOrigin) for item in observed.candidates
     )
-
-    provider = LocalSkillProvider(
-        user_product_skills_root=pulsara_home / "skills",
-        user_agents_skills_root=tmp_path / "empty-agents",
-    )
-    policy = provider.prepare_root_policy(tmp_path / "workspace")
-    discovery = provider.discover(policy)
-
-    assert len(discovery.skills) == 1
-    assert discovery.skills[0].name == "pulsara-alpha"
-    assert discovery.skills[0].source is SkillSource.USER
+    assert all(item.source is SkillSource.BUNDLED for item in observed.candidates)
+    assert not pulsara_home.exists()
 
 
-def test_sync_bundled_skills_second_sync_is_unchanged_noop(tmp_path) -> None:
-    source = tmp_path / "bundled-source"
-    pulsara_home = tmp_path / "pulsara-home"
-    _write_source_skill(source, "pulsara-alpha")
-    sync_bundled_skills(pulsara_home=pulsara_home, source_root=source)
-
-    result = sync_bundled_skills(pulsara_home=pulsara_home, source_root=source)
-
-    assert [item.action for item in result.items] == ["unchanged"]
-    assert result.manifest_written is False
-
-
-def test_sync_bundled_skills_does_not_overwrite_user_modified_skill(tmp_path) -> None:
-    source = tmp_path / "bundled-source"
-    pulsara_home = tmp_path / "pulsara-home"
-    _write_source_skill(source, "pulsara-alpha", body="# Original\n")
-    sync_bundled_skills(pulsara_home=pulsara_home, source_root=source)
-    target = pulsara_home / "skills" / "pulsara-alpha"
-    (target / "user-note.txt").write_text("user modification\n", encoding="utf-8")
-    _write_source_skill(source, "pulsara-alpha", body="# Updated bundled source\n")
-
-    result = sync_bundled_skills(pulsara_home=pulsara_home, source_root=source)
-
-    assert [item.action for item in result.items] == ["skipped_modified"]
-    assert (target / "user-note.txt").read_text(
-        encoding="utf-8"
-    ) == "user modification\n"
-    assert "# Original" in (target / "SKILL.md").read_text(encoding="utf-8")
-
-
-def test_sync_bundled_skills_does_not_restore_user_deleted_skill(tmp_path) -> None:
-    source = tmp_path / "bundled-source"
-    pulsara_home = tmp_path / "pulsara-home"
-    _write_source_skill(source, "pulsara-alpha")
-    sync_bundled_skills(pulsara_home=pulsara_home, source_root=source)
-    shutil.rmtree(pulsara_home / "skills" / "pulsara-alpha")
-
-    result = sync_bundled_skills(pulsara_home=pulsara_home, source_root=source)
-    status = bundled_skills_status(pulsara_home=pulsara_home, source_root=source)
-
-    assert [item.action for item in result.items] == ["skipped_deleted"]
-    assert not (pulsara_home / "skills" / "pulsara-alpha").exists()
-    assert status.statuses[0].state == "deleted"
-
-
-def test_sync_bundled_skills_removes_manifest_entry_when_source_is_removed(
-    tmp_path,
+def test_loose_marker_cannot_claim_bundled_origin(
+    tmp_path: Path,
 ) -> None:
-    source = tmp_path / "bundled-source"
+    workspace = tmp_path / "workspace"
+    user_root = tmp_path / "user-skills"
+    skill = _write_source_skill(
+        user_root,
+        "pulsara-skill-creator",
+        description="User override.",
+    )
+    (skill / ".pulsara-skill-source.json").write_text(
+        '{"source":"bundled"}\n', encoding="utf-8"
+    )
+
+    inspection = _inspect(workspace, user_root=user_root)
+
+    winner = next(
+        item for item in inspection.winners if item.name == "pulsara-skill-creator"
+    )
+    assert winner.source is SkillSource.USER
+    assert isinstance(winner.origin, LooseSkillOrigin)
+    assert any(
+        isinstance(item, ShadowedSkillCandidateIssue)
+        and item.name == "pulsara-skill-creator"
+        and isinstance(item.origin, BundledSkillOrigin)
+        for item in inspection.candidate_issues
+    )
+
+
+def test_process_binding_reuses_descriptor_and_rejects_rebound_root(
+    tmp_path: Path,
+) -> None:
+    resource_root = _write_bundled_root(tmp_path / "bundled")
+    with BundledSkillDistributionBindingOwner(
+        _test_resource_root=resource_root
+    ) as owner:
+        producer = BundledSkillDefinitionProducer(owner)
+        first = producer.observe()
+        second = producer.observe()
+
+        displaced = tmp_path / "displaced-bundled"
+        resource_root.rename(displaced)
+        replacement = _write_bundled_root(resource_root)
+        (replacement / EXPECTED_BUNDLED_SKILL_NAMES[0] / "SKILL.md").write_text(
+            "---\nname: pulsara-skill-creator\n"
+            "description: Rebound bytes must not be adopted.\n---\nnew\n",
+            encoding="utf-8",
+        )
+        rebound = producer.observe()
+
+    assert first == second
+    assert first.disposition is BundledSkillDefinitionsDisposition.COMPLETE
+    assert rebound.disposition is BundledSkillDefinitionsDisposition.UNAVAILABLE
+    assert rebound.unavailable_cause is not None
+    assert rebound.unavailable_cause.reason is (
+        SkillProducerUnavailableReason.BUNDLED_DISCOVERY_RACED
+    )
+
+    if sys.platform == "darwin":
+        system_alias_root = _write_bundled_root(tmp_path / "system-alias-bundled")
+        physical = system_alias_root.resolve()
+        private_var = Path("/private/var")
+        try:
+            suffix = physical.relative_to(private_var)
+        except ValueError:
+            pass
+        else:
+            alias = Path("/var") / suffix
+            with BundledSkillDistributionBindingOwner(
+                _test_resource_root=alias
+            ) as alias_owner:
+                aliased = BundledSkillDefinitionProducer(alias_owner).observe()
+            assert aliased.disposition is BundledSkillDefinitionsDisposition.COMPLETE
+
+
+def test_workspace_loose_definition_shadows_bundled_default(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    override = _write_source_skill(
+        workspace / ".pulsara" / "skills",
+        "pulsara-skill-installer",
+        description="Workspace modified definition.",
+        body="# Workspace body\n",
+    )
+
+    inspection = _inspect(workspace, user_root=tmp_path / "user-skills")
+
+    winner = next(
+        item for item in inspection.winners if item.name == "pulsara-skill-installer"
+    )
+    assert winner.path == override / "SKILL.md"
+    assert winner.body == "# Workspace body\n"
+    with BundledSkillDistributionBindingOwner() as owner:
+        bundled = BundledSkillDefinitionProducer(owner).observe()
+    bundled_item = next(
+        item for item in bundled.candidates if item.name == "pulsara-skill-installer"
+    )
+    assert bundled_item.body != winner.body
+
+
+def test_delete_loose_override_falls_back_to_bundled_default(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    user_root = tmp_path / "user-skills"
+    default = _inspect(workspace, user_root=user_root)
+    default_winner = next(
+        item for item in default.winners if item.name == "pulsara-skill-creator"
+    )
+    assert default_winner.source is SkillSource.BUNDLED
+
+    override = _write_source_skill(user_root, "pulsara-skill-creator")
+    overridden = _inspect(workspace, user_root=user_root)
+    override_winner = next(
+        item for item in overridden.winners if item.name == "pulsara-skill-creator"
+    )
+    assert override_winner.source is SkillSource.USER
+    assert override_winner.path == override / "SKILL.md"
+
+    (override / "SKILL.md").unlink()
+    override.rmdir()
+
+    fallback = _inspect(workspace, user_root=user_root)
+
+    winner = next(
+        item for item in fallback.winners if item.name == "pulsara-skill-creator"
+    )
+    assert winner.source is SkillSource.BUNDLED
+    assert winner.origin == default_winner.origin
+    assert not override.exists()
+
+
+def test_bundled_inventory_defects_are_whole_batch_unavailable(
+    tmp_path: Path,
+) -> None:
+    resource_root = _write_bundled_root(tmp_path / "bundled")
+    missing = resource_root / EXPECTED_BUNDLED_SKILL_NAMES[0]
+    (missing / "SKILL.md").unlink()
+    missing.rmdir()
+
+    with BundledSkillDistributionBindingOwner(
+        _test_resource_root=resource_root
+    ) as owner:
+        result = BundledSkillDefinitionProducer(owner).observe()
+
+    assert result.disposition is BundledSkillDefinitionsDisposition.UNAVAILABLE
+    assert result.candidates == ()
+    assert result.unavailable_cause is not None
+    assert (
+        result.unavailable_cause.reason
+        is SkillProducerUnavailableReason.BUNDLED_INVENTORY_MISMATCH
+    )
+
+    extra_root = _write_bundled_root(tmp_path / "extra-bundled")
+    (extra_root / "README").write_text("extra", encoding="utf-8")
+    with BundledSkillDistributionBindingOwner(
+        _test_resource_root=extra_root
+    ) as owner:
+        extra = BundledSkillDefinitionProducer(owner).observe()
+    assert extra.disposition is BundledSkillDefinitionsDisposition.UNAVAILABLE
+    assert extra.unavailable_cause is not None
+    assert extra.unavailable_cause.reason is (
+        SkillProducerUnavailableReason.BUNDLED_INVENTORY_MISMATCH
+    )
+
+    hidden_root = _write_bundled_root(tmp_path / "hidden-bundled")
+    (hidden_root / ".build-metadata").mkdir()
+    with BundledSkillDistributionBindingOwner(
+        _test_resource_root=hidden_root
+    ) as owner:
+        hidden = BundledSkillDefinitionProducer(owner).observe()
+    assert hidden.disposition is BundledSkillDefinitionsDisposition.COMPLETE
+
+    nonregular_root = _write_bundled_root(tmp_path / "nonregular-bundled")
+    nonregular_document = (
+        nonregular_root / EXPECTED_BUNDLED_SKILL_NAMES[0] / "SKILL.md"
+    )
+    nonregular_document.unlink()
+    nonregular_document.mkdir()
+    with BundledSkillDistributionBindingOwner(
+        _test_resource_root=nonregular_root
+    ) as owner:
+        nonregular = BundledSkillDefinitionProducer(owner).observe()
+    assert nonregular.disposition is BundledSkillDefinitionsDisposition.UNAVAILABLE
+    assert nonregular.unavailable_cause is not None
+    assert nonregular.unavailable_cause.reason is (
+        SkillProducerUnavailableReason.BUNDLED_INVENTORY_MISMATCH
+    )
+
+    invalid_root = _write_bundled_root(tmp_path / "invalid-bundled")
+    (invalid_root / EXPECTED_BUNDLED_SKILL_NAMES[0] / "SKILL.md").write_text(
+        "not frontmatter\n", encoding="utf-8"
+    )
+    with BundledSkillDistributionBindingOwner(
+        _test_resource_root=invalid_root
+    ) as owner:
+        invalid = BundledSkillDefinitionProducer(owner).observe()
+    assert invalid.disposition is BundledSkillDefinitionsDisposition.UNAVAILABLE
+    assert invalid.unavailable_cause is not None
+    assert invalid.unavailable_cause.reason is (
+        SkillProducerUnavailableReason.BUNDLED_DEFINITION_INVALID
+    )
+
+
+def test_bundled_definition_observation_ignores_old_opt_out_marker(
+    tmp_path: Path,
+) -> None:
     pulsara_home = tmp_path / "pulsara-home"
-    _write_source_skill(source, "pulsara-alpha")
-    sync_bundled_skills(pulsara_home=pulsara_home, source_root=source)
-    shutil.rmtree(source / "pulsara-alpha")
-
-    result = sync_bundled_skills(pulsara_home=pulsara_home, source_root=source)
-
-    assert [item.action for item in result.items] == ["source_removed"]
-    assert (pulsara_home / "skills" / BUNDLED_MANIFEST_FILE_NAME).read_text(
-        encoding="utf-8"
-    ) == ""
-    assert (pulsara_home / "skills" / "pulsara-alpha").exists()
-
-
-def test_sync_bundled_skills_respects_opt_out_marker(tmp_path) -> None:
-    source = tmp_path / "bundled-source"
-    pulsara_home = tmp_path / "pulsara-home"
-    _write_source_skill(source, "pulsara-alpha")
     pulsara_home.mkdir()
-    (pulsara_home / BUNDLED_OPT_OUT_MARKER_NAME).write_text("", encoding="utf-8")
+    marker = pulsara_home / ".pulsara-skip-bundled-skills"
+    marker.write_text("", encoding="utf-8")
 
-    result = sync_bundled_skills(pulsara_home=pulsara_home, source_root=source)
+    with BundledSkillDistributionBindingOwner() as owner:
+        result = BundledSkillDefinitionProducer(owner).observe()
 
-    assert result.opt_out is True
-    assert [item.action for item in result.items] == ["opted_out"]
+    assert result.disposition is BundledSkillDefinitionsDisposition.COMPLETE
+    assert marker.is_file()
     assert not (pulsara_home / "skills").exists()
 
 
-def test_sync_bundled_skills_skips_existing_unmanaged_skill(tmp_path) -> None:
-    source = tmp_path / "bundled-source"
-    pulsara_home = tmp_path / "pulsara-home"
-    _write_source_skill(source, "pulsara-alpha", body="# Bundled\n")
-    _write_source_skill(
-        pulsara_home / "skills", "pulsara-alpha", body="# User existing\n"
+def test_user_loose_definition_shadows_bundled_default(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    user_root = tmp_path / "user-skills"
+    existing = _write_source_skill(
+        user_root,
+        "pulsara-skill-installer",
+        description="Unmanaged user definition.",
     )
 
-    result = sync_bundled_skills(pulsara_home=pulsara_home, source_root=source)
+    inspection = _inspect(workspace, user_root=user_root)
 
-    assert [item.action for item in result.items] == ["skipped_existing_unmanaged"]
-    assert "# User existing" in (
-        pulsara_home / "skills" / "pulsara-alpha" / "SKILL.md"
-    ).read_text(encoding="utf-8")
-    assert not (pulsara_home / "skills" / BUNDLED_MANIFEST_FILE_NAME).exists()
-
-
-def test_reset_bundled_skill_backs_up_and_restores_modified_target(tmp_path) -> None:
-    source = tmp_path / "bundled-source"
-    pulsara_home = tmp_path / "pulsara-home"
-    _write_source_skill(source, "pulsara-alpha", body="# Bundled source\n")
-    sync_bundled_skills(pulsara_home=pulsara_home, source_root=source)
-    target = pulsara_home / "skills" / "pulsara-alpha"
-    (target / "SKILL.md").write_text(
-        """---
-name: pulsara-alpha
-description: Modified by user.
----
-# Modified
-""",
-        encoding="utf-8",
+    winner = next(
+        item for item in inspection.winners if item.name == "pulsara-skill-installer"
     )
-
-    result = reset_bundled_skill(
-        "pulsara-alpha", pulsara_home=pulsara_home, source_root=source
-    )
-
-    assert result.action == "reset"
-    assert result.backup_path is not None
-    assert (result.backup_path / "SKILL.md").is_file()
-    assert "# Bundled source" in (target / "SKILL.md").read_text(encoding="utf-8")
-    assert result.origin_hash == compute_skill_dir_hash(source / "pulsara-alpha")
-    manifest = (pulsara_home / "skills" / BUNDLED_MANIFEST_FILE_NAME).read_text(
-        encoding="utf-8"
-    )
-    assert f"pulsara-alpha:{result.origin_hash}\n" in manifest
+    assert winner.path == existing / "SKILL.md"
+    assert winner.source is SkillSource.USER
+    assert "Unmanaged user definition" in winner.description
 
 
-def test_bundled_skills_status_reports_available_to_sync_without_writing(
-    tmp_path,
+def test_skills_cli_has_only_four_current_commands(
+    tmp_path: Path,
 ) -> None:
-    source = tmp_path / "bundled-source"
+    import pulsara_agent.capability.bundled_skills as bundled_skills
+    import pulsara_agent.cli as cli
+
+    assert not hasattr(bundled_skills, "reset_bundled_skill")
+    parser = cli.build_parser()
+    skills = next(
+        action for action in parser._actions if action.dest == "command"
+    ).choices["skills"]
+    subcommands = next(
+        action for action in skills._actions if action.dest == "skills_command"
+    ).choices
+    assert set(subcommands) == {"validate", "install", "list", "doctor"}
+    assert not (tmp_path / "backup").exists()
+
+
+def test_unavailable_distribution_binding_does_not_reopen(
+    tmp_path: Path,
+) -> None:
     pulsara_home = tmp_path / "pulsara-home"
-    _write_source_skill(source, "pulsara-alpha")
+    missing_root = tmp_path / "missing-distribution"
+    with BundledSkillDistributionBindingOwner(
+        _test_resource_root=missing_root
+    ) as owner:
+        first = BundledSkillDefinitionProducer(owner).observe()
+        _write_bundled_root(missing_root)
+        second = BundledSkillDefinitionProducer(owner).observe()
 
-    result = bundled_skills_status(pulsara_home=pulsara_home, source_root=source)
+    assert first == second
+    assert first.disposition is BundledSkillDefinitionsDisposition.UNAVAILABLE
+    assert first.unavailable_cause is not None
+    assert first.unavailable_cause.reason is (
+        SkillProducerUnavailableReason.BUNDLED_RESOURCE_UNAVAILABLE
+    )
+    assert not pulsara_home.exists()
 
-    assert [status.state for status in result.statuses] == ["available_to_sync"]
-    assert not (pulsara_home / "skills").exists()
+
+def test_closed_distribution_binding_observes_typed_unavailable() -> None:
+    owner = BundledSkillDistributionBindingOwner()
+    owner.close()
+
+    observed = BundledSkillDefinitionProducer(owner).observe()
+
+    assert observed.disposition is BundledSkillDefinitionsDisposition.UNAVAILABLE
+    assert observed.unavailable_cause is not None
+    assert observed.unavailable_cause.reason is (
+        SkillProducerUnavailableReason.BUNDLED_DISCOVERY_RACED
+    )
 
 
-def test_default_bundled_source_contains_first_official_skills(tmp_path) -> None:
-    result = bundled_skills_status(pulsara_home=tmp_path / "pulsara-home")
+def test_installed_bundled_inventory_is_exact_and_ordinary_readable(
+    tmp_path: Path,
+) -> None:
+    with BundledSkillDistributionBindingOwner() as owner:
+        result = BundledSkillDefinitionProducer(owner).observe()
 
-    names = {status.name for status in result.statuses}
-    assert {"pulsara-skill-installer", "pulsara-skill-creator"}.issubset(names)
-    assert not (tmp_path / "pulsara-home" / "skills").exists()
+    assert result.disposition is BundledSkillDefinitionsDisposition.COMPLETE
+    assert tuple(item.name for item in result.candidates) == EXPECTED_BUNDLED_SKILL_NAMES
+    classification = classify_bundled_skill_inventory(
+        BundledInventoryEntry(name, True, True)
+        for name in EXPECTED_BUNDLED_SKILL_NAMES
+    )
+    assert classification.valid
+    assert classification.diagnostics == ()
+    assert not classify_bundled_skill_inventory(
+        (
+            *(BundledInventoryEntry(name, True, True) for name in EXPECTED_BUNDLED_SKILL_NAMES),
+            BundledInventoryEntry("README", False, False),
+        )
+    ).valid
+
+    installer = next(
+        item for item in result.candidates if item.name == "pulsara-skill-installer"
+    )
+    skill_read = ReadFileTool(tmp_path).execute(
+        ToolCall("call:skill", "read_file", {"path": str(installer.path)})
+    )
+    reference = installer.base_dir / "references" / "directory-contract.md"
+    reference_read = ReadFileTool(tmp_path).execute(
+        ToolCall("call:reference", "read_file", {"path": str(reference)})
+    )
+    assert skill_read.status is ToolResultState.SUCCESS
+    assert reference_read.status is ToolResultState.SUCCESS
+    assert json.loads(skill_read.output)["path"] == str(installer.path)
+    assert json.loads(reference_read.output)["path"] == str(reference)
+
+
+def _inspect(
+    workspace: Path,
+    *,
+    user_root: Path,
+) -> CompleteEffectiveSkillCatalogInspection:
+    producer = LooseSkillDefinitionProducer(
+        user_product_skills_root=user_root,
+        user_agents_skills_root=workspace / ".test-user-agents",
+    )
+    loose = producer.observe(producer.prepare_root_policy(workspace))
+    with BundledSkillDistributionBindingOwner() as owner:
+        bundled = BundledSkillDefinitionProducer(owner).observe()
+    inspection = SkillCatalogResolver().resolve(loose, bundled)
+    assert isinstance(inspection, CompleteEffectiveSkillCatalogInspection)
+    return inspection
+
+
+def _write_bundled_root(root: Path) -> Path:
+    for name in EXPECTED_BUNDLED_SKILL_NAMES:
+        _write_source_skill(root, name)
+    return root
 
 
 def _write_source_skill(
@@ -245,8 +413,7 @@ def _write_source_skill(
 name: {name}
 description: {description}
 ---
-{body}
-""",
+{body}""",
         encoding="utf-8",
     )
     return skill_dir

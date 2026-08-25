@@ -21,6 +21,12 @@ from pulsara_agent.capability.builtin_catalog import (
     builtin_permission_contract_identity_fingerprint,
     builtin_tool_catalog_entry,
 )
+from pulsara_agent.capability.pulsara_home import (
+    PulsaraHomeResolution,
+    UserHomeResolution,
+    resolve_pulsara_home,
+    resolve_user_home,
+)
 from pulsara_agent.capability.contracts import (
     CapabilityKind,
     CapabilitySourceKind,
@@ -611,8 +617,14 @@ class DirectKernelToolPort:
         artifact_read_port: ToolArtifactReadPort | None = None,
         terminal_monitor_wake_scheduler: Callable[[], None] | None = None,
         deadline_factory: KernelExecutionDeadlineFactory | None = None,
+        pulsara_home_resolution: PulsaraHomeResolution | None = None,
+        user_home_resolution: UserHomeResolution | None = None,
     ) -> None:
         root = workspace_root.expanduser().resolve()
+        frozen_user_home = user_home_resolution or resolve_user_home()
+        frozen_pulsara_home = pulsara_home_resolution or resolve_pulsara_home(
+            user_home_resolution=frozen_user_home
+        )
         self._host_owner_id = host_owner_id
         self._session_id = session_id
         self._live_bus = live_bus
@@ -631,10 +643,26 @@ class DirectKernelToolPort:
             wake_scheduler=terminal_monitor_wake_scheduler or (lambda: None),
         )
         tools: tuple[Tool, ...] = (
-            ReadFileTool(root),
-            SearchFilesTool(root),
-            EditFileTool(root),
-            WriteFileTool(root),
+            ReadFileTool(
+                root,
+                pulsara_home_resolution=frozen_pulsara_home,
+                user_home_resolution=frozen_user_home,
+            ),
+            SearchFilesTool(
+                root,
+                pulsara_home_resolution=frozen_pulsara_home,
+                user_home_resolution=frozen_user_home,
+            ),
+            EditFileTool(
+                root,
+                pulsara_home_resolution=frozen_pulsara_home,
+                user_home_resolution=frozen_user_home,
+            ),
+            WriteFileTool(
+                root,
+                pulsara_home_resolution=frozen_pulsara_home,
+                user_home_resolution=frozen_user_home,
+            ),
             TodoTool(),
             _DirectTerminalTool(self._terminal, host_owner_id),
             _DirectTerminalProcessTool(self._terminal, host_owner_id),

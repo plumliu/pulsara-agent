@@ -6,7 +6,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from pulsara_agent.capability.pulsara_home import require_pulsara_home
+from pulsara_agent.capability.pulsara_home import (
+    PulsaraHomeDisposition,
+    PulsaraHomeResolution,
+    PulsaraHomeResolutionError,
+    UserHomeResolution,
+    UserHomeResolutionError,
+    resolve_pulsara_home,
+    resolve_user_home,
+)
 from pulsara_agent.message import ToolResultState
 from pulsara_agent.ports.tool_execution import (
     ToolCall,
@@ -22,12 +30,29 @@ class WorkspaceTool:
     """Base class for tools constrained to a workspace root."""
 
     workspace_root: Path
+    pulsara_home_resolution: PulsaraHomeResolution | None = None
+    user_home_resolution: UserHomeResolution | None = None
 
     def __post_init__(self) -> None:
         self.workspace_root = self.workspace_root.expanduser().resolve()
+        if self.user_home_resolution is None:
+            self.user_home_resolution = resolve_user_home()
+        if self.pulsara_home_resolution is None:
+            self.pulsara_home_resolution = resolve_pulsara_home(
+                user_home_resolution=self.user_home_resolution
+            )
 
     def _resolve_path(self, raw_path: str | None) -> Path:
         return self._resolve_workspace_path(raw_path)
+
+    def _resolved_user_home(self) -> Path | None:
+        resolution = self.user_home_resolution
+        if (
+            resolution is None
+            or resolution.disposition is not PulsaraHomeDisposition.RESOLVED
+        ):
+            return None
+        return resolution.path
 
     def _resolve_workspace_path(self, raw_path: str | None) -> Path:
         if not raw_path or not raw_path.strip():
@@ -50,9 +75,26 @@ class WorkspaceTool:
         if raw == _PULSARA_HOME_READ_PREFIX or raw.startswith(
             _PULSARA_HOME_READ_PREFIX + "/"
         ):
-            base = require_pulsara_home()
+            resolution = self.pulsara_home_resolution
+            if resolution is None:  # pragma: no cover - frozen in post-init
+                raise RuntimeError("Pulsara home binding is absent")
+            if resolution.disposition is not PulsaraHomeDisposition.RESOLVED:
+                raise PulsaraHomeResolutionError(resolution)
+            base = resolution.path
+            if base is None:  # pragma: no cover - closed resolution invariant
+                raise RuntimeError("Pulsara home binding has no path")
             suffix = raw[len(_PULSARA_HOME_READ_PREFIX) :].lstrip("/")
             return (base / suffix).resolve()
+        if raw == "~" or raw.startswith("~/"):
+            resolution = self.user_home_resolution
+            if resolution is None:  # pragma: no cover - frozen in post-init
+                raise RuntimeError("user home binding is absent")
+            if resolution.disposition is not PulsaraHomeDisposition.RESOLVED:
+                raise UserHomeResolutionError(resolution)
+            if resolution.path is None:  # pragma: no cover - closed invariant
+                raise RuntimeError("user home binding has no path")
+            suffix = raw.removeprefix("~").lstrip("/")
+            return (resolution.path / suffix).resolve()
         if raw.startswith("~"):
             return Path(raw).expanduser().resolve()
         path = Path(raw)

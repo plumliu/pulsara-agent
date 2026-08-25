@@ -811,7 +811,7 @@ class ProviderDispatchCoordinator:
                 retained_skill_selection = freeze_retained_skill_context(
                     canonical_read=compaction_retained_skill_read,
                     predecessor_epoch=current_epoch,
-                    discovery=skill_owner.discovery,
+                    inspection=skill_owner.inspection,
                     estimator=prepared_call.compile_binding.estimator,
                 )
                 retained_source = build_compaction_context_source(

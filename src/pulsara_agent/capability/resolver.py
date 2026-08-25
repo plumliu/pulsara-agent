@@ -1,16 +1,23 @@
-"""Resolve one frozen Agent Skills discovery into catalog and active data."""
+"""Resolve bundled and loose definitions into the sole effective Skill catalog."""
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
+from enum import StrEnum
 from hashlib import sha256
 import re
 
+from pulsara_agent.capability.bundled_skills import (
+    BundledSkillDefinitionsDisposition,
+    FrozenBundledSkillDefinitions,
+)
 from pulsara_agent.capability.local_skills import (
-    LocalSkillDiscovery,
-    LocalSkillProvider,
-    PreparedLocalSkillRootPolicy,
-    SkillDiscoveryDisposition,
-    discovery_diagnostics,
+    FrozenLooseSkillDefinitions,
+    LOOSE_SKILL_ROOT_ORDER,
+    LooseSkillDefinitionsDisposition,
+    MAX_ADMITTED_SKILLS,
+    PreparedLooseSkillRootPolicy,
+    SKILL_DIAGNOSTIC_MESSAGES,
 )
 from pulsara_agent.capability.provider import SkillProjectionOutput
 from pulsara_agent.capability.render import (
@@ -22,14 +29,24 @@ from pulsara_agent.capability.render import (
 )
 from pulsara_agent.capability.types import (
     ActiveSkillInjection,
+    ActiveSkillProjectionUnavailableReason,
     ActiveSkillReason,
-    LocalSkillManifest,
+    BundledSkillOrigin,
+    InvalidSkillCandidateIssue,
+    LooseSkillOrigin,
+    ProducerUnavailableCause,
     ResolvedSkillCatalogEntry,
-    SkillCatalogUnavailableReason,
+    ResolutionUnavailableCause,
+    ShadowedSkillCandidateIssue,
+    SkillCandidateIssue,
+    SkillCatalogUnavailableCause,
     SkillDiagnostic,
     SkillDiagnosticCode,
     SkillDiagnosticSeverity,
+    SkillManifest,
+    SkillProducerKind,
     SkillProjectionResolveContext,
+    SkillResolutionUnavailableReason,
 )
 
 
@@ -42,118 +59,353 @@ _EXPLICIT_PREFIX = re.compile(
 )
 
 
-class LocalSkillCapabilityProvider:
-    provider_id = "local-skills"
+class EffectiveSkillCatalogDisposition(StrEnum):
+    COMPLETE = "COMPLETE"
+    UNAVAILABLE = "UNAVAILABLE"
 
-    def __init__(self, *, provider: LocalSkillProvider | None = None) -> None:
-        self.provider = provider or LocalSkillProvider()
 
-    def snapshot_projection_input(
-        self,
-        *,
-        root_policy: PreparedLocalSkillRootPolicy,
-        deadline_monotonic: float | None = None,
-    ) -> LocalSkillDiscovery:
-        return self.provider.discover(
-            root_policy, deadline_monotonic=deadline_monotonic
+@dataclass(frozen=True, slots=True)
+class CompleteEffectiveSkillCatalogInspection:
+    root_policy: PreparedLooseSkillRootPolicy = field(repr=False)
+    winners: tuple[SkillManifest, ...]
+    candidate_issues: tuple[SkillCandidateIssue, ...]
+    disposition: EffectiveSkillCatalogDisposition = field(
+        default=EffectiveSkillCatalogDisposition.COMPLETE, init=False
+    )
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.root_policy, PreparedLooseSkillRootPolicy):
+            raise TypeError("effective Skill inspection lacks a root policy")
+        names = tuple(item.name for item in self.winners)
+        if names != tuple(sorted(names)) or len(names) != len(set(names)):
+            raise ValueError("effective Skill winners are not sorted and unique")
+        if len(self.winners) > MAX_ADMITTED_SKILLS:
+            raise ValueError("effective Skill inspection exceeds winner bound")
+        winners = {(item.name, item.origin, item.path) for item in self.winners}
+        for issue in self.candidate_issues:
+            if isinstance(issue, InvalidSkillCandidateIssue) and not isinstance(
+                issue.origin, LooseSkillOrigin
+            ):
+                raise ValueError("effective Skill inspection has a bundled invalid issue")
+            if isinstance(issue, ShadowedSkillCandidateIssue) and (
+                issue.name,
+                issue.winner_origin,
+                issue.winner_path,
+            ) not in winners:
+                raise ValueError("shadowed Skill issue does not join a winner")
+        issue_keys = tuple(
+            skill_candidate_issue_sort_key(item) for item in self.candidate_issues
         )
+        if issue_keys != tuple(sorted(issue_keys)) or len(issue_keys) != len(
+            set(issue_keys)
+        ):
+            raise ValueError("effective Skill issues are not deterministic and unique")
+
+@dataclass(frozen=True, slots=True)
+class UnavailableEffectiveSkillCatalogInspection:
+    root_policy: PreparedLooseSkillRootPolicy = field(repr=False)
+    unavailable_causes: tuple[SkillCatalogUnavailableCause, ...]
+    disposition: EffectiveSkillCatalogDisposition = field(
+        default=EffectiveSkillCatalogDisposition.UNAVAILABLE, init=False
+    )
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.root_policy, PreparedLooseSkillRootPolicy):
+            raise TypeError("effective Skill inspection lacks a root policy")
+        if not self.unavailable_causes:
+            raise ValueError("unavailable effective Skill inspection has no cause")
+        producer_causes = tuple(
+            item for item in self.unavailable_causes if isinstance(item, ProducerUnavailableCause)
+        )
+        resolution_causes = tuple(
+            item for item in self.unavailable_causes if isinstance(item, ResolutionUnavailableCause)
+        )
+        if producer_causes and resolution_causes:
+            raise ValueError("producer and resolution causes cannot coexist")
+        if len(resolution_causes) > 1:
+            raise ValueError("effective Skill inspection has multiple resolution causes")
+        producer_order = tuple(item.producer_kind for item in producer_causes)
+        expected_order = tuple(
+            item
+            for item in (SkillProducerKind.LOOSE, SkillProducerKind.BUNDLED)
+            if item in producer_order
+        )
+        if producer_order != expected_order or len(producer_order) != len(
+            set(producer_order)
+        ):
+            raise ValueError("producer unavailable causes are not ordered and unique")
+
+    @property
+    def winners(self) -> tuple[SkillManifest, ...]:
+        return ()
+
+    @property
+    def candidate_issues(self) -> tuple[SkillCandidateIssue, ...]:
+        return ()
+
+EffectiveSkillCatalogInspection = (
+    CompleteEffectiveSkillCatalogInspection
+    | UnavailableEffectiveSkillCatalogInspection
+)
+
+
+class SkillCatalogResolver:
+    """The single five-tier precedence and final catalog-bound owner."""
+
+    def resolve(
+        self,
+        loose: FrozenLooseSkillDefinitions,
+        bundled: FrozenBundledSkillDefinitions,
+    ) -> EffectiveSkillCatalogInspection:
+        causes: list[ProducerUnavailableCause] = []
+        if loose.disposition is LooseSkillDefinitionsDisposition.UNAVAILABLE:
+            assert loose.unavailable_cause is not None
+            causes.append(loose.unavailable_cause)
+        if bundled.disposition is BundledSkillDefinitionsDisposition.UNAVAILABLE:
+            assert bundled.unavailable_cause is not None
+            causes.append(bundled.unavailable_cause)
+        if causes:
+            return UnavailableEffectiveSkillCatalogInspection(
+                root_policy=loose.root_policy,
+                unavailable_causes=tuple(causes),
+            )
+
+        grouped: dict[str, list[SkillManifest]] = {}
+        for candidate in (*loose.candidates, *bundled.candidates):
+            grouped.setdefault(candidate.name, []).append(candidate)
+        winners: list[SkillManifest] = []
+        issues: list[SkillCandidateIssue] = [*loose.invalid_issues]
+        for name in sorted(grouped):
+            candidates = sorted(grouped[name], key=skill_candidate_precedence_key)
+            winner = candidates[0]
+            winners.append(winner)
+            for candidate in candidates[1:]:
+                issues.append(
+                    ShadowedSkillCandidateIssue(
+                        path=candidate.path,
+                        origin=candidate.origin,
+                        name=name,
+                        winner_origin=winner.origin,
+                        winner_path=winner.path,
+                        diagnostic_codes=candidate.diagnostic_codes,
+                    )
+                )
+        input_valid = {
+            (item.name, item.origin, item.path)
+            for item in (*loose.candidates, *bundled.candidates)
+        }
+        allocated_valid = {
+            (item.name, item.origin, item.path) for item in winners
+        } | {
+            (item.name, item.origin, item.path)
+            for item in issues
+            if isinstance(item, ShadowedSkillCandidateIssue)
+        }
+        if allocated_valid != input_valid:
+            raise RuntimeError("central Skill resolution did not allocate every candidate")
+        if len(winners) > MAX_ADMITTED_SKILLS:
+            return UnavailableEffectiveSkillCatalogInspection(
+                root_policy=loose.root_policy,
+                unavailable_causes=(
+                    ResolutionUnavailableCause(
+                        SkillResolutionUnavailableReason.EFFECTIVE_WINNER_BOUND_EXCEEDED,
+                        SkillDiagnostic(
+                            SkillDiagnosticSeverity.WARNING,
+                            SkillDiagnosticCode.WINNER_BOUND_EXCEEDED,
+                            SKILL_DIAGNOSTIC_MESSAGES[
+                                SkillDiagnosticCode.WINNER_BOUND_EXCEEDED
+                            ],
+                        ),
+                    ),
+                ),
+            )
+        ordered_winners = tuple(sorted(winners, key=lambda item: item.name))
+        entries = tuple(_catalog_entry(item) for item in ordered_winners)
+        try:
+            render_catalog_prompt(entries)
+        except SkillProjectionOverbound as exc:
+            if exc.reason is not SkillResolutionUnavailableReason.CATALOG_PROJECTION_OVERBOUND:
+                raise RuntimeError("catalog renderer emitted an active outcome") from exc
+            return UnavailableEffectiveSkillCatalogInspection(
+                root_policy=loose.root_policy,
+                unavailable_causes=(
+                    ResolutionUnavailableCause(
+                        SkillResolutionUnavailableReason.CATALOG_PROJECTION_OVERBOUND,
+                        catalog_projection_overbound_diagnostic(),
+                    ),
+                ),
+            )
+        return CompleteEffectiveSkillCatalogInspection(
+            root_policy=loose.root_policy,
+            winners=ordered_winners,
+            candidate_issues=tuple(sorted(issues, key=skill_candidate_issue_sort_key)),
+        )
+
+
+class SkillCatalogCapabilityProvider:
+    provider_id = "skill-catalog"
 
     def resolve_projection_from_snapshot(
         self,
         context: SkillProjectionResolveContext,
         *,
-        discovery: LocalSkillDiscovery,
+        inspection: EffectiveSkillCatalogInspection,
     ) -> SkillProjectionOutput:
-        return self._resolve_projection_output(context, discovery=discovery)
-
-    def _resolve_projection_output(
-        self,
-        context: SkillProjectionResolveContext,
-        *,
-        discovery: LocalSkillDiscovery,
-    ) -> SkillProjectionOutput:
-        if discovery.disposition is SkillDiscoveryDisposition.UNAVAILABLE:
+        diagnostics = list(runtime_skill_diagnostics(inspection))
+        if isinstance(inspection, UnavailableEffectiveSkillCatalogInspection):
             return SkillProjectionOutput(
-                diagnostics=discovery_diagnostics(discovery),
-                catalog_unavailable_reason=discovery.unavailable_reason,
-                active_unavailable_reason=discovery.unavailable_reason,
+                diagnostics=tuple(diagnostics),
+                catalog_unavailable_causes=inspection.unavailable_causes,
+                active_unavailable_reason=(
+                    ActiveSkillProjectionUnavailableReason.ACTIVE_SELECTION_UNAVAILABLE
+                ),
             )
-        skills_by_name = {skill.name: skill for skill in discovery.skills}
-        catalog_entries = tuple(
-            sorted(
-                (_catalog_entry(skill) for skill in discovery.skills),
-                key=lambda item: item.name,
-            )
-        )
-        active_injections, active_diagnostics, active_unavailable = _active_injections(
+        skills_by_name = {skill.name: skill for skill in inspection.winners}
+        catalog_entries = tuple(_catalog_entry(item) for item in inspection.winners)
+        active, active_diagnostics, active_unavailable = _active_injections(
             skills_by_name,
             user_input=context.user_input,
             active_skill_names=context.active_skill_names,
         )
-        diagnostics = [*discovery_diagnostics(discovery), *active_diagnostics]
-        catalog_unavailable: SkillCatalogUnavailableReason | None = None
-        try:
-            catalog = render_catalog_prompt(catalog_entries)
-        except SkillProjectionOverbound as exc:
-            catalog_unavailable = exc.reason
-            diagnostics.append(catalog_projection_overbound_diagnostic())
-            catalog = None
-        active = None
+        diagnostics.extend(active_diagnostics)
+        catalog_prompt = render_catalog_prompt(catalog_entries)
+        active_prompt = None
         if active_unavailable is None:
             try:
-                active = render_active_skill_prompt(active_injections)
+                active_prompt = render_active_skill_prompt(active)
             except SkillProjectionOverbound as exc:
+                if not isinstance(exc.reason, ActiveSkillProjectionUnavailableReason):
+                    raise RuntimeError("active renderer emitted a catalog outcome") from exc
                 active_unavailable = exc.reason
                 diagnostics.append(active_projection_overbound_diagnostic())
         return SkillProjectionOutput(
             catalog_entries=catalog_entries,
-            active_injections=active_injections if active_unavailable is None else (),
+            active_injections=active if active_unavailable is None else (),
             diagnostics=tuple(diagnostics),
-            catalog_prompt=catalog,
-            active_skill_prompt=active,
-            catalog_unavailable_reason=catalog_unavailable,
+            catalog_prompt=catalog_prompt,
+            active_skill_prompt=active_prompt,
             active_unavailable_reason=active_unavailable,
         )
 
 
-def _catalog_entry(skill: LocalSkillManifest) -> ResolvedSkillCatalogEntry:
+def inspection_diagnostics(
+    inspection: EffectiveSkillCatalogInspection,
+) -> tuple[SkillDiagnostic, ...]:
+    """Full path-specific inspection projection used by doctor."""
+
+    if isinstance(inspection, UnavailableEffectiveSkillCatalogInspection):
+        result: list[SkillDiagnostic] = []
+        for cause in inspection.unavailable_causes:
+            if isinstance(cause, ProducerUnavailableCause):
+                result.extend(cause.diagnostics)
+            else:
+                result.append(cause.diagnostic)
+        return tuple(result)
+    result = []
+    for issue in inspection.candidate_issues:
+        if isinstance(issue, InvalidSkillCandidateIssue):
+            result.extend(issue.diagnostics)
+        else:
+            result.extend(
+                SkillDiagnostic(
+                    _canonical_diagnostic_severity(code),
+                    code,
+                    SKILL_DIAGNOSTIC_MESSAGES[code],
+                    issue.path,
+                )
+                for code in issue.diagnostic_codes
+            )
+    for winner in inspection.winners:
+        result.extend(
+            SkillDiagnostic(
+                _canonical_diagnostic_severity(code),
+                code,
+                SKILL_DIAGNOSTIC_MESSAGES[code],
+                winner.path,
+            )
+            for code in winner.diagnostic_codes
+        )
+    return tuple(result)
+
+
+def runtime_skill_diagnostics(
+    inspection: EffectiveSkillCatalogInspection,
+) -> tuple[SkillDiagnostic, ...]:
+    """Bounded semantic-set projection; it is not the inspection truth."""
+
+    codes = {item.code for item in inspection_diagnostics(inspection)}
+    return tuple(
+        SkillDiagnostic(
+            _canonical_diagnostic_severity(code),
+            code,
+            SKILL_DIAGNOSTIC_MESSAGES[code],
+        )
+        for code in sorted(codes, key=lambda item: item.value)
+    )
+
+
+def skill_candidate_precedence_key(item: SkillManifest) -> tuple[int, str]:
+    origin = item.origin
+    if isinstance(origin, LooseSkillOrigin):
+        tier = LOOSE_SKILL_ROOT_ORDER.index(origin.root_kind)
+    elif isinstance(origin, BundledSkillOrigin):
+        tier = len(LOOSE_SKILL_ROOT_ORDER)
+    else:  # pragma: no cover - closed union
+        raise TypeError("Skill origin union is open")
+    return tier, item.path.as_posix()
+
+
+def skill_candidate_issue_sort_key(item: SkillCandidateIssue) -> tuple[str, int, str, str]:
+    name = (
+        (item.declared_name or "")
+        if isinstance(item, InvalidSkillCandidateIssue)
+        else item.name
+    )
+    origin = item.origin
+    tier = (
+        LOOSE_SKILL_ROOT_ORDER.index(origin.root_kind)
+        if isinstance(origin, LooseSkillOrigin)
+        else len(LOOSE_SKILL_ROOT_ORDER)
+    )
+    return name, tier, item.path.as_posix(), item.kind.value
+
+
+def _catalog_entry(skill: SkillManifest) -> ResolvedSkillCatalogEntry:
     return ResolvedSkillCatalogEntry(
         name=skill.name,
         description=skill.description,
         location=skill.location,
-        source=skill.source,
+        origin=skill.origin,
     )
 
 
 def _active_injections(
-    skills_by_name: dict[str, LocalSkillManifest],
+    skills_by_name: dict[str, SkillManifest],
     *,
     user_input: str,
     active_skill_names: frozenset[str],
 ) -> tuple[
     tuple[ActiveSkillInjection, ...],
     tuple[SkillDiagnostic, ...],
-    SkillCatalogUnavailableReason | None,
+    ActiveSkillProjectionUnavailableReason | None,
 ]:
     explicit = _explicit_skill_names(user_input)
     selected = tuple(sorted(set(active_skill_names) | set(explicit)))
-    missing = tuple(name for name in selected if name not in skills_by_name)
-    if missing:
+    if any(name not in skills_by_name for name in selected):
         return (
             (),
             (
                 SkillDiagnostic(
-                    severity=SkillDiagnosticSeverity.WARNING,
-                    code=SkillDiagnosticCode.ACTIVE_SKILL_NOT_FOUND,
-                    message="One or more requested Skills were not found",
+                    SkillDiagnosticSeverity.WARNING,
+                    SkillDiagnosticCode.ACTIVE_SKILL_NOT_FOUND,
+                    SKILL_DIAGNOSTIC_MESSAGES[SkillDiagnosticCode.ACTIVE_SKILL_NOT_FOUND],
                 ),
             ),
-            SkillCatalogUnavailableReason.ACTIVE_SELECTION_UNAVAILABLE,
+            ActiveSkillProjectionUnavailableReason.ACTIVE_SELECTION_UNAVAILABLE,
         )
     injections: list[ActiveSkillInjection] = []
     for name in selected:
         skill = skills_by_name[name]
-        body_digest = "sha256:" + sha256(skill.body.encode("utf-8")).hexdigest()
         injections.append(
             ActiveSkillInjection(
                 name=skill.name,
@@ -166,9 +418,9 @@ def _active_injections(
                     if name in active_skill_names
                     else ActiveSkillReason.EXPLICIT_USER_MENTION
                 ),
-                source=skill.source,
-                manifest_semantic_fingerprint=(skill.manifest_semantic_fingerprint),
-                body_digest=body_digest,
+                origin=skill.origin,
+                manifest_semantic_fingerprint=skill.manifest_semantic_fingerprint,
+                body_digest="sha256:" + sha256(skill.body.encode("utf-8")).hexdigest(),
                 raw_document_digest=skill.raw_document_digest,
             )
         )
@@ -183,4 +435,40 @@ def _explicit_skill_names(user_input: str) -> tuple[str, ...]:
     return tuple(sorted(values))
 
 
-__all__ = ["LocalSkillCapabilityProvider"]
+def _canonical_diagnostic_severity(code: SkillDiagnosticCode) -> SkillDiagnosticSeverity:
+    if code in {
+        SkillDiagnosticCode.HOST_EXTENSION_IGNORED,
+        SkillDiagnosticCode.UNKNOWN_EXTENSION_IGNORED,
+        SkillDiagnosticCode.BODY_OVER_500_LINES,
+        SkillDiagnosticCode.BODY_ESTIMATE_OVER_5000_TOKENS,
+    }:
+        return SkillDiagnosticSeverity.INFO
+    if code in {
+        SkillDiagnosticCode.ROOT_ESCAPE,
+        SkillDiagnosticCode.ROOT_NOT_DIRECTORY,
+        SkillDiagnosticCode.DIRECTORY_ESCAPE,
+        SkillDiagnosticCode.FILE_ESCAPE,
+        SkillDiagnosticCode.ENUMERATION_RACED,
+        SkillDiagnosticCode.READ_RACED,
+        SkillDiagnosticCode.USER_HOME_CONFIGURATION_INVALID,
+        SkillDiagnosticCode.LOOSE_ROOT_ALIAS,
+        SkillDiagnosticCode.BUNDLED_DEFINITIONS_UNAVAILABLE,
+        SkillDiagnosticCode.BUNDLED_INVENTORY_MISMATCH,
+        SkillDiagnosticCode.INVALID_UTF8,
+    }:
+        return SkillDiagnosticSeverity.ERROR
+    return SkillDiagnosticSeverity.WARNING
+
+
+__all__ = [
+    "CompleteEffectiveSkillCatalogInspection",
+    "EffectiveSkillCatalogDisposition",
+    "EffectiveSkillCatalogInspection",
+    "SkillCatalogCapabilityProvider",
+    "SkillCatalogResolver",
+    "UnavailableEffectiveSkillCatalogInspection",
+    "inspection_diagnostics",
+    "runtime_skill_diagnostics",
+    "skill_candidate_issue_sort_key",
+    "skill_candidate_precedence_key",
+]

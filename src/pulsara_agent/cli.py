@@ -9,27 +9,26 @@ import json
 import os
 from pathlib import Path
 import signal
-import sys
 from time import monotonic
 
 from pulsara_agent import __version__
 from pulsara_agent.capability import (
     EventLocalSkillCancellationProbe,
-    InspectLocalSkillCatalogRequest,
+    InspectEffectiveSkillCatalogRequest,
     InstallLooseLocalSkillRequest,
-    InvalidLocalSkillCandidateIssue,
+    InvalidSkillCandidateIssue,
     LocalSkillInstallDisposition,
     LocalSkillInstallScope,
     LocalSkillManagementService,
     LocalSkillValidationDisposition,
-    ShadowedLocalSkillCandidateIssue,
-    SkillDiscoveryDisposition,
+    ShadowedSkillCandidateIssue,
+    EffectiveSkillCatalogDisposition,
+    ProducerUnavailableCause,
+    ResolutionUnavailableCause,
     ValidateLocalSkillSourceRequest,
-    bundled_skills_status,
-    default_pulsara_home,
-    reset_bundled_skill,
-    sync_bundled_skills,
+    skill_origin_label,
 )
+from pulsara_agent.capability.pulsara_home import require_pulsara_home
 from pulsara_agent.conversation_kernel.host import KernelHostCore
 from pulsara_agent.llm.models import ModelRole
 from pulsara_agent.mcp_config import (
@@ -74,11 +73,6 @@ def build_parser() -> argparse.ArgumentParser:
     repl.add_argument("--list-sessions", action="store_true")
     skills = commands.add_parser("skills")
     skill_commands = skills.add_subparsers(dest="skills_command")
-    sync = _add_env_args(skill_commands.add_parser("sync-bundled"))
-    sync.add_argument("--override-opt-out", action="store_true")
-    _add_env_args(skill_commands.add_parser("status"))
-    reset = _add_env_args(skill_commands.add_parser("reset"))
-    reset.add_argument("name")
     validate = _add_env_args(skill_commands.add_parser("validate"))
     validate.add_argument("path")
     validate.add_argument("--json", action="store_true")
@@ -275,7 +269,6 @@ def main() -> None:
 
 async def _kernel_host_run(args) -> object:
     settings = _settings_from_args(args)
-    _best_effort_sync_bundled_skills()
     core = KernelHostCore.production(settings=settings)
     session = None
     try:
@@ -310,10 +303,9 @@ async def _open_initial_session(core: KernelHostCore, args):
 
 async def _kernel_host_repl(args) -> None:
     settings = _settings_from_args(args)
-    _best_effort_sync_bundled_skills()
     core = KernelHostCore.production(settings=settings)
     repl_prompt: ReplPrompt = build_repl_prompt(
-        history_path=default_pulsara_home() / "repl_history"
+        history_path=require_pulsara_home() / "repl_history"
     )
     try:
         workspace = _workspace_input_from_args(args)
@@ -397,15 +389,6 @@ class _SkillCliUsageError(ValueError):
 def _skills_command(args: argparse.Namespace) -> tuple[str, int]:
     _load_env_file_from_args(args)
     command = args.skills_command
-    if command == "sync-bundled":
-        result = sync_bundled_skills(override_opt_out=args.override_opt_out)
-        return json.dumps(result.to_dict(), indent=2, ensure_ascii=False), 0
-    if command == "status":
-        result = bundled_skills_status()
-        return json.dumps(result.to_dict(), indent=2, ensure_ascii=False), 0
-    if command == "reset":
-        result = reset_bundled_skill(args.name)
-        return json.dumps(result.to_dict(), indent=2, ensure_ascii=False), 0
     if command is None:
         raise _SkillCliUsageError("skills requires a subcommand")
 
@@ -457,8 +440,8 @@ def _skills_command(args: argparse.Namespace) -> tuple[str, int]:
 
     if command in {"list", "doctor"}:
         workspace = _resolved_skill_workspace(args.workspace)
-        inspection = service.inspect_local_skill_catalog(
-            InspectLocalSkillCatalogRequest(workspace)
+        inspection = service.inspect_effective_skill_catalog(
+            InspectEffectiveSkillCatalogRequest(workspace)
         )
         payload = _skill_inspection_payload(inspection, doctor=command == "doctor")
         rendered = (
@@ -467,7 +450,9 @@ def _skills_command(args: argparse.Namespace) -> tuple[str, int]:
             else _skill_inspection_text(payload, doctor=command == "doctor")
         )
         status = (
-            0 if inspection.disposition is SkillDiscoveryDisposition.COMPLETE else 2
+            0
+            if inspection.disposition is EffectiveSkillCatalogDisposition.COMPLETE
+            else 2
         )
         return rendered, status
     raise _SkillCliUsageError("unknown skills command")
@@ -604,10 +589,22 @@ def _skill_install_text(payload: dict[str, object]) -> str:
 
 def _skill_inspection_payload(inspection, *, doctor: bool) -> dict[str, object]:
     payload: dict[str, object] = {
-        "operation": "inspect_effective_local_skill_catalog",
+        "operation": "inspect_effective_skill_catalog",
         "projection": "doctor" if doctor else "list",
         "disposition": inspection.disposition.value,
-        "roots": [
+        "skills": [
+            {
+                "name": item.name,
+                "description": item.description,
+                "location": item.location,
+                "source": item.source.value,
+                "origin_label": item.origin_label,
+            }
+            for item in inspection.winners
+        ],
+    }
+    if doctor:
+        payload["roots"] = [
             {
                 "root_kind": item.root_kind.value,
                 "path": str(item.path),
@@ -615,62 +612,64 @@ def _skill_inspection_payload(inspection, *, doctor: bool) -> dict[str, object]:
                 "precedence_ordinal": item.precedence_ordinal,
             }
             for item in inspection.root_policy.roots
-        ],
-        "excluded_root_kinds": [
-            item.value for item in inspection.root_policy.excluded_root_kinds
-        ],
-        "skills": [
-            {
-                "name": item.name,
-                "description": item.description,
-                "location": item.location,
-                "source": item.source.value,
-                "root_kind": item.root_kind.value,
-            }
-            for item in inspection.skills
-        ],
-    }
-    if inspection.unavailable_reason is not None:
-        payload["unavailable_reason"] = inspection.unavailable_reason.value
-        payload["diagnostics"] = [
-            item.to_dict() for item in inspection.unavailable_diagnostics
         ]
-    if doctor and inspection.disposition is SkillDiscoveryDisposition.COMPLETE:
+    if inspection.disposition is EffectiveSkillCatalogDisposition.UNAVAILABLE:
+        causes: list[dict[str, object]] = []
+        for cause in inspection.unavailable_causes:
+            if isinstance(cause, ProducerUnavailableCause):
+                causes.append(
+                    {
+                        "kind": "PRODUCER",
+                        "producer_kind": cause.producer_kind.value,
+                        "reason": cause.reason.value,
+                        "diagnostics": [item.to_dict() for item in cause.diagnostics],
+                    }
+                )
+            elif isinstance(cause, ResolutionUnavailableCause):
+                causes.append(
+                    {
+                        "kind": "RESOLUTION",
+                        "reason": cause.reason.value,
+                        "diagnostics": [cause.diagnostic.to_dict()],
+                    }
+                )
+            else:  # pragma: no cover - closed cause union
+                raise TypeError("Skill catalog unavailable cause is open")
+        payload["unavailable_causes"] = causes
+    if doctor and inspection.disposition is EffectiveSkillCatalogDisposition.COMPLETE:
         issues: list[dict[str, object]] = []
         for item in inspection.candidate_issues:
-            if isinstance(item, InvalidLocalSkillCandidateIssue):
+            if isinstance(item, InvalidSkillCandidateIssue):
                 issues.append(
                     {
                         "kind": item.kind.value,
                         "path": str(item.path),
-                        "root_kind": item.root_kind.value,
+                        "origin_label": skill_origin_label(item.origin),
                         "declared_name": item.declared_name,
                         "diagnostics": [
                             diagnostic.to_dict() for diagnostic in item.diagnostics
                         ],
                     }
                 )
-            elif isinstance(item, ShadowedLocalSkillCandidateIssue):
+            elif isinstance(item, ShadowedSkillCandidateIssue):
                 issues.append(
                     {
                         "kind": item.kind.value,
                         "path": str(item.path),
-                        "root_kind": item.root_kind.value,
+                        "origin_label": skill_origin_label(item.origin),
                         "name": item.name,
-                        "winner_ordinal": item.winner_ordinal,
-                        "local_diagnostic_codes": [
-                            code.value for code in item.local_diagnostic_codes
+                        "winner_origin_label": skill_origin_label(
+                            item.winner_origin
+                        ),
+                        "winner_path": str(item.winner_path),
+                        "diagnostic_codes": [
+                            code.value for code in item.diagnostic_codes
                         ],
                     }
                 )
+            else:  # pragma: no cover - closed issue union
+                raise TypeError("Skill candidate issue is open")
         payload["candidate_issues"] = issues
-        payload["winner_local_diagnostics"] = [
-            {
-                "winner_ordinal": item.winner_ordinal,
-                "diagnostic_codes": [code.value for code in item.diagnostic_codes],
-            }
-            for item in inspection.winner_local_diagnostics
-        ]
     return payload
 
 
@@ -679,16 +678,19 @@ def _skill_inspection_text(payload: dict[str, object], *, doctor: bool) -> str:
     skills = payload.get("skills", [])
     if (
         not skills
-        and payload["disposition"] == SkillDiscoveryDisposition.COMPLETE.value
+        and payload["disposition"]
+        == EffectiveSkillCatalogDisposition.COMPLETE.value
     ):
-        lines.append("No effective local Skills.")
+        lines.append("No effective Skills.")
     for item in skills:
         if isinstance(item, dict):
             lines.append(
-                f"- {item['name']}: {item['description']} ({item['location']})"
+                f"- {item['name']}: {item['description']} "
+                f"({item['location']}; {item['origin_label']})"
             )
-    if "unavailable_reason" in payload:
-        lines.append(f"Unavailable: {payload['unavailable_reason']}")
+    for cause in payload.get("unavailable_causes", []):
+        if isinstance(cause, dict):
+            lines.append(f"Unavailable: {cause['reason']}")
     if doctor:
         for root in payload.get("roots", []):
             if isinstance(root, dict):
@@ -699,14 +701,29 @@ def _skill_inspection_text(payload: dict[str, object], *, doctor: bool) -> str:
         for issue in payload.get("candidate_issues", []):
             if isinstance(issue, dict):
                 lines.append(f"Issue {issue['kind']}: {issue['path']}")
+                if issue["kind"] == "SHADOWED":
+                    lines.append(
+                        "  winner: "
+                        f"{issue['winner_origin_label']} {issue['winner_path']}"
+                    )
+                    if issue["origin_label"] == "bundled:pulsara-agent":
+                        lines.append(
+                            "  bundled fallback is shadowed by this loose definition; "
+                            "deleting the loose winner allows fallback at the next "
+                            "complete safe point"
+                        )
                 for diagnostic in issue.get("diagnostics", []):
                     if isinstance(diagnostic, dict):
                         lines.append(
                             f"  - {diagnostic['code']}: {diagnostic['message']}"
                         )
-        for diagnostic in payload.get("diagnostics", []):
-            if isinstance(diagnostic, dict):
-                lines.append(f"- {diagnostic['code']}: {diagnostic['message']}")
+        for cause in payload.get("unavailable_causes", []):
+            if isinstance(cause, dict):
+                for diagnostic in cause.get("diagnostics", []):
+                    if isinstance(diagnostic, dict):
+                        lines.append(
+                            f"- {diagnostic['code']}: {diagnostic['message']}"
+                        )
     return "\n".join(lines)
 
 
@@ -714,7 +731,6 @@ _SKILL_INSTALL_EXIT_STATUS = {
     LocalSkillInstallDisposition.INSTALLED: 0,
     LocalSkillInstallDisposition.SOURCE_INVALID: 1,
     LocalSkillInstallDisposition.UNSUPPORTED_ENTRY: 1,
-    LocalSkillInstallDisposition.RESERVED_CONTROL: 1,
     LocalSkillInstallDisposition.DESTINATION_EXISTS: 1,
     LocalSkillInstallDisposition.CANCELLED: 1,
     LocalSkillInstallDisposition.SOURCE_UNAVAILABLE: 2,
@@ -1109,19 +1125,6 @@ def _permission_policy(args):
     if raw:
         return preset_to_policy(parse_permission_mode(raw.strip()))
     return preset_to_policy(DEFAULT_PERMISSION_MODE)
-
-
-def _best_effort_sync_bundled_skills() -> None:
-    try:
-        result = sync_bundled_skills()
-    except Exception as exc:
-        print(f"pulsara: bundled skill sync failed: {exc}", file=sys.stderr)
-        return
-    changed = [
-        item.name for item in result.items if item.action in {"installed", "updated"}
-    ]
-    if changed:
-        print("pulsara: bundled skills synced: " + ", ".join(changed), file=sys.stderr)
 
 
 def _public_error(exc: BaseException) -> str:

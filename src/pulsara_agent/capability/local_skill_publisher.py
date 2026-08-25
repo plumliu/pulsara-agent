@@ -15,11 +15,12 @@ from typing import Protocol
 from uuid import uuid4
 
 from pulsara_agent.capability.local_skills import (
-    BUNDLED_SKILL_PROVENANCE_FILE_NAME,
     MAX_SKILL_FILE_BYTES,
     SKILL_FILE_NAME,
-    ParsedLocalSkillDocument,
-    parse_local_skill_document,
+    ParsedSkillDocument,
+    diagnostic_at,
+    parse_skill_document,
+    validate_skill_candidate_placement,
 )
 from pulsara_agent.capability.local_skill_source_binding import (
     open_absolute_directory_nofollow,
@@ -71,7 +72,6 @@ class LocalSkillInstallDisposition(StrEnum):
     SOURCE_RACED = "SOURCE_RACED"
     TARGET_CONFIGURATION_UNAVAILABLE = "TARGET_CONFIGURATION_UNAVAILABLE"
     UNSUPPORTED_ENTRY = "UNSUPPORTED_ENTRY"
-    RESERVED_CONTROL = "RESERVED_CONTROL"
     DESTINATION_EXISTS = "DESTINATION_EXISTS"
     STAGING_UNAVAILABLE = "STAGING_UNAVAILABLE"
     PUBLISH_UNAVAILABLE = "PUBLISH_UNAVAILABLE"
@@ -126,7 +126,6 @@ class LocalSkillInstallOutcome:
             ),
             LocalSkillInstallDisposition.PUBLISH_UNAVAILABLE: frozenset({"publish"}),
             LocalSkillInstallDisposition.UNSUPPORTED_ENTRY: frozenset({"entry"}),
-            LocalSkillInstallDisposition.RESERVED_CONTROL: frozenset({"entry"}),
             LocalSkillInstallDisposition.CLEANUP_UNAVAILABLE: frozenset(
                 {"prior", "staging", "cleanup"}
             ),
@@ -259,7 +258,7 @@ class _FrozenSourceObservation:
     root_inode: int
     entries: tuple[_FrozenSourceEntry, ...]
     skill_document_bytes: bytes
-    parsed: ParsedLocalSkillDocument
+    parsed: ParsedSkillDocument
 
 
 @dataclass(frozen=True, slots=True)
@@ -464,19 +463,27 @@ class AtomicLocalSkillPublisher:
                         ),
                     ),
                 )
-            parsed_result = parse_local_skill_document(
-                skill_bytes,
-                expected_directory_name=source.name,
+            try:
+                parsed_result = parse_skill_document(skill_bytes)
+            except MemoryError:
+                return LocalSkillInstallOutcome(
+                    LocalSkillInstallDisposition.SOURCE_UNAVAILABLE,
+                    source,
+                )
+            placement = (
+                validate_skill_candidate_placement(parsed_result.parsed, source.name)
+                if parsed_result.parsed is not None
+                else None
             )
-            if parsed_result.parsed is None:
+            if parsed_result.parsed is None or (
+                placement is not None and not placement.valid
+            ):
                 diagnostics = tuple(
-                    SkillDiagnostic(
-                        severity=item.severity,
-                        code=item.code,
-                        message=item.message,
-                        path=source / SKILL_FILE_NAME,
+                    diagnostic_at(item, source / SKILL_FILE_NAME)
+                    for item in (
+                        *parsed_result.diagnostics,
+                        *((placement.diagnostics) if placement is not None else ()),
                     )
-                    for item in parsed_result.diagnostics
                 )
                 return LocalSkillInstallOutcome(
                     LocalSkillInstallDisposition.SOURCE_INVALID,
@@ -492,21 +499,6 @@ class AtomicLocalSkillPublisher:
                     LocalSkillInstallDisposition.UNSUPPORTED_ENTRY,
                     source,
                     entry_path=unsupported.relative_path,
-                )
-            reserved = next(
-                (
-                    item
-                    for item in entries
-                    if item.relative_path
-                    == PurePosixPath(BUNDLED_SKILL_PROVENANCE_FILE_NAME)
-                ),
-                None,
-            )
-            if reserved is not None:
-                return LocalSkillInstallOutcome(
-                    LocalSkillInstallDisposition.RESERVED_CONTROL,
-                    source,
-                    entry_path=reserved.relative_path,
                 )
             observation = _FrozenSourceObservation(
                 source_path=source,
@@ -621,11 +613,19 @@ class AtomicLocalSkillPublisher:
                         )
                         if staged_skill_bytes != observation.skill_document_bytes:
                             raise _StageUnavailable("staged SKILL.md bytes conflict")
-                        staged_parse = parse_local_skill_document(
-                            staged_skill_bytes,
-                            expected_directory_name=final_name,
+                        staged_parse = parse_skill_document(staged_skill_bytes)
+                        staged_placement = (
+                            validate_skill_candidate_placement(
+                                staged_parse.parsed, final_name
+                            )
+                            if staged_parse.parsed is not None
+                            else None
                         )
-                        if staged_parse.parsed != observation.parsed:
+                        if (
+                            staged_parse.parsed != observation.parsed
+                            or staged_placement is None
+                            or not staged_placement.valid
+                        ):
                             raise _StageUnavailable("staged Skill validation conflicts")
                     except _Cancelled:
                         prior = LocalSkillInstallOutcome(
@@ -1063,7 +1063,16 @@ def _entry_exists(root_fd: int, name: str) -> bool:
 
 def _create_stage(target: _TargetRoot) -> _StageBinding:
     name = f".pulsara-skill-install-{uuid4().hex}"
-    os.mkdir(name, mode=0o700, dir_fd=target.descriptor)
+    try:
+        os.mkdir(name, mode=0o700, dir_fd=target.descriptor)
+    except MemoryError as exc:
+        # A synthetic/faulting adapter may have completed the syscall before
+        # failing to allocate its return path.  Without initial identity we
+        # cannot safely remove an entry at this name.
+        raise _StageCreationCleanupUnavailable(
+            name,
+            LocalSkillCleanupLocationStatus.UNRESOLVED_AFTER_NAMESPACE_INTERFERENCE,
+        ) from exc
     try:
         metadata = os.stat(name, dir_fd=target.descriptor, follow_symlinks=False)
     except MemoryError as exc:
@@ -1078,7 +1087,7 @@ def _create_stage(target: _TargetRoot) -> _StageBinding:
         ) from exc
     try:
         descriptor = os.open(name, _DIRECTORY_FLAGS, dir_fd=target.descriptor)
-    except OSError:
+    except (MemoryError, OSError):
         _cleanup_failed_stage_creation(target, name, metadata)
         raise
     try:
@@ -1116,7 +1125,7 @@ def _cleanup_failed_stage_creation(
         current = os.stat(name, dir_fd=target.descriptor, follow_symlinks=False)
     except FileNotFoundError:
         return
-    except OSError as exc:
+    except (MemoryError, RecursionError, OSError) as exc:
         raise _StageCreationCleanupUnavailable(
             name,
             LocalSkillCleanupLocationStatus.KNOWN_AT_LAST_OBSERVATION,
@@ -1131,7 +1140,7 @@ def _cleanup_failed_stage_creation(
         )
     try:
         os.rmdir(name, dir_fd=target.descriptor)
-    except OSError as exc:
+    except (MemoryError, RecursionError, OSError) as exc:
         raise _StageCreationCleanupUnavailable(
             name,
             LocalSkillCleanupLocationStatus.KNOWN_AT_LAST_OBSERVATION,

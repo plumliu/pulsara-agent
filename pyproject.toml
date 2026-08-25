@@ -28,6 +28,9 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/pulsara_agent"]
 
+[tool.hatch.build.hooks.custom]
+path = "tools/hatch_build.py"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [

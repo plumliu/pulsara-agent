@@ -31,6 +31,11 @@ pulsara skills install --scope user <source-skill-directory>
 pulsara skills list --workspace <workspace-root>
 ```
 
+   Pulsara's own bundled Skills are read-only package defaults. A same-name
+   workspace or user Skill is an ordinary higher-priority override; deleting
+   that loose directory makes the bundled definition eligible again at the
+   next complete safe point.
+
 5. If the Skill is invalid, shadowed, absent, or the catalog is unavailable, inspect the same catalog truth with:
 
 ```bash
@@ -46,6 +51,6 @@ Read `references/directory-contract.md` when the user needs the filesystem and r
 - Do not choose workspace or user scope on the user's behalf when their intent is ambiguous.
 - Do not overwrite, merge, update, remove, roll back, or force an existing destination.
 - Do not use raw `cp`, `copytree`, or a private script to imitate official installation.
-- Loose Skill installation does not create bundled or Plugin provenance.
+- Loose Skill installation does not create a receipt, ownership marker, or managed provenance.
 - Ordinary terminal and permission ownership still applies to every CLI invocation.
 - If `pulsara` is not on `PATH`, report a Pulsara distribution or launcher setup problem. Do not search for a source checkout, use `.venv/bin/pulsara`, `python -m`, or `uv run`.

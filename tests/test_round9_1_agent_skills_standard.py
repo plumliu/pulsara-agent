@@ -7,22 +7,30 @@ from pathlib import Path
 
 import pytest
 
+from pulsara_agent.capability.bundled_skills import (
+    BundledSkillDefinitionProducer,
+    BundledSkillDistributionBindingOwner,
+)
 from pulsara_agent.capability.contracts import LocalSkillRootKind
 from pulsara_agent.capability.local_skills import (
-    LocalSkillProvider,
-    SkillDiscoveryDisposition,
-    discovery_diagnostics,
+    FrozenLooseSkillDefinitions,
+    LooseSkillDefinitionProducer,
+    LooseSkillDefinitionsDisposition,
 )
-from pulsara_agent.capability.resolver import LocalSkillCapabilityProvider
+from pulsara_agent.capability.resolver import (
+    CompleteEffectiveSkillCatalogInspection,
+    SkillCatalogResolver,
+    UnavailableEffectiveSkillCatalogInspection,
+)
 from pulsara_agent.capability.types import (
-    SkillCatalogUnavailableReason,
+    ResolutionUnavailableCause,
     SkillDiagnostic,
     SkillDiagnosticCode,
     SkillDiagnosticSeverity,
+    SkillProducerUnavailableReason,
+    SkillResolutionUnavailableReason,
 )
-from pulsara_agent.conversation_kernel.capability import (
-    KernelSkillProjectionComposer,
-)
+from pulsara_agent.conversation_kernel.capability import KernelSkillProjectionComposer
 from pulsara_agent.conversation_kernel.context_sources import (
     _public_capability_diagnostics,
 )
@@ -58,47 +66,58 @@ def _write_skill(
     return path
 
 
-def _policy(
-    provider: LocalSkillProvider,
-    workspace: Path,
-):
-    return provider.prepare_root_policy(workspace)
+def _producer(tmp_path: Path, **kwargs: object) -> LooseSkillDefinitionProducer:
+    return LooseSkillDefinitionProducer(
+        user_product_skills_root=tmp_path / "test-user-product-skills",
+        user_agents_skills_root=tmp_path / "test-user-agent-skills",
+        **kwargs,
+    )
+
+
+def _policy(producer: LooseSkillDefinitionProducer, workspace: Path):
+    return producer.prepare_root_policy(workspace)
+
+
+def _diagnostics(result: FrozenLooseSkillDefinitions) -> tuple[SkillDiagnostic, ...]:
+    if result.unavailable_cause is not None:
+        return result.unavailable_cause.diagnostics
+    return tuple(
+        diagnostic
+        for issue in result.invalid_issues
+        for diagnostic in issue.diagnostics
+    )
 
 
 def test_round9_1_root_policy_is_exactly_two_or_four_and_scope_bound(
     tmp_path: Path,
 ) -> None:
     workspace = tmp_path / "workspace"
-    disabled = LocalSkillProvider(include_user_skills=False)
-    enabled = LocalSkillProvider(
-        user_product_skills_root=tmp_path / "user" / ".pulsara" / "skills",
-        user_agents_skills_root=tmp_path / "user" / ".agents" / "skills",
-    )
-    assert tuple(item.root_kind for item in _policy(disabled, workspace).roots) == (
+    first = _producer(tmp_path / "first")
+    second = _producer(tmp_path / "second")
+    assert tuple(item.root_kind for item in _policy(first, workspace).roots) == (
         LocalSkillRootKind.WORKSPACE_PULSARA,
         LocalSkillRootKind.WORKSPACE_AGENTS,
-    )
-    assert tuple(item.root_kind for item in _policy(enabled, workspace).roots) == tuple(
-        LocalSkillRootKind
+        LocalSkillRootKind.USER_PULSARA,
+        LocalSkillRootKind.USER_AGENTS,
     )
 
-    child = _policy(disabled, workspace)
-    assert not hasattr(child, "conversation_scope_kind")
-    assert not hasattr(child, "scope_subagent_task_id")
-    with pytest.raises(ValueError, match="foreign Skill root policy"):
-        enabled.discover(child)
+    frozen = _policy(first, workspace)
+    assert not hasattr(frozen, "conversation_scope_kind")
+    assert not hasattr(frozen, "scope_subagent_task_id")
+    with pytest.raises(ValueError, match="foreign loose Skill root policy"):
+        second.observe(frozen)
     with pytest.raises(TypeError, match="_constructor"):
-        replace(child.roots[0], path=tmp_path / "swapped")
+        replace(frozen.roots[0], path=tmp_path / "swapped")
 
 
 def test_round9_1_root_policy_bounds_cannot_be_relaxed() -> None:
     for kwargs in (
+        {"max_skill_file_bytes": 64 * 1024 + 1},
         {"maximum_direct_child_directories": 1_025},
-        {"maximum_admitted_skills": 65},
         {"maximum_discovery_skill_bytes": 16 * 1024 * 1024 + 1},
     ):
         with pytest.raises(ValueError, match="closed maximum"):
-            LocalSkillProvider(**kwargs)
+            LooseSkillDefinitionProducer(**kwargs)
 
 
 def test_round9_1_membership_change_before_final_revalidation_invalidates_cut(
@@ -108,9 +127,9 @@ def test_round9_1_membership_change_before_final_revalidation_invalidates_cut(
 
     workspace = tmp_path / "workspace"
     first = _write_skill(workspace, "alpha")
-    provider = LocalSkillProvider(include_user_skills=False)
-    policy = _policy(provider, workspace)
-    original = local_skills._read_discovery_skill_document
+    producer = _producer(tmp_path)
+    policy = _policy(producer, workspace)
+    original = local_skills.read_observed_skill_document
     installed = False
 
     def read_and_install(child, *, maximum: int, deadline_monotonic) -> bytes:
@@ -124,17 +143,13 @@ def test_round9_1_membership_change_before_final_revalidation_invalidates_cut(
             deadline_monotonic=deadline_monotonic,
         )
 
-    monkeypatch.setattr(
-        local_skills,
-        "_read_discovery_skill_document",
-        read_and_install,
-    )
-    current = provider.discover(policy)
+    monkeypatch.setattr(local_skills, "read_observed_skill_document", read_and_install)
+    current = producer.observe(policy)
     assert first.exists()
-    assert current.disposition is SkillDiscoveryDisposition.UNAVAILABLE
-    assert current.skills == ()
-    successor = provider.discover(policy)
-    assert [item.name for item in successor.skills] == ["alpha", "beta"]
+    assert current.disposition is LooseSkillDefinitionsDisposition.UNAVAILABLE
+    assert current.candidates == ()
+    successor = producer.observe(policy)
+    assert [item.name for item in successor.candidates] == ["alpha", "beta"]
 
 
 def test_round9_1_enumerated_member_loss_invalidates_whole_scan(
@@ -145,9 +160,9 @@ def test_round9_1_enumerated_member_loss_invalidates_whole_scan(
     workspace = tmp_path / "workspace"
     _write_skill(workspace, "alpha")
     victim = _write_skill(workspace, "beta")
-    provider = LocalSkillProvider(include_user_skills=False)
-    policy = _policy(provider, workspace)
-    original = local_skills._read_discovery_skill_document
+    producer = _producer(tmp_path)
+    policy = _policy(producer, workspace)
+    original = local_skills.read_observed_skill_document
     reads = 0
 
     def remove_before_second_read(child, *, maximum: int, deadline_monotonic) -> bytes:
@@ -162,14 +177,16 @@ def test_round9_1_enumerated_member_loss_invalidates_whole_scan(
         )
 
     monkeypatch.setattr(
-        local_skills,
-        "_read_discovery_skill_document",
-        remove_before_second_read,
+        local_skills, "read_observed_skill_document", remove_before_second_read
     )
-    discovery = provider.discover(policy)
-    assert discovery.disposition is SkillDiscoveryDisposition.UNAVAILABLE
-    assert discovery.unavailable_reason is SkillCatalogUnavailableReason.DISCOVERY_RACED
-    assert discovery.skills == ()
+    result = producer.observe(policy)
+    assert result.disposition is LooseSkillDefinitionsDisposition.UNAVAILABLE
+    assert result.unavailable_cause is not None
+    assert (
+        result.unavailable_cause.reason
+        is SkillProducerUnavailableReason.LOOSE_DISCOVERY_RACED
+    )
+    assert result.candidates == ()
 
 
 def test_round9_1_non_regular_skill_file_is_bounded_unavailable(
@@ -179,13 +196,17 @@ def test_round9_1_non_regular_skill_file_is_bounded_unavailable(
     skill_path = workspace / ".agents" / "skills" / "fifo-skill" / "SKILL.md"
     skill_path.parent.mkdir(parents=True)
     os.mkfifo(skill_path)
-    provider = LocalSkillProvider(include_user_skills=False)
+    producer = _producer(tmp_path)
 
-    discovery = provider.discover(_policy(provider, workspace))
+    result = producer.observe(_policy(producer, workspace))
 
-    assert discovery.disposition is SkillDiscoveryDisposition.UNAVAILABLE
-    assert discovery.unavailable_reason is SkillCatalogUnavailableReason.DISCOVERY_RACED
-    assert discovery.skills == ()
+    assert result.disposition is LooseSkillDefinitionsDisposition.UNAVAILABLE
+    assert result.unavailable_cause is not None
+    assert (
+        result.unavailable_cause.reason
+        is SkillProducerUnavailableReason.LOOSE_DISCOVERY_RACED
+    )
+    assert result.candidates == ()
 
 
 def test_round9_1_explicit_null_metadata_is_not_standard_valid(
@@ -197,16 +218,15 @@ def test_round9_1_explicit_null_metadata_is_not_standard_valid(
         "null-metadata",
         document=_document("null-metadata", extra="metadata:\n"),
     )
-    provider = LocalSkillProvider(include_user_skills=False)
+    producer = _producer(tmp_path)
 
-    discovery = provider.discover(_policy(provider, workspace))
+    result = producer.observe(_policy(producer, workspace))
 
-    assert discovery.disposition is SkillDiscoveryDisposition.COMPLETE
-    assert discovery.skills == ()
-    assert any(
-        item.code == "skill_invalid_metadata"
-        for item in discovery_diagnostics(discovery)
-    )
+    assert result.disposition is LooseSkillDefinitionsDisposition.COMPLETE
+    assert result.candidates == ()
+    assert [item.code for item in _diagnostics(result)] == [
+        SkillDiagnosticCode.INVALID_METADATA
+    ]
 
 
 def test_round9_1_inert_skill_diagnostics_are_not_public_degradation() -> None:
@@ -228,23 +248,35 @@ def test_round9_1_1025_directories_and_65_winners_publish_no_partial_catalog(
     root = direct_workspace / ".agents" / "skills"
     for index in range(1_025):
         (root / f"dir-{index:04d}").mkdir(parents=True)
-    direct_provider = LocalSkillProvider(include_user_skills=False)
-    direct = direct_provider.discover(_policy(direct_provider, direct_workspace))
-    assert direct.disposition is SkillDiscoveryDisposition.UNAVAILABLE
-    assert (
-        direct.unavailable_reason is SkillCatalogUnavailableReason.DISCOVERY_OVERBOUND
+    direct_producer = _producer(tmp_path / "direct-user")
+    direct = direct_producer.observe(
+        _policy(direct_producer, direct_workspace)
     )
-    assert direct.skills == ()
+    assert direct.disposition is LooseSkillDefinitionsDisposition.UNAVAILABLE
+    assert direct.unavailable_cause is not None
+    assert (
+        direct.unavailable_cause.reason
+        is SkillProducerUnavailableReason.LOOSE_DISCOVERY_OVERBOUND
+    )
+    assert direct.candidates == ()
 
     winner_workspace = tmp_path / "winners"
     for index in range(65):
-        name = f"skill-{index:02d}"
-        _write_skill(winner_workspace, name)
-    winner_provider = LocalSkillProvider(include_user_skills=False)
-    winners = winner_provider.discover(_policy(winner_provider, winner_workspace))
-    assert winners.disposition is SkillDiscoveryDisposition.UNAVAILABLE
-    assert winners.unavailable_reason is SkillCatalogUnavailableReason.CATALOG_OVERBOUND
-    assert winners.skills == ()
+        _write_skill(winner_workspace, f"skill-{index:02d}")
+    winner_producer = _producer(tmp_path / "winner-user")
+    loose = winner_producer.observe(_policy(winner_producer, winner_workspace))
+    with BundledSkillDistributionBindingOwner() as binding:
+        bundled = BundledSkillDefinitionProducer(binding).observe()
+    inspection = SkillCatalogResolver().resolve(loose, bundled)
+    assert isinstance(inspection, UnavailableEffectiveSkillCatalogInspection)
+    assert inspection.winners == ()
+    assert len(inspection.unavailable_causes) == 1
+    cause = inspection.unavailable_causes[0]
+    assert isinstance(cause, ResolutionUnavailableCause)
+    assert (
+        cause.reason
+        is SkillResolutionUnavailableReason.EFFECTIVE_WINNER_BOUND_EXCEEDED
+    )
 
 
 @pytest.mark.parametrize(
@@ -260,16 +292,12 @@ def test_round9_1_yaml_alias_tag_duplicate_and_multidoc_are_rejected(
     tmp_path: Path, frontmatter: str
 ) -> None:
     workspace = tmp_path / "workspace"
-    _write_skill(
-        workspace,
-        "alpha",
-        document=f"---\n{frontmatter}---\nbody\n",
-    )
-    provider = LocalSkillProvider(include_user_skills=False)
-    discovery = provider.discover(_policy(provider, workspace))
-    assert discovery.skills == ()
-    assert [item.code for item in discovery_diagnostics(discovery)] == [
-        "skill_invalid_frontmatter_yaml"
+    _write_skill(workspace, "alpha", document=f"---\n{frontmatter}---\nbody\n")
+    producer = _producer(tmp_path)
+    result = producer.observe(_policy(producer, workspace))
+    assert result.candidates == ()
+    assert [item.code for item in _diagnostics(result)] == [
+        SkillDiagnosticCode.INVALID_FRONTMATTER_YAML
     ]
 
 
@@ -282,26 +310,34 @@ def test_round9_1_owner_snapshot_freezes_effective_head_until_next_scan(
         "alpha",
         document=_document("alpha", body="# Version A\n"),
     )
-    provider = LocalSkillProvider(include_user_skills=False)
+    producer = _producer(tmp_path)
+    binding = BundledSkillDistributionBindingOwner()
     composer = KernelSkillProjectionComposer(
         workspace_root=workspace,
-        provider=LocalSkillCapabilityProvider(provider=provider),
+        bundled_binding_owner=binding,
+        loose_producer=producer,
     )
-    owner_a = composer.freeze_owner_snapshot(
-        conversation_scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
-    )
-    frozen_a = composer.freeze_projection_input(owner_a)
-    skill.write_text(_document("alpha", body="# Version B\n"), encoding="utf-8")
+    try:
+        owner_a = composer.freeze_owner_snapshot(
+            conversation_scope_kind=ModelInputScopeKind.ROOT,
+            scope_subagent_task_id=None,
+        )
+        frozen_a = composer.freeze_projection_input(owner_a)
+        skill.write_text(_document("alpha", body="# Version B\n"), encoding="utf-8")
 
-    assert owner_a.discovery.skills[0].body == "# Version A\n"
-    assert composer.freeze_projection_input(owner_a) == frozen_a
-    owner_b = composer.freeze_owner_snapshot(
-        conversation_scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
-    )
-    assert owner_b.discovery.skills[0].body == "# Version B\n"
-    assert composer.freeze_projection_input(owner_b) != frozen_a
+        assert isinstance(owner_a.inspection, CompleteEffectiveSkillCatalogInspection)
+        alpha_a = next(item for item in owner_a.inspection.winners if item.name == "alpha")
+        assert alpha_a.body == "# Version A\n"
+        assert composer.freeze_projection_input(owner_a) == frozen_a
+        owner_b = composer.freeze_owner_snapshot(
+            conversation_scope_kind=ModelInputScopeKind.ROOT,
+            scope_subagent_task_id=None,
+        )
+        alpha_b = next(item for item in owner_b.inspection.winners if item.name == "alpha")
+        assert alpha_b.body == "# Version B\n"
+        assert composer.freeze_projection_input(owner_b) != frozen_a
+    finally:
+        binding.close()
 
 
 def test_round9_1_read_file_repeats_current_bytes_with_2000_line_window(
@@ -338,23 +374,22 @@ def test_round9_1_pulsara_home_catalog_location_is_ordinary_readable(
     monkeypatch.setenv("PULSARA_HOME", str(pulsara_home))
 
     workspace = tmp_path / "workspace"
-    provider = LocalSkillProvider(
+    producer = LooseSkillDefinitionProducer(
         user_agents_skills_root=tmp_path / "empty-agents" / "skills"
     )
-    discovery = provider.discover(_policy(provider, workspace))
-    assert discovery.skills[0].location == (
-        "${PULSARA_HOME}/skills/home-skill/SKILL.md"
-    )
+    result = producer.observe(_policy(producer, workspace))
+    home_skill = next(item for item in result.candidates if item.name == "home-skill")
+    assert home_skill.location == "${PULSARA_HOME}/skills/home-skill/SKILL.md"
 
-    result = ReadFileTool(workspace).execute(
+    read = ReadFileTool(workspace).execute(
         ToolCall(
             id="read-home-skill",
             name="read_file",
-            arguments={"path": discovery.skills[0].location},
+            arguments={"path": home_skill.location},
         )
     )
-    assert result.status is ToolResultState.SUCCESS
-    assert "home-skill" in result.output
+    assert read.status is ToolResultState.SUCCESS
+    assert "home-skill" in read.output
 
 
 def test_round9_1_production_has_no_fifth_root_or_skill_execution_authority() -> None:

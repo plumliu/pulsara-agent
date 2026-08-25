@@ -124,7 +124,9 @@ class ReadFileTool(WorkspaceTool):
 
     def execute(self, call: ToolCall) -> ToolExecutionResult:
         path = self._resolve_read_path(str_arg(call.arguments, "path"))
-        access_scope = _path_access_scope(path, self.workspace_root)
+        access_scope = _path_access_scope(
+            path, self.workspace_root, self._resolved_user_home()
+        )
         workspace_relative = access_scope == "workspace"
         offset = _normalize_offset(int_arg(call.arguments, "offset", 1))
         limit = _normalize_limit(
@@ -234,7 +236,8 @@ class SearchFilesTool(WorkspaceTool):
         if target not in {"content", "files"}:
             raise ValueError(f"unsupported search target: {raw_target}")
         path = self._resolve_read_path(str_arg(call.arguments, "path") or ".")
-        access_scope = _path_access_scope(path, self.workspace_root)
+        user_home = self._resolved_user_home()
+        access_scope = _path_access_scope(path, self.workspace_root, user_home)
         workspace_relative = access_scope == "workspace"
         limit = int_arg(call.arguments, "limit", DEFAULT_SEARCH_LIMIT)
         limit = _normalize_limit(limit, MAX_SEARCH_LIMIT)
@@ -245,7 +248,7 @@ class SearchFilesTool(WorkspaceTool):
             raise ValueError(f"unsupported output_mode: {output_mode}")
         if not path.exists():
             raise FileNotFoundError(f"path not found: {path}")
-        if _is_broad_search_root(path, self.workspace_root):
+        if _is_broad_search_root(path, self.workspace_root, user_home):
             raise ValueError(
                 f"refusing broad recursive search root outside workspace: {path}. "
                 "Use a specific file or subdirectory."
@@ -700,14 +703,17 @@ def _relpath(path: Path, root: Path) -> str:
         return str(path)
 
 
-def _path_access_scope(path: Path, workspace_root: Path) -> str:
+def _path_access_scope(
+    path: Path, workspace_root: Path, user_home: Path | None
+) -> str:
     resolved = path.resolve()
     root = workspace_root.resolve()
     if resolved == root or root in resolved.parents:
         return "workspace"
-    home = Path.home().resolve()
-    if resolved == home or home in resolved.parents:
-        return "home"
+    if user_home is not None:
+        home = user_home.resolve()
+        if resolved == home or home in resolved.parents:
+            return "home"
     temp_roots = _temp_roots()
     if any(
         resolved == temp_root or temp_root in resolved.parents
@@ -717,20 +723,24 @@ def _path_access_scope(path: Path, workspace_root: Path) -> str:
     return "external_absolute"
 
 
-def _is_broad_search_root(path: Path, workspace_root: Path) -> bool:
+def _is_broad_search_root(
+    path: Path, workspace_root: Path, user_home: Path | None
+) -> bool:
     resolved = path.resolve()
     root = workspace_root.resolve()
     if resolved == root or root in resolved.parents:
         return False
     if resolved.is_file():
         return False
-    return resolved in _broad_search_roots(root)
+    return resolved in _broad_search_roots(root, user_home)
 
 
-def _broad_search_roots(workspace_root: Path) -> set[Path]:
+def _broad_search_roots(
+    workspace_root: Path, user_home: Path | None
+) -> set[Path]:
     roots = {Path("/").resolve()}
-    home = Path.home().resolve()
-    roots.add(home)
+    if user_home is not None:
+        roots.add(user_home.resolve())
     for candidate in (
         "/Users",
         "/home",
@@ -748,7 +758,10 @@ def _broad_search_roots(workspace_root: Path) -> set[Path]:
             roots.add(candidate_path.resolve())
     roots.update(_temp_roots())
     parent = workspace_root.resolve().parent
-    if parent in {home, *(_temp_roots())}:
+    parent_roots = _temp_roots()
+    if user_home is not None:
+        parent_roots.add(user_home.resolve())
+    if parent in parent_roots:
         roots.add(parent)
     return roots
 

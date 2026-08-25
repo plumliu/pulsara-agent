@@ -63,6 +63,10 @@ from pulsara_agent.conversation_kernel.compaction.runtime_handoff import (
 from pulsara_agent.conversation_kernel.compaction.retained_skill import (
     FrozenRetainedSkillContextItem,
     FrozenRetainedSkillContextSelection,
+    _exact_historical_read,
+    _historical_catalog_row,
+    _installed_observation_fingerprint,
+    _installed_retained_items,
     _was_installed_full,
     remove_full_tail_duplicates,
 )
@@ -79,6 +83,8 @@ from pulsara_agent.model_input.contracts import (
     CanonicalModelInputSnapshot,
     FrozenProviderInputItem,
     FrozenProviderInputItemKind,
+    ContextSourceKind,
+    ContextTrustClass,
     ModelInputScopeKind,
     ProviderToolCall,
     ProviderToolResultContextMetadata,
@@ -88,7 +94,12 @@ from pulsara_agent.model_input.contracts import (
     canonical_model_input_snapshot_fingerprint,
     provider_input_item_fingerprint,
 )
-from pulsara_agent.model_input.continuity import ProviderInputContinuityScope
+from pulsara_agent.model_input.continuity import (
+    ProviderInputContinuityScope,
+    SourceObservationLifecycle,
+    SourceObservationPresence,
+    encode_runtime_observation,
+)
 from pulsara_agent.model_input.lowering import lower_canonical_item
 from pulsara_agent.model_input.provider_replay import (
     FrozenCanonicalProviderDispatchRead,
@@ -1116,6 +1127,160 @@ def test_round5b_retained_skill_proves_older_full_from_installed_message() -> No
         item,
         decisions={},
         installed_messages={key: ()},
+    )
+
+    catalog_body = canonical_json_bytes(
+        {
+            "skills": (
+                {
+                    "name": "inspect",
+                    "description": "Inspect safely.",
+                    "location": "/package/bundled_skills/inspect/SKILL.md",
+                },
+            )
+        }
+    ).decode("utf-8")
+
+    def catalog_message(
+        *,
+        lifecycle: SourceObservationLifecycle,
+        presence: SourceObservationPresence,
+        body: str,
+    ) -> object:
+        return encode_runtime_observation(
+            source_kind=ContextSourceKind.SKILL_CATALOG,
+            trust_class=ContextTrustClass.UNTRUSTED_OBSERVATION,
+            lifecycle=lifecycle,
+            presence=presence,
+            contract_version="pulsara.skill-catalog.v2",
+            body=body,
+        )
+
+    full_catalog = catalog_message(
+        lifecycle=SourceObservationLifecycle.SNAPSHOT,
+        presence=SourceObservationPresence.VALUE,
+        body=catalog_body,
+    )
+    unavailable_catalog = catalog_message(
+        lifecycle=SourceObservationLifecycle.UNAVAILABLE,
+        presence=SourceObservationPresence.UNAVAILABLE,
+        body="",
+    )
+    predecessor = SimpleNamespace(
+        messages=(full_catalog, unavailable_catalog),
+        message_placements=(
+            SimpleNamespace(message_ordinal=1),
+            SimpleNamespace(message_ordinal=2),
+        ),
+    )
+    location = "/package/bundled_skills/inspect/SKILL.md"
+    assert (
+        _historical_catalog_row(
+            predecessor,
+            before_message_ordinal=3,
+            location=location,
+        )
+        is None
+    )
+    row = _historical_catalog_row(
+        predecessor,
+        before_message_ordinal=2,
+        location=location,
+    )
+    assert row == {
+        "name": "inspect",
+        "description": "Inspect safely.",
+        "location": location,
+    }
+
+    document = "---\nname: inspect\ndescription: Inspect safely.\n---\nRetained body"
+    numbered = "\n".join(
+        f"{ordinal}|{line}"
+        for ordinal, line in enumerate(document.splitlines(), start=1)
+    )
+    exact_body = json.dumps(
+        {
+            "status": "ok",
+            "path": location,
+            "access_scope": "external_absolute",
+            "workspace_relative": False,
+            "offset": 1,
+            "limit": 200,
+            "total_lines": len(document.splitlines()),
+            "file_size": len(document.encode("utf-8")),
+            "truncated": False,
+            "content": numbered,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    exact_item = FrozenProviderInputItem(
+        FrozenProviderInputItemKind.TOOL_RESULT,
+        "entry:exact-read-result",
+        5,
+        "turn:test",
+        exact_body,
+        tool_call_id="call:exact-read",
+        tool_request_entry_id="entry:exact-read-request",
+        tool_result_context=item.tool_result_context,
+        tool_result_body_text=exact_body,
+    )
+    assert _exact_historical_read(
+        exact_item,
+        catalog_row=row,
+        root_policy=SimpleNamespace(roots=()),
+    ) == "Retained body"
+
+
+def test_round5b_installed_retained_skill_is_inherited_only_within_same_turn() -> None:
+    body = canonical_json_bytes(
+        {
+            "skills": (
+                {
+                    "name": "inspect",
+                    "catalog_location": (
+                        "/package/bundled_skills/inspect/SKILL.md"
+                    ),
+                    "body": "Retained body",
+                },
+            )
+        }
+    ).decode("utf-8")
+    message = encode_runtime_observation(
+        source_kind=ContextSourceKind.RETAINED_SKILL_CONTEXT,
+        trust_class=ContextTrustClass.UNTRUSTED_OBSERVATION,
+        lifecycle=SourceObservationLifecycle.SNAPSHOT,
+        presence=SourceObservationPresence.VALUE,
+        contract_version="pulsara.retained-skill-context.v1",
+        body=body,
+    )
+    head = SimpleNamespace(
+        source_kind=ContextSourceKind.RETAINED_SKILL_CONTEXT,
+        presence=SourceObservationPresence.VALUE,
+        installed_observation_fingerprint=(
+            _installed_observation_fingerprint(message)
+        ),
+        last_emitted_turn_id="turn:skill",
+    )
+    predecessor = SimpleNamespace(
+        source_heads=(head,),
+        messages=(message,),
+    )
+
+    inherited = _installed_retained_items(
+        predecessor,
+        target_turn_id="turn:skill",
+    )
+
+    assert tuple((item.name, item.body) for item in inherited) == (
+        ("inspect", "Retained body"),
+    )
+    assert (
+        _installed_retained_items(
+            predecessor,
+            target_turn_id="turn:next-root",
+        )
+        == ()
     )
 
 

@@ -14,7 +14,7 @@ from pulsara_agent.conversation_kernel.assistant_settlement import (
     PreparedAssistantMessageSettlement,
 )
 from pulsara_agent.conversation_kernel.capability_composition import (
-    PreparedLocalSkillCatalogSourceSnapshot,
+    PreparedSkillCatalogSourceSnapshot,
 )
 from pulsara_agent.conversation_kernel.cold_epoch import (
     SelectedDurableReplayHydrationRequest,
@@ -56,7 +56,7 @@ def test_hard_cut_mandatory_process_local_fingerprint_fields_are_absent() -> Non
     forbidden_by_type = {
         FrozenToolCapabilityExposureSelection: {"selection_fingerprint"},
         McpInstallationCandidate: {"candidate_fingerprint"},
-        PreparedLocalSkillCatalogSourceSnapshot: {"root_policy_fingerprint"},
+        PreparedSkillCatalogSourceSnapshot: {"root_policy_fingerprint"},
         SubagentInitialSeed: {"objective_item_fingerprint", "seed_fingerprint"},
         SelectedDurableReplayHydrationRequest: {
             "source_dispatch_read_fingerprint",

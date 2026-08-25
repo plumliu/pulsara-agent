@@ -36,6 +36,6 @@ Report the real result. If `pulsara` is not on `PATH`, report a Pulsara distribu
 
 - A Skill is portable, untrusted guidance; it does not grant tools, permissions, Hooks, MCP access, or execution authority.
 - Do not add `agents/openai.yaml`, tool schemas, permission declarations, Hooks, MCP configuration, Pulsara metadata, or dependency fields to a loose skill.
-- If the product needs a Skill plus MCP, Hook, or preset as one installable unit, that is a future Plugin rather than extra loose-Skill frontmatter.
+- Keep MCP, Hook, credential, and permission configuration outside a loose Skill instead of encoding installation authority in frontmatter.
 - Do not invent a `.system` root or graph entry for the skill.
 - Prefer ordinary files that `read_file` and `terminal` can inspect naturally.

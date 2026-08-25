@@ -35,9 +35,10 @@ from pulsara_agent.capability.contracts import (
     tool_capability_version_ref,
 )
 from pulsara_agent.capability.local_skills import (
-    LocalSkillDiscovery,
-    LocalSkillProvider,
-    SkillDiscoveryDisposition,
+    LooseSkillDefinitionProducer,
+)
+from pulsara_agent.capability.resolver import (
+    CompleteEffectiveSkillCatalogInspection,
 )
 from pulsara_agent.capability.planner import KernelToolCapabilityPlanner
 from pulsara_agent.capability.registry import (
@@ -46,7 +47,7 @@ from pulsara_agent.capability.registry import (
 )
 from pulsara_agent.conversation_kernel.capability_composition import (
     freeze_capability_registry_from_owner_snapshots,
-    issue_local_skill_catalog_source_snapshot,
+    issue_skill_catalog_source_snapshot,
     issue_mcp_capability_source_snapshot_set,
     issue_sealed_builtin_capability_snapshot,
 )
@@ -430,16 +431,20 @@ class StaticContextSourceCollector:
             disposition=CapabilitySourceSnapshotDisposition.COMPLETE,
             facts=(),
         )
-        root_policy = LocalSkillProvider(include_user_skills=False).prepare_root_policy(
-            Path.cwd(),
+        root_policy = LooseSkillDefinitionProducer(
+            user_product_skills_root=Path.cwd() / ".test-user-pulsara-skills",
+            user_agents_skills_root=Path.cwd() / ".test-user-agent-skills",
+        ).prepare_root_policy(
+            Path.cwd()
         )
-        return issue_local_skill_catalog_source_snapshot(
+        return issue_skill_catalog_source_snapshot(
             conversation_scope_kind=conversation_scope_kind,
             scope_subagent_task_id=scope_subagent_task_id,
             source_snapshot=snapshot,
-            discovery=LocalSkillDiscovery(
+            inspection=CompleteEffectiveSkillCatalogInspection(
                 root_policy=root_policy,
-                disposition=SkillDiscoveryDisposition.COMPLETE,
+                winners=(),
+                candidate_issues=(),
             ),
             owner_authenticity=self,
         )
@@ -447,7 +452,7 @@ class StaticContextSourceCollector:
     def freeze_skill_capability_projection_input(self, owner):
         return FrozenSkillProjectionInput(
             source_snapshot=owner.source_snapshot,
-            discovery=owner.discovery,
+            inspection=owner.inspection,
         )
 
     def collect(self, **_kwargs: object) -> CollectedContextSources:
@@ -593,7 +598,7 @@ class StaticContextSourceCollector:
                 ContextSourceAbsenceKind.NOT_APPLICABLE
             ),
             ContextSourceKind.RETAINED_SKILL_CONTEXT: (
-                ContextSourceAbsenceKind.NOT_APPLICABLE
+                ContextSourceAbsenceKind.EXPLICIT_EMPTY
             ),
             ContextSourceKind.PARENT_CONTEXT: (ContextSourceAbsenceKind.NOT_APPLICABLE),
             ContextSourceKind.DEPENDENCY_RESULTS: (
@@ -1222,18 +1227,22 @@ def prepare_test_direct_tool_surface(
         disposition=CapabilitySourceSnapshotDisposition.COMPLETE,
         facts=(),
     )
-    root_policy = LocalSkillProvider(include_user_skills=False).prepare_root_policy(
-        Path.cwd(),
+    root_policy = LooseSkillDefinitionProducer(
+        user_product_skills_root=Path.cwd() / ".test-user-pulsara-skills",
+        user_agents_skills_root=Path.cwd() / ".test-user-agent-skills",
+    ).prepare_root_policy(
+        Path.cwd()
     )
-    discovery = LocalSkillDiscovery(
+    inspection = CompleteEffectiveSkillCatalogInspection(
         root_policy=root_policy,
-        disposition=SkillDiscoveryDisposition.COMPLETE,
+        winners=(),
+        candidate_issues=(),
     )
-    skill_owner = issue_local_skill_catalog_source_snapshot(
+    skill_owner = issue_skill_catalog_source_snapshot(
         conversation_scope_kind=conversation_scope_kind,
         scope_subagent_task_id=scope_subagent_task_id,
         source_snapshot=skill_snapshot,
-        discovery=discovery,
+        inspection=inspection,
         owner_authenticity=object(),
     )
     registry = freeze_capability_registry_from_owner_snapshots(
@@ -1255,7 +1264,7 @@ def prepare_test_direct_tool_surface(
     )
     skill_input = FrozenSkillProjectionInput(
         source_snapshot=skill_snapshot,
-        discovery=discovery,
+        inspection=inspection,
     )
     _parent, tool_view, _skill_view = freeze_capability_dispatch_cut_and_views(
         conversation_scope_kind=conversation_scope_kind,

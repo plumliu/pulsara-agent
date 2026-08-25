@@ -28,7 +28,8 @@ from pulsara_agent.primitives.tool_observation import (
 )
 
 if TYPE_CHECKING:
-    from pulsara_agent.capability.local_skills import LocalSkillDiscovery
+    from pulsara_agent.capability.resolver import EffectiveSkillCatalogInspection
+    from pulsara_agent.capability.types import SkillDefinitionOrigin
 
 MAXIMUM_CAPABILITY_MCP_SOURCES = 64
 MAXIMUM_CAPABILITY_SOURCE_REGISTRATIONS = 66
@@ -528,7 +529,7 @@ class FrozenSkillCapabilityFact:
     public_name: str
     description: str
     location: str
-    winning_root_provenance_fingerprint: str
+    origin: "SkillDefinitionOrigin"
     catalog_semantic_fingerprint: str
     activation_semantic_fingerprint: str
     fact_semantic_fingerprint: str
@@ -541,13 +542,22 @@ class FrozenSkillCapabilityFact:
             raise ValueError("skill capability identity/source matrix conflicts")
         if self.identity.stable_name != self.public_name:
             raise ValueError("skill identity does not join public name")
+        from pulsara_agent.capability.types import (
+            BundledSkillOrigin,
+            LooseSkillOrigin,
+        )
+
+        if not isinstance(self.origin, (LooseSkillOrigin, BundledSkillOrigin)):
+            raise TypeError("skill capability fact origin is not closed")
+        if isinstance(self.origin, BundledSkillOrigin) and (
+            self.origin.skill_name != self.public_name
+        ):
+            raise ValueError("bundled Skill fact origin/name join conflicts")
         expected = skill_capability_fact_fingerprint(
             identity_fingerprint=self.identity.identity_fingerprint,
             catalog_semantic_fingerprint=self.catalog_semantic_fingerprint,
             activation_semantic_fingerprint=self.activation_semantic_fingerprint,
-            winning_root_provenance_fingerprint=(
-                self.winning_root_provenance_fingerprint
-            ),
+            origin=self.origin,
         )
         if self.fact_semantic_fingerprint != expected:
             raise ValueError("skill capability fact fingerprint mismatch")
@@ -558,8 +568,9 @@ def skill_capability_fact_fingerprint(
     identity_fingerprint: str,
     catalog_semantic_fingerprint: str,
     activation_semantic_fingerprint: str,
-    winning_root_provenance_fingerprint: str,
+    origin: "SkillDefinitionOrigin",
 ) -> str:
+    origin_digest = _skill_origin_provenance_fingerprint(origin)
     return context_fingerprint(
         "skill-capability-fact:v1",
         {
@@ -567,10 +578,43 @@ def skill_capability_fact_fingerprint(
             "catalog_semantic_fingerprint": catalog_semantic_fingerprint,
             "activation_semantic_fingerprint": activation_semantic_fingerprint,
             "winning_root_provenance_fingerprint": (
-                winning_root_provenance_fingerprint
+                origin_digest
             ),
         },
     )
+
+
+def _skill_origin_provenance_fingerprint(origin: "SkillDefinitionOrigin") -> str:
+    """Derive the historical fact payload slot at its sole real boundary."""
+
+    from pulsara_agent.capability.types import BundledSkillOrigin, LooseSkillOrigin
+
+    if isinstance(origin, LooseSkillOrigin):
+        ordinal, prefix = {
+            LocalSkillRootKind.WORKSPACE_PULSARA: (0, ".pulsara/skills"),
+            LocalSkillRootKind.WORKSPACE_AGENTS: (1, ".agents/skills"),
+            LocalSkillRootKind.USER_PULSARA: (2, "${PULSARA_HOME}/skills"),
+            LocalSkillRootKind.USER_AGENTS: (3, "~/.agents/skills"),
+        }[origin.root_kind]
+        return context_fingerprint(
+            "local-skill-winning-root-provenance:v2-agent-skills",
+            {
+                "root_kind": origin.root_kind.value,
+                "precedence_ordinal": ordinal,
+                "stable_location_prefix": prefix,
+            },
+        )
+    if isinstance(origin, BundledSkillOrigin):
+        return context_fingerprint(
+            "bundled-skill-origin:v1-agent-skills",
+            {
+                "package": "pulsara_agent",
+                "relative_skill_directory": (
+                    origin.package_relative_skill_directory
+                ),
+            },
+        )
+    raise TypeError("Skill origin union is open")
 
 
 class CapabilitySourceSnapshotDisposition(StrEnum):
@@ -929,18 +973,27 @@ class FrozenMcpCapabilityProjectionInput:
 @dataclass(frozen=True, slots=True)
 class FrozenSkillProjectionInput:
     source_snapshot: FrozenCapabilitySourceSnapshot = field(repr=False)
-    discovery: "LocalSkillDiscovery" = field(repr=False)
+    inspection: "EffectiveSkillCatalogInspection" = field(repr=False)
 
     def __post_init__(self) -> None:
-        from pulsara_agent.capability.local_skills import LocalSkillDiscovery
+        from pulsara_agent.capability.resolver import (
+            CompleteEffectiveSkillCatalogInspection,
+            UnavailableEffectiveSkillCatalogInspection,
+        )
 
         if (
             self.source_snapshot.registration.source.kind
             is not CapabilitySourceKind.LOCAL_SKILL_CATALOG
         ):
             raise ValueError("skill projection input source kind conflicts")
-        if type(self.discovery) is not LocalSkillDiscovery:
-            raise TypeError("skill projection input discovery is not frozen")
+        if not isinstance(
+            self.inspection,
+            (
+                CompleteEffectiveSkillCatalogInspection,
+                UnavailableEffectiveSkillCatalogInspection,
+            ),
+        ):
+            raise TypeError("skill projection input inspection is not frozen")
 
 
 @dataclass(frozen=True, slots=True)

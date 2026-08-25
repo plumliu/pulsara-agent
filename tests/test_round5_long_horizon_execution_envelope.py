@@ -17,6 +17,9 @@ import httpx
 from openai import APITimeoutError
 import pytest
 
+from pulsara_agent.capability.bundled_skills import (
+    BundledSkillDistributionBindingOwner,
+)
 from pulsara_agent.conversation_kernel.execution_watchdogs import (
     KernelExecutionDeadlineFactory,
     KernelExecutionWatchdogPolicy,
@@ -445,15 +448,22 @@ def _bare_host_core_with_blocked_blob_gc(
         KernelExecutionWatchdogPolicy(blob_gc_close_seconds=close_seconds)
     )
     core._sessions = {}  # noqa: SLF001
+    core._open_attempts = set()  # noqa: SLF001
     core._close_attempts = {}  # noqa: SLF001
     core._extension_routes = {}  # noqa: SLF001
     core._jobs = None  # noqa: SLF001
     core._lock = asyncio.Lock()  # noqa: SLF001
+    core._closing = False  # noqa: SLF001
+    core._closed = False  # noqa: SLF001
+    core._shutdown_task = None  # noqa: SLF001
     core._blob_gc_io = KernelSessionIO(maximum_concurrency=1)  # noqa: SLF001
     core._blob_store = object()  # noqa: SLF001
     core._access = None  # noqa: SLF001
     core._repository = None  # noqa: SLF001
     core._event_loop = asyncio.get_running_loop()  # noqa: SLF001
+    core._bundled_skill_binding = (  # noqa: SLF001
+        BundledSkillDistributionBindingOwner()
+    )
     cancelled = asyncio.Event()
     release = asyncio.Event()
 

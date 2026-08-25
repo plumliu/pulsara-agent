@@ -9,6 +9,11 @@ from pathlib import Path
 import stat
 from threading import Event
 
+from pulsara_agent.capability.bundled_skills import (
+    BundledSkillDefinitionProducer,
+    BundledSkillDistributionBindingOwner,
+)
+
 from pulsara_agent.capability.local_skill_publisher import (
     AtomicLocalSkillPublisher,
     LocalSkillCancellationProbe,
@@ -25,19 +30,26 @@ from pulsara_agent.capability.local_skill_source_binding import (
 from pulsara_agent.capability.local_skills import (
     MAX_SKILL_FILE_BYTES,
     SKILL_FILE_NAME,
-    LocalSkillDiscovery,
-    LocalSkillProvider,
-    ParsedLocalSkillDocument,
-    parse_local_skill_document,
+    LooseSkillDefinitionProducer,
+    ParsedSkillDocument,
+    diagnostic_at,
+    parse_skill_document,
+    validate_skill_candidate_placement,
 )
 from pulsara_agent.capability.pulsara_home import (
     PulsaraHomeResolution,
+    UserHomeResolution,
     resolve_pulsara_home,
+    resolve_user_home,
 )
 from pulsara_agent.capability.types import (
     SkillDiagnostic,
     SkillDiagnosticCode,
     SkillDiagnosticSeverity,
+)
+from pulsara_agent.capability.resolver import (
+    EffectiveSkillCatalogInspection,
+    SkillCatalogResolver,
 )
 
 
@@ -92,7 +104,7 @@ class InstallLooseLocalSkillRequest:
 
 
 @dataclass(frozen=True, slots=True)
-class InspectLocalSkillCatalogRequest:
+class InspectEffectiveSkillCatalogRequest:
     workspace_root: Path
 
     def __post_init__(self) -> None:
@@ -104,7 +116,7 @@ class InspectLocalSkillCatalogRequest:
 class LocalSkillValidationOutcome:
     disposition: LocalSkillValidationDisposition
     source_path: Path
-    parsed: ParsedLocalSkillDocument | None = None
+    parsed: ParsedSkillDocument | None = None
     diagnostics: tuple[SkillDiagnostic, ...] = ()
     unavailable_reason: LocalSkillValidationUnavailableReason | None = None
 
@@ -150,13 +162,19 @@ class LocalSkillManagementService:
     def __init__(
         self,
         *,
-        provider: LocalSkillProvider | None = None,
+        loose_producer: LooseSkillDefinitionProducer | None = None,
         publisher: AtomicLocalSkillPublisher | None = None,
         pulsara_home_resolution: PulsaraHomeResolution | None = None,
+        user_home_resolution: UserHomeResolution | None = None,
+        bundled_binding_owner: BundledSkillDistributionBindingOwner | None = None,
+        catalog_resolver: SkillCatalogResolver | None = None,
     ) -> None:
-        self._provider = provider
+        self._loose_producer = loose_producer
         self._publisher = publisher or AtomicLocalSkillPublisher()
         self._pulsara_home_resolution = pulsara_home_resolution
+        self._user_home_resolution = user_home_resolution
+        self._bundled_binding_owner = bundled_binding_owner
+        self._catalog_resolver = catalog_resolver or SkillCatalogResolver()
 
     def validate_local_skill_source(
         self,
@@ -183,18 +201,38 @@ class LocalSkillManagementService:
             cancellation=cancellation,
         )
 
-    def inspect_local_skill_catalog(
+    def inspect_effective_skill_catalog(
         self,
-        request: InspectLocalSkillCatalogRequest,
-    ) -> LocalSkillDiscovery:
-        provider = self._provider or LocalSkillProvider(
-            pulsara_home_resolution=self._home_resolution()
-        )
-        policy = provider.prepare_root_policy(request.workspace_root)
-        return provider.discover(policy)
+        request: InspectEffectiveSkillCatalogRequest,
+    ) -> EffectiveSkillCatalogInspection:
+        producer = self._loose_producer
+        if producer is None:
+            user_home = self._user_home_resolution or resolve_user_home()
+            producer = LooseSkillDefinitionProducer(
+                pulsara_home_resolution=self._home_resolution(
+                    user_home_resolution=user_home
+                ),
+                user_home_resolution=user_home,
+            )
+        policy = producer.prepare_root_policy(request.workspace_root)
+        owner = self._bundled_binding_owner
+        owns_binding = owner is None
+        if owner is None:
+            owner = BundledSkillDistributionBindingOwner()
+        try:
+            bundled = BundledSkillDefinitionProducer(owner).observe()
+            loose = producer.observe(policy)
+            return self._catalog_resolver.resolve(loose, bundled)
+        finally:
+            if owns_binding:
+                owner.close()
 
-    def _home_resolution(self) -> PulsaraHomeResolution:
-        return self._pulsara_home_resolution or resolve_pulsara_home()
+    def _home_resolution(
+        self, *, user_home_resolution: UserHomeResolution | None = None
+    ) -> PulsaraHomeResolution:
+        return self._pulsara_home_resolution or resolve_pulsara_home(
+            user_home_resolution=user_home_resolution
+        )
 
 
 def _validate_source(source_path: Path) -> LocalSkillValidationOutcome:
@@ -307,20 +345,26 @@ def _validate_source(source_path: Path) -> LocalSkillValidationOutcome:
                 source,
                 LocalSkillValidationUnavailableReason.SOURCE_RACED,
             )
-        result = parse_local_skill_document(
-            b"".join(chunks),
-            expected_directory_name=source.name,
-        )
-        diagnostics = tuple(
-            SkillDiagnostic(
-                severity=item.severity,
-                code=item.code,
-                message=item.message,
-                path=source / SKILL_FILE_NAME,
+        try:
+            result = parse_skill_document(b"".join(chunks))
+            placement = (
+                validate_skill_candidate_placement(result.parsed, source.name)
+                if result.parsed is not None
+                else None
             )
-            for item in result.diagnostics
-        )
-        if result.parsed is None:
+            diagnostics = tuple(
+                diagnostic_at(item, source / SKILL_FILE_NAME)
+                for item in (
+                    *result.diagnostics,
+                    *((placement.diagnostics) if placement is not None else ()),
+                )
+            )
+        except MemoryError:
+            return _validation_unavailable(
+                source,
+                LocalSkillValidationUnavailableReason.SKILL_DOCUMENT_READ_UNAVAILABLE,
+            )
+        if result.parsed is None or (placement is not None and not placement.valid):
             return LocalSkillValidationOutcome(
                 LocalSkillValidationDisposition.INVALID,
                 source,
@@ -385,7 +429,7 @@ def _file_identity(value: os.stat_result) -> tuple[int, int, int, int, int]:
 __all__ = [
     "AtomicLocalSkillPublisher",
     "EventLocalSkillCancellationProbe",
-    "InspectLocalSkillCatalogRequest",
+    "InspectEffectiveSkillCatalogRequest",
     "InstallLooseLocalSkillRequest",
     "LocalSkillCleanupLocationStatus",
     "LocalSkillInstallDisposition",

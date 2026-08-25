@@ -19,6 +19,8 @@ from pulsara_agent.capability.render import (
 )
 from pulsara_agent.capability.types import (
     ActiveSkillReason,
+    ProducerUnavailableCause,
+    ResolutionUnavailableCause,
     SkillDiagnostic,
     SkillDiagnosticCode,
     SkillDiagnosticSeverity,
@@ -27,7 +29,7 @@ from pulsara_agent.conversation_kernel.capability import (
     KernelSkillProjectionComposer,
 )
 from pulsara_agent.conversation_kernel.capability_composition import (
-    PreparedLocalSkillCatalogSourceSnapshot,
+    PreparedSkillCatalogSourceSnapshot,
 )
 from pulsara_agent.llm.input import LLMMessage
 from pulsara_agent.model_input.contracts import (
@@ -101,10 +103,10 @@ class ContextSourceCollectorPort(Protocol):
         conversation_scope_kind: object,
         scope_subagent_task_id: str | None,
         deadline_monotonic: float | None = None,
-    ) -> PreparedLocalSkillCatalogSourceSnapshot: ...
+    ) -> PreparedSkillCatalogSourceSnapshot: ...
 
     def freeze_skill_capability_projection_input(
-        self, owner: PreparedLocalSkillCatalogSourceSnapshot
+        self, owner: PreparedSkillCatalogSourceSnapshot
     ): ...
 
     def collect(
@@ -116,7 +118,7 @@ class ContextSourceCollectorPort(Protocol):
         canonical_facts: FrozenCanonicalCompileSnapshot,
         tool_exposure_plan: FrozenToolCapabilityExposurePlan,
         skill_dispatch_view: FrozenSkillCapabilityDispatchView,
-        skill_owner_snapshot: PreparedLocalSkillCatalogSourceSnapshot,
+        skill_owner_snapshot: PreparedSkillCatalogSourceSnapshot,
         mcp_catalog_snapshot: "McpCatalogSnapshot | None" = None,
         hook_context_estimator: ModelInputTokenEstimator | None = None,
         deadline_monotonic: float | None = None,
@@ -129,7 +131,7 @@ class ContextSourceCollectorPort(Protocol):
         canonical_facts: FrozenCanonicalCompileSnapshot,
         tool_exposure_plan: FrozenToolCapabilityExposurePlan,
         skill_dispatch_view: FrozenSkillCapabilityDispatchView,
-        skill_owner_snapshot: PreparedLocalSkillCatalogSourceSnapshot,
+        skill_owner_snapshot: PreparedSkillCatalogSourceSnapshot,
         mcp_catalog_snapshot: "McpCatalogSnapshot | None" = None,
         hook_context_estimator: ModelInputTokenEstimator | None = None,
         deadline_monotonic: float | None = None,
@@ -200,7 +202,7 @@ class FrozenNonTriggerContextSources:
     registry_fingerprint: str
     tool_exposure_plan: FrozenToolCapabilityExposurePlan = field(repr=False)
     skill_dispatch_view: FrozenSkillCapabilityDispatchView = field(repr=False)
-    skill_owner_snapshot: PreparedLocalSkillCatalogSourceSnapshot = field(
+    skill_owner_snapshot: PreparedSkillCatalogSourceSnapshot = field(
         repr=False, compare=False
     )
     hook_context_reservation: HookContextReservation | None = field(
@@ -537,7 +539,7 @@ class KernelContextSourceCollector:
         conversation_scope_kind,
         scope_subagent_task_id: str | None,
         deadline_monotonic: float | None = None,
-    ) -> PreparedLocalSkillCatalogSourceSnapshot:
+    ) -> PreparedSkillCatalogSourceSnapshot:
         return self._capability.freeze_owner_snapshot(
             conversation_scope_kind=conversation_scope_kind,
             scope_subagent_task_id=scope_subagent_task_id,
@@ -545,7 +547,7 @@ class KernelContextSourceCollector:
         )
 
     def freeze_skill_capability_projection_input(
-        self, owner: PreparedLocalSkillCatalogSourceSnapshot
+        self, owner: PreparedSkillCatalogSourceSnapshot
     ):
         return self._capability.freeze_projection_input(owner)
 
@@ -558,7 +560,7 @@ class KernelContextSourceCollector:
         canonical_facts: FrozenCanonicalCompileSnapshot,
         tool_exposure_plan: FrozenToolCapabilityExposurePlan,
         skill_dispatch_view: FrozenSkillCapabilityDispatchView,
-        skill_owner_snapshot: PreparedLocalSkillCatalogSourceSnapshot,
+        skill_owner_snapshot: PreparedSkillCatalogSourceSnapshot,
         mcp_catalog_snapshot: "McpCatalogSnapshot | None" = None,
         hook_context_estimator: ModelInputTokenEstimator | None = None,
         deadline_monotonic: float | None = None,
@@ -586,7 +588,7 @@ class KernelContextSourceCollector:
         canonical_facts: FrozenCanonicalCompileSnapshot,
         tool_exposure_plan: FrozenToolCapabilityExposurePlan,
         skill_dispatch_view: FrozenSkillCapabilityDispatchView,
-        skill_owner_snapshot: PreparedLocalSkillCatalogSourceSnapshot,
+        skill_owner_snapshot: PreparedSkillCatalogSourceSnapshot,
         mcp_catalog_snapshot: "McpCatalogSnapshot | None" = None,
         hook_context_estimator: ModelInputTokenEstimator | None = None,
         deadline_monotonic: float | None = None,
@@ -617,7 +619,7 @@ class KernelContextSourceCollector:
                 ),
                 self._absent(
                     ContextSourceKind.RETAINED_SKILL_CONTEXT,
-                    ContextSourceAbsenceKind.NOT_APPLICABLE,
+                    ContextSourceAbsenceKind.EXPLICIT_EMPTY,
                 ),
                 self._absent(
                     ContextSourceKind.PARENT_CONTEXT,
@@ -881,7 +883,7 @@ class KernelContextSourceCollector:
         skill_source_unavailable = (
             frozen.skill_owner_snapshot.source_snapshot.disposition
             is CapabilitySourceSnapshotDisposition.UNAVAILABLE
-        ) or output.catalog_unavailable_reason is not None
+        ) or bool(output.catalog_unavailable_causes)
         if skill_source_unavailable:
             if (
                 output.catalog_prompt
@@ -893,16 +895,26 @@ class KernelContextSourceCollector:
                     is CapabilitySourceSnapshotDisposition.UNAVAILABLE
                 ):
                     raise ValueError("unavailable Skill catalog produced visible facts")
+            unavailable_cause_identity: list[tuple[str, str]] = []
+            for item in output.catalog_unavailable_causes:
+                if isinstance(item, ProducerUnavailableCause):
+                    unavailable_cause_identity.append(
+                        (item.producer_kind.value, item.reason.value)
+                    )
+                elif isinstance(item, ResolutionUnavailableCause):
+                    unavailable_cause_identity.append(
+                        ("RESOLUTION", item.reason.value)
+                    )
+                else:  # pragma: no cover - closed cause union
+                    raise TypeError("Skill catalog unavailable cause is open")
+            if not unavailable_cause_identity:
+                raise ValueError("unavailable Skill catalog has no typed cause")
             candidates.append(
                 self._candidate(
                     ContextSourceKind.SKILL_CATALOG,
                     ("", ""),
                     domain_identity={
-                        "unavailable_reason": (
-                            "DISCOVERY_UNAVAILABLE"
-                            if output.catalog_unavailable_reason is None
-                            else output.catalog_unavailable_reason.value
-                        )
+                        "unavailable_causes": tuple(unavailable_cause_identity)
                     },
                     initial_mode=ContextRenderMode.UNAVAILABLE_MINIMAL,
                 )

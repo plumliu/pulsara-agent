@@ -1,10 +1,11 @@
-"""Typed, immutable Agent Skills projection contracts."""
+"""Typed, immutable Agent Skills definition and projection contracts."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+from typing import TypeAlias
 
 from pulsara_agent.capability.contracts import LocalSkillRootKind
 
@@ -41,18 +42,24 @@ class SkillDiagnosticCode(StrEnum):
     ENUMERATION_RACED = "skill_enumeration_raced"
     READ_RACED = "skill_read_raced"
     DISCOVERY_BYTE_BOUND_EXCEEDED = "skill_discovery_byte_bound_exceeded"
-    DISCOVERY_DEADLINE_EXPIRED = "skill_discovery_deadline_expired"
-    DUPLICATE_NAME = "skill_duplicate_name"
     WINNER_BOUND_EXCEEDED = "skill_winner_bound_exceeded"
     CATALOG_PROJECTION_BOUND_EXCEEDED = "skill_catalog_projection_bound_exceeded"
     ACTIVE_SKILL_NOT_FOUND = "active_skill_not_found"
     PROJECTION_OVERBOUND = "skill_projection_overbound"
     USER_HOME_CONFIGURATION_INVALID = "skill_user_home_configuration_invalid"
+    LOOSE_ROOT_ALIAS = "skill_loose_root_alias"
+    BUNDLED_DEFINITIONS_UNAVAILABLE = "skill_bundled_definitions_unavailable"
+    BUNDLED_INVENTORY_MISMATCH = "skill_bundled_inventory_mismatch"
+
+
+if len(SkillDiagnosticCode) != 33:
+    raise RuntimeError("Skill diagnostic vocabulary must contain exactly 33 codes")
 
 
 class SkillSource(StrEnum):
     WORKSPACE = "workspace"
     USER = "user"
+    BUNDLED = "bundled"
 
 
 class ActiveSkillReason(StrEnum):
@@ -65,13 +72,29 @@ class SkillAuthoringDiagnosticCode(StrEnum):
     BODY_ESTIMATE_OVER_5000_TOKENS = "skill_body_estimate_over_5000_tokens"
 
 
-class SkillCatalogUnavailableReason(StrEnum):
-    DISCOVERY_RACED = "DISCOVERY_RACED"
-    DISCOVERY_OVERBOUND = "DISCOVERY_OVERBOUND"
-    CATALOG_OVERBOUND = "CATALOG_OVERBOUND"
-    PROVIDER_BUDGET_UNAVAILABLE = "PROVIDER_BUDGET_UNAVAILABLE"
+class SkillProducerKind(StrEnum):
+    LOOSE = "LOOSE"
+    BUNDLED = "BUNDLED"
+
+
+class SkillProducerUnavailableReason(StrEnum):
+    LOOSE_CONFIGURATION_INVALID = "LOOSE_CONFIGURATION_INVALID"
+    LOOSE_DISCOVERY_RACED = "LOOSE_DISCOVERY_RACED"
+    LOOSE_DISCOVERY_OVERBOUND = "LOOSE_DISCOVERY_OVERBOUND"
+    BUNDLED_RESOURCE_UNAVAILABLE = "BUNDLED_RESOURCE_UNAVAILABLE"
+    BUNDLED_INVENTORY_MISMATCH = "BUNDLED_INVENTORY_MISMATCH"
+    BUNDLED_DEFINITION_INVALID = "BUNDLED_DEFINITION_INVALID"
+    BUNDLED_DISCOVERY_RACED = "BUNDLED_DISCOVERY_RACED"
+
+
+class SkillResolutionUnavailableReason(StrEnum):
+    EFFECTIVE_WINNER_BOUND_EXCEEDED = "EFFECTIVE_WINNER_BOUND_EXCEEDED"
+    CATALOG_PROJECTION_OVERBOUND = "CATALOG_PROJECTION_OVERBOUND"
+
+
+class ActiveSkillProjectionUnavailableReason(StrEnum):
     ACTIVE_SELECTION_UNAVAILABLE = "ACTIVE_SELECTION_UNAVAILABLE"
-    USER_HOME_CONFIGURATION_INVALID = "USER_HOME_CONFIGURATION_INVALID"
+    ACTIVE_PROJECTION_OVERBOUND = "ACTIVE_PROJECTION_OVERBOUND"
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,16 +124,76 @@ class SkillDiagnostic:
 
 
 @dataclass(frozen=True, slots=True)
+class LooseSkillOrigin:
+    root_kind: LocalSkillRootKind
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.root_kind, LocalSkillRootKind):
+            raise TypeError("loose Skill root kind is not closed")
+
+
+@dataclass(frozen=True, slots=True)
+class BundledSkillOrigin:
+    package_relative_skill_directory: str
+
+    def __post_init__(self) -> None:
+        value = self.package_relative_skill_directory
+        parts = PurePosixPath(value).parts
+        if (
+            len(parts) != 2
+            or parts[0] != "bundled_skills"
+            or any(item in {"", ".", ".."} for item in parts)
+            or value.startswith("/")
+            or value.endswith("/")
+            or "\\" in value
+        ):
+            raise ValueError("bundled Skill origin is not canonical")
+
+    @property
+    def skill_name(self) -> str:
+        return PurePosixPath(self.package_relative_skill_directory).name
+
+
+SkillDefinitionOrigin: TypeAlias = LooseSkillOrigin | BundledSkillOrigin
+
+
+def skill_source_for_origin(origin: SkillDefinitionOrigin) -> SkillSource:
+    if isinstance(origin, BundledSkillOrigin):
+        return SkillSource.BUNDLED
+    if not isinstance(origin, LooseSkillOrigin):
+        raise TypeError("Skill origin union is open")
+    if origin.root_kind in {
+        LocalSkillRootKind.WORKSPACE_PULSARA,
+        LocalSkillRootKind.WORKSPACE_AGENTS,
+    }:
+        return SkillSource.WORKSPACE
+    return SkillSource.USER
+
+
+def skill_origin_label(origin: SkillDefinitionOrigin) -> str:
+    if isinstance(origin, BundledSkillOrigin):
+        return "bundled:pulsara-agent"
+    if not isinstance(origin, LooseSkillOrigin):
+        raise TypeError("Skill origin union is open")
+    return {
+        LocalSkillRootKind.WORKSPACE_PULSARA: "workspace:.pulsara/skills",
+        LocalSkillRootKind.WORKSPACE_AGENTS: "workspace:.agents/skills",
+        LocalSkillRootKind.USER_PULSARA: "user:${PULSARA_HOME}/skills",
+        LocalSkillRootKind.USER_AGENTS: "user:~/.agents/skills",
+    }[origin.root_kind]
+
+
+@dataclass(frozen=True, slots=True)
 class SkillProjectionResolveContext:
-    """Trigger-specific input resolved against one frozen Skill discovery."""
+    """Trigger-specific input resolved against one frozen effective catalog."""
 
     user_input: str
     active_skill_names: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)
-class LocalSkillManifest:
-    """One validated Agent Skills SKILL.md document."""
+class SkillManifest:
+    """One validated, source-neutral Agent Skills definition candidate."""
 
     name: str
     description: str
@@ -123,15 +206,20 @@ class LocalSkillManifest:
     body: str
     raw_document_digest: str
     manifest_semantic_fingerprint: str
-    root_kind: LocalSkillRootKind
+    origin: SkillDefinitionOrigin
+    diagnostic_codes: tuple[SkillDiagnosticCode, ...] = ()
     authoring_diagnostic_codes: tuple[SkillAuthoringDiagnosticCode, ...] = ()
     raw_document: str = field(default="", repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        if not isinstance(self.root_kind, LocalSkillRootKind):
-            raise TypeError("Skill root kind is not closed")
+        if not isinstance(self.origin, (LooseSkillOrigin, BundledSkillOrigin)):
+            raise TypeError("Skill manifest origin is not closed")
         if self.path.name != "SKILL.md" or self.base_dir != self.path.parent:
             raise ValueError("Skill physical identity is inconsistent")
+        if isinstance(self.origin, BundledSkillOrigin) and (
+            self.origin.skill_name != self.name
+        ):
+            raise ValueError("bundled Skill origin/name join conflicts")
         if not self.name or not self.description or not self.location:
             raise ValueError("Skill manifest identity is incomplete")
         if self.metadata != tuple(sorted(self.metadata)) or len(
@@ -142,6 +230,11 @@ class LocalSkillManifest:
             raise ValueError("Skill raw document digest is invalid")
         if not self.manifest_semantic_fingerprint.startswith("sha256:"):
             raise ValueError("Skill semantic fingerprint is invalid")
+        if len(set(self.diagnostic_codes)) != len(self.diagnostic_codes) or any(
+            not isinstance(item, SkillDiagnosticCode)
+            for item in self.diagnostic_codes
+        ):
+            raise ValueError("Skill candidate diagnostics are invalid")
         if len(set(self.authoring_diagnostic_codes)) != len(
             self.authoring_diagnostic_codes
         ) or any(
@@ -152,12 +245,99 @@ class LocalSkillManifest:
 
     @property
     def source(self) -> SkillSource:
-        if self.root_kind in {
-            LocalSkillRootKind.WORKSPACE_PULSARA,
-            LocalSkillRootKind.WORKSPACE_AGENTS,
-        }:
-            return SkillSource.WORKSPACE
-        return SkillSource.USER
+        return skill_source_for_origin(self.origin)
+
+    @property
+    def origin_label(self) -> str:
+        return skill_origin_label(self.origin)
+
+
+class SkillCandidateIssueKind(StrEnum):
+    INVALID = "INVALID"
+    SHADOWED = "SHADOWED"
+
+
+@dataclass(frozen=True, slots=True)
+class InvalidSkillCandidateIssue:
+    path: Path
+    origin: SkillDefinitionOrigin
+    diagnostics: tuple[SkillDiagnostic, ...]
+    declared_name: str | None = None
+    kind: SkillCandidateIssueKind = field(
+        default=SkillCandidateIssueKind.INVALID, init=False
+    )
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.origin, (LooseSkillOrigin, BundledSkillOrigin)):
+            raise TypeError("invalid candidate origin is not closed")
+        if not self.diagnostics or any(
+            item.path != self.path for item in self.diagnostics
+        ):
+            raise ValueError("invalid candidate diagnostics are incomplete")
+
+
+@dataclass(frozen=True, slots=True)
+class ShadowedSkillCandidateIssue:
+    path: Path
+    origin: SkillDefinitionOrigin
+    name: str
+    winner_origin: SkillDefinitionOrigin
+    winner_path: Path
+    diagnostic_codes: tuple[SkillDiagnosticCode, ...] = ()
+    kind: SkillCandidateIssueKind = field(
+        default=SkillCandidateIssueKind.SHADOWED, init=False
+    )
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.origin, (LooseSkillOrigin, BundledSkillOrigin)) or not (
+            isinstance(self.winner_origin, (LooseSkillOrigin, BundledSkillOrigin))
+        ):
+            raise TypeError("shadowed candidate origins are not closed")
+        if not self.name or self.path == self.winner_path:
+            raise ValueError("shadowed candidate identity is incomplete")
+        if len(set(self.diagnostic_codes)) != len(self.diagnostic_codes) or any(
+            not isinstance(item, SkillDiagnosticCode)
+            for item in self.diagnostic_codes
+        ):
+            raise ValueError("shadowed candidate diagnostics are invalid")
+
+
+SkillCandidateIssue: TypeAlias = (
+    InvalidSkillCandidateIssue | ShadowedSkillCandidateIssue
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ProducerUnavailableCause:
+    producer_kind: SkillProducerKind
+    reason: SkillProducerUnavailableReason
+    diagnostics: tuple[SkillDiagnostic, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.producer_kind, SkillProducerKind) or not isinstance(
+            self.reason, SkillProducerUnavailableReason
+        ):
+            raise TypeError("Skill producer unavailable cause is not closed")
+        if not self.diagnostics:
+            raise ValueError("Skill producer unavailable cause has no diagnostic")
+        loose_reason = self.reason.value.startswith("LOOSE_")
+        if loose_reason != (self.producer_kind is SkillProducerKind.LOOSE):
+            raise ValueError("Skill producer unavailable reason conflicts")
+
+
+@dataclass(frozen=True, slots=True)
+class ResolutionUnavailableCause:
+    reason: SkillResolutionUnavailableReason
+    diagnostic: SkillDiagnostic
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.reason, SkillResolutionUnavailableReason):
+            raise TypeError("Skill resolution unavailable reason is not closed")
+
+
+SkillCatalogUnavailableCause: TypeAlias = (
+    ProducerUnavailableCause | ResolutionUnavailableCause
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,13 +345,21 @@ class ResolvedSkillCatalogEntry:
     name: str
     description: str
     location: str
-    source: SkillSource
+    origin: SkillDefinitionOrigin
 
     def __post_init__(self) -> None:
-        if not isinstance(self.source, SkillSource):
-            raise TypeError("Skill catalog source is not closed")
+        if not isinstance(self.origin, (LooseSkillOrigin, BundledSkillOrigin)):
+            raise TypeError("Skill catalog origin is not closed")
         if not self.name or not self.description or not self.location:
             raise ValueError("Skill catalog entry is incomplete")
+
+    @property
+    def source(self) -> SkillSource:
+        return skill_source_for_origin(self.origin)
+
+    @property
+    def origin_label(self) -> str:
+        return skill_origin_label(self.origin)
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,7 +370,7 @@ class ActiveSkillInjection:
     location: str
     body: str
     reason: ActiveSkillReason
-    source: SkillSource
+    origin: SkillDefinitionOrigin
     manifest_semantic_fingerprint: str
     body_digest: str
     raw_document_digest: str
@@ -190,8 +378,8 @@ class ActiveSkillInjection:
     def __post_init__(self) -> None:
         if not isinstance(self.reason, ActiveSkillReason):
             raise TypeError("active Skill reason is not closed")
-        if not isinstance(self.source, SkillSource):
-            raise TypeError("active Skill source is not closed")
+        if not isinstance(self.origin, (LooseSkillOrigin, BundledSkillOrigin)):
+            raise TypeError("active Skill origin is not closed")
         if self.path.name != "SKILL.md" or self.base_dir != self.path.parent:
             raise ValueError("active Skill physical identity is inconsistent")
         for value in (
@@ -201,3 +389,37 @@ class ActiveSkillInjection:
         ):
             if not value.startswith("sha256:"):
                 raise ValueError("active Skill fingerprint is invalid")
+
+    @property
+    def source(self) -> SkillSource:
+        return skill_source_for_origin(self.origin)
+
+
+__all__ = [
+    "ActiveSkillInjection",
+    "ActiveSkillProjectionUnavailableReason",
+    "ActiveSkillReason",
+    "BundledSkillOrigin",
+    "InvalidSkillCandidateIssue",
+    "LooseSkillOrigin",
+    "ProducerUnavailableCause",
+    "ResolvedSkillCatalogEntry",
+    "ResolutionUnavailableCause",
+    "ShadowedSkillCandidateIssue",
+    "SkillAuthoringDiagnosticCode",
+    "SkillCandidateIssue",
+    "SkillCandidateIssueKind",
+    "SkillCatalogUnavailableCause",
+    "SkillDefinitionOrigin",
+    "SkillDiagnostic",
+    "SkillDiagnosticCode",
+    "SkillDiagnosticSeverity",
+    "SkillManifest",
+    "SkillProducerKind",
+    "SkillProducerUnavailableReason",
+    "SkillProjectionResolveContext",
+    "SkillResolutionUnavailableReason",
+    "SkillSource",
+    "skill_origin_label",
+    "skill_source_for_origin",
+]

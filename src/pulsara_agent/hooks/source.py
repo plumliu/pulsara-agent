@@ -223,11 +223,13 @@ def _read_regular_file_no_follow(
     allowed_root: Path,
     deadline_monotonic: float | None,
 ) -> bytes:
-    root = allowed_root.expanduser().resolve()
+    configured_root = Path(os.path.abspath(allowed_root.expanduser()))
+    configured_expected = Path(os.path.abspath(expected.expanduser()))
     try:
-        relative = expected.relative_to(root)
+        relative = configured_expected.relative_to(configured_root)
     except ValueError as exc:
         raise ValueError("Hook source escapes its allowed root") from exc
+    root = configured_root.resolve()
     parts = relative.parts
     if not parts or any(part in {"", ".", ".."} for part in parts):
         raise ValueError("Hook source path is invalid")

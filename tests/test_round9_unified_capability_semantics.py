@@ -35,10 +35,9 @@ from pulsara_agent.capability.contracts import (
     tool_capability_version_ref,
 )
 from pulsara_agent.capability.local_skills import (
-    LocalSkillDiscovery,
-    LocalSkillProvider,
-    SkillDiscoveryDisposition,
+    LooseSkillDefinitionProducer,
 )
+from pulsara_agent.capability.resolver import CompleteEffectiveSkillCatalogInspection
 from pulsara_agent.capability.planner import (
     CapabilityPlanningError,
     KernelToolCapabilityPlanner,
@@ -49,10 +48,10 @@ from pulsara_agent.capability.registry import (
     freeze_tool_planning_input,
 )
 from pulsara_agent.conversation_kernel.capability_composition import (
-    PreparedLocalSkillCatalogSourceSnapshot,
+    PreparedSkillCatalogSourceSnapshot,
     PreparedMcpCapabilitySourceSnapshotSet,
     freeze_capability_registry_from_owner_snapshots,
-    issue_local_skill_catalog_source_snapshot,
+    issue_skill_catalog_source_snapshot,
     issue_mcp_capability_source_snapshot_set,
     issue_sealed_builtin_capability_snapshot,
 )
@@ -141,6 +140,18 @@ def _source_snapshot(
     )
 
 
+def _empty_skill_inspection() -> CompleteEffectiveSkillCatalogInspection:
+    producer = LooseSkillDefinitionProducer(
+        user_product_skills_root=Path.cwd() / ".test-round9-user-product",
+        user_agents_skills_root=Path.cwd() / ".test-round9-user-agents",
+    )
+    return CompleteEffectiveSkillCatalogInspection(
+        root_policy=producer.prepare_root_policy(Path.cwd()),
+        winners=(),
+        candidate_issues=(),
+    )
+
+
 def _planning_view(
     *,
     builtin_facts: tuple,
@@ -188,18 +199,12 @@ def _planning_view(
         inspection_inputs=(),
         owner_authenticity=object(),
     )
-    root_policy = LocalSkillProvider(include_user_skills=False).prepare_root_policy(
-        Path.cwd(),
-    )
-    discovery = LocalSkillDiscovery(
-        root_policy=root_policy,
-        disposition=SkillDiscoveryDisposition.COMPLETE,
-    )
-    skill_owner = issue_local_skill_catalog_source_snapshot(
+    inspection = _empty_skill_inspection()
+    skill_owner = issue_skill_catalog_source_snapshot(
         conversation_scope_kind=conversation_scope_kind,
         scope_subagent_task_id=scope_subagent_task_id,
         source_snapshot=skill_snapshot,
-        discovery=discovery,
+        inspection=inspection,
         owner_authenticity=object(),
     )
     registry = freeze_capability_registry_from_owner_snapshots(
@@ -260,7 +265,7 @@ def _planning_view(
     )
     skill_input = FrozenSkillProjectionInput(
         source_snapshot=skill_snapshot,
-        discovery=discovery,
+        inspection=inspection,
     )
     _cut, tool_view, _skill_view = freeze_capability_dispatch_cut_and_views(
         conversation_scope_kind=conversation_scope_kind,
@@ -307,17 +312,11 @@ def test_round9_owner_snapshot_authenticity_rejects_same_shape_forgery() -> None
         source_id="local-skills",
         facts=(),
     )
-    root_policy = LocalSkillProvider(include_user_skills=False).prepare_root_policy(
-        Path.cwd(),
-    )
-    forged = PreparedLocalSkillCatalogSourceSnapshot(
+    forged = PreparedSkillCatalogSourceSnapshot(
         conversation_scope_kind=ModelInputScopeKind.ROOT,
         scope_subagent_task_id=None,
         source_snapshot=snapshot,
-        discovery=LocalSkillDiscovery(
-            root_policy=root_policy,
-            disposition=SkillDiscoveryDisposition.COMPLETE,
-        ),
+        inspection=_empty_skill_inspection(),
         owner_authenticity=object(),
         _issuer=object(),
     )
@@ -1172,7 +1171,7 @@ def test_round9_owner_carriers_do_not_retain_decorative_proof_fields() -> None:
         item.name for item in fields(PreparedMcpCapabilitySourceSnapshotSet)
     }
     assert "root_policy_fingerprint" not in {
-        item.name for item in fields(PreparedLocalSkillCatalogSourceSnapshot)
+        item.name for item in fields(PreparedSkillCatalogSourceSnapshot)
     }
 
 
@@ -1217,7 +1216,7 @@ def test_round9_owner_snapshot_issuers_and_registry_merge_have_closed_callers() 
         "issue_mcp_capability_source_snapshot_set": {
             "conversation_kernel/mcp/supervisor.py",
         },
-        "issue_local_skill_catalog_source_snapshot": {
+        "issue_skill_catalog_source_snapshot": {
             "conversation_kernel/capability.py",
         },
         "freeze_capability_registry_from_owner_snapshots": {
