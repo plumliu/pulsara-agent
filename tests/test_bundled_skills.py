@@ -90,7 +90,7 @@ def test_process_binding_reuses_descriptor_and_rejects_rebound_root(
         displaced = tmp_path / "displaced-bundled"
         resource_root.rename(displaced)
         replacement = _write_bundled_root(resource_root)
-        (replacement / EXPECTED_BUNDLED_SKILL_NAMES[0] / "SKILL.md").write_text(
+        (replacement / "pulsara-skill-creator" / "SKILL.md").write_text(
             "---\nname: pulsara-skill-creator\n"
             "description: Rebound bytes must not be adopted.\n---\nnew\n",
             encoding="utf-8",
@@ -342,6 +342,11 @@ def test_closed_distribution_binding_observes_typed_unavailable() -> None:
 def test_installed_bundled_inventory_is_exact_and_ordinary_readable(
     tmp_path: Path,
 ) -> None:
+    assert EXPECTED_BUNDLED_SKILL_NAMES == (
+        "pulsara-plugin-installer",
+        "pulsara-skill-creator",
+        "pulsara-skill-installer",
+    )
     with BundledSkillDistributionBindingOwner() as owner:
         result = BundledSkillDefinitionProducer(owner).observe()
 
@@ -374,6 +379,32 @@ def test_installed_bundled_inventory_is_exact_and_ordinary_readable(
     assert reference_read.status is ToolResultState.SUCCESS
     assert json.loads(skill_read.output)["path"] == str(installer.path)
     assert json.loads(reference_read.output)["path"] == str(reference)
+
+    plugin_installer = next(
+        item for item in result.candidates if item.name == "pulsara-plugin-installer"
+    )
+    plugin_skill_read = ReadFileTool(tmp_path).execute(
+        ToolCall("call:plugin-skill", "read_file", {"path": str(plugin_installer.path)})
+    )
+    assert plugin_skill_read.status is ToolResultState.SUCCESS
+    assert json.loads(plugin_skill_read.output)["path"] == str(plugin_installer.path)
+    for reference_name in (
+        "conversion-contract.md",
+        "codex-compatible.md",
+        "pulsara-hook-extension.md",
+    ):
+        plugin_reference = plugin_installer.base_dir / "references" / reference_name
+        plugin_reference_read = ReadFileTool(tmp_path).execute(
+            ToolCall(
+                f"call:plugin-reference:{reference_name}",
+                "read_file",
+                {"path": str(plugin_reference)},
+            )
+        )
+        assert plugin_reference_read.status is ToolResultState.SUCCESS
+        assert json.loads(plugin_reference_read.output)["path"] == str(
+            plugin_reference
+        )
 
 
 def _inspect(

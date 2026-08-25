@@ -1,78 +1,126 @@
-# Round 9.3：Agent Plugin Bundle、Hook Adapter 与 Subagent Preset 实施规格
+# Round 9.3：Local Agent Plugin Package、第三 Skill Producer 与 MCP/Hook Adapter 实施规格
 
-> 状态：**DEFERRED — 暂不实施，NOT ACTIVATED**
+> 状态：**READY FOR IMPLEMENTATION — NOT ACTIVATED**
 >
-> 本规格当前仅保留为后续讨论材料，不是可交给coding agent的实施authority。Plugin与Hook两项产品能力均已暂缓；Round 9.2重新闭合并明确恢复实施前，不得据本文编码Plugin store、Hook adapter、Subagent preset或任何过渡兼容结构。
+> 本文已按 2026-08-26 working-tree production truth、Agent Plugins Published 1.0.0与独立critic review完成编码前hard-cut。它不再是旧的 Plugin Skill materialization 方案；只有production code、tests、dogfood与 §15 Definition of Done 全部闭合后，才可把状态改为 `ACTIVATED`。
 >
-> 修订日期：2026-08-22
+> 修订日期：2026-08-26
 >
-> 编码前置：Round 9、Round 9.1、Round 5B、Round 10 均已 **ACTIVATED**，且[Round 9.2 independent Hook subsystem](ROUND_9_2_HOOK_SUBSYSTEM_IMPLEMENTATION_SPEC.zh.md)必须先ACTIVATED。本文只能复用它们当前的 Skill 四根目录、MCP direct/meta、shared cold-epoch assembler、compaction、ROOT-orchestrated worker task graph与唯一`KernelHookDispatcher`；不得恢复旧 registry、第五个 Skill root、compaction-private capability planner、第二套 subagent runtime或Plugin-private Hook engine。
+> 当前代码真源：`src/pulsara_agent/capability/`、`conversation_kernel/capability.py`、`mcp_config.py`、`conversation_kernel/mcp/`、`hooks/`、`conversation_kernel/host.py`、`conversation_kernel/tool_runtime.py`、`conversation_kernel/subagent.py`、`conversation_kernel/cold_epoch.py`。本文中的 owner、transaction、carrier 和调用顺序如与旧文字冲突，以实施时 working-tree production topology 为准；不得为旧稿恢复已删除的 DTO、owner、dual path 或 compatibility wrapper。
 >
-> Fingerprint 约束：[`PULSARA_FINGERPRINT_SUBTRACTION_HARD_CUT_IMPLEMENTATION_SPEC.zh.md`](PULSARA_FINGERPRINT_SUBTRACTION_HARD_CUT_IMPLEMENTATION_SPEC.zh.md) 是本文的强制上位契约。完整 frozen value 已传到消费者时不得再添加 DTO fingerprint。本文复用Round 9.2既有Hook trust digest；本轮只新增Skill安装provenance content digest，以及opaque agent-preset ref/directory cursor MAC等真正跨边界的摘要。
+> 强制上位约束：[`AGENTS.md`](AGENTS.md)、[`PULSARA_FINGERPRINT_SUBTRACTION_HARD_CUT_IMPLEMENTATION_SPEC.zh.md`](PULSARA_FINGERPRINT_SUBTRACTION_HARD_CUT_IMPLEMENTATION_SPEC.zh.md)、[`PULSARA_UNIFIED_SKILL_DEFINITION_PRODUCERS_HARD_CUT_IMPLEMENTATION_SPEC.zh.md`](PULSARA_UNIFIED_SKILL_DEFINITION_PRODUCERS_HARD_CUT_IMPLEMENTATION_SPEC.zh.md)、[`ROUND_9_2_HOOK_SUBSYSTEM_IMPLEMENTATION_SPEC.zh.md`](ROUND_9_2_HOOK_SUBSYSTEM_IMPLEMENTATION_SPEC.zh.md)、[`ROUND_9_UNIFIED_CAPABILITY_SEMANTICS_IMPLEMENTATION_SPEC.zh.md`](ROUND_9_UNIFIED_CAPABILITY_SEMANTICS_IMPLEMENTATION_SPEC.zh.md)、[`ROUND_6_MCP_PRODUCTION_CAPABILITY_IMPLEMENTATION_SPEC.zh.md`](ROUND_6_MCP_PRODUCTION_CAPABILITY_IMPLEMENTATION_SPEC.zh.md)、[`ROUND_10_HIERARCHICAL_SUBAGENT_ORCHESTRATION_IMPLEMENTATION_SPEC.zh.md`](ROUND_10_HIERARCHICAL_SUBAGENT_ORCHESTRATION_IMPLEMENTATION_SPEC.zh.md)、[`ROUND_5B_LONG_HORIZON_CONTEXT_COMPACTION_IMPLEMENTATION_SPEC.zh.md`](ROUND_5B_LONG_HORIZON_CONTEXT_COMPACTION_IMPLEMENTATION_SPEC.zh.md)。`contracts/`与archived gap index不是本轮authority；本轮不更新它们，也不更新README。
 >
-> 上位契约：[Round 3 structured compiler](ROUND_3_STRUCTURED_MODEL_INPUT_COMPILER_IMPLEMENTATION_SPEC.zh.md)、[Round 3.1 prefix continuity](ROUND_3_1_PROVIDER_INPUT_PREFIX_CONTINUITY_IMPLEMENTATION_SPEC.zh.md)、[Round 5A execution envelope](ROUND_5_LONG_HORIZON_EXECUTION_ENVELOPE_IMPLEMENTATION_SPEC.zh.md)、[Round 5B compaction](ROUND_5B_LONG_HORIZON_CONTEXT_COMPACTION_IMPLEMENTATION_SPEC.zh.md)、[Round 6 MCP](ROUND_6_MCP_PRODUCTION_CAPABILITY_IMPLEMENTATION_SPEC.zh.md)、[Round 7 observation](ROUND_7_MODEL_VISIBLE_FAILURE_AND_TOOL_OBSERVATION_IMPLEMENTATION_SPEC.zh.md)、[Round 7.1 ToolResult projection](ROUND_7_1_PROVIDER_VISIBLE_TOOL_RESULT_PROJECTION_IMPLEMENTATION_SPEC.zh.md)、[Round 9 unified capability](ROUND_9_UNIFIED_CAPABILITY_SEMANTICS_IMPLEMENTATION_SPEC.zh.md)、[Round 9.1 Agent Skills](ROUND_9_1_AGENT_SKILLS_STANDARD_IMPLEMENTATION_SPEC.zh.md)、[Round 10 subagent graph](ROUND_10_HIERARCHICAL_SUBAGENT_ORCHESTRATION_IMPLEMENTATION_SPEC.zh.md)、[Gap Index](archived_docs/POST_HARD_CUT_PRODUCT_CAPABILITY_GAP_INDEX.zh.md)
->
-> 公开兼容基线：[Agent Plugins Specification 1.0.0](https://agent-plugins.org/specification)（Published）、[Codex Plugin packaging](https://developers.openai.com/plugins/build/plugins)、[Codex Hooks](https://learn.chatgpt.com/docs/hooks)、[Claude Code Plugins](https://code.claude.com/docs/en/plugins)、[Claude Code Subagents](https://code.claude.com/docs/en/sub-agents)
+> 公开格式基线：[Agent Plugins Specification 1.0.0](https://agent-plugins.org/specification)（Published）。实施者还必须窄读官方[manifest](https://agent-plugins.org/plugin-authors/manifest)、[Skills](https://agent-plugins.org/plugin-authors/skills)、[MCP servers](https://agent-plugins.org/plugin-authors/mcp-servers)、[client extensions](https://agent-plugins.org/plugin-authors/client-extensions)、[loading/discovery](https://agent-plugins.org/client-implementers/loading-and-discovery)、[MCP runtime](https://agent-plugins.org/client-implementers/mcp-runtime)、[conformance](https://agent-plugins.org/client-implementers/conformance)与[schemas](https://agent-plugins.org/schemas)。Published prose与schema若有边界差异，以1.0 normative prose为准，并按本文冻结的diagnostic/failure isolation投影；不得从1.1 working draft补语义。Pulsara V1的package identity与portable component只来自该标准；Codex只提供本文明确列出的Hook/authoring文件语义adapter，不构成第二套package identity或whole-package profile。
 
-本文把 Plugin 定义为**可安装、可启用、可诊断的组件组合包**。Plugin 不是第四种 capability leaf，不拥有通用 `invoke()`，也不拥有 Skill、MCP、Tool、Subagent 或 canonical conversation 的第二套 authority。
+本文把 Plugin 定义为一个**本地安装、显式启用、可诊断的immutable component package**。Plugin不是第四种capability leaf，不拥有generic `invoke()`，也不拥有第二套Skill catalog、MCP supervisor、Hook engine、subagent runtime、permission owner或provider-prefix owner。
 
-本轮支持四类包内贡献：
+本轮支持三类package contribution：
 
-1. Agent Skills；
-2. MCP server definitions；
-3. Codex-compatible lifecycle Hooks；
-4. Claude-compatible、受限的 Subagent presets。
+1. Agent Plugins 1.0 portable Skills；
+2. Agent Plugins 1.0 portable MCP server definitions；
+3. `dev.pulsara/hooks/hooks.json`中的Codex-compatible command Hooks。
 
-其中前两类进入现有 Round 9/9.1 owner；Hook只经adapter进入Round 9.2已经激活的process-local lifecycle engine；Subagent preset只为Round 10现有worker task提供可选、低authority启动说明，不改变其拓扑、权限、工具或durable task model。
+Portable core只有前两项；第三项是Pulsara client extension，不冒充Agent Plugins 1.0 portable component。
 
 ---
 
 ## 0. 最终产品形状
 
-### 0.1 Plugin 只负责组合
+### 0.1 一个package lifecycle，三个既有consumer
 
 ```text
-InstalledPluginPackage
-  ├─ Skill directories
-  │    -> materialize into one existing Pulsara Skill root
-  │    -> LocalSkillProvider performs ordinary complete scan
-  ├─ MCP server configs
-  │    -> merge into the one existing resolved MCP config inventory
-  │    -> MCP supervisor performs ordinary reload / direct-meta routing
-  ├─ Hook definitions
-  │    -> Plugin Hook contribution adapter normalizes package config/provenance
-  │    -> Round 9.2 generic trust decides runnable disposition
-  │    -> one generic process-local Hook dispatcher and executor
-  └─ Subagent presets
-       -> list_agent_presets issues exact opaque refs
-       -> Round 10 child cold seed consumes one optional preset body
+local Plugin source directory
+  -> one Agent Plugins 1.0 parser
+  -> one narrow immutable package publisher
+  -> one enabled-package observation owner
+  -> FrozenEnabledPluginView
+       ├─ FrozenPluginSkillDefinitions
+       │    -> existing parse_skill_document + placement validator
+       │    -> existing central SkillCatalogResolver
+       │    -> the same SKILL_CATALOG / ACTIVE_SKILL / read_file path
+       ├─ normalized McpServerConfig values
+       │    -> existing MCP supervisor / DIRECT-META / permission-effect owners
+       ├─ FrozenHookSourceSnapshot values
+       │    -> existing config_parser / HookTrustStore / KernelHookDispatcher
 ```
 
-Plugin 不回答：
+Plugin package owner只回答：
 
-- Tool 是否获得执行 permission；
-- MCP slot 是否 READY；
-- Skill 是否应该被模型采用；
-- Hook 是否可以改写 canonical rows；
-- worker 是否能递归创建 worker；
-- Plugin 是否可以把任意 Python 模块加载进 Host 进程。
+- 哪些local package versions完整安装；
+- 哪个USER或exact WORKSPACE instance是current；
+- 该instance是否enabled；
+- current immutable root、persistent data root和component observations是什么；
+- 哪些old immutable roots可由显式GC安全回收。
 
-### 0.2 四类贡献的 authority
+它不回答：
 
-| 组件 | Provider 暴露 | 最终 authority | Plugin 可做什么 |
-|---|---|---|---|
-| Skill | 现有 `SKILL_CATALOG` + ordinary `read_file` | Round 9.1 LocalSkillProvider 与 filesystem | 原样物化目录并记录安装 provenance |
-| MCP | existing DIRECT tool 或 new-MCP meta route | Plugin enable授权server spawn/connect；Round 6/9 supervisor、slot、tool permission/effect与attempt拥有后续调用 | 提供普通 `McpServerConfig` 输入 |
-| Hook | 成功的 `additionalContext` 仅形成 append-only `UNTRUSTED_OBSERVATION` | lifecycle operation仍归User/Tool/Permission/Compaction/Subagent原owner；Round 9.2 generic trust/dispatcher拥有trust与process-local attempt | Plugin adapter贡献已归一化definitions/provenance/environment；不拥有trust或dispatcher |
-| Subagent preset | ROOT 通过目录工具取得 opaque ref；child 启动时得到低 authority preset body | Round 10 task/coordinator/cold assembler | 提供 name、description 与正文；不拥有 executor |
+- Skill winner或是否activation；
+- MCP tool是否READY、DIRECT、META、permitted或safe；
+- Hook command是否trusted、match、block或追加context；
+- worker是否可启动、能用什么工具、用哪个模型；
+- canonical conversation、ToolResult或compaction是否提交。
 
-### 0.3 Hook vocabulary完全继承Round 9.2
+### 0.2 Current baseline 与本轮真实hard cut
 
-Round 9.3不声明新的Hook event。Plugin package中的Codex/Claude Hook names只经adapter映射到Round 9.2已ACTIVATED的11项`HookEventType`；unknown/unsupported event在最窄entry上typed skip。Plugin不能复用`CommittedEventType`/`LiveEventType`，也不能扩展generic control vocabulary。
+当前production已经是：
 
-### 0.4 Prefix 不变量
+```text
+BundledSkillDefinitionProducer ┐
+                               ├─ SkillCatalogResolver -> one effective catalog
+LooseSkillDefinitionProducer   ┘
 
-同一 exact ROOT/child scope、同一 continuity epoch：
+Local USER/WORKSPACE Hook sources -> one KernelHookDispatcher
+local/Host MCP configs             -> one MCP supervisor
+Round 10 task graph                 -> one child runtime/cold assembler
+```
+
+本轮必须一次性变成：
+
+```text
+BundledSkillDefinitionProducer ┐
+LooseSkillDefinitionProducer   ├─ SkillCatalogResolver -> one effective catalog
+PluginSkillDefinitionProducer  ┘
+```
+
+这必须是显式third input和closed union hard cut，不能改成：
+
+- `list[SkillProvider]`；
+- `register_producer()`；
+- entry-point discovery；
+- service locator；
+- generic mutable registry；
+- generation-indexed view map；
+- digest-to-object registry。
+
+Four loose Skill roots及用户直接copy/edit/delete的Round 9.1/Unified product semantics完全保留；Plugin package不会接管或监听它们。与loose Skill不同，Plugin含process-bearing MCP/Hook等components，只有本文typed install + instance state才是Plugin enablement truth；手工把目录复制进managed `packages/`不会安装或启用Plugin，也不会被Runtime猜测采用。
+
+### 0.3 旧9.3设计必须完整删除
+
+以下旧稿结构不保留compatibility wrapper或dormant branch：
+
+- 把Plugin Skills复制到`${PULSARA_HOME}/skills`或`<workspace>/.pulsara/skills`；
+- `.pulsara-skill-source.json` provenance sidecar；
+- `PluginSkillMaterializer`；
+- pre-scan reconciler、projection drift、orphan Skill cleanup；
+- Plugin Skill tree/content ownership digest；
+- `compute_skill_dir_hash()`复活或任何替代recursive hash；
+- Plugin作为第五个loose Skill root；
+- Plugin-private Skill scanner/parser/resolver/activation/read tool；
+- root `hooks/hooks.json`或vendor manifest的隐式profile猜测；
+- `.codex-plugin/plugin.json`的identity/priority fallback；
+- multi-manifest name precedence；
+- `hooks/parser.py`旧模块名；唯一production parser是`hooks/config_parser.py`；
+- Plugin provenance注入generic Hook stdin或provider-visible `HOOK_CONTEXT`；
+- Hook output head/tail preview或Plugin-private artifact path；
+- `PluginHookDispatcher`、`PluginHookTrustStore`、`PLUGIN_HOOK_CONTEXT`；
+- dormant `agents/` inventory而没有Round 10 consumer；
+- package snapshot/contribution-plan/root-policy fingerprints。
+
+仓库中尚无production `src/pulsara_agent/plugins/`，因此本轮不存在外部deployed Plugin state需要兼容。新实现只形成一条路径。
+
+### 0.4 Prefix continuity
+
+同一exact ROOT/child scope、同一installed continuity epoch：
 
 ```text
 SYSTEM[n + 1]   == SYSTEM[n]
@@ -80,1092 +128,1922 @@ tools[n + 1]    == tools[n]
 messages[n + 1] == messages[n] || append_only_suffix
 ```
 
-因此：
+所以：
 
-- Plugin enable/disable 不热改 `BASE_SYSTEM` 或 provider `tools[]`；
-- new/changed MCP 复用 Round 9 late META catalog；
-- disconnected installed DIRECT descriptor 继续保留并由现有 unavailable gate 拒绝；
-- Skill materialization变化只由 Round 9.1 产生 ordinary append-only catalog successor；
-- Hook context 只追加来源无关的 `HOOK_CONTEXT` user-role observation；
-- Subagent preset 只在新 child cold epoch安装；
-- compaction successor 是合法 cold rebase：它重新读取current Plugin-derived Skill/MCP/Hook目录状态；已经admit的active child则继承其predecessor中已安装的exact preset snapshot，不用current package偷换启动说明；
-- Hook definition refresh 只影响未来 event，不回写历史 Hook output。
+- Plugin install/replace/enable/disable/remove不直接重写running Host prefix；
+- Plugin Skill变化只经existing Skill safe-point source追加suffix；
+- late Plugin MCP只经existing `MCP_CATALOG`和META route追加suffix；
+- 已安装DIRECT descriptor不从same epoch `tools[]`热删；不可用时由existing gate拒绝；
+- Hook output只经source-neutral `HOOK_CONTEXT`追加user-role untrusted suffix；
+- ordinary cold open与explicitly adopted compaction successor仍是唯一可重建SYSTEM/tools的boundaries；
+- Plugin reload、Hook trust变化、MCP reconnect或package GC不得创造第三种rebase boundary。
 
-### 0.5 Durability 与 oracle
+### 0.5 Small durability 与oracle
 
-本轮允许的跨进程状态只有：
+本轮允许的新增durable local product state只有：
 
-- managed Plugin package copy；
-- enabled user/workspace Plugin 配置；
-- Plugin writable data directory；
-- 已物化 Skill 的 owner provenance sidecar。
+- immutable managed Plugin package version directories；
+- USER/exact WORKSPACE current instance state；
+- per-instance writable Plugin data directory；
+- package/state/GC所需local OS lock files。
 
-Plugin Hook的exact-definition trust digest由Round 9.2 generic `HookTrustStore`既有状态覆盖，不是本轮新增的Plugin状态。
-
-它们是本地产品配置与安装状态，不是 conversation execution recovery。
+它们是local installation/configuration truth，不是conversation execution recovery。Hook trust继续由Round 9.2现有generic `HookTrustStore`拥有。
 
 本轮不新增：
 
-- PostgreSQL relation、column、migration；
-- committed/live event、subject slot、append guard；
-- durable job、receipt、checkpoint、reducer、replay、repair graph；
-- Hook execution history relation；
-- durable Plugin capability graph；
-- cross-Host Hook、MCP、Skill 或 worker execution recovery。
+- PostgreSQL relation、column或migration；
+- CommittedEventType、LiveEventType、subject、guard或product relation；
+- durable job、receipt、history、checkpoint、replay、repair queue或recovery graph；
+- watcher、registry generation、version→consumer map或lease relation；
+- Plugin execution history；
+- cross-Host Hook/MCP/worker execution recovery。
 
-激活后的architecture oracle继承Round 9.2已经扩展的七维口径；Round 9.3不得再增加任何一维或扩大任何计数：
+七维oracle保持：
 
 ```text
-Committed events   29
-Live events        24
-Subject slots      11
-Append guards       1
-Product relations  25
-Durable jobs        0
-Hook event types   11
+29 / 24 / 11 / 1 / 25 / 0 / 11
 ```
 
-固定顺序简写为`29 / 24 / 11 / 1 / 25 / 0 / 11`。最后一项是Round 9.2拥有的`HookEventType` vocabulary；Round 9.3只把Plugin声明映射到这11项既有类型，不新增第12项，也不建立Plugin-private Hook event enum。
+最后一项仍是Round 9.2唯一`HookEventType`的11项vocabulary。
 
 ---
 
-## 1. 范围与明确非目标
+## 1. Scope 与明确非目标
 
 ### 1.1 本轮实现
 
-1. Agent Plugins 1.0.0 root `plugin.json` parser；
-2. Codex `.codex-plugin/plugin.json` primary host adapter；
-3. Claude `.claude-plugin/plugin.json` secondary host adapter；
-4. local path package add/replace/remove/enable/disable/list/doctor/gc；
-5. user scope与exact workspace scope composition；
-6. portable/Codex/Claude Skill 与 MCP normalization；
-7. Codex/Claude package Hook declaration adapter，复用Round 9.2当前公开11-event command contract；
-8. Claude `agents/*.md` 的安全最小子集与 Round 10 optional preset ref；
-9. mid-session explicit `KernelHostCore.reload_plugins()`与固定ROOT `reload_plugins` Builtin；
-10. strict-prefix、failure isolation、physical close与real-provider dogfood。
+1. Agent Plugins 1.0.0 root `plugin.json` offline parser与validator；
+2. fixed portable `skills/`与`mcp.json` discovery；
+3. fixed Pulsara extension directory `dev.pulsara/`；
+4. local directory validate/add/replace/enable/disable/remove/list/doctor/gc；
+5. USER与exact WORKSPACE instance scope；
+6. immutable managed version roots与persistent data roots；
+7. complete enabled-package observation与process-local current view；
+8. explicit Plugin Skill third producer与seven-tier resolver；
+9. portable MCP到existing `McpServerConfig`的adapter；
+10. command Hook source adapter，复用Round 9.2的11 lifecycle events；
+11. fixed ROOT-only `reload_plugins` Builtin；
+12. CLI/in-process service、diagnostics、packaging、tests与real-provider dogfood；
+13. 一个package内只读`pulsara-plugin-installer` bundled Skill：strict validation成功时不转换；只有deterministic Codex package-format差异才指导模型读取实际Plugin内容与对应Codex source reference，生成Agent Plugins 1.0临时候选并重新交给同一production validator。Hook target必须exact join §9的event/matcher/stdin/environment/output/control/lifecycle；Skill不是第二parser、install authority或Runtime compatibility profile。
 
 ### 1.2 本轮明确不实现
 
-- remote marketplace、Git/npm download、publisher signing、auto-update、dependency resolver；
-- Codex Apps、`.app.json`、UI、assets renderer、marketplace metadata；
-- Claude LSP、monitors、PATH injection、settings、themes、output styles、commands；
-- 修改或复制Round 9.2已经实现的USER/WORKSPACE custom Hook config/runtime；managed Hook仍不支持；
-- Hook `prompt`、`agent`、`http`、`mcp_tool` handler；
-- Hook argument rewrite、ToolResult rewrite或permission policy mutation；
-- Plugin Python entry point、dynamic import、shared-library injection；
-- Plugin-defined permission preset、effect taxonomy、provider adapter或model target；
-- Plugin-defined durable event/job/repository callback；
-- subagent tool allowlist、model override、memory、worktree isolation、recursive worker或persistent named-agent session；
-- 在 provider prompt 中自动注入完整 Plugin package catalog。
+- remote marketplace、Git/npm download、archive extraction、publisher signing、auto-update；
+- dependency installation或package lifecycle scripts；
+- OpenAI hosted Plugins、Apps UI或universal directory submission；
+- production parser/Runtime中的Codex whole-package manifest profile；
+- `.codex-plugin/plugin.json`、`.app.json`、marketplace manifest；
+- Codex commands、LSP、monitors、themes、output styles、settings或PATH injection；
+- Agent Plugins future component version guessing；
+- MCP OAuth、credential acquisition或secret store；
+- Hook `http`、`mcp_tool`、`prompt`或`agent` handler；
+- Hook argument rewrite、ToolResult rewrite或output suppression；
+- Plugin Python import/entry point/shared-library injection；
+- Plugin-defined permission/effect/model/provider/worker profile；
+- named persistent agent session、recursive worker或Plugin-private task graph；
+- Plugin uninstall rollback、package downgrade history或auto-GC；
+- provider-visible install/update/remove management tool；
+- provider prompt中的完整Plugin inventory。
 
-### 1.3 Hard-cut 删除的旧稿结构
+### 1.3 Vendor compatibility的精确定义
 
-以下旧设计不保留兼容 wrapper：
+Pulsara本轮的安装单元是Agent Plugins 1.0 package，不声称直接安装任意Codex package。
 
-- Plugin Skill 作为第五个 `SAFE_POINT_REFRESHABLE` Skill root；
-- `skill_root_registrations`；
-- `<plugin-id>:<skill-name>` 的 Skill 重命名；
-- dormant `agents/` inventory；
-- `PluginHookActivationContextOwner`；
-- `PluginHookDispatcher`与`PLUGIN_HOOK_CONTEXT`这类把通用Hook execution绑死到Plugin来源的命名/owner；
-- Plugin-wide generation、package snapshot fingerprint、contribution-plan fingerprint；
-- Hook registry fingerprint 与 `fingerprint -> object` map；
-- “Round 5B/10 尚未实现”的 dormant producer；
-- 64 enabled plugins、16 selected handlers 等无独立产品理由的总量 caps；
-- per-file code/document/evidence SHA gates。
+兼容性仅指`dev.pulsara/hooks/hooks.json`使用Round 9.2已经冻结的Codex-compatible command Hook grammar；portable core仍严格遵守Agent Plugins 1.0。
+
+作者若要迁移Codex package，应创建root `plugin.json`并把Pulsara-specific Hook file放入`dev.pulsara/`。Runtime不得从root basename、vendor manifest或alternate path猜identity/component。Package内只读`pulsara-plugin-installer`只提供模型侧authoring workflow：首次strict validation失败且failure是deterministic format/schema difference时，模型才按需读取Codex source reference与实际source内容，在attempt-local目录生成new standard candidate，再交给同一个production parser。Hook conversion不能只按同名event猜测，必须exact join §9的matcher/stdin/environment/output/control/owner timing。Filesystem/symlink/special-file/secret/race/unavailable/cancel/deadline失败不得触发转换；任何required active component没有exact Pulsara representation时必须报告`NOT_CONVERTIBLE`且不安装。该Skill不增加foreign manifest parser、alternate package identity、partial Plugin、Runtime fallback、receipt或durable conversion state。
 
 ---
 
-## 2. 公开标准与兼容优先级
+## 2. Agent Plugins 1.0 与Pulsara extension
 
-### 2.1 Agent Plugins 1.0.0 是 portable truth
+### 2.1 唯一package identity
 
-Portable package必须遵循 Published 1.0.0：
-
-- root `plugin.json` 必须存在；
-- `$schema` 为 `https://agent-plugins.org/schemas/1.0.0/plugin.schema.json`；
-- portable component只有固定 `skills/` 与 `mcp.json`；
-- `skills/`只把每个immediate child directory中exact regular `SKILL.md`识别为一项，invalid Skill逐项skip，不递归把更深后代猜成另一项；
-- `mcp.json` 使用 `https://agent-plugins.org/schemas/1.0.0/mcp.schema.json`；
-- portable manifest不能改写固定 component location；
-- `plugin.json`的unknown top-level field按标准report-and-ignore；`extensions`不是object时只忽略该field；除此以外的schema violation拒绝整个portable package；
-- 未实现的`extensions.<namespace>`整块忽略且不得深入验证；Pulsara不得把其中内容猜成Hook、agent或permission配置；
-- Skill逐项失败、MCP server逐项失败，不牵连其他合法 component；
-- 所有 package-relative path解析后必须仍位于 package root；
-- client extension不得冒充 portable core。
-
-Pulsara 支持 portable stdio 与 Streamable HTTP。Legacy SSE是标准允许但客户端可选的 transport；本轮若现有 MCP owner不能完整证明其redirect/origin safety，则对该 server给出 typed unsupported，不做 transport fallback。
-
-### 2.2 Codex 是 primary host profile
-
-Codex profile支持：
+合法source root必须有exact regular file：
 
 ```text
-.codex-plugin/plugin.json
-skills/
-.mcp.json
-hooks/hooks.json
+plugin.json
 ```
 
-以及 Codex manifest中 `skills`、`mcpServers`、`hooks` 的合法 package-relative path声明。`hooks`可为：
+它必须满足Published 1.0.0：
 
-- 一个path；
-- path数组；
-- inline hook object；
-- inline object数组。
+- `$schema == "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json"`；
+- `name`满足标准的1–64字符、lowercase alphanumeric/`-`/`.`约束；
+- optional metadata只按标准JSON type约束验证；`version`不是SemVer、`homepage`/`repository`/`author.url`不是可识别URL、`author.email`不是可识别email或`license`不是SPDX identifier，都不能仅因此拒绝manifest；`author`出现unknown field或任一field type错误仍按closed schema fatal；
+- unknown top-level fields逐项diagnostic-and-ignore，不赋予语义；
+- non-object `extensions` diagnostic-and-ignore；
+- 其他schema violation拒绝package；
+- unsupported schema拒绝package；
+- Runtime绝不联网下载schema。
 
-manifest指定`hooks`时覆盖默认`hooks/hooks.json`。`.app.json`与assets只报告 unsupported，不影响其他 component。
+Pulsara V1只recognize上述Published 1.0.0 canonical identifiers。官方仓库中的1.1.0仍是working draft，不是本轮兼容目标；不得预读draft schema、猜测future version或把unknown `$schema`映射到1.0 parser。`version`及其他metadata只用于inspection/display；本轮没有auto-update/cache-freshness owner，它们不参与package identity、precedence、install id或enablement。
 
-“Codex primary”表示优先兼容其公开package shape、Skill/MCP/Hook配置与当前11-event command lifecycle，不声称复刻Codex marketplace UI或Skill slash-command namespace。Pulsara不会为避免冲突改写标准Skill的frontmatter/name；两个Plugin携带同名Skill时按§4的typed collision与现有four-root precedence处理，而不是生成非标准alias。
+官方1.0.0 `plugin.schema.json`与`mcp.schema.json`作为read-only package resources随wheel发布。Git与wheel拥有这些资源的内容identity；不得保存schema SHA、下载etag或compatibility fingerprint。
 
-这里也不声称把Codex Hook的authority逐字照搬：Pulsara按用户已冻结的边界把`additionalContext`降为`UNTRUSTED_OBSERVATION`，不实现argument rewrite，也不让PostToolUse替换canonical ToolResult；`PostToolUse.tool_response`只提供Round 7.1现有bounded public projection，不额外暴露raw oversized/private payload。Codex当前会把超大Hook output spill到temporary file并把path交给模型；Pulsara本轮只产生有界head/tail preview，不建立Hook专用artifact或read path。Pulsara `terminal`在yield时已经提交model-visible `RUNNING` ToolResult，因此对应PostToolUse发生在该result后；后续process completion不会假装成尚未交付的原始Bash result。CLI conformance/doctor必须把这些少数deliberate authority/payload/canonical-timing差异列出，不能用“Codex-compatible”掩盖。
+Parser只接受UTF-8 JSON并拒绝duplicate object keys；绝不fallback到YAML。由于Published text规定unknown manifest top-level fields和whole-field non-object `extensions`有窄的report-and-ignore边界，implementation必须先按规范机械分类这些fields，再用embedded schema验证remaining normative object；不能直接让`additionalProperties`错误把本应继续加载的package整包拒绝。若`extensions`是object，unimplemented namespace的value必须整块ignore而不深入validate。Embedded `$ref` resolver必须local-only，任何remote resolution attempt都是test failure。
 
-### 2.3 Claude 是 secondary host profile
+Production schema owner固定使用one Draft 2020-12 validator path（`jsonschema.Draft202012Validator` + embedded-only registry）；`jsonschema`必须成为`pyproject.toml` direct runtime dependency，不能因当前lock中偶然transitive存在而省略。不得同时保留手写partial schema validator或Pydantic fallback；规范文字要求的unknown-field/non-object-extension preprocessing和cross-document version rule是schema前后的显式semantic layer，不是第二parser。
 
-Claude profile支持与本轮重叠的：
+### 2.2 Portable fixed components
+
+Agent Plugins 1.0 portable core只有：
 
 ```text
-.claude-plugin/plugin.json
-skills/
-.mcp.json
-hooks/hooks.json
-agents/*.md
+skills/    # immediate child directories only
+mcp.json   # exact root file
 ```
 
-Claude manifest的`agents` additional paths同样属于本轮Agents兼容面：接受一个package-relative Markdown file/directory path或其数组，并与默认`agents/`共同组成preset discovery inputs。所有path必须resolve在managed package root内；directory按§7递归，single file只读取该exact `.md`。同一physical file经default与declared path重复命中时按canonical contained identity去重，不生成第二preset。
+规则：
 
-Claude 独有的 LSP、monitors、settings、commands 等不导入。Claude Hook只接纳本文与Codex当前公开契约一致的11项event集合及`type=command` handler；`SessionEnd`是两家当前契约的交集。其他event或handler在最窄单元上typed skip。
+- location missing不是错误；
+- present但filesystem kind错误使该component确定性`INVALID`，不是physical `UNAVAILABLE`，且不使其他component失效；
+- `skills/`不递归寻找更深的Skill；
+- invalid Skill逐项skip并进入完整diagnostic；
+- invalid top-level `mcp.json`禁用该package的MCP component；
+- invalid/unsupported individual MCP server只skip该server；
+- package parser不把unknown root files猜成component。
 
-Skill只接受与Codex/Agent Skills共同的`skills/<name>/SKILL.md`目录形状；Claude独有的root-level single `SKILL.md`与legacy flat `commands/*.md`不进入本轮。它们由doctor typed报告而不是被误扫成portable Skill。
+`mcp.json`同样拒绝duplicate keys；top-level envelope整体验证后，individual entries使用embedded schema的server definition逐项验证，从而保留standard per-server failure isolation。
 
-`agents/`是Claude extension，不是Agent Plugins portable core，也不是Codex Plugin component。Pulsara只支持§7定义的安全最小子集。
+Portable loader的path failure boundary必须保持Published 1.0的最窄层级：root `plugin.json`逃逸才reject package；fixed `skills/`或`mcp.json` kind/escape只invalid exact component；one `SKILL.md` escape只skip exact Skill；one MCP `command`/`cwd` escape只invalid exact server；其他escaping resource只deny exact access。`INVALID`表示完整观察到的deterministic defect，`UNAVAILABLE`只用于I/O、deadline前无法完成的physical observation或identity/membership race；两者不能互换。
 
-Claude允许只靠default component locations、没有`.claude-plugin/plugin.json`的目录。Pulsara V1不从directory basename猜canonical Plugin identity，因此这种manifest-less Claude package返回typed `UNSUPPORTED_MISSING_CANONICAL_PLUGIN_ID`；作者需提供Claude manifest、Codex manifest或portable root manifest后再安装。该限制必须由doctor显式报告，不能伪装成完整Claude package compatibility。
+### 2.3 Pulsara client extension
 
-### 2.4 多 manifest package 的单一归一化规则
-
-一个package可以同时携带portable、Codex、Claude manifest以服务不同host；Pulsara不因此拒绝跨客户端package。
-
-Identity与component优先级固定为：
+Pulsara拥有固定reverse-domain namespace：
 
 ```text
-identity metadata:
-  root plugin.json
-  > .codex-plugin/plugin.json
-  > .claude-plugin/plugin.json
-
-Skill/MCP:
-  portable fixed locations when root plugin.json exists
-  > Codex declarations/defaults
-  > Claude declarations/defaults
-
-Hooks:
-  Codex declaration/default
-  > Claude declaration/default
-
-Subagent presets:
-  Claude default agents/ + manifest-declared agents paths only
+dev.pulsara/
+  hooks/hooks.json
 ```
 
-按上述优先级第一个合法manifest的name唯一拥有`plugin_id`。低优先级Codex/Claude manifest若声明不同name，只产生`SECONDARY_MANIFEST_NAME_IGNORED` diagnostic：它不能覆盖identity、创建第二Plugin instance或改变portable fixed Skill/MCP path，也不应让已经合法的portable core整包失效。被高优先级覆盖的component声明同样只产生diagnostic，不形成第二份贡献。Authoritative manifest自身name不合法仍按其公开schema拒绝对应package/profile；不得从低优先级name或directory basename回退猜identity。
+V1只实现file extension directory，不实现`plugin.json.extensions["dev.pulsara"]` manifest-data arm。只要whole `extensions`本身是object，该namespace value与所有unimplemented namespace value一样整块ignore而不validate；它不携带配置、不会重定向目录，也不会使file extension失效。若whole `extensions`不是object，才走Published 1.0明确的report-and-ignore whole-field边界。
 
-### 2.5 既有生态探针为何只执行command Hook
+Pulsara extension locations固定，不能被manifest path重定向：
 
-起草期基于[Claude official marketplace固定提交](https://github.com/anthropics/claude-plugins-official/blob/49b5ab1a022e9f7daa72e35ec10bff3ee20a4a52/.claude-plugin/marketplace.json)的第三方Plugin窄探针仍作为兼容取舍依据：42份实际root Hook配置中，37份只使用本文11项兼容并集与command handler；把没有root Hook的external entries一并计入时，228/233的样本在静态Hook vocabulary/handler shape上不要求其余Claude-only执行能力。该数字不是完整兼容率，也不证明脚本stdin/env语义相同；它只说明“支持Codex当前公开的11项events与command handler，对prompt/agent/其余Claude-only event做最窄typed skip”能覆盖主流核心路径，而无需提前建设第二个模型调用型Hook engine。
+- `dev.pulsara/hooks/hooks.json`是单一Hook config source；
+- root `hooks/`、inline manifest objects不被读取；
+- extension path missing不是错误；kind错误使对应extension component确定性`INVALID`，只有I/O、identity/membership race或无法完成physical observation才是`UNAVAILABLE`。
 
-双轨package证明作者会主动提供宿主适配；AWS/Expo/Semgrep等反例又证明common event、Claude-only handler/event可以混在同一文件。因此failure boundary必须停在exact event/group/handler，不能因一个unsupported sibling废掉整个Hook文件、Skill/MCP core或Plugin package。
+### 2.4 Filesystem admission subset
+
+Agent Plugins允许client选择如何处理in-root symlink。Pulsara V1的**managed local acquisition/installability policy**采用更窄、机械的admission：
+
+- source root本身不能是symlink；
+- package tree内symlink、junction、reparse point、socket、device、FIFO全部拒绝；
+- 只复制regular files与directories；
+- package-relative traversal不能包含empty/`.`/`..`，不能escape held root；
+- descriptor-relative read与final revalidation证明membership和identity；
+- `/tmp`、`/var`等host system aliases先经shared source-binding seam规范化，再执行no-follow traversal；
+- 不放松source tree内部no-follow规则。
+
+因此`validate_local_plugin_source`回答“能否按Pulsara managed-store policy安装”，不是单独签发一份抽象的portable-conformance certificate。一个otherwise portable、仅含in-root symlink的package可以被Pulsara installation policy拒绝，但实现不得把该client acquisition policy反向写成Agent Plugins portable parser的整包failure rule。已经admit的managed root以及same-UID干扰后的Runtime读取仍按§2.2最窄component/entry boundary分类。
+
+这不是sandbox声明。Plugin MCP/Hook process仍以Host OS user identity运行。
+
+### 2.5 Per-document与existing physical bounds
+
+本轮不增加total package bytes、total resources、total installed versions、total enabled Plugins或Plugin lifetime cap。
+
+只保留有真实consumer的per-operation bounds：
+
+- `plugin.json`与`mcp.json`各自最多1 MiB；
+- 两个Agent Plugins JSON documents复用一个purpose-neutral bounded JSON structural loader：maximum 16,384 nodes、depth 64、one scalar/key 64 KiB；duplicate keys仍由各自closed parser拒绝；
+- 每个internal `PluginInstanceState` JSON最多1 MiB；这是单分片corruption/RSS boundary，不是aggregate state或Plugin count cap；
+- `SKILL.md`复用current 64 KiB document bound；
+- Hook config复用Round 9.2的1 MiB bound；
+- MCP configured-server aggregate复用current 64-server bound；
+- final effective Skill winners复用current 64-winner、catalog 384 KiB、active 16/512 KiB bounds；
+- tool result/page复用existing ToolResult physical bound。
+
+Package regular-file byte copy、secret scan与paired compare必须constant-memory streaming；directory membership/identity evidence与one immutable inspection result允许诚实的`O(observed member count)`metadata，不得宣称whole operation constant RAM。`MemoryError`或OS resource failure进入typed `UNAVAILABLE`/cleanup，而不是偷偷增加total member/package cap。若实现采用external sort/scratch来降低RSS，它只能是attempt-local、立即unlink且最终close的non-authoritative physical scratch，受同一deadline/cancel/secret cleanup owner约束，绝不能成为receipt、generation或recovery input。
 
 ---
 
-## 3. Package parser 与本地生命周期
+## 3. Typed management boundary
 
-### 3.1 Pure package facts
+### 3.1 六个底层operations
 
-```text
-PluginScope
-  USER
-  WORKSPACE
-
-PluginManifestProfile
-  PORTABLE_V1
-  CODEX
-  CLAUDE
-
-FrozenPluginPackage
-  plugin_id
-  package_install_id
-  scope
-  exact workspace identity | NONE
-  managed package root
-  writable data root
-  authoritative metadata
-  present manifest profiles
-  Skill component description
-  MCP component description
-  Hook component description
-  Subagent preset component description
-  component diagnostics
-```
-
-它携带完整immutable值，不再添加`package_snapshot_fingerprint`。
-
-`package_install_id`由每次成功`add`或`add --replace`生成并随local install state保存；replace即使manifest version与Hook command文本未变，也必须得到新identity。它只区分两次明确安装，不是mutable generation或package内容fingerprint。
-
-`plugin_id`保留authoritative manifest schema定义的canonical logical name，不通过slug规则改写生态identity。凡是出现在local path中的`<plugin-id>`都必须使用一个reversible、single-component filesystem-safe storage encoding；logical id继续用于CLI、diagnostic、MCP namespace与preset scoped name。Host-profile name无法按其公开schema形成canonical identity时拒绝package，不得用basename或脆弱规则猜名。Composite MCP server id仍需通过existing 128-byte config validation；单个overbound entry typed unavailable，不影响同package其他component。
-
-Package/Hook/MCP private bodies使用`repr=False`或等价closed carrier。CLI inspection、doctor、exception、diagnostic与dogfood只对exact active `PULSARA_API_KEY`值做固定替换，其他prompt、Hook input/output、model reply、DSN与配置内容保持可观察；不得为了“安全感”恢复广泛secret scanning/redaction。
-
-### 3.2 Parser physical bounds
-
-这些是单个不可信配置文档的parser/RSS边界，不是Plugin数量或长期历史上限：
+CLI、Desktop GUI与future local Host API只能调用同一组in-process typed operations：
 
 ```text
-maximum one manifest or hook JSON bytes  1 MiB
-maximum JSON/YAML nodes                 16,384
-maximum JSON/YAML depth                     64
-maximum one scalar UTF-8 bytes           64 KiB
-maximum filesystem path UTF-8 bytes       4 KiB
-maximum command UTF-8 bytes               8 KiB
-maximum matcher UTF-8 bytes               1 KiB
-maximum status message UTF-8 bytes         4 KiB
+validate_local_plugin_source(request) -> PluginValidationOutcome
+install_local_plugin(request)         -> PluginInstallOutcome
+set_local_plugin_enabled(request)     -> PluginEnablementOutcome
+remove_local_plugin(request)          -> PluginRemovalOutcome
+inspect_local_plugins(request)        -> PluginInspectionResult
+gc_local_plugin_packages(request)     -> PluginGcOutcome
 ```
 
-不得新增：
+其中：
 
-- total installed/enabled Plugin count；
-- total package files/bytes；
-- total Hook groups/handlers；
-- total agent preset count；
-- total Plugin history或lifetime。
+- `install_local_plugin(replace=false)`是add；
+- `install_local_plugin(replace=true)`安装new immutable version、切换current并强制`enabled=false`；
+- enable/disable只改current instance state；
+- remove只删除current instance state，不删除persistent data；
+- gc只回收unreferenced且未被physical consumer持有的version/stage，以及§4.3 exact grammar、同instance lock下可证明安全的state-temp residue；
+- list与doctor共享exact一次`inspect_local_plugins`结果，只是不同projection。
 
-Package copy必须streaming处理并依赖已验证的local filesystem/storage quota。落在source package root内的symlink可在防竞态重验后被dereference为managed root中的ordinary file/directory；dangling、escape、cycle、junction、device、socket、FIFO或复制期间identity变化拒绝最窄component/package path。Managed version root本身不保存指向source checkout的link。Manifest/component自身继续受各自parser与Round 9/9.1/MCP现有边界约束。
+Service不依赖argparse、stdout、JSON schema、terminal cwd或UI state。CLI `--json`只是typed outcome projection，不是GUI IPC/wire authority。
 
-Copy必须保留portable bundled stdio executable所需的执行语义，但不能复制特权filesystem metadata。POSIX source regular file只保留“是否具有任一execute bit”这一事实：可执行文件在managed root归一化为owner-readable/writable且可执行的ordinary mode，非执行文件归一化为owner-readable/writable ordinary mode；directories归一化为owner可遍历模式。Setuid、setgid、sticky、ACL、ownership、xattr、resource fork与mtime都不进入产品语义，也不得复制成执行authority。Windows使用ordinary managed-file语义，由existing executable resolution在spawn前验证。这样`command: "./bin/server"`可继续运行，同时package不能借安装保留privileged bits。
+Every operation request携带one caller-frozen absolute monotonic deadline与cooperative cancellation port；nested scan/copy/schema/state/cleanup不得刷新deadline或另取完整handler timeout。已经开始的filesystem/physical close按§5.5 shield+join，但logical disposition仍按唯一cut分类。本轮不新增Plugin/session/lifecycle total timeout。
 
-若当前配置存在non-empty `PULSARA_API_KEY`，streaming copier必须用跨chunk boundary安全的exact-byte matcher检查将被写入managed root的每个regular file；每段bytes必须先与process-local carry共同检查、再写temporary file，不能先落完整secret后补扫。命中时删除temporary sibling并typed拒绝整个add/replace，diagnostic只报告path与`PULSARA_API_KEY_VALUE_PRESENT`，绝不能包含matched value。它只匹配该一个active secret的exact bytes，不扫描、猜测或脱敏其他内容；环境变量名文本`PULSARA_API_KEY`本身不是secret value。这样Plugin Skill/resource/Hook config不会借package copy把该值复制进managed store。
-
-### 3.3 Managed store
-
-Package与state存入Pulsara local home，不让repository内容自动启用可执行Hook：
+Enable request必须额外携带：
 
 ```text
-${PULSARA_HOME}/plugins/packages/<scope-key>/<plugin-id>/<package-install-id>/
-${PULSARA_HOME}/plugins/data/<scope-key>/<plugin-id>/
-${PULSARA_HOME}/plugins/state/<scope-key>/<plugin-id>.json
-${PULSARA_HOME}/plugins/locks/<scope-key>/<plugin-id>.lock
+expected_current_package_install_id
+external_process_acceptance = ACCEPTED
 ```
 
-`scope-key`使用existing canonical workspace identity的filesystem-safe stable representation；`plugin-id` path segment使用§3.1的reversible storage encoding，不得重新发明workspace root算法或直接把逻辑name拼进path。
+Management service在exact instance lock内重读state并比较install id；不匹配返回typed `STALE/plugin_state_raced`，不能授权未审阅的replacement。Disable不需要`external_process_acceptance`，但仍比较caller观察的expected install id。这个字段有直接consumer：它确认用户已看到同一package的normalized component summary，并接受future Host composition可能启动stdio MCP process或连接HTTP endpoint；它不是receipt、durable consent log或remote-tool permission bypass。
 
-不存在全局`state.json`或全局store mutex。每个Plugin instance的state只在自己的`scope-key + plugin-id`分片内原子replace；单个分片复用§3.2的1 MiB配置文档物理上界。Host composition按确定顺序枚举USER与exact WORKSPACE state目录并逐个读取完整分片，因此安装数量不需要总cap，也不会让一次无关Plugin更新重写不断增长的全局JSON。Hook trust完全归Round 9.2 generic `HookTrustStore`，不在Plugin store复制第二份状态。
+### 3.2 Scope与路径解析
 
-两个分片的closed product state固定为：
+```text
+PluginScopeKind = USER | WORKSPACE
+```
+
+USER request：
+
+- 完全不依赖cwd；
+- 使用shared absolute-only `PULSARA_HOME` resolver；
+- unset/empty使用default home；
+- `expanduser()`后仍relative则typed fail；
+- 绝不相对cwd调用`resolve()`。
+
+WORKSPACE request：
+
+- explicit `--workspace`优先；
+- 未提供时以caller cwd作为workspace root；
+- 规范化为exact absolute project root；
+- 使用existing workspace state-key derivation；
+- transient/non-project workspace不允许创建WORKSPACE Plugin instance。
+
+Plugin store统一位于`${PULSARA_HOME}`，因此invalid Plugin home配置会阻止USER与WORKSPACE Plugin lifecycle；这不应反向阻止unrelated loose workspace Skill validation/install。
+
+Standalone `validate_local_plugin_source`只需要explicit source path、current API-key scrub input与call deadline/cancel port，不读取Plugin store或workspace，因此也不能被unrelated invalid `PULSARA_HOME`或cwd阻断。
+
+### 3.3 Closed dispositions
+
+```text
+PluginValidationDisposition =
+  VALID | INVALID | UNAVAILABLE | CANCELLED | TIMED_OUT
+
+PluginInstallDisposition =
+  INSTALLED | REPLACED | ALREADY_PRESENT | INVALID | UNAVAILABLE |
+  CANCELLED | TIMED_OUT | ACK_UNKNOWN | CLEANUP_UNAVAILABLE
+
+PluginEnablementDisposition =
+  ENABLED | DISABLED | ALREADY_ENABLED | ALREADY_DISABLED |
+  NOT_FOUND | STALE | UNAVAILABLE | CANCELLED | TIMED_OUT | ACK_UNKNOWN
+
+PluginRemovalDisposition =
+  REMOVED | NOT_FOUND | UNAVAILABLE | CANCELLED | TIMED_OUT | ACK_UNKNOWN
+
+PluginInspectionDisposition = COMPLETE | UNAVAILABLE
+
+PluginInspectionAbortReason = CANCELLED | TIMED_OUT
+
+PluginGcDisposition =
+  COMPLETE | UNAVAILABLE | CANCELLED | TIMED_OUT
+```
+
+Inspection的semantic value与outer abort使用closed sum，而不是把两类truth塞进同一disposition：
+
+```text
+PluginInspectionResult = PluginInspectionOutcome | PluginInspectionAbort
+
+PluginInspectionAbort
+  reason: PluginInspectionAbortReason
+```
+
+`PluginInspectionAbort`没有instances、versions、component facts或partial issues；CLI/GUI必须exhaustive projection这两个arms，不能靠caught exception或message string识别abort。
+
+Expected user input、OS I/O、race、deadline与cancellation不能靠exception string分类。Programmer invariant violation仍可raise。
+
+上述enum不是裸status string；六个operations的production result必须是closed sum，payload matrix冻结为：
+
+```text
+PluginValidationOutcome
+  VALID       -> exact PluginValidationSummary + ordered component issues
+  INVALID     -> no summary/component facts; ordered deterministic diagnostics
+  UNAVAILABLE -> no summary/component facts; ordered physical diagnostics
+  CANCELLED | TIMED_OUT -> outer-abort reason only
+
+PluginInstallOutcome
+  INSTALLED | REPLACED
+    -> scope/workspace key/plugin id/new package install id/enabled=false/
+       exact normalized summary/ordered diagnostics
+  ALREADY_PRESENT
+    -> exact current package install id/current enabled bit/current summary
+  INVALID
+    -> exact PluginValidationOutcome.INVALID
+  UNAVAILABLE | CANCELLED | TIMED_OUT
+    -> attempted scope/plugin id when already known + no claimed state mutation
+  ACK_UNKNOWN
+    -> attempted package install id + intended post-state + last known cut;
+       never a fabricated success or retry instruction
+  CLEANUP_UNAVAILABLE
+    -> one non-recursive prior non-cleanup PluginInstallOutcome +
+       attempted path + closed location status
+
+PluginEnablementOutcome
+  ENABLED | DISABLED | ALREADY_ENABLED | ALREADY_DISABLED
+    -> scope/plugin id/exact current package install id/resulting enabled bit
+  NOT_FOUND -> exact requested instance identity
+  STALE     -> expected install id + observed current install id
+  UNAVAILABLE | CANCELLED | TIMED_OUT
+    -> requested identity + desired bit; no claimed state cut
+  ACK_UNKNOWN
+    -> exact install id + desired bit + last known state cut
+
+PluginRemovalOutcome
+  REMOVED   -> exact removed instance identity + prior package install id
+  NOT_FOUND -> exact requested instance identity
+  UNAVAILABLE | CANCELLED | TIMED_OUT
+    -> requested identity; no claimed unlink
+  ACK_UNKNOWN
+    -> requested identity + prior package install id + last known unlink cut
+
+PluginInspectionResult
+  -> §3.3既有PluginInspectionOutcome | PluginInspectionAbort closed union
+
+PluginGcProgress
+  ordered_removed: exact VERSION/STAGE/state-temp refs
+  ordered_in_use: exact VERSION/STAGE refs
+  current_attempted_ref?
+  current_location_status?: ABSENT | STAGE_ONLY | UNREFERENCED_VERSION |
+                            STATE_TEMP | UNKNOWN
+  unvisited_suffix: bool
+
+PluginGcOutcome
+  COMPLETE    -> progress.unvisited_suffix=false且无current attempted failure
+  UNAVAILABLE -> progress（允许此前已有FULL delete cuts）+ exact diagnostic
+  CANCELLED | TIMED_OUT
+              -> progress（允许此前已有FULL delete cuts）+ outer-abort reason
+```
+
+任何GC disposition都不能靠名称暗示“零mutation”；第一个unlink/rmdir FULL后，所有arms都强制携带同一个`PluginGcProgress`。GC没有`ACK_UNKNOWN`：每个local unlink/rmdir syscall及其join有明确FULL/not-FULL cut；reply cancellation不能把已知progress变unknown。GC也没有`CLEANUP_UNAVAILABLE` wrapper：删除本身就是primary operation，物理失败直接是保留progress的`UNAVAILABLE`。CLI/GUI/JSON必须exhaustive match arm与required payload，不能读取optional-field组合猜语义。
+
+Validation语义固定：
+
+- `VALID`表示portable core identity与physical package tree可安全安装；它可以携带invalid Skill、skipped MCP server或unavailable Hook等narrow component issues，因为Agent Plugins要求component failure isolation；
+- `INVALID`表示fatal manifest/schema、tree kind/escape/symlink、reserved secret或其他确定性source defect；
+- `UNAVAILABLE`表示source I/O、identity/membership race或validator physical observation无法完成；
+- `CANCELLED`/`TIMED_OUT`只表示对应outer abort在validation outcome install前胜出。
+
+Install只接受`VALID`package，但不能把component issues升级成整包拒绝，也不能静默丢弃这些issues。
+
+Install的`CLEANUP_UNAVAILABLE`只携带：
+
+- attempted path；
+- closed location status：`ABSENT | STAGE_ONLY | UNREFERENCED_VERSION | UNKNOWN`；
+- prior semantic disposition。
+
+它不携带tree listing、bytes、digest、repair token或recovery plan。
+
+### 3.4 Settlement cuts 与priority
+
+每个mutation owner使用同一caller deadline/cancel port，并按以下总规则结算；后续章节的physical cause priority必须嵌入本表，不能另起一套：
+
+1. irreversible state/unlink cut若已FULL，胜过其后的cancel/deadline；owner返回已知success/progress，只有需要确认且确认本身不可用时才使用对应`ACK_UNKNOWN`；
+2. state cut前已经完整观察到的source race，优先于source I/O、stage I/O、publish conflict与outer abort；其后依次是source I/O → staging → publish conflict → state/data-root unavailable；
+3. 若尚无上述settled physical cause，cancel signal先于absolute deadline则`CANCELLED`，deadline已经到达则`TIMED_OUT`；不得刷新deadline来等待更喜欢的outcome；
+4. worker一旦开始必须shield+join；join后才知道的physical cause按1–3归类，不能让caller cancellation制造detached work；
+5. install ordinary cleanup在prior semantic outcome之后运行；cleanup失败只形成one non-recursive `CLEANUP_UNAVAILABLE(prior=...)`，不能覆盖prior package/state identity；
+6. reply formatting、logging或CLI projection失败不追溯改变已经安装的typed outcome。
+
+### 3.5 Closed diagnostics
+
+新增一个closed `PluginDiagnosticCode`，exact 40 members冻结如下；增删任何member都必须先修订本文并同步exact-count guard。Production mapping必须exhaustive，不能把raw exception message当code：
+
+```text
+plugin_home_configuration_invalid
+plugin_workspace_required
+plugin_source_not_directory
+plugin_source_final_symlink
+plugin_source_tree_symlink
+plugin_source_special_file
+plugin_source_escape
+plugin_source_unavailable
+plugin_source_raced
+plugin_source_contains_active_api_key
+plugin_manifest_missing
+plugin_manifest_overbound
+plugin_manifest_invalid_utf8
+plugin_manifest_invalid_json
+plugin_manifest_schema_unsupported
+plugin_manifest_invalid
+plugin_manifest_unknown_field_ignored
+plugin_extensions_field_ignored
+plugin_package_not_found
+plugin_package_root_unavailable
+plugin_package_root_raced
+plugin_staging_unavailable
+plugin_publish_conflict
+plugin_state_unavailable
+plugin_state_raced
+plugin_cleanup_unavailable
+plugin_package_in_use
+plugin_data_root_unavailable
+plugin_data_root_raced
+plugin_component_kind_invalid
+plugin_mcp_component_invalid
+plugin_mcp_server_invalid
+plugin_mcp_transport_unsupported
+plugin_mcp_server_id_collision
+plugin_mcp_configured_bound_exceeded
+plugin_view_unavailable
+plugin_reload_partial
+```
+
+`PluginDiagnosticSeverity = INFO | WARNING | ERROR`，code→severity唯一mapping冻结为：
+
+```text
+INFO
+  plugin_manifest_unknown_field_ignored
+  plugin_extensions_field_ignored
+  plugin_package_in_use
+  plugin_mcp_transport_unsupported
+
+WARNING
+  plugin_package_not_found
+  plugin_cleanup_unavailable
+  plugin_component_kind_invalid
+  plugin_mcp_component_invalid
+  plugin_mcp_server_invalid
+  plugin_mcp_server_id_collision
+  plugin_mcp_configured_bound_exceeded
+  plugin_reload_partial
+
+ERROR
+  plugin_home_configuration_invalid
+  plugin_workspace_required
+  plugin_source_not_directory
+  plugin_source_final_symlink
+  plugin_source_tree_symlink
+  plugin_source_special_file
+  plugin_source_escape
+  plugin_source_unavailable
+  plugin_source_raced
+  plugin_source_contains_active_api_key
+  plugin_manifest_missing
+  plugin_manifest_overbound
+  plugin_manifest_invalid_utf8
+  plugin_manifest_invalid_json
+  plugin_manifest_schema_unsupported
+  plugin_manifest_invalid
+  plugin_package_root_unavailable
+  plugin_package_root_raced
+  plugin_staging_unavailable
+  plugin_publish_conflict
+  plugin_state_unavailable
+  plugin_state_raced
+  plugin_data_root_unavailable
+  plugin_data_root_raced
+  plugin_view_unavailable
+```
+
+Exact-count test必须证明三组disjoint union等于全部37 codes。`sse`是Agent Plugins optional transport，本轮skip exact server并报告INFO known-unsupported；不得把lack of optional transport support升级成package/server config invalid。
+
+Skill document/placement issues继续使用existing closed `SkillDiagnosticCode`；Hook config/source/trust/runtime issues继续使用Round 9.2 `HookDiagnostic` codes与trust disposition；不得同时生成一个generic Plugin duplicate diagnostic作为第二truth。Plugin owner只可为package path/state/view/publication这些自身causes生成Plugin diagnostics。
+
+### 3.6 CLI projection
+
+新增：
+
+```text
+pulsara plugins validate <path>
+pulsara plugins add --scope user|workspace [--workspace <path>] [--replace] <path>
+pulsara plugins enable --scope user|workspace [--workspace <path>] [--yes] <plugin-id>
+pulsara plugins disable --scope user|workspace [--workspace <path>] <plugin-id>
+pulsara plugins remove --scope user|workspace [--workspace <path>] <plugin-id>
+pulsara plugins list [--workspace <path>]
+pulsara plugins doctor [--workspace <path>]
+pulsara plugins gc [--workspace <path>]
+```
+
+每项支持human与`--json`projection。`list`只显示current USER/WORKSPACE instances与effective component summary；`doctor`显示invalid、disabled、shadowed/conflicting、component unavailable、unreferenced/in-use roots与trust/reload notices。两者不能各自scan。
+
+`enable`在mutation前必须投影exact current install的normalized summary：Skill names/descriptions、每个MCP stdio command/args/cwd/env key/value、HTTP endpoint/public header key/value与完整Hook definitions。Interactive CLI显示summary并要求明确确认；non-interactive `--yes`只省略prompt，仍把刚观察的exact install id和`ACCEPTED`传给typed operation。Desktop/未来Web UI直接展示同一typed summary并调用service，不解析CLI输出。Enable Plugin MCP授权future composition以Host OS user启动/connect server；具体remote tool invocation仍完整经过existing scope、permission、effect、dirty和attempt owners。Enable不等于Hook trust，Hook command继续单独exact trust。
+
+Global `pulsara` launcher继续由`[project.scripts]`发行，必须从任意non-source cwd运行，不依赖repository cwd、repository `.venv`、`PYTHONPATH`、source symlink或`uv run`。
+
+Agent若通过terminal调用CLI，继续服从existing terminal/permission owner；不新增provider-visible Plugin install tool。
+
+---
+
+## 4. Managed store、state与physical lifetime
+
+### 4.1 Store layout
+
+```text
+${PULSARA_HOME}/plugins/
+  packages/
+    user/<plugin-id>/<package-install-id>/
+    user/<plugin-id>/.pulsara-stage-<package-install-id>-<attempt-nonce>/
+    workspace/<workspace-state-key>/<plugin-id>/<package-install-id>/
+    workspace/<workspace-state-key>/<plugin-id>/.pulsara-stage-<package-install-id>-<attempt-nonce>/
+  state/
+    user/<plugin-id>.json
+    user/.pulsara-state-<plugin-id>-<attempt-nonce>.tmp
+    workspace/<workspace-state-key>/<plugin-id>.json
+    workspace/<workspace-state-key>/.pulsara-state-<plugin-id>-<attempt-nonce>.tmp
+  data/
+    user/<plugin-id>/
+    workspace/<workspace-state-key>/<plugin-id>/
+  locks/
+    instances/<scope-key>/<plugin-id>.lock
+    packages/<scope-key>/<plugin-id>/<package-install-id>.lock
+```
+
+所有components通过shared `PULSARA_HOME` resolver取得同一absolute store。目录逐component no-follow创建，不跟随已有symlink，不用broad `mkdir(parents=True)`跨越未经验证的ancestor。
+
+`package-install-id`语法固定为`pkg_`加32个lowercase hex；`attempt-nonce`固定为32个lowercase hex。两者都是random opaque physical identity，不是content hash。只有exact上述hidden grammar属于publisher/GC；其他dot entry和malformed lookalike不是Plugin-owned，scanner/GC必须ignore且永不按mtime/age猜测删除。
+
+### 4.2 Instance state
+
+每个instance state只保存：
 
 ```text
 PluginInstanceState
-  contract_id
-  logical plugin_id
-  scope = USER | WORKSPACE
-  exact canonical workspace identity | NONE
-  current package_install_id
-  enabled: bool
+  contract_id = "pulsara.plugin-instance-state.v1"
+  plugin_id
+  scope
+  workspace_state_key?   # iff WORKSPACE
+  current_package_install_id
+  enabled
 ```
 
-它不复制manifest、component facts、package tree hash或Runtime view。`add`创建新的immutable root与`enabled=false` state；`enable/disable`只切换同一current install的enabled值；`add --replace`原子切换current install并保留原enabled值。New install id进入Round 9.2 Plugin Hook source identity与trust digest，因此旧trust自动成为MODIFIED而不能授权new package。`remove`只删除instance state；generic orphan trust可以由`pulsara hooks doctor`显示并由用户revoke/清理，但永远不能在缺少current exact Plugin source时执行。Package lifecycle的linearization是state replace/delete；Hook trust/revoke的linearization属于Round 9.2 `HookTrustStore`，二者不伪造跨文件事务。
+不保存：
 
-一次composition refresh的state观察规则必须closed但不伪造filesystem transaction：每个scope的成员集合以该次bounded directory enumeration为准，枚举完成后新增的instance进入下一次refresh；每个已枚举分片只接受一次成功读取的exact regular-file bytes。已枚举分片在读取前消失、identity变化、无法形成完整bounded bytes，或引用的immutable package root无法取得borrow时，本次refresh整体形成`PLUGIN_STATE_DISCOVERY_RACED/UNAVAILABLE`，不得用读到的一半发布新的package tuple，也不得循环重试到新的deadline。Running Host保留predecessor component views；cold Host不执行未证明完整的Plugin MCP/Hook/preset贡献，Plugin-managed Skill则由§3.5 pre-scan reconciliation令聚合catalog `UNAVAILABLE`。这只定义一次process-local observation cut，不增加global generation、inventory fingerprint或durable coordinator。
+- source path；
+- manifest/component copy；
+- package tree digest；
+- history或previous install list；
+- install receipt；
+- last scan generation；
+- contribution fingerprint；
+- repair status。
 
-所有会修改某一instance的package versions、state、Skill materialized projection或GC结果的操作只取得该instance的local lock，再执行read-modify-atomic-replace。Generic Hook trust命令使用Round 9.2自己的per-source lock，不取得Plugin state lock；写前重新读取current Plugin source identity/digest，因而不会把stale inspection授权给replacement。纯读取MCP/Hook/preset composition的Host可以读取atomic state snapshot而不持锁；Host pre-scan Skill reconciler一旦需要create/replace/remove projection，必须取得同一instance lock、在锁内重新读取current state/install id/provenance并证明仍等于本次观察，随后才atomic发布。若重读已经变化，本次reconciliation形成`DISCOVERY_RACED`并留给下一cut，不能用旧观察覆盖new state。跨多个instance的`list/doctor/gc/reconcile`逐项处理并允许调用方取消，不承诺虚假的all-Plugin transaction。该filesystem mutex只防止同一instance的local state/projection丢失更新，不是durable execution lease、package generation或跨Host协调表。
+`package_install_id`是上述随机、opaque、stable version-root identity，不是content hash。它必须能在state、path、Hook trust input和GC中exact join；不得用manifest version或tree digest代替。
 
-`add`：
+### 4.3 Lifecycle linearization
 
-1. resolve exact local source；
-2. streaming复制到temporary sibling；
-3. validate manifest、path containment与component descriptions；
-4. fsync必要文件；
-5. 生成新的`package_install_id`并atomic rename为该immutable version root；
-6. state只引用exact install id；
-7. 不自动enable，不自动trust Hooks。
+- add：publish immutable root后atomic create state，initial `enabled=false`；
+- add existing instance且`replace=false`：`ALREADY_PRESENT`，不改state；state path/content identity不一致则按state unavailable处理，不另造无消费者的identity-conflict disposition；
+- replace：publish new immutable root后atomic replace state并强制`enabled=false`；old package的enable acceptance不能授权new package；
+- enable/disable：per-instance lock内重读exact predecessor并atomic replace；
+- remove：per-instance lock内重读后atomic unlink state；
+- gc：state complete observation后，只删除unreferenced且取得package exclusive lock的roots。
 
-`add --replace`是唯一update路径：先安装一个新的immutable version root，再atomic切换state中的current install id；绝不原地改写旧root。这里的多个physical version不是old/new产品兼容或capability generation，而是为了保证running Host冻结的Hook command、MCP command path与trust identity不会在脚下被替换。
+每个operation只锁exact instance。没有global Plugin mutation mutex；inspection则必须完整观察其目标USER/exact WORKSPACE aggregate，不能返回mixed partial truth。
 
-每个Host读取一个package version时取得private `PluginPackageBorrow`：它持有exact install id/root与一个OS-released-on-process-exit shared lock。Borrow必须由实际仍依赖package bytes或executable path的consumer持有，不能把“本Host曾加载过”当成保留到Host close的理由：Skill在atomic materialization完成后释放；preset directory冻结完整definition/body后释放，accepted task只持有其process-local frozen body；Hook predecessor view在已dispatch attempts全部settle后释放；MCP config/slot在old server process、pending connect与remote invocation全部drain后释放。多个consumer可以共享同一个process-local borrow owner，但其唯一职责是last-consumer close；不得演化成version registry、durable lease、borrow history或`borrow -> object` map。Host close/crash仍兜底释放全部未settle handle。该borrow不进入DTO fingerprint、provider输入、repository或recovery状态。
+Publisher必须在hidden stage创建前取得exact package-install-id lock，并从stage lifetime开始一直持有到package publish、state atomic cut、same-process confirmation与ordinary cleanup全部settle。否则GC可能在package publish与state create/replace之间把尚未referenced的新root删掉。GC取得不了该exclusive lock时只报告`IN_USE`并继续其他roots；不得等待publisher或推断其最终state。
 
-`remove`先在exact instance lock内删除其state并使future Host不可见；package version目录只做opportunistic GC。`pulsara plugins gc`或store启动清理逐个instance取得该lock，再只在取得version lock的nonblocking exclusive ownership后删除未被current state引用的root；有running Host borrow时跳过，不能阻塞或中断Host。Host crash后OS释放lock。不存在version数量cap、定时repair job或durable lease table；磁盘使用继续受已验证local storage quota约束。
+State create/replace只使用same-parent exact hidden state-temp grammar：exclusive create → bounded write/close → atomic no-follow rename/replace cut。State enumerator忽略这些exact temp names；GC只有在nonblocking取得对应instance lock后才可删除crash residue。Unknown/malformed hidden state entry不属于产品，不扫描内容、不删除。SIGKILL residue不会令ordinary state enumeration永久`UNAVAILABLE`，但visible non-hidden malformed/missing state仍按typed unavailable处理。
 
-`remove`默认保留独立writable data root，避免删除Plugin产生的用户数据，也避免与尚未reload的Host竞争。V1不提供自动data GC；用户显式清理该目录属于普通filesystem操作，不是Plugin execution recovery。
+### 4.4 Immutable package root
 
-仓库仍处开发阶段，不为旧的原地单目录layout保留dual-read、legacy alias或迁移wrapper；verified local development state直接hard-cut/reset。
+Publisher在publish前把stage mode规范化为：
 
-### 3.4 Enablement 与 scope
+- directories `0500`；
+- regular non-executable files `0400`；
+- source任一execute bit为true的regular file `0500`；
+- clear setuid/setgid/sticky；
+- 不复制owner、ACL、xattr或platform metadata。
 
-状态文件原子replace，表达：
+Source observation冻结的是regular-file bytes、membership、identity与executable class，不要求destination mode byte-equal source mode。
 
-```text
-USER plugin instance
-  visible to all workspaces in this Pulsara home
+Managed root对Pulsara是immutable input。Host OS同UID仍可chmod、move或replace它；这是明确out-of-contract namespace interference，不得虚构sandbox、tamper-proof或reply-time exact-path liveness。
 
-WORKSPACE plugin instance
-  visible only to exact canonical workspace identity
-```
+### 4.5 Consumer lifetime 与GC
 
-同一`plugin_id`在exact workspace同时存在USER和WORKSPACE实例时，两者都保持独立package instance；不得声称WORKSPACE可以“整包shadow”已经物化到user Skill root的内容。有效贡献按existing owner能够机械证明的leaf identity决定：
+每个opened package root通过adjacent package lock取得shared OS lock。以下physical consumers通过ordinary object sharing持有exact lock handle：
 
-- Skill继续使用Round 9.1的root precedence与exact Skill name；workspace同名Skill胜出，user-only Skill仍可见；
-- MCP按`plugin-id + package-local-server-id`取workspace entry；user instance中没有发生identity冲突的server仍可见；
-- Hook为避免同一Plugin两份lifecycle policy叠加，workspace Hook component存在时替代该Plugin的user Hook component；workspace package没有Hook component时user Hook仍可见；
-- Subagent preset按`plugin-id + relative namespace + agent-name`取workspace entry；user-only preset仍可见。
+- current Host Plugin composition view；
+- old Hook attempt直到settle；
+- old MCP slot/process直到retire/close/drain；
+- call-local inspection/CLI projection。
 
-该规则分别在Skill/MCP/Hook/preset owner输入冻结前执行，不建立跨ownerwinner transaction。CLI/doctor必须显示两个package instance及每个component/leaf的effective或shadowed disposition。
+Darwin/Linux统一使用per-open-description `flock(LOCK_SH)`与GC `flock(LOCK_EX | LOCK_NB)`；publisher持有与GC exclusive互斥的package lock。Anchor复制使用`os.dup`保持同一locked open-file description，直到最后一个duplicate close才释放；不得换成“closing任意fd可能释放process全部record locks”的process-scoped POSIX record-lock语义，也不得只用Python mutex冒充cross-process exclusion。
 
-Package不会因存在于workspace checkout、marketplace目录或`.pulsara/`下就自动enable。Enable是明确用户操作。CLI enable前必须显示current package的normalized Skill/MCP/Hook/preset component summary，尤其是每个stdio MCP command/cwd/env keys与HTTP endpoint。Enable Plugin MCP即授权existing supervisor在合法composition时以当前Host OS用户启动stdio server或连接HTTP endpoint；这项physical server startup/connect发生在具体MCP tool permission之前，不能被描述成“只有模型调用工具才会执行外部代码”。每次remote tool invocation仍必须经过Round 6/9的scope、permission、effect、dirty与attempt owner，Plugin enable不授予调用bypass。
+“ordinary object sharing”必须落到一个generic process-local `PhysicalLifetimeAnchor`，不能只写成注释：
 
-Enable也不等于Hook trust：
+- package binding为每个需要跨view生存的leaf复制一份独立shared-lock file descriptor；没有manual refcount、view lease DTO或registry；
+- Plugin Hook adapter把anchor附着在generic `FrozenHookSourceProvenance`/definition可达对象，old sync/background attempt与one-shot context只要仍持exact definition就保持锁；
+- Plugin MCP adapter把anchor附着在generic native `McpServerConfig`/client可达对象，retiring candidate/slot/process drain前保持锁；
+- fields必须`repr=False, compare=False`，不进入trust/config/fact fingerprint；package root、data root、resolved command/cwd/env等真实concrete values仍进入对应Hook trust或MCP runtime identity；
+- anchor拥有idempotent close/finalizer；Host close在Hook attempts与MCP slots完整drain并清除owner references后关闭current anchors，unreachable old leaf的独立descriptor自然关闭；GC等待的是OS lock，不查询Python refcount；
+- local Hook/MCP值携带`None`，generic cores不得import `plugins/*`或回读Plugin state。
 
-- Skill仍是untrusted data；
-- MCP仍经过现有permission/effect policy；
-- Hook必须exact trust；
-- Subagent preset仍是untrusted startup guidance。
+这不是manual refcount或durable lease。延迟finalization最多让GC保守报告`IN_USE`，绝不能让仍在执行的consumer失去锁。
 
-### 3.5 Running Host refresh
+GC仅在state aggregate证明root unreferenced且能nonblocking取得exclusive package lock时删除。它不查询manual refcount、generation、registry或database lease。
 
-Host提供：
+GC deletion从held packages parent/root descriptor开始，逐项no-follow、iterative地unlink files/symlinks并移除empty directories；即使managed root遭same-UID interference也绝不能跟随symlink/junction逃出exact version root。Root/path binding或membership在delete cut前变化时exact root settle unavailable；已经FULL unlink的prior members不回滚，按§5.7报告progress。
 
-```text
-KernelHostCore.reload_plugins()
-```
+Skill historical messages中的absolute path与loose filesystem path具有相同弱liveness：current view/root borrow退休后，历史路径不保证永远可读。Activated Skill body与compaction retained body已经由existing frozen/canonical proof拥有，不依赖GC重读package文件。
 
-并从Round 9.3 hard-cut后的每个cold Host开始固定暴露：
+### 4.6 Data directory
 
-```text
-reload_plugins()
-```
+`PLUGIN_DATA`按instance而非version定位，replace后保留。第一次successful enable在state enabled cut前由package store逐component no-follow安全创建为Host-user private、可写/可进入的`0700` directory，并机械验证subprocess user可写；创建/permission验证失败则enable `UNAVAILABLE`且state保持disabled。Cold/reload composition在产生process-bearing MCP/Hook values前只调用同一package-store `ensure_instance_data_root()`窄口重验/必要时重建，不让MCP/Hook core写Plugin store；失败只使该instance的process-bearing components unavailable，Skill仍按自身事实处理。Remove默认保留，避免把remove伪装成data deletion authority。
 
-该Builtin是ROOT-only、execution-backed、非read-only的process-local composition action；descriptor始终存在以保持same-epoch tools稳定，只有`BYPASS_PERMISSIONS`可以成功。它不执行`add/enable/disable/trust`，不写Plugin state，也不把模型输入变成package authority；它只在safe point重读已经由CLI原子提交的current state并返回各component的published/unavailable/unchanged disposition。这样模型可先通过已授权Terminal运行local lifecycle CLI，再显式要求当前Host采用变化，而无需filesystem watcher或重启。
-
-它是explicit process-local refresh，不是filesystem watcher、durable generation或recovery owner。Plugin state是enablement truth；四根目录中的Plugin-managed Skill只是可重建的filesystem projection。所有lifecycle command，以及running/new Host的**每一次ordinary complete Skill scan**，都必须先由Host composition layer按current state和exact provenance执行一次bounded synchronous Plugin Skill reconciliation；随后才调用不感知Plugin的existing `LocalSkillProvider`。这次pre-scan reconciliation只维护Skill filesystem projection，不顺带refresh MCP、Hook或preset view，并与本次dispatch planning共享同一个absolute deadline。无法证明reconciliation complete时，本次聚合`LOCAL_SKILL_CATALOG`形成typed `UNAVAILABLE/PLUGIN_RECONCILIATION_FAILED`，不能让stale Plugin目录作为普通Skill重新进入catalog；它不阻断conversation，也不启动后台repair job。
-
-Reconciliation的输入不是“当前仍存在的state files”单边集合，而是两个完整、bounded、可取消的枚举结果之并集：current USER/exact WORKSPACE Plugin instance states，以及对应user/workspace target roots中所有携带Plugin owner provenance sidecar的Skill directories。后者让已经删除state但CLI在projection cleanup前崩溃的orphan目录仍能被发现。对每个instance取得§3.3 exact lock并重读current truth后：enabled current contribution应存在且逐项匹配；disabled/missing/replaced contribution在content digest仍匹配时删除；用户已修改时只删除Plugin provenance并保留为ordinary unmanaged Skill。任一目标root无法完整枚举、已枚举sidecar/目录发生identity race或lock内重读无法与本次cut闭合，都使本次reconciliation `UNAVAILABLE`，不得用只看state或只看目录的partial winner继续scan。
-
-`enable/disable/add --replace/remove`都在exact instance lock内以该instance state分片的atomic replace/delete作为package lifecycle唯一产品linearization point。State提交后，同一CLI可继续在同一lock ownership内尽力完成Skill projection reconciliation与必要diagnostic；某个component失败不回滚已经成立的enablement truth，也不假装其他owner已原子切换。Future或running Host都会在下一次complete Skill scan前按上段规则取得exact instance lock并再次同步reconcile，所以CLI进程在state提交后崩溃只会留下可诊断、可由下一合法scan重建的projection drift，不需要repair job。Disable/remove必须先使state不可见，再删除仍与provenance exact匹配的Skill目录；若进程在两步之间中断，pre-scan reconciliation必须先完成清理或令该次聚合catalog `UNAVAILABLE`，不得把未启用文件误当成authority。
-
-外部CLI修改state后：
-
-- future Host直接读取新state；
-- 成功完成Skill materialization/removal的变化可由running Host在下一次ordinary complete Skill scan中自然发现，不等待Plugin reload；
-- 同一installed epoch中的MCP、Hook与preset只有收到explicit reload control才hot-refresh；
-- ordinary cold open与Round 5B compaction successor在冻结current owner snapshots/capability cut前自动调用同一个composition refresh，因为它们本来就是合法cold reconstruction boundary；
-- external embedder可直接调用Host method；对话内模型或用户通过固定`reload_plugins` Builtin触发同一实现；若两者都不可用才需要restart Host。
-
-因此改变Plugin enablement/current install的CLI必须明确返回`running_host_reload_required`及调用`reload_plugins`/关闭Host的提示；generic Hook trust/revoke命令则提示调用Round 9.2 fixed `reload_hooks`。Disable/remove只在Plugin state linearization point阻止future composition，Hook revoke只在generic trust state linearization point阻止future trust join；一个已经持有old immutable definition/borrow的running Host在对应reload或close前仍可能执行old Hook/MCP。CLI不得谎称已经同步撤销所有进程内执行能力，Runtime也不得用filesystem watcher偷换view。
-
-Refresh在Host safe point先为新的exact enabled package tuple取得immutable package borrows，再把贡献分别交给Skill、MCP、Hook与preset owner。不同physical owner没有虚假的跨owner事务瞬间；component各自在自己的合法linearization point生效。失败的refresh释放本次尚未发布的新borrow；成功replacement的predecessor borrow只保留到§3.3列出的old consumer全部drain，不能为了实现方便积累到Host close。
-
-Compaction的顺序固定为：install exact-scope fence -> dispatch `PreCompact` against predecessor Hook view -> 若未abort则执行Plugin composition refresh -> freeze successor Plugin/capability/cold inputs -> ordinary summary/adoption。Refresh发布的新Hook view可以观察后续`PostCompact`与`SessionStart(compact)`，但不能倒流重跑本次PreCompact。Refresh与后续summary任一失败都不伪造跨ownerrollback：已经在各owner合法发布的Plugin component保持current，并继续遵守old epoch tools不变/late-meta消息追加规则。
-
-`reload_plugins`这次Tool invocation的Pre/Permission/Post Hook必须全部使用attempt开始时冻结的predecessor Hook view；本次reload新发布的Hook定义只能从后续lifecycle event生效，不能在自己的PostToolUse阶段自触发。Reload ToolResult按Round 7.1 normal projection提交，不形成Plugin receipt或durable generation。
+本轮没有`--purge-data`。未来若需要必须独立规格化destructive ownership与confirmation。
 
 ---
 
-## 4. Skill contribution：只进入现有四根目录
+## 5. Atomic local installation
 
-### 4.1 禁止第五个 root
+### 5.1 Shared source-binding preparation
 
-Round 9.1唯一合法Skill roots保持：
+validate与install必须共用一个source-binding seam：
+
+1. lexical absolute preparation；
+2. host-known `/tmp -> /private/tmp`、`/var -> /private/var`等system alias normalization；
+3. final source directory no-follow open；
+4. descriptor-relative package traversal；
+5. frozen logical source basename仅用于diagnostic，不用于Plugin identity；identity只来自`plugin.json.name`。
+
+Final source symlink拒绝；system alias normalization不能放松source tree内部symlink禁令。
+
+Current implementation已在`capability/local_skill_source_binding.py`拥有经过dogfood的Darwin alias与absolute descriptor walk。实施时应把该physical policy hard-cut抽到一个purpose-neutral narrow module（例如`pulsara_agent/local_source_binding.py`），由loose Skill validation/publisher、bundled binding和Plugin package source共同调用；删除Skill-named旧module/path，不留re-export alias或两份alias table。Plugin package core不得复制`_DARWIN_SYSTEM_ALIASES`。
+
+### 5.2 One frozen observation
+
+第一次validation、copy、source final revalidation和stage verification必须属于同一个descriptor-relative frozen source observation：
 
 ```text
-workspace/.pulsara/skills
-workspace/.agents/skills
-${PULSARA_HOME}/skills
-~/.agents/skills
+held source root
+  -> validate plugin.json and component envelopes
+  -> deterministic iterative traversal
+  -> streaming copy into hidden stage
+  -> final source membership/identity revalidation
+  -> paired source/stage streaming byte + executable-class verification
+  -> exclusive immutable-root publish
 ```
 
-Plugin不得注册自己的root、cache root或source kind。它必须把portable Skill目录**原样物化**到：
+不得在validation后关闭source再按string path重开；不得只比较root mtime；不得保存aggregate tree digest充当observation。
+
+Directory evidence至少冻结每个relative member的name、file type、device、inode与executable class；regular-file before/after/path evidence至少比较device、inode、size、`mtime_ns`、`ctime_ns`。Every directory membership在copy后descriptor-relative重枚举并与initial evidence exact比较；root/path binding也要重验。任何差异都settle source raced，不能返回从未真实存在过的mixed package tree。该membership evidence是诚实的`O(member count)`call-local metadata；不得把它伪称constant memory，也不得保存为durable inventory。
+
+Recursive traversal必须iterative，不依赖Python recursion limit，不把所有resource bytes收集到内存。File copy、API-key detection、paired compare均使用constant-memory byte chunks；只有上述identity/membership metadata随member count线性增长。`MemoryError`按§3.4/§5.5进入typed settlement与cleanup，不能用新total cap解决。
+
+Standalone validation使用相同held traversal、component validation、special-file policy、API-key detection与final source revalidation，只省略stage/copy/publish/state mutation。Validate与install不能对同一source给出两套合法性truth。
+
+### 5.3 Hidden stage 与publish
+
+Stage是final package-install-id root的exact hidden sibling：
 
 ```text
-USER Plugin      -> ${PULSARA_HOME}/skills/<skill-name>/
-WORKSPACE Plugin -> <workspace>/.pulsara/skills/<skill-name>/
+.pulsara-stage-<package-install-id>-<attempt-nonce>
 ```
 
-`.claude/skills`仍不扫描。Plugin也不得把Skill改名为`<plugin-id>:<skill-name>`；Agent Skills要求frontmatter name与目录basename一致，改名会改写外部标准内容。
+Publisher先取得`<package-install-id>.lock`的exclusive/shared-publish owner，再exclusive创建该stage；stage与final root通过same held parent descriptor操作。Stage validation使用source `plugin.json` identity与frozen final install root，不用stage basename推导package语义。
 
-### 4.2 Materialization 与 provenance
+Final immutable root publish使用exclusive no-replace primitive：
 
-每个目标Skill目录额外带existing `.pulsara-skill-source.json` provenance。Plugin-managed variant至少记录：
+- Darwin：`renameatx_np(..., RENAME_EXCL)`；
+- Linux：`renameat2(..., RENAME_NOREPLACE)`；
+- unsupported platform返回typed `UNAVAILABLE`；
+- 禁止普通`rename`/`os.replace`fallback。
 
-- owner kind=`plugin`；
-- plugin instance与package install identity；
-- source package-relative path；
-- installed source-content digest。
+Exclusive primitive只保证held destination parent中的final-name no-replace。Final cut后同UID移动parent或替换private stage属于out-of-contract namespace interference。
 
-该digest直接复用现有`compute_skill_dir_hash()`内容契约：覆盖ordered relative file path与bytes，排除`.pulsara-skill-source.json`自身以及该helper既有的cache/OS ignored files，避免自引用或发明第二种Skill tree hash。Plugin source tree若自己携带reserved `.pulsara-skill-source.json`，该exact Skill contribution拒绝，不能让包伪造owner sidecar。该digest跨filesystem/restart边界证明“这个managed目录的产品内容仍是Plugin上次物化的内容”，是允许保留的immutable content digest。
+Package-install-id lock在stage创建前已经由同一publisher持有，并覆盖final publish到instance-state cut/confirmation；publish后不能先release再写state。Lock是physical exclusion，不是durable receipt、lease relation或consumer registry。
 
-安装/update/disable规则：
+GC枚举exact stage grammar后解析同一个package install id，nonblocking取得同一package exclusive lock并重新descriptor-bind exact stage，成功才可删除；锁忙则加入`PluginGcProgress.ordered_in_use`。Malformed/unknown hidden sibling按§4.1永远ignore；GC不能按age猜“旧stage”，也不能删一个无法join lock identity的path。SIGKILL释放OS lock后，后续GC即可回收exact合法stage。
 
-1. destination不存在：staging copy + atomic directory rename；
-2. destination由same Plugin instance管理且content仍匹配：允许atomic replace；
-3. destination属于其他Plugin、bundled Skill或普通用户Skill：该Skill contribution typed collision，绝不覆盖；
-4. Plugin-managed destination已被用户修改：不覆盖、不删除用户内容；删除Plugin provenance使它成为普通unmanaged Skill，并报告ownership conflict；
-5. disable/remove只删除仍与provenance digest exact匹配的目录。
+### 5.4 Copy failure classification
 
-一个Skill collision不阻止同package的其他合法Skill、MCP或Hooks。
+优先级固定为：
 
-### 4.3 Discovery 与 continuity
+1. source identity/membership变化 → source raced；
+2. source read/metadata I/O → source unavailable；
+3. stage create/write/readback/mode/verification → staging unavailable；
+4. final-name collision → publish conflict；
+5. cleanup failure在prior disposition外层形成`CLEANUP_UNAVAILABLE`。
 
-物化完成后不直接构造catalog。现有LocalSkillProvider在下一次ordinary complete scan中决定：
+如果同一attempt同时观察多个failure，必须按上述physical owner priority settle，不能依赖last exception。
 
-- four-root precedence；
-- manifest validity；
-- COMPLETE或UNAVAILABLE；
-- ROOT/child scope；
-- current catalog successor。
+### 5.5 Cancellation、worker与cleanup
 
-Plugin materialization使用atomic directory rename；并发scan若观察到已枚举文件消失或读取不完整，继续按Round 9.1形成`UNAVAILABLE/DISCOVERY_RACED`，下一cut重试。Plugin不得添加partial catalog、loaded-state或repair job。
+所有thread/filesystem workers必须：
+
+- 接收absolute deadline与cooperative cancel port；
+- caller cancellation时shield；
+- 在返回前join exact worker；
+- worker确认不再访问source/stage后才cleanup；
+- 不留下detached worker。
+
+Stage一旦创建，`MemoryError`、source/stage I/O、deadline、cancellation、validation或publish failure都必须进入同一个typed settlement/finally cleanup owner。不能让`MemoryError`逃逸并遗留stage，也不能用total package cap解决。
+
+### 5.6 PULSARA_API_KEY
+
+Non-empty current exact `PULSARA_API_KEY` value是唯一secret。Install copy必须对每个frozen package-relative member name/path的filesystem bytes以及每个regular-file byte stream做跨chunk exact检测；命中则拒绝package并cleanup，diagnostic path本身也必须经下述scrub。不能把secret藏进resource filename后复制到managed store。
+
+Raw `os.getenv()` snapshot不足以闭合rotation。本轮必须建立一个显式注入、process-local且purpose-specific的`ProcessApiKeyBoundary`：
+
+- application bootstrap为one Pulsara process构造exact one boundary object，并显式注入Plugin package store、generic Hook executor、native MCP SDK facade与provider dispatch sink；不得用module singleton lookup、service locator或每子系统各建一把互不相干的mutex；
+- owner内部只有one mutex与current raw-environment snapshot；不是service locator、generation、secret store或durable registry；
+- 所有Pulsara-supported key rotation在该mutex内更新`os.environ`与boundary snapshot；所有install/Hook/MCP/provider sinks使用同一boundary；
+- 大文件scan可在mutex外完成，但final admission必须重新取得mutex，读取raw environment并与scan snapshot exact比较；相同则保持mutex跨越irreversible `renameatx_np`/`renameat2`、process spawn或HTTP/provider request admission cut，随后立即释放；变化则释放后重扫，不设retry cap，absolute deadline/cancel仍可胜出；
+- command、final env/stdin/header/provider payload的最终secret check也在该guard内完成；不得检查后释放guard、再调用sink；
+- 非合作方绕过该port直接并发写`os.environ`属于same-process namespace interference，产品不虚构可序列化它；但每次guard acquisition仍必须从raw environment重读，不能只信cached value。
+
+该boundary不能用互不相干的`asyncio.Lock`与`threading.Lock`实现。本轮冻结one underlying `threading.Lock` linearization gate与两个narrow acquisition ports：
+
+```text
+sync_guard()   # 只供filesystem worker/非event-loop同步sink
+async_guard()  # event-loop caller；等待同一underlying gate时offload acquisition
+```
+
+- event-loop thread禁止直接blocking acquire；`async_guard()`把同一lock acquisition交给joined worker，caller cancellation时shield该worker直到它取得lock并立即release，或把owned token交还caller，绝不留下detached waiter；
+- Python lock token可以由event-loop owner在finally release；两种port共享同一互斥序，不是两个阶段或两个authority；
+- guard不是reentrant；持有期间不能调用supported rotation、nested boundary acquisition或任何会反向等待该gate的worker；
+- sync guard只跨streaming scan后的final compare + synchronous rename/request-enqueue cut；async guard只跨final compare + exact subprocess/HTTP/provider admission operation。若该operation本身必须`await`才能知道cut是否FULL，则在existing absolute deadline内shield/join这一个admission await并保持gate，知道FULL/not-FULL后立即release；不持gate等待response body、Hook/MCP process lifetime、retry、retire或drain；
+- supported rotation从对应sync/async port取得同一gate后一次更新raw `os.environ`与boundary snapshot；因此event loop继续调度不会造成mutex deadlock，而rotation与每个sink cut仍有单一线性化顺序。
+
+Copy开始时的snapshot不能替代publish sink。Stage byte/mode verification完成后，publisher必须在同一absolute deadline内执行：snapshot current non-empty key → streaming scan entire staged membership names/relative paths与regular-file bytes → 进入上述guard并确认raw current key仍等于该snapshot → 保持guard完成exclusive publish admission。Scan期间轮换则用new exact value重新scan；不设retry cap，deadline/cancel胜出时typed settle并cleanup。未来才轮换成一个package原本就含有的byte sequence不追溯撤销已安装package；current provider/process sink仍负责当次exact secret。
+
+Attempt-local scrub set必须保留本次观察过的每个non-empty exact key value，覆盖source/managed paths、exception、diagnostic、human/JSON projection与trace；例如source path本身含key时不能因“diagnostic只显示path”而泄漏。Raw package bytes/definitions使用`repr=False`或等价private carrier。除这些exact values外不广泛redact prompt、Hook/MCP payload、model reply、DSN或普通path。
+
+该检查不递归hash或分析其他secrets，不扫描PATH/dependencies的semantic meaning。Runtime Hook/MCP spawn/request仍必须在最终sink重新snapshot current key并验证command、args、environment、stdin/headers；Plugin Skill/context/ToolResult进入模型时复用existing provider sink final check。Install-time检查不能替代任一runtime postcondition。
+
+### 5.7 Crash 与ACK语义
+
+- ordinary exception/cancel：join worker并尽力cleanup后返回typed outcome；
+- state atomic cut前cancel：semantic mutation未发生；已publish version可能成为unreferenced root；
+- state atomic cut后reply前cancel：mutation已发生；owner先用known install id/current state作同process exact confirmation，不重跑copy/effect；确认成功返回真实success，确认本身不可用才返回closed `ACK_UNKNOWN`，绝不能谎报`CANCELLED`；
+- SIGKILL：可能留下hidden stage或unreferenced complete root；
+- power loss：因为本轮不承诺fsync durability，重启后可能看到old/new/missing/malformed state、hidden state temp、hidden package stage、unreferenced root，或new state引用missing package root；这些都按state/package observation typed `UNAVAILABLE`或orphan inventory处理，绝不自动repair；
+- `gc`可清理可证明unreferenced且unlocked的物理残留，但不是repair queue/recovery job；
+- GC的每个root/stage/state-temp unlink/rmdir是独立FULL cut；若deadline/cancellation/IO在若干cuts后胜出，已经删除的items不回滚。Outcome严格使用§3.3 `PluginGcProgress`，不能用裸status暗示零mutation，也不能声称未访问suffix已分类；
+- 不创建receipt、operation nonce relation、rollback log或startup recovery loop。
+
+Final destination在ordinary settled failure下必须完整存在或完全不存在；existing immutable root绝不覆盖。
 
 ---
 
-## 5. MCP contribution：进入现有唯一 config inventory
+## 6. Enabled-package observation 与Host composition
 
-### 5.1 Normalization
-
-MCP document envelope先按profile closed解析，不能把三家的top-level shape互相猜测：portable `mcp.json`严格接受Agent Plugins 1.0的`$schema + mcpServers`；Codex `.mcp.json`按公开契约接受direct server map或wrapped `mcp_servers` object；Claude default `.mcp.json`接受direct server map或wrapped `mcpServers` object。Claude manifest inline/path-array `mcpServers`、`.mcpb`与Codex `.app.json`不属于本轮执行面，逐component typed unsupported，不能回退到另一profile parser。Top-level envelope损坏只使该MCP component unavailable；合法envelope中的individual server继续按对应profile的最窄entry boundary校验。
-
-每个enabled Plugin MCP entry归一化为existing `McpServerConfig`。Runtime server id为：
+### 6.1 Closed aggregate
 
 ```text
-<plugin-id>.<package-local-server-id>
+EnabledPluginViewDisposition = COMPLETE | UNAVAILABLE
+
+FrozenEnabledPluginView
+  disposition
+  ordered USER instances
+  ordered exact WORKSPACE instances
+  closed component observations
+  diagnostics
+  held package bindings
 ```
 
-这只namespaces Host config identity；remote MCP tool name、schema与policy仍由Round 6/9 owner定义。
+`COMPLETE`要求instances按`(scope, workspace_state_key, plugin_id)` deterministic且unique，并且每个enabled instance exact join one held current package binding。`UNAVAILABLE`只携带closed aggregate diagnostics，instances/component facts/bindings全空；不能把已经读到的prefix当partial truth。
 
-Plugin package不是Host startup policy authority。所有Plugin-derived server固定normalize为`required=false`，单个start/connect/auth/handshake failure只使该server unavailable并保留其他server/component；Plugin manifest不能把它提升成required Host dependency。Visibility固定为existing `ROOT_AND_SUBAGENTS`并继续受exact Plugin USER/WORKSPACE scope约束；effect保持existing `AUTO` inference/override owner，package不能声明permission bypass、effect override或parallelism authority。Codex/Claude profile中超出其公开MCP config交集的host-policy字段typed unsupported，而不是翻译成Pulsara authority。
+State observer必须：
 
-这里的`required=false`只保证server failure不阻塞Host，不把server启动变成无副作用操作。Enable/inspect输出必须明确展示stdio code execution或HTTP connection boundary；Plugin MCP process继承的environment继续由existing transport policy与本文secret删减规则决定，不能把Tool permission误当成server-process sandbox。
+- descriptor-held、no-follow枚举目标state roots；
+- 冻结direct-child membership和file identity；
+- descriptor-relative读取每个state；
+- bind referenced immutable package root与manifest identity；
+- final revalidate state membership、state files与package root identities；
+- 任何replace/delete/mixed observation返回whole `UNAVAILABLE`，不发布partial winners；
+- missing state roots表示COMPLETE empty；
+- disabled instance仍进入inspection，但不进入enabled component values。
 
-Portable stdio必须保留标准的字段级语义：
+不重试到“看起来一致”，不增加generation或watcher。
 
-- `command`是一个bare executable token或以`./`开头的package-relative token；不得做placeholder expansion或shell split；后者在adapter中resolve为managed package内的exact executable path；
-- omitted `cwd`使用managed package root；显式`cwd`只接受`./...`、`${PLUGIN_ROOT}`或`${PLUGIN_DATA}` anchored forms，展开后必须留在对应root；
-- 只在`args`每个string、`env`每个value与`cwd`中对`${PLUGIN_ROOT}`/`${PLUGIN_DATA}`做一次non-recursive textual replacement；replacement产生的新`${...}`不得再次扫描，unknown placeholder-like text保持literal而不是读取Host secret；env key、command与fixed component path都不展开；
-- portable `env`声明`PLUGIN_ROOT`或`PLUGIN_DATA`会使该server entry invalid；configured env overlay之后由client最后写入这两个真实值，并删除任何名为`PULSARA_API_KEY`的entry；任何Plugin-derived stdio env、secret-ref、HTTP header env-ref或placeholder试图读取/声明`PULSARA_API_KEY`时，该MCP entry typed rejected，不能通过另一种transport/config shape绕过；
-- adapter通过sealed factory给existing stdio transport增加一个already-validated exact local cwd branch；ordinary config继续使用workspace-relative branch。MCP physical owner只消费closed value并在spawn前重验目录仍存在，不导入Plugin parser或package store。
+Runtime enabled view只观察instance state及其referenced current roots；它不枚举全部historical/unreferenced package directories，因此一个无关orphan root的physical race不能阻止Host composition。`inspect_local_plugins`与`gc_local_plugin_packages`在同一store policy上额外做complete version inventory；该inventory失败只使对应inspection/GC unavailable，不反向伪造Runtime enabled state。
 
-Portable Streamable HTTP必须冻结literal public headers，而不是把它们误写成environment-secret references。Round 9.3给existing auth/config union增加`StaticLiteralHeaders` pure value；URL拒绝userinfo/fragment，non-loopback endpoint必须HTTPS，HTTP只允许host恰为`localhost`或由`ipaddress`机械证明的任意loopback IP literal。为符合portable 1.0，existing URL validator的loopback判断从当前三个literal扩展为closed `localhost | ipaddress.is_loopback`，但不通过DNS把普通hostname猜成loopback。Private non-loopback HTTPS仍受existing network policy；package本身不能放大该policy，policy拒绝是typed connection unavailable而不是伪造invalid portable schema。Literal headers不得展开环境变量或`${PLUGIN_*}`，也不得覆盖client-owned MCP protocol/auth headers。因为existing transport禁用redirect，它不会把header转发到另一origin。Portable OAuth不存在；legacy SSE在current owner没有transport实现时对该entry typed unsupported，不做fallback。
-
-上述扩展只补齐existing `McpServerConfig`表达能力，不创建Plugin MCP transport、slot、registry或executor。Hook command环境同样提供`${PLUGIN_ROOT}`/`${PLUGIN_DATA}`，但两者不是共享execution owner。
-
-### 5.2 Single composition input
+每个enabled package的fixed component observation使用同一closed disposition：
 
 ```text
-existing configured MCP servers
-+ enabled Plugin normalized MCP servers
--> one ordered tuple[McpServerConfig, ...]
--> KernelHostCore.reload_mcp_configs(...)
+PluginComponentObservationDisposition = MISSING | COMPLETE | INVALID | UNAVAILABLE
+
+FrozenPluginSkillComponentObservation
+  MISSING
+  COMPLETE(valid definitions, ordered Skill issues)
+  INVALID(ordered deterministic issues; no definitions)
+  UNAVAILABLE(ordered physical diagnostics; no partial facts)
+
+FrozenPluginMcpComponentObservation
+  MISSING
+  COMPLETE(ordered declared server keys,
+           ordered valid normalized server candidates,
+           ordered invalid/unsupported entry issues)
+  INVALID(ordered top-level/kind diagnostics; no declared keys/configs)
+  UNAVAILABLE(ordered physical diagnostics; no declared keys/configs)
+
+FrozenPluginHookComponentObservation
+  MISSING | COMPLETE(generic source snapshot) |
+  INVALID(no definitions) | UNAVAILABLE(no definitions)
+
 ```
 
-server id冲突在reload前按entry拒绝；不得让Plugin覆盖base config或另一个Plugin。Plugin不创建MCP registry、slot、generation、executor、permission matrix或retry loop。
+`MISSING`只表示fixed path在complete membership observation中不存在。`INVALID`只表示kind/schema/content等deterministic defect；`UNAVAILABLE`只表示I/O、identity/membership race或无法完成physical observation。Parser、cross-scope selection、inspection和reload必须共享这些exact objects，不能各自重新扫描或从diagnostic string反推presence/declared keys。
 
-最终ordered tuple仍受existing `MAXIMUM_MCP_CONFIGURED_SERVERS`这一已激活physical owner bound约束；它不是Plugin数量cap。若current base + Plugin tuple整体越界，MCP component的本次reload typed rejected且supervisor继续使用old exact config tuple，不挑选partial Plugin winner；Skill、Hook与preset component可在各自linearization point继续生效。CLI/doctor必须报告current count、existing bound及本次MCP component未发布的事实。
+### 6.2 Scope-neutral package truth
 
-### 5.3 Mid-session behavior
+一个call-local inspection同时观察：
 
-- late READY/new schema走existing `MCP_CATALOG` successor与`inspect_new_mcp_tool -> use_new_mcp_tool`；
-- current epoch已DIRECT的same identity schema replacement继续按Round 9 unavailable/pending-cold-adoption规则，不能meta绕过；
-- runtime-only reconnect不产生provider-visiblecatalog变化；
-- disable/remove从current config inventory移除server，未来meta route消失；
-- existing epoch的native descriptor不热删，调用由existing unavailable gate拒绝；
-- next ordinary cold open或compaction successor重新决定完整MCP cohort的DIRECT/META exposure。
+- all USER current instances；
+- exact workspace的current instances；
+- referenced/unreferenced managed versions；
+- enabled/disabled状态；
+- per-component COMPLETE/UNAVAILABLE/invalid issues；
+- roots被current process或其他process持有时的in-use状态。
+
+`PluginInspectionOutcome.COMPLETE`是list、doctor、GUI与future local Host endpoint的唯一inspection truth。Result只在本次call内immutable；不做跨调用cache、generation或“同一时刻”宣称。
+
+Inspection只拥有package/instance/component observation aggregate，不复制leaf semantics。为形成effective summary，它在同一次call-local cut中：把Plugin Skill batch连同current loose/bundled batches交给existing `SkillCatalogResolver`；把Plugin MCP candidates连同production local/Host config交给同一个native normalization/collision function；读取generic Hook trust assessment。Nested component outcome可以独立`UNAVAILABLE`而package inspection仍`COMPLETE`并完整报告原因。`list`与`doctor`投影同一个已经组成的result，不能再次scan、再次resolve或拿running Host pointer冒充filesystem current truth。
+
+Inspection只能说明“current local state若被new cold/reload合法采用将产生什么”；running Host是否仍持predecessor由refresh notice表达，不能通过CLI跨进程探测或伪造adoption confirmation。
+
+Caller deadline/cancellation在inspection install前胜出时走outer operation abort，不构造`PluginInspectionOutcome`、不把`CANCELLED`伪装成第三种semantic inspection disposition。已经在deadline前FULL install的COMPLETE/UNAVAILABLE observation不因reply阶段cancellation被追溯撤销。
+
+### 6.3 Host current view
+
+Host cold open从一个COMPLETE enabled-package observation构造`FrozenEnabledPluginView`。Package aggregate UNAVAILABLE时：
+
+- Plugin components接收explicit unavailable而不是伪造COMPLETE empty；
+- Host本身继续可用；
+- Plugin Hook/MCP按各自fail-open边界不阻止local Hook/MCP或ordinary Host；
+- 因Plugin是effective Skill catalog的required producer，current `SKILL_CATALOG`按§7.5 whole `UNAVAILABLE`，不得同时声称loose/bundled winners仍可投影；
+- diagnostics诚实说明Plugin view unavailable。
+
+Running Host仅在以下seam替换current Plugin view：
+
+- explicit ROOT-only `reload_plugins`；
+- approved compaction successor preparation；
+- new Host cold open。
+
+没有watcher。CLI mutation必须提示running Host需要reload、compaction或restart。
+
+Semantic observation `UNAVAILABLE`与owner outer abort必须分开：
+
+- state/package observation在deadline前完整settle为`UNAVAILABLE`时，Host尝试发布一个closed unavailable Plugin view：Skill third batch `UNAVAILABLE`且无facts；future Plugin Hook sources为空并发出Host-level diagnostic；Plugin MCP candidate tuple为空并由native owner retire old future configs；old already-dispatched physical consumers仍drain；
+- deadline/cancellation/stale Host owner在candidate observation install前胜出时，不构造Plugin view、不发布任何component，predecessor保持current；
+- 不得把semantic unavailable当outer cancel，也不得在semantic unavailable时从predecessor Plugin values恢复stale future contribution。
+
+### 6.4 Component failure isolation
+
+Package state aggregate完整后，各component按自己的标准failure boundary处理：
+
+- invalid Plugin Skill逐项issue，其他Skills继续；
+- fixed-location wrong kind进入exact component `INVALID`，不是aggregate/component `UNAVAILABLE`；
+- invalid `mcp.json` top-level进入MCP `INVALID`并只禁用该package MCP；`COMPLETE`中的invalid server只skip exact server且其declared key仍被保留；
+- invalid Hook config进入exact Hook component `INVALID`；physical read/race才是`UNAVAILABLE`；
+- one component failure不回滚package enablement或其他components。
+
+No component adapter能改写package state。
+
+### 6.5 Cross-scope component selection
+
+USER与exact WORKSPACE同`plugin_id`可以同时enabled。Selection按component明确：
+
+- Skills：两者都进入central resolver，WORKSPACE Plugin tier高于USER Plugin tier；
+- MCP：同`plugin_id + local_server_id`时WORKSPACE contribution覆盖USER contribution；
+- Hooks：同`plugin_id`时WORKSPACE Hook source覆盖USER Hook source；
+不同Plugin之间不按manifest version、install time、directory order或lexicographic accident赋予semantic precedence。需要tie outcome的Skill见§7.4；MCP identity本身包含plugin id。
+
+同plugin id的cross-scope fallback必须区分missing与broken override：
+
+- WORKSPACE fixed component path missing表示没有override claim，USER同Plugin component/leaf可继续；
+- Skills继续遵守central resolver既有truth：invalid higher candidate不成为valid shadow marker，lower valid tier可胜出；
+- WORKSPACE `mcp.json` COMPLETE时，每个declared server key即使individual invalid也claim exact `(plugin_id, local_server_id)`并压住USER counterpart，其他USER-only server继续；top-level MCP component present但UNAVAILABLE/invalid且无法形成完整keys时，压住该Plugin整个USER MCP component而不是执行lower unknown set；
+- WORKSPACE Hook fixed path present即claim whole Hook component；invalid、unavailable、disabled generic Hook trust或UNTRUSTED都不能让USER Plugin Hook偷偷fallback执行；
+- doctor必须显示“broken higher override suppressed lower”而不是把lower标成普通winner。
+
+这些shadow markers只存在于本次complete component observation，不是durable tombstone、registry或generic precedence framework。
 
 ---
 
-## 6. Hook contribution adapter
+## 7. Plugin Skill：显式第三definition producer
 
-Round 9.3不实现Hook subsystem。11项event、USER/WORKSPACE source、trust store、matcher、dispatcher、executor、output parser、lifecycle seam与`HOOK_CONTEXT`全部由已ACTIVATED的[Round 9.2](ROUND_9_2_HOOK_SUBSYSTEM_IMPLEMENTATION_SPEC.zh.md)唯一拥有。
+### 7.1 Dependency direction
 
-本节只冻结Plugin package如何成为Round 9.2的第三种definition producer。
-
-### 6.1 Package declaration discovery
-
-Codex profile接受：
-
-- manifest指定的exact Hook file/path；
-- manifest inline Hook object；
-- 未指定时default `hooks/hooks.json`。
-
-Claude profile接受其manifest公开的Hook path/array/inline forms及default `hooks/hooks.json`。Portable Agent Plugins 1.0没有Hook component；不得从`extensions`猜测Hook。
-
-Adapter只负责定位并取得完整bounded bytes，再调用Round 9.2唯一`hooks/parser.py`。它不得复制JSON schema、matcher normalization或output parser。Invalid/unsupported event/group/handler使用Round 9.2既有最窄failure boundary；Plugin的Skill/MCP/preset component不受无关Hook entry牵连。
-
-### 6.2 Plugin Hook source identity
-
-Round 9.3以一次明确hard cut给Round 9.2的closed source union增加：
+Plugin Skill adapter只把enabled package中的portable `skills/`变成current Skill subsystem能消费的typed batch：
 
 ```text
-HookSourceKind.PLUGIN
+plugins/skill_producer.py
+  -> capability.parse_skill_document
+  -> capability.validate_skill_candidate_placement
+  -> capability.PluginSkillOrigin
+  -> FrozenPluginSkillDefinitions
+
+capability/*  -X-> plugins/*
+```
+
+`SkillCatalogResolver`只消费三个explicit inputs；它不读Plugin state/filesystem。
+
+### 7.2 Closed types hard cut
+
+在`capability/types.py`与resolver contracts中一次性增加：
+
+```text
+SkillProducerKind.PLUGIN
+SkillSource.PLUGIN
+
+PluginSkillVisibilityScope = USER | WORKSPACE
+
+PluginSkillOrigin
+  visibility_scope
+  workspace_state_key?     # iff WORKSPACE
+  plugin_id
+  package_install_id
+  package_relative_skill_directory  # skills/<name>
+
+SkillDefinitionOrigin =
+  LooseSkillOrigin | BundledSkillOrigin | PluginSkillOrigin
+
+PluginSkillDefinitionsDisposition = COMPLETE | UNAVAILABLE
+
+FrozenPluginSkillDefinitions
+  disposition
+  candidates
+  invalid_issues
+  unavailable_cause?
+
+SkillProducerUnavailableReason additions
+  PLUGIN_VIEW_UNAVAILABLE
+  PLUGIN_RESOURCE_UNAVAILABLE
+  PLUGIN_DISCOVERY_RACED
+
+SkillDiagnosticCode additions
+  PLUGIN_DEFINITIONS_UNAVAILABLE
+    = "skill_plugin_definitions_unavailable"
+  PLUGIN_SAME_TIER_NAME_CONFLICT
+    = "skill_plugin_same_tier_name_conflict"
+```
+
+Origin携带完整exact values，不新增stored/caller-supplied origin/provenance fingerprint。`PluginSkillOrigin`定义在capability contracts中，避免capability反向import Plugin runtime。Current `SkillDiagnosticCode` exact guard随上述two additions由33 hard-cut为35；不存在old/new enum dual path。
+
+同时机械扩展current closed invariants：
+
+- `SkillManifest.__post_init__`接受exact three-origin union；
+- `CompleteEffectiveSkillCatalogInspection`允许`InvalidSkillCandidateIssue.origin`为Loose或Plugin，仍禁止Bundled invalid issue；
+- `SkillCandidateIssueKind`增加`CONFLICTING`，union增加一个group-level `ConflictingSkillCandidateIssue` arm：`name + exact tier + ordered(path, origin) candidates + exact diagnostic code`；每个group至少two members且每个candidate只出现一次；members仅为deterministic projection按`(plugin_id, package_install_id, path)`排序，不形成winner precedence；
+- every complete valid candidate必须exact分配为winner、shadowed或conflicting之一；
+- `skill_candidate_issue_sort_key`与producer-unavailable order显式包含Plugin tier/kind；
+- `skill_source_for_origin`、`skill_origin_label`、catalog/active/doctor projection对Plugin origin exhaustive；
+- unknown origin仍typed/raise closed-union error，不用default branch猜source。
+
+### 7.3 Single parser/placement path
+
+Plugin producer对每个portable `skills/` immediate child：
+
+1. 从held immutable package root descriptor观察exact child；
+2. exact regular `SKILL.md`才是candidate；
+3. 调用current root-neutral `parse_skill_document(raw)`；
+4. 调用current placement validator，以immediate child basename验证name；
+5. 形成普通`SkillManifest`与`PluginSkillOrigin`；
+6. invalid document/placement形成普通`InvalidSkillCandidateIssue`；
+7. supporting resources不递归scan/hash。
+
+不得出现Plugin name regex、YAML loader、fallback parser、document bound或host-extension semantics副本。
+
+### 7.4 Seven-tier precedence 与same-tier collision
+
+Final precedence：
+
+```text
+1. workspace <workspace>/.pulsara/skills
+2. workspace <workspace>/.agents/skills
+3. user ${PULSARA_HOME}/skills
+4. user ~/.agents/skills
+5. exact WORKSPACE Plugin Skills
+6. USER Plugin Skills
+7. Pulsara bundled Skills
+```
+
+同一Plugin tier内，两个不同enabled Plugins可以提供同名Skill。Resolver不能按plugin id、install time或path任意选winner。
+
+对每个name按tier从高到低：
+
+1. first non-empty tier只有一个candidate：它是winner，所有lower valid candidates是SHADOWED；
+2. first non-empty tier有多个candidates：形成one group-level `ConflictingSkillCandidateIssue`与one causal `skill_plugin_same_tier_name_conflict`，该tier不产生winner，继续检查下一tier；
+3. lower tier若有unique candidate可成为fallback winner；
+4. 所有tiers都无unique candidate时该name不进入effective catalog；
+5. 已有更高unique winner时，lower Plugin candidates只记SHADOWED，不重复制造无消费者conflict truth。
+
+因此一个Plugin collision不会让整个Skill aggregate unavailable，也不会随机授权某个Plugin；其他Skill names继续可用。
+
+本轮必须扩展closed issue union与diagnostic enum，而不是把conflict伪装成INVALID或UNAVAILABLE。
+
+`SkillDiagnosticCode.PLUGIN_SAME_TIER_NAME_CONFLICT`只有一个message/severity owner；Plugin inspection不得再产生一个同义generic diagnostic。
+
+Resolver allocation proof把group issue中的ordered candidate refs展开后与input valid candidates exact比较；不能为便于assertion又建立一份conflict map。Group carrier避免N个conflicting candidates各自复制N个peers造成O(n²) metadata；projection仍完整显示全部paths/origins且不截断。
+
+### 7.5 Required producer availability
+
+Plugin package view complete且零enabled package时，`FrozenPluginSkillDefinitions.COMPLETE(empty)`。
+
+只有以下physical causes使Plugin Skill producer `UNAVAILABLE`：
+
+- enabled-package aggregate本身`UNAVAILABLE`；
+- 任一enabled instance的referenced immutable package root无法bind、被replace或无法完成identity revalidation；
+- 任一enabled instance的`skills/` physical observation为`UNAVAILABLE`（包括descriptor-relative membership race或I/O failure）。
+
+`skills/`为`MISSING`或deterministic `INVALID`（例如fixed path wrong-kind）都属于`COMPLETE` producer batch中的empty exact package slice + complete issues；它们不把Plugin producer升级成`UNAVAILABLE`，也不抹去其他Plugin、loose或bundled Skill winners。Invalid individual Plugin Skill同样只进入existing Skill issue algebra。换言之，只有无法证明完整physical batch的cause才触发whole-catalog fail-closed，已经完整观察到的deterministic component defect不冒充availability failure。
+
+Owner deadline/cancellation在Skill source snapshot install前胜出时走existing outer abort，不构造`FrozenPluginSkillDefinitions.UNAVAILABLE`、不追加source observation/CAS；只有deadline前settled的non-deadline Plugin failure才可成为semantic producer cause。
+
+与current bundled/loose contract一致，任何required producer `UNAVAILABLE`时effective Skill catalog whole `UNAVAILABLE`、零winners、零facts、active fail-closed。
+
+Unavailable cause order固定：
+
+```text
+LOOSE, PLUGIN, BUNDLED
+```
+
+不因Plugin failure从predecessor/current hidden map恢复stale winners。
+
+### 7.6 Composer与source contract
+
+`KernelSkillProjectionComposer`显式接收：
+
+```text
+BundledSkillDefinitionProducer
+LooseSkillDefinitionProducer
+exact FrozenPluginSkillDefinitions from the captured FrozenEnabledPluginView
+SkillCatalogResolver
+```
+
+每个safe point冻结一个absolute deadline，按current owner topology取得三项完整batch，再resolve/install一次。`freeze_owner_snapshot(...)`必须显式接收本次Host capture的exact `FrozenPluginSkillDefinitions` object，或接收一个只返回该exact object的narrow owner-held callable；不得让composer自行scanPlugin state、查询service locator或接受caller手写package paths。Plugin batch必须与同一`FrozenEnabledPluginView`逐对象join。
+
+Capability source继续exact：
+
+```text
+CapabilitySourceKind.LOCAL_SKILL_CATALOG
+stable_source_id = "pulsara-local-skill-catalog"
+```
+
+Source contract hard-cut为新单一路径，例如：
+
+```text
+domain = "skill-source-contract:v4-bundled-loose-plugin-skills"
+payload = {
+  parser_contract,
+  placement_contract,
+  producer_kinds: ("LOOSE", "PLUGIN", "BUNDLED"),
+  precedence: seven exact tiers,
+  bundled_names: exact current inventory,
+}
+```
+
+删除v3 production path，不做dual contract/compatibility flag。既有loose/bundled candidate/fact identity在其origin fields未变时必须保持；Plugin fact origin framing直接编码完整`PluginSkillOrigin`，不保存另一个DTO fingerprint。
+
+### 7.7 Runtime、read与compaction
+
+Plugin winner与loose/bundled winner走完全相同的：
+
+- `ResolvedSkillCatalogEntry`；
+- `SKILL_CATALOG`；
+- textual/explicit activation；
+- `ACTIVE_SKILL`；
+- ordinary `read_file` absolute path；
+- ToolResult projection；
+- retained Skill proof；
+- compaction successor composition；
+- same-epoch continuity。
+
+Plugin root只读，不等于provider authority；Skill body仍是untrusted guidance。Supporting resource read使用ordinary filesystem tool和existing permission/path policy，不建立Plugin read tool。
+
+Package replace/disable后，old active/retained body按existing frozen/canonical facts完成；current catalog在next Plugin view publication + Skill safe point使用new truth。历史absolute path不承诺跨GC永久存活。
+
+---
+
+## 8. Plugin MCP：只进入existing native config/supervisor
+
+### 8.1 Portable parser
+
+只读取root `mcp.json`，必须满足Agent Plugins 1.0：
+
+- exact `$schema == https://agent-plugins.org/schemas/1.0.0/mcp.schema.json`；
+- schema version与`plugin.json`匹配；
+- top-level只有`$schema`与`mcpServers`；
+- 每个server独立validate；
+- supported transports：`stdio`与`streamable-http`；
+- `sse`本轮typed unsupported，不fallback；
+- Runtime不联网fetch schema。
+
+### 8.2 Native normalization
+
+每个valid server归一化为existing `McpServerConfig`：
+
+```text
+server_id = "plugin:<decimal UTF-8 byte length of plugin-id>:<plugin-id>:<full local-server-id>"
+display_name = "<plugin-id>:<local-server-id>"
+enabled = true
+required = false
+scope_policy = ROOT_AND_SUBAGENTS
+effect_policy = AUTO
+exposure_policy = ALL
+```
+
+Plugin不能声明：
+
+- required startup gate；
+- permission bypass；
+- effect override；
+- ROOT-only/child-only hidden authority；
+- concurrency/timeout beyond native accepted values；
+- existing configured-server bound override。
+
+为使native supervisor在model surface不变、physical package version变化时仍能retire旧client，generic `McpServerConfig`增加一个有直接consumer的closed source carrier：
+
+```text
+McpRuntimeSourceIdentity =
+  LocalConfiguredMcpRuntimeSource |
+  ManagedPackageMcpRuntimeSource(
+    store_scope_key,
+    package_owner_key,
+    package_install_id,
+  )
+```
+
+Existing local/Host config使用first arm；Plugin adapter用scope/workspace-key + plugin id机械形成前两个safe exact keys，并携带current package install id。Native MCP core只比较/编码closed values，不解析它们回读Plugin state。该carrier不是durable provenance、tree fingerprint或display identity；唯一consumer是runtime replacement/reconnect与old lifetime anchor retirement。
+
+`plugin:`是Plugin-generated server namespace。Length framing按UTF-8 bytes解析出exact plugin id，local server id是剩余完整suffix；因此`("a.b", "c")`与`("a", "b.c")`等组合不能alias。禁止用`.`拼接、escaping约定、truncate或hash来弥补非injective identity。Native 128-byte server-id bound在完成上述framing后应用；overbound只使exact server invalid。
+
+Local/Host config若已有同一exact server id，它作为existing explicit authority保留，冲突的exact Plugin server形成`plugin_mcp_server_id_collision`并被skip；两个Plugin candidate若仍形成同一exact framed id，也全部skip而无任意winner。其他local/Plugin servers继续进入candidate tuple。不能让merge order静默覆盖，也不能因一个collision保留整份stale predecessor config。
+
+Provider name collision不是Plugin diagnostic owner。Existing native naming/install path必须从raise-only hard-cut为closed call-local collision truth：
+
+```text
+McpProviderNameCollisionFact
+  provider_name
+  ordered exact members: (server_id, remote_tool_name, discovered tool identity)
+```
+
+Native owner先对本次完整discovery candidate set运行`mangle_mcp_tool_names`，再按provider name形成groups。Group size大于一时不选winner，全部ambiguous members同时从DIRECT projection和`MCP_CATALOG`/META directory省略；同一server内部truncate/normalize collision也走同一algebra。其他tools、servers、resources、templates、prompts及execution-policy facts继续可用。不得用hash改写model-visible name，也不得让一个raw `ValueError`/`RuntimeError`中止whole MCP install。Cold/compaction cohort只安装collision-free descriptor；same epoch已经安装的DIRECT descriptor仍遵循existing stale-schema/availability gate，late discovery不能改写`tools[]`。
+
+Per-server `McpDiscoverySnapshot`继续拥有remote discovery truth；cross-server分组只能由收齐全部server snapshots的native aggregate projection owner完成。`FrozenMcpCapabilityProjectionInput`因此增加ordered `provider_name_collision_facts` nested field，并把这些groups加入其existing catalog/projection fingerprint framing；各collision member不进入source tool facts/inspectability routes。它不是Plugin diagnostic、Committed/Live event、durable receipt或新的fingerprint registry。Directory/doctor projection可以解释被省略成员，但dispatch只能解析collision-free exact `(server_id, remote_tool_name)`。
+
+### 8.3 stdio
+
+- `command`保持一个token，不shell split；
+- bare executable按本次native config composition冻结的Host `PATH`规则解析；该exact configured `PATH`进入runtime/resolved config identity并随changed config正常retire/restart，spawn不能重新读取一个不同PATH偷换reviewed lookup；Plugin作者不能假定任意Host具有某个bare executable；
+- `./...`command descriptor-relative resolve到immutable package root内，再形成exact absolute executable path；
+- command若含path separator则只接受上述contained `./...` form；absolute path、`../...`或其他relative path form使exact server invalid；
+- omitted cwd使用package root；
+- `cwd`只接受standard `./...`、`${PLUGIN_ROOT}`或`${PLUGIN_DATA}` forms并保持contained；
+- `args`、`env` values与`cwd`对原始string中的每一个exact `${PLUGIN_ROOT}`/`${PLUGIN_DATA}` occurrence执行一次、left-to-right、non-recursive expansion；replacement产生的文本不再scan；
+- `command`和environment key永不做placeholder expansion；unknown placeholder-like text保持literal；
+- `args`/`env`中的unrecognized placeholder-like text按standard保持literal；replacement引入的text不再scan，因此不存在cycle evaluator；
+- 只有`cwd`因不满足上述closed forms或post-expansion containment才使exact server invalid；`args`/`env` values按standard是opaque strings，不做path containment猜测；
+- Plugin env中exact `PLUGIN_ROOT`、`PLUGIN_DATA`或`PULSARA_API_KEY` key使exact server invalid；不得先接受再覆盖或删除；
+- final subprocess environment由native MCP transport owner按existing public base allowlist + frozen Plugin overlay构造，最后强制设置exact `PLUGIN_ROOT`/`PLUGIN_DATA`；bare command查找使用的就是这份final frozen `PATH`；
+- `PULSARA_API_KEY`从base/overlay删除并在spawn sink重新验证command、args、cwd、env。
+
+Current `StdioTransportConfig.cwd: str | None`与SDK“永远workspace-relative resolve”不能承载上述语义。本轮在native `mcp_config.py` hard-cut为closed generic carrier：
+
+```text
+McpStdioCwdBinding =
+  WorkspaceRelativeMcpCwd(relative_path) |
+  ExactAbsoluteMcpCwd(absolute_path, authority = PACKAGE_ROOT | INSTANCE_DATA)
+```
+
+Existing local/Host config的omitted cwd仍由native parser形成`WorkspaceRelativeMcpCwd(".")`，relative cwd继续由SDK在exact Host workspace内resolve；Plugin server无论cwd omitted、`./...`、`${PLUGIN_ROOT}...`或`${PLUGIN_DATA}...`，adapter都先通过held package/data binding形成`ExactAbsoluteMcpCwd`。SDK收到absolute arm后必须原样作为cwd，不再拼接/re-resolve workspace。Binding arm、exact normalized path和frozen lookup `PATH`进入runtime config payload；§4.5 `PhysicalLifetimeAnchor`附在generic config/client可达对象，`repr=False, compare=False`且不进入任何fingerprint。
+
+Package root/data binding由Plugin composition传给adapter；MCP supervisor不读Plugin state或manifest。`${PLUGIN_DATA}` cwd在composition时还必须通过package-store narrow port证明exact instance data root存在、是held no-follow directory且Host user可写/进入；失败只使exact process-bearing server unavailable。
+
+### 8.4 Streamable HTTP
+
+Agent Plugins fixed `headers`是visible public data，不是secret refs，也不是authentication mechanism。Current native config hard-cut在generic `McpServerConfig`增加独立字段：
+
+```text
+public_headers: tuple[(original_name, literal_value), ...] = ()
+```
+
+Existing local/Host configs默认empty。不得给`McpAuthConfig`增加`StaticPublicHeaders` arm，不得把public headers塞进`StaticHeaderEnvironmentRefs`、伪造environment variable names或建立Plugin-private HTTP client/optional config wrapper。`McpServerConfig.__post_init__`、`resolved_headers()`、runtime/resolved config fingerprint builders与HTTP request owner必须共同消费这一generic field；exact literal values进入runtime payload，并由resolved identity间接覆盖，但不进入model-surface semantic payload；`PhysicalLifetimeAnchor`不进入任何identity。
+
+规则：
+
+- absolute HTTP/HTTPS，无userinfo/fragment；
+- non-loopback必须HTTPS；HTTP只接受case-insensitive exact hostname `localhost`，或由`ipaddress.ip_address(parsed.hostname).is_loopback`判定为true的IPv4/IPv6 literal；不做DNS resolution，也不把`localhost.example`、private/link-local地址当loopback；
+- no redirect/cross-origin header forwarding；
+- header name必须是RFC 9110 ASCII `tchar`且按ASCII casefold唯一；literal value必须为空或由HTAB/SP/visible ASCII组成，禁止NUL、CR、LF、其他control/non-ASCII及leading/trailing OWS；owner不得trim、case-normalize或重写用户审阅值；
+- url/header不做placeholder/env expansion；
+- current exact `PULSARA_API_KEY`值出现在url/header时拒绝；
+- no OAuth、credential ref或headers helper；
+- final header merge按case-insensitive key执行：package `public_headers`最低，native HTTP/MCP protocol headers与resolved existing auth headers覆盖同名public value；client-owned layers之间继续使用existing native precedence。最终request headers在§5.6同一`ProcessApiKeyBoundary` guard内重验并进入HTTP admission cut；
+- missing/invalid secret environment ref、authorization acquisition失败或server返回authentication failure属于native connection/runtime failure，不回写Plugin config为INVALID。
+
+### 8.5 One MCP inventory
+
+Host composition显式合并：
+
+```text
+existing local/Host McpServerConfig tuple
++ current Plugin McpServerConfig tuple
+-> one deterministic tuple
+-> existing MCP supervisor install_config_epoch
+```
+
+MCP supervisor、discovery、naming、slot、catalog、DIRECT/META route、permission、effect、attempt、reconnect、close全部保持唯一owner。`conversation_kernel/mcp/*`不得import`plugins/*`。
+
+Existing `MAXIMUM_CONFIGURED_MCP_SERVERS = 64`对合并后tuple生效。Overbound时new MCP config epoch不发布，old exact supervisor config继续；Plugin Skill/Hook component不因无关MCP bound被回滚。该outcome必须进入`reload_plugins`component result与doctor。
+
+### 8.6 Runtime behavior
+
+- cold/compaction决定完整cohort的DIRECT/META exposure；
+- same epoch late READY走existing `MCP_CATALOG` successor；
+- meta wrapper只对resolved underlying remote tool产生一组Pre/Permission/Post Hook；
+- same identity schema replacement不能通过META绕过installed DIRECT descriptor；
+- disable/remove后future META route消失；installed DIRECT descriptor仍在`tools[]`，native availability gate拒绝；
+- config unchanged时reload应复用existing physical slot/process；
+- old changed/removed process持有old package lock直到terminate/kill/drain；
+- one server start/connect/handshake failure不阻止其他server或Plugin components。
+
+每个Plugin-produced native config都携带一份独立§4.5 `PhysicalLifetimeAnchor`；supervisor candidate、installed slot、stdio process或HTTP client只要仍可能start/reconnect/request/retire，就必须通过generic config/client object持有它。Config comparison忽略anchor，因此semantic/runtime/resolved identity不变时可复用slot；被拒candidate在确认无client/process引用后close自身anchor，changed/removed old slot则在native terminate/kill/drain与所有request settlement完成后close。不能只让`FrozenEnabledPluginView`持lock，因为view replace早于old physical consumer drain。
+
+Native identity matrix固定为：
+
+```text
+semantic_config_fingerprint
+  = model-visible server identity/display + enabled/required/scope/exposure/effect
+
+runtime_config_fingerprint
+  = transport/endpoint/command/args/native cwd binding/frozen PATH/env/auth/
+    public_headers/timeouts/concurrency/refresh + McpRuntimeSourceIdentity
+
+resolved_config_identity
+  = exact server_id + semantic_config_fingerprint + runtime_config_fingerprint
+
+excluded from all three
+  = PhysicalLifetimeAnchor object/descriptor
+```
+
+Package replace即使HTTP URL/public headers完全相同，`ManagedPackageMcpRuntimeSource.package_install_id`仍变化，因此是runtime-only config change：native supervisor保留same-epoch semantic descriptor，立即fence old slot的新dispatch，连接new config/client，并按existing safe point切换；old slot/request/process完成terminate/kill/drain后释放old anchor。New config anchor不能通过“resolved identity unchanged”被丢弃，old anchor也不能滞留到Host close。只有上述全部runtime values（含package source identity）都exact相同才可复用physical slot。
+
+---
+
+## 9. Plugin Hook：Round 9.2第三definition source
+
+### 9.1 One adapter, not a Hook subsystem
+
+Plugin adapter只读取：
+
+```text
+dev.pulsara/hooks/hooks.json
+```
+
+然后构造Plugin provenance并调用唯一production：
+
+```text
+hooks/config_parser.py
+HookTrustStore
+KernelHookDispatcher
+HookCommandExecutor
+Hook output parser/aggregation
+HookContextOwner
+ContextSourceKind.HOOK_CONTEXT
+```
+
+`hooks/*`不得import`plugins/*`；dependency只能是`plugins/hook_adapter.py -> hooks/contracts.py + hooks/config_parser.py`。
+
+### 9.2 Closed source identity
+
+Round 9.2 source contract一次性hard-cut为closed union：
+
+```text
+LocalFileHookSourceIdentity
+  USER_FILE | WORKSPACE_FILE
+  canonical path
+  visibility/workspace key
 
 PluginHookSourceIdentity
-  plugin logical id
-  visibility scope = USER | exact WORKSPACE
-  exact package_install_id
-  selected package-relative Hook config identity
+  kind = PLUGIN
+  visibility scope = USER | WORKSPACE
+  workspace_state_key?
+  plugin_id
+  package_install_id
+  config_relative_path = "dev.pulsara/hooks/hooks.json"
+  canonical managed path
+```
+
+不要把Plugin fields加成一组optional fields塞进local identity。
+
+Trust subject稳定定位instance：
+
+```text
+plugin:user:<plugin-id>
+plugin:workspace:<workspace-state-key>:<plugin-id>
+```
+
+Subject carrier同样是closed union，而不是在current `HookTrustSubject(source_kind, stable_locator)`上继续堆string parsing：
+
+```text
+LocalFileHookTrustSubject
+  source kind = USER_FILE | WORKSPACE_FILE
+  workspace_state_key?  # iff WORKSPACE_FILE
 
 PluginHookTrustSubject
-  plugin logical id
-  visibility scope = USER | exact WORKSPACE
+  source kind = PLUGIN
+  visibility scope = USER | WORKSPACE
+  workspace_state_key?  # iff WORKSPACE
+  plugin_id
+
+HookTrustSubject = LocalFileHookTrustSubject | PluginHookTrustSubject
 ```
 
-这不是capability leaf、registry generation或新的Hook owner。Generic `HookSourceIdentity`继续由private factory构造；Plugin adapter不能把任意path或caller自报identity塞进dispatcher。
+`stable_locator`若仍用于display/diagnostic，只能由typed subject pure projection产生，不能反向解析为execution/path authority。
 
-Current Hook source order扩展为：
+Current package install id、exact normalized definitions与declaration environment进入Round 9.2 existing normalized-definition trust digest，不进入subject key。Replace即使command文本相同也因new install id成为MODIFIED/UNTRUSTED；enable不等于trust。
+
+Digest builder以closed identity union分支framing：existing USER_FILE/WORKSPACE_FILE inputs的canonical bytes与digest必须保持byte-identical；Plugin arm额外编码visibility/workspace key/plugin id/package install id/config relative path/canonical managed path。这里不需要v1/v2 dual evaluator；同一builder对local old arms保持原framing，对new arm使用新closed payload。
+
+Existing `HookTrustStore._state_path/_lock_path`当前只覆盖one USER file和one exact WORKSPACE file，不能用`else -> workspace`承载多个Plugin subjects。本轮在同一个generic store内把closed path matrix hard-cut为：
 
 ```text
-USER hooks.json
-WORKSPACE hooks.json
-effective Plugin sources in deterministic package/component order
+trust/user.json
+trust/workspace/<workspace-state-key>.json
+trust/plugin/user/<plugin-id>.json
+trust/plugin/workspace/<workspace-state-key>/<plugin-id>.json
+
+locks/user.lock
+locks/workspace/<workspace-state-key>.lock
+locks/plugin/user/<plugin-id>.lock
+locks/plugin/workspace/<workspace-state-key>/<plugin-id>.lock
 ```
 
-USER/WORKSPACE custom Hook与Plugin Hook是append关系，不做semantic dedup。对于同一`plugin_id`的USER/WORKSPACE package instance，§3.4既有component winner先选出一个effective Hook contribution，再把它作为一个Plugin source交给generic Hook owner。
+Logical subject仍用closed typed fields而不是解析`stable_locator`字符串决定scope/path；plugin id与workspace key使用各自already-validated filesystem-safe exact component。不得把所有Plugin subjects塞进一个不断增长的global JSON，不新增Plugin-private store或legacy dual path。Orphan Plugin trust可由generic Hook doctor/revoke看到，但没有current exact source时永远不能执行。
 
-### 6.3 Provenance与environment overlay
+Generic trust store必须接收shared resolver产出的absolute `PULSARA_HOME`，并对上述新增directory components逐级no-follow准备；不得在store内部对relative home调用cwd-relative `resolve()`。
 
-每个normalized Plugin definition携带普通source provenance与closed environment overlay：
+### 9.3 Source order 与scope
+
+Future view source order固定：
 
 ```text
-PLUGIN_ROOT
-PLUGIN_DATA
-CLAUDE_PLUGIN_ROOT = PLUGIN_ROOT
-CLAUDE_PLUGIN_DATA = PLUGIN_DATA
-CLAUDE_PROJECT_DIR = exact workspace root
+1. USER hooks.json
+2. WORKSPACE hooks.json (project workspace only)
+3. effective USER Plugin Hook sources, plugin_id sorted
+4. effective WORKSPACE Plugin Hook sources, plugin_id sorted
 ```
 
-Package adapter冻结这些exact managed paths；Round 9.2 executor只消费values，不解析Plugin manifest/store。Plugin不能覆盖`PULSARA_HOOK_SOURCE_DIR`、`PULSARA_PROJECT_DIR`或Host-owned环境字段，不能声明`PULSARA_API_KEY`。
+同plugin id的WORKSPACE source在adapter层覆盖USER source，因此不会重复运行；不同Plugin sources与local sources是append关系，不做semantic dedup。
 
-Command中的`${PLUGIN_ROOT}`/`${PLUGIN_DATA}`按host profile的公开契约由adapter执行单次、non-recursive substitution；unknown placeholder、cycle或escape使exact handler unavailable。Generic Hook core不承担Plugin placeholder expansion。
+Order只决定existing aggregation中的stable definition order，不授予某个source绕过explicit control/fail-open rules。
 
-### 6.4 Generic trust reuse
+### 9.4 Environment与placeholder
 
-Enable Plugin不trust Hook。Plugin source复用Round 9.2唯一`HookTrustStore`与CLI：
+Plugin source declaration environment只可包含：
 
 ```text
-generic state:
-  ${PULSARA_HOME}/hooks/trust/plugin/<scope-key>/<encoded-plugin-id>.json
-  ${PULSARA_HOME}/hooks/locks/plugin/<scope-key>/<encoded-plugin-id>.lock
+PLUGIN_ROOT=<exact managed immutable root>
+PLUGIN_DATA=<exact persistent data root>
+```
 
+Plugin adapter不得对Hook `command`/`commandWindows`做`${PLUGIN_ROOT}`/`${PLUGIN_DATA}`字符串替换、shell quoting或path containment猜测。Command保持config parser产出的exact normalized string；generic Hook executor把上述两个public values作为declaration environment交给现有shell execution，作者可按shell语义显式写`"${PLUGIN_ROOT}"`/`"${PLUGIN_DATA}"`。`inspect`必须同时显示exact command与exact declaration environment，existing trust digest覆盖二者；package root/install id变化会通过source identity/environment使trust变为MODIFIED。Executor最终收到的command必须与用户审阅值byte-identical，不得在trust后重写。
+
+这不是Hook subprocess sandbox：reviewed command仍可有ordinary shell expansion、bare PATH executable或访问package root之外的路径。Plugin package containment只约束安装与fixed component读取；Hook trust授权的是exact command declaration，不是递归依赖attestation。
+
+Host-derived workspace/project variables继续由Round 9.2 attempt-time executor拥有，不进入Plugin stable overlay。Plugin不能声明或覆盖`PULSARA_API_KEY`、Hook source/project owner fields。
+
+### 9.5 Generic stdin/context不含Plugin provenance
+
+Hook stdin仍严格使用Round 9.2的11 public variants。不得增加：
+
+- plugin id；
+- package install id；
+- config path；
+- trust subject；
+- package scope。
+
+这些值只属于inspection、trust与diagnostic。Provider-visible `HOOK_CONTEXT`只显示source-neutral event/context；不出现`PLUGIN_HOOK_CONTEXT`或package provenance。
+
+### 9.6 Trust与CLI
+
+Round 9.2 generic Hook management扩展Plugin source selection，但不新增Plugin trust CLI/owner：
+
+```text
 pulsara hooks inspect --source plugin:<plugin-id> --scope ...
-pulsara hooks trust --source plugin:<plugin-id> --scope ... --expected-definition-digest <digest>
+pulsara hooks trust --source plugin:<plugin-id> --scope ... --expected-definition-digest ...
 pulsara hooks revoke --source plugin:<plugin-id> --scope ...
 ```
 
-Generic trust state按稳定`PluginHookTrustSubject`定位，digest则在Round 9.2字段基础上覆盖current Plugin source identity、package install id、config identity与environment overlay。Package replacement即使manifest version/command文本相同，也会在同一trust subject下因new install id形成MODIFIED/UNTRUSTED，而不是悄悄成为另一个不相干的state key。不存在`PluginHookTrustState`、`plugins/hook-trust`、Plugin-private trust map或兼容alias CLI。
+Exact CLI syntax应按current Hook CLI parser窄改并由tests冻结。Trust state仍位于generic Hook trust store；orphan trust没有current exact source时永远不能执行。
 
-Plugin package lifecycle可以在enable前展示normalized Hook summary，但不能替generic `hooks inspect/trust`签发执行trust。Round 9.2 trust state是唯一truth。
+Trust UI必须明确：Plugin enable授权package contribution和MCP spawn，Hook command执行仍需separate exact trust；Hook process以Host OS user运行，不是假装sandboxed Tool。
 
-### 6.5 Refresh与consumer lifetime
+### 9.7 One future-view publication lane
 
-Cold Host/compaction successor在ordinary Hook source discovery中加入current enabled Plugin contributions。Running Host只有explicit `reload_plugins`才重新读取Plugin store/config、冻结Plugin source tuple并交给`KernelHookDispatcher`的existing future-view replacement seam。Round 9.3扩展generic `reload_hooks`：它可以对**已经安装在current dispatcher view中的Plugin source values**重读generic trust state并改变runnable disposition，但不重新读取Plugin store、manifest、package config或install identity。
-
-`reload_plugins`自身的Pre/Permission/Post Hook使用attempt开始时的predecessor view；new Plugin definitions从下一event生效。Disable/remove/replace/revoke后，state/trust变更只阻止future composition；already-dispatched Hook attempts持有old immutable definition和package borrow直到settle。
-
-Package borrow只保留到依赖该root executable/path的old Hook attempts全部settle；不能因Host曾加载该Plugin就留到Host close。Generic dispatcher不拥有package GC或version history。
-
-### 6.6 No duplicated Hook machinery
-
-Round 9.3 production必须满足：
+`KernelHookDispatcher`现有`_publication_lock`是唯一future Hook view publication mutex，但current `reload()`在mutex内执行filesystem discovery会长时间占锁。本轮把scan/build与publication hard-cut分开，并冻结全局锁序：
 
 ```text
-plugins/hook_adapter.py
-  -> hooks/contracts.py
-  -> hooks/parser.py
-  -> existing HookTrustStore / KernelHookDispatcher
-
-hooks/*  -X->  plugins/*
+slow scan / parse / trust assessment / candidate build  # no publication/Host lock
+-> Hook _publication_lock
+-> short Host _lock
+-> exact revalidation + pointer cuts only
+-> release Host _lock
+-> release publication lock
 ```
 
-Plugin adapter不得拥有：
+任何路径都不得按`Host _lock -> Hook _publication_lock`反向取得；持有两把锁时不得等待filesystem worker、Hook execution、MCP install/start/retire、provider call或physical drain。
 
-- `HookEventType`副本；
-- matcher/compiler；
-- process scheduler/executor；
-- Hook output parser/control aggregator；
-- pending context buffer；
-- `HOOK_CONTEXT` renderer；
-- lifecycle seam；
-- trust persistence；
-- Hook registry fingerprint/map。
-## 7. Claude-compatible Subagent preset
+Narrow merge seam必须做到：
 
-### 7.1 为什么现在必须有真实consumer
+- `reload_hooks`先capture one complete Hook predecessor view，在两把锁之外完整重读USER/WORKSPACE files，并对该captured view中的current immutable Plugin source declarations重评generic trust；进入publication mutex后必须验证`dispatcher.current_view is captured_predecessor`，而不是只比较Plugin slice。任一local或Plugin slice、trust/diagnostic view已经被其他writer发布，都立即release mutex并在同一absolute deadline下从fresh complete capture重做slow assessment；identity仍exact相同才用candidate local slice + assessed Plugin slice merge。该optimistic loop无retry-count cap且cancel/deadline可胜出；它不scan Plugin state/package，也不在mutex内读trust filesystem；
+- `reload_plugins`先在两把锁之外观察package并构造new Plugin Hook slice；进入publication mutex后重新捕获**当前** Hook commit predecessor并保留其current local slice，再merge candidate Plugin slice；它不重读local Hook files；
+- 两者随后只短暂进入Host lock，revalidate Host仍open、exact Plugin composition predecessor/candidate仍current、Hook commit predecessor object identity未变，再执行各自授权的pointer cut；失败则不发布该owner，返回typed stale/partial outcome；
+- concurrent reloads因此总是以进入publication mutex时的current opposite slice合并，不能lost-update或分别发布相互覆盖的views；
+- 不暴露generic mutable event bus、view lease、manual refcount、generation或registry map。
 
-Round 10已经ACTIVATED。旧稿继续保存dormant `agents/` inventory只会制造无人消费的DTO。本轮要么诚实不支持agents，要么接入现有task graph；本文选择最小接入，且不增加第二套agent runtime。
+这里有两个不能混淆的predecessor：`reload_plugins`自己的PreTool/Permission/PostTool使用invoke前捕获的**lifecycle predecessor view**，确保同一physical attempt不被new Hooks反向包围；publication merge/revalidation使用进mutex后捕获的**commit predecessor view**，确保并发`reload_hooks`更新不丢失。PostTool仍使用lifecycle predecessor，即使commit已经FULL。New definitions只从下一event生效。
 
-### 7.2 Accepted safe subset
+### 9.8 Runtime semantics
 
-Claude package默认`agents/`与manifest-declared `agents` directory按Claude Plugin现有语义递归枚举regular `*.md`；declared single-file path读取该exact regular `.md`。Directory-relative subdirectory segments构成preset namespace，不能被丢弃或扁平化；single-file source没有额外namespace。每个去重后的文件可形成preset。Required：
+- 11 events、11 public stdin variants、12 internal causal arms不变；
+- unsupported event/handler在最窄entry typed skip；
+- engine/transport/parser failure fail-open；
+- only successfully parsed explicit control能block/continue；
+- old in-flight attempt持有old immutable definition/package lock直到settle；
+- disable/remove/replace/revoke只影响future events；
+- Stop/SubagentStop continuation仍最多一次；
+- SessionEnd physical order不变；
+- Plugin adapter不直接dispatch任何lifecycle event。
 
-```yaml
----
-name: code-reviewer
-description: Reviews code for concrete defects.
----
-
-Detailed role guidance...
-```
-
-Pulsara V1只执行：
-
-- `name`；
-- `description`；
-- Markdown body。
-
-`color`可作为inert display metadata被解析并原样用于目录显示，但不进入child prompt、task identity、permission、model或tool选择。除`color`外，未知frontmatter key不被猜测；它使exact preset形成typed unavailable diagnostic，等待未来规格显式定义其语义。
-
-以下字段一旦存在，exact preset标为`UNAVAILABLE_UNSUPPORTED_SEMANTICS`，不得静默忽略后以更大authority运行：
-
-```text
-tools
-disallowedTools
-model (except omitted or inherit)
-permissionMode
-mcpServers
-hooks
-maxTurns
-skills
-memory
-background
-effort
-isolation
-initialPrompt
-```
-
-理由：Round 10固定所有worker都是不可递归leaf，继承current child capability/permission，并刻意不设置turn/lifetime总cap。忽略Claude限制字段可能把作者期望的read-only agent变成BYPASS/full-tool worker；临场翻译vendor tool名则会恢复脆弱metadata authority。
-
-Preset Markdown文件复用existing `maximum_single_source_variant_bytes`物理边界；解析器不得再发明更小的Plugin专用正文cap。超过existing single-source bound、无法形成完整UTF-8 bytes或最终`PLUGIN_AGENT_CONTEXT FULL`不能通过child cold preflight时，exact preset typed unavailable，worker task不被接受。
-
-Recursive discovery使用确定性、contained的ordered filesystem walk：default source先于manifest declaration order，同一source内按relative path排序；只接纳managed package root内的regular `.md` bytes，不跟随scanner阶段的新symlink，不把非Markdown supporting file猜成preset。Scoped identity固定为`<plugin-id>:<namespace-segment>...:<agent-name>`；namespace segment来自exact relative directory name，logical name冲突使该exact preset typed unavailable，不能靠遍历顺序挑winner。单个完整读取但frontmatter无效的文件只让该exact preset unavailable；任一required declared source不存在、目录无法完整枚举、已枚举文件在读取前消失/变化或无法形成exact bounded bytes时，整个package preset component `UNAVAILABLE/DISCOVERY_RACED`，不能把unknown remainder当成不存在后发布partial directory。这里不设置preset数量、目录深度或总文件历史cap；仍受§3.2 path/scalar、单文件source与本次可取消filesystem operation的既有物理边界。
-
-### 7.3 Directory与opaque ref
-
-新增固定Builtin：
-
-```text
-list_agent_presets(
-  cursor?: string,
-  limit: integer = 50  # 1..200
-)
-```
-
-它返回current exact scope中可用preset的：
-
-- scoped name `<plugin-id>:<namespace-segment>...:<agent-name>`；
-- description；
-- opaque `agent_preset_ref`；
-- component diagnostics/pagination。
-
-它只读current process-local Plugin composition，不连接、不reload、不启动worker。
-
-`limit`复用现有local directory tool的单页边界，只限制一次provider结果而非preset总量。Page builder按deterministic preset order加入完整行，并在Round 7.1 logical 40,000-byte envelope前停止；`next_cursor`指向第一个未交付row。单个preset的完整`scoped name + description + opaque ref`无法形成FULL row时，该preset typed unavailable，description不得截短后继续路由。Directory ToolResult标记existing `FULL_REQUIRED/DIRECTORY_PAGE`；aggregate budget不fit时provider open为0，不得让模型使用未完整交付的ref或推进cursor。
-
-Cursor使用process-local keyed opaque token，claims只含exact scope、current ordered preset-directory content commitment与next offset。该commitment用domain-versioned canonical framing覆盖ordered `(scoped name, package install id, preset definition content digest)`；它不覆盖physical borrow/diagnostic。MAC key与preset ref共用同一Host opaque-token issuer，Host restart或Plugin refresh后旧cursor typed stale。这里的commitment只服务跨model-call分页exact join，不进入registry、DTO proof或`fingerprint -> object` map。
-
-Round 10的`spawn_agent`与`create_agent_tasks.tasks[]`增加optional：
-
-```text
-agent_preset_ref: string
-```
-
-ref是keyed MAC的closed claims：
-
-- exact user/workspace scope；
-- plugin instance与package install identity；
-- scoped preset name；
-- preset definition content digest；
-- ref contract version。
-
-这是跨model-call opaque token authentication的真实边界。Runtime不维护`ref -> object` map；use时从current preset view exact resolve并重验definition digest。Plugin disable/change使旧ref typed stale。
-
-MAC key只由current Host process-local opaque-token issuer持有，不写state/database，也不复用`PULSARA_API_KEY`。Host restart后旧ref自然invalid，模型需要再次调用`list_agent_presets`；已经admit的nonterminal worker本来也按Round 10在Host loss后`INTERRUPTED`，因此不需要durable ref恢复。
-
-`list_agent_presets`是ROOT-only fixed Builtin directory tool；它在四种ROOT permission mode中保持同一descriptor并可执行只读local lookup。真正创建task的Round 10 tools仍只在`BYPASS_PERMISSIONS`成功。Child surface不暴露该目录工具。
-
-### 7.4 Round 10 integration
-
-有preset时：
-
-- built-in `profile`必须省略或为`general_worker`；
-- task/dependency/result/status/recovery语义完全不变；
-- canonical task row继续使用existing `general_worker`与`display_role`；
-- `display_role`由scoped preset name确定；携带preset ref时调用方不得另传相互竞争的`display_role`；
-- exact preset body只保存在Round 10 process-local start material；
-- Host loss后nonterminal task仍按Round 10 `INTERRUPTED`，不恢复preset body；
-- child cold assembly新增一个`PLUGIN_AGENT_CONTEXT` source。
-
-```text
-source      PLUGIN_AGENT_CONTEXT
-contract    pulsara.plugin-agent-context.v1
-trust       UNTRUSTED_OBSERVATION
-lifecycle   ACTIVATION_SNAPSHOT
-presence    VALUE
-budget      MUST_KEEP
-placement   44   # after PARENT_CONTEXT(42)/DEPENDENCY_RESULTS(43), before Skill catalog
-variant     FULL only
-body        scoped name + description + exact Markdown body
-```
-
-没有preset的ordinary ROOT/child cold input必须为该kind提供`NOT_APPLICABLE` absent fact；不得用空VALUE伪造已选择preset。
-
-该source与objective、optional `PARENT_CONTEXT`、`DEPENDENCY_RESULTS`一起进入existing `SubagentInitialSeed`和唯一`KernelColdEpochInputAssembler`。它不能：
-
-- 修改BASE_SYSTEM；
-- 改变child provider tools、permission、MCP/Skill catalog或model target；
-- 覆盖ROOT objective；
-- 让child创建child；
-- 建立loaded-agent registry或durable agent session。
-
-Stable BASE_SYSTEM只增加通用读规则：Plugin agent context是用户安装的untrusted role guidance；system policy、ROOT objective、current permission与workspace truth优先。
-
-Task admission一旦成功，就把exact preset body冻结进existing process-local start material。随后Plugin disable/replace不得偷换一个已经accepted但仍在`PENDING_START/WAITING_DEPENDENCY`的task；该task仍使用admission时的body。Host loss依旧按Round 10中断nonterminal task，不跨Host恢复该body。
-
-Active child发生Round 5B compaction时，successor必须从predecessor已安装的`PLUGIN_AGENT_CONTEXT`继承同一activation snapshot，而不是重新读取current Plugin package。它与Round 5B继承active Skill body的理由相同：这是same task已选择的启动说明，不是current catalog。Task terminal后释放。
-
-### 7.5 Hooks中的agent_type
-
-`SubagentStartEvent`/`SubagentStopEvent`：
-
-- 使用preset时`agent_type=<plugin-id>:<namespace-segment>...:<agent-name>`；
-- 否则使用Round 10 built-in profile name；
-- `agent_id`为exact canonical task id；
-- worker transcript不复制给Hook；只有existing bounded last assistant/result view可用。
+Plugin definition的generic `FrozenHookSourceProvenance`必须携带§4.5 one independent `PhysicalLifetimeAnchor`（local source为`None`），并由每个normalized definition/execution request可达；field `repr=False, compare=False`且不进入trust digest、matcher、stdin、context或diagnostic。Dispatch capture、sync/background execution与one-shot context settlement只要仍持old definition就持old shared package lock；settle并释放最后ordinary object后anchor idempotent close/finalize，GC才可能取得exclusive lock。不得用source path重开package lock，也不得增加manual refcount/view lease/registry。
 
 ---
 
-## 8. Hook integration inherited from Round 9.2
+---
 
-### 8.1 No new event or context contract
+## 10. Reload、compaction与publication semantics
 
-Round 9.3不增加Hook event、lifecycle seam、control vocabulary或provider source。Plugin-derived definition与USER/WORKSPACE definition使用Round 9.2同一套：
+### 10.1 `reload_plugins` descriptor
 
-```text
-HookEventType (11 events)
-KernelHookDispatcher
-HookCommandExecutor
-ContextSourceKind.HOOK_CONTEXT
-FrozenHookContextBatch
-```
+新增fixed ROOT-only Builtin `reload_plugins`：
 
-Event input/output、matcher aliases、sync/background、timeout、process-group cleanup、PULSARA_API_KEY scrub、ToolResult public projection、Stop/SubagentStop continuation与Pre/PostCompact顺序全部直接继承Round 9.2。若两篇文档冲突，以Round 9.2 generic runtime contract为authority；Round 9.3只能增加Plugin source normalization。
+- 从所有cold epochs一开始就存在于Builtin surface；
+- ROOT BYPASS-permissions only，其他scope/mode typed denied；
+- 不安装package，不修改state，不grant Hook trust；
+- 只观察已提交local state并尝试为future consumers发布new component values；
+- 返回per-component closed outcomes与diagnostics。
 
-### 8.2 Plugin-specific event provenance
+它不能在Plugin首次出现时热加自身descriptor。
 
-Generic Hook stdin中的source provenance对Plugin definition增加：
+### 10.2 Publication不是虚假跨owner transaction
 
-```text
-source_kind = plugin
-plugin_id
-package_install_id
-plugin_scope = USER | WORKSPACE
-plugin_config_relative_path
-```
+Plugin lifecycle state、Skill source、MCP config epoch与Hook future view各有真实owner。本轮不虚构一个跨这些owners的atomic transaction。
 
-这些字段只用于inspection、diagnostic与handler自识别，不授予permission或package mutation。Provider-visible`HOOK_CONTEXT`可以显示bounded Plugin source label/event/status，但仍是source-neutral`UNTRUSTED_OBSERVATION`；不得恢复`PLUGIN_HOOK_CONTEXT`。
+`PluginRuntimeCompositionOwner`可以保存latest FULL-observed `FrozenEnabledPluginView`以及各consumer当前安装的exact projection object references，但不能用一个`all_components_current=true`、generation或aggregate fingerprint掩盖partial publication。每个consumer的current truth仍由其真实owner pointer/config epoch决定；inspection则报告durable package state与running-Host refresh notice，不伪造跨process Runtime状态。
 
-### 8.3 Refresh ordering
+`reload_plugins`顺序固定：
 
-Plugin composition与Round 5B/10 lifecycle的顺序：
+1. 在short Host capture中冻结predecessor Plugin composition view、invoke-time lifecycle Hook view、MCP config owner value与current tool/planning owner已经给出的absolute deadline，然后释放Host lock；
+2. ordinary PreTool、以及仅在existing permission owner已经决定ASK时的PermissionRequest，使用invoke-time lifecycle Hook view；
+3. 在Host/Hook publication locks之外complete observe candidate package view；
+4. 在locks之外build all component candidate values，无side effect；
+5. 取得Hook `_publication_lock`，重新capture current Hook **commit predecessor**，用其current local slice + candidate Plugin slice构造exact merged view；
+6. 在仍持publication lock时短暂取得Host `_lock`，revalidate Host open、step 1 exact Plugin predecessor仍current、candidate package bindings仍owned、Hook commit predecessor object identity仍current；全部成立才以non-awaiting pointer cuts发布future Plugin Skill view与merged Hook view；随后先release Host lock，再release publication lock；
+7. 不持上述两把锁，向existing MCP owner请求在其native safe point install candidate merged config epoch；
+8. ordinary PostTool Hook仍使用step 1同一invoke-time lifecycle view；
+9. return exact per-component result。
 
-- `reload_plugins`的Pre/Permission/Post使用predecessor generic Hook view；
-- PreCompact使用predecessor view；
-- 若PreCompact未abort，Plugin refresh把new contribution set交给generic dispatcher；
-- PostCompact与ROOT SessionStart(compact)可观察new view；
-- active child compaction继承其既有preset snapshot，但Hook definitions按generic exact-scope current view执行；
-- SubagentStart/Stop仍由Round 10 existing seams触发，不由Plugin adapter直接调用dispatcher。
+Step 5–6只做call-local merge、revalidation和pointer assignment；不得scan、重评filesystem trust、等待Hook attempt或调用MCP。`reload_hooks`遵守§9.7同一`publication -> Host`顺序。任何Host code持`_lock`时都不能进入publication mutex，从而没有ABBA edge。
 
-Plugin adapter不能绕过generic event producer，不能重跑一个event，也不能把Hook output写入Plugin state。
+Step 1同时冻结current tool/planning owner已经给出的absolute deadline并贯穿2–9；package observation、Skill snapshot、Hook publication和MCP install不得各自重新获得完整timeout。Existing physical MCP terminate/kill/drain可以在logical deadline后按native no-detach close contract完成，但不能把logical result改回success。
 
-### 8.4 Dogfood expectation
+如果step 3在owner deadline前settle为semantic whole `UNAVAILABLE`，按§6.3构造无partial facts的closed unavailable component values并继续step 5–7；如果step 3被outer deadline/cancel/stale owner打断，则不构造view、不发布任何component。Step 6 Host/Hook combined short publication没有partial arm：revalidation失败时二者都保持predecessor；step 6 FULL后step 7 MCP owner仍可能保留其predecessor并返回`plugin_reload_partial`。不回滚已经FULL的其他owner，不建立compensation/repair queue；再次reload从各owner current exact values收敛。
 
-Plugin Hook dogfood只需证明adapter复用已激活runtime：
+Cancellation必须shield/join已经开始的publication/physical MCP close，不能留下detached worker或half-owned package lock。
 
-1. package default/manifest Hook path成功normalize；
-2. generic `hooks inspect/trust`使exact Plugin source runnable；
-3. User/Workspace custom Hook与Plugin Hook按defined order共同运行；
-4. real Tool/compaction/subagent event仍只dispatch一次；
-5. output进入同一个`HOOK_CONTEXT`；
-6. package replace使generic trust变MODIFIED；
-7. disable/remove/reload后future Plugin handlers消失，old attempts正常drain；
-8. architecture证明没有第二套matcher/executor/parser/context owner。
-## 9. Owners 与依赖方向
+### 10.3 Compaction
 
-### 9.1 Owners
+Compaction只能复用current Round 5B/9/9.2 order：
+
+- PreCompact使用predecessor Hook view；
+- Plugin state refresh发生在approved successor preparation safe point；
+- Plugin Skill与MCP加入同一个cold successor capability cut；
+- PostCompact与ROOT `SessionStart(compact)`只在adoption FULL后运行；
+- new Plugin Hook slice只能通过single future-view publication lane生效；
+- no-Hook/Hook cold siblings、single final continuity CAS/install/open规则不变；
+- 不增加second CAS、installed-base augmentation、runner back-reference或service locator。
+
+若Plugin refresh unavailable，compaction本身仍可按existing fail-open/typed source rules继续；不得永久占住compaction lane/fence。
+
+### 10.4 Old consumers
+
+Replace/disable/remove后的old consumers：
+
+- already-dispatched Hook attempt完成；
+- existing MCP process/slot按native retirement close/terminate/kill/drain；
+- prepared provider attempt按exact installed view完成；
+- GC等到exclusive lock成功。
+
+Old Hook definitions与old native MCP configs分别通过§9.8/§8.6 generic `PhysicalLifetimeAnchor` leaf持有独立duplicated shared-lock descriptor，而不是依赖current Plugin view继续存在。Host close严格先停止新admission，再drain Hook attempts与MCP requests/processes，清除owner references并close current anchors，最后package GC才可能成功；任何仍在使用的old leaf都会令GC保守返回`IN_USE`。
+
+这不是instant cross-process revocation。CLI/doctor必须诚实显示running Hosts需要reload/restart和package可能`IN_USE`。
+
+---
+
+## 11. Owners与forbidden dependencies
+
+### 11.1 Owner matrix
 
 | Owner | 拥有 | 明确不拥有 |
 |---|---|---|
-| `PluginPackageStore` | immutable version roots、state/data文件的atomic local lifecycle与opportunistic GC | Hook trust、Host runtime、MCP slot、Skill discovery |
-| `PluginRuntimeCompositionOwner` | current enabled exact package values、consumer-lifetime package borrows、safe-point refresh | cross-owner atomic transaction、provider prefix、version history |
-| `PluginSkillMaterializer` | exact Skill目录copy/provenance | Skill catalog/activation |
-| `PluginHookContributionAdapter` | Plugin Hook config定位、host-profile normalization、package provenance/environment overlay与generic source identity | trust persistence、event dispatch、Hook process、provider context |
-| existing `LocalSkillProvider` | four-root scan与Skill source | Plugin lifecycle |
-| existing MCP supervisor/tool runtime | config/slot/catalog/route/attempt | Plugin enablement |
-| `KernelHookDispatcher` | normalized current definition set、command attempts、exact-scope background pending buffer与queue-item-bound prompt context | Plugin parsing/trust、canonical rows、permission policy、tool execution |
-| `PluginAgentPresetDirectory` | exact preset values与opaque refs | task scheduling、child execution |
-| existing Round 10 coordinator | task/start material/worker scheduling | Plugin package parsing |
-| existing compiler/continuity | provider context selection与prefix CAS | Hook process、Plugin install |
+| `PluginPackageParser` | Agent Plugins manifest/schema/component envelope pure validation | filesystem copy、state、Runtime |
+| `PluginPackageStore` | source observation、hidden stage、exclusive publish、instance state、data root、GC | Skill winner、MCP slot、Hook trust |
+| `PluginInspectionService` | one call-local installed/effective package truth | CLI formatting、cross-call cache |
+| `PluginRuntimeCompositionOwner` | current Host package view、held package bindings、closed component observations | provider prefix、cross-owner rollback |
+| generic `ProcessApiKeyBoundary` | supported key rotation与install/process/HTTP/provider irreversible sink admission的one mutex guard | arbitrary secret store、durability、noncooperating raw environment writers |
+| `PluginSkillDefinitionProducer` | portable Skill candidates/invalid issues from exact package values | parser semantics、precedence、materialization |
+| existing `SkillCatalogResolver` | seven-tier winner/conflict/shadow/final bounds | filesystem、package lifecycle |
+| `PluginMcpAdapter` | portable config→native cwd/header/lifetime-bearing `McpServerConfig` normalization | connection、tool permission/effect/attempt |
+| existing MCP supervisor | config epoch、slot、discovery、provider-name collision groups、DIRECT/META、physical close | Plugin state/parser |
+| `PluginHookContributionAdapter` | fixed config location、Plugin source identity、declaration environment、generic lifetime anchor | trust、matcher、executor、context |
+| existing `HookTrustStore` / `KernelHookDispatcher` | trust、single future-view publication lane、dispatch、execution/context | Plugin lifecycle |
+| existing compiler/continuity | source placement、wire/CAS/prefix | package install/GC |
 
-### 9.2 Forbidden dependency direction
+### 11.2 Forbidden dependency directions
 
 ```text
-capability/*             must not import plugin runtime
-hooks/*                  must not import plugins/*
-MCP supervisor           must not import plugin parser
-LocalSkillProvider       must not scan plugin package roots
-Round 10 coordinator     must not parse plugin manifests/files
-Plugin package core      must not import provider adapters/repository/compaction
-Hook executor            must not write canonical conversation rows
+capability/*                -X-> plugins/*
+hooks/*                     -X-> plugins/*
+conversation_kernel/mcp/*   -X-> plugins/*
+Round 10 coordinator        -X-> Plugin filesystem/manifest parser
+Plugin package core         -X-> provider/repository/compaction
+Plugin adapters             -X-> canonical conversation writes
+CLI                         -X-> private scanner/copy implementation
 ```
 
-Plugin adapter只输出现有owner需要的pure config/value。Host composition layer是唯一接线点；依赖方向固定为`plugins/hook_adapter.py -> hooks/contracts.py + hooks/parser.py`，绝不能反向。
+Host composition layer是唯一接线点。Adapters输出existing owners消费的typed values，不把owner藏在service locator。
+
+### 11.3 Fingerprint subtraction
+
+本轮允许继续/新增的摘要只有真实边界：
+
+- existing Skill raw-document/semantic/fact fingerprints；
+- existing Skill fact builder内由typed origin即时计算的nested origin framing；Plugin arm直接覆盖scope/workspace key/plugin id/package install id/relative Skill directory，并只进入现有`winning_root_provenance_fingerprint`canonical payload slot；
+- existing MCP config/discovery/fact fingerprints；
+- existing Hook normalized-definition trust digest；
+- existing capability source contract fingerprint。
+
+禁止：
+
+- package tree/content digest；
+- per-file hash inventory；
+- enabled view fingerprint字段；
+- contribution plan fingerprint；
+- root-policy digest；
+- stored origin/provenance fingerprint field或caller-supplied provenance digest；
+- activation evidence SHA；
+- fingerprint→object map；
+- recursive script/dependency hashing。
+
+Copy verification直接stream compare；package install id使用random opaque identity。
+
+Current `_skill_origin_provenance_fingerprint(origin)`是唯一capability-fact builder内部的pure framing helper，不是DTO、registry或package identity，必须保留并增加closed Plugin arm。Loose/Bundled输入的既有framing与fact identitybyte保持不变；不得为了字面删除“fingerprint”函数名而改写已经成立的canonical fact boundary。
 
 ---
 
-## 10. Implementation slices
+## 12. Implementation slices
 
-### R9.3-0：Package core 与 local lifecycle
+### R9.3-0：Contracts、schema与package core
 
-- manifest/profile parser；
-- containment与streaming atomic install；
-- user/workspace state、shadow规则与doctor；
-- component-level dispositions；
-- 无package/contribution fingerprints。
+- closed scopes/dispositions/diagnostics；
+- vendored official Agent Plugins 1.0 schemas；
+- pure manifest/component parser；
+- shared source binding；
+- immutable package store/state/data/locks；
+- streaming copy/verification、exclusive publish、cancel/cleanup/crash；
+- inspection service与CLI lifecycle。
 
-### R9.3-A：Skill/MCP composition
+### R9.3-A：Enabled view 与third Skill producer
 
-- four-root Skill materializer/provenance；
-- single MCP config composition；
-- explicit Host reload；
-- mid-session catalog successor与cold adoption retained tests。
+- complete USER/exact WORKSPACE state observation；
+- Host current Plugin composition owner；
+- `PluginSkillOrigin`与`FrozenPluginSkillDefinitions`；
+- explicit third composer input；
+- seven-tier conflict algebra；
+- source contract hard cut；
+- Runtime/list/doctor/compaction retained tests；
+- delete every materialization/provenance/reconcile artifact from spec/tests if any remains。
 
-### R9.3-B：Plugin Hook contribution adapter
+### R9.3-B：MCP adapter
 
-- 复用已ACTIVATED的Round 9.2 contracts/parser/trust/dispatcher/executor/context；
-- `plugins/hook_adapter.py`只拥有package定位、provenance/environment overlay与generic source construction；
-- 为generic source union增加current Plugin branch；
-- `reload_plugins`发布new contribution values，`reload_hooks`只重验current Plugin source trust；
-- architecture gate禁止第二套Hook machinery。
+- portable MCP schema parser；
+- independent generic literal `public_headers` field与native merge；
+- native cwd closed union、Plugin root/data expansion与frozen PATH；
+- one merged config inventory；
+- injective server identity、provider collision groups、bound/failure semantics；
+- old slot/process package-lock lifetime。
 
-### R9.3-C：Hook integration retained tests
+### R9.3-C：Hook adapter与single publication lane
 
-- Round 9.2 human/tool/permission/result/compaction/subagent/ROOT seams不发生语义漂移；
-- Plugin source与USER/WORKSPACE source共用一次dispatch；
-- package reload/replace/disable与old-attempt drain。
+- Plugin Hook identity/trust subject closed arm；
+- fixed extension config discovery；
+- reuse `hooks/config_parser.py`；
+- generic Hook CLI source selection；
+- `reload_hooks`/`reload_plugins` exact predecessor merge；
+- predecessor-view lifecycle for reload tool；
+- no Plugin provenance in stdin/context；
+- old attempts drain。
 
-### R9.3-D：Subagent presets
+### R9.3-D：Activation
 
-- Claude safe subset parser；
-- `list_agent_presets` + opaque ref；
-- Round 10 schemas/start material；
-- `PLUGIN_AGENT_CONTEXT` child cold source。
+- full retained/PostgreSQL/static/packaging gates；
+- local service+CLI dogfood；
+- real provider Plugin Skill/MCP/Hook/compaction trajectory；
+- active spec synchronization；
+- only after all DoD update status/date/evidence。
 
-### R9.3-E：Activation
-
-- full tests/architecture/oracle；
-- real MCP/Skill/Hook/Subagent dogfood；
-- update active specs、Gap Index与README；
-- activation evidence只记录行为与环境，不记录逐文件/document/evidence SHA。
+所有slices最终必须形成single production path；不得以feature flag、old/new package profile、dormant adapter或compatibility mode分批激活。
 
 ---
 
-## 11. Production modification map
+## 13. Production modification map
 
-### 11.1 New package
+实施时按actual code truth至少核对：
 
 ```text
 src/pulsara_agent/plugins/
+  __init__.py
   contracts.py
-  manifests.py
+  schemas/1.0.0/plugin.schema.json
+  schemas/1.0.0/mcp.schema.json
+  package_parser.py
   package_store.py
+  inspection.py
   composition.py
-  skills.py
-  mcp.py
+  skill_producer.py
+  mcp_adapter.py
   hook_adapter.py
-  agents.py
+
+src/pulsara_agent/local_source_binding.py  # extracted one physical policy
+src/pulsara_agent/process_api_key_boundary.py  # one injected process sink/rotation guard
+
+src/pulsara_agent/capability/
+  types.py
+  resolver.py
+  contracts.py
+  __init__.py
+  local_skill_source_binding.py            # delete; no compatibility wrapper
+
+src/pulsara_agent/conversation_kernel/
+  host.py
+  capability.py
+  capability_composition.py
+  context_sources.py
+  provider_dispatch.py
+  tool_runtime.py
+  cold_epoch.py
+  subagent.py
+  mcp/* only where native config/header/lifetime seam truly belongs
+
+src/pulsara_agent/hooks/
+  contracts.py
+  source.py
+  config_parser.py
+  trust.py
+  dispatcher.py
+
+src/pulsara_agent/model_input/contracts.py
+src/pulsara_agent/mcp_config.py
+src/pulsara_agent/capability/builtin_catalog.py
+src/pulsara_agent/cli.py
+pyproject.toml / uv.lock                    # direct jsonschema dependency
+tests/
+tools/Plugin dogfood script and machine trace path
 ```
 
-### 11.2 Existing integration
+Module split是上限提示，不是创建decorative DTO/module的命令。实现若能用更少narrow modules且保持owners清晰，应删除空壳。
 
-- `hooks/contracts.py`、`hooks/parser.py`、`hooks/trust.py`、`hooks/dispatcher.py`：增加Plugin source adapter输入与generic trust/reload join；不改变event/runtime semantics；
-- `conversation_kernel/host.py`：package composition、reload与Plugin contribution publish；
-- `conversation_kernel/subagent.py`、`subagents/contracts.py`：preset ref、start/stop seams；
-- `conversation_kernel/cold_epoch.py`：optional `PLUGIN_AGENT_CONTEXT` exact seed；
-- `conversation_kernel/context_sources.py`、`model_input/contracts.py`：一个新`PLUGIN_AGENT_CONTEXT` untrusted source kind；
-- `capability/builtin_catalog.py`、`conversation_kernel/tool_runtime.py`：`list_agent_presets`、Round 10 optional ref字段，以及固定ROOT-only `reload_plugins` descriptor/authorize/invoke seam；
-- `mcp_config.py`、`conversation_kernel/mcp/sdk_facade.py`与existing supervisor adapter：Plugin normalized config input、validated exact cwd与literal public headers；
-- CLI：local package lifecycle；Hook trust继续使用Round 9.2 generic commands；
-- active Round 9/9.1/5B/10 docs：只写消费接缝，不复制本文engine。
-
-不得新增PostgreSQL migration或Protocol event kind。
+Active spec synchronization至少覆盖unified Skill、Round 9.2 Hook、Round 6/9 MCP、Round 5B compaction truth。不要修改`contracts/`、archived docs或README。
 
 ---
 
-## 12. Test plan
+## 14. Test plan
 
-### 12.1 Package conformance
+### 14.1 Package parser与physical source
 
-- Published Agent Plugins 1.0 fixtures；
-- required schema/name与unknown-field rules；
-- safe in-root symlink dereference，以及escape/dangling/cycle/identity-race拒绝；
-- POSIX executable bit归一化后portable `./bin/server`可启动；setuid/setgid/sticky/ACL/xattr/ownership不被复制；
-- fixed `skills/`/`mcp.json`；
-- Codex/Claude adapters与multi-manifest priority；
-- conformance fixture覆盖Codex当前公开的11项events（含`SessionEnd`）；固定本地源码checkout缺失该event只能成为research diagnostic，不能缩窄parser vocabulary；
-- path escape、symlink/special file拒绝；
-- streaming copy对exact active `PULSARA_API_KEY`值做跨chunk匹配；命中时temp root删除、diagnostic不含value，其他内容不扫描；
-- component failure isolation；
-- no total Plugin/package history cap。
-- repr/log/doctor只排除exact `PULSARA_API_KEY`，其余真实package/Hook/MCP内容保持可诊断；
+- official Agent Plugins 1.0 manifest/MCP fixtures；
+- offline embedded schema，runtime network call=0；
+- one Draft 2020-12 validator path，`jsonschema` direct dependency而非transitive accident；
+- missing/unsupported/invalid schema；
+- unknown manifest field和non-object extensions的standard failure boundary；
+- type-correct但semantically nonsensical `version`/homepage/repository/author URL/email/license仍被接受并仅display；`author` unknown field与field type错误仍fatal；
+- object `extensions`中的unimplemented namespace value不深入validate；
+- portable fixed locations only；
+- fixed path MISSING/regular valid/wrong-kind INVALID/physical race UNAVAILABLE four-way matrix，不把deterministic kind defect升级成availability；
+- root vendor manifests/alternate paths不被猜测；
+- `/tmp`、`/var` source happy path；final source symlink拒绝；
+- internal symlink/junction/special file拒绝；
+- root/membership/file identity replacement typed raced；
+- source validation/copy/final revalidation/stage verification同一observation；
+- streaming large resource constant memory；
+- wide directory tree只允许membership metadata按observed member count增长；RSS probe证明不随largest regular-file bytes增长且没有hidden member cap；
+- injected `MemoryError`不逃逸、不留stage；
+- current API key跨chunk detection且diagnostic不含value；
+- API-key在stage scan期间rotation会以new exact value重验，未重验不得publish；
+- one underlying gate的sync worker与async event-loop ports互斥；async等待不blocking loop，cancelled acquisition被shield/join且无detached waiter，sink/rotation交错无deadlock；
+- no total package/resource/version cap。
 
-### 12.2 Lifecycle与scope
+### 14.2 Atomic lifecycle
 
-- user/workspace visibility；
-- per-instance state分片与instance-local lock；generic Hook trust仍由Round 9.2独立per-source state拥有；一个Plugin replace不重写或锁住无关Plugin state；
-- state directory的ordered-enumeration cut；enumeration后新增进入下一refresh，已枚举分片消失/变化使整个new package tuple unavailable且不发布partial composition；
-- user/workspace同Plugin实例的Skill/MCP/Hook/preset leaf precedence与doctor projection；
-- add/replace/enable/disable/remove atomic state与immutable version roots；
-- add默认disabled；enable/disable保留current install；replace保留enablement但因new install id强制generic Hook trust变MODIFIED；remove删除state且orphan trust不能在缺少current source时授权；
-- state atomic replace/delete是唯一lifecycle linearization；post-state Skill reconcile失败留下typed drift，future或running Host下一次complete Skill scan前同步重建且不回滚state；
-- two-Host concurrent pre-scan reconciliation复用exact instance lock并在锁内重读state/install/provenance；旧观察不能覆盖new state，也不存在global reconcile mutex；
-- running consumer borrow阻止旧root GC；successful reload后old Hook/MCP attempts/slots drain即释放，Host close/crash只是兜底，不得随reload次数无界积累version handles；
-- replace后未reload Host继续使用old exact root/trust，reload或new Host只使用new root；
-- running Host explicit reload；
-- lifecycle/trust CLI明确报告running Host需要reload；disable/remove/revoke后old borrowed Hook/MCP在reload完成且old attempts/slots drain前仍可能有效，不伪造instant cross-process revocation；
-- ordinary cold/compaction在capability cut前自动refresh current Plugin state；same-epoch非cold变化仍要求explicit reload；
-- fixed `reload_plugins` descriptor在all modes保持相同，non-BYPASS typed denied；BYPASS调用只采用已提交state并返回per-component dispositions；
-- reload工具的Pre/Post Hook使用predecessor frozen view，新Hook只从下一event生效；
-- interrupted enable/disable留下的materialized Skill drift在future或already-running Host的下一次complete Skill scan前同步reconcile；无法完成时整个聚合Skill source为typed UNAVAILABLE，stale Plugin Skill不得重新进入catalog；conflict只形成doctor diagnostic且不覆盖用户内容；
-- state已删除但projection cleanup未完成的orphan Skill必须通过provenance-sidecar enumeration被发现；digest匹配时删除，用户已修改时只摘除Plugin provenance并保留ordinary Skill；
-- future Host restart读取state；
-- Hook enable不等于trust。
-- trust inspection明确告知Hook command本身可产生Host-level side effect，Tool permission只约束被Hook影响的后续Tool call；
+- fresh no-follow root creation；
+- Darwin `RENAME_EXCL`、Linux `RENAME_NOREPLACE`；unsupported platform typed unavailable；
+- existing final root永不覆盖；
+- add/replace均disabled、enable/disable/remove exact state；
+- enable summary/confirmation exact-binds current install；concurrent replace不能让stale acceptance授权new package；
+- data root no-follow create before enable cut；later unavailable只隔离process-bearing MCP/Hook components；
+- per-instance concurrent CAS/lock races；
+- state enumeration replace/delete whole unavailable；
+- cancellation before/after package publish/state cut；
+- publisher从stage create跨publish/state confirmation持有package lock，concurrent GC不能删除pre-state new root；
+- shield+join，无detached worker；
+- cleanup unavailable carrier exact；
+- SIGKILL/ACK-unknown/power-loss语义golden；
+- unreferenced version与hidden stage explicit gc；
+- hidden stage name可parse回exact package install id，publisher与GC竞争同一package lock；无法parse的lookalike永不删除；
+- exact state-temp只在同一instance lock下回收；enumeration忽略它，malformed dot entry不删除；
+- GC在部分root cuts后cancel/timeout/unavailable时报告completed roots、attempted location与unvisited suffix，不谎报零mutation；
+- shared/exclusive package lock阻止in-use deletion；
+- same-UID namespace interference不被错误宣称为guarantee。
 
-### 12.3 Skill
+### 14.3 Inspection、CLI与packaging
 
-- 只物化到existing `.pulsara/skills` roots；
-- `.agents/skills`仍可由ordinary user install使用，但Plugin不写入；
-- 不存在Plugin root/fifth root；
-- name/body/supporting files byte-preserving；
-- collision、modified ownership与disable cleanup；
-- source携带reserved provenance sidecar拒绝；content digest复用existing `compute_skill_dir_hash()`并排除sidecar，禁止第二种tree hash；
-- catalog COMPLETE/UNAVAILABLE/safe-point successor；
-- compaction retained Skill继续使用Round 5B现有机制。
+- list/doctor consume same exact inspection object；
+- list current/effective only，doctor all issues；
+- call-local immutable，无cross-call cache/generation；
+- USER不依赖cwd；WORKSPACE explicit/default cwd；
+- GUI adapter direct typed call，不spawn CLI/parse JSON；
+- arbitrary non-source cwd global launcher；
+- wheel包含official schemas与any required Plugin resources；
+- `--json` exhaustive dispositions/codes；
+- no raw exception-string classification。
 
-### 12.4 MCP
+### 14.4 Skill third producer
 
-- portable/Codex/Claude config normalization；
-- profile envelope exact：portable `$schema+mcpServers`、Codex direct/`mcp_servers`、Claude direct/`mcpServers`；cross-profile key guessing、Claude `.mcpb`与Codex `.app.json`不得进入MCP execution；
-- namespaced server identity与collision；
-- existing configured-server bound越界时MCP reload整体不发布且old exact supervisor config继续，其他Plugin component不被回滚；
-- Plugin root/data expansion；
-- Plugin MCP固定optional、ROOT_AND_SUBAGENTS且无permission/effect/required authority；单server connect failure不阻塞Host或其他component；
-- enable inspection完整显示normalized MCP command/cwd/env keys或HTTP endpoint，并明确enable授权server spawn/connect而remote tool invocation仍需existing permission/effect gate；
-- portable stdio command不做placeholder/shell split，args/env/cwd只展开标准变量；exact plugin/data cwd可启动；
-- placeholder expansion单次且non-recursive；portable env保留名、unknown placeholder与all-loopback-IP URL goldens；
-- stdio child删除`PULSARA_API_KEY`，Plugin env/secret/header ref不能读取或重新加入；
-- Streamable HTTP literal public headers、no redirect/cross-origin forwarding；legacy SSE typed unsupported；
-- late READY -> META；
-- late META真实调用的Pre/Permission/Post Hook只对resolved remote identity触发一次，不对`use_new_mcp_tool` wrapper重复触发；
-- compaction/cold -> DIRECT when cohort fits；
-- disconnect/uninstall gate；
-- same identity schema replacement不meta绕过；
-- Plugin runtime不拥有slot/attempt/policy。
+- Plugin/loose/bundled identical Skill bytes走same parser/placement；
+- portable immediate child only，no recursive Skill discovery；
+- no four-root materialization、sidecar、reconcile、orphan cleanup；
+- seven exact tiers；
+- workspace Plugin > user Plugin > bundled；
+- high loose winner shadows Plugin；
+- same-tier two-Plugin conflict skips exact tier and allows lower fallback；
+- conflict without fallback omits name but preserves complete issues；
+- invalid Plugin candidate allows other candidate/lower winner；
+- every valid candidate exactly winner/shadowed/conflicting；
+- required Plugin producer unavailable makes whole catalog unavailable；
+- Plugin observation deadline/cancel before install走outer abort、无fake unavailable source/CAS；
+- zero Plugins COMPLETE empty；
+- source contract v4 only，no dual path；
+- existing loose/bundled fact identities retained；
+- ordinary `read_file` reads Plugin SKILL.md/supporting resource；
+- activation/retained/compaction use same existing path；
+- complete issues不受旧128 cap截断。
 
-### 12.5 Plugin Hook adapter
+### 14.5 MCP
 
-- Codex/Claude path、array、inline与default `hooks/hooks.json` forms；
-- adapter调用Round 9.2唯一parser，unsupported event/handler使用upstream typed disposition；
-- Plugin source identity覆盖instance scope、install id与config identity；
-- USER/WORKSPACE Plugin component winner在generic source publish前机械确定；
-- `PLUGIN_ROOT/PLUGIN_DATA`及Claude aliases使用exact managed roots；
-- placeholder expansion single/non-recursive，unknown/cycle/escape拒绝exact handler；
-- Plugin source不能覆盖Host-owned environment或读取`PULSARA_API_KEY`；
-- enable不trust；generic `hooks inspect/trust` happy path；
-- replace使generic trust MODIFIED；remove后的orphan trust不能授权；
-- `reload_hooks`只重验current installed Plugin source trust，`reload_plugins`才重读package config；
-- old Plugin Hook attempts settle后及时释放package borrow；
-- architecture gate证明`hooks/*`不导入`plugins/*`，且Plugin没有parser/matcher/executor/output/context副本。
+- stdio/streamable-http standard fixtures；
+- SSE typed unsupported/no fallback；
+- per-server invalid skip；top-level invalid disables only package MCP；
+- one frozen MCP component observation完整覆盖`MISSING | COMPLETE(declared keys, valid configs, issues) | INVALID(no partial) | UNAVAILABLE(no partial)`，selection/inspection/reload按object identity复用而不重新parse；
+- broken WORKSPACE MCP override suppresses only the frozen same-plugin identity/component boundary，不意外fallback执行USER counterpart；
+- length-framed server id对含`.`/`:`等合法local id组合保持injective；128-byte bound在framing后应用，无truncate/hash；
+- exact namespaced server IDs与local/plugin collisions；collision members all-skip、其他configs保留；
+- same-server与cross-server provider-name normalize/truncate collision形成complete typed groups，全部ambiguous tools同时从DIRECT/META省略，其他tools/resources/servers保留且无raw exception；
+- root/data expansion覆盖每个exact occurrence且single/non-recursive；command/env keys不expand，unknown placeholder remains literal；
+- reserved env keys exact invalid；frozen configured PATH参与bare command lookup与runtime/resolved identity；
+- bare command vs contained `./` command；
+- native cwd closed union证明local config仍workspace-relative、Plugin omitted/root/data cwd均是exact absolute且SDK不二次拼workspace；DATA cwd writable/no-follow failure只隔离exact server；
+- public literal headers是independent generic field而非auth arm；RFC name/value rejection、case-insensitive duplicate与case-insensitive overwrite precedence全覆盖；runtime/resolved identity随literal header变化而semantic identity保持；
+- native identity matrix golden：cwd/PATH/public headers与managed package source只改变runtime/resolved，不改变semantic；same HTTP config的new package install id仍触发runtime reconnect、old slot drain并释放old anchor；
+- exact `localhost`与`ipaddress.is_loopback` IPv4/IPv6允许HTTP；private/link-local、localhost suffix与non-loopback HTTP拒绝；无DNS猜测；
+- auth ref/acquisition/server authentication failure是connection failure而非config INVALID；no OAuth/no redirect forwarding；
+- local/Host exact server-id collision保留local config并只skip冲突Plugin server；
+- final API-key spawn sink rotation probe；
+- combined 64-server bound retains old config on new overbound；
+- same server config reuses process；changed server retires/drains old lock；
+- late READY META、cold/compaction DIRECT；
+- meta resolved tool only one Hook lifecycle set；
+- existing permission/effect/bypass/scope gates unchanged。
 
-### 12.6 Generic Hook retained integration
+### 14.6 Hook adapter
 
-- Round 9.2全部11-event targeted tests原样通过；
-- USER/WORKSPACE custom Hook与Plugin Hook按defined order共用一次dispatcher；
-- late META真实调用仍只对resolved remote identity触发一次；
-- package reload自己的Pre/Permission/Post使用predecessor view；
-- PreCompact predecessor -> Plugin refresh -> PostCompact/new SessionStart顺序；
-- output只进入source-neutral `HOOK_CONTEXT`；
-- no new Hook process cap、trust store、lifecycle seam或durable machinery。
+- fixed extension path only；
+- all 11 Hook events through one config parser；
+- unsupported handler narrow skip；
+- local USER/WORKSPACE + Plugin deterministic source order；
+- workspace Plugin same id covers user Plugin Hook；
+- missing WORKSPACE Hook component permits USER fallback；present invalid/untrusted WORKSPACE Hook suppresses USER counterpart；
+- enable without trust cannot execute；
+- generic trust store四臂path matrix无USER/workspace/Plugin subject collision；
+- trust digest changes on install id/definition/environment；
+- existing USER/WORKSPACE file Hook normalized digests byte-identical after union hard cut；
+- Hook command byte-identical through inspect/trust/executor；root/data只作为reviewed declaration environment，不做adapter string expansion；
+- generic Hook stdin/context contains no Plugin provenance；
+- `reload_hooks` does not scan package；`reload_plugins` does not reread local files；
+- concurrent reload在scan期间互不占publication mutex，并按`publication -> Host`固定锁序完成；stress probe无ABBA、无lost local/Plugin slice update；
+- two concurrent `reload_hooks`从同一V0 scan、先后发布时，later writer必须因complete predecessor identity变化而rescan，不能把先发布的new local slice覆回stale值；
+- reload tool Pre/Permission/Post uses invoke-time lifecycle predecessor，commit merge使用lock内current predecessor；两者不同的并发轨迹被冻结；
+- old sync/background attempt与one-shot context completes with old generic definition/root anchor；current view replace后GC仍`IN_USE`，settle后才可exclusive；
+- API key通过supported boundary在Hook spawn final cut前rotation时旧scan不能穿透；guard持有跨spawn admission；
+- engine/parser/transport fail-open；explicit control only；
+- Round 9.2 all lifecycle/Plan/compaction/subagent/Stop retained tests pass。
 
-### 12.7 Subagent preset
+### 14.7 Prefix、architecture与oracle
 
-- recursive default `agents/**/*.md`、manifest single-file/directory/array declarations与relative namespace identity；physical duplicate去重，nested同名basename不扁平冲突，exact scoped-name冲突typed unavailable；
-- simple Claude agent parse/list/ref/spawn；
-- directory page逐行完整、40K FULL-required、cursor scope/current-view/offset exact；单行overbound typed unavailable；
-- unsupported tool/model/permission/maxTurns fields使preset unavailable；
-- stale/tampered/wrong-scope ref拒绝；
-- existing Round 10 task graph/result/dependency行为不变；
-- child tools/permission/model不因preset变化；
-- body进入`PLUGIN_AGENT_CONTEXT`而非SYSTEM；
-- Plugin update before queued child start不改变accepted task已经冻结的preset正文；new task必须取得current ref。
+- same epoch SYSTEM/tools byte-identical；
+- messages suffix-only；
+- reload/install/trust/GC no rebase；
+- only cold/compaction rebuild；
+- no second Skill catalog/MCP supervisor/Hook engine/subagent runtime；
+- no Plugin import from capability/hooks/MCP owners；
+- no generic registry/service locator/event bus；
+- no receipt/watcher/generation/replay/repair/durable job；
+- no total Plugin/package/resource/history/lifetime cap；
+- no package/contribution/stored provenance fingerprints；
+- existing Skill fact builder call-local typed-origin framing保留，no stored/caller-supplied provenance digest；
+- PostgreSQL/oracle exact `29 / 24 / 11 / 1 / 25 / 0 / 11`；
+- new skip/xfail = 0。
 
-### 12.8 Prefix与architecture
+### 14.8 Final verification与dogfood
 
-Chat Completions与Responses都证明：
+Activation前统一执行并记录：
 
-- same epoch SYSTEM/tools exact；
-- messages只追加suffix；
-- Plugin reload不热改native surface；
-- compaction/child first-open只通过shared cold assembler；
-- 七维oracle保持`29 / 24 / 11 / 1 / 25 / 0 / 11`，最后一维为既有Hook event types；
-- 无durable Hook/Plugin execution machinery；
-- 无新增skip/xfail；
-- 无per-file/document/evidence SHA gate。
+- retained full pytest；
+- PostgreSQL full suite、clean-v0 migration/deep verification；
+- Ruff；
+- compileall；
+- protocol generator check；
+- `uv lock --check`；
+- `git diff --check`；
+- non-editable sdist→wheel build；
+- isolated tool install与arbitrary non-source cwd launcher smoke；
+- pure local service+CLI dogfood；
+- real provider Plugin Skill/MCP/Hook trajectory；
+- new skip/xfail count。
 
-### 12.9 Real dogfood
+Pure local dogfood至少覆盖：
 
-至少使用一个真实OpenAI-compatible provider执行：
+```text
+validate -> add(disabled) -> inspect -> enable -> inspect
+-> replace -> disable -> remove -> gc
+```
 
-1. Host cold start时Plugin Skill被catalog发现并由普通`read_file`完整读取；
-2. 同一ROOT epoch中enable一个MCP Plugin，模型从catalog使用`inspect_new_mcp_tool -> use_new_mcp_tool`；
-   enable后由模型显式调用固定`reload_plugins`，不重启Host且不改变native tools[]；
-3. trusted `UserPromptSubmit`或`PreToolUse` Hook产生真实block与真实context；
-4. background Hook output在下一safe point追加；
-5. compaction触发Pre/PostCompact及`SessionStart(compact)`，successor tools按Round 9重新冻结；
-6. list agent preset、spawn Round 10 worker并看到preset context；
-7. CLI disable Plugin并显式`reload_plugins`后，future Hook/preset/meta route消失、next Skill scan先reconcile removal，旧native descriptor由unavailable gate拒绝；
-8. 记录真实prompt、Hook stdin/stdout、模型回复与MCP/Skill路径；只排除`PULSARA_API_KEY`。
+Real provider dogfood至少覆盖一个single package：
+
+1. Plugin Skill进入seven-tier catalog并由ordinary `read_file`读取；
+2. local stdio Plugin MCP经META或DIRECT实际调用；
+3. exact trusted Plugin `UserPromptSubmit`/`PreToolUse` Hook运行并产生context/control；
+4. `reload_plugins`不改same-epoch SYSTEM/tools；
+5. compaction successor重新冻结current Plugin Skill/MCP并运行Pre/PostCompact、SessionStart(compact)；
+6. replace自动disabled；对new exact install再次enable后Hook trust仍为MODIFIED，old MCP/Hook consumer drain；
+7. disable/remove后future contributions消失，old DIRECT descriptor typed unavailable；
+8. 保留actual prompt、provider-visible messages/tools、Hook stdin/stdout/stderr、MCP/ToolResults与model reply；只排除exact non-empty `PULSARA_API_KEY`。
 
 ---
 
-## 13. Definition of Done
+## 15. Definition of Done
 
-1. Portable core严格符合Agent Plugins 1.0.0 Published contract；
-2. Codex Skill/MCP/Hook package happy path可运行；
-3. Claude simple agent preset happy path可运行；
-4. Plugin不是capability leaf或executor；
-5. Skill没有第五root；
-6. MCP没有第二registry/supervisor；
-7. Hook只有Round 9.2一套与`plugins/`平级的generic trust/dispatcher/executor/provider context；Plugin只拥有contribution adapter，不拥有trust state；
-8. agent preset复用Round 10 task与shared cold assembler；
-9. unsupported vendor semantics被typed拒绝或skip，不被静默放大authority；
-10. trust、permission、effect与canonical authority边界闭合；
-11. same-epoch strict prefix成立；
-12. ordinary cold open、compaction successor与child first-open只复用既有shared cold-epoch assembly；不新增第三种rebase boundary；
-13. 没有任意total Plugin/Hook/task lifetime caps；
-14. 没有冗余DTO fingerprints、SHA evidence循环或compatibility fallback；
-15. 无schema/event/job/guard/recovery增长；
-16. full pytest、PostgreSQL、architecture、compiler/continuity、Round 9/9.1/5B/10 retained tests与real dogfood全部通过；
-17. 规格、Gap Index、README与activation evidence只描述新单一路径。
+只有全部满足，本文才能标记`ACTIVATED`：
+
+1. Agent Plugins 1.0 root manifest是唯一package identity；one embedded Draft 2020-12 validator path且runtime schema lookup不联网；`jsonschema`是direct dependency。
+2. Portable core只从fixed `skills/`与`mcp.json`读取；Pulsara extension只从fixed `dev.pulsara/`读取。
+3. Vendor manifest/profile猜测与multi-manifest priority完全不存在。
+4. Six typed management operations成为CLI/GUI共同boundary；list/doctor共享one inspection。
+5. Source validate/copy/revalidate/stage verify来自one held observation；regular-file bytes streaming constant-memory，membership evidence诚实O(member count)。
+6. Fresh roots no-follow，Darwin/Linux exclusive publish，existing root永不覆盖。
+7. Publisher package lock覆盖stage create→state cut/confirmation；concurrent GC不能删除pre-state new root。
+8. Cancellation shield+join，MemoryError/IO进入typed cleanup；file bytes streaming constant-memory、membership metadata诚实O(member count)且无hidden cap；ordinary failure无stage leak；partial GC mutation有exact progress truth。
+9. SIGKILL、ACK-unknown与power-loss弱保证诚实，无fsync/receipt/recovery。
+10. Store/state/data/locks是only new durable local state；PostgreSQL无增长。
+11. Add/replace均initial disabled；Enable exact-binds reviewed current install与external-process acceptance；它不替代remote tool permission或Hook trust。
+12. COMPLETE enabled view不能mixed；三类component observation由parse/selection/inspection/reload共享；wrong-kind是INVALID、physical race才是UNAVAILABLE；UNAVAILABLE不发布partial contribution；inspection outer abort不是第三semantic disposition。
+13. Plugin Skill是explicit third producer，使用same parser/placement/resolver/catalog/activation/read/retained path。
+14. No Plugin Skill materialization、sidecar、reconciler、orphan cleanup或tree digest。
+15. Seven-tier precedence与same-tier conflict fallback全函数实现。
+16. Stable Skill capability source kind/id保留；v4 source contract single path；no dual compatibility。
+17. Plugin MCP只生成generic native `McpServerConfig`并进入one supervisor；server id length-framed injective，native cwd closed union承载exact package/data path，literal public headers是独立generic field；model surface/runtime/resolved identity matrix exact，package replace即使HTTP config同值也runtime-reconnect并释放old anchor。
+18. Plugin不能grant MCP required/permission/effect/scope authority；existing 64-server bound是only aggregate bound。
+19. Plugin Hook只增加closed source identity/trust subject arm；parser/trust/dispatcher/executor/context owner仍唯一。
+20. Hook command在inspect/trust/execute间byte-identical；root/data只通过trust-covered declaration environment提供。
+21. Generic Hook stdin/`HOOK_CONTEXT`没有Plugin provenance；11 events/11 public variants/12 causal arms不变。
+22. `reload_hooks`与`reload_plugins`scan/build不占publication/Host locks，固定`Hook publication -> Host`锁序；`reload_hooks`提交校验complete captured predecessor，任一slice变化即重做，`reload_plugins`以lock内current opposite slice merge；无ABBA、stale overwrite、lost update、generation或registry。
+23. Reload tool lifecycle使用invoke-time predecessor、commit使用lock内current predecessor；old Hook/MCP leaves各自通过generic lifetime anchor持package lock直到physical drain。
+24. Same-epoch SYSTEM/tools exact、messages suffix-only；无第三rebase boundary。
+25. Long-horizon availability无new total cap；all scans/copy/list use streaming/pagination/deadline。
+26. One injected process-local `ProcessApiKeyBoundary`以one underlying gate和nonblocking-event-loop sync/async ports串行化supported rotation与install publish、Hook/MCP spawn/HTTP、provider final sink admission；guard持有跨irreversible cut，cancel acquisition shield+join、无deadlock/detached waiter，rotation probe不能穿透，diagnostics/dogfood不泄漏exact value。
+27. No generic mutable registry/service locator/event bus、watcher、receipt、history、replay、repair或durable job。
+28. Fingerprint只保留§11.3真实边界；无package tree/view/contribution/stored provenance hash。
+29. Architecture oracle保持`29 / 24 / 11 / 1 / 25 / 0 / 11`。
+30. Active specs、tests、CLI help与dogfood只描述新单一路径；不修改`contracts/`、archived docs或README。
+31. Full retained/PostgreSQL/static/wheel/launcher/local+real-provider dogfood全绿，new skip/xfail为0。
 
 ---
 
-## 14. 最终冻结
+## 16. 最终冻结
 
-Round 9.3激活后的产品语义是：
+Round 9.3激活后的产品语义应当是：
 
-> Pulsara可以从本地安装Agent Plugins 1.0、Codex或Claude Code风格的Plugin package。Portable Skills被原样物化进Round 9.1现有四根目录之一；MCP definitions进入Round 9唯一supervisor并沿用direct/meta和cold adoption；已信任的command Hooks在Codex当前公开的11项native lifecycle seam运行，其中`SessionEnd`同时兼容Claude，其控制结果只能影响当前合法操作，其模型可见文本始终作为append-only untrusted observation；简单Claude agent preset通过opaque ref为Round 10新worker提供低authority启动说明。Plugin本身不成为capability、executor、permission owner、canonical authority或durable recovery system。中途refresh不改写已安装provider prefix，只有existing cold open和compaction successor重建SYSTEM/tools。
+> Pulsara从本地目录安装一个Agent Plugins 1.0 package为immutable managed version，以USER或exact WORKSPACE instance显式enable。Portable Plugin Skills不复制进four loose roots，而作为第三typed definition producer，与用户/工作空间loose Skills和Pulsara package bundled Skills共同进入唯一central catalog；优先级为four loose roots、WORKSPACE Plugin、USER Plugin、bundled。Portable MCP definitions只归一化为existing native MCP configs；Pulsara extension command Hooks只进入existing Round 9.2 dispatcher/trust。Plugin package本身不成为capability、executor、permission owner、canonical authority或durable recovery system，也不提供agent-definition或subagent runtime。Running Host refresh不改写installed prefix，只有existing cold open与adopted compaction successor能重建SYSTEM/tools。
+
+本文在代码、测试、dogfood与§15全部闭合前保持`NOT ACTIVATED`。

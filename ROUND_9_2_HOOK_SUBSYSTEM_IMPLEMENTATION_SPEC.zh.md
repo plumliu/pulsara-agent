@@ -199,7 +199,7 @@ Hook event types   11
 
 ### 1.2 明确不实现
 
-- Plugin package parsing、installation、MCP/Skill/preset；这些属于Round 9.3；
+- Plugin package parsing、installation、MCP/Skill；这些属于Round 9.3；
 - Codex inline `config.toml [hooks]`；Pulsara本轮只有一个JSON配置truth；
 - system、enterprise、MDM、managed requirements或`allow_managed_hooks_only`；
 - filesystem watcher、自动热重载；
@@ -661,7 +661,7 @@ PULSARA_HOOK_SOURCE_DIR = directory containing hooks.json
 PULSARA_PROJECT_DIR     = exact workspace root when available
 ```
 
-Round 9.3 Plugin adapter未来可额外提供`PLUGIN_ROOT/PLUGIN_DATA`与Claude aliases；generic executor只消费closed overlay。
+Round 9.3 Plugin Hook adapter未来可额外提供`PLUGIN_ROOT/PLUGIN_DATA`；generic executor只消费closed overlay。Plugin不增加agent-definition语义。
 
 ### 6.2 Process semantics
 

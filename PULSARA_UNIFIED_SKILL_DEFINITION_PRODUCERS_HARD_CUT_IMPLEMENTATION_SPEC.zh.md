@@ -491,6 +491,7 @@ Official inventory在代码中closed为：
 
 ```text
 EXPECTED_BUNDLED_SKILL_NAMES = (
+  "pulsara-plugin-installer",
   "pulsara-skill-creator",
   "pulsara-skill-installer",
 )
@@ -954,8 +955,9 @@ Release/user guidance必须明确：现有user path可能遮挡新版built-in；
 
 ### 9.4 Bundled Skill guidance
 
-Package内`pulsara-skill-creator`与`pulsara-skill-installer`本身成为direct bundled definitions：
+Package内`pulsara-plugin-installer`、`pulsara-skill-creator`与`pulsara-skill-installer`本身成为direct bundled definitions：
 
+- plugin installer在Round 9.3 CLI尚未随installed distribution激活时必须诚实停止；激活后先调用唯一Agent Plugins 1.0 validator，只有deterministic Codex package-format差异才允许模型按需读取Codex source reference；若存在行为型Hook，再读取Pulsara Hook exact-target reference并生成新的standard candidate。Hook target必须覆盖event/matcher/stdin/environment/output/control/lifecycle语义。它不是Plugin parser、publisher或compatibility Runtime；
 - creator指导创建portable loose Skill并调用正式validator；
 - installer只选择local source/scope并调用正式loose CLI；
 - scope不明确时询问用户；
