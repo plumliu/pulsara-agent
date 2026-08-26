@@ -16,14 +16,15 @@ from pulsara_agent.capability.bundled_inventory import (
     classify_bundled_skill_inventory,
 )
 
-from pulsara_agent.capability.local_skill_source_binding import (
+from pulsara_agent.local_source_binding import (
     open_absolute_directory_nofollow,
-    prepare_local_skill_source_path,
+    prepare_local_source_path,
 )
 from pulsara_agent.capability.local_skills import (
     MAX_SKILL_FILE_BYTES,
     MAX_SKILL_LOCATION_BYTES,
     SKILL_FILE_NAME,
+    SkillObservationCancellationPort,
     SkillObservationError,
     check_skill_deadline,
     close_skill_roots,
@@ -94,7 +95,7 @@ class BundledSkillDistributionBindingOwner:
             )
             if not isinstance(resource, Path):
                 raise TypeError("bundled resources are not filesystem-backed")
-            path = prepare_local_skill_source_path(resource)
+            path = prepare_local_source_path(resource)
             if not path.is_absolute():
                 raise ValueError("bundled resource root is not absolute")
             descriptor = open_absolute_directory_nofollow(path)
@@ -172,9 +173,12 @@ class BundledSkillDefinitionProducer:
         self._binding_owner = binding_owner
 
     def observe(
-        self, *, deadline_monotonic: float | None = None
+        self,
+        *,
+        deadline_monotonic: float | None = None,
+        cancellation: SkillObservationCancellationPort | None = None,
     ) -> FrozenBundledSkillDefinitions:
-        check_skill_deadline(deadline_monotonic)
+        check_skill_deadline(deadline_monotonic, cancellation)
         held_roots = []
         try:
             construction = self._binding_owner.construction_cause
@@ -203,6 +207,7 @@ class BundledSkillDefinitionProducer:
                 root_path,
                 maximum_direct_child_directories=len(EXPECTED_BUNDLED_SKILL_NAMES),
                 deadline_monotonic=deadline_monotonic,
+                cancellation=cancellation,
                 bound_descriptor=descriptor,
                 bound_identity=identity,
                 classify_nonregular_skill_document_as_missing=True,
@@ -239,6 +244,7 @@ class BundledSkillDefinitionProducer:
                     child,
                     maximum=MAX_SKILL_FILE_BYTES,
                     deadline_monotonic=deadline_monotonic,
+                    cancellation=cancellation,
                 )
                 skill_path = root_path / name / SKILL_FILE_NAME
                 parsed = parse_skill_document(data)
@@ -303,8 +309,9 @@ class BundledSkillDefinitionProducer:
                 held_roots,
                 maximum_direct_child_directories=len(EXPECTED_BUNDLED_SKILL_NAMES),
                 deadline_monotonic=deadline_monotonic,
+                cancellation=cancellation,
             )
-            check_skill_deadline(deadline_monotonic)
+            check_skill_deadline(deadline_monotonic, cancellation)
             return FrozenBundledSkillDefinitions(
                 BundledSkillDefinitionsDisposition.COMPLETE,
                 candidates=tuple(candidates),

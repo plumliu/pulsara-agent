@@ -22,6 +22,10 @@ from pulsara_agent.capability.resolver import (
     SkillCatalogResolver,
     UnavailableEffectiveSkillCatalogInspection,
 )
+from pulsara_agent.capability.plugin_skill_contracts import (
+    FrozenPluginSkillDefinitions,
+    PluginSkillDefinitionsDisposition,
+)
 from pulsara_agent.capability.types import (
     ResolutionUnavailableCause,
     SkillDiagnostic,
@@ -132,7 +136,9 @@ def test_round9_1_membership_change_before_final_revalidation_invalidates_cut(
     original = local_skills.read_observed_skill_document
     installed = False
 
-    def read_and_install(child, *, maximum: int, deadline_monotonic) -> bytes:
+    def read_and_install(
+        child, *, maximum: int, deadline_monotonic, cancellation=None
+    ) -> bytes:
         nonlocal installed
         if not installed:
             installed = True
@@ -141,6 +147,7 @@ def test_round9_1_membership_change_before_final_revalidation_invalidates_cut(
             child,
             maximum=maximum,
             deadline_monotonic=deadline_monotonic,
+            cancellation=cancellation,
         )
 
     monkeypatch.setattr(local_skills, "read_observed_skill_document", read_and_install)
@@ -165,7 +172,9 @@ def test_round9_1_enumerated_member_loss_invalidates_whole_scan(
     original = local_skills.read_observed_skill_document
     reads = 0
 
-    def remove_before_second_read(child, *, maximum: int, deadline_monotonic) -> bytes:
+    def remove_before_second_read(
+        child, *, maximum: int, deadline_monotonic, cancellation=None
+    ) -> bytes:
         nonlocal reads
         reads += 1
         if reads == 1:
@@ -174,6 +183,7 @@ def test_round9_1_enumerated_member_loss_invalidates_whole_scan(
             child,
             maximum=maximum,
             deadline_monotonic=deadline_monotonic,
+            cancellation=cancellation,
         )
 
     monkeypatch.setattr(
@@ -267,7 +277,11 @@ def test_round9_1_1025_directories_and_65_winners_publish_no_partial_catalog(
     loose = winner_producer.observe(_policy(winner_producer, winner_workspace))
     with BundledSkillDistributionBindingOwner() as binding:
         bundled = BundledSkillDefinitionProducer(binding).observe()
-    inspection = SkillCatalogResolver().resolve(loose, bundled)
+    inspection = SkillCatalogResolver().resolve(
+        loose,
+        FrozenPluginSkillDefinitions(PluginSkillDefinitionsDisposition.COMPLETE),
+        bundled,
+    )
     assert isinstance(inspection, UnavailableEffectiveSkillCatalogInspection)
     assert inspection.winners == ()
     assert len(inspection.unavailable_causes) == 1
@@ -315,6 +329,9 @@ def test_round9_1_owner_snapshot_freezes_effective_head_until_next_scan(
     composer = KernelSkillProjectionComposer(
         workspace_root=workspace,
         bundled_binding_owner=binding,
+        plugin_definitions_provider=lambda: FrozenPluginSkillDefinitions(
+            PluginSkillDefinitionsDisposition.COMPLETE
+        ),
         loose_producer=producer,
     )
     try:

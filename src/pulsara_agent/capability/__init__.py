@@ -63,6 +63,10 @@ from pulsara_agent.capability.local_skills import (
     validate_skill_candidate_placement,
 )
 from pulsara_agent.capability.provider import SkillProjectionOutput
+from pulsara_agent.capability.plugin_skill_contracts import (
+    FrozenPluginSkillDefinitions,
+    PluginSkillDefinitionsDisposition,
+)
 from pulsara_agent.capability.pulsara_home import (
     PulsaraHomeDisposition,
     PulsaraHomeResolution,
@@ -93,8 +97,12 @@ from pulsara_agent.capability.types import (
     ActiveSkillProjectionUnavailableReason,
     ActiveSkillReason,
     BundledSkillOrigin,
+    ConflictingSkillCandidateIssue,
+    ConflictingSkillCandidateRef,
     InvalidSkillCandidateIssue,
     LooseSkillOrigin,
+    PluginSkillOrigin,
+    PluginSkillVisibilityScope,
     ProducerUnavailableCause,
     ResolvedSkillCatalogEntry,
     ResolutionUnavailableCause,
@@ -134,6 +142,8 @@ __all__ = [
     "BundledSkillDefinitionsDisposition",
     "BundledSkillDistributionBindingOwner",
     "BundledSkillOrigin",
+    "ConflictingSkillCandidateIssue",
+    "ConflictingSkillCandidateRef",
     "CapabilityIdentity",
     "CapabilityKind",
     "CapabilitySourceKind",
@@ -148,6 +158,7 @@ __all__ = [
     "FrozenCapabilityDispatchCut",
     "FrozenCapabilityRegistrySnapshot",
     "FrozenLooseSkillDefinitions",
+    "FrozenPluginSkillDefinitions",
     "FrozenSkillCapabilityDispatchView",
     "FrozenSkillCapabilityFact",
     "FrozenToolCapabilityDispatchView",
@@ -169,6 +180,9 @@ __all__ = [
     "LooseSkillDefinitionProducer",
     "LooseSkillDefinitionsDisposition",
     "LooseSkillOrigin",
+    "PluginSkillDefinitionsDisposition",
+    "PluginSkillOrigin",
+    "PluginSkillVisibilityScope",
     "ParsedSkillDocument",
     "PreparedLooseSkillRootPolicy",
     "PreparedSkillRootBinding",

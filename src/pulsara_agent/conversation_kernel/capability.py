@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from hashlib import sha256
 from pathlib import Path
+from typing import Callable
 
 from pulsara_agent.capability.bundled_skills import (
     BundledSkillDefinitionProducer,
@@ -32,6 +33,9 @@ from pulsara_agent.capability.local_skills import (
     check_skill_deadline,
 )
 from pulsara_agent.capability.provider import SkillProjectionOutput
+from pulsara_agent.capability.plugin_skill_contracts import (
+    FrozenPluginSkillDefinitions,
+)
 from pulsara_agent.capability.resolver import (
     CompleteEffectiveSkillCatalogInspection,
     SkillCatalogCapabilityProvider,
@@ -50,13 +54,14 @@ _SKILL_SOURCE_ID = "pulsara-local-skill-catalog"
 
 
 class KernelSkillProjectionComposer:
-    """Freeze one effective bundled+loose source and compose its sibling view."""
+    """Freeze one effective loose+Plugin+bundled Skill source."""
 
     def __init__(
         self,
         *,
         workspace_root: Path,
         bundled_binding_owner: BundledSkillDistributionBindingOwner,
+        plugin_definitions_provider: Callable[[], FrozenPluginSkillDefinitions],
         configured_active_skill_names: frozenset[str] = frozenset(),
         loose_producer: LooseSkillDefinitionProducer | None = None,
         catalog_resolver: SkillCatalogResolver | None = None,
@@ -68,6 +73,7 @@ class KernelSkillProjectionComposer:
         self._bundled_producer = BundledSkillDefinitionProducer(
             bundled_binding_owner
         )
+        self._plugin_definitions_provider = plugin_definitions_provider
         self._resolver = catalog_resolver or SkillCatalogResolver()
         self._projection_provider = (
             projection_provider or SkillCatalogCapabilityProvider()
@@ -97,7 +103,10 @@ class KernelSkillProjectionComposer:
         if loose.root_policy is not root_policy:
             raise ValueError("loose definitions do not join their physical policy")
         check_skill_deadline(deadline_monotonic)
-        inspection = self._resolver.resolve(loose, bundled)
+        plugin = self._plugin_definitions_provider()
+        if not isinstance(plugin, FrozenPluginSkillDefinitions):
+            raise TypeError("Plugin Skill definition provider returned a foreign batch")
+        inspection = self._resolver.resolve(loose, plugin, bundled)
         check_skill_deadline(deadline_monotonic)
         source = capability_source_ref(
             CapabilitySourceKind.LOCAL_SKILL_CATALOG,
@@ -107,13 +116,15 @@ class KernelSkillProjectionComposer:
             source=source,
             refresh_mode=CapabilitySourceRefreshMode.SAFE_POINT_REFRESHABLE,
             source_contract_fingerprint=context_fingerprint(
-                "skill-source-contract:v3-bundled-loose-agent-skills",
+                "skill-source-contract:v4-bundled-loose-plugin-skills",
                 {
                     "parser_contract": AGENT_SKILLS_CONTRACT_ID,
                     "placement_contract": SKILL_PLACEMENT_CONTRACT_ID,
-                    "producer_kinds": ("LOOSE", "BUNDLED"),
+                    "producer_kinds": ("LOOSE", "PLUGIN", "BUNDLED"),
                     "precedence": (
                         *(item.value for item in LOOSE_SKILL_ROOT_ORDER),
+                        "WORKSPACE_PLUGIN",
+                        "USER_PLUGIN",
                         "BUNDLED",
                     ),
                     "bundled_names": EXPECTED_BUNDLED_SKILL_NAMES,

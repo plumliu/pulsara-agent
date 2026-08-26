@@ -10,6 +10,10 @@ class JsonBoundExceeded(ValueError):
     pass
 
 
+class DuplicateJsonKey(ValueError):
+    pass
+
+
 def bounded_json_loads(
     data: bytes | bytearray,
     *,
@@ -17,6 +21,7 @@ def bounded_json_loads(
     maximum_nodes: int,
     maximum_depth: int,
     maximum_string_utf8_bytes: int | None = None,
+    reject_duplicate_keys: bool = False,
 ) -> Any:
     if len(data) > maximum_bytes:
         raise JsonBoundExceeded("JSON body exceeds the byte bound")
@@ -27,7 +32,12 @@ def bounded_json_loads(
         maximum_string_utf8_bytes=maximum_string_utf8_bytes,
     ).scan()
     try:
-        value = json.loads(data)
+        value = json.loads(
+            data,
+            object_pairs_hook=(
+                _unique_object_pairs if reject_duplicate_keys else None
+            ),
+        )
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError("JSON body is invalid") from exc
     validate_json_shape(
@@ -37,6 +47,15 @@ def bounded_json_loads(
         maximum_string_utf8_bytes=maximum_string_utf8_bytes,
     )
     return value
+
+
+def _unique_object_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise DuplicateJsonKey("JSON object contains a duplicate key")
+        result[key] = value
+    return result
 
 
 class _BoundedJsonScanner:
@@ -254,4 +273,9 @@ def validate_json_shape(
     return nodes
 
 
-__all__ = ["JsonBoundExceeded", "bounded_json_loads", "validate_json_shape"]
+__all__ = [
+    "DuplicateJsonKey",
+    "JsonBoundExceeded",
+    "bounded_json_loads",
+    "validate_json_shape",
+]

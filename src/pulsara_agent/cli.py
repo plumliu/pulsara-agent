@@ -9,10 +9,12 @@ import json
 import os
 from pathlib import Path
 import signal
+import sys
 from time import monotonic
 
 from pulsara_agent import __version__
 from pulsara_agent.capability import (
+    ConflictingSkillCandidateIssue,
     EventLocalSkillCancellationProbe,
     InspectEffectiveSkillCatalogRequest,
     InstallLooseLocalSkillRequest,
@@ -28,7 +30,12 @@ from pulsara_agent.capability import (
     ValidateLocalSkillSourceRequest,
     skill_origin_label,
 )
-from pulsara_agent.capability.pulsara_home import require_pulsara_home
+from pulsara_agent.capability.pulsara_home import (
+    PulsaraHomeDisposition,
+    require_pulsara_home,
+    resolve_pulsara_home,
+    resolve_user_home,
+)
 from pulsara_agent.conversation_kernel.host import KernelHostCore
 from pulsara_agent.llm.models import ModelRole
 from pulsara_agent.mcp_config import (
@@ -52,9 +59,42 @@ from pulsara_agent.workspace_identity import (
     normalize_workspace_kind,
     resolve_workspace,
 )
-from pulsara_agent.hooks.contracts import HookSourceKind
+from pulsara_agent.hooks.contracts import (
+    HookSourceKind,
+    PluginHookSourceIdentity,
+)
 from pulsara_agent.hooks.executor import HookSecretScrubSet
 from pulsara_agent.hooks.source import LocalHookSourceProvider
+from pulsara_agent.plugins.contracts import (
+    CleanupUnavailablePluginInstallOutcome,
+    ExternalProcessAcceptance,
+    GcLocalPluginPackagesRequest,
+    InspectLocalPluginsRequest,
+    InstallLocalPluginRequest,
+    PluginInspectionAbort,
+    PluginInspectionDisposition,
+    PluginInspectionOutcome,
+    PluginScopeKind,
+    EnabledPluginViewDisposition,
+    NeverCancelPluginOperation,
+    PluginDiagnostic,
+    PluginDiagnosticCode,
+    RemoveLocalPluginRequest,
+    SetLocalPluginEnabledRequest,
+    ValidateLocalPluginSourceRequest as ValidateLocalPluginPackageRequest,
+)
+from pulsara_agent.plugins.hook_adapter import compose_hook_definition_view
+from pulsara_agent.plugins.management import (
+    EventPluginCancellationPort,
+    PluginManagementService,
+)
+from pulsara_agent.plugins.package_store import ManagedPluginStore
+from pulsara_agent.plugins.skill_producer import PluginSkillDefinitionProducer
+from pulsara_agent.plugins.view import EnabledPluginViewOwner, FrozenEnabledPluginView
+from pulsara_agent.process_api_key_boundary import (
+    ProcessApiKeyBoundary,
+    ProcessApiKeyScrubSet,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -83,6 +123,36 @@ def build_parser() -> argparse.ArgumentParser:
     install.add_argument("--json", action="store_true")
     for name in ("list", "doctor"):
         command = _add_env_args(skill_commands.add_parser(name))
+        command.add_argument("--workspace", default=None)
+        command.add_argument("--json", action="store_true")
+
+    plugins = commands.add_parser(
+        "plugins", help="Manage local Agent Plugins 1.0 packages."
+    )
+    plugin_commands = plugins.add_subparsers(dest="plugins_command")
+    plugin_validate = _add_env_args(plugin_commands.add_parser("validate"))
+    plugin_validate.add_argument("path")
+    plugin_validate.add_argument("--json", action="store_true")
+    plugin_add = _add_plugin_scope_args(
+        _add_env_args(plugin_commands.add_parser("add"))
+    )
+    plugin_add.add_argument("--replace", action="store_true")
+    plugin_add.add_argument("path")
+    plugin_add.add_argument("--json", action="store_true")
+    plugin_enable = _add_plugin_scope_args(
+        _add_env_args(plugin_commands.add_parser("enable"))
+    )
+    plugin_enable.add_argument("--yes", action="store_true")
+    plugin_enable.add_argument("plugin_id")
+    plugin_enable.add_argument("--json", action="store_true")
+    for name in ("disable", "remove"):
+        command = _add_plugin_scope_args(
+            _add_env_args(plugin_commands.add_parser(name))
+        )
+        command.add_argument("plugin_id")
+        command.add_argument("--json", action="store_true")
+    for name in ("list", "doctor", "gc"):
+        command = _add_env_args(plugin_commands.add_parser(name))
         command.add_argument("--workspace", default=None)
         command.add_argument("--json", action="store_true")
 
@@ -130,6 +200,11 @@ def build_parser() -> argparse.ArgumentParser:
             choices=("user", "workspace"),
             required=name not in {"list", "doctor"},
         )
+        command.add_argument(
+            "--source",
+            default=None,
+            help="local or plugin:<plugin-id>; omitted list/doctor shows all",
+        )
         if name == "trust":
             command.add_argument("--expected-definition-digest", required=True)
 
@@ -149,6 +224,14 @@ def _add_env_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument("--env-file", default=None)
     parser.add_argument("--override-env", action="store_true")
     parser.add_argument("--prefix", default="PULSARA")
+    return parser
+
+
+def _add_plugin_scope_args(
+    parser: argparse.ArgumentParser,
+) -> argparse.ArgumentParser:
+    parser.add_argument("--scope", choices=("user", "workspace"), required=True)
+    parser.add_argument("--workspace", default=None)
     return parser
 
 
@@ -215,6 +298,22 @@ def main() -> None:
         except ValueError as exc:
             parser.error(_public_error(exc))
         print(output)
+        if exit_status:
+            raise SystemExit(exit_status)
+        return
+    if args.command == "plugins":
+        api_key_boundary = ProcessApiKeyBoundary()
+        try:
+            output, exit_status = _plugins_command(
+                args, api_key_boundary=api_key_boundary
+            )
+        except _PluginCliUsageError as exc:
+            _plugin_cli_parser_error(parser, str(exc), api_key_boundary)
+        except ValueError as exc:
+            _plugin_cli_parser_error(
+                parser, _public_error(exc), api_key_boundary
+            )
+        _plugin_cli_print(output, api_key_boundary)
         if exit_status:
             raise SystemExit(exit_status)
         return
@@ -440,21 +539,28 @@ def _skills_command(args: argparse.Namespace) -> tuple[str, int]:
 
     if command in {"list", "doctor"}:
         workspace = _resolved_skill_workspace(args.workspace)
-        inspection = service.inspect_effective_skill_catalog(
-            InspectEffectiveSkillCatalogRequest(workspace)
-        )
-        payload = _skill_inspection_payload(inspection, doctor=command == "doctor")
-        rendered = (
-            json.dumps(payload, indent=2, ensure_ascii=False)
-            if args.json
-            else _skill_inspection_text(payload, doctor=command == "doctor")
-        )
-        status = (
-            0
-            if inspection.disposition is EffectiveSkillCatalogDisposition.COMPLETE
-            else 2
-        )
-        return rendered, status
+        plugin_definitions, plugin_view = _cli_plugin_skill_definitions(workspace)
+        try:
+            inspection = service.inspect_effective_skill_catalog(
+                InspectEffectiveSkillCatalogRequest(workspace, plugin_definitions)
+            )
+            payload = _skill_inspection_payload(
+                inspection, doctor=command == "doctor"
+            )
+            rendered = (
+                json.dumps(payload, indent=2, ensure_ascii=False)
+                if args.json
+                else _skill_inspection_text(payload, doctor=command == "doctor")
+            )
+            status = (
+                0
+                if inspection.disposition
+                is EffectiveSkillCatalogDisposition.COMPLETE
+                else 2
+            )
+            return rendered, status
+        finally:
+            plugin_view.close()
     raise _SkillCliUsageError("unknown skills command")
 
 
@@ -463,6 +569,36 @@ def _resolved_skill_workspace(raw: str | None) -> Path:
     return resolve_workspace(
         HostWorkspaceInput(workspace_kind="project", workspace_root=root)
     ).workspace_root
+
+
+def _cli_plugin_skill_definitions(
+    workspace: Path,
+):
+    boundary = ProcessApiKeyBoundary()
+    user_home = resolve_user_home()
+    home = resolve_pulsara_home(user_home_resolution=user_home)
+    if home.disposition is not PulsaraHomeDisposition.RESOLVED:
+        view = FrozenEnabledPluginView(
+            EnabledPluginViewDisposition.UNAVAILABLE,
+            diagnostics=(
+                PluginDiagnostic(
+                    PluginDiagnosticCode.HOME_CONFIGURATION_INVALID,
+                    "Plugin home configuration is invalid",
+                ),
+            ),
+        )
+    else:
+        view = EnabledPluginViewOwner(
+            store=ManagedPluginStore(
+                pulsara_home=home, api_key_boundary=boundary
+            ),
+            api_key_boundary=boundary,
+        ).observe(
+            workspace_root=workspace,
+            deadline_monotonic=float("inf"),
+            cancellation=NeverCancelPluginOperation(),
+        )
+    return PluginSkillDefinitionProducer().observe(view), view
 
 
 def _resolved_local_source(raw: str) -> Path:
@@ -667,6 +803,22 @@ def _skill_inspection_payload(inspection, *, doctor: bool) -> dict[str, object]:
                         ],
                     }
                 )
+            elif isinstance(item, ConflictingSkillCandidateIssue):
+                issues.append(
+                    {
+                        "kind": item.kind.value,
+                        "name": item.name,
+                        "tier": item.tier.value,
+                        "candidates": [
+                            {
+                                "path": str(candidate.path),
+                                "origin_label": skill_origin_label(candidate.origin),
+                            }
+                            for candidate in item.candidates
+                        ],
+                        "diagnostic_codes": [item.diagnostic_code.value],
+                    }
+                )
             else:  # pragma: no cover - closed issue union
                 raise TypeError("Skill candidate issue is open")
         payload["candidate_issues"] = issues
@@ -700,7 +852,8 @@ def _skill_inspection_text(payload: dict[str, object], *, doctor: bool) -> str:
                 )
         for issue in payload.get("candidate_issues", []):
             if isinstance(issue, dict):
-                lines.append(f"Issue {issue['kind']}: {issue['path']}")
+                location = issue.get("path", issue.get("name", "unknown"))
+                lines.append(f"Issue {issue['kind']}: {location}")
                 if issue["kind"] == "SHADOWED":
                     lines.append(
                         "  winner: "
@@ -712,6 +865,13 @@ def _skill_inspection_text(payload: dict[str, object], *, doctor: bool) -> str:
                             "deleting the loose winner allows fallback at the next "
                             "complete safe point"
                         )
+                if issue["kind"] == "CONFLICTING":
+                    for candidate in issue.get("candidates", []):
+                        if isinstance(candidate, dict):
+                            lines.append(
+                                "  candidate: "
+                                f"{candidate['origin_label']} {candidate['path']}"
+                            )
                 for diagnostic in issue.get("diagnostics", []):
                     if isinstance(diagnostic, dict):
                         lines.append(
@@ -742,8 +902,687 @@ _SKILL_INSTALL_EXIT_STATUS = {
 }
 
 
-async def _mcp_command(args: argparse.Namespace) -> dict[str, object]:
+class _PluginCliUsageError(ValueError):
+    pass
+
+
+def _plugins_command(
+    args: argparse.Namespace,
+    *,
+    api_key_boundary: ProcessApiKeyBoundary | None = None,
+) -> tuple[str, int]:
     _load_env_file_from_args(args)
+    command = args.plugins_command
+    if command is None:
+        raise _PluginCliUsageError("plugins requires a subcommand")
+    boundary = api_key_boundary or ProcessApiKeyBoundary()
+    service = PluginManagementService(api_key_boundary=boundary)
+    cancellation = EventPluginCancellationPort()
+    deadline = float("inf")
+
+    if command == "validate":
+        with _bridge_skill_sigint(cancellation):
+            result = service.validate_local_plugin_source(
+                ValidateLocalPluginPackageRequest(
+                    _resolved_local_source(args.path), deadline, cancellation
+                )
+            )
+        payload = _plugin_validation_payload(result)
+        return _render_plugin_payload(payload, args.json), _plugin_exit_status(
+            result.disposition
+        )
+
+    if command == "add":
+        scope, workspace = _plugin_scope_and_workspace(args)
+        with _bridge_skill_sigint(cancellation):
+            result = service.install_local_plugin(
+                InstallLocalPluginRequest(
+                    _resolved_local_source(args.path),
+                    scope,
+                    deadline,
+                    workspace,
+                    args.replace,
+                    cancellation,
+                )
+            )
+        payload = _plugin_install_payload(result)
+        return _render_plugin_payload(payload, args.json), _plugin_exit_status(
+            result.disposition
+        )
+
+    if command in {"enable", "disable"}:
+        scope, workspace = _plugin_scope_and_workspace(args)
+        with _bridge_skill_sigint(cancellation):
+            inspection = service.inspect_local_plugins(
+                InspectLocalPluginsRequest(deadline, workspace, cancellation)
+            )
+        if not isinstance(inspection, PluginInspectionOutcome) or (
+            inspection.disposition is not PluginInspectionDisposition.COMPLETE
+        ):
+            payload = _plugin_inspection_payload(
+                inspection, doctor=True, projection="enable-preflight"
+            )
+            return _render_plugin_payload(payload, args.json), 2
+        try:
+            target = next(
+                (
+                    item
+                    for item in inspection.instances
+                    if item.identity.scope is scope
+                    and item.identity.plugin_id == args.plugin_id
+                ),
+                None,
+            )
+            if target is None:
+                payload = {
+                    "operation": "set_local_plugin_enabled",
+                    "disposition": "NOT_FOUND",
+                    "scope": scope.value,
+                    "plugin_id": args.plugin_id,
+                }
+                return _render_plugin_payload(payload, args.json), 1
+            review = _plugin_instance_payload(target, include_diagnostics=True)
+            if command == "enable" and not args.yes:
+                _plugin_cli_stderr(_plugin_enable_review_text(review), boundary)
+                _plugin_cli_stderr(
+                    "Enable this exact package and accept future local process/HTTP "
+                    "startup? [y/N] ",
+                    boundary,
+                    end="",
+                )
+                try:
+                    accepted = input()
+                except EOFError:
+                    accepted = ""
+                if accepted.strip().lower() not in {"y", "yes"}:
+                    payload = {
+                        "operation": "set_local_plugin_enabled",
+                        "disposition": "DECLINED",
+                        "reviewed_package": review,
+                    }
+                    return _render_plugin_payload(payload, args.json), 1
+            with _bridge_skill_sigint(cancellation):
+                result = service.set_local_plugin_enabled(
+                    SetLocalPluginEnabledRequest(
+                        scope,
+                        args.plugin_id,
+                        command == "enable",
+                        target.package_install_id,
+                        deadline,
+                        workspace,
+                        (
+                            ExternalProcessAcceptance.ACCEPTED
+                            if command == "enable"
+                            else None
+                        ),
+                        cancellation,
+                    )
+                )
+            payload = _plugin_enablement_payload(result, reviewed=review)
+            return _render_plugin_payload(payload, args.json), _plugin_exit_status(
+                result.disposition
+            )
+        finally:
+            _close_inspection_anchors(inspection)
+
+    if command == "remove":
+        scope, workspace = _plugin_scope_and_workspace(args)
+        with _bridge_skill_sigint(cancellation):
+            result = service.remove_local_plugin(
+                RemoveLocalPluginRequest(
+                    scope, args.plugin_id, deadline, workspace, cancellation
+                )
+            )
+        payload = _plugin_removal_payload(result)
+        return _render_plugin_payload(payload, args.json), _plugin_exit_status(
+            result.disposition
+        )
+
+    workspace = _resolved_skill_workspace(args.workspace)
+    if command in {"list", "doctor"}:
+        with _bridge_skill_sigint(cancellation):
+            inspection = service.inspect_local_plugins(
+                InspectLocalPluginsRequest(deadline, workspace, cancellation)
+            )
+        try:
+            payload = _plugin_inspection_payload(
+                inspection, doctor=command == "doctor", projection=command
+            )
+            status = (
+                0
+                if isinstance(inspection, PluginInspectionOutcome)
+                and inspection.disposition is PluginInspectionDisposition.COMPLETE
+                else 2
+            )
+            return _render_plugin_payload(payload, args.json), status
+        finally:
+            if isinstance(inspection, PluginInspectionOutcome):
+                _close_inspection_anchors(inspection)
+
+    if command == "gc":
+        with _bridge_skill_sigint(cancellation):
+            result = service.gc_local_plugin_packages(
+                GcLocalPluginPackagesRequest(deadline, workspace, cancellation)
+            )
+        payload = _plugin_gc_payload(result)
+        return _render_plugin_payload(payload, args.json), _plugin_exit_status(
+            result.disposition
+        )
+    raise _PluginCliUsageError("unknown plugins command")
+
+
+def _plugin_scope_and_workspace(
+    args: argparse.Namespace,
+) -> tuple[PluginScopeKind, Path | None]:
+    scope = PluginScopeKind(args.scope.upper())
+    if scope is PluginScopeKind.USER:
+        if args.workspace is not None:
+            raise _PluginCliUsageError(
+                "--workspace is not valid with --scope user"
+            )
+        return scope, None
+    return scope, _resolved_skill_workspace(args.workspace)
+
+
+def _plugin_validation_payload(result) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "operation": "validate_local_plugin_source",
+        "disposition": result.disposition.value,
+        "source_path": str(result.source_path),
+    }
+    if hasattr(result, "summary"):
+        payload["summary"] = _plugin_summary_payload(result.summary)
+    diagnostics = getattr(result, "diagnostics", ())
+    if diagnostics:
+        payload["diagnostics"] = [_diagnostic_payload(item) for item in diagnostics]
+    return payload
+
+
+def _plugin_install_payload(result) -> dict[str, object]:
+    if isinstance(result, CleanupUnavailablePluginInstallOutcome):
+        return {
+            "operation": "install_local_plugin",
+            "disposition": result.disposition.value,
+            "prior": _plugin_install_payload(result.prior),
+            "attempted_path": str(result.attempted_path),
+            "location_status": result.location_status.value,
+            "diagnostic": _diagnostic_payload(result.diagnostic),
+        }
+    payload: dict[str, object] = {
+        "operation": "install_local_plugin",
+        "disposition": result.disposition.value,
+    }
+    identity = getattr(result, "identity", None)
+    if identity is not None:
+        payload["identity"] = _plugin_identity_payload(identity)
+    package_id = getattr(result, "package_install_id", None)
+    if package_id is not None:
+        payload["package_install_id"] = package_id
+    if hasattr(result, "enabled"):
+        payload["enabled"] = result.enabled
+    if hasattr(result, "summary"):
+        payload["summary"] = _plugin_summary_payload(result.summary)
+    for name in (
+        "attempted_package_install_id",
+        "intended_enabled",
+        "last_known_cut",
+    ):
+        value = getattr(result, name, None)
+        if value is not None:
+            payload[name] = value
+    diagnostics = getattr(result, "diagnostics", ())
+    if diagnostics:
+        payload["diagnostics"] = [_diagnostic_payload(item) for item in diagnostics]
+    return payload
+
+
+def _plugin_enablement_payload(result, *, reviewed: dict[str, object]):
+    payload: dict[str, object] = {
+        "operation": "set_local_plugin_enabled",
+        "disposition": result.disposition.value,
+        "identity": _plugin_identity_payload(result.identity),
+        "reviewed_package": reviewed,
+    }
+    for name in (
+        "package_install_id",
+        "enabled",
+        "desired_enabled",
+        "expected_package_install_id",
+        "observed_package_install_id",
+        "last_known_cut",
+    ):
+        value = getattr(result, name, None)
+        if value is not None:
+            payload[name] = value
+    diagnostics = getattr(result, "diagnostics", ())
+    if diagnostics:
+        payload["diagnostics"] = [_diagnostic_payload(item) for item in diagnostics]
+    return payload
+
+
+def _plugin_removal_payload(result) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "operation": "remove_local_plugin",
+        "disposition": result.disposition.value,
+        "identity": _plugin_identity_payload(result.identity),
+    }
+    for name in ("prior_package_install_id", "last_known_cut"):
+        value = getattr(result, name, None)
+        if value is not None:
+            payload[name] = value
+    diagnostics = getattr(result, "diagnostics", ())
+    if diagnostics:
+        payload["diagnostics"] = [_diagnostic_payload(item) for item in diagnostics]
+    return payload
+
+
+def _plugin_inspection_payload(
+    inspection, *, doctor: bool, projection: str
+) -> dict[str, object]:
+    if isinstance(inspection, PluginInspectionAbort):
+        return {
+            "operation": "inspect_local_plugins",
+            "projection": projection,
+            "disposition": inspection.reason.value,
+        }
+    payload: dict[str, object] = {
+        "operation": "inspect_local_plugins",
+        "projection": projection,
+        "disposition": inspection.disposition.value,
+        "instances": [
+            (
+                _plugin_instance_payload(item, include_diagnostics=True)
+                if doctor
+                else _plugin_list_instance_payload(item)
+            )
+            for item in inspection.instances
+        ],
+        "effective_composition": {
+            "skills": inspection.skill_composition_disposition.value,
+            "mcp": inspection.mcp_composition_disposition.value,
+            "hooks": inspection.hook_composition_disposition.value,
+        },
+    }
+    if doctor:
+        payload["versions"] = [
+            {
+                "identity": _plugin_identity_payload(item.identity),
+                "package_install_id": item.package_install_id,
+                "package_root": str(item.package_root),
+                "referenced": item.referenced,
+                "in_use": item.in_use,
+            }
+            for item in inspection.versions
+        ]
+    if inspection.diagnostics:
+        payload["diagnostics"] = [
+            _diagnostic_payload(item) for item in inspection.diagnostics
+        ]
+    return payload
+
+
+def _plugin_instance_payload(
+    item, *, include_diagnostics: bool
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "identity": _plugin_identity_payload(item.identity),
+        "package_install_id": item.package_install_id,
+        "enabled": item.enabled,
+        "package_root": str(item.package_root),
+        "data_root": str(item.data_root),
+        "package_in_use": item.package_in_use,
+        "summary": _plugin_summary_payload(item.summary),
+        "effective_skill_names": list(item.effective_skill_names),
+        "effective_mcp_server_ids": list(item.effective_mcp_server_ids),
+        "effective_hook": item.effective_hook,
+        "effective_hook_definition_count": item.effective_hook_definition_count,
+        "effective_hook_trust_disposition": (
+            None
+            if item.effective_hook_trust_disposition is None
+            else item.effective_hook_trust_disposition.value
+        ),
+    }
+    if include_diagnostics and item.diagnostics:
+        payload["diagnostics"] = [
+            _diagnostic_payload(value) for value in item.diagnostics
+        ]
+    return payload
+
+
+def _plugin_list_instance_payload(item) -> dict[str, object]:
+    """The intentionally narrow current/effective ``list`` projection."""
+
+    return {
+        "identity": _plugin_identity_payload(item.identity),
+        "package_install_id": item.package_install_id,
+        "enabled": item.enabled,
+        "effective_skill_names": list(item.effective_skill_names),
+        "effective_mcp_server_ids": list(item.effective_mcp_server_ids),
+        "effective_hook": item.effective_hook,
+        "effective_hook_definition_count": item.effective_hook_definition_count,
+        "effective_hook_trust_disposition": (
+            None
+            if item.effective_hook_trust_disposition is None
+            else item.effective_hook_trust_disposition.value
+        ),
+    }
+
+
+def _plugin_summary_payload(summary) -> dict[str, object]:
+    manifest = summary.manifest
+    return {
+        "manifest": {
+            "schema": manifest.schema,
+            "name": manifest.name,
+            "version": manifest.version,
+            "description": manifest.description,
+            "author": (
+                None
+                if manifest.author is None
+                else {
+                    "name": manifest.author.name,
+                    "email": manifest.author.email,
+                    "url": manifest.author.url,
+                }
+            ),
+            "homepage": manifest.homepage,
+            "repository": manifest.repository,
+            "license": manifest.license,
+            "keywords": list(manifest.keywords),
+            "extensions": list(manifest.extension_names),
+        },
+        "skills": {
+            "disposition": summary.skills.disposition.value,
+            "definitions": [
+                {
+                    "name": item.name,
+                    "description": item.description,
+                    "location": item.location,
+                }
+                for item in summary.skills.skills
+            ],
+            "diagnostics": [
+                _diagnostic_payload(item) for item in summary.skills.diagnostics
+            ],
+        },
+        "mcp": {
+            "disposition": summary.mcp.disposition.value,
+            "servers": [_plugin_mcp_summary(item) for item in summary.mcp.mcp_servers],
+            "diagnostics": [
+                _diagnostic_payload(item) for item in summary.mcp.diagnostics
+            ],
+        },
+        "hooks": {
+            "disposition": summary.hooks.disposition.value,
+            "definitions": [
+                {
+                    "event": item.event,
+                    "matcher": item.matcher,
+                    "command": item.command,
+                    "commandWindows": item.command_windows,
+                    "timeout": item.timeout_seconds,
+                    "async": item.asynchronous,
+                    "statusMessage": item.status_message,
+                }
+                for item in summary.hooks.hook_definitions
+            ],
+            "diagnostics": [
+                _diagnostic_payload(item) for item in summary.hooks.diagnostics
+            ],
+        },
+    }
+
+
+def _plugin_mcp_summary(item) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "server_id": item.local_server_id,
+        "transport": item.kind.value,
+    }
+    if item.kind.value == "stdio":
+        payload.update(
+            {
+                "command": item.command,
+                "args": list(item.args),
+                "cwd": item.cwd,
+                "env": dict(item.environment),
+            }
+        )
+    else:
+        payload.update(
+            {
+                "endpoint": item.endpoint,
+                "public_headers": dict(item.public_headers),
+            }
+        )
+    return payload
+
+
+def _plugin_gc_payload(result) -> dict[str, object]:
+    progress = result.progress
+    return {
+        "operation": "gc_local_plugin_packages",
+        "disposition": result.disposition.value,
+        "progress": {
+            "ordered_removed": [_plugin_gc_ref(item) for item in progress.ordered_removed],
+            "ordered_in_use": [_plugin_gc_ref(item) for item in progress.ordered_in_use],
+            "current_attempted_ref": (
+                None
+                if progress.current_attempted_ref is None
+                else _plugin_gc_ref(progress.current_attempted_ref)
+            ),
+            "current_location_status": (
+                None
+                if progress.current_location_status is None
+                else progress.current_location_status.value
+            ),
+            "unvisited_suffix": progress.unvisited_suffix,
+        },
+        "diagnostics": [_diagnostic_payload(item) for item in result.diagnostics],
+    }
+
+
+def _plugin_gc_ref(item) -> dict[str, object]:
+    return {
+        "kind": item.kind.value,
+        "path": str(item.path),
+        "package_install_id": item.package_install_id,
+    }
+
+
+def _plugin_identity_payload(identity) -> dict[str, object]:
+    return {
+        "scope": identity.scope.value,
+        "plugin_id": identity.plugin_id,
+        "workspace_state_key": identity.workspace_state_key,
+    }
+
+
+def _diagnostic_payload(item) -> dict[str, object]:
+    if isinstance(item, ProducerUnavailableCause):
+        return {
+            "kind": "SKILL_PRODUCER_UNAVAILABLE",
+            "producer_kind": item.producer_kind.value,
+            "reason": item.reason.value,
+            "diagnostics": [value.to_dict() for value in item.diagnostics],
+        }
+    if isinstance(item, ResolutionUnavailableCause):
+        return {
+            "kind": "SKILL_RESOLUTION_UNAVAILABLE",
+            "reason": item.reason.value,
+            "diagnostics": [item.diagnostic.to_dict()],
+        }
+    if isinstance(item, InvalidSkillCandidateIssue):
+        return {
+            "kind": item.kind.value,
+            "path": str(item.path),
+            "origin_label": skill_origin_label(item.origin),
+            "declared_name": item.declared_name,
+            "diagnostics": [value.to_dict() for value in item.diagnostics],
+        }
+    if isinstance(item, ShadowedSkillCandidateIssue):
+        return {
+            "kind": item.kind.value,
+            "path": str(item.path),
+            "origin_label": skill_origin_label(item.origin),
+            "name": item.name,
+            "winner_origin_label": skill_origin_label(item.winner_origin),
+            "winner_path": str(item.winner_path),
+            "diagnostic_codes": [value.value for value in item.diagnostic_codes],
+        }
+    if isinstance(item, ConflictingSkillCandidateIssue):
+        return {
+            "kind": item.kind.value,
+            "name": item.name,
+            "tier": item.tier.value,
+            "candidates": [
+                {
+                    "path": str(candidate.path),
+                    "origin_label": skill_origin_label(candidate.origin),
+                }
+                for candidate in item.candidates
+            ],
+            "diagnostic_codes": [item.diagnostic_code.value],
+        }
+    if hasattr(item, "to_dict"):
+        return item.to_dict()
+    value: dict[str, object] = {
+        "code": getattr(getattr(item, "code", None), "value", getattr(item, "code", type(item).__name__)),
+        "message": getattr(item, "message", type(item).__name__),
+    }
+    for name in ("severity", "path", "component", "source_label"):
+        field = getattr(item, name, None)
+        if field is not None:
+            value[name] = getattr(field, "value", field)
+    return value
+
+
+def _plugin_enable_review_text(review: dict[str, object]) -> str:
+    return "Exact package review (Hook trust remains separate):\n" + json.dumps(
+        review, indent=2, ensure_ascii=False
+    )
+
+
+def _render_plugin_payload(payload: dict[str, object], json_output: bool) -> str:
+    if json_output:
+        return json.dumps(payload, indent=2, ensure_ascii=False)
+    lines = [
+        f"Plugin operation: {payload.get('operation')}",
+        f"Disposition: {payload.get('disposition')}",
+    ]
+    identity = payload.get("identity")
+    if isinstance(identity, dict):
+        lines.append(
+            f"Instance: {identity.get('scope')}:{identity.get('plugin_id')}"
+        )
+    if "package_install_id" in payload:
+        lines.append(f"Package install id: {payload['package_install_id']}")
+    instances = payload.get("instances")
+    if isinstance(instances, list):
+        if not instances:
+            lines.append("No current Plugin instances.")
+        for item in instances:
+            if isinstance(item, dict):
+                item_identity = item["identity"]
+                lines.append(
+                    f"- {item_identity['scope']}:{item_identity['plugin_id']} "
+                    f"{item['package_install_id']} enabled={item['enabled']}"
+                )
+                skills = ", ".join(item.get("effective_skill_names", [])) or "none"
+                servers = ", ".join(
+                    item.get("effective_mcp_server_ids", [])
+                ) or "none"
+                hook_count = item.get("effective_hook_definition_count", 0)
+                hook_trust = item.get("effective_hook_trust_disposition") or "none"
+                lines.append(f"  effective Skills: {skills}")
+                lines.append(f"  effective MCP servers: {servers}")
+                lines.append(
+                    f"  effective Hooks: {hook_count} trust={hook_trust}"
+                )
+    for diagnostic in payload.get("diagnostics", []):
+        if isinstance(diagnostic, dict):
+            lines.append(f"- {diagnostic['code']}: {diagnostic['message']}")
+    if payload.get("projection") == "doctor" or payload.get("disposition") in {
+        "VALID",
+        "INSTALLED",
+        "REPLACED",
+        "ALREADY_PRESENT",
+    }:
+        lines.append(json.dumps(payload, indent=2, ensure_ascii=False))
+    return "\n".join(lines)
+
+
+def _plugin_cli_print(
+    output: str, api_key_boundary: ProcessApiKeyBoundary
+) -> None:
+    """Scrub and emit while supported rotation is excluded from stdout."""
+
+    with api_key_boundary.sync_guard() as guard:
+        scrub_set = ProcessApiKeyScrubSet()
+        scrub_set.observe(guard.value)
+        print(scrub_set.scrub_text(output))
+
+
+def _plugin_cli_stderr(
+    output: str,
+    api_key_boundary: ProcessApiKeyBoundary,
+    *,
+    end: str = "\n",
+) -> None:
+    """Keep preflight review/prompt off JSON stdout and inside the sink gate."""
+
+    with api_key_boundary.sync_guard() as guard:
+        scrub_set = ProcessApiKeyScrubSet()
+        scrub_set.observe(guard.value)
+        print(scrub_set.scrub_text(output), end=end, file=sys.stderr, flush=True)
+
+
+def _plugin_cli_parser_error(
+    parser: argparse.ArgumentParser,
+    message: str,
+    api_key_boundary: ProcessApiKeyBoundary,
+) -> None:
+    """Keep argparse's irreversible stderr write inside the shared gate."""
+
+    with api_key_boundary.sync_guard() as guard:
+        scrub_set = ProcessApiKeyScrubSet()
+        scrub_set.observe(guard.value)
+        parser.error(scrub_set.scrub_text(message))
+
+
+def _close_inspection_anchors(inspection: PluginInspectionOutcome) -> None:
+    for anchor in inspection.physical_lifetime_anchors:
+        close = getattr(anchor, "close", None)
+        if close is not None:
+            close()
+
+
+def _plugin_exit_status(disposition) -> int:
+    value = disposition.value
+    if value in {
+        "VALID",
+        "INSTALLED",
+        "REPLACED",
+        "ALREADY_PRESENT",
+        "ENABLED",
+        "DISABLED",
+        "ALREADY_ENABLED",
+        "ALREADY_DISABLED",
+        "REMOVED",
+        "COMPLETE",
+    }:
+        return 0
+    if value in {"INVALID", "NOT_FOUND", "STALE", "CANCELLED", "TIMED_OUT"}:
+        return 1
+    return 2
+
+
+async def _mcp_command(
+    args: argparse.Namespace,
+    *,
+    api_key_boundary: ProcessApiKeyBoundary | None = None,
+) -> dict[str, object]:
+    _load_env_file_from_args(args)
+    boundary = api_key_boundary or ProcessApiKeyBoundary()
     workspace_root = (
         Path(args.workspace).expanduser().resolve()
         if getattr(args, "workspace", None)
@@ -831,6 +1670,7 @@ async def _mcp_command(args: argparse.Namespace) -> dict[str, object]:
                 session_id=f"mcp-doctor:{config.server_id}",
                 workspace_root=workspace_root or Path.cwd(),
                 configs=(config,),
+                api_key_boundary=boundary,
             )
             try:
                 await supervisor.start()
@@ -884,31 +1724,98 @@ def _hooks_command(args: argparse.Namespace) -> dict[str, object]:
         workspace_kind=workspace.workspace_kind,
         workspace_state_key=workspace.workspace_key,
     )
-    requested_scope = getattr(args, "scope", None)
-    kinds = (
-        (HookSourceKind.USER_FILE, HookSourceKind.WORKSPACE_FILE)
-        if requested_scope is None
-        else (
-            HookSourceKind.USER_FILE
-            if requested_scope == "user"
-            else HookSourceKind.WORKSPACE_FILE,
-        )
-    )
+    boundary = ProcessApiKeyBoundary()
+    user_home = resolve_user_home()
+    home = resolve_pulsara_home(user_home_resolution=user_home)
 
-    def current_snapshot(kind: HookSourceKind):
-        view = provider.discover()
-        return next(
+    def observe_view():
+        local = provider.discover()
+        if home.disposition is not PulsaraHomeDisposition.RESOLVED:
+            plugin_view = FrozenEnabledPluginView(
+                EnabledPluginViewDisposition.UNAVAILABLE,
+                diagnostics=(
+                    PluginDiagnostic(
+                        PluginDiagnosticCode.HOME_CONFIGURATION_INVALID,
+                        "Plugin home configuration is invalid",
+                    ),
+                ),
+            )
+        else:
+            plugin_view = EnabledPluginViewOwner(
+                store=ManagedPluginStore(
+                    pulsara_home=home, api_key_boundary=boundary
+                ),
+                api_key_boundary=boundary,
+            ).observe(
+                workspace_root=workspace.workspace_root,
+                deadline_monotonic=float("inf"),
+                cancellation=NeverCancelPluginOperation(),
+            )
+        try:
+            view = compose_hook_definition_view(
+                local_view=local,
+                plugin_view=plugin_view,
+                trust_store=provider.trust_store,
+            )
+        except BaseException:
+            plugin_view.close()
+            raise
+        return view, plugin_view
+
+    requested_scope = getattr(args, "scope", None)
+    requested_source = getattr(args, "source", None)
+
+    def selected_snapshots(view):
+        snapshots = view.source_snapshots
+        if requested_scope is not None:
+            snapshots = tuple(
+                item
+                for item in snapshots
+                if item.provenance.identity.visibility_scope.value.lower()
+                == requested_scope
+            )
+        if requested_source in {None, "local"}:
+            if requested_source == "local" or requested_scope is not None:
+                snapshots = tuple(
+                    item
+                    for item in snapshots
+                    if item.provenance.identity.kind
+                    in {HookSourceKind.USER_FILE, HookSourceKind.WORKSPACE_FILE}
+                )
+            return snapshots
+        if not requested_source.startswith("plugin:"):
+            raise ValueError("Hook --source must be local or plugin:<plugin-id>")
+        plugin_id = requested_source.removeprefix("plugin:")
+        if not plugin_id:
+            raise ValueError("Plugin Hook source id is empty")
+        return tuple(
             item
-            for item in view.source_snapshots
-            if item.provenance.identity.kind is kind
+            for item in snapshots
+            if isinstance(item.provenance.identity, PluginHookSourceIdentity)
+            and item.provenance.identity.plugin_id == plugin_id
         )
+
+    def current_snapshot():
+        view, plugin_view = observe_view()
+        try:
+            snapshots = selected_snapshots(view)
+            if len(snapshots) != 1:
+                raise KeyError("Hook source is absent or ambiguous")
+            return snapshots[0]
+        finally:
+            plugin_view.close()
 
     command = args.hooks_command
     if command in {"list", "inspect", "doctor"}:
-        snapshots = tuple(current_snapshot(kind) for kind in kinds)
-        values = [
-            _hook_snapshot_public(item, inspect=command != "list") for item in snapshots
-        ]
+        view, plugin_view = observe_view()
+        try:
+            snapshots = selected_snapshots(view)
+            values = [
+                _hook_snapshot_public(item, inspect=command != "list")
+                for item in snapshots
+            ]
+        finally:
+            plugin_view.close()
         result: dict[str, object] = {"status": "ok", "sources": values}
         if command == "doctor":
             result["compatibility_profile"] = {
@@ -934,14 +1841,14 @@ def _hooks_command(args: argparse.Namespace) -> dict[str, object]:
         return result
     if command is None:
         raise ValueError("hooks requires a subcommand")
-    kind = kinds[0]
-    subject = provider.source_subject(kind)
+    snapshot = current_snapshot()
+    subject = snapshot.provenance.trust_subject
     if command == "trust":
         expected = args.expected_definition_digest
 
         def read_current_digest() -> str:
-            snapshot = current_snapshot(kind)
-            digest = snapshot.trust.current_definition_digest
+            current = current_snapshot()
+            digest = current.trust.current_definition_digest
             if digest is None:
                 raise ValueError("current Hook source is unavailable")
             return digest
@@ -959,7 +1866,7 @@ def _hooks_command(args: argparse.Namespace) -> dict[str, object]:
         provider.trust_store.set_enabled(subject, enabled=False)
     else:
         raise ValueError("unknown hooks command")
-    snapshot = current_snapshot(kind)
+    snapshot = current_snapshot()
     return {
         "status": "ok",
         "source": _hook_snapshot_public(snapshot, inspect=False),
@@ -979,11 +1886,18 @@ def _hook_snapshot_public(snapshot, *, inspect: bool) -> dict[str, object]:
         "trusted_definition_digest": snapshot.trust.trusted_definition_digest,
         "trusted_at": snapshot.trust.trusted_at,
         "runnable_handler_count": len(snapshot.definitions) if snapshot.runnable else 0,
+        "declaration_environment": dict(
+            snapshot.provenance.declaration_environment
+        ),
         "diagnostics": [
             {"code": item.code, "message": item.message}
             for item in snapshot.diagnostics
         ],
     }
+    identity = snapshot.provenance.identity
+    if isinstance(identity, PluginHookSourceIdentity):
+        value["plugin_id"] = identity.plugin_id
+        value["package_install_id"] = identity.package_install_id
     if inspect:
         value["definitions"] = [
             {

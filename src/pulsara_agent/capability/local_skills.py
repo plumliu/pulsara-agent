@@ -10,7 +10,7 @@ from pathlib import Path
 import re
 import stat
 from time import monotonic
-from typing import Any
+from typing import Any, Protocol
 
 import yaml
 from yaml.events import (
@@ -24,9 +24,9 @@ from yaml.events import (
 )
 
 from pulsara_agent.capability.contracts import LocalSkillRootKind
-from pulsara_agent.capability.local_skill_source_binding import (
+from pulsara_agent.local_source_binding import (
     open_absolute_directory_nofollow,
-    prepare_local_skill_source_path,
+    prepare_local_source_path,
 )
 from pulsara_agent.capability.pulsara_home import (
     PulsaraHomeDisposition,
@@ -342,6 +342,14 @@ class SkillObservationError(RuntimeError):
         self.overbound = overbound
 
 
+class SkillObservationCancellationPort(Protocol):
+    def cancellation_requested(self) -> bool: ...
+
+
+class SkillObservationCancelled(Exception):
+    """Cooperative abort that must not become producer UNAVAILABLE."""
+
+
 @dataclass(frozen=True, slots=True)
 class ObservedSkillChildEvidence:
     name: str
@@ -437,7 +445,7 @@ class LooseSkillDefinitionProducer:
         self._owner_authority = object()
 
     def prepare_root_policy(self, workspace_root: Path) -> PreparedLooseSkillRootPolicy:
-        workspace = prepare_local_skill_source_path(workspace_root)
+        workspace = prepare_local_source_path(workspace_root)
         user_home_resolution = self.user_home_resolution
         if self.user_agents_skills_root is None and user_home_resolution is None:
             user_home_resolution = resolve_user_home()
@@ -502,13 +510,14 @@ class LooseSkillDefinitionProducer:
         policy: PreparedLooseSkillRootPolicy,
         *,
         deadline_monotonic: float | None = None,
+        cancellation: SkillObservationCancellationPort | None = None,
     ) -> FrozenLooseSkillDefinitions:
         if (
             type(policy) is not PreparedLooseSkillRootPolicy
             or policy._owner_authority is not self._owner_authority
         ):
             raise ValueError("foreign loose Skill root policy")
-        check_skill_deadline(deadline_monotonic)
+        check_skill_deadline(deadline_monotonic, cancellation)
         if policy.configuration_unavailable_reason is not None:
             return _unavailable_loose_definitions(
                 policy,
@@ -546,6 +555,7 @@ class LooseSkillDefinitionProducer:
                             self.maximum_direct_child_directories
                         ),
                         deadline_monotonic=deadline_monotonic,
+                        cancellation=cancellation,
                     )
                 )
             inode_aliases = _physical_root_aliases(policy, held_roots)
@@ -563,11 +573,12 @@ class LooseSkillDefinitionProducer:
                 for child in held_root.children:
                     if child.evidence.skill_file_identity is None:
                         continue
-                    check_skill_deadline(deadline_monotonic)
+                    check_skill_deadline(deadline_monotonic, cancellation)
                     data = read_observed_skill_document(
                         child,
                         maximum=self.max_skill_file_bytes,
                         deadline_monotonic=deadline_monotonic,
+                        cancellation=cancellation,
                     )
                     observed_bytes += len(data)
                     if observed_bytes > self.maximum_discovery_skill_bytes:
@@ -637,8 +648,9 @@ class LooseSkillDefinitionProducer:
                     self.maximum_direct_child_directories
                 ),
                 deadline_monotonic=deadline_monotonic,
+                cancellation=cancellation,
             )
-            check_skill_deadline(deadline_monotonic)
+            check_skill_deadline(deadline_monotonic, cancellation)
             return FrozenLooseSkillDefinitions(
                 root_policy=policy,
                 disposition=LooseSkillDefinitionsDisposition.COMPLETE,
@@ -702,8 +714,8 @@ class LooseSkillDefinitionProducer:
             containment = path
         else:  # pragma: no cover - closed enum
             raise TypeError("unknown Skill root kind")
-        path = prepare_local_skill_source_path(path)
-        containment = prepare_local_skill_source_path(containment)
+        path = prepare_local_source_path(path)
+        containment = prepare_local_source_path(containment)
         return PreparedSkillRootBinding(
             root_kind=root_kind,
             path=path,
@@ -974,6 +986,7 @@ def observe_skill_root(
     *,
     maximum_direct_child_directories: int,
     deadline_monotonic: float | None,
+    cancellation: SkillObservationCancellationPort | None = None,
     bound_descriptor: int | None = None,
     bound_identity: tuple[int, int] | None = None,
     classify_nonregular_skill_document_as_missing: bool = False,
@@ -982,7 +995,7 @@ def observe_skill_root(
         path.relative_to(containment_root)
     except ValueError as exc:
         raise SkillObservationError(SkillDiagnosticCode.ROOT_ESCAPE) from exc
-    check_skill_deadline(deadline_monotonic)
+    check_skill_deadline(deadline_monotonic, cancellation)
     try:
         descriptor = (
             open_absolute_directory_nofollow(path)
@@ -1010,6 +1023,7 @@ def observe_skill_root(
             descriptor,
             maximum_direct_child_directories=maximum_direct_child_directories,
             deadline_monotonic=deadline_monotonic,
+            cancellation=cancellation,
             retain_descriptors=True,
             overbound_code=SkillDiagnosticCode.DIRECT_CHILD_BOUND_EXCEEDED,
             classify_nonregular_skill_document_as_missing=(
@@ -1035,12 +1049,13 @@ def read_observed_skill_document(
     *,
     maximum: int,
     deadline_monotonic: float | None,
+    cancellation: SkillObservationCancellationPort | None = None,
 ) -> bytes:
     descriptor = child.descriptor
     expected = child.evidence.skill_file_identity
     if descriptor is None or expected is None:
         raise ValueError("observed candidate has no held Skill document")
-    check_skill_deadline(deadline_monotonic)
+    check_skill_deadline(deadline_monotonic, cancellation)
     try:
         file_fd = os.open(SKILL_FILE_NAME, _FILE_FLAGS, dir_fd=descriptor)
     except OSError as exc:
@@ -1052,7 +1067,7 @@ def read_observed_skill_document(
         chunks: list[bytes] = []
         remaining = maximum + 1
         while remaining:
-            check_skill_deadline(deadline_monotonic)
+            check_skill_deadline(deadline_monotonic, cancellation)
             try:
                 chunk = os.read(file_fd, remaining)
             except OSError as exc:
@@ -1073,9 +1088,10 @@ def revalidate_skill_roots(
     *,
     maximum_direct_child_directories: int,
     deadline_monotonic: float | None,
+    cancellation: SkillObservationCancellationPort | None = None,
 ) -> None:
     for observed in roots:
-        check_skill_deadline(deadline_monotonic)
+        check_skill_deadline(deadline_monotonic, cancellation)
         if observed.descriptor is None:
             try:
                 appeared = open_absolute_directory_nofollow(observed.path)
@@ -1115,6 +1131,7 @@ def revalidate_skill_roots(
                 rebound,
                 maximum_direct_child_directories=maximum_direct_child_directories,
                 deadline_monotonic=deadline_monotonic,
+                cancellation=cancellation,
                 retain_descriptors=False,
                 overbound_code=SkillDiagnosticCode.ENUMERATION_RACED,
                 classify_nonregular_skill_document_as_missing=False,
@@ -1139,7 +1156,12 @@ def close_skill_roots(roots: list[HeldSkillRoot]) -> None:
             pass
 
 
-def check_skill_deadline(deadline_monotonic: float | None) -> None:
+def check_skill_deadline(
+    deadline_monotonic: float | None,
+    cancellation: SkillObservationCancellationPort | None = None,
+) -> None:
+    if cancellation is not None and cancellation.cancellation_requested():
+        raise SkillObservationCancelled
     if deadline_monotonic is not None and monotonic() >= deadline_monotonic:
         raise TimeoutError("Skill observation owner deadline expired")
 
@@ -1183,6 +1205,7 @@ def _snapshot_skill_children(
     *,
     maximum_direct_child_directories: int,
     deadline_monotonic: float | None,
+    cancellation: SkillObservationCancellationPort | None,
     retain_descriptors: bool,
     overbound_code: SkillDiagnosticCode,
     classify_nonregular_skill_document_as_missing: bool = False,
@@ -1197,7 +1220,7 @@ def _snapshot_skill_children(
     directory_count = 0
     try:
         for name in names:
-            check_skill_deadline(deadline_monotonic)
+            check_skill_deadline(deadline_monotonic, cancellation)
             try:
                 metadata = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
             except OSError as exc:

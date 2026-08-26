@@ -195,6 +195,7 @@ from pulsara_agent.hooks.contracts import (
     HookDispatchEnvelope,
     HookDispatchScopeRef,
     HookScopeKind,
+    HookSourceKind,
     QueuedPromptRef,
     SessionEndInput,
     SessionEndRef,
@@ -213,9 +214,48 @@ from pulsara_agent.storage.schema_verification_service import (
     VerifiedPostgresAccessLease,
     process_postgres_schema_verification_service,
 )
+from pulsara_agent.plugins.contracts import (
+    EnabledPluginViewDisposition,
+    NeverCancelPluginOperation,
+    PluginDiagnosticCode,
+    PluginMcpNormalizationDisposition,
+)
+from pulsara_agent.plugins.hook_adapter import compose_hook_definition_view
+from pulsara_agent.plugins.mcp_adapter import normalize_plugin_mcp_configs
+from pulsara_agent.plugins.package_store import ManagedPluginStore
+from pulsara_agent.plugins.skill_producer import PluginSkillDefinitionProducer
+from pulsara_agent.plugins.view import (
+    EnabledPluginViewOwner,
+    FrozenEnabledPluginView,
+)
+from pulsara_agent.process_api_key_boundary import ProcessApiKeyBoundary
 
 
 MAXIMUM_PROMPT_BYTES = STAGE2_LIMITS.prompt_hard_bytes
+
+
+async def _shielded_plugin_filesystem_call(operation, /, **kwargs):
+    """Join a started Plugin filesystem worker before cancellation escapes."""
+
+    task = asyncio.create_task(
+        asyncio.to_thread(operation, **kwargs),
+        name=f"plugin-filesystem:{getattr(operation, '__name__', 'operation')}",
+    )
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                continue
+        # A settled physical cause intentionally wins here; otherwise close
+        # the successfully returned RAII value before propagating cancellation.
+        result = task.result()
+        close = getattr(result, "close", None)
+        if close is not None:
+            close()
+        raise
 
 
 @dataclass(frozen=True, slots=True)
@@ -376,6 +416,10 @@ class KernelHostSession:
         bundled_skill_binding: BundledSkillDistributionBindingOwner,
         pulsara_home_resolution: PulsaraHomeResolution,
         user_home_resolution: UserHomeResolution,
+        plugin_view_owner: EnabledPluginViewOwner,
+        initial_plugin_view: FrozenEnabledPluginView,
+        api_key_boundary: ProcessApiKeyBoundary,
+        local_mcp_configs: tuple[McpServerConfig, ...] = (),
         mcp_configs: tuple[McpServerConfig, ...] = (),
     ) -> None:
         self.settings = settings
@@ -451,9 +495,17 @@ class KernelHostSession:
             initial_view=initial_hook_view,
             workspace_root=workspace.workspace_root,
             source_provider=self._hook_source_provider,
+            api_key_boundary=api_key_boundary,
             diagnostic_adapter=self._hook_diagnostics,
             background_context=self._hook_context,
         )
+        self._plugin_view_owner = plugin_view_owner
+        self._plugin_view = initial_plugin_view
+        self._plugin_skill_producer = PluginSkillDefinitionProducer()
+        self._plugin_skill_definitions = self._plugin_skill_producer.observe(
+            initial_plugin_view
+        )
+        self._local_mcp_configs = local_mcp_configs
 
         def wake_terminal_monitor_scheduler() -> None:
             self._event_loop.call_soon_threadsafe(self._monitor_wake.set)
@@ -512,13 +564,16 @@ class KernelHostSession:
             feature_config=settings.retrieval.memory,
             io_owner=self._io,
             provider_trust_domain_identity=memory_provider_trust_domain,
+            api_key_boundary=api_key_boundary,
         )
         self._memory_tools.bind_deadline_factory(self._deadlines)
         self._memory_governor = AdvisoryMemoryGovernor(
             repository=repository,
             guard=self._lease.guard,
             read_binding=memory_read_binding,
-            model=DirectKernelAuxiliaryJsonModel(settings.llm),
+            model=DirectKernelAuxiliaryJsonModel(
+                settings.llm, api_key_boundary=api_key_boundary
+            ),
             io_owner=self._io,
             deadline_factory=self._deadlines,
             provider_trust_domain_identity=memory_provider_trust_domain,
@@ -533,12 +588,14 @@ class KernelHostSession:
             session_id=session_id,
             workspace_root=workspace.workspace_root,
             configs=mcp_configs,
+            api_key_boundary=api_key_boundary,
         )
         self._tools.bind_mcp_supervisor(self._mcp_supervisor)
         self._tools.seal_builtin_composition()
         self._capabilities = KernelSkillProjectionComposer(
             workspace_root=workspace.workspace_root,
             bundled_binding_owner=bundled_skill_binding,
+            plugin_definitions_provider=lambda: self._plugin_skill_definitions,
             configured_active_skill_names=active_skill_names,
             loose_producer=LooseSkillDefinitionProducer(
                 pulsara_home_resolution=pulsara_home_resolution,
@@ -548,6 +605,7 @@ class KernelHostSession:
         self._model = DirectKernelModelPort(
             config=settings.llm,
             role=model_role,
+            api_key_boundary=api_key_boundary,
             usage_observer=self._observe_provider_usage,
             timeout_policy=self._deadlines.policy.foreground_transport,
         )
@@ -604,6 +662,7 @@ class KernelHostSession:
         self._external_new_turn_settled.set()
         self._command_failures: dict[str, KernelCommandOutcome] = {}
         self._lock = asyncio.Lock()
+        self._plugin_reload_settlement_lock = asyncio.Lock()
         self._ingress_hook_attempts: dict[str, _IngressHookAttempt] = {}
         self._compaction_write_reservations: dict[
             tuple[ModelInputScopeKind, str | None], int
@@ -727,12 +786,17 @@ class KernelHostSession:
         self._tools.prepare_tool_surface_safe_point()
 
     async def reload_mcp_configs(
-        self, configs: tuple[McpServerConfig, ...]
+        self,
+        configs: tuple[McpServerConfig, ...],
+        *,
+        deadline_monotonic: float,
     ) -> frozenset[str]:
         """Install a process-local config epoch; publication waits for safe point."""
 
         self._require_open()
-        return await self._tools.reload_mcp_configs(configs)
+        return await self._tools.reload_mcp_configs(
+            configs, deadline_monotonic=deadline_monotonic
+        )
 
     async def reload_hooks(
         self, *, deadline_monotonic: float | None
@@ -766,6 +830,176 @@ class KernelHostSession:
         safe = HookSecretScrubSet.capture().scrub_json(result)
         if not isinstance(safe, dict):
             raise RuntimeError("Hook reload result lost its JSON object shape")
+        return safe
+
+    async def reload_plugins(
+        self, *, deadline_monotonic: float | None
+    ) -> dict[str, object]:
+        """Publish one future Plugin view without rebasing provider input."""
+
+        self._require_open()
+        deadline = (
+            self._deadlines.deadline(KernelWatchdogOwner.NONTERMINAL_TOOL_INVOCATION)
+            if deadline_monotonic is None
+            else deadline_monotonic
+        )
+        # Scans/builds below never hold the Hook publication or Host lock.  The
+        # settlement mutex only prevents a later Plugin reload's native MCP cut
+        # from overtaking an earlier Hook/Skill publication.
+        await _acquire_lock_before_deadline(
+            self._plugin_reload_settlement_lock,
+            deadline,
+            "Plugin reload settlement deadline expired",
+        )
+        try:
+            return await self._reload_plugins_serialized(deadline)
+        finally:
+            self._plugin_reload_settlement_lock.release()
+
+    async def _reload_plugins_serialized(
+        self, deadline: float
+    ) -> dict[str, object]:
+        predecessor = self._plugin_view
+        replacement = await _shielded_plugin_filesystem_call(
+            self._plugin_view_owner.observe,
+            workspace_root=(
+                self.workspace.workspace_root
+                if self.workspace.workspace_kind == "project"
+                else None
+            ),
+            deadline_monotonic=deadline,
+            cancellation=NeverCancelPluginOperation(),
+        )
+        try:
+            _raise_if_deadline_expired(
+                deadline, "Plugin reload candidate deadline expired"
+            )
+            skill_definitions = self._plugin_skill_producer.observe(replacement)
+            plugin_only_hooks = compose_hook_definition_view(
+                local_view=FrozenHookDefinitionView(()),
+                plugin_view=replacement,
+                trust_store=self._hook_source_provider.trust_store,
+            ).source_snapshots
+            mcp = normalize_plugin_mcp_configs(
+                existing_configs=self._local_mcp_configs,
+                view=replacement,
+            )
+            _raise_if_deadline_expired(
+                deadline, "Plugin reload composition deadline expired"
+            )
+        except BaseException:
+            replacement.close()
+            raise
+
+        async def publish_scanned_view(hook_predecessor, hook_replacement) -> bool:
+            await _acquire_lock_before_deadline(
+                self._lock,
+                deadline,
+                "Plugin reload Host publication deadline expired",
+            )
+            try:
+                _raise_if_deadline_expired(
+                    deadline, "Plugin reload Host publication deadline expired"
+                )
+                if (
+                    self._closing
+                    or self._closed
+                    or self._plugin_view is not predecessor
+                ):
+                    return False
+                if not self._hooks.publish_scanned_view(
+                    hook_predecessor, hook_replacement
+                ):
+                    return False
+                self._plugin_view = replacement
+                self._plugin_skill_definitions = skill_definitions
+                return True
+            finally:
+                self._lock.release()
+
+        try:
+            hook_view = await self._hooks.publish_plugin_slice(
+                plugin_snapshots=plugin_only_hooks,
+                deadline_monotonic=deadline,
+                publish_scanned_view=publish_scanned_view,
+            )
+        except BaseException:
+            mcp.close_plugin_anchors()
+            replacement.close()
+            raise
+
+        predecessor.close()
+        mcp_status = (
+            "UNAVAILABLE"
+            if mcp.disposition is PluginMcpNormalizationDisposition.UNAVAILABLE
+            else "BOUND_EXCEEDED"
+        )
+        changed: frozenset[str] = frozenset()
+        if not mcp.configured_bound_exceeded and monotonic() < deadline:
+            reload_task = asyncio.create_task(
+                self._tools.reload_mcp_configs(
+                    mcp.configs, deadline_monotonic=deadline
+                ),
+                name="plugin-mcp-config-reload",
+            )
+            try:
+                changed = await asyncio.wait_for(
+                    asyncio.shield(reload_task),
+                    timeout=max(0.0, deadline - monotonic()),
+                )
+                mcp_status = (
+                    "UNAVAILABLE"
+                    if mcp.disposition
+                    is PluginMcpNormalizationDisposition.UNAVAILABLE
+                    else "RELOADED"
+                )
+            except asyncio.CancelledError:
+                # The native config cut occurs before its asynchronous
+                # confirmation cleanup.  Join that exact owner so caller
+                # cancellation cannot strand a half-settled cut or close
+                # anchors already adopted by the supervisor.
+                with suppress(BaseException):
+                    await asyncio.shield(reload_task)
+                raise
+            except TimeoutError:
+                # The native owner decides whether its synchronous config cut
+                # became FULL.  Join its exact confirmation/cleanup owner, but
+                # retain the caller's logical timeout as a partial reload.
+                with suppress(BaseException):
+                    await asyncio.shield(reload_task)
+                mcp_status = "PARTIAL"
+            except BaseException:
+                # Hook/Skill publication is already FULL and has no cross-owner
+                # rollback.  The native MCP owner preserves its own exact
+                # predecessor on failure.
+                mcp_status = "PARTIAL"
+        else:
+            # No native owner adopted these duplicated package anchors.
+            mcp.close_plugin_anchors()
+        reload_diagnostics = [item.code.value for item in mcp.diagnostics]
+        if mcp_status != "RELOADED":
+            reload_diagnostics.append(
+                PluginDiagnosticCode.RELOAD_PARTIAL.value
+            )
+        result = {
+            "status": "RELOADED" if mcp_status == "RELOADED" else "PARTIAL",
+            "plugin_view": replacement.disposition.value,
+            "skill_producer": skill_definitions.disposition.value,
+            "hook_sources": len(
+                tuple(
+                    item
+                    for item in hook_view.source_snapshots
+                    if item.provenance.identity.kind is HookSourceKind.PLUGIN
+                )
+            ),
+            "mcp": mcp_status,
+            "mcp_changed_server_ids": sorted(changed),
+            "diagnostics": reload_diagnostics,
+            "same_epoch_prefix": "UNCHANGED",
+        }
+        safe = HookSecretScrubSet.capture().scrub_json(result)
+        if not isinstance(safe, dict):
+            raise RuntimeError("Plugin reload result lost its JSON object shape")
         return safe
 
     def reconnect_mcp_server(self, server_id: str) -> None:
@@ -3841,6 +4075,13 @@ class KernelHostSession:
             except BaseException as exc:
                 close_error = close_error or exc
             try:
+                self._plugin_view.close()
+                self._plugin_view = FrozenEnabledPluginView(
+                    EnabledPluginViewDisposition.COMPLETE
+                )
+            except BaseException as exc:
+                close_error = close_error or exc
+            try:
                 await self.extensions.aclose(deadline_monotonic=deadline)
             except BaseException as exc:
                 close_error = close_error or exc
@@ -4067,6 +4308,7 @@ class KernelHostCore:
         settings: PulsaraSettings,
         authenticated_first_party_extension_ids: frozenset[str] = frozenset(),
         watchdog_policy: KernelExecutionWatchdogPolicy | None = None,
+        api_key_boundary: ProcessApiKeyBoundary | None = None,
     ) -> None:
         self.settings = settings
         self._deadlines = KernelExecutionDeadlineFactory(
@@ -4090,6 +4332,7 @@ class KernelHostCore:
             authenticated_first_party_extension_ids
         )
         self._bundled_skill_binding = BundledSkillDistributionBindingOwner()
+        self._api_key_boundary = api_key_boundary or ProcessApiKeyBoundary()
 
     def _canonical_deadline(self) -> float:
         return self._deadlines.deadline(KernelWatchdogOwner.FOREGROUND_CANONICAL)
@@ -4101,6 +4344,7 @@ class KernelHostCore:
         settings: PulsaraSettings,
         authenticated_first_party_extension_ids: frozenset[str] = frozenset(),
         watchdog_policy: KernelExecutionWatchdogPolicy | None = None,
+        api_key_boundary: ProcessApiKeyBoundary | None = None,
     ) -> "KernelHostCore":
         return cls(
             settings=settings,
@@ -4108,6 +4352,7 @@ class KernelHostCore:
                 authenticated_first_party_extension_ids
             ),
             watchdog_policy=watchdog_policy,
+            api_key_boundary=api_key_boundary,
         )
 
     async def _ensure_resources(self) -> ConversationKernelRepository:
@@ -4253,22 +4498,54 @@ class KernelHostCore:
         )
         if pulsara_home_resolution.path is None:
             raise PulsaraHomeResolutionError(pulsara_home_resolution)
-        hook_source_provider = LocalHookSourceProvider(
-            workspace_root=workspace.workspace_root,
-            workspace_kind=workspace.workspace_kind,
-            workspace_state_key=workspace.workspace_key,
-            pulsara_home=pulsara_home_resolution.path,
+        plugin_store = ManagedPluginStore(
+            pulsara_home=pulsara_home_resolution,
+            api_key_boundary=self._api_key_boundary,
         )
-        initial_hook_view = await asyncio.to_thread(
-            hook_source_provider.discover,
+        plugin_view_owner = EnabledPluginViewOwner(
+            store=plugin_store,
+            api_key_boundary=self._api_key_boundary,
+        )
+        initial_plugin_view = await _shielded_plugin_filesystem_call(
+            plugin_view_owner.observe,
+            workspace_root=(
+                workspace.workspace_root
+                if workspace.workspace_kind == "project"
+                else None
+            ),
             deadline_monotonic=deadline,
+            cancellation=NeverCancelPluginOperation(),
         )
-        mcp_configs = await asyncio.to_thread(
-            load_mcp_server_configs,
-            workspace_root=workspace.workspace_root,
-            trust_workspace_config=workspace.trust_workspace_mcp_config,
-        )
-        repository = await self._ensure_resources()
+        try:
+            hook_source_provider = LocalHookSourceProvider(
+                workspace_root=workspace.workspace_root,
+                workspace_kind=workspace.workspace_kind,
+                workspace_state_key=workspace.workspace_key,
+                pulsara_home=pulsara_home_resolution.path,
+            )
+            initial_local_hook_view = await asyncio.to_thread(
+                hook_source_provider.discover,
+                deadline_monotonic=deadline,
+            )
+            initial_hook_view = compose_hook_definition_view(
+                local_view=initial_local_hook_view,
+                plugin_view=initial_plugin_view,
+                trust_store=hook_source_provider.trust_store,
+            )
+            local_mcp_configs = await asyncio.to_thread(
+                load_mcp_server_configs,
+                workspace_root=workspace.workspace_root,
+                trust_workspace_config=workspace.trust_workspace_mcp_config,
+            )
+            mcp_normalization = normalize_plugin_mcp_configs(
+                existing_configs=local_mcp_configs,
+                view=initial_plugin_view,
+            )
+            mcp_configs = mcp_normalization.configs
+            repository = await self._ensure_resources()
+        except BaseException:
+            initial_plugin_view.close()
+            raise
         host_id = f"host:{uuid4().hex}"
         io_owner = KernelSessionIO()
         try:
@@ -4303,6 +4580,10 @@ class KernelHostCore:
                 bundled_skill_binding=self._bundled_skill_binding,
                 pulsara_home_resolution=pulsara_home_resolution,
                 user_home_resolution=user_home_resolution,
+                plugin_view_owner=plugin_view_owner,
+                initial_plugin_view=initial_plugin_view,
+                api_key_boundary=self._api_key_boundary,
+                local_mcp_configs=local_mcp_configs,
                 mcp_configs=mcp_configs,
             )
             await session.start_mcp()
@@ -4318,6 +4599,9 @@ class KernelHostCore:
             if "session" in locals():
                 with suppress(BaseException):
                     await session.aclose(deadline_monotonic=deadline)
+            else:
+                with suppress(BaseException):
+                    initial_plugin_view.close()
             await io_owner.aclose(deadline_monotonic=deadline)
             raise
 
@@ -4603,6 +4887,25 @@ class KernelHostCore:
                 # bounded interval retries; product writes never wait for it.
                 pass
             await asyncio.sleep(STAGE2_LIMITS.blob_gc_interval_ms / 1_000)
+
+
+async def _acquire_lock_before_deadline(
+    lock: asyncio.Lock,
+    deadline_monotonic: float,
+    message: str,
+) -> None:
+    remaining = deadline_monotonic - monotonic()
+    if remaining <= 0:
+        raise TimeoutError(message)
+    try:
+        await asyncio.wait_for(lock.acquire(), timeout=remaining)
+    except TimeoutError:
+        raise TimeoutError(message) from None
+
+
+def _raise_if_deadline_expired(deadline_monotonic: float, message: str) -> None:
+    if monotonic() >= deadline_monotonic:
+        raise TimeoutError(message)
 
 
 def _plan_workflow_command_outcome(

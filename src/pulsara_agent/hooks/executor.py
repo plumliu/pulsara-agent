@@ -23,6 +23,10 @@ from pulsara_agent.hooks.contracts import (
 from pulsara_agent.model_input.contracts import (
     MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES,
 )
+from pulsara_agent.process_api_key_boundary import (
+    ProcessApiKeyBoundary,
+    ProcessApiKeyBoundaryTimedOut,
+)
 
 
 MAXIMUM_HOOK_CAPTURE_BYTES = 1024 * 1024
@@ -47,6 +51,13 @@ class HookSecretScrubSet:
         raw = os.getenv(API_KEY_ENVIRONMENT_NAME)
         if raw:
             self._values.add(raw.encode("utf-8"))
+
+    def observe(self, value: str | bytes | None) -> None:
+        if not value:
+            return
+        encoded = value.encode("utf-8") if isinstance(value, str) else value
+        if encoded:
+            self._values.add(encoded)
 
     @property
     def values(self) -> tuple[bytes, ...]:
@@ -114,7 +125,8 @@ class HookCommandExecution:
 
 
 class HookCommandExecutor:
-    def __init__(self) -> None:
+    def __init__(self, *, api_key_boundary: ProcessApiKeyBoundary) -> None:
+        self._api_key_boundary = api_key_boundary
         self._sync_slots = asyncio.Semaphore(SYNCHRONOUS_COMMAND_SLOTS)
         self._background_slots = asyncio.Semaphore(BACKGROUND_COMMAND_SLOTS)
         self._processes: set[asyncio.subprocess.Process] = set()
@@ -231,29 +243,50 @@ class HookCommandExecutor:
         # final sink therefore re-snapshots and rejects the exact reviewed
         # command rather than rewriting it.  The copied environment/stdin must
         # also satisfy the same current-value postcondition.
-        scrub.snapshot_current()
-        if (
-            API_KEY_ENVIRONMENT_NAME in environment
-            or scrub.contains(command)
-            or scrub.contains(stdin)
-            or any(
-                scrub.contains(key) or scrub.contains(value)
-                for key, value in environment.items()
-            )
-        ):
-            return _failure(request, scrub, "API_KEY_VALUE_PRESENT")
+        process: asyncio.subprocess.Process | None = None
+        cancelled: asyncio.CancelledError | None = None
         try:
-            process = await asyncio.create_subprocess_shell(
-                command,
-                cwd=request.cwd,
-                env=environment,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                **creation,
-            )
+            async with self._api_key_boundary.async_guard(
+                deadline_monotonic=effective_deadline
+            ) as guard:
+                scrub.observe(guard.value)
+                if (
+                    API_KEY_ENVIRONMENT_NAME in environment
+                    or guard.contains(command)
+                    or guard.contains(stdin)
+                    or any(
+                        guard.contains(key) or guard.contains(value)
+                        for key, value in environment.items()
+                    )
+                ):
+                    return _failure(request, scrub, "API_KEY_VALUE_PRESENT")
+                spawn = asyncio.create_task(
+                    asyncio.create_subprocess_shell(
+                        command,
+                        cwd=request.cwd,
+                        env=environment,
+                        stdin=asyncio.subprocess.PIPE,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                        **creation,
+                    ),
+                    name="hook-process-spawn-admission",
+                )
+                try:
+                    process = await asyncio.shield(spawn)
+                except asyncio.CancelledError as exc:
+                    cancelled = exc
+                    process = await asyncio.shield(spawn)
+        except ProcessApiKeyBoundaryTimedOut:
+            return _failure(request, scrub, "HOOK_TIMEOUT")
         except Exception:
             return _failure(request, scrub, "HOOK_SPAWN_FAILED")
+        assert process is not None
+        if cancelled is not None:
+            await _abort_process_group(
+                process, physical_deadline=effective_deadline
+            )
+            raise cancelled
         async with self._lock:
             if self._closed:
                 await _abort_process_group(

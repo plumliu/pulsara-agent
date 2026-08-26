@@ -51,6 +51,7 @@ from pulsara_agent.conversation_kernel.mcp.input_required import (
 from pulsara_agent.conversation_kernel.mcp.contracts import (
     McpCatalogSnapshot,
     McpServerCatalogEntry,
+    McpToolSemanticFact,
 )
 from pulsara_agent.conversation_kernel.mcp.naming import mangle_mcp_tool_names
 from pulsara_agent.conversation_kernel.mcp.sdk_facade import (
@@ -61,13 +62,15 @@ from pulsara_agent.conversation_kernel.mcp.sdk_facade import (
     _SlotByteBudget,
     _enforce_http_network_policy,
 )
+from pulsara_agent.process_api_key_boundary import ProcessApiKeyBoundary
 from pulsara_agent.conversation_kernel.mcp.sdk_facade import _BoundedTransport
 from pulsara_agent.conversation_kernel.mcp.supervisor import (
-    McpHostSupervisor,
+    McpHostSupervisor as _McpHostSupervisor,
     McpPhysicalOutcomeUnknown,
     McpPhysicalConcurrencyKind,
     McpServerState,
     McpSnapshotStale,
+    _provider_projection_from_semantics,
     _resource_uri_matches_template,
 )
 from pulsara_agent.conversation_kernel.tool_surface import McpEffectKind
@@ -128,7 +131,7 @@ from pulsara_agent.primitives.run_permission import (
     RunPermissionAdmissionSource,
     build_run_permission_snapshot,
 )
-from pulsara_agent.primitives.context import context_fingerprint, thaw_json
+from pulsara_agent.primitives.context import context_fingerprint, freeze_json, thaw_json
 from pulsara_agent.ports.live_agent_event import (
     TextDeltaPayload,
     TextEndPayload,
@@ -145,6 +148,14 @@ from tests.support.round3 import (
     StaticContextSourceCollector,
     prepare_test_direct_tool_surface,
 )
+
+
+_TEST_API_KEY_BOUNDARY = ProcessApiKeyBoundary()
+
+
+def McpHostSupervisor(*args, **kwargs):
+    kwargs["api_key_boundary"] = _TEST_API_KEY_BOUNDARY
+    return _McpHostSupervisor(*args, **kwargs)
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "round6_mcp_server.py"
@@ -474,6 +485,7 @@ def test_round6_transport_exception_notification_is_typed(tmp_path: Path) -> Non
             config,
             workspace_root=Path.cwd(),
             notification_callback=callback,
+            api_key_boundary=_TEST_API_KEY_BOUNDARY,
         )
         await client._handle_notification(  # noqa: SLF001
             McpProtocolConformanceError("bad carrier")
@@ -938,8 +950,9 @@ class _FakeMcpClient:
         *,
         workspace_root: Path,
         notification_callback,
+        api_key_boundary: ProcessApiKeyBoundary,
     ) -> None:
-        del workspace_root
+        del workspace_root, api_key_boundary
         self.config = config
         self.notification_callback = notification_callback
         self.session = _FakeMcpSession()
@@ -2686,7 +2699,9 @@ def test_round6_config_disable_rebuilds_surface_and_old_borrow_drains(
         old_borrow = port.borrow_tool_surface(old_surface)
         disabled = _config(tmp_path, enabled=False)
         try:
-            assert await port.reload_mcp_configs((disabled,)) == frozenset({"fixture"})
+            assert await port.reload_mcp_configs(
+                (disabled,), deadline_monotonic=monotonic() + 30
+            ) == frozenset({"fixture"})
             port.prepare_tool_surface_safe_point()
             new_surface = prepare_test_direct_tool_surface(
                 port,
@@ -2852,7 +2867,9 @@ def test_round6_config_disable_cancels_visible_uncommitted_confirmation(
             )
             await asyncio.sleep(0)
             assert live.current_snapshot().current_interaction is not None
-            assert await port.reload_mcp_configs(()) == frozenset({"fixture"})
+            assert await port.reload_mcp_configs(
+                (), deadline_monotonic=monotonic() + 30
+            ) == frozenset({"fixture"})
             denied = await waiter
             assert denied.kind is KernelToolAuthorizationKind.PERMISSION_DENIED
             assert live.current_snapshot().current_interaction is None
@@ -3265,16 +3282,57 @@ def test_round6_naming_disambiguates_normalization_collisions() -> None:
     canonical = mangle_mcp_tool_names("foo_bar", ("get_issue",))
     normalized = mangle_mcp_tool_names("foo-bar", ("get_issue",))
     assert canonical == normalized
-    with pytest.raises(ValueError, match="normalization collision"):
-        mangle_mcp_tool_names("server", ("x-y", "x_y"))
+    same_server_collision = mangle_mcp_tool_names("server", ("x-y", "x_y"))
+    assert len(set(same_server_collision.values())) == 1
     long_name = mangle_mcp_tool_names("server", ("x" * 512,))["x" * 512]
     assert len(long_name.encode("ascii")) == 64
     assert long_name.startswith("mcp__server__")
-    with pytest.raises(ValueError, match="normalization collision"):
-        mangle_mcp_tool_names(
-            "server",
-            ("x" * 512 + "a", "x" * 512 + "b"),
+    truncated_collision = mangle_mcp_tool_names(
+        "server",
+        ("x" * 512 + "a", "x" * 512 + "b"),
+    )
+    assert len(set(truncated_collision.values())) == 1
+
+
+def test_round9_3_provider_name_collision_is_one_closed_group() -> None:
+    schema = freeze_json({"type": "object", "properties": {}})
+    semantics = tuple(
+        McpToolSemanticFact(
+            server_id=server_id,
+            remote_tool_name=remote_name,
+            provider_tool_name="mcp__same__normalized",
+            description="collision member",
+            input_schema=schema,
+            descriptor_fingerprint=f"sha256:{server_id}:{remote_name}",
         )
+        for server_id, remote_name in (
+            ("same", "normalized"),
+            ("same", "normalized-"),
+            ("same-", "normalized"),
+        )
+    )
+    survivor = McpToolSemanticFact(
+        server_id="other",
+        remote_tool_name="unique",
+        provider_tool_name="mcp__other__unique",
+        description="unique tool",
+        input_schema=schema,
+        descriptor_fingerprint="sha256:other:unique",
+    )
+    selected, collisions = _provider_projection_from_semantics(
+        (*semantics, survivor)
+    )
+    assert selected == (survivor,)
+    assert len(collisions) == 1
+    assert collisions[0].provider_name == "mcp__same__normalized"
+    assert tuple(
+        (item.server_id, item.remote_tool_name)
+        for item in collisions[0].members
+    ) == (
+        ("same", "normalized"),
+        ("same", "normalized-"),
+        ("same-", "normalized"),
+    )
 
 
 def _free_port() -> int:
@@ -3308,6 +3366,7 @@ def test_round6_streamable_http_fixture(tmp_path: Path) -> None:
                 config,
                 workspace_root=tmp_path,
                 notification_callback=lambda _method: asyncio.sleep(0),
+                api_key_boundary=_TEST_API_KEY_BOUNDARY,
             )
             await client.open()
             try:
@@ -3585,6 +3644,7 @@ def test_round6_wire_bounds_and_result_type_presence_fail_closed(
         _config(tmp_path),
         workspace_root=tmp_path,
         notification_callback=lambda _method: asyncio.sleep(0),
+        api_key_boundary=_TEST_API_KEY_BOUNDARY,
     )
     client._transport = transport  # noqa: SLF001
     complete_results = (

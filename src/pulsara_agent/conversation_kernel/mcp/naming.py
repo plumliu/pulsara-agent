@@ -30,8 +30,6 @@ def mangle_mcp_tool_names(
     if remaining < 1:  # pragma: no cover - closed by the frozen server bound.
         raise AssertionError("MCP provider name has no tool-name budget")
     result = {remote: f"{prefix}{_slug(remote)[:remaining]}" for remote in remote_names}
-    if len(set(result.values())) != len(result):
-        raise ValueError("MCP provider tool normalization collision")
     if any(
         len(provider.encode("ascii")) > MAXIMUM_MCP_PROVIDER_TOOL_NAME_BYTES
         for provider in result.values()

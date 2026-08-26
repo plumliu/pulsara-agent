@@ -4,7 +4,7 @@
 >
 > 本文已经逐项吸收[`PULSARA_ROUND_9_2_REVIEWER_FINDINGS.md`](PULSARA_ROUND_9_2_REVIEWER_FINDINGS.md)中的7项P1、6项P2与2项P3。Reviewer文档保留为修订前审阅记录；本文§17是逐项closure索引。2026-08-24复审确认的4项P1与2项P2也已按§15.1单一路径闭合，并由重新生成的真实provider/command轨迹与完整验证取代先前被撤回的activation结论；最终合入前review新增发现的post-adoption error降格与FIFO source阻塞也已闭合，重新运行retained full/PostgreSQL与静态验证，既有真实trace继续证明本次未改变的successful provider/Hook路径。
 >
-> 修订日期：2026-08-24
+> 修订日期：2026-08-26（Round 9.3 Plugin adapter同步）
 >
 > 编码基线：lifecycle seam、owner、transaction与process-local carrier以当前production code为第一真源；已ACTIVATED Round 9、Round 9.1、Round 5B与Round 10用于解释仍由当前代码实现的产品不变量。上位文档中的旧拓扑、已删除DTO或被本文显式hard-cut的逐字段等价假设不得迫使实现恢复旧owner、dual path或补偿机制。
 >
@@ -14,19 +14,20 @@
 >
 > 公开兼容基线：[Codex Hooks](https://learn.chatgpt.com/docs/hooks)。本地Codex checkout当前production实现仍只有不含`SessionEnd`的10项event，但公开契约已经列出11项；本文以公开11项为产品truth，并把本地差异当作上游版本差异，而不是缩窄Pulsara契约。
 >
-> 下游消费者：[Round 9.3 Agent Plugin Bundle 与 Hook Adapter](ROUND_9_3_AGENT_PLUGIN_BUNDLE_AND_HOOK_ADAPTER_IMPLEMENTATION_SPEC.zh.md)。Round 9.3只能成为本文的definition producer，不得复制trust、matcher、dispatcher、executor、output parser或provider context owner。
+> 已激活下游消费者：[Round 9.3 Agent Plugin Bundle 与 Hook Adapter](ROUND_9_3_AGENT_PLUGIN_BUNDLE_AND_HOOK_ADAPTER_IMPLEMENTATION_SPEC.zh.md)。Round 9.3只成为本文的第三definition source，并复用本文的trust、matcher、dispatcher、executor、output parser、provider context owner与single future-view publication lane。
 
-本文先把Hook实现为**独立、source-agnostic、process-local的Runtime subsystem**。本轮用USER与exact WORKSPACE `hooks.json`作为首个真实产品路径；未来Plugin只把包内`hooks/hooks.json`归一化成同一组definitions，复用本轮所有执行机制。
+本文把Hook实现为**独立、source-agnostic、process-local的Runtime subsystem**。USER与exact WORKSPACE `hooks.json`是local paths；Round 9.3把enabled immutable package中的fixed `dev.pulsara/hooks/hooks.json`归一化成同一组definitions，复用全部执行机制。
 
 ---
 
 ## 0. 最终产品形状
 
-### 0.1 两类当前source，一个运行时
+### 0.1 三类当前source，一个运行时
 
 ```text
 ${PULSARA_HOME}/hooks.json             USER source
 <workspace>/.pulsara/hooks.json       exact WORKSPACE source
+<managed-plugin>/dev.pulsara/hooks/hooks.json  Plugin source
              │
              ├─ complete bounded discovery
              ├─ Codex-compatible JSON normalization
@@ -42,16 +43,16 @@ ${PULSARA_HOME}/hooks.json             USER source
                    └─ context port ────────────> one HookContextOwner ──> HOOK_CONTEXT
 ```
 
-Round 9.3加入后，只增加第三个producer：
+Round 9.3只增加第三个definition source：
 
 ```text
-Plugin hooks/hooks.json
+Plugin dev.pulsara/hooks/hooks.json
   -> PluginHookContributionAdapter
   -> same FrozenHookSourceProvenance + FrozenHookDefinition values
   -> same trust owner / dispatcher / executor / HOOK_CONTEXT
 ```
 
-本轮不存在Hook subclass、PluginHookDispatcher、managed policy engine或第二套event bus。
+Production不存在Hook subclass、PluginHookDispatcher、managed policy engine或第二套event bus。
 
 ### 0.2 Authority
 
@@ -199,7 +200,7 @@ Hook event types   11
 
 ### 1.2 明确不实现
 
-- Plugin package parsing、installation、MCP/Skill；这些属于Round 9.3；
+- Plugin package parsing、installation、MCP/Skill authority；这些只属于Round 9.3 package/component owners；
 - Codex inline `config.toml [hooks]`；Pulsara本轮只有一个JSON配置truth；
 - system、enterprise、MDM、managed requirements或`allow_managed_hooks_only`；
 - filesystem watcher、自动热重载；
@@ -348,6 +349,8 @@ Current source order：
 ```text
 USER
 WORKSPACE
+USER Plugin sources by plugin_id
+WORKSPACE Plugin sources by plugin_id
 ```
 
 两层是append，不是后者覆盖前者。一个exact declaration只属于一个source；即使两层command/matcher文本完全相同也分别运行，CLI必须显示duplicate-looking definitions及provenance，不能做语义dedup。
@@ -363,7 +366,7 @@ handler ordinal
 
 每个source内部签发total `source_local_definition_ordinal`；merged view中的deterministic order key是`(source_ordinal, source_local_definition_ordinal)`。它只决定admission、synchronous aggregation与同一safe-point的context rendering；不承诺OS process实际start或finish顺序。Deny/block仍按§7的closed aggregation，不因source顺序被allow覆盖。
 
-Round 9.3启用时可在本文后追加`HookSourceKind.PLUGIN`及其deterministic package/component order。Visibility仍是USER或exact WORKSPACE。它必须把complete normalized values交给同一个factory；不得让Hook core扫描Plugin store或提前在本轮加入dormant Plugin enum/branch。
+`HookSourceKind.PLUGIN`与closed `PluginHookSourceIdentity`已经由Round 9.3 hard cut加入；visibility仍是USER或exact WORKSPACE，identity exact包含plugin id、package install id、fixed config relative path与workspace key（iff WORKSPACE）。Adapter把complete normalized values交给同一个factory；Hook core不扫描Plugin store，也不存在dormant/old enum branch。
 
 ---
 
@@ -375,6 +378,7 @@ Round 9.3启用时可在本文后追加`HookSourceKind.PLUGIN`及其deterministi
 HookSourceKind
   USER_FILE
   WORKSPACE_FILE
+  PLUGIN
 
 HookSourceIdentity
   source kind
@@ -451,7 +455,7 @@ HookDispatchCausalRef =
 
 Provenance只沿一条owner-issued reference传递：definition引用provenance；attempt引用definition；outcome/context只携带用户可见source label与其真实delivery scope，不再复制第三份path/scope/ordinal作为proof。Source visibility由identity拥有，current dispatch/context delivery scope由同一个`HookDispatchScopeRef`拥有，不能用重复字段或fingerprint互相“证明”。Envelope不是wire mega DTO：serializer只看其中的typed public variant；dispatcher/context owner只看opaque scope、causal carrier、deadline与cancellation signal，不取得Host、repository或ToolRuntime。它不使用digest、registry或可由generic caller自报的strings证明authority。
 
-Current USER/WORKSPACE JSON没有environment字段，因此其`source-stable declaration environment overlay`固定为空。该slot只让未来managed definition producer提交本文允许的stable public overlay，不接收current Host/workspace派生值；`PULSARA_HOOK_SOURCE_DIR`与`PULSARA_PROJECT_DIR`属于§6.1 attempt-time dispatch environment。
+Current USER/WORKSPACE JSON没有environment字段，因此其`source-stable declaration environment overlay`固定为空。Plugin adapter只提交trust-covered `PLUGIN_ROOT`与`PLUGIN_DATA` exact public overlay；该slot不接收current Host/workspace派生值。`PULSARA_HOOK_SOURCE_DIR`与`PULSARA_PROJECT_DIR`属于§6.1 attempt-time dispatch environment。
 
 ### 3.2 Generic trust state
 
@@ -544,10 +548,10 @@ External host/UI未来可直接调用同一个`KernelHostCore.reload_hooks()`；
 
 Reload：
 
-1. 取得并持续持有process-local Hook future-view publication mutex，capture exact predecessor view；
-2. 不持Host lock，按一个absolute deadline读取/normalize本次所需sources与trust joins；publication mutex在scan期间不释放，因此其他future-view writer排队；
-3. 短暂进入Host lock验证Host仍open、target scope current且dispatcher current view仍是exact predecessor object；
-4. atomic publish一个由predecessor current slices加本次完整replacement/trust dispositions构成的新future definition view，然后释放Host lock与publication mutex；
+1. 不持Hook publication mutex或Host lock，capture one observed predecessor并按一个absolute deadline读取/normalize本次所需sources与trust joins，build complete candidate；
+2. 取得process-local Hook future-view publication mutex；若current view已不是scan所基于的observed predecessor，释放mutex并在同一caller-frozen deadline内重新build，不允许stale overwrite；
+3. 在publication mutex内从publication-time current predecessor保留未重建的exact slices、合并本writer完整replacement，并按固定锁序`Hook publication -> Host`短暂取得Host lock，验证Host仍open、target scope current且dispatcher current view仍是exact predecessor object；
+4. atomic publishmerged future definition view，然后依次释放Host lock与publication mutex；
 5. old attempts继续持有predecessor values并settle；
 6. 无old consumer后释放old view。
 
@@ -555,7 +559,7 @@ Reload：
 
 Missing config是完整empty replacement，会撤销future handlers。Malformed/unreadable/raced source在新view中为UNAVAILABLE并撤销该source future runnable handlers；不得为了“可用性”继续执行current filesystem已经无法证明的old external command。Other complete source继续运行。
 
-这条publication mutex是dispatcher future view的唯一writer。Round 9.3若增加Plugin definition producer，`reload_plugins`只能排队进入同一mutex；`reload_hooks`与`reload_plugins`都可能同时影响Plugin definition/trust disposition，不能假设它们操作disjoint slices。每个writer都从取得mutex后的current predecessor开始，保留未重建的exact current slices、完整替换自己负责的source values，并用commit时读取的current trust facts重算受影响disposition；不能读取旧view后在另一把锁中last-writer-wins。Mutex保证正常路径predecessor不会冲突；Host close/scope replacement导致验证失败时discard scan。不得为此引入retry generation、registry seal、view fingerprint或全局Hook transaction。
+这条publication mutex是dispatcher future view的唯一writer。Round 9.3 `reload_plugins`与`reload_hooks`排队进入同一mutex；二者不能假设操作disjoint slices。所有filesystem/package scan与candidate build都在mutex和Host lock之外；每个writer只在commit lane读取publication-time current predecessor，保留未重建的exact slices并完整替换自己负责的source values。Local reload若发现predecessor变化便在同一deadline重建；Plugin writer把already-complete Plugin slice与lock内current local slice合并。Host close/scope replacement导致验证失败时discard unpublished candidate。不得为此引入retry generation、registry seal、view fingerprint或全局Hook transaction。
 
 Host close只有一条顺序，不能把ordinary Hook lane提前fence：
 
@@ -661,7 +665,7 @@ PULSARA_HOOK_SOURCE_DIR = directory containing hooks.json
 PULSARA_PROJECT_DIR     = exact workspace root when available
 ```
 
-Round 9.3 Plugin Hook adapter未来可额外提供`PLUGIN_ROOT/PLUGIN_DATA`；generic executor只消费closed overlay。Plugin不增加agent-definition语义。
+Round 9.3 Plugin Hook adapter通过trust-covered declaration environment提供`PLUGIN_ROOT/PLUGIN_DATA`；generic executor只消费closed overlay。Plugin不增加agent-definition语义。
 
 ### 6.2 Process semantics
 
@@ -1214,7 +1218,7 @@ Event-specific required fields：
 | SubagentStop | `turn_id`, `agent_id`, `agent_type`, `agent_transcript_path:null`, `stop_hook_active:bool`, `last_assistant_message:string|null`, `permission_mode` |
 | Stop | `turn_id`, `stop_hook_active:bool`, `last_assistant_message:string|null`, `permission_mode` |
 
-`tool_name`是§5.2 compatibility primary；matcher仍使用canonical subject/aliases。`pulsara_tool_name`只在Pulsara exposed/outer name与compatibility primary不同（尤其meta MCP）时出现，值是exact outer name；相同时必须omit，不能由call site任选。Successful meta route的`tool_input`是resolved underlying arguments；pre-resolution failure的Post以outer identity和original meta input投影，resolved-then-invalid failure以underlying identity和rejected underlying input投影。Inputs不得携带hidden reasoning、private replay、raw artifact、PULSARA_API_KEY、package install/config path或完整internal DTO repr。Plugin provenance未来只留在trust/inspection/diagnostic，不能通过generic stdin extension map暴露。
+`tool_name`是§5.2 compatibility primary；matcher仍使用canonical subject/aliases。`pulsara_tool_name`只在Pulsara exposed/outer name与compatibility primary不同（尤其meta MCP）时出现，值是exact outer name；相同时必须omit，不能由call site任选。Successful meta route的`tool_input`是resolved underlying arguments；pre-resolution failure的Post以outer identity和original meta input投影，resolved-then-invalid failure以underlying identity和rejected underlying input投影。Inputs不得携带hidden reasoning、private replay、raw artifact、PULSARA_API_KEY、package install/config path或完整internal DTO repr。Plugin provenance只留在trust/inspection/diagnostic，不能通过generic stdin extension map暴露。
 
 PreCompact/PostCompact的`turn_id`始终来自current compaction owner已经冻结的exact `target_turn_id`，包括idle/manual target；不得改用“当前active turn”、latest arbitrary turn或空值。`last_assistant_message`在owner没有合法public assistant正文时为null，不能读取private replay或伪造empty assistant。
 
@@ -1298,6 +1302,7 @@ Background pending buffer把**origin identity**与**delivery scope**分开：每
 | Owner | 拥有 | 不拥有 |
 |---|---|---|
 | `LocalHookSourceProvider` + single config parser | USER/WORKSPACE exact source discovery/normalization/provenance | process execution、Plugin package |
+| `PluginHookContributionAdapter` | fixed `dev.pulsara/hooks/hooks.json` location、Plugin source/trust identity、declaration environment、generic lifetime anchor | trust、matcher、executor、context |
 | `HookTrustStore` | source enablement与exact trust digest | definition object registry、execution history |
 | `KernelHookDispatcher` | current immutable view、matcher、attempt scheduling、single output parser、typed aggregation | canonical rows、Plugin parsing、Tool/permission authority |
 | `HookCommandExecutor` | subprocess/process-group、stdin/stdout/stderr、deadline | event semantics、trust persistence |
@@ -1322,9 +1327,9 @@ compiler/continuity      receives pure HOOK_CONTEXT source values only
 
 Generic Hook subsystem不能扫描Plugin package root，也不能知道MCP supervisor、Skill provider或subagent manifest。它不得复用`OperationalHookType`、`KernelExtensionHost`或extension delivery；extension plane也不得反向发送本轮11项lifecycle event。
 
-Round 9.3只能把package declaration/provenance/environment overlay规范化成本文既有`FrozenHookSourceProvenance + FrozenHookDefinition`，并通过§4.3唯一publication lane替换Plugin slice。它不能建立第二套trust、matcher、dispatcher、executor、output parser、context owner/source或Hook event enum。USER/WORKSPACE路径即使Round 9.3永不实现也必须独立完成全部产品能力。
+Round 9.3只把package declaration/provenance/environment overlay规范化成本文既有`FrozenHookSourceProvenance + FrozenHookDefinition`，并通过§4.3唯一publication lane替换Plugin slice。它没有建立第二套trust、matcher、dispatcher、executor、output parser、context owner/source或Hook event enum；USER/WORKSPACE路径继续独立成立。
 
-Round 9.3当前是DEFERRED下游文档；其中任何与本文冲突的旧Hook clause——包括head/tail context preview、`hooks/parser.py`旧路径、Plugin provenance进入generic stdin、`statusMessage`进入model、dispatcher私有pending buffer或无single publication lane的reload——均由本文取代，必须在Round 9.3重新READY前删除。它们不阻塞Round 9.2独立编码，也不能成为实现第二套兼容路径的理由。
+Round 9.3已经ACTIVATED；其single-path adapter遵守本文收口：无head/tail context preview、无`hooks/parser.py`旧路径、无Plugin provenance stdin arm、无`statusMessage` model context、无dispatcher私有pending buffer，也无第二publication lane。历史冲突条款不得复活为compatibility path。
 
 ---
 
@@ -1606,7 +1611,7 @@ src/pulsara_agent/hooks/
 15. Round 5B active spec/tests中被§0.5取代的full-dry-equality断言已在同一hard cut更新，未保留dual contract；
 16. §8.9确认的Subagent launch-vs-stop、close deadline与late-threshold compaction liveness缺陷已经在同一diff修复；§8.6 combined child admission/loop入口完成single-path hard cut，均无dual path、补偿事务或scope leak；
 17. ordinary、Plan immediate/delayed与subagent composite ToolResult保留各自atomic owner，但在FULL后收敛为one process-local accepted settlement与one Round 7.1 public projection；Plan不伪造physical attempt，Hook不查库或重建body；
-18. Round 9.3只需增加definition producer/provenance/environment overlay并复用single publication lane，不修改本轮runtime semantics。
+18. Round 9.3只增加definition producer/provenance/environment overlay并复用single publication lane，没有修改本轮runtime semantics。
 
 ### 15.1 Activation（2026-08-24，ACTIVATED）
 
@@ -1616,13 +1621,17 @@ src/pulsara_agent/hooks/
 
 真实dogfood继续使用生产`DirectKernelModelPort`与真实command Hook，结果为`passed`：70次Hook command invocation、24次provider open、4次compaction summary request、12个canonical ToolResult，11项lifecycle全覆盖；queued B context对active A的两个provider requests均不可见、对B request可见，active与idle compaction各有exact one compact SessionStart final open，permission allow/deny、Plan no-physical-attempt、Subagent/ROOT continuation、reload predecessor view与SessionEnd terminal lane全部成立。完整prompt、Hook stdin/stdout/stderr、provider-visible messages、model replies与ToolResults保存在[`round9_2_hook_subsystem_trace.json`](benchmarks/suites/core/v1/round9_2_hook_subsystem_trace.json)，只排除exact nonempty `PULSARA_API_KEY`；machine-readable结论见[`round9_2_hook_subsystem_activation.json`](benchmarks/suites/core/v1/round9_2_hook_subsystem_activation.json)。当前没有外部availability blocker。
 
+### 15.2 Round 9.3 adapter synchronization（2026-08-26）
+
+Round 9.3真实provider dogfood使用one installed package运行trusted Plugin `UserPromptSubmit`与`PreToolUse`，并在compaction lifecycle运行`PreCompact`、`PostCompact`、`SessionStart(compact)`。Trace保留exact Hook stdin/stdout/stderr、provider-visible context/control与model replies，只排除exact nonempty API key。Replace形成new disabled package；重新enable后原Hook trust为`MODIFIED/UNTRUSTED`，必须单独trust。`reload_hooks`的Pre/Permission/Post继续使用invoke-time predecessor，commit merge使用publication-time current predecessor；concurrent Plugin/local publication共享one lane且固定`Hook publication -> Host`锁序。Old attempt通过generic lifetime anchor持旧package root直到settle。
+
 ---
 
 ## 16. 最终冻结
 
 Round 9.2激活后的产品语义：
 
-> Pulsara用户可以在`${PULSARA_HOME}/hooks.json`或exact workspace `.pulsara/hooks.json`中声明Codex-compatible command Hooks。用户审阅并trust exact normalized definitions后，唯一process-local `KernelHookDispatcher`在11项lifecycle seam执行它们；successful control只影响当前合法operation，informational output只作为append-only、source-neutral、untrusted `HOOK_CONTEXT`进入模型。Hook不拥有canonical conversation、Tool、permission、compaction或subagent authority，不增加durable execution recovery，也不改变同epoch SYSTEM/tools。未来Plugin只向这套subsystem贡献definitions与source environment，不复制任何Hook engine。
+> Pulsara用户可以在`${PULSARA_HOME}/hooks.json`或exact workspace `.pulsara/hooks.json`中声明Codex-compatible command Hooks；enabled local Agent Plugin也可从fixed `dev.pulsara/hooks/hooks.json`贡献definitions。用户分别审阅并trust exact normalized definitions后，唯一process-local `KernelHookDispatcher`在11项lifecycle seam执行它们；successful control只影响当前合法operation，informational output只作为append-only、source-neutral、untrusted `HOOK_CONTEXT`进入模型。Hook不拥有canonical conversation、Tool、permission、compaction或subagent authority，不增加durable execution recovery，也不改变同epoch SYSTEM/tools。Plugin只贡献definitions、trust subject与trust-covered declaration environment，不复制任何Hook engine。
 
 ---
 

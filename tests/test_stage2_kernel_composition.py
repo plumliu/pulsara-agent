@@ -34,6 +34,10 @@ from pulsara_agent.capability.local_skills import (
     LooseSkillDefinitionProducer,
 )
 from pulsara_agent.capability.provider import SkillProjectionOutput
+from pulsara_agent.capability.plugin_skill_contracts import (
+    FrozenPluginSkillDefinitions,
+    PluginSkillDefinitionsDisposition,
+)
 from pulsara_agent.conversation_kernel.capability import (
     KernelSkillProjectionComposer,
 )
@@ -43,6 +47,7 @@ from pulsara_agent.conversation_kernel.host import (
 )
 from pulsara_agent.capability.types import BundledSkillOrigin
 from pulsara_agent.model_input.contracts import ModelInputScopeKind
+from pulsara_agent.hooks.contracts import FrozenHookDefinitionView
 from pulsara_agent.primitives.context import context_fingerprint
 from pulsara_agent.workspace_identity import HostWorkspaceInput
 
@@ -105,6 +110,9 @@ Review body
     composer = KernelSkillProjectionComposer(
         workspace_root=tmp_path,
         bundled_binding_owner=binding,
+        plugin_definitions_provider=lambda: FrozenPluginSkillDefinitions(
+            PluginSkillDefinitionsDisposition.COMPLETE
+        ),
         configured_active_skill_names=frozenset({"review"}),
         loose_producer=loose,
         projection_provider=provider,  # type: ignore[arg-type]
@@ -194,13 +202,15 @@ def test_kernel_composition_preserves_root_catalog_and_active_skill_prompt(
         owner, view = _skill_view(composer)
         assert owner.source_snapshot.registration.source_contract_fingerprint == (
             context_fingerprint(
-                "skill-source-contract:v3-bundled-loose-agent-skills",
+                "skill-source-contract:v4-bundled-loose-plugin-skills",
                 {
                     "parser_contract": AGENT_SKILLS_CONTRACT_ID,
                     "placement_contract": SKILL_PLACEMENT_CONTRACT_ID,
-                    "producer_kinds": ("LOOSE", "BUNDLED"),
+                    "producer_kinds": ("LOOSE", "PLUGIN", "BUNDLED"),
                     "precedence": (
                         *(item.value for item in LOOSE_SKILL_ROOT_ORDER),
+                        "WORKSPACE_PLUGIN",
+                        "USER_PLUGIN",
                         "BUNDLED",
                     ),
                     "bundled_names": EXPECTED_BUNDLED_SKILL_NAMES,
@@ -331,10 +341,10 @@ def test_shutdown_fences_and_joins_unregistered_session_open(
 
     class FakeHookSourceProvider:
         def __init__(self, **_kwargs: object) -> None:
-            pass
+            self.trust_store = object()
 
         def discover(self, **_kwargs: object) -> object:
-            return object()
+            return FrozenHookDefinitionView(())
 
     class FakeRepository:
         @staticmethod

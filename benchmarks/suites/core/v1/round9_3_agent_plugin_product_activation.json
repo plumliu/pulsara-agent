@@ -1,0 +1,241 @@
+{
+  "schema_version": "round9-3-agent-plugin-product-activation.v1",
+  "status": "ACTIVATED",
+  "activation_date": "2026-08-26",
+  "specification": "ROUND_9_3_AGENT_PLUGIN_BUNDLE_AND_HOOK_ADAPTER_IMPLEMENTATION_SPEC.zh.md",
+  "product_contract": {
+    "package_format": "Agent Plugins 1.0 with fixed dev.pulsara client extension paths",
+    "typed_management_operations": 6,
+    "plugin_cli_commands": 8,
+    "skill_definition_producers": [
+      "BundledSkillDefinitionProducer",
+      "LooseSkillDefinitionProducer",
+      "PluginSkillDefinitionProducer"
+    ],
+    "skill_precedence_tiers": 7,
+    "mcp_runtime": "one native MCP supervisor",
+    "hook_runtime": "one KernelHookDispatcher and one future-view publication lane",
+    "process_api_key_boundary": "one injected process-local underlying gate"
+  },
+  "post_activation_p1_closure": {
+    "package_anchor_deadline_and_cancellation": "passed",
+    "paired_source_io_physical_owner": "passed",
+    "reload_steps_1_through_9_absolute_deadline": "passed",
+    "http_provider_request_body_admission_rotation_gate": "passed"
+  },
+  "automated_gates": [
+    {
+      "command": ".venv/bin/python -m pytest -q tests/test_bundled_skills.py tests/test_round9_3_agent_plugin_product.py tests/test_round9_3_plugin_physical_semantics.py",
+      "result": "33 passed in 1.47s"
+    },
+    {
+      "command": ".venv/bin/python -m pytest -q",
+      "result": "1011 passed in 180.90s"
+    },
+    {
+      "command": ".venv/bin/python -m pytest -q -m postgres",
+      "result": "223 passed, 788 deselected in 127.10s"
+    },
+    {
+      "command": ".venv/bin/python -m pytest -q tests/test_stage5_clean_migration.py",
+      "result": "12 passed in 3.40s"
+    },
+    {
+      "command": ".venv/bin/python -m pytest -q tests/test_stage3_5_architecture.py::test_stage3_5_final_oracles_are_exact tests/test_round9_2_hook_subsystem.py::test_round9_2_closed_vocabulary_inputs_outcomes_causal_arms_and_oracle",
+      "result": "2 passed in 0.92s"
+    },
+    {
+      "command": ".venv/bin/ruff check .",
+      "result": "All checks passed"
+    },
+    {
+      "command": ".venv/bin/python -m compileall -q src tests tools",
+      "result": "exit 0"
+    },
+    {
+      "command": ".venv/bin/python tools/generate_terminal_protocol_contract.py --check",
+      "result": "exit 0"
+    },
+    {
+      "command": "uv lock --check",
+      "result": "exit 0"
+    },
+    {
+      "command": "git diff --check",
+      "result": "exit 0"
+    }
+  ],
+  "postgresql": {
+    "schema_changed": false,
+    "fresh_database_created": true,
+    "exact_loopback_target_verified": true,
+    "first_applied_versions": [0],
+    "second_applied_versions": [],
+    "migration_head_version": 0,
+    "deep_verification_type": "PostgresFastVerificationBundle"
+  },
+  "architecture_oracle": {
+    "committed_event_descriptors": 29,
+    "live_event_types": 24,
+    "subject_slots": 11,
+    "append_guards": 1,
+    "product_relations": 25,
+    "new_durable_job_kinds": 0,
+    "hook_event_types": 11,
+    "new_skips": 0,
+    "new_xfails": 0
+  },
+  "package_and_launcher": {
+    "sdist_command": "uv build --sdist --out-dir /tmp/pulsara-r9-3-p1-final.CLhwty/sdist",
+    "sdist": "/tmp/pulsara-r9-3-p1-final.CLhwty/sdist/pulsara_agent-0.1.0.tar.gz",
+    "wheel_command": "uv build --wheel --out-dir /tmp/pulsara-r9-3-p1-final.CLhwty/wheel /tmp/pulsara-r9-3-p1-final.CLhwty/sdist/pulsara_agent-0.1.0.tar.gz",
+    "wheel": "/tmp/pulsara-r9-3-p1-final.CLhwty/wheel/pulsara_agent-0.1.0-py3-none-any.whl",
+    "isolated_tool_install": "51 packages and one pulsara executable installed",
+    "non_source_cwd": "/tmp/pulsara-r9-3-p1-final.CLhwty/non-source-cwd",
+    "launcher_version": "0.1.0",
+    "plugin_help_commands": [
+      "validate",
+      "add",
+      "enable",
+      "disable",
+      "remove",
+      "list",
+      "doctor",
+      "gc"
+    ],
+    "installed_wheel_vault_validation": "positive/elements-of-style -> VALID",
+    "installed_wheel_empty_inspection": "COMPLETE"
+  },
+  "vault_observations": {
+    "root": "/Users/plumliu/Desktop/python_workspace/pulsara_plugin_test_vault",
+    "valid": [
+      "positive/elements-of-style",
+      "positive/jumpcloud-admin",
+      "positive/fdeops",
+      "positive/spar",
+      "positive/one"
+    ],
+    "component_isolation": "negative/google-agents-cli-metadata package VALID with seven invalid Skill issues",
+    "invalid": [
+      "negative/resend-symlink -> symlink rejection",
+      "Codex bundle without root plugin.json -> missing manifest"
+    ]
+  },
+  "local_dogfood": {
+    "command": ".venv/bin/python tools/run_round9_3_plugin_dogfood.py",
+    "service": "passed",
+    "cli": "passed",
+    "sequence": [
+      "validate VALID",
+      "add INSTALLED enabled=false",
+      "inspect COMPLETE disabled",
+      "enable ENABLED exact install id",
+      "inspect COMPLETE with Skill/MCP/Hook",
+      "replace REPLACED enabled=false",
+      "disable ALREADY_DISABLED",
+      "remove REMOVED",
+      "gc COMPLETE"
+    ]
+  },
+  "real_provider_dogfood": {
+    "status": "passed",
+    "provider_api": "openai_chat_completions",
+    "provider_model": "deepseek-v4-flash-vision-exp",
+    "provider_requests": 13,
+    "provider_stream_items": 2441,
+    "compaction_summary_requests": 3,
+    "compaction_summary_stream_items": 6715,
+    "hook_command_logs": 14,
+    "hook_events": [
+      "UserPromptSubmit",
+      "PreToolUse",
+      "PreCompact",
+      "PostCompact",
+      "SessionStart"
+    ],
+    "mcp_calls": 1,
+    "canonical_tool_results": [
+      "read_file PERMISSION_DENIED by trusted Plugin PreToolUse",
+      "read_file SUCCESS for Plugin SKILL.md",
+      "Plugin stdio MCP direct_echo SUCCESS",
+      "read_file SUCCESS for compaction resource",
+      "old Plugin MCP direct descriptor TOOL_UNAVAILABLE after disable"
+    ],
+    "same_epoch_reload": "epoch nonce unchanged",
+    "continuity": {
+      "system_byte_identical": true,
+      "tools_exact_equal": true,
+      "messages_suffix_only": true
+    },
+    "compaction": "COMPACTED revision 1; successor epoch changed and contains current Plugin Skill/MCP",
+    "replace_trust": "new package disabled; after enable Hook trust MODIFIED and not runnable until separately trusted",
+    "old_package_gc": "IN_USE while old view held, reclaimable after drain",
+    "disable_remove": "future Skill/MCP/Hook contributions disappeared",
+    "pulsara_api_key_in_hook_or_mcp_child_environment": false
+  },
+  "real_provider_installer_discovery_matrix": {
+    "status": "passed",
+    "command": ".venv/bin/python tools/run_round9_3_plugin_installer_discovery_dogfood.py",
+    "completed_at_utc": "2026-08-26T03:53:55.551795+00:00",
+    "provider_api": "openai_chat_completions",
+    "provider_model": "deepseek-v4-flash-vision-exp",
+    "natural_user_prompt_named_installer_skill": false,
+    "positive_fixtures": [
+      "elements-of-style@1.0.0",
+      "jumpcloud-admin@1.1.0",
+      "fdeops@3.10.3",
+      "spar@0.5.0",
+      "one@1.0.3"
+    ],
+    "fixture_results": {
+      "elements-of-style": "passed; VALID -> INSTALLED; disabled",
+      "jumpcloud-admin": "passed; VALID -> INSTALLED; disabled",
+      "fdeops": "passed; VALID -> INSTALLED; disabled",
+      "spar": "passed; VALID -> INSTALLED; disabled",
+      "one": "passed; VALID -> INSTALLED; disabled"
+    },
+    "required_sequence": [
+      "natural user prompt omitted Skill name",
+      "model selected exact bundled guidance from SKILL_CATALOG",
+      "ordinary read_file returned the complete SKILL.md",
+      "a later provider call generated terminal commands",
+      "isolated installed global pulsara exposed plugins",
+      "strict validator returned VALID",
+      "pulsara plugins add --scope user returned INSTALLED",
+      "list or doctor inspected installed truth",
+      "independent management inspection found exact disabled instance",
+      "model explained exact-conversion versus honest-stop boundary"
+    ],
+    "all_boolean_checks": true,
+    "all_instances_disabled": true,
+    "guidance_reads": 5,
+    "terminal_calls": 34,
+    "canonical_tool_rows": 67,
+    "provider_requests": 46,
+    "provider_stream_items": 44549,
+    "isolated_launcher_version": "0.1.0",
+    "isolated_launcher_exposed_all_eight_plugin_commands": true,
+    "postgres_clean_v0_first_applied_versions": [
+      0
+    ],
+    "postgres_clean_v0_second_applied_versions": [],
+    "trace": {
+      "path": "benchmarks/suites/core/v1/round9_3_plugin_installer_discovery_trace.json",
+      "bytes": 20163692,
+      "pulsara_api_key_recorded": false,
+      "content": "natural user prompts, provider-visible inputs, provider stream, Skill read ToolResults, terminal commands and stdout/stderr, managed-state inspections, canonical tool rows, transcripts, and model replies"
+    }
+  },
+  "trace": {
+    "path": "benchmarks/suites/core/v1/round9_3_agent_plugin_product_trace.json",
+    "bytes": 5321370,
+    "pulsara_api_key_recorded": false,
+    "content": "actual prompts, provider-visible SYSTEM/tools/messages, provider stream, Hook stdin/stdout/stderr, MCP logs, ToolResults, canonical transcript and model replies"
+  },
+  "external_availability": {
+    "provider_available": true,
+    "network_available": true,
+    "blocker": null,
+    "runtime_defect": null
+  }
+}

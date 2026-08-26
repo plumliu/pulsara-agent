@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import ctypes
 from dataclasses import dataclass
 import errno
 from enum import StrEnum
@@ -10,7 +9,6 @@ from hashlib import sha256
 import os
 from pathlib import Path, PurePosixPath
 import stat
-import sys
 from typing import Protocol
 from uuid import uuid4
 
@@ -22,9 +20,9 @@ from pulsara_agent.capability.local_skills import (
     parse_skill_document,
     validate_skill_candidate_placement,
 )
-from pulsara_agent.capability.local_skill_source_binding import (
+from pulsara_agent.local_source_binding import (
     open_absolute_directory_nofollow,
-    prepare_local_skill_source_path,
+    prepare_local_source_path,
 )
 from pulsara_agent.capability.pulsara_home import (
     PulsaraHomeDisposition,
@@ -35,6 +33,11 @@ from pulsara_agent.capability.types import (
     SkillDiagnostic,
     SkillDiagnosticCode,
     SkillDiagnosticSeverity,
+)
+from pulsara_agent.exclusive_publish import (
+    ExclusiveDirectoryPublisher,
+    ExclusivePublishPrimitiveUnavailable,
+    PlatformExclusiveDirectoryPublisher,
 )
 
 
@@ -160,79 +163,6 @@ class NeverCancelLocalSkillOperation:
         return False
 
 
-class ExclusiveDirectoryPublisher(Protocol):
-    def publish(self, root_fd: int, staging_name: str, final_name: str) -> None: ...
-
-
-class PlatformExclusiveDirectoryPublisher:
-    """The only platform-specific no-replace namespace adapter."""
-
-    def publish(self, root_fd: int, staging_name: str, final_name: str) -> None:
-        if sys.platform == "darwin":
-            self._darwin(root_fd, staging_name, final_name)
-            return
-        if sys.platform.startswith("linux"):
-            self._linux(root_fd, staging_name, final_name)
-            return
-        raise _ExclusivePrimitiveUnavailable
-
-    @staticmethod
-    def _darwin(root_fd: int, staging_name: str, final_name: str) -> None:
-        libc = ctypes.CDLL(None, use_errno=True)
-        try:
-            rename = libc.renameatx_np
-        except AttributeError as exc:
-            raise _ExclusivePrimitiveUnavailable from exc
-        rename.argtypes = [
-            ctypes.c_int,
-            ctypes.c_char_p,
-            ctypes.c_int,
-            ctypes.c_char_p,
-            ctypes.c_uint,
-        ]
-        rename.restype = ctypes.c_int
-        if (
-            rename(
-                root_fd,
-                os.fsencode(staging_name),
-                root_fd,
-                os.fsencode(final_name),
-                0x00000004,
-            )
-            != 0
-        ):
-            error = ctypes.get_errno()
-            raise OSError(error, os.strerror(error), final_name)
-
-    @staticmethod
-    def _linux(root_fd: int, staging_name: str, final_name: str) -> None:
-        libc = ctypes.CDLL(None, use_errno=True)
-        try:
-            rename = libc.renameat2
-        except AttributeError as exc:
-            raise _ExclusivePrimitiveUnavailable from exc
-        rename.argtypes = [
-            ctypes.c_int,
-            ctypes.c_char_p,
-            ctypes.c_int,
-            ctypes.c_char_p,
-            ctypes.c_uint,
-        ]
-        rename.restype = ctypes.c_int
-        if (
-            rename(
-                root_fd,
-                os.fsencode(staging_name),
-                root_fd,
-                os.fsencode(final_name),
-                0x00000001,
-            )
-            != 0
-        ):
-            error = ctypes.get_errno()
-            raise OSError(error, os.strerror(error), final_name)
-
-
 class _EntryKind(StrEnum):
     DIRECTORY = "DIRECTORY"
     REGULAR_FILE = "REGULAR_FILE"
@@ -317,10 +247,6 @@ class _Cancelled(RuntimeError):
     pass
 
 
-class _ExclusivePrimitiveUnavailable(RuntimeError):
-    pass
-
-
 class _RootBindingRaced(OSError):
     pass
 
@@ -363,7 +289,7 @@ class AtomicLocalSkillPublisher:
         pulsara_home: PulsaraHomeResolution | None,
         cancellation: LocalSkillCancellationProbe | None = None,
     ) -> LocalSkillInstallOutcome:
-        source = prepare_local_skill_source_path(source_path)
+        source = prepare_local_source_path(source_path)
         probe = cancellation or NeverCancelLocalSkillOperation()
         if not isinstance(scope, LocalSkillInstallScope):
             raise TypeError("Skill installation scope is not closed")
@@ -706,7 +632,7 @@ class AtomicLocalSkillPublisher:
                         self._exclusive.publish(
                             target.descriptor, stage.name, final_name
                         )
-                    except _ExclusivePrimitiveUnavailable:
+                    except ExclusivePublishPrimitiveUnavailable:
                         prior = LocalSkillInstallOutcome(
                             LocalSkillInstallDisposition.PUBLISH_UNAVAILABLE,
                             source,

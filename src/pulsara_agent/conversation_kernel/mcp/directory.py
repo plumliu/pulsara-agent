@@ -154,6 +154,11 @@ class McpDirectoryPageFactory:
         ):
             return _error("MCP_CATALOG_STALE")
         semantics = () if scoped_snapshot is None else scoped_snapshot.tools
+        collision_targets = {
+            (member.server_id, member.remote_tool_name)
+            for fact in catalog.provider_name_collision_facts
+            for member in fact.members
+        }
         route_by_target = {
             (item.target.server_id, item.target.remote_tool_name): item
             for item in routes.routes
@@ -165,6 +170,8 @@ class McpDirectoryPageFactory:
         for semantic in sorted(
             semantics, key=lambda item: (item.remote_tool_name, item.provider_tool_name)
         ):
+            if (semantic.server_id, semantic.remote_tool_name) in collision_targets:
+                continue
             route = route_by_target.get(
                 (semantic.server_id, semantic.remote_tool_name)
             )
@@ -210,6 +217,11 @@ class McpDirectoryPageFactory:
                 ],
                 "server": _server_row(server),
                 "total_tool_count": len(rows),
+                "provider_name_collision_member_count": sum(
+                    member.server_id == server_filter
+                    for fact in catalog.provider_name_collision_facts
+                    for member in fact.members
+                ),
                 "unavailable_tool_count": counts[
                     ToolCapabilityRouteKind.UNAVAILABLE.value
                 ],

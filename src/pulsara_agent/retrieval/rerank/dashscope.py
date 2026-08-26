@@ -9,6 +9,11 @@ from typing import Any
 
 import httpx
 
+from pulsara_agent.process_api_key_boundary import (
+    ProcessApiKeyBoundary,
+    ProcessApiKeyBoundAsyncClient,
+    admit_process_api_key_http_operation,
+)
 from pulsara_agent.retrieval.errors import RerankServiceError
 
 from .protocol import RerankResult
@@ -29,6 +34,7 @@ class DashScopeRerankProvider:
         timeout_seconds: float,
         max_retries: int,
         maximum_concurrent: int,
+        api_key_boundary: ProcessApiKeyBoundary,
     ) -> None:
         if model != "qwen3-rerank":
             raise ValueError("rerank model is outside the V1 contract")
@@ -39,7 +45,10 @@ class DashScopeRerankProvider:
         self._model = model
         self._max_retries = max(0, max_retries)
         self._semaphore = asyncio.Semaphore(1)
-        self._client = httpx.AsyncClient(
+        self._api_key_boundary = api_key_boundary
+        self._client = ProcessApiKeyBoundAsyncClient(
+            api_key_boundary=api_key_boundary,
+            credential_header_names=frozenset({b"authorization"}),
             timeout=httpx.Timeout(timeout_seconds),
             headers={
                 "Authorization": f"Bearer {api_key}",
@@ -89,10 +98,16 @@ class DashScopeRerankProvider:
                         self._url,
                         content=encoded,
                     )
-                    response = await self._client.send(request, stream=True)
-                except httpx.HTTPError as exc:
+                    response = await admit_process_api_key_http_operation(
+                        api_key_boundary=self._api_key_boundary,
+                        guarded_values=(self._url, encoded),
+                        operation=lambda: self._client.send(request, stream=True),
+                    )
+                except ValueError:
+                    raise RerankServiceError("rerank admission rejected") from None
+                except httpx.HTTPError:
                     if attempt >= self._max_retries:
-                        raise RerankServiceError("rerank transport failed") from exc
+                        raise RerankServiceError("rerank transport failed") from None
                     continue
                 try:
                     if response.status_code == 200:

@@ -82,6 +82,7 @@ from pulsara_agent.ports.provider_stream import (
 )
 from pulsara_agent.ports.tool_execution import thaw_tool_json_object
 from pulsara_agent.primitives.context import thaw_json
+from pulsara_agent.process_api_key_boundary import ProcessApiKeyBoundary
 from pulsara_agent.model_input.contracts import (
     ModelInputScopeKind,
     PreparedProviderInputCut,
@@ -556,6 +557,7 @@ def test_chat_replay_byte_overflow_is_typed_and_not_retried(
     adapter = OpenAIChatCompletionsTransport(
         api_key="test",
         timeout_policy=OpenAITransportTimeoutPolicy(1, 1, 1, 1, None),
+        api_key_boundary=ProcessApiKeyBoundary(),
         retry_config=LLMRetryConfig(enabled=True, attempts=3),
     )
     adapter._client = FakeClient(completions)
@@ -2326,7 +2328,8 @@ def test_auxiliary_valid_partial_json_is_not_parsed_after_incomplete() -> None:
             pro_model="test-pro",
             flash_model="test-flash",
             api="openai_chat_completions",
-        )
+        ),
+        api_key_boundary=ProcessApiKeyBoundary(),
     )
     prepared = auxiliary.prepare_json_call(
         purpose=ModelCallPurpose.MEMORY_HINT_REVIEW,
@@ -2435,9 +2438,17 @@ async def _consume_provider_shaped_sse(
         ),
     )
     adapter = (
-        OpenAIChatCompletionsTransport(api_key="test", timeout_policy=timeout)
+        OpenAIChatCompletionsTransport(
+            api_key="test",
+            timeout_policy=timeout,
+            api_key_boundary=ProcessApiKeyBoundary(),
+        )
         if api == OPENAI_CHAT_COMPLETIONS_API
-        else OpenAIResponsesTransport(api_key="test", timeout_policy=timeout)
+        else OpenAIResponsesTransport(
+            api_key="test",
+            timeout_policy=timeout,
+            api_key_boundary=ProcessApiKeyBoundary(),
+        )
     )
     registry = NormalizedLLMTransportRegistry()
     registry.register(NormalizedLLMTransport(adapter))

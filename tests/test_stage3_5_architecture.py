@@ -203,7 +203,11 @@ def test_stage3_5_process_local_task_sites_are_closed() -> None:
         # aggregation tasks inside the independent process-local Hook core.
         "src/pulsara_agent/hooks/dispatcher.py",
         "src/pulsara_agent/hooks/executor.py",
-    }
+            # Round 9.3's one injected API-key boundary owns the final HTTP
+            # admission and lock-acquisition tasks. Provider/retrieval callers no
+            # longer create parallel sink tasks of their own.
+            "src/pulsara_agent/process_api_key_boundary.py",
+        }
     observed: set[str] = set()
     for path in _production_python():
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))

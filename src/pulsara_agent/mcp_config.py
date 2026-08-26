@@ -25,6 +25,9 @@ MAXIMUM_MCP_TOOL_OVERRIDES = 512
 MAXIMUM_MCP_CONFIG_BYTES = 1024 * 1024
 MAXIMUM_MCP_CONFIGURED_SERVERS = 64
 _PROCESS_SECRET_COMMITMENT_KEY = os.urandom(32)
+_HTTP_TCHAR = frozenset(
+    b"!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+)
 
 
 class McpTransportKind(StrEnum):
@@ -53,14 +56,83 @@ class McpConfiguredEffect(StrEnum):
     EXTERNAL_EFFECT = "EXTERNAL_EFFECT"
 
 
+class McpAbsoluteCwdAuthority(StrEnum):
+    PACKAGE_ROOT = "PACKAGE_ROOT"
+    INSTANCE_DATA = "INSTANCE_DATA"
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceRelativeMcpCwd:
+    relative_path: str
+
+    def __post_init__(self) -> None:
+        path = Path(self.relative_path)
+        if (
+            not self.relative_path
+            or "\x00" in self.relative_path
+            or path.is_absolute()
+            or any(part == ".." for part in path.parts)
+        ):
+            raise ValueError("MCP workspace-relative cwd is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class ExactAbsoluteMcpCwd:
+    absolute_path: Path
+    authority: McpAbsoluteCwdAuthority
+
+    def __post_init__(self) -> None:
+        if not self.absolute_path.is_absolute() or not isinstance(
+            self.authority, McpAbsoluteCwdAuthority
+        ):
+            raise ValueError("MCP exact absolute cwd binding is invalid")
+
+
+McpStdioCwdBinding = WorkspaceRelativeMcpCwd | ExactAbsoluteMcpCwd
+
+
+@dataclass(frozen=True, slots=True)
+class LocalConfiguredMcpRuntimeSource:
+    kind: str = "LOCAL_CONFIGURED"
+
+
+@dataclass(frozen=True, slots=True)
+class ManagedPackageMcpRuntimeSource:
+    store_scope_key: str
+    package_owner_key: str
+    package_install_id: str
+    kind: str = "MANAGED_PACKAGE"
+
+    def __post_init__(self) -> None:
+        import re
+
+        if (
+            not self.store_scope_key
+            or not self.package_owner_key
+            or not re.fullmatch(r"pkg_[0-9a-f]{32}", self.package_install_id)
+            or any("\x00" in item for item in (self.store_scope_key, self.package_owner_key))
+        ):
+            raise ValueError("managed MCP runtime source identity is invalid")
+
+
+McpRuntimeSourceIdentity = (
+    LocalConfiguredMcpRuntimeSource | ManagedPackageMcpRuntimeSource
+)
+
+
 @dataclass(frozen=True, slots=True)
 class StdioTransportConfig:
     command: str
     args: tuple[str, ...] = ()
-    cwd: str | None = None
+    cwd: McpStdioCwdBinding = field(
+        default_factory=lambda: WorkspaceRelativeMcpCwd(".")
+    )
     environment: tuple[tuple[str, str], ...] = field(default=(), repr=False)
     secret_environment_refs: tuple[tuple[str, str], ...] = field(
         default=(), repr=False
+    )
+    lookup_path: str = field(
+        default_factory=lambda: os.environ.get("PATH", ""), repr=False
     )
     kind: McpTransportKind = McpTransportKind.STDIO
 
@@ -73,6 +145,10 @@ class StdioTransportConfig:
         _validate_unique_pairs(
             self.secret_environment_refs, "MCP stdio secret environment"
         )
+        if not isinstance(
+            self.cwd, (WorkspaceRelativeMcpCwd, ExactAbsoluteMcpCwd)
+        ) or "\x00" in self.lookup_path:
+            raise ValueError("MCP stdio cwd/PATH binding is invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -187,6 +263,13 @@ class McpServerConfig:
     semantic_config_fingerprint: str
     runtime_config_fingerprint: str
     resolved_config_identity: str
+    runtime_source: McpRuntimeSourceIdentity = field(
+        default_factory=LocalConfiguredMcpRuntimeSource
+    )
+    public_headers: tuple[tuple[str, str], ...] = ()
+    physical_lifetime_anchor: object | None = field(
+        default=None, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         if not self.server_id or not self.display_name:
@@ -205,6 +288,12 @@ class McpServerConfig:
         _validate_names(names, "MCP timeout override tools")
         if any(not 1_000 <= value <= 600_000 for _, value in self.per_tool_timeout_ms):
             raise ValueError("MCP per-tool timeout is out of range")
+        if not isinstance(
+            self.runtime_source,
+            (LocalConfiguredMcpRuntimeSource, ManagedPackageMcpRuntimeSource),
+        ):
+            raise TypeError("MCP runtime source identity union is open")
+        _validate_public_headers(self.public_headers)
         semantic, runtime, resolved = _derive_config_fingerprints(
             server_id=self.server_id,
             display_name=self.display_name,
@@ -220,6 +309,8 @@ class McpServerConfig:
             catalog_refresh_interval_ms=self.catalog_refresh_interval_ms,
             default_tool_timeout_ms=self.default_tool_timeout_ms,
             per_tool_timeout_ms=self.per_tool_timeout_ms,
+            runtime_source=self.runtime_source,
+            public_headers=self.public_headers,
         )
         if (
             self.semantic_config_fingerprint != semantic
@@ -228,23 +319,32 @@ class McpServerConfig:
         ):
             raise ValueError("MCP config fingerprints do not exact-join fields")
 
-    def resolved_headers(self) -> dict[str, str]:
+    def resolved_headers(
+        self, final_overrides: Mapping[str, str] | None = None
+    ) -> dict[str, str]:
+        result = dict(self.public_headers)
         if isinstance(self.auth, NoAuth):
-            return {}
-        if isinstance(self.auth, UnsupportedOAuth):
+            resolved = result
+        elif isinstance(self.auth, UnsupportedOAuth):
             raise ValueError(self.auth.reason)
-        if isinstance(self.auth, BearerEnvironmentRef):
+        elif isinstance(self.auth, BearerEnvironmentRef):
             value = os.environ.get(self.auth.environment_variable)
             if value is None:
                 raise ValueError("MCP bearer secret reference is unavailable")
-            return {"Authorization": f"Bearer {value}"}
-        result: dict[str, str] = {}
-        for name, environment_variable in self.auth.headers:
-            value = os.environ.get(environment_variable)
-            if value is None:
-                raise ValueError("MCP header secret reference is unavailable")
-            result[name] = value
-        return result
+            resolved = _merge_headers_case_insensitive(
+                result, {"Authorization": f"Bearer {value}"}
+            )
+        else:
+            auth_headers: dict[str, str] = {}
+            for name, environment_variable in self.auth.headers:
+                value = os.environ.get(environment_variable)
+                if value is None:
+                    raise ValueError("MCP header secret reference is unavailable")
+                auth_headers[name] = value
+            resolved = _merge_headers_case_insensitive(result, auth_headers)
+        if final_overrides is None:
+            return resolved
+        return _merge_headers_case_insensitive(resolved, final_overrides)
 
 
 # Compatibility name retained for callers which only inspect enabled IDs.
@@ -355,6 +455,69 @@ def set_mcp_server_enabled(
         entry=updated,
         workspace_root=workspace_root,
         user_config_path=user_config_path,
+    )
+
+
+def freeze_mcp_server_config(
+    *,
+    server_id: str,
+    display_name: str,
+    enabled: bool,
+    required: bool,
+    transport: McpTransportConfig,
+    auth: McpAuthConfig,
+    exposure_policy: McpExposurePolicy,
+    scope_policy: McpScopePolicy,
+    effect_policy: McpEffectPolicyConfig,
+    supports_parallel_tool_calls: bool,
+    stateless_http_max_in_flight: int,
+    catalog_refresh_interval_ms: int | None,
+    default_tool_timeout_ms: int,
+    per_tool_timeout_ms: tuple[tuple[str, int], ...],
+    runtime_source: McpRuntimeSourceIdentity | None = None,
+    public_headers: tuple[tuple[str, str], ...] = (),
+    physical_lifetime_anchor: object | None = None,
+) -> McpServerConfig:
+    source = runtime_source or LocalConfiguredMcpRuntimeSource()
+    semantic, runtime, resolved = _derive_config_fingerprints(
+        server_id=server_id,
+        display_name=display_name,
+        enabled=enabled,
+        required=required,
+        transport=transport,
+        auth=auth,
+        exposure=exposure_policy,
+        scope_policy=scope_policy,
+        effect=effect_policy,
+        supports_parallel=supports_parallel_tool_calls,
+        stateless_http_max_in_flight=stateless_http_max_in_flight,
+        catalog_refresh_interval_ms=catalog_refresh_interval_ms,
+        default_tool_timeout_ms=default_tool_timeout_ms,
+        per_tool_timeout_ms=per_tool_timeout_ms,
+        runtime_source=source,
+        public_headers=public_headers,
+    )
+    return McpServerConfig(
+        server_id,
+        display_name,
+        enabled,
+        required,
+        transport,
+        auth,
+        exposure_policy,
+        scope_policy,
+        effect_policy,
+        supports_parallel_tool_calls,
+        stateless_http_max_in_flight,
+        catalog_refresh_interval_ms,
+        default_tool_timeout_ms,
+        per_tool_timeout_ms,
+        semantic,
+        runtime,
+        resolved,
+        source,
+        public_headers,
+        physical_lifetime_anchor,
     )
 
 
@@ -470,10 +633,10 @@ def _parse_server(server_id: str, raw: Mapping[str, Any]) -> McpServerConfig:
         transport: McpTransportConfig = StdioTransportConfig(
             command=_string(transport_raw.get("command") or "", "MCP command"),
             args=_string_list(transport_raw.get("args", []), "MCP args"),
-            cwd=(
+            cwd=WorkspaceRelativeMcpCwd(
                 _string(transport_raw["cwd"], "MCP cwd")
                 if transport_raw.get("cwd") is not None
-                else None
+                else "."
             ),
             environment=tuple(sorted(environment.items())),
             secret_environment_refs=tuple(sorted(secret_environment.items())),
@@ -604,23 +767,7 @@ def _parse_server(server_id: str, raw: Mapping[str, Any]) -> McpServerConfig:
         "MCP tool timeout",
     )
     per_tool_timeout = tuple(sorted(per_timeout.items()))
-    semantic_fp, runtime_fp, resolved = _derive_config_fingerprints(
-        server_id=server_id,
-        display_name=display_name,
-        enabled=enabled,
-        required=required,
-        transport=transport,
-        auth=auth,
-        exposure=exposure,
-        scope_policy=scope_policy,
-        effect=effect,
-        supports_parallel=supports_parallel,
-        stateless_http_max_in_flight=stateless_max,
-        catalog_refresh_interval_ms=refresh,
-        default_tool_timeout_ms=default_timeout,
-        per_tool_timeout_ms=per_tool_timeout,
-    )
-    return McpServerConfig(
+    return freeze_mcp_server_config(
         server_id=server_id,
         display_name=display_name,
         enabled=enabled,
@@ -635,9 +782,8 @@ def _parse_server(server_id: str, raw: Mapping[str, Any]) -> McpServerConfig:
         catalog_refresh_interval_ms=refresh,
         default_tool_timeout_ms=default_timeout,
         per_tool_timeout_ms=per_tool_timeout,
-        semantic_config_fingerprint=semantic_fp,
-        runtime_config_fingerprint=runtime_fp,
-        resolved_config_identity=resolved,
+        runtime_source=LocalConfiguredMcpRuntimeSource(),
+        public_headers=(),
     )
 
 
@@ -676,7 +822,8 @@ def _transport_fingerprint_payload(value: McpTransportConfig) -> object:
             "kind": value.kind.value,
             "command": value.command,
             "args": value.args,
-            "cwd": value.cwd,
+            "cwd": _cwd_fingerprint_payload(value.cwd),
+            "lookup_path": value.lookup_path,
             "environment": value.environment,
             "secret_environment_refs": tuple(
                 (
@@ -716,6 +863,31 @@ def _auth_fingerprint_payload(value: McpAuthConfig) -> object:
     return {"kind": value.kind}
 
 
+def _cwd_fingerprint_payload(value: McpStdioCwdBinding) -> object:
+    if isinstance(value, WorkspaceRelativeMcpCwd):
+        return {"kind": "WORKSPACE_RELATIVE", "relative_path": value.relative_path}
+    if isinstance(value, ExactAbsoluteMcpCwd):
+        return {
+            "kind": "EXACT_ABSOLUTE",
+            "absolute_path": str(value.absolute_path),
+            "authority": value.authority.value,
+        }
+    raise TypeError("MCP cwd binding union is open")
+
+
+def _runtime_source_payload(value: McpRuntimeSourceIdentity) -> object:
+    if isinstance(value, LocalConfiguredMcpRuntimeSource):
+        return {"kind": value.kind}
+    if isinstance(value, ManagedPackageMcpRuntimeSource):
+        return {
+            "kind": value.kind,
+            "store_scope_key": value.store_scope_key,
+            "package_owner_key": value.package_owner_key,
+            "package_install_id": value.package_install_id,
+        }
+    raise TypeError("MCP runtime source identity union is open")
+
+
 def _secret_generation_commitment(environment_variable: str) -> str:
     """Return one process-local opaque generation commitment, never a secret hash."""
 
@@ -748,6 +920,8 @@ def _derive_config_fingerprints(
     catalog_refresh_interval_ms: int | None,
     default_tool_timeout_ms: int,
     per_tool_timeout_ms: tuple[tuple[str, int], ...],
+    runtime_source: McpRuntimeSourceIdentity,
+    public_headers: tuple[tuple[str, str], ...],
 ) -> tuple[str, str, str]:
     semantic_payload = {
         "server_id": server_id,
@@ -775,6 +949,8 @@ def _derive_config_fingerprints(
         "catalog_refresh_interval_ms": catalog_refresh_interval_ms,
         "default_tool_timeout_ms": default_tool_timeout_ms,
         "per_tool_timeout_ms": per_tool_timeout_ms,
+        "runtime_source": _runtime_source_payload(runtime_source),
+        "public_headers": public_headers,
     }
     semantic = context_fingerprint(
         "pulsara:mcp-semantic-config:v1", semantic_payload
@@ -902,6 +1078,41 @@ def _validate_unique_pairs(values: tuple[tuple[str, str], ...], label: str) -> N
         raise ValueError(f"{label} contains an invalid value")
 
 
+def _validate_public_headers(values: tuple[tuple[str, str], ...]) -> None:
+    folded: set[str] = set()
+    for name, value in values:
+        try:
+            encoded_name = name.encode("ascii")
+            encoded_value = value.encode("ascii")
+        except UnicodeEncodeError as exc:
+            raise ValueError("MCP public header is not ASCII") from exc
+        if (
+            not name
+            or any(item not in _HTTP_TCHAR for item in encoded_name)
+            or name.casefold() in folded
+            or value != value.strip(" \t")
+            or any(
+                item not in {9, 32} and not 33 <= item <= 126
+                for item in encoded_value
+            )
+        ):
+            raise ValueError("MCP public header is invalid")
+        folded.add(name.casefold())
+
+
+def _merge_headers_case_insensitive(
+    lower: Mapping[str, str], higher: Mapping[str, str]
+) -> dict[str, str]:
+    result = dict(lower)
+    for name, value in higher.items():
+        folded = name.casefold()
+        for prior in tuple(result):
+            if prior.casefold() == folded:
+                result.pop(prior)
+        result[name] = value
+    return result
+
+
 def _valid_env_name(value: str) -> bool:
     return bool(value) and value.replace("_", "a").isalnum() and not value[0].isdigit()
 
@@ -910,6 +1121,10 @@ __all__ = [
     "BearerEnvironmentRef",
     "DEFAULT_USER_MCP_CONFIG",
     "DetectedMcpServerConfig",
+    "ExactAbsoluteMcpCwd",
+    "LocalConfiguredMcpRuntimeSource",
+    "ManagedPackageMcpRuntimeSource",
+    "McpAbsoluteCwdAuthority",
     "McpConfiguredEffect",
     "McpEffectPolicyConfig",
     "McpExposurePolicy",
@@ -917,12 +1132,15 @@ __all__ = [
     "McpHttpNetworkPolicy",
     "McpScopePolicy",
     "McpServerConfig",
+    "McpStdioCwdBinding",
     "McpTransportKind",
     "NoAuth",
     "StaticHeaderEnvironmentRefs",
     "StdioTransportConfig",
     "StreamableHttpTransportConfig",
     "UnsupportedOAuth",
+    "WorkspaceRelativeMcpCwd",
+    "freeze_mcp_server_config",
     "WORKSPACE_MCP_CONFIG",
     "load_mcp_server_configs",
     "set_mcp_server_enabled",

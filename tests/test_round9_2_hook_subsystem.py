@@ -51,13 +51,13 @@ from pulsara_agent.hooks.contracts import (
     HookDispatchScopeRef,
     HookEventType,
     HookScopeKind,
-    HookSourceIdentity,
     HookSourceKind,
     HookSourceSnapshotDisposition,
     HookSourceTrustAssessment,
     HookTrustDisposition,
-    HookTrustSubject,
     HookVisibilityScope,
+    LocalFileHookSourceIdentity,
+    LocalFileHookTrustSubject,
     ObserveOutcome,
     PermissionDecision,
     PermissionOutcome,
@@ -103,6 +103,7 @@ from pulsara_agent.hooks.output_parser import (
     ValidHandlerContribution,
     parse_handler_output,
 )
+from pulsara_agent.process_api_key_boundary import ProcessApiKeyBoundary
 from pulsara_agent.hooks.source import LocalHookSourceProvider
 from pulsara_agent.hooks.trust import normalized_definition_digest
 from pulsara_agent.storage.migrations.manifest import CONVERSATION_KERNEL_RELATIONS
@@ -157,7 +158,7 @@ def _provenance(
 ) -> FrozenHookSourceProvenance:
     workspace_key = "workspace:test" if kind is HookSourceKind.WORKSPACE_FILE else None
     return FrozenHookSourceProvenance(
-        HookSourceIdentity(
+        LocalFileHookSourceIdentity(
             kind,
             (
                 root / ("workspace-hooks.json" if workspace_key else "hooks.json")
@@ -167,7 +168,7 @@ def _provenance(
             else HookVisibilityScope.USER,
             workspace_key,
         ),
-        HookTrustSubject(kind, workspace_key or "user"),
+        LocalFileHookTrustSubject(kind, workspace_key),
         None,
         label,
     )
@@ -1014,6 +1015,7 @@ def test_round9_2_dispatcher_all_events_status_and_terminal_lane(
         dispatcher = KernelHookDispatcher(
             initial_view=_view(tmp_path, definitions),
             workspace_root=tmp_path,
+            api_key_boundary=ProcessApiKeyBoundary(),
             executor=executor,  # type: ignore[arg-type]
             diagnostic_adapter=diagnostics,
         )
@@ -1170,7 +1172,9 @@ print('visible stderr ' + secret, file=sys.stderr)
             tmp_path,
             monotonic() + 10,
         )
-        executor = HookCommandExecutor()
+        executor = HookCommandExecutor(
+            api_key_boundary=ProcessApiKeyBoundary()
+        )
         execution = await executor.execute(request)
         assert execution.failure_code is None and execution.exit_code == 0
         parsed = parse_handler_output(execution)
@@ -1392,6 +1396,7 @@ def test_round9_2_reload_publishes_future_view_and_old_attempt_keeps_reference(
             initial_view=old_view,
             workspace_root=tmp_path,
             source_provider=_Provider(),  # type: ignore[arg-type]
+            api_key_boundary=ProcessApiKeyBoundary(),
             executor=executor,  # type: ignore[arg-type]
         )
         scope = _scope()
@@ -1463,7 +1468,7 @@ def test_round9_2_architecture_has_one_independent_engine_and_no_new_durability(
         assert all("fingerprint" not in item.name for item in fields(value))
     for path in hook_files:
         module_source = path.read_text(encoding="utf-8")
-        assert "class Plugin" not in module_source
+        assert "class PluginHookDispatcher" not in module_source
 
     production = "\n".join(
         path.read_text(encoding="utf-8")
@@ -1649,7 +1654,9 @@ def test_round9_2_api_key_rotation_is_rejected_at_exact_spawn_sink(
     monkeypatch.setattr(executor_module, "_spawn_environment", rotate_after_environment)
 
     async def exercise() -> None:
-        executor = HookCommandExecutor()
+        executor = HookCommandExecutor(
+            api_key_boundary=ProcessApiKeyBoundary()
+        )
         outcome = await executor.execute(request)
         assert outcome.failure_code == "API_KEY_VALUE_PRESENT"
         assert outcome.exit_code is None

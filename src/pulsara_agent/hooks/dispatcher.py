@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from dataclasses import replace
 import logging
 from pathlib import Path
+from time import monotonic
 from typing import Protocol
 
 from pulsara_agent.hooks.contracts import (
@@ -15,6 +17,7 @@ from pulsara_agent.hooks.contracts import (
     ContinuationOutcome,
     EVENT_OUTCOME_FAMILY,
     FrozenHookDefinitionView,
+    FrozenHookSourceSnapshot,
     GateDecision,
     GateOutcome,
     HookContextEntry,
@@ -24,6 +27,10 @@ from pulsara_agent.hooks.contracts import (
     HookDispatchOutcome,
     HookDispatchScopeRef,
     HookEventType,
+    HookSourceKind,
+    HookSourceSnapshotDisposition,
+    HookSourceTrustAssessment,
+    HookTrustDisposition,
     ObserveOutcome,
     PermissionDecision,
     PermissionOutcome,
@@ -39,6 +46,8 @@ from pulsara_agent.hooks.output_parser import (
     parse_handler_output,
 )
 from pulsara_agent.hooks.source import LocalHookSourceProvider
+from pulsara_agent.hooks.trust import normalized_definition_digest
+from pulsara_agent.process_api_key_boundary import ProcessApiKeyBoundary
 
 
 class HookDiagnosticAdapter(Protocol):
@@ -87,6 +96,56 @@ class LoggingHookDiagnosticAdapter:
             )
 
 
+async def _shielded_to_thread(operation, /, *args):
+    task = asyncio.create_task(
+        asyncio.to_thread(operation, *args), name="hook-source-filesystem"
+    )
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        with suppress(BaseException):
+            await asyncio.shield(task)
+        raise
+
+
+def _build_local_reload_candidate(
+    source_provider: LocalHookSourceProvider,
+    predecessor: FrozenHookDefinitionView,
+    deadline_monotonic: float | None,
+) -> FrozenHookDefinitionView:
+    local = source_provider.discover(deadline_monotonic=deadline_monotonic)
+    plugin = tuple(
+        item
+        for item in predecessor.source_snapshots
+        if item.provenance.identity.kind is HookSourceKind.PLUGIN
+    )
+    if not plugin:
+        return local
+    trust_store = source_provider.trust_store
+    assessed: list[FrozenHookSourceSnapshot] = []
+    for snapshot in plugin:
+        if snapshot.disposition is not HookSourceSnapshotDisposition.COMPLETE:
+            assessed.append(snapshot)
+            continue
+        digest = normalized_definition_digest(
+            snapshot.provenance, snapshot.definitions
+        )
+        try:
+            trust = trust_store.assess(
+                snapshot.provenance.trust_subject, digest
+            )
+        except (OSError, ValueError):
+            trust = HookSourceTrustAssessment(
+                HookTrustDisposition.UNAVAILABLE,
+                digest,
+                None,
+                True,
+                None,
+            )
+        assessed.append(replace(snapshot, trust=trust))
+    return FrozenHookDefinitionView((*local.source_snapshots, *assessed))
+
+
 class KernelHookDispatcher:
     def __init__(
         self,
@@ -94,6 +153,7 @@ class KernelHookDispatcher:
         initial_view: FrozenHookDefinitionView,
         workspace_root: Path,
         source_provider: LocalHookSourceProvider | None = None,
+        api_key_boundary: ProcessApiKeyBoundary,
         executor: HookCommandExecutor | None = None,
         diagnostic_adapter: HookDiagnosticAdapter | None = None,
         background_context: HookBackgroundContextPort | None = None,
@@ -101,7 +161,9 @@ class KernelHookDispatcher:
         self._current_view = initial_view
         self._workspace_root = workspace_root.expanduser().resolve()
         self._source_provider = source_provider
-        self._executor = executor or HookCommandExecutor()
+        self._executor = executor or HookCommandExecutor(
+            api_key_boundary=api_key_boundary
+        )
         self._diagnostics = diagnostic_adapter or _NullDiagnosticAdapter()
         self._background_context = background_context
         self._publication_lock = asyncio.Lock()
@@ -135,16 +197,66 @@ class KernelHookDispatcher:
     ) -> FrozenHookDefinitionView:
         if self._source_provider is None:
             raise RuntimeError("dispatcher has no local Hook source provider")
-        async with self._publication_lock:
+        while True:
             predecessor = self._current_view
-            replacement = await asyncio.to_thread(
-                self._source_provider.discover,
-                deadline_monotonic=deadline_monotonic,
+            replacement = await _shielded_to_thread(
+                _build_local_reload_candidate,
+                self._source_provider,
+                predecessor,
+                deadline_monotonic,
             )
+            if deadline_monotonic is not None and monotonic() >= deadline_monotonic:
+                raise TimeoutError("Hook reload deadline expired")
+            await _acquire_lock_before_deadline(
+                self._publication_lock,
+                deadline_monotonic,
+                "Hook reload publication deadline expired",
+            )
+            try:
+                if self._current_view is not predecessor:
+                    continue
+                if not await publish_scanned_view(predecessor, replacement):
+                    raise RuntimeError("Hook reload owner is no longer current")
+                self._offer_view_diagnostics(replacement, phase="reload")
+                return replacement
+            finally:
+                self._publication_lock.release()
+
+    async def publish_plugin_slice(
+        self,
+        *,
+        plugin_snapshots: tuple[FrozenHookSourceSnapshot, ...],
+        deadline_monotonic: float,
+        publish_scanned_view: Callable[
+            [FrozenHookDefinitionView, FrozenHookDefinitionView], Awaitable[bool]
+        ],
+    ) -> FrozenHookDefinitionView:
+        """Merge one already-built Plugin slice in the only publication lane."""
+
+        if any(
+            snapshot.provenance.identity.kind is not HookSourceKind.PLUGIN
+            for snapshot in plugin_snapshots
+        ):
+            raise ValueError("Plugin Hook publication contains a local source")
+        await _acquire_lock_before_deadline(
+            self._publication_lock,
+            deadline_monotonic,
+            "Plugin Hook publication deadline expired",
+        )
+        try:
+            predecessor = self._current_view
+            local = tuple(
+                snapshot
+                for snapshot in predecessor.source_snapshots
+                if snapshot.provenance.identity.kind is not HookSourceKind.PLUGIN
+            )
+            replacement = FrozenHookDefinitionView((*local, *plugin_snapshots))
             if not await publish_scanned_view(predecessor, replacement):
-                raise RuntimeError("Hook reload owner is no longer current")
-            self._offer_view_diagnostics(replacement, phase="reload")
+                raise RuntimeError("Hook Plugin publication owner is no longer current")
+            self._offer_view_diagnostics(replacement, phase="plugin-reload")
             return replacement
+        finally:
+            self._publication_lock.release()
 
     def publish_scanned_view(
         self,
@@ -380,6 +492,12 @@ class KernelHookDispatcher:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         await self._executor.aclose(deadline_monotonic=deadline_monotonic)
+        # Drop the current definition graph only after ordinary/background
+        # attempts have joined.  Plugin package anchors are ordinary RAII
+        # leaves referenced by definitions and any retained Hook contexts;
+        # their last consumer, rather than the publication pointer, closes
+        # the shared package lock.
+        self._current_view = FrozenHookDefinitionView(())
 
     async def _enter_ordinary(self) -> None:
         async with self._lane:
@@ -494,6 +612,23 @@ def _aggregate(
             diagnostics,
         )
     return GateOutcome(context_entries=contexts, diagnostics=diagnostics)
+
+
+async def _acquire_lock_before_deadline(
+    lock: asyncio.Lock,
+    deadline_monotonic: float | None,
+    message: str,
+) -> None:
+    if deadline_monotonic is None:
+        await lock.acquire()
+        return
+    remaining = deadline_monotonic - monotonic()
+    if remaining <= 0:
+        raise TimeoutError(message)
+    try:
+        await asyncio.wait_for(lock.acquire(), timeout=remaining)
+    except TimeoutError:
+        raise TimeoutError(message) from None
 
 
 __all__ = [

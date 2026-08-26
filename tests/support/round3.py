@@ -140,6 +140,7 @@ from pulsara_agent.ports.provider_stream import (
     ProviderStreamTerminal,
 )
 from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
+from pulsara_agent.process_api_key_boundary import ProcessApiKeyBoundary
 from pulsara_agent.primitives.run_permission import (
     FrozenRunPermissionSnapshot,
     RunPermissionAdmissionSource,
@@ -154,6 +155,7 @@ class ScriptedKernelModel:
         self.requests: list[KernelModelExecutionRequest] = []
         self.preparation_requests: list[KernelModelPreparationRequest] = []
         self._preparer = DirectKernelModelPort(
+            api_key_boundary=ProcessApiKeyBoundary(),
             config=test_llm_config(
                 api_key="test",
                 base_url="https://example.invalid/v1",
@@ -226,6 +228,7 @@ class CallbackScriptedKernelModel:
         self._stream_factory = stream_factory
         self.requests: list[KernelModelExecutionRequest] = []
         self._preparer = DirectKernelModelPort(
+            api_key_boundary=ProcessApiKeyBoundary(),
             config=test_llm_config(
                 api_key="test",
                 base_url="https://example.invalid/v1",

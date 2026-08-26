@@ -19,13 +19,14 @@ from pulsara_agent.hooks.contracts import (
     FrozenHookSourceProvenance,
     FrozenHookSourceSnapshot,
     HookDiagnostic,
-    HookSourceIdentity,
     HookSourceKind,
     HookSourceSnapshotDisposition,
     HookSourceTrustAssessment,
     HookTrustDisposition,
     HookTrustSubject,
     HookVisibilityScope,
+    LocalFileHookSourceIdentity,
+    LocalFileHookTrustSubject,
 )
 from pulsara_agent.hooks.trust import HookTrustStore, normalized_definition_digest
 
@@ -93,10 +94,10 @@ class LocalHookSourceProvider:
 
     def source_subject(self, kind: HookSourceKind) -> HookTrustSubject:
         if kind is HookSourceKind.USER_FILE:
-            return HookTrustSubject(kind, "user")
+            return LocalFileHookTrustSubject(kind)
         if self._workspace_kind != "project":
             raise ValueError("transient workspaces have no WORKSPACE Hook source")
-        return HookTrustSubject(kind, self._workspace_state_key)
+        return LocalFileHookTrustSubject(kind, self._workspace_state_key)
 
     def _read_source(
         self,
@@ -108,7 +109,7 @@ class LocalHookSourceProvider:
         deadline_monotonic: float | None,
     ) -> FrozenHookSourceSnapshot:
         expected = Path(os.path.abspath(expected))
-        identity = HookSourceIdentity(
+        identity = LocalFileHookSourceIdentity(
             kind,
             expected,
             HookVisibilityScope.USER

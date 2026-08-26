@@ -25,6 +25,7 @@ from pulsara_agent.ports.live_agent_event import (
     live_digest,
 )
 from pulsara_agent.primitives.permission import PermissionMode
+from pulsara_agent.process_api_key_boundary import ProcessApiKeyBoundary
 from pulsara_agent.model_input.continuity import ProcessLocalProviderInputInstallPermit
 from pulsara_agent.primitives.plan_workflow import (
     PlanDraftDecision,
@@ -148,6 +149,7 @@ class _PlanHostModel(_PreflightModel):
         self.question_opened = asyncio.Event()
         self.implementation_seen = asyncio.Event()
         self._preparer = DirectKernelModelPort(
+            api_key_boundary=ProcessApiKeyBoundary(),
             config=test_llm_config(
                 api_key="test",
                 base_url="https://example.invalid/v1",
@@ -237,6 +239,7 @@ class _EnterPlanThenTextModel(_PreflightModel):
         self.requests: list[object] = []
         self.completed = asyncio.Event()
         self._preparer = DirectKernelModelPort(
+            api_key_boundary=ProcessApiKeyBoundary(),
             config=test_llm_config(
                 api_key="test",
                 base_url="https://example.invalid/v1",
@@ -271,6 +274,7 @@ class _DetachedDraftModel(_PreflightModel):
         self.implementation_seen = asyncio.Event()
         self.requests: list[object] = []
         self._preparer = DirectKernelModelPort(
+            api_key_boundary=ProcessApiKeyBoundary(),
             config=test_llm_config(
                 api_key="test",
                 base_url="https://example.invalid/v1",
@@ -306,6 +310,7 @@ class _ForceExitRaceModel(_PreflightModel):
     def __init__(self) -> None:
         self.requests: list[object] = []
         self._preparer = DirectKernelModelPort(
+            api_key_boundary=ProcessApiKeyBoundary(),
             config=test_llm_config(
                 api_key="test",
                 base_url="https://example.invalid/v1",
@@ -333,6 +338,7 @@ class _BlockingPlanTextModel(_PreflightModel):
         self.started = asyncio.Event()
         self.release = asyncio.Event()
         self._preparer = DirectKernelModelPort(
+            api_key_boundary=ProcessApiKeyBoundary(),
             config=test_llm_config(
                 api_key="test",
                 base_url="https://example.invalid/v1",

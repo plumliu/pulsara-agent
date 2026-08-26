@@ -67,7 +67,23 @@ Inspect the installed truth with `pulsara plugins list` and use
 `pulsara plugins doctor` for component, availability, conflict, trust, or reload
 diagnostics. Enabling is a separate decision: show the exact normalized component
 summary and obtain the user's acceptance before invoking `pulsara plugins enable`.
-Do not treat Plugin enablement as Hook trust or remote tool permission.
+`--yes` only records that exact external-process acceptance non-interactively; it
+does not waive the summary, bind a different package install id, grant Hook trust,
+or grant remote tool permission.
+
+Use the ordinary lifecycle commands rather than editing managed state:
+
+```bash
+pulsara plugins disable --scope <user|workspace> [--workspace <workspace-root>] <plugin-id>
+pulsara plugins remove --scope <user|workspace> [--workspace <workspace-root>] <plugin-id>
+pulsara plugins gc [--workspace <workspace-root>]
+```
+
+Remove preserves the per-instance data directory. GC only reclaims unreferenced
+package roots/stages that have no physical consumer. A running Host adopts
+management changes only through its explicit Plugin reload path or restart;
+install, replace, enable, disable, remove, trust, and GC never rewrite an already
+installed provider prefix.
 
 ## Guardrails
 

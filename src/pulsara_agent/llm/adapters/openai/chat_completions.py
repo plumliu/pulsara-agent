@@ -11,8 +11,10 @@ from typing import Any, AsyncIterator
 from pulsara_agent.llm.adapters.openai.client import (
     OPENAI_CHAT_COMPLETIONS_API,
     OpenAITransportTimeoutPolicy,
+    admit_provider_request,
     build_async_openai_client,
 )
+from pulsara_agent.process_api_key_boundary import ProcessApiKeyBoundary
 from pulsara_agent.llm.adapters.openai.errors import classify_llm_error
 from pulsara_agent.llm.adapters.openai.events import (
     ProviderLiveItemBuilder,
@@ -79,6 +81,7 @@ class OpenAIChatCompletionsTransport:
 
     api_key: str
     timeout_policy: OpenAITransportTimeoutPolicy
+    api_key_boundary: ProcessApiKeyBoundary = field(repr=False)
     api: str = OPENAI_CHAT_COMPLETIONS_API
     binding_id: str = "pulsara.openai.chat_completions"
     contract_version: str = "v5-explicit-terminal-bounded-reasoning-carriers"
@@ -125,6 +128,7 @@ class OpenAIChatCompletionsTransport:
             api_key=self.api_key,
             base_url=model.base_url,
             timeout_policy=self.timeout_policy,
+            api_key_boundary=self.api_key_boundary,
             max_retries=sdk_max_retries_for_transport(
                 retry_config=self.retry_config,
                 explicit_max_retries=self.openai_sdk_max_retries,
@@ -147,8 +151,12 @@ class OpenAIChatCompletionsTransport:
                     provider_profile=model.provider_profile,
                 )
                 try:
-                    stream = await client.chat.completions.create(
-                        **payload, stream=True
+                    stream = await admit_provider_request(
+                        api_key_boundary=self.api_key_boundary,
+                        payload=payload,
+                        operation=lambda: client.chat.completions.create(
+                            **payload, stream=True
+                        ),
                     )
                     async for raw_chunk in stream:
                         model_identity.observe(

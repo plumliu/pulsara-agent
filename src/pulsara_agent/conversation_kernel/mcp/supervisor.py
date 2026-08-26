@@ -23,6 +23,8 @@ from pulsara_agent.capability.contracts import (
     FrozenMcpCapabilityProjectionInput,
     FrozenToolCapabilityFact,
     McpInspectEffectKind,
+    McpProviderNameCollisionFact,
+    McpProviderNameCollisionMember,
     McpToolCapabilityRef,
     capability_identity,
     capability_source_ref,
@@ -57,6 +59,7 @@ from pulsara_agent.primitives.context import (
     freeze_json,
     thaw_json,
 )
+from pulsara_agent.process_api_key_boundary import ProcessApiKeyBoundary
 
 from ..tool_surface import (
     McpEffectKind,
@@ -278,6 +281,7 @@ class McpConnectionSlot:
         maximum_in_flight: int,
         host_lane: asyncio.Semaphore,
         failure_reporter: Callable[["McpConnectionSlot", str, bool], None],
+        physical_lifetime_anchor: object | None = None,
     ) -> None:
         self.slot_id = f"mcp-slot:{server_id}:{uuid4().hex}"
         self.server_id = server_id
@@ -303,12 +307,20 @@ class McpConnectionSlot:
         self._lane = asyncio.Semaphore(maximum_in_flight)
         self._host_lane = host_lane
         self._failure_reporter = failure_reporter
+        self._physical_lifetime_anchor = physical_lifetime_anchor
         self._dirty_generation = 0
         self._dispatch_fence = McpDispatchFenceState.OPEN
         self._accepting_new_leases = True
         self._leases: set[McpSlotLease] = set()
         self._permits: dict[str, McpDispatchAdmissionPermit] = {}
         self._active_operation_count = 0
+
+    def close_physical_lifetime(self) -> None:
+        anchor = self._physical_lifetime_anchor
+        if anchor is None:
+            return
+        self._physical_lifetime_anchor = None
+        _close_physical_lifetime_anchor(anchor)
 
     @property
     def dispatch_fence_state(self) -> McpDispatchFenceState:
@@ -699,6 +711,69 @@ class McpBoundToolExecutor:
                 input_owner.close()
 
 
+def _aggregate_provider_projection(
+    candidates: tuple[McpInstallationCandidate, ...],
+    scope: ModelInputScopeKind,
+) -> tuple[
+    tuple[McpToolSemanticFact, ...],
+    tuple[McpProviderNameCollisionFact, ...],
+]:
+    visible_semantics = tuple(
+        semantic
+        for candidate in candidates
+        for semantic in candidate.discovery_snapshot.tools
+        if (
+            semantic.root_visible
+            if scope is ModelInputScopeKind.ROOT
+            else semantic.subagent_visible
+        )
+    )
+    return _provider_projection_from_semantics(visible_semantics)
+
+
+def _provider_projection_from_semantics(
+    semantics: tuple[McpToolSemanticFact, ...],
+) -> tuple[
+    tuple[McpToolSemanticFact, ...],
+    tuple[McpProviderNameCollisionFact, ...],
+]:
+    groups: dict[str, list[McpToolSemanticFact]] = {}
+    for semantic in semantics:
+        groups.setdefault(semantic.provider_tool_name, []).append(semantic)
+    survivors: list[McpToolSemanticFact] = []
+    collisions: list[McpProviderNameCollisionFact] = []
+    for provider_name in sorted(groups):
+        members = groups[provider_name]
+        if len(members) == 1:
+            survivors.append(members[0])
+            continue
+        collisions.append(
+            McpProviderNameCollisionFact(
+                provider_name=provider_name,
+                members=tuple(
+                    sorted(
+                        (
+                            McpProviderNameCollisionMember(
+                                server_id=item.server_id,
+                                remote_tool_name=item.remote_tool_name,
+                                discovered_tool_identity=(
+                                    item.descriptor_fingerprint
+                                ),
+                            )
+                            for item in members
+                        ),
+                        key=lambda item: (
+                            item.server_id,
+                            item.remote_tool_name,
+                            item.discovered_tool_identity,
+                        ),
+                    )
+                ),
+            )
+        )
+    return tuple(survivors), tuple(collisions)
+
+
 @dataclass(frozen=True, slots=True)
 class McpInstalledRuntimeGeneration:
     runtime_generation_id: int
@@ -715,6 +790,12 @@ class McpInstalledRuntimeGeneration:
     candidates: Mapping[str, McpInstallationCandidate] = field(
         repr=False, compare=False
     )
+    root_provider_name_collision_facts: tuple[
+        McpProviderNameCollisionFact, ...
+    ] = ()
+    subagent_provider_name_collision_facts: tuple[
+        McpProviderNameCollisionFact, ...
+    ] = ()
 
     def catalog_for_scope(
         self, scope: ModelInputScopeKind
@@ -723,6 +804,15 @@ class McpInstalledRuntimeGeneration:
             self.catalog_snapshot
             if scope is ModelInputScopeKind.ROOT
             else self.subagent_catalog_snapshot
+        )
+
+    def provider_name_collisions_for_scope(
+        self, scope: ModelInputScopeKind
+    ) -> tuple[McpProviderNameCollisionFact, ...]:
+        return (
+            self.root_provider_name_collision_facts
+            if scope is ModelInputScopeKind.ROOT
+            else self.subagent_provider_name_collision_facts
         )
 
     def release(self) -> None:
@@ -1064,6 +1154,7 @@ class McpHostSupervisor:
         session_id: str,
         workspace_root: Path,
         configs: tuple[McpServerConfig, ...],
+        api_key_boundary: ProcessApiKeyBoundary,
         client_factory: type[BoundedMcpSdkClient] = BoundedMcpSdkClient,
         required_startup_timeout_seconds: float = 120.0,
         optional_fast_start_seconds: float = 3.0,
@@ -1076,6 +1167,7 @@ class McpHostSupervisor:
         self.configs = tuple(sorted(configs, key=lambda item: item.server_id))
         self._config_by_id = {item.server_id: item for item in self.configs}
         self._client_factory = client_factory
+        self._api_key_boundary = api_key_boundary
         if min(
             required_startup_timeout_seconds,
             optional_fast_start_seconds,
@@ -1178,27 +1270,43 @@ class McpHostSupervisor:
         if len(configs) > MAXIMUM_CONFIGURED_MCP_SERVERS:
             raise ValueError("too many configured MCP servers")
         ordered = tuple(sorted(configs, key=lambda item: item.server_id))
-        updated = {item.server_id: item for item in ordered}
-        if len(updated) != len(ordered):
+        incoming = {item.server_id: item for item in ordered}
+        if len(incoming) != len(ordered):
             raise ValueError("MCP server ids are not unique")
         reconnect: list[str] = []
         retire_slots: list[McpConnectionSlot] = []
         release_candidates: list[McpInstallationCandidate] = []
         cancel_tasks: list[asyncio.Task[None]] = []
+        close_config_anchors: list[object] = []
         with self._lock:
             if self._closed:
                 raise RuntimeError("MCP supervisor is closed")
             old = self._config_by_id
             changed_ids = {
                 server_id
-                for server_id in set(old) | set(updated)
+                for server_id in set(old) | set(incoming)
                 if server_id not in old
-                or server_id not in updated
+                or server_id not in incoming
                 or old[server_id].resolved_config_identity
-                != updated[server_id].resolved_config_identity
-                or old[server_id].enabled != updated[server_id].enabled
+                != incoming[server_id].resolved_config_identity
+                or old[server_id].enabled != incoming[server_id].enabled
             }
-            self.configs = ordered
+            updated = dict(incoming)
+            for server_id in set(old) & set(incoming) - changed_ids:
+                updated[server_id] = old[server_id]
+                anchor = incoming[server_id].physical_lifetime_anchor
+                if anchor is not None:
+                    close_config_anchors.append(anchor)
+            for server_id in changed_ids:
+                old_config = old.get(server_id)
+                if (
+                    old_config is not None
+                    and old_config.physical_lifetime_anchor is not None
+                ):
+                    close_config_anchors.append(
+                        old_config.physical_lifetime_anchor
+                    )
+            self.configs = tuple(updated[key] for key in sorted(updated))
             self._config_by_id = updated
             for server_id in changed_ids:
                 old_config = old.get(server_id)
@@ -1280,6 +1388,8 @@ class McpHostSupervisor:
                     reconnect.append(server_id)
         for candidate in release_candidates:
             candidate.slot_lease.release()
+        for anchor in close_config_anchors:
+            _close_physical_lifetime_anchor(anchor)
         for task in cancel_tasks:
             task.cancel()
         for slot in retire_slots:
@@ -1312,6 +1422,9 @@ class McpHostSupervisor:
             self._attempt_generation[server_id] += 1
             generation = self._attempt_generation[server_id]
             refresh_generation = self._refresh_generation[server_id]
+            attempt_anchor = _duplicate_physical_lifetime_anchor(
+                config.physical_lifetime_anchor
+            )
             # A same-semantic replacement attempt is physical state only.  Its
             # installed catalog remains provider-visible while execution is
             # independently fenced, so CONNECTING would create a false catalog
@@ -1321,7 +1434,13 @@ class McpHostSupervisor:
                     server_id, McpServerState.CONNECTING
                 )
             task = asyncio.create_task(
-                self._connect(server_id, generation, refresh_generation),
+                self._connect(
+                    server_id,
+                    generation,
+                    refresh_generation,
+                    config,
+                    attempt_anchor,
+                ),
                 name=f"mcp-connect:{server_id}:{generation}",
             )
             self._tasks[server_id] = task
@@ -1376,8 +1495,9 @@ class McpHostSupervisor:
         server_id: str,
         attempt_generation: int,
         refresh_generation: int,
+        config: McpServerConfig,
+        attempt_anchor: object | None,
     ) -> None:
-        config = self._config_by_id[server_id]
         box: dict[str, McpConnectionSlot] = {}
 
         async def notification(method: str) -> None:
@@ -1413,14 +1533,16 @@ class McpHostSupervisor:
                         name=f"mcp-reconcile:{server_id}",
                     )
 
-        client = self._client_factory(
-            config,
-            workspace_root=self.workspace_root,
-            notification_callback=notification,
-        )
+        client: BoundedMcpSdkClient | None = None
         slot: McpConnectionSlot | None = None
         candidate_lease: McpSlotLease | None = None
         try:
+            client = self._client_factory(
+                config,
+                workspace_root=self.workspace_root,
+                notification_callback=notification,
+                api_key_boundary=self._api_key_boundary,
+            )
             # Start serial while the handshake determines whether an HTTP peer
             # installed session state.  Only an operator assertion *and* a
             # session-id-free negotiated transport can open the bounded lane.
@@ -1436,7 +1558,9 @@ class McpHostSupervisor:
                 maximum_in_flight=maximum,
                 host_lane=self._host_operation_lane,
                 failure_reporter=self._report_slot_failure,
+                physical_lifetime_anchor=attempt_anchor,
             )
+            attempt_anchor = None
             box["slot"] = slot
             superseded_pending: McpInstallationCandidate | None = None
             async with asyncio.timeout(self._connect_attempt_timeout_seconds):
@@ -1528,7 +1652,10 @@ class McpHostSupervisor:
                 candidate_lease.release()
             if slot is not None:
                 slot.begin_close()
-            await client.aclose()
+            if client is not None:
+                await client.aclose()
+            if slot is not None:
+                slot.close_physical_lifetime()
             with self._lock:
                 if (
                     not self._closed
@@ -1556,6 +1683,9 @@ class McpHostSupervisor:
                         )
                     if not isinstance(exc, ValueError):
                         self._schedule_retry_locked(server_id)
+        finally:
+            if attempt_anchor is not None:
+                _close_physical_lifetime_anchor(attempt_anchor)
 
     def _report_slot_failure(
         self,
@@ -1692,6 +1822,7 @@ class McpHostSupervisor:
             await asyncio.sleep(0.01)
         slot.begin_close()
         await slot.client.aclose()
+        slot.close_physical_lifetime()
         # Retired physical objects are not lifecycle history.  Only a proven
         # successful physical close may drop the heavyweight slot/client graph;
         # a close failure stays retained for Host shutdown diagnosis/join.
@@ -1736,16 +1867,21 @@ class McpHostSupervisor:
             candidates = tuple(
                 next_installed[key] for key in sorted(next_installed)
             )
-            specs = tuple(
-                tool
-                for item in candidates
-                for tool in item.discovery_snapshot.tools
+            root, root_collisions = _aggregate_provider_projection(
+                candidates, ModelInputScopeKind.ROOT
             )
-            root = tuple(
-                sorted(specs, key=lambda item: item.provider_tool_name)
+            child, child_collisions = _aggregate_provider_projection(
+                candidates, ModelInputScopeKind.SUBAGENT_TASK
             )
-            if len({item.provider_tool_name for item in root}) != len(root):
-                raise RuntimeError("MCP provider tool names collide across servers")
+            execution_semantics = tuple(
+                sorted(
+                    {
+                        (item.server_id, item.remote_tool_name): item
+                        for item in (*root, *child)
+                    }.values(),
+                    key=lambda item: item.provider_tool_name,
+                )
+            )
             lease_by_server: dict[str, McpSlotLease] = {}
             try:
                 for candidate in candidates:
@@ -1774,18 +1910,17 @@ class McpHostSupervisor:
             subagent_catalog = self._catalog_locked(
                 ModelInputScopeKind.SUBAGENT_TASK
             )
-        child = tuple(
-            item for item in root if item.subagent_visible
-        )
-        policy_by_name = {
-            policy.provider_tool_name: policy
+        policy_by_target = {
+            (policy.server_id, policy.remote_tool_name): policy
             for candidate in candidates
             for policy in candidate.ordered_tool_execution_policies
         }
         bindings: list[PreparedToolExecutionBinding] = []
         executors: dict[str, McpBoundToolExecutor] = {}
-        for semantic in root:
-            policy = policy_by_name[semantic.provider_tool_name]
+        for semantic in execution_semantics:
+            policy = policy_by_target[
+                (semantic.server_id, semantic.remote_tool_name)
+            ]
             lease = lease_by_server[semantic.server_id]
             executor_fp = context_fingerprint(
                 "mcp-tool-executor-binding:v1",
@@ -1833,6 +1968,8 @@ class McpHostSupervisor:
             slot_leases=leases,
             slot_lease_by_server=lease_by_server,
             candidates={item.server_id: item for item in candidates},
+            root_provider_name_collision_facts=root_collisions,
+            subagent_provider_name_collision_facts=child_collisions,
         )
 
     def catalog_snapshot(self) -> McpCatalogSnapshot:
@@ -1856,6 +1993,13 @@ class McpHostSupervisor:
                 raise RuntimeError("MCP supervisor is closed")
             snapshots = []
             inspection_inputs: list[PreparedMcpInspectionInput] = []
+            scoped_semantics, collision_facts = _aggregate_provider_projection(
+                tuple(self._installed[key] for key in sorted(self._installed)),
+                conversation_scope_kind,
+            )
+            semantics_by_server: dict[str, list[McpToolSemanticFact]] = {}
+            for semantic in scoped_semantics:
+                semantics_by_server.setdefault(semantic.server_id, []).append(semantic)
             for config in self.configs:
                 if not config.enabled:
                     continue
@@ -1892,14 +2036,8 @@ class McpHostSupervisor:
                 )
                 facts = ()
                 if clean and candidate is not None:
-                    scoped_semantics = tuple(
-                        item
-                        for item in candidate.discovery_snapshot.tools
-                        if (
-                            item.root_visible
-                            if conversation_scope_kind is ModelInputScopeKind.ROOT
-                            else item.subagent_visible
-                        )
+                    server_semantics = tuple(
+                        semantics_by_server.get(config.server_id, ())
                     )
                     facts = tuple(
                         freeze_tool_capability_fact(
@@ -1911,7 +2049,7 @@ class McpHostSupervisor:
                             origin=ToolCapabilityOrigin.MCP,
                             canonical_tool_spec=item.provider_spec(),
                         )
-                        for item in scoped_semantics
+                        for item in server_semantics
                     )
                 disposition = (
                     CapabilitySourceSnapshotDisposition.COMPLETE
@@ -1928,10 +2066,11 @@ class McpHostSupervisor:
                 snapshots.append(source_snapshot)
                 if clean and candidate is not None:
                     semantic_by_remote = {
-                        item.remote_tool_name: item for item in scoped_semantics
+                        item.remote_tool_name: item
+                        for item in semantics_by_server.get(config.server_id, ())
                     }
-                    policy_by_name = {
-                        item.provider_tool_name: item
+                    policy_by_remote = {
+                        item.remote_tool_name: item
                         for item in candidate.ordered_tool_execution_policies
                     }
                     for fact in source_snapshot.facts:
@@ -1940,9 +2079,7 @@ class McpHostSupervisor:
                         semantic = semantic_by_remote.get(
                             fact.identity.stable_name
                         )
-                        policy = policy_by_name.get(
-                            fact.canonical_tool_spec.name
-                        )
+                        policy = policy_by_remote.get(fact.identity.stable_name)
                         if (
                             semantic is None
                             or policy is None
@@ -1984,6 +2121,7 @@ class McpHostSupervisor:
                     )
                 ),
                 owner_authenticity=self._capability_owner_authenticity,
+                provider_name_collision_facts=collision_facts,
             )
 
     def freeze_capability_projection_input(
@@ -2056,12 +2194,24 @@ class McpHostSupervisor:
             source_snapshots=owner.source_snapshots,
             catalog_semantic_fingerprint=catalog.semantic_fingerprint,
             inspectability_facts=ordered_inspectability,
+            provider_name_collision_facts=(
+                owner.provider_name_collision_facts
+            ),
         )
 
     def _catalog_locked(
         self, scope: ModelInputScopeKind
     ) -> McpCatalogSnapshot:
         entries: list[McpServerCatalogEntry] = []
+        _semantics, collision_facts = _aggregate_provider_projection(
+            tuple(self._installed[key] for key in sorted(self._installed)),
+            scope,
+        )
+        collision_targets = {
+            (member.server_id, member.remote_tool_name)
+            for fact in collision_facts
+            for member in fact.members
+        }
         for config in self.configs:
             if (
                 scope is ModelInputScopeKind.SUBAGENT_TASK
@@ -2077,13 +2227,23 @@ class McpHostSupervisor:
                 if candidate is not None
                 else None
             )
+            visible_tools = (
+                ()
+                if snapshot is None
+                else tuple(
+                    item
+                    for item in snapshot.tools
+                    if (item.server_id, item.remote_tool_name)
+                    not in collision_targets
+                )
+            )
             entries.append(
                 McpServerCatalogEntry(
                     server_id=config.server_id,
                     display_name=config.display_name,
                     status=self._state[config.server_id],
                     required=config.required,
-                    exposed_tool_count=len(snapshot.tools) if snapshot else 0,
+                    exposed_tool_count=len(visible_tools),
                     discovered_tool_count=(
                         snapshot.discovered_tool_count if snapshot else 0
                     ),
@@ -2091,9 +2251,9 @@ class McpHostSupervisor:
                     resource_template_count=(len(snapshot.resource_templates) if snapshot else 0),
                     prompt_count=len(snapshot.prompts) if snapshot else 0,
                     bounded_tool_name_overview=(
-                        tuple(item.provider_tool_name for item in snapshot.tools[:32])
-                        if snapshot
-                        else ()
+                        tuple(
+                            item.provider_tool_name for item in visible_tools[:32]
+                        )
                     ),
                     sanitized_instructions=(snapshot.sanitized_instructions if snapshot else ""),
                     stable_failure_category=self._failure.get(config.server_id),
@@ -2117,6 +2277,7 @@ class McpHostSupervisor:
             owner_epoch=self._epoch,
             catalog_revision=self._catalog_revision,
             entries=tuple(entries),
+            provider_name_collision_facts=collision_facts,
         )
 
     def reconnect(self, server_id: str) -> None:
@@ -2184,6 +2345,13 @@ class McpHostSupervisor:
             slots = tuple(self._all_slots)
             pending = tuple(self._pending.values())
             installed = tuple(self._installed.values())
+            config_anchors = tuple(
+                item.physical_lifetime_anchor
+                for item in self.configs
+                if item.physical_lifetime_anchor is not None
+            )
+            self.configs = ()
+            self._config_by_id.clear()
             self._pending.clear()
             self._installed.clear()
             for slot in slots:
@@ -2209,10 +2377,30 @@ class McpHostSupervisor:
             for slot in slots
         ):
             await asyncio.sleep(0.01)
+        for slot in slots:
+            slot.close_physical_lifetime()
+        for anchor in config_anchors:
+            _close_physical_lifetime_anchor(anchor)
         # Retiring-slot close tasks are physical owners, not retry timers.  They
         # must be joined rather than cancelled, even when Host close races them.
         if slot_close_tasks:
             await asyncio.gather(*slot_close_tasks, return_exceptions=True)
+
+
+def _duplicate_physical_lifetime_anchor(anchor: object | None) -> object | None:
+    if anchor is None:
+        return None
+    duplicate = getattr(anchor, "duplicate", None)
+    if not callable(duplicate):
+        raise TypeError("MCP physical lifetime anchor is not duplicable")
+    return duplicate()
+
+
+def _close_physical_lifetime_anchor(anchor: object) -> None:
+    close = getattr(anchor, "close", None)
+    if not callable(close):
+        raise TypeError("MCP physical lifetime anchor is not closable")
+    close()
 
 
 async def _discover(

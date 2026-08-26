@@ -48,6 +48,7 @@ from pulsara_agent.ports.provider_stream import (
 )
 from pulsara_agent.primitives.model_call import ModelCallPurpose, ModelContextLimits
 from pulsara_agent.primitives.context import canonical_json_bytes
+from pulsara_agent.process_api_key_boundary import ProcessApiKeyBoundary
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,11 +84,13 @@ class DirectKernelAuxiliaryJsonModel:
         self,
         config: LLMConfig,
         *,
+        api_key_boundary: ProcessApiKeyBoundary,
         target_resolver: Callable[..., object] = resolve_model_target,
         call_resolver: Callable[..., object] = resolve_model_call,
         context_validator: Callable[..., object] = validate_model_context_for_call,
     ) -> None:
         self._config = config
+        self._api_key_boundary = api_key_boundary
         self._target_resolver = target_resolver
         self._call_resolver = call_resolver
         self._context_validator = context_validator
@@ -119,6 +122,7 @@ class DirectKernelAuxiliaryJsonModel:
                 OpenAIResponsesTransport(
                     api_key=config.api_key,
                     timeout_policy=timeout_policy,
+                    api_key_boundary=self._api_key_boundary,
                     retry_config=config.retry,
                     openai_sdk_max_retries=config.openai_sdk_max_retries,
                 )
@@ -129,6 +133,7 @@ class DirectKernelAuxiliaryJsonModel:
                 OpenAIChatCompletionsTransport(
                     api_key=config.api_key,
                     timeout_policy=timeout_policy,
+                    api_key_boundary=self._api_key_boundary,
                     retry_config=config.retry,
                     openai_sdk_max_retries=config.openai_sdk_max_retries,
                 )

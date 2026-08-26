@@ -16,6 +16,7 @@ import pytest
 import psycopg
 
 from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
+from pulsara_agent.process_api_key_boundary import ProcessApiKeyBoundary
 from pulsara_agent.conversation_kernel.contracts import (
     InlineContent,
     PromptDeliveryMode,
@@ -428,6 +429,7 @@ class _LimitedCompactionScriptedModel(_CompactionScriptedModel):
             input_safety_margin_tokens=0,
         )
         self._preparer = DirectKernelModelPort(
+            api_key_boundary=ProcessApiKeyBoundary(),
             config=test_llm_config(
                 api_key="test",
                 base_url="https://example.invalid/v1",
@@ -933,7 +935,9 @@ class _HeadroomOrderingReader(CanonicalProviderInputReader):
 
 class _SequencedDirectKernelModel(DirectKernelModelPort):
     def __init__(self, *, config, scripts: tuple[tuple[dict[str, object], ...], ...]):
-        super().__init__(config=config)
+        super().__init__(
+            config=config, api_key_boundary=ProcessApiKeyBoundary()
+        )
         self._scripts = scripts
         self.requests = []
 
@@ -3497,6 +3501,7 @@ def test_round5a1_replay_fragment_binds_only_after_exact_assistant_winner(
         ),
     )
     model = DirectKernelModelPort(
+        api_key_boundary=ProcessApiKeyBoundary(),
         config=test_llm_config(
             api_key="test",
             base_url="https://example.invalid/v1",

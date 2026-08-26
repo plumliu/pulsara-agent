@@ -15,6 +15,10 @@ import pytest
 
 from pulsara_agent import cli
 from pulsara_agent.capability.contracts import FrozenSkillProjectionInput
+from pulsara_agent.capability.plugin_skill_contracts import (
+    FrozenPluginSkillDefinitions,
+    PluginSkillDefinitionsDisposition,
+)
 from pulsara_agent.capability.local_skill_management import (
     EventLocalSkillCancellationProbe,
     InspectEffectiveSkillCatalogRequest,
@@ -60,6 +64,13 @@ from pulsara_agent.capability.types import (
     SkillDiagnosticCode,
     SkillProducerUnavailableReason,
 )
+from pulsara_agent.exclusive_publish import ExclusivePublishPrimitiveUnavailable
+
+
+def _no_plugin_skills() -> FrozenPluginSkillDefinitions:
+    return FrozenPluginSkillDefinitions(
+        PluginSkillDefinitionsDisposition.COMPLETE
+    )
 
 
 def _document(
@@ -354,7 +365,7 @@ def test_invalid_user_home_does_not_block_validation_or_workspace_install(
         )
     )
     inspection = service.inspect_effective_skill_catalog(
-        InspectEffectiveSkillCatalogRequest(workspace)
+        InspectEffectiveSkillCatalogRequest(workspace, _no_plugin_skills())
     )
 
     assert validation.disposition is LocalSkillValidationDisposition.VALID
@@ -397,7 +408,7 @@ def test_inspection_closes_one_failed_os_home_observation(
     workspace.mkdir()
 
     inspection = LocalSkillManagementService().inspect_effective_skill_catalog(
-        InspectEffectiveSkillCatalogRequest(workspace)
+        InspectEffectiveSkillCatalogRequest(workspace, _no_plugin_skills())
     )
 
     assert calls == 1
@@ -1438,7 +1449,7 @@ def test_inspection_preserves_all_invalid_and_shadowed_candidate_issues(
     service = LocalSkillManagementService(loose_producer=provider)
 
     inspection = service.inspect_effective_skill_catalog(
-        InspectEffectiveSkillCatalogRequest(workspace)
+        InspectEffectiveSkillCatalogRequest(workspace, _no_plugin_skills())
     )
 
     assert inspection.disposition is EffectiveSkillCatalogDisposition.COMPLETE
@@ -1510,7 +1521,9 @@ def test_root_replacement_cannot_produce_a_mixed_complete_inspection(
     original = local_skills_module.read_observed_skill_document
     replaced = False
 
-    def replace_root_then_read(child, *, maximum: int, deadline_monotonic) -> bytes:
+    def replace_root_then_read(
+        child, *, maximum: int, deadline_monotonic, cancellation=None
+    ) -> bytes:
         nonlocal replaced
         if not replaced:
             replaced = True
@@ -1526,6 +1539,7 @@ def test_root_replacement_cannot_produce_a_mixed_complete_inspection(
             child,
             maximum=maximum,
             deadline_monotonic=deadline_monotonic,
+            cancellation=cancellation,
         )
 
     monkeypatch.setattr(
@@ -1568,13 +1582,16 @@ def test_direct_filesystem_read_race_makes_the_whole_inspection_unavailable(
     raced = _source(root, "second-raced") / "SKILL.md"
     original = local_skills_module.read_observed_skill_document
 
-    def fail_one(child, *, maximum: int, deadline_monotonic) -> bytes:
+    def fail_one(
+        child, *, maximum: int, deadline_monotonic, cancellation=None
+    ) -> bytes:
         if child.evidence.name == raced.parent.name:
             raise OSError(errno.EIO, "synthetic direct-copy race")
         return original(
             child,
             maximum=maximum,
             deadline_monotonic=deadline_monotonic,
+            cancellation=cancellation,
         )
 
     monkeypatch.setattr(
@@ -1654,6 +1671,7 @@ def test_cli_four_loose_commands_project_typed_service_outcomes(
         assert payload["operation"] == "inspect_effective_skill_catalog"
         assert {item["name"] for item in payload["skills"]} == {
             "cli-skill",
+            "pulsara-plugin-installer",
             "pulsara-skill-creator",
             "pulsara-skill-installer",
         }
@@ -1731,20 +1749,20 @@ def test_management_boundary_is_cli_independent_and_private_installer_is_deleted
 def test_validate_and_install_share_one_narrow_source_binding_seam() -> None:
     import pulsara_agent.capability.local_skill_management as management_module
     import pulsara_agent.capability.local_skill_publisher as publisher_module
-    import pulsara_agent.capability.local_skill_source_binding as binding_module
+    import pulsara_agent.local_source_binding as binding_module
 
     binding_source = Path(binding_module.__file__).read_text(encoding="utf-8")
     management_source = Path(management_module.__file__).read_text(encoding="utf-8")
     publisher_source = Path(publisher_module.__file__).read_text(encoding="utf-8")
     cli_source = Path(cli.__file__).read_text(encoding="utf-8")
 
-    assert binding_source.count("def prepare_local_skill_source_path(") == 1
+    assert binding_source.count("def prepare_local_source_path(") == 1
     assert binding_source.count("def open_absolute_directory_nofollow(") == 1
-    assert "prepare_local_skill_source_path" in management_source
-    assert "prepare_local_skill_source_path" in publisher_source
+    assert "prepare_local_source_path" in management_source
+    assert "prepare_local_source_path" in publisher_source
     assert "def _open_absolute_directory_nofollow(" not in management_source
     assert "def _open_absolute_directory_nofollow(" not in publisher_source
-    assert "prepare_local_skill_source_path" not in cli_source
+    assert "prepare_local_source_path" not in cli_source
 
 
 def test_exclusive_adapter_reports_real_collision_without_replacement(
@@ -1810,11 +1828,9 @@ def test_exclusive_adapter_does_not_replace_an_existing_empty_directory(
 def test_unavailable_exclusive_primitive_never_falls_back_to_plain_rename(
     tmp_path: Path,
 ) -> None:
-    import pulsara_agent.capability.local_skill_publisher as publisher_module
-
     class Unsupported:
         def publish(self, _root_fd: int, _staging_name: str, _final_name: str) -> None:
-            raise publisher_module._ExclusivePrimitiveUnavailable
+            raise ExclusivePublishPrimitiveUnavailable
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()

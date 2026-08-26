@@ -98,6 +98,7 @@ _LONG_HORIZON_POLICY_KIND_BY_NAME = {
     "use_new_mcp_tool": BuiltinToolLongHorizonPolicyKind.EVIDENCE_ACQUISITION,
     "read_file": BuiltinToolLongHorizonPolicyKind.EVIDENCE_ACQUISITION,
     "reload_hooks": BuiltinToolLongHorizonPolicyKind.PROCESS_CONTROL,
+    "reload_plugins": BuiltinToolLongHorizonPolicyKind.PROCESS_CONTROL,
     "read_mcp_resource": BuiltinToolLongHorizonPolicyKind.EVIDENCE_ACQUISITION,
     "remember": BuiltinToolLongHorizonPolicyKind.SYNTHESIS_MUTATION,
     "report_agent_result": BuiltinToolLongHorizonPolicyKind.SYNTHESIS_MUTATION,
@@ -526,6 +527,21 @@ _SUBAGENT_CONTEXT_TURNS_DESCRIPTION = (
 
 
 _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
+    "reload_plugins": _descriptor(
+        name="reload_plugins",
+        description=(
+            "Reload this running Host's enabled local Agent Plugin view for future "
+            "Skill, MCP, and Hook use. This does not install, enable, trust, or "
+            "remove a package and does not rewrite the same-epoch SYSTEM, tool "
+            "definitions, or prior messages. It is ROOT-only while "
+            "bypass-permissions mode is active."
+        ),
+        input_schema=object_schema(properties={}, required=[]),
+        is_read_only=True,
+        is_concurrency_safe=False,
+        permission_category="plugin_control",
+        artifact_mode=ToolArtifactMode.NEVER,
+    ),
     "reload_hooks": _descriptor(
         name="reload_hooks",
         description=(
@@ -1890,6 +1906,7 @@ class BuiltinToolBindingKind(StrEnum):
     SUBAGENT_CONTROL = "subagent_control"
     MCP_CATALOG = "mcp_catalog"
     HOOK_CONTROL = "hook_control"
+    PLUGIN_CONTROL = "plugin_control"
 
 
 class BuiltinToolAvailabilityKind(StrEnum):
@@ -2160,6 +2177,13 @@ def _catalog_shape(name: str):
             (ToolInvocationOwnerKind.HOST_MAIN_RUN,),
             "hook_control",
         )
+    if name == "reload_plugins":
+        return (
+            BuiltinToolBindingKind.PLUGIN_CONTROL,
+            BuiltinToolAvailabilityKind.ALWAYS,
+            (ToolInvocationOwnerKind.HOST_MAIN_RUN,),
+            "plugin_control",
+        )
     if name in {
         "get_mcp_prompt",
         "list_mcp_prompts",
@@ -2316,6 +2340,7 @@ def _recovery_contract(name: str) -> BuiltinToolRecoveryContract:
         "read_file",
         "read_mcp_resource",
         "reload_hooks",
+        "reload_plugins",
         "search_files",
         "todo",
     }:

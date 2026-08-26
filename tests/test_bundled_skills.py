@@ -13,6 +13,10 @@ from pulsara_agent.capability.bundled_skills import (
     classify_bundled_skill_inventory,
 )
 from pulsara_agent.capability.local_skills import LooseSkillDefinitionProducer
+from pulsara_agent.capability.plugin_skill_contracts import (
+    FrozenPluginSkillDefinitions,
+    PluginSkillDefinitionsDisposition,
+)
 from pulsara_agent.capability.resolver import (
     CompleteEffectiveSkillCatalogInspection,
     SkillCatalogResolver,
@@ -419,7 +423,11 @@ def _inspect(
     loose = producer.observe(producer.prepare_root_policy(workspace))
     with BundledSkillDistributionBindingOwner() as owner:
         bundled = BundledSkillDefinitionProducer(owner).observe()
-    inspection = SkillCatalogResolver().resolve(loose, bundled)
+    inspection = SkillCatalogResolver().resolve(
+        loose,
+        FrozenPluginSkillDefinitions(PluginSkillDefinitionsDisposition.COMPLETE),
+        bundled,
+    )
     assert isinstance(inspection, CompleteEffectiveSkillCatalogInspection)
     return inspection
 

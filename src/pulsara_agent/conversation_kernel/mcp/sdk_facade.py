@@ -21,10 +21,18 @@ from mcp.shared.exceptions import MCPError
 from mcp.shared.message import SessionMessage
 
 from pulsara_agent.mcp_config import (
+    ExactAbsoluteMcpCwd,
     McpHttpNetworkPolicy,
     McpServerConfig,
     StdioTransportConfig,
     StreamableHttpTransportConfig,
+    WorkspaceRelativeMcpCwd,
+)
+from pulsara_agent.process_api_key_boundary import (
+    PULSARA_API_KEY_ENVIRONMENT_NAME,
+    ProcessApiKeyBoundary,
+    ProcessApiKeyBoundAsyncClient,
+    admit_process_api_key_http_operation,
 )
 
 from .wire import (
@@ -179,46 +187,84 @@ class _BoundedStdioTransport(_BoundedTransport):
         config: StdioTransportConfig,
         *,
         workspace_root: Path,
+        api_key_boundary: ProcessApiKeyBoundary,
         bounds: McpWireBounds,
     ) -> None:
         super().__init__(bounds)
         self._config = config
         self._workspace_root = workspace_root
+        self._api_key_boundary = api_key_boundary
         self._process: asyncio.subprocess.Process | None = None
         self._tasks: tuple[asyncio.Task[object], ...] = ()
         self._closed = False
 
     async def start(self) -> None:
-        cwd = self._workspace_root
-        if self._config.cwd is not None:
-            candidate = (self._workspace_root / self._config.cwd).resolve()
+        binding = self._config.cwd
+        if isinstance(binding, WorkspaceRelativeMcpCwd):
+            candidate = (self._workspace_root / binding.relative_path).resolve()
             try:
                 candidate.relative_to(self._workspace_root)
             except ValueError as exc:
                 raise ValueError("MCP stdio cwd escapes the workspace") from exc
             cwd = candidate
+        elif isinstance(binding, ExactAbsoluteMcpCwd):
+            cwd = binding.absolute_path
+        else:  # pragma: no cover - closed dataclass validation
+            raise TypeError("MCP stdio cwd binding union is open")
         environment = {
             key: value
-            for key in ("HOME", "LANG", "LC_ALL", "LOGNAME", "PATH", "TMPDIR", "USER")
+            for key in ("HOME", "LANG", "LC_ALL", "LOGNAME", "TMPDIR", "USER")
             if (value := os.environ.get(key)) is not None
         }
+        environment["PATH"] = self._config.lookup_path
         environment.update(dict(self._config.environment))
         for target, reference in self._config.secret_environment_refs:
             value = os.environ.get(reference)
             if value is None:
                 raise ValueError("MCP stdio secret environment reference is unavailable")
             environment[target] = value
-        self._process = await asyncio.create_subprocess_exec(
-            self._config.command,
-            *self._config.args,
-            cwd=str(cwd),
-            env=environment,
-            limit=self.bounds.maximum_stdio_frame_bytes + 1,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            start_new_session=True,
-        )
+        environment.pop(PULSARA_API_KEY_ENVIRONMENT_NAME, None)
+        process: asyncio.subprocess.Process | None = None
+        cancelled: asyncio.CancelledError | None = None
+        async with self._api_key_boundary.async_guard() as guard:
+            if guard.contains(self._config.command) or any(
+                guard.contains(item) for item in self._config.args
+            ) or guard.contains(str(cwd)) or any(
+                guard.contains(name) or guard.contains(value)
+                for name, value in environment.items()
+            ):
+                raise ValueError("MCP stdio admission contains PULSARA_API_KEY")
+            spawn = asyncio.create_task(
+                asyncio.create_subprocess_exec(
+                    self._config.command,
+                    *self._config.args,
+                    cwd=str(cwd),
+                    env=environment,
+                    limit=self.bounds.maximum_stdio_frame_bytes + 1,
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    start_new_session=True,
+                ),
+                name="mcp-stdio-spawn-admission",
+            )
+            try:
+                process = await asyncio.shield(spawn)
+            except asyncio.CancelledError as exc:
+                cancelled = exc
+                process = await asyncio.shield(spawn)
+        if cancelled is not None:
+            assert process is not None
+            with suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGTERM)
+            try:
+                await asyncio.wait_for(process.wait(), timeout=2)
+            except TimeoutError:
+                with suppress(ProcessLookupError):
+                    os.killpg(process.pid, signal.SIGKILL)
+                await process.wait()
+            raise cancelled
+        self._process = process
         self._tasks = (
             asyncio.create_task(self._reader(), name="mcp-stdio-reader"),
             asyncio.create_task(self._writer(), name="mcp-stdio-writer"),
@@ -345,11 +391,13 @@ class _BoundedHttpTransport(_BoundedTransport):
         config: McpServerConfig,
         transport: StreamableHttpTransportConfig,
         *,
+        api_key_boundary: ProcessApiKeyBoundary,
         bounds: McpWireBounds,
     ) -> None:
         super().__init__(bounds)
         self._config = config
         self._transport = transport
+        self._api_key_boundary = api_key_boundary
         self._client: httpx.AsyncClient | None = None
         self._writer_task: asyncio.Task[object] | None = None
         self._listener_task: asyncio.Task[object] | None = None
@@ -375,7 +423,8 @@ class _BoundedHttpTransport(_BoundedTransport):
     async def start(self) -> None:
         self._endpoint = await _enforce_http_network_policy(self._transport)
         headers = self._config.resolved_headers()
-        self._client = httpx.AsyncClient(
+        self._client = ProcessApiKeyBoundAsyncClient(
+            api_key_boundary=self._api_key_boundary,
             headers=headers,
             follow_redirects=False,
             trust_env=False,
@@ -433,14 +482,33 @@ class _BoundedHttpTransport(_BoundedTransport):
             headers.update(message.metadata.headers or {})
         if self._session_id is not None:
             headers["Mcp-Session-Id"] = self._session_id
+        response_context = None
+        response = None
         try:
-            async with self._client.stream(
-                "POST",
-                self._endpoint.url,
-                content=payload,
-                headers=headers,
-                extensions=_http_request_extensions(self._endpoint),
-            ) as response:
+            final_headers = self._config.resolved_headers(headers)
+
+            async def open_response() -> httpx.Response:
+                nonlocal response_context
+                response_context = self._client.stream(
+                    "POST",
+                    self._endpoint.url,
+                    content=payload,
+                    headers=final_headers,
+                    extensions=_http_request_extensions(self._endpoint),
+                )
+                return await response_context.__aenter__()
+
+            response = await admit_process_api_key_http_operation(
+                api_key_boundary=self._api_key_boundary,
+                guarded_values=(
+                    self._endpoint.url,
+                    payload,
+                    *(item for pair in final_headers.items() for item in pair),
+                ),
+                operation=open_response,
+            )
+            assert response is not None and response_context is not None
+            try:
                 response.raise_for_status()
                 session_id = response.headers.get("Mcp-Session-Id")
                 if session_id:
@@ -458,6 +526,8 @@ class _BoundedHttpTransport(_BoundedTransport):
                     raise McpProtocolConformanceError(
                         "MCP_RESPONSE_CARRIER_INVALID"
                     ) from exc
+            finally:
+                await response_context.__aexit__(None, None, None)
         except McpProtocolConformanceError as exc:
             # The HTTP response was received and decoded far enough to prove a
             # peer conformance failure.  Preserve that exact settlement instead
@@ -691,11 +761,13 @@ class BoundedMcpSdkClient:
         *,
         workspace_root: Path,
         notification_callback: NotificationCallback,
+        api_key_boundary: ProcessApiKeyBoundary,
         bounds: McpWireBounds = DEFAULT_MCP_WIRE_BOUNDS,
     ) -> None:
         self.config = config
         self._workspace_root = workspace_root
         self._notification_callback = notification_callback
+        self._api_key_boundary = api_key_boundary
         self._bounds = bounds
         self._transport: _BoundedTransport | None = None
         self._session: ClientSession | None = None
@@ -743,11 +815,15 @@ class BoundedMcpSdkClient:
             transport: _BoundedTransport = _BoundedStdioTransport(
                 transport_config,
                 workspace_root=self._workspace_root,
+                api_key_boundary=self._api_key_boundary,
                 bounds=self._bounds,
             )
         else:
             transport = _BoundedHttpTransport(
-                self.config, transport_config, bounds=self._bounds
+                self.config,
+                transport_config,
+                api_key_boundary=self._api_key_boundary,
+                bounds=self._bounds,
             )
         self._transport = transport
         try:

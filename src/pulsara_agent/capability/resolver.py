@@ -1,4 +1,4 @@
-"""Resolve bundled and loose definitions into the sole effective Skill catalog."""
+"""Resolve bundled, loose, and Plugin definitions into one Skill catalog."""
 
 from __future__ import annotations
 
@@ -19,6 +19,10 @@ from pulsara_agent.capability.local_skills import (
     PreparedLooseSkillRootPolicy,
     SKILL_DIAGNOSTIC_MESSAGES,
 )
+from pulsara_agent.capability.plugin_skill_contracts import (
+    FrozenPluginSkillDefinitions,
+    PluginSkillDefinitionsDisposition,
+)
 from pulsara_agent.capability.provider import SkillProjectionOutput
 from pulsara_agent.capability.render import (
     SkillProjectionOverbound,
@@ -32,8 +36,12 @@ from pulsara_agent.capability.types import (
     ActiveSkillProjectionUnavailableReason,
     ActiveSkillReason,
     BundledSkillOrigin,
+    ConflictingSkillCandidateIssue,
+    ConflictingSkillCandidateRef,
     InvalidSkillCandidateIssue,
     LooseSkillOrigin,
+    PluginSkillOrigin,
+    PluginSkillVisibilityScope,
     ProducerUnavailableCause,
     ResolvedSkillCatalogEntry,
     ResolutionUnavailableCause,
@@ -83,8 +91,8 @@ class CompleteEffectiveSkillCatalogInspection:
             raise ValueError("effective Skill inspection exceeds winner bound")
         winners = {(item.name, item.origin, item.path) for item in self.winners}
         for issue in self.candidate_issues:
-            if isinstance(issue, InvalidSkillCandidateIssue) and not isinstance(
-                issue.origin, LooseSkillOrigin
+            if isinstance(issue, InvalidSkillCandidateIssue) and isinstance(
+                issue.origin, BundledSkillOrigin
             ):
                 raise ValueError("effective Skill inspection has a bundled invalid issue")
             if isinstance(issue, ShadowedSkillCandidateIssue) and (
@@ -127,7 +135,11 @@ class UnavailableEffectiveSkillCatalogInspection:
         producer_order = tuple(item.producer_kind for item in producer_causes)
         expected_order = tuple(
             item
-            for item in (SkillProducerKind.LOOSE, SkillProducerKind.BUNDLED)
+            for item in (
+                SkillProducerKind.LOOSE,
+                SkillProducerKind.PLUGIN,
+                SkillProducerKind.BUNDLED,
+            )
             if item in producer_order
         )
         if producer_order != expected_order or len(producer_order) != len(
@@ -150,17 +162,21 @@ EffectiveSkillCatalogInspection = (
 
 
 class SkillCatalogResolver:
-    """The single five-tier precedence and final catalog-bound owner."""
+    """The single seven-tier precedence and final catalog-bound owner."""
 
     def resolve(
         self,
         loose: FrozenLooseSkillDefinitions,
+        plugin: FrozenPluginSkillDefinitions,
         bundled: FrozenBundledSkillDefinitions,
     ) -> EffectiveSkillCatalogInspection:
         causes: list[ProducerUnavailableCause] = []
         if loose.disposition is LooseSkillDefinitionsDisposition.UNAVAILABLE:
             assert loose.unavailable_cause is not None
             causes.append(loose.unavailable_cause)
+        if plugin.disposition is PluginSkillDefinitionsDisposition.UNAVAILABLE:
+            assert plugin.unavailable_cause is not None
+            causes.append(plugin.unavailable_cause)
         if bundled.disposition is BundledSkillDefinitionsDisposition.UNAVAILABLE:
             assert bundled.unavailable_cause is not None
             causes.append(bundled.unavailable_cause)
@@ -171,28 +187,62 @@ class SkillCatalogResolver:
             )
 
         grouped: dict[str, list[SkillManifest]] = {}
-        for candidate in (*loose.candidates, *bundled.candidates):
+        for candidate in (
+            *loose.candidates,
+            *plugin.candidates,
+            *bundled.candidates,
+        ):
             grouped.setdefault(candidate.name, []).append(candidate)
         winners: list[SkillManifest] = []
-        issues: list[SkillCandidateIssue] = [*loose.invalid_issues]
+        issues: list[SkillCandidateIssue] = [
+            *loose.invalid_issues,
+            *plugin.invalid_issues,
+        ]
         for name in sorted(grouped):
-            candidates = sorted(grouped[name], key=skill_candidate_precedence_key)
-            winner = candidates[0]
-            winners.append(winner)
-            for candidate in candidates[1:]:
-                issues.append(
-                    ShadowedSkillCandidateIssue(
-                        path=candidate.path,
-                        origin=candidate.origin,
-                        name=name,
-                        winner_origin=winner.origin,
-                        winner_path=winner.path,
-                        diagnostic_codes=candidate.diagnostic_codes,
-                    )
+            by_tier: dict[int, list[SkillManifest]] = {}
+            for candidate in grouped[name]:
+                by_tier.setdefault(_skill_tier(candidate), []).append(candidate)
+            winner: SkillManifest | None = None
+            for tier in sorted(by_tier):
+                candidates = sorted(
+                    by_tier[tier], key=skill_candidate_precedence_key
                 )
+                if winner is not None:
+                    for candidate in candidates:
+                        issues.append(
+                            ShadowedSkillCandidateIssue(
+                                path=candidate.path,
+                                origin=candidate.origin,
+                                name=name,
+                                winner_origin=winner.origin,
+                                winner_path=winner.path,
+                                diagnostic_codes=candidate.diagnostic_codes,
+                            )
+                        )
+                    continue
+                first_origin = candidates[0].origin
+                if isinstance(first_origin, PluginSkillOrigin) and len(candidates) > 1:
+                    issues.append(
+                        ConflictingSkillCandidateIssue(
+                            name,
+                            first_origin.visibility_scope,
+                            tuple(
+                                ConflictingSkillCandidateRef(
+                                    candidate.path, candidate.origin
+                                )
+                                for candidate in candidates
+                                if isinstance(candidate.origin, PluginSkillOrigin)
+                            ),
+                        )
+                    )
+                    continue
+                if len(candidates) != 1:
+                    raise RuntimeError("non-Plugin Skill tier is not unique")
+                winner = candidates[0]
+                winners.append(winner)
         input_valid = {
             (item.name, item.origin, item.path)
-            for item in (*loose.candidates, *bundled.candidates)
+            for item in (*loose.candidates, *plugin.candidates, *bundled.candidates)
         }
         allocated_valid = {
             (item.name, item.origin, item.path) for item in winners
@@ -200,6 +250,11 @@ class SkillCatalogResolver:
             (item.name, item.origin, item.path)
             for item in issues
             if isinstance(item, ShadowedSkillCandidateIssue)
+        } | {
+            (item.name, candidate.origin, candidate.path)
+            for item in issues
+            if isinstance(item, ConflictingSkillCandidateIssue)
+            for candidate in item.candidates
         }
         if allocated_valid != input_valid:
             raise RuntimeError("central Skill resolution did not allocate every candidate")
@@ -305,7 +360,7 @@ def inspection_diagnostics(
     for issue in inspection.candidate_issues:
         if isinstance(issue, InvalidSkillCandidateIssue):
             result.extend(issue.diagnostics)
-        else:
+        elif isinstance(issue, ShadowedSkillCandidateIssue):
             result.extend(
                 SkillDiagnostic(
                     _canonical_diagnostic_severity(code),
@@ -315,6 +370,16 @@ def inspection_diagnostics(
                 )
                 for code in issue.diagnostic_codes
             )
+        elif isinstance(issue, ConflictingSkillCandidateIssue):
+            result.append(
+                SkillDiagnostic(
+                    _canonical_diagnostic_severity(issue.diagnostic_code),
+                    issue.diagnostic_code,
+                    SKILL_DIAGNOSTIC_MESSAGES[issue.diagnostic_code],
+                )
+            )
+        else:  # pragma: no cover - closed issue union
+            raise TypeError("Skill candidate issue union is open")
     for winner in inspection.winners:
         result.extend(
             SkillDiagnostic(
@@ -345,29 +410,46 @@ def runtime_skill_diagnostics(
 
 
 def skill_candidate_precedence_key(item: SkillManifest) -> tuple[int, str]:
-    origin = item.origin
-    if isinstance(origin, LooseSkillOrigin):
-        tier = LOOSE_SKILL_ROOT_ORDER.index(origin.root_kind)
-    elif isinstance(origin, BundledSkillOrigin):
-        tier = len(LOOSE_SKILL_ROOT_ORDER)
-    else:  # pragma: no cover - closed union
-        raise TypeError("Skill origin union is open")
-    return tier, item.path.as_posix()
+    return _skill_tier(item), item.path.as_posix()
 
 
-def skill_candidate_issue_sort_key(item: SkillCandidateIssue) -> tuple[str, int, str, str]:
+def skill_candidate_issue_sort_key(
+    item: SkillCandidateIssue,
+) -> tuple[str, int, str, str]:
+    if isinstance(item, ConflictingSkillCandidateIssue):
+        first = item.candidates[0]
+        tier = (
+            len(LOOSE_SKILL_ROOT_ORDER)
+            if item.tier is PluginSkillVisibilityScope.WORKSPACE
+            else len(LOOSE_SKILL_ROOT_ORDER) + 1
+        )
+        return item.name, tier, first.path.as_posix(), item.kind.value
     name = (
         (item.declared_name or "")
         if isinstance(item, InvalidSkillCandidateIssue)
         else item.name
     )
     origin = item.origin
-    tier = (
-        LOOSE_SKILL_ROOT_ORDER.index(origin.root_kind)
-        if isinstance(origin, LooseSkillOrigin)
-        else len(LOOSE_SKILL_ROOT_ORDER)
-    )
+    tier = _origin_tier(origin)
     return name, tier, item.path.as_posix(), item.kind.value
+
+
+def _skill_tier(item: SkillManifest) -> int:
+    return _origin_tier(item.origin)
+
+
+def _origin_tier(origin) -> int:
+    if isinstance(origin, LooseSkillOrigin):
+        return LOOSE_SKILL_ROOT_ORDER.index(origin.root_kind)
+    if isinstance(origin, PluginSkillOrigin):
+        return (
+            len(LOOSE_SKILL_ROOT_ORDER)
+            if origin.visibility_scope is PluginSkillVisibilityScope.WORKSPACE
+            else len(LOOSE_SKILL_ROOT_ORDER) + 1
+        )
+    if isinstance(origin, BundledSkillOrigin):
+        return len(LOOSE_SKILL_ROOT_ORDER) + 2
+    raise TypeError("Skill origin union is open")
 
 
 def _catalog_entry(skill: SkillManifest) -> ResolvedSkillCatalogEntry:
@@ -454,6 +536,7 @@ def _canonical_diagnostic_severity(code: SkillDiagnosticCode) -> SkillDiagnostic
         SkillDiagnosticCode.LOOSE_ROOT_ALIAS,
         SkillDiagnosticCode.BUNDLED_DEFINITIONS_UNAVAILABLE,
         SkillDiagnosticCode.BUNDLED_INVENTORY_MISMATCH,
+        SkillDiagnosticCode.PLUGIN_DEFINITIONS_UNAVAILABLE,
         SkillDiagnosticCode.INVALID_UTF8,
     }:
         return SkillDiagnosticSeverity.ERROR

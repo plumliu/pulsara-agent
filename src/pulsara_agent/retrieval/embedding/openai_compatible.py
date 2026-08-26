@@ -10,9 +10,15 @@ import asyncio
 from collections.abc import Sequence
 import json
 
+import httpx
 import openai
 
 from pulsara_agent.llm.estimator import PulsaraHeuristicTokenEstimatorV1
+from pulsara_agent.process_api_key_boundary import (
+    ProcessApiKeyBoundary,
+    ProcessApiKeyBoundAsyncClient,
+    admit_process_api_key_http_operation,
+)
 from pulsara_agent.retrieval.errors import EmbeddingServiceError
 from pulsara_agent.retrieval.embedding.validation import (
     freeze_v1_embedding_vector,
@@ -36,6 +42,7 @@ class OpenAICompatibleEmbeddingProvider:
         max_retries: int = 3,
         batch_size: int = 10,
         max_concurrent: int = 5,
+        api_key_boundary: ProcessApiKeyBoundary,
     ) -> None:
         if model != "text-embedding-v4" or dimensions != 1024:
             raise ValueError("embedding configuration is outside the V1 vector space")
@@ -46,11 +53,17 @@ class OpenAICompatibleEmbeddingProvider:
         self._model = model
         self._batch_size = batch_size
         self._semaphore = asyncio.Semaphore(max_concurrent)
+        self._api_key_boundary = api_key_boundary
         self._client = openai.AsyncOpenAI(
             api_key=api_key,
             base_url=base_url,
             timeout=timeout_seconds,
             max_retries=max_retries,
+            http_client=ProcessApiKeyBoundAsyncClient(
+                api_key_boundary=api_key_boundary,
+                credential_header_names=frozenset({b"authorization"}),
+                timeout=httpx.Timeout(timeout_seconds),
+            ),
         )
 
     async def aclose(self) -> None:
@@ -80,14 +93,32 @@ class OpenAICompatibleEmbeddingProvider:
         )
         async with self._semaphore:
             try:
-                response = await self._client.embeddings.create(
-                    model=self._model,
-                    input=texts,
-                    dimensions=self.dimensions,
-                    encoding_format="float",
+                payload = {
+                    "model": self._model,
+                    "input": texts,
+                    "dimensions": self.dimensions,
+                    "encoding_format": "float",
+                }
+                encoded = json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                response = await admit_process_api_key_http_operation(
+                    api_key_boundary=self._api_key_boundary,
+                    guarded_values=(encoded,),
+                    operation=lambda: self._client.embeddings.create(
+                            model=self._model,
+                            input=texts,
+                            dimensions=self.dimensions,
+                            encoding_format="float",
+                        ),
                 )
-            except openai.OpenAIError as exc:
-                raise EmbeddingServiceError(str(exc)) from exc
+            except ValueError:
+                raise EmbeddingServiceError("embedding admission rejected") from None
+            except openai.OpenAIError:
+                raise EmbeddingServiceError("embedding transport failed") from None
         if getattr(response, "model", None) != self._model:
             raise EmbeddingServiceError(
                 "Embedding response model violates the sealed V1 contract."

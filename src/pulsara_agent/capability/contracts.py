@@ -545,9 +545,12 @@ class FrozenSkillCapabilityFact:
         from pulsara_agent.capability.types import (
             BundledSkillOrigin,
             LooseSkillOrigin,
+            PluginSkillOrigin,
         )
 
-        if not isinstance(self.origin, (LooseSkillOrigin, BundledSkillOrigin)):
+        if not isinstance(
+            self.origin, (LooseSkillOrigin, PluginSkillOrigin, BundledSkillOrigin)
+        ):
             raise TypeError("skill capability fact origin is not closed")
         if isinstance(self.origin, BundledSkillOrigin) and (
             self.origin.skill_name != self.public_name
@@ -587,7 +590,11 @@ def skill_capability_fact_fingerprint(
 def _skill_origin_provenance_fingerprint(origin: "SkillDefinitionOrigin") -> str:
     """Derive the historical fact payload slot at its sole real boundary."""
 
-    from pulsara_agent.capability.types import BundledSkillOrigin, LooseSkillOrigin
+    from pulsara_agent.capability.types import (
+        BundledSkillOrigin,
+        LooseSkillOrigin,
+        PluginSkillOrigin,
+    )
 
     if isinstance(origin, LooseSkillOrigin):
         ordinal, prefix = {
@@ -610,6 +617,19 @@ def _skill_origin_provenance_fingerprint(origin: "SkillDefinitionOrigin") -> str
             {
                 "package": "pulsara_agent",
                 "relative_skill_directory": (
+                    origin.package_relative_skill_directory
+                ),
+            },
+        )
+    if isinstance(origin, PluginSkillOrigin):
+        return context_fingerprint(
+            "plugin-skill-origin:v1-agent-skills",
+            {
+                "visibility_scope": origin.visibility_scope.value,
+                "workspace_state_key": origin.workspace_state_key,
+                "plugin_id": origin.plugin_id,
+                "package_install_id": origin.package_install_id,
+                "package_relative_skill_directory": (
                     origin.package_relative_skill_directory
                 ),
             },
@@ -937,12 +957,47 @@ def freeze_mcp_inspectability_fact(
 
 
 @dataclass(frozen=True, slots=True)
+class McpProviderNameCollisionMember:
+    server_id: str
+    remote_tool_name: str
+    discovered_tool_identity: str
+
+    def __post_init__(self) -> None:
+        if not all(
+            (self.server_id, self.remote_tool_name, self.discovered_tool_identity)
+        ):
+            raise ValueError("MCP provider-name collision member is incomplete")
+
+
+@dataclass(frozen=True, slots=True)
+class McpProviderNameCollisionFact:
+    provider_name: str
+    members: tuple[McpProviderNameCollisionMember, ...]
+
+    def __post_init__(self) -> None:
+        if not self.provider_name:
+            raise ValueError("MCP provider-name collision is unnamed")
+        keys = tuple(
+            (item.server_id, item.remote_tool_name, item.discovered_tool_identity)
+            for item in self.members
+        )
+        targets = tuple((item.server_id, item.remote_tool_name) for item in self.members)
+        if (
+            len(self.members) < 2
+            or keys != tuple(sorted(keys))
+            or len(targets) != len(set(targets))
+        ):
+            raise ValueError("MCP provider-name collision members are invalid")
+
+
+@dataclass(frozen=True, slots=True)
 class FrozenMcpCapabilityProjectionInput:
     conversation_scope_kind: ModelInputScopeKind
     scope_subagent_task_id: str | None
     source_snapshots: tuple[FrozenCapabilitySourceSnapshot, ...] = field(repr=False)
     catalog_semantic_fingerprint: str
     inspectability_facts: tuple[FrozenMcpInspectabilityFact, ...]
+    provider_name_collision_facts: tuple[McpProviderNameCollisionFact, ...] = ()
 
     def __post_init__(self) -> None:
         _validate_scope(self.conversation_scope_kind, self.scope_subagent_task_id)
@@ -968,6 +1023,28 @@ class FrozenMcpCapabilityProjectionInput:
             set(inspect_keys)
         ):
             raise ValueError("MCP inspectability facts are not sorted and unique")
+        collision_names = tuple(
+            item.provider_name for item in self.provider_name_collision_facts
+        )
+        if collision_names != tuple(sorted(collision_names)) or len(
+            collision_names
+        ) != len(set(collision_names)):
+            raise ValueError("MCP provider-name collision facts are not sorted and unique")
+        collided_targets = {
+            (member.server_id, member.remote_tool_name)
+            for fact in self.provider_name_collision_facts
+            for member in fact.members
+        }
+        if collided_targets & set(inspect_keys):
+            raise ValueError("collided MCP tool has an inspectability route")
+        source_tool_targets = {
+            (fact.identity.source.stable_source_id, fact.identity.stable_name)
+            for snapshot in self.source_snapshots
+            for fact in snapshot.facts
+            if isinstance(fact, FrozenToolCapabilityFact)
+        }
+        if collided_targets & source_tool_targets:
+            raise ValueError("collided MCP tool was published as a source fact")
 
 
 @dataclass(frozen=True, slots=True)

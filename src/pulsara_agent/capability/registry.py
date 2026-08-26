@@ -74,6 +74,12 @@ def _require_bounded_planner_framing(
         add(tool_capability_version_identity_digest(item.version))
         add(item.descriptor_payload_fingerprint)
         add(item.mcp_execution_policy_fingerprint)
+    for fact in tools.mcp.provider_name_collision_facts:
+        add(fact.provider_name)
+        for member in fact.members:
+            add(member.server_id)
+            add(member.remote_tool_name)
+            add(member.discovered_tool_identity)
     predecessor = tools.predecessor
     if isinstance(predecessor, InstalledCapabilityEpochPredecessor):
         add(predecessor.direct_projection_set.projection_set_fingerprint)

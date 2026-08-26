@@ -237,6 +237,7 @@ from pulsara_agent.primitives.context import (
 )
 from pulsara_agent.primitives.model_call import ModelCallPurpose
 from pulsara_agent.primitives.permission import PermissionMode
+from pulsara_agent.process_api_key_boundary import ProcessApiKeyBoundary
 from pulsara_agent.primitives.plan_workflow import (
     PlanApprovedMaterializationDisposition,
     PlanHandoffKind,
@@ -980,6 +981,7 @@ def _prepared_request(
         capability_exposure_plan=tool_plan,
     )
     model = DirectKernelModelPort(
+        api_key_boundary=ProcessApiKeyBoundary(),
         config=test_llm_config(
             api_key="test",
             base_url="https://example.invalid/v1",

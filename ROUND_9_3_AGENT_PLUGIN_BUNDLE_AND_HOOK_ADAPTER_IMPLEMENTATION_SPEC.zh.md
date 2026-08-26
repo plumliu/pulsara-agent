@@ -1,8 +1,10 @@
 # Round 9.3：Local Agent Plugin Package、第三 Skill Producer 与 MCP/Hook Adapter 实施规格
 
-> 状态：**READY FOR IMPLEMENTATION — NOT ACTIVATED**
+> 状态：**ACTIVATED**
 >
-> 本文已按 2026-08-26 working-tree production truth、Agent Plugins Published 1.0.0与独立critic review完成编码前hard-cut。它不再是旧的 Plugin Skill materialization 方案；只有production code、tests、dogfood与 §15 Definition of Done 全部闭合后，才可把状态改为 `ACTIVATED`。
+> 激活日期：2026-08-26
+>
+> 本文已按2026-08-26 working-tree production truth完成Agent Plugins Published 1.0.0 hard cut；production code、tests、PostgreSQL、packaging、local dogfood、real-provider dogfood、active-spec synchronization与§15 Definition of Done已全部闭合。它不是旧的Plugin Skill materialization方案，也没有dormant/compatibility path。
 >
 > 修订日期：2026-08-26
 >
@@ -514,7 +516,7 @@ Install的`CLEANUP_UNAVAILABLE`只携带：
 
 ### 3.5 Closed diagnostics
 
-新增一个closed `PluginDiagnosticCode`，exact 40 members冻结如下；增删任何member都必须先修订本文并同步exact-count guard。Production mapping必须exhaustive，不能把raw exception message当code：
+新增一个closed `PluginDiagnosticCode`，exact 37 members冻结如下；增删任何member都必须先修订本文并同步exact-count guard。Production mapping必须exhaustive，不能把raw exception message当code：
 
 ```text
 plugin_home_configuration_invalid
@@ -807,6 +809,8 @@ Final immutable root publish使用exclusive no-replace primitive：
 - unsupported platform返回typed `UNAVAILABLE`；
 - 禁止普通`rename`/`os.replace`fallback。
 
+Darwin `RENAME_EXCL`对source directory为`0500`时会返回`EACCES`。Production在stage已经完整normalize/verify为`0500`后，只在同一held stage descriptor与`ProcessApiKeyBoundary` guard跨越irreversible cut期间临时`fchmod(stage_fd, 0700)`，无论publish成功/失败都在离开cut前恢复`0500`。该narrow syscall prerequisite不改变最终immutable mode、不重开path，也不扩大同UID tamper-proof承诺。
+
 Exclusive primitive只保证held destination parent中的final-name no-replace。Final cut后同UID移动parent或替换private stage属于out-of-contract namespace interference。
 
 Package-install-id lock在stage创建前已经由同一publisher持有，并覆盖final publish到instance-state cut/confirmation；publish后不能先release再写state。Lock是physical exclusion，不是durable receipt、lease relation或consumer registry。
@@ -847,8 +851,10 @@ Raw `os.getenv()` snapshot不足以闭合rotation。本轮必须建立一个显�
 - owner内部只有one mutex与current raw-environment snapshot；不是service locator、generation、secret store或durable registry；
 - 所有Pulsara-supported key rotation在该mutex内更新`os.environ`与boundary snapshot；所有install/Hook/MCP/provider sinks使用同一boundary；
 - 大文件scan可在mutex外完成，但final admission必须重新取得mutex，读取raw environment并与scan snapshot exact比较；相同则保持mutex跨越irreversible `renameatx_np`/`renameat2`、process spawn或HTTP/provider request admission cut，随后立即释放；变化则释放后重扫，不设retry cap，absolute deadline/cancel仍可胜出；
-- command、final env/stdin/header/provider payload的最终secret check也在该guard内完成；不得检查后释放guard、再调用sink；
+- command、final env/stdin/header/provider model payload的最终secret check也在该guard内完成；不得检查后释放guard、再调用sink；
 - 非合作方绕过该port直接并发写`os.environ`属于same-process namespace interference，产品不虚构可序列化它；但每次guard acquisition仍必须从raw environment重读，不能只信cached value。
+
+Provider SDK必须把该key作为authentication credential送给configured provider，因此唯一允许携带exact value的HTTP field是adapter构造时冻结的client-owned credential header（当前为`Authorization`）。它不是model-visible payload、Plugin/public header或diagnostic/evidence内容；final request admission仍检查URL、完整request body、所有header names及除此closed credential-name外的header values。MCP/Plugin headers没有该豁免。该窄carrier是provider authentication本身，不是第二secret authority或任意header allowlist。
 
 该boundary不能用互不相干的`asyncio.Lock`与`threading.Lock`实现。本轮冻结one underlying `threading.Lock` linearization gate与两个narrow acquisition ports：
 
@@ -2046,4 +2052,44 @@ Round 9.3激活后的产品语义应当是：
 
 > Pulsara从本地目录安装一个Agent Plugins 1.0 package为immutable managed version，以USER或exact WORKSPACE instance显式enable。Portable Plugin Skills不复制进four loose roots，而作为第三typed definition producer，与用户/工作空间loose Skills和Pulsara package bundled Skills共同进入唯一central catalog；优先级为four loose roots、WORKSPACE Plugin、USER Plugin、bundled。Portable MCP definitions只归一化为existing native MCP configs；Pulsara extension command Hooks只进入existing Round 9.2 dispatcher/trust。Plugin package本身不成为capability、executor、permission owner、canonical authority或durable recovery system，也不提供agent-definition或subagent runtime。Running Host refresh不改写installed prefix，只有existing cold open与adopted compaction successor能重建SYSTEM/tools。
 
-本文在代码、测试、dogfood与§15全部闭合前保持`NOT ACTIVATED`。
+本文已经按§17 evidence闭合全部DoD并标记`ACTIVATED`。
+
+---
+
+## 17. Activation evidence（2026-08-26）
+
+Machine-readable gate/results authority：
+
+- [`round9_3_agent_plugin_product_activation.json`](benchmarks/suites/core/v1/round9_3_agent_plugin_product_activation.json)
+- [`round9_3_agent_plugin_product_trace.json`](benchmarks/suites/core/v1/round9_3_agent_plugin_product_trace.json)
+- [`round9_3_plugin_installer_discovery_trace.json`](benchmarks/suites/core/v1/round9_3_plugin_installer_discovery_trace.json)
+
+Final working-tree gates：
+
+```text
+.venv/bin/python -m pytest -q
+  -> 1011 passed in 180.90s
+
+.venv/bin/python -m pytest -q -m postgres
+  -> 223 passed, 788 deselected in 127.10s
+
+.venv/bin/python -m pytest -q tests/test_stage5_clean_migration.py
+  -> 12 passed in 3.40s
+
+Ruff / compileall / protocol generator / uv lock --check / git diff --check
+  -> all exit 0
+```
+
+Clean-v0 dogfood创建并删除exact loopback ephemeral PostgreSQL database；first migration applied `(0)`, repeat migrate applied `()`, head remained `0`, deep verification carrier为`PostgresFastVerificationBundle`。PostgreSQL relation/column/migration、Committed/Live event、subject、append guard、product relation与durable job均无增长；oracle保持`29 / 24 / 11 / 1 / 25 / 0 / 11`，new skip/xfail为0。
+
+Non-editable sdist→wheel在`/tmp/pulsara-r9-3-p1-final.CLhwty`成功；isolated `uv tool install`安装51个packages与one global `pulsara` executable。任意non-source cwd下`pulsara --version`为`0.1.0`，八个Plugin subcommands可见，installed-wheel embedded schemas成功把vault `positive/elements-of-style`验证为`VALID`，empty list为`COMPLETE`。
+
+Pure local service与CLI都完成`validate -> add(disabled) -> inspect -> enable -> inspect -> replace(disabled) -> disable -> remove -> gc`。Real-provider trace使用production `openai_chat_completions`与`deepseek-v4-flash-vision-exp`，结果`passed`：13次foreground provider requests、3次compaction summary requests、14条Hook command logs与one real stdio Plugin MCP call。Plugin Skill由ordinary `read_file`读取；trusted `UserPromptSubmit`/`PreToolUse`产生context/control；PreCompact/PostCompact/SessionStart(compact)运行；same-epoch reload保持SYSTEM/tools exact且messages suffix-only；compaction successor重新冻结Plugin Skill/MCP；replace后的new Hook为`MODIFIED`且单独trust前不可运行；old package在view持有期间GC为`IN_USE`，disable/remove后future contributions消失且old direct descriptor返回`TOOL_UNAVAILABLE`。
+
+5,321,370-byte trace保留actual prompts、provider-visible SYSTEM/tools/messages、provider stream、Hook stdin/stdout/stderr、MCP logs、ToolResults、canonical transcript与model replies。`pulsara_api_key_recorded=false`，Hook/MCP child environment也均未包含exact key。Provider与network真实可达；没有external availability blocker或remaining runtime defect。
+
+合入前P1 closure同一working-tree另以deterministic probes与retained tests证明：package shared anchor使用caller absolute deadline/cancel的nonblocking lock acquisition；paired source read/fstat失败保持source physical owner；`reload_plugins`同一deadline贯穿settlement、Hook/Host publication与native MCP cut；HTTP/provider每个physical request保持one `ProcessApiKeyBoundary` gate直到request body FULL/not-FULL，随后在response headers/body前释放。对应Round 9.3 focused gate为`33 passed in 1.47s`，没有新增task-owner site、durability、retry cap或fingerprint。
+
+Supplemental bundled installer discovery matrix同样使用production `openai_chat_completions`与`deepseek-v4-flash-vision-exp`，以五个隔离HOME/PULSARA_HOME覆盖vault全部positive packages：`elements-of-style@1.0.0`、`jumpcloud-admin@1.1.0`、`fdeops@3.10.3`、`spar@0.5.0`、`one@1.0.3`。每条human user message只自然请求安装本地Plugin与处理不兼容格式，没有出现installer Skill name；模型从provider-visible `SKILL_CATALOG`自行选择exact bundled guidance，以ordinary `read_file`完整读取其`SKILL.md`，且只有在该ToolResult进入later provider call后才生成terminal CLI命令。五条轨迹均通过installed global `pulsara`确认八个commands、strict validate=`VALID`、`add --scope user`=`INSTALLED`、list/doctor检查；independent management inspection均确认exact version、USER scope与`enabled=false`。模型均说明只有exact behavior-preserving candidate且same validator重新返回`VALID`时才可继续，否则honest stop且不安装partial Plugin。
+
+该matrix总计46次provider requests、44,549个provider stream items、5次exact guidance reads、34次terminal calls与67条canonical tool rows。20,163,692-byte trace保留natural user prompts、provider-visible input、Skill read ToolResults、CLI commands/stdout/stderr、managed-state inspections、canonical transcript与model replies；`pulsara_api_key_recorded=false`。隔离non-source sdist→wheel→`uv tool install` launcher为`0.1.0`；ephemeral exact-loopback PostgreSQL仍为clean-v0 first `(0)`、repeat `()`、head `0`与`PostgresFastVerificationBundle` deep verification。

@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
+import re
 from typing import TypeAlias
 
 from pulsara_agent.capability.contracts import LocalSkillRootKind
@@ -50,15 +51,18 @@ class SkillDiagnosticCode(StrEnum):
     LOOSE_ROOT_ALIAS = "skill_loose_root_alias"
     BUNDLED_DEFINITIONS_UNAVAILABLE = "skill_bundled_definitions_unavailable"
     BUNDLED_INVENTORY_MISMATCH = "skill_bundled_inventory_mismatch"
+    PLUGIN_DEFINITIONS_UNAVAILABLE = "skill_plugin_definitions_unavailable"
+    PLUGIN_SAME_TIER_NAME_CONFLICT = "skill_plugin_same_tier_name_conflict"
 
 
-if len(SkillDiagnosticCode) != 33:
-    raise RuntimeError("Skill diagnostic vocabulary must contain exactly 33 codes")
+if len(SkillDiagnosticCode) != 35:
+    raise RuntimeError("Skill diagnostic vocabulary must contain exactly 35 codes")
 
 
 class SkillSource(StrEnum):
     WORKSPACE = "workspace"
     USER = "user"
+    PLUGIN = "plugin"
     BUNDLED = "bundled"
 
 
@@ -74,6 +78,7 @@ class SkillAuthoringDiagnosticCode(StrEnum):
 
 class SkillProducerKind(StrEnum):
     LOOSE = "LOOSE"
+    PLUGIN = "PLUGIN"
     BUNDLED = "BUNDLED"
 
 
@@ -81,6 +86,9 @@ class SkillProducerUnavailableReason(StrEnum):
     LOOSE_CONFIGURATION_INVALID = "LOOSE_CONFIGURATION_INVALID"
     LOOSE_DISCOVERY_RACED = "LOOSE_DISCOVERY_RACED"
     LOOSE_DISCOVERY_OVERBOUND = "LOOSE_DISCOVERY_OVERBOUND"
+    PLUGIN_VIEW_UNAVAILABLE = "PLUGIN_VIEW_UNAVAILABLE"
+    PLUGIN_RESOURCE_UNAVAILABLE = "PLUGIN_RESOURCE_UNAVAILABLE"
+    PLUGIN_DISCOVERY_RACED = "PLUGIN_DISCOVERY_RACED"
     BUNDLED_RESOURCE_UNAVAILABLE = "BUNDLED_RESOURCE_UNAVAILABLE"
     BUNDLED_INVENTORY_MISMATCH = "BUNDLED_INVENTORY_MISMATCH"
     BUNDLED_DEFINITION_INVALID = "BUNDLED_DEFINITION_INVALID"
@@ -154,12 +162,52 @@ class BundledSkillOrigin:
         return PurePosixPath(self.package_relative_skill_directory).name
 
 
-SkillDefinitionOrigin: TypeAlias = LooseSkillOrigin | BundledSkillOrigin
+class PluginSkillVisibilityScope(StrEnum):
+    USER = "USER"
+    WORKSPACE = "WORKSPACE"
+
+
+@dataclass(frozen=True, slots=True)
+class PluginSkillOrigin:
+    visibility_scope: PluginSkillVisibilityScope
+    plugin_id: str
+    package_install_id: str
+    package_relative_skill_directory: str
+    workspace_state_key: str | None = None
+
+    def __post_init__(self) -> None:
+        relative = PurePosixPath(self.package_relative_skill_directory)
+        if (
+            not isinstance(self.visibility_scope, PluginSkillVisibilityScope)
+            or not re.fullmatch(
+                r"(?!.*(?:--|\.\.))[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?",
+                self.plugin_id,
+            )
+            or len(self.plugin_id.encode("utf-8")) > 64
+            or not re.fullmatch(r"pkg_[0-9a-f]{32}", self.package_install_id)
+            or len(relative.parts) != 2
+            or relative.parts[0] != "skills"
+            or any(part in {"", ".", ".."} for part in relative.parts)
+            or self.package_relative_skill_directory.startswith("/")
+            or "\\" in self.package_relative_skill_directory
+        ):
+            raise ValueError("Plugin Skill origin is not canonical")
+        if (self.visibility_scope is PluginSkillVisibilityScope.WORKSPACE) != (
+            self.workspace_state_key is not None
+        ):
+            raise ValueError("Plugin Skill visibility conflicts with workspace identity")
+
+
+SkillDefinitionOrigin: TypeAlias = (
+    LooseSkillOrigin | PluginSkillOrigin | BundledSkillOrigin
+)
 
 
 def skill_source_for_origin(origin: SkillDefinitionOrigin) -> SkillSource:
     if isinstance(origin, BundledSkillOrigin):
         return SkillSource.BUNDLED
+    if isinstance(origin, PluginSkillOrigin):
+        return SkillSource.PLUGIN
     if not isinstance(origin, LooseSkillOrigin):
         raise TypeError("Skill origin union is open")
     if origin.root_kind in {
@@ -173,6 +221,13 @@ def skill_source_for_origin(origin: SkillDefinitionOrigin) -> SkillSource:
 def skill_origin_label(origin: SkillDefinitionOrigin) -> str:
     if isinstance(origin, BundledSkillOrigin):
         return "bundled:pulsara-agent"
+    if isinstance(origin, PluginSkillOrigin):
+        prefix = (
+            "workspace-plugin"
+            if origin.visibility_scope is PluginSkillVisibilityScope.WORKSPACE
+            else "user-plugin"
+        )
+        return f"{prefix}:{origin.plugin_id}@{origin.package_install_id}"
     if not isinstance(origin, LooseSkillOrigin):
         raise TypeError("Skill origin union is open")
     return {
@@ -212,7 +267,9 @@ class SkillManifest:
     raw_document: str = field(default="", repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        if not isinstance(self.origin, (LooseSkillOrigin, BundledSkillOrigin)):
+        if not isinstance(
+            self.origin, (LooseSkillOrigin, PluginSkillOrigin, BundledSkillOrigin)
+        ):
             raise TypeError("Skill manifest origin is not closed")
         if self.path.name != "SKILL.md" or self.base_dir != self.path.parent:
             raise ValueError("Skill physical identity is inconsistent")
@@ -255,6 +312,7 @@ class SkillManifest:
 class SkillCandidateIssueKind(StrEnum):
     INVALID = "INVALID"
     SHADOWED = "SHADOWED"
+    CONFLICTING = "CONFLICTING"
 
 
 @dataclass(frozen=True, slots=True)
@@ -268,7 +326,9 @@ class InvalidSkillCandidateIssue:
     )
 
     def __post_init__(self) -> None:
-        if not isinstance(self.origin, (LooseSkillOrigin, BundledSkillOrigin)):
+        if not isinstance(
+            self.origin, (LooseSkillOrigin, PluginSkillOrigin, BundledSkillOrigin)
+        ):
             raise TypeError("invalid candidate origin is not closed")
         if not self.diagnostics or any(
             item.path != self.path for item in self.diagnostics
@@ -289,8 +349,13 @@ class ShadowedSkillCandidateIssue:
     )
 
     def __post_init__(self) -> None:
-        if not isinstance(self.origin, (LooseSkillOrigin, BundledSkillOrigin)) or not (
-            isinstance(self.winner_origin, (LooseSkillOrigin, BundledSkillOrigin))
+        if not isinstance(
+            self.origin, (LooseSkillOrigin, PluginSkillOrigin, BundledSkillOrigin)
+        ) or not (
+            isinstance(
+                self.winner_origin,
+                (LooseSkillOrigin, PluginSkillOrigin, BundledSkillOrigin),
+            )
         ):
             raise TypeError("shadowed candidate origins are not closed")
         if not self.name or self.path == self.winner_path:
@@ -302,8 +367,48 @@ class ShadowedSkillCandidateIssue:
             raise ValueError("shadowed candidate diagnostics are invalid")
 
 
+@dataclass(frozen=True, slots=True)
+class ConflictingSkillCandidateRef:
+    path: Path
+    origin: PluginSkillOrigin
+
+
+@dataclass(frozen=True, slots=True)
+class ConflictingSkillCandidateIssue:
+    name: str
+    tier: PluginSkillVisibilityScope
+    candidates: tuple[ConflictingSkillCandidateRef, ...]
+    diagnostic_code: SkillDiagnosticCode = field(
+        default=SkillDiagnosticCode.PLUGIN_SAME_TIER_NAME_CONFLICT, init=False
+    )
+    kind: SkillCandidateIssueKind = field(
+        default=SkillCandidateIssueKind.CONFLICTING, init=False
+    )
+
+    def __post_init__(self) -> None:
+        if not self.name or len(self.candidates) < 2:
+            raise ValueError("Plugin Skill conflict group is incomplete")
+        if any(
+            item.origin.visibility_scope is not self.tier
+            for item in self.candidates
+        ):
+            raise ValueError("Plugin Skill conflict group crosses tiers")
+        keys = tuple(
+            (
+                item.origin.plugin_id,
+                item.origin.package_install_id,
+                item.path.as_posix(),
+            )
+            for item in self.candidates
+        )
+        if keys != tuple(sorted(keys)) or len(keys) != len(set(keys)):
+            raise ValueError("Plugin Skill conflict candidates are not deterministic")
+
+
 SkillCandidateIssue: TypeAlias = (
-    InvalidSkillCandidateIssue | ShadowedSkillCandidateIssue
+    InvalidSkillCandidateIssue
+    | ShadowedSkillCandidateIssue
+    | ConflictingSkillCandidateIssue
 )
 
 
@@ -320,8 +425,8 @@ class ProducerUnavailableCause:
             raise TypeError("Skill producer unavailable cause is not closed")
         if not self.diagnostics:
             raise ValueError("Skill producer unavailable cause has no diagnostic")
-        loose_reason = self.reason.value.startswith("LOOSE_")
-        if loose_reason != (self.producer_kind is SkillProducerKind.LOOSE):
+        expected_prefix = f"{self.producer_kind.value}_"
+        if not self.reason.value.startswith(expected_prefix):
             raise ValueError("Skill producer unavailable reason conflicts")
 
 
@@ -348,7 +453,9 @@ class ResolvedSkillCatalogEntry:
     origin: SkillDefinitionOrigin
 
     def __post_init__(self) -> None:
-        if not isinstance(self.origin, (LooseSkillOrigin, BundledSkillOrigin)):
+        if not isinstance(
+            self.origin, (LooseSkillOrigin, PluginSkillOrigin, BundledSkillOrigin)
+        ):
             raise TypeError("Skill catalog origin is not closed")
         if not self.name or not self.description or not self.location:
             raise ValueError("Skill catalog entry is incomplete")
@@ -378,7 +485,9 @@ class ActiveSkillInjection:
     def __post_init__(self) -> None:
         if not isinstance(self.reason, ActiveSkillReason):
             raise TypeError("active Skill reason is not closed")
-        if not isinstance(self.origin, (LooseSkillOrigin, BundledSkillOrigin)):
+        if not isinstance(
+            self.origin, (LooseSkillOrigin, PluginSkillOrigin, BundledSkillOrigin)
+        ):
             raise TypeError("active Skill origin is not closed")
         if self.path.name != "SKILL.md" or self.base_dir != self.path.parent:
             raise ValueError("active Skill physical identity is inconsistent")
@@ -400,8 +509,12 @@ __all__ = [
     "ActiveSkillProjectionUnavailableReason",
     "ActiveSkillReason",
     "BundledSkillOrigin",
+    "ConflictingSkillCandidateIssue",
+    "ConflictingSkillCandidateRef",
     "InvalidSkillCandidateIssue",
     "LooseSkillOrigin",
+    "PluginSkillOrigin",
+    "PluginSkillVisibilityScope",
     "ProducerUnavailableCause",
     "ResolvedSkillCatalogEntry",
     "ResolutionUnavailableCause",

@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 from pulsara_agent.retrieval.config import EmbeddingBackendConfig
+from pulsara_agent.process_api_key_boundary import ProcessApiKeyBoundary
 
 from .openai_compatible import OpenAICompatibleEmbeddingProvider
 from .protocol import EmbeddingProvider
 
 
-def build_embedding_provider(config: EmbeddingBackendConfig) -> EmbeddingProvider:
+def build_embedding_provider(
+    config: EmbeddingBackendConfig,
+    *,
+    api_key_boundary: ProcessApiKeyBoundary,
+) -> EmbeddingProvider:
     if not config.model:
         raise ValueError("Embedding model is not configured.")
     if not config.api_key:
@@ -29,5 +34,6 @@ def build_embedding_provider(config: EmbeddingBackendConfig) -> EmbeddingProvide
             max_retries=config.max_retries,
             batch_size=config.batch_size,
             max_concurrent=config.max_concurrent,
+            api_key_boundary=api_key_boundary,
         )
     raise ValueError("embedding configuration is outside the V1 contract")

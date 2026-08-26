@@ -17,6 +17,10 @@ from pulsara_agent.capability.local_skills import (
     LooseSkillDefinitionsDisposition,
 )
 from pulsara_agent.capability.render import SkillProjectionOverbound
+from pulsara_agent.capability.plugin_skill_contracts import (
+    FrozenPluginSkillDefinitions,
+    PluginSkillDefinitionsDisposition,
+)
 from pulsara_agent.capability.resolver import (
     CompleteEffectiveSkillCatalogInspection,
     SkillCatalogCapabilityProvider,
@@ -90,7 +94,11 @@ def _inspect(
     loose = _discover(producer, workspace)
     with BundledSkillDistributionBindingOwner() as binding:
         bundled = BundledSkillDefinitionProducer(binding).observe()
-    result = SkillCatalogResolver().resolve(loose, bundled)
+    result = SkillCatalogResolver().resolve(
+        loose,
+        FrozenPluginSkillDefinitions(PluginSkillDefinitionsDisposition.COMPLETE),
+        bundled,
+    )
     assert isinstance(result, CompleteEffectiveSkillCatalogInspection)
     return result
 

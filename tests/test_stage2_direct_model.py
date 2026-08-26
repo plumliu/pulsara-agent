@@ -61,6 +61,7 @@ from pulsara_agent.ports.provider_stream import (
     ProviderStreamFailure,
 )
 from pulsara_agent.primitives.model_call import ModelCallPurpose
+from pulsara_agent.process_api_key_boundary import ProcessApiKeyBoundary
 from pulsara_agent.primitives.context import context_fingerprint
 from tests.support.model_config import test_llm_config
 from tests.support.round3 import (
@@ -75,6 +76,7 @@ from tests.support.round3 import (
 def test_round5_foreground_model_rejects_a_total_transport_timeout() -> None:
     with pytest.raises(ValueError, match="must not have a total"):
         DirectKernelModelPort(
+            api_key_boundary=ProcessApiKeyBoundary(),
             config=test_llm_config(
                 api_key="test",
                 base_url="https://example.invalid/v1",
@@ -88,6 +90,7 @@ def test_round5_foreground_model_rejects_a_total_transport_timeout() -> None:
 
 def test_foreground_target_uses_resolved_model_input_budget_without_implicit_128k_cap() -> None:
     port = DirectKernelModelPort(
+        api_key_boundary=ProcessApiKeyBoundary(),
         config=test_llm_config(
             api_key="test",
             base_url="https://example.invalid/v1",
@@ -121,10 +124,12 @@ def test_round5_preflight_rejects_a_foreign_transport_timeout_binding() -> None:
         api="openai_chat_completions",
     )
     first = DirectKernelModelPort(
+        api_key_boundary=ProcessApiKeyBoundary(),
         config=config,
         timeout_policy=OpenAITransportTimeoutPolicy(120, 120, 120, 600, None),
     )
     second = DirectKernelModelPort(
+        api_key_boundary=ProcessApiKeyBoundary(),
         config=config,
         timeout_policy=OpenAITransportTimeoutPolicy(120, 120, 120, 601, None),
     )
@@ -242,6 +247,7 @@ def test_round5_provider_retries_before_semantic_output(
     transport = transport_type(
         api_key="test",
         timeout_policy=OpenAITransportTimeoutPolicy(1, 1, 1, 1, None),
+        api_key_boundary=ProcessApiKeyBoundary(),
         retry_config=LLMRetryConfig(
             attempts=2,
             base_delay_seconds=0.001,
@@ -294,6 +300,7 @@ def test_round5_provider_never_retries_after_semantic_output(
     transport = transport_type(
         api_key="test",
         timeout_policy=OpenAITransportTimeoutPolicy(1, 1, 1, 1, None),
+        api_key_boundary=ProcessApiKeyBoundary(),
         retry_config=LLMRetryConfig(
             attempts=2,
             base_delay_seconds=0.001,
@@ -427,6 +434,7 @@ def _port(
     api: str = "openai_chat_completions",
 ) -> DirectKernelModelPort:
     return DirectKernelModelPort(
+        api_key_boundary=ProcessApiKeyBoundary(),
         config=test_llm_config(
             api_key="test",
             base_url="https://example.invalid/v1",

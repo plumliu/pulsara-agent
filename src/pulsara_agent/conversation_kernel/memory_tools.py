@@ -63,6 +63,7 @@ from pulsara_agent.model_input.contracts import (
 )
 from pulsara_agent.primitives.run_permission import FrozenRunPermissionSnapshot
 from pulsara_agent.primitives.context import canonical_json_bytes
+from pulsara_agent.process_api_key_boundary import ProcessApiKeyBoundary
 from pulsara_agent.ports.tool_execution import (
     ToolOutputArtifactCandidate,
     ToolOutputSourceCoverage,
@@ -118,6 +119,7 @@ class KernelMemoryToolPort:
         rerank_provider: RerankProvider | None = None,
         io_owner: KernelSessionIO,
         provider_trust_domain_identity: str = "",
+        api_key_boundary: ProcessApiKeyBoundary,
     ) -> None:
         self._repository = repository
         self._session_id = session_id
@@ -143,6 +145,7 @@ class KernelMemoryToolPort:
         self._closed = False
         self._governor: AdvisoryMemoryGovernor | None = None
         self._provider_trust_domain_identity = provider_trust_domain_identity
+        self._api_key_boundary = api_key_boundary
 
     @property
     def tool_names(self) -> frozenset[str]:
@@ -589,7 +592,10 @@ class KernelMemoryToolPort:
         if self._embedding is None and self._embedding_config.api_key:
             async with self._provider_lock:
                 if self._embedding is None and not self._closed:
-                    self._embedding = build_embedding_provider(self._embedding_config)
+                    self._embedding = build_embedding_provider(
+                        self._embedding_config,
+                        api_key_boundary=self._api_key_boundary,
+                    )
         return self._embedding
 
     async def _rerank_provider(self) -> RerankProvider | None:
@@ -604,7 +610,10 @@ class KernelMemoryToolPort:
         if self._rerank is None:
             async with self._provider_lock:
                 if self._rerank is None and not self._closed:
-                    self._rerank = build_rerank_provider(config)
+                    self._rerank = build_rerank_provider(
+                        config,
+                        api_key_boundary=self._api_key_boundary,
+                    )
         return self._rerank
 
     async def _rerank_explicit(self, query: str, result, *, total_deadline: float):

@@ -2,7 +2,7 @@
 
 > 状态：**ACTIVATED**
 >
-> 当前语义同步：2026-08-25
+> 当前语义同步：2026-08-26（Round 9.3 activated hard cut）
 >
 > 当前definition-producer架构由
 > [`PULSARA_UNIFIED_SKILL_DEFINITION_PRODUCERS_HARD_CUT_IMPLEMENTATION_SPEC.zh.md`](PULSARA_UNIFIED_SKILL_DEFINITION_PRODUCERS_HARD_CUT_IMPLEMENTATION_SPEC.zh.md)
@@ -16,17 +16,18 @@
 
 ## 0. 当前产品结论
 
-Skill是untrusted prompt/context capability，不是executable tool。当前production只接受两类definition producer：
+Skill是untrusted prompt/context capability，不是executable tool。当前production只接受三个显式definition producer：
 
 ```text
 installed pulsara_agent package/bundled_skills（read-only defaults）
 four loose roots（workspace/user editable overrides）
+enabled local Agent Plugin packages（exact WORKSPACE / USER）
                          │
                          ▼
                one effective Skill catalog
 ```
 
-当前不实现Plugin Skill producer、Plugin installer、Plugin-private catalog或任何empty placeholder branch。
+Plugin package lifecycle由Round 9.3唯一拥有；Skill侧只接收`FrozenPluginSkillDefinitions`第三input。它不扫描managed state猜enablement，不把Plugin Skill物化到four loose roots，也不存在Plugin-private parser、catalog、activation/read path或empty placeholder branch。
 
 Runtime行为：
 
@@ -71,12 +72,13 @@ Host-extension与unknown extension只产生closed INFO diagnostics，保持inert
 
 - loose Runtime candidate：expected basename是physical direct-child name；
 - bundled definition：expected basename是official tuple member；
+- Plugin definition：expected basename是同一次immutable package observation中的`skills/` immediate child name；
 - standalone validate/install source observation：expected basename是frozen source directory name；
 - installer hidden stage/final：expected basename是已验证parsed name，不使用随机stage basename。
 
 ---
 
-## 2. 两个current definition producers
+## 2. 三个current definition producers
 
 ### 2.1 Loose producer
 
@@ -110,7 +112,13 @@ Build与Runtime共用同一个pure all-non-dot immediate-entry classifier。Miss
 
 Bundled definitions直接从package absolute path进入catalog和ordinary `read_file`，不复制到four roots，不创建manifest/provenance/backup/opt-out状态。
 
-### 2.3 Central resolver
+### 2.3 Plugin producer
+
+`PluginSkillDefinitionProducer`只消费Round 9.3一次完整、immutable、不能mixed的enabled-package view，并复用同一个root-neutral parser与placement validator。它输出ordinary `SkillManifest`、invalid issues或one closed Plugin producer unavailable cause；它不读取instance state、不管理package lifecycle、不选择winner，也不建立第五个Skill root。
+
+Plugin origin exact携带`USER | WORKSPACE` visibility、WORKSPACE state key（仅WORKSPACE）、plugin id、package install id与`skills/<name>`relative directory。Supporting resources仍由ordinary `read_file`读取；old in-flight consumer通过Round 9.3 generic package lifetime anchor持有旧immutable root，disable/replace/remove只改变future view。
+
+### 2.4 Central resolver
 
 `SkillCatalogResolver`是唯一precedence owner：
 
@@ -119,10 +127,12 @@ WORKSPACE_PULSARA
 > WORKSPACE_AGENTS
 > USER_PULSARA
 > USER_AGENTS
+> exact WORKSPACE Plugin Skills
+> USER Plugin Skills
 > BUNDLED
 ```
 
-每个valid candidate恰好成为winner或one shadowed issue；invalid high-tier不遮挡lower valid definition。Complete inspection保留all invalid/shadowed issues，不受旧diagnostic cap截断。任一required producer UNAVAILABLE或final winner/catalog projection overbound时，effective inspection为UNAVAILABLE且没有winner/fact/hidden map；active selection同样fail closed。
+同一Plugin tier出现多个同名valid candidates时形成one group-level `CONFLICTING` issue，不按plugin id、安装时间或path选winner，并继续寻找lower-tier unique fallback。除此以外，每个valid candidate恰好成为winner或one shadowed issue；invalid high-tier不遮挡lower valid definition。Complete inspection保留all invalid/shadowed/conflicting issues，不受旧diagnostic cap截断。任一required producer UNAVAILABLE或final winner/catalog projection overbound时，effective inspection为UNAVAILABLE且没有winner/fact/hidden map；active selection同样fail closed。
 
 ---
 
@@ -136,7 +146,7 @@ Complete effective winners按name排序并以exact canonical JSON投影：
 {"skills":[{"name":"...","description":"...","location":"..."}]}
 ```
 
-Catalog只含routing truth。Bundled location是installed package absolute `SKILL.md` path；loose location使用existing model-visible workspace/user prefixes。
+Catalog只含routing truth。Bundled location是installed package absolute `SKILL.md` path；loose location使用existing model-visible workspace/user prefixes；Plugin location是enabled immutable package root下的exact absolute path。
 
 ### 3.2 Active Skill
 
@@ -162,7 +172,7 @@ tools[n + 1]    == tools[n]
 messages[n + 1] == messages[n] || append_only_suffix
 ```
 
-Skill add/edit/delete、bundled availability变化、loose override与fallback只在next legal provider safe point形成successor source observation；不创造第三种rebase boundary，不重写installed prefix。
+Skill add/edit/delete、bundled availability变化、Plugin reload/enable/disable/replace/remove、loose override与fallback只在next legal provider safe point形成successor source observation；不创造第三种rebase boundary，不重写installed prefix。
 
 Cold epoch与explicitly adopted compaction successor才可重建provider input roots。Same-turn tool follow-up继续使用installed source heads；current filesystem变化不能回写已open attempt。
 
@@ -186,9 +196,10 @@ Retained仍使用existing 8 items/40,000-token product boundary，不建立recei
 ## 6. Identity与durability
 
 - Stable source kind/id保持`LOCAL_SKILL_CATALOG / pulsara-local-skill-catalog`；
-- source contract使用bundled+loose v3 exact framing；
-- manifest/fact携带closed `LooseSkillOrigin | BundledSkillOrigin`；
+- source contract使用`skill-source-contract:v4-bundled-loose-plugin-skills` exact framing，producer order为`LOOSE, PLUGIN, BUNDLED`，precedence为four loose tiers、`WORKSPACE_PLUGIN`、`USER_PLUGIN`、`BUNDLED`；
+- manifest/fact携带closed `LooseSkillOrigin | PluginSkillOrigin | BundledSkillOrigin`；
 - bundled origin exact为`bundled_skills/<official-name>`；
+- Plugin origin exact为visibility/workspace key/plugin id/package install id/`skills/<name>`；
 - origin digest只在fact builder真实canonical boundary即时计算，不存回DTO；
 - 删除`discovery_semantic_fingerprint`、root-policy digest及所有consumer；
 - 不新增digest map、generation、watcher、receipt、history、replay、repair job或database schema。
@@ -214,4 +225,4 @@ CLI只有`pulsara skills validate/install/list/doctor`。旧bundled `sync-bundle
 
 ## 8. Final active truth
 
-Round 9.1当前唯一真相是：一个portable Agent Skills parser与placement path，两类current definition producer，一个central effective resolver，一个source-neutral inspection/fact/projection path，以及append-only provider exposure。Bundled是package内只读default；four-root loose definitions是可直接copy/edit/delete的higher-priority overrides。没有bundled materialization、Plugin placeholder、compatibility path或第二套Skill engine。
+Round 9.1当前唯一真相是：一个portable Agent Skills parser与placement path，Bundled/Loose/Plugin三个显式definition producer，一个seven-tier central resolver，一个source-neutral inspection/fact/projection path，以及append-only provider exposure。Bundled是package内只读default；four-root loose definitions是可直接copy/edit/delete的highest-priority overrides；enabled local Agent Plugin definitions位于loose与bundled之间。没有bundled或Plugin Skill materialization、compatibility path、generic producer registry或第二套Skill engine。

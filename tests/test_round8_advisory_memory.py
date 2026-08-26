@@ -87,6 +87,7 @@ from pulsara_agent.memory.scope import (
     workspace_scope,
 )
 from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
+from pulsara_agent.process_api_key_boundary import ProcessApiKeyBoundary
 from pulsara_agent.primitives.run_permission import (
     RunPermissionAdmissionSource,
     build_run_permission_snapshot,
@@ -1441,6 +1442,7 @@ def test_round8_preference_head_and_automatic_recall_are_separate_advisory_sourc
             cheap_hint_reflection=False,
         ),
         io_owner=io_owner,
+        api_key_boundary=ProcessApiKeyBoundary(),
     )
 
     async def exercise() -> tuple[object, object, object]:
@@ -1549,7 +1551,7 @@ def test_round8_optional_provider_and_relation_failures_remain_advisory(
     )
     assert fact.fact_id is not None
 
-    def fail_provider(_config):
+    def fail_provider(_config, **_kwargs):
         raise RuntimeError("optional provider constructor failed")
 
     monkeypatch.setattr(
@@ -1576,6 +1578,7 @@ def test_round8_optional_provider_and_relation_failures_remain_advisory(
             cheap_hint_reflection=False,
         ),
         io_owner=io_owner,
+        api_key_boundary=ProcessApiKeyBoundary(),
     )
 
     def fail_relation_enrichment(**_kwargs):

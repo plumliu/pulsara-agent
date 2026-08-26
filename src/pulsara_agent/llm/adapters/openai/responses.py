@@ -11,8 +11,10 @@ from typing import Any, AsyncIterator
 from pulsara_agent.llm.adapters.openai.client import (
     OPENAI_RESPONSES_API,
     OpenAITransportTimeoutPolicy,
+    admit_provider_request,
     build_async_openai_client,
 )
+from pulsara_agent.process_api_key_boundary import ProcessApiKeyBoundary
 from pulsara_agent.llm.adapters.openai.errors import classify_llm_error
 from pulsara_agent.llm.adapters.openai.events import (
     ProviderLiveItemBuilder,
@@ -82,6 +84,7 @@ class OpenAIResponsesTransport:
 
     api_key: str
     timeout_policy: OpenAITransportTimeoutPolicy
+    api_key_boundary: ProcessApiKeyBoundary = field(repr=False)
     api: str = OPENAI_RESPONSES_API
     binding_id: str = "pulsara.openai.responses"
     contract_version: str = "v5-explicit-terminal-operational-elision"
@@ -126,6 +129,7 @@ class OpenAIResponsesTransport:
             api_key=self.api_key,
             base_url=model.base_url,
             timeout_policy=self.timeout_policy,
+            api_key_boundary=self.api_key_boundary,
             max_retries=sdk_max_retries_for_transport(
                 retry_config=self.retry_config,
                 explicit_max_retries=self.openai_sdk_max_retries,
@@ -147,7 +151,13 @@ class OpenAIResponsesTransport:
                     builder=ProviderLiveItemBuilder()
                 )
                 try:
-                    stream = await client.responses.create(**payload, stream=True)
+                    stream = await admit_provider_request(
+                        api_key_boundary=self.api_key_boundary,
+                        payload=payload,
+                        operation=lambda: client.responses.create(
+                            **payload, stream=True
+                        ),
+                    )
                     async for raw_event in stream:
                         model_identity.observe(responses_reported_model(raw_event))
                         for item in accumulator.apply(raw_event):

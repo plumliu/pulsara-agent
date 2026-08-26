@@ -9,8 +9,9 @@ from hashlib import sha256
 import json
 import os
 from pathlib import Path
-import tempfile
+import stat
 from typing import Callable, Iterator
+from uuid import uuid4
 
 from pulsara_agent.hooks.contracts import (
     FrozenHookDefinition,
@@ -18,6 +19,15 @@ from pulsara_agent.hooks.contracts import (
     HookSourceTrustAssessment,
     HookTrustDisposition,
     HookTrustSubject,
+    LocalFileHookSourceIdentity,
+    LocalFileHookTrustSubject,
+    PluginHookSourceIdentity,
+    PluginHookTrustSubject,
+)
+from pulsara_agent.local_source_binding import (
+    open_absolute_directory_nofollow,
+    open_or_create_absolute_directory_nofollow,
+    prepare_local_source_path,
 )
 
 try:  # pragma: no cover - platform branch
@@ -27,6 +37,20 @@ except ImportError:  # pragma: no cover - Windows branch
 
 
 TRUST_DIGEST_CONTRACT = "pulsara.hook-definition-trust.v1"
+MAXIMUM_HOOK_TRUST_STATE_BYTES = 64 * 1024
+_READ_FLAGS = (
+    os.O_RDONLY
+    | getattr(os, "O_CLOEXEC", 0)
+    | getattr(os, "O_NONBLOCK", 0)
+    | getattr(os, "O_NOFOLLOW", 0)
+)
+_WRITE_FLAGS = (
+    os.O_WRONLY
+    | os.O_CREAT
+    | os.O_EXCL
+    | getattr(os, "O_CLOEXEC", 0)
+    | getattr(os, "O_NOFOLLOW", 0)
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,14 +65,29 @@ def normalized_definition_digest(
     provenance: FrozenHookSourceProvenance,
     definitions: tuple[FrozenHookDefinition, ...],
 ) -> str:
+    identity = provenance.identity
+    if isinstance(identity, LocalFileHookSourceIdentity):
+        source = {
+            "kind": identity.kind.value,
+            "path": identity.canonical_path.as_posix(),
+            "visibility": identity.visibility_scope.value,
+            "workspace_state_key": identity.workspace_state_key,
+        }
+    elif isinstance(identity, PluginHookSourceIdentity):
+        source = {
+            "kind": identity.kind.value,
+            "path": identity.canonical_path.as_posix(),
+            "visibility": identity.visibility_scope.value,
+            "workspace_state_key": identity.workspace_state_key,
+            "plugin_id": identity.plugin_id,
+            "package_install_id": identity.package_install_id,
+            "config_relative_path": identity.config_relative_path,
+        }
+    else:  # pragma: no cover - closed union
+        raise TypeError("Hook source identity union is open")
     body = {
         "contract": TRUST_DIGEST_CONTRACT,
-        "source": {
-            "kind": provenance.identity.kind.value,
-            "path": provenance.identity.canonical_path.as_posix(),
-            "visibility": provenance.identity.visibility_scope.value,
-            "workspace_state_key": provenance.identity.workspace_state_key,
-        },
+        "source": source,
         "environment": list(provenance.declaration_environment),
         "definitions": [
             {
@@ -85,14 +124,60 @@ def normalized_definition_digest(
     ).hexdigest()
 
 
+def _read_regular_file_nofollow(path: Path) -> bytes:
+    parent = open_absolute_directory_nofollow(path.parent)
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(path.name, _READ_FLAGS, dir_fd=parent)
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise OSError("Hook trust state is not a regular file")
+        if before.st_size > MAXIMUM_HOOK_TRUST_STATE_BYTES:
+            raise ValueError("Hook trust state exceeds its scalar contract")
+        chunks: list[bytes] = []
+        retained = 0
+        while True:
+            chunk = os.read(
+                descriptor,
+                min(64 * 1024, MAXIMUM_HOOK_TRUST_STATE_BYTES + 1 - retained),
+            )
+            if not chunk:
+                break
+            retained += len(chunk)
+            if retained > MAXIMUM_HOOK_TRUST_STATE_BYTES:
+                raise ValueError("Hook trust state exceeds its scalar contract")
+            chunks.append(chunk)
+        after = os.fstat(descriptor)
+        current = os.stat(path.name, dir_fd=parent, follow_symlinks=False)
+        def evidence(value: os.stat_result) -> tuple[int, int, int, int, int, int]:
+            return (
+                value.st_dev,
+                value.st_ino,
+                value.st_mode,
+                value.st_size,
+                value.st_mtime_ns,
+                value.st_ctime_ns,
+            )
+        if evidence(before) != evidence(after) or evidence(after) != evidence(current):
+            raise OSError("Hook trust state changed during observation")
+        return b"".join(chunks)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        os.close(parent)
+
+
 class HookTrustStore:
     def __init__(self, pulsara_home: Path) -> None:
-        self._root = pulsara_home.expanduser().resolve() / "hooks"
+        # The configured home itself is the already-adopted root binding (and
+        # may be an operator-selected alias); every control-directory and file
+        # component below that one root is created/opened no-follow.
+        self._root = prepare_local_source_path(pulsara_home.resolve()) / "hooks"
 
     def read(self, subject: HookTrustSubject) -> HookSourceTrustState:
         path = self._state_path(subject)
         try:
-            raw = path.read_bytes()
+            raw = _read_regular_file_nofollow(path)
         except FileNotFoundError:
             return HookSourceTrustState(subject)
         try:
@@ -218,7 +303,6 @@ class HookTrustStore:
 
     def _write(self, state: HookSourceTrustState) -> None:
         path = self._state_path(state.subject)
-        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         payload = json.dumps(
             {
                 "enabled": state.enabled,
@@ -229,48 +313,126 @@ class HookTrustStore:
             sort_keys=True,
             separators=(",", ":"),
         ).encode("utf-8")
-        fd, temporary_name = tempfile.mkstemp(prefix=".trust-", dir=path.parent)
-        temporary = Path(temporary_name)
+        if len(payload) > MAXIMUM_HOOK_TRUST_STATE_BYTES:
+            raise ValueError("Hook trust state exceeds its scalar contract")
+        parent = open_or_create_absolute_directory_nofollow(path.parent)
+        temporary = f".trust-{uuid4().hex}"
+        fd: int | None = None
         try:
+            fd = os.open(temporary, _WRITE_FLAGS, 0o600, dir_fd=parent)
             os.fchmod(fd, 0o600)
             with os.fdopen(fd, "wb", closefd=True) as stream:
+                fd = None
                 stream.write(payload)
                 stream.flush()
                 os.fsync(stream.fileno())
-            os.replace(temporary, path)
-            directory_fd = os.open(path.parent, os.O_RDONLY)
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
+            os.replace(
+                temporary,
+                path.name,
+                src_dir_fd=parent,
+                dst_dir_fd=parent,
+            )
+            os.fsync(parent)
         finally:
             try:
-                temporary.unlink()
+                os.unlink(temporary, dir_fd=parent)
             except FileNotFoundError:
                 pass
+            if fd is not None:
+                os.close(fd)
+            os.close(parent)
 
     @contextmanager
     def _locked(self, subject: HookTrustSubject) -> Iterator[None]:
         path = self._lock_path(subject)
-        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        with path.open("a+b") as stream:
+        parent = open_or_create_absolute_directory_nofollow(path.parent)
+        descriptor: int | None = None
+        try:
+            descriptor = os.open(
+                path.name,
+                os.O_RDWR
+                | os.O_CREAT
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+                dir_fd=parent,
+            )
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode):
+                raise OSError("Hook trust lock is not a regular file")
             if fcntl is not None:
-                fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+                fcntl.flock(descriptor, fcntl.LOCK_EX)
             try:
                 yield
             finally:
                 if fcntl is not None:
-                    fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+            os.close(parent)
 
     def _state_path(self, subject: HookTrustSubject) -> Path:
-        if subject.source_kind.value == "USER_FILE":
-            return self._root / "trust" / "user.json"
-        return self._root / "trust" / "workspace" / f"{subject.stable_locator}.json"
+        if isinstance(subject, LocalFileHookTrustSubject):
+            if subject.source_kind.value == "USER_FILE":
+                return self._root / "trust" / "user.json"
+            assert subject.workspace_state_key is not None
+            return (
+                self._root
+                / "trust"
+                / "workspace"
+                / f"{subject.workspace_state_key}.json"
+            )
+        if not isinstance(subject, PluginHookTrustSubject):
+            raise TypeError("Hook trust subject union is open")
+        if subject.visibility_scope.value == "USER":
+            return (
+                self._root
+                / "trust"
+                / "plugin"
+                / "user"
+                / f"{subject.plugin_id}.json"
+            )
+        assert subject.workspace_state_key is not None
+        return (
+            self._root
+            / "trust"
+            / "plugin"
+            / "workspace"
+            / subject.workspace_state_key
+            / f"{subject.plugin_id}.json"
+        )
 
     def _lock_path(self, subject: HookTrustSubject) -> Path:
-        if subject.source_kind.value == "USER_FILE":
-            return self._root / "locks" / "user.lock"
-        return self._root / "locks" / "workspace" / f"{subject.stable_locator}.lock"
+        if isinstance(subject, LocalFileHookTrustSubject):
+            if subject.source_kind.value == "USER_FILE":
+                return self._root / "locks" / "user.lock"
+            assert subject.workspace_state_key is not None
+            return (
+                self._root
+                / "locks"
+                / "workspace"
+                / f"{subject.workspace_state_key}.lock"
+            )
+        if not isinstance(subject, PluginHookTrustSubject):
+            raise TypeError("Hook trust subject union is open")
+        if subject.visibility_scope.value == "USER":
+            return (
+                self._root
+                / "locks"
+                / "plugin"
+                / "user"
+                / f"{subject.plugin_id}.lock"
+            )
+        assert subject.workspace_state_key is not None
+        return (
+            self._root
+            / "locks"
+            / "plugin"
+            / "workspace"
+            / subject.workspace_state_key
+            / f"{subject.plugin_id}.lock"
+        )
 
 
 __all__ = [

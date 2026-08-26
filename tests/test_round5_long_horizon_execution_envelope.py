@@ -63,6 +63,7 @@ from pulsara_agent.primitives.run_permission import (
     RunPermissionAdmissionSource,
     build_run_permission_snapshot,
 )
+from pulsara_agent.process_api_key_boundary import ProcessApiKeyBoundary
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -206,6 +207,7 @@ def test_round5_foreground_openai_timeout_is_typed_and_has_no_total(
         api_key="test",
         base_url="https://example.invalid/v1",
         timeout_policy=policy,
+        api_key_boundary=ProcessApiKeyBoundary(),
         max_retries=0,
     )
 
@@ -313,6 +315,7 @@ async def _consume_local_sse(*, api: str, base_url: str) -> int:
         api_key="test",
         base_url=base_url,
         timeout_policy=OpenAITransportTimeoutPolicy(1, 1, 1, 0.05, None),
+        api_key_boundary=ProcessApiKeyBoundary(),
         max_retries=0,
     )
     try:

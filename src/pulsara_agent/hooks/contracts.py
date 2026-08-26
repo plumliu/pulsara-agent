@@ -51,6 +51,7 @@ _HOOK_EVENT_BY_EXTERNAL_NAME = {
 class HookSourceKind(StrEnum):
     USER_FILE = "USER_FILE"
     WORKSPACE_FILE = "WORKSPACE_FILE"
+    PLUGIN = "PLUGIN"
 
 
 class HookVisibilityScope(StrEnum):
@@ -91,7 +92,7 @@ class HookDiagnostic:
 
 
 @dataclass(frozen=True, slots=True)
-class HookSourceIdentity:
+class LocalFileHookSourceIdentity:
     kind: HookSourceKind
     canonical_path: Path
     visibility_scope: HookVisibilityScope
@@ -113,9 +114,88 @@ class HookSourceIdentity:
 
 
 @dataclass(frozen=True, slots=True)
-class HookTrustSubject:
+class PluginHookSourceIdentity:
+    visibility_scope: HookVisibilityScope
+    plugin_id: str
+    package_install_id: str
+    config_relative_path: str
+    canonical_path: Path
+    workspace_state_key: str | None = None
+    physical_lifetime_anchor: object | None = field(
+        default=None, repr=False, compare=False
+    )
+    kind: HookSourceKind = field(default=HookSourceKind.PLUGIN, init=False)
+
+    def __post_init__(self) -> None:
+        import re
+
+        if not self.canonical_path.is_absolute():
+            raise ValueError("Plugin Hook source path must be absolute")
+        if self.config_relative_path != "dev.pulsara/hooks/hooks.json":
+            raise ValueError("Plugin Hook source location is not fixed")
+        if not re.fullmatch(
+            r"(?!.*(?:--|\.\.))[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?",
+            self.plugin_id,
+        ) or not re.fullmatch(r"pkg_[0-9a-f]{32}", self.package_install_id):
+            raise ValueError("Plugin Hook source identity is invalid")
+        if (self.visibility_scope is HookVisibilityScope.WORKSPACE) != (
+            self.workspace_state_key is not None
+        ):
+            raise ValueError("Plugin Hook source workspace identity conflicts")
+
+
+type HookSourceIdentity = LocalFileHookSourceIdentity | PluginHookSourceIdentity
+
+
+@dataclass(frozen=True, slots=True)
+class LocalFileHookTrustSubject:
     source_kind: HookSourceKind
-    stable_locator: str
+    workspace_state_key: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.source_kind not in {
+            HookSourceKind.USER_FILE,
+            HookSourceKind.WORKSPACE_FILE,
+        }:
+            raise ValueError("local Hook trust subject kind is invalid")
+        if (self.source_kind is HookSourceKind.WORKSPACE_FILE) != (
+            self.workspace_state_key is not None
+        ):
+            raise ValueError("local Hook trust workspace identity conflicts")
+
+    @property
+    def stable_locator(self) -> str:
+        return self.workspace_state_key or "user"
+
+
+@dataclass(frozen=True, slots=True)
+class PluginHookTrustSubject:
+    visibility_scope: HookVisibilityScope
+    plugin_id: str
+    workspace_state_key: str | None = None
+    source_kind: HookSourceKind = field(default=HookSourceKind.PLUGIN, init=False)
+
+    def __post_init__(self) -> None:
+        import re
+
+        if not re.fullmatch(
+            r"(?!.*(?:--|\.\.))[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?",
+            self.plugin_id,
+        ):
+            raise ValueError("Plugin Hook trust subject id is invalid")
+        if (self.visibility_scope is HookVisibilityScope.WORKSPACE) != (
+            self.workspace_state_key is not None
+        ):
+            raise ValueError("Plugin Hook trust workspace identity conflicts")
+
+    @property
+    def stable_locator(self) -> str:
+        if self.visibility_scope is HookVisibilityScope.USER:
+            return f"plugin:user:{self.plugin_id}"
+        return f"plugin:workspace:{self.workspace_state_key}:{self.plugin_id}"
+
+
+type HookTrustSubject = LocalFileHookTrustSubject | PluginHookTrustSubject
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,6 +205,9 @@ class FrozenHookSourceProvenance:
     description: str | None
     display_label: str
     declaration_environment: tuple[tuple[str, str], ...] = ()
+    physical_lifetime_anchor: object | None = field(
+        default=None, repr=False, compare=False
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -685,6 +768,10 @@ __all__ = [
     "HookTrustDisposition",
     "HookTrustSubject",
     "HookVisibilityScope",
+    "LocalFileHookSourceIdentity",
+    "LocalFileHookTrustSubject",
+    "PluginHookSourceIdentity",
+    "PluginHookTrustSubject",
     "JsonScalar",
     "JsonValue",
     "ObserveOutcome",

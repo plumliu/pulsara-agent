@@ -23,9 +23,9 @@ from pulsara_agent.capability.local_skill_publisher import (
     LocalSkillInstallScope,
     LocalSkillPublishUnavailableReason,
 )
-from pulsara_agent.capability.local_skill_source_binding import (
+from pulsara_agent.local_source_binding import (
     open_absolute_directory_nofollow,
-    prepare_local_skill_source_path,
+    prepare_local_source_path,
 )
 from pulsara_agent.capability.local_skills import (
     MAX_SKILL_FILE_BYTES,
@@ -50,6 +50,9 @@ from pulsara_agent.capability.types import (
 from pulsara_agent.capability.resolver import (
     EffectiveSkillCatalogInspection,
     SkillCatalogResolver,
+)
+from pulsara_agent.capability.plugin_skill_contracts import (
+    FrozenPluginSkillDefinitions,
 )
 
 
@@ -106,10 +109,13 @@ class InstallLooseLocalSkillRequest:
 @dataclass(frozen=True, slots=True)
 class InspectEffectiveSkillCatalogRequest:
     workspace_root: Path
+    plugin_definitions: FrozenPluginSkillDefinitions
 
     def __post_init__(self) -> None:
         if not self.workspace_root.is_absolute():
             raise ValueError("Skill inspection workspace must be resolved and absolute")
+        if not isinstance(self.plugin_definitions, FrozenPluginSkillDefinitions):
+            raise TypeError("Skill inspection lacks its Plugin definition batch")
 
 
 @dataclass(frozen=True, slots=True)
@@ -222,7 +228,9 @@ class LocalSkillManagementService:
         try:
             bundled = BundledSkillDefinitionProducer(owner).observe()
             loose = producer.observe(policy)
-            return self._catalog_resolver.resolve(loose, bundled)
+            return self._catalog_resolver.resolve(
+                loose, request.plugin_definitions, bundled
+            )
         finally:
             if owns_binding:
                 owner.close()
@@ -236,7 +244,7 @@ class LocalSkillManagementService:
 
 
 def _validate_source(source_path: Path) -> LocalSkillValidationOutcome:
-    source = prepare_local_skill_source_path(source_path)
+    source = prepare_local_source_path(source_path)
     try:
         source_fd = open_absolute_directory_nofollow(source)
     except FileNotFoundError:

@@ -4,7 +4,7 @@
 >
 > Fingerprint hard-cut：[`PULSARA_FINGERPRINT_SUBTRACTION_HARD_CUT_IMPLEMENTATION_SPEC.zh.md`](PULSARA_FINGERPRINT_SUBTRACTION_HARD_CUT_IMPLEMENTATION_SPEC.zh.md)覆盖本文冗余的same-process installation candidate fingerprint/proof字段以及逐文件、文档与activation evidence SHA门禁；MCP config、catalog/schema、policy、slot/binding与MAC ref边界digest继续有效。
 >
-> 记录日期：2026-08-13
+> 记录日期：2026-08-13；当前下游同步：2026-08-26（Round 9.3）
 >
 > 当前编码基线：44ec551f7ae6ff4c98f1b4cdeb222d68ac94f28c（feat: activate long-horizon execution envelope）
 >
@@ -17,6 +17,8 @@
 > Catalog 先行设计：[PULSARA_MCP_CATALOG_AND_LIST_FALLBACK_DESIGN.zh.md](archived_docs/PULSARA_MCP_CATALOG_AND_LIST_FALLBACK_DESIGN.zh.md)
 >
 > 前置规格：[Round 3 compiler](ROUND_3_STRUCTURED_MODEL_INPUT_COMPILER_IMPLEMENTATION_SPEC.zh.md)、[Round 3.1 prefix continuity](ROUND_3_1_PROVIDER_INPUT_PREFIX_CONTINUITY_IMPLEMENTATION_SPEC.zh.md)、[Round 5 long-horizon envelope](ROUND_5_LONG_HORIZON_EXECUTION_ENVELOPE_IMPLEMENTATION_SPEC.zh.md)
+>
+> Round 9.3同步：local Agent Plugin `mcp.json`只经portable parser归一化成本文唯一native `McpServerConfig`，然后进入同一个supervisor、slot、DIRECT/META、permission/effect/attempt owner。Plugin不建立MCP registry/supervisor/executor，不授予`required`、permission、effect或scope authority。Native config增加closed cwd binding、runtime source identity、literal public headers与generic physical lifetime anchor；这些是所有source可用的native fields，不是Plugin-private DTO。
 
 ---
 
@@ -591,9 +593,16 @@ McpServerConfig
   semantic_config_fingerprint
   runtime_config_fingerprint
   resolved_config_identity
+  runtime_source:
+    LocalConfiguredMcpRuntimeSource
+    | ManagedPackageMcpRuntimeSource(store_scope_key, package_owner_key, package_install_id)
+  public_headers: ordered literal public HTTP headers
+  physical_lifetime_anchor: opaque process-local generic anchor | NONE
 ~~~
 
 semantic_config_fingerprint 只覆盖会改变 server/capability 语义的非 secret 事实；runtime_config_fingerprint 绑定transport endpoint、command、secret-generation commitment、refresh/concurrency/timeout等physical policy。raw secret 不得进入任一普通 fingerprint、repr、diagnostic 或 event。
+
+`StdioTransportConfig.cwd`使用closed `WorkspaceRelativeMcpCwd | ExactAbsoluteMcpCwd(PACKAGE_ROOT | INSTANCE_DATA)`；native transport只消费already-resolved typed path，不解析Plugin placeholder或回读package state。`runtime_source`以canonical typed values进入runtime identity，使Plugin replace即使HTTP endpoint/config文本相同也形成new resolved config identity与正确reconnect cut。Anchor不进入semantic identity、repr或provider surface，只让old slot/process/attempt持旧immutable package root至physical drain。
 
 ~~~text
 resolved_config_identity = H(
@@ -634,6 +643,8 @@ user config       ~/.pulsara/mcp.yaml
 workspace config  <workspace-root>/.pulsara/mcp.yaml
 Host open override  process-local only
 ~~~
+
+Round 9.3 enabled-package view是第三种**adapter input**而不是第三个YAML precedence layer：每个portable server使用injective `plugin:<utf8-length>:<plugin-id>:<local-server-id>` native id；与local/Host id或另一个Plugin id形成collision group时整组Plugin candidates不进入supervisor。Local configs与accepted Plugin configs共同服从existing `MAXIMUM_MCP_CONFIGURED_SERVERS = 64` aggregate bound；不能为Plugin另开64个slots。Workspace-vs-USER Plugin component/leaf selection由Round 9.3 complete view先闭合，native MCP core不解析scope state。
 
 `pulsara mcp add` 默认写 user config；只有显式 `--workspace` 才写 workspace config。`mcp list/doctor/add/enable/disable --workspace`本身属于显式管理行为，但随后普通`host run/repl/tui`仍需`--trust-workspace-mcp`才激活repository-owned配置。Host open override 不回写文件。配置文件只保存用户明确填写的 server/tool effect override，不保存 discovery 后自动推导出的每个 tool classification，也不保存 connection generation、candidate、slot 或 approval decision。
 
@@ -711,10 +722,12 @@ V1 不增加：per-argument risk scoring、LLM permission classifier、Guardian 
 
 V1 支持：
 
-- stdio：argument vector，不经 shell；cwd 必须在 workspace policy 内；child environment 使用 default-deny allowlist，只把显式配置的非 secret 值和 sealed secret refs 注入 fresh process；
+- stdio：argument vector，不经 shell；cwd使用closed workspace-relative或exact package/data authority；child environment 使用 default-deny allowlist，只把显式配置的非 secret 值和sealed secret refs注入fresh process；Plugin adapter仅在typed seam解析`./`、`${PLUGIN_ROOT}`、`${PLUGIN_DATA}`并提供reserved public `PLUGIN_ROOT/PLUGIN_DATA`；
 - Streamable HTTP：HTTPS 默认；localhost 可以显式允许 HTTP；redirect、proxy 和 private network 规则必须由 typed network policy 决定；`PUBLIC_ONLY`必须把一次验证通过的exact IP pin到实际connection，同时保留原始Host header与TLS SNI，禁止validation与connect分别解析造成DNS rebinding窗口；
-- static header 与 bearer 值只在 fresh wire request builder 处解封；
+- literal `public_headers`与static-header/bearer secret refs分别承载；public headers作为generic native field参与runtime config，secret values只在fresh wire request builder处解封；
 - server log、stderr 与 transport exception 经过 redaction 和长度上限。
+
+Round 9.3建立的同一injected `ProcessApiKeyBoundary`必须覆盖MCP stdio final spawn与HTTP final sink admission，并与supported key rotation、Hook spawn、provider final sink及Plugin irreversible publish共用underlying gate。Async acquisition不得阻塞event loop，cancelled acquisition必须shield+join；guard跨越spawn/send irreversible cut。Exact nonempty `PULSARA_API_KEY`不得进入Plugin MCP environment、stdin、stdout/stderr、diagnostic或provider model payload；provider authentication所必需的client-owned credential header仅按Round 9.3 §5.6 closed carrier处理，不属于Plugin MCP header authority。
 
 V1 不支持 legacy SSE 与隐式全环境继承。
 

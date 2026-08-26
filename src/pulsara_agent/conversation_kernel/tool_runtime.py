@@ -401,6 +401,10 @@ class KernelHookReloadPort(Protocol):
         self, *, deadline_monotonic: float | None
     ) -> Mapping[str, object]: ...
 
+    async def reload_plugins(
+        self, *, deadline_monotonic: float | None
+    ) -> Mapping[str, object]: ...
+
 
 @dataclass(slots=True)
 class _DirectTerminalTool:
@@ -562,7 +566,7 @@ class _DirectPlanControlTool:
 
 @dataclass(slots=True)
 class _DirectHookControlTool:
-    name: str = "reload_hooks"
+    name: str
 
     def execute(self, call: ToolCall) -> ToolExecutionResult:
         del call
@@ -670,7 +674,8 @@ class DirectKernelToolPort:
             _DirectPlanControlTool("enter_plan"),
             _DirectPlanControlTool("ask_plan_question"),
             _DirectPlanControlTool("exit_plan"),
-            _DirectHookControlTool(),
+            _DirectHookControlTool("reload_hooks"),
+            _DirectHookControlTool("reload_plugins"),
             _DirectMcpCatalogTool("list_mcp_servers"),
             _DirectMcpCatalogTool("inspect_new_mcp_tool"),
             _DirectMcpCatalogTool("use_new_mcp_tool"),
@@ -831,6 +836,7 @@ class DirectKernelToolPort:
                         "ask_plan_question",
                         "exit_plan",
                         "reload_hooks",
+                        "reload_plugins",
                         "spawn_agent",
                         "create_agent_tasks",
                         "list_agents",
@@ -951,13 +957,18 @@ class DirectKernelToolPort:
         return supervisor.freeze_capability_projection_input(owner)
 
     async def reload_mcp_configs(
-        self, configs: tuple[McpServerConfig, ...]
+        self,
+        configs: tuple[McpServerConfig, ...],
+        *,
+        deadline_monotonic: float,
     ) -> frozenset[str]:
         """Fence a config epoch and cancel only not-yet-FULL confirmations."""
 
         supervisor = self._mcp_supervisor
         if supervisor is None:
             raise RuntimeError("MCP supervisor is not bound")
+        if monotonic() >= deadline_monotonic:
+            raise TimeoutError("MCP config reload deadline expired before cut")
         old_configs = {item.server_id: item for item in supervisor.configs}
         new_configs = {item.server_id: item for item in configs}
         changed = supervisor.reload_configs(configs)
@@ -1621,7 +1632,7 @@ class DirectKernelToolPort:
                 f"descriptor:{entry.descriptor.id}",
                 f"invalid tool arguments: {exc.message}",
             )
-        if tool_name == "reload_hooks":
+        if tool_name in {"reload_hooks", "reload_plugins"}:
             access = surface_borrow.prepared.access
             if (
                 access.conversation_scope_kind is not ModelInputScopeKind.ROOT
@@ -1631,8 +1642,8 @@ class DirectKernelToolPort:
             ):
                 return KernelToolAuthorization(
                     KernelToolAuthorizationKind.PERMISSION_DENIED,
-                    "reload_hooks_requires_root_bypass_mode",
-                    "reload_hooks requires ROOT bypass-permissions mode",
+                    f"{tool_name}_requires_root_bypass_mode",
+                    f"{tool_name} requires ROOT bypass-permissions mode",
                 )
             return KernelToolAuthorization(
                 KernelToolAuthorizationKind.ALLOW,
@@ -2469,6 +2480,31 @@ class DirectKernelToolPort:
             safe_values = HookSecretScrubSet.capture().scrub_json(dict(values))
             if not isinstance(safe_values, dict):
                 raise RuntimeError("Hook reload result lost its JSON object shape")
+            content = json.dumps(
+                safe_values,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+            return KernelToolResult(
+                state="SUCCESS",
+                content=content,
+                effect_class="read_only",
+                physical_observation=_freeze_physical_observation(
+                    invocation_started, observation_origin
+                ),
+            )
+        if tool_name == "reload_plugins":
+            if self._hook_reload is None:
+                raise RuntimeError("Plugin reload port is unavailable")
+            values = await self._hook_reload.reload_plugins(
+                deadline_monotonic=self._deadlines.deadline(
+                    KernelWatchdogOwner.NONTERMINAL_TOOL_INVOCATION
+                )
+            )
+            safe_values = HookSecretScrubSet.capture().scrub_json(dict(values))
+            if not isinstance(safe_values, dict):
+                raise RuntimeError("Plugin reload result lost its JSON object shape")
             content = json.dumps(
                 safe_values,
                 ensure_ascii=False,

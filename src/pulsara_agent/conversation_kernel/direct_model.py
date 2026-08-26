@@ -43,6 +43,7 @@ from pulsara_agent.llm.adapters.openai.responses import (
 from pulsara_agent.llm.config import LLMConfig
 from pulsara_agent.llm.input import LLMToolCall, ToolSpec
 from pulsara_agent.llm.models import ModelRole
+from pulsara_agent.process_api_key_boundary import ProcessApiKeyBoundary
 from pulsara_agent.llm.provider import ProviderAssistantReplayCodecKind
 from pulsara_agent.llm.provider_replay import (
     PreparedDurableProviderAssistantReplay,
@@ -567,6 +568,7 @@ class DirectKernelModelPort:
         ]
         | None = None,
         timeout_policy: OpenAITransportTimeoutPolicy | None = None,
+        api_key_boundary: ProcessApiKeyBoundary,
     ) -> None:
         transport_timeout = (
             timeout_policy or DEFAULT_KERNEL_WATCHDOG_POLICY.foreground_transport
@@ -581,6 +583,7 @@ class DirectKernelModelPort:
                 OpenAIResponsesTransport(
                     api_key=config.api_key,
                     timeout_policy=transport_timeout,
+                    api_key_boundary=api_key_boundary,
                     retry_config=config.retry,
                     openai_sdk_max_retries=config.openai_sdk_max_retries,
                 )
@@ -591,6 +594,7 @@ class DirectKernelModelPort:
                 OpenAIChatCompletionsTransport(
                     api_key=config.api_key,
                     timeout_policy=transport_timeout,
+                    api_key_boundary=api_key_boundary,
                     retry_config=config.retry,
                     openai_sdk_max_retries=config.openai_sdk_max_retries,
                 )

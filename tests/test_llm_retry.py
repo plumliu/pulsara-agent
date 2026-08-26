@@ -16,6 +16,7 @@ from pulsara_agent.llm.retry import (
     compute_retry_delay,
     retry_config_from_env,
 )
+from pulsara_agent.process_api_key_boundary import ProcessApiKeyBoundary
 
 
 class FakeResponse:
@@ -99,11 +100,13 @@ def test_openai_client_max_retries_plumbing(monkeypatch) -> None:
         api_key="sk-test",
         base_url="https://example.test/v1/",
         timeout_policy=OpenAITransportTimeoutPolicy(7, 7, 7, 7, 7),
+        api_key_boundary=ProcessApiKeyBoundary(),
     )
     openai_client.build_async_openai_client(
         api_key="sk-test",
         base_url="https://example.test/v1/",
         timeout_policy=OpenAITransportTimeoutPolicy(7, 7, 7, 7, 7),
+        api_key_boundary=ProcessApiKeyBoundary(),
         max_retries=0,
     )
 
