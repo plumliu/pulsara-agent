@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type {
   CommandReceipt,
@@ -205,12 +205,13 @@ describe('PulsaraApp', () => {
     render(<PulsaraApp adapter={new FakeAdapter()} />);
     expect(await screen.findByRole('heading', { name: '准备发布' })).toBeTruthy();
     expect(screen.getByLabelText('发送给 Pulsara')).toBeTruthy();
-    expect(await screen.findByLabelText('本轮清单')).toBeTruthy();
-    expect(screen.getByRole('button', { name: '收起本轮清单' }).textContent).toContain('第 2 / 2 步');
+    expect(await screen.findByLabelText('TODO清单')).toBeTruthy();
+    expect(screen.getAllByText('TODO清单')).toHaveLength(2);
+    expect(screen.getByRole('button', { name: '收起TODO清单' }).textContent).toContain('第 2 / 2 步');
     expect(screen.getByText('检查实现')).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: '收起本轮清单' }));
-    expect(screen.queryByLabelText('本轮清单')).toBeNull();
-    expect(screen.getByRole('button', { name: '展开本轮清单' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: '收起TODO清单' }));
+    expect(screen.queryByLabelText('TODO清单')).toBeNull();
+    expect(screen.getByRole('button', { name: '展开TODO清单' })).toBeTruthy();
     expect(screen.queryByText(/文件已更改|项变更/)).toBeNull();
     expect(screen.queryByRole('button', { name: '添加附件' })).toBeNull();
     expect(screen.queryByRole('button', { name: '能力' })).toBeNull();
@@ -290,7 +291,7 @@ describe('PulsaraApp', () => {
         id: 'assistant-tool', role: 'assistant', time: '18:11', body: '', status: 'completed',
         reasoning: [{ id: 'reasoning-before-tool', kind: 'full', body: '先读取文件。' }],
         traces: [{
-          id: 'trace-read', kind: 'read', title: '读取文件', subtitle: '已完成',
+          id: 'trace-read', kind: 'read', toolName: 'read_file', title: '读取文件', subtitle: '已完成',
           status: 'completed', meta: '操作完成',
         }],
       }, {
@@ -321,10 +322,110 @@ describe('PulsaraApp', () => {
     expect(container.querySelectorAll('.assistant-heading--run-start')).toHaveLength(1);
     expect(container.querySelectorAll('.assistant-heading--response')).toHaveLength(1);
     expect(container.querySelectorAll('.assistant-turn--operational .assistant-heading')).toHaveLength(1);
+    expect(screen.getByText('read_file')).toBeTruthy();
+    expect(screen.getByText('读取文件')).toBeTruthy();
 
     const finalTurn = container.querySelector('.assistant-turn--response-with-reasoning');
     expect(finalTurn?.firstElementChild?.classList.contains('reasoning-disclosure')).toBe(true);
     expect(finalTurn?.children[1]?.classList.contains('assistant-heading--response')).toBe(true);
+  });
+
+  it('shows the exact tool name and keeps a terminal command inside its expanded output', async () => {
+    const adapter = new FakeAdapter();
+    adapter.connectionValue = {
+      ...projection(''),
+      messages: [{
+        id: 'assistant-terminal', role: 'assistant', time: '18:11', body: '', status: 'completed',
+        traces: [{
+          id: 'trace-terminal', kind: 'terminal', toolName: 'terminal', title: '运行命令',
+          subtitle: '已完成', status: 'completed', command: 'printf "visible command"',
+          output: ['visible command'], meta: '操作完成',
+        }],
+      }],
+      isRunning: false,
+      activeTurnId: undefined,
+    };
+
+    const { container } = render(<PulsaraApp adapter={adapter} />);
+    expect(await screen.findByText('terminal')).toBeTruthy();
+    expect(screen.getByText('运行命令')).toBeTruthy();
+    expect(container.querySelector('.terminal-command')).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: /terminal/ }));
+
+    expect(container.querySelector('.terminal-command')?.textContent).toContain('printf "visible command"');
+  });
+
+  it('offers copy only for the terminal assistant response', async () => {
+    const adapter = new FakeAdapter();
+    adapter.connectionValue = {
+      ...projection(''),
+      messages: [{
+        id: 'assistant-intermediate', role: 'assistant', assistantKind: 'tool-request',
+        time: '18:11', body: '我先检查文件，然后继续处理。', status: 'completed',
+        traces: [{
+          id: 'trace-intermediate', kind: 'read', toolName: 'read_file', title: '读取文件',
+          subtitle: '已完成', status: 'completed', meta: '操作完成',
+        }],
+      }, {
+        id: 'assistant-terminal-response', role: 'assistant', assistantKind: 'terminal',
+        time: '18:12', body: '最终结果已经准备好。', status: 'completed',
+      }],
+      isRunning: false,
+      activeTurnId: undefined,
+    };
+
+    render(<PulsaraApp adapter={adapter} />);
+    const intermediate = (await screen.findByText('我先检查文件，然后继续处理。')).closest('.assistant-copy');
+    const terminal = screen.getByText('最终结果已经准备好。').closest('.assistant-copy');
+
+    expect(intermediate).toBeTruthy();
+    expect(terminal).toBeTruthy();
+    expect(within(intermediate as HTMLElement).queryByRole('button', { name: '复制回复' })).toBeNull();
+    expect(within(terminal as HTMLElement).getByRole('button', { name: '复制回复' })).toBeTruthy();
+    expect(screen.getAllByRole('button', { name: '复制回复' })).toHaveLength(1);
+  });
+
+  it('joins consecutive tool rails only when no visible content separates them', async () => {
+    const adapter = new FakeAdapter();
+    adapter.connectionValue = {
+      ...projection(''),
+      messages: [{
+        id: 'assistant-edit', role: 'assistant', assistantKind: 'tool-request',
+        time: '18:11', body: '我先修正测试。', status: 'completed',
+        traces: [{
+          id: 'trace-edit', kind: 'edit', toolName: 'edit_file', title: '更新文件',
+          subtitle: '已完成', status: 'completed', meta: '操作完成',
+        }],
+      }, {
+        id: 'assistant-terminal', role: 'assistant', assistantKind: 'tool-request',
+        time: '18:12', body: '', status: 'completed',
+        traces: [{
+          id: 'trace-terminal', kind: 'terminal', toolName: 'terminal', title: '运行命令',
+          subtitle: '已完成', status: 'completed', meta: '操作完成',
+        }],
+      }, {
+        id: 'assistant-reasoning-boundary', role: 'assistant', assistantKind: 'tool-request',
+        time: '18:13', body: '', status: 'completed',
+        reasoning: [{ id: 'reasoning-boundary', kind: 'full', body: '我需要先分析结果。' }],
+        traces: [{
+          id: 'trace-after-reasoning', kind: 'terminal', toolName: 'terminal', title: '运行命令',
+          subtitle: '已完成', status: 'completed', meta: '操作完成',
+        }],
+      }],
+      isRunning: false,
+      activeTurnId: undefined,
+    };
+
+    const { container } = render(<PulsaraApp adapter={adapter} />);
+    await screen.findByText('我先修正测试。');
+    const turns = container.querySelectorAll('.assistant-turn');
+
+    expect(turns).toHaveLength(3);
+    expect(turns[0].classList.contains('assistant-turn--tool-chain-after')).toBe(true);
+    expect(turns[1].classList.contains('assistant-turn--tool-chain-before')).toBe(true);
+    expect(turns[1].classList.contains('assistant-turn--tool-chain-after')).toBe(false);
+    expect(turns[2].classList.contains('assistant-turn--tool-chain-before')).toBe(false);
   });
 
   it('renders a delivered subtask completion as a neutral continuation event', async () => {
@@ -363,6 +464,50 @@ describe('PulsaraApp', () => {
     expect(screen.getByRole('heading', { name: '设置' })).toBeTruthy();
   });
 
+  it('uses shared session presence and the simplified local overview chrome', async () => {
+    const adapter = new FakeAdapter();
+    adapter.sessions = [
+      initialSession,
+      {
+        id: 'session-loaded',
+        title: '后台检查',
+        subtitle: '8 条记录',
+        status: 'waiting',
+        updatedAt: '2 分钟前',
+        live: true,
+      },
+      {
+        id: 'session-resumable',
+        title: '历史会话',
+        subtitle: '21 条记录',
+        status: 'completed',
+        updatedAt: '昨天',
+        live: false,
+      },
+    ];
+    const { container } = render(<PulsaraApp adapter={adapter} />);
+    await screen.findByRole('heading', { name: '准备发布' });
+
+    fireEvent.click(screen.getByRole('button', { name: '总览' }));
+
+    expect(screen.getAllByText('最近会话')).toHaveLength(2);
+    expect(screen.queryByText('最近工作')).toBeNull();
+    const runtimeHealth = container.querySelector('.runtime-health');
+    expect(runtimeHealth?.textContent).toBe('本地服务已连接');
+    expect(runtimeHealth?.querySelector('small')).toBeNull();
+    expect(container.querySelectorAll('.active-mission .session-presence--current')).toHaveLength(1);
+    expect(container.querySelector('.mission-presence-column')?.textContent).toBe('当前会话');
+    expect(container.querySelectorAll('.recent-table .session-presence--current')).toHaveLength(1);
+    expect(container.querySelectorAll('.recent-table .session-presence--loaded')).toHaveLength(1);
+    expect(container.querySelectorAll('.recent-table .session-presence--resumable')).toHaveLength(1);
+    expect(Array.from(container.querySelectorAll('.recent-table .table-state'), (node) => node.textContent))
+      .toEqual(['当前会话', '已载入', '可恢复']);
+    const systemCard = container.querySelector('.system-card');
+    expect(systemCard?.querySelector('.healthy-dot')).toBeNull();
+    expect(systemCard?.querySelector('footer span')).toBeNull();
+    expect(systemCard?.querySelector('footer')?.textContent).toBe('仅限这台设备');
+  });
+
   it('refreshes loaded session facts and distinguishes the current page connection', async () => {
     const adapter = new FakeAdapter();
     adapter.sessions = [
@@ -376,17 +521,66 @@ describe('PulsaraApp', () => {
         live: false,
       },
     ];
-    render(<PulsaraApp adapter={adapter} />);
+    const { container } = render(<PulsaraApp adapter={adapter} />);
 
     await screen.findByRole('heading', { name: '准备发布' });
     expect(await screen.findByText('1 条记录 · 当前会话')).toBeTruthy();
     expect(screen.getByText('13 条记录 · 可恢复')).toBeTruthy();
+    expect(container.querySelectorAll('.session-presence--current')).toHaveLength(1);
+    expect(container.querySelectorAll('.session-presence--loaded')).toHaveLength(0);
+    expect(container.querySelectorAll('.session-presence--resumable')).toHaveLength(1);
 
     fireEvent.click(screen.getByRole('button', { name: /继续检查/ }));
     await screen.findByRole('heading', { name: '继续检查' });
     expect(await screen.findByText('13 条记录 · 当前会话')).toBeTruthy();
     expect(screen.getByText('1 条记录 · 已载入')).toBeTruthy();
+    expect(container.querySelectorAll('.session-presence--current')).toHaveLength(1);
+    expect(container.querySelectorAll('.session-presence--loaded')).toHaveLength(1);
+    expect(container.querySelectorAll('.session-presence--resumable')).toHaveLength(0);
     await waitFor(() => expect(adapter.listSessions).toHaveBeenCalledTimes(3));
+  });
+
+  it('groups sessions into collapsible project directories and a final quick-start section', async () => {
+    const adapter = new FakeAdapter();
+    adapter.sessions = [{
+      ...initialSession,
+      workspace: { id: 'project-alpha', name: 'alpha', path: '/tmp/alpha', kind: 'project' },
+    }, {
+      id: 'session-alpha-2', title: '继续 alpha', subtitle: '7 条记录', status: 'completed',
+      updatedAt: '3 分钟前', live: false,
+      workspace: { id: 'project-alpha', name: 'alpha', path: '/tmp/alpha', kind: 'project' },
+    }, {
+      id: 'session-beta', title: '检查 beta', subtitle: '4 条记录', status: 'completed',
+      updatedAt: '10 分钟前', live: false,
+      workspace: { id: 'project-beta', name: 'beta', path: '/tmp/beta', kind: 'project' },
+    }, {
+      id: 'session-quick', title: '快速排查', subtitle: '2 条记录', status: 'completed',
+      updatedAt: '昨天', live: false,
+      workspace: { id: 'quick-one', name: '快速开始', path: '/tmp/pulsara-quick', kind: 'quick' },
+    }];
+
+    const { container } = render(<PulsaraApp adapter={adapter} />);
+    await screen.findByRole('heading', { name: '准备发布' });
+    const directoryTree = screen.getByRole('region', { name: '会话目录' });
+    expect(container.querySelector('.workspace-heading')).toBeNull();
+    expect(within(directoryTree).getByRole('button', { name: '从目录中打开' }).getAttribute('aria-expanded')).toBe('true');
+    expect(within(directoryTree).getByRole('button', { name: '快速开始' }).getAttribute('aria-expanded')).toBe('true');
+    const alphaGroup = within(directoryTree).getByRole('region', { name: 'alpha 会话' });
+    expect(within(alphaGroup).getByText('准备发布')).toBeTruthy();
+    expect(within(alphaGroup).getByText('继续 alpha')).toBeTruthy();
+    expect(within(directoryTree).getByText('快速排查')).toBeTruthy();
+    expect(directoryTree.querySelector('.session-section:last-child')?.classList.contains('session-section--quick')).toBe(true);
+
+    fireEvent.click(within(alphaGroup).getByRole('button', { name: 'alpha' }));
+    expect(within(alphaGroup).queryByText('准备发布')).toBeNull();
+    expect(within(alphaGroup).queryByText('继续 alpha')).toBeNull();
+
+    fireEvent.click(within(directoryTree).getByRole('button', { name: '从目录中打开' }));
+    fireEvent.click(within(directoryTree).getByRole('button', { name: '快速开始' }));
+    expect(within(directoryTree).queryByRole('region', { name: 'alpha 会话' })).toBeNull();
+    expect(within(directoryTree).queryByText('快速排查')).toBeNull();
+    expect(within(directoryTree).getByRole('button', { name: '从目录中打开' })).toBeTruthy();
+    expect(within(directoryTree).getByRole('button', { name: '快速开始' })).toBeTruthy();
   });
 
   it('creates a quick-start session before asking for the first task', async () => {
@@ -452,8 +646,8 @@ describe('PulsaraApp', () => {
 
     expect(await screen.findByRole('heading', { name: '实施方案' })).toBeTruthy();
     expect(screen.getByText('检查契约')).toBeTruthy();
-    expect(screen.queryByLabelText('本轮清单')).toBeNull();
-    expect(screen.getByRole('button', { name: '展开本轮清单' }).hasAttribute('disabled')).toBe(true);
+    expect(screen.queryByLabelText('TODO清单')).toBeNull();
+    expect(screen.getByRole('button', { name: '展开TODO清单' }).hasAttribute('disabled')).toBe(true);
     fireEvent.click(screen.getByRole('button', { name: /批准并继续/ }));
 
     await waitFor(() => expect(adapter.lastConnection?.resolveInteraction).toHaveBeenCalledWith(
@@ -511,8 +705,12 @@ describe('PulsaraApp', () => {
     adapter.connectionValue = {
       ...projection('主任务继续运行。'),
       messages: [{
-        id: 'assistant-root', role: 'assistant', time: '现在', body: '主任务继续运行。',
-        status: 'running',
+        id: 'assistant-root', turnId: 'turn-1', role: 'assistant', time: '现在',
+        body: '主任务继续运行。', status: 'running',
+        traces: [{
+          id: 'spawn-task', kind: 'mcp', toolName: 'spawn_agent', title: '创建子任务',
+          subtitle: '已完成', status: 'completed', meta: '操作完成',
+        }],
       }],
       isRunning: false,
       activeTurnId: undefined,
@@ -566,9 +764,21 @@ describe('PulsaraApp', () => {
     await waitFor(() => expect(adapter.lastConnection?.acceptSubagentCompletion).toHaveBeenCalledWith('task-complete', 'read-only'));
     expect(await screen.findByText('Pulsara 已收到结果')).toBeTruthy();
 
-    fireEvent.click(within(taskCard).getByRole('button', { name: '在对话中查看' }));
-    await waitFor(() => expect(
-      container.querySelector('.subagent-run.is-focused[data-task-id="task-complete"]'),
-    ).toBeTruthy());
+    vi.useFakeTimers();
+    try {
+      fireEvent.click(within(taskCard).getByRole('button', { name: '在对话中查看' }));
+      const focusedRun = container.querySelector('.subagent-run.is-focused[data-task-id="task-complete"]');
+      expect(focusedRun).toBeTruthy();
+      expect(focusedRun?.classList.contains('is-expanded')).toBe(true);
+
+      await act(async () => vi.advanceTimersByTimeAsync(2600));
+
+      const settledRun = container.querySelector('.subagent-run[data-task-id="task-complete"]');
+      expect(settledRun?.classList.contains('is-focused')).toBe(false);
+      expect(settledRun?.classList.contains('is-expanded')).toBe(true);
+      expect(document.activeElement).not.toBe(settledRun?.querySelector('.subagent-run__header'));
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

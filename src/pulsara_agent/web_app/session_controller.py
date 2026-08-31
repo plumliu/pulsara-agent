@@ -49,6 +49,19 @@ def _display_session_id(session_id: str) -> str:
     return suffix[:8] if suffix else session_id[:8]
 
 
+def _create_quick_workspace_root(managed_root: Path, now: datetime) -> Path:
+    """Create one short, readable, process-safe managed workspace directory."""
+
+    stem = f"quick-{now.strftime('%Y%m%d-%H%M%S')}"
+    while True:
+        candidate = managed_root / f"{stem}-{uuid4().hex[:8]}"
+        try:
+            candidate.mkdir(mode=0o700, exist_ok=False)
+        except FileExistsError:
+            continue
+        return candidate
+
+
 class LocalSessionController:
     """Own create/resume publication while preserving Kernel close authority."""
 
@@ -310,10 +323,7 @@ class LocalSessionController:
             managed_root = require_pulsara_home() / "workspaces"
             managed_root.mkdir(mode=0o700, parents=True, exist_ok=True)
             now = datetime.now().astimezone()
-            root = managed_root / (
-                f"quick-{now.strftime('%Y%m%d-%H%M%S')}-{uuid4().hex}"
-            )
-            root.mkdir(mode=0o700, exist_ok=False)
+            root = _create_quick_workspace_root(managed_root, now)
             workspace_input = HostWorkspaceInput(
                 workspace_kind="transient",
                 workspace_root=root,

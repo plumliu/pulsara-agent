@@ -13,15 +13,18 @@ import type {
   AgentTask,
   AppView,
   RuntimeStatus,
-  SessionStatus,
   SessionSummary,
-  Workspace,
 } from '../lib/pulsara-types';
 import { BrandMark } from './brand-mark';
+import {
+  getSessionPresence,
+  SessionPresenceGlyph,
+  sessionPresenceLabels,
+} from './session-presence';
 
 interface OverviewViewProps {
-  workspace: Workspace;
   sessions: SessionSummary[];
+  activeSessionId: string;
   runtimeStatus: RuntimeStatus;
   agentTasks: AgentTask[];
   onNavigate: (view: AppView) => void;
@@ -45,17 +48,9 @@ const shortConnectionLabels: Record<RuntimeStatus, string> = {
   failed: '失败',
 };
 
-const sessionLabels: Record<SessionStatus, string> = {
-  running: '进行中',
-  waiting: '等待中',
-  completed: '已完成',
-  interrupted: '已中断',
-  draft: '草稿',
-};
-
 export function OverviewView({
-  workspace,
   sessions,
+  activeSessionId,
   runtimeStatus,
   agentTasks,
   onNavigate,
@@ -63,7 +58,10 @@ export function OverviewView({
   onNewSession,
 }: OverviewViewProps) {
   const runningTasks = agentTasks.filter((task) => task.status === 'running').length;
-  const active = sessions.find((session) => session.status === 'running') ?? sessions[0];
+  const active = sessions.find((session) => session.id === activeSessionId)
+    ?? sessions.find((session) => session.status === 'running')
+    ?? sessions[0];
+  const activePresence = active ? getSessionPresence(active, activeSessionId) : undefined;
   const connected = runtimeStatus === 'online';
 
   return (
@@ -71,7 +69,7 @@ export function OverviewView({
       <header className="surface-topbar">
         <div className="surface-brand"><BrandMark compact /><span>Pulsara 工作台</span></div>
         <div className={`runtime-health runtime-health--${runtimeStatus}`}>
-          <span /><strong>{connectionLabels[runtimeStatus]}</strong><small>仅限本机</small>
+          <span /><strong>{connectionLabels[runtimeStatus]}</strong>
         </div>
       </header>
 
@@ -97,16 +95,16 @@ export function OverviewView({
         <section className="metric-grid">
           <article><div className="metric-icon amber"><Radio size={15} /></div><div><strong>{sessions.filter((session) => session.status === 'running').length}</strong><span>活动会话</span></div><small>共 {sessions.length} 个会话</small></article>
           <article><div className="metric-icon blue"><Bot size={15} /></div><div><strong>{runningTasks}</strong><span>进行中任务</span></div><small>共 {agentTasks.length} 个子任务</small></article>
-          <article><div className="metric-icon green"><Sparkles size={15} /></div><div><strong>{sessions.length}</strong><span>最近工作</span></div><small>可随时继续</small></article>
+          <article><div className="metric-icon green"><Sparkles size={15} /></div><div><strong>{sessions.length}</strong><span>最近会话</span></div><small>可随时继续</small></article>
           <article><div className="metric-icon violet"><Database size={15} /></div><div><strong>{connected ? '正常' : '—'}</strong><span>本地数据</span></div><small>{connected ? '已经就绪' : '等待连接'}</small></article>
         </section>
 
         <div className="overview-columns">
           <section className="overview-card active-mission-card">
             <header className="overview-card__header"><div><span className="page-kicker">当前工作</span><h2>正在发生</h2></div><button onClick={() => onNavigate('workbench')}>打开工作台 <ArrowRight size={12} /></button></header>
-            {active ? (
+            {active && activePresence ? (
               <button className="active-mission" onClick={() => onOpenSession(active.id)}>
-                <span className="mission-status-column"><i /><b>{sessionLabels[active.status]}</b></span>
+                <span className={`mission-presence-column mission-presence-column--${activePresence}`}><SessionPresenceGlyph presence={activePresence} /><b>{sessionPresenceLabels[activePresence]}</b></span>
                 <span className="mission-copy"><strong>{active.title}</strong><small>{active.subtitle}</small><span className="mission-detail"><span><TerminalSquare size={10} /> 保存在本机</span></span></span>
                 <ArrowRight size={15} />
               </button>
@@ -129,17 +127,20 @@ export function OverviewView({
           <section className="overview-card recent-card">
             <header className="overview-card__header"><div><span className="page-kicker">最近记录</span><h2>最近会话</h2></div><button onClick={() => onNavigate('workbench')}>查看全部</button></header>
             <div className="recent-table">
-              {sessions.slice(0, 4).map((session) => (
-                <button key={session.id} onClick={() => onOpenSession(session.id)}>
-                  <span className={`session-status session-status--${session.status}`} /><span><strong>{session.title}</strong><small>{session.subtitle}</small></span><span className={`table-state table-state--${session.status}`}>{sessionLabels[session.status]}</span><time>{session.updatedAt}</time><ArrowRight size={12} />
-                </button>
-              ))}
+              {sessions.slice(0, 4).map((session) => {
+                const presence = getSessionPresence(session, activeSessionId);
+                return (
+                  <button key={session.id} onClick={() => onOpenSession(session.id)}>
+                    <SessionPresenceGlyph presence={presence} /><span><strong>{session.title}</strong><small>{session.subtitle}</small></span><span className={`table-state table-state--${presence}`}>{sessionPresenceLabels[presence]}</span><time>{session.updatedAt}</time><ArrowRight size={12} />
+                  </button>
+                );
+              })}
               {sessions.length === 0 && <div className="empty-state"><MessageCircle size={22} /><h3>会话列表为空</h3><p>创建任务后，它会出现在这里。</p></div>}
             </div>
           </section>
 
           <section className="overview-card system-card">
-            <header className="overview-card__header"><div><span className="page-kicker">这台设备</span><h2>本地工作空间</h2></div><span className={connected ? 'healthy-dot' : ''} /></header>
+            <header className="overview-card__header"><div><span className="page-kicker">这台设备</span><h2>本地工作空间</h2></div></header>
             <div className="system-map">
               <div className="system-node"><Waypoints size={14} /><span><strong>任务服务</strong><small>运行你的会话</small></span><b>{shortConnectionLabels[runtimeStatus]}</b></div>
               <div className="system-line" />
@@ -147,7 +148,7 @@ export function OverviewView({
               <div className="system-line" />
               <div className="system-node"><TerminalSquare size={14} /><span><strong>浏览器连接</strong><small>自动恢复</small></span><b>{connected ? '正常' : '未连接'}</b></div>
             </div>
-            <footer><span>{workspace.name}</span><code>仅限这台设备</code></footer>
+            <footer><code>仅限这台设备</code></footer>
           </section>
         </div>
       </div>

@@ -1,6 +1,12 @@
-import { Eye, FolderGit2, GitFork, Plus, Search } from 'lucide-react';
+import { ChevronRight, Eye, Folder, FolderOpen, GitFork, Plus, Search } from 'lucide-react';
+import { useMemo, useState } from 'react';
 import type { RuntimeStatus, SessionSummary, Workspace } from '../lib/pulsara-types';
 import { BrandMark } from './brand-mark';
+import {
+  getSessionPresence,
+  SessionPresenceGlyph,
+  sessionPresenceLabels,
+} from './session-presence';
 
 const connectionLabels: Record<RuntimeStatus, string> = {
   starting: '正在连接',
@@ -24,10 +30,6 @@ interface SessionSidebarProps {
   onTakeControl: () => void;
 }
 
-function StatusGlyph({ status }: { status: SessionSummary['status'] }) {
-  return <span className={`session-status session-status--${status}`} aria-hidden="true" />;
-}
-
 function taskCountSummary(session: SessionSummary): string | undefined {
   const counts = session.taskCounts;
   if (!counts?.total) return undefined;
@@ -36,6 +38,75 @@ function taskCountSummary(session: SessionSummary): string | undefined {
   if (counts.attention > 0) parts.push(`${counts.attention} 项需留意`);
   if (!parts.length) parts.push(`${counts.total} 个子任务`);
   return parts.join(' · ');
+}
+
+interface ProjectSessionGroup {
+  key: string;
+  label: string;
+  path: string;
+  sessions: SessionSummary[];
+}
+
+function groupSessionsByWorkspace(
+  sessions: SessionSummary[],
+  fallbackWorkspace: Workspace,
+): { projects: ProjectSessionGroup[]; quick: SessionSummary[] } {
+  const projects = new Map<string, ProjectSessionGroup>();
+  const quick: SessionSummary[] = [];
+
+  for (const session of sessions) {
+    const sessionWorkspace = session.workspace ?? fallbackWorkspace;
+    if (sessionWorkspace.kind === 'quick') {
+      quick.push(session);
+      continue;
+    }
+    const identity = sessionWorkspace.path || sessionWorkspace.id || sessionWorkspace.name;
+    const key = `project:${identity}`;
+    const existing = projects.get(key);
+    if (existing) {
+      existing.sessions.push(session);
+      continue;
+    }
+    projects.set(key, {
+      key,
+      label: sessionWorkspace.name || '工作目录',
+      path: sessionWorkspace.path,
+      sessions: [session],
+    });
+  }
+
+  return { projects: [...projects.values()], quick };
+}
+
+function SessionItem({
+  session,
+  activeSessionId,
+  onSelectSession,
+}: {
+  session: SessionSummary;
+  activeSessionId: string;
+  onSelectSession: (id: string) => void;
+}) {
+  const presence = getSessionPresence(session, activeSessionId);
+  return (
+    <button
+      className={`session-item${presence === 'current' ? ' is-active' : ''}`}
+      onClick={() => onSelectSession(session.id)}
+    >
+      <SessionPresenceGlyph presence={presence} />
+      <span className="session-item__copy">
+        <strong>{session.title}</strong>
+        <small>{session.subtitle} · {sessionPresenceLabels[presence]}</small>
+        <span className="session-item__meta"><span>{session.updatedAt}</span></span>
+        {taskCountSummary(session) && (
+          <span className={`session-item__tasks${session.taskCounts?.attention ? ' has-attention' : ''}`}>
+            <GitFork size={10} /> {taskCountSummary(session)}
+          </span>
+        )}
+      </span>
+      {session.unread && <span className="unread-dot" aria-label="有新活动" />}
+    </button>
+  );
 }
 
 export function SessionSidebar({
@@ -51,6 +122,22 @@ export function SessionSidebar({
   onOpenCommand,
   onTakeControl,
 }: SessionSidebarProps) {
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(() => new Set());
+  const groupedSessions = useMemo(
+    () => groupSessionsByWorkspace(sessions, workspace),
+    [sessions, workspace],
+  );
+  const toggleGroup = (key: string) => {
+    setCollapsedGroups((current) => {
+      const next = new Set(current);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+  const projectsCollapsed = collapsedGroups.has('section:projects');
+  const quickCollapsed = collapsedGroups.has('section:quick');
+
   return (
     <>
       <button
@@ -83,52 +170,78 @@ export function SessionSidebar({
           <kbd>⌘ N</kbd>
         </button>
 
-        <div className="workspace-heading">
-          <span className="workspace-emblem"><FolderGit2 size={14} /></span>
-          <span className="workspace-copy">
-            <strong>{workspace.name}</strong>
-            <small>{workspace.kind === 'quick' ? '快速开始' : '指定目录'}</small>
-          </span>
-        </div>
-
-        <section className="session-list" aria-label="最近会话">
-          <div className="section-label">
-            <span>最近会话</span>
-          </div>
+        <section className="session-list" aria-label="会话目录">
           <div className="session-list__scroll">
-            {sessions.length === 0 && (
-              <div className="session-empty">
-                <strong>还没有会话</strong>
-                <span>创建一个任务后，会话记录会出现在这里。</span>
-              </div>
-            )}
-            {sessions.map((session) => (
+            <section className="session-section" aria-label="从目录中打开">
               <button
-                className={`session-item${session.id === activeSessionId ? ' is-active' : ''}`}
-                key={session.id}
-                onClick={() => onSelectSession(session.id)}
+                className={`session-section__toggle${projectsCollapsed ? '' : ' is-expanded'}`}
+                type="button"
+                aria-expanded={!projectsCollapsed}
+                onClick={() => toggleGroup('section:projects')}
               >
-                <StatusGlyph status={session.status} />
-                <span className="session-item__copy">
-                  <strong>{session.title}</strong>
-                  <small>
-                    {session.subtitle} · {session.id === activeSessionId
-                      ? '当前会话'
-                      : session.live ? '已载入' : '可恢复'}
-                  </small>
-                  <span className="session-item__meta">
-                    <span>{session.updatedAt}</span>
-                    <span>{session.workspace?.kind === 'quick' ? '快速开始' : '指定目录'}</span>
-                  </span>
-                  {taskCountSummary(session) && (
-                    <span className={`session-item__tasks${session.taskCounts?.attention ? ' has-attention' : ''}`}>
-                      <GitFork size={10} /> {taskCountSummary(session)}
-                    </span>
-                  )}
-                </span>
-                {session.unread && <span className="unread-dot" aria-label="有新活动" />}
+                <strong>从目录中打开</strong><ChevronRight size={12} />
               </button>
-            ))}
+              {!projectsCollapsed && (
+                <div className="session-projects">
+                  {groupedSessions.projects.length === 0 && <span className="session-group-empty">还没有从目录中打开的会话</span>}
+                  {groupedSessions.projects.map((project, index) => {
+                    const collapsed = collapsedGroups.has(project.key);
+                    const sessionListId = `project-session-list-${index}`;
+                    const ProjectIcon = collapsed ? Folder : FolderOpen;
+                    return (
+                      <section className="session-project" key={project.key} aria-label={`${project.label} 会话`}>
+                        <button
+                          className={`session-project__toggle${collapsed ? '' : ' is-expanded'}`}
+                          type="button"
+                          title={project.path || project.label}
+                          aria-expanded={!collapsed}
+                          aria-controls={sessionListId}
+                          onClick={() => toggleGroup(project.key)}
+                        >
+                          <ProjectIcon size={13} /><strong>{project.label}</strong><ChevronRight size={12} />
+                        </button>
+                        {!collapsed && (
+                          <div className="session-project__sessions" id={sessionListId}>
+                            {project.sessions.map((session) => (
+                              <SessionItem
+                                key={session.id}
+                                session={session}
+                                activeSessionId={activeSessionId}
+                                onSelectSession={onSelectSession}
+                              />
+                            ))}
+                          </div>
+                        )}
+                      </section>
+                    );
+                  })}
+                </div>
+              )}
+            </section>
+
+            <section className="session-section session-section--quick" aria-label="快速开始">
+              <button
+                className={`session-section__toggle${quickCollapsed ? '' : ' is-expanded'}`}
+                type="button"
+                aria-expanded={!quickCollapsed}
+                onClick={() => toggleGroup('section:quick')}
+              >
+                <strong>快速开始</strong><ChevronRight size={12} />
+              </button>
+              {!quickCollapsed && (
+                <div className="session-section__sessions">
+                  {groupedSessions.quick.length === 0 && <span className="session-group-empty">还没有快速开始会话</span>}
+                  {groupedSessions.quick.map((session) => (
+                    <SessionItem
+                      key={session.id}
+                      session={session}
+                      activeSessionId={activeSessionId}
+                      onSelectSession={onSelectSession}
+                    />
+                  ))}
+                </div>
+              )}
+            </section>
           </div>
         </section>
 

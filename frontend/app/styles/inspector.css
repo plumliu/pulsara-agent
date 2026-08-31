@@ -106,6 +106,7 @@
 .session-task__markdown ul { list-style: disc; }
 .session-task__markdown ol { list-style: decimal; }
 .session-task__markdown code { padding: 1px 3px; border-radius: 4px; background: var(--paper-deep); font-family: var(--mono); font-size: .92em; }
+.session-task__markdown .katex-display { max-width: 100%; overflow-x: auto; overflow-y: hidden; }
 .session-task__facts { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; margin: 0; }
 .session-task__facts div { min-width: 0; padding: 7px; border-radius: 7px; background: color-mix(in srgb, var(--paper-deep) 62%, transparent); }
 .session-task__facts dt { color: var(--faint); font-size: var(--type-micro); }

@@ -140,8 +140,13 @@ command receipt 的 `PENDING` 不是成功。前端使用 `QueryCommandRequest` 
   缩尾搜索，只在 FULL 后决定继续当前 turn 或等待下一条用户消息。两者的 `NOT_NEEDED` 使用
   同一成功语义，提示“当前上下文已经较紧凑，本次整理无法进一步缩小。”，不展示成失败或不可用；
 - stop 按 exact turn/task ID 路由；没有全局“停止一切”的模糊操作；
-- 已实现的 response action（当前为复制）贴近所属 assistant entry；
-- tool trace 默认压缩，高价值 terminal/live output 可原位展开；
+- 已实现的 response action（当前为复制）贴近所属 assistant entry。复制只属于每轮最终的
+  assistant 正文；工具调用前的中途正文与尚在生成的实时草稿不得绘制复制入口；
+- 对话末尾的静态安全间距只保留折叠态 TODO 清单的高度与少量呼吸空间。“回到最新”和展开的
+  TODO 清单继续作为消息上方的动态覆盖层，不得用大块永久留白为其预留最大尺寸；
+- tool trace 默认压缩，高价值 terminal/live output 可原位展开。同一工具组以及跨记录连续执行、
+  中间没有正文、思考、用户输入或其他可见语义边界的工具，使用同一条连续轨道与紧凑等距间隔；
+  任一可见语义边界都必须断开轨道；
 - 超出 inline projection 的完整输出通过 `ReadContentRequest` / artifact path 分页读取。
 
 ### 6.1 产品语言边界

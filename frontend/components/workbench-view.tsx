@@ -30,9 +30,7 @@ import {
   WandSparkles,
   Zap,
 } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState } from 'react';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   RuntimeInteractionContent,
   RuntimeInteractionResolution,
@@ -40,6 +38,7 @@ import type {
 } from '../lib/runtime-adapter';
 import type { Message, PermissionMode, ReasoningBlock, RuntimeStatus, SessionSummary, SubagentRun, TodoRun, ToolTrace, Workspace } from '../lib/pulsara-types';
 import { permissionLabels } from '../lib/pulsara-types';
+import { MarkdownBody } from './markdown-body';
 
 interface WorkbenchViewProps {
   workspace: Workspace;
@@ -59,6 +58,7 @@ interface WorkbenchViewProps {
   permission: PermissionMode;
   focusTaskId?: string;
   focusTaskRevision: number;
+  focusTaskHighlighted: boolean;
   onReconnect: () => void;
   onTakeControl: () => void;
   onOpenSidebar: () => void;
@@ -99,7 +99,12 @@ function TraceCard({ trace }: { trace: ToolTrace }) {
     <>
       <span className={`trace-icon trace-icon--${trace.kind}`}><Icon size={14} /></span>
       <span className="trace-summary-copy">
-        <strong>{trace.title}</strong>
+        <span className="trace-summary-title">
+          <strong>{trace.toolName ?? trace.title}</strong>
+          {trace.toolName && trace.title !== trace.toolName
+            ? <span className="trace-purpose">{trace.title}</span>
+            : null}
+        </span>
         <small>{trace.subtitle}</small>
       </span>
       <span className={`trace-state trace-state--${trace.status}`}>
@@ -139,12 +144,15 @@ function TraceCard({ trace }: { trace: ToolTrace }) {
 function TodoDock({
   todo,
   interactionOpen,
+  onLayoutChange,
 }: {
   todo?: TodoRun;
   interactionOpen: boolean;
+  onLayoutChange: () => void;
 }) {
   const [open, setOpen] = useState(true);
   const containerRef = useRef<HTMLDivElement>(null);
+  const popoverRef = useRef<HTMLElement>(null);
   const items = todo?.items ?? [];
   const completed = items.filter((item) => item.status === 'completed').length;
   const activeIndex = items.findIndex((item) => item.status === 'in-progress');
@@ -172,14 +180,38 @@ function TodoDock({
     };
   }, [expanded]);
 
+  useEffect(() => {
+    let frame = window.requestAnimationFrame(onLayoutChange);
+    if (typeof ResizeObserver === 'undefined') {
+      return () => window.cancelAnimationFrame(frame);
+    }
+    const observer = new ResizeObserver(() => {
+      window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(onLayoutChange);
+    });
+    if (containerRef.current) observer.observe(containerRef.current);
+    if (popoverRef.current) observer.observe(popoverRef.current);
+    return () => {
+      observer.disconnect();
+      window.cancelAnimationFrame(frame);
+    };
+  }, [expanded, items.length, onLayoutChange]);
+
   if (!todo || items.length === 0) return null;
 
   return (
     <div className={`todo-dock${expanded ? ' is-open' : ''}`} ref={containerRef}>
       {expanded && (
-        <section className="todo-dock__popover" id="current-todo-list" aria-label="本轮清单" aria-live="polite">
+        <section
+          ref={popoverRef}
+          className="todo-dock__popover"
+          id="current-todo-list"
+          aria-label="TODO清单"
+          aria-live="polite"
+          onAnimationEnd={onLayoutChange}
+        >
           <header className="todo-dock__header">
-            <span><ListTodo size={14} /><strong>本轮清单</strong></span>
+            <span><ListTodo size={14} /><strong>TODO清单</strong></span>
             <small>{completed} / {items.length} 已完成</small>
           </header>
           <div className="todo-dock__progress" aria-hidden="true">
@@ -205,7 +237,7 @@ function TodoDock({
         disabled={interactionOpen}
         aria-expanded={expanded}
         aria-controls="current-todo-list"
-        aria-label={expanded ? '收起本轮清单' : '展开本轮清单'}
+        aria-label={expanded ? '收起TODO清单' : '展开TODO清单'}
         title={interactionOpen ? '完成当前确认后可查看清单' : undefined}
       >
         <span className={`todo-dock__trigger-state${completed === items.length ? ' is-complete' : ''}`}>
@@ -215,19 +247,6 @@ function TodoDock({
         <ChevronDown size={12} />
       </button>
     </div>
-  );
-}
-
-function MarkdownBody({ body }: { body: string }) {
-  return (
-    <ReactMarkdown
-      remarkPlugins={[remarkGfm]}
-      components={{
-        a: ({ children, ...props }) => <a {...props} target="_blank" rel="noreferrer">{children}</a>,
-      }}
-    >
-      {body}
-    </ReactMarkdown>
   );
 }
 
@@ -344,10 +363,12 @@ function SubagentGroup({
   runs,
   focusTaskId,
   focusTaskRevision,
+  focusTaskHighlighted,
 }: {
   runs: SubagentRun[];
   focusTaskId?: string;
   focusTaskRevision: number;
+  focusTaskHighlighted: boolean;
 }) {
   const settled = runs.filter((run) => !['pending', 'running', 'waiting'].includes(run.status)).length;
   return (
@@ -360,7 +381,7 @@ function SubagentGroup({
         <SubagentRunCard
           key={`${run.id}:${focusTaskId === run.id ? focusTaskRevision : 0}`}
           run={run}
-          focused={focusTaskId === run.id}
+          focused={focusTaskHighlighted && focusTaskId === run.id}
         />
       ))}</div>
     </section>
@@ -434,17 +455,26 @@ function AssistantHeading({ message, response }: { message: Message; response: b
 function AssistantMessage({
   message,
   startsAssistantRun,
+  joinsPreviousToolChain,
+  joinsNextToolChain,
   focusTaskId,
   focusTaskRevision,
+  focusTaskHighlighted,
   onNotify,
 }: {
   message: Message;
   startsAssistantRun: boolean;
+  joinsPreviousToolChain: boolean;
+  joinsNextToolChain: boolean;
   focusTaskId?: string;
   focusTaskRevision: number;
+  focusTaskHighlighted: boolean;
   onNotify: WorkbenchViewProps['onNotify'];
 }) {
   const hasNaturalLanguage = Boolean(message.body.trim());
+  const canCopyResponse = hasNaturalLanguage
+    && message.assistantKind === 'terminal'
+    && message.status !== 'running';
   const hasReasoning = Boolean(message.reasoning?.length);
   const hasOperationalContent = Boolean(
     hasReasoning || message.traces?.length || message.subagentRuns?.length,
@@ -454,6 +484,8 @@ function AssistantMessage({
     hasNaturalLanguage ? 'assistant-turn--response' : 'assistant-turn--operational',
     hasNaturalLanguage && hasReasoning ? 'assistant-turn--response-with-reasoning' : '',
     startsAssistantRun ? 'assistant-turn--run-start' : '',
+    joinsPreviousToolChain ? 'assistant-turn--tool-chain-before' : '',
+    joinsNextToolChain ? 'assistant-turn--tool-chain-after' : '',
   ].filter(Boolean).join(' ');
 
   return (
@@ -469,17 +501,19 @@ function AssistantMessage({
           {!startsAssistantRun && <AssistantHeading message={message} response />}
           <div className="assistant-copy">
             <div className="assistant-markdown"><MarkdownBody body={message.body} /></div>
-            <div className="response-actions">
-              <button
-                onClick={() => {
-                  void navigator.clipboard.writeText(message.body).then(
-                    () => onNotify('已复制回复'),
-                    () => onNotify('无法复制回复', '浏览器没有授予剪贴板权限'),
-                  );
-                }}
-                aria-label="复制回复"
-              ><Clipboard size={12} /></button>
-            </div>
+            {canCopyResponse && (
+              <div className="response-actions">
+                <button
+                  onClick={() => {
+                    void navigator.clipboard.writeText(message.body).then(
+                      () => onNotify('已复制回复'),
+                      () => onNotify('无法复制回复', '浏览器没有授予剪贴板权限'),
+                    );
+                  }}
+                  aria-label="复制回复"
+                ><Clipboard size={12} /></button>
+              </div>
+            )}
           </div>
         </>
       )}
@@ -490,7 +524,7 @@ function AssistantMessage({
 
       {message.traces && <div className="execution-rail">{message.traces.map((trace) => <TraceCard key={trace.id} trace={trace} />)}</div>}
       {message.subagentRuns?.length ? (
-        <SubagentGroup runs={message.subagentRuns} focusTaskId={focusTaskId} focusTaskRevision={focusTaskRevision} />
+        <SubagentGroup runs={message.subagentRuns} focusTaskId={focusTaskId} focusTaskRevision={focusTaskRevision} focusTaskHighlighted={focusTaskHighlighted} />
       ) : null}
     </article>
   );
@@ -508,6 +542,30 @@ function findAssistantRunStarts(messages: Message[]): ReadonlySet<string> {
     assistantRunOpen = true;
   }
   return starts;
+}
+
+function findToolChainConnections(messages: Message[]): {
+  before: ReadonlySet<string>;
+  after: ReadonlySet<string>;
+} {
+  const before = new Set<string>();
+  const after = new Set<string>();
+  const startsWithTools = (message: Message) => message.role === 'assistant'
+    && Boolean(message.traces?.length)
+    && !message.body.trim()
+    && !message.reasoning?.length;
+  const endsWithTools = (message: Message) => message.role === 'assistant'
+    && Boolean(message.traces?.length)
+    && !message.subagentRuns?.length;
+
+  for (let index = 1; index < messages.length; index += 1) {
+    const previous = messages[index - 1];
+    const current = messages[index];
+    if (!endsWithTools(previous) || !startsWithTools(current)) continue;
+    after.add(previous.id);
+    before.add(current.id);
+  }
+  return { before, after };
 }
 
 function permissionPrompt(prompt: string): string {
@@ -672,6 +730,7 @@ export function WorkbenchView({
   permission,
   focusTaskId,
   focusTaskRevision,
+  focusTaskHighlighted,
   onReconnect,
   onTakeControl,
   onOpenSidebar,
@@ -690,12 +749,32 @@ export function WorkbenchView({
   const [compacting, setCompacting] = useState(false);
   const [permissionOpen, setPermissionOpen] = useState(false);
   const [atBottom, setAtBottom] = useState(true);
+  const [jumpBottom, setJumpBottom] = useState(126);
   const followLatestRef = useRef(true);
   const locatingTaskRef = useRef(false);
+  const workbenchRef = useRef<HTMLElement>(null);
   const threadRef = useRef<HTMLDivElement>(null);
+  const composerWrapRef = useRef<HTMLDivElement>(null);
   const wordCount = draft.trim().length;
   const lastMessageLength = messages.at(-1)?.body.length ?? 0;
   const assistantRunStarts = useMemo(() => findAssistantRunStarts(messages), [messages]);
+  const toolChainConnections = useMemo(() => findToolChainConnections(messages), [messages]);
+
+  const updateJumpPosition = useCallback(() => {
+    const workbench = workbenchRef.current;
+    const composer = composerWrapRef.current;
+    if (!workbench || !composer) return;
+    const workbenchBox = workbench.getBoundingClientRect();
+    const obstacleTops = [composer.getBoundingClientRect().top];
+    for (const element of composer.querySelectorAll<HTMLElement>('.todo-dock__trigger, .todo-dock__popover')) {
+      obstacleTops.push(element.getBoundingClientRect().top);
+    }
+    const obstacleTop = Math.min(...obstacleTops);
+    const requested = Math.ceil(workbenchBox.bottom - obstacleTop + 12);
+    const maximum = Math.max(112, Math.floor(workbenchBox.height - 105));
+    const next = Math.min(maximum, Math.max(112, requested));
+    setJumpBottom((current) => current === next ? current : next);
+  }, []);
 
   const composerHint = useMemo(() => {
     if (!isRunning) return 'Enter 发送 · Shift Enter 换行';
@@ -729,6 +808,31 @@ export function WorkbenchView({
   }, [atBottom, interaction?.id, lastMessageLength, messages.length]);
 
   useEffect(() => {
+    const workbench = workbenchRef.current;
+    const composer = composerWrapRef.current;
+    let frame = window.requestAnimationFrame(updateJumpPosition);
+    const schedule = () => {
+      window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(updateJumpPosition);
+    };
+    window.addEventListener('resize', schedule);
+    if (typeof ResizeObserver === 'undefined' || !workbench || !composer) {
+      return () => {
+        window.removeEventListener('resize', schedule);
+        window.cancelAnimationFrame(frame);
+      };
+    }
+    const observer = new ResizeObserver(schedule);
+    observer.observe(workbench);
+    observer.observe(composer);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener('resize', schedule);
+      window.cancelAnimationFrame(frame);
+    };
+  }, [interaction?.id, isObserver, queuedCount, todo?.id, updateJumpPosition]);
+
+  useEffect(() => {
     const thread = threadRef.current;
     const column = thread?.querySelector('.thread-column');
     if (!thread || !column || !atBottom || typeof ResizeObserver === 'undefined') return undefined;
@@ -747,11 +851,12 @@ export function WorkbenchView({
   }, [atBottom]);
 
   useEffect(() => {
-    if (!focusTaskId || focusTaskRevision < 1) return;
+    if (!focusTaskHighlighted || !focusTaskId || focusTaskRevision < 1) return;
     followLatestRef.current = false;
     locatingTaskRef.current = true;
     let settleFrame = 0;
     let restoreFrame = 0;
+    let taskHeader: HTMLButtonElement | null = null;
     const frame = window.requestAnimationFrame(() => {
       setAtBottom(false);
       const target = [...(threadRef.current?.querySelectorAll<HTMLElement>('[data-task-id]') ?? [])]
@@ -764,7 +869,7 @@ export function WorkbenchView({
       settleFrame = window.requestAnimationFrame(() => {
         const previousScrollBehavior = thread.style.scrollBehavior;
         thread.style.scrollBehavior = 'auto';
-        const taskHeader = target.querySelector<HTMLButtonElement>('.subagent-run__header');
+        taskHeader = target.querySelector<HTMLButtonElement>('.subagent-run__header');
         if (taskHeader) taskHeader.focus({ preventScroll: true });
         const threadBox = thread.getBoundingClientRect();
         const targetBox = target.getBoundingClientRect();
@@ -784,12 +889,13 @@ export function WorkbenchView({
       window.cancelAnimationFrame(frame);
       window.cancelAnimationFrame(settleFrame);
       window.cancelAnimationFrame(restoreFrame);
+      if (taskHeader && document.activeElement === taskHeader) taskHeader.blur();
       locatingTaskRef.current = false;
     };
-  }, [focusTaskId, focusTaskRevision]);
+  }, [focusTaskHighlighted, focusTaskId, focusTaskRevision]);
 
   return (
-    <section className="workbench" aria-label="会话工作台">
+    <section className="workbench" aria-label="会话工作台" ref={workbenchRef}>
       <header className="topbar">
         <div className="session-title">
           <button className="mobile-menu-button" onClick={onOpenSidebar} aria-label="打开会话侧栏"><Menu size={17} /></button>
@@ -851,8 +957,11 @@ export function WorkbenchView({
                 key={message.id}
                 message={message}
                 startsAssistantRun={assistantRunStarts.has(message.id)}
+                joinsPreviousToolChain={toolChainConnections.before.has(message.id)}
+                joinsNextToolChain={toolChainConnections.after.has(message.id)}
                 focusTaskId={focusTaskId}
                 focusTaskRevision={focusTaskRevision}
+                focusTaskHighlighted={focusTaskHighlighted}
                 onNotify={onNotify}
               />
             ))}
@@ -868,7 +977,7 @@ export function WorkbenchView({
       </div>
 
       {!atBottom && (
-        <button className="jump-to-bottom" onClick={() => {
+        <button className="jump-to-bottom" style={{ bottom: `${jumpBottom}px` }} onClick={() => {
           followLatestRef.current = true;
           threadRef.current?.scrollTo({ top: threadRef.current.scrollHeight, behavior: 'smooth' });
         }}>
@@ -876,7 +985,7 @@ export function WorkbenchView({
         </button>
       )}
 
-      {!isObserver ? <div className="composer-wrap">
+      {!isObserver ? <div className="composer-wrap" ref={composerWrapRef}>
         {queuedCount > 0 && (
           <div className="queued-input">
             <MessageSquarePlus size={12} /><span>{queuedCount} 条输入正在等待处理</span>
@@ -887,6 +996,7 @@ export function WorkbenchView({
             key={todo?.id ?? 'no-todo'}
             todo={todo}
             interactionOpen={Boolean(interaction)}
+            onLayoutChange={updateJumpPosition}
           />
           <div className={`composer${draft ? ' has-content' : ''}`}>
           <div className="composer-editor">

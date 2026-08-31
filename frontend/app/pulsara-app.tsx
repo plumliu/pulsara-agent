@@ -101,6 +101,7 @@ function saveSessionId(sessionId: string): void {
 }
 
 const internalLanguage = /terminal(?:\s+protocol)?|protocol\s*v?\d*|kernel|canonical|generation|authority|projection|epoch|hostsession|runtime|attachment|owner|provider\s+prefix/i;
+const TASK_FOCUS_DURATION_MS = 2600;
 
 function productMessage(message: string | undefined, fallback: string): string {
   if (!message || internalLanguage.test(message) || !/[\u3400-\u9fff]/u.test(message)) return fallback;
@@ -122,7 +123,9 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
   const [taskInventoryLoading, setTaskInventoryLoading] = useState(false);
   const [taskInventoryError, setTaskInventoryError] = useState<string>();
   const taskInventoryAttempt = useRef(0);
-  const [focusedTask, setFocusedTask] = useState<{ id: string; revision: number }>();
+  const [focusedTask, setFocusedTask] = useState<{ id: string; revision: number; highlighted: boolean }>();
+  const focusTaskRevisionRef = useRef(0);
+  const focusTaskTimerRef = useRef<number | undefined>(undefined);
   const [connection, setConnection] = useState<RuntimeConnection>();
   const connectionRef = useRef<RuntimeConnection | undefined>(undefined);
   const activeSessionIdRef = useRef('');
@@ -137,6 +140,10 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
   const [theme, setTheme] = useState<'light' | 'dark'>(readSavedTheme);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const [turnPermission, setTurnPermission] = useState<PermissionMode>('accept-edits');
+
+  useEffect(() => () => {
+    if (focusTaskTimerRef.current !== undefined) window.clearTimeout(focusTaskTimerRef.current);
+  }, []);
 
   const notify = useCallback((
     title: string,
@@ -226,6 +233,10 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     setTaskInventorySessionId('');
     setTaskInventoryError(undefined);
     setTaskInventoryLoading(Boolean(sessionId));
+    if (focusTaskTimerRef.current !== undefined) {
+      window.clearTimeout(focusTaskTimerRef.current);
+      focusTaskTimerRef.current = undefined;
+    }
     setFocusedTask(undefined);
     setRuntimeStatus(reconnecting ? 'reconnecting' : 'starting');
     setRuntimeError(undefined);
@@ -565,8 +576,18 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
   };
 
   const locateTask = (taskId: string) => {
+    const revision = ++focusTaskRevisionRef.current;
+    if (focusTaskTimerRef.current !== undefined) window.clearTimeout(focusTaskTimerRef.current);
     setActiveView('workbench');
-    setFocusedTask((current) => ({ id: taskId, revision: (current?.revision ?? 0) + 1 }));
+    setFocusedTask({ id: taskId, revision, highlighted: true });
+    focusTaskTimerRef.current = window.setTimeout(() => {
+      setFocusedTask((current) => (
+        current?.id === taskId && current.revision === revision
+          ? { ...current, highlighted: false }
+          : current
+      ));
+      focusTaskTimerRef.current = undefined;
+    }, TASK_FOCUS_DURATION_MS);
   };
 
   const readInteraction = useCallback(async (interaction: RuntimeInteractionSummary) => {
@@ -630,8 +651,8 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
 
       {activeView === 'overview' && (
         <OverviewView
-          workspace={workspace}
           sessions={sessionList}
+          activeSessionId={activeSessionId}
           runtimeStatus={runtimeStatus}
           agentTasks={mergedProjection.agentTasks}
           onNavigate={navigate}
@@ -657,6 +678,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           isObserver={isObserver}
           focusTaskId={focusedTask?.id}
           focusTaskRevision={focusedTask?.revision ?? 0}
+          focusTaskHighlighted={focusedTask?.highlighted ?? false}
           onReconnect={() => activeSessionId && void openRuntimeSession(activeSessionId, true)}
           onTakeControl={() => activeSessionId && void openRuntimeSession(activeSessionId, true, true)}
           onOpenSidebar={() => setSidebarOpen(true)}

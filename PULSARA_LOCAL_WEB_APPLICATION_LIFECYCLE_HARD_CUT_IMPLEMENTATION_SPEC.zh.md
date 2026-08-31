@@ -99,7 +99,9 @@ Hook/Plugin/MCP setup、`KernelHostSession.start_mcp()`。失败路径 join 现�
 
 - **快速开始**：Application 在 Pulsara home 下的受管 workspace 根创建唯一目录，再以
   `transient` Kernel workspace kind 打开会话。这里的 `transient` 只表示它不拥有 project
-  memory scope；目录和会话都是持久的，Application/HostSession close 不删除该目录；
+  memory scope；目录和会话都是持久的，Application/HostSession close 不删除该目录。受管目录
+  basename 使用 `quick-YYYYMMDD-HHMMSS-<8 hex>`；8 位随机后缀发生碰撞时通过原子建目录
+  重新生成，不得再写入完整 UUID 或长 hash；
 - **指定目录**：用户提供一个已经存在的本地绝对目录，Application 以 `project` workspace
   kind 打开会话。
 

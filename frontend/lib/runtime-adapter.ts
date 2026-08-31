@@ -1016,6 +1016,21 @@ class LocalRuntimeConnection implements RuntimeConnection {
           status: 'running',
         });
       }
+      if (event.event_type === 'TOOL_CALL_END') {
+        const item = payload.tool_call_end ?? {};
+        const toolCallId = String(item.tool_call_id ?? '');
+        const trace = current.traces.find((candidate) => candidate.id === toolCallId)
+          ?? current.traces.at(-1);
+        if (trace) {
+          const toolName = String(item.tool_name ?? trace.toolName ?? 'tool');
+          const argumentsJson = String(item.arguments_json ?? '');
+          trace.toolName = toolName;
+          trace.kind = toolKind(toolName);
+          trace.title = toolDisplayName(toolName);
+          trace.subtitle = toolArgumentSummary(toolName, argumentsJson);
+          trace.command = terminalCommand(toolName, argumentsJson);
+        }
+      }
       if (event.event_type === 'TOOL_RESULT_DELTA') {
         const text = stringField(payload.tool_result_delta, 'text');
         const trace = current.traces.at(-1);
@@ -1127,6 +1142,7 @@ class LocalRuntimeConnection implements RuntimeConnection {
         id: `live:${draft.id}`,
         turnId: draft.turnId,
         role: 'assistant',
+        assistantKind: 'live',
         time: '现在',
         body: draft.body,
         reasoning: draft.reasoning.filter((block) => block.body).length
@@ -1313,6 +1329,7 @@ function projectEntries(
         id: entry.entry_id,
         turnId: entry.turn_id,
         role: 'assistant',
+        assistantKind: entry.entry_kind === 'ASSISTANT_MESSAGE' ? 'terminal' : 'tool-request',
         time: formatTime(entry.accepted_at_utc),
         body: text || (entry.entry_kind === 'ASSISTANT_MESSAGE' ? decodeContent(entry.content) : ''),
         reasoning: reasoning.length ? reasoning : undefined,
@@ -1356,6 +1373,7 @@ function projectEntries(
         id: entry.entry_id,
         turnId: entry.turn_id,
         role: 'assistant',
+        assistantKind: 'tool-request',
         time: formatTime(entry.accepted_at_utc),
         body: '',
         traces: [fallbackTrace],
@@ -1379,6 +1397,7 @@ function projectEntries(
           id: entry.entry_id,
           turnId: entry.turn_id,
           role: 'assistant',
+          assistantKind: 'tool-request',
           time: formatTime(entry.accepted_at_utc),
           body: '',
           traces: [trace],
@@ -1572,6 +1591,11 @@ function settleHistoricalTrace(trace: ToolTrace): void {
   trace.meta = '操作未完成';
 }
 
+function createsSubagentTasks(trace: ToolTrace): boolean {
+  const name = trace.toolName?.toLowerCase() ?? '';
+  return name.includes('create_agent_tasks') || name.includes('spawn_agent');
+}
+
 function attachSubagentRuns(messages: Message[], runs: SubagentRun[]): void {
   if (!runs.length) return;
   const groups = new Map<string, SubagentRun[]>();
@@ -1579,32 +1603,19 @@ function attachSubagentRuns(messages: Message[], runs: SubagentRun[]): void {
     const key = run.parentId || '';
     groups.set(key, [...(groups.get(key) ?? []), run]);
   }
-  const attached = new Set<string>();
   for (const [parentId, group] of groups) {
-    const target = messages.find((message) => (
+    if (!parentId) continue;
+    const creator = messages.find((message) => (
       message.role === 'assistant'
-      && (!parentId || message.turnId === parentId)
-      && message.traces?.some((trace) => trace.toolName === 'create_agent_tasks')
+      && message.turnId === parentId
+      && message.traces?.some(createsSubagentTasks)
+    ));
+    const target = creator ?? messages.find((message) => (
+      message.role === 'assistant' && message.turnId === parentId
     ));
     if (!target) continue;
     target.subagentRuns = [...(target.subagentRuns ?? []), ...group];
-    for (const run of group) attached.add(run.id);
   }
-  const remaining = runs.filter((run) => !attached.has(run.id));
-  if (!remaining.length) return;
-  const fallback = [...messages].reverse().find((message) => (
-    message.role === 'assistant'
-    && message.traces?.some((trace) => trace.toolName === 'create_agent_tasks')
-  ));
-  if (fallback) fallback.subagentRuns = [...(fallback.subagentRuns ?? []), ...remaining];
-  else messages.push({
-    id: `subagent-runs:${remaining.map((run) => run.id).join(':')}`,
-    role: 'assistant',
-    time: '',
-    body: '',
-    status: remaining.some((run) => run.status === 'running') ? 'running' : 'completed',
-    subagentRuns: remaining,
-  });
 }
 
 function inferToolResultState(content: string): string {
@@ -1691,6 +1702,7 @@ function projectToolBlock(block: ProtocolAssistantBlock): ToolTrace {
     title: toolDisplayName(name),
     subtitle: toolArgumentSummary(name, argumentsPreview),
     status: 'running',
+    command: terminalCommand(name, argumentsPreview),
   };
 }
 
@@ -1717,6 +1729,7 @@ function toolDisplayName(name: string): string {
   if (normalized.includes('send_agent_message')) return '发送子任务消息';
   if (normalized.includes('stop_agent')) return '停止子任务';
   if (normalized.includes('list_agents')) return '查看子任务';
+  if (normalized === 'todo') return '更新 TODO';
   if (normalized.includes('ask_plan_question')) return '提出规划问题';
   if (normalized.includes('exit_plan')) return '提交规划方案';
   if (normalized.includes('artifact_read')) return '读取保留内容';
@@ -1725,6 +1738,7 @@ function toolDisplayName(name: string): string {
   if (normalized.includes('apply_patch') || normalized.includes('edit')) return '更新文件';
   if (normalized.includes('search') || normalized.includes('grep')) return '搜索内容';
   if (normalized.includes('list')) return '浏览文件';
+  if (normalized.includes('terminal_monitor')) return '等待命令';
   if (normalized.includes('terminal') || normalized.includes('shell') || normalized.includes('exec')) return '运行命令';
   if (normalized.includes('browser')) return '操作浏览器';
   return '使用工具';
@@ -1743,15 +1757,39 @@ function toolArgumentSummary(name: string, content: string): string {
     if (normalized.includes('send_agent_message')) return '向子任务发送补充信息';
     if (normalized.includes('stop_agent')) return '停止指定子任务';
     if (normalized.includes('list_agents')) return '读取当前子任务状态';
+    if (normalized === 'todo') return '更新当前工作清单';
     if (name.toLowerCase().includes('ask_plan_question')) return String(value.question ?? '等待你的选择');
     if (name.toLowerCase().includes('exit_plan')) return String(value.summary ?? '等待你确认方案');
+    if (terminalCommand(name, content)) return '等待执行结果';
     if (typeof value.path === 'string') return value.path;
-    if (typeof value.command === 'string') return value.command;
     return '正在准备操作';
   } catch {
     // Keep a short provider-visible preview when it is not structured JSON.
   }
   return content.slice(0, 160) || '正在准备操作';
+}
+
+function terminalCommand(name: string, content: string): string | undefined {
+  const normalized = name.toLowerCase();
+  if (
+    !normalized.includes('terminal')
+    && !normalized.includes('shell')
+    && !normalized.includes('exec')
+  ) return undefined;
+  try {
+    const value = JSON.parse(content) as Record<string, unknown>;
+    for (const key of ['command', 'cmd', 'script']) {
+      const command = value[key];
+      if (typeof command === 'string' && command.trim()) return command.trim();
+    }
+    if (Array.isArray(value.argv) && value.argv.every((item) => typeof item === 'string')) {
+      const command = value.argv.join(' ').trim();
+      if (command) return command;
+    }
+  } catch {
+    // Only complete, structured terminal arguments can be rendered as a command.
+  }
+  return undefined;
 }
 
 function projectTodo(control: ProtocolLiveControlSnapshot): TodoRun | undefined {

@@ -120,6 +120,7 @@ export interface Message {
   turnId?: string;
   role: 'user' | 'assistant';
   userKind?: 'prompt' | 'steer' | 'plan-continuation' | 'subagent-completion';
+  assistantKind?: 'terminal' | 'tool-request' | 'live';
   sourceSubagentTaskId?: string;
   time: string;
   body: string;

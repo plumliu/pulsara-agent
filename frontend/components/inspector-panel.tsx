@@ -19,10 +19,9 @@ import {
   Sparkles,
 } from 'lucide-react';
 import { useMemo, useState } from 'react';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
 import type { AgentTask, PermissionMode, SessionSummary, TaskStatus, TodoRun } from '../lib/pulsara-types';
 import { permissionLabels } from '../lib/pulsara-types';
+import { MarkdownBody } from './markdown-body';
 
 interface InspectorPanelProps {
   session: SessionSummary;
@@ -104,10 +103,6 @@ function diagnosticText(value: Record<string, unknown>): string | undefined {
   return undefined;
 }
 
-function Markdown({ children }: { children: string }) {
-  return <ReactMarkdown remarkPlugins={[remarkGfm]}>{children}</ReactMarkdown>;
-}
-
 function TaskCard({
   task,
   canControl,
@@ -163,7 +158,7 @@ function TaskCard({
         <div className="session-task__detail">
           <section className="session-task__objective">
             <span>目标</span>
-            <div className="session-task__markdown"><Markdown>{task.objective || '未提供单独目标。'}</Markdown></div>
+            <div className="session-task__markdown"><MarkdownBody body={task.objective || '未提供单独目标。'} /></div>
           </section>
 
           <dl className="session-task__facts">
@@ -177,7 +172,7 @@ function TaskCard({
           {task.terminalPublicDetail && (
             <section className="session-task__progress">
               <span><AlertTriangle size={11} /> 发生了什么</span>
-              <div className="session-task__markdown"><Markdown>{task.terminalPublicDetail}</Markdown></div>
+              <div className="session-task__markdown"><MarkdownBody body={task.terminalPublicDetail} /></div>
             </section>
           )}
 
@@ -209,11 +204,11 @@ function TaskCard({
                 <span><CheckCircle2 size={12} /> 任务结果</span>
                 {task.completionDelivered && <small><Check size={10} /> 已用于对话</small>}
               </header>
-              {task.result.summary && <div className="session-task__markdown"><Markdown>{task.result.summary}</Markdown></div>}
+              {task.result.summary && <div className="session-task__markdown"><MarkdownBody body={task.result.summary} /></div>}
               {task.result.outputPreview && (
                 <details>
                   <summary>查看输出摘录</summary>
-                  <div className="session-task__markdown"><Markdown>{task.result.outputPreview}</Markdown></div>
+                  <div className="session-task__markdown"><MarkdownBody body={task.result.outputPreview} /></div>
                 </details>
               )}
               {diagnostics.length ? (
@@ -300,7 +295,7 @@ export function InspectorPanel({
             <div><strong>{agentTasks.length}</strong><span>全部</span></div>
             <div><strong>{activeCount}</strong><span>进行中</span></div>
             <div className={attentionCount ? 'has-attention' : ''}><strong>{attentionCount}</strong><span>需留意</span></div>
-            <div><strong>{todo?.items.length ? `${completedTodo}/${todo.items.length}` : '—'}</strong><span>本轮清单</span></div>
+            <div><strong>{todo?.items.length ? `${completedTodo}/${todo.items.length}` : '—'}</strong><span>TODO清单</span></div>
           </div>
         </section>
 

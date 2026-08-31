@@ -211,6 +211,7 @@ describe('selectPromptCommand', () => {
 
     const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
 
+    expect(connection.current().messages[0].assistantKind).toBe('terminal');
     expect(connection.current().messages[0].reasoning).toEqual([
       { id: 'reasoning-1', kind: 'summary', body: 'short provider summary' },
       { id: 'reasoning-2', kind: 'full', body: 'full provider reasoning' },
@@ -252,9 +253,52 @@ describe('selectPromptCommand', () => {
 
     const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
 
+    expect(connection.current().messages[0].assistantKind).toBe('live');
     expect(connection.current().messages[0].reasoning).toEqual([
       { id: 'reasoning-1', kind: 'summary', body: 'live summary', active: true },
     ]);
+  });
+
+  it('projects the exact live tool name and terminal command when arguments close', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      connection_id: 'connection-1', connection_generation: 1,
+      session_id: 'session-1', role: 'controller',
+      live_hello: {
+        live_owner_epoch: '1', live_revision: '2',
+        live_snapshot: {
+          events: [
+            {
+              live_revision: '1', event_type: 'TOOL_CALL_START', draft_identity: 'draft-1',
+              turn_id: 'turn-1', scope_kind: 'ROOT', block_id: 'tool-1',
+              payload: { tool_call_start: {
+                block_identity: 'tool-1', tool_call_id: 'call-1', tool_name: 'terminal',
+              } },
+            },
+            {
+              live_revision: '2', event_type: 'TOOL_CALL_END', draft_identity: 'draft-1',
+              turn_id: 'turn-1', scope_kind: 'ROOT', block_id: 'tool-1',
+              payload: { tool_call_end: {
+                block_identity: 'tool-1', tool_call_id: 'call-1', tool_name: 'terminal',
+                arguments_json: JSON.stringify({ command: 'sleep 30' }),
+              } },
+            },
+          ],
+        },
+      },
+      snapshot: {
+        snapshot: {
+          session_id: 'session-1', writer_generation: '1', event_sequence_cut: '0',
+          entries: [], control: { active_turns: [{ turn_id: 'turn-1', status: 'RUNNING' }] },
+        },
+      },
+      live_control_snapshot: { snapshot: {} },
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+
+    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+
+    expect(connection.current().messages[0].traces?.[0]).toMatchObject({
+      toolName: 'terminal', title: '运行命令', subtitle: '等待执行结果', command: 'sleep 30',
+    });
   });
 
   it('projects the root TODO and applies live updates without attaching it to a message', async () => {
@@ -398,6 +442,7 @@ describe('selectPromptCommand', () => {
       callId: string,
       scope = 'ROOT',
       taskId = '',
+      argumentsJson = '{}',
     ) => ({
       entry_id: entryId,
       turn_id: scope === 'ROOT' ? 'turn-root' : `turn-${taskId}`,
@@ -410,11 +455,11 @@ describe('selectPromptCommand', () => {
         block_kind: 'TOOL_CALL',
         tool_call_id: callId,
         tool_name: toolName,
-        tool_arguments_preview: btoa('{}'),
+        tool_arguments_preview: btoa(argumentsJson),
       }],
     });
     const entries = [
-      toolRequest(1, 'root-create', 'create_agent_tasks', 'call-create'),
+      toolRequest(1, 'root-create', 'spawn_agent', 'call-create'),
       {
         entry_id: 'task-objective', turn_id: 'turn-task-1', entry_sequence: '2',
         entry_kind: 'USER_MESSAGE', scope_kind: 'SUBAGENT_TASK',
@@ -455,7 +500,15 @@ describe('selectPromptCommand', () => {
         entry_kind: 'TOOL_RESULT', scope_kind: 'ROOT',
         content: content('ROOT subagent orchestration requires bypass-permissions mode'),
       },
-      toolRequest(12, 'root-user-denied', 'terminal', 'call-user-denied'),
+      toolRequest(
+        12,
+        'root-user-denied',
+        'terminal',
+        'call-user-denied',
+        'ROOT',
+        '',
+        JSON.stringify({ command: 'printf "visible command"' }),
+      ),
       {
         entry_id: 'user-denied-result', turn_id: 'turn-root', entry_sequence: '13',
         entry_kind: 'TOOL_RESULT', scope_kind: 'ROOT',
@@ -517,21 +570,23 @@ describe('selectPromptCommand', () => {
     const artifactRead = projected.messages.find((message) => message.id === 'root-artifact-read');
     const orphanTool = projected.messages.find((message) => message.id === 'root-orphan-tool');
 
+    expect(create?.assistantKind).toBe('tool-request');
     expect(create?.traces?.[0]).toMatchObject({ status: 'completed', meta: '操作完成' });
+    expect(create?.traces?.[0].toolName).toBe('spawn_agent');
     expect(wait?.traces?.[0]).toMatchObject({ status: 'completed', meta: '操作完成' });
     expect(denied?.traces?.[0]).toMatchObject({ status: 'failed', subtitle: '已拒绝' });
     expect(userDenied?.traces?.[0]).toMatchObject({
+      toolName: 'terminal', command: 'printf "visible command"',
       status: 'failed', subtitle: '已拒绝', meta: '操作未完成',
     });
     expect(artifactRead?.traces?.[0]).toMatchObject({
       title: '读取保留内容', status: 'completed', meta: '操作完成',
     });
-    expect(create?.subagentRuns?.find((run) => run.id === 'task-orphan')).toMatchObject({
-      status: 'ended', objective: 'Interrupted before a final reply.', activities: [],
-    });
+    expect(create?.subagentRuns?.find((run) => run.id === 'task-orphan')).toBeUndefined();
     expect(orphanTool?.traces?.[0]).toMatchObject({
       status: 'cancelled', subtitle: '已结束', meta: '操作未完成',
     });
+    expect(orphanTool?.subagentRuns).toBeUndefined();
     expect(create?.subagentRuns?.[0]).toMatchObject({
       id: 'task-1', label: '读取标题', status: 'completed', objective: 'Read README.md.',
     });
@@ -747,9 +802,7 @@ describe('session task inventory', () => {
     expect(merged.agentTasks[0]).toMatchObject({
       status: 'interrupted', progress: undefined, summary: '中断前的最后结果',
     });
-    expect(merged.messages[0].subagentRuns?.[0]).toMatchObject({
-      id: 'task-1', status: 'interrupted', summary: '中断前的最后结果',
-    });
+    expect(merged.messages).toEqual([]);
   });
 });
 
