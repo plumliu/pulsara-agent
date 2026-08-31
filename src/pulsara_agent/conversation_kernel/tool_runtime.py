@@ -2888,6 +2888,13 @@ class DirectKernelToolPort:
                 origin,
                 attempt_id,
                 deadline_monotonic=self._deadlines.deadline(owner),
+                on_caller_cancelled=(
+                    lambda: tool.manager.process_registry.abort_foreground_decision(
+                        attempt_id
+                    )
+                    if isinstance(tool, _DirectTerminalTool)
+                    else None
+                ),
             )
         else:
             physical = await self._physical_io.run_tool_invocation(
@@ -3523,6 +3530,8 @@ def _terminal_execution_result(
     state = (
         ToolResultState.SUCCESS
         if result.status.value in {"success", "running"}
+        else ToolResultState.INTERRUPTED
+        if result.status.value == "killed"
         else ToolResultState.ERROR
     )
     trusted_duration = (

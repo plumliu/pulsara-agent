@@ -162,6 +162,19 @@ message CanonicalAssistantBlock {
   uint64 tool_arguments_size = 10;
 }
 
+enum ReasoningPresentationKind {
+  REASONING_PRESENTATION_KIND_UNSPECIFIED = 0;
+  REASONING_PRESENTATION_FULL = 1;
+  REASONING_PRESENTATION_SUMMARY = 2;
+}
+
+message CanonicalReasoningBlock {
+  string block_id = 1;
+  uint32 ordinal = 2;
+  ReasoningPresentationKind presentation_kind = 3;
+  CanonicalContentReference content = 4;
+}
+
 message CanonicalEntry {
   string entry_id = 1;
   string turn_id = 2;
@@ -174,6 +187,8 @@ message CanonicalEntry {
   CanonicalContentReference content = 9;
   repeated CanonicalAssistantBlock blocks = 10;
   string accepted_at_utc = 11;
+  repeated CanonicalReasoningBlock reasoning_blocks = 12;
+  string source_subagent_result_id = 13;
 }
 
 message ActiveTurnControl {
@@ -392,7 +407,10 @@ message LiveTextEndPayload {
   string block_identity = 1; string final_text = 2;
   uint64 utf8_bytes = 3; string digest = 4;
 }
-message LiveThinkingStartPayload { string block_identity = 1; }
+message LiveThinkingStartPayload {
+  string block_identity = 1;
+  ReasoningPresentationKind presentation_kind = 2;
+}
 message LiveThinkingDeltaPayload { string block_identity = 1; string delta = 2; }
 message LiveThinkingEndPayload {
   string block_identity = 1; string final_text = 2;

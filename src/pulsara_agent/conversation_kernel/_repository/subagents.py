@@ -1457,11 +1457,16 @@ class _SubagentOperations:
         actor_id: str,
         deadline_monotonic: float,
     ) -> bool:
-        if (task_status, task_reason, turn_reason) not in {
+        closed_disposition = (task_status, task_reason, turn_reason) in {
             ("CANCELLED", "USER_CANCELLED", "USER_STOPPED"),
             ("INTERRUPTED", "HOST_CLOSING", "SESSION_CLOSED"),
-        }:
-            raise ValueError("subagent cancellation disposition is invalid")
+        } or (
+            task_status == "FAILED"
+            and task_reason == turn_reason
+            and task_reason.startswith("CHILD_START_")
+        )
+        if not closed_disposition:
+            raise ValueError("joint child terminal disposition is invalid")
         drafts = self._subagent_cancellation_drafts(
             task_id=task_id,
             turn_id=turn_id,
@@ -1547,6 +1552,16 @@ class _SubagentOperations:
         actor_id: str,
         deadline_monotonic: float,
     ) -> TurnAdmissionConfirmation:
+        closed_disposition = (task_status, task_reason, turn_reason) in {
+            ("CANCELLED", "USER_CANCELLED", "USER_STOPPED"),
+            ("INTERRUPTED", "HOST_CLOSING", "SESSION_CLOSED"),
+        } or (
+            task_status == "FAILED"
+            and task_reason == turn_reason
+            and task_reason.startswith("CHILD_START_")
+        )
+        if not closed_disposition:
+            raise ValueError("joint child terminal disposition is invalid")
         drafts = self._subagent_cancellation_drafts(
             task_id=task_id,
             turn_id=turn_id,
@@ -2015,7 +2030,7 @@ class _SubagentOperations:
                                t.profile_kind, t.display_role, t.context_mode,
                                t.context_last_n_turns, t.parent_turn_id,
                                t.objective, t.status, t.pending_reason,
-                               t.terminal_reason, t.accepted_at,
+                               t.terminal_reason, t.accepted_at, t.terminal_at,
                                c.id AS result_id,
                                c.entry_id AS result_entry_id, c.result_source,
                                c.summary AS result_summary,

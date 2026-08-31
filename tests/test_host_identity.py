@@ -55,6 +55,16 @@ def test_host_workspace_transient_resolution_uses_user_scope_only(tmp_path) -> N
     assert resolved.workspace_scope is None
     assert resolved.memory_domain.read_scopes == frozenset({CTX_USER})
     assert resolved.workspace_key.startswith("transient:")
+    assert (
+        resolve_workspace(
+            HostWorkspaceInput(
+                workspace_kind="transient",
+                workspace_root=scratch,
+                memory_domain_id="u_test",
+            )
+        ).workspace_key
+        == resolved.workspace_key
+    )
 
 
 def test_host_workspace_auto_transient_resolution_keeps_root_by_default(

@@ -14,7 +14,7 @@ from datetime import datetime
 from enum import StrEnum
 from hashlib import sha256
 from time import monotonic
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, Mapping
 from uuid import uuid4
 
 from psycopg import IsolationLevel
@@ -262,11 +262,18 @@ async def _shielded_plugin_filesystem_call(operation, /, **kwargs):
 class KernelSessionSummary:
     session_id: str
     workspace_id: str
+    workspace_kind: str
+    workspace_root: str
+    workspace_label: str
     memory_domain_id: str
     lifecycle: str
     writer_generation: int
     latest_entry_sequence: int
     updated_at: datetime
+    subagent_task_total: int = 0
+    subagent_task_active: int = 0
+    subagent_task_waiting: int = 0
+    subagent_task_attention: int = 0
 
     @property
     def runtime_session_id(self) -> str:
@@ -276,6 +283,9 @@ class KernelSessionSummary:
         return {
             "runtime_session_id": self.session_id,
             "workspace_id": self.workspace_id,
+            "workspace_kind": self.workspace_kind,
+            "workspace_root": self.workspace_root,
+            "workspace_label": self.workspace_label,
             "memory_domain_id": self.memory_domain_id,
             "lifecycle": self.lifecycle,
             "writer_generation": self.writer_generation,
@@ -856,9 +866,7 @@ class KernelHostSession:
         finally:
             self._plugin_reload_settlement_lock.release()
 
-    async def _reload_plugins_serialized(
-        self, deadline: float
-    ) -> dict[str, object]:
+    async def _reload_plugins_serialized(self, deadline: float) -> dict[str, object]:
         predecessor = self._plugin_view
         replacement = await _shielded_plugin_filesystem_call(
             self._plugin_view_owner.observe,
@@ -949,8 +957,7 @@ class KernelHostSession:
                 )
                 mcp_status = (
                     "UNAVAILABLE"
-                    if mcp.disposition
-                    is PluginMcpNormalizationDisposition.UNAVAILABLE
+                    if mcp.disposition is PluginMcpNormalizationDisposition.UNAVAILABLE
                     else "RELOADED"
                 )
             except asyncio.CancelledError:
@@ -978,9 +985,7 @@ class KernelHostSession:
             mcp.close_plugin_anchors()
         reload_diagnostics = [item.code.value for item in mcp.diagnostics]
         if mcp_status != "RELOADED":
-            reload_diagnostics.append(
-                PluginDiagnosticCode.RELOAD_PARTIAL.value
-            )
+            reload_diagnostics.append(PluginDiagnosticCode.RELOAD_PARTIAL.value)
         result = {
             "status": "RELOADED" if mcp_status == "RELOADED" else "PARTIAL",
             "plugin_view": replacement.disposition.value,
@@ -1195,12 +1200,10 @@ class KernelHostSession:
                 requested_mode=requested,
                 deadline_monotonic=self._canonical_deadline(),
             )
-            block_reason, context_reservation = (
-                await self._dispatch_user_prompt_hook(
-                    key=key,
-                    identity=identity,
-                    permission=permission,
-                )
+            block_reason, context_reservation = await self._dispatch_user_prompt_hook(
+                key=key,
+                identity=identity,
+                permission=permission,
             )
             if block_reason is not None:
                 raise PromptBlockedByHook(block_reason)
@@ -1440,9 +1443,7 @@ class KernelHostSession:
     async def _settle_manual_compaction_command(
         self, candidate: PreparedManualCompactionCommand
     ) -> CompactionConfirmationKind:
-        existing = self._manual_compaction_command_attempts.get(
-            candidate.command_id
-        )
+        existing = self._manual_compaction_command_attempts.get(candidate.command_id)
         if existing is not None:
             semantic_digest, task = existing
             if semantic_digest != candidate.semantic_digest:
@@ -1973,10 +1974,8 @@ class KernelHostSession:
         target_turn_id: str | None = None,
         requested_permission_mode: PermissionMode | None = None,
     ) -> KernelCommandOutcome:
-        if (
-            not command_id
-            or (delivery_mode is PromptDeliveryMode.NEW_TURN)
-            != (target_turn_id is None)
+        if not command_id or (delivery_mode is PromptDeliveryMode.NEW_TURN) != (
+            target_turn_id is None
         ):
             return await self._submit_prompt_owner(
                 command_id=command_id,
@@ -2121,9 +2120,7 @@ class KernelHostSession:
         if delivery_mode is PromptDeliveryMode.NEW_TURN:
             if hook_attempt is None:
                 raise RuntimeError("queued new turn lacks its Hook reservation owner")
-            identity = build_queued_root_turn_identity(
-                self.session_id, queue_item_id
-            )
+            identity = build_queued_root_turn_identity(self.session_id, queue_item_id)
             if permission_snapshot_id != identity.permission_snapshot_id:
                 raise RuntimeError("queued prompt permission identity drifted")
             assert effective_requested_permission is not None
@@ -2134,12 +2131,13 @@ class KernelHostSession:
                 requested_mode=effective_requested_permission,
                 deadline_monotonic=self._canonical_deadline(),
             )
-            block_reason, hook_context_reservation = (
-                await self._dispatch_user_prompt_hook(
-                    key=hook_attempt.key,
-                    identity=identity,
-                    permission=permission_projection,
-                )
+            (
+                block_reason,
+                hook_context_reservation,
+            ) = await self._dispatch_user_prompt_hook(
+                key=hook_attempt.key,
+                identity=identity,
+                permission=permission_projection,
             )
             if block_reason is not None:
                 return KernelCommandOutcome(
@@ -2155,8 +2153,7 @@ class KernelHostSession:
                 or self._plan_exit_fence
                 or (
                     hook_attempt is not None
-                    and self._ingress_hook_attempts.get(command_id)
-                    is not hook_attempt
+                    and self._ingress_hook_attempts.get(command_id) is not hook_attempt
                 )
             ):
                 if hook_context_reservation is not None:
@@ -2262,9 +2259,7 @@ class KernelHostSession:
                     "PROMPT_CAPACITY_EXHAUSTED",
                     "The session prompt queue is full.",
                 )
-            if exc.reason is (
-                PromptIngressWriteRejection.INGRESS_PRECONDITION_CHANGED
-            ):
+            if exc.reason is (PromptIngressWriteRejection.INGRESS_PRECONDITION_CHANGED):
                 return KernelCommandOutcome(
                     command_id,
                     "REJECTED",
@@ -2629,9 +2624,7 @@ class KernelHostSession:
                 return resolution
             finally:
                 if write_reservation is not None:
-                    await self._release_compaction_write_reservation(
-                        write_reservation
-                    )
+                    await self._release_compaction_write_reservation(write_reservation)
 
         def reserve_question_write() -> None:
             nonlocal write_reservation
@@ -2813,9 +2806,7 @@ class KernelHostSession:
                 raise
             finally:
                 if write_reservation is not None:
-                    await self._release_compaction_write_reservation(
-                        write_reservation
-                    )
+                    await self._release_compaction_write_reservation(write_reservation)
 
         async with self._lock:
 
@@ -3171,9 +3162,7 @@ class KernelHostSession:
         finalization_failed = False
         async with self._lock:
             try:
-                closed = self._finalize_todo_run_activation_locked(
-                    activation, accepted
-                )
+                closed = self._finalize_todo_run_activation_locked(activation, accepted)
             except BaseException:
                 finalization_failed = True
                 task = None
@@ -3212,9 +3201,7 @@ class KernelHostSession:
                 ),
             )
             if not finalization_failed:
-                self._tools.todo_owner.mark_root_idle(
-                    exact_turn_id=accepted.turn_id
-                )
+                self._tools.todo_owner.mark_root_idle(exact_turn_id=accepted.turn_id)
         return task
 
     async def _interrupt_queued_admission_until_safe(
@@ -3301,9 +3288,7 @@ class KernelHostSession:
                 attempt = coordinator.current_installation_attempt(monitor_id)
                 target = None if attempt is None else attempt.target
                 reserved_new_turn = False
-                write_reservation: (
-                    tuple[ModelInputScopeKind, str | None] | None
-                ) = None
+                write_reservation: tuple[ModelInputScopeKind, str | None] | None = None
                 if target is None:
                     async with self._lock:
                         self._retire_done_active_root_locked()
@@ -3396,11 +3381,9 @@ class KernelHostSession:
                 else:
                     async with self._lock:
                         try:
-                            write_reservation = (
-                                self._reserve_compaction_write_locked(
-                                    scope_kind=ModelInputScopeKind.ROOT,
-                                    scope_subagent_task_id=None,
-                                )
+                            write_reservation = self._reserve_compaction_write_locked(
+                                scope_kind=ModelInputScopeKind.ROOT,
+                                scope_subagent_task_id=None,
                             )
                         except RuntimeError:
                             target = None
@@ -3446,9 +3429,7 @@ class KernelHostSession:
                     self._monitor_wake.set()
                     break
                 if write_reservation is not None:
-                    await self._release_compaction_write_reservation(
-                        write_reservation
-                    )
+                    await self._release_compaction_write_reservation(write_reservation)
                 if accepted is None:
                     if reserved_new_turn:
                         await self._release_terminal_new_turn_reservation(
@@ -3712,6 +3693,7 @@ class KernelHostSession:
         *,
         command_id: str,
         target_turn_id: str | None,
+        requested_permission_mode: PermissionMode | None,
         child_result_id: str,
         actor_id: str,
     ) -> KernelCommandOutcome:
@@ -3720,6 +3702,22 @@ class KernelHostSession:
         if existing is not None:
             return existing
         new_turn = target_turn_id is None
+        if new_turn and requested_permission_mode is None:
+            return KernelCommandOutcome(
+                command_id,
+                "REJECTED",
+                child_result_id,
+                "PERMISSION_MODE_REQUIRED",
+                "A new ROOT turn requires an explicit permission mode.",
+            )
+        if not new_turn and requested_permission_mode is not None:
+            return KernelCommandOutcome(
+                command_id,
+                "REJECTED",
+                child_result_id,
+                "PERMISSION_FIELD_NOT_ALLOWED",
+                "An existing ROOT turn already owns its permission snapshot.",
+            )
         resolved_turn_id = target_turn_id or _stable_id(
             "turn", self.session_id, command_id
         )
@@ -3754,6 +3752,7 @@ class KernelHostSession:
             accepted = await self._runner.accept_subagent_result(
                 turn_id=resolved_turn_id,
                 new_context_binding_revision_id=new_revision_id,
+                requested_permission_mode=requested_permission_mode,
                 child_result_id=child_result_id,
                 command_id=command_id,
                 actor_id=actor_id,
@@ -4016,9 +4015,7 @@ class KernelHostSession:
                 except BaseException as exc:
                     close_error = close_error or exc
             try:
-                await self._subagents.aclose(
-                    deadline_monotonic=deadline
-                )
+                await self._subagents.aclose(deadline_monotonic=deadline)
             except BaseException as exc:
                 close_error = close_error or exc
             try:
@@ -4288,15 +4285,119 @@ def _list_resumable_session_rows(
     ) as connection:
         return connection.execute(
             """
-            SELECT id, workspace_id, memory_domain_id, lifecycle, writer_generation,
-                   latest_entry_sequence, updated_at
-            FROM pulsara_v3.sessions
-            WHERE workspace_id = %s AND memory_domain_id = %s
-              AND (%s OR lifecycle = 'OPEN')
-            ORDER BY updated_at DESC, id LIMIT %s
+            SELECT s.id, s.workspace_id, s.workspace_kind, s.workspace_root,
+                   s.workspace_label, s.memory_domain_id, s.lifecycle,
+                   s.writer_generation, s.latest_entry_sequence, s.updated_at,
+                   count(t.id) AS subagent_task_total,
+                   count(t.id) FILTER (WHERE t.status = 'ACTIVE')
+                       AS subagent_task_active,
+                   count(t.id) FILTER (WHERE t.status IN (
+                       'PENDING_START', 'WAITING_DEPENDENCY'
+                   )) AS subagent_task_waiting,
+                   count(t.id) FILTER (WHERE t.status IN (
+                       'FAILED', 'INTERRUPTED', 'BLOCKED_DEPENDENCY_FAILED'
+                   )) AS subagent_task_attention
+            FROM pulsara_v3.sessions AS s
+            LEFT JOIN pulsara_v3.subagent_tasks AS t ON t.session_id = s.id
+            WHERE s.workspace_id = %s AND s.memory_domain_id = %s
+              AND (%s OR s.lifecycle = 'OPEN')
+            GROUP BY s.id
+            ORDER BY s.updated_at DESC, s.id LIMIT %s
             """,
             (workspace_id, memory_domain_id, include_closed, limit),
         ).fetchall()
+
+
+def _list_resumable_session_rows_across_workspaces(
+    repository: ConversationKernelRepository,
+    memory_domain_id: str,
+    include_closed: bool,
+    deadline_monotonic: float,
+):
+    with repository.connection_provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        row_factory=dict_row,
+        deadline_monotonic=deadline_monotonic,
+        isolation_level=IsolationLevel.REPEATABLE_READ,
+    ) as connection:
+        return connection.execute(
+            """
+            SELECT s.id, s.workspace_id, s.workspace_kind, s.workspace_root,
+                   s.workspace_label, s.memory_domain_id, s.lifecycle,
+                   s.writer_generation, s.latest_entry_sequence, s.updated_at,
+                   count(t.id) AS subagent_task_total,
+                   count(t.id) FILTER (WHERE t.status = 'ACTIVE')
+                       AS subagent_task_active,
+                   count(t.id) FILTER (WHERE t.status IN (
+                       'PENDING_START', 'WAITING_DEPENDENCY'
+                   )) AS subagent_task_waiting,
+                   count(t.id) FILTER (WHERE t.status IN (
+                       'FAILED', 'INTERRUPTED', 'BLOCKED_DEPENDENCY_FAILED'
+                   )) AS subagent_task_attention
+            FROM pulsara_v3.sessions AS s
+            LEFT JOIN pulsara_v3.subagent_tasks AS t ON t.session_id = s.id
+            WHERE s.memory_domain_id = %s AND (%s OR s.lifecycle = 'OPEN')
+            GROUP BY s.id
+            ORDER BY s.updated_at DESC, s.id
+            """,
+            (memory_domain_id, include_closed),
+        ).fetchall()
+
+
+def _read_resumable_session_row(
+    repository: ConversationKernelRepository,
+    session_id: str,
+    memory_domain_id: str,
+    include_closed: bool,
+    deadline_monotonic: float,
+):
+    with repository.connection_provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        row_factory=dict_row,
+        deadline_monotonic=deadline_monotonic,
+        isolation_level=IsolationLevel.REPEATABLE_READ,
+    ) as connection:
+        return connection.execute(
+            """
+            SELECT s.id, s.workspace_id, s.workspace_kind, s.workspace_root,
+                   s.workspace_label, s.memory_domain_id, s.lifecycle,
+                   s.writer_generation, s.latest_entry_sequence, s.updated_at,
+                   count(t.id) AS subagent_task_total,
+                   count(t.id) FILTER (WHERE t.status = 'ACTIVE')
+                       AS subagent_task_active,
+                   count(t.id) FILTER (WHERE t.status IN (
+                       'PENDING_START', 'WAITING_DEPENDENCY'
+                   )) AS subagent_task_waiting,
+                   count(t.id) FILTER (WHERE t.status IN (
+                       'FAILED', 'INTERRUPTED', 'BLOCKED_DEPENDENCY_FAILED'
+                   )) AS subagent_task_attention
+            FROM pulsara_v3.sessions AS s
+            LEFT JOIN pulsara_v3.subagent_tasks AS t ON t.session_id = s.id
+            WHERE s.id = %s AND s.memory_domain_id = %s
+              AND (%s OR s.lifecycle = 'OPEN')
+            GROUP BY s.id
+            """,
+            (session_id, memory_domain_id, include_closed),
+        ).fetchone()
+
+
+def _kernel_session_summary(row) -> KernelSessionSummary:
+    return KernelSessionSummary(
+        session_id=str(row["id"]),
+        workspace_id=str(row["workspace_id"]),
+        workspace_kind=str(row["workspace_kind"]),
+        workspace_root=str(row["workspace_root"]),
+        workspace_label=str(row["workspace_label"]),
+        memory_domain_id=str(row["memory_domain_id"]),
+        lifecycle=str(row["lifecycle"]),
+        writer_generation=int(row["writer_generation"]),
+        latest_entry_sequence=int(row["latest_entry_sequence"]),
+        updated_at=row["updated_at"],
+        subagent_task_total=int(row.get("subagent_task_total") or 0),
+        subagent_task_active=int(row.get("subagent_task_active") or 0),
+        subagent_task_waiting=int(row.get("subagent_task_waiting") or 0),
+        subagent_task_attention=int(row.get("subagent_task_attention") or 0),
+    )
 
 
 class KernelHostCore:
@@ -4471,9 +4572,7 @@ class KernelHostCore:
             self._open_attempts.add(settlement)
             return settlement
 
-    async def _settle_session_open(
-        self, settlement: asyncio.Future[None]
-    ) -> None:
+    async def _settle_session_open(self, settlement: asyncio.Future[None]) -> None:
         async with self._lock:
             self._open_attempts.discard(settlement)
             if not settlement.done():
@@ -4553,6 +4652,9 @@ class KernelHostCore:
                 repository.acquire_host_writer,
                 session_id=session_id,
                 workspace_id=workspace.workspace_key,
+                workspace_kind=workspace.workspace_kind,
+                workspace_root=str(workspace.workspace_root),
+                workspace_label=workspace.display_label,
                 memory_domain_id=workspace.memory_domain.memory_domain_id,
                 writer_owner_id=host_id,
                 lease_seconds=self._deadlines.policy.writer_lease_seconds,
@@ -4625,18 +4727,88 @@ class KernelHostCore:
             limit,
             self._canonical_deadline(),
         )
-        return [
-            KernelSessionSummary(
-                session_id=str(row["id"]),
-                workspace_id=str(row["workspace_id"]),
-                memory_domain_id=str(row["memory_domain_id"]),
-                lifecycle=str(row["lifecycle"]),
-                writer_generation=int(row["writer_generation"]),
-                latest_entry_sequence=int(row["latest_entry_sequence"]),
-                updated_at=row["updated_at"],
+        return [_kernel_session_summary(row) for row in rows]
+
+    async def list_resumable_sessions_across_workspaces(
+        self,
+        *,
+        memory_domain_id: str = "u_local",
+        include_closed: bool = False,
+    ) -> list[KernelSessionSummary]:
+        """Cold-list every resumable Session in one local memory domain."""
+
+        repository = await self._ensure_resources()
+        rows = await asyncio.to_thread(
+            _list_resumable_session_rows_across_workspaces,
+            repository,
+            memory_domain_id,
+            include_closed,
+            self._canonical_deadline(),
+        )
+        return [_kernel_session_summary(row) for row in rows]
+
+    async def read_resumable_session(
+        self,
+        session_id: str,
+        *,
+        memory_domain_id: str = "u_local",
+        include_closed: bool = False,
+    ) -> KernelSessionSummary | None:
+        """Cold-read one Session together with its exact workspace input."""
+
+        if not session_id:
+            raise ValueError("session_id is required")
+        repository = await self._ensure_resources()
+        row = await asyncio.to_thread(
+            _read_resumable_session_row,
+            repository,
+            session_id,
+            memory_domain_id,
+            include_closed,
+            self._canonical_deadline(),
+        )
+        return None if row is None else _kernel_session_summary(row)
+
+    async def read_subagent_task_page(
+        self,
+        *,
+        session_id: str,
+        maximum_items: int,
+        after_accepted_at: datetime | None = None,
+        after_task_id: str | None = None,
+    ) -> tuple[
+        tuple[Mapping[str, object], ...],
+        tuple[Mapping[str, object], ...],
+    ]:
+        """Cold-read one durable, session-scoped task page plus its edges."""
+
+        if not session_id:
+            raise ValueError("session_id is required")
+        if not 1 <= maximum_items <= 50:
+            raise ValueError("subagent task page bound is invalid")
+        repository = await self._ensure_resources()
+        deadline = self._canonical_deadline()
+        rows = await asyncio.to_thread(
+            repository.list_subagent_tasks,
+            session_id=session_id,
+            maximum_items=maximum_items,
+            after_accepted_at=after_accepted_at,
+            after_task_id=after_task_id,
+            include_lookahead=True,
+            deadline_monotonic=deadline,
+        )
+        task_ids = tuple(str(row["id"]) for row in rows[:maximum_items])
+        dependencies: list[Mapping[str, object]] = []
+        for start in range(0, len(task_ids), 32):
+            dependencies.extend(
+                await asyncio.to_thread(
+                    repository.read_subagent_dependencies,
+                    session_id=session_id,
+                    task_ids=task_ids[start : start + 32],
+                    deadline_monotonic=deadline,
+                )
             )
-            for row in rows
-        ]
+        return rows, tuple(dependencies)
 
     async def close_session(
         self, host_session_id: str, *, close_conversation: bool

@@ -42,7 +42,6 @@ from pulsara_agent.conversation_kernel.input_continuity import (
 )
 from pulsara_agent.conversation_kernel.compaction.contracts import (
     CompactionDisposition,
-    CompactionTargetBranch,
     CompactionTrigger,
     ResolvedCompactionPolicy,
 )
@@ -79,6 +78,7 @@ from pulsara_agent.conversation_kernel.repository import (
     build_prepared_tool_result_acceptance,
 )
 from pulsara_agent.conversation_kernel.reader import CanonicalProviderInputReader
+from pulsara_agent.conversation_kernel.safe_point import ProviderSafePointCoordinator
 from pulsara_agent.conversation_kernel.io import KernelSessionIO
 from pulsara_agent.conversation_kernel.runner import (
     ConversationKernelRunner,
@@ -109,6 +109,7 @@ from pulsara_agent.llm.provider import (
 )
 from pulsara_agent.llm.result import TransportUsageReport
 from pulsara_agent.model_input.contracts import (
+    CanonicalInputOriginKind,
     ContextSourceKind,
     ModelInputScopeKind,
     ModelInputCompileFailureKind,
@@ -438,7 +439,7 @@ class _LimitedCompactionScriptedModel(_CompactionScriptedModel):
                 api="openai_chat_completions",
                 pro_limits=limits,
                 flash_limits=limits,
-            )
+            ),
         )
 
 
@@ -935,9 +936,7 @@ class _HeadroomOrderingReader(CanonicalProviderInputReader):
 
 class _SequencedDirectKernelModel(DirectKernelModelPort):
     def __init__(self, *, config, scripts: tuple[tuple[dict[str, object], ...], ...]):
-        super().__init__(
-            config=config, api_key_boundary=ProcessApiKeyBoundary()
-        )
+        super().__init__(config=config, api_key_boundary=ProcessApiKeyBoundary())
         self._scripts = scripts
         self.requests = []
 
@@ -1409,9 +1408,7 @@ def test_round5b_active_manual_compaction_adopts_and_continues_same_run(
     assert len(model.summary_transport.contexts) == 1
     summary_context = model.summary_transport.contexts[0]
     assert summary_context.tool_choice == "auto"
-    assert summary_context.messages[-1].content == (
-        compaction_summary_request(CompactionTargetBranch.ACTIVE_INSTALLATION),
-    )
+    assert summary_context.messages[-1].content == (compaction_summary_request(),)
     assert len(model.requests) == 2
     successor_snapshot = _context_snapshot_payload(model.requests[1])
     assert successor_snapshot["continuation"]["mode"] == "RESUME_ACTIVE_TURN"
@@ -1456,6 +1453,170 @@ def test_round5b_active_manual_compaction_adopts_and_continues_same_run(
     assert attempt_count == 0
     if lose_adoption_ack:
         assert repository.lost_once
+
+
+@pytest.mark.parametrize("idle", (False, True), ids=("active", "idle"))
+def test_round5b_manual_candidate_shrink_search_is_lifecycle_neutral(
+    idle: bool,
+    stage2_migrated_postgres_database,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id = _name("session")
+    workspace_id = _name("workspace")
+    lease = repository.acquire_host_writer(
+        session_id=session_id,
+        workspace_id=workspace_id,
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    normal_calls = [
+        _text_stream("historical answer " + "x" * 80_000),
+        _tool_stream(),
+        _text_stream("tool turn complete"),
+    ]
+    if not idle:
+        normal_calls.append(_text_stream("active turn continued"))
+    model = _CompactionScriptedModel(
+        normal_calls,
+        [
+            "oversized handoff " + "x" * 200_000,
+            "compact handoff after shrinking the retained tool tail",
+        ],
+    )
+    owner = HostCompactionRuntimeOwner(
+        policy=ResolvedCompactionPolicy(
+            automatic_enabled=False,
+            minimum_reclaim_tokens=1,
+            maximum_retained_tool_groups=1,
+        )
+    )
+    runner = ConversationKernelRunner(
+        repository=repository,
+        writer_lease=lease,
+        model=model,
+        tools=StructuredToolPort(
+            _AssertingTool(provider, session_id), tool_names=("terminal",)
+        ),
+        live_bus=LiveAgentEventBus(),
+        context_source_collector=StaticContextSourceCollector(),
+        compaction_owner=owner,
+        workspace_id=workspace_id,
+    )
+
+    async def exercise():
+        await runner.run_turn("historical question")
+        tool_turn = await runner.run_turn("create one complete tool group")
+        if idle:
+            outcome = await runner.compaction.compact_idle_turn(
+                turn_id=tool_turn.turn_id,
+                command_id=_name("idle-compact"),
+                force=True,
+            )
+            final_text = None
+        else:
+            command_id = _name("active-command")
+            turn_id = _stable_id("turn", session_id, command_id)
+            _request, waiter = await owner.request_manual(
+                command_id=_name("active-compact"),
+                scope_kind=ModelInputScopeKind.ROOT,
+                scope_subagent_task_id=None,
+                expected_turn_id=turn_id,
+                force=True,
+            )
+            active_turn = await runner.run_turn(
+                "continue actively", command_id=command_id
+            )
+            outcome = await waiter
+            final_text = active_turn.final_text
+        await owner.aclose()
+        return outcome, final_text
+
+    outcome, final_text = asyncio.run(exercise())
+
+    assert outcome.disposition is CompactionDisposition.COMPACTED
+    assert outcome.snapshot_id is not None
+    assert len(model.summary_transport.contexts) == 2
+    assert len(model.summary_transport.contexts[0].messages) < len(
+        model.summary_transport.contexts[1].messages
+    )
+    assert {
+        context.messages[-1].content for context in model.summary_transport.contexts
+    } == {(compaction_summary_request(),)}
+    assert final_text == (None if idle else "active turn continued")
+
+
+def test_round5b_active_manual_non_reclaim_is_not_needed_and_turn_continues(
+    stage2_migrated_postgres_database,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id = _name("session")
+    workspace_id = _name("workspace")
+    lease = repository.acquire_host_writer(
+        session_id=session_id,
+        workspace_id=workspace_id,
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    model = _CompactionScriptedModel(
+        [
+            _text_stream("first answer " + "x" * 80_000),
+            _text_stream("second turn continued"),
+        ],
+        "oversized handoff " + "x" * 200_000,
+    )
+    owner = HostCompactionRuntimeOwner(
+        policy=ResolvedCompactionPolicy(
+            automatic_enabled=False,
+            minimum_reclaim_tokens=1,
+        )
+    )
+    runner = ConversationKernelRunner(
+        repository=repository,
+        writer_lease=lease,
+        model=model,
+        tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
+        live_bus=LiveAgentEventBus(),
+        context_source_collector=StaticContextSourceCollector(),
+        compaction_owner=owner,
+        workspace_id=workspace_id,
+    )
+
+    async def exercise():
+        await runner.run_turn("first question")
+        command_id = _name("second-command")
+        turn_id = _stable_id("turn", session_id, command_id)
+        _request, waiter = await owner.request_manual(
+            command_id=_name("compact-command"),
+            scope_kind=ModelInputScopeKind.ROOT,
+            scope_subagent_task_id=None,
+            expected_turn_id=turn_id,
+            force=True,
+        )
+        second = await runner.run_turn("second question", command_id=command_id)
+        outcome = await waiter
+        await owner.aclose()
+        return second, outcome
+
+    second, outcome = asyncio.run(exercise())
+
+    assert second.final_text == "second turn continued"
+    assert outcome.disposition is CompactionDisposition.NOT_NEEDED
+    assert outcome.public_code == "CONTEXT_ALREADY_COMPACT"
+    assert outcome.snapshot_id is None
+    assert len(model.summary_transport.contexts) == 1
+    with provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        deadline_monotonic=monotonic() + 10,
+    ) as connection:
+        snapshot_count = connection.execute(
+            "SELECT count(*) FROM pulsara_v3.context_snapshots WHERE session_id = %s",
+            (session_id,),
+        ).fetchone()[0]
+    assert snapshot_count == 0
 
 
 def test_round5b_back_to_back_manual_request_cannot_overwrite_successor(
@@ -1940,8 +2101,9 @@ def test_round5b_proactive_auto_compaction_runs_before_next_provider_open(
     assert len(overbudget_sources) == 1
     assert overbudget_sources[0][0] > overbudget_sources[0][1]
     assert len(model.summary_transport.contexts) == 1
-    assert model.summary_transport.contexts[0].compiler_estimated_input_tokens <= (
-        overbudget_sources[0][1]
+    assert (
+        model.summary_transport.contexts[0].compiler_estimated_input_tokens
+        <= (overbudget_sources[0][1])
     )
     assert len(model.requests) == 2
     successor_snapshot = _context_snapshot_payload(model.requests[1])
@@ -1949,10 +2111,13 @@ def test_round5b_proactive_auto_compaction_runs_before_next_provider_open(
     assert successor_snapshot["continuation"]["mode"] == "RESUME_ACTIVE_TURN"
     assert active_request["location"] == "CANONICAL_SUFFIX"
     assert active_request["text"] is None
-    assert sum(
-        message.content == ("y" * 100_000,)
-        for message in model.requests[1].compiled_input.messages
-    ) == 1
+    assert (
+        sum(
+            message.content == ("y" * 100_000,)
+            for message in model.requests[1].compiled_input.messages
+        )
+        == 1
+    )
     assert input_reader.operations[:2] == ["headroom", "dispatch"]
 
 
@@ -2007,7 +2172,7 @@ def test_round5b_idle_manual_compaction_adopts_without_successor_open(
     assert outcome.snapshot_id is not None
     assert len(model.summary_transport.contexts) == 1
     assert model.summary_transport.contexts[0].messages[-1].content == (
-        compaction_summary_request(CompactionTargetBranch.IDLE_BASE_ONLY),
+        compaction_summary_request(),
     )
     assert len(model.requests) == 1
     scope = ProviderInputContinuityScope(
@@ -2056,10 +2221,75 @@ def test_round5b_idle_manual_compaction_adopts_without_successor_open(
     assert restart_snapshot["continuation"]["instruction"].startswith(
         "HANDOFF COMPLETE / AWAIT NEXT USER"
     )
-    assert sum(
-        message.content == ("question after restart",)
-        for message in replacement_model.requests[0].compiled_input.messages
-    ) == 1
+    assert (
+        sum(
+            message.content == ("question after restart",)
+            for message in replacement_model.requests[0].compiled_input.messages
+        )
+        == 1
+    )
+
+
+def test_round5b_idle_manual_non_reclaim_matches_active_not_needed(
+    stage2_migrated_postgres_database,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id = _name("session")
+    workspace_id = _name("workspace")
+    lease = repository.acquire_host_writer(
+        session_id=session_id,
+        workspace_id=workspace_id,
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    model = _CompactionScriptedModel(
+        [_text_stream("brief idle answer")],
+        "oversized handoff " + "x" * 100_000,
+    )
+    owner = HostCompactionRuntimeOwner(
+        policy=ResolvedCompactionPolicy(
+            automatic_enabled=False,
+            minimum_reclaim_tokens=1,
+        )
+    )
+    runner = ConversationKernelRunner(
+        repository=repository,
+        writer_lease=lease,
+        model=model,
+        tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
+        live_bus=LiveAgentEventBus(),
+        context_source_collector=StaticContextSourceCollector(),
+        compaction_owner=owner,
+        workspace_id=workspace_id,
+    )
+
+    async def exercise():
+        first = await runner.run_turn("question")
+        outcome = await runner.compaction.compact_idle_turn(
+            turn_id=first.turn_id,
+            command_id=_name("idle-compact"),
+            force=True,
+        )
+        await owner.aclose()
+        return outcome
+
+    outcome = asyncio.run(exercise())
+
+    assert outcome.disposition is CompactionDisposition.NOT_NEEDED
+    assert outcome.public_code == "CONTEXT_ALREADY_COMPACT"
+    assert outcome.snapshot_id is None
+    assert len(model.summary_transport.contexts) == 1
+    with provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        deadline_monotonic=monotonic() + 10,
+    ) as connection:
+        snapshot_count = connection.execute(
+            "SELECT count(*) FROM pulsara_v3.context_snapshots WHERE session_id = %s",
+            (session_id,),
+        ).fetchone()[0]
+    assert snapshot_count == 0
 
 
 def test_round3_1_empty_epoch_absorbs_pre_first_call_steers_once(
@@ -3509,7 +3739,7 @@ def test_round5a1_replay_fragment_binds_only_after_exact_assistant_winner(
             flash_model="test-flash",
             api="openai_chat_completions",
             provider_profile=profile,
-        )
+        ),
     )
     model._registry.get("openai_chat_completions")._adapter._mock_chunks = [
         {
@@ -4195,9 +4425,7 @@ def test_stage2_subagent_runner_produces_durable_message_child(
             objective="produce one message",
         ),
     )
-    result = asyncio.run(
-        run_admitted_subagent_fixture(runner, task_id)
-    )
+    result = asyncio.run(run_admitted_subagent_fixture(runner, task_id))
     with provider.connection(
         lane=PostgresConnectionLane.INSPECTOR,
         deadline_monotonic=monotonic() + 10,
@@ -4450,6 +4678,37 @@ def test_round10_sole_report_result_atomically_completes_child_without_second_mo
             "WHERE a.session_id=%s AND e.conversation_scope_kind='SUBAGENT_TASK'",
             (session_id,),
         ).fetchone() == (1,)
+
+        explicit_result_id = str(
+            connection.execute(
+                "SELECT id FROM pulsara_v3.subagent_task_children "
+                "WHERE session_id=%s AND task_id=%s AND child_kind='RESULT'",
+                (session_id, task_id),
+            ).fetchone()[0]
+        )
+
+    safe_point = ProviderSafePointCoordinator(repository=repository, guard=lease.guard)
+    accepted = safe_point.accept_subagent_result(
+        turn_id=parent_turn_id,
+        child_result_id=explicit_result_id,
+        command_id=_name("command"),
+        actor_id="host:test",
+        deadline_monotonic=monotonic() + 30,
+    )
+    assert accepted is not None
+    handle = safe_point.freeze_provider_input(
+        turn_id=parent_turn_id,
+        deadline_monotonic=monotonic() + 30,
+    )
+    try:
+        materialized = CanonicalProviderInputReader(provider).read_frozen_snapshot(
+            handle.cut,
+            deadline_monotonic=monotonic() + 30,
+        )
+    finally:
+        handle.close()
+    assert materialized.items[-1].text == "exact explicit summary"
+    assert materialized.items[-1].input_origin is CanonicalInputOriginKind.SUBAGENT_RESULT
 
 
 def test_round10_mixed_report_batch_has_zero_attempt_and_physical_effect_then_recovers(

@@ -1405,12 +1405,11 @@ class ProviderDispatchCoordinator:
                 base_input, base_anchor
             )
             if isinstance(cold_seed_override, CompactionContinuationSeed):
-                # A compaction successor is the same activation crossing an
-                # explicit cold epoch boundary.  Its synthetic base can expose
-                # a historical human anchor after context-base replacement,
-                # but that anchor is not a new Skill or memory activation.  The
-                # successor instead carries the exact prebound ACTIVE_SKILL
-                # state recovered from the predecessor epoch.
+                # Every compaction candidate crosses the same synthetic cold
+                # base assembly path.  Its historical human anchor is not a new
+                # Skill or memory activation.  An active candidate may later be
+                # installed as a successor; an idle candidate is closed after
+                # the same proof without opening a provider call.
                 activation_subject = None
                 activation_text = ""
             try:

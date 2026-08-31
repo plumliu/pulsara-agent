@@ -121,6 +121,24 @@ The current Kernel supports:
   capability epoch without a durable compaction job;
 - canonical inspection and Protocol v3 terminal observation.
 
+## Frontend
+
+The repository now includes the Pulsara local workbench under
+[`frontend/`](frontend/). It connects directly to the local Host and renders only
+surfaces backed by an existing Kernel contract: overview, durable sessions,
+execution traces, Plan interactions, per-turn permissions, queued prompts,
+stop, context compaction, subagent tasks, and local configuration. Child work is
+visible inline where it was delegated, with its objective, live tool activity,
+canonical status, and Markdown-rendered result; the task page provides the same
+facts as a broader view. The workbench no longer
+uses a demo projection or reserves placeholder navigation for unsupported
+features. Session creation has exactly two workspace choices: Quick Start asks
+Pulsara to create a durable managed directory, while Specified Directory uses
+an existing absolute path. Plan and permission choices live beside the composer
+and apply to one turn. The bare loopback URL opens directly without a token,
+cookie, OpenAI login, or other website account. See
+[`PULSARA_FRONTEND_APPLICATION_SPEC.zh.md`](PULSARA_FRONTEND_APPLICATION_SPEC.zh.md).
+
 Round 6 intentionally does not add durable MCP connection or request recovery.
 Host replacement reconnects from configuration. Form/private-URL elicitation,
 OAuth, MCP-backed skill activation, server-initiated Sampling/Roots, Apps/Tasks,
@@ -166,7 +184,12 @@ schema and borrow the runtime role.
 ```sh
 uv run pulsara db migrate --env-file .env
 uv run pulsara db verify --deep --env-file .env
+uv run pulsara app --env-file .env
 ```
+
+The last command starts the loopback-only Web application and opens it in a
+browser. Pass `--no-open` to start the service without opening a page. Durable
+sessions resume with their exact workspace after the page or service restarts.
 
 The only active migration universe is
 `pulsara.conversation-kernel.v1`, generation 1, beginning at version 0.

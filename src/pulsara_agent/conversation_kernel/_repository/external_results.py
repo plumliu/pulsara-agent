@@ -11,6 +11,7 @@ from pulsara_agent.conversation_kernel.contracts import (
     ConversationScopeKind,
     EntryKind,
     HostWriterGuard,
+    InlineContent,
     canonical_digest,
 )
 from pulsara_agent.conversation_kernel.vocabulary import (
@@ -59,9 +60,8 @@ class _ExternalResultOperations:
             row = connection.execute(
                 """
                 SELECT t.workspace_id, c.id AS child_id, c.entry_id,
-                       e.inline_content, e.blob_id,
-                       e.content_digest, e.content_size, e.content_media_type,
-                       e.content_codec, accepted.id AS accepted_entry_id
+                       c.summary, c.result_fingerprint,
+                       accepted.id AS accepted_entry_id
                 FROM pulsara_v3.subagent_tasks AS t
                 JOIN pulsara_v3.subagent_task_children AS c
                   ON c.session_id = t.session_id AND c.task_id = t.id
@@ -81,7 +81,7 @@ class _ExternalResultOperations:
                 return None
             child_id = str(row["child_id"])
             digest = canonical_digest(
-                "pulsara:accept-subagent-result:v1",
+                "pulsara:accept-subagent-result:v2",
                 {
                     "turn_id": turn_id,
                     "new_context_binding_revision_id": (
@@ -93,7 +93,7 @@ class _ExternalResultOperations:
                         else requested_permission_mode.value
                     ),
                     "source_subagent_result_id": child_id,
-                    "content_digest": str(row["content_digest"]),
+                    "result_fingerprint": str(row["result_fingerprint"]),
                 },
             )
             existing = connection.execute(
@@ -143,7 +143,7 @@ class _ExternalResultOperations:
             )
             if sequence is None:
                 return None
-            content = self._content_from_row(row)
+            content = InlineContent.from_bytes(str(row["summary"]).encode("utf-8"))
             self._insert_entry(
                 connection,
                 session_id=guard.session_id,
@@ -164,7 +164,7 @@ class _ExternalResultOperations:
                     request_schema_version, semantic_digest,
                     target_kind, target_entry_id
                 ) VALUES (%s, %s, 'ACCEPT_SUBAGENT_RESULT',
-                          'accept_subagent_result.v1', %s, 'ENTRY', %s)
+                          'accept_subagent_result.v2', %s, 'ENTRY', %s)
                 """,
                 (guard.session_id, command_id, digest, entry_id),
             )

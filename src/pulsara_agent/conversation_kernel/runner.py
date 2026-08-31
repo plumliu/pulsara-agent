@@ -334,12 +334,8 @@ class ChildCompactionContinuationBlocked(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class _RootSessionStartCompactPort(SessionStartCompactPort):
-    dispatcher: KernelHookDispatcher | None = dataclass_field(
-        repr=False, compare=False
-    )
-    context_owner: HookContextOwner | None = dataclass_field(
-        repr=False, compare=False
-    )
+    dispatcher: KernelHookDispatcher | None = dataclass_field(repr=False, compare=False)
+    context_owner: HookContextOwner | None = dataclass_field(repr=False, compare=False)
     scope: HookDispatchScopeRef | None = dataclass_field(repr=False, compare=False)
     boundary_owner: _SessionStartColdBoundaryOwner = dataclass_field(
         repr=False, compare=False
@@ -351,7 +347,10 @@ class _RootSessionStartCompactPort(SessionStartCompactPort):
     async def __call__(
         self, facts: PreparedCompactSessionStartFacts
     ) -> PreparedCompactSessionStart:
-        if facts.scope.session_id != self.session_id or facts.turn_id != self.intent.turn_id:
+        if (
+            facts.scope.session_id != self.session_id
+            or facts.turn_id != self.intent.turn_id
+        ):
             raise RuntimeError("compact SessionStart port received foreign facts")
         boundary = await self.boundary_owner.consume_compact(facts)
         if boundary is None:
@@ -702,14 +701,10 @@ class ConversationKernelRunner:
             task_id=task_id,
             turn_id=turn_id,
             entry_id=_stable_id("entry", turn_id, "objective"),
-            context_binding_revision_id=_stable_id(
-                "context-revision", turn_id, "0"
-            ),
+            context_binding_revision_id=_stable_id("context-revision", turn_id, "0"),
             permission_snapshot_id=_stable_id("permission-snapshot", turn_id),
             task_start_event_id=task_start.event_id,
-            expected_parent_permission_snapshot=(
-                launch.parent_permission_snapshot
-            ),
+            expected_parent_permission_snapshot=(launch.parent_permission_snapshot),
             content=content,
             occurred_at=occurred_at,
             actor_id="subagent-manager",
@@ -926,16 +921,12 @@ class ConversationKernelRunner:
                             compaction = await self.compaction.execute_active(
                                 turn_id=turn_id,
                                 model_call_index=model_call_count,
-                                inherited_memory_use_policy=(
-                                    current_memory_use_policy
-                                ),
+                                inherited_memory_use_policy=(current_memory_use_policy),
                                 trigger=auto_trigger,
                                 force=False,
                                 manual_request=None,
                                 scope_kind=intent.scope_kind,
-                                scope_subagent_task_id=(
-                                    intent.scope_subagent_task_id
-                                ),
+                                scope_subagent_task_id=(intent.scope_subagent_task_id),
                                 prepared_source=prepared_compaction,
                                 hook_scope=self._hook_scope,
                                 session_start_compact_port=(
@@ -971,15 +962,13 @@ class ConversationKernelRunner:
                             )
                         )
                         try:
-                            session_start_context = (
-                                await self._dispatch_initial_session_start(
-                                    intent,
-                                    canonical_facts=session_start_facts,
-                                    model_id=(
-                                        headroom_admission.prepared_target.target.fact.model_id
-                                    ),
-                                    deadline_monotonic=planning_deadline,
-                                )
+                            session_start_context = await self._dispatch_initial_session_start(
+                                intent,
+                                canonical_facts=session_start_facts,
+                                model_id=(
+                                    headroom_admission.prepared_target.target.fact.model_id
+                                ),
+                                deadline_monotonic=planning_deadline,
                             )
                         except BaseException:
                             headroom_admission.close()
@@ -1177,8 +1166,7 @@ class ConversationKernelRunner:
                     stop_causal_ref = None
                     if (
                         complete_turn
-                        and identity.conversation_scope_kind
-                        is ModelInputScopeKind.ROOT
+                        and identity.conversation_scope_kind is ModelInputScopeKind.ROOT
                         and self._hook_dispatcher is not None
                         and self._hook_context_owner is not None
                         and self._hook_scope is not None
@@ -1228,16 +1216,14 @@ class ConversationKernelRunner:
                         and identity.scope_subagent_task_id is not None
                         and self._subagent_runtime is not None
                     ):
-                        completion_prepared = (
-                            await self._subagent_runtime.prepare_inferred_completion(
-                                task_id=identity.scope_subagent_task_id,
-                                entry_id=entry_id,
-                                public_text=completed.public_text,
-                                model_id=request.prepared_call.call.target.fact.model_id,
-                                permission_snapshot=(
-                                    canonical_facts.run_permission_snapshot
-                                ),
-                            )
+                        completion_prepared = await self._subagent_runtime.prepare_inferred_completion(
+                            task_id=identity.scope_subagent_task_id,
+                            entry_id=entry_id,
+                            public_text=completed.public_text,
+                            model_id=request.prepared_call.call.target.fact.model_id,
+                            permission_snapshot=(
+                                canonical_facts.run_permission_snapshot
+                            ),
                         )
                         complete_turn = (
                             completion_prepared is not None
@@ -1469,9 +1455,8 @@ class ConversationKernelRunner:
                     )
                 )
             cause = intent.cause
-            if (
-                intent.scope_kind is ModelInputScopeKind.SUBAGENT_TASK
-                and isinstance(error, CompactionContinuationBlocked)
+            if intent.scope_kind is ModelInputScopeKind.SUBAGENT_TASK and isinstance(
+                error, CompactionContinuationBlocked
             ):
                 raise ChildCompactionContinuationBlocked(
                     "HOOK_COMPACTION_BLOCKED"
@@ -1526,8 +1511,7 @@ class ConversationKernelRunner:
             permission_mode=external_permission_mode(
                 canonical_facts.run_permission_snapshot.effective_mode.value,
                 active_plan_workflow=(
-                    canonical_facts.run_permission_snapshot.plan_workflow_id
-                    is not None
+                    canonical_facts.run_permission_snapshot.plan_workflow_id is not None
                 ),
             ),
         )
@@ -1562,6 +1546,7 @@ class ConversationKernelRunner:
         *,
         turn_id: str,
         new_context_binding_revision_id: str | None = None,
+        requested_permission_mode: PermissionMode | None = None,
         child_result_id: str,
         command_id: str,
         actor_id: str,
@@ -1571,6 +1556,7 @@ class ConversationKernelRunner:
             self._safe_point.accept_subagent_result,
             turn_id=turn_id,
             new_context_binding_revision_id=new_context_binding_revision_id,
+            requested_permission_mode=requested_permission_mode,
             child_result_id=child_result_id,
             command_id=command_id,
             actor_id=actor_id,

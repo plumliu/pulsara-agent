@@ -1173,6 +1173,8 @@ Result也不会自动伪装成ROOT user message。ROOT只有两条显式result-c
 1. ROOT调用`wait_agent`/`wait_agent_tasks`得到ordinary ToolResult；
 2. ROOT controller调用既有`ACCEPT_SUBAGENT_RESULT`，按同一`FrozenSubagentResultPublicFact.result_fingerprint`把chosen result的acceptance projection作为ROOT external-result entry接受。
 
+第二条路径进入provider时仍走ROOT的唯一structured model-input compiler。ROOT entry只保存exact acceptance content与`source_subagent_result_id`，reader将其标记为`SUBAGENT_RESULT`；provider-neutral lowering保留`user` transport role并生成closed `pulsara_subagent_result`信封，明确正文是已接纳的delegated work product而非真人新指令。repository、Host、Terminal/Web bridge和provider adapter均不得拼接该prompt或另开provider调用。
+
 ROOT可以通过`list_agents`检查任何task的bounded terminal metadata，方便诊断或人工接管，但这不会影响下游消费。若result content要进入ROOT model input，必须通过wait ToolResult或既有显式result acceptance，不自动注入；Round 5B handoff也只投影active/task-board状态，不复制result正文。External-result writer仍只创建既有acceptance entry；本轮不引入result-copy relation、artifact、delivery marker或ack-to-content特殊分支。
 
 ---
@@ -1346,7 +1348,11 @@ dependency_status
 
 ### 11.3 用户控制
 
-Round 10不新增client直接给child发message或编辑DAG的UI。Controller继续支持list/stop/result accept；model工具先完成产品面。高级task-board交互属于后续Web/Desktop UI round。
+Round 10不新增client直接给child发message、重试task或编辑DAG的UI。Controller继续支持既有
+turn stop与result accept；model工具承担批量创建、依赖调度、list/wait、向active worker补充消息、
+停止task和提交result。后续Pulsara Web产品面按session分页读取全部durable task/result/dependency，
+叠加process-local progress，在会话检查器与主对话原位投影这些能力，并允许用户通过既有controller
+显式接纳result；该read/accept产品面不改变Round 10执行权威或cross-restart non-goals。
 
 ---
 
@@ -1600,7 +1606,7 @@ Neutral `conversation_kernel/cold_epoch.py`属于Round 5B已激活共享基础�
 - raw child transcript自动注入ROOT；
 - model-authoredtool allowlist/permission；
 - Plugin agent-definition manifest parsing or execution；本轮不实现，Round 9.3也不提供该component；未来若需要必须另立产品规格；
-- advanced Web/Desktop task-board UI。
+- client直接发送child消息、编辑DAG、重试或重定义task的Web/Desktop控制面。
 
 ---
 

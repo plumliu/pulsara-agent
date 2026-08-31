@@ -11,7 +11,6 @@ from pulsara_agent.conversation_kernel.compaction.contracts import (
     CompactionActiveRequestLocation,
     CompactionContinuationMode,
     CompactionSnapshotCarrier,
-    CompactionTargetBranch,
     FrozenCompactionActiveRequest,
     FrozenCompactionSummary,
 )
@@ -60,43 +59,24 @@ Runtime会在交接后另外提供最近真实用户原话、受保护的最近t
 先在内部组织和核对信息，不要输出analysis或思考过程。最终只输出语义交接正文；可以自然使用短段落、项目符号或小标题，但没有必需的标题、编号、XML标签或固定格式。不要问候，不要向用户作答，不要把本指令当成用户的新需求，也不要在正文后添加closing text。
 """
 
-_ACTIVE_SUMMARY_REQUEST_SUFFIX = """
-ACTIVE-TURN HANDOFF:
-Runtime has a RUNNING target turn. After this summary is durably adopted, Runtime
-will immediately open a normal successor call. Describe unresolved work as the
-active objective to resume now, never as work delayed by compaction. Runtime will
-separately and mechanically identify the exact active request; do not guess a new
-request or instruct the successor to wait for another user message.
-
-REMINDER: Produce the checkpoint handoff now as text only. Do not resume task
-work and do not call, inspect, retry, or request any tool in this summary response.
-"""
-
-_IDLE_SUMMARY_REQUEST_SUFFIX = """
-IDLE HANDOFF:
-Runtime's target turn is already terminal. This call only creates a durable base
-for a future user turn; it does not create a new active request or an immediate
-successor model call. Describe old work as pending only when the conversation
-itself left it pending, never merely because this summary call cannot execute it.
+_SUMMARY_REQUEST_SUFFIX = """
+CONTINUATION OWNERSHIP:
+Runtime separately and mechanically owns whether work resumes immediately or a
+later user message starts the next turn. Do not infer either lifecycle from this
+summary-only response, do not instruct Runtime to wait or continue, and describe
+work as pending only when the conversation itself actually left it pending.
 
 REMINDER: Produce the checkpoint handoff now as text only. Do not resume task
 work and do not call, inspect, retry, or request any tool in this summary response.
 """
 
 
-def compaction_summary_request(target_branch: CompactionTargetBranch) -> str:
-    if target_branch is CompactionTargetBranch.ACTIVE_INSTALLATION:
-        return _SUMMARY_REQUEST_COMMON + _ACTIVE_SUMMARY_REQUEST_SUFFIX
-    if target_branch is CompactionTargetBranch.IDLE_BASE_ONLY:
-        return _SUMMARY_REQUEST_COMMON + _IDLE_SUMMARY_REQUEST_SUFFIX
-    raise ValueError("unsupported compaction target branch")
+def compaction_summary_request() -> str:
+    return _SUMMARY_REQUEST_COMMON + _SUMMARY_REQUEST_SUFFIX
 
-_LEADING_ANALYSIS = re.compile(
-    r"\A\s*<analysis>.*?</analysis>\s*", re.DOTALL
-)
-_OUTER_MARKDOWN_FENCE = re.compile(
-    r"\A```[^\n]*\n(?P<body>.*)\n```\s*\Z", re.DOTALL
-)
+
+_LEADING_ANALYSIS = re.compile(r"\A\s*<analysis>.*?</analysis>\s*", re.DOTALL)
+_OUTER_MARKDOWN_FENCE = re.compile(r"\A```[^\n]*\n(?P<body>.*)\n```\s*\Z", re.DOTALL)
 
 
 def freeze_compaction_summary_output(
@@ -170,9 +150,7 @@ def build_compaction_snapshot_carrier(
                 "mode": continuation_mode.value,
                 "instruction": handoff_instruction,
                 "active_request": (
-                    None
-                    if active_request is None
-                    else active_request.canonical_value()
+                    None if active_request is None else active_request.canonical_value()
                 ),
             },
             "earlier_context_summary": summary.body,
@@ -286,9 +264,7 @@ def parse_compaction_snapshot_carrier(
             raise ValueError("snapshot active-request location is invalid") from error
         entry_id = active_value["entry_id"]
         text = active_value["text"]
-        if not isinstance(entry_id, str) or not (
-            text is None or isinstance(text, str)
-        ):
+        if not isinstance(entry_id, str) or not (text is None or isinstance(text, str)):
             raise ValueError("snapshot active-request values are invalid")
         active_request = FrozenCompactionActiveRequest(
             entry_id=entry_id,

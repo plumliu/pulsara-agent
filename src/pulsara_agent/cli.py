@@ -102,6 +102,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="store_true")
     commands = parser.add_subparsers(dest="command")
 
+    app = _add_host_common_args(
+        commands.add_parser("app", help="Run the complete local Pulsara Web app.")
+    )
+    app.add_argument("--port", type=int, default=0)
+    app.add_argument(
+        "--no-open",
+        action="store_true",
+        help="Print the local app URL without opening the default browser.",
+    )
+    app.add_argument(
+        "--static-root",
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+
     host = commands.add_parser("host", help="Run the canonical conversation kernel.")
     host_commands = host.add_subparsers(dest="host_command")
     run = _add_host_common_args(host_commands.add_parser("run"))
@@ -278,6 +293,12 @@ def main() -> None:
     if args.version:
         print(__version__)
         return
+    if args.command == "app":
+        try:
+            asyncio.run(_local_web_app(args))
+            return
+        except (ValueError, KeyError, RuntimeError, OSError) as exc:
+            parser.error(_public_error(exc))
     if args.command == "host":
         try:
             if args.host_command == "run":
@@ -382,6 +403,30 @@ async def _kernel_host_run(args) -> object:
         if session is not None:
             await core.close_session(session.host_session_id, close_conversation=True)
         await core.shutdown()
+
+
+async def _local_web_app(args) -> None:
+    from pulsara_agent.web_app import (
+        LocalWebApplication,
+        run_local_web_application,
+    )
+
+    settings = _settings_from_args(args)
+    application = LocalWebApplication(
+        settings=settings,
+        workspace_input=_workspace_input_from_args(args),
+        model_role=ModelRole(args.model_role),
+        permission_policy=_permission_policy(args),
+        active_skill_names=_active_skill_names_from_args(args),
+        port=args.port,
+        static_root=(
+            None if args.static_root is None else Path(args.static_root)
+        ),
+    )
+    await run_local_web_application(
+        application,
+        open_browser=not args.no_open,
+    )
 
 
 async def _open_initial_session(core: KernelHostCore, args):

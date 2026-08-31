@@ -19,6 +19,7 @@ from pulsara_agent.primitives.context import (
     thaw_json,
 )
 from pulsara_agent.primitives.bounded_json import bounded_json_loads
+from pulsara_agent.ports.live_agent_event import ReasoningPresentationKind
 
 
 MAXIMUM_PROVIDER_REPLAY_PAYLOAD_BYTES = 16 << 20
@@ -101,9 +102,7 @@ def provider_replay_contract_fingerprint(
                 sorted(RESPONSES_TERMINAL_ELIDABLE_OPERATIONAL_ITEM_FIELDS)
             ),
             "terminal_elidable_empty_message_content_fields": tuple(
-                sorted(
-                    RESPONSES_TERMINAL_ELIDABLE_EMPTY_MESSAGE_CONTENT_FIELDS
-                )
+                sorted(RESPONSES_TERMINAL_ELIDABLE_EMPTY_MESSAGE_CONTENT_FIELDS)
             ),
             "canonical_array": "pulsara.canonical-json.v1",
         }
@@ -188,9 +187,7 @@ def build_provider_replay_target_compatibility(
         transport_binding_id=transport_binding_id,
         codec_kind=codec,
         provider_replay_contract_fingerprint=contract_fingerprint,
-        compatibility_contract_version=(
-            PROVIDER_REPLAY_COMPATIBILITY_CONTRACT_VERSION
-        ),
+        compatibility_contract_version=(PROVIDER_REPLAY_COMPATIBILITY_CONTRACT_VERSION),
         replay_target_fingerprint=target_fingerprint,
     )
 
@@ -213,9 +210,7 @@ def _replay_target_fingerprint(
             "transport_binding": transport_binding_id,
             "codec": codec_kind.value,
             "replay_contract": provider_replay_contract_fingerprint,
-            "compatibility_contract": (
-                PROVIDER_REPLAY_COMPATIBILITY_CONTRACT_VERSION
-            ),
+            "compatibility_contract": (PROVIDER_REPLAY_COMPATIBILITY_CONTRACT_VERSION),
         },
     )
 
@@ -230,7 +225,127 @@ def provider_replay_payload_digest(payload_bytes: bytes) -> str:
     return "sha256:" + sha256(payload_bytes).hexdigest()
 
 
-def provider_replay_id(*, session_id: str, assistant_entry_id: str, wire_api: str) -> str:
+@dataclass(frozen=True, slots=True)
+class ProviderVisibleReasoningBlock:
+    """A provider-exposed reasoning body safe to project to product clients."""
+
+    presentation_kind: ReasoningPresentationKind
+    text: str
+
+    def __post_init__(self) -> None:
+        if not self.text:
+            raise ValueError("provider-visible reasoning text is empty")
+
+
+def project_provider_visible_reasoning(
+    *,
+    codec_kind: ProviderAssistantReplayCodecKind,
+    payload_bytes: bytes,
+    expected_payload_digest: str,
+    expected_payload_size: int,
+    expected_item_count: int,
+) -> tuple[ProviderVisibleReasoningBlock, ...]:
+    """Derive only text the provider explicitly exposed in its replay body."""
+
+    if (
+        len(payload_bytes) != expected_payload_size
+        or provider_replay_payload_digest(payload_bytes) != expected_payload_digest
+    ):
+        raise ValueError("provider replay payload integrity mismatch")
+    decoded = bounded_json_loads(
+        payload_bytes,
+        maximum_bytes=MAXIMUM_PROVIDER_REPLAY_PAYLOAD_BYTES,
+        maximum_nodes=MAXIMUM_PROVIDER_REPLAY_JSON_NODES,
+        maximum_depth=MAXIMUM_PROVIDER_REPLAY_JSON_DEPTH,
+        maximum_string_utf8_bytes=MAXIMUM_PROVIDER_REPLAY_STRING_UTF8_BYTES,
+    )
+    if (
+        not isinstance(decoded, list)
+        or len(decoded) != expected_item_count
+        or canonical_json_bytes(decoded) != payload_bytes
+    ):
+        raise ValueError("provider replay payload is not canonical JSON")
+    _validate_provider_replay_payload_shape(codec_kind, decoded)
+
+    projected: list[ProviderVisibleReasoningBlock] = []
+    if codec_kind is ProviderAssistantReplayCodecKind.CHAT_CLOSED_REASONING_FIELDS:
+        message = decoded[0]
+        assert isinstance(message, dict)
+        for field_name in ("reasoning_content", "reasoning"):
+            if field_name not in message:
+                continue
+            value = message[field_name]
+            if not isinstance(value, str):
+                raise ValueError("Chat provider-visible reasoning is not text")
+            if value:
+                projected.append(
+                    ProviderVisibleReasoningBlock(
+                        ReasoningPresentationKind.FULL,
+                        value,
+                    )
+                )
+        return tuple(projected)
+
+    if codec_kind is ProviderAssistantReplayCodecKind.RESPONSES_EXACT_OUTPUT_ITEMS:
+        for item in decoded:
+            assert isinstance(item, dict)
+            if item.get("type") != "reasoning":
+                continue
+            summary = _project_responses_reasoning_text(
+                item.get("summary"),
+                allowed_types=frozenset({"summary_text", "output_text"}),
+                label="summary",
+            )
+            content = _project_responses_reasoning_text(
+                item.get("content"),
+                allowed_types=frozenset({"reasoning_text"}),
+                label="content",
+            )
+            if summary:
+                projected.append(
+                    ProviderVisibleReasoningBlock(
+                        ReasoningPresentationKind.SUMMARY,
+                        summary,
+                    )
+                )
+            if content:
+                projected.append(
+                    ProviderVisibleReasoningBlock(
+                        ReasoningPresentationKind.FULL,
+                        content,
+                    )
+                )
+        return tuple(projected)
+
+    raise ValueError("provider replay codec is unsupported")
+
+
+def _project_responses_reasoning_text(
+    value: object,
+    *,
+    allowed_types: frozenset[str],
+    label: str,
+) -> str:
+    if value is None:
+        return ""
+    if not isinstance(value, list):
+        raise ValueError(f"Responses reasoning {label} is not an array")
+    parts: list[str] = []
+    for block in value:
+        if (
+            not isinstance(block, dict)
+            or block.get("type") not in allowed_types
+            or set(block).difference({"type", "text"})
+            or not isinstance(block.get("text"), str)
+        ):
+            raise ValueError(f"Responses reasoning {label} block is invalid")
+        parts.append(str(block["text"]))
+    return "".join(parts)
+
+
+def provider_replay_id(
+    *, session_id: str, assistant_entry_id: str, wire_api: str
+) -> str:
     digest = context_fingerprint(
         "pulsara.provider-assistant-replay-id:v1",
         {
@@ -531,6 +646,7 @@ __all__ = [
     "PreparedDurableProviderAssistantReplay",
     "ProviderAssistantReplayFragment",
     "ProviderAssistantReplayCodecKind",
+    "ProviderVisibleReasoningBlock",
     "ProviderReplayDisposition",
     "ProviderReplayTargetCompatibilityFact",
     "build_prepared_durable_provider_assistant_replay",
@@ -540,4 +656,5 @@ __all__ = [
     "provider_replay_id",
     "provider_replay_payload_bytes",
     "provider_replay_payload_digest",
+    "project_provider_visible_reasoning",
 ]

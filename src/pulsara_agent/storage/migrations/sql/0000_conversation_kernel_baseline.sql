@@ -20,6 +20,9 @@ REVOKE ALL ON SCHEMA pulsara_v3 FROM PUBLIC;
 CREATE TABLE pulsara_v3.sessions (
     id text PRIMARY KEY,
     workspace_id text NOT NULL,
+    workspace_kind text NOT NULL CHECK (workspace_kind IN ('project', 'transient')),
+    workspace_root text NOT NULL CHECK (workspace_root <> ''),
+    workspace_label text NOT NULL CHECK (workspace_label <> ''),
     memory_domain_id text NOT NULL CHECK (
         memory_domain_id ~ '^[a-z0-9][a-z0-9._-]{0,127}$'
     ),

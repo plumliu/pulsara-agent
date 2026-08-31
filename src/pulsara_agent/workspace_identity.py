@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import tempfile
 from dataclasses import dataclass
+from hashlib import sha256
 from pathlib import Path
 from typing import Literal
 from uuid import uuid4
@@ -86,7 +87,13 @@ def resolve_workspace(
         display_label=label,
         memory_domain=domain,
         workspace_scope=None,
-        workspace_key=f"transient:{uuid4().hex}",
+        # A transient workspace has no project-memory scope, but its physical
+        # directory can still back a durable, resumable conversation.  The
+        # canonical identity therefore follows that exact normalized root.
+        workspace_key=(
+            "transient:"
+            + sha256(root.as_posix().encode("utf-8")).hexdigest()
+        ),
         cleanup_workspace_root_on_close=host_created_root
         and workspace.cleanup_workspace_root_on_close,
         trust_workspace_mcp_config=workspace.trust_workspace_mcp_config,

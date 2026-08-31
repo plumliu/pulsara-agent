@@ -62,6 +62,7 @@ from pulsara_agent.llm.provider_replay import (
     build_provider_replay_target_compatibility,
 )
 from pulsara_agent.ports.live_agent_event import (
+    ReasoningPresentationKind,
     TextDeltaPayload,
     TextStartPayload,
     ThinkingDeltaPayload,
@@ -279,9 +280,7 @@ def test_assistant_settlement_exact_candidate_carries_scope_and_epoch() -> None:
     cut = PreparedProviderInputCut("session:test", "turn:test", "revision:test", 1)
     content = InlineContent.from_bytes(b"assistant")
     occurred_at = datetime(2026, 8, 17, tzinfo=timezone.utc)
-    root = ProviderInputContinuityScope(
-        "session:test", ModelInputScopeKind.ROOT, None
-    )
+    root = ProviderInputContinuityScope("session:test", ModelInputScopeKind.ROOT, None)
     child = ProviderInputContinuityScope(
         "session:test", ModelInputScopeKind.SUBAGENT_TASK, "task:test"
     )
@@ -391,8 +390,7 @@ def test_chat_observed_known_reasoning_is_retained_despite_legacy_policy() -> No
 def test_chat_reasoning_registry_is_closed_and_provider_neutral() -> None:
     profile = _chat_profile()
     assert tuple(
-        (item.field_name, item.accumulation_mode)
-        for item in profile.chat_replay_fields
+        (item.field_name, item.accumulation_mode) for item in profile.chat_replay_fields
     ) == (
         ("reasoning_content", ProviderChatFieldAccumulationMode.TEXT_CONCAT),
         ("reasoning", ProviderChatFieldAccumulationMode.TEXT_CONCAT),
@@ -477,15 +475,14 @@ def test_chat_opaque_replay_item_limit_fails_before_terminal(
         builder=ProviderLiveItemBuilder(), provider_profile=_chat_profile()
     )
     for index in range(1_000):
-        assert accumulator.apply(
-            _chat_chunk({"reasoning_details": [{"ordinal": index}]})
-        ) == []
+        assert (
+            accumulator.apply(_chat_chunk({"reasoning_details": [{"ordinal": index}]}))
+            == []
+        )
     assert len(accumulator._array_field_items["reasoning_details"]) == 1_000
 
     with pytest.raises(LLMTransportContractError) as captured:
-        accumulator.apply(
-            _chat_chunk({"reasoning_details": [{"ordinal": 1_000}]})
-        )
+        accumulator.apply(_chat_chunk({"reasoning_details": [{"ordinal": 1_000}]}))
     assert captured.value.reason_code == "transport_source_item_limit_exceeded"
     assert accumulator.terminal is None
     assert accumulator._array_field_items == {}
@@ -539,9 +536,7 @@ def test_chat_replay_byte_overflow_is_typed_and_not_retried(
             self.calls += 1
 
             async def chunks():
-                yield _chat_chunk(
-                    {"reasoning_details": [{"opaque": "x" * 128}]}
-                )
+                yield _chat_chunk({"reasoning_details": [{"opaque": "x" * 128}]})
 
             return chunks()
 
@@ -633,7 +628,7 @@ def test_chat_conflicting_array_final_and_incomplete_never_complete() -> None:
                     {
                         "index": 0,
                         "id": "call:test",
-                        "function": {"name": "virtual", "arguments": "{\"x\":"},
+                        "function": {"name": "virtual", "arguments": '{"x":'},
                     }
                 ]
             }
@@ -643,7 +638,9 @@ def test_chat_conflicting_array_final_and_incomplete_never_complete() -> None:
     terminal = incomplete.finish()
     assert isinstance(terminal, ProviderAdapterTerminal)
     assert terminal.terminal_kind is ProviderAdapterTerminalKind.OUTPUT_INCOMPLETE
-    assert terminal.incomplete_reason is ProviderOutputIncompleteReason.OUTPUT_TOKEN_LIMIT
+    assert (
+        terminal.incomplete_reason is ProviderOutputIncompleteReason.OUTPUT_TOKEN_LIMIT
+    )
     assert terminal.completed_replay_payload is None
 
 
@@ -738,12 +735,15 @@ def test_chat_structured_reasoning_tool_response_and_terminal_echo_round_trip() 
             "tool_calls",
         )
     )
-    assert accumulator.apply(
-        _chat_chunk(
-            {"content": "", "reasoning": None, "reasoning_details": []},
-            "tool_calls",
+    assert (
+        accumulator.apply(
+            _chat_chunk(
+                {"content": "", "reasoning": None, "reasoning_details": []},
+                "tool_calls",
+            )
         )
-    ) == []
+        == []
+    )
     terminal = accumulator.finish()
     assert isinstance(terminal, ProviderAdapterTerminal)
     assert terminal.completed_replay_payload is not None
@@ -938,22 +938,25 @@ def test_chat_tool_terminal_usage_echo_does_not_duplicate_tool_semantics() -> No
         )
     )
     event_count = len(events)
-    assert accumulator.apply(
-        {
-            "usage": {
-                "prompt_tokens": 100,
-                "completion_tokens": 5,
-                "total_tokens": 105,
-            },
-            "choices": [
-                {
-                    "index": 0,
-                    "delta": {"role": "assistant", "content": ""},
-                    "finish_reason": "tool_calls",
-                }
-            ],
-        }
-    ) == []
+    assert (
+        accumulator.apply(
+            {
+                "usage": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 5,
+                    "total_tokens": 105,
+                },
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"role": "assistant", "content": ""},
+                        "finish_reason": "tool_calls",
+                    }
+                ],
+            }
+        )
+        == []
+    )
     assert len(events) == event_count
     terminal = accumulator.finish()
     assert isinstance(terminal, ProviderAdapterTerminal)
@@ -1108,9 +1111,12 @@ def test_chat_replay_field_absence_empty_and_final_contract_are_distinct() -> No
     )
     terminal = present_empty.finish()
     assert isinstance(terminal, ProviderAdapterTerminal)
-    assert thaw_json(terminal.completed_replay_payload.ordered_items[0])[  # type: ignore[union-attr]
-        "reasoning_content"
-    ] == ""
+    assert (
+        thaw_json(terminal.completed_replay_payload.ordered_items[0])[  # type: ignore[union-attr]
+            "reasoning_content"
+        ]
+        == ""
+    )
 
     mismatch = ChatCompletionAccumulator(
         builder=ProviderLiveItemBuilder(), provider_profile=profile
@@ -1370,9 +1376,7 @@ def test_responses_empty_terminal_reconstructs_exact_completed_tool_call() -> No
                     "id": "message:unfinished",
                     "status": "completed",
                     "role": "assistant",
-                    "content": [
-                        {"type": "output_text", "text": "unfinished"}
-                    ],
+                    "content": [{"type": "output_text", "text": "unfinished"}],
                 },
             },
         ),
@@ -1420,9 +1424,7 @@ def test_responses_terminal_snapshot_exact_joins_streamed_done_items() -> None:
                 [
                     {
                         **streamed,
-                        "content": [
-                            {"type": "output_text", "text": "terminal"}
-                        ],
+                        "content": [{"type": "output_text", "text": "terminal"}],
                     }
                 ]
             )
@@ -1660,7 +1662,7 @@ def test_responses_completed_replay_preserves_all_allowed_items_in_order() -> No
             "status": "completed",
             "call_id": "call:2",
             "name": "virtual_two",
-            "arguments": "{\"ok\":true}",
+            "arguments": '{"ok":true}',
         },
     ]
     accumulator = ResponsesCompletionAccumulator(builder=ProviderLiveItemBuilder())
@@ -1788,33 +1790,39 @@ def test_responses_stream_projection_exactly_joins_its_output_index() -> None:
 
 def test_responses_reasoning_summary_and_content_are_separate_exact_streams() -> None:
     accumulator = ResponsesCompletionAccumulator(builder=ProviderLiveItemBuilder())
-    accumulator.apply(
+    events = accumulator.apply(
         {
             "type": "response.reasoning_summary_text.delta",
             "output_index": 0,
             "delta": "summary",
         }
     )
-    accumulator.apply(
-        {
-            "type": "response.reasoning_summary_text.done",
-            "output_index": 0,
-            "text": "summary",
-        }
+    events.extend(
+        accumulator.apply(
+            {
+                "type": "response.reasoning_summary_text.done",
+                "output_index": 0,
+                "text": "summary",
+            }
+        )
     )
-    accumulator.apply(
-        {
-            "type": "response.reasoning_text.delta",
-            "output_index": 0,
-            "delta": "reasoning",
-        }
+    events.extend(
+        accumulator.apply(
+            {
+                "type": "response.reasoning_text.delta",
+                "output_index": 0,
+                "delta": "reasoning",
+            }
+        )
     )
-    accumulator.apply(
-        {
-            "type": "response.reasoning_text.done",
-            "output_index": 0,
-            "text": "reasoning",
-        }
+    events.extend(
+        accumulator.apply(
+            {
+                "type": "response.reasoning_text.done",
+                "output_index": 0,
+                "text": "reasoning",
+            }
+        )
     )
     accumulator.apply(
         _completed_response(
@@ -1829,6 +1837,11 @@ def test_responses_reasoning_summary_and_content_are_separate_exact_streams() ->
             ]
         )
     )
+    assert [
+        item.presentation_kind
+        for item in events
+        if isinstance(item, ThinkingStartPayload)
+    ] == [ReasoningPresentationKind.SUMMARY, ReasoningPresentationKind.FULL]
     assert isinstance(accumulator.finish(), ProviderAdapterTerminal)
 
 
@@ -1855,9 +1868,7 @@ def test_responses_exact_reasoning_text_to_summary_alias_is_provider_neutral() -
                     "type": "reasoning",
                     "id": "reasoning:alias",
                     "status": "completed",
-                    "summary": [
-                        {"type": "summary_text", "text": "public summary"}
-                    ],
+                    "summary": [{"type": "summary_text", "text": "public summary"}],
                 }
             ]
         )
@@ -1900,9 +1911,7 @@ def test_responses_reasoning_text_to_summary_alias_must_be_exact() -> None:
                         "type": "reasoning",
                         "id": "reasoning:alias-conflict",
                         "status": "completed",
-                        "summary": [
-                            {"type": "summary_text", "text": "different"}
-                        ],
+                        "summary": [{"type": "summary_text", "text": "different"}],
                     }
                 ]
             )
@@ -1972,9 +1981,7 @@ def test_responses_completed_event_rejects_noncompleted_response_status() -> Non
                         {
                             "type": "message",
                             "role": "assistant",
-                            "content": [
-                                {"type": "output_text", "text": "partial"}
-                            ],
+                            "content": [{"type": "output_text", "text": "partial"}],
                         }
                     ],
                 },
@@ -2169,8 +2176,7 @@ def test_sdk_decoded_json_shape_is_bounded_before_freeze(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "pulsara_agent.llm.adapters.openai.events."
-        "MAX_PROVIDER_DECODED_JSON_DEPTH",
+        "pulsara_agent.llm.adapters.openai.events.MAX_PROVIDER_DECODED_JSON_DEPTH",
         2,
     )
     with pytest.raises(LLMTransportContractError):
@@ -2248,8 +2254,7 @@ def test_responses_rejects_output_order_canonical_blocks_cannot_round_trip() -> 
     ) as captured:
         accumulator.apply(_completed_response(output))
     assert (
-        captured.value.reason_code
-        == "transport_responses_output_order_unrepresentable"
+        captured.value.reason_code == "transport_responses_output_order_unrepresentable"
     )
 
 
@@ -2348,11 +2353,7 @@ def test_auxiliary_valid_partial_json_is_not_parsed_after_incomplete() -> None:
                 }
             ]
         },
-        {
-            "choices": [
-                {"index": 0, "delta": {}, "finish_reason": "length"}
-            ]
-        },
+        {"choices": [{"index": 0, "delta": {}, "finish_reason": "length"}]},
     ]
     with pytest.raises(ProviderModelOutputIncomplete) as captured:
         asyncio.run(auxiliary.complete_prepared_json(prepared))
@@ -2425,9 +2426,7 @@ def _local_response(
     return result
 
 
-async def _consume_provider_shaped_sse(
-    *, api: str, base_url: str
-) -> list[object]:
+async def _consume_provider_shaped_sse(*, api: str, base_url: str) -> list[object]:
     timeout = OpenAITransportTimeoutPolicy(1, 1, 1, 1, None)
     profile = ProviderProfile(
         id="test:provider-shaped-sse",
@@ -2535,9 +2534,7 @@ def test_provider_shaped_local_sse_reports_incomplete_not_completed(
         server.shutdown()
         server.server_close()
         thread.join(2)
-    terminal = next(
-        item for item in items if isinstance(item, ProviderAdapterTerminal)
-    )
+    terminal = next(item for item in items if isinstance(item, ProviderAdapterTerminal))
     assert terminal.terminal_kind is ProviderAdapterTerminalKind.OUTPUT_INCOMPLETE
     assert terminal.completed_replay_payload is None
 
@@ -2569,9 +2566,7 @@ def test_provider_shaped_responses_completed_uses_wire_present_sdk_fields() -> N
             "id": "message:complete",
             "status": "completed",
             "role": "assistant",
-            "content": [
-                {"type": "output_text", "text": "complete", "annotations": []}
-            ],
+            "content": [{"type": "output_text", "text": "complete", "annotations": []}],
         }
     ]
     frames = (
@@ -2599,9 +2594,7 @@ def test_provider_shaped_responses_completed_uses_wire_present_sdk_fields() -> N
         server.shutdown()
         server.server_close()
         thread.join(2)
-    terminal = next(
-        item for item in items if isinstance(item, ProviderAdapterTerminal)
-    )
+    terminal = next(item for item in items if isinstance(item, ProviderAdapterTerminal))
     assert terminal.terminal_kind is ProviderAdapterTerminalKind.COMPLETED
     assert terminal.completed_replay_payload is not None
 
@@ -2613,9 +2606,7 @@ def test_provider_shaped_responses_event_after_terminal_fails_closed() -> None:
             "id": "message:complete",
             "status": "completed",
             "role": "assistant",
-            "content": [
-                {"type": "output_text", "text": "complete", "annotations": []}
-            ],
+            "content": [{"type": "output_text", "text": "complete", "annotations": []}],
         }
     ]
     frames = (

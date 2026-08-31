@@ -22,6 +22,12 @@ from pulsara_agent.conversation_kernel.vocabulary import (
     CommittedEventType,
 )
 from pulsara_agent.conversation_kernel.limits import STAGE2_LIMITS
+from pulsara_agent.llm.provider_replay import (
+    ProviderAssistantReplayCodecKind,
+    ProviderVisibleReasoningBlock,
+    project_provider_visible_reasoning,
+)
+from pulsara_agent.ports.live_agent_event import ReasoningPresentationKind
 from pulsara_agent.primitives.context import (
     FrozenJsonObjectFact,
     canonical_json_bytes,
@@ -47,6 +53,7 @@ MAXIMUM_OBSERVATION_BYTES = STAGE2_LIMITS.committed_observation_hard_bytes
 MAXIMUM_SNAPSHOT_BYTES = STAGE2_LIMITS.snapshot_hard_bytes
 MAXIMUM_HISTORY_PAGE_BYTES = STAGE2_LIMITS.history_page_hard_bytes
 MAXIMUM_TOOL_ARGUMENT_PREVIEW_BYTES = STAGE2_LIMITS.tool_argument_display_hard_bytes
+MAXIMUM_REASONING_INLINE_BYTES = STAGE2_LIMITS.inline_content_hard_bytes
 
 
 class CanonicalProtocolResourceExhausted(RuntimeError):
@@ -422,8 +429,54 @@ class CanonicalProtocolReader:
                     (session_id, entry_id),
                 ).fetchone()
             if row is None:
+                if block_id:
+                    derived = self._resolve_reasoning_content(
+                        connection,
+                        session_id=session_id,
+                        entry_id=entry_id,
+                        block_id=block_id,
+                    )
+                    if derived is not None:
+                        return derived
                 raise KeyError(entry_id if not block_id else block_id)
             return dict(row)
+
+    def _resolve_reasoning_content(
+        self,
+        connection: Any,
+        *,
+        session_id: str,
+        entry_id: str,
+        block_id: str,
+    ) -> Mapping[str, object] | None:
+        prefix = f"{entry_id}:provider-reasoning:"
+        if not block_id.startswith(prefix):
+            return None
+        raw_ordinal = block_id.removeprefix(prefix)
+        if not raw_ordinal.isdigit() or str(int(raw_ordinal)) != raw_ordinal:
+            return None
+        entry = connection.execute(
+            """
+            SELECT * FROM pulsara_v3.transcript_entries
+            WHERE session_id = %s AND id = %s
+            """,
+            (session_id, entry_id),
+        ).fetchone()
+        if entry is None:
+            return None
+        reasoning = self._reasoning_blocks(connection, entry)
+        ordinal = int(raw_ordinal)
+        if ordinal >= len(reasoning):
+            return None
+        content = reasoning[ordinal].text.encode("utf-8")
+        return {
+            "inline_content": content,
+            "blob_id": None,
+            "content_digest": "sha256:" + sha256(content).hexdigest(),
+            "content_size": len(content),
+            "content_media_type": "text/plain",
+            "content_codec": "utf-8",
+        }
 
     def _connection(self, deadline_monotonic: float):
         return self._provider.connection(
@@ -476,7 +529,20 @@ class CanonicalProtocolReader:
             ),
             content=_content_reference(row),
             accepted_at_utc=_utc(row["accepted_at"]),
+            source_subagent_result_id=str(row["source_subagent_result_id"] or ""),
         )
+        for ordinal, reasoning in enumerate(self._reasoning_blocks(connection, row)):
+            content = reasoning.text.encode("utf-8")
+            target = result.reasoning_blocks.add(
+                block_id=f"{entry_id}:provider-reasoning:{ordinal}",
+                ordinal=ordinal,
+                presentation_kind=(
+                    wire.REASONING_PRESENTATION_SUMMARY
+                    if reasoning.presentation_kind is ReasoningPresentationKind.SUMMARY
+                    else wire.REASONING_PRESENTATION_FULL
+                ),
+            )
+            target.content.CopyFrom(_reasoning_content_reference(content))
         for block in blocks:
             arguments = (
                 canonical_json_bytes(dict(block["tool_arguments"]))
@@ -489,9 +555,7 @@ class CanonicalProtocolReader:
                 block_kind=str(block["block_kind"]),
                 tool_call_id=str(block["tool_call_id"] or ""),
                 tool_name=str(block["tool_name"] or ""),
-                tool_arguments_preview=arguments[
-                    :MAXIMUM_TOOL_ARGUMENT_PREVIEW_BYTES
-                ],
+                tool_arguments_preview=arguments[:MAXIMUM_TOOL_ARGUMENT_PREVIEW_BYTES],
                 tool_arguments_truncated=(
                     len(arguments) > MAXIMUM_TOOL_ARGUMENT_PREVIEW_BYTES
                 ),
@@ -503,6 +567,43 @@ class CanonicalProtocolReader:
             if block["block_kind"] in ("TEXT", "DATA"):
                 item.content.CopyFrom(_content_reference(block))
         return result
+
+    @staticmethod
+    def _reasoning_blocks(
+        connection: Any,
+        entry: Mapping[str, object],
+    ) -> tuple[ProviderVisibleReasoningBlock, ...]:
+        entry_kind = str(entry["entry_kind"])
+        if entry_kind not in {"ASSISTANT_MESSAGE", "ASSISTANT_TOOL_REQUEST"}:
+            return ()
+        disposition = str(entry.get("provider_replay_disposition") or "")
+        replay_id = entry.get("provider_replay_fragment_id")
+        if disposition == "PUBLIC_SEMANTIC_ONLY":
+            if replay_id is not None:
+                raise RuntimeError("public-only assistant has a replay pointer")
+            return ()
+        if disposition != "NATIVE_REPLAY" or replay_id is None:
+            raise RuntimeError("assistant provider replay union is invalid")
+        row = connection.execute(
+            """
+            SELECT codec_kind, payload_bytes, payload_digest, payload_size, item_count
+            FROM pulsara_v3.provider_assistant_replay_fragments
+            WHERE session_id = %s AND assistant_entry_id = %s AND id = %s
+            """,
+            (entry["session_id"], entry["id"], replay_id),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("assistant provider replay row is missing")
+        try:
+            return project_provider_visible_reasoning(
+                codec_kind=ProviderAssistantReplayCodecKind(str(row["codec_kind"])),
+                payload_bytes=bytes(row["payload_bytes"]),
+                expected_payload_digest=str(row["payload_digest"]),
+                expected_payload_size=int(row["payload_size"]),
+                expected_item_count=int(row["item_count"]),
+            )
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("assistant provider replay body is corrupt") from exc
 
     def _control(
         self,
@@ -802,9 +903,7 @@ def _permission_projection(row: Mapping[str, object]):
         overlay=str(row["permission_overlay"]),
         plan_context_ordinal=int(row["permission_plan_context_ordinal"]),
         plan_workflow_id=str(row["permission_plan_workflow_id"] or ""),
-        plan_workflow_revision=int(
-            row["permission_plan_revision_at_admission"] or 0
-        ),
+        plan_workflow_revision=int(row["permission_plan_revision_at_admission"] or 0),
         inherited_from_turn_id=str(row["permission_inherited_from_turn_id"] or ""),
         contract_id=str(row["permission_contract_id"]),
         contract_fingerprint=str(row["permission_contract_fingerprint"]),
@@ -872,6 +971,18 @@ def _content_reference(row: Mapping[str, object]) -> wire.CanonicalContentRefere
     elif inline is not None or blob_id is None:
         raise RuntimeError("canonical blob content edge is corrupt")
     return result
+
+
+def _reasoning_content_reference(content: bytes) -> wire.CanonicalContentReference:
+    inline = len(content) <= MAXIMUM_REASONING_INLINE_BYTES
+    return wire.CanonicalContentReference(
+        kind=wire.INLINE if inline else wire.CANONICAL_BLOB,
+        inline_content=content if inline else b"",
+        digest="sha256:" + sha256(content).hexdigest(),
+        size=len(content),
+        media_type="text/plain",
+        codec="utf-8",
+    )
 
 
 def _event_subject(event: Mapping[str, object]) -> tuple[str, str]:

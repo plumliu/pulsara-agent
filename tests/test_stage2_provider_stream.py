@@ -10,14 +10,19 @@ from pulsara_agent.llm.normalized_transport import (
 )
 from pulsara_agent.llm.result import TransportUsageReport
 from pulsara_agent.ports.live_agent_event import (
+    ReasoningPresentationKind,
     TextDeltaPayload,
     TextEndPayload,
     TextStartPayload,
+    ThinkingEndPayload,
+    ThinkingStartPayload,
     ToolCallDeltaPayload,
     ToolCallEndPayload,
     ToolCallStartPayload,
     live_digest,
 )
+from pulsara_agent.terminal_protocol.generated_v3 import terminal_kernel_v3_pb2 as wire
+from pulsara_agent.terminal_protocol.v3_gateway import _live_payload_to_wire
 from pulsara_agent.ports.provider_stream import (
     ProviderAdapterTerminal,
     ProviderAdapterTerminalKind,
@@ -72,6 +77,29 @@ def test_stage2_provider_stream_uses_formal_live_payloads_without_adoption() -> 
     assert not hasattr(execution, "require_adoptable")
     assert not hasattr(execution, "acknowledge_adopted")
     assert completion.status is ProviderPhysicalCompletionStatus.COMPLETED
+
+
+def test_provider_live_reasoning_preserves_summary_presentation_kind() -> None:
+    builder = ProviderLiveItemBuilder()
+
+    events = builder.thinking_delta(
+        "provider summary",
+        presentation_kind=ReasoningPresentationKind.SUMMARY,
+    )
+    events.extend(
+        builder.thinking_end(
+            final_text="provider summary",
+            presentation_kind=ReasoningPresentationKind.SUMMARY,
+        )
+    )
+
+    start = next(item for item in events if isinstance(item, ThinkingStartPayload))
+    assert start.presentation_kind is ReasoningPresentationKind.SUMMARY
+    assert any(isinstance(item, ThinkingEndPayload) for item in events)
+    encoded = _live_payload_to_wire(start)
+    assert encoded.thinking_start.presentation_kind == (
+        wire.REASONING_PRESENTATION_SUMMARY
+    )
 
 
 def test_stage2_provider_stream_terminal_view_must_match_delta_prefix() -> None:

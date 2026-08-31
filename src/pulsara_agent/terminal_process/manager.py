@@ -366,6 +366,19 @@ class ProcessRegistry:
             attempt = self._decision_attempts.get(attempt_id)
             return None if attempt is None else attempt.state.value
 
+    def abort_foreground_decision(self, attempt_id: str) -> bool:
+        """Abort one exact Terminal invocation still deciding foreground yield."""
+
+        with self._lock:
+            attempt = self._decision_attempts.get(attempt_id)
+            if attempt is None or attempt.state in {
+                TerminalForegroundDecisionState.RESULT_READY,
+                TerminalForegroundDecisionState.SETTLED,
+            }:
+                return False
+        self._abort_foreground_decision(attempt_id)
+        return True
+
     def _abort_foreground_decision(self, attempt_id: str) -> None:
         state: _ProcessState | None = None
         with self._launch_condition:

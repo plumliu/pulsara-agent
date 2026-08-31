@@ -616,9 +616,7 @@ def test_round9_2_user_source_binds_root_alias_before_no_follow(
                     "PreToolUse": [
                         {
                             "matcher": "read_file",
-                            "hooks": [
-                                {"type": "command", "command": "printf alias"}
-                            ],
+                            "hooks": [{"type": "command", "command": "printf alias"}],
                         }
                     ]
                 }
@@ -1172,9 +1170,7 @@ print('visible stderr ' + secret, file=sys.stderr)
             tmp_path,
             monotonic() + 10,
         )
-        executor = HookCommandExecutor(
-            api_key_boundary=ProcessApiKeyBoundary()
-        )
+        executor = HookCommandExecutor(api_key_boundary=ProcessApiKeyBoundary())
         execution = await executor.execute(request)
         assert execution.failure_code is None and execution.exit_code == 0
         parsed = parse_handler_output(execution)
@@ -1577,10 +1573,10 @@ def test_round9_2_queued_prompt_context_stays_candidate_bound_until_full(
     scrub = HookSecretScrubSet.capture()
     active = owner.prepare_sync(
         scope=scope,
-        causal_ref=DirectPromptRef(
-            "command:A", "turn:A", "entry:A", "revision:A"
+        causal_ref=DirectPromptRef("command:A", "turn:A", "entry:A", "revision:A"),
+        entries=(
+            HookContextEntry(definition, 0, 1, "context-for-active-turn-A", scrub),
         ),
-        entries=(HookContextEntry(definition, 0, 1, "context-for-active-turn-A", scrub),),
     )
     queued = owner.prepare_sync(
         scope=scope,
@@ -1591,7 +1587,9 @@ def test_round9_2_queued_prompt_context_stays_candidate_bound_until_full(
             "entry:B",
             "revision:B",
         ),
-        entries=(HookContextEntry(definition, 0, 2, "context-for-queued-turn-B", scrub),),
+        entries=(
+            HookContextEntry(definition, 0, 2, "context-for-queued-turn-B", scrub),
+        ),
     )
     assert active is not None and queued is not None
     active.commit()
@@ -1624,8 +1622,7 @@ def test_round9_2_api_key_rotation_is_rejected_at_exact_spawn_sink(
     rotated_secret = "rotated-key-at-final-sink"
     marker = tmp_path / "spawned.txt"
     program = (
-        "from pathlib import Path;"
-        f"Path({str(marker)!r}).write_text({rotated_secret!r})"
+        f"from pathlib import Path;Path({str(marker)!r}).write_text({rotated_secret!r})"
     )
     command = f"{shlex.quote(sys.executable)} -c {shlex.quote(program)}"
     definition = _definition(
@@ -1654,9 +1651,7 @@ def test_round9_2_api_key_rotation_is_rejected_at_exact_spawn_sink(
     monkeypatch.setattr(executor_module, "_spawn_environment", rotate_after_environment)
 
     async def exercise() -> None:
-        executor = HookCommandExecutor(
-            api_key_boundary=ProcessApiKeyBoundary()
-        )
+        executor = HookCommandExecutor(api_key_boundary=ProcessApiKeyBoundary())
         outcome = await executor.execute(request)
         assert outcome.failure_code == "API_KEY_VALUE_PRESENT"
         assert outcome.exit_code is None
@@ -1835,7 +1830,9 @@ def test_round9_2_session_start_boundary_supersedes_resume_and_inherits_deadline
     asyncio.run(exercise())
 
 
-def test_round9_2_post_adoption_status_revalidation_is_bounded_and_control_linearized() -> None:
+def test_round9_2_post_adoption_status_revalidation_is_bounded_and_control_linearized() -> (
+    None
+):
     from pulsara_agent.conversation_kernel.compaction.contracts import (
         CompactionConfirmationKind,
         CompactionDisposition,
@@ -1956,9 +1953,7 @@ def test_round9_2_post_adoption_status_revalidation_is_bounded_and_control_linea
         return result, order, dry, owner, continuity
 
     async def exercise() -> None:
-        historical, order, dry, owner, continuity = await invoke(
-            TurnStatus.COMPLETED
-        )
+        historical, order, dry, owner, continuity = await invoke(TurnStatus.COMPLETED)
         assert order == ["adoption", "post", "status"]
         assert historical.outcome.public_code == "HISTORICAL_COMPACTION_WINNER"
         assert historical.active_continuation_blocked_reason is None
@@ -1972,10 +1967,7 @@ def test_round9_2_post_adoption_status_revalidation_is_bounded_and_control_linea
             assert carrier.outcome.disposition is CompactionDisposition.COMPACTED
             assert carrier.outcome.snapshot_id == "snapshot:1"
             assert carrier.outcome.revision_ordinal == 3
-            assert (
-                carrier.outcome.public_code
-                == "COMPACTED_CONTINUATION_UNAVAILABLE"
-            )
+            assert carrier.outcome.public_code == "COMPACTED_CONTINUATION_UNAVAILABLE"
 
             class _OuterOwner:
                 def __init__(self) -> None:
@@ -2007,7 +1999,7 @@ def test_round9_2_post_adoption_status_revalidation_is_bounded_and_control_linea
                 raise carrier
 
             outer._resolved_workspace_id = workspace_id
-            outer._execute_active_compaction_fenced = fail_after_adoption
+            outer._execute_compaction_fenced = fail_after_adoption
             manual = SimpleNamespace(
                 command_id="command:1",
                 scope_kind=ModelInputScopeKind.ROOT,

@@ -8,6 +8,7 @@ the adapter boundary from inventing a second per-delta vocabulary.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from enum import StrEnum
 from hashlib import sha256
 import json
 from typing import Mapping, TypeAlias, TypeGuard
@@ -34,6 +35,13 @@ def _validate_frozen_text(value: str, utf8_bytes: int, digest: str) -> None:
     encoded = value.encode("utf-8")
     if utf8_bytes != len(encoded) or digest != live_digest(value):
         raise ValueError("live terminal payload integrity mismatch")
+
+
+class ReasoningPresentationKind(StrEnum):
+    """What the provider actually exposed for one reasoning block."""
+
+    FULL = "FULL"
+    SUMMARY = "SUMMARY"
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,9 +78,12 @@ class TextEndPayload:
 @dataclass(frozen=True, slots=True)
 class ThinkingStartPayload:
     block_identity: str
+    presentation_kind: ReasoningPresentationKind = ReasoningPresentationKind.FULL
 
     def __post_init__(self) -> None:
         _require_identity(self.block_identity)
+        if not isinstance(self.presentation_kind, ReasoningPresentationKind):
+            raise ValueError("thinking presentation kind is invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -364,9 +375,7 @@ class TodoSnapshotUpdatedPayload:
             item.ordinal for item in self.ordered_items
         ) != tuple(range(len(self.ordered_items))):
             raise ValueError("TODO live item ordering is invalid")
-        if len({item.text for item in self.ordered_items}) != len(
-            self.ordered_items
-        ):
+        if len({item.text for item in self.ordered_items}) != len(self.ordered_items):
             raise ValueError("TODO live snapshot contains duplicate text")
         actual = {
             status: sum(item.status == status for item in self.ordered_items)
@@ -471,6 +480,7 @@ __all__ = [
     "InteractionReplacedPayload",
     "LivePayload",
     "ProviderStreamPayload",
+    "ReasoningPresentationKind",
     "SubagentProgressPayload",
     "TodoLiveItemProjection",
     "TodoSnapshotUpdatedPayload",

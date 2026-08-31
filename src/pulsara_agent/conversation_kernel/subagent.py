@@ -66,6 +66,9 @@ from pulsara_agent.conversation_kernel.runner import (
     ConversationKernelRunner,
     KernelRunResult,
 )
+from pulsara_agent.conversation_kernel.turn_admission import (
+    SubagentTurnAdmissionPostCommitError,
+)
 from pulsara_agent.conversation_kernel.tool_contracts import (
     KernelToolInvocationContext,
     KernelToolResult,
@@ -927,11 +930,11 @@ class KernelSubagentManager:
                 if self._closed:
                     return
                 # Capacity belongs to physical child execution, not the small
-                # post-terminal dependency/TODO bookkeeping tail.  Every
-                # terminal path changes ``status`` before it asks the scheduler
-                # to fill the slot, so a canonical terminal child no longer
-                # blocks the next accepted task merely because its coroutine
-                # has not returned from final settlement yet.
+                # post-terminal bookkeeping tail.  Every terminal path changes
+                # ``status`` and retires its TODO owner before it asks the
+                # scheduler to fill the slot, so a canonical terminal child no
+                # longer blocks the next accepted task merely because its
+                # coroutine has not returned from final settlement yet.
                 active = sum(item.status == "ACTIVE" for item in self._tasks.values())
                 reserved = len(self._launch_permits)
                 available = MAXIMUM_LIVE_SUBAGENTS - active - reserved
@@ -1152,6 +1155,10 @@ class KernelSubagentManager:
                         )
                     raise
                 except BaseException as exc:
+                    admission_error = exc
+                    if isinstance(exc, SubagentTurnAdmissionPostCommitError):
+                        admission_full = True
+                        admission_error = exc.activation_error
                     if permit.cancellation_reason is not None:
                         if admission_full and not live_installed:
                             explicit = permit.cancellation_reason == "USER_CANCELLED"
@@ -1172,9 +1179,11 @@ class KernelSubagentManager:
                         continue
                     code = (
                         "DEPENDENCY_RESULT_INVARIANT"
-                        if isinstance(exc, (TypeError, ValueError))
-                        and "dependency" in str(exc).lower()
-                        else f"CHILD_START_{type(exc).__name__.upper()}"
+                        if isinstance(admission_error, (TypeError, ValueError))
+                        and "dependency" in str(admission_error).lower()
+                        else (
+                            f"CHILD_START_{type(admission_error).__name__.upper()}"
+                        )
                     )
                     try:
                         if admission_full:
@@ -2591,6 +2600,10 @@ class KernelSubagentManager:
                 await self._retire_all_canonical_terminal_dormant_tasks()
             async with self._state_changed:
                 self._notify_state_changed_locked()
+            # TODO child ownership is the same four-slot physical resource as
+            # live execution.  Release it before recursively admitting work
+            # from the newly opened dependency frontier.
+            await self._close_todo_child_run(task_id)
             if schedule_after:
                 await self._start_available_tasks()
 

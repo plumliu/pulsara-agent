@@ -985,7 +985,9 @@ class RuntimeClockSnapshot:
 | reader item | provider-neutral lowering |
 | --- | --- |
 | CONTEXT_SNAPSHOT | user message，固定`[CONTEXT_SNAPSHOT]`边界 |
-| USER | ordinary user message |
+| USER / HUMAN_MESSAGE / HUMAN_STEER | ordinary user message，正文保持原文 |
+| USER / SUBAGENT_OBJECTIVE | child 的 user-role 任务指令，正文保持原文 |
+| USER / SUBAGENT_RESULT | user-role typed carrier；由唯一 lowering owner 包装为 `pulsara_subagent_result`，明确它是已接纳的 delegated work product 而非真人新指令 |
 | TERMINAL_OBSERVATION | user-role observational carrier，固定untrusted边界 |
 | ASSISTANT | assistant message |
 | ASSISTANT_TOOL_REQUEST | assistant turn + ordered tool calls |
@@ -993,7 +995,7 @@ class RuntimeClockSnapshot:
 | TOOL_RESULT_CLOSURE | matching tool result message，body不可省略 |
 | LATE_TOOL_OUTCOME | user-role typed runtime observation，保持真实sequence |
 
-`LLMMessage.SYSTEM`仍不得出现在ordered messages；所有privileged source通过frozen compiled carrier的`system_prompt`表达，并由adapter最后一次性构造`LLMContext`。
+`LLMMessage.SYSTEM`仍不得出现在ordered messages；所有privileged source通过frozen compiled carrier的`system_prompt`表达，并由adapter最后一次性构造`LLMContext`。`SUBAGENT_RESULT`不得在repository、Host、terminal/web bridge或provider adapter中拼接prompt，也不得另开provider调用；canonical acceptance只保存同一public fact的exact acceptance content与typed source，唯一lowering owner负责产生provider-visible信封。
 
 assistant正文必须只来自ordered semantic `TEXT | DATA` blocks。`transcript_entries.content`中的parent block manifest只是storage/integrity carrier，永远不得作为provider-visible assistant fallback：
 

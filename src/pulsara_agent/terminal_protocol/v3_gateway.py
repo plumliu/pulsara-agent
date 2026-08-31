@@ -27,6 +27,7 @@ from pulsara_agent.ports.live_agent_event import (
     InteractionClosedPayload,
     InteractionOpenedPayload,
     InteractionReplacedPayload,
+    ReasoningPresentationKind,
     SubagentProgressPayload,
     TerminalMonitorClosedPayload,
     TerminalMonitorObservationPayload,
@@ -77,7 +78,7 @@ from pulsara_agent.terminal_protocol.generated_v3 import terminal_kernel_v3_pb2 
 PROTOCOL_MAJOR = 3
 PROTOCOL_MINOR = 0
 PROTOCOL_SCHEMA_FINGERPRINT = (
-    "sha256:3d1e45b0075c86f39704ad021df678632172b2b8b58dc0f9dbcf9c138945debb"
+    "sha256:79ef15e7de869ba293b16ab3189b64fb107e67f6d45e81bf05541d4d8e0644ef"
 )
 MAXIMUM_FRAME_BYTES = 8 << 20
 MAXIMUM_OBSERVATION_WAIT_MS = STAGE2_LIMITS.committed_observation_hard_wait_ms
@@ -582,8 +583,13 @@ class TerminalKernelProtocolServer:
         if request.force and request.command_kind != wire.COMPACT_CONTEXT:
             return _error(request.request_id, "COMMAND_FORCE_FIELD_NOT_ALLOWED")
         requested_permission = _permission_from_wire(request.requested_permission_mode)
+        permission_command = request.command_kind in (
+            wire.SUBMIT_PROMPT,
+            wire.ACCEPT_SUBAGENT_RESULT,
+            wire.ENTER_PLAN,
+        )
         if (
-            request.command_kind not in (wire.SUBMIT_PROMPT, wire.ENTER_PLAN)
+            not permission_command
             and request.requested_permission_mode != wire.PERMISSION_MODE_UNSPECIFIED
         ):
             return _error(request.request_id, "PERMISSION_FIELD_NOT_ALLOWED")
@@ -628,14 +634,18 @@ class TerminalKernelProtocolServer:
                 "The active turn was stopped." if stopped else "No active turn exists.",
             )
         elif request.command_kind == wire.ACCEPT_SUBAGENT_RESULT:
+            new_root = not request.target_turn_id
             if (
                 request.text
                 or not request.source_subagent_result_id
+                or (new_root and requested_permission is None)
+                or (not new_root and requested_permission is not None)
             ):
                 return _error(request.request_id, "SUBAGENT_RESULT_REQUEST_INVALID")
             outcome = await state.host_session.accept_subagent_result(
                 command_id=request.command_id,
                 target_turn_id=request.target_turn_id or None,
+                requested_permission_mode=requested_permission,
                 child_result_id=request.source_subagent_result_id,
                 actor_id=state.attachment_id,
             )
@@ -1131,7 +1141,12 @@ def _live_payload_to_wire(payload: object) -> wire.LiveEventPayload:
     if isinstance(payload, ThinkingStartPayload):
         return wire.LiveEventPayload(
             thinking_start=wire.LiveThinkingStartPayload(
-                block_identity=payload.block_identity
+                block_identity=payload.block_identity,
+                presentation_kind=(
+                    wire.REASONING_PRESENTATION_SUMMARY
+                    if payload.presentation_kind is ReasoningPresentationKind.SUMMARY
+                    else wire.REASONING_PRESENTATION_FULL
+                ),
             )
         )
     if isinstance(payload, ThinkingDeltaPayload):

@@ -42,6 +42,21 @@ class TodoRunAdmissionFinalizer(Protocol):
     ) -> None: ...
 
 
+class SubagentTurnAdmissionPostCommitError(RuntimeError):
+    """A child turn committed before its process-local activation failed."""
+
+    def __init__(
+        self,
+        accepted: AcceptedEntry,
+        activation_error: BaseException,
+    ) -> None:
+        super().__init__(
+            "subagent turn admission committed before TODO activation failed"
+        )
+        self.accepted = accepted
+        self.activation_error = activation_error
+
+
 @dataclass(slots=True)
 class _TurnAdmissionSettlementAttempt:
     candidate: PreparedRootTurnAdmission | PreparedSubagentTurnAdmission
@@ -270,7 +285,12 @@ class TurnAdmissionCoordinator:
             await _await_shielded(activation)
         except asyncio.CancelledError:
             raise
-        except BaseException:
+        except BaseException as exc:
+            if isinstance(prepared, PreparedTodoChildRunActivation):
+                # The canonical child turn already exists.  Its manager owns
+                # the joint task/turn terminal winner, so retain that boundary
+                # explicitly instead of terminalizing only the turn here.
+                raise SubagentTurnAdmissionPostCommitError(accepted, exc) from exc
             await self.interrupt_turn(
                 accepted.turn_id,
                 reason="FOREGROUND_EXECUTION_INTERRUPTED",
@@ -374,6 +394,7 @@ async def _await_admission_settlement(
 
 
 __all__ = [
+    "SubagentTurnAdmissionPostCommitError",
     "TodoRunAdmissionFinalizer",
     "TurnAdmissionCoordinator",
     "root_cancellation_terminal_reason",

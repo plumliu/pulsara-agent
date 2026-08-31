@@ -14,6 +14,7 @@ from pulsara_agent.ports.live_agent_event import (
     DataStartPayload,
     LivePayload,
     ProviderStreamPayload,
+    ReasoningPresentationKind,
     TextDeltaPayload,
     TextEndPayload,
     TextStartPayload,
@@ -121,7 +122,10 @@ class ProviderStreamAssembler:
             self._start(item.block_identity, "text", None, LiveEventType.TEXT_START)
         elif isinstance(item, ThinkingStartPayload):
             self._start(
-                item.block_identity, "thinking", None, LiveEventType.THINKING_START
+                item.block_identity,
+                "thinking",
+                item.presentation_kind.value,
+                LiveEventType.THINKING_START,
             )
         elif isinstance(item, DataStartPayload):
             self._start(
@@ -234,7 +238,11 @@ class ProviderStreamAssembler:
         if kind == "text":
             payload = TextStartPayload(block.canonical_block_id)
         elif kind == "thinking":
-            payload = ThinkingStartPayload(block.canonical_block_id)
+            assert name_or_media is not None
+            payload = ThinkingStartPayload(
+                block.canonical_block_id,
+                ReasoningPresentationKind(name_or_media),
+            )
         elif kind == "data":
             assert name_or_media is not None
             payload = DataStartPayload(block.canonical_block_id, name_or_media)

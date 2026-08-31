@@ -77,9 +77,7 @@ from run_round9_2_hook_dogfood import (
 
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
-_TRACE_PATH = Path(
-    "benchmarks/suites/core/v1/round9_3_agent_plugin_product_trace.json"
-)
+_TRACE_PATH = Path("benchmarks/suites/core/v1/round9_3_agent_plugin_product_trace.json")
 _PLUGIN_ID = "pulsara-round9-3-dogfood"
 _SKILL_NAME = "round9-3-plugin"
 _LOCAL_SERVER_ID = "dogfood"
@@ -139,9 +137,7 @@ def _create_plugin_package(root: Path, *, revision: str) -> Path:
     _write_json(
         root / "plugin.json",
         {
-            "$schema": (
-                "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json"
-            ),
+            "$schema": ("https://agent-plugins.org/schemas/1.0.0/plugin.schema.json"),
             "name": _PLUGIN_ID,
             "version": revision,
             "description": f"Round 9.3 activation package {revision}",
@@ -350,9 +346,7 @@ def _service(home: Path, boundary: ProcessApiKeyBoundary) -> PluginManagementSer
     )
 
 
-def _inspect(
-    service: PluginManagementService, workspace: Path
-) -> dict[str, object]:
+def _inspect(service: PluginManagementService, workspace: Path) -> dict[str, object]:
     result = service.inspect_local_plugins(
         InspectLocalPluginsRequest(monotonic() + 60, workspace_root=workspace)
     )
@@ -389,9 +383,7 @@ def _run_service_lifecycle(
     )
     enabled_inspection = _inspect(service, workspace)
     replaced = service.install_local_plugin(
-        InstallLocalPluginRequest(
-            second, PluginScopeKind.USER, deadline, replace=True
-        )
+        InstallLocalPluginRequest(second, PluginScopeKind.USER, deadline, replace=True)
     )
     replaced_inspection = _inspect(service, workspace)
     disabled = service.set_local_plugin_enabled(
@@ -419,8 +411,7 @@ def _run_service_lifecycle(
         and replaced.disposition is PluginInstallDisposition.REPLACED
         and replaced.enabled is False
         and replaced_inspection["instances"][0]["enabled"] is False
-        and disabled.disposition
-        is PluginEnablementDisposition.ALREADY_DISABLED
+        and disabled.disposition is PluginEnablementDisposition.ALREADY_DISABLED
         and removed.disposition is PluginRemovalDisposition.REMOVED
         and gc.disposition is PluginGcDisposition.COMPLETE
     )
@@ -495,9 +486,7 @@ def _run_cli_lifecycle(
         )
     dispositions = {
         item["label"]: (
-            item["json"].get("disposition")
-            if isinstance(item["json"], dict)
-            else None
+            item["json"].get("disposition") if isinstance(item["json"], dict) else None
         )
         for item in records
     }
@@ -534,9 +523,7 @@ def _plugin_hook_snapshot(
         pulsara_home=resolve_pulsara_home(str(home)),
         api_key_boundary=boundary,
     )
-    view = EnabledPluginViewOwner(
-        store=store, api_key_boundary=boundary
-    ).observe(
+    view = EnabledPluginViewOwner(store=store, api_key_boundary=boundary).observe(
         workspace_root=workspace,
         deadline_monotonic=monotonic() + 60,
         cancellation=NeverCancelPluginOperation(),
@@ -565,9 +552,7 @@ def _plugin_hook_snapshot(
         "trust": snapshot.trust.disposition.value,
         "runnable": snapshot.runnable,
         "package_install_id": snapshot.provenance.identity.package_install_id,
-        "declaration_environment": dict(
-            snapshot.provenance.declaration_environment
-        ),
+        "declaration_environment": dict(snapshot.provenance.declaration_environment),
         "definitions": [
             {
                 "event": item.event_type.external_name,
@@ -696,9 +681,9 @@ async def _run_real_provider(
     data_root = Path(current["data_root"])
     package_root_v1 = Path(current["package_root"])
     server_id = framed_plugin_mcp_server_id(_PLUGIN_ID, _LOCAL_SERVER_ID)
-    provider_tool_name = mangle_mcp_tool_names(
-        server_id, ("direct_echo",)
-    )["direct_echo"]
+    provider_tool_name = mangle_mcp_tool_names(server_id, ("direct_echo",))[
+        "direct_echo"
+    ]
 
     prompts = {
         "control": (
@@ -751,9 +736,7 @@ async def _run_real_provider(
     host_module.DirectKernelModelPort = lambda **kwargs: _TracingModel(  # type: ignore[assignment]
         original_model(**kwargs), recorder
     )
-    core = KernelHostCore.production(
-        settings=settings, api_key_boundary=boundary
-    )
+    core = KernelHostCore.production(settings=settings, api_key_boundary=boundary)
     session = None
     pending_failure: Round93RealProviderFailure | None = None
     compaction_internal_failures: list[dict[str, object]] = []
@@ -768,9 +751,7 @@ async def _run_real_provider(
     }
     try:
         session = await core.open_session(
-            HostWorkspaceInput(
-                workspace_kind="project", workspace_root=workspace
-            ),
+            HostWorkspaceInput(workspace_kind="project", workspace_root=workspace),
             system_prompt=(
                 "You are executing a controlled Pulsara Round 9.3 Agent Plugin "
                 "activation check against a real provider. Execute the requested "
@@ -787,7 +768,7 @@ async def _run_real_provider(
         coordinator = session._runner.compaction  # noqa: SLF001
         compaction_coordinator_type = type(coordinator)
         original_compaction_execute = (
-            compaction_coordinator_type._execute_active_compaction_fenced
+            compaction_coordinator_type._execute_compaction_fenced
         )
 
         async def traced_compaction_execute(owner, *args, **kwargs):
@@ -803,7 +784,7 @@ async def _run_real_provider(
                 )
                 raise
 
-        compaction_coordinator_type._execute_active_compaction_fenced = (
+        compaction_coordinator_type._execute_compaction_fenced = (
             traced_compaction_execute
         )
 
@@ -818,15 +799,11 @@ async def _run_real_provider(
             )
         )
         results["mcp"] = _jsonable(
-            await session.run_turn(
-                prompts["mcp"], command_id="command:round9-3:mcp"
-            )
+            await session.run_turn(prompts["mcp"], command_id="command:round9-3:mcp")
         )
 
         epoch_before_reload = _current_epoch(session)
-        reload_same = await session.reload_plugins(
-            deadline_monotonic=monotonic() + 120
-        )
+        reload_same = await session.reload_plugins(deadline_monotonic=monotonic() + 120)
         results["after_reload"] = _jsonable(
             await session.run_turn(
                 prompts["after_reload"],
@@ -847,9 +824,7 @@ async def _run_real_provider(
             ),
             name="round9-3-active-compaction-turn",
         )
-        await asyncio.wait_for(
-            recorder.active_provider_started.wait(), timeout=30
-        )
+        await asyncio.wait_for(recorder.active_provider_started.wait(), timeout=30)
         active_turn_id = session._active_turn_id  # noqa: SLF001
         if active_turn_id is None:
             raise RuntimeError("Plugin active compaction turn is absent")
@@ -882,10 +857,7 @@ async def _run_real_provider(
             raise RuntimeError(f"Plugin compaction did not adopt: {compacted!r}")
         results["after_compact"] = _jsonable(active_compaction_result)
         epoch_after_compaction = _current_epoch(session)
-        if (
-            epoch_before_compaction.epoch_nonce
-            == epoch_after_compaction.epoch_nonce
-        ):
+        if epoch_before_compaction.epoch_nonce == epoch_after_compaction.epoch_nonce:
             raise RuntimeError("compaction did not install a successor epoch")
         if not _provider_successor_contains_plugin(recorder):
             raise RuntimeError("compaction successor lost Plugin Skill or MCP")
@@ -910,8 +882,7 @@ async def _run_real_provider(
         )
         management["gc_while_old_view"] = _jsonable(gc_while_old_view)
         if package_root_v1.as_posix() not in {
-            item.path.as_posix()
-            for item in gc_while_old_view.progress.ordered_in_use
+            item.path.as_posix() for item in gc_while_old_view.progress.ordered_in_use
         }:
             raise RuntimeError("old Plugin consumer did not hold its package root")
 
@@ -930,9 +901,7 @@ async def _run_real_provider(
         )
         if enabled_v2.disposition is not PluginEnablementDisposition.ENABLED:
             raise RuntimeError("replacement Plugin did not enable")
-        reload_v2 = await session.reload_plugins(
-            deadline_monotonic=monotonic() + 120
-        )
+        reload_v2 = await session.reload_plugins(deadline_monotonic=monotonic() + 120)
         state_v2 = await session._mcp_supervisor.wait_for_server_settlement(  # noqa: SLF001
             server_id, timeout_seconds=30
         )
@@ -989,9 +958,7 @@ async def _run_real_provider(
             )
         )
         removed = service.remove_local_plugin(
-            RemoveLocalPluginRequest(
-                PluginScopeKind.USER, _PLUGIN_ID, deadline
-            )
+            RemoveLocalPluginRequest(PluginScopeKind.USER, _PLUGIN_ID, deadline)
         )
         if removed.disposition is not PluginRemovalDisposition.REMOVED:
             raise RuntimeError("replacement Plugin did not remove")
@@ -1029,20 +996,15 @@ async def _run_real_provider(
         tool_names = [item.get("tool_name") for item in tools]
         tool_payload = json.dumps(tools, ensure_ascii=False)
         passed = bool(
-            results["control"]["final_text"].strip()
-            == "PLUGIN_CONTROL_BLOCK_OK"
-            and results["skill"]["final_text"].strip()
-            == "PLUGIN_SKILL_READ_OK"
-            and results["mcp"]["final_text"].strip()
-            == "PLUGIN_MCP_CALL_OK"
+            results["control"]["final_text"].strip() == "PLUGIN_CONTROL_BLOCK_OK"
+            and results["skill"]["final_text"].strip() == "PLUGIN_SKILL_READ_OK"
+            and results["mcp"]["final_text"].strip() == "PLUGIN_MCP_CALL_OK"
             and results["after_reload"]["final_text"].strip()
             == "PLUGIN_RELOAD_PREFIX_OK"
-            and results["after_compact"]["final_text"].strip()
-            == "PLUGIN_COMPACTION_OK"
+            and results["after_compact"]["final_text"].strip() == "PLUGIN_COMPACTION_OK"
             and results["modified_untrusted"]["final_text"].strip()
             == "PLUGIN_MODIFIED_UNTRUSTED_OK"
-            and results["trusted_v2"]["final_text"].strip()
-            == "PLUGIN_TRUST_V2_OK"
+            and results["trusted_v2"]["final_text"].strip() == "PLUGIN_TRUST_V2_OK"
             and results["disabled_direct"]["final_text"].strip()
             == "PLUGIN_DISABLED_TOOL_UNAVAILABLE_OK"
             and provider_tool_name in tool_names
@@ -1071,12 +1033,8 @@ async def _run_real_provider(
             "management": management,
             "compaction": {
                 "outcome": _jsonable(compacted),
-                "predecessor_epoch_nonce": str(
-                    epoch_before_compaction.epoch_nonce
-                ),
-                "successor_epoch_nonce": str(
-                    epoch_after_compaction.epoch_nonce
-                ),
+                "predecessor_epoch_nonce": str(epoch_before_compaction.epoch_nonce),
+                "successor_epoch_nonce": str(epoch_after_compaction.epoch_nonce),
                 "successor_contains_plugin_skill_and_mcp": True,
             },
             "same_epoch_reload": {
@@ -1146,7 +1104,7 @@ async def _run_real_provider(
             compaction_coordinator_type is not None
             and original_compaction_execute is not None
         ):
-            compaction_coordinator_type._execute_active_compaction_fenced = (
+            compaction_coordinator_type._execute_compaction_fenced = (
                 original_compaction_execute
             )
         try:
@@ -1164,9 +1122,7 @@ async def _run_real_provider(
 def _failure_classification(stage: str, exc: BaseException) -> str:
     if isinstance(exc, Round93RealProviderFailure):
         exc = exc.cause
-    if isinstance(
-        exc, (ProviderModelExecutionFailed, ProviderModelOutputIncomplete)
-    ):
+    if isinstance(exc, (ProviderModelExecutionFailed, ProviderModelOutputIncomplete)):
         return "EXTERNAL_AVAILABILITY"
     if stage in {"DATABASE_SETUP", "ENVIRONMENT_LOAD"}:
         return "EXTERNAL_AVAILABILITY"

@@ -111,6 +111,18 @@ Kernel 当前支持：
   并在标准cold capability epoch中继续，不使用durable compaction job；
 - canonical Inspector 与 Protocol v3 terminal observation。
 
+## Frontend
+
+仓库现在包含 [`frontend/`](frontend/) 下的 Pulsara 本地智能工作台。它直接连接本机
+Host，只展示已有 Kernel 契约支持的总览、持久会话、执行轨迹、规划交互、逐轮权限、
+输入队列、停止、上下文整理、子任务和本地配置。子任务会原位出现在委派它们的主消息下，
+逐项展示目标、实时工具活动、真实状态和 Markdown 结果；任务页提供同一事实的全局视图。
+前端不再使用 demo projection，也不会为尚未
+接入的能力保留占位入口。新建会话只选择“快速开始”或“指定目录”：前者由 Pulsara
+创建可恢复的持久工作目录，后者使用现有绝对路径。规划和权限都在输入框旁按单轮选择。
+浏览器可直接打开裸 loopback 地址，不需要 token、cookie、OpenAI 或其他网站账号登录。产品契约见
+[`PULSARA_FRONTEND_APPLICATION_SPEC.zh.md`](PULSARA_FRONTEND_APPLICATION_SPEC.zh.md)。
+
 Round 6不增加durable MCP连接或request recovery；Host换代只按配置fresh
 connect。form/private URL elicitation、OAuth、MCP-backed skill activation、
 server-initiated Sampling/Roots、Apps/Tasks与bundled terminal UI仍是明确
@@ -155,7 +167,11 @@ role。
 ```sh
 uv run pulsara db migrate --env-file .env
 uv run pulsara db verify --deep --env-file .env
+uv run pulsara app --env-file .env
 ```
+
+最后一条命令会启动仅限本机访问的 Web 应用并打开浏览器；使用 `--no-open` 可以只启动
+服务。页面关闭或服务重启后，持久会话与其原工作目录仍可继续。
 
 唯一 active migration universe 是
 `pulsara.conversation-kernel.v1` generation 1，从 version 0 开始。Round 1 与

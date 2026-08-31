@@ -53,7 +53,9 @@ class _CommandHost:
         self.accepted_subagent_results: list[dict[str, object]] = []
         self.accepted_job_results: list[dict[str, object]] = []
 
-    async def submit_prompt(self, *, command_id: str, text: str) -> KernelCommandOutcome:
+    async def submit_prompt(
+        self, *, command_id: str, text: str
+    ) -> KernelCommandOutcome:
         self.submitted.append((command_id, text))
         return KernelCommandOutcome(
             command_id, "PENDING", "queue:item", "PROMPT_QUEUED", "Queued."
@@ -221,6 +223,7 @@ def test_stage2_controller_can_accept_exact_durable_subagent_result() -> None:
         {
             "command_id": "command:accept-child",
             "target_turn_id": "turn:root",
+            "requested_permission_mode": None,
             "child_result_id": "subagent-result:1",
             "actor_id": "attachment:test",
         }
@@ -239,13 +242,42 @@ def test_stage2_controller_can_accept_external_results_into_a_new_root() -> None
                 client_submission_id="command:accept-child-new-turn",
                 command_kind=wire.ACCEPT_SUBAGENT_RESULT,
                 source_subagent_result_id="subagent-result:2",
+                requested_permission_mode=wire.PERMISSION_MODE_ACCEPT_EDITS,
             ),
         )
     )
     assert subagent.command_outcome.status == wire.SUCCEEDED
-    assert controller.host_session.accepted_subagent_results[-1][
-        "target_turn_id"
-    ] is None
+    assert (
+        controller.host_session.accepted_subagent_results[-1]["target_turn_id"] is None
+    )
+    assert (
+        controller.host_session.accepted_subagent_results[-1][
+            "requested_permission_mode"
+        ]
+        is PermissionMode.ACCEPT_EDITS
+    )
+
+
+def test_stage2_new_root_subagent_result_requires_turn_permission() -> None:
+    server = _server()
+    controller = _state(role=wire.ATTACHMENT_ROLE_CONTROLLER)
+
+    result = asyncio.run(
+        server._command(
+            controller,
+            wire.CommandRequest(
+                request_id="request:accept-child-without-permission",
+                command_id="command:accept-child-without-permission",
+                client_submission_id="command:accept-child-without-permission",
+                command_kind=wire.ACCEPT_SUBAGENT_RESULT,
+                source_subagent_result_id="subagent-result:3",
+            ),
+        )
+    )
+
+    assert result.error.stable_code == "SUBAGENT_RESULT_REQUEST_INVALID"
+    assert controller.host_session.accepted_subagent_results == []
+
 
 def _removed_stage2_host_exposes_job_result_acceptance_to_production_protocol() -> None:
     class _Runner:
@@ -408,17 +440,16 @@ def test_stage2_live_control_snapshot_and_cursor_are_linearized() -> None:
         subscriber, owner_epoch=1, after_revision=0, maximum_events=2
     )
     assert repeated.events == (opened,)
-    assert owner.observe(
-        subscriber, owner_epoch=1, after_revision=0, maximum_events=2
-    ) == repeated
+    assert (
+        owner.observe(subscriber, owner_epoch=1, after_revision=0, maximum_events=2)
+        == repeated
+    )
     second = CurrentInteractionView(
         "interaction:2", "PLAN", "Accept the plan?", ("yes", "no"), ""
     )
     owner.install_interaction(second, replace_expected_interaction_id="interaction:1")
     owner.close_interaction(expected_interaction_id="interaction:2")
-    gap = owner.observe(
-        subscriber, owner_epoch=1, after_revision=0, maximum_events=2
-    )
+    gap = owner.observe(subscriber, owner_epoch=1, after_revision=0, maximum_events=2)
     assert gap.kind is LiveControlObservationKind.GAP
 
 
@@ -450,14 +481,20 @@ def test_stage2_protocol_v3_closed_vocabularies_are_exact() -> None:
         "InterAgentMessageAccepted",
         "PlanContinuationAccepted",
     }
-    assert sum(
-        value == "CURRENT_CONTROL"
-        for value in COMMITTED_PROJECTION_BRANCH_BY_TYPE.values()
-    ) == 19
-    assert sum(
-        value == "EVENT_ONLY"
-        for value in COMMITTED_PROJECTION_BRANCH_BY_TYPE.values()
-    ) == 2
+    assert (
+        sum(
+            value == "CURRENT_CONTROL"
+            for value in COMMITTED_PROJECTION_BRANCH_BY_TYPE.values()
+        )
+        == 19
+    )
+    assert (
+        sum(
+            value == "EVENT_ONLY"
+            for value in COMMITTED_PROJECTION_BRANCH_BY_TYPE.values()
+        )
+        == 2
+    )
     assert {item.name for item in wire.ObservationGapKind.DESCRIPTOR.values} == {
         "OBSERVATION_GAP_KIND_UNSPECIFIED",
         "COMMITTED_GAP",

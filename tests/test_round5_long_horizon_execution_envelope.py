@@ -52,6 +52,7 @@ from pulsara_agent.conversation_kernel.io import (
 from pulsara_agent.conversation_kernel.tool_runtime import (
     _physical_effect_class,
     _production_executor_binding,
+    _terminal_execution_result,
     production_builtin_executor_binding_identity_fingerprint,
 )
 from pulsara_agent.llm.adapters.openai import client as openai_client
@@ -64,6 +65,9 @@ from pulsara_agent.primitives.run_permission import (
     build_run_permission_snapshot,
 )
 from pulsara_agent.process_api_key_boundary import ProcessApiKeyBoundary
+from pulsara_agent.message import ToolResultState
+from pulsara_agent.ports.tool_execution import ToolCall
+from pulsara_agent.terminal_process.models import TerminalResult, TerminalStatus
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -416,6 +420,44 @@ def test_round5_tool_watchdog_preserves_late_exact_return() -> None:
     asyncio.run(scenario())
 
 
+def test_round5_tool_cancellation_callback_releases_physical_owner() -> None:
+    entered = Event()
+    release = Event()
+    callback_calls = 0
+
+    def physical(*, deadline_monotonic: float) -> str:
+        del deadline_monotonic
+        entered.set()
+        assert release.wait(2)
+        return "cancelled-exact-result"
+
+    def cancel_physical() -> None:
+        nonlocal callback_calls
+        callback_calls += 1
+        release.set()
+
+    async def scenario() -> None:
+        owner = KernelSessionIO(maximum_concurrency=1)
+        task = asyncio.create_task(
+            owner.run_tool_invocation(
+                physical,
+                deadline_monotonic=monotonic() + 2,
+                on_caller_cancelled=cancel_physical,
+            )
+        )
+        assert await asyncio.to_thread(entered.wait, 1)
+        task.cancel()
+        outcome = await asyncio.wait_for(task, timeout=1)
+        assert outcome.disposition is PhysicalToolInvocationDisposition.RETURNED_EXACT
+        assert outcome.timing is PhysicalToolInvocationTiming.LATE_AFTER_WATCHDOG
+        assert outcome.caller_cancelled
+        assert outcome.value == "cancelled-exact-result"
+        assert callback_calls == 1
+        await owner.aclose(deadline_monotonic=monotonic() + 1)
+
+    asyncio.run(scenario())
+
+
 def test_round5_io_close_reports_timeout_only_after_physical_thread_exit() -> None:
     entered = Event()
     release = Event()
@@ -669,3 +711,55 @@ def test_round5_terminal_decision_process_installed_and_result_ready_races(
     assert registry.foreground_decision_state("decision:ready") == "RESULT_READY"
     registry.settle_foreground_decision("decision:ready")
     registry.release_owner("round5:host", timeout_seconds=2)
+
+
+def test_round5_terminal_foreground_decision_can_be_aborted_by_exact_attempt(
+    tmp_path: Path,
+) -> None:
+    registry = ProcessRegistry(max_live_processes=2)
+    outcome: list[object] = []
+
+    def invoke() -> None:
+        try:
+            outcome.append(
+                _exec_sleeping_terminal(
+                    registry,
+                    tmp_path,
+                    attempt_id="decision:user-stop",
+                    decision_deadline_monotonic=monotonic() + 5,
+                    yield_time_ms=4_000,
+                )
+            )
+        except BaseException as exc:  # pragma: no cover - assertion reports it
+            outcome.append(exc)
+
+    worker = Thread(target=invoke)
+    worker.start()
+    deadline = monotonic() + 2
+    while registry.foreground_decision_state("decision:user-stop") is None:
+        assert monotonic() < deadline
+        sleep(0.01)
+    assert registry.abort_foreground_decision("decision:user-stop")
+    worker.join(3)
+    assert not worker.is_alive()
+    assert len(outcome) == 1 and not isinstance(outcome[0], BaseException)
+    state, yielded, _cwd = outcome[0]  # type: ignore[misc]
+    assert yielded is False
+    assert state.killed is True
+    assert state.physical_completion.is_set()
+    registry.settle_foreground_decision("decision:user-stop")
+    registry.release_owner("round5:host", timeout_seconds=2)
+
+
+def test_round5_killed_terminal_result_is_an_interrupted_tool_result() -> None:
+    result = _terminal_execution_result(
+        ToolCall("call:user-stop", "terminal"),
+        TerminalResult(
+            status=TerminalStatus.KILLED,
+            output="partial output",
+            exit_code=-15,
+            cwd="/tmp",
+        ),
+    )
+
+    assert result.status is ToolResultState.INTERRUPTED

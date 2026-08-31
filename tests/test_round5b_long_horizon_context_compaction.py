@@ -33,6 +33,7 @@ from pulsara_agent.conversation_kernel.assembler import (
 )
 from pulsara_agent.conversation_kernel.compaction.planner import (
     CompactionPlanningError,
+    CompactionReclaimUnavailable,
     crosses_compaction_resource_headroom,
     estimate_unavoidable_compaction_successor_tokens,
     enumerate_complete_tool_groups,
@@ -167,9 +168,7 @@ def test_round5b_manual_command_settlement_keys_the_exact_semantic_digest() -> N
     async def exercise() -> tuple[CompactionConfirmationKind, ...]:
         first = asyncio.create_task(host._settle_manual_compaction_command(exact))
         await started.wait()
-        duplicate = asyncio.create_task(
-            host._settle_manual_compaction_command(exact)
-        )
+        duplicate = asyncio.create_task(host._settle_manual_compaction_command(exact))
         conflicting = await host._settle_manual_compaction_command(conflict)
         release.set()
         results = (await first, await duplicate, conflicting)
@@ -258,8 +257,7 @@ def test_round5b_compaction_cut_rebase_only_advances_global_sequence() -> None:
     assert rebased.compile_snapshot.canonical_input.items == snapshot.items
     assert rebased.compile_snapshot.canonical_input.closures == snapshot.closures
     assert (
-        rebased.compile_snapshot.canonical_input.late_outcomes
-        == snapshot.late_outcomes
+        rebased.compile_snapshot.canonical_input.late_outcomes == snapshot.late_outcomes
     )
     assert rebased.replay_manifest_cut.manifests == manifest_cut.manifests
     assert (
@@ -293,9 +291,7 @@ def test_round5b_first_full_history_adoption_uses_zero_effective_floor() -> None
         scope_subagent_task_id=None,
     )
 
-    def prepare(
-        base_kind: str, context_snapshot_id: str | None
-    ) -> object:
+    def prepare(base_kind: str, context_snapshot_id: str | None) -> object:
         return build_prepared_compaction_canonical_adoption(
             CompactionCanonicalAdoptionFactoryInput(
                 scope=scope,
@@ -391,16 +387,16 @@ def test_round5b_summary_normalizer_and_snapshot_carrier_are_bounded() -> None:
         )
 
 
-def test_round5b_summary_prompt_does_not_turn_response_limits_into_task_state() -> None:
-    active = compaction_summary_request(CompactionTargetBranch.ACTIVE_INSTALLATION)
-    idle = compaction_summary_request(CompactionTargetBranch.IDLE_BASE_ONLY)
+def test_round5b_summary_prompt_keeps_lifecycle_out_of_compaction() -> None:
+    request = compaction_summary_request()
 
-    for request in (active, idle):
-        assert "restrictions above" in request
-        assert "end when this summary response" in request
-        assert "Never say that a user request is queued, deferred, blocked" in request
-    assert "immediately open a normal successor call" in active
-    assert "does not create a new active request" in idle
+    assert "restrictions above" in request
+    assert "end when this summary response" in request
+    assert "Never say that a user request is queued, deferred, blocked" in request
+    assert "Runtime separately and mechanically owns" in request
+    assert "Do not infer either lifecycle" in request
+    assert "ACTIVE-TURN HANDOFF" not in request
+    assert "IDLE HANDOFF" not in request
 
 
 def test_round5b_repeated_compaction_carries_runtime_owned_active_request() -> None:
@@ -491,7 +487,10 @@ def test_round5b_non_human_initial_activation_is_mechanically_resumable() -> Non
         ("plain text", "plain text"),
         ("<summary>free-form paragraph</summary>", "free-form paragraph"),
         ("```markdown\n- progress\n- next step\n```", "- progress\n- next step"),
-        ("<summary>没有固定标题，也可以自然成段。</summary>", "没有固定标题，也可以自然成段。"),
+        (
+            "<summary>没有固定标题，也可以自然成段。</summary>",
+            "没有固定标题，也可以自然成段。",
+        ),
     ),
 )
 def test_round5b_summary_normalizer_accepts_guided_freeform_text(
@@ -532,10 +531,19 @@ def test_round5b_summary_normalizer_rejects_only_empty_or_overbound_text(
 
 def test_round5b_reclaim_force_only_bypasses_soft_target() -> None:
     policy = ResolvedCompactionPolicy(minimum_reclaim_tokens=100)
-    with pytest.raises(CompactionPlanningError, match="enough"):
+    with pytest.raises(CompactionReclaimUnavailable, match="enough"):
         validate_compaction_reclaim(
             source_tokens=1_000,
             successor_tokens=950,
+            hard_input_budget_tokens=2_000,
+            policy=policy,
+            force=True,
+            enforce_soft_target=True,
+        )
+    with pytest.raises(CompactionReclaimUnavailable, match="does not reclaim context"):
+        validate_compaction_reclaim(
+            source_tokens=1_000,
+            successor_tokens=1_000,
             hard_input_budget_tokens=2_000,
             policy=policy,
             force=True,
@@ -634,14 +642,17 @@ def test_round5b_longest_suffix_skips_impossible_old_tool_tail_before_open() -> 
             force=False,
             enforce_soft_target=True,
         )
-    assert validate_compaction_reclaim(
-        source_tokens=207_600,
-        successor_tokens=compacted_quote,
-        hard_input_budget_tokens=239_616,
-        policy=policy,
-        force=False,
-        enforce_soft_target=True,
-    ) > 0
+    assert (
+        validate_compaction_reclaim(
+            source_tokens=207_600,
+            successor_tokens=compacted_quote,
+            hard_input_budget_tokens=239_616,
+            policy=policy,
+            force=False,
+            enforce_soft_target=True,
+        )
+        > 0
+    )
 
 
 def test_round5b_trigger_uses_exact_prepared_target_budget_without_262k_cap() -> None:
@@ -744,9 +755,7 @@ def test_round5b_terminal_provider_race_handoffs_manual_to_idle_owner() -> None:
     host._runner = _Runner()
     host._tools = SimpleNamespace(
         todo_owner=SimpleNamespace(
-            mark_root_idle=lambda *, exact_turn_id: idle_marks.append(
-                exact_turn_id
-            )
+            mark_root_idle=lambda *, exact_turn_id: idle_marks.append(exact_turn_id)
         )
     )
 
@@ -1225,11 +1234,14 @@ def test_round5b_retained_skill_proves_older_full_from_installed_message() -> No
         tool_result_context=item.tool_result_context,
         tool_result_body_text=exact_body,
     )
-    assert _exact_historical_read(
-        exact_item,
-        catalog_row=row,
-        root_policy=SimpleNamespace(roots=()),
-    ) == "Retained body"
+    assert (
+        _exact_historical_read(
+            exact_item,
+            catalog_row=row,
+            root_policy=SimpleNamespace(roots=()),
+        )
+        == "Retained body"
+    )
 
 
 def test_round5b_installed_retained_skill_is_inherited_only_within_same_turn() -> None:
@@ -1238,9 +1250,7 @@ def test_round5b_installed_retained_skill_is_inherited_only_within_same_turn() -
             "skills": (
                 {
                     "name": "inspect",
-                    "catalog_location": (
-                        "/package/bundled_skills/inspect/SKILL.md"
-                    ),
+                    "catalog_location": ("/package/bundled_skills/inspect/SKILL.md"),
                     "body": "Retained body",
                 },
             )
@@ -1257,9 +1267,7 @@ def test_round5b_installed_retained_skill_is_inherited_only_within_same_turn() -
     head = SimpleNamespace(
         source_kind=ContextSourceKind.RETAINED_SKILL_CONTEXT,
         presence=SourceObservationPresence.VALUE,
-        installed_observation_fingerprint=(
-            _installed_observation_fingerprint(message)
-        ),
+        installed_observation_fingerprint=(_installed_observation_fingerprint(message)),
         last_emitted_turn_id="turn:skill",
     )
     predecessor = SimpleNamespace(
@@ -1381,19 +1389,13 @@ def test_round5b_architecture_and_oracle_are_exact() -> None:
     cold = ROOT / "src/pulsara_agent/conversation_kernel/cold_epoch.py"
     tree = ast.parse(cold.read_text(encoding="utf-8"), filename=str(cold))
     imported = {
-        node.module or ""
-        for node in ast.walk(tree)
-        if isinstance(node, ast.ImportFrom)
+        node.module or "" for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
     }
     assert not any("repository" in item for item in imported)
     assert not any("compaction" in item for item in imported)
     assert not any("terminal" in item for item in imported)
-    assert not (
-        ROOT / "src/pulsara_agent/conversation_kernel/jobs.py"
-    ).exists()
-    assert not (
-        ROOT / "src/pulsara_agent/conversation_kernel/job_model.py"
-    ).exists()
+    assert not (ROOT / "src/pulsara_agent/conversation_kernel/jobs.py").exists()
+    assert not (ROOT / "src/pulsara_agent/conversation_kernel/job_model.py").exists()
 
 
 def test_round9_2_compaction_hard_cut_has_one_post_adoption_install_path() -> None:

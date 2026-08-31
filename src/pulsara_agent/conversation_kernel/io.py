@@ -158,6 +158,7 @@ class KernelSessionIO:
         /,
         *args: object,
         deadline_monotonic: float,
+        on_caller_cancelled: Callable[[], None] | None = None,
         **kwargs: object,
     ) -> PhysicalToolInvocationOutcome[T]:
         """Run one physical tool call and never discard its exact terminal state."""
@@ -212,6 +213,8 @@ class KernelSessionIO:
                     timed_out = True
                 except asyncio.CancelledError:
                     caller_cancelled = True
+                    if on_caller_cancelled is not None:
+                        on_caller_cancelled()
             else:
                 timed_out = True
             if not task.done():

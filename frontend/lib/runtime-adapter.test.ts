@@ -1,0 +1,765 @@
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import {
+  LocalHttpRuntimeAdapter,
+  mergeRuntimeTaskInventory,
+  productVisibleText,
+  selectPromptCommand,
+  type RuntimeProjection,
+} from './runtime-adapter';
+import type { AgentTask } from './pulsara-types';
+
+afterEach(() => vi.unstubAllGlobals());
+
+describe('selectPromptCommand', () => {
+  it('submits a normal prompt when there is no active turn', () => {
+    expect(selectPromptCommand(false, false)).toBe('SUBMIT_PROMPT');
+  });
+
+  it('queues a new prompt instead of rewriting an active turn', () => {
+    expect(selectPromptCommand(true, false)).toBe('SUBMIT_PROMPT');
+  });
+
+  it('uses the explicit steer command for an active turn', () => {
+    expect(selectPromptCommand(true, true)).toBe('STEER_ACTIVE_TURN');
+  });
+
+  it('keeps an in-flight user steer distinct from an ordinary user turn', async () => {
+    const content = (value: string) => ({
+      kind: 'INLINE',
+      inline_content: btoa(String.fromCharCode(...new TextEncoder().encode(value))),
+    });
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      connection_id: 'connection-1', connection_generation: 1,
+      session_id: 'session-1', role: 'controller',
+      live_hello: { live_owner_epoch: '1', live_revision: '0', live_snapshot: {} },
+      snapshot: {
+        snapshot: {
+          session_id: 'session-1', writer_generation: '1', event_sequence_cut: '0',
+          entries: [{
+            entry_id: 'prompt-1', turn_id: 'turn-1', entry_sequence: '1',
+            entry_kind: 'USER_MESSAGE', scope_kind: 'ROOT', content: content('完成这项工作'),
+          }, {
+            entry_id: 'steer-1', turn_id: 'turn-1', entry_sequence: '2',
+            entry_kind: 'USER_STEER', scope_kind: 'ROOT', content: content('先检查真实页面'),
+          }, {
+            entry_id: 'accepted-result-1', turn_id: 'turn-2', entry_sequence: '3',
+            entry_kind: 'USER_MESSAGE', scope_kind: 'ROOT',
+            source_subagent_result_id: 'subagent-result-1',
+            content: content('{"status":"accepted"}'),
+          }],
+          control: {},
+        },
+      },
+      live_control_snapshot: { snapshot: {} },
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+
+    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+
+    expect(connection.current().messages.map((message) => ({
+      body: message.body,
+      userKind: message.userKind,
+    }))).toEqual([
+      { body: '完成这项工作', userKind: 'prompt' },
+      { body: '先检查真实页面', userKind: 'steer' },
+      { body: '', userKind: 'subagent-result' },
+    ]);
+    expect(connection.current().messages[2]?.sourceSubagentResultId).toBe('subagent-result-1');
+  });
+
+  it('loads every older history page before exposing a resumed connection', async () => {
+    const historyBodies: Array<Record<string, unknown>> = [];
+    const entry = (sequence: number, body: string) => ({
+      entry_id: `entry-${sequence}`,
+      turn_id: `turn-${sequence}`,
+      entry_sequence: String(sequence),
+      entry_kind: 'USER_MESSAGE',
+      content: { kind: 'INLINE_UTF8', inline_content: btoa(body) },
+    });
+    const responses = [
+      {
+        connection_id: 'connection-1',
+        connection_generation: 1,
+        session_id: 'session-1',
+        role: 'controller',
+        live_hello: { live_owner_epoch: '1', live_revision: '0', live_snapshot: {} },
+        snapshot: {
+          snapshot: {
+            session_id: 'session-1',
+            writer_generation: '1',
+            event_sequence_cut: '0',
+            entries: [entry(3, 'latest')],
+            older_history_cursor: {
+              session_id: 'session-1',
+              cut_sequence: '3',
+              entry_sequence: '3',
+            },
+            control: {},
+          },
+        },
+        live_control_snapshot: { snapshot: {} },
+      },
+      {
+        history_page: {
+          entries: [entry(2, 'middle')],
+          has_more: true,
+          older_history_cursor: {
+            session_id: 'session-1',
+            cut_sequence: '3',
+            entry_sequence: '2',
+          },
+        },
+      },
+      { history_page: { entries: [entry(1, 'oldest')], has_more: false } },
+    ];
+    vi.stubGlobal('fetch', vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.body) historyBodies.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+      const payload = responses.shift();
+      return new Response(JSON.stringify(payload), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }));
+
+    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+
+    expect(connection.current().messages.map((message) => message.body)).toEqual([
+      'oldest',
+      'middle',
+      'latest',
+    ]);
+    expect(historyBodies).toHaveLength(2);
+    expect(historyBodies[0]).toMatchObject({
+      maximum_entries: 256,
+      maximum_serialized_bytes: 2 << 20,
+      cursor: { entry_sequence: '3' },
+    });
+    expect(historyBodies[1]).toMatchObject({ cursor: { entry_sequence: '2' } });
+  });
+
+  it('treats the manual context action as an explicit forced request', async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const responses = [
+      {
+        connection_id: 'connection-1', connection_generation: 1,
+        session_id: 'session-1', role: 'controller',
+        live_hello: { live_owner_epoch: '1', live_revision: '0', live_snapshot: {} },
+        snapshot: {
+          snapshot: {
+            session_id: 'session-1', writer_generation: '1', event_sequence_cut: '0',
+            entries: [], control: {},
+          },
+        },
+        live_control_snapshot: { snapshot: {} },
+      },
+      {
+        command_outcome: {
+          command_id: 'command:web:test', status: 'SUCCEEDED',
+          target_id: 'turn-1', public_code: 'COMPACTED',
+        },
+      },
+    ];
+    vi.stubGlobal('crypto', { randomUUID: () => 'test' });
+    vi.stubGlobal('fetch', vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.body) bodies.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+      return new Response(JSON.stringify(responses.shift()), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }));
+
+    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+    await connection.compactContext('turn-1');
+
+    expect(bodies.at(-1)).toMatchObject({
+      command_kind: 'COMPACT_CONTEXT', target_turn_id: 'turn-1', force: true,
+    });
+  });
+
+  it('projects provider reasoning and distinguishes full text from a summary', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      connection_id: 'connection-1', connection_generation: 1,
+      session_id: 'session-1', role: 'controller',
+      live_hello: { live_owner_epoch: '1', live_revision: '0', live_snapshot: {} },
+      snapshot: {
+        snapshot: {
+          session_id: 'session-1', writer_generation: '1', event_sequence_cut: '0',
+          entries: [{
+            entry_id: 'assistant-1', turn_id: 'turn-1', entry_sequence: '1',
+            entry_kind: 'ASSISTANT_MESSAGE', scope_kind: 'ROOT',
+            blocks: [{
+              block_id: 'text-1', block_kind: 'TEXT',
+              content: { kind: 'INLINE', inline_content: btoa('final answer') },
+            }],
+            reasoning_blocks: [
+              {
+                block_id: 'reasoning-1', ordinal: '0',
+                presentation_kind: 'REASONING_PRESENTATION_SUMMARY',
+                content: { kind: 'INLINE', inline_content: btoa('short provider summary') },
+              },
+              {
+                block_id: 'reasoning-2', ordinal: '1',
+                presentation_kind: 'REASONING_PRESENTATION_FULL',
+                content: { kind: 'INLINE', inline_content: btoa('full provider reasoning') },
+              },
+            ],
+          }],
+          control: {},
+        },
+      },
+      live_control_snapshot: { snapshot: {} },
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+
+    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+
+    expect(connection.current().messages[0].reasoning).toEqual([
+      { id: 'reasoning-1', kind: 'summary', body: 'short provider summary' },
+      { id: 'reasoning-2', kind: 'full', body: 'full provider reasoning' },
+    ]);
+  });
+
+  it('keeps the provider presentation kind on a live reasoning stream', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      connection_id: 'connection-1', connection_generation: 1,
+      session_id: 'session-1', role: 'controller',
+      live_hello: {
+        live_owner_epoch: '1', live_revision: '2',
+        live_snapshot: {
+          events: [
+            {
+              live_revision: '1', event_type: 'THINKING_START', draft_identity: 'draft-1',
+              turn_id: 'turn-1', scope_kind: 'ROOT', block_id: 'reasoning-1',
+              payload: { thinking_start: {
+                block_identity: 'reasoning-1',
+                presentation_kind: 'REASONING_PRESENTATION_SUMMARY',
+              } },
+            },
+            {
+              live_revision: '2', event_type: 'THINKING_DELTA', draft_identity: 'draft-1',
+              turn_id: 'turn-1', scope_kind: 'ROOT', block_id: 'reasoning-1',
+              payload: { thinking_delta: { block_identity: 'reasoning-1', delta: 'live summary' } },
+            },
+          ],
+        },
+      },
+      snapshot: {
+        snapshot: {
+          session_id: 'session-1', writer_generation: '1', event_sequence_cut: '0',
+          entries: [], control: { active_turns: [{ turn_id: 'turn-1', status: 'RUNNING' }] },
+        },
+      },
+      live_control_snapshot: { snapshot: {} },
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+
+    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+
+    expect(connection.current().messages[0].reasoning).toEqual([
+      { id: 'reasoning-1', kind: 'summary', body: 'live summary', active: true },
+    ]);
+  });
+
+  it('projects the root TODO and applies live updates without attaching it to a message', async () => {
+    const responses = [
+      {
+        connection_id: 'connection-1', connection_generation: 1,
+        session_id: 'session-1', role: 'controller',
+        live_hello: { live_owner_epoch: '1', live_revision: '0', live_snapshot: {} },
+        snapshot: {
+          snapshot: {
+            session_id: 'session-1', writer_generation: '1', event_sequence_cut: '0',
+            entries: [], control: { active_turns: [{ turn_id: 'turn-1', scope_kind: 'ROOT', status: 'RUNNING' }] },
+          },
+        },
+        live_control_snapshot: {
+          snapshot: {
+            owner_epoch: '1', live_revision: '0',
+            current_todos: [{
+              todo_run_id: 'todo-child', scope_kind: 'SUBAGENT_TASK',
+              scope_subagent_task_id: 'task-1', disposition: 'ACTIVE',
+              ordered_items: [{ ordinal: 0, text: '子任务步骤', status: 'in_progress' }],
+            }, {
+              todo_run_id: 'todo-root', scope_kind: 'ROOT', disposition: 'ACTIVE',
+              ordered_items: [
+                { ordinal: 0, text: '检查契约', status: 'completed' },
+                { ordinal: 1, text: '目视验证', status: 'pending' },
+              ],
+            }],
+          },
+        },
+      },
+      {
+        observation: {
+          through_event_sequence: '0', live_owner_epoch: '1', through_live_revision: '1',
+          live: [{
+            live_revision: '1', event_type: 'TODO_SNAPSHOT_UPDATED', turn_id: 'turn-1',
+            scope_kind: 'ROOT', payload: { todo_snapshot_updated: {
+              todo_run_id: 'todo-root', todo_revision: '2', disposition: 'ACTIVE',
+              ordered_items: [
+                { ordinal: 0, text: '检查契约', status: 'completed' },
+                { ordinal: 1, text: '目视验证', status: 'in_progress' },
+              ],
+              pending_count: 0, in_progress_count: 1, completed_count: 1,
+            } },
+          }],
+        },
+      },
+      {
+        observation: {
+          through_event_sequence: '0', live_owner_epoch: '1', through_live_revision: '2',
+          live: [{
+            live_revision: '2', event_type: 'TODO_SNAPSHOT_UPDATED', turn_id: 'turn-1',
+            scope_kind: 'ROOT', payload: { todo_snapshot_updated: {
+              todo_run_id: 'todo-root', todo_revision: '3', disposition: 'CLOSED',
+              ordered_items: [], pending_count: 0, in_progress_count: 0, completed_count: 0,
+            } },
+          }],
+        },
+      },
+    ];
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(responses.shift()), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    })));
+
+    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+
+    expect(connection.current().todo).toEqual({
+      id: 'todo-root',
+      items: [
+        { id: 'todo-root:0', label: '检查契约', status: 'completed' },
+        { id: 'todo-root:1', label: '目视验证', status: 'pending' },
+      ],
+    });
+    expect(connection.current().messages).toEqual([]);
+
+    const updated = await connection.observe();
+    expect(updated.todo?.items.map((item) => item.status)).toEqual(['completed', 'in-progress']);
+    expect(updated.messages).toEqual([]);
+
+    const closed = await connection.observe();
+    expect(closed.todo).toBeUndefined();
+  });
+
+  it('hydrates a large historical reasoning block through the content reader', async () => {
+    const reasoning = 'large provider reasoning';
+    const digest = `sha256:${'3'.repeat(64)}`;
+    const requests: Array<Record<string, unknown>> = [];
+    const responses = [
+      {
+        connection_id: 'connection-1', connection_generation: 1,
+        session_id: 'session-1', role: 'controller',
+        live_hello: { live_owner_epoch: '1', live_revision: '0', live_snapshot: {} },
+        snapshot: {
+          snapshot: {
+            session_id: 'session-1', writer_generation: '1', event_sequence_cut: '0',
+            entries: [{
+              entry_id: 'assistant-1', turn_id: 'turn-1', entry_sequence: '1',
+              entry_kind: 'ASSISTANT_MESSAGE', scope_kind: 'ROOT',
+              reasoning_blocks: [{
+                block_id: 'assistant-1:provider-reasoning:0', ordinal: '0',
+                presentation_kind: 'REASONING_PRESENTATION_FULL',
+                content: {
+                  kind: 'CANONICAL_BLOB', digest, size: String(reasoning.length),
+                  media_type: 'text/plain', codec: 'utf-8',
+                },
+              }],
+            }],
+            control: {},
+          },
+        },
+        live_control_snapshot: { snapshot: {} },
+      },
+      {
+        content: {
+          digest, complete_size: String(reasoning.length), offset_bytes: '0',
+          content: btoa(reasoning), complete: true,
+        },
+      },
+    ];
+    vi.stubGlobal('fetch', vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.body) requests.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+      return new Response(JSON.stringify(responses.shift()), {
+        status: 200, headers: { 'Content-Type': 'application/json' },
+      });
+    }));
+
+    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+
+    expect(connection.current().messages[0].reasoning?.[0].body).toBe(reasoning);
+    expect(requests.at(-1)).toMatchObject({
+      entry_id: 'assistant-1', block_id: 'assistant-1:provider-reasoning:0', offset_bytes: 0,
+    });
+  });
+
+  it('projects successful orchestration results and exposes child execution', async () => {
+    const content = (value: string) => ({ kind: 'INLINE', inline_content: btoa(value) });
+    const toolRequest = (
+      sequence: number,
+      entryId: string,
+      toolName: string,
+      callId: string,
+      scope = 'ROOT',
+      taskId = '',
+    ) => ({
+      entry_id: entryId,
+      turn_id: scope === 'ROOT' ? 'turn-root' : `turn-${taskId}`,
+      entry_sequence: String(sequence),
+      entry_kind: 'ASSISTANT_TOOL_REQUEST',
+      scope_kind: scope,
+      scope_subagent_task_id: taskId,
+      blocks: [{
+        block_id: `block-${sequence}`,
+        block_kind: 'TOOL_CALL',
+        tool_call_id: callId,
+        tool_name: toolName,
+        tool_arguments_preview: btoa('{}'),
+      }],
+    });
+    const entries = [
+      toolRequest(1, 'root-create', 'create_agent_tasks', 'call-create'),
+      {
+        entry_id: 'task-objective', turn_id: 'turn-task-1', entry_sequence: '2',
+        entry_kind: 'USER_MESSAGE', scope_kind: 'SUBAGENT_TASK',
+        scope_subagent_task_id: 'task-1', content: content('Read README.md.'),
+      },
+      {
+        entry_id: 'task-guidance', turn_id: 'turn-task-1', entry_sequence: '3',
+        entry_kind: 'INTER_AGENT_MESSAGE', scope_kind: 'SUBAGENT_TASK',
+        scope_subagent_task_id: 'task-1', content: content('Also verify the visible heading.'),
+      },
+      {
+        entry_id: 'create-result', turn_id: 'turn-root', entry_sequence: '4',
+        entry_kind: 'TOOL_RESULT', scope_kind: 'ROOT',
+        content: content(JSON.stringify({ tasks: [{ task_id: 'task-1', status: 'active' }] })),
+      },
+      toolRequest(5, 'task-read', 'read_file', 'call-read', 'SUBAGENT_TASK', 'task-1'),
+      {
+        entry_id: 'read-result', turn_id: 'turn-task-1', entry_sequence: '6',
+        entry_kind: 'TOOL_RESULT', scope_kind: 'SUBAGENT_TASK',
+        scope_subagent_task_id: 'task-1',
+        content: content(JSON.stringify({ status: 'ok', path: 'README.md', total_lines: 1 })),
+      },
+      {
+        entry_id: 'task-answer', turn_id: 'turn-task-1', entry_sequence: '7',
+        entry_kind: 'ASSISTANT_MESSAGE', scope_kind: 'SUBAGENT_TASK',
+        scope_subagent_task_id: 'task-1',
+        blocks: [{ block_id: 'task-text', block_kind: 'TEXT', content: content('# Pulsara') }],
+      },
+      toolRequest(8, 'root-wait', 'wait_agent_tasks', 'call-wait'),
+      {
+        entry_id: 'wait-result', turn_id: 'turn-root', entry_sequence: '9',
+        entry_kind: 'TOOL_RESULT', scope_kind: 'ROOT',
+        content: content(JSON.stringify({ pending_task_ids: [], settled: [{ status: 'completed' }] })),
+      },
+      toolRequest(10, 'root-denied', 'create_agent_tasks', 'call-denied'),
+      {
+        entry_id: 'denied-result', turn_id: 'turn-root', entry_sequence: '11',
+        entry_kind: 'TOOL_RESULT', scope_kind: 'ROOT',
+        content: content('ROOT subagent orchestration requires bypass-permissions mode'),
+      },
+      toolRequest(12, 'root-user-denied', 'terminal', 'call-user-denied'),
+      {
+        entry_id: 'user-denied-result', turn_id: 'turn-root', entry_sequence: '13',
+        entry_kind: 'TOOL_RESULT', scope_kind: 'ROOT',
+        content: content('tool execution denied by user'),
+      },
+      toolRequest(14, 'root-artifact-read', 'artifact_read', 'call-artifact-read'),
+      {
+        entry_id: 'artifact-read-result', turn_id: 'turn-root', entry_sequence: '15',
+        entry_kind: 'TOOL_RESULT', scope_kind: 'ROOT',
+        content: content(JSON.stringify({ status: 'ok', content: 'retained page' })),
+      },
+      {
+        entry_id: 'orphan-objective', turn_id: 'turn-orphan', entry_sequence: '16',
+        entry_kind: 'USER_MESSAGE', scope_kind: 'SUBAGENT_TASK',
+        scope_subagent_task_id: 'task-orphan', content: content('Interrupted before a final reply.'),
+      },
+      toolRequest(17, 'root-orphan-tool', 'wait_agent_tasks', 'call-orphan'),
+    ];
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      connection_id: 'connection-1',
+      connection_generation: 1,
+      session_id: 'session-1',
+      role: 'controller',
+      live_hello: {
+        live_owner_epoch: '1', live_revision: '1',
+        live_snapshot: {
+          events: [{
+            live_revision: '1', event_type: 'TEXT_DELTA', draft_identity: 'stale-task-draft',
+            turn_id: 'turn-task-1', scope_kind: 'SUBAGENT_TASK',
+            scope_subagent_task_id: 'task-1', payload: { text_delta: { delta: 'stale live text' } },
+          }],
+        },
+      },
+      snapshot: {
+        snapshot: {
+          session_id: 'session-1', writer_generation: '1', event_sequence_cut: '0',
+          entries,
+          control: {
+            subagent_tasks: [{
+              task_id: 'task-1', parent_turn_id: 'turn-root', status: 'COMPLETED',
+              label: '读取标题', display_role: '研究', objective: 'Read README.md.',
+              result_summary: '# Pulsara',
+            }, {
+              task_id: 'task-2', parent_turn_id: 'turn-root', status: 'PENDING_START',
+              label: '等待槽位', display_role: '研究', objective: 'Wait for capacity.',
+            }],
+          },
+        },
+      },
+      live_control_snapshot: { snapshot: {} },
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+
+    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+    const projected = connection.current();
+    const create = projected.messages.find((message) => message.id === 'root-create');
+    const wait = projected.messages.find((message) => message.id === 'root-wait');
+    const denied = projected.messages.find((message) => message.id === 'root-denied');
+    const userDenied = projected.messages.find((message) => message.id === 'root-user-denied');
+    const artifactRead = projected.messages.find((message) => message.id === 'root-artifact-read');
+    const orphanTool = projected.messages.find((message) => message.id === 'root-orphan-tool');
+
+    expect(create?.traces?.[0]).toMatchObject({ status: 'completed', meta: '操作完成' });
+    expect(wait?.traces?.[0]).toMatchObject({ status: 'completed', meta: '操作完成' });
+    expect(denied?.traces?.[0]).toMatchObject({ status: 'failed', subtitle: '已拒绝' });
+    expect(userDenied?.traces?.[0]).toMatchObject({
+      status: 'failed', subtitle: '已拒绝', meta: '操作未完成',
+    });
+    expect(artifactRead?.traces?.[0]).toMatchObject({
+      title: '读取保留内容', status: 'completed', meta: '操作完成',
+    });
+    expect(create?.subagentRuns?.find((run) => run.id === 'task-orphan')).toMatchObject({
+      status: 'ended', objective: 'Interrupted before a final reply.', activities: [],
+    });
+    expect(orphanTool?.traces?.[0]).toMatchObject({
+      status: 'cancelled', subtitle: '已结束', meta: '操作未完成',
+    });
+    expect(create?.subagentRuns?.[0]).toMatchObject({
+      id: 'task-1', label: '读取标题', status: 'completed', objective: 'Read README.md.',
+    });
+    expect(create?.subagentRuns?.[0].activities).toHaveLength(3);
+    expect(create?.subagentRuns?.[0].activities[0]).toMatchObject({
+      kind: 'guidance', body: 'Also verify the visible heading.',
+    });
+    expect(create?.subagentRuns?.find((run) => run.id === 'task-2')).toMatchObject({
+      label: '等待槽位', status: 'pending', activities: [],
+    });
+    expect(create?.subagentRuns?.[0].activities.find((activity) => activity.traces?.length)?.traces?.[0]).toMatchObject({
+      title: '读取文件', status: 'completed', meta: '操作完成',
+    });
+    expect(projected.isRunning).toBe(false);
+    expect(JSON.stringify(create?.subagentRuns)).not.toContain('stale live text');
+  });
+
+  it('ignores a stale child live draft after the task leaves active control', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      connection_id: 'connection-1', connection_generation: 1,
+      session_id: 'session-1', role: 'controller',
+      live_hello: {
+        live_owner_epoch: '1', live_revision: '1',
+        live_snapshot: {
+          events: [{
+            live_revision: '1', event_type: 'TOOL_RESULT_START',
+            draft_identity: 'stale-child-tool-result',
+            turn_id: 'turn-task-1', scope_kind: 'SUBAGENT_TASK',
+            scope_subagent_task_id: 'task-1',
+            payload: { tool_result_start: { tool_call_id: 'call-1' } },
+          }],
+        },
+      },
+      snapshot: {
+        snapshot: {
+          session_id: 'session-1', writer_generation: '1', event_sequence_cut: '0',
+          entries: [], control: {},
+        },
+      },
+      live_control_snapshot: { snapshot: {} },
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+
+    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+
+    expect(connection.current().isRunning).toBe(false);
+    expect(connection.current().messages).toEqual([]);
+  });
+});
+
+describe('LocalHttpRuntimeAdapter connection ownership', () => {
+  it('sends an explicit takeover only when this page asks to become controller', async () => {
+    let requestBody: unknown;
+    vi.stubGlobal('fetch', vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      requestBody = init?.body ? JSON.parse(String(init.body)) : undefined;
+      return new Response(JSON.stringify({
+        connection_id: 'connection-takeover', connection_generation: 2,
+        session_id: 'session-1', role: 'controller',
+        live_hello: { live_owner_epoch: '1', live_revision: '0', live_snapshot: {} },
+        snapshot: {
+          snapshot: {
+            session_id: 'session-1', writer_generation: '1', event_sequence_cut: '0',
+            entries: [], control: {},
+          },
+        },
+        live_control_snapshot: { snapshot: {} },
+      }), { status: 201, headers: { 'Content-Type': 'application/json' } });
+    }));
+
+    const connection = await new LocalHttpRuntimeAdapter().connect('session-1', true);
+
+    expect(requestBody).toEqual({ takeover: true });
+    expect(connection.role).toBe('controller');
+  });
+});
+
+describe('subagent result continuation', () => {
+  it('carries the selected permission into the new root turn command', async () => {
+    let commandBody: Record<string, unknown> | undefined;
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path.endsWith('/command')) {
+        commandBody = JSON.parse(String(init?.body));
+        return new Response(JSON.stringify({
+          command_outcome: {
+            command_id: commandBody?.command_id,
+            status: 'SUCCEEDED',
+            public_code: 'SUBAGENT_RESULT_ACCEPTED',
+          },
+        }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+      return new Response(JSON.stringify({
+        connection_id: 'connection-result', connection_generation: 3,
+        session_id: 'session-1', role: 'controller',
+        live_hello: { live_owner_epoch: '1', live_revision: '0', live_snapshot: {} },
+        snapshot: { snapshot: { session_id: 'session-1', writer_generation: '1', entries: [], control: {} } },
+        live_control_snapshot: { snapshot: {} },
+      }), { status: 201, headers: { 'Content-Type': 'application/json' } });
+    }));
+
+    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+    await connection.acceptSubagentResult('result-1', 'read-only');
+
+    expect(commandBody).toMatchObject({
+      command_kind: 'ACCEPT_SUBAGENT_RESULT',
+      source_subagent_result_id: 'result-1',
+      requested_permission_mode: 'PERMISSION_MODE_READ_ONLY',
+    });
+  });
+});
+
+describe('session summaries', () => {
+  it('keeps process-loaded state structured for the sidebar', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      sessions: [{
+        id: 'session-loaded',
+        title: '会话 loaded',
+        subtitle: '13 条记录',
+        lifecycle: 'OPEN',
+        updated_at: '2026-08-30T11:00:00Z',
+        live: true,
+        task_counts: { total: 5, active: 1, waiting: 2, attention: 1 },
+      }, {
+        id: 'session-resumable',
+        title: '会话 resumable',
+        subtitle: '8 条记录',
+        lifecycle: 'OPEN',
+        updated_at: '2026-08-30T10:00:00Z',
+        live: false,
+      }],
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+
+    const sessions = await new LocalHttpRuntimeAdapter().listSessions();
+
+    expect(sessions.map((session) => ({
+      id: session.id,
+      subtitle: session.subtitle,
+      live: session.live,
+      taskCounts: session.taskCounts,
+    }))).toEqual([
+      {
+        id: 'session-loaded', subtitle: '13 条记录', live: true,
+        taskCounts: { total: 5, active: 1, waiting: 2, attention: 1 },
+      },
+      { id: 'session-resumable', subtitle: '8 条记录', live: false, taskCounts: undefined },
+    ]);
+  });
+});
+
+describe('session task inventory', () => {
+  it('projects the durable page with every state, result field, and dependency', async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL) => {
+      void _input;
+      return new Response(JSON.stringify({
+      session_id: 'session-1',
+      tasks: [{
+        id: 'task-blocked', parent_turn_id: 'turn-1', batch_id: 'batch-1',
+        task_key: 'verify', label: '验证结果', profile: 'verification_worker',
+        display_role: '验证', context: { mode: 'LAST_N', last_n_turns: 4 },
+        objective: '确认结果可以使用。', status: 'BLOCKED_DEPENDENCY_FAILED',
+        accepted_at: '2026-08-30T12:00:00Z', terminal_at: '2026-08-30T12:01:00Z',
+        dependencies: [{
+          task_id: 'task-failed', task_key: 'build', label: '生成结果',
+          status: 'FAILED', result_summary: null,
+        }],
+        result: {
+          id: 'result-1', entry_id: 'entry-1', source: 'EXPLICIT',
+          summary: '保留的总结', output_preview: '输出摘录',
+          diagnostics: [{ message: '前置检查失败' }], accepted: false,
+        },
+      }],
+      total_count: 51, remaining_count: 50, next_cursor: 'page-2',
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const page = await new LocalHttpRuntimeAdapter().listSessionTasks('session-1');
+
+    expect(String(fetchMock.mock.calls[0][0])).toContain('/api/sessions/session-1/tasks?limit=50');
+    expect(page).toMatchObject({ totalCount: 51, remainingCount: 50, nextCursor: 'page-2' });
+    expect(page.tasks[0]).toMatchObject({
+      id: 'task-blocked', status: 'blocked', role: '验证',
+      context: { mode: 'last-n', lastNTurns: 4 },
+      dependencyIds: ['task-failed'],
+      dependencies: [{ id: 'task-failed', status: 'failed', label: '生成结果' }],
+      result: {
+        id: 'result-1', entryId: 'entry-1', summary: '保留的总结',
+        outputPreview: '输出摘录', accepted: false,
+      },
+    });
+  });
+
+  it('uses durable terminal truth over stale live progress while preserving live active progress', () => {
+    const durable: AgentTask[] = [{
+      id: 'task-1', label: '持久任务', role: '研究', objective: '完成检查',
+      status: 'interrupted', dependencyIds: [], color: 'blue',
+      summary: '中断前的最后结果',
+    }];
+    const projection: RuntimeProjection = {
+      messages: [], isRunning: true, queuedCount: 0, planMode: false,
+      control: {}, liveControl: {}, todo: undefined,
+      agentTasks: [{
+        ...durable[0], status: 'running', progress: '仍在运行', summary: undefined,
+      }],
+      eventSequence: 1, liveOwnerEpoch: 1, liveRevision: 1,
+      liveControlOwnerEpoch: 1, liveControlRevision: 1,
+    };
+
+    const merged = mergeRuntimeTaskInventory(projection, durable);
+
+    expect(merged.agentTasks[0]).toMatchObject({
+      status: 'interrupted', progress: undefined, summary: '中断前的最后结果',
+    });
+    expect(merged.messages[0].subagentRuns?.[0]).toMatchObject({
+      id: 'task-1', status: 'interrupted', summary: '中断前的最后结果',
+    });
+  });
+});
+
+describe('productVisibleText', () => {
+  it('translates local runtime vocabulary without rewriting ordinary prose', () => {
+    expect(productVisibleText(
+      'ROOT subagent orchestration requires bypass-permissions mode; create_agent_tasks was rejected.',
+    )).toBe('创建子任务需要在本轮选择“完全访问”权限; 创建子任务 已被拒绝.');
+    expect(productVisibleText('The Linux kernel uses canonical paths.')).toBe(
+      'The Linux kernel uses canonical paths.',
+    );
+    expect(productVisibleText('使用 read_file 和 terminal 工具。')).toBe(
+      '使用 读取文件 和 终端。',
+    );
+  });
+});

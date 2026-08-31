@@ -80,15 +80,16 @@ class CanonicalColdContinuationSeed:
 
 @dataclass(frozen=True, slots=True)
 class CompactionContinuationSeed:
-    """Exact canonical continuation installed by an active compaction."""
+    """Exact cold base used to prove every compaction candidate."""
 
     dispatch_read: FrozenCanonicalProviderDispatchRead = field(repr=False)
     binding_rewrite_identity: str
     protected_tail_selection_fingerprint: str
 
     def __post_init__(self) -> None:
-        if not self.binding_rewrite_identity or not self.protected_tail_selection_fingerprint.startswith(
-            "sha256:"
+        if (
+            not self.binding_rewrite_identity
+            or not self.protected_tail_selection_fingerprint.startswith("sha256:")
         ):
             raise ValueError("compaction continuation seed is incomplete")
 
@@ -156,9 +157,7 @@ class SubagentInitialSeed:
             domain_identity=(
                 None
                 if self.dependency_context is None
-                else dependency_result_context_identity_digest(
-                    self.dependency_context
-                )
+                else dependency_result_context_identity_digest(self.dependency_context)
             ),
         )
         parent_present = isinstance(self.parent_context_source, ContextSourceCandidate)
@@ -167,8 +166,7 @@ class SubagentInitialSeed:
         )
         if (
             self._authority is not _SUBAGENT_SEED_AUTHORITY
-            or identity.conversation_scope_kind
-            is not ModelInputScopeKind.SUBAGENT_TASK
+            or identity.conversation_scope_kind is not ModelInputScopeKind.SUBAGENT_TASK
             or identity.scope_subagent_task_id != self.task_id
             or not self.parent_turn_id
             or self.parent_call_subject.caller_turn_id != self.parent_turn_id
@@ -186,7 +184,8 @@ class SubagentInitialSeed:
                 and parent_present
             )
             or bool(self.parent_context_selection.selected_units) != parent_present
-            or self.parent_context_source.source_kind is not ContextSourceKind.PARENT_CONTEXT
+            or self.parent_context_source.source_kind
+            is not ContextSourceKind.PARENT_CONTEXT
             or (self.dependency_context is None) == dependency_present
             or self.dependency_results_source.source_kind
             is not ContextSourceKind.DEPENDENCY_RESULTS
@@ -229,9 +228,7 @@ def build_subagent_initial_seed(
         kind=ContextSourceKind.PARENT_CONTEXT,
         text=parent_context_selection.rendered_body,
         domain_identity={
-            "subject": parent_context_call_subject_identity_digest(
-                parent_call_subject
-            ),
+            "subject": parent_context_call_subject_identity_digest(parent_call_subject),
             "selection": parent_context_selection_identity_digest(
                 parent_call_subject, parent_context_selection
             ),
@@ -340,9 +337,7 @@ class ColdEpochContinuityCandidateInputs:
 class ColdEpochInputAssemblyResult:
     compiled_input: FrozenCompiledModelInput = field(repr=False)
     wire_input_plan: FrozenProviderWireInputPlan = field(repr=False)
-    continuity_candidate_inputs: ColdEpochContinuityCandidateInputs = field(
-        repr=False
-    )
+    continuity_candidate_inputs: ColdEpochContinuityCandidateInputs = field(repr=False)
 
 
 class ColdEpochWirePlanner(Protocol):
@@ -506,13 +501,11 @@ class KernelColdEpochInputAssembler:
         canonical = seed.dispatch_read.compile_snapshot.canonical_input
         identity = canonical.identity
         if (
-            compile_request.canonical_facts
-            != seed.dispatch_read.compile_snapshot
+            compile_request.canonical_facts != seed.dispatch_read.compile_snapshot
             or compile_request.canonical_input != canonical
             or planning.scope.session_id != identity.session_id
             or planning.scope.scope_kind is not identity.conversation_scope_kind
-            or planning.scope.scope_subagent_task_id
-            != identity.scope_subagent_task_id
+            or planning.scope.scope_subagent_task_id != identity.scope_subagent_task_id
             or capability_dispatch_cut.conversation_scope_kind
             is not identity.conversation_scope_kind
             or capability_dispatch_cut.scope_subagent_task_id
@@ -534,13 +527,17 @@ class KernelColdEpochInputAssembler:
         if isinstance(seed, SubagentInitialSeed):
             observed = {
                 item.source_kind: item
-                for item in (*non_trigger_sources.candidates, *non_trigger_sources.absent_facts)
+                for item in (
+                    *non_trigger_sources.candidates,
+                    *non_trigger_sources.absent_facts,
+                )
                 if item.source_kind
-                in {ContextSourceKind.PARENT_CONTEXT, ContextSourceKind.DEPENDENCY_RESULTS}
+                in {
+                    ContextSourceKind.PARENT_CONTEXT,
+                    ContextSourceKind.DEPENDENCY_RESULTS,
+                }
             }
-            expected = {
-                item.source_kind: item for item in seed.source_replacements
-            }
+            expected = {item.source_kind: item for item in seed.source_replacements}
             if observed != expected or planning.predecessor_view is not None:
                 raise ValueError("subagent cold seed sources do not exact-join")
 

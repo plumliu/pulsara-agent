@@ -64,6 +64,7 @@ from pulsara_agent.model_input.contracts import (
     ModelInputScopeKind,
 )
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
+from pulsara_agent.terminal_protocol.canonical_v3 import CanonicalProtocolReader
 from pulsara_agent.primitives.context import freeze_json
 from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
 from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
@@ -980,6 +981,16 @@ def test_subagent_result_acceptance_linearizes_at_provider_safe_point(
         deadline_monotonic=monotonic() + 30,
     )
     assert compatible == accepted
+    protocol_snapshot = CanonicalProtocolReader(provider).snapshot(
+        session_id=lease.guard.session_id,
+        maximum_entries=32,
+        maximum_control_items=32,
+        deadline_monotonic=monotonic() + 30,
+    )
+    accepted_projection = next(
+        entry for entry in protocol_snapshot.entries if entry.entry_id == accepted.entry_id
+    )
+    assert accepted_projection.source_subagent_result_id == child_result_id
     with provider.connection(
         lane=PostgresConnectionLane.INSPECTOR,
         deadline_monotonic=monotonic() + 30,

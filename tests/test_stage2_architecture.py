@@ -406,7 +406,7 @@ def test_stage2_runner_decomposition_has_exact_owners_and_import_direction() -> 
         {
             "_accept_turn_exact",
             "_prepare_provider_dispatch",
-            "_execute_active_compaction_fenced",
+            "_execute_compaction_fenced",
             "_accept_plan_control_batch",
             "_execute_tool_batch",
             "_settle_known_tool_result",

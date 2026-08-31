@@ -58,6 +58,7 @@ from pulsara_agent.ports.provider_stream import (
     ProviderStreamFailure,
     freeze_provider_adapter_completed_replay_payload,
 )
+from pulsara_agent.ports.live_agent_event import ReasoningPresentationKind
 from pulsara_agent.primitives.context import (
     FrozenJsonObjectFact,
     canonical_json_bytes,
@@ -293,9 +294,7 @@ def build_responses_payload(
         root = thaw_json(plan.materialization.root_policy_value)
         if root is not None and not isinstance(root, str):
             raise TypeError("Responses root policy must be text or null")
-        wire_input = _thaw_wire_objects(
-            plan.materialization.ordered_input_items
-        )
+        wire_input = _thaw_wire_objects(plan.materialization.ordered_input_items)
         planned_tools = _thaw_wire_objects(plan.materialization.tool_items)
     else:
         root = context.system_prompt
@@ -368,13 +367,9 @@ class ResponsesCompletionAccumulator:
     _reasoning_summary_done: set[int] = field(default_factory=set)
     _reasoning_content_done: set[int] = field(default_factory=set)
     _output_item_added: dict[int, str] = field(default_factory=dict)
-    _output_item_done: dict[int, FrozenJsonObjectFact] = field(
-        default_factory=dict
-    )
+    _output_item_done: dict[int, FrozenJsonObjectFact] = field(default_factory=dict)
     _content_part_added: dict[tuple[int, int], str] = field(default_factory=dict)
-    _content_part_done: dict[tuple[int, int], str] = field(
-        default_factory=dict
-    )
+    _content_part_done: dict[tuple[int, int], str] = field(default_factory=dict)
     _stream_item_index_invalid: bool = False
     _done_output_aggregate_bytes: int = 2
 
@@ -732,9 +727,7 @@ class ResponsesCompletionAccumulator:
                             "Responses output item is not an object",
                             reason_code="transport_responses_output_invalid",
                         )
-                    streamed = _thaw_frozen_object(
-                        self._output_item_done[index]
-                    )
+                    streamed = _thaw_frozen_object(self._output_item_done[index])
                     selected = _select_terminal_or_streamed_output_item(
                         terminal=item,
                         streamed=streamed,
@@ -764,9 +757,7 @@ class ResponsesCompletionAccumulator:
                 for output_index, item in enumerate(output)
                 if isinstance(item, dict) and item.get("type") == "message"
                 for content_index, _part in enumerate(
-                    item.get("content")
-                    if isinstance(item.get("content"), list)
-                    else ()
+                    item.get("content") if isinstance(item.get("content"), list) else ()
                 )
             }
             if set(self._content_part_done) != expected_parts:
@@ -774,9 +765,10 @@ class ResponsesCompletionAccumulator:
                     "Responses content-part done sequence is incomplete",
                     reason_code="transport_responses_output_mismatch",
                 )
-        for (output_index, content_index), part_fingerprint in (
-            self._content_part_done.items()
-        ):
+        for (
+            output_index,
+            content_index,
+        ), part_fingerprint in self._content_part_done.items():
             if output_index >= len(output):
                 raise LLMTransportContractError(
                     "Responses content part has no final output item",
@@ -841,9 +833,7 @@ def _responses_incomplete_reason(
         ),
         "content_filter": ProviderOutputIncompleteReason.CONTENT_FILTERED,
     }
-    return aliases.get(
-        raw, ProviderOutputIncompleteReason.UNKNOWN_PROVIDER_INCOMPLETE
-    )
+    return aliases.get(raw, ProviderOutputIncompleteReason.UNKNOWN_PROVIDER_INCOMPLETE)
 
 
 def _responses_output_index(event: dict[str, Any]) -> int:
@@ -932,10 +922,7 @@ def _message_content_differs_only_by_empty_operational_elision(
             return False
         if any(streamed_part[key] != [] for key in omitted):
             return False
-        if any(
-            terminal_part[key] != streamed_part[key]
-            for key in terminal_keys
-        ):
+        if any(terminal_part[key] != streamed_part[key] for key in terminal_keys):
             return False
     return True
 
@@ -964,9 +951,7 @@ def _response_content_part_identity_fingerprint(
         "item_id": event.get("item_id"),
         "type": part.get("type"),
     }
-    return context_fingerprint(
-        "pulsara.responses-content-part-identity:v1", identity
-    )
+    return context_fingerprint("pulsara.responses-content-part-identity:v1", identity)
 
 
 def _response_content_part_fingerprint(*, item_id: object, part: object) -> str:
@@ -1069,9 +1054,7 @@ def _project_completed_response(
                     "Responses encrypted reasoning carrier is not text",
                     reason_code="transport_responses_output_invalid",
                 )
-            streamed_summary = "".join(
-                streamed_reasoning_summary.get(output_index, ())
-            )
+            streamed_summary = "".join(streamed_reasoning_summary.get(output_index, ()))
             if output_index in reasoning_summary_done or streamed_summary:
                 if summary_text != streamed_summary:
                     raise LLMTransportContractError(
@@ -1079,10 +1062,13 @@ def _project_completed_response(
                         reason_code="transport_responses_output_mismatch",
                     )
             elif summary_text:
-                events.extend(builder.thinking_end(final_text=summary_text))
-            streamed_content = "".join(
-                streamed_reasoning_content.get(output_index, ())
-            )
+                events.extend(
+                    builder.thinking_end(
+                        final_text=summary_text,
+                        presentation_kind=ReasoningPresentationKind.SUMMARY,
+                    )
+                )
+            streamed_content = "".join(streamed_reasoning_content.get(output_index, ()))
             if output_index in reasoning_content_done or streamed_content:
                 # Some OpenAI-compatible Responses implementations stream the
                 # public reasoning summary under ``reasoning_text`` and place
@@ -1100,6 +1086,13 @@ def _project_completed_response(
                         "final Responses reasoning content differs from the stream",
                         reason_code="transport_responses_output_mismatch",
                     )
+            elif content_text:
+                events.extend(
+                    builder.thinking_end(
+                        final_text=content_text,
+                        presentation_kind=ReasoningPresentationKind.FULL,
+                    )
+                )
         elif item_type == "message":
             final_text_indexes.add(output_index)
             _validate_response_item_keys(
@@ -1233,9 +1226,7 @@ def _project_completed_response(
     return events, tuple(frozen_source)
 
 
-def _validate_response_item_keys(
-    item: dict[str, Any], allowed: set[str]
-) -> None:
+def _validate_response_item_keys(item: dict[str, Any], allowed: set[str]) -> None:
     if set(item).difference(allowed):
         raise LLMTransportContractError(
             "Responses output item contains unsupported fields",
@@ -1369,18 +1360,28 @@ def translate_responses_event(
         return builder.text_end(
             final_text=final_text if isinstance(final_text, str) else None
         )
-    if event_type in {
-        "response.reasoning_summary_text.delta",
-        "response.reasoning_text.delta",
-    }:
-        return builder.thinking_delta(str(event.get("delta", "")))
+    if event_type == "response.reasoning_summary_text.delta":
+        return builder.thinking_delta(
+            str(event.get("delta", "")),
+            presentation_kind=ReasoningPresentationKind.SUMMARY,
+        )
+    if event_type == "response.reasoning_text.delta":
+        return builder.thinking_delta(
+            str(event.get("delta", "")),
+            presentation_kind=ReasoningPresentationKind.FULL,
+        )
     if event_type in {
         "response.reasoning_summary_text.done",
         "response.reasoning_text.done",
     }:
         final_text = event.get("text")
         return builder.thinking_end(
-            final_text=final_text if isinstance(final_text, str) else None
+            final_text=final_text if isinstance(final_text, str) else None,
+            presentation_kind=(
+                ReasoningPresentationKind.SUMMARY
+                if event_type == "response.reasoning_summary_text.done"
+                else ReasoningPresentationKind.FULL
+            ),
         )
     if event_type == "response.output_item.added":
         item = event.get("item")

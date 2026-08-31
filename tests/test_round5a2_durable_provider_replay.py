@@ -23,7 +23,9 @@ from pulsara_agent.llm.provider_replay import (
     build_prepared_durable_provider_assistant_replay,
     build_provider_replay_target_compatibility,
     provider_replay_id,
+    project_provider_visible_reasoning,
 )
+from pulsara_agent.ports.live_agent_event import ReasoningPresentationKind
 from pulsara_agent.model_input.provider_replay import (
     ProviderReplayHydrationError,
     ProviderReplayHydrationFailureKind,
@@ -108,13 +110,28 @@ def test_round5a2_dogfood_report_scrubs_only_the_exact_configured_key() -> None:
 def test_round5a2_replay_target_is_closed_and_process_stable() -> None:
     baseline = _target()
     assert baseline == _target()
-    assert baseline.replay_target_fingerprint != _target(endpoint="3").replay_target_fingerprint
-    assert baseline.replay_target_fingerprint != _target(model="model-b").replay_target_fingerprint
-    assert baseline.replay_target_fingerprint != _target(binding="other-chat-binding").replay_target_fingerprint
+    assert (
+        baseline.replay_target_fingerprint
+        != _target(endpoint="3").replay_target_fingerprint
+    )
+    assert (
+        baseline.replay_target_fingerprint
+        != _target(model="model-b").replay_target_fingerprint
+    )
+    assert (
+        baseline.replay_target_fingerprint
+        != _target(binding="other-chat-binding").replay_target_fingerprint
+    )
     responses = _target(api="openai_responses")
     assert baseline.replay_target_fingerprint != responses.replay_target_fingerprint
-    assert baseline.codec_kind is ProviderAssistantReplayCodecKind.CHAT_CLOSED_REASONING_FIELDS
-    assert responses.codec_kind is ProviderAssistantReplayCodecKind.RESPONSES_EXACT_OUTPUT_ITEMS
+    assert (
+        baseline.codec_kind
+        is ProviderAssistantReplayCodecKind.CHAT_CLOSED_REASONING_FIELDS
+    )
+    assert (
+        responses.codec_kind
+        is ProviderAssistantReplayCodecKind.RESPONSES_EXACT_OUTPUT_ITEMS
+    )
 
 
 def test_round5a2_private_body_roundtrips_without_repr_disclosure() -> None:
@@ -158,6 +175,84 @@ def test_round5a2_private_body_roundtrips_without_repr_disclosure() -> None:
     assert decoded == fragment
     for carrier in (adapter_payload, candidate, fragment, decoded):
         assert sentinel not in repr(carrier)
+
+
+def test_provider_visible_chat_reasoning_is_derived_from_exact_replay_text() -> None:
+    candidate = _candidate(
+        _frozen_object(
+            {
+                "role": "assistant",
+                "content": "public",
+                "reasoning_content": "full provider reasoning",
+                "reasoning_details": [{"encrypted": "opaque"}],
+            }
+        )
+    )
+
+    projected = project_provider_visible_reasoning(
+        codec_kind=candidate.codec_kind,
+        payload_bytes=candidate.payload_bytes,
+        expected_payload_digest=candidate.payload_digest,
+        expected_payload_size=candidate.payload_size,
+        expected_item_count=candidate.item_count,
+    )
+
+    assert [(item.presentation_kind, item.text) for item in projected] == [
+        (ReasoningPresentationKind.FULL, "full provider reasoning")
+    ]
+
+
+def test_provider_visible_responses_reasoning_distinguishes_summary_and_full_text() -> (
+    None
+):
+    candidate = _candidate(
+        _frozen_object(
+            {
+                "type": "reasoning",
+                "id": "reasoning:1",
+                "status": "completed",
+                "summary": [{"type": "summary_text", "text": "short summary"}],
+                "content": [{"type": "reasoning_text", "text": "full reasoning"}],
+                "encrypted_content": "opaque-carrier-is-not-product-text",
+            }
+        ),
+        api="openai_responses",
+    )
+
+    projected = project_provider_visible_reasoning(
+        codec_kind=candidate.codec_kind,
+        payload_bytes=candidate.payload_bytes,
+        expected_payload_digest=candidate.payload_digest,
+        expected_payload_size=candidate.payload_size,
+        expected_item_count=candidate.item_count,
+    )
+
+    assert [(item.presentation_kind, item.text) for item in projected] == [
+        (ReasoningPresentationKind.SUMMARY, "short summary"),
+        (ReasoningPresentationKind.FULL, "full reasoning"),
+    ]
+    assert "opaque-carrier" not in repr(projected)
+
+
+def test_provider_visible_reasoning_rejects_replay_integrity_drift() -> None:
+    candidate = _candidate(
+        _frozen_object(
+            {
+                "role": "assistant",
+                "content": "public",
+                "reasoning": "visible",
+            }
+        )
+    )
+
+    with pytest.raises(ValueError, match="integrity"):
+        project_provider_visible_reasoning(
+            codec_kind=candidate.codec_kind,
+            payload_bytes=candidate.payload_bytes,
+            expected_payload_digest="sha256:" + "0" * 64,
+            expected_payload_size=candidate.payload_size,
+            expected_item_count=candidate.item_count,
+        )
 
 
 def test_round5a2_chat_payload_boundary_is_exact() -> None:
@@ -231,17 +326,15 @@ def test_round5a2_responses_item_count_and_allowlist_are_closed() -> None:
 def test_round5a2_dispatch_composite_accepts_exact_boundary(delta: int) -> None:
     canonical = 1 << 20
     metadata = 8 << 10
-    selected = (
-        MAXIMUM_PROVIDER_DISPATCH_COMPOSITE_BYTES
-        - canonical
-        - metadata
-        + delta
+    selected = MAXIMUM_PROVIDER_DISPATCH_COMPOSITE_BYTES - canonical - metadata + delta
+    assert (
+        quote_provider_dispatch_composite_bytes(
+            canonical_compile_bytes=canonical,
+            manifest_metadata_bytes=metadata,
+            selected_payload_bytes=selected,
+        )
+        == MAXIMUM_PROVIDER_DISPATCH_COMPOSITE_BYTES + delta
     )
-    assert quote_provider_dispatch_composite_bytes(
-        canonical_compile_bytes=canonical,
-        manifest_metadata_bytes=metadata,
-        selected_payload_bytes=selected,
-    ) == MAXIMUM_PROVIDER_DISPATCH_COMPOSITE_BYTES + delta
 
 
 def test_round5a2_dispatch_composite_rejects_boundary_plus_one_typed() -> None:
@@ -251,14 +344,13 @@ def test_round5a2_dispatch_composite_rejects_boundary_plus_one_typed() -> None:
             manifest_metadata_bytes=0,
             selected_payload_bytes=1,
         )
-    assert (
-        captured.value.kind
-        is ProviderReplayHydrationFailureKind.RESOURCE_BOUNDARY
-    )
+    assert captured.value.kind is ProviderReplayHydrationFailureKind.RESOURCE_BOUNDARY
 
 
 def test_round5a2_metadata_read_and_writer_paths_are_sealed() -> None:
-    dispatch_source = inspect.getsource(CanonicalProviderInputReader.read_frozen_dispatch)
+    dispatch_source = inspect.getsource(
+        CanonicalProviderInputReader.read_frozen_dispatch
+    )
     hydrate_source = inspect.getsource(
         CanonicalProviderInputReader.hydrate_selected_provider_replays
     )
@@ -276,7 +368,9 @@ def test_round5a2_metadata_read_and_writer_paths_are_sealed() -> None:
     repository_source = (KERNEL / "_repository/conversation.py").read_text(
         encoding="utf-8"
     )
-    assert "UPDATE pulsara_v3.provider_assistant_replay_fragments" not in repository_source
+    assert (
+        "UPDATE pulsara_v3.provider_assistant_replay_fragments" not in repository_source
+    )
     assert "UPDATE pulsara_v3.transcript_entries\n" not in repository_source
 
 
@@ -301,9 +395,7 @@ def test_round5a2_has_no_vendor_or_remote_state_branch_and_oracle_is_exact() -> 
         tree = ast.parse(source, filename=str(path))
         assert not any(token in source.lower() for token in forbidden_text), path
         authority_names = {
-            node.id.lower()
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Name)
+            node.id.lower() for node in ast.walk(tree) if isinstance(node, ast.Name)
         } | {
             node.name.lower()
             for node in ast.walk(tree)

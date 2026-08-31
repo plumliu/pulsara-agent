@@ -9,6 +9,7 @@ from uuid import uuid4
 
 from pulsara_agent.ports.live_agent_event import (
     ProviderStreamPayload,
+    ReasoningPresentationKind,
     TextDeltaPayload,
     TextEndPayload,
     TextStartPayload,
@@ -41,6 +42,7 @@ from pulsara_agent.primitives.model_call import (
 class ProviderLiveItemBuilder:
     text_block_id: str | None = None
     thinking_block_id: str | None = None
+    thinking_presentation_kind: ReasoningPresentationKind | None = None
     text_parts: list[str] = field(default_factory=list)
     thinking_parts: list[str] = field(default_factory=list)
     active_tool_call_ids: dict[str, None] = field(default_factory=dict)
@@ -75,14 +77,30 @@ class ProviderLiveItemBuilder:
         self.text_parts.append(delta)
         return events
 
-    def thinking_delta(self, delta: str) -> list[ProviderStreamPayload]:
+    def thinking_delta(
+        self,
+        delta: str,
+        *,
+        presentation_kind: ReasoningPresentationKind = ReasoningPresentationKind.FULL,
+    ) -> list[ProviderStreamPayload]:
         if not delta:
             return []
         self.has_semantic_output = True
         events: list[ProviderStreamPayload] = []
         if self.thinking_block_id is None:
             self.thinking_block_id = f"thinking:{uuid4()}"
-            events.append(ThinkingStartPayload(block_identity=self.thinking_block_id))
+            self.thinking_presentation_kind = presentation_kind
+            events.append(
+                ThinkingStartPayload(
+                    block_identity=self.thinking_block_id,
+                    presentation_kind=presentation_kind,
+                )
+            )
+        elif self.thinking_presentation_kind is not presentation_kind:
+            raise LLMTransportContractError(
+                "provider changed the presentation kind of an open reasoning block",
+                reason_code="transport_thinking_presentation_kind_mismatch",
+            )
         events.append(
             ThinkingDeltaPayload(block_identity=self.thinking_block_id, delta=delta)
         )
@@ -119,12 +137,22 @@ class ProviderLiveItemBuilder:
         return events
 
     def thinking_end(
-        self, *, final_text: str | None = None
+        self,
+        *,
+        final_text: str | None = None,
+        presentation_kind: ReasoningPresentationKind | None = None,
     ) -> list[ProviderStreamPayload]:
         events: list[ProviderStreamPayload] = []
         if final_text is not None:
             if self.thinking_block_id is None and final_text:
-                events.extend(self.thinking_delta(final_text))
+                events.extend(
+                    self.thinking_delta(
+                        final_text,
+                        presentation_kind=(
+                            presentation_kind or ReasoningPresentationKind.FULL
+                        ),
+                    )
+                )
             elif (
                 self.thinking_block_id is not None
                 and "".join(self.thinking_parts) != final_text
@@ -133,11 +161,21 @@ class ProviderLiveItemBuilder:
                     "provider thinking done payload differs from its delta prefix",
                     reason_code="transport_thinking_done_content_mismatch",
                 )
+        if (
+            self.thinking_block_id is not None
+            and presentation_kind is not None
+            and self.thinking_presentation_kind is not presentation_kind
+        ):
+            raise LLMTransportContractError(
+                "provider changed the presentation kind of an open reasoning block",
+                reason_code="transport_thinking_presentation_kind_mismatch",
+            )
         if self.thinking_block_id is None:
             return events
         block_id = self.thinking_block_id
         completed = "".join(self.thinking_parts)
         self.thinking_block_id = None
+        self.thinking_presentation_kind = None
         self.thinking_parts.clear()
         events.append(
             ThinkingEndPayload(
@@ -259,9 +297,7 @@ class ProviderLiveItemBuilder:
         events: list[ProviderStreamPayload] = []
         parts = self.tool_call_argument_parts.get(tool_call_id, ())
         if not parts:
-            events.extend(
-                self.tool_call_delta(tool_call_id=tool_call_id, delta="{}")
-            )
+            events.extend(self.tool_call_delta(tool_call_id=tool_call_id, delta="{}"))
         self.active_tool_call_ids.pop(tool_call_id)
         arguments = "".join(self.tool_call_argument_parts[tool_call_id])
         tool_name = self.tool_call_names[tool_call_id]

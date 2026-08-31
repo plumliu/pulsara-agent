@@ -22,6 +22,7 @@ from pulsara_agent.conversation_kernel.tool_contracts import (
     ProcessLocalEffectSettlementOutcome,
 )
 from pulsara_agent.conversation_kernel.turn_admission import (
+    SubagentTurnAdmissionPostCommitError,
     TurnAdmissionCoordinator,
 )
 from pulsara_agent.conversation_kernel.cancellation import (
@@ -74,6 +75,16 @@ def _root_activation(turn: str = "turn:1"):
         session_id="session:1",
         admission_kind="DIRECT",
         command_id="command:1",
+        exact_turn_id=turn,
+        exact_initial_entry_id=f"entry:{turn}",
+        exact_context_binding_revision_id=f"context:{turn}",
+    )
+
+
+def _child_activation(turn: str = "turn:child:1"):
+    return build_child_activation(
+        session_id="session:1",
+        subagent_task_id="subagent-task:1",
         exact_turn_id=turn,
         exact_initial_entry_id=f"entry:{turn}",
         exact_context_binding_revision_id=f"context:{turn}",
@@ -710,6 +721,31 @@ def test_todo_admission_finalizer_is_not_detached_by_waiter_cancellation() -> No
         with pytest.raises(asyncio.CancelledError):
             await task
         assert installed
+
+    asyncio.run(exercise())
+
+
+def test_child_todo_activation_failure_preserves_postcommit_ownership() -> None:
+    async def exercise() -> None:
+        accepted = AcceptedEntry("entry:turn:child:1", "turn:child:1", 1, 1)
+        terminalized: list[tuple[str, str]] = []
+
+        async def finalizer(_prepared, _accepted) -> None:
+            raise RuntimeError("child TODO run capacity is exhausted")
+
+        async def terminalize(turn_id: str, reason: str) -> None:
+            terminalized.append((turn_id, reason))
+
+        coordinator = object.__new__(TurnAdmissionCoordinator)
+        coordinator._todo_finalizer = finalizer
+        coordinator.interrupt_turn = terminalize
+
+        with pytest.raises(SubagentTurnAdmissionPostCommitError) as raised:
+            await coordinator._finalize_todo(_child_activation(), accepted)
+
+        assert raised.value.accepted == accepted
+        assert isinstance(raised.value.activation_error, RuntimeError)
+        assert terminalized == []
 
     asyncio.run(exercise())
 

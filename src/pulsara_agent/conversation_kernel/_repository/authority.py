@@ -35,6 +35,9 @@ class _AuthorityOperations:
         *,
         session_id: str,
         workspace_id: str,
+        workspace_kind: str = "project",
+        workspace_root: str | None = None,
+        workspace_label: str | None = None,
         memory_domain_id: str = "u_local",
         writer_owner_id: str,
         lease_seconds: float,
@@ -42,6 +45,12 @@ class _AuthorityOperations:
     ) -> WriterLease:
         if lease_seconds <= 0:
             raise ValueError("writer lease must be finite and positive")
+        if workspace_kind not in {"project", "transient"}:
+            raise ValueError("workspace kind is invalid")
+        normalized_workspace_root = workspace_root or workspace_id
+        normalized_workspace_label = workspace_label or workspace_id
+        if not normalized_workspace_root or not normalized_workspace_label:
+            raise ValueError("workspace metadata is incomplete")
         expires_at = _utcnow() + timedelta(seconds=lease_seconds)
         self._begin_event_batch()
         try:
@@ -52,7 +61,8 @@ class _AuthorityOperations:
             ) as connection:
                 row = connection.execute(
                     """
-                    SELECT id, workspace_id, memory_domain_id, lifecycle, writer_generation,
+                    SELECT id, workspace_id, workspace_kind, workspace_root,
+                           workspace_label, memory_domain_id, lifecycle, writer_generation,
                            writer_lease_owner_id, writer_lease_expires_at
                     FROM pulsara_v3.sessions
                     WHERE id = %s
@@ -64,16 +74,34 @@ class _AuthorityOperations:
                     connection.execute(
                         """
                         INSERT INTO pulsara_v3.sessions (
-                            id, workspace_id, memory_domain_id, lifecycle, writer_generation,
+                            id, workspace_id, workspace_kind, workspace_root,
+                            workspace_label, memory_domain_id, lifecycle, writer_generation,
                             writer_lease_owner_id, writer_lease_expires_at
-                        ) VALUES (%s, %s, %s, 'OPEN', 1, %s, %s)
+                        ) VALUES (%s, %s, %s, %s, %s, %s, 'OPEN', 1, %s, %s)
                         """,
-                        (session_id, workspace_id, memory_domain_id, writer_owner_id, expires_at),
+                        (
+                            session_id,
+                            workspace_id,
+                            workspace_kind,
+                            normalized_workspace_root,
+                            normalized_workspace_label,
+                            memory_domain_id,
+                            writer_owner_id,
+                            expires_at,
+                        ),
                     )
                     generation = 1
                 else:
                     if str(row["workspace_id"]) != workspace_id:
                         raise ConversationKernelConflict("session workspace conflict")
+                    if (
+                        str(row["workspace_kind"]) != workspace_kind
+                        or str(row["workspace_root"]) != normalized_workspace_root
+                        or str(row["workspace_label"]) != normalized_workspace_label
+                    ):
+                        raise ConversationKernelConflict(
+                            "session workspace metadata conflict"
+                        )
                     if str(row["memory_domain_id"]) != memory_domain_id:
                         raise ConversationKernelConflict("session memory domain conflict")
                     if str(row["lifecycle"]) != "OPEN":

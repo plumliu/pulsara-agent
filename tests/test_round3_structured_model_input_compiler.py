@@ -87,9 +87,6 @@ from pulsara_agent.conversation_kernel.execution_watchdogs import (
 from pulsara_agent.conversation_kernel.compaction.planner import (
     freeze_tail_and_prefix,
 )
-from pulsara_agent.conversation_kernel.compaction.contracts import (
-    CompactionTargetBranch,
-)
 from pulsara_agent.conversation_kernel.compaction.prompt import (
     compaction_summary_request,
 )
@@ -993,7 +990,7 @@ def _prepared_request(
                 else provider_profile.wire_api
             ),
             provider_profile=provider_profile,
-        )
+        ),
     )
     prepared = prepare_test_model_call(
         model,
@@ -2011,6 +2008,45 @@ def test_round3_assistant_semantic_text_never_uses_parent_manifest() -> None:
     assert "draft_identity" not in mixed_lowered.fixed_message.content[0]
 
 
+def test_round3_subagent_result_uses_typed_user_role_envelope() -> None:
+    result = FrozenProviderInputItem(
+        FrozenProviderInputItemKind.USER,
+        "entry:accepted-result",
+        2,
+        "turn:root",
+        "exact delegated summary",
+        input_origin=CanonicalInputOriginKind.SUBAGENT_RESULT,
+    )
+    lowered = lower_canonical_item(
+        result,
+        artifact_read_available=False,
+        limits=StructuredModelInputLimits(),
+    )
+    assert lowered.fixed_message is not None
+    assert lowered.fixed_message.role is MessageRole.USER
+    carrier = json.loads(lowered.fixed_message.content[0])
+    assert carrier["pulsara_subagent_result"]["content"] == (
+        "exact delegated summary"
+    )
+    assert "not a new human instruction" in (
+        carrier["pulsara_subagent_result"]["handling"]
+    )
+
+    human = replace(
+        result,
+        source_entry_id="entry:human",
+        text="ordinary human text",
+        input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE,
+    )
+    lowered_human = lower_canonical_item(
+        human,
+        artifact_read_available=False,
+        limits=StructuredModelInputLimits(),
+    )
+    assert lowered_human.fixed_message is not None
+    assert lowered_human.fixed_message.content == ("ordinary human text",)
+
+
 def test_round3_tool_result_variants_are_typed_utf8_safe_and_surface_aware() -> None:
     item = _tool_result("🙂" * 10_000, sequence=2, turn_id="turn:test")
     without_read = lower_canonical_item(
@@ -2543,9 +2579,7 @@ def test_round3_1_overbudget_append_can_be_projected_without_execution_authority
             request.canonical_input.identity.provider_input_through_sequence
         ),
     )
-    summary_request = compaction_summary_request(
-        CompactionTargetBranch.ACTIVE_INSTALLATION
-    )
+    summary_request = compaction_summary_request()
     tail, prefix = freeze_tail_and_prefix(
         source_view=source_view,
         complete_tool_groups=(),
@@ -2643,9 +2677,7 @@ class _Capability:
         root_policy = LooseSkillDefinitionProducer(
             user_product_skills_root=Path.cwd() / ".test-r3-user-product",
             user_agents_skills_root=Path.cwd() / ".test-r3-user-agents",
-        ).prepare_root_policy(
-            Path.cwd()
-        )
+        ).prepare_root_policy(Path.cwd())
         return issue_skill_catalog_source_snapshot(
             conversation_scope_kind=conversation_scope_kind,
             scope_subagent_task_id=scope_subagent_task_id,
@@ -2996,9 +3028,7 @@ def test_round3_capability_sources_and_public_diagnostics_are_separate(
         for item in collected.absent_facts
         if item.source_kind is ContextSourceKind.RETAINED_SKILL_CONTEXT
     )
-    assert retained_absence.absence_kind is (
-        ContextSourceAbsenceKind.EXPLICIT_EMPTY
-    )
+    assert retained_absence.absence_kind is (ContextSourceAbsenceKind.EXPLICIT_EMPTY)
     assert collected.diagnostics[0].code is (
         ContextPublicDiagnosticCode.CAPABILITY_DISCOVERY_INCOMPLETE
     )

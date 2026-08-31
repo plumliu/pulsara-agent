@@ -31,6 +31,9 @@ from pulsara_agent.conversation_kernel.repository import (
     ConversationKernelRepository,
 )
 from pulsara_agent.conversation_kernel.runner import KernelRunResult
+from pulsara_agent.conversation_kernel.turn_admission import (
+    SubagentTurnAdmissionPostCommitError,
+)
 from pulsara_agent.conversation_kernel.subagent import (
     ROOT_ORCHESTRATION_TOOL_NAMES,
     SUBAGENT_TOOL_NAMES,
@@ -53,6 +56,7 @@ from pulsara_agent.conversation_kernel.subagents.contracts import (
     build_subagent_result_public_fact,
 )
 from pulsara_agent.conversation_kernel.todo_runtime import TodoRunStateOwner
+from pulsara_agent.conversation_kernel.todo_runtime import build_child_activation
 from pulsara_agent.primitives.context import freeze_json
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.primitives.run_permission import (
@@ -708,6 +712,55 @@ class _CountingBlockingChildRunner:
 
     async def admit_subagent_turn(self, **kwargs: object):
         return kwargs["cancellation_intent"]
+
+    async def run_admitted_subagent_turn(self, *, launch, **_kwargs: object):
+        task_id = launch.task_start.task_id
+        self.started.append(task_id)
+        self.changed.set()
+        await asyncio.Event().wait()
+
+
+class _TodoAwareCountingBlockingChildRunner:
+    """Exercise the real post-admission TODO ownership boundary."""
+
+    def __init__(self, repository, lease, todo_owner: TodoRunStateOwner) -> None:
+        self._repository = repository
+        self._lease = lease
+        self._todo_owner = todo_owner
+        self.started: list[str] = []
+        self.changed = asyncio.Event()
+
+    async def admit_subagent_turn(self, *, launch, cancellation_intent):
+        task_id = launch.task_start.task_id
+        context_binding_revision_id = _id("revision")
+        accepted = self._repository.start_subagent_turn(
+            self._lease.guard,
+            task_id=task_id,
+            turn_id=cancellation_intent.turn_id,
+            entry_id=_id("entry"),
+            context_binding_revision_id=context_binding_revision_id,
+            task_start_event_id=launch.task_start.event_id,
+            expected_parent_permission_snapshot=launch.parent_permission_snapshot,
+            content=InlineContent.from_bytes(
+                launch.task_start.objective.encode("utf-8")
+            ),
+            occurred_at=datetime.now(timezone.utc),
+            actor_id=task_id,
+            deadline_monotonic=monotonic() + 30,
+        )
+        try:
+            self._todo_owner.activate_child_run(
+                build_child_activation(
+                    session_id=launch.task_start.session_id,
+                    subagent_task_id=task_id,
+                    exact_turn_id=accepted.turn_id,
+                    exact_initial_entry_id=accepted.entry_id,
+                    exact_context_binding_revision_id=context_binding_revision_id,
+                )
+            )
+        except BaseException as exc:
+            raise SubagentTurnAdmissionPostCommitError(accepted, exc) from exc
+        return cancellation_intent
 
     async def run_admitted_subagent_turn(self, *, launch, **_kwargs: object):
         task_id = launch.task_start.task_id
@@ -1576,6 +1629,10 @@ def test_round10_global_four_worker_capacity_queues_without_limiting_task_horizo
             tool_name="create_agent_tasks",
             arguments=arguments,
         )
+        todo_owner = TodoRunStateOwner(
+            session_id=session_id,
+            owner_epoch=_id("todo"),
+        )
         manager = KernelSubagentManager(
             **_manager_launch_kwargs(repository, lease.guard),
             repository=repository,
@@ -1583,12 +1640,13 @@ def test_round10_global_four_worker_capacity_queues_without_limiting_task_horizo
             host_owner_id=_id("host"),
             io_owner=KernelSessionIO(),
             live_bus=LiveAgentEventBus(),
-            todo_owner=TodoRunStateOwner(
-                session_id=session_id,
-                owner_epoch=_id("todo"),
-            ),
+            todo_owner=todo_owner,
         )
-        blocker = _CountingBlockingChildRunner()
+        blocker = _TodoAwareCountingBlockingChildRunner(
+            repository,
+            lease,
+            todo_owner,
+        )
         manager.bind_runner_factory(lambda _scope: blocker)  # type: ignore[arg-type]
         created = await manager.invoke(
             tool_name="create_agent_tasks",
@@ -1630,6 +1688,94 @@ def test_round10_global_four_worker_capacity_queues_without_limiting_task_horizo
         assert (
             len([item for item in manager._tasks.values() if not item.task.done()]) == 4
         )
+        await manager.aclose(deadline_monotonic=monotonic() + 2)
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.postgres
+def test_round10_postcommit_child_activation_failure_settles_task_and_turn(
+    stage2_migrated_postgres_database,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+
+    async def exercise() -> None:
+        session_id = _id("session")
+        arguments = {"task": "fail after the child turn commits"}
+        lease, context = _prepare_root_tool_attempt(
+            repository,
+            session_id=session_id,
+            workspace_id=_id("workspace"),
+            tool_name="spawn_agent",
+            arguments=arguments,
+        )
+        todo_owner = TodoRunStateOwner(
+            session_id=session_id,
+            owner_epoch=_id("todo"),
+        )
+        for index in range(4):
+            todo_owner.activate_child_run(
+                build_child_activation(
+                    session_id=session_id,
+                    subagent_task_id=f"occupied:{index}",
+                    exact_turn_id=f"turn:occupied:{index}",
+                    exact_initial_entry_id=f"entry:occupied:{index}",
+                    exact_context_binding_revision_id=f"revision:occupied:{index}",
+                )
+            )
+        manager = KernelSubagentManager(
+            **_manager_launch_kwargs(repository, lease.guard),
+            repository=repository,
+            guard=lease.guard,
+            host_owner_id=_id("host"),
+            io_owner=KernelSessionIO(),
+            live_bus=LiveAgentEventBus(),
+            todo_owner=todo_owner,
+        )
+        blocker = _TodoAwareCountingBlockingChildRunner(
+            repository,
+            lease,
+            todo_owner,
+        )
+        manager.bind_runner_factory(lambda _scope: blocker)  # type: ignore[arg-type]
+
+        spawned = await manager.invoke(
+            tool_name="spawn_agent",
+            arguments=arguments,
+            invocation_context=context,
+        )
+        payload = json.loads(spawned.content)
+        task_id = payload["task_id"]
+        assert payload["status"] == "failed"
+        assert blocker.started == []
+
+        durable = repository.query_subagent_task(
+            session_id=session_id,
+            task_id=task_id,
+            deadline_monotonic=monotonic() + 30,
+        )
+        assert durable is not None
+        assert durable["status"] == "FAILED"
+        assert durable["terminal_reason"] == "CHILD_START_RUNTIMEERROR"
+        child_turn = repository.read_turn_terminal_outcome(
+            session_id=session_id,
+            turn_id=stable_subagent_turn_id(
+                session_id=session_id,
+                task_id=task_id,
+            ),
+            deadline_monotonic=monotonic() + 30,
+        )
+        assert child_turn is not None
+        assert child_turn["status"] == "INTERRUPTED"
+        assert child_turn["terminal_reason"] == "CHILD_START_RUNTIMEERROR"
+
+        stopped = await manager.invoke(
+            tool_name="stop_agent",
+            arguments={"task_id": task_id},
+            invocation_context=context,
+        )
+        assert json.loads(stopped.content)["status"] == "failed"
         await manager.aclose(deadline_monotonic=monotonic() + 2)
 
     asyncio.run(exercise())

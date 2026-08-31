@@ -69,6 +69,10 @@ class CompactionPlanningError(RuntimeError):
     """A body-free deterministic compaction planning failure."""
 
 
+class CompactionReclaimUnavailable(CompactionPlanningError):
+    """The candidate is valid but cannot reclaim enough context to adopt."""
+
+
 def build_synthetic_compaction_dispatch_read(
     *,
     canonical_read: FrozenCompactionCanonicalRead,
@@ -791,7 +795,11 @@ def freeze_compaction_continuation(
     if target_branch is not CompactionTargetBranch.ACTIVE_INSTALLATION:
         raise ValueError("unsupported compaction target branch")
     canonical = source_view.canonical_dispatch_read.compile_snapshot.canonical_input
-    if not 0 <= source_through_sequence <= canonical.identity.provider_input_through_sequence:
+    if (
+        not 0
+        <= source_through_sequence
+        <= canonical.identity.provider_input_through_sequence
+    ):
         raise ValueError("compaction continuation boundary is out of range")
     active_entry_id = canonical.identity.initial_entry_id
     matches = tuple(
@@ -931,12 +939,14 @@ def validate_compaction_reclaim(
         )
     reclaim = source_tokens - successor_tokens
     if reclaim <= 0:
-        raise CompactionPlanningError("compaction successor does not reclaim context")
+        raise CompactionReclaimUnavailable(
+            "compaction successor does not reclaim context"
+        )
     if (
         reclaim < policy.minimum_reclaim_tokens
         and source_tokens <= hard_input_budget_tokens
     ):
-        raise CompactionPlanningError(
+        raise CompactionReclaimUnavailable(
             "compaction successor does not reclaim enough context"
         )
     if (
@@ -1038,6 +1048,7 @@ def _logical_input_bytes(
 
 __all__ = [
     "CompactionPlanningError",
+    "CompactionReclaimUnavailable",
     "crosses_compaction_resource_headroom",
     "enumerate_complete_tool_groups",
     "estimate_unavoidable_compaction_successor_tokens",
