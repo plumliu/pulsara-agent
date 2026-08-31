@@ -1,6 +1,7 @@
 'use client';
 
 import {
+  Blocks,
   Check,
   Command,
   Gauge,
@@ -29,6 +30,7 @@ interface CommandPaletteProps {
 const commandItems = [
   { id: 'overview', label: '打开总览', detail: '查看运行状态与最近活动', icon: Gauge, view: 'overview' as AppView },
   { id: 'workbench', label: '打开会话工作台', detail: '回到当前活动会话', icon: MessageCircle, view: 'workbench' as AppView },
+  { id: 'capabilities', label: '打开能力', detail: '管理插件、MCP 与技能', icon: Blocks, view: 'capabilities' as AppView },
   { id: 'settings', label: '打开设置', detail: '外观、模型与本地服务', icon: Settings, view: 'settings' as AppView },
 ];
 

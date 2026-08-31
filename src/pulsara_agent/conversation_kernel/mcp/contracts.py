@@ -278,6 +278,33 @@ class McpCatalogSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class McpCatalogToolInspection:
+    """One bounded discovered tool for disposable management/UI inspection."""
+
+    semantic: McpToolSemanticFact = field(repr=False)
+    policy: McpToolExecutionPolicyFact = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class McpConfiguredServerInspection:
+    """Exact config source/version identity for a management projection."""
+
+    server_id: str
+    resolved_config_identity: str
+    source_kind: str
+    status_matches_config: bool
+
+
+@dataclass(frozen=True, slots=True)
+class McpDiscoveryCatalogInspection:
+    """Latest successful discovery without provider-surface publication authority."""
+
+    catalog_snapshot: McpCatalogSnapshot
+    configured_servers: tuple[McpConfiguredServerInspection, ...]
+    tools: tuple[McpCatalogToolInspection, ...] = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True)
 class McpInstallationCandidate:
     candidate_id: str
     server_id: str

@@ -1,6 +1,7 @@
 export type AppView =
   | 'overview'
   | 'workbench'
+  | 'capabilities'
   | 'settings';
 
 export type RuntimeStatus =
@@ -38,6 +39,172 @@ export interface Workspace {
   name: string;
   path: string;
   kind: 'quick' | 'project';
+}
+
+export type McpServerStatus =
+  | 'disabled'
+  | 'configured'
+  | 'connecting'
+  | 'discovering'
+  | 'ready'
+  | 'failed-retryable'
+  | 'failed'
+  | 'updating'
+  | 'closed';
+
+export interface McpToolCapability {
+  name: string;
+  remoteName: string;
+  description: string;
+  effect: 'read-only' | 'external-effect';
+  availableToSubagents: boolean;
+  parallelSafe: boolean;
+}
+
+export interface McpServerCapability {
+  id: string;
+  name: string;
+  status: McpServerStatus;
+  required: boolean;
+  availableToSubagents: boolean;
+  toolCount: number;
+  discoveredToolCount: number;
+  resourceCount: number;
+  resourceTemplateCount: number;
+  promptCount: number;
+  instructions: string;
+  hasFailure: boolean;
+  tools: McpToolCapability[];
+}
+
+export interface SkillCapability {
+  name: string;
+  description: string;
+  location: string;
+  source: 'workspace' | 'user' | 'plugin' | 'bundled';
+  configured: boolean;
+  authoringNotes: string[];
+}
+
+export interface SkillCatalogIssue {
+  kind: 'invalid' | 'shadowed' | 'conflict';
+  title: string;
+  path?: string;
+  details: string[];
+}
+
+export interface CapabilitySnapshot {
+  sessionId: string;
+  workspacePath: string;
+  skills: {
+    status: 'ready' | 'attention';
+    items: SkillCapability[];
+    issues: SkillCatalogIssue[];
+    details: string[];
+    roots: Array<{ path: string; scope: 'workspace' | 'user' }>;
+  };
+  mcp: {
+    servers: McpServerCapability[];
+    collisions: Array<{
+      name: string;
+      members: Array<{ serverId: string; toolName: string }>;
+    }>;
+  };
+}
+
+export interface SkillInstallResult {
+  status: string;
+  installed: boolean;
+  message: string;
+  sourcePath: string;
+  destinationPath?: string;
+  details: string[];
+}
+
+export interface UserSkillCapability {
+  name: string;
+  description: string;
+  location: string;
+  path: string;
+  enabled: boolean;
+  root: 'agents' | 'pulsara';
+  authoringNotes: string[];
+}
+
+export interface UserMcpServerCapability {
+  id: string;
+  name: string;
+  enabled: boolean;
+  status: McpServerStatus;
+  required: boolean;
+  availableToSubagents: boolean;
+  toolCount: number;
+  resourceCount: number;
+  resourceTemplateCount: number;
+  promptCount: number;
+  instructions: string;
+  hasFailure: boolean;
+  transport: { kind: 'stdio' | 'http'; summary: string };
+  tools: McpToolCapability[];
+}
+
+export interface UserPluginCapability {
+  id: string;
+  name: string;
+  description: string;
+  version?: string;
+  author?: string;
+  enabled: boolean;
+  packageInstallId: string;
+  packageRoot: string;
+  skillCount: number;
+  mcpCount: number;
+  effectiveSkillNames: string[];
+  effectiveMcpServerIds: string[];
+  details: string[];
+}
+
+export interface UserCapabilitySnapshot {
+  roots: Array<{ kind: 'agents' | 'pulsara'; path: string }>;
+  skills: {
+    status: 'ready' | 'attention';
+    configPath: string;
+    items: UserSkillCapability[];
+    issues: SkillCatalogIssue[];
+    details: string[];
+    roots: Array<{ kind: 'agents' | 'pulsara'; path: string }>;
+  };
+  mcp: {
+    configPath: string;
+    servers: UserMcpServerCapability[];
+  };
+  plugins: {
+    status: 'ready' | 'attention';
+    items: UserPluginCapability[];
+    details: string[];
+  };
+  adoption?: {
+    updatedSessions: number;
+    attentionSessions: number;
+  };
+}
+
+export interface CapabilityOperation {
+  status: string;
+  success: boolean;
+  message: string;
+  details: string[];
+  pluginId?: string;
+}
+
+export interface McpCreateInput {
+  serverId: string;
+  displayName: string;
+  transport: 'http' | 'stdio';
+  endpoint?: string;
+  command?: string;
+  args: string[];
+  availableToSubagents: boolean;
 }
 
 export type SessionWorkspaceSelection =
@@ -188,6 +355,13 @@ export const permissionLabels: Record<PermissionMode, string> = {
   'ask-permissions': '每次询问',
   'bypass-permissions': '完全访问',
 };
+
+export const permissionModeOrder: readonly PermissionMode[] = [
+  'read-only',
+  'ask-permissions',
+  'accept-edits',
+  'bypass-permissions',
+];
 
 export const protocolPermissionModes: Record<PermissionMode, string> = {
   'accept-edits': 'PERMISSION_MODE_ACCEPT_EDITS',

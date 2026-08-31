@@ -1,13 +1,19 @@
 import type {
   AgentTask,
+  CapabilityOperation,
+  CapabilitySnapshot,
+  McpCreateInput,
+  McpServerStatus,
   Message,
   PermissionMode,
   ReasoningBlock,
   SessionSummary,
   SessionWorkspaceSelection,
+  SkillInstallResult,
   SubagentRun,
   TodoRun,
   ToolTrace,
+  UserCapabilitySnapshot,
   Workspace,
 } from './pulsara-types';
 import { protocolPermissionModes } from './pulsara-types';
@@ -97,6 +103,46 @@ export interface RuntimeAdapter {
   createSession(selection: SessionWorkspaceSelection): Promise<SessionSummary>;
   listSessions(): Promise<SessionSummary[]>;
   listSessionTasks(sessionId: string, cursor?: string): Promise<AgentTaskPage>;
+  inspectCapabilities(sessionId: string): Promise<CapabilitySnapshot>;
+  reconnectMcpServer(sessionId: string, serverId: string): Promise<CapabilitySnapshot>;
+  installSkill(
+    sessionId: string,
+    sourcePath: string,
+    scope: 'workspace' | 'user',
+  ): Promise<{ installation: SkillInstallResult; capabilities: CapabilitySnapshot }>;
+  inspectUserCapabilities(activeSessionId?: string): Promise<UserCapabilitySnapshot>;
+  refreshUserCapabilities(activeSessionId?: string): Promise<UserCapabilitySnapshot>;
+  installUserSkill(sourcePath: string, activeSessionId?: string): Promise<{
+    operation: CapabilityOperation;
+    capabilities: UserCapabilitySnapshot;
+  }>;
+  setUserSkillEnabled(skillPath: string, enabled: boolean, activeSessionId?: string): Promise<{
+    operation: CapabilityOperation;
+    capabilities: UserCapabilitySnapshot;
+  }>;
+  createUserMcp(input: McpCreateInput, activeSessionId?: string): Promise<{
+    operation: CapabilityOperation;
+    capabilities: UserCapabilitySnapshot;
+  }>;
+  setUserMcpEnabled(serverId: string, enabled: boolean, activeSessionId?: string): Promise<{
+    operation: CapabilityOperation;
+    capabilities: UserCapabilitySnapshot;
+  }>;
+  installUserPlugin(sourcePath: string, activeSessionId?: string): Promise<{
+    operation: CapabilityOperation;
+    capabilities: UserCapabilitySnapshot;
+  }>;
+  setUserPluginEnabled(
+    pluginId: string,
+    packageInstallId: string,
+    enabled: boolean,
+    activeSessionId?: string,
+  ): Promise<{ operation: CapabilityOperation; capabilities: UserCapabilitySnapshot }>;
+  removeUserPlugin(pluginId: string, activeSessionId?: string): Promise<{
+    operation: CapabilityOperation;
+    capabilities: UserCapabilitySnapshot;
+  }>;
+  openCapabilityRoot(root: 'agents' | 'pulsara'): Promise<void>;
 }
 
 export interface AgentTaskPage {
@@ -455,6 +501,154 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
       remainingCount: numeric(payload.remaining_count),
       nextCursor: payload.next_cursor || undefined,
     };
+  }
+
+  async inspectCapabilities(sessionId: string): Promise<CapabilitySnapshot> {
+    const payload = await apiRequest<Record<string, unknown>>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/capabilities`,
+    );
+    return projectCapabilitySnapshot(payload);
+  }
+
+  async reconnectMcpServer(
+    sessionId: string,
+    serverId: string,
+  ): Promise<CapabilitySnapshot> {
+    const payload = await apiRequest<Record<string, unknown>>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/capabilities/mcp/${encodeURIComponent(serverId)}/reconnect`,
+      { method: 'POST' },
+    );
+    return projectCapabilitySnapshot(payload);
+  }
+
+  async installSkill(
+    sessionId: string,
+    sourcePath: string,
+    scope: 'workspace' | 'user',
+  ): Promise<{ installation: SkillInstallResult; capabilities: CapabilitySnapshot }> {
+    const payload = await apiRequest<Record<string, unknown>>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/capabilities/skills/install`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ source_path: sourcePath, scope }),
+      },
+    );
+    return {
+      installation: projectSkillInstallResult(asRecord(payload.installation)),
+      capabilities: projectCapabilitySnapshot(asRecord(payload.capabilities)),
+    };
+  }
+
+  async inspectUserCapabilities(activeSessionId?: string): Promise<UserCapabilitySnapshot> {
+    const query = activeSessionId
+      ? `?${new URLSearchParams({ active_session_id: activeSessionId }).toString()}`
+      : '';
+    return projectUserCapabilitySnapshot(await apiRequest<Record<string, unknown>>(
+      `/api/capabilities${query}`,
+    ));
+  }
+
+  async refreshUserCapabilities(activeSessionId?: string): Promise<UserCapabilitySnapshot> {
+    return projectUserCapabilitySnapshot(await apiRequest<Record<string, unknown>>(
+      '/api/capabilities/refresh',
+      { method: 'POST', body: JSON.stringify(activeSessionId ? { active_session_id: activeSessionId } : {}) },
+    ));
+  }
+
+  async installUserSkill(sourcePath: string, activeSessionId?: string) {
+    return projectUserCapabilityOperation(await apiRequest<Record<string, unknown>>(
+      '/api/capabilities/skills/install',
+      {
+        method: 'POST',
+        body: JSON.stringify({ source_path: sourcePath, ...(activeSessionId ? { active_session_id: activeSessionId } : {}) }),
+      },
+    ));
+  }
+
+  async setUserSkillEnabled(skillPath: string, enabled: boolean, activeSessionId?: string) {
+    return projectUserCapabilityOperation(await apiRequest<Record<string, unknown>>(
+      '/api/capabilities/skills/enabled',
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          path: skillPath,
+          enabled,
+          ...(activeSessionId ? { active_session_id: activeSessionId } : {}),
+        }),
+      },
+    ));
+  }
+
+  async createUserMcp(input: McpCreateInput, activeSessionId?: string) {
+    return projectUserCapabilityOperation(await apiRequest<Record<string, unknown>>(
+      '/api/capabilities/mcp',
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          server_id: input.serverId,
+          display_name: input.displayName,
+          transport: input.transport,
+          endpoint: input.endpoint,
+          command: input.command,
+          args: input.args,
+          available_to_subagents: input.availableToSubagents,
+          ...(activeSessionId ? { active_session_id: activeSessionId } : {}),
+        }),
+      },
+    ));
+  }
+
+  async setUserMcpEnabled(serverId: string, enabled: boolean, activeSessionId?: string) {
+    return projectUserCapabilityOperation(await apiRequest<Record<string, unknown>>(
+      `/api/capabilities/mcp/${encodeURIComponent(serverId)}/enabled`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ enabled, ...(activeSessionId ? { active_session_id: activeSessionId } : {}) }),
+      },
+    ));
+  }
+
+  async installUserPlugin(sourcePath: string, activeSessionId?: string) {
+    return projectUserCapabilityOperation(await apiRequest<Record<string, unknown>>(
+      '/api/capabilities/plugins/install',
+      {
+        method: 'POST',
+        body: JSON.stringify({ source_path: sourcePath, ...(activeSessionId ? { active_session_id: activeSessionId } : {}) }),
+      },
+    ));
+  }
+
+  async setUserPluginEnabled(
+    pluginId: string,
+    packageInstallId: string,
+    enabled: boolean,
+    activeSessionId?: string,
+  ) {
+    return projectUserCapabilityOperation(await apiRequest<Record<string, unknown>>(
+      `/api/capabilities/plugins/${encodeURIComponent(pluginId)}/enabled`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          enabled,
+          package_install_id: packageInstallId,
+          ...(activeSessionId ? { active_session_id: activeSessionId } : {}),
+        }),
+      },
+    ));
+  }
+
+  async removeUserPlugin(pluginId: string, activeSessionId?: string) {
+    return projectUserCapabilityOperation(await apiRequest<Record<string, unknown>>(
+      `/api/capabilities/plugins/${encodeURIComponent(pluginId)}`,
+      {
+        method: 'DELETE',
+        body: JSON.stringify(activeSessionId ? { active_session_id: activeSessionId } : {}),
+      },
+    ));
+  }
+
+  async openCapabilityRoot(root: 'agents' | 'pulsara'): Promise<void> {
+    await apiRequest(`/api/capabilities/roots/${root}/open`, { method: 'POST' });
   }
 
   async createSession(selection: SessionWorkspaceSelection): Promise<SessionSummary> {
@@ -1234,6 +1428,234 @@ async function apiRequest<T = unknown>(path: string, init: RequestInit = {}): Pr
     );
   }
   return payload as T;
+}
+
+const mcpStatusByProtocol: Record<string, McpServerStatus> = {
+  DISABLED: 'disabled',
+  CONFIGURED: 'configured',
+  CONNECTING: 'connecting',
+  DISCOVERING: 'discovering',
+  READY: 'ready',
+  FAILED_RETRYABLE: 'failed-retryable',
+  FAILED_TERMINAL: 'failed',
+  RETIRING: 'updating',
+  CLOSED: 'closed',
+};
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function recordArray(value: unknown): Array<Record<string, unknown>> {
+  return Array.isArray(value) ? value.map(asRecord) : [];
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === 'string')
+    : [];
+}
+
+function projectCapabilitySnapshot(value: Record<string, unknown>): CapabilitySnapshot {
+  const skills = asRecord(value.skills);
+  const mcp = asRecord(value.mcp);
+  return {
+    sessionId: String(value.session_id ?? ''),
+    workspacePath: String(value.workspace_path ?? ''),
+    skills: {
+      status: skills.status === 'attention' ? 'attention' : 'ready',
+      items: recordArray(skills.items).map((item) => ({
+        name: String(item.name ?? ''),
+        description: String(item.description ?? ''),
+        location: String(item.location ?? ''),
+        source: (
+          item.source === 'workspace'
+          || item.source === 'user'
+          || item.source === 'plugin'
+          || item.source === 'bundled'
+            ? item.source
+            : 'bundled'
+        ),
+        configured: Boolean(item.configured),
+        authoringNotes: stringArray(item.authoring_notes),
+      })),
+      issues: recordArray(skills.issues).map((item) => ({
+        kind: item.kind === 'shadowed'
+          ? 'shadowed'
+          : item.kind === 'conflict'
+            ? 'conflict'
+            : 'invalid',
+        title: String(item.title ?? '技能需要留意'),
+        path: typeof item.path === 'string' ? item.path : undefined,
+        details: stringArray(item.details),
+      })),
+      details: stringArray(skills.details),
+      roots: recordArray(skills.roots).map((item) => ({
+        path: String(item.path ?? ''),
+        scope: item.scope === 'workspace' ? 'workspace' : 'user',
+      })),
+    },
+    mcp: {
+      servers: recordArray(mcp.servers).map((server) => ({
+        id: String(server.id ?? ''),
+        name: String(server.name ?? server.id ?? 'MCP 服务'),
+        status: mcpStatusByProtocol[String(server.status ?? '')] ?? 'failed',
+        required: Boolean(server.required),
+        availableToSubagents: Boolean(server.available_to_subagents),
+        toolCount: numeric(server.tool_count),
+        discoveredToolCount: numeric(server.discovered_tool_count),
+        resourceCount: numeric(server.resource_count),
+        resourceTemplateCount: numeric(server.resource_template_count),
+        promptCount: numeric(server.prompt_count),
+        instructions: String(server.instructions ?? ''),
+        hasFailure: Boolean(server.has_failure),
+        tools: recordArray(server.tools).map((tool) => ({
+          name: String(tool.name ?? ''),
+          remoteName: String(tool.remote_name ?? ''),
+          description: String(tool.description ?? ''),
+          effect: tool.effect === 'READ_ONLY' ? 'read-only' : 'external-effect',
+          availableToSubagents: Boolean(tool.available_to_subagents),
+          parallelSafe: Boolean(tool.parallel_safe),
+        })),
+      })),
+      collisions: recordArray(mcp.collisions).map((collision) => ({
+        name: String(collision.name ?? ''),
+        members: recordArray(collision.members).map((member) => ({
+          serverId: String(member.server_id ?? ''),
+          toolName: String(member.tool_name ?? ''),
+        })),
+      })),
+    },
+  };
+}
+
+function projectUserCapabilitySnapshot(value: Record<string, unknown>): UserCapabilitySnapshot {
+  const skills = asRecord(value.skills);
+  const mcp = asRecord(value.mcp);
+  const plugins = asRecord(value.plugins);
+  const adoption = asRecord(value.adoption);
+  const roots = recordArray(value.roots).map((item) => ({
+    kind: item.kind === 'agents' ? 'agents' as const : 'pulsara' as const,
+    path: String(item.path ?? ''),
+  }));
+  return {
+    roots,
+    skills: {
+      status: skills.status === 'attention' ? 'attention' : 'ready',
+      configPath: String(skills.config_path ?? ''),
+      items: recordArray(skills.items).map((item) => ({
+        name: String(item.name ?? ''),
+        description: String(item.description ?? ''),
+        location: String(item.location ?? ''),
+        path: String(item.path ?? ''),
+        enabled: item.enabled !== false,
+        root: item.root === 'agents' ? 'agents' : 'pulsara',
+        authoringNotes: stringArray(item.authoring_notes),
+      })),
+      issues: recordArray(skills.issues).map((item) => ({
+        kind: item.kind === 'shadowed'
+          ? 'shadowed'
+          : item.kind === 'conflict'
+            ? 'conflict'
+            : 'invalid',
+        title: String(item.title ?? '技能需要留意'),
+        path: typeof item.path === 'string' ? item.path : undefined,
+        details: stringArray(item.details),
+      })),
+      details: stringArray(skills.details),
+      roots: recordArray(skills.roots).map((item) => ({
+        kind: item.kind === 'agents' ? 'agents' : 'pulsara',
+        path: String(item.path ?? ''),
+      })),
+    },
+    mcp: {
+      configPath: String(mcp.config_path ?? ''),
+      servers: recordArray(mcp.servers).map((server) => {
+        const transport = asRecord(server.transport);
+        return {
+          id: String(server.id ?? ''),
+          name: String(server.name ?? server.id ?? 'MCP 服务'),
+          enabled: Boolean(server.enabled),
+          status: mcpStatusByProtocol[String(server.status ?? '')] ?? 'failed',
+          required: Boolean(server.required),
+          availableToSubagents: Boolean(server.available_to_subagents),
+          toolCount: numeric(server.tool_count),
+          resourceCount: numeric(server.resource_count),
+          resourceTemplateCount: numeric(server.resource_template_count),
+          promptCount: numeric(server.prompt_count),
+          instructions: String(server.instructions ?? ''),
+          hasFailure: Boolean(server.has_failure),
+          transport: {
+            kind: transport.kind === 'stdio' ? 'stdio' as const : 'http' as const,
+            summary: String(transport.summary ?? ''),
+          },
+          tools: recordArray(server.tools).map((tool) => ({
+            name: String(tool.name ?? ''),
+            remoteName: String(tool.remote_name ?? ''),
+            description: String(tool.description ?? ''),
+            effect: tool.effect === 'READ_ONLY' ? 'read-only' as const : 'external-effect' as const,
+            availableToSubagents: Boolean(tool.available_to_subagents),
+            parallelSafe: Boolean(tool.parallel_safe),
+          })),
+        };
+      }),
+    },
+    plugins: {
+      status: plugins.status === 'attention' ? 'attention' : 'ready',
+      items: recordArray(plugins.items).map((item) => ({
+        id: String(item.id ?? ''),
+        name: String(item.name ?? item.id ?? '插件'),
+        description: String(item.description ?? ''),
+        version: typeof item.version === 'string' ? item.version : undefined,
+        author: typeof item.author === 'string' ? item.author : undefined,
+        enabled: Boolean(item.enabled),
+        packageInstallId: String(item.package_install_id ?? ''),
+        packageRoot: String(item.package_root ?? ''),
+        skillCount: numeric(item.skill_count),
+        mcpCount: numeric(item.mcp_count),
+        effectiveSkillNames: stringArray(item.effective_skill_names),
+        effectiveMcpServerIds: stringArray(item.effective_mcp_server_ids),
+        details: stringArray(item.details),
+      })),
+      details: stringArray(plugins.details),
+    },
+    adoption: Object.keys(adoption).length > 0 ? {
+      updatedSessions: numeric(adoption.updated_sessions),
+      attentionSessions: numeric(adoption.attention_sessions),
+    } : undefined,
+  };
+}
+
+function projectUserCapabilityOperation(value: Record<string, unknown>): {
+  operation: CapabilityOperation;
+  capabilities: UserCapabilitySnapshot;
+} {
+  const operation = asRecord(value.operation);
+  return {
+    operation: {
+      status: String(operation.status ?? ''),
+      success: Boolean(operation.success ?? operation.installed),
+      message: String(operation.message ?? '能力已经更新。'),
+      details: stringArray(operation.details),
+      pluginId: typeof operation.plugin_id === 'string' ? operation.plugin_id : undefined,
+    },
+    capabilities: projectUserCapabilitySnapshot(asRecord(value.capabilities)),
+  };
+}
+
+function projectSkillInstallResult(value: Record<string, unknown>): SkillInstallResult {
+  return {
+    status: String(value.status ?? ''),
+    installed: Boolean(value.installed),
+    message: String(value.message ?? '技能安装没有完成。'),
+    sourcePath: String(value.source_path ?? ''),
+    destinationPath: typeof value.destination_path === 'string'
+      ? value.destination_path
+      : undefined,
+    details: stringArray(value.details),
+  };
 }
 
 function projectSessionSummary(value: Record<string, unknown>): SessionSummary {

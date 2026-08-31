@@ -806,6 +806,94 @@ describe('session task inventory', () => {
   });
 });
 
+describe('capability catalog adapter', () => {
+  it('projects Skill activation facts and the complete ready MCP tool detail', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      session_id: 'session-1',
+      workspace_path: '/tmp/project',
+      skills: {
+        status: 'ready',
+        items: [{
+          name: 'pdf', description: '处理 PDF', location: 'bundled_skills/pdf',
+          source: 'bundled', configured: false, authoring_notes: [],
+        }],
+        issues: [], details: [], roots: [],
+      },
+      mcp: {
+        servers: [{
+          id: 'docs', name: '文档', status: 'READY', required: false,
+          available_to_subagents: true, tool_count: 1, discovered_tool_count: 1,
+          resource_count: 2, resource_template_count: 3, prompt_count: 4,
+          instructions: '优先读取目录', has_failure: false,
+          tools: [{
+            name: 'docs_search', remote_name: 'search', description: '搜索文档',
+            effect: 'READ_ONLY', available_to_subagents: true, parallel_safe: true,
+          }],
+        }],
+        collisions: [],
+      },
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+
+    const capabilities = await new LocalHttpRuntimeAdapter().inspectCapabilities('session-1');
+
+    expect(capabilities.skills.items[0]).toMatchObject({ name: 'pdf', source: 'bundled' });
+    expect(capabilities.mcp.servers[0]).toMatchObject({
+      id: 'docs', status: 'ready', availableToSubagents: true,
+      resourceCount: 2, resourceTemplateCount: 3, promptCount: 4,
+    });
+    expect(capabilities.mcp.servers[0].tools[0]).toMatchObject({
+      name: 'docs_search', remoteName: 'search', effect: 'read-only',
+      availableToSubagents: true, parallelSafe: true,
+    });
+  });
+
+  it('writes a path-based user Skill switch and projects its effective state', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      void input;
+      void init;
+      return new Response(JSON.stringify({
+        operation: { status: 'DISABLED', success: true, message: '技能已关闭。' },
+        capabilities: {
+          roots: [
+            { kind: 'agents', path: '/Users/test/.agents' },
+            { kind: 'pulsara', path: '/Users/test/.pulsara' },
+          ],
+          skills: {
+            status: 'ready',
+            config_path: '/Users/test/.pulsara/skills.yaml',
+            items: [{
+              name: 'review', description: '审阅实现', location: '~/.agents/skills/review/SKILL.md',
+              path: '/Users/test/.agents/skills/review/SKILL.md', enabled: false,
+              root: 'agents', authoring_notes: [],
+            }],
+            issues: [], details: [], roots: [],
+          },
+          mcp: { config_path: '/Users/test/.pulsara/mcp.yaml', servers: [] },
+          plugins: { status: 'ready', items: [], details: [] },
+        },
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await new LocalHttpRuntimeAdapter().setUserSkillEnabled(
+      '/Users/test/.agents/skills/review/SKILL.md',
+      false,
+      'session-1',
+    );
+
+    expect(result.capabilities.skills).toMatchObject({
+      configPath: '/Users/test/.pulsara/skills.yaml',
+      items: [{ name: 'review', enabled: false }],
+    });
+    const [, init] = fetchMock.mock.calls[0]!;
+    expect(JSON.parse(String(init?.body))).toEqual({
+      path: '/Users/test/.agents/skills/review/SKILL.md',
+      enabled: false,
+      active_session_id: 'session-1',
+    });
+  });
+});
+
 describe('productVisibleText', () => {
   it('translates local runtime vocabulary without rewriting ordinary prose', () => {
     expect(productVisibleText(

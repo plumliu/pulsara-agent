@@ -20,18 +20,19 @@ Pulsara 前端是面向本地长时 Agent 工作的「可观测工作台」。�
 
 ## 2. 信息架构
 
-全局 activity rail 只提供三个已有端到端实现的产品面：
+全局 activity rail 只提供四个已有端到端实现的产品面：
 
 - **总览**：当前 mission、最近 session、运行脉冲与本地内核健康；
 - **会话**：canonical transcript、live output、plan、tool trace、queue/steer 与 composer；
-- **设置**：真实生效的主题偏好，以及本机启动配置提供的模型与服务状态。权限不是全局
-  偏好；它属于每一次用户发送。
+- **能力**：只管理用户目录 `~/.agents` 与 `~/.pulsara` 中的 Plugin、MCP 与 Skill；
+- **设置**：真实生效的主题偏好，以及本机启动配置提供的模型与服务状态。权限不是全局偏好；
+  它属于每一次用户发送。
 
 子任务不是跨会话的独立产品面。选择会话后，其完整子任务清单进入右侧“当前会话”检查器；
 会话列表只展示“进行中”“需留意”等紧凑聚合，不在全局导航或所有会话行中复制任务树。
 
 任何尚无 Kernel/本地应用控制面端到端实现的功能都不得保留导航项、按钮、空卡片、
-“即将开放”或“暂不可用”占位。例如能力注册表、记忆浏览、附件、文件变更列表、通知、
+“即将开放”或“暂不可用”占位。例如记忆浏览、附件、文件变更列表、通知、
 会话菜单和虚构上下文百分比在拥有对应实现前都不进入用户可见 DOM。
 
 会话工作台使用四栏桌面布局：activity rail、session sidebar、conversation workbench、
@@ -134,7 +135,9 @@ command receipt 的 `PENDING` 不是成功。前端使用 `QueryCommandRequest` 
   既有 Plan workflow，再提交同一轮目标；它不是会话创建属性，也不是项目级持久设置；
 - permission selector 与发送按钮相邻，只提交这一次新 turn admission 所需 mode。下一轮可
   重新选择，已冻结 turn snapshot 不被改写；active turn 的 steer 不重新解释权限；把子任务
-  结果带入会话并继续同样会创建一轮新处理，因此复用此刻 composer 选择的本轮权限；
+  结果带入会话并继续同样会创建一轮新处理，因此复用此刻 composer 选择的本轮权限。菜单从
+  上到下固定为“只读”“每次询问”“接受编辑”“完全访问”，新打开的应用默认选择“完全访问”；
+  “完全访问”的当前选择与菜单项均使用红色文字和红色三角警告图标；
 - compaction 仅请求 safe-point operation；前端不得自行裁剪 canonical transcript。Kernel 在
   canonical FULL 前对 active/idle 使用同一 summary、candidate assembly、reclaim validator 与
   缩尾搜索，只在 FULL 后决定继续当前 turn 或等待下一条用户消息。两者的 `NOT_NEEDED` 使用
@@ -177,6 +180,47 @@ projection、Kernel、HostSession、provider prefix 或其他实现术语。状�
 - 大于既有 inline 边界的思考沿用 `ReadContentRequest` 分块读取，不另设前端总长度上限；
 - 没有供应商可见文本时不渲染任何“思考不可用”占位；子任务 scope 使用同一投影并在其原位
   活动中展示。
+
+### 6.3 用户能力面与会话有效目录
+
+“能力”是一等页面，但不得维护独立注册表或数据库副本。该页面只枚举用户拥有的两棵根：
+`~/.agents` 与 `~/.pulsara`。项目目录、Pulsara bundled Skill 以及 workspace Plugin 不进入这个
+页面。浏览器进入页面、重新获得焦点或显式刷新时重新读取文件系统与 Plugin store，不从旧 UI
+cache 恢复目录真相。
+
+- 页面使用 Plugin、MCP、Skill 三个 tab、统一搜索、真实计数与一致的开关交互。Skill 开关按
+  `SKILL.md` 的 canonical path 写入 `~/.pulsara/skills.yaml`；未配置路径默认开启，关闭的 Skill
+  仍留在用户能力清单中，但不得进入会话 effective Skill catalog、自动提示或显式 `$skill-name`
+  解析；关闭高优先级定义后，同名低优先级定义按既有解析顺序自然接替；
+- Skill 通过既有 atomic local installation service 安装到用户根。安装结果及 diagnostics 来自
+  该 service，前端不自行复制、校验或覆盖 Skill 文件。Skill 开关配置同样使用 atomic replace，
+  单文件读取边界为 1 MiB；配置损坏时用户 Skill fail-closed，能力页显示需留意而不静默重启；
+- MCP 新增与启停写入 `~/.pulsara/mcp.yaml` 的单一配置真相。Plugin 安装、启停与移除走现有
+  in-process management service；启用 Plugin 的明确点击同时构成对其已审阅包启动本地进程或
+  网络连接的接受；
+- 每次 MCP/Plugin 变化后，控制面并行通知所有当前已打开会话重新读取用户 MCP 配置与 enabled
+  Plugin view，并通过既有 safe-point owner 采用。一个会话失败不会阻止其他会话采用，页面会
+  显示需重试的会话数量；Skill 配置由每个会话在同一既有 safe-point Skill observation 中读取，
+  不新增 reload 通道、provider 调用或 epoch 重建；不自动恢复进程重启前的执行；
+- 用户能力页面可以把实时状态叠加到当前已打开会话，但必须同时 exact-join 当前用户配置来源与
+  resolved config identity；workspace/Plugin/Host override 中同名 MCP，以及用户配置更新前的旧
+  Host 结果，其状态、计数、说明与工具都不得泄漏进用户清单；
+- 可选 MCP 的首次连接可能晚于 Host 快速启动窗口。连接一旦完成，能力页必须从同一个
+  bounded discovery candidate 展示真实工具、资源与说明，即使该 candidate 尚未在下一次合法
+  provider safe point 进入 effective tool generation；这个 disposable inspection 只读，不安装
+  provider surface、不取得 dispatch authority，也不得把“已发现”伪装成当前正在运行调用的工具；
+- 浏览器仍按当前 `session_id` 读取该 Host 的一次性 effective capability inspection，供 composer
+  展示所有本轮可见 Skill。该 inspection 可以包含 workspace、user、Plugin 与 bundled 来源，
+  但它不是一等能力页的数据源；
+- composer 的 Skill 选择器只把可见 `$skill-name` 写入本轮草稿。发送仍走普通 prompt admission
+  与统一 prompt compiler，不增加隐藏 activation API 或旁路模型调用；一等能力页不再提供
+  “用于下一轮”按钮，Skill 开关只改变用户配置和后续 safe point 的 effective catalog；
+- 能力页不得直接执行 MCP tool/resource/prompt，也不得为了展示而安装一套新的 provider tool
+  surface；
+- “已发现”不等于“已经进入正在运行这一轮的直接工具列表”。前端只陈述 catalog 事实，并用
+  “Pulsara 会按需使用”表达产品语义，不猜测某个工具在某一轮会走直接调用还是先检查详情；
+- 没有配置 MCP、没有匹配 Skill 或某个来源读取失败时，只显示对应真实目录状态；不得渲染
+  无后端动作的 enable/delete/edit 占位控件。
 
 ## 7. 子任务面板
 
@@ -237,6 +281,9 @@ Production UI 必须 hard-cut 使用真实 localhost adapter；demo data 只可�
 - `npm test` 覆盖主要导航、两种工作目录创建、逐轮 Plan/permission、command mapping，以及
   session-scoped durable task pagination、全部终态、依赖、live overlay、定位与结果接纳；
 - unit/integration 覆盖完整思考、思考摘要、实时 presentation kind、历史回放恢复与分块内容读取；
+- unit/integration 覆盖 session-scoped effective capability inspection、用户级 Plugin/MCP/Skill
+  清单与变更、Skill path enablement 的持久化与 fail-closed、所有 live Session 的动态采用，以及
+  composer 显式 Skill 标记仍走普通发送路径；
 - `npm run build` 通过 Cloudflare Worker-compatible Vinext build；
 - 本地 route 返回非错误响应；
 - 不打印、持久化或提交 `PULSARA_API_KEY`；

@@ -9,7 +9,13 @@ import type {
   RuntimeInteractionSummary,
   RuntimeProjection,
 } from '../lib/runtime-adapter';
-import type { AgentTask, SessionSummary, SessionWorkspaceSelection } from '../lib/pulsara-types';
+import type {
+  AgentTask,
+  CapabilitySnapshot,
+  SessionSummary,
+  SessionWorkspaceSelection,
+  UserCapabilitySnapshot,
+} from '../lib/pulsara-types';
 import PulsaraApp from './pulsara-app';
 
 afterEach(cleanup);
@@ -40,6 +46,110 @@ const initialSession: SessionSummary = {
   status: 'running',
   updatedAt: '刚刚',
   live: false,
+};
+
+const capabilitySnapshot: CapabilitySnapshot = {
+  sessionId: 'session-1',
+  workspacePath: '/tmp/pulsara_agent',
+  skills: {
+    status: 'ready',
+    items: [{
+      name: 'pdf',
+      description: '读取、创建并检查 PDF 文件。',
+      location: 'bundled_skills/pdf',
+      source: 'bundled',
+      configured: false,
+      authoringNotes: [],
+    }],
+    issues: [],
+    details: [],
+    roots: [],
+  },
+  mcp: {
+    servers: [{
+      id: 'local-docs',
+      name: '本地文档',
+      status: 'ready',
+      required: false,
+      availableToSubagents: true,
+      toolCount: 1,
+      discoveredToolCount: 1,
+      resourceCount: 2,
+      resourceTemplateCount: 0,
+      promptCount: 1,
+      instructions: '',
+      hasFailure: false,
+      tools: [{
+        name: 'local_docs_search',
+        remoteName: 'search',
+        description: '搜索本地文档。',
+        effect: 'read-only',
+        availableToSubagents: true,
+        parallelSafe: true,
+      }],
+    }],
+    collisions: [],
+  },
+};
+
+const userCapabilitySnapshot: UserCapabilitySnapshot = {
+  roots: [
+    { kind: 'agents', path: '/Users/test/.agents' },
+    { kind: 'pulsara', path: '/Users/test/.pulsara' },
+  ],
+  skills: {
+    status: 'ready',
+    configPath: '/Users/test/.pulsara/skills.yaml',
+    items: [{
+      name: 'personal-pdf',
+      description: '处理个人 PDF 工作流。',
+      location: '~/.agents/skills/personal-pdf/SKILL.md',
+      path: '/Users/test/.agents/skills/personal-pdf/SKILL.md',
+      enabled: true,
+      root: 'agents',
+      authoringNotes: [],
+    }],
+    issues: [],
+    details: [],
+    roots: [{ kind: 'agents', path: '/Users/test/.agents/skills' }],
+  },
+  mcp: {
+    configPath: '/Users/test/.pulsara/mcp.yaml',
+    servers: [{
+      id: 'personal-docs',
+      name: '个人文档',
+      enabled: true,
+      status: 'ready',
+      required: false,
+      availableToSubagents: true,
+      toolCount: 1,
+      resourceCount: 0,
+      resourceTemplateCount: 0,
+      promptCount: 0,
+      instructions: '',
+      hasFailure: false,
+      transport: { kind: 'http', summary: 'https://example.com/mcp' },
+      tools: [],
+    }],
+  },
+  plugins: {
+    status: 'ready',
+    items: [{
+      id: 'personal-tools',
+      name: 'Personal Tools',
+      description: '个人工作流插件。',
+      version: '1.0.0',
+      enabled: true,
+      packageInstallId: 'pkg_0123456789abcdef0123456789abcdef',
+      packageRoot: '/Users/test/.pulsara/plugins/personal-tools',
+      skillCount: 2,
+      mcpCount: 1,
+      effectiveSkillNames: ['personal-pdf'],
+      effectiveMcpServerIds: ['personal-docs'],
+      details: [],
+    }],
+    details: [],
+  },
 };
 
 function projection(body = '我已经开始检查。'): RuntimeProjection {
@@ -182,6 +292,75 @@ class FakeAdapter implements RuntimeAdapter {
     remainingCount: 0,
   }));
 
+  inspectCapabilities = vi.fn(async (sessionId: string) => ({
+    ...capabilitySnapshot,
+    sessionId,
+  }));
+
+  reconnectMcpServer = vi.fn(async (sessionId: string) => ({
+    ...capabilitySnapshot,
+    sessionId,
+  }));
+
+  installSkill = vi.fn(async (sessionId: string, sourcePath: string) => ({
+    installation: {
+      status: 'INSTALLED',
+      installed: true,
+      message: '技能已经安装。',
+      sourcePath,
+      destinationPath: '/tmp/pulsara_agent/.pulsara/skills/pdf',
+      details: [],
+    },
+    capabilities: { ...capabilitySnapshot, sessionId },
+  }));
+
+  inspectUserCapabilities = vi.fn(async () => userCapabilitySnapshot);
+
+  refreshUserCapabilities = vi.fn(async () => userCapabilitySnapshot);
+
+  installUserSkill = vi.fn(async () => ({
+    operation: { status: 'INSTALLED', success: true, message: '技能已安装。', details: [] },
+    capabilities: userCapabilitySnapshot,
+  }));
+
+  setUserSkillEnabled = vi.fn(async () => ({
+    operation: { status: 'DISABLED', success: true, message: '技能已关闭。', details: [] },
+    capabilities: {
+      ...userCapabilitySnapshot,
+      skills: {
+        ...userCapabilitySnapshot.skills,
+        items: userCapabilitySnapshot.skills.items.map((item) => ({ ...item, enabled: false })),
+      },
+    },
+  }));
+
+  createUserMcp = vi.fn(async () => ({
+    operation: { status: 'ADDED', success: true, message: 'MCP 服务已添加。', details: [] },
+    capabilities: userCapabilitySnapshot,
+  }));
+
+  setUserMcpEnabled = vi.fn(async () => ({
+    operation: { status: 'ENABLED', success: true, message: 'MCP 服务已开启。', details: [] },
+    capabilities: userCapabilitySnapshot,
+  }));
+
+  installUserPlugin = vi.fn(async () => ({
+    operation: { status: 'INSTALLED', success: true, message: '插件已安装。', details: [] },
+    capabilities: userCapabilitySnapshot,
+  }));
+
+  setUserPluginEnabled = vi.fn(async () => ({
+    operation: { status: 'ENABLED', success: true, message: '插件已开启。', details: [] },
+    capabilities: userCapabilitySnapshot,
+  }));
+
+  removeUserPlugin = vi.fn(async () => ({
+    operation: { status: 'REMOVED', success: true, message: '插件已移除。', details: [] },
+    capabilities: userCapabilitySnapshot,
+  }));
+
+  openCapabilityRoot = vi.fn(async () => {});
+
   async connect(sessionId: string, takeover = false) {
     this.connectCalls.push({ sessionId, takeover });
     if (takeover) this.connectionRole = 'controller';
@@ -214,8 +393,38 @@ describe('PulsaraApp', () => {
     expect(screen.getByRole('button', { name: '展开TODO清单' })).toBeTruthy();
     expect(screen.queryByText(/文件已更改|项变更/)).toBeNull();
     expect(screen.queryByRole('button', { name: '添加附件' })).toBeNull();
-    expect(screen.queryByRole('button', { name: '能力' })).toBeNull();
+    expect(screen.getByRole('button', { name: '能力' })).toBeTruthy();
     expect(screen.queryByRole('button', { name: '记忆' })).toBeNull();
+  });
+
+  it('keeps the full session catalog in the composer and user-owned capabilities on the first-class page', async () => {
+    const adapter = new FakeAdapter();
+    render(<PulsaraApp adapter={adapter} />);
+
+    const skillButton = await screen.findByRole('button', { name: '选择技能' });
+    fireEvent.click(skillButton);
+    fireEvent.click(screen.getByRole('button', { name: /\$pdf/ }));
+    expect((screen.getByLabelText('发送给 Pulsara') as HTMLTextAreaElement).value).toBe('$pdf ');
+
+    fireEvent.click(screen.getByRole('button', { name: '能力' }));
+    expect(await screen.findByRole('heading', { name: '能力' })).toBeTruthy();
+    expect(await screen.findByText('Personal Tools')).toBeTruthy();
+    fireEvent.click(screen.getByRole('tab', { name: /技能/ }));
+    const skillSwitch = await screen.findByRole('switch', { name: '关闭 personal-pdf' });
+    expect(skillSwitch.getAttribute('aria-checked')).toBe('true');
+    fireEvent.click(skillSwitch);
+    expect(adapter.setUserSkillEnabled).toHaveBeenCalledWith(
+      '/Users/test/.agents/skills/personal-pdf/SKILL.md',
+      false,
+      'session-1',
+    );
+    expect(await screen.findByRole('switch', { name: '开启 personal-pdf' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: '用于下一轮' })).toBeNull();
+    fireEvent.click(screen.getByRole('tab', { name: /MCP/ }));
+    expect(await screen.findByText('个人文档')).toBeTruthy();
+    expect(screen.queryByText('本地文档')).toBeNull();
+    expect(adapter.inspectCapabilities).toHaveBeenCalledWith('session-1');
+    expect(adapter.inspectUserCapabilities).toHaveBeenCalledWith('session-1');
   });
 
   it('keeps a second page stable as an observer until the user explicitly takes control', async () => {
@@ -599,14 +808,23 @@ describe('PulsaraApp', () => {
 
   it('binds plan and permission choices to the next composer submission', async () => {
     const adapter = new FakeAdapter();
-    render(<PulsaraApp adapter={adapter} />);
+    const { container } = render(<PulsaraApp adapter={adapter} />);
     await screen.findByRole('heading', { name: '准备发布' });
     fireEvent.click(screen.getByRole('button', { name: /新建会话/ }));
     fireEvent.click(screen.getByRole('button', { name: /^创建会话/ }));
     await screen.findByText('这个会话还没有消息');
 
     fireEvent.click(screen.getByRole('button', { name: '先规划' }));
-    fireEvent.click(screen.getByRole('button', { name: /接受编辑/ }));
+    const permissionTrigger = screen.getByRole('button', { name: /完全访问/ });
+    expect(permissionTrigger.classList.contains('is-danger')).toBe(true);
+    fireEvent.click(permissionTrigger);
+    expect(
+      [...container.querySelectorAll('.permission-menu .permission-option-title')]
+        .map((element) => element.textContent),
+    ).toEqual(['只读', '每次询问', '接受编辑', '完全访问']);
+    expect(
+      container.querySelector('.permission-option--danger .permission-warning-icon'),
+    ).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: /只读/ }));
     const composer = screen.getByLabelText('发送给 Pulsara');
     fireEvent.change(composer, { target: { value: '验证新的前端任务' } });
@@ -756,7 +974,7 @@ describe('PulsaraApp', () => {
     expect(screen.getByRole('heading', { name: '研究结论' })).toBeTruthy();
     expect(within(taskCard).getByText('目视检查通过')).toBeTruthy();
 
-    fireEvent.click(screen.getByRole('button', { name: /接受编辑/ }));
+    fireEvent.click(screen.getByRole('button', { name: /完全访问/ }));
     fireEvent.click(screen.getByRole('button', { name: /只读/ }));
     const continueButton = within(taskCard).getByRole('button', { name: '用这份结果继续' });
     expect(within(taskCard).getByRole('tooltip').textContent).toContain('启动新一轮，让 Pulsara 基于这项工作的结果继续处理');

@@ -6,13 +6,26 @@ from types import SimpleNamespace
 from typing import cast
 
 from aiohttp import ClientSession, DummyCookieJar
+import pytest
 
+from pulsara_agent import mcp_config
+from pulsara_agent.web_app import session_controller as session_controller_module
 from pulsara_agent.web_app.browser_bridge import LocalBrowserBridge
 from pulsara_agent.web_app.http_server import LocalHttpServer
 from pulsara_agent.web_app.session_controller import LocalSessionController
+from pulsara_agent.capability.user_skill_config import (
+    load_user_skill_config,
+    set_user_skill_enabled,
+)
 
 
 class _Sessions:
+    def __init__(self) -> None:
+        self.reconnect_calls: list[tuple[str, str]] = []
+        self.install_calls: list[tuple[str, str, str]] = []
+        self.user_mcp_toggle_calls: list[tuple[str, bool, str | None]] = []
+        self.user_skill_toggle_calls: list[tuple[str, bool, str | None]] = []
+
     def bootstrap_payload(self) -> dict[str, object]:
         return {"application": {"name": "Pulsara", "version": "test"}}
 
@@ -51,6 +64,106 @@ class _Sessions:
             "next_cursor": None,
         }
 
+    async def inspect_session_capabilities(self, session_id: str) -> dict[str, object]:
+        return _capabilities(session_id)
+
+    async def reconnect_session_mcp(
+        self, session_id: str, server_id: str
+    ) -> dict[str, object]:
+        self.reconnect_calls.append((session_id, server_id))
+        return _capabilities(session_id)
+
+    async def install_session_skill(
+        self,
+        session_id: str,
+        *,
+        source_path: str,
+        scope: str,
+    ) -> dict[str, object]:
+        self.install_calls.append((session_id, source_path, scope))
+        return {
+            "installation": {
+                "status": "INSTALLED",
+                "installed": True,
+                "message": "技能已经安装。",
+            },
+            "capabilities": _capabilities(session_id),
+        }
+
+    async def inspect_user_capabilities(
+        self, *, active_session_id: str | None
+    ) -> dict[str, object]:
+        return _user_capabilities(active_session_id)
+
+    async def set_user_mcp_enabled(
+        self,
+        *,
+        server_id: str,
+        enabled: bool,
+        active_session_id: str | None,
+    ) -> dict[str, object]:
+        self.user_mcp_toggle_calls.append((server_id, enabled, active_session_id))
+        return {
+            "operation": {"status": "DISABLED", "success": True},
+            "capabilities": _user_capabilities(active_session_id),
+        }
+
+    async def set_user_skill_enabled(
+        self,
+        *,
+        skill_path: str,
+        enabled: bool,
+        active_session_id: str | None,
+    ) -> dict[str, object]:
+        self.user_skill_toggle_calls.append(
+            (skill_path, enabled, active_session_id)
+        )
+        return {
+            "operation": {"status": "DISABLED", "success": True},
+            "capabilities": _user_capabilities(active_session_id),
+        }
+
+
+def _capabilities(session_id: str) -> dict[str, object]:
+    return {
+        "session_id": session_id,
+        "workspace_path": "/tmp/project",
+        "skills": {
+            "status": "ready",
+            "items": [],
+            "issues": [],
+            "details": [],
+            "roots": [],
+        },
+        "mcp": {
+            "servers": [{"id": "docs", "name": "Docs", "status": "READY"}],
+            "collisions": [],
+        },
+    }
+
+
+def _user_capabilities(active_session_id: str | None) -> dict[str, object]:
+    return {
+        "active_session_id": active_session_id,
+        "roots": [
+            {"kind": "agents", "path": "/Users/test/.agents"},
+            {"kind": "pulsara", "path": "/Users/test/.pulsara"},
+        ],
+        "skills": {
+            "status": "ready",
+            "config_path": "/Users/test/.pulsara/skills.yaml",
+            "items": [],
+            "issues": [],
+            "details": [],
+            "roots": [],
+        },
+        "mcp": {
+            "config_path": "/Users/test/.pulsara/mcp.yaml",
+            "servers": [{"id": "docs", "name": "Docs", "enabled": True}],
+        },
+        "plugins": {"status": "ready", "items": [], "details": []},
+    }
+
 
 class _Bridge:
     def __init__(self) -> None:
@@ -80,8 +193,9 @@ async def _exercise_bare_loopback_origin(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     bridge = _Bridge()
+    sessions = _Sessions()
     server = LocalHttpServer(
-        sessions=cast(LocalSessionController, _Sessions()),
+        sessions=cast(LocalSessionController, sessions),
         bridge=cast(LocalBrowserBridge, bridge),
         static_root=tmp_path,
         requested_port=0,
@@ -110,8 +224,81 @@ async def _exercise_bare_loopback_origin(tmp_path: Path) -> None:
             ) as response:
                 assert response.status == 200
                 payload = await response.json()
-                assert payload["tasks"] == [
-                    {"id": "task-1", "status": "COMPLETED"}
+                assert payload["tasks"] == [{"id": "task-1", "status": "COMPLETED"}]
+
+            async with client.get(
+                f"{server.origin}/api/sessions/session-1/capabilities"
+            ) as response:
+                assert response.status == 200
+                assert (await response.json())["mcp"]["servers"][0]["id"] == "docs"
+
+            async with client.get(
+                f"{server.origin}/api/capabilities",
+                params={"active_session_id": "session-1"},
+            ) as response:
+                assert response.status == 200
+                payload = await response.json()
+                assert [item["kind"] for item in payload["roots"]] == [
+                    "agents",
+                    "pulsara",
+                ]
+
+            async with client.post(
+                f"{server.origin}/api/capabilities/skills/enabled",
+                json={
+                    "path": "/Users/test/.agents/skills/review/SKILL.md",
+                    "enabled": False,
+                    "active_session_id": "session-1",
+                },
+                headers={
+                    "Origin": server.origin,
+                    "Sec-Fetch-Site": "same-origin",
+                },
+            ) as response:
+                assert response.status == 200
+                assert sessions.user_skill_toggle_calls == [
+                    (
+                        "/Users/test/.agents/skills/review/SKILL.md",
+                        False,
+                        "session-1",
+                    )
+                ]
+
+            async with client.post(
+                f"{server.origin}/api/capabilities/mcp/docs/enabled",
+                json={"enabled": False, "active_session_id": "session-1"},
+                headers={
+                    "Origin": server.origin,
+                    "Sec-Fetch-Site": "same-origin",
+                },
+            ) as response:
+                assert response.status == 200
+                assert sessions.user_mcp_toggle_calls == [
+                    ("docs", False, "session-1")
+                ]
+
+            async with client.post(
+                f"{server.origin}/api/sessions/session-1/capabilities/mcp/docs/reconnect",
+                headers={
+                    "Origin": server.origin,
+                    "Sec-Fetch-Site": "same-origin",
+                },
+            ) as response:
+                assert response.status == 200
+                assert sessions.reconnect_calls == [("session-1", "docs")]
+
+            async with client.post(
+                f"{server.origin}/api/sessions/session-1/capabilities/skills/install",
+                json={"source_path": "/tmp/pdf", "scope": "workspace"},
+                headers={
+                    "Origin": server.origin,
+                    "Sec-Fetch-Site": "same-origin",
+                },
+            ) as response:
+                assert response.status == 200
+                assert (await response.json())["installation"]["installed"] is True
+                assert sessions.install_calls == [
+                    ("session-1", "/tmp/pdf", "workspace")
                 ]
 
             async with client.post(
@@ -185,3 +372,165 @@ async def _exercise_request_guards(tmp_path: Path) -> None:
                 ] == "CROSS_SITE_REQUEST_REJECTED"
     finally:
         await server.aclose()
+
+
+def test_user_skill_switch_is_an_atomic_path_based_user_config(tmp_path: Path) -> None:
+    config_path = tmp_path / ".pulsara" / "skills.yaml"
+    skill_path = tmp_path / ".agents" / "skills" / "review" / "SKILL.md"
+
+    set_user_skill_enabled(
+        skill_path=skill_path,
+        enabled=False,
+        config_path=config_path,
+    )
+    disabled = load_user_skill_config(config_path=config_path)
+    assert disabled.available is True
+    assert disabled.enabled_for(skill_path) is False
+
+    set_user_skill_enabled(
+        skill_path=skill_path,
+        enabled=True,
+        config_path=config_path,
+    )
+    enabled = load_user_skill_config(config_path=config_path)
+    assert enabled.enabled_for(skill_path) is True
+
+    config_path.write_text("skills: [broken", encoding="utf-8")
+    unavailable = load_user_skill_config(config_path=config_path)
+    assert unavailable.available is False
+    assert unavailable.enabled_for(skill_path) is False
+
+
+def test_user_mcp_live_overlay_requires_exact_user_source_and_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    user_path = tmp_path / "user-mcp.yaml"
+    workspace = tmp_path / "workspace"
+    workspace_config_path = workspace / ".pulsara" / "mcp.yaml"
+    workspace_config_path.parent.mkdir(parents=True)
+    user_path.write_text(
+        "servers:\n"
+        "  docs:\n"
+        "    transport:\n"
+        "      type: streamable_http\n"
+        "      endpoint: https://user.example/mcp\n",
+        encoding="utf-8",
+    )
+    workspace_config_path.write_text(
+        "servers:\n"
+        "  docs:\n"
+        "    transport:\n"
+        "      type: streamable_http\n"
+        "      endpoint: https://workspace.example/mcp\n",
+        encoding="utf-8",
+    )
+    (user_config,) = mcp_config.load_mcp_server_configs(
+        user_config_path=user_path
+    )
+    (workspace_config,) = mcp_config.load_mcp_server_configs(
+        workspace_root=workspace,
+        user_config_path=user_path,
+        trust_workspace_config=True,
+    )
+
+    live_server = SimpleNamespace(
+        server_id="docs",
+        status=SimpleNamespace(value="READY"),
+        exposed_tool_count=1,
+        resource_count=0,
+        resource_template_count=0,
+        prompt_count=0,
+        sanitized_instructions="workspace instructions",
+        stable_failure_category=None,
+    )
+    live_tool = SimpleNamespace(
+        server_id="docs",
+        provider_name="workspace_tool",
+        remote_name="workspace_tool",
+        description="workspace-only description",
+        effect="READ_ONLY",
+        available_to_subagents=False,
+        parallel_safe=False,
+    )
+
+    monkeypatch.setattr(
+        session_controller_module,
+        "_user_plugins_payload",
+        lambda _inspection: {"status": "ready", "items": [], "details": []},
+    )
+
+    def project(live_config: object) -> dict[str, object]:
+        return session_controller_module._user_capability_payload(
+            skills={},
+            mcp_configs=(user_config,),
+            plugins=object(),
+            live_inspection=SimpleNamespace(
+                mcp_catalog=SimpleNamespace(servers=(live_server,)),
+                mcp_configured_servers=(live_config,),
+                mcp_tools=(live_tool,),
+            ),
+        )
+
+    workspace_payload = project(
+        SimpleNamespace(
+            server_id="docs",
+            resolved_config_identity=workspace_config.resolved_config_identity,
+            source_kind=mcp_config.McpLocalConfigSourceKind.WORKSPACE.value,
+            status_matches_config=True,
+        )
+    )
+    workspace_item = workspace_payload["mcp"]["servers"][0]  # type: ignore[index]
+    assert workspace_item["status"] == "CONFIGURED"
+    assert workspace_item["tool_count"] == 0
+    assert workspace_item["tools"] == []
+
+    joined_payload = project(
+        SimpleNamespace(
+            server_id="docs",
+            resolved_config_identity=user_config.resolved_config_identity,
+            source_kind=mcp_config.McpLocalConfigSourceKind.USER.value,
+            status_matches_config=True,
+        )
+    )
+    joined_item = joined_payload["mcp"]["servers"][0]  # type: ignore[index]
+    assert joined_item["status"] == "READY"
+    assert joined_item["tool_count"] == 1
+    assert joined_item["tools"][0]["name"] == "workspace_tool"
+
+    stale_user_path = tmp_path / "stale-user-mcp.yaml"
+    stale_user_path.write_text(
+        "servers:\n"
+        "  docs:\n"
+        "    transport:\n"
+        "      type: streamable_http\n"
+        "      endpoint: https://old-user.example/mcp\n",
+        encoding="utf-8",
+    )
+    (stale_user_config,) = mcp_config.load_mcp_server_configs(
+        user_config_path=stale_user_path
+    )
+    stale_payload = project(
+        SimpleNamespace(
+            server_id="docs",
+            resolved_config_identity=stale_user_config.resolved_config_identity,
+            source_kind=mcp_config.McpLocalConfigSourceKind.USER.value,
+            status_matches_config=True,
+        )
+    )
+    stale_item = stale_payload["mcp"]["servers"][0]  # type: ignore[index]
+    assert stale_item["status"] == "CONFIGURED"
+    assert stale_item["tool_count"] == 0
+    assert stale_item["tools"] == []
+
+    retained_status_payload = project(
+        SimpleNamespace(
+            server_id="docs",
+            resolved_config_identity=user_config.resolved_config_identity,
+            source_kind=mcp_config.McpLocalConfigSourceKind.USER.value,
+            status_matches_config=False,
+        )
+    )
+    retained_status_item = retained_status_payload["mcp"]["servers"][0]  # type: ignore[index]
+    assert retained_status_item["status"] == "CONFIGURED"
+    assert retained_status_item["tool_count"] == 0
+    assert retained_status_item["tools"] == []

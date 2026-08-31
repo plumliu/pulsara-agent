@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityRail } from '../components/activity-rail';
+import { CapabilityView } from '../components/capability-view';
 import { InspectorPanel } from '../components/inspector-panel';
 import { CommandPalette, NewSessionDialog, ToastStack } from '../components/overlays';
 import { OverviewView } from '../components/overview-view';
@@ -22,12 +23,18 @@ import {
 import type {
   AgentTask,
   AppView,
+  CapabilitySnapshot,
+  McpCreateInput,
   Message,
   PermissionMode,
   RuntimeStatus,
   SessionSummary,
   SessionWorkspaceSelection,
   ToastMessage,
+  UserCapabilitySnapshot,
+  UserMcpServerCapability,
+  UserPluginCapability,
+  UserSkillCapability,
   Workspace,
 } from '../lib/pulsara-types';
 
@@ -123,6 +130,14 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
   const [taskInventoryLoading, setTaskInventoryLoading] = useState(false);
   const [taskInventoryError, setTaskInventoryError] = useState<string>();
   const taskInventoryAttempt = useRef(0);
+  const [capabilities, setCapabilities] = useState<CapabilitySnapshot>();
+  const [, setCapabilityLoading] = useState(false);
+  const [, setCapabilityError] = useState<string>();
+  const capabilityAttempt = useRef(0);
+  const [userCapabilities, setUserCapabilities] = useState<UserCapabilitySnapshot>();
+  const [userCapabilityLoading, setUserCapabilityLoading] = useState(false);
+  const [userCapabilityError, setUserCapabilityError] = useState<string>();
+  const userCapabilityAttempt = useRef(0);
   const [focusedTask, setFocusedTask] = useState<{ id: string; revision: number; highlighted: boolean }>();
   const focusTaskRevisionRef = useRef(0);
   const focusTaskTimerRef = useRef<number | undefined>(undefined);
@@ -139,7 +154,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
   const [newSessionOpen, setNewSessionOpen] = useState(false);
   const [theme, setTheme] = useState<'light' | 'dark'>(readSavedTheme);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
-  const [turnPermission, setTurnPermission] = useState<PermissionMode>('accept-edits');
+  const [turnPermission, setTurnPermission] = useState<PermissionMode>('bypass-permissions');
 
   useEffect(() => () => {
     if (focusTaskTimerRef.current !== undefined) window.clearTimeout(focusTaskTimerRef.current);
@@ -222,6 +237,46 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     }
   }, [adapter]);
 
+  const loadCapabilities = useCallback(async (sessionId: string) => {
+    const attempt = ++capabilityAttempt.current;
+    setCapabilityLoading(true);
+    setCapabilityError(undefined);
+    try {
+      const next = await adapter.inspectCapabilities(sessionId);
+      if (attempt !== capabilityAttempt.current || activeSessionIdRef.current !== sessionId) return;
+      setCapabilities(next);
+      setCapabilityLoading(false);
+    } catch (error) {
+      if (attempt !== capabilityAttempt.current || activeSessionIdRef.current !== sessionId) return;
+      setCapabilityError(productMessage(
+        error instanceof Error ? error.message : undefined,
+        '暂时无法读取这个会话的能力。',
+      ));
+      setCapabilityLoading(false);
+    }
+  }, [adapter]);
+
+  const loadUserCapabilities = useCallback(async (refresh = false) => {
+    const attempt = ++userCapabilityAttempt.current;
+    setUserCapabilityLoading(true);
+    setUserCapabilityError(undefined);
+    try {
+      const next = refresh
+        ? await adapter.refreshUserCapabilities(activeSessionIdRef.current || undefined)
+        : await adapter.inspectUserCapabilities(activeSessionIdRef.current || undefined);
+      if (attempt !== userCapabilityAttempt.current) return;
+      setUserCapabilities(next);
+      setUserCapabilityLoading(false);
+    } catch (error) {
+      if (attempt !== userCapabilityAttempt.current) return;
+      setUserCapabilityError(productMessage(
+        error instanceof Error ? error.message : undefined,
+        '暂时无法读取这台设备上的能力。',
+      ));
+      setUserCapabilityLoading(false);
+    }
+  }, [adapter]);
+
   const openRuntimeSession = useCallback(async (
     sessionId: string,
     reconnecting = false,
@@ -229,10 +284,14 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
   ): Promise<RuntimeConnection | undefined> => {
     const attempt = ++connectionAttempt.current;
     taskInventoryAttempt.current += 1;
+    capabilityAttempt.current += 1;
     setTaskInventory([]);
     setTaskInventorySessionId('');
     setTaskInventoryError(undefined);
     setTaskInventoryLoading(Boolean(sessionId));
+    setCapabilities(undefined);
+    setCapabilityError(undefined);
+    setCapabilityLoading(Boolean(sessionId));
     if (focusTaskTimerRef.current !== undefined) {
       window.clearTimeout(focusTaskTimerRef.current);
       focusTaskTimerRef.current = undefined;
@@ -281,6 +340,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
       setRuntimeStatus(error instanceof RuntimeApiError && error.retryable ? 'offline' : 'failed');
       setRuntimeError(message);
       setTaskInventoryLoading(false);
+      setCapabilityLoading(false);
       return undefined;
     }
   }, [adapter, publishProjection]);
@@ -365,6 +425,34 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     });
     return () => window.cancelAnimationFrame(frame);
   }, [activeSessionId, connection, loadSessionTasks, taskRefreshKey]);
+
+  useEffect(() => {
+    if (!activeSessionId || !connection || connection.sessionId !== activeSessionId) return;
+    const frame = window.requestAnimationFrame(() => {
+      void loadCapabilities(activeSessionId);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [activeSessionId, connection, loadCapabilities]);
+
+  useEffect(() => {
+    if (activeView !== 'capabilities') return;
+    const frame = window.requestAnimationFrame(() => void loadUserCapabilities());
+    return () => window.cancelAnimationFrame(frame);
+  }, [activeSessionId, activeView, loadUserCapabilities]);
+
+  useEffect(() => {
+    const refreshVisibleCapabilities = () => {
+      if (document.visibilityState === 'visible' && activeView === 'capabilities') {
+        void loadUserCapabilities();
+      }
+    };
+    window.addEventListener('focus', refreshVisibleCapabilities);
+    document.addEventListener('visibilitychange', refreshVisibleCapabilities);
+    return () => {
+      window.removeEventListener('focus', refreshVisibleCapabilities);
+      document.removeEventListener('visibilitychange', refreshVisibleCapabilities);
+    };
+  }, [activeView, loadUserCapabilities]);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -629,6 +717,125 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     }
   }, [notify, recoverConnectionAfterOperation]);
 
+  const installDeviceSkill = useCallback(async (sourcePath: string): Promise<boolean> => {
+    try {
+      const result = await adapter.installUserSkill(sourcePath, activeSessionIdRef.current || undefined);
+      setUserCapabilities(result.capabilities);
+      setUserCapabilityError(undefined);
+      notify(result.operation.success ? '技能已安装' : '技能没有安装', result.operation.message, result.operation.success ? 'success' : 'warning');
+      if (activeSessionIdRef.current) void loadCapabilities(activeSessionIdRef.current);
+      return result.operation.success;
+    } catch (error) {
+      notify('技能安装失败', productMessage(error instanceof Error ? error.message : undefined, '请检查本地目录后重试。'), 'warning');
+      return false;
+    }
+  }, [adapter, loadCapabilities, notify]);
+
+  const installDevicePlugin = useCallback(async (sourcePath: string): Promise<boolean> => {
+    try {
+      const result = await adapter.installUserPlugin(sourcePath, activeSessionIdRef.current || undefined);
+      setUserCapabilities(result.capabilities);
+      setUserCapabilityError(undefined);
+      notify(result.operation.success ? '插件已安装' : '插件没有安装', result.operation.message, result.operation.success ? 'success' : 'warning');
+      return result.operation.success;
+    } catch (error) {
+      notify('插件安装失败', productMessage(error instanceof Error ? error.message : undefined, '请检查本地目录后重试。'), 'warning');
+      return false;
+    }
+  }, [adapter, notify]);
+
+  const createDeviceMcp = useCallback(async (input: McpCreateInput): Promise<boolean> => {
+    try {
+      const result = await adapter.createUserMcp(input, activeSessionIdRef.current || undefined);
+      setUserCapabilities(result.capabilities);
+      setUserCapabilityError(undefined);
+      notify(result.operation.success ? 'MCP 服务已添加' : 'MCP 服务没有添加', result.operation.message, result.operation.success ? 'success' : 'warning');
+      if (activeSessionIdRef.current) void loadCapabilities(activeSessionIdRef.current);
+      return result.operation.success;
+    } catch (error) {
+      notify('MCP 服务添加失败', productMessage(error instanceof Error ? error.message : undefined, '请检查连接信息后重试。'), 'warning');
+      return false;
+    }
+  }, [adapter, loadCapabilities, notify]);
+
+  const toggleDeviceMcp = useCallback(async (
+    server: UserMcpServerCapability,
+    enabled: boolean,
+  ): Promise<boolean> => {
+    try {
+      const result = await adapter.setUserMcpEnabled(server.id, enabled, activeSessionIdRef.current || undefined);
+      setUserCapabilities(result.capabilities);
+      notify(enabled ? 'MCP 服务已开启' : 'MCP 服务已关闭', result.operation.message, result.operation.success ? 'success' : 'warning');
+      if (activeSessionIdRef.current) void loadCapabilities(activeSessionIdRef.current);
+      return result.operation.success;
+    } catch (error) {
+      notify('MCP 状态没有改变', productMessage(error instanceof Error ? error.message : undefined, '请刷新后重试。'), 'warning');
+      return false;
+    }
+  }, [adapter, loadCapabilities, notify]);
+
+  const toggleDeviceSkill = useCallback(async (
+    skill: UserSkillCapability,
+    enabled: boolean,
+  ): Promise<boolean> => {
+    try {
+      const result = await adapter.setUserSkillEnabled(
+        skill.path,
+        enabled,
+        activeSessionIdRef.current || undefined,
+      );
+      setUserCapabilities(result.capabilities);
+      notify(enabled ? '技能已开启' : '技能已关闭', result.operation.message, result.operation.success ? 'success' : 'warning');
+      if (activeSessionIdRef.current) void loadCapabilities(activeSessionIdRef.current);
+      return result.operation.success;
+    } catch (error) {
+      notify('技能状态没有改变', productMessage(error instanceof Error ? error.message : undefined, '请刷新后重试。'), 'warning');
+      return false;
+    }
+  }, [adapter, loadCapabilities, notify]);
+
+  const toggleDevicePlugin = useCallback(async (
+    plugin: UserPluginCapability,
+    enabled: boolean,
+  ): Promise<boolean> => {
+    try {
+      const result = await adapter.setUserPluginEnabled(
+        plugin.id,
+        plugin.packageInstallId,
+        enabled,
+        activeSessionIdRef.current || undefined,
+      );
+      setUserCapabilities(result.capabilities);
+      notify(enabled ? '插件已开启' : '插件已关闭', result.operation.message, result.operation.success ? 'success' : 'warning');
+      if (activeSessionIdRef.current) void loadCapabilities(activeSessionIdRef.current);
+      return result.operation.success;
+    } catch (error) {
+      notify('插件状态没有改变', productMessage(error instanceof Error ? error.message : undefined, '请刷新后重试。'), 'warning');
+      return false;
+    }
+  }, [adapter, loadCapabilities, notify]);
+
+  const removeDevicePlugin = useCallback(async (plugin: UserPluginCapability): Promise<boolean> => {
+    try {
+      const result = await adapter.removeUserPlugin(plugin.id, activeSessionIdRef.current || undefined);
+      setUserCapabilities(result.capabilities);
+      notify(result.operation.success ? '插件已移除' : '插件没有移除', result.operation.message, result.operation.success ? 'success' : 'warning');
+      if (activeSessionIdRef.current) void loadCapabilities(activeSessionIdRef.current);
+      return result.operation.success;
+    } catch (error) {
+      notify('插件没有移除', productMessage(error instanceof Error ? error.message : undefined, '请刷新后重试。'), 'warning');
+      return false;
+    }
+  }, [adapter, loadCapabilities, notify]);
+
+  const openCapabilityRoot = useCallback(async (root: 'agents' | 'pulsara'): Promise<void> => {
+    try {
+      await adapter.openCapabilityRoot(root);
+    } catch (error) {
+      notify('无法打开目录', productMessage(error instanceof Error ? error.message : undefined, '请稍后重试。'), 'warning');
+    }
+  }, [adapter, notify]);
+
   return (
     <main className={`pulsara-shell${activeView === 'workbench' ? ' is-workbench' : ' is-surface'}${inspectorOpen ? ' has-inspector' : ''}`}>
       <ActivityRail activeView={activeView} onNavigate={navigate} onOpenCommand={() => setCommandOpen(true)} />
@@ -676,6 +883,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           interaction={projection.interaction}
           canControl={canControl}
           isObserver={isObserver}
+          skills={capabilities?.skills.items ?? []}
           focusTaskId={focusedTask?.id}
           focusTaskRevision={focusedTask?.revision ?? 0}
           focusTaskHighlighted={focusedTask?.highlighted ?? false}
@@ -708,6 +916,22 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           onLocate={locateTask}
           onAcceptCompletion={(task) => void acceptTaskCompletion(task)}
           onClose={() => setInspectorOpen(false)}
+        />
+      )}
+      {activeView === 'capabilities' && (
+        <CapabilityView
+          snapshot={userCapabilities}
+          loading={userCapabilityLoading}
+          error={userCapabilityError}
+          onRefresh={() => loadUserCapabilities(true)}
+          onOpenRoot={openCapabilityRoot}
+          onInstallSkill={installDeviceSkill}
+          onInstallPlugin={installDevicePlugin}
+          onCreateMcp={createDeviceMcp}
+          onToggleSkill={toggleDeviceSkill}
+          onToggleMcp={toggleDeviceMcp}
+          onTogglePlugin={toggleDevicePlugin}
+          onRemovePlugin={removeDevicePlugin}
         />
       )}
       {activeView === 'settings' && (

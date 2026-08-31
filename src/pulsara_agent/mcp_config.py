@@ -61,6 +61,12 @@ class McpAbsoluteCwdAuthority(StrEnum):
     INSTANCE_DATA = "INSTANCE_DATA"
 
 
+class McpLocalConfigSourceKind(StrEnum):
+    USER = "USER"
+    WORKSPACE = "WORKSPACE"
+    HOST_OVERRIDE = "HOST_OVERRIDE"
+
+
 @dataclass(frozen=True, slots=True)
 class WorkspaceRelativeMcpCwd:
     relative_path: str
@@ -93,7 +99,12 @@ McpStdioCwdBinding = WorkspaceRelativeMcpCwd | ExactAbsoluteMcpCwd
 
 @dataclass(frozen=True, slots=True)
 class LocalConfiguredMcpRuntimeSource:
+    source_kind: McpLocalConfigSourceKind = McpLocalConfigSourceKind.USER
     kind: str = "LOCAL_CONFIGURED"
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.source_kind, McpLocalConfigSourceKind):
+            raise TypeError("local MCP config source kind is open")
 
 
 @dataclass(frozen=True, slots=True)
@@ -362,12 +373,21 @@ def load_mcp_server_configs(
     # workspace file is untrusted until this exact Host open opts in: merely
     # checking out a repository must not launch code or resolve secret refs.
     merged = _load_raw(user_config_path.expanduser())
+    source_by_server_id = {
+        server_id: McpLocalConfigSourceKind.USER for server_id in merged
+    }
     if workspace_root is not None:
         workspace_entries = _load_raw(
             workspace_root.expanduser().resolve() / WORKSPACE_MCP_CONFIG
         )
         if trust_workspace_config:
             merged.update(workspace_entries)
+            source_by_server_id.update(
+                {
+                    server_id: McpLocalConfigSourceKind.WORKSPACE
+                    for server_id in workspace_entries
+                }
+            )
         else:
             for server_id, entry in workspace_entries.items():
                 # Untrusted workspace data cannot shadow a trusted user entry.
@@ -377,6 +397,7 @@ def load_mcp_server_configs(
                 disabled = dict(entry)
                 disabled["enabled"] = False
                 merged[server_id] = disabled
+                source_by_server_id[server_id] = McpLocalConfigSourceKind.WORKSPACE
     if host_overrides:
         for server_id, value in host_overrides.items():
             if not isinstance(server_id, str):
@@ -384,7 +405,37 @@ def load_mcp_server_configs(
             if not isinstance(value, Mapping):
                 raise ValueError("MCP Host override must be an object")
             merged[server_id] = dict(value)
-    return tuple(_parse_server(server_id, merged[server_id]) for server_id in sorted(merged))
+            source_by_server_id[server_id] = McpLocalConfigSourceKind.HOST_OVERRIDE
+    return tuple(
+        _parse_server(
+            server_id,
+            merged[server_id],
+            runtime_source=LocalConfiguredMcpRuntimeSource(
+                source_by_server_id[server_id]
+            ),
+        )
+        for server_id in sorted(merged)
+    )
+
+
+def load_workspace_mcp_server_configs(
+    workspace_root: Path,
+) -> tuple[McpServerConfig, ...]:
+    """Read only one workspace source without merging user authority."""
+
+    raw = _load_raw(
+        workspace_root.expanduser().resolve() / WORKSPACE_MCP_CONFIG
+    )
+    return tuple(
+        _parse_server(
+            server_id,
+            raw[server_id],
+            runtime_source=LocalConfiguredMcpRuntimeSource(
+                McpLocalConfigSourceKind.WORKSPACE
+            ),
+        )
+        for server_id in sorted(raw)
+    )
 
 
 def write_mcp_server_config(
@@ -521,7 +572,12 @@ def freeze_mcp_server_config(
     )
 
 
-def _parse_server(server_id: str, raw: Mapping[str, Any]) -> McpServerConfig:
+def _parse_server(
+    server_id: str,
+    raw: Mapping[str, Any],
+    *,
+    runtime_source: McpRuntimeSourceIdentity | None = None,
+) -> McpServerConfig:
     server_id = server_id.strip()
     if not server_id or len(server_id.encode("utf-8")) > 128:
         raise ValueError("MCP server id is invalid")
@@ -782,7 +838,7 @@ def _parse_server(server_id: str, raw: Mapping[str, Any]) -> McpServerConfig:
         catalog_refresh_interval_ms=refresh,
         default_tool_timeout_ms=default_timeout,
         per_tool_timeout_ms=per_tool_timeout,
-        runtime_source=LocalConfiguredMcpRuntimeSource(),
+        runtime_source=runtime_source or LocalConfiguredMcpRuntimeSource(),
         public_headers=(),
     )
 
@@ -877,7 +933,7 @@ def _cwd_fingerprint_payload(value: McpStdioCwdBinding) -> object:
 
 def _runtime_source_payload(value: McpRuntimeSourceIdentity) -> object:
     if isinstance(value, LocalConfiguredMcpRuntimeSource):
-        return {"kind": value.kind}
+        return {"kind": value.kind, "source_kind": value.source_kind.value}
     if isinstance(value, ManagedPackageMcpRuntimeSource):
         return {
             "kind": value.kind,
@@ -1129,6 +1185,7 @@ __all__ = [
     "McpEffectPolicyConfig",
     "McpExposurePolicy",
     "McpInvalidToolPolicy",
+    "McpLocalConfigSourceKind",
     "McpHttpNetworkPolicy",
     "McpScopePolicy",
     "McpServerConfig",
@@ -1143,6 +1200,7 @@ __all__ = [
     "freeze_mcp_server_config",
     "WORKSPACE_MCP_CONFIG",
     "load_mcp_server_configs",
+    "load_workspace_mcp_server_configs",
     "set_mcp_server_enabled",
     "write_mcp_server_config",
 ]

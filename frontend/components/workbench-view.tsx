@@ -2,6 +2,7 @@
 
 import {
   ArrowDown,
+  BookOpenText,
   Bot,
   Braces,
   Check,
@@ -26,6 +27,7 @@ import {
   ShieldCheck,
   Sparkles,
   TerminalSquare,
+  TriangleAlert,
   UserRound,
   WandSparkles,
   Zap,
@@ -36,8 +38,8 @@ import type {
   RuntimeInteractionResolution,
   RuntimeInteractionSummary,
 } from '../lib/runtime-adapter';
-import type { Message, PermissionMode, ReasoningBlock, RuntimeStatus, SessionSummary, SubagentRun, TodoRun, ToolTrace, Workspace } from '../lib/pulsara-types';
-import { permissionLabels } from '../lib/pulsara-types';
+import type { Message, PermissionMode, ReasoningBlock, RuntimeStatus, SessionSummary, SkillCapability, SubagentRun, TodoRun, ToolTrace, Workspace } from '../lib/pulsara-types';
+import { permissionLabels, permissionModeOrder } from '../lib/pulsara-types';
 import { MarkdownBody } from './markdown-body';
 
 interface WorkbenchViewProps {
@@ -56,6 +58,7 @@ interface WorkbenchViewProps {
   canControl: boolean;
   isObserver: boolean;
   permission: PermissionMode;
+  skills: SkillCapability[];
   focusTaskId?: string;
   focusTaskRevision: number;
   focusTaskHighlighted: boolean;
@@ -728,6 +731,7 @@ export function WorkbenchView({
   canControl,
   isObserver,
   permission,
+  skills,
   focusTaskId,
   focusTaskRevision,
   focusTaskHighlighted,
@@ -748,6 +752,7 @@ export function WorkbenchView({
   const [submitting, setSubmitting] = useState(false);
   const [compacting, setCompacting] = useState(false);
   const [permissionOpen, setPermissionOpen] = useState(false);
+  const [skillOpen, setSkillOpen] = useState(false);
   const [atBottom, setAtBottom] = useState(true);
   const [jumpBottom, setJumpBottom] = useState(126);
   const followLatestRef = useRef(true);
@@ -755,10 +760,22 @@ export function WorkbenchView({
   const workbenchRef = useRef<HTMLElement>(null);
   const threadRef = useRef<HTMLDivElement>(null);
   const composerWrapRef = useRef<HTMLDivElement>(null);
+  const composerInputRef = useRef<HTMLTextAreaElement>(null);
   const wordCount = draft.trim().length;
   const lastMessageLength = messages.at(-1)?.body.length ?? 0;
   const assistantRunStarts = useMemo(() => findAssistantRunStarts(messages), [messages]);
   const toolChainConnections = useMemo(() => findToolChainConnections(messages), [messages]);
+
+  const insertSkill = useCallback((name: string) => {
+    const marker = `$${name}`;
+    setDraft((current) => {
+      const alreadySelected = new RegExp(`(^|\\s)\\$${name}(?=\\s|$)`).test(current);
+      if (alreadySelected) return current;
+      return current.trim() ? `${marker} ${current}` : `${marker} `;
+    });
+    setSkillOpen(false);
+    window.requestAnimationFrame(() => composerInputRef.current?.focus());
+  }, []);
 
   const updateJumpPosition = useCallback(() => {
     const workbench = workbenchRef.current;
@@ -1002,6 +1019,7 @@ export function WorkbenchView({
           <div className="composer-editor">
             <Sparkles size={14} />
             <textarea
+              ref={composerInputRef}
               value={draft}
               onChange={(event) => setDraft(event.target.value)}
               onKeyDown={(event) => {
@@ -1020,6 +1038,37 @@ export function WorkbenchView({
           <div className="composer-actions">
             <div>
               <span className="mode-chip model-chip" title="由本机启动配置提供"><Bot size={12} /> {modelName || '当前模型'}</span>
+              {skills.length > 0 && (
+                <div className="popover-anchor">
+                  <button
+                    className={`mode-chip${skillOpen ? ' is-active' : ''}`}
+                    onClick={() => {
+                      setSkillOpen((value) => !value);
+                      setPermissionOpen(false);
+                    }}
+                    aria-expanded={skillOpen}
+                    aria-label="选择技能"
+                    disabled={submitting}
+                  ><BookOpenText size={12} /> 技能 <ChevronDown size={10} /></button>
+                  {skillOpen && (
+                    <div className="menu-popover skill-menu skill-menu--composer">
+                      <span className="menu-label">用于本轮</span>
+                      <div className="skill-menu__list">
+                        {skills.map((skill) => {
+                          const selected = skill.configured || new RegExp(`(^|\\s)\\$${skill.name}(?=\\s|$)`).test(draft);
+                          return (
+                            <button key={`${skill.name}:${skill.location}`} className={selected ? 'is-selected' : ''} onClick={() => insertSkill(skill.name)} disabled={skill.configured}>
+                              <span><strong>${skill.name}</strong><small>{skill.description}</small></span>
+                              {selected && <Check size={13} />}
+                            </button>
+                          );
+                        })}
+                      </div>
+                      <small className="skill-menu__note">技能名称会加入输入，由 Pulsara 在本轮读取。</small>
+                    </div>
+                  )}
+                </div>
+              )}
               <button
                 className={`mode-chip${(requestPlan && !isRunning) || activePlanMode ? ' is-active' : ''}`}
                 onClick={() => setRequestPlan((value) => !value)}
@@ -1028,15 +1077,15 @@ export function WorkbenchView({
                 title={isRunning ? '当前运行结束后可为下一轮启用规划' : undefined}
               ><WandSparkles size={12} /> {activePlanMode ? '规划进行中' : requestPlan && !isRunning ? '本轮先规划' : '先规划'}</button>
               <div className="popover-anchor">
-                <button className="mode-chip permission-chip" onClick={() => setPermissionOpen((value) => !value)} aria-expanded={permissionOpen} disabled={submitting}>
-                  <ShieldCheck size={12} /> {permissionLabels[permission]} <ChevronDown size={10} />
+                <button className={`mode-chip permission-chip${permission === 'bypass-permissions' ? ' is-danger' : ''}`} onClick={() => setPermissionOpen((value) => !value)} aria-expanded={permissionOpen} disabled={submitting}>
+                  {permission === 'bypass-permissions' ? <TriangleAlert size={12} /> : <ShieldCheck size={12} />} {permissionLabels[permission]} <ChevronDown size={10} />
                 </button>
                 {permissionOpen && (
                   <div className="menu-popover permission-menu permission-menu--composer">
                     <span className="menu-label">本轮权限</span>
-                    {(Object.keys(permissionLabels) as PermissionMode[]).map((mode) => (
-                      <button key={mode} className={mode === permission ? 'is-selected' : ''} onClick={() => { onPermissionChange(mode); setPermissionOpen(false); }}>
-                        <span><strong>{permissionLabels[mode]}</strong><small>{mode === 'accept-edits' ? '允许编辑；敏感操作仍会询问' : mode === 'read-only' ? '只观察和读取，不做改动' : mode === 'ask-permissions' ? '每次有副作用的操作都询问' : '跳过询问，仅限可信目录'}</small></span>
+                    {permissionModeOrder.map((mode) => (
+                      <button key={mode} className={`${mode === permission ? 'is-selected' : ''}${mode === 'bypass-permissions' ? ' permission-option--danger' : ''}`} onClick={() => { onPermissionChange(mode); setPermissionOpen(false); }}>
+                        <span><strong className="permission-option-title">{permissionLabels[mode]}{mode === 'bypass-permissions' && <TriangleAlert className="permission-warning-icon" size={13} aria-hidden="true" />}</strong><small>{mode === 'accept-edits' ? '允许编辑；敏感操作仍会询问' : mode === 'read-only' ? '只观察和读取，不做改动' : mode === 'ask-permissions' ? '每次有副作用的操作都询问' : '跳过询问，仅限可信目录'}</small></span>
                         {mode === permission && <Check size={13} />}
                       </button>
                     ))}

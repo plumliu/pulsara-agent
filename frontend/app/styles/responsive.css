@@ -36,7 +36,7 @@
   .workspace-kind-grid { grid-template-columns: 1fr; }
   body { overflow: hidden; }
   .pulsara-shell.is-workbench, .pulsara-shell.is-workbench.has-inspector, .pulsara-shell.is-surface { grid-template-columns: 1fr; grid-template-rows: minmax(0,1fr) 52px; }
-  .activity-rail { position: fixed; left: 0; right: 0; bottom: 0; z-index: 90; display: grid; grid-template-columns: repeat(3,1fr); height: 52px; padding: 5px 8px; border-top: 1px solid rgba(255,255,255,.06); }
+  .activity-rail { position: fixed; left: 0; right: 0; bottom: 0; z-index: 90; display: grid; grid-template-columns: repeat(4,1fr); height: 52px; padding: 5px 8px; border-top: 1px solid rgba(255,255,255,.06); }
   .rail-logo, .rail-nav--bottom .rail-button:first-child, .rail-avatar { display: none; }
   .rail-nav { display: contents; }
   .rail-nav--bottom { display: contents; }

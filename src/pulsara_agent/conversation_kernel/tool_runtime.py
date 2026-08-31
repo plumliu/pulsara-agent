@@ -213,6 +213,7 @@ from .mcp.supervisor import (
     McpPhysicalOutcomeUnknown,
     McpSnapshotStale,
 )
+from .mcp.contracts import McpDiscoveryCatalogInspection
 from .mcp.directory import McpDirectoryPageFactory
 from .mcp.meta import (
     McpToolRefCapacityExceeded,
@@ -948,6 +949,12 @@ class DirectKernelToolPort:
             conversation_scope_kind=conversation_scope_kind,
             scope_subagent_task_id=scope_subagent_task_id,
         )
+
+    def inspect_mcp_discovery_catalog(self) -> McpDiscoveryCatalogInspection:
+        supervisor = self._mcp_supervisor
+        if supervisor is None:
+            raise RuntimeError("MCP supervisor is not bound")
+        return supervisor.inspect_discovery_catalog()
 
     def freeze_mcp_capability_projection_input(self, owner):
         supervisor = self._mcp_supervisor

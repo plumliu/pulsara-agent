@@ -40,7 +40,12 @@ const statusLabels: Record<RuntimeStatus, string> = {
   failed: '连接失败',
 };
 
-function SettingRow({ icon: Icon, title, detail, children }: { icon: typeof Sun; title: string; detail: string; children: React.ReactNode }) {
+function SettingRow({ icon: Icon, title, detail, children }: {
+  icon: typeof Sun;
+  title: string;
+  detail: string;
+  children: React.ReactNode;
+}) {
   return <div className="setting-row"><span className="setting-row__icon"><Icon size={15} /></span><span className="setting-row__copy"><strong>{title}</strong><small>{detail}</small></span><div className="setting-row__control">{children}</div></div>;
 }
 
@@ -55,7 +60,7 @@ export function SettingsView({
 
   return (
     <section className="surface-view settings-view">
-      <header className="page-header"><div><span className="page-kicker">本机设置</span><h1>设置</h1><p>调整实际生效的外观，并查看本机模型与服务配置。</p></div></header>
+      <header className="page-header"><div><span className="page-kicker">本机设置</span><h1>设置</h1><p>调整实际生效的外观，并查看本机模型与服务。</p></div></header>
 
       <div className="settings-layout">
         <aside className="settings-nav">
@@ -66,13 +71,11 @@ export function SettingsView({
 
         <div className="settings-content">
           {section === 'general' && (
-            <>
-              <section className="settings-group"><header><Palette size={16} /><div><h2>外观</h2><p>控制 Pulsara 在本机的呈现方式。</p></div></header>
-                <SettingRow icon={theme === 'light' ? Sun : Moon} title="主题" detail="切换明暗外观">
-                  <div className="theme-picker"><button className={theme === 'light' ? 'is-active' : ''} onClick={() => onThemeChange('light')}><Sun size={12} /> 浅色</button><button className={theme === 'dark' ? 'is-active' : ''} onClick={() => onThemeChange('dark')}><Moon size={12} /> 深色</button></div>
-                </SettingRow>
-              </section>
-            </>
+            <section className="settings-group"><header><Palette size={16} /><div><h2>外观</h2><p>控制 Pulsara 在本机的呈现方式。</p></div></header>
+              <SettingRow icon={theme === 'light' ? Sun : Moon} title="主题" detail="切换明暗外观">
+                <div className="theme-picker"><button className={theme === 'light' ? 'is-active' : ''} onClick={() => onThemeChange('light')}><Sun size={12} /> 浅色</button><button className={theme === 'dark' ? 'is-active' : ''} onClick={() => onThemeChange('dark')}><Moon size={12} /> 深色</button></div>
+              </SettingRow>
+            </section>
           )}
 
           {section === 'models' && (

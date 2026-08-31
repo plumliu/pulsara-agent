@@ -1,4 +1,5 @@
 import {
+  Blocks,
   Command,
   Gauge,
   MessageCircle,
@@ -10,6 +11,7 @@ import { BrandMark } from './brand-mark';
 const navigation = [
   { id: 'overview' as const, label: '总览', icon: Gauge },
   { id: 'workbench' as const, label: '会话', icon: MessageCircle },
+  { id: 'capabilities' as const, label: '能力', icon: Blocks },
 ];
 
 interface ActivityRailProps {

@@ -7,6 +7,7 @@ import './styles/workbench.css';
 import './styles/inspector.css';
 import './styles/overview.css';
 import './styles/settings.css';
+import './styles/capabilities.css';
 import './styles/overlays.css';
 import './styles/responsive.css';
 

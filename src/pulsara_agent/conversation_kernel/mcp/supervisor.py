@@ -46,6 +46,8 @@ from pulsara_agent.conversation_kernel.capability_composition import (
     issue_mcp_capability_source_snapshot_set,
 )
 from pulsara_agent.mcp_config import (
+    LocalConfiguredMcpRuntimeSource,
+    ManagedPackageMcpRuntimeSource,
     McpConfiguredEffect,
     McpInvalidToolPolicy,
     McpScopePolicy,
@@ -78,6 +80,9 @@ from .contracts import (
     MAXIMUM_MCP_HOST_IN_FLIGHT,
     MAXIMUM_MCP_REMOTE_BODY_BYTES,
     McpCatalogSnapshot,
+    McpCatalogToolInspection,
+    McpConfiguredServerInspection,
+    McpDiscoveryCatalogInspection,
     McpDiscoverySnapshot,
     McpInstallationCandidate,
     McpPhysicalConcurrencyKind,
@@ -1145,6 +1150,33 @@ async def _invoke_standard_remote_result(
         request_state = input_owner.prepare_state_only_continuation(result)
 
 
+def _mcp_config_source_kind(config: McpServerConfig) -> str:
+    source = config.runtime_source
+    if isinstance(source, LocalConfiguredMcpRuntimeSource):
+        return source.source_kind.value
+    if isinstance(source, ManagedPackageMcpRuntimeSource):
+        return source.kind
+    raise TypeError("MCP runtime source identity union is open")
+
+
+def _candidate_exact_joins_config(
+    candidate: McpInstallationCandidate,
+    config: McpServerConfig,
+    *,
+    supervisor_epoch: int,
+) -> bool:
+    return (
+        candidate.server_id == config.server_id
+        and candidate.expected_supervisor_epoch == supervisor_epoch
+        and candidate.expected_semantic_config_fingerprint
+        == config.semantic_config_fingerprint
+        and candidate.expected_runtime_config_fingerprint
+        == config.runtime_config_fingerprint
+        and candidate.expected_resolved_config_identity
+        == config.resolved_config_identity
+    )
+
+
 class McpHostSupervisor:
     """The only owner allowed to connect, fence, and close MCP slots."""
 
@@ -1184,6 +1216,9 @@ class McpHostSupervisor:
                 McpServerState.CONNECTING if item.enabled else McpServerState.DISABLED
             )
             for item in self.configs
+        }
+        self._state_config_identity = {
+            item.server_id: item.resolved_config_identity for item in self.configs
         }
         self._failure: dict[str, str] = {}
         self._attempt_generation = {item.server_id: 0 for item in self.configs}
@@ -1359,6 +1394,7 @@ class McpHostSupervisor:
                 config = updated.get(server_id)
                 if config is None:
                     self._state.pop(server_id, None)
+                    self._state_config_identity.pop(server_id, None)
                     self._failure.pop(server_id, None)
                     self._retry_counts.pop(server_id, None)
                     self._refresh_generation.pop(server_id, None)
@@ -1370,6 +1406,9 @@ class McpHostSupervisor:
                             McpServerState.CONNECTING
                             if config.enabled
                             else McpServerState.DISABLED
+                        )
+                        self._state_config_identity[server_id] = (
+                            config.resolved_config_identity
                         )
                     if config.enabled:
                         reconnect.append(server_id)
@@ -1383,6 +1422,9 @@ class McpHostSupervisor:
                     McpServerState.CONNECTING
                     if config.enabled
                     else McpServerState.DISABLED
+                )
+                self._state_config_identity[server_id] = (
+                    config.resolved_config_identity
                 )
                 if config.enabled and server_id not in reconnect:
                     reconnect.append(server_id)
@@ -1478,11 +1520,18 @@ class McpHostSupervisor:
         state: McpServerState,
         *,
         failure: str | None = None,
+        resolved_config_identity: str | None = None,
     ) -> None:
         """Request a catalog-only successor for a visible state transition."""
 
         previous = (self._state.get(server_id), self._failure.get(server_id))
+        if resolved_config_identity is None:
+            config = self._config_by_id.get(server_id)
+            if config is None:
+                raise RuntimeError("MCP state has no current config identity")
+            resolved_config_identity = config.resolved_config_identity
         self._state[server_id] = state
+        self._state_config_identity[server_id] = resolved_config_identity
         if failure is None:
             self._failure.pop(server_id, None)
         else:
@@ -1668,8 +1717,17 @@ class McpHostSupervisor:
                         # A failed replacement must not withdraw the retained
                         # semantic catalog or publish an operational failure as
                         # catalog semantics.  Physical execution remains fenced.
+                        retained_candidate = self._installed.get(server_id)
+                        if retained_candidate is None:
+                            raise RuntimeError(
+                                "retained MCP surface lost its config identity"
+                            )
                         self._set_catalog_state_locked(
-                            server_id, McpServerState.READY
+                            server_id,
+                            McpServerState.READY,
+                            resolved_config_identity=(
+                                retained_candidate.expected_resolved_config_identity
+                            ),
                         )
                     else:
                         self._set_catalog_state_locked(
@@ -1717,6 +1775,13 @@ class McpHostSupervisor:
                 # physical close.  It must never mutate another generation's
                 # public state or candidate ownership.
                 return
+            failed_config_identity: str | None = None
+            if pending_is_failed_slot:
+                assert pending is not None
+                failed_config_identity = pending.expected_resolved_config_identity
+            elif installed_is_failed_slot:
+                assert installed is not None
+                failed_config_identity = installed.expected_resolved_config_identity
             if pending_is_failed_slot:
                 assert pending is not None
                 self._pending.pop(server_id, None)
@@ -1735,13 +1800,24 @@ class McpHostSupervisor:
                 else:
                     self._slots[server_id] = replacement.slot_lease._slot  # noqa: SLF001
             replacement_available = self._installed_available_locked(server_id)
+            installed_replacement = self._installed.get(server_id)
             pending_replacement = self._pending.get(server_id)
             if replacement_available or pending_replacement is not None:
                 # The failed exact slot is operational history.  A healthy
                 # installed surface (or ready pending replacement) remains the
                 # semantic catalog truth.
                 self._set_catalog_state_locked(
-                    server_id, McpServerState.READY
+                    server_id,
+                    McpServerState.READY,
+                    resolved_config_identity=(
+                        pending_replacement.expected_resolved_config_identity
+                        if pending_replacement is not None
+                        else (
+                            installed_replacement.expected_resolved_config_identity
+                            if installed_replacement is not None
+                            else None
+                        )
+                    ),
                 )
             else:
                 self._set_catalog_state_locked(
@@ -1752,6 +1828,7 @@ class McpHostSupervisor:
                         else McpServerState.FAILED_TERMINAL
                     ),
                     failure=category,
+                    resolved_config_identity=failed_config_identity,
                 )
             if retryable:
                 self._schedule_retry_locked(server_id)
@@ -1844,13 +1921,11 @@ class McpHostSupervisor:
                 config = self._config_by_id.get(server_id)
                 if (
                     config is None
-                    or candidate.expected_supervisor_epoch != self._epoch
-                    or candidate.expected_semantic_config_fingerprint
-                    != config.semantic_config_fingerprint
-                    or candidate.expected_runtime_config_fingerprint
-                    != config.runtime_config_fingerprint
-                    or candidate.expected_resolved_config_identity
-                    != config.resolved_config_identity
+                    or not _candidate_exact_joins_config(
+                        candidate,
+                        config,
+                        supervisor_epoch=self._epoch,
+                    )
                     or not candidate.slot_lease._slot.lease_is_current(  # noqa: SLF001
                         candidate.slot_lease
                     )
@@ -1975,6 +2050,106 @@ class McpHostSupervisor:
     def catalog_snapshot(self) -> McpCatalogSnapshot:
         with self._lock:
             return self._catalog_locked(ModelInputScopeKind.ROOT)
+
+    def inspect_discovery_catalog(
+        self,
+        scope: ModelInputScopeKind = ModelInputScopeKind.ROOT,
+    ) -> McpDiscoveryCatalogInspection:
+        """Freeze the latest bounded discovery for management/UI inspection.
+
+        A completed connection may produce a normalized candidate after the
+        Host's optional fast-start window.  Provider publication still belongs
+        exclusively to ``install_pending_at_safe_point``; this read-only view
+        lets management surfaces report what the peer actually exposed without
+        mutating the current provider/tool generation.
+        """
+
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("MCP supervisor is closed")
+            inspection_configs = tuple(
+                config
+                for config in self.configs
+                if scope is ModelInputScopeKind.ROOT
+                or config.scope_policy is McpScopePolicy.ROOT_AND_SUBAGENTS
+            )
+            candidates: dict[str, McpInstallationCandidate] = {}
+            for config in inspection_configs:
+                candidate = self._pending.get(
+                    config.server_id
+                ) or self._installed.get(config.server_id)
+                if (
+                    config.enabled
+                    and candidate is not None
+                    and _candidate_exact_joins_config(
+                        candidate,
+                        config,
+                        supervisor_epoch=self._epoch,
+                    )
+                ):
+                    candidates[config.server_id] = candidate
+            semantics, _collisions = _aggregate_provider_projection(
+                tuple(candidates[key] for key in sorted(candidates)),
+                scope,
+            )
+            policy_by_tool: dict[
+                tuple[str, str], McpToolExecutionPolicyFact
+            ] = {}
+            for candidate in candidates.values():
+                for policy in candidate.ordered_tool_execution_policies:
+                    if policy.server_id != candidate.server_id:
+                        raise RuntimeError(
+                            "MCP discovery inspection policy has the wrong server"
+                        )
+                    key = (policy.server_id, policy.remote_tool_name)
+                    if key in policy_by_tool:
+                        raise RuntimeError(
+                            "MCP discovery inspection policy identity is duplicated"
+                        )
+                    policy_by_tool[key] = policy
+            tools: list[McpCatalogToolInspection] = []
+            for semantic in semantics:
+                policy = policy_by_tool.get(
+                    (semantic.server_id, semantic.remote_tool_name)
+                )
+                if (
+                    policy is None
+                    or policy.server_id != semantic.server_id
+                    or policy.remote_tool_name != semantic.remote_tool_name
+                    or policy.provider_tool_name != semantic.provider_tool_name
+                    or policy.tool_semantic_fingerprint
+                    != semantic.descriptor_fingerprint
+                ):
+                    raise RuntimeError(
+                        "MCP discovery inspection policy does not join semantic"
+                    )
+                tools.append(McpCatalogToolInspection(semantic, policy))
+            return McpDiscoveryCatalogInspection(
+                catalog_snapshot=self._catalog_from_candidates_locked(
+                    scope, candidates
+                ),
+                configured_servers=tuple(
+                    McpConfiguredServerInspection(
+                        server_id=config.server_id,
+                        resolved_config_identity=config.resolved_config_identity,
+                        source_kind=_mcp_config_source_kind(config),
+                        status_matches_config=(
+                            self._state_config_identity.get(config.server_id)
+                            == config.resolved_config_identity
+                        ),
+                    )
+                    for config in inspection_configs
+                ),
+                tools=tuple(
+                    sorted(
+                        tools,
+                        key=lambda item: (
+                            item.semantic.server_id,
+                            item.semantic.remote_tool_name,
+                        ),
+                    )
+                ),
+            )
 
     def freeze_capability_source_snapshot_set(
         self,
@@ -2199,12 +2374,17 @@ class McpHostSupervisor:
             ),
         )
 
-    def _catalog_locked(
-        self, scope: ModelInputScopeKind
+    def _catalog_locked(self, scope: ModelInputScopeKind) -> McpCatalogSnapshot:
+        return self._catalog_from_candidates_locked(scope, self._installed)
+
+    def _catalog_from_candidates_locked(
+        self,
+        scope: ModelInputScopeKind,
+        candidates: Mapping[str, McpInstallationCandidate],
     ) -> McpCatalogSnapshot:
         entries: list[McpServerCatalogEntry] = []
         _semantics, collision_facts = _aggregate_provider_projection(
-            tuple(self._installed[key] for key in sorted(self._installed)),
+            tuple(candidates[key] for key in sorted(candidates)),
             scope,
         )
         collision_targets = {
@@ -2218,7 +2398,7 @@ class McpHostSupervisor:
                 and config.scope_policy is not McpScopePolicy.ROOT_AND_SUBAGENTS
             ):
                 continue
-            candidate = self._installed.get(config.server_id)
+            candidate = candidates.get(config.server_id)
             snapshot = (
                 scope_mcp_discovery_snapshot(
                     candidate.discovery_snapshot,

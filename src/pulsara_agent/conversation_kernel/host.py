@@ -13,6 +13,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import StrEnum
 from hashlib import sha256
+from pathlib import Path
 from time import monotonic
 from typing import Awaitable, Callable, Mapping
 from uuid import uuid4
@@ -56,12 +57,17 @@ from pulsara_agent.capability.bundled_skills import (
     BundledSkillDistributionBindingOwner,
 )
 from pulsara_agent.capability.local_skills import LooseSkillDefinitionProducer
+from pulsara_agent.capability.resolver import EffectiveSkillCatalogInspection
 from pulsara_agent.capability.pulsara_home import (
     PulsaraHomeResolution,
     PulsaraHomeResolutionError,
     UserHomeResolution,
     resolve_pulsara_home,
     resolve_user_home,
+)
+from pulsara_agent.capability.user_skill_config import (
+    USER_SKILL_CONFIG_NAME,
+    load_user_skill_config,
 )
 from pulsara_agent.conversation_kernel.contracts import (
     ConversationScopeKind,
@@ -184,6 +190,10 @@ from pulsara_agent.ports.terminal_observation import (
 )
 from pulsara_agent.mcp_config import McpServerConfig, load_mcp_server_configs
 from pulsara_agent.conversation_kernel.mcp import McpHostSupervisor
+from pulsara_agent.conversation_kernel.mcp.contracts import (
+    McpCatalogSnapshot,
+    McpConfiguredServerInspection,
+)
 from pulsara_agent.settings import PulsaraSettings
 from pulsara_agent.hooks.context import (
     HookContextOwner,
@@ -217,11 +227,22 @@ from pulsara_agent.storage.schema_verification_service import (
 )
 from pulsara_agent.plugins.contracts import (
     EnabledPluginViewDisposition,
+    ExternalProcessAcceptance,
+    InspectLocalPluginsRequest,
+    InstallLocalPluginRequest,
     NeverCancelPluginOperation,
     PluginDiagnosticCode,
+    PluginEnablementOutcome,
+    PluginInspectionResult,
+    PluginInstallOutcome,
     PluginMcpNormalizationDisposition,
+    PluginRemovalOutcome,
+    PluginScopeKind,
+    RemoveLocalPluginRequest,
+    SetLocalPluginEnabledRequest,
 )
 from pulsara_agent.plugins.hook_adapter import compose_hook_definition_view
+from pulsara_agent.plugins.management import PluginManagementService
 from pulsara_agent.plugins.mcp_adapter import normalize_plugin_mcp_configs
 from pulsara_agent.plugins.package_store import ManagedPluginStore
 from pulsara_agent.plugins.skill_producer import PluginSkillDefinitionProducer
@@ -308,6 +329,30 @@ class KernelCommandOutcome:
     plan_workflow_revision: int | None = None
     plan_draft_decision: PlanDraftDecision | None = None
     plan_continuation_turn_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class KernelMcpToolCatalogItem:
+    """Renderer-neutral public facts for one currently discovered MCP tool."""
+
+    server_id: str
+    remote_name: str
+    provider_name: str
+    description: str
+    effect: str
+    available_to_subagents: bool
+    parallel_safe: bool
+
+
+@dataclass(frozen=True, slots=True)
+class KernelCapabilityCatalogInspection:
+    """Disposable product projection frozen directly from capability owners."""
+
+    mcp_catalog: McpCatalogSnapshot
+    mcp_configured_servers: tuple[McpConfiguredServerInspection, ...]
+    mcp_tools: tuple[KernelMcpToolCatalogItem, ...]
+    skill_catalog: EffectiveSkillCatalogInspection
+    configured_active_skill_names: frozenset[str]
 
 
 class PromptBlockedByHook(RuntimeError):
@@ -603,11 +648,18 @@ class KernelHostSession:
         )
         self._tools.bind_mcp_supervisor(self._mcp_supervisor)
         self._tools.seal_builtin_composition()
+        pulsara_home_path = pulsara_home_resolution.path
+        if pulsara_home_path is None:
+            raise PulsaraHomeResolutionError(pulsara_home_resolution)
+        user_skill_config_path = pulsara_home_path / USER_SKILL_CONFIG_NAME
         self._capabilities = KernelSkillProjectionComposer(
             workspace_root=workspace.workspace_root,
             bundled_binding_owner=bundled_skill_binding,
             plugin_definitions_provider=lambda: self._plugin_skill_definitions,
             configured_active_skill_names=active_skill_names,
+            user_skill_config_provider=lambda: load_user_skill_config(
+                config_path=user_skill_config_path
+            ),
             loose_producer=LooseSkillDefinitionProducer(
                 pulsara_home_resolution=pulsara_home_resolution,
                 user_home_resolution=user_home_resolution,
@@ -846,7 +898,7 @@ class KernelHostSession:
     async def reload_plugins(
         self, *, deadline_monotonic: float | None
     ) -> dict[str, object]:
-        """Publish one future Plugin view without rebasing provider input."""
+        """Reload local MCP and Plugin sources without rebasing provider input."""
 
         self._require_open()
         deadline = (
@@ -863,7 +915,18 @@ class KernelHostSession:
             "Plugin reload settlement deadline expired",
         )
         try:
-            return await self._reload_plugins_serialized(deadline)
+            local_mcp_configs = await asyncio.to_thread(
+                load_mcp_server_configs,
+                workspace_root=self.workspace.workspace_root,
+                trust_workspace_config=self.workspace.trust_workspace_mcp_config,
+            )
+            predecessor_local_mcp_configs = self._local_mcp_configs
+            self._local_mcp_configs = local_mcp_configs
+            try:
+                return await self._reload_plugins_serialized(deadline)
+            except BaseException:
+                self._local_mcp_configs = predecessor_local_mcp_configs
+                raise
         finally:
             self._plugin_reload_settlement_lock.release()
 
@@ -1013,6 +1076,36 @@ class KernelHostSession:
 
         self._require_open()
         self._mcp_supervisor.reconnect(server_id)
+
+    def inspect_capability_catalog(self) -> KernelCapabilityCatalogInspection:
+        """Freeze one UI-safe view without creating another capability owner."""
+
+        self._require_open()
+        mcp = self._tools.inspect_mcp_discovery_catalog()
+        skills = self._capabilities.freeze_owner_snapshot(
+            conversation_scope_kind=ModelInputScopeKind.ROOT,
+            scope_subagent_task_id=None,
+        )
+        return KernelCapabilityCatalogInspection(
+            mcp_catalog=mcp.catalog_snapshot,
+            mcp_configured_servers=mcp.configured_servers,
+            mcp_tools=tuple(
+                KernelMcpToolCatalogItem(
+                    server_id=tool.semantic.server_id,
+                    remote_name=tool.semantic.remote_tool_name,
+                    provider_name=tool.semantic.provider_tool_name,
+                    description=tool.semantic.description,
+                    effect=tool.policy.effect_kind.value,
+                    available_to_subagents=tool.semantic.subagent_visible,
+                    parallel_safe=tool.policy.parallel_safe,
+                )
+                for tool in mcp.tools
+            ),
+            skill_catalog=skills.inspection,
+            configured_active_skill_names=(
+                self._capabilities.configured_active_skill_names
+            ),
+        )
 
     @property
     def writer_generation(self) -> int:
@@ -3886,9 +3979,7 @@ class KernelHostSession:
             if not self._external_new_turn_accepting or self._active_task is not None:
                 self._external_new_turn_accepting = False
                 self._external_new_turn_settled.set()
-                raise RuntimeError(
-                    "subagent completion turn lost its local admission"
-                )
+                raise RuntimeError("subagent completion turn lost its local admission")
             self._tools.todo_owner.bind_continuation_if_present(
                 scope_kind=ModelInputScopeKind.ROOT,
                 scope_subagent_task_id=None,
@@ -4459,6 +4550,68 @@ class KernelHostCore:
 
     def _canonical_deadline(self) -> float:
         return self._deadlines.deadline(KernelWatchdogOwner.FOREGROUND_CANONICAL)
+
+    def _plugin_management(self) -> PluginManagementService:
+        return PluginManagementService(api_key_boundary=self._api_key_boundary)
+
+    async def inspect_user_plugins(self) -> PluginInspectionResult:
+        """Inspect only the process-wide user Plugin store."""
+
+        request = InspectLocalPluginsRequest(self._canonical_deadline())
+        return await _shielded_plugin_filesystem_call(
+            self._plugin_management().inspect_local_plugins,
+            request=request,
+        )
+
+    async def install_user_plugin(self, source_path: Path) -> PluginInstallOutcome:
+        """Install one local package into the user Plugin store, initially disabled."""
+
+        request = InstallLocalPluginRequest(
+            source_path=source_path,
+            scope=PluginScopeKind.USER,
+            deadline_monotonic=self._canonical_deadline(),
+        )
+        return await _shielded_plugin_filesystem_call(
+            self._plugin_management().install_local_plugin,
+            request=request,
+        )
+
+    async def set_user_plugin_enabled(
+        self,
+        *,
+        plugin_id: str,
+        package_install_id: str,
+        enabled: bool,
+    ) -> PluginEnablementOutcome:
+        """Apply one exact reviewed user Plugin enablement cut."""
+
+        request = SetLocalPluginEnabledRequest(
+            scope=PluginScopeKind.USER,
+            plugin_id=plugin_id,
+            enabled=enabled,
+            expected_current_package_install_id=package_install_id,
+            deadline_monotonic=self._canonical_deadline(),
+            external_process_acceptance=(
+                ExternalProcessAcceptance.ACCEPTED if enabled else None
+            ),
+        )
+        return await _shielded_plugin_filesystem_call(
+            self._plugin_management().set_local_plugin_enabled,
+            request=request,
+        )
+
+    async def remove_user_plugin(self, plugin_id: str) -> PluginRemovalOutcome:
+        """Remove one user Plugin state reference."""
+
+        request = RemoveLocalPluginRequest(
+            scope=PluginScopeKind.USER,
+            plugin_id=plugin_id,
+            deadline_monotonic=self._canonical_deadline(),
+        )
+        return await _shielded_plugin_filesystem_call(
+            self._plugin_management().remove_local_plugin,
+            request=request,
+        )
 
     @classmethod
     def production(
@@ -5124,10 +5277,12 @@ def _plan_workflow_command_outcome(
 
 
 __all__ = [
+    "KernelCapabilityCatalogInspection",
     "KernelCommandOutcome",
     "KernelCompositionUnavailable",
     "KernelHostCore",
     "KernelHostSession",
+    "KernelMcpToolCatalogItem",
     "KernelSessionSummary",
     "HostSessionCloseDecisionFrozen",
 ]

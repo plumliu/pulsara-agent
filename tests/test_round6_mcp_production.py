@@ -120,8 +120,10 @@ from pulsara_agent.llm.adapters.openai.function_tools import (
 )
 from pulsara_agent.llm.input import MessageRole
 from pulsara_agent.mcp_config import (
+    LocalConfiguredMcpRuntimeSource,
     McpConfiguredEffect,
     McpHttpNetworkPolicy,
+    McpLocalConfigSourceKind,
     StreamableHttpTransportConfig,
     load_mcp_server_configs,
 )
@@ -1155,6 +1157,11 @@ class _DelayedTerminalFailureFakeMcpClient(_FakeMcpClient):
         raise ValueError("terminal fixture connection failure")
 
 
+class _DelayedSuccessFakeMcpClient(_FakeMcpClient):
+    async def open(self) -> None:
+        await asyncio.sleep(0.03)
+
+
 class _SchemaChangingFakeMcpSession(_FakeMcpSession):
     description = "schema-v1"
 
@@ -1426,6 +1433,19 @@ def test_round6_runtime_only_reconnect_preserves_semantic_surface_until_safe_poi
             )
             assert reconnecting_catalog.servers[0].status is McpServerState.READY
             assert supervisor.install_pending_at_safe_point() is None
+            reconnecting_inspection = supervisor.inspect_discovery_catalog()
+            assert reconnecting_inspection.tools == ()
+            assert (
+                reconnecting_inspection.catalog_snapshot.servers[0].exposed_tool_count
+                == 0
+            )
+            assert (
+                reconnecting_inspection.configured_servers[0].resolved_config_identity
+                == second_config.resolved_config_identity
+            )
+            assert not reconnecting_inspection.configured_servers[
+                0
+            ].status_matches_config
             with pytest.raises(McpSnapshotStale):
                 old_executor.admit(
                     session_id="session:runtime-rebind",
@@ -1443,6 +1463,15 @@ def test_round6_runtime_only_reconnect_preserves_semantic_surface_until_safe_poi
                 await asyncio.sleep(0.01)
             else:
                 pytest.fail("runtime-only MCP reconnect did not finish")
+            discovered_replacement = supervisor.inspect_discovery_catalog()
+            assert len(discovered_replacement.tools) == 1
+            assert (
+                discovered_replacement.configured_servers[0].resolved_config_identity
+                == second_config.resolved_config_identity
+            )
+            assert discovered_replacement.configured_servers[
+                0
+            ].status_matches_config
             second = supervisor.install_pending_at_safe_point()
             assert second is not None
             try:
@@ -1464,6 +1493,48 @@ def test_round6_runtime_only_reconnect_preserves_semantic_surface_until_safe_poi
                 permit.release()
             finally:
                 second.release()
+        finally:
+            first.release()
+            await supervisor.aclose()
+
+    asyncio.run(exercise())
+
+
+def test_round9_old_draining_slot_failure_keeps_old_config_provenance(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        first_config = _config(tmp_path, default_tool_timeout_ms=10_000)
+        supervisor = McpHostSupervisor(
+            session_id="session:old-draining-slot-failure",
+            workspace_root=tmp_path,
+            configs=(first_config,),
+            client_factory=_DelayedSuccessFakeMcpClient,  # type: ignore[arg-type]
+        )
+        await supervisor.start()
+        first = supervisor.install_pending_at_safe_point()
+        assert first is not None
+        old_slot = next(iter(first.candidates.values())).slot_lease._slot  # noqa: SLF001
+        try:
+            second_config = _config(tmp_path, default_tool_timeout_ms=20_000)
+            supervisor.reload_configs((second_config,))
+            supervisor._report_slot_failure(  # noqa: SLF001
+                old_slot,
+                "OLD_DRAINING_SLOT_FAILURE",
+                False,
+            )
+
+            inspection = supervisor.inspect_discovery_catalog()
+            assert inspection.catalog_snapshot.servers[0].status is (
+                McpServerState.FAILED_TERMINAL
+            )
+            assert inspection.catalog_snapshot.servers[0].exposed_tool_count == 0
+            assert inspection.tools == ()
+            assert (
+                inspection.configured_servers[0].resolved_config_identity
+                == second_config.resolved_config_identity
+            )
+            assert not inspection.configured_servers[0].status_matches_config
         finally:
             first.release()
             await supervisor.aclose()
@@ -1584,6 +1655,65 @@ def test_round9_optional_mcp_failure_publishes_catalog_only_successor(
             finally:
                 successor.release()
         finally:
+            first.release()
+            await supervisor.aclose()
+
+    asyncio.run(exercise())
+
+
+def test_round9_late_optional_mcp_discovery_is_visible_without_surface_publication(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        supervisor = McpHostSupervisor(
+            session_id="session:late-optional-discovery-inspection",
+            workspace_root=tmp_path,
+            configs=(_config(tmp_path, required=False),),
+            client_factory=_DelayedSuccessFakeMcpClient,  # type: ignore[arg-type]
+            optional_fast_start_seconds=0.005,
+        )
+        await supervisor.start()
+        first = supervisor.install_pending_at_safe_point()
+        assert first is not None
+        successor = None
+        try:
+            assert first.catalog_snapshot.servers[0].status is McpServerState.CONNECTING
+            assert first.catalog_snapshot.servers[0].discovered_tool_count == 0
+
+            await supervisor._tasks["fixture"]  # noqa: SLF001
+            effective_before = supervisor.catalog_snapshot()
+            assert effective_before.servers[0].status is McpServerState.READY
+            assert effective_before.servers[0].discovered_tool_count == 0
+
+            inspection = supervisor.inspect_discovery_catalog()
+            assert inspection.catalog_snapshot.servers[0].status is McpServerState.READY
+            assert inspection.catalog_snapshot.servers[0].discovered_tool_count == 1
+            assert inspection.catalog_snapshot.servers[0].exposed_tool_count == 1
+            assert tuple(item.semantic.remote_tool_name for item in inspection.tools) == (
+                "fake_echo",
+            )
+            assert len(inspection.configured_servers) == 1
+            assert (
+                inspection.configured_servers[0].resolved_config_identity
+                == supervisor.configs[0].resolved_config_identity
+            )
+            assert (
+                inspection.configured_servers[0].source_kind
+                == McpLocalConfigSourceKind.USER.value
+            )
+            assert inspection.configured_servers[0].status_matches_config
+
+            # Management inspection must not publish or mutate the provider surface.
+            effective_after = supervisor.catalog_snapshot()
+            assert effective_after.semantic_fingerprint == effective_before.semantic_fingerprint
+            assert effective_after.servers[0].discovered_tool_count == 0
+
+            successor = supervisor.install_pending_at_safe_point()
+            assert successor is not None
+            assert successor.catalog_snapshot.servers[0].discovered_tool_count == 1
+        finally:
+            if successor is not None:
+                successor.release()
             first.release()
             await supervisor.aclose()
 
@@ -2296,6 +2426,16 @@ def test_round6_permission_matrix_is_local_and_scope_surface_is_stable(
         try:
             assert runtime.root_tool_specs
             assert runtime.subagent_tool_specs == ()
+            root_inspection = root_only.inspect_discovery_catalog(
+                ModelInputScopeKind.ROOT
+            )
+            child_inspection = root_only.inspect_discovery_catalog(
+                ModelInputScopeKind.SUBAGENT_TASK
+            )
+            assert len(root_inspection.configured_servers) == 1
+            assert child_inspection.configured_servers == ()
+            assert child_inspection.catalog_snapshot.servers == ()
+            assert child_inspection.tools == ()
             assert (
                 runtime.catalog_for_scope(ModelInputScopeKind.SUBAGENT_TASK).servers
                 == ()
@@ -3529,6 +3669,11 @@ def test_round6_config_is_closed_whole_entry_and_secret_safe(
         trust_workspace_config=True,
     )
     assert resolved.server_id == "shared"
+    assert isinstance(resolved.runtime_source, LocalConfiguredMcpRuntimeSource)
+    assert (
+        resolved.runtime_source.source_kind
+        is McpLocalConfigSourceKind.WORKSPACE
+    )
     assert resolved.effect_policy.default_effect is McpConfiguredEffect.READ_ONLY
     assert "must-not-appear" not in repr(resolved)
     assert "must-not-appear" not in resolved.runtime_config_fingerprint
@@ -3551,12 +3696,24 @@ def test_round6_config_is_closed_whole_entry_and_secret_safe(
     )
     assert untrusted.server_id == "repository_owned"
     assert not untrusted.enabled
+    assert isinstance(untrusted.runtime_source, LocalConfiguredMcpRuntimeSource)
+    assert (
+        untrusted.runtime_source.source_kind
+        is McpLocalConfigSourceKind.WORKSPACE
+    )
     (explicitly_trusted,) = load_mcp_server_configs(
         workspace_root=untrusted_workspace,
         user_config_path=tmp_path / "missing-user-mcp.yaml",
         trust_workspace_config=True,
     )
     assert explicitly_trusted.enabled
+    assert isinstance(
+        explicitly_trusted.runtime_source, LocalConfiguredMcpRuntimeSource
+    )
+    assert (
+        explicitly_trusted.runtime_source.source_kind
+        is McpLocalConfigSourceKind.WORKSPACE
+    )
 
     secret_config = tmp_path / "secret-mcp.yaml"
     secret_config.write_text(
@@ -3572,6 +3729,8 @@ def test_round6_config_is_closed_whole_entry_and_secret_safe(
         encoding="utf-8",
     )
     (secret_one,) = load_mcp_server_configs(user_config_path=secret_config)
+    assert isinstance(secret_one.runtime_source, LocalConfiguredMcpRuntimeSource)
+    assert secret_one.runtime_source.source_kind is McpLocalConfigSourceKind.USER
     monkeypatch.setenv("ROUND6_SECRET", "rotated-must-not-appear")
     (secret_two,) = load_mcp_server_configs(user_config_path=secret_config)
     assert (

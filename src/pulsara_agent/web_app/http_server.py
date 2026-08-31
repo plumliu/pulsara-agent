@@ -19,6 +19,15 @@ from pulsara_agent.web_app.session_controller import (
 LOOPBACK_HOST = "127.0.0.1"
 
 
+def _optional_body_string(body: dict[str, object], key: str) -> str | None:
+    value = body.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{key} must be a non-empty string")
+    return value
+
+
 class HttpPublicError(RuntimeError):
     def __init__(
         self,
@@ -118,11 +127,53 @@ class LocalHttpServer:
         self._app.router.add_get("/og.png", self._public_file)
         self._app.router.add_get("/assets/{tail:.*}", self._public_file)
         self._app.router.add_get("/api/app/bootstrap", self._bootstrap)
+        self._app.router.add_get("/api/capabilities", self._inspect_user_capabilities)
+        self._app.router.add_post(
+            "/api/capabilities/refresh", self._refresh_user_capabilities
+        )
+        self._app.router.add_post(
+            "/api/capabilities/roots/{root}/open", self._open_capability_root
+        )
+        self._app.router.add_post(
+            "/api/capabilities/skills/install", self._install_user_skill
+        )
+        self._app.router.add_post(
+            "/api/capabilities/skills/enabled", self._set_user_skill_enabled
+        )
+        self._app.router.add_post(
+            "/api/capabilities/mcp", self._create_user_mcp_server
+        )
+        self._app.router.add_post(
+            "/api/capabilities/mcp/{server_id}/enabled",
+            self._set_user_mcp_enabled,
+        )
+        self._app.router.add_post(
+            "/api/capabilities/plugins/install", self._install_user_plugin
+        )
+        self._app.router.add_post(
+            "/api/capabilities/plugins/{plugin_id}/enabled",
+            self._set_user_plugin_enabled,
+        )
+        self._app.router.add_delete(
+            "/api/capabilities/plugins/{plugin_id}", self._remove_user_plugin
+        )
         self._app.router.add_get("/api/sessions", self._list_sessions)
         self._app.router.add_get(
             "/api/sessions/{session_id}/tasks", self._list_session_tasks
         )
+        self._app.router.add_get(
+            "/api/sessions/{session_id}/capabilities",
+            self._inspect_session_capabilities,
+        )
         self._app.router.add_post("/api/sessions", self._create_session)
+        self._app.router.add_post(
+            "/api/sessions/{session_id}/capabilities/mcp/{server_id}/reconnect",
+            self._reconnect_session_mcp,
+        )
+        self._app.router.add_post(
+            "/api/sessions/{session_id}/capabilities/skills/install",
+            self._install_session_skill,
+        )
         self._app.router.add_delete("/api/sessions/{session_id}", self._close_session)
         self._app.router.add_post(
             "/api/sessions/{session_id}/connections", self._connect
@@ -293,6 +344,195 @@ class LocalHttpServer:
                 "任务列表的分页参数不正确。",
                 status=400,
             ) from exc
+        return web.json_response(payload)
+
+    async def _inspect_session_capabilities(self, request: web.Request) -> web.Response:
+        payload = await self.sessions.inspect_session_capabilities(
+            request.match_info["session_id"]
+        )
+        return web.json_response(payload)
+
+    async def _inspect_user_capabilities(self, request: web.Request) -> web.Response:
+        payload = await self.sessions.inspect_user_capabilities(
+            active_session_id=request.query.get("active_session_id")
+        )
+        return web.json_response(payload)
+
+    async def _refresh_user_capabilities(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        active_session_id = _optional_body_string(body, "active_session_id")
+        if set(body) - {"active_session_id"}:
+            raise ValueError("unexpected capability refresh field")
+        return web.json_response(
+            await self.sessions.refresh_user_capabilities(
+                active_session_id=active_session_id
+            )
+        )
+
+    async def _open_capability_root(self, request: web.Request) -> web.Response:
+        return web.json_response(
+            await self.sessions.open_capability_root(request.match_info["root"])
+        )
+
+    async def _install_user_skill(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        if set(body) - {"source_path", "active_session_id"}:
+            raise ValueError("unexpected Skill install field")
+        source_path = body.get("source_path")
+        if not isinstance(source_path, str):
+            raise ValueError("Skill source path is required")
+        payload = await self.sessions.install_user_skill(
+            source_path=source_path,
+            active_session_id=_optional_body_string(body, "active_session_id"),
+        )
+        return web.json_response(payload, status=201)
+
+    async def _set_user_skill_enabled(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        if set(body) - {"path", "enabled", "active_session_id"}:
+            raise ValueError("unexpected Skill enablement field")
+        path = body.get("path")
+        enabled = body.get("enabled")
+        if not isinstance(path, str) or not isinstance(enabled, bool):
+            raise ValueError("Skill enablement fields are invalid")
+        return web.json_response(
+            await self.sessions.set_user_skill_enabled(
+                skill_path=path,
+                enabled=enabled,
+                active_session_id=_optional_body_string(body, "active_session_id"),
+            )
+        )
+
+    async def _create_user_mcp_server(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        allowed = {
+            "server_id",
+            "display_name",
+            "transport",
+            "endpoint",
+            "command",
+            "args",
+            "available_to_subagents",
+            "active_session_id",
+        }
+        if set(body) - allowed:
+            raise ValueError("unexpected MCP field")
+        args = body.get("args", [])
+        if not isinstance(args, list) or any(not isinstance(item, str) for item in args):
+            raise ValueError("MCP args must be strings")
+        server_id = body.get("server_id")
+        display_name = body.get("display_name", "")
+        transport = body.get("transport")
+        available_to_subagents = body.get("available_to_subagents", False)
+        if (
+            not isinstance(server_id, str)
+            or not isinstance(display_name, str)
+            or not isinstance(transport, str)
+            or not isinstance(available_to_subagents, bool)
+        ):
+            raise ValueError("MCP fields are invalid")
+        endpoint = body.get("endpoint")
+        command = body.get("command")
+        if endpoint is not None and not isinstance(endpoint, str):
+            raise ValueError("MCP endpoint is invalid")
+        if command is not None and not isinstance(command, str):
+            raise ValueError("MCP command is invalid")
+        payload = await self.sessions.create_user_mcp_server(
+            server_id=server_id,
+            display_name=display_name,
+            transport=transport,
+            endpoint=endpoint,
+            command=command,
+            args=args,
+            available_to_subagents=available_to_subagents,
+            active_session_id=_optional_body_string(body, "active_session_id"),
+        )
+        return web.json_response(payload, status=201)
+
+    async def _set_user_mcp_enabled(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        if set(body) - {"enabled", "active_session_id"}:
+            raise ValueError("unexpected MCP enablement field")
+        enabled = body.get("enabled")
+        if not isinstance(enabled, bool):
+            raise ValueError("MCP enabled must be boolean")
+        return web.json_response(
+            await self.sessions.set_user_mcp_enabled(
+                server_id=request.match_info["server_id"],
+                enabled=enabled,
+                active_session_id=_optional_body_string(body, "active_session_id"),
+            )
+        )
+
+    async def _install_user_plugin(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        if set(body) - {"source_path", "active_session_id"}:
+            raise ValueError("unexpected Plugin install field")
+        source_path = body.get("source_path")
+        if not isinstance(source_path, str):
+            raise ValueError("Plugin source path is required")
+        payload = await self.sessions.install_user_plugin(
+            source_path=source_path,
+            active_session_id=_optional_body_string(body, "active_session_id"),
+        )
+        return web.json_response(payload, status=201)
+
+    async def _set_user_plugin_enabled(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        if set(body) - {"enabled", "package_install_id", "active_session_id"}:
+            raise ValueError("unexpected Plugin enablement field")
+        enabled = body.get("enabled")
+        package_install_id = body.get("package_install_id")
+        if not isinstance(enabled, bool) or not isinstance(package_install_id, str):
+            raise ValueError("Plugin enablement fields are invalid")
+        return web.json_response(
+            await self.sessions.set_user_plugin_enabled(
+                plugin_id=request.match_info["plugin_id"],
+                package_install_id=package_install_id,
+                enabled=enabled,
+                active_session_id=_optional_body_string(body, "active_session_id"),
+            )
+        )
+
+    async def _remove_user_plugin(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        if set(body) - {"active_session_id"}:
+            raise ValueError("unexpected Plugin removal field")
+        return web.json_response(
+            await self.sessions.remove_user_plugin(
+                plugin_id=request.match_info["plugin_id"],
+                active_session_id=_optional_body_string(body, "active_session_id"),
+            )
+        )
+
+    async def _reconnect_session_mcp(self, request: web.Request) -> web.Response:
+        payload = await self.sessions.reconnect_session_mcp(
+            request.match_info["session_id"],
+            request.match_info["server_id"],
+        )
+        return web.json_response(payload)
+
+    async def _install_session_skill(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        if set(body) != {"source_path", "scope"}:
+            raise HttpPublicError(
+                "SKILL_INSTALL_REQUEST_INVALID",
+                "安装技能需要选择本地目录和安装位置。",
+                status=400,
+            )
+        source_path = body["source_path"]
+        scope = body["scope"]
+        if not isinstance(source_path, str) or not isinstance(scope, str):
+            raise HttpPublicError(
+                "SKILL_INSTALL_REQUEST_INVALID",
+                "安装技能需要选择本地目录和安装位置。",
+                status=400,
+            )
+        payload = await self.sessions.install_session_skill(
+            request.match_info["session_id"],
+            source_path=source_path,
+            scope=scope,
+        )
         return web.json_response(payload)
 
     async def _create_session(self, request: web.Request) -> web.Response:
