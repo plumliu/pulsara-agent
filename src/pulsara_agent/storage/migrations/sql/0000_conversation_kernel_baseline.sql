@@ -102,6 +102,7 @@ CREATE TABLE pulsara_v3.subagent_tasks (
     execution_writer_generation bigint NOT NULL CHECK (execution_writer_generation >= 1),
     pending_reason text,
     terminal_reason text,
+    terminal_public_detail text,
     accepted_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     terminal_at timestamptz,
     UNIQUE (session_id, id),
@@ -123,7 +124,24 @@ CREATE TABLE pulsara_v3.subagent_tasks (
     CHECK ((status IN ('PENDING_START', 'WAITING_DEPENDENCY')) =
            (pending_reason IS NOT NULL)),
     CHECK (status IN ('PENDING_START', 'WAITING_DEPENDENCY') OR
-           pending_reason IS NULL)
+           pending_reason IS NULL),
+    CHECK (
+        (status IN ('FAILED', 'INTERRUPTED', 'CANCELLED',
+                    'BLOCKED_DEPENDENCY_FAILED')) =
+        (terminal_reason IS NOT NULL AND terminal_public_detail IS NOT NULL)
+    ),
+    CHECK (
+        terminal_reason IS NULL OR terminal_reason IN (
+            'DEPENDENCY_FAILED', 'DEPENDENCY_RESULT_INVARIANT',
+            'CHILD_START_FAILED', 'CHILD_EXECUTION_FAILED',
+            'HOOK_COMPACTION_BLOCKED', 'HOST_CLOSING', 'HOST_TAKEOVER',
+            'USER_CANCELLED'
+        )
+    ),
+    CHECK (
+        terminal_public_detail IS NULL OR
+        octet_length(terminal_public_detail) BETWEEN 1 AND 16384
+    )
 );
 
 CREATE TABLE pulsara_v3.subagent_task_dependencies (
@@ -160,7 +178,7 @@ CREATE TABLE pulsara_v3.turns (
         'read-only', 'ask-permissions', 'accept-edits', 'bypass-permissions'
     )),
     permission_admission_source text NOT NULL CHECK (permission_admission_source IN (
-        'USER_SUBMISSION', 'EXTERNAL_RESULT_COMMAND', 'TERMINAL_OBSERVATION',
+        'USER_SUBMISSION', 'SUBAGENT_COMPLETION_COMMAND', 'TERMINAL_OBSERVATION',
         'SUBAGENT_INHERITANCE', 'RUNTIME_PLAN_CONTINUATION'
     )),
     permission_overlay text NOT NULL CHECK (permission_overlay IN ('NONE', 'PLAN_READ_ONLY')),
@@ -264,7 +282,7 @@ CREATE TABLE pulsara_v3.session_commands (
     command_id text NOT NULL,
     command_kind text NOT NULL CHECK (command_kind IN (
         'SUBMIT_PROMPT', 'STEER', 'QUEUE_PROMPT', 'CANCEL_PROMPT',
-        'RESOLVE_INTERACTION', 'ACCEPT_SUBAGENT_RESULT',
+        'RESOLVE_INTERACTION', 'ACCEPT_SUBAGENT_COMPLETION',
         'ENTER_PLAN', 'CANCEL_PLAN', 'FORCE_EXIT_PLAN',
         'RESOLVE_PLAN_INTERACTION', 'COMPACT_CONTEXT'
     )),
@@ -301,7 +319,7 @@ CREATE TABLE pulsara_v3.session_commands (
         (command_kind = 'STEER' AND target_kind = 'ENTRY') OR
         (command_kind IN ('QUEUE_PROMPT', 'CANCEL_PROMPT') AND target_kind = 'QUEUE_ITEM') OR
         (command_kind = 'RESOLVE_INTERACTION' AND target_kind = 'INTERACTION_DECISION') OR
-        (command_kind = 'ACCEPT_SUBAGENT_RESULT' AND target_kind = 'ENTRY') OR
+        (command_kind = 'ACCEPT_SUBAGENT_COMPLETION' AND target_kind = 'ENTRY') OR
         (command_kind IN ('ENTER_PLAN', 'CANCEL_PLAN', 'FORCE_EXIT_PLAN')
             AND target_kind = 'PLAN_WORKFLOW') OR
         (command_kind = 'RESOLVE_PLAN_INTERACTION'
@@ -328,7 +346,7 @@ CREATE TABLE pulsara_v3.transcript_entries (
     provider_wire_api text,
     provider_replay_disposition text,
     provider_replay_fragment_id text,
-    source_subagent_result_id text,
+    source_subagent_task_id text,
     source_inter_agent_tool_attempt_id text,
     source_plan_workflow_id text,
     source_plan_interaction_id text,
@@ -346,7 +364,7 @@ CREATE TABLE pulsara_v3.transcript_entries (
     UNIQUE (session_id, id),
     UNIQUE (session_id, id, provider_wire_api, provider_replay_fragment_id),
     UNIQUE (session_id, entry_sequence),
-    UNIQUE (session_id, source_subagent_result_id),
+    UNIQUE (session_id, source_subagent_task_id),
     UNIQUE (session_id, source_inter_agent_tool_attempt_id),
     FOREIGN KEY (session_id, workspace_id)
         REFERENCES pulsara_v3.sessions (id, workspace_id) ON DELETE RESTRICT,
@@ -388,14 +406,18 @@ CREATE TABLE pulsara_v3.transcript_entries (
             AND provider_replay_disposition IS NULL
             AND provider_replay_fragment_id IS NULL)
     ),
-    CHECK (source_subagent_result_id IS NULL OR
-        (conversation_scope_kind = 'ROOT' AND entry_kind = 'USER_MESSAGE')),
     CHECK (
         (entry_kind = 'INTER_AGENT_MESSAGE'
             AND conversation_scope_kind = 'SUBAGENT_TASK'
-            AND source_inter_agent_tool_attempt_id IS NOT NULL) OR
+            AND source_inter_agent_tool_attempt_id IS NOT NULL
+            AND source_subagent_task_id IS NULL) OR
+        (entry_kind = 'INTER_AGENT_MESSAGE'
+            AND conversation_scope_kind = 'ROOT'
+            AND source_inter_agent_tool_attempt_id IS NULL
+            AND source_subagent_task_id IS NOT NULL) OR
         (entry_kind <> 'INTER_AGENT_MESSAGE'
-            AND source_inter_agent_tool_attempt_id IS NULL)
+            AND source_inter_agent_tool_attempt_id IS NULL
+            AND source_subagent_task_id IS NULL)
     ),
     CHECK (
         (entry_kind = 'PLAN_CONTINUATION'
@@ -404,12 +426,12 @@ CREATE TABLE pulsara_v3.transcript_entries (
             AND source_plan_handoff_kind IN (
                 'ENTERED_PLAN', 'REVISION_REQUESTED', 'APPROVED_PLAN'
             )
-            AND source_subagent_result_id IS NULL) OR
+            AND source_subagent_task_id IS NULL) OR
         (entry_kind = 'USER_MESSAGE'
             AND source_plan_workflow_id IS NOT NULL
             AND conversation_scope_kind = 'ROOT'
             AND source_plan_handoff_kind IN ('CANCELLED_PLAN', 'FORCE_EXITED_PLAN')
-            AND source_subagent_result_id IS NULL) OR
+            AND source_subagent_task_id IS NULL) OR
         (source_plan_workflow_id IS NULL
             AND source_plan_interaction_id IS NULL
             AND source_plan_handoff_kind IS NULL)
@@ -739,7 +761,7 @@ CREATE TABLE pulsara_v3.prompt_queue_items (
         'read-only', 'ask-permissions', 'accept-edits', 'bypass-permissions'
     )),
     permission_admission_source text CHECK (permission_admission_source IN (
-        'USER_SUBMISSION', 'EXTERNAL_RESULT_COMMAND', 'TERMINAL_OBSERVATION',
+        'USER_SUBMISSION', 'SUBAGENT_COMPLETION_COMMAND', 'TERMINAL_OBSERVATION',
         'SUBAGENT_INHERITANCE', 'RUNTIME_PLAN_CONTINUATION'
     )),
     permission_overlay text CHECK (permission_overlay IN ('NONE', 'PLAN_READ_ONLY')),
@@ -1124,9 +1146,9 @@ CREATE UNIQUE INDEX uq_pulsara_v3_subagent_task_terminal_result
     ON pulsara_v3.subagent_task_children (session_id, task_id)
     WHERE child_kind = 'RESULT';
 
-ALTER TABLE pulsara_v3.transcript_entries ADD CONSTRAINT transcript_entries_source_subagent_result_fk
-    FOREIGN KEY (session_id, source_subagent_result_id)
-    REFERENCES pulsara_v3.subagent_task_children (session_id, id) ON DELETE RESTRICT
+ALTER TABLE pulsara_v3.transcript_entries ADD CONSTRAINT transcript_entries_source_subagent_task_fk
+    FOREIGN KEY (session_id, source_subagent_task_id)
+    REFERENCES pulsara_v3.subagent_tasks (session_id, id) ON DELETE RESTRICT
     DEFERRABLE INITIALLY DEFERRED;
 
 ALTER TABLE pulsara_v3.transcript_entries
@@ -1966,7 +1988,8 @@ BEGIN
         END IF;
         IF (NEW.conversation_scope_kind = 'ROOT'
                 AND observed_kind NOT IN (
-                    'USER_MESSAGE', 'TERMINAL_OBSERVATION', 'PLAN_CONTINUATION'
+                    'USER_MESSAGE', 'TERMINAL_OBSERVATION', 'PLAN_CONTINUATION',
+                    'INTER_AGENT_MESSAGE'
                 ))
            OR (NEW.conversation_scope_kind = 'SUBAGENT_TASK'
                 AND observed_kind IS DISTINCT FROM 'USER_MESSAGE') THEN
@@ -2029,12 +2052,15 @@ BEGIN
                     USING ERRCODE = '23514';
             END IF;
         END IF;
-        IF NEW.source_subagent_result_id IS NOT NULL THEN
-            SELECT child_kind INTO observed_kind
-            FROM pulsara_v3.subagent_task_children
-            WHERE session_id = NEW.session_id AND id = NEW.source_subagent_result_id;
-            IF observed_kind IS DISTINCT FROM 'RESULT' THEN
-                RAISE EXCEPTION 'conversation subagent source must be a RESULT child'
+        IF NEW.source_subagent_task_id IS NOT NULL THEN
+            SELECT status INTO observed_status
+            FROM pulsara_v3.subagent_tasks
+            WHERE session_id = NEW.session_id AND id = NEW.source_subagent_task_id;
+            IF observed_status NOT IN (
+                'COMPLETED', 'FAILED', 'INTERRUPTED', 'CANCELLED',
+                'BLOCKED_DEPENDENCY_FAILED'
+            ) THEN
+                RAISE EXCEPTION 'conversation subagent source must be a terminal task'
                 USING ERRCODE = '23514';
             END IF;
         END IF;

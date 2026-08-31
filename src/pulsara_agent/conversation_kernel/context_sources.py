@@ -213,7 +213,7 @@ class FrozenNonTriggerContextSources:
 _BINDINGS = (
     _SourceBinding(
         ContextSourceKind.BASE_SYSTEM,
-        "pulsara.base-system.prefix-continuity.v8-hierarchical-subagents",
+        "pulsara.base-system.prefix-continuity.v9-async-subagent-completions",
         ContextChannel.SYSTEM,
         ContextTrustClass.ROOT_INSTRUCTION,
         ContextBudgetClass.MUST_KEEP,

@@ -117,7 +117,7 @@ export interface RuntimeConnection {
   steerActiveTurn(text: string, targetTurnId: string): Promise<CommandReceipt>;
   stopActiveTurn(): Promise<CommandReceipt>;
   compactContext(targetTurnId?: string): Promise<CommandReceipt>;
-  acceptSubagentResult(resultId: string, permission: PermissionMode): Promise<CommandReceipt>;
+  acceptSubagentCompletion(taskId: string, permission: PermissionMode): Promise<CommandReceipt>;
   enterPlan(reason: string, permission: PermissionMode): Promise<CommandReceipt>;
   readInteraction(interaction: RuntimeInteractionSummary): Promise<RuntimeInteractionContent>;
   resolveInteraction(
@@ -141,7 +141,7 @@ export type RuntimeCommandKind =
   | 'STEER_ACTIVE_TURN'
   | 'STOP_ACTIVE_TURN'
   | 'COMPACT_CONTEXT'
-  | 'ACCEPT_SUBAGENT_RESULT'
+  | 'ACCEPT_SUBAGENT_COMPLETION'
   | 'ENTER_PLAN';
 
 export class RuntimeApiError extends Error {
@@ -196,7 +196,7 @@ interface ProtocolEntry {
   blocks?: ProtocolAssistantBlock[];
   reasoning_blocks?: ProtocolReasoningBlock[];
   accepted_at_utc?: string;
-  source_subagent_result_id?: string;
+  source_subagent_task_id?: string;
 }
 
 interface ProtocolActiveTurn {
@@ -219,8 +219,9 @@ interface ProtocolSubagentTask {
   context_last_n_turns?: string | number;
   pending_reason?: string;
   terminal_reason?: string;
+  terminal_public_detail?: string;
   result_id?: string;
-  result_accepted?: boolean;
+  completion_delivered?: boolean;
   result_summary?: string;
   dependency_task_ids?: string[];
 }
@@ -238,6 +239,8 @@ interface ProtocolTaskInventoryRecord {
   status?: string;
   pending_reason?: string | null;
   terminal_reason?: string | null;
+  terminal_public_detail?: string | null;
+  completion_delivered?: boolean;
   accepted_at?: string;
   terminal_at?: string | null;
   dependencies?: Array<{
@@ -254,7 +257,6 @@ interface ProtocolTaskInventoryRecord {
     summary?: string | null;
     output_preview?: string | null;
     diagnostics?: Array<Record<string, unknown>>;
-    accepted?: boolean;
   } | null;
 }
 
@@ -596,9 +598,9 @@ class LocalRuntimeConnection implements RuntimeConnection {
     });
   }
 
-  acceptSubagentResult(resultId: string, permission: PermissionMode): Promise<CommandReceipt> {
-    return this.command('ACCEPT_SUBAGENT_RESULT', {
-      source_subagent_result_id: resultId,
+  acceptSubagentCompletion(taskId: string, permission: PermissionMode): Promise<CommandReceipt> {
+    return this.command('ACCEPT_SUBAGENT_COMPLETION', {
+      subagent_task_id: taskId,
       requested_permission_mode: protocolPermissionModes[permission],
     });
   }
@@ -1257,6 +1259,21 @@ function projectEntries(
   for (const entry of entries) {
     if (entry.scope_kind === 'SUBAGENT_TASK') continue;
     if (
+      entry.entry_kind === 'INTER_AGENT_MESSAGE'
+      && entry.source_subagent_task_id
+    ) {
+      messages.push({
+        id: entry.entry_id,
+        turnId: entry.turn_id,
+        role: 'user',
+        userKind: 'subagent-completion',
+        time: formatTime(entry.accepted_at_utc),
+        body: '',
+        sourceSubagentTaskId: entry.source_subagent_task_id,
+      });
+      continue;
+    }
+    if (
       entry.entry_kind === 'USER_MESSAGE'
       || entry.entry_kind === 'USER_STEER'
       || entry.entry_kind === 'PLAN_CONTINUATION'
@@ -1265,21 +1282,16 @@ function projectEntries(
         ? 'steer'
         : entry.entry_kind === 'PLAN_CONTINUATION'
           ? 'plan-continuation'
-          : entry.source_subagent_result_id
-            ? 'subagent-result'
-            : 'prompt';
+          : 'prompt';
       messages.push({
         id: entry.entry_id,
         turnId: entry.turn_id,
         role: 'user',
         userKind,
         time: formatTime(entry.accepted_at_utc),
-        body: userKind === 'subagent-result'
-          ? ''
-          : entry.entry_kind === 'PLAN_CONTINUATION'
+        body: entry.entry_kind === 'PLAN_CONTINUATION'
           ? projectPlanContinuation(decodeContent(entry.content))
           : decodeContent(entry.content),
-        sourceSubagentResultId: entry.source_subagent_result_id || undefined,
       });
       continue;
     }
@@ -1727,7 +1739,7 @@ function toolArgumentSummary(name: string, content: string): string {
       return `创建 ${Array.isArray(value.tasks) ? value.tasks.length : 0} 个子任务`;
     }
     if (normalized.includes('spawn_agent')) return String(value.label ?? value.task ?? '创建一个子任务');
-    if (normalized.includes('wait_agent')) return '等待子任务返回结果';
+    if (normalized.includes('wait_agent')) return '等待指定子任务出现新进展';
     if (normalized.includes('send_agent_message')) return '向子任务发送补充信息';
     if (normalized.includes('stop_agent')) return '停止指定子任务';
     if (normalized.includes('list_agents')) return '读取当前子任务状态';
@@ -1817,6 +1829,10 @@ function projectAgentTasks(
       context: projectTaskContext(task.context_mode, task.context_last_n_turns),
       pendingReason: task.pending_reason || undefined,
       terminalReason: task.terminal_reason || undefined,
+      terminalPublicDetail: task.terminal_public_detail
+        ? productVisibleText(task.terminal_public_detail)
+        : undefined,
+      completionDelivered: Boolean(task.completion_delivered),
       dependencyIds: task.dependency_task_ids ?? [],
       summary: task.result_summary ? productVisibleText(task.result_summary) : undefined,
       progress: !isTerminalTaskStatus(status) && live?.summary
@@ -1826,7 +1842,6 @@ function projectAgentTasks(
         id: task.result_id,
         summary: productVisibleText(task.result_summary ?? ''),
         diagnostics: [],
-        accepted: Boolean(task.result_accepted),
       } : undefined,
       color: taskColor(task.task_id),
     };
@@ -1853,7 +1868,6 @@ function projectTaskInventoryRecord(task: ProtocolTaskInventoryRecord): AgentTas
     diagnostics: Array.isArray(task.result.diagnostics)
       ? task.result.diagnostics
       : [],
-    accepted: Boolean(task.result.accepted),
   } : undefined;
   return {
     id: task.id,
@@ -1868,6 +1882,10 @@ function projectTaskInventoryRecord(task: ProtocolTaskInventoryRecord): AgentTas
     context: projectTaskContext(task.context?.mode, task.context?.last_n_turns),
     pendingReason: task.pending_reason || undefined,
     terminalReason: task.terminal_reason || undefined,
+    terminalPublicDetail: task.terminal_public_detail
+      ? productVisibleText(task.terminal_public_detail)
+      : undefined,
+    completionDelivered: Boolean(task.completion_delivered),
     acceptedAt: task.accepted_at,
     terminalAt: task.terminal_at || undefined,
     dependencyIds: dependencies.map((dependency) => dependency.id),
@@ -2024,7 +2042,7 @@ const PRODUCT_TEXT_REPLACEMENTS: ReadonlyArray<readonly [RegExp, string]> = [
   [/\bPERMISSION_MODE_ASK_PERMISSIONS\b/g, '每次询问'],
   [/\bask-permissions\b/gi, '每次询问'],
   [/\bcreate_agent_tasks\b|\bspawn_agent\b/g, '创建子任务'],
-  [/\bwait_agent_tasks\b|\bwait_agent\b/g, '等待子任务'],
+  [/\bwait_agent\b/g, '等待子任务'],
   [/\breport_agent_result\b/g, '提交子任务结果'],
   [/\bsend_agent_message\b/g, '发送子任务消息'],
   [/\bstop_agent\b/g, '停止子任务'],
@@ -2047,7 +2065,7 @@ const PRODUCT_TEXT_REPLACEMENTS: ReadonlyArray<readonly [RegExp, string]> = [
   [/\byielded_to_background\s*=\s*false\b/gi, '保持前台运行'],
   [/\btimed_out\s*=\s*false\b/gi, '未超时'],
   [/\bsource_coverage\s*=\s*COMPLETE\b/g, '输出完整'],
-  [/\bTerminal Protocol(?: v?\d+)?\b/gi, '本地运行协议'],
+  [/\bTerminal Protocol(?: v?\d+)?\b/gi, '本地服务'],
   [/\bHostSession\b/g, '本地会话'],
   [/\bKernel\b/g, '本地服务'],
   [/\bROOT\b/g, '主任务'],

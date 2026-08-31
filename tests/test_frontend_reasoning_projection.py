@@ -70,7 +70,7 @@ def _fixture(reasoning: str) -> tuple[dict[str, object], dict[str, object]]:
         "entry_kind": "ASSISTANT_MESSAGE",
         "conversation_scope_kind": "ROOT",
         "scope_subagent_task_id": None,
-        "source_subagent_result_id": None,
+        "source_subagent_task_id": None,
         "context_binding_revision_id": None,
         "provider_input_through_sequence": 0,
         "provider_replay_disposition": "NATIVE_REPLAY",

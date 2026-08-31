@@ -4688,7 +4688,7 @@ def test_round10_sole_report_result_atomically_completes_child_without_second_mo
         )
 
     safe_point = ProviderSafePointCoordinator(repository=repository, guard=lease.guard)
-    accepted = safe_point.accept_subagent_result(
+    accepted = safe_point.accept_subagent_completion(
         turn_id=parent_turn_id,
         child_result_id=explicit_result_id,
         command_id=_name("command"),

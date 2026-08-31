@@ -50,7 +50,7 @@ class _CommandHost:
         self.submitted: list[tuple[str, str]] = []
         self.steered: list[tuple[str, str, str]] = []
         self.resolved: list[dict[str, object]] = []
-        self.accepted_subagent_results: list[dict[str, object]] = []
+        self.accepted_subagent_completions: list[dict[str, object]] = []
         self.accepted_job_results: list[dict[str, object]] = []
 
     async def submit_prompt(
@@ -90,13 +90,13 @@ class _CommandHost:
             "Accepted.",
         )
 
-    async def accept_subagent_result(self, **kwargs) -> KernelCommandOutcome:
-        self.accepted_subagent_results.append(dict(kwargs))
+    async def accept_subagent_completion(self, **kwargs) -> KernelCommandOutcome:
+        self.accepted_subagent_completions.append(dict(kwargs))
         return KernelCommandOutcome(
             str(kwargs["command_id"]),
             "SUCCEEDED",
             "entry:accepted-child",
-            "SUBAGENT_RESULT_ACCEPTED",
+            "SUBAGENT_COMPLETION_DELIVERED",
             "Accepted.",
         )
 
@@ -202,7 +202,7 @@ def test_stage2_controller_can_send_an_exact_active_turn_steer() -> None:
     ]
 
 
-def test_stage2_controller_can_accept_exact_durable_subagent_result() -> None:
+def test_stage2_controller_can_deliver_exact_terminal_subagent_task() -> None:
     server = _server()
     controller = _state(role=wire.ATTACHMENT_ROLE_CONTROLLER)
     result = asyncio.run(
@@ -212,25 +212,25 @@ def test_stage2_controller_can_accept_exact_durable_subagent_result() -> None:
                 request_id="request:accept-child",
                 command_id="command:accept-child",
                 client_submission_id="command:accept-child",
-                command_kind=wire.ACCEPT_SUBAGENT_RESULT,
+                command_kind=wire.ACCEPT_SUBAGENT_COMPLETION,
                 target_turn_id="turn:root",
-                source_subagent_result_id="subagent-result:1",
+                subagent_task_id="task:1",
             ),
         )
     )
     assert result.command_outcome.status == wire.SUCCEEDED
-    assert controller.host_session.accepted_subagent_results == [
+    assert controller.host_session.accepted_subagent_completions == [
         {
             "command_id": "command:accept-child",
             "target_turn_id": "turn:root",
             "requested_permission_mode": None,
-            "child_result_id": "subagent-result:1",
+            "task_id": "task:1",
             "actor_id": "attachment:test",
         }
     ]
 
 
-def test_stage2_controller_can_accept_external_results_into_a_new_root() -> None:
+def test_stage2_controller_can_continue_from_a_completion_in_a_new_root() -> None:
     server = _server()
     controller = _state(role=wire.ATTACHMENT_ROLE_CONTROLLER)
     subagent = asyncio.run(
@@ -240,25 +240,26 @@ def test_stage2_controller_can_accept_external_results_into_a_new_root() -> None
                 request_id="request:accept-child-new-turn",
                 command_id="command:accept-child-new-turn",
                 client_submission_id="command:accept-child-new-turn",
-                command_kind=wire.ACCEPT_SUBAGENT_RESULT,
-                source_subagent_result_id="subagent-result:2",
+                command_kind=wire.ACCEPT_SUBAGENT_COMPLETION,
+                subagent_task_id="task:2",
                 requested_permission_mode=wire.PERMISSION_MODE_ACCEPT_EDITS,
             ),
         )
     )
     assert subagent.command_outcome.status == wire.SUCCEEDED
     assert (
-        controller.host_session.accepted_subagent_results[-1]["target_turn_id"] is None
+        controller.host_session.accepted_subagent_completions[-1]["target_turn_id"]
+        is None
     )
     assert (
-        controller.host_session.accepted_subagent_results[-1][
+        controller.host_session.accepted_subagent_completions[-1][
             "requested_permission_mode"
         ]
         is PermissionMode.ACCEPT_EDITS
     )
 
 
-def test_stage2_new_root_subagent_result_requires_turn_permission() -> None:
+def test_stage2_new_root_subagent_completion_requires_turn_permission() -> None:
     server = _server()
     controller = _state(role=wire.ATTACHMENT_ROLE_CONTROLLER)
 
@@ -269,14 +270,14 @@ def test_stage2_new_root_subagent_result_requires_turn_permission() -> None:
                 request_id="request:accept-child-without-permission",
                 command_id="command:accept-child-without-permission",
                 client_submission_id="command:accept-child-without-permission",
-                command_kind=wire.ACCEPT_SUBAGENT_RESULT,
-                source_subagent_result_id="subagent-result:3",
+                command_kind=wire.ACCEPT_SUBAGENT_COMPLETION,
+                subagent_task_id="task:3",
             ),
         )
     )
 
-    assert result.error.stable_code == "SUBAGENT_RESULT_REQUEST_INVALID"
-    assert controller.host_session.accepted_subagent_results == []
+    assert result.error.stable_code == "SUBAGENT_COMPLETION_REQUEST_INVALID"
+    assert controller.host_session.accepted_subagent_completions == []
 
 
 def _removed_stage2_host_exposes_job_result_acceptance_to_production_protocol() -> None:

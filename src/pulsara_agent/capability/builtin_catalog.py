@@ -72,6 +72,7 @@ class BuiltinToolLongHorizonPolicyKind(StrEnum):
     EVIDENCE_ACQUISITION = "evidence_acquisition"
     SYNTHESIS_MUTATION = "synthesis_mutation"
     PROCESS_CONTROL = "process_control"
+    SYNCHRONIZATION = "synchronization"
     USER_INTERACTION = "user_interaction"
     TERMINAL_COMMAND = "terminal_command"
     TERMINAL_PROCESS = "terminal_process"
@@ -110,8 +111,7 @@ _LONG_HORIZON_POLICY_KIND_BY_NAME = {
     "terminal_monitor": BuiltinToolLongHorizonPolicyKind.TERMINAL_MONITOR,
     "terminal_process": BuiltinToolLongHorizonPolicyKind.TERMINAL_PROCESS,
     "todo": BuiltinToolLongHorizonPolicyKind.SYNTHESIS_MUTATION,
-    "wait_agent": BuiltinToolLongHorizonPolicyKind.EVIDENCE_HYDRATION,
-    "wait_agent_tasks": BuiltinToolLongHorizonPolicyKind.EVIDENCE_HYDRATION,
+    "wait_agent": BuiltinToolLongHorizonPolicyKind.SYNCHRONIZATION,
     "write_file": BuiltinToolLongHorizonPolicyKind.SYNTHESIS_MUTATION,
 }
 
@@ -1216,8 +1216,11 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
         description=(
             "Delegate one independent task to one agent. This is the default choice for "
             "a single, well-bounded piece of work. The response returns a task_id and its "
-            "current status; copy that task_id exactly into wait_agent, send_agent_message, "
-            "or stop_agent. The task may start immediately or wait until capacity is "
+            "current status. Its terminal outcome will be delivered automatically to the "
+            "main conversation; do not wait merely to fetch the result. Continue useful, "
+            "non-overlapping local work after spawning. Copy task_id exactly into "
+            "wait_agent, send_agent_message, or stop_agent when synchronization or control "
+            "is genuinely needed. The task may start immediately or wait until capacity is "
             "available. By default the agent receives the task but no earlier conversation, "
             "so write a self-contained task and include exact files or sources it should "
             "use. Request last_n context only when a few recent conversation turns are "
@@ -1284,21 +1287,33 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "wait_agent": _descriptor(
         name="wait_agent",
         description=(
-            "Wait for one delegated task and return its current status and, when finished, "
-            "its result. Use the exact task_id returned by spawn_agent, create_agent_tasks, "
-            "or list_agents. timeout_seconds limits only this wait: if time runs out while "
-            "the task is still working, the task continues and the response reports its "
-            "current state. Use 0 to check once without waiting. A finished result can be "
-            "read again. If the task can run independently, continue other useful work "
-            "before waiting; use wait_agent_tasks when waiting on several tasks."
+            "Wait only when the current answer is genuinely blocked on delegated work and "
+            "no other useful work remains. Terminal outcomes are delivered automatically "
+            "after this tool result closes; this tool never transports result content. "
+            "Omit task_ids to wait for input activity, or provide 1..16 exact task_ids and "
+            "settle=all|first for a join predicate. A user steer interrupts the join so it "
+            "can be handled first. Prefer one meaningful wait over repeated short polls. "
+            "timeout_seconds limits only this call and never cancels a task."
         ),
         input_schema=object_schema(
             properties={
-                "task_id": {
+                "task_ids": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 16,
+                    "uniqueItems": True,
+                    "items": {"type": "string", "minLength": 1, "maxLength": 512},
+                    "description": (
+                        "Optional exact task identities for a join predicate. Omit to "
+                        "wait for any ROOT input activity."
+                    ),
+                },
+                "settle": {
                     "type": "string",
-                    "minLength": 1,
-                    "maxLength": 512,
-                    "description": "Exact task_id for the delegated task to wait for.",
+                    "enum": ["all", "first"],
+                    "description": (
+                        "Join predicate used only with task_ids; omit to use all."
+                    ),
                 },
                 "timeout_seconds": {
                     "type": "number",
@@ -1310,7 +1325,7 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
                     ),
                 },
             },
-            required=["task_id"],
+            required=[],
         ),
         provider_kind=BuiltinToolDomainKind.WORKFLOW,
         is_read_only=False,
@@ -1410,7 +1425,9 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
             "successfully, the dependent task does not run. When a prerequisite succeeds, "
             "its self-contained summary is provided to the dependent task. Use spawn_agent "
             "for one ordinary independent task. The response returns a task_id and current "
-            "status for every task."
+            "status for every task. Every terminal outcome is delivered automatically to "
+            "the main conversation. Continue non-overlapping local work after dispatch; "
+            "use wait_agent only for a true critical-path join."
         ),
         input_schema=object_schema(
             properties={
@@ -1510,54 +1527,6 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
                 }
             },
             required=["tasks"],
-        ),
-        provider_kind=BuiltinToolDomainKind.WORKFLOW,
-        is_read_only=False,
-        is_concurrency_safe=False,
-        permission_category="subagent_runtime",
-    ),
-    "wait_agent_tasks": _descriptor(
-        name="wait_agent_tasks",
-        description=(
-            "Wait for several delegated tasks and return finished results plus the task_ids "
-            "still pending. With settle=all, wait until every task finishes or the timeout "
-            "ends. With settle=first, return when any one task finishes; the other tasks "
-            "continue running. timeout_seconds limits only this call and never cancels a "
-            "task; use 0 to check all requested tasks once without waiting. Use wait_agent "
-            "for a single task."
-        ),
-        input_schema=object_schema(
-            properties={
-                "task_ids": {
-                    "type": "array",
-                    "minItems": 1,
-                    "maxItems": 32,
-                    "uniqueItems": True,
-                    "items": {"type": "string", "minLength": 1, "maxLength": 512},
-                    "description": (
-                        "Exact, unique task_ids returned by spawn_agent, "
-                        "create_agent_tasks, or list_agents."
-                    ),
-                },
-                "settle": {
-                    "type": "string",
-                    "enum": ["all", "first"],
-                    "description": (
-                        "all waits for every task; first returns after any one finishes. "
-                        "Omit to use all."
-                    ),
-                },
-                "timeout_seconds": {
-                    "type": "number",
-                    "minimum": 0,
-                    "maximum": 300,
-                    "description": (
-                        "Maximum seconds to wait in this call. Omit for 30 seconds; use "
-                        "0 to return current states immediately."
-                    ),
-                },
-            },
-            required=["task_ids"],
         ),
         provider_kind=BuiltinToolDomainKind.WORKFLOW,
         is_read_only=False,
@@ -1997,7 +1966,6 @@ _SUBAGENT_PARENT = frozenset(
         "stop_agent",
         "send_agent_message",
         "wait_agent",
-        "wait_agent_tasks",
     }
 )
 _SUBAGENT_CHILD = frozenset({"report_agent_result"})

@@ -1553,7 +1553,7 @@
       "call_target": null,
       "kind": "fetchone",
       "ordinal": 0,
-      "owner": "accept_subagent_result_into_root",
+      "owner": "accept_subagent_completion_into_root",
       "source_module": "src/pulsara_agent/conversation_kernel/repository.py"
     },
     {
@@ -1562,7 +1562,7 @@
       "call_target": "connection.execute",
       "kind": "execute",
       "ordinal": 1,
-      "owner": "accept_subagent_result_into_root",
+      "owner": "accept_subagent_completion_into_root",
       "source_module": "src/pulsara_agent/conversation_kernel/repository.py"
     },
     {
@@ -1571,7 +1571,7 @@
       "call_target": null,
       "kind": "fetchone",
       "ordinal": 2,
-      "owner": "accept_subagent_result_into_root",
+      "owner": "accept_subagent_completion_into_root",
       "source_module": "src/pulsara_agent/conversation_kernel/repository.py"
     },
     {
@@ -1580,7 +1580,7 @@
       "call_target": "connection.execute",
       "kind": "execute",
       "ordinal": 3,
-      "owner": "accept_subagent_result_into_root",
+      "owner": "accept_subagent_completion_into_root",
       "source_module": "src/pulsara_agent/conversation_kernel/repository.py"
     },
     {
@@ -1589,7 +1589,7 @@
       "call_target": "connection.execute",
       "kind": "execute",
       "ordinal": 4,
-      "owner": "accept_subagent_result_into_root",
+      "owner": "accept_subagent_completion_into_root",
       "source_module": "src/pulsara_agent/conversation_kernel/repository.py"
     },
     {
@@ -5318,7 +5318,7 @@
       "signature_ast_digest": "ab87abfbb3e0fdb14398e5972786be82bbb75366556efb89fd47126a11fe328d",
       "stable_literal_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
     },
-    "accept_subagent_result_into_root": {
+    "accept_subagent_completion_into_root": {
       "ast_digest": "6a54d1450c9a5eeaf83b6b121282a456465a80a11d4a31f1bcf397177cb3b3de",
       "decorator_kind": "instance",
       "is_async": false,
@@ -7220,7 +7220,7 @@
       },
       "_insert_entry": {
         "is_async": false,
-        "signature": "(connection: 'Connection', *, session_id: 'str', workspace_id: 'str', turn_id: 'str', entry_id: 'str', entry_sequence: 'int', entry_kind: 'EntryKind', scope_kind: 'ConversationScopeKind', scope_task_id: 'str | None', content: 'CanonicalContent', context_binding_revision_id: 'str | None' = None, provider_input_through_sequence: 'int | None' = None, source_job_id: 'str | None' = None, source_subagent_result_id: 'str | None' = None, source_plan_workflow_id: 'str | None' = None, source_plan_interaction_id: 'str | None' = None, source_plan_handoff_kind: 'PlanHandoffKind | None' = None) -> 'None'"
+        "signature": "(connection: 'Connection', *, session_id: 'str', workspace_id: 'str', turn_id: 'str', entry_id: 'str', entry_sequence: 'int', entry_kind: 'EntryKind', scope_kind: 'ConversationScopeKind', scope_task_id: 'str | None', content: 'CanonicalContent', context_binding_revision_id: 'str | None' = None, provider_input_through_sequence: 'int | None' = None, source_job_id: 'str | None' = None, source_subagent_task_id: 'str | None' = None, source_plan_workflow_id: 'str | None' = None, source_plan_interaction_id: 'str | None' = None, source_plan_handoff_kind: 'PlanHandoffKind | None' = None) -> 'None'"
       },
       "_insert_event": {
         "is_async": false,
@@ -7350,7 +7350,7 @@
         "is_async": false,
         "signature": "(self, guard: 'HostWriterGuard', *, child_id: 'str', task_id: 'str', child_kind: 'str', child_ordinal: 'int', entry_id: 'str', occurred_at: 'datetime', actor_id: 'str', deadline_monotonic: 'float') -> 'None'"
       },
-      "accept_subagent_result_into_root": {
+      "accept_subagent_completion_into_root": {
         "is_async": false,
         "signature": "(self, guard: 'HostWriterGuard', *, turn_id: 'str', new_context_binding_revision_id: 'str | None' = None, requested_permission_mode: 'PermissionMode | None' = None, child_result_id: 'str', command_id: 'str', occurred_at: 'datetime', actor_id: 'str', deadline_monotonic: 'float') -> 'AcceptedEntry | None'"
       },

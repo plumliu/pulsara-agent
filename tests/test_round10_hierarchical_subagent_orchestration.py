@@ -114,7 +114,6 @@ def test_round10_tool_inventory_and_result_fact_are_closed() -> None:
         "create_agent_tasks",
         "list_agents",
         "wait_agent",
-        "wait_agent_tasks",
         "send_agent_message",
         "stop_agent",
     }
@@ -150,6 +149,102 @@ def test_round10_tool_inventory_and_result_fact_are_closed() -> None:
             summary="done",
             diagnostics=[{"code": str(index)} for index in range(33)],
         )
+
+
+def test_round10_wait_is_level_triggered_input_barrier_without_result_transport() -> None:
+    class _InlineIO:
+        async def run(self, function, *args: object, **kwargs: object):
+            return function(*args, **kwargs)
+
+    class _Repository:
+        @staticmethod
+        def read_pending_prompt_steer_facts(**_kwargs: object):
+            return ()
+
+        @staticmethod
+        def read_subagent_task_board(**_kwargs: object):
+            # Historical terminal tasks do not make an untargeted wait block.
+            return (), (("COMPLETED", 7), ("FAILED", 3))
+
+    async def exercise() -> None:
+        manager = KernelSubagentManager(
+            **_manager_launch_kwargs(),
+            repository=_Repository(),  # type: ignore[arg-type]
+            guard=HostWriterGuard("session:test", 1, "host:test"),
+            host_owner_id="host:test",
+            io_owner=_InlineIO(),  # type: ignore[arg-type]
+            live_bus=LiveAgentEventBus(),
+            todo_owner=TodoRunStateOwner(
+                session_id="session:test",
+                owner_epoch="todo:test",
+            ),
+        )
+        context = SimpleNamespace(turn_id="turn:root")
+        idle = await manager._wait(  # noqa: SLF001
+            {"timeout_seconds": 0}, context
+        )
+        assert json.loads(idle.content) == {
+            "outcome": "nothing_pending",
+            "satisfied_task_ids": [],
+            "pending_task_ids": [],
+        }
+
+        assert await manager.offer_subagent_completion("task:done")
+        immediate = await manager._wait(  # noqa: SLF001
+            {"timeout_seconds": 30}, context
+        )
+        assert json.loads(immediate.content) == {
+            "outcome": "input_available",
+            "satisfied_task_ids": [],
+            "pending_task_ids": [],
+        }
+        assert b"result" not in immediate.content.lower()
+
+    asyncio.run(exercise())
+
+
+def test_round10_root_completion_answer_fence_keeps_late_delivery_for_next_turn() -> None:
+    async def exercise() -> None:
+        manager = KernelSubagentManager(
+            **_manager_launch_kwargs(),
+            repository=SimpleNamespace(),
+            guard=HostWriterGuard("session:test", 1, "host:test"),
+            host_owner_id="host:test",
+            io_owner=KernelSessionIO(),
+            live_bus=LiveAgentEventBus(),
+            todo_owner=TodoRunStateOwner(
+                session_id="session:test",
+                owner_epoch="todo:test",
+            ),
+        )
+        await manager.open_root_completion_delivery("turn:first")
+        assert await manager.offer_subagent_completion("task:before-fence")
+        assert not await manager.offer_subagent_completion("task:before-fence")
+        assert await manager.seal_root_completion_delivery("turn:first")
+        assert await manager.snapshot_pending_root_completions("turn:first") == ()
+        await manager.settle_root_completion_delivery(
+            "turn:first", turn_completed=False
+        )
+        assert await manager.snapshot_pending_root_completions("turn:first") == (
+            "task:before-fence",
+        )
+        assert await manager.retire_root_completion("task:before-fence")
+
+        # Once the no-tool answer has sealed the exact turn, an arrival cannot
+        # reopen it or force a background model sample.
+        assert not await manager.seal_root_completion_delivery("turn:first")
+        assert await manager.offer_subagent_completion("task:after-fence")
+        await manager.settle_root_completion_delivery(
+            "turn:first", turn_completed=True
+        )
+        assert await manager.snapshot_pending_root_completions("turn:first") == ()
+
+        await manager.open_root_completion_delivery("turn:next")
+        assert await manager.snapshot_pending_root_completions("turn:next") == (
+            "task:after-fence",
+        )
+
+    asyncio.run(exercise())
 
 
 def test_round10_list_pages_dependency_hydration_without_inventory_cap() -> None:
@@ -523,8 +618,7 @@ def test_round10_all_root_orchestration_tools_are_bypass_only_before_owner_io(
                 "tasks": [{"task": "bounded objective", "depends_on": []}]
             },
             "list_agents": {},
-            "wait_agent": {"task_id": "task:test"},
-            "wait_agent_tasks": {"task_ids": ["task:test"]},
+            "wait_agent": {"task_ids": ["task:test"]},
             "send_agent_message": {
                 "task_id": "task:test",
                 "message": "bounded message",
@@ -1403,7 +1497,7 @@ def test_round10_batch_admission_exact_joins_args_permission_and_ack_unknown(
             manager.invoke(
                 tool_name="wait_agent",
                 arguments={
-                    "task_id": str(rows[0]["id"]),
+                    "task_ids": [str(rows[0]["id"])],
                     "timeout_seconds": 300,
                 },
                 invocation_context=context,
@@ -1552,22 +1646,26 @@ def test_round10_dependency_chain_routes_only_direct_result_and_retires_physical
         )
         assert created.state == "SUCCESS"
         task_ids = [item["task_id"] for item in json.loads(created.content)["tasks"]]
-        waited = await manager.invoke(
-            tool_name="wait_agent_tasks",
-            arguments={
-                "task_ids": task_ids,
-                "settle": "all",
-                "timeout_seconds": 10,
-            },
-            invocation_context=context,
-        )
-        payload = json.loads(waited.content)
+        while True:
+            waited = await manager.invoke(
+                tool_name="wait_agent",
+                arguments={
+                    "task_ids": task_ids,
+                    "settle": "all",
+                    "timeout_seconds": 10,
+                },
+                invocation_context=context,
+            )
+            payload = json.loads(waited.content)
+            if payload["outcome"] == "predicate_satisfied":
+                break
+            assert payload["outcome"] == "input_available"
+            for offered in tuple(manager._root_completion_queue):
+                await manager.retire_root_completion(offered)
         assert payload["pending_task_ids"] == []
-        assert [item["status"] for item in payload["settled"]] == [
-            "completed",
-            "completed",
-            "completed",
-        ]
+        assert payload["outcome"] == "predicate_satisfied"
+        assert payload["satisfied_task_ids"] == task_ids
+        assert "settled" not in payload
         assert started == ["alpha-only", "bravo-only", "charlie-only"]
 
         # A has no dependency source. B sees A. C sees only its direct B
@@ -1757,7 +1855,8 @@ def test_round10_postcommit_child_activation_failure_settles_task_and_turn(
         )
         assert durable is not None
         assert durable["status"] == "FAILED"
-        assert durable["terminal_reason"] == "CHILD_START_RUNTIMEERROR"
+        assert durable["terminal_reason"] == "CHILD_START_FAILED"
+        assert durable["terminal_public_detail"]
         child_turn = repository.read_turn_terminal_outcome(
             session_id=session_id,
             turn_id=stable_subagent_turn_id(
@@ -1768,7 +1867,7 @@ def test_round10_postcommit_child_activation_failure_settles_task_and_turn(
         )
         assert child_turn is not None
         assert child_turn["status"] == "INTERRUPTED"
-        assert child_turn["terminal_reason"] == "CHILD_START_RUNTIMEERROR"
+        assert child_turn["terminal_reason"] == "CHILD_START_FAILED"
 
         stopped = await manager.invoke(
             tool_name="stop_agent",
@@ -1831,7 +1930,7 @@ def test_round10_wait_agent_waits_for_dormant_dependency_terminalization(
         wait = asyncio.create_task(
             manager.invoke(
                 tool_name="wait_agent",
-                arguments={"task_id": task_ids[1], "timeout_seconds": 10},
+                arguments={"task_ids": [task_ids[1]], "timeout_seconds": 10},
                 invocation_context=context,
             )
         )
@@ -1862,8 +1961,11 @@ def test_round10_wait_agent_waits_for_dormant_dependency_terminalization(
         )
         result = await asyncio.wait_for(wait, timeout=2)
         payload = json.loads(result.content)
-        assert payload["task_id"] == task_ids[1]
-        assert payload["status"] == "blocked_dependency_failed"
+        assert payload == {
+            "outcome": "predicate_satisfied",
+            "satisfied_task_ids": [task_ids[1]],
+            "pending_task_ids": [],
+        }
         assert blocker.started == [task_ids[0]]
         assert frontier_ack_lost
         assert task_ids[1] not in manager._start_materials
@@ -2005,7 +2107,8 @@ def test_round10_mailbox_exact_fifo_ack_unknown_and_typed_child_projection(
             "second exact message",
         ]
         assert all(
-            json.loads(item.text)["pulsara_inter_agent_message"]["sender"] == "ROOT"
+            json.loads(item.text)["pulsara_inter_agent_message"]["sender"]
+            == {"kind": "ROOT"}
             for item in messages
         )
         with provider.connection(

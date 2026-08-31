@@ -449,7 +449,6 @@ def _task_payload(
             "summary": task.get("result_summary"),
             "output_preview": task.get("result_output_preview"),
             "diagnostics": task.get("result_diagnostics") or [],
-            "accepted": task.get("accepted_root_entry_id") is not None,
         }
     return {
         "id": str(task["id"]),
@@ -467,6 +466,8 @@ def _task_payload(
         "status": str(task["status"]),
         "pending_reason": task.get("pending_reason"),
         "terminal_reason": task.get("terminal_reason"),
+        "terminal_public_detail": task.get("terminal_public_detail"),
+        "completion_delivered": task.get("accepted_root_entry_id") is not None,
         "accepted_at": accepted_at.isoformat(),
         "terminal_at": (
             terminal_at.isoformat() if isinstance(terminal_at, datetime) else None

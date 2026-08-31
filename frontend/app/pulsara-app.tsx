@@ -344,7 +344,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
   }, [connection, openRuntimeSession, publishProjection]);
 
   const taskRefreshKey = useMemo(() => projection.agentTasks.map((task) => (
-    `${task.id}:${task.status}:${task.result?.id ?? ''}:${task.result?.accepted ? '1' : '0'}`
+    `${task.id}:${task.status}:${task.result?.id ?? ''}:${task.completionDelivered ? '1' : '0'}`
   )).join('|'), [projection.agentTasks]);
 
   useEffect(() => {
@@ -533,25 +533,34 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     }
   };
 
-  const acceptTaskResult = async (task: AgentTask): Promise<void> => {
+  const acceptTaskCompletion = async (task: AgentTask): Promise<void> => {
     const active = connectionRef.current;
-    if (!active || active.role !== 'controller' || !task.result || task.result.accepted) return;
+    if (!active || active.role !== 'controller' || task.completionDelivered) return;
     try {
-      const receipt = await active.acceptSubagentResult(task.result.id, turnPermission);
+      const receipt = await active.acceptSubagentCompletion(task.id, turnPermission);
       if (receipt.status === 'rejected') {
-        notify('无法带入会话', productMessage(receipt.publicMessage, '这份结果可能已经处理或不再可用。'), 'warning');
+        if (receipt.publicCode === 'ROOT_TURN_ALREADY_RUNNING') {
+          notify('主任务已经开始处理', '这项工作会在合适的时机自动交给 Pulsara。', 'success');
+          void loadSessionTasks(active.sessionId);
+          return;
+        }
+        notify('暂时无法继续处理', productMessage(receipt.publicMessage, '请刷新任务状态后重试。'), 'warning');
         return;
       }
-      setTaskInventory((current) => current.map((item) => item.id === task.id && item.result ? {
+      setTaskInventory((current) => current.map((item) => item.id === task.id ? {
         ...item,
-        result: { ...item.result, accepted: true },
+        completionDelivered: true,
       } : item));
       setTurnPermission('accept-edits');
-      notify('已带入会话', 'Pulsara 已使用这份结果开始新一轮处理。', 'success');
+      notify(
+        task.status === 'completed' ? 'Pulsara 已收到结果' : 'Pulsara 已收到这项问题',
+        '已经开始新一轮处理；子任务不会重新运行。',
+        'success',
+      );
       void loadSessionTasks(active.sessionId);
     } catch (error) {
       recoverConnectionAfterOperation(error);
-      notify('无法带入会话', productMessage(error instanceof Error ? error.message : undefined, '请稍后重试。'), 'warning');
+      notify('暂时无法继续处理', productMessage(error instanceof Error ? error.message : undefined, '请稍后重试。'), 'warning');
     }
   };
 
@@ -670,11 +679,12 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           todo={projection.todo}
           loading={taskInventoryLoading}
           canControl={canControl}
+          isRunning={projection.isRunning}
           permission={turnPermission}
           error={taskInventoryError}
           onRetry={() => activeSessionId && void loadSessionTasks(activeSessionId)}
           onLocate={locateTask}
-          onAcceptResult={(task) => void acceptTaskResult(task)}
+          onAcceptCompletion={(task) => void acceptTaskCompletion(task)}
           onClose={() => setInspectorOpen(false)}
         />
       )}

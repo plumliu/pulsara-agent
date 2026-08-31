@@ -240,6 +240,8 @@ class _RepositoryKernel:
                 UPDATE pulsara_v3.subagent_tasks
                 SET status = 'INTERRUPTED',
                     terminal_reason = 'HOST_TAKEOVER',
+                    terminal_public_detail =
+                        'Pulsara 运行环境发生切换，子任务已中断。',
                     terminal_at = clock_timestamp()
                 WHERE session_id = %s
                   AND status IN (
@@ -814,7 +816,7 @@ class _RepositoryKernel:
         provider_wire_api: str | None = None,
         provider_replay_disposition: str | None = None,
         provider_replay_fragment_id: str | None = None,
-        source_subagent_result_id: str | None = None,
+        source_subagent_task_id: str | None = None,
         source_inter_agent_tool_attempt_id: str | None = None,
         source_plan_workflow_id: str | None = None,
         source_plan_interaction_id: str | None = None,
@@ -827,7 +829,7 @@ class _RepositoryKernel:
                 entry_kind, conversation_scope_kind, scope_subagent_task_id,
                 context_binding_revision_id, provider_input_through_sequence,
                 provider_wire_api, provider_replay_disposition,
-                provider_replay_fragment_id, source_subagent_result_id,
+                provider_replay_fragment_id, source_subagent_task_id,
                 source_inter_agent_tool_attempt_id,
                 source_plan_workflow_id, source_plan_interaction_id,
                 source_plan_handoff_kind,
@@ -851,7 +853,7 @@ class _RepositoryKernel:
                 provider_wire_api,
                 provider_replay_disposition,
                 provider_replay_fragment_id,
-                source_subagent_result_id,
+                source_subagent_task_id,
                 source_inter_agent_tool_attempt_id,
                 source_plan_workflow_id,
                 source_plan_interaction_id,

@@ -340,7 +340,7 @@ _ROUND10_CHANGED_METHODS = {
     "_interrupt_prior_generation",
     # Result acceptance now copies the durable public result summary rather
     # than the producer tool acknowledgement into the ROOT transcript.
-    "accept_subagent_result_into_root",
+    "accept_subagent_completion_into_root",
     "list_subagent_tasks",
     "query_subagent_task",
 }

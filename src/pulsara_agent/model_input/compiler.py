@@ -74,7 +74,7 @@ from pulsara_agent.primitives.tool_result_projection import (
 
 
 COMPILER_CONTRACT_VERSION = (
-    "pulsara.structured-model-input-compiler.prefix-continuity.v10-subagent-context"
+    "pulsara.structured-model-input-compiler.prefix-continuity.v11-async-subagent-completions"
 )
 
 
@@ -87,7 +87,7 @@ class _SacrificeRank(IntEnum):
 
 _SOURCE_POLICY = {
     ContextSourceKind.BASE_SYSTEM: (
-        "pulsara.base-system.prefix-continuity.v8-hierarchical-subagents",
+        "pulsara.base-system.prefix-continuity.v9-async-subagent-completions",
         ContextChannel.SYSTEM,
         ContextTrustClass.ROOT_INSTRUCTION,
         ContextBudgetClass.MUST_KEEP,

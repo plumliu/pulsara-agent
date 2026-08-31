@@ -250,7 +250,7 @@ class LocalBrowserBridge:
                 "DETACH",
                 "CLOSE_SESSION",
                 "STEER_ACTIVE_TURN",
-                "ACCEPT_SUBAGENT_RESULT",
+                "ACCEPT_SUBAGENT_COMPLETION",
                 "ENTER_PLAN",
                 "CANCEL_PLAN",
                 "FORCE_EXIT_PLAN",
@@ -276,7 +276,7 @@ class LocalBrowserBridge:
             client_submission_id=str(body.get("client_submission_id", command_id)),
             text=str(body.get("text", "")),
             target_turn_id=str(body.get("target_turn_id", "")),
-            source_subagent_result_id=str(body.get("source_subagent_result_id", "")),
+            subagent_task_id=str(body.get("subagent_task_id", "")),
             requested_permission_mode=permission,
             target_plan_workflow_id=str(body.get("target_plan_workflow_id", "")),
             expected_plan_workflow_revision=_uint(

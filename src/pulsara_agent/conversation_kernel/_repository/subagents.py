@@ -51,6 +51,9 @@ from pulsara_agent.conversation_kernel.subagents.contracts import (
     SubagentBatchConfirmationKind,
     SubagentTaskTerminalConfirmationKind,
     SubagentTaskStatus,
+    SubagentTerminalReason,
+    bounded_terminal_public_detail,
+    build_default_terminal_public_detail,
     build_dependency_result_context,
     derive_subagent_batch_initial_dispositions,
     subagent_task_batch_identity_digest,
@@ -467,11 +470,11 @@ class _SubagentOperations:
                            id, session_id, workspace_id, parent_turn_id,
                            batch_id, task_key, label, profile_kind, display_role,
                            context_mode, context_last_n_turns, objective, status,
-                           pending_reason, terminal_reason,
+                           pending_reason, terminal_reason, terminal_public_detail,
                            execution_writer_generation, terminal_at
                        ) VALUES (
                            %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                           %s, %s, %s, %s, %s, %s, %s,
+                           %s, %s, %s, %s, %s, %s, %s, %s,
                            CASE WHEN %s THEN clock_timestamp() ELSE NULL END
                        )""",
                     (
@@ -490,6 +493,13 @@ class _SubagentOperations:
                         item.initial_status.value,
                         item.pending_reason,
                         item.terminal_reason,
+                        (
+                            None
+                            if item.terminal_reason is None
+                            else build_default_terminal_public_detail(
+                                item.terminal_reason
+                            )
+                        ),
                         guard.writer_generation,
                         item.initial_status.terminal,
                     ),
@@ -838,6 +848,7 @@ class _SubagentOperations:
             updated = connection.execute(
                 """UPDATE pulsara_v3.subagent_tasks
                    SET status=%s, pending_reason=NULL, terminal_reason=%s,
+                       terminal_public_detail=%s,
                        terminal_at=clock_timestamp()
                    WHERE session_id=%s AND id=%s
                      AND execution_writer_generation=%s
@@ -846,6 +857,7 @@ class _SubagentOperations:
                 (
                     candidate.status.value,
                     candidate.reason,
+                    candidate.public_detail,
                     candidate.session_id,
                     candidate.task_id,
                     candidate.writer_generation,
@@ -919,6 +931,7 @@ class _SubagentOperations:
                 str(task["status"]) == candidate.status.value
                 and task["pending_reason"] is None
                 and str(task["terminal_reason"]) == candidate.reason
+                and str(task["terminal_public_detail"]) == candidate.public_detail
                 and task["terminal_at"] is not None
                 and event is not None
                 and _event_row_matches_draft(event, expected_event)
@@ -1150,7 +1163,8 @@ class _SubagentOperations:
             task_row = connection.execute(
                 """UPDATE pulsara_v3.subagent_tasks
                    SET status = 'COMPLETED', pending_reason = NULL,
-                       terminal_reason = NULL, terminal_at = clock_timestamp()
+                       terminal_reason = NULL, terminal_public_detail = NULL,
+                       terminal_at = clock_timestamp()
                    WHERE session_id = %s AND id = %s AND status = 'ACTIVE'
                      AND execution_writer_generation = %s
                    RETURNING id""",
@@ -1407,6 +1421,7 @@ class _SubagentOperations:
         turn_id: str,
         task_status: str,
         task_reason: str,
+        terminal_public_detail: str,
         turn_reason: str,
         occurred_at: datetime,
         actor_id: str,
@@ -1436,10 +1451,15 @@ class _SubagentOperations:
                     "SubagentTaskStatusAccepted",
                     task_status,
                     task_reason,
+                    terminal_public_detail,
                 ),
                 event_type=CommittedEventType.SUBAGENT_TASK_STATUS_ACCEPTED,
                 subject=CommittedEventSubject(SubjectSlot.SUBAGENT_TASK, task_id),
-                payload={"status": task_status, "reason": task_reason},
+                payload={
+                    "status": task_status,
+                    "reason": task_reason,
+                    "public_detail": terminal_public_detail,
+                },
                 **common,
             ),
         )
@@ -1452,18 +1472,29 @@ class _SubagentOperations:
         turn_id: str,
         task_status: str,
         task_reason: str,
+        terminal_public_detail: str,
         turn_reason: str,
         occurred_at: datetime,
         actor_id: str,
         deadline_monotonic: float,
     ) -> bool:
+        try:
+            SubagentTerminalReason(task_reason)
+        except ValueError as exc:
+            raise ValueError("joint child terminal reason is invalid") from exc
+        if bounded_terminal_public_detail(terminal_public_detail) != terminal_public_detail:
+            raise ValueError("joint child public detail is invalid")
         closed_disposition = (task_status, task_reason, turn_reason) in {
             ("CANCELLED", "USER_CANCELLED", "USER_STOPPED"),
             ("INTERRUPTED", "HOST_CLOSING", "SESSION_CLOSED"),
+            (
+                "INTERRUPTED",
+                "HOOK_COMPACTION_BLOCKED",
+                "HOOK_COMPACTION_BLOCKED",
+            ),
         } or (
             task_status == "FAILED"
-            and task_reason == turn_reason
-            and task_reason.startswith("CHILD_START_")
+            and task_reason == turn_reason == "CHILD_START_FAILED"
         )
         if not closed_disposition:
             raise ValueError("joint child terminal disposition is invalid")
@@ -1472,6 +1503,7 @@ class _SubagentOperations:
             turn_id=turn_id,
             task_status=task_status,
             task_reason=task_reason,
+            terminal_public_detail=terminal_public_detail,
             turn_reason=turn_reason,
             occurred_at=occurred_at,
             actor_id=actor_id,
@@ -1526,10 +1558,17 @@ class _SubagentOperations:
             connection.execute(
                 """UPDATE pulsara_v3.subagent_tasks
                    SET status = %s, terminal_reason = %s,
+                       terminal_public_detail = %s,
                        terminal_at = clock_timestamp()
                    WHERE session_id = %s AND id = %s
                      AND status IN ('PENDING_START', 'WAITING_DEPENDENCY', 'ACTIVE')""",
-                (task_status, task_reason, guard.session_id, task_id),
+                (
+                    task_status,
+                    task_reason,
+                    terminal_public_detail,
+                    guard.session_id,
+                    task_id,
+                ),
             )
             self._append_events(
                 connection,
@@ -1547,18 +1586,29 @@ class _SubagentOperations:
         turn_id: str,
         task_status: str,
         task_reason: str,
+        terminal_public_detail: str,
         turn_reason: str,
         occurred_at: datetime,
         actor_id: str,
         deadline_monotonic: float,
     ) -> TurnAdmissionConfirmation:
+        try:
+            SubagentTerminalReason(task_reason)
+        except ValueError as exc:
+            raise ValueError("joint child terminal reason is invalid") from exc
+        if bounded_terminal_public_detail(terminal_public_detail) != terminal_public_detail:
+            raise ValueError("joint child public detail is invalid")
         closed_disposition = (task_status, task_reason, turn_reason) in {
             ("CANCELLED", "USER_CANCELLED", "USER_STOPPED"),
             ("INTERRUPTED", "HOST_CLOSING", "SESSION_CLOSED"),
+            (
+                "INTERRUPTED",
+                "HOOK_COMPACTION_BLOCKED",
+                "HOOK_COMPACTION_BLOCKED",
+            ),
         } or (
             task_status == "FAILED"
-            and task_reason == turn_reason
-            and task_reason.startswith("CHILD_START_")
+            and task_reason == turn_reason == "CHILD_START_FAILED"
         )
         if not closed_disposition:
             raise ValueError("joint child terminal disposition is invalid")
@@ -1567,6 +1617,7 @@ class _SubagentOperations:
             turn_id=turn_id,
             task_status=task_status,
             task_reason=task_reason,
+            terminal_public_detail=terminal_public_detail,
             turn_reason=turn_reason,
             occurred_at=occurred_at,
             actor_id=actor_id,
@@ -1578,7 +1629,8 @@ class _SubagentOperations:
             isolation_level=IsolationLevel.REPEATABLE_READ,
         ) as connection:
             task = connection.execute(
-                """SELECT status, terminal_reason FROM pulsara_v3.subagent_tasks
+                """SELECT status, terminal_reason, terminal_public_detail
+                   FROM pulsara_v3.subagent_tasks
                    WHERE session_id = %s AND id = %s""",
                 (session_id, task_id),
             ).fetchone()
@@ -1650,6 +1702,8 @@ class _SubagentOperations:
             if not (
                 str(task["status"]) == task_status
                 and str(task["terminal_reason"]) == task_reason
+                and str(task["terminal_public_detail"])
+                == terminal_public_detail
                 and str(turn["status"]) == "INTERRUPTED"
                 and str(turn["terminal_reason"]) == turn_reason
                 and all(
@@ -1981,7 +2035,8 @@ class _SubagentOperations:
                        t.profile_kind,
                        t.display_role, t.context_mode, t.context_last_n_turns,
                        t.parent_turn_id, t.objective, t.status, t.pending_reason,
-                       t.terminal_reason, c.id AS result_id,
+                       t.terminal_reason, t.terminal_public_detail,
+                       c.id AS result_id,
                        c.entry_id AS result_entry_id, c.result_source,
                        c.summary AS result_summary,
                        c.output_preview AS result_output_preview,
@@ -1993,8 +2048,8 @@ class _SubagentOperations:
                   ON c.session_id = t.session_id AND c.task_id = t.id
                  AND c.child_kind = 'RESULT'
                 LEFT JOIN pulsara_v3.transcript_entries AS accepted
-                  ON accepted.session_id = c.session_id
-                 AND accepted.source_subagent_result_id = c.id
+                  ON accepted.session_id = t.session_id
+                 AND accepted.source_subagent_task_id = t.id
                 WHERE t.session_id = %s AND t.id = %s
                 """,
                 (session_id, task_id),
@@ -2030,7 +2085,8 @@ class _SubagentOperations:
                                t.profile_kind, t.display_role, t.context_mode,
                                t.context_last_n_turns, t.parent_turn_id,
                                t.objective, t.status, t.pending_reason,
-                               t.terminal_reason, t.accepted_at, t.terminal_at,
+                               t.terminal_reason, t.terminal_public_detail,
+                               t.accepted_at, t.terminal_at,
                                c.id AS result_id,
                                c.entry_id AS result_entry_id, c.result_source,
                                c.summary AS result_summary,
@@ -2044,8 +2100,8 @@ class _SubagentOperations:
                           ON c.session_id = t.session_id AND c.task_id = t.id
                          AND c.child_kind = 'RESULT'
                         LEFT JOIN pulsara_v3.transcript_entries AS accepted
-                          ON accepted.session_id = c.session_id
-                         AND accepted.source_subagent_result_id = c.id
+                          ON accepted.session_id = t.session_id
+                         AND accepted.source_subagent_task_id = t.id
                         WHERE t.session_id = %s
                     )
                     SELECT * FROM inventory
@@ -2271,6 +2327,7 @@ class _SubagentOperations:
                         """UPDATE pulsara_v3.subagent_tasks
                            SET status = %s, pending_reason = %s,
                                terminal_reason = %s,
+                               terminal_public_detail = %s,
                                terminal_at = CASE WHEN %s THEN clock_timestamp()
                                                   ELSE NULL END
                            WHERE session_id = %s AND id = %s
@@ -2280,6 +2337,11 @@ class _SubagentOperations:
                             new_status,
                             pending,
                             reason,
+                            (
+                                None
+                                if reason is None
+                                else build_default_terminal_public_detail(reason)
+                            ),
                             SubagentTaskStatus(new_status).terminal,
                             guard.session_id,
                             task_id,

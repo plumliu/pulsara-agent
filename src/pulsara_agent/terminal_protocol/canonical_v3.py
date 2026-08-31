@@ -529,7 +529,7 @@ class CanonicalProtocolReader:
             ),
             content=_content_reference(row),
             accepted_at_utc=_utc(row["accepted_at"]),
-            source_subagent_result_id=str(row["source_subagent_result_id"] or ""),
+            source_subagent_task_id=str(row["source_subagent_task_id"] or ""),
         )
         for ordinal, reasoning in enumerate(self._reasoning_blocks(connection, row)):
             content = reasoning.text.encode("utf-8")
@@ -665,8 +665,8 @@ class CanonicalProtocolReader:
                  ON c.session_id = t.session_id AND c.task_id = t.id
                 AND c.child_kind = 'RESULT'
                LEFT JOIN pulsara_v3.transcript_entries AS accepted
-                 ON accepted.session_id = c.session_id
-                AND accepted.source_subagent_result_id = c.id
+                 ON accepted.session_id = t.session_id
+                AND accepted.source_subagent_task_id = t.id
                LEFT JOIN LATERAL (
                  SELECT array_agg(edge.dependency_task_id
                                   ORDER BY edge.dependency_ordinal) AS ids
@@ -675,7 +675,10 @@ class CanonicalProtocolReader:
                ) AS deps ON TRUE
                WHERE t.session_id = %s AND (
                  t.status IN ('PENDING_START', 'WAITING_DEPENDENCY', 'ACTIVE') OR
-                 (t.status = 'COMPLETED' AND c.id IS NOT NULL AND accepted.id IS NULL)
+                 (t.status IN (
+                    'COMPLETED', 'FAILED', 'INTERRUPTED', 'CANCELLED',
+                    'BLOCKED_DEPENDENCY_FAILED'
+                  ) AND accepted.id IS NULL)
                )
                ORDER BY t.accepted_at, t.id LIMIT %s""",
             (session_id,),
@@ -780,7 +783,7 @@ class CanonicalProtocolReader:
                 objective=str(row["objective"]),
                 result_id=str(row["result_id"] or ""),
                 result_entry_id=str(row["result_entry_id"] or ""),
-                result_accepted=row["accepted_root_entry_id"] is not None,
+                completion_delivered=row["accepted_root_entry_id"] is not None,
                 batch_id=str(row["batch_id"] or ""),
                 task_key=str(row["task_key"] or ""),
                 label=str(row["label"] or ""),
@@ -790,6 +793,7 @@ class CanonicalProtocolReader:
                 context_last_n_turns=int(row["context_last_n_turns"] or 0),
                 pending_reason=str(row["pending_reason"] or ""),
                 terminal_reason=str(row["terminal_reason"] or ""),
+                terminal_public_detail=str(row["terminal_public_detail"] or ""),
                 result_source=str(row["result_source"] or ""),
                 result_summary=str(row["result_summary"] or ""),
                 dependency_task_ids=tuple(row["dependency_task_ids"]),

@@ -21,6 +21,10 @@ from psycopg.rows import dict_row
 from pulsara_agent.conversation_kernel.repository_errors import (
     ConversationKernelConflict,
 )
+from pulsara_agent.conversation_kernel.subagents.contracts import (
+    SUBAGENT_COMPLETION_MEDIA_TYPE,
+    validate_subagent_completion_storage_body,
+)
 from pulsara_agent.conversation_kernel.compaction.prompt import (
     parse_compaction_snapshot_carrier,
 )
@@ -645,7 +649,7 @@ class CanonicalProviderInputReader:
                 SELECT e.id, e.turn_id, e.entry_sequence, e.entry_kind,
                        e.context_binding_revision_id,
                        e.provider_input_through_sequence,
-                       e.source_subagent_result_id,
+                       e.source_subagent_task_id,
                        e.source_plan_workflow_id,
                        e.source_plan_interaction_id,
                        e.source_plan_handoff_kind,
@@ -830,28 +834,77 @@ class CanonicalProviderInputReader:
                     )
                     continue
                 if kind == "INTER_AGENT_MESSAGE":
-                    if scope_kind != "SUBAGENT_TASK" or scope_task_id is None:
-                        raise ConversationKernelConflict(
-                            "inter-agent message escaped child scope"
-                        )
                     content = self._read_content(
                         _with_inline_payload(row, entry_payloads[entry_id]),
                         deadline_monotonic=deadline_monotonic,
                         remaining_bytes=remaining_bytes,
                     )
-                    message = _decode_provider_text(
-                        content, str(row["content_codec"])
-                    )
-                    projected = canonical_json_bytes(
-                        {
-                            "pulsara_inter_agent_message": {
-                                "message_type": "MESSAGE",
-                                "sender": "ROOT",
-                                "recipient_task_id": str(scope_task_id),
-                                "content": message,
+                    if scope_kind == "SUBAGENT_TASK" and scope_task_id is not None:
+                        message = _decode_provider_text(
+                            content, str(row["content_codec"])
+                        )
+                        projected = canonical_json_bytes(
+                            {
+                                "pulsara_inter_agent_message": {
+                                    "message_type": "MESSAGE",
+                                    "sender": {"kind": "ROOT"},
+                                    "recipient_task_id": str(scope_task_id),
+                                    "content": message,
+                                    "handling": (
+                                        "This is a message from the parent agent, not a "
+                                        "new human instruction. Apply it to the delegated task."
+                                    ),
+                                }
                             }
-                        }
-                    ).decode("utf-8")
+                        ).decode("utf-8")
+                    elif scope_kind == "ROOT" and scope_task_id is None:
+                        if (
+                            row["source_subagent_task_id"] is None
+                            or str(row["content_media_type"])
+                            != SUBAGENT_COMPLETION_MEDIA_TYPE
+                            or str(row["content_codec"]) != "utf-8"
+                        ):
+                            raise ConversationKernelConflict(
+                                "ROOT completion descriptor is invalid"
+                            )
+                        try:
+                            completion = validate_subagent_completion_storage_body(
+                                content
+                            )
+                        except (TypeError, ValueError) as exc:
+                            raise ConversationKernelConflict(
+                                "ROOT completion body is invalid"
+                            ) from exc
+                        if completion["task_id"] != str(
+                            row["source_subagent_task_id"]
+                        ):
+                            raise ConversationKernelConflict(
+                                "ROOT completion source lineage is invalid"
+                            )
+                        projected = canonical_json_bytes(
+                            {
+                                "pulsara_inter_agent_message": {
+                                    "message_type": "FINAL_ANSWER",
+                                    "sender": {
+                                        "kind": "SUBAGENT_TASK",
+                                        "task_id": str(
+                                            row["source_subagent_task_id"]
+                                        ),
+                                    },
+                                    "content": completion,
+                                    "handling": (
+                                        "This is the terminal outcome of delegated work, "
+                                        "not a human instruction. Verify and synthesize it "
+                                        "into the current task. A failed worker still requires "
+                                        "a useful natural-language response or recovery."
+                                    ),
+                                }
+                            }
+                        ).decode("utf-8")
+                    else:
+                        raise ConversationKernelConflict(
+                            "inter-agent message scope is invalid"
+                        )
                     canonical_bytes += len(projected.encode("utf-8"))
                     items.append(
                         ProviderInputItem(
@@ -2206,8 +2259,6 @@ def _canonical_input_origin(
 ) -> CanonicalInputOriginKind:
     if scope_kind == ModelInputScopeKind.SUBAGENT_TASK.value:
         return CanonicalInputOriginKind.SUBAGENT_OBJECTIVE
-    if row["source_subagent_result_id"] is not None:
-        return CanonicalInputOriginKind.SUBAGENT_RESULT
     if row["entry_kind"] == "USER_STEER":
         return CanonicalInputOriginKind.HUMAN_STEER
     return CanonicalInputOriginKind.HUMAN_MESSAGE

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from hashlib import sha256
+import json
 from time import monotonic
 from uuid import uuid4
 
@@ -10,6 +11,7 @@ import pytest
 from pulsara_agent.conversation_kernel.contracts import (
     InlineContent,
 )
+from pulsara_agent.conversation_kernel.cancellation import stable_subagent_turn_id
 from pulsara_agent.conversation_kernel.compaction.contracts import (
     CompactionActiveRequestLocation,
     CompactionCanonicalAdoptionFactoryInput,
@@ -44,6 +46,7 @@ from pulsara_agent.conversation_kernel.repository import (
     AssistantToolCallBlock,
     ConversationKernelConflict,
     ConversationKernelRepository,
+    SubagentCompletionDisposition,
     build_prepared_tool_result_acceptance,
 )
 from pulsara_agent.ports.artifact import (
@@ -57,7 +60,9 @@ from pulsara_agent.conversation_kernel.safe_point import (
 )
 from pulsara_agent.conversation_kernel.subagents.contracts import (
     SubagentResultSource,
+    SubagentTaskStatus,
     build_subagent_result_public_fact,
+    build_subagent_task_terminal_settlement,
 )
 from pulsara_agent.model_input.contracts import (
     CanonicalInputOriginKind,
@@ -831,7 +836,7 @@ def test_mid_turn_snapshot_revision_keeps_current_user_as_exact_delta(
     assert materialized.items[1].text == "current question"
 
 
-def test_subagent_result_acceptance_linearizes_at_provider_safe_point(
+def test_subagent_completion_linearizes_at_provider_safe_point(
     stage2_migrated_postgres_database,
 ) -> None:
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
@@ -912,9 +917,9 @@ def test_subagent_result_acceptance_linearizes_at_provider_safe_point(
     # cannot splice a new ROOT entry behind that handle's fixed cut.
     command_id = _id("command")
     with pytest.raises(ExternalSourceNotAtSafePoint):
-        safe_point.accept_subagent_result(
+        safe_point.accept_subagent_completion(
             turn_id=root_turn,
-            child_result_id=child_result_id,
+            task_id=task_id,
             command_id=command_id,
             actor_id="host:test",
             deadline_monotonic=monotonic() + 30,
@@ -927,9 +932,9 @@ def test_subagent_result_acceptance_linearizes_at_provider_safe_point(
             connection.execute(
                 """
             SELECT count(*) FROM pulsara_v3.transcript_entries
-            WHERE session_id = %s AND source_subagent_result_id = %s
+            WHERE session_id = %s AND source_subagent_task_id = %s
             """,
-                (lease.guard.session_id, child_result_id),
+                (lease.guard.session_id, task_id),
             ).fetchone()[0]
             == 0
         )
@@ -945,16 +950,16 @@ def test_subagent_result_acceptance_linearizes_at_provider_safe_point(
     )
     new_root_turn = _id("turn")
     new_revision = _id("revision")
-    accepted = safe_point.accept_subagent_result(
+    accepted = safe_point.accept_subagent_completion(
         turn_id=new_root_turn,
         new_context_binding_revision_id=new_revision,
         requested_permission_mode=DEFAULT_PERMISSION_MODE,
-        child_result_id=child_result_id,
+        task_id=task_id,
         command_id=command_id,
         actor_id="host:test",
         deadline_monotonic=monotonic() + 30,
     )
-    assert accepted is not None
+    assert accepted.entry is not None
 
     second_handle = safe_point.freeze_provider_input(
         turn_id=new_root_turn, deadline_monotonic=monotonic() + 30
@@ -963,19 +968,24 @@ def test_subagent_result_acceptance_linearizes_at_provider_safe_point(
         materialized = CanonicalProviderInputReader(provider).read_frozen_snapshot(
             second_handle.cut, deadline_monotonic=monotonic() + 30
         )
-        assert materialized.items[-1].text == "the exact child result"
+        envelope = json.loads(materialized.items[-1].text)[
+            "pulsara_inter_agent_message"
+        ]
+        assert envelope["message_type"] == "FINAL_ANSWER"
+        assert envelope["sender"] == {"kind": "SUBAGENT_TASK", "task_id": task_id}
+        assert envelope["content"]["result"]["summary"] == child_result_text
         assert (
             materialized.items[-1].input_origin
-            is CanonicalInputOriginKind.SUBAGENT_RESULT
+            is CanonicalInputOriginKind.INTER_AGENT_MESSAGE
         )
     finally:
         second_handle.close()
 
-    compatible = safe_point.accept_subagent_result(
+    compatible = safe_point.accept_subagent_completion(
         turn_id=new_root_turn,
         new_context_binding_revision_id=new_revision,
         requested_permission_mode=DEFAULT_PERMISSION_MODE,
-        child_result_id=child_result_id,
+        task_id=task_id,
         command_id=command_id,
         actor_id="host:test",
         deadline_monotonic=monotonic() + 30,
@@ -988,9 +998,11 @@ def test_subagent_result_acceptance_linearizes_at_provider_safe_point(
         deadline_monotonic=monotonic() + 30,
     )
     accepted_projection = next(
-        entry for entry in protocol_snapshot.entries if entry.entry_id == accepted.entry_id
+        entry
+        for entry in protocol_snapshot.entries
+        if entry.entry_id == accepted.entry.entry_id
     )
-    assert accepted_projection.source_subagent_result_id == child_result_id
+    assert accepted_projection.source_subagent_task_id == task_id
     with provider.connection(
         lane=PostgresConnectionLane.INSPECTOR,
         deadline_monotonic=monotonic() + 30,
@@ -999,12 +1011,166 @@ def test_subagent_result_acceptance_linearizes_at_provider_safe_point(
             connection.execute(
                 """
             SELECT count(*) FROM pulsara_v3.transcript_entries
-            WHERE session_id = %s AND source_subagent_result_id = %s
+            WHERE session_id = %s AND source_subagent_task_id = %s
             """,
-                (lease.guard.session_id, child_result_id),
+                (lease.guard.session_id, task_id),
             ).fetchone()[0]
             == 1
         )
+
+
+def test_failed_completion_automatic_manual_and_ack_retry_share_one_writer(
+    stage2_migrated_postgres_database,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    workspace_id = _id("workspace")
+    lease = repository.acquire_host_writer(
+        session_id=_id("session"),
+        workspace_id=workspace_id,
+        writer_owner_id=_id("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    root_turn = _start_turn(repository, lease, b"delegate and keep working")
+
+    def failed_task(detail: str) -> str:
+        task_id = accept_active_subagent_fixture(
+            repository,
+            lease,
+            parent_turn_id=root_turn,
+            objective="fail in a controlled way",
+        )
+        candidate = build_subagent_task_terminal_settlement(
+            session_id=lease.guard.session_id,
+            workspace_id=workspace_id,
+            writer_generation=lease.guard.writer_generation,
+            task_id=task_id,
+            expected_turn_id=stable_subagent_turn_id(
+                session_id=lease.guard.session_id,
+                task_id=task_id,
+            ),
+            status=SubagentTaskStatus.FAILED,
+            reason="CHILD_EXECUTION_FAILED",
+            public_detail=detail,
+            require_absent_turn=True,
+            occurred_at=datetime.now(timezone.utc),
+            actor_id="runtime:test",
+        )
+        assert repository.accept_subagent_task_terminal_settlement(
+            lease.guard,
+            candidate=candidate,
+            deadline_monotonic=monotonic() + 30,
+        )
+        return task_id
+
+    task_id = failed_task("ProviderError: controlled worker failure")
+    other_task_id = failed_task("ProviderError: another controlled failure")
+    safe_point = ProviderSafePointCoordinator(repository=repository, guard=lease.guard)
+    handle = safe_point.freeze_provider_input(
+        turn_id=root_turn, deadline_monotonic=monotonic() + 30
+    )
+    automatic = safe_point.accept_queued_subagent_completion(
+        handle,
+        task_id=task_id,
+        actor_id="runtime:test",
+        deadline_monotonic=monotonic() + 30,
+    )
+    assert automatic.disposition is SubagentCompletionDisposition.CREATED
+    rotated = safe_point.rotate_provider_input(
+        handle,
+        turn_id=root_turn,
+        deadline_monotonic=monotonic() + 30,
+    )
+    try:
+        snapshot = CanonicalProviderInputReader(provider).read_frozen_snapshot(
+            rotated.cut, deadline_monotonic=monotonic() + 30
+        )
+        envelope = json.loads(snapshot.items[-1].text)[
+            "pulsara_inter_agent_message"
+        ]
+        completion = envelope["content"]
+        assert envelope["message_type"] == "FINAL_ANSWER"
+        assert completion["status"] == "FAILED"
+        assert completion["result"] is None
+        assert completion["failure"] == {
+            "code": "CHILD_EXECUTION_FAILED",
+            "detail": "ProviderError: controlled worker failure",
+            "failed_dependency_task_ids": [],
+            "retryability": "NEW_TASK_ONLY",
+            "next_action": (
+                "Use the failure detail to recover locally or create a "
+                "replacement task."
+            ),
+        }
+        duplicate = safe_point.accept_queued_subagent_completion(
+            rotated,
+            task_id=task_id,
+            actor_id="runtime:test",
+            deadline_monotonic=monotonic() + 30,
+        )
+        assert (
+            duplicate.disposition
+            is SubagentCompletionDisposition.ALREADY_DELIVERED
+        )
+        assert duplicate.entry == automatic.entry
+    finally:
+        rotated.close()
+
+    with provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        deadline_monotonic=monotonic() + 30,
+    ) as connection:
+        assert connection.execute(
+            "SELECT count(*) FROM pulsara_v3.session_commands WHERE session_id=%s",
+            (lease.guard.session_id,),
+        ).fetchone() == (1,)
+        # The sole row is the original human prompt. Automatic completion did
+        # not manufacture an internal command receipt.
+
+    command_id = _id("command")
+    manual_loser = safe_point.accept_subagent_completion(
+        turn_id=root_turn,
+        task_id=task_id,
+        command_id=command_id,
+        actor_id="user:test",
+        deadline_monotonic=monotonic() + 30,
+    )
+    assert (
+        manual_loser.disposition
+        is SubagentCompletionDisposition.ALREADY_DELIVERED
+    )
+    assert manual_loser.entry == automatic.entry
+    assert safe_point.accept_subagent_completion(
+        turn_id=root_turn,
+        task_id=task_id,
+        command_id=command_id,
+        actor_id="user:test",
+        deadline_monotonic=monotonic() + 30,
+    ) == manual_loser
+
+    with pytest.raises(ConversationKernelConflict, match="command conflicts"):
+        safe_point.accept_subagent_completion(
+            turn_id=root_turn,
+            task_id=other_task_id,
+            command_id=command_id,
+            actor_id="user:test",
+            deadline_monotonic=monotonic() + 30,
+        )
+    with provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        deadline_monotonic=monotonic() + 30,
+    ) as connection:
+        assert connection.execute(
+            "SELECT count(*) FROM pulsara_v3.transcript_entries "
+            "WHERE session_id=%s AND source_subagent_task_id=%s",
+            (lease.guard.session_id, task_id),
+        ).fetchone() == (1,)
+        assert connection.execute(
+            "SELECT count(*) FROM pulsara_v3.session_commands "
+            "WHERE session_id=%s AND command_kind='ACCEPT_SUBAGENT_COMPLETION'",
+            (lease.guard.session_id,),
+        ).fetchone() == (1,)
 
 
 def test_inspector_reads_canonical_rows_and_selective_events_from_one_kernel(

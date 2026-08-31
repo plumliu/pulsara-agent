@@ -115,6 +115,7 @@ from pulsara_agent.conversation_kernel.repository import (
     AcceptedPlanWorkflowCommand,
     ConversationKernelConflict,
     ConversationKernelRepository,
+    SubagentCompletionDisposition,
     PromptIngressRejected,
     PlanContinuationDisposition,
     PlanQuestionAnswer,
@@ -2111,6 +2112,8 @@ class KernelHostSession:
             # the process-local queue loop, so every compatible retry must
             # re-assert the wake hint.
             self._queue_wake.set()
+            if delivery_mode is PromptDeliveryMode.STEER_ACTIVE_TURN:
+                await self._subagents.notify_root_input_activity()
             existing = await self.query_command(command_id)
             if existing is None:
                 raise RuntimeError("compatible prompt command has no canonical outcome")
@@ -2288,6 +2291,8 @@ class KernelHostSession:
                 if hook_context_reservation is not None:
                     hook_context_reservation.commit_prompt_bound(queue_item_id)
                 self._queue_wake.set()
+                if delivery_mode is PromptDeliveryMode.STEER_ACTIVE_TURN:
+                    await self._subagents.notify_root_input_activity()
                 existing = await self.query_command(command_id)
                 if existing is None:
                     raise RuntimeError(
@@ -2308,6 +2313,8 @@ class KernelHostSession:
         if hook_context_reservation is not None:
             hook_context_reservation.commit_prompt_bound(queue_item_id)
         self._queue_wake.set()
+        if delivery_mode is PromptDeliveryMode.STEER_ACTIVE_TURN:
+            await self._subagents.notify_root_input_activity()
         return KernelCommandOutcome(
             command_id,
             "PENDING",
@@ -3579,13 +3586,13 @@ class KernelHostSession:
                 f"INTERACTION_{decision}",
                 "Interaction decision accepted.",
             )
-        if row.get("command_kind") == "ACCEPT_SUBAGENT_RESULT":
+        if row.get("command_kind") == "ACCEPT_SUBAGENT_COMPLETION":
             return KernelCommandOutcome(
                 command_id,
                 "SUCCEEDED",
                 str(row.get("target_entry_id") or ""),
-                "SUBAGENT_RESULT_ACCEPTED",
-                "The durable child result was accepted into the ROOT conversation.",
+                "SUBAGENT_COMPLETION_DELIVERED",
+                "The delegated task outcome was delivered to Pulsara.",
             )
         status = str(row.get("turn_status") or "")
         target = str(row.get("target_turn_id") or "")
@@ -3688,13 +3695,13 @@ class KernelHostSession:
         await self._settle_active_root_task(task)
         return True
 
-    async def accept_subagent_result(
+    async def accept_subagent_completion(
         self,
         *,
         command_id: str,
         target_turn_id: str | None,
         requested_permission_mode: PermissionMode | None,
-        child_result_id: str,
+        task_id: str,
         actor_id: str,
     ) -> KernelCommandOutcome:
         self._require_open()
@@ -3706,7 +3713,7 @@ class KernelHostSession:
             return KernelCommandOutcome(
                 command_id,
                 "REJECTED",
-                child_result_id,
+                task_id,
                 "PERMISSION_MODE_REQUIRED",
                 "A new ROOT turn requires an explicit permission mode.",
             )
@@ -3714,7 +3721,7 @@ class KernelHostSession:
             return KernelCommandOutcome(
                 command_id,
                 "REJECTED",
-                child_result_id,
+                task_id,
                 "PERMISSION_FIELD_NOT_ALLOWED",
                 "An existing ROOT turn already owns its permission snapshot.",
             )
@@ -3729,7 +3736,7 @@ class KernelHostSession:
             return KernelCommandOutcome(
                 command_id,
                 "REJECTED",
-                child_result_id,
+                task_id,
                 "ROOT_TURN_ALREADY_RUNNING",
                 "A ROOT turn is already running.",
             )
@@ -3744,16 +3751,16 @@ class KernelHostSession:
                     return KernelCommandOutcome(
                         command_id,
                         "REJECTED",
-                        child_result_id,
+                        task_id,
                         "COMPACTION_IN_PROGRESS",
                         "Context compaction is in progress for the ROOT scope.",
                     )
         try:
-            accepted = await self._runner.accept_subagent_result(
+            accepted = await self._runner.accept_subagent_completion(
                 turn_id=resolved_turn_id,
                 new_context_binding_revision_id=new_revision_id,
                 requested_permission_mode=requested_permission_mode,
-                child_result_id=child_result_id,
+                task_id=task_id,
                 command_id=command_id,
                 actor_id=actor_id,
                 deadline_monotonic=self._canonical_deadline(),
@@ -3764,47 +3771,56 @@ class KernelHostSession:
             return KernelCommandOutcome(
                 command_id,
                 "REJECTED",
-                child_result_id,
+                task_id,
                 "PROVIDER_SAFE_POINT_REQUIRED",
                 "The ROOT turn is currently dispatching a provider call.",
             )
         except BaseException as error:
-            confirmed = await self._confirm_external_result_command(
+            confirmed = await self._confirm_subagent_completion_command(
                 command_id=command_id,
-                command_kind="ACCEPT_SUBAGENT_RESULT",
-                source_id=child_result_id,
-                expected_turn_id=resolved_turn_id,
+                command_kind="ACCEPT_SUBAGENT_COMPLETION",
+                task_id=task_id,
             )
             if confirmed is not None:
-                if new_turn:
-                    await self._start_external_result_turn(resolved_turn_id, command_id)
+                outcome, winner_turn_id = confirmed
+                if new_turn and winner_turn_id == resolved_turn_id:
+                    await self._start_subagent_completion_turn(
+                        resolved_turn_id, command_id
+                    )
+                elif new_turn:
+                    await self._release_external_new_turn_reservation()
                 if isinstance(error, asyncio.CancelledError):
                     raise
-                return confirmed
+                return outcome
             if new_turn:
                 await self._release_external_new_turn_reservation()
             raise
         finally:
             if write_reservation is not None:
                 await self._release_compaction_write_reservation(write_reservation)
-        if accepted is None:
+        if accepted.disposition is SubagentCompletionDisposition.TARGET_STALE:
             if new_turn:
                 await self._release_external_new_turn_reservation()
             return KernelCommandOutcome(
                 command_id,
                 "REJECTED",
-                child_result_id,
-                "SUBAGENT_RESULT_UNAVAILABLE",
-                "The durable child result cannot be accepted into this turn.",
+                task_id,
+                "SUBAGENT_COMPLETION_TARGET_STALE",
+                "The conversation changed before this task outcome could be delivered.",
             )
-        if new_turn:
-            await self._start_external_result_turn(accepted.turn_id, command_id)
+        assert accepted.entry is not None
+        if new_turn and accepted.disposition is SubagentCompletionDisposition.CREATED:
+            await self._start_subagent_completion_turn(
+                accepted.entry.turn_id, command_id
+            )
+        elif new_turn:
+            await self._release_external_new_turn_reservation()
         return KernelCommandOutcome(
             command_id,
             "SUCCEEDED",
-            accepted.entry_id,
-            "SUBAGENT_RESULT_ACCEPTED",
-            "The durable child result was accepted into the ROOT conversation.",
+            accepted.entry.entry_id,
+            "SUBAGENT_COMPLETION_DELIVERED",
+            "The delegated task outcome was delivered to Pulsara.",
         )
 
     async def _reserve_external_new_turn(self) -> bool:
@@ -3825,33 +3841,35 @@ class KernelHostSession:
             self._external_new_turn_settled.clear()
             return True
 
-    async def _confirm_external_result_command(
+    async def _confirm_subagent_completion_command(
         self,
         *,
         command_id: str,
         command_kind: str,
-        source_id: str,
-        expected_turn_id: str,
-    ) -> KernelCommandOutcome | None:
+        task_id: str,
+    ) -> tuple[KernelCommandOutcome, str] | None:
         try:
             row = await self._query_command_row(command_id)
         except BaseException:
             return None
         if row is None or row.get("command_kind") != command_kind:
             return None
-        observed_source = row.get("target_entry_source_subagent_result_id")
+        observed_source = row.get("target_entry_source_subagent_task_id")
         if (
-            observed_source != source_id
-            or row.get("target_entry_turn_id") != expected_turn_id
+            observed_source != task_id
             or not row.get("target_entry_id")
+            or not row.get("target_entry_turn_id")
         ):
             return None
-        return KernelCommandOutcome(
-            command_id,
-            "SUCCEEDED",
-            str(row["target_entry_id"]),
-            "SUBAGENT_RESULT_ACCEPTED",
-            "The durable external result was accepted into the ROOT conversation.",
+        return (
+            KernelCommandOutcome(
+                command_id,
+                "SUCCEEDED",
+                str(row["target_entry_id"]),
+                "SUBAGENT_COMPLETION_DELIVERED",
+                "The delegated task outcome was delivered to Pulsara.",
+            ),
+            str(row["target_entry_turn_id"]),
         )
 
     async def _release_external_new_turn_reservation(self) -> None:
@@ -3860,13 +3878,17 @@ class KernelHostSession:
             self._external_new_turn_settled.set()
             self._queue_wake.set()
 
-    async def _start_external_result_turn(self, turn_id: str, command_id: str) -> None:
+    async def _start_subagent_completion_turn(
+        self, turn_id: str, command_id: str
+    ) -> None:
         async with self._lock:
             self._retire_done_active_root_locked()
             if not self._external_new_turn_accepting or self._active_task is not None:
                 self._external_new_turn_accepting = False
                 self._external_new_turn_settled.set()
-                raise RuntimeError("external result turn lost its local admission")
+                raise RuntimeError(
+                    "subagent completion turn lost its local admission"
+                )
             self._tools.todo_owner.bind_continuation_if_present(
                 scope_kind=ModelInputScopeKind.ROOT,
                 scope_subagent_task_id=None,
@@ -3875,7 +3897,7 @@ class KernelHostSession:
             self._install_active_root_task_locked(
                 turn_id=turn_id,
                 command_id=command_id,
-                name=f"kernel-external-result-turn:{turn_id}",
+                name=f"kernel-subagent-completion-turn:{turn_id}",
                 run=lambda intent: self._run_accepted_root_chain(turn_id, intent),
             )
             self._external_new_turn_accepting = False

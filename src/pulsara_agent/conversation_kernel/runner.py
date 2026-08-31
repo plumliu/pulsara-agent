@@ -128,6 +128,7 @@ from pulsara_agent.conversation_kernel.subagents.contracts import (
 from pulsara_agent.conversation_kernel.tool_execution import ToolBatchExecutor
 from pulsara_agent.conversation_kernel.repository import (
     AcceptedEntry,
+    AcceptedSubagentCompletion,
     AssistantBlock,
     AssistantDataBlock,
     AssistantTextBlock,
@@ -836,6 +837,13 @@ class ConversationKernelRunner:
         successor_dispatch: PreparedProviderDispatch | None = None
         completed_tool_batch = False
         stop_continuation_used = False
+        root_completion_phase_opened = False
+        if (
+            intent.scope_kind is ModelInputScopeKind.ROOT
+            and self._subagent_runtime is not None
+        ):
+            await self._subagent_runtime.open_root_completion_delivery(turn_id)
+            root_completion_phase_opened = True
         try:
             while True:
                 if (
@@ -1234,6 +1242,20 @@ class ConversationKernelRunner:
                         if completion_prepared is None
                         else completion_prepared.result
                     )
+                    root_answer_fenced = False
+                    if (
+                        complete_turn
+                        and identity.conversation_scope_kind
+                        is ModelInputScopeKind.ROOT
+                        and self._subagent_runtime is not None
+                    ):
+                        pending_completion = (
+                            await self._subagent_runtime.seal_root_completion_delivery(
+                                turn_id
+                            )
+                        )
+                        root_answer_fenced = True
+                        complete_turn = not pending_completion
                     settlement = PreparedAssistantMessageSettlement(
                         guard=self._writer_lease.guard,
                         cut=request.cut,
@@ -1256,11 +1278,19 @@ class ConversationKernelRunner:
                     try:
                         accepted = await self._assistant_settlements.settle(settlement)
                     except BaseException:
+                        if root_answer_fenced and self._subagent_runtime is not None:
+                            await self._subagent_runtime.settle_root_completion_delivery(
+                                turn_id, turn_completed=False
+                            )
                         if completion_prepared is not None:
                             await self._subagent_runtime.finish_completion(
                                 completion_prepared.permit, committed=False
                             )
                         raise
+                    if root_answer_fenced and self._subagent_runtime is not None:
+                        await self._subagent_runtime.settle_root_completion_delivery(
+                            turn_id, turn_completed=accepted.turn_completed
+                        )
                     if completion_prepared is not None:
                         await self._subagent_runtime.finish_completion(
                             completion_prepared.permit, committed=True
@@ -1478,6 +1508,9 @@ class ConversationKernelRunner:
                 )
             await self._turn_admission.interrupt_turn(turn_id, reason=reason)
             raise
+        finally:
+            if root_completion_phase_opened and self._subagent_runtime is not None:
+                await self._subagent_runtime.close_root_completion_delivery(turn_id)
 
     async def _dispatch_initial_session_start(
         self,
@@ -1541,23 +1574,23 @@ class ConversationKernelRunner:
             reservation.commit()
         return reservation
 
-    async def accept_subagent_result(
+    async def accept_subagent_completion(
         self,
         *,
         turn_id: str,
         new_context_binding_revision_id: str | None = None,
         requested_permission_mode: PermissionMode | None = None,
-        child_result_id: str,
+        task_id: str,
         command_id: str,
         actor_id: str,
         deadline_monotonic: float,
-    ) -> AcceptedEntry | None:
+    ) -> AcceptedSubagentCompletion:
         return await self._io.run(
-            self._safe_point.accept_subagent_result,
+            self._safe_point.accept_subagent_completion,
             turn_id=turn_id,
             new_context_binding_revision_id=new_context_binding_revision_id,
             requested_permission_mode=requested_permission_mode,
-            child_result_id=child_result_id,
+            task_id=task_id,
             command_id=command_id,
             actor_id=actor_id,
             deadline_monotonic=deadline_monotonic,

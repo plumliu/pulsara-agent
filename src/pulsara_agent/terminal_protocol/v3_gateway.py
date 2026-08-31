@@ -78,7 +78,7 @@ from pulsara_agent.terminal_protocol.generated_v3 import terminal_kernel_v3_pb2 
 PROTOCOL_MAJOR = 3
 PROTOCOL_MINOR = 0
 PROTOCOL_SCHEMA_FINGERPRINT = (
-    "sha256:79ef15e7de869ba293b16ab3189b64fb107e67f6d45e81bf05541d4d8e0644ef"
+    "sha256:9ce0bc88df761b6b6480a262d6036112eae12cbf3c7dbf0af50fcea07809ded8"
 )
 MAXIMUM_FRAME_BYTES = 8 << 20
 MAXIMUM_OBSERVATION_WAIT_MS = STAGE2_LIMITS.committed_observation_hard_wait_ms
@@ -572,8 +572,8 @@ class TerminalKernelProtocolServer:
             return _error(request.request_id, "COMMAND_ID_INVALID")
         if request.client_submission_id not in ("", request.command_id):
             return _error(request.request_id, "COMMAND_SUBMISSION_ID_MISMATCH")
-        if request.command_kind != wire.ACCEPT_SUBAGENT_RESULT and (
-            request.source_subagent_result_id
+        if request.command_kind != wire.ACCEPT_SUBAGENT_COMPLETION and (
+            request.subagent_task_id
         ):
             return _error(request.request_id, "COMMAND_SOURCE_UNION_INVALID")
         if request.command_kind != wire.DETACH and (
@@ -585,7 +585,7 @@ class TerminalKernelProtocolServer:
         requested_permission = _permission_from_wire(request.requested_permission_mode)
         permission_command = request.command_kind in (
             wire.SUBMIT_PROMPT,
-            wire.ACCEPT_SUBAGENT_RESULT,
+            wire.ACCEPT_SUBAGENT_COMPLETION,
             wire.ENTER_PLAN,
         )
         if (
@@ -633,20 +633,20 @@ class TerminalKernelProtocolServer:
                 "TURN_STOP_REQUESTED" if stopped else "NO_ACTIVE_TURN",
                 "The active turn was stopped." if stopped else "No active turn exists.",
             )
-        elif request.command_kind == wire.ACCEPT_SUBAGENT_RESULT:
+        elif request.command_kind == wire.ACCEPT_SUBAGENT_COMPLETION:
             new_root = not request.target_turn_id
             if (
                 request.text
-                or not request.source_subagent_result_id
+                or not request.subagent_task_id
                 or (new_root and requested_permission is None)
                 or (not new_root and requested_permission is not None)
             ):
-                return _error(request.request_id, "SUBAGENT_RESULT_REQUEST_INVALID")
-            outcome = await state.host_session.accept_subagent_result(
+                return _error(request.request_id, "SUBAGENT_COMPLETION_REQUEST_INVALID")
+            outcome = await state.host_session.accept_subagent_completion(
                 command_id=request.command_id,
                 target_turn_id=request.target_turn_id or None,
                 requested_permission_mode=requested_permission,
-                child_result_id=request.source_subagent_result_id,
+                task_id=request.subagent_task_id,
                 actor_id=state.attachment_id,
             )
         elif request.command_kind == wire.ENTER_PLAN:
@@ -692,7 +692,7 @@ class TerminalKernelProtocolServer:
         elif request.command_kind == wire.COMPACT_CONTEXT:
             if (
                 request.text
-                or request.source_subagent_result_id
+                or request.subagent_task_id
                 or request.target_plan_workflow_id
                 or request.expected_plan_workflow_revision
             ):

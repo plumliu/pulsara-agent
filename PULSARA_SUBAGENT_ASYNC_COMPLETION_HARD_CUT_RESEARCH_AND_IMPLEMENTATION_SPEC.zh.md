@@ -1,17 +1,18 @@
 # Pulsara 子代理异步完成交付与 Late-Join Hard-Cut 调研及实施契约
 
-> 状态：**READY_FOR_IMPLEMENTATION**
+> 状态：**ACTIVATED**
 >
 > 记录日期：2026-08-31
+>
+> 激活日期：2026-08-31
 >
 > Pulsara 调研基线：当前工作树 production source；根目录文档仅作次级证据。
 >
 > Codex 调研基线：本地 `/Users/plumliu/Desktop/python_workspace/codex`，commit
 > `fb0781b9eee6`；官方产品说明仅作补充证据。
 >
-> 本文是下一次 hard-cut 的目标契约，不声称当前代码已经实现。实现激活前，现行 authority
-> 仍是 `ROUND_10_HIERARCHICAL_SUBAGENT_ORCHESTRATION_IMPLEMENTATION_SPEC.zh.md` 与 production
-> source；实现激活后，本文只替换 Round 10 中关于“ROOT 如何收到 terminal outcome”、
+> 本文现已作为 production source 的异步完成交付 hard-cut authority 激活。本文只替换
+> Round 10 中关于“ROOT 如何收到 terminal outcome”、
 > `wait_agent*`、ROOT completion mailbox、result acceptance 与对应 UI 的条款，其余 task graph、
 > dependency、profile、context、permission、capacity、child result 和 restart 边界继续有效。
 
@@ -19,19 +20,19 @@
 
 ## 0. 一句话结论
 
-Pulsara **已经能够让 ROOT 与多个 worker 真正并行执行**。它之所以在真实模型使用中频繁、
-甚至连续调用 `wait_agent`，不是因为 child scheduler 是同步的，也不是因为 wait 在 CPU
-busy-poll，而是因为现行契约把两件本应分开的事情绑在了一起：
+Pulsara **已经能够让 ROOT 与多个 worker 真正并行执行**。调研基线之所以在真实模型使用中
+频繁、甚至连续调用 `wait_agent`，不是因为 child scheduler 是同步的，也不是因为 wait 在 CPU
+busy-poll，而是因为旧契约把两件本应分开的事情绑在了一起：
 
 1. 等待某个异步事实发生；
 2. 把 worker 的最终结果送进 ROOT 的模型上下文。
 
-目前 worker 完成后不会主动向 ROOT 投递 terminal completion。ROOT 想在当前回答中使用结果，
-只能让模型调用 target-specific `wait_agent` / `wait_agent_tasks`，或者由前端用户显式点击
-“带入会话并继续”。因此 wait 既是同步屏障，又是结果运输工具；模型自然会在 spawn 后尽早
-wait，以免永远看不到结果。
+调研基线里，worker 完成后不会主动向 ROOT 投递 terminal completion。ROOT 想在当前回答中
+使用结果，只能让模型调用 target-specific `wait_agent` / `wait_agent_tasks`，或者由前端用户
+显式点击“带入会话并继续”。因此旧 wait 既是同步屏障，又是结果运输工具；模型自然会在
+spawn 后尽早 wait，以免永远看不到结果。
 
-本次 hard-cut 要把它改成 Codex 风格的 late join：
+本次 hard-cut 已把它改成 Codex 风格的 late join：
 
 ```text
 spawn
@@ -1066,7 +1067,7 @@ ROOT model 不因 UI 可见就自动读取 child 全量 trace。terminal summary
 
 ### HC-0：冻结目标规格与 supersession
 
-- 将本文评审后状态改为 `READY_FOR_IMPLEMENTATION`；
+- 评审结束时先将本文置为 `READY_FOR_IMPLEMENTATION`，激活证据闭合后改为 `ACTIVATED`；
 - 更新 Round 10 的 supersession 注记；
 - 明确删除 automatic-injection prohibition、result-carrying wait 与手动-only acceptance；
 - 不在 README 先行宣称实现完成。
@@ -1347,7 +1348,7 @@ real LLM dogfood 必须通过 Pulsara 前端实际发送，不只运行接入代
 
 ## 17. Definition of Done
 
-只有同时满足以下条件，本文才可从 `READY_FOR_IMPLEMENTATION` 改为 `ACTIVATED`：
+以下条件已经同时满足，本文从 `READY_FOR_IMPLEMENTATION` 改为 `ACTIVATED`：
 
 - Pulsara ROOT 在未调用 wait 的情况下收到成功 terminal completion；
 - 所有非成功 terminal 状态也自动进入 ROOT，并有自然语言收尾测试；
@@ -1370,7 +1371,73 @@ real LLM dogfood 必须通过 Pulsara 前端实际发送，不只运行接入代
 
 ---
 
-## 18. 调研索引
+## 18. 激活证据
+
+### 18.1 自动化验证
+
+最终验证只运行用户指定的三组后端契约测试，以及所有直接受影响的前端测试、lint、production
+bundle、Python compile 与静态检查；没有借助 skip、xfail、弱化断言或兼容分支取绿。
+
+| 验证面 | 命令/范围 | 结果 |
+| --- | --- | --- |
+| 后端 hard-cut | `test_round10_hierarchical_subagent_orchestration.py`、`test_stage2_canonical_reader.py`、`test_stage2_protocol_v3.py` | 41 passed |
+| 前端 projection 与交互 | `runtime-adapter.test.ts`、`pulsara-app.test.tsx` | 32 passed |
+| 前端静态与生产构建 | ESLint、TypeScript/Vite local production bundle | passed |
+| Python 与 diff 静态检查 | focused Ruff、`compileall`、`git diff --check` | passed |
+
+### 18.2 Real-provider 前端 dogfood
+
+使用本地 Web 应用和真实模型，通过真实浏览器逐场景操作并肉眼检查，而不是只调用后端夹具：
+
+- `2425fc44`：两个 worker 并行完成；ROOT 同时读取 README；没有调用 wait，两个成功 completion
+  自动进入同一轮，ROOT 正常综合三项结果；
+- `f14af271`：worker 进入取消终态；失败 completion 自动进入同一轮，ROOT 仍返回包含项目名的
+  自然语言回答；本证据只证明 canonical 取消与回答闭合，不声称任意正在运行的外部进程都能被
+  瞬时物理终止；
+- `54c66b51`：ROOT 先结束、worker 后完成；旧回答没有被后台追加或重开。空闲态显示一次性继续
+  操作，点击后创建新 ROOT turn、接纳同一份 completion 且不重跑 worker；
+- `7e4d50f3`：一次创建 6 个任务，肉眼观察到 4 个并行运行、额外任务排队、依赖任务等待；
+  ROOT 同时读取文件并向运行中的 worker 追加要求；全程只调用一次 wait，之后 6 个 completion
+  自动进入对话，依赖摘要和中途补充均出现在最终综合中；
+- `293baa55`：在 `7e4d50f3` 尚未完成时从另一会话提交独立请求并得到回答。数据库时间区间显示
+  第二会话 ROOT 的 `11:46:34.616–11:46:39.763` 与第一会话 ROOT 的
+  `11:45:46.872–11:47:04.178` 重叠，证明没有退化为全局单会话串行。
+
+Canonical 数据库核对结果：
+
+| session | ROOT turns | tasks | ROOT completion entries | manual acceptance commands | wait calls |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `2425fc44` | 1 | 2 | 2 | 0 | 0 |
+| `f14af271` | 1 | 1 | 1 | 0 | 0 |
+| `54c66b51` | 2 | 1 | 1 | 1 | 0 |
+| `7e4d50f3` | 1 | 6 | 6 | 0 | 1 |
+| `293baa55` | 1 | 0 | 0 | 0 | 0 |
+
+`7e4d50f3` 唯一一次 wait 返回 `input_available`、3 个 satisfied task 和 3 个 pending task；payload
+没有 task result body。随后全部 6 个 task 都以 terminal task source 唯一交付。`f14af271` 的
+canonical task 为 `CANCELLED`，有面向产品的失败说明且 completion 已交付。`54c66b51` 的第二个
+ROOT turn 由手动 completion continuation 创建；worker 只有一个 task/turn，没有重跑。
+
+视觉证据与完整测试记录见
+[`dogfood_evidence/async_completion/README.zh.md`](dogfood_evidence/async_completion/README.zh.md)。
+第一次 real-provider 尝试还捕获了 BASE_SYSTEM source contract 已升级、compiler policy 未同步的
+真实缺陷；修复统一 compiler 的唯一 policy 后重新执行上述场景全部通过。这证明 dogfood 实际经过
+provider 输入路径，而不是只验证前端静态投影。
+
+### 18.3 Hard-cut 删除与边界
+
+- 旧 result-acceptance writer、旧 result source lineage、旧 result-carrying wait 与旧前端 acceptance
+  path 已删除，不保留 alias、dual read/write 或兼容分支；
+- automatic/manual、成功/失败共享一个 canonical completion writer；
+- 没有增加 durable delivery job、receipt/replay graph 或进程重启后的自动续跑；
+- provider 输入仍只走统一 compiler；既有 epoch 内的 SYSTEM、tools 与 message prefix continuity
+  约束保持不变；
+- 前端自有状态、提示与操作文案不展示 storage envelope、协议枚举、原始错误码或不透明 task ID；
+  模型自行生成的自然语言仍按普通 Markdown 内容处理，是否偶尔复述内部术语不列入本项验收。
+
+---
+
+## 19. 调研索引
 
 ### Pulsara production source
 

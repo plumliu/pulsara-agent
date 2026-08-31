@@ -2,6 +2,13 @@
 
 > 状态：**ACTIVATED**
 >
+> **局部 supersession（2026-08-31）**：
+> [`PULSARA_SUBAGENT_ASYNC_COMPLETION_HARD_CUT_RESEARCH_AND_IMPLEMENTATION_SPEC.zh.md`](PULSARA_SUBAGENT_ASYNC_COMPLETION_HARD_CUT_RESEARCH_AND_IMPLEMENTATION_SPEC.zh.md)
+> 已替换本文关于 ROOT terminal outcome 交付、`wait_agent*`、completion mailbox、result
+> acceptance 与对应 UI 的条款。最终工具面只保留一个不运输结果的 `wait_agent`；其余 batch、DAG、
+> dependency、profile、context、permission、capacity、child result 与 restart 边界继续有效。本文下文
+> 出现的旧工具名和手动-only result acceptance 仅是历史记录，不再是 production authority。
+>
 > Fingerprint hard-cut：[`PULSARA_FINGERPRINT_SUBTRACTION_HARD_CUT_IMPLEMENTATION_SPEC.zh.md`](PULSARA_FINGERPRINT_SUBTRACTION_HARD_CUT_IMPLEMENTATION_SPEC.zh.md)覆盖本文冗余的same-process DTO fingerprint/proof字段以及所有逐文件、文档与activation evidence SHA门禁；canonical task/result/message identity与provider-prefix边界digest继续有效。
 >
 > 记录日期：2026-08-20

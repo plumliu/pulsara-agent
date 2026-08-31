@@ -106,6 +106,7 @@ from pulsara_agent.conversation_kernel.subagents.runtime_port import (
 from pulsara_agent.conversation_kernel.workspace import SessionWorkspaceResolver
 from pulsara_agent.conversation_kernel.repository import (
     ConversationKernelRepository,
+    SubagentCompletionDisposition,
 )
 from pulsara_agent.conversation_kernel.reader import (
     CanonicalProviderInputReader,
@@ -181,6 +182,8 @@ from pulsara_agent.model_input.continuity import (
     ProviderInputEpochCompatibility,
     provider_input_logical_utf8_bytes,
 )
+
+
 from pulsara_agent.model_input.provider_replay import (
     FrozenCanonicalProviderDispatchRead,
     FrozenSelectedDurableProviderReplayHydration,
@@ -201,6 +204,14 @@ from pulsara_agent.conversation_kernel.subagents.contracts import (
     build_parent_context_call_subject,
     build_root_context_unit,
 )
+
+
+# One ordinary pending-input transaction stays below the compaction contract's
+# reserved 296 items / 4 MiB next-admission headroom even when every completion
+# occupies the maximum 64 KiB canonical content carrier.  This is a per-plan
+# physical bound, never a session or task-history limit; the answer fence keeps
+# the exact ROOT turn open while later FIFO batches remain queued.
+_ROOT_COMPLETION_SUFFIX_BATCH_ITEMS = 16
 
 
 class KernelModelPort(Protocol):
@@ -420,6 +431,69 @@ class ProviderDispatchCoordinator:
     def _canonical_deadline(self) -> float:
         return self._deadlines.deadline(KernelWatchdogOwner.FOREGROUND_CANONICAL)
 
+    async def _drain_root_completion_suffix(
+        self,
+        handle: PreparedProviderInputHandle,
+        canonical_read: FrozenCanonicalProviderDispatchRead,
+        *,
+        deadline: float,
+    ) -> tuple[
+        PreparedProviderInputHandle,
+        FrozenCanonicalProviderDispatchRead,
+        bool,
+    ]:
+        """Append the current FIFO completion cut at one ordinary ROOT safe point."""
+
+        runtime = self._subagent_runtime
+        identity = canonical_read.compile_snapshot.canonical_input.identity
+        if (
+            runtime is None
+            or identity.conversation_scope_kind is not ModelInputScopeKind.ROOT
+        ):
+            return handle, canonical_read, False
+        # Human steer is the first lane of the single ROOT pending-input
+        # coordinator.  The read is only an optimization: the canonical writer
+        # repeats this check in its exact-cut transaction, so a concurrent steer
+        # still wins and makes the completion plan stale.
+        pending_steer = await self._io.run(
+            self._repository.read_pending_prompt_steer_facts,
+            session_id=identity.session_id,
+            target_turn_id=identity.turn_id,
+            maximum_items=1,
+            deadline_monotonic=deadline,
+        )
+        if pending_steer:
+            return handle, canonical_read, False
+        changed = False
+        pending_cut = await runtime.snapshot_pending_root_completions(
+            identity.turn_id
+        )
+        for task_id in pending_cut[:_ROOT_COMPLETION_SUFFIX_BATCH_ITEMS]:
+            outcome = await self._io.run(
+                self._safe_point.accept_queued_subagent_completion,
+                handle,
+                task_id=task_id,
+                actor_id=self._writer_lease.guard.writer_owner_id,
+                deadline_monotonic=deadline,
+            )
+            if outcome.disposition is SubagentCompletionDisposition.TARGET_STALE:
+                # A pending steer or changed exact cut keeps the FIFO hint for
+                # the next rebuilt plan; never leapfrog it with later items.
+                break
+            await runtime.retire_root_completion(task_id)
+            if outcome.disposition is SubagentCompletionDisposition.CREATED:
+                changed = True
+                handle = await self._io.run(
+                    self._safe_point.rotate_provider_input,
+                    handle,
+                    turn_id=identity.turn_id,
+                    deadline_monotonic=deadline,
+                )
+                canonical_read = await self.read_dispatch_read(
+                    handle.cut, deadline=deadline
+                )
+        return handle, canonical_read, changed
+
     async def prepare_headroom_admission(
         self,
         *,
@@ -561,6 +635,30 @@ class ProviderDispatchCoordinator:
                     handle.cut, deadline=deadline
                 )
             observed_read = await self.read_dispatch_read(handle.cut, deadline=deadline)
+            if (
+                allow_steers
+                and not allow_terminal_compaction
+                and canonical_read_override is None
+                and not _compaction_source_projection
+            ):
+                handle, observed_read, completion_changed = (
+                    await self._drain_root_completion_suffix(
+                        handle, observed_read, deadline=deadline
+                    )
+                )
+                if completion_changed:
+                    # A preflight frozen for the former cut is no longer a
+                    # legal quote. Recompute it from the rotated canonical cut.
+                    headroom_preflight = None
+                    if (
+                        self._compaction_owner is not None
+                        and self._compaction_owner.policy.automatic_enabled
+                    ):
+                        headroom_preflight = (
+                            await self.read_compaction_headroom_preflight(
+                                handle.cut, deadline=deadline
+                            )
+                        )
             if canonical_read_override is not None:
                 if (
                     expected_source_read is None
@@ -1317,6 +1415,12 @@ class ProviderDispatchCoordinator:
                         selected_plan.quote.resulting_epoch_logical_bytes
                     ),
                 )
+                handle, actual_read, _completion_changed = (
+                    await self._drain_root_completion_suffix(
+                        handle, actual_read, deadline=deadline
+                    )
+                )
+                actual = actual_read.compile_snapshot
                 final_sources = await self._memory_support.apply_sources(
                     selected_sources,
                     activation_subject=CapabilityActivationSubjectKind.ROOT_HUMAN_PROMPT,

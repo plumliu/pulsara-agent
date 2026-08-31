@@ -43,8 +43,8 @@ describe('selectPromptCommand', () => {
             entry_kind: 'USER_STEER', scope_kind: 'ROOT', content: content('先检查真实页面'),
           }, {
             entry_id: 'accepted-result-1', turn_id: 'turn-2', entry_sequence: '3',
-            entry_kind: 'USER_MESSAGE', scope_kind: 'ROOT',
-            source_subagent_result_id: 'subagent-result-1',
+            entry_kind: 'INTER_AGENT_MESSAGE', scope_kind: 'ROOT',
+            source_subagent_task_id: 'task-1',
             content: content('{"status":"accepted"}'),
           }],
           control: {},
@@ -61,9 +61,9 @@ describe('selectPromptCommand', () => {
     }))).toEqual([
       { body: '完成这项工作', userKind: 'prompt' },
       { body: '先检查真实页面', userKind: 'steer' },
-      { body: '', userKind: 'subagent-result' },
+      { body: '', userKind: 'subagent-completion' },
     ]);
-    expect(connection.current().messages[2]?.sourceSubagentResultId).toBe('subagent-result-1');
+    expect(connection.current().messages[2]?.sourceSubagentTaskId).toBe('task-1');
   });
 
   it('loads every older history page before exposing a resumed connection', async () => {
@@ -443,7 +443,7 @@ describe('selectPromptCommand', () => {
         scope_subagent_task_id: 'task-1',
         blocks: [{ block_id: 'task-text', block_kind: 'TEXT', content: content('# Pulsara') }],
       },
-      toolRequest(8, 'root-wait', 'wait_agent_tasks', 'call-wait'),
+      toolRequest(8, 'root-wait', 'wait_agent', 'call-wait'),
       {
         entry_id: 'wait-result', turn_id: 'turn-root', entry_sequence: '9',
         entry_kind: 'TOOL_RESULT', scope_kind: 'ROOT',
@@ -472,7 +472,7 @@ describe('selectPromptCommand', () => {
         entry_kind: 'USER_MESSAGE', scope_kind: 'SUBAGENT_TASK',
         scope_subagent_task_id: 'task-orphan', content: content('Interrupted before a final reply.'),
       },
-      toolRequest(17, 'root-orphan-tool', 'wait_agent_tasks', 'call-orphan'),
+      toolRequest(17, 'root-orphan-tool', 'wait_agent', 'call-orphan'),
     ];
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
       connection_id: 'connection-1',
@@ -607,7 +607,7 @@ describe('LocalHttpRuntimeAdapter connection ownership', () => {
   });
 });
 
-describe('subagent result continuation', () => {
+describe('subagent completion continuation', () => {
   it('carries the selected permission into the new root turn command', async () => {
     let commandBody: Record<string, unknown> | undefined;
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -618,7 +618,7 @@ describe('subagent result continuation', () => {
           command_outcome: {
             command_id: commandBody?.command_id,
             status: 'SUCCEEDED',
-            public_code: 'SUBAGENT_RESULT_ACCEPTED',
+            public_code: 'SUBAGENT_COMPLETION_DELIVERED',
           },
         }), { status: 200, headers: { 'Content-Type': 'application/json' } });
       }
@@ -632,11 +632,11 @@ describe('subagent result continuation', () => {
     }));
 
     const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
-    await connection.acceptSubagentResult('result-1', 'read-only');
+    await connection.acceptSubagentCompletion('task-1', 'read-only');
 
     expect(commandBody).toMatchObject({
-      command_kind: 'ACCEPT_SUBAGENT_RESULT',
-      source_subagent_result_id: 'result-1',
+      command_kind: 'ACCEPT_SUBAGENT_COMPLETION',
+      subagent_task_id: 'task-1',
       requested_permission_mode: 'PERMISSION_MODE_READ_ONLY',
     });
   });
@@ -691,6 +691,7 @@ describe('session task inventory', () => {
         task_key: 'verify', label: '验证结果', profile: 'verification_worker',
         display_role: '验证', context: { mode: 'LAST_N', last_n_turns: 4 },
         objective: '确认结果可以使用。', status: 'BLOCKED_DEPENDENCY_FAILED',
+        terminal_public_detail: '前置任务未能完成。', completion_delivered: true,
         accepted_at: '2026-08-30T12:00:00Z', terminal_at: '2026-08-30T12:01:00Z',
         dependencies: [{
           task_id: 'task-failed', task_key: 'build', label: '生成结果',
@@ -699,7 +700,7 @@ describe('session task inventory', () => {
         result: {
           id: 'result-1', entry_id: 'entry-1', source: 'EXPLICIT',
           summary: '保留的总结', output_preview: '输出摘录',
-          diagnostics: [{ message: '前置检查失败' }], accepted: false,
+          diagnostics: [{ message: '前置检查失败' }],
         },
       }],
       total_count: 51, remaining_count: 50, next_cursor: 'page-2',
@@ -713,12 +714,13 @@ describe('session task inventory', () => {
     expect(page).toMatchObject({ totalCount: 51, remainingCount: 50, nextCursor: 'page-2' });
     expect(page.tasks[0]).toMatchObject({
       id: 'task-blocked', status: 'blocked', role: '验证',
+      terminalPublicDetail: '前置任务未能完成。', completionDelivered: true,
       context: { mode: 'last-n', lastNTurns: 4 },
       dependencyIds: ['task-failed'],
       dependencies: [{ id: 'task-failed', status: 'failed', label: '生成结果' }],
       result: {
         id: 'result-1', entryId: 'entry-1', summary: '保留的总结',
-        outputPreview: '输出摘录', accepted: false,
+        outputPreview: '输出摘录',
       },
     });
   });
@@ -727,6 +729,7 @@ describe('session task inventory', () => {
     const durable: AgentTask[] = [{
       id: 'task-1', label: '持久任务', role: '研究', objective: '完成检查',
       status: 'interrupted', dependencyIds: [], color: 'blue',
+      completionDelivered: false,
       summary: '中断前的最后结果',
     }];
     const projection: RuntimeProjection = {

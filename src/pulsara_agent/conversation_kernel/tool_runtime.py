@@ -841,7 +841,6 @@ class DirectKernelToolPort:
                         "create_agent_tasks",
                         "list_agents",
                         "wait_agent",
-                        "wait_agent_tasks",
                         "send_agent_message",
                         "stop_agent",
                     }
@@ -1656,7 +1655,6 @@ class DirectKernelToolPort:
                 "create_agent_tasks",
                 "list_agents",
                 "wait_agent",
-                "wait_agent_tasks",
                 "send_agent_message",
                 "stop_agent",
             }

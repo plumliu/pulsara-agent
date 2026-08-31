@@ -413,7 +413,7 @@ def test_round7_source_registry_wire_and_oracle_architecture_guards() -> None:
     )
     assert (
         COMPILER_CONTRACT_VERSION
-        == "pulsara.structured-model-input-compiler.prefix-continuity.v10-subagent-context"
+        == "pulsara.structured-model-input-compiler.prefix-continuity.v11-async-subagent-completions"
     )
     assert (
         PROVIDER_MESSAGE_LOWERING_CONTRACT

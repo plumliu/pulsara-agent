@@ -31,11 +31,12 @@ interface InspectorPanelProps {
   todo?: TodoRun;
   loading: boolean;
   canControl: boolean;
+  isRunning: boolean;
   permission: PermissionMode;
   error?: string;
   onRetry: () => void;
   onLocate: (taskId: string) => void;
-  onAcceptResult: (task: AgentTask) => void;
+  onAcceptCompletion: (task: AgentTask) => void;
   onClose: () => void;
 }
 
@@ -54,6 +55,10 @@ const statusLabels: Record<TaskStatus, string> = {
 
 function isActive(status: TaskStatus): boolean {
   return status === 'pending' || status === 'running' || status === 'waiting';
+}
+
+function isTerminal(status: TaskStatus): boolean {
+  return !isActive(status);
 }
 
 function needsAttention(status: TaskStatus): boolean {
@@ -106,15 +111,17 @@ function Markdown({ children }: { children: string }) {
 function TaskCard({
   task,
   canControl,
+  isRunning,
   permission,
   onLocate,
-  onAcceptResult,
+  onAcceptCompletion,
 }: {
   task: AgentTask;
   canControl: boolean;
+  isRunning: boolean;
   permission: PermissionMode;
   onLocate: (taskId: string) => void;
-  onAcceptResult: (task: AgentTask) => void;
+  onAcceptCompletion: (task: AgentTask) => void;
 }) {
   const [expanded, setExpanded] = useState(
     task.status === 'running' || task.status === 'waiting' || needsAttention(task.status),
@@ -125,6 +132,13 @@ function TaskCard({
   const explanation = taskExplanation(task);
   const acceptedAt = formatTaskTime(task.acceptedAt);
   const terminalAt = formatTaskTime(task.terminalAt);
+  const failed = task.status !== 'completed';
+  const terminal = isTerminal(task.status);
+  const deliveryLabel = task.completionDelivered
+    ? failed ? 'Pulsara 已收到这项问题' : 'Pulsara 已收到结果'
+    : terminal
+      ? isRunning ? '本轮结束后可继续处理' : failed ? '这项问题尚未用于对话' : '结果尚未用于对话'
+      : '结果会自动交给 Pulsara';
 
   return (
     <article className={`session-task session-task--${task.status}${expanded ? ' is-expanded' : ''}`}>
@@ -160,6 +174,12 @@ function TaskCard({
           </dl>
 
           {explanation && <p className="session-task__explanation">{explanation}</p>}
+          {task.terminalPublicDetail && (
+            <section className="session-task__progress">
+              <span><AlertTriangle size={11} /> 发生了什么</span>
+              <div className="session-task__markdown"><Markdown>{task.terminalPublicDetail}</Markdown></div>
+            </section>
+          )}
 
           {task.dependencies?.length ? (
             <section className="session-task__dependencies">
@@ -187,7 +207,7 @@ function TaskCard({
             <section className="session-task__result">
               <header>
                 <span><CheckCircle2 size={12} /> 任务结果</span>
-                {task.result.accepted && <small><Check size={10} /> 已带入会话</small>}
+                {task.completionDelivered && <small><Check size={10} /> 已用于对话</small>}
               </header>
               {task.result.summary && <div className="session-task__markdown"><Markdown>{task.result.summary}</Markdown></div>}
               {task.result.outputPreview && (
@@ -210,18 +230,19 @@ function TaskCard({
 
           <footer className="session-task__actions">
             <button type="button" onClick={() => onLocate(task.id)}><LocateFixed size={11} /> 在对话中查看</button>
-            {canControl && task.result && !task.result.accepted && (
+            <span className="session-task__delivery-state" title={deliveryLabel}>{deliveryLabel}</span>
+            {canControl && terminal && !isRunning && !task.completionDelivered && (
               <span className="session-task__continue-action">
                 <button
                   className="is-primary"
                   type="button"
                   aria-describedby={`${task.id}-continue-help`}
-                  onClick={() => onAcceptResult(task)}
+                  onClick={() => onAcceptCompletion(task)}
                 >
-                  <Sparkles size={11} /> 带入会话并继续
+                  <Sparkles size={11} /> {failed ? '让 Pulsara 处理这个问题' : '用这份结果继续'}
                 </button>
                 <span id={`${task.id}-continue-help`} className="session-task__continue-tooltip" role="tooltip">
-                  把这份子任务结果作为新消息交给 Pulsara，并以“{permissionLabels[permission]}”权限立即继续处理。
+                  启动新一轮，让 Pulsara 基于这项工作的{failed ? '问题' : '结果'}继续处理；不会重新运行子任务。本轮使用“{permissionLabels[permission]}”权限。
                 </span>
               </span>
             )}
@@ -239,11 +260,12 @@ export function InspectorPanel({
   todo,
   loading,
   canControl,
+  isRunning,
   permission,
   error,
   onRetry,
   onLocate,
-  onAcceptResult,
+  onAcceptCompletion,
   onClose,
 }: InspectorPanelProps) {
   const [filter, setFilter] = useState<TaskFilter>('all');
@@ -320,7 +342,7 @@ export function InspectorPanel({
                   <span>{tasks[0]?.batchId ? <Layers3 size={11} /> : <GitFork size={11} />}<strong>第 {index + 1} 组</strong></span>
                   <small>{tasks.length} 项 · {tasks.filter((task) => isActive(task.status)).length} 项进行中</small>
                 </header>
-                <div>{tasks.map((task) => <TaskCard key={task.id} task={task} canControl={canControl} permission={permission} onLocate={onLocate} onAcceptResult={onAcceptResult} />)}</div>
+                <div>{tasks.map((task) => <TaskCard key={task.id} task={task} canControl={canControl} isRunning={isRunning} permission={permission} onLocate={onLocate} onAcceptCompletion={onAcceptCompletion} />)}</div>
               </section>
             ))}
           </div>

@@ -417,7 +417,7 @@ def _read_child_tool_rows(
 
 
 async def _run_graph(session) -> dict[str, object]:
-    prompt = """Use create_agent_tasks exactly once to create this six-task graph, then use wait_agent_tasks until every task is terminal. Do not solve the worker tasks yourself.
+    prompt = """Use create_agent_tasks exactly once to create this six-task graph. After dispatching it, continue useful independent work by reading pyproject.toml and identifying the project version. Do not call list_agents and do not wait merely to retrieve results. At the final critical-path join, if any requested task is still unfinished, call wait_agent exactly once with all six exact task IDs and settle=all; its ToolResult is synchronization only, so synthesize the automatically delivered completion messages that follow it.
 
 Chain:
 - key a, default context (omit context): call report_agent_result alone with summary A_EXPLICIT_OK.
@@ -429,7 +429,7 @@ Fork/join:
 - key f2: finish with ordinary assistant text F2_INFERRED_OK. Do not call report_agent_result.
 - key join, depends_on [f1, f2]: inspect both direct dependency summaries, then call report_agent_result alone with summary JOIN_SAW_F1_AND_F2.
 
-Use the general_worker profile. After all six settle, briefly state that you actually created and waited for them."""
+Use the general_worker profile. After all six settle, briefly state the graph outcome and the independently observed project version."""
     result = await session.run_turn(
         prompt,
         command_id="command:round10:graph",
@@ -631,8 +631,10 @@ The first four slow tasks must precede mcp_queued in the batch so the Host-globa
     task_ids = tuple(str(row["id"]) for row in await _task_rows(session))
     wait_result = await session.run_turn(
         (
-            "Call wait_agent_tasks for these exact task IDs with settle=all and "
-            "timeout_seconds=180, then summarize the settled result sources: "
+            "Call wait_agent exactly once for these exact task IDs with settle=all "
+            "and timeout_seconds=180. Its ToolResult is only a synchronization "
+            "outcome; summarize the task outcomes from the completion messages "
+            "that Pulsara delivers after the tool closes: "
             + json.dumps(task_ids)
         ),
         command_id="command:round10:capacity-wait",

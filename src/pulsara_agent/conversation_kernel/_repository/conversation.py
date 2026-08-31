@@ -1666,7 +1666,9 @@ class _ConversationOperations:
                 updated = connection.execute(
                     """UPDATE pulsara_v3.subagent_tasks
                        SET status = 'COMPLETED', pending_reason = NULL,
-                           terminal_reason = NULL, terminal_at = clock_timestamp()
+                           terminal_reason = NULL,
+                           terminal_public_detail = NULL,
+                           terminal_at = clock_timestamp()
                        WHERE session_id = %s AND id = %s AND status = 'ACTIVE'
                        RETURNING id""",
                     (guard.session_id, task_id),
@@ -2229,7 +2231,7 @@ class _ConversationOperations:
                        qt.final_entry_id AS consumed_turn_final_entry_id,
                        qt.terminal_reason AS consumed_turn_terminal_reason,
                        te.turn_id AS target_entry_turn_id,
-                       te.source_subagent_result_id AS target_entry_source_subagent_result_id,
+                       te.source_subagent_task_id AS target_entry_source_subagent_task_id,
                        d.decision AS interaction_decision,
                        d.subject_kind AS interaction_subject_kind,
                        d.subject_tool_call_entry_id,

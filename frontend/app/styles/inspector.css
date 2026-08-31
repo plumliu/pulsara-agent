@@ -137,6 +137,7 @@
 .session-task__diagnostics { display: grid; gap: 5px; margin: 7px 0 0; padding: 0 0 0 15px; color: var(--muted); font-size: var(--type-caption); line-height: 1.45; }
 .session-task__diagnostic-count { margin: 0; color: var(--faint); font-size: var(--type-caption); }
 .session-task__actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.session-task__delivery-state { align-self: center; color: var(--faint); font-size: var(--type-micro); }
 .session-task__actions button { display: inline-flex; align-items: center; justify-content: center; gap: 4px; min-height: 27px; padding: 0 8px; border: 1px solid var(--line); border-radius: 7px; background: var(--paper-solid); color: var(--muted); font-size: var(--type-caption); }
 .session-task__actions button:hover { color: var(--ink); border-color: var(--line-strong); }
 .session-task__actions button.is-primary { margin-left: auto; border-color: color-mix(in srgb, var(--violet) 30%, var(--line)); color: var(--violet); background: var(--violet-soft); font-weight: 650; }

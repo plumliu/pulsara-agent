@@ -11,6 +11,7 @@ from dataclasses import dataclass, field as dataclass_field
 from datetime import datetime
 from enum import StrEnum
 from hashlib import sha256
+import json
 import re
 from typing import Iterable, Mapping, Protocol
 
@@ -28,6 +29,7 @@ from pulsara_agent.primitives.run_permission import FrozenRunPermissionSnapshot
 
 MAXIMUM_TASK_OBJECTIVE_UTF8_BYTES = 65_536
 MAXIMUM_RESULT_SUMMARY_UTF8_BYTES = 16_384
+MAXIMUM_TERMINAL_PUBLIC_DETAIL_UTF8_BYTES = 16_384
 MAXIMUM_RESULT_OUTPUT_PREVIEW_UTF8_BYTES = 32_768
 MAXIMUM_RESULT_DIAGNOSTICS_ITEMS = 32
 MAXIMUM_RESULT_DIAGNOSTICS_UTF8_BYTES = 65_536
@@ -75,6 +77,276 @@ class SubagentTaskStatus(StrEnum):
             type(self).INTERRUPTED,
             type(self).BLOCKED_DEPENDENCY_FAILED,
         }
+
+
+class SubagentTerminalReason(StrEnum):
+    DEPENDENCY_FAILED = "DEPENDENCY_FAILED"
+    DEPENDENCY_RESULT_INVARIANT = "DEPENDENCY_RESULT_INVARIANT"
+    CHILD_START_FAILED = "CHILD_START_FAILED"
+    CHILD_EXECUTION_FAILED = "CHILD_EXECUTION_FAILED"
+    HOOK_COMPACTION_BLOCKED = "HOOK_COMPACTION_BLOCKED"
+    HOST_CLOSING = "HOST_CLOSING"
+    HOST_TAKEOVER = "HOST_TAKEOVER"
+    USER_CANCELLED = "USER_CANCELLED"
+
+
+class SubagentFailureRetryability(StrEnum):
+    NEW_TASK_ONLY = "NEW_TASK_ONLY"
+    USER_ACTION_REQUIRED = "USER_ACTION_REQUIRED"
+    NOT_APPLICABLE = "NOT_APPLICABLE"
+    UNKNOWN = "UNKNOWN"
+
+
+SUBAGENT_COMPLETION_SCHEMA_VERSION = "pulsara.subagent-completion.v1"
+SUBAGENT_COMPLETION_MEDIA_TYPE = "application/vnd.pulsara.subagent-completion+json"
+
+
+_FAILURE_GUIDANCE: Mapping[
+    SubagentTerminalReason, tuple[SubagentFailureRetryability, str]
+] = {
+    SubagentTerminalReason.DEPENDENCY_FAILED: (
+        SubagentFailureRetryability.NEW_TASK_ONLY,
+        "Inspect the failed dependency and create a new task if retrying is useful.",
+    ),
+    SubagentTerminalReason.DEPENDENCY_RESULT_INVARIANT: (
+        SubagentFailureRetryability.USER_ACTION_REQUIRED,
+        "Inspect the dependency result lineage before creating replacement work.",
+    ),
+    SubagentTerminalReason.CHILD_START_FAILED: (
+        SubagentFailureRetryability.NEW_TASK_ONLY,
+        "Address the launch failure and create a new task if the work is still needed.",
+    ),
+    SubagentTerminalReason.CHILD_EXECUTION_FAILED: (
+        SubagentFailureRetryability.NEW_TASK_ONLY,
+        "Use the failure detail to recover locally or create a replacement task.",
+    ),
+    SubagentTerminalReason.HOOK_COMPACTION_BLOCKED: (
+        SubagentFailureRetryability.USER_ACTION_REQUIRED,
+        "Review the blocking hook or continue the work in the main task.",
+    ),
+    SubagentTerminalReason.HOST_CLOSING: (
+        SubagentFailureRetryability.NEW_TASK_ONLY,
+        "Create a new task if this work is still required.",
+    ),
+    SubagentTerminalReason.HOST_TAKEOVER: (
+        SubagentFailureRetryability.NEW_TASK_ONLY,
+        "Create a new task under the current runtime if this work is still required.",
+    ),
+    SubagentTerminalReason.USER_CANCELLED: (
+        SubagentFailureRetryability.NOT_APPLICABLE,
+        "No retry is needed unless the user asks for the work again.",
+    ),
+}
+
+
+_DEFAULT_TERMINAL_DETAILS: Mapping[SubagentTerminalReason, str] = {
+    SubagentTerminalReason.DEPENDENCY_FAILED: (
+        "An upstream delegated task did not complete, so this task was not started."
+    ),
+    SubagentTerminalReason.DEPENDENCY_RESULT_INVARIANT: (
+        "A completed dependency did not have the required canonical result."
+    ),
+    SubagentTerminalReason.CHILD_START_FAILED: (
+        "The delegated task could not start."
+    ),
+    SubagentTerminalReason.CHILD_EXECUTION_FAILED: (
+        "The delegated task failed while it was running."
+    ),
+    SubagentTerminalReason.HOOK_COMPACTION_BLOCKED: (
+        "A configured hook prevented the delegated task from continuing after compaction."
+    ),
+    SubagentTerminalReason.HOST_CLOSING: (
+        "The local runtime closed before the delegated task finished."
+    ),
+    SubagentTerminalReason.HOST_TAKEOVER: (
+        "A newer local runtime took ownership before the delegated task finished."
+    ),
+    SubagentTerminalReason.USER_CANCELLED: (
+        "The delegated task was cancelled by the user."
+    ),
+}
+
+
+def build_default_terminal_public_detail(reason: str) -> str:
+    return _DEFAULT_TERMINAL_DETAILS[SubagentTerminalReason(reason)]
+
+
+def bounded_terminal_public_detail(value: str, *, secret: str | None = None) -> str:
+    """Return useful bounded diagnostics while removing only the API key value."""
+
+    if not isinstance(value, str):
+        raise TypeError("terminal public detail must be text")
+    detail = value.strip() or "The delegated task ended without additional detail."
+    if secret:
+        detail = detail.replace(secret, "[PULSARA_API_KEY]")
+    raw = detail.encode("utf-8")
+    if len(raw) <= MAXIMUM_TERMINAL_PUBLIC_DETAIL_UTF8_BYTES:
+        return detail
+    marker = "\n… detail truncated …".encode("utf-8")
+    clipped = raw[: MAXIMUM_TERMINAL_PUBLIC_DETAIL_UTF8_BYTES - len(marker)]
+    while clipped:
+        try:
+            return clipped.decode("utf-8") + marker.decode("utf-8")
+        except UnicodeDecodeError:
+            clipped = clipped[:-1]
+    return marker.decode("utf-8").lstrip()
+
+
+def build_subagent_completion_storage_body(
+    *,
+    task_id: str,
+    task_key: str | None,
+    label: str | None,
+    display_role: str | None,
+    profile: str,
+    status: SubagentTaskStatus,
+    terminal_reason: str | None,
+    terminal_public_detail: str | None,
+    failed_dependency_task_ids: tuple[str, ...],
+    result_id: str | None,
+    result_source: str | None,
+    result_summary: str | None,
+) -> bytes:
+    """Build the only durable ROOT completion body accepted by the reader."""
+
+    _text(task_id, "task_id", 512)
+    _text(profile, "profile", 256)
+    if not status.terminal:
+        raise ValueError("completion source task must be terminal")
+    if len(failed_dependency_task_ids) > 16 or len(set(failed_dependency_task_ids)) != len(
+        failed_dependency_task_ids
+    ):
+        raise ValueError("completion failed dependency set is invalid")
+    if any(not item for item in failed_dependency_task_ids):
+        raise ValueError("completion dependency identity is empty")
+    if status is SubagentTaskStatus.COMPLETED:
+        if terminal_reason is not None or terminal_public_detail is not None:
+            raise ValueError("completed task cannot carry failure detail")
+        _text(result_id or "", "result_id", 512)
+        source = SubagentResultSource(result_source or "")
+        summary = _text(
+            result_summary or "", "result_summary", MAXIMUM_RESULT_SUMMARY_UTF8_BYTES
+        )
+        failure: object = None
+        result: object = {
+            "result_id": result_id,
+            "source": source.value,
+            "summary": summary,
+        }
+    else:
+        reason = SubagentTerminalReason(terminal_reason or "")
+        detail = _text(
+            terminal_public_detail or "",
+            "terminal_public_detail",
+            MAXIMUM_TERMINAL_PUBLIC_DETAIL_UTF8_BYTES,
+        )
+        retryability, next_action = _FAILURE_GUIDANCE[reason]
+        failure = {
+            "code": reason.value,
+            "detail": detail,
+            "failed_dependency_task_ids": list(failed_dependency_task_ids),
+            "retryability": retryability.value,
+            "next_action": next_action,
+        }
+        result = None
+        if any(value is not None for value in (result_id, result_source, result_summary)):
+            raise ValueError("failed task cannot carry a result")
+    return canonical_json_bytes(
+        {
+            "schema_version": SUBAGENT_COMPLETION_SCHEMA_VERSION,
+            "message_type": "FINAL_ANSWER",
+            "task_id": task_id,
+            "task_key": task_key,
+            "label": label,
+            "display_role": display_role,
+            "profile": profile,
+            "status": status.value,
+            "failure": failure,
+            "result": result,
+        }
+    )
+
+
+def validate_subagent_completion_storage_body(value: bytes) -> Mapping[str, object]:
+    """Validate and return a canonical completion object for provider projection."""
+
+    try:
+        decoded = json.loads(value)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("subagent completion body is not UTF-8 JSON") from exc
+    if not isinstance(decoded, dict) or set(decoded) != {
+        "schema_version",
+        "message_type",
+        "task_id",
+        "task_key",
+        "label",
+        "display_role",
+        "profile",
+        "status",
+        "failure",
+        "result",
+    }:
+        raise ValueError("subagent completion body is not closed")
+    failure = decoded.get("failure")
+    result = decoded.get("result")
+    if failure is not None and (
+        not isinstance(failure, dict)
+        or set(failure)
+        != {
+            "code",
+            "detail",
+            "failed_dependency_task_ids",
+            "retryability",
+            "next_action",
+        }
+    ):
+        raise ValueError("subagent completion failure is not closed")
+    if result is not None and (
+        not isinstance(result, dict)
+        or set(result) != {"result_id", "source", "summary"}
+    ):
+        raise ValueError("subagent completion result is not closed")
+    rebuilt = build_subagent_completion_storage_body(
+        task_id=str(decoded.get("task_id") or ""),
+        task_key=decoded.get("task_key"),
+        label=decoded.get("label"),
+        display_role=decoded.get("display_role"),
+        profile=str(decoded.get("profile") or ""),
+        status=SubagentTaskStatus(str(decoded.get("status") or "")),
+        terminal_reason=(
+            None
+            if failure is None
+            else str(failure.get("code") or "")
+        ),
+        terminal_public_detail=(
+            None
+            if failure is None
+            else str(failure.get("detail") or "")
+        ),
+        failed_dependency_task_ids=(
+            ()
+            if failure is None
+            else tuple(failure.get("failed_dependency_task_ids") or ())
+        ),
+        result_id=(
+            None
+            if result is None
+            else str(result.get("result_id") or "")
+        ),
+        result_source=(
+            None
+            if result is None
+            else str(result.get("source") or "")
+        ),
+        result_summary=(
+            None
+            if result is None
+            else str(result.get("summary") or "")
+        ),
+    )
+    if rebuilt != value:
+        raise ValueError("subagent completion body is not canonical")
+    return decoded
 
 
 @dataclass(frozen=True, slots=True)
@@ -243,6 +515,7 @@ class PreparedSubagentTaskTerminalSettlement:
     expected_turn_id: str
     status: SubagentTaskStatus
     reason: str
+    public_detail: str
     require_absent_turn: bool
     occurred_at: datetime
     actor_id: str
@@ -259,6 +532,12 @@ class PreparedSubagentTaskTerminalSettlement:
             ("event_id", self.event_id),
         ):
             _text(value, field, 512)
+        _text(
+            self.public_detail,
+            "public_detail",
+            MAXIMUM_TERMINAL_PUBLIC_DETAIL_UTF8_BYTES,
+        )
+        SubagentTerminalReason(self.reason)
         if (
             self.writer_generation < 1
             or not isinstance(self.status, SubagentTaskStatus)
@@ -275,6 +554,7 @@ class PreparedSubagentTaskTerminalSettlement:
             str(self.writer_generation),
             self.status.value,
             self.reason,
+            self.public_detail,
         )
         if self.event_id != expected_event:
             raise ValueError("subagent task terminal settlement identity mismatch")
@@ -289,6 +569,7 @@ def build_subagent_task_terminal_settlement(
     expected_turn_id: str,
     status: SubagentTaskStatus,
     reason: str,
+    public_detail: str,
     require_absent_turn: bool,
     occurred_at: datetime,
     actor_id: str,
@@ -300,6 +581,7 @@ def build_subagent_task_terminal_settlement(
         str(writer_generation),
         status.value,
         reason,
+        public_detail,
     )
     return PreparedSubagentTaskTerminalSettlement(
         session_id=session_id,
@@ -309,6 +591,7 @@ def build_subagent_task_terminal_settlement(
         expected_turn_id=expected_turn_id,
         status=status,
         reason=reason,
+        public_detail=public_detail,
         require_absent_turn=require_absent_turn,
         occurred_at=occurred_at,
         actor_id=actor_id,

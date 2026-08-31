@@ -119,8 +119,8 @@ export interface Message {
   id: string;
   turnId?: string;
   role: 'user' | 'assistant';
-  userKind?: 'prompt' | 'steer' | 'plan-continuation' | 'subagent-result';
-  sourceSubagentResultId?: string;
+  userKind?: 'prompt' | 'steer' | 'plan-continuation' | 'subagent-completion';
+  sourceSubagentTaskId?: string;
   time: string;
   body: string;
   reasoning?: ReasoningBlock[];
@@ -146,6 +146,8 @@ export interface AgentTask {
   };
   pendingReason?: string;
   terminalReason?: string;
+  terminalPublicDetail?: string;
+  completionDelivered: boolean;
   acceptedAt?: string;
   terminalAt?: string;
   dependencyIds: string[];
@@ -170,7 +172,6 @@ export interface AgentTaskResult {
   summary: string;
   outputPreview?: string;
   diagnostics: Array<Record<string, unknown>>;
-  accepted: boolean;
 }
 
 export interface ToastMessage {

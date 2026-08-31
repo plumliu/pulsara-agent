@@ -40,6 +40,7 @@ class LongHorizonActionClass(StrEnum):
     BOUNDED_VERIFICATION = "bounded_verification"
     USER_INTERACTION = "user_interaction"
     PROCESS_CONTROL = "process_control"
+    SYNCHRONIZATION = "synchronization"
     EXTERNAL_ACTION = "external_action"
 
 

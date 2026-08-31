@@ -130,7 +130,7 @@ class CanonicalConversationQuery:
                        e.conversation_scope_kind, e.scope_subagent_task_id,
                        e.context_binding_revision_id,
                        e.provider_input_through_sequence,
-                       e.source_subagent_result_id,
+                       e.source_subagent_task_id,
                        e.content_digest, e.content_size, e.content_media_type,
                        e.content_codec, e.accepted_at,
                        COALESCE(

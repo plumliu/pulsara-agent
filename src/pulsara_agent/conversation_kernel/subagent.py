@@ -9,12 +9,14 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from collections import deque
 from dataclasses import dataclass, field as dataclass_field, replace
 from datetime import datetime, timezone
 import hmac
 import json
 from hashlib import sha256
 import math
+import os
 from pathlib import Path
 import re
 import secrets
@@ -112,6 +114,8 @@ from pulsara_agent.conversation_kernel.subagents.contracts import (
     SubagentResultSource,
     SubagentTaskTerminalConfirmationKind,
     SubagentTaskStatus,
+    bounded_terminal_public_detail,
+    build_default_terminal_public_detail,
     build_dependency_result_context,
     derive_subagent_batch_initial_dispositions,
     build_inter_agent_mailbox_batch,
@@ -159,7 +163,6 @@ SUBAGENT_TOOL_NAMES = frozenset(
         "create_agent_tasks",
         "list_agents",
         "wait_agent",
-        "wait_agent_tasks",
         "send_agent_message",
         "stop_agent",
         "report_agent_result",
@@ -286,6 +289,10 @@ class KernelSubagentManager:
         self._lock = asyncio.Lock()
         self._state_changed = asyncio.Condition(self._lock)
         self._state_revision = 0
+        self._root_completion_queue: deque[str] = deque()
+        self._root_completion_set: set[str] = set()
+        self._root_completion_turn_id: str | None = None
+        self._root_completion_delivery_open = False
         self._closed = False
         self._list_cursor_secret = secrets.token_bytes(32)
         self._hook_dispatcher = hook_dispatcher
@@ -304,6 +311,103 @@ class KernelSubagentManager:
 
         self._state_revision += 1
         self._state_changed.notify_all()
+
+    async def offer_subagent_completion(self, task_id: str) -> bool:
+        """Offer one durable terminal task to this HostSession's ROOT inbox."""
+
+        if not task_id:
+            raise ValueError("completion task identity is empty")
+        async with self._state_changed:
+            if self._closed or task_id in self._root_completion_set:
+                return False
+            self._root_completion_set.add(task_id)
+            self._root_completion_queue.append(task_id)
+            self._notify_state_changed_locked()
+            return True
+
+    async def open_root_completion_delivery(self, turn_id: str) -> None:
+        """Open the exact ROOT turn's ordinary pending-input phase."""
+
+        if not turn_id:
+            raise ValueError("ROOT completion turn identity is empty")
+        async with self._state_changed:
+            if self._closed:
+                return
+            if (
+                self._root_completion_turn_id is not None
+                and self._root_completion_turn_id != turn_id
+                and self._root_completion_delivery_open
+            ):
+                raise RuntimeError("another ROOT completion phase is still open")
+            self._root_completion_turn_id = turn_id
+            self._root_completion_delivery_open = True
+            self._notify_state_changed_locked()
+
+    async def seal_root_completion_delivery(self, turn_id: str) -> bool:
+        """Linearize a no-tool answer fence against completion offers."""
+
+        async with self._state_changed:
+            if (
+                self._root_completion_turn_id != turn_id
+                or not self._root_completion_delivery_open
+            ):
+                raise RuntimeError("ROOT completion phase is not open")
+            pending = bool(self._root_completion_queue)
+            self._root_completion_delivery_open = False
+            self._notify_state_changed_locked()
+            return pending
+
+    async def settle_root_completion_delivery(
+        self, turn_id: str, *, turn_completed: bool
+    ) -> None:
+        """Resolve the answer fence from the canonical assistant settlement."""
+
+        async with self._state_changed:
+            if self._root_completion_turn_id != turn_id:
+                return
+            if turn_completed:
+                self._root_completion_turn_id = None
+                self._root_completion_delivery_open = False
+            else:
+                self._root_completion_delivery_open = True
+            self._notify_state_changed_locked()
+
+    async def close_root_completion_delivery(self, turn_id: str) -> None:
+        """Retire an exact ROOT phase without discarding queued completions."""
+
+        async with self._state_changed:
+            if self._root_completion_turn_id != turn_id:
+                return
+            self._root_completion_turn_id = None
+            self._root_completion_delivery_open = False
+            self._notify_state_changed_locked()
+
+    async def snapshot_pending_root_completions(
+        self, turn_id: str
+    ) -> tuple[str, ...]:
+        async with self._lock:
+            if (
+                self._root_completion_turn_id != turn_id
+                or not self._root_completion_delivery_open
+            ):
+                return ()
+            return tuple(self._root_completion_queue)
+
+    async def retire_root_completion(self, task_id: str) -> bool:
+        async with self._state_changed:
+            if task_id not in self._root_completion_set:
+                return False
+            self._root_completion_set.remove(task_id)
+            self._root_completion_queue = deque(
+                value for value in self._root_completion_queue if value != task_id
+            )
+            self._notify_state_changed_locked()
+            return True
+
+    async def notify_root_input_activity(self) -> None:
+        async with self._state_changed:
+            if not self._closed:
+                self._notify_state_changed_locked()
 
     @property
     def tool_names(self) -> frozenset[str]:
@@ -476,9 +580,7 @@ class KernelSubagentManager:
         if tool_name == "list_agents":
             return await self._list(arguments)
         if tool_name == "wait_agent":
-            return await self._wait(arguments)
-        if tool_name == "wait_agent_tasks":
-            return await self._wait_many(arguments)
+            return await self._wait(arguments, invocation_context)
         if tool_name == "stop_agent":
             return await self._stop(arguments)
         if tool_name == "send_agent_message":
@@ -885,6 +987,8 @@ class KernelSubagentManager:
                 deadline_monotonic=self._canonical_deadline(),
             )
             assert durable is not None
+            if SubagentTaskStatus(str(durable["status"])).terminal:
+                await self.offer_subagent_completion(draft.task_id)
             result_tasks.append(
                 {
                     "task_key": draft.task_key,
@@ -1177,13 +1281,19 @@ class KernelSubagentManager:
                                 ),
                             )
                         continue
+                    dependency_failure = (
+                        not admission_full
+                        and isinstance(admission_error, (TypeError, ValueError))
+                        and "dependency" in str(admission_error).lower()
+                    )
                     code = (
                         "DEPENDENCY_RESULT_INVARIANT"
-                        if isinstance(admission_error, (TypeError, ValueError))
-                        and "dependency" in str(admission_error).lower()
-                        else (
-                            f"CHILD_START_{type(admission_error).__name__.upper()}"
-                        )
+                        if dependency_failure
+                        else "CHILD_START_FAILED"
+                    )
+                    public_detail = bounded_terminal_public_detail(
+                        f"{type(admission_error).__name__}: {admission_error}",
+                        secret=os.environ.get("PULSARA_API_KEY"),
                     )
                     try:
                         if admission_full:
@@ -1196,6 +1306,7 @@ class KernelSubagentManager:
                                 task_status="FAILED",
                                 task_reason=code,
                                 turn_reason=code,
+                                terminal_public_detail=public_detail,
                             )
                         else:
                             await self._settle_task_terminal_exact(
@@ -1203,6 +1314,7 @@ class KernelSubagentManager:
                                 SubagentTaskStatus.FAILED,
                                 code,
                                 require_absent_turn=True,
+                                public_detail=public_detail,
                             )
                         await self._settle_dependency_frontier(
                             task_id, schedule_after=False
@@ -1375,19 +1487,40 @@ class KernelSubagentManager:
                 await asyncio.sleep(0.05)
         if durable is None or not SubagentTaskStatus(str(durable["status"])).terminal:
             return
+        await self.offer_subagent_completion(task_id)
         async with self._state_changed:
             if self._retire_dormant_carriers_locked(task_id):
                 self._notify_state_changed_locked()
 
-    async def _retire_all_canonical_terminal_dormant_tasks(self) -> None:
-        """ACK-unknown fallback; inspect only this Host's remaining carriers."""
+    async def _dependency_frontier_candidate_ids(
+        self, terminal_task_id: str
+    ) -> tuple[str, ...]:
+        """Freeze the exact process-local descendant closure for one frontier."""
 
         async with self._lock:
-            candidates = tuple(
-                task_id
-                for task_id in self._start_materials
-                if task_id not in self._tasks
-            )
+            materials = tuple(self._start_materials.values())
+        reached = {terminal_task_id}
+        candidates: list[str] = []
+        changed = True
+        while changed:
+            changed = False
+            for material in materials:
+                if material.task_id in reached:
+                    continue
+                if any(
+                    dependency_task_id in reached
+                    for dependency_task_id in material.dependency_task_ids
+                ):
+                    reached.add(material.task_id)
+                    candidates.append(material.task_id)
+                    changed = True
+        return tuple(candidates)
+
+    async def _retire_canonical_terminal_dormant_tasks(
+        self, candidates: tuple[str, ...]
+    ) -> None:
+        """ACK-unknown fallback over one causal dependency frontier only."""
+
         for task_id in candidates:
             await self._retire_dormant_terminal_task(task_id)
 
@@ -1441,6 +1574,7 @@ class KernelSubagentManager:
                 "COMPLETED",
                 result.final_text,
             )
+            await self.offer_subagent_completion(task_id)
             await self._settle_dependency_frontier(task_id)
             return result
         except asyncio.CancelledError:
@@ -1493,6 +1627,9 @@ class KernelSubagentManager:
                 task_status="INTERRUPTED",
                 task_reason="HOOK_COMPACTION_BLOCKED",
                 turn_reason="HOOK_COMPACTION_BLOCKED",
+                terminal_public_detail=build_default_terminal_public_detail(
+                    "HOOK_COMPACTION_BLOCKED"
+                ),
             )
             async with self._state_changed:
                 live = self._tasks.get(task_id)
@@ -1511,12 +1648,17 @@ class KernelSubagentManager:
             await self._settle_dependency_frontier(task_id)
             raise
         except BaseException as exc:
-            code = f"CHILD_{type(exc).__name__.upper()}"
+            code = "CHILD_EXECUTION_FAILED"
+            public_detail = bounded_terminal_public_detail(
+                f"{type(exc).__name__}: {exc}",
+                secret=os.environ.get("PULSARA_API_KEY"),
+            )
             await self._settle_task_terminal_exact(
                 task_id,
                 SubagentTaskStatus.FAILED,
                 code,
                 require_absent_turn=False,
+                public_detail=public_detail,
             )
             async with self._state_changed:
                 live = self._tasks.get(task_id)
@@ -1559,8 +1701,15 @@ class KernelSubagentManager:
         reason: str,
         *,
         require_absent_turn: bool,
+        public_detail: str | None = None,
     ) -> None:
+        exact_public_detail = public_detail or build_default_terminal_public_detail(
+            reason
+        )
+        confirmed_terminal = False
+
         async def worker() -> None:
+            nonlocal confirmed_terminal
             while True:
                 try:
                     durable = await self._io.run(
@@ -1580,7 +1729,13 @@ class KernelSubagentManager:
                 )
             observed = SubagentTaskStatus(str(durable["status"]))
             if observed.terminal:
-                if observed is status and durable.get("terminal_reason") == reason:
+                if (
+                    observed is status
+                    and durable.get("terminal_reason") == reason
+                    and durable.get("terminal_public_detail")
+                    == exact_public_detail
+                ):
+                    confirmed_terminal = True
                     return
                 raise ConversationKernelConflict(
                     "subagent task already has another terminal winner"
@@ -1595,6 +1750,7 @@ class KernelSubagentManager:
                 ),
                 status=status,
                 reason=reason,
+                public_detail=exact_public_detail,
                 require_absent_turn=require_absent_turn,
                 occurred_at=datetime.now(timezone.utc),
                 actor_id=self._host_owner_id,
@@ -1614,6 +1770,7 @@ class KernelSubagentManager:
                 except _RETRYABLE_CANONICAL_ERRORS:
                     changed = False
                 if changed:
+                    confirmed_terminal = True
                     return
                 try:
                     confirmation = await self._io.run(
@@ -1629,6 +1786,7 @@ class KernelSubagentManager:
                     await asyncio.sleep(0.05)
                     continue
                 if confirmation is SubagentTaskTerminalConfirmationKind.FULL:
+                    confirmed_terminal = True
                     return
                 if confirmation is SubagentTaskTerminalConfirmationKind.CONFLICT:
                     raise ConversationKernelConflict(
@@ -1640,6 +1798,9 @@ class KernelSubagentManager:
             worker(), name=f"kernel-subagent-task-terminal:{task_id}"
         )
         await _join_child_settlement(settlement)
+        if not confirmed_terminal:
+            return
+        await self.offer_subagent_completion(task_id)
         await self._retire_dormant_terminal_task(task_id)
 
     async def _settle_cancelled_child(
@@ -1650,7 +1811,12 @@ class KernelSubagentManager:
         task_status: str,
         task_reason: str,
         turn_reason: str,
+        terminal_public_detail: str | None = None,
     ) -> AcceptedEntry | None:
+        exact_public_detail = (
+            terminal_public_detail
+            or build_default_terminal_public_detail(task_reason)
+        )
         occurred_at = datetime.now(timezone.utc)
         while True:
             try:
@@ -1661,12 +1827,14 @@ class KernelSubagentManager:
                     turn_id=turn_id,
                     task_status=task_status,
                     task_reason=task_reason,
+                    terminal_public_detail=exact_public_detail,
                     turn_reason=turn_reason,
                     occurred_at=occurred_at,
                     actor_id=self._host_owner_id,
                     deadline_monotonic=self._canonical_deadline(),
                 )
                 if confirmation.kind is TurnAdmissionConfirmationKind.FULL:
+                    await self.offer_subagent_completion(task_id)
                     return None
                 if (
                     confirmation.kind
@@ -1692,6 +1860,7 @@ class KernelSubagentManager:
                         raise ConversationKernelConflict(
                             "completed child winner lacks atomic task result lineage"
                         )
+                    await self.offer_subagent_completion(task_id)
                     return accepted
                 if confirmation.kind is TurnAdmissionConfirmationKind.CONFLICT:
                     raise ConversationKernelConflict(
@@ -1714,12 +1883,14 @@ class KernelSubagentManager:
                     turn_id=turn_id,
                     task_status=task_status,
                     task_reason=task_reason,
+                    terminal_public_detail=exact_public_detail,
                     turn_reason=turn_reason,
                     occurred_at=occurred_at,
                     actor_id=self._host_owner_id,
                     deadline_monotonic=self._canonical_deadline(),
                 )
                 if changed:
+                    await self.offer_subagent_completion(task_id)
                     return None
                 # A cancellation can win before the task-scoped turn admission.
                 # The guarded task-only CAS is legal only while that exact turn
@@ -1731,6 +1902,7 @@ class KernelSubagentManager:
                         SubagentTaskStatus(task_status),
                         task_reason,
                         require_absent_turn=True,
+                        public_detail=exact_public_detail,
                     )
                 except ConversationKernelConflict:
                     # The exact child turn may have appeared after the joint
@@ -1907,11 +2079,14 @@ class KernelSubagentManager:
                     "status": str(item["status"]).lower(),
                     "pending_reason": item.get("pending_reason"),
                     "terminal_reason": item.get("terminal_reason"),
+                    "terminal_public_detail": item.get("terminal_public_detail"),
                     "dependencies": dependencies[task_id],
                     "result_id": item.get("result_id"),
                     "result_source": item.get("result_source"),
                     "result_summary": item.get("result_summary"),
-                    "result_accepted": item.get("accepted_root_entry_id") is not None,
+                    "completion_delivered": (
+                        item.get("accepted_root_entry_id") is not None
+                    ),
                     "pending_message_count": mailbox_counts[task_id],
                 }
             )
@@ -1944,18 +2119,120 @@ class KernelSubagentManager:
             },
         )
 
-    async def _wait(self, arguments: Mapping[str, object]) -> KernelToolResult:
-        task_id = str(arguments.get("task_id") or "")
+    async def _wait(
+        self,
+        arguments: Mapping[str, object],
+        invocation_context: KernelToolInvocationContext,
+    ) -> KernelToolResult:
+        raw_task_ids = arguments.get("task_ids")
+        task_ids = () if raw_task_ids is None else tuple(raw_task_ids)
+        settle = str(arguments.get("settle", "all"))
         timeout = float(arguments.get("timeout_seconds", 30.0))
-        if timeout < 0 or timeout > 300:
-            return _result("APPLICATION_ERROR", {"error": "timeout is out of bounds"})
-        rows = await self._wait_for_tasks(
-            task_ids=(task_id,), settle="all", timeout=timeout
-        )
-        durable = rows[0]
-        if durable is None:
-            return _result("APPLICATION_ERROR", {"error": "subagent is unknown"})
-        return _durable_wait_result(durable)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while True:
+            async with self._lock:
+                observed_revision = self._state_revision
+                completion_pending = bool(self._root_completion_queue)
+            pending_steer = bool(
+                await self._io.run(
+                    self._repository.read_pending_prompt_steer_facts,
+                    session_id=self._guard.session_id,
+                    target_turn_id=invocation_context.turn_id,
+                    maximum_items=1,
+                    deadline_monotonic=self._canonical_deadline(),
+                )
+            )
+            rows = tuple(
+                [
+                    await self._io.run(
+                        self._repository.query_subagent_task,
+                        session_id=self._guard.session_id,
+                        task_id=task_id,
+                        deadline_monotonic=self._canonical_deadline(),
+                    )
+                    for task_id in task_ids
+                ]
+            )
+            if any(row is None for row in rows):
+                unknown = task_ids[rows.index(None)]
+                return _result(
+                    "APPLICATION_ERROR", {"error": f"unknown task: {unknown}"}
+                )
+            satisfied = tuple(
+                str(row["id"])
+                for row in rows
+                if SubagentTaskStatus(str(row["status"])).terminal
+            )
+            pending = tuple(
+                str(row["id"])
+                for row in rows
+                if not SubagentTaskStatus(str(row["status"])).terminal
+            )
+            predicate_satisfied = bool(task_ids) and (
+                (settle == "first" and bool(satisfied)) or not pending
+            )
+            if predicate_satisfied:
+                return _result(
+                    "SUCCESS",
+                    {
+                        "outcome": "predicate_satisfied",
+                        "satisfied_task_ids": list(satisfied),
+                        "pending_task_ids": list(pending),
+                    },
+                )
+            if completion_pending or pending_steer:
+                return _result(
+                    "SUCCESS",
+                    {
+                        "outcome": "input_available",
+                        "satisfied_task_ids": list(satisfied),
+                        "pending_task_ids": list(pending),
+                    },
+                )
+            if not task_ids:
+                _board, totals = await self._io.run(
+                    self._repository.read_subagent_task_board,
+                    session_id=self._guard.session_id,
+                    deadline_monotonic=self._canonical_deadline(),
+                )
+                if sum(
+                    total
+                    for status, total in totals
+                    if not SubagentTaskStatus(str(status)).terminal
+                ) == 0:
+                    return _result(
+                        "SUCCESS",
+                        {
+                            "outcome": "nothing_pending",
+                            "satisfied_task_ids": [],
+                            "pending_task_ids": [],
+                        },
+                    )
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return _result(
+                    "SUCCESS",
+                    {
+                        "outcome": "timeout",
+                        "satisfied_task_ids": list(satisfied),
+                        "pending_task_ids": list(pending),
+                    },
+                )
+            async with self._state_changed:
+                if self._state_revision != observed_revision:
+                    continue
+                try:
+                    await asyncio.wait_for(self._state_changed.wait(), remaining)
+                except TimeoutError:
+                    return _result(
+                        "SUCCESS",
+                        {
+                            "outcome": "timeout",
+                            "satisfied_task_ids": list(satisfied),
+                            "pending_task_ids": list(pending),
+                        },
+                    )
 
     async def _stop(self, arguments: Mapping[str, object]) -> KernelToolResult:
         task_id = str(arguments.get("task_id") or "")
@@ -1985,7 +2262,7 @@ class KernelSubagentManager:
                 return _result("APPLICATION_ERROR", {"error": "subagent is unknown"})
             status = str(durable["status"])
             if SubagentTaskStatus(status).terminal:
-                return _durable_wait_result(durable)
+                return _task_status_acknowledgement(durable)
             await self._settle_task_terminal_exact(
                 task_id,
                 SubagentTaskStatus.CANCELLED,
@@ -2000,7 +2277,7 @@ class KernelSubagentManager:
                 deadline_monotonic=self._canonical_deadline(),
             )
             assert durable is not None
-            return _durable_wait_result(durable)
+            return _task_status_acknowledgement(durable)
         if not live.task.done():
             async with self._lock:
                 current = self._tasks.get(task_id)
@@ -2024,88 +2301,6 @@ class KernelSubagentManager:
                 schedule_after=True,
             )
         return _result("SUCCESS", {"status": live.status.lower(), "task_id": task_id})
-
-    async def _wait_many(self, arguments: Mapping[str, object]) -> KernelToolResult:
-        raw = arguments.get("task_ids")
-        settle = str(arguments.get("settle", "all"))
-        timeout = float(arguments.get("timeout_seconds", 30.0))
-        if (
-            not isinstance(raw, list)
-            or not 1 <= len(raw) <= 32
-            or any(not isinstance(value, str) or not value for value in raw)
-            or len(set(raw)) != len(raw)
-            or settle not in {"first", "all"}
-            or not 0 <= timeout <= 300
-        ):
-            return _result("INVALID_ARGUMENTS", {"error": "invalid wait request"})
-        task_ids = tuple(raw)
-        rows = await self._wait_for_tasks(
-            task_ids=task_ids, settle=settle, timeout=timeout
-        )
-        if any(row is None for row in rows):
-            unknown = task_ids[rows.index(None)]
-            return _result("APPLICATION_ERROR", {"error": f"unknown task: {unknown}"})
-        terminal_payload = [
-            _durable_wait_payload(row)
-            for row in rows
-            if SubagentTaskStatus(str(row["status"])).terminal
-        ]
-        pending = [
-            str(row["id"])
-            for row in rows
-            if not SubagentTaskStatus(str(row["status"])).terminal
-        ]
-        return _result(
-            "SUCCESS",
-            {"settled": terminal_payload, "pending_task_ids": pending},
-        )
-
-    async def _wait_for_tasks(
-        self,
-        *,
-        task_ids: tuple[str, ...],
-        settle: str,
-        timeout: float,
-    ) -> tuple[Mapping[str, object] | None, ...]:
-        """Wait on canonical task state without a durable waiter or lost wake."""
-
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + timeout
-        while True:
-            async with self._lock:
-                observed_revision = self._state_revision
-            rows = tuple(
-                [
-                    await self._io.run(
-                        self._repository.query_subagent_task,
-                        session_id=self._guard.session_id,
-                        task_id=task_id,
-                        deadline_monotonic=self._canonical_deadline(),
-                    )
-                    for task_id in task_ids
-                ]
-            )
-            if any(row is None for row in rows):
-                return rows
-            terminal_count = sum(
-                SubagentTaskStatus(str(row["status"])).terminal
-                for row in rows
-                if row is not None
-            )
-            if (settle == "first" and terminal_count > 0) or terminal_count == len(
-                rows
-            ):
-                return rows
-            remaining = deadline - loop.time()
-            if remaining <= 0:
-                return rows
-            async with self._state_changed:
-                if self._state_revision != observed_revision:
-                    continue
-                try:
-                    await asyncio.wait_for(self._state_changed.wait(), remaining)
-                except TimeoutError:
-                    return rows
 
     async def _send_message(
         self,
@@ -2554,6 +2749,7 @@ class KernelSubagentManager:
         self, task_id: str, *, schedule_after: bool = True
     ) -> None:
         occurred_at = datetime.now(timezone.utc)
+        causal_candidates = await self._dependency_frontier_candidate_ids(task_id)
 
         async def worker() -> None:
             ack_unknown = False
@@ -2585,6 +2781,8 @@ class KernelSubagentManager:
                 for changed_task_id, status in changed
                 if SubagentTaskStatus(status).terminal
             )
+            for changed_task_id in terminal_ids:
+                await self.offer_subagent_completion(changed_task_id)
             async with self._state_changed:
                 retired = False
                 for changed_task_id in terminal_ids:
@@ -2595,9 +2793,11 @@ class KernelSubagentManager:
                     self._notify_state_changed_locked()
             if ack_unknown:
                 # A committed first attempt may lose its return rows.  The
-                # retry then observes an empty frontier, so confirm only this
-                # Host's still-retained dormant candidates before scheduling.
-                await self._retire_all_canonical_terminal_dormant_tasks()
+                # retry then observes an empty frontier, so confirm only the
+                # descendant closure causally reachable from this settlement.
+                await self._retire_canonical_terminal_dormant_tasks(
+                    causal_candidates
+                )
             async with self._state_changed:
                 self._notify_state_changed_locked()
             # TODO child ownership is the same four-slot physical resource as
@@ -2730,6 +2930,10 @@ class KernelSubagentManager:
             self._start_materials.clear()
             self._launch_permits.clear()
             self._completing.clear()
+            self._root_completion_queue.clear()
+            self._root_completion_set.clear()
+            self._root_completion_turn_id = None
+            self._root_completion_delivery_open = False
             self._notify_state_changed_locked()
         if close_deadline_expired:
             raise TimeoutError("subagent owner exited after close deadline")
@@ -2978,25 +3182,24 @@ def _validate_subagent_tool_arguments(
             _bounded_nonempty_text(cursor, "cursor", _MAXIMUM_LIST_CURSOR_BYTES)
         return
     if tool_name == "wait_agent":
-        if set(arguments) - {"task_id", "timeout_seconds"}:
-            raise ValueError("wait request has unknown fields")
-        _bounded_nonempty_text(arguments.get("task_id"), "task_id", 512)
-        _bounded_timeout(arguments.get("timeout_seconds", 30.0))
-        return
-    if tool_name == "wait_agent_tasks":
         if set(arguments) - {"task_ids", "settle", "timeout_seconds"}:
             raise ValueError("wait request has unknown fields")
         task_ids = arguments.get("task_ids")
-        if (
-            not isinstance(task_ids, list)
-            or not 1 <= len(task_ids) <= 32
-            or any(
-                not isinstance(item, str) or not item or len(item.encode("utf-8")) > 512
-                for item in task_ids
-            )
-            or len(set(task_ids)) != len(task_ids)
-        ):
-            raise ValueError("task_ids must contain 1..32 unique identities")
+        if task_ids is not None:
+            if (
+                not isinstance(task_ids, list)
+                or not 1 <= len(task_ids) <= 16
+                or any(
+                    not isinstance(item, str)
+                    or not item
+                    or len(item.encode("utf-8")) > 512
+                    for item in task_ids
+                )
+                or len(set(task_ids)) != len(task_ids)
+            ):
+                raise ValueError("task_ids must contain 1..16 unique identities")
+        elif "settle" in arguments:
+            raise ValueError("settle requires task_ids")
         if arguments.get("settle", "all") not in {"first", "all"}:
             raise ValueError("settle must be first or all")
         _bounded_timeout(arguments.get("timeout_seconds", 30.0))
@@ -3104,35 +3307,16 @@ def _bounded_text(value: str, maximum_bytes: int) -> str:
     return left + marker.decode("utf-8") + right
 
 
-def _durable_wait_result(row: Mapping[str, object]) -> KernelToolResult:
-    payload = _durable_wait_payload(row)
-    status = SubagentTaskStatus(str(row["status"]))
+def _task_status_acknowledgement(
+    row: Mapping[str, object],
+) -> KernelToolResult:
     return _result(
-        "SUCCESS" if status is not SubagentTaskStatus.FAILED else "APPLICATION_ERROR",
-        payload,
+        "SUCCESS",
+        {
+            "task_id": str(row["id"]),
+            "status": str(row["status"]).lower(),
+        },
     )
-
-
-def _durable_wait_payload(row: Mapping[str, object]) -> dict[str, object]:
-    status = str(row["status"])
-    payload: dict[str, object] = {
-        "task_id": str(row["id"]),
-        "status": status.lower(),
-        "pending_reason": row.get("pending_reason"),
-        "error_code": row.get("terminal_reason"),
-    }
-    if status == "COMPLETED" and row.get("result_id") is not None:
-        payload.update(
-            {
-                "result_id": str(row["result_id"]),
-                "result_source": row.get("result_source"),
-                "summary": row.get("result_summary"),
-                "output_preview": row.get("result_output_preview"),
-                "diagnostics": row.get("result_diagnostics"),
-                "result_accepted": row.get("accepted_root_entry_id") is not None,
-            }
-        )
-    return payload
 
 
 async def _join_child_settlement(

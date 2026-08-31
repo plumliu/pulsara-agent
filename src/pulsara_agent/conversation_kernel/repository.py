@@ -48,6 +48,7 @@ from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
 from ._repository.contracts import (
     AcceptedCapabilityDecision,
     AcceptedEntry,
+    AcceptedSubagentCompletion,
     AcceptedInteractionDecision,
     AcceptedPlanResolution,
     AcceptedPlanToolBatch,
@@ -74,6 +75,7 @@ from ._repository.contracts import (
     PreparedToolResultAcceptance,
     PromptIngressRejected,
     StaleHostWriter,
+    SubagentCompletionDisposition,
     ToolRemoteIdentityConfirmationKind,
     ToolResultSideBranch,
     ToolResultSideBranchKind,
@@ -89,7 +91,7 @@ from ._repository.contracts import (
 )
 from ._repository.authority import _AuthorityOperations
 from ._repository.conversation import _ConversationOperations
-from ._repository.external_results import _ExternalResultOperations
+from ._repository.completions import _SubagentCompletionOperations
 from ._repository.kernel import _RepositoryKernel
 from ._repository.matching import _MatchingOperations
 from ._repository.memory import AcceptedMemoryGovernance, _MemoryOperations
@@ -107,7 +109,7 @@ class ConversationKernelRepository(
     _PlanOperations,
     _PromptOperations,
     _SubagentOperations,
-    _ExternalResultOperations,
+    _SubagentCompletionOperations,
     _MemoryOperations,
     _RepositoryKernel,
 ):
@@ -117,6 +119,8 @@ class ConversationKernelRepository(
 _FACADE_OWNED_SYMBOLS = (
     "AcceptedCapabilityDecision",
     "AcceptedEntry",
+    "AcceptedSubagentCompletion",
+    "AcceptedSubagentCompletion",
     "AcceptedInteractionDecision",
     "AcceptedPlanResolution",
     "AcceptedPlanToolBatch",
@@ -143,6 +147,8 @@ _FACADE_OWNED_SYMBOLS = (
     "PreparedToolResultAcceptance",
     "PromptIngressRejected",
     "StaleHostWriter",
+    "SubagentCompletionDisposition",
+    "SubagentCompletionDisposition",
     "ToolRemoteIdentityConfirmationKind",
     "ToolResultSideBranchKind",
     "TurnAdmissionConfirmation",

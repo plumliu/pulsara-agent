@@ -11,6 +11,7 @@ from typing import Callable, Iterator, TypeVar
 from pulsara_agent.conversation_kernel.contracts import HostWriterGuard
 from pulsara_agent.conversation_kernel.repository import (
     AcceptedEntry,
+    AcceptedSubagentCompletion,
     ConversationKernelConflict,
     ConversationKernelRepository,
 )
@@ -152,18 +153,18 @@ class ProviderSafePointCoordinator:
             self._active_handle = successor
             return successor
 
-    def accept_subagent_result(
+    def accept_subagent_completion(
         self,
         *,
         turn_id: str,
         new_context_binding_revision_id: str | None = None,
         requested_permission_mode: PermissionMode | None = None,
-        child_result_id: str,
+        task_id: str,
         command_id: str,
         actor_id: str,
         deadline_monotonic: float,
-    ) -> AcceptedEntry | None:
-        """Explicitly accept one durable child result at the same cut boundary."""
+    ) -> AcceptedSubagentCompletion:
+        """Explicitly deliver one terminal task at the same cut boundary."""
 
         with self._lock:
             if self._active_handle is not None:
@@ -176,13 +177,39 @@ class ProviderSafePointCoordinator:
                     turn_id=turn_id,
                     deadline_monotonic=deadline_monotonic,
                 )
-            return self._repository.accept_subagent_result_into_root(
+            return self._repository.accept_subagent_completion_into_root(
                 self._guard,
                 turn_id=turn_id,
                 new_context_binding_revision_id=new_context_binding_revision_id,
                 requested_permission_mode=requested_permission_mode,
-                child_result_id=child_result_id,
+                task_id=task_id,
                 command_id=command_id,
+                occurred_at=datetime.now(timezone.utc),
+                actor_id=actor_id,
+                deadline_monotonic=deadline_monotonic,
+            )
+
+    def accept_queued_subagent_completion(
+        self,
+        handle: PreparedProviderInputHandle,
+        *,
+        task_id: str,
+        actor_id: str,
+        deadline_monotonic: float,
+    ) -> AcceptedSubagentCompletion:
+        """Append one automatic completion behind the handle's exact base cut."""
+
+        with self._lock:
+            self._require_current(handle)
+            if handle._model_active:
+                raise ExternalSourceNotAtSafePoint(
+                    "provider model operation is active"
+                )
+            return self._repository.accept_subagent_completion_into_root(
+                self._guard,
+                task_id=task_id,
+                turn_id=handle.cut.turn_id,
+                expected_provider_input_cut=handle.cut,
                 occurred_at=datetime.now(timezone.utc),
                 actor_id=actor_id,
                 deadline_monotonic=deadline_monotonic,

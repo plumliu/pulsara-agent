@@ -117,7 +117,7 @@ class FakeConnection implements RuntimeConnection {
     return { commandId: 'command-4', status: 'succeeded' };
   }
 
-  acceptSubagentResult = vi.fn(async (): Promise<CommandReceipt> => {
+  acceptSubagentCompletion = vi.fn(async (): Promise<CommandReceipt> => {
     return { commandId: 'command-result', status: 'succeeded' };
   });
 
@@ -327,14 +327,14 @@ describe('PulsaraApp', () => {
     expect(finalTurn?.children[1]?.classList.contains('assistant-heading--response')).toBe(true);
   });
 
-  it('renders an accepted subtask result as a neutral continuation event', async () => {
+  it('renders a delivered subtask completion as a neutral continuation event', async () => {
     const adapter = new FakeAdapter();
     adapter.connectionValue = {
       ...projection(''),
       messages: [{
-        id: 'accepted-result', role: 'user', userKind: 'subagent-result', time: '18:14',
+        id: 'accepted-result', role: 'user', userKind: 'subagent-completion', time: '18:14',
         body: '{"status":"accepted","task_id":"internal"}',
-        sourceSubagentResultId: 'subagent-result:internal',
+        sourceSubagentTaskId: 'task-internal',
         status: 'completed',
       }, {
         id: 'assistant-after-result', role: 'assistant', time: '18:15',
@@ -345,9 +345,9 @@ describe('PulsaraApp', () => {
     };
 
     const { container } = render(<PulsaraApp adapter={adapter} />);
-    expect(await screen.findByLabelText('已带入子任务结果')).toBeTruthy();
-    expect(screen.getByText('Pulsara 正在基于这份结果继续处理')).toBeTruthy();
-    expect(screen.getByRole('tooltip').textContent).toContain('作为新的上下文交给 Pulsara');
+    expect(await screen.findByLabelText('Pulsara 已收到子任务进展')).toBeTruthy();
+    expect(screen.getByText('Pulsara 已收到子任务进展')).toBeTruthy();
+    expect(screen.getByRole('tooltip').textContent).toContain('Pulsara 已把这项工作的进展用于当前处理');
     expect(screen.queryByText(/"status":"accepted"/)).toBeNull();
     expect(container.querySelectorAll('.user-heading')).toHaveLength(0);
     expect(container.querySelectorAll('.assistant-turn--run-start')).toHaveLength(1);
@@ -514,6 +514,8 @@ describe('PulsaraApp', () => {
         id: 'assistant-root', role: 'assistant', time: '现在', body: '主任务继续运行。',
         status: 'running',
       }],
+      isRunning: false,
+      activeTurnId: undefined,
       agentTasks: [],
     };
     adapter.taskInventory = [{
@@ -521,19 +523,22 @@ describe('PulsaraApp', () => {
       objective: '### 汇总目标\n\n整理可见结果。', status: 'completed',
       parentId: 'turn-1', batchId: 'batch-1', taskKey: 'research',
       context: { mode: 'last-n', lastNTurns: 4 }, dependencyIds: [],
+      completionDelivered: false,
       acceptedAt: '2026-08-30T12:00:00Z', terminalAt: '2026-08-30T12:01:00Z',
       summary: '### 研究结论\n\n页面符合契约。', color: 'blue',
       result: {
         id: 'result-complete', entryId: 'entry-result', summary: '### 研究结论\n\n页面符合契约。',
-        outputPreview: '- 完整输出', diagnostics: [{ message: '目视检查通过' }], accepted: false,
+        outputPreview: '- 完整输出', diagnostics: [{ message: '目视检查通过' }],
       },
     }, {
       id: 'task-interrupted', label: '中断检查', role: '验证', objective: '验证重启边界。',
       status: 'interrupted', parentId: 'turn-2', dependencyIds: [], color: 'amber',
+      completionDelivered: false,
     }, {
       id: 'task-blocked', label: '等待产物', role: '整合', objective: '整合前置产物。',
       status: 'blocked', parentId: 'turn-1', batchId: 'batch-1', dependencyIds: ['task-interrupted'],
       dependencies: [{ id: 'task-interrupted', label: '中断检查', status: 'interrupted' }], color: 'violet',
+      completionDelivered: false,
     }];
 
     const { container } = render(<PulsaraApp adapter={adapter} />);
@@ -555,11 +560,11 @@ describe('PulsaraApp', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /接受编辑/ }));
     fireEvent.click(screen.getByRole('button', { name: /只读/ }));
-    const continueButton = within(taskCard).getByRole('button', { name: '带入会话并继续' });
-    expect(within(taskCard).getByRole('tooltip').textContent).toContain('作为新消息交给 Pulsara，并以“只读”权限立即继续处理');
+    const continueButton = within(taskCard).getByRole('button', { name: '用这份结果继续' });
+    expect(within(taskCard).getByRole('tooltip').textContent).toContain('启动新一轮，让 Pulsara 基于这项工作的结果继续处理');
     fireEvent.click(continueButton);
-    await waitFor(() => expect(adapter.lastConnection?.acceptSubagentResult).toHaveBeenCalledWith('result-complete', 'read-only'));
-    expect(await screen.findByText('已带入会话')).toBeTruthy();
+    await waitFor(() => expect(adapter.lastConnection?.acceptSubagentCompletion).toHaveBeenCalledWith('task-complete', 'read-only'));
+    expect(await screen.findByText('Pulsara 已收到结果')).toBeTruthy();
 
     fireEvent.click(within(taskCard).getByRole('button', { name: '在对话中查看' }));
     await waitFor(() => expect(

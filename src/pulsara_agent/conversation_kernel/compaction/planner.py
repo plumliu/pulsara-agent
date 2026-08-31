@@ -815,9 +815,9 @@ def freeze_compaction_continuation(
             in {
                 CanonicalInputOriginKind.HUMAN_MESSAGE,
                 CanonicalInputOriginKind.SUBAGENT_OBJECTIVE,
-                CanonicalInputOriginKind.SUBAGENT_RESULT,
             }
         ) or item.item_kind in {
+            FrozenProviderInputItemKind.INTER_AGENT_MESSAGE,
             FrozenProviderInputItemKind.PLAN_CONTINUATION,
             FrozenProviderInputItemKind.TERMINAL_OBSERVATION,
         }

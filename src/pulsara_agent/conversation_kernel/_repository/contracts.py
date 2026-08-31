@@ -127,6 +127,24 @@ class TurnAdmissionConfirmationKind(StrEnum):
     CONFLICT = "CONFLICT"
 
 
+class SubagentCompletionDisposition(StrEnum):
+    CREATED = "CREATED"
+    ALREADY_DELIVERED = "ALREADY_DELIVERED"
+    TARGET_STALE = "TARGET_STALE"
+
+
+@dataclass(frozen=True, slots=True)
+class AcceptedSubagentCompletion:
+    disposition: SubagentCompletionDisposition
+    entry: AcceptedEntry | None = None
+
+    def __post_init__(self) -> None:
+        if (
+            self.disposition is SubagentCompletionDisposition.TARGET_STALE
+        ) != (self.entry is None):
+            raise ValueError("subagent completion disposition is inconsistent")
+
+
 class ToolRemoteIdentityConfirmationKind(StrEnum):
     FULL = "FULL"
     NONE = "NONE"

@@ -129,8 +129,9 @@ surfaces backed by an existing Kernel contract: overview, durable sessions,
 execution traces, Plan interactions, per-turn permissions, queued prompts,
 stop, context compaction, subagent tasks, and local configuration. Child work is
 visible inline where it was delegated, with its objective, live tool activity,
-canonical status, and Markdown-rendered result; the task page provides the same
-facts as a broader view. The workbench no longer
+current status, and Markdown-rendered result. The current-session inspector
+keeps the complete task history beside the conversation; there is no separate
+task destination to manage. The workbench no longer
 uses a demo projection or reserves placeholder navigation for unsupported
 features. Session creation has exactly two workspace choices: Quick Start asks
 Pulsara to create a durable managed directory, while Specified Directory uses
@@ -295,12 +296,19 @@ own the logical board, while scheduling, capacity, mailbox delivery, and waits
 remain process-local. The four-child limit is physical concurrency rather than
 a task-graph lifetime cap: additional admitted work stays `PENDING_START` and
 starts when capacity frees. Direct dependency results propagate one edge only;
-ROOT observes results explicitly through list/wait/accept paths. Round 5B now
-hands off the same task board during compaction without adding a durable inbox,
-run, receipt, or recovery graph. The current oracle is 29 committed events, 24
+the main agent keeps doing useful work while children run, and completed work is
+automatically folded into the conversation at a safe response boundary. Waiting
+is only a synchronization choice, not the result-delivery path. Work that finishes
+after an answer remains available for one explicit continuation without rerunning
+the child; success, failure, cancellation, and dependency failure share the same
+delivery path. Round 5B now hands off the same task board during compaction without
+adding a durable inbox, run, receipt, or recovery graph. The current oracle is 29 committed events, 24
 live events, 11 subject slots, one append guard, 25 product relations, and zero
 durable jobs. Verification is recorded in
 [`round10_hierarchical_subagent_orchestration_activation.json`](benchmarks/suites/core/v1/round10_hierarchical_subagent_orchestration_activation.json).
+The asynchronous-completion hard cut and real-provider browser evidence are recorded in
+[`PULSARA_SUBAGENT_ASYNC_COMPLETION_HARD_CUT_RESEARCH_AND_IMPLEMENTATION_SPEC.zh.md`](PULSARA_SUBAGENT_ASYNC_COMPLETION_HARD_CUT_RESEARCH_AND_IMPLEMENTATION_SPEC.zh.md)
+and [`dogfood_evidence/async_completion/README.zh.md`](dogfood_evidence/async_completion/README.zh.md).
 The fingerprint-subtraction hard cut removes same-process self hashes,
 duplicate child/parent proof fields, fingerprint-based continuity/settlement
 lookups, and per-file activation SHA inventories in one incompatible internal

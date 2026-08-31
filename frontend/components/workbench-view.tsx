@@ -368,23 +368,23 @@ function SubagentGroup({
 }
 
 function UserMessage({ message }: { message: Message }) {
-  if (message.userKind === 'subagent-result') {
-    const helpId = `${message.id}-subagent-result-help`;
+  if (message.userKind === 'subagent-completion') {
+    const helpId = `${message.id}-subagent-completion-help`;
     return (
       <article
-        className="subagent-result-event"
-        aria-label="已带入子任务结果"
+        className="subagent-completion-event"
+        aria-label="Pulsara 已收到子任务进展"
         aria-describedby={helpId}
         tabIndex={0}
       >
-        <span className="subagent-result-event__icon"><GitFork size={13} /></span>
-        <div className="subagent-result-event__copy">
-          <strong>已带入子任务结果</strong>
-          <small>Pulsara 正在基于这份结果继续处理</small>
+        <span className="subagent-completion-event__icon"><GitFork size={13} /></span>
+        <div className="subagent-completion-event__copy">
+          <strong>Pulsara 已收到子任务进展</strong>
+          <small>主任务会结合这项工作的结果继续处理</small>
         </div>
         <time>{message.time}</time>
-        <span id={helpId} className="subagent-result-event__tooltip" role="tooltip">
-          这份子任务结果已作为新的上下文交给 Pulsara，并按你选择的本轮权限继续处理。
+        <span id={helpId} className="subagent-completion-event__tooltip" role="tooltip">
+          Pulsara 已把这项工作的进展用于当前处理；这不是你发送的新消息，也不会重新运行子任务。
         </span>
       </article>
     );
