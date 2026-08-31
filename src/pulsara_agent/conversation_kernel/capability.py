@@ -49,7 +49,11 @@ from pulsara_agent.capability.types import (
     SkillManifest,
     SkillProjectionResolveContext,
 )
-from pulsara_agent.capability.user_skill_config import UserSkillConfigSnapshot
+from pulsara_agent.capability.user_skill_config import (
+    UserSkillConfigSnapshot,
+    load_user_skill_config,
+    workspace_skill_config_path,
+)
 from pulsara_agent.conversation_kernel.capability_composition import (
     PreparedSkillCatalogSourceSnapshot,
     issue_skill_catalog_source_snapshot,
@@ -72,6 +76,8 @@ class KernelSkillProjectionComposer:
         plugin_definitions_provider: Callable[[], FrozenPluginSkillDefinitions],
         configured_active_skill_names: frozenset[str] = frozenset(),
         user_skill_config_provider: Callable[[], UserSkillConfigSnapshot] | None = None,
+        workspace_skill_config_provider: Callable[[], UserSkillConfigSnapshot]
+        | None = None,
         loose_producer: LooseSkillDefinitionProducer | None = None,
         catalog_resolver: SkillCatalogResolver | None = None,
         projection_provider: SkillCatalogCapabilityProvider | None = None,
@@ -79,12 +85,17 @@ class KernelSkillProjectionComposer:
         self._workspace_root = workspace_root
         self._configured = configured_active_skill_names
         self._loose_producer = loose_producer or LooseSkillDefinitionProducer()
-        self._bundled_producer = BundledSkillDefinitionProducer(
-            bundled_binding_owner
-        )
+        self._bundled_producer = BundledSkillDefinitionProducer(bundled_binding_owner)
         self._plugin_definitions_provider = plugin_definitions_provider
         self._user_skill_config_provider = user_skill_config_provider or (
-            lambda: UserSkillConfigSnapshot(config_path=Path("skills.yaml"))
+            lambda: UserSkillConfigSnapshot(
+                config_path=(self._workspace_root / ".pulsara/user-skills.yaml")
+            )
+        )
+        self._workspace_skill_config_provider = workspace_skill_config_provider or (
+            lambda: load_user_skill_config(
+                config_path=workspace_skill_config_path(self._workspace_root)
+            )
         )
         self._resolver = catalog_resolver or SkillCatalogResolver()
         self._projection_provider = (
@@ -105,9 +116,7 @@ class KernelSkillProjectionComposer:
     ) -> PreparedSkillCatalogSourceSnapshot:
         check_skill_deadline(deadline_monotonic)
         root_policy = self._loose_producer.prepare_root_policy(self._workspace_root)
-        bundled = self._bundled_producer.observe(
-            deadline_monotonic=deadline_monotonic
-        )
+        bundled = self._bundled_producer.observe(deadline_monotonic=deadline_monotonic)
         check_skill_deadline(deadline_monotonic)
         loose = self._loose_producer.observe(
             root_policy, deadline_monotonic=deadline_monotonic
@@ -117,7 +126,16 @@ class KernelSkillProjectionComposer:
         user_skill_config = self._user_skill_config_provider()
         if not isinstance(user_skill_config, UserSkillConfigSnapshot):
             raise TypeError("user Skill config provider returned a foreign snapshot")
-        loose = _apply_user_skill_config(loose, user_skill_config)
+        workspace_skill_config = self._workspace_skill_config_provider()
+        if not isinstance(workspace_skill_config, UserSkillConfigSnapshot):
+            raise TypeError(
+                "workspace Skill config provider returned a foreign snapshot"
+            )
+        loose = _apply_skill_configs(
+            loose,
+            user_config=user_skill_config,
+            workspace_config=workspace_skill_config,
+        )
         check_skill_deadline(deadline_monotonic)
         plugin = self._plugin_definitions_provider()
         if not isinstance(plugin, FrozenPluginSkillDefinitions):
@@ -132,7 +150,7 @@ class KernelSkillProjectionComposer:
             source=source,
             refresh_mode=CapabilitySourceRefreshMode.SAFE_POINT_REFRESHABLE,
             source_contract_fingerprint=context_fingerprint(
-                "skill-source-contract:v5-user-enablement",
+                "skill-source-contract:v6-local-enablement",
                 {
                     "parser_contract": AGENT_SKILLS_CONTRACT_ID,
                     "placement_contract": SKILL_PLACEMENT_CONTRACT_ID,
@@ -144,7 +162,10 @@ class KernelSkillProjectionComposer:
                         "BUNDLED",
                     ),
                     "bundled_names": EXPECTED_BUNDLED_SKILL_NAMES,
-                    "user_enablement": "exact-path-user-config",
+                    "local_enablement": (
+                        "exact-path-user-config",
+                        "exact-path-workspace-config",
+                    ),
                 },
             ),
         )
@@ -254,8 +275,7 @@ def _skill_fact(source, skill: SkillManifest) -> FrozenSkillCapabilityFact:
             "name": skill.name,
             "location": skill.location,
             "source": skill.source.value,
-            "body_digest": "sha256:"
-            + sha256(skill.body.encode("utf-8")).hexdigest(),
+            "body_digest": "sha256:" + sha256(skill.body.encode("utf-8")).hexdigest(),
         },
     )
     fact_fingerprint = skill_capability_fact_fingerprint(
@@ -276,20 +296,29 @@ def _skill_fact(source, skill: SkillManifest) -> FrozenSkillCapabilityFact:
     )
 
 
-def _apply_user_skill_config(
+def _apply_skill_configs(
     loose: FrozenLooseSkillDefinitions,
-    config: UserSkillConfigSnapshot,
+    *,
+    user_config: UserSkillConfigSnapshot,
+    workspace_config: UserSkillConfigSnapshot,
 ) -> FrozenLooseSkillDefinitions:
     if loose.disposition is LooseSkillDefinitionsDisposition.UNAVAILABLE:
         return loose
 
     def admitted(path: Path, origin: object) -> bool:
-        return not (
-            isinstance(origin, LooseSkillOrigin)
-            and origin.root_kind
-            in {LocalSkillRootKind.USER_PULSARA, LocalSkillRootKind.USER_AGENTS}
-            and not config.enabled_for(path)
-        )
+        if not isinstance(origin, LooseSkillOrigin):
+            return True
+        if origin.root_kind in {
+            LocalSkillRootKind.USER_PULSARA,
+            LocalSkillRootKind.USER_AGENTS,
+        }:
+            return user_config.enabled_for(path)
+        if origin.root_kind in {
+            LocalSkillRootKind.WORKSPACE_PULSARA,
+            LocalSkillRootKind.WORKSPACE_AGENTS,
+        }:
+            return workspace_config.enabled_for(path)
+        raise TypeError("loose Skill root kind is open")
 
     return FrozenLooseSkillDefinitions(
         root_policy=loose.root_policy,
@@ -298,9 +327,7 @@ def _apply_user_skill_config(
             item for item in loose.candidates if admitted(item.path, item.origin)
         ),
         invalid_issues=tuple(
-            item
-            for item in loose.invalid_issues
-            if admitted(item.path, item.origin)
+            item for item in loose.invalid_issues if admitted(item.path, item.origin)
         ),
     )
 

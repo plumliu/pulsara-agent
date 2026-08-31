@@ -12,6 +12,7 @@ import type {
 import type {
   AgentTask,
   CapabilitySnapshot,
+  ProjectCapabilityMutationResult,
   SessionSummary,
   SessionWorkspaceSelection,
   UserCapabilitySnapshot,
@@ -51,13 +52,21 @@ const initialSession: SessionSummary = {
 const capabilitySnapshot: CapabilitySnapshot = {
   sessionId: 'session-1',
   workspacePath: '/tmp/pulsara_agent',
+  workspaceKind: 'project',
+  adoption: { scope: 'workspace', pending: false, when: 'next-user-turn' },
   skills: {
     status: 'ready',
+    configPath: '/tmp/pulsara_agent/.pulsara/skills.yaml',
     items: [{
+      id: 'bundled:pdf',
       name: 'pdf',
       description: '读取、创建并检查 PDF 文件。',
       location: 'bundled_skills/pdf',
+      path: '/opt/pulsara/bundled_skills/pdf/SKILL.md',
       source: 'bundled',
+      editable: false,
+      enabled: true,
+      effective: true,
       configured: false,
       authoringNotes: [],
     }],
@@ -66,9 +75,16 @@ const capabilitySnapshot: CapabilitySnapshot = {
     roots: [],
   },
   mcp: {
+    configPath: '/tmp/pulsara_agent/.pulsara/mcp.yaml',
     servers: [{
       id: 'local-docs',
       name: '本地文档',
+      source: 'user',
+      editable: false,
+      enabled: true,
+      configuredEnabled: true,
+      needsApproval: false,
+      effective: true,
       status: 'ready',
       required: false,
       availableToSubagents: true,
@@ -187,6 +203,7 @@ class FakeConnection implements RuntimeConnection {
   readonly role: 'controller' | 'observer';
   readonly generation = 1;
   private value: RuntimeProjection;
+  private observer?: (value: RuntimeProjection) => void;
 
   constructor(
     readonly sessionId: string,
@@ -206,9 +223,20 @@ class FakeConnection implements RuntimeConnection {
   }
 
   observe(signal?: AbortSignal): Promise<RuntimeProjection> {
-    return new Promise((_, reject) => {
-      signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true });
+    return new Promise((resolve, reject) => {
+      this.observer = resolve;
+      signal?.addEventListener('abort', () => {
+        this.observer = undefined;
+        reject(new DOMException('Aborted', 'AbortError'));
+      }, { once: true });
     });
+  }
+
+  emit(value: RuntimeProjection) {
+    this.value = value;
+    const observer = this.observer;
+    this.observer = undefined;
+    observer?.(value);
   }
 
   submitPrompt = vi.fn(async (): Promise<CommandReceipt> => {
@@ -311,6 +339,31 @@ class FakeAdapter implements RuntimeAdapter {
       destinationPath: '/tmp/pulsara_agent/.pulsara/skills/pdf',
       details: [],
     },
+    adoption: { scope: 'workspace' as const, pendingSessions: 1, when: 'next-user-turn' as const },
+    capabilities: { ...capabilitySnapshot, sessionId },
+  }));
+
+  setProjectSkillEnabled = vi.fn<RuntimeAdapter['setProjectSkillEnabled']>(async (sessionId: string) => ({
+    operation: { status: 'DISABLED', success: true, message: '项目技能已关闭。', details: [] },
+    adoption: { scope: 'workspace' as const, pendingSessions: 1, when: 'next-user-turn' as const },
+    capabilities: { ...capabilitySnapshot, sessionId },
+  }));
+
+  createProjectMcp = vi.fn(async (sessionId: string) => ({
+    operation: { status: 'ADDED', success: true, message: '项目 MCP 已添加。', details: [] },
+    adoption: { scope: 'workspace' as const, pendingSessions: 1, when: 'next-user-turn' as const },
+    capabilities: { ...capabilitySnapshot, sessionId },
+  }));
+
+  setProjectMcpEnabled = vi.fn(async (sessionId: string) => ({
+    operation: { status: 'DISABLED', success: true, message: '项目 MCP 已关闭。', details: [] },
+    adoption: { scope: 'workspace' as const, pendingSessions: 1, when: 'next-user-turn' as const },
+    capabilities: { ...capabilitySnapshot, sessionId },
+  }));
+
+  removeProjectMcp = vi.fn(async (sessionId: string) => ({
+    operation: { status: 'REMOVED', success: true, message: '项目 MCP 已移除。', details: [] },
+    adoption: { scope: 'workspace' as const, pendingSessions: 1, when: 'next-user-turn' as const },
     capabilities: { ...capabilitySnapshot, sessionId },
   }));
 
@@ -409,6 +462,9 @@ describe('PulsaraApp', () => {
     fireEvent.click(screen.getByRole('button', { name: '能力' }));
     expect(await screen.findByRole('heading', { name: '能力' })).toBeTruthy();
     expect(await screen.findByText('Personal Tools')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: '查看 Personal Tools' }));
+    expect(await screen.findByText('已用于当前打开的会话')).toBeTruthy();
+    expect(screen.queryByText('/Users/test/.pulsara/plugins/personal-tools')).toBeNull();
     fireEvent.click(screen.getByRole('tab', { name: /技能/ }));
     const skillSwitch = await screen.findByRole('switch', { name: '关闭 personal-pdf' });
     expect(skillSwitch.getAttribute('aria-checked')).toBe('true');
@@ -425,6 +481,573 @@ describe('PulsaraApp', () => {
     expect(screen.queryByText('本地文档')).toBeNull();
     expect(adapter.inspectCapabilities).toHaveBeenCalledWith('session-1');
     expect(adapter.inspectUserCapabilities).toHaveBeenCalledWith('session-1');
+  });
+
+  it('manages directory capabilities in the session inspector and keeps inherited rows read-only', async () => {
+    const adapter = new FakeAdapter();
+    const projectSkill: CapabilitySnapshot['skills']['items'][number] = {
+      id: 'pulsara:project-review',
+      name: 'project-review',
+      description: '检查当前项目。',
+      location: '.pulsara/skills/project-review/SKILL.md',
+      path: '/tmp/pulsara_agent/.pulsara/skills/project-review/SKILL.md',
+      source: 'workspace',
+      editable: true,
+      enabled: true,
+      effective: true,
+      configured: false,
+      authoringNotes: [],
+    };
+    const projectMcp: CapabilitySnapshot['mcp']['servers'][number] = {
+      ...capabilitySnapshot.mcp.servers[0],
+      id: 'project-docs',
+      name: '项目文档',
+      source: 'workspace',
+      editable: true,
+      configIdentity: 'project-config-v1',
+      enabled: true,
+      configuredEnabled: true,
+      transport: { kind: 'http', summary: 'https://example.com/mcp', detail: 'https://example.com/mcp' },
+    };
+    const projectSnapshot: CapabilitySnapshot = {
+      ...capabilitySnapshot,
+      skills: {
+        ...capabilitySnapshot.skills,
+        items: [projectSkill, ...capabilitySnapshot.skills.items],
+      },
+      mcp: {
+        ...capabilitySnapshot.mcp,
+        servers: [projectMcp, ...capabilitySnapshot.mcp.servers],
+      },
+    };
+    adapter.inspectCapabilities.mockResolvedValue(projectSnapshot);
+    adapter.setProjectSkillEnabled.mockResolvedValue({
+      operation: { status: 'DISABLED', success: true, message: '项目技能已关闭。', details: [] },
+      adoption: { scope: 'workspace', pendingSessions: 1, when: 'next-user-turn' },
+      capabilities: {
+        ...projectSnapshot,
+        adoption: { scope: 'workspace', pending: true, when: 'next-user-turn' },
+        skills: {
+          ...projectSnapshot.skills,
+          items: projectSnapshot.skills.items.map((item) => (
+            item.id === projectSkill.id ? { ...item, enabled: false } : item
+          )),
+        },
+      },
+    });
+
+    render(<PulsaraApp adapter={adapter} />);
+    const inspector = await screen.findByLabelText('当前会话详情');
+    await waitFor(() => expect(adapter.inspectCapabilities).toHaveBeenCalledWith('session-1'));
+    fireEvent.click(within(inspector).getByRole('button', { name: '项目能力' }));
+
+    expect(await within(inspector).findByText('项目能力')).toBeTruthy();
+    expect(within(inspector).getByText('同一目录的所有会话', { exact: false })).toBeTruthy();
+    const projectSwitch = within(inspector).getByRole('switch', { name: '关闭 project-review' });
+    fireEvent.click(projectSwitch);
+    await waitFor(() => expect(adapter.setProjectSkillEnabled).toHaveBeenCalledWith(
+      'session-1',
+      'pulsara:project-review',
+      false,
+    ));
+    expect(await within(inspector).findByText('更改已保存')).toBeTruthy();
+    expect(within(inspector).queryByRole('switch', { name: /pdf/ })).toBeNull();
+
+    fireEvent.click(within(inspector).getByRole('tab', { name: /MCP/ }));
+    expect(await within(inspector).findByText('项目文档')).toBeTruthy();
+    expect(within(inspector).getByRole('switch', { name: '关闭 项目文档' })).toBeTruthy();
+    expect(within(inspector).queryByRole('switch', { name: /本地文档/ })).toBeNull();
+  });
+
+  it('summarizes Skill conflicts without exposing internal absolute paths', async () => {
+    const adapter = new FakeAdapter();
+    const hiddenPath = '/Users/test/source/src/pulsara_agent/bundled_skills/pdf/SKILL.md';
+    const hiddenWinner = '/Users/test/.pulsara/skills/pdf/SKILL.md';
+    adapter.inspectCapabilities.mockResolvedValue({
+      ...capabilitySnapshot,
+      skills: {
+        ...capabilitySnapshot.skills,
+        issues: [{
+          kind: 'shadowed',
+          title: 'pdf 使用了优先级更高的版本',
+          path: hiddenPath,
+          details: [`当前使用：${hiddenWinner}`],
+        }],
+        details: ['internal producer unavailable'],
+      },
+    });
+
+    render(<PulsaraApp adapter={adapter} />);
+    const inspector = await screen.findByLabelText('当前会话详情');
+    fireEvent.click(within(inspector).getByRole('button', { name: '项目能力' }));
+
+    expect(await within(inspector).findByText(/pdf 使用了优先级更高的版本/)).toBeTruthy();
+    expect(within(inspector).getByText(/部分技能目录暂时无法完整读取/)).toBeTruthy();
+    expect(within(inspector).queryByText(hiddenPath, { exact: false })).toBeNull();
+    expect(within(inspector).queryByText(hiddenWinner, { exact: false })).toBeNull();
+    expect(within(inspector).queryByText(/internal producer unavailable/)).toBeNull();
+  });
+
+  it('keeps disabled or shadowed skills out of the composer suggestions', async () => {
+    const adapter = new FakeAdapter();
+    adapter.inspectCapabilities.mockResolvedValue({
+      ...capabilitySnapshot,
+      skills: {
+        ...capabilitySnapshot.skills,
+        items: [{
+          id: 'pulsara:disabled-review',
+          name: 'disabled-review',
+          description: '当前目录中已停用的技能。',
+          location: '.pulsara/skills/disabled-review/SKILL.md',
+          path: '/tmp/pulsara_agent/.pulsara/skills/disabled-review/SKILL.md',
+          source: 'workspace',
+          editable: true,
+          enabled: false,
+          effective: false,
+          configured: false,
+          authoringNotes: [],
+        }],
+      },
+    });
+
+    render(<PulsaraApp adapter={adapter} />);
+    await screen.findByRole('heading', { name: '准备发布' });
+    await waitFor(() => expect(adapter.inspectCapabilities).toHaveBeenCalledWith('session-1'));
+    await waitFor(() => expect(screen.queryByRole('button', { name: '选择技能' })).toBeNull());
+  });
+
+  it('renders the project capability dialog above the app and isolates its background', async () => {
+    const adapter = new FakeAdapter();
+    render(<PulsaraApp adapter={adapter} />);
+    const inspector = await screen.findByLabelText('当前会话详情');
+    fireEvent.click(within(inspector).getByRole('button', { name: '项目能力' }));
+    const addButton = await within(inspector).findByRole('button', { name: '添加' });
+    addButton.focus();
+    fireEvent.click(addButton);
+
+    const dialog = await screen.findByRole('dialog', { name: '添加项目能力' });
+    expect(inspector.contains(dialog)).toBe(false);
+    const application = document.querySelector<HTMLElement>('main.pulsara-shell');
+    expect(application?.inert).toBe(true);
+    fireEvent.click(within(dialog).getByRole('button', { name: 'MCP' }));
+    expect((within(dialog).getByRole('checkbox', { name: /允许子代理使用/ }) as HTMLInputElement).checked).toBe(false);
+
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(screen.queryByRole('dialog', { name: '添加项目能力' })).toBeNull();
+    expect(application?.inert).toBe(false);
+    await waitFor(() => expect(document.activeElement).toBe(addButton));
+  });
+
+  it('keeps the project capability dialog open while its mutation is saving', async () => {
+    const adapter = new FakeAdapter();
+    let finishInstallation!: (value: Awaited<ReturnType<FakeAdapter['installSkill']>>) => void;
+    adapter.installSkill.mockImplementation(() => new Promise((resolve) => {
+      finishInstallation = resolve;
+    }));
+
+    render(<PulsaraApp adapter={adapter} />);
+    const inspector = await screen.findByLabelText('当前会话详情');
+    fireEvent.click(within(inspector).getByRole('button', { name: '项目能力' }));
+    const addButton = await within(inspector).findByRole('button', { name: '添加' });
+    fireEvent.click(addButton);
+    const dialog = await screen.findByRole('dialog', { name: '添加项目能力' });
+    fireEvent.change(within(dialog).getByPlaceholderText('/绝对路径/到/skill'), {
+      target: { value: '/tmp/market-skill' },
+    });
+    fireEvent.click(within(dialog).getByRole('button', { name: '添加' }));
+
+    await waitFor(() => expect(dialog.getAttribute('aria-busy')).toBe('true'));
+    expect((addButton as HTMLButtonElement).disabled).toBe(true);
+    for (const closeButton of within(dialog).getAllByRole('button', { name: '关闭' })) {
+      expect((closeButton as HTMLButtonElement).disabled).toBe(true);
+      fireEvent.click(closeButton);
+    }
+    const cancelButton = within(dialog).getByRole('button', { name: '取消' });
+    expect((cancelButton as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(cancelButton);
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(screen.getByRole('dialog', { name: '添加项目能力' })).toBeTruthy();
+
+    await act(async () => finishInstallation({
+      installation: {
+        status: 'INSTALLED',
+        installed: true,
+        message: '技能已经安装。',
+        sourcePath: '/tmp/market-skill',
+        destinationPath: '/tmp/pulsara_agent/.pulsara/skills/market-skill',
+        details: [],
+      },
+      adoption: { scope: 'workspace', pendingSessions: 1, when: 'next-user-turn' },
+      capabilities: capabilitySnapshot,
+    }));
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: '添加项目能力' })).toBeNull());
+  });
+
+  it('refreshes a stale MCP snapshot after a rejected project mutation', async () => {
+    const adapter = new FakeAdapter();
+    const projectMcp: CapabilitySnapshot['mcp']['servers'][number] = {
+      ...capabilitySnapshot.mcp.servers[0]!,
+      id: 'project-docs',
+      name: '项目文档',
+      source: 'workspace',
+      editable: true,
+      configIdentity: 'approval-v1',
+      transport: { kind: 'http', summary: 'https://example.com/mcp', detail: 'https://example.com/mcp' },
+    };
+    const projectSnapshot = {
+      ...capabilitySnapshot,
+      mcp: { ...capabilitySnapshot.mcp, servers: [projectMcp] },
+    };
+    adapter.inspectCapabilities.mockResolvedValue(projectSnapshot);
+    adapter.setProjectMcpEnabled.mockRejectedValueOnce(new Error('项目能力已经变化，正在读取最新状态。'));
+
+    render(<PulsaraApp adapter={adapter} />);
+    const inspector = await screen.findByLabelText('当前会话详情');
+    fireEvent.click(within(inspector).getByRole('button', { name: '项目能力' }));
+    fireEvent.click(await within(inspector).findByRole('tab', { name: /MCP/ }));
+    adapter.inspectCapabilities.mockClear();
+    fireEvent.click(await within(inspector).findByRole('switch', { name: '关闭 项目文档' }));
+
+    await waitFor(() => expect(adapter.setProjectMcpEnabled).toHaveBeenCalled());
+    await waitFor(() => expect(adapter.inspectCapabilities).toHaveBeenCalledWith('session-1'));
+  });
+
+  it('shows a durable adoption warning and the actual production MCP failure reasons', async () => {
+    const adapter = new FakeAdapter();
+    adapter.inspectCapabilities.mockResolvedValue({
+      ...capabilitySnapshot,
+      adoption: {
+        ...capabilitySnapshot.adoption,
+        attention: 'PROJECT_MCP_ADOPTION_INCOMPLETE',
+      },
+      mcp: {
+        ...capabilitySnapshot.mcp,
+        servers: [
+          {
+            ...capabilitySnapshot.mcp.servers[0]!,
+            id: 'protocol-failure',
+            name: '协议样本',
+            source: 'workspace',
+            editable: true,
+            configIdentity: 'project-config-protocol',
+            status: 'failed',
+            hasFailure: true,
+            failureCategory: 'McpProtocolConformanceError',
+          },
+          {
+            ...capabilitySnapshot.mcp.servers[0]!,
+            id: 'transport-failure',
+            name: '连接样本',
+            source: 'workspace',
+            editable: true,
+            configIdentity: 'project-config-transport',
+            status: 'failed-retryable',
+            hasFailure: true,
+            failureCategory: 'McpTransportOperationError',
+          },
+        ],
+      },
+    });
+
+    render(<PulsaraApp adapter={adapter} />);
+    const inspector = await screen.findByLabelText('当前会话详情');
+    fireEvent.click(within(inspector).getByRole('button', { name: '项目能力' }));
+    expect(await within(inspector).findByText('部分项目连接未载入')).toBeTruthy();
+    fireEvent.click(within(inspector).getByRole('tab', { name: /MCP/ }));
+    expect(await within(inspector).findByText(/服务返回的内容不符合当前 MCP 要求/)).toBeTruthy();
+    expect(await within(inspector).findByText(/连接在通信时中断/)).toBeTruthy();
+  });
+
+  it('does not describe a general project capability adoption failure as an MCP-only problem', async () => {
+    const adapter = new FakeAdapter();
+    adapter.inspectCapabilities.mockResolvedValue({
+      ...capabilitySnapshot,
+      adoption: {
+        ...capabilitySnapshot.adoption,
+        attention: 'PROJECT_CAPABILITY_ADOPTION_FAILED',
+      },
+    });
+
+    render(<PulsaraApp adapter={adapter} />);
+    const inspector = await screen.findByLabelText('当前会话详情');
+    fireEvent.click(within(inspector).getByRole('button', { name: '项目能力' }));
+    expect(await within(inspector).findByText('项目能力配置需要处理')).toBeTruthy();
+    expect(within(inspector).getByText(/技能与连接设置/)).toBeTruthy();
+  });
+
+  it('does not let an older capability inspection overwrite a completed mutation', async () => {
+    const adapter = new FakeAdapter();
+    const projectMcp: CapabilitySnapshot['mcp']['servers'][number] = {
+      ...capabilitySnapshot.mcp.servers[0]!,
+      id: 'project-docs',
+      name: '项目文档',
+      source: 'workspace',
+      editable: true,
+      configIdentity: 'approval-v1',
+      enabled: true,
+      configuredEnabled: true,
+      effective: true,
+      status: 'connecting',
+      transport: {
+        kind: 'http',
+        summary: 'https://example.com/mcp',
+        detail: 'https://example.com/mcp',
+      },
+    };
+    const inspectingSnapshot: CapabilitySnapshot = {
+      ...capabilitySnapshot,
+      mcp: { ...capabilitySnapshot.mcp, servers: [projectMcp] },
+    };
+    let resolveOlderInspection!: (snapshot: CapabilitySnapshot) => void;
+    const olderInspection = new Promise<CapabilitySnapshot>((resolve) => {
+      resolveOlderInspection = resolve;
+    });
+    adapter.inspectCapabilities
+      .mockResolvedValueOnce(inspectingSnapshot)
+      .mockReturnValue(olderInspection);
+    adapter.setProjectMcpEnabled.mockResolvedValue({
+      operation: { status: 'DISABLED', success: true, message: '项目 MCP 已关闭。', details: [] },
+      adoption: { scope: 'workspace', pendingSessions: 1, when: 'next-user-turn' },
+      capabilities: {
+        ...inspectingSnapshot,
+        mcp: {
+          ...inspectingSnapshot.mcp,
+          servers: [{
+            ...projectMcp,
+            configIdentity: 'approval-v2',
+            enabled: false,
+            configuredEnabled: false,
+            effective: false,
+            status: 'disabled',
+          }],
+        },
+      },
+    });
+
+    render(<PulsaraApp adapter={adapter} />);
+    const inspector = await screen.findByLabelText('当前会话详情');
+    fireEvent.click(within(inspector).getByRole('button', { name: '项目能力' }));
+    fireEvent.click(await within(inspector).findByRole('tab', { name: /MCP/ }));
+    expect(await within(inspector).findByText(/连接中/)).toBeTruthy();
+    await waitFor(
+      () => expect(adapter.inspectCapabilities).toHaveBeenCalledTimes(2),
+      { timeout: 1800 },
+    );
+
+    fireEvent.click(within(inspector).getByRole('switch', { name: '关闭 项目文档' }));
+    expect(await within(inspector).findByRole('switch', { name: '开启 项目文档' })).toBeTruthy();
+    await act(async () => resolveOlderInspection(inspectingSnapshot));
+    expect(within(inspector).getByRole('switch', { name: '开启 项目文档' })).toBeTruthy();
+  });
+
+  it('does not paint a completed capability mutation onto a newly selected session', async () => {
+    const adapter = new FakeAdapter();
+    const secondSession: SessionSummary = {
+      ...initialSession,
+      id: 'session-2',
+      title: '另一个会话',
+      live: false,
+      workspace: {
+        id: 'workspace',
+        name: 'pulsara_agent',
+        path: '/tmp/pulsara_agent',
+        kind: 'project',
+      },
+    };
+    adapter.sessions = [initialSession, secondSession];
+    const projectSkill: CapabilitySnapshot['skills']['items'][number] = {
+      id: 'pulsara:project-review',
+      name: 'project-review',
+      description: '检查当前项目。',
+      location: '.pulsara/skills/project-review/SKILL.md',
+      path: '/tmp/pulsara_agent/.pulsara/skills/project-review/SKILL.md',
+      source: 'workspace',
+      editable: true,
+      enabled: true,
+      effective: true,
+      configured: false,
+      authoringNotes: [],
+    };
+    const firstSnapshot: CapabilitySnapshot = {
+      ...capabilitySnapshot,
+      sessionId: 'session-1',
+      skills: { ...capabilitySnapshot.skills, items: [projectSkill] },
+    };
+    adapter.inspectCapabilities.mockImplementation(async (sessionId: string) => (
+      sessionId === 'session-1'
+        ? firstSnapshot
+        : { ...capabilitySnapshot, sessionId: 'session-2' }
+    ));
+    let finishMutation!: (value: ProjectCapabilityMutationResult) => void;
+    adapter.setProjectSkillEnabled.mockImplementation(() => (
+      new Promise<ProjectCapabilityMutationResult>((resolve) => { finishMutation = resolve; })
+    ));
+
+    render(<PulsaraApp adapter={adapter} />);
+    const inspector = await screen.findByLabelText('当前会话详情');
+    fireEvent.click(within(inspector).getByRole('button', { name: '项目能力' }));
+    fireEvent.click(await within(inspector).findByRole('switch', { name: '关闭 project-review' }));
+    fireEvent.click(screen.getByRole('button', { name: /另一个会话/ }));
+    await screen.findByRole('heading', { name: '另一个会话' });
+
+    await act(async () => {
+      finishMutation({
+        operation: { status: 'DISABLED', success: true, message: '项目技能已关闭。', details: [] },
+        adoption: { scope: 'workspace', pendingSessions: 1, when: 'next-user-turn' },
+        capabilities: {
+          ...firstSnapshot,
+          skills: { ...firstSnapshot.skills, items: [{ ...projectSkill, enabled: false }] },
+        },
+      });
+    });
+    await waitFor(() => expect(within(inspector).queryByText('project-review')).toBeNull());
+  });
+
+  it('does not let a rejected mutation from an old session retire the new session inspection', async () => {
+    const adapter = new FakeAdapter();
+    const secondSession: SessionSummary = {
+      ...initialSession,
+      id: 'session-2',
+      title: '新的能力会话',
+      live: false,
+      workspace: {
+        id: 'workspace',
+        name: 'pulsara_agent',
+        path: '/tmp/pulsara_agent',
+        kind: 'project',
+      },
+    };
+    adapter.sessions = [initialSession, secondSession];
+    const projectMcp: CapabilitySnapshot['mcp']['servers'][number] = {
+      ...capabilitySnapshot.mcp.servers[0]!,
+      id: 'project-docs',
+      name: '项目文档',
+      source: 'workspace',
+      editable: true,
+      configIdentity: 'approval-v1',
+      transport: { kind: 'http', summary: 'https://example.com/mcp', detail: 'https://example.com/mcp' },
+    };
+    const firstSnapshot: CapabilitySnapshot = {
+      ...capabilitySnapshot,
+      sessionId: 'session-1',
+      mcp: { ...capabilitySnapshot.mcp, servers: [projectMcp] },
+    };
+    let finishSecondInspection!: (value: CapabilitySnapshot) => void;
+    const secondInspection = new Promise<CapabilitySnapshot>((resolve) => {
+      finishSecondInspection = resolve;
+    });
+    adapter.inspectCapabilities.mockImplementation((sessionId: string) => (
+      sessionId === 'session-1' ? Promise.resolve(firstSnapshot) : secondInspection
+    ));
+    let rejectOldMutation!: (reason: Error) => void;
+    adapter.setProjectMcpEnabled.mockImplementation(() => new Promise((_, reject) => {
+      rejectOldMutation = reject;
+    }));
+
+    render(<PulsaraApp adapter={adapter} />);
+    const inspector = await screen.findByLabelText('当前会话详情');
+    fireEvent.click(within(inspector).getByRole('button', { name: '项目能力' }));
+    fireEvent.click(await within(inspector).findByRole('tab', { name: /MCP/ }));
+    fireEvent.click(await within(inspector).findByRole('switch', { name: '关闭 项目文档' }));
+    await waitFor(() => expect(adapter.setProjectMcpEnabled).toHaveBeenCalled());
+
+    fireEvent.click(screen.getByRole('button', { name: /新的能力会话/ }));
+    await screen.findByRole('heading', { name: '新的能力会话' });
+    await waitFor(() => expect(adapter.inspectCapabilities).toHaveBeenCalledWith('session-2'));
+    await act(async () => rejectOldMutation(new Error('项目能力已经变化。')));
+    await act(async () => finishSecondInspection({
+      ...capabilitySnapshot,
+      sessionId: 'session-2',
+    }));
+
+    fireEvent.click(await within(inspector).findByRole('button', { name: /继承的能力/ }));
+    expect(await within(inspector).findByText('本地文档')).toBeTruthy();
+    await waitFor(() => expect(within(inspector).queryByText('正在读取项目能力')).toBeNull());
+    expect(adapter.inspectCapabilities.mock.calls.filter(([sessionId]) => sessionId === 'session-1')).toHaveLength(1);
+  });
+
+  it('clears the pending capability notice after the next turn settles', async () => {
+    const adapter = new FakeAdapter();
+    adapter.inspectCapabilities
+      .mockResolvedValueOnce({
+        ...capabilitySnapshot,
+        adoption: { ...capabilitySnapshot.adoption, pending: true },
+      })
+      .mockResolvedValue({
+        ...capabilitySnapshot,
+        adoption: { ...capabilitySnapshot.adoption, pending: false },
+      });
+
+    render(<PulsaraApp adapter={adapter} />);
+    const inspector = await screen.findByLabelText('当前会话详情');
+    fireEvent.click(within(inspector).getByRole('button', { name: '项目能力' }));
+    expect(await within(inspector).findByText('更改已保存')).toBeTruthy();
+
+    await act(async () => {
+      adapter.lastConnection?.emit({
+        ...projection('能力配置已采用。'),
+        messages: [{
+          id: 'assistant-settled',
+          role: 'assistant',
+          time: '现在',
+          body: '能力配置已采用。',
+          status: 'completed',
+        }],
+        isRunning: false,
+        activeTurnId: undefined,
+      });
+    });
+
+    await waitFor(() => expect(adapter.inspectCapabilities).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(within(inspector).queryByText('更改已保存')).toBeNull());
+  });
+
+  it('keeps refreshing a settling MCP connection until its status is final', async () => {
+    const adapter = new FakeAdapter();
+    let resolveReady!: (snapshot: CapabilitySnapshot) => void;
+    const readySnapshot = new Promise<CapabilitySnapshot>((resolve) => {
+      resolveReady = resolve;
+    });
+    adapter.inspectCapabilities
+      .mockResolvedValueOnce({
+        ...capabilitySnapshot,
+        mcp: {
+          ...capabilitySnapshot.mcp,
+          servers: capabilitySnapshot.mcp.servers.map((server) => ({
+            ...server,
+            source: 'workspace' as const,
+            editable: true,
+            status: 'connecting' as const,
+          })),
+        },
+      })
+      .mockReturnValue(readySnapshot);
+
+    const settledSnapshot: CapabilitySnapshot = {
+        ...capabilitySnapshot,
+        mcp: {
+          ...capabilitySnapshot.mcp,
+          servers: capabilitySnapshot.mcp.servers.map((server) => ({
+            ...server,
+            source: 'workspace' as const,
+            editable: true,
+            status: 'ready' as const,
+          })),
+        },
+      };
+
+    render(<PulsaraApp adapter={adapter} />);
+    const inspector = await screen.findByLabelText('当前会话详情');
+    fireEvent.click(within(inspector).getByRole('button', { name: '项目能力' }));
+    fireEvent.click(within(inspector).getByRole('tab', { name: /MCP/ }));
+
+    expect(await within(inspector).findByText(/连接中/)).toBeTruthy();
+    await waitFor(
+      () => expect(adapter.inspectCapabilities).toHaveBeenCalledTimes(2),
+      { timeout: 1800 },
+    );
+    resolveReady(settledSnapshot);
+    expect(await within(inspector).findByText(/已连接/)).toBeTruthy();
   });
 
   it('keeps a second page stable as an observer until the user explicitly takes control', async () => {

@@ -64,6 +64,13 @@ export interface McpToolCapability {
 export interface McpServerCapability {
   id: string;
   name: string;
+  source: 'workspace' | 'user' | 'plugin' | 'host';
+  editable: boolean;
+  configIdentity?: string;
+  enabled: boolean;
+  configuredEnabled: boolean;
+  needsApproval: boolean;
+  effective: boolean;
   status: McpServerStatus;
   required: boolean;
   availableToSubagents: boolean;
@@ -74,14 +81,21 @@ export interface McpServerCapability {
   promptCount: number;
   instructions: string;
   hasFailure: boolean;
+  failureCategory?: string;
+  transport?: { kind: 'stdio' | 'http'; summary: string; detail: string };
   tools: McpToolCapability[];
 }
 
 export interface SkillCapability {
+  id: string;
   name: string;
   description: string;
   location: string;
+  path: string;
   source: 'workspace' | 'user' | 'plugin' | 'bundled';
+  editable: boolean;
+  enabled: boolean;
+  effective: boolean;
   configured: boolean;
   authoringNotes: string[];
 }
@@ -96,14 +110,23 @@ export interface SkillCatalogIssue {
 export interface CapabilitySnapshot {
   sessionId: string;
   workspacePath: string;
+  workspaceKind: 'quick' | 'project';
+  adoption: {
+    scope: 'workspace';
+    pending: boolean;
+    attention?: 'PROJECT_CAPABILITY_ADOPTION_FAILED' | 'PROJECT_MCP_ADOPTION_INCOMPLETE';
+    when: 'next-user-turn';
+  };
   skills: {
     status: 'ready' | 'attention';
+    configPath: string;
     items: SkillCapability[];
     issues: SkillCatalogIssue[];
     details: string[];
     roots: Array<{ path: string; scope: 'workspace' | 'user' }>;
   };
   mcp: {
+    configPath: string;
     servers: McpServerCapability[];
     collisions: Array<{
       name: string;
@@ -144,6 +167,7 @@ export interface UserMcpServerCapability {
   promptCount: number;
   instructions: string;
   hasFailure: boolean;
+  failureCategory?: string;
   transport: { kind: 'stdio' | 'http'; summary: string };
   tools: McpToolCapability[];
 }
@@ -195,6 +219,18 @@ export interface CapabilityOperation {
   message: string;
   details: string[];
   pluginId?: string;
+}
+
+export interface ProjectCapabilityAdoption {
+  scope: 'workspace';
+  pendingSessions: number;
+  when: 'next-user-turn';
+}
+
+export interface ProjectCapabilityMutationResult {
+  operation: CapabilityOperation;
+  adoption: ProjectCapabilityAdoption;
+  capabilities: CapabilitySnapshot;
 }
 
 export interface McpCreateInput {

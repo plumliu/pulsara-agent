@@ -45,6 +45,14 @@ class McpScopePolicy(StrEnum):
     ROOT_AND_SUBAGENTS = "ROOT_AND_SUBAGENTS"
 
 
+class McpConfiguredServerBoundExceeded(ValueError):
+    """The existing native MCP composition bound would be exceeded."""
+
+
+class WorkspaceMcpConfigStaleError(ValueError):
+    """A project MCP mutation no longer matches the value the user inspected."""
+
+
 class McpInvalidToolPolicy(StrEnum):
     FAIL_SERVER = "FAIL_SERVER"
     OMIT_INVALID = "OMIT_INVALID"
@@ -121,7 +129,10 @@ class ManagedPackageMcpRuntimeSource:
             not self.store_scope_key
             or not self.package_owner_key
             or not re.fullmatch(r"pkg_[0-9a-f]{32}", self.package_install_id)
-            or any("\x00" in item for item in (self.store_scope_key, self.package_owner_key))
+            or any(
+                "\x00" in item
+                for item in (self.store_scope_key, self.package_owner_key)
+            )
         ):
             raise ValueError("managed MCP runtime source identity is invalid")
 
@@ -139,9 +150,7 @@ class StdioTransportConfig:
         default_factory=lambda: WorkspaceRelativeMcpCwd(".")
     )
     environment: tuple[tuple[str, str], ...] = field(default=(), repr=False)
-    secret_environment_refs: tuple[tuple[str, str], ...] = field(
-        default=(), repr=False
-    )
+    secret_environment_refs: tuple[tuple[str, str], ...] = field(default=(), repr=False)
     lookup_path: str = field(
         default_factory=lambda: os.environ.get("PATH", ""), repr=False
     )
@@ -156,9 +165,10 @@ class StdioTransportConfig:
         _validate_unique_pairs(
             self.secret_environment_refs, "MCP stdio secret environment"
         )
-        if not isinstance(
-            self.cwd, (WorkspaceRelativeMcpCwd, ExactAbsoluteMcpCwd)
-        ) or "\x00" in self.lookup_path:
+        if (
+            not isinstance(self.cwd, (WorkspaceRelativeMcpCwd, ExactAbsoluteMcpCwd))
+            or "\x00" in self.lookup_path
+        ):
             raise ValueError("MCP stdio cwd/PATH binding is invalid")
 
 
@@ -218,10 +228,7 @@ class UnsupportedOAuth:
 
 
 McpAuthConfig = (
-    NoAuth
-    | StaticHeaderEnvironmentRefs
-    | BearerEnvironmentRef
-    | UnsupportedOAuth
+    NoAuth | StaticHeaderEnvironmentRefs | BearerEnvironmentRef | UnsupportedOAuth
 )
 
 
@@ -235,9 +242,9 @@ class McpExposurePolicy:
         if self.include_tool_names is not None:
             _validate_names(self.include_tool_names, "MCP included tools")
         _validate_names(self.exclude_tool_names, "MCP excluded tools")
-        if self.include_tool_names is not None and set(
-            self.include_tool_names
-        ) & set(self.exclude_tool_names):
+        if self.include_tool_names is not None and set(self.include_tool_names) & set(
+            self.exclude_tool_names
+        ):
             raise ValueError("MCP include/exclude sets overlap")
 
 
@@ -251,7 +258,10 @@ class McpEffectPolicyConfig:
             raise ValueError("too many MCP per-tool effect overrides")
         names = tuple(name for name, _ in self.tool_effect_overrides)
         _validate_names(names, "MCP effect override tools")
-        if any(effect is McpConfiguredEffect.AUTO for _, effect in self.tool_effect_overrides):
+        if any(
+            effect is McpConfiguredEffect.AUTO
+            for _, effect in self.tool_effect_overrides
+        ):
             raise ValueError("per-tool MCP effect override cannot be AUTO")
 
 
@@ -358,6 +368,12 @@ class McpServerConfig:
         return _merge_headers_case_insensitive(resolved, final_overrides)
 
 
+@dataclass(frozen=True, slots=True)
+class WorkspaceMcpConfigWriteResult:
+    path: Path
+    config: McpServerConfig | None
+
+
 # Compatibility name retained for callers which only inspect enabled IDs.
 DetectedMcpServerConfig = McpServerConfig
 
@@ -368,6 +384,7 @@ def load_mcp_server_configs(
     user_config_path: Path = DEFAULT_USER_MCP_CONFIG,
     host_overrides: Mapping[str, Mapping[str, Any]] | None = None,
     trust_workspace_config: bool = False,
+    approved_workspace_server_identities: Mapping[str, str] | None = None,
 ) -> tuple[McpServerConfig, ...]:
     # User configuration is explicit local authority.  A repository-owned
     # workspace file is untrusted until this exact Host open opts in: merely
@@ -377,27 +394,32 @@ def load_mcp_server_configs(
         server_id: McpLocalConfigSourceKind.USER for server_id in merged
     }
     if workspace_root is not None:
-        workspace_entries = _load_raw(
-            workspace_root.expanduser().resolve() / WORKSPACE_MCP_CONFIG
-        )
-        if trust_workspace_config:
-            merged.update(workspace_entries)
-            source_by_server_id.update(
-                {
-                    server_id: McpLocalConfigSourceKind.WORKSPACE
-                    for server_id in workspace_entries
-                }
+        workspace_entries = _load_raw(workspace_mcp_config_path(workspace_root))
+        approved = approved_workspace_server_identities or {}
+        for server_id, entry in workspace_entries.items():
+            parsed = _parse_server(
+                server_id,
+                entry,
+                runtime_source=LocalConfiguredMcpRuntimeSource(
+                    McpLocalConfigSourceKind.WORKSPACE
+                ),
             )
-        else:
-            for server_id, entry in workspace_entries.items():
-                # Untrusted workspace data cannot shadow a trusted user entry.
-                # Otherwise retain it for inspection, but force it disabled.
-                if server_id in merged:
-                    continue
-                disabled = dict(entry)
-                disabled["enabled"] = False
-                merged[server_id] = disabled
+            trusted = trust_workspace_config or (
+                approved.get(server_id)
+                == mcp_server_workspace_approval_identity(parsed)
+            )
+            if trusted:
+                merged[server_id] = dict(entry)
                 source_by_server_id[server_id] = McpLocalConfigSourceKind.WORKSPACE
+                continue
+            # Untrusted workspace data cannot shadow a trusted user entry.
+            # Otherwise retain it for inspection, but force it disabled.
+            if server_id in merged:
+                continue
+            disabled = dict(entry)
+            disabled["enabled"] = False
+            merged[server_id] = disabled
+            source_by_server_id[server_id] = McpLocalConfigSourceKind.WORKSPACE
     if host_overrides:
         for server_id, value in host_overrides.items():
             if not isinstance(server_id, str):
@@ -406,6 +428,8 @@ def load_mcp_server_configs(
                 raise ValueError("MCP Host override must be an object")
             merged[server_id] = dict(value)
             source_by_server_id[server_id] = McpLocalConfigSourceKind.HOST_OVERRIDE
+    if len(merged) > MAXIMUM_MCP_CONFIGURED_SERVERS:
+        raise McpConfiguredServerBoundExceeded("too many configured MCP servers")
     return tuple(
         _parse_server(
             server_id,
@@ -423,9 +447,7 @@ def load_workspace_mcp_server_configs(
 ) -> tuple[McpServerConfig, ...]:
     """Read only one workspace source without merging user authority."""
 
-    raw = _load_raw(
-        workspace_root.expanduser().resolve() / WORKSPACE_MCP_CONFIG
-    )
+    raw = _load_raw(workspace_mcp_config_path(workspace_root))
     return tuple(
         _parse_server(
             server_id,
@@ -438,6 +460,38 @@ def load_workspace_mcp_server_configs(
     )
 
 
+def validate_workspace_mcp_server_addition_capacity(
+    *,
+    workspace_root: Path,
+    server_id: str,
+    managed_server_ids: tuple[str, ...] = (),
+    user_config_path: Path | None = None,
+) -> None:
+    """Reject one project addition before it can exceed the native composition."""
+
+    user_path = DEFAULT_USER_MCP_CONFIG if user_config_path is None else user_config_path
+    user_ids = set(_load_raw(user_path.expanduser()))
+    workspace_ids = set(_load_raw(workspace_mcp_config_path(workspace_root)))
+    prospective_ids = user_ids | workspace_ids | set(managed_server_ids) | {server_id}
+    if len(prospective_ids) > MAXIMUM_MCP_CONFIGURED_SERVERS:
+        raise McpConfiguredServerBoundExceeded("too many configured MCP servers")
+
+
+def workspace_mcp_config_path(workspace_root: Path) -> Path:
+    """Resolve one physical project config without following a project symlink."""
+
+    root = workspace_root.expanduser().resolve(strict=False)
+    directory = root / ".pulsara"
+    if directory.is_symlink():
+        raise ValueError("project capability directory must not be a symlink")
+    if directory.exists() and not directory.is_dir():
+        raise ValueError("project capability directory is not a directory")
+    path = directory / "mcp.yaml"
+    if path.is_symlink():
+        raise ValueError("project MCP config must not be a symlink")
+    return path
+
+
 def write_mcp_server_config(
     *,
     server_id: str,
@@ -446,7 +500,7 @@ def write_mcp_server_config(
     user_config_path: Path = DEFAULT_USER_MCP_CONFIG,
 ) -> Path:
     path = (
-        workspace_root.expanduser().resolve() / WORKSPACE_MCP_CONFIG
+        workspace_mcp_config_path(workspace_root)
         if workspace_root is not None
         else user_config_path.expanduser()
     )
@@ -457,12 +511,127 @@ def write_mcp_server_config(
         candidate = dict(entry)
         _parse_server(server_id, candidate)
         raw[server_id] = candidate
+    _write_mcp_raw(path, raw, workspace_root=workspace_root)
+    return path
+
+
+def create_workspace_mcp_server_config(
+    *,
+    workspace_root: Path,
+    server_id: str,
+    entry: Mapping[str, Any],
+) -> WorkspaceMcpConfigWriteResult:
+    """Create one exact project entry and return the value that was written."""
+
+    path = workspace_mcp_config_path(workspace_root)
+    raw = _load_raw(path)
+    if server_id in raw:
+        raise ValueError("MCP server id already exists in this project")
+    candidate = dict(entry)
+    config = _parse_server(
+        server_id,
+        candidate,
+        runtime_source=LocalConfiguredMcpRuntimeSource(
+            McpLocalConfigSourceKind.WORKSPACE
+        ),
+    )
+    raw[server_id] = candidate
+    _write_mcp_raw(path, raw, workspace_root=workspace_root)
+    return WorkspaceMcpConfigWriteResult(path=path, config=config)
+
+
+def set_workspace_mcp_server_enabled(
+    *,
+    workspace_root: Path,
+    server_id: str,
+    enabled: bool,
+    expected_approval_identity: str,
+) -> WorkspaceMcpConfigWriteResult:
+    """Change one project entry only if it is the value the user inspected."""
+
+    path = workspace_mcp_config_path(workspace_root)
+    raw = _load_raw(path)
+    entry = raw.get(server_id)
+    if entry is None:
+        raise KeyError(server_id)
+    current = _parse_server(
+        server_id,
+        entry,
+        runtime_source=LocalConfiguredMcpRuntimeSource(
+            McpLocalConfigSourceKind.WORKSPACE
+        ),
+    )
+    if (
+        mcp_server_workspace_approval_identity(current)
+        != expected_approval_identity
+    ):
+        raise WorkspaceMcpConfigStaleError(
+            "MCP configuration changed; refresh before editing it"
+        )
+    updated = dict(entry)
+    updated["enabled"] = enabled
+    config = _parse_server(
+        server_id,
+        updated,
+        runtime_source=LocalConfiguredMcpRuntimeSource(
+            McpLocalConfigSourceKind.WORKSPACE
+        ),
+    )
+    raw[server_id] = updated
+    _write_mcp_raw(path, raw, workspace_root=workspace_root)
+    return WorkspaceMcpConfigWriteResult(path=path, config=config)
+
+
+def remove_workspace_mcp_server_config(
+    *,
+    workspace_root: Path,
+    server_id: str,
+    expected_approval_identity: str,
+) -> WorkspaceMcpConfigWriteResult:
+    """Remove one project entry only if it is the value the user inspected."""
+
+    path = workspace_mcp_config_path(workspace_root)
+    raw = _load_raw(path)
+    entry = raw.get(server_id)
+    if entry is None:
+        raise KeyError(server_id)
+    current = _parse_server(
+        server_id,
+        entry,
+        runtime_source=LocalConfiguredMcpRuntimeSource(
+            McpLocalConfigSourceKind.WORKSPACE
+        ),
+    )
+    if (
+        mcp_server_workspace_approval_identity(current)
+        != expected_approval_identity
+    ):
+        raise WorkspaceMcpConfigStaleError(
+            "MCP configuration changed; refresh before editing it"
+        )
+    raw.pop(server_id)
+    _write_mcp_raw(path, raw, workspace_root=workspace_root)
+    return WorkspaceMcpConfigWriteResult(path=path, config=None)
+
+
+def _write_mcp_raw(
+    path: Path,
+    raw: Mapping[str, Mapping[str, Any]],
+    *,
+    workspace_root: Path | None,
+) -> None:
+    if len(raw) > MAXIMUM_MCP_CONFIGURED_SERVERS:
+        raise McpConfiguredServerBoundExceeded("too many configured MCP servers")
     encoded = yaml.safe_dump(
         {"servers": raw}, sort_keys=True, allow_unicode=True
     ).encode("utf-8")
     if len(encoded) > MAXIMUM_MCP_CONFIG_BYTES:
         raise ValueError("MCP config exceeds the byte bound")
     path.parent.mkdir(parents=True, exist_ok=True)
+    if workspace_root is not None:
+        expected = workspace_mcp_config_path(workspace_root)
+        if expected != path or path.parent.resolve(strict=True) != path.parent:
+            raise ValueError("project capability directory changed while saving")
     descriptor, temporary = tempfile.mkstemp(
         dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
     )
@@ -478,7 +647,6 @@ def write_mcp_server_config(
         except FileNotFoundError:
             pass
         raise
-    return path
 
 
 def set_mcp_server_enabled(
@@ -491,7 +659,7 @@ def set_mcp_server_enabled(
     """Edit one explicit config entry without serializing runtime discovery."""
 
     path = (
-        workspace_root.expanduser().resolve() / WORKSPACE_MCP_CONFIG
+        workspace_mcp_config_path(workspace_root)
         if workspace_root is not None
         else user_config_path.expanduser()
     )
@@ -501,12 +669,10 @@ def set_mcp_server_enabled(
         raise KeyError(server_id)
     updated = dict(entry)
     updated["enabled"] = enabled
-    return write_mcp_server_config(
-        server_id=server_id,
-        entry=updated,
-        workspace_root=workspace_root,
-        user_config_path=user_config_path,
-    )
+    _parse_server(server_id, updated)
+    raw[server_id] = updated
+    _write_mcp_raw(path, raw, workspace_root=workspace_root)
+    return path
 
 
 def freeze_mcp_server_config(
@@ -752,12 +918,12 @@ def _parse_server(
         isinstance(include, str) and include.lower() == "all"
     )
     exposure = McpExposurePolicy(
-        include_tool_names=(None if include_all else _sorted_string_list(include, "MCP included tools")),
+        include_tool_names=(
+            None if include_all else _sorted_string_list(include, "MCP included tools")
+        ),
         exclude_tool_names=tuple(
             _sorted_string_list(
-                exposure_raw.get(
-                    "exclude_tool_names", exposure_raw.get("exclude", [])
-                ),
+                exposure_raw.get("exclude_tool_names", exposure_raw.get("exclude", [])),
                 "MCP excluded tools",
             )
         ),
@@ -793,9 +959,13 @@ def _parse_server(
     )
     per_timeout = {
         name: _integer(value, "MCP per-tool timeout")
-        for name, value in _mapping(raw.get("per_tool_timeout_ms", {}), "MCP per-tool timeout").items()
+        for name, value in _mapping(
+            raw.get("per_tool_timeout_ms", {}), "MCP per-tool timeout"
+        ).items()
     }
-    refresh_raw = raw.get("catalog_refresh_interval_ms", DEFAULT_MCP_REFRESH_INTERVAL_MS)
+    refresh_raw = raw.get(
+        "catalog_refresh_interval_ms", DEFAULT_MCP_REFRESH_INTERVAL_MS
+    )
     refresh = (
         None
         if isinstance(refresh_raw, str) and refresh_raw.upper() == "DISABLED"
@@ -865,7 +1035,11 @@ def _parse_auth(raw: object) -> McpAuthConfig:
         )
     if kind == "static_header_environment_refs":
         return StaticHeaderEnvironmentRefs(
-            tuple(sorted(_string_mapping(raw.get("headers", {}), "MCP auth headers").items()))
+            tuple(
+                sorted(
+                    _string_mapping(raw.get("headers", {}), "MCP auth headers").items()
+                )
+            )
         )
     if kind == "oauth":
         return UnsupportedOAuth()
@@ -919,6 +1093,37 @@ def _auth_fingerprint_payload(value: McpAuthConfig) -> object:
     return {"kind": value.kind}
 
 
+def _transport_workspace_approval_payload(value: McpTransportConfig) -> object:
+    """Freeze the approved transport authority without process-local secrets."""
+
+    if isinstance(value, StdioTransportConfig):
+        return {
+            "kind": value.kind.value,
+            "command": value.command,
+            "args": value.args,
+            "cwd": _cwd_fingerprint_payload(value.cwd),
+            "environment": value.environment,
+            "secret_environment_refs": value.secret_environment_refs,
+        }
+    return {
+        "kind": value.kind.value,
+        "endpoint": value.endpoint,
+        "allow_http_localhost": value.allow_http_localhost,
+        "network_policy": value.network_policy.value,
+        "proved_stateless": value.proved_stateless,
+    }
+
+
+def _auth_workspace_approval_payload(value: McpAuthConfig) -> object:
+    """Freeze secret reference names, never their values or process commitments."""
+
+    if isinstance(value, StaticHeaderEnvironmentRefs):
+        return {"kind": value.kind, "refs": value.headers}
+    if isinstance(value, BearerEnvironmentRef):
+        return {"kind": value.kind, "ref": value.environment_variable}
+    return {"kind": value.kind}
+
+
 def _cwd_fingerprint_payload(value: McpStdioCwdBinding) -> object:
     if isinstance(value, WorkspaceRelativeMcpCwd):
         return {"kind": "WORKSPACE_RELATIVE", "relative_path": value.relative_path}
@@ -953,13 +1158,42 @@ def _secret_generation_commitment(environment_variable: str) -> str:
         + b"\0"
         + (value.encode("utf-8") if value is not None else b"<absent>")
     )
-    return "hmac-sha256:" + hmac.new(
-        _PROCESS_SECRET_COMMITMENT_KEY,
-        payload,
-        hashlib.sha256,
-    ).hexdigest()
+    return (
+        "hmac-sha256:"
+        + hmac.new(
+            _PROCESS_SECRET_COMMITMENT_KEY,
+            payload,
+            hashlib.sha256,
+        ).hexdigest()
+    )
 
 
+def mcp_server_workspace_approval_identity(config: McpServerConfig) -> str:
+    """Return the stable identity of the exact authority a user approved.
+
+    Runtime identities intentionally include process-local commitments so a
+    secret rotation reconnects a live MCP client.  Durable workspace approval
+    instead binds the complete non-secret configuration plus secret reference
+    names.  It therefore survives a process restart without weakening the
+    runtime identity used by the supervisor.
+    """
+
+    return context_fingerprint(
+        "pulsara:mcp-workspace-approval:v1",
+        {
+            "server_id": config.server_id,
+            "semantic_config_fingerprint": config.semantic_config_fingerprint,
+            "transport": _transport_workspace_approval_payload(config.transport),
+            "auth": _auth_workspace_approval_payload(config.auth),
+            "supports_parallel_tool_calls": config.supports_parallel_tool_calls,
+            "stateless_http_max_in_flight": config.stateless_http_max_in_flight,
+            "catalog_refresh_interval_ms": config.catalog_refresh_interval_ms,
+            "default_tool_timeout_ms": config.default_tool_timeout_ms,
+            "per_tool_timeout_ms": config.per_tool_timeout_ms,
+            "runtime_source": _runtime_source_payload(config.runtime_source),
+            "public_headers": config.public_headers,
+        },
+    )
 def _derive_config_fingerprints(
     *,
     server_id: str,
@@ -1008,9 +1242,7 @@ def _derive_config_fingerprints(
         "runtime_source": _runtime_source_payload(runtime_source),
         "public_headers": public_headers,
     }
-    semantic = context_fingerprint(
-        "pulsara:mcp-semantic-config:v1", semantic_payload
-    )
+    semantic = context_fingerprint("pulsara:mcp-semantic-config:v1", semantic_payload)
     runtime = context_fingerprint("pulsara:mcp-runtime-config:v1", runtime_payload)
     resolved = context_fingerprint(
         "pulsara:mcp-resolved-config:v1",
@@ -1034,7 +1266,9 @@ def _load_raw(path: Path) -> dict[str, dict[str, Any]]:
     text = data.decode("utf-8")
     if not text.strip():
         return {}
-    payload = json.loads(text) if path.suffix.lower() == ".json" else yaml.safe_load(text)
+    payload = (
+        json.loads(text) if path.suffix.lower() == ".json" else yaml.safe_load(text)
+    )
     if payload is None:
         return {}
     if not isinstance(payload, Mapping):
@@ -1046,7 +1280,7 @@ def _load_raw(path: Path) -> dict[str, dict[str, Any]]:
         raise ValueError(f"MCP config 'servers' must be an object: {path}")
     result: dict[str, dict[str, Any]] = {}
     if len(servers) > MAXIMUM_MCP_CONFIGURED_SERVERS:
-        raise ValueError("too many configured MCP servers")
+        raise McpConfiguredServerBoundExceeded("too many configured MCP servers")
     for raw_id, raw_entry in servers.items():
         if not isinstance(raw_id, str):
             raise ValueError("MCP server id must be a string")
@@ -1069,7 +1303,9 @@ def _reject_unknown_keys(
     value: Mapping[object, object], allowed: set[str], label: str
 ) -> None:
     unknown = tuple(
-        sorted(str(key) for key in value if not isinstance(key, str) or key not in allowed)
+        sorted(
+            str(key) for key in value if not isinstance(key, str) or key not in allowed
+        )
     )
     if unknown:
         raise ValueError(f"{label} contains unknown fields: {', '.join(unknown)}")
@@ -1148,8 +1384,7 @@ def _validate_public_headers(values: tuple[tuple[str, str], ...]) -> None:
             or name.casefold() in folded
             or value != value.strip(" \t")
             or any(
-                item not in {9, 32} and not 33 <= item <= 126
-                for item in encoded_value
+                item not in {9, 32} and not 33 <= item <= 126 for item in encoded_value
             )
         ):
             raise ValueError("MCP public header is invalid")
@@ -1180,6 +1415,7 @@ __all__ = [
     "ExactAbsoluteMcpCwd",
     "LocalConfiguredMcpRuntimeSource",
     "ManagedPackageMcpRuntimeSource",
+    "McpConfiguredServerBoundExceeded",
     "McpAbsoluteCwdAuthority",
     "McpConfiguredEffect",
     "McpEffectPolicyConfig",
@@ -1196,11 +1432,19 @@ __all__ = [
     "StdioTransportConfig",
     "StreamableHttpTransportConfig",
     "UnsupportedOAuth",
+    "WorkspaceMcpConfigWriteResult",
+    "WorkspaceMcpConfigStaleError",
     "WorkspaceRelativeMcpCwd",
+    "create_workspace_mcp_server_config",
     "freeze_mcp_server_config",
     "WORKSPACE_MCP_CONFIG",
     "load_mcp_server_configs",
     "load_workspace_mcp_server_configs",
+    "mcp_server_workspace_approval_identity",
+    "remove_workspace_mcp_server_config",
     "set_mcp_server_enabled",
+    "set_workspace_mcp_server_enabled",
+    "validate_workspace_mcp_server_addition_capacity",
+    "workspace_mcp_config_path",
     "write_mcp_server_config",
 ]

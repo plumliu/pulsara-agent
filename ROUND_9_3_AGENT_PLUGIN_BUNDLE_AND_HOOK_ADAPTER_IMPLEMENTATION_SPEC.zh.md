@@ -626,7 +626,7 @@ pulsara plugins gc [--workspace <path>]
 
 每项支持human与`--json`projection。`list`只显示current USER/WORKSPACE instances与effective component summary；`doctor`显示invalid、disabled、shadowed/conflicting、component unavailable、unreferenced/in-use roots与trust/reload notices。两者不能各自scan。
 
-`enable`在mutation前必须投影exact current install的normalized summary：Skill names/descriptions、每个MCP stdio command/args/cwd/env key/value、HTTP endpoint/public header key/value与完整Hook definitions。Interactive CLI显示summary并要求明确确认；non-interactive `--yes`只省略prompt，仍把刚观察的exact install id和`ACCEPTED`传给typed operation。Desktop/未来Web UI直接展示同一typed summary并调用service，不解析CLI输出。Enable Plugin MCP授权future composition以Host OS user启动/connect server；具体remote tool invocation仍完整经过existing scope、permission、effect、dirty和attempt owners。Enable不等于Hook trust，Hook command继续单独exact trust。
+`enable`在mutation前必须投影exact current install的normalized summary：Skill names/descriptions、每个MCP stdio command/args/cwd/env key/value、HTTP endpoint/public header key/value与完整Hook definitions。Interactive CLI显示summary并要求明确确认；non-interactive `--yes`只省略prompt，仍把刚观察的exact install id和`ACCEPTED`传给typed operation。Desktop/未来Web UI直接展示同一typed summary并调用service，不解析CLI输出；管理界面可以把exact install id作为mutation输入，但不得向用户展示managed package root、随机package install id或内部存储层级。Enable Plugin MCP授权future composition以Host OS user启动/connect server；具体remote tool invocation仍完整经过existing scope、permission、effect、dirty和attempt owners。Enable不等于Hook trust，Hook command继续单独exact trust。
 
 Global `pulsara` launcher继续由`[project.scripts]`发行，必须从任意non-source cwd运行，不依赖repository cwd、repository `.venv`、`PYTHONPATH`、source symlink或`uv run`。
 

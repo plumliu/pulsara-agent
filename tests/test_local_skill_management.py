@@ -68,9 +68,7 @@ from pulsara_agent.exclusive_publish import ExclusivePublishPrimitiveUnavailable
 
 
 def _no_plugin_skills() -> FrozenPluginSkillDefinitions:
-    return FrozenPluginSkillDefinitions(
-        PluginSkillDefinitionsDisposition.COMPLETE
-    )
+    return FrozenPluginSkillDefinitions(PluginSkillDefinitionsDisposition.COMPLETE)
 
 
 def _document(
@@ -183,7 +181,7 @@ def test_local_skill_validation_reuses_root_neutral_production_parser(
         _document("wrong-directory"),
     ],
 )
-def test_validation_and_runtime_use_exactly_the_same_parser_contract(
+def test_source_validation_and_runtime_share_parser_but_runtime_enforces_placement(
     tmp_path: Path,
     document: str | bytes,
 ) -> None:
@@ -198,8 +196,9 @@ def test_validation_and_runtime_use_exactly_the_same_parser_contract(
         if direct.parsed is not None
         else None
     )
-    direct_valid = direct.parsed is not None and placement is not None and placement.valid
-    direct_diagnostics = (
+    source_valid = direct.parsed is not None
+    runtime_valid = source_valid and placement is not None and placement.valid
+    runtime_diagnostics = (
         *direct.diagnostics,
         *(placement.diagnostics if placement is not None else ()),
     )
@@ -213,19 +212,26 @@ def test_validation_and_runtime_use_exactly_the_same_parser_contract(
     provider = _loose_producer(tmp_path / "runtime-user")
     discovery = provider.observe(provider.prepare_root_policy(runtime_root))
 
-    assert (validation.disposition is LocalSkillValidationDisposition.VALID) == (
-        direct_valid
-    )
-    if not direct_valid:
+    assert (
+        validation.disposition is LocalSkillValidationDisposition.VALID
+    ) == source_valid
+    if not source_valid:
         assert validation.disposition is LocalSkillValidationDisposition.INVALID
         assert [item.code for item in validation.diagnostics] == [
-            item.code for item in direct_diagnostics
+            item.code for item in direct.diagnostics
         ]
+    else:
+        assert validation.parsed == direct.parsed
+        assert [item.code for item in validation.diagnostics] == [
+            item.code for item in direct.diagnostics
+        ]
+
+    if not runtime_valid:
         assert len(discovery.invalid_issues) == 1
         issue = discovery.invalid_issues[0]
         assert isinstance(issue, InvalidSkillCandidateIssue)
         assert [item.code for item in issue.diagnostics] == [
-            item.code for item in direct_diagnostics
+            item.code for item in runtime_diagnostics
         ]
     else:
         assert direct.parsed is not None
@@ -255,18 +261,18 @@ def test_local_skill_validation_closed_invalid_and_unavailable_outcomes(
         SkillDiagnosticCode.MISSING_DOCUMENT
     ]
 
-    mismatch = _source(
+    aliased = _source(
         tmp_path,
         "actual-name",
         document=_document("different-name"),
     )
     result = service.validate_local_skill_source(
-        ValidateLocalSkillSourceRequest(mismatch)
+        ValidateLocalSkillSourceRequest(aliased)
     )
-    assert result.disposition is LocalSkillValidationDisposition.INVALID
-    assert SkillDiagnosticCode.DIRECTORY_NAME_MISMATCH in {
-        item.code for item in result.diagnostics
-    }
+    assert result.disposition is LocalSkillValidationDisposition.VALID
+    assert result.parsed is not None
+    assert result.parsed.name == "different-name"
+    assert not result.diagnostics
 
 
 def test_shared_pulsara_home_resolution_is_absolute_and_cwd_independent(
@@ -626,6 +632,31 @@ def test_install_never_overwrites_existing_destination(tmp_path: Path) -> None:
     assert result.disposition is LocalSkillInstallDisposition.DESTINATION_EXISTS
     assert marker.read_text(encoding="utf-8") == "existing\n"
     assert not (destination / "SKILL.md").exists()
+
+
+def test_install_publishes_source_alias_under_validated_manifest_name(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source = _source(
+        tmp_path / "market-package",
+        "repository-folder-name",
+        document=_document("vendor-market-skill"),
+    )
+
+    result = LocalSkillManagementService().install_loose_local_skill(
+        _workspace_request(source, workspace)
+    )
+
+    if not (sys.platform == "darwin" or sys.platform.startswith("linux")):
+        assert result.disposition is LocalSkillInstallDisposition.PUBLISH_UNAVAILABLE
+        return
+    assert result.disposition is LocalSkillInstallDisposition.INSTALLED
+    destination = workspace / ".pulsara" / "skills" / "vendor-market-skill"
+    assert result.destination_path == destination
+    assert (destination / "SKILL.md").is_file()
+    assert not (workspace / ".pulsara" / "skills" / source.name).exists()
 
 
 def test_install_rejects_reserved_control_symlink_and_source_target_overlap(

@@ -34,7 +34,6 @@ from pulsara_agent.capability.local_skills import (
     ParsedSkillDocument,
     diagnostic_at,
     parse_skill_document,
-    validate_skill_candidate_placement,
 )
 from pulsara_agent.capability.pulsara_home import (
     PulsaraHomeResolution,
@@ -355,24 +354,16 @@ def _validate_source(source_path: Path) -> LocalSkillValidationOutcome:
             )
         try:
             result = parse_skill_document(b"".join(chunks))
-            placement = (
-                validate_skill_candidate_placement(result.parsed, source.name)
-                if result.parsed is not None
-                else None
-            )
             diagnostics = tuple(
                 diagnostic_at(item, source / SKILL_FILE_NAME)
-                for item in (
-                    *result.diagnostics,
-                    *((placement.diagnostics) if placement is not None else ()),
-                )
+                for item in result.diagnostics
             )
         except MemoryError:
             return _validation_unavailable(
                 source,
                 LocalSkillValidationUnavailableReason.SKILL_DOCUMENT_READ_UNAVAILABLE,
             )
-        if result.parsed is None or (placement is not None and not placement.valid):
+        if result.parsed is None:
             return LocalSkillValidationOutcome(
                 LocalSkillValidationDisposition.INVALID,
                 source,

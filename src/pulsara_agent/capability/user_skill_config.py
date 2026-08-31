@@ -14,6 +14,7 @@ from pulsara_agent.capability.pulsara_home import require_pulsara_home
 
 
 USER_SKILL_CONFIG_NAME = "skills.yaml"
+WORKSPACE_SKILL_CONFIG = ".pulsara/skills.yaml"
 MAXIMUM_USER_SKILL_CONFIG_BYTES = 1024 * 1024
 
 
@@ -58,6 +59,19 @@ class UserSkillConfigSnapshot:
 
 def default_user_skill_config_path() -> Path:
     return require_pulsara_home() / USER_SKILL_CONFIG_NAME
+
+
+def workspace_skill_config_path(workspace_root: Path) -> Path:
+    root = workspace_root.expanduser().resolve(strict=False)
+    directory = root / ".pulsara"
+    if directory.is_symlink():
+        raise ValueError("project capability directory must not be a symlink")
+    if directory.exists() and not directory.is_dir():
+        raise ValueError("project capability directory is not a directory")
+    path = directory / "skills.yaml"
+    if path.is_symlink():
+        raise ValueError("project Skill config must not be a symlink")
+    return path
 
 
 def load_user_skill_config(
@@ -166,9 +180,11 @@ def _unavailable(path: Path) -> UserSkillConfigSnapshot:
 __all__ = [
     "MAXIMUM_USER_SKILL_CONFIG_BYTES",
     "USER_SKILL_CONFIG_NAME",
+    "WORKSPACE_SKILL_CONFIG",
     "UserSkillConfigEntry",
     "UserSkillConfigSnapshot",
     "default_user_skill_config_path",
     "load_user_skill_config",
     "set_user_skill_enabled",
+    "workspace_skill_config_path",
 ]

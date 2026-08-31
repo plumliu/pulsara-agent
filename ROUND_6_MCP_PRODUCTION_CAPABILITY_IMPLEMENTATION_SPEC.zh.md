@@ -159,7 +159,7 @@ Round 6 activation 必须覆盖：
 
 - user/workspace MCP config 解析与 closed precedence；
 - stdio 与 Streamable HTTP transport；
-- initialize、协商与 bounded tools/list 完整发现；
+- modern discover 或显式协商成功的 legacy initialize、以及 bounded tools/list 完整发现；
 - optional/required server startup 语义；
 - retry、manual reconnect、config reload、list-changed reconcile 与 Host-policy periodic refresh；
 - exact schema normalization 与 direct provider tool exposure；
@@ -194,10 +194,10 @@ Round 6冻结hard-cut前已经验证过的official Python SDK public-v2 seam：
 ~~~text
 mcp[cli]==2.0.0
 mcp-types==2.0.0  # 由official SDK依赖闭合，uv.lock必须exact确认
-Pulsara semantic contract: pulsara.mcp-sdk-v2.2026-07-28.v1
+Pulsara semantic contract: pulsara.mcp-sdk-v2.2026-09-01.v2
 ~~~
 
-SDK自身可以按public negotiation API与兼容server协商，但Pulsara只接受本文closed vocabulary中的core tools/resources/prompts、exact `"complete" | "input_required"`与elicitation mode；未知experimental result type、capability或extension必须typed fail closed。production不得复制SDK的private header map、exit stack或frame state，也不得因为未来SDK出现新字段就把开放JSON直接投影成成功ToolResult。
+SDK自身可以按public negotiation API与兼容server协商。Pulsara首先尝试modern `server/discover`；仅当该请求明确返回`METHOD_NOT_FOUND(-32601)`或`INVALID_PARAMS(-32602)`，并且随后public `initialize`成功时，才冻结为legacy compatibility era。其他discover/initialize错误不得触发兼容回退。Pulsara只接受本文closed vocabulary中的core tools/resources/prompts、closed result type与elicitation mode；未知experimental result type、capability或extension必须typed fail closed。production不得复制SDK的private header map、exit stack或frame state，也不得因为未来SDK出现新字段就把开放JSON直接投影成成功ToolResult。
 
 ---
 
@@ -613,6 +613,20 @@ resolved_config_identity = H(
 )
 ~~~
 
+`resolved_config_identity`仍只服务于一次运行内的physical client exact join；其中的secret-generation commitment是process-local的，进程重启或secret轮换可以形成新的连接身份。项目批准不得持久化这个process-local值，而使用独立的真实持久边界：
+
+~~~text
+workspace_approval_identity = H(
+  "pulsara:mcp-workspace-approval:v1",
+  server_id,
+  semantic_config_fingerprint,
+  complete configured transport/auth/runtime policy,
+  secret reference names (never secret values or process-local commitments),
+)
+~~~
+
+该身份绑定用户实际批准的完整非secret authority，跨进程稳定；ambient process `PATH`只参与本次运行的physical executable lookup与runtime identity，不得进入durable批准身份。secret值变化仍由runtime identity触发重连，但不会撤销用户对同一secret reference的批准。
+
 candidate必须同时携带并exact compare两个fingerprint以及resolved identity；不得用含义不明的单一`expected_config_fingerprint`让实现者临场决定比较哪一层。
 
 数值config在parse时闭合：
@@ -634,7 +648,13 @@ user config
     < explicit Host open overrides
 ~~~
 
-同 server_id 按 whole-entry replacement，不做字段级深合并，避免 user auth 与 workspace endpoint 被意外拼成新 authority。解析后按 server_id 排序。workspace 文件属于 repository-owned input，普通 Host open 默认不信任：它不能覆盖 user entry，workspace-only entry会保留为可诊断但强制`enabled=false`的配置。只有当前 Host open 显式传入`--trust-workspace-mcp`，或用户进入显式 workspace MCP 管理命令时，workspace entry 才能成为active physical配置；仅checkout一个仓库永远不能自动启动command或解封header/bearer secret reference。
+同 server_id 按 whole-entry replacement，不做字段级深合并，避免 user auth 与 workspace endpoint 被意外拼成新 authority。解析后按 server_id 排序。workspace 文件属于 repository-owned input，普通 Host open 默认不信任：它不能覆盖 user entry，workspace-only entry会保留为可诊断但强制`enabled=false`的配置。只有当前 Host open 显式传入`--trust-workspace-mcp`，或用户通过本机项目能力管理界面明确添加、开启某一个 workspace entry 后，该 entry 才能成为active physical配置；仅checkout一个仓库永远不能自动启动command或解封header/bearer secret reference。
+
+项目能力管理采用**逐 server、逐完整解析值**的本机批准。每个物理 workspace 在用户目录中拥有独立批准文件，entry 由`server_id`与`workspace_approval_identity` exact join；单项目文件继续服从有依据的单次读取字节边界，项目数量之间不存在共享总量上限。批准记录不对同一`mcp.yaml`中的其他 entry 授权；批准前重新读取当前 entry，只在它仍与刚写入/查看的稳定批准身份一致时落盘，并顺手清除已不存在或已改变的旧批准。普通 Host open 会恢复仍与批准值完全一致的 entry；仓库外部改动只使被改动 entry 失效，其他已批准 entry 保持不变；关闭或移除 entry 时立即撤销该 entry 的本机批准，批准文件为空后随即删除，损坏或符号链接的批准文件在撤销路径按exact path删除而不能保留authority。创建、启停和移除必须先由 canonical `session_id`解析workspace，再对用户刚查看的`workspace_approval_identity`做乐观陈旧值检查；陈旧身份以typed conflict返回并要求前端刷新snapshot，浏览器不得提交任意目标目录。任何已经写入项目配置的mutation即使后续批准清理失败，也必须标记同目录live sessions在安全点刷新。`<workspace>/.pulsara`、`mcp.yaml`或`skills.yaml`是符号链接时，项目级读取和写入一律closed拒绝，不能把项目操作重定向到用户配置。
+
+同目录所有live sessions只在各自下一次root user turn admission前的safe point惰性采用最新目录配置；这不是provider-prefix rebase。一次确定性采用失败必须consume该requested revision、保留上一次可用MCP物理配置、投影用户可见attention并允许已排队turn继续，不能以固定周期静默重试。后续明确的项目mutation会产生新revision并再次尝试。
+
+项目能力前端的inspection attempt与loading只能由当前active session拥有；旧会话late mutation失败后的刷新必须no-op，不能淘汰新会话正在进行的inspection。连接失败沿用supervisor现有stable failure category，但前端必须把实际生产类别翻译成可操作的用户文案，不展示内部异常名；Skill冲突只展示技能名与处理含义，不铺开绝对路径、producer诊断或内部目录结构。普通能力采用失败与MCP部分采用失败使用不同提示。添加mutation提交期间，弹窗的backdrop、关闭、取消、字段和重复提交入口全部锁定，主面板“添加”入口同步禁用，直到唯一请求settle。
 
 配置物理真源继续使用当前 neutral detector 已冻结的两个路径：
 
@@ -644,9 +664,9 @@ workspace config  <workspace-root>/.pulsara/mcp.yaml
 Host open override  process-local only
 ~~~
 
-Round 9.3 enabled-package view是第三种**adapter input**而不是第三个YAML precedence layer：每个portable server使用injective `plugin:<utf8-length>:<plugin-id>:<local-server-id>` native id；与local/Host id或另一个Plugin id形成collision group时整组Plugin candidates不进入supervisor。Local configs与accepted Plugin configs共同服从existing `MAXIMUM_MCP_CONFIGURED_SERVERS = 64` aggregate bound；不能为Plugin另开64个slots。Workspace-vs-USER Plugin component/leaf selection由Round 9.3 complete view先闭合，native MCP core不解析scope state。
+Round 9.3 enabled-package view是第三种**adapter input**而不是第三个YAML precedence layer：每个portable server使用injective `plugin:<utf8-length>:<plugin-id>:<local-server-id>` native id；与local/Host id或另一个Plugin id形成collision group时整组Plugin candidates不进入supervisor。Local configs与accepted Plugin configs共同服从existing `MAXIMUM_MCP_CONFIGURED_SERVERS = 64` aggregate bound；不能为Plugin另开64个slots。项目管理写入必须在temporary file与`os.replace`之前验证单文档以及当前local+accepted Plugin组合，容量失败不得先污染项目文件。Workspace-vs-USER Plugin component/leaf selection由Round 9.3 complete view先闭合，native MCP core不解析scope state。
 
-`pulsara mcp add` 默认写 user config；只有显式 `--workspace` 才写 workspace config。`mcp list/doctor/add/enable/disable --workspace`本身属于显式管理行为，但随后普通`host run/repl/tui`仍需`--trust-workspace-mcp`才激活repository-owned配置。Host open override 不回写文件。配置文件只保存用户明确填写的 server/tool effect override，不保存 discovery 后自动推导出的每个 tool classification，也不保存 connection generation、candidate、slot 或 approval decision。
+`pulsara mcp add` 默认写 user config；只有显式 `--workspace` 才写 workspace config。CLI 的 `--trust-workspace-mcp` 仍是本次 Host open 的全 workspace 显式信任；本地 Web 项目能力管理则只持久批准用户实际添加或开启的 exact entry，两者不得互相扩大。Host open override 不回写文件。配置文件只保存用户明确填写的 server/tool effect override，不保存 discovery 后自动推导出的每个 tool classification，也不保存 connection generation、candidate、slot 或 approval decision；逐 entry 的本机批准保存在用户目录，而不是仓库中。
 
 连接 server 时不要求用户逐个给 tool 选择 effect kind。默认 classification 在每次完整 discovery candidate 中确定；用户只有在 server annotation 不准确或希望采用更严格分类时，才需要编辑 config 或使用后续 CLI override。
 
@@ -1191,14 +1211,17 @@ validated methods
   prompts/get
 ~~~
 
-- V1只与能够协商本文SDK contract、并为上述响应显式携带该era所要求resultType字段的peer工作；
+- modern discover era要求上述响应显式携带`resultType`；
+- 只有先拒绝modern discover、再成功完成legacy initialize的peer进入legacy compatibility era；该旧协议不能表达human-bearing input-required，因此缺失`resultType`只在此era、且仅对非`InputRequiredResult`的成功响应归一化为exact `complete`；
 - bounded wire adapter必须保留top-level字段presence fact，再交给typed model；不能把SDK对缺失字段填入的默认值当成wire presence；
 - exact `complete` 才能进入ordinary known-result lowering；exact `input_required` 只能进入第11章round owner；
-- missing、unknown字符串（例如future result type）或resultType与payload形状矛盾都形成typed protocol-conformance failure，canonical success/result lowering count为0；
+- modern era的missing、任何era的unknown字符串（例如future result type）或resultType与payload形状矛盾都形成typed protocol-conformance failure，canonical success/result lowering count为0；
 - validation同样适用于resources/read与prompts/get，不能只包住tools/call；
 - 该seam只保存本次process-local presence/typed fact，不持久化raw envelope或开放resultType。
 
 initialize/discover还必须冻结negotiated capability set：只在`tools`、`resources`、`prompts`对应capability存在时调用其listing方法；未广告的surface投影为空。合法tools-only、resources-only或prompts-only server不能因为另一方法返回`METHOD_NOT_FOUND`而进入FAILED。
+
+legacy initialize era中，早期server可以广告`resources`却未实现后加入的`resources/templates/list`。仅当该连接已经显式协商为legacy era、且该方法exact返回`METHOD_NOT_FOUND(-32601)`时，adapter把模板子面冻结为空；modern era、resources/list本身、其他错误码或已开始返回的畸形分页都不得走该兼容分支。
 
 ### 9.6 Progress 与 logging
 
@@ -1492,7 +1515,9 @@ foreign Host、foreign child、expired generation 或 same-shape copied DTO 必�
 | schema 变化 | 无 | safe-point 安装并触发 new provider-input epoch | discovery 允许，tool call 不重试 |
 | list-changed storm | 无 | 单 server dirty bit + bounded wake | coalesced full relist |
 | listChanged后旧response返回tool call | typed no-attempt `MCP_SNAPSHOT_STALE` result | 不取得operation permit；等待reconcile | 当前call不重放 |
-| missing/unknown resultType | typed protocol-conformance failure，不接受success | exact operation收口；slot按compatibility policy降级/关闭 | 当前call不重放 |
+| modern missing / 任意era unknown resultType | typed protocol-conformance failure，不接受success | exact operation收口；slot按compatibility policy降级/关闭 | 当前call不重放 |
+| 已协商legacy era缺失resultType | 只对非input-required响应归一化为exact complete | 保留wire presence fact与legacy era fact，不开放猜测 | 否 |
+| legacy resources/templates/list METHOD_NOT_FOUND | resource templates冻结为空 | 仅限已协商legacy era；其他listing与错误保持可见 | 否 |
 | tool 已明确返回 success/error | 接受 exact ToolResult | 正常 release borrow | 否 |
 | tools/call 确定未写出 | known typed transport failure 可接受 | reconnect 供未来调用 | 当前调用不重跑 |
 | tools/call 可能写出但响应丢失 | attempt 无 result，turn interrupted | reconnect 供未来调用 | 绝不自动重跑 |
@@ -1624,7 +1649,8 @@ Exit gate：
 - bounded initialize/listing，且listing严格服从negotiated capability set；
 - schema conformance 与 deterministic naming；
 - 任意合法remote tool name在exposure前都必须证明最终remote identity可进入canonical 4 KiB contract；V1使用覆盖server、connection generation和完整remote name的domain-separated bounded digest，不把原始长name带到result settlement；
-- negotiated-era `complete | input_required` resultType wire-presence validation；
+- modern era的`complete | input_required` wire-presence validation，以及只在协商成功legacy era内的implicit-complete归一化；
+- legacy era中缺失resource-template listing方法只归一化为空模板子面，modern era保持strict；
 - server cache hint在V1被明确忽略，refresh只由Host policy驱动；
 - no SDK private API。
 
@@ -1676,7 +1702,7 @@ Exit gate：
 - exact scope/permission/generation；
 - exact slot operation permit在attempt前取得，dirty/revoked slot产生no-attempt stale result；
 - known/unknown 结果矩阵；
-- missing/unknown resultType在success lowering前fail closed；
+- modern missing / 任意era unknown resultType在success lowering前fail closed；legacy missing只在协商成功的compatibility era归一化为complete；
 - Round 1 artifact；
 - no ambiguous retry；
 - resources/templates/prompts的stable builtin descriptors、exact snapshot binding与untrusted lowering；
@@ -1984,7 +2010,7 @@ git diff --check
 Round 6 只有同时满足以下条件才能标记 ACTIVATED：
 
 - enabled MCP config 不再阻止 Kernel open；
-- workspace MCP只有在当前Host显式trust后才能启动或解封secret reference；
+- workspace MCP只有在当前Host显式trust，或该物理目录下的 exact server entry 已经由本机项目能力管理明确批准后，才能启动或解封secret reference；
 - stdio 和 Streamable HTTP 至少各有一条 production happy path；
 - optional/required startup 语义闭合；
 - descriptor 与 executor exact same-generation；
@@ -2000,7 +2026,7 @@ Round 6 只有同时满足以下条件才能标记 ACTIVATED：
 - 自动effect classification仅存于process-local generation，只有显式override写入既有user/workspace YAML；
 - resources/templates/prompts标准read surface使用exact generation与untrusted result lowering；advertised resource-template实例只经linear conservative matcher执行并exact校验named query/matrix变量，list类bounded pagination，resource body一次bounded读取后只经artifact_read稳定分页；
 - remote tool name无论长度都不能在exact result返回后阻断canonical settlement；provider display name与bounded remote identity均由完整原名的domain-separated digest闭合；
-- tools/call、resources/read、prompts/get在lowering前验证explicit closed resultType；
+- tools/call、resources/read、prompts/get在lowering前验证negotiated-era closed result type；modern必须explicit，legacy compatibility era允许implicit complete；
 - ambiguous side effect 不自动 retry；
 - initial/state-change announcement 与 list_mcp_servers 生效；
 - server instructions 和 catalog 有 bounded sanitizer；

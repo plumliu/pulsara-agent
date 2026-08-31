@@ -22,7 +22,12 @@ from pulsara_agent.capability.user_skill_config import (
 class _Sessions:
     def __init__(self) -> None:
         self.reconnect_calls: list[tuple[str, str]] = []
-        self.install_calls: list[tuple[str, str, str]] = []
+        self.install_calls: list[tuple[str, str]] = []
+        self.project_skill_toggle_calls: list[tuple[str, str, bool]] = []
+        self.project_mcp_create_calls: list[tuple[str, str]] = []
+        self.project_mcp_toggle_calls: list[tuple[str, str, str, bool]] = []
+        self.project_mcp_remove_calls: list[tuple[str, str, str]] = []
+        self.project_mcp_toggle_error: Exception | None = None
         self.user_mcp_toggle_calls: list[tuple[str, bool, str | None]] = []
         self.user_skill_toggle_calls: list[tuple[str, bool, str | None]] = []
 
@@ -78,15 +83,65 @@ class _Sessions:
         session_id: str,
         *,
         source_path: str,
-        scope: str,
     ) -> dict[str, object]:
-        self.install_calls.append((session_id, source_path, scope))
+        self.install_calls.append((session_id, source_path))
         return {
             "installation": {
                 "status": "INSTALLED",
                 "installed": True,
                 "message": "技能已经安装。",
             },
+            "capabilities": _capabilities(session_id),
+        }
+
+    async def set_session_skill_enabled(
+        self, session_id: str, *, skill_id: str, enabled: bool
+    ) -> dict[str, object]:
+        self.project_skill_toggle_calls.append((session_id, skill_id, enabled))
+        return {
+            "operation": {"status": "DISABLED", "success": True},
+            "capabilities": _capabilities(session_id),
+        }
+
+    async def create_session_mcp_server(
+        self, session_id: str, *, server_id: str, **_values: object
+    ) -> dict[str, object]:
+        self.project_mcp_create_calls.append((session_id, server_id))
+        return {
+            "operation": {"status": "ADDED", "success": True},
+            "capabilities": _capabilities(session_id),
+        }
+
+    async def set_session_mcp_enabled(
+        self,
+        session_id: str,
+        *,
+        server_id: str,
+        enabled: bool,
+        expected_config_identity: str,
+    ) -> dict[str, object]:
+        if self.project_mcp_toggle_error is not None:
+            raise self.project_mcp_toggle_error
+        self.project_mcp_toggle_calls.append(
+            (session_id, server_id, expected_config_identity, enabled)
+        )
+        return {
+            "operation": {"status": "DISABLED", "success": True},
+            "capabilities": _capabilities(session_id),
+        }
+
+    async def remove_session_mcp_server(
+        self,
+        session_id: str,
+        *,
+        server_id: str,
+        expected_config_identity: str,
+    ) -> dict[str, object]:
+        self.project_mcp_remove_calls.append(
+            (session_id, server_id, expected_config_identity)
+        )
+        return {
+            "operation": {"status": "REMOVED", "success": True},
             "capabilities": _capabilities(session_id),
         }
 
@@ -115,9 +170,7 @@ class _Sessions:
         enabled: bool,
         active_session_id: str | None,
     ) -> dict[str, object]:
-        self.user_skill_toggle_calls.append(
-            (skill_path, enabled, active_session_id)
-        )
+        self.user_skill_toggle_calls.append((skill_path, enabled, active_session_id))
         return {
             "operation": {"status": "DISABLED", "success": True},
             "capabilities": _user_capabilities(active_session_id),
@@ -273,9 +326,7 @@ async def _exercise_bare_loopback_origin(tmp_path: Path) -> None:
                 },
             ) as response:
                 assert response.status == 200
-                assert sessions.user_mcp_toggle_calls == [
-                    ("docs", False, "session-1")
-                ]
+                assert sessions.user_mcp_toggle_calls == [("docs", False, "session-1")]
 
             async with client.post(
                 f"{server.origin}/api/sessions/session-1/capabilities/mcp/docs/reconnect",
@@ -289,7 +340,7 @@ async def _exercise_bare_loopback_origin(tmp_path: Path) -> None:
 
             async with client.post(
                 f"{server.origin}/api/sessions/session-1/capabilities/skills/install",
-                json={"source_path": "/tmp/pdf", "scope": "workspace"},
+                json={"source_path": "/tmp/pdf"},
                 headers={
                     "Origin": server.origin,
                     "Sec-Fetch-Site": "same-origin",
@@ -297,8 +348,67 @@ async def _exercise_bare_loopback_origin(tmp_path: Path) -> None:
             ) as response:
                 assert response.status == 200
                 assert (await response.json())["installation"]["installed"] is True
-                assert sessions.install_calls == [
-                    ("session-1", "/tmp/pdf", "workspace")
+                assert sessions.install_calls == [("session-1", "/tmp/pdf")]
+
+            async with client.post(
+                f"{server.origin}/api/sessions/session-1/capabilities/skills/enabled",
+                json={"skill_id": "pulsara:review", "enabled": False},
+                headers={"Origin": server.origin, "Sec-Fetch-Site": "same-origin"},
+            ) as response:
+                assert response.status == 200
+                assert sessions.project_skill_toggle_calls == [
+                    ("session-1", "pulsara:review", False)
+                ]
+
+            async with client.post(
+                f"{server.origin}/api/sessions/session-1/capabilities/mcp",
+                json={
+                    "server_id": "project-docs",
+                    "display_name": "Project Docs",
+                    "transport": "http",
+                    "endpoint": "https://example.com/mcp",
+                    "args": [],
+                    "available_to_subagents": True,
+                },
+                headers={"Origin": server.origin, "Sec-Fetch-Site": "same-origin"},
+            ) as response:
+                assert response.status == 201
+                assert sessions.project_mcp_create_calls == [
+                    ("session-1", "project-docs")
+                ]
+
+            async with client.post(
+                f"{server.origin}/api/sessions/session-1/capabilities/mcp/project-docs/enabled",
+                json={"enabled": False, "config_identity": "config-v1"},
+                headers={"Origin": server.origin, "Sec-Fetch-Site": "same-origin"},
+            ) as response:
+                assert response.status == 200
+                assert sessions.project_mcp_toggle_calls == [
+                    ("session-1", "project-docs", "config-v1", False)
+                ]
+
+            sessions.project_mcp_toggle_error = (
+                mcp_config.WorkspaceMcpConfigStaleError("changed")
+            )
+            async with client.post(
+                f"{server.origin}/api/sessions/session-1/capabilities/mcp/project-docs/enabled",
+                json={"enabled": True, "config_identity": "config-v1"},
+                headers={"Origin": server.origin, "Sec-Fetch-Site": "same-origin"},
+            ) as response:
+                assert response.status == 409
+                payload = await response.json()
+                assert payload["error"]["code"] == "PROJECT_CAPABILITY_STALE"
+                assert payload["error"]["retryable"] is True
+            sessions.project_mcp_toggle_error = None
+
+            async with client.delete(
+                f"{server.origin}/api/sessions/session-1/capabilities/mcp/project-docs",
+                json={"config_identity": "config-v1"},
+                headers={"Origin": server.origin, "Sec-Fetch-Site": "same-origin"},
+            ) as response:
+                assert response.status == 200
+                assert sessions.project_mcp_remove_calls == [
+                    ("session-1", "project-docs", "config-v1")
                 ]
 
             async with client.post(
@@ -424,9 +534,7 @@ def test_user_mcp_live_overlay_requires_exact_user_source_and_config(
         "      endpoint: https://workspace.example/mcp\n",
         encoding="utf-8",
     )
-    (user_config,) = mcp_config.load_mcp_server_configs(
-        user_config_path=user_path
-    )
+    (user_config,) = mcp_config.load_mcp_server_configs(user_config_path=user_path)
     (workspace_config,) = mcp_config.load_mcp_server_configs(
         workspace_root=workspace,
         user_config_path=user_path,

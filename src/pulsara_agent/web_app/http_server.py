@@ -8,6 +8,10 @@ from typing import Awaitable, Callable, cast
 from aiohttp import web
 
 from pulsara_agent.conversation_kernel.host import KernelHostCoreClosing
+from pulsara_agent.mcp_config import (
+    McpConfiguredServerBoundExceeded,
+    WorkspaceMcpConfigStaleError,
+)
 from pulsara_agent.web_app.browser_bridge import LocalBrowserBridge
 from pulsara_agent.web_app.protocol_client import ProtocolBridgeError
 from pulsara_agent.web_app.session_controller import (
@@ -140,9 +144,7 @@ class LocalHttpServer:
         self._app.router.add_post(
             "/api/capabilities/skills/enabled", self._set_user_skill_enabled
         )
-        self._app.router.add_post(
-            "/api/capabilities/mcp", self._create_user_mcp_server
-        )
+        self._app.router.add_post("/api/capabilities/mcp", self._create_user_mcp_server)
         self._app.router.add_post(
             "/api/capabilities/mcp/{server_id}/enabled",
             self._set_user_mcp_enabled,
@@ -173,6 +175,22 @@ class LocalHttpServer:
         self._app.router.add_post(
             "/api/sessions/{session_id}/capabilities/skills/install",
             self._install_session_skill,
+        )
+        self._app.router.add_post(
+            "/api/sessions/{session_id}/capabilities/skills/enabled",
+            self._set_session_skill_enabled,
+        )
+        self._app.router.add_post(
+            "/api/sessions/{session_id}/capabilities/mcp",
+            self._create_session_mcp_server,
+        )
+        self._app.router.add_post(
+            "/api/sessions/{session_id}/capabilities/mcp/{server_id}/enabled",
+            self._set_session_mcp_enabled,
+        )
+        self._app.router.add_delete(
+            "/api/sessions/{session_id}/capabilities/mcp/{server_id}",
+            self._remove_session_mcp_server,
         )
         self._app.router.add_delete("/api/sessions/{session_id}", self._close_session)
         self._app.router.add_post(
@@ -219,6 +237,20 @@ class LocalHttpServer:
         except ProtocolBridgeError as exc:
             return self._error_response(
                 exc.code, exc.public_message, status=409, retryable=True
+            )
+        except WorkspaceMcpConfigStaleError:
+            return self._error_response(
+                "PROJECT_CAPABILITY_STALE",
+                "项目能力已经变化，正在读取最新状态。",
+                status=409,
+                retryable=True,
+            )
+        except McpConfiguredServerBoundExceeded:
+            return self._error_response(
+                "PROJECT_MCP_CAPACITY_REACHED",
+                "当前能力组合已无法再添加 MCP，请先移除一个不再使用的连接。",
+                status=409,
+                retryable=False,
             )
         except KeyError:
             return self._error_response(
@@ -418,7 +450,9 @@ class LocalHttpServer:
         if set(body) - allowed:
             raise ValueError("unexpected MCP field")
         args = body.get("args", [])
-        if not isinstance(args, list) or any(not isinstance(item, str) for item in args):
+        if not isinstance(args, list) or any(
+            not isinstance(item, str) for item in args
+        ):
             raise ValueError("MCP args must be strings")
         server_id = body.get("server_id")
         display_name = body.get("display_name", "")
@@ -514,26 +548,118 @@ class LocalHttpServer:
 
     async def _install_session_skill(self, request: web.Request) -> web.Response:
         body = await self._json_body(request)
-        if set(body) != {"source_path", "scope"}:
+        if set(body) != {"source_path"}:
             raise HttpPublicError(
                 "SKILL_INSTALL_REQUEST_INVALID",
-                "安装技能需要选择本地目录和安装位置。",
+                "安装项目技能需要选择一个本地目录。",
                 status=400,
             )
         source_path = body["source_path"]
-        scope = body["scope"]
-        if not isinstance(source_path, str) or not isinstance(scope, str):
+        if not isinstance(source_path, str):
             raise HttpPublicError(
                 "SKILL_INSTALL_REQUEST_INVALID",
-                "安装技能需要选择本地目录和安装位置。",
+                "安装项目技能需要选择一个本地目录。",
                 status=400,
             )
         payload = await self.sessions.install_session_skill(
             request.match_info["session_id"],
             source_path=source_path,
-            scope=scope,
         )
         return web.json_response(payload)
+
+    async def _set_session_skill_enabled(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        if set(body) != {"skill_id", "enabled"}:
+            raise ValueError("unexpected project Skill enablement field")
+        skill_id = body.get("skill_id")
+        enabled = body.get("enabled")
+        if not isinstance(skill_id, str) or not isinstance(enabled, bool):
+            raise ValueError("project Skill enablement fields are invalid")
+        return web.json_response(
+            await self.sessions.set_session_skill_enabled(
+                request.match_info["session_id"],
+                skill_id=skill_id,
+                enabled=enabled,
+            )
+        )
+
+    async def _create_session_mcp_server(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        allowed = {
+            "server_id",
+            "display_name",
+            "transport",
+            "endpoint",
+            "command",
+            "args",
+            "available_to_subagents",
+        }
+        if set(body) - allowed:
+            raise ValueError("unexpected project MCP field")
+        args = body.get("args", [])
+        if not isinstance(args, list) or any(
+            not isinstance(item, str) for item in args
+        ):
+            raise ValueError("project MCP args must be strings")
+        server_id = body.get("server_id")
+        display_name = body.get("display_name", "")
+        transport = body.get("transport")
+        available_to_subagents = body.get("available_to_subagents", False)
+        if (
+            not isinstance(server_id, str)
+            or not isinstance(display_name, str)
+            or not isinstance(transport, str)
+            or not isinstance(available_to_subagents, bool)
+        ):
+            raise ValueError("project MCP fields are invalid")
+        endpoint = body.get("endpoint")
+        command = body.get("command")
+        if endpoint is not None and not isinstance(endpoint, str):
+            raise ValueError("project MCP endpoint is invalid")
+        if command is not None and not isinstance(command, str):
+            raise ValueError("project MCP command is invalid")
+        payload = await self.sessions.create_session_mcp_server(
+            request.match_info["session_id"],
+            server_id=server_id,
+            display_name=display_name,
+            transport=transport,
+            endpoint=endpoint,
+            command=command,
+            args=args,
+            available_to_subagents=available_to_subagents,
+        )
+        return web.json_response(payload, status=201)
+
+    async def _set_session_mcp_enabled(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        if set(body) != {"enabled", "config_identity"}:
+            raise ValueError("project MCP enablement fields are incomplete")
+        if not isinstance(body.get("enabled"), bool) or not isinstance(
+            body.get("config_identity"), str
+        ):
+            raise ValueError("project MCP enablement fields are invalid")
+        return web.json_response(
+            await self.sessions.set_session_mcp_enabled(
+                request.match_info["session_id"],
+                server_id=request.match_info["server_id"],
+                enabled=body["enabled"],
+                expected_config_identity=body["config_identity"],
+            )
+        )
+
+    async def _remove_session_mcp_server(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        if set(body) != {"config_identity"} or not isinstance(
+            body.get("config_identity"), str
+        ):
+            raise ValueError("project MCP removal identity is required")
+        return web.json_response(
+            await self.sessions.remove_session_mcp_server(
+                request.match_info["session_id"],
+                server_id=request.match_info["server_id"],
+                expected_config_identity=body["config_identity"],
+            )
+        )
 
     async def _create_session(self, request: web.Request) -> web.Response:
         body = await self._json_body(request)

@@ -14,6 +14,7 @@ from typing import Callable, Mapping
 from uuid import uuid4
 
 from jsonschema import validators
+from mcp.shared.exceptions import MCPError
 
 from pulsara_agent.capability.contracts import (
     CapabilityKind,
@@ -2609,12 +2610,7 @@ async def _discover(
         else ()
     )
     templates = (
-        await _list_pages(
-            client,
-            client.session.list_resource_templates,
-            "resource_templates",
-            budget=budget,
-        )
+        await _list_legacy_optional_resource_templates(client, budget=budget)
         if advertised.resources
         else ()
     )
@@ -2769,7 +2765,13 @@ async def _discover(
             (config.server_id, config.display_name, len(semantic_tuple)),
         ),
         sdk_conformance_contract_fingerprint=context_fingerprint(
-            "mcp-sdk-conformance:v1", ("mcp==2.0.0", "mcp-types==2.0.0")
+            "mcp-sdk-conformance:v2",
+            (
+                "mcp==2.0.0",
+                "mcp-types==2.0.0",
+                "modern-explicit-result-type",
+                "negotiated-legacy-implicit-complete",
+            ),
         ),
     )
     if _discovery_snapshot_physical_bytes(snapshot) > (
@@ -2829,6 +2831,28 @@ async def _list_pages(
             raise ValueError("MCP discovery cursor is invalid")
         seen.add(cursor)
     raise ValueError("MCP discovery page bound exceeded")
+
+
+async def _list_legacy_optional_resource_templates(
+    client: BoundedMcpSdkClient,
+    *,
+    budget: _DiscoveryBudget,
+) -> tuple[object, ...]:
+    try:
+        return await _list_pages(
+            client,
+            client.session.list_resource_templates,
+            "resource_templates",
+            budget=budget,
+        )
+    except MCPError as exc:
+        # MCP 1.x servers can advertise the resources surface without
+        # implementing the later resource-template listing method.  The
+        # absence is an empty optional sub-surface only after legacy
+        # initialize was explicitly negotiated; modern peers stay strict.
+        if client.uses_legacy_initialize and exc.code == -32601:
+            return ()
+        raise
 
 
 def _candidate(

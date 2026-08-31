@@ -25,11 +25,13 @@ import type {
   AppView,
   CapabilitySnapshot,
   McpCreateInput,
+  McpServerCapability,
   Message,
   PermissionMode,
   RuntimeStatus,
   SessionSummary,
   SessionWorkspaceSelection,
+  SkillCapability,
   ToastMessage,
   UserCapabilitySnapshot,
   UserMcpServerCapability,
@@ -131,8 +133,9 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
   const [taskInventoryError, setTaskInventoryError] = useState<string>();
   const taskInventoryAttempt = useRef(0);
   const [capabilities, setCapabilities] = useState<CapabilitySnapshot>();
-  const [, setCapabilityLoading] = useState(false);
-  const [, setCapabilityError] = useState<string>();
+  const [capabilityLoading, setCapabilityLoading] = useState(false);
+  const [capabilityError, setCapabilityError] = useState<string>();
+  const [capabilityBusy, setCapabilityBusy] = useState<string>();
   const capabilityAttempt = useRef(0);
   const [userCapabilities, setUserCapabilities] = useState<UserCapabilitySnapshot>();
   const [userCapabilityLoading, setUserCapabilityLoading] = useState(false);
@@ -238,6 +241,13 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
   }, [adapter]);
 
   const loadCapabilities = useCallback(async (sessionId: string) => {
+    // A mutation may settle after the user has already moved to another
+    // session.  An obsolete refresh must not retire the current session's
+    // inspection or leave its loading indicator without an owner.
+    if (
+      activeSessionIdRef.current !== sessionId
+      || connectionRef.current?.sessionId !== sessionId
+    ) return;
     const attempt = ++capabilityAttempt.current;
     setCapabilityLoading(true);
     setCapabilityError(undefined);
@@ -255,6 +265,19 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
       setCapabilityLoading(false);
     }
   }, [adapter]);
+
+  const adoptCapabilityMutation = useCallback((
+    sessionId: string,
+    next: CapabilitySnapshot,
+  ): void => {
+    if (activeSessionIdRef.current !== sessionId) return;
+    // A mutation response is newer than any inspection that began before it.
+    // Retire those reads so a late response cannot paint stale switches back.
+    capabilityAttempt.current += 1;
+    setCapabilities(next);
+    setCapabilityError(undefined);
+    setCapabilityLoading(false);
+  }, []);
 
   const loadUserCapabilities = useCallback(async (refresh = false) => {
     const attempt = ++userCapabilityAttempt.current;
@@ -433,6 +456,52 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     });
     return () => window.cancelAnimationFrame(frame);
   }, [activeSessionId, connection, loadCapabilities]);
+
+  useEffect(() => {
+    if (
+      !activeSessionId
+      || !connection
+      || connection.sessionId !== activeSessionId
+      || !capabilities?.adoption.pending
+      || projection.isRunning
+    ) return;
+    const frame = window.requestAnimationFrame(() => {
+      void loadCapabilities(activeSessionId);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [
+    activeSessionId,
+    capabilities?.adoption.pending,
+    connection,
+    loadCapabilities,
+    projection.isRunning,
+    projection.messages.length,
+  ]);
+
+  const mcpConnectionIsSettling = capabilities?.mcp.servers.some((server) => (
+    server.status === 'connecting'
+    || server.status === 'discovering'
+    || server.status === 'updating'
+  )) ?? false;
+
+  useEffect(() => {
+    if (
+      !mcpConnectionIsSettling
+      || !activeSessionId
+      || !connection
+      || connection.sessionId !== activeSessionId
+    ) return;
+    const timer = window.setTimeout(() => {
+      void loadCapabilities(activeSessionId);
+    }, 650);
+    return () => window.clearTimeout(timer);
+  }, [
+    activeSessionId,
+    capabilities,
+    connection,
+    loadCapabilities,
+    mcpConnectionIsSettling,
+  ]);
 
   useEffect(() => {
     if (activeView !== 'capabilities') return;
@@ -836,6 +905,122 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     }
   }, [adapter, notify]);
 
+  const installProjectSkill = useCallback(async (sourcePath: string): Promise<void> => {
+    const sessionId = activeSessionIdRef.current;
+    if (!sessionId) throw new Error('请先打开一个会话。');
+    setCapabilityBusy('正在添加技能…');
+    try {
+      const result = await adapter.installSkill(sessionId, sourcePath);
+      adoptCapabilityMutation(sessionId, result.capabilities);
+      if (!result.installation.installed) throw new Error(result.installation.message);
+      notify('项目技能已添加', '同一目录中的会话会在各自下次发送时载入。', 'success');
+    } finally {
+      setCapabilityBusy(undefined);
+    }
+  }, [adapter, adoptCapabilityMutation, notify]);
+
+  const toggleProjectSkill = useCallback(async (
+    skill: SkillCapability,
+    enabled: boolean,
+  ): Promise<void> => {
+    const sessionId = activeSessionIdRef.current;
+    if (!sessionId) return;
+    setCapabilityBusy(enabled ? '正在开启技能…' : '正在关闭技能…');
+    try {
+      const result = await adapter.setProjectSkillEnabled(sessionId, skill.id, enabled);
+      adoptCapabilityMutation(sessionId, result.capabilities);
+      notify(enabled ? '项目技能已开启' : '项目技能已关闭', result.operation.message, 'success');
+    } catch (error) {
+      notify('技能状态没有改变', productMessage(error instanceof Error ? error.message : undefined, '请刷新后重试。'), 'warning');
+    } finally {
+      setCapabilityBusy(undefined);
+    }
+  }, [adapter, adoptCapabilityMutation, notify]);
+
+  const createProjectMcp = useCallback(async (input: McpCreateInput): Promise<void> => {
+    const sessionId = activeSessionIdRef.current;
+    if (!sessionId) throw new Error('请先打开一个会话。');
+    setCapabilityBusy('正在添加 MCP…');
+    try {
+      const result = await adapter.createProjectMcp(sessionId, input);
+      adoptCapabilityMutation(sessionId, result.capabilities);
+      if (!result.operation.success) throw new Error(result.operation.message);
+      notify('项目 MCP 已添加', result.operation.message, 'success');
+    } finally {
+      setCapabilityBusy(undefined);
+    }
+  }, [adapter, adoptCapabilityMutation, notify]);
+
+  const toggleProjectMcp = useCallback(async (
+    server: McpServerCapability,
+    enabled: boolean,
+  ): Promise<void> => {
+    const sessionId = activeSessionIdRef.current;
+    if (!sessionId) return;
+    if (!server.configIdentity) {
+      notify('MCP 状态没有改变', '能力信息已经更新，请刷新后重试。', 'warning');
+      void loadCapabilities(sessionId);
+      return;
+    }
+    setCapabilityBusy(enabled ? '正在开启 MCP…' : '正在关闭 MCP…');
+    try {
+      const result = await adapter.setProjectMcpEnabled(
+        sessionId,
+        server.id,
+        server.configIdentity,
+        enabled,
+      );
+      adoptCapabilityMutation(sessionId, result.capabilities);
+      notify(enabled ? '项目 MCP 已开启' : '项目 MCP 已关闭', result.operation.message, 'success');
+    } catch (error) {
+      notify('MCP 状态没有改变', productMessage(error instanceof Error ? error.message : undefined, '请刷新后重试。'), 'warning');
+      await loadCapabilities(sessionId);
+    } finally {
+      setCapabilityBusy(undefined);
+    }
+  }, [adapter, adoptCapabilityMutation, loadCapabilities, notify]);
+
+  const removeProjectMcp = useCallback(async (server: McpServerCapability): Promise<void> => {
+    if (!window.confirm(`从这个目录移除“${server.name}”？`)) return;
+    const sessionId = activeSessionIdRef.current;
+    if (!sessionId) return;
+    if (!server.configIdentity) {
+      notify('MCP 没有移除', '能力信息已经更新，请刷新后重试。', 'warning');
+      void loadCapabilities(sessionId);
+      return;
+    }
+    setCapabilityBusy('正在移除 MCP…');
+    try {
+      const result = await adapter.removeProjectMcp(
+        sessionId,
+        server.id,
+        server.configIdentity,
+      );
+      adoptCapabilityMutation(sessionId, result.capabilities);
+      notify('项目 MCP 已移除', result.operation.message, 'success');
+    } catch (error) {
+      notify('MCP 没有移除', productMessage(error instanceof Error ? error.message : undefined, '请刷新后重试。'), 'warning');
+      await loadCapabilities(sessionId);
+    } finally {
+      setCapabilityBusy(undefined);
+    }
+  }, [adapter, adoptCapabilityMutation, loadCapabilities, notify]);
+
+  const reconnectProjectMcp = useCallback(async (server: McpServerCapability): Promise<void> => {
+    const sessionId = activeSessionIdRef.current;
+    if (!sessionId) return;
+    setCapabilityBusy('正在重新连接…');
+    try {
+      const next = await adapter.reconnectMcpServer(sessionId, server.id);
+      adoptCapabilityMutation(sessionId, next);
+      notify('已经请求重新连接', '连接状态会在发现完成后更新。', 'success');
+    } catch (error) {
+      notify('没有重新连接', productMessage(error instanceof Error ? error.message : undefined, '请稍后重试。'), 'warning');
+    } finally {
+      setCapabilityBusy(undefined);
+    }
+  }, [adapter, adoptCapabilityMutation, notify]);
+
   return (
     <main className={`pulsara-shell${activeView === 'workbench' ? ' is-workbench' : ' is-surface'}${inspectorOpen ? ' has-inspector' : ''}`}>
       <ActivityRail activeView={activeView} onNavigate={navigate} onOpenCommand={() => setCommandOpen(true)} />
@@ -883,7 +1068,9 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           interaction={projection.interaction}
           canControl={canControl}
           isObserver={isObserver}
-          skills={capabilities?.skills.items ?? []}
+          skills={(capabilities?.skills.items ?? []).filter(
+            (skill) => skill.enabled && skill.effective,
+          )}
           focusTaskId={focusedTask?.id}
           focusTaskRevision={focusedTask?.revision ?? 0}
           focusTaskHighlighted={focusedTask?.highlighted ?? false}
@@ -911,10 +1098,22 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           canControl={canControl}
           isRunning={projection.isRunning}
           permission={turnPermission}
+          capabilities={capabilities}
+          capabilityLoading={capabilityLoading}
+          capabilityError={capabilityError}
+          capabilityBusy={capabilityBusy}
           error={taskInventoryError}
           onRetry={() => activeSessionId && void loadSessionTasks(activeSessionId)}
           onLocate={locateTask}
           onAcceptCompletion={(task) => void acceptTaskCompletion(task)}
+          onRetryCapabilities={() => activeSessionId && void loadCapabilities(activeSessionId)}
+          onToggleProjectSkill={toggleProjectSkill}
+          onInstallProjectSkill={installProjectSkill}
+          onCreateProjectMcp={createProjectMcp}
+          onToggleProjectMcp={toggleProjectMcp}
+          onRemoveProjectMcp={removeProjectMcp}
+          onReconnectProjectMcp={reconnectProjectMcp}
+          onOpenUserCapabilities={() => setActiveView('capabilities')}
           onClose={() => setInspectorOpen(false)}
         />
       )}

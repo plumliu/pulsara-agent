@@ -161,6 +161,9 @@ def McpHostSupervisor(*args, **kwargs):
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "round6_mcp_server.py"
+LEGACY_FIXTURE = (
+    Path(__file__).parent / "fixtures" / "round6_legacy_mcp_server.py"
+)
 
 
 def _enabled_memory_context() -> FrozenModelCallMemoryContext:
@@ -1388,6 +1391,69 @@ def test_round6_stdio_discovery_direct_tool_resource_and_prompt(tmp_path: Path) 
                 scope_kind=ModelInputScopeKind.ROOT,
             )
             assert b"Discuss MCP" in prompt.content
+        finally:
+            runtime.release()
+            await supervisor.aclose()
+
+    asyncio.run(exercise())
+
+
+def test_round6_stdio_legacy_initialize_normalizes_implicit_complete(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        config_path = tmp_path / "legacy-mcp.yaml"
+        transport = json.dumps(
+            {
+                "type": "stdio",
+                "command": sys.executable,
+                "args": [str(LEGACY_FIXTURE)],
+            }
+        )
+        config_path.write_text(
+            "servers:\n"
+            "  legacy:\n"
+            "    enabled: true\n"
+            "    required: true\n"
+            "    scope_policy: ROOT_ONLY\n"
+            "    catalog_refresh_interval_ms: DISABLED\n"
+            f"    transport: {transport}\n",
+            encoding="utf-8",
+        )
+        (config,) = load_mcp_server_configs(user_config_path=config_path)
+        supervisor = McpHostSupervisor(
+            session_id="session:legacy",
+            workspace_root=tmp_path,
+            configs=(config,),
+        )
+        await supervisor.start()
+        runtime = supervisor.install_pending_at_safe_point()
+        assert runtime is not None
+        try:
+            assert (
+                runtime.candidates["legacy"].discovery_snapshot.protocol_version
+                == "2025-11-25"
+            )
+            assert runtime.candidates["legacy"].discovery_snapshot.resources == ()
+            assert (
+                runtime.candidates["legacy"].discovery_snapshot.resource_templates
+                == ()
+            )
+            assert runtime.candidates["legacy"].discovery_snapshot.prompts == ()
+            (echo,) = runtime.root_tool_specs
+            assert echo.remote_tool_name == "legacy_echo"
+            executor = runtime.executors[echo.provider_tool_name]
+            permit = executor.admit(
+                session_id="session:legacy",
+                scope_kind=ModelInputScopeKind.ROOT,
+                scope_subagent_task_id=None,
+                turn_id="turn:legacy",
+                tool_call_id="tool-call:legacy",
+            )
+            permit.mark_attempt_accepted()
+            result = await executor.invoke(permit, {"text": "hello"})
+            assert result.state == "SUCCESS"
+            assert b"legacy:hello" in result.content
         finally:
             runtime.release()
             await supervisor.aclose()

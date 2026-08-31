@@ -34,6 +34,10 @@ from pulsara_agent.capability.types import (
     SkillProducerUnavailableReason,
     SkillResolutionUnavailableReason,
 )
+from pulsara_agent.capability.user_skill_config import (
+    set_user_skill_enabled,
+    workspace_skill_config_path,
+)
 from pulsara_agent.conversation_kernel.capability import KernelSkillProjectionComposer
 from pulsara_agent.conversation_kernel.context_sources import (
     _public_capability_diagnostics,
@@ -259,9 +263,7 @@ def test_round9_1_1025_directories_and_65_winners_publish_no_partial_catalog(
     for index in range(1_025):
         (root / f"dir-{index:04d}").mkdir(parents=True)
     direct_producer = _producer(tmp_path / "direct-user")
-    direct = direct_producer.observe(
-        _policy(direct_producer, direct_workspace)
-    )
+    direct = direct_producer.observe(_policy(direct_producer, direct_workspace))
     assert direct.disposition is LooseSkillDefinitionsDisposition.UNAVAILABLE
     assert direct.unavailable_cause is not None
     assert (
@@ -288,8 +290,7 @@ def test_round9_1_1025_directories_and_65_winners_publish_no_partial_catalog(
     cause = inspection.unavailable_causes[0]
     assert isinstance(cause, ResolutionUnavailableCause)
     assert (
-        cause.reason
-        is SkillResolutionUnavailableReason.EFFECTIVE_WINNER_BOUND_EXCEEDED
+        cause.reason is SkillResolutionUnavailableReason.EFFECTIVE_WINNER_BOUND_EXCEEDED
     )
 
 
@@ -343,16 +344,58 @@ def test_round9_1_owner_snapshot_freezes_effective_head_until_next_scan(
         skill.write_text(_document("alpha", body="# Version B\n"), encoding="utf-8")
 
         assert isinstance(owner_a.inspection, CompleteEffectiveSkillCatalogInspection)
-        alpha_a = next(item for item in owner_a.inspection.winners if item.name == "alpha")
+        alpha_a = next(
+            item for item in owner_a.inspection.winners if item.name == "alpha"
+        )
         assert alpha_a.body == "# Version A\n"
         assert composer.freeze_projection_input(owner_a) == frozen_a
         owner_b = composer.freeze_owner_snapshot(
             conversation_scope_kind=ModelInputScopeKind.ROOT,
             scope_subagent_task_id=None,
         )
-        alpha_b = next(item for item in owner_b.inspection.winners if item.name == "alpha")
+        alpha_b = next(
+            item for item in owner_b.inspection.winners if item.name == "alpha"
+        )
         assert alpha_b.body == "# Version B\n"
         assert composer.freeze_projection_input(owner_b) != frozen_a
+    finally:
+        binding.close()
+
+
+def test_round9_1_workspace_skill_switch_applies_on_the_next_owner_snapshot(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    skill = _write_skill(workspace, "alpha")
+    producer = _producer(tmp_path)
+    binding = BundledSkillDistributionBindingOwner()
+    composer = KernelSkillProjectionComposer(
+        workspace_root=workspace,
+        bundled_binding_owner=binding,
+        plugin_definitions_provider=lambda: FrozenPluginSkillDefinitions(
+            PluginSkillDefinitionsDisposition.COMPLETE
+        ),
+        loose_producer=producer,
+    )
+    try:
+        enabled = composer.freeze_owner_snapshot(
+            conversation_scope_kind=ModelInputScopeKind.ROOT,
+            scope_subagent_task_id=None,
+        )
+        assert isinstance(enabled.inspection, CompleteEffectiveSkillCatalogInspection)
+        assert "alpha" in {item.name for item in enabled.inspection.winners}
+
+        set_user_skill_enabled(
+            skill_path=skill,
+            enabled=False,
+            config_path=workspace_skill_config_path(workspace),
+        )
+        disabled = composer.freeze_owner_snapshot(
+            conversation_scope_kind=ModelInputScopeKind.ROOT,
+            scope_subagent_task_id=None,
+        )
+        assert isinstance(disabled.inspection, CompleteEffectiveSkillCatalogInspection)
+        assert "alpha" not in {item.name for item in disabled.inspection.winners}
     finally:
         binding.close()
 

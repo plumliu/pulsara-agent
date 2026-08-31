@@ -396,20 +396,10 @@ class AtomicLocalSkillPublisher:
                     LocalSkillInstallDisposition.SOURCE_UNAVAILABLE,
                     source,
                 )
-            placement = (
-                validate_skill_candidate_placement(parsed_result.parsed, source.name)
-                if parsed_result.parsed is not None
-                else None
-            )
-            if parsed_result.parsed is None or (
-                placement is not None and not placement.valid
-            ):
+            if parsed_result.parsed is None:
                 diagnostics = tuple(
                     diagnostic_at(item, source / SKILL_FILE_NAME)
-                    for item in (
-                        *parsed_result.diagnostics,
-                        *((placement.diagnostics) if placement is not None else ()),
-                    )
+                    for item in parsed_result.diagnostics
                 )
                 return LocalSkillInstallOutcome(
                     LocalSkillInstallDisposition.SOURCE_INVALID,

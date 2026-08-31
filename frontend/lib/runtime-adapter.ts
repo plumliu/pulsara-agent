@@ -6,6 +6,8 @@ import type {
   McpServerStatus,
   Message,
   PermissionMode,
+  ProjectCapabilityAdoption,
+  ProjectCapabilityMutationResult,
   ReasoningBlock,
   SessionSummary,
   SessionWorkspaceSelection,
@@ -108,8 +110,31 @@ export interface RuntimeAdapter {
   installSkill(
     sessionId: string,
     sourcePath: string,
-    scope: 'workspace' | 'user',
-  ): Promise<{ installation: SkillInstallResult; capabilities: CapabilitySnapshot }>;
+  ): Promise<{
+    installation: SkillInstallResult;
+    adoption: ProjectCapabilityAdoption;
+    capabilities: CapabilitySnapshot;
+  }>;
+  setProjectSkillEnabled(
+    sessionId: string,
+    skillId: string,
+    enabled: boolean,
+  ): Promise<ProjectCapabilityMutationResult>;
+  createProjectMcp(
+    sessionId: string,
+    input: McpCreateInput,
+  ): Promise<ProjectCapabilityMutationResult>;
+  setProjectMcpEnabled(
+    sessionId: string,
+    serverId: string,
+    configIdentity: string,
+    enabled: boolean,
+  ): Promise<ProjectCapabilityMutationResult>;
+  removeProjectMcp(
+    sessionId: string,
+    serverId: string,
+    configIdentity: string,
+  ): Promise<ProjectCapabilityMutationResult>;
   inspectUserCapabilities(activeSessionId?: string): Promise<UserCapabilitySnapshot>;
   refreshUserCapabilities(activeSessionId?: string): Promise<UserCapabilitySnapshot>;
   installUserSkill(sourcePath: string, activeSessionId?: string): Promise<{
@@ -524,19 +549,91 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
   async installSkill(
     sessionId: string,
     sourcePath: string,
-    scope: 'workspace' | 'user',
-  ): Promise<{ installation: SkillInstallResult; capabilities: CapabilitySnapshot }> {
+  ): Promise<{
+    installation: SkillInstallResult;
+    adoption: ProjectCapabilityAdoption;
+    capabilities: CapabilitySnapshot;
+  }> {
     const payload = await apiRequest<Record<string, unknown>>(
       `/api/sessions/${encodeURIComponent(sessionId)}/capabilities/skills/install`,
       {
         method: 'POST',
-        body: JSON.stringify({ source_path: sourcePath, scope }),
+        body: JSON.stringify({ source_path: sourcePath }),
       },
     );
     return {
       installation: projectSkillInstallResult(asRecord(payload.installation)),
+      adoption: projectCapabilityAdoption(asRecord(payload.adoption)),
       capabilities: projectCapabilitySnapshot(asRecord(payload.capabilities)),
     };
+  }
+
+  async setProjectSkillEnabled(
+    sessionId: string,
+    skillId: string,
+    enabled: boolean,
+  ): Promise<ProjectCapabilityMutationResult> {
+    const payload = await apiRequest<Record<string, unknown>>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/capabilities/skills/enabled`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ skill_id: skillId, enabled }),
+      },
+    );
+    return projectCapabilityMutation(payload);
+  }
+
+  async createProjectMcp(
+    sessionId: string,
+    input: McpCreateInput,
+  ): Promise<ProjectCapabilityMutationResult> {
+    const payload = await apiRequest<Record<string, unknown>>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/capabilities/mcp`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          server_id: input.serverId,
+          display_name: input.displayName,
+          transport: input.transport,
+          endpoint: input.endpoint,
+          command: input.command,
+          args: input.args,
+          available_to_subagents: input.availableToSubagents,
+        }),
+      },
+    );
+    return projectCapabilityMutation(payload);
+  }
+
+  async setProjectMcpEnabled(
+    sessionId: string,
+    serverId: string,
+    configIdentity: string,
+    enabled: boolean,
+  ): Promise<ProjectCapabilityMutationResult> {
+    const payload = await apiRequest<Record<string, unknown>>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/capabilities/mcp/${encodeURIComponent(serverId)}/enabled`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ enabled, config_identity: configIdentity }),
+      },
+    );
+    return projectCapabilityMutation(payload);
+  }
+
+  async removeProjectMcp(
+    sessionId: string,
+    serverId: string,
+    configIdentity: string,
+  ): Promise<ProjectCapabilityMutationResult> {
+    const payload = await apiRequest<Record<string, unknown>>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/capabilities/mcp/${encodeURIComponent(serverId)}`,
+      {
+        method: 'DELETE',
+        body: JSON.stringify({ config_identity: configIdentity }),
+      },
+    );
+    return projectCapabilityMutation(payload);
   }
 
   async inspectUserCapabilities(activeSessionId?: string): Promise<UserCapabilitySnapshot> {
@@ -1461,15 +1558,29 @@ function stringArray(value: unknown): string[] {
 function projectCapabilitySnapshot(value: Record<string, unknown>): CapabilitySnapshot {
   const skills = asRecord(value.skills);
   const mcp = asRecord(value.mcp);
+  const adoption = asRecord(value.adoption);
   return {
     sessionId: String(value.session_id ?? ''),
     workspacePath: String(value.workspace_path ?? ''),
+    workspaceKind: value.workspace_kind === 'quick' ? 'quick' : 'project',
+    adoption: {
+      scope: 'workspace',
+      pending: Boolean(adoption.pending),
+      attention: adoption.attention === 'PROJECT_CAPABILITY_ADOPTION_FAILED'
+        || adoption.attention === 'PROJECT_MCP_ADOPTION_INCOMPLETE'
+        ? adoption.attention
+        : undefined,
+      when: 'next-user-turn',
+    },
     skills: {
       status: skills.status === 'attention' ? 'attention' : 'ready',
+      configPath: String(skills.config_path ?? ''),
       items: recordArray(skills.items).map((item) => ({
+        id: String(item.id ?? ''),
         name: String(item.name ?? ''),
         description: String(item.description ?? ''),
         location: String(item.location ?? ''),
+        path: String(item.path ?? ''),
         source: (
           item.source === 'workspace'
           || item.source === 'user'
@@ -1478,6 +1589,9 @@ function projectCapabilitySnapshot(value: Record<string, unknown>): CapabilitySn
             ? item.source
             : 'bundled'
         ),
+        editable: Boolean(item.editable),
+        enabled: item.enabled !== false,
+        effective: item.effective !== false,
         configured: Boolean(item.configured),
         authoringNotes: stringArray(item.authoring_notes),
       })),
@@ -1498,28 +1612,56 @@ function projectCapabilitySnapshot(value: Record<string, unknown>): CapabilitySn
       })),
     },
     mcp: {
-      servers: recordArray(mcp.servers).map((server) => ({
-        id: String(server.id ?? ''),
-        name: String(server.name ?? server.id ?? 'MCP 服务'),
-        status: mcpStatusByProtocol[String(server.status ?? '')] ?? 'failed',
-        required: Boolean(server.required),
-        availableToSubagents: Boolean(server.available_to_subagents),
-        toolCount: numeric(server.tool_count),
-        discoveredToolCount: numeric(server.discovered_tool_count),
-        resourceCount: numeric(server.resource_count),
-        resourceTemplateCount: numeric(server.resource_template_count),
-        promptCount: numeric(server.prompt_count),
-        instructions: String(server.instructions ?? ''),
-        hasFailure: Boolean(server.has_failure),
-        tools: recordArray(server.tools).map((tool) => ({
-          name: String(tool.name ?? ''),
-          remoteName: String(tool.remote_name ?? ''),
-          description: String(tool.description ?? ''),
-          effect: tool.effect === 'READ_ONLY' ? 'read-only' : 'external-effect',
-          availableToSubagents: Boolean(tool.available_to_subagents),
-          parallelSafe: Boolean(tool.parallel_safe),
-        })),
-      })),
+      configPath: String(mcp.config_path ?? ''),
+      servers: recordArray(mcp.servers).map((server) => {
+        const rawTransport = asRecord(server.transport);
+        const transport = Object.keys(rawTransport).length ? {
+          kind: rawTransport.kind === 'stdio' ? 'stdio' as const : 'http' as const,
+          summary: String(rawTransport.summary ?? ''),
+          detail: String(rawTransport.detail ?? rawTransport.summary ?? ''),
+        } : undefined;
+        return {
+          id: String(server.id ?? ''),
+          name: String(server.name ?? server.id ?? 'MCP 服务'),
+          source: server.source === 'workspace'
+            ? 'workspace' as const
+            : server.source === 'user'
+              ? 'user' as const
+              : server.source === 'plugin'
+                ? 'plugin' as const
+                : 'host' as const,
+          editable: Boolean(server.editable),
+          configIdentity: typeof server.config_identity === 'string' && server.config_identity
+            ? server.config_identity
+            : undefined,
+          enabled: Boolean(server.enabled),
+          configuredEnabled: Boolean(server.configured_enabled),
+          needsApproval: Boolean(server.needs_approval),
+          effective: Boolean(server.effective),
+          status: mcpStatusByProtocol[String(server.status ?? '')] ?? 'failed',
+          required: Boolean(server.required),
+          availableToSubagents: Boolean(server.available_to_subagents),
+          toolCount: numeric(server.tool_count),
+          discoveredToolCount: numeric(server.discovered_tool_count),
+          resourceCount: numeric(server.resource_count),
+          resourceTemplateCount: numeric(server.resource_template_count),
+          promptCount: numeric(server.prompt_count),
+          instructions: String(server.instructions ?? ''),
+          hasFailure: Boolean(server.has_failure),
+          failureCategory: typeof server.failure_category === 'string'
+            ? server.failure_category
+            : undefined,
+          transport,
+          tools: recordArray(server.tools).map((tool) => ({
+            name: String(tool.name ?? ''),
+            remoteName: String(tool.remote_name ?? ''),
+            description: String(tool.description ?? ''),
+            effect: tool.effect === 'READ_ONLY' ? 'read-only' as const : 'external-effect' as const,
+            availableToSubagents: Boolean(tool.available_to_subagents),
+            parallelSafe: Boolean(tool.parallel_safe),
+          })),
+        };
+      }),
       collisions: recordArray(mcp.collisions).map((collision) => ({
         name: String(collision.name ?? ''),
         members: recordArray(collision.members).map((member) => ({
@@ -1528,6 +1670,28 @@ function projectCapabilitySnapshot(value: Record<string, unknown>): CapabilitySn
         })),
       })),
     },
+  };
+}
+
+function projectCapabilityAdoption(value: Record<string, unknown>): ProjectCapabilityAdoption {
+  return {
+    scope: 'workspace',
+    pendingSessions: numeric(value.pending_sessions),
+    when: 'next-user-turn',
+  };
+}
+
+function projectCapabilityMutation(value: Record<string, unknown>): ProjectCapabilityMutationResult {
+  const operation = asRecord(value.operation);
+  return {
+    operation: {
+      status: String(operation.status ?? ''),
+      success: Boolean(operation.success),
+      message: String(operation.message ?? '项目能力已经更新。'),
+      details: stringArray(operation.details),
+    },
+    adoption: projectCapabilityAdoption(asRecord(value.adoption)),
+    capabilities: projectCapabilitySnapshot(asRecord(value.capabilities)),
   };
 }
 
@@ -1587,6 +1751,9 @@ function projectUserCapabilitySnapshot(value: Record<string, unknown>): UserCapa
           promptCount: numeric(server.prompt_count),
           instructions: String(server.instructions ?? ''),
           hasFailure: Boolean(server.has_failure),
+          failureCategory: typeof server.failure_category === 'string'
+            ? server.failure_category
+            : undefined,
           transport: {
             kind: transport.kind === 'stdio' ? 'stdio' as const : 'http' as const,
             summary: String(transport.summary ?? ''),

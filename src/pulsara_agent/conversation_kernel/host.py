@@ -68,6 +68,10 @@ from pulsara_agent.capability.pulsara_home import (
 from pulsara_agent.capability.user_skill_config import (
     USER_SKILL_CONFIG_NAME,
     load_user_skill_config,
+    workspace_skill_config_path,
+)
+from pulsara_agent.capability.workspace_mcp_trust import (
+    workspace_mcp_server_approvals,
 )
 from pulsara_agent.conversation_kernel.contracts import (
     ConversationScopeKind,
@@ -660,6 +664,9 @@ class KernelHostSession:
             user_skill_config_provider=lambda: load_user_skill_config(
                 config_path=user_skill_config_path
             ),
+            workspace_skill_config_provider=lambda: load_user_skill_config(
+                config_path=workspace_skill_config_path(self.workspace.workspace_root)
+            ),
             loose_producer=LooseSkillDefinitionProducer(
                 pulsara_home_resolution=pulsara_home_resolution,
                 user_home_resolution=user_home_resolution,
@@ -726,6 +733,9 @@ class KernelHostSession:
         self._command_failures: dict[str, KernelCommandOutcome] = {}
         self._lock = asyncio.Lock()
         self._plugin_reload_settlement_lock = asyncio.Lock()
+        self._project_capability_refresh_requested_revision = 0
+        self._project_capability_refresh_applied_revision = 0
+        self._project_capability_refresh_attention: str | None = None
         self._ingress_hook_attempts: dict[str, _IngressHookAttempt] = {}
         self._compaction_write_reservations: dict[
             tuple[ModelInputScopeKind, str | None], int
@@ -919,6 +929,9 @@ class KernelHostSession:
                 load_mcp_server_configs,
                 workspace_root=self.workspace.workspace_root,
                 trust_workspace_config=self.workspace.trust_workspace_mcp_config,
+                approved_workspace_server_identities=(
+                    workspace_mcp_server_approvals(self.workspace.workspace_root)
+                ),
             )
             predecessor_local_mcp_configs = self._local_mcp_configs
             self._local_mcp_configs = local_mcp_configs
@@ -929,6 +942,52 @@ class KernelHostSession:
                 raise
         finally:
             self._plugin_reload_settlement_lock.release()
+
+    async def request_project_capability_refresh(self) -> int:
+        """Mark this live Session to adopt its directory config next turn."""
+
+        async with self._lock:
+            self._require_open()
+            self._project_capability_refresh_requested_revision += 1
+            revision = self._project_capability_refresh_requested_revision
+            self._queue_wake.set()
+            return revision
+
+    @property
+    def project_capability_refresh_pending(self) -> bool:
+        return (
+            self._project_capability_refresh_requested_revision
+            > self._project_capability_refresh_applied_revision
+        )
+
+    @property
+    def project_capability_refresh_attention(self) -> str | None:
+        return self._project_capability_refresh_attention
+
+    async def _adopt_project_capabilities_if_requested(self) -> bool:
+        """Attempt one directory adoption without starving the queued root turn."""
+
+        async with self._lock:
+            requested = self._project_capability_refresh_requested_revision
+            if requested <= self._project_capability_refresh_applied_revision:
+                return True
+        attention: str | None = None
+        try:
+            outcome = await self.reload_plugins(deadline_monotonic=None)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            attention = "PROJECT_CAPABILITY_ADOPTION_FAILED"
+        else:
+            if outcome.get("mcp") != "RELOADED":
+                attention = "PROJECT_MCP_ADOPTION_INCOMPLETE"
+        async with self._lock:
+            self._project_capability_refresh_applied_revision = max(
+                self._project_capability_refresh_applied_revision,
+                requested,
+            )
+            self._project_capability_refresh_attention = attention
+        return True
 
     async def _reload_plugins_serialized(self, deadline: float) -> dict[str, object]:
         predecessor = self._plugin_view
@@ -3151,6 +3210,10 @@ class KernelHostSession:
                     if head_mode is PromptDeliveryMode.NEW_TURN:
                         continue
                     break
+                if not await self._adopt_project_capabilities_if_requested():
+                    await asyncio.sleep(0.1)
+                    self._queue_wake.set()
+                    break
                 async with self._lock:
                     try:
                         write_reservation = self._reserve_compaction_write_locked(
@@ -4810,6 +4873,9 @@ class KernelHostCore:
                 load_mcp_server_configs,
                 workspace_root=workspace.workspace_root,
                 trust_workspace_config=workspace.trust_workspace_mcp_config,
+                approved_workspace_server_identities=(
+                    workspace_mcp_server_approvals(workspace.workspace_root)
+                ),
             )
             mcp_normalization = normalize_plugin_mcp_configs(
                 existing_configs=local_mcp_configs,

@@ -124,6 +124,7 @@ class _BoundedTransport:
         ](1)
         self.last_result_presence = McpWireResultPresence(False, None)
         self.enforce_closed_result_type = False
+        self.allow_legacy_implicit_complete = False
         self._closed = False
 
     async def start(self) -> None:
@@ -148,11 +149,16 @@ class _BoundedTransport:
                 self.enforce_closed_result_type
                 and isinstance(raw, dict)
                 and "result" in raw
-                and (not present or value not in {"complete", "input_required"})
             ):
-                raise McpProtocolConformanceError(
-                    "MCP_RESULT_TYPE_CONFORMANCE_FAILED"
-                )
+                if present:
+                    if value not in {"complete", "input_required"}:
+                        raise McpProtocolConformanceError(
+                            "MCP_RESULT_TYPE_CONFORMANCE_FAILED"
+                        )
+                elif not self.allow_legacy_implicit_complete:
+                    raise McpProtocolConformanceError(
+                        "MCP_RESULT_TYPE_CONFORMANCE_FAILED"
+                    )
             message = types.jsonrpc_message_adapter.validate_python(raw)
         except McpProtocolConformanceError:
             raise
@@ -777,6 +783,7 @@ class BoundedMcpSdkClient:
         self.server_name = config.display_name
         self.server_instructions = ""
         self.advertised_capabilities: McpAdvertisedCapabilities | None = None
+        self._allow_legacy_implicit_complete = False
 
     @property
     def session(self) -> ClientSession:
@@ -789,6 +796,12 @@ class BoundedMcpSdkClient:
         if self._transport is None:
             return McpWireResultPresence(False, None)
         return self._transport.last_result_presence
+
+    @property
+    def uses_legacy_initialize(self) -> bool:
+        """Whether this connection explicitly negotiated the legacy era."""
+
+        return self._allow_legacy_implicit_complete
 
     @property
     def supports_bounded_stateless_parallelism(self) -> bool:
@@ -846,14 +859,18 @@ class BoundedMcpSdkClient:
                 self.server_instructions = getattr(result, "instructions", "") or ""
                 transport.enforce_closed_result_type = True
             except MCPError as modern_error:
-                # A legacy initialize fallback is allowed only for a peer that
-                # explicitly lacks modern discover; other faults stay visible.
-                if modern_error.code != -32601:
+                # MCP SDK 1.x FastMCP peers reject the MCP 2.x discover request
+                # with either METHOD_NOT_FOUND or INVALID_PARAMS.  Only a
+                # successful legacy initialize adopts the compatibility era;
+                # every other discover/initialize fault remains visible.
+                if modern_error.code not in {-32601, -32602}:
                     raise
                 result = await self._session.initialize()
                 self.protocol_version = result.protocol_version
                 self.server_name = result.server_info.name
                 self.server_instructions = result.instructions or ""
+                self._allow_legacy_implicit_complete = True
+                transport.allow_legacy_implicit_complete = True
                 transport.enforce_closed_result_type = True
             capabilities = self._session.server_capabilities
             if capabilities is None:
@@ -896,30 +913,49 @@ class BoundedMcpSdkClient:
                 "result_type" in fields_set,
                 result_value if isinstance(result_value, str) else None,
             )
-        if (
+        implicit_complete = (
+            not presence.present and self._allow_legacy_implicit_complete
+        )
+        if implicit_complete:
+            result_value = getattr(result, "result_type", None)
+            if isinstance(result, types.InputRequiredResult) or result_value not in {
+                None,
+                "complete",
+            }:
+                raise McpProtocolConformanceError(
+                    "MCP_RESULT_TYPE_PAYLOAD_CONTRADICTION"
+                )
+            effective_value = "complete"
+        elif (
             not presence.present
             or presence.value not in {"complete", "input_required"}
         ):
             raise McpProtocolConformanceError(
                 "MCP_RESULT_TYPE_CONFORMANCE_FAILED"
             )
+        else:
+            effective_value = presence.value
         result_value = getattr(result, "result_type", None)
-        if result is not None and result_value != presence.value:
+        if (
+            result is not None
+            and not implicit_complete
+            and result_value != effective_value
+        ):
             raise McpProtocolConformanceError(
                 "MCP_RESULT_TYPE_PAYLOAD_CONTRADICTION"
             )
         if (
-            presence.value == "input_required"
+            effective_value == "input_required"
             and result is not None
             and not isinstance(result, types.InputRequiredResult)
         ) or (
-            presence.value == "complete"
+            effective_value == "complete"
             and isinstance(result, types.InputRequiredResult)
         ):
             raise McpProtocolConformanceError(
                 "MCP_RESULT_TYPE_PAYLOAD_CONTRADICTION"
             )
-        return presence.value
+        return effective_value
 
     async def aclose(self) -> None:
         async with self._close_lock:
