@@ -825,7 +825,8 @@ class ResponsesCompletionAccumulator:
             expected_parts = {
                 (output_index, content_index)
                 for output_index, item in enumerate(output)
-                if isinstance(item, dict) and item.get("type") == "message"
+                if isinstance(item, dict)
+                and item.get("type") in {"message", "reasoning"}
                 for content_index, _part in enumerate(
                     item.get("content") if isinstance(item.get("content"), list) else ()
                 )
@@ -845,9 +846,12 @@ class ResponsesCompletionAccumulator:
                     reason_code="transport_responses_output_mismatch",
                 )
             item = output[output_index]
-            if not isinstance(item, dict) or item.get("type") != "message":
+            if not isinstance(item, dict) or item.get("type") not in {
+                "message",
+                "reasoning",
+            }:
                 raise LLMTransportContractError(
-                    "Responses content part is not owned by a message item",
+                    "Responses content part is not owned by a content-bearing item",
                     reason_code="transport_responses_output_mismatch",
                 )
             content = item.get("content")

@@ -976,6 +976,7 @@ class BoundedMcpSdkClient:
 
 __all__ = [
     "BoundedMcpSdkClient",
+    "MCPError",
     "McpAdvertisedCapabilities",
     "McpProtocolConformanceError",
     "McpTransportOperationError",

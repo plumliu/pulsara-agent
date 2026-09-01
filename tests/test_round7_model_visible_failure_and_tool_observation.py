@@ -417,7 +417,7 @@ def test_round7_source_registry_wire_and_oracle_architecture_guards() -> None:
     )
     assert (
         PROVIDER_MESSAGE_LOWERING_CONTRACT
-        == "pulsara.provider-message-lowering.prefix-continuity.v6-subagent-result-envelope"
+        == "pulsara.provider-message-lowering.prefix-continuity.v7-subagent-completion-envelope"
     )
 
     reader = (ROOT / "src/pulsara_agent/conversation_kernel/reader.py").read_text()
@@ -797,6 +797,7 @@ def test_round7_child_user_stop_atomically_settles_turn_task_and_occurrences(
         "turn_id": child_turn_id,
         "task_status": "CANCELLED",
         "task_reason": "USER_CANCELLED",
+        "terminal_public_detail": "The delegated task was stopped by the user.",
         "turn_reason": "USER_STOPPED",
         "occurred_at": occurred_at,
         "actor_id": "host:test",
@@ -832,12 +833,17 @@ def test_round7_child_user_stop_atomically_settles_turn_task_and_occurrences(
             (lease.guard.session_id, child_turn_id),
         ).fetchone()
         task = connection.execute(
-            """SELECT status, terminal_reason FROM pulsara_v3.subagent_tasks
+            """SELECT status, terminal_reason, terminal_public_detail
+               FROM pulsara_v3.subagent_tasks
                WHERE session_id = %s AND id = %s""",
             (lease.guard.session_id, task_id),
         ).fetchone()
     assert turn == ("INTERRUPTED", "USER_STOPPED")
-    assert task == ("CANCELLED", "USER_CANCELLED")
+    assert task == (
+        "CANCELLED",
+        "USER_CANCELLED",
+        "The delegated task was stopped by the user.",
+    )
 
 
 class _CanonicalChildRaceRunner:
@@ -1083,10 +1089,18 @@ def test_round7_late_child_cancel_preserves_completed_winner_and_result_lineage(
         assert json.loads(stopped.content)["status"] == "completed"
         waited = await manager.invoke(
             tool_name="wait_agent",
-            arguments={"task_id": task_id, "timeout_seconds": 1},
+            arguments={
+                "task_ids": [task_id],
+                "settle": "all",
+                "timeout_seconds": 1,
+            },
             invocation_context=context,
         )
-        assert json.loads(waited.content)["status"] == "completed"
+        assert json.loads(waited.content) == {
+            "outcome": "predicate_satisfied",
+            "satisfied_task_ids": [task_id],
+            "pending_task_ids": [],
+        }
         await manager.aclose(deadline_monotonic=monotonic() + 5)
         return task_id
 
@@ -1148,6 +1162,9 @@ def test_round7_child_cancellation_event_failure_rolls_back_both_rows(
             turn_id=child_turn_id,
             task_status="INTERRUPTED",
             task_reason="HOST_CLOSING",
+            terminal_public_detail=(
+                "The delegated task was interrupted because the host is closing."
+            ),
             turn_reason="SESSION_CLOSED",
             occurred_at=datetime.now(timezone.utc),
             actor_id="host:test",
@@ -1163,7 +1180,8 @@ def test_round7_child_cancellation_event_failure_rolls_back_both_rows(
             (lease.guard.session_id, child_turn_id),
         ).fetchone()
         task = connection.execute(
-            """SELECT status, terminal_reason FROM pulsara_v3.subagent_tasks
+            """SELECT status, terminal_reason, terminal_public_detail
+               FROM pulsara_v3.subagent_tasks
                WHERE session_id = %s AND id = %s""",
             (lease.guard.session_id, task_id),
         ).fetchone()
@@ -1174,7 +1192,7 @@ def test_round7_child_cancellation_event_failure_rolls_back_both_rows(
             (lease.guard.session_id, child_turn_id),
         ).fetchone()
     assert turn == ("RUNNING", None)
-    assert task == ("ACTIVE", None)
+    assert task == ("ACTIVE", None, None)
     assert interruption_count == (0,)
 
 

@@ -230,5 +230,5 @@ def test_round4_all_root_producers_use_the_single_host_owned_chain() -> None:
         "_bind_plan_review_successor",
         "_settle_queued_root_admission",
         "_start_terminal_observation_turn",
-        "_start_external_result_turn",
+        "_start_subagent_completion_turn",
     } <= root_chain_callers

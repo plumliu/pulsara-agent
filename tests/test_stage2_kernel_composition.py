@@ -202,7 +202,7 @@ def test_kernel_composition_preserves_root_catalog_and_active_skill_prompt(
         owner, view = _skill_view(composer)
         assert owner.source_snapshot.registration.source_contract_fingerprint == (
             context_fingerprint(
-                "skill-source-contract:v4-bundled-loose-plugin-skills",
+                "skill-source-contract:v6-local-enablement",
                 {
                     "parser_contract": AGENT_SKILLS_CONTRACT_ID,
                     "placement_contract": SKILL_PLACEMENT_CONTRACT_ID,
@@ -214,6 +214,10 @@ def test_kernel_composition_preserves_root_catalog_and_active_skill_prompt(
                         "BUNDLED",
                     ),
                     "bundled_names": EXPECTED_BUNDLED_SKILL_NAMES,
+                    "local_enablement": (
+                        "exact-path-user-config",
+                        "exact-path-workspace-config",
+                    ),
                 },
             )
         )

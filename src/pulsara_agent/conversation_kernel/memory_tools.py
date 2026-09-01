@@ -172,10 +172,10 @@ class KernelMemoryToolPort:
         self._deadlines = deadline_factory
         self._deadline_factory_bound = True
 
-    def offer_candidate_wake(self, candidate_id: str) -> None:
+    def offer_governance_wake(self) -> None:
         governor = self._governor
         if governor is not None:
-            governor.offer_candidate_wake(candidate_id)
+            governor.offer_governance_wake()
 
     def adopt_dormant_reflection(
         self, handoff: PreparedCheapHintReflectionHandoff

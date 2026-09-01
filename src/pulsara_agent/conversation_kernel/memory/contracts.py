@@ -34,6 +34,10 @@ MAXIMUM_MODEL_VISIBLE_MEMORY_PROVENANCE_BYTES = 16 * 1024
 MAXIMUM_GOVERNANCE_PRODUCER_TURN_BYTES = 32 * 1024
 MAXIMUM_GOVERNANCE_CITATION_PREVIEW_BYTES = 64 * 1024
 MAXIMUM_GOVERNANCE_VISIBLE_MEMORY_BYTES = 64 * 1024
+MAXIMUM_GOVERNANCE_FINAL_WIRE_BYTES = 128 * 1024
+MAXIMUM_GOVERNANCE_INPUT_TOKENS = 32_768
+MAXIMUM_GOVERNANCE_OUTPUT_BYTES = 8 * 1024
+MAXIMUM_GOVERNANCE_OUTPUT_TOKENS = 4_096
 
 
 class MemoryFactKind(StrEnum):
@@ -78,6 +82,7 @@ class MemoryDecisionReasonCode(StrEnum):
     """Closed public/terminal reason vocabulary for one governance decision."""
 
     DUPLICATE = "DUPLICATE"
+    INSUFFICIENT_SOURCE_SUPPORT = "INSUFFICIENT_SOURCE_SUPPORT"
     TEMPORARY_OR_EPHEMERAL = "TEMPORARY_OR_EPHEMERAL"
     LOW_VALUE = "LOW_VALUE"
     MULTI_ATOM_STATEMENT = "MULTI_ATOM_STATEMENT"
@@ -112,6 +117,7 @@ class MemoryDecisionReasonCode(StrEnum):
 MODEL_GOVERNANCE_SKIP_REASON_CODES = frozenset(
     {
         MemoryDecisionReasonCode.DUPLICATE,
+        MemoryDecisionReasonCode.INSUFFICIENT_SOURCE_SUPPORT,
         MemoryDecisionReasonCode.TEMPORARY_OR_EPHEMERAL,
         MemoryDecisionReasonCode.LOW_VALUE,
         MemoryDecisionReasonCode.MULTI_ATOM_STATEMENT,
@@ -142,6 +148,27 @@ class MemoryCitationVisibility(StrEnum):
 class MemoryCitationEvidenceKind(StrEnum):
     PRIMARY_OBSERVATION = "PRIMARY_OBSERVATION"
     MEMORY_READ_EXPOSURE = "MEMORY_READ_EXPOSURE"
+
+
+class MemoryGovernanceEvidenceRole(StrEnum):
+    HUMAN_ASSERTION = "HUMAN_ASSERTION"
+    POST_PROPOSAL_HUMAN = "POST_PROPOSAL_HUMAN"
+    PRIMARY_OBSERVATION = "PRIMARY_OBSERVATION"
+    MEMORY_READ_EXPOSURE = "MEMORY_READ_EXPOSURE"
+    ASSISTANT_CONTEXT = "ASSISTANT_CONTEXT"
+    NON_HUMAN_CONTEXT = "NON_HUMAN_CONTEXT"
+    TOOL_CONTEXT_ONLY = "TOOL_CONTEXT_ONLY"
+
+
+class MemoryGovernanceChronology(StrEnum):
+    BEFORE_PROPOSAL = "BEFORE_PROPOSAL"
+    PRODUCER_OUTPUT = "PRODUCER_OUTPUT"
+    AFTER_PROPOSAL = "AFTER_PROPOSAL"
+
+
+class MemoryGovernanceSourceBlockKind(StrEnum):
+    TEXT = "TEXT"
+    DATA = "DATA"
 
 
 class ModelVisibleMemoryProvenanceDisposition(StrEnum):
@@ -429,18 +456,85 @@ class PreparedMemoryCandidateAcceptance:
 
 
 @dataclass(frozen=True, slots=True)
+class FrozenMemoryGovernanceTerminalFence:
+    """Existing committed occurrences that close one candidate's source turn."""
+
+    source_turn_id: str
+    source_entry_id: str
+    source_entry_event_id: str
+    source_entry_event_sequence: int
+    terminal_status: str
+    terminal_outcome: str
+    terminal_event_id: str
+    terminal_event_sequence: int
+
+    def __post_init__(self) -> None:
+        if not all(
+            (
+                self.source_turn_id,
+                self.source_entry_id,
+                self.source_entry_event_id,
+                self.terminal_outcome,
+                self.terminal_event_id,
+            )
+        ):
+            raise ValueError("memory governance terminal fence is incomplete")
+        if self.terminal_status not in {"COMPLETED", "INTERRUPTED"}:
+            raise ValueError("memory governance terminal status is invalid")
+        if (
+            self.source_entry_event_sequence < 1
+            or self.terminal_event_sequence <= self.source_entry_event_sequence
+        ):
+            raise ValueError("memory governance occurrence fence is unordered")
+
+
+@dataclass(frozen=True, slots=True)
+class FrozenMemoryGovernanceProducerCut:
+    """Exact historical semantic cut authorized by one producer assistant entry."""
+
+    session_id: str
+    turn_id: str
+    producer_entry_id: str
+    producer_entry_sequence: int
+    context_binding_revision_id: str
+    provider_input_through_sequence: int
+
+    def __post_init__(self) -> None:
+        if not all(
+            (
+                self.session_id,
+                self.turn_id,
+                self.producer_entry_id,
+                self.context_binding_revision_id,
+            )
+        ):
+            raise ValueError("memory governance producer cut is incomplete")
+        if (
+            self.provider_input_through_sequence < 0
+            or self.producer_entry_sequence <= self.provider_input_through_sequence
+        ):
+            raise ValueError("memory governance producer cut is not historical")
+
+
+@dataclass(frozen=True, slots=True)
 class FrozenMemoryCandidateForGovernance:
     """Immutable candidate head read after the process-local claim."""
 
     prepared: PreparedMemoryCandidateAcceptance
     status: MemoryCandidateStatus
     processing_started_at: object
+    terminal_fence: FrozenMemoryGovernanceTerminalFence
 
     def __post_init__(self) -> None:
         if self.status is not MemoryCandidateStatus.PROCESSING:
             raise ValueError("governance candidate must be PROCESSING")
         if self.processing_started_at is None:
             raise ValueError("governance candidate lacks claim time")
+        if self.terminal_fence.source_entry_id not in {
+            self.prepared.producer_entry_id,
+            self.prepared.trigger_user_entry_id,
+        }:
+            raise ValueError("governance fence does not name the candidate source")
 
 
 @dataclass(frozen=True, slots=True)
@@ -469,15 +563,94 @@ class FrozenMemoryPublicFactProjection:
 
 
 @dataclass(frozen=True, slots=True)
-class FrozenMemoryGovernanceTurnItem:
-    ordinal: int
-    role: str
-    body: str = field(repr=False)
+class FrozenMemoryGovernanceSourceBlock:
+    block_kind: MemoryGovernanceSourceBlockKind
+    text: str = field(repr=False)
     truncated: bool = False
 
     def __post_init__(self) -> None:
-        if self.ordinal < 0 or self.role not in {"USER", "ASSISTANT", "TOOL"}:
-            raise ValueError("memory governance turn item is invalid")
+        self.text.encode("utf-8")
+        if not self.text and not self.truncated:
+            raise ValueError("memory governance source block is empty")
+
+
+@dataclass(frozen=True, slots=True)
+class FrozenMemoryGovernanceSourceItem:
+    """One call-local source item with Host-assigned chronology and authority."""
+
+    source_entry_id: str | None
+    chronology: MemoryGovernanceChronology
+    source_product_label: str
+    evidence_role: MemoryGovernanceEvidenceRole
+    public_kind: str
+    blocks: tuple[FrozenMemoryGovernanceSourceBlock, ...] = field(repr=False)
+    item_omitted_before: int = 0
+    item_omitted_after: int = 0
+    anchor: bool = False
+
+    def __post_init__(self) -> None:
+        if not self.source_product_label or not self.public_kind or not self.blocks:
+            raise ValueError("memory governance source item is incomplete")
+        if min(self.item_omitted_before, self.item_omitted_after) < 0:
+            raise ValueError("memory governance omission count is invalid")
+        human = self.evidence_role in {
+            MemoryGovernanceEvidenceRole.HUMAN_ASSERTION,
+            MemoryGovernanceEvidenceRole.POST_PROPOSAL_HUMAN,
+        }
+        if human and any(block.truncated for block in self.blocks):
+            # Incomplete human material may be represented by the repository so
+            # the Host can deterministically skip before opening a provider.
+            return
+
+    @property
+    def truncated(self) -> bool:
+        return any(block.truncated for block in self.blocks)
+
+    @property
+    def utf8_bytes(self) -> int:
+        return sum(len(block.text.encode("utf-8")) for block in self.blocks)
+
+
+def memory_governance_source_item_payload(
+    item: FrozenMemoryGovernanceSourceItem,
+    *,
+    ordinal: int,
+) -> Mapping[str, object]:
+    """The sole provider-visible codec for one governance source item."""
+
+    return {
+        "source": f"source:{ordinal}",
+        "chronology": item.chronology.value,
+        "source_product_label": item.source_product_label,
+        "evidence_role": item.evidence_role.value,
+        "public_kind": item.public_kind,
+        "source_anchor": item.anchor,
+        "blocks": tuple(
+            {
+                "kind": block.block_kind.value,
+                "text": block.text,
+                "truncated": block.truncated,
+            }
+            for block in item.blocks
+        ),
+        "omitted_before": item.item_omitted_before,
+        "omitted_after": item.item_omitted_after,
+    }
+
+
+def memory_governance_source_projection_bytes(
+    items: Sequence[FrozenMemoryGovernanceSourceItem],
+) -> int:
+    """Exact canonical bytes of the complete provider-visible source array."""
+
+    return len(
+        canonical_json_bytes(
+            tuple(
+                memory_governance_source_item_payload(item, ordinal=ordinal)
+                for ordinal, item in enumerate(items, start=1)
+            )
+        )
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -505,31 +678,83 @@ class FrozenMemoryGovernanceToolEvidence:
 
 
 @dataclass(frozen=True, slots=True)
+class FrozenMemoryGovernanceSourceCoverage:
+    causal_context_complete: bool
+    origin_turn_human_source_complete: bool
+    post_proposal_human_source_complete: bool
+    omitted_causal_items: int = 0
+    omitted_assistant_or_tool_items: int = 0
+    omitted_post_proposal_human_items: int = 0
+    relation_authority: bool = True
+
+    def __post_init__(self) -> None:
+        if min(
+            self.omitted_causal_items,
+            self.omitted_assistant_or_tool_items,
+            self.omitted_post_proposal_human_items,
+        ) < 0:
+            raise ValueError("memory governance source coverage count is invalid")
+        if not (
+            self.origin_turn_human_source_complete
+            and self.post_proposal_human_source_complete
+        ) and self.relation_authority:
+            raise ValueError("incomplete human source cannot authorize relations")
+
+
+@dataclass(frozen=True, slots=True)
 class FrozenMemoryGovernanceEvidence:
     origin_workspace_id: str
-    producer_turn_items: tuple[FrozenMemoryGovernanceTurnItem, ...]
+    terminal_fence: FrozenMemoryGovernanceTerminalFence
+    producer_cut: FrozenMemoryGovernanceProducerCut | None
+    producer_call_context: tuple[FrozenMemoryGovernanceSourceItem, ...]
+    producer_public_output: tuple[FrozenMemoryGovernanceSourceItem, ...]
+    post_proposal_turn_suffix: tuple[FrozenMemoryGovernanceSourceItem, ...]
     tool_result_evidence: tuple[FrozenMemoryGovernanceToolEvidence, ...]
     basis_items: tuple[FrozenMemoryPublicFactProjection, ...]
     model_visible_items: tuple[FrozenMemoryPublicFactProjection, ...]
     model_visible_complete: bool
+    source_coverage: FrozenMemoryGovernanceSourceCoverage
 
     def __post_init__(self) -> None:
         if not self.origin_workspace_id:
             raise ValueError("memory governance evidence lacks origin workspace")
-        if tuple(item.ordinal for item in self.producer_turn_items) != tuple(
-            range(len(self.producer_turn_items))
-        ):
-            raise ValueError("memory governance turn projection is unordered")
         if tuple(item.ordinal for item in self.tool_result_evidence) != tuple(
             range(len(self.tool_result_evidence))
         ):
             raise ValueError("memory governance citation projection is unordered")
-        if len(
-            canonical_json_bytes(
-                tuple((item.role, item.body, item.truncated) for item in self.producer_turn_items)
+        if self.producer_cut is not None and (
+            self.producer_cut.turn_id != self.terminal_fence.source_turn_id
+            or self.producer_cut.producer_entry_id
+            != self.terminal_fence.source_entry_id
+        ):
+            raise ValueError("memory governance producer cut/fence drifted")
+        if any(
+            item.chronology is not expected
+            for values, expected in (
+                (
+                    self.producer_call_context,
+                    MemoryGovernanceChronology.BEFORE_PROPOSAL,
+                ),
+                (
+                    self.producer_public_output,
+                    MemoryGovernanceChronology.PRODUCER_OUTPUT,
+                ),
+                (
+                    self.post_proposal_turn_suffix,
+                    MemoryGovernanceChronology.AFTER_PROPOSAL,
+                ),
+            )
+            for item in values
+        ):
+            raise ValueError("memory governance source chronology drifted")
+        if memory_governance_source_projection_bytes(
+            (
+                *self.producer_call_context,
+                *self.producer_public_output,
+                *self.post_proposal_turn_suffix,
             )
         ) > MAXIMUM_GOVERNANCE_PRODUCER_TURN_BYTES:
-            raise ValueError("memory governance producer turn exceeds its bound")
+            raise ValueError("memory governance origin source exceeds its bound")
         if len(
             canonical_json_bytes(
                 tuple(
@@ -557,6 +782,18 @@ class FrozenMemoryGovernanceEvidence:
             or visible_bytes > MAXIMUM_GOVERNANCE_VISIBLE_MEMORY_BYTES
         ):
             raise ValueError("complete model-visible memory projection exceeds its bound")
+        post_human_complete = all(
+            not item.truncated
+            and item.item_omitted_before == 0
+            and item.item_omitted_after == 0
+            for item in self.post_proposal_turn_suffix
+            if item.evidence_role
+            is MemoryGovernanceEvidenceRole.POST_PROPOSAL_HUMAN
+        ) and self.source_coverage.omitted_post_proposal_human_items == 0
+        if self.source_coverage.post_proposal_human_source_complete != (
+            post_human_complete
+        ):
+            raise ValueError("post-proposal human coverage is inconsistent")
 
 
 def memory_public_fact_payload(item: FrozenMemoryPublicFactProjection) -> Mapping[str, object]:
@@ -617,6 +854,8 @@ class FrozenMemoryGovernanceDecision:
             return
         if self.final_kind is None or self.reason_code is not None:
             raise ValueError("memory acceptance decision union is invalid")
+        if self.public_summary is None:
+            raise ValueError("memory acceptance requires a public formation summary")
         if self.decision_kind is MemoryDecisionKind.ACCEPT:
             if self.related_target_fact_id is not None or self.supersede_mode is not None:
                 raise ValueError("plain memory acceptance carries a relation")
@@ -1441,6 +1680,21 @@ def validate_final_kind_shape(proposal: FrozenMemoryProposal, kind: MemoryFactKi
         raise ValueError("RESPONSE_PREFERENCE exceeds statement bound")
 
 
+def legal_memory_final_kinds(
+    proposal: FrozenMemoryProposal,
+) -> tuple[MemoryFactKind, ...]:
+    """Return the unique shape validator's complete closed legal-kind set."""
+
+    legal: list[MemoryFactKind] = []
+    for kind in MemoryFactKind:
+        try:
+            validate_final_kind_shape(proposal, kind)
+        except ValueError:
+            continue
+        legal.append(kind)
+    return tuple(legal)
+
+
 def visible_scope_predicate(binding: FrozenMemoryReadScopeBinding) -> tuple[tuple[str, str], ...]:
     return tuple((item.kind.value, item.scope_id) for item in binding.readable_scopes)
 
@@ -1475,6 +1729,9 @@ __all__ = [name for name in globals() if name.startswith("Memory") or name.start
     "digest",
     "freeze_memory_fact_settlement_identity",
     "memory_fact_semantic_digest",
+    "memory_governance_source_item_payload",
+    "memory_governance_source_projection_bytes",
+    "legal_memory_final_kinds",
     "memory_public_fact_payload",
     "memory_response_preference_item_payload",
     "memory_relation_id",

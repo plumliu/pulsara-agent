@@ -87,7 +87,7 @@ class MemoryContextProjectionPort(Protocol):
 
     def classify_memory_trigger(self, text: str) -> FrozenMemoryTriggerPolicy: ...
 
-    def offer_candidate_wake(self, candidate_id: str) -> None: ...
+    def offer_governance_wake(self) -> None: ...
 
     def prepare_and_adopt_reflection(
         self,
@@ -117,6 +117,11 @@ class MemoryDispatchSupport:
         self._memory_projection = memory_projection
         self._input_reader = input_reader
         self._deadlines = deadline_factory
+
+    def offer_governance_wake(self) -> None:
+        projection = self._memory_projection
+        if projection is not None:
+            projection.offer_governance_wake()
 
     def _canonical_deadline(self) -> float:
         return self._deadlines.deadline(KernelWatchdogOwner.FOREGROUND_CANONICAL)

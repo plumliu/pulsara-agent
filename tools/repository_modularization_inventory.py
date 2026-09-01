@@ -37,7 +37,7 @@ REPOSITORY_OWNER_CLASSES = {
     "_PlanOperations",
     "_PromptOperations",
     "_SubagentOperations",
-    "_ExternalResultOperations",
+    "_SubagentCompletionOperations",
     "_JobOperations",
     "_MemoryOperations",
 }

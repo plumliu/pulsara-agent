@@ -14,8 +14,6 @@ from typing import Callable, Mapping
 from uuid import uuid4
 
 from jsonschema import validators
-from mcp.shared.exceptions import MCPError
-
 from pulsara_agent.capability.contracts import (
     CapabilityKind,
     CapabilitySourceKind,
@@ -106,6 +104,7 @@ from .input_required import (
 )
 from .sdk_facade import (
     BoundedMcpSdkClient,
+    MCPError,
     McpAdvertisedCapabilities,
     McpProtocolConformanceError,
     McpTransportOperationError,

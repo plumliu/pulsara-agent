@@ -6,6 +6,12 @@ from dataclasses import asdict, dataclass
 from enum import StrEnum
 from typing import Any, Literal
 
+from pulsara_agent.memory.product_contract import (
+    MEMORY_SCOPE_PRODUCT_GUIDE,
+    MEMORY_SINGLE_ATOM_GUIDE,
+    memory_kind_product_guide,
+)
+
 from pulsara_agent.capability.descriptor import (
     BuiltinToolAdvertisePolicy,
     BuiltinToolDescriptor,
@@ -240,20 +246,9 @@ def _long_horizon_policy(name: str):
     return fixed_tool_action_policy(LongHorizonActionClass(kind.value))
 
 
-_MEMORY_SCOPE_GUIDE = (
-    "USER is for information that should remain useful across this user's projects. "
-    "WORKSPACE is for facts, response preferences, action rules, and decisions specific "
-    "to the current project. USER_PROFILE is always USER."
-)
+_MEMORY_SCOPE_GUIDE = MEMORY_SCOPE_PRODUCT_GUIDE
 
-_MEMORY_KIND_GUIDE = (
-    "FACT describes durable world, environment, or project state. USER_PROFILE "
-    "describes the user's durable "
-    "attributes, habits, or interests and requires USER scope. RESPONSE_PREFERENCE "
-    "describes how answers should usually be written or explained; it is not a general "
-    "fact about what the user likes. ACTION_RULE describes what to do under a future "
-    "condition. DECISION records a choice already made."
-)
+_MEMORY_KIND_GUIDE = memory_kind_product_guide()
 
 _MEMORY_KIND_HINT_GUIDE = (
     "AUTO lets the memory system choose when you are uncertain. "
@@ -1842,8 +1837,9 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
             "conversations. Use this when the user asks you to remember something or "
             "clearly provides a lasting fact, preference, action rule, or decision; do "
             "not use it for temporary task state, TODO items, reminders, secrets, raw "
-            "tool output, or permission and safety instructions. Make one call per "
-            "independent idea. For example, split 'I use macOS, so show me zsh commands' "
+            "tool output, or permission and safety instructions. "
+            + MEMORY_SINGLE_ATOM_GUIDE
+            + " For example, split 'I use macOS, so show me zsh commands' "
             "into a USER_PROFILE and a RESPONSE_PREFERENCE; split 'production uses "
             "PostgreSQL, so back it up before schema changes' into a FACT and an "
             "ACTION_RULE with applies_when; record 'we chose PostgreSQL based on these "

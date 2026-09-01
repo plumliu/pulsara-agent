@@ -934,6 +934,7 @@ class _PolicyMemoryProjection:
         self._all = TurnMemoryUseOptOut()
         self.preference_calls = 0
         self.recall_calls = 0
+        self.governance_wakes = 0
 
     def classify_memory_trigger(self, text: str) -> FrozenMemoryTriggerPolicy:
         if self._all.excludes(text):
@@ -977,8 +978,8 @@ class _PolicyMemoryProjection:
             ),
         )
 
-    def offer_candidate_wake(self, _candidate_id: str) -> None:
-        return None
+    def offer_governance_wake(self) -> None:
+        self.governance_wakes += 1
 
     def prepare_and_adopt_reflection(self, **_kwargs: object) -> None:
         return None
@@ -3934,6 +3935,7 @@ def test_round8_memory_policy_aggregates_steers_and_resets_on_next_root_message(
         )
         assert projection.preference_calls == 1
         assert projection.recall_calls == 1
+        assert projection.governance_wakes == 1
 
         collector.started.clear()
         collector.release.clear()
@@ -3968,6 +3970,7 @@ def test_round8_memory_policy_aggregates_steers_and_resets_on_next_root_message(
         )
         assert projection.preference_calls == 1
         assert projection.recall_calls == 1
+        assert projection.governance_wakes == 2
 
         await runner.run_turn("normal next root message")
         assert model.requests[2].memory_context.memory_use_policy is (
@@ -3975,6 +3978,7 @@ def test_round8_memory_policy_aggregates_steers_and_resets_on_next_root_message(
         )
         assert projection.preference_calls == 2
         assert projection.recall_calls == 2
+        assert projection.governance_wakes == 3
 
     asyncio.run(exercise())
     first_input, second_input, third_input = (
@@ -6222,18 +6226,10 @@ def test_round10_sole_report_result_atomically_completes_child_without_second_mo
             (session_id,),
         ).fetchone() == (1,)
 
-        explicit_result_id = str(
-            connection.execute(
-                "SELECT id FROM pulsara_v3.subagent_task_children "
-                "WHERE session_id=%s AND task_id=%s AND child_kind='RESULT'",
-                (session_id, task_id),
-            ).fetchone()[0]
-        )
-
     safe_point = ProviderSafePointCoordinator(repository=repository, guard=lease.guard)
     accepted = safe_point.accept_subagent_completion(
         turn_id=parent_turn_id,
-        child_result_id=explicit_result_id,
+        task_id=task_id,
         command_id=_name("command"),
         actor_id="host:test",
         deadline_monotonic=monotonic() + 30,
@@ -6250,9 +6246,13 @@ def test_round10_sole_report_result_atomically_completes_child_without_second_mo
         )
     finally:
         handle.close()
-    assert materialized.items[-1].text == "exact explicit summary"
+    envelope = json.loads(materialized.items[-1].text)[
+        "pulsara_inter_agent_message"
+    ]
+    assert envelope["content"]["result"]["summary"] == "exact explicit summary"
     assert (
-        materialized.items[-1].input_origin is CanonicalInputOriginKind.SUBAGENT_RESULT
+        materialized.items[-1].input_origin
+        is CanonicalInputOriginKind.INTER_AGENT_MESSAGE
     )
 
 

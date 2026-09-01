@@ -223,9 +223,15 @@ def _claim_candidate(
 
 
 def _settle(repository, lease, candidate, decision):
+    head = repository.read_memory_candidate_for_governance(
+        lease.guard,
+        candidate_id=candidate.candidate_id,
+        deadline_monotonic=monotonic() + 30,
+    )
+    assert head is not None
     evidence = repository.read_memory_governance_evidence(
         lease.guard,
-        candidate=candidate,
+        candidate=head,
         deadline_monotonic=monotonic() + 30,
     )
     relation_targets = ()
@@ -592,6 +598,7 @@ def test_round8_duplicate_relations_taxonomy_correction_and_basis_are_exact(
         FrozenMemoryGovernanceDecision(
             MemoryDecisionKind.ACCEPT,
             final_kind=MemoryFactKind.RESPONSE_PREFERENCE,
+            public_summary="Based on the exact test source.",
         ),
     )
     assert old.fact_id is not None
@@ -609,6 +616,7 @@ def test_round8_duplicate_relations_taxonomy_correction_and_basis_are_exact(
         FrozenMemoryGovernanceDecision(
             MemoryDecisionKind.ACCEPT,
             final_kind=MemoryFactKind.USER_PROFILE,
+            public_summary="Based on the exact test source.",
         ),
     )
     assert correct.fact_id is not None
@@ -626,6 +634,7 @@ def test_round8_duplicate_relations_taxonomy_correction_and_basis_are_exact(
         FrozenMemoryGovernanceDecision(
             MemoryDecisionKind.ACCEPT_AND_SUPERSEDE,
             final_kind=MemoryFactKind.USER_PROFILE,
+            public_summary="Based on the exact test source.",
             related_target_fact_id=old.fact_id,
             supersede_mode=MemorySupersedeMode.TAXONOMY_CORRECTION,
         ),
@@ -648,6 +657,7 @@ def test_round8_duplicate_relations_taxonomy_correction_and_basis_are_exact(
         FrozenMemoryGovernanceDecision(
             MemoryDecisionKind.ACCEPT_AND_SUPERSEDE,
             final_kind=MemoryFactKind.USER_PROFILE,
+            public_summary="Based on the exact test source.",
             related_target_fact_id=old.fact_id,
             supersede_mode=MemorySupersedeMode.TAXONOMY_CORRECTION,
         ),
@@ -668,6 +678,7 @@ def test_round8_duplicate_relations_taxonomy_correction_and_basis_are_exact(
         FrozenMemoryGovernanceDecision(
             MemoryDecisionKind.ACCEPT,
             final_kind=MemoryFactKind.USER_PROFILE,
+            public_summary="Based on the exact test source.",
         ),
     )
     assert plain.status is MemoryCandidateStatus.SKIPPED
@@ -687,6 +698,7 @@ def test_round8_duplicate_relations_taxonomy_correction_and_basis_are_exact(
         FrozenMemoryGovernanceDecision(
             MemoryDecisionKind.ACCEPT,
             final_kind=MemoryFactKind.DECISION,
+            public_summary="Based on the exact test source.",
         ),
     )
     assert decision.fact_id is not None
@@ -704,6 +716,7 @@ def test_round8_duplicate_relations_taxonomy_correction_and_basis_are_exact(
         FrozenMemoryGovernanceDecision(
             MemoryDecisionKind.ACCEPT,
             final_kind=MemoryFactKind.DECISION,
+            public_summary="Based on the exact test source.",
         ),
     )
     assert basis_loser.status is MemoryCandidateStatus.SKIPPED
@@ -739,6 +752,7 @@ def test_round8_reverse_contradiction_confirms_the_unordered_relation_winner(
         FrozenMemoryGovernanceDecision(
             MemoryDecisionKind.ACCEPT,
             final_kind=MemoryFactKind.FACT,
+            public_summary="Based on the exact test source.",
         ),
     )
     assert first.fact_id is not None
@@ -756,6 +770,7 @@ def test_round8_reverse_contradiction_confirms_the_unordered_relation_winner(
         FrozenMemoryGovernanceDecision(
             MemoryDecisionKind.ACCEPT_AND_CONTRADICT,
             final_kind=MemoryFactKind.FACT,
+            public_summary="Based on the exact test source.",
             related_target_fact_id=first.fact_id,
         ),
     )
@@ -774,6 +789,7 @@ def test_round8_reverse_contradiction_confirms_the_unordered_relation_winner(
         FrozenMemoryGovernanceDecision(
             MemoryDecisionKind.ACCEPT_AND_CONTRADICT,
             final_kind=MemoryFactKind.FACT,
+            public_summary="Based on the exact test source.",
             related_target_fact_id=second.fact_id,
         ),
     )
@@ -815,6 +831,7 @@ def test_round8_scope_sparse_recall_and_cross_origin_provenance_redaction(
         FrozenMemoryGovernanceDecision(
             MemoryDecisionKind.ACCEPT,
             final_kind=MemoryFactKind.FACT,
+            public_summary="Based on the exact test source.",
         ),
     )
     assert accepted.fact_id is not None
@@ -951,7 +968,9 @@ def test_round8_workspace_domain_visibility_origin_claim_and_relation_endpoints(
         lease_a,
         user_candidate,
         FrozenMemoryGovernanceDecision(
-            MemoryDecisionKind.ACCEPT, final_kind=MemoryFactKind.USER_PROFILE
+            MemoryDecisionKind.ACCEPT,
+            final_kind=MemoryFactKind.USER_PROFILE,
+            public_summary="Based on the exact test source.",
         ),
     )
     workspace_candidate = _claim_candidate(
@@ -968,7 +987,9 @@ def test_round8_workspace_domain_visibility_origin_claim_and_relation_endpoints(
         lease_a,
         workspace_candidate,
         FrozenMemoryGovernanceDecision(
-            MemoryDecisionKind.ACCEPT, final_kind=MemoryFactKind.FACT
+            MemoryDecisionKind.ACCEPT,
+            final_kind=MemoryFactKind.FACT,
+            public_summary="Based on the exact test source.",
         ),
     )
     assert user_fact.fact_id is not None and workspace_fact.fact_id is not None
@@ -1026,7 +1047,9 @@ def test_round8_workspace_domain_visibility_origin_claim_and_relation_endpoints(
         lease_a,
         decision_candidate,
         FrozenMemoryGovernanceDecision(
-            MemoryDecisionKind.ACCEPT, final_kind=MemoryFactKind.DECISION
+            MemoryDecisionKind.ACCEPT,
+            final_kind=MemoryFactKind.DECISION,
+            public_summary="Based on the exact test source.",
         ),
     )
     assert decision_fact.fact_id is not None
@@ -1154,7 +1177,7 @@ def test_round8_governance_owner_is_exact_session_within_shared_workspace(
 
     evidence = repository.read_memory_governance_evidence(
         owner.guard,
-        candidate=claimed.prepared,
+        candidate=claimed,
         deadline_monotonic=monotonic() + 30,
     )
     prepared = prepare_memory_governance_acceptance(
@@ -1206,6 +1229,7 @@ def test_round8_response_preference_capacity_and_atomic_replacement(
             FrozenMemoryGovernanceDecision(
                 MemoryDecisionKind.ACCEPT,
                 final_kind=MemoryFactKind.RESPONSE_PREFERENCE,
+            public_summary="Based on the exact test source.",
             ),
         )
         assert accepted.fact_id is not None
@@ -1224,6 +1248,7 @@ def test_round8_response_preference_capacity_and_atomic_replacement(
         FrozenMemoryGovernanceDecision(
             MemoryDecisionKind.ACCEPT,
             final_kind=MemoryFactKind.RESPONSE_PREFERENCE,
+            public_summary="Based on the exact test source.",
         ),
     )
     assert overflow.status is MemoryCandidateStatus.SKIPPED
@@ -1249,6 +1274,7 @@ def test_round8_response_preference_capacity_and_atomic_replacement(
         FrozenMemoryGovernanceDecision(
             MemoryDecisionKind.ACCEPT_AND_SUPERSEDE,
             final_kind=MemoryFactKind.RESPONSE_PREFERENCE,
+            public_summary="Based on the exact test source.",
             related_target_fact_id=accepted_ids[0],
             supersede_mode=MemorySupersedeMode.SAME_KIND_REPLACEMENT,
         ),
@@ -1276,15 +1302,23 @@ def test_round8_search_document_is_trigger_sealed_and_not_repository_input(
         statement="The service code is src/runtime/memory_index.py",
         kind_hint=MemoryKindHint.FACT,
     )
+    head = repository.read_memory_candidate_for_governance(
+        lease.guard,
+        candidate_id=candidate.candidate_id,
+        deadline_monotonic=monotonic() + 30,
+    )
+    assert head is not None
     evidence = repository.read_memory_governance_evidence(
         lease.guard,
-        candidate=candidate,
+        candidate=head,
         deadline_monotonic=monotonic() + 30,
     )
     prepared = prepare_memory_governance_acceptance(
         candidate=candidate,
         decision=FrozenMemoryGovernanceDecision(
-            MemoryDecisionKind.ACCEPT, final_kind=MemoryFactKind.FACT
+            MemoryDecisionKind.ACCEPT,
+            final_kind=MemoryFactKind.FACT,
+            public_summary="Based on the exact test source.",
         ),
         basis_items=evidence.basis_items,
         relation_targets=(),
@@ -1383,7 +1417,9 @@ def test_round8_embedding_cache_revalidates_scope_digest_and_vector_shape(
         lease,
         candidate,
         FrozenMemoryGovernanceDecision(
-            MemoryDecisionKind.ACCEPT, final_kind=MemoryFactKind.USER_PROFILE
+            MemoryDecisionKind.ACCEPT,
+            final_kind=MemoryFactKind.USER_PROFILE,
+            public_summary="Based on the exact test source.",
         ),
     )
     assert accepted.fact_id is not None
@@ -1506,6 +1542,7 @@ def test_round8_preference_head_and_automatic_recall_are_separate_advisory_sourc
         FrozenMemoryGovernanceDecision(
             MemoryDecisionKind.ACCEPT,
             final_kind=MemoryFactKind.RESPONSE_PREFERENCE,
+            public_summary="Based on the exact test source.",
         ),
     )
     profile_candidate = _claim_candidate(
@@ -1522,6 +1559,7 @@ def test_round8_preference_head_and_automatic_recall_are_separate_advisory_sourc
         FrozenMemoryGovernanceDecision(
             MemoryDecisionKind.ACCEPT,
             final_kind=MemoryFactKind.USER_PROFILE,
+            public_summary="Based on the exact test source.",
         ),
     )
     assert preference.fact_id is not None and profile.fact_id is not None
@@ -1647,6 +1685,7 @@ def test_round8_optional_provider_and_relation_failures_remain_advisory(
         FrozenMemoryGovernanceDecision(
             MemoryDecisionKind.ACCEPT,
             final_kind=MemoryFactKind.FACT,
+            public_summary="Based on the exact test source.",
         ),
     )
     assert fact.fact_id is not None

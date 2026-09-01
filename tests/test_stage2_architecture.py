@@ -558,14 +558,20 @@ def test_stage2_provider_admission_and_blob_gc_are_physical_not_heuristic() -> N
     blob = (KERNEL / "blob.py").read_text(encoding="utf-8")
     host = (KERNEL / "host.py").read_text(encoding="utf-8")
 
-    # Foreground model input is now estimated by the pure structured compiler
-    # and exact-joined to the transport-aware final validator. Auxiliary
-    # advisory model calls retain their own bounded estimate seam.
+    # Foreground model input is estimated by the pure structured compiler and
+    # exact-joined to the transport-aware final validator. Auxiliary advisory
+    # calls retain the semantic estimate for telemetry only: shape/binding is
+    # validated separately, while admission uses the adapter's final-wire
+    # materialization and the single local estimator.
     assert "validate_model_context_for_call" in direct
     assert "validated.estimate != compiled.final_estimate" in direct
     assert "estimate_model_context_for_call" not in direct
     assert "estimate_model_context_for_call" in auxiliary
-    assert "validate_model_context_for_call" in auxiliary
+    assert "validate_model_context_shape_for_call" in auxiliary
+    assert "materialize_chat_context_bearing_wire_projection" in auxiliary
+    assert "materialize_responses_context_bearing_wire_projection" in auxiliary
+    assert "estimate_final_wire_json_components" in auxiliary
+    assert "validate_model_context_for_call(" not in auxiliary
     for source in (direct, auxiliary):
         assert "canonical_bytes / 4" not in source
     assert "CanonicalProviderContinuityError" in reader

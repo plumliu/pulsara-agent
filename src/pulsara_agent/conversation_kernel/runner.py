@@ -1384,6 +1384,7 @@ class ConversationKernelRunner:
                 if not calls and accepted.turn_completed:
                     active_surface_borrow.close()
                     active_surface_borrow = None
+                    self._memory_dispatch.offer_governance_wake()
                     reflection_token = await self._memory_dispatch.prepare_reflection(
                         cut=request.cut,
                         through_sequence=accepted.entry_sequence,
@@ -1447,6 +1448,7 @@ class ConversationKernelRunner:
                         # Idempotent enter_plan against the already-active
                         # workflow settles the batch but keeps this exact run.
                         continue
+                    self._memory_dispatch.offer_governance_wake()
                     return KernelRunResult(
                         turn_id=turn_id,
                         final_entry_id=(
@@ -1481,6 +1483,7 @@ class ConversationKernelRunner:
                 tool_call_count += batch.tool_call_count
                 remember_requested = remember_requested or batch.remember_requested
                 if batch.terminal is not None:
+                    self._memory_dispatch.offer_governance_wake()
                     return KernelRunResult(
                         turn_id=turn_id,
                         final_entry_id=batch.terminal.final_entry_id,
@@ -1559,6 +1562,7 @@ class ConversationKernelRunner:
                     else "FOREGROUND_EXECUTION_INTERRUPTED"
                 )
             await self._turn_admission.interrupt_turn(turn_id, reason=reason)
+            self._memory_dispatch.offer_governance_wake()
             raise
         finally:
             if root_completion_phase_opened and self._subagent_runtime is not None:

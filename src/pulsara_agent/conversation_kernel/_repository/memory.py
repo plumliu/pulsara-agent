@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-import re
 from typing import Sequence
 
 from psycopg import Connection, IsolationLevel
@@ -22,8 +21,12 @@ from pulsara_agent.conversation_kernel.memory.contracts import (
     FrozenMemoryCandidateForGovernance,
     FrozenMemoryFactSettlementIdentity,
     FrozenMemoryGovernanceEvidence,
+    FrozenMemoryGovernanceProducerCut,
+    FrozenMemoryGovernanceSourceBlock,
+    FrozenMemoryGovernanceSourceCoverage,
+    FrozenMemoryGovernanceSourceItem,
+    FrozenMemoryGovernanceTerminalFence,
     FrozenMemoryGovernanceToolEvidence,
-    FrozenMemoryGovernanceTurnItem,
     FrozenMemoryPublicFactProjection,
     FrozenMemoryProposal,
     FrozenModelVisibleMemoryProvenance,
@@ -34,6 +37,9 @@ from pulsara_agent.conversation_kernel.memory.contracts import (
     MemoryDecisionReasonCode,
     MemoryFactKind,
     MemoryGovernanceConfirmation,
+    MemoryGovernanceChronology,
+    MemoryGovernanceEvidenceRole,
+    MemoryGovernanceSourceBlockKind,
     MemoryKindHint,
     MemoryProducerKind,
     MemoryRelationKind,
@@ -45,6 +51,7 @@ from pulsara_agent.conversation_kernel.memory.contracts import (
     PreparedMemoryGovernanceAcceptance,
     PreparedMemoryToolResultReference,
     canonical_json_bytes,
+    memory_governance_source_projection_bytes,
     memory_relation_id,
     memory_response_preference_item_payload,
     prepare_existing_source_relation_settlement,
@@ -70,10 +77,8 @@ from .contracts import (
 
 MAXIMUM_ACTIVE_RESPONSE_PREFERENCES_PER_SCOPE = 16
 MAXIMUM_RESPONSE_PREFERENCE_SCOPE_PROJECTION_BYTES = 7 * 1024
-_MAXIMUM_GOVERNANCE_TURN_ITEMS = 32
-_MAXIMUM_GOVERNANCE_TURN_BODY_BYTES = 24 * 1024
+_MAXIMUM_GOVERNANCE_ORIGIN_SOURCE_BYTES = 32 * 1024
 _MAXIMUM_GOVERNANCE_TOOL_BODY_BYTES = 56 * 1024
-_PRIVATE_OR_REMOTE_URL = re.compile(r"https?://[^\s\]\[\)\(\}\{<>'\"]+", re.I)
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,7 +164,7 @@ class _MemoryOperations:
         processing_started_at: datetime,
         deadline_monotonic: float,
     ) -> FrozenMemoryCandidateForGovernance | None:
-        """Claim only candidates produced by this exact origin Session."""
+        """Claim only a same-Host candidate whose origin turn is exactly terminal."""
 
         with self._writer_transaction(
             guard, deadline_monotonic=deadline_monotonic
@@ -173,40 +178,125 @@ class _MemoryOperations:
             ).fetchone()
             if session is None:
                 raise ConversationKernelConflict("governor session is absent")
-            row = connection.execute(
-                """
-                SELECT id FROM pulsara_v3.memory_candidates
-                WHERE memory_domain_id=%s AND origin_workspace_id=%s
-                  AND origin_session_id=%s
-                  AND status='PENDING' AND (%s::text IS NULL OR id=%s)
-                ORDER BY accepted_at, id
-                LIMIT 1 FOR UPDATE SKIP LOCKED
-                """,
-                (
-                    session["memory_domain_id"],
-                    session["workspace_id"],
-                    guard.session_id,
-                    candidate_id,
-                    candidate_id,
-                ),
-            ).fetchone()
-            if row is None:
-                return None
-            connection.execute(
-                """
-                UPDATE pulsara_v3.memory_candidates
-                SET status='PROCESSING', processing_started_at=%s
-                WHERE id=%s AND status='PENDING'
-                """,
-                (processing_started_at, row["id"]),
-            )
-            prepared = self._read_prepared_memory_candidate(
-                connection, str(row["id"])
-            )
+            while True:
+                row = connection.execute(
+                    """
+                    SELECT c.id,
+                           source.id AS source_entry_id,
+                           source.turn_id AS source_turn_id,
+                           source_event.event_id AS source_entry_event_id,
+                           source_event.event_sequence AS source_entry_event_sequence,
+                           turn.status AS terminal_status,
+                           CASE WHEN turn.status='COMPLETED'
+                                THEN turn.final_entry_id ELSE turn.terminal_reason END
+                               AS terminal_outcome,
+                           terminal_event.event_id AS terminal_event_id,
+                           terminal_event.event_sequence AS terminal_event_sequence
+                    FROM pulsara_v3.memory_candidates AS c
+                    JOIN pulsara_v3.transcript_entries AS source
+                      ON source.session_id=c.origin_session_id
+                     AND source.id=CASE
+                           WHEN c.producer_kind='MAIN_AGENT_REMEMBER'
+                             THEN c.producer_entry_id
+                           ELSE c.trigger_user_entry_id
+                         END
+                    JOIN pulsara_v3.turns AS turn
+                      ON turn.session_id=source.session_id AND turn.id=source.turn_id
+                    JOIN LATERAL (
+                        SELECT event_id, event_sequence, count(*) OVER () AS n
+                        FROM pulsara_v3.agent_events
+                        WHERE session_id=source.session_id
+                          AND subject_entry_id=source.id
+                          AND (
+                            (source.entry_kind='USER_MESSAGE'
+                              AND event_type='UserMessageAccepted') OR
+                            (source.entry_kind='USER_STEER'
+                              AND event_type='UserSteerAccepted') OR
+                            (source.entry_kind='ASSISTANT_MESSAGE'
+                              AND event_type='AssistantMessageAccepted') OR
+                            (source.entry_kind='ASSISTANT_TOOL_REQUEST'
+                              AND event_type='AssistantToolRequestAccepted')
+                          )
+                    ) AS source_event ON source_event.n=1
+                    JOIN LATERAL (
+                        SELECT event_id, event_sequence, event_type, payload,
+                               count(*) OVER () AS n
+                        FROM pulsara_v3.agent_events
+                        WHERE session_id=turn.session_id
+                          AND subject_turn_id=turn.id
+                          AND event_type IN ('TurnCompleted', 'TurnInterrupted')
+                    ) AS terminal_event ON terminal_event.n=1
+                    WHERE c.memory_domain_id=%s AND c.origin_workspace_id=%s
+                      AND c.origin_session_id=%s
+                      AND c.status='PENDING' AND (%s::text IS NULL OR c.id=%s)
+                      AND (
+                        (c.producer_kind='MAIN_AGENT_REMEMBER'
+                          AND source.entry_kind IN (
+                            'ASSISTANT_MESSAGE', 'ASSISTANT_TOOL_REQUEST')) OR
+                        (c.producer_kind='CHEAP_HINT_REFLECTION'
+                          AND source.entry_kind IN ('USER_MESSAGE', 'USER_STEER'))
+                      )
+                      AND (
+                        (turn.status='COMPLETED'
+                          AND turn.terminal_reason='COMPLETED'
+                          AND turn.final_entry_id IS NOT NULL
+                          AND terminal_event.event_type='TurnCompleted'
+                          AND terminal_event.payload->>'final_entry_id'=turn.final_entry_id) OR
+                        (turn.status='INTERRUPTED'
+                          AND turn.terminal_reason IS NOT NULL
+                          AND terminal_event.event_type='TurnInterrupted'
+                          AND terminal_event.payload->>'reason'=turn.terminal_reason)
+                      )
+                      AND source_event.event_sequence < terminal_event.event_sequence
+                    ORDER BY c.accepted_at, c.id
+                    LIMIT 1 FOR UPDATE OF c SKIP LOCKED
+                    """,
+                    (
+                        session["memory_domain_id"],
+                        session["workspace_id"],
+                        guard.session_id,
+                        candidate_id,
+                        candidate_id,
+                    ),
+                ).fetchone()
+                if row is None:
+                    return None
+                connection.execute(
+                    """
+                    UPDATE pulsara_v3.memory_candidates
+                    SET status='PROCESSING', processing_started_at=%s
+                    WHERE id=%s AND status='PENDING'
+                    """,
+                    (processing_started_at, row["id"]),
+                )
+                try:
+                    prepared = self._read_prepared_memory_candidate(
+                        connection, str(row["id"])
+                    )
+                except (ConversationKernelConflict, ValueError):
+                    # The accepted digest is the immutable intake authority.
+                    # A drifted PENDING row is terminally unusable, but it must
+                    # not starve a later healthy advisory candidate.
+                    connection.execute(
+                        """
+                        UPDATE pulsara_v3.memory_candidates
+                        SET status='ABANDONED', decision_kind='SKIP',
+                            decision_reason_code='ABANDONED_REFERENCE_DRIFT',
+                            decision_public_summary=NULL, decided_at=%s
+                        WHERE id=%s AND status='PROCESSING'
+                        """,
+                        (processing_started_at, row["id"]),
+                    )
+                    if candidate_id is not None:
+                        return None
+                    continue
+                fence = _memory_governance_terminal_fence(row)
+                break
         return FrozenMemoryCandidateForGovernance(
             prepared=prepared,
             status=MemoryCandidateStatus.PROCESSING,
             processing_started_at=processing_started_at,
+            terminal_fence=fence,
         )
 
     def read_memory_candidate_for_governance(
@@ -227,37 +317,36 @@ class _MemoryOperations:
                 "SELECT workspace_id, memory_domain_id FROM pulsara_v3.sessions WHERE id=%s",
                 (guard.session_id,),
             ).fetchone()
-            head = connection.execute(
-                """
-                SELECT status, processing_started_at
-                FROM pulsara_v3.memory_candidates
-                WHERE id=%s AND memory_domain_id=%s AND origin_workspace_id=%s
-                  AND origin_session_id=%s
-                """,
-                (
-                    candidate_id,
-                    session["memory_domain_id"],
-                    session["workspace_id"],
-                    guard.session_id,
-                ),
-            ).fetchone()
-            if head is None or str(head["status"]) != "PROCESSING":
+            head = _read_memory_governance_terminal_candidate(
+                connection,
+                candidate_id=candidate_id,
+                required_status=MemoryCandidateStatus.PROCESSING,
+            )
+            if head is None or (
+                str(head["memory_domain_id"]) != str(session["memory_domain_id"])
+                or str(head["origin_workspace_id"])
+                != str(session["workspace_id"])
+                or str(head["origin_session_id"]) != guard.session_id
+            ):
                 return None
             prepared = self._read_prepared_memory_candidate(connection, candidate_id)
             return FrozenMemoryCandidateForGovernance(
                 prepared=prepared,
                 status=MemoryCandidateStatus.PROCESSING,
                 processing_started_at=head["processing_started_at"],
+                terminal_fence=_memory_governance_terminal_fence(head),
             )
 
     def read_memory_governance_evidence(
         self,
         guard: HostWriterGuard,
         *,
-        candidate: PreparedMemoryCandidateAcceptance,
+        candidate: FrozenMemoryCandidateForGovernance,
         deadline_monotonic: float,
     ) -> FrozenMemoryGovernanceEvidence:
-        """Freeze the bounded same-origin evidence visible to one governor call."""
+        """Freeze exact terminal-bounded source; causal history joins separately."""
+
+        prepared = candidate.prepared
 
         with self._provider.connection(
             lane=PostgresConnectionLane.MEMORY_QUERY,
@@ -274,55 +363,64 @@ class _MemoryOperations:
                 (guard.session_id,),
             ).fetchone()
             if session is None or (
-                candidate.origin_session_id != guard.session_id
-                or candidate.origin_workspace_id != str(session["workspace_id"])
-                or candidate.memory_domain_id != str(session["memory_domain_id"])
+                prepared.origin_session_id != guard.session_id
+                or prepared.origin_workspace_id != str(session["workspace_id"])
+                or prepared.memory_domain_id != str(session["memory_domain_id"])
             ):
                 raise ConversationKernelConflict(
                     "memory governance evidence origin does not match the Host"
                 )
-            source_entry_id = (
-                candidate.producer_entry_id
-                if candidate.producer_kind is MemoryProducerKind.MAIN_AGENT_REMEMBER
-                else candidate.trigger_user_entry_id
+            head = _read_memory_governance_terminal_candidate(
+                connection,
+                candidate_id=prepared.candidate_id,
+                required_status=MemoryCandidateStatus.PROCESSING,
             )
-            assert source_entry_id is not None
-            source = connection.execute(
-                """
-                SELECT turn_id, entry_kind
-                FROM pulsara_v3.transcript_entries
-                WHERE session_id=%s AND id=%s
-                """,
-                (candidate.origin_session_id, source_entry_id),
-            ).fetchone()
-            if source is None or (
-                candidate.producer_kind is MemoryProducerKind.MAIN_AGENT_REMEMBER
-                and str(source["entry_kind"])
-                not in {"ASSISTANT_MESSAGE", "ASSISTANT_TOOL_REQUEST"}
-            ) or (
-                candidate.producer_kind is MemoryProducerKind.CHEAP_HINT_REFLECTION
-                and str(source["entry_kind"]) not in {"USER_MESSAGE", "USER_STEER"}
+            if head is None or (
+                _memory_governance_terminal_fence(head)
+                != candidate.terminal_fence
             ):
                 raise ConversationKernelConflict(
-                    "memory governance producer entry drifted"
+                    "memory governance terminal occurrence fence drifted"
                 )
-            turn_items = self._read_memory_governance_turn_projection(
+            observed = self._read_prepared_memory_candidate(
+                connection, prepared.candidate_id
+            )
+            if observed != prepared:
+                raise ConversationKernelConflict(
+                    "memory governance candidate payload or references drifted"
+                )
+            producer_cut = self._read_memory_governance_producer_cut(
                 connection,
-                session_id=candidate.origin_session_id,
-                turn_id=str(source["turn_id"]),
+                candidate=prepared,
+                source=head,
+            )
+            producer_output, producer_human_complete = (
+                self._read_memory_governance_producer_output(
+                    connection,
+                    candidate=prepared,
+                    source=head,
+                )
+            )
+            suffix, post_human_complete, omitted_nonhuman, omitted_human = (
+                self._read_memory_governance_terminal_suffix(
+                    connection,
+                    candidate=prepared,
+                    source=head,
+                    retained_prefix=producer_output,
+                )
             )
             tool_evidence = self._read_memory_governance_tool_evidence(
-                connection, candidate
+                connection, prepared
             )
             basis_items, basis_complete = self._read_memory_public_facts(
                 connection,
-                candidate=candidate,
-                fact_ids=tuple(item.target_fact_id for item in candidate.basis_refs),
+                candidate=prepared,
+                fact_ids=tuple(item.target_fact_id for item in prepared.basis_refs),
             )
             if not basis_complete:
                 raise ConversationKernelConflict("memory governance basis drifted")
             if (
-                candidate.visible_memory.disposition
+                prepared.visible_memory.disposition
                 is ModelVisibleMemoryProvenanceDisposition.OVERFLOW
             ):
                 visible_items: tuple[FrozenMemoryPublicFactProjection, ...] = ()
@@ -330,8 +428,8 @@ class _MemoryOperations:
             else:
                 visible_items, visible_complete = self._read_memory_public_facts(
                     connection,
-                    candidate=candidate,
-                    fact_ids=candidate.visible_memory.fact_ids,
+                    candidate=prepared,
+                    fact_ids=prepared.visible_memory.fact_ids,
                 )
                 if visible_complete and len(
                     canonical_json_bytes(
@@ -341,89 +439,347 @@ class _MemoryOperations:
                     visible_items = ()
                     visible_complete = False
         return FrozenMemoryGovernanceEvidence(
-            origin_workspace_id=candidate.origin_workspace_id,
-            producer_turn_items=turn_items,
+            origin_workspace_id=prepared.origin_workspace_id,
+            terminal_fence=candidate.terminal_fence,
+            producer_cut=producer_cut,
+            producer_call_context=(),
+            producer_public_output=producer_output,
+            post_proposal_turn_suffix=suffix,
             tool_result_evidence=tool_evidence,
             basis_items=basis_items,
             model_visible_items=visible_items,
             model_visible_complete=visible_complete,
+            source_coverage=FrozenMemoryGovernanceSourceCoverage(
+                causal_context_complete=False,
+                origin_turn_human_source_complete=(
+                    producer_human_complete and post_human_complete
+                ),
+                post_proposal_human_source_complete=post_human_complete,
+                omitted_assistant_or_tool_items=omitted_nonhuman,
+                omitted_post_proposal_human_items=omitted_human,
+                relation_authority=False,
+            ),
+        )
+
+    def confirm_memory_governance_terminal_fence(
+        self,
+        guard: HostWriterGuard,
+        *,
+        candidate: FrozenMemoryCandidateForGovernance,
+        deadline_monotonic: float,
+    ) -> bool:
+        """Exact provider-open recheck of the already frozen occurrence fence."""
+
+        with self._provider.connection(
+            lane=PostgresConnectionLane.MEMORY_QUERY,
+            row_factory=dict_row,
+            deadline_monotonic=deadline_monotonic,
+            isolation_level=IsolationLevel.REPEATABLE_READ,
+        ) as connection:
+            self._require_writer(connection, guard, lock=False)
+            row = _read_memory_governance_terminal_candidate(
+                connection,
+                candidate_id=candidate.prepared.candidate_id,
+                required_status=MemoryCandidateStatus.PROCESSING,
+            )
+            if row is None or (
+                str(row["origin_session_id"]) != guard.session_id
+                or _memory_governance_terminal_fence(row)
+                != candidate.terminal_fence
+            ):
+                return False
+            try:
+                observed = self._read_prepared_memory_candidate(
+                    connection, candidate.prepared.candidate_id
+                )
+            except (ConversationKernelConflict, ValueError):
+                return False
+            return observed == candidate.prepared
+
+    @staticmethod
+    def _read_memory_governance_producer_cut(
+        connection,
+        *,
+        candidate: PreparedMemoryCandidateAcceptance,
+        source,
+    ) -> FrozenMemoryGovernanceProducerCut | None:
+        del connection
+        if candidate.producer_kind is not MemoryProducerKind.MAIN_AGENT_REMEMBER:
+            return None
+        return FrozenMemoryGovernanceProducerCut(
+            session_id=candidate.origin_session_id,
+            turn_id=str(source["source_turn_id"]),
+            producer_entry_id=str(source["source_entry_id"]),
+            producer_entry_sequence=int(source["source_entry_sequence"]),
+            context_binding_revision_id=str(
+                source["context_binding_revision_id"]
+            ),
+            provider_input_through_sequence=int(
+                source["provider_input_through_sequence"]
+            ),
         )
 
     @classmethod
-    def _read_memory_governance_turn_projection(
-        cls, connection, *, session_id: str, turn_id: str
-    ) -> tuple[FrozenMemoryGovernanceTurnItem, ...]:
+    def _read_memory_governance_producer_output(
+        cls,
+        connection,
+        *,
+        candidate: PreparedMemoryCandidateAcceptance,
+        source,
+    ) -> tuple[tuple[FrozenMemoryGovernanceSourceItem, ...], bool]:
+        kind = str(source["source_entry_kind"])
+        row = {
+            "id": source["source_entry_id"],
+            "entry_kind": kind,
+            "conversation_scope_kind": source["conversation_scope_kind"],
+            "source_plan_workflow_id": source["source_plan_workflow_id"],
+        }
+        item = cls._read_memory_governance_source_item(
+            connection,
+            session_id=candidate.origin_session_id,
+            row=row,
+            chronology=MemoryGovernanceChronology.PRODUCER_OUTPUT,
+            maximum_bytes=_MAXIMUM_GOVERNANCE_ORIGIN_SOURCE_BYTES,
+            force_human=(
+                candidate.producer_kind
+                is MemoryProducerKind.CHEAP_HINT_REFLECTION
+            ),
+        )
+        if item is None:
+            return (), True
+        if memory_governance_source_projection_bytes((item,)) > (
+            _MAXIMUM_GOVERNANCE_ORIGIN_SOURCE_BYTES
+        ):
+            if item.evidence_role is MemoryGovernanceEvidenceRole.HUMAN_ASSERTION:
+                item = _memory_governance_incomplete_human_marker(
+                    row,
+                    chronology=MemoryGovernanceChronology.PRODUCER_OUTPUT,
+                )
+            else:
+                item = FrozenMemoryGovernanceSourceItem(
+                    source_entry_id=str(row["id"]),
+                    chronology=MemoryGovernanceChronology.PRODUCER_OUTPUT,
+                    source_product_label="助手回复上下文（正文已缩减）",
+                    evidence_role=MemoryGovernanceEvidenceRole.ASSISTANT_CONTEXT,
+                    public_kind=_memory_governance_entry_product_kind(kind),
+                    blocks=(
+                        FrozenMemoryGovernanceSourceBlock(
+                            block_kind=MemoryGovernanceSourceBlockKind.TEXT,
+                            text="",
+                            truncated=True,
+                        ),
+                    ),
+                    item_omitted_after=max(1, item.item_omitted_after),
+                )
+        human_complete = not (
+            item.evidence_role
+            in {
+                MemoryGovernanceEvidenceRole.HUMAN_ASSERTION,
+                MemoryGovernanceEvidenceRole.POST_PROPOSAL_HUMAN,
+            }
+            and item.truncated
+        )
+        return (item,), human_complete
+
+    @classmethod
+    def _read_memory_governance_terminal_suffix(
+        cls,
+        connection,
+        *,
+        candidate: PreparedMemoryCandidateAcceptance,
+        source,
+        retained_prefix: tuple[FrozenMemoryGovernanceSourceItem, ...],
+    ) -> tuple[tuple[FrozenMemoryGovernanceSourceItem, ...], bool, int, int]:
+        """Exhaust the exact occurrence range; never impose an item-count cut."""
+
         rows = connection.execute(
             """
-            SELECT id, entry_kind
-            FROM pulsara_v3.transcript_entries
-            WHERE session_id=%s AND turn_id=%s
-            ORDER BY entry_sequence, id
-            LIMIT %s
+            SELECT e.id, e.entry_sequence, e.entry_kind,
+                   e.conversation_scope_kind, e.source_plan_workflow_id,
+                   occurrence.n AS occurrence_count,
+                   occurrence.event_sequence
+            FROM pulsara_v3.transcript_entries AS e
+            LEFT JOIN LATERAL (
+                SELECT count(*) AS n, min(event_sequence) AS event_sequence
+                FROM pulsara_v3.agent_events
+                WHERE session_id=e.session_id AND subject_entry_id=e.id
+                  AND (
+                    (e.entry_kind='USER_MESSAGE'
+                      AND event_type='UserMessageAccepted') OR
+                    (e.entry_kind='USER_STEER'
+                      AND event_type='UserSteerAccepted') OR
+                    (e.entry_kind='ASSISTANT_MESSAGE'
+                      AND event_type='AssistantMessageAccepted') OR
+                    (e.entry_kind='ASSISTANT_TOOL_REQUEST'
+                      AND event_type='AssistantToolRequestAccepted') OR
+                    (e.entry_kind='TOOL_RESULT'
+                      AND event_type='ToolResultAccepted') OR
+                    (e.entry_kind='TERMINAL_OBSERVATION'
+                      AND event_type='TerminalObservationAccepted') OR
+                    (e.entry_kind='PLAN_CONTINUATION'
+                      AND event_type='PlanContinuationAccepted') OR
+                    (e.entry_kind='INTER_AGENT_MESSAGE'
+                      AND event_type='InterAgentMessageAccepted')
+                  )
+            ) AS occurrence ON TRUE
+            WHERE e.session_id=%s AND e.turn_id=%s
+              AND e.entry_sequence>%s
+            ORDER BY occurrence.event_sequence NULLS LAST, e.entry_sequence, e.id
             """,
-            (session_id, turn_id, _MAXIMUM_GOVERNANCE_TURN_ITEMS + 1),
+            (
+                candidate.origin_session_id,
+                source["source_turn_id"],
+                source["source_entry_sequence"],
+            ),
         ).fetchall()
-        output: list[FrozenMemoryGovernanceTurnItem] = []
-        remaining = _MAXIMUM_GOVERNANCE_TURN_BODY_BYTES
-        for row in rows[:_MAXIMUM_GOVERNANCE_TURN_ITEMS]:
-            if remaining <= 0:
-                break
-            kind = str(row["entry_kind"])
-            entry_id = str(row["id"])
-            if kind in {"ASSISTANT_MESSAGE", "ASSISTANT_TOOL_REQUEST"}:
-                body, truncated = cls._read_assistant_public_body(
-                    connection,
-                    session_id=session_id,
-                    entry_id=entry_id,
-                    maximum_bytes=min(remaining, 8 * 1024),
-                )
-                role = "ASSISTANT"
-            else:
-                body, truncated = cls._read_entry_public_body(
-                    connection,
-                    session_id=session_id,
-                    entry_id=entry_id,
-                    maximum_bytes=min(remaining, 8 * 1024),
-                )
-                role = (
-                    "USER"
-                    if kind
-                    in {"USER_MESSAGE", "USER_STEER", "PLAN_CONTINUATION"}
-                    else "TOOL"
-                )
-            body = _governance_public_text(body)
-            body_bytes = len(body.encode("utf-8"))
-            if not body and not truncated:
+        output: list[FrozenMemoryGovernanceSourceItem] = []
+        post_human_complete = True
+        omitted_nonhuman = 0
+        omitted_human = 0
+        for row in rows:
+            human = _memory_governance_entry_is_human(row)
+            occurrence_count = int(row["occurrence_count"])
+            occurrence_sequence = row["event_sequence"]
+            if (
+                occurrence_sequence is not None
+                and int(occurrence_sequence)
+                >= int(source["terminal_event_sequence"])
+            ):
+                # A late same-turn entry is outside the frozen event prefix.
+                # It must not affect coverage, markers, or provider semantics.
                 continue
-            output.append(
-                FrozenMemoryGovernanceTurnItem(
-                    ordinal=len(output), role=role, body=body, truncated=truncated
-                )
+            in_fence = (
+                occurrence_count == 1
+                and occurrence_sequence is not None
+                and int(source["source_entry_event_sequence"])
+                < int(occurrence_sequence)
+                < int(source["terminal_event_sequence"])
             )
-            remaining -= body_bytes
-        if len(rows) > _MAXIMUM_GOVERNANCE_TURN_ITEMS and output:
-            last = output[-1]
-            output[-1] = FrozenMemoryGovernanceTurnItem(
-                ordinal=last.ordinal,
-                role=last.role,
-                body=last.body,
-                truncated=True,
+            if not in_fence:
+                if human:
+                    post_human_complete = False
+                    omitted_human += 1
+                    marker = _memory_governance_incomplete_human_marker(
+                        row,
+                        chronology=MemoryGovernanceChronology.AFTER_PROPOSAL,
+                    )
+                    if memory_governance_source_projection_bytes(
+                        (*retained_prefix, *output, marker)
+                    ) <= _MAXIMUM_GOVERNANCE_ORIGIN_SOURCE_BYTES:
+                        output.append(marker)
+                else:
+                    omitted_nonhuman += 1
+                continue
+            remaining = max(
+                1,
+                _MAXIMUM_GOVERNANCE_ORIGIN_SOURCE_BYTES
+                - memory_governance_source_projection_bytes(
+                    (*retained_prefix, *output)
+                ),
             )
-        # Contract overhead is bounded independently from retained body bytes.
-        while output and len(
-            canonical_json_bytes(
-                tuple((item.role, item.body, item.truncated) for item in output)
+            item = cls._read_memory_governance_source_item(
+                connection,
+                session_id=candidate.origin_session_id,
+                row=row,
+                chronology=MemoryGovernanceChronology.AFTER_PROPOSAL,
+                maximum_bytes=remaining,
             )
-        ) > 32 * 1024:
-            output.pop()
-        return tuple(
-            FrozenMemoryGovernanceTurnItem(
-                ordinal=ordinal,
-                role=item.role,
-                body=item.body,
-                truncated=item.truncated,
+            if item is None:
+                continue
+            candidate_items = (*retained_prefix, *output, item)
+            if (
+                item.truncated
+                or memory_governance_source_projection_bytes(candidate_items)
+                > _MAXIMUM_GOVERNANCE_ORIGIN_SOURCE_BYTES
+            ):
+                if human:
+                    post_human_complete = False
+                    omitted_human += 1
+                    marker = _memory_governance_incomplete_human_marker(
+                        row,
+                        chronology=MemoryGovernanceChronology.AFTER_PROPOSAL,
+                    )
+                    if memory_governance_source_projection_bytes(
+                        (*retained_prefix, *output, marker)
+                    ) <= _MAXIMUM_GOVERNANCE_ORIGIN_SOURCE_BYTES:
+                        output.append(marker)
+                else:
+                    omitted_nonhuman += 1
+                continue
+            output.append(item)
+        return (
+            tuple(output),
+            post_human_complete,
+            omitted_nonhuman,
+            omitted_human,
+        )
+
+    @classmethod
+    def _read_memory_governance_source_item(
+        cls,
+        connection,
+        *,
+        session_id: str,
+        row,
+        chronology: MemoryGovernanceChronology,
+        maximum_bytes: int,
+        force_human: bool = False,
+    ) -> FrozenMemoryGovernanceSourceItem | None:
+        kind = str(row["entry_kind"])
+        evidence_role, label = _memory_governance_source_role_and_label(
+            row,
+            chronology=chronology,
+            force_human=force_human,
+        )
+        if kind in {"ASSISTANT_MESSAGE", "ASSISTANT_TOOL_REQUEST"}:
+            blocks, omitted = cls._read_assistant_public_blocks(
+                connection,
+                session_id=session_id,
+                entry_id=str(row["id"]),
+                maximum_bytes=maximum_bytes,
             )
-            for ordinal, item in enumerate(output)
+            if not blocks:
+                return None
+            return FrozenMemoryGovernanceSourceItem(
+                source_entry_id=str(row["id"]),
+                chronology=chronology,
+                source_product_label=label,
+                evidence_role=evidence_role,
+                public_kind=_memory_governance_entry_product_kind(kind),
+                blocks=blocks,
+                item_omitted_after=omitted,
+                anchor=evidence_role
+                in {
+                    MemoryGovernanceEvidenceRole.HUMAN_ASSERTION,
+                    MemoryGovernanceEvidenceRole.POST_PROPOSAL_HUMAN,
+                },
+            )
+        body, truncated = cls._read_entry_public_body(
+            connection,
+            session_id=session_id,
+            entry_id=str(row["id"]),
+            maximum_bytes=maximum_bytes,
+        )
+        if not body and not truncated:
+            return None
+        return FrozenMemoryGovernanceSourceItem(
+            source_entry_id=str(row["id"]),
+            chronology=chronology,
+            source_product_label=label,
+            evidence_role=evidence_role,
+            public_kind=_memory_governance_entry_product_kind(kind),
+            blocks=(
+                FrozenMemoryGovernanceSourceBlock(
+                    block_kind=MemoryGovernanceSourceBlockKind.TEXT,
+                    text=body,
+                    truncated=truncated,
+                ),
+            ),
+            anchor=evidence_role
+            in {
+                MemoryGovernanceEvidenceRole.HUMAN_ASSERTION,
+                MemoryGovernanceEvidenceRole.POST_PROPOSAL_HUMAN,
+            },
         )
 
     @classmethod
@@ -458,7 +814,6 @@ class _MemoryOperations:
                 entry_id=str(row["result_entry_id"]),
                 maximum_bytes=per_item,
             )
-            body = _governance_public_text(body)
             remaining -= len(body.encode("utf-8"))
             count -= 1
             output.append(
@@ -562,24 +917,24 @@ class _MemoryOperations:
         )
 
     @classmethod
-    def _read_assistant_public_body(
+    def _read_assistant_public_blocks(
         cls, connection, *, session_id: str, entry_id: str, maximum_bytes: int
-    ) -> tuple[str, bool]:
+    ) -> tuple[tuple[FrozenMemoryGovernanceSourceBlock, ...], int]:
         rows = connection.execute(
             """
-            SELECT id FROM pulsara_v3.assistant_message_blocks
+            SELECT id, block_kind FROM pulsara_v3.assistant_message_blocks
             WHERE session_id=%s AND assistant_entry_id=%s
               AND block_kind IN ('TEXT', 'DATA')
-            ORDER BY block_ordinal, id LIMIT 65
+            ORDER BY block_ordinal, id
             """,
             (session_id, entry_id),
         ).fetchall()
-        parts: list[str] = []
+        blocks: list[FrozenMemoryGovernanceSourceBlock] = []
         remaining = maximum_bytes
-        truncated = len(rows) > 64
-        for row in rows[:64]:
+        omitted = 0
+        for index, row in enumerate(rows):
             if remaining <= 0:
-                truncated = True
+                omitted += len(rows) - index
                 break
             block = connection.execute(
                 """
@@ -602,10 +957,21 @@ class _MemoryOperations:
                 maximum_bytes=remaining,
                 truncated=int(block["content_size"]) > remaining,
             )
-            parts.append(text)
+            if text or item_truncated:
+                blocks.append(
+                    FrozenMemoryGovernanceSourceBlock(
+                        block_kind=MemoryGovernanceSourceBlockKind(
+                            str(row["block_kind"])
+                        ),
+                        text=text,
+                        truncated=item_truncated,
+                    )
+                )
             remaining -= len(text.encode("utf-8"))
-            truncated = truncated or item_truncated
-        return "".join(parts), truncated
+            if item_truncated:
+                omitted += len(rows) - index - 1
+                break
+        return tuple(blocks), omitted
 
     def abandon_memory_candidate(
         self,
@@ -1790,7 +2156,7 @@ class _MemoryOperations:
             ),
             cited_tool_result_handles=(),
         )
-        return prepare_memory_candidate(
+        prepared = prepare_memory_candidate(
             candidate_id=str(row["id"]),
             memory_domain_id=str(row["memory_domain_id"]),
             origin_workspace_id=str(row["origin_workspace_id"]),
@@ -1827,6 +2193,13 @@ class _MemoryOperations:
                 tuple(str(value) for value in row["model_visible_memory_fact_ids"]),
             ),
         )
+        if prepared.candidate_acceptance_digest != str(
+            row["candidate_acceptance_digest"]
+        ):
+            raise ConversationKernelConflict(
+                "memory candidate acceptance digest does not match its frozen payload"
+            )
+        return prepared
 
     def _lock_processing_candidate(self, connection, guard, prepared):
         row = connection.execute(
@@ -2294,6 +2667,185 @@ class _MemoryOperations:
         ) <= MAXIMUM_RESPONSE_PREFERENCE_SCOPE_PROJECTION_BYTES
 
 
+def _read_memory_governance_terminal_candidate(
+    connection,
+    *,
+    candidate_id: str,
+    required_status: MemoryCandidateStatus,
+):
+    return connection.execute(
+        """
+        SELECT c.id, c.memory_domain_id, c.origin_workspace_id,
+               c.origin_session_id, c.status, c.processing_started_at,
+               source.id AS source_entry_id,
+               source.turn_id AS source_turn_id,
+               source.entry_sequence AS source_entry_sequence,
+               source.entry_kind AS source_entry_kind,
+               source.conversation_scope_kind,
+               source.source_plan_workflow_id,
+               source.context_binding_revision_id,
+               source.provider_input_through_sequence,
+               source_event.event_id AS source_entry_event_id,
+               source_event.event_sequence AS source_entry_event_sequence,
+               turn.status AS terminal_status,
+               CASE WHEN turn.status='COMPLETED'
+                    THEN turn.final_entry_id ELSE turn.terminal_reason END
+                   AS terminal_outcome,
+               terminal_event.event_id AS terminal_event_id,
+               terminal_event.event_sequence AS terminal_event_sequence
+        FROM pulsara_v3.memory_candidates AS c
+        JOIN pulsara_v3.transcript_entries AS source
+          ON source.session_id=c.origin_session_id
+         AND source.id=CASE
+               WHEN c.producer_kind='MAIN_AGENT_REMEMBER'
+                 THEN c.producer_entry_id
+               ELSE c.trigger_user_entry_id
+             END
+        JOIN pulsara_v3.turns AS turn
+          ON turn.session_id=source.session_id AND turn.id=source.turn_id
+        JOIN LATERAL (
+            SELECT event_id, event_sequence, count(*) OVER () AS n
+            FROM pulsara_v3.agent_events
+            WHERE session_id=source.session_id AND subject_entry_id=source.id
+              AND (
+                (source.entry_kind='USER_MESSAGE'
+                  AND event_type='UserMessageAccepted') OR
+                (source.entry_kind='USER_STEER'
+                  AND event_type='UserSteerAccepted') OR
+                (source.entry_kind='ASSISTANT_MESSAGE'
+                  AND event_type='AssistantMessageAccepted') OR
+                (source.entry_kind='ASSISTANT_TOOL_REQUEST'
+                  AND event_type='AssistantToolRequestAccepted')
+              )
+        ) AS source_event ON source_event.n=1
+        JOIN LATERAL (
+            SELECT event_id, event_sequence, event_type, payload,
+                   count(*) OVER () AS n
+            FROM pulsara_v3.agent_events
+            WHERE session_id=turn.session_id AND subject_turn_id=turn.id
+              AND event_type IN ('TurnCompleted', 'TurnInterrupted')
+        ) AS terminal_event ON terminal_event.n=1
+        WHERE c.id=%s AND c.status=%s
+          AND (
+            (c.producer_kind='MAIN_AGENT_REMEMBER'
+              AND source.entry_kind IN (
+                'ASSISTANT_MESSAGE', 'ASSISTANT_TOOL_REQUEST')) OR
+            (c.producer_kind='CHEAP_HINT_REFLECTION'
+              AND source.entry_kind IN ('USER_MESSAGE', 'USER_STEER'))
+          )
+          AND (
+            (turn.status='COMPLETED'
+              AND turn.terminal_reason='COMPLETED'
+              AND turn.final_entry_id IS NOT NULL
+              AND terminal_event.event_type='TurnCompleted'
+              AND terminal_event.payload->>'final_entry_id'=turn.final_entry_id) OR
+            (turn.status='INTERRUPTED'
+              AND turn.terminal_reason IS NOT NULL
+              AND terminal_event.event_type='TurnInterrupted'
+              AND terminal_event.payload->>'reason'=turn.terminal_reason)
+          )
+          AND source_event.event_sequence < terminal_event.event_sequence
+        """,
+        (candidate_id, required_status.value),
+    ).fetchone()
+
+
+def _memory_governance_terminal_fence(row) -> FrozenMemoryGovernanceTerminalFence:
+    return FrozenMemoryGovernanceTerminalFence(
+        source_turn_id=str(row["source_turn_id"]),
+        source_entry_id=str(row["source_entry_id"]),
+        source_entry_event_id=str(row["source_entry_event_id"]),
+        source_entry_event_sequence=int(row["source_entry_event_sequence"]),
+        terminal_status=str(row["terminal_status"]),
+        terminal_outcome=str(row["terminal_outcome"]),
+        terminal_event_id=str(row["terminal_event_id"]),
+        terminal_event_sequence=int(row["terminal_event_sequence"]),
+    )
+
+
+def _memory_governance_entry_is_human(row) -> bool:
+    return (
+        str(row["entry_kind"]) in {"USER_MESSAGE", "USER_STEER"}
+        and str(row["conversation_scope_kind"]) == "ROOT"
+        and row["source_plan_workflow_id"] is None
+    )
+
+
+def _memory_governance_source_role_and_label(
+    row,
+    *,
+    chronology: MemoryGovernanceChronology,
+    force_human: bool,
+) -> tuple[MemoryGovernanceEvidenceRole, str]:
+    kind = str(row["entry_kind"])
+    human = force_human or _memory_governance_entry_is_human(row)
+    if human:
+        if chronology is MemoryGovernanceChronology.AFTER_PROPOSAL:
+            return (
+                MemoryGovernanceEvidenceRole.POST_PROPOSAL_HUMAN,
+                "候选提出后的用户原话",
+            )
+        return MemoryGovernanceEvidenceRole.HUMAN_ASSERTION, "用户原话"
+    if kind in {"ASSISTANT_MESSAGE", "ASSISTANT_TOOL_REQUEST"}:
+        return MemoryGovernanceEvidenceRole.ASSISTANT_CONTEXT, "助手回复上下文"
+    if kind == "TOOL_RESULT":
+        return MemoryGovernanceEvidenceRole.TOOL_CONTEXT_ONLY, "普通工具结果上下文"
+    if kind == "PLAN_CONTINUATION":
+        return MemoryGovernanceEvidenceRole.NON_HUMAN_CONTEXT, "计划运行时上下文"
+    if kind == "INTER_AGENT_MESSAGE":
+        return MemoryGovernanceEvidenceRole.NON_HUMAN_CONTEXT, "代理协作上下文"
+    if kind == "TERMINAL_OBSERVATION":
+        return MemoryGovernanceEvidenceRole.NON_HUMAN_CONTEXT, "运行时终止观察"
+    return MemoryGovernanceEvidenceRole.NON_HUMAN_CONTEXT, "非用户运行时上下文"
+
+
+def _memory_governance_entry_product_kind(kind: str) -> str:
+    return {
+        "USER_MESSAGE": "用户消息",
+        "USER_STEER": "用户补充",
+        "ASSISTANT_MESSAGE": "助手回复",
+        "ASSISTANT_TOOL_REQUEST": "助手工具请求回复",
+        "TOOL_RESULT": "工具结果",
+        "TERMINAL_OBSERVATION": "终止观察",
+        "PLAN_CONTINUATION": "计划运行时续接",
+        "INTER_AGENT_MESSAGE": "代理协作消息",
+    }[kind]
+
+
+def _memory_governance_incomplete_human_marker(
+    row,
+    *,
+    chronology: MemoryGovernanceChronology,
+) -> FrozenMemoryGovernanceSourceItem:
+    after = chronology is MemoryGovernanceChronology.AFTER_PROPOSAL
+    return FrozenMemoryGovernanceSourceItem(
+        source_entry_id=str(row["id"]),
+        chronology=chronology,
+        source_product_label=(
+            "候选提出后的用户原话（来源不完整）"
+            if after
+            else "用户原话（来源不完整）"
+        ),
+        evidence_role=(
+            MemoryGovernanceEvidenceRole.POST_PROPOSAL_HUMAN
+            if after
+            else MemoryGovernanceEvidenceRole.HUMAN_ASSERTION
+        ),
+        public_kind=_memory_governance_entry_product_kind(
+            str(row["entry_kind"])
+        ),
+        blocks=(
+            FrozenMemoryGovernanceSourceBlock(
+                block_kind=MemoryGovernanceSourceBlockKind.TEXT,
+                text="",
+                truncated=True,
+            ),
+        ),
+        item_omitted_after=1,
+        anchor=True,
+    )
+
+
 def _decode_governance_projection(
     raw: bytes, *, maximum_bytes: int, truncated: bool
 ) -> tuple[str, bool]:
@@ -2304,14 +2856,6 @@ def _decode_governance_projection(
         except UnicodeDecodeError as exc:
             value = value[: exc.start]
     return "", truncated or bool(raw)
-
-
-def _governance_public_text(value: str) -> str:
-    # Governance receives semantic evidence, never private URLs or transport
-    # handles.  Tool/user bodies remain otherwise opaque and are not parsed.
-    return _PRIVATE_OR_REMOTE_URL.sub("[url redacted]", value)
-
-
 __all__ = [
     "AcceptedMemoryGovernance",
     "MAXIMUM_ACTIVE_RESPONSE_PREFERENCES_PER_SCOPE",

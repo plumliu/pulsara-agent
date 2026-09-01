@@ -1831,10 +1831,6 @@ class ToolBatchExecutor:
                 )
             )
             raise
-        if result.memory_candidate is not None and self._memory_projection is not None:
-            self._memory_projection.offer_candidate_wake(
-                result.memory_candidate.candidate_id
-            )
         epoch = self._continuity.current_view(continuity_scope)
         if epoch is None:
             raise RuntimeError("accepted ToolResult lost its provider-input epoch")

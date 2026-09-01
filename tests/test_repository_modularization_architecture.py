@@ -52,6 +52,71 @@ _ROUND5B_DURABLE_JOB_SUBTRACTION_RETIRED_PYTEST_NODES = {
     "tests/test_stage2_job_executor.py::test_stage2_job_executor_close_joins_active_handler_and_settles_attempt",
     "tests/test_stage2_protocol_v3.py::test_stage2_host_exposes_job_result_acceptance_to_production_protocol",
 }
+_ASYNC_SUBAGENT_COMPLETION_RETIRED_PYTEST_NODES = {
+    (
+        "tests/test_stage2_canonical_reader.py::"
+        "test_subagent_result_acceptance_linearizes_at_provider_safe_point"
+    ),
+    (
+        "tests/test_stage2_protocol_v3.py::"
+        "test_stage2_controller_can_accept_exact_durable_subagent_result"
+    ),
+    (
+        "tests/test_stage2_protocol_v3.py::"
+        "test_stage2_controller_can_accept_external_results_into_a_new_root"
+    ),
+}
+_ASYNC_SUBAGENT_COMPLETION_ADDED_OBSERVED_IMPORTS = {
+    "AcceptedSubagentCompletion",
+    "SubagentCompletionDisposition",
+}
+_ASYNC_SUBAGENT_COMPLETION_ADDED_ALL = {
+    "AcceptedSubagentCompletion",
+    "SubagentCompletionDisposition",
+}
+_ASYNC_SUBAGENT_COMPLETION_ADDED_TOP_LEVEL_CLASSES = {
+    "AcceptedSubagentCompletion",
+    "SubagentCompletionDisposition",
+}
+_ASYNC_SUBAGENT_COMPLETION_ADDED_METHODS = {
+    "_accepted_completion_row",
+    "_bind_completion_command",
+    "_completion_accepted_entry",
+    "_completion_source_row",
+    "_prepare_completion_target",
+}
+_ASYNC_SUBAGENT_COMPLETION_REMOVED_METHODS = {
+    "_prepare_external_result_target",
+}
+_ASYNC_SUBAGENT_COMPLETION_CHANGED_METHODS = {
+    "accept_subagent_completion_into_root",
+}
+_ASYNC_SUBAGENT_COMPLETION_ADDED_RUNTIME_DATACLASSES = {
+    "AcceptedSubagentCompletion",
+}
+_MEMORY_GOVERNANCE_HARD_CUT_ADDED_TOP_LEVEL_FUNCTIONS = {
+    "_memory_governance_entry_is_human",
+    "_memory_governance_entry_product_kind",
+    "_memory_governance_incomplete_human_marker",
+    "_memory_governance_source_role_and_label",
+    "_memory_governance_terminal_fence",
+    "_read_memory_governance_terminal_candidate",
+}
+_MEMORY_GOVERNANCE_HARD_CUT_REMOVED_TOP_LEVEL_FUNCTIONS = {
+    "_governance_public_text",
+}
+_MEMORY_GOVERNANCE_HARD_CUT_ADDED_METHODS = {
+    "_read_assistant_public_blocks",
+    "_read_memory_governance_producer_cut",
+    "_read_memory_governance_producer_output",
+    "_read_memory_governance_source_item",
+    "_read_memory_governance_terminal_suffix",
+    "confirm_memory_governance_terminal_fence",
+}
+_MEMORY_GOVERNANCE_HARD_CUT_REMOVED_METHODS = {
+    "_read_assistant_public_body",
+    "_read_memory_governance_turn_projection",
+}
 _ROUND7_ADDED_TOP_LEVEL_FUNCTIONS = {"_plan_question_response"}
 _ROUND7_CHANGED_TOP_LEVEL_FUNCTIONS = {
     "_prepared_tool_result_manifest",
@@ -589,7 +654,7 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
     baseline = _baseline()
     assert set(current["observed_imports"]) == (
         set(baseline["observed_imports"]) - _ROUND5B_REMOVED_OBSERVED_IMPORTS
-    )
+    ) | _ASYNC_SUBAGENT_COMPLETION_ADDED_OBSERVED_IMPORTS
     for key in ("closed_owner_renames", "override_seams"):
         assert current[key] == baseline[key], key
     assert (
@@ -600,6 +665,7 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
             - _ROUND5B_REMOVED_ALL
         )
         | _ROUND8_ADDED_ALL
+        | _ASYNC_SUBAGENT_COMPLETION_ADDED_ALL
     )
     assert (
         set(current["top_level_classes"])
@@ -609,15 +675,20 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
             - _ROUND5B_REMOVED_TOP_LEVEL_CLASSES
         )
         | _ROUND8_ADDED_TOP_LEVEL_CLASSES
+        | _ASYNC_SUBAGENT_COMPLETION_ADDED_TOP_LEVEL_CLASSES
     )
     for key, added, changed in (
         (
             "top_level_functions",
-            _ROUND7_ADDED_TOP_LEVEL_FUNCTIONS
-            | _ROUND8_ADDED_TOP_LEVEL_FUNCTIONS
-            | _ROUND5B_ADDED_TOP_LEVEL_FUNCTIONS
-            | _ROUND10_ADDED_TOP_LEVEL_FUNCTIONS
-            | _ROUND9_2_ADDED_TOP_LEVEL_FUNCTIONS,
+            (
+                _ROUND7_ADDED_TOP_LEVEL_FUNCTIONS
+                | _ROUND8_ADDED_TOP_LEVEL_FUNCTIONS
+                | _ROUND5B_ADDED_TOP_LEVEL_FUNCTIONS
+                | _ROUND10_ADDED_TOP_LEVEL_FUNCTIONS
+                | _ROUND9_2_ADDED_TOP_LEVEL_FUNCTIONS
+            )
+            - _MEMORY_GOVERNANCE_HARD_CUT_REMOVED_TOP_LEVEL_FUNCTIONS
+            | _MEMORY_GOVERNANCE_HARD_CUT_ADDED_TOP_LEVEL_FUNCTIONS,
             (
                 _ROUND7_CHANGED_TOP_LEVEL_FUNCTIONS
                 | _FINGERPRINT_HARD_CUT_CHANGED_TOP_LEVEL_FUNCTIONS
@@ -626,18 +697,24 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
         ),
         (
             "methods",
-            _ROUND7_ADDED_METHODS
-            | _ROUND8_ADDED_METHODS
-            | _TODO_REFINEMENT_ADDED_METHODS
-            | _ROUND5B_ADDED_METHODS
-            | _ROUND10_ADDED_METHODS
-            | _ROUND9_2_ADDED_METHODS,
+            (
+                _ROUND7_ADDED_METHODS
+                | _ROUND8_ADDED_METHODS
+                | _TODO_REFINEMENT_ADDED_METHODS
+                | _ROUND5B_ADDED_METHODS
+                | _ROUND10_ADDED_METHODS
+                | _ROUND9_2_ADDED_METHODS
+                | _ASYNC_SUBAGENT_COMPLETION_ADDED_METHODS
+            )
+            - _MEMORY_GOVERNANCE_HARD_CUT_REMOVED_METHODS
+            | _MEMORY_GOVERNANCE_HARD_CUT_ADDED_METHODS,
             _ROUND7_CHANGED_METHODS
             | _ROUND8_CHANGED_METHODS
             | _ROUND5A2_CHANGED_METHODS
             | _ROUND5B_CHANGED_METHODS
             | _ROUND10_CHANGED_METHODS
-            | _ROUND9_2_CHANGED_METHODS,
+            | _ROUND9_2_CHANGED_METHODS
+            | _ASYNC_SUBAGENT_COMPLETION_CHANGED_METHODS,
         ),
     ):
         removed = (
@@ -645,8 +722,13 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
             | _TODO_REFINEMENT_REMOVED_METHODS
             | _ROUND5B_REMOVED_METHODS
             | _ROUND10_REMOVED_METHODS
+            | _ASYNC_SUBAGENT_COMPLETION_REMOVED_METHODS
+            | _MEMORY_GOVERNANCE_HARD_CUT_REMOVED_METHODS
             if key == "methods"
-            else _ROUND5B_REMOVED_TOP_LEVEL_FUNCTIONS
+            else (
+                _ROUND5B_REMOVED_TOP_LEVEL_FUNCTIONS
+                | _MEMORY_GOVERNANCE_HARD_CUT_REMOVED_TOP_LEVEL_FUNCTIONS
+            )
         )
         assert set(current[key]) == (set(baseline[key]) - removed) | added
         for name in set(baseline[key]) - changed:
@@ -666,9 +748,12 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
     for key in ("observed_symbols", "owned_observed_symbols"):
         assert set(current_runtime[key]) == (
             set(baseline_runtime[key]) - _ROUND5B_REMOVED_OBSERVED_IMPORTS
-        )
+        ) | _ASYNC_SUBAGENT_COMPLETION_ADDED_OBSERVED_IMPORTS
         if isinstance(current_runtime[key], dict):
-            for name in current_runtime[key]:
+            for name in (
+                set(current_runtime[key])
+                - _ASYNC_SUBAGENT_COMPLETION_ADDED_OBSERVED_IMPORTS
+            ):
                 assert current_runtime[key][name] == baseline_runtime[key][name]
     assert (
         set(current_runtime["exceptions"])
@@ -688,7 +773,7 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
         set(baseline_runtime["dataclasses"])
         - _ROUND8_RUNTIME_REMOVED_DATACLASSES
         - _ROUND5B_RUNTIME_REMOVED_DATACLASSES
-    )
+    ) | _ASYNC_SUBAGENT_COMPLETION_ADDED_RUNTIME_DATACLASSES
     for name in (
         set(baseline_runtime["dataclasses"])
         - _ROUND8_RUNTIME_REMOVED_DATACLASSES
@@ -708,13 +793,20 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
             - _TODO_REFINEMENT_REMOVED_METHODS
             - _ROUND5B_REMOVED_METHODS
             - _ROUND10_REMOVED_METHODS
+            - _ASYNC_SUBAGENT_COMPLETION_REMOVED_METHODS
+            - _MEMORY_GOVERNANCE_HARD_CUT_REMOVED_METHODS
         )
-        | _ROUND7_ADDED_METHODS
-        | _ROUND8_ADDED_METHODS
-        | _TODO_REFINEMENT_ADDED_METHODS
-        | _ROUND5B_ADDED_METHODS
-        | _ROUND10_ADDED_METHODS
-        | _ROUND9_2_ADDED_METHODS
+        | (
+            _ROUND7_ADDED_METHODS
+            | _ROUND8_ADDED_METHODS
+            | _TODO_REFINEMENT_ADDED_METHODS
+            | _ROUND5B_ADDED_METHODS
+            | _ROUND10_ADDED_METHODS
+            | _ROUND9_2_ADDED_METHODS
+            | _ASYNC_SUBAGENT_COMPLETION_ADDED_METHODS
+        )
+        - _MEMORY_GOVERNANCE_HARD_CUT_REMOVED_METHODS
+        | _MEMORY_GOVERNANCE_HARD_CUT_ADDED_METHODS
     )
     for name in (
         set(baseline_runtime["methods"])
@@ -724,10 +816,13 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
         - _ROUND5B_RUNTIME_CHANGED_METHODS
         - _ROUND10_CHANGED_METHODS
         - _ROUND9_2_CHANGED_METHODS
+        - _ASYNC_SUBAGENT_COMPLETION_CHANGED_METHODS
         - _ROUND8_REMOVED_METHODS
         - _TODO_REFINEMENT_REMOVED_METHODS
         - _ROUND5B_REMOVED_METHODS
         - _ROUND10_REMOVED_METHODS
+        - _ASYNC_SUBAGENT_COMPLETION_REMOVED_METHODS
+        - _MEMORY_GOVERNANCE_HARD_CUT_REMOVED_METHODS
     ):
         assert current_runtime["methods"][name] == baseline_runtime["methods"][name]
     assert set(
@@ -756,6 +851,13 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
         | _ROUND5B_REMOVED_METHODS
         | _ROUND10_ADDED_METHODS
         | _ROUND10_CHANGED_METHODS
+        | _ASYNC_SUBAGENT_COMPLETION_ADDED_METHODS
+        | _ASYNC_SUBAGENT_COMPLETION_CHANGED_METHODS
+        | _ASYNC_SUBAGENT_COMPLETION_REMOVED_METHODS
+        | _MEMORY_GOVERNANCE_HARD_CUT_ADDED_METHODS
+        | _MEMORY_GOVERNANCE_HARD_CUT_REMOVED_METHODS
+        | _MEMORY_GOVERNANCE_HARD_CUT_ADDED_TOP_LEVEL_FUNCTIONS
+        | _MEMORY_GOVERNANCE_HARD_CUT_REMOVED_TOP_LEVEL_FUNCTIONS
         | _ROUND9_2_ADDED_METHODS
         | _ROUND9_2_CHANGED_METHODS
         | _ROUND10_REMOVED_METHODS
@@ -793,6 +895,7 @@ def test_repository_modularization_preserves_every_existing_pytest_node() -> Non
     assert baseline_nodes - current_nodes == (
         _FRONTEND_HARD_CUT_RETIRED_PYTEST_NODES
         | _ROUND5B_DURABLE_JOB_SUBTRACTION_RETIRED_PYTEST_NODES
+        | _ASYNC_SUBAGENT_COMPLETION_RETIRED_PYTEST_NODES
     )
     assert (
         "tests/test_stage2_architecture.py::"

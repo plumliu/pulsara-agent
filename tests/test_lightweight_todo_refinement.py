@@ -389,7 +389,7 @@ def test_external_root_continuations_use_loss_tolerant_todo_binding() -> None:
     for method_name in (
         "_bind_plan_review_successor",
         "_start_terminal_observation_turn",
-        "_start_external_result_turn",
+        "_start_subagent_completion_turn",
     ):
         method_source = host_source.split(f"    async def {method_name}(", 1)[1].split(
             "\n    async def ", 1

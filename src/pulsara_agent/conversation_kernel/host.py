@@ -97,6 +97,7 @@ from pulsara_agent.conversation_kernel.auxiliary_model import (
     DirectKernelAuxiliaryJsonModel,
     provider_trust_domain_identity,
 )
+from pulsara_agent.conversation_kernel.reader import CanonicalProviderInputReader
 from pulsara_agent.conversation_kernel.extensions import (
     ExtensionPlane,
     ExtensionPrincipal,
@@ -633,6 +634,12 @@ class KernelHostSession:
             read_binding=memory_read_binding,
             model=DirectKernelAuxiliaryJsonModel(
                 settings.llm, api_key_boundary=api_key_boundary
+            ),
+            input_reader=CanonicalProviderInputReader(
+                repository.connection_provider,
+                blob_reader=PostgresCanonicalBlobStore(
+                    repository.connection_provider
+                ),
             ),
             io_owner=self._io,
             deadline_factory=self._deadlines,
@@ -3135,6 +3142,8 @@ class KernelHostSession:
                     PlanContinuationDisposition.HISTORICAL_TERMINAL,
                     PlanContinuationDisposition.NOT_OWNED_BY_CURRENT_WRITER,
                 }:
+                    if disposition is PlanContinuationDisposition.HISTORICAL_TERMINAL:
+                        self._memory_tools.offer_governance_wake()
                     return
             except asyncio.CancelledError:
                 raise
@@ -3400,6 +3409,7 @@ class KernelHostSession:
             except Exception:
                 status = None
             if status is not None and status.value != "RUNNING":
+                self._memory_tools.offer_governance_wake()
                 return
             await asyncio.sleep(delay_seconds)
             delay_seconds = min(delay_seconds * 2, 0.5)

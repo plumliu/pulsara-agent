@@ -1302,11 +1302,13 @@ def test_round9_2_compact_before_resumed_first_open_supersedes_resume_once(
             )
             assert result.final_text == f"RESUME_HISTORY_{index}"
         prior = model.requests[-1]
-        prior_tokens = prior.compiled_input.final_estimate.total_input_tokens
+        prior_tokens = (
+            prior.wire_input_plan.quote.final_wire_estimated_input_tokens
+        )
         budget = prior.prepared_call.compile_binding.effective_input_budget_tokens
         prior_ratio = prior_tokens / budget
         trigger_ratio = min(0.8, prior_ratio + 0.005)
-        target_ratio = max(0.001, min(trigger_ratio - 0.001, prior_ratio * 0.75))
+        target_ratio = max(0.001, trigger_ratio - 0.001)
         await core.close_session(first.host_session_id, close_conversation=False)
 
         resumed = await core.resume_session(
@@ -1327,6 +1329,9 @@ def test_round9_2_compact_before_resumed_first_open_supersedes_resume_once(
             requested_permission_mode=PermissionMode.ACCEPT_EDITS,
         )
         assert result.final_text == "RESUME_COMPACTION_COMPLETE"
+        # The trigger and target are derived from the installed final-wire
+        # quote. The first exact-fit successor is adopted without retrying a
+        # changed semantic prefix under a stale semantic-token threshold.
         assert model.summary_transport.open_count == 1
         assert len(model.requests) == 8
         await core.close_session(resumed.host_session_id, close_conversation=True)

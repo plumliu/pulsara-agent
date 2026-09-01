@@ -1286,6 +1286,81 @@ def test_responses_empty_terminal_reconstructs_exact_completed_message() -> None
     )
 
 
+def test_responses_content_part_sequence_covers_reasoning_items() -> None:
+    accumulator = ResponsesCompletionAccumulator(builder=ProviderLiveItemBuilder())
+    initial_item = {
+        "type": "reasoning",
+        "id": "reasoning:streamed",
+        "status": "in_progress",
+        "summary": [],
+        "content": [],
+        "encrypted_content": "opaque",
+    }
+    final_part = {"type": "reasoning_text", "text": "reasoning"}
+    final_item = {
+        **initial_item,
+        "status": "completed",
+        "content": [final_part],
+    }
+    events = (
+        {
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": initial_item,
+        },
+        {
+            "type": "response.content_part.added",
+            "output_index": 0,
+            "content_index": 0,
+            "item_id": "reasoning:streamed",
+            "part": {**final_part, "text": ""},
+        },
+        {
+            "type": "response.reasoning_text.delta",
+            "output_index": 0,
+            "content_index": 0,
+            "delta": "reasoning",
+        },
+        {
+            "type": "response.reasoning_text.done",
+            "output_index": 0,
+            "content_index": 0,
+            "text": "reasoning",
+        },
+        {
+            "type": "response.content_part.done",
+            "output_index": 0,
+            "content_index": 0,
+            "item_id": "reasoning:streamed",
+            "part": final_part,
+        },
+        {
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "item": final_item,
+        },
+        {
+            "type": "response.completed",
+            "response": {
+                "id": "response:test",
+                "status": "completed",
+                "output": [final_item],
+            },
+        },
+    )
+
+    for event in events:
+        accumulator.apply(event)
+
+    terminal = accumulator.finish()
+    assert isinstance(terminal, ProviderAdapterTerminal)
+    assert terminal.terminal_kind is ProviderAdapterTerminalKind.COMPLETED
+    assert terminal.completed_replay_payload is not None
+    assert tuple(
+        thaw_json(item) for item in terminal.completed_replay_payload.ordered_items
+    ) == (final_item,)
+
+
 def test_responses_empty_terminal_reconstructs_exact_completed_tool_call() -> None:
     accumulator = ResponsesCompletionAccumulator(builder=ProviderLiveItemBuilder())
     initial_item = {
@@ -2338,8 +2413,9 @@ def test_auxiliary_valid_partial_json_is_not_parsed_after_incomplete() -> None:
     )
     prepared = auxiliary.prepare_json_call(
         purpose=ModelCallPurpose.MEMORY_HINT_REVIEW,
-        prompt="return a bounded JSON object",
+        messages=(LLMMessage.user("return a bounded JSON object"),),
         maximum_input_tokens=1024,
+        maximum_input_bytes=4096,
         maximum_output_tokens=32,
         timeout_policy=OpenAITransportTimeoutPolicy(1, 1, 1, 1, 5),
     )
