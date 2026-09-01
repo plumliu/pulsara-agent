@@ -220,12 +220,16 @@ def _user_capabilities(active_session_id: str | None) -> dict[str, object]:
 
 class _Bridge:
     def __init__(self) -> None:
-        self.connect_calls: list[tuple[str, bool]] = []
+        self.connect_calls: list[tuple[str, str, bool]] = []
 
     async def connect(
-        self, session_id: str, *, takeover: bool = False
+        self,
+        session_id: str,
+        *,
+        browser_instance_id: str,
+        takeover: bool = False,
     ) -> dict[str, object]:
-        self.connect_calls.append((session_id, takeover))
+        self.connect_calls.append((session_id, browser_instance_id, takeover))
         return {
             "connection_id": "connection-1",
             "connection_generation": 1,
@@ -387,8 +391,8 @@ async def _exercise_bare_loopback_origin(tmp_path: Path) -> None:
                     ("session-1", "project-docs", "config-v1", False)
                 ]
 
-            sessions.project_mcp_toggle_error = (
-                mcp_config.WorkspaceMcpConfigStaleError("changed")
+            sessions.project_mcp_toggle_error = mcp_config.WorkspaceMcpConfigStaleError(
+                "changed"
             )
             async with client.post(
                 f"{server.origin}/api/sessions/session-1/capabilities/mcp/project-docs/enabled",
@@ -424,7 +428,10 @@ async def _exercise_bare_loopback_origin(tmp_path: Path) -> None:
 
             async with client.post(
                 f"{server.origin}/api/sessions/session-1/connections",
-                json={"takeover": True},
+                json={
+                    "browser_instance_id": ("00000000-0000-4000-8000-000000000001"),
+                    "takeover": True,
+                },
                 headers={
                     "Origin": server.origin,
                     "Sec-Fetch-Site": "same-origin",
@@ -432,7 +439,13 @@ async def _exercise_bare_loopback_origin(tmp_path: Path) -> None:
             ) as response:
                 assert response.status == 201
                 assert (await response.json())["role"] == "controller"
-                assert bridge.connect_calls == [("session-1", True)]
+                assert bridge.connect_calls == [
+                    (
+                        "session-1",
+                        "00000000-0000-4000-8000-000000000001",
+                        True,
+                    )
+                ]
     finally:
         await server.aclose()
 

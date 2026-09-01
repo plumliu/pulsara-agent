@@ -11,6 +11,10 @@ from pulsara_agent.terminal_protocol.v3_gateway import TerminalKernelProtocolSer
 from pulsara_agent.web_app.browser_bridge import LocalBrowserBridge
 from pulsara_agent.web_app.session_controller import LocalSessionController
 
+BROWSER_ONE = "00000000-0000-4000-8000-000000000001"
+BROWSER_TWO = "00000000-0000-4000-8000-000000000002"
+BROWSER_THREE = "00000000-0000-4000-8000-000000000003"
+
 
 class _Sessions:
     async def resume_session(self, session_id: str) -> SimpleNamespace:
@@ -83,9 +87,9 @@ async def _exercise_browser_connection_roles(monkeypatch) -> None:
         protocol_server=cast(TerminalKernelProtocolServer, object()),
     )
 
-    first = await bridge.connect("session:one")
-    second = await bridge.connect("session:one")
-    other_session = await bridge.connect("session:two")
+    first = await bridge.connect("session:one", browser_instance_id=BROWSER_ONE)
+    second = await bridge.connect("session:one", browser_instance_id=BROWSER_TWO)
+    other_session = await bridge.connect("session:two", browser_instance_id=BROWSER_ONE)
 
     assert first["role"] == "controller"
     assert second["role"] == "observer"
@@ -101,10 +105,25 @@ async def _exercise_browser_connection_roles(monkeypatch) -> None:
         bridge._controller_by_session["session:two"] == other_session["connection_id"]
     )
 
-    third = await bridge.connect("session:one", takeover=True)
+    refreshed = await bridge.connect("session:one", browser_instance_id=BROWSER_ONE)
+
+    assert refreshed["role"] == "controller"
+    assert first_connection.closed
+    assert not second_connection.closed
+    assert not other_connection.closed
+    assert bridge._controller_by_session["session:one"] == refreshed["connection_id"]
+    await bridge.disconnect(str(first["connection_id"]))
+    assert bridge._controller_by_session["session:one"] == refreshed["connection_id"]
+
+    refreshed_connection = bridge._connections[str(refreshed["connection_id"])]
+    third = await bridge.connect(
+        "session:one",
+        browser_instance_id=BROWSER_THREE,
+        takeover=True,
+    )
 
     assert third["role"] == "controller"
-    assert first_connection.closed
+    assert refreshed_connection.closed
     assert not second_connection.closed
     assert not other_connection.closed
     assert str(second["connection_id"]) in bridge._connections
@@ -143,7 +162,7 @@ async def _exercise_dead_attachment_expiry(monkeypatch) -> None:
         sessions=cast(LocalSessionController, _Sessions()),
         protocol_server=cast(TerminalKernelProtocolServer, object()),
     )
-    payload = await bridge.connect("session:one")
+    payload = await bridge.connect("session:one", browser_instance_id=BROWSER_ONE)
     connection_id = str(payload["connection_id"])
     connection = bridge._connections[connection_id]
     connection.closed = True
@@ -153,6 +172,6 @@ async def _exercise_dead_attachment_expiry(monkeypatch) -> None:
 
     assert connection_id not in bridge._connections
     assert "session:one" not in bridge._controller_by_session
-    replacement = await bridge.connect("session:one")
+    replacement = await bridge.connect("session:one", browser_instance_id=BROWSER_ONE)
     assert replacement["role"] == "controller"
     await bridge.aclose()

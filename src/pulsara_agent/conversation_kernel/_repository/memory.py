@@ -159,7 +159,7 @@ class _MemoryOperations:
         processing_started_at: datetime,
         deadline_monotonic: float,
     ) -> FrozenMemoryCandidateForGovernance | None:
-        """Claim only candidates produced by this exact origin workspace."""
+        """Claim only candidates produced by this exact origin Session."""
 
         with self._writer_transaction(
             guard, deadline_monotonic=deadline_monotonic
@@ -177,6 +177,7 @@ class _MemoryOperations:
                 """
                 SELECT id FROM pulsara_v3.memory_candidates
                 WHERE memory_domain_id=%s AND origin_workspace_id=%s
+                  AND origin_session_id=%s
                   AND status='PENDING' AND (%s::text IS NULL OR id=%s)
                 ORDER BY accepted_at, id
                 LIMIT 1 FOR UPDATE SKIP LOCKED
@@ -184,6 +185,7 @@ class _MemoryOperations:
                 (
                     session["memory_domain_id"],
                     session["workspace_id"],
+                    guard.session_id,
                     candidate_id,
                     candidate_id,
                 ),
@@ -230,8 +232,14 @@ class _MemoryOperations:
                 SELECT status, processing_started_at
                 FROM pulsara_v3.memory_candidates
                 WHERE id=%s AND memory_domain_id=%s AND origin_workspace_id=%s
+                  AND origin_session_id=%s
                 """,
-                (candidate_id, session["memory_domain_id"], session["workspace_id"]),
+                (
+                    candidate_id,
+                    session["memory_domain_id"],
+                    session["workspace_id"],
+                    guard.session_id,
+                ),
             ).fetchone()
             if head is None or str(head["status"]) != "PROCESSING":
                 return None
@@ -628,6 +636,7 @@ class _MemoryOperations:
                 WHERE c.id=%s AND c.status='PROCESSING'
                   AND s.id=%s AND c.memory_domain_id=s.memory_domain_id
                   AND c.origin_workspace_id=s.workspace_id
+                  AND c.origin_session_id=s.id
                 RETURNING c.id
                 """,
                 (reason_code, public_summary, decided_at, candidate_id, guard.session_id),
@@ -708,7 +717,7 @@ class _MemoryOperations:
         with self._writer_transaction(
             guard, deadline_monotonic=deadline_monotonic
         ) as connection:
-            self._lock_processing_candidate(connection, prepared)
+            self._lock_processing_candidate(connection, guard, prepared)
             return self._freeze_existing_source_relation_settlement(
                 connection, prepared
             )
@@ -1294,7 +1303,7 @@ class _MemoryOperations:
         with self._writer_transaction(
             guard, deadline_monotonic=deadline_monotonic
         ) as connection:
-            self._lock_processing_candidate(connection, prepared)
+            self._lock_processing_candidate(connection, guard, prepared)
             decision = prepared.decision
             if decision.decision_kind is MemoryDecisionKind.SKIP:
                 connection.execute(
@@ -1401,7 +1410,7 @@ class _MemoryOperations:
         with self._writer_transaction(
             guard, deadline_monotonic=deadline_monotonic
         ) as connection:
-            self._lock_processing_candidate(connection, prepared)
+            self._lock_processing_candidate(connection, guard, prepared)
             winner = self._active_semantic_winner(connection, fact)
             if winner is None or not self._memory_fact_matches(winner, fact):
                 raise ConversationKernelConflict("memory duplicate winner drifted")
@@ -1556,7 +1565,7 @@ class _MemoryOperations:
         with self._writer_transaction(
             guard, deadline_monotonic=deadline_monotonic
         ) as connection:
-            self._lock_processing_candidate(connection, prepared)
+            self._lock_processing_candidate(connection, guard, prepared)
             source = connection.execute(
                 "SELECT * FROM pulsara_v3.memory_facts WHERE id=%s FOR UPDATE",
                 (settlement.existing_source.fact_id,),
@@ -1819,7 +1828,7 @@ class _MemoryOperations:
             ),
         )
 
-    def _lock_processing_candidate(self, connection, prepared):
+    def _lock_processing_candidate(self, connection, guard, prepared):
         row = connection.execute(
             "SELECT * FROM pulsara_v3.memory_candidates WHERE id=%s FOR UPDATE",
             (prepared.candidate_id,),
@@ -1831,6 +1840,7 @@ class _MemoryOperations:
             != prepared.candidate_acceptance_digest
             or str(row["memory_domain_id"]) != prepared.memory_domain_id
             or str(row["origin_workspace_id"]) != prepared.origin_workspace_id
+            or str(row["origin_session_id"]) != guard.session_id
             or str(row["scope_kind"]) != prepared.scope_kind.value
             or str(row["scope_id"]) != prepared.scope_id
         ):

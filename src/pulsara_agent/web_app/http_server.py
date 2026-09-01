@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Awaitable, Callable, cast
+from uuid import UUID
 
 from aiohttp import web
 
@@ -717,11 +718,25 @@ class LocalHttpServer:
 
     async def _connect(self, request: web.Request) -> web.Response:
         body = await self._json_body(request)
+        browser_instance_id = _optional_body_string(body, "browser_instance_id")
+        if browser_instance_id is None:
+            raise ValueError("browser_instance_id is required")
+        try:
+            parsed_browser_instance_id = UUID(browser_instance_id)
+        except ValueError as exc:
+            raise ValueError("browser_instance_id must be a canonical UUID") from exc
+        if (
+            parsed_browser_instance_id.version != 4
+            or str(parsed_browser_instance_id) != browser_instance_id
+        ):
+            raise ValueError("browser_instance_id must be a canonical UUID")
         takeover = body.get("takeover", False)
         if not isinstance(takeover, bool):
             raise ValueError("takeover must be boolean")
         payload = await self.bridge.connect(
-            request.match_info["session_id"], takeover=takeover
+            request.match_info["session_id"],
+            browser_instance_id=browser_instance_id,
+            takeover=takeover,
         )
         return web.json_response(payload, status=201)
 

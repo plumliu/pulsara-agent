@@ -1401,6 +1401,9 @@ describe('PulsaraApp', () => {
     expect(within(alphaGroup).getByText('准备发布')).toBeTruthy();
     expect(within(alphaGroup).getByText('继续 alpha')).toBeTruthy();
     expect(within(directoryTree).getByText('快速排查')).toBeTruthy();
+    expect(within(directoryTree).queryByText('3 分钟前')).toBeNull();
+    expect(within(directoryTree).queryByText('10 分钟前')).toBeNull();
+    expect(within(directoryTree).queryByText('昨天')).toBeNull();
     expect(directoryTree.querySelector('.session-section:last-child')?.classList.contains('session-section--quick')).toBe(true);
 
     fireEvent.click(within(alphaGroup).getByRole('button', { name: 'alpha' }));
@@ -1456,6 +1459,37 @@ describe('PulsaraApp', () => {
     expect(await screen.findByText('验证新的前端任务')).toBeTruthy();
     expect(adapter.lastConnection?.enterPlan).toHaveBeenCalledWith('验证新的前端任务', 'read-only');
     expect(adapter.lastConnection?.submitPrompt).toHaveBeenCalledWith('验证新的前端任务', 'read-only');
+  });
+
+  it('leaves Enter to the input method while the composer is composing text', async () => {
+    const adapter = new FakeAdapter();
+    render(<PulsaraApp adapter={adapter} />);
+    await screen.findByRole('heading', { name: '准备发布' });
+    const composer = screen.getByLabelText('发送给 Pulsara') as HTMLTextAreaElement;
+
+    fireEvent.compositionStart(composer);
+    fireEvent.change(composer, { target: { value: 'biruzhey' } });
+    expect(fireEvent.keyDown(
+      composer,
+      { key: 'Enter', code: 'Enter', isComposing: true },
+    )).toBe(true);
+
+    expect(adapter.lastConnection?.submitPrompt).not.toHaveBeenCalled();
+    expect(composer.value).toBe('biruzhey');
+
+    fireEvent.compositionEnd(composer);
+    expect(fireEvent.keyDown(
+      composer,
+      { key: 'Enter', code: 'Enter', keyCode: 229 },
+    )).toBe(true);
+    expect(adapter.lastConnection?.submitPrompt).not.toHaveBeenCalled();
+    expect(composer.value).toBe('biruzhey');
+
+    expect(fireEvent.keyDown(composer, { key: 'Enter', code: 'Enter' })).toBe(false);
+    await waitFor(() => expect(adapter.lastConnection?.submitPrompt).toHaveBeenCalledWith(
+      'biruzhey',
+      'bypass-permissions',
+    ));
   });
 
   it('creates a session for an explicitly selected directory', async () => {

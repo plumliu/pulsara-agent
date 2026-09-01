@@ -491,7 +491,40 @@ export function selectPromptCommand(isTurnActive: boolean, steer: boolean): Runt
   return 'SUBMIT_PROMPT';
 }
 
+const browserInstanceStorageKey = 'pulsara-browser-instance-id-v1';
+const canonicalUuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+function resolveBrowserInstanceId(): string {
+  const next = () => crypto.randomUUID();
+  if (typeof window === 'undefined') return next();
+  let existing: string | null = null;
+  try {
+    existing = window.sessionStorage.getItem(browserInstanceStorageKey);
+  } catch {
+    return next();
+  }
+  const navigation = typeof window.performance?.getEntriesByType === 'function'
+    ? window.performance.getEntriesByType('navigation')[0] as PerformanceNavigationTiming | undefined
+    : undefined;
+  if (navigation?.type === 'reload' && existing && canonicalUuidPattern.test(existing)) {
+    return existing;
+  }
+  const created = next();
+  try {
+    window.sessionStorage.setItem(browserInstanceStorageKey, created);
+  } catch {
+    // The process-local value still identifies this page while storage is unavailable.
+  }
+  return created;
+}
+
 export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
+  private readonly browserInstanceId: string;
+
+  constructor(browserInstanceId = resolveBrowserInstanceId()) {
+    this.browserInstanceId = browserInstanceId;
+  }
+
   async bootstrap(): Promise<RuntimeBootstrap> {
     const value = await apiRequest<Omit<RuntimeBootstrap, 'workspace'> & {
       workspace: { id: string; name: string; path: string; kind: string };
@@ -763,7 +796,10 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
       `/api/sessions/${encodeURIComponent(sessionId)}/connections`,
       {
         method: 'POST',
-        ...(takeover ? { body: JSON.stringify({ takeover: true }) } : {}),
+        body: JSON.stringify({
+          browser_instance_id: this.browserInstanceId,
+          ...(takeover ? { takeover: true } : {}),
+        }),
       },
     );
     const connection = new LocalRuntimeConnection(payload);

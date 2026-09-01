@@ -141,7 +141,11 @@ controller ownership **按 canonical session 隔离**，绝不是 Application �
 - 用户在 observer 页面显式选择“在此窗口继续”时，connection 请求携带 `takeover=true`。Bridge
   只替换该 session 的旧 browser controller；其他 observer 与其他 session 的 controller 均保持不变；
 - 被替换的旧页面按普通断线重连后成为 observer，不得自动夺回 controller，因此不能形成两个页面
-  互相驱逐、无限重连的 ping-pong。
+  互相驱逐、无限重连的 ping-pong；
+- 每个浏览器页面拥有一个process-local `browser_instance_id`。同一页面刷新时复用该identity，Bridge
+  只允许它原子替换同session、同identity的上一connection generation并继续作为controller；新的标签页或
+  窗口生成不同identity，仍按普通observer规则连接。旧generation迟到的disconnect必须no-op，不能释放
+  replacement controller。identity不持久化产品状态、不跨浏览器页面共享，也不授予显式takeover以外的authority。
 
 同一个 browser runtime connection 的数据 attachment 与 observation attachment 共同构成一个
 不可拆分的连接 generation。任一 attachment 关闭、到达 EOF 或报告 typed transport failure 时，
@@ -216,10 +220,11 @@ POST   /api/connections/{connection_id}/resolve-plan-interaction
 POST   /api/connections/{connection_id}/read-content
 ```
 
-connection 创建默认不携带 body；显式接管同一 session 时只允许：
+connection 创建始终携带当前页面的canonical UUID；显式接管同一 session 时额外携带`takeover=true`：
 
 ```json
-{"takeover":true}
+{"browser_instance_id":"00000000-0000-4000-8000-000000000001"}
+{"browser_instance_id":"00000000-0000-4000-8000-000000000001","takeover":true}
 ```
 
 创建请求只有以下两种合法形态：

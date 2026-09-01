@@ -97,7 +97,6 @@ function SessionItem({
       <span className="session-item__copy">
         <strong>{session.title}</strong>
         <small>{session.subtitle} · {sessionPresenceLabels[presence]}</small>
-        <span className="session-item__meta"><span>{session.updatedAt}</span></span>
         {taskCountSummary(session) && (
           <span className={`session-item__tasks${session.taskCounts?.attention ? ' has-attention' : ''}`}>
             <GitFork size={10} /> {taskCountSummary(session)}

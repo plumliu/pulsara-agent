@@ -57,6 +57,7 @@ from pulsara_agent.conversation_kernel.memory.governor import (
 )
 from pulsara_agent.conversation_kernel.repository import (
     AssistantTextBlock,
+    ConversationKernelConflict,
     ConversationKernelRepository,
 )
 from pulsara_agent.conversation_kernel.memory_tools import (
@@ -1084,6 +1085,105 @@ def test_round8_workspace_domain_visibility_origin_claim_and_relation_endpoints(
         )
         is not None
     )
+
+
+def test_round8_governance_owner_is_exact_session_within_shared_workspace(
+    stage2_migrated_postgres_database,
+) -> None:
+    repository = _repository(stage2_migrated_postgres_database)
+    domain = _name("domain").replace(":", "_")
+    workspace_id = workspace_scope("/tmp/round8/shared-project")
+    owner = _lease(repository, workspace_id=workspace_id, domain=domain)
+    peer = _lease(repository, workspace_id=workspace_id, domain=domain)
+    trigger_entry_id = _completed_human_entry(
+        repository, owner, "Please remember my shared-project preference"
+    )
+    candidate = prepare_memory_candidate(
+        candidate_id=_name("candidate"),
+        memory_domain_id=domain,
+        origin_workspace_id=workspace_id,
+        origin_session_id=owner.guard.session_id,
+        producer_kind=MemoryProducerKind.CHEAP_HINT_REFLECTION,
+        trigger_user_entry_id=trigger_entry_id,
+        producer_candidate_ordinal=0,
+        proposal=FrozenMemoryProposal(
+            statement="The user prefers concise shared-project updates",
+            scope_kind=MemoryScopeKind.USER,
+            scope_id=CTX_USER,
+            kind_hint=MemoryKindHint.RESPONSE_PREFERENCE,
+        ),
+    )
+    repository.accept_reflection_memory_candidates(
+        owner.guard,
+        candidates=(candidate,),
+        deadline_monotonic=monotonic() + 30,
+    )
+
+    assert (
+        repository.claim_memory_candidate_for_governance(
+            peer.guard,
+            candidate_id=candidate.candidate_id,
+            processing_started_at=datetime.now(timezone.utc),
+            deadline_monotonic=monotonic() + 30,
+        )
+        is None
+    )
+    claimed = repository.claim_memory_candidate_for_governance(
+        owner.guard,
+        candidate_id=candidate.candidate_id,
+        processing_started_at=datetime.now(timezone.utc),
+        deadline_monotonic=monotonic() + 30,
+    )
+    assert claimed is not None
+    assert (
+        repository.read_memory_candidate_for_governance(
+            peer.guard,
+            candidate_id=candidate.candidate_id,
+            deadline_monotonic=monotonic() + 30,
+        )
+        is None
+    )
+    assert not repository.abandon_memory_candidate(
+        peer.guard,
+        candidate_id=candidate.candidate_id,
+        reason_code="ABANDONED_GOVERNANCE_FAILURE",
+        public_summary=None,
+        decided_at=datetime.now(timezone.utc),
+        deadline_monotonic=monotonic() + 30,
+    )
+
+    evidence = repository.read_memory_governance_evidence(
+        owner.guard,
+        candidate=claimed.prepared,
+        deadline_monotonic=monotonic() + 30,
+    )
+    prepared = prepare_memory_governance_acceptance(
+        candidate=claimed.prepared,
+        decision=FrozenMemoryGovernanceDecision(
+            MemoryDecisionKind.SKIP,
+            reason_code="LOW_VALUE",
+        ),
+        basis_items=evidence.basis_items,
+        relation_targets=(),
+    )
+    with pytest.raises(
+        ConversationKernelConflict,
+        match="memory governance candidate head drifted",
+    ):
+        repository.accept_memory_governance(
+            peer.guard,
+            prepared=prepared,
+            decided_at=datetime.now(timezone.utc),
+            deadline_monotonic=monotonic() + 30,
+        )
+
+    settled = repository.accept_memory_governance(
+        owner.guard,
+        prepared=prepared,
+        decided_at=datetime.now(timezone.utc),
+        deadline_monotonic=monotonic() + 30,
+    )
+    assert settled.status is MemoryCandidateStatus.SKIPPED
 
 
 def test_round8_response_preference_capacity_and_atomic_replacement(

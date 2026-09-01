@@ -119,6 +119,9 @@ command receipt 的 `PENDING` 不是成功。前端使用 `QueryCommandRequest` 
 - 创建会话不接收目标文本、Plan 开关或 permission mode。创建成功并建立连接后，用户才在
   composer 中提交第一轮输入；
 - active turn 时 Enter 创建 future prompt queue item；Cmd/Ctrl+Enter 才 steer 当前 turn；
+- composer 正处于输入法组合输入时，Enter 完全交给输入法处理：不得发送、排队或 steer，
+  也不得 `preventDefault` 阻止输入法确认候选或保留原始拼音；组合输入结束后的普通 Enter
+  才恢复上述发送语义，并兼容浏览器以 `isComposing` 或 `keyCode=229` 暴露组合状态；
 - pending queue 在 current turn 完成前保持可见，不混入 active assistant draft；
 - 普通用户输入以右侧独立说话者块呈现，使用用户图标与“你”标识；运行中的显式引导则以
   紧凑的“你 · 引导”事件嵌入当前执行流，不伪装成一轮新的普通对话；

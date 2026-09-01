@@ -55,6 +55,7 @@ class LocalBrowserBridge:
         self.protocol_server = protocol_server
         self._connections: dict[str, BrowserRuntimeConnection] = {}
         self._controller_by_session: dict[str, str] = {}
+        self._browser_instance_by_connection: dict[str, str] = {}
         self._session_locks: dict[str, asyncio.Lock] = {}
         self._next_generation = 0
         self._lock = asyncio.Lock()
@@ -62,10 +63,16 @@ class LocalBrowserBridge:
         self._close_task: asyncio.Task[None] | None = None
 
     async def connect(
-        self, session_id: str, *, takeover: bool = False
+        self,
+        session_id: str,
+        *,
+        browser_instance_id: str,
+        takeover: bool = False,
     ) -> dict[str, object]:
         if not session_id:
             raise ValueError("session_id is required")
+        if not browser_instance_id:
+            raise ValueError("browser_instance_id is required")
         async with self._lock:
             if self._closing:
                 raise RuntimeError("Local Web application is draining")
@@ -76,10 +83,17 @@ class LocalBrowserBridge:
                 controller_id = self._controller_by_session.get(session_id)
                 if controller_id is not None and controller_id not in self._connections:
                     self._controller_by_session.pop(session_id, None)
+                    self._browser_instance_by_connection.pop(controller_id, None)
                     controller_id = None
-                if takeover and controller_id is not None:
+                same_browser_instance = (
+                    controller_id is not None
+                    and self._browser_instance_by_connection.get(controller_id)
+                    == browser_instance_id
+                )
+                if controller_id is not None and (takeover or same_browser_instance):
                     self._controller_by_session.pop(session_id, None)
                     old = self._connections.pop(controller_id, None)
+                    self._browser_instance_by_connection.pop(controller_id, None)
                     controller_id = None
                 role = "controller" if controller_id is None else "observer"
             if old is not None:
@@ -115,6 +129,9 @@ class LocalBrowserBridge:
                     if self._closing:
                         raise RuntimeError("Local Web application is draining")
                     self._connections[connection.connection_id] = connection
+                    self._browser_instance_by_connection[connection.connection_id] = (
+                        browser_instance_id
+                    )
                     if role == "controller":
                         self._controller_by_session[session_id] = (
                             connection.connection_id
@@ -127,6 +144,7 @@ class LocalBrowserBridge:
     async def disconnect(self, connection_id: str) -> None:
         async with self._lock:
             connection = self._connections.pop(connection_id, None)
+            self._browser_instance_by_connection.pop(connection_id, None)
             if (
                 connection is not None
                 and self._controller_by_session.get(connection.session_id)
@@ -439,6 +457,7 @@ class LocalBrowserBridge:
             connections = tuple(self._connections.values())
             self._connections.clear()
             self._controller_by_session.clear()
+            self._browser_instance_by_connection.clear()
         await asyncio.gather(
             *(connection.aclose() for connection in connections),
             return_exceptions=True,
@@ -452,6 +471,7 @@ class LocalBrowserBridge:
             connection = self._connections.get(connection_id)
             if connection is not None and not connection.is_open:
                 stale = self._connections.pop(connection_id)
+                self._browser_instance_by_connection.pop(connection_id, None)
                 if (
                     self._controller_by_session.get(connection.session_id)
                     == connection_id

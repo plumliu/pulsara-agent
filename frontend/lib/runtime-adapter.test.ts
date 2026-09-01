@@ -111,8 +111,10 @@ describe('selectPromptCommand', () => {
       },
       { history_page: { entries: [entry(1, 'oldest')], has_more: false } },
     ];
-    vi.stubGlobal('fetch', vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
-      if (init?.body) historyBodies.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith('/history') && init?.body) {
+        historyBodies.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+      }
       const payload = responses.shift();
       return new Response(JSON.stringify(payload), {
         status: 200,
@@ -637,7 +639,7 @@ describe('selectPromptCommand', () => {
 });
 
 describe('LocalHttpRuntimeAdapter connection ownership', () => {
-  it('sends an explicit takeover only when this page asks to become controller', async () => {
+  it('sends the stable page identity with an explicit takeover request', async () => {
     let requestBody: unknown;
     vi.stubGlobal('fetch', vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
       requestBody = init?.body ? JSON.parse(String(init.body)) : undefined;
@@ -655,9 +657,14 @@ describe('LocalHttpRuntimeAdapter connection ownership', () => {
       }), { status: 201, headers: { 'Content-Type': 'application/json' } });
     }));
 
-    const connection = await new LocalHttpRuntimeAdapter().connect('session-1', true);
+    const connection = await new LocalHttpRuntimeAdapter(
+      '00000000-0000-4000-8000-000000000001',
+    ).connect('session-1', true);
 
-    expect(requestBody).toEqual({ takeover: true });
+    expect(requestBody).toEqual({
+      browser_instance_id: '00000000-0000-4000-8000-000000000001',
+      takeover: true,
+    });
     expect(connection.role).toBe('controller');
   });
 });

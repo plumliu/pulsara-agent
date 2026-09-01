@@ -761,6 +761,7 @@ export function WorkbenchView({
   const threadRef = useRef<HTMLDivElement>(null);
   const composerWrapRef = useRef<HTMLDivElement>(null);
   const composerInputRef = useRef<HTMLTextAreaElement>(null);
+  const composerComposingRef = useRef(false);
   const wordCount = draft.trim().length;
   const lastMessageLength = messages.at(-1)?.body.length ?? 0;
   const assistantRunStarts = useMemo(() => findAssistantRunStarts(messages), [messages]);
@@ -1022,8 +1023,23 @@ export function WorkbenchView({
               ref={composerInputRef}
               value={draft}
               onChange={(event) => setDraft(event.target.value)}
+              onCompositionStart={() => {
+                composerComposingRef.current = true;
+              }}
+              onCompositionEnd={() => {
+                composerComposingRef.current = false;
+              }}
+              onBlur={() => {
+                composerComposingRef.current = false;
+              }}
               onKeyDown={(event) => {
                 if (event.key === 'Enter' && !event.shiftKey) {
+                  const nativeEvent = event.nativeEvent;
+                  if (
+                    composerComposingRef.current
+                    || nativeEvent.isComposing
+                    || nativeEvent.keyCode === 229
+                  ) return;
                   event.preventDefault();
                   void submit(event.metaKey || event.ctrlKey);
                 }
