@@ -9,7 +9,7 @@ import {
   ChevronDown,
   ChevronRight,
   CircleStop,
-  Clipboard,
+  Copy,
   CornerDownRight,
   FileDiff,
   FileText,
@@ -516,7 +516,8 @@ function AssistantMessage({
                     );
                   }}
                   aria-label="复制回复"
-                ><Clipboard size={12} /></button>
+                ><Copy size={13} /></button>
+                <time className="response-time">{message.time}</time>
               </div>
             )}
           </div>

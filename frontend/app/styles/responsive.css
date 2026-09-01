@@ -46,7 +46,7 @@
   .session-sidebar { left: 0; bottom: 52px; width: min(300px,86vw); transform: translateX(-100%); }
   .workbench, .surface-view { grid-row: 1; }
   .topbar { padding: 0 10px; }
-  .thread-column { width: calc(100% - 22px); padding-top: 23px; }.user-turn { width: 94%; }.user-steer, .assistant-progress, .assistant-copy, .interaction-card, .subagent-group, .reasoning-disclosure { margin-left: 0; }.execution-rail { margin-left: 14px; }.subagent-run__body { padding-left: 10px; }.subagent-execution { margin-left: 4px; }.model-label { display: none; }.response-actions { opacity: 1; }
+  .thread-column { width: calc(100% - 22px); padding-top: 23px; }.user-turn { width: 94%; }.user-steer, .assistant-progress, .assistant-copy, .interaction-card, .subagent-group, .reasoning-disclosure { margin-left: 0; }.execution-rail { margin-left: 14px; }.subagent-run__body { padding-left: 10px; }.subagent-execution { margin-left: 4px; }.model-label { display: none; }
   .interaction-text-answer { grid-template-columns: 1fr; }.interaction-text-answer > button { justify-self: end; }.interaction-actions--plan { flex-wrap: wrap; }
   .composer-wrap, .observer-wrap { padding-inline: 10px; }.observer-dock { grid-template-columns: 31px minmax(0,1fr); }.observer-dock button { grid-column: 2; justify-self: start; }.model-chip { display: none; }.composer-note { font-size: var(--type-micro); }
   .inspector-panel { bottom: 52px; width: min(320px,92vw); }

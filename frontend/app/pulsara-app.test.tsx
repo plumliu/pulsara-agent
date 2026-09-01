@@ -1252,6 +1252,8 @@ describe('PulsaraApp', () => {
     expect(terminal).toBeTruthy();
     expect(within(intermediate as HTMLElement).queryByRole('button', { name: '复制回复' })).toBeNull();
     expect(within(terminal as HTMLElement).getByRole('button', { name: '复制回复' })).toBeTruthy();
+    expect(within(intermediate as HTMLElement).queryByText('18:11')).toBeNull();
+    expect(within(terminal as HTMLElement).getByText('18:12', { selector: 'time' })).toBeTruthy();
     expect(screen.getAllByRole('button', { name: '复制回复' })).toHaveLength(1);
   });
 
