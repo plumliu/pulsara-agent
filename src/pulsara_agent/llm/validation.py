@@ -28,6 +28,38 @@ def validate_model_context_for_call(
     call: ResolvedModelCall,
     context: LLMContext,
 ) -> ModelContextValidationResult:
+    validate_model_context_shape_for_call(call=call, context=context)
+    fact = call.fact
+    target_fact = call.target.fact
+    estimate = estimate_model_context_for_call(call=call, context=context)
+    if estimate.total_input_tokens > target_fact.context_budget.input_budget_tokens:
+        exc = ModelInputBudgetExceeded(
+            f"model input estimate {estimate.total_input_tokens} exceeds budget "
+            f"{target_fact.context_budget.input_budget_tokens}"
+        )
+        exc.estimate = estimate  # type: ignore[attr-defined]
+        raise exc
+    if fact.context_mode is ModelContextMode.COMPILED and (
+        context.compiler_estimated_input_tokens is None
+        or context.compiler_estimated_input_tokens != estimate.total_input_tokens
+    ):
+        exc = ModelInputEstimateMismatch(
+            "compiled model context is missing its final estimate"
+            if context.compiler_estimated_input_tokens is None
+            else "compiler and pre-send model input estimates differ"
+        )
+        exc.estimate = estimate  # type: ignore[attr-defined]
+        raise exc
+    return ModelContextValidationResult(estimate=estimate)
+
+
+def validate_model_context_shape_for_call(
+    *,
+    call: ResolvedModelCall,
+    context: LLMContext,
+) -> None:
+    """Validate shape, target and transport binding without a token gate."""
+
     fact = call.fact
     target_fact = call.target.fact
     if not context.context_id:
@@ -75,24 +107,3 @@ def validate_model_context_for_call(
         raise ModelTargetBindingMismatch(
             "effective options changed after target resolution"
         )
-
-    estimate = estimate_model_context_for_call(call=call, context=context)
-    if estimate.total_input_tokens > target_fact.context_budget.input_budget_tokens:
-        exc = ModelInputBudgetExceeded(
-            f"model input estimate {estimate.total_input_tokens} exceeds budget "
-            f"{target_fact.context_budget.input_budget_tokens}"
-        )
-        exc.estimate = estimate  # type: ignore[attr-defined]
-        raise exc
-    if fact.context_mode is ModelContextMode.COMPILED and (
-        context.compiler_estimated_input_tokens is None
-        or context.compiler_estimated_input_tokens != estimate.total_input_tokens
-    ):
-        exc = ModelInputEstimateMismatch(
-            "compiled model context is missing its final estimate"
-            if context.compiler_estimated_input_tokens is None
-            else "compiler and pre-send model input estimates differ"
-        )
-        exc.estimate = estimate  # type: ignore[attr-defined]
-        raise exc
-    return ModelContextValidationResult(estimate=estimate)

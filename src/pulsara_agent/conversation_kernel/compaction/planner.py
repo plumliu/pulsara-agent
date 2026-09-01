@@ -26,11 +26,10 @@ from pulsara_agent.conversation_kernel.compaction.contracts import (
     resolved_compaction_headroom_bounds,
 )
 from pulsara_agent.conversation_kernel.compaction.prompt import (
-    build_compaction_snapshot_carrier,
-    freeze_compaction_summary_output,
     parse_compaction_snapshot_carrier,
 )
 from pulsara_agent.llm.input import LLMMessage
+from pulsara_agent.llm.request import FrozenProviderWireInputQuote
 from pulsara_agent.model_input.contracts import (
     ApprovedPlanMaterializationFact,
     CanonicalInputOriginKind,
@@ -408,10 +407,14 @@ def freeze_compaction_source_view(
     compile_binding: ModelInputCompileBinding,
     semantic_projection: FrozenProviderInputAppendSemanticProjection,
     predecessor_epoch_view: FrozenProviderInputEpochView | None,
+    provider_wire_quote: FrozenProviderWireInputQuote,
+    producer_wire_api: str,
 ) -> FrozenCompactionSourceView:
     """Combine existing carriers without creating another executable input."""
 
     compiled = semantic_projection.projected_input
+    if provider_wire_quote.wire_api != producer_wire_api:
+        raise CompactionPlanningError("wire quote belongs to another wire API")
     tools = compile_binding.tool_surface.tool_specs
     if compiled.tools != tools:
         raise CompactionPlanningError("compiled tools differ from the source binding")
@@ -489,6 +492,7 @@ def freeze_compaction_source_view(
         "normal_compile_binding": compile_binding,
         "predecessor_epoch_view": predecessor_epoch_view,
         "provider_projection": projection,
+        "provider_wire_quote": provider_wire_quote,
         "physical_working_set": working,
     }
     return FrozenCompactionSourceView(
@@ -577,11 +581,50 @@ def freeze_tail_and_prefix(
     complete_tool_groups: tuple[CompleteToolGroup, ...],
     retained_group_count: int,
     source_projection: FrozenModelInputSemanticProjection | None = None,
-    summary_request: str | None = None,
+    summary_prefix_message_count: int | None = None,
     deadline_monotonic: float | None = None,
 ) -> tuple[ProtectedTailSelectionFact, ProviderPrefixCutProof]:
     """Freeze one of the closed longest-suffix tail candidates."""
 
+    retained, earliest_id, tail_start, boundary = _retained_tail_coordinates(
+        source_view=source_view,
+        complete_tool_groups=complete_tool_groups,
+        retained_group_count=retained_group_count,
+    )
+    messages = source_view.materialized_messages()
+    if (source_projection is None) != (summary_prefix_message_count is None):
+        raise ValueError("explicit summary boundary inputs are incomplete")
+    if source_projection is not None:
+        safe = dict(
+            _safe_summary_boundaries(
+                source_view=source_view,
+                source_projection=source_projection,
+                maximum_message_count=tail_start,
+                deadline_monotonic=deadline_monotonic,
+            )
+        )
+        assert summary_prefix_message_count is not None
+        selected = safe.get(summary_prefix_message_count)
+        if selected is None:
+            raise CompactionPlanningError("requested summary boundary is not safe")
+        tail_start = summary_prefix_message_count
+        boundary = selected
+    return _freeze_tail_and_prefix_facts(
+        source_view=source_view,
+        messages=messages,
+        retained=retained,
+        earliest_id=earliest_id,
+        tail_start=tail_start,
+        boundary=boundary,
+    )
+
+
+def _retained_tail_coordinates(
+    *,
+    source_view: FrozenCompactionSourceView,
+    complete_tool_groups: tuple[CompleteToolGroup, ...],
+    retained_group_count: int,
+) -> tuple[tuple[CompleteToolGroup, ...], str | None, int, int]:
     if not 0 <= retained_group_count <= len(complete_tool_groups):
         raise ValueError("retained compaction group count is out of bounds")
     retained = (
@@ -607,95 +650,105 @@ def freeze_tail_and_prefix(
         tail_start = len(messages)
         boundary = source_view.exact_safe_canonical_head
         earliest_id = None
-    budgeted = source_projection is not None
-    if budgeted != (summary_request is not None) or budgeted != (
-        deadline_monotonic is not None
+    return retained, earliest_id, tail_start, boundary
+
+
+def _safe_summary_boundaries(
+    *,
+    source_view: FrozenCompactionSourceView,
+    source_projection: FrozenModelInputSemanticProjection,
+    maximum_message_count: int,
+    deadline_monotonic: float | None,
+) -> tuple[tuple[int, int], ...]:
+    """Compute every complete boundary in one suffix-minimum traversal."""
+
+    if deadline_monotonic is not None and monotonic() >= deadline_monotonic:
+        raise TimeoutError("compaction prefix planning deadline expired")
+    messages = source_view.materialized_messages()
+    if (
+        source_projection.messages != messages
+        or source_projection.system_prompt != source_view.materialized_system_prompt()
+        or source_projection.tools
+        != source_view.normal_compile_binding.tool_surface.tool_specs
+        or source_projection.compile_binding_fingerprint
+        != source_view.normal_compile_binding.binding_fingerprint
+        or not 0 <= maximum_message_count <= len(messages)
     ):
-        raise ValueError("budgeted prefix inputs are incomplete")
-    if source_projection is not None:
-        if (
-            source_projection.messages != messages
-            or source_projection.system_prompt
-            != source_view.materialized_system_prompt()
-            or source_projection.tools
-            != source_view.normal_compile_binding.tool_surface.tool_specs
-            or source_projection.compile_binding_fingerprint
-            != source_view.normal_compile_binding.binding_fingerprint
-        ):
+        raise CompactionPlanningError(
+            "budgeted prefix projection differs from its source view"
+        )
+    canonical = source_view.canonical_dispatch_read.compile_snapshot.canonical_input
+    sequence_by_entry = {
+        item.source_entry_id: item.source_entry_sequence
+        for item in canonical.items
+        if item.source_entry_id is not None and item.source_entry_sequence is not None
+    }
+    placements = source_projection.message_placements
+    minimum_message_count = 1
+    predecessor = source_view.predecessor_epoch_view
+    if predecessor is not None:
+        minimum_message_count = len(predecessor.messages)
+        if minimum_message_count < 1:
             raise CompactionPlanningError(
-                "budgeted prefix projection differs from its source view"
+                "installed provider prefix has no materialized messages"
             )
-        assert summary_request is not None
-        assert deadline_monotonic is not None
-        if monotonic() >= deadline_monotonic:
+        if minimum_message_count > maximum_message_count:
+            raise CompactionPlanningError(
+                "retained tail would truncate the installed provider prefix"
+            )
+    suffix_minimum: list[int | None] = [None] * (len(placements) + 1)
+    for index in range(len(placements) - 1, -1, -1):
+        placement = placements[index]
+        sequence = (
+            None
+            if placement.origin_entry_id is None
+            else sequence_by_entry.get(placement.origin_entry_id)
+        )
+        later = suffix_minimum[index + 1]
+        suffix_minimum[index] = (
+            later
+            if sequence is None
+            else sequence
+            if later is None
+            else min(sequence, later)
+        )
+    safe_by_count: dict[int, int] = {}
+    if maximum_message_count == len(messages):
+        safe_by_count[maximum_message_count] = source_view.exact_safe_canonical_head
+    for count in range(minimum_message_count, maximum_message_count + 1):
+        if deadline_monotonic is not None and monotonic() >= deadline_monotonic:
             raise TimeoutError("compaction prefix planning deadline expired")
-        canonical = source_view.canonical_dispatch_read.compile_snapshot.canonical_input
-        sequence_by_entry = {
-            item.source_entry_id: item.source_entry_sequence
-            for item in canonical.items
-            if item.source_entry_id is not None
-            and item.source_entry_sequence is not None
-        }
-        placements = source_projection.message_placements
-        safe: list[tuple[int, int]] = []
-        if tail_start == len(messages):
-            safe.append((tail_start, boundary))
-        for count in range(1, tail_start + 1):
-            placement = placements[count - 1]
-            entry_id = placement.origin_entry_id
-            sequence = None if entry_id is None else sequence_by_entry.get(entry_id)
-            if sequence is None or messages[count - 1].tool_calls:
-                continue
-            if count < len(messages):
-                next_message = messages[count]
-                next_placement = placements[count]
-                if (
-                    next_message.tool_call_id is not None
-                    or next_placement.origin_entry_id == entry_id
-                ):
-                    continue
-            if any(
-                later.origin_entry_id is not None
-                and sequence_by_entry.get(later.origin_entry_id, sequence + 1)
-                <= sequence
-                for later in placements[count:]
+        placement = placements[count - 1]
+        entry_id = placement.origin_entry_id
+        sequence = None if entry_id is None else sequence_by_entry.get(entry_id)
+        if sequence is None or messages[count - 1].tool_calls:
+            continue
+        if count < len(messages):
+            next_message = messages[count]
+            next_placement = placements[count]
+            if (
+                next_message.tool_call_id is not None
+                or next_placement.origin_entry_id == entry_id
             ):
                 continue
-            safe.append((count, sequence))
-        safe_by_count = {count: through for count, through in safe}
-        if tail_start == len(messages):
-            safe_by_count[tail_start] = source_view.exact_safe_canonical_head
-        safe = sorted(safe_by_count.items())
-        if not safe:
-            raise CompactionPlanningError("source view has no safe summary prefix")
-        binding = source_view.normal_compile_binding
+        later_minimum = suffix_minimum[count]
+        if later_minimum is not None and later_minimum <= sequence:
+            continue
+        safe_by_count[count] = sequence
+    if not safe_by_count:
+        raise CompactionPlanningError("source view has no safe summary prefix")
+    return tuple(sorted(safe_by_count.items(), reverse=True))
 
-        def fits(count: int) -> bool:
-            if monotonic() >= deadline_monotonic:
-                raise TimeoutError("compaction prefix planning deadline expired")
-            estimate = binding.estimator.estimate_frozen_input(
-                system_prompt=source_projection.system_prompt,
-                messages=messages[:count] + (LLMMessage.user(summary_request),),
-                tools=source_projection.tools,
-            )
-            return estimate.total_input_tokens <= binding.effective_input_budget_tokens
 
-        low = 0
-        high = len(safe) - 1
-        selected: tuple[int, int] | None = None
-        while low <= high:
-            middle = (low + high) // 2
-            candidate = safe[middle]
-            if fits(candidate[0]):
-                selected = candidate
-                low = middle + 1
-            else:
-                high = middle - 1
-        if selected is None:
-            raise CompactionPlanningError(
-                "no non-empty summary prefix fits the resolved input budget"
-            )
-        tail_start, boundary = selected
+def _freeze_tail_and_prefix_facts(
+    *,
+    source_view: FrozenCompactionSourceView,
+    messages: tuple[LLMMessage, ...],
+    retained: tuple[CompleteToolGroup, ...],
+    earliest_id: str | None,
+    tail_start: int,
+    boundary: int,
+) -> tuple[ProtectedTailSelectionFact, ProviderPrefixCutProof]:
     tail_values = {
         "source_view_fingerprint": source_view.source_view_fingerprint,
         "retained_groups": retained,
@@ -738,6 +791,41 @@ def freeze_tail_and_prefix(
         ),
     )
     return tail, proof
+
+
+def enumerate_safe_summary_prefixes(
+    *,
+    source_view: FrozenCompactionSourceView,
+    complete_tool_groups: tuple[CompleteToolGroup, ...],
+    retained_group_count: int,
+    source_projection: FrozenModelInputSemanticProjection,
+    deadline_monotonic: float | None = None,
+) -> tuple[tuple[ProtectedTailSelectionFact, ProviderPrefixCutProof], ...]:
+    """Return every complete safe prefix, longest first, without token pruning."""
+
+    retained, earliest_id, tail_start, _boundary = _retained_tail_coordinates(
+        source_view=source_view,
+        complete_tool_groups=complete_tool_groups,
+        retained_group_count=retained_group_count,
+    )
+    messages = source_view.materialized_messages()
+    boundaries = _safe_summary_boundaries(
+        source_view=source_view,
+        source_projection=source_projection,
+        maximum_message_count=tail_start,
+        deadline_monotonic=deadline_monotonic,
+    )
+    return tuple(
+        _freeze_tail_and_prefix_facts(
+            source_view=source_view,
+            messages=messages,
+            retained=retained,
+            earliest_id=earliest_id,
+            tail_start=count,
+            boundary=boundary,
+        )
+        for count, boundary in boundaries
+    )
 
 
 def select_recent_human_messages(
@@ -887,7 +975,7 @@ def should_trigger_compaction(
     if force:
         return True
     budget = source_view.normal_compile_binding.effective_input_budget_tokens
-    estimate = source_view.provider_projection.final_estimate.total_input_tokens
+    estimate = source_view.provider_wire_quote.final_wire_estimated_input_tokens
     token_trigger = estimate >= int(budget * policy.auto_trigger_ratio)
     working = source_view.physical_working_set
     headroom_trigger = crosses_compaction_resource_headroom(
@@ -959,81 +1047,6 @@ def validate_compaction_reclaim(
     return reclaim
 
 
-def estimate_unavoidable_compaction_successor_tokens(
-    *,
-    source_view: FrozenCompactionSourceView,
-    tail: ProtectedTailSelectionFact,
-    recent_user_messages: tuple[RecentHumanMessageProof, ...],
-    continuation_mode: CompactionContinuationMode,
-    active_request: FrozenCompactionActiveRequest | None,
-    deadline_monotonic: float,
-) -> int:
-    """Quote a conservative lower bound before opening the summary provider.
-
-    Protected canonical human messages cannot be degraded by the compiler.  A
-    candidate whose minimal non-empty snapshot plus those exact messages is
-    already over the post target can therefore never become admissible,
-    regardless of how concise the summary is or how aggressively optional
-    runtime observations and ToolResults degrade.  Rejecting that candidate
-    before provider open lets the longest-suffix planner continue from
-    ``3 -> 2 -> 1 -> 0`` without inventing a maximum summary size.
-
-    This deliberately omits SYSTEM, tools, replaceable observations,
-    assistant messages and ToolResults.  It is a lower-bound proof, not a
-    substitute for the final exact cold-epoch assembly.
-    """
-
-    if deadline_monotonic <= 0:
-        raise ValueError("compaction candidate deadline is invalid")
-    if monotonic() >= deadline_monotonic:
-        raise TimeoutError("compaction planning deadline expired")
-    if tail.source_view_fingerprint != source_view.source_view_fingerprint:
-        raise ValueError("compaction tail belongs to another source view")
-
-    canonical = source_view.canonical_dispatch_read.compile_snapshot.canonical_input
-    unavoidable_messages = tuple(
-        LLMMessage.user(item.text)
-        for item in canonical.items
-        if item.item_kind is FrozenProviderInputItemKind.USER
-        and item.source_entry_sequence is not None
-        and item.source_entry_sequence > tail.source_through_sequence
-    )
-    minimal_summary = freeze_compaction_summary_output(
-        "x",
-        maximum_utf8_bytes=1,
-    )
-    carrier = build_compaction_snapshot_carrier(
-        summary=minimal_summary,
-        recent_user_messages=tuple(item.text for item in recent_user_messages),
-        continuation_mode=continuation_mode,
-        active_request=active_request,
-    )
-    messages = (LLMMessage.user(carrier.body.decode("utf-8")), *unavoidable_messages)
-    estimator = source_view.normal_compile_binding.estimator
-
-    def checkpoint() -> None:
-        if monotonic() >= deadline_monotonic:
-            raise TimeoutError("compaction planning deadline expired")
-
-    cooperative = getattr(estimator, "estimate_frozen_input_cooperative", None)
-    if callable(cooperative):
-        estimate = cooperative(
-            system_prompt="",
-            messages=messages,
-            tools=(),
-            checkpoint=checkpoint,
-        )
-    else:
-        checkpoint()
-        estimate = estimator.estimate_frozen_input(
-            system_prompt="",
-            messages=messages,
-            tools=(),
-        )
-        checkpoint()
-    return estimate.total_input_tokens
-
-
 def _logical_input_bytes(
     system_prompt: str,
     messages: tuple[LLMMessage, ...],
@@ -1051,7 +1064,7 @@ __all__ = [
     "CompactionReclaimUnavailable",
     "crosses_compaction_resource_headroom",
     "enumerate_complete_tool_groups",
-    "estimate_unavoidable_compaction_successor_tokens",
+    "enumerate_safe_summary_prefixes",
     "freeze_compaction_continuation",
     "freeze_compaction_source_view",
     "freeze_tail_and_prefix",

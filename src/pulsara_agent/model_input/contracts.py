@@ -316,6 +316,17 @@ class ModelInputTokenEstimator(Protocol):
 
     def estimate_text(self, text: str) -> int: ...
 
+    def estimate_json(self, value: object) -> int: ...
+
+    def estimate_wire_json_component(self, value: object) -> int: ...
+
+    def estimate_final_wire_json_components(
+        self,
+        *,
+        fixed_context: object,
+        ordered_input_items: tuple[object, ...],
+    ) -> int: ...
+
     def estimate_message(self, message: LLMMessage) -> int: ...
 
     def estimate_frozen_tool_spec(self, tool: FrozenToolSpec) -> int: ...
@@ -327,6 +338,22 @@ class ModelInputTokenEstimator(Protocol):
         messages: tuple[LLMMessage, ...],
         tools: tuple[FrozenToolSpec, ...],
     ) -> TokenEstimate: ...
+
+
+class ProviderWireSemanticInput(Protocol):
+    """The complete structural input needed by provider-wire planning.
+
+    Both executable compiler output and non-executable compaction carriers
+    satisfy this seam.  No continuity or provider-open authority is implied.
+    """
+
+    canonical_input_identity: CanonicalModelInputIdentity
+    system_prompt: str
+    messages: tuple[LLMMessage, ...]
+    message_placements: tuple["FrozenCompiledMessagePlacement", ...]
+    tools: tuple[FrozenToolSpec, ...]
+    final_estimate: TokenEstimate
+    compile_binding_fingerprint: str
 
 
 @dataclass(frozen=True, slots=True)

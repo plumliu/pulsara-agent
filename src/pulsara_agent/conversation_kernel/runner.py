@@ -42,9 +42,11 @@ from pulsara_agent.conversation_kernel.compaction.runtime import (
     HostCompactionRuntimeOwner,
 )
 from pulsara_agent.conversation_kernel.compaction.coordinator import (
+    AutomaticCompactionTriggerCandidate,
     CompactionAttemptToken,
     CompactionCoordinator,
     CompactionExecutionResult,
+    OrdinaryPrecompileDecision,
     PreparedCompactSessionStart,
     PreparedCompactSessionStartFacts,
     SessionStartCompactBoundaryPort,
@@ -895,6 +897,8 @@ class ConversationKernelRunner:
                 dispatch = successor_dispatch
                 successor_dispatch = None
                 automatic_compaction_decided = dispatch is not None
+                reusable_wire_observation = None
+                wire_decision = None
                 if dispatch is None:
                     headroom_admission = None
                     if self.compaction.automatic_allowed(
@@ -921,21 +925,32 @@ class ConversationKernelRunner:
                             scope_kind=intent.scope_kind,
                             scope_subagent_task_id=intent.scope_subagent_task_id,
                             headroom_admission=headroom_admission,
+                            deadline=planning_deadline,
                         )
-                        headroom_admission = precompile.ordinary_admission
-                        prepared_compaction = precompile.compaction
-                        if prepared_compaction is not None:
+                        if isinstance(
+                            precompile,
+                            OrdinaryPrecompileDecision,
+                        ):
+                            headroom_admission = precompile.ordinary_admission
+                            reusable_wire_observation = (
+                                precompile.reusable_wire_observation
+                            )
+                        else:
+                            headroom_admission = None
+                        if isinstance(
+                            precompile,
+                            AutomaticCompactionTriggerCandidate,
+                        ):
                             automatic_compaction_decided = True
                             compaction = await self.compaction.execute_active(
                                 turn_id=turn_id,
                                 model_call_index=model_call_count,
                                 inherited_memory_use_policy=(current_memory_use_policy),
-                                trigger=auto_trigger,
+                                trigger=precompile.trigger,
                                 force=False,
                                 manual_request=None,
                                 scope_kind=intent.scope_kind,
                                 scope_subagent_task_id=(intent.scope_subagent_task_id),
-                                prepared_source=prepared_compaction,
                                 hook_scope=self._hook_scope,
                                 session_start_compact_port=(
                                     self._compact_session_start_port(intent)
@@ -963,13 +978,13 @@ class ConversationKernelRunner:
                                     deadline=planning_deadline,
                                 )
                             )
-                        session_start_facts = (
-                            await self._provider_dispatch.read_compile_snapshot(
-                                headroom_admission.handle.cut,
-                                deadline=planning_deadline,
-                            )
-                        )
                         try:
+                            session_start_facts = (
+                                await self._provider_dispatch.read_compile_snapshot(
+                                    headroom_admission.cut,
+                                    deadline=planning_deadline,
+                                )
+                            )
                             session_start_context = await self._dispatch_initial_session_start(
                                 intent,
                                 canonical_facts=session_start_facts,
@@ -980,19 +995,23 @@ class ConversationKernelRunner:
                             )
                         except BaseException:
                             headroom_admission.close()
+                            if reusable_wire_observation is not None:
+                                reusable_wire_observation.discard()
+                                reusable_wire_observation = None
                             raise
                     while True:
                         try:
+                            admission_handle = (
+                                None
+                                if headroom_admission is None
+                                else headroom_admission.take_handle()
+                            )
                             prepared_dispatch = await self._provider_dispatch.prepare(
                                 turn_id=turn_id,
                                 model_call_index=model_call_count,
                                 inherited_memory_use_policy=(current_memory_use_policy),
                                 deadline=planning_deadline,
-                                existing_handle=(
-                                    None
-                                    if headroom_admission is None
-                                    else headroom_admission.handle
-                                ),
+                                existing_handle=admission_handle,
                                 headroom_preflight_override=(
                                     None
                                     if headroom_admission is None
@@ -1011,99 +1030,120 @@ class ConversationKernelRunner:
                                     "normal provider preparation returned a projection"
                                 )
                             dispatch = prepared_dispatch
+                            headroom_admission = None
                             session_start_context = None
                             break
                         except PreparedSteerPlanStale:
                             headroom_admission = None
+                            if reusable_wire_observation is not None:
+                                reusable_wire_observation.discard()
+                                reusable_wire_observation = None
                             if monotonic() >= planning_deadline:
                                 raise
                             await asyncio.sleep(0)
                         except BaseException:
                             if session_start_context is not None:
                                 session_start_context.retire()
+                            if reusable_wire_observation is not None:
+                                reusable_wire_observation.discard()
+                                reusable_wire_observation = None
                             raise
                 else:
                     if (
                         dispatch.canonical_facts.canonical_input.identity.turn_id
                         != turn_id
                     ):
-                        dispatch.handle.close()
-                        dispatch.close_surface_borrow()
+                        dispatch.close()
                         raise ConversationKernelConflict(
                             "compaction successor belongs to another turn"
                         )
-                if (
-                    model_call_count == 1
-                    and expected_first_model_identity is not None
-                    and dispatch.prepared_call.call.target.fact.model_id
-                    != expected_first_model_identity
-                ):
-                    dispatch.handle.close()
-                    dispatch.close_surface_borrow()
-                    raise ConversationKernelConflict(
-                        "child first provider target drifted from launch carrier"
-                    )
-                auto_trigger = (
-                    CompactionTrigger.MID_TURN_FOLLOWUP
-                    if completed_tool_batch
-                    else CompactionTrigger.AUTO_ACTIVE_CONTEXT
-                )
-                if (
-                    not automatic_compaction_decided
-                    and self.compaction.automatic_allowed(
-                        scope_kind=intent.scope_kind,
-                        scope_subagent_task_id=intent.scope_subagent_task_id,
-                    )
-                    and self.compaction.dispatch_crosses_threshold(dispatch)
-                ):
-                    dispatch.handle.close()
-                    dispatch.close_for_canonical_replan()
-                    compaction = await self.compaction.execute_active(
-                        turn_id=turn_id,
-                        model_call_index=model_call_count,
-                        inherited_memory_use_policy=current_memory_use_policy,
-                        trigger=auto_trigger,
-                        force=False,
-                        manual_request=None,
-                        scope_kind=intent.scope_kind,
-                        scope_subagent_task_id=intent.scope_subagent_task_id,
-                        hook_scope=self._hook_scope,
-                        session_start_compact_port=(
-                            self._compact_session_start_port(intent)
-                        ),
-                        session_start_boundary_port=(
-                            self._compact_session_start_boundary_port(intent)
-                        ),
-                    )
-                    self._require_active_compaction_continuation(compaction)
-                    if compaction.successor_dispatch is not None:
-                        model_call_count -= 1
-                        successor_dispatch = compaction.successor_dispatch
-                        completed_tool_batch = False
-                        continue
-                    planning_deadline = self._planning_deadline()
-                    prepared_dispatch = await self._provider_dispatch.prepare(
-                        turn_id=turn_id,
-                        model_call_index=model_call_count,
-                        inherited_memory_use_policy=current_memory_use_policy,
-                        deadline=planning_deadline,
-                    )
-                    if not isinstance(prepared_dispatch, PreparedProviderDispatch):
-                        raise RuntimeError(
-                            "ordinary post-compaction decision is not installable"
+                try:
+                    if (
+                        model_call_count == 1
+                        and expected_first_model_identity is not None
+                        and dispatch.prepared_call.call.target.fact.model_id
+                        != expected_first_model_identity
+                    ):
+                        if reusable_wire_observation is not None:
+                            reusable_wire_observation.discard()
+                            reusable_wire_observation = None
+                        dispatch.close()
+                        raise ConversationKernelConflict(
+                            "child first provider target drifted from launch carrier"
                         )
-                    dispatch = prepared_dispatch
+                    auto_trigger = (
+                        CompactionTrigger.MID_TURN_FOLLOWUP
+                        if completed_tool_batch
+                        else CompactionTrigger.AUTO_ACTIVE_CONTEXT
+                    )
+                    if dispatch.installed_provider_open is None:
+                        wire_decision = await self.compaction.measure_dispatch_wire(
+                            dispatch,
+                            deadline=planning_deadline,
+                            reusable_observation=reusable_wire_observation,
+                        )
+                        reusable_wire_observation = None
+                    if (
+                        not automatic_compaction_decided
+                        and self.compaction.automatic_allowed(
+                            scope_kind=intent.scope_kind,
+                            scope_subagent_task_id=intent.scope_subagent_task_id,
+                        )
+                        and wire_decision is not None
+                        and self.compaction.wire_decision_crosses_automatic_threshold(
+                            dispatch, wire_decision
+                        )
+                    ):
+                        dispatch.close_for_canonical_replan()
+                        compaction = await self.compaction.execute_active(
+                            turn_id=turn_id,
+                            model_call_index=model_call_count,
+                            inherited_memory_use_policy=current_memory_use_policy,
+                            trigger=auto_trigger,
+                            force=False,
+                            manual_request=None,
+                            scope_kind=intent.scope_kind,
+                            scope_subagent_task_id=intent.scope_subagent_task_id,
+                            hook_scope=self._hook_scope,
+                            session_start_compact_port=(
+                                self._compact_session_start_port(intent)
+                            ),
+                            session_start_boundary_port=(
+                                self._compact_session_start_boundary_port(intent)
+                            ),
+                        )
+                        self._require_active_compaction_continuation(compaction)
+                        if compaction.successor_dispatch is not None:
+                            model_call_count -= 1
+                            successor_dispatch = compaction.successor_dispatch
+                            completed_tool_batch = False
+                            continue
+                        planning_deadline = self._planning_deadline()
+                        prepared_dispatch = await self._provider_dispatch.prepare(
+                            turn_id=turn_id,
+                            model_call_index=model_call_count,
+                            inherited_memory_use_policy=current_memory_use_policy,
+                            deadline=planning_deadline,
+                        )
+                        if not isinstance(prepared_dispatch, PreparedProviderDispatch):
+                            raise RuntimeError(
+                                "ordinary post-compaction decision is not installable"
+                            )
+                        dispatch = prepared_dispatch
+                        wire_decision = await self.compaction.measure_dispatch_wire(
+                            dispatch,
+                            deadline=planning_deadline,
+                        )
+                except BaseException:
+                    if dispatch.owns_execution_authority:
+                        dispatch.close()
+                    raise
                 completed_tool_batch = False
-                prepared = dispatch.handle
-                if dispatch.surface_borrow is None or not isinstance(
-                    dispatch.prepared_call, PreparedKernelModelCall
-                ):
-                    dispatch.handle.close()
-                    dispatch.close_surface_borrow()
+                if not isinstance(dispatch.prepared_call, PreparedKernelModelCall):
+                    dispatch.close()
                     raise RuntimeError(
                         "provider execution lacks an execution-backed surface"
                     )
-                active_surface_borrow = dispatch.surface_borrow
                 try:
                     canonical_facts = dispatch.canonical_facts
                     canonical_input = canonical_facts.canonical_input
@@ -1123,17 +1163,29 @@ class ConversationKernelRunner:
                     provider_open = dispatch.installed_provider_open
                     if provider_open is None:
                         try:
+                            if wire_decision is None:
+                                wire_decision = (
+                                    await self.compaction.measure_dispatch_wire(
+                                        dispatch,
+                                        deadline=planning_deadline,
+                                    )
+                                )
+                            prepared_wire = self._provider_dispatch.bind_prepared_executable_wire_input(
+                                owner_dispatch=dispatch,
+                                decision=wire_decision,
+                                deadline=planning_deadline,
+                            )
                             provider_open = (
                                 await self._provider_dispatch.install_provider_open(
                                     dispatch=dispatch,
+                                    prepared_wire=prepared_wire,
                                     turn_id=turn_id,
                                     model_call_index=model_call_count,
                                     deadline=planning_deadline,
                                 )
                             )
                         finally:
-                            if dispatch.hook_context_reservation is not None:
-                                dispatch.hook_context_reservation.retire()
+                            dispatch.retire_hook_context_reservation()
                     request = provider_open.request
                     execution = provider_open.execution
                     permit = provider_open.permit
@@ -1245,8 +1297,7 @@ class ConversationKernelRunner:
                     root_answer_fenced = False
                     if (
                         complete_turn
-                        and identity.conversation_scope_kind
-                        is ModelInputScopeKind.ROOT
+                        and identity.conversation_scope_kind is ModelInputScopeKind.ROOT
                         and self._subagent_runtime is not None
                     ):
                         pending_completion = (
@@ -1279,8 +1330,10 @@ class ConversationKernelRunner:
                         accepted = await self._assistant_settlements.settle(settlement)
                     except BaseException:
                         if root_answer_fenced and self._subagent_runtime is not None:
-                            await self._subagent_runtime.settle_root_completion_delivery(
-                                turn_id, turn_completed=False
+                            await (
+                                self._subagent_runtime.settle_root_completion_delivery(
+                                    turn_id, turn_completed=False
+                                )
                             )
                         if completion_prepared is not None:
                             await self._subagent_runtime.finish_completion(
@@ -1327,7 +1380,7 @@ class ConversationKernelRunner:
                         proposed_entry_id=entry_id,
                     )
                 finally:
-                    prepared.close()
+                    active_surface_borrow = dispatch.finish_model_operation()
                 if not calls and accepted.turn_completed:
                     active_surface_borrow.close()
                     active_surface_borrow = None
@@ -1438,8 +1491,7 @@ class ConversationKernelRunner:
                 completed_tool_batch = True
         except BaseException as error:
             if successor_dispatch is not None:
-                successor_dispatch.handle.close()
-                successor_dispatch.close_surface_borrow()
+                successor_dispatch.close()
             if active_surface_borrow is not None:
                 active_surface_borrow.close()
                 active_surface_borrow = None

@@ -44,6 +44,7 @@ from pulsara_agent.model_input.provider_replay import (
 )
 from pulsara_agent.llm.estimator import TokenEstimate
 from pulsara_agent.llm.input import LLMMessage
+from pulsara_agent.llm.request import FrozenProviderWireInputQuote
 from pulsara_agent.primitives.context import canonical_json_bytes, context_fingerprint
 
 
@@ -289,10 +290,7 @@ class ColdRebuildCompactionProjection:
     logical_utf8_bytes: int
 
     def __post_init__(self) -> None:
-        if (
-            not self.system_prompt
-            or self.logical_utf8_bytes < 0
-        ):
+        if not self.system_prompt or self.logical_utf8_bytes < 0:
             raise ValueError("cold compaction projection is invalid")
 
 
@@ -327,9 +325,7 @@ class ResolvedCompactionHeadroomBounds:
         values = {
             "maximum_canonical_items": self.maximum_canonical_items,
             "maximum_canonical_utf8_bytes": self.maximum_canonical_utf8_bytes,
-            "maximum_epoch_logical_utf8_bytes": (
-                self.maximum_epoch_logical_utf8_bytes
-            ),
+            "maximum_epoch_logical_utf8_bytes": (self.maximum_epoch_logical_utf8_bytes),
             "reserved_canonical_items": self.reserved_canonical_items,
             "reserved_canonical_utf8_bytes": self.reserved_canonical_utf8_bytes,
             "reserved_epoch_logical_utf8_bytes": (
@@ -392,11 +388,14 @@ class CompactionPhysicalWorkingSetReport:
     resolved_hard_bound_set_fingerprint: str
 
     def __post_init__(self) -> None:
-        if min(
-            self.post_base_item_count,
-            self.post_base_canonical_utf8_bytes,
-            self.continuity_epoch_logical_utf8_bytes,
-        ) < 0:
+        if (
+            min(
+                self.post_base_item_count,
+                self.post_base_canonical_utf8_bytes,
+                self.continuity_epoch_logical_utf8_bytes,
+            )
+            < 0
+        ):
             raise ValueError("compaction working-set report is invalid")
 
 
@@ -485,7 +484,9 @@ def _compaction_projection_identity_digest(
             "pulsara.compatible-append-compaction-projection.v1",
             {
                 "predecessor": (
-                    None if predecessor is None else predecessor.semantic_prefix_fingerprint
+                    None
+                    if predecessor is None
+                    else predecessor.semantic_prefix_fingerprint
                 ),
                 "append": provider_input_prefix_fingerprint(
                     system_prompt="", tools=(), messages=projection.append_only_messages
@@ -530,6 +531,7 @@ class FrozenCompactionSourceView:
     normal_compile_binding: ModelInputCompileBinding
     predecessor_epoch_view: FrozenProviderInputEpochView | None = field(repr=False)
     provider_projection: FrozenCompactionProviderProjection = field(repr=False)
+    provider_wire_quote: FrozenProviderWireInputQuote
     physical_working_set: CompactionPhysicalWorkingSetReport
     source_view_fingerprint: str
 
@@ -554,6 +556,15 @@ class FrozenCompactionSourceView:
             is not self.normal_compile_binding.tool_surface.conversation_scope_kind
         ):
             raise ValueError("compaction source tool surface belongs to another scope")
+        if (
+            self.provider_wire_quote.estimator_fingerprint
+            != self.normal_compile_binding.estimator_fingerprint
+            or self.provider_wire_quote.effective_input_budget_tokens
+            != self.normal_compile_binding.effective_input_budget_tokens
+            or self.provider_wire_quote.semantic_estimated_input_tokens
+            != self.provider_projection.final_estimate.total_input_tokens
+        ):
+            raise ValueError("compaction source wire quote does not exact-join")
         expected = context_fingerprint(
             "pulsara.frozen-compaction-source-view.v1",
             {
@@ -579,17 +590,13 @@ class FrozenCompactionSourceView:
             raise ValueError("compaction source view fingerprint mismatch")
 
     def materialized_system_prompt(self) -> str:
-        if isinstance(
-            self.provider_projection, CompatibleAppendCompactionProjection
-        ):
+        if isinstance(self.provider_projection, CompatibleAppendCompactionProjection):
             assert self.predecessor_epoch_view is not None
             return self.predecessor_epoch_view.system_prompt
         return self.provider_projection.system_prompt
 
     def materialized_messages(self) -> tuple[LLMMessage, ...]:
-        if isinstance(
-            self.provider_projection, CompatibleAppendCompactionProjection
-        ):
+        if isinstance(self.provider_projection, CompatibleAppendCompactionProjection):
             assert self.predecessor_epoch_view is not None
             return (
                 self.predecessor_epoch_view.messages
@@ -655,7 +662,9 @@ class CompactionSourceLineageBase:
         ):
             raise ValueError("compaction lineage base is incomplete")
         is_genesis = self.kind is CompactionLineageBaseKind.FULL_HISTORY_GENESIS
-        if is_genesis != (self.snapshot_id is None and self.prior_source_digest is None):
+        if is_genesis != (
+            self.snapshot_id is None and self.prior_source_digest is None
+        ):
             raise ValueError("compaction lineage base union is invalid")
         if is_genesis and self.effective_materialization_lineage_floor != 0:
             raise ValueError("FULL_HISTORY lineage must start at zero")
@@ -695,7 +704,8 @@ class FrozenCompactionCanonicalRange:
     def __post_init__(self) -> None:
         if (
             self.effective_materialization_lineage_floor < 0
-            or self.source_through_sequence < self.effective_materialization_lineage_floor
+            or self.source_through_sequence
+            < self.effective_materialization_lineage_floor
             or self.canonical_utf8_bytes < 0
         ):
             raise ValueError("compaction canonical range coordinate is invalid")
@@ -725,8 +735,7 @@ class FrozenCompactionCanonicalRead:
             identity.session_id != self.scope.session_id
             or identity.turn_id != self.scope.turn_id
             or identity.conversation_scope_kind is not self.scope.scope_kind
-            or identity.scope_subagent_task_id
-            != self.scope.scope_subagent_task_id
+            or identity.scope_subagent_task_id != self.scope.scope_subagent_task_id
             or self.lineage_base.scope != self.scope
             or self.safe_head_range.scope != self.scope
             or self.safe_head_range.source_through_sequence
@@ -1082,8 +1091,7 @@ class ExpectedCompactionPredecessorRevision:
             not self.binding_revision_id
             or self.revision_ordinal < 0
             or self.source_through_sequence < 0
-            or (self.base_kind == "FULL_HISTORY")
-            != (self.context_snapshot_id is None)
+            or (self.base_kind == "FULL_HISTORY") != (self.context_snapshot_id is None)
         ):
             raise ValueError("compaction predecessor revision is invalid")
 

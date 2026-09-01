@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import replace
+from dataclasses import fields, replace
 from datetime import datetime, timezone
 import json
 import os
@@ -27,6 +27,7 @@ from pulsara_agent.conversation_kernel.live import (
     LiveSettlementKind,
 )
 from pulsara_agent.conversation_kernel.context_sources import (
+    ContextSourceRegistry,
     build_memory_context_source,
 )
 from pulsara_agent.conversation_kernel.cold_epoch import (
@@ -44,6 +45,12 @@ from pulsara_agent.conversation_kernel.compaction.contracts import (
     CompactionDisposition,
     CompactionTrigger,
     ResolvedCompactionPolicy,
+)
+from pulsara_agent.conversation_kernel.compaction.coordinator import (
+    AutomaticCompactionTriggerCandidate,
+)
+from pulsara_agent.conversation_kernel.provider_dispatch import (
+    PreparedWireMeasurementDecision,
 )
 from pulsara_agent.conversation_kernel.compaction.prompt import (
     compaction_summary_request,
@@ -101,15 +108,20 @@ from pulsara_agent.conversation_kernel.todo_runtime import (
 )
 from pulsara_agent.conversation_kernel.vocabulary import LiveEventType
 from pulsara_agent.llm.input import MessageRole
-from pulsara_agent.primitives.context import freeze_json, thaw_json
+from pulsara_agent.primitives.context import context_fingerprint, freeze_json, thaw_json
 from pulsara_agent.llm.provider import (
     ProviderProfile,
     ThinkingProfile,
     ThinkingReplayPolicy,
 )
 from pulsara_agent.llm.result import TransportUsageReport
+from pulsara_agent.primitives.model_call import ModelCallPurpose, ModelTokenUsageFact
 from pulsara_agent.model_input.contracts import (
     CanonicalInputOriginKind,
+    ContextBindingBaseKind,
+    ContextRenderMode,
+    ContextRenderVariant,
+    ContextSourceCandidate,
     ContextSourceKind,
     ModelInputScopeKind,
     ModelInputCompileFailureKind,
@@ -315,13 +327,18 @@ class _RecordingColdEpochAssembler:
         self.semantic_seeds.append(kwargs["seed"])
         return self._delegate.prepare_semantic(**kwargs)
 
-    def finalize_wire(self, prepared, **kwargs):
+    def bind_prepared_wire(self, prepared, **kwargs):
         self.finalized += 1
-        return self._delegate.finalize_wire(prepared, **kwargs)
+        return self._delegate.bind_prepared_wire(prepared, **kwargs)
 
 
 class _CompactionSummaryExecution:
-    def __init__(self, value: str | list[object]) -> None:
+    def __init__(
+        self,
+        value: str | list[object],
+        *,
+        usage: TransportUsageReport | None = None,
+    ) -> None:
         if isinstance(value, str):
             block_id = "compaction-summary:text"
             self._items = [
@@ -339,7 +356,7 @@ class _CompactionSummaryExecution:
         self._items.append(
             ProviderStreamTerminal(
                 terminal_kind=ProviderNormalizedTerminalKind.COMPLETED,
-                usage=TransportUsageReport(usage_status="missing", usage=None),
+                usage=usage or TransportUsageReport(usage_status="missing", usage=None),
             )
         )
 
@@ -357,16 +374,42 @@ class _CompactionSummaryExecution:
 
 
 class _CompactionSummaryTransport:
-    def __init__(self, text: str | list[list[object] | str]) -> None:
+    def __init__(
+        self,
+        text: str | list[list[object] | str],
+        *,
+        usage_modes: list[str] | None = None,
+    ) -> None:
         self._scripts = list(text) if isinstance(text, list) else [text]
+        self._usage_modes = list(usage_modes or ())
         self.contexts: list[object] = []
+        self.usage_reports: list[TransportUsageReport] = []
 
     def open_stream(self, *, call, context):
         del call
         self.contexts.append(context)
         if not self._scripts:
             raise AssertionError("unexpected extra compaction summary request")
-        return _CompactionSummaryExecution(self._scripts.pop(0))
+        mode = self._usage_modes.pop(0) if self._usage_modes else "missing"
+        quote = context.provider_wire_input_plan.quote
+        if mode == "missing":
+            usage = TransportUsageReport(usage_status="missing", usage=None)
+        else:
+            input_tokens = quote.final_wire_estimated_input_tokens
+            if mode == "reported_different":
+                input_tokens += 12_345
+            cached_tokens = input_tokens // 2 if mode == "reported_cached" else None
+            usage = TransportUsageReport(
+                usage_status="reported",
+                usage=ModelTokenUsageFact(
+                    input_tokens=input_tokens,
+                    cached_input_tokens=cached_tokens,
+                    output_tokens=7,
+                    total_tokens=input_tokens + 7,
+                ),
+            )
+        self.usage_reports.append(usage)
+        return _CompactionSummaryExecution(self._scripts.pop(0), usage=usage)
 
 
 class _BlockingCompactionSummaryExecution:
@@ -405,9 +448,14 @@ class _CompactionScriptedModel(_ScriptedModel):
         self,
         calls: list[list[object]],
         summary: str | list[list[object] | str],
+        *,
+        summary_usage_modes: list[str] | None = None,
     ) -> None:
         super().__init__(calls)
-        self.summary_transport = _CompactionSummaryTransport(summary)
+        self.summary_transport = _CompactionSummaryTransport(
+            summary,
+            usage_modes=summary_usage_modes,
+        )
 
     def resolve_compaction_summary_call(self, **kwargs):
         call = super().resolve_compaction_summary_call(**kwargs)
@@ -457,6 +505,18 @@ def _context_snapshot_payload(request) -> dict[str, object]:
     return value
 
 
+def _hook_context_bodies(request) -> tuple[str, ...]:
+    return tuple(
+        decoded.body
+        for message in request.compiled_input.messages
+        if message.role is MessageRole.USER
+        and message.content
+        and "pulsara_runtime_observation" in message.content[0]
+        for decoded in (decode_runtime_observation(message),)
+        if decoded.source_kind is ContextSourceKind.HOOK_CONTEXT
+    )
+
+
 class _NativePlanningDeadlineModel(_ScriptedModel):
     def freeze_native_tool_eligibility(self, **kwargs):
         del kwargs
@@ -473,6 +533,70 @@ class _ChangingRegistryCollector(StaticContextSourceCollector):
         if self._reads == 1:
             return super().registry_fingerprint
         return "sha256:" + ("0" * 64)
+
+
+class _RecordingHookReservation:
+    def __init__(self) -> None:
+        self.retire_calls = 0
+
+    def retire(self) -> None:
+        self.retire_calls += 1
+        if self.retire_calls > 1:
+            raise AssertionError("Hook reservation was retired more than once")
+
+
+class _PostCompactionHookContextCollector(StaticContextSourceCollector):
+    def __init__(self, text: str) -> None:
+        self._text = text
+        self.reservations: list[_RecordingHookReservation] = []
+
+    def freeze_hook_context_source(self, **_kwargs: object):
+        binding = ContextSourceRegistry().binding(ContextSourceKind.HOOK_CONTEXT)
+        variants = tuple(
+            ContextRenderVariant(
+                mode,
+                text,
+                len(text.encode("utf-8")),
+                context_fingerprint(
+                    "context-render-variant:v1",
+                    {"mode": mode.value, "text": text},
+                ),
+            )
+            for mode, text in (
+                (ContextRenderMode.FULL, self._text),
+                (ContextRenderMode.COMPACT, self._text),
+            )
+        )
+        instance_id = "context-source:hook-context:test"
+        semantic = context_fingerprint(
+            "context-source-candidate:v1",
+            {
+                "source_kind": ContextSourceKind.HOOK_CONTEXT.value,
+                "source_instance_id": instance_id,
+                "source_contract_fingerprint": binding.contract_fingerprint,
+                "variants": tuple(item.semantic_fingerprint for item in variants),
+            },
+        )
+        candidate = ContextSourceCandidate(
+            source_kind=ContextSourceKind.HOOK_CONTEXT,
+            source_instance_id=instance_id,
+            source_contract_version=binding.contract_version,
+            source_contract_fingerprint=binding.contract_fingerprint,
+            source_semantic_fingerprint=semantic,
+            channel=binding.channel,
+            trust_class=binding.trust,
+            budget_class=binding.budget,
+            placement_ordinal=binding.placement,
+            degradation_priority=binding.degradation,
+            variants=variants,
+            lifecycle=binding.lifecycle,
+            domain_semantic_fingerprint=context_fingerprint(
+                "test:hook-context-domain:v1", self._text
+            ),
+        )
+        reservation = _RecordingHookReservation()
+        self.reservations.append(reservation)
+        return candidate, reservation
 
 
 class _FailingOperationalExtension:
@@ -497,6 +621,27 @@ class _RevocableStructuredToolPort(StructuredToolPort):
             return original_validate(current, tool_name)
 
         borrow._validate = validate
+        return borrow
+
+
+class _RecordingBorrowToolPort(StructuredToolPort):
+    def __init__(self, delegate: object, *, tool_names: tuple[str, ...] = ()) -> None:
+        super().__init__(delegate, tool_names=tool_names)
+        self.release_calls: list[int] = []
+
+    def borrow_tool_surface(self, prepared):
+        borrow = super().borrow_tool_surface(prepared)
+        original_release = borrow._release
+        record_index = len(self.release_calls)
+        self.release_calls.append(0)
+
+        def release(current):
+            self.release_calls[record_index] += 1
+            if self.release_calls[record_index] > 1:
+                raise AssertionError("tool surface borrow released more than once")
+            original_release(current)
+
+        borrow._release = release
         return borrow
 
 
@@ -965,6 +1110,54 @@ class _SequencedDirectKernelModel(DirectKernelModelPort):
         )
 
 
+class _CompactionSequencedDirectKernelModel(_SequencedDirectKernelModel):
+    def __init__(
+        self,
+        *,
+        config,
+        scripts: tuple[tuple[dict[str, object], ...], ...],
+        summary: str,
+    ) -> None:
+        super().__init__(config=config, scripts=scripts)
+        self.summary_transport = _CompactionSummaryTransport(summary)
+        self._next_script = 0
+
+    def preflight_execution(
+        self,
+        request,
+        *,
+        append_candidate,
+        install_authority,
+    ):
+        self.requests.append(request)
+        adapter = self._registry.get(
+            request.prepared_call.call.target.model_profile.api
+        )._adapter
+        script = list(self._scripts[self._next_script])
+        self._next_script += 1
+        if request.prepared_call.call.target.model_profile.api == (
+            "openai_chat_completions"
+        ):
+            adapter._mock_chunks = script
+        else:
+            adapter._mock_events = script
+        return DirectKernelModelPort.preflight_execution(
+            self,
+            request,
+            append_candidate=append_candidate,
+            install_authority=install_authority,
+        )
+
+    def resolve_compaction_summary_call(self, **kwargs):
+        call = super().resolve_compaction_summary_call(**kwargs)
+        self.summary_transport.binding_id = call.target.transport.binding_id
+        self.summary_transport.contract_version = call.target.transport.contract_version
+        return replace(
+            call,
+            target=replace(call.target, transport=self.summary_transport),
+        )
+
+
 class _NearBoundReplayContinuityOwner(HostProviderInputContinuityOwner):
     def reserve_assistant_replay_fragment(self, **kwargs):
         view = self.current_view(kwargs["scope"])
@@ -1020,6 +1213,7 @@ class _RecordingReplayHydrationReader:
         self._fail_hydration = fail_hydration
         self.dispatch_deadlines: list[float] = []
         self.hydration_deadlines: list[float] = []
+        self.hydration_selected_counts: list[int] = []
 
     def read_frozen_compile_snapshot(self, cut, *, deadline_monotonic):
         return self._delegate.read_frozen_compile_snapshot(
@@ -1042,7 +1236,11 @@ class _RecordingReplayHydrationReader:
         self.hydration_deadlines.append(deadline)
         if self._fail_hydration:
             raise TimeoutError("injected selected hydration deadline")
-        return self._delegate.hydrate_selected_provider_replays(**kwargs)
+        result = self._delegate.hydrate_selected_provider_replays(**kwargs)
+        self.hydration_selected_counts.append(
+            0 if result is None else len(result.selected_manifests)
+        )
+        return result
 
 
 def _text_stream(text: str, *, block: str = "text:1") -> list[object]:
@@ -1252,6 +1450,62 @@ def _round5a1_responses_scripts() -> tuple[tuple[dict[str, object], ...], ...]:
     )
 
 
+def _large_native_replay_script(
+    api: str,
+    *,
+    ordinal: int,
+) -> tuple[dict[str, object], ...]:
+    opaque = f"opaque-{ordinal}:" + "r" * 50_000
+    public = f"native replay answer {ordinal}:" + "p" * 12_000
+    if api == "openai_chat_completions":
+        return (
+            {
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"reasoning_content": opaque},
+                        "finish_reason": None,
+                    }
+                ]
+            },
+            {
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"content": public},
+                        "finish_reason": "stop",
+                    }
+                ]
+            },
+        )
+    if api == "openai_responses":
+        return (
+            {
+                "type": "response.completed",
+                "response": {
+                    "status": "completed",
+                    "output": [
+                        {
+                            "type": "reasoning",
+                            "id": f"reasoning:{ordinal}",
+                            "status": "completed",
+                            "summary": [],
+                            "encrypted_content": opaque,
+                        },
+                        {
+                            "type": "message",
+                            "id": f"message:{ordinal}",
+                            "status": "completed",
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": public}],
+                        },
+                    ],
+                },
+            },
+        )
+    raise AssertionError(f"unsupported test API: {api}")
+
+
 def test_stage2_runner_text_turn_has_two_entry_transactions_and_no_segments(
     stage2_migrated_postgres_database,
 ) -> None:
@@ -1455,10 +1709,526 @@ def test_round5b_active_manual_compaction_adopts_and_continues_same_run(
         assert repository.lost_once
 
 
+@pytest.mark.parametrize(
+    "usage_mode",
+    ("reported_equal", "reported_different", "missing", "reported_cached"),
+)
+def test_final_wire_compaction_trigger_and_adoption_ignore_provider_usage(
+    stage2_migrated_postgres_database,
+    usage_mode: str,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id = _name("session")
+    workspace_id = _name("workspace")
+    lease = repository.acquire_host_writer(
+        session_id=session_id,
+        workspace_id=workspace_id,
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    model = _CompactionScriptedModel(
+        [_text_stream("historical answer " + "x" * 80_000)],
+        "The same concise handoff for every provider usage variant.",
+        summary_usage_modes=[usage_mode],
+    )
+    owner = HostCompactionRuntimeOwner(
+        policy=ResolvedCompactionPolicy(
+            automatic_enabled=False,
+            minimum_reclaim_tokens=1,
+        )
+    )
+    runner = ConversationKernelRunner(
+        repository=repository,
+        writer_lease=lease,
+        model=model,
+        tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
+        live_bus=LiveAgentEventBus(),
+        context_source_collector=StaticContextSourceCollector(),
+        compaction_owner=owner,
+        workspace_id=workspace_id,
+    )
+
+    async def exercise():
+        first = await runner.run_turn("identical source question")
+        outcome = await runner.compaction.compact_idle_turn(
+            turn_id=first.turn_id,
+            command_id="command:usage-independent-compaction",
+            force=True,
+        )
+        await owner.aclose()
+        return outcome
+
+    outcome = asyncio.run(exercise())
+
+    assert outcome.disposition is CompactionDisposition.COMPACTED
+    assert outcome.public_code == "COMPACTED"
+    assert len(model.summary_transport.contexts) == 1
+    assert len(model.summary_transport.usage_reports) == 1
+    report = model.summary_transport.usage_reports[0]
+    assert report.usage_status == ("missing" if usage_mode == "missing" else "reported")
+    if usage_mode == "reported_cached":
+        assert report.usage is not None
+        assert report.usage.cached_input_tokens is not None
+    with provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        deadline_monotonic=monotonic() + 10,
+    ) as connection:
+        snapshot_count, event_count = connection.execute(
+            "SELECT "
+            "(SELECT count(*) FROM pulsara_v3.context_snapshots "
+            " WHERE session_id = %s), "
+            "(SELECT count(*) FROM pulsara_v3.agent_events "
+            " WHERE session_id = %s AND event_type = 'CompactionAdopted')",
+            (session_id, session_id),
+        ).fetchone()
+    assert (snapshot_count, event_count) == (1, 1)
+
+
+@pytest.mark.parametrize(
+    "api",
+    ("openai_chat_completions", "openai_responses"),
+    ids=("chat", "responses"),
+)
+def test_final_wire_compaction_summary_prefix_search_shrinks_replay_heavy_wire(
+    stage2_migrated_postgres_database,
+    api: str,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id = _name("session")
+    workspace_id = _name("workspace")
+    lease = repository.acquire_host_writer(
+        session_id=session_id,
+        workspace_id=workspace_id,
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    limits = test_model_limits(
+        total_context_tokens=40_000,
+        max_input_tokens=40_000,
+        max_output_tokens=1_000,
+        default_output_tokens=1_000,
+        input_safety_margin_tokens=0,
+    )
+    profile = ProviderProfile(
+        id=f"test:{api}:compaction-prefix-wire-search",
+        wire_api=api,
+        thinking=(
+            ThinkingProfile(
+                enabled=True,
+                message_field="reasoning_content",
+                replay_policy=ThinkingReplayPolicy.ALWAYS,
+            )
+            if api == "openai_chat_completions"
+            else ThinkingProfile()
+        ),
+    )
+    model = _CompactionSequencedDirectKernelModel(
+        config=test_llm_config(
+            api_key="test",
+            base_url="https://example.invalid/v1",
+            pro_model="test-pro",
+            flash_model="test-flash",
+            api=api,
+            provider_profile=profile,
+            pro_limits=limits,
+            flash_limits=limits,
+        ),
+        scripts=(
+            _large_native_replay_script(api, ordinal=1),
+            _large_native_replay_script(api, ordinal=2),
+        ),
+        summary="A concise checkpoint after exact final-wire prefix admission.",
+    )
+    owner = HostCompactionRuntimeOwner(
+        policy=ResolvedCompactionPolicy(
+            automatic_enabled=False,
+            minimum_reclaim_tokens=1,
+        )
+    )
+    runner = ConversationKernelRunner(
+        repository=repository,
+        writer_lease=lease,
+        model=model,
+        tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
+        live_bus=LiveAgentEventBus(),
+        context_source_collector=StaticContextSourceCollector(),
+        compaction_owner=owner,
+        workspace_id=workspace_id,
+    )
+    summary_measurements: list[tuple[int, object]] = []
+    freeze_wire_measurement = model.freeze_wire_measurement
+
+    def record_summary_measurement(**kwargs):
+        measurement = freeze_wire_measurement(**kwargs)
+        if kwargs["call"].fact.purpose is ModelCallPurpose.CONTEXT_COMPACTION_SUMMARY:
+            summary_measurements.append(
+                (len(kwargs["semantic_input"].messages), measurement.quote)
+            )
+        return measurement
+
+    model.freeze_wire_measurement = record_summary_measurement
+
+    async def exercise():
+        first = await runner.run_turn("first replay-bearing answer")
+        second = await runner.run_turn("second replay-bearing answer")
+        outcome = await runner.compaction.compact_idle_turn(
+            turn_id=second.turn_id,
+            command_id="command:replay-heavy-wire-prefix-search",
+            force=True,
+        )
+        await owner.aclose()
+        return first, second, outcome
+
+    first, second, outcome = asyncio.run(exercise())
+
+    assert first.final_text.startswith("native replay answer 1:")
+    assert second.final_text.startswith("native replay answer 2:")
+    assert outcome.disposition is CompactionDisposition.COMPACTED
+    assert len(model.summary_transport.contexts) == 1
+    assert len(summary_measurements) >= 2
+    longest_count, longest_quote = summary_measurements[0]
+    assert longest_quote.semantic_estimated_input_tokens <= (
+        longest_quote.effective_input_budget_tokens
+    )
+    assert longest_quote.final_wire_estimated_input_tokens > (
+        longest_quote.effective_input_budget_tokens
+    )
+    assert longest_quote.replaced_generic_wire_estimated_tokens > 0
+    assert longest_quote.replay_wire_estimated_tokens > 0
+    admitted_count, admitted_quote = next(
+        item
+        for item in summary_measurements
+        if item[1].final_wire_estimated_input_tokens
+        <= item[1].effective_input_budget_tokens
+    )
+    assert admitted_count < longest_count
+    assert admitted_quote.replaced_generic_wire_estimated_tokens > 0
+    assert admitted_quote.replay_wire_estimated_tokens > 0
+    selected_plan = model.summary_transport.contexts[0].provider_wire_input_plan
+    assert selected_plan.quote == admitted_quote
+    assert selected_plan.quote.final_wire_estimated_input_tokens <= (
+        selected_plan.quote.effective_input_budget_tokens
+    )
+
+
+def test_final_wire_compaction_summary_promotes_semantic_overbudget_replay_fit(
+    stage2_migrated_postgres_database,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pulsara_agent.conversation_kernel.compaction import (
+        coordinator as compaction_coordinator,
+    )
+    from pulsara_agent.conversation_kernel.compaction import (
+        model_call as compaction_model_call,
+    )
+
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id = _name("session")
+    workspace_id = _name("workspace")
+    lease = repository.acquire_host_writer(
+        session_id=session_id,
+        workspace_id=workspace_id,
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    limits = test_model_limits(
+        total_context_tokens=40_000,
+        max_input_tokens=40_000,
+        max_output_tokens=1_000,
+        default_output_tokens=1_000,
+        input_safety_margin_tokens=0,
+    )
+    profile = ProviderProfile(
+        id="test:chat:compaction-semantic-overbudget-wire-fit",
+        wire_api="openai_chat_completions",
+        thinking=ThinkingProfile(
+            enabled=True,
+            message_field="reasoning_content",
+            replay_policy=ThinkingReplayPolicy.ALWAYS,
+        ),
+    )
+    model = _CompactionSequencedDirectKernelModel(
+        config=test_llm_config(
+            api_key="test",
+            base_url="https://example.invalid/v1",
+            pro_model="test-pro",
+            flash_model="test-flash",
+            api="openai_chat_completions",
+            provider_profile=profile,
+            pro_limits=limits,
+            flash_limits=limits,
+        ),
+        scripts=(
+            _large_native_replay_script("openai_chat_completions", ordinal=1),
+            _round5a1_chat_scripts()[1],
+        ),
+        summary="A concise checkpoint from a wire-fit summary carrier.",
+    )
+    owner = HostCompactionRuntimeOwner(
+        policy=ResolvedCompactionPolicy(
+            automatic_enabled=False,
+            minimum_reclaim_tokens=1,
+        )
+    )
+    runner = ConversationKernelRunner(
+        repository=repository,
+        writer_lease=lease,
+        model=model,
+        tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
+        live_bus=LiveAgentEventBus(),
+        context_source_collector=StaticContextSourceCollector(),
+        compaction_owner=owner,
+        workspace_id=workspace_id,
+    )
+    original_prepare = compaction_model_call.prepare_compaction_summary_semantic
+    prepared_semantics: list[object] = []
+    estimator_patched = False
+
+    def prepare_semantic_overbudget(**kwargs):
+        nonlocal estimator_patched
+        estimator = kwargs["source_view"].normal_compile_binding.estimator
+        if not estimator_patched:
+            estimate_frozen_input = estimator.estimate_frozen_input
+
+            def inflate_summary_semantic_estimate(*, system_prompt, messages, tools):
+                estimate = estimate_frozen_input(
+                    system_prompt=system_prompt,
+                    messages=messages,
+                    tools=tools,
+                )
+                summary_request = kwargs["summary_request"]
+                if (
+                    not messages
+                    or messages[-1].role is not MessageRole.USER
+                    or messages[-1].content != (summary_request,)
+                ):
+                    return estimate
+                addend = 100_000
+                by_index = list(estimate.message_tokens_by_index)
+                by_index[-1] += addend
+                return replace(
+                    estimate,
+                    message_tokens=estimate.message_tokens + addend,
+                    message_tokens_by_index=tuple(by_index),
+                    total_input_tokens=estimate.total_input_tokens + addend,
+                )
+
+            monkeypatch.setattr(
+                estimator,
+                "estimate_frozen_input",
+                inflate_summary_semantic_estimate,
+            )
+            estimator_patched = True
+        semantic = original_prepare(**kwargs)
+        prepared_semantics.append(semantic)
+        return semantic
+
+    monkeypatch.setattr(
+        compaction_coordinator,
+        "prepare_compaction_summary_semantic",
+        prepare_semantic_overbudget,
+    )
+
+    async def exercise():
+        await runner.run_turn("create a replay-bearing assistant answer")
+        second = await runner.run_turn("freeze an ordinary replay input")
+        outcome = await runner.compaction.compact_idle_turn(
+            turn_id=second.turn_id,
+            command_id="command:semantic-overbudget-wire-fit",
+            force=True,
+        )
+        await owner.aclose()
+        return outcome
+
+    outcome = asyncio.run(exercise())
+
+    assert outcome.disposition is CompactionDisposition.COMPACTED
+    assert len(prepared_semantics) == 1
+    semantic = prepared_semantics[0]
+    selected_plan = model.summary_transport.contexts[0].provider_wire_input_plan
+    assert semantic.semantic_input.final_estimate.total_input_tokens > (
+        selected_plan.quote.effective_input_budget_tokens
+    )
+    assert selected_plan.quote.semantic_estimated_input_tokens == (
+        semantic.semantic_input.final_estimate.total_input_tokens
+    )
+    assert selected_plan.quote.final_wire_estimated_input_tokens <= (
+        selected_plan.quote.effective_input_budget_tokens
+    )
+    assert selected_plan.quote.replaced_generic_wire_estimated_tokens > 0
+    assert selected_plan.quote.replay_wire_estimated_tokens > 0
+
+    ordinary = model.requests[1].compiled_input
+    ordinary_messages = list(ordinary.messages)
+    ordinary_index = next(
+        index
+        for index, message in enumerate(ordinary_messages)
+        if message.role is MessageRole.ASSISTANT
+        and message.content
+        and message.content[0].startswith("native replay answer 1:")
+    )
+    ordinary_messages[ordinary_index] = replace(
+        ordinary_messages[ordinary_index],
+        thinking=("semantic-only diagnostic thinking:" + "s" * 200_000,),
+    )
+    ordinary_estimate = model.requests[
+        1
+    ].prepared_call.compile_binding.estimator.estimate_frozen_input(
+        system_prompt=ordinary.system_prompt,
+        messages=tuple(ordinary_messages),
+        tools=ordinary.tools,
+    )
+    assert ordinary_estimate.total_input_tokens > (
+        ordinary.budget_report.effective_input_budget_tokens
+    )
+    report = ordinary.budget_report
+    overbudget_report = object.__new__(type(report))
+    for item in fields(report):
+        object.__setattr__(overbudget_report, item.name, getattr(report, item.name))
+    for name, value in (
+        ("system_tokens", ordinary_estimate.system_tokens),
+        ("message_tokens", ordinary_estimate.message_tokens),
+        ("tool_tokens", ordinary_estimate.tool_tokens),
+        ("envelope_tokens", ordinary_estimate.envelope_tokens),
+        ("total_input_tokens", ordinary_estimate.total_input_tokens),
+    ):
+        object.__setattr__(overbudget_report, name, value)
+    with pytest.raises(ValueError, match="compiled model input exceeds"):
+        replace(
+            ordinary,
+            messages=tuple(ordinary_messages),
+            final_estimate=ordinary_estimate,
+            budget_report=overbudget_report,
+        )
+
+
+@pytest.mark.parametrize("trigger", ("manual", "automatic"))
+def test_final_wire_compaction_no_executable_summary_prefix_is_not_already_compact(
+    stage2_migrated_postgres_database,
+    trigger: str,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id = _name("session")
+    workspace_id = _name("workspace")
+    lease = repository.acquire_host_writer(
+        session_id=session_id,
+        workspace_id=workspace_id,
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    limits = test_model_limits(
+        total_context_tokens=1_200,
+        max_input_tokens=1_200,
+        max_output_tokens=200,
+        default_output_tokens=200,
+        input_safety_margin_tokens=0,
+    )
+    first_text = "history:" + "h" * 400
+    scripts = (
+        (
+            {
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"content": first_text},
+                        "finish_reason": "stop",
+                    }
+                ]
+            },
+        ),
+        _round5a1_chat_scripts()[1],
+    )
+    model = _CompactionSequencedDirectKernelModel(
+        config=test_llm_config(
+            api_key="test",
+            base_url="https://example.invalid/v1",
+            pro_model="test-pro",
+            flash_model="test-flash",
+            api="openai_chat_completions",
+            pro_limits=limits,
+            flash_limits=limits,
+        ),
+        scripts=scripts,
+        summary="This summary transport must never open.",
+    )
+    owner = HostCompactionRuntimeOwner(
+        policy=ResolvedCompactionPolicy(
+            automatic_enabled=trigger == "automatic",
+            auto_trigger_ratio=0.75,
+            minimum_reclaim_tokens=1,
+        )
+    )
+    runner = ConversationKernelRunner(
+        repository=repository,
+        writer_lease=lease,
+        model=model,
+        tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
+        live_bus=LiveAgentEventBus(),
+        context_source_collector=StaticContextSourceCollector(),
+        compaction_owner=owner,
+        workspace_id=workspace_id,
+    )
+    automatic_executions: list[object] = []
+    execute_active = runner.compaction.execute_active
+
+    async def record_automatic_execution(**kwargs):
+        execution = await execute_active(**kwargs)
+        automatic_executions.append(execution)
+        return execution
+
+    runner.compaction.execute_active = record_automatic_execution
+
+    async def exercise():
+        first = await runner.run_turn("first input")
+        if trigger == "manual":
+            outcome = await runner.compaction.compact_idle_turn(
+                turn_id=first.turn_id,
+                command_id="command:no-executable-summary-prefix",
+                force=True,
+            )
+            second_text = None
+        else:
+            second = await runner.run_turn("second input triggers compaction")
+            outcome = automatic_executions[0].outcome
+            second_text = second.final_text
+        await owner.aclose()
+        return outcome, second_text
+
+    outcome, second_text = asyncio.run(exercise())
+
+    assert outcome.disposition is CompactionDisposition.FAILED
+    assert outcome.public_code == "NO_EXECUTABLE_SUMMARY_PREFIX"
+    assert model.summary_transport.contexts == []
+    assert second_text == (None if trigger == "manual" else "chat final")
+    assert len(automatic_executions) == (0 if trigger == "manual" else 1)
+    with provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        deadline_monotonic=monotonic() + 10,
+    ) as connection:
+        snapshot_count, event_count = connection.execute(
+            "SELECT "
+            "(SELECT count(*) FROM pulsara_v3.context_snapshots "
+            " WHERE session_id = %s), "
+            "(SELECT count(*) FROM pulsara_v3.agent_events "
+            " WHERE session_id = %s AND event_type = 'CompactionAdopted')",
+            (session_id, session_id),
+        ).fetchone()
+    assert (snapshot_count, event_count) == (0, 0)
+
+
 @pytest.mark.parametrize("idle", (False, True), ids=("active", "idle"))
 def test_round5b_manual_candidate_shrink_search_is_lifecycle_neutral(
     idle: bool,
     stage2_migrated_postgres_database,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
@@ -1481,7 +2251,7 @@ def test_round5b_manual_candidate_shrink_search_is_lifecycle_neutral(
     model = _CompactionScriptedModel(
         normal_calls,
         [
-            "oversized handoff " + "x" * 200_000,
+            "first compact handoff whose successor quote is rejected",
             "compact handoff after shrinking the retained tool tail",
         ],
     )
@@ -1492,22 +2262,88 @@ def test_round5b_manual_candidate_shrink_search_is_lifecycle_neutral(
             maximum_retained_tool_groups=1,
         )
     )
+    tools = _RecordingBorrowToolPort(
+        _AssertingTool(provider, session_id), tool_names=("terminal",)
+    )
     runner = ConversationKernelRunner(
         repository=repository,
         writer_lease=lease,
         model=model,
-        tools=StructuredToolPort(
-            _AssertingTool(provider, session_id), tool_names=("terminal",)
-        ),
+        tools=tools,
         live_bus=LiveAgentEventBus(),
         context_source_collector=StaticContextSourceCollector(),
         compaction_owner=owner,
         workspace_id=workspace_id,
     )
+    dispatch_pre_compact = runner.compaction._dispatch_pre_compact
+    measure_wire = runner.compaction._provider_dispatch.measure_prepared_wire_candidate
+    pre_compact_calls = 0
+    rejected_successor_quotes = []
+
+    async def record_pre_compact(**kwargs):
+        nonlocal pre_compact_calls
+        pre_compact_calls += 1
+        return await dispatch_pre_compact(**kwargs)
+
+    async def reject_first_successor_wire(candidate, *, deadline, **kwargs):
+        decision = await measure_wire(candidate, deadline=deadline, **kwargs)
+        canonical_read = getattr(candidate, "canonical_read", None)
+        binding = (
+            None
+            if canonical_read is None
+            else canonical_read.compile_snapshot.context_binding_fact
+        )
+        if (
+            not rejected_successor_quotes
+            and binding is not None
+            and binding.base_kind is ContextBindingBaseKind.SNAPSHOT
+        ):
+            quote = decision.quote
+            over_budget = max(
+                quote.effective_input_budget_tokens + 1,
+                quote.replay_wire_estimated_tokens + 1,
+            )
+            rejected_quote = replace(
+                quote,
+                generic_wire_estimated_input_tokens=(
+                    over_budget
+                    + quote.replaced_generic_wire_estimated_tokens
+                    - quote.replay_wire_estimated_tokens
+                ),
+                final_wire_estimated_input_tokens=over_budget,
+            )
+            rejected_successor_quotes.append(rejected_quote)
+            return PreparedWireMeasurementDecision(
+                candidate=decision.candidate,
+                quote=rejected_quote,
+                wire_input_plan=None,
+            )
+        return decision
+
+    monkeypatch.setattr(
+        runner.compaction,
+        "_dispatch_pre_compact",
+        record_pre_compact,
+    )
+    monkeypatch.setattr(
+        runner.compaction._provider_dispatch,
+        "measure_prepared_wire_candidate",
+        reject_first_successor_wire,
+    )
 
     async def exercise():
         await runner.run_turn("historical question")
         tool_turn = await runner.run_turn("create one complete tool group")
+        # Exercise the candidate-shrink algorithm from an approved cold-epoch
+        # boundary.  An installed compatible prefix may not be truncated merely
+        # to retain a tool group, which is covered independently below.
+        runner._continuity.discard_scope(
+            ProviderInputContinuityScope(
+                session_id=session_id,
+                scope_kind=ModelInputScopeKind.ROOT,
+                scope_subagent_task_id=None,
+            )
+        )
         if idle:
             outcome = await runner.compaction.compact_idle_turn(
                 turn_id=tool_turn.turn_id,
@@ -1545,6 +2381,151 @@ def test_round5b_manual_candidate_shrink_search_is_lifecycle_neutral(
         context.messages[-1].content for context in model.summary_transport.contexts
     } == {(compaction_summary_request(),)}
     assert final_text == (None if idle else "active turn continued")
+    assert pre_compact_calls == 1
+    assert runner._safe_point._active_handle is None  # noqa: SLF001
+    assert tools._active == set()  # noqa: SLF001
+    assert tools.release_calls
+    assert all(count == 1 for count in tools.release_calls)
+    assert len(rejected_successor_quotes) == 1
+    assert rejected_successor_quotes[0].final_wire_estimated_input_tokens > (
+        rejected_successor_quotes[0].effective_input_budget_tokens
+    )
+
+
+@pytest.mark.parametrize("retained_group_count", (0, 1))
+def test_final_wire_pre_full_drift_replans_fresh_without_shrinking_tail(
+    retained_group_count: int,
+    stage2_migrated_postgres_database,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pulsara_agent.conversation_kernel.compaction import (
+        coordinator as compaction_coordinator,
+    )
+
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id = _name("session")
+    workspace_id = _name("workspace")
+    lease = repository.acquire_host_writer(
+        session_id=session_id,
+        workspace_id=workspace_id,
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    normal_calls = [_text_stream("historical answer " + "x" * 80_000)]
+    if retained_group_count:
+        normal_calls.extend((_tool_stream(), _text_stream("tool turn complete")))
+    normal_calls.append(_text_stream("active turn after fresh compaction replan"))
+    discarded_summary = "summary from the structurally drifted source"
+    selected_summary = "summary from the fresh exact source"
+    model = _CompactionScriptedModel(
+        normal_calls,
+        [discarded_summary, selected_summary],
+    )
+    owner = HostCompactionRuntimeOwner(
+        policy=ResolvedCompactionPolicy(
+            automatic_enabled=False,
+            minimum_reclaim_tokens=1,
+            maximum_retained_tool_groups=max(1, retained_group_count),
+        )
+    )
+    tools = _RecordingBorrowToolPort(
+        _AssertingTool(provider, session_id),
+        tool_names=("terminal",) if retained_group_count else (),
+    )
+    runner = ConversationKernelRunner(
+        repository=repository,
+        writer_lease=lease,
+        model=model,
+        tools=tools,
+        live_bus=LiveAgentEventBus(),
+        context_source_collector=StaticContextSourceCollector(),
+        compaction_owner=owner,
+        workspace_id=workspace_id,
+    )
+    transition = compaction_coordinator.validate_compaction_wire_transition
+    reclaim = compaction_coordinator.validate_compaction_reclaim
+    dispatch_pre_compact = runner.compaction._dispatch_pre_compact
+    pre_full_attempts = 0
+    numeric_reclaim_calls = 0
+    numeric_calls_at_drift: list[int] = []
+    pre_compact_calls = 0
+
+    async def record_pre_compact(**kwargs):
+        nonlocal pre_compact_calls
+        pre_compact_calls += 1
+        return await dispatch_pre_compact(**kwargs)
+
+    def record_numeric_reclaim(**kwargs):
+        nonlocal numeric_reclaim_calls
+        numeric_reclaim_calls += 1
+        return reclaim(**kwargs)
+
+    def drift_first_pre_full_transition(**kwargs):
+        nonlocal pre_full_attempts
+        if kwargs["phase"] == "PRE_FULL":
+            pre_full_attempts += 1
+            if pre_full_attempts == 1:
+                numeric_calls_at_drift.append(numeric_reclaim_calls)
+                raise compaction_coordinator.CompactionWireTransitionDrift(
+                    "injected PRE_FULL structural drift"
+                )
+        return transition(**kwargs)
+
+    monkeypatch.setattr(
+        compaction_coordinator,
+        "validate_compaction_reclaim",
+        record_numeric_reclaim,
+    )
+    monkeypatch.setattr(
+        compaction_coordinator,
+        "validate_compaction_wire_transition",
+        drift_first_pre_full_transition,
+    )
+    monkeypatch.setattr(
+        runner.compaction,
+        "_dispatch_pre_compact",
+        record_pre_compact,
+    )
+
+    async def exercise():
+        await runner.run_turn("historical question")
+        if retained_group_count:
+            await runner.run_turn("create one complete retained tool group")
+        command_id = _name("active-command")
+        turn_id = _stable_id("turn", session_id, command_id)
+        _request, waiter = await owner.request_manual(
+            command_id=_name("active-compact"),
+            scope_kind=ModelInputScopeKind.ROOT,
+            scope_subagent_task_id=None,
+            expected_turn_id=turn_id,
+            force=True,
+        )
+        result = await runner.run_turn("continue actively", command_id=command_id)
+        outcome = await waiter
+        await owner.aclose()
+        return result, outcome
+
+    result, outcome = asyncio.run(exercise())
+
+    assert result.final_text == "active turn after fresh compaction replan"
+    assert outcome.disposition is CompactionDisposition.COMPACTED
+    assert pre_full_attempts == 2
+    assert numeric_calls_at_drift == [0]
+    assert numeric_reclaim_calls == 2
+    assert len(model.summary_transport.contexts) == 2
+    assert len(model.summary_transport.contexts[0].messages) == len(
+        model.summary_transport.contexts[1].messages
+    )
+    successor_snapshot = _context_snapshot_payload(model.requests[-1])
+    assert successor_snapshot["earlier_context_summary"] == selected_summary
+    assert successor_snapshot["earlier_context_summary"] != discarded_summary
+    assert pre_compact_calls == 1
+    assert runner._safe_point._active_handle is None  # noqa: SLF001
+    assert tools._active == set()  # noqa: SLF001
+    assert tools.release_calls
+    assert all(count == 1 for count in tools.release_calls)
 
 
 def test_round5b_active_manual_non_reclaim_is_not_needed_and_turn_continues(
@@ -1711,9 +2692,11 @@ def test_round5b_back_to_back_manual_request_cannot_overwrite_successor(
     assert len(model.requests) == 2
     assert len(captured_successors) == 1
     captured = captured_successors[0]
-    assert captured.handle._closed
-    assert captured.surface_borrow is not None
-    assert captured.surface_borrow._closed
+    assert not captured.owns_execution_authority
+    with pytest.raises(RuntimeError, match="authority is consumed"):
+        captured.take_execution_authority()
+    with pytest.raises(RuntimeError, match="authority is consumed"):
+        captured.close()
 
 
 def test_round5b_summary_tool_call_gets_one_ephemeral_repair_and_no_dispatch(
@@ -1994,7 +2977,9 @@ def test_round5b_mid_turn_tool_followup_compacts_then_finishes(
     runner.compaction.execute_active = record_trigger
 
     async def exercise():
-        result = await runner.run_turn("p" * 110_000)
+        # The complete pre-summary source crosses the 90% final-wire trigger,
+        # while its exact summary candidate and successor remain executable.
+        result = await runner.run_turn("p" * 40_000)
         await owner.aclose()
         return result
 
@@ -2008,13 +2993,542 @@ def test_round5b_mid_turn_tool_followup_compacts_then_finishes(
     successor_snapshot = _context_snapshot_payload(model.requests[-1])
     assert successor_snapshot["continuation"]["mode"] == "RESUME_ACTIVE_TURN"
     assert successor_snapshot["continuation"]["active_request"]["text"] == (
-        "p" * 110_000
+        "p" * 40_000
     )
     assert len(tool.invocations) == 1
     assert not any(
         message.role is MessageRole.TOOL_RESULT
         for message in model.requests[-1].compiled_input.messages
     )
+
+
+def test_final_wire_below_trigger_compaction_precheck_reuses_one_materialization(
+    stage2_migrated_postgres_database,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id = _name("session")
+    workspace_id = _name("workspace")
+    lease = repository.acquire_host_writer(
+        session_id=session_id,
+        workspace_id=workspace_id,
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    model = _ScriptedModel([_text_stream("ordinary final-wire dispatch")])
+    owner = HostCompactionRuntimeOwner(
+        policy=ResolvedCompactionPolicy(minimum_reclaim_tokens=1)
+    )
+    runner = ConversationKernelRunner(
+        repository=repository,
+        writer_lease=lease,
+        model=model,
+        tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
+        live_bus=LiveAgentEventBus(),
+        context_source_collector=StaticContextSourceCollector(),
+        compaction_owner=owner,
+        workspace_id=workspace_id,
+    )
+    measurements = 0
+    hydrations = 0
+    source_preparations = 0
+    installs = 0
+    fences = 0
+    freeze_measurement = model.freeze_wire_measurement
+    reader = runner._provider_dispatch._input_reader
+    hydrate = reader.hydrate_selected_provider_replays
+    prepare_source = runner._provider_dispatch.prepare_compaction_source
+    install = runner._provider_dispatch.install_provider_open
+    run_fenced = owner.run_fenced
+
+    def record_measurement(**kwargs):
+        nonlocal measurements
+        measurements += 1
+        return freeze_measurement(**kwargs)
+
+    def record_hydration(**kwargs):
+        nonlocal hydrations
+        hydrations += 1
+        return hydrate(**kwargs)
+
+    async def record_source(**kwargs):
+        nonlocal source_preparations
+        source_preparations += 1
+        return await prepare_source(**kwargs)
+
+    async def record_install(*args, **kwargs):
+        nonlocal installs
+        installs += 1
+        return await install(*args, **kwargs)
+
+    async def record_fence(*args, **kwargs):
+        nonlocal fences
+        fences += 1
+        return await run_fenced(*args, **kwargs)
+
+    model.freeze_wire_measurement = record_measurement
+    reader.hydrate_selected_provider_replays = record_hydration
+    runner._provider_dispatch.prepare_compaction_source = record_source
+    runner._provider_dispatch.install_provider_open = record_install
+    owner.run_fenced = record_fence
+
+    async def exercise():
+        result = await runner.run_turn("small ordinary request")
+        await owner.aclose()
+        return result
+
+    result = asyncio.run(exercise())
+
+    assert result.final_text == "ordinary final-wire dispatch"
+    assert measurements == 1
+    assert hydrations == 1
+    assert source_preparations == 1
+    assert installs == 1
+    assert fences == 0
+    assert len(model.requests) == 1
+
+
+def test_final_wire_successful_install_is_not_rejected_by_post_cas_clock_expiry(
+    stage2_migrated_postgres_database,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pulsara_agent.conversation_kernel import provider_dispatch as dispatch_module
+
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id = _name("session")
+    lease = repository.acquire_host_writer(
+        session_id=session_id,
+        workspace_id=_name("workspace"),
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    model = _ScriptedModel([_text_stream("installed before the clock crossed")])
+    runner = ConversationKernelRunner(
+        repository=repository,
+        writer_lease=lease,
+        model=model,
+        tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
+        live_bus=LiveAgentEventBus(),
+        context_source_collector=StaticContextSourceCollector(),
+    )
+    continuity = runner._provider_dispatch._continuity
+    install = continuity.install
+
+    def install_then_cross_deadline(*args, **kwargs):
+        permit = install(*args, **kwargs)
+        monkeypatch.setattr(dispatch_module, "monotonic", lambda: float("inf"))
+        return permit
+
+    monkeypatch.setattr(continuity, "install", install_then_cross_deadline)
+
+    result = asyncio.run(runner.run_turn("complete the atomic install"))
+
+    assert result.final_text == "installed before the clock crossed"
+    assert len(model.requests) == 1
+
+
+@pytest.mark.parametrize(
+    "failure_call",
+    (1, 2),
+    ids=("first_measurement", "post_compaction_reprepare_measurement"),
+)
+def test_final_wire_late_measurement_failure_closes_linear_dispatch_authority(
+    failure_call: int,
+    stage2_migrated_postgres_database,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id = _name("session")
+    workspace_id = _name("workspace")
+    lease = repository.acquire_host_writer(
+        session_id=session_id,
+        workspace_id=workspace_id,
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    model = _ScriptedModel([_text_stream("recovered after measurement failure")])
+    tools = _RecordingBorrowToolPort(
+        _AssertingTool(provider, session_id), tool_names=()
+    )
+    hook_reservations: list[_RecordingHookReservation] = []
+    owner = HostCompactionRuntimeOwner(
+        policy=ResolvedCompactionPolicy(
+            automatic_enabled=failure_call == 2,
+            minimum_reclaim_tokens=1,
+        )
+    )
+    runner = ConversationKernelRunner(
+        repository=repository,
+        writer_lease=lease,
+        model=model,
+        tools=tools,
+        live_bus=LiveAgentEventBus(),
+        context_source_collector=StaticContextSourceCollector(),
+        compaction_owner=owner,
+        workspace_id=workspace_id,
+    )
+    measure = runner.compaction.measure_dispatch_wire
+    crosses_threshold = runner.compaction.wire_decision_crosses_automatic_threshold
+    measurement_calls = 0
+
+    async def fail_selected_measurement(*args, **kwargs):
+        nonlocal measurement_calls
+        measurement_calls += 1
+        dispatch = args[0]
+        reservation = _RecordingHookReservation()
+        with dispatch._authority_lock:  # noqa: SLF001
+            assert dispatch._hook_context_reservation is None  # noqa: SLF001
+            dispatch._hook_context_reservation = reservation  # noqa: SLF001
+        hook_reservations.append(reservation)
+        if measurement_calls == failure_call:
+            raise TimeoutError("injected late final-wire measurement failure")
+        return await measure(*args, **kwargs)
+
+    runner.compaction.measure_dispatch_wire = fail_selected_measurement
+    if failure_call == 2:
+        # Force only the advisory late decision across threshold.  The fenced
+        # fresh recapture remains below threshold, so Runner reprepares the
+        # ordinary dispatch and exercises its second measurement site.
+        runner.compaction.wire_decision_crosses_automatic_threshold = (
+            lambda *_args, **_kwargs: True
+        )
+
+    async def exercise():
+        with pytest.raises(
+            TimeoutError, match="injected late final-wire measurement failure"
+        ):
+            await runner.run_turn("fail before provider open")
+        assert runner._safe_point._active_handle is None  # noqa: SLF001
+        assert tools._active == set()  # noqa: SLF001
+        assert tools.release_calls == [1] * failure_call
+        assert len(hook_reservations) == failure_call
+        assert all(item.retire_calls == 1 for item in hook_reservations)
+
+        runner.compaction.wire_decision_crosses_automatic_threshold = crosses_threshold
+        recovered = await runner.run_turn("acquire the next safe point")
+        await owner.aclose()
+        return recovered
+
+    recovered = asyncio.run(exercise())
+
+    assert recovered.final_text == "recovered after measurement failure"
+    assert measurement_calls == failure_call + 1
+    assert runner._safe_point._active_handle is None  # noqa: SLF001
+    assert tools._active == set()  # noqa: SLF001
+    assert tools.release_calls == [1] * (failure_call + 1)
+    assert len(hook_reservations) == failure_call + 1
+    assert all(item.retire_calls == 1 for item in hook_reservations)
+
+
+def test_final_wire_post_full_hook_sibling_wins_with_one_authority_transfer(
+    stage2_migrated_postgres_database,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id = _name("session")
+    workspace_id = _name("workspace")
+    lease = repository.acquire_host_writer(
+        session_id=session_id,
+        workspace_id=workspace_id,
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    hook_text = "post-compaction hook context selected on final wire"
+    collector = _PostCompactionHookContextCollector(hook_text)
+    model = _CompactionScriptedModel(
+        [
+            _text_stream("historical answer " + "x" * 80_000),
+            _text_stream("final after Hook sibling"),
+        ],
+        "A concise handoff that leaves room for the Hook sibling.",
+    )
+    owner = HostCompactionRuntimeOwner(
+        policy=ResolvedCompactionPolicy(
+            automatic_enabled=False,
+            minimum_reclaim_tokens=1,
+        )
+    )
+    runner = ConversationKernelRunner(
+        repository=repository,
+        writer_lease=lease,
+        model=model,
+        tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
+        live_bus=LiveAgentEventBus(),
+        context_source_collector=collector,
+        compaction_owner=owner,
+        workspace_id=workspace_id,
+    )
+    measured_deadlines: list[float] = []
+    install_deadlines: list[float] = []
+    transferred_bases: list[object] = []
+    measured = runner._provider_dispatch.measure_prepared_wire_candidate
+    bind_selected = runner._provider_dispatch.bind_selected_provider_dispatch
+    install = runner._provider_dispatch.install_provider_open
+
+    async def record_measurement(*args, **kwargs):
+        measured_deadlines.append(kwargs["deadline"])
+        return await measured(*args, **kwargs)
+
+    def record_transfer(*, base, sibling):
+        assert sibling.candidate.cold_semantic is not None
+        assert (
+            sibling.candidate.cold_semantic.non_trigger_sources.hook_context_reservation
+            is None
+        )
+        selected = bind_selected(base=base, sibling=sibling)
+        transferred_bases.append(base)
+        return selected
+
+    async def record_install(*args, **kwargs):
+        install_deadlines.append(kwargs["deadline"])
+        return await install(*args, **kwargs)
+
+    async def exercise():
+        await runner.run_turn("first question")
+        runner._provider_dispatch.measure_prepared_wire_candidate = record_measurement
+        runner._provider_dispatch.bind_selected_provider_dispatch = record_transfer
+        runner._provider_dispatch.install_provider_open = record_install
+        command_id = _name("second-command")
+        turn_id = _stable_id("turn", session_id, command_id)
+        _request, waiter = await owner.request_manual(
+            command_id=_name("compact-command"),
+            scope_kind=ModelInputScopeKind.ROOT,
+            scope_subagent_task_id=None,
+            expected_turn_id=turn_id,
+            force=True,
+        )
+        result = await runner.run_turn("second question", command_id=command_id)
+        outcome = await waiter
+        await owner.aclose()
+        return result, outcome
+
+    result, outcome = asyncio.run(exercise())
+
+    assert result.final_text == "final after Hook sibling"
+    assert outcome.disposition is CompactionDisposition.COMPACTED
+    assert _hook_context_bodies(model.requests[-1]) == (hook_text,)
+    # PRE_FULL source proof, summary call, post-FULL no-Hook base, and optional
+    # Hook sibling each own one exact candidate measurement.
+    assert len(measured_deadlines) == 4
+    assert measured_deadlines == sorted(measured_deadlines)
+    assert len(install_deadlines) == 1
+    assert install_deadlines[0] > measured_deadlines[-1]
+    assert len(transferred_bases) == 1
+    base = transferred_bases[0]
+    assert not base.owns_execution_authority
+    with pytest.raises(RuntimeError, match="authority is consumed"):
+        base.take_execution_authority()
+    with pytest.raises(RuntimeError, match="authority is consumed"):
+        base.close()
+    assert len(collector.reservations) == 1
+    assert collector.reservations[0].retire_calls == 1
+    assert len(model.requests) == 2
+
+
+def test_final_wire_post_full_hook_timeout_falls_back_with_fresh_install_deadline(
+    stage2_migrated_postgres_database,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id = _name("session")
+    workspace_id = _name("workspace")
+    lease = repository.acquire_host_writer(
+        session_id=session_id,
+        workspace_id=workspace_id,
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    collector = _PostCompactionHookContextCollector(
+        "Hook context whose optional final-wire probe times out"
+    )
+    model = _CompactionScriptedModel(
+        [
+            _text_stream("historical answer " + "x" * 80_000),
+            _text_stream("final from verified no-Hook base"),
+        ],
+        "A concise handoff for the verified no-Hook fallback.",
+    )
+    owner = HostCompactionRuntimeOwner(
+        policy=ResolvedCompactionPolicy(
+            automatic_enabled=False,
+            minimum_reclaim_tokens=1,
+        )
+    )
+    runner = ConversationKernelRunner(
+        repository=repository,
+        writer_lease=lease,
+        model=model,
+        tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
+        live_bus=LiveAgentEventBus(),
+        context_source_collector=collector,
+        compaction_owner=owner,
+        workspace_id=workspace_id,
+    )
+    hook_candidate = None
+    hook_deadline = None
+    install_deadline = None
+    bind_calls = 0
+    prepare_sibling = runner._provider_dispatch.prepare_hook_context_sibling
+    measure = runner._provider_dispatch.measure_prepared_wire_candidate
+    bind_selected = runner._provider_dispatch.bind_selected_provider_dispatch
+    install = runner._provider_dispatch.install_provider_open
+
+    async def record_sibling(*args, **kwargs):
+        nonlocal hook_candidate
+        sibling = await prepare_sibling(*args, **kwargs)
+        assert sibling is not None
+        hook_candidate = sibling.candidate
+        return sibling
+
+    async def timeout_hook(candidate, **kwargs):
+        nonlocal hook_deadline
+        if candidate is hook_candidate:
+            hook_deadline = kwargs["deadline"]
+            raise TimeoutError("injected optional Hook final-wire timeout")
+        return await measure(candidate, **kwargs)
+
+    def record_bind(*args, **kwargs):
+        nonlocal bind_calls
+        bind_calls += 1
+        return bind_selected(*args, **kwargs)
+
+    async def record_install(*args, **kwargs):
+        nonlocal install_deadline
+        install_deadline = kwargs["deadline"]
+        return await install(*args, **kwargs)
+
+    async def exercise():
+        await runner.run_turn("first question")
+        runner._provider_dispatch.prepare_hook_context_sibling = record_sibling
+        runner._provider_dispatch.measure_prepared_wire_candidate = timeout_hook
+        runner._provider_dispatch.bind_selected_provider_dispatch = record_bind
+        runner._provider_dispatch.install_provider_open = record_install
+        command_id = _name("second-command")
+        turn_id = _stable_id("turn", session_id, command_id)
+        _request, waiter = await owner.request_manual(
+            command_id=_name("compact-command"),
+            scope_kind=ModelInputScopeKind.ROOT,
+            scope_subagent_task_id=None,
+            expected_turn_id=turn_id,
+            force=True,
+        )
+        result = await runner.run_turn("second question", command_id=command_id)
+        outcome = await waiter
+        await owner.aclose()
+        return result, outcome
+
+    result, outcome = asyncio.run(exercise())
+
+    assert result.final_text == "final from verified no-Hook base"
+    assert outcome.disposition is CompactionDisposition.COMPACTED
+    assert _hook_context_bodies(model.requests[-1]) == ()
+    assert hook_deadline is not None
+    assert install_deadline is not None
+    assert install_deadline > hook_deadline
+    assert bind_calls == 0
+    assert len(collector.reservations) == 1
+    assert collector.reservations[0].retire_calls == 1
+    assert len(model.requests) == 2
+
+
+@pytest.mark.parametrize("failure_site", ("rotated_read", "hook_bind"))
+def test_final_wire_post_full_failure_closes_unique_handle_and_hook_reservation(
+    stage2_migrated_postgres_database,
+    failure_site: str,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id = _name("session")
+    workspace_id = _name("workspace")
+    lease = repository.acquire_host_writer(
+        session_id=session_id,
+        workspace_id=workspace_id,
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    collector = _PostCompactionHookContextCollector(
+        "optional Hook context for post-FULL ownership failure"
+    )
+    model = _CompactionScriptedModel(
+        [_text_stream("historical answer " + "x" * 80_000)],
+        "A concise handoff before the injected post-FULL failure.",
+    )
+    owner = HostCompactionRuntimeOwner(
+        policy=ResolvedCompactionPolicy(
+            automatic_enabled=False,
+            minimum_reclaim_tokens=1,
+        )
+    )
+    runner = ConversationKernelRunner(
+        repository=repository,
+        writer_lease=lease,
+        model=model,
+        tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
+        live_bus=LiveAgentEventBus(),
+        context_source_collector=collector,
+        compaction_owner=owner,
+        workspace_id=workspace_id,
+    )
+
+    async def exercise():
+        await runner.run_turn("first question")
+        if failure_site == "rotated_read":
+            read_dispatch = runner._provider_dispatch.read_dispatch_read
+
+            async def fail_adopted_read(cut, **kwargs):
+                if cut.context_binding_revision_id.startswith("context-binding:"):
+                    raise RuntimeError("injected post-rotation read failure")
+                return await read_dispatch(cut, **kwargs)
+
+            runner._provider_dispatch.read_dispatch_read = fail_adopted_read
+        else:
+
+            def fail_hook_bind(*, base, sibling):
+                del base, sibling
+                raise RuntimeError("injected Hook selection bind failure")
+
+            runner._provider_dispatch.bind_selected_provider_dispatch = fail_hook_bind
+        command_id = _name("second-command")
+        turn_id = _stable_id("turn", session_id, command_id)
+        _request, waiter = await owner.request_manual(
+            command_id=_name("compact-command"),
+            scope_kind=ModelInputScopeKind.ROOT,
+            scope_subagent_task_id=None,
+            expected_turn_id=turn_id,
+            force=True,
+        )
+        with pytest.raises(RuntimeError, match="injected"):
+            await runner.run_turn("second question", command_id=command_id)
+        outcome = await waiter
+        await owner.aclose()
+        return outcome
+
+    outcome = asyncio.run(exercise())
+
+    assert outcome.disposition is CompactionDisposition.COMPACTED
+    assert runner._safe_point._active_handle is None  # noqa: SLF001
+    assert len(model.requests) == 1
+    if failure_site == "hook_bind":
+        assert len(collector.reservations) == 1
+        assert collector.reservations[0].retire_calls == 1
+    else:
+        assert collector.reservations == []
+    with provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        deadline_monotonic=monotonic() + 10,
+    ) as connection:
+        snapshot_count = connection.execute(
+            "SELECT count(*) FROM pulsara_v3.context_snapshots WHERE session_id = %s",
+            (session_id,),
+        ).fetchone()[0]
+    assert snapshot_count == 1
 
 
 def test_round5b_proactive_auto_compaction_runs_before_next_provider_open(
@@ -2034,7 +3548,11 @@ def test_round5b_proactive_auto_compaction_runs_before_next_provider_open(
     summary = "A concise free-form handoff for the pending manual request."
     model = _LimitedCompactionScriptedModel(
         [
-            _text_stream("historical " + "x" * 100_000),
+            # The final-wire estimator traverses JSON at two characters per
+            # token.  Keep the combined source over budget while allowing the
+            # historical prefix and the post-compaction active request to fit
+            # independently.
+            _text_stream("historical " + "x" * 60_000),
             _text_stream("automatic compaction final"),
         ],
         summary,
@@ -2063,19 +3581,14 @@ def test_round5b_proactive_auto_compaction_runs_before_next_provider_open(
     runner._provider_dispatch._input_reader = input_reader
     runner.compaction._input_reader = input_reader
     triggers: list[object] = []
-    overbudget_sources: list[tuple[int, int]] = []
+    trigger_candidates: list[AutomaticCompactionTriggerCandidate] = []
+    source_wire_quotes: list[tuple[int, int]] = []
     prepare_precompile = runner.compaction.prepare_precompile
 
     async def record_precompile(**kwargs):
         decision = await prepare_precompile(**kwargs)
-        prepared = decision.compaction
-        if prepared is not None:
-            overbudget_sources.append(
-                (
-                    prepared.source_view.provider_projection.final_estimate.total_input_tokens,
-                    prepared.source_view.normal_compile_binding.effective_input_budget_tokens,
-                )
-            )
+        if isinstance(decision, AutomaticCompactionTriggerCandidate):
+            trigger_candidates.append(decision)
         return decision
 
     runner.compaction.prepare_precompile = record_precompile
@@ -2086,10 +3599,33 @@ def test_round5b_proactive_auto_compaction_runs_before_next_provider_open(
         return await execute(**kwargs)
 
     runner.compaction.execute_active = record_trigger
+    automatic_order: list[str] = []
+    prepare_source = runner._provider_dispatch.prepare_compaction_source
+    run_fenced = owner.run_fenced
+
+    async def record_source(**kwargs):
+        automatic_order.append("source")
+        prepared = await prepare_source(**kwargs)
+        source_wire_quotes.append(
+            (
+                prepared.wire_quote.final_wire_estimated_input_tokens,
+                prepared.wire_quote.effective_input_budget_tokens,
+            )
+        )
+        return prepared
+
+    async def record_fence(*args, **kwargs):
+        automatic_order.append("fence")
+        return await run_fenced(*args, **kwargs)
+
+    runner._provider_dispatch.prepare_compaction_source = record_source
+    owner.run_fenced = record_fence
 
     async def exercise():
         first = await runner.run_turn("first")
-        second = await runner.run_turn("y" * 100_000)
+        automatic_order.clear()
+        source_wire_quotes.clear()
+        second = await runner.run_turn("y" * 40_000)
         await owner.aclose()
         return first, second
 
@@ -2098,12 +3634,13 @@ def test_round5b_proactive_auto_compaction_runs_before_next_provider_open(
     assert first.final_text.startswith("historical")
     assert second.final_text == "automatic compaction final"
     assert triggers == [CompactionTrigger.AUTO_ACTIVE_CONTEXT]
-    assert len(overbudget_sources) == 1
-    assert overbudget_sources[0][0] > overbudget_sources[0][1]
+    assert automatic_order == ["source", "fence", "source"]
+    assert len(trigger_candidates) == 1
+    assert source_wire_quotes[0][0] > source_wire_quotes[0][1]
     assert len(model.summary_transport.contexts) == 1
     assert (
         model.summary_transport.contexts[0].compiler_estimated_input_tokens
-        <= (overbudget_sources[0][1])
+        <= (source_wire_quotes[0][1])
     )
     assert len(model.requests) == 2
     successor_snapshot = _context_snapshot_payload(model.requests[1])
@@ -2113,7 +3650,7 @@ def test_round5b_proactive_auto_compaction_runs_before_next_provider_open(
     assert active_request["text"] is None
     assert (
         sum(
-            message.content == ("y" * 100_000,)
+            message.content == ("y" * 40_000,)
             for message in model.requests[1].compiled_input.messages
         )
         == 1
@@ -4115,6 +5652,10 @@ def test_round5a2_selected_corruption_fails_before_open_but_incompatible_target_
         live_bus=LiveAgentEventBus(),
         context_source_collector=StaticContextSourceCollector(),
     )
+    cold_reader = _RecordingReplayHydrationReader(
+        cold_runner._provider_dispatch._input_reader
+    )
+    cold_runner._provider_dispatch._input_reader = cold_reader
     cold = asyncio.run(cold_runner.run_turn("incompatible target uses public history"))
     assert cold.final_text == "chat final"
     assert len(cold_model.requests) == 1
@@ -4123,6 +5664,8 @@ def test_round5a2_selected_corruption_fails_before_open_but_incompatible_target_
         cold_model.requests[0].wire_input_plan.provider_replay_hydration_fingerprint
         is None
     )
+    assert len(cold_reader.hydration_deadlines) == 1
+    assert cold_reader.hydration_selected_counts == [0]
 
 
 @pytest.mark.parametrize(
@@ -4708,7 +6251,9 @@ def test_round10_sole_report_result_atomically_completes_child_without_second_mo
     finally:
         handle.close()
     assert materialized.items[-1].text == "exact explicit summary"
-    assert materialized.items[-1].input_origin is CanonicalInputOriginKind.SUBAGENT_RESULT
+    assert (
+        materialized.items[-1].input_origin is CanonicalInputOriginKind.SUBAGENT_RESULT
+    )
 
 
 def test_round10_mixed_report_batch_has_zero_attempt_and_physical_effect_then_recovers(

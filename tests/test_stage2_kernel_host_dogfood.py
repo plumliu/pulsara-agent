@@ -57,6 +57,12 @@ class _DogfoodModelPort:
     def plan_wire_input(self, **kwargs):
         return self._delegate.plan_wire_input(**kwargs)
 
+    def freeze_wire_measurement(self, **kwargs):
+        return self._delegate.freeze_wire_measurement(**kwargs)
+
+    def replay_target_for_resolved_call(self, call):
+        return self._delegate.replay_target_for_resolved_call(call)
+
     def preflight_execution(self, request, **kwargs):
         return self._delegate.preflight_execution(request, **kwargs)
 
@@ -98,6 +104,12 @@ class _SteerModelPort:
 
     def plan_wire_input(self, **kwargs):
         return self._delegate.plan_wire_input(**kwargs)
+
+    def freeze_wire_measurement(self, **kwargs):
+        return self._delegate.freeze_wire_measurement(**kwargs)
+
+    def replay_target_for_resolved_call(self, call):
+        return self._delegate.replay_target_for_resolved_call(call)
 
     def preflight_execution(self, request, **kwargs):
         return self._delegate.preflight_execution(request, **kwargs)

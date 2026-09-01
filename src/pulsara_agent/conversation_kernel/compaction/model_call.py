@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from enum import StrEnum
 from threading import Lock
 
@@ -22,30 +22,32 @@ from pulsara_agent.conversation_kernel.compaction.contracts import (
 from pulsara_agent.conversation_kernel.compaction.prompt import (
     summary_request_fingerprint,
 )
-from pulsara_agent.conversation_kernel.direct_model import DirectKernelModelPort
+from pulsara_agent.conversation_kernel.provider_dispatch import (
+    PreparedWireMeasurementDecision,
+)
+from pulsara_agent.conversation_kernel.direct_model import (
+    provider_wire_profile_fingerprint,
+)
 from pulsara_agent.llm.input import LLMMessage, LLMToolCall, MessageRole, ToolSpec
 from pulsara_agent.llm.estimator import TokenEstimate
 from pulsara_agent.llm.request import (
+    MAXIMUM_PROVIDER_WIRE_INPUT_BYTES,
     FrozenProviderWireInputPlan,
     LLMContext,
     provider_wire_input_plan_identity_fingerprint,
 )
 from pulsara_agent.llm.resolution import ResolvedModelCall
-from pulsara_agent.llm.validation import validate_model_context_for_call
-from pulsara_agent.model_input.compiler import COMPILER_CONTRACT_VERSION
-from pulsara_agent.model_input.continuity import provider_input_logical_utf8_bytes
+from pulsara_agent.llm.validation import validate_model_context_shape_for_call
 from pulsara_agent.model_input.contracts import (
-    ContextCompileBudgetReport,
+    CanonicalModelInputIdentity,
     FrozenCompiledMessagePlacement,
-    FrozenCompiledModelInput,
     FrozenModelInputSemanticProjection,
+    FrozenToolSpec,
     ModelInputCompileBinding,
-    ToolResultProviderRenderMode,
     compiled_message_placements_fingerprint,
-    frozen_compiled_model_input_fingerprint,
 )
 from pulsara_agent.model_input.provider_replay import (
-    FrozenSelectedDurableProviderReplayHydration,
+    FrozenCanonicalProviderDispatchRead,
 )
 from pulsara_agent.ports.provider_stream import (
     ProviderModelExecutionFailed,
@@ -76,15 +78,108 @@ class RawCompactionSummaryResponse:
 
 
 @dataclass(frozen=True, slots=True)
+class PreparedCompactionSummarySemanticInput:
+    """Ephemeral structural input; semantic over-budget is intentionally legal."""
+
+    context_id: str
+    canonical_input_identity: CanonicalModelInputIdentity = field(repr=False)
+    system_prompt: str = field(repr=False)
+    messages: tuple[LLMMessage, ...] = field(repr=False)
+    message_placements: tuple[FrozenCompiledMessagePlacement, ...] = field(repr=False)
+    tools: tuple[FrozenToolSpec, ...] = field(repr=False)
+    final_estimate: TokenEstimate
+    compile_binding_fingerprint: str
+    compiled_semantic_fingerprint: str
+
+    def __post_init__(self) -> None:
+        if not self.context_id or len(self.message_placements) != len(self.messages):
+            raise ValueError("summary semantic input shape is invalid")
+        if tuple(item.message_ordinal for item in self.message_placements) != tuple(
+            range(len(self.messages))
+        ):
+            raise ValueError("summary semantic placement order is invalid")
+        if any(
+            placement.role is not message.role
+            for placement, message in zip(
+                self.message_placements, self.messages, strict=True
+            )
+        ):
+            raise ValueError("summary semantic placement role drifted")
+        if len(self.final_estimate.message_tokens_by_index) != len(self.messages):
+            raise ValueError("summary semantic token breakdown is invalid")
+        for value in (
+            self.compile_binding_fingerprint,
+            self.compiled_semantic_fingerprint,
+        ):
+            if not value.startswith("sha256:"):
+                raise ValueError("summary semantic fingerprint is invalid")
+
+
+@dataclass(frozen=True, slots=True)
 class PreparedCompactionSummarySemantic:
     call: ResolvedModelCall = field(repr=False)
     source_view: FrozenCompactionSourceView = field(repr=False)
+    source_projection: FrozenModelInputSemanticProjection = field(repr=False)
     prefix_proof: ProviderPrefixCutProof
     compile_binding: ModelInputCompileBinding = field(repr=False)
     native_projection_set: FrozenNativeToolProjectionSet = field(repr=False)
     summary_request: str = field(repr=False)
-    compiled_input: FrozenCompiledModelInput = field(repr=False)
+    semantic_input: PreparedCompactionSummarySemanticInput = field(repr=False)
     semantic_fingerprint: str
+
+    def __post_init__(self) -> None:
+        source = self.source_projection
+        compiled = self.semantic_input
+        binding = self.compile_binding
+        count = self.prefix_proof.summary_prefix_message_count
+        expected_request = LLMMessage.user(self.summary_request)
+        expected_request_placement = _synthetic_summary_placement(
+            message_ordinal=count,
+            proof=self.prefix_proof,
+            summary_request=self.summary_request,
+        )
+        if (
+            self.call.fact.purpose is not ModelCallPurpose.CONTEXT_COMPACTION_SUMMARY
+            or self.call.target.fact != binding.target_fact
+            or source.canonical_input_identity
+            != self.source_view.canonical_dispatch_read.compile_snapshot.canonical_input.identity
+            or source.system_prompt != self.source_view.materialized_system_prompt()
+            or source.messages != self.source_view.materialized_messages()
+            or source.tools != binding.tool_surface.tool_specs
+            or source.compile_binding_fingerprint != binding.binding_fingerprint
+            or self.prefix_proof.source_view_fingerprint
+            != self.source_view.source_view_fingerprint
+            or not self.summary_request
+            or not 0 < count <= len(source.messages)
+            or compaction_summary_message_prefix_fingerprint(source.messages[:count])
+            != self.prefix_proof.summary_prefix_messages_fingerprint
+            or compiled.canonical_input_identity != source.canonical_input_identity
+            or compiled.system_prompt != source.system_prompt
+            or compiled.tools != source.tools
+            or compiled.compile_binding_fingerprint != binding.binding_fingerprint
+            or len(compiled.messages) < count + 1
+            or compiled.messages[:count] != source.messages[:count]
+            or compiled.message_placements[:count] != source.message_placements[:count]
+            or compiled.messages[count] != expected_request
+            or compiled.message_placements[count] != expected_request_placement
+            or not self.semantic_fingerprint.startswith("sha256:")
+        ):
+            raise ValueError("summary semantic carrier does not exact-join")
+        estimate = binding.estimator.estimate_frozen_input(
+            system_prompt=compiled.system_prompt,
+            messages=compiled.messages,
+            tools=compiled.tools,
+        )
+        if estimate != compiled.final_estimate:
+            raise ValueError("summary semantic estimate changed")
+
+    @property
+    def canonical_read(self) -> FrozenCanonicalProviderDispatchRead:
+        return self.source_view.canonical_dispatch_read
+
+    @property
+    def tool_choice(self) -> str:
+        return "auto"
 
 
 class PreparedCompactionSummaryCall:
@@ -97,7 +192,7 @@ class PreparedCompactionSummaryCall:
         wire_input_plan: FrozenProviderWireInputPlan,
     ) -> None:
         call = semantic.call
-        compiled = semantic.compiled_input
+        compiled = semantic.semantic_input
         if (
             call.fact.purpose is not ModelCallPurpose.CONTEXT_COMPACTION_SUMMARY
             or wire_input_plan.compiled_semantic_fingerprint
@@ -128,9 +223,18 @@ class PreparedCompactionSummaryCall:
             provider_wire_input_plan=wire_input_plan,
             tool_choice="auto",
         )
-        validation = validate_model_context_for_call(call=call, context=context)
-        if validation.estimate != compiled.final_estimate:
-            raise ValueError("summary pre-send estimate differs from its compile")
+        validate_model_context_shape_for_call(call=call, context=context)
+        if (
+            semantic.compile_binding.estimator.estimate_frozen_input(
+                system_prompt=compiled.system_prompt,
+                messages=compiled.messages,
+                tools=compiled.tools,
+            )
+            != compiled.final_estimate
+        ):
+            raise ValueError(
+                "summary pre-send estimate differs from its semantic input"
+            )
         self._semantic = semantic
         self._wire_input_plan = wire_input_plan
         self._context = context
@@ -301,53 +405,6 @@ def prepare_compaction_summary_semantic(
         messages=messages,
         tools=source_projection.tools,
     )
-    if estimate.total_input_tokens > binding.effective_input_budget_tokens:
-        raise ValueError("summary slice exceeds the resolved input budget")
-    prefix_bytes = provider_input_logical_utf8_bytes(
-        system_prompt="", tools=(), messages=prefix
-    )
-    report = ContextCompileBudgetReport(
-        compiler_contract_version=COMPILER_CONTRACT_VERSION,
-        estimator_fingerprint=binding.estimator_fingerprint,
-        target_fingerprint=binding.target_fact.target_fingerprint,
-        tool_surface_fingerprint=binding.tool_surface.surface_fingerprint,
-        effective_input_budget_tokens=binding.effective_input_budget_tokens,
-        system_tokens=estimate.system_tokens,
-        message_tokens=estimate.message_tokens,
-        tool_tokens=estimate.tool_tokens,
-        envelope_tokens=estimate.envelope_tokens,
-        total_input_tokens=estimate.total_input_tokens,
-        protected_transcript_tokens=sum(estimate.message_tokens_by_index[:count]),
-        protected_prefix_message_count=count,
-        protected_prefix_logical_utf8_bytes=prefix_bytes,
-        protected_prefix_fingerprint=(prefix_proof.summary_prefix_messages_fingerprint),
-        context_source_tokens=sum(
-            item.estimated_tokens for item in source_projection.source_decisions
-        ),
-        degraded_source_count=sum(
-            item.included and item.reason_code != "SELECTED_FULL"
-            for item in source_projection.source_decisions
-        ),
-        omitted_source_count=sum(
-            not item.included for item in source_projection.source_decisions
-        ),
-        degraded_tool_result_count=sum(
-            item.selected_mode is not item.first_legal_mode
-            for item in source_projection.tool_result_decisions
-        ),
-        omitted_tool_result_body_count=sum(
-            item.selected_mode is ToolResultProviderRenderMode.OMITTED_BODY
-            for item in source_projection.tool_result_decisions
-        ),
-        decision_digest=context_fingerprint(
-            "pulsara.compaction-summary-compile-decisions.v1",
-            {
-                "source": source_view.source_view_fingerprint,
-                "prefix": prefix_proof.proof_fingerprint,
-                "prompt": summary_request_fingerprint(summary_request),
-            },
-        ),
-    )
     context_id = context_fingerprint(
         "pulsara.compaction-summary-context-id.v1",
         {
@@ -364,23 +421,20 @@ def prepare_compaction_summary_semantic(
         "message_placements": placements,
         "tools": source_projection.tools,
         "final_estimate": estimate,
-        "source_decisions": source_projection.source_decisions,
-        "tool_result_decisions": source_projection.tool_result_decisions,
-        "budget_report": report,
-        "diagnostic_codes": source_projection.diagnostic_codes,
-        "source_collection_fingerprint": (
-            source_projection.source_collection_fingerprint
-        ),
         "compile_binding_fingerprint": binding.binding_fingerprint,
     }
-    compiled = FrozenCompiledModelInput(
+    compiled = PreparedCompactionSummarySemanticInput(
         **values,
-        compiled_semantic_fingerprint=frozen_compiled_model_input_fingerprint(
-            **{
-                key: value
-                for key, value in values.items()
-                if key != "message_placements"
-            }
+        compiled_semantic_fingerprint=context_fingerprint(
+            "pulsara.compaction-summary-semantic-input.v1",
+            {
+                "context": context_id,
+                "canonical": source_projection.canonical_input_identity.identity_fingerprint,
+                "messages": compaction_summary_message_prefix_fingerprint(messages),
+                "placements": compiled_message_placements_fingerprint(placements),
+                "estimate": _estimate_value(estimate),
+                "binding": binding.binding_fingerprint,
+            },
         ),
     )
     semantic_fingerprint = context_fingerprint(
@@ -397,29 +451,41 @@ def prepare_compaction_summary_semantic(
     return PreparedCompactionSummarySemantic(
         call=call,
         source_view=source_view,
+        source_projection=source_projection,
         prefix_proof=prefix_proof,
         compile_binding=binding,
         native_projection_set=native_projection_set,
         summary_request=summary_request,
-        compiled_input=compiled,
+        semantic_input=compiled,
         semantic_fingerprint=semantic_fingerprint,
     )
 
 
-def finalize_compaction_summary_call(
+def promote_compaction_summary_call(
     semantic: PreparedCompactionSummarySemantic,
     *,
-    replay_hydration: FrozenSelectedDurableProviderReplayHydration | None,
+    decision: PreparedWireMeasurementDecision,
     predecessor_summary_wire_plan: FrozenProviderWireInputPlan | None = None,
 ) -> PreparedCompactionSummaryCall:
-    plan = DirectKernelModelPort.plan_compaction_wire_input(
-        summary_call=semantic.call,
-        compile_binding=semantic.compile_binding,
-        native_projection_set=semantic.native_projection_set,
-        compiled_input=semantic.compiled_input,
-        predecessor_view=semantic.source_view.predecessor_epoch_view,
-        replay_hydration=replay_hydration,
-    )
+    if decision.candidate is not semantic:
+        raise ValueError("summary wire decision belongs to another candidate")
+    plan = decision.wire_input_plan
+    if plan is None:
+        raise ValueError("summary wire decision is not executable")
+    if (
+        plan.quote is not decision.quote
+        or plan.wire_api != semantic.call.target.model_profile.provider_profile.wire_api
+        or plan.provider_profile_fingerprint
+        != provider_wire_profile_fingerprint(semantic.call)
+        or decision.quote.estimator_fingerprint
+        != semantic.compile_binding.estimator_fingerprint
+        or decision.quote.effective_input_budget_tokens
+        != semantic.compile_binding.effective_input_budget_tokens
+        or decision.quote.final_wire_estimated_input_tokens
+        > decision.quote.effective_input_budget_tokens
+        or decision.quote.final_wire_utf8_bytes > MAXIMUM_PROVIDER_WIRE_INPUT_BYTES
+    ):
+        raise ValueError("summary wire decision failed hard admission")
     if predecessor_summary_wire_plan is None:
         _require_summary_wire_prefix(semantic, plan)
     else:
@@ -458,7 +524,7 @@ def prepare_compaction_summary_repair_semantic(
 
     if not tool_calls:
         raise ValueError("summary repair requires at least one denied tool call")
-    compiled = initial.compiled_input
+    compiled = initial.semantic_input
     suffix = (
         LLMMessage.assistant_turn(tool_calls=tool_calls),
         *tuple(
@@ -495,23 +561,6 @@ def prepare_compaction_summary_repair_semantic(
         messages=messages,
         tools=compiled.tools,
     )
-    if estimate.total_input_tokens > binding.effective_input_budget_tokens:
-        raise ValueError("summary repair exceeds the resolved input budget")
-    report = replace(
-        compiled.budget_report,
-        system_tokens=estimate.system_tokens,
-        message_tokens=estimate.message_tokens,
-        tool_tokens=estimate.tool_tokens,
-        envelope_tokens=estimate.envelope_tokens,
-        total_input_tokens=estimate.total_input_tokens,
-        decision_digest=context_fingerprint(
-            "pulsara.compaction-summary-repair-decisions.v1",
-            {
-                "initial": initial.semantic_fingerprint,
-                "tool_calls": tool_calls_fingerprint,
-            },
-        ),
-    )
     values = {
         "context_id": context_fingerprint(
             "pulsara.compaction-summary-repair-context-id.v1",
@@ -526,21 +575,22 @@ def prepare_compaction_summary_repair_semantic(
         "message_placements": frozen_placements,
         "tools": compiled.tools,
         "final_estimate": estimate,
-        "source_decisions": compiled.source_decisions,
-        "tool_result_decisions": compiled.tool_result_decisions,
-        "budget_report": report,
-        "diagnostic_codes": compiled.diagnostic_codes,
-        "source_collection_fingerprint": compiled.source_collection_fingerprint,
         "compile_binding_fingerprint": compiled.compile_binding_fingerprint,
     }
-    repaired = FrozenCompiledModelInput(
+    repaired = PreparedCompactionSummarySemanticInput(
         **values,
-        compiled_semantic_fingerprint=frozen_compiled_model_input_fingerprint(
-            **{
-                key: value
-                for key, value in values.items()
-                if key != "message_placements"
-            }
+        compiled_semantic_fingerprint=context_fingerprint(
+            "pulsara.compaction-summary-repair-semantic-input.v1",
+            {
+                "context": values["context_id"],
+                "canonical": compiled.canonical_input_identity.identity_fingerprint,
+                "messages": compaction_summary_message_prefix_fingerprint(messages),
+                "placements": compiled_message_placements_fingerprint(
+                    frozen_placements
+                ),
+                "estimate": _estimate_value(estimate),
+                "binding": compiled.compile_binding_fingerprint,
+            },
         ),
     )
     semantic_fingerprint = context_fingerprint(
@@ -554,11 +604,12 @@ def prepare_compaction_summary_repair_semantic(
     return PreparedCompactionSummarySemantic(
         call=initial.call,
         source_view=initial.source_view,
+        source_projection=initial.source_projection,
         prefix_proof=initial.prefix_proof,
         compile_binding=initial.compile_binding,
         native_projection_set=initial.native_projection_set,
         summary_request=initial.summary_request,
-        compiled_input=repaired,
+        semantic_input=repaired,
         semantic_fingerprint=semantic_fingerprint,
     )
 
@@ -581,8 +632,10 @@ def _require_summary_wire_prefix(
     # The synthetic request lowers to one final user item on both supported APIs.
     actual_prefix = new.ordered_input_items[:-1]
     old_items = old.ordered_input_items
-    overlap = min(len(actual_prefix), len(old_items))
-    if actual_prefix[:overlap] != old_items[:overlap]:
+    if (
+        len(actual_prefix) < len(old_items)
+        or actual_prefix[: len(old_items)] != old_items
+    ):
         raise ValueError("summary actual wire input rewrote the installed prefix")
 
 
@@ -659,8 +712,9 @@ def _estimate_value(estimate: TokenEstimate) -> dict[str, object]:
 __all__ = [
     "PreparedCompactionSummaryCall",
     "PreparedCompactionSummarySemantic",
+    "PreparedCompactionSummarySemanticInput",
     "RawCompactionSummaryResponse",
-    "finalize_compaction_summary_call",
+    "promote_compaction_summary_call",
     "prepare_compaction_summary_repair_semantic",
     "prepare_compaction_summary_semantic",
 ]

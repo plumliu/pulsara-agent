@@ -281,6 +281,14 @@ message SubagentTaskControl {
   string terminal_public_detail = 20;
 }
 
+message ContextCompactionControl {
+  string turn_id = 1;
+  string context_binding_revision_id = 2;
+  uint64 source_through_sequence = 3;
+  uint64 adopted_after_entry_sequence = 4;
+  string accepted_at_utc = 5;
+}
+
 message CanonicalControl {
   string session_lifecycle = 1;
   repeated ActiveTurnControl active_turns = 2;
@@ -292,6 +300,7 @@ message CanonicalControl {
   PlanWorkflowControl active_plan_workflow = 9;
   PlanInteractionControl open_plan_interaction = 10;
   PlanHandoffControl latest_plan_handoff = 11;
+  ContextCompactionControl latest_context_compaction = 12;
 }
 
 message HistoryCursor {

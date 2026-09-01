@@ -1083,6 +1083,43 @@ describe('PulsaraApp', () => {
 
     expect(await screen.findByText('无需整理上下文')).toBeTruthy();
     expect(screen.getByText('当前上下文已经较紧凑，本次整理无法进一步缩小。')).toBeTruthy();
+    expect(screen.queryByRole('separator', { name: '上下文已压缩' })).toBeNull();
+  });
+
+  it('places the adopted context boundary between old and successor messages', async () => {
+    const adapter = new FakeAdapter();
+    adapter.connectionValue = {
+      ...projection(),
+      messages: [{
+        id: 'before-compaction',
+        entrySequence: 1,
+        role: 'user',
+        time: '10:00',
+        body: '压缩前的消息',
+      }, {
+        id: 'after-compaction',
+        entrySequence: 2,
+        role: 'user',
+        time: '10:01',
+        body: '压缩后的消息',
+      }],
+      contextCompaction: {
+        contextBindingRevisionId: 'revision-1',
+        turnId: 'turn-1',
+        sourceThroughSequence: 1,
+        adoptedAfterEntrySequence: 1,
+        acceptedAt: '2026-09-01T10:00:30Z',
+      },
+    };
+    render(<PulsaraApp adapter={adapter} />);
+
+    const before = await screen.findByText('压缩前的消息');
+    const divider = screen.getByRole('separator', { name: '上下文已压缩' });
+    const after = screen.getByText('压缩后的消息');
+
+    expect(before.compareDocumentPosition(divider) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(divider.compareDocumentPosition(after) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(divider.querySelectorAll('.context-compaction-divider__line')).toHaveLength(2);
   });
 
   it('shows provider reasoning as an expandable full or summary disclosure', async () => {

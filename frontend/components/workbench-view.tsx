@@ -32,8 +32,9 @@ import {
   WandSparkles,
   Zap,
 } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
+  ContextCompactionBoundary,
   RuntimeInteractionContent,
   RuntimeInteractionResolution,
   RuntimeInteractionSummary,
@@ -46,6 +47,7 @@ interface WorkbenchViewProps {
   workspace: Workspace;
   session: SessionSummary;
   messages: Message[];
+  contextCompaction?: ContextCompactionBoundary;
   todo?: TodoRun;
   activePlanMode: boolean;
   isRunning: boolean;
@@ -533,10 +535,14 @@ function AssistantMessage({
   );
 }
 
-function findAssistantRunStarts(messages: Message[]): ReadonlySet<string> {
+function findAssistantRunStarts(
+  messages: Message[],
+  contextCompactionIndex = -1,
+): ReadonlySet<string> {
   const starts = new Set<string>();
   let assistantRunOpen = false;
-  for (const message of messages) {
+  for (const [index, message] of messages.entries()) {
+    if (index === contextCompactionIndex) assistantRunOpen = false;
     if (message.role === 'user') {
       if (message.userKind !== 'steer') assistantRunOpen = false;
       continue;
@@ -547,7 +553,7 @@ function findAssistantRunStarts(messages: Message[]): ReadonlySet<string> {
   return starts;
 }
 
-function findToolChainConnections(messages: Message[]): {
+function findToolChainConnections(messages: Message[], contextCompactionIndex = -1): {
   before: ReadonlySet<string>;
   after: ReadonlySet<string>;
 } {
@@ -562,6 +568,7 @@ function findToolChainConnections(messages: Message[]): {
     && !message.subagentRuns?.length;
 
   for (let index = 1; index < messages.length; index += 1) {
+    if (index === contextCompactionIndex) continue;
     const previous = messages[index - 1];
     const current = messages[index];
     if (!endsWithTools(previous) || !startsWithTools(current)) continue;
@@ -715,10 +722,25 @@ function InteractionCard({
   );
 }
 
+function ContextCompactionDivider() {
+  return (
+    <div
+      className="context-compaction-divider"
+      role="separator"
+      aria-label="上下文已压缩"
+    >
+      <span className="context-compaction-divider__line" aria-hidden="true" />
+      <span>上下文已压缩</span>
+      <span className="context-compaction-divider__line" aria-hidden="true" />
+    </div>
+  );
+}
+
 export function WorkbenchView({
   workspace,
   session,
   messages,
+  contextCompaction,
   todo,
   activePlanMode,
   isRunning,
@@ -764,8 +786,27 @@ export function WorkbenchView({
   const composerComposingRef = useRef(false);
   const wordCount = draft.trim().length;
   const lastMessageLength = messages.at(-1)?.body.length ?? 0;
-  const assistantRunStarts = useMemo(() => findAssistantRunStarts(messages), [messages]);
-  const toolChainConnections = useMemo(() => findToolChainConnections(messages), [messages]);
+  const contextCompactionIndex = useMemo(() => {
+    if (!contextCompaction) return -1;
+    const nextCanonical = messages.findIndex((message) => (
+      message.entrySequence !== undefined
+      && message.entrySequence > contextCompaction.adoptedAfterEntrySequence
+    ));
+    if (nextCanonical >= 0) return nextCanonical;
+    let lastCanonical = -1;
+    messages.forEach((message, index) => {
+      if (message.entrySequence !== undefined) lastCanonical = index;
+    });
+    return lastCanonical + 1;
+  }, [contextCompaction, messages]);
+  const assistantRunStarts = useMemo(
+    () => findAssistantRunStarts(messages, contextCompactionIndex),
+    [contextCompactionIndex, messages],
+  );
+  const toolChainConnections = useMemo(
+    () => findToolChainConnections(messages, contextCompactionIndex),
+    [contextCompactionIndex, messages],
+  );
 
   const insertSkill = useCallback((name: string) => {
     const marker = `$${name}`;
@@ -968,21 +1009,30 @@ export function WorkbenchView({
               <span>{session.id ? '在下方输入目标，Pulsara 会立即开始处理。' : '新建会话后，任务进展和回复会持续显示在这里。'}</span>
             </div>
           )}
-          {messages.map((message) => message.role === 'user'
-            ? <UserMessage key={message.id} message={message} />
-            : (
-              <AssistantMessage
-                key={message.id}
-                message={message}
-                startsAssistantRun={assistantRunStarts.has(message.id)}
-                joinsPreviousToolChain={toolChainConnections.before.has(message.id)}
-                joinsNextToolChain={toolChainConnections.after.has(message.id)}
-                focusTaskId={focusTaskId}
-                focusTaskRevision={focusTaskRevision}
-                focusTaskHighlighted={focusTaskHighlighted}
-                onNotify={onNotify}
-              />
-            ))}
+          {messages.map((message, index) => (
+            <Fragment key={message.id}>
+              {contextCompactionIndex === index && contextCompaction && (
+                <ContextCompactionDivider />
+              )}
+              {message.role === 'user'
+                ? <UserMessage message={message} />
+                : (
+                  <AssistantMessage
+                    message={message}
+                    startsAssistantRun={assistantRunStarts.has(message.id)}
+                    joinsPreviousToolChain={toolChainConnections.before.has(message.id)}
+                    joinsNextToolChain={toolChainConnections.after.has(message.id)}
+                    focusTaskId={focusTaskId}
+                    focusTaskRevision={focusTaskRevision}
+                    focusTaskHighlighted={focusTaskHighlighted}
+                    onNotify={onNotify}
+                  />
+                )}
+            </Fragment>
+          ))}
+          {contextCompactionIndex === messages.length && contextCompaction && (
+            <ContextCompactionDivider />
+          )}
           {canControl && interaction && (
             <InteractionCard
               key={`${interaction.id}:${interaction.kind === 'tool-confirmation' ? 'live' : interaction.workflowRevision}`}

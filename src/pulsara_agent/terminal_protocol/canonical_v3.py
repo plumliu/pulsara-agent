@@ -742,6 +742,37 @@ class CanonicalProtocolReader:
             """,
             (session_id,),
         ).fetchone()
+        latest_context_compaction = connection.execute(
+            """
+            SELECT revision.turn_id,
+                   revision.id AS context_binding_revision_id,
+                   revision.source_through_sequence,
+                   event.accepted_at,
+                   coalesce((
+                       SELECT max(entry.entry_sequence)
+                       FROM pulsara_v3.agent_events AS prior
+                       JOIN pulsara_v3.transcript_entries AS entry
+                         ON entry.session_id = prior.session_id
+                        AND entry.id = prior.subject_entry_id
+                       WHERE prior.session_id = event.session_id
+                         AND prior.event_sequence < event.event_sequence
+                         AND entry.conversation_scope_kind = 'ROOT'
+                   ), 0) AS adopted_after_entry_sequence
+            FROM pulsara_v3.agent_events AS event
+            JOIN pulsara_v3.turn_context_binding_revisions AS revision
+              ON revision.session_id = event.session_id
+             AND revision.id = event.subject_context_binding_revision_id
+            JOIN pulsara_v3.turns AS turn
+              ON turn.session_id = revision.session_id
+             AND turn.id = revision.turn_id
+            WHERE event.session_id = %s
+              AND event.event_type = 'CompactionAdopted'
+              AND turn.conversation_scope_kind = 'ROOT'
+            ORDER BY event.event_sequence DESC
+            LIMIT 1
+            """,
+            (session_id,),
+        ).fetchone()
         result = wire.CanonicalControl(
             session_lifecycle=lifecycle,
             prompt_queue_total_count=queue_total,
@@ -882,6 +913,22 @@ class CanonicalProtocolReader:
                     resume_permission_mode=_permission_mode(
                         str(latest_handoff["resume_permission_mode"])
                     ),
+                )
+            )
+        if latest_context_compaction is not None:
+            result.latest_context_compaction.CopyFrom(
+                wire.ContextCompactionControl(
+                    turn_id=str(latest_context_compaction["turn_id"]),
+                    context_binding_revision_id=str(
+                        latest_context_compaction["context_binding_revision_id"]
+                    ),
+                    source_through_sequence=int(
+                        latest_context_compaction["source_through_sequence"]
+                    ),
+                    adopted_after_entry_sequence=int(
+                        latest_context_compaction["adopted_after_entry_sequence"]
+                    ),
+                    accepted_at_utc=_utc(latest_context_compaction["accepted_at"]),
                 )
             )
         return result

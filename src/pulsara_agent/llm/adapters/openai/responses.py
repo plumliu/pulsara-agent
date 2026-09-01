@@ -291,41 +291,111 @@ def build_responses_payload(
     if plan is not None:
         if plan.wire_api != OPENAI_RESPONSES_API:
             raise ValueError("provider wire plan API does not match Responses")
-        root = thaw_json(plan.materialization.root_policy_value)
-        if root is not None and not isinstance(root, str):
-            raise TypeError("Responses root policy must be text or null")
-        wire_input = _thaw_wire_objects(plan.materialization.ordered_input_items)
-        planned_tools = _thaw_wire_objects(plan.materialization.tool_items)
+        context_fields = thaw_json(plan.materialization.context_bearing_projection)
+        if not isinstance(context_fields, dict):
+            raise TypeError("Responses context projection must be an object")
+        if context_fields.get("tool_choice") != context.tool_choice:
+            raise ValueError(
+                "Responses context tool choice changed after wire planning"
+            )
     else:
-        root = context.system_prompt
-        wire_input = _messages_to_responses_inputs(context.messages)
-        planned_tools = [_tool_to_responses_tool(tool) for tool in context.tools]
+        context_fields = materialize_responses_context_bearing_wire_projection(
+            call=call,
+            root_policy=context.system_prompt,
+            ordered_input_items=tuple(_messages_to_responses_inputs(context.messages)),
+            tool_items=tuple(_tool_to_responses_tool(tool) for tool in context.tools),
+            tool_choice=context.tool_choice,
+        )
     # Manual full-history replay is the only correctness authority.  Keeping
     # Responses stateless also makes encrypted reasoning carriers observable
     # on providers that support zero-retention/manual-history operation; a
     # remote response ID is never needed or accepted by the Kernel.
-    payload: dict[str, Any] = {
-        "model": model.id,
-        "input": wire_input,
-        "store": False,
-    }
     provider_profile = model.provider_profile
+    payload: dict[str, Any] = dict(context_fields)
+    extra_body: dict[str, Any] = {}
+    for key, value in provider_profile.request_extra_body.items():
+        materialized_value = mutable_provider_value(value)
+        if context_fields.get(key) != materialized_value:
+            raise ValueError("Responses extra-body context changed after wire planning")
+        extra_body[key] = context_fields[key]
+        payload.pop(key, None)
+    payload.update(
+        {
+            "model": model.id,
+            "store": False,
+        }
+    )
     for key, value in provider_profile.request_defaults.items():
         payload.setdefault(key, mutable_provider_value(value))
-    if root:
-        payload["instructions"] = root
-    if planned_tools and provider_profile.supports_tools:
-        payload["tools"] = planned_tools
-    if context.tool_choice is not None:
-        payload["tool_choice"] = context.tool_choice
     payload["max_output_tokens"] = call.target.context_budget.effective_output_tokens
     if options.reasoning_effort is not None:
         payload["reasoning"] = {"effort": options.reasoning_effort}
-    if provider_profile.request_extra_body:
-        payload["extra_body"] = mutable_provider_value(
-            provider_profile.request_extra_body
-        )
+    if extra_body:
+        payload["extra_body"] = extra_body
     return payload
+
+
+_RESPONSES_NON_CONTEXT_BEARING_FIELDS = frozenset(
+    {
+        "model",
+        "stream",
+        "store",
+        "max_tokens",
+        "max_completion_tokens",
+        "max_output_tokens",
+        "reasoning",
+        "timeout",
+        "service_tier",
+        "temperature",
+        "top_p",
+    }
+)
+
+
+def materialize_responses_context_bearing_wire_projection(
+    *,
+    call: ResolvedModelCall,
+    root_policy: str | None,
+    ordered_input_items: tuple[dict[str, Any], ...],
+    tool_items: tuple[dict[str, Any], ...],
+    tool_choice: str | None = None,
+) -> dict[str, Any]:
+    """Materialize the exact Responses fields carrying provider input context."""
+
+    profile = call.target.model_profile.provider_profile
+    projection: dict[str, Any] = {"input": [dict(item) for item in ordered_input_items]}
+    for key, value in profile.request_defaults.items():
+        if key not in _RESPONSES_NON_CONTEXT_BEARING_FIELDS:
+            projection.setdefault(key, mutable_provider_value(value))
+    if root_policy:
+        projection["instructions"] = root_policy
+    if tool_items and profile.supports_tools:
+        projection["tools"] = [dict(item) for item in tool_items]
+    if tool_choice is not None:
+        projection["tool_choice"] = tool_choice
+    for key, value in profile.request_extra_body.items():
+        # The OpenAI SDK merges ``extra_body`` into the JSON body, with the
+        # extension mapping taking precedence.  Measure that final body.
+        projection[key] = mutable_provider_value(value)
+    return projection
+
+
+def project_responses_context_bearing_payload_fields(
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Project the same context fields from an actual Responses payload."""
+
+    merged = {key: value for key, value in payload.items() if key != "extra_body"}
+    extra_body = payload.get("extra_body")
+    if extra_body is not None:
+        if not isinstance(extra_body, dict):
+            raise TypeError("Responses extra_body must be an object")
+        merged.update(extra_body)
+    return {
+        key: value
+        for key, value in merged.items()
+        if key not in _RESPONSES_NON_CONTEXT_BEARING_FIELDS
+    }
 
 
 def responses_semantic_wire_group(

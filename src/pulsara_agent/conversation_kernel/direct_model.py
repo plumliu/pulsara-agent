@@ -30,6 +30,7 @@ from pulsara_agent.conversation_kernel.execution_watchdogs import (
 from pulsara_agent.llm.adapters.openai.chat_completions import (
     OpenAIChatCompletionsTransport,
     chat_semantic_wire_group,
+    materialize_chat_context_bearing_wire_projection,
 )
 from pulsara_agent.llm.adapters.openai.function_tools import (
     freeze_openai_native_tool_eligibility,
@@ -38,6 +39,7 @@ from pulsara_agent.llm.adapters.openai.function_tools import (
 )
 from pulsara_agent.llm.adapters.openai.responses import (
     OpenAIResponsesTransport,
+    materialize_responses_context_bearing_wire_projection,
     responses_semantic_wire_group,
 )
 from pulsara_agent.llm.config import LLMConfig
@@ -82,6 +84,7 @@ from pulsara_agent.model_input.contracts import (
     FrozenToolSpec,
     ModelInputScopeKind,
     ModelInputCompileBinding,
+    ProviderWireSemanticInput,
     PreparedProviderInputCut,
     compiled_message_placements_fingerprint,
     model_input_compile_binding_fingerprint,
@@ -158,10 +161,7 @@ class PreparedKernelModelTarget:
         expected_contract = openai_native_function_tool_contract_fingerprint(
             self.target.model_profile.provider_profile.wire_api
         )
-        if (
-            self.native_function_tool_wire_contract_fingerprint
-            != expected_contract
-        ):
+        if self.native_function_tool_wire_contract_fingerprint != expected_contract:
             raise ValueError("prepared model target native contract drifted")
 
 
@@ -242,8 +242,7 @@ class PreparedKernelSemanticModelCall:
             or self.call.target.fact != self.compile_binding.target_fact
             or tuple(item.name for item in specs)
             != tuple(
-                item.provider_name
-                for item in self.native_projection_set.tool_versions
+                item.provider_name for item in self.native_projection_set.tool_versions
             )
             or self.compile_binding.tool_surface.conversation_scope_kind
             is not self.native_projection_set.conversation_scope_kind
@@ -302,9 +301,7 @@ class KernelModelExecutionRequest:
                 item.wire_tool
                 for item in self.prepared_call.native_projection_set.projections
             )
-            or not self.surface_borrow.exactly_joins(
-                self.prepared_call.tool_surface
-            )
+            or not self.surface_borrow.exactly_joins(self.prepared_call.tool_surface)
         ):
             raise ValueError("model execution request is not structurally joined")
 
@@ -320,9 +317,7 @@ class _PreparedExecutionState(StrEnum):
 @dataclass(frozen=True, slots=True)
 class CompletedProviderModelExecution:
     terminal: ProviderStreamTerminal
-    replay_payload: ProviderAdapterCompletedReplayPayload | None = field(
-        repr=False
-    )
+    replay_payload: ProviderAdapterCompletedReplayPayload | None = field(repr=False)
     replay_target: ProviderReplayTargetCompatibilityFact
 
     def bind_assistant_entry(
@@ -427,7 +422,9 @@ class PreparedKernelModelExecution:
     def discard(self) -> None:
         with self._lock:
             if self._state is not _PreparedExecutionState.PREFLIGHTED:
-                raise RuntimeError("prepared model execution can no longer be discarded")
+                raise RuntimeError(
+                    "prepared model execution can no longer be discarded"
+                )
             self._state = _PreparedExecutionState.DISCARDED
 
     def take_completed_result_once(self) -> CompletedProviderModelExecution:
@@ -702,9 +699,7 @@ class DirectKernelModelPort:
         return freeze_openai_native_tool_eligibility(
             conversation_scope_kind=conversation_scope_kind,
             scope_subagent_task_id=scope_subagent_task_id,
-            wire_api=(
-                prepared_target.target.model_profile.provider_profile.wire_api
-            ),
+            wire_api=(prepared_target.target.model_profile.provider_profile.wire_api),
             tool_facts=tool_facts,
             retained_direct_inputs=retained_direct_inputs,
             deadline_monotonic=deadline_monotonic,
@@ -724,9 +719,7 @@ class DirectKernelModelPort:
         return materialize_openai_native_tool_projection_set(
             conversation_scope_kind=conversation_scope_kind,
             scope_subagent_task_id=scope_subagent_task_id,
-            wire_api=(
-                prepared_target.target.model_profile.provider_profile.wire_api
-            ),
+            wire_api=(prepared_target.target.model_profile.provider_profile.wire_api),
             tool_versions=tool_versions,
             tool_specs=tool_specs,
             eligibility=eligibility,
@@ -888,7 +881,7 @@ class DirectKernelModelPort:
             or plan.resolved_target_semantic_fingerprint
             != prepared.call.target.fact.target_fingerprint
             or plan.provider_profile_fingerprint
-            != _provider_wire_profile_fingerprint(prepared.call)
+            != provider_wire_profile_fingerprint(prepared.call)
             or plan.materialization.tool_items
             != tuple(
                 item.wire_tool for item in prepared.native_projection_set.projections
@@ -968,46 +961,40 @@ class DirectKernelModelPort:
     ) -> FrozenProviderWireInputPlan:
         """Purely freeze the exact provider wire subtree before preflight."""
 
-        return _plan_provider_wire_input(
+        measurement = freeze_provider_wire_measurement(
             call=prepared_call.call,
             binding=prepared_call.compile_binding,
             native_projection_set=prepared_call.native_projection_set,
-            compiled_input=compiled_input,
-            predecessor_view=predecessor_view,
+            semantic_input=compiled_input,
             replay_hydration=replay_hydration,
         )
+        del predecessor_view
+        return measurement.prepare_executable_plan()
 
     @staticmethod
-    def plan_compaction_wire_input(
+    def freeze_wire_measurement(
         *,
-        summary_call: ResolvedModelCall,
+        call: ResolvedModelCall,
         compile_binding: ModelInputCompileBinding,
         native_projection_set: FrozenNativeToolProjectionSet,
-        compiled_input: FrozenCompiledModelInput,
-        predecessor_view: FrozenProviderInputEpochView | None,
+        semantic_input: ProviderWireSemanticInput,
         replay_hydration: FrozenSelectedDurableProviderReplayHydration | None,
-    ) -> FrozenProviderWireInputPlan:
-        if (
-            summary_call.fact.purpose
-            is not ModelCallPurpose.CONTEXT_COMPACTION_SUMMARY
-        ):
-            raise ValueError("compaction wire planning purpose is invalid")
-        return _plan_provider_wire_input(
-            call=summary_call,
+        tool_choice: str | None = None,
+    ) -> "ProviderWireMeasurement":
+        return freeze_provider_wire_measurement(
+            call=call,
             binding=compile_binding,
             native_projection_set=native_projection_set,
-            compiled_input=compiled_input,
-            predecessor_view=predecessor_view,
+            semantic_input=semantic_input,
             replay_hydration=replay_hydration,
+            tool_choice=tool_choice,
         )
 
     @staticmethod
     def replay_target(
         prepared_call: PreparedKernelModelCall,
     ) -> ProviderReplayTargetCompatibilityFact:
-        return DirectKernelModelPort.replay_target_for_resolved_call(
-            prepared_call.call
-        )
+        return DirectKernelModelPort.replay_target_for_resolved_call(prepared_call.call)
 
     @staticmethod
     def replay_target_for_resolved_call(
@@ -1022,7 +1009,7 @@ class DirectKernelModelPort:
         )
 
 
-def _provider_wire_profile_fingerprint(call: ResolvedModelCall) -> str:
+def provider_wire_profile_fingerprint(call: ResolvedModelCall) -> str:
     profile = call.target.model_profile.provider_profile
     return context_fingerprint(
         "pulsara.provider-wire-profile:v1",
@@ -1075,9 +1062,7 @@ def _completed_replay_public_projection_fingerprint(
                 arguments=function.get("arguments"),
             )
             calls.append(call)
-            ordered_blocks.append(
-                ("TOOL_CALL", call.id, call.name, call.arguments)
-            )
+            ordered_blocks.append(("TOOL_CALL", call.id, call.name, call.arguments))
     elif payload.codec_kind.value == "RESPONSES_EXACT_OUTPUT_ITEMS":
         for item in values:
             if not isinstance(item, dict):
@@ -1114,9 +1099,7 @@ def _completed_replay_public_projection_fingerprint(
                     arguments=item.get("arguments"),
                 )
                 calls.append(call)
-                ordered_blocks.append(
-                    ("TOOL_CALL", call.id, call.name, call.arguments)
-                )
+                ordered_blocks.append(("TOOL_CALL", call.id, call.name, call.arguments))
                 continue
             raise RuntimeError("Responses replay item is unsupported")
     else:  # pragma: no cover - payload DTO rejects NONE and enum is closed
@@ -1162,19 +1145,19 @@ def _freeze_wire_object(value: dict[str, object]) -> FrozenJsonObjectFact:
 def _semantic_wire_groups(
     *,
     call: ResolvedModelCall,
-    compiled_input: FrozenCompiledModelInput,
+    semantic_input: ProviderWireSemanticInput,
     native_projection_set: FrozenNativeToolProjectionSet,
 ) -> tuple[tuple[tuple[dict[str, object], ...], ...], tuple[dict[str, object], ...]]:
     profile = call.target.model_profile.provider_profile
     if profile.wire_api == "openai_chat_completions":
         groups = tuple(
             tuple(chat_semantic_wire_group(item, provider_profile=profile))
-            for item in compiled_input.messages
+            for item in semantic_input.messages
         )
     elif profile.wire_api == "openai_responses":
         groups = tuple(
             tuple(responses_semantic_wire_group(item))
-            for item in compiled_input.messages
+            for item in semantic_input.messages
         )
     else:  # pragma: no cover - resolved transport registry is closed
         raise ValueError("provider wire API is unsupported")
@@ -1184,11 +1167,13 @@ def _semantic_wire_groups(
     if (
         native_projection_set.native_function_tool_wire_contract_fingerprint
         != expected_contract
-        or tuple(item.name for item in compiled_input.tools)
+        or tuple(item.name for item in semantic_input.tools)
         != tuple(item.provider_name for item in native_projection_set.tool_versions)
     ):
         raise ValueError("native tool projection set does not join compiled tools")
-    tools = tuple(thaw_json(item.wire_tool) for item in native_projection_set.projections)
+    tools = tuple(
+        thaw_json(item.wire_tool) for item in native_projection_set.projections
+    )
     if any(not isinstance(item, dict) for item in tools):
         raise TypeError("native tool projection did not thaw to an object")
     if any(not group for group in groups):
@@ -1196,37 +1181,140 @@ def _semantic_wire_groups(
     return groups, tools
 
 
-def _plan_provider_wire_input(
+class ProviderWireMeasurement:
+    """One-shot owner of one exact adapter materialization and its quote."""
+
+    def __init__(
+        self,
+        *,
+        semantic_input: ProviderWireSemanticInput,
+        wire_api: str,
+        provider_profile_fingerprint: str,
+        resolved_target_semantic_fingerprint: str,
+        materialization: FrozenProviderWireMaterialization,
+        replacements: tuple[FrozenProviderWireReplacementIdentity, ...],
+        provider_replay_hydration_fingerprint: str | None,
+        wire_system_fingerprint: str,
+        wire_tools_fingerprint: str,
+        wire_input_prefix_fingerprint: str,
+        quote: FrozenProviderWireInputQuote,
+    ) -> None:
+        self._semantic_input = semantic_input
+        self._wire_api = wire_api
+        self._provider_profile_fingerprint = provider_profile_fingerprint
+        self._resolved_target_semantic_fingerprint = (
+            resolved_target_semantic_fingerprint
+        )
+        self._materialization: FrozenProviderWireMaterialization | None = (
+            materialization
+        )
+        self._replacements: tuple[FrozenProviderWireReplacementIdentity, ...] | None = (
+            replacements
+        )
+        self._provider_replay_hydration_fingerprint = (
+            provider_replay_hydration_fingerprint
+        )
+        self._wire_system_fingerprint = wire_system_fingerprint
+        self._wire_tools_fingerprint = wire_tools_fingerprint
+        self._wire_input_prefix_fingerprint = wire_input_prefix_fingerprint
+        self.quote = quote
+        self._lock = Lock()
+        self._consumed = False
+
+    def discard_materialization_to_quote(self) -> FrozenProviderWireInputQuote:
+        with self._lock:
+            if self._consumed:
+                raise RuntimeError("provider wire measurement is already consumed")
+            self._consumed = True
+            self._materialization = None
+            self._replacements = None
+        return self.quote
+
+    def prepare_executable_plan(
+        self,
+        *,
+        semantic_input: ProviderWireSemanticInput | None = None,
+    ) -> FrozenProviderWireInputPlan:
+        with self._lock:
+            if self._consumed:
+                raise RuntimeError("provider wire measurement is already consumed")
+            self._consumed = True
+            materialization = self._materialization
+            replacements = self._replacements
+            self._materialization = None
+            self._replacements = None
+        if materialization is None or replacements is None:
+            raise RuntimeError("provider wire measurement lost its materialization")
+        selected_semantic = semantic_input or self._semantic_input
+        _require_same_wire_semantic_input(
+            self._semantic_input,
+            selected_semantic,
+        )
+        context_id, compiled_semantic_fingerprint = _wire_plan_semantic_identity(
+            selected_semantic
+        )
+        # FrozenProviderWireInputPlan is the single hard-admission factory.
+        return FrozenProviderWireInputPlan(
+            context_id=context_id,
+            compiled_semantic_fingerprint=compiled_semantic_fingerprint,
+            message_placements_fingerprint=(
+                compiled_message_placements_fingerprint(
+                    selected_semantic.message_placements
+                )
+            ),
+            wire_api=self._wire_api,
+            provider_profile_fingerprint=self._provider_profile_fingerprint,
+            resolved_target_semantic_fingerprint=(
+                self._resolved_target_semantic_fingerprint
+            ),
+            materialization=materialization,
+            replacements=replacements,
+            provider_replay_hydration_fingerprint=(
+                self._provider_replay_hydration_fingerprint
+            ),
+            wire_system_fingerprint=self._wire_system_fingerprint,
+            wire_tools_fingerprint=self._wire_tools_fingerprint,
+            wire_input_prefix_fingerprint=self._wire_input_prefix_fingerprint,
+            quote=self.quote,
+        )
+
+
+def freeze_provider_wire_measurement(
     *,
     call: ResolvedModelCall,
     binding: ModelInputCompileBinding,
     native_projection_set: FrozenNativeToolProjectionSet,
-    compiled_input: FrozenCompiledModelInput,
-    predecessor_view: FrozenProviderInputEpochView | None,
+    semantic_input: ProviderWireSemanticInput,
     replay_hydration: FrozenSelectedDurableProviderReplayHydration | None,
-) -> FrozenProviderWireInputPlan:
-    del predecessor_view
+    tool_choice: str | None = None,
+) -> ProviderWireMeasurement:
     if (
-        compiled_input.compile_binding_fingerprint != binding.binding_fingerprint
-        or compiled_input.tools != binding.tool_surface.tool_specs
+        semantic_input.compile_binding_fingerprint != binding.binding_fingerprint
+        or semantic_input.tools != binding.tool_surface.tool_specs
         or call.target.fact != binding.target_fact
     ):
         raise ValueError("provider wire planning input does not join preparation")
+    recomputed_semantic = binding.estimator.estimate_frozen_input(
+        system_prompt=semantic_input.system_prompt,
+        messages=semantic_input.messages,
+        tools=semantic_input.tools,
+    )
+    if recomputed_semantic != semantic_input.final_estimate:
+        raise ValueError("provider wire semantic estimate changed")
     generic_groups, wire_tools = _semantic_wire_groups(
         call=call,
-        compiled_input=compiled_input,
+        semantic_input=semantic_input,
         native_projection_set=native_projection_set,
     )
     profile = call.target.model_profile.provider_profile
-    profile_fingerprint = _provider_wire_profile_fingerprint(call)
+    profile_fingerprint = provider_wire_profile_fingerprint(call)
     replay_target = DirectKernelModelPort.replay_target_for_resolved_call(call)
     fragments = () if replay_hydration is None else replay_hydration.fragments
     if replay_hydration is not None:
-        identity = compiled_input.canonical_input_identity
+        identity = semantic_input.canonical_input_identity
         if (
             replay_hydration.scope.session_id != identity.session_id
-            or replay_hydration.scope.scope_kind
-            is not identity.conversation_scope_kind
+            or replay_hydration.scope.scope_kind is not identity.conversation_scope_kind
             or replay_hydration.scope.scope_subagent_task_id
             != identity.scope_subagent_task_id
             or replay_hydration.replay_target_fingerprint
@@ -1240,17 +1328,11 @@ def _plan_provider_wire_input(
     replacements: list[FrozenProviderWireReplacementIdentity] = []
     final_items: list[dict[str, object]] = []
     used_entries: set[str] = set()
-    semantic_message_bytes = sum(
-        sum(len(canonical_json_bytes(item)) for item in group)
-        for group in generic_groups
-    )
-    debit_bytes = 0
-    addend_bytes = 0
-    debit_tokens = 0
-    addend_tokens = 0
+    replaced_generic_wire_tokens = 0
+    replay_wire_tokens = 0
     index = 0
-    while index < len(compiled_input.messages):
-        placement = compiled_input.message_placements[index]
+    while index < len(semantic_input.messages):
+        placement = semantic_input.message_placements[index]
         entry_id = placement.origin_entry_id
         fragment = None if entry_id is None else fragment_by_entry.get(entry_id)
         if fragment is None:
@@ -1261,16 +1343,16 @@ def _plan_provider_wire_input(
             raise ValueError("provider replay fragment matched more than one group")
         end = index + 1
         while (
-            end < len(compiled_input.message_placements)
-            and compiled_input.message_placements[end].origin_entry_id == entry_id
+            end < len(semantic_input.message_placements)
+            and semantic_input.message_placements[end].origin_entry_id == entry_id
         ):
             end += 1
-        placements = compiled_input.message_placements[index:end]
+        placements = semantic_input.message_placements[index:end]
         if tuple(item.within_origin_ordinal for item in placements) != tuple(
             range(len(placements))
         ):
             raise ValueError("provider replay placement group is not contiguous")
-        messages = compiled_input.messages[index:end]
+        messages = semantic_input.messages[index:end]
         if len(messages) != 1:
             raise ValueError("provider replay currently requires one assistant message")
         message = messages[0]
@@ -1290,125 +1372,116 @@ def _plan_provider_wire_input(
         replacement = tuple(thaw_json(item) for item in fragment.ordered_items)
         if any(not isinstance(item, dict) for item in replacement):
             raise TypeError("provider replay item did not thaw to an object")
-        generic_bytes = sum(len(canonical_json_bytes(item)) for item in generic)
-        replay_bytes = sum(len(canonical_json_bytes(item)) for item in replacement)
         generic_tokens = sum(
-            compiled_input.final_estimate.message_tokens_by_index[index:end]
+            binding.estimator.estimate_wire_json_component(item) for item in generic
         )
-        replay_tokens = binding.estimator.estimate_json(replacement)
-        generic_fingerprint = context_fingerprint(
-            "pulsara.provider-wire-generic-message-group:v1", generic
-        )
-        replacement_fingerprint = context_fingerprint(
-            "pulsara.provider-wire-replacement:v1", replacement
+        replacement_tokens = sum(
+            binding.estimator.estimate_wire_json_component(item) for item in replacement
         )
         replacements.append(
             FrozenProviderWireReplacementIdentity(
                 assistant_entry_id=entry_id or "",
                 first_message_ordinal=index,
                 message_count=end - index,
-                generic_message_group_fingerprint=generic_fingerprint,
                 replay_fragment_fingerprint=fragment.fragment_fingerprint,
-                replacement_wire_fingerprint=replacement_fingerprint,
-                semantic_debit_utf8_bytes=generic_bytes,
-                replay_addend_utf8_bytes=replay_bytes,
-                semantic_debit_tokens=generic_tokens,
-                replay_addend_tokens=replay_tokens,
+                generic_wire_estimated_tokens=generic_tokens,
+                replay_wire_estimated_tokens=replacement_tokens,
             )
         )
         final_items.extend(replacement)  # type: ignore[arg-type]
         used_entries.add(entry_id or "")
-        debit_bytes += generic_bytes
-        addend_bytes += replay_bytes
-        debit_tokens += generic_tokens
-        addend_tokens += replay_tokens
+        replaced_generic_wire_tokens += generic_tokens
+        replay_wire_tokens += replacement_tokens
         index = end
     if used_entries != set(fragment_by_entry):
         raise ValueError("an installed provider replay fragment was omitted")
     hydration_fingerprint = (
-        None
-        if replay_hydration is None
-        else replay_hydration.hydration_fingerprint
+        None if replay_hydration is None else replay_hydration.hydration_fingerprint
     )
     if replay_hydration is not None:
         replay_placements = tuple(
             item
-            for item in compiled_input.message_placements
+            for item in semantic_input.message_placements
             if item.origin_entry_id in used_entries
         )
-        if (
-            selected_message_placements_fingerprint(replay_placements)
-            != replay_hydration.selected_message_placements_fingerprint
-            or tuple(item.assistant_entry_id for item in replay_hydration.fragments)
-            != tuple(item.assistant_entry_id for item in replacements)
-        ):
+        if selected_message_placements_fingerprint(
+            replay_placements
+        ) != replay_hydration.selected_message_placements_fingerprint or tuple(
+            item.assistant_entry_id for item in replay_hydration.fragments
+        ) != tuple(item.assistant_entry_id for item in replacements):
             raise ValueError("provider replay hydration placements drifted")
 
-    root_value = freeze_json(compose_provider_root_policy(compiled_input.system_prompt))
+    root_value = freeze_json(compose_provider_root_policy(semantic_input.system_prompt))
     frozen_tools = tuple(_freeze_wire_object(item) for item in wire_tools)
     frozen_inputs = tuple(_freeze_wire_object(item) for item in final_items)
     root_plain = thaw_json(root_value)
     tools_plain = tuple(thaw_json(item) for item in frozen_tools)
     inputs_plain = tuple(thaw_json(item) for item in frozen_inputs)
+    generic_items = tuple(item for group in generic_groups for item in group)
+    fixed_projection = _materialize_context_bearing_projection(
+        call=call,
+        root_policy=root_plain,
+        tool_items=tools_plain,
+        ordered_input_items=(),
+        tool_choice=tool_choice,
+    )
+    final_projection = _materialize_context_bearing_projection(
+        call=call,
+        root_policy=root_plain,
+        tool_items=tools_plain,
+        ordered_input_items=inputs_plain,
+        tool_choice=tool_choice,
+    )
+    frozen_projection = freeze_json(final_projection)
+    if not isinstance(frozen_projection, FrozenJsonObjectFact):
+        raise TypeError("provider context projection did not freeze to an object")
     materialization = FrozenProviderWireMaterialization(
         root_policy_value=root_value,
         tool_items=frozen_tools,
         ordered_input_items=frozen_inputs,
+        context_bearing_projection=frozen_projection,
     )
-    final_message_tokens = (
-        compiled_input.final_estimate.message_tokens - debit_tokens + addend_tokens
+    generic_wire_tokens = binding.estimator.estimate_final_wire_json_components(
+        fixed_context=fixed_projection,
+        ordered_input_items=generic_items,
     )
-    final_total_tokens = (
-        compiled_input.final_estimate.total_input_tokens
-        - debit_tokens
-        + addend_tokens
+    final_wire_tokens = (
+        generic_wire_tokens - replaced_generic_wire_tokens + replay_wire_tokens
     )
-    final_message_bytes = semantic_message_bytes - debit_bytes + addend_bytes
-    final_wire_bytes = len(
-        canonical_json_bytes(
-            {"root": root_plain, "tools": tools_plain, "input": inputs_plain}
-        )
+    direct_final_wire_tokens = binding.estimator.estimate_final_wire_json_components(
+        fixed_context=fixed_projection,
+        ordered_input_items=inputs_plain,
     )
+    if direct_final_wire_tokens != final_wire_tokens:
+        raise ValueError("provider wire component traversal is inconsistent")
+    final_wire_bytes = len(canonical_json_bytes(final_projection))
     quote = FrozenProviderWireInputQuote(
+        wire_api=profile.wire_api,
         estimator_fingerprint=binding.estimator_fingerprint,
         effective_input_budget_tokens=binding.effective_input_budget_tokens,
-        semantic_total_input_tokens=compiled_input.final_estimate.total_input_tokens,
-        semantic_message_tokens=compiled_input.final_estimate.message_tokens,
-        semantic_message_utf8_bytes=semantic_message_bytes,
-        replaced_semantic_debit_tokens=debit_tokens,
-        replay_addend_tokens=addend_tokens,
-        replaced_semantic_debit_utf8_bytes=debit_bytes,
-        replay_addend_utf8_bytes=addend_bytes,
-        final_message_tokens=final_message_tokens,
-        final_total_input_tokens=final_total_tokens,
-        final_message_utf8_bytes=final_message_bytes,
+        semantic_estimated_input_tokens=(
+            semantic_input.final_estimate.total_input_tokens
+        ),
+        generic_wire_estimated_input_tokens=generic_wire_tokens,
+        replaced_generic_wire_estimated_tokens=(replaced_generic_wire_tokens),
+        replay_wire_estimated_tokens=replay_wire_tokens,
+        final_wire_estimated_input_tokens=final_wire_tokens,
         final_wire_utf8_bytes=final_wire_bytes,
-        quote_contract_version="pulsara.provider-wire-input-quote.v1",
     )
-    wire_system = context_fingerprint(
-        "pulsara.provider-wire-system:v1", root_plain
-    )
+    wire_system = context_fingerprint("pulsara.provider-wire-system:v1", root_plain)
     wire_tools_fingerprint = context_fingerprint(
         "pulsara.provider-wire-tools:v1", tools_plain
     )
     wire_input = context_fingerprint(
-        "pulsara.provider-wire-input-prefix:v1",
+        "pulsara.provider-wire-input-prefix:v2-final-context-projection",
         {
             "api": profile.wire_api,
             "profile": profile_fingerprint,
-            "root": root_plain,
-            "tools": tools_plain,
-            "input": inputs_plain,
+            "projection": final_projection,
         },
     )
-    return FrozenProviderWireInputPlan(
-        context_id=compiled_input.context_id,
-        compiled_semantic_fingerprint=compiled_input.compiled_semantic_fingerprint,
-        message_placements_fingerprint=(
-            compiled_message_placements_fingerprint(
-                compiled_input.message_placements
-            )
-        ),
+    return ProviderWireMeasurement(
+        semantic_input=semantic_input,
         wire_api=profile.wire_api,
         provider_profile_fingerprint=profile_fingerprint,
         resolved_target_semantic_fingerprint=call.target.fact.target_fingerprint,
@@ -1422,6 +1495,88 @@ def _plan_provider_wire_input(
     )
 
 
+def _wire_plan_semantic_identity(
+    semantic_input: ProviderWireSemanticInput,
+) -> tuple[str, str]:
+    context_id = getattr(semantic_input, "context_id", None) or context_fingerprint(
+        "pulsara.provider-wire-structural-context-id:v1",
+        {
+            "canonical": semantic_input.canonical_input_identity.identity_fingerprint,
+            "placements": compiled_message_placements_fingerprint(
+                semantic_input.message_placements
+            ),
+            "binding": semantic_input.compile_binding_fingerprint,
+        },
+    )
+    compiled_semantic_fingerprint = getattr(
+        semantic_input, "compiled_semantic_fingerprint", None
+    ) or context_fingerprint(
+        "pulsara.provider-wire-structural-semantic-input:v1",
+        {
+            "canonical": semantic_input.canonical_input_identity,
+            "system": semantic_input.system_prompt,
+            "messages": semantic_input.messages,
+            "placements": compiled_message_placements_fingerprint(
+                semantic_input.message_placements
+            ),
+            "tools": semantic_input.tools,
+            "estimate": semantic_input.final_estimate,
+            "binding": semantic_input.compile_binding_fingerprint,
+        },
+    )
+    return context_id, compiled_semantic_fingerprint
+
+
+def _require_same_wire_semantic_input(
+    measured: ProviderWireSemanticInput,
+    selected: ProviderWireSemanticInput,
+) -> None:
+    if (
+        measured.canonical_input_identity != selected.canonical_input_identity
+        or measured.system_prompt != selected.system_prompt
+        or measured.messages != selected.messages
+        or measured.message_placements != selected.message_placements
+        or measured.tools != selected.tools
+        or measured.final_estimate != selected.final_estimate
+        or measured.compile_binding_fingerprint != selected.compile_binding_fingerprint
+    ):
+        raise ValueError("provider wire semantic input changed after measurement")
+
+
+def _materialize_context_bearing_projection(
+    *,
+    call: ResolvedModelCall,
+    root_policy: object,
+    tool_items: tuple[object, ...],
+    ordered_input_items: tuple[object, ...],
+    tool_choice: str | None,
+) -> dict[str, object]:
+    if root_policy is not None and not isinstance(root_policy, str):
+        raise TypeError("provider root policy must be text or null")
+    if any(not isinstance(item, dict) for item in tool_items):
+        raise TypeError("provider tool item is not an object")
+    if any(not isinstance(item, dict) for item in ordered_input_items):
+        raise TypeError("provider input item is not an object")
+    profile = call.target.model_profile.provider_profile
+    if profile.wire_api == "openai_chat_completions":
+        return materialize_chat_context_bearing_wire_projection(
+            call=call,
+            root_policy=root_policy,
+            tool_items=tool_items,  # type: ignore[arg-type]
+            ordered_input_items=ordered_input_items,  # type: ignore[arg-type]
+            tool_choice=tool_choice,
+        )
+    if profile.wire_api == "openai_responses":
+        return materialize_responses_context_bearing_wire_projection(
+            call=call,
+            root_policy=root_policy,
+            tool_items=tool_items,  # type: ignore[arg-type]
+            ordered_input_items=ordered_input_items,  # type: ignore[arg-type]
+            tool_choice=tool_choice,
+        )
+    raise ValueError("provider wire API is unsupported")
+
+
 __all__ = [
     "DirectKernelModelPort",
     "KernelModelExecutionRequest",
@@ -1429,4 +1584,7 @@ __all__ = [
     "PreparedKernelModelExecution",
     "PreparedKernelModelCall",
     "PreparedKernelSemanticModelCall",
+    "ProviderWireMeasurement",
+    "freeze_provider_wire_measurement",
+    "provider_wire_profile_fingerprint",
 ]

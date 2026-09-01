@@ -27,11 +27,8 @@ def provider_assistant_public_projection_fingerprint(
 ) -> str:
     if ordered_blocks is None:
         ordered_blocks = (
-            *(((("TEXT", text),) if text else ())),
-            *(
-                ("TOOL_CALL", item.id, item.name, item.arguments)
-                for item in tool_calls
-            ),
+            *((("TEXT", text),) if text else ()),
+            *(("TOOL_CALL", item.id, item.name, item.arguments) for item in tool_calls),
         )
     return context_fingerprint(
         "pulsara.provider-assistant-public-projection:v2",
@@ -54,11 +51,7 @@ def provider_assistant_message_public_projection_fingerprint(
         text="".join(message.content),
         tool_calls=message.tool_calls,
         ordered_blocks=(
-            *(
-                (("TEXT", "".join(message.content)),)
-                if any(message.content)
-                else ()
-            ),
+            *((("TEXT", "".join(message.content)),) if any(message.content) else ()),
             *(
                 ("TOOL_CALL", item.id, item.name, item.arguments)
                 for item in message.tool_calls
@@ -72,13 +65,9 @@ class FrozenProviderWireReplacementIdentity:
     assistant_entry_id: str
     first_message_ordinal: int
     message_count: int
-    generic_message_group_fingerprint: str
     replay_fragment_fingerprint: str
-    replacement_wire_fingerprint: str
-    semantic_debit_utf8_bytes: int
-    replay_addend_utf8_bytes: int
-    semantic_debit_tokens: int
-    replay_addend_tokens: int
+    generic_wire_estimated_tokens: int
+    replay_wire_estimated_tokens: int
 
     def __post_init__(self) -> None:
         if (
@@ -86,21 +75,14 @@ class FrozenProviderWireReplacementIdentity:
             or self.message_count < 1
             or not self.assistant_entry_id
             or min(
-                self.semantic_debit_utf8_bytes,
-                self.replay_addend_utf8_bytes,
-                self.semantic_debit_tokens,
-                self.replay_addend_tokens,
+                self.generic_wire_estimated_tokens,
+                self.replay_wire_estimated_tokens,
             )
             < 0
         ):
             raise ValueError("provider wire replacement identity is invalid")
-        for value in (
-            self.generic_message_group_fingerprint,
-            self.replay_fragment_fingerprint,
-            self.replacement_wire_fingerprint,
-        ):
-            if not value.startswith("sha256:"):
-                raise ValueError("provider wire replacement fingerprint is invalid")
+        if not self.replay_fragment_fingerprint.startswith("sha256:"):
+            raise ValueError("provider replay fragment fingerprint is invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,68 +90,45 @@ class FrozenProviderWireMaterialization:
     root_policy_value: FrozenJsonValue = field(repr=False)
     tool_items: tuple[FrozenJsonObjectFact, ...] = field(repr=False)
     ordered_input_items: tuple[FrozenJsonObjectFact, ...] = field(repr=False)
+    context_bearing_projection: FrozenJsonObjectFact = field(repr=False)
 
 
 @dataclass(frozen=True, slots=True)
 class FrozenProviderWireInputQuote:
+    wire_api: str
     estimator_fingerprint: str
     effective_input_budget_tokens: int
-    semantic_total_input_tokens: int
-    semantic_message_tokens: int
-    semantic_message_utf8_bytes: int
-    replaced_semantic_debit_tokens: int
-    replay_addend_tokens: int
-    replaced_semantic_debit_utf8_bytes: int
-    replay_addend_utf8_bytes: int
-    final_message_tokens: int
-    final_total_input_tokens: int
-    final_message_utf8_bytes: int
+    semantic_estimated_input_tokens: int
+    generic_wire_estimated_input_tokens: int
+    replaced_generic_wire_estimated_tokens: int
+    replay_wire_estimated_tokens: int
+    final_wire_estimated_input_tokens: int
     final_wire_utf8_bytes: int
-    quote_contract_version: str
 
     def __post_init__(self) -> None:
         values = (
             self.effective_input_budget_tokens,
-            self.semantic_total_input_tokens,
-            self.semantic_message_tokens,
-            self.semantic_message_utf8_bytes,
-            self.replaced_semantic_debit_tokens,
-            self.replay_addend_tokens,
-            self.replaced_semantic_debit_utf8_bytes,
-            self.replay_addend_utf8_bytes,
-            self.final_message_tokens,
-            self.final_total_input_tokens,
-            self.final_message_utf8_bytes,
+            self.semantic_estimated_input_tokens,
+            self.generic_wire_estimated_input_tokens,
+            self.replaced_generic_wire_estimated_tokens,
+            self.replay_wire_estimated_tokens,
+            self.final_wire_estimated_input_tokens,
             self.final_wire_utf8_bytes,
         )
         if (
             any(value < 0 for value in values)
+            or self.replaced_generic_wire_estimated_tokens
+            > self.generic_wire_estimated_input_tokens
+            or self.wire_api not in {"openai_chat_completions", "openai_responses"}
             or not self.estimator_fingerprint.startswith("sha256:")
-            or not self.quote_contract_version
         ):
-            raise ValueError("provider wire quote contains a negative value")
-        if self.final_message_tokens != (
-            self.semantic_message_tokens
-            - self.replaced_semantic_debit_tokens
-            + self.replay_addend_tokens
+            raise ValueError("provider wire quote is invalid")
+        if self.final_wire_estimated_input_tokens != (
+            self.generic_wire_estimated_input_tokens
+            - self.replaced_generic_wire_estimated_tokens
+            + self.replay_wire_estimated_tokens
         ):
-            raise ValueError("provider wire message token quote is inconsistent")
-        if self.final_total_input_tokens != (
-            self.semantic_total_input_tokens
-            - self.replaced_semantic_debit_tokens
-            + self.replay_addend_tokens
-        ):
-            raise ValueError("provider wire total token quote is inconsistent")
-        if self.final_message_utf8_bytes != (
-            self.semantic_message_utf8_bytes
-            - self.replaced_semantic_debit_utf8_bytes
-            + self.replay_addend_utf8_bytes
-        ):
-            raise ValueError("provider wire message byte quote is inconsistent")
-        if self.final_total_input_tokens > self.effective_input_budget_tokens:
-            raise ValueError("provider wire quote exceeds the input budget")
-        if self.final_wire_utf8_bytes > MAXIMUM_PROVIDER_WIRE_INPUT_BYTES:
-            raise ValueError("provider wire quote exceeds its hard byte bound")
+            raise ValueError("provider wire token quote is inconsistent")
 
 
 @dataclass(frozen=True, slots=True)
@@ -189,20 +148,17 @@ class FrozenProviderWireInputPlan:
     quote: FrozenProviderWireInputQuote
 
     def __post_init__(self) -> None:
-        if (
-            not self.context_id
-            or self.wire_api
-            not in {"openai_chat_completions", "openai_responses"}
-        ):
+        if not self.context_id or self.wire_api not in {
+            "openai_chat_completions",
+            "openai_responses",
+        }:
             raise ValueError("provider wire plan identity is invalid")
         previous_end = 0
         for index, item in enumerate(self.replacements):
             if index and item.first_message_ordinal < previous_end:
                 raise ValueError("provider wire replacements overlap")
             previous_end = item.first_message_ordinal + item.message_count
-        if bool(self.replacements) != bool(
-            self.provider_replay_hydration_fingerprint
-        ):
+        if bool(self.replacements) != bool(self.provider_replay_hydration_fingerprint):
             raise ValueError("provider replay hydration proof union is invalid")
         if self.provider_replay_hydration_fingerprint is not None and not (
             self.provider_replay_hydration_fingerprint.startswith("sha256:")
@@ -219,29 +175,28 @@ class FrozenProviderWireInputPlan:
         ):
             if not value.startswith("sha256:"):
                 raise ValueError("provider wire plan fingerprint is invalid")
+        if self.quote.wire_api != self.wire_api:
+            raise ValueError("provider wire plan API differs from its quote")
+        if (
+            self.quote.final_wire_estimated_input_tokens
+            > self.quote.effective_input_budget_tokens
+        ):
+            raise ValueError("provider wire plan exceeds the input budget")
+        if self.quote.final_wire_utf8_bytes > MAXIMUM_PROVIDER_WIRE_INPUT_BYTES:
+            raise ValueError("provider wire plan exceeds its hard byte bound")
         root = thaw_json(self.materialization.root_policy_value)
         tools = tuple(thaw_json(item) for item in self.materialization.tool_items)
-        inputs = tuple(
-            thaw_json(item) for item in self.materialization.ordered_input_items
-        )
         aggregate = (
-            sum(item.semantic_debit_tokens for item in self.replacements),
-            sum(item.replay_addend_tokens for item in self.replacements),
-            sum(item.semantic_debit_utf8_bytes for item in self.replacements),
-            sum(item.replay_addend_utf8_bytes for item in self.replacements),
+            sum(item.generic_wire_estimated_tokens for item in self.replacements),
+            sum(item.replay_wire_estimated_tokens for item in self.replacements),
         )
         if aggregate != (
-            self.quote.replaced_semantic_debit_tokens,
-            self.quote.replay_addend_tokens,
-            self.quote.replaced_semantic_debit_utf8_bytes,
-            self.quote.replay_addend_utf8_bytes,
+            self.quote.replaced_generic_wire_estimated_tokens,
+            self.quote.replay_wire_estimated_tokens,
         ):
             raise ValueError("provider wire replacement quote aggregate drifted")
-        materialized_bytes = len(
-            canonical_json_bytes(
-                {"root": root, "tools": tools, "input": inputs}
-            )
-        )
+        projection = thaw_json(self.materialization.context_bearing_projection)
+        materialized_bytes = len(canonical_json_bytes(projection))
         if self.quote.final_wire_utf8_bytes != materialized_bytes:
             raise ValueError("provider wire materialization byte quote drifted")
         if self.wire_system_fingerprint != context_fingerprint(
@@ -253,13 +208,11 @@ class FrozenProviderWireInputPlan:
         ):
             raise ValueError("provider wire tools proof drifted")
         expected_prefix = context_fingerprint(
-            "pulsara.provider-wire-input-prefix:v1",
+            "pulsara.provider-wire-input-prefix:v2-final-context-projection",
             {
                 "api": self.wire_api,
                 "profile": self.provider_profile_fingerprint,
-                "root": root,
-                "tools": tools,
-                "input": inputs,
+                "projection": projection,
             },
         )
         if self.wire_input_prefix_fingerprint != expected_prefix:
@@ -277,30 +230,7 @@ def provider_wire_materialization_identity_fingerprint(
             "input": tuple(
                 thaw_json(item) for item in materialization.ordered_input_items
             ),
-        },
-    )
-
-
-def provider_wire_input_quote_identity_fingerprint(
-    quote: FrozenProviderWireInputQuote,
-) -> str:
-    return context_fingerprint(
-        "pulsara.provider-wire-input-quote:v1",
-        {
-            "estimator": quote.estimator_fingerprint,
-            "budget": quote.effective_input_budget_tokens,
-            "semantic_total_tokens": quote.semantic_total_input_tokens,
-            "semantic_message_tokens": quote.semantic_message_tokens,
-            "semantic_message_bytes": quote.semantic_message_utf8_bytes,
-            "debit_tokens": quote.replaced_semantic_debit_tokens,
-            "addend_tokens": quote.replay_addend_tokens,
-            "debit_bytes": quote.replaced_semantic_debit_utf8_bytes,
-            "addend_bytes": quote.replay_addend_utf8_bytes,
-            "final_message_tokens": quote.final_message_tokens,
-            "final_total_tokens": quote.final_total_input_tokens,
-            "final_message_bytes": quote.final_message_utf8_bytes,
-            "final_wire_bytes": quote.final_wire_utf8_bytes,
-            "contract": quote.quote_contract_version,
+            "context_projection": thaw_json(materialization.context_bearing_projection),
         },
     )
 
@@ -327,13 +257,9 @@ def provider_wire_input_plan_identity_fingerprint(
                     item.assistant_entry_id,
                     item.first_message_ordinal,
                     item.message_count,
-                    item.generic_message_group_fingerprint,
                     item.replay_fragment_fingerprint,
-                    item.replacement_wire_fingerprint,
-                    item.semantic_debit_utf8_bytes,
-                    item.replay_addend_utf8_bytes,
-                    item.semantic_debit_tokens,
-                    item.replay_addend_tokens,
+                    item.generic_wire_estimated_tokens,
+                    item.replay_wire_estimated_tokens,
                 )
                 for item in plan.replacements
             ),
@@ -341,7 +267,21 @@ def provider_wire_input_plan_identity_fingerprint(
             "wire_system": plan.wire_system_fingerprint,
             "wire_tools": plan.wire_tools_fingerprint,
             "wire_input": plan.wire_input_prefix_fingerprint,
-            "quote": provider_wire_input_quote_identity_fingerprint(plan.quote),
+            "quote": {
+                "wire_api": plan.quote.wire_api,
+                "estimator": plan.quote.estimator_fingerprint,
+                "budget": plan.quote.effective_input_budget_tokens,
+                "semantic_estimated": (plan.quote.semantic_estimated_input_tokens),
+                "generic_wire_estimated": (
+                    plan.quote.generic_wire_estimated_input_tokens
+                ),
+                "replaced_generic_wire_estimated": (
+                    plan.quote.replaced_generic_wire_estimated_tokens
+                ),
+                "replay_wire_estimated": (plan.quote.replay_wire_estimated_tokens),
+                "final_wire_estimated": (plan.quote.final_wire_estimated_input_tokens),
+                "final_wire_bytes": plan.quote.final_wire_utf8_bytes,
+            },
         },
     )
 

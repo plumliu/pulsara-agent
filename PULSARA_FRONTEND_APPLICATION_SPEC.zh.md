@@ -144,7 +144,10 @@ command receipt 的 `PENDING` 不是成功。前端使用 `QueryCommandRequest` 
 - compaction 仅请求 safe-point operation；前端不得自行裁剪 canonical transcript。Kernel 在
   canonical FULL 前对 active/idle 使用同一 summary、candidate assembly、reclaim validator 与
   缩尾搜索，只在 FULL 后决定继续当前 turn 或等待下一条用户消息。两者的 `NOT_NEEDED` 使用
-  同一成功语义，提示“当前上下文已经较紧凑，本次整理无法进一步缩小。”，不展示成失败或不可用；
+  同一成功语义，提示“当前上下文已经较紧凑，本次整理无法进一步缩小。”，不展示成失败或不可用。
+  真正发生 `CompactionAdopted` 后，前端从 canonical control 派生当前最近一次压缩边界，在边界
+  两侧使用 CSS 实线并居中显示“上下文已压缩”；它不得改写或裁剪 transcript，刷新与重连后必须
+  可恢复，`NOT_NEEDED` 不得创建该标识；
 - stop 按 exact turn/task ID 路由；没有全局“停止一切”的模糊操作；
 - 已实现的 response action（当前为复制）贴近所属 assistant entry。复制只属于每轮最终的
   assistant 正文；工具调用前的中途正文与尚在生成的实时草稿不得绘制复制入口；

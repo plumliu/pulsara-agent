@@ -7,6 +7,7 @@ import asyncio
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -35,14 +36,16 @@ from pulsara_agent.conversation_kernel.compaction.planner import (
     CompactionPlanningError,
     CompactionReclaimUnavailable,
     crosses_compaction_resource_headroom,
-    estimate_unavoidable_compaction_successor_tokens,
     enumerate_complete_tool_groups,
+    enumerate_safe_summary_prefixes,
     freeze_compaction_continuation,
     rebase_compaction_dispatch_read_through_sequence,
     resolved_compaction_headroom_bounds,
     should_trigger_compaction,
     validate_compaction_reclaim,
 )
+import pulsara_agent.conversation_kernel.compaction.coordinator as compaction_coordinator
+import pulsara_agent.conversation_kernel.compaction.model_call as compaction_model_call
 from pulsara_agent.conversation_kernel.compaction.prompt import (
     build_compaction_snapshot_carrier,
     compaction_summary_request,
@@ -54,6 +57,7 @@ from pulsara_agent.conversation_kernel.compaction.runtime import (
 )
 from pulsara_agent.conversation_kernel.host import KernelHostSession
 from pulsara_agent.conversation_kernel.limits import STAGE2_LIMITS
+from pulsara_agent.conversation_kernel.memory.contracts import MemoryUsePolicy
 from pulsara_agent.conversation_kernel.compaction.runtime_handoff import (
     CompactionRuntimeHandoffBoundError,
     FrozenTerminalMonitorHandoffFact,
@@ -78,10 +82,16 @@ from pulsara_agent.conversation_kernel.vocabulary import (
     SUBJECT_SLOTS,
 )
 from pulsara_agent.llm.estimator import PulsaraHeuristicTokenEstimatorV1
+from pulsara_agent.llm.input import LLMMessage
+from pulsara_agent.llm.request import (
+    MAXIMUM_PROVIDER_WIRE_INPUT_BYTES,
+    FrozenProviderWireInputQuote,
+)
 from pulsara_agent.model_input.contracts import (
     CanonicalInputOriginKind,
     CanonicalModelInputIdentity,
     CanonicalModelInputSnapshot,
+    ContextBindingBaseKind,
     FrozenProviderInputItem,
     FrozenProviderInputItemKind,
     ContextSourceKind,
@@ -129,6 +139,31 @@ from tests.support.round3 import static_canonical_compile_facts
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _wire_quote(
+    *,
+    semantic_tokens: int,
+    final_tokens: int,
+    budget_tokens: int = 1_000,
+    wire_api: str = "openai_chat_completions",
+    estimator_fingerprint: str | None = None,
+    wire_bytes: int | None = None,
+) -> FrozenProviderWireInputQuote:
+    return FrozenProviderWireInputQuote(
+        wire_api=wire_api,
+        estimator_fingerprint=(
+            estimator_fingerprint
+            or PulsaraHeuristicTokenEstimatorV1().fact.estimator_fingerprint
+        ),
+        effective_input_budget_tokens=budget_tokens,
+        semantic_estimated_input_tokens=semantic_tokens,
+        generic_wire_estimated_input_tokens=final_tokens,
+        replaced_generic_wire_estimated_tokens=0,
+        replay_wire_estimated_tokens=0,
+        final_wire_estimated_input_tokens=final_tokens,
+        final_wire_utf8_bytes=wire_bytes or max(1, final_tokens * 2),
+    )
 
 
 def test_round5b_manual_command_settlement_keys_the_exact_semantic_digest() -> None:
@@ -580,79 +615,30 @@ def test_round5b_reclaim_force_only_bypasses_soft_target() -> None:
         )
 
 
-def test_round5b_longest_suffix_skips_impossible_old_tool_tail_before_open() -> None:
-    """Old retained groups must not protect a later near-budget transcript."""
+def test_round5b_has_no_presummary_successor_lower_bound_gate() -> None:
+    root = Path(__file__).resolve().parents[1]
+    planner = (
+        root / "src/pulsara_agent/conversation_kernel/compaction/planner.py"
+    ).read_text()
+    coordinator = (
+        root / "src/pulsara_agent/conversation_kernel/compaction/coordinator.py"
+    ).read_text()
+    assert "estimate_unavoidable_compaction_successor_tokens" not in planner
+    assert "estimate_unavoidable_compaction_successor_tokens" not in coordinator
 
-    fingerprint = "sha256:" + "a" * 64
-    large_users = tuple(
-        FrozenProviderInputItem(
-            item_kind=FrozenProviderInputItemKind.USER,
-            source_entry_id=f"entry:{index}",
-            source_entry_sequence=index,
-            source_turn_id=f"turn:{index}",
-            text="长" * 48_000,
-            input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE,
-        )
-        for index in range(1, 16)
-    )
-    source_view = SimpleNamespace(
-        source_view_fingerprint=fingerprint,
-        canonical_dispatch_read=SimpleNamespace(
-            compile_snapshot=SimpleNamespace(
-                canonical_input=SimpleNamespace(items=large_users)
-            )
-        ),
-        normal_compile_binding=SimpleNamespace(
-            estimator=PulsaraHeuristicTokenEstimatorV1(),
-        ),
-    )
-    old_group_tail = SimpleNamespace(
-        source_view_fingerprint=fingerprint,
-        source_through_sequence=0,
-    )
-    no_group_tail = SimpleNamespace(
-        source_view_fingerprint=fingerprint,
-        source_through_sequence=15,
-    )
-    deadline = 1e30
-    protected_quote = estimate_unavoidable_compaction_successor_tokens(
-        source_view=source_view,
-        tail=old_group_tail,
-        recent_user_messages=(),
-        continuation_mode=CompactionContinuationMode.AWAIT_NEXT_USER,
-        active_request=None,
-        deadline_monotonic=deadline,
-    )
-    compacted_quote = estimate_unavoidable_compaction_successor_tokens(
-        source_view=source_view,
-        tail=no_group_tail,
-        recent_user_messages=(),
-        continuation_mode=CompactionContinuationMode.AWAIT_NEXT_USER,
-        active_request=None,
-        deadline_monotonic=deadline,
-    )
-    policy = ResolvedCompactionPolicy()
 
-    with pytest.raises(CompactionPlanningError, match="post target"):
-        validate_compaction_reclaim(
-            source_tokens=207_600,
-            successor_tokens=protected_quote,
-            hard_input_budget_tokens=239_616,
-            policy=policy,
-            force=False,
-            enforce_soft_target=True,
-        )
-    assert (
-        validate_compaction_reclaim(
-            source_tokens=207_600,
-            successor_tokens=compacted_quote,
-            hard_input_budget_tokens=239_616,
-            policy=policy,
-            force=False,
-            enforce_soft_target=True,
-        )
-        > 0
+def test_final_wire_successor_deadline_starts_after_snapshot_publication() -> None:
+    coordinator = (
+        ROOT / "src/pulsara_agent/conversation_kernel/compaction/coordinator.py"
+    ).read_text(encoding="utf-8")
+
+    summary_terminal = coordinator.index("raw = await prepared_summary.open_once()")
+    publication = coordinator.index("content = await self._content(", summary_terminal)
+    successor_deadline = coordinator.index(
+        "successor_deadline = monotonic()", publication
     )
+
+    assert summary_terminal < publication < successor_deadline
 
 
 def test_round5b_trigger_uses_exact_prepared_target_budget_without_262k_cap() -> None:
@@ -660,8 +646,8 @@ def test_round5b_trigger_uses_exact_prepared_target_budget_without_262k_cap() ->
         normal_compile_binding=SimpleNamespace(
             effective_input_budget_tokens=400_000,
         ),
-        provider_projection=SimpleNamespace(
-            final_estimate=SimpleNamespace(total_input_tokens=250_000),
+        provider_wire_quote=SimpleNamespace(
+            final_wire_estimated_input_tokens=250_000,
         ),
         physical_working_set=SimpleNamespace(
             post_base_item_count=1,
@@ -674,6 +660,559 @@ def test_round5b_trigger_uses_exact_prepared_target_budget_without_262k_cap() ->
         source_view=source_view,
         policy=ResolvedCompactionPolicy(auto_trigger_ratio=0.85),
         force=False,
+    )
+
+
+@pytest.mark.parametrize(
+    ("semantic_tokens", "final_tokens", "expected"),
+    (
+        (100, 850, True),
+        (100, 849, False),
+        (999, 849, False),
+    ),
+)
+def test_round5b_automatic_trigger_uses_final_wire_not_semantic_estimate(
+    semantic_tokens: int,
+    final_tokens: int,
+    expected: bool,
+) -> None:
+    source_view = SimpleNamespace(
+        normal_compile_binding=SimpleNamespace(
+            effective_input_budget_tokens=1_000,
+        ),
+        provider_wire_quote=_wire_quote(
+            semantic_tokens=semantic_tokens,
+            final_tokens=final_tokens,
+        ),
+        physical_working_set=SimpleNamespace(
+            post_base_item_count=1,
+            post_base_canonical_utf8_bytes=1,
+            continuity_epoch_logical_utf8_bytes=1,
+        ),
+    )
+
+    assert (
+        should_trigger_compaction(
+            source_view=source_view,
+            policy=ResolvedCompactionPolicy(auto_trigger_ratio=0.85),
+            force=False,
+        )
+        is expected
+    )
+
+
+def test_round5b_manual_reclaim_uses_wire_delta_and_only_rejects_actual_shortfall() -> (
+    None
+):
+    policy = ResolvedCompactionPolicy(minimum_reclaim_tokens=20_000)
+    # The semantic compactable prefix can be smaller than the minimum; native
+    # replay replacement arithmetic makes the exact final-wire reclaim larger.
+    assert (
+        validate_compaction_reclaim(
+            source_tokens=100_000,
+            successor_tokens=70_000,
+            hard_input_budget_tokens=100_000,
+            policy=policy,
+            force=True,
+            enforce_soft_target=False,
+        )
+        == 30_000
+    )
+    with pytest.raises(CompactionReclaimUnavailable, match="enough"):
+        validate_compaction_reclaim(
+            source_tokens=100_000,
+            successor_tokens=90_001,
+            hard_input_budget_tokens=100_000,
+            policy=policy,
+            force=True,
+            enforce_soft_target=False,
+        )
+
+
+def test_round5b_summary_prefix_enumerates_every_finite_safe_boundary() -> None:
+    count = 257
+    messages = tuple(LLMMessage.user(f"message {index}") for index in range(count))
+    placements = tuple(
+        SimpleNamespace(
+            message_ordinal=index,
+            origin_entry_id=f"entry:{index + 1}",
+            within_origin_ordinal=0,
+        )
+        for index in range(count)
+    )
+    items = tuple(
+        SimpleNamespace(
+            source_entry_id=f"entry:{index + 1}",
+            source_entry_sequence=index + 1,
+        )
+        for index in range(count)
+    )
+    binding_fingerprint = context_fingerprint("test:binding", "safe-prefix")
+    binding = SimpleNamespace(
+        binding_fingerprint=binding_fingerprint,
+        tool_surface=SimpleNamespace(tool_specs=()),
+    )
+    projection = SimpleNamespace(
+        system_prompt="ROOT SYSTEM",
+        messages=messages,
+        message_placements=placements,
+        tools=(),
+        compile_binding_fingerprint=binding_fingerprint,
+    )
+    source_view = SimpleNamespace(
+        source_view_fingerprint=context_fingerprint("test:source-view", "safe-prefix"),
+        materialized_messages=lambda: messages,
+        materialized_system_prompt=lambda: "ROOT SYSTEM",
+        predecessor_epoch_view=None,
+        normal_compile_binding=binding,
+        canonical_dispatch_read=SimpleNamespace(
+            compile_snapshot=SimpleNamespace(
+                canonical_input=SimpleNamespace(items=items)
+            )
+        ),
+        exact_safe_canonical_head=count,
+    )
+
+    candidates = enumerate_safe_summary_prefixes(
+        source_view=source_view,
+        complete_tool_groups=(),
+        retained_group_count=0,
+        source_projection=projection,
+    )
+
+    assert len(candidates) == count
+    assert tuple(item[1].summary_prefix_message_count for item in candidates) == tuple(
+        range(count, 0, -1)
+    )
+
+    installed_count = 193
+    source_view.predecessor_epoch_view = SimpleNamespace(
+        messages=messages[:installed_count]
+    )
+    compatible_candidates = enumerate_safe_summary_prefixes(
+        source_view=source_view,
+        complete_tool_groups=(),
+        retained_group_count=0,
+        source_projection=projection,
+    )
+    assert tuple(
+        item[1].summary_prefix_message_count for item in compatible_candidates
+    ) == tuple(range(count, installed_count - 1, -1))
+
+
+def test_compaction_summary_wire_proof_rejects_installed_prefix_truncation() -> None:
+    root = freeze_json({"role": "system", "content": "root"})
+    installed = tuple(freeze_json({"ordinal": index}) for index in range(3))
+    synthetic_request = freeze_json({"role": "user", "content": "summarize"})
+    predecessor = SimpleNamespace(
+        wire_input_plan=SimpleNamespace(
+            materialization=SimpleNamespace(
+                root_policy_value=root,
+                tool_items=(),
+                ordered_input_items=installed,
+            )
+        )
+    )
+    semantic = SimpleNamespace(
+        source_view=SimpleNamespace(predecessor_epoch_view=predecessor)
+    )
+    truncated = SimpleNamespace(
+        materialization=SimpleNamespace(
+            root_policy_value=root,
+            tool_items=(),
+            ordered_input_items=(*installed[:2], synthetic_request),
+        )
+    )
+
+    with pytest.raises(ValueError, match="rewrote the installed prefix"):
+        compaction_model_call._require_summary_wire_prefix(semantic, truncated)
+
+    extended = SimpleNamespace(
+        materialization=SimpleNamespace(
+            root_policy_value=root,
+            tool_items=(),
+            ordered_input_items=(
+                *installed,
+                freeze_json({"ordinal": 3}),
+                synthetic_request,
+            ),
+        )
+    )
+    compaction_model_call._require_summary_wire_prefix(semantic, extended)
+
+
+@pytest.mark.parametrize(
+    "drift",
+    (
+        "target",
+        "profile",
+        "wire_api",
+        "estimator",
+        "estimator_impl",
+        "budget",
+        "cut",
+        "native",
+        "hard_tokens",
+        "hard_bytes",
+    ),
+)
+def test_compaction_wire_transition_joins_authority_before_numeric_reclaim(
+    monkeypatch: pytest.MonkeyPatch,
+    drift: str,
+) -> None:
+    estimator = PulsaraHeuristicTokenEstimatorV1()
+    estimator_fingerprint = estimator.fact.estimator_fingerprint
+    source_profile = SimpleNamespace(
+        provider_profile=SimpleNamespace(wire_api="openai_chat_completions")
+    )
+    successor_profile = (
+        SimpleNamespace(provider_profile=SimpleNamespace(wire_api="openai_responses"))
+        if drift == "profile"
+        else source_profile
+    )
+    source_target_fact = SimpleNamespace(name="target")
+    successor_target_fact = (
+        SimpleNamespace(name="other-target")
+        if drift == "target"
+        else source_target_fact
+    )
+    successor_estimator = (
+        SimpleNamespace(
+            fact=SimpleNamespace(
+                estimator_id="other",
+                estimator_version="v1",
+                estimator_fingerprint="sha256:" + ("1" * 64),
+            )
+        )
+        if drift == "estimator"
+        else SimpleNamespace(fact=estimator.fact)
+        if drift == "estimator_impl"
+        else estimator
+    )
+    successor_estimator_fingerprint = successor_estimator.fact.estimator_fingerprint
+    successor_budget = 900 if drift == "budget" else 1_000
+    source_identity = SimpleNamespace(
+        session_id="session:test",
+        turn_id="turn:test",
+        conversation_scope_kind=ModelInputScopeKind.ROOT,
+        scope_subagent_task_id=None,
+    )
+    successor_identity = (
+        SimpleNamespace(
+            session_id="session:other",
+            turn_id="turn:test",
+            conversation_scope_kind=ModelInputScopeKind.ROOT,
+            scope_subagent_task_id=None,
+        )
+        if drift == "cut"
+        else source_identity
+    )
+
+    def canonical_read(identity):
+        return SimpleNamespace(
+            compile_snapshot=SimpleNamespace(
+                canonical_input=SimpleNamespace(identity=identity)
+            )
+        )
+
+    source_read = canonical_read(source_identity)
+    successor_read = canonical_read(successor_identity)
+    source_native = ("native",)
+    successor_native = ("other-native",) if drift == "native" else source_native
+    source_binding = SimpleNamespace(
+        target_fact=source_target_fact,
+        estimator=estimator,
+        estimator_fingerprint=estimator_fingerprint,
+        effective_input_budget_tokens=1_000,
+    )
+    successor_binding = SimpleNamespace(
+        target_fact=successor_target_fact,
+        estimator=successor_estimator,
+        estimator_fingerprint=successor_estimator_fingerprint,
+        effective_input_budget_tokens=successor_budget,
+    )
+    source_quote = _wire_quote(
+        semantic_tokens=800,
+        final_tokens=900,
+        estimator_fingerprint=estimator_fingerprint,
+        wire_bytes=(
+            MAXIMUM_PROVIDER_WIRE_INPUT_BYTES + 2 if drift == "hard_bytes" else 1_800
+        ),
+    )
+    successor_wire_api = (
+        "openai_responses"
+        if drift in {"wire_api", "profile"}
+        else source_quote.wire_api
+    )
+    successor_quote = _wire_quote(
+        semantic_tokens=400,
+        final_tokens=1_001 if drift == "hard_tokens" else 500,
+        budget_tokens=successor_budget,
+        wire_api=successor_wire_api,
+        estimator_fingerprint=successor_estimator_fingerprint,
+        wire_bytes=(
+            MAXIMUM_PROVIDER_WIRE_INPUT_BYTES + 1 if drift == "hard_bytes" else 1_000
+        ),
+    )
+    source_candidate = SimpleNamespace(
+        canonical_read=source_read,
+        semantic_input=SimpleNamespace(
+            canonical_input_identity=source_identity,
+            final_estimate=SimpleNamespace(total_input_tokens=800),
+        ),
+        prepared_call=SimpleNamespace(
+            call=SimpleNamespace(
+                target=SimpleNamespace(
+                    fact=source_target_fact,
+                    model_profile=source_profile,
+                )
+            ),
+            compile_binding=source_binding,
+        ),
+        native_projection_set=source_native,
+    )
+    successor_candidate = SimpleNamespace(
+        canonical_read=successor_read,
+        semantic_input=SimpleNamespace(
+            canonical_input_identity=successor_identity,
+            final_estimate=SimpleNamespace(total_input_tokens=400),
+        ),
+        prepared_call=SimpleNamespace(
+            call=SimpleNamespace(
+                target=SimpleNamespace(
+                    fact=successor_target_fact,
+                    model_profile=successor_profile,
+                )
+            ),
+            compile_binding=successor_binding,
+        ),
+        native_projection_set=successor_native,
+    )
+    source_view = SimpleNamespace(
+        canonical_dispatch_read=source_read,
+        provider_wire_quote=source_quote,
+    )
+    successor_wire = SimpleNamespace(
+        candidate=successor_candidate,
+        quote=successor_quote,
+        wire_input_plan=(None if drift in {"hard_tokens", "hard_bytes"} else object()),
+    )
+    reclaim_calls = 0
+
+    def observed_reclaim(**kwargs):
+        del kwargs
+        nonlocal reclaim_calls
+        reclaim_calls += 1
+        if drift != "native":
+            raise AssertionError("numeric reclaim ran before the structural join")
+        return 400
+
+    monkeypatch.setattr(
+        compaction_coordinator,
+        "validate_compaction_reclaim",
+        observed_reclaim,
+    )
+    if drift == "native":
+        monkeypatch.setattr(
+            compaction_coordinator,
+            "_compaction_cut_lineage_exactly_joins",
+            lambda **_: True,
+        )
+        transition = compaction_coordinator.validate_compaction_wire_transition(
+            source_view=source_view,
+            source_candidate=source_candidate,
+            successor_wire=successor_wire,
+            policy=ResolvedCompactionPolicy(minimum_reclaim_tokens=1),
+            force=True,
+            enforce_soft_target=False,
+            phase="PRE_FULL",
+        )
+        assert transition.reclaim_tokens == 400
+        assert reclaim_calls == 1
+        return
+    if drift in {"hard_tokens", "hard_bytes"}:
+        monkeypatch.setattr(
+            compaction_coordinator,
+            "_compaction_cut_lineage_exactly_joins",
+            lambda **_: True,
+        )
+        expected = "hard model budget" if drift == "hard_tokens" else "hard physical"
+        with pytest.raises(CompactionPlanningError, match=expected):
+            compaction_coordinator.validate_compaction_wire_transition(
+                source_view=source_view,
+                source_candidate=source_candidate,
+                successor_wire=successor_wire,
+                policy=ResolvedCompactionPolicy(minimum_reclaim_tokens=1),
+                force=True,
+                enforce_soft_target=False,
+                phase="PRE_FULL",
+            )
+        assert reclaim_calls == 0
+        return
+    with pytest.raises(CompactionPlanningError, match="does not exact-join"):
+        compaction_coordinator.validate_compaction_wire_transition(
+            source_view=source_view,
+            source_candidate=source_candidate,
+            successor_wire=successor_wire,
+            policy=ResolvedCompactionPolicy(minimum_reclaim_tokens=1),
+            force=True,
+            enforce_soft_target=False,
+            phase="PRE_FULL",
+        )
+    assert reclaim_calls == 0
+
+
+def test_compaction_fenced_restarts_are_stack_free_and_keep_one_attempt_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    coordinator = object.__new__(compaction_coordinator.CompactionCoordinator)
+    restart_count = sys.getrecursionlimit() + 17
+    calls: list[dict[str, object]] = []
+
+    async def execute_once(_self, **kwargs):
+        calls.append(kwargs)
+        if len(calls) <= restart_count:
+            return compaction_coordinator._CompactionFencedRestart(
+                maximum_retained_tool_groups=1,
+                pre_compact_dispatched=True,
+            )
+        return compaction_coordinator.CompactionExecutionResult(
+            CompactionOutcome(
+                CompactionDisposition.NOT_NEEDED,
+                "turn:stack-free",
+                None,
+                None,
+                "BELOW_TRIGGER",
+            )
+        )
+
+    monkeypatch.setattr(
+        compaction_coordinator.CompactionCoordinator,
+        "_execute_compaction_fenced_once",
+        execute_once,
+    )
+    scope = CompactionScope(
+        session_id="session:stack-free",
+        workspace_id="workspace:stack-free",
+        turn_id="turn:stack-free",
+        scope_kind=ModelInputScopeKind.ROOT,
+        scope_subagent_task_id=None,
+    )
+
+    result = asyncio.run(
+        coordinator._execute_compaction_fenced(
+            turn_id=scope.turn_id,
+            model_call_index=1,
+            inherited_memory_use_policy=MemoryUsePolicy.ENABLED,
+            trigger=CompactionTrigger.MANUAL,
+            force=True,
+            expected_scope=scope,
+            post_adoption_branch=CompactionTargetBranch.ACTIVE_INSTALLATION,
+            stable_command_id="command:stack-free",
+            maximum_retained_tool_groups=1,
+        )
+    )
+
+    assert result.outcome.public_code == "BELOW_TRIGGER"
+    assert len(calls) == restart_count + 1
+    attempt_token = calls[0]["attempt_token"]
+    assert all(item["attempt_token"] is attempt_token for item in calls)
+    assert calls[0]["pre_compact_dispatched"] is False
+    assert all(item["pre_compact_dispatched"] is True for item in calls[1:])
+    assert all(item["maximum_retained_tool_groups"] == 1 for item in calls)
+
+
+def test_compaction_cut_lineage_uses_full_history_materialization_floor() -> None:
+    source_identity = SimpleNamespace(
+        session_id="session:test",
+        turn_id="turn:test",
+        initial_entry_id="entry:current-user",
+        context_binding_revision_id="binding:source",
+        provider_input_through_sequence=49,
+        conversation_scope_kind=ModelInputScopeKind.ROOT,
+        scope_subagent_task_id=None,
+    )
+    successor_identity = SimpleNamespace(
+        session_id="session:test",
+        turn_id="turn:test",
+        initial_entry_id="entry:current-user",
+        context_binding_revision_id="binding:successor",
+        provider_input_through_sequence=49,
+        conversation_scope_kind=ModelInputScopeKind.ROOT,
+        scope_subagent_task_id=None,
+    )
+    source_binding = SimpleNamespace(
+        binding_revision_id="binding:source",
+        revision_ordinal=0,
+        base_kind=ContextBindingBaseKind.FULL_HISTORY,
+        context_snapshot_id=None,
+        source_through_sequence=48,
+    )
+    successor_binding = SimpleNamespace(
+        binding_revision_id="binding:successor",
+        revision_ordinal=1,
+        base_kind=ContextBindingBaseKind.SNAPSHOT,
+        context_snapshot_id="snapshot:test",
+        source_through_sequence=11,
+    )
+    source_prefix = SimpleNamespace(
+        item_kind=FrozenProviderInputItemKind.USER,
+        source_entry_id="entry:prefix",
+        source_entry_sequence=11,
+        text="old prefix",
+    )
+    retained_suffix = SimpleNamespace(
+        item_kind=FrozenProviderInputItemKind.USER,
+        source_entry_id="entry:current-user",
+        source_entry_sequence=49,
+        text="current request",
+    )
+    snapshot = SimpleNamespace(
+        item_kind=FrozenProviderInputItemKind.CONTEXT_SNAPSHOT,
+        source_entry_id=None,
+        source_entry_sequence=11,
+        text="summary",
+    )
+    shared_fact = object()
+
+    def candidate(*, identity, binding, items):
+        canonical_input = SimpleNamespace(
+            identity=identity,
+            items=items,
+            canonical_utf8_bytes=sum(len(item.text.encode("utf-8")) for item in items),
+            closures=(),
+            late_outcomes=(),
+        )
+        return SimpleNamespace(
+            canonical_read=SimpleNamespace(
+                compile_snapshot=SimpleNamespace(
+                    canonical_input=canonical_input,
+                    context_binding_fact=binding,
+                    run_permission_snapshot=shared_fact,
+                    plan_workflow_fact=shared_fact,
+                    plan_handoff_fact=shared_fact,
+                    previous_turn_outcome_fact=shared_fact,
+                    tool_observation_freshness_fact=shared_fact,
+                ),
+                replay_manifest_cut=SimpleNamespace(manifests=()),
+            )
+        )
+
+    source = candidate(
+        identity=source_identity,
+        binding=source_binding,
+        items=(source_prefix, retained_suffix),
+    )
+    successor = candidate(
+        identity=successor_identity,
+        binding=successor_binding,
+        items=(snapshot, retained_suffix),
+    )
+
+    assert compaction_coordinator._compaction_cut_lineage_exactly_joins(
+        source_candidate=source,
+        successor_candidate=successor,
+        phase="PRE_FULL",
     )
 
 
@@ -1396,6 +1935,57 @@ def test_round5b_architecture_and_oracle_are_exact() -> None:
     assert not any("terminal" in item for item in imported)
     assert not (ROOT / "src/pulsara_agent/conversation_kernel/jobs.py").exists()
     assert not (ROOT / "src/pulsara_agent/conversation_kernel/job_model.py").exists()
+
+
+def test_final_wire_quote_does_not_expand_fingerprint_or_registry_topology() -> None:
+    contracts = ROOT / "src/pulsara_agent/conversation_kernel/compaction/contracts.py"
+    tree = ast.parse(contracts.read_text(encoding="utf-8"), filename=str(contracts))
+    source_view = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "FrozenCompactionSourceView"
+    )
+    field_names = {
+        node.target.id
+        for node in source_view.body
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
+    }
+    assert "provider_wire_quote" in field_names
+    post_init = next(
+        node
+        for node in source_view.body
+        if isinstance(node, ast.FunctionDef) and node.name == "__post_init__"
+    )
+    expected = next(
+        node.value
+        for node in ast.walk(post_init)
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "expected"
+            for target in node.targets
+        )
+    )
+    fingerprint_constants = {
+        node.value
+        for node in ast.walk(expected)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    }
+    assert "provider_wire_quote" not in fingerprint_constants
+    assert not any("quote" in value for value in fingerprint_constants)
+
+    production = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (ROOT / "src/pulsara_agent").rglob("*.py")
+    )
+    assert "quote_fingerprint" not in production
+    assert "measurement_registry" not in production
+    assert "MAX_PREFIX_TRIALS" not in production
+    assert "dispatch_crosses_threshold" not in production
+    estimator = (ROOT / "src/pulsara_agent/llm/estimator.py").read_text(
+        encoding="utf-8"
+    )
+    assert "openai_chat" not in estimator
+    assert "openai_responses" not in estimator
 
 
 def test_round9_2_compaction_hard_cut_has_one_post_adoption_install_path() -> None:

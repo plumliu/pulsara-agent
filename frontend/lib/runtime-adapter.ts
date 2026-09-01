@@ -36,6 +36,7 @@ export interface RuntimeBootstrap {
 
 export interface RuntimeProjection {
   messages: Message[];
+  contextCompaction?: ContextCompactionBoundary;
   isRunning: boolean;
   queuedCount: number;
   planMode: boolean;
@@ -50,6 +51,14 @@ export interface RuntimeProjection {
   liveControlOwnerEpoch: number;
   liveControlRevision: number;
   interaction?: RuntimeInteractionSummary;
+}
+
+export interface ContextCompactionBoundary {
+  contextBindingRevisionId: string;
+  turnId: string;
+  sourceThroughSequence: number;
+  adoptedAfterEntrySequence: number;
+  acceptedAt: string;
 }
 
 export type RuntimeInteractionSummary =
@@ -355,6 +364,13 @@ export interface ProtocolCanonicalControl {
   subagent_tasks?: ProtocolSubagentTask[];
   active_plan_workflow?: Record<string, unknown>;
   open_plan_interaction?: Record<string, unknown>;
+  latest_context_compaction?: {
+    turn_id?: string;
+    context_binding_revision_id?: string;
+    source_through_sequence?: string | number;
+    adopted_after_entry_sequence?: string | number;
+    accepted_at_utc?: string;
+  };
 }
 
 interface ProtocolLiveEvent {
@@ -1496,6 +1512,7 @@ class LocalRuntimeConnection implements RuntimeConnection {
     const interaction = projectInteraction(this.liveControl, this.control);
     return {
       messages: messages.map(productVisibleMessage),
+      contextCompaction: projectContextCompaction(this.control),
       isRunning: Boolean(activeTurn) || hasActiveDraft,
       queuedCount: numeric(this.control.prompt_queue_total_count),
       planMode: Boolean(
@@ -1906,6 +1923,7 @@ function projectEntries(
       messages.push({
         id: entry.entry_id,
         turnId: entry.turn_id,
+        entrySequence: numeric(entry.entry_sequence),
         role: 'user',
         userKind: 'subagent-completion',
         time: formatTime(entry.accepted_at_utc),
@@ -1927,6 +1945,7 @@ function projectEntries(
       messages.push({
         id: entry.entry_id,
         turnId: entry.turn_id,
+        entrySequence: numeric(entry.entry_sequence),
         role: 'user',
         userKind,
         time: formatTime(entry.accepted_at_utc),
@@ -1953,6 +1972,7 @@ function projectEntries(
       messages.push({
         id: entry.entry_id,
         turnId: entry.turn_id,
+        entrySequence: numeric(entry.entry_sequence),
         role: 'assistant',
         assistantKind: entry.entry_kind === 'ASSISTANT_MESSAGE' ? 'terminal' : 'tool-request',
         time: formatTime(entry.accepted_at_utc),
@@ -1997,6 +2017,7 @@ function projectEntries(
       else messages.push({
         id: entry.entry_id,
         turnId: entry.turn_id,
+        entrySequence: numeric(entry.entry_sequence),
         role: 'assistant',
         assistantKind: 'tool-request',
         time: formatTime(entry.accepted_at_utc),
@@ -2021,6 +2042,7 @@ function projectEntries(
         messages.push({
           id: entry.entry_id,
           turnId: entry.turn_id,
+          entrySequence: numeric(entry.entry_sequence),
           role: 'assistant',
           assistantKind: 'tool-request',
           time: formatTime(entry.accepted_at_utc),
@@ -2436,6 +2458,23 @@ function projectTodo(control: ProtocolLiveControlSnapshot): TodoRun | undefined 
             : 'pending',
       };
     }),
+  };
+}
+
+function projectContextCompaction(
+  control: ProtocolCanonicalControl,
+): ContextCompactionBoundary | undefined {
+  const value = control.latest_context_compaction;
+  const contextBindingRevisionId = String(value?.context_binding_revision_id ?? '');
+  const turnId = String(value?.turn_id ?? '');
+  const acceptedAt = String(value?.accepted_at_utc ?? '');
+  if (!contextBindingRevisionId || !turnId || !acceptedAt) return undefined;
+  return {
+    contextBindingRevisionId,
+    turnId,
+    sourceThroughSequence: numeric(value?.source_through_sequence),
+    adoptedAfterEntrySequence: numeric(value?.adopted_after_entry_sequence),
+    acceptedAt,
   };
 }
 

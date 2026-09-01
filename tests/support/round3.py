@@ -162,7 +162,7 @@ class ScriptedKernelModel:
                 pro_model="test-pro",
                 flash_model="test-flash",
                 api="openai_chat_completions",
-            )
+            ),
         )
 
     def prepare_target(
@@ -197,6 +197,9 @@ class ScriptedKernelModel:
 
     def plan_wire_input(self, **kwargs):
         return self._preparer.plan_wire_input(**kwargs)
+
+    def freeze_wire_measurement(self, **kwargs):
+        return self._preparer.freeze_wire_measurement(**kwargs)
 
     def preflight_execution(
         self,
@@ -235,7 +238,7 @@ class CallbackScriptedKernelModel:
                 pro_model="test-pro",
                 flash_model="test-flash",
                 api="openai_chat_completions",
-            )
+            ),
         )
 
     def prepare_target(self, request):
@@ -266,6 +269,9 @@ class CallbackScriptedKernelModel:
 
     def plan_wire_input(self, **kwargs):
         return self._preparer.plan_wire_input(**kwargs)
+
+    def freeze_wire_measurement(self, **kwargs):
+        return self._preparer.freeze_wire_measurement(**kwargs)
 
     def preflight_execution(
         self,
@@ -437,9 +443,7 @@ class StaticContextSourceCollector:
         root_policy = LooseSkillDefinitionProducer(
             user_product_skills_root=Path.cwd() / ".test-user-pulsara-skills",
             user_agents_skills_root=Path.cwd() / ".test-user-agent-skills",
-        ).prepare_root_policy(
-            Path.cwd()
-        )
+        ).prepare_root_policy(Path.cwd())
         return issue_skill_catalog_source_snapshot(
             conversation_scope_kind=conversation_scope_kind,
             scope_subagent_task_id=scope_subagent_task_id,
@@ -1233,9 +1237,7 @@ def prepare_test_direct_tool_surface(
     root_policy = LooseSkillDefinitionProducer(
         user_product_skills_root=Path.cwd() / ".test-user-pulsara-skills",
         user_agents_skills_root=Path.cwd() / ".test-user-agent-skills",
-    ).prepare_root_policy(
-        Path.cwd()
-    )
+    ).prepare_root_policy(Path.cwd())
     inspection = CompleteEffectiveSkillCatalogInspection(
         root_policy=root_policy,
         winners=(),

@@ -1057,6 +1057,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           workspace={activeWorkspace}
           session={activeSession}
           messages={renderedMessages}
+          contextCompaction={mergedProjection.contextCompaction}
           todo={projection.todo}
           activePlanMode={projection.planMode}
           isRunning={projection.isRunning}

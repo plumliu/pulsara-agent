@@ -53,6 +53,9 @@
 
 .thread-scroll { min-height: 0; overflow-y: auto; overscroll-behavior: contain; scroll-behavior: smooth; }
 .thread-column { width: min(690px, calc(100% - 54px)); margin: 0 auto; padding: 34px 0 42px; font-family: var(--serif); }
+.assistant-turn:has(+ .context-compaction-divider), .user-turn:has(+ .context-compaction-divider) { margin-bottom: 16px; }
+.context-compaction-divider { display: flex; align-items: center; gap: 12px; margin: 2px 0 10px; color: var(--faint); font-family: var(--mono); font-size: var(--type-micro); font-weight: 700; letter-spacing: .1em; white-space: nowrap; }
+.context-compaction-divider__line { flex: 1; min-width: 24px; border-top: 1px solid var(--line-strong); }
 .turn-meta { display: flex; align-items: center; gap: 9px; margin-bottom: 17px; color: var(--faint); font-family: var(--mono); font-size: var(--type-caption); letter-spacing: .08em; }
 .hairline { width: 28px; height: 1px; background: var(--paper-darker); }
 .user-turn { width: min(520px, 88%); margin: 0 0 24px auto; }

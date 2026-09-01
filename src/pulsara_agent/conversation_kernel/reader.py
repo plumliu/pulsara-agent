@@ -35,7 +35,7 @@ from pulsara_agent.model_input.contracts import (
     CanonicalModelInputIdentity,
     CanonicalModelInputSnapshot,
     FrozenCanonicalCompileSnapshot,
-    FrozenCompiledModelInput,
+    ProviderWireSemanticInput,
     ContextBindingBaseKind,
     FrozenContextBindingCompileFact,
     FrozenPlanHandoffCompileFact,
@@ -250,9 +250,7 @@ class CanonicalProviderInputReader:
                 ),
             ).fetchone()
             if binding is None:
-                raise ConversationKernelConflict(
-                    "compaction headroom binding is stale"
-                )
+                raise ConversationKernelConflict("compaction headroom binding is stale")
             scope_kind = ModelInputScopeKind(str(binding["conversation_scope_kind"]))
             scope_task_id = binding["scope_subagent_task_id"]
             floor = (
@@ -343,9 +341,7 @@ class CanonicalProviderInputReader:
                 ),
             ).fetchone()
             if quote is None:
-                raise ConversationKernelConflict(
-                    "compaction headroom quote is absent"
-                )
+                raise ConversationKernelConflict("compaction headroom quote is absent")
             tool_calls = int(quote["tool_calls"])
             return freeze_compaction_headroom_preflight(
                 session_id=cut.session_id,
@@ -356,9 +352,7 @@ class CanonicalProviderInputReader:
                     None if scope_task_id is None else str(scope_task_id)
                 ),
                 effective_materialization_lineage_floor=floor,
-                provider_input_through_sequence=(
-                    cut.provider_input_through_sequence
-                ),
+                provider_input_through_sequence=(cut.provider_input_through_sequence),
                 # A request contributes one assistant item and at most one
                 # result/closure plus one cut-visible late correction per call.
                 post_base_item_count=max(
@@ -423,9 +417,7 @@ class CanonicalProviderInputReader:
                 ),
             ).fetchone()
             if row is None:
-                raise ConversationKernelConflict(
-                    "compaction binding lineage is absent"
-                )
+                raise ConversationKernelConflict("compaction binding lineage is absent")
             canonical = dispatch.compile_snapshot.canonical_input
             identity = canonical.identity
             scope = CompactionScope(
@@ -477,9 +469,7 @@ class CanonicalProviderInputReader:
                 effective_materialization_lineage_floor=(
                     lineage.effective_materialization_lineage_floor
                 ),
-                source_through_sequence=(
-                    identity.provider_input_through_sequence
-                ),
+                source_through_sequence=(identity.provider_input_through_sequence),
                 ordered_items=canonical.items,
                 closures=canonical.closures,
                 late_outcomes=canonical.late_outcomes,
@@ -573,9 +563,7 @@ class CanonicalProviderInputReader:
                 cut=cut,
                 workspace_id=str(binding["workspace_id"]),
                 scope_kind=ModelInputScopeKind(scope_kind),
-                scope_task_id=(
-                    None if scope_task_id is None else str(scope_task_id)
-                ),
+                scope_task_id=(None if scope_task_id is None else str(scope_task_id)),
                 current_initial_entry_sequence=int(
                     binding["current_initial_entry_sequence"]
                 ),
@@ -687,9 +675,7 @@ class CanonicalProviderInputReader:
                 connection,
                 cut.session_id,
                 entry_ids,
-                provider_input_through_sequence=(
-                    cut.provider_input_through_sequence
-                ),
+                provider_input_through_sequence=(cut.provider_input_through_sequence),
             )
             self._preflight_physical_bytes(
                 snapshot=snapshot,
@@ -875,9 +861,7 @@ class CanonicalProviderInputReader:
                             raise ConversationKernelConflict(
                                 "ROOT completion body is invalid"
                             ) from exc
-                        if completion["task_id"] != str(
-                            row["source_subagent_task_id"]
-                        ):
+                        if completion["task_id"] != str(row["source_subagent_task_id"]):
                             raise ConversationKernelConflict(
                                 "ROOT completion source lineage is invalid"
                             )
@@ -887,9 +871,7 @@ class CanonicalProviderInputReader:
                                     "message_type": "FINAL_ANSWER",
                                     "sender": {
                                         "kind": "SUBAGENT_TASK",
-                                        "task_id": str(
-                                            row["source_subagent_task_id"]
-                                        ),
+                                        "task_id": str(row["source_subagent_task_id"]),
                                     },
                                     "content": completion,
                                     "handling": (
@@ -1272,10 +1254,9 @@ class CanonicalProviderInputReader:
                             "Responses assistant lacks required replay"
                         )
                     continue
-                if (
-                    str(pointer) != str(row["replay_id"])
-                    or str(row["provider_wire_api"]) != str(row["wire_api"])
-                ):
+                if str(pointer) != str(row["replay_id"]) or str(
+                    row["provider_wire_api"]
+                ) != str(row["wire_api"]):
                     raise ConversationKernelConflict(
                         "assistant replay cyclic identity drifted"
                     )
@@ -1288,9 +1269,7 @@ class CanonicalProviderInputReader:
                         provider_replay_contract_fingerprint=str(
                             row["provider_replay_contract_fingerprint"]
                         ),
-                        replay_target_fingerprint=str(
-                            row["replay_target_fingerprint"]
-                        ),
+                        replay_target_fingerprint=str(row["replay_target_fingerprint"]),
                         public_projection_fingerprint=str(
                             row["public_projection_fingerprint"]
                         ),
@@ -1311,12 +1290,13 @@ class CanonicalProviderInputReader:
                 session_id=cut.session_id,
                 scope=scope,
                 context_binding_revision_id=cut.context_binding_revision_id,
-                provider_input_through_sequence=(
-                    cut.provider_input_through_sequence
-                ),
+                provider_input_through_sequence=(cut.provider_input_through_sequence),
                 manifests=tuple(manifests),
             )
-            if manifest_cut.aggregate_manifest_utf8_bytes > self._maximum_canonical_bytes:
+            if (
+                manifest_cut.aggregate_manifest_utf8_bytes
+                > self._maximum_canonical_bytes
+            ):
                 raise ConversationKernelConflict(
                     "provider replay manifest metadata bound exceeded"
                 )
@@ -1326,9 +1306,7 @@ class CanonicalProviderInputReader:
                 composite_fingerprint=context_fingerprint(
                     "pulsara.canonical-provider-dispatch-read:v1",
                     {
-                        "compile": (
-                            compile_snapshot.canonical_read_cut_fingerprint
-                        ),
+                        "compile": (compile_snapshot.canonical_read_cut_fingerprint),
                         "replay_manifest_cut": manifest_cut.cut_fingerprint,
                     },
                 ),
@@ -1338,7 +1316,7 @@ class CanonicalProviderInputReader:
         self,
         *,
         dispatch_read: FrozenCanonicalProviderDispatchRead,
-        compiled_input: FrozenCompiledModelInput,
+        compiled_input: ProviderWireSemanticInput,
         replay_target: ProviderReplayTargetCompatibilityFact,
         deadline_monotonic: float,
     ) -> FrozenSelectedDurableProviderReplayHydration | None:
@@ -1429,8 +1407,7 @@ class CanonicalProviderInputReader:
             if (
                 str(row["id"]) != manifest.replay_id
                 or str(row["session_id"]) != manifest_cut.scope.session_id
-                or str(row["assistant_entry_id"])
-                != manifest.assistant_entry_id
+                or str(row["assistant_entry_id"]) != manifest.assistant_entry_id
                 or str(row["wire_api"]) != manifest.wire_api
                 or str(row["codec_kind"]) != manifest.codec_kind
                 or str(row["provider_replay_contract_fingerprint"])
@@ -1442,8 +1419,7 @@ class CanonicalProviderInputReader:
                 or str(row["payload_digest"]) != manifest.payload_digest
                 or int(row["payload_size"]) != manifest.payload_size
                 or int(row["item_count"]) != manifest.item_count
-                or str(row["fragment_fingerprint"])
-                != manifest.fragment_fingerprint
+                or str(row["fragment_fingerprint"]) != manifest.fragment_fingerprint
             ):
                 raise ProviderReplayHydrationError(
                     ProviderReplayHydrationFailureKind.CANONICAL_CORRUPTION
@@ -1548,9 +1524,7 @@ def _permission_snapshot_from_binding(
             else str(binding["permission_inherited_from_turn_id"])
         ),
         permission_contract_id=str(binding["permission_contract_id"]),
-        permission_contract_fingerprint=str(
-            binding["permission_contract_fingerprint"]
-        ),
+        permission_contract_fingerprint=str(binding["permission_contract_fingerprint"]),
         snapshot_fingerprint=str(binding["permission_snapshot_fingerprint"]),
     )
 
@@ -1573,9 +1547,7 @@ def _plan_workflow_compile_fact(
     ).fetchone()
     if row is None:
         raise ConversationKernelConflict("active Plan compile workflow is absent")
-    provisional = FrozenPlanWorkflowCompileFact.__new__(
-        FrozenPlanWorkflowCompileFact
-    )
+    provisional = FrozenPlanWorkflowCompileFact.__new__(FrozenPlanWorkflowCompileFact)
     values = {
         "session_id": cut.session_id,
         "workspace_id": str(binding["workspace_id"]),
@@ -1587,13 +1559,9 @@ def _plan_workflow_compile_fact(
         "current_workflow_revision": int(row["workflow_revision"]),
         "workflow_status": PlanWorkflowStatus(str(row["status"])),
         "entered_by": PlanWorkflowEnteredBy(str(row["entered_by"])),
-        "resume_permission_mode": PermissionMode(
-            str(row["resume_permission_mode"])
-        ),
+        "resume_permission_mode": PermissionMode(str(row["resume_permission_mode"])),
         "permission_contract_id": str(row["permission_contract_id"]),
-        "permission_contract_fingerprint": str(
-            row["permission_contract_fingerprint"]
-        ),
+        "permission_contract_fingerprint": str(row["permission_contract_fingerprint"]),
     }
     for name, value in values.items():
         object.__setattr__(provisional, name, value)
@@ -1676,14 +1644,10 @@ def _plan_handoff_compile_facts(
         "interaction_id": interaction_id,
         "handoff_kind": kind,
         "workflow_status": PlanWorkflowStatus(str(row["status"])),
-        "resume_permission_mode": PermissionMode(
-            str(row["resume_permission_mode"])
-        ),
+        "resume_permission_mode": PermissionMode(str(row["resume_permission_mode"])),
         "transition_semantic_digest": transition_digest,
     }
-    provisional = FrozenPlanHandoffCompileFact.__new__(
-        FrozenPlanHandoffCompileFact
-    )
+    provisional = FrozenPlanHandoffCompileFact.__new__(FrozenPlanHandoffCompileFact)
     for name, value in values.items():
         object.__setattr__(provisional, name, value)
     object.__setattr__(provisional, "fact_fingerprint", "")
@@ -1766,6 +1730,7 @@ def _plan_handoff_compile_facts(
         ),
     )
     return handoff, approved
+
 
 class CanonicalProviderInputReader(CanonicalProviderInputReader):
     """Complete the bounded physical hydration methods after pure fact helpers."""
@@ -1949,9 +1914,7 @@ class CanonicalProviderInputReader(CanonicalProviderInputReader):
             "current_scope_kind": scope_kind,
             "scope_subagent_task_id": scope_task_id,
             "predecessor_turn_id": predecessor_turn_id,
-            "predecessor_initial_entry_sequence": int(
-                predecessor["entry_sequence"]
-            ),
+            "predecessor_initial_entry_sequence": int(predecessor["entry_sequence"]),
             "predecessor_terminal_at_utc": canonical_utc_timestamp(
                 predecessor["terminal_at"]
             ),
@@ -1967,8 +1930,7 @@ class CanonicalProviderInputReader(CanonicalProviderInputReader):
             ),
             "outcome_unknown_tool_count": int(unresolved["unknown_count"] or 0),
             "bounded_tool_name_samples": tuple(
-                _bounded_tool_name_sample(str(row["tool_name"]))
-                for row in sample_rows
+                _bounded_tool_name_sample(str(row["tool_name"])) for row in sample_rows
             ),
             "user_input_preserved": True,
             "canonical_entries_preserved": True,
@@ -2321,9 +2283,9 @@ def _project_plan_continuation_storage(
         typed_workflow
     ):
         raise ConversationKernelConflict("Plan continuation workflow conflicts")
-    if value.get("interaction_id") is not None and str(
-        value["interaction_id"]
-    ) != str(typed_interaction):
+    if value.get("interaction_id") is not None and str(value["interaction_id"]) != str(
+        typed_interaction
+    ):
         raise ConversationKernelConflict("Plan continuation interaction conflicts")
 
     projected: dict[str, object] = {

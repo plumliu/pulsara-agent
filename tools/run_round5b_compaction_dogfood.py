@@ -35,6 +35,7 @@ from pulsara_agent.conversation_kernel.contracts import InlineContent
 from pulsara_agent.conversation_kernel.host import KernelHostCore
 from pulsara_agent.conversation_kernel.repository import AssistantTextBlock
 from pulsara_agent.llm.input import MessageRole
+from pulsara_agent.llm.result import TransportUsageReport
 from pulsara_agent.ports.live_agent_event import (
     DataEndPayload,
     DataStartPayload,
@@ -69,7 +70,7 @@ _SKILL_NAME = "round5b-retained-check"
 _SENTINEL = "ROUND5B_SKILL_SUCCESS"
 _MCP_SENTINEL = "round5b-sentinel"
 _API_KEY_REDACTION = "<PULSARA_API_KEY>"
-_SCHEMA_VERSION = "round5b-compaction-dogfood.v4-isolated-roots-cache-usage"
+_SCHEMA_VERSION = "round5b-compaction-dogfood.v5-final-wire-estimation"
 
 
 def _scrub_exact(value: object, secret: str) -> object:
@@ -112,9 +113,7 @@ def _provider_usage_trace(report) -> dict[str, object]:
     return {
         "usage_status": report.usage_status,
         "input_tokens": None if usage is None else usage.input_tokens,
-        "cached_input_tokens": (
-            None if usage is None else usage.cached_input_tokens
-        ),
+        "cached_input_tokens": (None if usage is None else usage.cached_input_tokens),
         "output_tokens": None if usage is None else usage.output_tokens,
         "reasoning_output_tokens": (
             None if usage is None else usage.reasoning_output_tokens
@@ -127,6 +126,24 @@ def _provider_usage_trace(report) -> dict[str, object]:
     }
 
 
+def _provider_wire_quote_trace(quote) -> dict[str, object]:
+    return {
+        "wire_api": quote.wire_api,
+        "estimator_fingerprint": quote.estimator_fingerprint,
+        "semantic_estimated_input_tokens": (quote.semantic_estimated_input_tokens),
+        "generic_wire_estimated_input_tokens": (
+            quote.generic_wire_estimated_input_tokens
+        ),
+        "replaced_generic_wire_estimated_tokens": (
+            quote.replaced_generic_wire_estimated_tokens
+        ),
+        "replay_wire_estimated_tokens": quote.replay_wire_estimated_tokens,
+        "final_wire_estimated_input_tokens": (quote.final_wire_estimated_input_tokens),
+        "effective_input_budget_tokens": quote.effective_input_budget_tokens,
+        "final_wire_utf8_bytes": quote.final_wire_utf8_bytes,
+    }
+
+
 def _cache_usage_totals(
     records: tuple[dict[str, object], ...],
 ) -> dict[str, object]:
@@ -135,9 +152,7 @@ def _cache_usage_totals(
         for item in records
         if isinstance(item.get("provider_usage"), dict)
     )
-    reported = tuple(
-        item for item in reports if item.get("usage_status") == "reported"
-    )
+    reported = tuple(item for item in reports if item.get("usage_status") == "reported")
     cache_observable = tuple(
         item
         for item in reported
@@ -194,7 +209,13 @@ def _cache_usage_summary(
 
 
 class _DogfoodTrace:
-    def __init__(self, *, scenario: str, api_key: str) -> None:
+    def __init__(
+        self,
+        *,
+        scenario: str,
+        api_key: str,
+        suppress_one_summary_usage: bool = False,
+    ) -> None:
         self._secret = api_key
         self._active_turn_sequence: int | None = None
         self._turns: list[dict[str, object]] = []
@@ -202,6 +223,8 @@ class _DogfoodTrace:
         self._tool_invocations: list[dict[str, object]] = []
         self._compactions: list[dict[str, object]] = []
         self._scenario = scenario
+        self._suppress_one_summary_usage = suppress_one_summary_usage
+        self._usage_suppression_count = 0
 
     def scrub(self, value: object) -> object:
         return _scrub_exact(value, self._secret)
@@ -253,7 +276,10 @@ class _DogfoodTrace:
                     index
                     for index, message in enumerate(context.messages)
                     if message.role is MessageRole.USER
-                    and any("CONTEXT CHECKPOINT COMPACTION" in item for item in message.content)
+                    and any(
+                        "CONTEXT CHECKPOINT COMPACTION" in item
+                        for item in message.content
+                    )
                 ),
                 len(context.messages) - 1,
             )
@@ -263,6 +289,9 @@ class _DogfoodTrace:
         else:
             call_kind = "FOREGROUND"
             ephemeral_input_suffix = ()
+        plan = context.provider_wire_input_plan
+        if plan is None:
+            raise RuntimeError("provider open lacks its executable final-wire plan")
         record = {
             "sequence": len(self._model_calls) + 1,
             "turn_sequence": self._active_turn_sequence,
@@ -272,12 +301,23 @@ class _DogfoodTrace:
             "model_call_index": context.model_call_index,
             "tool_choice": context.tool_choice,
             "compiler_estimated_input_tokens": context.compiler_estimated_input_tokens,
+            "provider_wire_quote": _provider_wire_quote_trace(plan.quote),
             "ephemeral_input_suffix": self.scrub(ephemeral_input_suffix),
             "normalized_blocks": [],
             "terminal": None,
         }
         self._model_calls.append(record)
         return record
+
+    def claim_summary_usage_suppression(self, *, call) -> bool:
+        if (
+            not self._suppress_one_summary_usage
+            or self._usage_suppression_count != 0
+            or call.fact.purpose is not ModelCallPurpose.CONTEXT_COMPACTION_SUMMARY
+        ):
+            return False
+        self._usage_suppression_count = 1
+        return True
 
     def record_tool_invocation(self, record: dict[str, object]) -> None:
         record = {**record, "sequence": len(self._tool_invocations) + 1}
@@ -297,24 +337,49 @@ class _DogfoodTrace:
             "model_calls": self._model_calls,
             "tool_invocations": self._tool_invocations,
             "compactions": self._compactions,
-            "provider_cache_usage": _cache_usage_summary(
-                tuple(self._model_calls)
-            ),
+            "provider_cache_usage": _cache_usage_summary(tuple(self._model_calls)),
+            "usage_suppression_count": self._usage_suppression_count,
         }
 
 
+class _DogfoodScenarioFailure(RuntimeError):
+    def __init__(
+        self,
+        *,
+        scenario: str,
+        cause: BaseException,
+        diagnostic: dict[str, object],
+    ) -> None:
+        super().__init__(f"{scenario} failed: {type(cause).__name__}: {cause}")
+        self.cause = cause
+        self.diagnostic = diagnostic
+
+
 class _TracingExecution:
-    def __init__(self, delegate, *, trace: _DogfoodTrace, record) -> None:
+    def __init__(
+        self,
+        delegate,
+        *,
+        trace: _DogfoodTrace,
+        record,
+        suppress_usage: bool,
+    ) -> None:
         self._delegate = delegate
         self._trace = trace
         self._record = record
+        self._suppress_usage = suppress_usage
         self._blocks: dict[str, dict[str, object]] = {}
 
     async def read_next(self):
         item = await self._delegate.read_next()
         if isinstance(
             item,
-            (TextStartPayload, ThinkingStartPayload, DataStartPayload, ToolCallStartPayload),
+            (
+                TextStartPayload,
+                ThinkingStartPayload,
+                DataStartPayload,
+                ToolCallStartPayload,
+            ),
         ):
             if isinstance(item, TextStartPayload):
                 block = {"type": "TEXT", "block_identity": item.block_identity}
@@ -349,6 +414,20 @@ class _TracingExecution:
                 block["tool_name"] = item.tool_name
                 block["arguments"] = self._trace.scrub(item.arguments_json)
         elif isinstance(item, ProviderStreamTerminal):
+            reported_usage = item.usage
+            if self._suppress_usage:
+                item = replace(
+                    item,
+                    usage=TransportUsageReport(
+                        usage_status="missing",
+                        usage=None,
+                        provider_diagnostics=reported_usage.provider_diagnostics,
+                        reported_model_id=reported_usage.reported_model_id,
+                    ),
+                )
+            self._record["provider_reported_usage"] = _provider_usage_trace(
+                reported_usage
+            )
             self._record["provider_usage"] = _provider_usage_trace(item.usage)
             self._record["terminal"] = {
                 "kind": item.terminal_kind.value,
@@ -391,7 +470,12 @@ class _TracingTransport:
     def open_stream(self, *, call, context):
         record = self._trace.start_model_call(call=call, context=context)
         execution = self._delegate.open_stream(call=call, context=context)
-        return _TracingExecution(execution, trace=self._trace, record=record)
+        return _TracingExecution(
+            execution,
+            trace=self._trace,
+            record=record,
+            suppress_usage=self._trace.claim_summary_usage_suppression(call=call),
+        )
 
 
 def _dsn_with_database(dsn: str, database_name: str) -> str:
@@ -648,7 +732,7 @@ def _runtime_source_body_contains(view, kind: ContextSourceKind, text: str) -> b
     return False
 
 
-def _seed_completed_history(session, *, segments: int = 5) -> None:
+def _seed_completed_history(session, *, segments: int = 2) -> None:
     guard = session._lease.guard  # noqa: SLF001
     repository = session.repository
     for index in range(segments):
@@ -749,6 +833,9 @@ def _install_summary_recorder(session, records: list[dict[str, object]]) -> None
                     "tools_exact": materialization.tool_items == old_wire.tool_items,
                     "wire_prefix_exact": wire_prefix_exact,
                     "input_tokens": context.compiler_estimated_input_tokens,
+                    "provider_wire_quote": _provider_wire_quote_trace(
+                        context.provider_wire_input_plan.quote
+                    ),
                 }
             )
 
@@ -795,8 +882,8 @@ def _install_read_activation(session, observed_tools: list[str]) -> None:
         if name == "search_files" and observed_tools.count("search_files") == 1:
             session._compaction.policy = ResolvedCompactionPolicy(  # noqa: SLF001
                 automatic_enabled=True,
-                auto_trigger_ratio=0.30,
-                post_compaction_target_ratio=0.20,
+                auto_trigger_ratio=0.35,
+                post_compaction_target_ratio=0.30,
                 minimum_reclaim_tokens=1,
                 maximum_retained_tool_groups=1,
             )
@@ -817,6 +904,10 @@ def _install_compaction_trigger_recorder(
     original = coordinator.execute_active
 
     async def execute(**kwargs):
+        from pulsara_agent.conversation_kernel.compaction import (
+            coordinator as compaction_module,
+        )
+
         before = _snapshot_fingerprints(session)
         observed_before = tuple(observed_tools)
         base = {
@@ -828,6 +919,86 @@ def _install_compaction_trigger_recorder(
             "tool_names_before_compaction": observed_before,
             "snapshot_count_before": len(before),
         }
+        wire_transitions: list[dict[str, object]] = []
+        validate_transition = compaction_module.validate_compaction_wire_transition
+
+        def record_wire_transition(**values):
+            try:
+                transition = validate_transition(**values)
+            except BaseException as exc:
+                source_candidate = values["source_candidate"]
+                successor_wire = values["successor_wire"]
+                successor_candidate = successor_wire.candidate
+                source_call = source_candidate.call
+                successor_call = successor_candidate.call
+                source_identity = (
+                    source_candidate.semantic_input.canonical_input_identity
+                )
+                successor_identity = (
+                    successor_candidate.semantic_input.canonical_input_identity
+                )
+                wire_transitions.append(
+                    {
+                        "phase": values["phase"],
+                        "validation_failure_type": type(exc).__name__,
+                        "validation_failure_message": str(exc),
+                        "source": _provider_wire_quote_trace(
+                            values["source_view"].provider_wire_quote
+                        ),
+                        "successor": _provider_wire_quote_trace(successor_wire.quote),
+                        "target_fact_equal": (
+                            source_call.target.fact == successor_call.target.fact
+                        ),
+                        "provider_profile_equal": (
+                            source_call.target.model_profile.provider_profile
+                            == successor_call.target.model_profile.provider_profile
+                        ),
+                        "native_projection_equal": (
+                            source_candidate.native_projection_set
+                            == successor_candidate.native_projection_set
+                        ),
+                        "scope_equal": (
+                            source_identity.session_id == successor_identity.session_id
+                            and source_identity.turn_id == successor_identity.turn_id
+                            and source_identity.conversation_scope_kind
+                            is successor_identity.conversation_scope_kind
+                            and source_identity.scope_subagent_task_id
+                            == successor_identity.scope_subagent_task_id
+                        ),
+                        "lineage_exact": (
+                            compaction_module._compaction_cut_lineage_exactly_joins(
+                                source_candidate=source_candidate,
+                                successor_candidate=successor_candidate,
+                                phase=values["phase"],
+                            )
+                        ),
+                        "source_binding": repr(
+                            source_candidate.canonical_read.compile_snapshot.context_binding_fact
+                        ),
+                        "successor_binding": repr(
+                            successor_candidate.canonical_read.compile_snapshot.context_binding_fact
+                        ),
+                        "source_identity": repr(source_identity),
+                        "successor_identity": repr(successor_identity),
+                    }
+                )
+                raise
+            source = transition.source_quote
+            successor = transition.successor_quote
+            wire_transitions.append(
+                {
+                    "phase": transition.phase,
+                    "source": _provider_wire_quote_trace(source),
+                    "successor": _provider_wire_quote_trace(successor),
+                    "estimated_reclaim_tokens": transition.reclaim_tokens,
+                    "exact_wire_byte_delta": (
+                        source.final_wire_utf8_bytes - successor.final_wire_utf8_bytes
+                    ),
+                }
+            )
+            return transition
+
+        compaction_module.validate_compaction_wire_transition = record_wire_transition
         try:
             result = await original(**kwargs)
         except BaseException as exc:
@@ -837,10 +1008,13 @@ def _install_compaction_trigger_recorder(
                 "disposition": "RAISED",
                 "failure_type": type(exc).__name__,
                 "failure_message": str(exc),
+                "wire_transitions": tuple(wire_transitions),
             }
             records.append(failed)
             trace.record_compaction(failed)
             raise
+        finally:
+            compaction_module.validate_compaction_wire_transition = validate_transition
         outcome = result.outcome
         after = _snapshot_fingerprints(session)
         completed = {
@@ -850,6 +1024,7 @@ def _install_compaction_trigger_recorder(
             "snapshot_id_present": outcome.snapshot_id is not None,
             "revision_ordinal": outcome.revision_ordinal,
             "public_code": outcome.public_code,
+            "wire_transitions": tuple(wire_transitions),
         }
         records.append(completed)
         trace.record_compaction(completed)
@@ -917,6 +1092,7 @@ async def _run_retained_and_repeated(
     trace = _DogfoodTrace(
         scenario="retained_and_repeated",
         api_key=settings.llm.api_key,
+        suppress_one_summary_usage=True,
     )
     summary_records: list[dict[str, object]] = []
     compaction_records: list[dict[str, object]] = []
@@ -957,7 +1133,10 @@ async def _run_retained_and_repeated(
             workspace,
             (("direct", ("direct_echo",)), ("late", ("direct_echo",))),
         )
-        await session.reload_mcp_configs(_isolated_mcp_configs(workspace))
+        await session.reload_mcp_configs(
+            _isolated_mcp_configs(workspace),
+            deadline_monotonic=monotonic() + 30,
+        )
         ready = await session._mcp_supervisor.wait_for_server_settlement(  # noqa: SLF001
             "late", timeout_seconds=20
         )
@@ -1019,9 +1198,11 @@ async def _run_retained_and_repeated(
         # second durable snapshot.  The current correction remains in the
         # protected tail and must override any prior summary.
         _write_skill(workspace, changed=True)
-        _seed_completed_history(session, segments=15)
+        _seed_completed_history(session, segments=12)
         session._compaction.policy = ResolvedCompactionPolicy(  # noqa: SLF001
             automatic_enabled=True,
+            auto_trigger_ratio=0.85,
+            post_compaction_target_ratio=0.80,
             minimum_reclaim_tokens=1,
         )
         corrected = await _run_traced_turn(
@@ -1045,9 +1226,7 @@ async def _run_retained_and_repeated(
         )
         mid_turn = mid_turn_records[0] if len(mid_turn_records) == 1 else None
         try:
-            skill_mcp_index = skill_turn_trajectory.index(
-                "mcp__late__direct_echo"
-            )
+            skill_mcp_index = skill_turn_trajectory.index("mcp__late__direct_echo")
         except ValueError:
             skill_mcp_index = -1
         required_skill_sequence_seen = bool(
@@ -1055,8 +1234,7 @@ async def _run_retained_and_repeated(
             and skill_turn_trajectory.count("read_file") == 1
             and skill_turn_trajectory.count("mcp__late__direct_echo") == 1
             and skill_mcp_index > 0
-            and skill_turn_trajectory[1:skill_mcp_index].count("search_files")
-            >= 1
+            and skill_turn_trajectory[1:skill_mcp_index].count("search_files") >= 1
         )
         result = {
             "initial_epoch_revision": initial_epoch.epoch_revision,
@@ -1070,8 +1248,7 @@ async def _run_retained_and_repeated(
             "final_snapshot_count": len(all_snapshots),
             "snapshot_fingerprints": all_snapshots,
             "successor_epoch_changed": (
-                first_successor.epoch_nonce
-                != summary_records[0]["old_epoch_nonce"]
+                first_successor.epoch_nonce != summary_records[0]["old_epoch_nonce"]
             ),
             "successor_routes": _route_counts(first_successor),
             "successor_route_details": _route_details(first_successor),
@@ -1106,13 +1283,10 @@ async def _run_retained_and_repeated(
             "agentic_mid_turn": {
                 "exactly_one_mid_turn_compaction": len(mid_turn_records) == 1,
                 "same_turn": (
-                    mid_turn is not None
-                    and mid_turn["turn_id"] == skill_result.turn_id
+                    mid_turn is not None and mid_turn["turn_id"] == skill_result.turn_id
                 ),
                 "trigger": None if mid_turn is None else mid_turn["trigger"],
-                "disposition": (
-                    None if mid_turn is None else mid_turn["disposition"]
-                ),
+                "disposition": (None if mid_turn is None else mid_turn["disposition"]),
                 "snapshot_count_before": (
                     None if mid_turn is None else mid_turn["snapshot_count_before"]
                 ),
@@ -1125,9 +1299,7 @@ async def _run_retained_and_repeated(
                     else mid_turn["tool_calls_before_compaction"]
                 ),
                 "tool_names_before_compaction": (
-                    ()
-                    if mid_turn is None
-                    else mid_turn["tool_names_before_compaction"]
+                    () if mid_turn is None else mid_turn["tool_names_before_compaction"]
                 ),
                 "same_turn_tool_trajectory": skill_turn_trajectory,
                 "post_compaction_tool_suffix": skill_turn_trajectory[2:],
@@ -1138,8 +1310,10 @@ async def _run_retained_and_repeated(
         }
         result["passed"] = bool(
             result["late_meta_before_compaction"]
-            and result["summary_call_shape"]["initial_calls"] == 2
+            and result["summary_call_shape"]["initial_calls"] >= 2
             and result["summary_call_shape"]["at_most_one_repair_per_initial"]
+            and len(compaction_records) == 2
+            and all(item["disposition"] == "COMPACTED" for item in compaction_records)
             and all(
                 item["tool_choice"] == "auto"
                 and item["tools_exact"]
@@ -1174,6 +1348,17 @@ async def _run_retained_and_repeated(
             and result["agentic_mid_turn"]["final_answer_nonempty"]
         )
         return result
+    except BaseException as exc:
+        raise _DogfoodScenarioFailure(
+            scenario="retained_and_repeated",
+            cause=exc,
+            diagnostic={
+                "trace": trace.report(),
+                "summary_records": tuple(summary_records),
+                "compaction_records": tuple(compaction_records),
+                "observed_tools": tuple(observed_tools),
+            },
+        ) from exc
     finally:
         try:
             await core.shutdown()
@@ -1234,7 +1419,10 @@ async def _run_overbound(
                 ("bulk", tuple(f"bulk_{index:02d}" for index in range(48))),
             ),
         )
-        await session.reload_mcp_configs(_isolated_mcp_configs(workspace))
+        await session.reload_mcp_configs(
+            _isolated_mcp_configs(workspace),
+            deadline_monotonic=monotonic() + 30,
+        )
         ready = await session._mcp_supervisor.wait_for_server_settlement(  # noqa: SLF001
             "bulk", timeout_seconds=20
         )
@@ -1249,8 +1437,8 @@ async def _run_overbound(
         )
         session._compaction.policy = ResolvedCompactionPolicy(  # noqa: SLF001
             automatic_enabled=True,
-            auto_trigger_ratio=0.30,
-            post_compaction_target_ratio=0.20,
+            auto_trigger_ratio=0.99,
+            post_compaction_target_ratio=0.98,
             minimum_reclaim_tokens=1,
         )
         final = await _run_traced_turn(
@@ -1297,6 +1485,17 @@ async def _run_overbound(
             and result["final_nonempty"]
         )
         return result
+    except BaseException as exc:
+        raise _DogfoodScenarioFailure(
+            scenario="overbound_mcp",
+            cause=exc,
+            diagnostic={
+                "trace": trace.report(),
+                "summary_records": tuple(summary_records),
+                "compaction_records": tuple(compaction_records),
+                "observed_tools": tuple(observed_tools),
+            },
+        ) from exc
     finally:
         try:
             await core.shutdown()
@@ -1321,6 +1520,7 @@ async def _run(settings: PulsaraSettings) -> dict[str, object]:
     overbound_calls = tuple(
         overbound["diagnostic_trace"]["model_calls"]  # type: ignore[index]
     )
+    usage = _cache_usage_summary(retained_calls + overbound_calls)
     return {
         "schema_version": _SCHEMA_VERSION,
         "completed_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -1330,10 +1530,15 @@ async def _run(settings: PulsaraSettings) -> dict[str, object]:
         "overbound_mcp": overbound,
         "diagnostic_trace_recorded": True,
         "pulsara_api_key_recorded": False,
-        "provider_cache_usage": _cache_usage_summary(
-            retained_calls + overbound_calls
+        "provider_cache_usage": usage,
+        "status": (
+            "passed"
+            if retained["passed"]
+            and overbound["passed"]
+            and usage["usage_reported_calls"] > 0
+            and usage["usage_missing_calls"] > 0
+            else "failed"
         ),
-        "status": "passed" if retained["passed"] and overbound["passed"] else "failed",
     }
 
 
@@ -1377,19 +1582,30 @@ def main() -> int:
     admin_root_dsn, database_name, runtime_dsn = _create_database(initial)
     try:
         with _isolated_user_definition_environment():
-            report = asyncio.run(
-                _run(_runtime_settings(args.env_file, runtime_dsn))
-            )
+            report = asyncio.run(_run(_runtime_settings(args.env_file, runtime_dsn)))
     except BaseException as exc:
-        frame = traceback.extract_tb(exc.__traceback__)[-1]
+        root_failure = exc.cause if isinstance(exc, _DogfoodScenarioFailure) else exc
+        frame = traceback.extract_tb(root_failure.__traceback__)[-1]
         report = {
             "schema_version": _SCHEMA_VERSION,
             "completed_at_utc": datetime.now(timezone.utc).isoformat(),
             "status": "external_or_runtime_failure",
-            "failure_type": type(exc).__name__,
-            "failure_message": _scrub_exact(str(exc)[:512], initial.llm.api_key),
+            "provider_api": initial.llm.api,
+            "provider_model": initial.llm.pro.model_id,
+            "failure_type": type(root_failure).__name__,
+            "failure_message": _scrub_exact(
+                str(root_failure)[:512], initial.llm.api_key
+            ),
             "failure_site": f"{Path(frame.filename).name}:{frame.lineno}:{frame.name}",
-            "diagnostic_trace_recorded": False,
+            "failure_traceback": _scrub_exact(
+                traceback.format_exc(), initial.llm.api_key
+            ),
+            "failure_diagnostic": (
+                None
+                if not isinstance(exc, _DogfoodScenarioFailure)
+                else _scrub_exact(exc.diagnostic, initial.llm.api_key)
+            ),
+            "diagnostic_trace_recorded": isinstance(exc, _DogfoodScenarioFailure),
             "pulsara_api_key_recorded": False,
         }
     finally:

@@ -62,8 +62,7 @@ class _PreparedTestExecution:
             raise RuntimeError("test execution already opened")
         if (
             permit.epoch_nonce != self._candidate.epoch_nonce
-            or permit.epoch_revision
-            != self._candidate.expected_epoch_revision + 1
+            or permit.epoch_revision != self._candidate.expected_epoch_revision + 1
         ):
             raise RuntimeError("test execution permit mismatch")
         self._install_authority.consume(
@@ -99,6 +98,12 @@ class _PreflightModel:
 
     def plan_wire_input(self, **kwargs):
         return self._preparer.plan_wire_input(**kwargs)
+
+    def freeze_wire_measurement(self, **kwargs):
+        return self._preparer.freeze_wire_measurement(**kwargs)
+
+    def replay_target_for_resolved_call(self, call):
+        return self._preparer.replay_target_for_resolved_call(call)
 
     def preflight_execution(
         self,
@@ -156,7 +161,7 @@ class _PlanHostModel(_PreflightModel):
                 pro_model="test-pro",
                 flash_model="test-flash",
                 api="openai_chat_completions",
-            )
+            ),
         )
 
     def prepare_call(self, request):
@@ -202,9 +207,7 @@ class _PlanHostModel(_PreflightModel):
                 "exit_plan",
                 "call:draft",
                 {
-                    "plan": (
-                        f"1. inspect\n2. implement {_PLAN_SENTINEL}\n3. verify"
-                    ),
+                    "plan": (f"1. inspect\n2. implement {_PLAN_SENTINEL}\n3. verify"),
                     "summary": "bounded implementation",
                 },
             )
@@ -246,7 +249,7 @@ class _EnterPlanThenTextModel(_PreflightModel):
                 pro_model="test-pro",
                 flash_model="test-flash",
                 api="openai_chat_completions",
-            )
+            ),
         )
 
     def prepare_call(self, request):
@@ -281,7 +284,7 @@ class _DetachedDraftModel(_PreflightModel):
                 pro_model="test-pro",
                 flash_model="test-flash",
                 api="openai_chat_completions",
-            )
+            ),
         )
 
     def prepare_call(self, request):
@@ -317,7 +320,7 @@ class _ForceExitRaceModel(_PreflightModel):
                 pro_model="test-pro",
                 flash_model="test-flash",
                 api="openai_chat_completions",
-            )
+            ),
         )
 
     def prepare_call(self, request):
@@ -345,7 +348,7 @@ class _BlockingPlanTextModel(_PreflightModel):
                 pro_model="test-pro",
                 flash_model="test-flash",
                 api="openai_chat_completions",
-            )
+            ),
         )
 
     def prepare_call(self, request):
@@ -464,9 +467,7 @@ def test_round4_host_enter_question_approve_and_permission_happy_path(
             workflow_id=workflow_id,
             expected_workflow_revision=2,
             interaction_id=opened.interaction_id,
-            answer=PlanQuestionAnswer(
-                PlanQuestionAnswerKind.OPTION, option_ordinal=0
-            ),
+            answer=PlanQuestionAnswer(PlanQuestionAnswerKind.OPTION, option_ordinal=0),
         )
         draft_run = await asyncio.wait_for(running, timeout=5)
         assert draft_run.pending_plan_interaction_id is not None
@@ -645,8 +646,7 @@ def test_round4_detached_waiter_cannot_strand_root_slot_before_plan_review(
             deadline_monotonic=monotonic() + 5,
         ) as connection:
             successor_row = connection.execute(
-                "SELECT status FROM pulsara_v3.turns "
-                "WHERE session_id = %s AND id = %s",
+                "SELECT status FROM pulsara_v3.turns WHERE session_id = %s AND id = %s",
                 (session.session_id, approved.continuation_turn_id),
             ).fetchone()
         assert successor_row == {"status": "COMPLETED"}
@@ -730,8 +730,7 @@ def test_round4_force_exit_fences_full_automatic_continuation_before_bind(
             deadline_monotonic=monotonic() + 5,
         ) as connection:
             successor_row = connection.execute(
-                "SELECT status FROM pulsara_v3.turns "
-                "WHERE session_id = %s AND id = %s",
+                "SELECT status FROM pulsara_v3.turns WHERE session_id = %s AND id = %s",
                 (session.session_id, successor["id"]),
             ).fetchone()
         assert successor_row == {"status": "INTERRUPTED"}
@@ -816,9 +815,7 @@ def test_round7_cancel_during_automatic_plan_pending_handoff_interrupts_successo
             "terminal_reason": terminal_reason,
         }
         if operation == "stop":
-            await core.close_session(
-                session.host_session_id, close_conversation=True
-            )
+            await core.close_session(session.host_session_id, close_conversation=True)
         await core.shutdown()
 
     asyncio.run(scenario())
@@ -949,8 +946,7 @@ def test_round4_unbound_successor_retries_terminalization_before_retirement(
             deadline_monotonic=monotonic() + 5,
         ) as connection:
             successor = connection.execute(
-                "SELECT status FROM pulsara_v3.turns "
-                "WHERE session_id = %s AND id = %s",
+                "SELECT status FROM pulsara_v3.turns WHERE session_id = %s AND id = %s",
                 (session.session_id, approved.continuation_turn_id),
             ).fetchone()
         assert successor == {"status": "INTERRUPTED"}

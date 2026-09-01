@@ -321,6 +321,7 @@ export interface SubagentRun {
 export interface Message {
   id: string;
   turnId?: string;
+  entrySequence?: number;
   role: 'user' | 'assistant';
   userKind?: 'prompt' | 'steer' | 'plan-continuation' | 'subagent-completion';
   assistantKind?: 'terminal' | 'tool-request' | 'live';

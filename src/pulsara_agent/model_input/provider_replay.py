@@ -22,8 +22,8 @@ from pulsara_agent.llm.request import (
 from pulsara_agent.llm.input import MessageRole
 from pulsara_agent.model_input.contracts import (
     FrozenCanonicalCompileSnapshot,
-    FrozenCompiledModelInput,
     FrozenCompiledMessagePlacement,
+    ProviderWireSemanticInput,
     compiled_message_placement_identity_fingerprint,
 )
 from pulsara_agent.model_input.continuity import ProviderInputContinuityScope
@@ -129,7 +129,9 @@ def provider_replay_manifest_fingerprint(
     )
 
 
-def freeze_provider_replay_manifest(**values: object) -> FrozenDurableProviderReplayManifest:
+def freeze_provider_replay_manifest(
+    **values: object,
+) -> FrozenDurableProviderReplayManifest:
     provisional = FrozenDurableProviderReplayManifest.__new__(
         FrozenDurableProviderReplayManifest
     )
@@ -258,13 +260,11 @@ class FrozenCanonicalProviderDispatchRead:
         cut = self.replay_manifest_cut
         if (
             identity.session_id != cut.session_id
-            or identity.context_binding_revision_id
-            != cut.context_binding_revision_id
+            or identity.context_binding_revision_id != cut.context_binding_revision_id
             or identity.provider_input_through_sequence
             != cut.provider_input_through_sequence
             or identity.conversation_scope_kind is not cut.scope.scope_kind
-            or identity.scope_subagent_task_id
-            != cut.scope.scope_subagent_task_id
+            or identity.scope_subagent_task_id != cut.scope.scope_subagent_task_id
         ):
             raise ValueError("provider dispatch read cut does not exact-join")
         expected = context_fingerprint(
@@ -303,8 +303,7 @@ class FrozenSelectedDurableProviderReplayHydration:
             if (
                 manifest.assistant_entry_id != fragment.assistant_entry_id
                 or manifest.fragment_fingerprint != fragment.fragment_fingerprint
-                or manifest.replay_target_fingerprint
-                != self.replay_target_fingerprint
+                or manifest.replay_target_fingerprint != self.replay_target_fingerprint
             ):
                 raise ValueError("selected provider replay fragment drifted")
         expected = context_fingerprint(
@@ -337,8 +336,7 @@ def selected_message_placements_fingerprint(
     return context_fingerprint(
         "pulsara.selected-provider-replay-message-placements:v1",
         tuple(
-            compiled_message_placement_identity_fingerprint(item)
-            for item in placements
+            compiled_message_placement_identity_fingerprint(item) for item in placements
         ),
     )
 
@@ -346,7 +344,7 @@ def selected_message_placements_fingerprint(
 def select_compatible_provider_replay_manifests(
     *,
     manifest_cut: FrozenDurableProviderReplayManifestCut,
-    compiled_input: FrozenCompiledModelInput,
+    compiled_input: ProviderWireSemanticInput,
     replay_target: ProviderReplayTargetCompatibilityFact,
 ) -> tuple[
     tuple[FrozenDurableProviderReplayManifest, ...],
@@ -358,8 +356,7 @@ def select_compatible_provider_replay_manifests(
     if (
         manifest_cut.session_id != identity.session_id
         or manifest_cut.scope.scope_kind is not identity.conversation_scope_kind
-        or manifest_cut.scope.scope_subagent_task_id
-        != identity.scope_subagent_task_id
+        or manifest_cut.scope.scope_subagent_task_id != identity.scope_subagent_task_id
         or manifest_cut.context_binding_revision_id
         != identity.context_binding_revision_id
         or manifest_cut.provider_input_through_sequence
@@ -406,7 +403,7 @@ def select_compatible_provider_replay_manifests(
 def freeze_selected_provider_replay_hydration(
     *,
     manifest_cut: FrozenDurableProviderReplayManifestCut,
-    compiled_input: FrozenCompiledModelInput,
+    compiled_input: ProviderWireSemanticInput,
     replay_target: ProviderReplayTargetCompatibilityFact,
     selected_manifests: tuple[FrozenDurableProviderReplayManifest, ...],
     selected_placements: tuple[FrozenCompiledMessagePlacement, ...],
@@ -451,9 +448,7 @@ def freeze_selected_provider_replay_hydration(
         ):
             raise ValueError("provider replay public projection or target drifted")
 
-    placement_fingerprint = selected_message_placements_fingerprint(
-        selected_placements
-    )
+    placement_fingerprint = selected_message_placements_fingerprint(selected_placements)
     aggregate_payload_bytes = sum(item.payload_size for item in fragments)
     provisional = FrozenSelectedDurableProviderReplayHydration.__new__(
         FrozenSelectedDurableProviderReplayHydration

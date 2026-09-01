@@ -177,6 +177,62 @@ describe('selectPromptCommand', () => {
     });
   });
 
+  it('projects an adopted context boundary from canonical control after observation', async () => {
+    const content = (value: string) => ({
+      kind: 'INLINE',
+      inline_content: btoa(String.fromCharCode(...new TextEncoder().encode(value))),
+    });
+    const responses = [{
+      connection_id: 'connection-1', connection_generation: 1,
+      session_id: 'session-1', role: 'controller',
+      live_hello: { live_owner_epoch: '1', live_revision: '0', live_snapshot: {} },
+      snapshot: {
+        snapshot: {
+          session_id: 'session-1', writer_generation: '1', event_sequence_cut: '2',
+          entries: [{
+            entry_id: 'entry-1', turn_id: 'turn-1', entry_sequence: '1',
+            entry_kind: 'USER_MESSAGE', scope_kind: 'ROOT', content: content('压缩前'),
+          }],
+          control: {},
+        },
+      },
+      live_control_snapshot: { snapshot: {} },
+    }, {
+      observation: {
+        through_event_sequence: '3',
+        committed: [{
+          projection_kind: 'CURRENT_CONTROL',
+          current_control: {
+            latest_context_compaction: {
+              turn_id: 'turn-1',
+              context_binding_revision_id: 'revision-1',
+              source_through_sequence: '1',
+              adopted_after_entry_sequence: '1',
+              accepted_at_utc: '2026-09-01T10:00:00Z',
+            },
+          },
+        }],
+      },
+    }];
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(responses.shift()), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    })));
+
+    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+    expect(connection.current().contextCompaction).toBeUndefined();
+    expect(connection.current().messages[0]?.entrySequence).toBe(1);
+
+    const observed = await connection.observe();
+
+    expect(observed.contextCompaction).toEqual({
+      contextBindingRevisionId: 'revision-1',
+      turnId: 'turn-1',
+      sourceThroughSequence: 1,
+      adoptedAfterEntrySequence: 1,
+      acceptedAt: '2026-09-01T10:00:00Z',
+    });
+  });
+
   it('projects provider reasoning and distinguishes full text from a summary', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
       connection_id: 'connection-1', connection_generation: 1,

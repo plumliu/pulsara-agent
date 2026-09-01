@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field as dataclass_field, replace
 from datetime import datetime, timezone
 from hashlib import sha256
+from threading import Lock
 from time import monotonic
 from typing import Protocol
 from uuid import uuid4
@@ -54,6 +55,8 @@ from pulsara_agent.conversation_kernel.direct_model import (
     PreparedKernelModelExecution,
     PreparedKernelSemanticModelCall,
     PreparedKernelModelTarget,
+    ProviderWireMeasurement,
+    provider_wire_profile_fingerprint,
 )
 from pulsara_agent.capability.contracts import (
     EmptyCapabilityEpochPredecessor,
@@ -73,8 +76,11 @@ from pulsara_agent.conversation_kernel.capability_composition import (
 )
 from pulsara_agent.llm.input import MessageRole
 from pulsara_agent.llm.request import (
+    MAXIMUM_PROVIDER_WIRE_INPUT_BYTES,
+    FrozenProviderWireInputQuote,
     FrozenProviderWireInputPlan,
 )
+from pulsara_agent.llm.resolution import ResolvedModelCall
 from pulsara_agent.llm.provider_replay import (
     build_provider_replay_target_compatibility,
 )
@@ -156,7 +162,9 @@ from pulsara_agent.model_input.contracts import (
     FrozenModelToolSurface,
     PreparedProviderInputCut,
     FrozenCompiledModelInput,
+    ProviderWireSemanticInput,
     ModelInputCompileFailureKind,
+    ModelInputCompileBinding,
     ModelInputScopeKind,
     StructuredModelInputCompileError,
     StructuredModelInputCompileRequest,
@@ -275,6 +283,17 @@ class KernelModelPort(Protocol):
         replay_hydration: FrozenSelectedDurableProviderReplayHydration | None = None,
     ) -> FrozenProviderWireInputPlan: ...
 
+    def freeze_wire_measurement(
+        self,
+        *,
+        call,
+        compile_binding: ModelInputCompileBinding,
+        native_projection_set: FrozenNativeToolProjectionSet,
+        semantic_input: ProviderWireSemanticInput,
+        replay_hydration: FrozenSelectedDurableProviderReplayHydration | None,
+        tool_choice: str | None = None,
+    ) -> ProviderWireMeasurement: ...
+
     def resolve_compaction_summary_call(
         self,
         *,
@@ -287,15 +306,275 @@ class KernelModelPort(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
+class PreparedProviderWireCandidate:
+    """Authority-free structural input for one exact wire measurement."""
+
+    canonical_read: FrozenCanonicalProviderDispatchRead = dataclass_field(repr=False)
+    semantic_input: ProviderWireSemanticInput = dataclass_field(repr=False)
+    prepared_call: PreparedKernelModelCall | PreparedKernelSemanticModelCall = (
+        dataclass_field(repr=False)
+    )
+    native_projection_set: FrozenNativeToolProjectionSet = dataclass_field(repr=False)
+    tool_choice: str | None = None
+    planning: FrozenProviderInputAppendPlanningInput | None = dataclass_field(
+        default=None, repr=False
+    )
+    append_result: FrozenProviderInputAppendCompileResult | None = dataclass_field(
+        default=None, repr=False
+    )
+    cold_semantic: PreparedColdEpochSemanticAssembly | None = dataclass_field(
+        default=None, repr=False
+    )
+    sources: CollectedContextSources | None = dataclass_field(default=None, repr=False)
+    tool_exposure_plan: FrozenToolCapabilityExposurePlan | None = dataclass_field(
+        default=None, repr=False
+    )
+    memory_context: FrozenModelCallMemoryContext | None = dataclass_field(
+        default=None, repr=False
+    )
+
+    def __post_init__(self) -> None:
+        if (
+            self.semantic_input.canonical_input_identity
+            != self.canonical_read.compile_snapshot.canonical_input.identity
+            or self.semantic_input.compile_binding_fingerprint
+            != self.prepared_call.compile_binding.binding_fingerprint
+            or self.native_projection_set != self.prepared_call.native_projection_set
+        ):
+            raise ValueError("provider wire candidate does not exact-join")
+        dispatch_values = (
+            self.planning,
+            self.append_result,
+            self.sources,
+            self.tool_exposure_plan,
+            self.memory_context,
+        )
+        if any(item is not None for item in dispatch_values) and any(
+            item is None for item in dispatch_values
+        ):
+            raise ValueError("provider wire dispatch candidate is incomplete")
+        if (
+            self.append_result is not None
+            and self.append_result.compiled_input != self.semantic_input
+        ):
+            raise ValueError("provider wire candidate changed its compiled input")
+
+    @property
+    def call(self) -> ResolvedModelCall:
+        return self.prepared_call.call
+
+    @property
+    def compile_binding(self) -> ModelInputCompileBinding:
+        return self.prepared_call.compile_binding
+
+
+class ProviderWireMeasurementCandidate(Protocol):
+    """Authority-free structural seam shared by dispatch and summary input."""
+
+    @property
+    def canonical_read(self) -> FrozenCanonicalProviderDispatchRead: ...
+
+    @property
+    def semantic_input(self) -> ProviderWireSemanticInput: ...
+
+    @property
+    def call(self) -> ResolvedModelCall: ...
+
+    @property
+    def compile_binding(self) -> ModelInputCompileBinding: ...
+
+    @property
+    def native_projection_set(self) -> FrozenNativeToolProjectionSet: ...
+
+    @property
+    def tool_choice(self) -> str | None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedWireMeasurementDecision:
+    """Closed quote and, only after hard admission, its same-pass plan."""
+
+    candidate: ProviderWireMeasurementCandidate = dataclass_field(repr=False)
+    quote: FrozenProviderWireInputQuote
+    wire_input_plan: FrozenProviderWireInputPlan | None = dataclass_field(
+        default=None, repr=False
+    )
+
+    def __post_init__(self) -> None:
+        candidate = self.candidate
+        admitted = (
+            self.quote.final_wire_estimated_input_tokens
+            <= self.quote.effective_input_budget_tokens
+            and self.quote.final_wire_utf8_bytes <= MAXIMUM_PROVIDER_WIRE_INPUT_BYTES
+        )
+        if admitted != (self.wire_input_plan is not None):
+            raise ValueError("wire measurement decision has invalid admission union")
+        if (
+            self.quote.wire_api
+            != candidate.call.target.model_profile.provider_profile.wire_api
+            or self.quote.estimator_fingerprint
+            != candidate.compile_binding.estimator_fingerprint
+            or self.quote.effective_input_budget_tokens
+            != candidate.compile_binding.effective_input_budget_tokens
+            or self.quote.semantic_estimated_input_tokens
+            != candidate.semantic_input.final_estimate.total_input_tokens
+        ):
+            raise ValueError("wire measurement decision does not join its candidate")
+        plan = self.wire_input_plan
+        if plan is not None and (
+            plan.quote != self.quote
+            or plan.compiled_semantic_fingerprint
+            != candidate.semantic_input.compiled_semantic_fingerprint
+            or plan.message_placements_fingerprint
+            != compiled_message_placements_fingerprint(
+                candidate.semantic_input.message_placements
+            )
+            or plan.resolved_target_semantic_fingerprint
+            != candidate.call.target.fact.target_fingerprint
+            or plan.provider_profile_fingerprint
+            != provider_wire_profile_fingerprint(candidate.call)
+            or plan.materialization.tool_items
+            != tuple(
+                item.wire_tool for item in candidate.native_projection_set.projections
+            )
+        ):
+            raise ValueError("wire measurement decision changed its candidate")
+
+
+class HandleFreeProviderWireObservation:
+    """One-shot reusable measurement with no physical/install authority."""
+
+    def __init__(
+        self,
+        candidate: ProviderWireMeasurementCandidate,
+        measurement: ProviderWireMeasurement,
+    ) -> None:
+        self._candidate = candidate
+        self._measurement: ProviderWireMeasurement | None = measurement
+        self._lock = Lock()
+
+    def take_for(
+        self, candidate: ProviderWireMeasurementCandidate
+    ) -> ProviderWireMeasurement | None:
+        with self._lock:
+            measurement = self._measurement
+            self._measurement = None
+        if measurement is None:
+            raise RuntimeError("provider wire observation is already consumed")
+        if _same_provider_wire_measurement_candidate(candidate, self._candidate):
+            return measurement
+        measurement.discard_materialization_to_quote()
+        return None
+
+    def discard(self) -> FrozenProviderWireInputQuote:
+        with self._lock:
+            measurement = self._measurement
+            self._measurement = None
+        if measurement is None:
+            raise RuntimeError("provider wire observation is already consumed")
+        return measurement.discard_materialization_to_quote()
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedExecutableProviderWireInput:
+    """Non-owning exact dispatch binding for one already-prepared wire plan."""
+
+    owner_dispatch: "PreparedProviderDispatch" = dataclass_field(repr=False)
+    quote: FrozenProviderWireInputQuote
+    wire_input_plan: FrozenProviderWireInputPlan = dataclass_field(repr=False)
+    selected_candidate: PreparedProviderWireCandidate = dataclass_field(repr=False)
+    append_candidate: PreparedProviderInputAppendCandidate = dataclass_field(repr=False)
+
+
+class ProviderDispatchExecutionAuthority:
+    """One-shot owner of the physical resources for one provider dispatch."""
+
+    __slots__ = ("_handle", "_surface_borrow", "_lock")
+
+    def __init__(
+        self,
+        handle: PreparedProviderInputHandle,
+        surface_borrow: ProcessLocalToolSurfaceBorrow,
+    ) -> None:
+        if handle is None or surface_borrow is None:
+            raise ValueError("provider execution authority is incomplete")
+        self._handle: PreparedProviderInputHandle | None = handle
+        self._surface_borrow: ProcessLocalToolSurfaceBorrow | None = surface_borrow
+        self._lock = Lock()
+
+    @property
+    def cut(self) -> PreparedProviderInputCut:
+        with self._lock:
+            handle = self._handle
+        if handle is None:
+            raise RuntimeError("provider execution authority is already consumed")
+        return handle.cut
+
+    def require_for_install(
+        self,
+    ) -> tuple[PreparedProviderInputHandle, ProcessLocalToolSurfaceBorrow]:
+        with self._lock:
+            handle = self._handle
+            borrow = self._surface_borrow
+        if handle is None or borrow is None:
+            raise RuntimeError("provider execution authority is already consumed")
+        return handle, borrow
+
+    def close(self) -> None:
+        with self._lock:
+            handle = self._handle
+            borrow = self._surface_borrow
+            self._handle = None
+            self._surface_borrow = None
+        if handle is None or borrow is None:
+            raise RuntimeError("provider execution authority is already consumed")
+        try:
+            handle.close()
+        finally:
+            borrow.close()
+
+    def take_handle_for_rotation(self) -> PreparedProviderInputHandle:
+        """Consume the authority while retiring the obsolete Tool borrow."""
+
+        with self._lock:
+            handle = self._handle
+            borrow = self._surface_borrow
+            self._handle = None
+            self._surface_borrow = None
+        if handle is None or borrow is None:
+            raise RuntimeError("provider execution authority is already consumed")
+        borrow.close()
+        return handle
+
+    def finish_model_operation(self) -> ProcessLocalToolSurfaceBorrow:
+        """Close the safe-point handle and transfer the Tool borrow to execution."""
+
+        with self._lock:
+            handle = self._handle
+            borrow = self._surface_borrow
+            self._handle = None
+            self._surface_borrow = None
+        if handle is None or borrow is None:
+            raise RuntimeError("provider execution authority is already consumed")
+        try:
+            handle.close()
+        except BaseException:
+            borrow.close()
+            raise
+        return borrow
+
+
+@dataclass(slots=True)
 class PreparedProviderDispatch:
-    handle: PreparedProviderInputHandle
+    _execution_authority: ProviderDispatchExecutionAuthority | None = dataclass_field(
+        repr=False, compare=False
+    )
     canonical_read: FrozenCanonicalProviderDispatchRead
     canonical_facts: FrozenCanonicalCompileSnapshot
     planning: FrozenProviderInputAppendPlanningInput
     prepared_call: PreparedKernelModelCall | PreparedKernelSemanticModelCall
     capability_dispatch_cut: FrozenCapabilityDispatchCut
     tool_exposure_plan: FrozenToolCapabilityExposurePlan
-    surface_borrow: ProcessLocalToolSurfaceBorrow | None
     sources: CollectedContextSources
     append_result: FrozenProviderInputAppendCompileResult
     memory_context: FrozenModelCallMemoryContext
@@ -312,43 +591,157 @@ class PreparedProviderDispatch:
     installed_provider_open: InstalledProviderOpen | None = dataclass_field(
         default=None, repr=False
     )
-    hook_context_reservation: HookContextReservation | None = dataclass_field(
+    _hook_context_reservation: HookContextReservation | None = dataclass_field(
         default=None, repr=False, compare=False
     )
+    _authority_lock: Lock = dataclass_field(
+        default_factory=Lock, init=False, repr=False, compare=False
+    )
+    _install_started: bool = dataclass_field(
+        default=False, init=False, repr=False, compare=False
+    )
+    _installed_sealed: bool = dataclass_field(
+        default=False, init=False, repr=False, compare=False
+    )
 
-    def close_surface_borrow(self) -> None:
-        if self.surface_borrow is not None:
-            self.surface_borrow.close()
-        if self.hook_context_reservation is not None:
-            self.hook_context_reservation.retire()
+    def __post_init__(self) -> None:
+        if (
+            self._execution_authority is None
+            or self.canonical_facts != self.canonical_read.compile_snapshot
+            or not isinstance(self.prepared_call, PreparedKernelModelCall)
+            or self.append_result.compiled_input.canonical_input_identity
+            != self.canonical_facts.canonical_input.identity
+            or self.append_result.compiled_input.compile_binding_fingerprint
+            != self.prepared_call.compile_binding.binding_fingerprint
+        ):
+            raise ValueError("prepared provider dispatch does not exact-join")
+
+    @property
+    def cut(self) -> PreparedProviderInputCut:
+        with self._authority_lock:
+            authority = self._execution_authority
+        if authority is None:
+            raise RuntimeError("provider dispatch execution authority is consumed")
+        return authority.cut
+
+    @property
+    def owns_execution_authority(self) -> bool:
+        with self._authority_lock:
+            return self._execution_authority is not None
+
+    @property
+    def has_hook_context_reservation(self) -> bool:
+        with self._authority_lock:
+            return self._hook_context_reservation is not None
+
+    def take_execution_authority(self) -> ProviderDispatchExecutionAuthority:
+        with self._authority_lock:
+            authority = self._execution_authority
+            self._execution_authority = None
+        if authority is None:
+            raise RuntimeError("provider dispatch execution authority is consumed")
+        return authority
+
+    def take_handle_for_rotation(self) -> PreparedProviderInputHandle:
+        return self.take_execution_authority().take_handle_for_rotation()
+
+    def claim_install_authority(
+        self,
+    ) -> tuple[PreparedProviderInputHandle, ProcessLocalToolSurfaceBorrow]:
+        with self._authority_lock:
+            authority = self._execution_authority
+            if authority is None:
+                raise RuntimeError("provider dispatch execution authority is consumed")
+            if self._install_started:
+                raise RuntimeError("provider dispatch install is already consumed")
+            self._install_started = True
+        return authority.require_for_install()
+
+    def finish_model_operation(self) -> ProcessLocalToolSurfaceBorrow:
+        authority = self.take_execution_authority()
+        try:
+            return authority.finish_model_operation()
+        finally:
+            self.retire_hook_context_reservation()
+
+    def retire_hook_context_reservation(self) -> None:
+        with self._authority_lock:
+            reservation = self._hook_context_reservation
+            self._hook_context_reservation = None
+        if reservation is not None:
+            reservation.retire()
+
+    def close(self) -> None:
+        authority = self.take_execution_authority()
+        try:
+            authority.close()
+        finally:
+            self.retire_hook_context_reservation()
 
     def close_for_canonical_replan(self) -> None:
-        if self.surface_borrow is not None:
-            self.surface_borrow.close()
-        if self.hook_context_reservation is not None:
-            # HOOK_CONTEXT is one-shot advisory input.  Once a planning cut
-            # freezes it, every abandon/conflict/replan retires that exact
-            # reservation; it is never put back or replayed into another cut.
-            self.hook_context_reservation.retire()
+        # HOOK_CONTEXT is one-shot advisory input.  Once a planning cut
+        # freezes it, every abandon/conflict/replan retires that exact
+        # reservation; it is never put back or replayed into another cut.
+        self.close()
+
+    def seal_installed_open(
+        self,
+        *,
+        prepared_wire: PreparedExecutableProviderWireInput,
+        installed_open: "InstalledProviderOpen",
+    ) -> None:
+        selected = prepared_wire.selected_candidate
+        if (
+            prepared_wire.owner_dispatch is not self
+            or selected.append_result is None
+            or selected.sources is None
+            or selected.memory_context is None
+            or not _provider_wire_candidate_matches_dispatch(selected, self)
+        ):
+            raise ValueError("installed selection belongs to another dispatch")
+        with self._authority_lock:
+            if self._installed_sealed:
+                raise RuntimeError("provider dispatch selection is already sealed")
+            if not self._install_started or self._execution_authority is None:
+                raise RuntimeError("provider dispatch lacks installed authority")
+            self.installed_provider_open = installed_open
+            self._installed_sealed = True
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class PreparedProviderHeadroomAdmission:
     """One safe-point handle and its metadata-only exact-cut quote."""
 
-    handle: PreparedProviderInputHandle
+    _handle: PreparedProviderInputHandle | None = dataclass_field(repr=False)
     preflight: FrozenCompactionHeadroomPreflight
     prepared_target: PreparedKernelModelTarget = dataclass_field(repr=False)
+    _lock: Lock = dataclass_field(default_factory=Lock, init=False, repr=False)
+
+    @property
+    def cut(self) -> PreparedProviderInputCut:
+        with self._lock:
+            handle = self._handle
+        if handle is None:
+            raise RuntimeError("headroom admission no longer owns its handle")
+        return handle.cut
+
+    def take_handle(self) -> PreparedProviderInputHandle:
+        with self._lock:
+            handle = self._handle
+            self._handle = None
+        if handle is None:
+            raise RuntimeError("headroom admission handle is already consumed")
+        return handle
 
     def close(self) -> None:
-        self.handle.close()
+        self.take_handle().close()
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class PreparedCompactionSourceDispatch:
     """Non-executable normal semantic projection for compaction planning."""
 
-    handle: PreparedProviderInputHandle
+    _handle: PreparedProviderInputHandle | None = dataclass_field(repr=False)
     canonical_read: FrozenCanonicalProviderDispatchRead
     canonical_facts: FrozenCanonicalCompileSnapshot
     planning: FrozenProviderInputAppendPlanningInput
@@ -360,6 +753,107 @@ class PreparedCompactionSourceDispatch:
         repr=False
     )
     memory_context: FrozenModelCallMemoryContext
+    wire_candidate: PreparedProviderWireCandidate = dataclass_field(repr=False)
+    _wire_measurement: ProviderWireMeasurement | None = dataclass_field(
+        repr=False, compare=False
+    )
+    _lock: Lock = dataclass_field(default_factory=Lock, init=False, repr=False)
+
+    @property
+    def cut(self) -> PreparedProviderInputCut:
+        with self._lock:
+            handle = self._handle
+        if handle is None:
+            raise RuntimeError("compaction source no longer owns its handle")
+        return handle.cut
+
+    @property
+    def wire_quote(self) -> FrozenProviderWireInputQuote:
+        with self._lock:
+            measurement = self._wire_measurement
+        if measurement is None:
+            raise RuntimeError("compaction source measurement is already consumed")
+        return measurement.quote
+
+    def take_below_trigger_ownership(
+        self,
+    ) -> tuple[PreparedProviderInputHandle, ProviderWireMeasurement]:
+        with self._lock:
+            handle = self._handle
+            measurement = self._wire_measurement
+            self._handle = None
+            self._wire_measurement = None
+        if handle is None or measurement is None:
+            raise RuntimeError("compaction source ownership is already consumed")
+        return handle, measurement
+
+    def discard_wire_materialization_to_quote(
+        self,
+    ) -> FrozenProviderWireInputQuote:
+        with self._lock:
+            measurement = self._wire_measurement
+            self._wire_measurement = None
+        if measurement is None:
+            raise RuntimeError("compaction source measurement is already consumed")
+        return measurement.discard_materialization_to_quote()
+
+    def take_handle(self) -> PreparedProviderInputHandle:
+        with self._lock:
+            handle = self._handle
+            measurement = self._wire_measurement
+            if measurement is not None:
+                raise RuntimeError(
+                    "compaction source measurement must settle before handle transfer"
+                )
+            self._handle = None
+        if handle is None:
+            raise RuntimeError("compaction source handle is already consumed")
+        return handle
+
+    def close(self) -> None:
+        with self._lock:
+            handle = self._handle
+            measurement = self._wire_measurement
+            self._handle = None
+            self._wire_measurement = None
+        if handle is None:
+            raise RuntimeError("compaction source handle is already consumed")
+        try:
+            if measurement is not None:
+                measurement.discard_materialization_to_quote()
+        finally:
+            handle.close()
+
+
+class PreparedHookContextSibling:
+    """Authority-free optional semantic sibling and its one-shot reservation."""
+
+    __slots__ = ("candidate", "_reservation", "_lock")
+
+    def __init__(
+        self,
+        candidate: PreparedProviderWireCandidate,
+        reservation: HookContextReservation,
+    ) -> None:
+        self.candidate = candidate
+        self._reservation: HookContextReservation | None = reservation
+        self._lock = Lock()
+
+    def take_reservation(self) -> HookContextReservation:
+        with self._lock:
+            reservation = self._reservation
+            self._reservation = None
+        if reservation is None:
+            raise RuntimeError("Hook sibling reservation is already consumed")
+        return reservation
+
+    @property
+    def owns_reservation(self) -> bool:
+        with self._lock:
+            return self._reservation is not None
+
+    def retire(self) -> None:
+        self.take_reservation().retire()
 
 
 @dataclass(frozen=True, slots=True)
@@ -465,9 +959,7 @@ class ProviderDispatchCoordinator:
         if pending_steer:
             return handle, canonical_read, False
         changed = False
-        pending_cut = await runtime.snapshot_pending_root_completions(
-            identity.turn_id
-        )
+        pending_cut = await runtime.snapshot_pending_root_completions(identity.turn_id)
         for task_id in pending_cut[:_ROOT_COMPLETION_SUFFIX_BATCH_ITEMS]:
             outcome = await self._io.run(
                 self._safe_point.accept_queued_subagent_completion,
@@ -641,10 +1133,12 @@ class ProviderDispatchCoordinator:
                 and canonical_read_override is None
                 and not _compaction_source_projection
             ):
-                handle, observed_read, completion_changed = (
-                    await self._drain_root_completion_suffix(
-                        handle, observed_read, deadline=deadline
-                    )
+                (
+                    handle,
+                    observed_read,
+                    completion_changed,
+                ) = await self._drain_root_completion_suffix(
+                    handle, observed_read, deadline=deadline
                 )
                 if completion_changed:
                     # A preflight frozen for the former cut is no longer a
@@ -942,6 +1436,13 @@ class ProviderDispatchCoordinator:
                     deadline_monotonic=deadline,
                 )
                 hook_context_reservation = frozen_sources.hook_context_reservation
+                if hook_context_reservation is not None:
+                    # The reservation is physical one-shot authority owned by
+                    # the dispatch, never part of frozen semantic source state.
+                    frozen_sources = replace(
+                        frozen_sources,
+                        hook_context_reservation=None,
+                    )
                 if compaction_source_replacements:
                     frozen_sources = replace_frozen_compaction_context_sources(
                         frozen_sources, compaction_source_replacements
@@ -1415,10 +1916,12 @@ class ProviderDispatchCoordinator:
                         selected_plan.quote.resulting_epoch_logical_bytes
                     ),
                 )
-                handle, actual_read, _completion_changed = (
-                    await self._drain_root_completion_suffix(
-                        handle, actual_read, deadline=deadline
-                    )
+                (
+                    handle,
+                    actual_read,
+                    _completion_changed,
+                ) = await self._drain_root_completion_suffix(
+                    handle, actual_read, deadline=deadline
                 )
                 actual = actual_read.compile_snapshot
                 final_sources = await self._memory_support.apply_sources(
@@ -1484,20 +1987,21 @@ class ProviderDispatchCoordinator:
                     memory_use_policy=selected_memory_use_policy,
                 )
                 return PreparedProviderDispatch(
-                    handle=handle,
+                    _execution_authority=ProviderDispatchExecutionAuthority(
+                        handle, borrow
+                    ),
                     canonical_read=actual_read,
                     canonical_facts=actual,
                     planning=selected_plan.predecessor,
                     prepared_call=prepared_call,
                     capability_dispatch_cut=capability_dispatch_cut,
                     tool_exposure_plan=tool_exposure_plan,
-                    surface_borrow=borrow,
                     sources=final_sources,
                     append_result=final_append,
                     memory_context=final_memory[0],
                     accepted_steers=batch,
                     retained_skill_selection=retained_skill_selection,
-                    hook_context_reservation=hook_context_reservation,
+                    _hook_context_reservation=hook_context_reservation,
                 )
 
             planning = self._continuity.freeze_planning_input(
@@ -1660,18 +2164,34 @@ class ProviderDispatchCoordinator:
                     raise RuntimeError(
                         "semantic compaction projection acquired a physical borrow"
                     )
-                return PreparedCompactionSourceDispatch(
-                    handle=handle,
+                wire_candidate = PreparedProviderWireCandidate(
                     canonical_read=base_read,
-                    canonical_facts=base_facts,
-                    planning=planning,
+                    semantic_input=projection.projected_input,
                     prepared_call=prepared_call,
-                    capability_dispatch_cut=capability_dispatch_cut,
-                    tool_exposure_plan=tool_exposure_plan,
-                    sources=projection_sources,
-                    projection=projection,
-                    memory_context=projection_memory[0],
+                    native_projection_set=prepared_call.native_projection_set,
                 )
+                wire_measurement = await self._freeze_candidate_wire_measurement(
+                    wire_candidate,
+                    deadline=deadline,
+                )
+                try:
+                    return PreparedCompactionSourceDispatch(
+                        _handle=handle,
+                        canonical_read=base_read,
+                        canonical_facts=base_facts,
+                        planning=planning,
+                        prepared_call=prepared_call,
+                        capability_dispatch_cut=capability_dispatch_cut,
+                        tool_exposure_plan=tool_exposure_plan,
+                        sources=projection_sources,
+                        projection=projection,
+                        memory_context=projection_memory[0],
+                        wire_candidate=wire_candidate,
+                        _wire_measurement=wire_measurement,
+                    )
+                except BaseException:
+                    wire_measurement.discard_materialization_to_quote()
+                    raise
             cold_semantic: PreparedColdEpochSemanticAssembly | None = None
             replay_target = provider_replay_target(prepared_call)
             if cold_seed is not None and preference_source is None:
@@ -1883,21 +2403,20 @@ class ProviderDispatchCoordinator:
                 memory_use_policy=memory_use_policy,
             )
             return PreparedProviderDispatch(
-                handle=handle,
+                _execution_authority=ProviderDispatchExecutionAuthority(handle, borrow),
                 canonical_read=base_read,
                 canonical_facts=base_facts,
                 planning=planning,
                 prepared_call=prepared_call,
                 capability_dispatch_cut=capability_dispatch_cut,
                 tool_exposure_plan=tool_exposure_plan,
-                surface_borrow=borrow,
                 sources=final_sources,
                 append_result=append,
                 memory_context=memory_snapshot[0],
                 compaction_headroom_preflight=headroom_preflight,
                 cold_semantic=cold_semantic,
                 retained_skill_selection=retained_skill_selection,
-                hook_context_reservation=hook_context_reservation,
+                _hook_context_reservation=hook_context_reservation,
             )
         except BaseException:
             handle.close()
@@ -1913,7 +2432,7 @@ class ProviderDispatchCoordinator:
         *,
         model_call_index: int,
         deadline: float,
-    ) -> PreparedProviderDispatch | None:
+    ) -> PreparedHookContextSibling | None:
         """Compile the optional Hook cold sibling from the base's exact facts.
 
         The base remains the final fallback and owns the sole physical borrow.
@@ -1922,7 +2441,7 @@ class ProviderDispatchCoordinator:
         """
 
         semantic = base.cold_semantic
-        if semantic is None or base.hook_context_reservation is not None:
+        if semantic is None or base.has_hook_context_reservation:
             raise ValueError("Hook sibling requires one no-Hook cold base")
         identity = base.canonical_facts.canonical_input.identity
         replacement, reservation = (
@@ -1939,7 +2458,7 @@ class ProviderDispatchCoordinator:
             hook_non_trigger = replace_frozen_hook_context_source(
                 semantic.non_trigger_sources,
                 replacement,
-                reservation=reservation,
+                reservation=None,
             )
             anchor = semantic.planning.dispatch_anchor
             compile_request = StructuredModelInputCompileRequest(
@@ -2002,16 +2521,244 @@ class ProviderDispatchCoordinator:
             if hook_decision is None or not hook_decision.included:
                 reservation.retire()
                 return None
-            return replace(
-                base,
-                sources=hook_sources,
+            candidate = PreparedProviderWireCandidate(
+                canonical_read=base.canonical_read,
+                semantic_input=hook_semantic.compiled_result.compiled_input,
+                prepared_call=base.prepared_call,
+                native_projection_set=base.prepared_call.native_projection_set,
+                planning=base.planning,
                 append_result=hook_semantic.compiled_result,
                 cold_semantic=hook_semantic,
-                hook_context_reservation=reservation,
+                sources=hook_sources,
+                tool_exposure_plan=base.tool_exposure_plan,
+                memory_context=base.memory_context,
             )
+            return PreparedHookContextSibling(candidate, reservation)
         except BaseException:
             reservation.retire()
             raise
+
+    @staticmethod
+    def wire_candidate_for_dispatch(
+        dispatch: PreparedProviderDispatch,
+    ) -> PreparedProviderWireCandidate:
+        return PreparedProviderWireCandidate(
+            canonical_read=dispatch.canonical_read,
+            semantic_input=dispatch.append_result.compiled_input,
+            prepared_call=dispatch.prepared_call,
+            native_projection_set=dispatch.prepared_call.native_projection_set,
+            planning=dispatch.planning,
+            append_result=dispatch.append_result,
+            cold_semantic=dispatch.cold_semantic,
+            sources=dispatch.sources,
+            tool_exposure_plan=dispatch.tool_exposure_plan,
+            memory_context=dispatch.memory_context,
+        )
+
+    def bind_selected_provider_dispatch(
+        self,
+        *,
+        base: PreparedProviderDispatch,
+        sibling: PreparedHookContextSibling,
+    ) -> PreparedProviderDispatch:
+        """Atomically move the base authority into one selected Hook sibling."""
+
+        selected = sibling.candidate
+        if (
+            selected.planning is None
+            or selected.append_result is None
+            or selected.sources is None
+            or selected.tool_exposure_plan is None
+            or selected.memory_context is None
+            or selected.cold_semantic is None
+            or selected.canonical_read != base.canonical_read
+            or selected.prepared_call != base.prepared_call
+            or selected.native_projection_set
+            != base.prepared_call.native_projection_set
+            or selected.planning != base.planning
+            or selected.tool_exposure_plan != base.tool_exposure_plan
+            or base.has_hook_context_reservation
+        ):
+            sibling.retire()
+            raise StructuredModelInputCompileError(
+                ModelInputCompileFailureKind.CANONICAL_PREFIX_CONFLICT
+            )
+        authority = base.take_execution_authority()
+        reservation: HookContextReservation | None = None
+        final: PreparedProviderDispatch | None = None
+        try:
+            reservation = sibling.take_reservation()
+            final = PreparedProviderDispatch(
+                _execution_authority=authority,
+                canonical_read=selected.canonical_read,
+                canonical_facts=selected.canonical_read.compile_snapshot,
+                planning=selected.planning,
+                prepared_call=selected.prepared_call,
+                capability_dispatch_cut=base.capability_dispatch_cut,
+                tool_exposure_plan=selected.tool_exposure_plan,
+                sources=selected.sources,
+                append_result=selected.append_result,
+                memory_context=selected.memory_context,
+                compaction_headroom_preflight=base.compaction_headroom_preflight,
+                accepted_steers=base.accepted_steers,
+                cold_semantic=selected.cold_semantic,
+                retained_skill_selection=base.retained_skill_selection,
+                _hook_context_reservation=reservation,
+            )
+            return final
+        except BaseException:
+            if final is not None:
+                final.close()
+            else:
+                try:
+                    authority.close()
+                finally:
+                    if reservation is not None:
+                        reservation.retire()
+            raise
+
+    async def _freeze_candidate_wire_measurement(
+        self,
+        candidate: ProviderWireMeasurementCandidate,
+        *,
+        deadline: float,
+    ) -> ProviderWireMeasurement:
+        replay_target = self._model.replay_target_for_resolved_call(candidate.call)
+        try:
+            replay_hydration = await self._io.run(
+                self._input_reader.hydrate_selected_provider_replays,
+                dispatch_read=candidate.canonical_read,
+                compiled_input=candidate.semantic_input,
+                replay_target=replay_target,
+                deadline_monotonic=deadline,
+            )
+        except TimeoutError as exc:
+            raise StructuredModelInputCompileError(
+                ModelInputCompileFailureKind.DEADLINE_EXPIRED
+            ) from exc
+        except ProviderReplayHydrationError as exc:
+            kind = (
+                ModelInputCompileFailureKind.COMPILE_WORKING_SET_EXCEEDED
+                if exc.kind is ProviderReplayHydrationFailureKind.RESOURCE_BOUNDARY
+                else ModelInputCompileFailureKind.CANONICAL_PREFIX_CONFLICT
+            )
+            raise StructuredModelInputCompileError(kind) from exc
+        _require_dispatch_planning_deadline(deadline)
+        return self._model.freeze_wire_measurement(
+            call=candidate.call,
+            compile_binding=candidate.compile_binding,
+            native_projection_set=candidate.native_projection_set,
+            semantic_input=candidate.semantic_input,
+            replay_hydration=replay_hydration,
+            tool_choice=candidate.tool_choice,
+        )
+
+    async def measure_prepared_wire_candidate(
+        self,
+        candidate: ProviderWireMeasurementCandidate,
+        *,
+        deadline: float,
+        reusable_observation: HandleFreeProviderWireObservation | None = None,
+    ) -> PreparedWireMeasurementDecision:
+        measurement = None
+        if reusable_observation is not None:
+            measurement = reusable_observation.take_for(candidate)
+        if measurement is None:
+            measurement = await self._freeze_candidate_wire_measurement(
+                candidate,
+                deadline=deadline,
+            )
+        try:
+            _require_dispatch_planning_deadline(deadline)
+        except BaseException:
+            measurement.discard_materialization_to_quote()
+            raise
+        quote = measurement.quote
+        if (
+            quote.final_wire_estimated_input_tokens
+            <= quote.effective_input_budget_tokens
+            and quote.final_wire_utf8_bytes <= MAXIMUM_PROVIDER_WIRE_INPUT_BYTES
+        ):
+            plan = measurement.prepare_executable_plan(
+                semantic_input=candidate.semantic_input
+            )
+        else:
+            quote = measurement.discard_materialization_to_quote()
+            plan = None
+        decision = PreparedWireMeasurementDecision(candidate, quote, plan)
+        _require_dispatch_planning_deadline(deadline)
+        return decision
+
+    def bind_prepared_executable_wire_input(
+        self,
+        *,
+        owner_dispatch: PreparedProviderDispatch,
+        decision: PreparedWireMeasurementDecision,
+        deadline: float,
+    ) -> PreparedExecutableProviderWireInput:
+        _require_dispatch_planning_deadline(deadline)
+        if decision.wire_input_plan is None:
+            kind = (
+                ModelInputCompileFailureKind.REQUIRED_CONTEXT_EXCEEDS_BUDGET
+                if decision.quote.final_wire_estimated_input_tokens
+                > decision.quote.effective_input_budget_tokens
+                else ModelInputCompileFailureKind.SOURCE_PHYSICAL_BOUND_EXCEEDED
+            )
+            raise StructuredModelInputCompileError(kind)
+        selected = decision.candidate
+        if (
+            not isinstance(selected, PreparedProviderWireCandidate)
+            or selected.planning is None
+            or selected.append_result is None
+            or selected.sources is None
+            or selected.tool_exposure_plan is None
+            or selected.memory_context is None
+            or not _provider_wire_candidate_matches_dispatch(selected, owner_dispatch)
+        ):
+            raise StructuredModelInputCompileError(
+                ModelInputCompileFailureKind.CANONICAL_PREFIX_CONFLICT
+            )
+        wire_input_plan = decision.wire_input_plan
+        if selected.cold_semantic is not None:
+            assembly = self._cold_epoch_assembler.bind_prepared_wire(
+                selected.cold_semantic,
+                wire_input_plan=wire_input_plan,
+                deadline_monotonic=deadline,
+            )
+            if assembly.compiled_input != selected.append_result.compiled_input:
+                raise StructuredModelInputCompileError(
+                    ModelInputCompileFailureKind.CANONICAL_PREFIX_CONFLICT
+                )
+            inputs = assembly.continuity_candidate_inputs
+            append_candidate = prepared_append_candidate(
+                planning=inputs.planning,
+                compatibility=inputs.compatibility,
+                compiled_result=inputs.compiled_result,
+                wire_input_plan=inputs.wire_input_plan,
+                tool_exposure_plan=inputs.tool_exposure_plan,
+            )
+        else:
+            compatibility = provider_input_compatibility(
+                prepared_call=selected.prepared_call,
+                canonical_facts=owner_dispatch.canonical_facts,
+                sources=selected.sources,
+            )
+            append_candidate = prepared_append_candidate(
+                planning=selected.planning,
+                compatibility=compatibility,
+                compiled_result=selected.append_result,
+                wire_input_plan=wire_input_plan,
+                tool_exposure_plan=selected.tool_exposure_plan,
+            )
+        prepared = PreparedExecutableProviderWireInput(
+            owner_dispatch=owner_dispatch,
+            quote=decision.quote,
+            wire_input_plan=wire_input_plan,
+            selected_candidate=selected,
+            append_candidate=append_candidate,
+        )
+        _require_dispatch_planning_deadline(deadline)
+        return prepared
 
     async def read_compile_snapshot(
         self, cut: PreparedProviderInputCut, *, deadline: float
@@ -2059,6 +2806,7 @@ class ProviderDispatchCoordinator:
         self,
         *,
         dispatch: PreparedProviderDispatch,
+        prepared_wire: PreparedExecutableProviderWireInput,
         turn_id: str,
         model_call_index: int,
         deadline: float,
@@ -2066,92 +2814,41 @@ class ProviderDispatchCoordinator:
         """Preflight and CAS one exact dispatch without opening transport."""
 
         prepared_call = dispatch.prepared_call
-        borrow = dispatch.surface_borrow
-        if borrow is None or not isinstance(prepared_call, PreparedKernelModelCall):
+        if not isinstance(prepared_call, PreparedKernelModelCall):
             raise RuntimeError("provider install lacks an execution-backed surface")
+        if prepared_wire.owner_dispatch is not dispatch:
+            raise ValueError("prepared wire input belongs to another dispatch owner")
+        selected = prepared_wire.selected_candidate
         canonical_facts = dispatch.canonical_facts
-        compiled_input = dispatch.append_result.compiled_input
-        replay_target = provider_replay_target(prepared_call)
-        try:
-            replay_hydration = await self._io.run(
-                self._input_reader.hydrate_selected_provider_replays,
-                dispatch_read=dispatch.canonical_read,
-                compiled_input=compiled_input,
-                replay_target=replay_target,
-                deadline_monotonic=deadline,
-            )
-        except TimeoutError as exc:
-            raise StructuredModelInputCompileError(
-                ModelInputCompileFailureKind.DEADLINE_EXPIRED
-            ) from exc
-        except ProviderReplayHydrationError as exc:
-            kind = (
-                ModelInputCompileFailureKind.COMPILE_WORKING_SET_EXCEEDED
-                if exc.kind is ProviderReplayHydrationFailureKind.RESOURCE_BOUNDARY
-                else ModelInputCompileFailureKind.CANONICAL_PREFIX_CONFLICT
-            )
-            raise StructuredModelInputCompileError(kind) from exc
-        if dispatch.cold_semantic is not None:
-            assembly = self._cold_epoch_assembler.finalize_wire(
-                dispatch.cold_semantic,
-                replay_hydration=replay_hydration,
-                wire_planner=lambda **values: self._model.plan_wire_input(
-                    prepared_call=prepared_call,
-                    **values,
-                ),
-                deadline_monotonic=deadline,
-            )
-            if assembly.compiled_input != compiled_input:
-                raise StructuredModelInputCompileError(
-                    ModelInputCompileFailureKind.CANONICAL_PREFIX_CONFLICT
-                )
-            wire_input_plan = assembly.wire_input_plan
-            candidate_inputs = assembly.continuity_candidate_inputs
-            append_candidate = prepared_append_candidate(
-                planning=candidate_inputs.planning,
-                compatibility=candidate_inputs.compatibility,
-                compiled_result=candidate_inputs.compiled_result,
-                wire_input_plan=candidate_inputs.wire_input_plan,
-                tool_exposure_plan=candidate_inputs.tool_exposure_plan,
-            )
-        else:
-            compatibility = provider_input_compatibility(
-                prepared_call=prepared_call,
-                canonical_facts=canonical_facts,
-                sources=dispatch.sources,
-            )
-            wire_input_plan = self._model.plan_wire_input(
-                prepared_call=prepared_call,
-                compiled_input=compiled_input,
-                predecessor_view=(
-                    None
-                    if dispatch.append_result.reset_reason is not None
-                    else dispatch.planning.predecessor_view
-                ),
-                replay_hydration=replay_hydration,
-            )
-            append_candidate = prepared_append_candidate(
-                planning=dispatch.planning,
-                compatibility=compatibility,
-                compiled_result=dispatch.append_result,
-                wire_input_plan=wire_input_plan,
-                tool_exposure_plan=dispatch.tool_exposure_plan,
-            )
-        self._continuity.register(append_candidate)
-        request = KernelModelExecutionRequest(
-            session_id=self._writer_lease.guard.session_id,
-            turn_id=turn_id,
-            model_call_index=model_call_index,
-            prepared_call=prepared_call,
-            compiled_input=compiled_input,
-            wire_input_plan=wire_input_plan,
-            cut=dispatch.handle.cut,
-            surface_borrow=borrow,
-            memory_context=dispatch.memory_context,
-        )
+        if (
+            selected.append_result is None
+            or selected.memory_context is None
+            or not _provider_wire_candidate_matches_dispatch(selected, dispatch)
+        ):
+            raise ValueError("prepared wire selection lost its dispatch join")
+        _require_dispatch_planning_deadline(deadline)
+        handle, borrow = dispatch.claim_install_authority()
+        compiled_input = selected.append_result.compiled_input
+        wire_input_plan = prepared_wire.wire_input_plan
+        append_candidate = prepared_wire.append_candidate
+        request: KernelModelExecutionRequest | None = None
         execution: PreparedKernelModelExecution | None = None
+        registered = False
         installed = False
         try:
+            self._continuity.register(append_candidate)
+            registered = True
+            request = KernelModelExecutionRequest(
+                session_id=self._writer_lease.guard.session_id,
+                turn_id=turn_id,
+                model_call_index=model_call_index,
+                prepared_call=prepared_call,
+                compiled_input=compiled_input,
+                wire_input_plan=wire_input_plan,
+                cut=handle.cut,
+                surface_borrow=borrow,
+                memory_context=selected.memory_context,
+            )
             try:
                 for tool in compiled_input.tools:
                     binding = borrow.execution_binding(tool.name)
@@ -2173,7 +2870,8 @@ class ProviderDispatchCoordinator:
                 raise StructuredModelInputCompileError(
                     ModelInputCompileFailureKind.FINAL_ESTIMATE_MISMATCH
                 ) from exc
-            dispatch.handle.begin_model_operation()
+            _require_dispatch_planning_deadline(deadline)
+            handle.begin_model_operation()
             permit = self._continuity.install(
                 candidate=append_candidate,
                 execution=execution,
@@ -2185,7 +2883,7 @@ class ProviderDispatchCoordinator:
                 compiled_input=compiled_input,
                 surface_borrow=borrow,
             )
-            return InstalledProviderOpen(
+            installed_open = InstalledProviderOpen(
                 request=request,
                 execution=execution,
                 permit=permit,
@@ -2193,6 +2891,7 @@ class ProviderDispatchCoordinator:
                 subagent_parent_context_subject=(
                     _freeze_subagent_parent_context_call_subject(
                         dispatch=dispatch,
+                        compiled_input=compiled_input,
                         permit=permit,
                     )
                     if canonical_facts.canonical_input.identity.conversation_scope_kind
@@ -2200,8 +2899,13 @@ class ProviderDispatchCoordinator:
                     else None
                 ),
             )
+            dispatch.seal_installed_open(
+                prepared_wire=prepared_wire,
+                installed_open=installed_open,
+            )
+            return installed_open
         except BaseException:
-            if not installed:
+            if not installed and registered:
                 if execution is not None:
                     try:
                         execution.discard()
@@ -2549,6 +3253,49 @@ def _dispatch_anchor(
     )
 
 
+def _same_provider_wire_measurement_candidate(
+    left: ProviderWireMeasurementCandidate,
+    right: ProviderWireMeasurementCandidate,
+) -> bool:
+    return (
+        left.canonical_read == right.canonical_read
+        and left.semantic_input.canonical_input_identity
+        == right.semantic_input.canonical_input_identity
+        and left.semantic_input.system_prompt == right.semantic_input.system_prompt
+        and left.semantic_input.messages == right.semantic_input.messages
+        and left.semantic_input.message_placements
+        == right.semantic_input.message_placements
+        and left.semantic_input.tools == right.semantic_input.tools
+        and left.semantic_input.final_estimate == right.semantic_input.final_estimate
+        and left.semantic_input.compile_binding_fingerprint
+        == right.semantic_input.compile_binding_fingerprint
+        and left.call == right.call
+        and left.compile_binding == right.compile_binding
+        and left.compile_binding.estimator is right.compile_binding.estimator
+        and left.native_projection_set == right.native_projection_set
+        and left.tool_choice == right.tool_choice
+    )
+
+
+def _provider_wire_candidate_matches_dispatch(
+    candidate: PreparedProviderWireCandidate,
+    dispatch: PreparedProviderDispatch,
+) -> bool:
+    return (
+        candidate.canonical_read == dispatch.canonical_read
+        and candidate.semantic_input == dispatch.append_result.compiled_input
+        and candidate.prepared_call == dispatch.prepared_call
+        and candidate.native_projection_set
+        == dispatch.prepared_call.native_projection_set
+        and candidate.planning == dispatch.planning
+        and candidate.append_result == dispatch.append_result
+        and candidate.cold_semantic == dispatch.cold_semantic
+        and candidate.sources == dispatch.sources
+        and candidate.tool_exposure_plan == dispatch.tool_exposure_plan
+        and candidate.memory_context == dispatch.memory_context
+    )
+
+
 def provider_input_compatibility(
     *,
     prepared_call: PreparedKernelModelCall | PreparedKernelSemanticModelCall,
@@ -2630,6 +3377,7 @@ def prepared_append_candidate(
 def _freeze_subagent_parent_context_call_subject(
     *,
     dispatch: PreparedProviderDispatch,
+    compiled_input: FrozenCompiledModelInput,
     permit: ProcessLocalProviderInputInstallPermit,
 ) -> FrozenSubagentParentContextCallSubject:
     """Derive the bounded public ROOT tail from the exact installed call.
@@ -2639,7 +3387,7 @@ def _freeze_subagent_parent_context_call_subject(
     excluded; assistant messages contribute public text only.
     """
 
-    compiled = dispatch.append_result.compiled_input
+    compiled = compiled_input
     canonical = dispatch.canonical_facts.canonical_input
     by_entry = {
         item.source_entry_id: item
@@ -2714,7 +3462,7 @@ def _freeze_subagent_parent_context_call_subject(
         )
         for entry_ids, public_items in units_buffer[-3:]
     )
-    cut = dispatch.handle.cut
+    cut = dispatch.cut
     return build_parent_context_call_subject(
         session_id=cut.session_id,
         caller_turn_id=cut.turn_id,
@@ -2738,9 +3486,17 @@ def _freeze_subagent_parent_context_call_subject(
 
 
 __all__ = [
+    "HandleFreeProviderWireObservation",
     "InstalledProviderOpen",
     "KernelModelPort",
+    "PreparedCompactionSourceDispatch",
+    "PreparedExecutableProviderWireInput",
     "PreparedProviderDispatch",
+    "PreparedProviderHeadroomAdmission",
+    "PreparedProviderWireCandidate",
+    "PreparedWireMeasurementDecision",
+    "ProviderWireMeasurementCandidate",
+    "ProviderDispatchExecutionAuthority",
     "ProviderDispatchCoordinator",
     "canonical_frontier",
     "compile_structured_append",

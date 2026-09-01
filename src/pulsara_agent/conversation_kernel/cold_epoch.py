@@ -2,15 +2,16 @@
 
 This module deliberately owns no I/O and no execution authority.  Callers
 freeze the canonical cut, Round 9 capability cut/views, context sources and
-model binding before entering here.  Replay bodies are hydrated by the caller
-between :meth:`prepare_semantic` and :meth:`finalize_wire`.
+model binding before entering here. Replay bodies are hydrated and materialized
+once by the shared wire planner; this assembler only binds its already-admitted
+plan to the cold continuity candidate.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from time import monotonic
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING
 
 from pulsara_agent.capability.contracts import (
     FrozenCapabilityDispatchCut,
@@ -53,15 +54,10 @@ from pulsara_agent.model_input.contracts import (
 from pulsara_agent.model_input.continuity import (
     FrozenProviderInputAppendCompileResult,
     FrozenProviderInputAppendPlanningInput,
-    FrozenProviderInputEpochView,
     ProviderInputEpochCompatibility,
 )
 from pulsara_agent.model_input.provider_replay import (
     FrozenCanonicalProviderDispatchRead,
-    FrozenDurableProviderReplayManifest,
-    FrozenSelectedDurableProviderReplayHydration,
-    select_compatible_provider_replay_manifests,
-    selected_message_placements_fingerprint,
 )
 
 if TYPE_CHECKING:
@@ -268,19 +264,6 @@ FrozenColdConversationSeed = (
 
 
 @dataclass(frozen=True, slots=True)
-class SelectedDurableReplayHydrationRequest:
-    """Metadata-only request for the existing bounded replay body reader."""
-
-    replay_target: ProviderReplayTargetCompatibilityFact
-    selected_manifests: tuple[FrozenDurableProviderReplayManifest, ...]
-    selected_message_placements_fingerprint: str
-
-    def __post_init__(self) -> None:
-        if not self.selected_manifests:
-            raise ValueError("selected replay hydration request is invalid")
-
-
-@dataclass(frozen=True, slots=True)
 class PreparedColdEpochSemanticAssembly:
     seed: FrozenColdConversationSeed = field(repr=False)
     planning: FrozenProviderInputAppendPlanningInput = field(repr=False)
@@ -295,9 +278,6 @@ class PreparedColdEpochSemanticAssembly:
     tool_exposure_plan: FrozenToolCapabilityExposurePlan = field(repr=False)
     non_trigger_sources: FrozenNonTriggerContextSources = field(repr=False)
     replay_target: ProviderReplayTargetCompatibilityFact
-    hydration_request: SelectedDurableReplayHydrationRequest | None = field(
-        default=None, repr=False
-    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -338,16 +318,6 @@ class ColdEpochInputAssemblyResult:
     compiled_input: FrozenCompiledModelInput = field(repr=False)
     wire_input_plan: FrozenProviderWireInputPlan = field(repr=False)
     continuity_candidate_inputs: ColdEpochContinuityCandidateInputs = field(repr=False)
-
-
-class ColdEpochWirePlanner(Protocol):
-    def __call__(
-        self,
-        *,
-        compiled_input: FrozenCompiledModelInput,
-        predecessor_view: FrozenProviderInputEpochView | None,
-        replay_hydration: FrozenSelectedDurableProviderReplayHydration | None,
-    ) -> FrozenProviderWireInputPlan: ...
 
 
 class KernelColdEpochInputAssembler:
@@ -391,20 +361,6 @@ class KernelColdEpochInputAssembler:
             deadline_monotonic=deadline_monotonic,
         )
         self._require_deadline(deadline_monotonic)
-        dispatch_read = seed.dispatch_read
-        selected, placements = select_compatible_provider_replay_manifests(
-            manifest_cut=dispatch_read.replay_manifest_cut,
-            compiled_input=compiled_result.compiled_input,
-            replay_target=replay_target,
-        )
-        hydration_request = None
-        if selected:
-            placement_fingerprint = selected_message_placements_fingerprint(placements)
-            hydration_request = SelectedDurableReplayHydrationRequest(
-                replay_target=replay_target,
-                selected_manifests=selected,
-                selected_message_placements_fingerprint=placement_fingerprint,
-            )
         return PreparedColdEpochSemanticAssembly(
             seed=seed,
             planning=planning,
@@ -417,44 +373,20 @@ class KernelColdEpochInputAssembler:
             tool_exposure_plan=tool_exposure_plan,
             non_trigger_sources=non_trigger_sources,
             replay_target=replay_target,
-            hydration_request=hydration_request,
         )
 
-    def finalize_wire(
+    def bind_prepared_wire(
         self,
         prepared: PreparedColdEpochSemanticAssembly,
         *,
-        replay_hydration: FrozenSelectedDurableProviderReplayHydration | None,
-        wire_planner: ColdEpochWirePlanner,
+        wire_input_plan: FrozenProviderWireInputPlan,
         deadline_monotonic: float,
     ) -> ColdEpochInputAssemblyResult:
-        self._require_deadline(deadline_monotonic)
-        request = prepared.hydration_request
-        if request is None:
-            if replay_hydration is not None:
-                raise ValueError("unexpected replay hydration for cold epoch")
-        elif (
-            replay_hydration is None
-            or replay_hydration.source_manifest_cut_fingerprint
-            != prepared.seed.dispatch_read.replay_manifest_cut.cut_fingerprint
-            or replay_hydration.replay_target_fingerprint
-            != request.replay_target.replay_target_fingerprint
-            or replay_hydration.selected_message_placements_fingerprint
-            != request.selected_message_placements_fingerprint
-            or replay_hydration.selected_manifests != request.selected_manifests
-        ):
-            raise ValueError("cold epoch replay hydration does not exact-join")
-        predecessor = prepared.planning.predecessor_view
-        if prepared.compiled_result.reset_reason is not None:
-            predecessor = None
-        wire_plan = wire_planner(
-            compiled_input=prepared.compiled_result.compiled_input,
-            predecessor_view=predecessor,
-            replay_hydration=replay_hydration,
-        )
+        """Build continuity inputs from an already-materialized wire plan."""
+
         self._require_deadline(deadline_monotonic)
         if (
-            wire_plan.compiled_semantic_fingerprint
+            wire_input_plan.compiled_semantic_fingerprint
             != prepared.compiled_result.compiled_input.compiled_semantic_fingerprint
         ):
             raise ValueError("cold epoch wire plan changed semantic input")
@@ -462,12 +394,12 @@ class KernelColdEpochInputAssembler:
             planning=prepared.planning,
             compatibility=prepared.compatibility,
             compiled_result=prepared.compiled_result,
-            wire_input_plan=wire_plan,
+            wire_input_plan=wire_input_plan,
             tool_exposure_plan=prepared.tool_exposure_plan,
         )
         return ColdEpochInputAssemblyResult(
             compiled_input=prepared.compiled_result.compiled_input,
-            wire_input_plan=wire_plan,
+            wire_input_plan=wire_input_plan,
             continuity_candidate_inputs=candidate_inputs,
         )
 
@@ -550,7 +482,6 @@ __all__ = [
     "FrozenColdConversationSeed",
     "KernelColdEpochInputAssembler",
     "PreparedColdEpochSemanticAssembly",
-    "SelectedDurableReplayHydrationRequest",
     "SubagentInitialSeed",
     "build_subagent_initial_seed",
 ]

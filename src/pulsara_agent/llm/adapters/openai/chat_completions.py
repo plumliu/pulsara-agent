@@ -286,48 +286,120 @@ def build_chat_completions_payload(
     if plan is not None:
         if plan.wire_api != OPENAI_CHAT_COMPLETIONS_API:
             raise ValueError("provider wire plan API does not match Chat")
-        root = thaw_json(plan.materialization.root_policy_value)
-        if root is not None and not isinstance(root, str):
-            raise TypeError("Chat root policy must be text or null")
-        messages = [] if not root else [{"role": "system", "content": root}]
-        messages.extend(
-            _thaw_wire_objects(plan.materialization.ordered_input_items)
-        )
-        planned_tools = _thaw_wire_objects(plan.materialization.tool_items)
+        context_fields = thaw_json(plan.materialization.context_bearing_projection)
+        if not isinstance(context_fields, dict):
+            raise TypeError("Chat context projection must be an object")
+        if context_fields.get("tool_choice") != context.tool_choice:
+            raise ValueError("Chat context tool choice changed after wire planning")
     else:
-        messages = []
-        if context.system_prompt:
-            messages.append({"role": "system", "content": context.system_prompt})
-        messages.extend(
-            _messages_to_chat_messages(
-                context.messages,
-                provider_profile=provider_profile,
-            )
+        context_fields = materialize_chat_context_bearing_wire_projection(
+            call=call,
+            root_policy=context.system_prompt,
+            ordered_input_items=tuple(
+                _messages_to_chat_messages(
+                    context.messages,
+                    provider_profile=provider_profile,
+                )
+            ),
+            tool_items=tuple(_tool_to_chat_tool(tool) for tool in context.tools),
+            tool_choice=context.tool_choice,
         )
-        planned_tools = [_tool_to_chat_tool(tool) for tool in context.tools]
 
-    payload: dict[str, Any] = {
-        "model": model.id,
-        "messages": messages,
-        "n": 1,
-        "stream_options": {"include_usage": True},
-    }
+    payload: dict[str, Any] = dict(context_fields)
+    extra_body: dict[str, Any] = {}
+    for key, value in provider_profile.request_extra_body.items():
+        materialized_value = mutable_provider_value(value)
+        if context_fields.get(key) != materialized_value:
+            raise ValueError("Chat extra-body context changed after wire planning")
+        extra_body[key] = context_fields[key]
+        payload.pop(key, None)
+    payload.update(
+        {
+            "model": model.id,
+            "n": 1,
+            "stream_options": {"include_usage": True},
+        }
+    )
     for key, value in provider_profile.request_defaults.items():
         payload.setdefault(key, mutable_provider_value(value))
-    if planned_tools and provider_profile.supports_tools:
-        payload["tools"] = planned_tools
-    if context.tool_choice is not None:
-        payload["tool_choice"] = context.tool_choice
     payload["max_completion_tokens"] = (
         call.target.context_budget.effective_output_tokens
     )
     if options.reasoning_effort is not None:
         payload["reasoning_effort"] = options.reasoning_effort
-    if provider_profile.request_extra_body:
-        payload["extra_body"] = mutable_provider_value(
-            provider_profile.request_extra_body
-        )
+    if extra_body:
+        payload["extra_body"] = extra_body
     return payload
+
+
+_CHAT_NON_CONTEXT_BEARING_FIELDS = frozenset(
+    {
+        "model",
+        "n",
+        "stream",
+        "stream_options",
+        "max_tokens",
+        "max_completion_tokens",
+        "max_output_tokens",
+        "reasoning_effort",
+        "timeout",
+        "service_tier",
+        "seed",
+        "temperature",
+        "top_p",
+        "logprobs",
+        "top_logprobs",
+    }
+)
+
+
+def materialize_chat_context_bearing_wire_projection(
+    *,
+    call: ResolvedModelCall,
+    root_policy: str | None,
+    ordered_input_items: tuple[dict[str, Any], ...],
+    tool_items: tuple[dict[str, Any], ...],
+    tool_choice: str | None = None,
+) -> dict[str, Any]:
+    """Materialize the exact Chat fields that carry provider input context."""
+
+    profile = call.target.model_profile.provider_profile
+    messages: list[dict[str, Any]] = []
+    if root_policy:
+        messages.append({"role": "system", "content": root_policy})
+    messages.extend(dict(item) for item in ordered_input_items)
+    projection: dict[str, Any] = {"messages": messages}
+    for key, value in profile.request_defaults.items():
+        if key not in _CHAT_NON_CONTEXT_BEARING_FIELDS:
+            projection.setdefault(key, mutable_provider_value(value))
+    if tool_items and profile.supports_tools:
+        projection["tools"] = [dict(item) for item in tool_items]
+    if tool_choice is not None:
+        projection["tool_choice"] = tool_choice
+    for key, value in profile.request_extra_body.items():
+        # The OpenAI SDK merges ``extra_body`` into the JSON body, with the
+        # extension mapping taking precedence.  The measured projection is
+        # the resulting HTTP-body shape, not the SDK invocation kwargs.
+        projection[key] = mutable_provider_value(value)
+    return projection
+
+
+def project_chat_context_bearing_payload_fields(
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Project the same context fields from an actual Chat request payload."""
+
+    merged = {key: value for key, value in payload.items() if key != "extra_body"}
+    extra_body = payload.get("extra_body")
+    if extra_body is not None:
+        if not isinstance(extra_body, dict):
+            raise TypeError("Chat extra_body must be an object")
+        merged.update(extra_body)
+    return {
+        key: value
+        for key, value in merged.items()
+        if key not in _CHAT_NON_CONTEXT_BEARING_FIELDS
+    }
 
 
 def chat_semantic_wire_group(
@@ -415,9 +487,7 @@ class ChatCompletionAccumulator:
     _text_parts: list[str] = field(default_factory=list)
     _content_observed: bool = False
     _text_field_chunks: dict[str, list[str]] = field(default_factory=dict)
-    _array_field_items: dict[str, list[FrozenJsonValue]] = field(
-        default_factory=dict
-    )
+    _array_field_items: dict[str, list[FrozenJsonValue]] = field(default_factory=dict)
     _replay_aggregate_bytes: int = 2
     _replay_item_count: int = 0
     _unknown_nonempty_field_seen: bool = False
@@ -474,8 +544,7 @@ class ChatCompletionAccumulator:
             )
         if isinstance(delta, dict):
             known_contracts = {
-                item.field_name: item
-                for item in CHAT_CLOSED_REASONING_FIELD_CONTRACTS
+                item.field_name: item for item in CHAT_CLOSED_REASONING_FIELD_CONTRACTS
             }
             live_thinking_fields = frozenset(
                 self.provider_profile.thinking.delta_fields
@@ -615,13 +684,10 @@ class ChatCompletionAccumulator:
     def _reconcile_final_message(self, raw_message: object) -> None:
         known_contracts = CHAT_CLOSED_REASONING_FIELD_CONTRACTS
         replay_contracts = {
-            item.field_name: item
-            for item in self.provider_profile.chat_replay_fields
+            item.field_name: item for item in self.provider_profile.chat_replay_fields
         }
         if raw_message is None:
-            if any(
-                item.final_value_required for item in replay_contracts.values()
-            ):
+            if any(item.final_value_required for item in replay_contracts.values()):
                 raise LLMTransportContractError(
                     "completed chat response lacks its required final message",
                     reason_code="transport_chat_replay_field_missing",
@@ -676,10 +742,7 @@ class ChatCompletionAccumulator:
                 continue
             raw_value = raw_message[contract.field_name]
             if raw_value is None:
-                if (
-                    replay_contract is not None
-                    and replay_contract.final_value_required
-                ):
+                if replay_contract is not None and replay_contract.final_value_required:
                     raise LLMTransportContractError(
                         "chat final message has a null required replay field",
                         reason_code="transport_chat_replay_field_missing",
@@ -855,12 +918,7 @@ class ChatCompletionAccumulator:
         if item_count > MAX_CHAT_REASONING_REPLAY_ITEMS_PER_RESPONSE:
             self._fail_replay_limit(items=True)
         encoded = self._canonical_replay_value_bytes(raw_value)
-        logical_bytes = (
-            2
-            + len(canonical_json_bytes(field_name))
-            + 1
-            + len(encoded)
-        )
+        logical_bytes = 2 + len(canonical_json_bytes(field_name)) + 1 + len(encoded)
         if logical_bytes > MAX_CHAT_REASONING_REPLAY_AGGREGATE_BYTES:
             self._fail_replay_limit(items=False)
 
@@ -1101,9 +1159,7 @@ class ChatToolCallAccumulator:
             assert state.tool_call_id is not None
             arguments = (
                 "".join(
-                    self.builder.tool_call_argument_parts.get(
-                        state.tool_call_id, ()
-                    )
+                    self.builder.tool_call_argument_parts.get(state.tool_call_id, ())
                 )
                 or "{}"
             )

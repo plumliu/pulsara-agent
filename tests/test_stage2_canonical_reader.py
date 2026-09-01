@@ -819,6 +819,25 @@ def test_mid_turn_snapshot_revision_keeps_current_user_as_exact_delta(
             deadline_monotonic=monotonic() + 30,
         )
     assert winner.revision_ordinal == 1
+    protocol_snapshot = CanonicalProtocolReader(provider).snapshot(
+        session_id=lease.guard.session_id,
+        maximum_entries=32,
+        maximum_control_items=32,
+        deadline_monotonic=monotonic() + 30,
+    )
+    assert protocol_snapshot.control.HasField("latest_context_compaction")
+    compaction_control = protocol_snapshot.control.latest_context_compaction
+    assert compaction_control.turn_id == current_turn
+    assert (
+        compaction_control.context_binding_revision_id
+        == adoption.binding.binding_revision_id
+    )
+    assert compaction_control.source_through_sequence == first_answer.entry_sequence
+    assert (
+        compaction_control.adopted_after_entry_sequence
+        == active_item.source_entry_sequence
+    )
+    assert compaction_control.accepted_at_utc
     prepared = safe_point.freeze_provider_input(
         turn_id=current_turn, deadline_monotonic=monotonic() + 30
     )

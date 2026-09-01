@@ -17,7 +17,6 @@ from pulsara_agent.conversation_kernel.capability_composition import (
     PreparedSkillCatalogSourceSnapshot,
 )
 from pulsara_agent.conversation_kernel.cold_epoch import (
-    SelectedDurableReplayHydrationRequest,
     SubagentInitialSeed,
 )
 from pulsara_agent.conversation_kernel.compaction.contracts import (
@@ -43,8 +42,7 @@ from pulsara_agent.tools.builtins.todo import FrozenTodoItem
 
 ROOT = Path(__file__).resolve().parents[1]
 EVIDENCE = (
-    ROOT
-    / "benchmarks/suites/core/v1/fingerprint_subtraction_hard_cut_activation.json"
+    ROOT / "benchmarks/suites/core/v1/fingerprint_subtraction_hard_cut_activation.json"
 )
 
 
@@ -58,10 +56,6 @@ def test_hard_cut_mandatory_process_local_fingerprint_fields_are_absent() -> Non
         McpInstallationCandidate: {"candidate_fingerprint"},
         PreparedSkillCatalogSourceSnapshot: {"root_policy_fingerprint"},
         SubagentInitialSeed: {"objective_item_fingerprint", "seed_fingerprint"},
-        SelectedDurableReplayHydrationRequest: {
-            "source_dispatch_read_fingerprint",
-            "request_fingerprint",
-        },
         RecentHumanMessageProof: {"item_fingerprint"},
         FrozenTodoItem: {"item_fingerprint"},
         PreparedCheapHintReflectionCandidateBatch: {"batch_fingerprint"},
@@ -101,11 +95,22 @@ def test_hard_cut_subagent_process_local_aggregate_fields_are_absent() -> None:
             assert names.isdisjoint(forbidden), name
 
 
-def test_builtin_binding_keeps_exact_catalog_entry_not_duplicate_schema_fields() -> None:
+def test_builtin_binding_keeps_exact_catalog_entry_not_duplicate_schema_fields() -> (
+    None
+):
     assert _field_names(ProductionBuiltinExecutorBinding) == {
         "catalog_entry",
         "executor_identity",
     }
+
+
+def test_cold_epoch_has_no_duplicate_replay_hydration_request_carrier() -> None:
+    source = (ROOT / "src/pulsara_agent/conversation_kernel/cold_epoch.py").read_text(
+        encoding="utf-8"
+    )
+    assert "SelectedDurableReplayHydrationRequest" not in source
+    assert "hydration_request" not in source
+    assert "select_compatible_provider_replay_manifests" not in source
 
 
 def test_new_activation_evidence_contains_no_file_or_report_hash_inventory() -> None:

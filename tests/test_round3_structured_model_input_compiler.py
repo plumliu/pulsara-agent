@@ -85,7 +85,7 @@ from pulsara_agent.conversation_kernel.execution_watchdogs import (
     KernelWatchdogOwner,
 )
 from pulsara_agent.conversation_kernel.compaction.planner import (
-    freeze_tail_and_prefix,
+    enumerate_safe_summary_prefixes,
 )
 from pulsara_agent.conversation_kernel.compaction.prompt import (
     compaction_summary_request,
@@ -112,6 +112,14 @@ from pulsara_agent.conversation_kernel.tool_policy import (
 from pulsara_agent.conversation_kernel.tool_runtime import DirectKernelToolPort
 from pulsara_agent.conversation_kernel.live import LiveAgentEventBus
 from pulsara_agent.llm.input import LLMMessage, MessageRole
+from pulsara_agent.llm.adapters.openai.chat_completions import (
+    build_chat_completions_payload,
+    project_chat_context_bearing_payload_fields,
+)
+from pulsara_agent.llm.adapters.openai.responses import (
+    build_responses_payload,
+    project_responses_context_bearing_payload_fields,
+)
 from pulsara_agent.llm.adapters.openai.function_tools import (
     freeze_openai_native_tool_eligibility,
     materialize_openai_native_tool_projection_set,
@@ -126,6 +134,7 @@ from pulsara_agent.llm.provider_replay import (
     provider_replay_id,
 )
 from pulsara_agent.llm.request import (
+    LLMContext,
     provider_assistant_message_public_projection_fingerprint,
 )
 from pulsara_agent.llm.result import TransportUsageReport
@@ -2025,11 +2034,10 @@ def test_round3_subagent_result_uses_typed_user_role_envelope() -> None:
     assert lowered.fixed_message is not None
     assert lowered.fixed_message.role is MessageRole.USER
     carrier = json.loads(lowered.fixed_message.content[0])
-    assert carrier["pulsara_subagent_result"]["content"] == (
-        "exact delegated summary"
-    )
-    assert "not a new human instruction" in (
-        carrier["pulsara_subagent_result"]["handling"]
+    assert carrier["pulsara_subagent_result"]["content"] == ("exact delegated summary")
+    assert (
+        "not a new human instruction"
+        in (carrier["pulsara_subagent_result"]["handling"])
     )
 
     human = replace(
@@ -2571,6 +2579,7 @@ def test_round3_1_overbudget_append_can_be_projected_without_execution_authority
         source_view_fingerprint=source_fingerprint,
         materialized_messages=lambda: projected.messages,
         materialized_system_prompt=lambda: projected.system_prompt,
+        predecessor_epoch_view=installed,
         normal_compile_binding=request.compile_binding,
         canonical_dispatch_read=SimpleNamespace(
             compile_snapshot=request.canonical_facts
@@ -2580,14 +2589,14 @@ def test_round3_1_overbudget_append_can_be_projected_without_execution_authority
         ),
     )
     summary_request = compaction_summary_request()
-    tail, prefix = freeze_tail_and_prefix(
+    safe_prefixes = enumerate_safe_summary_prefixes(
         source_view=source_view,
         complete_tool_groups=(),
         retained_group_count=0,
         source_projection=projected,
-        summary_request=summary_request,
         deadline_monotonic=monotonic() + 1,
     )
+    tail, prefix = safe_prefixes[-1]
     summary_estimate = request.compile_binding.estimator.estimate_frozen_input(
         system_prompt=projected.system_prompt,
         messages=(
@@ -3548,13 +3557,13 @@ def test_round3_source_decision_and_compiled_fingerprints_are_golden() -> None:
     )
     compiled = StructuredModelInputCompiler().compile(request)
     assert compiled.source_collection_fingerprint == (
-        "sha256:2087719dbf411cbdb83e864c0c25d6aca2f8a764bba05090508098cf011e1169"
+        "sha256:89dc4f1793177bba3513ddc9e279bd7eeaecce3bfc942e5148ca4432f872ef95"
     )
     assert compiled.budget_report.decision_digest == (
         "sha256:caee1ae23a161f2c862947ef5b7b2b9a4ae3093bce6117e00bc13a3a19058fbd"
     )
     assert compiled.compiled_semantic_fingerprint == (
-        "sha256:7c8c7dd2445d127b415dcceefc72f82d545f026689cd68c1165b31450d6ebb8d"
+        "sha256:97c99a956cda7a2c4820ff20787fc70a574960aca27f3f2a4d8a77572e6f97d7"
     )
     assert compiled.final_estimate.total_input_tokens == 268
 
@@ -3690,6 +3699,47 @@ def test_round9_2_hook_context_is_one_shot_user_suffix_with_exact_prefix() -> No
     )
 
 
+def _assert_replay_final_wire_projection(*, result, view, prepared_call) -> None:
+    plan = view.wire_input_plan
+    quote = plan.quote
+    assert plan.replacements
+    assert quote.replaced_generic_wire_estimated_tokens == sum(
+        item.generic_wire_estimated_tokens for item in plan.replacements
+    )
+    assert quote.replay_wire_estimated_tokens == sum(
+        item.replay_wire_estimated_tokens for item in plan.replacements
+    )
+    assert quote.final_wire_estimated_input_tokens == (
+        quote.generic_wire_estimated_input_tokens
+        - quote.replaced_generic_wire_estimated_tokens
+        + quote.replay_wire_estimated_tokens
+    )
+    projection = thaw_json(plan.materialization.context_bearing_projection)
+    assert isinstance(projection, dict)
+    assert quote.final_wire_utf8_bytes == len(canonical_json_bytes(projection))
+    compiled = result.compiled_input
+    context = LLMContext(
+        messages=compiled.messages,
+        context_id=compiled.context_id,
+        resolved_model_call_id=prepared_call.call.resolved_model_call_id,
+        target_fingerprint=prepared_call.call.target.fact.target_fingerprint,
+        model_call_index=1,
+        system_prompt=compiled.system_prompt,
+        compiler_estimated_input_tokens=compiled.final_estimate.total_input_tokens,
+        provider_wire_input_plan=plan,
+    )
+    if plan.wire_api == "openai_chat_completions":
+        payload = build_chat_completions_payload(
+            call=prepared_call.call,
+            context=context,
+        )
+        actual = project_chat_context_bearing_payload_fields(payload)
+    else:
+        payload = build_responses_payload(call=prepared_call.call, context=context)
+        actual = project_responses_context_bearing_payload_fields(payload)
+    assert actual == projection
+
+
 def test_round5a1_reasoning_replay_replaces_exact_assistant_and_keeps_wire_prefix() -> (
     None
 ):
@@ -3771,7 +3821,7 @@ def test_round5a1_reasoning_replay_replaces_exact_assistant_and_keeps_wire_prefi
         context_id="context:second",
         model_call_index=2,
     )
-    _second, successor = _compile_and_install_append(
+    second_result, successor = _compile_and_install_append(
         compiler=compiler,
         owner=owner,
         request=second_request,
@@ -3791,6 +3841,11 @@ def test_round5a1_reasoning_replay_replaces_exact_assistant_and_keeps_wire_prefi
     )
     assert thaw_json(second_wire.ordered_input_items[-1]) == thaw_json(replay_message)
     assert successor.messages[: len(installed.messages)] == installed.messages
+    _assert_replay_final_wire_projection(
+        result=second_result,
+        view=successor,
+        prepared_call=first_prepared,
+    )
 
     follow_up = _user("follow-up", sequence=3)
     third_request = replace(
@@ -3901,7 +3956,7 @@ def test_round5a1_responses_replay_preserves_ordered_items_after_wire_prefix() -
         context_id="context:responses:second",
         model_call_index=2,
     )
-    _second, successor = _compile_and_install_append(
+    second_result, successor = _compile_and_install_append(
         compiler=compiler,
         owner=owner,
         request=second_request,
@@ -3916,6 +3971,11 @@ def test_round5a1_responses_replay_preserves_ordered_items_after_wire_prefix() -
     second_wire = successor.wire_input_plan.materialization.ordered_input_items
     assert second_wire[: len(first_wire)] == first_wire
     assert second_wire[-2:] == replay_items
+    _assert_replay_final_wire_projection(
+        result=second_result,
+        view=successor,
+        prepared_call=prepared,
+    )
 
 
 def test_round3_1_active_skill_no_change_and_clear_are_causal_once() -> None:

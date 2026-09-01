@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import asyncio
 
-from dataclasses import dataclass, field as dataclass_field, replace
+from dataclasses import dataclass, field as dataclass_field
 
 from datetime import datetime, timezone
 from hashlib import sha256
-from typing import Protocol
+from typing import Literal, Protocol
 
 
 from time import monotonic
@@ -55,7 +55,7 @@ from pulsara_agent.conversation_kernel.compaction.contracts import (
 )
 
 from pulsara_agent.conversation_kernel.compaction.model_call import (
-    finalize_compaction_summary_call,
+    promote_compaction_summary_call,
     prepare_compaction_summary_repair_semantic,
     prepare_compaction_summary_semantic,
 )
@@ -66,10 +66,9 @@ from pulsara_agent.conversation_kernel.compaction.planner import (
     CompactionReclaimUnavailable,
     crosses_compaction_resource_headroom,
     enumerate_complete_tool_groups,
-    estimate_unavoidable_compaction_successor_tokens,
+    enumerate_safe_summary_prefixes,
     freeze_compaction_continuation,
     freeze_compaction_source_view,
-    freeze_tail_and_prefix,
     select_recent_human_messages,
     should_trigger_compaction,
     validate_compaction_reclaim,
@@ -136,6 +135,9 @@ from pulsara_agent.conversation_kernel.provider_dispatch import (
     PreparedCompactionSourceDispatch,
     PreparedProviderDispatch,
     PreparedProviderHeadroomAdmission,
+    PreparedProviderWireCandidate,
+    PreparedWireMeasurementDecision,
+    HandleFreeProviderWireObservation,
     ProviderDispatchCoordinator,
 )
 
@@ -145,6 +147,7 @@ from pulsara_agent.conversation_kernel.reader import (
 )
 
 from pulsara_agent.conversation_kernel.safe_point import (
+    PreparedProviderInputHandle,
     ProviderSafePointCoordinator,
 )
 
@@ -155,10 +158,12 @@ from pulsara_agent.model_input.compiler import (
 
 
 from pulsara_agent.model_input.contracts import (
+    ContextBindingBaseKind,
     ContextSourceAbsentFact,
     ContextSourceAbsenceKind,
     ContextSourceCandidate,
     ContextSourceKind,
+    FrozenProviderInputItemKind,
     ModelInputScopeKind,
     ModelInputCompileFailureKind,
     StructuredModelInputCompileError,
@@ -167,6 +172,10 @@ from pulsara_agent.model_input.contracts import (
 from pulsara_agent.model_input.continuity import (
     ProviderInputContinuityScope,
     provider_input_logical_utf8_bytes,
+)
+from pulsara_agent.llm.request import (
+    MAXIMUM_PROVIDER_WIRE_INPUT_BYTES,
+    FrozenProviderWireInputQuote,
 )
 
 from pulsara_agent.primitives.run_permission import FrozenRunPermissionSnapshot
@@ -188,7 +197,237 @@ def _stable_id(prefix: str, *parts: str) -> str:
     return f"{prefix}:{sha256(chr(0).join(parts).encode()).hexdigest()}"
 
 
+@dataclass(frozen=True, slots=True)
+class ValidatedCompactionWireTransition:
+    phase: Literal["PRE_FULL", "POST_FULL"]
+    source_quote: FrozenProviderWireInputQuote
+    successor_quote: FrozenProviderWireInputQuote
+    reclaim_tokens: int
+
+
+class CompactionWireTransitionDrift(CompactionPlanningError):
+    """The source and successor no longer share one exact planning authority."""
+
+
+def validate_compaction_wire_transition(
+    *,
+    source_view: FrozenCompactionSourceView,
+    source_candidate: PreparedProviderWireCandidate,
+    successor_wire: PreparedWireMeasurementDecision,
+    policy,
+    force: bool,
+    enforce_soft_target: bool,
+    phase: Literal["PRE_FULL", "POST_FULL"],
+) -> ValidatedCompactionWireTransition:
+    """Exact structural join before the single numerical reclaim validator."""
+
+    source_quote = source_view.provider_wire_quote
+    successor_candidate = successor_wire.candidate
+    successor_quote = successor_wire.quote
+    successor_prepared_call = getattr(successor_candidate, "prepared_call", None)
+    if successor_prepared_call is None:
+        raise CompactionWireTransitionDrift(
+            "compaction wire transition does not exact-join an installable successor"
+        )
+    source_call = source_candidate.prepared_call.call
+    successor_call = successor_prepared_call.call
+    source_binding = source_candidate.prepared_call.compile_binding
+    successor_binding = successor_prepared_call.compile_binding
+    source_identity = source_candidate.semantic_input.canonical_input_identity
+    successor_identity = successor_candidate.semantic_input.canonical_input_identity
+    if (
+        phase not in {"PRE_FULL", "POST_FULL"}
+        or source_candidate.canonical_read != source_view.canonical_dispatch_read
+        or source_candidate.semantic_input.final_estimate.total_input_tokens
+        != source_quote.semantic_estimated_input_tokens
+        or successor_candidate.semantic_input.final_estimate.total_input_tokens
+        != successor_quote.semantic_estimated_input_tokens
+        or source_call.target.fact != successor_call.target.fact
+        or source_binding.target_fact != source_call.target.fact
+        or successor_binding.target_fact != successor_call.target.fact
+        or source_call.target.model_profile.provider_profile
+        != successor_call.target.model_profile.provider_profile
+        or type(source_binding.estimator) is not type(successor_binding.estimator)
+        or source_binding.estimator.fact != successor_binding.estimator.fact
+        or source_quote.wire_api != successor_quote.wire_api
+        or source_quote.wire_api
+        != source_call.target.model_profile.provider_profile.wire_api
+        or successor_quote.wire_api
+        != successor_call.target.model_profile.provider_profile.wire_api
+        or source_binding.estimator_fingerprint != source_quote.estimator_fingerprint
+        or successor_binding.estimator_fingerprint
+        != successor_quote.estimator_fingerprint
+        or source_quote.estimator_fingerprint != successor_quote.estimator_fingerprint
+        or source_binding.effective_input_budget_tokens
+        != source_quote.effective_input_budget_tokens
+        or successor_binding.effective_input_budget_tokens
+        != successor_quote.effective_input_budget_tokens
+        or source_quote.effective_input_budget_tokens
+        != successor_quote.effective_input_budget_tokens
+        or source_identity.session_id != successor_identity.session_id
+        or source_identity.turn_id != successor_identity.turn_id
+        or source_identity.conversation_scope_kind
+        is not successor_identity.conversation_scope_kind
+        or source_identity.scope_subagent_task_id
+        != successor_identity.scope_subagent_task_id
+        or source_identity
+        != source_candidate.canonical_read.compile_snapshot.canonical_input.identity
+        or successor_candidate.semantic_input.canonical_input_identity
+        != successor_candidate.canonical_read.compile_snapshot.canonical_input.identity
+        or not _compaction_cut_lineage_exactly_joins(
+            source_candidate=source_candidate,
+            successor_candidate=successor_candidate,
+            phase=phase,
+        )
+    ):
+        raise CompactionWireTransitionDrift(
+            "compaction wire transition does not exact-join its target and cuts"
+        )
+    if successor_wire.wire_input_plan is None:
+        if (
+            successor_quote.final_wire_estimated_input_tokens
+            > successor_quote.effective_input_budget_tokens
+        ):
+            raise CompactionPlanningError(
+                "compaction successor exceeds its hard model budget"
+            )
+        if successor_quote.final_wire_utf8_bytes > MAXIMUM_PROVIDER_WIRE_INPUT_BYTES:
+            raise CompactionPlanningError(
+                "compaction successor exceeds its hard physical byte bound"
+            )
+        raise CompactionPlanningError(
+            "compaction successor lacks executable final-wire admission"
+        )
+    if successor_quote.final_wire_utf8_bytes >= source_quote.final_wire_utf8_bytes:
+        raise CompactionReclaimUnavailable(
+            "compaction successor does not shrink exact final-wire bytes"
+        )
+    reclaim = validate_compaction_reclaim(
+        source_tokens=source_quote.final_wire_estimated_input_tokens,
+        successor_tokens=successor_quote.final_wire_estimated_input_tokens,
+        hard_input_budget_tokens=successor_quote.effective_input_budget_tokens,
+        policy=policy,
+        force=force,
+        enforce_soft_target=enforce_soft_target,
+    )
+    return ValidatedCompactionWireTransition(
+        phase=phase,
+        source_quote=source_quote,
+        successor_quote=successor_quote,
+        reclaim_tokens=reclaim,
+    )
+
+
+def _compaction_cut_lineage_exactly_joins(
+    *,
+    source_candidate: PreparedProviderWireCandidate,
+    successor_candidate: PreparedProviderWireCandidate,
+    phase: Literal["PRE_FULL", "POST_FULL"],
+) -> bool:
+    """Prove the successor is the one snapshot rewrite of the source cut."""
+
+    source_read = source_candidate.canonical_read
+    successor_read = successor_candidate.canonical_read
+    source_facts = source_read.compile_snapshot
+    successor_facts = successor_read.compile_snapshot
+    source_input = source_facts.canonical_input
+    successor_input = successor_facts.canonical_input
+    source_identity = source_input.identity
+    successor_identity = successor_input.identity
+    source_binding = source_facts.context_binding_fact
+    successor_binding = successor_facts.context_binding_fact
+    boundary = successor_binding.source_through_sequence
+    source_lineage_floor = (
+        0
+        if source_binding.base_kind is ContextBindingBaseKind.FULL_HISTORY
+        else source_binding.source_through_sequence
+    )
+    if (
+        successor_binding.base_kind is not ContextBindingBaseKind.SNAPSHOT
+        or successor_binding.context_snapshot_id is None
+        or successor_binding.revision_ordinal != source_binding.revision_ordinal + 1
+        or not source_lineage_floor
+        <= boundary
+        <= source_identity.provider_input_through_sequence
+        or successor_identity.session_id != source_identity.session_id
+        or successor_identity.turn_id != source_identity.turn_id
+        or successor_identity.initial_entry_id != source_identity.initial_entry_id
+        or successor_identity.conversation_scope_kind
+        is not source_identity.conversation_scope_kind
+        or successor_identity.scope_subagent_task_id
+        != source_identity.scope_subagent_task_id
+        or successor_identity.context_binding_revision_id
+        != successor_binding.binding_revision_id
+        or successor_identity.provider_input_through_sequence
+        < source_identity.provider_input_through_sequence
+        or (
+            phase == "PRE_FULL"
+            and successor_identity.provider_input_through_sequence
+            != source_identity.provider_input_through_sequence
+        )
+    ):
+        return False
+    suffix = tuple(
+        item
+        for item in source_input.items
+        if item.source_entry_sequence is not None
+        and item.source_entry_sequence > boundary
+    )
+    if not successor_input.items:
+        return False
+    snapshot, *successor_suffix = successor_input.items
+    if (
+        snapshot.item_kind is not FrozenProviderInputItemKind.CONTEXT_SNAPSHOT
+        or snapshot.source_entry_id is not None
+        or snapshot.source_entry_sequence != boundary
+        or tuple(successor_suffix) != suffix
+        or successor_input.canonical_utf8_bytes
+        != len(snapshot.text.encode("utf-8"))
+        + sum(len(item.text.encode("utf-8")) for item in suffix)
+    ):
+        return False
+    retained_request_ids = frozenset(
+        item.source_entry_id
+        for item in suffix
+        if item.item_kind is FrozenProviderInputItemKind.ASSISTANT_TOOL_REQUEST
+        and item.source_entry_id is not None
+    )
+    expected_closures = tuple(
+        item
+        for item in source_input.closures
+        if item.assistant_entry_id in retained_request_ids
+    )
+    expected_late_outcomes = tuple(
+        item
+        for item in source_input.late_outcomes
+        if item.result_entry_sequence > boundary
+    )
+    retained_entry_ids = frozenset(
+        item.source_entry_id for item in suffix if item.source_entry_id is not None
+    )
+    expected_manifests = tuple(
+        item
+        for item in source_read.replay_manifest_cut.manifests
+        if item.assistant_entry_id in retained_entry_ids
+    )
+    return (
+        successor_input.closures == expected_closures
+        and successor_input.late_outcomes == expected_late_outcomes
+        and successor_read.replay_manifest_cut.manifests == expected_manifests
+        and successor_facts.run_permission_snapshot
+        == source_facts.run_permission_snapshot
+        and successor_facts.plan_workflow_fact == source_facts.plan_workflow_fact
+        and successor_facts.plan_handoff_fact == source_facts.plan_handoff_fact
+        and successor_facts.previous_turn_outcome_fact
+        == source_facts.previous_turn_outcome_fact
+        and successor_facts.tool_observation_freshness_fact
+        == source_facts.tool_observation_freshness_fact
+    )
+
+
 def _can_retry_compaction_with_smaller_tail(error: BaseException) -> bool:
+    if isinstance(error, CompactionWireTransitionDrift):
+        return False
     if isinstance(error, CompactionPlanningError):
         return True
     if not isinstance(error, StructuredModelInputCompileError):
@@ -217,6 +456,14 @@ class CompactionExecutionResult:
             or self.successor_dispatch is not None
         ):
             raise ValueError("compaction continuation block carrier is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class _CompactionFencedRestart:
+    """Stack-free restart request after one fenced attempt releases its owners."""
+
+    maximum_retained_tool_groups: int | None
+    pre_compact_dispatched: bool
 
 
 def _already_compact_result(turn_id: str) -> CompactionExecutionResult:
@@ -314,32 +561,33 @@ class SessionStartCompactBoundaryPort(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
-class PreparedPrecompileCompaction:
-    """Exact non-executable source retained across the decision/attempt seam."""
+class OrdinaryPrecompileDecision:
+    """Unique ordinary admission plus its handle-free exact wire observation."""
 
-    dispatch: PreparedCompactionSourceDispatch = dataclass_field(repr=False)
-    canonical_read: FrozenCompactionCanonicalRead = dataclass_field(repr=False)
-    source_view: FrozenCompactionSourceView = dataclass_field(repr=False)
-    attempt_token: CompactionAttemptToken = dataclass_field(repr=False, compare=False)
-
-    def close(self) -> None:
-        self.dispatch.handle.close()
+    ordinary_admission: PreparedProviderHeadroomAdmission = dataclass_field(repr=False)
+    reusable_wire_observation: HandleFreeProviderWireObservation = dataclass_field(
+        repr=False, compare=False
+    )
 
 
 @dataclass(frozen=True, slots=True)
-class PrecompileCompactionDecision:
-    """Closed result of the exact projection before an ordinary compile."""
+class AutomaticCompactionTriggerCandidate:
+    """Authority-free trigger fact; fenced execution recaptures all source truth."""
 
-    compaction: PreparedPrecompileCompaction | None = dataclass_field(
-        default=None, repr=False
-    )
-    ordinary_admission: PreparedProviderHeadroomAdmission | None = dataclass_field(
-        default=None, repr=False
-    )
+    trigger: CompactionTrigger
+    reason: Literal["FINAL_WIRE_POLICY"] = "FINAL_WIRE_POLICY"
 
     def __post_init__(self) -> None:
-        if self.compaction is not None and self.ordinary_admission is not None:
-            raise ValueError("precompile decision owns two continuations")
+        if self.trigger not in {
+            CompactionTrigger.AUTO_ACTIVE_CONTEXT,
+            CompactionTrigger.MID_TURN_FOLLOWUP,
+        }:
+            raise ValueError("automatic trigger candidate has a non-automatic trigger")
+
+
+PrecompileCompactionDecision = (
+    OrdinaryPrecompileDecision | AutomaticCompactionTriggerCandidate
+)
 
 
 class CompactionCoordinator:
@@ -426,9 +674,9 @@ class CompactionCoordinator:
             )
         )
 
-    async def _resolved_workspace_id(self) -> str:
+    async def _resolved_workspace_id(self, *, deadline: float | None = None) -> str:
         return await self._workspace_resolver.resolve(
-            deadline=self._canonical_deadline()
+            deadline=self._canonical_deadline() if deadline is None else deadline
         )
 
     async def _content(
@@ -544,7 +792,6 @@ class CompactionCoordinator:
         manual_request: ManualCompactionRequest | None,
         scope_kind: ModelInputScopeKind,
         scope_subagent_task_id: str | None,
-        prepared_source: PreparedPrecompileCompaction | None = None,
         hook_scope: HookDispatchScopeRef | None = None,
         session_start_compact_port: SessionStartCompactPort | None = None,
         session_start_boundary_port: SessionStartCompactBoundaryPort | None = None,
@@ -558,7 +805,6 @@ class CompactionCoordinator:
             manual_request=manual_request,
             scope_kind=scope_kind,
             scope_subagent_task_id=scope_subagent_task_id,
-            prepared_source=prepared_source,
             hook_scope=hook_scope,
             session_start_compact_port=session_start_compact_port,
             session_start_boundary_port=session_start_boundary_port,
@@ -574,15 +820,16 @@ class CompactionCoordinator:
         scope_kind: ModelInputScopeKind,
         scope_subagent_task_id: str | None,
         headroom_admission: PreparedProviderHeadroomAdmission,
-    ) -> PrecompileCompactionDecision:
+        deadline: float,
+    ) -> PrecompileCompactionDecision | None:
         owner = self._compaction_owner
         if owner is None:
             headroom_admission.close()
-            return PrecompileCompactionDecision()
+            return None
         try:
             scope = CompactionScope(
                 session_id=self._writer_lease.guard.session_id,
-                workspace_id=await self._resolved_workspace_id(),
+                workspace_id=await self._resolved_workspace_id(deadline=deadline),
                 turn_id=turn_id,
                 scope_kind=scope_kind,
                 scope_subagent_task_id=scope_subagent_task_id,
@@ -591,88 +838,97 @@ class CompactionCoordinator:
             headroom_admission.close()
             raise
 
-        async def operation() -> PreparedPrecompileCompaction | None:
-            deadline = monotonic() + owner.policy.planning_attempt_seconds
+        dispatch: PreparedCompactionSourceDispatch | None = None
+        try:
+            preflight = headroom_admission.preflight
+            prepared_target = headroom_admission.prepared_target
+            transferred_handle = headroom_admission.take_handle()
             dispatch = await self._provider_dispatch.prepare_compaction_source(
                 turn_id=turn_id,
                 model_call_index=model_call_index,
                 inherited_memory_use_policy=inherited_memory_use_policy,
                 deadline=deadline,
-                existing_handle=headroom_admission.handle,
-                headroom_preflight_override=headroom_admission.preflight,
-                prepared_target_override=headroom_admission.prepared_target,
+                existing_handle=transferred_handle,
+                headroom_preflight_override=preflight,
+                prepared_target_override=prepared_target,
             )
-            try:
-                canonical_read = await self._io.run(
-                    self._input_reader.read_frozen_compaction_cut,
-                    dispatch.handle.cut,
-                    deadline_monotonic=deadline,
-                )
-                if (
-                    canonical_read.scope != scope
-                    or canonical_read.turn_status != "RUNNING"
-                ):
-                    raise CompactionPlanningError(
-                        "precompile compaction target changed at admission"
-                    )
-                preflight = headroom_admission.preflight
-                canonical_range = canonical_read.safe_head_range
-                if (
-                    preflight.effective_materialization_lineage_floor
-                    != canonical_range.effective_materialization_lineage_floor
-                ):
-                    raise CompactionPlanningError(
-                        "compaction headroom quote differs from its frozen source"
-                    )
-                source_view = freeze_compaction_source_view(
-                    canonical_read=canonical_read,
-                    compile_binding=dispatch.prepared_call.compile_binding,
-                    semantic_projection=dispatch.projection,
-                    predecessor_epoch_view=dispatch.planning.predecessor_view,
-                )
-                if not should_trigger_compaction(
-                    source_view=source_view,
-                    policy=owner.policy,
-                    force=False,
-                ):
-                    return None
-                return PreparedPrecompileCompaction(
-                    dispatch=dispatch,
-                    canonical_read=canonical_read,
-                    source_view=source_view,
-                    attempt_token=CompactionAttemptToken(
-                        scope.session_id,
-                        turn_id,
-                        scope_kind,
-                        scope_subagent_task_id,
-                        trigger,
-                    ),
-                )
-            except BaseException:
-                dispatch.handle.close()
-                raise
-
-        try:
-            prepared = await owner.run_fenced(
-                scope=scope,
-                trigger=trigger,
-                operation=operation,
+            canonical_read = await self._io.run(
+                self._input_reader.read_frozen_compaction_cut,
+                dispatch.cut,
+                deadline_monotonic=deadline,
             )
-            if prepared is None:
-                return PrecompileCompactionDecision(
-                    ordinary_admission=headroom_admission
+            if canonical_read.scope != scope or canonical_read.turn_status != "RUNNING":
+                raise CompactionPlanningError(
+                    "precompile compaction target changed at admission"
                 )
-            return PrecompileCompactionDecision(compaction=prepared)
+            canonical_range = canonical_read.safe_head_range
+            if (
+                preflight.effective_materialization_lineage_floor
+                != canonical_range.effective_materialization_lineage_floor
+            ):
+                raise CompactionPlanningError(
+                    "compaction headroom quote differs from its frozen source"
+                )
+            source_view = freeze_compaction_source_view(
+                canonical_read=canonical_read,
+                compile_binding=dispatch.prepared_call.compile_binding,
+                semantic_projection=dispatch.projection,
+                predecessor_epoch_view=dispatch.planning.predecessor_view,
+                provider_wire_quote=dispatch.wire_quote,
+                producer_wire_api=(
+                    dispatch.prepared_call.call.target.model_profile.provider_profile.wire_api
+                ),
+            )
+            if not should_trigger_compaction(
+                source_view=source_view,
+                policy=owner.policy,
+                force=False,
+            ):
+                wire_candidate = dispatch.wire_candidate
+                handle, measurement = dispatch.take_below_trigger_ownership()
+                dispatch = None
+                ordinary: PreparedProviderHeadroomAdmission | None = None
+                observation: HandleFreeProviderWireObservation | None = None
+                try:
+                    ordinary = PreparedProviderHeadroomAdmission(
+                        handle,
+                        preflight,
+                        prepared_target,
+                    )
+                    observation = HandleFreeProviderWireObservation(
+                        candidate=wire_candidate,
+                        measurement=measurement,
+                    )
+                    return OrdinaryPrecompileDecision(
+                        ordinary_admission=ordinary,
+                        reusable_wire_observation=observation,
+                    )
+                except BaseException:
+                    if observation is None:
+                        measurement.discard_materialization_to_quote()
+                    else:
+                        observation.discard()
+                    if ordinary is None:
+                        handle.close()
+                    else:
+                        ordinary.close()
+                    raise
+            dispatch.discard_wire_materialization_to_quote()
+            dispatch.close()
+            dispatch = None
+            return AutomaticCompactionTriggerCandidate(trigger=trigger)
         except (asyncio.CancelledError, StaleHostWriter):
-            headroom_admission.close()
+            if dispatch is not None:
+                dispatch.close()
             raise
         except BaseException:
-            headroom_admission.close()
+            if dispatch is not None:
+                dispatch.close()
             owner.record_automatic_failure(
                 scope_kind=scope_kind,
                 scope_subagent_task_id=scope_subagent_task_id,
             )
-            return PrecompileCompactionDecision()
+            return None
 
     async def _execute_active(
         self,
@@ -685,15 +941,12 @@ class CompactionCoordinator:
         manual_request: ManualCompactionRequest | None,
         scope_kind: ModelInputScopeKind,
         scope_subagent_task_id: str | None,
-        prepared_source: PreparedPrecompileCompaction | None,
         hook_scope: HookDispatchScopeRef | None,
         session_start_compact_port: SessionStartCompactPort | None,
         session_start_boundary_port: SessionStartCompactBoundaryPort | None,
     ) -> CompactionExecutionResult:
         owner = self._compaction_owner
         if owner is None:
-            if prepared_source is not None:
-                prepared_source.close()
             return CompactionExecutionResult(
                 CompactionOutcome(
                     CompactionDisposition.NOT_NEEDED,
@@ -709,16 +962,12 @@ class CompactionCoordinator:
         ):
             raise RuntimeError("manual compaction belongs to another scope")
         scope_task_id = scope_subagent_task_id
-        attempt_token = (
-            prepared_source.attempt_token
-            if prepared_source is not None
-            else CompactionAttemptToken(
-                self._writer_lease.guard.session_id,
-                turn_id,
-                scope_kind,
-                scope_subagent_task_id,
-                trigger,
-            )
+        attempt_token = CompactionAttemptToken(
+            self._writer_lease.guard.session_id,
+            turn_id,
+            scope_kind,
+            scope_subagent_task_id,
+            trigger,
         )
         try:
             provisional_scope = CompactionScope(
@@ -729,8 +978,6 @@ class CompactionCoordinator:
                 scope_subagent_task_id=scope_task_id,
             )
         except BaseException:
-            if prepared_source is not None:
-                prepared_source.close()
             raise
 
         async def operation() -> CompactionExecutionResult:
@@ -745,7 +992,6 @@ class CompactionCoordinator:
                 stable_command_id=(
                     None if manual_request is None else manual_request.command_id
                 ),
-                prepared_source=prepared_source,
                 attempt_token=attempt_token,
                 pre_compact_dispatched=False,
                 hook_scope=(
@@ -811,9 +1057,6 @@ class CompactionCoordinator:
             )
         else:
             execution = outcome
-        finally:
-            if prepared_source is not None:
-                prepared_source.close()
         outcome = execution.outcome
         if manual_request is not None:
             await owner.settle_manual(manual_request, outcome)
@@ -826,13 +1069,35 @@ class CompactionCoordinator:
             )
         return execution
 
-    def dispatch_crosses_threshold(self, dispatch: PreparedProviderDispatch) -> bool:
+    async def measure_dispatch_wire(
+        self,
+        dispatch: PreparedProviderDispatch,
+        *,
+        deadline: float,
+        reusable_observation: HandleFreeProviderWireObservation | None = None,
+    ) -> PreparedWireMeasurementDecision:
+        return await self._provider_dispatch.measure_prepared_wire_candidate(
+            self._provider_dispatch.wire_candidate_for_dispatch(dispatch),
+            deadline=deadline,
+            reusable_observation=reusable_observation,
+        )
+
+    def wire_decision_crosses_automatic_threshold(
+        self,
+        dispatch: PreparedProviderDispatch,
+        decision: PreparedWireMeasurementDecision,
+    ) -> bool:
         owner = self._compaction_owner
         if owner is None or not owner.policy.automatic_enabled:
             return False
+        if decision.candidate != self._provider_dispatch.wire_candidate_for_dispatch(
+            dispatch
+        ):
+            raise RuntimeError("wire decision belongs to another provider dispatch")
         compiled = dispatch.append_result.compiled_input
-        budget = dispatch.prepared_call.compile_binding.effective_input_budget_tokens
-        if compiled.final_estimate.total_input_tokens >= int(
+        quote = decision.quote
+        budget = quote.effective_input_budget_tokens
+        if quote.final_wire_estimated_input_tokens >= int(
             budget * owner.policy.auto_trigger_ratio
         ):
             return True
@@ -874,14 +1139,21 @@ class CompactionCoordinator:
         scope_kind: ModelInputScopeKind,
         scope_subagent_task_id: str | None,
         maximum_utf8_bytes: int,
+        deadline: float,
     ) -> tuple[
         ContextSourceCandidate | ContextSourceAbsentFact,
         FrozenCompactionRuntimeHandoff | None,
     ]:
-        handoff = await self._tools.freeze_compaction_runtime_handoff(
-            conversation_scope_kind=scope_kind,
-            scope_subagent_task_id=scope_subagent_task_id,
-            maximum_utf8_bytes=maximum_utf8_bytes,
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            raise TimeoutError("compaction runtime handoff deadline expired")
+        handoff = await asyncio.wait_for(
+            self._tools.freeze_compaction_runtime_handoff(
+                conversation_scope_kind=scope_kind,
+                scope_subagent_task_id=scope_subagent_task_id,
+                maximum_utf8_bytes=maximum_utf8_bytes,
+            ),
+            timeout=remaining,
         )
         if handoff is None:
             source = build_compaction_context_source(
@@ -909,16 +1181,12 @@ class CompactionCoordinator:
         post_adoption_branch: CompactionTargetBranch,
         stable_command_id: str | None,
         maximum_retained_tool_groups: int | None = None,
-        prepared_source: PreparedPrecompileCompaction | None = None,
         attempt_token: CompactionAttemptToken | None = None,
         pre_compact_dispatched: bool = False,
         hook_scope: HookDispatchScopeRef | None = None,
         session_start_compact_port: SessionStartCompactPort | None = None,
         session_start_boundary_port: SessionStartCompactBoundaryPort | None = None,
     ) -> CompactionExecutionResult:
-        owner = self._compaction_owner
-        if owner is None:
-            raise RuntimeError("compaction lacks its Host owner")
         if attempt_token is None:
             attempt_token = CompactionAttemptToken(
                 expected_scope.session_id,
@@ -927,41 +1195,83 @@ class CompactionCoordinator:
                 expected_scope.scope_subagent_task_id,
                 trigger,
             )
-        deadline = monotonic() + owner.policy.planning_attempt_seconds
-        if prepared_source is None:
-            dispatch = await self._provider_dispatch.prepare_compaction_source(
+        current_maximum = maximum_retained_tool_groups
+        current_pre_compact_dispatched = pre_compact_dispatched
+        while True:
+            result = await self._execute_compaction_fenced_once(
                 turn_id=turn_id,
                 model_call_index=model_call_index,
                 inherited_memory_use_policy=inherited_memory_use_policy,
-                deadline=deadline,
-                allow_terminal_compaction=(
-                    post_adoption_branch is CompactionTargetBranch.IDLE_BASE_ONLY
+                trigger=trigger,
+                force=force,
+                expected_scope=expected_scope,
+                post_adoption_branch=post_adoption_branch,
+                stable_command_id=stable_command_id,
+                maximum_retained_tool_groups=current_maximum,
+                attempt_token=attempt_token,
+                pre_compact_dispatched=current_pre_compact_dispatched,
+                hook_scope=hook_scope,
+                session_start_compact_port=session_start_compact_port,
+                session_start_boundary_port=session_start_boundary_port,
+            )
+            if not isinstance(result, _CompactionFencedRestart):
+                return result
+            current_maximum = result.maximum_retained_tool_groups
+            current_pre_compact_dispatched = result.pre_compact_dispatched
+
+    async def _execute_compaction_fenced_once(
+        self,
+        *,
+        turn_id: str,
+        model_call_index: int,
+        inherited_memory_use_policy: MemoryUsePolicy,
+        trigger: CompactionTrigger,
+        force: bool,
+        expected_scope: CompactionScope,
+        post_adoption_branch: CompactionTargetBranch,
+        stable_command_id: str | None,
+        maximum_retained_tool_groups: int | None,
+        attempt_token: CompactionAttemptToken,
+        pre_compact_dispatched: bool,
+        hook_scope: HookDispatchScopeRef | None,
+        session_start_compact_port: SessionStartCompactPort | None,
+        session_start_boundary_port: SessionStartCompactBoundaryPort | None,
+    ) -> CompactionExecutionResult | _CompactionFencedRestart:
+        owner = self._compaction_owner
+        if owner is None:
+            raise RuntimeError("compaction lacks its Host owner")
+        deadline = monotonic() + owner.policy.planning_attempt_seconds
+        dispatch = await self._provider_dispatch.prepare_compaction_source(
+            turn_id=turn_id,
+            model_call_index=model_call_index,
+            inherited_memory_use_policy=inherited_memory_use_policy,
+            deadline=deadline,
+            allow_terminal_compaction=(
+                post_adoption_branch is CompactionTargetBranch.IDLE_BASE_ONLY
+            ),
+        )
+        try:
+            compaction_read = await self._io.run(
+                self._input_reader.read_frozen_compaction_cut,
+                dispatch.cut,
+                deadline_monotonic=deadline,
+            )
+            source_quote = dispatch.discard_wire_materialization_to_quote()
+            source_view = freeze_compaction_source_view(
+                canonical_read=compaction_read,
+                compile_binding=dispatch.prepared_call.compile_binding,
+                semantic_projection=dispatch.projection,
+                predecessor_epoch_view=dispatch.planning.predecessor_view,
+                provider_wire_quote=source_quote,
+                producer_wire_api=(
+                    dispatch.prepared_call.call.target.model_profile.provider_profile.wire_api
                 ),
             )
-            try:
-                compaction_read = await self._io.run(
-                    self._input_reader.read_frozen_compaction_cut,
-                    dispatch.handle.cut,
-                    deadline_monotonic=deadline,
-                )
-                source_view = freeze_compaction_source_view(
-                    canonical_read=compaction_read,
-                    compile_binding=dispatch.prepared_call.compile_binding,
-                    semantic_projection=dispatch.projection,
-                    predecessor_epoch_view=dispatch.planning.predecessor_view,
-                )
-            except BaseException:
-                dispatch.handle.close()
-                raise
-        else:
-            if post_adoption_branch is not CompactionTargetBranch.ACTIVE_INSTALLATION:
-                raise ValueError(
-                    "precompile source is only valid for active compaction"
-                )
-            dispatch = prepared_source.dispatch
-            compaction_read = prepared_source.canonical_read
-            source_view = prepared_source.source_view
+        except BaseException:
+            dispatch.close()
+            raise
         dry_dispatch: PreparedProviderDispatch | None = None
+        source_handle_transferred = False
         try:
             expected_statuses = (
                 {"RUNNING"}
@@ -1010,6 +1320,7 @@ class CompactionCoordinator:
                     )
             groups = enumerate_complete_tool_groups(compaction_read)
             semantic = None
+            selected_summary_decision = None
             tail = None
             prefix = None
             recent = None
@@ -1042,23 +1353,25 @@ class CompactionCoordinator:
                 if monotonic() >= deadline:
                     raise TimeoutError("compaction planning deadline expired")
                 try:
-                    candidate_tail, candidate_prefix = freeze_tail_and_prefix(
+                    safe_candidates = enumerate_safe_summary_prefixes(
                         source_view=source_view,
                         complete_tool_groups=groups,
                         retained_group_count=retained_count,
                         source_projection=dispatch.projection.projected_input,
-                        summary_request=summary_request,
                         deadline_monotonic=deadline,
                     )
-                    canonical = (
-                        compaction_read.dispatch_read.compile_snapshot.canonical_input
-                    )
+                except (CompactionPlanningError, ValueError):
+                    continue
+                canonical = (
+                    compaction_read.dispatch_read.compile_snapshot.canonical_input
+                )
+                for candidate_tail, candidate_prefix in safe_candidates:
                     tail_range = freeze_compaction_canonical_range(
                         scope=compaction_read.scope,
                         effective_materialization_lineage_floor=(
                             candidate_tail.source_through_sequence
                         ),
-                        source_through_sequence=(source_view.exact_safe_canonical_head),
+                        source_through_sequence=source_view.exact_safe_canonical_head,
                         ordered_items=canonical.items,
                         closures=canonical.closures,
                         late_outcomes=canonical.late_outcomes,
@@ -1070,44 +1383,18 @@ class CompactionCoordinator:
                     candidate_continuation = freeze_compaction_continuation(
                         source_view=source_view,
                         target_branch=post_adoption_branch,
-                        source_through_sequence=(
-                            candidate_prefix.source_through_sequence
-                        ),
+                        source_through_sequence=candidate_prefix.source_through_sequence,
                     )
                     candidate_active_request = candidate_continuation[1]
                     candidate_recent = select_recent_human_messages(
                         canonical_read=compaction_read,
-                        source_through_sequence=(
-                            candidate_prefix.source_through_sequence
-                        ),
+                        source_through_sequence=candidate_prefix.source_through_sequence,
                         policy=owner.policy,
                         excluded_entry_id=(
                             None
                             if candidate_active_request is None
                             else candidate_active_request.entry_id
                         ),
-                    )
-                    unavoidable_tokens = (
-                        estimate_unavoidable_compaction_successor_tokens(
-                            source_view=source_view,
-                            tail=candidate_tail,
-                            recent_user_messages=candidate_recent,
-                            continuation_mode=candidate_continuation[0],
-                            active_request=candidate_active_request,
-                            deadline_monotonic=deadline,
-                        )
-                    )
-                    validate_compaction_reclaim(
-                        source_tokens=(
-                            source_view.provider_projection.final_estimate.total_input_tokens
-                        ),
-                        successor_tokens=unavoidable_tokens,
-                        hard_input_budget_tokens=(
-                            source_view.normal_compile_binding.effective_input_budget_tokens
-                        ),
-                        policy=owner.policy,
-                        force=force,
-                        enforce_soft_target=True,
                     )
                     candidate_semantic = prepare_compaction_summary_semantic(
                         call=summary_call,
@@ -1119,15 +1406,24 @@ class CompactionCoordinator:
                         ),
                         summary_request=summary_request,
                     )
-                except (CompactionPlanningError, ValueError):
-                    continue
-                semantic = candidate_semantic
-                tail = candidate_tail
-                prefix = candidate_prefix
-                recent = candidate_recent
-                selected_continuation = candidate_continuation
-                selected_retained_count = retained_count
-                break
+                    summary_decision = (
+                        await self._provider_dispatch.measure_prepared_wire_candidate(
+                            candidate_semantic,
+                            deadline=deadline,
+                        )
+                    )
+                    if summary_decision.wire_input_plan is None:
+                        continue
+                    selected_summary_decision = summary_decision
+                    semantic = candidate_semantic
+                    tail = candidate_tail
+                    prefix = candidate_prefix
+                    recent = candidate_recent
+                    selected_continuation = candidate_continuation
+                    selected_retained_count = retained_count
+                    break
+                if semantic is not None:
+                    break
             if (
                 semantic is None
                 or tail is None
@@ -1135,26 +1431,20 @@ class CompactionCoordinator:
                 or recent is None
                 or selected_continuation is None
                 or selected_retained_count is None
+                or selected_summary_decision is None
             ):
                 return CompactionExecutionResult(
                     CompactionOutcome(
-                        CompactionDisposition.NOT_NEEDED,
+                        CompactionDisposition.FAILED,
                         turn_id,
                         None,
                         None,
-                        "CONTEXT_ALREADY_COMPACT",
+                        "NO_EXECUTABLE_SUMMARY_PREFIX",
                     )
                 )
-            replay_hydration = await self._io.run(
-                self._input_reader.hydrate_selected_provider_replays,
-                dispatch_read=compaction_read.dispatch_read,
-                compiled_input=semantic.compiled_input,
-                replay_target=self._model.replay_target_for_resolved_call(summary_call),
-                deadline_monotonic=deadline,
-            )
-            prepared_summary = finalize_compaction_summary_call(
+            prepared_summary = promote_compaction_summary_call(
                 semantic,
-                replay_hydration=replay_hydration,
+                decision=selected_summary_decision,
             )
             owner.advance_phase(
                 scope_kind=expected_scope.scope_kind,
@@ -1174,13 +1464,24 @@ class CompactionCoordinator:
                     scope_subagent_task_id=expected_scope.scope_subagent_task_id,
                     phase=CompactionAttemptPhase.REPAIRING,
                 )
+                repair_deadline = monotonic() + owner.policy.planning_attempt_seconds
                 repair_semantic = prepare_compaction_summary_repair_semantic(
                     semantic,
                     tool_calls=raw.tool_calls,
                 )
-                repair = finalize_compaction_summary_call(
+                repair_decision = (
+                    await self._provider_dispatch.measure_prepared_wire_candidate(
+                        repair_semantic,
+                        deadline=repair_deadline,
+                    )
+                )
+                if repair_decision.wire_input_plan is None:
+                    raise CompactionPlanningError(
+                        "summary repair exceeds final-wire admission"
+                    )
+                repair = promote_compaction_summary_call(
                     repair_semantic,
-                    replay_hydration=replay_hydration,
+                    decision=repair_decision,
                     predecessor_summary_wire_plan=(prepared_summary.wire_input_plan),
                 )
                 raw = await repair.open_once()
@@ -1188,6 +1489,8 @@ class CompactionCoordinator:
                     raise CompactionPlanningError(
                         "summary model attempted tools after one repair"
                     )
+                del repair, repair_decision, repair_semantic
+            del prepared_summary, selected_summary_decision, semantic
             summary = freeze_compaction_summary_output(
                 raw.text,
                 maximum_utf8_bytes=(MAXIMUM_COMPLETED_ASSISTANT_MESSAGE_UTF8_BYTES),
@@ -1197,10 +1500,6 @@ class CompactionCoordinator:
                 scope_subagent_task_id=expected_scope.scope_subagent_task_id,
                 phase=CompactionAttemptPhase.VALIDATED,
             )
-            # Successor capability/source planning is a new bounded operation;
-            # it receives one fresh absolute deadline that is then shared by
-            # dry assembly and the post-FULL exact re-read/install proof.
-            successor_deadline = monotonic() + owner.policy.planning_attempt_seconds
             carrier = build_compaction_snapshot_carrier(
                 summary=summary,
                 recent_user_messages=tuple(item.text for item in recent),
@@ -1213,6 +1512,12 @@ class CompactionCoordinator:
                 media_type=CONTEXT_SNAPSHOT_MEDIA_TYPE,
                 codec=CONTEXT_SNAPSHOT_CODEC,
             )
+            # Blob publication owns its independent foreground watchdog and
+            # must not consume any of the bounded successor-planning slice.
+            # Only after publication has settled do synthetic-read assembly,
+            # current capability capture, replay hydration and the dry quote
+            # begin under one fresh deadline.
+            successor_deadline = monotonic() + owner.policy.planning_attempt_seconds
             canonical = compaction_read.dispatch_read.compile_snapshot.canonical_input
             boundary_range = freeze_compaction_canonical_range(
                 scope=compaction_read.scope,
@@ -1299,6 +1604,7 @@ class CompactionCoordinator:
                 scope_kind=expected_scope.scope_kind,
                 scope_subagent_task_id=(expected_scope.scope_subagent_task_id),
                 maximum_utf8_bytes=(owner.policy.maximum_runtime_handoff_utf8_bytes),
+                deadline=successor_deadline,
             )
             owner.advance_phase(
                 scope_kind=expected_scope.scope_kind,
@@ -1323,9 +1629,8 @@ class CompactionCoordinator:
                     raise CompactionReclaimUnavailable(
                         "compaction candidate does not reclaim canonical input"
                     )
-                source_estimate = (
-                    source_view.provider_projection.final_estimate.total_input_tokens
-                )
+                source_handle = dispatch.take_handle()
+                source_handle_transferred = True
                 dry_dispatch = await self._provider_dispatch.prepare(
                     turn_id=turn_id,
                     model_call_index=model_call_index,
@@ -1336,20 +1641,46 @@ class CompactionCoordinator:
                     expected_source_read=compaction_read.dispatch_read,
                     force_empty_capability_predecessor=True,
                     cold_seed_override=seed,
-                    existing_handle=dispatch.handle,
+                    existing_handle=source_handle,
                     compaction_source_replacements=(runtime_source,),
                     compaction_retained_skill_read=compaction_read,
                     include_hook_context=False,
                 )
-                candidate_estimate = dry_dispatch.append_result.compiled_input.final_estimate.total_input_tokens
-                target_budget = dry_dispatch.prepared_call.compile_binding.effective_input_budget_tokens
-                validate_compaction_reclaim(
-                    source_tokens=source_estimate,
-                    successor_tokens=candidate_estimate,
-                    hard_input_budget_tokens=target_budget,
+                dry_wire_candidate = (
+                    self._provider_dispatch.wire_candidate_for_dispatch(dry_dispatch)
+                )
+                dry_wire_decision = (
+                    await self._provider_dispatch.measure_prepared_wire_candidate(
+                        dry_wire_candidate,
+                        deadline=successor_deadline,
+                    )
+                )
+                validate_compaction_wire_transition(
+                    source_view=source_view,
+                    source_candidate=dispatch.wire_candidate,
+                    successor_wire=dry_wire_decision,
                     policy=owner.policy,
                     force=force,
                     enforce_soft_target=True,
+                    phase="PRE_FULL",
+                )
+                # The dry candidate consumes only the quote proof.  It never
+                # gains continuity/install authority, so release the admitted
+                # plan's materialization before canonical settlement.
+                del dry_wire_decision
+            except CompactionWireTransitionDrift:
+                # The summary and dry successor were planned from authorities
+                # that no longer exact-join.  Discard both and recapture a fresh
+                # source without changing the retained-tail search constraint.
+                if dry_dispatch is not None:
+                    dry_dispatch.close()
+                    dry_dispatch = None
+                elif not source_handle_transferred:
+                    dispatch.close()
+                    source_handle_transferred = True
+                return _CompactionFencedRestart(
+                    maximum_retained_tool_groups=maximum_retained_tool_groups,
+                    pre_compact_dispatched=pre_compact_dispatched,
                 )
             except (
                 CompactionPlanningError,
@@ -1368,25 +1699,14 @@ class CompactionCoordinator:
                 # tool group. Physical summary calls are never replayed and no
                 # tool is dispatched by this branch.
                 if dry_dispatch is not None:
-                    dry_dispatch.handle.close()
-                    dry_dispatch.close_surface_borrow()
+                    dry_dispatch.close()
                     dry_dispatch = None
-                dispatch.handle.close()
-                return await self._execute_compaction_fenced(
-                    turn_id=turn_id,
-                    model_call_index=model_call_index,
-                    inherited_memory_use_policy=inherited_memory_use_policy,
-                    trigger=trigger,
-                    force=force,
-                    expected_scope=expected_scope,
-                    post_adoption_branch=post_adoption_branch,
-                    stable_command_id=stable_command_id,
+                elif not source_handle_transferred:
+                    dispatch.close()
+                    source_handle_transferred = True
+                return _CompactionFencedRestart(
                     maximum_retained_tool_groups=(selected_retained_count - 1),
-                    attempt_token=attempt_token,
                     pre_compact_dispatched=pre_compact_dispatched,
-                    hook_scope=hook_scope,
-                    session_start_compact_port=session_start_compact_port,
-                    session_start_boundary_port=session_start_boundary_port,
                 )
             owner.advance_phase(
                 scope_kind=expected_scope.scope_kind,
@@ -1395,49 +1715,56 @@ class CompactionCoordinator:
             )
             settlement_dispatch = dry_dispatch
             dry_dispatch = None
-            settlement = owner.start_settlement(
-                self._complete_compaction_settlement(
-                    turn_id=turn_id,
-                    model_call_index=model_call_index,
-                    inherited_memory_use_policy=inherited_memory_use_policy,
-                    force=force,
-                    expected_scope=expected_scope,
-                    target_branch=post_adoption_branch,
-                    successor_deadline=successor_deadline,
-                    candidate=candidate,
-                    preconditions=preconditions,
-                    dry_dispatch=settlement_dispatch,
-                    source_tokens=(
-                        source_view.provider_projection.final_estimate.total_input_tokens
-                    ),
-                    protected_tail_selection_fingerprint=(
-                        tail.protected_tail_selection_fingerprint
-                    ),
-                    compaction_read=compaction_read,
-                    trigger=trigger,
-                    attempt_token=attempt_token,
-                    hook_scope=hook_scope,
-                    hook_model_id=dispatch.prepared_call.call.target.fact.model_id,
-                    hook_cwd=(
-                        str(self._tools.snapshot_terminal_cwd())
-                        if self._hook_dispatcher is not None
-                        else ""
-                    ),
-                    session_start_compact_port=session_start_compact_port,
-                    session_start_boundary_port=session_start_boundary_port,
+            settlement_operation = self._complete_compaction_settlement(
+                turn_id=turn_id,
+                model_call_index=model_call_index,
+                inherited_memory_use_policy=inherited_memory_use_policy,
+                force=force,
+                expected_scope=expected_scope,
+                target_branch=post_adoption_branch,
+                candidate=candidate,
+                preconditions=preconditions,
+                dry_dispatch=settlement_dispatch,
+                source_view=source_view,
+                source_wire_candidate=dispatch.wire_candidate,
+                protected_tail_selection_fingerprint=(
+                    tail.protected_tail_selection_fingerprint
                 ),
-                name=f"kernel-compaction-settlement:{candidate.snapshot.snapshot_id}",
+                compaction_read=compaction_read,
+                trigger=trigger,
+                attempt_token=attempt_token,
+                hook_scope=hook_scope,
+                hook_model_id=dispatch.prepared_call.call.target.fact.model_id,
+                hook_cwd=(
+                    str(self._tools.snapshot_terminal_cwd())
+                    if self._hook_dispatcher is not None
+                    else ""
+                ),
+                session_start_compact_port=session_start_compact_port,
+                session_start_boundary_port=session_start_boundary_port,
             )
+            try:
+                settlement = owner.start_settlement(
+                    settlement_operation,
+                    name=(
+                        f"kernel-compaction-settlement:{candidate.snapshot.snapshot_id}"
+                    ),
+                )
+            except BaseException:
+                settlement_operation.close()
+                if settlement_dispatch is not None:
+                    settlement_dispatch.close()
+                raise
             try:
                 return await asyncio.shield(settlement)
             except asyncio.CancelledError:
                 await settlement
                 raise
         finally:
-            dispatch.handle.close()
+            if not source_handle_transferred:
+                dispatch.close()
             if dry_dispatch is not None:
-                dry_dispatch.handle.close()
-                dry_dispatch.close_surface_borrow()
+                dry_dispatch.close()
 
     async def _complete_compaction_settlement(
         self,
@@ -1448,11 +1775,11 @@ class CompactionCoordinator:
         force: bool,
         expected_scope: CompactionScope,
         target_branch: CompactionTargetBranch,
-        successor_deadline: float,
         candidate: PreparedCompactionCanonicalAdoption,
         preconditions: CompactionCanonicalWritePreconditions,
         dry_dispatch: PreparedProviderDispatch | None,
-        source_tokens: int,
+        source_view: FrozenCompactionSourceView,
+        source_wire_candidate: PreparedProviderWireCandidate,
         protected_tail_selection_fingerprint: str,
         compaction_read: FrozenCompactionCanonicalRead,
         trigger: CompactionTrigger,
@@ -1482,6 +1809,7 @@ class CompactionCoordinator:
             )
             if confirmation.kind is not CompactionConfirmationKind.FULL:
                 raise ConversationKernelConflict("compaction adoption did not settle")
+            post_hook_deadline = monotonic() + owner.policy.planning_attempt_seconds
             adopted_outcome = CompactionOutcome(
                 CompactionDisposition.COMPACTED,
                 turn_id,
@@ -1510,16 +1838,17 @@ class CompactionCoordinator:
                 candidate=candidate,
                 turn_id=turn_id,
                 trigger=trigger,
-                deadline=successor_deadline,
+                deadline=post_hook_deadline,
             )
             if target_branch is CompactionTargetBranch.ACTIVE_INSTALLATION:
                 if dry_dispatch is None:
                     raise RuntimeError("active compaction lost its dry assembly")
+                base_deadline = monotonic() + owner.policy.planning_attempt_seconds
                 status = await self._io.run(
                     self._repository.read_turn_status,
                     session_id=expected_scope.session_id,
                     turn_id=turn_id,
-                    deadline_monotonic=successor_deadline,
+                    deadline_monotonic=base_deadline,
                 )
                 if status is not TurnStatus.RUNNING:
                     self._continuity.discard_scope(continuity_scope)
@@ -1554,81 +1883,127 @@ class CompactionCoordinator:
                             post_reason or "PostCompact Hook blocked continuation"
                         ),
                     )
-                rotated = await self._io.run(
-                    self._safe_point.rotate_provider_input,
-                    dry_dispatch.handle,
-                    turn_id=turn_id,
-                    deadline_monotonic=successor_deadline,
-                )
-                dry_dispatch.close_surface_borrow()
+                rotation_handle = dry_dispatch.take_handle_for_rotation()
                 dry_dispatch = None
-                actual_read = await self._provider_dispatch.read_dispatch_read(
-                    rotated.cut, deadline=successor_deadline
-                )
-                actual_facts = actual_read.compile_snapshot
-                actual_identity = actual_facts.canonical_input.identity
-                actual_binding = actual_facts.context_binding_fact
-                if (
-                    actual_identity.turn_id != turn_id
-                    or actual_identity.conversation_scope_kind
-                    is not expected_scope.scope_kind
-                    or actual_identity.scope_subagent_task_id
-                    != expected_scope.scope_subagent_task_id
-                    or actual_binding.binding_revision_id
-                    != candidate.binding.binding_revision_id
-                    or actual_binding.context_snapshot_id
-                    != candidate.snapshot.snapshot_id
-                ):
-                    rotated.close()
-                    raise ConversationKernelConflict(
-                        "post-adoption cut does not name the adopted compaction winner"
+                rotation_result: list[PreparedProviderInputHandle] = []
+
+                def rotate_and_capture(
+                    handle: PreparedProviderInputHandle,
+                    *,
+                    turn_id: str,
+                    deadline_monotonic: float,
+                ) -> PreparedProviderInputHandle:
+                    successor = self._safe_point.rotate_provider_input(
+                        handle,
+                        turn_id=turn_id,
+                        deadline_monotonic=deadline_monotonic,
                     )
-                (
-                    current_runtime_source,
-                    _current_runtime_handoff,
-                ) = await self._freeze_compaction_runtime_source(
-                    scope_kind=expected_scope.scope_kind,
-                    scope_subagent_task_id=(expected_scope.scope_subagent_task_id),
-                    maximum_utf8_bytes=(
-                        owner.policy.maximum_runtime_handoff_utf8_bytes
-                    ),
-                )
-                prepared_base = await self._provider_dispatch.prepare(
-                    turn_id=turn_id,
-                    model_call_index=model_call_index,
-                    inherited_memory_use_policy=inherited_memory_use_policy,
-                    deadline=successor_deadline,
-                    allow_steers=False,
-                    canonical_read_override=actual_read,
-                    expected_source_read=actual_read,
-                    force_empty_capability_predecessor=True,
-                    cold_seed_override=CompactionContinuationSeed(
-                        dispatch_read=actual_read,
-                        binding_rewrite_identity=(
-                            candidate.binding.binding_revision_id
+                    rotation_result.append(successor)
+                    return successor
+
+                try:
+                    rotated = await self._io.run(
+                        rotate_and_capture,
+                        rotation_handle,
+                        turn_id=turn_id,
+                        deadline_monotonic=base_deadline,
+                    )
+                except BaseException:
+                    # KernelSessionIO drains a late/cancelled physical worker
+                    # before raising.  Recover whichever exact handle the
+                    # worker left active so ownership is never lost between
+                    # the consumed dry dispatch and its successor.
+                    if rotation_result:
+                        rotation_result[0].close()
+                    else:
+                        rotation_handle.close()
+                    raise
+                rotated_owner: PreparedProviderInputHandle | None = rotated
+                try:
+                    actual_read = await self._provider_dispatch.read_dispatch_read(
+                        rotated_owner.cut, deadline=base_deadline
+                    )
+                    actual_facts = actual_read.compile_snapshot
+                    actual_identity = actual_facts.canonical_input.identity
+                    actual_binding = actual_facts.context_binding_fact
+                    if (
+                        actual_identity.turn_id != turn_id
+                        or actual_identity.conversation_scope_kind
+                        is not expected_scope.scope_kind
+                        or actual_identity.scope_subagent_task_id
+                        != expected_scope.scope_subagent_task_id
+                        or actual_binding.binding_revision_id
+                        != candidate.binding.binding_revision_id
+                        or actual_binding.context_snapshot_id
+                        != candidate.snapshot.snapshot_id
+                    ):
+                        raise ConversationKernelConflict(
+                            "post-adoption cut does not name the adopted compaction winner"
+                        )
+                    (
+                        current_runtime_source,
+                        _current_runtime_handoff,
+                    ) = await self._freeze_compaction_runtime_source(
+                        scope_kind=expected_scope.scope_kind,
+                        scope_subagent_task_id=(expected_scope.scope_subagent_task_id),
+                        maximum_utf8_bytes=(
+                            owner.policy.maximum_runtime_handoff_utf8_bytes
                         ),
-                        protected_tail_selection_fingerprint=(
-                            protected_tail_selection_fingerprint
+                        deadline=base_deadline,
+                    )
+                    prepare_handle = rotated_owner
+                    rotated_owner = None
+                    prepared_base = await self._provider_dispatch.prepare(
+                        turn_id=turn_id,
+                        model_call_index=model_call_index,
+                        inherited_memory_use_policy=inherited_memory_use_policy,
+                        deadline=base_deadline,
+                        allow_steers=False,
+                        canonical_read_override=actual_read,
+                        expected_source_read=actual_read,
+                        force_empty_capability_predecessor=True,
+                        cold_seed_override=CompactionContinuationSeed(
+                            dispatch_read=actual_read,
+                            binding_rewrite_identity=(
+                                candidate.binding.binding_revision_id
+                            ),
+                            protected_tail_selection_fingerprint=(
+                                protected_tail_selection_fingerprint
+                            ),
                         ),
-                    ),
-                    existing_handle=rotated,
-                    compaction_source_replacements=(current_runtime_source,),
-                    compaction_retained_skill_read=compaction_read,
-                    include_hook_context=False,
-                )
+                        existing_handle=prepare_handle,
+                        compaction_source_replacements=(current_runtime_source,),
+                        compaction_retained_skill_read=compaction_read,
+                        include_hook_context=False,
+                    )
+                finally:
+                    if rotated_owner is not None:
+                        rotated_owner.close()
                 if not isinstance(prepared_base, PreparedProviderDispatch):
                     raise RuntimeError("final compaction base is not installable")
                 dry_dispatch = prepared_base
-                current_estimate = dry_dispatch.append_result.compiled_input.final_estimate.total_input_tokens
-                current_budget = dry_dispatch.prepared_call.compile_binding.effective_input_budget_tokens
-                validate_compaction_reclaim(
-                    source_tokens=source_tokens,
-                    successor_tokens=current_estimate,
-                    hard_input_budget_tokens=current_budget,
+                base_wire_candidate = (
+                    self._provider_dispatch.wire_candidate_for_dispatch(dry_dispatch)
+                )
+                base_wire_decision = (
+                    await self._provider_dispatch.measure_prepared_wire_candidate(
+                        base_wire_candidate,
+                        deadline=base_deadline,
+                    )
+                )
+                validate_compaction_wire_transition(
+                    source_view=source_view,
+                    source_candidate=source_wire_candidate,
+                    successor_wire=base_wire_decision,
                     policy=owner.policy,
                     force=force,
                     enforce_soft_target=True,
+                    phase="POST_FULL",
                 )
+                if base_wire_decision.wire_input_plan is None:
+                    raise CompactionPlanningError(
+                        "post-adoption base lacks executable final-wire admission"
+                    )
                 compact_start: PreparedCompactSessionStart | None = None
                 if expected_scope.scope_kind is ModelInputScopeKind.ROOT:
                     if session_start_compact_port is not None:
@@ -1647,7 +2022,7 @@ class CompactionCoordinator:
                                 permission_snapshot=(
                                     dry_dispatch.canonical_facts.run_permission_snapshot
                                 ),
-                                deadline_monotonic=successor_deadline,
+                                deadline_monotonic=base_deadline,
                             )
                         )
                         if not compact_start.proceed:
@@ -1674,41 +2049,95 @@ class CompactionCoordinator:
                 pending_start = (
                     None if compact_start is None else compact_start.reservation
                 )
+                selected_wire_decision = base_wire_decision
+                hook_sibling = None
+                hook_decision = None
+                hook_probe_completed = False
                 try:
+                    hook_deadline = monotonic() + owner.policy.planning_attempt_seconds
                     try:
                         hook_sibling = (
                             await self._provider_dispatch.prepare_hook_context_sibling(
                                 dry_dispatch,
                                 model_call_index=model_call_index,
-                                deadline=successor_deadline,
+                                deadline=hook_deadline,
                             )
                         )
+                        if hook_sibling is not None:
+                            hook_decision = await self._provider_dispatch.measure_prepared_wire_candidate(
+                                hook_sibling.candidate,
+                                deadline=hook_deadline,
+                            )
+                            validate_compaction_wire_transition(
+                                source_view=source_view,
+                                source_candidate=source_wire_candidate,
+                                successor_wire=hook_decision,
+                                policy=owner.policy,
+                                force=force,
+                                enforce_soft_target=True,
+                                phase="POST_FULL",
+                            )
+                            if hook_decision.wire_input_plan is None:
+                                raise CompactionPlanningError(
+                                    "Hook sibling lacks executable final-wire admission"
+                                )
+                    except CompactionWireTransitionDrift:
+                        # Target/cut/profile drift invalidates both siblings; it
+                        # is not an optional Hook-only failure.
+                        raise
                     except (
+                        CompactionPlanningError,
                         StructuredModelInputCompileError,
                         TimeoutError,
                         ValueError,
                     ):
+                        if hook_sibling is not None:
+                            hook_sibling.retire()
                         hook_sibling = None
-                    if hook_sibling is not None:
-                        dry_dispatch = hook_sibling
+                        hook_decision = None
+                    hook_probe_completed = True
                 finally:
+                    if (
+                        not hook_probe_completed
+                        and hook_sibling is not None
+                        and hook_sibling.owns_reservation
+                    ):
+                        hook_sibling.retire()
                     if pending_start is not None:
                         pending_start.retire()
-                try:
-                    installed_open = (
-                        await self._provider_dispatch.install_provider_open(
-                            dispatch=dry_dispatch,
-                            turn_id=turn_id,
-                            model_call_index=model_call_index,
-                            deadline=successor_deadline,
+                if hook_sibling is not None:
+                    assert hook_decision is not None
+                    base_dispatch = dry_dispatch
+                    try:
+                        selected_dispatch = (
+                            self._provider_dispatch.bind_selected_provider_dispatch(
+                                base=base_dispatch,
+                                sibling=hook_sibling,
+                            )
                         )
+                    except BaseException:
+                        if hook_sibling.owns_reservation:
+                            hook_sibling.retire()
+                        if not base_dispatch.owns_execution_authority:
+                            dry_dispatch = None
+                        raise
+                    dry_dispatch = selected_dispatch
+                    selected_wire_decision = hook_decision
+                    del base_wire_decision
+                install_deadline = monotonic() + owner.policy.planning_attempt_seconds
+                prepared_wire = (
+                    self._provider_dispatch.bind_prepared_executable_wire_input(
+                        owner_dispatch=dry_dispatch,
+                        decision=selected_wire_decision,
+                        deadline=install_deadline,
                     )
-                finally:
-                    if dry_dispatch.hook_context_reservation is not None:
-                        dry_dispatch.hook_context_reservation.retire()
-                dry_dispatch = replace(
-                    dry_dispatch,
-                    installed_provider_open=installed_open,
+                )
+                await self._provider_dispatch.install_provider_open(
+                    dispatch=dry_dispatch,
+                    prepared_wire=prepared_wire,
+                    turn_id=turn_id,
+                    model_call_index=model_call_index,
+                    deadline=install_deadline,
                 )
                 successor_dispatch = dry_dispatch
                 dry_dispatch = None
@@ -1748,8 +2177,7 @@ class CompactionCoordinator:
             raise _PostAdoptionCompactionFailure(adopted_outcome, error) from error
         finally:
             if dry_dispatch is not None:
-                dry_dispatch.handle.close()
-                dry_dispatch.close_surface_borrow()
+                dry_dispatch.close()
 
     async def compact_idle_turn(
         self,
@@ -1805,8 +2233,7 @@ class CompactionCoordinator:
                 operation=operation,
             )
             if execution.successor_dispatch is not None:
-                execution.successor_dispatch.handle.close()
-                execution.successor_dispatch.close_surface_borrow()
+                execution.successor_dispatch.close()
                 raise RuntimeError("idle compaction produced an active successor")
             return execution.outcome
         except _PostAdoptionCompactionFailure as failure:
@@ -1873,4 +2300,10 @@ class CompactionCoordinator:
             await asyncio.sleep(0)
 
 
-__all__ = ["CompactionCoordinator", "CompactionExecutionResult"]
+__all__ = [
+    "CompactionCoordinator",
+    "CompactionExecutionResult",
+    "CompactionWireTransitionDrift",
+    "ValidatedCompactionWireTransition",
+    "validate_compaction_wire_transition",
+]

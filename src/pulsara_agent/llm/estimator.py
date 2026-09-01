@@ -56,6 +56,15 @@ class TokenEstimator(Protocol):
 
     def estimate_json(self, value: object) -> int: ...
 
+    def estimate_wire_json_component(self, value: object) -> int: ...
+
+    def estimate_final_wire_json_components(
+        self,
+        *,
+        fixed_context: object,
+        ordered_input_items: tuple[object, ...],
+    ) -> int: ...
+
     def estimate_tool_spec(self, tool: ToolSpec) -> int: ...
 
     def estimate_message(self, message: LLMMessage) -> int: ...
@@ -104,6 +113,10 @@ class PulsaraHeuristicTokenEstimatorV1:
                 "arguments",
             ],
             "breakdown": "per_message_includes_message_and_tool_call_framing",
+            "wire_component_traversal": (
+                "request_envelope+canonical_fixed_context_json+"
+                "sum(message_framing+canonical_ordered_item_json)"
+            ),
         }
         self.fact = TokenEstimatorFact(
             estimator_id="pulsara_heuristic",
@@ -117,6 +130,38 @@ class PulsaraHeuristicTokenEstimatorV1:
     def estimate_json(self, value: object) -> int:
         rendered = canonical_json_bytes(value).decode("utf-8")
         return 0 if rendered == "" else _ceil_div(len(rendered), JSON_CHARS_PER_TOKEN)
+
+    def estimate_wire_json_component(self, value: object) -> int:
+        """Estimate one already-lowered ordered provider input item.
+
+        This is deliberately a wire-object traversal.  It does not recover an
+        ``LLMMessage`` or consult the compiler's per-message estimate.
+        """
+
+        return MESSAGE_FRAMING_TOKENS + self.estimate_json(value)
+
+    def estimate_final_wire_json_components(
+        self,
+        *,
+        fixed_context: object,
+        ordered_input_items: tuple[object, ...],
+    ) -> int:
+        """Estimate one adapter-owned final context projection additively.
+
+        ``fixed_context`` is the exact adapter projection with its ordered
+        input array empty; it therefore owns root placement, native tools,
+        profile defaults and container framing.  Every final ordered item is
+        then traversed with the same local JSON primitive and message framing.
+        The additive seam makes durable replay replacement arithmetic exact.
+        """
+
+        return (
+            REQUEST_ENVELOPE_TOKENS
+            + self.estimate_json(fixed_context)
+            + sum(
+                self.estimate_wire_json_component(item) for item in ordered_input_items
+            )
+        )
 
     def estimate_tool_spec(self, tool: ToolSpec) -> int:
         return TOOL_SPEC_FRAMING_TOKENS + self.estimate_json(
@@ -197,10 +242,7 @@ class PulsaraHeuristicTokenEstimatorV1:
             tool_tokens=tool_tokens,
             envelope_tokens=REQUEST_ENVELOPE_TOKENS,
             total_input_tokens=(
-                system_tokens
-                + message_tokens
-                + tool_tokens
-                + REQUEST_ENVELOPE_TOKENS
+                system_tokens + message_tokens + tool_tokens + REQUEST_ENVELOPE_TOKENS
             ),
         )
 

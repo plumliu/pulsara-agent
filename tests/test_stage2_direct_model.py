@@ -24,13 +24,17 @@ from pulsara_agent.conversation_kernel.provider_dispatch import (
 from pulsara_agent.llm.adapters.openai.chat_completions import (
     OpenAIChatCompletionsTransport,
     build_chat_completions_payload,
+    project_chat_context_bearing_payload_fields,
 )
 from pulsara_agent.llm.adapters.openai.responses import (
     OpenAIResponsesTransport,
     build_responses_payload,
+    project_responses_context_bearing_payload_fields,
 )
 from pulsara_agent.llm.adapters.openai.client import OpenAITransportTimeoutPolicy
 from pulsara_agent.llm.input import LLMMessage, LLMToolCall
+from pulsara_agent.llm.provider import ProviderProfile
+from pulsara_agent.llm.request import MAXIMUM_PROVIDER_WIRE_INPUT_BYTES
 from pulsara_agent.llm.retry import LLMRetryConfig
 from pulsara_agent.model_input.compiler import StructuredModelInputCompiler
 from pulsara_agent.model_input.continuity import (
@@ -62,7 +66,11 @@ from pulsara_agent.ports.provider_stream import (
 )
 from pulsara_agent.primitives.model_call import ModelCallPurpose
 from pulsara_agent.process_api_key_boundary import ProcessApiKeyBoundary
-from pulsara_agent.primitives.context import context_fingerprint
+from pulsara_agent.primitives.context import (
+    canonical_json_bytes,
+    context_fingerprint,
+    thaw_json,
+)
 from tests.support.model_config import test_llm_config
 from tests.support.round3 import (
     StaticContextSourceCollector,
@@ -88,7 +96,9 @@ def test_round5_foreground_model_rejects_a_total_transport_timeout() -> None:
         )
 
 
-def test_foreground_target_uses_resolved_model_input_budget_without_implicit_128k_cap() -> None:
+def test_foreground_target_uses_resolved_model_input_budget_without_implicit_128k_cap() -> (
+    None
+):
     port = DirectKernelModelPort(
         api_key_boundary=ProcessApiKeyBoundary(),
         config=test_llm_config(
@@ -96,7 +106,7 @@ def test_foreground_target_uses_resolved_model_input_budget_without_implicit_128
             base_url="https://example.invalid/v1",
             pro_model="test-pro",
             flash_model="test-flash",
-        )
+        ),
     )
     prepared = port.prepare_target(
         KernelModelTargetPreparationRequest(
@@ -358,7 +368,7 @@ def _prepared_execution(
             maximum_input_tokens=maximum_input_tokens,
             maximum_output_tokens=16_384,
             tool_surface=surface,
-        )
+        ),
     )
     identity = CanonicalModelInputIdentity(
         session_id=session_id,
@@ -432,6 +442,7 @@ def _port(
     *,
     usage_observer=None,
     api: str = "openai_chat_completions",
+    provider_profile: ProviderProfile | None = None,
 ) -> DirectKernelModelPort:
     return DirectKernelModelPort(
         api_key_boundary=ProcessApiKeyBoundary(),
@@ -441,6 +452,7 @@ def _port(
             pro_model="test-pro",
             flash_model="test-flash",
             api=api,
+            provider_profile=provider_profile,
         ),
         usage_observer=usage_observer,
     )
@@ -559,13 +571,187 @@ def test_round5b_adapter_encodes_explicit_summary_tool_choice_auto(
         call=request.prepared_call.call,
         context=execution.final_context,
     )
+    summary_plan = port.freeze_wire_measurement(
+        call=request.prepared_call.call,
+        compile_binding=request.prepared_call.compile_binding,
+        native_projection_set=request.prepared_call.native_projection_set,
+        semantic_input=request.compiled_input,
+        replay_hydration=None,
+        tool_choice="auto",
+    ).prepare_executable_plan()
     summary_payload = payload_builder(
         call=request.prepared_call.call,
-        context=replace(execution.final_context, tool_choice="auto"),
+        context=replace(
+            execution.final_context,
+            provider_wire_input_plan=summary_plan,
+            tool_choice="auto",
+        ),
     )
 
     assert "tool_choice" not in ordinary_payload
     assert summary_payload["tool_choice"] == "auto"
+    request.surface_borrow.close()
+
+
+@pytest.mark.parametrize(
+    ("api", "payload_builder", "payload_projection"),
+    (
+        (
+            "openai_chat_completions",
+            build_chat_completions_payload,
+            project_chat_context_bearing_payload_fields,
+        ),
+        (
+            "openai_responses",
+            build_responses_payload,
+            project_responses_context_bearing_payload_fields,
+        ),
+    ),
+)
+def test_final_wire_measurement_is_the_exact_adapter_payload_projection(
+    api,
+    payload_builder,
+    payload_projection,
+) -> None:
+    port = _port(api=api)
+    request, _tool_port = _prepared_execution(port)
+    prepared = request.prepared_call
+    measurement = port.freeze_wire_measurement(
+        call=prepared.call,
+        compile_binding=prepared.compile_binding,
+        native_projection_set=prepared.native_projection_set,
+        semantic_input=request.compiled_input,
+        replay_hydration=None,
+    )
+    quote = measurement.quote
+
+    assert quote == request.wire_input_plan.quote
+    assert quote.replaced_generic_wire_estimated_tokens == 0
+    assert quote.replay_wire_estimated_tokens == 0
+    assert (
+        quote.final_wire_estimated_input_tokens
+        == quote.generic_wire_estimated_input_tokens
+    )
+    plan = measurement.prepare_executable_plan()
+    projection = thaw_json(plan.materialization.context_bearing_projection)
+    assert isinstance(projection, dict)
+    assert quote.final_wire_utf8_bytes == len(canonical_json_bytes(projection))
+
+    owner, candidate = _continuity_candidate(request)
+    execution = port.preflight_execution(
+        request,
+        append_candidate=candidate,
+        install_authority=owner.install_authority,
+    )
+    payload = payload_builder(
+        call=prepared.call,
+        context=replace(execution.final_context, provider_wire_input_plan=plan),
+    )
+    assert payload_projection(payload) == projection
+    with pytest.raises(RuntimeError, match="already consumed"):
+        measurement.discard_materialization_to_quote()
+    request.surface_borrow.close()
+
+
+@pytest.mark.parametrize(
+    ("api", "payload_builder", "payload_projection"),
+    (
+        (
+            "openai_chat_completions",
+            build_chat_completions_payload,
+            project_chat_context_bearing_payload_fields,
+        ),
+        (
+            "openai_responses",
+            build_responses_payload,
+            project_responses_context_bearing_payload_fields,
+        ),
+    ),
+)
+def test_final_wire_projection_measures_sdk_merged_extra_body(
+    api,
+    payload_builder,
+    payload_projection,
+) -> None:
+    thinking = {"type": "enabled", "budget_tokens": 4096}
+    port = _port(
+        api=api,
+        provider_profile=ProviderProfile(
+            id="test:extra-body",
+            wire_api=api,
+            request_extra_body={"thinking": thinking},
+        ),
+    )
+    request, _tool_port = _prepared_execution(port)
+    plan = request.wire_input_plan
+    projection = thaw_json(plan.materialization.context_bearing_projection)
+    assert isinstance(projection, dict)
+    assert projection["thinking"] == thinking
+    assert "extra_body" not in projection
+    assert plan.quote.final_wire_utf8_bytes == len(canonical_json_bytes(projection))
+
+    owner, candidate = _continuity_candidate(request)
+    execution = port.preflight_execution(
+        request,
+        append_candidate=candidate,
+        install_authority=owner.install_authority,
+    )
+    payload = payload_builder(
+        call=request.prepared_call.call,
+        context=execution.final_context,
+    )
+    assert payload["extra_body"] == {"thinking": thinking}
+    assert "thinking" not in payload
+    assert payload_projection(payload) == projection
+    request.surface_borrow.close()
+
+
+@pytest.mark.parametrize("api", ("openai_chat_completions", "openai_responses"))
+def test_final_wire_quote_is_one_shot_without_creating_an_executable_plan(
+    api: str,
+) -> None:
+    port = _port(api=api)
+    request, _tool_port = _prepared_execution(port)
+    prepared = request.prepared_call
+    measurement = port.freeze_wire_measurement(
+        call=prepared.call,
+        compile_binding=prepared.compile_binding,
+        native_projection_set=prepared.native_projection_set,
+        semantic_input=request.compiled_input,
+        replay_hydration=None,
+    )
+
+    assert measurement.discard_materialization_to_quote() == (
+        request.wire_input_plan.quote
+    )
+    with pytest.raises(RuntimeError, match="already consumed"):
+        measurement.prepare_executable_plan()
+    request.surface_borrow.close()
+
+
+def test_final_wire_quote_can_cross_hard_bounds_but_plan_cannot() -> None:
+    port = _port()
+    request, _tool_port = _prepared_execution(port)
+    plan = request.wire_input_plan
+    quote = plan.quote
+    assert quote.final_wire_estimated_input_tokens > 0
+
+    token_overbound = replace(
+        quote,
+        effective_input_budget_tokens=quote.final_wire_estimated_input_tokens - 1,
+    )
+    byte_overbound = replace(
+        quote,
+        final_wire_utf8_bytes=MAXIMUM_PROVIDER_WIRE_INPUT_BYTES + 1,
+    )
+    assert token_overbound.final_wire_estimated_input_tokens > (
+        token_overbound.effective_input_budget_tokens
+    )
+    assert byte_overbound.final_wire_utf8_bytes > MAXIMUM_PROVIDER_WIRE_INPUT_BYTES
+    with pytest.raises(ValueError, match="exceeds the input budget"):
+        replace(plan, quote=token_overbound)
+    with pytest.raises(ValueError, match="exceeds its hard byte bound"):
+        replace(plan, quote=byte_overbound)
     request.surface_borrow.close()
 
 
@@ -869,11 +1055,7 @@ def test_stage2_direct_model_real_adapter_path_emits_only_live_payloads() -> Non
     binding = port._registry.get("openai_chat_completions")
     binding._adapter._mock_chunks = [
         {"choices": [{"delta": {"content": "hello"}}]},
-        {
-            "choices": [
-                {"index": 0, "delta": {}, "finish_reason": "stop"}
-            ]
-        },
+        {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
         {
             "choices": [],
             "usage": {
@@ -935,11 +1117,7 @@ def test_round5a1_direct_model_never_promotes_incomplete_adapter_output(
                     }
                 ]
             },
-            {
-                "choices": [
-                    {"index": 0, "delta": {}, "finish_reason": "length"}
-                ]
-            },
+            {"choices": [{"index": 0, "delta": {}, "finish_reason": "length"}]},
         ]
     else:
         binding._adapter._mock_events = [

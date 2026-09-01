@@ -88,6 +88,12 @@ class _TerminalMonitorDogfoodModel:
     def plan_wire_input(self, **kwargs):
         return self._delegate.plan_wire_input(**kwargs)
 
+    def freeze_wire_measurement(self, **kwargs):
+        return self._delegate.freeze_wire_measurement(**kwargs)
+
+    def replay_target_for_resolved_call(self, call):
+        return self._delegate.replay_target_for_resolved_call(call)
+
     def preflight_execution(self, request, **kwargs):
         return self._delegate.preflight_execution(request, **kwargs)
 
@@ -130,9 +136,7 @@ class _TerminalMonitorDogfoodModel:
                 for item in request.compiled_input.messages
                 if item.role is MessageRole.USER
                 and item.content
-                and item.content[0].startswith(
-                    '{"pulsara_terminal_observation":'
-                )
+                and item.content[0].startswith('{"pulsara_terminal_observation":')
             )
             assert len(terminal_items) == 1
             assert "R2_COMPLETION_SENTINEL" in terminal_items[0]["output"]

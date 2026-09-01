@@ -1481,13 +1481,17 @@ def test_round9_2_architecture_has_one_independent_engine_and_no_new_durability(
         ROOT / "src/pulsara_agent/conversation_kernel/provider_dispatch.py"
     ).read_text(encoding="utf-8")
     assert "hook_context_reservation.restore" not in provider_dispatch
-    for owner_path in (
-        ROOT / "src/pulsara_agent/conversation_kernel/runner.py",
-        ROOT / "src/pulsara_agent/conversation_kernel/compaction/coordinator.py",
-    ):
-        owner_source = owner_path.read_text(encoding="utf-8")
-        assert "install_provider_open(" in owner_source
-        assert "hook_context_reservation.retire()" in owner_source
+    runner_source = (
+        ROOT / "src/pulsara_agent/conversation_kernel/runner.py"
+    ).read_text(encoding="utf-8")
+    coordinator_source = (
+        ROOT / "src/pulsara_agent/conversation_kernel/compaction/coordinator.py"
+    ).read_text(encoding="utf-8")
+    assert "install_provider_open(" in runner_source
+    assert "hook_context_reservation.retire()" in runner_source
+    assert "install_provider_open(" in coordinator_source
+    assert "hook_sibling.retire()" in coordinator_source
+    assert "pending_start.retire()" in coordinator_source
 
     host_source = (ROOT / "src/pulsara_agent/conversation_kernel/host.py").read_text(
         encoding="utf-8"
@@ -1860,9 +1864,13 @@ def test_round9_2_post_adoption_status_revalidation_is_bounded_and_control_linea
         def close_surface_borrow(self) -> None:
             pass
 
+        def close(self) -> None:
+            self.closed = True
+
     class _Owner:
         def __init__(self) -> None:
             self.reset = False
+            self.policy = SimpleNamespace(planning_attempt_seconds=3.0)
 
         def reset_automatic_failures(self, **kwargs) -> None:
             del kwargs
@@ -1935,11 +1943,11 @@ def test_round9_2_post_adoption_status_revalidation_is_bounded_and_control_linea
             force=True,
             expected_scope=scope,
             target_branch=CompactionTargetBranch.ACTIVE_INSTALLATION,
-            successor_deadline=monotonic() + 3,
             candidate=candidate,
             preconditions=None,
             dry_dispatch=dry,
-            source_tokens=1,
+            source_view=None,
+            source_wire_candidate=None,
             protected_tail_selection_fingerprint="tail:1",
             compaction_read=None,
             trigger=CompactionTrigger.MANUAL,
@@ -2015,7 +2023,6 @@ def test_round9_2_post_adoption_status_revalidation_is_bounded_and_control_linea
                     manual_request=manual,
                     scope_kind=ModelInputScopeKind.ROOT,
                     scope_subagent_task_id=None,
-                    prepared_source=None,
                     hook_scope=None,
                     session_start_compact_port=None,
                     session_start_boundary_port=None,
