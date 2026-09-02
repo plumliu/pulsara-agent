@@ -33,35 +33,33 @@ from pulsara_agent.conversation_kernel.memory.contracts import (
     FrozenMemoryProposal,
     MemoryFactKind,
     MemoryKindHint,
-    MemoryProducerKind,
     MemoryUsePolicy,
     PreparedMemoryBasisReference,
     PreparedMemoryCandidateAcceptance,
+    memory_basis_context_allowed,
+    memory_context_product_label,
     memory_response_preference_item_payload,
     prepare_memory_candidate,
 )
-from pulsara_agent.conversation_kernel.memory.reflection import (
+from pulsara_agent.conversation_kernel.memory.hints import (
+    CheapMemoryWriteHintMatcher,
     MemoryWriteOptOut,
-    PreparedCheapHintReflectionHandoff,
     TurnMemoryUseOptOut,
-    normalize_reflection_text,
-    prepare_cheap_hint_reflection_handoff,
+    normalize_memory_trigger_text,
 )
 from pulsara_agent.conversation_kernel.repository import ConversationKernelRepository
 from pulsara_agent.conversation_kernel.tool_contracts import (
     KernelToolInvocationContext,
     KernelToolResult,
 )
-from pulsara_agent.memory.scope import FrozenMemoryReadScopeBinding, MemoryScopeKind
+from pulsara_agent.memory.scope import CTX_GLOBAL, FrozenMemoryReadContextBinding
 from pulsara_agent.llm.estimator import PulsaraHeuristicTokenEstimatorV1
 from pulsara_agent.model_input.contracts import (
-    CanonicalModelInputSnapshot,
     ContextSourceAbsentFact,
     ContextSourceCandidate,
     ContextSourceAbsenceKind,
     ContextSourceKind,
 )
-from pulsara_agent.primitives.run_permission import FrozenRunPermissionSnapshot
 from pulsara_agent.primitives.context import canonical_json_bytes
 from pulsara_agent.process_api_key_boundary import ProcessApiKeyBoundary
 from pulsara_agent.ports.tool_execution import (
@@ -111,14 +109,13 @@ class KernelMemoryToolPort:
         *,
         repository: ConversationKernelRepository,
         session_id: str,
-        read_binding: FrozenMemoryReadScopeBinding,
+        read_binding: FrozenMemoryReadContextBinding,
         embedding_config: EmbeddingBackendConfig,
         rerank_config: RerankBackendConfig | None = None,
         feature_config: AdvisoryMemoryFeatureConfig | None = None,
         embedding_provider: EmbeddingProvider | None = None,
         rerank_provider: RerankProvider | None = None,
         io_owner: KernelSessionIO,
-        provider_trust_domain_identity: str = "",
         api_key_boundary: ProcessApiKeyBoundary,
     ) -> None:
         self._repository = repository
@@ -142,9 +139,9 @@ class KernelMemoryToolPort:
         ] = {}
         self._write_opt_out = MemoryWriteOptOut()
         self._turn_use_opt_out = TurnMemoryUseOptOut()
+        self._write_hint_matcher = CheapMemoryWriteHintMatcher()
         self._closed = False
         self._governor: AdvisoryMemoryGovernor | None = None
-        self._provider_trust_domain_identity = provider_trust_domain_identity
         self._api_key_boundary = api_key_boundary
 
     @property
@@ -177,28 +174,18 @@ class KernelMemoryToolPort:
         if governor is not None:
             governor.offer_governance_wake()
 
-    def adopt_dormant_reflection(
-        self, handoff: PreparedCheapHintReflectionHandoff
-    ) -> str | None:
-        governor = self._governor
-        return None if governor is None else governor.adopt_dormant_reflection(handoff)
-
-    def activate_reflection(self, token: str) -> None:
-        governor = self._governor
-        if governor is not None:
-            governor.activate_reflection(token)
-
     def classify_automatic_trigger(
         self, text: str
     ) -> AutomaticMemoryTriggerDisposition:
         return self.classify_memory_trigger(text).automatic_recall
 
     def classify_memory_trigger(self, text: str) -> FrozenMemoryTriggerPolicy:
-        normalized = normalize_reflection_text(text)
+        normalized = normalize_memory_trigger_text(text)
         if self._turn_use_opt_out.excludes(normalized):
             return FrozenMemoryTriggerPolicy(
                 AutomaticMemoryTriggerDisposition.DISABLED_BY_EXPLICIT_USER_DIRECTIVE,
                 MemoryUsePolicy.ALL_DISABLED_BY_USER,
+                False,
             )
         memory_use = (
             MemoryUsePolicy.WRITE_DISABLED_BY_USER
@@ -210,39 +197,11 @@ class KernelMemoryToolPort:
             if len(normalized) < 8
             else AutomaticMemoryTriggerDisposition.ELIGIBLE
         )
-        return FrozenMemoryTriggerPolicy(automatic, memory_use)
-
-    def prepare_and_adopt_reflection(
-        self,
-        *,
-        canonical: CanonicalModelInputSnapshot,
-        permission: FrozenRunPermissionSnapshot,
-        remember_requested: bool,
-    ) -> str | None:
-        if (
-            not self._feature_config.cheap_hint_reflection
-            or not self._provider_trust_domain_identity
-        ):
-            return None
-        handoff = prepare_cheap_hint_reflection_handoff(
-            canonical=canonical,
-            permission=permission,
-            workspace_id=self._read_binding.host_workspace_id,
-            memory_domain_id=self._read_binding.memory_domain_id,
-            workspace_scope_id=next(
-                (
-                    item.scope_id
-                    for item in self._read_binding.readable_scopes
-                    if item.kind is MemoryScopeKind.WORKSPACE
-                ),
-                None,
-            ),
-            provider_trust_domain_identity=self._provider_trust_domain_identity,
-            remember_requested=remember_requested,
-            write_opt_out=self._write_opt_out,
-            turn_use_opt_out=self._turn_use_opt_out,
+        return FrozenMemoryTriggerPolicy(
+            automatic,
+            memory_use,
+            memory_use.allows_writes and self._write_hint_matcher.matches(normalized),
         )
-        return None if handoff is None else self.adopt_dormant_reflection(handoff)
 
     async def embed_memory_batch(
         self, texts: Sequence[str], *, timeout_seconds: float
@@ -293,41 +252,35 @@ class KernelMemoryToolPort:
         arguments: Mapping[str, object],
         context: KernelToolInvocationContext,
     ) -> KernelToolResult:
-        scope_kind = MemoryScopeKind(str(arguments.get("scope") or "USER"))
-        scope = next(
-            (
-                item
-                for item in self._read_binding.readable_scopes
-                if item.kind is scope_kind
-            ),
-            None,
-        )
-        if scope is None:
-            raise ValueError("requested memory scope is unavailable in this Host")
-        exclusions = _string_sequence(arguments.get("do_not_apply_when"))
+        context_target = str(arguments.get("context_target") or "")
+        if context_target == "GLOBAL":
+            context_id = CTX_GLOBAL
+        elif context_target == "CURRENT_PROJECT":
+            context_id = self._read_binding.current_project_context_id
+            if context_id is None:
+                raise ValueError(
+                    "CURRENT_PROJECT memory is unavailable in this transient Host"
+                )
+        else:
+            raise ValueError("context_target must be GLOBAL or CURRENT_PROJECT")
         basis_ids = _string_sequence(arguments.get("based_on_memory_ids"))
         citation_handles = _string_sequence(arguments.get("cited_tool_result_handles"))
         proposal = FrozenMemoryProposal(
             statement=str(arguments.get("statement") or ""),
-            scope_kind=scope_kind,
-            scope_id=scope.scope_id,
+            context_id=context_id,
             kind_hint=MemoryKindHint(str(arguments.get("kind_hint") or "AUTO")),
-            applies_when=(
-                None
-                if arguments.get("applies_when") is None
-                else str(arguments["applies_when"])
-            ),
-            do_not_apply_when=exclusions,
             based_on_memory_ids=basis_ids,
             cited_tool_result_handles=citation_handles,
         )
-        basis_refs = await self._resolve_basis(basis_ids)
+        basis_refs = await self._resolve_basis(basis_ids, source_context_id=context_id)
         citation_refs = context.memory_context.resolve(citation_handles)
-        if scope_kind is MemoryScopeKind.USER and any(
-            reference.citation_visibility.value != "USER_SAFE"
+        if context_id == CTX_GLOBAL and any(
+            reference.citation_visibility.value != "GLOBAL_SAFE"
             for reference in citation_refs
         ):
-            raise ValueError("USER memory cannot cite a workspace-bound ToolResult")
+            raise ValueError(
+                "GLOBAL memory cannot cite a current-context-bound ToolResult"
+            )
         candidate_id = _stable_id(
             "memory-candidate",
             context.session_id,
@@ -339,7 +292,6 @@ class KernelMemoryToolPort:
             memory_domain_id=self._read_binding.memory_domain_id,
             origin_workspace_id=context.workspace_id,
             origin_session_id=context.session_id,
-            producer_kind=MemoryProducerKind.MAIN_AGENT_REMEMBER,
             proposal=proposal,
             producer_entry_id=context.assistant_entry_id,
             producer_tool_call_id=context.tool_call_id,
@@ -360,7 +312,7 @@ class KernelMemoryToolPort:
         )
 
     async def _resolve_basis(
-        self, fact_ids: Sequence[str]
+        self, fact_ids: Sequence[str], *, source_context_id: str
     ) -> tuple[PreparedMemoryBasisReference, ...]:
         refs: list[PreparedMemoryBasisReference] = []
         for ordinal, fact_id in enumerate(fact_ids):
@@ -374,13 +326,14 @@ class KernelMemoryToolPort:
             )
             if item is None:
                 raise ValueError(
-                    "based_on memory is absent or outside the visible scope"
+                    "based_on memory is absent or outside the visible context"
                 )
+            if not memory_basis_context_allowed(source_context_id, item.context_id):
+                raise ValueError("based_on memory crosses the context hierarchy")
             refs.append(
                 PreparedMemoryBasisReference(
                     target_fact_id=item.fact_id,
-                    target_scope_kind=MemoryScopeKind(item.scope_kind),
-                    target_scope_id=item.scope_id,
+                    target_context_id=item.context_id,
                     ordinal=ordinal,
                 )
             )
@@ -396,7 +349,6 @@ class KernelMemoryToolPort:
         limit = int(arguments.get("limit", 5))
         if not 1 <= limit <= MAXIMUM_MEMORY_QUERY_RESULTS:
             raise ValueError("memory search limit is outside 1..50")
-        requested_scope = arguments.get("scope")
         requested_kind = arguments.get("kind")
         if requested_kind is not None:
             MemoryFactKind(str(requested_kind))
@@ -426,11 +378,6 @@ class KernelMemoryToolPort:
         result = await self._parallel_recall(
             terms=query_terms,
             limit=limit,
-            requested_scope=(
-                None
-                if requested_scope is None
-                else MemoryScopeKind(str(requested_scope))
-            ),
             requested_kind=(None if requested_kind is None else str(requested_kind)),
             query_embedding=query_embedding,
             automatic=False,
@@ -459,10 +406,10 @@ class KernelMemoryToolPort:
             {
                 "memory_id": item.fact_id,
                 "kind": item.fact_kind,
-                "scope": item.scope_kind,
+                "context_product_label": memory_context_product_label(item.context_id),
+                "current_context": item.context_id != CTX_GLOBAL,
                 "statement": item.statement,
-                "applies_when": item.applies_when,
-                "do_not_apply_when": list(item.do_not_apply_when),
+                "recorded_at": item.recorded_at,
                 "filter_match": _filter_match(item.match_tier),
             }
             for item in result.facts
@@ -471,7 +418,6 @@ class KernelMemoryToolPort:
             "SUCCESS",
             {
                 "requested_filters": {
-                    "scope": requested_scope,
                     "kind": requested_kind,
                 },
                 "retrieval_summary": _retrieval_summary(
@@ -520,11 +466,11 @@ class KernelMemoryToolPort:
         payload: dict[str, object] = {
             "memory_id": item.fact_id,
             "kind": item.fact_kind,
-            "scope": item.scope_kind,
+            "context_product_label": memory_context_product_label(item.context_id),
+            "current_context": item.context_id != CTX_GLOBAL,
             "lifecycle": item.lifecycle,
             "statement": item.statement,
-            "applies_when": item.applies_when,
-            "do_not_apply_when": list(item.do_not_apply_when),
+            "recorded_at": item.recorded_at,
             "relations": [
                 {
                     "relation_id": relation.relation_id,
@@ -552,7 +498,6 @@ class KernelMemoryToolPort:
                 return _json_result("APPLICATION_ERROR", {"error": "memory not found"})
             projection: dict[str, object] = {
                 "disposition": provenance.provenance_disposition,
-                "producer_kind": provenance.producer_kind,
                 "decision": {
                     "kind": provenance.decision_kind,
                     "reason_code": provenance.decision_reason_code,
@@ -709,7 +654,7 @@ class KernelMemoryToolPort:
                 self._query.response_preference_snapshot,
                 read_binding=self._read_binding,
                 # At most 16 active preferences exist in each of the two
-                # visible scopes.  Two complete same-scope graphs therefore
+                # readable contexts. Two complete same-context graphs therefore
                 # contain at most 2 * C(16, 2) = 240 edges.
                 relation_limit=240,
                 deadline_monotonic=self._canonical_deadline(
@@ -724,21 +669,22 @@ class KernelMemoryToolPort:
             )
         rows = snapshot.facts
         relations = snapshot.contradictions
-        rows_by_scope: dict[tuple[str, str], list[object]] = {}
+        rows_by_context: dict[str, list[object]] = {}
         for item in rows:
-            rows_by_scope.setdefault((item.scope_kind, item.scope_id), []).append(item)
-        for scoped_rows in rows_by_scope.values():
-            scoped_projection = tuple(
+            rows_by_context.setdefault(item.context_id, []).append(item)
+        for context_rows in rows_by_context.values():
+            context_projection = tuple(
                 memory_response_preference_item_payload(
                     memory_id=item.fact_id,
-                    scope_kind=item.scope_kind,
+                    context_id=item.context_id,
                     statement=item.statement,
+                    recorded_at=item.recorded_at,
                 )
-                for item in scoped_rows
+                for item in context_rows
             )
             if (
-                len(scoped_rows) > 16
-                or len(canonical_json_bytes(scoped_projection)) > 7 * 1024
+                len(context_rows) > 16
+                or len(canonical_json_bytes(context_projection)) > 7 * 1024
             ):
                 return build_memory_context_source(
                     kind=ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD,
@@ -768,8 +714,9 @@ class KernelMemoryToolPort:
         items = tuple(
             memory_response_preference_item_payload(
                 memory_id=item.fact_id,
-                scope_kind=item.scope_kind,
+                context_id=item.context_id,
                 statement=item.statement,
+                recorded_at=item.recorded_at,
             )
             for item in effective
         )
@@ -862,7 +809,6 @@ class KernelMemoryToolPort:
             result = await self._parallel_recall(
                 terms=query_terms,
                 limit=5,
-                requested_scope=None,
                 requested_kind=None,
                 query_embedding=vector,
                 automatic=True,
@@ -902,7 +848,7 @@ class KernelMemoryToolPort:
                 ),
             )
         except Exception:
-            # Without the same-scope contradiction join we cannot safely
+            # Without the same-context contradiction join we cannot safely
             # present a seemingly complete automatic advisory projection.
             return build_memory_context_source(
                 kind=ContextSourceKind.MEMORY_RECALL,
@@ -914,10 +860,10 @@ class KernelMemoryToolPort:
             return {
                 "memory_id": item.fact_id,
                 "kind": item.fact_kind,
-                "scope": item.scope_kind,
+                "context_product_label": memory_context_product_label(item.context_id),
+                "current_context": item.context_id != CTX_GLOBAL,
                 "statement": item.statement,
-                "applies_when": item.applies_when,
-                "do_not_apply_when": list(item.do_not_apply_when),
+                "recorded_at": item.recorded_at,
             }
 
         membership = tuple(
@@ -950,7 +896,9 @@ class KernelMemoryToolPort:
             {
                 "kind": item.fact_kind,
                 "memory_id": item.fact_id,
-                "scope": item.scope_kind,
+                "context_product_label": memory_context_product_label(item.context_id),
+                "current_context": item.context_id != CTX_GLOBAL,
+                "recorded_at": item.recorded_at,
                 "read_with": "memory_get",
             }
             for item in presentation
@@ -1025,7 +973,6 @@ class KernelMemoryToolPort:
         *,
         terms: Sequence[str],
         limit: int,
-        requested_scope: MemoryScopeKind | None,
         requested_kind: str | None,
         query_embedding: Sequence[float] | None,
         automatic: bool,
@@ -1038,7 +985,7 @@ class KernelMemoryToolPort:
         """
 
         stages = self._query.filter_stages(
-            self._read_binding, requested_scope, requested_kind
+            self._read_binding, requested_kind
         )
         gathered = []
         seen: set[str] = set()
@@ -1047,7 +994,7 @@ class KernelMemoryToolPort:
         sparse_ok = True
         dense_ok = query_embedding is not None
         dense_dispositions: list[MemoryDenseCandidateDisposition] = []
-        for ordinal, (scope_filter, kind_filter, label, relaxed_field) in enumerate(
+        for ordinal, (kind_filter, label, relaxed_field) in enumerate(
             stages
         ):
             if monotonic() >= deadline_monotonic:
@@ -1058,7 +1005,6 @@ class KernelMemoryToolPort:
                 self._query.sparse_candidates,
                 read_binding=self._read_binding,
                 terms=terms,
-                scope_filter=scope_filter,
                 kind_filter=kind_filter,
                 limit=20 if automatic else 40,
                 automatic=automatic,
@@ -1071,7 +1017,6 @@ class KernelMemoryToolPort:
                     self._query.dense_candidates,
                     read_binding=self._read_binding,
                     vector=query_embedding,
-                    scope_filter=scope_filter,
                     kind_filter=kind_filter,
                     limit=20 if automatic else 30,
                     purpose=(
@@ -1118,13 +1063,11 @@ class KernelMemoryToolPort:
                             for field in (
                                 "fact_id",
                                 "memory_domain_id",
-                                "scope_kind",
-                                "scope_id",
+                                "context_id",
                                 "fact_kind",
                                 "lifecycle",
                                 "statement",
-                                "applies_when",
-                                "do_not_apply_when",
+                                "recorded_at",
                                 "fact_semantic_digest",
                                 "sparse_rank",
                                 "dense_rank",
@@ -1207,9 +1150,7 @@ def _filter_match(tier: int) -> str:
     return {
         0: "EXACT",
         1: "KIND_RELAXED",
-        2: "SCOPE_RELAXED",
-        3: "KIND_AND_SCOPE_RELAXED",
-    }.get(tier, "KIND_AND_SCOPE_RELAXED")
+    }.get(tier, "KIND_RELAXED")
 
 
 def _memory_search_stage_result(
@@ -1217,8 +1158,8 @@ def _memory_search_stage_result(
 ) -> MemorySearchStageResult:
     return MemorySearchStageResult(
         ordinal=ordinal,
-        scope=("REQUESTED" if label in {"EXACT", "RELAX_KIND"} else "ALL_VISIBLE"),
-        kind=("REQUESTED" if label in {"EXACT", "RELAX_SCOPE"} else "ANY"),
+        context_coverage="ALL_READABLE",
+        kind=("REQUESTED" if label == "EXACT" else "ANY"),
         new_results=new_results,
     )
 
@@ -1269,8 +1210,7 @@ def _retrieval_summary(
     expanded_filters = [
         field
         for field, present in (
-            ("KIND", "kind" in relaxed or "scope+kind" in relaxed),
-            ("SCOPE", "scope" in relaxed or "scope+kind" in relaxed),
+            ("KIND", "kind" in relaxed),
         )
         if present
     ]
@@ -1372,10 +1312,11 @@ def _prepare_rerank_projection(query: str, facts) -> tuple[str, tuple[str, ...]]
         raw = canonical_json_bytes(
             {
                 "kind": fact.fact_kind,
-                "scope": fact.scope_kind,
+                "context_product_label": memory_context_product_label(
+                    fact.context_id
+                ),
                 "statement": fact.statement,
-                "applies_when": fact.applies_when,
-                "do_not_apply_when": fact.do_not_apply_when,
+                "recorded_at": fact.recorded_at,
             }
         )
         projected = _utf8_head_tail(raw, MAXIMUM_RERANK_DOCUMENT_BYTES)

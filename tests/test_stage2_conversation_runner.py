@@ -15,7 +15,7 @@ from uuid import uuid4
 import pytest
 import psycopg
 
-from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
+from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE, PermissionMode
 from pulsara_agent.process_api_key_boundary import ProcessApiKeyBoundary
 from pulsara_agent.conversation_kernel.contracts import (
     InlineContent,
@@ -63,7 +63,9 @@ from pulsara_agent.conversation_kernel.memory.contracts import (
     FrozenMemoryTriggerPolicy,
     MemoryUsePolicy,
 )
-from pulsara_agent.conversation_kernel.memory.reflection import (
+from pulsara_agent.conversation_kernel.memory.hints import (
+    CheapMemoryWriteHintMatcher,
+    MEMORY_WRITE_HINT_BODY,
     MemoryWriteOptOut,
     TurnMemoryUseOptOut,
 )
@@ -932,6 +934,7 @@ class _PolicyMemoryProjection:
     def __init__(self) -> None:
         self._write = MemoryWriteOptOut()
         self._all = TurnMemoryUseOptOut()
+        self._hint = CheapMemoryWriteHintMatcher()
         self.preference_calls = 0
         self.recall_calls = 0
         self.governance_wakes = 0
@@ -941,18 +944,21 @@ class _PolicyMemoryProjection:
             return FrozenMemoryTriggerPolicy(
                 AutomaticMemoryTriggerDisposition.DISABLED_BY_EXPLICIT_USER_DIRECTIVE,
                 MemoryUsePolicy.ALL_DISABLED_BY_USER,
+                False,
             )
+        memory_use = (
+            MemoryUsePolicy.WRITE_DISABLED_BY_USER
+            if self._write.excludes(text)
+            else MemoryUsePolicy.ENABLED
+        )
         return FrozenMemoryTriggerPolicy(
             (
                 AutomaticMemoryTriggerDisposition.SKIPPED_LOW_INFORMATION
                 if len(" ".join(text.split())) < 8
                 else AutomaticMemoryTriggerDisposition.ELIGIBLE
             ),
-            (
-                MemoryUsePolicy.WRITE_DISABLED_BY_USER
-                if self._write.excludes(text)
-                else MemoryUsePolicy.ENABLED
-            ),
+            memory_use,
+            memory_use.allows_writes and self._hint.matches(text),
         )
 
     def classify_automatic_trigger(
@@ -980,10 +986,6 @@ class _PolicyMemoryProjection:
 
     def offer_governance_wake(self) -> None:
         self.governance_wakes += 1
-
-    def prepare_and_adopt_reflection(self, **_kwargs: object) -> None:
-        return None
-
 
 class _DelayedPreparedExecution:
     def __init__(
@@ -4006,6 +4008,207 @@ def test_round8_memory_policy_aggregates_steers_and_resets_on_next_root_message(
         ContextSourceKind.MEMORY_RECALL,
         ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD,
     } <= cleared_memory_sources
+
+
+def test_round8_memory_write_hint_is_gated_before_the_real_provider_wire(
+    stage2_migrated_postgres_database,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+
+    async def run_case(
+        *,
+        text: str,
+        memory_enabled: bool,
+        tool_names: tuple[str, ...],
+        permission: PermissionMode = DEFAULT_PERMISSION_MODE,
+    ) -> tuple[object, tuple[str, ...]]:
+        repository = ConversationKernelRepository(provider)
+        session_id = _name("session")
+        lease = repository.acquire_host_writer(
+            session_id=session_id,
+            workspace_id=_name("workspace"),
+            writer_owner_id=_name("host"),
+            lease_seconds=30,
+            deadline_monotonic=monotonic() + 30,
+        )
+        model = _ScriptedModel([_text_stream("done")])
+        runner = ConversationKernelRunner(
+            repository=repository,
+            writer_lease=lease,
+            model=model,
+            tools=StructuredToolPort(
+                _AssertingTool(provider, session_id), tool_names=tool_names
+            ),
+            live_bus=LiveAgentEventBus(),
+            context_source_collector=StaticContextSourceCollector(),
+            memory_projection=_PolicyMemoryProjection() if memory_enabled else None,
+        )
+        result = await runner.run_turn(text, requested_permission_mode=permission)
+        assert result.final_text == "done"
+        assert len(model.requests) == 1
+        with provider.connection(
+            lane=PostgresConnectionLane.INSPECTOR,
+            deadline_monotonic=monotonic() + 30,
+        ) as connection:
+            canonical_entries = tuple(
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT entry_kind FROM pulsara_v3.transcript_entries "
+                    "WHERE session_id=%s ORDER BY entry_sequence",
+                    (session_id,),
+                ).fetchall()
+            )
+        return model.requests[0].compiled_input, canonical_entries
+
+    async def exercise() -> None:
+        positive, entries = await run_case(
+            text="Please remember that I prefer concise answers",
+            memory_enabled=True,
+            tool_names=("remember",),
+        )
+        opt_out, _ = await run_case(
+            text="Please don't remember what I just said",
+            memory_enabled=True,
+            tool_names=("remember",),
+        )
+        disabled, _ = await run_case(
+            text="Please remember that I prefer concise answers",
+            memory_enabled=False,
+            tool_names=("remember",),
+        )
+        read_only, _ = await run_case(
+            text="Please remember that I prefer concise answers",
+            memory_enabled=True,
+            tool_names=("remember",),
+            permission=PermissionMode.READ_ONLY,
+        )
+        absent_tool, _ = await run_case(
+            text="Please remember that I prefer concise answers",
+            memory_enabled=True,
+            tool_names=(),
+        )
+
+        def visible_hints(compiled: object) -> tuple[object, ...]:
+            return tuple(
+                decoded
+                for message in compiled.messages  # type: ignore[attr-defined]
+                if message.role is MessageRole.USER
+                and message.content
+                and "pulsara_runtime_observation" in message.content[0]
+                for decoded in (decode_runtime_observation(message),)
+                if decoded.source_kind is ContextSourceKind.MEMORY_WRITE_HINT
+            )
+
+        hints = visible_hints(positive)
+        assert len(hints) == 1
+        assert hints[0].body == MEMORY_WRITE_HINT_BODY
+        assert entries == ("USER_MESSAGE", "ASSISTANT_MESSAGE")
+        for gated in (opt_out, disabled, read_only, absent_tool):
+            assert visible_hints(gated) == ()
+
+    asyncio.run(exercise())
+
+
+def test_round8_accepted_user_steer_independently_adds_one_memory_write_hint(
+    stage2_migrated_postgres_database,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id = _name("session")
+    lease = repository.acquire_host_writer(
+        session_id=session_id,
+        workspace_id=_name("workspace"),
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    command_id = _name("command")
+    turn_id = _stable_id("turn", session_id, command_id)
+    model = _BlockingFirstCallModel(
+        [
+            _text_stream("first answer"),
+            _tool_stream(),
+            _text_stream("final answer", block="text:3"),
+        ]
+    )
+    tool = _AssertingTool(provider, session_id)
+    runner = ConversationKernelRunner(
+        repository=repository,
+        writer_lease=lease,
+        model=model,
+        tools=StructuredToolPort(tool, tool_names=("remember", "terminal")),
+        live_bus=LiveAgentEventBus(),
+        context_source_collector=StaticContextSourceCollector(),
+        memory_projection=_PolicyMemoryProjection(),
+    )
+
+    async def exercise():
+        task = asyncio.create_task(
+            runner.run_turn("Inspect the current request", command_id=command_id)
+        )
+        await asyncio.wait_for(model.started.wait(), timeout=5)
+        steer_command = _name("steer-command")
+        repository.enqueue_prompt(
+            lease.guard,
+            command_id=steer_command,
+            queue_item_id=_name("steer-queue"),
+            client_submission_id=steer_command,
+            delivery_mode=PromptDeliveryMode.STEER_ACTIVE_TURN,
+            target_turn_id=turn_id,
+            permission_snapshot_id=None,
+            requested_permission_mode=None,
+            content=InlineContent.from_bytes(
+                b"Please remember that I prefer concise answers"
+            ),
+            occurred_at=datetime.now(timezone.utc),
+            actor_id="test",
+            deadline_monotonic=monotonic() + 10,
+        )
+        model.release.set()
+        return await task
+
+    result = asyncio.run(exercise())
+    assert result.final_text == "final answer"
+    assert len(model.requests) == 3
+    first, second, third = (
+        request.compiled_input for request in model.requests
+    )
+    assert second.messages[: len(first.messages)] == first.messages
+    assert third.messages[: len(second.messages)] == second.messages
+
+    def hint_indexes(compiled) -> tuple[int, ...]:
+        return tuple(
+            index
+            for index, message in enumerate(compiled.messages)
+            if message.role is MessageRole.USER
+            and message.content
+            and "pulsara_runtime_observation" in message.content[0]
+            and decode_runtime_observation(message).source_kind
+            is ContextSourceKind.MEMORY_WRITE_HINT
+        )
+
+    assert hint_indexes(first) == ()
+    second_hints = hint_indexes(second)
+    assert len(second_hints) == 1
+    steer_index = next(
+        index
+        for index, message in enumerate(second.messages)
+        if message.role is MessageRole.USER
+        and message.content
+        and message.content[0] == "Please remember that I prefer concise answers"
+    )
+    assert second_hints[0] == steer_index - 1
+    assert hint_indexes(third) == second_hints
+    assert len(tool.invocations) == 1
+    with provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        deadline_monotonic=monotonic() + 30,
+    ) as connection:
+        assert connection.execute(
+            "SELECT count(*) FROM pulsara_v3.transcript_entries "
+            "WHERE session_id=%s AND entry_kind='USER_STEER'",
+            (session_id,),
+        ).fetchone() == (1,)
 
 
 def test_round3_1_planning_reaches_shorter_fifo_prefix_without_recharging_base(

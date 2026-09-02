@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import StrEnum
 from hashlib import sha256
 import json
@@ -10,9 +11,10 @@ import unicodedata
 from typing import Mapping, Sequence
 
 from pulsara_agent.memory.scope import (
-    CTX_USER,
-    FrozenMemoryReadScopeBinding,
-    MemoryScopeKind,
+    CTX_GLOBAL,
+    WORKSPACE_CONTEXT_PREFIX,
+    FrozenMemoryReadContextBinding,
+    is_valid_context_id,
 )
 from pulsara_agent.retrieval.tokenizer import (
     MEMORY_RETRIEVAL_TOKENIZER_CONTRACT_ID,
@@ -23,10 +25,6 @@ from pulsara_agent.retrieval.tokenizer import (
 
 MAXIMUM_MEMORY_STATEMENT_BYTES = 8 * 1024
 MAXIMUM_RESPONSE_PREFERENCE_STATEMENT_BYTES = 2 * 1024
-MAXIMUM_MEMORY_APPLIES_WHEN_BYTES = 4 * 1024
-MAXIMUM_MEMORY_EXCLUSION_ITEMS = 8
-MAXIMUM_MEMORY_EXCLUSION_ITEM_BYTES = 2 * 1024
-MAXIMUM_MEMORY_EXCLUSION_BYTES = 8 * 1024
 MAXIMUM_MEMORY_REFERENCE_ITEMS = 8
 MAXIMUM_MEMORY_CANDIDATE_BYTES = 32 * 1024
 MAXIMUM_MODEL_VISIBLE_MEMORY_FACT_IDS = 128
@@ -37,29 +35,22 @@ MAXIMUM_GOVERNANCE_VISIBLE_MEMORY_BYTES = 64 * 1024
 MAXIMUM_GOVERNANCE_FINAL_WIRE_BYTES = 128 * 1024
 MAXIMUM_GOVERNANCE_INPUT_TOKENS = 32_768
 MAXIMUM_GOVERNANCE_OUTPUT_BYTES = 8 * 1024
-MAXIMUM_GOVERNANCE_OUTPUT_TOKENS = 4_096
+MAXIMUM_GOVERNANCE_OUTPUT_TOKENS = 8_192
 
 
 class MemoryFactKind(StrEnum):
-    FACT = "FACT"
     USER_PROFILE = "USER_PROFILE"
     RESPONSE_PREFERENCE = "RESPONSE_PREFERENCE"
-    ACTION_RULE = "ACTION_RULE"
+    FACT = "FACT"
     DECISION = "DECISION"
 
 
 class MemoryKindHint(StrEnum):
     AUTO = "AUTO"
-    FACT = "FACT"
     USER_PROFILE = "USER_PROFILE"
     RESPONSE_PREFERENCE = "RESPONSE_PREFERENCE"
-    ACTION_RULE = "ACTION_RULE"
+    FACT = "FACT"
     DECISION = "DECISION"
-
-
-class MemoryProducerKind(StrEnum):
-    MAIN_AGENT_REMEMBER = "MAIN_AGENT_REMEMBER"
-    CHEAP_HINT_REFLECTION = "CHEAP_HINT_REFLECTION"
 
 
 class MemoryCandidateStatus(StrEnum):
@@ -85,8 +76,6 @@ class MemoryDecisionReasonCode(StrEnum):
     INSUFFICIENT_SOURCE_SUPPORT = "INSUFFICIENT_SOURCE_SUPPORT"
     TEMPORARY_OR_EPHEMERAL = "TEMPORARY_OR_EPHEMERAL"
     LOW_VALUE = "LOW_VALUE"
-    MULTI_ATOM_STATEMENT = "MULTI_ATOM_STATEMENT"
-    USER_PROFILE_SCOPE_OR_KIND_MISMATCH = "USER_PROFILE_SCOPE_OR_KIND_MISMATCH"
     UNSAFE_RESPONSE_PREFERENCE = "UNSAFE_RESPONSE_PREFERENCE"
     UNSUPPORTED_STRUCTURE = "UNSUPPORTED_STRUCTURE"
     RECALLED_MEMORY_ECHO = "RECALLED_MEMORY_ECHO"
@@ -120,8 +109,6 @@ MODEL_GOVERNANCE_SKIP_REASON_CODES = frozenset(
         MemoryDecisionReasonCode.INSUFFICIENT_SOURCE_SUPPORT,
         MemoryDecisionReasonCode.TEMPORARY_OR_EPHEMERAL,
         MemoryDecisionReasonCode.LOW_VALUE,
-        MemoryDecisionReasonCode.MULTI_ATOM_STATEMENT,
-        MemoryDecisionReasonCode.USER_PROFILE_SCOPE_OR_KIND_MISMATCH,
         MemoryDecisionReasonCode.UNSAFE_RESPONSE_PREFERENCE,
         MemoryDecisionReasonCode.UNSUPPORTED_STRUCTURE,
         MemoryDecisionReasonCode.RECALLED_MEMORY_ECHO,
@@ -141,8 +128,8 @@ class MemorySupersedeMode(StrEnum):
 
 
 class MemoryCitationVisibility(StrEnum):
-    USER_SAFE = "USER_SAFE"
-    WORKSPACE_BOUND = "WORKSPACE_BOUND"
+    GLOBAL_SAFE = "GLOBAL_SAFE"
+    CURRENT_CONTEXT_BOUND = "CURRENT_CONTEXT_BOUND"
 
 
 class MemoryCitationEvidenceKind(StrEnum):
@@ -214,6 +201,7 @@ def strongest_memory_use_policy(
 class FrozenMemoryTriggerPolicy:
     automatic_recall: AutomaticMemoryTriggerDisposition
     memory_use: MemoryUsePolicy
+    write_hint: bool
 
 
 class MemoryGovernanceConfirmation(StrEnum):
@@ -238,65 +226,23 @@ class ExistingSourceRelationDisposition(StrEnum):
 @dataclass(frozen=True, slots=True)
 class FrozenMemoryProposal:
     statement: str
-    scope_kind: MemoryScopeKind
-    scope_id: str
+    context_id: str
     kind_hint: MemoryKindHint = MemoryKindHint.AUTO
-    applies_when: str | None = None
-    do_not_apply_when: tuple[str, ...] = ()
     based_on_memory_ids: tuple[str, ...] = ()
     cited_tool_result_handles: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         statement = normalize_memory_text(self.statement)
-        applies = (
-            None if self.applies_when is None else normalize_memory_text(self.applies_when)
-        )
-        exclusions = tuple(normalize_memory_text(item) for item in self.do_not_apply_when)
         basis = _unique_ids(self.based_on_memory_ids, "basis")
         citations = _unique_ids(self.cited_tool_result_handles, "citation")
         object.__setattr__(self, "statement", statement)
-        object.__setattr__(self, "applies_when", applies)
-        object.__setattr__(self, "do_not_apply_when", exclusions)
         object.__setattr__(self, "based_on_memory_ids", basis)
         object.__setattr__(self, "cited_tool_result_handles", citations)
         _bounded_text(statement, 1, MAXIMUM_MEMORY_STATEMENT_BYTES, "statement")
-        if applies is not None:
-            _bounded_text(applies, 1, MAXIMUM_MEMORY_APPLIES_WHEN_BYTES, "applies_when")
-        if len(exclusions) > MAXIMUM_MEMORY_EXCLUSION_ITEMS:
-            raise ValueError("do_not_apply_when exceeds item bound")
-        exclusion_bytes = 0
-        for item in exclusions:
-            _bounded_text(item, 1, MAXIMUM_MEMORY_EXCLUSION_ITEM_BYTES, "do_not_apply_when")
-            exclusion_bytes += len(item.encode("utf-8"))
-        if exclusion_bytes > MAXIMUM_MEMORY_EXCLUSION_BYTES:
-            raise ValueError("do_not_apply_when exceeds aggregate bound")
         if len(basis) > MAXIMUM_MEMORY_REFERENCE_ITEMS or len(citations) > MAXIMUM_MEMORY_REFERENCE_ITEMS:
             raise ValueError("memory references exceed item bound")
-        if self.scope_kind is MemoryScopeKind.USER:
-            if self.scope_id != CTX_USER:
-                raise ValueError("USER memory requires ctx:user")
-        elif not self.scope_id.startswith("ctx:workspace/"):
-            raise ValueError("WORKSPACE memory requires exact workspace scope")
-        if self.kind_hint is MemoryKindHint.USER_PROFILE and self.scope_kind is not MemoryScopeKind.USER:
-            raise ValueError("USER_PROFILE hint requires USER scope")
-        if self.kind_hint is MemoryKindHint.ACTION_RULE:
-            if applies is None or basis:
-                raise ValueError("ACTION_RULE hint requires applies_when and no basis")
-        elif self.kind_hint is MemoryKindHint.DECISION:
-            if applies is not None or exclusions:
-                raise ValueError("DECISION hint cannot carry applicability fields")
-        elif self.kind_hint is not MemoryKindHint.AUTO and (
-            applies is not None or exclusions or basis
-        ):
-            raise ValueError(
-                "non-rule/non-decision hint carries incompatible structured fields"
-            )
-        if self.kind_hint is MemoryKindHint.AUTO and exclusions and applies is None:
-            raise ValueError("exclusions require an ACTION_RULE applicability condition")
-        if self.kind_hint is MemoryKindHint.AUTO and basis and (
-            applies is not None or exclusions
-        ):
-            raise ValueError("AUTO candidate cannot mix rule and decision structure")
+        if not is_valid_context_id(self.context_id):
+            raise ValueError("memory proposal context identity is invalid")
         if self.kind_hint is MemoryKindHint.RESPONSE_PREFERENCE and len(statement.encode("utf-8")) > MAXIMUM_RESPONSE_PREFERENCE_STATEMENT_BYTES:
             raise ValueError("explicit RESPONSE_PREFERENCE exceeds active statement bound")
         encoded = canonical_json_bytes(self.semantic_payload())
@@ -309,11 +255,8 @@ class FrozenMemoryProposal:
         # freezes their resolved relational identities separately below.
         return {
             "statement": self.statement,
-            "scope_kind": self.scope_kind.value,
-            "scope_id": self.scope_id,
+            "context_id": self.context_id,
             "kind_hint": self.kind_hint.value,
-            "applies_when": self.applies_when,
-            "do_not_apply_when": self.do_not_apply_when,
         }
 
 
@@ -380,8 +323,7 @@ class FrozenModelCallMemoryContext:
 @dataclass(frozen=True, slots=True)
 class PreparedMemoryBasisReference:
     target_fact_id: str
-    target_scope_kind: MemoryScopeKind
-    target_scope_id: str
+    target_context_id: str
     ordinal: int
 
     def __post_init__(self) -> None:
@@ -413,11 +355,8 @@ class PreparedMemoryCandidateAcceptance:
     memory_domain_id: str
     origin_workspace_id: str
     origin_session_id: str
-    producer_kind: MemoryProducerKind
-    producer_entry_id: str | None
-    producer_tool_call_id: str | None
-    trigger_user_entry_id: str | None
-    producer_candidate_ordinal: int | None
+    producer_entry_id: str
+    producer_tool_call_id: str
     proposal: FrozenMemoryProposal = field(repr=False)
     tool_result_refs: tuple[PreparedMemoryToolResultReference, ...] = ()
     basis_refs: tuple[PreparedMemoryBasisReference, ...] = ()
@@ -432,18 +371,8 @@ class PreparedMemoryCandidateAcceptance:
     def __post_init__(self) -> None:
         if not all((self.candidate_id, self.memory_domain_id, self.origin_workspace_id, self.origin_session_id)):
             raise ValueError("prepared memory candidate identity is incomplete")
-        if self.producer_kind is MemoryProducerKind.MAIN_AGENT_REMEMBER:
-            if not self.producer_entry_id or not self.producer_tool_call_id:
-                raise ValueError("MAIN_AGENT_REMEMBER provenance is incomplete")
-            if self.trigger_user_entry_id is not None or self.producer_candidate_ordinal is not None:
-                raise ValueError("MAIN_AGENT_REMEMBER carries reflection provenance")
-        else:
-            if self.producer_entry_id is not None or self.producer_tool_call_id is not None:
-                raise ValueError("reflection carries main-agent provenance")
-            if not self.trigger_user_entry_id or self.producer_candidate_ordinal is None or not 0 <= self.producer_candidate_ordinal < 4:
-                raise ValueError("reflection provenance is incomplete")
-            if self.tool_result_refs or self.visible_memory.fact_ids or self.visible_memory.disposition is not ModelVisibleMemoryProvenanceDisposition.COMPLETE:
-                raise ValueError("reflection cannot carry memory/tool evidence")
+        if not self.producer_entry_id or not self.producer_tool_call_id:
+            raise ValueError("main-Agent remember provenance is incomplete")
         if len(self.tool_result_refs) > MAXIMUM_MEMORY_REFERENCE_ITEMS:
             raise ValueError("memory candidate ToolResult references exceed their bound")
         if tuple(item.ordinal for item in self.tool_result_refs) != tuple(range(len(self.tool_result_refs))):
@@ -530,23 +459,18 @@ class FrozenMemoryCandidateForGovernance:
             raise ValueError("governance candidate must be PROCESSING")
         if self.processing_started_at is None:
             raise ValueError("governance candidate lacks claim time")
-        if self.terminal_fence.source_entry_id not in {
-            self.prepared.producer_entry_id,
-            self.prepared.trigger_user_entry_id,
-        }:
+        if self.terminal_fence.source_entry_id != self.prepared.producer_entry_id:
             raise ValueError("governance fence does not name the candidate source")
 
 
 @dataclass(frozen=True, slots=True)
 class FrozenMemoryPublicFactProjection:
     fact_id: str
-    scope_kind: MemoryScopeKind
-    scope_id: str
+    context_id: str
     fact_kind: MemoryFactKind
     lifecycle: str
     statement: str = field(repr=False)
-    applies_when: str | None = field(default=None, repr=False)
-    do_not_apply_when: tuple[str, ...] = field(default=(), repr=False)
+    recorded_at: str = ""
     fact_semantic_digest: str = ""
 
     def __post_init__(self) -> None:
@@ -555,11 +479,12 @@ class FrozenMemoryPublicFactProjection:
         expected = memory_fact_semantic_digest(
             kind=self.fact_kind,
             statement=self.statement,
-            applies_when=self.applies_when,
-            do_not_apply_when=self.do_not_apply_when,
         )
         if self.fact_semantic_digest != expected:
             raise ValueError("memory public projection semantic digest mismatch")
+        if not is_valid_context_id(self.context_id):
+            raise ValueError("memory public projection context is invalid")
+        validate_canonical_memory_recorded_at(self.recorded_at)
 
 
 @dataclass(frozen=True, slots=True)
@@ -705,7 +630,7 @@ class FrozenMemoryGovernanceSourceCoverage:
 class FrozenMemoryGovernanceEvidence:
     origin_workspace_id: str
     terminal_fence: FrozenMemoryGovernanceTerminalFence
-    producer_cut: FrozenMemoryGovernanceProducerCut | None
+    producer_cut: FrozenMemoryGovernanceProducerCut
     producer_call_context: tuple[FrozenMemoryGovernanceSourceItem, ...]
     producer_public_output: tuple[FrozenMemoryGovernanceSourceItem, ...]
     post_proposal_turn_suffix: tuple[FrozenMemoryGovernanceSourceItem, ...]
@@ -722,7 +647,7 @@ class FrozenMemoryGovernanceEvidence:
             range(len(self.tool_result_evidence))
         ):
             raise ValueError("memory governance citation projection is unordered")
-        if self.producer_cut is not None and (
+        if (
             self.producer_cut.turn_id != self.terminal_fence.source_turn_id
             or self.producer_cut.producer_entry_id
             != self.terminal_fence.source_entry_id
@@ -799,28 +724,28 @@ class FrozenMemoryGovernanceEvidence:
 def memory_public_fact_payload(item: FrozenMemoryPublicFactProjection) -> Mapping[str, object]:
     return {
         "memory_id": item.fact_id,
-        "scope": item.scope_kind.value,
+        "context_product_label": memory_context_product_label(item.context_id),
+        "current_context": item.context_id != CTX_GLOBAL,
         "kind": item.fact_kind.value,
         "lifecycle": item.lifecycle,
         "statement": item.statement,
-        "applies_when": item.applies_when,
-        "do_not_apply_when": item.do_not_apply_when,
+        "recorded_at": item.recorded_at,
     }
 
 
 def memory_response_preference_item_payload(
-    *, memory_id: str, scope_kind: MemoryScopeKind | str, statement: str
+    *, memory_id: str, context_id: str, statement: str, recorded_at: str
 ) -> Mapping[str, object]:
     """The sole canonical item codec shared by capacity and compiler freeze."""
 
-    scope = (
-        scope_kind.value if isinstance(scope_kind, MemoryScopeKind) else scope_kind
-    )
+    validate_canonical_memory_recorded_at(recorded_at)
     return {
         "memory_id": memory_id,
         "kind": MemoryFactKind.RESPONSE_PREFERENCE.value,
-        "scope": scope,
+        "context_product_label": memory_context_product_label(context_id),
+        "current_context": context_id != CTX_GLOBAL,
         "statement": statement,
+        "recorded_at": recorded_at,
         "advisory": True,
     }
 
@@ -871,13 +796,10 @@ class FrozenMemoryGovernanceDecision:
 class PreparedMemoryFactDraft:
     fact_id: str
     memory_domain_id: str
-    scope_kind: MemoryScopeKind
-    scope_id: str
+    context_id: str
     source_candidate_id: str
     fact_kind: MemoryFactKind
     statement: str
-    applies_when: str | None
-    do_not_apply_when: tuple[str, ...]
     fact_semantic_digest: str
     search_contract_id: str
     search_contract_version: int
@@ -889,8 +811,6 @@ class PreparedMemoryFactDraft:
         expected = memory_fact_semantic_digest(
             kind=self.fact_kind,
             statement=self.statement,
-            applies_when=self.applies_when,
-            do_not_apply_when=self.do_not_apply_when,
         )
         if self.fact_semantic_digest != expected:
             raise ValueError("prepared memory fact semantic digest mismatch")
@@ -903,8 +823,6 @@ class PreparedMemoryFactDraft:
             raise ValueError("prepared memory fact tokenizer version is invalid")
         expected_terms = MemoryRetrievalTokenizerV1().tokenize(
             self.statement,
-            self.applies_when,
-            *self.do_not_apply_when,
         )
         if self.search_terms != expected_terms:
             raise ValueError("prepared memory fact search terms drifted")
@@ -914,12 +832,9 @@ class PreparedMemoryFactDraft:
 class FrozenMemoryFactSettlementIdentity:
     fact_id: str
     memory_domain_id: str
-    scope_kind: MemoryScopeKind
-    scope_id: str
+    context_id: str
     fact_kind: MemoryFactKind
     statement: str
-    applies_when: str | None
-    do_not_apply_when: tuple[str, ...]
     fact_semantic_digest: str
     expected_lifecycle: str
 
@@ -929,8 +844,6 @@ class FrozenMemoryFactSettlementIdentity:
         expected = memory_fact_semantic_digest(
             kind=self.fact_kind,
             statement=self.statement,
-            applies_when=self.applies_when,
-            do_not_apply_when=self.do_not_apply_when,
         )
         if self.fact_semantic_digest != expected:
             raise ValueError("memory settlement semantic identity is invalid")
@@ -940,8 +853,7 @@ class FrozenMemoryFactSettlementIdentity:
 class PreparedMemoryRelationDraft:
     relation_id: str
     decision_candidate_id: str
-    source_scope_kind: MemoryScopeKind
-    source_scope_id: str
+    source_context_id: str
     source_fact_id: str
     source_fact_kind: MemoryFactKind
     relation_kind: MemoryRelationKind
@@ -957,7 +869,7 @@ class PreparedMemoryRelationDraft:
                 self.relation_id,
                 self.decision_candidate_id,
                 self.source_fact_id,
-                self.source_scope_id,
+                self.source_context_id,
             )
         ):
             raise ValueError("prepared memory relation identity is incomplete")
@@ -981,12 +893,10 @@ class PreparedMemoryRelationDraft:
             raise ValueError("unordered memory relation carries an ordinal")
         expected_id = memory_relation_id(
             memory_domain_id=self.target.memory_domain_id,
-            source_scope_kind=self.source_scope_kind,
-            source_scope_id=self.source_scope_id,
+            source_context_id=self.source_context_id,
             source_fact_id=self.source_fact_id,
             relation_kind=self.relation_kind,
-            target_scope_kind=self.target.scope_kind,
-            target_scope_id=self.target.scope_id,
+            target_context_id=self.target.context_id,
             target_fact_id=self.target.fact_id,
             supersede_mode=self.supersede_mode,
         )
@@ -1036,8 +946,7 @@ class PreparedMemoryGovernanceAcceptance:
     candidate_acceptance_digest: str
     memory_domain_id: str
     origin_workspace_id: str
-    scope_kind: MemoryScopeKind
-    scope_id: str
+    context_id: str
     decision: FrozenMemoryGovernanceDecision
     fact: PreparedMemoryFactDraft | None
     expected_candidate_status: MemoryCandidateStatus
@@ -1075,8 +984,7 @@ class PreparedMemoryGovernanceAcceptance:
         if self.fact is not None and (
             self.fact.source_candidate_id != self.candidate_id
             or self.fact.memory_domain_id != self.memory_domain_id
-            or self.fact.scope_kind is not self.scope_kind
-            or self.fact.scope_id != self.scope_id
+            or self.fact.context_id != self.context_id
             or self.fact.fact_kind is not self.decision.final_kind
         ):
             raise ValueError("prepared memory fact does not join candidate")
@@ -1091,12 +999,35 @@ class PreparedMemoryGovernanceAcceptance:
             "ACTIVE",
         ) * len(self.basis_targets):
             raise ValueError("prepared governance basis is not ACTIVE")
-        if tuple(item.ordinal for item in self.relation_drafts) not in {
-            (),
-            tuple(range(len(self.relation_drafts))),
-            (None,),
-        }:
+        expected_ordinals: tuple[int | None, ...] = tuple(
+            range(len(self.basis_targets))
+        )
+        if self.target is not None:
+            expected_ordinals = (*expected_ordinals, None)
+        if tuple(item.ordinal for item in self.relation_drafts) != expected_ordinals:
             raise ValueError("prepared governance relations are unordered")
+        basis_drafts = self.relation_drafts[: len(self.basis_targets)]
+        if any(
+            draft.relation_kind is not MemoryRelationKind.BASED_ON
+            or draft.target != target
+            for draft, target in zip(
+                basis_drafts, self.basis_targets, strict=True
+            )
+        ):
+            raise ValueError("prepared governance basis relation drifted")
+        if self.target is not None:
+            lifecycle_draft = self.relation_drafts[-1]
+            expected_kind = (
+                MemoryRelationKind.SUPERSEDES
+                if self.decision.decision_kind
+                is MemoryDecisionKind.ACCEPT_AND_SUPERSEDE
+                else MemoryRelationKind.CONTRADICTS
+            )
+            if (
+                lifecycle_draft.relation_kind is not expected_kind
+                or lifecycle_draft.target != self.target
+            ):
+                raise ValueError("prepared governance lifecycle relation drifted")
         if any(
             item.decision_candidate_id != self.candidate_id
             or item.source_fact_id != (self.fact.fact_id if self.fact else None)
@@ -1146,12 +1077,10 @@ class PreparedExistingSourceRelationSettlement:
             raise ValueError("existing-source target settlement is invalid")
         expected_relation_id = memory_relation_id(
             memory_domain_id=self.existing_source.memory_domain_id,
-            source_scope_kind=self.existing_source.scope_kind,
-            source_scope_id=self.existing_source.scope_id,
+            source_context_id=self.existing_source.context_id,
             source_fact_id=self.existing_source.fact_id,
             relation_kind=self.relation_kind,
-            target_scope_kind=self.target.scope_kind,
-            target_scope_id=self.target.scope_id,
+            target_context_id=self.target.context_id,
             target_fact_id=self.target.fact_id,
             supersede_mode=self.supersede_mode,
         )
@@ -1180,12 +1109,9 @@ def prepare_memory_candidate(
     memory_domain_id: str,
     origin_workspace_id: str,
     origin_session_id: str,
-    producer_kind: MemoryProducerKind,
     proposal: FrozenMemoryProposal,
-    producer_entry_id: str | None = None,
-    producer_tool_call_id: str | None = None,
-    trigger_user_entry_id: str | None = None,
-    producer_candidate_ordinal: int | None = None,
+    producer_entry_id: str,
+    producer_tool_call_id: str,
     tool_result_refs: Sequence[PreparedMemoryToolResultReference] = (),
     basis_refs: Sequence[PreparedMemoryBasisReference] = (),
     visible_memory: FrozenModelVisibleMemoryProvenance | None = None,
@@ -1196,11 +1122,8 @@ def prepare_memory_candidate(
         "memory_domain_id": memory_domain_id,
         "origin_workspace_id": origin_workspace_id,
         "origin_session_id": origin_session_id,
-        "producer_kind": producer_kind,
         "producer_entry_id": producer_entry_id,
         "producer_tool_call_id": producer_tool_call_id,
-        "trigger_user_entry_id": trigger_user_entry_id,
-        "producer_candidate_ordinal": producer_candidate_ordinal,
         "proposal": proposal,
         "tool_result_refs": tuple(tool_result_refs),
         "basis_refs": tuple(basis_refs),
@@ -1215,17 +1138,14 @@ def prepare_memory_candidate(
 
 def prepared_memory_candidate_digest(candidate: PreparedMemoryCandidateAcceptance) -> str:
     return digest(
-        "pulsara:memory-candidate-acceptance:v1",
+        "pulsara:memory-candidate-acceptance:v2-context-hard-cut",
         {
             "candidate_id": candidate.candidate_id,
             "memory_domain_id": candidate.memory_domain_id,
             "origin_workspace_id": candidate.origin_workspace_id,
             "origin_session_id": candidate.origin_session_id,
-            "producer_kind": candidate.producer_kind.value,
             "producer_entry_id": candidate.producer_entry_id,
             "producer_tool_call_id": candidate.producer_tool_call_id,
-            "trigger_user_entry_id": candidate.trigger_user_entry_id,
-            "producer_candidate_ordinal": candidate.producer_candidate_ordinal,
             "proposal": candidate.proposal.semantic_payload(),
             "tool_result_refs": tuple(
                 (
@@ -1238,7 +1158,7 @@ def prepared_memory_candidate_digest(candidate: PreparedMemoryCandidateAcceptanc
                 for r in candidate.tool_result_refs
             ),
             "basis_refs": tuple(
-                (r.target_fact_id, r.target_scope_kind.value, r.target_scope_id, r.ordinal)
+                (r.target_fact_id, r.target_context_id, r.ordinal)
                 for r in candidate.basis_refs
             ),
             "visible_memory": (
@@ -1268,15 +1188,9 @@ def prepare_memory_governance_acceptance(
         semantic_digest = memory_fact_semantic_digest(
             kind=decision.final_kind,
             statement=candidate.proposal.statement,
-            applies_when=candidate.proposal.applies_when,
-            do_not_apply_when=candidate.proposal.do_not_apply_when,
         )
         tokenizer_owner = tokenizer or MemoryRetrievalTokenizerV1()
-        terms = tokenizer_owner.tokenize(
-            candidate.proposal.statement,
-            candidate.proposal.applies_when,
-            *candidate.proposal.do_not_apply_when,
-        )
+        terms = tokenizer_owner.tokenize(candidate.proposal.statement)
         fact = PreparedMemoryFactDraft(
             fact_id=_stable_id(
                 "memory",
@@ -1284,13 +1198,10 @@ def prepare_memory_governance_acceptance(
                 semantic_digest,
             ),
             memory_domain_id=candidate.memory_domain_id,
-            scope_kind=candidate.proposal.scope_kind,
-            scope_id=candidate.proposal.scope_id,
+            context_id=candidate.proposal.context_id,
             source_candidate_id=candidate.candidate_id,
             fact_kind=decision.final_kind,
             statement=candidate.proposal.statement,
-            applies_when=candidate.proposal.applies_when,
-            do_not_apply_when=candidate.proposal.do_not_apply_when,
             fact_semantic_digest=semantic_digest,
             search_contract_id=MEMORY_RETRIEVAL_TOKENIZER_CONTRACT_ID,
             search_contract_version=MEMORY_RETRIEVAL_TOKENIZER_CONTRACT_VERSION,
@@ -1306,11 +1217,13 @@ def prepare_memory_governance_acceptance(
         for reference in candidate.basis_refs:
             item = basis_by_id[reference.target_fact_id]
             if (
-                item.scope_kind is not reference.target_scope_kind
-                or item.scope_id != reference.target_scope_id
+                item.context_id != reference.target_context_id
                 or item.lifecycle != "ACTIVE"
+                or not memory_basis_context_allowed(
+                    candidate.proposal.context_id, item.context_id
+                )
             ):
-                raise ValueError("prepared governance basis scope/lifecycle drifted")
+                raise ValueError("prepared governance basis context/lifecycle drifted")
             ordered_basis.append(
                 freeze_memory_fact_settlement_identity(
                     memory_domain_id=candidate.memory_domain_id,
@@ -1318,9 +1231,17 @@ def prepare_memory_governance_acceptance(
                 )
             )
         frozen_basis = tuple(ordered_basis)
-        if fact.fact_kind is not MemoryFactKind.DECISION and frozen_basis:
-            raise ValueError("non-DECISION governance acceptance carries basis")
-
+        relation_drafts = tuple(
+            _prepare_memory_relation_draft(
+                candidate_id=candidate.candidate_id,
+                source=fact,
+                target=item,
+                relation_kind=MemoryRelationKind.BASED_ON,
+                supersede_mode=None,
+                ordinal=ordinal,
+            )
+            for ordinal, item in enumerate(frozen_basis)
+        )
         targets_by_id = {item.fact_id: item for item in relation_targets}
         if len(targets_by_id) != len(tuple(relation_targets)):
             raise ValueError("prepared governance targets are duplicated")
@@ -1335,8 +1256,8 @@ def prepare_memory_governance_acceptance(
             )
             if target.expected_lifecycle != "ACTIVE":
                 raise ValueError("prepared governance target is not ACTIVE")
-            if target.scope_kind is not fact.scope_kind or target.scope_id != fact.scope_id:
-                raise ValueError("prepared governance relation crosses exact scope")
+            if target.context_id != fact.context_id:
+                raise ValueError("prepared governance relation crosses exact context")
             same_kind = target.fact_kind is fact.fact_kind
             if decision.decision_kind is MemoryDecisionKind.ACCEPT_AND_CONTRADICT:
                 if not same_kind:
@@ -1353,6 +1274,7 @@ def prepare_memory_governance_acceptance(
             else:
                 raise ValueError("plain acceptance carries a relation target")
             relation_drafts = (
+                *relation_drafts,
                 _prepare_memory_relation_draft(
                     candidate_id=candidate.candidate_id,
                     source=fact,
@@ -1364,18 +1286,8 @@ def prepare_memory_governance_acceptance(
             )
         elif targets_by_id:
             raise ValueError("unused governance relation targets are forbidden")
-        elif decision.decision_kind is MemoryDecisionKind.ACCEPT:
-            relation_drafts = tuple(
-                _prepare_memory_relation_draft(
-                    candidate_id=candidate.candidate_id,
-                    source=fact,
-                    target=item,
-                    relation_kind=MemoryRelationKind.BASED_ON,
-                    supersede_mode=None,
-                    ordinal=ordinal,
-                )
-                for ordinal, item in enumerate(frozen_basis)
-            )
+        elif decision.decision_kind is not MemoryDecisionKind.ACCEPT:
+            raise ValueError("relational acceptance lacks a relation target")
 
         branch_values = [MemoryGovernanceSettlementBranch.ACCEPTANCE]
         if fact.fact_kind is MemoryFactKind.RESPONSE_PREFERENCE or (
@@ -1423,8 +1335,7 @@ def prepare_memory_governance_acceptance(
         "candidate_acceptance_digest": candidate.candidate_acceptance_digest,
         "memory_domain_id": candidate.memory_domain_id,
         "origin_workspace_id": candidate.origin_workspace_id,
-        "scope_kind": candidate.proposal.scope_kind,
-        "scope_id": candidate.proposal.scope_id,
+        "context_id": candidate.proposal.context_id,
         "decision": decision,
         "fact": fact,
         "expected_candidate_status": MemoryCandidateStatus.PROCESSING,
@@ -1445,12 +1356,9 @@ def freeze_memory_fact_settlement_identity(
     return FrozenMemoryFactSettlementIdentity(
         fact_id=item.fact_id,
         memory_domain_id=memory_domain_id,
-        scope_kind=item.scope_kind,
-        scope_id=item.scope_id,
+        context_id=item.context_id,
         fact_kind=item.fact_kind,
         statement=item.statement,
-        applies_when=item.applies_when,
-        do_not_apply_when=item.do_not_apply_when,
         fact_semantic_digest=item.fact_semantic_digest,
         expected_lifecycle=item.lifecycle,
     )
@@ -1467,20 +1375,17 @@ def _prepare_memory_relation_draft(
 ) -> PreparedMemoryRelationDraft:
     relation_id = memory_relation_id(
         memory_domain_id=source.memory_domain_id,
-        source_scope_kind=source.scope_kind,
-        source_scope_id=source.scope_id,
+        source_context_id=source.context_id,
         source_fact_id=source.fact_id,
         relation_kind=relation_kind,
-        target_scope_kind=target.scope_kind,
-        target_scope_id=target.scope_id,
+        target_context_id=target.context_id,
         target_fact_id=target.fact_id,
         supersede_mode=supersede_mode,
     )
     return PreparedMemoryRelationDraft(
         relation_id=relation_id,
         decision_candidate_id=candidate_id,
-        source_scope_kind=source.scope_kind,
-        source_scope_id=source.scope_id,
+        source_context_id=source.context_id,
         source_fact_id=source.fact_id,
         source_fact_kind=source.fact_kind,
         relation_kind=relation_kind,
@@ -1521,30 +1426,23 @@ def prepare_existing_source_relation_settlement(
         existing_source.fact_id == target.fact_id
         or existing_source.memory_domain_id != parent.memory_domain_id
         or target.memory_domain_id != parent.memory_domain_id
-        or existing_source.scope_kind is not parent.scope_kind
-        or existing_source.scope_id != parent.scope_id
+        or existing_source.context_id != parent.context_id
         or existing_source.fact_kind is not fact.fact_kind
         or existing_source.statement != fact.statement
-        or existing_source.applies_when != fact.applies_when
-        or existing_source.do_not_apply_when != fact.do_not_apply_when
         or existing_source.fact_semantic_digest != fact.fact_semantic_digest
         or target.fact_id != decision.related_target_fact_id
     ):
         raise ValueError("existing-source settlement does not join prepared acceptance")
     if relation_kind is MemoryRelationKind.CONTRADICTS:
         if (
-            target.scope_kind is not existing_source.scope_kind
-            or target.scope_id != existing_source.scope_id
+            target.context_id != existing_source.context_id
             or target.fact_kind is not existing_source.fact_kind
         ):
             raise ValueError("existing contradiction endpoint matrix is invalid")
     else:
-        same_scope = (
-            target.scope_kind is existing_source.scope_kind
-            and target.scope_id == existing_source.scope_id
-        )
+        same_context = target.context_id == existing_source.context_id
         same_kind = target.fact_kind is existing_source.fact_kind
-        if not same_scope or (
+        if not same_context or (
             decision.supersede_mode is MemorySupersedeMode.SAME_KIND_REPLACEMENT
             and not same_kind
         ) or (
@@ -1554,12 +1452,10 @@ def prepare_existing_source_relation_settlement(
             raise ValueError("existing supersede endpoint matrix is invalid")
     relation_id = memory_relation_id(
         memory_domain_id=existing_source.memory_domain_id,
-        source_scope_kind=existing_source.scope_kind,
-        source_scope_id=existing_source.scope_id,
+        source_context_id=existing_source.context_id,
         source_fact_id=existing_source.fact_id,
         relation_kind=relation_kind,
-        target_scope_kind=target.scope_kind,
-        target_scope_id=target.scope_id,
+        target_context_id=target.context_id,
         target_fact_id=target.fact_id,
         supersede_mode=decision.supersede_mode,
     )
@@ -1590,51 +1486,42 @@ def prepare_existing_source_relation_settlement(
 def memory_relation_id(
     *,
     memory_domain_id: str,
-    source_scope_kind: MemoryScopeKind,
-    source_scope_id: str,
+    source_context_id: str,
     source_fact_id: str,
     relation_kind: MemoryRelationKind,
-    target_scope_kind: MemoryScopeKind,
-    target_scope_id: str,
+    target_context_id: str,
     target_fact_id: str,
     supersede_mode: MemorySupersedeMode | None,
 ) -> str:
     if relation_kind is MemoryRelationKind.CONTRADICTS:
         source_endpoint = (
-            source_scope_kind.value,
-            source_scope_id,
+            source_context_id,
             source_fact_id,
         )
         target_endpoint = (
-            target_scope_kind.value,
-            target_scope_id,
+            target_context_id,
             target_fact_id,
         )
         if target_endpoint < source_endpoint:
             (
-                source_scope_kind,
-                target_scope_kind,
-                source_scope_id,
-                target_scope_id,
+                source_context_id,
+                target_context_id,
                 source_fact_id,
                 target_fact_id,
             ) = (
-                target_scope_kind,
-                source_scope_kind,
-                target_scope_id,
-                source_scope_id,
+                target_context_id,
+                source_context_id,
                 target_fact_id,
                 source_fact_id,
             )
     identity = canonical_json_bytes(
         (
+            "pulsara.memory-relation.v2-context-hard-cut",
             memory_domain_id,
-            source_scope_kind.value,
-            source_scope_id,
+            source_context_id,
             source_fact_id,
             relation_kind.value,
-            target_scope_kind.value,
-            target_scope_id,
+            target_context_id,
             target_fact_id,
             None if supersede_mode is None else supersede_mode.value,
         )
@@ -1648,34 +1535,18 @@ def _stable_id(prefix: str, *parts: str) -> str:
 
 
 def memory_fact_semantic_digest(
-    *, kind: MemoryFactKind, statement: str, applies_when: str | None, do_not_apply_when: Sequence[str]
+    *, kind: MemoryFactKind, statement: str
 ) -> str:
     return digest(
-        "pulsara:memory-fact-semantic:v1",
+        "pulsara:memory-fact-semantic:v3",
         {
             "fact_kind": kind.value,
             "statement": normalize_memory_text(statement),
-            "applies_when": None if applies_when is None else normalize_memory_text(applies_when),
-            "do_not_apply_when": tuple(normalize_memory_text(x) for x in do_not_apply_when),
         },
     )
 
 
 def validate_final_kind_shape(proposal: FrozenMemoryProposal, kind: MemoryFactKind) -> None:
-    has_applies = proposal.applies_when is not None
-    has_exclusions = bool(proposal.do_not_apply_when)
-    has_basis = bool(proposal.based_on_memory_ids)
-    if kind is MemoryFactKind.ACTION_RULE:
-        if not has_applies or has_basis:
-            raise ValueError("ACTION_RULE structure is invalid")
-    elif has_applies or has_exclusions:
-        raise ValueError("only ACTION_RULE can carry applicability fields")
-    if kind is MemoryFactKind.DECISION:
-        pass
-    elif has_basis:
-        raise ValueError("only DECISION can carry BASED_ON references")
-    if kind is MemoryFactKind.USER_PROFILE and proposal.scope_kind is not MemoryScopeKind.USER:
-        raise ValueError("USER_PROFILE requires USER scope")
     if kind is MemoryFactKind.RESPONSE_PREFERENCE and len(proposal.statement.encode("utf-8")) > MAXIMUM_RESPONSE_PREFERENCE_STATEMENT_BYTES:
         raise ValueError("RESPONSE_PREFERENCE exceeds statement bound")
 
@@ -1695,8 +1566,49 @@ def legal_memory_final_kinds(
     return tuple(legal)
 
 
-def visible_scope_predicate(binding: FrozenMemoryReadScopeBinding) -> tuple[tuple[str, str], ...]:
-    return tuple((item.kind.value, item.scope_id) for item in binding.readable_scopes)
+def visible_context_predicate(binding: FrozenMemoryReadContextBinding) -> tuple[str, ...]:
+    return binding.readable_context_ids
+
+
+def memory_basis_context_allowed(
+    source_context_id: str, target_context_id: str
+) -> bool:
+    """Closed BASED_ON hierarchy: global->global; project->global/same project."""
+
+    if source_context_id == CTX_GLOBAL:
+        return target_context_id == CTX_GLOBAL
+    return source_context_id.startswith(WORKSPACE_CONTEXT_PREFIX) and (
+        target_context_id == CTX_GLOBAL or target_context_id == source_context_id
+    )
+
+
+def memory_context_product_label(context_id: str) -> str:
+    if context_id == CTX_GLOBAL:
+        return "available across conversations; use only as limited by the statement"
+    if context_id.startswith(WORKSPACE_CONTEXT_PREFIX) and is_valid_context_id(
+        context_id
+    ):
+        return "available only in the current project/context"
+    raise ValueError("memory context identity is invalid")
+
+
+def canonical_memory_recorded_at(value: datetime) -> str:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("memory recorded_at must be timezone-aware")
+    return value.astimezone(timezone.utc).replace(microsecond=0).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+
+
+def validate_canonical_memory_recorded_at(value: str) -> None:
+    if not value or not value.endswith("Z"):
+        raise ValueError("memory recorded_at is not canonical UTC")
+    try:
+        parsed = datetime.fromisoformat(value[:-1] + "+00:00")
+    except ValueError as exc:
+        raise ValueError("memory recorded_at is not RFC 3339") from exc
+    if canonical_memory_recorded_at(parsed) != value:
+        raise ValueError("memory recorded_at is not canonical UTC seconds")
 
 
 def normalize_memory_text(value: str) -> str:
@@ -1726,12 +1638,15 @@ def _bounded_text(value: str, minimum: int, maximum: int, name: str) -> None:
 
 __all__ = [name for name in globals() if name.startswith("Memory") or name.startswith("Prepared") or name.startswith("Frozen") or name.startswith("MAXIMUM_")] + [
     "canonical_json_bytes",
+    "canonical_memory_recorded_at",
     "digest",
     "freeze_memory_fact_settlement_identity",
     "memory_fact_semantic_digest",
     "memory_governance_source_item_payload",
     "memory_governance_source_projection_bytes",
     "legal_memory_final_kinds",
+    "memory_basis_context_allowed",
+    "memory_context_product_label",
     "memory_public_fact_payload",
     "memory_response_preference_item_payload",
     "memory_relation_id",
@@ -1742,5 +1657,6 @@ __all__ = [name for name in globals() if name.startswith("Memory") or name.start
     "prepared_memory_candidate_digest",
     "strongest_memory_use_policy",
     "validate_final_kind_shape",
-    "visible_scope_predicate",
+    "validate_canonical_memory_recorded_at",
+    "visible_context_predicate",
 ]

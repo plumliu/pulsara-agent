@@ -23,7 +23,6 @@ class KernelWatchdogOwner(StrEnum):
     HOST_SESSION_CLOSE = "HOST_SESSION_CLOSE"
     BLOB_GC_CLOSE = "BLOB_GC_CLOSE"
     MEMORY_GOVERNANCE_ATTEMPT = "MEMORY_GOVERNANCE_ATTEMPT"
-    MEMORY_HINT_REVIEW_ATTEMPT = "MEMORY_HINT_REVIEW_ATTEMPT"
     MEMORY_GOVERNOR_CLOSE = "MEMORY_GOVERNOR_CLOSE"
     MEMORY_AUTO_QUERY_EMBEDDING = "MEMORY_AUTO_QUERY_EMBEDDING"
     MEMORY_EXPLICIT_QUERY_EMBEDDING = "MEMORY_EXPLICIT_QUERY_EMBEDDING"
@@ -48,7 +47,6 @@ class KernelExecutionWatchdogPolicy:
     host_session_close_join_seconds: float = 120.0
     blob_gc_close_seconds: float = 120.0
     memory_governance_attempt_seconds: float = 300.0
-    memory_hint_review_attempt_seconds: float = 120.0
     memory_governor_close_seconds: float = 120.0
     memory_auto_query_embedding_seconds: float = 3.0
     memory_explicit_query_embedding_seconds: float = 4.0
@@ -83,7 +81,6 @@ class KernelExecutionWatchdogPolicy:
             self.host_session_close_join_seconds,
             self.blob_gc_close_seconds,
             self.memory_governance_attempt_seconds,
-            self.memory_hint_review_attempt_seconds,
             self.memory_governor_close_seconds,
             self.memory_auto_query_embedding_seconds,
             self.memory_explicit_query_embedding_seconds,
@@ -147,7 +144,6 @@ class KernelExecutionWatchdogPolicy:
             KernelWatchdogOwner.HOST_SESSION_CLOSE: self.host_session_close_join_seconds,
             KernelWatchdogOwner.BLOB_GC_CLOSE: self.blob_gc_close_seconds,
             KernelWatchdogOwner.MEMORY_GOVERNANCE_ATTEMPT: self.memory_governance_attempt_seconds,
-            KernelWatchdogOwner.MEMORY_HINT_REVIEW_ATTEMPT: self.memory_hint_review_attempt_seconds,
             KernelWatchdogOwner.MEMORY_GOVERNOR_CLOSE: self.memory_governor_close_seconds,
             KernelWatchdogOwner.MEMORY_AUTO_QUERY_EMBEDDING: self.memory_auto_query_embedding_seconds,
             KernelWatchdogOwner.MEMORY_EXPLICIT_QUERY_EMBEDDING: self.memory_explicit_query_embedding_seconds,

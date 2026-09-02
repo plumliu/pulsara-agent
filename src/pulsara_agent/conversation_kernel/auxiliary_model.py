@@ -41,7 +41,7 @@ from pulsara_agent.llm.resolution import (
 )
 from pulsara_agent.llm.validation import validate_model_context_shape_for_call
 from pulsara_agent.memory.product_contract import (
-    MEMORY_GOVERNANCE_SYSTEM_PROMPT_V2,
+    MEMORY_GOVERNANCE_SYSTEM_PROMPT_V3,
 )
 from pulsara_agent.ports.live_agent_event import (
     TextDeltaPayload,
@@ -165,7 +165,6 @@ class DirectKernelAuxiliaryJsonModel:
         if purpose not in {
             ModelCallPurpose.CONTEXT_COMPACTION_SUMMARY,
             ModelCallPurpose.MEMORY_GOVERNANCE,
-            ModelCallPurpose.MEMORY_HINT_REVIEW,
         }:
             raise ValueError("auxiliary JSON purpose is not in the closed contract")
         if timeout_policy.total_seconds is None:
@@ -349,13 +348,13 @@ def _validate_auxiliary_message_shape(
         if (
             len(messages) != 2
             or messages[0].role is not MessageRole.SYSTEM
-            or messages[0].content != (MEMORY_GOVERNANCE_SYSTEM_PROMPT_V2,)
+            or messages[0].content != (MEMORY_GOVERNANCE_SYSTEM_PROMPT_V3,)
             or messages[1].role is not MessageRole.USER
         ):
             raise ValueError(
                 "memory governance requires its exact stable SYSTEM and one USER packet"
             )
-        system_prompt = MEMORY_GOVERNANCE_SYSTEM_PROMPT_V2
+        system_prompt = MEMORY_GOVERNANCE_SYSTEM_PROMPT_V3
         ordered_messages = (messages[1],)
     else:
         if len(messages) != 1 or messages[0].role is not MessageRole.USER:

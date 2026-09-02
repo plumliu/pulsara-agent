@@ -26,9 +26,6 @@ from pulsara_agent.conversation_kernel.compaction.runtime_handoff import (
     FrozenRootSubagentTaskBoardHandoffFact,
 )
 from pulsara_agent.conversation_kernel.mcp.contracts import McpInstallationCandidate
-from pulsara_agent.conversation_kernel.memory.reflection import (
-    PreparedCheapHintReflectionCandidateBatch,
-)
 from pulsara_agent.conversation_kernel.subagents import contracts as subagent_contracts
 from pulsara_agent.conversation_kernel.tool_runtime import (
     ProductionBuiltinExecutorBinding,
@@ -58,7 +55,6 @@ def test_hard_cut_mandatory_process_local_fingerprint_fields_are_absent() -> Non
         SubagentInitialSeed: {"objective_item_fingerprint", "seed_fingerprint"},
         RecentHumanMessageProof: {"item_fingerprint"},
         FrozenTodoItem: {"item_fingerprint"},
-        PreparedCheapHintReflectionCandidateBatch: {"batch_fingerprint"},
         FrozenRootSubagentTaskBoardHandoffFact: {"fact_fingerprint"},
         PreparedAssistantMessageSettlement: {"candidate_fingerprint"},
         PreparedProviderInputAppendCandidate: {"candidate_fingerprint"},

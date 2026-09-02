@@ -601,6 +601,9 @@ class StaticContextSourceCollector:
                 ContextSourceAbsenceKind.NOT_APPLICABLE
             ),
             ContextSourceKind.MEMORY_RECALL: (ContextSourceAbsenceKind.NOT_APPLICABLE),
+            ContextSourceKind.MEMORY_WRITE_HINT: (
+                ContextSourceAbsenceKind.NOT_APPLICABLE
+            ),
             ContextSourceKind.COMPACTION_RUNTIME_HANDOFF: (
                 ContextSourceAbsenceKind.NOT_APPLICABLE
             ),

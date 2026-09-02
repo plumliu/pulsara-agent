@@ -755,18 +755,11 @@ class _ToolOperations:
         if (
             str(memory["origin_workspace_id"]) != prepared.origin_workspace_id
             or str(memory["origin_session_id"]) != prepared.origin_session_id
-            or str(memory["producer_kind"]) != prepared.producer_kind.value
             or memory["producer_entry_id"] != prepared.producer_entry_id
             or memory["producer_tool_call_id"] != prepared.producer_tool_call_id
-            or memory["trigger_user_entry_id"] != prepared.trigger_user_entry_id
-            or memory["producer_candidate_ordinal"]
-            != prepared.producer_candidate_ordinal
-            or str(memory["scope_kind"]) != proposal.scope_kind.value
-            or str(memory["scope_id"]) != proposal.scope_id
+            or str(memory["context_id"]) != proposal.context_id
             or str(memory["kind_hint"]) != proposal.kind_hint.value
             or str(memory["statement"]) != proposal.statement
-            or memory["applies_when"] != proposal.applies_when
-            or tuple(memory["do_not_apply_when"]) != proposal.do_not_apply_when
             or str(memory["candidate_acceptance_digest"])
             != prepared.candidate_acceptance_digest
             or str(memory["model_visible_memory_provenance_disposition"])
@@ -789,7 +782,7 @@ class _ToolOperations:
         ).fetchall()
         basis = connection.execute(
             """
-            SELECT target_fact_id, target_scope_kind, target_scope_id, ordinal
+            SELECT target_fact_id, target_context_id, ordinal
             FROM pulsara_v3.memory_candidate_basis_refs
             WHERE candidate_id = %s ORDER BY ordinal
             """,
@@ -816,16 +809,14 @@ class _ToolOperations:
         ) or tuple(
             (
                 str(row["target_fact_id"]),
-                str(row["target_scope_kind"]),
-                str(row["target_scope_id"]),
+                str(row["target_context_id"]),
                 int(row["ordinal"]),
             )
             for row in basis
         ) != tuple(
             (
                 ref.target_fact_id,
-                ref.target_scope_kind.value,
-                ref.target_scope_id,
+                ref.target_context_id,
                 ref.ordinal,
             )
             for ref in prepared.basis_refs
@@ -844,15 +835,13 @@ class _ToolOperations:
             """
             INSERT INTO pulsara_v3.memory_candidates (
                 id, memory_domain_id, origin_workspace_id, origin_session_id,
-                producer_kind, producer_entry_id, producer_tool_call_id,
-                trigger_user_entry_id, producer_candidate_ordinal,
-                scope_kind, scope_id, kind_hint, statement, applies_when,
-                do_not_apply_when, candidate_acceptance_digest,
+                producer_entry_id, producer_tool_call_id,
+                context_id, kind_hint, statement, candidate_acceptance_digest,
                 model_visible_memory_provenance_disposition,
                 model_visible_memory_fact_ids, status
             ) VALUES (
-                %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, 'PENDING'
+                %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, 'PENDING'
             )
             """,
             (
@@ -860,17 +849,11 @@ class _ToolOperations:
                 prepared.memory_domain_id,
                 prepared.origin_workspace_id,
                 prepared.origin_session_id,
-                prepared.producer_kind.value,
                 prepared.producer_entry_id,
                 prepared.producer_tool_call_id,
-                prepared.trigger_user_entry_id,
-                prepared.producer_candidate_ordinal,
-                proposal.scope_kind.value,
-                proposal.scope_id,
+                proposal.context_id,
                 proposal.kind_hint.value,
                 proposal.statement,
-                proposal.applies_when,
-                list(proposal.do_not_apply_when),
                 prepared.candidate_acceptance_digest,
                 prepared.visible_memory.disposition.value,
                 list(prepared.visible_memory.fact_ids),
@@ -898,17 +881,15 @@ class _ToolOperations:
                 """
                 INSERT INTO pulsara_v3.memory_candidate_basis_refs (
                     candidate_id, memory_domain_id,
-                    source_scope_kind, source_scope_id,
-                    target_scope_kind, target_scope_id, target_fact_id, ordinal
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    source_context_id,
+                    target_context_id, target_fact_id, ordinal
+                ) VALUES (%s, %s, %s, %s, %s, %s)
                 """,
                 (
                     prepared.candidate_id,
                     prepared.memory_domain_id,
-                    proposal.scope_kind.value,
-                    proposal.scope_id,
-                    ref.target_scope_kind.value,
-                    ref.target_scope_id,
+                    proposal.context_id,
+                    ref.target_context_id,
                     ref.target_fact_id,
                     ref.ordinal,
                 ),

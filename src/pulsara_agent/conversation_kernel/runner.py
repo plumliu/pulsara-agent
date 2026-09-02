@@ -227,7 +227,6 @@ class KernelRunResult:
     continuation_turn_id: str | None = None
     continuation_entry_id: str | None = None
     pending_plan_interaction_id: str | None = None
-    memory_reflection_tokens: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -829,7 +828,6 @@ class ConversationKernelRunner:
 
         model_call_count = 0
         tool_call_count = 0
-        remember_requested = False
         current_memory_use_policy = (
             self._root_memory_use_policy
             if intent.scope_kind is ModelInputScopeKind.ROOT
@@ -1385,22 +1383,12 @@ class ConversationKernelRunner:
                     active_surface_borrow.close()
                     active_surface_borrow = None
                     self._memory_dispatch.offer_governance_wake()
-                    reflection_token = await self._memory_dispatch.prepare_reflection(
-                        cut=request.cut,
-                        through_sequence=accepted.entry_sequence,
-                        permission=canonical_facts.run_permission_snapshot,
-                        remember_requested=remember_requested,
-                        memory_use_policy=current_memory_use_policy,
-                    )
                     return KernelRunResult(
                         turn_id=turn_id,
                         final_entry_id=accepted.entry_id,
                         final_text=completed.public_text,
                         model_call_count=model_call_count,
                         tool_call_count=tool_call_count,
-                        memory_reflection_tokens=(
-                            () if reflection_token is None else (reflection_token,)
-                        ),
                     )
                 if not calls:
                     # A steer arrived after this provider call froze its cut.
@@ -1481,7 +1469,6 @@ class ConversationKernelRunner:
                     hook_scope=self._hook_scope,
                 )
                 tool_call_count += batch.tool_call_count
-                remember_requested = remember_requested or batch.remember_requested
                 if batch.terminal is not None:
                     self._memory_dispatch.offer_governance_wake()
                     return KernelRunResult(

@@ -321,7 +321,6 @@ class ToolBatchTerminalResult:
 @dataclass(frozen=True, slots=True)
 class ToolBatchExecutionResult:
     tool_call_count: int
-    remember_requested: bool
     terminal: ToolBatchTerminalResult | None = None
 
 
@@ -645,7 +644,6 @@ class ToolBatchExecutor:
         hook_scope: HookDispatchScopeRef | None = None,
     ) -> ToolBatchExecutionResult:
         tool_call_count = 0
-        remember_requested = False
         unsettled_process_local_effect: ProcessLocalEffectSettlementToken | None = None
         pending_hook_context_reservations = []
         pending_completion_permit: object | None = None
@@ -709,7 +707,7 @@ class ToolBatchExecutor:
                             getattr(
                                 binding,
                                 "memory_citation_visibility",
-                                "WORKSPACE_BOUND",
+                                "CURRENT_CONTEXT_BOUND",
                             )
                         ),
                         memory_citation_evidence_kind=MemoryCitationEvidenceKind(
@@ -735,7 +733,6 @@ class ToolBatchExecutor:
                         )
                 return ToolBatchExecutionResult(
                     tool_call_count=tool_call_count,
-                    remember_requested=remember_requested,
                 )
             for call_ordinal, call in enumerate(calls):
                 tool_call_count += 1
@@ -1419,7 +1416,6 @@ class ToolBatchExecutor:
                         raise cancellation
                     return ToolBatchExecutionResult(
                         tool_call_count=tool_call_count,
-                        remember_requested=remember_requested,
                         terminal=ToolBatchTerminalResult(
                             final_entry_id=explicit_accepted.entry_id,
                             final_text=result_fact.summary,
@@ -1456,7 +1452,7 @@ class ToolBatchExecutor:
                                 getattr(
                                     binding,
                                     "memory_citation_visibility",
-                                    "WORKSPACE_BOUND",
+                                    "CURRENT_CONTEXT_BOUND",
                                 )
                             )
                         ),
@@ -1502,8 +1498,6 @@ class ToolBatchExecutor:
                     pending_hook_context_reservations.remove(
                         pre_context_reservation
                     )
-                if result.memory_candidate is not None:
-                    remember_requested = True
                 if cancellation is not None:
                     raise cancellation
                 if result.caller_cancelled_while_running:
@@ -1512,7 +1506,6 @@ class ToolBatchExecutor:
                     raise asyncio.CancelledError
             return ToolBatchExecutionResult(
                 tool_call_count=tool_call_count,
-                remember_requested=remember_requested,
             )
 
         finally:

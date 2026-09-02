@@ -200,6 +200,7 @@ from pulsara_agent.model_input.provider_replay import (
 )
 
 from pulsara_agent.primitives.model_call import ModelCallPurpose
+from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.primitives.context import (
     context_fingerprint,
 )
@@ -1498,6 +1499,7 @@ class ProviderDispatchCoordinator:
                 ContextSourceCandidate | ContextSourceAbsentFact | None
             ) = None
             selected_trigger_disposition: str | None = None
+            selected_write_hint = False
             selected_memory_use_policy = inherited_memory_use_policy
 
             # A steer batch is appended to the already-admitted ROOT prompt.
@@ -1603,6 +1605,7 @@ class ProviderDispatchCoordinator:
                     activation_text = prefix[-1][1].decode("utf-8")
                     memory_use_policy = steer_base_memory_use_policy
                     trigger_disposition = "ELIGIBLE"
+                    write_hint = False
                     if self._memory_support.available:
                         trigger_policies = tuple(
                             self._memory_support.classify_trigger(body.decode("utf-8"))
@@ -1618,6 +1621,16 @@ class ProviderDispatchCoordinator:
                             trigger_disposition = str(
                                 AutomaticMemoryTriggerDisposition.DISABLED_BY_EXPLICIT_USER_DIRECTIVE
                             )
+                        write_hint = (
+                            trigger_policies[-1].write_hint
+                            and memory_use_policy.allows_writes
+                            and prospective.run_permission_snapshot.effective_mode
+                            is not PermissionMode.READ_ONLY
+                            and any(
+                                item.name == "remember"
+                                for item in model_surface.tool_specs
+                            )
+                        )
                     try:
                         sources = await self._io.run(
                             self._context_source_collector.complete_frozen_sources,
@@ -1828,6 +1841,7 @@ class ProviderDispatchCoordinator:
                     selected_activation_text = activation_text
                     selected_preference = effective_preference
                     selected_trigger_disposition = trigger_disposition
+                    selected_write_hint = write_hint
                     selected_memory_use_policy = memory_use_policy
                     break
 
@@ -1931,6 +1945,7 @@ class ProviderDispatchCoordinator:
                     include_recall=True,
                     frozen_preference=selected_preference,
                     trigger_disposition=selected_trigger_disposition,
+                    write_hint=selected_write_hint,
                 )
                 final_memory = self._memory_support.freeze_call_context(
                     scope=scope,
@@ -2039,6 +2054,7 @@ class ProviderDispatchCoordinator:
             recall_reservation = None
             preference_reservation = None
             trigger_disposition = None
+            write_hint = False
             memory_use_policy = inherited_memory_use_policy
             if (
                 self._memory_support.available
@@ -2060,6 +2076,13 @@ class ProviderDispatchCoordinator:
                     trigger_disposition = str(
                         AutomaticMemoryTriggerDisposition.DISABLED_BY_EXPLICIT_USER_DIRECTIVE
                     )
+                write_hint = (
+                    trigger_policy.write_hint
+                    and memory_use_policy.allows_writes
+                    and base_facts.run_permission_snapshot.effective_mode
+                    is not PermissionMode.READ_ONLY
+                    and any(item.name == "remember" for item in model_surface.tool_specs)
+                )
                 if memory_use_policy is MemoryUsePolicy.ALL_DISABLED_BY_USER:
                     preference_source = build_memory_context_source(
                         kind=(ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD),
@@ -2135,6 +2158,7 @@ class ProviderDispatchCoordinator:
                         include_recall=True,
                         frozen_preference=preference_source,
                         trigger_disposition=trigger_disposition,
+                        write_hint=write_hint,
                     )
                 projection_memory = self._memory_support.freeze_call_context(
                     scope=scope,
@@ -2252,6 +2276,7 @@ class ProviderDispatchCoordinator:
                     include_recall=True,
                     frozen_preference=preference_source,
                     trigger_disposition=trigger_disposition,
+                    write_hint=write_hint,
                 )
                 final_memory = self._memory_support.freeze_call_context(
                     scope=scope,

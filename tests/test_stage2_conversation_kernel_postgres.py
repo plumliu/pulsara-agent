@@ -24,7 +24,6 @@ from pulsara_agent.conversation_kernel.memory import PostgresMemoryQuery
 from pulsara_agent.conversation_kernel.memory.contracts import (
     FrozenMemoryProposal,
     MemoryKindHint,
-    MemoryProducerKind,
     prepare_memory_candidate,
 )
 from pulsara_agent.conversation_kernel.input_continuity import (
@@ -94,7 +93,7 @@ from pulsara_agent.model_input.contracts import (
 )
 from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
 from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
-from pulsara_agent.memory.scope import CTX_USER, MemoryScopeKind
+from pulsara_agent.memory.scope import CTX_GLOBAL
 from pulsara_agent.conversation_kernel.vocabulary import (
     APPEND_GUARDS,
     COMMITTED_EVENT_DESCRIPTORS,
@@ -2286,13 +2285,11 @@ def test_stage2_memory_candidate_and_tool_result_are_one_transaction(
         memory_domain_id="u_local",
         origin_workspace_id=workspace_id,
         origin_session_id=session_id,
-        producer_kind=MemoryProducerKind.MAIN_AGENT_REMEMBER,
         producer_entry_id=assistant_entry_id,
         producer_tool_call_id=first_call,
         proposal=FrozenMemoryProposal(
             statement="a",
-            scope_kind=MemoryScopeKind.USER,
-            scope_id=CTX_USER,
+            context_id=CTX_GLOBAL,
             kind_hint=MemoryKindHint.FACT,
         ),
     )
@@ -2348,13 +2345,11 @@ def test_stage2_memory_candidate_and_tool_result_are_one_transaction(
         memory_domain_id="u_local",
         origin_workspace_id=workspace_id,
         origin_session_id=session_id,
-        producer_kind=MemoryProducerKind.MAIN_AGENT_REMEMBER,
         producer_entry_id=assistant_entry_id,
         producer_tool_call_id=second_call,
         proposal=FrozenMemoryProposal(
             statement="b",
-            scope_kind=MemoryScopeKind.USER,
-            scope_id=CTX_USER,
+            context_id=CTX_GLOBAL,
             kind_hint=MemoryKindHint.FACT,
         ),
     )

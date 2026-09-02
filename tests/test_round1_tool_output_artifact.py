@@ -19,7 +19,6 @@ from pulsara_agent.conversation_kernel.live import LiveAgentEventBus
 from pulsara_agent.conversation_kernel.memory.contracts import (
     FrozenMemoryProposal,
     MemoryKindHint,
-    MemoryProducerKind,
     prepare_memory_candidate,
 )
 from pulsara_agent.conversation_kernel.repository import (
@@ -99,7 +98,7 @@ from pulsara_agent.ports.tool_execution import (
     ToolOutputSourceCoverageReason,
 )
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
-from pulsara_agent.memory.scope import CTX_USER, MemoryScopeKind
+from pulsara_agent.memory.scope import CTX_GLOBAL
 from pulsara_agent.storage.migrations.manifest import CONVERSATION_KERNEL_RELATIONS
 from pulsara_agent.terminal_process.output import TerminalOutputOwner
 from pulsara_agent.tools.builtins.artifact import ArtifactReadTool
@@ -1605,13 +1604,11 @@ def test_round1_memory_side_branch_confirmation_is_all_or_none(
         memory_domain_id=memory_domain_id,
         origin_workspace_id=workspace_id,
         origin_session_id=lease.guard.session_id,
-        producer_kind=MemoryProducerKind.MAIN_AGENT_REMEMBER,
         producer_entry_id=assistant_entry_id,
         producer_tool_call_id=tool_call_id,
         proposal=FrozenMemoryProposal(
             statement="remember",
-            scope_kind=MemoryScopeKind.USER,
-            scope_id=CTX_USER,
+            context_id=CTX_GLOBAL,
             kind_hint=MemoryKindHint.FACT,
         ),
     )

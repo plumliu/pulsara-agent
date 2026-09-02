@@ -1013,8 +1013,10 @@ def _response_output_item_identity_fingerprint(item: dict[str, Any]) -> str:
                 "name": item.get("name"),
             }
         )
-    elif item_type == "reasoning":
-        identity["format"] = item.get("format")
+    # ``reasoning.format`` is a settled carrier field, not stream identity.
+    # Responses-compatible endpoints may populate it only on item.done.  The
+    # final value remains closed and byte-exact through the existing
+    # item.done-to-response.completed comparison and replay validation.
     return context_fingerprint("pulsara.responses-output-item-identity:v1", identity)
 
 

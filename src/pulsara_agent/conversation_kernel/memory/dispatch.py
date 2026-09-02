@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import replace
 from typing import Protocol
 
@@ -25,6 +24,7 @@ from pulsara_agent.conversation_kernel.memory.contracts import (
     FrozenModelCallMemoryContext,
     MemoryUsePolicy,
 )
+from pulsara_agent.conversation_kernel.memory.hints import MEMORY_WRITE_HINT_BODY
 from pulsara_agent.conversation_kernel.memory.citations import (
     ProcessLocalMemoryCallContextOwner,
 )
@@ -47,7 +47,6 @@ from pulsara_agent.model_input.contracts import (
     ContextSourceKind,
     ContextSourceLifecycle,
     FrozenCanonicalCompileSnapshot,
-    CanonicalModelInputSnapshot,
     PreparedProviderInputCut,
     FrozenCompiledModelInput,
     ModelInputCompileFailureKind,
@@ -66,7 +65,6 @@ from pulsara_agent.model_input.continuity import (
     SourceObservationPresence,
 )
 
-from pulsara_agent.primitives.run_permission import FrozenRunPermissionSnapshot
 from pulsara_agent.primitives.context import (
     context_fingerprint,
 )
@@ -88,14 +86,6 @@ class MemoryContextProjectionPort(Protocol):
     def classify_memory_trigger(self, text: str) -> FrozenMemoryTriggerPolicy: ...
 
     def offer_governance_wake(self) -> None: ...
-
-    def prepare_and_adopt_reflection(
-        self,
-        *,
-        canonical: CanonicalModelInputSnapshot,
-        permission: FrozenRunPermissionSnapshot,
-        remember_requested: bool,
-    ) -> str | None: ...
 
 
 class MemoryDispatchSupport:
@@ -381,6 +371,7 @@ class MemoryDispatchSupport:
         | ContextSourceAbsentFact
         | None = None,
         trigger_disposition: str | None = None,
+        write_hint: bool = False,
     ) -> CollectedContextSources:
         if (
             self._memory_projection is None
@@ -401,7 +392,12 @@ class MemoryDispatchSupport:
                 absence_kind=ContextSourceAbsenceKind.EXPLICIT_EMPTY,
             )
         replacements: list[ContextSourceCandidate | ContextSourceAbsentFact] = [
-            preference
+            preference,
+            build_memory_context_source(
+                kind=ContextSourceKind.MEMORY_WRITE_HINT,
+                texts=(MEMORY_WRITE_HINT_BODY,) if write_hint else None,
+                absence_kind=ContextSourceAbsenceKind.NOT_APPLICABLE,
+            ),
         ]
         if include_recall:
             if disposition in {
@@ -545,43 +541,5 @@ class MemoryDispatchSupport:
             ),
         )
         return await compile_one(without_optional_values), without_optional_values
-
-    async def prepare_reflection(
-        self,
-        *,
-        cut: PreparedProviderInputCut,
-        through_sequence: int,
-        permission: FrozenRunPermissionSnapshot,
-        remember_requested: bool,
-        memory_use_policy: MemoryUsePolicy,
-    ) -> str | None:
-        """Install one optional DORMANT handoff before the ROOT slot releases."""
-
-        if (
-            self._memory_projection is None
-            or memory_use_policy is MemoryUsePolicy.ALL_DISABLED_BY_USER
-        ):
-            return None
-        post_turn_cut = PreparedProviderInputCut(
-            session_id=cut.session_id,
-            turn_id=cut.turn_id,
-            context_binding_revision_id=cut.context_binding_revision_id,
-            provider_input_through_sequence=through_sequence,
-        )
-        try:
-            frozen = await self._read_compile_snapshot(
-                post_turn_cut, deadline=self._canonical_deadline()
-            )
-            return self._memory_projection.prepare_and_adopt_reflection(
-                canonical=frozen.canonical_input,
-                permission=permission,
-                remember_requested=remember_requested,
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            # Reflection is weaker than the already-committed reply.
-            return None
-
 
 __all__ = ["MemoryContextProjectionPort", "MemoryDispatchSupport"]

@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Literal
 from uuid import uuid4
 
-from pulsara_agent.memory.scope import MemoryDomainContext, workspace_scope
+from pulsara_agent.memory.scope import MemoryDomainContext, workspace_context_id
 
 WorkspaceKind = Literal["project", "transient"]
 
@@ -30,7 +30,7 @@ class ResolvedWorkspace:
     workspace_root: Path
     display_label: str
     memory_domain: MemoryDomainContext
-    workspace_scope: str | None
+    workspace_context_id: str | None
     workspace_key: str
     cleanup_workspace_root_on_close: bool = False
     trust_workspace_mcp_config: bool = False
@@ -61,14 +61,14 @@ def resolve_workspace(
             stable_project_key=stable_key,
             workspace_label=label,
         )
-        scope = workspace_scope(stable_key)
+        context_id = workspace_context_id(stable_key)
         return ResolvedWorkspace(
             workspace_kind="project",
             workspace_root=root,
             display_label=label,
             memory_domain=domain,
-            workspace_scope=scope,
-            workspace_key=scope,
+            workspace_context_id=context_id,
+            workspace_key=context_id,
             trust_workspace_mcp_config=workspace.trust_workspace_mcp_config,
         )
 
@@ -86,8 +86,8 @@ def resolve_workspace(
         workspace_root=root,
         display_label=label,
         memory_domain=domain,
-        workspace_scope=None,
-        # A transient workspace has no project-memory scope, but its physical
+        workspace_context_id=None,
+        # A transient workspace has no project-memory context, but its physical
         # directory can still back a durable, resumable conversation.  The
         # canonical identity therefore follows that exact normalized root.
         workspace_key=(

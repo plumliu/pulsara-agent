@@ -1330,7 +1330,7 @@ class DirectKernelToolPort:
                                 )
                             ),
                             execution_policy=policy,
-                            memory_citation_visibility="WORKSPACE_BOUND",
+                            memory_citation_visibility="CURRENT_CONTEXT_BOUND",
                             memory_citation_evidence_kind=(
                                 "MEMORY_READ_EXPOSURE"
                                 if spec.name

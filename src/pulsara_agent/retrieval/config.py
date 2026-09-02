@@ -211,8 +211,6 @@ class RerankBackendConfig:
 class AdvisoryMemoryFeatureConfig:
     automatic_dense: bool = True
     explicit_rerank: bool = True
-    cheap_hint_reflection: bool = True
-    hint_review_allow_cross_provider: bool = False
 
     @classmethod
     def from_env(
@@ -222,12 +220,6 @@ class AdvisoryMemoryFeatureConfig:
             automatic_dense=_env_bool(f"{prefix}_MEMORY_AUTO_DENSE", True),
             explicit_rerank=_env_bool(
                 f"{prefix}_MEMORY_EXPLICIT_RERANK", True
-            ),
-            cheap_hint_reflection=_env_bool(
-                f"{prefix}_MEMORY_CHEAP_HINT_REFLECTION", True
-            ),
-            hint_review_allow_cross_provider=_env_bool(
-                f"{prefix}_MEMORY_HINT_REVIEW_ALLOW_CROSS_PROVIDER", False
             ),
         )
 

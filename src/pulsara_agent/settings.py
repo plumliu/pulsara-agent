@@ -95,12 +95,6 @@ class PulsaraSettings:
                 "memory": {
                     "automatic_dense": self.retrieval.memory.automatic_dense,
                     "explicit_rerank": self.retrieval.memory.explicit_rerank,
-                    "cheap_hint_reflection": (
-                        self.retrieval.memory.cheap_hint_reflection
-                    ),
-                    "hint_review_allow_cross_provider": (
-                        self.retrieval.memory.hint_review_allow_cross_provider
-                    ),
                 },
             },
         }

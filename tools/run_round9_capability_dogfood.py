@@ -142,7 +142,6 @@ def _settings(env_file: str, *, api: str, runtime_dsn: str) -> PulsaraSettings:
     os.environ["PULSARA_API"] = api
     os.environ["PULSARA_MEMORY_AUTO_DENSE"] = "false"
     os.environ["PULSARA_MEMORY_EXPLICIT_RERANK"] = "false"
-    os.environ["PULSARA_MEMORY_CHEAP_HINT_REFLECTION"] = "false"
     return replace(
         PulsaraSettings.from_env(),
         storage=StorageConfig(postgres_dsn=runtime_dsn),

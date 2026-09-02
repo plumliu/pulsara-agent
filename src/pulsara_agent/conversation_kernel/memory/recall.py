@@ -10,7 +10,10 @@ from typing import Sequence
 from psycopg import IsolationLevel
 from psycopg.rows import dict_row
 
-from pulsara_agent.memory.scope import FrozenMemoryReadScopeBinding, MemoryScopeKind
+from pulsara_agent.conversation_kernel.memory.contracts import (
+    canonical_memory_recorded_at,
+)
+from pulsara_agent.memory.scope import FrozenMemoryReadContextBinding
 from pulsara_agent.retrieval.config import (
     MEMORY_DENSE_ELIGIBILITY_POLICY,
     MEMORY_EMBEDDING_CONTRACT,
@@ -55,7 +58,7 @@ class MemoryDenseCandidateBatch:
 @dataclass(frozen=True, slots=True)
 class MemorySearchStageResult:
     ordinal: int
-    scope: str
+    context_coverage: str
     kind: str
     new_results: int
 
@@ -64,13 +67,11 @@ class MemorySearchStageResult:
 class MemoryQueryRow:
     fact_id: str
     memory_domain_id: str
-    scope_kind: str
-    scope_id: str
+    context_id: str
     fact_kind: str
     lifecycle: str
     statement: str
-    applies_when: str | None
-    do_not_apply_when: tuple[str, ...]
+    recorded_at: str
     fact_semantic_digest: str
     sparse_rank: int | None = None
     dense_rank: int | None = None
@@ -80,11 +81,9 @@ class MemoryQueryRow:
     @property
     def fact_payload(self) -> dict[str, object]:
         return {
-            "scope": self.scope_kind,
-            "scope_id": self.scope_id,
+            "context_id": self.context_id,
             "statement": self.statement,
-            "applies_when": self.applies_when,
-            "do_not_apply_when": list(self.do_not_apply_when),
+            "recorded_at": self.recorded_at,
         }
 
 
@@ -117,7 +116,6 @@ class MemoryRelationDecisionProjection:
 @dataclass(frozen=True, slots=True)
 class MemoryProvenanceProjection:
     provenance_disposition: str
-    producer_kind: str
     decision_kind: str
     decision_reason_code: str | None
     decision_public_summary: str | None
@@ -151,10 +149,9 @@ class PostgresMemoryQuery:
     def search(
         self,
         *,
-        read_binding: FrozenMemoryReadScopeBinding,
+        read_binding: FrozenMemoryReadContextBinding,
         query: str,
         limit: int = 5,
-        requested_scope: MemoryScopeKind | str | None = None,
         requested_kind: str | None = None,
         query_embedding: Sequence[float] | None = None,
         automatic: bool = False,
@@ -162,7 +159,7 @@ class PostgresMemoryQuery:
     ) -> MemoryQueryResult:
         limit = max(1, min(int(limit), MAXIMUM_MEMORY_QUERY_RESULTS))
         terms = self._tokenizer.tokenize(query)
-        stages = _filter_stages(read_binding, requested_scope, requested_kind)
+        stages = _filter_stages(read_binding, requested_kind)
         gathered: list[MemoryQueryRow] = []
         seen: set[str] = set()
         attempted: list[MemorySearchStageResult] = []
@@ -170,14 +167,13 @@ class PostgresMemoryQuery:
         sparse_ok = True
         dense_ok = query_embedding is not None
         dense_dispositions: list[MemoryDenseCandidateDisposition] = []
-        for ordinal, (scope_filter, kind_filter, label, relaxed_field) in enumerate(stages):
+        for ordinal, (kind_filter, label, relaxed_field) in enumerate(stages):
             if relaxed_field is not None:
                 relaxed.append(relaxed_field)
             try:
                 sparse = self._sparse(
                     read_binding=read_binding,
                     terms=terms,
-                    scope_filter=scope_filter,
                     kind_filter=kind_filter,
                     limit=40 if not automatic else 20,
                     automatic=automatic,
@@ -192,7 +188,6 @@ class PostgresMemoryQuery:
                     dense_batch = self._dense(
                         read_binding=read_binding,
                         vector=query_embedding,
-                        scope_filter=scope_filter,
                         kind_filter=kind_filter,
                         limit=30 if not automatic else 20,
                         purpose=(
@@ -219,9 +214,9 @@ class PostgresMemoryQuery:
                 gathered.append(
                     MemoryQueryRow(
                         **{field: getattr(item, field) for field in (
-                            "fact_id", "memory_domain_id", "scope_kind", "scope_id",
-                            "fact_kind", "lifecycle", "statement", "applies_when",
-                            "do_not_apply_when", "fact_semantic_digest", "sparse_rank",
+                            "fact_id", "memory_domain_id", "context_id",
+                            "fact_kind", "lifecycle", "statement", "recorded_at",
+                            "fact_semantic_digest", "sparse_rank",
                             "dense_rank", "fused_score"
                         )},
                         match_tier=ordinal,
@@ -271,11 +266,10 @@ class PostgresMemoryQuery:
 
     @staticmethod
     def filter_stages(
-        read_binding: FrozenMemoryReadScopeBinding,
-        requested_scope: MemoryScopeKind | str | None,
+        read_binding: FrozenMemoryReadContextBinding,
         requested_kind: str | None,
     ):
-        return _filter_stages(read_binding, requested_scope, requested_kind)
+        return _filter_stages(read_binding, requested_kind)
 
     def sparse_candidates(self, **kwargs) -> tuple[MemoryQueryRow, ...]:
         return self._sparse(**kwargs)
@@ -295,7 +289,7 @@ class PostgresMemoryQuery:
     def get(
         self,
         *,
-        read_binding: FrozenMemoryReadScopeBinding,
+        read_binding: FrozenMemoryReadContextBinding,
         fact_id: str,
         deadline_monotonic: float,
     ) -> MemoryQueryRow | None:
@@ -306,20 +300,16 @@ class PostgresMemoryQuery:
         ) as connection:
             row = connection.execute(
                 """
-                SELECT id, memory_domain_id, scope_kind, scope_id, fact_kind,
-                       lifecycle, statement, applies_when, do_not_apply_when,
-                       fact_semantic_digest
+                SELECT id, memory_domain_id, context_id, fact_kind,
+                       lifecycle, statement, accepted_at, fact_semantic_digest
                 FROM pulsara_v3.memory_facts
                 WHERE memory_domain_id = %s AND id = %s
-                  AND (scope_kind, scope_id) IN (
-                    SELECT * FROM unnest(%s::text[], %s::text[])
-                  )
+                  AND context_id=ANY(%s::text[])
                 """,
                 (
                     read_binding.memory_domain_id,
                     fact_id,
-                    [scope.kind.value for scope in read_binding.readable_scopes],
-                    [scope.scope_id for scope in read_binding.readable_scopes],
+                    list(read_binding.readable_context_ids),
                 ),
             ).fetchone()
         return None if row is None else _row(row)
@@ -327,7 +317,7 @@ class PostgresMemoryQuery:
     def response_preferences(
         self,
         *,
-        read_binding: FrozenMemoryReadScopeBinding,
+        read_binding: FrozenMemoryReadContextBinding,
         deadline_monotonic: float,
     ) -> tuple[MemoryQueryRow, ...]:
         with self._provider.connection(
@@ -342,7 +332,7 @@ class PostgresMemoryQuery:
     def response_preference_snapshot(
         self,
         *,
-        read_binding: FrozenMemoryReadScopeBinding,
+        read_binding: FrozenMemoryReadContextBinding,
         relation_limit: int = 240,
         deadline_monotonic: float,
     ) -> MemoryResponsePreferenceSnapshot:
@@ -370,19 +360,16 @@ class PostgresMemoryQuery:
     def _response_preferences_in_connection(
         connection,
         *,
-        read_binding: FrozenMemoryReadScopeBinding,
+        read_binding: FrozenMemoryReadContextBinding,
     ) -> tuple[MemoryQueryRow, ...]:
-        conditions, parameters = _visibility_sql(
-            read_binding, None, "RESPONSE_PREFERENCE"
-        )
+        conditions, parameters = _visibility_sql(read_binding, "RESPONSE_PREFERENCE")
         rows = connection.execute(
             f"""
-            SELECT id, memory_domain_id, scope_kind, scope_id, fact_kind,
-                   lifecycle, statement, applies_when, do_not_apply_when,
-                   fact_semantic_digest
+            SELECT id, memory_domain_id, context_id, fact_kind,
+                   lifecycle, statement, accepted_at, fact_semantic_digest
             FROM pulsara_v3.memory_facts
             WHERE memory_domain_id=%s AND lifecycle='ACTIVE' AND ({conditions})
-            ORDER BY CASE scope_kind WHEN 'USER' THEN 0 ELSE 1 END,
+            ORDER BY CASE context_id WHEN 'ctx:global' THEN 0 ELSE 1 END,
                      fact_semantic_digest, id
             LIMIT 33
             """,
@@ -393,18 +380,14 @@ class PostgresMemoryQuery:
     def find_active_semantic(
         self,
         *,
-        read_binding: FrozenMemoryReadScopeBinding,
-        scope_kind: MemoryScopeKind,
-        scope_id: str,
+        read_binding: FrozenMemoryReadContextBinding,
+        context_id: str,
         fact_semantic_digest: str,
         deadline_monotonic: float,
     ) -> MemoryQueryRow | None:
-        """Return the sole ACTIVE exact-semantic winner in one visible scope."""
+        """Return the sole ACTIVE exact-semantic winner in one visible context."""
 
-        if not any(
-            item.kind is scope_kind and item.scope_id == scope_id
-            for item in read_binding.readable_scopes
-        ):
+        if context_id not in read_binding.readable_context_ids:
             return None
         with self._provider.connection(
             lane=PostgresConnectionLane.MEMORY_QUERY,
@@ -413,17 +396,15 @@ class PostgresMemoryQuery:
         ) as connection:
             row = connection.execute(
                 """
-                SELECT id, memory_domain_id, scope_kind, scope_id, fact_kind,
-                       lifecycle, statement, applies_when, do_not_apply_when,
-                       fact_semantic_digest
+                SELECT id, memory_domain_id, context_id, fact_kind,
+                       lifecycle, statement, accepted_at, fact_semantic_digest
                 FROM pulsara_v3.memory_facts
-                WHERE memory_domain_id=%s AND scope_kind=%s AND scope_id=%s
+                WHERE memory_domain_id=%s AND context_id=%s
                   AND fact_semantic_digest=%s AND lifecycle='ACTIVE'
                 """,
                 (
                     read_binding.memory_domain_id,
-                    scope_kind.value,
-                    scope_id,
+                    context_id,
                     fact_semantic_digest,
                 ),
             ).fetchone()
@@ -432,28 +413,24 @@ class PostgresMemoryQuery:
     def governance_related(
         self,
         *,
-        read_binding: FrozenMemoryReadScopeBinding,
-        scope_kind: MemoryScopeKind,
-        scope_id: str,
+        read_binding: FrozenMemoryReadContextBinding,
+        context_id: str,
         query: str,
         query_embedding: Sequence[float] | None,
         exclude_fact_id: str | None,
         limit: int = 8,
         deadline_monotonic: float,
     ) -> tuple[MemoryQueryRow, ...]:
-        """Bounded exact-scope relatedness; never relax scope or call rerank."""
+        """Bounded exact-context relatedness; never relax context or call rerank."""
 
-        if not any(
-            item.kind is scope_kind and item.scope_id == scope_id
-            for item in read_binding.readable_scopes
-        ):
+        if context_id not in read_binding.readable_context_ids:
             return ()
         bounded_limit = max(1, min(int(limit), 8))
         terms = self._tokenizer.tokenize(query)
         sparse = self._sparse(
             read_binding=read_binding,
             terms=terms,
-            scope_filter=scope_kind,
+            context_filter=context_id,
             kind_filter=None,
             limit=20,
             automatic=False,
@@ -464,23 +441,21 @@ class PostgresMemoryQuery:
             dense = self._dense(
                 read_binding=read_binding,
                 vector=query_embedding,
-                scope_filter=scope_kind,
+                context_filter=context_id,
                 kind_filter=None,
                 limit=20,
                 purpose=DenseRecallPurpose.GOVERNANCE_RELATEDNESS,
                 automatic=False,
                 deadline_monotonic=deadline_monotonic,
             ).facts
-        exact_scope = tuple(
+        exact_context = tuple(
             item
             for item in _rrf(sparse, dense)
-            if item.scope_kind == scope_kind.value
-            and item.scope_id == scope_id
-            and item.fact_id != exclude_fact_id
+            if item.context_id == context_id and item.fact_id != exclude_fact_id
         )[:bounded_limit]
         return self._canonical_refetch(
             read_binding=read_binding,
-            ranked=exact_scope,
+            ranked=exact_context,
             automatic=False,
             deadline_monotonic=deadline_monotonic,
         )
@@ -488,15 +463,15 @@ class PostgresMemoryQuery:
     def governance_sparse_candidates(
         self,
         *,
-        read_binding: FrozenMemoryReadScopeBinding,
-        scope_kind: MemoryScopeKind,
+        read_binding: FrozenMemoryReadContextBinding,
+        context_id: str,
         query: str,
         deadline_monotonic: float,
     ) -> tuple[MemoryQueryRow, ...]:
         return self._sparse(
             read_binding=read_binding,
             terms=self._tokenizer.tokenize(query),
-            scope_filter=scope_kind,
+            context_filter=context_id,
             kind_filter=None,
             limit=30,
             automatic=False,
@@ -506,15 +481,15 @@ class PostgresMemoryQuery:
     def governance_dense_candidates(
         self,
         *,
-        read_binding: FrozenMemoryReadScopeBinding,
-        scope_kind: MemoryScopeKind,
+        read_binding: FrozenMemoryReadContextBinding,
+        context_id: str,
         query_embedding: Sequence[float],
         deadline_monotonic: float,
     ) -> MemoryDenseCandidateBatch:
         return self._dense(
             read_binding=read_binding,
             vector=query_embedding,
-            scope_filter=scope_kind,
+            context_filter=context_id,
             kind_filter=None,
             limit=30,
             purpose=DenseRecallPurpose.GOVERNANCE_RELATEDNESS,
@@ -525,9 +500,8 @@ class PostgresMemoryQuery:
     def finalize_governance_related(
         self,
         *,
-        read_binding: FrozenMemoryReadScopeBinding,
-        scope_kind: MemoryScopeKind,
-        scope_id: str,
+        read_binding: FrozenMemoryReadContextBinding,
+        context_id: str,
         sparse: Sequence[MemoryQueryRow],
         dense: Sequence[MemoryQueryRow],
         exclude_fact_id: str | None,
@@ -535,16 +509,14 @@ class PostgresMemoryQuery:
         deadline_monotonic: float,
     ) -> tuple[MemoryQueryRow, ...]:
         bounded_limit = max(1, min(int(limit), 8))
-        exact_scope = tuple(
+        exact_context = tuple(
             item
             for item in _rrf(sparse, dense)
-            if item.scope_kind == scope_kind.value
-            and item.scope_id == scope_id
-            and item.fact_id != exclude_fact_id
+            if item.context_id == context_id and item.fact_id != exclude_fact_id
         )[:bounded_limit]
         return self._canonical_refetch(
             read_binding=read_binding,
-            ranked=exact_scope,
+            ranked=exact_context,
             automatic=False,
             deadline_monotonic=deadline_monotonic,
         )
@@ -552,7 +524,7 @@ class PostgresMemoryQuery:
     def active_contradictions(
         self,
         *,
-        read_binding: FrozenMemoryReadScopeBinding,
+        read_binding: FrozenMemoryReadContextBinding,
         fact_ids: Sequence[str],
         limit: int = 64,
         deadline_monotonic: float,
@@ -576,13 +548,13 @@ class PostgresMemoryQuery:
     def _active_contradictions_in_connection(
         connection,
         *,
-        read_binding: FrozenMemoryReadScopeBinding,
+        read_binding: FrozenMemoryReadContextBinding,
         fact_ids: Sequence[str],
         bounded_limit: int,
     ) -> tuple[MemoryRelationRow, ...]:
         if not fact_ids:
             return ()
-        scopes = read_binding.readable_scopes
+        contexts = read_binding.readable_context_ids
         rows = connection.execute(
             """
             SELECT r.id, r.source_fact_id, r.target_fact_id,
@@ -595,22 +567,16 @@ class PostgresMemoryQuery:
             WHERE r.memory_domain_id=%s AND r.relation_kind='CONTRADICTS'
               AND s.lifecycle='ACTIVE' AND t.lifecycle='ACTIVE'
               AND (r.source_fact_id=ANY(%s) OR r.target_fact_id=ANY(%s))
-              AND (r.source_scope_kind, r.source_scope_id) IN (
-                SELECT * FROM unnest(%s::text[], %s::text[])
-              )
-              AND (r.target_scope_kind, r.target_scope_id) IN (
-                SELECT * FROM unnest(%s::text[], %s::text[])
-              )
+              AND r.source_context_id=ANY(%s::text[])
+              AND r.target_context_id=ANY(%s::text[])
             ORDER BY r.source_fact_id, r.target_fact_id LIMIT %s
             """,
             (
                 read_binding.memory_domain_id,
                 list(fact_ids),
                 list(fact_ids),
-                [scope.kind.value for scope in scopes],
-                [scope.scope_id for scope in scopes],
-                [scope.kind.value for scope in scopes],
-                [scope.scope_id for scope in scopes],
+                list(contexts),
+                list(contexts),
                 bounded_limit,
             ),
         ).fetchall()
@@ -628,12 +594,12 @@ class PostgresMemoryQuery:
     def direct_relations(
         self,
         *,
-        read_binding: FrozenMemoryReadScopeBinding,
+        read_binding: FrozenMemoryReadContextBinding,
         fact_id: str,
         limit: int = 100,
         deadline_monotonic: float,
     ) -> tuple[MemoryRelationRow, ...]:
-        scopes = read_binding.readable_scopes
+        contexts = read_binding.readable_context_ids
         with self._provider.connection(
             lane=PostgresConnectionLane.MEMORY_QUERY,
             row_factory=dict_row,
@@ -645,12 +611,8 @@ class PostgresMemoryQuery:
                 FROM pulsara_v3.memory_relations
                 WHERE memory_domain_id = %s
                   AND (source_fact_id = %s OR target_fact_id = %s)
-                  AND (source_scope_kind, source_scope_id) IN (
-                    SELECT * FROM unnest(%s::text[], %s::text[])
-                  )
-                  AND (target_scope_kind, target_scope_id) IN (
-                    SELECT * FROM unnest(%s::text[], %s::text[])
-                  )
+                  AND source_context_id=ANY(%s::text[])
+                  AND target_context_id=ANY(%s::text[])
                 ORDER BY relation_kind, source_fact_id, target_fact_id
                 LIMIT %s
                 """,
@@ -658,10 +620,8 @@ class PostgresMemoryQuery:
                     read_binding.memory_domain_id,
                     fact_id,
                     fact_id,
-                    [scope.kind.value for scope in scopes],
-                    [scope.scope_id for scope in scopes],
-                    [scope.kind.value for scope in scopes],
-                    [scope.scope_id for scope in scopes],
+                    list(contexts),
+                    list(contexts),
                     max(1, min(limit, 100)),
                 ),
             ).fetchall()
@@ -676,14 +636,14 @@ class PostgresMemoryQuery:
     def provenance(
         self,
         *,
-        read_binding: FrozenMemoryReadScopeBinding,
+        read_binding: FrozenMemoryReadContextBinding,
         fact_id: str,
         relation_ids: Sequence[str] = (),
         deadline_monotonic: float,
     ) -> MemoryProvenanceProjection | None:
         """Project producer/decision lineage with an exact workspace fence."""
 
-        scopes = read_binding.readable_scopes
+        contexts = read_binding.readable_context_ids
         bounded_relation_ids = tuple(dict.fromkeys(relation_ids))[:100]
         with self._provider.connection(
             lane=PostgresConnectionLane.MEMORY_QUERY,
@@ -693,27 +653,22 @@ class PostgresMemoryQuery:
             row = connection.execute(
                 """
                 SELECT c.origin_workspace_id, c.origin_session_id,
-                       c.producer_kind, c.producer_entry_id,
-                       c.producer_tool_call_id, c.trigger_user_entry_id,
+                       c.producer_entry_id, c.producer_tool_call_id,
                        c.decision_kind, c.decision_reason_code,
-                       c.decision_public_summary, e.turn_id AS producer_turn_id,
-                       f.scope_kind
+                       c.decision_public_summary, e.turn_id AS producer_turn_id
                 FROM pulsara_v3.memory_facts AS f
                 JOIN pulsara_v3.memory_candidates AS c
                   ON c.id=f.source_candidate_id
                 LEFT JOIN pulsara_v3.transcript_entries AS e
                   ON e.session_id=c.origin_session_id
-                 AND e.id=coalesce(c.producer_entry_id, c.trigger_user_entry_id)
+                 AND e.id=c.producer_entry_id
                 WHERE f.memory_domain_id=%s AND f.id=%s
-                  AND (f.scope_kind, f.scope_id) IN (
-                    SELECT * FROM unnest(%s::text[], %s::text[])
-                  )
+                  AND f.context_id=ANY(%s::text[])
                 """,
                 (
                     read_binding.memory_domain_id,
                     fact_id,
-                    [scope.kind.value for scope in scopes],
-                    [scope.scope_id for scope in scopes],
+                    list(contexts),
                 ),
             ).fetchone()
             if row is None:
@@ -722,10 +677,6 @@ class PostgresMemoryQuery:
                 str(row["origin_workspace_id"])
                 == read_binding.host_workspace_id
             )
-            if str(row["scope_kind"]) == "WORKSPACE" and not same_origin:
-                # A WORKSPACE fact cannot legitimately cross its producer
-                # workspace.  Treat inconsistent identity as invisible.
-                return None
             citations = ()
             if same_origin:
                 citations = tuple(
@@ -755,21 +706,15 @@ class PostgresMemoryQuery:
                       ON c.memory_domain_id=r.memory_domain_id
                      AND c.id=r.decision_candidate_id
                     WHERE r.memory_domain_id=%s AND r.id=ANY(%s)
-                      AND (r.source_scope_kind, r.source_scope_id) IN (
-                        SELECT * FROM unnest(%s::text[], %s::text[])
-                      )
-                      AND (r.target_scope_kind, r.target_scope_id) IN (
-                        SELECT * FROM unnest(%s::text[], %s::text[])
-                      )
+                      AND r.source_context_id=ANY(%s::text[])
+                      AND r.target_context_id=ANY(%s::text[])
                     ORDER BY r.id
                     """,
                     (
                         read_binding.memory_domain_id,
                         list(bounded_relation_ids),
-                        [scope.kind.value for scope in scopes],
-                        [scope.scope_id for scope in scopes],
-                        [scope.kind.value for scope in scopes],
-                        [scope.scope_id for scope in scopes],
+                        list(contexts),
+                        list(contexts),
                     ),
                 ).fetchall()
                 relation_decisions.extend(
@@ -799,7 +744,6 @@ class PostgresMemoryQuery:
             provenance_disposition=(
                 "SAME_ORIGIN" if same_origin else "CROSS_ORIGIN_REDACTED"
             ),
-            producer_kind=str(row["producer_kind"]),
             decision_kind=str(row["decision_kind"]),
             decision_reason_code=(
                 None
@@ -822,9 +766,7 @@ class PostgresMemoryQuery:
             producer_entry_id=(
                 None
                 if not same_origin
-                else str(
-                    row["producer_entry_id"] or row["trigger_user_entry_id"]
-                )
+                else str(row["producer_entry_id"])
             ),
             producer_tool_call_id=(
                 None
@@ -835,16 +777,27 @@ class PostgresMemoryQuery:
             relation_decisions=tuple(relation_decisions),
         )
 
-    def _sparse(self, *, read_binding, terms, scope_filter, kind_filter, limit, automatic, deadline_monotonic):
+    def _sparse(
+        self,
+        *,
+        read_binding,
+        terms,
+        kind_filter,
+        limit,
+        automatic,
+        deadline_monotonic,
+        context_filter=None,
+    ):
         if not terms:
             return ()
-        conditions, parameters = _visibility_sql(read_binding, scope_filter, kind_filter)
+        conditions, parameters = _visibility_sql(
+            read_binding, kind_filter, context_filter=context_filter
+        )
         with self._provider.connection(lane=PostgresConnectionLane.MEMORY_QUERY, row_factory=dict_row, deadline_monotonic=deadline_monotonic) as connection:
             rows = connection.execute(
                 f"""
-                SELECT id, memory_domain_id, scope_kind, scope_id, fact_kind,
-                       lifecycle, statement, applies_when, do_not_apply_when,
-                       fact_semantic_digest,
+                SELECT id, memory_domain_id, context_id, fact_kind,
+                       lifecycle, statement, accepted_at, fact_semantic_digest,
                        ts_rank_cd(search_document, pulsara_v3.memory_terms_to_tsquery(%s::text[])) AS rank
                 FROM pulsara_v3.memory_facts
                 WHERE memory_domain_id = %s AND lifecycle = 'ACTIVE'
@@ -876,28 +829,30 @@ class PostgresMemoryQuery:
         *,
         read_binding,
         vector,
-        scope_filter,
         kind_filter,
         limit,
         purpose,
         automatic,
         deadline_monotonic,
+        context_filter=None,
     ) -> MemoryDenseCandidateBatch:
         frozen_vector = freeze_v1_embedding_vector(vector)
         minimum_similarity = MEMORY_DENSE_ELIGIBILITY_POLICY.minimum_similarity(
             DenseRecallPurpose(purpose)
         )
         literal = "[" + ",".join(format(value, ".17g") for value in frozen_vector) + "]"
-        conditions, parameters = _visibility_sql(read_binding, scope_filter, kind_filter, alias="f")
+        conditions, parameters = _visibility_sql(
+            read_binding, kind_filter, alias="f", context_filter=context_filter
+        )
         overfetch = min(int(limit) * 4, 120)
         with self._provider.connection(lane=PostgresConnectionLane.MEMORY_QUERY, row_factory=dict_row, deadline_monotonic=deadline_monotonic) as connection:
             connection.execute("SET LOCAL hnsw.iterative_scan = strict_order")
             connection.execute("SET LOCAL hnsw.max_scan_tuples = 20000")
             rows = connection.execute(
                 f"""
-                SELECT f.id, f.memory_domain_id, f.scope_kind, f.scope_id,
-                       f.fact_kind, f.lifecycle, f.statement, f.applies_when,
-                       f.do_not_apply_when, f.fact_semantic_digest,
+                SELECT f.id, f.memory_domain_id, f.context_id,
+                       f.fact_kind, f.lifecycle, f.statement, f.accepted_at,
+                       f.fact_semantic_digest,
                        e.embedding <=> %s::public.vector AS distance
                 FROM pulsara_v3.memory_embeddings e
                 JOIN pulsara_v3.memory_facts f
@@ -955,13 +910,12 @@ class PostgresMemoryQuery:
         if not ranked:
             return ()
         ids = [row.fact_id for row in ranked]
-        conditions, parameters = _visibility_sql(read_binding, None, None)
+        conditions, parameters = _visibility_sql(read_binding, None)
         with self._provider.connection(lane=PostgresConnectionLane.MEMORY_QUERY, row_factory=dict_row, deadline_monotonic=deadline_monotonic) as connection:
             rows = connection.execute(
                 f"""
-                SELECT id, memory_domain_id, scope_kind, scope_id, fact_kind,
-                       lifecycle, statement, applies_when, do_not_apply_when,
-                       fact_semantic_digest
+                SELECT id, memory_domain_id, context_id, fact_kind,
+                       lifecycle, statement, accepted_at, fact_semantic_digest
                 FROM pulsara_v3.memory_facts
                 WHERE memory_domain_id=%s AND id=ANY(%s) AND lifecycle='ACTIVE'
                   AND ({conditions})
@@ -979,28 +933,21 @@ class PostgresMemoryQuery:
         return tuple(final)
 
 
-def _filter_stages(binding, requested_scope, requested_kind):
-    scope = None if requested_scope is None else MemoryScopeKind(requested_scope)
-    if scope is not None and not any(item.kind is scope for item in binding.readable_scopes):
-        raise ValueError("requested memory scope is not visible")
-    stages = [(scope, requested_kind, "EXACT", None)]
+def _filter_stages(binding, requested_kind):
+    del binding
+    stages = [(requested_kind, "EXACT", None)]
     if requested_kind is not None:
-        stages.append((scope, None, "RELAX_KIND", "kind"))
-    if scope is not None:
-        stages.append((None, requested_kind, "RELAX_SCOPE", "scope"))
-    if scope is not None and requested_kind is not None:
-        stages.append((None, None, "RELAX_SCOPE_AND_KIND", "scope+kind"))
-    return tuple(dict.fromkeys(stages))
+        stages.append((None, "RELAX_KIND", "kind"))
+    return tuple(stages)
 
 
 def _stage_result(
     ordinal: int, label: str, *, new_results: int
 ) -> MemorySearchStageResult:
-    scope = "REQUESTED" if label in {"EXACT", "RELAX_KIND"} else "ALL_VISIBLE"
-    kind = "REQUESTED" if label in {"EXACT", "RELAX_SCOPE"} else "ANY"
+    kind = "REQUESTED" if label == "EXACT" else "ANY"
     return MemorySearchStageResult(
         ordinal=ordinal,
-        scope=scope,
+        context_coverage="ALL_READABLE",
         kind=kind,
         new_results=new_results,
     )
@@ -1039,21 +986,17 @@ def _aggregate_dense_disposition(
     return MemoryDenseCandidateDisposition.NO_ELIGIBLE_MATCH
 
 
-def _visibility_sql(binding, scope_filter, kind_filter, alias=""):
+def _visibility_sql(binding, kind_filter, alias="", context_filter=None):
     prefix = f"{alias}." if alias else ""
-    parts = []
-    parameters = []
-    visible = binding.readable_scopes
-    if scope_filter is not None:
-        visible = tuple(item for item in visible if item.kind is scope_filter)
-    for scope in visible:
-        parts.append(f"({prefix}scope_kind=%s AND {prefix}scope_id=%s)")
-        parameters.extend((scope.kind.value, scope.scope_id))
-    if not parts:
+    visible = binding.readable_context_ids
+    if context_filter is not None:
+        visible = tuple(item for item in visible if item == context_filter)
+    if not visible:
         return "false", []
-    expression = " OR ".join(parts)
+    expression = f"{prefix}context_id=ANY(%s::text[])"
+    parameters = [list(visible)]
     if kind_filter is not None:
-        expression = f"({expression}) AND {prefix}fact_kind=%s"
+        expression += f" AND {prefix}fact_kind=%s"
         parameters.append(str(kind_filter))
     return expression, parameters
 
@@ -1064,9 +1007,9 @@ def _rrf(sparse, dense):
         existing = by_id.get(item.fact_id, item)
         by_id[item.fact_id] = MemoryQueryRow(
             fact_id=item.fact_id, memory_domain_id=item.memory_domain_id,
-            scope_kind=item.scope_kind, scope_id=item.scope_id, fact_kind=item.fact_kind,
-            lifecycle=item.lifecycle, statement=item.statement, applies_when=item.applies_when,
-            do_not_apply_when=item.do_not_apply_when, fact_semantic_digest=item.fact_semantic_digest,
+            context_id=item.context_id, fact_kind=item.fact_kind,
+            lifecycle=item.lifecycle, statement=item.statement,
+            recorded_at=item.recorded_at, fact_semantic_digest=item.fact_semantic_digest,
             sparse_rank=item.sparse_rank or existing.sparse_rank,
             dense_rank=item.dense_rank or existing.dense_rank,
         )
@@ -1074,8 +1017,8 @@ def _rrf(sparse, dense):
     for item in by_id.values():
         score = sum(1.0 / (RRF_K + rank) for rank in (item.sparse_rank, item.dense_rank) if rank is not None)
         fused.append(MemoryQueryRow(**{field: getattr(item, field) for field in (
-            "fact_id", "memory_domain_id", "scope_kind", "scope_id", "fact_kind",
-            "lifecycle", "statement", "applies_when", "do_not_apply_when",
+            "fact_id", "memory_domain_id", "context_id", "fact_kind",
+            "lifecycle", "statement", "recorded_at",
             "fact_semantic_digest", "sparse_rank", "dense_rank")}, fused_score=score))
     return tuple(sorted(fused, key=lambda item: (-item.fused_score, item.fact_id)))
 
@@ -1083,10 +1026,10 @@ def _rrf(sparse, dense):
 def _row(row, **extra):
     return MemoryQueryRow(
         fact_id=str(row["id"]), memory_domain_id=str(row["memory_domain_id"]),
-        scope_kind=str(row["scope_kind"]), scope_id=str(row["scope_id"]),
+        context_id=str(row["context_id"]),
         fact_kind=str(row["fact_kind"]), lifecycle=str(row["lifecycle"]),
-        statement=str(row["statement"]), applies_when=None if row["applies_when"] is None else str(row["applies_when"]),
-        do_not_apply_when=tuple(str(x) for x in row["do_not_apply_when"]),
+        statement=str(row["statement"]),
+        recorded_at=canonical_memory_recorded_at(row["accepted_at"]),
         fact_semantic_digest=str(row["fact_semantic_digest"]), **extra,
     )
 

@@ -1105,7 +1105,7 @@ closed。Parser 后继续由 `prepare_memory_governance_acceptance` 做唯一 me
 | complete model-visible memory | 128 items / 64 KiB encoded |
 | relation targets | 8 items |
 | total governance user evidence + system contract final wire | 128 KiB exact bytes 且不超过本地 estimator 的 32,768 input tokens |
-| governance output | 8 KiB UTF-8 / 4,096 provider output tokens（包含 Responses reasoning 预算） |
+| governance output | 8 KiB UTF-8 / 8,192 provider output tokens（包含 Responses reasoning 预算；real-provider activation 已证明 4,096 会在闭合 JSON 前耗尽） |
 
 删除当前 `_MAXIMUM_GOVERNANCE_TURN_ITEMS = 32` 这一无独立产品意义的 item-count cutoff。
 turn metadata 使用 keyset/streaming 读取；真正限制 provider materialization 的是以上 byte/token

@@ -1,27 +1,27 @@
-"""Neutral memory-domain scope used by the canonical conversation Kernel."""
+"""Neutral memory-domain context used by the canonical conversation Kernel."""
 
 from pulsara_agent.memory.scope import (
-    CTX_USER,
-    FrozenMemoryReadScopeBinding,
-    FrozenMemoryScope,
-    MemoryHostWorkspaceKind,
+    CTX_GLOBAL,
+    WORKSPACE_CONTEXT_PREFIX,
+    FrozenMemoryReadContextBinding,
     MemoryDomainContext,
-    MemoryScopeKind,
-    freeze_memory_read_scope_binding,
-    format_scope_list,
-    is_valid_scope,
-    workspace_scope,
+    MemoryHostWorkspaceKind,
+    context_ids_for_domain,
+    format_context_list,
+    freeze_memory_read_context_binding,
+    is_valid_context_id,
+    workspace_context_id,
 )
 
 __all__ = [
-    "CTX_USER",
-    "FrozenMemoryReadScopeBinding",
-    "FrozenMemoryScope",
-    "MemoryHostWorkspaceKind",
+    "CTX_GLOBAL",
+    "WORKSPACE_CONTEXT_PREFIX",
+    "FrozenMemoryReadContextBinding",
     "MemoryDomainContext",
-    "MemoryScopeKind",
-    "freeze_memory_read_scope_binding",
-    "format_scope_list",
-    "is_valid_scope",
-    "workspace_scope",
+    "MemoryHostWorkspaceKind",
+    "context_ids_for_domain",
+    "format_context_list",
+    "freeze_memory_read_context_binding",
+    "is_valid_context_id",
+    "workspace_context_id",
 ]

@@ -1,4 +1,4 @@
-"""Controlled memory scope and domain helpers."""
+"""Controlled advisory-memory context and domain helpers."""
 
 from __future__ import annotations
 
@@ -10,16 +10,11 @@ from pathlib import Path
 from typing import Literal
 
 
-CTX_USER = "ctx:user"
-WORKSPACE_SCOPE_PREFIX = "ctx:workspace/"
+CTX_GLOBAL = "ctx:global"
+WORKSPACE_CONTEXT_PREFIX = "ctx:workspace/"
 
 _FLAT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
-_WORKSPACE_SCOPE_KEY_CHARS = 16
-
-
-class MemoryScopeKind(StrEnum):
-    USER = "USER"
-    WORKSPACE = "WORKSPACE"
+_WORKSPACE_CONTEXT_KEY_CHARS = 16
 
 
 class MemoryHostWorkspaceKind(StrEnum):
@@ -28,65 +23,59 @@ class MemoryHostWorkspaceKind(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
-class FrozenMemoryScope:
-    kind: MemoryScopeKind
-    scope_id: str
-
-    def __post_init__(self) -> None:
-        if self.kind is MemoryScopeKind.USER:
-            if self.scope_id != CTX_USER:
-                raise ValueError("USER memory scope must use ctx:user")
-        elif not self.scope_id.startswith(WORKSPACE_SCOPE_PREFIX) or not is_valid_scope(
-            self.scope_id
-        ):
-            raise ValueError("WORKSPACE memory scope identity is invalid")
-
-
-@dataclass(frozen=True, slots=True)
-class FrozenMemoryReadScopeBinding:
+class FrozenMemoryReadContextBinding:
     """Host-selected advisory-memory visibility; never a durable authority."""
 
     memory_domain_id: str
     host_workspace_id: str
     host_workspace_kind: MemoryHostWorkspaceKind
-    readable_scopes: tuple[FrozenMemoryScope, ...]
+    readable_context_ids: tuple[str, ...]
     binding_fingerprint: str
 
     def __post_init__(self) -> None:
         if not is_valid_flat_id(self.memory_domain_id) or not self.host_workspace_id:
             raise ValueError("memory read binding identity is invalid")
-        expected_scopes = (FrozenMemoryScope(MemoryScopeKind.USER, CTX_USER),)
         if self.host_workspace_kind is MemoryHostWorkspaceKind.PROJECT:
-            if len(self.readable_scopes) != 2:
-                raise ValueError("project memory binding needs USER and WORKSPACE")
-            if self.readable_scopes[0] != expected_scopes[0]:
-                raise ValueError("USER memory scope must be first")
-            if self.readable_scopes[1].kind is not MemoryScopeKind.WORKSPACE:
-                raise ValueError("project memory binding lacks WORKSPACE scope")
-        elif self.readable_scopes != expected_scopes:
-            raise ValueError("transient memory binding can only read USER memory")
-        if self.binding_fingerprint != memory_read_scope_binding_fingerprint(
+            if (
+                len(self.readable_context_ids) != 2
+                or self.readable_context_ids[0] != CTX_GLOBAL
+                or not self.readable_context_ids[1].startswith(
+                    WORKSPACE_CONTEXT_PREFIX
+                )
+            ):
+                raise ValueError(
+                    "project memory binding needs global then current-project context"
+                )
+        elif self.readable_context_ids != (CTX_GLOBAL,):
+            raise ValueError("transient memory binding can only read global memory")
+        if len(set(self.readable_context_ids)) != len(self.readable_context_ids) or any(
+            not is_valid_context_id(value) for value in self.readable_context_ids
+        ):
+            raise ValueError("memory read binding contains an invalid context")
+        if self.binding_fingerprint != memory_read_context_binding_fingerprint(
             memory_domain_id=self.memory_domain_id,
             host_workspace_id=self.host_workspace_id,
             host_workspace_kind=self.host_workspace_kind,
-            readable_scopes=self.readable_scopes,
+            readable_context_ids=self.readable_context_ids,
         ):
             raise ValueError("memory read binding fingerprint mismatch")
 
-    def can_read(self, kind: MemoryScopeKind | str, scope_id: str) -> bool:
-        try:
-            target = FrozenMemoryScope(MemoryScopeKind(kind), scope_id)
-        except (ValueError, TypeError):
-            return False
-        return target in self.readable_scopes
+    def can_read(self, context_id: str) -> bool:
+        return context_id in self.readable_context_ids
+
+    @property
+    def current_project_context_id(self) -> str | None:
+        if self.host_workspace_kind is MemoryHostWorkspaceKind.PROJECT:
+            return self.readable_context_ids[1]
+        return None
 
 
-def memory_read_scope_binding_fingerprint(
+def memory_read_context_binding_fingerprint(
     *,
     memory_domain_id: str,
     host_workspace_id: str,
     host_workspace_kind: MemoryHostWorkspaceKind,
-    readable_scopes: tuple[FrozenMemoryScope, ...],
+    readable_context_ids: tuple[str, ...],
 ) -> str:
     import json
 
@@ -94,42 +83,36 @@ def memory_read_scope_binding_fingerprint(
         "memory_domain_id": memory_domain_id,
         "host_workspace_id": host_workspace_id,
         "host_workspace_kind": host_workspace_kind.value,
-        "readable_scopes": tuple(
-            (scope.kind.value, scope.scope_id) for scope in readable_scopes
-        ),
+        "readable_context_ids": readable_context_ids,
     }
     encoded = json.dumps(
         payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
     ).encode("utf-8")
     return "sha256:" + sha256(
-        b"pulsara:memory-read-scope-binding:v1\x00" + encoded
+        b"pulsara:memory-read-context-binding:v2\x00" + encoded
     ).hexdigest()
 
 
-def freeze_memory_read_scope_binding(
+def freeze_memory_read_context_binding(
     *, domain: "MemoryDomainContext", host_workspace_id: str
-) -> FrozenMemoryReadScopeBinding:
-    scopes = [FrozenMemoryScope(MemoryScopeKind.USER, CTX_USER)]
+) -> FrozenMemoryReadContextBinding:
+    contexts = [CTX_GLOBAL]
     kind = MemoryHostWorkspaceKind.TRANSIENT
     if domain.workspace_kind == "project":
         assert domain.stable_project_key is not None
         kind = MemoryHostWorkspaceKind.PROJECT
-        scopes.append(
-            FrozenMemoryScope(
-                MemoryScopeKind.WORKSPACE, workspace_scope(domain.stable_project_key)
-            )
-        )
-    ordered = tuple(scopes)
-    return FrozenMemoryReadScopeBinding(
+        contexts.append(workspace_context_id(domain.stable_project_key))
+    ordered = tuple(contexts)
+    return FrozenMemoryReadContextBinding(
         memory_domain_id=domain.memory_domain_id,
         host_workspace_id=host_workspace_id,
         host_workspace_kind=kind,
-        readable_scopes=ordered,
-        binding_fingerprint=memory_read_scope_binding_fingerprint(
+        readable_context_ids=ordered,
+        binding_fingerprint=memory_read_context_binding_fingerprint(
             memory_domain_id=domain.memory_domain_id,
             host_workspace_id=host_workspace_id,
             host_workspace_kind=kind,
-            readable_scopes=ordered,
+            readable_context_ids=ordered,
         ),
     )
 
@@ -148,34 +131,36 @@ def canonical_project_key(stable_project_key: str) -> str:
     return value
 
 
-def workspace_scope_key(stable_project_key: str) -> str:
+def workspace_context_key(stable_project_key: str) -> str:
     canonical = canonical_project_key(stable_project_key)
-    return sha256(canonical.encode("utf-8")).hexdigest()[:_WORKSPACE_SCOPE_KEY_CHARS]
+    return sha256(canonical.encode("utf-8")).hexdigest()[
+        :_WORKSPACE_CONTEXT_KEY_CHARS
+    ]
 
 
-def workspace_scope(stable_project_key: str) -> str:
-    return f"{WORKSPACE_SCOPE_PREFIX}{workspace_scope_key(stable_project_key)}"
+def workspace_context_id(stable_project_key: str) -> str:
+    return f"{WORKSPACE_CONTEXT_PREFIX}{workspace_context_key(stable_project_key)}"
 
 
-def is_valid_scope(scope: str) -> bool:
-    if scope == CTX_USER:
+def is_valid_context_id(context_id: str) -> bool:
+    if context_id == CTX_GLOBAL:
         return True
-    if scope.startswith(WORKSPACE_SCOPE_PREFIX):
-        key = scope[len(WORKSPACE_SCOPE_PREFIX) :]
+    if context_id.startswith(WORKSPACE_CONTEXT_PREFIX):
+        key = context_id[len(WORKSPACE_CONTEXT_PREFIX) :]
         return is_valid_flat_id(key)
     return False
 
 
-def parse_scope(
-    scope: str,
-) -> tuple[Literal["user"], str | None] | tuple[Literal["workspace"], str]:
-    if scope == CTX_USER:
-        return ("user", None)
-    if scope.startswith(WORKSPACE_SCOPE_PREFIX):
-        key = scope[len(WORKSPACE_SCOPE_PREFIX) :]
+def parse_context_id(
+    context_id: str,
+) -> tuple[Literal["global"], None] | tuple[Literal["workspace"], str]:
+    if context_id == CTX_GLOBAL:
+        return ("global", None)
+    if context_id.startswith(WORKSPACE_CONTEXT_PREFIX):
+        key = context_id[len(WORKSPACE_CONTEXT_PREFIX) :]
         if is_valid_flat_id(key):
             return ("workspace", key)
-    raise ValueError(f"invalid memory scope: {scope!r}")
+    raise ValueError(f"invalid memory context: {context_id!r}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -210,21 +195,42 @@ class MemoryDomainContext:
         return f"graph:user/{self.memory_domain_id}"
 
     @property
-    def read_scopes(self) -> frozenset[str]:
-        return scopes_for_domain(self)
+    def read_context_ids(self) -> frozenset[str]:
+        return context_ids_for_domain(self)
 
     @property
-    def allowed_write_scopes(self) -> frozenset[str]:
-        return scopes_for_domain(self)
+    def allowed_write_context_ids(self) -> frozenset[str]:
+        return context_ids_for_domain(self)
 
 
-def scopes_for_domain(domain: MemoryDomainContext) -> frozenset[str]:
-    scopes = {CTX_USER}
+def context_ids_for_domain(domain: MemoryDomainContext) -> frozenset[str]:
+    context_ids = {CTX_GLOBAL}
     if domain.workspace_kind == "project":
         assert domain.stable_project_key is not None
-        scopes.add(workspace_scope(domain.stable_project_key))
-    return frozenset(scopes)
+        context_ids.add(workspace_context_id(domain.stable_project_key))
+    return frozenset(context_ids)
 
 
-def format_scope_list(scopes: frozenset[str] | tuple[str, ...] | list[str]) -> str:
-    return ", ".join(sorted(scopes))
+def format_context_list(
+    context_ids: frozenset[str] | tuple[str, ...] | list[str],
+) -> str:
+    return ", ".join(sorted(context_ids))
+
+
+__all__ = [
+    "CTX_GLOBAL",
+    "WORKSPACE_CONTEXT_PREFIX",
+    "FrozenMemoryReadContextBinding",
+    "MemoryDomainContext",
+    "MemoryHostWorkspaceKind",
+    "canonical_project_key",
+    "context_ids_for_domain",
+    "format_context_list",
+    "freeze_memory_read_context_binding",
+    "is_valid_context_id",
+    "is_valid_flat_id",
+    "memory_read_context_binding_fingerprint",
+    "parse_context_id",
+    "workspace_context_id",
+    "workspace_context_key",
+]

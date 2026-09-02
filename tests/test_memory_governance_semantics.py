@@ -1,4 +1,4 @@
-"""Focused product, prompt, wire, and source semantics for memory governance v2."""
+"""Focused product, prompt, wire, and source semantics for memory governance v3."""
 
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ from pulsara_agent.conversation_kernel.auxiliary_model import (
 from pulsara_agent.conversation_kernel.memory.contracts import (
     MAXIMUM_GOVERNANCE_OUTPUT_TOKENS,
     FrozenMemoryGovernanceEvidence,
+    FrozenMemoryGovernanceProducerCut,
     FrozenMemoryGovernanceSourceBlock,
     FrozenMemoryGovernanceSourceCoverage,
     FrozenMemoryGovernanceSourceItem,
@@ -32,7 +33,6 @@ from pulsara_agent.conversation_kernel.memory.contracts import (
     MemoryGovernanceEvidenceRole,
     MemoryGovernanceSourceBlockKind,
     MemoryKindHint,
-    MemoryProducerKind,
     MODEL_GOVERNANCE_SKIP_REASON_CODES,
     canonical_json_bytes,
     legal_memory_final_kinds,
@@ -50,15 +50,16 @@ from pulsara_agent.conversation_kernel.memory.governor import (
 from pulsara_agent.llm.input import LLMMessage, MessageRole
 from pulsara_agent.memory.product_contract import (
     MEMORY_GOVERNANCE_CONTRACT_ID,
-    MEMORY_GOVERNANCE_SYSTEM_PROMPT_V2,
+    MEMORY_GOVERNANCE_SYSTEM_PROMPT_V3,
+    MEMORY_COHESIVE_UNIT_GUIDE,
+    MEMORY_CONTEXT_PRODUCT_GUIDE,
     MEMORY_KIND_PRODUCT_DEFINITIONS,
-    MEMORY_SCOPE_PRODUCT_GUIDE,
-    MEMORY_SINGLE_ATOM_GUIDE,
+    MEMORY_RETRIEVAL_AUTHORING_GUIDE,
 )
-from pulsara_agent.memory.scope import CTX_USER, MemoryScopeKind
+from pulsara_agent.memory.scope import CTX_GLOBAL
 from pulsara_agent.memory.scope import (
     MemoryDomainContext,
-    freeze_memory_read_scope_binding,
+    freeze_memory_read_context_binding,
 )
 from pulsara_agent.conversation_kernel.contracts import InlineContent
 from pulsara_agent.conversation_kernel.repository import (
@@ -71,8 +72,13 @@ from pulsara_agent.conversation_kernel.repository import (
 )
 from pulsara_agent.model_input.contracts import (
     CanonicalInputOriginKind,
+    CanonicalModelInputIdentity,
+    CanonicalModelInputSnapshot,
     FrozenProviderInputItem,
     FrozenProviderInputItemKind,
+    ModelInputScopeKind,
+    canonical_model_input_identity_fingerprint,
+    canonical_model_input_snapshot_fingerprint,
 )
 from pulsara_agent.conversation_kernel.memory.governor import _causal_source_item
 from pulsara_agent.conversation_kernel.execution_watchdogs import (
@@ -99,20 +105,14 @@ from tests.support.postgres import verified_postgres_provider
 
 def _proposal(
     *,
-    scope_kind: MemoryScopeKind = MemoryScopeKind.USER,
-    scope_id: str = CTX_USER,
+    context_id: str = CTX_GLOBAL,
     kind_hint: MemoryKindHint = MemoryKindHint.AUTO,
-    applies_when: str | None = None,
-    exclusions: tuple[str, ...] = (),
     basis: tuple[str, ...] = (),
 ) -> FrozenMemoryProposal:
     return FrozenMemoryProposal(
         statement="Use concise release notes",
-        scope_kind=scope_kind,
-        scope_id=scope_id,
+        context_id=context_id,
         kind_hint=kind_hint,
-        applies_when=applies_when,
-        do_not_apply_when=exclusions,
         based_on_memory_ids=basis,
     )
 
@@ -121,16 +121,14 @@ def _target() -> FrozenMemoryPublicFactProjection:
     statement = "Use detailed release notes"
     return FrozenMemoryPublicFactProjection(
         fact_id="memory:target",
-        scope_kind=MemoryScopeKind.USER,
-        scope_id=CTX_USER,
+        context_id=CTX_GLOBAL,
         fact_kind=MemoryFactKind.RESPONSE_PREFERENCE,
         lifecycle="ACTIVE",
         statement=statement,
+        recorded_at="2026-01-01T00:00:00Z",
         fact_semantic_digest=memory_fact_semantic_digest(
             kind=MemoryFactKind.RESPONSE_PREFERENCE,
             statement=statement,
-            applies_when=None,
-            do_not_apply_when=(),
         ),
     )
 
@@ -226,39 +224,6 @@ def _complete_turn(
     return entry_id
 
 
-def _reflection_candidate(
-    repository: ConversationKernelRepository,
-    lease,
-    *,
-    trigger_entry_id: str,
-    statement: str,
-):
-    workspace_id = repository.read_session_workspace_id(
-        lease.guard, deadline_monotonic=monotonic() + 30
-    )
-    candidate = prepare_memory_candidate(
-        candidate_id=_id("candidate"),
-        memory_domain_id="u_local",
-        origin_workspace_id=workspace_id,
-        origin_session_id=lease.guard.session_id,
-        producer_kind=MemoryProducerKind.CHEAP_HINT_REFLECTION,
-        trigger_user_entry_id=trigger_entry_id,
-        producer_candidate_ordinal=0,
-        proposal=FrozenMemoryProposal(
-            statement=statement,
-            scope_kind=MemoryScopeKind.USER,
-            scope_id=CTX_USER,
-            kind_hint=MemoryKindHint.FACT,
-        ),
-    )
-    repository.accept_reflection_memory_candidates(
-        lease.guard,
-        candidates=(candidate,),
-        deadline_monotonic=monotonic() + 30,
-    )
-    return candidate
-
-
 def _permission_fingerprint(
     repository: ConversationKernelRepository,
     lease,
@@ -312,7 +277,9 @@ def _install_running_main_candidate(
                 _id("block"),
                 tool_call_id,
                 "remember",
-                freeze_json({"statement": statement, "scope": "USER"}),
+                freeze_json(
+                    {"statement": statement, "context_target": "GLOBAL"}
+                ),
             ),
         ),
         occurred_at=datetime.now(timezone.utc),
@@ -344,13 +311,11 @@ def _install_running_main_candidate(
         memory_domain_id="u_local",
         origin_workspace_id=workspace_id,
         origin_session_id=lease.guard.session_id,
-        producer_kind=MemoryProducerKind.MAIN_AGENT_REMEMBER,
         producer_entry_id=assistant_entry_id,
         producer_tool_call_id=tool_call_id,
         proposal=FrozenMemoryProposal(
             statement=statement,
-            scope_kind=MemoryScopeKind.USER,
-            scope_id=CTX_USER,
+            context_id=CTX_GLOBAL,
             kind_hint=MemoryKindHint.FACT,
         ),
     )
@@ -484,19 +449,20 @@ class _ForbiddenGovernanceModel:
         raise AssertionError("source-incomplete governance opened provider transport")
 
 
-def test_governance_v2_prompt_is_the_shared_complete_product_contract() -> None:
-    assert MEMORY_GOVERNANCE_CONTRACT_ID.endswith(".v2")
-    assert "governance.v1" not in MEMORY_GOVERNANCE_SYSTEM_PROMPT_V2
+def test_governance_v3_prompt_is_the_shared_complete_product_contract() -> None:
+    assert MEMORY_GOVERNANCE_CONTRACT_ID.endswith(".v3")
+    assert "governance.v2" not in MEMORY_GOVERNANCE_SYSTEM_PROMPT_V3
     assert tuple(name for name, _ in MEMORY_KIND_PRODUCT_DEFINITIONS) == tuple(
         item.value for item in MemoryFactKind
     )
     for name, meaning in MEMORY_KIND_PRODUCT_DEFINITIONS:
-        assert name in MEMORY_GOVERNANCE_SYSTEM_PROMPT_V2
+        assert name in MEMORY_GOVERNANCE_SYSTEM_PROMPT_V3
         assert meaning in DEFAULT_SYSTEM_PROMPT
-    assert MEMORY_SCOPE_PRODUCT_GUIDE in DEFAULT_SYSTEM_PROMPT
-    assert MEMORY_SINGLE_ATOM_GUIDE in DEFAULT_SYSTEM_PROMPT
+    assert MEMORY_CONTEXT_PRODUCT_GUIDE in DEFAULT_SYSTEM_PROMPT
+    assert MEMORY_COHESIVE_UNIT_GUIDE in DEFAULT_SYSTEM_PROMPT
+    assert MEMORY_RETRIEVAL_AUTHORING_GUIDE in DEFAULT_SYSTEM_PROMPT
     for required in (
-        "advisory context",
+        "advisory dataset",
         "HUMAN_ASSERTION",
         "POST_PROPOSAL_HUMAN",
         "PRIMARY_OBSERVATION",
@@ -508,13 +474,24 @@ def test_governance_v2_prompt_is_the_shared_complete_product_contract() -> None:
         "ACCEPT_AND_CONTRADICT",
         "public_summary",
         "target-independent",
-        "PLAN_CONTINUATION",
+        "Never narrate why you selected ACCEPT",
     ):
-        assert required in MEMORY_GOVERNANCE_SYSTEM_PROMPT_V2
+        assert required in MEMORY_GOVERNANCE_SYSTEM_PROMPT_V3
     for reason in MODEL_GOVERNANCE_SKIP_REASON_CODES:
-        assert reason.value in MEMORY_GOVERNANCE_SYSTEM_PROMPT_V2
-    for ordinal in range(1, 21):
-        assert f"{ordinal}." in MEMORY_GOVERNANCE_SYSTEM_PROMPT_V2
+        assert reason.value in MEMORY_GOVERNANCE_SYSTEM_PROMPT_V3
+    for required in (
+        "ACCEPT is the default",
+        "not a second retention-value approval",
+        "lockfiles",
+        "shadow fact",
+        "What and Who/subject",
+        "does not execute, track, or guarantee completion",
+        "date verification",
+        "not answer presentation",
+        "future-facing human instruction",
+        "Mere association with",
+    ):
+        assert required in MEMORY_GOVERNANCE_SYSTEM_PROMPT_V3
 
 
 def test_remember_descriptor_and_root_prompt_share_taxonomy() -> None:
@@ -526,29 +503,25 @@ def test_remember_descriptor_and_root_prompt_share_taxonomy() -> None:
     for kind, _meaning in MEMORY_KIND_PRODUCT_DEFINITIONS:
         assert kind in descriptor or kind in schema_text
         assert kind in DEFAULT_SYSTEM_PROMPT
-        assert kind in MEMORY_GOVERNANCE_SYSTEM_PROMPT_V2
+        assert kind in MEMORY_GOVERNANCE_SYSTEM_PROMPT_V3
 
 
 def test_legal_final_kinds_reuse_the_closed_shape_validator() -> None:
     ordinary = legal_memory_final_kinds(_proposal())
     assert ordinary == (
-        MemoryFactKind.FACT,
         MemoryFactKind.USER_PROFILE,
         MemoryFactKind.RESPONSE_PREFERENCE,
+        MemoryFactKind.FACT,
         MemoryFactKind.DECISION,
     )
-    rule = legal_memory_final_kinds(
-        _proposal(
-            kind_hint=MemoryKindHint.ACTION_RULE,
-            applies_when="before publishing a release",
-            exclusions=("for private drafts",),
-        )
+    mis_hint = legal_memory_final_kinds(
+        _proposal(kind_hint=MemoryKindHint.USER_PROFILE)
     )
-    assert rule == (MemoryFactKind.ACTION_RULE,)
+    assert mis_hint == ordinary
     decision = legal_memory_final_kinds(
         _proposal(kind_hint=MemoryKindHint.DECISION, basis=("memory:basis",))
     )
-    assert decision == (MemoryFactKind.DECISION,)
+    assert decision == ordinary
 
 
 @pytest.mark.parametrize("reason", sorted(MODEL_GOVERNANCE_SKIP_REASON_CODES))
@@ -618,8 +591,9 @@ def test_parser_rejects_missing_summary_illegal_kind_and_extra_semantics(
         "根据来源更新了旧记忆。",
         "Based on memory:0123456789.",
         "Based on a fact enum selected by governance.",
+        "Based on the DECISION enum.",
         "根据 source:1 整理。",
-        "根据 MAIN_AGENT_REMEMBER 的结果整理。",
+        "根据 CURRENT_PROJECT 内部目标整理。",
     ),
 )
 def test_public_summary_rejects_relation_internal_and_certification_language(
@@ -635,6 +609,34 @@ def test_public_summary_rejects_relation_internal_and_certification_language(
             {},
             legal_final_kinds=legal_memory_final_kinds(_proposal()),
         )
+
+
+def test_public_summary_allows_product_names_that_contain_sql() -> None:
+    parsed = _parse_governance_decision(
+        {
+            "decision": "ACCEPT",
+            "final_kind": "DECISION",
+            "public_summary": "The user chose PostgreSQL for Apollo.",
+        },
+        {},
+        legal_final_kinds=legal_memory_final_kinds(_proposal()),
+    )
+    assert parsed.public_summary == "The user chose PostgreSQL for Apollo."
+
+
+def test_public_summary_allows_natural_lowercase_kind_words() -> None:
+    parsed = _parse_governance_decision(
+        {
+            "decision": "ACCEPT",
+            "final_kind": "DECISION",
+            "public_summary": "Based on the user's stated decision for this year.",
+        },
+        {},
+        legal_final_kinds=legal_memory_final_kinds(_proposal()),
+    )
+    assert parsed.public_summary == (
+        "Based on the user's stated decision for this year."
+    )
 
 
 def test_relation_parser_requires_exact_allowlist_and_target_independent_summary() -> None:
@@ -710,8 +712,8 @@ def test_auxiliary_governance_uses_exact_system_user_shape_and_final_wire(api: s
     prepared = auxiliary.prepare_json_call(
         purpose=ModelCallPurpose.MEMORY_GOVERNANCE,
         messages=(
-            LLMMessage.system(MEMORY_GOVERNANCE_SYSTEM_PROMPT_V2),
-            LLMMessage.user('{"contract":"pulsara.advisory-memory-governance.v2"}'),
+            LLMMessage.system(MEMORY_GOVERNANCE_SYSTEM_PROMPT_V3),
+            LLMMessage.user('{"contract":"pulsara.advisory-memory-governance.v3"}'),
         ),
         maximum_input_tokens=32_768,
         maximum_input_bytes=128 * 1024,
@@ -719,7 +721,7 @@ def test_auxiliary_governance_uses_exact_system_user_shape_and_final_wire(api: s
         timeout_policy=_timeout(),
         maximum_result_bytes=8 * 1024,
     )
-    assert prepared.context.system_prompt == MEMORY_GOVERNANCE_SYSTEM_PROMPT_V2
+    assert prepared.context.system_prompt == MEMORY_GOVERNANCE_SYSTEM_PROMPT_V3
     assert len(prepared.context.messages) == 1
     assert prepared.context.messages[0].role is MessageRole.USER
     assert prepared.context.tools == ()
@@ -737,7 +739,7 @@ def test_auxiliary_governance_uses_exact_system_user_shape_and_final_wire(api: s
 
 
 def test_governance_output_budget_leaves_room_for_responses_reasoning() -> None:
-    assert MAXIMUM_GOVERNANCE_OUTPUT_TOKENS == 4_096
+    assert MAXIMUM_GOVERNANCE_OUTPUT_TOKENS == 8_192
 
 
 def test_auxiliary_governance_rejects_user_only_or_noncanonical_system() -> None:
@@ -764,7 +766,7 @@ def test_auxiliary_governance_rejects_user_only_or_noncanonical_system() -> None
 def test_auxiliary_variant_admission_selects_first_exact_final_wire_fit() -> None:
     auxiliary = _auxiliary("openai_responses")
     small_messages = (
-        LLMMessage.system(MEMORY_GOVERNANCE_SYSTEM_PROMPT_V2),
+        LLMMessage.system(MEMORY_GOVERNANCE_SYSTEM_PROMPT_V3),
         LLMMessage.user('{"candidate":"small"}'),
     )
     small = auxiliary.prepare_json_call(
@@ -779,7 +781,7 @@ def test_auxiliary_variant_admission_selects_first_exact_final_wire_fit() -> Non
         purpose=ModelCallPurpose.MEMORY_GOVERNANCE,
         message_variants=(
             (
-                LLMMessage.system(MEMORY_GOVERNANCE_SYSTEM_PROMPT_V2),
+                LLMMessage.system(MEMORY_GOVERNANCE_SYSTEM_PROMPT_V3),
                 LLMMessage.user(json.dumps({"body": "x" * 20_000})),
             ),
             small_messages,
@@ -888,6 +890,44 @@ def test_packet_shedding_preserves_human_anchors_and_orders_optional_removal() -
 def test_incomplete_nonhuman_source_cannot_authorize_relations(
     source_gap: str,
 ) -> None:
+    historical_item = FrozenProviderInputItem(
+        FrozenProviderInputItemKind.USER,
+        "entry:user",
+        0,
+        "turn:test",
+        "The user supplied the source context.",
+        input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE,
+    )
+    identity = CanonicalModelInputIdentity(
+        session_id="session:test",
+        turn_id="turn:test",
+        initial_entry_id="entry:user",
+        context_binding_revision_id="revision:test",
+        provider_input_through_sequence=0,
+        conversation_scope_kind=ModelInputScopeKind.ROOT,
+        scope_subagent_task_id=None,
+        identity_fingerprint=canonical_model_input_identity_fingerprint(
+            session_id="session:test",
+            turn_id="turn:test",
+            initial_entry_id="entry:user",
+            context_binding_revision_id="revision:test",
+            provider_input_through_sequence=0,
+            conversation_scope_kind=ModelInputScopeKind.ROOT,
+            scope_subagent_task_id=None,
+        ),
+    )
+    historical = CanonicalModelInputSnapshot(
+        identity=identity,
+        items=(historical_item,),
+        canonical_utf8_bytes=len(historical_item.text.encode("utf-8")),
+        snapshot_fingerprint=canonical_model_input_snapshot_fingerprint(
+            identity=identity,
+            items=(historical_item,),
+            canonical_utf8_bytes=len(historical_item.text.encode("utf-8")),
+            closures=(),
+            late_outcomes=(),
+        ),
+    )
     producer = FrozenMemoryGovernanceSourceItem(
         source_entry_id="entry:producer",
         chronology=MemoryGovernanceChronology.PRODUCER_OUTPUT,
@@ -915,7 +955,14 @@ def test_incomplete_nonhuman_source_cannot_authorize_relations(
             terminal_event_id="event:terminal",
             terminal_event_sequence=3,
         ),
-        producer_cut=None,
+        producer_cut=FrozenMemoryGovernanceProducerCut(
+            session_id="session:test",
+            turn_id="turn:test",
+            producer_entry_id="entry:producer",
+            producer_entry_sequence=1,
+            context_binding_revision_id="revision:test",
+            provider_input_through_sequence=0,
+        ),
         producer_call_context=(),
         producer_public_output=(producer,),
         post_proposal_turn_suffix=(),
@@ -931,7 +978,10 @@ def test_incomplete_nonhuman_source_cannot_authorize_relations(
             relation_authority=False,
         ),
     )
-    finalized = _finalize_governance_source_envelope(evidence, historical=None)
+    finalized = _finalize_governance_source_envelope(
+        evidence,
+        historical=historical,
+    )
     assert finalized.source_coverage.omitted_assistant_or_tool_items > 0
     assert not finalized.source_coverage.relation_authority
 
@@ -940,15 +990,30 @@ def test_incomplete_nonhuman_source_cannot_authorize_relations(
         memory_domain_id="u_local",
         origin_workspace_id=evidence.origin_workspace_id,
         origin_session_id="session:test",
-        producer_kind=MemoryProducerKind.CHEAP_HINT_REFLECTION,
-        trigger_user_entry_id="entry:human",
-        producer_candidate_ordinal=0,
+        producer_entry_id="entry:producer",
+        producer_tool_call_id="call:remember",
         proposal=_proposal(),
     )
 
+    class _EmptyQuery:
+        @staticmethod
+        def find_active_semantic(**_kwargs: object):
+            return None
+
+    class _ImmediateIO:
+        @staticmethod
+        async def run(operation, *args: object, **kwargs: object):
+            return operation(*args, **kwargs)
+
+    class _PacketOwner:
+        _query = _EmptyQuery()
+        _io = _ImmediateIO()
+        _embedding_port = None
+        _read_binding = object()
+
     async def materialize_packet():
         return await AdvisoryMemoryGovernor._governance_packet(  # noqa: SLF001
-            object(),
+            _PacketOwner(),
             candidate,
             evidence=finalized,
             deadline_monotonic=monotonic() + 30,
@@ -980,6 +1045,9 @@ def test_output_schema_is_a_flat_constraint_not_an_example_object() -> None:
         legal_final_kinds=("FACT", "DECISION"),
         allowed_target_ids=("memory:target",),
     )
+    assert "never mention relation selection" in str(
+        schema["field_constraints"]["public_summary"]["contract"]
+    )
     fields = schema["field_constraints"]
     assert fields["final_kind"] == {
         "type": "string",
@@ -989,10 +1057,9 @@ def test_output_schema_is_a_flat_constraint_not_an_example_object() -> None:
     assert "accept" not in schema
     assert "skip" not in schema
     assert "one flat top-level object" in schema["shape"]
-    assert "never wrap it in a branch name" in MEMORY_GOVERNANCE_SYSTEM_PROMPT_V2
-    assert "never emit the array itself" in MEMORY_GOVERNANCE_SYSTEM_PROMPT_V2
-    assert "not by itself replacement intent" in MEMORY_GOVERNANCE_SYSTEM_PROMPT_V2
-    assert "CONTRADICT, not SUPERSEDE" in MEMORY_GOVERNANCE_SYSTEM_PROMPT_V2
+    assert "one flat JSON object" in MEMORY_GOVERNANCE_SYSTEM_PROMPT_V3
+    assert "Formal replacement wording is not required" in MEMORY_GOVERNANCE_SYSTEM_PROMPT_V3
+    assert "keeps both exact same-context endpoints ACTIVE" in MEMORY_GOVERNANCE_SYSTEM_PROMPT_V3
 
 
 def test_no_v1_builder_provider_token_counter_or_provider_business_branch_exists() -> None:
@@ -1206,26 +1273,20 @@ def test_candidate_digest_drift_fails_before_evidence_or_provider_open_without_s
     repository = _repository(stage2_migrated_postgres_database)
     lease = _lease(repository)
 
-    corrupt_turn, corrupt_entry = _start_human_turn(
-        repository, lease, "Remember the first setting"
-    )
-    _complete_turn(repository, lease, corrupt_turn)
-    corrupt = _reflection_candidate(
+    corrupt_turn, corrupt = _install_running_main_candidate(
         repository,
         lease,
-        trigger_entry_id=corrupt_entry,
+        user_text="Remember the first setting",
         statement="The first setting is enabled",
     )
-    healthy_turn, healthy_entry = _start_human_turn(
-        repository, lease, "Remember the healthy setting"
-    )
-    _complete_turn(repository, lease, healthy_turn)
-    healthy = _reflection_candidate(
+    _complete_turn(repository, lease, corrupt_turn)
+    healthy_turn, healthy = _install_running_main_candidate(
         repository,
         lease,
-        trigger_entry_id=healthy_entry,
+        user_text="Remember the healthy setting",
         statement="The healthy setting is enabled",
     )
+    _complete_turn(repository, lease, healthy_turn)
     with repository.connection_provider.connection(
         lane=PostgresConnectionLane.BACKGROUND_WORK,
         deadline_monotonic=monotonic() + 30,
@@ -1320,14 +1381,13 @@ def test_terminal_occurrence_corruption_is_ineligible_and_does_not_block_healthy
 ) -> None:
     repository = _repository(stage2_migrated_postgres_database)
     lease = _lease(repository)
-    turn_id, entry_id = _start_human_turn(repository, lease, "Remember corrupt fence")
-    _complete_turn(repository, lease, turn_id)
-    corrupt = _reflection_candidate(
+    turn_id, corrupt = _install_running_main_candidate(
         repository,
         lease,
-        trigger_entry_id=entry_id,
+        user_text="Remember corrupt fence",
         statement="This source fence will be corrupted",
     )
+    _complete_turn(repository, lease, turn_id)
     with psycopg.connect(
         stage2_migrated_postgres_database.admin_dsn,
         autocommit=True,
@@ -1385,16 +1445,13 @@ def test_terminal_occurrence_corruption_is_ineligible_and_does_not_block_healthy
         )
         is None
     )
-    healthy_turn, healthy_entry = _start_human_turn(
-        repository, lease, "Remember healthy fence"
-    )
-    _complete_turn(repository, lease, healthy_turn)
-    healthy = _reflection_candidate(
+    healthy_turn, healthy = _install_running_main_candidate(
         repository,
         lease,
-        trigger_entry_id=healthy_entry,
+        user_text="Remember healthy fence",
         statement="This source fence is healthy",
     )
+    _complete_turn(repository, lease, healthy_turn)
     claimed = repository.claim_memory_candidate_for_governance(
         lease.guard,
         processing_started_at=datetime.now(timezone.utc),
@@ -1589,7 +1646,7 @@ def test_incomplete_post_proposal_human_source_fails_closed_before_model_semanti
     governor = AdvisoryMemoryGovernor(
         repository=repository,
         guard=lease.guard,
-        read_binding=freeze_memory_read_scope_binding(
+        read_binding=freeze_memory_read_context_binding(
             domain=MemoryDomainContext("u_local", "transient"),
             host_workspace_id=workspace_id,
         ),
@@ -1599,7 +1656,6 @@ def test_incomplete_post_proposal_human_source_fails_closed_before_model_semanti
         ),
         io_owner=io_owner,
         deadline_factory=KernelExecutionDeadlineFactory(),
-        provider_trust_domain_identity="test-governance-domain",
     )
 
     async def settle_without_provider() -> None:

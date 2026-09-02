@@ -533,7 +533,6 @@ def _runtime_settings(env_file: str, runtime_dsn: str) -> PulsaraSettings:
     load_env_file(env_file, override=False)
     os.environ["PULSARA_MEMORY_AUTO_DENSE"] = "false"
     os.environ["PULSARA_MEMORY_EXPLICIT_RERANK"] = "false"
-    os.environ["PULSARA_MEMORY_CHEAP_HINT_REFLECTION"] = "false"
     settings = PulsaraSettings.from_env()
     return replace(
         settings,

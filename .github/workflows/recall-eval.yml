@@ -1,15 +1,14 @@
-name: Memory Recall Eval
+name: Advisory Memory Contract
 
 on:
   pull_request:
     paths:
-      - "evals/recall/**"
       - "src/pulsara_agent/memory/**"
-      - "src/pulsara_agent/graph/**"
-      - "src/pulsara_agent/storage/memory_schema.py"
-      - "src/pulsara_agent/tools/builtins/memory_query.py"
-      - "tests/test_recall*.py"
+      - "src/pulsara_agent/conversation_kernel/memory/**"
+      - "src/pulsara_agent/conversation_kernel/memory_tools.py"
+      - "src/pulsara_agent/storage/migrations/**"
       - "tests/test_memory_*"
+      - "tests/test_round8_advisory_memory.py"
       - ".github/workflows/recall-eval.yml"
   push:
     branches:
@@ -27,5 +26,8 @@ jobs:
         run: uv sync --dev
       - name: Ruff
         run: uv run ruff check
-      - name: Recall eval gate
-        run: uv run python -m evals.recall.runner --gate --json
+      - name: Advisory memory contract gate
+        run: >-
+          uv run pytest -q
+          tests/test_memory_governance_semantics.py
+          tests/test_round8_advisory_memory.py

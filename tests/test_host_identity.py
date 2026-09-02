@@ -7,7 +7,11 @@ from pulsara_agent.workspace_identity import (
     normalize_workspace_kind,
     resolve_workspace,
 )
-from pulsara_agent.memory.scope import CTX_USER, MemoryDomainContext, workspace_scope
+from pulsara_agent.memory.scope import (
+    CTX_GLOBAL,
+    MemoryDomainContext,
+    workspace_context_id,
+)
 
 
 def test_host_workspace_project_resolution_couples_memory_domain(tmp_path) -> None:
@@ -32,12 +36,12 @@ def test_host_workspace_project_resolution_couples_memory_domain(tmp_path) -> No
         stable_project_key=repo.resolve().as_posix(),
         workspace_label="Repo",
     )
-    assert resolved.workspace_scope == workspace_scope(repo.resolve().as_posix())
-    assert resolved.workspace_scope in resolved.memory_domain.read_scopes
+    assert resolved.workspace_context_id == workspace_context_id(repo.resolve().as_posix())
+    assert resolved.workspace_context_id in resolved.memory_domain.read_context_ids
     assert resolved.memory_domain.graph_id == "graph:user/u_test"
 
 
-def test_host_workspace_transient_resolution_uses_user_scope_only(tmp_path) -> None:
+def test_host_workspace_transient_resolution_uses_global_context_only(tmp_path) -> None:
     scratch = tmp_path / "scratch"
 
     resolved = resolve_workspace(
@@ -52,8 +56,8 @@ def test_host_workspace_transient_resolution_uses_user_scope_only(tmp_path) -> N
     assert resolved.workspace_root == scratch.resolve()
     assert resolved.cleanup_workspace_root_on_close is False
     assert resolved.display_label == "Scratch"
-    assert resolved.workspace_scope is None
-    assert resolved.memory_domain.read_scopes == frozenset({CTX_USER})
+    assert resolved.workspace_context_id is None
+    assert resolved.memory_domain.read_context_ids == frozenset({CTX_GLOBAL})
     assert resolved.workspace_key.startswith("transient:")
     assert (
         resolve_workspace(

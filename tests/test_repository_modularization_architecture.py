@@ -66,6 +66,12 @@ _ASYNC_SUBAGENT_COMPLETION_RETIRED_PYTEST_NODES = {
         "test_stage2_controller_can_accept_external_results_into_a_new_root"
     ),
 }
+_MEMORY_TAXONOMY_HARD_CUT_RETIRED_PYTEST_NODES = {
+    (
+        "tests/test_host_identity.py::"
+        "test_host_workspace_transient_resolution_uses_user_scope_only"
+    ),
+}
 _ASYNC_SUBAGENT_COMPLETION_ADDED_OBSERVED_IMPORTS = {
     "AcceptedSubagentCompletion",
     "SubagentCompletionDisposition",
@@ -193,7 +199,7 @@ _ROUND8_ADDED_METHODS = {
     "_lock_basis_targets",
     "_lock_governance_target",
     "_lock_processing_candidate",
-    "_lock_response_preference_scope",
+    "_lock_response_preference_context",
     "_memory_fact_matches",
     "_memory_fact_settlement_identity",
     "_memory_settlement_identity_matches",
@@ -210,7 +216,6 @@ _ROUND8_ADDED_METHODS = {
     "_response_preference_capacity_allows",
     "_settle_existing_source_memory_relation_once",
     "abandon_memory_candidate",
-    "accept_reflection_memory_candidates",
     "claim_memory_candidate_for_governance",
     "confirm_memory_candidate_intake",
     "confirm_memory_governance_winner",
@@ -896,6 +901,7 @@ def test_repository_modularization_preserves_every_existing_pytest_node() -> Non
         _FRONTEND_HARD_CUT_RETIRED_PYTEST_NODES
         | _ROUND5B_DURABLE_JOB_SUBTRACTION_RETIRED_PYTEST_NODES
         | _ASYNC_SUBAGENT_COMPLETION_RETIRED_PYTEST_NODES
+        | _MEMORY_TAXONOMY_HARD_CUT_RETIRED_PYTEST_NODES
     )
     assert (
         "tests/test_stage2_architecture.py::"

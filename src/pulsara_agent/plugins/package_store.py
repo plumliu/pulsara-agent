@@ -26,7 +26,7 @@ from pulsara_agent.local_source_binding import (
     open_absolute_directory_nofollow,
     prepare_local_source_path,
 )
-from pulsara_agent.memory.scope import workspace_scope_key
+from pulsara_agent.memory.scope import workspace_context_key
 from pulsara_agent.plugins.contracts import (
     PLUGIN_INSTANCE_STATE_CONTRACT_ID,
     PluginCancellationPort,
@@ -326,7 +326,7 @@ class ManagedPluginStore:
                 raise ValueError("workspace Plugin identity requires an absolute root")
             if not workspace_root.exists() or not workspace_root.is_dir():
                 raise ValueError("workspace Plugin identity requires a project root")
-            workspace_key = workspace_scope_key(workspace_root.as_posix())
+            workspace_key = workspace_context_key(workspace_root.as_posix())
         return PluginInstanceIdentity(scope, plugin_id, workspace_key)
 
     def layout(self, identity: PluginInstanceIdentity) -> PluginStoreLayout:
@@ -980,7 +980,7 @@ class ManagedPluginStore:
         targets = [(PluginScopeKind.USER, None)]
         if workspace_root is not None:
             targets.append(
-                (PluginScopeKind.WORKSPACE, workspace_scope_key(workspace_root.as_posix()))
+                (PluginScopeKind.WORKSPACE, workspace_context_key(workspace_root.as_posix()))
             )
         states: list[PluginInstanceState] = []
         observations: list[_StateRootObservation] = []
@@ -1041,7 +1041,7 @@ class ManagedPluginStore:
         targets = [(PluginScopeKind.USER, None)]
         if workspace_root is not None:
             targets.append(
-                (PluginScopeKind.WORKSPACE, workspace_scope_key(workspace_root.as_posix()))
+                (PluginScopeKind.WORKSPACE, workspace_context_key(workspace_root.as_posix()))
             )
         result: list[PluginVersionInspection] = []
         for scope, workspace_key in targets:
@@ -1260,7 +1260,7 @@ class ManagedPluginStore:
         targets = [(PluginScopeKind.USER, None)]
         if workspace_root is not None:
             targets.append(
-                (PluginScopeKind.WORKSPACE, workspace_scope_key(workspace_root.as_posix()))
+                (PluginScopeKind.WORKSPACE, workspace_context_key(workspace_root.as_posix()))
             )
         result: list[tuple[PluginGcRef, PluginInstanceIdentity, str]] = []
         for scope, workspace_key in targets:
@@ -1327,7 +1327,7 @@ class ManagedPluginStore:
             targets.append(
                 (
                     PluginScopeKind.WORKSPACE,
-                    workspace_scope_key(workspace_root.as_posix()),
+                    workspace_context_key(workspace_root.as_posix()),
                 )
             )
         result: list[tuple[PluginGcRef, PluginInstanceIdentity, str]] = []

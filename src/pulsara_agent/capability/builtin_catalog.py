@@ -7,8 +7,9 @@ from enum import StrEnum
 from typing import Any, Literal
 
 from pulsara_agent.memory.product_contract import (
-    MEMORY_SCOPE_PRODUCT_GUIDE,
-    MEMORY_SINGLE_ATOM_GUIDE,
+    MEMORY_COHESIVE_UNIT_GUIDE,
+    MEMORY_CONTEXT_PRODUCT_GUIDE,
+    MEMORY_RETRIEVAL_AUTHORING_GUIDE,
     memory_kind_product_guide,
 )
 
@@ -246,14 +247,14 @@ def _long_horizon_policy(name: str):
     return fixed_tool_action_policy(LongHorizonActionClass(kind.value))
 
 
-_MEMORY_SCOPE_GUIDE = MEMORY_SCOPE_PRODUCT_GUIDE
+_MEMORY_CONTEXT_GUIDE = MEMORY_CONTEXT_PRODUCT_GUIDE
 
 _MEMORY_KIND_GUIDE = memory_kind_product_guide()
 
 _MEMORY_KIND_HINT_GUIDE = (
     "AUTO lets the memory system choose when you are uncertain. "
     + _MEMORY_KIND_GUIDE
-    + " For remember, ACTION_RULE requires applies_when, and DECISION may name supporting "
+    + " The hint is not authoritative. Every final kind may name meaningful supporting "
     "memories in based_on_memory_ids."
 )
 
@@ -266,59 +267,32 @@ def _remember_parameters() -> dict[str, Any]:
                 "minLength": 1,
                 "maxLength": 8192,
                 "description": (
-                    "One self-contained, durable proposition supported by the conversation "
-                    "or cited evidence, using at most 8192 UTF-8 bytes. Preserve the "
-                    "source's certainty and wording closely enough to avoid adding an "
-                    "inference. Split ideas that could be recalled, revised, or applied "
-                    "independently into separate remember calls."
+                    "One source-faithful, cohesive, durable advisory memory using at most "
+                    "8192 UTF-8 bytes. Rewrite references or omissions into a natural, "
+                    "self-contained statement when the visible source supports it. Prefer "
+                    "a clear What and Who/subject plus necessary context, retaining Where, "
+                    "When, Why, How, quantity, negation, modality, and uncertainty when "
+                    "material; these are soft authoring cues, not required fields. Do not "
+                    "use template labels or invent missing detail."
                 ),
             },
-            "scope": {
+            "context_target": {
                 "type": "string",
-                "enum": ["USER", "WORKSPACE"],
-                "description": "Where the information should remain available. "
-                + _MEMORY_SCOPE_GUIDE,
+                "enum": ["GLOBAL", "CURRENT_PROJECT"],
+                "description": "Where the item should be readable. "
+                + _MEMORY_CONTEXT_GUIDE,
             },
             "kind_hint": {
                 "type": "string",
                 "enum": [
                     "AUTO",
-                    "FACT",
                     "USER_PROFILE",
                     "RESPONSE_PREFERENCE",
-                    "ACTION_RULE",
+                    "FACT",
                     "DECISION",
                 ],
                 "default": "AUTO",
                 "description": _MEMORY_KIND_HINT_GUIDE,
-            },
-            "applies_when": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 4096,
-                "description": (
-                    "The specific future condition under which an ACTION_RULE applies, "
-                    "using at most 4096 UTF-8 bytes. State the condition here and the "
-                    "action in statement. Omit for every other kind."
-                ),
-            },
-            "do_not_apply_when": {
-                "type": "array",
-                "items": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 2048,
-                    "description": (
-                        "One explicitly stated exception to the ACTION_RULE, using at "
-                        "most 2048 UTF-8 bytes."
-                    ),
-                },
-                "maxItems": 8,
-                "description": (
-                    "Optional exceptions for an ACTION_RULE, in their stated order, with "
-                    "at most 8 items and 8192 UTF-8 bytes in total. Do not invent an "
-                    "exception merely to fill this field. Omit for every other kind."
-                ),
             },
             "based_on_memory_ids": {
                 "type": "array",
@@ -331,9 +305,10 @@ def _remember_parameters() -> dict[str, Any]:
                 },
                 "maxItems": 8,
                 "description": (
-                    "For a DECISION only: up to 8 exact saved-memory IDs that genuinely "
-                    "support the choice, in dependency order. Do not use merely related "
-                    "items and do not invent IDs. Omit for every other kind."
+                    "For any kind: up to 8 exact saved-memory IDs that are meaningful "
+                    "reasons, background, motivations, or dependencies for this entire "
+                    "item, in dependency order. Do not use merely related items or invent "
+                    "IDs. Deleting any cited basis later also deletes this dependent item."
                 ),
             },
             "cited_tool_result_handles": {
@@ -356,56 +331,8 @@ def _remember_parameters() -> dict[str, Any]:
                 ),
             },
         },
-        required=["statement", "scope"],
+        required=["statement", "context_target"],
     )
-    schema["allOf"] = [
-        {
-            "if": {
-                "properties": {"kind_hint": {"const": "USER_PROFILE"}},
-                "required": ["kind_hint"],
-            },
-            "then": {"properties": {"scope": {"const": "USER"}}},
-        },
-        {
-            "if": {
-                "properties": {"kind_hint": {"const": "ACTION_RULE"}},
-                "required": ["kind_hint"],
-            },
-            "then": {
-                "required": ["applies_when"],
-                "properties": {"based_on_memory_ids": {"maxItems": 0}},
-            },
-        },
-        {
-            "if": {
-                "properties": {
-                    "kind_hint": {
-                        "enum": ["FACT", "USER_PROFILE", "RESPONSE_PREFERENCE"]
-                    }
-                },
-                "required": ["kind_hint"],
-            },
-            "then": {
-                "properties": {
-                    "applies_when": False,
-                    "do_not_apply_when": {"maxItems": 0},
-                    "based_on_memory_ids": {"maxItems": 0},
-                }
-            },
-        },
-        {
-            "if": {
-                "properties": {"kind_hint": {"const": "DECISION"}},
-                "required": ["kind_hint"],
-            },
-            "then": {
-                "properties": {
-                    "applies_when": False,
-                    "do_not_apply_when": {"maxItems": 0},
-                }
-            },
-        },
-    ]
     return schema
 
 
@@ -417,31 +344,18 @@ _MEMORY_SEARCH_PARAMETERS = object_schema(
             "maxLength": 32768,
             "description": (
                 "A focused natural-language description or keyword query for the earlier "
-                "fact, preference, rule, or decision you need, using at most 32768 UTF-8 "
+                "profile, preference, fact, or decision you need, using at most 32768 "
+                "UTF-8 "
                 "bytes. Ask for the needed subject rather than guessing the exact stored "
                 "wording."
-            ),
-        },
-        "scope": {
-            "type": "string",
-            "enum": ["USER", "WORKSPACE"],
-            "description": (
-                "Optional preferred scope filter. "
-                + _MEMORY_SCOPE_GUIDE
-                + " Omit to search every scope visible here. Set it only when the user "
-                "explicitly distinguishes personal from project memory; do not choose "
-                "WORKSPACE merely because the current task happens in a project. If too "
-                "few exact matches exist, the search may add broader visible results, "
-                "each labeled by filter_match."
             ),
         },
         "kind": {
             "type": "string",
             "enum": [
-                "FACT",
                 "USER_PROFILE",
                 "RESPONSE_PREFERENCE",
-                "ACTION_RULE",
+                "FACT",
                 "DECISION",
             ],
             "description": (
@@ -1785,8 +1699,9 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
             "exact memory_id, use memory_get instead. Short references such as 'the "
             "deployment choice' can justify a search even when no memory was supplied "
             "automatically; an empty result does not prove the user never provided the "
-            "information. Scope and kind are preferred filters, not strict guarantees: "
-            "read retrieval_summary for search completeness, filter expansion, final "
+            "information. The search covers every context readable by this Host; kind is "
+            "a preferred filter, not a strict guarantee. Read retrieval_summary for "
+            "search completeness, filter expansion, final "
             "ranking method, and relation-check availability; then check each result's "
             "filter_match and any relation_warnings before relying on it. Results are "
             "advisory and may be stale or incomplete. Do not search just to decorate a "
@@ -1803,7 +1718,7 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
         description=(
             "Read one visible saved-memory item when you already know its exact memory_id, "
             "usually from memory_search or a memory reference. Returns the stored "
-            "statement, kind, scope, lifecycle, applicability, and direct relations. It "
+            "statement, kind, context, recorded time, lifecycle, and direct relations. It "
             "does not search by meaning or explain why the item was saved. Use "
             "memory_explain only when its origin or review history matters."
         ),
@@ -1833,18 +1748,29 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "remember": _descriptor(
         name="remember",
         description=(
-            "Submit one durable, reusable piece of information for possible use in future "
-            "conversations. Use this when the user asks you to remember something or "
-            "clearly provides a lasting fact, preference, action rule, or decision; do "
-            "not use it for temporary task state, TODO items, reminders, secrets, raw "
-            "tool output, or permission and safety instructions. "
-            + MEMORY_SINGLE_ATOM_GUIDE
-            + " For example, split 'I use macOS, so show me zsh commands' "
-            "into a USER_PROFILE and a RESPONSE_PREFERENCE; split 'production uses "
-            "PostgreSQL, so back it up before schema changes' into a FACT and an "
-            "ACTION_RULE with applies_when; record 'we chose PostgreSQL based on these "
-            "facts' as a DECISION whose based_on_memory_ids contain only those exact "
-            "saved-memory IDs. A successful call confirms only submission for review: "
+            "Submit one durable, reusable advisory memory for possible use in future "
+            "conversations. Use it for a user profile, response preference, declarative "
+            "fact, or decision. When the user explicitly asks to remember safe declarative "
+            "content whose kind is ambiguous, still submit it with AUTO. A lightweight, "
+            "source-faithful inference from visible conversation, behavior, tool choice, "
+            "or planning is allowed; direct self-report, repeated observations, and high "
+            "confidence are not required. A runtime memory hint only asks you to reconsider "
+            "the original human input and never requires a call; you may also remember "
+            "useful information without a hint. Submit before the final reply if you decide "
+            "to do so. "
+            + MEMORY_COHESIVE_UNIT_GUIDE
+            + " "
+            + MEMORY_RETRIEVAL_AUTHORING_GUIDE
+            + " Context target controls retrieval placement, not the full applicability "
+            "of the statement. Current tasks, goals, dates, commitments, and simple work "
+            "practices may be useful advisory background, but this tool creates no task, "
+            "calendar, reminder, permission, policy, Skill, or execution authority. Do not "
+            "store secrets, credentials, raw tool dumps, detailed executable procedures, "
+            "or safety/permission overrides. Implementation facts directly readable from "
+            "current code, config, schema, lockfiles, tests, or authoritative project docs "
+            "should normally be reread instead of remembered; reread current workspace "
+            "truth before using a recalled coding fact. A successful call confirms only "
+            "submission for review: "
             "the item may be accepted, rejected, or remain unresolved, so never claim it "
             "was permanently saved."
         ),

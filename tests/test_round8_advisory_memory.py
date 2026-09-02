@@ -28,13 +28,15 @@ from pulsara_agent.conversation_kernel.memory.contracts import (
     MemoryDecisionKind,
     MemoryFactKind,
     MemoryKindHint,
+    MemoryRelationKind,
     ModelVisibleMemoryProvenanceDisposition,
     MemoryUsePolicy,
-    MemoryProducerKind,
     MemorySupersedeMode,
     PreparedExistingSourceRelationSettlement,
     PreparedMemoryBasisReference,
+    canonical_memory_recorded_at,
     memory_fact_semantic_digest,
+    legal_memory_final_kinds,
     prepare_memory_candidate,
     prepare_memory_governance_acceptance,
     strongest_memory_use_policy,
@@ -45,20 +47,18 @@ from pulsara_agent.conversation_kernel.memory.recall import (
     MemoryDenseCandidateDisposition,
     PostgresMemoryQuery,
 )
-from pulsara_agent.conversation_kernel.memory.reflection import (
-    CheapHintEligibleEntry,
-    CheapMemoryHintSetV1,
+from pulsara_agent.conversation_kernel.memory.hints import (
+    CheapMemoryWriteHintMatcher,
+    MEMORY_WRITE_HINT_BODY,
     MemoryWriteOptOut,
-    PreparedCheapHintReflectionHandoff,
     TurnMemoryUseOptOut,
-)
-from pulsara_agent.conversation_kernel.memory.governor import (
-    _prepare_reflection_batch,
 )
 from pulsara_agent.conversation_kernel.repository import (
     AssistantTextBlock,
+    AssistantToolCallBlock,
     ConversationKernelConflict,
     ConversationKernelRepository,
+    build_prepared_tool_result_acceptance,
 )
 from pulsara_agent.conversation_kernel.memory_tools import (
     AutomaticMemoryTriggerDisposition,
@@ -81,12 +81,18 @@ from pulsara_agent.conversation_kernel.vocabulary import (
     SUBJECT_SLOTS,
 )
 from pulsara_agent.memory.scope import (
-    CTX_USER,
+    CTX_GLOBAL,
     MemoryDomainContext,
-    MemoryScopeKind,
-    freeze_memory_read_scope_binding,
-    workspace_scope,
+    freeze_memory_read_context_binding,
+    workspace_context_id,
 )
+from pulsara_agent.ports.artifact import (
+    ToolOutputArtifactDisposition,
+    ToolResultDisplayKind,
+)
+from pulsara_agent.ports.tool_execution import ToolOutputSourceCoverage
+from pulsara_agent.primitives.context import freeze_json
+from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
 from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
 from pulsara_agent.process_api_key_boundary import ProcessApiKeyBoundary
 from pulsara_agent.primitives.run_permission import (
@@ -133,7 +139,21 @@ def _lease(repository, *, workspace_id: str, domain: str = "u_local"):
     )
 
 
-def _completed_human_entry(repository, lease, text: str) -> str:
+def _permission_fingerprint(repository, lease, turn_id: str) -> str:
+    with repository.connection_provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        deadline_monotonic=monotonic() + 30,
+    ) as connection:
+        row = connection.execute(
+            "SELECT permission_snapshot_fingerprint FROM pulsara_v3.turns "
+            "WHERE session_id=%s AND id=%s",
+            (lease.guard.session_id, turn_id),
+        ).fetchone()
+    assert row is not None
+    return str(row[0])
+
+
+def _start_human_turn(repository, lease, text: str) -> tuple[str, str]:
     now = datetime.now(timezone.utc)
     turn_id = _name("turn")
     entry_id = _name("entry")
@@ -149,21 +169,7 @@ def _completed_human_entry(repository, lease, text: str) -> str:
         occurred_at=now,
         deadline_monotonic=monotonic() + 30,
     )
-    cut = repository.prepare_provider_input_cut(
-        lease.guard, turn_id=turn_id, deadline_monotonic=monotonic() + 30
-    )
-    repository.commit_assistant_message(
-        lease.guard,
-        cut=cut,
-        entry_id=_name("entry"),
-        parent_content=InlineContent.from_bytes(b"ack"),
-        blocks=(AssistantTextBlock(_name("block"), InlineContent.from_bytes(b"ack")),),
-        complete_turn=True,
-        occurred_at=now,
-        actor_id="model:test",
-        deadline_monotonic=monotonic() + 30,
-    )
-    return entry_id
+    return turn_id, entry_id
 
 
 def _claim_candidate(
@@ -172,54 +178,155 @@ def _claim_candidate(
     *,
     statement: str,
     kind_hint: MemoryKindHint,
-    scope_kind: MemoryScopeKind = MemoryScopeKind.USER,
-    scope_id: str = CTX_USER,
-    applies_when: str | None = None,
+    context_id: str = CTX_GLOBAL,
     based_on: tuple[str, ...] = (),
     domain: str = "u_local",
+    claim: bool = True,
 ):
-    trigger_entry_id = _completed_human_entry(repository, lease, statement)
+    turn_id, _ = _start_human_turn(repository, lease, statement)
+    cut = repository.prepare_provider_input_cut(
+        lease.guard, turn_id=turn_id, deadline_monotonic=monotonic() + 30
+    )
+    producer_entry_id = _name("entry")
+    producer_tool_call_id = _name("call")
+    repository.commit_assistant_message(
+        lease.guard,
+        cut=cut,
+        entry_id=producer_entry_id,
+        parent_content=InlineContent.from_bytes(b"I can remember that."),
+        blocks=(
+            AssistantTextBlock(
+                _name("block"), InlineContent.from_bytes(b"I can remember that.")
+            ),
+            AssistantToolCallBlock(
+                _name("block"),
+                producer_tool_call_id,
+                "remember",
+                freeze_json(
+                    {
+                        "statement": statement,
+                        "context_target": (
+                            "GLOBAL" if context_id == CTX_GLOBAL else "CURRENT_PROJECT"
+                        ),
+                    }
+                ),
+            ),
+        ),
+        occurred_at=datetime.now(timezone.utc),
+        actor_id="model:test",
+        deadline_monotonic=monotonic() + 30,
+    )
+    attempt = repository.accept_tool_attempt(
+        lease.guard,
+        attempt_id=_name("attempt"),
+        assistant_entry_id=producer_entry_id,
+        tool_call_id=producer_tool_call_id,
+        authorization_kind="policy",
+        authorization_reference="allow",
+        actor_kind="runtime",
+        actor_id="tool:test",
+        remote_idempotency_key=None,
+        retry_of_attempt_id=None,
+        permission_snapshot_fingerprint=_permission_fingerprint(
+            repository, lease, turn_id
+        ),
+        occurred_at=datetime.now(timezone.utc),
+        deadline_monotonic=monotonic() + 30,
+    )
+    workspace_id = repository.read_session_workspace_id(
+        lease.guard, deadline_monotonic=monotonic() + 30
+    )
+    basis_contexts: dict[str, str] = {}
+    if based_on:
+        with repository.connection_provider.connection(
+            lane=PostgresConnectionLane.INSPECTOR,
+            deadline_monotonic=monotonic() + 30,
+        ) as connection:
+            rows = connection.execute(
+                "SELECT id, context_id FROM pulsara_v3.memory_facts "
+                "WHERE memory_domain_id=%s AND id=ANY(%s::text[])",
+                (domain, list(based_on)),
+            ).fetchall()
+        basis_contexts = {str(row[0]): str(row[1]) for row in rows}
+        assert set(basis_contexts) == set(based_on)
     candidate = prepare_memory_candidate(
         candidate_id=_name("candidate"),
         memory_domain_id=domain,
-        origin_workspace_id=repository.read_session_workspace_id(
-            lease.guard, deadline_monotonic=monotonic() + 30
-        ),
+        origin_workspace_id=workspace_id,
         origin_session_id=lease.guard.session_id,
-        producer_kind=MemoryProducerKind.CHEAP_HINT_REFLECTION,
-        trigger_user_entry_id=trigger_entry_id,
-        producer_candidate_ordinal=0,
+        producer_entry_id=producer_entry_id,
+        producer_tool_call_id=producer_tool_call_id,
         proposal=FrozenMemoryProposal(
             statement=statement,
-            scope_kind=scope_kind,
-            scope_id=scope_id,
+            context_id=context_id,
             kind_hint=kind_hint,
-            applies_when=applies_when,
             based_on_memory_ids=based_on,
         ),
         basis_refs=tuple(
             PreparedMemoryBasisReference(
                 target_fact_id=fact_id,
-                target_scope_kind=MemoryScopeKind.USER,
-                target_scope_id=CTX_USER,
+                target_context_id=basis_contexts[fact_id],
                 ordinal=ordinal,
             )
             for ordinal, fact_id in enumerate(based_on)
         ),
     )
-    repository.accept_reflection_memory_candidates(
+    result = build_prepared_tool_result_acceptance(
+        guard=lease.guard,
+        workspace_id=workspace_id,
+        result_id=_name("result"),
+        result_entry_id=_name("entry"),
+        turn_id=turn_id,
+        assistant_entry_id=producer_entry_id,
+        tool_call_id=producer_tool_call_id,
+        attempt_id=attempt.attempt_id,
+        result_state="SUCCESS",
+        canonical_preview_content=InlineContent.from_bytes(b"submitted for review"),
+        artifact_disposition=ToolOutputArtifactDisposition.NOT_REQUIRED,
+        artifact_id=None,
+        artifact_blob_descriptor=None,
+        source_coverage=ToolOutputSourceCoverage.COMPLETE,
+        display_kind=ToolResultDisplayKind.COMPLETE,
+        source_coverage_reason=None,
+        artifact_unavailability_reason=None,
+        observed_at=datetime.now(timezone.utc),
+        observation_duration_microseconds=None,
+        observation_origin_kind=ToolObservationOrigin.BUILTIN,
+        trusted_tool_reported_duration_microseconds=None,
+        actor_id="remember",
+        memory_candidate=candidate,
+    )
+    repository.accept_tool_result(
         lease.guard,
-        candidates=(candidate,),
+        candidate=result,
         deadline_monotonic=monotonic() + 30,
     )
-    claimed = repository.claim_memory_candidate_for_governance(
+    final_cut = repository.prepare_provider_input_cut(
+        lease.guard, turn_id=turn_id, deadline_monotonic=monotonic() + 30
+    )
+    repository.commit_assistant_message(
         lease.guard,
-        candidate_id=candidate.candidate_id,
-        processing_started_at=datetime.now(timezone.utc),
+        cut=final_cut,
+        entry_id=_name("entry"),
+        parent_content=InlineContent.from_bytes(b"ack"),
+        blocks=(
+            AssistantTextBlock(_name("block"), InlineContent.from_bytes(b"ack")),
+        ),
+        complete_turn=True,
+        occurred_at=datetime.now(timezone.utc),
+        actor_id="model:test",
         deadline_monotonic=monotonic() + 30,
     )
-    assert claimed is not None
-    return claimed.prepared
+    if claim:
+        claimed = repository.claim_memory_candidate_for_governance(
+            lease.guard,
+            candidate_id=candidate.candidate_id,
+            processing_started_at=datetime.now(timezone.utc),
+            deadline_monotonic=monotonic() + 30,
+        )
+        assert claimed is not None
+        return claimed.prepared
+    return candidate
 
 
 def _settle(repository, lease, candidate, decision):
@@ -236,29 +343,28 @@ def _settle(repository, lease, candidate, decision):
     )
     relation_targets = ()
     if decision.related_target_fact_id is not None:
-        binding = freeze_memory_read_scope_binding(
-            domain=MemoryDomainContext(candidate.memory_domain_id, "transient"),
-            host_workspace_id=candidate.origin_workspace_id,
-        )
-        target = PostgresMemoryQuery(repository.connection_provider).get(
-            read_binding=binding,
-            fact_id=decision.related_target_fact_id,
+        with repository.connection_provider.connection(
+            lane=PostgresConnectionLane.INSPECTOR,
             deadline_monotonic=monotonic() + 30,
-        )
+        ) as connection:
+            target = connection.execute(
+                "SELECT id, context_id, fact_kind, lifecycle, statement, "
+                "accepted_at, fact_semantic_digest FROM pulsara_v3.memory_facts "
+                "WHERE memory_domain_id=%s AND id=%s",
+                (candidate.memory_domain_id, decision.related_target_fact_id),
+            ).fetchone()
         assert target is not None
         relation_targets = (
             FrozenMemoryPublicFactProjection(
-                fact_id=target.fact_id,
-                scope_kind=MemoryScopeKind(target.scope_kind),
-                scope_id=target.scope_id,
-                fact_kind=MemoryFactKind(target.fact_kind),
+                fact_id=str(target[0]),
+                context_id=str(target[1]),
+                fact_kind=MemoryFactKind(str(target[2])),
                 # A second settlement may observe the exact relation winner
                 # after it applied the prepared ACTIVE -> SUPERSEDED effect.
                 lifecycle="ACTIVE",
-                statement=target.statement,
-                applies_when=target.applies_when,
-                do_not_apply_when=target.do_not_apply_when,
-                fact_semantic_digest=target.fact_semantic_digest,
+                statement=str(target[4]),
+                recorded_at=canonical_memory_recorded_at(target[5]),
+                fact_semantic_digest=str(target[6]),
             ),
         )
     prepared = prepare_memory_governance_acceptance(
@@ -296,10 +402,9 @@ def _settle(repository, lease, candidate, decision):
 
 def test_round8_closed_taxonomy_tokenizer_and_process_local_architecture() -> None:
     assert tuple(item.value for item in MemoryFactKind) == (
-        "FACT",
         "USER_PROFILE",
         "RESPONSE_PREFERENCE",
-        "ACTION_RULE",
+        "FACT",
         "DECISION",
     )
     assert len(COMMITTED_EVENT_DESCRIPTORS) == 29
@@ -307,6 +412,11 @@ def test_round8_closed_taxonomy_tokenizer_and_process_local_architecture() -> No
     assert len(SUBJECT_SLOTS) == 11
     assert len(APPEND_GUARDS) == 1
     assert len(CONVERSATION_KERNEL_RELATIONS) == 25
+    assert tuple(item.value for item in MemoryRelationKind) == (
+        "BASED_ON",
+        "SUPERSEDES",
+        "CONTRADICTS",
+    )
     tokenizer = MemoryRetrievalTokenizerV1()
     terms = tokenizer.tokenize(
         "请记住 FastAPI routes live at src/api/user_profile.py and error E_CONN_42"
@@ -338,6 +448,175 @@ def test_round8_closed_taxonomy_tokenizer_and_process_local_architecture() -> No
         "MemoryFactLifecycleChanged",
     ):
         assert forbidden not in production
+
+
+def test_round8_clean_v0_memory_schema_is_the_closed_context_hard_cut(
+    stage2_migrated_postgres_database,
+) -> None:
+    """The reset-only v0 schema contains only the authorized subtraction delta."""
+
+    expected_columns = {
+        "memory_candidates": {
+            "id",
+            "memory_domain_id",
+            "origin_workspace_id",
+            "origin_session_id",
+            "producer_entry_id",
+            "producer_tool_call_id",
+            "context_id",
+            "kind_hint",
+            "statement",
+            "candidate_acceptance_digest",
+            "model_visible_memory_provenance_disposition",
+            "model_visible_memory_fact_ids",
+            "status",
+            "decision_kind",
+            "final_kind",
+            "decision_reason_code",
+            "decision_public_summary",
+            "related_target_fact_id",
+            "duplicate_winner_fact_id",
+            "accepted_fact_id",
+            "applied_existing_fact_id",
+            "processing_started_at",
+            "decided_at",
+            "accepted_fact_at",
+            "accepted_at",
+        },
+        "memory_candidate_tool_result_refs": {
+            "candidate_id",
+            "origin_session_id",
+            "tool_result_id",
+            "ordinal",
+            "evidence_kind",
+            "citation_visibility",
+        },
+        "memory_candidate_basis_refs": {
+            "candidate_id",
+            "memory_domain_id",
+            "source_context_id",
+            "target_context_id",
+            "target_fact_id",
+            "ordinal",
+        },
+        "memory_facts": {
+            "id",
+            "memory_domain_id",
+            "context_id",
+            "source_candidate_id",
+            "lifecycle",
+            "fact_kind",
+            "statement",
+            "fact_semantic_digest",
+            "accepted_at",
+            "updated_at",
+            "search_contract_id",
+            "search_contract_version",
+            "search_terms",
+            "search_document",
+        },
+        "memory_relations": {
+            "id",
+            "memory_domain_id",
+            "decision_candidate_id",
+            "source_context_id",
+            "source_fact_id",
+            "source_fact_kind",
+            "relation_kind",
+            "target_context_id",
+            "target_fact_id",
+            "target_fact_kind",
+            "supersede_mode",
+            "ordinal",
+            "accepted_at",
+        },
+        "memory_embeddings": {
+            "memory_domain_id",
+            "fact_id",
+            "fact_semantic_digest",
+            "embedding_contract_id",
+            "embedding_contract_version",
+            "embedding",
+            "embedded_at",
+        },
+    }
+    provider = verified_postgres_provider(
+        stage2_migrated_postgres_database.runtime_dsn
+    )
+    with provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        deadline_monotonic=monotonic() + 30,
+    ) as connection:
+        rows = connection.execute(
+            """
+            SELECT table_name, column_name, is_nullable
+            FROM information_schema.columns
+            WHERE table_schema='pulsara_v3' AND table_name LIKE 'memory_%'
+            ORDER BY table_name, ordinal_position
+            """
+        ).fetchall()
+        constraint_text = "\n".join(
+            str(row[0])
+            for row in connection.execute(
+                """
+                SELECT pg_get_constraintdef(c.oid)
+                FROM pg_catalog.pg_constraint c
+                JOIN pg_catalog.pg_class r ON r.oid = c.conrelid
+                JOIN pg_catalog.pg_namespace n ON n.oid = r.relnamespace
+                WHERE n.nspname='pulsara_v3' AND r.relname LIKE 'memory_%'
+                ORDER BY r.relname, c.conname
+                """
+            ).fetchall()
+        )
+
+    observed_columns: dict[str, set[str]] = {}
+    nullability: dict[tuple[str, str], str] = {}
+    for table_name, column_name, is_nullable in rows:
+        observed_columns.setdefault(str(table_name), set()).add(str(column_name))
+        nullability[(str(table_name), str(column_name))] = str(is_nullable)
+
+    assert observed_columns == expected_columns
+    assert sum(map(len, observed_columns.values())) == 71
+    assert nullability[("memory_candidates", "producer_entry_id")] == "NO"
+    assert nullability[("memory_candidates", "producer_tool_call_id")] == "NO"
+    assert nullability[("memory_candidates", "accepted_at")] == "NO"
+    assert nullability[("memory_facts", "accepted_at")] == "NO"
+    assert nullability[("memory_facts", "updated_at")] == "NO"
+
+    for retired in (
+        "ACTION_RULE",
+        "MULTI_ATOM_STATEMENT",
+        "USER_PROFILE_SCOPE_OR_KIND_MISMATCH",
+        "ctx:user",
+        "USER_SAFE",
+        "WORKSPACE_BOUND",
+        "CHEAP_HINT_REFLECTION",
+    ):
+        assert retired not in constraint_text
+    assert "ctx:global" in constraint_text
+    assert "ctx:workspace/" in constraint_text
+    assert "GLOBAL_SAFE" in constraint_text
+    assert "CURRENT_CONTEXT_BOUND" in constraint_text
+
+    repository = _repository(stage2_migrated_postgres_database)
+    lease = _lease(repository, workspace_id=_name("workspace"))
+    candidate = _claim_candidate(
+        repository,
+        lease,
+        statement="A schema-oracle candidate",
+        kind_hint=MemoryKindHint.FACT,
+        claim=False,
+    )
+    with pytest.raises(CheckViolation):
+        with repository.connection_provider.connection(
+            lane=PostgresConnectionLane.BACKGROUND_WORK,
+            deadline_monotonic=monotonic() + 30,
+        ) as connection:
+            connection.execute(
+                "UPDATE pulsara_v3.memory_candidates SET context_id='ctx:user' "
+                "WHERE id=%s",
+                (candidate.candidate_id,),
+            )
 
 
 def test_round8_memory_remote_credentials_never_fallback_to_main_model(
@@ -396,11 +675,10 @@ def test_round8_opt_out_and_hint_matchers_are_closed() -> None:
     )
     assert not turn_opt_out.excludes("answer without using memory allocation")
     assert not turn_opt_out.excludes("不要使用内存")
-    hints = CheapMemoryHintSetV1().match("Please remember that I prefer terse answers")
-    assert hints
-    assert all(item.signal_code and item.normalized_excerpt for item in hints)
-    assert not CheapMemoryHintSetV1().match("Please don't run the tests yet")
-    assert CheapMemoryHintSetV1().match("I like Sichuan food")
+    matcher = CheapMemoryWriteHintMatcher()
+    assert matcher.matches("Please remember that I prefer terse answers")
+    assert not matcher.matches("Please don't run the tests yet")
+    assert matcher.matches("I like Sichuan food")
 
     policy = MemoryUsePolicy.ENABLED
     for candidate in (
@@ -523,60 +801,14 @@ def test_round8_memory_use_policy_is_enforced_without_changing_tool_surface(
     asyncio.run(exercise())
 
 
-def test_round8_reflection_can_select_but_cannot_rewrite_human_text() -> None:
-    entry = CheapHintEligibleEntry(
-        entry_id="entry:reflection",
-        entry_sequence=1,
-        public_text="I Prefer concise replies.",
-        adjacent_assistant_text="",
-        hints=CheapMemoryHintSetV1().match("I Prefer concise replies."),
-    )
-    values = {
-        "session_id": "session:reflection",
-        "workspace_id": "ctx:workspace/reflection",
-        "memory_domain_id": "u_local",
-        "workspace_scope_id": "ctx:workspace/reflection",
-        "turn_id": "turn:reflection",
-        "permission_snapshot_fingerprint": "sha256:" + "1" * 64,
-        "provider_trust_domain_identity": "sha256:" + "2" * 64,
-        "eligible_entries": (entry,),
-        "final_assistant_text": "ack",
-    }
-    handoff = PreparedCheapHintReflectionHandoff(**values)
-
-    accepted = _prepare_reflection_batch(
-        handoff,
-        {
-            "candidates": [
-                {
-                    "source": "user:1",
-                    "statement": "I Prefer concise replies.",
-                    "scope": "USER",
-                    "kind_hint": "RESPONSE_PREFERENCE",
-                    "applies_when": None,
-                    "do_not_apply_when": [],
-                }
-            ]
-        },
-    )
-    assert accepted.candidates[0].proposal.statement == "I Prefer concise replies."
-
-    with pytest.raises(ValueError, match="rewrote"):
-        _prepare_reflection_batch(
-            handoff,
-            {
-                "candidates": [
-                    {
-                        "source": "user:1",
-                        "statement": "i prefer concise replies.",
-                        "scope": "USER",
-                        "kind_hint": "RESPONSE_PREFERENCE",
-                        "applies_when": None,
-                        "do_not_apply_when": [],
-                    }
-                ]
-            },
-        )
+def test_round8_cheap_hint_is_a_fixed_boolean_attention_cue_only() -> None:
+    matcher = CheapMemoryWriteHintMatcher()
+    assert matcher.matches("I Prefer concise replies.")
+    assert matcher.matches("请记住，我喜欢川菜")
+    assert not matcher.matches("Please inspect the current schema")
+    assert "I Prefer concise replies" not in MEMORY_WRITE_HINT_BODY
+    assert "must" not in MEMORY_WRITE_HINT_BODY.casefold()
+    assert "remember" in MEMORY_WRITE_HINT_BODY
 
 
 def test_round8_duplicate_relations_taxonomy_correction_and_basis_are_exact(
@@ -733,6 +965,118 @@ def test_round8_duplicate_relations_taxonomy_correction_and_basis_are_exact(
         ).fetchone() == (correct_candidate.candidate_id,)
 
 
+@pytest.mark.parametrize(
+    ("decision_kind", "supersede_mode", "expected_lifecycle"),
+    (
+        (
+            MemoryDecisionKind.ACCEPT_AND_SUPERSEDE,
+            MemorySupersedeMode.SAME_KIND_REPLACEMENT,
+            "SUPERSEDED",
+        ),
+        (MemoryDecisionKind.ACCEPT_AND_CONTRADICT, None, "ACTIVE"),
+    ),
+)
+def test_round8_lifecycle_acceptance_preserves_all_frozen_basis_relations(
+    stage2_migrated_postgres_database,
+    decision_kind: MemoryDecisionKind,
+    supersede_mode: MemorySupersedeMode | None,
+    expected_lifecycle: str,
+) -> None:
+    repository = _repository(stage2_migrated_postgres_database)
+    lease = _lease(repository, workspace_id=_name("workspace"))
+
+    basis_candidate = _claim_candidate(
+        repository,
+        lease,
+        statement=(
+            "The user prefers releases with an explicit rationale for "
+            f"{decision_kind.value} checks"
+        ),
+        kind_hint=MemoryKindHint.USER_PROFILE,
+    )
+    _, basis = _settle(
+        repository,
+        lease,
+        basis_candidate,
+        FrozenMemoryGovernanceDecision(
+            MemoryDecisionKind.ACCEPT,
+            final_kind=MemoryFactKind.USER_PROFILE,
+            public_summary="Based on the exact test source.",
+        ),
+    )
+    target_candidate = _claim_candidate(
+        repository,
+        lease,
+        statement=f"The {decision_kind.value} release is scheduled for Tuesday",
+        kind_hint=MemoryKindHint.FACT,
+    )
+    _, target = _settle(
+        repository,
+        lease,
+        target_candidate,
+        FrozenMemoryGovernanceDecision(
+            MemoryDecisionKind.ACCEPT,
+            final_kind=MemoryFactKind.FACT,
+            public_summary="Based on the exact test source.",
+        ),
+    )
+    assert basis.fact_id is not None and target.fact_id is not None
+
+    source_candidate = _claim_candidate(
+        repository,
+        lease,
+        statement=f"The {decision_kind.value} release is scheduled for Wednesday",
+        kind_hint=MemoryKindHint.FACT,
+        based_on=(basis.fact_id,),
+    )
+    _, source = _settle(
+        repository,
+        lease,
+        source_candidate,
+        FrozenMemoryGovernanceDecision(
+            decision_kind,
+            final_kind=MemoryFactKind.FACT,
+            public_summary="Based on the exact test source.",
+            related_target_fact_id=target.fact_id,
+            supersede_mode=supersede_mode,
+        ),
+    )
+    assert source.fact_id is not None and source.relation_id is not None
+
+    with repository.connection_provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        deadline_monotonic=monotonic() + 30,
+    ) as connection:
+        rows = connection.execute(
+            """
+            SELECT id, relation_kind, target_fact_id, ordinal
+            FROM pulsara_v3.memory_relations
+            WHERE decision_candidate_id=%s
+            ORDER BY ordinal NULLS LAST, id
+            """,
+            (source_candidate.candidate_id,),
+        ).fetchall()
+        target_lifecycle = connection.execute(
+            "SELECT lifecycle FROM pulsara_v3.memory_facts WHERE id=%s",
+            (target.fact_id,),
+        ).fetchone()
+
+    assert rows == [
+        (rows[0][0], "BASED_ON", basis.fact_id, 0),
+        (
+            source.relation_id,
+            (
+                "SUPERSEDES"
+                if decision_kind is MemoryDecisionKind.ACCEPT_AND_SUPERSEDE
+                else "CONTRADICTS"
+            ),
+            target.fact_id,
+            None,
+        ),
+    ]
+    assert target_lifecycle == (expected_lifecycle,)
+
+
 def test_round8_reverse_contradiction_confirms_the_unordered_relation_winner(
     stage2_migrated_postgres_database,
 ) -> None:
@@ -805,8 +1149,9 @@ def test_round8_reverse_contradiction_confirms_the_unordered_relation_winner(
             """
             SELECT id, source_fact_id, target_fact_id
             FROM pulsara_v3.memory_relations
-            WHERE relation_kind='CONTRADICTS'
-            """
+            WHERE relation_kind='CONTRADICTS' AND id=%s
+            """,
+            (second.relation_id,),
         ).fetchall()
     assert row == [(second.relation_id, second.fact_id, first.fact_id)]
 
@@ -837,7 +1182,7 @@ def test_round8_scope_sparse_recall_and_cross_origin_provenance_redaction(
     assert accepted.fact_id is not None
 
     query = PostgresMemoryQuery(repository.connection_provider)
-    binding_a = freeze_memory_read_scope_binding(
+    binding_a = freeze_memory_read_context_binding(
         domain=MemoryDomainContext("u_local", "transient"),
         host_workspace_id=workspace_a,
     )
@@ -846,7 +1191,6 @@ def test_round8_scope_sparse_recall_and_cross_origin_provenance_redaction(
         terms=MemoryRetrievalTokenizerV1().tokenize(
             "E_CONN_42 user_profile.py 中文服务"
         ),
-        scope_filter=None,
         kind_filter=None,
         limit=20,
         automatic=False,
@@ -867,7 +1211,7 @@ def test_round8_scope_sparse_recall_and_cross_origin_provenance_redaction(
     assert same is not None and same.provenance_disposition == "SAME_ORIGIN"
     assert same.producer_entry_id is not None
 
-    binding_b = freeze_memory_read_scope_binding(
+    binding_b = freeze_memory_read_context_binding(
         domain=MemoryDomainContext("u_local", "transient"),
         host_workspace_id=workspace_b,
     )
@@ -894,47 +1238,42 @@ def test_round8_tool_schema_proposal_shape_and_vector_contract_are_closed() -> N
     assert tuple(item.descriptor.name for item in memory_writes) == ("remember",)
     schema = memory_writes[0].descriptor.input_schema
     assert schema["additionalProperties"] is False
-    assert schema["properties"]["scope"]["enum"] == ("USER", "WORKSPACE")
+    assert schema["properties"]["context_target"]["enum"] == (
+        "GLOBAL",
+        "CURRENT_PROJECT",
+    )
     assert schema["properties"]["kind_hint"]["enum"] == (
         "AUTO",
-        "FACT",
         "USER_PROFILE",
         "RESPONSE_PREFERENCE",
-        "ACTION_RULE",
+        "FACT",
         "DECISION",
     )
+    assert "scope" not in schema["properties"]
+    assert "applies_when" not in schema["properties"]
+    assert "do_not_apply_when" not in schema["properties"]
     assert "force" not in schema["properties"]
     assert "authority" not in schema["properties"]
 
-    with pytest.raises(ValueError, match="ACTION_RULE"):
+    with pytest.raises(ValueError, match="context"):
         FrozenMemoryProposal(
             statement="Run the formatter",
-            scope_kind=MemoryScopeKind.USER,
-            scope_id=CTX_USER,
-            kind_hint=MemoryKindHint.ACTION_RULE,
+            context_id="ctx:user",
+            kind_hint=MemoryKindHint.DECISION,
         )
-    with pytest.raises(ValueError, match="incompatible structured fields"):
-        FrozenMemoryProposal(
-            statement="The deployment target is prod",
-            scope_kind=MemoryScopeKind.USER,
-            scope_id=CTX_USER,
-            kind_hint=MemoryKindHint.FACT,
-            based_on_memory_ids=("memory:one",),
-        )
-    with pytest.raises(ValueError, match="USER_PROFILE"):
-        FrozenMemoryProposal(
-            statement="The user maintains the backend in this repository",
-            scope_kind=MemoryScopeKind.WORKSPACE,
-            scope_id="ctx:workspace/example",
-            kind_hint=MemoryKindHint.USER_PROFILE,
-        )
-    FrozenMemoryProposal(
-        statement="Use the release checklist before deployment",
-        scope_kind=MemoryScopeKind.USER,
-        scope_id=CTX_USER,
-        kind_hint=MemoryKindHint.ACTION_RULE,
-        applies_when="before a production deployment",
+    project_profile = FrozenMemoryProposal(
+        statement="In this project, the user owns the release process",
+        context_id="ctx:workspace/example",
+        kind_hint=MemoryKindHint.USER_PROFILE,
+        based_on_memory_ids=("memory:one",),
     )
+    assert legal_memory_final_kinds(project_profile) == tuple(MemoryFactKind)
+    conditional = FrozenMemoryProposal(
+        statement="For legal questions, explain uncertainty before conclusions",
+        context_id=CTX_GLOBAL,
+        kind_hint=MemoryKindHint.RESPONSE_PREFERENCE,
+    )
+    assert legal_memory_final_kinds(conditional) == tuple(MemoryFactKind)
 
     assert len(freeze_v1_embedding_vector([1.0] * 1024)) == 1024
     for invalid in ([1.0] * 1023, [0.0] * 1024, [nan] * 1024):
@@ -950,8 +1289,8 @@ def test_round8_workspace_domain_visibility_origin_claim_and_relation_endpoints(
     other_domain = _name("domain").replace(":", "_")
     project_a = "/tmp/round8/project-a"
     project_b = "/tmp/round8/project-b"
-    workspace_a = workspace_scope(project_a)
-    workspace_b = workspace_scope(project_b)
+    workspace_a = workspace_context_id(project_a)
+    workspace_b = workspace_context_id(project_b)
     lease_a = _lease(repository, workspace_id=workspace_a, domain=domain)
     lease_b = _lease(repository, workspace_id=workspace_b, domain=domain)
     _lease(repository, workspace_id=workspace_a, domain=other_domain)
@@ -978,8 +1317,7 @@ def test_round8_workspace_domain_visibility_origin_claim_and_relation_endpoints(
         lease_a,
         statement="This repository deploys from src/release.py",
         kind_hint=MemoryKindHint.FACT,
-        scope_kind=MemoryScopeKind.WORKSPACE,
-        scope_id=workspace_a,
+        context_id=workspace_a,
         domain=domain,
     )
     _, workspace_fact = _settle(
@@ -994,15 +1332,15 @@ def test_round8_workspace_domain_visibility_origin_claim_and_relation_endpoints(
     )
     assert user_fact.fact_id is not None and workspace_fact.fact_id is not None
 
-    binding_a = freeze_memory_read_scope_binding(
+    binding_a = freeze_memory_read_context_binding(
         domain=MemoryDomainContext(domain, "project", project_a),
         host_workspace_id=workspace_a,
     )
-    binding_b = freeze_memory_read_scope_binding(
+    binding_b = freeze_memory_read_context_binding(
         domain=MemoryDomainContext(domain, "project", project_b),
         host_workspace_id=workspace_b,
     )
-    binding_foreign_domain = freeze_memory_read_scope_binding(
+    binding_foreign_domain = freeze_memory_read_context_binding(
         domain=MemoryDomainContext(other_domain, "project", project_a),
         host_workspace_id=workspace_a,
     )
@@ -1037,8 +1375,7 @@ def test_round8_workspace_domain_visibility_origin_claim_and_relation_endpoints(
         lease_a,
         statement="We selected a migration checklist",
         kind_hint=MemoryKindHint.DECISION,
-        scope_kind=MemoryScopeKind.WORKSPACE,
-        scope_id=workspace_a,
+        context_id=workspace_a,
         based_on=(user_fact.fact_id,),
         domain=domain,
     )
@@ -1067,28 +1404,13 @@ def test_round8_workspace_domain_visibility_origin_claim_and_relation_endpoints(
         == ()
     )
 
-    trigger_entry_id = _completed_human_entry(
-        repository, lease_a, "Please remember my editor setting"
-    )
-    pending = prepare_memory_candidate(
-        candidate_id=_name("pending"),
-        memory_domain_id=domain,
-        origin_workspace_id=workspace_a,
-        origin_session_id=lease_a.guard.session_id,
-        producer_kind=MemoryProducerKind.CHEAP_HINT_REFLECTION,
-        trigger_user_entry_id=trigger_entry_id,
-        producer_candidate_ordinal=0,
-        proposal=FrozenMemoryProposal(
-            statement="The user uses a compact editor layout",
-            scope_kind=MemoryScopeKind.USER,
-            scope_id=CTX_USER,
-            kind_hint=MemoryKindHint.USER_PROFILE,
-        ),
-    )
-    repository.accept_reflection_memory_candidates(
-        lease_a.guard,
-        candidates=(pending,),
-        deadline_monotonic=monotonic() + 30,
+    pending = _claim_candidate(
+        repository,
+        lease_a,
+        statement="The user uses a compact editor layout",
+        kind_hint=MemoryKindHint.USER_PROFILE,
+        domain=domain,
+        claim=False,
     )
     assert (
         repository.claim_memory_candidate_for_governance(
@@ -1115,31 +1437,16 @@ def test_round8_governance_owner_is_exact_session_within_shared_workspace(
 ) -> None:
     repository = _repository(stage2_migrated_postgres_database)
     domain = _name("domain").replace(":", "_")
-    workspace_id = workspace_scope("/tmp/round8/shared-project")
+    workspace_id = workspace_context_id("/tmp/round8/shared-project")
     owner = _lease(repository, workspace_id=workspace_id, domain=domain)
     peer = _lease(repository, workspace_id=workspace_id, domain=domain)
-    trigger_entry_id = _completed_human_entry(
-        repository, owner, "Please remember my shared-project preference"
-    )
-    candidate = prepare_memory_candidate(
-        candidate_id=_name("candidate"),
-        memory_domain_id=domain,
-        origin_workspace_id=workspace_id,
-        origin_session_id=owner.guard.session_id,
-        producer_kind=MemoryProducerKind.CHEAP_HINT_REFLECTION,
-        trigger_user_entry_id=trigger_entry_id,
-        producer_candidate_ordinal=0,
-        proposal=FrozenMemoryProposal(
-            statement="The user prefers concise shared-project updates",
-            scope_kind=MemoryScopeKind.USER,
-            scope_id=CTX_USER,
-            kind_hint=MemoryKindHint.RESPONSE_PREFERENCE,
-        ),
-    )
-    repository.accept_reflection_memory_candidates(
-        owner.guard,
-        candidates=(candidate,),
-        deadline_monotonic=monotonic() + 30,
+    candidate = _claim_candidate(
+        repository,
+        owner,
+        statement="The user prefers concise shared-project updates",
+        kind_hint=MemoryKindHint.RESPONSE_PREFERENCE,
+        domain=domain,
+        claim=False,
     )
 
     assert (
@@ -1286,7 +1593,7 @@ def test_round8_response_preference_capacity_and_atomic_replacement(
     ) as connection:
         assert connection.execute(
             "SELECT count(*) FROM pulsara_v3.memory_facts WHERE memory_domain_id='u_local' "
-            "AND scope_kind='USER' AND scope_id='ctx:user' "
+            "AND context_id='ctx:global' "
             "AND fact_kind='RESPONSE_PREFERENCE' AND lifecycle='ACTIVE'"
         ).fetchone() == (16,)
 
@@ -1348,24 +1655,21 @@ def test_round8_search_document_is_trigger_sealed_and_not_repository_input(
         connection.execute(
             """
             INSERT INTO pulsara_v3.memory_facts (
-                id, memory_domain_id, scope_kind, scope_id, source_candidate_id,
-                lifecycle, fact_kind, statement, applies_when, do_not_apply_when,
+                id, memory_domain_id, context_id, source_candidate_id,
+                lifecycle, fact_kind, statement,
                 fact_semantic_digest, accepted_at, updated_at,
                 search_contract_id, search_contract_version, search_terms,
                 search_document
-            ) VALUES (%s,%s,%s,%s,%s,'ACTIVE',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+            ) VALUES (%s,%s,%s,%s,'ACTIVE',%s,%s,%s,%s,%s,%s,%s,%s,
                       to_tsvector('simple', 'forged_only'))
             """,
             (
                 fact.fact_id,
                 fact.memory_domain_id,
-                fact.scope_kind.value,
-                fact.scope_id,
+                fact.context_id,
                 candidate.candidate_id,
                 fact.fact_kind.value,
                 fact.statement,
-                fact.applies_when,
-                list(fact.do_not_apply_when),
                 fact.fact_semantic_digest,
                 now,
                 now,
@@ -1402,7 +1706,7 @@ def test_round8_embedding_cache_revalidates_scope_digest_and_vector_shape(
 ) -> None:
     repository = _repository(stage2_migrated_postgres_database)
     project = "/tmp/round8/vector-project"
-    workspace = workspace_scope(project)
+    workspace = workspace_context_id(project)
     domain = _name("domain").replace(":", "_")
     lease = _lease(repository, workspace_id=workspace, domain=domain)
     candidate = _claim_candidate(
@@ -1423,15 +1727,13 @@ def test_round8_embedding_cache_revalidates_scope_digest_and_vector_shape(
         ),
     )
     assert accepted.fact_id is not None
-    binding = freeze_memory_read_scope_binding(
+    binding = freeze_memory_read_context_binding(
         domain=MemoryDomainContext(domain, "project", project),
         host_workspace_id=workspace,
     )
     digest_value = memory_fact_semantic_digest(
         kind=MemoryFactKind.USER_PROFILE,
         statement="Vector recall fixture for Chinese food preferences",
-        applies_when=None,
-        do_not_apply_when=(),
     )
     assert repository.upsert_memory_embedding(
         read_binding=binding,
@@ -1479,7 +1781,6 @@ def test_round8_embedding_cache_revalidates_scope_digest_and_vector_shape(
     bounded = PostgresMemoryQuery(repository.connection_provider).dense_candidates(
         read_binding=binding,
         vector=[1.0] * 1024,
-        scope_filter=None,
         kind_filter=None,
         limit=1,
         purpose="EXPLICIT_SEARCH",
@@ -1565,7 +1866,7 @@ def test_round8_preference_head_and_automatic_recall_are_separate_advisory_sourc
     assert preference.fact_id is not None and profile.fact_id is not None
 
     io_owner = KernelSessionIO()
-    binding = freeze_memory_read_scope_binding(
+    binding = freeze_memory_read_context_binding(
         domain=MemoryDomainContext(domain, "transient"),
         host_workspace_id=workspace_id,
     )
@@ -1577,7 +1878,6 @@ def test_round8_preference_head_and_automatic_recall_are_separate_advisory_sourc
         feature_config=AdvisoryMemoryFeatureConfig(
             automatic_dense=False,
             explicit_rerank=False,
-            cheap_hint_reflection=False,
         ),
         io_owner=io_owner,
         api_key_boundary=ProcessApiKeyBoundary(),
@@ -1650,7 +1950,7 @@ def test_round8_preference_head_uses_one_repeatable_read_composite(
 
     query = PostgresMemoryQuery(TracingProvider())
     snapshot = query.response_preference_snapshot(
-        read_binding=freeze_memory_read_scope_binding(
+        read_binding=freeze_memory_read_context_binding(
             domain=MemoryDomainContext(_name("domain").replace(":", "_"), "transient"),
             host_workspace_id=_name("workspace"),
         ),
@@ -1705,7 +2005,7 @@ def test_round8_optional_provider_and_relation_failures_remain_advisory(
     port = KernelMemoryToolPort(
         repository=repository,
         session_id=lease.guard.session_id,
-        read_binding=freeze_memory_read_scope_binding(
+        read_binding=freeze_memory_read_context_binding(
             domain=MemoryDomainContext(domain, "transient"),
             host_workspace_id=workspace_id,
         ),
@@ -1714,7 +2014,6 @@ def test_round8_optional_provider_and_relation_failures_remain_advisory(
         feature_config=AdvisoryMemoryFeatureConfig(
             automatic_dense=True,
             explicit_rerank=True,
-            cheap_hint_reflection=False,
         ),
         io_owner=io_owner,
         api_key_boundary=ProcessApiKeyBoundary(),
@@ -1770,12 +2069,12 @@ def test_round8_optional_provider_and_relation_failures_remain_advisory(
         "status": "COMPLETE",
     }
     assert set(explicit_payload["memories"][0]) == {
-        "applies_when",
-        "do_not_apply_when",
+        "context_product_label",
+        "current_context",
         "filter_match",
         "kind",
         "memory_id",
-        "scope",
+        "recorded_at",
         "statement",
     }
     assert unavailable.absence_kind.value == "UNAVAILABLE"

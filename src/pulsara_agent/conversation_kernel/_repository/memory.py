@@ -41,7 +41,6 @@ from pulsara_agent.conversation_kernel.memory.contracts import (
     MemoryGovernanceEvidenceRole,
     MemoryGovernanceSourceBlockKind,
     MemoryKindHint,
-    MemoryProducerKind,
     MemoryRelationKind,
     MemorySupersedeMode,
     ModelVisibleMemoryProvenanceDisposition,
@@ -50,6 +49,7 @@ from pulsara_agent.conversation_kernel.memory.contracts import (
     PreparedMemoryCandidateAcceptance,
     PreparedMemoryGovernanceAcceptance,
     PreparedMemoryToolResultReference,
+    canonical_memory_recorded_at,
     canonical_json_bytes,
     memory_governance_source_projection_bytes,
     memory_relation_id,
@@ -62,7 +62,7 @@ from pulsara_agent.conversation_kernel.memory.recall import (
     MEMORY_EMBEDDING_CONTRACT_ID,
     MEMORY_EMBEDDING_CONTRACT_VERSION,
 )
-from pulsara_agent.memory.scope import FrozenMemoryReadScopeBinding, MemoryScopeKind
+from pulsara_agent.memory.scope import CTX_GLOBAL, FrozenMemoryReadContextBinding
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 from pulsara_agent.retrieval.embedding.validation import (
     freeze_v1_embedding_vector,
@@ -70,13 +70,12 @@ from pulsara_agent.retrieval.embedding.validation import (
 
 from .contracts import (
     ConversationKernelConflict,
-    PreparedMemoryProposalSideBranch,
     _ObservedActiveMemoryDuplicate,
 )
 
 
-MAXIMUM_ACTIVE_RESPONSE_PREFERENCES_PER_SCOPE = 16
-MAXIMUM_RESPONSE_PREFERENCE_SCOPE_PROJECTION_BYTES = 7 * 1024
+MAXIMUM_ACTIVE_RESPONSE_PREFERENCES_PER_CONTEXT = 16
+MAXIMUM_RESPONSE_PREFERENCE_CONTEXT_PROJECTION_BYTES = 7 * 1024
 _MAXIMUM_GOVERNANCE_ORIGIN_SOURCE_BYTES = 32 * 1024
 _MAXIMUM_GOVERNANCE_TOOL_BODY_BYTES = 56 * 1024
 
@@ -91,34 +90,6 @@ class AcceptedMemoryGovernance:
 
 
 class _MemoryOperations:
-    def accept_reflection_memory_candidates(
-        self,
-        guard: HostWriterGuard,
-        *,
-        candidates: Sequence[PreparedMemoryCandidateAcceptance],
-        deadline_monotonic: float,
-    ) -> tuple[str, ...]:
-        """Best-effort batch intake; no event or durable work is created."""
-
-        if len(candidates) > 4:
-            raise ValueError("reflection candidate batch exceeds its bound")
-        with self._writer_transaction(
-            guard, deadline_monotonic=deadline_monotonic
-        ) as connection:
-            for candidate in candidates:
-                if (
-                    candidate.origin_session_id != guard.session_id
-                    or candidate.producer_kind
-                    is not MemoryProducerKind.CHEAP_HINT_REFLECTION
-                ):
-                    raise ConversationKernelConflict(
-                        "reflection candidate does not belong to this Host"
-                    )
-                self._insert_prepared_memory_candidate(
-                    connection, PreparedMemoryProposalSideBranch(candidate)
-                )
-        return tuple(candidate.candidate_id for candidate in candidates)
-
     def confirm_memory_candidate_intake(
         self,
         *,
@@ -195,11 +166,7 @@ class _MemoryOperations:
                     FROM pulsara_v3.memory_candidates AS c
                     JOIN pulsara_v3.transcript_entries AS source
                       ON source.session_id=c.origin_session_id
-                     AND source.id=CASE
-                           WHEN c.producer_kind='MAIN_AGENT_REMEMBER'
-                             THEN c.producer_entry_id
-                           ELSE c.trigger_user_entry_id
-                         END
+                     AND source.id=c.producer_entry_id
                     JOIN pulsara_v3.turns AS turn
                       ON turn.session_id=source.session_id AND turn.id=source.turn_id
                     JOIN LATERAL (
@@ -229,13 +196,8 @@ class _MemoryOperations:
                     WHERE c.memory_domain_id=%s AND c.origin_workspace_id=%s
                       AND c.origin_session_id=%s
                       AND c.status='PENDING' AND (%s::text IS NULL OR c.id=%s)
-                      AND (
-                        (c.producer_kind='MAIN_AGENT_REMEMBER'
-                          AND source.entry_kind IN (
-                            'ASSISTANT_MESSAGE', 'ASSISTANT_TOOL_REQUEST')) OR
-                        (c.producer_kind='CHEAP_HINT_REFLECTION'
-                          AND source.entry_kind IN ('USER_MESSAGE', 'USER_STEER'))
-                      )
+                      AND source.entry_kind IN (
+                        'ASSISTANT_MESSAGE', 'ASSISTANT_TOOL_REQUEST')
                       AND (
                         (turn.status='COMPLETED'
                           AND turn.terminal_reason='COMPLETED'
@@ -502,10 +464,8 @@ class _MemoryOperations:
         *,
         candidate: PreparedMemoryCandidateAcceptance,
         source,
-    ) -> FrozenMemoryGovernanceProducerCut | None:
+    ) -> FrozenMemoryGovernanceProducerCut:
         del connection
-        if candidate.producer_kind is not MemoryProducerKind.MAIN_AGENT_REMEMBER:
-            return None
         return FrozenMemoryGovernanceProducerCut(
             session_id=candidate.origin_session_id,
             turn_id=str(source["source_turn_id"]),
@@ -540,10 +500,6 @@ class _MemoryOperations:
             row=row,
             chronology=MemoryGovernanceChronology.PRODUCER_OUTPUT,
             maximum_bytes=_MAXIMUM_GOVERNANCE_ORIGIN_SOURCE_BYTES,
-            force_human=(
-                candidate.producer_kind
-                is MemoryProducerKind.CHEAP_HINT_REFLECTION
-            ),
         )
         if item is None:
             return (), True
@@ -723,13 +679,11 @@ class _MemoryOperations:
         row,
         chronology: MemoryGovernanceChronology,
         maximum_bytes: int,
-        force_human: bool = False,
     ) -> FrozenMemoryGovernanceSourceItem | None:
         kind = str(row["entry_kind"])
         evidence_role, label = _memory_governance_source_role_and_label(
             row,
             chronology=chronology,
-            force_human=force_human,
         )
         if kind in {"ASSISTANT_MESSAGE", "ASSISTANT_TOOL_REQUEST"}:
             blocks, omitted = cls._read_assistant_public_blocks(
@@ -849,20 +803,20 @@ class _MemoryOperations:
             return (), True
         rows = connection.execute(
             """
-            SELECT id, memory_domain_id, scope_kind, scope_id, fact_kind,
-                   lifecycle, statement, applies_when, do_not_apply_when,
-                   fact_semantic_digest
+            SELECT id, memory_domain_id, context_id, fact_kind,
+                   lifecycle, statement, accepted_at, fact_semantic_digest
             FROM pulsara_v3.memory_facts
             WHERE memory_domain_id=%s AND id=ANY(%s)
-              AND ((scope_kind='USER' AND scope_id='ctx:user')
-                   OR (scope_kind='WORKSPACE' AND scope_id=%s))
+              AND context_id=ANY(%s::text[])
             """,
             (
                 candidate.memory_domain_id,
                 list(fact_ids),
-                candidate.proposal.scope_id
-                if candidate.proposal.scope_kind is MemoryScopeKind.WORKSPACE
-                else candidate.origin_workspace_id,
+                list(
+                    dict.fromkeys(
+                        (CTX_GLOBAL, candidate.proposal.context_id)
+                    )
+                ),
             ),
         ).fetchall()
         by_id = {str(row["id"]): row for row in rows}
@@ -871,18 +825,12 @@ class _MemoryOperations:
         output = tuple(
             FrozenMemoryPublicFactProjection(
                 fact_id=fact_id,
-                scope_kind=MemoryScopeKind(str(by_id[fact_id]["scope_kind"])),
-                scope_id=str(by_id[fact_id]["scope_id"]),
+                context_id=str(by_id[fact_id]["context_id"]),
                 fact_kind=MemoryFactKind(str(by_id[fact_id]["fact_kind"])),
                 lifecycle=str(by_id[fact_id]["lifecycle"]),
                 statement=str(by_id[fact_id]["statement"]),
-                applies_when=(
-                    None
-                    if by_id[fact_id]["applies_when"] is None
-                    else str(by_id[fact_id]["applies_when"])
-                ),
-                do_not_apply_when=tuple(
-                    str(value) for value in by_id[fact_id]["do_not_apply_when"]
+                recorded_at=canonical_memory_recorded_at(
+                    by_id[fact_id]["accepted_at"]
                 ),
                 fact_semantic_digest=str(by_id[fact_id]["fact_semantic_digest"]),
             )
@@ -1346,13 +1294,12 @@ class _MemoryOperations:
         duplicate = connection.execute(
             """
             SELECT 1 FROM pulsara_v3.memory_facts
-            WHERE memory_domain_id=%s AND scope_kind=%s AND scope_id=%s
+            WHERE memory_domain_id=%s AND context_id=%s
               AND fact_semantic_digest=%s AND lifecycle='ACTIVE'
             """,
             (
                 fact.memory_domain_id,
-                fact.scope_kind.value,
-                fact.scope_id,
+                fact.context_id,
                 fact.fact_semantic_digest,
             ),
         ).fetchone()
@@ -1367,8 +1314,7 @@ class _MemoryOperations:
             FROM pulsara_v3.memory_candidate_basis_refs AS r
             JOIN pulsara_v3.memory_facts AS f
               ON f.memory_domain_id=r.memory_domain_id
-             AND f.scope_kind=r.target_scope_kind
-             AND f.scope_id=r.target_scope_id AND f.id=r.target_fact_id
+             AND f.context_id=r.target_context_id AND f.id=r.target_fact_id
             WHERE r.candidate_id=%s ORDER BY r.ordinal
             """,
             (prepared.candidate_id,),
@@ -1384,7 +1330,7 @@ class _MemoryOperations:
                 )
             ):
                 return False
-        return fact.fact_kind is MemoryFactKind.DECISION or not basis
+        return True
 
     def _read_governance_target_for_confirmation(
         self,
@@ -1438,13 +1384,11 @@ class _MemoryOperations:
                 item.relation_id,
                 item.target.memory_domain_id,
                 item.decision_candidate_id,
-                item.source_scope_kind.value,
-                item.source_scope_id,
+                item.source_context_id,
                 item.source_fact_id,
                 item.source_fact_kind.value,
                 item.relation_kind.value,
-                item.target.scope_kind.value,
-                item.target.scope_id,
+                item.target.context_id,
                 item.target.fact_id,
                 item.target.fact_kind.value,
                 None
@@ -1473,12 +1417,10 @@ class _MemoryOperations:
     ) -> tuple[object, ...]:
         relation_id = memory_relation_id(
             memory_domain_id=str(source["memory_domain_id"]),
-            source_scope_kind=MemoryScopeKind(str(source["scope_kind"])),
-            source_scope_id=str(source["scope_id"]),
+            source_context_id=str(source["context_id"]),
             source_fact_id=str(source["id"]),
             relation_kind=relation_kind,
-            target_scope_kind=MemoryScopeKind(str(target["scope_kind"])),
-            target_scope_id=str(target["scope_id"]),
+            target_context_id=str(target["context_id"]),
             target_fact_id=str(target["id"]),
             supersede_mode=supersede_mode,
         )
@@ -1486,13 +1428,11 @@ class _MemoryOperations:
             relation_id,
             str(source["memory_domain_id"]),
             candidate_id,
-            str(source["scope_kind"]),
-            str(source["scope_id"]),
+            str(source["context_id"]),
             str(source["id"]),
             str(source["fact_kind"]),
             relation_kind.value,
-            str(target["scope_kind"]),
-            str(target["scope_id"]),
+            str(target["context_id"]),
             str(target["id"]),
             str(target["fact_kind"]),
             None if supersede_mode is None else supersede_mode.value,
@@ -1505,13 +1445,11 @@ class _MemoryOperations:
             str(row["id"]),
             str(row["memory_domain_id"]),
             str(row["decision_candidate_id"]),
-            str(row["source_scope_kind"]),
-            str(row["source_scope_id"]),
+            str(row["source_context_id"]),
             str(row["source_fact_id"]),
             str(row["source_fact_kind"]),
             str(row["relation_kind"]),
-            str(row["target_scope_kind"]),
-            str(row["target_scope_id"]),
+            str(row["target_context_id"]),
             str(row["target_fact_id"]),
             str(row["target_fact_kind"]),
             None if row["supersede_mode"] is None else str(row["supersede_mode"]),
@@ -1569,7 +1507,7 @@ class _MemoryOperations:
     def list_unembedded_memory_facts(
         self,
         *,
-        read_binding: FrozenMemoryReadScopeBinding,
+        read_binding: FrozenMemoryReadContextBinding,
         limit: int,
         deadline_monotonic: float,
     ) -> tuple[tuple[str, str, str], ...]:
@@ -1580,24 +1518,19 @@ class _MemoryOperations:
         ) as connection:
             rows = connection.execute(
                 """
-                SELECT f.id, f.fact_semantic_digest,
-                       concat_ws(E'\n', f.statement, f.applies_when,
-                                 array_to_string(f.do_not_apply_when, E'\n')) AS body
+                SELECT f.id, f.fact_semantic_digest, f.statement AS body
                 FROM pulsara_v3.memory_facts AS f
                 LEFT JOIN pulsara_v3.memory_embeddings AS e
                   ON e.memory_domain_id=f.memory_domain_id AND e.fact_id=f.id
                  AND e.fact_semantic_digest=f.fact_semantic_digest
                 WHERE f.memory_domain_id=%s AND f.lifecycle='ACTIVE'
-                  AND (f.scope_kind, f.scope_id) IN (
-                    SELECT * FROM unnest(%s::text[], %s::text[])
-                  )
+                  AND f.context_id=ANY(%s::text[])
                   AND e.fact_id IS NULL
                 ORDER BY f.accepted_at, f.id LIMIT %s
                 """,
                 (
                     read_binding.memory_domain_id,
-                    [item.kind.value for item in read_binding.readable_scopes],
-                    [item.scope_id for item in read_binding.readable_scopes],
+                    list(read_binding.readable_context_ids),
                     max(1, min(limit, 100)),
                 ),
             ).fetchall()
@@ -1609,7 +1542,7 @@ class _MemoryOperations:
     def upsert_memory_embedding(
         self,
         *,
-        read_binding: FrozenMemoryReadScopeBinding,
+        read_binding: FrozenMemoryReadContextBinding,
         fact_id: str,
         fact_semantic_digest: str,
         vector: Sequence[float],
@@ -1633,9 +1566,7 @@ class _MemoryOperations:
                        %s, %s, %s::public.vector, %s
                 FROM pulsara_v3.memory_facts AS f
                 WHERE f.memory_domain_id=%s AND f.id=%s
-                  AND (f.scope_kind, f.scope_id) IN (
-                    SELECT * FROM unnest(%s::text[], %s::text[])
-                  )
+                  AND f.context_id=ANY(%s::text[])
                   AND f.lifecycle='ACTIVE' AND f.fact_semantic_digest=%s
                 ON CONFLICT (memory_domain_id, fact_id) DO UPDATE
                 SET fact_semantic_digest=EXCLUDED.fact_semantic_digest,
@@ -1651,8 +1582,7 @@ class _MemoryOperations:
                     embedded_at,
                     read_binding.memory_domain_id,
                     fact_id,
-                    [item.kind.value for item in read_binding.readable_scopes],
-                    [item.scope_id for item in read_binding.readable_scopes],
+                    list(read_binding.readable_context_ids),
                     fact_semantic_digest,
                 ),
             ).fetchone()
@@ -1700,7 +1630,7 @@ class _MemoryOperations:
                 and str(target["fact_kind"])
                 == MemoryFactKind.RESPONSE_PREFERENCE.value
             ):
-                self._lock_response_preference_scope(connection, fact)
+                self._lock_response_preference_context(connection, fact)
                 if not self._response_preference_capacity_allows(
                     connection,
                     fact,
@@ -1713,6 +1643,7 @@ class _MemoryOperations:
                     include_new=(
                         fact.fact_kind is MemoryFactKind.RESPONSE_PREFERENCE
                     ),
+                    accepted_at=decided_at,
                 ):
                     connection.execute(
                         """
@@ -1759,7 +1690,13 @@ class _MemoryOperations:
                 prepared.candidate_id,
                 MemoryCandidateStatus.ACCEPTED,
                 fact.fact_id,
-                relation_id=relation_ids[0] if len(relation_ids) == 1 else None,
+                relation_id=(
+                    relation_ids[-1]
+                    if decision.decision_kind is not MemoryDecisionKind.ACCEPT
+                    else relation_ids[0]
+                    if len(relation_ids) == 1
+                    else None
+                ),
             )
 
     def _prepare_memory_duplicate_outcome(
@@ -2084,14 +2021,9 @@ class _MemoryOperations:
         return FrozenMemoryFactSettlementIdentity(
             fact_id=str(row["id"]),
             memory_domain_id=str(row["memory_domain_id"]),
-            scope_kind=MemoryScopeKind(str(row["scope_kind"])),
-            scope_id=str(row["scope_id"]),
+            context_id=str(row["context_id"]),
             fact_kind=MemoryFactKind(str(row["fact_kind"])),
             statement=str(row["statement"]),
-            applies_when=(
-                None if row["applies_when"] is None else str(row["applies_when"])
-            ),
-            do_not_apply_when=tuple(str(value) for value in row["do_not_apply_when"]),
             fact_semantic_digest=str(row["fact_semantic_digest"]),
             expected_lifecycle=str(row["lifecycle"]),
         )
@@ -2106,12 +2038,9 @@ class _MemoryOperations:
         return (
             actual.fact_id == expected.fact_id
             and actual.memory_domain_id == expected.memory_domain_id
-            and actual.scope_kind is expected.scope_kind
-            and actual.scope_id == expected.scope_id
+            and actual.context_id == expected.context_id
             and actual.fact_kind is expected.fact_kind
             and actual.statement == expected.statement
-            and actual.applies_when == expected.applies_when
-            and actual.do_not_apply_when == expected.do_not_apply_when
             and actual.fact_semantic_digest == expected.fact_semantic_digest
         )
 
@@ -2136,7 +2065,7 @@ class _MemoryOperations:
         ).fetchall()
         basis_rows = connection.execute(
             """
-            SELECT target_fact_id, target_scope_kind, target_scope_id, ordinal
+            SELECT target_fact_id, target_context_id, ordinal
             FROM pulsara_v3.memory_candidate_basis_refs
             WHERE candidate_id=%s ORDER BY ordinal
             """,
@@ -2144,13 +2073,8 @@ class _MemoryOperations:
         ).fetchall()
         proposal = FrozenMemoryProposal(
             statement=str(row["statement"]),
-            scope_kind=MemoryScopeKind(str(row["scope_kind"])),
-            scope_id=str(row["scope_id"]),
+            context_id=str(row["context_id"]),
             kind_hint=MemoryKindHint(str(row["kind_hint"])),
-            applies_when=None
-            if row["applies_when"] is None
-            else str(row["applies_when"]),
-            do_not_apply_when=tuple(str(value) for value in row["do_not_apply_when"]),
             based_on_memory_ids=tuple(
                 str(value["target_fact_id"]) for value in basis_rows
             ),
@@ -2161,11 +2085,8 @@ class _MemoryOperations:
             memory_domain_id=str(row["memory_domain_id"]),
             origin_workspace_id=str(row["origin_workspace_id"]),
             origin_session_id=str(row["origin_session_id"]),
-            producer_kind=MemoryProducerKind(str(row["producer_kind"])),
-            producer_entry_id=row["producer_entry_id"],
-            producer_tool_call_id=row["producer_tool_call_id"],
-            trigger_user_entry_id=row["trigger_user_entry_id"],
-            producer_candidate_ordinal=row["producer_candidate_ordinal"],
+            producer_entry_id=str(row["producer_entry_id"]),
+            producer_tool_call_id=str(row["producer_tool_call_id"]),
             proposal=proposal,
             tool_result_refs=tuple(
                 PreparedMemoryToolResultReference(
@@ -2180,8 +2101,7 @@ class _MemoryOperations:
             basis_refs=tuple(
                 PreparedMemoryBasisReference(
                     str(item["target_fact_id"]),
-                    MemoryScopeKind(str(item["target_scope_kind"])),
-                    str(item["target_scope_id"]),
+                    str(item["target_context_id"]),
                     int(item["ordinal"]),
                 )
                 for item in basis_rows
@@ -2214,8 +2134,7 @@ class _MemoryOperations:
             or str(row["memory_domain_id"]) != prepared.memory_domain_id
             or str(row["origin_workspace_id"]) != prepared.origin_workspace_id
             or str(row["origin_session_id"]) != guard.session_id
-            or str(row["scope_kind"]) != prepared.scope_kind.value
-            or str(row["scope_id"]) != prepared.scope_id
+            or str(row["context_id"]) != prepared.context_id
         ):
             raise ConversationKernelConflict("memory governance candidate head drifted")
         observed = self._read_prepared_memory_candidate(
@@ -2232,14 +2151,13 @@ class _MemoryOperations:
         return connection.execute(
             """
             SELECT * FROM pulsara_v3.memory_facts
-            WHERE memory_domain_id=%s AND scope_kind=%s AND scope_id=%s
+            WHERE memory_domain_id=%s AND context_id=%s
               AND fact_semantic_digest=%s AND lifecycle='ACTIVE'
             FOR UPDATE
             """,
             (
                 fact.memory_domain_id,
-                fact.scope_kind.value,
-                fact.scope_id,
+                fact.context_id,
                 fact.fact_semantic_digest,
             ),
         ).fetchone()
@@ -2248,12 +2166,9 @@ class _MemoryOperations:
     def _memory_fact_matches(row, fact) -> bool:
         return (
             str(row["memory_domain_id"]) == fact.memory_domain_id
-            and str(row["scope_kind"]) == fact.scope_kind.value
-            and str(row["scope_id"]) == fact.scope_id
+            and str(row["context_id"]) == fact.context_id
             and str(row["fact_kind"]) == fact.fact_kind.value
             and str(row["statement"]) == fact.statement
-            and row["applies_when"] == fact.applies_when
-            and tuple(row["do_not_apply_when"]) == fact.do_not_apply_when
             and str(row["fact_semantic_digest"]) == fact.fact_semantic_digest
             and str(row["search_contract_id"]) == fact.search_contract_id
             and int(row["search_contract_version"]) == fact.search_contract_version
@@ -2265,22 +2180,19 @@ class _MemoryOperations:
         connection.execute(
             """
             INSERT INTO pulsara_v3.memory_facts (
-                id, memory_domain_id, scope_kind, scope_id, source_candidate_id,
-                lifecycle, fact_kind, statement, applies_when, do_not_apply_when,
+                id, memory_domain_id, context_id, source_candidate_id,
+                lifecycle, fact_kind, statement,
                 fact_semantic_digest, accepted_at, updated_at,
                 search_contract_id, search_contract_version, search_terms
-            ) VALUES (%s,%s,%s,%s,%s,'ACTIVE',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            ) VALUES (%s,%s,%s,%s,'ACTIVE',%s,%s,%s,%s,%s,%s,%s,%s)
             """,
             (
                 fact.fact_id,
                 fact.memory_domain_id,
-                fact.scope_kind.value,
-                fact.scope_id,
+                fact.context_id,
                 fact.source_candidate_id,
                 fact.fact_kind.value,
                 fact.statement,
-                fact.applies_when,
-                list(fact.do_not_apply_when),
                 fact.fact_semantic_digest,
                 accepted_at,
                 accepted_at,
@@ -2297,8 +2209,7 @@ class _MemoryOperations:
             FROM pulsara_v3.memory_candidate_basis_refs AS r
             JOIN pulsara_v3.memory_facts AS f
               ON f.memory_domain_id=r.memory_domain_id
-             AND f.scope_kind=r.target_scope_kind
-             AND f.scope_id=r.target_scope_id AND f.id=r.target_fact_id
+             AND f.context_id=r.target_context_id AND f.id=r.target_fact_id
             WHERE r.candidate_id=%s ORDER BY r.ordinal
             FOR UPDATE OF f
             """,
@@ -2347,14 +2258,11 @@ class _MemoryOperations:
             raise ConversationKernelConflict("memory relation target identity drifted")
         fact = prepared.fact
         assert fact is not None
-        same_scope = (
-            str(row["scope_kind"]) == fact.scope_kind.value
-            and str(row["scope_id"]) == fact.scope_id
-        )
+        same_context = str(row["context_id"]) == fact.context_id
         target_kind = MemoryFactKind(str(row["fact_kind"]))
         decision = prepared.decision
-        if not same_scope:
-            raise ConversationKernelConflict("memory relation crosses exact scope")
+        if not same_context:
+            raise ConversationKernelConflict("memory relation crosses exact context")
         if decision.decision_kind is MemoryDecisionKind.ACCEPT_AND_CONTRADICT:
             if target_kind is not fact.fact_kind:
                 raise ConversationKernelConflict("memory contradiction crosses kind")
@@ -2372,53 +2280,46 @@ class _MemoryOperations:
     ):
         decision = prepared.decision
         relation_ids = []
-        if decision.decision_kind is MemoryDecisionKind.ACCEPT:
-            if source_fact.fact_kind is not MemoryFactKind.DECISION and basis:
-                raise ConversationKernelConflict("non-decision memory owns basis refs")
-            for expected, row in enumerate(basis):
-                if int(row["ordinal"]) != expected or str(row["lifecycle"]) != "ACTIVE":
-                    raise ConversationKernelConflict("memory basis reference drifted")
-                relation_ids.append(
-                    self._insert_relation(
-                        connection,
-                        candidate_id=prepared.candidate_id,
-                        source=self._fact_draft_row(source_fact),
-                        target=row,
-                        relation_kind=MemoryRelationKind.BASED_ON,
-                        supersede_mode=None,
-                        ordinal=expected,
-                        accepted_at=decided_at,
-                    )
+        for expected, row in enumerate(basis):
+            if int(row["ordinal"]) != expected or str(row["lifecycle"]) != "ACTIVE":
+                raise ConversationKernelConflict("memory basis reference drifted")
+            relation_ids.append(
+                self._insert_relation(
+                    connection,
+                    candidate_id=prepared.candidate_id,
+                    source=self._fact_draft_row(source_fact),
+                    target=row,
+                    relation_kind=MemoryRelationKind.BASED_ON,
+                    supersede_mode=None,
+                    ordinal=expected,
+                    accepted_at=decided_at,
                 )
-            frozen_ids = tuple(item.relation_id for item in prepared.relation_drafts)
-            if tuple(relation_ids) != frozen_ids:
-                raise ConversationKernelConflict(
-                    "memory BASED_ON relation draft drifted"
+            )
+        if decision.decision_kind is not MemoryDecisionKind.ACCEPT:
+            assert target is not None
+            kind = (
+                MemoryRelationKind.SUPERSEDES
+                if decision.decision_kind
+                is MemoryDecisionKind.ACCEPT_AND_SUPERSEDE
+                else MemoryRelationKind.CONTRADICTS
+            )
+            relation_ids.append(
+                self._insert_relation(
+                    connection,
+                    candidate_id=prepared.candidate_id,
+                    source=self._fact_draft_row(source_fact),
+                    target=target,
+                    relation_kind=kind,
+                    supersede_mode=decision.supersede_mode,
+                    ordinal=None,
+                    accepted_at=decided_at,
                 )
-            return tuple(relation_ids)
-        assert target is not None
-        kind = (
-            MemoryRelationKind.SUPERSEDES
-            if decision.decision_kind is MemoryDecisionKind.ACCEPT_AND_SUPERSEDE
-            else MemoryRelationKind.CONTRADICTS
-        )
-        relation_ids.append(
-            self._insert_relation(
-                connection,
-                candidate_id=prepared.candidate_id,
-                source=self._fact_draft_row(source_fact),
-                target=target,
-                relation_kind=kind,
-                supersede_mode=decision.supersede_mode,
-                ordinal=None,
-                accepted_at=decided_at,
             )
-        )
-        if kind is MemoryRelationKind.SUPERSEDES:
-            connection.execute(
-                "UPDATE pulsara_v3.memory_facts SET lifecycle='SUPERSEDED', updated_at=%s WHERE id=%s",
-                (decided_at, target["id"]),
-            )
+            if kind is MemoryRelationKind.SUPERSEDES:
+                connection.execute(
+                    "UPDATE pulsara_v3.memory_facts SET lifecycle='SUPERSEDED', updated_at=%s WHERE id=%s",
+                    (decided_at, target["id"]),
+                )
         if tuple(relation_ids) != tuple(
             item.relation_id for item in prepared.relation_drafts
         ):
@@ -2430,8 +2331,7 @@ class _MemoryOperations:
         return {
             "id": fact.fact_id,
             "memory_domain_id": fact.memory_domain_id,
-            "scope_kind": fact.scope_kind.value,
-            "scope_id": fact.scope_id,
+            "context_id": fact.context_id,
             "fact_kind": fact.fact_kind.value,
             "fact_semantic_digest": fact.fact_semantic_digest,
         }
@@ -2450,12 +2350,10 @@ class _MemoryOperations:
     ):
         relation_id = memory_relation_id(
             memory_domain_id=str(source["memory_domain_id"]),
-            source_scope_kind=MemoryScopeKind(str(source["scope_kind"])),
-            source_scope_id=str(source["scope_id"]),
+            source_context_id=str(source["context_id"]),
             source_fact_id=str(source["id"]),
             relation_kind=relation_kind,
-            target_scope_kind=MemoryScopeKind(str(target["scope_kind"])),
-            target_scope_id=str(target["scope_id"]),
+            target_context_id=str(target["context_id"]),
             target_fact_id=str(target["id"]),
             supersede_mode=supersede_mode,
         )
@@ -2463,23 +2361,21 @@ class _MemoryOperations:
             """
             INSERT INTO pulsara_v3.memory_relations (
                 id, memory_domain_id, decision_candidate_id,
-                source_scope_kind, source_scope_id, source_fact_id, source_fact_kind,
+                source_context_id, source_fact_id, source_fact_kind,
                 relation_kind,
-                target_scope_kind, target_scope_id, target_fact_id, target_fact_kind,
+                target_context_id, target_fact_id, target_fact_kind,
                 supersede_mode, ordinal, accepted_at
-            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             """,
             (
                 relation_id,
                 source["memory_domain_id"],
                 candidate_id,
-                source["scope_kind"],
-                source["scope_id"],
+                source["context_id"],
                 source["id"],
                 source["fact_kind"],
                 relation_kind.value,
-                target["scope_kind"],
-                target["scope_id"],
+                target["context_id"],
                 target["id"],
                 target["fact_kind"],
                 None if supersede_mode is None else supersede_mode.value,
@@ -2498,18 +2394,15 @@ class _MemoryOperations:
                 """
                 SELECT * FROM pulsara_v3.memory_relations
                 WHERE memory_domain_id=%s AND relation_kind='CONTRADICTS'
-                  AND source_scope_kind=%s AND source_scope_id=%s
-                  AND target_scope_kind=%s AND target_scope_id=%s
+                  AND source_context_id=%s AND target_context_id=%s
                   AND least(source_fact_id, target_fact_id)=least(%s,%s)
                   AND greatest(source_fact_id, target_fact_id)=greatest(%s,%s)
                   AND supersede_mode IS NULL
                 """,
                 (
                     source["memory_domain_id"],
-                    source["scope_kind"],
-                    source["scope_id"],
-                    target["scope_kind"],
-                    target["scope_id"],
+                    source["context_id"],
+                    target["context_id"],
                     source["id"],
                     target["id"],
                     source["id"],
@@ -2519,20 +2412,17 @@ class _MemoryOperations:
         return connection.execute(
             """
             SELECT * FROM pulsara_v3.memory_relations
-            WHERE memory_domain_id=%s AND source_scope_kind=%s
-              AND source_scope_id=%s AND source_fact_id=%s
-              AND relation_kind=%s AND target_scope_kind=%s
-              AND target_scope_id=%s AND target_fact_id=%s
+            WHERE memory_domain_id=%s AND source_context_id=%s
+              AND source_fact_id=%s AND relation_kind=%s
+              AND target_context_id=%s AND target_fact_id=%s
               AND supersede_mode IS NOT DISTINCT FROM %s
             """,
             (
                 source["memory_domain_id"],
-                source["scope_kind"],
-                source["scope_id"],
+                source["context_id"],
                 source["id"],
                 relation_kind.value,
-                target["scope_kind"],
-                target["scope_id"],
+                target["context_id"],
                 target["id"],
                 None if supersede_mode is None else supersede_mode.value,
             ),
@@ -2569,29 +2459,25 @@ class _MemoryOperations:
             return False
         actual_source = (
             str(row["memory_domain_id"]),
-            str(row["source_scope_kind"]),
-            str(row["source_scope_id"]),
+            str(row["source_context_id"]),
             str(row["source_fact_id"]),
             str(row["source_fact_kind"]),
         )
         actual_target = (
             str(row["memory_domain_id"]),
-            str(row["target_scope_kind"]),
-            str(row["target_scope_id"]),
+            str(row["target_context_id"]),
             str(row["target_fact_id"]),
             str(row["target_fact_kind"]),
         )
         prepared_source = (
             prepared.existing_source.memory_domain_id,
-            prepared.existing_source.scope_kind.value,
-            prepared.existing_source.scope_id,
+            prepared.existing_source.context_id,
             prepared.existing_source.fact_id,
             prepared.existing_source.fact_kind.value,
         )
         prepared_target = (
             prepared.target.memory_domain_id,
-            prepared.target.scope_kind.value,
-            prepared.target.scope_id,
+            prepared.target.context_id,
             prepared.target.fact_id,
             prepared.target.fact_kind.value,
         )
@@ -2621,10 +2507,10 @@ class _MemoryOperations:
         )
 
     @staticmethod
-    def _lock_response_preference_scope(connection, fact):
+    def _lock_response_preference_context(connection, fact):
         key = (
             f"pulsara:memory-response-preference:{fact.memory_domain_id}:"
-            f"{fact.scope_kind.value}:{fact.scope_id}"
+            f"{fact.context_id}"
         )
         connection.execute(
             "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (key,)
@@ -2632,23 +2518,24 @@ class _MemoryOperations:
 
     @staticmethod
     def _response_preference_capacity_allows(
-        connection, fact, *, superseded_target, include_new: bool
+        connection, fact, *, superseded_target, include_new: bool, accepted_at: datetime
     ):
         rows = connection.execute(
             """
-            SELECT id, statement, scope_kind
+            SELECT id, context_id, statement, accepted_at
             FROM pulsara_v3.memory_facts
-            WHERE memory_domain_id=%s AND scope_kind=%s AND scope_id=%s
+            WHERE memory_domain_id=%s AND context_id=%s
               AND lifecycle='ACTIVE' AND fact_kind='RESPONSE_PREFERENCE'
             ORDER BY accepted_at, id FOR UPDATE
             """,
-            (fact.memory_domain_id, fact.scope_kind.value, fact.scope_id),
+            (fact.memory_domain_id, fact.context_id),
         ).fetchall()
         values = [
             memory_response_preference_item_payload(
                 memory_id=str(row["id"]),
-                scope_kind=str(row["scope_kind"]),
+                context_id=str(row["context_id"]),
                 statement=str(row["statement"]),
+                recorded_at=canonical_memory_recorded_at(row["accepted_at"]),
             )
             for row in rows
             if superseded_target is None
@@ -2658,13 +2545,14 @@ class _MemoryOperations:
             values.append(
                 memory_response_preference_item_payload(
                     memory_id=fact.fact_id,
-                    scope_kind=fact.scope_kind,
+                    context_id=fact.context_id,
                     statement=fact.statement,
+                    recorded_at=canonical_memory_recorded_at(accepted_at),
                 )
             )
-        return len(values) <= MAXIMUM_ACTIVE_RESPONSE_PREFERENCES_PER_SCOPE and len(
+        return len(values) <= MAXIMUM_ACTIVE_RESPONSE_PREFERENCES_PER_CONTEXT and len(
             canonical_json_bytes(values)
-        ) <= MAXIMUM_RESPONSE_PREFERENCE_SCOPE_PROJECTION_BYTES
+        ) <= MAXIMUM_RESPONSE_PREFERENCE_CONTEXT_PROJECTION_BYTES
 
 
 def _read_memory_governance_terminal_candidate(
@@ -2696,11 +2584,7 @@ def _read_memory_governance_terminal_candidate(
         FROM pulsara_v3.memory_candidates AS c
         JOIN pulsara_v3.transcript_entries AS source
           ON source.session_id=c.origin_session_id
-         AND source.id=CASE
-               WHEN c.producer_kind='MAIN_AGENT_REMEMBER'
-                 THEN c.producer_entry_id
-               ELSE c.trigger_user_entry_id
-             END
+         AND source.id=c.producer_entry_id
         JOIN pulsara_v3.turns AS turn
           ON turn.session_id=source.session_id AND turn.id=source.turn_id
         JOIN LATERAL (
@@ -2726,13 +2610,8 @@ def _read_memory_governance_terminal_candidate(
               AND event_type IN ('TurnCompleted', 'TurnInterrupted')
         ) AS terminal_event ON terminal_event.n=1
         WHERE c.id=%s AND c.status=%s
-          AND (
-            (c.producer_kind='MAIN_AGENT_REMEMBER'
-              AND source.entry_kind IN (
-                'ASSISTANT_MESSAGE', 'ASSISTANT_TOOL_REQUEST')) OR
-            (c.producer_kind='CHEAP_HINT_REFLECTION'
-              AND source.entry_kind IN ('USER_MESSAGE', 'USER_STEER'))
-          )
+          AND source.entry_kind IN (
+            'ASSISTANT_MESSAGE', 'ASSISTANT_TOOL_REQUEST')
           AND (
             (turn.status='COMPLETED'
               AND turn.terminal_reason='COMPLETED'
@@ -2775,10 +2654,9 @@ def _memory_governance_source_role_and_label(
     row,
     *,
     chronology: MemoryGovernanceChronology,
-    force_human: bool,
 ) -> tuple[MemoryGovernanceEvidenceRole, str]:
     kind = str(row["entry_kind"])
-    human = force_human or _memory_governance_entry_is_human(row)
+    human = _memory_governance_entry_is_human(row)
     if human:
         if chronology is MemoryGovernanceChronology.AFTER_PROPOSAL:
             return (
@@ -2858,7 +2736,7 @@ def _decode_governance_projection(
     return "", truncated or bool(raw)
 __all__ = [
     "AcceptedMemoryGovernance",
-    "MAXIMUM_ACTIVE_RESPONSE_PREFERENCES_PER_SCOPE",
-    "MAXIMUM_RESPONSE_PREFERENCE_SCOPE_PROJECTION_BYTES",
+    "MAXIMUM_ACTIVE_RESPONSE_PREFERENCES_PER_CONTEXT",
+    "MAXIMUM_RESPONSE_PREFERENCE_CONTEXT_PROJECTION_BYTES",
     "_MemoryOperations",
 ]

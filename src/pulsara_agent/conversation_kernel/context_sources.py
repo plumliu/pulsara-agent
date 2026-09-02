@@ -400,6 +400,18 @@ _BINDINGS = (
         ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
     ),
     _SourceBinding(
+        ContextSourceKind.MEMORY_WRITE_HINT,
+        "pulsara.memory-write-hint.v1",
+        ContextChannel.RUNTIME_OBSERVATION,
+        ContextTrustClass.AUTHORIZED_RUNTIME_GUIDANCE,
+        ContextBudgetClass.OPTIONAL,
+        95,
+        85,
+        (ContextRenderMode.FULL,),
+        "pulsara.memory-write-hint-collector.v1",
+        ContextSourceLifecycle.CALL_APPEND,
+    ),
+    _SourceBinding(
         ContextSourceKind.HOOK_CONTEXT,
         "pulsara.hook-context.v1",
         ContextChannel.RUNTIME_OBSERVATION,
@@ -611,6 +623,10 @@ class KernelContextSourceCollector:
                 ),
                 self._absent(
                     ContextSourceKind.MEMORY_RECALL,
+                    ContextSourceAbsenceKind.NOT_APPLICABLE,
+                ),
+                self._absent(
+                    ContextSourceKind.MEMORY_WRITE_HINT,
                     ContextSourceAbsenceKind.NOT_APPLICABLE,
                 ),
                 self._absent(
@@ -1254,6 +1270,7 @@ def build_memory_context_source(
     if kind not in {
         ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD,
         ContextSourceKind.MEMORY_RECALL,
+        ContextSourceKind.MEMORY_WRITE_HINT,
     }:
         raise ValueError("memory source builder received a foreign source kind")
     registry = ContextSourceRegistry()

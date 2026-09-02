@@ -95,7 +95,6 @@ from pulsara_agent.conversation_kernel.assistant_settlement import (
 )
 from pulsara_agent.conversation_kernel.auxiliary_model import (
     DirectKernelAuxiliaryJsonModel,
-    provider_trust_domain_identity,
 )
 from pulsara_agent.conversation_kernel.reader import CanonicalProviderInputReader
 from pulsara_agent.conversation_kernel.extensions import (
@@ -118,7 +117,7 @@ from pulsara_agent.conversation_kernel.live import LiveAgentEventBus
 from pulsara_agent.conversation_kernel.live_control import SessionLiveControlOwner
 from pulsara_agent.conversation_kernel.memory_tools import KernelMemoryToolPort
 from pulsara_agent.conversation_kernel.memory.governor import AdvisoryMemoryGovernor
-from pulsara_agent.memory.scope import freeze_memory_read_scope_binding
+from pulsara_agent.memory.scope import freeze_memory_read_context_binding
 from pulsara_agent.conversation_kernel.query import CanonicalConversationQuery
 from pulsara_agent.conversation_kernel.repository import (
     AcceptedPlanResolution,
@@ -611,11 +610,10 @@ class KernelHostSession:
             hook_root_scope=self._hook_root_scope,
         )
         self._tools.bind_subagent_port(self._subagents)
-        memory_read_binding = freeze_memory_read_scope_binding(
+        memory_read_binding = freeze_memory_read_context_binding(
             domain=workspace.memory_domain,
             host_workspace_id=workspace.workspace_key,
         )
-        memory_provider_trust_domain = provider_trust_domain_identity(settings.llm)
         self._memory_tools = KernelMemoryToolPort(
             repository=repository,
             session_id=session_id,
@@ -624,7 +622,6 @@ class KernelHostSession:
             rerank_config=settings.retrieval.rerank,
             feature_config=settings.retrieval.memory,
             io_owner=self._io,
-            provider_trust_domain_identity=memory_provider_trust_domain,
             api_key_boundary=api_key_boundary,
         )
         self._memory_tools.bind_deadline_factory(self._deadlines)
@@ -643,11 +640,7 @@ class KernelHostSession:
             ),
             io_owner=self._io,
             deadline_factory=self._deadlines,
-            provider_trust_domain_identity=memory_provider_trust_domain,
             embedding_port=self._memory_tools,
-            hint_review_allow_cross_provider=(
-                settings.retrieval.memory.hint_review_allow_cross_provider
-            ),
         )
         self._memory_tools.bind_governor(self._memory_governor)
         self._tools.bind_memory_port(self._memory_tools)
@@ -1716,7 +1709,6 @@ class KernelHostSession:
     ) -> KernelRunResult:
         total_model_calls = result.model_call_count
         total_tool_calls = result.tool_call_count
-        reflection_tokens = list(result.memory_reflection_tokens)
         while result.continuation_turn_id is not None:
             continuation_turn_id = result.continuation_turn_id
             async with self._lock:
@@ -1758,7 +1750,6 @@ class KernelHostSession:
             )
             total_model_calls += result.model_call_count
             total_tool_calls += result.tool_call_count
-            reflection_tokens.extend(result.memory_reflection_tokens)
         return KernelRunResult(
             turn_id=result.turn_id,
             final_entry_id=result.final_entry_id,
@@ -1766,7 +1757,6 @@ class KernelHostSession:
             model_call_count=total_model_calls,
             tool_call_count=total_tool_calls,
             pending_plan_interaction_id=result.pending_plan_interaction_id,
-            memory_reflection_tokens=tuple(reflection_tokens),
         )
 
     def _install_active_root_task_locked(
@@ -1820,11 +1810,6 @@ class KernelHostSession:
         finally:
             await self._settle_pending_root_successor(task)
             await self._settle_active_root_task(task)
-            if result is not None:
-                # Cheap-hint review becomes RUNNABLE only after the exact ROOT
-                # slot has settled.  It can never delay the foreground reply.
-                for token in result.memory_reflection_tokens:
-                    self._memory_tools.activate_reflection(token)
 
     async def _settle_pending_root_successor(self, task: asyncio.Task[object]) -> None:
         async with self._lock:

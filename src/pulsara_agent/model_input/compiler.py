@@ -244,6 +244,16 @@ _SOURCE_POLICY = {
         ),
         ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
     ),
+    ContextSourceKind.MEMORY_WRITE_HINT: (
+        "pulsara.memory-write-hint.v1",
+        ContextChannel.RUNTIME_OBSERVATION,
+        ContextTrustClass.AUTHORIZED_RUNTIME_GUIDANCE,
+        ContextBudgetClass.OPTIONAL,
+        95,
+        85,
+        (ContextRenderMode.FULL,),
+        ContextSourceLifecycle.CALL_APPEND,
+    ),
     ContextSourceKind.HOOK_CONTEXT: (
         "pulsara.hook-context.v1",
         ContextChannel.RUNTIME_OBSERVATION,
@@ -335,6 +345,9 @@ _SOURCE_ABSENCE_POLICY = {
             ContextSourceAbsenceKind.EXPLICIT_EMPTY,
             ContextSourceAbsenceKind.UNAVAILABLE,
         }
+    ),
+    ContextSourceKind.MEMORY_WRITE_HINT: frozenset(
+        {ContextSourceAbsenceKind.NOT_APPLICABLE}
     ),
     ContextSourceKind.HOOK_CONTEXT: frozenset(
         {ContextSourceAbsenceKind.EXPLICIT_EMPTY}

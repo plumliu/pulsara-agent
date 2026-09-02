@@ -575,7 +575,7 @@ def test_chat_replay_byte_overflow_is_typed_and_not_retried(
     )
     call = resolve_model_call(
         target=target,
-        purpose=ModelCallPurpose.MEMORY_HINT_REVIEW,
+        purpose=ModelCallPurpose.CONTEXT_COMPACTION_SUMMARY,
     )
     context = LLMContext(
         messages=(LLMMessage.user("bounded"),),
@@ -2092,6 +2092,104 @@ def test_responses_current_closed_phase_and_reasoning_format_replay_exactly() ->
     ) == tuple(output)
 
 
+def test_responses_reasoning_format_may_materialize_at_item_done() -> None:
+    initial_item = {
+        "type": "reasoning",
+        "id": "reasoning:late-format",
+        "status": "in_progress",
+        "summary": [],
+    }
+    final_item = {
+        **initial_item,
+        "status": "completed",
+        "format": "openai-responses-v1",
+    }
+    accumulator = ResponsesCompletionAccumulator(builder=ProviderLiveItemBuilder())
+
+    accumulator.apply(
+        {
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": initial_item,
+        }
+    )
+    accumulator.apply(
+        {
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "item": final_item,
+        }
+    )
+    accumulator.apply(
+        {
+            "type": "response.completed",
+            "response": {
+                "id": "response:test",
+                "status": "completed",
+                "output": [final_item],
+            },
+        }
+    )
+
+    terminal = accumulator.finish()
+    assert isinstance(terminal, ProviderAdapterTerminal)
+    assert terminal.terminal_kind is ProviderAdapterTerminalKind.COMPLETED
+    assert terminal.completed_replay_payload is not None
+    assert tuple(
+        thaw_json(item) for item in terminal.completed_replay_payload.ordered_items
+    ) == (final_item,)
+
+
+def test_responses_late_reasoning_format_still_matches_terminal_snapshot() -> None:
+    initial_item = {
+        "type": "reasoning",
+        "id": "reasoning:late-format",
+        "status": "in_progress",
+        "summary": [],
+    }
+    done_item = {
+        **initial_item,
+        "status": "completed",
+        "format": "openai-responses-v1",
+    }
+    accumulator = ResponsesCompletionAccumulator(builder=ProviderLiveItemBuilder())
+    accumulator.apply(
+        {
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": initial_item,
+        }
+    )
+    accumulator.apply(
+        {
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "item": done_item,
+        }
+    )
+
+    with pytest.raises(
+        LLMTransportContractError,
+        match="terminal Responses output differs from item.done",
+    ):
+        accumulator.apply(
+            {
+                "type": "response.completed",
+                "response": {
+                    "id": "response:test",
+                    "status": "completed",
+                    "output": [
+                        {
+                            key: value
+                            for key, value in done_item.items()
+                            if key != "format"
+                        }
+                    ],
+                },
+            }
+        )
+
+
 @pytest.mark.parametrize(
     "item",
     (
@@ -2412,7 +2510,7 @@ def test_auxiliary_valid_partial_json_is_not_parsed_after_incomplete() -> None:
         api_key_boundary=ProcessApiKeyBoundary(),
     )
     prepared = auxiliary.prepare_json_call(
-        purpose=ModelCallPurpose.MEMORY_HINT_REVIEW,
+        purpose=ModelCallPurpose.CONTEXT_COMPACTION_SUMMARY,
         messages=(LLMMessage.user("return a bounded JSON object"),),
         maximum_input_tokens=1024,
         maximum_input_bytes=4096,
@@ -2542,7 +2640,7 @@ async def _consume_provider_shaped_sse(*, api: str, base_url: str) -> list[objec
         requested_options=LLMOptions(),
     )
     call = resolve_model_call(
-        target=target, purpose=ModelCallPurpose.MEMORY_HINT_REVIEW
+        target=target, purpose=ModelCallPurpose.CONTEXT_COMPACTION_SUMMARY
     )
     context = LLMContext(
         messages=(LLMMessage.user("bounded local fixture"),),

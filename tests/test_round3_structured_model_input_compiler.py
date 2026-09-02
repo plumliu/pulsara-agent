@@ -81,6 +81,7 @@ from pulsara_agent.conversation_kernel.memory.contracts import (
     FrozenModelVisibleMemoryProvenance,
     ModelVisibleMemoryProvenanceDisposition,
 )
+from pulsara_agent.conversation_kernel.memory.hints import MEMORY_WRITE_HINT_BODY
 from pulsara_agent.conversation_kernel.execution_watchdogs import (
     KernelWatchdogOwner,
 )
@@ -516,6 +517,16 @@ _SOURCE_FACTS = {
         ),
         ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
     ),
+    ContextSourceKind.MEMORY_WRITE_HINT: (
+        "pulsara.memory-write-hint.v1",
+        ContextChannel.RUNTIME_OBSERVATION,
+        ContextTrustClass.AUTHORIZED_RUNTIME_GUIDANCE,
+        ContextBudgetClass.OPTIONAL,
+        95,
+        85,
+        (ContextRenderMode.FULL,),
+        ContextSourceLifecycle.CALL_APPEND,
+    ),
     ContextSourceKind.HOOK_CONTEXT: (
         "pulsara.hook-context.v1",
         ContextChannel.RUNTIME_OBSERVATION,
@@ -706,6 +717,9 @@ def _sources(
             ContextSourceAbsenceKind.NOT_APPLICABLE
         ),
         ContextSourceKind.MEMORY_RECALL: ContextSourceAbsenceKind.NOT_APPLICABLE,
+        ContextSourceKind.MEMORY_WRITE_HINT: (
+            ContextSourceAbsenceKind.NOT_APPLICABLE
+        ),
         ContextSourceKind.HOOK_CONTEXT: ContextSourceAbsenceKind.EXPLICIT_EMPTY,
         ContextSourceKind.COMPACTION_RUNTIME_HANDOFF: (
             ContextSourceAbsenceKind.NOT_APPLICABLE
@@ -3585,13 +3599,13 @@ def test_round3_source_decision_and_compiled_fingerprints_are_golden() -> None:
     )
     compiled = StructuredModelInputCompiler().compile(request)
     assert compiled.source_collection_fingerprint == (
-        "sha256:89dc4f1793177bba3513ddc9e279bd7eeaecce3bfc942e5148ca4432f872ef95"
+        "sha256:8bffc2e15fedb236c6c6e7d48a09eecdd03f54f554f694ccb904be7dc1386ec6"
     )
     assert compiled.budget_report.decision_digest == (
         "sha256:caee1ae23a161f2c862947ef5b7b2b9a4ae3093bce6117e00bc13a3a19058fbd"
     )
     assert compiled.compiled_semantic_fingerprint == (
-        "sha256:97c99a956cda7a2c4820ff20787fc70a574960aca27f3f2a4d8a77572e6f97d7"
+        "sha256:0e32b06a3ef189d9e2d11ebf90421084c2bcd8ad976211ba985164076045070a"
     )
     assert compiled.final_estimate.total_input_tokens == 268
 
@@ -3725,6 +3739,146 @@ def test_round9_2_hook_context_is_one_shot_user_suffix_with_exact_prefix() -> No
         )
         == 1
     )
+
+
+@pytest.mark.parametrize(
+    "wire_api", ("openai_chat_completions", "openai_responses")
+)
+def test_memory_write_hint_is_the_only_final_wire_difference_before_anchor(
+    wire_api: str,
+) -> None:
+    profile = ProviderProfile(id=f"test:memory-write-hint:{wire_api}", wire_api=wire_api)
+    snapshot = _snapshot(_user("Please remember that I like concise answers"))
+    no_hint_request = _prepared_request(
+        snapshot,
+        _sources(),
+        provider_profile=profile,
+    )
+    hint_request = _prepared_request(
+        snapshot,
+        _sources(
+            _candidate(
+                ContextSourceKind.MEMORY_WRITE_HINT,
+                (MEMORY_WRITE_HINT_BODY,),
+            )
+        ),
+        provider_profile=profile,
+    )
+    no_hint, no_hint_view = _compile_and_install_append(
+        compiler=StructuredModelInputCompiler(),
+        owner=HostProviderInputContinuityOwner(session_id="session:test"),
+        request=no_hint_request,
+    )
+    with_hint, hint_view = _compile_and_install_append(
+        compiler=StructuredModelInputCompiler(),
+        owner=HostProviderInputContinuityOwner(session_id="session:test"),
+        request=hint_request,
+    )
+
+    assert with_hint.compiled_input.system_prompt == no_hint.compiled_input.system_prompt
+    assert with_hint.compiled_input.tools == no_hint.compiled_input.tools
+    hint_messages = tuple(
+        message
+        for message in with_hint.compiled_input.messages
+        if message.role is MessageRole.USER
+        and message.content
+        and "pulsara_runtime_observation" in message.content[0]
+        and decode_runtime_observation(message).source_kind
+        is ContextSourceKind.MEMORY_WRITE_HINT
+    )
+    assert len(hint_messages) == 1
+    decoded = decode_runtime_observation(hint_messages[0])
+    assert decoded.trust_class is ContextTrustClass.AUTHORIZED_RUNTIME_GUIDANCE
+    assert decoded.body == MEMORY_WRITE_HINT_BODY
+    assert with_hint.compiled_input.messages[-2] is hint_messages[0]
+    assert with_hint.compiled_input.messages[-1].content == (snapshot.items[-1].text,)
+    assert tuple(
+        message
+        for message in with_hint.compiled_input.messages
+        if message is not hint_messages[0]
+    ) == no_hint.compiled_input.messages
+
+    no_hint_projection = thaw_json(
+        no_hint_view.wire_input_plan.materialization.context_bearing_projection
+    )
+    hint_projection = thaw_json(
+        hint_view.wire_input_plan.materialization.context_bearing_projection
+    )
+    removed = 0
+
+    def without_hint(value):
+        nonlocal removed
+        if isinstance(value, dict):
+            return {key: without_hint(item) for key, item in value.items()}
+        if isinstance(value, list):
+            output = []
+            for item in value:
+                if MEMORY_WRITE_HINT_BODY in json.dumps(
+                    item, ensure_ascii=False, sort_keys=True
+                ):
+                    removed += 1
+                    continue
+                output.append(without_hint(item))
+            return output
+        return value
+
+    assert without_hint(hint_projection) == no_hint_projection
+    assert removed == 1
+    assert no_hint_view.wire_input_plan.quote.final_wire_utf8_bytes == len(
+        canonical_json_bytes(no_hint_projection)
+    )
+    assert hint_view.wire_input_plan.quote.final_wire_utf8_bytes == len(
+        canonical_json_bytes(hint_projection)
+    )
+
+
+def test_memory_write_hint_call_append_does_not_repeat_on_tool_loop() -> None:
+    compiler = StructuredModelInputCompiler()
+    owner = HostProviderInputContinuityOwner(session_id="session:test")
+    initial = _user("Please remember that I like concise answers", sequence=1)
+    first_request = _prepared_request(
+        _snapshot(initial),
+        _sources(
+            _candidate(
+                ContextSourceKind.MEMORY_WRITE_HINT,
+                (MEMORY_WRITE_HINT_BODY,),
+            )
+        ),
+    )
+    _first, first_view = _compile_and_install_append(
+        compiler=compiler,
+        owner=owner,
+        request=first_request,
+    )
+    assistant = FrozenProviderInputItem(
+        FrozenProviderInputItemKind.ASSISTANT,
+        "entry:2",
+        2,
+        "turn:test",
+        "continuing after a tool result",
+    )
+    second_request = replace(
+        _prepared_request(_snapshot(initial, assistant), _sources()),
+        context_id="context:memory-write-hint-tool-loop",
+        model_call_index=2,
+    )
+    _second, second_view = _compile_and_install_append(
+        compiler=compiler,
+        owner=owner,
+        request=second_request,
+    )
+    assert second_view.messages[: len(first_view.messages)] == first_view.messages
+    hint_observations = tuple(
+        decode_runtime_observation(message)
+        for message in second_view.messages
+        if message.role is MessageRole.USER
+        and message.content
+        and "pulsara_runtime_observation" in message.content[0]
+        and decode_runtime_observation(message).source_kind
+        is ContextSourceKind.MEMORY_WRITE_HINT
+    )
+    assert len(hint_observations) == 1
+    assert hint_observations[0].body == MEMORY_WRITE_HINT_BODY
 
 
 def _assert_replay_final_wire_projection(*, result, view, prepared_call) -> None:

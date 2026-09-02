@@ -11,7 +11,7 @@ from pulsara_agent.capability.pulsara_home import (
     PulsaraHomeResolution,
     resolve_pulsara_home,
 )
-from pulsara_agent.memory.scope import workspace_scope_key
+from pulsara_agent.memory.scope import workspace_context_key
 from pulsara_agent.capability.types import (
     ConflictingSkillCandidateIssue,
     InvalidSkillCandidateIssue,
@@ -710,7 +710,7 @@ def _request_identity(
         scope,
         plugin_id,
         (
-            workspace_scope_key(workspace_root.as_posix())
+            workspace_context_key(workspace_root.as_posix())
             if workspace_root is not None
             else None
         ),

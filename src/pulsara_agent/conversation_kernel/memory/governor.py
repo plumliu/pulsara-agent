@@ -8,11 +8,10 @@ be lost and a claimed candidate may remain PROCESSING forever.
 from __future__ import annotations
 
 import asyncio
-from collections import deque
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from hashlib import sha256
+import re
 from time import monotonic
 from typing import Protocol
 
@@ -35,7 +34,6 @@ from pulsara_agent.conversation_kernel.memory.contracts import (
     FrozenMemoryGovernanceSourceBlock,
     FrozenMemoryGovernanceSourceCoverage,
     FrozenMemoryGovernanceSourceItem,
-    FrozenMemoryProposal,
     FrozenMemoryPublicFactProjection,
     MemoryDecisionKind,
     MemoryDecisionReasonCode,
@@ -44,8 +42,6 @@ from pulsara_agent.conversation_kernel.memory.contracts import (
     MemoryGovernanceChronology,
     MemoryGovernanceEvidenceRole,
     MemoryGovernanceSourceBlockKind,
-    MemoryKindHint,
-    MemoryProducerKind,
     MemorySupersedeMode,
     MODEL_GOVERNANCE_SKIP_REASON_CODES,
     PreparedMemoryCandidateAcceptance,
@@ -53,29 +49,23 @@ from pulsara_agent.conversation_kernel.memory.contracts import (
     canonical_json_bytes,
     legal_memory_final_kinds,
     memory_fact_semantic_digest,
+    memory_context_product_label,
     memory_governance_source_item_payload,
     memory_governance_source_projection_bytes,
-    prepare_memory_candidate,
     prepare_memory_governance_acceptance,
     memory_public_fact_payload,
-    normalize_memory_text,
     validate_final_kind_shape,
 )
 from pulsara_agent.conversation_kernel.reader import CanonicalProviderInputReader
 from pulsara_agent.conversation_kernel.memory.recall import PostgresMemoryQuery
-from pulsara_agent.conversation_kernel.memory.reflection import (
-    PreparedCheapHintReflectionCandidateBatch,
-    PreparedCheapHintReflectionHandoff,
-    cheap_hint_handoff_identity_digest,
-)
 from pulsara_agent.conversation_kernel.repository import (
     ConversationKernelConflict,
     ConversationKernelRepository,
 )
-from pulsara_agent.memory.scope import FrozenMemoryReadScopeBinding, MemoryScopeKind
+from pulsara_agent.memory.scope import FrozenMemoryReadContextBinding
 from pulsara_agent.memory.product_contract import (
     MEMORY_GOVERNANCE_CONTRACT_ID,
-    MEMORY_GOVERNANCE_SYSTEM_PROMPT_V2,
+    MEMORY_GOVERNANCE_SYSTEM_PROMPT_V3,
 )
 from pulsara_agent.llm.input import LLMMessage
 from pulsara_agent.model_input.contracts import (
@@ -87,10 +77,7 @@ from pulsara_agent.model_input.contracts import (
 from pulsara_agent.primitives.model_call import ModelCallPurpose
 
 
-MAXIMUM_HINT_REVIEW_INPUT_BYTES = 64 * 1024
-MAXIMUM_HINT_REVIEW_OUTPUT_BYTES = 8 * 1024
 MAXIMUM_RELATED_MEMORIES = 8
-MAXIMUM_REFLECTION_QUEUE = 16
 MAXIMUM_EMBEDDING_SCAN = 100
 MAXIMUM_EMBEDDING_CALLS = 5
 MAXIMUM_EMBEDDING_BATCH = 10
@@ -103,36 +90,26 @@ class MemoryEmbeddingMaintenancePort(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
-class _ReflectionAttempt:
-    token: str
-    handoff: PreparedCheapHintReflectionHandoff
-
-
-@dataclass(frozen=True, slots=True)
 class _GovernancePacketVariant:
     packet: str
     allowed_targets: Mapping[str, FrozenMemoryPublicFactProjection]
 
 
 class AdvisoryMemoryGovernor:
-    """The only process-local owner of governance/reflection provider calls."""
+    """The only process-local owner of advisory-memory governance calls."""
 
     def __init__(
         self,
         *,
         repository: ConversationKernelRepository,
         guard: HostWriterGuard,
-        read_binding: FrozenMemoryReadScopeBinding,
+        read_binding: FrozenMemoryReadContextBinding,
         model: AuxiliaryJsonModelPort,
         input_reader: CanonicalProviderInputReader,
         io_owner: KernelSessionIO,
         deadline_factory: KernelExecutionDeadlineFactory,
-        provider_trust_domain_identity: str,
         embedding_port: MemoryEmbeddingMaintenancePort | None = None,
-        hint_review_allow_cross_provider: bool = False,
     ) -> None:
-        if not provider_trust_domain_identity:
-            raise ValueError("memory governor trust-domain identity is required")
         self._repository = repository
         self._guard = guard
         self._read_binding = read_binding
@@ -141,13 +118,9 @@ class AdvisoryMemoryGovernor:
         self._input_reader = input_reader
         self._io = io_owner
         self._deadlines = deadline_factory
-        self._trust_domain = provider_trust_domain_identity
         self._embedding_port = embedding_port
-        self._allow_cross_provider = hint_review_allow_cross_provider
         self._wake = asyncio.Event()
         self._auxiliary_lane = asyncio.Lock()
-        self._dormant: dict[str, PreparedCheapHintReflectionHandoff] = {}
-        self._reflections: deque[_ReflectionAttempt] = deque()
         self._closing = False
         self._task: asyncio.Task[None] | None = None
 
@@ -164,38 +137,8 @@ class AdvisoryMemoryGovernor:
         if not self._closing:
             self._wake.set()
 
-    def adopt_dormant_reflection(
-        self, handoff: PreparedCheapHintReflectionHandoff
-    ) -> str | None:
-        if self._closing or handoff.session_id != self._guard.session_id:
-            return None
-        if (
-            handoff.provider_trust_domain_identity != self._trust_domain
-            and not self._allow_cross_provider
-        ):
-            return None
-        token = "memory-reflection:" + sha256(
-            cheap_hint_handoff_identity_digest(handoff).encode("utf-8")
-        ).hexdigest()
-        if len(self._dormant) + len(self._reflections) >= MAXIMUM_REFLECTION_QUEUE:
-            return None
-        existing = self._dormant.get(token)
-        if existing is not None and existing != handoff:
-            raise RuntimeError("reflection token names a different handoff")
-        self._dormant[token] = handoff
-        return token
-
-    def activate_reflection(self, token: str) -> None:
-        handoff = self._dormant.pop(token, None)
-        if handoff is None or self._closing:
-            return
-        self._reflections.append(_ReflectionAttempt(token, handoff))
-        self._wake.set()
-
     async def aclose(self, *, deadline_monotonic: float) -> None:
         self._closing = True
-        self._dormant.clear()
-        self._reflections.clear()
         self._wake.set()
         task = self._task
         if task is None:
@@ -223,7 +166,6 @@ class AdvisoryMemoryGovernor:
                 await self._wake.wait()
                 self._wake.clear()
                 await self._drain_governance()
-                await self._drain_reflections()
                 await self._maintain_embeddings()
         except asyncio.CancelledError:
             raise
@@ -303,14 +245,10 @@ class AdvisoryMemoryGovernor:
                     acceptance, deadline_monotonic=deadline_monotonic
                 )
                 return
-            historical = (
-                None
-                if evidence.producer_cut is None
-                else await self._io.run(
-                    self._input_reader.read_memory_governance_historical_snapshot,
-                    evidence.producer_cut,
-                    deadline_monotonic=deadline_monotonic,
-                )
+            historical = await self._io.run(
+                self._input_reader.read_memory_governance_historical_snapshot,
+                evidence.producer_cut,
+                deadline_monotonic=deadline_monotonic,
             )
             evidence = _finalize_governance_source_envelope(
                 evidence,
@@ -349,7 +287,7 @@ class AdvisoryMemoryGovernor:
                     purpose=ModelCallPurpose.MEMORY_GOVERNANCE,
                     message_variants=tuple(
                         (
-                            LLMMessage.system(MEMORY_GOVERNANCE_SYSTEM_PROMPT_V2),
+                            LLMMessage.system(MEMORY_GOVERNANCE_SYSTEM_PROMPT_V3),
                             LLMMessage.user(variant.packet),
                         )
                         for variant in packet_variants
@@ -414,11 +352,7 @@ class AdvisoryMemoryGovernor:
     ) -> tuple[_GovernancePacketVariant, ...]:
         proposal = candidate.proposal
         existing: list[dict[str, object]] = []
-        exact_kinds = (
-            ()
-            if proposal.kind_hint is MemoryKindHint.AUTO
-            else (MemoryFactKind(proposal.kind_hint.value),)
-        )
+        exact_kinds = legal_memory_final_kinds(proposal)
         for kind in exact_kinds:
             try:
                 validate_final_kind_shape(proposal, kind)
@@ -427,14 +361,11 @@ class AdvisoryMemoryGovernor:
             semantic = memory_fact_semantic_digest(
                 kind=kind,
                 statement=proposal.statement,
-                applies_when=proposal.applies_when,
-                do_not_apply_when=proposal.do_not_apply_when,
             )
             winner = await self._io.run(
                 self._query.find_active_semantic,
                 read_binding=self._read_binding,
-                scope_kind=proposal.scope_kind,
-                scope_id=proposal.scope_id,
+                context_id=proposal.context_id,
                 fact_semantic_digest=semantic,
                 deadline_monotonic=deadline_monotonic,
             )
@@ -457,7 +388,7 @@ class AdvisoryMemoryGovernor:
             sparse_operation = self._io.run(
                 self._query.governance_sparse_candidates,
                 read_binding=self._read_binding,
-                scope_kind=proposal.scope_kind,
+                context_id=proposal.context_id,
                 query=proposal.statement,
                 deadline_monotonic=deadline_monotonic,
             )
@@ -467,7 +398,7 @@ class AdvisoryMemoryGovernor:
                 else self._io.run(
                     self._query.governance_dense_candidates,
                     read_binding=self._read_binding,
-                    scope_kind=proposal.scope_kind,
+                    context_id=proposal.context_id,
                     query_embedding=query_embedding,
                     deadline_monotonic=deadline_monotonic,
                 )
@@ -494,8 +425,7 @@ class AdvisoryMemoryGovernor:
             related = await self._io.run(
                 self._query.finalize_governance_related,
                 read_binding=self._read_binding,
-                scope_kind=proposal.scope_kind,
-                scope_id=proposal.scope_id,
+                context_id=proposal.context_id,
                 sparse=sparse,
                 dense=dense,
                 exclude_fact_id=None,
@@ -544,18 +474,12 @@ class AdvisoryMemoryGovernor:
                     evidence.terminal_fence.terminal_status
                 ),
             },
-            "producer": (
-                "The main model proposed this while replying."
-                if candidate.producer_kind
-                is MemoryProducerKind.MAIN_AGENT_REMEMBER
-                else "Terminal-turn lightweight hint review proposed this from the user's words."
-            ),
             "candidate": {
                 "statement": proposal.statement,
-                "scope_kind": proposal.scope_kind.value,
+                "context_product_label": memory_context_product_label(
+                    proposal.context_id
+                ),
                 "kind_hint": proposal.kind_hint.value,
-                "applies_when": proposal.applies_when,
-                "do_not_apply_when": proposal.do_not_apply_when,
                 "basis_memory_ids": tuple(
                     item.target_fact_id for item in candidate.basis_refs
                 ),
@@ -676,88 +600,6 @@ class AdvisoryMemoryGovernor:
                 "memory relation settlement did not reach a stable disposition"
             )
 
-    async def _drain_reflections(self) -> None:
-        while self._reflections and not self._closing:
-            attempt = self._reflections.popleft()
-            deadline = self._deadlines.deadline(
-                KernelWatchdogOwner.MEMORY_HINT_REVIEW_ATTEMPT
-            )
-            try:
-                await self._review_hints(attempt.handoff, deadline_monotonic=deadline)
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                # Reflection is intentionally weaker than governance.
-                continue
-
-    async def _review_hints(
-        self,
-        handoff: PreparedCheapHintReflectionHandoff,
-        *,
-        deadline_monotonic: float,
-    ) -> None:
-        value = {
-            "contract": "pulsara.cheap-memory-hint-review.v1",
-            "instruction": (
-                "Return zero to four single-atom advisory memory proposals. Copy "
-                "the exact normalized statement from a cited human entry; do not "
-                "infer from memory, rewrite, merge, or split one proposal."
-            ),
-            "entries": [
-                {
-                    "source": f"user:{ordinal}",
-                    "human_text": item.public_text,
-                    "adjacent_assistant_text": item.adjacent_assistant_text,
-                    "hint_codes": tuple(hint.signal_code for hint in item.hints),
-                }
-                for ordinal, item in enumerate(handoff.eligible_entries, start=1)
-            ],
-            "final_assistant_text": handoff.final_assistant_text,
-            "output": {"candidates": []},
-        }
-        prompt = canonical_json_bytes(value)
-        if len(prompt) > MAXIMUM_HINT_REVIEW_INPUT_BYTES:
-            return
-        async with self._auxiliary_lane:
-            remaining = deadline_monotonic - monotonic()
-            if remaining <= 0:
-                return
-            policy = self._deadlines.policy.bounded_auxiliary_transport(remaining)
-            call = self._model.prepare_json_call(
-                purpose=ModelCallPurpose.MEMORY_HINT_REVIEW,
-                messages=(LLMMessage.user(prompt.decode("utf-8")),),
-                maximum_input_tokens=16_384,
-                maximum_input_bytes=MAXIMUM_HINT_REVIEW_INPUT_BYTES,
-                maximum_output_tokens=2_048,
-                timeout_policy=policy,
-                maximum_result_bytes=MAXIMUM_HINT_REVIEW_OUTPUT_BYTES,
-            )
-            output = await self._model.complete_prepared_json(call)
-        batch = _prepare_reflection_batch(handoff, output)
-        if not batch.candidates:
-            return
-        try:
-            await self._io.run(
-                self._repository.accept_reflection_memory_candidates,
-                self._guard,
-                candidates=batch.candidates,
-                deadline_monotonic=deadline_monotonic,
-            )
-        except Exception:
-            confirmations = await asyncio.gather(
-                *(
-                    self._io.run(
-                        self._repository.confirm_memory_candidate_intake,
-                        candidate=candidate,
-                        deadline_monotonic=deadline_monotonic,
-                    )
-                    for candidate in batch.candidates
-                )
-            )
-            if not all(confirmations):
-                return
-        self._wake.set()
-
     async def _maintain_embeddings(self) -> None:
         if self._embedding_port is None or self._closing:
             return
@@ -805,13 +647,13 @@ class AdvisoryMemoryGovernor:
 def _finalize_governance_source_envelope(
     evidence: FrozenMemoryGovernanceEvidence,
     *,
-    historical: CanonicalModelInputSnapshot | None,
+    historical: CanonicalModelInputSnapshot,
 ) -> FrozenMemoryGovernanceEvidence:
     """Keep every terminal-turn human source, then add a bounded causal tail."""
 
     raw_causal = tuple(
         item
-        for source in (() if historical is None else historical.items)
+        for source in historical.items
         if (item := _causal_source_item(source)) is not None
     )
     causal = tuple(
@@ -994,11 +836,9 @@ def _causal_source_item(
 
 
 def _causal_source_item_turn(
-    snapshot: CanonicalModelInputSnapshot | None,
+    snapshot: CanonicalModelInputSnapshot,
     source_entry_id: str,
 ) -> str | None:
-    if snapshot is None:
-        return None
     for item in snapshot.items:
         if item.source_entry_id == source_entry_id:
             return item.source_turn_id
@@ -1181,7 +1021,10 @@ def _governance_output_schema(
             },
             "public_summary": {
                 "type": "string",
-                "contract": "target-independent formation summary",
+                "contract": (
+                    "neutral target-independent public formation source only; never "
+                    "mention relation selection, update, replacement, or conflict"
+                ),
             },
         },
         "required_fields_by_decision": {
@@ -1228,25 +1071,23 @@ def _terminal_outcome_product_label(status: str) -> str:
 def _fact_projection(item) -> dict[str, object]:
     return {
         "memory_id": item.fact_id,
-        "scope_kind": item.scope_kind,
+        "context_product_label": memory_context_product_label(item.context_id),
+        "current_context": item.context_id != "ctx:global",
         "kind": item.fact_kind,
         "lifecycle": item.lifecycle,
         "statement": item.statement,
-        "applies_when": item.applies_when,
-        "do_not_apply_when": item.do_not_apply_when,
+        "recorded_at": item.recorded_at,
     }
 
 
 def _frozen_fact_projection(item) -> FrozenMemoryPublicFactProjection:
     return FrozenMemoryPublicFactProjection(
         fact_id=item.fact_id,
-        scope_kind=MemoryScopeKind(item.scope_kind),
-        scope_id=item.scope_id,
+        context_id=item.context_id,
         fact_kind=MemoryFactKind(item.fact_kind),
         lifecycle=item.lifecycle,
         statement=item.statement,
-        applies_when=item.applies_when,
-        do_not_apply_when=item.do_not_apply_when,
+        recorded_at=item.recorded_at,
         fact_semantic_digest=item.fact_semantic_digest,
     )
 
@@ -1338,95 +1179,6 @@ def _selected_governance_relation_targets(
         raise ValueError("governance selected a target outside the frozen allowlist") from exc
 
 
-def _prepare_reflection_batch(
-    handoff: PreparedCheapHintReflectionHandoff,
-    output: Mapping[str, object],
-) -> PreparedCheapHintReflectionCandidateBatch:
-    if set(output) != {"candidates"} or not isinstance(output["candidates"], list):
-        raise ValueError("reflection output is outside its closed schema")
-    rows = output["candidates"]
-    if len(rows) > 4:
-        raise ValueError("reflection output exceeds four candidates")
-    eligible = {
-        f"user:{ordinal}": item
-        for ordinal, item in enumerate(handoff.eligible_entries, start=1)
-    }
-    encoded = canonical_json_bytes(output)
-    output_digest = "sha256:" + sha256(encoded).hexdigest()
-    candidates: list[PreparedMemoryCandidateAcceptance] = []
-    for ordinal, raw in enumerate(rows):
-        if not isinstance(raw, dict):
-            raise ValueError("reflection candidate is not an object")
-        allowed = {
-            "source",
-            "statement",
-            "scope",
-            "kind_hint",
-            "applies_when",
-            "do_not_apply_when",
-        }
-        if set(raw) - allowed:
-            raise ValueError("reflection candidate contains extra fields")
-        source_handle = _required_string(raw.get("source"), "reflection source")
-        source = eligible.get(source_handle)
-        if source is None:
-            raise ValueError("reflection candidate source is not eligible")
-        statement = _required_string(raw.get("statement"), "reflection statement")
-        # Reflection may select a single verbatim normalized atom, but cannot
-        # invent text absent from the exact human projection.
-        normalized_source = normalize_memory_text(source.public_text)
-        normalized_statement = normalize_memory_text(statement)
-        if not normalized_statement or normalized_statement not in normalized_source:
-            raise ValueError("reflection candidate rewrote its human source")
-        scope_kind = MemoryScopeKind(
-            _required_string(raw.get("scope", "USER"), "reflection scope")
-        )
-        if scope_kind is MemoryScopeKind.USER:
-            scope_id = "ctx:user"
-        else:
-            scope_id = handoff.workspace_scope_id
-            if scope_id is None:
-                raise ValueError(
-                    "reflection cannot propose WORKSPACE memory in a transient Host"
-                )
-        proposal = FrozenMemoryProposal(
-            statement=normalized_statement,
-            scope_kind=scope_kind,
-            scope_id=scope_id,
-            kind_hint=MemoryKindHint(
-                _required_string(raw.get("kind_hint", "AUTO"), "reflection kind hint")
-            ),
-            applies_when=_optional_string(raw.get("applies_when")),
-            do_not_apply_when=_strict_string_sequence(
-                raw.get("do_not_apply_when"), "reflection exclusions"
-            ),
-        )
-        candidate_id = "memory-candidate:" + sha256(
-            canonical_json_bytes(
-                (
-                    cheap_hint_handoff_identity_digest(handoff),
-                    output_digest,
-                    ordinal,
-                )
-            )
-        ).hexdigest()
-        candidates.append(
-            prepare_memory_candidate(
-                candidate_id=candidate_id,
-                memory_domain_id=handoff.memory_domain_id,
-                origin_workspace_id=handoff.workspace_id,
-                origin_session_id=handoff.session_id,
-                producer_kind=MemoryProducerKind.CHEAP_HINT_REFLECTION,
-                proposal=proposal,
-                trigger_user_entry_id=source.entry_id,
-                producer_candidate_ordinal=ordinal,
-            )
-        )
-    return PreparedCheapHintReflectionCandidateBatch(
-        candidates=tuple(candidates),
-    )
-
-
 def _validate_governance_public_summary(value: str) -> None:
     lowered = value.casefold()
     forbidden = (
@@ -1444,6 +1196,7 @@ def _validate_governance_public_summary(value: str) -> None:
         "after:",
         "cited-observation:",
         "ctx:",
+        "current_project",
         "target_fact_id",
         "reason_code",
         "final_kind",
@@ -1454,7 +1207,6 @@ def _validate_governance_public_summary(value: str) -> None:
         "assistant_context",
         "non_human_context",
         "tool_context_only",
-        "sql",
         "prompt",
         "provider",
         "wire api",
@@ -1468,6 +1220,7 @@ def _validate_governance_public_summary(value: str) -> None:
         "context binding",
         "event sequence",
         "terminal event",
+        "governance",
         "governance watchdog",
         "runtime owner",
         "database lane",
@@ -1490,14 +1243,18 @@ def _validate_governance_public_summary(value: str) -> None:
         "数据库通道",
         "候选领取",
     )
-    if any(term in lowered for term in forbidden):
+    if any(term in lowered for term in forbidden) or re.search(
+        r"(?<![a-z0-9_])sql(?![a-z0-9_])", lowered
+    ):
         raise ValueError("governance public summary exposes non-product semantics")
     internal_enums = (
         tuple(item.value for item in MemoryFactKind)
         + tuple(item.value for item in MemoryDecisionReasonCode)
-        + tuple(item.value for item in MemoryProducerKind)
     )
-    if any(term.casefold() in lowered for term in internal_enums):
+    if any(
+        term in value or ("_" in term and term.casefold() in lowered)
+        for term in internal_enums
+    ):
         raise ValueError("governance public summary exposes an internal enum")
 
 
