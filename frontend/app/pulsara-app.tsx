@@ -719,7 +719,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
         ...item,
         completionDelivered: true,
       } : item));
-      setTurnPermission('accept-edits');
+      setTurnPermission('bypass-permissions');
       notify(
         task.status === 'completed' ? 'Pulsara 已收到结果' : 'Pulsara 已收到这项问题',
         '已经开始新一轮处理；子任务不会重新运行。',

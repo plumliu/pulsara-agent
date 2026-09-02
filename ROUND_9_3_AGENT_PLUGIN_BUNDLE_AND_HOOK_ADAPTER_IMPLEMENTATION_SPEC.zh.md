@@ -184,7 +184,7 @@ messages[n + 1] == messages[n] || append_only_suffix
 8. explicit Plugin Skill third producer与seven-tier resolver；
 9. portable MCP到existing `McpServerConfig`的adapter；
 10. command Hook source adapter，复用Round 9.2的11 lifecycle events；
-11. fixed ROOT-only `reload_plugins` Builtin；
+11. fixed ROOT-only `reload_capabilities` Builtin；
 12. CLI/in-process service、diagnostics、packaging、tests与real-provider dogfood；
 13. 一个package内只读`pulsara-plugin-installer` bundled Skill：strict validation成功时不转换；只有deterministic Codex package-format差异才指导模型读取实际Plugin内容与对应Codex source reference，生成Agent Plugins 1.0临时候选并重新交给同一production validator。Hook target必须exact join §9的event/matcher/stdin/environment/output/control/lifecycle；Skill不是第二parser、install authority或Runtime compatibility profile。
 
@@ -981,7 +981,7 @@ Host cold open从一个COMPLETE enabled-package observation构造`FrozenEnabledP
 
 Running Host仅在以下seam替换current Plugin view：
 
-- explicit ROOT-only `reload_plugins`；
+- explicit ROOT-only `reload_capabilities`；
 - approved compaction successor preparation；
 - new Host cold open。
 
@@ -1351,7 +1351,7 @@ existing local/Host McpServerConfig tuple
 
 MCP supervisor、discovery、naming、slot、catalog、DIRECT/META route、permission、effect、attempt、reconnect、close全部保持唯一owner。`conversation_kernel/mcp/*`不得import`plugins/*`。
 
-Existing `MAXIMUM_CONFIGURED_MCP_SERVERS = 64`对合并后tuple生效。Overbound时new MCP config epoch不发布，old exact supervisor config继续；Plugin Skill/Hook component不因无关MCP bound被回滚。该outcome必须进入`reload_plugins`component result与doctor。
+Existing `MAXIMUM_CONFIGURED_MCP_SERVERS = 64`对合并后tuple生效。Overbound时new MCP config epoch不发布，old exact supervisor config继续；Plugin Skill/Hook component不因无关MCP bound被回滚。该outcome必须进入`reload_capabilities`component result与doctor。
 
 ### 8.6 Runtime behavior
 
@@ -1554,12 +1554,12 @@ slow scan / parse / trust assessment / candidate build  # no publication/Host lo
 Narrow merge seam必须做到：
 
 - `reload_hooks`先capture one complete Hook predecessor view，在两把锁之外完整重读USER/WORKSPACE files，并对该captured view中的current immutable Plugin source declarations重评generic trust；进入publication mutex后必须验证`dispatcher.current_view is captured_predecessor`，而不是只比较Plugin slice。任一local或Plugin slice、trust/diagnostic view已经被其他writer发布，都立即release mutex并在同一absolute deadline下从fresh complete capture重做slow assessment；identity仍exact相同才用candidate local slice + assessed Plugin slice merge。该optimistic loop无retry-count cap且cancel/deadline可胜出；它不scan Plugin state/package，也不在mutex内读trust filesystem；
-- `reload_plugins`先在两把锁之外观察package并构造new Plugin Hook slice；进入publication mutex后重新捕获**当前** Hook commit predecessor并保留其current local slice，再merge candidate Plugin slice；它不重读local Hook files；
+- `reload_capabilities`先在两把锁之外观察package并构造new Plugin Hook slice；进入publication mutex后重新捕获**当前** Hook commit predecessor并保留其current local slice，再merge candidate Plugin slice；它不重读local Hook files；
 - 两者随后只短暂进入Host lock，revalidate Host仍open、exact Plugin composition predecessor/candidate仍current、Hook commit predecessor object identity未变，再执行各自授权的pointer cut；失败则不发布该owner，返回typed stale/partial outcome；
 - concurrent reloads因此总是以进入publication mutex时的current opposite slice合并，不能lost-update或分别发布相互覆盖的views；
 - 不暴露generic mutable event bus、view lease、manual refcount、generation或registry map。
 
-这里有两个不能混淆的predecessor：`reload_plugins`自己的PreTool/Permission/PostTool使用invoke前捕获的**lifecycle predecessor view**，确保同一physical attempt不被new Hooks反向包围；publication merge/revalidation使用进mutex后捕获的**commit predecessor view**，确保并发`reload_hooks`更新不丢失。PostTool仍使用lifecycle predecessor，即使commit已经FULL。New definitions只从下一event生效。
+这里有两个不能混淆的predecessor：`reload_capabilities`自己的PreTool/Permission/PostTool使用invoke前捕获的**lifecycle predecessor view**，确保同一physical attempt不被new Hooks反向包围；publication merge/revalidation使用进mutex后捕获的**commit predecessor view**，确保并发`reload_hooks`更新不丢失。PostTool仍使用lifecycle predecessor，即使commit已经FULL。New definitions只从下一event生效。
 
 ### 9.8 Runtime semantics
 
@@ -1581,9 +1581,9 @@ Plugin definition的generic `FrozenHookSourceProvenance`必须携带§4.5 one in
 
 ## 10. Reload、compaction与publication semantics
 
-### 10.1 `reload_plugins` descriptor
+### 10.1 `reload_capabilities` descriptor
 
-新增fixed ROOT-only Builtin `reload_plugins`：
+新增fixed ROOT-only Builtin `reload_capabilities`：
 
 - 从所有cold epochs一开始就存在于Builtin surface；
 - ROOT BYPASS-permissions only，其他scope/mode typed denied；
@@ -1599,7 +1599,7 @@ Plugin lifecycle state、Skill source、MCP config epoch与Hook future view各�
 
 `PluginRuntimeCompositionOwner`可以保存latest FULL-observed `FrozenEnabledPluginView`以及各consumer当前安装的exact projection object references，但不能用一个`all_components_current=true`、generation或aggregate fingerprint掩盖partial publication。每个consumer的current truth仍由其真实owner pointer/config epoch决定；inspection则报告durable package state与running-Host refresh notice，不伪造跨process Runtime状态。
 
-`reload_plugins`顺序固定：
+`reload_capabilities`顺序固定：
 
 1. 在short Host capture中冻结predecessor Plugin composition view、invoke-time lifecycle Hook view、MCP config owner value与current tool/planning owner已经给出的absolute deadline，然后释放Host lock；
 2. ordinary PreTool、以及仅在existing permission owner已经决定ASK时的PermissionRequest，使用invoke-time lifecycle Hook view；
@@ -1747,7 +1747,7 @@ Current `_skill_origin_provenance_fingerprint(origin)`是唯一capability-fact b
 - fixed extension config discovery；
 - reuse `hooks/config_parser.py`；
 - generic Hook CLI source selection；
-- `reload_hooks`/`reload_plugins` exact predecessor merge；
+- `reload_hooks`/`reload_capabilities` exact predecessor merge；
 - predecessor-view lifecycle for reload tool；
 - no Plugin provenance in stdin/context；
 - old attempts drain。
@@ -1946,7 +1946,7 @@ Active spec synchronization至少覆盖unified Skill、Round 9.2 Hook、Round 6/
 - existing USER/WORKSPACE file Hook normalized digests byte-identical after union hard cut；
 - Hook command byte-identical through inspect/trust/executor；root/data只作为reviewed declaration environment，不做adapter string expansion；
 - generic Hook stdin/context contains no Plugin provenance；
-- `reload_hooks` does not scan package；`reload_plugins` does not reread local files；
+- `reload_hooks` does not scan package；`reload_capabilities` does not reread local files；
 - concurrent reload在scan期间互不占publication mutex，并按`publication -> Host`固定锁序完成；stress probe无ABBA、无lost local/Plugin slice update；
 - two concurrent `reload_hooks`从同一V0 scan、先后发布时，later writer必须因complete predecessor identity变化而rescan，不能把先发布的new local slice覆回stale值；
 - reload tool Pre/Permission/Post uses invoke-time lifecycle predecessor，commit merge使用lock内current predecessor；两者不同的并发轨迹被冻结；
@@ -2000,7 +2000,7 @@ Real provider dogfood至少覆盖一个single package：
 1. Plugin Skill进入seven-tier catalog并由ordinary `read_file`读取；
 2. local stdio Plugin MCP经META或DIRECT实际调用；
 3. exact trusted Plugin `UserPromptSubmit`/`PreToolUse` Hook运行并产生context/control；
-4. `reload_plugins`不改same-epoch SYSTEM/tools；
+4. `reload_capabilities`不改same-epoch SYSTEM/tools；
 5. compaction successor重新冻结current Plugin Skill/MCP并运行Pre/PostCompact、SessionStart(compact)；
 6. replace自动disabled；对new exact install再次enable后Hook trust仍为MODIFIED，old MCP/Hook consumer drain；
 7. disable/remove后future contributions消失，old DIRECT descriptor typed unavailable；
@@ -2033,7 +2033,7 @@ Real provider dogfood至少覆盖一个single package：
 19. Plugin Hook只增加closed source identity/trust subject arm；parser/trust/dispatcher/executor/context owner仍唯一。
 20. Hook command在inspect/trust/execute间byte-identical；root/data只通过trust-covered declaration environment提供。
 21. Generic Hook stdin/`HOOK_CONTEXT`没有Plugin provenance；11 events/11 public variants/12 causal arms不变。
-22. `reload_hooks`与`reload_plugins`scan/build不占publication/Host locks，固定`Hook publication -> Host`锁序；`reload_hooks`提交校验complete captured predecessor，任一slice变化即重做，`reload_plugins`以lock内current opposite slice merge；无ABBA、stale overwrite、lost update、generation或registry。
+22. `reload_hooks`与`reload_capabilities`scan/build不占publication/Host locks，固定`Hook publication -> Host`锁序；`reload_hooks`提交校验complete captured predecessor，任一slice变化即重做，`reload_capabilities`以lock内current opposite slice merge；无ABBA、stale overwrite、lost update、generation或registry。
 23. Reload tool lifecycle使用invoke-time predecessor、commit使用lock内current predecessor；old Hook/MCP leaves各自通过generic lifetime anchor持package lock直到physical drain。
 24. Same-epoch SYSTEM/tools exact、messages suffix-only；无第三rebase boundary。
 25. Long-horizon availability无new total cap；all scans/copy/list use streaming/pagination/deadline。
@@ -2088,7 +2088,7 @@ Pure local service与CLI都完成`validate -> add(disabled) -> inspect -> enable
 
 5,321,370-byte trace保留actual prompts、provider-visible SYSTEM/tools/messages、provider stream、Hook stdin/stdout/stderr、MCP logs、ToolResults、canonical transcript与model replies。`pulsara_api_key_recorded=false`，Hook/MCP child environment也均未包含exact key。Provider与network真实可达；没有external availability blocker或remaining runtime defect。
 
-合入前P1 closure同一working-tree另以deterministic probes与retained tests证明：package shared anchor使用caller absolute deadline/cancel的nonblocking lock acquisition；paired source read/fstat失败保持source physical owner；`reload_plugins`同一deadline贯穿settlement、Hook/Host publication与native MCP cut；HTTP/provider每个physical request保持one `ProcessApiKeyBoundary` gate直到request body FULL/not-FULL，随后在response headers/body前释放。对应Round 9.3 focused gate为`33 passed in 1.47s`，没有新增task-owner site、durability、retry cap或fingerprint。
+合入前P1 closure同一working-tree另以deterministic probes与retained tests证明：package shared anchor使用caller absolute deadline/cancel的nonblocking lock acquisition；paired source read/fstat失败保持source physical owner；`reload_capabilities`同一deadline贯穿settlement、Hook/Host publication与native MCP cut；HTTP/provider每个physical request保持one `ProcessApiKeyBoundary` gate直到request body FULL/not-FULL，随后在response headers/body前释放。对应Round 9.3 focused gate为`33 passed in 1.47s`，没有新增task-owner site、durability、retry cap或fingerprint。
 
 Supplemental bundled installer discovery matrix同样使用production `openai_chat_completions`与`deepseek-v4-flash-vision-exp`，以五个隔离HOME/PULSARA_HOME覆盖vault全部positive packages：`elements-of-style@1.0.0`、`jumpcloud-admin@1.1.0`、`fdeops@3.10.3`、`spar@0.5.0`、`one@1.0.3`。每条human user message只自然请求安装本地Plugin与处理不兼容格式，没有出现installer Skill name；模型从provider-visible `SKILL_CATALOG`自行选择exact bundled guidance，以ordinary `read_file`完整读取其`SKILL.md`，且只有在该ToolResult进入later provider call后才生成terminal CLI命令。五条轨迹均通过installed global `pulsara`确认八个commands、strict validate=`VALID`、`add --scope user`=`INSTALLED`、list/doctor检查；independent management inspection均确认exact version、USER scope与`enabled=false`。模型均说明只有exact behavior-preserving candidate且same validator重新返回`VALID`时才可继续，否则honest stop且不安装partial Plugin。
 

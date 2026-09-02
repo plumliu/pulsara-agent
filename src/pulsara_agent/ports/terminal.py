@@ -22,9 +22,13 @@ MIN_TERMINAL_OUTPUT_CHARS = 512
 DEFAULT_WAIT_TIMEOUT_SECONDS = 30
 
 TERMINAL_TOOL_DESCRIPTION = (
-    "Run one shell command inside the workspace. workdir must remain inside the "
-    "workspace; relative paths use the current working directory remembered for "
-    "terminal_session_id. Omit terminal_session_id to use the default session. Set "
+    "Run one shell command on the local host when the current run permission allows "
+    "terminal access. workdir may be any existing local directory; relative paths "
+    "use the current working directory remembered for terminal_session_id. The "
+    "workspace is the initial working directory, not a sandbox in an authorized "
+    "terminal run. Omit workdir to remain in the remembered directory; explicitly "
+    "supplying it also makes that directory the session's cwd for later commands. "
+    "Omit terminal_session_id to use the default session. Set "
     "tty=true only for programs that need interactive terminal behavior, such as line "
     "editing or a full-screen interface. yield_time_ms controls how long this call waits "
     "initially (0-30000 ms); it does not stop or limit the command. If the response has "
@@ -94,8 +98,10 @@ class TerminalInput(_StrictInput):
         min_length=1,
         max_length=4096,
         description=(
-            "Optional working directory inside the workspace. Relative paths use the "
-            "current working directory remembered for terminal_session_id."
+            "Optional existing local working directory. Relative paths use the "
+            "current working directory remembered for terminal_session_id; absolute "
+            "paths and ~ are accepted when terminal access is authorized. Supplying "
+            "this field updates the remembered directory for later commands."
         ),
     )
     terminal_session_id: str = Field(

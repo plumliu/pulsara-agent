@@ -793,7 +793,7 @@ class LocalSessionController:
             return 0, 0
         results = await asyncio.gather(
             *(
-                handle.session.reload_plugins(deadline_monotonic=None)
+                handle.session.reload_capabilities(deadline_monotonic=None)
                 for handle in handles
             ),
             return_exceptions=True,

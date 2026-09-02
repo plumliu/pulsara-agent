@@ -1702,6 +1702,7 @@ def test_cli_four_loose_commands_project_typed_service_outcomes(
         assert payload["operation"] == "inspect_effective_skill_catalog"
         assert {item["name"] for item in payload["skills"]} == {
             "cli-skill",
+            "pulsara-mcp-installer",
             "pulsara-plugin-installer",
             "pulsara-skill-creator",
             "pulsara-skill-installer",

@@ -81,7 +81,7 @@ pulsara plugins gc [--workspace <workspace-root>]
 
 Remove preserves the per-instance data directory. GC only reclaims unreferenced
 package roots/stages that have no physical consumer. A running Host adopts
-management changes only through its explicit Plugin reload path or restart;
+management changes only through `reload_capabilities` or restart;
 install, replace, enable, disable, remove, trust, and GC never rewrite an already
 installed provider prefix.
 

@@ -32,6 +32,7 @@ from pulsara_agent.conversation_kernel.tool_policy import (
 )
 from pulsara_agent.conversation_kernel.tool_runtime import DirectKernelToolPort
 from pulsara_agent.conversation_kernel.tool_contracts import (
+    KernelToolAuthorizationKind,
     build_accepted_canonical_tool_result_settlement,
 )
 from pulsara_agent.conversation_kernel.vocabulary import (
@@ -65,13 +66,14 @@ from pulsara_agent.primitives.run_permission import (
     build_run_permission_snapshot,
 )
 from pulsara_agent.storage.migrations.manifest import CONVERSATION_KERNEL_RELATIONS
+from pulsara_agent.tool_permission import preset_to_policy
 from pulsara_agent.terminal_protocol.generated_v3 import terminal_kernel_v3_pb2 as wire
 from pulsara_agent.terminal_protocol.v3_gateway import (
     TerminalKernelProtocolServer,
     _Connection,
     _outcome_to_wire,
 )
-from tests.support.round3 import prepare_test_direct_tool_surface
+from tests.support.round3 import authorize_direct_tool, prepare_test_direct_tool_surface
 
 
 def _binding(tool_name: str) -> PlanInteractionBinding:
@@ -129,13 +131,128 @@ def test_round4_closed_oracle_and_permission_presets() -> None:
         "ask_plan_question",
         "exit_plan",
     }
-    assert PERMISSION_PRESET_CONTRACT_ID == "pulsara.permission-presets.v1"
+    assert PERMISSION_PRESET_CONTRACT_ID == "pulsara.permission-presets.v2"
     assert PERMISSION_PRESET_CONTRACT_FINGERPRINT.startswith("sha256:")
     for mode in PermissionMode:
         first = preset_permission_payload(mode)
         second = preset_permission_payload(mode)
         assert first == second
         assert first is not second
+        assert preset_to_policy(mode).to_dict() == first
+
+    assert preset_permission_payload(PermissionMode.READ_ONLY)["filesystem"] == {
+        "read_text_scope": "host_local",
+        "search_text_scope": "host_local_guarded_broad_roots",
+        "workspace_write": "deny",
+        "outside_workspace_write": "deny",
+    }
+    assert (
+        preset_permission_payload(PermissionMode.ASK_PERMISSIONS)["filesystem"][
+            "workspace_write"
+        ]
+        == "ask"
+    )
+    assert (
+        preset_permission_payload(PermissionMode.ASK_PERMISSIONS)["filesystem"][
+            "outside_workspace_write"
+        ]
+        == "ask"
+    )
+    assert (
+        preset_permission_payload(PermissionMode.ACCEPT_EDITS)["filesystem"][
+            "workspace_write"
+        ]
+        == "allow"
+    )
+    assert (
+        preset_permission_payload(PermissionMode.ACCEPT_EDITS)["filesystem"][
+            "outside_workspace_write"
+        ]
+        == "ask"
+    )
+    assert (
+        preset_permission_payload(PermissionMode.BYPASS_PERMISSIONS)["filesystem"][
+            "outside_workspace_write"
+        ]
+        == "allow"
+    )
+
+
+def test_round4_permission_modes_authorize_workspace_and_host_writes_exactly(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        session_id = "session:permission-matrix"
+        port = DirectKernelToolPort(
+            workspace_root=workspace,
+            host_owner_id="host:permission-matrix",
+            session_id=session_id,
+            live_bus=LiveAgentEventBus(),
+            authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
+        )
+        expected = {
+            PermissionMode.READ_ONLY: (
+                KernelToolAuthorizationKind.PERMISSION_DENIED,
+                KernelToolAuthorizationKind.PERMISSION_DENIED,
+                KernelToolAuthorizationKind.PERMISSION_DENIED,
+            ),
+            PermissionMode.ASK_PERMISSIONS: (
+                KernelToolAuthorizationKind.REQUIRE_CONFIRMATION,
+                KernelToolAuthorizationKind.REQUIRE_CONFIRMATION,
+                KernelToolAuthorizationKind.REQUIRE_CONFIRMATION,
+            ),
+            PermissionMode.ACCEPT_EDITS: (
+                KernelToolAuthorizationKind.ALLOW,
+                KernelToolAuthorizationKind.REQUIRE_CONFIRMATION,
+                KernelToolAuthorizationKind.REQUIRE_CONFIRMATION,
+            ),
+            PermissionMode.BYPASS_PERMISSIONS: (
+                KernelToolAuthorizationKind.ALLOW,
+                KernelToolAuthorizationKind.ALLOW,
+                KernelToolAuthorizationKind.ALLOW,
+            ),
+        }
+        try:
+            for ordinal, (mode, outcomes) in enumerate(expected.items()):
+                permission = build_run_permission_snapshot(
+                    snapshot_id=f"permission:matrix:{ordinal}",
+                    requested_mode=mode,
+                    effective_mode=mode,
+                    admission_source=RunPermissionAdmissionSource.USER_SUBMISSION,
+                )
+                observed = []
+                for path_ordinal, path in enumerate(
+                    (workspace / "inside.txt", tmp_path / "outside.txt")
+                ):
+                    authorization = await authorize_direct_tool(
+                        port,
+                        session_id=session_id,
+                        tool_name="write_file",
+                        arguments={"path": str(path), "content": "value"},
+                        tool_call_id=f"call:{ordinal}:{path_ordinal}",
+                        turn_id=f"turn:{ordinal}:{path_ordinal}",
+                        assistant_entry_id=f"entry:{ordinal}:{path_ordinal}",
+                        permission_snapshot=permission,
+                    )
+                    observed.append(authorization.kind)
+                terminal_authorization = await authorize_direct_tool(
+                    port,
+                    session_id=session_id,
+                    tool_name="terminal",
+                    arguments={"command": "pwd", "workdir": str(tmp_path)},
+                    tool_call_id=f"call:{ordinal}:terminal",
+                    turn_id=f"turn:{ordinal}:terminal",
+                    assistant_entry_id=f"entry:{ordinal}:terminal",
+                    permission_snapshot=permission,
+                )
+                observed.append(terminal_authorization.kind)
+                assert tuple(observed) == outcomes
+        finally:
+            await port.aclose(timeout_seconds=2)
+
+    asyncio.run(scenario())
 
 
 def test_round4_permission_snapshot_is_immutable_and_plan_only_narrows() -> None:

@@ -1225,6 +1225,81 @@ describe('PulsaraApp', () => {
     expect(container.querySelector('.terminal-command')?.textContent).toContain('printf "visible command"');
   });
 
+  it('explains MCP meta-tool routing and identifies exact Skill documents', async () => {
+    const adapter = new FakeAdapter();
+    adapter.connectionValue = {
+      ...projection(''),
+      messages: [{
+        id: 'assistant-capabilities', role: 'assistant', time: '18:11', body: '', status: 'completed',
+        traces: [{
+          id: 'trace-reload', kind: 'artifact', toolName: 'reload_capabilities', title: '刷新能力',
+          subtitle: '已完成', status: 'completed', meta: '操作完成',
+          argumentsJson: '{}', resultText: '{"status":"RELOADED"}', output: ['操作已完成。'],
+        }, {
+          id: 'trace-skill', kind: 'read', toolName: 'read_file', title: '读取文件',
+          subtitle: '已完成', status: 'completed', meta: '操作完成',
+          argumentsJson: JSON.stringify({ path: '/opt/pulsara/bundled_skills/pdf/SKILL.md' }),
+          resultText: JSON.stringify({ path: '/opt/pulsara/bundled_skills/pdf/SKILL.md', total_lines: 42 }),
+          output: ['已读取 /opt/pulsara/bundled_skills/pdf/SKILL.md · 42 行'],
+        }, {
+          id: 'trace-list', kind: 'mcp', toolName: 'list_mcp_servers', title: '浏览 MCP 服务',
+          subtitle: '已完成', status: 'completed', meta: '操作完成', argumentsJson: '{}',
+          resultText: JSON.stringify({
+            page_kind: 'SERVER_PAGE', total_server_count: 2,
+            servers: [{ server_id: 'firecrawl', public_status: 'READY', tool_count: 3 }, {
+              server_id: 'local-docs', public_status: 'CONNECTING', tool_count: 1,
+            }],
+          }),
+          output: ['操作已完成。'],
+        }, {
+          id: 'trace-inspect', kind: 'mcp', toolName: 'inspect_new_mcp_tool', title: '检查 MCP 工具',
+          subtitle: '已完成', status: 'completed', meta: '操作完成',
+          argumentsJson: JSON.stringify({ server_id: 'firecrawl', tool_name: 'firecrawl_search' }),
+          resultText: JSON.stringify({
+            server_id: 'firecrawl', remote_tool_name: 'firecrawl_search',
+            provider_tool_name: 'mcp__firecrawl__firecrawl_search', effect_kind: 'READ_ONLY',
+            description: '搜索公开网页。', tool_ref: 'mcpref_firecrawl_search',
+            input_schema: { type: 'object', properties: { query: { type: 'string' } } },
+          }),
+          output: ['操作已完成。'],
+        }, {
+          id: 'trace-use', kind: 'mcp', toolName: 'use_new_mcp_tool', title: '调用 MCP 工具',
+          subtitle: '已完成', status: 'completed', meta: '操作完成',
+          argumentsJson: JSON.stringify({
+            tool_ref: 'mcpref_firecrawl_search', arguments: { query: 'Pulsara' },
+          }),
+          resultText: JSON.stringify({ content: '搜索完成' }), output: ['搜索完成'],
+        }],
+      }],
+      isRunning: false,
+      activeTurnId: undefined,
+    };
+
+    const { container } = render(<PulsaraApp adapter={adapter} />);
+    expect(await screen.findByText('reload_capabilities')).toBeTruthy();
+    expect(await screen.findByText('正在使用 pdf Skill')).toBeTruthy();
+    expect(screen.queryByText('reload_plugins')).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: /list_mcp_servers/ }));
+    const listDetails = container.querySelectorAll('.mcp-trace-details')[0] as HTMLElement;
+    expect(within(listDetails).getByText('firecrawl')).toBeTruthy();
+    expect(within(listDetails).getByText('local-docs')).toBeTruthy();
+    expect(within(listDetails).getByText('已就绪 · 3 个工具')).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: /inspect_new_mcp_tool/ }));
+    const inspectDetails = container.querySelectorAll('.mcp-trace-details')[1] as HTMLElement;
+    expect(within(inspectDetails).getByText('检查的工具')).toBeTruthy();
+    expect(within(inspectDetails).getByText('firecrawl_search')).toBeTruthy();
+    expect(within(inspectDetails).queryByText('mcp__firecrawl__firecrawl_search')).toBeNull();
+    expect(within(inspectDetails).queryByText('query')).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: /use_new_mcp_tool/ }));
+    const useDetails = container.querySelectorAll('.mcp-trace-details')[2] as HTMLElement;
+    expect(within(useDetails).getByText('调用的工具')).toBeTruthy();
+    expect(within(useDetails).getByText('firecrawl_search')).toBeTruthy();
+    expect(within(useDetails).queryByText(/"query": "Pulsara"/)).toBeNull();
+  });
+
   it('offers copy only for the terminal assistant response', async () => {
     const adapter = new FakeAdapter();
     adapter.connectionValue = {
@@ -1498,6 +1573,7 @@ describe('PulsaraApp', () => {
     expect(await screen.findByText('验证新的前端任务')).toBeTruthy();
     expect(adapter.lastConnection?.enterPlan).toHaveBeenCalledWith('验证新的前端任务', 'read-only');
     expect(adapter.lastConnection?.submitPrompt).toHaveBeenCalledWith('验证新的前端任务', 'read-only');
+    expect(screen.getByRole('button', { name: /完全访问/ })).toBeTruthy();
   });
 
   it('leaves Enter to the input method while the composer is composing text', async () => {
@@ -1677,6 +1753,7 @@ describe('PulsaraApp', () => {
     fireEvent.click(continueButton);
     await waitFor(() => expect(adapter.lastConnection?.acceptSubagentCompletion).toHaveBeenCalledWith('task-complete', 'read-only'));
     expect(await screen.findByText('Pulsara 已收到结果')).toBeTruthy();
+    expect(screen.getByRole('button', { name: /完全访问/ })).toBeTruthy();
 
     vi.useFakeTimers();
     try {

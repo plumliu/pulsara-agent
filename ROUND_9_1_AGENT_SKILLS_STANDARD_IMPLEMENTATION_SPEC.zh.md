@@ -102,6 +102,8 @@ Loose producer输出all valid candidates与all standard-invalid candidate issues
 `BundledSkillDefinitionProducer`只借用installed distribution中filesystem-backed absolute `pulsara_agent/bundled_skills/` descriptor。Official set exact为：
 
 ```text
+pulsara-mcp-installer
+pulsara-plugin-installer
 pulsara-skill-creator
 pulsara-skill-installer
 ```

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from enum import StrEnum
+from pathlib import Path
 from typing import Mapping, Protocol
 
 from pulsara_agent.ports.tool_execution import ToolCall
@@ -31,6 +32,7 @@ class ToolDispatchAuthorizationRequest:
     turn_id: str
     assistant_entry_id: str
     permission_snapshot: FrozenRunPermissionSnapshot
+    workspace_root: Path
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +69,7 @@ class DefaultToolDispatchAuthorizationPolicy:
         gate = PolicyPermissionGate(
             preset_to_policy(request.permission_snapshot.effective_mode),
             AllowAllPermissionGate(),
+            workspace_root=request.workspace_root,
         )
         try:
             decision = await asyncio.wait_for(

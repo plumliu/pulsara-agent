@@ -72,6 +72,16 @@ _MEMORY_TAXONOMY_HARD_CUT_RETIRED_PYTEST_NODES = {
         "test_host_workspace_transient_resolution_uses_user_scope_only"
     ),
 }
+_PERMISSION_HOST_SCOPE_HARD_CUT_RETIRED_PYTEST_NODES = {
+    (
+        "tests/test_round2_terminal_output.py::"
+        "test_round2_cwd_fallback_outside_rejection_and_probe_cleanup"
+    ),
+    (
+        "tests/test_round3_structured_model_input_compiler.py::"
+        "test_round3_runtime_path_is_fixed_escaped_and_cannot_leave_workspace"
+    ),
+}
 _ASYNC_SUBAGENT_COMPLETION_ADDED_OBSERVED_IMPORTS = {
     "AcceptedSubagentCompletion",
     "SubagentCompletionDisposition",
@@ -902,6 +912,7 @@ def test_repository_modularization_preserves_every_existing_pytest_node() -> Non
         | _ROUND5B_DURABLE_JOB_SUBTRACTION_RETIRED_PYTEST_NODES
         | _ASYNC_SUBAGENT_COMPLETION_RETIRED_PYTEST_NODES
         | _MEMORY_TAXONOMY_HARD_CUT_RETIRED_PYTEST_NODES
+        | _PERMISSION_HOST_SCOPE_HARD_CUT_RETIRED_PYTEST_NODES
     )
     assert (
         "tests/test_stage2_architecture.py::"

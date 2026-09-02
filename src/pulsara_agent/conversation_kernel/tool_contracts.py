@@ -129,6 +129,7 @@ class KernelToolInvocationContext:
     effective_permission_mode: PermissionMode
     attempt_permission_snapshot_fingerprint: str
     surface_borrow: ProcessLocalToolSurfaceBorrow = field(repr=False, compare=False)
+    permission_confirmation_granted: bool = False
     subagent_parent_context_subject: FrozenSubagentParentContextCallSubject | None = (
         field(default=None, repr=False)
     )
@@ -160,6 +161,8 @@ class KernelToolInvocationContext:
             raise ValueError("kernel tool invocation context is incomplete")
         if self.conversation_scope_kind not in {"ROOT", "SUBAGENT_TASK"}:
             raise ValueError("kernel tool invocation scope is invalid")
+        if not isinstance(self.permission_confirmation_granted, bool):
+            raise TypeError("kernel tool permission confirmation must be frozen")
         if (self.conversation_scope_kind == "ROOT") != (
             self.scope_subagent_task_id is None
         ):

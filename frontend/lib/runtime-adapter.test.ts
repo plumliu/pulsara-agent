@@ -635,6 +635,8 @@ describe('selectPromptCommand', () => {
     expect(denied?.traces?.[0]).toMatchObject({ status: 'failed', subtitle: '已拒绝' });
     expect(userDenied?.traces?.[0]).toMatchObject({
       toolName: 'terminal', command: 'printf "visible command"',
+      argumentsJson: JSON.stringify({ command: 'printf "visible command"' }),
+      resultText: 'tool execution denied by user',
       status: 'failed', subtitle: '已拒绝', meta: '操作未完成',
     });
     expect(artifactRead?.traces?.[0]).toMatchObject({
@@ -660,6 +662,53 @@ describe('selectPromptCommand', () => {
     });
     expect(projected.isRunning).toBe(false);
     expect(JSON.stringify(create?.subagentRuns)).not.toContain('stale live text');
+  });
+
+  it('keeps exact MCP meta-tool arguments and results for structured UI projection', async () => {
+    const argumentsJson = JSON.stringify({ server_id: 'firecrawl' });
+    const resultText = JSON.stringify({
+      total_server_count: 1,
+      servers: [{ server_id: 'firecrawl', public_status: 'READY', tool_count: 3 }],
+    });
+    const content = (value: string) => ({ kind: 'INLINE', inline_content: btoa(value) });
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      connection_id: 'connection-1', connection_generation: 1,
+      session_id: 'session-1', role: 'controller',
+      live_hello: { live_owner_epoch: '1', live_revision: '0', live_snapshot: {} },
+      snapshot: {
+        snapshot: {
+          session_id: 'session-1', writer_generation: '1', event_sequence_cut: '2',
+          entries: [{
+            entry_id: 'assistant-mcp-list', turn_id: 'turn-1', entry_sequence: '1',
+            entry_kind: 'ASSISTANT_TOOL_REQUEST', scope_kind: 'ROOT',
+            blocks: [{
+              block_id: 'block-mcp-list', block_kind: 'TOOL_CALL',
+              tool_call_id: 'call-mcp-list', tool_name: 'list_mcp_servers',
+              tool_arguments_preview: btoa(argumentsJson),
+            }],
+          }, {
+            entry_id: 'result-mcp-list', turn_id: 'turn-1', entry_sequence: '2',
+            entry_kind: 'TOOL_RESULT', scope_kind: 'ROOT', content: content(resultText),
+          }],
+          control: {
+            tool_attempts: [{
+              assistant_entry_id: 'assistant-mcp-list', tool_call_id: 'call-mcp-list',
+              result_entry_id: 'result-mcp-list', result_state: 'SUCCESS',
+            }],
+          },
+        },
+      },
+      live_control_snapshot: { snapshot: {} },
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+
+    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+    expect(connection.current().messages[0]?.traces?.[0]).toMatchObject({
+      toolName: 'list_mcp_servers',
+      title: '浏览 MCP 服务',
+      argumentsJson,
+      resultText,
+      status: 'completed',
+    });
   });
 
   it('ignores a stale child live draft after the task leaves active control', async () => {

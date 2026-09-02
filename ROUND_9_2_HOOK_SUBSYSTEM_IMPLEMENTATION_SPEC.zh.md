@@ -559,7 +559,7 @@ Reload：
 
 Missing config是完整empty replacement，会撤销future handlers。Malformed/unreadable/raced source在新view中为UNAVAILABLE并撤销该source future runnable handlers；不得为了“可用性”继续执行current filesystem已经无法证明的old external command。Other complete source继续运行。
 
-这条publication mutex是dispatcher future view的唯一writer。Round 9.3 `reload_plugins`与`reload_hooks`排队进入同一mutex；二者不能假设操作disjoint slices。所有filesystem/package scan与candidate build都在mutex和Host lock之外；每个writer只在commit lane读取publication-time current predecessor，保留未重建的exact slices并完整替换自己负责的source values。Local reload若发现predecessor变化便在同一deadline重建；Plugin writer把already-complete Plugin slice与lock内current local slice合并。Host close/scope replacement导致验证失败时discard unpublished candidate。不得为此引入retry generation、registry seal、view fingerprint或全局Hook transaction。
+这条publication mutex是dispatcher future view的唯一writer。Round 9.3 `reload_capabilities`与`reload_hooks`排队进入同一mutex；二者不能假设操作disjoint slices。所有filesystem/package scan与candidate build都在mutex和Host lock之外；每个writer只在commit lane读取publication-time current predecessor，保留未重建的exact slices并完整替换自己负责的source values。Local reload若发现predecessor变化便在同一deadline重建；Plugin writer把already-complete Plugin slice与lock内current local slice合并。Host close/scope replacement导致验证失败时discard unpublished candidate。不得为此引入retry generation、registry seal、view fingerprint或全局Hook transaction。
 
 Host close只有一条顺序，不能把ordinary Hook lane提前fence：
 

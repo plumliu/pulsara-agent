@@ -587,7 +587,7 @@ class KernelHostSession:
             user_home_resolution=user_home_resolution,
         )
         self._tools.bind_interaction_port(self._interactions)
-        self._tools.bind_hook_reload_port(self)
+        self._tools.bind_capability_reload_port(self)
         self._subagents = KernelSubagentManager(
             repository=repository,
             guard=self._lease.guard,
@@ -732,7 +732,7 @@ class KernelHostSession:
         self._external_new_turn_settled.set()
         self._command_failures: dict[str, KernelCommandOutcome] = {}
         self._lock = asyncio.Lock()
-        self._plugin_reload_settlement_lock = asyncio.Lock()
+        self._capability_reload_settlement_lock = asyncio.Lock()
         self._project_capability_refresh_requested_revision = 0
         self._project_capability_refresh_applied_revision = 0
         self._project_capability_refresh_attention: str | None = None
@@ -905,7 +905,7 @@ class KernelHostSession:
             raise RuntimeError("Hook reload result lost its JSON object shape")
         return safe
 
-    async def reload_plugins(
+    async def reload_capabilities(
         self, *, deadline_monotonic: float | None
     ) -> dict[str, object]:
         """Reload local MCP and Plugin sources without rebasing provider input."""
@@ -917,12 +917,12 @@ class KernelHostSession:
             else deadline_monotonic
         )
         # Scans/builds below never hold the Hook publication or Host lock.  The
-        # settlement mutex only prevents a later Plugin reload's native MCP cut
+        # settlement mutex only prevents a later Capability reload's native MCP cut
         # from overtaking an earlier Hook/Skill publication.
         await _acquire_lock_before_deadline(
-            self._plugin_reload_settlement_lock,
+            self._capability_reload_settlement_lock,
             deadline,
-            "Plugin reload settlement deadline expired",
+            "Capability reload settlement deadline expired",
         )
         try:
             local_mcp_configs = await asyncio.to_thread(
@@ -936,12 +936,12 @@ class KernelHostSession:
             predecessor_local_mcp_configs = self._local_mcp_configs
             self._local_mcp_configs = local_mcp_configs
             try:
-                return await self._reload_plugins_serialized(deadline)
+                return await self._reload_capabilities_serialized(deadline)
             except BaseException:
                 self._local_mcp_configs = predecessor_local_mcp_configs
                 raise
         finally:
-            self._plugin_reload_settlement_lock.release()
+            self._capability_reload_settlement_lock.release()
 
     async def request_project_capability_refresh(self) -> int:
         """Mark this live Session to adopt its directory config next turn."""
@@ -973,7 +973,7 @@ class KernelHostSession:
                 return True
         attention: str | None = None
         try:
-            outcome = await self.reload_plugins(deadline_monotonic=None)
+            outcome = await self.reload_capabilities(deadline_monotonic=None)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -989,7 +989,7 @@ class KernelHostSession:
             self._project_capability_refresh_attention = attention
         return True
 
-    async def _reload_plugins_serialized(self, deadline: float) -> dict[str, object]:
+    async def _reload_capabilities_serialized(self, deadline: float) -> dict[str, object]:
         predecessor = self._plugin_view
         replacement = await _shielded_plugin_filesystem_call(
             self._plugin_view_owner.observe,
@@ -1003,7 +1003,7 @@ class KernelHostSession:
         )
         try:
             _raise_if_deadline_expired(
-                deadline, "Plugin reload candidate deadline expired"
+                deadline, "Capability reload candidate deadline expired"
             )
             skill_definitions = self._plugin_skill_producer.observe(replacement)
             plugin_only_hooks = compose_hook_definition_view(
@@ -1016,7 +1016,7 @@ class KernelHostSession:
                 view=replacement,
             )
             _raise_if_deadline_expired(
-                deadline, "Plugin reload composition deadline expired"
+                deadline, "Capability reload composition deadline expired"
             )
         except BaseException:
             replacement.close()
@@ -1026,11 +1026,11 @@ class KernelHostSession:
             await _acquire_lock_before_deadline(
                 self._lock,
                 deadline,
-                "Plugin reload Host publication deadline expired",
+                "Capability reload Host publication deadline expired",
             )
             try:
                 _raise_if_deadline_expired(
-                    deadline, "Plugin reload Host publication deadline expired"
+                    deadline, "Capability reload Host publication deadline expired"
                 )
                 if (
                     self._closing
@@ -1127,7 +1127,7 @@ class KernelHostSession:
         }
         safe = HookSecretScrubSet.capture().scrub_json(result)
         if not isinstance(safe, dict):
-            raise RuntimeError("Plugin reload result lost its JSON object shape")
+            raise RuntimeError("Capability reload result lost its JSON object shape")
         return safe
 
     def reconnect_mcp_server(self, server_id: str) -> None:

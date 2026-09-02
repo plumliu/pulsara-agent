@@ -23,6 +23,11 @@ class TerminalIOMode(StrEnum):
     PTY = "pty"
 
 
+class TerminalCwdScope(StrEnum):
+    WORKSPACE = "workspace"
+    HOST_LOCAL = "host_local"
+
+
 class TerminalStatus(StrEnum):
     RUNNING = "running"
     SUCCESS = "success"

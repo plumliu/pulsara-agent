@@ -80,6 +80,7 @@ from pulsara_agent.ports.tool_registry import (
 )
 from pulsara_agent.hooks.executor import HookSecretScrubSet
 from pulsara_agent.terminal_process import (
+    TerminalCwdScope,
     TerminalProcessInfo,
     TerminalProcessOrigin,
     TerminalRequest,
@@ -99,6 +100,7 @@ from pulsara_agent.tools.builtins.filesystem import (
     SearchFilesTool,
     WriteFileTool,
 )
+from pulsara_agent.tools.builtins.workspace import WritePathScope
 from pulsara_agent.tools.builtins.todo import (
     TodoTool,
     TodoValidationError,
@@ -397,12 +399,12 @@ class KernelToolInteractionPort(Protocol):
     ) -> None: ...
 
 
-class KernelHookReloadPort(Protocol):
+class KernelCapabilityReloadPort(Protocol):
     async def reload_hooks(
         self, *, deadline_monotonic: float | None
     ) -> Mapping[str, object]: ...
 
-    async def reload_plugins(
+    async def reload_capabilities(
         self, *, deadline_monotonic: float | None
     ) -> Mapping[str, object]: ...
 
@@ -421,6 +423,7 @@ class _DirectTerminalTool:
         origin: TerminalProcessOrigin,
         decision_attempt_id: str,
         decision_deadline_monotonic: float,
+        effective_permission_mode: PermissionMode,
     ) -> ToolExecutionResult:
         request = parse_terminal_input(call.arguments)
         session_id = request.terminal_session_id
@@ -446,6 +449,11 @@ class _DirectTerminalTool:
             origin=origin,
             decision_attempt_id=decision_attempt_id,
             decision_deadline_monotonic=decision_deadline_monotonic,
+            cwd_scope=(
+                TerminalCwdScope.WORKSPACE
+                if effective_permission_mode is PermissionMode.READ_ONLY
+                else TerminalCwdScope.HOST_LOCAL
+            ),
         )
         return _terminal_execution_result(call, result)
 
@@ -566,7 +574,7 @@ class _DirectPlanControlTool:
 
 
 @dataclass(slots=True)
-class _DirectHookControlTool:
+class _DirectCapabilityControlTool:
     name: str
 
     def execute(self, call: ToolCall) -> ToolExecutionResult:
@@ -632,6 +640,7 @@ class DirectKernelToolPort:
         )
         self._host_owner_id = host_owner_id
         self._session_id = session_id
+        self._workspace_root = root
         self._live_bus = live_bus
         self._physical_io = KernelSessionIO()
         self._deadlines = deadline_factory or KernelExecutionDeadlineFactory()
@@ -675,8 +684,8 @@ class DirectKernelToolPort:
             _DirectPlanControlTool("enter_plan"),
             _DirectPlanControlTool("ask_plan_question"),
             _DirectPlanControlTool("exit_plan"),
-            _DirectHookControlTool("reload_hooks"),
-            _DirectHookControlTool("reload_plugins"),
+            _DirectCapabilityControlTool("reload_hooks"),
+            _DirectCapabilityControlTool("reload_capabilities"),
             _DirectMcpCatalogTool("list_mcp_servers"),
             _DirectMcpCatalogTool("inspect_new_mcp_tool"),
             _DirectMcpCatalogTool("use_new_mcp_tool"),
@@ -725,7 +734,7 @@ class DirectKernelToolPort:
         self._subagent: KernelSubagentToolPort | None = None
         self._memory: KernelMemoryToolPort | None = None
         self._interaction: KernelToolInteractionPort | None = None
-        self._hook_reload: KernelHookReloadPort | None = None
+        self._capability_reload: KernelCapabilityReloadPort | None = None
         self._mcp_supervisor: McpHostSupervisor | None = None
         self._mcp_current: McpInstalledRuntimeGeneration | None = None
         self._mcp_runtime_by_surface_generation: dict[
@@ -767,12 +776,12 @@ class DirectKernelToolPort:
                 raise RuntimeError("interaction tool port is already bound")
             self._interaction = port
 
-    def bind_hook_reload_port(self, port: KernelHookReloadPort) -> None:
+    def bind_capability_reload_port(self, port: KernelCapabilityReloadPort) -> None:
         with self._surface_lock:
             self._require_builtin_composition_preparing_locked()
-            if self._hook_reload is not None:
-                raise RuntimeError("Hook reload port is already bound")
-            self._hook_reload = port
+            if self._capability_reload is not None:
+                raise RuntimeError("Capability reload port is already bound")
+            self._capability_reload = port
 
     def bind_mcp_supervisor(self, supervisor: McpHostSupervisor) -> None:
         with self._surface_lock:
@@ -801,7 +810,7 @@ class DirectKernelToolPort:
                     self._subagent,
                     self._memory,
                     self._mcp_supervisor,
-                    self._hook_reload,
+                    self._capability_reload,
                 )
             ):
                 raise RuntimeError("builtin composition required ports are incomplete")
@@ -837,7 +846,7 @@ class DirectKernelToolPort:
                         "ask_plan_question",
                         "exit_plan",
                         "reload_hooks",
-                        "reload_plugins",
+                        "reload_capabilities",
                         "spawn_agent",
                         "create_agent_tasks",
                         "list_agents",
@@ -1638,7 +1647,7 @@ class DirectKernelToolPort:
                 f"descriptor:{entry.descriptor.id}",
                 f"invalid tool arguments: {exc.message}",
             )
-        if tool_name in {"reload_hooks", "reload_plugins"}:
+        if tool_name in {"reload_hooks", "reload_capabilities"}:
             access = surface_borrow.prepared.access
             if (
                 access.conversation_scope_kind is not ModelInputScopeKind.ROOT
@@ -1732,6 +1741,7 @@ class DirectKernelToolPort:
                 turn_id=turn_id,
                 assistant_entry_id=assistant_entry_id,
                 permission_snapshot=permission_snapshot,
+                workspace_root=self._workspace_root,
             )
         )
         if decision.kind is ToolDispatchDecisionKind.REQUIRE_CONFIRMATION:
@@ -2475,9 +2485,9 @@ class DirectKernelToolPort:
         invocation_started = monotonic()
         observation_origin = tool_observation_origin_for_binding(binding)
         if tool_name == "reload_hooks":
-            if self._hook_reload is None:
+            if self._capability_reload is None:
                 raise RuntimeError("Hook reload port is unavailable")
-            values = await self._hook_reload.reload_hooks(
+            values = await self._capability_reload.reload_hooks(
                 deadline_monotonic=self._deadlines.deadline(
                     KernelWatchdogOwner.NONTERMINAL_TOOL_INVOCATION
                 )
@@ -2499,17 +2509,17 @@ class DirectKernelToolPort:
                     invocation_started, observation_origin
                 ),
             )
-        if tool_name == "reload_plugins":
-            if self._hook_reload is None:
-                raise RuntimeError("Plugin reload port is unavailable")
-            values = await self._hook_reload.reload_plugins(
+        if tool_name == "reload_capabilities":
+            if self._capability_reload is None:
+                raise RuntimeError("Capability reload port is unavailable")
+            values = await self._capability_reload.reload_capabilities(
                 deadline_monotonic=self._deadlines.deadline(
                     KernelWatchdogOwner.NONTERMINAL_TOOL_INVOCATION
                 )
             )
             safe_values = HookSecretScrubSet.capture().scrub_json(dict(values))
             if not isinstance(safe_values, dict):
-                raise RuntimeError("Plugin reload result lost its JSON object shape")
+                raise RuntimeError("Capability reload result lost its JSON object shape")
             content = json.dumps(
                 safe_values,
                 ensure_ascii=False,
@@ -2892,6 +2902,7 @@ class DirectKernelToolPort:
                 live_sink,
                 origin,
                 attempt_id,
+                invocation_context.effective_permission_mode,
                 deadline_monotonic=self._deadlines.deadline(owner),
                 on_caller_cancelled=(
                     lambda: tool.manager.process_registry.abort_foreground_decision(
@@ -2906,6 +2917,8 @@ class DirectKernelToolPort:
                 _execute_tool_call,
                 tool,
                 call,
+                invocation_context.effective_permission_mode,
+                invocation_context.permission_confirmation_granted,
                 deadline_monotonic=self._deadlines.deadline(
                     KernelWatchdogOwner.NONTERMINAL_TOOL_INVOCATION
                 ),
@@ -3466,6 +3479,8 @@ async def _await_mcp_operation(
 def _execute_tool_call(
     tool: Tool,
     call: ToolCall,
+    effective_permission_mode: PermissionMode,
+    permission_confirmation_granted: bool,
     *,
     deadline_monotonic: float,
 ) -> ToolExecutionResult:
@@ -3473,6 +3488,14 @@ def _execute_tool_call(
     # the physical thread and makes a close timeout explicit; adapters with
     # their own timeouts continue to enforce them inside execute().
     del deadline_monotonic
+    if isinstance(tool, (EditFileTool, WriteFileTool)):
+        write_scope = (
+            WritePathScope.HOST_LOCAL
+            if effective_permission_mode is PermissionMode.BYPASS_PERMISSIONS
+            or permission_confirmation_granted
+            else WritePathScope.WORKSPACE
+        )
+        return tool.execute(call, write_scope=write_scope)
     return tool.execute(call)
 
 
@@ -3494,6 +3517,7 @@ def _execute_terminal_tool_call(
     live_sink: KernelToolLiveSink | None,
     origin: TerminalProcessOrigin,
     decision_attempt_id: str,
+    effective_permission_mode: PermissionMode,
     *,
     deadline_monotonic: float,
 ) -> ToolExecutionResult:
@@ -3504,6 +3528,7 @@ def _execute_terminal_tool_call(
             origin=origin,
             decision_attempt_id=decision_attempt_id,
             decision_deadline_monotonic=deadline_monotonic,
+            effective_permission_mode=effective_permission_mode,
         )
     return tool.execute(call, live_sink=live_sink)
 

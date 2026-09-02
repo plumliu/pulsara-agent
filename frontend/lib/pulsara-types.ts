@@ -284,6 +284,8 @@ export interface ToolTrace {
   subtitle: string;
   status: TaskStatus;
   duration?: string;
+  argumentsJson?: string;
+  resultText?: string;
   command?: string;
   output?: string[];
   meta?: string;

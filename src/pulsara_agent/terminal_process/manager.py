@@ -18,6 +18,7 @@ from uuid import uuid4
 
 from pulsara_agent.terminal_process.environment import TerminalEnvironmentOwner
 from pulsara_agent.terminal_process.models import (
+    TerminalCwdScope,
     TerminalIOMode,
     TerminalPhysicalState,
     TerminalProcessInfo,
@@ -1067,17 +1068,33 @@ class TerminalSession:
         origin: TerminalProcessOrigin | None = None,
         decision_attempt_id: str | None = None,
         decision_deadline_monotonic: float | None = None,
+        cwd_scope: TerminalCwdScope = TerminalCwdScope.WORKSPACE,
     ) -> TerminalResult:
         with self.state_lock:
             current = _nearest_existing_cwd(
                 self.state.current_cwd, self.state.workspace_root
             )
-        cwd = _resolve_workdir(
-            request.workdir, current=current, workspace=self.state.workspace_root
-        )
-        environment = self.environment.build(cwd=cwd)
-        probe = _new_cwd_probe(self.state.workspace_root)
-        command = _command_with_cwd_probe(request.command, probe)
+        probe: Path | None = None
+        try:
+            cwd = _resolve_workdir(
+                request.workdir,
+                current=current,
+                workspace=self.state.workspace_root,
+                scope=cwd_scope,
+            )
+            environment = self.environment.build(cwd=cwd)
+            probe = _new_cwd_probe(self.state.workspace_root)
+            command = _command_with_cwd_probe(request.command, probe)
+        except Exception as exc:
+            if probe is not None:
+                probe.unlink(missing_ok=True)
+            return TerminalResult(
+                status=TerminalStatus.ERROR,
+                output="",
+                exit_code=-1,
+                cwd=str(current),
+                error=(f"terminal preflight failed ({type(exc).__name__}): {exc}"),
+            )
         effective_decision_attempt_id = (
             decision_attempt_id or f"terminal-decision:{uuid4().hex}"
         )
@@ -1123,13 +1140,14 @@ class TerminalSession:
         result = _snapshot(process, request.max_output_chars)
         if not yielded and final_cwd is not None:
             candidate = Path(final_cwd)
-            if (
-                candidate == self.state.workspace_root
-                or self.state.workspace_root in candidate.parents
+            inside_workspace = candidate == self.state.workspace_root or (
+                self.state.workspace_root in candidate.parents
+            )
+            if candidate.is_dir() and (
+                cwd_scope is TerminalCwdScope.HOST_LOCAL or inside_workspace
             ):
-                if candidate.is_dir():
-                    with self.state_lock:
-                        self.state.current_cwd = candidate
+                with self.state_lock:
+                    self.state.current_cwd = candidate
         with self.state_lock:
             visible_cwd = self.state.current_cwd if not yielded else cwd
         try:
@@ -1529,13 +1547,23 @@ def _snapshot(
     )
 
 
-def _resolve_workdir(raw: str | None, *, current: Path, workspace: Path) -> Path:
+def _resolve_workdir(
+    raw: str | None,
+    *,
+    current: Path,
+    workspace: Path,
+    scope: TerminalCwdScope,
+) -> Path:
     candidate = current if not raw else Path(raw).expanduser()
     if not candidate.is_absolute():
         candidate = current / candidate
     resolved = candidate.resolve()
-    if resolved != workspace and workspace not in resolved.parents:
+    if scope is TerminalCwdScope.WORKSPACE and (
+        resolved != workspace and workspace not in resolved.parents
+    ):
         raise ValueError("terminal workdir must remain inside workspace")
+    if scope not in {TerminalCwdScope.WORKSPACE, TerminalCwdScope.HOST_LOCAL}:
+        raise ValueError("terminal workdir scope is invalid")
     if not resolved.is_dir():
         raise ValueError("terminal workdir does not exist")
     return resolved

@@ -20,7 +20,10 @@ from pulsara_agent.ports.tool_execution import ToolOutputSourceCoverageReason
 from pulsara_agent.terminal_process.manager import ProcessRegistry
 from pulsara_agent.terminal_process.manager import TerminalSessionManager
 import pulsara_agent.terminal_process.manager as terminal_manager_module
-from pulsara_agent.terminal_process.models import TerminalPhysicalState
+from pulsara_agent.terminal_process.models import (
+    TerminalCwdScope,
+    TerminalPhysicalState,
+)
 from pulsara_agent.terminal_process.output import (
     IncrementalTerminalSanitizer,
     TerminalOutputOwner,
@@ -864,7 +867,7 @@ def test_round2_host_close_invalidates_process_and_cursor(tmp_path: Path) -> Non
         )
 
 
-def test_round2_cwd_fallback_outside_rejection_and_probe_cleanup(
+def test_round2_cwd_fallback_preflight_result_host_scope_and_probe_cleanup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     workspace = tmp_path / "workspace"
@@ -885,13 +888,29 @@ def test_round2_cwd_fallback_outside_rejection_and_probe_cleanup(
     )
     assert result.status.value == "success"
     assert str(workspace / "a") in result.output
-    with pytest.raises(ValueError, match="inside workspace"):
-        session.execute(
-            terminal_manager_module.TerminalRequest(
-                command="pwd", workdir=str(tmp_path), yield_time_ms=2_000
-            ),
-            decision_deadline_monotonic=monotonic() + 5,
-        )
+    rejected = session.execute(
+        terminal_manager_module.TerminalRequest(
+            command="pwd", workdir=str(tmp_path), yield_time_ms=2_000
+        ),
+        decision_deadline_monotonic=monotonic() + 5,
+    )
+    assert rejected.status.value == "error"
+    assert rejected.exit_code == -1
+    assert rejected.error is not None
+    assert "terminal preflight failed (ValueError)" in rejected.error
+    assert "inside workspace" in rejected.error
+    assert manager.live_process_count(owner_host_session_id=owner) == 0
+
+    allowed = session.execute(
+        terminal_manager_module.TerminalRequest(
+            command="pwd", workdir=str(tmp_path), yield_time_ms=2_000
+        ),
+        decision_deadline_monotonic=monotonic() + 5,
+        cwd_scope=TerminalCwdScope.HOST_LOCAL,
+    )
+    assert allowed.status.value == "success"
+    assert allowed.cwd == str(tmp_path)
+    assert str(tmp_path) in allowed.output
 
     original_spawn = manager.process_registry._spawn  # noqa: SLF001
 
@@ -901,7 +920,9 @@ def test_round2_cwd_fallback_outside_rejection_and_probe_cleanup(
     monkeypatch.setattr(manager.process_registry, "_spawn", fail_spawn)
     with pytest.raises(OSError, match="spawn failure"):
         session.execute(
-            terminal_manager_module.TerminalRequest(command="true", yield_time_ms=1),
+            terminal_manager_module.TerminalRequest(
+                command="true", workdir=str(workspace), yield_time_ms=1
+            ),
             decision_deadline_monotonic=monotonic() + 5,
         )
     monkeypatch.setattr(manager.process_registry, "_spawn", original_spawn)

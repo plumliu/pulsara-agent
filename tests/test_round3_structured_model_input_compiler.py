@@ -3136,7 +3136,7 @@ def test_round3_large_catalog_renderer_never_inverts_declared_variants(
     )
 
 
-def test_round3_runtime_path_is_fixed_escaped_and_cannot_leave_workspace(
+def test_round3_runtime_path_is_fixed_escaped_and_can_leave_workspace(
     tmp_path: Path,
 ) -> None:
     inside = tmp_path / "目录 with space\nand-newline"
@@ -3178,15 +3178,22 @@ def test_round3_runtime_path_is_fixed_escaped_and_cannot_leave_workspace(
     assert "\\n" in environment
     assert str(inside).split("\n", 1)[0] in environment
 
-    terminal.value = tmp_path.parent
-    with pytest.raises(ValueError, match="outside"):
-        _collect_context_sources(
-            collector,
-            activation_subject=CapabilityActivationSubjectKind.ROOT_HUMAN_PROMPT,
-            activation_text="hello",
-            tool_surface=surface,
-            canonical_facts=_canonical_facts(),
-        )
+    outside = tmp_path.parent.resolve()
+    terminal.value = outside
+    collected = _collect_context_sources(
+        collector,
+        activation_subject=CapabilityActivationSubjectKind.ROOT_HUMAN_PROMPT,
+        activation_text="hello",
+        tool_surface=surface,
+        canonical_facts=_canonical_facts(),
+    )
+    environment = next(
+        candidate
+        for candidate in collected.candidates
+        if candidate.source_kind is ContextSourceKind.RUNTIME_ENVIRONMENT
+    ).variants[0].text
+    assert json.dumps(str(outside), ensure_ascii=False) in environment
+    assert json.dumps(str(tmp_path.resolve()), ensure_ascii=False) in environment
 
 
 def test_round3_runtime_source_tracks_foreground_cwd_but_not_yielded_cwd(

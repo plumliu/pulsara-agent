@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import suppress
 from dataclasses import dataclass
+from datetime import date
 import ipaddress
 import os
 from pathlib import Path
@@ -17,6 +18,10 @@ import anyio
 import httpx
 from mcp import ClientSession
 import mcp_types as types
+from mcp_types.version import (
+    HANDSHAKE_PROTOCOL_VERSIONS,
+    LATEST_MODERN_VERSION,
+)
 from mcp.shared.exceptions import MCPError
 from mcp.shared.message import SessionMessage
 
@@ -113,6 +118,84 @@ class McpTransportOperationError(RuntimeError):
         )
 
 
+def _has_legacy_discovery_fallback_evidence(message: str) -> bool:
+    """Recognize an HTTP pre-validation rejection that proves a legacy era."""
+
+    if message == "Bad Request: No valid session ID provided":
+        return True
+    prefixes = (
+        "Bad Request: Unsupported protocol version: "
+        f"{LATEST_MODERN_VERSION} (supported versions: ",
+        "Bad Request: Unsupported protocol version (supported versions: ",
+    )
+    supported: str | None = None
+    for prefix in prefixes:
+        if message.startswith(prefix) and message.endswith(")"):
+            supported = message[len(prefix) : -1]
+            break
+    if supported is None:
+        return False
+    versions = tuple(item.strip() for item in supported.split(","))
+    if not versions or not all(versions):
+        return False
+    if not any(item in HANDSHAKE_PROTOCOL_VERSIONS for item in versions):
+        return False
+    if not all(
+        len(item) == 10
+        and item[4] == "-"
+        and item[7] == "-"
+        and (item[:4] + item[5:7] + item[8:]).isdigit()
+        for item in versions
+    ):
+        return False
+    try:
+        parsed_versions = tuple(date.fromisoformat(item) for item in versions)
+        modern_version = date.fromisoformat(LATEST_MODERN_VERSION)
+    except ValueError:
+        return False
+    return all(item < modern_version for item in parsed_versions)
+
+
+def _normalize_legacy_discovery_http_error(
+    raw: object,
+    *,
+    request: dict[str, object],
+    response_status: int,
+    has_session_id: bool,
+) -> object:
+    """Correlate a proved legacy-only HTTP rejection with its discovery request."""
+
+    request_id = request.get("id")
+    if (
+        response_status != 400
+        or has_session_id
+        or request.get("method") != "server/discover"
+        or not isinstance(request_id, str | int)
+        or isinstance(request_id, bool)
+        or not isinstance(raw, dict)
+        or raw.get("id") is not None
+    ):
+        return raw
+    error = raw.get("error")
+    if not isinstance(error, dict):
+        return raw
+    message = error.get("message")
+    if (
+        error.get("code") != -32000
+        or not isinstance(message, str)
+        or not _has_legacy_discovery_fallback_evidence(message)
+    ):
+        return raw
+    return {
+        **raw,
+        "id": request_id,
+        "error": {
+            **error,
+            "code": types.METHOD_NOT_FOUND,
+        },
+    }
+
+
 class _BoundedTransport:
     def __init__(self, bounds: McpWireBounds) -> None:
         self.bounds = bounds
@@ -136,13 +219,30 @@ class _BoundedTransport:
     def _decode(
         self, data: bytes | bytearray, *, maximum_bytes: int
     ) -> SessionMessage:
+        return self._decode_parsed(
+            self._parse(data, maximum_bytes=maximum_bytes)
+        )
+
+    def _parse(self, data: bytes | bytearray, *, maximum_bytes: int) -> object:
         try:
-            raw = bounded_json_loads(
+            return bounded_json_loads(
                 data,
                 maximum_bytes=maximum_bytes,
                 maximum_nodes=self.bounds.maximum_wire_json_nodes,
                 maximum_depth=self.bounds.maximum_wire_json_depth,
             )
+        except McpProtocolConformanceError:
+            raise
+        except BaseException as exc:
+            # A peer frame is already physically present.  Malformed JSON,
+            # shape overflow and SDK carrier validation are therefore exact
+            # protocol failures, never evidence of an unknown remote effect.
+            raise McpProtocolConformanceError(
+                "MCP_RESPONSE_CARRIER_INVALID"
+            ) from exc
+
+    def _decode_parsed(self, raw: object) -> SessionMessage:
+        try:
             present, value = result_type_presence(raw)
             self.last_result_presence = McpWireResultPresence(present, value)
             if (
@@ -160,16 +260,15 @@ class _BoundedTransport:
                         "MCP_RESULT_TYPE_CONFORMANCE_FAILED"
                     )
             message = types.jsonrpc_message_adapter.validate_python(raw)
+            return SessionMessage(message)
         except McpProtocolConformanceError:
             raise
         except BaseException as exc:
-            # A peer frame is already physically present.  Malformed JSON,
-            # shape overflow and SDK carrier validation are therefore exact
-            # protocol failures, never evidence of an unknown remote effect.
+            if isinstance(exc, asyncio.CancelledError):
+                raise
             raise McpProtocolConformanceError(
                 "MCP_RESPONSE_CARRIER_INVALID"
             ) from exc
-        return SessionMessage(message)
 
     def _encode(self, value: SessionMessage) -> bytes:
         data = value.message.model_dump_json(
@@ -491,6 +590,11 @@ class _BoundedHttpTransport(_BoundedTransport):
         response_context = None
         response = None
         try:
+            request = message.message.model_dump(
+                by_alias=True,
+                mode="json",
+                exclude_none=True,
+            )
             final_headers = self._config.resolved_headers(headers)
 
             async def open_response() -> httpx.Response:
@@ -515,10 +619,19 @@ class _BoundedHttpTransport(_BoundedTransport):
             )
             assert response is not None and response_context is not None
             try:
+                response_session_id = response.headers.get("Mcp-Session-Id")
+                if response.status_code >= 400 and "application/json" in (
+                    response.headers.get("content-type", "").lower()
+                ):
+                    await self._consume_response(
+                        response,
+                        request=request,
+                        response_session_id=response_session_id,
+                    )
+                    return
                 response.raise_for_status()
-                session_id = response.headers.get("Mcp-Session-Id")
-                if session_id:
-                    self._session_id = session_id
+                if response_session_id:
+                    self._session_id = response_session_id
                     self._ensure_listener()
                 if response.status_code == 202:
                     return
@@ -584,7 +697,13 @@ class _BoundedHttpTransport(_BoundedTransport):
         except BaseException as exc:
             await self._offer_failure(exc, "MCP HTTP listener cancelled")
 
-    async def _consume_response(self, response: httpx.Response) -> None:
+    async def _consume_response(
+        self,
+        response: httpx.Response,
+        *,
+        request: dict[str, object] | None = None,
+        response_session_id: str | None = None,
+    ) -> None:
         content_type = response.headers.get("content-type", "").lower()
         if "text/event-stream" in content_type:
             await self._consume_sse(response)
@@ -595,12 +714,18 @@ class _BoundedHttpTransport(_BoundedTransport):
             budget=self._byte_budget,
         )
         try:
-            await self.read_writer.send(
-                self._decode(
-                    data,
-                    maximum_bytes=self.bounds.maximum_http_json_body_bytes,
-                )
+            raw = self._parse(
+                data,
+                maximum_bytes=self.bounds.maximum_http_json_body_bytes,
             )
+            if request is not None:
+                raw = _normalize_legacy_discovery_http_error(
+                    raw,
+                    request=request,
+                    response_status=response.status_code,
+                    has_session_id=response_session_id is not None,
+                )
+            await self.read_writer.send(self._decode_parsed(raw))
         finally:
             self._byte_budget.release(reserved)
 

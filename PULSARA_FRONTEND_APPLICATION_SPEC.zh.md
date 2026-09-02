@@ -140,6 +140,14 @@ command receipt 的 `PENDING` 不是成功。前端使用 `QueryCommandRequest` 
   重新选择，已冻结 turn snapshot 不被改写；active turn 的 steer 不重新解释权限；把子任务
   结果带入会话并继续同样会创建一轮新处理，因此复用此刻 composer 选择的本轮权限。菜单从
   上到下固定为“只读”“每次询问”“接受编辑”“完全访问”，新打开的应用默认选择“完全访问”；
+  每次普通发送或用子任务结果继续成功创建新 turn 后，composer 也必须立即重置为
+  “完全访问”，不继承刚刚送出的低权限选择；
+  四种模式共用同一 host-local 能力语义：“只读”可读取本机文本但禁止写入与 Terminal；
+  “每次询问”允许本机操作，但结构化写入、Terminal 与其他外部副作用逐次确认；
+  “接受编辑”直接允许 workspace 内结构化写入，workspace 外写入与 Terminal 仍逐次确认；
+  “完全访问”直接允许普通本机读写、Terminal 与网络访问，此时 workspace 只是相对路径和
+  初始工作目录，不是沙箱。操作系统权限、Plan 的 read-only overlay 与既有 hardline 灾难
+  底线不因 mode 改写；
   “完全访问”的当前选择与菜单项均使用红色文字和红色三角警告图标；
 - compaction 仅请求 safe-point operation；前端不得自行裁剪 canonical transcript。Kernel 在
   canonical FULL 前对 active/idle 使用同一 summary、candidate assembly、reclaim validator 与
@@ -155,6 +163,17 @@ command receipt 的 `PENDING` 不是成功。前端使用 `QueryCommandRequest` 
   TODO 清单继续作为消息上方的动态覆盖层，不得用大块永久留白为其预留最大尺寸；
 - tool trace 默认压缩，高价值 terminal/live output 可原位展开。同一工具组以及跨记录连续执行、
   中间没有正文、思考、用户输入或其他可见语义边界的工具，使用同一条连续轨道与紧凑等距间隔；
+- `reload_capabilities` 是刷新当前 Host 后续 Skill、MCP 与 Hook view 的唯一产品名；前端不得继续
+  显示已删除的 `reload_plugins` 名称。`list_mcp_servers` 展开后从其既有 canonical result 呈现
+  实际 MCP 服务、状态与工具数；带 server filter 时只呈现该服务的真实工具名。
+  `inspect_new_mcp_tool` 只展示模型检查的 exact server/tool；`use_new_mcp_tool` 仅通过前序 inspect
+  result 中的 exact `tool_ref` 做页面内关联，只展示最终调用的 server/tool。Provider 调用名、effect、
+  schema、参数清单、完整工具说明与原始调用参数属于执行细节，不直接倾倒给用户。前端不猜测 ref、
+  不新增 Kernel 字段，也不把 endpoint 可达冒充工具调用成功；
+- ordinary `read_file` 的 exact path 若与当前 effective Skill catalog 中某个 `SKILL.md` 的 canonical
+  path 或 catalog location 完全相同，tool trace 将“读取文件”改写为“正在使用 `<name>` Skill”。
+  这覆盖 workspace/user 的 `.pulsara/skills` 与 `.agents/skills` 四个 loose roots，也适用于当前
+  catalog 已证明的 bundled/Plugin Skill；仅凭文件名、父目录形状或模糊 suffix 不得伪造 Skill 使用；
   任一可见语义边界都必须断开轨道；
 - 超出 inline projection 的完整输出通过 `ReadContentRequest` / artifact path 分页读取。
 

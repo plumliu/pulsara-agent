@@ -5,11 +5,12 @@ import ast
 from dataclasses import fields
 from datetime import datetime, timezone
 import json
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import socket
 import subprocess
 import sys
-from threading import Event
+from threading import Event, Thread
 from time import monotonic, sleep
 from uuid import uuid4
 
@@ -61,6 +62,8 @@ from pulsara_agent.conversation_kernel.mcp.sdk_facade import (
     McpTransportOperationError,
     _SlotByteBudget,
     _enforce_http_network_policy,
+    _has_legacy_discovery_fallback_evidence,
+    _normalize_legacy_discovery_http_error,
 )
 from pulsara_agent.process_api_key_boundary import ProcessApiKeyBoundary
 from pulsara_agent.conversation_kernel.mcp.sdk_facade import _BoundedTransport
@@ -178,6 +181,95 @@ def _enabled_memory_context() -> FrozenModelCallMemoryContext:
 HTTP_FIXTURE = Path(__file__).parent / "fixtures" / "round6_mcp_http_server.py"
 
 
+class _LegacyOnlyHttpServer(ThreadingHTTPServer):
+    observed_methods: list[str]
+
+
+class _LegacyOnlyHttpHandler(BaseHTTPRequestHandler):
+    def log_message(self, _format: str, *_args: object) -> None:
+        return
+
+    def _send_json(self, status: int, payload: dict[str, object]) -> None:
+        body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self) -> None:  # noqa: N802 - stdlib handler contract
+        length = int(self.headers.get("Content-Length", "0"))
+        request = json.loads(self.rfile.read(length))
+        method = request.get("method")
+        assert isinstance(method, str)
+        server = self.server
+        assert isinstance(server, _LegacyOnlyHttpServer)
+        server.observed_methods.append(method)
+        request_id = request.get("id")
+        if method == "server/discover":
+            self._send_json(
+                400,
+                {
+                    "jsonrpc": "2.0",
+                    "id": None,
+                    "error": {
+                        "code": -32000,
+                        "message": (
+                            "Bad Request: Unsupported protocol version: 2026-07-28 "
+                            "(supported versions: 2025-11-25, 2025-06-18, "
+                            "2025-03-26, 2024-11-05, 2024-10-07)"
+                        ),
+                    },
+                },
+            )
+            return
+        if method == "notifications/initialized":
+            self.send_response(202)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        assert isinstance(request_id, str | int) and not isinstance(request_id, bool)
+        if method == "initialize":
+            result: dict[str, object] = {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {"tools": {"listChanged": False}},
+                "serverInfo": {
+                    "name": "legacy-only-http-fixture",
+                    "version": "1.0.0",
+                },
+                "instructions": "Legacy-only HTTP fixture.",
+            }
+        elif method == "tools/list":
+            result = {
+                "tools": [
+                    {
+                        "name": "legacy_http_echo",
+                        "description": "Return one input string.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {"text": {"type": "string"}},
+                            "required": ["text"],
+                            "additionalProperties": False,
+                        },
+                    }
+                ]
+            }
+        else:
+            self._send_json(
+                200,
+                {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "error": {"code": -32601, "message": "Method not found"},
+                },
+            )
+            return
+        self._send_json(
+            200,
+            {"jsonrpc": "2.0", "id": request_id, "result": result},
+        )
+
+
 class _RecordingHookDispatcher:
     def __init__(self) -> None:
         self.view = FrozenHookDefinitionView(())
@@ -225,8 +317,8 @@ def _seal_mcp_test_port(port: DirectKernelToolPort) -> None:
         port.bind_memory_port(  # type: ignore[arg-type]
             type("_EmptyMemoryPort", (), {"tool_names": ()})()
         )
-    if port._hook_reload is None:  # noqa: SLF001
-        port.bind_hook_reload_port(object())  # type: ignore[arg-type]
+    if port._capability_reload is None:  # noqa: SLF001
+        port.bind_capability_reload_port(object())  # type: ignore[arg-type]
     port.seal_builtin_composition()
 
 
@@ -346,6 +438,129 @@ def _config(
         encoding="utf-8",
     )
     return load_mcp_server_configs(user_config_path=config)[0]
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    (
+        ("Bad Request: No valid session ID provided", True),
+        (
+            "Bad Request: Unsupported protocol version: 2026-07-28 "
+            "(supported versions: 2025-11-25, 2025-06-18, 2025-03-26, "
+            "2024-11-05, 2024-10-07)",
+            True,
+        ),
+        (
+            "Bad Request: Unsupported protocol version: 2026-07-28 "
+            "(supported versions: 2026-07-28, 2025-11-25)",
+            False,
+        ),
+        (
+            "Bad Request: Unsupported protocol version: 2026-07-28 "
+            "(supported versions: 2025-99-99, 2024-10-07)",
+            False,
+        ),
+        (
+            "Bad Request: Unsupported protocol version: 2026-07-28 "
+            "(supported versions: 20251125, 2024-10-07)",
+            False,
+        ),
+        (
+            "Bad Request: Unsupported protocol version: 2026-07-28 "
+            "(supported versions: 2024-10-07)",
+            False,
+        ),
+        ("Bad Request: arbitrary peer failure", False),
+    ),
+)
+def test_round6_legacy_discovery_fallback_requires_exact_protocol_evidence(
+    message: str,
+    expected: bool,
+) -> None:
+    assert _has_legacy_discovery_fallback_evidence(message) is expected
+
+
+def test_round6_legacy_discovery_http_error_normalization_is_closed() -> None:
+    message = (
+        "Bad Request: Unsupported protocol version: 2026-07-28 "
+        "(supported versions: 2025-11-25, 2025-06-18)"
+    )
+    raw = {
+        "jsonrpc": "2.0",
+        "id": None,
+        "error": {"code": -32000, "message": message},
+    }
+    normalized = _normalize_legacy_discovery_http_error(
+        raw,
+        request={"jsonrpc": "2.0", "id": 7, "method": "server/discover"},
+        response_status=400,
+        has_session_id=False,
+    )
+    assert normalized == {
+        "jsonrpc": "2.0",
+        "id": 7,
+        "error": {"code": types.METHOD_NOT_FOUND, "message": message},
+    }
+    assert raw["id"] is None
+    assert (
+        _normalize_legacy_discovery_http_error(
+            raw,
+            request={"jsonrpc": "2.0", "id": 7, "method": "server/discover"},
+            response_status=401,
+            has_session_id=False,
+        )
+        is raw
+    )
+    assert (
+        _normalize_legacy_discovery_http_error(
+            raw,
+            request={"jsonrpc": "2.0", "id": 7, "method": "server/discover"},
+            response_status=400,
+            has_session_id=True,
+        )
+        is raw
+    )
+
+
+def test_round6_legacy_only_http_prevalidation_falls_back_to_initialize(
+    tmp_path: Path,
+) -> None:
+    server = _LegacyOnlyHttpServer(("127.0.0.1", 0), _LegacyOnlyHttpHandler)
+    server.observed_methods = []
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    async def exercise() -> None:
+        endpoint = f"http://127.0.0.1:{server.server_port}/mcp"
+        config = _config(tmp_path, endpoint=endpoint)
+        client = BoundedMcpSdkClient(
+            config,
+            workspace_root=tmp_path,
+            notification_callback=lambda _method: asyncio.sleep(0),
+            api_key_boundary=_TEST_API_KEY_BOUNDARY,
+        )
+        await client.open()
+        try:
+            assert client.uses_legacy_initialize
+            assert client.protocol_version == "2025-11-25"
+            tools = await client.session.list_tools()
+            assert client.require_closed_result_type(tools) == "complete"
+            assert [item.name for item in tools.tools] == ["legacy_http_echo"]
+        finally:
+            await client.aclose()
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+    assert server.observed_methods == [
+        "server/discover",
+        "initialize",
+        "notifications/initialized",
+        "tools/list",
+    ]
 
 
 def test_round6_http_network_policy_is_typed_and_private_default_denied() -> None:
@@ -1874,6 +2089,15 @@ def test_round9_meta_tool_descriptors_define_inspect_then_use_few_shot() -> None
     assert (
         '{"tool_ref":"mcpref_RETURNED_VALUE","arguments":{"text":"round9"}}'
     ) in use.description
+
+
+def test_reload_capabilities_name_is_one_complete_hard_cut() -> None:
+    descriptor = builtin_tool_catalog_entry("reload_capabilities").descriptor
+
+    assert descriptor.name == "reload_capabilities"
+    assert "Skill, MCP, and Hook" in descriptor.description
+    with pytest.raises(KeyError, match="unknown builtin tool catalog entry"):
+        builtin_tool_catalog_entry("reload_plugins")
 
 
 def test_round6_terminal_failure_retires_only_exact_pending_slot(

@@ -1371,6 +1371,7 @@ class LocalRuntimeConnection implements RuntimeConnection {
           trace.kind = toolKind(toolName);
           trace.title = toolDisplayName(toolName);
           trace.subtitle = toolArgumentSummary(toolName, argumentsJson);
+          trace.argumentsJson = argumentsJson;
           trace.command = terminalCommand(toolName, argumentsJson);
         }
       }
@@ -1391,7 +1392,10 @@ class LocalRuntimeConnection implements RuntimeConnection {
               : 'failed';
           trace.subtitle = trace.status === 'completed' ? '已完成' : toolFailureLabel(resultState);
           const finalText = String(item.final_text ?? '');
-          if (finalText) trace.output = [formatToolResult(finalText)];
+          if (finalText) {
+            trace.resultText = finalText;
+            trace.output = [formatToolResult(finalText)];
+          }
         }
       }
       if (
@@ -2000,7 +2004,10 @@ function projectEntries(
           || resultState === 'CANCELLED_BEFORE_DISPATCH';
         pendingTrace.status = succeeded ? 'completed' : cancelled ? 'cancelled' : 'failed';
         pendingTrace.subtitle = succeeded ? '已完成' : toolFailureLabel(resultState);
-        if (result) pendingTrace.output = [formatToolResult(result)];
+        if (result) {
+          pendingTrace.resultText = result;
+          pendingTrace.output = [formatToolResult(result)];
+        }
         pendingTrace.meta = succeeded ? '操作完成' : cancelled ? '操作已取消' : '操作未完成';
         continue;
       }
@@ -2172,7 +2179,10 @@ function projectSubagentRuns(
           || resultState === 'CANCELLED_BEFORE_DISPATCH';
         pendingTrace.status = succeeded ? 'completed' : cancelled ? 'cancelled' : 'failed';
         pendingTrace.subtitle = succeeded ? '已完成' : toolFailureLabel(resultState);
-        if (content) pendingTrace.output = [formatToolResult(content)];
+        if (content) {
+          pendingTrace.resultText = content;
+          pendingTrace.output = [formatToolResult(content)];
+        }
         pendingTrace.meta = succeeded ? '操作完成' : cancelled ? '操作已取消' : '操作未完成';
       }
       continue;
@@ -2349,6 +2359,7 @@ function projectToolBlock(block: ProtocolAssistantBlock): ToolTrace {
     title: toolDisplayName(name),
     subtitle: toolArgumentSummary(name, argumentsPreview),
     status: 'running',
+    argumentsJson: argumentsPreview,
     command: terminalCommand(name, argumentsPreview),
   };
 }
@@ -2370,6 +2381,10 @@ function reasoningKind(value: string): ReasoningBlock['kind'] {
 
 function toolDisplayName(name: string): string {
   const normalized = name.toLowerCase();
+  if (normalized === 'reload_capabilities') return '刷新能力';
+  if (normalized === 'list_mcp_servers') return '浏览 MCP 服务';
+  if (normalized === 'inspect_new_mcp_tool') return '检查 MCP 工具';
+  if (normalized === 'use_new_mcp_tool') return '调用 MCP 工具';
   if (normalized.includes('report_agent_result')) return '提交子任务结果';
   if (normalized.includes('create_agent_tasks') || normalized.includes('spawn_agent')) return '创建子任务';
   if (normalized.includes('wait_agent')) return '等待子任务';
@@ -2395,6 +2410,18 @@ function toolArgumentSummary(name: string, content: string): string {
   try {
     const value = JSON.parse(content) as Record<string, unknown>;
     const normalized = name.toLowerCase();
+    if (normalized === 'reload_capabilities') return '重新载入 Skill、MCP 与 Hook';
+    if (normalized === 'list_mcp_servers') {
+      return typeof value.server_id === 'string' && value.server_id
+        ? `查看 ${value.server_id} 的工具`
+        : '读取当前 MCP 服务列表';
+    }
+    if (normalized === 'inspect_new_mcp_tool') {
+      const server = typeof value.server_id === 'string' ? value.server_id : '';
+      const tool = typeof value.tool_name === 'string' ? value.tool_name : '';
+      return [server, tool].filter(Boolean).join(' · ') || '检查一个 MCP 工具';
+    }
+    if (normalized === 'use_new_mcp_tool') return '调用已经检查的 MCP 工具';
     if (normalized.includes('report_agent_result')) return '提交最终结果';
     if (normalized.includes('create_agent_tasks')) {
       return `创建 ${Array.isArray(value.tasks) ? value.tasks.length : 0} 个子任务`;

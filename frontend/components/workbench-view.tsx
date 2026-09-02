@@ -96,21 +96,242 @@ const traceIcons: Record<ToolTrace['kind'], typeof TerminalSquare> = {
   mcp: Zap,
 };
 
-function TraceCard({ trace }: { trace: ToolTrace }) {
+type JsonObject = Record<string, unknown>;
+
+interface McpToolIdentity {
+  serverId: string;
+  remoteToolName: string;
+}
+
+interface McpDetailRow {
+  label: string;
+  value: string;
+}
+
+interface McpDetailItem {
+  name: string;
+  detail?: string;
+}
+
+interface McpTraceDetail {
+  subtitle: string;
+  rows: McpDetailRow[];
+  items: McpDetailItem[];
+  suppressGenericSuccess: boolean;
+}
+
+function parseJsonObject(value?: string): JsonObject | undefined {
+  if (!value) return undefined;
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as JsonObject
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function objectField(value: JsonObject | undefined, key: string): JsonObject | undefined {
+  const field = value?.[key];
+  return field && typeof field === 'object' && !Array.isArray(field)
+    ? field as JsonObject
+    : undefined;
+}
+
+function objectArrayField(value: JsonObject | undefined, key: string): JsonObject[] {
+  const field = value?.[key];
+  return Array.isArray(field)
+    ? field.filter((item): item is JsonObject => Boolean(item) && typeof item === 'object' && !Array.isArray(item))
+    : [];
+}
+
+function stringValue(value: unknown): string {
+  return typeof value === 'string' ? value : '';
+}
+
+function numberValue(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
+}
+
+function mcpStatusLabel(value: unknown): string {
+  const status = stringValue(value).toUpperCase();
+  if (status === 'READY') return '已就绪';
+  if (status === 'CONNECTING' || status === 'DISCOVERING' || status === 'UPDATING') return '连接中';
+  if (status === 'DISABLED') return '已关闭';
+  if (status === 'FAILED_RETRYABLE') return '等待重试';
+  if (status === 'FAILED_TERMINAL') return '连接失败';
+  return status ? status.toLowerCase() : '状态未知';
+}
+
+function collectMessageTraces(messages: Message[]): ToolTrace[] {
+  const traces: ToolTrace[] = [];
+  for (const message of messages) {
+    traces.push(...(message.traces ?? []));
+    for (const run of message.subagentRuns ?? []) {
+      for (const activity of run.activities) traces.push(...(activity.traces ?? []));
+    }
+  }
+  return traces;
+}
+
+function buildMcpToolRefIndex(messages: Message[]): ReadonlyMap<string, McpToolIdentity> {
+  const result = new Map<string, McpToolIdentity>();
+  for (const trace of collectMessageTraces(messages)) {
+    if (trace.toolName !== 'inspect_new_mcp_tool') continue;
+    const descriptor = parseJsonObject(trace.resultText);
+    const toolRef = stringValue(descriptor?.tool_ref);
+    const serverId = stringValue(descriptor?.server_id);
+    const remoteToolName = stringValue(descriptor?.remote_tool_name);
+    if (!toolRef || !serverId || !remoteToolName) continue;
+    result.set(toolRef, {
+      serverId,
+      remoteToolName,
+    });
+  }
+  return result;
+}
+
+function normalizedSkillDocumentPath(value: string): string {
+  return value.replaceAll('\\', '/').replace(/\/+$/u, '');
+}
+
+function traceSkill(trace: ToolTrace, skills: SkillCapability[]): SkillCapability | undefined {
+  if (trace.toolName !== 'read_file') return undefined;
+  const requested = stringValue(parseJsonObject(trace.argumentsJson)?.path);
+  const normalized = normalizedSkillDocumentPath(requested);
+  if (!normalized || normalized.split('/').at(-1) !== 'SKILL.md') return undefined;
+  return skills.find((skill) => (
+    skill.enabled
+    && skill.effective
+    && [skill.path, skill.location]
+      .filter(Boolean)
+      .map(normalizedSkillDocumentPath)
+      .includes(normalized)
+  ));
+}
+
+function mcpTraceDetail(
+  trace: ToolTrace,
+  toolRefs: ReadonlyMap<string, McpToolIdentity>,
+): McpTraceDetail | undefined {
+  const name = trace.toolName;
+  if (!name || !['list_mcp_servers', 'inspect_new_mcp_tool', 'use_new_mcp_tool'].includes(name)) {
+    return undefined;
+  }
+  const args = parseJsonObject(trace.argumentsJson);
+  const result = parseJsonObject(trace.resultText);
+  if (name === 'list_mcp_servers') {
+    const requestedServer = stringValue(args?.server_id);
+    const server = objectField(result, 'server');
+    const servers = objectArrayField(result, 'servers');
+    const tools = objectArrayField(result, 'tools');
+    if (server || requestedServer) {
+      const serverId = stringValue(server?.server_id) || requestedServer;
+      const rows: McpDetailRow[] = [{ label: 'MCP 服务', value: serverId }];
+      if (server) rows.push({ label: '连接状态', value: mcpStatusLabel(server.public_status) });
+      return {
+        subtitle: `${serverId} · ${tools.length} 个工具`,
+        rows,
+        items: tools.map((tool) => ({
+          name: stringValue(tool.remote_tool_name) || stringValue(tool.provider_tool_name) || '未命名工具',
+        })),
+        suppressGenericSuccess: true,
+      };
+    }
+    const total = numberValue(result?.total_server_count) || servers.length;
+    return {
+      subtitle: `发现 ${total} 个 MCP 服务`,
+      rows: total > servers.length
+        ? [{ label: '当前页', value: `${servers.length} / ${total}` }]
+        : [],
+      items: servers.map((item) => ({
+        name: stringValue(item.server_id) || '未命名服务',
+        detail: `${mcpStatusLabel(item.public_status)} · ${numberValue(item.tool_count)} 个工具`,
+      })),
+      suppressGenericSuccess: true,
+    };
+  }
+  if (name === 'inspect_new_mcp_tool') {
+    const serverId = stringValue(result?.server_id) || stringValue(args?.server_id) || '未知服务';
+    const remoteToolName = stringValue(result?.remote_tool_name) || stringValue(args?.tool_name) || '未知工具';
+    return {
+      subtitle: `${serverId} · ${remoteToolName}`,
+      rows: [
+      { label: 'MCP 服务', value: serverId },
+      { label: '检查的工具', value: remoteToolName },
+      ],
+      items: [],
+      suppressGenericSuccess: true,
+    };
+  }
+  const toolRef = stringValue(args?.tool_ref);
+  const identity = toolRefs.get(toolRef);
+  const rows: McpDetailRow[] = identity
+    ? [
+      { label: 'MCP 服务', value: identity.serverId },
+      { label: '调用的工具', value: identity.remoteToolName },
+    ]
+    : [{ label: '调用方式', value: '使用此前检查通过的 MCP 工具' }];
+  return {
+    subtitle: identity
+      ? `${identity.serverId} · ${identity.remoteToolName}`
+      : '调用已经检查的 MCP 工具',
+    rows,
+    items: [],
+    suppressGenericSuccess: true,
+  };
+}
+
+function McpTraceDetails({ detail }: { detail: McpTraceDetail }) {
+  return (
+    <section className="mcp-trace-details" aria-label="MCP 操作详情">
+      {detail.rows.length ? (
+        <dl>{detail.rows.map((row) => (
+          <div key={`${row.label}:${row.value}`}><dt>{row.label}</dt><dd>{row.value}</dd></div>
+        ))}</dl>
+      ) : null}
+      {detail.items.length ? (
+        <div className="mcp-trace-list">{detail.items.map((item, index) => (
+          <div className="mcp-trace-list__item" key={`${item.name}:${index}`}>
+            <strong>{item.name}</strong>{item.detail && <span>{item.detail}</span>}
+          </div>
+        ))}</div>
+      ) : null}
+    </section>
+  );
+}
+
+function TraceCard({
+  trace,
+  skills,
+  mcpToolRefs,
+}: {
+  trace: ToolTrace;
+  skills: SkillCapability[];
+  mcpToolRefs: ReadonlyMap<string, McpToolIdentity>;
+}) {
   const [expanded, setExpanded] = useState(false);
   const Icon = traceIcons[trace.kind];
-  const expandable = Boolean(trace.command || trace.output?.length);
+  const skill = traceSkill(trace, skills);
+  const mcpDetail = mcpTraceDetail(trace, mcpToolRefs);
+  const purpose = skill ? `正在使用 ${skill.name} Skill` : trace.title;
+  const subtitle = mcpDetail?.subtitle ?? trace.subtitle;
+  const output = mcpDetail?.suppressGenericSuccess
+    ? trace.output?.filter((line) => line !== '操作已完成。')
+    : trace.output;
+  const expandable = Boolean(trace.command || output?.length || mcpDetail);
   const summary = (
     <>
       <span className={`trace-icon trace-icon--${trace.kind}`}><Icon size={14} /></span>
       <span className="trace-summary-copy">
         <span className="trace-summary-title">
           <strong>{trace.toolName ?? trace.title}</strong>
-          {trace.toolName && trace.title !== trace.toolName
-            ? <span className="trace-purpose">{trace.title}</span>
+          {trace.toolName && purpose !== trace.toolName
+            ? <span className="trace-purpose">{purpose}</span>
             : null}
         </span>
-        <small>{trace.subtitle}</small>
+        <small>{subtitle}</small>
       </span>
       <span className={`trace-state trace-state--${trace.status}`}>
         {trace.status === 'running' ? `进行中 · ${trace.duration ?? ''}` : trace.duration ?? trace.meta}
@@ -133,9 +354,10 @@ function TraceCard({ trace }: { trace: ToolTrace }) {
         {expanded && (
           <div className="terminal-output">
             {trace.command && <div className="terminal-command"><span>$</span> {trace.command}</div>}
-            {trace.output?.map((line, index) => (
-              <div className={index === trace.output!.length - 1 ? 'terminal-success' : ''} key={`${trace.id}-${line}`}>
-                {line}{index === trace.output!.length - 1 && trace.status === 'running' ? <span className="terminal-cursor" /> : null}
+            {mcpDetail && <McpTraceDetails detail={mcpDetail} />}
+            {output?.map((line, index) => (
+              <div className={index === output.length - 1 ? 'terminal-success' : ''} key={`${trace.id}-${line}`}>
+                {line}{index === output.length - 1 && trace.status === 'running' ? <span className="terminal-cursor" /> : null}
               </div>
             ))}
             {trace.meta && <footer><span>{trace.meta}</span></footer>}
@@ -314,7 +536,17 @@ const subagentStatusLabels: Record<SubagentRun['status'], string> = {
   ended: '已结束',
 };
 
-function SubagentRunCard({ run, focused }: { run: SubagentRun; focused: boolean }) {
+function SubagentRunCard({
+  run,
+  focused,
+  skills,
+  mcpToolRefs,
+}: {
+  run: SubagentRun;
+  focused: boolean;
+  skills: SkillCapability[];
+  mcpToolRefs: ReadonlyMap<string, McpToolIdentity>;
+}) {
   const [expanded, setExpanded] = useState(
     focused || run.status === 'running' || run.status === 'waiting' || run.status === 'pending',
   );
@@ -352,7 +584,7 @@ function SubagentRunCard({ run, focused }: { run: SubagentRun; focused: boolean 
                   <div className="assistant-markdown"><MarkdownBody body={activity.body} /></div>
                 </div>
               ) : <div className="assistant-markdown"><MarkdownBody body={activity.body} /></div>)}
-              {activity.traces?.length ? <div className="execution-rail subagent-execution">{activity.traces.map((trace) => <TraceCard key={trace.id} trace={trace} />)}</div> : null}
+              {activity.traces?.length ? <div className="execution-rail subagent-execution">{activity.traces.map((trace) => <TraceCard key={trace.id} trace={trace} skills={skills} mcpToolRefs={mcpToolRefs} />)}</div> : null}
             </section>
           ))}
           {showSummary && run.summary && (
@@ -369,11 +601,15 @@ function SubagentGroup({
   focusTaskId,
   focusTaskRevision,
   focusTaskHighlighted,
+  skills,
+  mcpToolRefs,
 }: {
   runs: SubagentRun[];
   focusTaskId?: string;
   focusTaskRevision: number;
   focusTaskHighlighted: boolean;
+  skills: SkillCapability[];
+  mcpToolRefs: ReadonlyMap<string, McpToolIdentity>;
 }) {
   const settled = runs.filter((run) => !['pending', 'running', 'waiting'].includes(run.status)).length;
   return (
@@ -387,6 +623,8 @@ function SubagentGroup({
           key={`${run.id}:${focusTaskId === run.id ? focusTaskRevision : 0}`}
           run={run}
           focused={focusTaskHighlighted && focusTaskId === run.id}
+          skills={skills}
+          mcpToolRefs={mcpToolRefs}
         />
       ))}</div>
     </section>
@@ -465,6 +703,8 @@ function AssistantMessage({
   focusTaskId,
   focusTaskRevision,
   focusTaskHighlighted,
+  skills,
+  mcpToolRefs,
   onNotify,
 }: {
   message: Message;
@@ -474,6 +714,8 @@ function AssistantMessage({
   focusTaskId?: string;
   focusTaskRevision: number;
   focusTaskHighlighted: boolean;
+  skills: SkillCapability[];
+  mcpToolRefs: ReadonlyMap<string, McpToolIdentity>;
   onNotify: WorkbenchViewProps['onNotify'];
 }) {
   const hasNaturalLanguage = Boolean(message.body.trim());
@@ -528,9 +770,9 @@ function AssistantMessage({
         <div className="assistant-progress"><i /> 正在处理…</div>
       )}
 
-      {message.traces && <div className="execution-rail">{message.traces.map((trace) => <TraceCard key={trace.id} trace={trace} />)}</div>}
+      {message.traces && <div className="execution-rail">{message.traces.map((trace) => <TraceCard key={trace.id} trace={trace} skills={skills} mcpToolRefs={mcpToolRefs} />)}</div>}
       {message.subagentRuns?.length ? (
-        <SubagentGroup runs={message.subagentRuns} focusTaskId={focusTaskId} focusTaskRevision={focusTaskRevision} focusTaskHighlighted={focusTaskHighlighted} />
+        <SubagentGroup runs={message.subagentRuns} focusTaskId={focusTaskId} focusTaskRevision={focusTaskRevision} focusTaskHighlighted={focusTaskHighlighted} skills={skills} mcpToolRefs={mcpToolRefs} />
       ) : null}
     </article>
   );
@@ -808,6 +1050,7 @@ export function WorkbenchView({
     () => findToolChainConnections(messages, contextCompactionIndex),
     [contextCompactionIndex, messages],
   );
+  const mcpToolRefs = useMemo(() => buildMcpToolRefIndex(messages), [messages]);
 
   const insertSkill = useCallback((name: string) => {
     const marker = `$${name}`;
@@ -855,7 +1098,7 @@ export function WorkbenchView({
     if (!accepted) return;
     setDraft((current) => current.trim() === value ? '' : current);
     setRequestPlan(false);
-    onPermissionChange('accept-edits');
+    onPermissionChange('bypass-permissions');
   };
 
   useEffect(() => {
@@ -1026,6 +1269,8 @@ export function WorkbenchView({
                     focusTaskId={focusTaskId}
                     focusTaskRevision={focusTaskRevision}
                     focusTaskHighlighted={focusTaskHighlighted}
+                    skills={skills}
+                    mcpToolRefs={mcpToolRefs}
                     onNotify={onNotify}
                   />
                 )}
@@ -1152,7 +1397,7 @@ export function WorkbenchView({
                     <span className="menu-label">本轮权限</span>
                     {permissionModeOrder.map((mode) => (
                       <button key={mode} className={`${mode === permission ? 'is-selected' : ''}${mode === 'bypass-permissions' ? ' permission-option--danger' : ''}`} onClick={() => { onPermissionChange(mode); setPermissionOpen(false); }}>
-                        <span><strong className="permission-option-title">{permissionLabels[mode]}{mode === 'bypass-permissions' && <TriangleAlert className="permission-warning-icon" size={13} aria-hidden="true" />}</strong><small>{mode === 'accept-edits' ? '允许编辑；敏感操作仍会询问' : mode === 'read-only' ? '只观察和读取，不做改动' : mode === 'ask-permissions' ? '每次有副作用的操作都询问' : '跳过询问，仅限可信目录'}</small></span>
+                        <span><strong className="permission-option-title">{permissionLabels[mode]}{mode === 'bypass-permissions' && <TriangleAlert className="permission-warning-icon" size={13} aria-hidden="true" />}</strong><small>{mode === 'accept-edits' ? '工作区编辑直接执行；其他操作询问' : mode === 'read-only' ? '只观察和读取，不做改动' : mode === 'ask-permissions' ? '每次有副作用的操作都询问' : '跳过询问，可操作本机'}</small></span>
                         {mode === permission && <Check size={13} />}
                       </button>
                     ))}

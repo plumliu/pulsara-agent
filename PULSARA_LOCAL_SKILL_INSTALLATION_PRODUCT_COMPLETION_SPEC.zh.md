@@ -210,7 +210,7 @@ Workspace resolution：
 - validate只解析source；
 - human/`--json`都只是typed outcome projection，JSON不是GUI wire protocol。
 
-Official bundled `pulsara-skill-creator`与`pulsara-skill-installer`只调用global CLI。旧private `skill_utils.py`、`install-local-skill.py`、`list-installed-skills.py`及引用/packaged copies已经删除。
+Official bundled `pulsara-mcp-installer`、`pulsara-plugin-installer`、`pulsara-skill-creator`与`pulsara-skill-installer`只调用global CLI和各自已有的running-Host控制面；它们不回退到source checkout或private installer。旧private `skill_utils.py`、`install-local-skill.py`、`list-installed-skills.py`及引用/packaged copies已经删除。
 
 旧`sync-bundled/status/reset` CLI与对应sync/manifest/provenance/hash/backup/opt-out owner已经由unified hard cut删除。Package bundled Skills是read-only catalog defaults，不属于loose management service或publisher。
 

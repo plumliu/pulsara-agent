@@ -45,6 +45,11 @@ from pulsara_agent.conversation_kernel.tool_policy import (
     DefaultToolDispatchAuthorizationPolicy,
 )
 from pulsara_agent.message import ToolResultState
+from pulsara_agent.primitives.permission import PermissionMode
+from pulsara_agent.primitives.run_permission import (
+    RunPermissionAdmissionSource,
+    build_run_permission_snapshot,
+)
 from pulsara_agent.ports.tool_execution import (
     ToolCall,
     ToolExecutionResult,
@@ -189,6 +194,75 @@ def test_stage2_terminal_handle_is_same_host_only_and_close_kills_and_joins(
             )
             == 0
         )
+
+    asyncio.run(scenario())
+
+
+def test_host_scoped_writes_and_terminal_cwd_follow_exact_permission_snapshot(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        workspace = tmp_path / "workspace"
+        outside = tmp_path / "outside"
+        workspace.mkdir()
+        outside.mkdir()
+        session_id = _name("session")
+        port = DirectKernelToolPort(
+            workspace_root=workspace,
+            host_owner_id=_name("host"),
+            session_id=session_id,
+            live_bus=LiveAgentEventBus(),
+            authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
+        )
+        bypass = build_run_permission_snapshot(
+            snapshot_id=_name("permission"),
+            requested_mode=PermissionMode.BYPASS_PERMISSIONS,
+            effective_mode=PermissionMode.BYPASS_PERMISSIONS,
+            admission_source=RunPermissionAdmissionSource.USER_SUBMISSION,
+        )
+        accept_edits = build_run_permission_snapshot(
+            snapshot_id=_name("permission"),
+            requested_mode=PermissionMode.ACCEPT_EDITS,
+            effective_mode=PermissionMode.ACCEPT_EDITS,
+            admission_source=RunPermissionAdmissionSource.USER_SUBMISSION,
+        )
+        try:
+            write = await invoke_direct_tool(
+                port,
+                session_id=session_id,
+                tool_name="write_file",
+                arguments={
+                    "path": str(outside / "host.txt"),
+                    "content": "host write",
+                },
+                tool_call_id=_name("call"),
+                attempt_id=_name("attempt"),
+                turn_id=_name("turn"),
+                assistant_entry_id=_name("entry"),
+                permission_snapshot=bypass,
+            )
+            assert write.state == "SUCCESS"
+            assert (outside / "host.txt").read_text() == "host write"
+
+            terminal = await invoke_direct_tool(
+                port,
+                session_id=session_id,
+                tool_name="terminal",
+                arguments={"command": "pwd", "workdir": str(outside)},
+                tool_call_id=_name("call"),
+                attempt_id=_name("attempt"),
+                turn_id=_name("turn"),
+                assistant_entry_id=_name("entry"),
+                permission_snapshot=accept_edits,
+            )
+            payload = json.loads(terminal.content)
+            assert terminal.state == "SUCCESS"
+            assert payload["status"] == "success"
+            assert payload["cwd"] == str(outside)
+            assert str(outside) in payload["output"]
+            assert port.snapshot_terminal_cwd() == outside
+        finally:
+            await port.aclose(timeout_seconds=2)
 
     asyncio.run(scenario())
 

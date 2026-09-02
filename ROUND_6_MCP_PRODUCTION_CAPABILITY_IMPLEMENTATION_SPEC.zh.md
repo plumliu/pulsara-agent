@@ -197,7 +197,11 @@ mcp-types==2.0.0  # 由official SDK依赖闭合，uv.lock必须exact确认
 Pulsara semantic contract: pulsara.mcp-sdk-v2.2026-09-01.v2
 ~~~
 
-SDK自身可以按public negotiation API与兼容server协商。Pulsara首先尝试modern `server/discover`；仅当该请求明确返回`METHOD_NOT_FOUND(-32601)`或`INVALID_PARAMS(-32602)`，并且随后public `initialize`成功时，才冻结为legacy compatibility era。其他discover/initialize错误不得触发兼容回退。Pulsara只接受本文closed vocabulary中的core tools/resources/prompts、closed result type与elicitation mode；未知experimental result type、capability或extension必须typed fail closed。production不得复制SDK的private header map、exit stack或frame state，也不得因为未来SDK出现新字段就把开放JSON直接投影成成功ToolResult。
+SDK自身可以按public negotiation API与兼容server协商。Pulsara首先尝试modern `server/discover`；仅当该请求明确返回`METHOD_NOT_FOUND(-32601)`或`INVALID_PARAMS(-32602)`，或者HTTP peer在解析request id前以本文冻结的legacy-only prevalidation形状拒绝该请求，并且随后public `initialize`成功时，才冻结为legacy compatibility era。
+
+legacy-only HTTP prevalidation证据必须同时满足：HTTP 400、没有`Mcp-Session-Id`、JSON-RPC error的`id=null`与`code=-32000`，并且message要么精确为`Bad Request: No valid session ID provided`，要么明确指出被拒绝的是当前modern protocol version，并列出非空的日期版本集合；集合中的每项都必须是有效`YYYY-MM-DD`、全部早于当前modern version，并至少包含一个official SDK支持的handshake version。transport必须在既有HTTP body、JSON node/depth与slot aggregate byte bounds内读取该error；仅对此已证明形状把null id关联回原始`server/discover`并投影为`METHOD_NOT_FOUND`，以便official SDK/public caller进入同一legacy `initialize`路径。这是provider-neutral protocol normalization，不得按server名称、endpoint或provider维护分支。
+
+普通timeout、鉴权/授权错误、网络错误、任意`-32000`、畸形body、携带session id的拒绝、包含当前或未来modern version的版本集合，以及不能exact join原始discover request的响应，都不得触发legacy兼容回退。其他discover/initialize错误仍必须可见。Pulsara只接受本文closed vocabulary中的core tools/resources/prompts、closed result type与elicitation mode；未知experimental result type、capability或extension必须typed fail closed。production不得复制SDK的private header map、exit stack或frame state，也不得因为未来SDK出现新字段就把开放JSON直接投影成成功ToolResult。
 
 ---
 

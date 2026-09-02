@@ -4,12 +4,15 @@
 
 适用仓库：pulsara_agent
 
+当前实现基线：`13d43930`（`feat: hard-cut advisory memory taxonomy and scope`）
+
 强制前置：
 `PULSARA_MEMORY_GOVERNANCE_TERMINAL_CLAIM_SOURCE_SEMANTICS_AND_PROMPT_HARD_CUT_IMPLEMENTATION_SPEC.zh.md`
 与
 `PULSARA_MEMORY_TAXONOMY_AND_SCOPE_SUBTRACTION_HARD_CUT_IMPLEMENTATION_SPEC.zh.md`
-必须已经完整实施、验证并通过审查。本规范只从两项前置完成后的 clean-v0 基线继续；不得在管理
-页面或删除实现中重新定义 candidate、governance、来源、四类 taxonomy、context、公开形成摘要或
+已在上述基线完整实施、验证并通过审查。开始本规范实施时必须先核验该完成态仍在；本规范只从
+两项前置完成后的 clean-v0 基线继续，不把前置工作重复计入本功能；不得在管理页面或删除实现中
+重新定义 candidate、governance、来源、四类 taxonomy、context、公开形成摘要或
 relation 语义。发生冲突时，后者对 taxonomy、context、structured shape、recorded_at 与 reflector
 减法的定义优先。
 
@@ -41,6 +44,11 @@ Pulsara 增加一个与“会话”“能力”同级的“记忆”页面。它
 
 页面默认展示 ACTIVE 记忆，产品文案为“正在使用”；用户可以切换到 SUPERSEDED 历史，产品文案为“已更新”。页面提供搜索、类别筛选、keyset 分页、页面内详情面板和用户确认后的删除。
 
+“正在使用”只表示该 canonical 事实当前处于 ACTIVE，并可在既有 conflict/retrieval filter 后参与召回
+或回答偏好冻结；它不是“每轮必用”。记忆仍是 advisory dataset：它不保证每一轮都会提供给模型，
+不保证模型采用，也不保证内容始终正确或最新；UI 不得把 ACTIVE 渲染成权威真相、任务履约状态或
+执行承诺。
+
 删除由用户直接授权，不能交给模型工具或模型决策。删除采用物理 hard delete：
 
 - 删除 memory_facts 中被确认的事实；
@@ -68,10 +76,12 @@ Pulsara 增加一个与“会话”“能力”同级的“记忆”页面。它
 - src/pulsara_agent/conversation_kernel/memory/governor.py
 - src/pulsara_agent/conversation_kernel/_repository/memory.py
 - src/pulsara_agent/conversation_kernel/host.py
+- src/pulsara_agent/workspace_identity.py
 - src/pulsara_agent/storage/postgres_connection_provider.py
 - src/pulsara_agent/storage/migrations/sql/0000_conversation_kernel_baseline.sql
 - src/pulsara_agent/storage/migrations/manifest.py
 - src/pulsara_agent/storage/migrations/grants.py
+- src/pulsara_agent/storage/migrations/contracts.py
 - src/pulsara_agent/storage/migrations/resources/0000_conversation_kernel_expected_catalog_v1.json
 - src/pulsara_agent/storage/migrations/resources/0000_conversation_kernel_runtime_grants_v1.json
 - src/pulsara_agent/web_app/application.py
@@ -80,12 +90,17 @@ Pulsara 增加一个与“会话”“能力”同级的“记忆”页面。它
 - frontend/lib/pulsara-types.ts
 - frontend/lib/runtime-adapter.ts
 - frontend/components/activity-rail.tsx
+- frontend/components/overlays.tsx
 - frontend/app/pulsara-app.tsx
+- frontend/app/layout.tsx
 - frontend/app/globals.css 及其拆分样式
 - tests/test_round8_advisory_memory.py
 - tests/test_stage2_conversation_kernel_postgres.py
 - tests/test_stage5_clean_migration.py
 - tests/test_local_web_http_surface.py
+- tests/test_stage2_conversation_runner.py
+- tests/test_repository_modularization_architecture.py
+- tests/test_fingerprint_subtraction_architecture.py
 - frontend/lib/runtime-adapter.test.ts
 - frontend/app/pulsara-app.test.tsx
 
@@ -103,6 +118,10 @@ Pulsara 增加一个与“会话”“能力”同级的“记忆”页面。它
 - BASED_ON
 - SUPERSEDES
 - CONTRADICTS
+
+其中 BASED_ON 是 Main Agent 在 `remember` 时可以主动声明的产品关系；SUPERSEDES 与
+CONTRADICTS 是 governance 在结算时被动识别的变化/冲突关系。三者都是 canonical 关系，但 UI
+不得把后两者描述成用户或 Main Agent 主动编写的指令，也不在本页面提供关系编辑入口。
 
 当前 lifecycle 只有 ACTIVE 和 SUPERSEDED。
 
@@ -220,7 +239,13 @@ AppView 增加 memory。ActivityRail 在“会话”和“能力”附近增加�
 - 目录当前不存在、session 已 CLOSED，仍可出现在选择器；
 - transient / quick workspace 永远不出现。
 
-项目选择器按最近打开时间降序、workspace_id 稳定打破平局。显示 workspace_label 和 workspace_root；若同一 workspace_id 有多条 session，使用 updated_at 最新行的 label/root。
+项目选择器按最近活动时间降序、workspace_id 稳定打破平局；最近活动时间就是该 workspace 分组中
+最大的 canonical session.updated_at，不虚构数据库不存在的“最后打开时间”。显示 workspace_label 和
+workspace_root；若同一 workspace_id 有多条 session，使用 `updated_at DESC, id DESC` 第一行的
+label/root。
+
+进入“项目”视角时，若尚无仍有效的本地选择，则默认选择 catalog 第一项，即最近活动的项目；刷新与
+分页时只要原选择仍在 catalog 中就保持它。catalog 为空时显示项目空状态，不制造 transient fallback。
 
 ### 4.3 搜索、筛选和生命周期
 
@@ -246,6 +271,19 @@ AppView 增加 memory。ActivityRail 在“会话”和“能力”附近增加�
 - 不修改 model recall 排序；
 - 结果继续按 updated_at DESC、id DESC 做 keyset 分页。
 
+搜索匹配规范固定为按 PostgreSQL 当前数据库 collation 对 `statement` 做大小写不敏感 literal
+substring。服务端 trim 首尾空白，空字符串等同未搜索；`%`、`_`、`\\` 必须按 literal 转义，不能
+泄漏成 SQL wildcard。类别与位置由独立筛选器表达，不把 label、project root、公开摘要或关系
+companion 偷偷并入搜索语料。
+
+当前 GET route 的 aiohttp request-line 物理上限是 8190 bytes，而后续页同时携带 URL-encoded search
+与包含同一筛选值的 base64url cursor。因此 management search 冻结独立的
+`MAXIMUM_MEMORY_MANAGEMENT_SEARCH_BYTES = 1024` UTF-8 field bound；
+cursor canonical JSON 使用 UTF-8/`ensure_ascii=False`，最坏 percent/base64url expansion 连同固定字段
+仍必须在现有 request-line 内通过 integration test。超界 search 返回 400，不提高全局 parser limit。
+这是 GET transport 的单字段物理边界，不是 statement、库存、分页、图或查询轮数上限；若以后产品
+需要更长搜索，应另行改成 body-bearing query contract，而不是悄悄放宽本地 listener。
+
 每个物理页面大小为 1 至 100；默认 40。100 是单次 JSON 序列化和前端渲染边界，不是库存总量上限。只要 next_cursor 存在，客户端可以继续读取。
 
 ### 4.4 行展示
@@ -255,7 +293,8 @@ AppView 增加 memory。ActivityRail 在“会话”和“能力”附近增加�
 - statement 正文，列表中可视觉截断但可访问文本保留；
 - 产品类别；
 - 可读位置：“跨对话”或项目 label；
-- recorded_at，并可另显示 updated_at；
+- recorded_at，产品文案“记录时间”；只有 canonical fact row 的 lifecycle 更新确实使 updated_at 与
+  recorded_at 不同时，才另显示“更新时间”；
 - lifecycle/status；
 - 使用提示。
 
@@ -267,6 +306,14 @@ AppView 增加 memory。ActivityRail 在“会话”和“能力”附近增加�
 4. 其他 ACTIVE：显示“相关时使用”。
 
 ACTIVE RESPONSE_PREFERENCE 一旦处于活动 contradiction，补充说明“冲突解决前暂不作为回答偏好使用”，与 freeze_response_preference_source 当前排除冲突端点的行为一致。
+
+时间按用户本地时区显示淡化的易读值，并提供可访问的 exact timestamp。recorded_at 是 accepted_at 的
+canonical projection，表示这条记忆何时被接受，不表示正文所描述事件的发生时间或内容新鲜度；UI
+不得据此推断“最近发生”。
+
+relation 显示自己的 recorded_at。仅删除 CONTRADICTS/BASED_ON 等 relation 时，不为制造 UI“更新时间”
+而触碰存活 companion fact 的 updated_at；SUPERSEDES 恢复导致 lifecycle 改变时才按执行算法更新该
+fact timestamp。
 
 不能把 SUPERSEDED 文案写成“已删除”；历史仍然存在，直到用户确认物理删除。
 
@@ -296,6 +343,10 @@ ACTIVE RESPONSE_PREFERENCE 一旦处于活动 contradiction，补充说明“冲
 - provenance 契约允许且前端确实能定位时，显示“在对话中查看”；
 - 删除入口。
 
+前置 taxonomy hard cut 已删除结构化 `applies_when` / `do_not_apply_when`。适用条件、时间限定和例外
+若存在，属于完整自然语言 statement；详情原样展示该 statement，不解析、猜测或伪造单独的“适用
+条件与例外”字段。位置是独立的 exact context 产品投影，也不能冒充正文适用条件。
+
 不存在的编辑、修改、合并按钮不渲染；不能显示 disabled placeholder。
 
 列表、详情、关系 companion 和删除 confirmation 都把 cohesive memory 当作完整 record，只展示最终
@@ -321,6 +372,10 @@ coding-source precedence。
 
 CONTRADICTS 的 relative_role 只有 CONFLICTS_WITH，不存在 SOURCE_CONFLICT 或 TARGET_CONFLICT。数据库 least/greatest、source/target 和 relation id 构造方向都不能泄漏为产品语义。
 
+详情可以把关系分为“形成依据”（BASED_ON / BASIS_FOR）与“变化与冲突”（UPDATES /
+UPDATED_BY / CONFLICTS_WITH）两个轻量分组。前者是主动提供的依据关系，后者是被动治理结果；分组
+只改变产品解释，不改变 canonical relation，也不暗示 SUPERSEDES 或 CONTRADICTS 拥有主动编辑者。
+
 建议 typed projection：
 
     MemoryManagementRelationProjection(
@@ -328,7 +383,7 @@ CONTRADICTS 的 relative_role 只有 CONFLICTS_WITH，不存在 SOURCE_CONFLICT 
         relative_role,  # BASED_ON / BASIS_FOR / UPDATES / UPDATED_BY / CONFLICTS_WITH
         companion,
         public_summary,
-        accepted_at,
+        recorded_at,  # relation.accepted_at 经共享 canonical encoder 的产品投影
     )
 
 前端只翻译 relative_role，不接收 decision_kind、reason_code、supersede_mode 或 raw context ID 作为直接文案。
@@ -351,10 +406,18 @@ summary；“更新了 / 已由…更新 / 与…存在冲突”只能来自 rel
 - raw decision kind、reason code 不显示。当前唯一 producer 是 Main Agent 的 `remember` tool call；
   `MEMORY_WRITE_HINT` 不是 candidate source，不能产生另一种形成方式。
 
-项目视角可以用所选 workspace 形成 exact read binding。只有 provenance disposition 为 SAME_ORIGIN，且 session/turn/entry locator 完整且仍可由前端打开时，才显示“在对话中查看”。
+governance auxiliary model 是内部 advisory settlement mechanism，不是另一位产品作者。页面不显示其
+模型名称、raw prompt/output、candidate status 或“AI 审核”徽章；可公开形成解释只来自上述 source
+contract 与 target-independent decision_public_summary。
 
-global 视角没有可据以放宽 fence 的虚构 host workspace。跨 origin locator 继续隐藏；只显示允许公开的
-形成方式与摘要。后续若要 global 公开跨项目 locator，必须另写权限/来源契约，本任务不推断该例外。
+项目视角用 server catalog 中所选 workspace 形成 exact provenance binding；global 视角使用当前
+WebApplication 已解析的真实 workspace binding。客户端不能为任一视角自由提交 provenance workspace。
+只有 disposition 为 SAME_ORIGIN，且 session/turn/entry locator 完整且仍可由前端打开时，才显示“在
+对话中查看”。
+
+`ctx:global` placement 本身不能放宽来源 fence：global 记忆若来自另一 project/transient origin，locator
+继续隐藏，只显示允许公开的形成方式与摘要。后续若要 global 公开跨 workspace locator，必须另写
+权限/来源契约，本任务不推断该例外。
 
 ---
 
@@ -377,10 +440,15 @@ project catalog 从 pulsara_v3.sessions 读取：
 - 按 workspace_id 聚合；
 - 取每组 updated_at 最新 session 的 workspace_root 和 workspace_label；
 - transient 永久排除；
-- keyset 为 last_opened_at DESC、workspace_id DESC；
+- keyset 为 last_activity_at DESC、workspace_id DESC，其中 last_activity_at = MAX(session.updated_at)；
 - 不复用 /api/sessions 的 include_closed=False 结果。
 
 目录行不存在并不删除 project identity，也不隐藏已有 memory。
+
+catalog row 对外携带 `workspace_id`、label、root 与 last_activity_at。当前 project workspace_id 的值与
+canonical project context identity 相同，但 API 仍把它当 server catalog selection key：客户端不能
+另传自由格式 context_id，服务端必须先在当前 domain 的 catalog 中 exact join workspace_id，再从该
+row 得到查询 context。不得再创造语义重复的 `project_id` 字段。
 
 ### 6.2 Catalog query
 
@@ -415,6 +483,8 @@ detail 以 server-owned domain、exact context_id 和 fact id 三者查找，不
 
 管理读取失败不能 fallback 到 model recall，也不能用旧缓存伪装成功。
 
+ACTIVE 与 SUPERSEDED fact 都可以从详情发起删除；“已更新”表示历史状态，不是只读保留策略。
+
 ---
 
 ## 7. 删除关系代数
@@ -445,13 +515,15 @@ context 后果对四类 source 完全相同：
 - 因此删除一个 global basis 可能级联到多个项目中的任意四类 dependent；
 - 删除一个 project basis 不会跨到其他项目。
 
-确认 UI 必须按“所有项目”及各项目 label 分组展示完整 cascade，不能只显示数量。
+确认 UI 必须按“跨对话”及各项目 label 分组展示完整 cascade，不能只显示数量，也不能把 global
+placement 写成暗示 universal applicability 的“所有项目”。
 
 ### 7.2 SUPERSEDES
 
 a SUPERSEDES b 表示 a 更新了 b，b 为 SUPERSEDED。
 
-- 删除 a：删除 relation；若 b 不在 C 且没有其他合法 incoming superseder，b 成为 restoration candidate。
+- 删除 a：删除 relation；若 b 不在 C 且没有其他合法 incoming superseder，b 成为 preliminary
+  restoration candidate。
 - 删除 b：删除 relation；a 不加入 C，继续存活。
 - 若 a、b 都在 C：删除 relation，不恢复。
 
@@ -459,11 +531,27 @@ a SUPERSEDES b 表示 a 更新了 b，b 为 SUPERSEDED。
 
 - a supersedes b，b supersedes c；
 - 删除 a 后，b 恢复 ACTIVE，b 到 c 的 relation 保留，c 仍为 SUPERSEDED；
-- 删除 b 后，a 保留，a 到 b 被移除；b 到 c 被移除，c 进入恢复判断。
+- 单独删除 b 时，a 保留，a 到 b 与 b 到 c 都被移除；c 虽然失去直接 incoming relation，
+  但不能自动恢复，因为仍有存活的较新祖先 a。preview 必须进入 NEEDS_RESOLUTION，用户若坚持删除
+  b，需要同时明确删除 c；
+- 同时删除 a、b 时没有存活的较新祖先，c 才进入普通恢复 admission。
 
-一个既有 source 可以通过多个 APPLIED_TO_EXISTING candidates supersede 多个 target。删除 source 时，每个存活 target 都独立进入恢复集合；不能只恢复第一条。
+“存活的较新祖先”按删除前同一事务快照中的 SUPERSEDES 有向图计算：对某个因 C 中 source 被移除
+而失去最后直接 incoming superseder 的 target，沿这些被删 source 的 incoming SUPERSEDES 方向向上
+遍历；若能到达任何 C 外 fact，则该 target 存在 surviving supersede ancestry。遍历必须 cycle-safe、
+无任意 hop cap。
 
-当前生产 writer 通过 target row lock 和 ACTIVE lifecycle 检查阻止第二个 incoming superseder，但删除 executor 不把“最多一个”当成数据库结构前提。它必须读取并计数每个 target 的全部存活 incoming SUPERSEDES；只有删除后计数为零时，该 target 才进入恢复判断。
+该检查防止删除链中间节点后，把更旧内容与仍存活的更新内容同时激活。实现不能合成 `a -> c`
+relation，因为没有合法 relation owner/provenance；也不能留下失去解释的 SUPERSEDED orphan。它只把
+c 暴露为需要用户一并删除的阻塞项，不自动删除 c，也不把 a 选成新的数据库 winner。
+
+一个既有 source 可以通过多个 APPLIED_TO_EXISTING candidates supersede 多个 target。删除 source 时，
+每个存活 target 都独立进入 preliminary restoration 集合，再分别做 ancestry 与 hard admission；不能
+只处理第一条。
+
+当前生产 writer 通过 target row lock 和 ACTIVE lifecycle 检查阻止第二个 incoming superseder，但删除
+executor 不把“最多一个”当成数据库结构前提。它必须读取并计数每个 target 的全部存活 incoming
+SUPERSEDES；只有删除后计数为零时，该 target 才进入 preliminary restoration 判断。
 
 ### 7.3 CONTRADICTS
 
@@ -485,6 +573,9 @@ a CONTRADICTS b 是无向冲突：
 - 删除 C 的所有 incident relations；
 - 对 incident SUPERSEDES 的存活 target 做恢复规划；
 - 对 incident SUPERSEDES / CONTRADICTS 的存活 source 做 candidate cleanup 或归一化；
+- 对每个拟恢复 fact，投影其在最终状态中仍存活且两端都将为 ACTIVE 的 CONTRADICTS；它们不是新的
+  restoration blocker，但 confirmation 必须说明恢复后哪些事实会重新显示“需要确认”，其中
+  RESPONSE_PREFERENCE 继续按既有规则不进入有效偏好集；
 - 如果用户把某个不可恢复旧事实加入“一并删除”，以它为新 seed 重新计算整个 BASED_ON 闭包和恢复集合。
 
 不能在旧闭包上局部打补丁。
@@ -527,7 +618,8 @@ count 或 bytes 任一超界，计划不可执行。
 preview 有两种状态：
 
 - READY：所有存活 restoration candidates 可以同时通过 exact hard admission；
-- NEEDS_RESOLUTION：至少一个 restoration candidate 与当前 ACTIVE 真相、同批恢复或 preference capacity 冲突。
+- NEEDS_RESOLUTION：至少一个 restoration candidate 与当前 ACTIVE 真相、同批恢复或 preference
+  capacity 冲突，或者它仍位于某个 surviving supersede ancestry 之后而不能安全恢复。
 
 NEEDS_RESOLUTION 不签发 execution authority。UI 显示：
 
@@ -535,11 +627,29 @@ NEEDS_RESOLUTION 不签发 execution authority。UI 显示：
 - 为什么不能同时恢复，使用产品文案；
 - 用户可以勾选哪些旧事实“一并永久删除”，再请求一次 preview。
 
-additional_delete_fact_ids 是用户的显式删除授权，不是模型选择。它们成为新 seeds，服务器从头重算完整 plan。对同一 semantic collision group，用户可以全部删除或明确保留至多一个；对 preference capacity group，用户可以保留任意能通过 exact count/bytes admission 的子集。后端不提供隐藏默认 winner，不按时间、id、context 或模型分数自行获胜。
+surviving supersede ancestry 的产品文案为“仍有更新内容保留，这条更早的记忆不能自动恢复”。此时
+可勾选的是该更早 target；不向用户暴露图遍历、source/target 方向或内部 winner 术语。
+
+management API 的 closed product reason 只有：
+
+- ACTIVE_SEMANTIC_COLLISION：“已有相同内容正在使用”；
+- RESTORATION_SEMANTIC_COLLISION：“多条旧记忆不能同时恢复”；
+- RESPONSE_PREFERENCE_CAPACITY：“恢复后回答偏好将超出可用容量”；
+- SURVIVING_SUPERSEDE_ANCESTRY：“仍有更新内容保留，这条更早的记忆不能自动恢复”。
+
+reason 用于 typed frontend branching，但 UI 必须显示上述产品文案与具体 companion/group，不能直接
+渲染 enum，也不能复用 governance decision reason code。
+
+additional_delete_fact_ids 是用户的显式删除授权，不是模型选择。它们成为新 seeds，服务器从头重算
+完整 plan。对只由同批 restoration candidates 构成的 semantic collision group，用户可以全部删除或
+明确保留至多一个；对 preference capacity group，用户可以保留任意能通过 exact count/bytes admission
+的 restoration 子集。后端不提供隐藏默认 winner，不按时间、id、context 或模型分数自行获胜。
 
 如果用户不选择足以消除冲突的 additional deletions，preview 保持 NEEDS_RESOLUTION，删除按钮不签发。
 
-当前 ACTIVE facts 不会被删除流程自动牺牲来给旧事实腾位。用户若想删它们，应另行从其详情发起删除；不能把本 root 的隐式冲突解决扩大成未确认删除。
+当前 ACTIVE fact 与拟恢复事实冲突时，本确认层只提供把拟恢复旧事实一并删除的选项，不会牺牲当前
+ACTIVE fact 来腾位。用户若想保留旧事实、删除当前 ACTIVE fact，应取消本操作，另行从后者详情发起
+删除后再重试；不能把本 root 的隐式冲突解决扩大成未确认删除。
 
 ### 8.4 计划收敛
 
@@ -559,15 +669,21 @@ additional_delete_fact_ids 是用户的显式删除授权，不是模型选择�
 
 ### 9.1 必须删除的 candidates
 
-以下 candidate 连同其 tool result refs 和 basis refs 一起删除：
+清理规则按 canonical ownership 与 FK 引用决定，不把当前 status/reason-code 枚举复制成第二套产品
+状态机：
 
-1. source fact 位于 C 的 ACCEPTED candidate；
-2. relation 被删除且 candidate 为 APPLIED_TO_EXISTING 的 owner；
-3. duplicate_winner_fact_id 指向 C 的 SKIPPED candidate；
-4. SKIPPED_DUPLICATE_RELATION_ALREADY_PRESENT 且任一 endpoint 位于 C 的 candidate；
-5. applied_existing_fact_id 指向 C 的 candidate；
-6. PENDING 或 PROCESSING candidate 的 basis ref 指向 C；
-7. 任何其他通过 related_target_fact_id、duplicate_winner_fact_id、applied_existing_fact_id 或 candidate basis FK 引用 C，且不能按下一节合法归一化的 candidate。
+1. source fact 位于 C 的 owner candidate，连同 tool result refs 与 basis refs 删除；
+2. 被删除 relation 的 owner 若为 APPLIED_TO_EXISTING candidate，删除该 candidate 及 refs；
+3. 被删除 relation 的 owner 若为存活 source fact 的 ACCEPTED candidate，只有满足 9.2 时归一化，
+   不删除；
+4. 其余任何 candidate 只要通过 related_target_fact_id、duplicate_winner_fact_id、
+   applied_existing_fact_id 或 candidate basis FK 引用 C，且不能按 9.2 合法归一化，就连同 refs
+   删除，不区分它当前是 PENDING、PROCESSING、SKIPPED、ABANDONED 或未来仍属同一引用代数的
+   非 owning 状态。
+
+现有 duplicate、duplicate-relation、pending/processing 与 applied cases 仍必须作为代表性测试夹具，
+但删除正确性不依赖 reason code 白名单；新增一个不改变 ownership/FK 代数的治理原因时，不应要求
+同步扩展删除状态机。
 
 如果 governor 已在进程内持有某个随后被删除的 PROCESSING candidate，后续 settlement 必须因 canonical candidate missing / target drift 而安全停止，不得重建候选或事实。
 
@@ -637,15 +753,33 @@ internal expectation 携带事务执行所需的完整 canonical 值：
       restoration_conflicts
       disposition
 
-confirmation 中每个 fact/relation/restore 仍携带 id、exact context_id、lifecycle、kind、fact_semantic_digest、recorded_at、updated_at 和关系端点等防漂移值；它不是只含数量的摘要。candidate status、candidate refs 和内部 reason code 不跨产品边界。
+confirmation 不是只含数量的摘要，各 record 携带与其类型相符的完整 product expectation：
 
-不可变 statement 不需要为了真实性再造 fingerprint；fact_semantic_digest 是现有 canonical semantic boundary，可作为完整 fact expectation 的一个真实字段，但不能代替 lifecycle、relations 或 ownership exact compare。
+- FACT_DELETE / FACT_RESTORE 携 fact id、exact context_id、kind、lifecycle、完整 statement、
+  recorded_at 与 expected pre-execution updated_at；FACT_RESTORE 另带 planned lifecycle ACTIVE，
+  不预报尚未发生的 operation timestamp；
+- RELATION_EFFECT 携 relation id、产品 subject/companion exact fact projection、relative_role、
+  recorded_at、已展示的 product summary，以及 closed effect `REMOVED` 或
+  `BECOMES_ACTIVE_CONFLICT`，不暴露 raw SQL source/target；前端分别显示“将移除该关系”或“恢复后
+  将与 companion 存在冲突”，不能直接渲染 effect enum；
+- RESTORATION_CONFLICT 携受影响 fact 的 exact product projection、closed product reason 与已展示的
+  companion/group，不伪造 relation 不具备的 lifecycle/digest/updated_at 字段。
+
+candidate status、candidate refs 和 governance 内部 reason code 不跨产品边界。
+
+fact_semantic_digest 继续是 repository internal plan 用于 ACTIVE uniqueness/admission 的现有 canonical
+semantic boundary，但不进入浏览器 confirmation：完整 statement、kind、context、lifecycle 与时间已经
+随 typed fact 携带，再带 digest 是重复 DTO fingerprint。它不能代替 relation、ownership 或 exact DML
+compare，也不据此创建 registry。
 
 internal plan 与 user confirmation 都有 canonical sequence 顺序：
 
-- facts 以 memory_domain_id、id；
-- relations 以 id；
+- explicit additional roots 以 fact id；
+- facts 以 memory_domain_id、context_id、id；
+- relation effects 以 relation id、effect、subject fact id、companion fact id；
 - restorations 以 context_id、accepted_at、id；
+- restoration conflicts 以 product reason、context_id、显式 grouping tuple、subject fact id、可选
+  companion fact id；
 - internal candidates 以 id、refs 以 candidate_id/ordinal。
 
 executor 不信任客户端序列来决定删除动作，而是：
@@ -656,7 +790,10 @@ executor 不信任客户端序列来决定删除动作，而是：
 4. 与客户端确认的完整 canonical confirmation sequence 做 exact equality；
 5. 只有 equality 且 disposition READY 才执行 transaction-owned internal plan。
 
-会改变用户可见删除闭包、关系效果、恢复集合、lifecycle、updated_at 或 restoration admission 的漂移都返回 409 MEMORY_DELETION_PLAN_DRIFTED，并附新的 preview。仅 PENDING 到 PROCESSING 而最终 internal cleanup 和用户可见 impact 完全相同，不需要伪造一个用户不可见的 drift；executor 仍必须使用锁内当前 candidate 真相，并通过既有 deferred constraints 与本规范的 affected-subgraph final validation。
+会改变用户可见删除闭包、关系效果、恢复集合、lifecycle、updated_at 或 restoration admission 的漂移都返回 409 MEMORY_DELETION_PLAN_DRIFTED，并附新的 preview。纯 candidate 状态/reason 变化若既不改变
+product confirmation，也不改变 fresh plan 中 delete/normalize action，则不伪造用户不可见的 drift；
+PENDING 到 PROCESSING 只是一个例子，不是硬编码特例。executor 始终使用锁内当前 candidate 真相、
+exact DML result 和既有数据库约束。
 
 禁止把 plan/confirmation 序列化后哈希成 quote fingerprint，也禁止服务端 registry。旧 confirmation 不得被拓宽、修补或继续执行。
 
@@ -666,10 +803,20 @@ src/pulsara_agent/web_app/http_server.py 当前 Application 使用 client_max_si
 
 preview request、preview response、confirmed DELETE request 和大结果采用 application/x-ndjson 的 canonical typed record stream：
 
-- HEADER：view、project、root、disposition；
+- HEADER：view、workspace_id、root、disposition；global view 的 workspace_id 为 null；
 - ADDITIONAL_ROOT：每个用户 seed 一条；
 - FACT_DELETE、RELATION_EFFECT、FACT_RESTORE、RESTORATION_CONFLICT：每个产品 expectation 一条；
 - END：exact record counts 和流终止。
+
+200 deletion result 同样一条 product fact/relation effect 一条 record，最后以 END exact counts 收口；
+candidate delete/normalize 与 ref cleanup 是内部执行细节，不进入 result records，也不以内部行数冒充
+“删除了几条记忆”。
+
+RESTORATION_CONFLICT 不得把整个 collision/capacity/ancestry group 放进一个无界 array。每条只带一个
+subject fact 与至多一个 companion；同组通过现有 typed values 显式归组：semantic collision 使用
+context_id/kind 加该组按 id 排序后的最小 fact id 作为 group anchor，preference capacity 使用 context_id，
+surviving ancestry 使用 blocked target fact id。多成员组发多条 canonical records，前端增量聚合。不得
+为分组新增 digest、group registry 或 durable identity。
 
 一条 record 的最大字节数由现有 memory statement、context、时间和 ID 字段上界机械推导；这是单
 canonical row 的物理协议边界。record 总数和总 body bytes 没有固定 cap。
@@ -730,21 +877,21 @@ memory_relations 的缓存 source_fact_kind / target_fact_kind 没有通过 comp
 
 ACTIVE semantic 的既有 partial unique index 继续保持；它负责 restoration 后真正需要的最终 ACTIVE 冲突防线，不扩展为其他图不变量。
 
-### 11.4 executor-local affected-subgraph final validation
+### 11.4 Exact DML 结果与既有约束
 
-删除事务不新增全局 lifecycle 或 lineage trigger。executor 在 commit 前只对本次受影响子图做一次 exact final validation：
+删除事务不新增全局 lifecycle/lineage trigger，也不在完成 DML 后再运行一套重复的 affected-subgraph
+证明器。closure、candidate action、supersede ancestry 与 restoration admission 都在锁内 fresh plan 中
+确定；executor 只执行该 transaction-owned plan。
 
-- closure C 中的 facts 全部不存在；
-- candidates_to_delete、其 tool/basis refs 和所有应删除的 incident relations 全部不存在；
-- 每个归一化后存活的 accepted candidate 都是 decision_kind = ACCEPT、related_target_fact_id = NULL、
-  decision_public_summary 与归一化前 exact byte-identical 且非空，并仍 exact join 自己的 accepted fact；
-- 对每个因删除 incident SUPERSEDES 而受影响、且自身仍存活的 target，重新计算全部存活 incoming SUPERSEDES 并做穷尽分区：计数为零时，它必须在 facts_to_restore 中且最终为 ACTIVE；计数大于零时，它必须不在 facts_to_restore 中且最终为 SUPERSEDED；
-- 被删 facts 没有残留 embedding；
-- response preference 的最终 count、canonical bytes 和既有 ACTIVE semantic uniqueness 都仍通过最终 admission。
+每个 DELETE/UPDATE 使用 RETURNING 或等价 exact row identity，比对实际行集合与计划集合；缺行、
+多行或旧值不符都 rollback，并按真实原因归类为 drift、已枚举的并发重规划或实现错误。candidate
+归一化必须 exact compare 旧字段，并保留 decision_public_summary bytes。恢复前在既有 advisory lock
+内重读该 transition 真正需要的 incoming superseders、surviving ancestry、ACTIVE semantic 集合与
+response-preference canonical projection；这属于状态转换本身，不是事后全图验证。
 
-validation 必须从数据库最终事务视图重新查询，不以先前 plan、删除行数或 Python 对象别名代替。任何不一致都 rollback 并作为实现错误或已枚举的并发重规划结果返回；禁止在 validation 中自动修复。
-
-它不得扫描或断言全库的 ACTIVE/SUPERSEDED 等价关系，也不得把历史上与本次操作无关的异常变成本次删除 blocker。现有 lineage triggers、CHECK、FK 和 unique constraints 原样保留并照常执行。
+commit 前强制检查既有 deferred constraints。保留的 RESTRICT/NO ACTION FK、lineage triggers、
+CHECK、ACTIVE semantic unique index 与 embedding CASCADE 继续作为数据库防线。实现不得为了“再
+证明一次”扫描本次子图或全库，也不得把历史上与本次操作无关的异常变成本次删除 blocker。
 
 ### 11.5 Runtime grants
 
@@ -778,10 +925,11 @@ memory_embeddings 已有 DELETE，且 fact FK 的既有 CASCADE 保留。不能�
 
 ### 11.7 精确数据库 delta 与最小性证明
 
-以下 delta 的比较起点必须是前置 governance hard cut 已完成、且已经包含
-`INSUFFICIENT_SOURCE_SUPPORT` CHECK value 的 clean-v0 catalog。不得拿前置实施前的 catalog
-作为本规范的直接 before snapshot，也不得把前置规范的 reason vocabulary 变化误算为 deletion
-功能新增的第四类数据库变化。
+以下 delta 的比较起点必须是当前 `13d43930`：governance terminal-claim/source-semantics 与
+taxonomy/context subtraction 均已完成，clean-v0 已包含四类 taxonomy、exact context、recorded_at
+projection、当前 reason vocabulary（包括 `INSUFFICIENT_SOURCE_SUPPORT`）及 reflector hard cut。
+不得拿任一前置实施前的 catalog 作为本规范的直接 before snapshot，也不得把前置变化误算为
+deletion 功能的数据库变化。
 
 从该前置基线起，本任务允许的数据库差异封闭为三类：
 
@@ -807,8 +955,9 @@ preview 是只读、可重试操作：
 4. 求 incoming BASED_ON 最小闭包 C；
 5. 读取 C 的所有 incident relations；
 6. 计算 candidate delete/normalize actions；
-7. 计算存活 SUPERSEDES targets 的 restoration candidates；
-8. 读取最终 admission 所需的 exact active semantic winners 和 preference scopes；
+7. 计算存活 SUPERSEDES targets 的 preliminary restoration candidates；
+8. 读取最终 admission 所需的 exact active semantic winners、surviving supersede ancestry 和
+   preference contexts；
 9. 构造 READY 或 NEEDS_RESOLUTION internal plan，并把 product confirmation canonical records 写入 operation-local transport buffer；
 10. rollback/结束只读事务并释放 DB borrow；只由 response writer 线性接管临时 buffer，不保留 registry entry。
 
@@ -829,18 +978,19 @@ execute 使用 SERIALIZABLE transaction 和 MEMORY_MAINTENANCE lane：
 9. 在锁内再次重新规划；
 10. 从锁内 internal plan 投影 canonical confirmation iterator，与客户端 streamed confirmation 逐条 exact equality；
 11. 不是 READY 或发生 drift：rollback，返回 typed 409；
-12. 为所有受影响 response-preference scopes 按稳定 key 获取现有 advisory transaction locks；
+12. 为所有受影响 response-preference contexts 按稳定 key 获取现有 advisory transaction locks；
 13. 在锁内再次做 exact semantic 与 preference capacity admission；
 14. 删除 candidate tool refs；
 15. 删除 candidate basis refs；
 16. 删除 incident relations；
 17. 归一化存活 accepted candidates；
-18. 删除所有 candidates_to_delete，包括 APPLIED、duplicate、processing 以及 C 中 facts 的 accepted source candidates；fact 到 source candidate 的 deferred NO ACTION FK 允许按 candidate-first 顺序让 accepted pair 在同一事务共同消失；
+18. 删除所有 candidates_to_delete，包括 APPLIED_TO_EXISTING、duplicate、processing 以及 C 中 facts 的 accepted source candidates；fact 到 source candidate 的 deferred NO ACTION FK 允许按 candidate-first 顺序让 accepted pair 在同一事务共同消失；
 19. 删除 C facts；此时所有 candidate target/basis 引用都已清除，embedding 由既有 FK cascade；
 20. 将 approved restoration facts 更新为 ACTIVE、updated_at 为同一 operation timestamp；
-21. 执行 executor-local affected-subgraph final validation，并强制既有 deferred constraints 在 commit 前检查；
+21. exact 校验各 DML 返回行集合，并强制既有 deferred constraints 在 commit 前检查；
 22. commit；
-23. 返回 deleted/restored/normalized 的产品 projection。
+23. 返回 deleted/restored facts 与已应用 relation effects 的产品 projection；candidate normalization
+    只留在内部结果/诊断，不跨产品 API。
 
 实现可以在满足 FK 顺序的前提下调整 14 至 20 的局部顺序，但必须先移除所有指向 C 的 RESTRICT 引用，再删除 C facts；最终状态、锁序和单事务边界不得改变。任何异常 rollback 全部操作。
 
@@ -878,7 +1028,7 @@ embedding worker 对已删除 fact 的 upsert 由 exact fact FK/refetch 拒绝�
 
 - HTTP request stream 只表达用户 intent 和 confirmed typed product confirmation；
 - Web controller 不持有 SQL transaction；
-- kernel management service 持有一次 provider borrow；
+- kernel management service 持有一次 PostgreSQL connection-provider borrow；
 - repository planner/executor 持有一次 transaction；
 - internal plan 没有跨请求服务器 owner；
 - transport TemporaryFile、connection、borrow、cursor 均有唯一 owner，并在 success/error/cancel 后释放一次；
@@ -904,18 +1054,20 @@ embedding worker 对已删除 fact 的 upsert 由 exact fact FK/refetch 拒绝�
 查询：
 
 - view = global | project
-- project_id，仅 project 必填
+- workspace_id，仅 project 必填；global 必须省略
 - lifecycle = active | updated
 - kind，可选产品值
 - search，可选
 - page_size
 - cursor
 
-后端将产品值映射到 server-owned exact context_id；客户端不能提交 raw context_id。project_id 必须 exact join 当前 project catalog 中 workspace_kind='project' 的行。
+后端将产品值映射到 server-owned exact context_id；客户端不能提交 raw context_id。workspace_id 必须
+exact join 当前 server-owned domain 的 project catalog 行，服务端再从该行取得 canonical project
+context。不存在独立 project_id/context_id 兼容别名。
 
 ### 13.3 GET /api/memories/{fact_id}
 
-查询参数与 catalog 的 view/project fence 相同，另有：
+查询参数与 catalog 的 view/workspace_id fence 相同，另有：
 
 - relation_page_size
 - relation_cursor
@@ -924,7 +1076,7 @@ embedding worker 对已删除 fact 的 upsert 由 exact fact FK/refetch 拒绝�
 
 ### 13.4 POST /api/memories/{fact_id}/deletion-preview
 
-request content-type 为 application/x-ndjson。第一条 HEADER 携 view/project/root，随后每个 additional_delete_fact_id 使用一条 ADDITIONAL_ROOT，最后必须有 END。不得把所有 additional roots 拼回一个受 8 MiB 限制的 JSON array。
+request content-type 为 application/x-ndjson。第一条 HEADER 携 view/workspace_id/root，随后每个 additional_delete_fact_id 使用一条 ADDITIONAL_ROOT，最后必须有 END。不得把所有 additional roots 拼回一个受 8 MiB 限制的 JSON array。
 
 response 以 NDJSON 流返回 READY 或 NEEDS_RESOLUTION 的 FrozenMemoryDeletionConfirmation product records。runtime adapter 增量 decode，MemoryView 可以逐步虚拟化展示，但只有 END 校验完成后该 confirmation 才可确认。additional roots 可以跨项目，因为 global-basis dependency cascade 本身可能跨项目；每一个 ID 必须属于 server-owned domain，并在 impact 中完整显示。
 
@@ -932,7 +1084,7 @@ response 以 NDJSON 流返回 READY 或 NEEDS_RESOLUTION 的 FrozenMemoryDeletio
 
 request content-type 为 application/x-ndjson：
 
-- HEADER 携 view/project/root；
+- HEADER 携 view/workspace_id/root；
 - ADDITIONAL_ROOT 逐条表达用户额外删除授权；
 - 其余 records 是 preview 已完整显示并确认的 canonical FrozenMemoryDeletionConfirmation；
 - END 结束。
@@ -953,6 +1105,8 @@ DELETE 缺失完整 confirmed confirmation sequence 或 END 时不能执行，�
 
 ### 13.6 安全与文案
 
+- preview/DELETE raw-stream routes 继续经过 LocalHttpServer 既有 Host、Origin、Sec-Fetch-Site 与 draining
+  middleware；绕过 aggregate body read 不能绕过 same-origin 安全边界，也不另开 listener；
 - 不接受 memory_domain_id；
 - 不回传 raw SQL、candidate internal status 或 reason code；
 - 所有 confirmation impact、error 和 detail 都使用产品 DTO 与产品文案；
@@ -996,15 +1150,17 @@ MemoryView 独立维护：
 
 - root 完整正文；
 - 直接删除和 BASED_ON cascade 的完整事实清单；
-- 按所有项目/项目名分组；
+- 按“跨对话”/项目名分组；
 - 将移除的冲突/更新关系的产品影响；
 - 将恢复为“正在使用”的旧事实；
+- 因恢复而重新成为活动状态的冲突，以及对应“需要确认”/回答偏好暂不使用提示；
 - 不删除原始对话的说明。
 
 NEEDS_RESOLUTION 时：
 
 - 列出不可同时恢复的旧事实；
-- 显示“已有相同内容正在使用”或“恢复后回答偏好将超出可用容量”等产品文案；
+- 显示“已有相同内容正在使用”“恢复后回答偏好将超出可用容量”或“仍有更新内容保留，这条更早的
+  记忆不能自动恢复”等对应产品文案；
 - 提供“一并永久删除”勾选；
 - 勾选变化后重新 preview；
 - 只有新 preview READY 才启用最终删除按钮。
@@ -1087,6 +1243,7 @@ active turn 与 idle session 的删除数据库语义完全相同。差异只在
 - frontend/lib/pulsara-types.ts
 - frontend/lib/runtime-adapter.ts
 - frontend/components/activity-rail.tsx
+- frontend/components/overlays.tsx
 - frontend/app/pulsara-app.tsx
 - frontend/app/globals.css 或对应拆分样式入口
 
@@ -1096,6 +1253,9 @@ active turn 与 idle session 的删除数据库语义完全相同。差异只在
 - src/pulsara_agent/web_app/memory_controller.py
 - frontend/components/memory-view.tsx
 - frontend/app/styles/memory.css
+
+若样式采用 Next layout 直接 import 而非 globals.css 聚合，再同步修改 frontend/app/layout.tsx；两种入口
+只选当前项目的一条真实样式加载路径，不做重复 import。
 
 按 verifier 真源需要修改：
 
@@ -1122,8 +1282,12 @@ active turn 与 idle session 的删除数据库语义完全相同。差异只在
 并更新：
 
 - tests/test_stage5_clean_migration.py
+- tests/test_stage2_conversation_kernel_postgres.py
 - tests/test_round8_advisory_memory.py
 - tests/test_local_web_http_surface.py
+- tests/test_stage2_conversation_runner.py
+- tests/test_repository_modularization_architecture.py
+- tests/test_fingerprint_subtraction_architecture.py
 - frontend/lib/runtime-adapter.test.ts
 - frontend/app/pulsara-app.test.tsx
 
@@ -1131,8 +1295,8 @@ active turn 与 idle session 的删除数据库语义完全相同。差异只在
 
 ## 17. 严格实施顺序
 
-0. 完成 governance 与 taxonomy/context subtraction 两项前置 hard cut 的全部 DoD、PostgreSQL 和
-   real-provider semantic dogfood；确认唯一 clean-v0 baseline 已切换到四类/exact-context 完成态。
+0. 核验 `13d43930` 中 governance 与 taxonomy/context subtraction 两项前置 hard cut 的完成态、
+   PostgreSQL/real-provider 证据和唯一四类/exact-context clean-v0 baseline 仍未漂移；不重复实施前置。
 1. 冻结 management DTO、relative relation role、error/disposition；先写纯 contract tests。
 2. 只修改 clean-v0 的 fact 到 source candidate FK action 与五张 memory 表的 runtime DELETE grants，并同步 catalog resources；先用 schema diff 证明没有新增 index、UNIQUE、composite FK、function 或 trigger。
 3. reset 已核验的本地 disposable database，先证明 clean-v0 与现有 memory governance 全绿。
@@ -1163,8 +1327,9 @@ active turn 与 idle session 的删除数据库语义完全相同。差异只在
 - CLOSED-only project 仍出现；
 - transient/quick 永不出现；
 - project path 当前不存在仍出现；
+- 首次进入 project 默认选择最近活动项，刷新时保留仍存在的选择，空 catalog 不 fallback 到 quick；
 - 不同 memory_domain 隔离；
-- client 伪造 context/domain/project id 被拒绝。
+- client 伪造 context/domain/workspace id 被拒绝，project_id/context_id 兼容别名不存在。
 
 ### 18.2 Catalog/detail
 
@@ -1172,7 +1337,10 @@ active turn 与 idle session 的删除数据库语义完全相同。差异只在
 - 四类 kind 映射，ACTION_RULE 与兼容别名不存在；
 - global/project 均显示 USER_PROFILE filter，“关于你”不等于 global placement；
 - search 不跨 context/lifecycle；
+- search 只匹配 statement 的大小写不敏感 literal substring，`%`、`_`、`\\` 不成为 wildcard；
+- search 空白归一化、1 KiB UTF-8 transport bound 与最坏编码 next-cursor request exact，超界 400；
 - catalog/detail/relations 的 recorded_at 均来自 accepted_at canonical projection；
+- recorded_at 显示为“记录时间”，只在确有差异时显示 updated_at，二者都不冒充正文事件时间；
 - updated_at/id keyset 无静态数据重复或遗漏；
 - cursor/filter 不一致 400；
 - 多于 100 条 catalog 可继续翻页；
@@ -1188,22 +1356,28 @@ active turn 与 idle session 的删除数据库语义完全相同。差异只在
 - 同一 CONTRADICTS 行打开 b：显示“与 a 存在冲突”；
 - 反向插入/least-greatest 规范化不改变两端文案；
 - raw source/target、decision_kind、reason_code 不渲染；
+- BASED_ON 投影为主动“形成依据”，SUPERSEDES/CONTRADICTS 投影为被动“变化与冲突”，不伪造编辑者；
 - active conflict 与 superseded status 优先级正确。
 
 ### 18.4 单边删除
 
 - BASED_ON 删除 source：target 保留；
 - BASED_ON 删除 target：source 级联删除；
-- SUPERSEDES 删除 source：target 恢复；
+- 单条 SUPERSEDES 且无存活较新祖先时删除 source：target 恢复；
 - SUPERSEDES 删除 target：source 保留且 owner 正确归一化/删除；
-- CONTRADICTS 删除任一端：另一端保留且 conflict badge 消失。
+- CONTRADICTS 删除任一端：另一端保留且 conflict badge 消失；
+- 仅移除 relation 不改写存活 companion 的 updated_at；
+- ACTIVE 与 SUPERSEDED root 都能从详情发起同一 hard-delete 流程。
 
 ### 18.5 复杂图
 
 - BASED_ON 长链；
 - BASED_ON 菱形；
 - BASED_ON cycle-safe 固定点；
-- supersede chain 删除头/中/尾；
+- supersede chain 删除头：下一节点恢复且更旧 relation 保留；
+- supersede chain 单独删除中间节点：存活的较新祖先阻止更旧节点恢复，NEEDS_RESOLUTION；
+- supersede chain 同时删除头和中间节点：最旧节点通过普通 admission 后恢复；
+- supersede chain 删除尾：较新 source 保留，不发生反向 cascade；
 - 一个 existing source supersede 多 target；
 - relation owner 为 source ACCEPTED candidate；
 - relation owner 为 APPLIED_TO_EXISTING candidate；
@@ -1224,6 +1398,7 @@ active turn 与 idle session 的删除数据库语义完全相同。差异只在
 - governor 持有 stale prepared candidate 不复活；
 - skipped duplicate winner 指向被删 fact 时删除；
 - skipped duplicate relation candidate cleanup；
+- 另一个仍服从同一 ownership/FK 代数的非 owning reason/status 无需新增 reason 白名单即可清理；
 - accepted relation candidate 归一化为 ACCEPT，target-independent formation summary exact 保留；
 - APPLIED_TO_EXISTING candidate 随 relation 删除；
 - unrelated model_visible_memory_fact_ids occurrence 不触发 transcript 重写；
@@ -1234,6 +1409,9 @@ active turn 与 idle session 的删除数据库语义完全相同。差异只在
 - 无冲突 restoration READY；
 - 与现存 ACTIVE semantic collision；
 - 多个 restoration candidates 互相 semantic collision；
+- surviving supersede ancestry 阻止旧 target 恢复，用户一并删除 target 后 READY；
+- restoration 重新激活既有 CONTRADICTS 时仍可 READY，但 confirmation 明列两端的新“需要确认”状态，
+  RESPONSE_PREFERENCE 不进入有效偏好集；
 - user additional deletion 解决 collision；
 - 后端不按时间/id 选择 winner；
 - response preference count 正好 16 通过、17 拒绝；
@@ -1248,7 +1426,9 @@ active turn 与 idle session 的删除数据库语义完全相同。差异只在
 - fact 到 source candidate 的 deferred NO ACTION 允许 candidate-first accepted pair 同事务删除；
 - 反向 candidate 到 fact 的 RESTRICT 保持，fact-first 和任一单边删除仍失败；
 - 遗漏 candidate target、basis ref 或 relation owner 的清理仍被保留的 RESTRICT FK 拒绝；
-- executor final validation 分别捕获遗漏 BASED_ON dependent、遗漏 candidate 归一化、incoming 已为零却遗漏 restoration、错误 restoration 分区和 orphan embedding，并使整个事务 rollback；
+- planner tests 分别证明 BASED_ON closure、candidate 归一化、incoming/ancestry restoration 分区；
+- executor 对每类 DELETE/UPDATE 的 RETURNING 行集合做 exact compare，缺行、多行或旧值漂移均使整个事务 rollback；
+- embedding CASCADE 与既有 FK 证明 fact 删除后不残留 orphan embedding，无第二套事后图 validator；
 - 正常 writer 对同一 target 的并发 supersede 仍由 target row lock 与 ACTIVE lifecycle check 串行化；
 - 即使测试夹具构造多个 incoming SUPERSEDES，executor 也逐条计数，并且只在全部 incoming 都将消失时规划恢复；
 - relation delete 与 target restore、relation delete 与 target delete 的合法事务都可提交；
@@ -1261,7 +1441,8 @@ active turn 与 idle session 的删除数据库语义完全相同。差异只在
 - preview 后新增 incoming BASED_ON，execute 返回 409 fresh preview；
 - preview 后新增 contradiction/supersede，409；
 - preview 后 candidate PROCESSING 到 terminal 且产生新 canonical fact/relation，409；
-- PENDING 到 PROCESSING 但用户 confirmation impact 完全相同，可使用锁内 fresh internal cleanup，不伪造用户不可见 drift；
+- candidate-only 状态/reason 变化但 product confirmation 与 delete/normalize action 完全相同，可使用
+  锁内 fresh internal cleanup，不伪造用户不可见 drift；
 - preview 后 lifecycle/updated_at 变化，409；
 - concurrent governance 与 deletion 无 partial state；
 - deadlock/serialization retry 在同一 deadline 内 fresh replan；
@@ -1277,15 +1458,23 @@ active turn 与 idle session 的删除数据库语义完全相同。差异只在
 - 合法 confirmed confirmation stream 总量超过 8 MiB 仍到达 executor，不被 aiohttp client_max_size 预先 413；
 - 超过 8 MiB 且发生 plan drift 返回业务 409，证明 transport 没有成为 inventory cap；
 - 单 record 超出由字段契约推导的边界返回 400，已读临时文件释放；
+- 大型 collision/capacity/ancestry group 被规范化为多条 bounded RESTORATION_CONFLICT records，
+  不出现无界 record array；
 - truncated/missing END、count mismatch、cancel、read-idle timeout 均零 DB mutation 且唯一关闭 transport owner；
 - preview 释放 DB borrow 后再向慢客户端流式响应；
 - runtime adapter 不把 streamed confirmation 聚合成单一 JSON request body；
 - domain 不能由 client 提交；
+- forged Host、cross-origin 与 cross-site preview/DELETE 在进入 management service 前被既有 middleware
+  拒绝；
 - 400/404/408/409/503/504/507 映射为不同产品状态；
+- 四种 restoration product reason 均映射为产品文案和具体 companion/group，不渲染 enum/governance
+  reason code；
 - AppView memory 可从 rail 与 command palette 到达；
-- global/project tabs、selector、filters、history、pagination；
+- “跨对话”/“项目”tabs、selector、filters、history、pagination；
 - detail 在页面内部，不打开 session inspector；
-- 来源 link 只在 permitted locator 存在时渲染；
+- project 以 catalog selection、global 以真实 WebApplication workspace 做 provenance fence；只在
+  SAME_ORIGIN 且 locator 完整可打开时渲染来源 link，跨 workspace 隐藏；
+- 不渲染 governance model/raw prompt/output/candidate status；
 - 无 edit/disabled fake actions；
 - cascade preview 按项目分组；
 - resolution checkbox 重新 preview；
@@ -1322,6 +1511,10 @@ Web：
 
     .venv/bin/python -m pytest -q tests/test_local_web_http_surface.py tests/test_local_web_memory_management.py
 
+Prefix continuity 与 architecture：
+
+    .venv/bin/python -m pytest -q tests/test_stage2_conversation_runner.py tests/test_repository_modularization_architecture.py tests/test_fingerprint_subtraction_architecture.py
+
 Frontend：
 
     cd frontend
@@ -1336,7 +1529,7 @@ Frontend：
 2. project selector 包含 closed project、排除 quick；
 3. a/b 两端 contradiction 相对文案；
 4. BASED_ON cascade preview；
-5. restoration conflict 的 NEEDS_RESOLUTION；
+5. restoration collision 及 supersede 链中间节点的 surviving-ancestry NEEDS_RESOLUTION；
 6. 人工制造 drift 后 409；
 7. READY 删除成功、页面刷新、数据库 canonical 行核验；
 8. 原始对话仍可打开。
@@ -1365,7 +1558,7 @@ Frontend：
 - 将完整 confirmation JSON.stringify 后交给 8 MiB aggregate request limit；
 - 为绕过 deletion stream 而把整个 WebApplication 的 client_max_size 改成 unlimited；
 - 为本功能新增 incoming SUPERSEDES partial unique index、relation fact_kind composite FK 或全局 lifecycle/lineage constraint trigger；
-- 用全库 lifecycle 扫描代替本次 affected-subgraph final validation；
+- 新增事后 affected-subgraph/全库图扫描，只为重复证明锁内 plan 与 exact DML 已完成的工作；
 - 修改当前 provider prefix；
 - 删除 transcript/tool result 来伪造“彻底遗忘”；
 - 0001 migration、兼容旧 schema、v1/v2 双读写；
@@ -1389,7 +1582,8 @@ Frontend：
 6. 删除 algebra、candidate cleanup、restoration admission 在一个 exact transaction 内实现。
 7. 只有 READY exact plan 能执行，drift 必须 409。
 8. 用户而非模型解决 restoration 冲突。
-9. clean-v0 只包含单向 FK action 与最小 grants 变化；schema diff 证明没有新增 index、constraint trigger、function 或 composite FK，executor-local final validation 经 PostgreSQL 证明。
+9. clean-v0 只包含单向 FK action 与最小 grants 变化；schema diff 证明没有新增 index、constraint
+   trigger、function 或 composite FK，exact DML result 与既有 deferred constraints 经 PostgreSQL 证明。
 10. 没有新增 durable relation/event/job/checkpoint/registry 或兼容路径。
 11. provider prefix continuity 与下一 ROOT prompt 生效时点有测试。
 12. 超过 8 MiB 的 confirmed confirmation stream 能进入 executor，且没有 total inventory cap、plan registry 或全局 unlimited body。

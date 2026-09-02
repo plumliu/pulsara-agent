@@ -187,10 +187,10 @@ CREATE TABLE pulsara_v3.turns (
     permission_plan_revision_at_admission bigint,
     permission_inherited_from_turn_id text,
     permission_contract_id text NOT NULL CHECK (
-        permission_contract_id = 'pulsara.permission-presets.v1'
+        permission_contract_id = 'pulsara.permission-presets.v2'
     ),
     permission_contract_fingerprint text NOT NULL CHECK (
-        permission_contract_fingerprint = 'sha256:3bd08888d117e2db5a170230def4f93761b2ae9f1a642ee349515992e5f6e371'
+        permission_contract_fingerprint = 'sha256:3d67042487c798bf96e2339aab76ea20268bcaccc65361a262dc8ff7f33dbb51'
     ),
     permission_snapshot_fingerprint text NOT NULL CHECK (
         permission_snapshot_fingerprint ~ '^sha256:[0-9a-f]{64}$'
@@ -770,10 +770,10 @@ CREATE TABLE pulsara_v3.prompt_queue_items (
     permission_plan_revision_at_admission bigint,
     permission_inherited_from_turn_id text,
     permission_contract_id text CHECK (
-        permission_contract_id = 'pulsara.permission-presets.v1'
+        permission_contract_id = 'pulsara.permission-presets.v2'
     ),
     permission_contract_fingerprint text CHECK (
-        permission_contract_fingerprint = 'sha256:3bd08888d117e2db5a170230def4f93761b2ae9f1a642ee349515992e5f6e371'
+        permission_contract_fingerprint = 'sha256:3d67042487c798bf96e2339aab76ea20268bcaccc65361a262dc8ff7f33dbb51'
     ),
     permission_snapshot_fingerprint text CHECK (
         permission_snapshot_fingerprint ~ '^sha256:[0-9a-f]{64}$'
@@ -929,10 +929,10 @@ CREATE TABLE pulsara_v3.plan_workflows (
         'read-only', 'ask-permissions', 'accept-edits', 'bypass-permissions'
     )),
     permission_contract_id text NOT NULL CHECK (
-        permission_contract_id = 'pulsara.permission-presets.v1'
+        permission_contract_id = 'pulsara.permission-presets.v2'
     ),
     permission_contract_fingerprint text NOT NULL CHECK (
-        permission_contract_fingerprint = 'sha256:3bd08888d117e2db5a170230def4f93761b2ae9f1a642ee349515992e5f6e371'
+        permission_contract_fingerprint = 'sha256:3d67042487c798bf96e2339aab76ea20268bcaccc65361a262dc8ff7f33dbb51'
     ),
     workflow_revision bigint NOT NULL CHECK (workflow_revision >= 1),
     accepted_plan_interaction_id text,

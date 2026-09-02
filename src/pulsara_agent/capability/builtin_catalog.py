@@ -106,7 +106,7 @@ _LONG_HORIZON_POLICY_KIND_BY_NAME = {
     "use_new_mcp_tool": BuiltinToolLongHorizonPolicyKind.EVIDENCE_ACQUISITION,
     "read_file": BuiltinToolLongHorizonPolicyKind.EVIDENCE_ACQUISITION,
     "reload_hooks": BuiltinToolLongHorizonPolicyKind.PROCESS_CONTROL,
-    "reload_plugins": BuiltinToolLongHorizonPolicyKind.PROCESS_CONTROL,
+    "reload_capabilities": BuiltinToolLongHorizonPolicyKind.PROCESS_CONTROL,
     "read_mcp_resource": BuiltinToolLongHorizonPolicyKind.EVIDENCE_ACQUISITION,
     "remember": BuiltinToolLongHorizonPolicyKind.SYNTHESIS_MUTATION,
     "report_agent_result": BuiltinToolLongHorizonPolicyKind.SYNTHESIS_MUTATION,
@@ -436,13 +436,13 @@ _SUBAGENT_CONTEXT_TURNS_DESCRIPTION = (
 
 
 _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
-    "reload_plugins": _descriptor(
-        name="reload_plugins",
+    "reload_capabilities": _descriptor(
+        name="reload_capabilities",
         description=(
-            "Reload this running Host's enabled local Agent Plugin view for future "
+            "Reload this running Host's enabled local capability sources for future "
             "Skill, MCP, and Hook use. This does not install, enable, trust, or "
-            "remove a package and does not rewrite the same-epoch SYSTEM, tool "
-            "definitions, or prior messages. It is ROOT-only while "
+            "remove a package or configuration and does not rewrite the same-epoch "
+            "SYSTEM, tool definitions, or prior messages. It is ROOT-only while "
             "bypass-permissions mode is active."
         ),
         input_schema=object_schema(properties={}, required=[]),
@@ -940,8 +940,10 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "edit_file": _descriptor(
         name="edit_file",
         description=(
-            "Replace a specific text block in an existing UTF-8 file inside the "
-            "current workspace. Copy old_text from a recent read and include enough "
+            "Replace a specific text block in an existing local UTF-8 file. Relative "
+            "paths start in the current workspace; absolute paths and ~ are accepted "
+            "when the current run permission allows that host-local write. Copy "
+            "old_text from a recent read and include enough "
             "surrounding text to make it unique. The tool prefers an exact match and "
             "has limited whitespace-tolerant matching; an ambiguous match fails without "
             "writing unless replace_all is true. It preserves the file's line endings "
@@ -955,7 +957,8 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
                     "minLength": 1,
                     "description": (
                         "Existing text file to edit. Relative paths start in the current "
-                        "workspace; the resolved path must remain inside that workspace."
+                        "workspace. Absolute paths and ~ address other local files when "
+                        "the current run permission allows the write."
                     ),
                 },
                 "old_text": {
@@ -991,7 +994,9 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "write_file": _descriptor(
         name="write_file",
         description=(
-            "Create or replace one complete UTF-8 file inside the current workspace. "
+            "Create or replace one complete local UTF-8 file. Relative paths start in "
+            "the current workspace; absolute paths and ~ are accepted when the current "
+            "run permission allows that host-local write. "
             "content is the entire desired file, not a patch; an empty string creates or "
             "truncates the file to zero length. Missing parent directories are created "
             "automatically, and replacing an existing file preserves its line-ending style "
@@ -1006,7 +1011,8 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
                     "minLength": 1,
                     "description": (
                         "File to create or replace. Relative paths start in the current "
-                        "workspace; the resolved path must remain inside that workspace."
+                        "workspace. Absolute paths and ~ address other local files when "
+                        "the current run permission allows the write."
                     ),
                 },
                 "content": {
@@ -2067,7 +2073,7 @@ def _catalog_shape(name: str):
             (ToolInvocationOwnerKind.HOST_MAIN_RUN,),
             "hook_control",
         )
-    if name == "reload_plugins":
+    if name == "reload_capabilities":
         return (
             BuiltinToolBindingKind.PLUGIN_CONTROL,
             BuiltinToolAvailabilityKind.ALWAYS,
@@ -2230,7 +2236,7 @@ def _recovery_contract(name: str) -> BuiltinToolRecoveryContract:
         "read_file",
         "read_mcp_resource",
         "reload_hooks",
-        "reload_plugins",
+        "reload_capabilities",
         "search_files",
         "todo",
     }:

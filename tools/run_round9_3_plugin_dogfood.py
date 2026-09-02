@@ -803,7 +803,7 @@ async def _run_real_provider(
         )
 
         epoch_before_reload = _current_epoch(session)
-        reload_same = await session.reload_plugins(deadline_monotonic=monotonic() + 120)
+        reload_same = await session.reload_capabilities(deadline_monotonic=monotonic() + 120)
         results["after_reload"] = _jsonable(
             await session.run_turn(
                 prompts["after_reload"],
@@ -812,7 +812,7 @@ async def _run_real_provider(
         )
         epoch_after_reload = _current_epoch(session)
         if epoch_before_reload.epoch_nonce != epoch_after_reload.epoch_nonce:
-            raise RuntimeError("reload_plugins rebased the installed epoch")
+            raise RuntimeError("reload_capabilities rebased the installed epoch")
 
         _seed_completed_history(session, segments=4)
         epoch_before_compaction = _current_epoch(session)
@@ -886,7 +886,7 @@ async def _run_real_provider(
         }:
             raise RuntimeError("old Plugin consumer did not hold its package root")
 
-        reload_disabled = await session.reload_plugins(
+        reload_disabled = await session.reload_capabilities(
             deadline_monotonic=monotonic() + 120
         )
         enabled_v2 = service.set_local_plugin_enabled(
@@ -901,7 +901,7 @@ async def _run_real_provider(
         )
         if enabled_v2.disposition is not PluginEnablementDisposition.ENABLED:
             raise RuntimeError("replacement Plugin did not enable")
-        reload_v2 = await session.reload_plugins(deadline_monotonic=monotonic() + 120)
+        reload_v2 = await session.reload_capabilities(deadline_monotonic=monotonic() + 120)
         state_v2 = await session._mcp_supervisor.wait_for_server_settlement(  # noqa: SLF001
             server_id, timeout_seconds=30
         )
@@ -948,7 +948,7 @@ async def _run_real_provider(
         )
         if disabled.disposition is not PluginEnablementDisposition.DISABLED:
             raise RuntimeError("replacement Plugin did not disable")
-        reload_after_disable = await session.reload_plugins(
+        reload_after_disable = await session.reload_capabilities(
             deadline_monotonic=monotonic() + 120
         )
         results["disabled_direct"] = _jsonable(
@@ -962,7 +962,7 @@ async def _run_real_provider(
         )
         if removed.disposition is not PluginRemovalDisposition.REMOVED:
             raise RuntimeError("replacement Plugin did not remove")
-        reload_after_remove = await session.reload_plugins(
+        reload_after_remove = await session.reload_capabilities(
             deadline_monotonic=monotonic() + 120
         )
         management.update(

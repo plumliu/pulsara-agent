@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,11 @@ from pulsara_agent.ports.tool_execution import (
 _PULSARA_HOME_READ_PREFIX = "${PULSARA_HOME}"
 
 
+class WritePathScope(StrEnum):
+    WORKSPACE = "workspace"
+    HOST_LOCAL = "host_local"
+
+
 @dataclass(slots=True)
 class WorkspaceTool:
     """Base class for tools constrained to a workspace root."""
@@ -42,8 +48,22 @@ class WorkspaceTool:
                 user_home_resolution=self.user_home_resolution
             )
 
-    def _resolve_path(self, raw_path: str | None) -> Path:
-        return self._resolve_workspace_path(raw_path)
+    def _resolve_path(
+        self,
+        raw_path: str | None,
+        *,
+        write_scope: WritePathScope = WritePathScope.WORKSPACE,
+    ) -> Path:
+        if write_scope is WritePathScope.WORKSPACE:
+            return self._resolve_workspace_path(raw_path)
+        if write_scope is not WritePathScope.HOST_LOCAL:
+            raise ValueError("write path scope is invalid")
+        if not raw_path or not raw_path.strip():
+            raise ValueError("path is required")
+        path = Path(raw_path).expanduser()
+        if not path.is_absolute():
+            path = self.workspace_root / path
+        return path.resolve()
 
     def _resolved_user_home(self) -> Path | None:
         resolution = self.user_home_resolution

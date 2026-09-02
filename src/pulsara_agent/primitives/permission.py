@@ -12,6 +12,7 @@ from hashlib import sha256
 import json
 from typing import Any, Mapping
 
+
 class PermissionMode(StrEnum):
     READ_ONLY = "read-only"
     ASK_PERMISSIONS = "ask-permissions"
@@ -21,60 +22,72 @@ class PermissionMode(StrEnum):
 
 DEFAULT_PERMISSION_MODE = PermissionMode.BYPASS_PERMISSIONS
 
-PERMISSION_PRESET_CONTRACT_ID = "pulsara.permission-presets.v1"
+PERMISSION_PRESET_CONTRACT_ID = "pulsara.permission-presets.v2"
 
 
 _PRESET_PERMISSION_PAYLOADS: dict[PermissionMode, dict[str, Any]] = {
     PermissionMode.READ_ONLY: {
         "profile": "read_only",
         "approval_policy": "on_request",
-        "terminal_access": "off",
         "execution_boundary": "host",
         "network_isolated": False,
         "filesystem": {
-            "read_file_scope": "host_local_text",
-            "search_files_scope": "host_local_text_guarded_broad_roots",
-            "write_file_scope": "workspace_only",
-            "terminal": "off",
+            "read_text_scope": "host_local",
+            "search_text_scope": "host_local_guarded_broad_roots",
+            "workspace_write": "deny",
+            "outside_workspace_write": "deny",
+        },
+        "terminal": {
+            "access": "off",
+            "workdir_scope": "unavailable",
         },
     },
     PermissionMode.ASK_PERMISSIONS: {
         "profile": "trusted_host",
         "approval_policy": "on_request",
-        "terminal_access": "ask",
         "execution_boundary": "host",
         "network_isolated": False,
         "filesystem": {
-            "read_file_scope": "host_local_text",
-            "search_files_scope": "host_local_text_guarded_broad_roots",
-            "write_file_scope": "workspace_only",
-            "terminal": "host_shell",
+            "read_text_scope": "host_local",
+            "search_text_scope": "host_local_guarded_broad_roots",
+            "workspace_write": "ask",
+            "outside_workspace_write": "ask",
+        },
+        "terminal": {
+            "access": "ask",
+            "workdir_scope": "host_local",
         },
     },
     PermissionMode.ACCEPT_EDITS: {
         "profile": "trusted_host",
         "approval_policy": "never",
-        "terminal_access": "ask",
         "execution_boundary": "host",
         "network_isolated": False,
         "filesystem": {
-            "read_file_scope": "host_local_text",
-            "search_files_scope": "host_local_text_guarded_broad_roots",
-            "write_file_scope": "workspace_only",
-            "terminal": "host_shell",
+            "read_text_scope": "host_local",
+            "search_text_scope": "host_local_guarded_broad_roots",
+            "workspace_write": "allow",
+            "outside_workspace_write": "ask",
+        },
+        "terminal": {
+            "access": "ask",
+            "workdir_scope": "host_local",
         },
     },
     PermissionMode.BYPASS_PERMISSIONS: {
         "profile": "trusted_host",
         "approval_policy": "never",
-        "terminal_access": "allow",
         "execution_boundary": "host",
         "network_isolated": False,
         "filesystem": {
-            "read_file_scope": "host_local_text",
-            "search_files_scope": "host_local_text_guarded_broad_roots",
-            "write_file_scope": "workspace_only",
-            "terminal": "host_shell",
+            "read_text_scope": "host_local",
+            "search_text_scope": "host_local_guarded_broad_roots",
+            "workspace_write": "allow",
+            "outside_workspace_write": "allow",
+        },
+        "terminal": {
+            "access": "allow",
+            "workdir_scope": "host_local",
         },
     },
 }
@@ -90,15 +103,15 @@ def _canonical_json_bytes(value: object) -> bytes:
     ).encode("utf-8")
 
 
-PERMISSION_PRESET_CONTRACT_FINGERPRINT = "sha256:" + sha256(
-    b"pulsara:permission-presets:v1\0"
-    + _canonical_json_bytes(
-        {
-            mode.value: _PRESET_PERMISSION_PAYLOADS[mode]
-            for mode in PermissionMode
-        }
-    )
-).hexdigest()
+PERMISSION_PRESET_CONTRACT_FINGERPRINT = (
+    "sha256:"
+    + sha256(
+        b"pulsara:permission-presets:v2\0"
+        + _canonical_json_bytes(
+            {mode.value: _PRESET_PERMISSION_PAYLOADS[mode] for mode in PermissionMode}
+        )
+    ).hexdigest()
+)
 
 
 def parse_permission_mode(value: str | PermissionMode) -> PermissionMode:

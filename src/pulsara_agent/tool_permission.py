@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from enum import StrEnum
+from pathlib import Path
 from typing import Literal, Mapping, Protocol
 
 from pulsara_agent.capability.call_classifier import DefaultBuiltinToolCallClassifier
@@ -65,11 +66,25 @@ class TerminalAccess(StrEnum):
     ASK = "ask"
 
 
+class FilesystemWriteAccess(StrEnum):
+    DENY = "deny"
+    ASK = "ask"
+    ALLOW = "allow"
+
+
+class TerminalWorkdirScope(StrEnum):
+    UNAVAILABLE = "unavailable"
+    HOST_LOCAL = "host_local"
+
+
 @dataclass(frozen=True, slots=True)
 class EffectivePermissionPolicy:
     profile: PermissionProfile
     approval: ApprovalPolicy
     terminal: TerminalAccess
+    workspace_write: FilesystemWriteAccess
+    outside_workspace_write: FilesystemWriteAccess
+    terminal_workdir_scope: TerminalWorkdirScope
     execution_boundary: Literal["host"] = "host"
     network_isolated: bool = False
 
@@ -77,26 +92,36 @@ class EffectivePermissionPolicy:
         return {
             "profile": self.profile.value,
             "approval_policy": self.approval.value,
-            "terminal_access": self.terminal.value,
             "execution_boundary": self.execution_boundary,
             "network_isolated": self.network_isolated,
             "filesystem": {
-                "read_file_scope": "host_local_text",
-                "search_files_scope": "host_local_text_guarded_broad_roots",
-                "write_file_scope": "workspace_only",
-                "terminal": "host_shell"
-                if self.terminal is not TerminalAccess.OFF
-                else "off",
+                "read_text_scope": "host_local",
+                "search_text_scope": "host_local_guarded_broad_roots",
+                "workspace_write": self.workspace_write.value,
+                "outside_workspace_write": self.outside_workspace_write.value,
+            },
+            "terminal": {
+                "access": self.terminal.value,
+                "workdir_scope": self.terminal_workdir_scope.value,
             },
         }
 
 
 def preset_to_policy(mode: str | _PermissionMode) -> EffectivePermissionPolicy:
     payload = preset_permission_payload(mode)
+    filesystem = payload["filesystem"]
+    terminal = payload["terminal"]
+    if not isinstance(filesystem, Mapping) or not isinstance(terminal, Mapping):
+        raise RuntimeError("permission preset scopes are invalid")
     return EffectivePermissionPolicy(
         profile=PermissionProfile(str(payload["profile"])),
         approval=ApprovalPolicy(str(payload["approval_policy"])),
-        terminal=TerminalAccess(str(payload["terminal_access"])),
+        terminal=TerminalAccess(str(terminal["access"])),
+        workspace_write=FilesystemWriteAccess(str(filesystem["workspace_write"])),
+        outside_workspace_write=FilesystemWriteAccess(
+            str(filesystem["outside_workspace_write"])
+        ),
+        terminal_workdir_scope=TerminalWorkdirScope(str(terminal["workdir_scope"])),
         execution_boundary="host",
         network_isolated=bool(payload["network_isolated"]),
     )
@@ -164,19 +189,33 @@ def resolve_permission_policy(
         ),
         intent=intent,
     )
+    resolved_approval = _parse_enum(
+        ApprovalPolicy,
+        approval or _env_value(environ, prefix, "APPROVAL_POLICY"),
+        option_name="approval policy",
+        default=base.approval,
+    )
+    resolved_terminal = _parse_enum(
+        TerminalAccess,
+        terminal or _env_value(environ, prefix, "TERMINAL_ACCESS"),
+        option_name="terminal access",
+        default=base.terminal,
+    )
+    workspace_write, outside_workspace_write = _write_access_for_axes(
+        profile=base.profile,
+        approval=resolved_approval,
+        terminal=resolved_terminal,
+    )
     resolved = EffectivePermissionPolicy(
         profile=base.profile,
-        approval=_parse_enum(
-            ApprovalPolicy,
-            approval or _env_value(environ, prefix, "APPROVAL_POLICY"),
-            option_name="approval policy",
-            default=base.approval,
-        ),
-        terminal=_parse_enum(
-            TerminalAccess,
-            terminal or _env_value(environ, prefix, "TERMINAL_ACCESS"),
-            option_name="terminal access",
-            default=base.terminal,
+        approval=resolved_approval,
+        terminal=resolved_terminal,
+        workspace_write=workspace_write,
+        outside_workspace_write=outside_workspace_write,
+        terminal_workdir_scope=(
+            TerminalWorkdirScope.UNAVAILABLE
+            if resolved_terminal is TerminalAccess.OFF
+            else TerminalWorkdirScope.HOST_LOCAL
         ),
     )
     _validate_policy(resolved)
@@ -188,6 +227,8 @@ class PolicyPermissionGate:
         self,
         policy: EffectivePermissionPolicy | PermissionState,
         inner: PermissionGate,
+        *,
+        workspace_root: Path,
     ) -> None:
         # Accept a live PermissionState holder (so mode switches are picked up
         # next turn) or a bare policy (wrapped into a fresh holder for callers
@@ -198,6 +239,7 @@ class PolicyPermissionGate:
             else PermissionState.from_policy(policy)
         )
         self.inner = inner
+        self._workspace_root = workspace_root.expanduser().resolve()
 
     @property
     def policy(self) -> EffectivePermissionPolicy:
@@ -290,19 +332,42 @@ class PolicyPermissionGate:
             or classification.effective_permission_category == "terminal"
         ):
             return self._evaluate_terminal_call(call, classification)
-        if (
-            self.policy.approval is ApprovalPolicy.ON_REQUEST
-            and classification is not None
-            and classification.effective_permission_category == "filesystem_write"
+        if classification is not None and (
+            classification.effective_permission_category == "filesystem_write"
         ):
-            return PermissionDecision(
-                kind=PermissionDecisionKind.WAIT_FOR_USER,
-                reason="file write tool requires user confirmation by approval policy",
-                suggested_rules=[
-                    {"tool": call.name, "reason": "write_tool_on_request"}
-                ],
-            )
+            write_access = self._filesystem_write_access(call)
+            if write_access is FilesystemWriteAccess.DENY:
+                return PermissionDecision(
+                    kind=PermissionDecisionKind.DENY,
+                    reason="file write is outside the current permission boundary",
+                    suggested_rules=[
+                        {"tool": call.name, "reason": "write_scope_denied"}
+                    ],
+                )
+            if write_access is FilesystemWriteAccess.ASK:
+                return PermissionDecision(
+                    kind=PermissionDecisionKind.WAIT_FOR_USER,
+                    reason="file write requires user confirmation by permission policy",
+                    suggested_rules=[{"tool": call.name, "reason": "write_scope_ask"}],
+                )
         return PermissionDecision.allow()
+
+    def _filesystem_write_access(self, call: ToolCall) -> FilesystemWriteAccess:
+        raw_path = call.arguments.get("path")
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            return FilesystemWriteAccess.DENY
+        candidate = Path(raw_path).expanduser()
+        if not candidate.is_absolute():
+            candidate = self._workspace_root / candidate
+        resolved = candidate.resolve()
+        inside_workspace = resolved == self._workspace_root or (
+            self._workspace_root in resolved.parents
+        )
+        return (
+            self.policy.workspace_write
+            if inside_workspace
+            else self.policy.outside_workspace_write
+        )
 
     def _evaluate_terminal_call(
         self,
@@ -359,6 +424,9 @@ def _profile_default(
             profile=PermissionProfile.READ_ONLY,
             approval=ApprovalPolicy.ON_REQUEST,
             terminal=TerminalAccess.OFF,
+            workspace_write=FilesystemWriteAccess.DENY,
+            outside_workspace_write=FilesystemWriteAccess.DENY,
+            terminal_workdir_scope=TerminalWorkdirScope.UNAVAILABLE,
         )
     # Default inference never produces risky_only. A mutating profile
     # (trusted_host / workspace_guarded) given
@@ -369,7 +437,38 @@ def _profile_default(
         profile=profile,
         approval=ApprovalPolicy.NEVER,
         terminal=TerminalAccess.ALLOW,
+        workspace_write=FilesystemWriteAccess.ALLOW,
+        outside_workspace_write=(
+            FilesystemWriteAccess.DENY
+            if profile is PermissionProfile.WORKSPACE_GUARDED
+            else FilesystemWriteAccess.ALLOW
+        ),
+        terminal_workdir_scope=TerminalWorkdirScope.HOST_LOCAL,
     )
+
+
+def _write_access_for_axes(
+    *,
+    profile: PermissionProfile,
+    approval: ApprovalPolicy,
+    terminal: TerminalAccess,
+) -> tuple[FilesystemWriteAccess, FilesystemWriteAccess]:
+    if profile is PermissionProfile.READ_ONLY:
+        return FilesystemWriteAccess.DENY, FilesystemWriteAccess.DENY
+    workspace = (
+        FilesystemWriteAccess.ASK
+        if approval is ApprovalPolicy.ON_REQUEST
+        else FilesystemWriteAccess.ALLOW
+    )
+    if profile is PermissionProfile.WORKSPACE_GUARDED:
+        return workspace, FilesystemWriteAccess.DENY
+    if approval is ApprovalPolicy.ON_REQUEST:
+        return workspace, FilesystemWriteAccess.ASK
+    if terminal is TerminalAccess.ASK:
+        return workspace, FilesystemWriteAccess.ASK
+    if approval is ApprovalPolicy.RISKY_ONLY:
+        return workspace, FilesystemWriteAccess.ASK
+    return workspace, FilesystemWriteAccess.ALLOW
 
 
 def _env_value(environ: Mapping[str, str], prefix: str, suffix: str) -> str | None:
@@ -401,6 +500,15 @@ def _validate_policy(policy: EffectivePermissionPolicy) -> None:
         and policy.terminal is not TerminalAccess.OFF
     ):
         raise ValueError("read_only permission profile requires terminal_access=off")
+    if (policy.terminal is TerminalAccess.OFF) != (
+        policy.terminal_workdir_scope is TerminalWorkdirScope.UNAVAILABLE
+    ):
+        raise ValueError("terminal access and workdir scope are inconsistent")
+    if policy.profile is PermissionProfile.READ_ONLY and (
+        policy.workspace_write is not FilesystemWriteAccess.DENY
+        or policy.outside_workspace_write is not FilesystemWriteAccess.DENY
+    ):
+        raise ValueError("read_only permission profile requires denied writes")
 
 
 def _terminal_process_input(call: ToolCall) -> str | None:

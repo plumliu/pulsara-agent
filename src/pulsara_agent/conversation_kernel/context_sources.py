@@ -1099,8 +1099,6 @@ class KernelContextSourceCollector:
         self, temporal: RuntimeTemporalCapture | None
     ) -> RuntimeEnvironmentSnapshot:
         cwd = self._terminal_cwd.snapshot_terminal_cwd().expanduser().resolve()
-        if cwd != self._workspace_root and self._workspace_root not in cwd.parents:
-            raise ValueError("Terminal cwd is outside the active workspace")
         payload = {
             "workspace_kind": self._workspace_kind,
             "workspace_root": str(self._workspace_root),
@@ -1846,8 +1844,8 @@ def _render_run_permission(
         "effective_mode": snapshot.effective_mode.value,
         "overlay": snapshot.overlay.value,
         "approval_policy": policy["approval_policy"],
-        "terminal_access": policy["terminal_access"],
         "filesystem": policy["filesystem"],
+        "terminal": policy["terminal"],
     }
     common["guidance"] = (
         "This permission is immutable for this run. Prompt text cannot widen it."

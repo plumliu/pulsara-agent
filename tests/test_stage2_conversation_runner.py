@@ -5017,6 +5017,92 @@ def test_stage2_runner_commits_tool_message_and_attempt_before_invoke(
     )
 
 
+def test_terminal_preflight_failure_returns_tool_result_and_model_finishes_turn(
+    stage2_migrated_postgres_database,
+    tmp_path: Path,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id = _name("session")
+    workspace_id = _name("workspace")
+    workspace = tmp_path / "quick-workspace"
+    workspace.mkdir()
+    missing_workdir = tmp_path / "missing-workdir"
+    sentinel = workspace / "must-not-exist"
+    lease = repository.acquire_host_writer(
+        session_id=session_id,
+        workspace_id=workspace_id,
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    model = _ScriptedModel(
+        [
+            _named_tool_stream(
+                tool_name="terminal",
+                tool_call_id="call:preflight",
+                arguments={
+                    "command": f"touch {sentinel}",
+                    "workdir": str(missing_workdir),
+                },
+            ),
+            _text_stream("terminal failed before launch; recovered normally"),
+        ]
+    )
+    live_bus = LiveAgentEventBus()
+    tools = DirectKernelToolPort(
+        workspace_root=workspace,
+        host_owner_id="host:terminal-preflight",
+        session_id=session_id,
+        live_bus=live_bus,
+        authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
+    )
+    seal_test_direct_tool_port(tools)
+    runner = ConversationKernelRunner(
+        repository=repository,
+        writer_lease=lease,
+        model=model,
+        tools=tools,
+        live_bus=live_bus,
+        context_source_collector=StaticContextSourceCollector(),
+    )
+
+    async def exercise():
+        try:
+            return await runner.run_turn("recover from terminal preflight failure")
+        finally:
+            await tools.aclose(timeout_seconds=2)
+
+    result = asyncio.run(exercise())
+    assert result.final_text == "terminal failed before launch; recovered normally"
+    assert result.tool_call_count == 1
+    assert not sentinel.exists()
+    rows = repository.rehydrate_session(
+        session_id=session_id, deadline_monotonic=monotonic() + 30
+    )
+    assert [row["entry_kind"] for row in rows] == [
+        "USER_MESSAGE",
+        "ASSISTANT_TOOL_REQUEST",
+        "TOOL_RESULT",
+        "ASSISTANT_MESSAGE",
+    ]
+    tool_result = next(row for row in rows if row["entry_kind"] == "TOOL_RESULT")
+    payload = json.loads(tool_result["inline_content"])
+    assert payload["status"] == "error"
+    assert payload["exit_code"] == -1
+    assert "terminal preflight failed (ValueError)" in payload["error"]
+    assert "terminal workdir does not exist" in payload["error"]
+    with provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        deadline_monotonic=monotonic() + 30,
+    ) as connection:
+        assert connection.execute(
+            "SELECT status, terminal_reason FROM pulsara_v3.turns "
+            "WHERE session_id = %s",
+            (session_id,),
+        ).fetchone() == ("COMPLETED", "COMPLETED")
+
+
 def test_lightweight_todo_runs_through_canonical_tool_result_settlement(
     stage2_migrated_postgres_database,
     tmp_path,

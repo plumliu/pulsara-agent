@@ -11,6 +11,7 @@ from pulsara_agent.terminal_process.manager import (
     TerminalSessionManager,
 )
 from pulsara_agent.terminal_process.models import (
+    TerminalCwdScope,
     TerminalPhysicalState,
     TerminalProcessInfo,
     TerminalProcessLog,
@@ -21,6 +22,7 @@ from pulsara_agent.terminal_process.models import (
 )
 
 __all__ = [
+    "TerminalCwdScope",
     "TerminalProcessInfo",
     "TerminalForegroundDecisionAttemptHandle",
     "TerminalForegroundDecisionState",

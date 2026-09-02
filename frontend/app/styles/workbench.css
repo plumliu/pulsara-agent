@@ -213,6 +213,15 @@
 .terminal-command span { color: #7c808b; }
 .terminal-success { color: #8fc2a2; }
 .terminal-cursor { display: inline-block; width: 4px; height: 9px; margin-left: 4px; vertical-align: -1px; background: var(--amber); animation: blink 1s steps(1) infinite; }
+.mcp-trace-details { display: grid; gap: 9px; margin-bottom: 9px; color: #cecac1; font-family: var(--sans); }
+.mcp-trace-details dl { display: grid; gap: 4px; margin: 0; }
+.mcp-trace-details dl > div { display: grid; grid-template-columns: 78px minmax(0,1fr); gap: 10px; align-items: baseline; }
+.mcp-trace-details dt { color: #7f828a; font-size: var(--type-caption); }
+.mcp-trace-details dd { min-width: 0; margin: 0; color: #d9d5cc; font-family: var(--mono); font-size: var(--type-label); overflow-wrap: anywhere; }
+.mcp-trace-list { display: grid; gap: 5px; }
+.mcp-trace-list__item { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 6px 8px; border: 1px solid rgba(255,255,255,.065); border-radius: 7px; background: rgba(255,255,255,.025); }
+.mcp-trace-list__item strong { min-width: 0; color: #d9d5cc; font-family: var(--mono); font-size: var(--type-label); overflow-wrap: anywhere; }
+.mcp-trace-list__item span { flex: none; color: #8f929a; font-size: var(--type-caption); }
 .terminal-output footer { display: flex; align-items: center; justify-content: space-between; margin: 8px -12px 0; padding: 7px 10px; border-top: 1px solid rgba(255,255,255,.055); color: #7f828a; font-family: var(--sans); font-size: var(--type-caption); }
 .terminal-output footer button { background: transparent; color: #9fafe9; font-size: var(--type-caption); }
 

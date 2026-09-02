@@ -1208,6 +1208,10 @@ class ToolBatchExecutor:
                         attempt_permission_snapshot_fingerprint=(
                             attempt_permission_snapshot_fingerprint
                         ),
+                        permission_confirmation_granted=(
+                            machine_policy_kind
+                            is KernelToolAuthorizationKind.REQUIRE_CONFIRMATION
+                        ),
                         subagent_parent_context_subject=(
                             subagent_parent_context_subject
                         ),

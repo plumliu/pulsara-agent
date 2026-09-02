@@ -28,7 +28,7 @@ from pulsara_agent.tools.builtins.schemas import (
     required_str_arg,
     str_arg,
 )
-from pulsara_agent.tools.builtins.workspace import WorkspaceTool
+from pulsara_agent.tools.builtins.workspace import WorkspaceTool, WritePathScope
 
 
 MAX_READ_LINES = 2_000
@@ -520,8 +520,15 @@ class SearchFilesTool(WorkspaceTool):
 class EditFileTool(WorkspaceTool):
     name: str = "edit_file"
 
-    def execute(self, call: ToolCall) -> ToolExecutionResult:
-        path = self._resolve_path(str_arg(call.arguments, "path"))
+    def execute(
+        self,
+        call: ToolCall,
+        *,
+        write_scope: WritePathScope = WritePathScope.WORKSPACE,
+    ) -> ToolExecutionResult:
+        path = self._resolve_path(
+            str_arg(call.arguments, "path"), write_scope=write_scope
+        )
         old_text = required_str_arg(call.arguments, "old_text")
         new_text = str_arg(call.arguments, "new_text")
         if new_text is None:
@@ -597,13 +604,22 @@ class EditFileTool(WorkspaceTool):
 class WriteFileTool(WorkspaceTool):
     name: str = "write_file"
 
-    def execute(self, call: ToolCall) -> ToolExecutionResult:
-        path = self._resolve_path(str_arg(call.arguments, "path"))
+    def execute(
+        self,
+        call: ToolCall,
+        *,
+        write_scope: WritePathScope = WritePathScope.WORKSPACE,
+    ) -> ToolExecutionResult:
+        path = self._resolve_path(
+            str_arg(call.arguments, "path"), write_scope=write_scope
+        )
         if "content" not in call.arguments:
             raise ValueError("content is required")
         content = str_arg(call.arguments, "content")
         if content is None:
             raise ValueError("content must be a string")
+        if path.exists() and not path.is_file():
+            raise ValueError(f"path is not a regular file: {path}")
         state = _state_for_workspace(self.workspace_root)
         path_lock = state.lock_for_path(path)
         with path_lock:

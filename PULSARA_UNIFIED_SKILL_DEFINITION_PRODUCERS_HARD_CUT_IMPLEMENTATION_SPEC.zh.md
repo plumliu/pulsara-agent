@@ -512,6 +512,7 @@ Official inventory在代码中closed为：
 
 ```text
 EXPECTED_BUNDLED_SKILL_NAMES = (
+  "pulsara-mcp-installer",
   "pulsara-plugin-installer",
   "pulsara-skill-creator",
   "pulsara-skill-installer",
@@ -633,7 +634,7 @@ Bundled expected-name tuple自身必须unique；package inventory duplicate/miss
 | 64 KiB document及frontmatter/YAML/field bounds | §1.1 parser，per document，三个producer与management共用 |
 | `MAX_SKILL_DIRECT_CHILDREN = 1024` | loose producer，per each of four roots |
 | `MAX_DISCOVERY_SKILL_BYTES = 16 MiB` | loose producer，一次four-root observation读取的全部candidate `SKILL.md` bytes |
-| exact three official bundled names | bundled product inventory，不是通用resource cap |
+| exact four official bundled names | bundled product inventory，不是通用resource cap |
 | `MAX_SKILL_LOCATION_BYTES = 1024` | candidate placement/enrichment，三个producer共用 |
 | `MAX_ADMITTED_SKILLS = 64` | central resolver，最终effective winners总数，不是per producer |
 | `MAX_SKILL_CATALOG_UTF8_BYTES = 384 KiB` | sole catalog renderer，最终effective catalog |
@@ -863,6 +864,8 @@ context_fingerprint(
             "BUNDLED",
         ),
         "bundled_names": (
+            "pulsara-mcp-installer",
+            "pulsara-plugin-installer",
             "pulsara-skill-creator",
             "pulsara-skill-installer",
         ),
@@ -1008,8 +1011,9 @@ Release/user guidance必须明确：现有user path可能遮挡新版built-in；
 
 ### 9.4 Bundled Skill guidance
 
-Package内`pulsara-plugin-installer`、`pulsara-skill-creator`与`pulsara-skill-installer`本身成为direct bundled definitions：
+Package内`pulsara-mcp-installer`、`pulsara-plugin-installer`、`pulsara-skill-creator`与`pulsara-skill-installer`本身成为direct bundled definitions：
 
+- MCP installer只编排正式`pulsara mcp`配置/doctor、running Host reload与late-ready meta-tool路径；不直接编辑YAML、不建立第二套安装器、不猜测endpoint/tool schema，也不授予permission、workspace trust或remote-effect authority；
 - plugin installer调用Round 9.3唯一Agent Plugins 1.0 validator/management/CLI path；只有deterministic Codex package-format差异才允许model-assisted authoring按需读取Codex source reference；若存在行为型Hook，再读取Pulsara Hook exact-target reference并生成新的standard candidate。Hook target必须覆盖event/matcher/stdin/environment/output/control/lifecycle语义。Bundled Skill本身不是Plugin parser、publisher、enablement/trust authority或compatibility Runtime；
 - creator指导创建portable loose Skill并调用正式validator；
 - installer只选择local source/scope并调用正式loose CLI；
@@ -1464,7 +1468,7 @@ UV_TOOL_BIN_DIR=<isolated>/bin UV_TOOL_DIR=<isolated>/tools \
   uv tool install --from <wheel> pulsara-agent
 ```
 
-结果：wheel `pulsara_agent-0.1.0-py3-none-any.whl`成功构建；isolated install安装51个packages与一个`pulsara` executable；在任意non-source cwd、unset `PYTHONPATH`、不依赖repository `.venv`或`uv run`时，`pulsara --version`返回`0.1.0`，`skills list --json`返回`COMPLETE`并从isolated wheel `site-packages/pulsara_agent/bundled_skills`读取exact两个official bundled Skills。Wheel inventory gate确认bundled `SKILL.md`与installer supporting reference完整，旧private scripts没有进入wheel。`httpx>=0.28.1,<1`是direct project dependency，lock已一致。
+结果：wheel `pulsara_agent-0.1.0-py3-none-any.whl`成功构建；isolated install安装51个packages与一个`pulsara` executable；在任意non-source cwd、unset `PYTHONPATH`、不依赖repository `.venv`或`uv run`时，`pulsara --version`返回`0.1.0`，`skills list --json`返回`COMPLETE`并从isolated wheel `site-packages/pulsara_agent/bundled_skills`读取closed official bundled Skill inventory。Wheel inventory gate确认bundled `SKILL.md`与installer supporting reference完整，旧private scripts没有进入wheel。`httpx>=0.28.1,<1`是direct project dependency，lock已一致。
 
 同一isolated launcher与隔离`HOME`、`PULSARA_HOME`、workspace完成以下真实序列：
 

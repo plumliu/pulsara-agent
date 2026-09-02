@@ -7,6 +7,7 @@ from typing import Iterable
 
 
 EXPECTED_BUNDLED_SKILL_NAMES = (
+    "pulsara-mcp-installer",
     "pulsara-plugin-installer",
     "pulsara-skill-creator",
     "pulsara-skill-installer",

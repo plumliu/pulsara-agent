@@ -666,18 +666,18 @@ def test_live_session_refresh_is_lazy_until_the_next_turn_safe_point() -> None:
             _project_capability_refresh_applied_revision=0,
             _project_capability_refresh_attention=None,
             _require_open=lambda: None,
-            reload_plugins=AsyncMock(return_value={"mcp": "RELOADED"}),
+            reload_capabilities=AsyncMock(return_value={"mcp": "RELOADED"}),
         )
 
         await KernelHostSession.request_project_capability_refresh(session)
-        session.reload_plugins.assert_not_awaited()
+        session.reload_capabilities.assert_not_awaited()
         assert KernelHostSession.project_capability_refresh_pending.fget(session)
 
         adopted = await KernelHostSession._adopt_project_capabilities_if_requested(
             session
         )
         assert adopted is True
-        session.reload_plugins.assert_awaited_once_with(deadline_monotonic=None)
+        session.reload_capabilities.assert_awaited_once_with(deadline_monotonic=None)
         assert not KernelHostSession.project_capability_refresh_pending.fget(session)
         assert session._project_capability_refresh_attention is None
 
@@ -693,7 +693,7 @@ def test_failed_project_capability_adoption_does_not_starve_the_queued_turn() ->
             _project_capability_refresh_applied_revision=0,
             _project_capability_refresh_attention=None,
             _require_open=lambda: None,
-            reload_plugins=AsyncMock(side_effect=ValueError("bad project MCP")),
+            reload_capabilities=AsyncMock(side_effect=ValueError("bad project MCP")),
         )
 
         await KernelHostSession.request_project_capability_refresh(session)
@@ -708,7 +708,7 @@ def test_failed_project_capability_adoption_does_not_starve_the_queued_turn() ->
         assert await KernelHostSession._adopt_project_capabilities_if_requested(
             session
         )
-        session.reload_plugins.assert_awaited_once_with(deadline_monotonic=None)
+        session.reload_capabilities.assert_awaited_once_with(deadline_monotonic=None)
 
     asyncio.run(exercise())
 

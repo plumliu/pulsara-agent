@@ -347,6 +347,7 @@ def test_installed_bundled_inventory_is_exact_and_ordinary_readable(
     tmp_path: Path,
 ) -> None:
     assert EXPECTED_BUNDLED_SKILL_NAMES == (
+        "pulsara-mcp-installer",
         "pulsara-plugin-installer",
         "pulsara-skill-creator",
         "pulsara-skill-installer",
@@ -409,6 +410,15 @@ def test_installed_bundled_inventory_is_exact_and_ordinary_readable(
         assert json.loads(plugin_reference_read.output)["path"] == str(
             plugin_reference
         )
+
+    mcp_installer = next(
+        item for item in result.candidates if item.name == "pulsara-mcp-installer"
+    )
+    mcp_skill_read = ReadFileTool(tmp_path).execute(
+        ToolCall("call:mcp-skill", "read_file", {"path": str(mcp_installer.path)})
+    )
+    assert mcp_skill_read.status is ToolResultState.SUCCESS
+    assert json.loads(mcp_skill_read.output)["path"] == str(mcp_installer.path)
 
 
 def _inspect(

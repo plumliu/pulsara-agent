@@ -1111,7 +1111,7 @@ def seal_test_direct_tool_port(port: DirectKernelToolPort) -> None:
         type("_EmptyMemoryPort", (), {"tool_names": ()})()
     )
     port.bind_mcp_supervisor(_EmptyTestMcpCapabilityOwner())  # type: ignore[arg-type]
-    port.bind_hook_reload_port(object())  # type: ignore[arg-type]
+    port.bind_capability_reload_port(object())  # type: ignore[arg-type]
     port.seal_builtin_composition()
 
 
@@ -1207,8 +1207,8 @@ def prepare_test_direct_tool_surface(
             port.bind_mcp_supervisor(  # type: ignore[arg-type]
                 _EmptyTestMcpCapabilityOwner()
             )
-        if port._hook_reload is None:  # noqa: SLF001
-            port.bind_hook_reload_port(object())  # type: ignore[arg-type]
+        if port._capability_reload is None:  # noqa: SLF001
+            port.bind_capability_reload_port(object())  # type: ignore[arg-type]
         port.seal_builtin_composition()
 
     builtin = port.sealed_builtin_capability_snapshot(
@@ -1528,6 +1528,7 @@ async def invoke_direct_tool(
     workspace_id: str = "workspace:test",
     conversation_scope_kind: ModelInputScopeKind = ModelInputScopeKind.ROOT,
     scope_subagent_task_id: str | None = None,
+    permission_snapshot: FrozenRunPermissionSnapshot | None = None,
     memory_context: FrozenModelCallMemoryContext | None = None,
     **kwargs: object,
 ):
@@ -1544,6 +1545,7 @@ async def invoke_direct_tool(
         workspace_id=workspace_id,
         conversation_scope_kind=conversation_scope_kind,
         scope_subagent_task_id=scope_subagent_task_id,
+        permission_snapshot=permission_snapshot,
         memory_context=memory_context,
     )
     try:

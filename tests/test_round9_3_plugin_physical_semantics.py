@@ -736,29 +736,29 @@ def test_round9_3_paired_source_read_failure_keeps_source_owner(
 
 def test_round9_3_reload_settlement_lock_obeys_absolute_deadline() -> None:
     class Probe:
-        reload_plugins = KernelHostSession.reload_plugins
+        reload_capabilities = KernelHostSession.reload_capabilities
 
         def __init__(self) -> None:
-            self._plugin_reload_settlement_lock = asyncio.Lock()
+            self._capability_reload_settlement_lock = asyncio.Lock()
             self.serialized_called = False
 
         def _require_open(self) -> None:
             return
 
-        async def _reload_plugins_serialized(self, deadline: float):
+        async def _reload_capabilities_serialized(self, deadline: float):
             del deadline
             self.serialized_called = True
             return {"status": "RELOADED"}
 
     async def run() -> None:
         probe = Probe()
-        await probe._plugin_reload_settlement_lock.acquire()
+        await probe._capability_reload_settlement_lock.acquire()
         try:
             with pytest.raises(TimeoutError):
-                await probe.reload_plugins(deadline_monotonic=monotonic() + 0.05)
+                await probe.reload_capabilities(deadline_monotonic=monotonic() + 0.05)
             assert probe.serialized_called is False
         finally:
-            probe._plugin_reload_settlement_lock.release()
+            probe._capability_reload_settlement_lock.release()
 
     asyncio.run(run())
 
