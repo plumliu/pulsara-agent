@@ -449,28 +449,37 @@ def _read_child_tool_rows(
 
 
 async def _run_graph(session) -> dict[str, object]:
-    prompt = """Use create_agent_tasks exactly once to create this six-task graph. After dispatching it, continue useful independent work by reading pyproject.toml and identifying the project version. Do not call list_agents and do not wait merely to retrieve results. At the final critical-path join, if any requested task is still unfinished, call wait_agent exactly once with all six exact task IDs and settle=all; its ToolResult is synchronization only, so synthesize the automatically delivered completion messages that follow it.
+    prompt = """Use create_agent_tasks exactly once to create this six-task graph. After dispatching it, continue useful independent work by reading pyproject.toml and identifying the project version. Do not call list_agents or poll task status. Use wait_agent only if the current response is genuinely blocked on delegated work. A wait may return input_available to deliver a partial completion while other tasks continue in the background; if that happens, synthesize the delivered completion and accurately report any remaining work. It is valid for those background tasks to outlive this foreground response.
 
 Chain:
 - key a, default context (omit context): call report_agent_result alone with summary A_EXPLICIT_OK.
 - key b, depends_on [a], default context: inspect only your DEPENDENCY_RESULTS; if A_EXPLICIT_OK is present, call report_agent_result alone with summary B_SAW_A_EXPLICIT. Never claim to have received any ancestor other than your direct dependency.
-- key c, depends_on [b], default context: inspect only your DEPENDENCY_RESULTS and finish with ordinary assistant text C_INFERRED_SAW_B. Do not call report_agent_result.
+- key c, depends_on [b], default context: inspect only your DEPENDENCY_RESULTS and finish with ordinary assistant text C_SAW_B. Do not call report_agent_result.
 
 Fork/join:
 - key f1: call report_agent_result alone with summary F1_EXPLICIT_OK.
-- key f2: finish with ordinary assistant text F2_INFERRED_OK. Do not call report_agent_result.
+- key f2: finish with ordinary assistant text F2_OK. Do not call report_agent_result.
 - key join, depends_on [f1, f2]: inspect both direct dependency summaries, then call report_agent_result alone with summary JOIN_SAW_F1_AND_F2.
 
-Use the general_worker profile. After all six settle, briefly state the graph outcome and the independently observed project version."""
+Use the general_worker profile. Briefly state the graph outcome currently visible to you and the independently observed project version; do not claim unfinished work is complete."""
     result = await session.run_turn(
         prompt,
         command_id="command:round10:graph",
         requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
     )
-    rows = await _task_rows(session)
-    task_ids = tuple(str(row["id"]) for row in rows)
+    root_return_rows = await _task_rows(session)
+    task_ids = tuple(str(row["id"]) for row in root_return_rows)
+    # A ROOT answer is not an ownership join: accepted workers may correctly
+    # outlive the foreground turn.  The fixture joins them independently before
+    # evaluating the graph's eventual canonical results.
+    await _wait_for_tasks_to_settle(
+        session,
+        task_ids=task_ids,
+        timeout_seconds=180,
+    )
+    final_rows = await _task_rows(session)
     edges = await _dependency_rows(session, task_ids)
-    by_key = {str(row["task_key"]): row for row in rows}
+    by_key = {str(row["task_key"]): row for row in final_rows}
     expected_sources = {
         "a": "EXPLICIT",
         "b": "EXPLICIT",
@@ -481,7 +490,7 @@ Use the general_worker profile. After all six settle, briefly state the graph ou
     }
     passed = (
         set(by_key) == set(expected_sources)
-        and all(str(row["status"]) == "COMPLETED" for row in rows)
+        and all(str(row["status"]) == "COMPLETED" for row in final_rows)
         and all(
             str(by_key[key]["result_source"]) == source
             for key, source in expected_sources.items()
@@ -493,7 +502,8 @@ Use the general_worker profile. After all six settle, briefly state the graph ou
         "root_model_calls": result.model_call_count,
         "root_tool_calls": result.tool_call_count,
         "root_final_text": result.final_text,
-        "tasks": tuple(_public_task_row(row) for row in rows),
+        "root_return_tasks": tuple(_public_task_row(row) for row in root_return_rows),
+        "tasks": tuple(_public_task_row(row) for row in final_rows),
         "edges": tuple(
             {
                 "task_id": str(row["task_id"]),
@@ -503,13 +513,6 @@ Use the general_worker profile. After all six settle, briefly state the graph ou
             for row in edges
         ),
     }
-    # Freeze semantic evidence first, then prevent unfinished graph workers from
-    # leaking into the next dogfood scenario or Host shutdown.
-    await _wait_for_tasks_to_settle(
-        session,
-        task_ids=task_ids,
-        timeout_seconds=180,
-    )
     return report
 
 
@@ -689,8 +692,7 @@ The first four slow tasks must precede mcp_queued in the batch so the Host-globa
             "Call wait_agent exactly once for these exact task IDs with settle=all "
             "and timeout_seconds=180. Its ToolResult is only a synchronization "
             "outcome; summarize the task outcomes from the completion messages "
-            "that Pulsara delivers after the tool closes: "
-            + json.dumps(task_ids)
+            "that Pulsara delivers after the tool closes: " + json.dumps(task_ids)
         ),
         command_id="command:round10:capacity-wait",
         requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
