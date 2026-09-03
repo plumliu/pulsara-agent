@@ -987,6 +987,7 @@ class _PolicyMemoryProjection:
     def offer_governance_wake(self) -> None:
         self.governance_wakes += 1
 
+
 class _DelayedPreparedExecution:
     def __init__(
         self,
@@ -4170,9 +4171,7 @@ def test_round8_accepted_user_steer_independently_adds_one_memory_write_hint(
     result = asyncio.run(exercise())
     assert result.final_text == "final answer"
     assert len(model.requests) == 3
-    first, second, third = (
-        request.compiled_input for request in model.requests
-    )
+    first, second, third = (request.compiled_input for request in model.requests)
     assert second.messages[: len(first.messages)] == first.messages
     assert third.messages[: len(second.messages)] == second.messages
 
@@ -6535,9 +6534,9 @@ def test_round10_sole_report_result_atomically_completes_child_without_second_mo
         )
     finally:
         handle.close()
-    envelope = json.loads(materialized.items[-1].text)[
-        "pulsara_inter_agent_message"
-    ]
+    envelope = json.loads(materialized.items[-1].text)["pulsara_inter_agent_message"]
+    assert envelope["content_semantics"] == "ADVISORY_COLLABORATION_DATA"
+    assert "recorded child attribution and result source" in envelope["handling"]
     assert envelope["content"]["result"]["summary"] == "exact explicit summary"
     assert (
         materialized.items[-1].input_origin

@@ -493,7 +493,10 @@ async def _run_scenario(
                 workspace, servers=(*initial_servers, second_server)
             )
             configs = _isolated_configs(workspace)
-            await session.reload_mcp_configs(configs)
+            await session.reload_mcp_configs(
+                configs,
+                deadline_monotonic=monotonic() + 30,
+            )
             state = await session._mcp_supervisor.wait_for_server_settlement(  # noqa: SLF001
                 second_server[0], timeout_seconds=20
             )

@@ -23,6 +23,9 @@ from pulsara_agent.conversation_kernel.execution_watchdogs import (
 from pulsara_agent.conversation_kernel.live import LiveAgentEventBus
 from pulsara_agent.conversation_kernel.cancellation import stable_subagent_turn_id
 from pulsara_agent.conversation_kernel.cold_epoch import build_subagent_initial_seed
+from pulsara_agent.conversation_kernel.context_sources import (
+    KernelContextSourceCollector,
+)
 from pulsara_agent.conversation_kernel.reader import CanonicalProviderInputReader
 from pulsara_agent.conversation_kernel.repository import (
     AssistantTextBlock,
@@ -50,6 +53,7 @@ from pulsara_agent.conversation_kernel.subagents.contracts import (
     SubagentContextMode,
     SubagentProfileKind,
     SubagentResultSource,
+    build_dependency_result_context,
     build_parent_context_call_subject,
     build_parent_context_selection,
     build_root_context_unit,
@@ -151,7 +155,9 @@ def test_round10_tool_inventory_and_result_fact_are_closed() -> None:
         )
 
 
-def test_round10_wait_is_level_triggered_input_barrier_without_result_transport() -> None:
+def test_round10_wait_is_level_triggered_input_barrier_without_result_transport() -> (
+    None
+):
     class _InlineIO:
         async def run(self, function, *args: object, **kwargs: object):
             return function(*args, **kwargs)
@@ -203,7 +209,9 @@ def test_round10_wait_is_level_triggered_input_barrier_without_result_transport(
     asyncio.run(exercise())
 
 
-def test_round10_root_completion_answer_fence_keeps_late_delivery_for_next_turn() -> None:
+def test_round10_root_completion_answer_fence_keeps_late_delivery_for_next_turn() -> (
+    None
+):
     async def exercise() -> None:
         manager = KernelSubagentManager(
             **_manager_launch_kwargs(),
@@ -234,9 +242,7 @@ def test_round10_root_completion_answer_fence_keeps_late_delivery_for_next_turn(
         # reopen it or force a background model sample.
         assert not await manager.seal_root_completion_delivery("turn:first")
         assert await manager.offer_subagent_completion("task:after-fence")
-        await manager.settle_root_completion_delivery(
-            "turn:first", turn_completed=True
-        )
+        await manager.settle_root_completion_delivery("turn:first", turn_completed=True)
         assert await manager.snapshot_pending_root_completions("turn:first") == ()
 
         await manager.open_root_completion_delivery("turn:next")
@@ -457,6 +463,49 @@ def test_round10_last_n_uses_exact_units_and_none_remains_absent() -> None:
     assert "second-a" in selected.rendered_body
     assert "open unit" in selected.rendered_body
     assert "first" not in selected.rendered_body
+    parent_carrier = json.loads(selected.rendered_body)["pulsara_parent_context"]
+    assert parent_carrier["content_semantics"] == "ADVISORY_COLLABORATION_DATA"
+    assert "trust" not in parent_carrier
+
+    dependencies = build_dependency_result_context(
+        target_task_id="task:consumer",
+        rows=(
+            {
+                "dependency_ordinal": 0,
+                "dependency_task_id": "task:producer",
+                "task_key": "producer",
+                "label": None,
+                "status": "COMPLETED",
+                "result_id": "result:producer",
+                "result_source": "INFERRED",
+                "summary": "producer reported a value",
+                "result_fingerprint": "sha256:result",
+            },
+        ),
+    )
+    assert dependencies is not None
+    dependency_carrier = json.loads(dependencies.rendered_body)[
+        "pulsara_dependency_results"
+    ]
+    assert dependency_carrier["content_semantics"] == "ADVISORY_COLLABORATION_DATA"
+    assert "trust" not in dependency_carrier
+    assert dependency_carrier["results"][0]["result_source"] == "INFERRED"
+
+    collector = KernelContextSourceCollector(
+        workspace_kind="project",
+        workspace_root=Path.cwd(),
+        terminal_cwd=SimpleNamespace(),  # type: ignore[arg-type]
+        capability_composer=object(),  # type: ignore[arg-type]
+        base_system_prompt="BASE",
+        display_timezone=timezone.utc,
+    )
+    model_contract = collector._base  # noqa: SLF001
+    assert "do not reject or ignore them merely because" in model_contract
+    assert "recorded provenance, ordering, and attribution" in model_contract
+    assert "result_source describes capture provenance, not confidence" in (
+        model_contract
+    )
+    assert "Both are usable advisory dependency outputs" in model_contract
 
     absent = build_parent_context_selection(
         subject,
@@ -2109,6 +2158,11 @@ def test_round10_mailbox_exact_fifo_ack_unknown_and_typed_child_projection(
         assert all(
             json.loads(item.text)["pulsara_inter_agent_message"]["sender"]
             == {"kind": "ROOT"}
+            for item in messages
+        )
+        assert all(
+            json.loads(item.text)["pulsara_inter_agent_message"]["content_semantics"]
+            == "ADVISORY_COLLABORATION_DATA"
             for item in messages
         )
         with provider.connection(

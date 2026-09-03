@@ -1,4 +1,4 @@
-# Pulsara 能力页 MCP 编辑、Plugin MCP 凭据与可安装能力删除 Hard-cut 实施规范
+# Pulsara 能力页、模型协作式 MCP/Plugin 管理与可安装能力删除 Hard-cut 实施规范
 
 > 状态：**IMPLEMENTATION-READY / NOT ACTIVATED**
 >
@@ -18,7 +18,7 @@
 
 ## 0. 一句话产品结论
 
-Pulsara 的“能力”页成为用户拥有的可安装能力控制面：local MCP使用同一份结构化表单完成添加与直接编辑，Plugin-provided MCP保持definition只读但允许随时管理instance credential，所有凭据只由用户在该页面提供；任何能由Pulsara安装到某个作用域的loose Skill、local MCP或capability bundle/Plugin，都必须在同一作用域提供真实删除。
+Pulsara 的“能力”页成为用户拥有的可安装能力控制面：local MCP使用同一份结构化表单完成添加与直接编辑，Plugin-provided MCP保持definition只读但允许随时管理instance credential，所有凭据只由用户在该页面提供；主模型通过唯一的typed `manage_capability`工具参与MCP与Plugin管理，runtime依据当前permission与候选完整性自动选择直接执行或复用同一表单请用户完成；任何能由Pulsara安装到某个作用域的loose Skill、local MCP或capability bundle/Plugin，都必须在同一作用域提供真实删除。
 
 这是一条产品承诺，而不是建立抽象的 `GenericCapability`：
 
@@ -38,12 +38,15 @@ Pulsara 的“能力”页成为用户拥有的可安装能力控制面：local 
 
 ## 1. 已冻结的产品决策
 
-### 1.1 能力页是用户控制面，不是模型的秘密输入面
+### 1.1 能力页是用户拥有的控制面；模型可以协作但不持有秘密
 
 1. 用户可以在能力页添加、查看、启停、编辑local MCP，为Plugin-provided MCP管理凭据，并删除可安装能力。
 2. Local MCP 与 Plugin-provided MCP 的 secret 均由用户直接交给本地能力管理控制面；不得经过主模型、subagent、terminal command、conversation message、canonical transcript、tool arguments/result、provider input、memory、Hook stdin/context 或普通诊断。
 3. 模型只可知道认证种类、需要哪个非秘密 binding 名称，以及“未配置 / 已配置 / 需要更换”；模型永远拿不到 secret value。
-4. MCP installer Skill 可以完成公开 endpoint、transport、scope 与普通非秘密配置；遇到需要用户凭据或其他用户独占选择时，必须引导用户前往能力页，而不是要求在对话中粘贴 key。
+4. MCP installer Skill可以完成公开endpoint、transport、scope与普通非秘密配置；遇到需要用户凭据或其他用户独占选择时，必须让runtime唤起能力页同款本地表单，而不是要求用户自行找入口或在对话中粘贴key。
+5. “用户拥有”不等于“模型只能给教程”。主模型可以通过一个ROOT-only typed tool提交MCP/Plugin安装、编辑、启停或删除意图；当信息完整且当前permission允许时，operation可以直接完成。
+6. 当需要secret、缺少用户独占选择、existing product trust review或当前permission要求确认时，runtime必须自动打开与能力页相同的表单；模型不能通过参数强制跳过，也不能把“是否简单”作为自报字段。
+7. 用户在表单中修改并提交后的exact值才是最终mutation request。模型的草稿只是prefill，不是authority；secret从browser-local form直接进入local controller/credential owner，不回流给模型。
 
 ### 1.2 MCP 可以直接编辑
 
@@ -112,6 +115,35 @@ Plugin MCP credential是可重新取得的连接认证附属状态，不是Plugi
 
 如果未来需要删除 `PLUGIN_DATA`，必须作为单独、明确、不可误触的数据删除产品动作规范；不能暗中级联进本轮统一 capability 删除。
 
+### 1.6 一个模型工具，两种合法完成路径
+
+本轮新增且只新增一个模型侧管理入口：`manage_capability`。它是现有MCP config、Plugin management、credential与live-adoption owners的窄facade，不是`GenericCapability`、第二套mutation service或万能文件写入工具。
+
+同一tool call只有两种合法完成路径：
+
+```text
+DIRECT
+  closed candidate完整
+  不需要secret或其他用户独占输入
+  existing product review已满足
+  当前FrozenRunPermissionSnapshot允许本次exact effect
+  => typed owner mutation => runtime automatic adoption => sanitized ToolResult
+
+USER_FORM
+  需要secret / 缺少用户选择 / 需要existing product review
+  或当前permission要求用户确认
+  => 打开shared capability editor/review
+  => 用户可检查、补齐或修改
+  => 用户提交exact request
+  => typed owner mutation => runtime automatic adoption => sanitized ToolResult
+```
+
+二者必须汇入同一个typed operation与同一个live adoption owner。不得让DIRECT shell out到CLI、让USER_FORM拼YAML，或为模型、Web页面各实现一条写入路径。
+
+`READ_ONLY`下模型调用不得直接修改能力；runtime可以打开一个由用户拥有的prefilled editor。该表单提交是新的显式用户控制面动作，模型tool call只等待并观察其non-secret settlement，不能把它伪装成模型获得了write permission。`ASK_PERMISSIONS`、`ACCEPT_EDITS`与`BYPASS_PERMISSIONS`继续完全服从现有permission preset；本文不发明第五种mode或capability-specific bypass。
+
+Plugin仍保持install-disabled、optional credential overlay、enable review三个独立settle。`manage_capability`可以编排连续UI，但不能把三种authority折叠为一个“安装并信任”布尔值。一个公开配置完整的Plugin可以在permission允许时直接安装为disabled；`SET_PLUGIN_ENABLED(enabled=true)`始终进入USER_FORM，由用户review current exact package后产生call-local acceptance。Disable仍按实际effect与permission正常分流。
+
 ---
 
 ## 2. 当前代码真源与具体缺口
@@ -167,7 +199,33 @@ HTTP transport 会在 physical open/request 时解析 secret reference；stdio t
 
 现有 `remove_local_plugin` 已以 instance state unlink 作为 future contribution authority cut；旧 package root 由 physical lifetime anchor 保持到 consumer drain，再由现有 GC 回收。本文复用并补齐 UI stale guard，不新建第二套 Plugin uninstaller。
 
+`PluginStoreLayout`把USER与WORKSPACE两种namespace的package/state/lock都放在`PULSARA_HOME/plugins/...`；WORKSPACE只决定identity与可见范围，不表示物理写入落在workspace目录。Permission classification必须按这个physical truth判定为outside-workspace write。
+
+现有`SetLocalPluginEnabledRequest`要求`enabled=true`与`ExternalProcessAcceptance.ACCEPTED`exact同行；CLI只在展示current package summary并收到用户确认后构造该call-local value。模型参数不能成为这项acceptance，因此model-assisted enable必须落到用户review form，而不是由permission的DIRECT verdict单独替代。
+
 当前 Agent Plugins 1.0 `mcp.json` 只表达literal `env`/`headers`，没有credential slot schema；现有 `PluginMcpAdapter`也把所有Plugin MCP归一化为`NoAuth`。因此带API key的Plugin MCP目前没有正式用户配置路径。实现不得谎称package manifest已经声明secret slot，也不得把用户secret回写immutable package；本轮增加的唯一新truth是Plugin instance state中的non-secret credential overlay与local credential store中的value。
+
+### 2.5 当前 permission、interaction 与 reload 真源
+
+当前代码已经有且只应保留一套run permission authority：
+
+```text
+FrozenRunPermissionSnapshot
+  -> BuiltinToolCallClassifier
+  -> PolicyPermissionGate
+  -> ToolDispatchAuthorizationPolicy
+  -> ALLOW | DENY | REQUIRE_CONFIRMATION
+```
+
+[`src/pulsara_agent/primitives/permission.py`](src/pulsara_agent/primitives/permission.py)定义四种preset，普通run默认`BYPASS_PERMISSIONS`；`READ_ONLY`禁止write/terminal，`ASK_PERMISSIONS`逐次询问，`ACCEPT_EDITS`允许workspace write但对outside-workspace write与terminal询问，`BYPASS_PERMISSIONS`允许普通host-local write/terminal。本文只把capability action的exact effect接入这张现有表，不改变preset语义。
+
+当前`DefaultBuiltinToolCallClassifier`只读取raw model arguments与static action override，`PolicyPermissionGate._filesystem_write_access()`只从`arguments["path"]`推导inside/outside；READ_ONLY的non-read-only call会在`DirectKernelToolPort.authorize()`成为终局DENY，而只有REQUIRE_CONFIRMATION才进入interaction。由于`manage_capability`禁止模型提供mutation destination path，实施必须先由trusted preparation owner解析target/effect，再窄扩展这条现有链；不能靠descriptor标成read-only或把DENY粗暴改成ALLOW来弹表单。
+
+当前[`src/pulsara_agent/conversation_kernel/interaction.py`](src/pulsara_agent/conversation_kernel/interaction.py)与live-control/protocol只拥有process-local单一current tool confirmation，resolution仍是通用allow/deny；它尚不能承载editable capability form或secret-safe submission。这是需要扩展的真实缺口，但不构成新增durable interaction subsystem的理由。
+
+当前`Host.reload_capabilities`已经明确same-epoch no-rebase，Web的若干user mutation也会通知live sessions；`reload_capabilities` builtin则是ROOT/bypass的显式process-control adapter。缺口不是再造refresh，而是让所有first-party typed mutation统一自动进入已有refresh owner，并把model tool保留为out-of-band/partial recovery。
+
+现有workspace路径只由`LocalSessionController._mark_workspace_capability_refresh()`登记请求，并在`_workspace_adoption_payload()`公开为`next_user_turn`；`KernelHostSession._adopt_project_capabilities_if_requested()`也只在prompt delivery取得下一条root prompt后执行。这个时点不足以支持模型在同一turn完成“安装 → 验证”，因此本规范明确把它hard-cut为“下一次provider dispatch前的合法safe point”，同时保留old surface borrow drain与same-epoch prefix continuity。
 
 ---
 
@@ -181,8 +239,11 @@ HTTP transport 会在 physical open/request 时解析 secret reference；stdio t
 4. Plugin-provided MCP在MCP列表与Plugin详情中共用同一credential editor；package definition保持只读。
 5. User 与已有 project management surface 的 Skill/MCP 删除闭合。
 6. User Plugin 删除补齐 exact stale guard 与统一文案；workspace Plugin CLI 继续使用现有 remove owner。
-7. MCP/Plugin installer Skill 明确高级配置与用户凭据应在能力页完成。
-8. 所有变更通过 existing live capability refresh/safe-point adoption 生效。
+7. 新增唯一ROOT-only `manage_capability` builtin tool，让主模型以closed actions参与local MCP与Plugin管理；它不得接收secret或任意YAML/shell payload。
+8. `manage_capability`接入现有frozen run permission、call classifier、permission gate与same-Host interaction owner，自动决定DIRECT或USER_FORM，不新增permission mode或旁路。
+9. 能力页与模型唤起的表单复用同一component、schema projection、typed controller operation与stale guard；用户提交可覆盖模型prefill。
+10. First-party Web/tool mutation成功后由runtime直接调用existing live capability refresh/safe-point adoption owner；不得要求模型例行补调`reload_capabilities`。
+11. MCP/Plugin installer Skill明确direct/form分流、用户凭据边界与automatic adoption；`reload_capabilities`仅作为out-of-band变更或明确adoption attention的补救措施。
 
 ### 3.2 本轮明确不做
 
@@ -196,7 +257,9 @@ HTTP transport 会在 physical open/request 时解析 secret reference；stdio t
 - remote secret acquisition、API key 创建、轮换或供应商账号管理；
 - capability history、undo log、trash timeline、soft-delete rows；
 - PostgreSQL schema/event/subject/guard/relation/job 增长；
-- provider、compaction、memory、task、Hook execution、permission mode 或 terminal 语义变化；
+- provider、compaction、memory、task、Hook execution或terminal语义变化；
+- 新permission mode、修改现有四种permission preset含义、capability专用permission gate或模型自报“simple/trusted”绕过；
+- 通过解析terminal command、watch filesystem或轮询来猜测能力配置是否变化；
 - 任意 provider-specific MCP auth branch。
 
 ---
@@ -216,6 +279,14 @@ HTTP transport 会在 physical open/request 时解析 secret reference；stdio t
 ### 4.2 MCP add/edit 共用 editor
 
 点击“添加 MCP”打开空 editor；点击一个 owned MCP 的“编辑”打开同一 editor，并填入完整非秘密配置。
+
+`manage_capability`需要用户参与时也打开这个editor，而不是另做一张简化确认卡：
+
+- model给出的公开配置只作为prefill；字段仍然可编辑；
+- 因permission而需要确认、但candidate已经完整时，editor以compact review状态打开，仍允许用户展开完整配置；
+- 需要secret或缺少用户独占选择时，直接聚焦相应字段并解释缺少什么，不要求用户重新填写模型已经可靠提供的公开字段；
+- 用户提交走与能力页手动添加/编辑完全相同的controller operation；取消则产生typed `CANCELLED` ToolResult，让模型继续自然收尾；
+- 表单不得包含“允许模型以后都这样做”“将此MCP视为安全”或其他新的持久授权控件。
 
 Editor 分为两层：
 
@@ -544,6 +615,140 @@ Package replace对同一`plugin_id + local_server_id`保留overlay，但在new i
 
 Replace继续遵守existing“new package默认disabled”：保留的credential在用户重新enable前只是suspended local binding，不能连接或spawn。Enable review必须exact join new package MCP endpoint/command、credential auth kind、non-secret target names与configured/present状态并显示给用户；用户接受new exact package后才允许把旧value用于new physical destination。Review不显示secret，也不新增consent receipt。Ordinary disable保留overlay；remove删除overlay及managed values。
 
+### 6.5 唯一模型入口：`manage_capability`
+
+Builtin catalog新增一个ROOT-only tool，名称固定为`manage_capability`。它在四种permission mode中均可被模型调用，不得照搬`reload_capabilities`当前“仅ROOT bypass可调用”的特殊授权。第一版closed action union只覆盖本轮确有共享typed owner的MCP与Plugin动作：
+
+```text
+ADD_LOCAL_MCP
+UPDATE_LOCAL_MCP
+REMOVE_LOCAL_MCP
+
+INSTALL_PLUGIN
+SET_PLUGIN_ENABLED
+REMOVE_PLUGIN
+CONFIGURE_PLUGIN_MCP_CREDENTIAL
+```
+
+`UPDATE_LOCAL_MCP`包含启停与完整whole-entry replacement；Plugin definition不可编辑，因此没有`UPDATE_PLUGIN`。Plugin credential replace/clear共用`CONFIGURE_PLUGIN_MCP_CREDENTIAL`的closed mutation intent。Loose Skill继续由既有installer/filesystem与本轮Web delete owner管理；不要因为tool名较宽就在本轮塞入任意Skill文件写入或generic capability action。
+
+Tool input只能包含：
+
+- closed action；
+- `USER | WORKSPACE`与当前workspace context可exact resolve的scope；
+- server/plugin/component identity与相应expected-current guard；
+- typed public source/candidate、非秘密credential kind/target names，以及模型已知的用户意图。
+
+Tool input不得包含：
+
+- raw YAML/JSON config blob、shell command wrapper或作为mutation destination的任意filesystem path；Plugin可使用existing typed local/remote source locator，但目标root必须由scope owner导出；
+- Bearer value、Header value、secret env value、OAuth token或“请用户把key贴到这里”的字段；
+- `simple`、`trusted`、`skip_confirmation`、`force`、`interactive=false`等由模型自报的授权结论；
+- 另一个tool call、CLI invocation或UI submit token。
+
+`INSTALL_PLUGIN`只接收existing Plugin installer已经支持的typed source identity与验证参数，并继续落为disabled exact instance。`SET_PLUGIN_ENABLED(enabled=true)`必须复用existing Plugin review/enable owner且恒走USER_FORM：表单exact join current package install id，展示normalized Skill/MCP/Hook与credential-presence摘要，只有用户SUBMIT时才生成call-local `ExternalProcessAcceptance.ACCEPTED`并交给existing owner。Acceptance不出现在模型参数，也不持久化为receipt。`enabled=false`按实际write/process effect与permission正常分流。`manage_capability`不执行包内代码来判断Plugin是否“简单”，也不根据名称、README或模型描述放宽permission。
+
+配置完整的environment reference是非秘密candidate，可按permission进入DIRECT；新增或更换managed credential value必然进入USER_FORM。清除existing managed credential不需要读取value，可按exact destructive effect与当前permission分流，不能因为“曾经含secret”而永远强制表单。
+
+Tool最终只返回sanitized closed outcome：
+
+```text
+APPLIED | CANCELLED | REJECTED | CONFLICT | PARTIAL
+object kind / action / scope / stable public identity
+current non-secret inspection
+automatic adoption: RELOADED | PENDING_SAFE_POINT | PARTIAL | NOT_APPLICABLE
+reloaded / pending / attention session counts（如有）
+```
+
+USER_FORM是tool执行期间的process-local interaction状态，不是提前返回的伪成功ToolResult。用户取消、拒绝或关闭表单后必须让原tool call以`CANCELLED`/`REJECTED`settle，模型取得下一次推理机会并自然收尾；不得把一轮永远停在未完成tool card。Secret、opaque form carrier与private rollback material均不得进入最终ToolResult。
+
+### 6.6 Permission与表单分流算法
+
+当前generic authorization先按raw tool arguments分类，READ_ONLY的non-read-only call会直接得到终局DENY，filesystem policy也只认识模型参数中的`path`。`manage_capability`不得假设只加descriptor/action override就能得到USER_FORM；它必须是一个窄的prepare-first binding。
+
+Preparation owner先形成一个process-local、不可由模型伪造的typed value：
+
+```text
+PreparedCapabilityManagementInvocation
+  normalized closed action and public candidate
+  exact resolved target/current inspection/expected guard
+  user-only input requirements
+  existing product review requirements
+  ResolvedCapabilityEffectProjection
+```
+
+该对象不持久化、不加fingerprint，也不进入provider input。其唯一用途是把已经由canonical owner解析的事实交给现有permission与execution owner。“是否直接执行”按以下顺序机械计算：
+
+1. resolve exact target owner与current inspection，拒绝foreign/inherited/bundled/component-only target；
+2. 用对应唯一parser/preflight解析public candidate，列出缺失或必须由用户提供的字段；
+3. 根据真实physical destination与adoption行为导出effect projection，而不是把逻辑USER/WORKSPACE scope直接当成filesystem边界；
+4. 将prepared projection与当前`FrozenRunPermissionSnapshot`交给existing `BuiltinToolCallClassifier -> PolicyPermissionGate -> ToolDispatchAuthorizationPolicy`的窄扩展接口；permission gate消费resolved facts，不从模型参数读取mutation target path；
+5. `ALLOW`只有在无user-only input且无pending product review时才进入DIRECT；`REQUIRE_CONFIRMATION`、user-only input或product review进入process-local `CAPABILITY_FORM_REQUIRED`；
+6. READ_ONLY的write `DENY`绝不转换为模型执行permit。Tool execution adapter只允许展示process-local form；用户SUBMIT以独立user-control-plane actor调用同一mutation owner。其他policy DENY仍立即settle为no-attempt ToolResult；
+7. `CAPABILITY_FORM_REQUIRED`必须在generic“DENY立即返回”和普通boolean confirmation execution之前由exact prepared owner消费；用户取消或controller缺失则不执行mutation，但仍给原tool call一个最终ToolResult；
+8. 表单提交后重新读取current target、重新parse完整submitted candidate并exact compare stale guard；不得执行最初草稿、把用户submit伪装成model permission，或last-write-wins；
+9. 调用第6节已有typed owner，等待mutation与automatic adoption settlement，再生成一个ToolResult。
+
+`CAPABILITY_FORM_REQUIRED`只是existing `KernelToolAuthorization`/same-Host interaction flow新增的process-local closed disposition，不是permission mode、durable event或通用表单框架。普通tools的DENY/REQUIRE_CONFIRMATION控制流保持不变；同一`PreparedCapabilityManagementInvocation`只能被DIRECT execution或一次form submission线性消费。
+
+Physical effect mapping固定为：
+
+| Exact operation part | 交给existing permission gate的事实 |
+|---|---|
+| USER local MCP YAML create/update/remove | `outside_workspace_write` |
+| WORKSPACE local MCP YAML create/update/remove | `workspace_write` |
+| 任意scope Plugin package/state install/enable/disable/remove | physical target位于`PULSARA_HOME/plugins/...`，一律`outside_workspace_write` |
+| 任意scope Plugin MCP non-secret overlay | Plugin instance state位于`PULSARA_HOME`，一律`outside_workspace_write` |
+| 任意managed credential create/replace/clear/cleanup | local credential store不在workspace，一律追加`outside_workspace_write` |
+| Environment reference only | 不产生credential-store write；仍保留其config/state physical write |
+| Adoption会start/stop stdio process或activate/deactivate local Hook/executable | 同时追加existing terminal/process effect |
+| HTTP reconnect/catalog refresh | 继续服从existing `network_isolated=false`，不凭“网络”新增确认 |
+
+一个operation可同时携带多个effect，使用现有规则中更严格的实际verdict。`BuiltinToolCallClassifier`可以按closed action与prepared projection生成不同effective category/metadata，但不得信任模型提供的path或风险标签；不要把所有action永久写死为bypass-only，也不要为此新建capability permission service。
+
+四种mode的产品矩阵固定为：
+
+| 当前 effective permission | `manage_capability`可否调用 | 完整、无secret、无需额外product review | 缺secret/用户选择或需existing review |
+|---|---|---|---|
+| READ_ONLY | 可以 | 不允许模型DIRECT；打开prefilled USER_FORM，由用户控制面提交独立显式mutation | 打开USER_FORM；模型只观察脱敏settlement |
+| ASK_PERMISSIONS | 可以 | 进入existing permission confirmation；Hook未替用户合法settle时打开shared review/editor | 打开同一表单补齐并确认；Hook不能代填secret或product review |
+| ACCEPT_EDITS | 可以 | 只有pure WORKSPACE local-MCP YAML write可DIRECT；USER MCP、所有Plugin state、managed credential、stdio/local process或Hook effect均按现有outside-write/terminal规则打开表单 | 打开同一表单补齐并确认 |
+| BYPASS_PERMISSIONS | 可以 | DIRECT；但Plugin `enabled=true`仍需existing product review | 打开表单；bypass不能替用户发明secret、缺失值或existing product trust决定 |
+
+HTTP/network本身继续服从现有`network_isolated=false`preset，不因“网络”二字发明新approval；stdio process与Plugin executable/Hook activation映射到existing terminal/executable effect。一个operation若同时含多种effect，采用现有规则中更严格的实际边界，但不能把“未来也许有副作用”泛化成所有MCP/Plugin都询问。
+
+表单不是permission旁路：
+
+- permission为ASK且existing PermissionRequest Hook没有合法settle时，它承载本次exact确认；Hook decision只能处理permission，不能代替secret input或Plugin product review；
+- READ_ONLY时，表单提交的actor是用户控制面，而非把模型run提升到write mode；
+- secret/缺失选择触发表单时，即使permission为BYPASS，最终authority也只覆盖用户实际提交的exact candidate；
+- current controller不存在、interaction被替换、用户取消或stale时不执行mutation；
+- PreToolUse/PermissionRequest Hook最多看到sanitized public candidate与effect projection，永远看不到form secret。
+
+现有same-Host interaction owner只需增加一种process-local typed capability form payload与对应submission resolution。它复用现有单一current interaction、controller、replacement与settlement纪律；不得增加数据库interaction row、committed event kind、durable form job、receipt或跨重启恢复。前端复用第4.2节editor component，不让模型操纵DOM。
+
+### 6.7 Automatic adoption 与 `reload_capabilities`补救边界
+
+First-party能力变更——无论来自能力页、`manage_capability` DIRECT还是其USER_FORM submit——在typed mutation成功后，都由当前request owner直接调用existing Host/live-session refresh与safe-point adoption。Runtime调用的是`reload_capabilities`背后的同一个内部owner，不是伪造一次模型tool call：
+
+- 不新增assistant tool request、ToolResult、provider roundtrip或canonical transcript项；
+- USER mutation继续传播给所有live sessions，WORKSPACE mutation只传播给matching sessions；每个target取得一个requested adoption revision；
+- healthy provider stream/tool attempt不被中断。每个session在第一个合法safe point采用：若mutation来自`manage_capability`，发起它的当前session必须在同一turn的下一次provider call前settle该revision；其他busy/idle matching sessions最迟在各自下一次provider dispatch前采用，不要求等到“下一条user message”；
+- old tool-surface borrow可继续drain，new surface只供后续dispatch。Adoption不得修改same-epoch provider SYSTEM/tools/messages prefix；新/变化MCP继续走existing DIRECT/META exposure规则；
+- mutation settlement与adoption settlement明确分层，adoption失败不回滚已经保存的canonical capability truth；
+- `manage_capability`的ToolResult等待origin-session requested revision：成功才返回`APPLIED + RELOADED`，失败返回`APPLIED + PARTIAL`并禁止假装可立即验证。普通Web API可对尚未到safe point的session返回`PENDING_SAFE_POINT`；正常pending不是attention；
+- response列出reloaded/pending/attention session counts。模型不得在`RELOADED`后再例行reload。
+
+保留现有ROOT-only `reload_capabilities` builtin tool，但把它定位为显式补救入口，而非正常安装步骤。它只用于：
+
+1. terminal/CLI、手工编辑YAML/Skill目录、git checkout或其他进程installer造成的out-of-band source change；
+2. first-party mutation已经返回明确`PARTIAL`/adoption attention，需要用户或模型在问题解除后重试；
+3. 诊断时需要重新读取canonical sources以确认外部修改是否可采用。
+
+`reload_capabilities`继续服从它已有的ROOT/bypass授权与same-epoch no-rebase契约；其他mode下的用户可从能力页发起同一底层刷新补救，不因此扩大模型run permission。Reload不能安装、启用、信任、删除或修复invalid config，不能摄取另一个进程后来新增的environment value，也不能代替MCP reconnect/credential editor。
+
+不得通过解析terminal command来猜测“刚才可能改了能力”并自动reload，也不新增filesystem watcher。Out-of-band caller负责在确知source settled后显式调用补救入口。
+
 ---
 
 ## 7. 删除代数
@@ -675,17 +880,22 @@ Capability edit/delete不是新的 provider rebase boundary。
 
 ### 8.3 Live sessions
 
-User capability mutation继续并行通知所有已打开 sessions；一个 session adoption失败不回滚已保存的用户真相，也不阻塞其他 session。Workspace mutation继续只影响同一 resolved workspace 的 sessions，并在下一次 root user turn admission前的 safe point采用。
+User capability mutation继续并行通知所有已打开sessions；一个session adoption失败不回滚已保存的用户真相，也不阻塞其他session。Workspace mutation继续只影响同一resolved workspace的sessions，但采用边界统一为“该session下一次provider dispatch之前的第一个合法safe point”，不再限定到下一次root user turn。这个传播由Web与`manage_capability`共用的mutation owner自动触发，而不是由发起变更的模型session单独调用`reload_capabilities`。
+
+若mutation由当前root turn中的`manage_capability`发起，当前session是origin target：tool owner必须在允许旧execution borrow安全存活的前提下等待requested revision adoption，然后才完成ToolResult；这样模型能在同一turn的后续provider call中使用list/inspect/meta route验证。若adoption失败，ToolResult明确为PARTIAL，模型可以自然说明，但不能调用尚未证明available的新能力。其他session可以保持`PENDING_SAFE_POINT`直到自身下一次dispatch；这不是失败，也不需要固定轮询或唤醒一个空turn。
 
 页面展示：
 
 ```text
 已保存 / 已删除
 已更新 N 个会话
+等待安全采用 P 个会话
 M 个会话需要重试
 ```
 
 不得用固定轮询制造执行恢复；用户刷新、后续明确 mutation 或既有连接生命周期可以再次观察。
+
+`manage_capability`的USER_FORM仍占用当前session唯一same-Host interaction slot；它可以按existing arbiter被更新或替换，但不能与同一tool call的另一份表单alias。表单关闭后，无论mutation成功、取消、拒绝、stale或partial，原tool execution owner都必须settle并把一个最终ToolResult送回模型。
 
 ---
 
@@ -693,27 +903,30 @@ M 个会话需要重试
 
 ### 9.1 MCP installer
 
-Bundled `pulsara-mcp-installer` 必须保留 production CLI/Host 验证路径，并新增以下指导：
+Bundled `pulsara-mcp-installer`必须以`manage_capability`作为模型参与正式安装/编辑的首选路径，同时保留production CLI作为用户明确要求或tool不可用时的out-of-band路径，并新增以下指导：
 
 ```text
 Pulsara 的能力页支持 Streamable HTTP、stdio、Bearer、自定义秘密 Header、
 stdio secret environment、tool exposure/effect/timeout 与其他高级 MCP 配置。
 
 不要要求用户在对话、terminal command 或可见配置文本中粘贴 secret。
-如果服务需要凭据：
-1. 确认公开 endpoint、transport、auth shape 与所需非秘密 Header/env 名；
-2. 请用户打开“能力 → MCP → 添加/编辑”完成凭据配置；
-3. 等用户明确表示完成后，再调用 reload_capabilities；
-4. 使用 list_mcp_servers / inspect_new_mcp_tool / use_new_mcp_tool 或 doctor
-   验证 exact server 与 representative safe operation；
-5. 只报告 connector state、tool count、使用的工具与 non-secret result。
+1. 查明公开 endpoint、transport、auth shape 与所需非秘密 Header/env 名；
+2. 用 manage_capability 提交typed public candidate；不要先自行判断要不要弹窗；
+3. runtime会在信息完整且permission允许时直接保存，否则自动打开“能力 → MCP”同款表单；
+4. 用户若需要输入secret，只在该表单中输入；model与Skill均不得索取或复述；
+5. manage_capability返回APPLIED + RELOADED后，直接使用list_mcp_servers /
+   inspect_new_mcp_tool / use_new_mcp_tool或doctor验证exact server与representative
+   safe operation，不再例行调用reload_capabilities；
+6. 只有走CLI/手工文件等out-of-band路径，或结果明确为PARTIAL/adoption attention时，
+   才使用reload_capabilities补救；
+7. 只报告connector state、tool count、使用的工具与non-secret result。
 ```
 
 推荐用户文案：
 
-> 该 MCP 需要凭据。请在“能力 → MCP”中添加或编辑这个服务并完成认证；不要把密钥发送到对话里。完成后告诉我，我会继续检查连接并实际验证工具。
+> 该 MCP 需要凭据。我会打开本地配置表单；请只在那里填写密钥，不要发送到对话里。保存后我会继续检查连接并实际验证工具。
 
-Skill 不应把所有高级配置都推给用户。对于有权且可由 official management surface 表达的非秘密配置，模型仍应完成；只有 secret、明确 trust/authority选择或当前 surface不支持的设置才交给用户。
+Skill不应把所有高级配置都推给用户。对于有权且可由official management surface表达的非秘密配置，模型应形成尽可能完整的prefill；是否DIRECT由runtime和当前permission决定。只有secret、缺失的用户独占选择、existing trust/review或当前surface不支持的设置需要用户补充。
 
 如果 authoritative server 只支持 OAuth，Skill 必须诚实报告当前 Pulsara 不支持，不能伪装成 Bearer、自行抓 token 或把网页登录 cookie写入 config。
 
@@ -721,15 +934,17 @@ Skill 不应把所有高级配置都推给用户。对于有权且可由 officia
 
 Bundled `pulsara-plugin-installer`不得要求用户把Plugin MCP API key发进对话，不得把secret写进source package、转换candidate、`mcp.json`、terminal command或Plugin data。它必须遵循：
 
-1. 先按existing exact package workflow完成validate/install；secret不是package合法性或安装成功的条件。
+1. 用`manage_capability(INSTALL_PLUGIN)`进入existing exact validate/install workflow；secret不是package合法性或安装成功的条件，成功后仍先得到disabled instance。
 2. 从inspection列出Plugin提供的MCP component及其公开endpoint/transport，不猜测credential slot。
-3. 若Plugin文档或连接结果表明需要认证，引导用户到“能力 → MCP → 该Plugin连接 → 配置凭据”。
-4. 用户明确表示完成后，调用`reload_capabilities`并通过existing list/inspect/use路径验证；不要求重装Plugin。
-5. 只报告configured/present、connection状态、tool catalog与non-secret call结果。
+3. 若Plugin文档或连接结果表明需要认证，用`CONFIGURE_PLUGIN_MCP_CREDENTIAL`提交non-secret binding shape，由runtime自动打开shared credential form；不让用户把secret发给模型。
+4. `SET_PLUGIN_ENABLED(enabled=true)`始终复用existing exact-package review UI；只有用户SUBMIT产生call-local external-process acceptance，不能把install、credential、enable压成一次隐式信任。
+5. 每个first-party mutation返回`RELOADED`后直接通过existing list/inspect/use路径验证；不要求重装Plugin，也不例行调用`reload_capabilities`。
+6. 只有CLI/手工source等out-of-band变更或明确`PARTIAL`/adoption attention才调用reload补救。
+7. 只报告configured/present、connection状态、tool catalog与non-secret call结果。
 
 推荐用户文案：
 
-> 插件已经安装，但其中的这个 MCP 还需要凭据。请在“能力 → MCP”中找到标有该插件来源的连接并完成认证；不要把密钥发送到对话里。配置后告诉我，我会继续验证。
+> 插件已经安装，但其中的这个 MCP 还需要凭据。我会打开它的本地配置表单；请只在那里填写密钥，不要发送到对话里。保存后我会继续验证。
 
 ---
 
@@ -763,6 +978,7 @@ PUT    /api/sessions/{session_id}/capabilities/plugins/{plugin_id}/mcp/{local_se
 - Skill delete只接受当前 inspection中exact owned path/row，不接受任意绝对路径作为通用recursive delete API；
 - UI adapter不解析 CLI JSON，不操作 YAML，不接触 Keychain API；
 - server/controller不把 secret复制到 capability operation details。
+- `manage_capability`不得绕过这些controller/service contracts直接写source；DIRECT与USER_FORM submit只是在actor/admission上不同。
 
 ### 10.1 MCP editable projection
 
@@ -789,6 +1005,28 @@ Secret value字段在任何 response schema中都不存在，而不是返回 `**
 
 Plugin-provided MCP使用同一credential presence projection，但另外携带只读`source_plugin`、`local_server_id`与opaque current package identity；它不返回local MCP update identity，也不接受对package-derived definition fields的写入。
 
+### 10.2 Model-triggered capability form projection
+
+Current same-Host interaction projection增加一个closed `CAPABILITY_FORM` variant，至少携带：
+
+```text
+interaction identity / revision / expiry
+requested closed action
+object kind / USER-or-WORKSPACE scope / public target identity
+shared editor mode (create | edit | review | credential)
+sanitized prefill
+editable field schema/profile
+public effect summary
+permission reason（产品文案）
+opaque expected-current guard
+```
+
+Projection不得携带existing secret value、credential-store binding internals、model/provider payload、raw Plugin package bytes或让frontend选择backend operation的自由字符串。Frontend按variant加载与能力页相同的form component；submission返回完整public candidate、closed secret mutation与opaque guard，直接交给唯一pending interaction owner。
+
+Secret-bearing submission只可通过本地controller transport进入credential owner；request/response middleware、WebSocket/protobuf debug logging、error serialization与browser persistence均须显式排除其value。Live snapshot/reconnect最多重新投影non-secret form与`configured/present`，不得重放用户已经输入但尚未成功settle的secret。Controller断开后保留现有process-local interaction行为，不增加durable草稿或跨重启恢复。
+
+同一interaction resolution必须原子选择`SUBMIT | CANCEL`之一并exact compare interaction identity/revision。普通tool confirmation的`ALLOW | DENY`继续原样存在；不得把capability form的完整candidate塞进通用allow boolean，也不得用先调用Web API、再单独点击ALLOW的两阶段split-brain流程。
+
 ---
 
 ## 11. 文件与 owner 变更上限
@@ -812,22 +1050,41 @@ src/pulsara_agent/plugins/package_store.py
 src/pulsara_agent/plugins/mcp_adapter.py
   instance credential overlay、native composition、remove stale guard；不复制 package GC
 
+src/pulsara_agent/capability/builtin_catalog.py
+src/pulsara_agent/capability/call_classifier.py
+src/pulsara_agent/tool_permission.py
+  注册唯一manage_capability descriptor；按closed action投影exact scope/effect并复用现有permission gate
+
+src/pulsara_agent/conversation_kernel/tool_contracts.py
+src/pulsara_agent/conversation_kernel/tool_runtime.py
+src/pulsara_agent/conversation_kernel/tool_execution.py
+src/pulsara_agent/conversation_kernel/host.py
+  manage_capability preparation/authorization/execution、typed owner dispatch与automatic adoption；不复制mutation逻辑
+
+src/pulsara_agent/conversation_kernel/interaction.py
+src/pulsara_agent/conversation_kernel/live_control.py
+src/pulsara_agent/ports/live_agent_event.py
+src/pulsara_agent/terminal_protocol/schema/terminal_kernel_v3.proto
+src/pulsara_agent/terminal_protocol/v3_gateway.py
+  process-local CAPABILITY_FORM projection/submission；复用唯一current interaction，不增加durable row/event
+
 src/pulsara_agent/web_app/http_server.py
 src/pulsara_agent/web_app/session_controller.py
   user/workspace structured operations、secret request boundary、live adoption
 
 frontend/components/capability-view.tsx
+frontend/components/workbench-view.tsx
 frontend/components/inspector-panel.tsx
 frontend/lib/pulsara-types.ts
 frontend/lib/runtime-adapter.ts
-  add/edit form、credential UX、三类删除与typed outcomes
+  shared add/edit/review form、conversation interaction、credential UX、三类删除与typed outcomes
 
 src/pulsara_agent/bundled_skills/pulsara-mcp-installer/SKILL.md
 src/pulsara_agent/bundled_skills/pulsara-plugin-installer/SKILL.md
   user-owned credential handoff与Plugin MCP配置指引
 ```
 
-Managed credential store若需要新模块，只允许一个窄 local port/adapter；不得把它扩展成通用账号系统、OAuth vault、remote sync、database service或模型可调用 tool。
+Managed credential store或capability mutation facade若需要新模块，各只允许一个窄local port/adapter；`manage_capability`只能调用facade，不能让Keychain adapter本身成为模型tool。不得把任一模块扩展成通用账号系统、OAuth vault、remote sync、database service、generic capability registry或第二套permission owner。
 
 ---
 
@@ -839,12 +1096,15 @@ Managed credential store若需要新模块，只允许一个窄 local port/adapt
 4. 实现 descriptor-safe loose Skill removal，并同步清理 exact enablement override。
 5. 在existing Plugin instance state中加入per-component non-secret credential overlay，并在`PluginMcpAdapter`中与immutable package definition exact join；不给portable schema增加伪slot。
 6. 给 Plugin removal增加 expected package install id stale guard与managed credential cleanup，继续复用existing state/anchor/GC。
-7. 扩展 Web controller 与 non-secret inspection projection；secret request全链路禁止日志/回显。
-8. 重做能力页 MCP add/edit shared editor与 progressive advanced fields；Plugin MCP复用credential部分但definition保持只读。
-9. 给 user Skill/MCP/Plugin 与已有 workspace Skill/MCP management surface补齐删除入口和确认。
-10. 更新 `pulsara-mcp-installer`与`pulsara-plugin-installer`，删除旧“auth surface不能表达就只能 blocker”的过时描述；保留 OAuth 等真实 blocker。
-11. 运行 focused tests、全量 Python/frontend、PostgreSQL clean-v0 verify与real MCP dogfood。
-12. 同步 active specs，删除旧 no-edit/no-delete/no-Plugin-credential契约、compat aliases、旧 DTO fields与重复 UI/API路径。
+7. 扩展Web controller与non-secret inspection projection；让所有first-party mutation在settle后调用同一个automatic live-adoption owner，并把workspace adoption推进到每个session下一次provider dispatch前的safe point；secret request全链路禁止日志/回显。
+8. 在builtin catalog注册唯一ROOT-only `manage_capability` closed descriptor；实现prepare-first invocation与resolved physical effect projection，再接入existing call classifier/permission gate。先证明四种mode与Plugin/credential physical-location矩阵，禁止临时bypass-only special case。
+9. 实现DIRECT路径，只dispatch到第3、5、6步的typed owners；model-origin mutation必须在同一turn后续provider call前settleorigin adoption revision，mutation/adoption分层，一个tool call只产生一个最终ToolResult。
+10. 扩展existing same-Host current interaction为typed `CAPABILITY_FORM`与process-local authorization disposition，明确READ_ONLY form-only actor边界，实现exact submit/cancel与controller-loss settlement；不改数据库/event oracle。
+11. 重做能力页MCP add/edit shared editor与progressive advanced fields；Plugin MCP复用credential部分但definition保持只读，并让workbench interaction复用同一component/schema。
+12. 给user Skill/MCP/Plugin与已有workspace Skill/MCP management surface补齐删除入口和确认。
+13. 更新`pulsara-mcp-installer`与`pulsara-plugin-installer`，删除旧“auth surface不能表达就只能blocker”和“成功后例行reload”的过时描述；保留OAuth等真实blocker，并把`reload_capabilities`写成out-of-band/partial补救。
+14. 运行focused tests、全量Python/frontend、PostgreSQL clean-v0 verify与real MCP/Plugin model-assisted dogfood。
+15. 同步active specs，删除旧no-edit/no-delete/no-Plugin-credential、model只能口头指导、manual reload happy path契约，以及compat aliases、旧DTO fields与重复UI/API路径。
 
 不得保留 v1/v2 form、old/new auth双读写、临时 feature flag、raw YAML fallback或“编辑其实是删除再添加”的前端伪实现。
 
@@ -954,6 +1214,37 @@ Managed credential store若需要新模块，只允许一个窄 local port/adapt
 - Mutation settle前关闭/backdrop/重复提交入口按现有规则锁定。
 - Backend stale/partial/attention必须有可理解文案，不能只显示异常名。
 
+### 13.8 Model participation、permission与reload
+
+| 场景 | 必须结果 |
+|---|---|
+| ROOT + READ_ONLY调用manage_capability | tool可调用但无模型DIRECT write；自动打开prefilled form，用户submit作为独立user-control-plane authority |
+| ROOT + ASK_PERMISSIONS完整keyless candidate | 进入existing permission confirmation；Hook没有合法ALLOW/DENY时自动打开shared review/editor，用户确认后原tool call继续settle |
+| ROOT + ACCEPT_EDITS创建workspace keyless HTTP MCP | candidate完整且无需existing review时DIRECT |
+| ROOT + ACCEPT_EDITS创建user MCP | 按outside-workspace write语义打开form，不偷换成workspace write |
+| ROOT + ACCEPT_EDITS安装/启停/删除任意scope Plugin | package/state实际位于PULSARA_HOME，按outside-workspace write打开form；WORKSPACE namespace不冒充workspace filesystem |
+| ROOT + ACCEPT_EDITS操作WORKSPACE MCP managed credential | YAML可在workspace，但credential store effect为outside-workspace，create/replace/clear/cleanup均打开form |
+| ROOT + ACCEPT_EDITS创建/启用stdio或Hook-bearing capability | 按existing terminal/executable effect打开form |
+| ROOT + BYPASS_PERMISSIONS完整keyless MCP | DIRECT；不因MCP类别本身强制弹窗 |
+| ROOT + BYPASS_PERMISSIONS缺Bearer value | 自动打开credential form；不得匿名安装、猜值或要求在chat粘贴 |
+| SUBAGENT调用manage_capability | 明确拒绝；不能转发secret请求或借ROOT authority |
+| 模型传simple/skip_confirmation/raw YAML/path/secret | schema或admission拒绝，不进入mutation |
+| 模型prefill后用户修改公开字段 | 重新parse并执行用户实际提交的完整candidate，不执行旧草稿 |
+| form target在等待时变化 | stale/conflict + fresh non-secret inspection；不覆盖current |
+| 用户取消/拒绝/关闭form | 原tool call得到CANCELLED/REJECTED ToolResult，模型可继续自然语言收尾 |
+| controller缺失或interaction被替换 | 无mutation；pending owner关闭且tool call确定settle，不永久显示“操作未完成” |
+| model安装完整Plugin | permission允许时可DIRECT安装为disabled；不隐式enable |
+| 任意mode执行SET_PLUGIN_ENABLED(true) | 恒进入exact package review form；只有user SUBMIT生成call-local ExternalProcessAcceptance，模型参数/数据库没有acceptance |
+| Plugin credential动作需要value | shared credential form；value不进入tool args/result/Hook/transcript |
+| model tool origin mutation成功且origin adoption成功 | 同一turn下一次provider call前完成requested revision；ToolResult为APPLIED + RELOADED，可直接list/inspect/use |
+| model tool origin adoption失败 | capability truth保留；ToolResult为APPLIED + PARTIAL，不伪称新能力已可用 |
+| Web mutation影响busy matching session | API可返回PENDING_SAFE_POINT；该session下一次provider dispatch前采用，pending不算失败 |
+| automatic adoption为RELOADED | 模型不再调用reload_capabilities，直接list/inspect/use验证 |
+| CLI/手工YAML/外部installer修改 | 不自动猜测；明确调用reload_capabilities后再验证 |
+| automatic adoption为PARTIAL | capability truth不回滚；问题解除后允许显式reload补救 |
+| same-epoch automatic/manual reload | SYSTEM/tools既有prefix不重写，messages只追加suffix |
+| permission Hook观察manage_capability | 只见public candidate/effect；form secret永不进入Hook input |
+
 ---
 
 ## 14. 验证与 dogfood
@@ -968,10 +1259,31 @@ tests/test_local_skill_management_concurrency.py（若现有拆分适用）
 tests/test_project_capability_management.py
 tests/test_round6_mcp_production.py
 tests/test_round9_3_plugin_physical_semantics.py
+tests/test_round9_unified_capability_semantics.py
+tests/test_round4_plan_workflow.py
+tests/test_stage2_conversation_runner.py
+tests/test_stage2_protocol_v3.py
 tests/test_local_web_http_surface.py
 frontend/app/pulsara-app.test.tsx
 frontend/lib/runtime-adapter.test.ts
 ```
+
+新增/扩展测试必须至少分层证明：
+
+- `manage_capability`只有一个descriptor与一个execution owner，closed actions逐项schema/classifier覆盖；
+- preparation先形成不可伪造的resolved effect projection；permission不从模型path/risk标签推导；
+- ROOT四种permission mode矩阵、SUBAGENT拒绝；READ_ONLY只允许展示用户表单而不能把DENY升级成model permit，其他DENY仍走no-attempt；
+- physical effect mapping覆盖USER/WORKSPACE local MCP YAML、两种scope的Plugin PULSARA_HOME state、managed credential store与stdio/Hook process；
+- ACCEPT_EDITS下Workspace Plugin与Workspace MCP managed-credential create/clear/cleanup仍按outside write询问；
+- DIRECT与USER_FORM汇入同一个MCP/Plugin typed mutation fake，既不shell out也不double apply；
+- shared form prefill/edit/submit/cancel/stale/controller-loss与最终ToolResult settlement；
+- Plugin enabled=true恒由exact review SUBMIT产生call-local ExternalProcessAcceptance；disable不携带acceptance；
+- secret不出现在tool args/result、live projection、Hook input、protocol diagnostics或frontend state snapshot；
+- model-origin first-party mutation在同一turn下一次provider call前settle requested adoption revision；old surface borrow可drain且无deadlock/double-close；
+- Web-origin busy session返回PENDING_SAFE_POINT并在下一次provider dispatch前采用；pending与PARTIAL区分；
+- first-party mutation只调用一次底层refresh；`RELOADED`后没有第二次model reload；
+- CLI/manual source变更保持不可见直到explicit reload，reload仍不rebase same-epoch provider prefix；
+- Plugin install-disabled、credential、enable三个settle保持独立。
 
 不得弱化现有 assertion、增加 skip/xfail或通过隐藏真实错误换绿。
 
@@ -993,15 +1305,17 @@ git diff --check
 
 至少完成：
 
-1. Keyless Firecrawl：add → reload → list → inspect → safe tool call。
-2. Authenticated HTTP MCP：用户在能力页输入 Bearer，页面不回显，连接发现完整 catalog并完成一个safe call。
-3. Edit：变更一个non-secret setting并证明old/new physical cut与prefix continuity。
-4. Delete：删除连接后future call unavailable，managed credential不再存在。
-5. stdio fixture：managed secret env只到child process；fixture主动回显secret时transport boundary拦截，trace/terminal/provider均不含值。
-6. Skill user/workspace delete与duplicate fallback。
-7. Authenticated Plugin MCP：先安装Plugin、再从能力页配置credential、不改package bytes，reload后完成一个safe call；disable/re-enable保持binding。
-8. Replace Plugin：stable component保留并重验credential；new package在enable acceptance前不使用old value；removed/incompatible component不采用old binding。
-9. Enabled Plugin delete：future contributions消失、managed MCP credentials清理、Plugin data保留，old physical consumer drain后GC。
+1. Keyless Firecrawl：模型调用`manage_capability` → bypass下DIRECT add → automatic reload → list → inspect → safe tool call；不得出现例行第二次reload。
+2. 同一keyless candidate分别在ASK与ACCEPT_EDITS user/workspace scope运行，证明表单/直达分流符合13.8而非bypass-only；另以Workspace Plugin与Workspace MCP managed credential证明physical outside-write不会被逻辑scope放宽。
+3. Authenticated HTTP MCP：模型发起typed public candidate，runtime自动打开shared form；用户只在表单输入Bearer，页面不回显，连接发现完整catalog并完成一个safe call。
+4. Edit：从能力页与模型各变更一个non-secret setting，证明共用typed owner、old/new physical cut与prefix continuity。
+5. Delete：删除连接后future call unavailable，managed credential不再存在。
+6. stdio fixture：managed secret env只到child process；fixture主动回显secret时transport boundary拦截，trace/terminal/provider均不含值。
+7. Skill user/workspace delete与duplicate fallback。
+8. Authenticated Plugin MCP：模型在bypass下可先直接安装disabled Plugin，再由自动表单配置credential并完成exact-package enable review；只由user SUBMIT产生call-local acceptance，不改package bytes，automatic reload后完成一个safe call；disable/re-enable保持binding。
+9. Replace Plugin：stable component保留并重验credential；new package在enable acceptance前不使用old value；removed/incompatible component不采用old binding。
+10. Enabled Plugin delete：future contributions消失、managed MCP credentials清理、Plugin data保留，old physical consumer drain后GC。
+11. Out-of-band CLI修改：变更本身不被runtime猜测；一次explicit`reload_capabilities`补救后采用，且不改provider prefix。
 
 Real provider dogfood保留实际 prompt、provider-visible messages/tools、model reply、non-secret MCP result与失败详情；不得记录任何 MCP credential value，也不得输出 `PULSARA_API_KEY`。
 
@@ -1014,20 +1328,24 @@ Real provider dogfood保留实际 prompt、provider-visible messages/tools、mod
 1. 用户能力页可以用同一 structured editor添加和直接编辑 MCP。
 2. Current native HTTP/stdio/auth/exposure/effect/timeout/concurrency配置有完整但渐进披露的产品入口。
 3. Plugin-provided MCP definition保持immutable/read-only，但其instance-scoped credential可从MCP列表或Plugin详情随时配置、更换、清除。
-4. Plugin安装不以secret为输入或成功条件；连续UI在exact disabled instance创建后才调用credential overlay，再进行enable review。缺少凭据只使exact MCP需要配置，不使整个Plugin伪失败。
-5. Managed secret由用户直接交给local credential store；模型、transcript、terminal、config和响应均看不到值。
-6. HTTP/stdio server即使回显已注入credential，exact value也在native MCP transport owner内被拦截，old/new client各自保持正确scrubber lifetime。
-7. Environment reference仍是一等高级路径；reload与restart语义诚实。
-8. OAuth没有伪UI或fallback。
-9. User 与现有 workspace install surfaces 对 loose Skill、local MCP、Plugin instance满足“可安装即有删除”。
-10. Skill删除只删除exact managed-root row并清理enablement override；同名候选自然重算。
-11. MCP删除切除exact config/approval、清理managed credential、允许old physical request drain。
-12. Plugin删除复用existing state/anchor/GC并以expected package install id防止stale delete；bundle contributions与instance MCP credentials一起消失，Plugin data保留。
-13. Builtin、bundled、inherited与Plugin child contribution没有假删除按钮。
-14. Same-epoch provider prefix不重写；canonical transcript/history不被删除操作回溯修改。
-15. 无generic capability registry、database growth、event/job/receipt/tombstone/repair machinery、compat alias或双路径。
-16. Focused/full/frontend/PostgreSQL/dogfood全部通过或对真实外部阻塞精确报告。
-17. Active specs与bundled MCP/Plugin installer Skills只描述新单一路径。
+4. 唯一ROOT-only `manage_capability` tool以closed actions覆盖本轮MCP/Plugin管理；它先从canonical owner形成不可伪造的resolved physical effect projection，不接收secret、raw config/path、shell wrapper或模型自报授权标签。
+5. 该tool在READ_ONLY、ASK_PERMISSIONS、ACCEPT_EDITS、BYPASS_PERMISSIONS均可调用；现有permission按MCP YAML、PULSARA_HOME Plugin state、credential store与process的真实边界决定DIRECT或USER_FORM，不是bypass-only或逻辑scope猜测。
+6. 能力页与model-triggered interaction复用同一form/schema/controller/typed owner；READ_ONLY只允许展示user-control-plane form而不产生model write permit，用户提交的exact candidate覆盖model prefill，cancel/stale/controller-loss均确定settle并让模型继续。
+7. Plugin安装不以secret为输入或成功条件；连续UI在exact disabled instance创建后才调用credential overlay，再进行enable review。`enabled=true`恒由用户对current exact package提交review并生成call-local external-process acceptance；模型不能自报，系统不新增receipt。缺少凭据只使exact MCP需要配置，不使整个Plugin伪失败。
+8. Managed secret由用户直接交给local credential store；模型、transcript、terminal、config、Hook、live projection和响应均看不到值。
+9. HTTP/stdio server即使回显已注入credential，exact value也在native MCP transport owner内被拦截，old/new client各自保持正确scrubber lifetime。
+10. Environment reference仍是一等高级路径；reload与restart语义诚实。
+11. First-party Web/tool mutation自动调用existing live adoption owner并返回独立mutation/adoption settlement；model-origin requested revision在同一turn下一次provider call前settle，其他session使用`PENDING_SAFE_POINT`而不是伪失败。`reload_capabilities`只保留为out-of-band或PARTIAL补救，不再是happy-path步骤。
+12. OAuth没有伪UI或fallback。
+13. User 与现有 workspace install surfaces 对 loose Skill、local MCP、Plugin instance满足“可安装即有删除”。
+14. Skill删除只删除exact managed-root row并清理enablement override；同名候选自然重算。
+15. MCP删除切除exact config/approval、清理managed credential、允许old physical request drain。
+16. Plugin删除复用existing state/anchor/GC并以expected package install id防止stale delete；bundle contributions与instance MCP credentials一起消失，Plugin data保留。
+17. Builtin、bundled、inherited与Plugin child contribution没有假删除按钮。
+18. Same-epoch provider prefix不重写；canonical transcript/history不被删除操作回溯修改。
+19. 无generic capability registry、第二套permission owner、database growth、event/job/receipt/tombstone/repair machinery、compat alias或双路径。
+20. Focused/full/frontend/PostgreSQL/dogfood全部通过或对真实外部阻塞精确报告。
+21. Active specs与bundled MCP/Plugin installer Skills只描述新单一路径。
 
 ---
 
@@ -1044,6 +1362,22 @@ MCP 保存成功：
 MCP 需要凭据：
 
 > 连接已保存，但还需要凭据。完成认证后即可测试连接。
+
+模型已准备完整配置、当前permission要求确认：
+
+> Pulsara 已准备好这项能力设置。请检查后确认；你也可以在保存前修改。
+
+模型需要用户补齐配置：
+
+> Pulsara 已填写可以确认的公开设置。请补充标出的内容后保存；密钥只会交给这台设备上的凭据存储，不会发送给模型。
+
+用户取消模型发起的表单后，tool结果对应的自然语言不得带责备或反复索取：
+
+> 已取消，本次没有更改能力设置。
+
+Automatic adoption partial：
+
+> 设置已保存，但部分已打开的会话还没有刷新成功。你可以稍后重试刷新。
 
 Plugin MCP 需要凭据：
 

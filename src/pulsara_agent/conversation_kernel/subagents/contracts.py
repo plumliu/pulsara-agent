@@ -146,9 +146,7 @@ _DEFAULT_TERMINAL_DETAILS: Mapping[SubagentTerminalReason, str] = {
     SubagentTerminalReason.DEPENDENCY_RESULT_INVARIANT: (
         "A completed dependency did not have the required canonical result."
     ),
-    SubagentTerminalReason.CHILD_START_FAILED: (
-        "The delegated task could not start."
-    ),
+    SubagentTerminalReason.CHILD_START_FAILED: ("The delegated task could not start."),
     SubagentTerminalReason.CHILD_EXECUTION_FAILED: (
         "The delegated task failed while it was running."
     ),
@@ -213,9 +211,9 @@ def build_subagent_completion_storage_body(
     _text(profile, "profile", 256)
     if not status.terminal:
         raise ValueError("completion source task must be terminal")
-    if len(failed_dependency_task_ids) > 16 or len(set(failed_dependency_task_ids)) != len(
-        failed_dependency_task_ids
-    ):
+    if len(failed_dependency_task_ids) > 16 or len(
+        set(failed_dependency_task_ids)
+    ) != len(failed_dependency_task_ids):
         raise ValueError("completion failed dependency set is invalid")
     if any(not item for item in failed_dependency_task_ids):
         raise ValueError("completion dependency identity is empty")
@@ -249,7 +247,9 @@ def build_subagent_completion_storage_body(
             "next_action": next_action,
         }
         result = None
-        if any(value is not None for value in (result_id, result_source, result_summary)):
+        if any(
+            value is not None for value in (result_id, result_source, result_summary)
+        ):
             raise ValueError("failed task cannot carry a result")
     return canonical_json_bytes(
         {
@@ -313,36 +313,18 @@ def validate_subagent_completion_storage_body(value: bytes) -> Mapping[str, obje
         display_role=decoded.get("display_role"),
         profile=str(decoded.get("profile") or ""),
         status=SubagentTaskStatus(str(decoded.get("status") or "")),
-        terminal_reason=(
-            None
-            if failure is None
-            else str(failure.get("code") or "")
-        ),
+        terminal_reason=(None if failure is None else str(failure.get("code") or "")),
         terminal_public_detail=(
-            None
-            if failure is None
-            else str(failure.get("detail") or "")
+            None if failure is None else str(failure.get("detail") or "")
         ),
         failed_dependency_task_ids=(
             ()
             if failure is None
             else tuple(failure.get("failed_dependency_task_ids") or ())
         ),
-        result_id=(
-            None
-            if result is None
-            else str(result.get("result_id") or "")
-        ),
-        result_source=(
-            None
-            if result is None
-            else str(result.get("source") or "")
-        ),
-        result_summary=(
-            None
-            if result is None
-            else str(result.get("summary") or "")
-        ),
+        result_id=(None if result is None else str(result.get("result_id") or "")),
+        result_source=(None if result is None else str(result.get("source") or "")),
+        result_summary=(None if result is None else str(result.get("summary") or "")),
     )
     if rebuilt != value:
         raise ValueError("subagent completion body is not canonical")
@@ -400,7 +382,10 @@ def derive_subagent_batch_initial_dispositions(
                     raise ValueError("subagent dependency is unknown")
                 states.append(state)
         visiting.remove(task_id)
-        if any(status.terminal and status is not SubagentTaskStatus.COMPLETED for status, _ in states):
+        if any(
+            status.terminal and status is not SubagentTaskStatus.COMPLETED
+            for status, _ in states
+        ):
             disposition = FrozenSubagentTaskInitialDisposition(
                 SubagentTaskStatus.BLOCKED_DEPENDENCY_FAILED,
                 None,
@@ -821,13 +806,16 @@ class FrozenSubagentParentContextSelection:
 
     def __post_init__(self) -> None:
         if self.mode is SubagentContextMode.NONE:
-            if any(
-                value is not None
-                for value in (
-                    self.last_n_turns,
-                    self.rendered_body,
+            if (
+                any(
+                    value is not None
+                    for value in (
+                        self.last_n_turns,
+                        self.rendered_body,
+                    )
                 )
-            ) or self.selected_units:
+                or self.selected_units
+            ):
                 raise ValueError("NONE parent context must be absent")
         elif self.mode is SubagentContextMode.LAST_N:
             if self.last_n_turns is None or not 1 <= self.last_n_turns <= 3:
@@ -846,7 +834,7 @@ def _render_parent_units(
     return canonical_json_bytes(
         {
             "pulsara_parent_context": {
-                "trust": "UNTRUSTED_OBSERVATION",
+                "content_semantics": "ADVISORY_COLLABORATION_DATA",
                 "units": [
                     {
                         "ordinal": ordinal,
@@ -943,23 +931,31 @@ class PreparedSubagentTaskDraft:
         if self.task_key is not None:
             if re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", self.task_key) is None:
                 raise ValueError("task_key is invalid")
-        for field, value in (("label", self.label), ("display_role", self.display_role)):
+        for field, value in (
+            ("label", self.label),
+            ("display_role", self.display_role),
+        ):
             if value is not None:
                 _text(value, field, 256)
-        if len(self.dependency_task_ids) > 16 or len(set(self.dependency_task_ids)) != len(
-            self.dependency_task_ids
-        ):
+        if len(self.dependency_task_ids) > 16 or len(
+            set(self.dependency_task_ids)
+        ) != len(self.dependency_task_ids):
             raise ValueError("dependency set is invalid")
-        if any(not isinstance(item, str) or not item for item in self.dependency_task_ids):
+        if any(
+            not isinstance(item, str) or not item for item in self.dependency_task_ids
+        ):
             raise ValueError("dependency identity is invalid")
         if self.task_id in self.dependency_task_ids:
             raise ValueError("task cannot depend on itself")
         if self.initial_status.terminal != (self.terminal_reason is not None):
             raise ValueError("task terminal reason does not match initial status")
-        if (self.initial_status in {
-            SubagentTaskStatus.PENDING_START,
-            SubagentTaskStatus.WAITING_DEPENDENCY,
-        }) != (self.pending_reason is not None):
+        if (
+            self.initial_status
+            in {
+                SubagentTaskStatus.PENDING_START,
+                SubagentTaskStatus.WAITING_DEPENDENCY,
+            }
+        ) != (self.pending_reason is not None):
             raise ValueError("task pending reason does not match initial status")
         valid_initial = {
             SubagentTaskStatus.PENDING_START: ("CAPACITY", None),
@@ -1054,9 +1050,7 @@ def _subagent_task_draft_identity_digest(
             "profile": draft.profile.value,
             "display_role": draft.display_role,
             "objective": draft.objective,
-            "context": parent_context_selection_identity_digest(
-                subject, draft.context
-            ),
+            "context": parent_context_selection_identity_digest(subject, draft.context),
             "dependencies": draft.dependency_task_ids,
             "initial_status": draft.initial_status.value,
             "pending_reason": draft.pending_reason,
@@ -1143,8 +1137,7 @@ class FrozenSubagentResultPublicFact:
         ):
             raise TypeError("subagent result diagnostics items must be frozen objects")
         if any(
-            len(canonical_json_bytes(item)) > 8_192
-            for item in self.diagnostics.items
+            len(canonical_json_bytes(item)) > 8_192 for item in self.diagnostics.items
         ):
             raise ValueError("subagent result diagnostic item exceeds its bound")
         if (
@@ -1311,7 +1304,7 @@ def _render_dependency_results(
     return canonical_json_bytes(
         {
             "pulsara_dependency_results": {
-                "trust": "UNTRUSTED_OBSERVATION",
+                "content_semantics": "ADVISORY_COLLABORATION_DATA",
                 "results": [
                     {
                         "dependency_ordinal": item.dependency_ordinal,
@@ -1443,4 +1436,8 @@ def build_inter_agent_mailbox_batch(
     )
 
 
-__all__ = [name for name in globals() if name.startswith(("Frozen", "Prepared", "Subagent", "build_", "MAXIMUM_"))]
+__all__ = [
+    name
+    for name in globals()
+    if name.startswith(("Frozen", "Prepared", "Subagent", "build_", "MAXIMUM_"))
+]

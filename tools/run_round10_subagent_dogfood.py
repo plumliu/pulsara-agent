@@ -32,6 +32,7 @@ from pulsara_agent.conversation_kernel.compaction.contracts import (
 from pulsara_agent.conversation_kernel.contracts import InlineContent
 from pulsara_agent.conversation_kernel.host import KernelHostCore
 from pulsara_agent.conversation_kernel.repository import AssistantTextBlock
+from pulsara_agent.conversation_kernel.subagents import SubagentTaskStatus
 from pulsara_agent.mcp_config import load_mcp_server_configs
 from pulsara_agent.model_input.continuity import (
     ProviderInputContinuityScope,
@@ -168,6 +169,38 @@ async def _wait_for_task_status(
             status = None if row is None else row["status"]
             raise TimeoutError(
                 f"task {task_id!r} did not reach {sorted(expected)}; status={status}"
+            )
+        await asyncio.sleep(0.05)
+
+
+async def _wait_for_tasks_to_settle(
+    session,
+    *,
+    task_ids: tuple[str, ...],
+    timeout_seconds: float,
+) -> None:
+    """Join accepted dogfood tasks without changing their semantic evidence."""
+
+    if not task_ids:
+        return
+    deadline = asyncio.get_running_loop().time() + timeout_seconds
+    expected = set(task_ids)
+    latest: dict[str, str] = {}
+    while True:
+        rows = await _task_rows(session)
+        latest = {
+            str(row["id"]): str(row["status"])
+            for row in rows
+            if str(row["id"]) in expected
+        }
+        if set(latest) == expected and all(
+            SubagentTaskStatus(status).terminal for status in latest.values()
+        ):
+            return
+        if asyncio.get_running_loop().time() >= deadline:
+            raise TimeoutError(
+                "accepted dogfood tasks did not settle before fixture cleanup: "
+                + repr(latest)
             )
         await asyncio.sleep(0.05)
 
@@ -455,7 +488,7 @@ Use the general_worker profile. After all six settle, briefly state the graph ou
         )
         and len(edges) == 4
     )
-    return {
+    report = {
         "passed": passed,
         "root_model_calls": result.model_call_count,
         "root_tool_calls": result.tool_call_count,
@@ -470,6 +503,14 @@ Use the general_worker profile. After all six settle, briefly state the graph ou
             for row in edges
         ),
     }
+    # Freeze semantic evidence first, then prevent unfinished graph workers from
+    # leaking into the next dogfood scenario or Host shutdown.
+    await _wait_for_tasks_to_settle(
+        session,
+        task_ids=task_ids,
+        timeout_seconds=180,
+    )
+    return report
 
 
 async def _run_last_n_and_message(session, workspace: Path) -> dict[str, object]:
@@ -607,25 +648,40 @@ The first four slow tasks must precede mcp_queued in the batch so the Host-globa
         session, task_key="mcp_queued", timeout_seconds=60
     )
     status_at_install = await _wait_for_capacity_frontier(session, timeout_seconds=10)
-    compaction_task = asyncio.create_task(
-        session.compact_context(
-            command_id="command:round10:active-task-board-compaction",
-            force=True,
-            expected_active_turn_id=active_turn_id,
+    compaction_task: asyncio.Task | None = None
+    try:
+        compaction_task = asyncio.create_task(
+            session.compact_context(
+                command_id="command:round10:active-task-board-compaction",
+                force=True,
+                expected_active_turn_id=active_turn_id,
+            )
         )
-    )
-    _write_child_mcp_config(workspace)
-    installed = await session.reload_mcp_configs(_isolated_mcp_configs(workspace))
-    state = await session._mcp_supervisor.wait_for_server_settlement(  # noqa: SLF001
-        "child", timeout_seconds=20
-    )
-    spawn_result = await root_run
-    compaction = await compaction_task
-    handoff_body, handoff_observations = _root_runtime_handoff_probe(session)
-    # Keep the exact 4 ACTIVE + 1 PENDING_START frontier alive until the
-    # compaction successor has installed its runtime handoff.  This is a local
-    # dogfood synchronization point, not a task-lifetime limit.
-    release_path.touch()
+        _write_child_mcp_config(workspace)
+        installed = await session.reload_mcp_configs(
+            _isolated_mcp_configs(workspace),
+            deadline_monotonic=monotonic() + 30,
+        )
+        state = await session._mcp_supervisor.wait_for_server_settlement(  # noqa: SLF001
+            "child", timeout_seconds=20
+        )
+        spawn_result = await root_run
+        compaction = await compaction_task
+        handoff_body, handoff_observations = _root_runtime_handoff_probe(session)
+    finally:
+        # Keep the exact 4 ACTIVE + 1 PENDING_START frontier alive until the
+        # compaction successor has installed its runtime handoff, but never
+        # strand workers or a local compaction task when fixture setup fails.
+        release_path.touch()
+        pending_local_tasks = tuple(
+            task
+            for task in (root_run, compaction_task)
+            if task is not None and not task.done()
+        )
+        for task in pending_local_tasks:
+            task.cancel()
+        if pending_local_tasks:
+            await asyncio.gather(*pending_local_tasks, return_exceptions=True)
 
     task_ids = tuple(str(row["id"]) for row in await _task_rows(session))
     wait_result = await session.run_turn(
@@ -685,7 +741,7 @@ The first four slow tasks must precede mcp_queued in the batch so the Host-globa
         and "mcp__child__direct_echo" in mcp_names
         and "direct:PRESTART_MCP_MARKER" in mcp_summary
     )
-    return {
+    report = {
         "passed": passed,
         "status_at_mcp_install": status_at_install,
         "mcp_reload_ids": tuple(sorted(installed)),
@@ -711,6 +767,15 @@ The first four slow tasks must precede mcp_queued in the batch so the Host-globa
             if row.get("task_key") in {"cap0", "cap1", "cap2", "cap3", "mcp_queued"}
         ),
     }
+    # The rows above are the frozen semantic observation.  This separate join
+    # exists only so a model-side wait failure cannot leak live workers into
+    # Host shutdown and mask the actual dogfood result.
+    await _wait_for_tasks_to_settle(
+        session,
+        task_ids=task_ids,
+        timeout_seconds=180,
+    )
+    return report
 
 
 def _count_inter_agent_entries(
