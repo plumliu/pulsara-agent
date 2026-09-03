@@ -963,6 +963,67 @@ def test_chat_tool_terminal_usage_echo_does_not_duplicate_tool_semantics() -> No
     assert terminal.terminal_kind is ProviderAdapterTerminalKind.COMPLETED
 
 
+def test_chat_one_based_tool_call_indexes_are_normalized_at_wire_boundary() -> None:
+    accumulator = ChatCompletionAccumulator(
+        builder=ProviderLiveItemBuilder(),
+        provider_profile=ProviderProfile(wire_api="openai_chat_completions"),
+    )
+    events = []
+    for tool_call in (
+        {
+            "index": 1,
+            "id": "call:first",
+            "type": "function",
+            "function": {"name": "web_search", "arguments": ""},
+        },
+        {
+            "index": 1,
+            "function": {"arguments": '{"query":"Meta MUSE"}'},
+        },
+        {
+            "index": 2,
+            "id": "call:second",
+            "type": "function",
+            "function": {"name": "web_search", "arguments": ""},
+        },
+        {
+            "index": 2,
+            "function": {"arguments": '{"query":"Meta MUSE paper"}'},
+        },
+    ):
+        events.extend(accumulator.apply(_chat_chunk({"tool_calls": [tool_call]})))
+    events.extend(accumulator.apply(_chat_chunk({}, "tool_calls")))
+
+    starts = [item for item in events if isinstance(item, ToolCallStartPayload)]
+    ends = [item for item in events if isinstance(item, ToolCallEndPayload)]
+    assert [item.tool_call_id for item in starts] == ["call:first", "call:second"]
+    assert [(item.tool_call_id, item.arguments_json) for item in ends] == [
+        ("call:first", '{"query":"Meta MUSE"}'),
+        ("call:second", '{"query":"Meta MUSE paper"}'),
+    ]
+    assert accumulator.tool_calls.completed_calls == (
+        {
+            "id": "call:first",
+            "type": "function",
+            "function": {
+                "name": "web_search",
+                "arguments": '{"query":"Meta MUSE"}',
+            },
+        },
+        {
+            "id": "call:second",
+            "type": "function",
+            "function": {
+                "name": "web_search",
+                "arguments": '{"query":"Meta MUSE paper"}',
+            },
+        },
+    )
+    terminal = accumulator.finish()
+    assert isinstance(terminal, ProviderAdapterTerminal)
+    assert terminal.terminal_kind is ProviderAdapterTerminalKind.COMPLETED
+
+
 def test_chat_empty_tool_arguments_emit_exact_synthetic_json_delta() -> None:
     accumulator = ChatCompletionAccumulator(
         builder=ProviderLiveItemBuilder(),

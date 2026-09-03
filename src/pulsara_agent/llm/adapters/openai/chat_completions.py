@@ -1044,6 +1044,7 @@ class _ChatToolCallState:
 class ChatToolCallAccumulator:
     builder: ProviderLiveItemBuilder
     _states: dict[str, _ChatToolCallState] = field(default_factory=dict)
+    _index_origin: int | None = None
     completed_calls: tuple[dict[str, object], ...] = ()
 
     def apply_tool_call_delta(
@@ -1065,8 +1066,20 @@ class ChatToolCallAccumulator:
                 "chat tool-call index is invalid",
                 reason_code="transport_tool_call_contract_invalid",
             )
-        key = str(raw_index)
-        if key not in self._states and raw_index != len(self._states):
+        if self._index_origin is None:
+            if raw_index not in {0, 1}:
+                raise LLMTransportContractError(
+                    "chat tool-call indexes are not contiguous",
+                    reason_code="transport_tool_call_contract_invalid",
+                )
+            self._index_origin = raw_index
+        normalized_index = raw_index - self._index_origin
+        key = str(normalized_index)
+        if (
+            normalized_index < 0
+            or key not in self._states
+            and normalized_index != len(self._states)
+        ):
             raise LLMTransportContractError(
                 "chat tool-call indexes are not contiguous",
                 reason_code="transport_tool_call_contract_invalid",
