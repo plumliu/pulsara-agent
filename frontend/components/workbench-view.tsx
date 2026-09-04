@@ -45,7 +45,7 @@ import type {
 } from '../lib/runtime-adapter';
 import type { Message, PermissionMode, ReasoningBlock, RuntimeStatus, SessionSummary, SkillCapability, SubagentRun, TodoRun, ToolTrace, Workspace } from '../lib/pulsara-types';
 import { permissionLabels, permissionModeOrder } from '../lib/pulsara-types';
-import { MarkdownBody } from './markdown-body';
+import { MarkdownBody, MarkdownInline } from './markdown-body';
 
 interface WorkbenchViewProps {
   workspace: Workspace;
@@ -508,12 +508,12 @@ function ReasoningRow({ block }: { block: ReasoningBlock }) {
         <span className="reasoning-row__icon"><Sparkles size={11} /></span>
         <span className="reasoning-row__copy">
           <strong>{title}</strong>
-          {!expanded && <small>{reasoningPreview(block.body, running)}</small>}
+          {!expanded && <small><MarkdownInline body={reasoningPreview(block.body, running)} /></small>}
         </span>
         {running && <span className="reasoning-row__live"><i />思考中</span>}
         <ChevronRight className="reasoning-row__chevron" size={12} />
       </button>
-      {expanded && <div className="reasoning-row__body">{block.body}</div>}
+      {expanded && <div className="reasoning-row__body assistant-markdown"><MarkdownBody body={block.body} /></div>}
     </section>
   );
 }
@@ -1064,7 +1064,12 @@ export function WorkbenchView({
   const composerComposingRef = useRef(false);
   const wordCount = draft.trim().length;
   const selectedModel = modelConfigurations.find((item) => item.id === modelCallBinding?.connection_id);
-  const modelReady = Boolean(modelCallBinding && selectedModel?.status === 'ready');
+  const modelBindingMissing = Boolean(modelCallBinding && !selectedModel);
+  const modelReady = Boolean(
+    modelCallBinding
+    && selectedModel?.status === 'ready'
+    && (selectedModel.authentication === 'none' || selectedModel.credential_configured),
+  );
   const lastMessageLength = messages.at(-1)?.body.length ?? 0;
   const contextCompactionIndex = useMemo(() => {
     if (!contextCompaction) return -1;
@@ -1125,7 +1130,12 @@ export function WorkbenchView({
     const value = draft.trim();
     if (!value || submitting) return;
     if (!steer && !modelReady) {
-      onNotify('请先选择模型配置', '模型会固定到这个会话，直到你再次更改。');
+      onNotify(
+        modelBindingMissing ? '原模型配置已删除' : '请先选择模型配置',
+        modelBindingMissing
+          ? '请为这个会话显式选择另一条模型配置。'
+          : '模型会固定到这个会话，直到你再次更改。',
+      );
       setModelOpen(true);
       return;
     }
@@ -1425,12 +1435,12 @@ export function WorkbenchView({
             <div>
               <div className="popover-anchor">
                 <button className={`mode-chip model-chip${modelOpen ? ' is-active' : ''}`} onClick={() => { setModelOpen((value) => !value); setReasoningOpen(false); setSkillOpen(false); setPermissionOpen(false); }} aria-expanded={modelOpen} disabled={modelBindingBusy}>
-                  <Bot size={12} /> {modelConnectionLabel(selectedModel)} <ChevronDown size={10} />
+                  <Bot size={12} /> {modelBindingMissing ? '模型配置已删除' : modelConnectionLabel(selectedModel)} <ChevronDown size={10} />
                 </button>
                 {modelOpen && <div className="menu-popover model-menu">
                   <span className="menu-label">此会话的模型</span>
                   {modelConfigurations.length ? modelConfigurations.map((connection) => <button key={connection.id} className={connection.id === modelCallBinding?.connection_id ? 'is-selected' : ''} disabled={connection.status !== 'ready' || modelBindingBusy} onClick={() => void changeBinding({ connection_id: connection.id, reasoning: connection.default_reasoning ?? null })}>
-                    <span><strong>{connection.route_name ?? connection.route_id} · {connection.display_name ?? connection.model_id}</strong><small>{connection.wire_api === 'openai_responses' ? 'Responses' : 'Chat Completions'} · {connection.credential_state === 'PRESENT' ? '密钥已配置' : '密钥未就绪'}</small></span>
+                    <span><strong>{connection.route_name ?? connection.route_id} · {connection.display_name ?? connection.model_id}</strong><small>{connection.wire_api === 'openai_responses' ? 'Responses' : 'Chat Completions'} · {connection.authentication === 'none' ? '无需认证' : connection.credential_configured ? '密钥已配置' : '密钥未配置'}</small></span>
                     {connection.id === modelCallBinding?.connection_id && <Check size={13} />}
                   </button>) : <div className="model-menu__empty"><span>还没有模型配置。</span><button onClick={onOpenModelSettings}>前往设置添加</button></div>}
                   {modelConfigurations.length > 0 && <button className="model-menu__settings" onClick={onOpenModelSettings}>管理模型配置</button>}
@@ -1519,7 +1529,7 @@ export function WorkbenchView({
           </div>
           </div>
         </div>
-        <p className={`composer-note${!modelReady ? ' composer-note--attention' : ''}`}>{!modelReady ? '请先为此会话选择模型配置' : composerHint} · 规划与权限只作用于本轮</p>
+        <p className={`composer-note${!modelReady ? ' composer-note--attention' : ''}`}>{!modelReady ? (modelBindingMissing ? '原模型配置已删除，请重新选择' : '请先为此会话选择模型配置') : composerHint} · 规划与权限只作用于本轮</p>
       </div> : (
         <div className="observer-wrap">
           <div className="observer-dock">

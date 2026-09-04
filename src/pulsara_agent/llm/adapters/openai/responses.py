@@ -13,13 +13,9 @@ from pulsara_agent.llm.adapters.openai.client import (
     OpenAITransportTimeoutPolicy,
     admit_provider_request,
     build_async_openai_client,
+    openai_auth_request_options,
 )
 from pulsara_agent.process_credential_boundary import ProcessCredentialBoundary
-from pulsara_agent.local_credentials import (
-    CredentialBorrow,
-    LocalCredentialStore,
-    ModelProviderCredential,
-)
 from pulsara_agent.llm.adapters.openai.errors import classify_llm_error
 from pulsara_agent.llm.adapters.openai.events import (
     ProviderLiveItemBuilder,
@@ -83,13 +79,14 @@ from pulsara_agent.llm.retry import (
     apply_retry_after_cap,
     compute_retry_delay,
 )
+from pulsara_agent.settings import LocalSettingsStore
 
 
 @dataclass(slots=True)
 class OpenAIResponsesTransport:
     """Adapter for OpenAI Responses-compatible APIs."""
 
-    credentials: LocalCredentialStore = field(repr=False)
+    settings: LocalSettingsStore = field(repr=False)
     timeout_policy: OpenAITransportTimeoutPolicy
     api: str = OPENAI_RESPONSES_API
     binding_id: str = "pulsara.openai.responses"
@@ -130,14 +127,15 @@ class OpenAIResponsesTransport:
 
         payload = build_responses_payload(call=call, context=context)
         should_close_client = self._client is None
-        borrow: CredentialBorrow | None = None
+        api_key: str | None = None
         if self._client is None:
-            borrow = self.credentials.borrow(
-                ModelProviderCredential(call.binding.connection_id)
-            )
-            credential_boundary = ProcessCredentialBoundary(borrow.value)
+            if call.target.connection.requires_api_key:
+                api_key = self.settings.read().require_model_api_key(
+                    call.binding.connection_id
+                )
+            credential_boundary = ProcessCredentialBoundary(api_key or "")
             client = build_async_openai_client(
-                api_key=borrow.value,
+                api_key=api_key,
                 base_url=model.base_url,
                 timeout_policy=self.timeout_policy,
                 credential_boundary=credential_boundary,
@@ -168,7 +166,13 @@ class OpenAIResponsesTransport:
                         credential_boundary=credential_boundary,
                         payload=payload,
                         operation=lambda: client.responses.create(
-                            **payload, stream=True
+                            **payload,
+                            stream=True,
+                            **openai_auth_request_options(
+                                requires_api_key=(
+                                    call.target.connection.requires_api_key
+                                )
+                            ),
                         ),
                     )
                     async for raw_event in stream:
@@ -255,8 +259,7 @@ class OpenAIResponsesTransport:
         finally:
             if should_close_client:
                 await client.close()
-            if borrow is not None:
-                borrow.close()
+            api_key = None
 
         if completed_report is not None:
             yield completed_report
@@ -341,9 +344,7 @@ def build_responses_payload(
     for key, value in route_wire_profile.request_defaults.items():
         payload.setdefault(key, mutable_provider_value(value))
     payload["max_output_tokens"] = call.target.context_budget.effective_output_tokens
-    reasoning = reasoning_wire_fields(
-        call.target.contract, call.selected_reasoning
-    )
+    reasoning = reasoning_wire_fields(call.target.contract, call.selected_reasoning)
     for key, value in reasoning.root.items():
         if key in payload:
             raise ValueError("Responses reasoning root field has another owner")
@@ -455,10 +456,12 @@ class ResponsesCompletionAccumulator:
     terminal: ProviderAdapterTerminal | None = None
     failure: ProviderStreamFailure | None = None
     _text_parts: dict[int, list[str]] = field(default_factory=dict)
-    _reasoning_summary_parts: dict[int, list[str]] = field(default_factory=dict)
+    _reasoning_summary_parts: dict[tuple[int, int], list[str]] = field(
+        default_factory=dict
+    )
     _reasoning_content_parts: dict[int, list[str]] = field(default_factory=dict)
     _text_done: set[int] = field(default_factory=set)
-    _reasoning_summary_done: set[int] = field(default_factory=set)
+    _reasoning_summary_done: set[tuple[int, int]] = field(default_factory=set)
     _reasoning_content_done: set[int] = field(default_factory=set)
     _output_item_added: dict[int, str] = field(default_factory=dict)
     _output_item_done: dict[int, FrozenJsonObjectFact] = field(default_factory=dict)
@@ -576,24 +579,26 @@ class ResponsesCompletionAccumulator:
             self._text_done.add(output_index)
         elif event_type == "response.reasoning_summary_text.delta":
             output_index = _responses_output_index(event)
+            summary_key = (output_index, _responses_summary_index(event))
             delta = event.get("delta")
             if not isinstance(delta, str):
                 raise LLMTransportContractError(
                     "Responses reasoning delta is invalid",
                     reason_code="transport_responses_event_invalid",
                 )
-            self._reasoning_summary_parts.setdefault(output_index, []).append(delta)
+            self._reasoning_summary_parts.setdefault(summary_key, []).append(delta)
         elif event_type == "response.reasoning_summary_text.done":
             output_index = _responses_output_index(event)
+            summary_key = (output_index, _responses_summary_index(event))
             final_text = event.get("text")
             if not isinstance(final_text, str) or final_text != "".join(
-                self._reasoning_summary_parts.get(output_index, ())
+                self._reasoning_summary_parts.get(summary_key, ())
             ):
                 raise LLMTransportContractError(
                     "Responses reasoning done differs from its delta prefix",
                     reason_code="transport_thinking_done_content_mismatch",
                 )
-            self._reasoning_summary_done.add(output_index)
+            self._reasoning_summary_done.add(summary_key)
         elif event_type == "response.reasoning_text.delta":
             output_index = _responses_output_index(event)
             delta = event.get("delta")
@@ -949,6 +954,26 @@ def _responses_output_index(event: dict[str, Any]) -> int:
     return value
 
 
+def _responses_summary_index(event: dict[str, Any]) -> int:
+    # Older OpenAI-compatible streams omitted ``summary_index`` when a
+    # reasoning item had only one public summary part.  Preserve that
+    # unambiguous shape as index zero while using the protocol index whenever
+    # it is present; the index is the identity of a summary part, not another
+    # output item.
+    value = event.get("summary_index", 0)
+    if (
+        not isinstance(value, int)
+        or isinstance(value, bool)
+        or value < 0
+        or value >= MAXIMUM_PROVIDER_REPLAY_RESPONSES_ITEMS
+    ):
+        raise LLMTransportContractError(
+            "Responses reasoning event lacks a bounded summary index",
+            reason_code="transport_responses_event_invalid",
+        )
+    return value
+
+
 def _optional_responses_output_index(event: dict[str, Any]) -> int | None:
     try:
         return _responses_output_index(event)
@@ -1074,8 +1099,8 @@ def _project_completed_response(
     builder: ProviderLiveItemBuilder,
     streamed_text: dict[int, list[str]],
     text_done: set[int],
-    streamed_reasoning_summary: dict[int, list[str]],
-    reasoning_summary_done: set[int],
+    streamed_reasoning_summary: dict[tuple[int, int], list[str]],
+    reasoning_summary_done: set[tuple[int, int]],
     streamed_reasoning_content: dict[int, list[str]],
     reasoning_content_done: set[int],
 ) -> tuple[list[ProviderAdapterStreamItem], tuple[dict[str, Any], ...]]:
@@ -1146,7 +1171,8 @@ def _project_completed_response(
                     "Responses reasoning format is unsupported",
                     reason_code="transport_responses_output_invalid",
                 )
-            summary_text = _reasoning_summary_text(item)
+            summary_parts = _reasoning_summary_text_parts(item)
+            summary_text = "".join(summary_parts)
             content_text = _reasoning_content_text(item)
             encrypted = item.get("encrypted_content")
             if encrypted is not None and not isinstance(encrypted, str):
@@ -1154,20 +1180,42 @@ def _project_completed_response(
                     "Responses encrypted reasoning carrier is not text",
                     reason_code="transport_responses_output_invalid",
                 )
-            streamed_summary = "".join(streamed_reasoning_summary.get(output_index, ()))
-            if output_index in reasoning_summary_done or streamed_summary:
-                if summary_text != streamed_summary:
+            observed_summary_keys = {
+                key
+                for key in set(streamed_reasoning_summary).union(reasoning_summary_done)
+                if key[0] == output_index
+            }
+            streamed_summary = "".join(
+                "".join(streamed_reasoning_summary.get(key, ()))
+                for key in sorted(observed_summary_keys)
+            )
+            if observed_summary_keys:
+                expected_summary_keys = {
+                    (output_index, summary_index)
+                    for summary_index in range(len(summary_parts))
+                }
+                if observed_summary_keys != expected_summary_keys:
                     raise LLMTransportContractError(
-                        "final Responses reasoning summary differs from the stream",
+                        "final Responses reasoning summary parts differ from the stream",
                         reason_code="transport_responses_output_mismatch",
                     )
+                for key in sorted(observed_summary_keys):
+                    summary_index = key[1]
+                    if summary_parts[summary_index] != "".join(
+                        streamed_reasoning_summary.get(key, ())
+                    ):
+                        raise LLMTransportContractError(
+                            "final Responses reasoning summary differs from the stream",
+                            reason_code="transport_responses_output_mismatch",
+                        )
             elif summary_text:
-                events.extend(
-                    builder.thinking_end(
-                        final_text=summary_text,
-                        presentation_kind=ReasoningPresentationKind.SUMMARY,
+                for summary_part in summary_parts:
+                    events.extend(
+                        builder.thinking_end(
+                            final_text=summary_part,
+                            presentation_kind=ReasoningPresentationKind.SUMMARY,
+                        )
                     )
-                )
             streamed_content = "".join(streamed_reasoning_content.get(output_index, ()))
             if output_index in reasoning_content_done or streamed_content:
                 # Some OpenAI-compatible Responses implementations stream the
@@ -1178,7 +1226,7 @@ def _project_completed_response(
                 exact_summary_alias = (
                     not content_text
                     and not streamed_summary
-                    and output_index not in reasoning_summary_done
+                    and not observed_summary_keys
                     and summary_text == streamed_content
                 )
                 if content_text != streamed_content and not exact_summary_alias:
@@ -1304,10 +1352,14 @@ def _project_completed_response(
             "streamed Responses text lacks an exact final output item",
             reason_code="transport_responses_output_mismatch",
         )
-    if set(streamed_reasoning_summary).union(reasoning_summary_done) != (
-        final_reasoning_indexes.intersection(
-            set(streamed_reasoning_summary).union(reasoning_summary_done)
+    streamed_summary_output_indexes = {
+        output_index
+        for output_index, _summary_index in set(streamed_reasoning_summary).union(
+            reasoning_summary_done
         )
+    }
+    if streamed_summary_output_indexes != final_reasoning_indexes.intersection(
+        streamed_summary_output_indexes
     ):
         raise LLMTransportContractError(
             "streamed Responses reasoning lacks an exact final output item",
@@ -1381,10 +1433,10 @@ def _response_message_text(item: dict[str, Any]) -> str:
     return "".join(parts)
 
 
-def _reasoning_summary_text(item: dict[str, Any]) -> str:
+def _reasoning_summary_text_parts(item: dict[str, Any]) -> tuple[str, ...]:
     summary = item.get("summary")
     if summary is None:
-        return ""
+        return ()
     if not isinstance(summary, list):
         raise LLMTransportContractError(
             "Responses reasoning summary is invalid",
@@ -1412,7 +1464,7 @@ def _reasoning_summary_text(item: dict[str, Any]) -> str:
                 reason_code="transport_responses_output_invalid",
             )
         parts.append(text)
-    return "".join(parts)
+    return tuple(parts)
 
 
 def _reasoning_content_text(item: dict[str, Any]) -> str:

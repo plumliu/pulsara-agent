@@ -102,6 +102,32 @@ def test_openai_client_max_retries_plumbing(monkeypatch) -> None:
     assert calls[1]["max_retries"] == 0
 
 
+def test_openai_client_no_auth_does_not_consult_environment_key(monkeypatch) -> None:
+    calls = []
+
+    class FakeAsyncOpenAI:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+
+    monkeypatch.setenv("OPENAI_API_KEY", "must-not-be-inherited")
+    monkeypatch.setattr(openai_client, "AsyncOpenAI", FakeAsyncOpenAI)
+
+    openai_client.build_async_openai_client(
+        api_key=None,
+        base_url="http://127.0.0.1:11434/v1",
+        timeout_policy=OpenAITransportTimeoutPolicy(7, 7, 7, 7, 7),
+        credential_boundary=ProcessCredentialBoundary(),
+    )
+
+    assert calls[0]["api_key"] == ""
+    assert calls[0]["_enforce_credentials"] is False
+    request_options = openai_client.openai_auth_request_options(
+        requires_api_key=False
+    )
+    assert type(request_options["extra_headers"]["Authorization"]).__name__ == "Omit"
+    assert "must-not-be-inherited" not in str(calls[0])
+
+
 def test_retry_config_rejects_invalid_delay_values() -> None:
     with pytest.raises(ValueError, match="attempts must be <= 32"):
         LLMRetryConfig(attempts=33)

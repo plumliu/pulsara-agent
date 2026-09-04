@@ -248,7 +248,7 @@ def test_round5_provider_retries_before_semantic_output(
         semantic_output_before_failure=False,
     )
     transport = transport_type(
-        credentials=port._model_runtime.credentials,  # noqa: SLF001
+        settings=port._model_runtime.settings,  # noqa: SLF001
         timeout_policy=OpenAITransportTimeoutPolicy(1, 1, 1, 1, None),
         retry_config=LLMRetryConfig(
             attempts=2,
@@ -300,7 +300,7 @@ def test_round5_provider_never_retries_after_semantic_output(
         semantic_output_before_failure=True,
     )
     transport = transport_type(
-        credentials=port._model_runtime.credentials,  # noqa: SLF001
+        settings=port._model_runtime.settings,  # noqa: SLF001
         timeout_policy=OpenAITransportTimeoutPolicy(1, 1, 1, 1, None),
         retry_config=LLMRetryConfig(
             attempts=2,

@@ -1,4 +1,4 @@
-"""Process-local owner joining saved connections, catalog, adapters and credentials."""
+"""Process-local owner joining saved connections, catalog and wire adapters."""
 
 from __future__ import annotations
 
@@ -28,7 +28,6 @@ from pulsara_agent.llm.normalized_transport import (
 from pulsara_agent.llm.resolution import ResolvedModelTarget, resolve_model_target
 from pulsara_agent.llm.retry import LLMRetryConfig
 from pulsara_agent.llm.route_wires import production_route_wire_registry
-from pulsara_agent.local_credentials import LocalCredentialStore
 from pulsara_agent.settings import LocalSettingsStore
 
 
@@ -40,7 +39,6 @@ class ModelRuntimeUnavailable(RuntimeError):
 class ModelRuntime:
     settings: LocalSettingsStore
     catalog: ModelCatalogOwner
-    credentials: LocalCredentialStore
     route_wires: RouteWireRegistry
     retry: LLMRetryConfig = LLMRetryConfig()
 
@@ -50,9 +48,8 @@ class ModelRuntime:
         *,
         settings: LocalSettingsStore,
         catalog: ModelCatalogOwner,
-        credentials: LocalCredentialStore,
     ) -> "ModelRuntime":
-        return cls(settings, catalog, credentials, production_route_wire_registry())
+        return cls(settings, catalog, production_route_wire_registry())
 
     def connection(self, binding: ModelCallBinding) -> ModelConnectionConfig:
         try:
@@ -77,7 +74,7 @@ class ModelRuntime:
             settings = self.settings.read()
         except Exception as exc:
             raise ModelRuntimeUnavailable("local model settings are unavailable") from exc
-        catalog = self.selectable_catalog()
+        catalog = self.catalog.selectable()
         resolved: dict[ModelConnectionId, ResolvedModelConnection] = {}
         unavailable: dict[ModelConnectionId, str] = {}
         for connection in settings.model_connections:
@@ -103,7 +100,7 @@ class ModelRuntime:
         return resolve_model_target(
             connection=self.connection(binding),
             binding=binding,
-            catalog=self.selectable_catalog(),
+            catalog=self.catalog.selectable(),
             route_wires=self.route_wires,
             registry=registry,
         )
@@ -115,7 +112,7 @@ class ModelRuntime:
         registry.register(
             NormalizedLLMTransport(
                 OpenAIResponsesTransport(
-                    credentials=self.credentials,
+                    settings=self.settings,
                     timeout_policy=timeout_policy,
                     retry_config=self.retry,
                 )
@@ -124,7 +121,7 @@ class ModelRuntime:
         registry.register(
             NormalizedLLMTransport(
                 OpenAIChatCompletionsTransport(
-                    credentials=self.credentials,
+                    settings=self.settings,
                     timeout_policy=timeout_policy,
                     retry_config=self.retry,
                 )

@@ -10,6 +10,7 @@ from pulsara_agent.llm.model_catalog import (
 from pulsara_agent.llm.model_connections import (
     ReasoningEffortSelection,
     ReasoningSelection,
+    ReasoningToggleSelection,
 )
 from pulsara_agent.llm.model_target import (
     ReasoningWireFields,
@@ -39,9 +40,15 @@ _RESPONSES_REPLAY = provider_replay_contract_fingerprint(
 def _chat_reasoning(
     selection: ReasoningSelection, _controls: ReasoningControlContract
 ) -> ReasoningWireFields:
-    if not isinstance(selection, ReasoningEffortSelection):
-        raise ValueError("Chat Completions only accepts catalog effort controls")
-    return ReasoningWireFields({"reasoning_effort": selection.value}, {})
+    if isinstance(selection, ReasoningEffortSelection):
+        return ReasoningWireFields({"reasoning_effort": selection.value}, {})
+    if isinstance(selection, ReasoningToggleSelection):
+        # ``reasoning`` is an OpenAI-compatible extension rather than a
+        # keyword accepted by the OpenAI Python SDK's Chat create method.
+        # ``extra_body`` is only the SDK carrier: the SDK merges it into the
+        # root HTTP JSON object before sending the request.
+        return ReasoningWireFields({}, {"reasoning": {"enabled": selection.enabled}})
+    raise ValueError("Chat Completions only accepts catalog effort or toggle controls")
 
 
 def _responses_reasoning(
@@ -49,7 +56,15 @@ def _responses_reasoning(
 ) -> ReasoningWireFields:
     if not isinstance(selection, ReasoningEffortSelection):
         raise ValueError("Responses only accepts catalog effort controls")
-    return ReasoningWireFields({"reasoning": {"effort": selection.value}}, {})
+    return ReasoningWireFields(
+        {
+            "reasoning": {
+                "effort": selection.value,
+                "summary": "auto",
+            }
+        },
+        {},
+    )
 
 
 def _contract(
@@ -103,7 +118,7 @@ def production_route_wire_registry() -> RouteWireRegistry:
         _contract(
             wire_api=WireApi.OPENAI_CHAT_COMPLETIONS,
             model_identity_policy=ModelIdentityPolicy.ACCEPT_REPORTED,
-            families=frozenset({"effort"}),
+            families=frozenset({"effort", "toggle"}),
             lowerer=_chat_reasoning,
         ),
     )

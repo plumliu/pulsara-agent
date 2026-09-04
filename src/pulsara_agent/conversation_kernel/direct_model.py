@@ -709,7 +709,7 @@ class DirectKernelModelPort:
         surface = tool_surface.model_surface
         if (
             surface.tool_specs
-            and prepared_target.target.contract.catalog_facts.tool_call is False
+            and prepared_target.target.contract.target_facts.tool_call is False
         ):
             raise ValueError("resolved model target does not support prepared tools")
         if (
@@ -770,7 +770,7 @@ class DirectKernelModelPort:
             raise ValueError("prepared model target belongs to another adapter")
         if (
             tool_surface.tool_specs
-            and prepared_target.target.contract.catalog_facts.tool_call is False
+            and prepared_target.target.contract.target_facts.tool_call is False
         ):
             raise ValueError("resolved model target does not support prepared tools")
         if (

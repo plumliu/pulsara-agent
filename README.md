@@ -171,10 +171,12 @@ environment variables. Start the local app and use **Settings** to:
   Responses, and add the API key;
 - optionally add the two independent DashScope keys for embedding and rerank.
 
-Non-secret metadata is stored in `${PULSARA_HOME}/local-settings.yaml` (or the
-default Pulsara home). API keys are write-only and live in macOS Keychain. The
+PostgreSQL DSNs, model configurations, and all API keys are stored together in
+the closed `${PULSARA_HOME}/local-settings.yaml` document (or the default
+Pulsara home), protected by `0700` directory and `0600` file permissions. API
+keys are write-only through the UI and are never returned by the local API. The
 app and Settings shell start with zero configuration; sparse memory recall
-continues when either DashScope credential is absent.
+continues when either DashScope key is absent.
 
 ```sh
 uv run pulsara app

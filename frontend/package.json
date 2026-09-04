@@ -24,7 +24,7 @@
     "react-markdown": "^10.1.0",
     "rehype-katex": "^7.0.1",
     "remark-gfm": "^4.0.1",
-    "remark-math": "^6.0.0"
+    "remark-math-extended": "^6.1.1"
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "1.37.1",

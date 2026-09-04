@@ -5,9 +5,9 @@ from __future__ import annotations
 import asyncio
 import os
 import stat
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Literal, TypeVar
 from uuid import uuid4
 
 import yaml
@@ -15,17 +15,17 @@ import yaml
 from pulsara_agent.capability.pulsara_home import require_pulsara_home
 from pulsara_agent.llm.model_connections import (
     ModelConnectionConfig,
+    ModelConnectionId,
     model_connection_from_dict,
     model_connection_to_dict,
 )
-from pulsara_agent.local_credentials import LocalCredentialStore, ModelProviderCredential
 from pulsara_agent.local_source_binding import (
     open_absolute_directory_nofollow,
     open_or_create_absolute_directory_nofollow,
 )
 
 
-LOCAL_SETTINGS_SCHEMA = "pulsara-local-settings:v1"
+LOCAL_SETTINGS_SCHEMA = "pulsara-local-settings:v2"
 LOCAL_SETTINGS_FILE_NAME = "local-settings.yaml"
 MAXIMUM_LOCAL_SETTINGS_BYTES = 1 << 20
 _READ_FLAGS = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
@@ -56,14 +56,71 @@ class LocalPostgresConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class LocalModelApiKey:
+    connection_id: ModelConnectionId
+    value: str = field(repr=False)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.connection_id, ModelConnectionId):
+            raise TypeError("model API key connection ID must be typed")
+        if not self.value:
+            raise ValueError("model API key must be non-empty")
+
+
+DashScopeCredentialKind = Literal["embedding", "rerank"]
+
+
+@dataclass(frozen=True, slots=True)
+class LocalDashScopeCredentials:
+    embedding_api_key: str | None = field(default=None, repr=False)
+    rerank_api_key: str | None = field(default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        for value in (self.embedding_api_key, self.rerank_api_key):
+            if value is not None and not value:
+                raise ValueError("DashScope API key must be non-empty when present")
+
+    def api_key(self, kind: DashScopeCredentialKind) -> str | None:
+        if kind == "embedding":
+            return self.embedding_api_key
+        if kind == "rerank":
+            return self.rerank_api_key
+        raise ValueError("unknown DashScope credential kind")
+
+    def replacing(
+        self, kind: DashScopeCredentialKind, value: str | None
+    ) -> "LocalDashScopeCredentials":
+        if kind == "embedding":
+            return LocalDashScopeCredentials(value, self.rerank_api_key)
+        if kind == "rerank":
+            return LocalDashScopeCredentials(self.embedding_api_key, value)
+        raise ValueError("unknown DashScope credential kind")
+
+
+@dataclass(frozen=True, slots=True)
 class LocalSettings:
     postgres: LocalPostgresConfig | None = None
     model_connections: tuple[ModelConnectionConfig, ...] = ()
+    model_api_keys: tuple[LocalModelApiKey, ...] = field(default=(), repr=False)
+    dashscope_credentials: LocalDashScopeCredentials = field(
+        default_factory=LocalDashScopeCredentials,
+        repr=False,
+    )
 
     def __post_init__(self) -> None:
         ids = tuple(item.id for item in self.model_connections)
         if len(ids) != len(set(ids)):
             raise ValueError("local settings contain duplicate model connection IDs")
+        credential_ids = tuple(item.connection_id for item in self.model_api_keys)
+        if len(credential_ids) != len(set(credential_ids)):
+            raise ValueError("local settings contain duplicate model API keys")
+        required_ids = {
+            item.id for item in self.model_connections if item.requires_api_key
+        }
+        if set(credential_ids) != required_ids:
+            raise ValueError(
+                "local settings model API keys do not match bearer connections"
+            )
 
     def connection(self, connection_id) -> ModelConnectionConfig | None:
         return next(
@@ -71,12 +128,41 @@ class LocalSettings:
             None,
         )
 
+    def model_api_key(self, connection_id) -> str | None:
+        return next(
+            (
+                item.value
+                for item in self.model_api_keys
+                if item.connection_id == connection_id
+            ),
+            None,
+        )
+
+    def require_model_api_key(self, connection_id) -> str:
+        value = self.model_api_key(connection_id)
+        if value is None:
+            raise LocalSettingsSecretMissing("model API key is unavailable")
+        return value
+
+    def dashscope_api_key(self, kind: DashScopeCredentialKind) -> str | None:
+        return self.dashscope_credentials.api_key(kind)
+
+    def require_dashscope_api_key(self, kind: DashScopeCredentialKind) -> str:
+        value = self.dashscope_api_key(kind)
+        if value is None:
+            raise LocalSettingsSecretMissing("DashScope API key is unavailable")
+        return value
+
 
 class LocalSettingsUnavailable(RuntimeError):
     pass
 
 
 class LocalSettingsPublishIndeterminate(RuntimeError):
+    pass
+
+
+class LocalSettingsSecretMissing(RuntimeError):
     pass
 
 
@@ -100,8 +186,16 @@ def local_settings_to_dict(settings: LocalSettings) -> dict[str, object]:
             }
         ),
         "model_connections": [
-            model_connection_to_dict(item) for item in settings.model_connections
+            {
+                **model_connection_to_dict(item),
+                "api_key": settings.model_api_key(item.id),
+            }
+            for item in settings.model_connections
         ],
+        "dashscope_credentials": {
+            "embedding_api_key": settings.dashscope_credentials.embedding_api_key,
+            "rerank_api_key": settings.dashscope_credentials.rerank_api_key,
+        },
     }
 
 
@@ -110,6 +204,7 @@ def local_settings_from_dict(value: object) -> LocalSettings:
         "schema",
         "postgres",
         "model_connections",
+        "dashscope_credentials",
     }:
         raise ValueError("local settings have an invalid closed shape")
     if value["schema"] != LOCAL_SETTINGS_SCHEMA:
@@ -134,10 +229,40 @@ def local_settings_from_dict(value: object) -> LocalSettings:
     raw_connections = value["model_connections"]
     if not isinstance(raw_connections, list):
         raise ValueError("model_connections must be an array")
+    connections: list[ModelConnectionConfig] = []
+    model_api_keys: list[LocalModelApiKey] = []
+    for item in raw_connections:
+        if not isinstance(item, dict) or "api_key" not in item:
+            raise ValueError("model connection settings have an invalid closed shape")
+        api_key = item["api_key"]
+        if api_key is not None and (not isinstance(api_key, str) or not api_key):
+            raise ValueError("model connection API key is invalid")
+        raw_connection = dict(item)
+        raw_connection.pop("api_key")
+        connection = model_connection_from_dict(raw_connection)
+        connections.append(connection)
+        if api_key is not None:
+            model_api_keys.append(LocalModelApiKey(connection.id, api_key))
+    raw_dashscope = value["dashscope_credentials"]
+    if not isinstance(raw_dashscope, dict) or set(raw_dashscope) != {
+        "embedding_api_key",
+        "rerank_api_key",
+    }:
+        raise ValueError("DashScope credentials have an invalid closed shape")
+    embedding_api_key = raw_dashscope["embedding_api_key"]
+    rerank_api_key = raw_dashscope["rerank_api_key"]
+    if any(
+        item is not None and (not isinstance(item, str) or not item)
+        for item in (embedding_api_key, rerank_api_key)
+    ):
+        raise ValueError("DashScope API key is invalid")
     return LocalSettings(
         postgres=postgres,
-        model_connections=tuple(
-            model_connection_from_dict(item) for item in raw_connections
+        model_connections=tuple(connections),
+        model_api_keys=tuple(model_api_keys),
+        dashscope_credentials=LocalDashScopeCredentials(
+            embedding_api_key=embedding_api_key,
+            rerank_api_key=rerank_api_key,
         ),
     )
 
@@ -156,9 +281,18 @@ def read_local_settings(path: Path | None = None) -> LocalSettings:
             descriptor = os.open(settings_path.name, _READ_FLAGS, dir_fd=parent)
         except FileNotFoundError:
             return LocalSettings()
+        parent_metadata = os.fstat(parent)
+        if stat.S_IMODE(parent_metadata.st_mode) & 0o077:
+            raise LocalSettingsUnavailable(
+                "local settings directory permissions are too broad"
+            )
         metadata = os.fstat(descriptor)
         if not stat.S_ISREG(metadata.st_mode):
             raise LocalSettingsUnavailable("local settings are not a regular file")
+        if stat.S_IMODE(metadata.st_mode) & 0o077:
+            raise LocalSettingsUnavailable(
+                "local settings file permissions are too broad"
+            )
         if metadata.st_size > MAXIMUM_LOCAL_SETTINGS_BYTES:
             raise LocalSettingsUnavailable("local settings exceed their byte bound")
         with os.fdopen(descriptor, "rb", closefd=True) as stream:
@@ -224,6 +358,7 @@ def write_local_settings(path: Path, settings: LocalSettings) -> None:
 
 
 SettingsWriter = Callable[[Path, LocalSettings], None]
+MutationResult = TypeVar("MutationResult")
 
 
 class LocalSettingsStore:
@@ -261,28 +396,137 @@ class LocalSettingsStore:
     async def save_postgres(
         self, postgres: LocalPostgresConfig | None
     ) -> LocalSettings:
-        async with self._lock:
-            current = await asyncio.to_thread(self._read_for_explicit_repair)
-            updated = LocalSettings(postgres, current.model_connections)
-            await asyncio.to_thread(self._writer, self.path, updated)
-            return updated
+        updated, _ = await self._run_mutation(
+            lambda current: (
+                LocalSettings(
+                    postgres=postgres,
+                    model_connections=current.model_connections,
+                    model_api_keys=current.model_api_keys,
+                    dashscope_credentials=current.dashscope_credentials,
+                ),
+                None,
+            ),
+            name="publish-postgres-settings",
+        )
+        return updated
 
     async def add_model_connection(
         self,
         *,
         connection: ModelConnectionConfig,
-        api_key: str,
-        credentials: LocalCredentialStore,
+        api_key: str | None,
     ) -> LocalSettings:
-        key = ModelProviderCredential(connection.id)
-        credentials.put(key, api_key)
-        settlement = asyncio.create_task(
-            self._settle_model_connection_add(
+        if connection.requires_api_key and not api_key:
+            raise ValueError("model connection requires an API key")
+        if not connection.requires_api_key and api_key is not None:
+            raise ValueError("model connection without authentication cannot own a key")
+        updated, _ = await self._run_mutation(
+            lambda current: self._add_model_connection_value(
+                current,
                 connection=connection,
-                credentials=credentials,
+                api_key=api_key,
             ),
-            name="publish-model-connection-metadata",
+            name="publish-model-connection",
         )
+        return updated
+
+    @staticmethod
+    def _add_model_connection_value(
+        current: LocalSettings,
+        *,
+        connection: ModelConnectionConfig,
+        api_key: str | None,
+    ) -> tuple[LocalSettings, None]:
+        if current.connection(connection.id) is not None:
+            raise ValueError("model connection ID already exists")
+        key = (
+            ()
+            if api_key is None
+            else (LocalModelApiKey(connection.id, api_key),)
+        )
+        return (
+            LocalSettings(
+                postgres=current.postgres,
+                model_connections=(*current.model_connections, connection),
+                model_api_keys=(*current.model_api_keys, *key),
+                dashscope_credentials=current.dashscope_credentials,
+            ),
+            None,
+        )
+
+    async def delete_model_connection(
+        self, connection_id: ModelConnectionId
+    ) -> tuple[LocalSettings, bool]:
+        return await self._run_mutation(
+            lambda current: (
+                LocalSettings(
+                    postgres=current.postgres,
+                    model_connections=tuple(
+                        item
+                        for item in current.model_connections
+                        if item.id != connection_id
+                    ),
+                    model_api_keys=tuple(
+                        item
+                        for item in current.model_api_keys
+                        if item.connection_id != connection_id
+                    ),
+                    dashscope_credentials=current.dashscope_credentials,
+                ),
+                current.connection(connection_id) is not None,
+            ),
+            name="delete-model-connection",
+        )
+
+    async def save_dashscope_api_key(
+        self, kind: DashScopeCredentialKind, api_key: str
+    ) -> LocalSettings:
+        if not api_key:
+            raise ValueError("DashScope API key must be non-empty")
+        updated, _ = await self._run_mutation(
+            lambda current: (
+                LocalSettings(
+                    postgres=current.postgres,
+                    model_connections=current.model_connections,
+                    model_api_keys=current.model_api_keys,
+                    dashscope_credentials=current.dashscope_credentials.replacing(
+                        kind, api_key
+                    ),
+                ),
+                None,
+            ),
+            name=f"save-dashscope-{kind}-api-key",
+        )
+        return updated
+
+    async def delete_dashscope_api_key(
+        self, kind: DashScopeCredentialKind
+    ) -> LocalSettings:
+        updated, _ = await self._run_mutation(
+            lambda current: (
+                LocalSettings(
+                    postgres=current.postgres,
+                    model_connections=current.model_connections,
+                    model_api_keys=current.model_api_keys,
+                    dashscope_credentials=current.dashscope_credentials.replacing(
+                        kind, None
+                    ),
+                ),
+                None,
+            ),
+            name=f"delete-dashscope-{kind}-api-key",
+        )
+        return updated
+
+    async def _run_mutation(
+        self,
+        mutation: Callable[
+            [LocalSettings], tuple[LocalSettings, MutationResult]
+        ],
+        *,
+        name: str,
+    ) -> tuple[LocalSettings, MutationResult]:
+        settlement = asyncio.create_task(self._mutate(mutation), name=name)
         cancelled: asyncio.CancelledError | None = None
         while not settlement.done():
             try:
@@ -295,45 +539,32 @@ class LocalSettingsStore:
             raise cancelled
         return result
 
-    async def _settle_model_connection_add(
+    async def _mutate(
         self,
-        *,
-        connection: ModelConnectionConfig,
-        credentials: LocalCredentialStore,
-    ) -> LocalSettings:
-        key = ModelProviderCredential(connection.id)
+        mutation: Callable[
+            [LocalSettings], tuple[LocalSettings, MutationResult]
+        ],
+    ) -> tuple[LocalSettings, MutationResult]:
         async with self._lock:
+            current = await asyncio.to_thread(self._read_for_explicit_repair)
+            updated, result = mutation(current)
+            if updated == current:
+                return current, result
             try:
-                current = await asyncio.to_thread(self._read_for_explicit_repair)
-                if current.connection(connection.id) is not None:
-                    raise ValueError("model connection ID already exists")
-                updated = LocalSettings(
-                    current.postgres,
-                    (*current.model_connections, connection),
-                )
                 await asyncio.to_thread(self._writer, self.path, updated)
-                return updated
             except _LocalSettingsCommitUnknown as exc:
                 try:
                     observed = await asyncio.to_thread(self.read)
                 except LocalSettingsUnavailable as read_exc:
                     raise LocalSettingsPublishIndeterminate(
-                        "model connection metadata publication is indeterminate"
+                        "local settings publication is indeterminate"
                     ) from read_exc
-                published = observed.connection(connection.id)
-                if published == connection:
-                    return observed
-                if published is None:
-                    credentials.delete(key)
-                    raise LocalSettingsUnavailable(
-                        "model connection metadata was not published"
+                if observed != updated:
+                    raise LocalSettingsPublishIndeterminate(
+                        "local settings publication resolved to another value"
                     ) from exc
-                raise LocalSettingsPublishIndeterminate(
-                    "model connection ID resolved to different metadata"
-                ) from exc
-            except BaseException:
-                credentials.delete(key)
-                raise
+                return observed, result
+            return updated, result
 
 
 def _validate_postgres_dsn(value: str) -> None:
@@ -350,9 +581,13 @@ def _validate_postgres_dsn(value: str) -> None:
 __all__ = [
     "LOCAL_SETTINGS_FILE_NAME",
     "LOCAL_SETTINGS_SCHEMA",
+    "DashScopeCredentialKind",
+    "LocalDashScopeCredentials",
+    "LocalModelApiKey",
     "LocalPostgresConfig",
     "LocalSettings",
     "LocalSettingsPublishIndeterminate",
+    "LocalSettingsSecretMissing",
     "LocalSettingsStore",
     "LocalSettingsUnavailable",
     "default_local_settings_path",

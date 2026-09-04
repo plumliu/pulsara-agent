@@ -8,7 +8,7 @@ import json
 from typing import Any
 
 import httpx
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, Omit
 
 from pulsara_agent.primitives.context import context_fingerprint
 from pulsara_agent.process_credential_boundary import (
@@ -75,7 +75,7 @@ class OpenAITransportTimeoutPolicy:
 
 def build_async_openai_client(
     *,
-    api_key: str,
+    api_key: str | None,
     base_url: str,
     timeout_policy: OpenAITransportTimeoutPolicy,
     credential_boundary: ProcessCredentialBoundary,
@@ -91,7 +91,10 @@ def build_async_openai_client(
         read=timeout_policy.read_idle_seconds,
     )
     kwargs: dict[str, Any] = {
-        "api_key": api_key,
+        # An explicit empty string prevents the SDK from consulting
+        # OPENAI_API_KEY for a connection whose contract says no auth.
+        "api_key": api_key if api_key is not None else "",
+        "_enforce_credentials": api_key is not None,
         "base_url": base_url.rstrip("/"),
         "timeout": timeout,
         "http_client": ProcessCredentialBoundAsyncClient(
@@ -106,6 +109,17 @@ def build_async_openai_client(
     return AsyncOpenAI(
         **kwargs,
     )
+
+
+def openai_auth_request_options(*, requires_api_key: bool) -> dict[str, Any]:
+    """Return the per-request SDK option that explicitly omits bearer auth."""
+
+    if requires_api_key:
+        return {}
+    # The SDK validates omissions against request-local headers, not client
+    # defaults. This also prevents an ambient OPENAI_API_KEY from leaking onto
+    # a connection whose declared authentication contract is NONE.
+    return {"extra_headers": {"Authorization": Omit()}}
 
 
 async def admit_provider_request(
@@ -137,4 +151,5 @@ __all__ = [
     "OpenAITransportTimeoutPolicy",
     "admit_provider_request",
     "build_async_openai_client",
+    "openai_auth_request_options",
 ]

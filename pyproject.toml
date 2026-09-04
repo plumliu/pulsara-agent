@@ -18,7 +18,6 @@ dependencies = [
     "google-re2>=1.1.20240702",
     "mcp[cli]==2.0.0",
     "mcp-types==2.0.0",
-    "keyring>=25.6,<26",
 ]
 
 [project.scripts]

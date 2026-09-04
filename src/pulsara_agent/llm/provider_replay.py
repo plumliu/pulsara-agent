@@ -291,24 +291,24 @@ def project_provider_visible_reasoning(
             assert isinstance(item, dict)
             if item.get("type") != "reasoning":
                 continue
-            summary = _project_responses_reasoning_text(
+            summary_parts = _project_responses_reasoning_text_parts(
                 item.get("summary"),
                 allowed_types=frozenset({"summary_text", "output_text"}),
                 label="summary",
             )
-            content = _project_responses_reasoning_text(
+            content_parts = _project_responses_reasoning_text_parts(
                 item.get("content"),
                 allowed_types=frozenset({"reasoning_text"}),
                 label="content",
             )
-            if summary:
+            for summary in summary_parts:
                 projected.append(
                     ProviderVisibleReasoningBlock(
                         ReasoningPresentationKind.SUMMARY,
                         summary,
                     )
                 )
-            if content:
+            for content in content_parts:
                 projected.append(
                     ProviderVisibleReasoningBlock(
                         ReasoningPresentationKind.FULL,
@@ -320,14 +320,14 @@ def project_provider_visible_reasoning(
     raise ValueError("provider replay codec is unsupported")
 
 
-def _project_responses_reasoning_text(
+def _project_responses_reasoning_text_parts(
     value: object,
     *,
     allowed_types: frozenset[str],
     label: str,
-) -> str:
+) -> tuple[str, ...]:
     if value is None:
-        return ""
+        return ()
     if not isinstance(value, list):
         raise ValueError(f"Responses reasoning {label} is not an array")
     parts: list[str] = []
@@ -339,8 +339,10 @@ def _project_responses_reasoning_text(
             or not isinstance(block.get("text"), str)
         ):
             raise ValueError(f"Responses reasoning {label} block is invalid")
-        parts.append(str(block["text"]))
-    return "".join(parts)
+        text = str(block["text"])
+        if text:
+            parts.append(text)
+    return tuple(parts)
 
 
 def provider_replay_id(

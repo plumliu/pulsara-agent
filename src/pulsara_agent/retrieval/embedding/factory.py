@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from pulsara_agent.local_credentials import LocalCredentialStore
 from pulsara_agent.retrieval.config import EmbeddingBackendConfig
+from pulsara_agent.settings import LocalSettingsStore
 
 from .openai_compatible import OpenAICompatibleEmbeddingProvider
 from .protocol import EmbeddingProvider
@@ -12,7 +12,7 @@ from .protocol import EmbeddingProvider
 def build_embedding_provider(
     config: EmbeddingBackendConfig,
     *,
-    credentials: LocalCredentialStore,
+    settings: LocalSettingsStore,
 ) -> EmbeddingProvider:
     if not config.model:
         raise ValueError("Embedding model is not configured.")
@@ -31,6 +31,6 @@ def build_embedding_provider(
             max_retries=config.max_retries,
             batch_size=config.batch_size,
             max_concurrent=config.max_concurrent,
-            credentials=credentials,
+            settings=settings,
         )
     raise ValueError("embedding configuration is outside the V1 contract")

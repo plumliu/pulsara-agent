@@ -35,10 +35,11 @@ const bootstrap: RuntimeBootstrap = {
   local_settings: {
     state: 'ready',
     postgres: { runtime_dsn: 'postgresql://pulsara@localhost/pulsara', admin_dsn: null },
-    dashscope_credentials: { embedding: 'MISSING', rerank: 'MISSING' },
+    dashscope_credentials: { embedding_configured: false, rerank_configured: false },
   },
   model_configurations: [{
     id: 'model-connection:00000000000000000000000000000000',
+    source: 'models_dev',
     route_id: 'test',
     route_name: 'Local Test',
     wire_api: 'openai_responses',
@@ -46,8 +47,11 @@ const bootstrap: RuntimeBootstrap = {
     display_name: 'test-model',
     base_url: 'http://localhost',
     status: 'ready',
-    credential_state: 'PRESENT',
+    authentication: 'bearer_api_key',
+    credential_configured: true,
     context_tokens: 256000,
+    max_output_tokens: 8192,
+    tool_call: true,
     reasoning: { kind: 'selectable', effort: { values: ['low', 'medium', 'high'] }, toggle: false, budget_tokens: null },
     default_reasoning: { kind: 'effort', value: 'medium' },
   }],
@@ -304,6 +308,7 @@ class FakeConnection implements RuntimeConnection {
 
 class FakeAdapter implements RuntimeAdapter {
   sessions = [initialSession];
+  modelConfigurations = [...bootstrap.model_configurations];
   taskInventory: AgentTask[] = [];
   lastConnection?: FakeConnection;
   connectionValue?: RuntimeProjection;
@@ -326,7 +331,7 @@ class FakeAdapter implements RuntimeAdapter {
   });
 
   async bootstrap() {
-    return bootstrap;
+    return { ...bootstrap, model_configurations: this.modelConfigurations };
   }
 
   async modelCatalog() {
@@ -360,7 +365,7 @@ class FakeAdapter implements RuntimeAdapter {
   async localSettings() {
     return {
       local_settings: bootstrap.local_settings,
-      model_configurations: bootstrap.model_configurations,
+      model_configurations: this.modelConfigurations,
       database_state: bootstrap.database_state,
     };
   }
@@ -369,14 +374,26 @@ class FakeAdapter implements RuntimeAdapter {
     return { model_configuration: bootstrap.model_configurations[0], wire_shape_warning: false };
   }
 
+  async deleteModelConfiguration(connectionId: string) {
+    const before = this.modelConfigurations.length;
+    this.modelConfigurations = this.modelConfigurations.filter((item) => item.id !== connectionId);
+    return {
+      model_configuration_id: connectionId,
+      deleted: this.modelConfigurations.length !== before,
+      model_configurations: this.modelConfigurations,
+    };
+  }
+
+  async testModelConfiguration() { return { status: 'ready' as const }; }
+
   async savePostgres() {
     return { ...(await this.localSettings()), restart_required: false };
   }
 
   async checkPostgres() { return { database_name: 'pulsara' }; }
   async migratePostgres() { return { database_name: 'pulsara' }; }
-  async putDashScopeCredential() { return 'PRESENT' as const; }
-  async deleteDashScopeCredential() { return 'MISSING' as const; }
+  async putDashScopeCredential() { return true; }
+  async deleteDashScopeCredential() { return false; }
 
   async updateModelCallBinding(sessionId: string, binding: NonNullable<SessionSummary['modelCallBinding']>) {
     this.sessions = this.sessions.map((session) => session.id === sessionId
@@ -1208,7 +1225,7 @@ describe('PulsaraApp', () => {
         reasoning: [{
           id: 'reasoning-summary',
           kind: 'summary',
-          body: '先检查输入。\n再生成最终回答。',
+          body: '**先检查输入。**\n\n再生成最终回答。',
         }],
       }],
       isRunning: false,
@@ -1216,9 +1233,10 @@ describe('PulsaraApp', () => {
     render(<PulsaraApp adapter={adapter} />);
 
     expect(await screen.findByText('思考摘要')).toBeTruthy();
-    expect(screen.getByText('先检查输入。')).toBeTruthy();
+    expect(screen.getByText('先检查输入。').tagName).toBe('STRONG');
     fireEvent.click(screen.getByRole('button', { name: '展开思考摘要' }));
     expect(screen.getByText(/再生成最终回答。/)).toBeTruthy();
+    expect(screen.getByText('先检查输入。').tagName).toBe('STRONG');
     expect(screen.getByRole('button', { name: '收起思考摘要' })).toBeTruthy();
   });
 
@@ -1519,7 +1537,7 @@ describe('PulsaraApp', () => {
           local_settings: {
             state: 'ready',
             postgres: null,
-            dashscope_credentials: { embedding: 'MISSING', rerank: 'MISSING' },
+            dashscope_credentials: { embedding_configured: false, rerank_configured: false },
           },
           model_configurations: [],
         };
@@ -1530,7 +1548,7 @@ describe('PulsaraApp', () => {
           local_settings: {
             state: 'ready' as const,
             postgres: null,
-            dashscope_credentials: { embedding: 'MISSING' as const, rerank: 'MISSING' as const },
+            dashscope_credentials: { embedding_configured: false, rerank_configured: false },
           },
           model_configurations: [],
           database_state: 'database_not_configured' as const,
@@ -1602,6 +1620,7 @@ describe('PulsaraApp', () => {
     fireEvent.click(screen.getByRole('button', { name: '保存配置' }));
 
     await waitFor(() => expect(add).toHaveBeenCalledWith({
+      source: 'models_dev',
       route_id: 'test',
       model_id: 'test-model',
       wire_api: 'openai_responses',
@@ -1609,6 +1628,132 @@ describe('PulsaraApp', () => {
     }));
     await waitFor(() => expect(screen.queryByLabelText('API key')).toBeNull());
     expect(container.textContent).not.toContain(secret);
+  });
+
+  it('deletes one model configuration without silently rebinding its sessions', async () => {
+    const adapter = new FakeAdapter();
+    const remove = vi.spyOn(adapter, 'deleteModelConfiguration');
+    render(<PulsaraApp adapter={adapter} />);
+    await screen.findByRole('heading', { name: '准备发布' });
+    fireEvent.click(screen.getByRole('button', { name: '设置' }));
+    fireEvent.click(screen.getByRole('button', { name: '模型' }));
+
+    const deleteButton = await screen.findByRole('button', {
+      name: /删除模型配置 Local Test · test-model/,
+    });
+    fireEvent.click(deleteButton);
+    expect(screen.getByText('删除后，已有会话不会自动改用其他模型。')).toBeTruthy();
+    expect(remove).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: '确认删除' }));
+    await waitFor(() => expect(remove).toHaveBeenCalledWith(
+      'model-connection:00000000000000000000000000000000',
+    ));
+    expect(await screen.findByText('还没有模型配置')).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: '会话' }));
+    await waitFor(() => expect(
+      document.querySelector('.mode-chip.model-chip')?.textContent,
+    ).toContain('模型配置已删除'));
+    expect(screen.getByText(/原模型配置已删除，请重新选择/)).toBeTruthy();
+    expect(adapter.sessions[0].modelCallBinding?.connection_id).toBe(
+      'model-connection:00000000000000000000000000000000',
+    );
+  });
+
+  it('adds and independently tests a user-declared OpenAI-compatible model configuration', async () => {
+    const adapter = new FakeAdapter();
+    const add = vi.spyOn(adapter, 'addModelConfiguration');
+    const test = vi.spyOn(adapter, 'testModelConfiguration');
+    render(<PulsaraApp adapter={adapter} />);
+    await screen.findByRole('heading', { name: '准备发布' });
+    fireEvent.click(screen.getByRole('button', { name: '设置' }));
+    fireEvent.click(screen.getByRole('button', { name: '模型' }));
+    fireEvent.click(screen.getByRole('button', { name: /添加配置/ }));
+    fireEvent.click(screen.getByRole('button', { name: '自定义服务' }));
+
+    fireEvent.change(screen.getByLabelText('配置名称'), { target: { value: 'Local Gateway' } });
+    fireEvent.change(screen.getByLabelText('Base URL'), { target: { value: 'http://127.0.0.1:9000/v1' } });
+    fireEvent.change(screen.getByLabelText('Model ID'), { target: { value: 'local-model' } });
+    fireEvent.change(screen.getByLabelText('API 协议'), { target: { value: 'openai_chat_completions' } });
+    fireEvent.change(screen.getByLabelText('Reasoning 控制'), { target: { value: 'effort' } });
+    fireEvent.change(screen.getByLabelText('Effort 列表'), { target: { value: 'low, high, high' } });
+    const secret = 'custom-front-end-secret';
+    fireEvent.change(screen.getByLabelText('API key'), { target: { value: secret } });
+
+    fireEvent.click(screen.getByRole('button', { name: '测试连接' }));
+    await waitFor(() => expect(test).toHaveBeenCalledWith(expect.objectContaining({
+      source: 'user_declared',
+      configuration_name: 'Local Gateway',
+      base_url: 'http://127.0.0.1:9000/v1',
+      model_id: 'local-model',
+      wire_api: 'openai_chat_completions',
+      authentication: 'bearer_api_key',
+      api_key: secret,
+      context_tokens: 256000,
+      max_output_tokens: 8192,
+      tool_call: true,
+      reasoning: { kind: 'effort', values: ['low', 'high'] },
+    })));
+    expect(add).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: '保存配置' }));
+    await waitFor(() => expect(add).toHaveBeenCalledWith(expect.objectContaining({
+      source: 'user_declared',
+      api_key: secret,
+    })));
+  });
+
+  it('allows a user-declared no-auth target without rendering an API key field', async () => {
+    const adapter = new FakeAdapter();
+    const add = vi.spyOn(adapter, 'addModelConfiguration');
+    render(<PulsaraApp adapter={adapter} />);
+    await screen.findByRole('heading', { name: '准备发布' });
+    fireEvent.click(screen.getByRole('button', { name: '设置' }));
+    fireEvent.click(screen.getByRole('button', { name: '模型' }));
+    fireEvent.click(screen.getByRole('button', { name: /添加配置/ }));
+    fireEvent.click(screen.getByRole('button', { name: '自定义服务' }));
+    fireEvent.change(screen.getByLabelText('配置名称'), { target: { value: 'Local No Auth' } });
+    fireEvent.change(screen.getByLabelText('Base URL'), { target: { value: 'http://127.0.0.1:11434/v1' } });
+    fireEvent.change(screen.getByLabelText('Model ID'), { target: { value: 'local-model' } });
+    fireEvent.change(screen.getByLabelText('API 协议'), { target: { value: 'openai_responses' } });
+    fireEvent.change(screen.getByLabelText('认证方式'), { target: { value: 'none' } });
+
+    expect(screen.queryByLabelText('API key')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: '保存配置' }));
+    await waitFor(() => expect(add).toHaveBeenCalledWith(expect.objectContaining({
+      source: 'user_declared',
+      authentication: 'none',
+      api_key: null,
+      reasoning: { kind: 'provider_default' },
+    })));
+  });
+
+  it('keeps saving available after an independent connection test fails', async () => {
+    const adapter = new FakeAdapter();
+    const test = vi.spyOn(adapter, 'testModelConfiguration').mockRejectedValue(new Error('endpoint rejected test'));
+    const add = vi.spyOn(adapter, 'addModelConfiguration');
+    render(<PulsaraApp adapter={adapter} />);
+    await screen.findByRole('heading', { name: '准备发布' });
+    fireEvent.click(screen.getByRole('button', { name: '设置' }));
+    fireEvent.click(screen.getByRole('button', { name: '模型' }));
+    fireEvent.click(screen.getByRole('button', { name: /添加配置/ }));
+    fireEvent.click(screen.getByRole('button', { name: '自定义服务' }));
+    fireEvent.change(screen.getByLabelText('配置名称'), { target: { value: 'Save Anyway' } });
+    fireEvent.change(screen.getByLabelText('Base URL'), { target: { value: 'https://example.test/v1' } });
+    fireEvent.change(screen.getByLabelText('Model ID'), { target: { value: 'future-model' } });
+    fireEvent.change(screen.getByLabelText('API 协议'), { target: { value: 'openai_chat_completions' } });
+    fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'draft-key' } });
+
+    fireEvent.click(screen.getByRole('button', { name: '测试连接' }));
+    await waitFor(() => expect(test).toHaveBeenCalledOnce());
+    const save = screen.getByRole('button', { name: '保存配置' });
+    await waitFor(() => expect((save as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(save);
+    await waitFor(() => expect(add).toHaveBeenCalledWith(expect.objectContaining({
+      source: 'user_declared',
+      api_key: 'draft-key',
+    })));
   });
 
   it('sorts provider names and model IDs alphabetically in their selectors', async () => {
@@ -1705,7 +1850,7 @@ describe('PulsaraApp', () => {
     fireEvent.change(screen.getByLabelText('提供方'), { target: { value: 'catalog-only' } });
     fireEvent.change(screen.getByLabelText('模型'), { target: { value: 'catalog-only-model' } });
 
-    expect(screen.getByText(/尚未为这个提供方注册可执行/)).toBeTruthy();
+    expect(screen.getByText(/没有声明 OpenAI-compatible 接口/)).toBeTruthy();
     expect((screen.getByLabelText('API 协议') as HTMLSelectElement).disabled).toBe(true);
     expect(screen.getByRole('option', { name: 'Chat Completions · 暂不支持' })).toBeTruthy();
     expect(screen.getByRole('option', { name: 'Responses · 暂不支持' })).toBeTruthy();

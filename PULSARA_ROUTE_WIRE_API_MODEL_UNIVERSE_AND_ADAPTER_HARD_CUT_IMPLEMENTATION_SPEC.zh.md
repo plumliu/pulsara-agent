@@ -30,9 +30,9 @@
 本文不重写 Agent loop、canonical transcript、provider replay、compaction、memory、Agent
 capability、tool execution、permission 或长程执行语义。数据库只为“当前会话选择、已排队
 输入、已开始 turn”增加最小的 model connection 与 exact reasoning selection 字段；模型连接与
-本机 PostgreSQL 使用一份 database-independent closed 本地配置，所有 API key 使用系统
-credential vault，不增加 PostgreSQL 配置表、event、job、fingerprint registry 或 arbitrary
-key/value settings system。发生冲突时，优先级为：
+本机 PostgreSQL、模型连接及其 API key、两枚固定 DashScope API key 使用一份
+database-independent closed 本地配置；不增加系统 credential vault、PostgreSQL 配置表、event、
+job、fingerprint registry 或 arbitrary key/value settings system。发生冲突时，优先级为：
 `AGENTS.md`、用户当前要求、本文、仍然生效的既有规范。
 
 本文 hard-cut 取代下列旧路径：
@@ -70,10 +70,10 @@ provider/model 表。用户在配置时显式选择 Chat Completions、Responses
 ModelTargetKey = route_id + wire_api + model_id
 ```
 
-Pulsara 的用户级设置可以保存多组 `ModelConnectionConfig`，每组都冻结一套 exact target 与
-endpoint；API key 由固定 vault service + connection ID 定位。固定 DashScope embedding 与
-reranker 各有一枚独立、write-only 的 vault credential；本机 PostgreSQL runtime/admin DSN 与
-model-connection metadata 共用一份 closed 本地配置文件。每个会话只选择其中一组模型连接；主
+Pulsara 的用户级设置可以保存多组 `ModelConnectionConfig`，每组都冻结一套 exact target、
+endpoint 及其 API key。固定 DashScope embedding 与 reranker 各有一枚独立 API key；本机
+PostgreSQL runtime/admin DSN、model-connection metadata 与全部 API key 共用一份权限受限的
+closed 本地配置文件。每个会话只选择其中一组模型连接；主
 Agent、该会话的 summary、compaction、memory governance、subagent 和其他 auxiliary model call 不再被分配到
 PRO/FLASH 两种模型职责，而是共享该会话选择的同一 connection/target，只保留各自真实需要的
 purpose、output bound、deadline 和输入 contract。不同会话可并发使用不同配置。
@@ -137,15 +137,15 @@ gateway 与直连 OpenAI、DeepSeek、Moonshot 等在产品选择层处于同一
 
 本机 HTTP/设置壳不依赖 PostgreSQL，因而全新安装或数据库不可连接时仍可打开设置页。只有
 会话/任务数据面需要已配置且通过验证的 runtime DSN；admin DSN 仅供用户显式发起的数据库
-初始化/升级使用。缺少两枚可选 DashScope credential 只让对应 advisory retrieval channel
+初始化/升级使用。缺少两枚可选 DashScope key 只让对应 advisory retrieval channel
 退化，不得阻止 app、会话或主模型工作。
 
 直接读 catalog 只发生在设置/配置校验或新 cold Host 解析边界；不得在单次 provider request
 的路径上读网络，也不得热替换 active epoch 已冻结的 target。首个 hard cut 只在现有
 `sessions`、`prompt_queue_items` 与 `turns` 上各增加一个必要的 `model_call_binding` 字段；
 不新增 PostgreSQL 表、event、job、checkpoint、receipt、在线逐档 probe、
-本地 model catalog 副本或第二套 normalized IR。用户保存的任何 API key 永远不进入这些表或
-本地配置文件。
+本地 model catalog 副本或第二套 normalized IR。用户保存的 API key 只进入
+`${PULSARA_HOME}/local-settings.yaml`，永远不进入这些表、Web response、日志或浏览器持久化。
 
 ---
 
@@ -179,7 +179,7 @@ capability dispatch cut 等完整术语体系。LLM model support metadata 不�
 | `RouteWireContract` | route 在某个 wire API 上的 transport、request、stream、terminal 与 replay 契约 |
 | `ModelTargetUniverse` | 当前 selectable catalog 中可与已注册 adapter exact join 的 target 投影 |
 | `ModelConnectionId` | 一组用户保存连接配置的随机稳定本地 ID；不是 target fingerprint |
-| `ModelConnectionConfig` | 用户保存的 target 与 endpoint；不含明文 API key、reasoning 或派生 execution policy |
+| `ModelConnectionConfig` | 运行时使用的 non-secret target/endpoint metadata；同一 local-settings record 另带 API key，但 API key 不进入该 DTO、reasoning 或派生 execution policy |
 | `ReasoningControlContract` | 某 target 真正提供的 reasoning 行为与控制形状 |
 | `ModelTargetResolver` | 对已取得 snapshot 做 exact 查找、join 并冻结 target contract 的纯本地解析器 |
 
@@ -302,7 +302,8 @@ LLMOptions.reasoning_effort: str | None
 ```
 
 Chat 将 raw string 写入 `reasoning_effort`，Responses 将其写入
-`reasoning={"effort": ...}`；未指定时不发送。与此同时，`ThinkingProfile.enabled`、
+`reasoning={"effort": ..., "summary": "auto"}`，使显式启用 reasoning 的 turn 同时请求
+provider 可公开展示的推理摘要；未指定时不发送。与此同时，`ThinkingProfile.enabled`、
 `PULSARA_THINKING_*` 与 `request_extra_body.thinking` 又能成为第二个 request owner。
 
 该结构无法证明：
@@ -330,7 +331,7 @@ PostgreSQL；CLI普遍暴露 `--env-file`，`LocalWebApplication.start()` 又在
 Retrieval真源同时表明 embedding与 reranker不是开放 provider universe：前者固定为 DashScope
 compatible `text-embedding-v4` / 1024 dimensions，后者固定为 DashScope `qwen3-rerank`。把它们的
 provider、model、endpoint与 tuning继续做成 production env变量既制造第二 owner，也会让 UI 暗示
-Pulsara支持尚不存在的替代 backend。本轮只把两枚独立 credential交给用户管理，保持既有 fixed
+Pulsara支持尚不存在的替代 backend。本轮只把两枚独立 API key交给用户管理，保持既有 fixed
 semantic contracts。
 
 ---
@@ -477,7 +478,8 @@ Agent core 的不同正确性规则。OpenRouter 和 OpenAI 都是可被用户�
 已经是现有运行时选择和复现 adapter 的边界。models.dev 的 `npm` 可以把 route解析到通用
 OpenAI-compatible dialect；Pulsara 的通用 Chat/Responses adapters拥有 request主干、SSE、terminal、
 tool correlation与closed observed-field replay，也分别统一拥有 Chat 的 `reasoning_effort` 与
-Responses 的 `reasoning.effort` request lowering。Pulsara不为 provider或 model复制这些 contract。
+Responses 的 `reasoning.effort + reasoning.summary=auto` request lowering。Pulsara不为 provider或
+model复制这些 contract。
 OpenAI route在models.dev缺少 `api` 时所需的默认 endpoint属于独立的 route endpoint fallback，
 不得伪装成另一份 wire contract。
 
@@ -487,22 +489,24 @@ OpenAI route在models.dev缺少 `api` 时所需的默认 endpoint属于独立的
 @dataclass(frozen=True, slots=True)
 class ModelTargetContract:
     key: ModelTargetKey
-    catalog_facts: ModelCatalogFacts
+    target_facts: ModelTargetFacts
     reasoning: ReasoningControlContract
     route_wire: RouteWireContract
 ```
 
 ```python
 @dataclass(frozen=True, slots=True)
-class ModelCatalogFacts:
+class ModelTargetFacts:
     display_name: str
+    route_name: str
     tool_call: bool | None
     limits: ModelHardLimits
     wire_shape_hint: Literal["responses", "completions"] | None
 ```
 
 Identity只存在于 `ModelCatalogEntryKey` / `ModelTargetKey`；display、limits与 tool-call
-只存在于 `ModelCatalogFacts`。`ModelTargetContract` 不把这些 child fields再复制成 sibling字段，
+只存在于 `ModelTargetFacts`。目录连接从 models.dev row 构造该值，自定义连接从 closed
+`UserDeclaredModelTarget` 构造同一个值；`ModelTargetContract` 不把这些 child fields再复制成 sibling字段，
 也不增加 validator要求两份永远相等。Raw `reasoning/reasoning_options`只在 snapshot parser中
 消费一次，解析后的 `reasoning` 是 target唯一 execution/UI事实，不把 raw与 normalized副本一起
 塞进 target；`route_wire` 是本地 adapter binding。
@@ -589,7 +593,8 @@ Catalog parser 只在 response 不是可解析 JSON object、顶层结构无法�
 
 ### 4.7 Limits 与本地 execution policy 的所有权
 
-models.dev catalog entry 拥有 provider/model 的 hard limits：
+models.dev catalog entry 拥有目录 target 的 hard limits；自定义连接则由用户在创建时明确声明同一
+组 target facts：
 
 ```text
 total_context_tokens
@@ -597,7 +602,8 @@ max_input_tokens（provider 明确区分时）
 max_output_tokens
 ```
 
-首轮四字段 connection 不再保存或要求用户理解 output/safety policy。Pulsara 从同一 hard limits
+目录连接不复制这些字段；自定义连接只保存用户声明的 context/output hard limits，不开放任意
+execution policy。Pulsara 从两种来源解析出的同一 hard-limit value object
 以 provider-neutral 的固定本地 policy 确定性派生：
 
 ```python
@@ -657,11 +663,10 @@ effort + budget_tokens
 toggle + effort + budget_tokens
 ```
 
-其中 `toggle` 表示独立 on/off wire control，`effort` 与 `budget_tokens` 表示该 target 公开的
+其中 `toggle` 表示独立 on/off control，`effort` 与 `budget_tokens` 表示该 target 公开的
 两种 graded control surface。它们是**同一 request 的替代选择族**，不是要求 Pulsara 同时发送
-effort 与 budget；当 toggle 与某个 graded control 共存时，选择 graded control 必须由 exact
-adapter 同时形成“启用 + 该 graded value”。Pulsara 不能像 OpenCode 当前的 effort-first 路径
-一样丢掉同 row 中的 toggle 或 budget，也不能把两种 graded control 擅自拼成新协议。
+多个 control。Pulsara 完整保留同 row 中的合法 family 供用户选择，但一次只 lower 用户选中的
+一种 control，不把 toggle、effort 与 budget 擅自拼成新协议。
 
 ```python
 ReasoningControlContract = (
@@ -712,8 +717,11 @@ class ReasoningToggle:
     pass
 ```
 
-UI 显示真实开关。开与关都必须由 route/wire adapter 生成 exact wire control；
-不得假设 `false/true` 是所有 provider 的共同形状。
+UI 显示真实开关。首轮通用 OpenAI-compatible Chat contract 将 models.dev 的 `toggle`
+统一 lower 为最终 HTTP JSON root `reasoning={"enabled": false|true}`；实现通过 OpenAI SDK 的
+`extra_body` 参数携带该扩展，SDK 合并后 wire 上不存在 `extra_body` 包装。这是 Chat wire shape，
+不是 provider/model 分支。Responses contract 暂不声明 toggle 支持。采用其他私有 toggle 形状的端点
+不在该通用 lowering 内，Pulsara 不按 provider 名称改写，也不发送 `adaptive` 等厂商值。
 
 #### `ReasoningTokenBudgetRange`
 
@@ -749,11 +757,11 @@ ReasoningSelection = (
 - `ReasoningEffortSelection` exact携带 catalog raw value，包括 `null/none` 这种 effort-owned
   disabled value；它不被改写成 toggle；
 - `ReasoningBudgetSelection` 只携带 closed range 内的 exact整数；
-- `toggle + effort` 下选择 effort 时，adapter 发送 enable + exact effort；`toggle + budget`
-  同理；单选 toggle-on 只发送 enable，让 provider 在已开启状态内决定 graded behavior；
+- `toggle + effort` 或 `toggle + budget` 下，选择 toggle 时只发送该开关，选择 graded control时
+  只发送其 exact effort或budget；toggle-on让 provider在已开启状态内决定 graded behavior；
 - `effort + budget` 下菜单同时呈现“档位”和“Token 预算”两组，用户一次只能选择一组；adapter
-  发送被选 control并 exact omission另一组；三种 option 共存时再增加 toggle off/on 两项，
-  graded selection仍只选 effort或 budget之一，并由 adapter同时启用 toggle；
+  发送被选 control并 exact omission另一组；三种 option共存时再增加 toggle off/on两项，
+  每次仍只发送一种 selected control；
 - 一次 request只能有一个 typed selection，adapter不得将 effort与 budget拼出无上游契约的组合。
 
 #### `ReasoningFixedOn`
@@ -842,9 +850,9 @@ def upper_middle(items: tuple[T, ...]) -> T:
 - closed token-budget range 默认取 `ceil((minimum + maximum) / 2)`；任一边界缺失且 adapter
   不得从 output limit闭合，不伪造数值；若还有 effort/toggle则按上述优先级选择，否则退回
   `None`；
-- `toggle + effort` 的默认是正向 effort中位值并由 adapter同时启用 toggle；`toggle + budget` 在
-  closed range下默认数值中点并同时启用 toggle；`effort + budget` 或三者组合按同一优先级默认
-  effort，但菜单仍保留 closed budget替代项；
+- `toggle + effort` 的默认是正向 effort中位值；`toggle + budget` 在 closed range下默认数值中点；
+  `effort + budget` 或三者组合按同一优先级默认 effort，但菜单仍保留 toggle与closed budget
+  替代项；adapter只发送当前 selected control；
 - fixed-on、unavailable 与 provider-default 没有可选档位，不渲染 selector，也不保存伪选择。
 
 这里的“向上取”只用于**同一 target 已公开选择列表里的默认下标或数值中点**，不是
@@ -1007,7 +1015,7 @@ selection或用当前 catalog的同名 choice猜测。
 3. provider selector 直接展示仍有 selectable model 的 route，例如 OpenAI、OpenRouter、
    Zhipu AI、DeepSeek、Moonshot；
 4. 用户选 route 后，model selector 只展示该 provider entry 的 selectable models；
-5. 用户显式选择 Chat Completions 或 Responses 并填写 API key；普通“添加配置”不要求用户
+5. 用户显式选择 Chat Completions 或 Responses 并填写 API key；目录“添加配置”不要求用户
    理解或填写 base URL；endpoint 按 model-level `provider.api`、provider-level `api`、Pulsara明确维护的
    route endpoint fallback 的顺序 exact 解析；三者都没有时返回 typed
    `model_endpoint_unknown`，不能猜 endpoint；
@@ -1021,6 +1029,13 @@ selection或用当前 catalog的同名 choice猜测。
 
 产品可以把一级标签叫“模型提供方”或“连接方式”，但 kernel canonical identity 必须是
 `route_id`。OpenRouter 不是 OpenAI route 的一个 checkbox，而是自己的 route。
+
+同一添加流程另有一个显式“自定义服务”入口。它不伪造 models.dev row，而是要求用户声明配置
+名称、Base URL、Model ID、Chat/Responses、Bearer API key或无需认证、context window、最大输出、
+tool calling布尔值，以及 `provider_default | toggle | exact effort list` 之一；toggle只在通用 Chat
+wire contract中可选，Responses不静默丢弃它。Context window仍必须
+至少为 256,000。该入口不开放 arbitrary JSON、header template、field path或 adapter code；两种
+来源最终都解析为同一个 `ModelTargetContract` 并进入同一通用 Chat/Responses adapter。
 
 确认提示是协议边界说明，不是新的 allowlist。§4.2 已明确排除 model ID leaf 以 `claude` 或
 `gemini` 开头的条目；除此之外，UI 不再按模型名、provider 名或 family 猜测兼容性。选择
@@ -1076,14 +1091,21 @@ adapter contract唯一拥有：
 
 | target contract | route/wire adapter lowering |
 |---|---|
-| OpenAI Responses effort `high` | `reasoning={"effort":"high"}` |
+| OpenAI Responses effort `high` | `reasoning={"effort":"high","summary":"auto"}` |
 | OpenAI Chat effort `high` | root `reasoning_effort="high"` |
+| OpenAI Chat toggle-on / toggle-off | SDK `extra_body` 携带、最终 HTTP root `reasoning={"enabled":true|false}` |
 | effort `none`（若 target 定义为关闭） | adapter-owned exact disable value |
 | fixed-on / no caller control | exact omission |
 | unavailable / provider-default | 不发送 reasoning selector |
 
 表中只说明责任边界；通用 Chat/Responses dialect的实际 shape由既有 adapter与request golden冻结，
 不能靠models.dev `shape` hint改写。
+
+Responses 的公开 reasoning summary 是有序多 part 值。stream中的每个 part必须以
+`(output_index, summary_index)` 作为身份逐段累计、完成和校验，再按最终 `summary[]` 顺序投影；
+不得忽略 `summary_index` 后把多个 part拼成一个 delta prefix。缺失 `summary_index` 只在单 part
+兼容形状下等价于 `0`，不能据此猜测多 part identity。terminal adoption从exact replay重建公开
+reasoning时也必须逐个保留这些part，不能把多个summary或content part连接成一个展示块。
 
 ### 7.2 Hard-cut 删除重复 request owner
 
@@ -1193,36 +1215,44 @@ class ModelConnectionConfig:
     id: ModelConnectionId
     target: ModelTargetKey
     base_url: str
+    user_declared: UserDeclaredModelTarget | None
 ```
 
-每条配置通过 `target` 保存 exact route/model/wire API IDs，并保存解析后的 endpoint；不复制整份
-models.dev row，不保存 reasoning选择或由 §4.7 确定性派生的 execution policy，也不含明文 API
-key。`ModelConnectionId` 是普通随机本地主键，不由 target、endpoint 或
+每条配置通过 `target` 保存 exact route/model/wire API IDs，并保存解析后的 endpoint。目录连接的
+`user_declared=None`，不复制整份 models.dev row；自定义连接的 `user_declared` 只保存用户明确填写
+的 display name、context/output limits、tool-call、reasoning control与认证种类。两者都不保存会话
+reasoning选择或由 §4.7 确定性派生的 execution policy。`ModelConnectionConfig` 是 non-secret
+runtime DTO；其 local-settings record 同时保存 nullable `api_key`，Bearer 连接必须为非空字符串，
+no-auth 连接必须为 `null`。
+`ModelConnectionId` 是普通随机本地主键，不由 target、endpoint 或
 credential hash 派生，不建立 fingerprint registry。
 
 首轮配置对象创建后不可原地修改 target、wire API 或 endpoint；需要另一组合时新增一条。
 这避免一条已被 session/queue/turn 引用的 ID 在背后变成另一 target。本文首轮只冻结
-add/list/select，不渲染尚未实现的 edit/delete/rotate 控件；以后增加删除或 key rotation 时必须
-单独定义引用中 session、pending queue 与 credential 的结算语义，不能先放一个不可用按钮。
+add/list/select/delete，不渲染尚未实现的 edit/rotate 控件。删除按 exact `ModelConnectionId`
+幂等执行，并在同一次 local-settings document replace 中同时移除 metadata 与该条 API key；它不
+扫描或改写 canonical session、queue、turn、transcript或已安装 epoch。引用已删除 ID 的会话保持
+原绑定并显示“原模型配置已删除，请重新选择”，不得静默绑定列表第一项。已经打开 provider call
+并取得 key value 的 operation继续结算；尚未 resolve/open 的后续执行按缺失配置明确失败。
 
-Catalog-backed target 的 hard limits 直接来自 frozen models.dev row；output/safety policy只按
-§4.7 的 provider-neutral公式派生。所有设置、CLI、Host 与 Web 路径都消费同一个 typed
-store/read model。
+Catalog-backed target 的 hard limits 直接来自 frozen models.dev row；user-declared target 的
+hard limits来自同一 closed metadata object。output/safety policy只按 §4.7 的 provider-neutral
+公式派生。所有设置、CLI、Host 与 Web 路径都消费同一个 typed store/read model。
 
-### 9.2 本机设置与 credential 的最小存储边界
+### 9.2 单一 local-settings document
 
-`.env` 不能承担 GUI 首次启动所需的 canonical configuration：它既不能安全保存多组 key，也会让
-PostgreSQL 尚未配置时连设置页都无法启动。Hard cut 后，用户级 non-secret/inspectable metadata 的
-唯一 authority 是：
+`.env` 不能承担 GUI 首次启动所需的 canonical configuration，也不能表达多组模型配置。Hard cut
+后，用户级 product configuration 的唯一 durable authority 是：
 
 ```text
 ${PULSARA_HOME}/local-settings.yaml
 ```
 
-首轮 closed shape 只有：
+它是一份有固定 schema 的本机文件，同时保存 PostgreSQL DSN、模型连接及其 key、两枚固定
+DashScope key：
 
 ```yaml
-schema: pulsara-local-settings:v1
+schema: pulsara-local-settings:v2
 postgres:
   runtime_dsn: postgresql://...
   admin_dsn: postgresql://...   # optional；只供显式 initialize/migrate
@@ -1232,111 +1262,70 @@ model_connections:
     wire_api: openai_chat_completions
     model_id: glm-5.3
     base_url: https://...
+    api_key: sk-...
+  - id: model-connection:...
+    route_id: user_declared
+    wire_api: openai_responses
+    model_id: local-model
+    base_url: http://127.0.0.1:11434/v1
+    user_declared:
+      configuration_name: Local model
+      total_context_tokens: 256000
+      max_output_tokens: 8192
+      tool_call: true
+      reasoning: {kind: provider_default}
+      authentication: none
+    api_key: null
+dashscope_credentials:
+  embedding_api_key: sk-...     # optional
+  rerank_api_key: sk-...        # optional
 ```
 
-`postgres: null` 与空 `model_connections` 都是合法初始状态。文件使用 no-follow、父目录 `0700`、
-文件 `0600` 与 write/fsync/atomic replace，复用已有 user-configuration 安全写入 primitive。该文件
-不保存 catalog snapshot、reasoning preference、任何 API key、credential digest、revision、
-generation、fingerprint 或数据库 row 副本，也不演化为任意 key/value settings registry。格式损坏
-只令对应 local-settings read typed unavailable；本机 HTTP/设置壳仍须启动并允许用户覆盖修复，不能
-因为配置文件错误关闭整个应用。
+`postgres: null`、空 `model_connections` 与两枚 `null` DashScope key 都是合法初始状态。Bearer
+连接必须在同一 record 中有 non-empty `api_key`；no-auth 连接必须为 `null`。文件使用 no-follow、
+父目录 `0700`、文件 `0600`、1 MiB 物理大小边界与 write/fsync/atomic replace。API key 在文件中是
+可直接使用的值，不再复制到 Keychain、PostgreSQL、另一个 sidecar、环境变量或 credential registry。
+文件不保存 catalog snapshot、会话 reasoning preference、credential digest、revision、generation、
+fingerprint 或数据库 row 副本，也不演化为 arbitrary key/value registry。
 
-同一 Web 进程内只有一个 process-local `LocalSettingsStore` mutation owner。所有模型配置添加与
-PostgreSQL配置保存都必须在该 owner的同一异步互斥区内重新读取最新文件、修改对应 closed字段并
-执行安全写入；调用方不得先各自读取旧 snapshot后分别覆盖。首轮只支持这个 GUI/Web进程写配置；
-CLI只读同一文件，不声明多个 Pulsara进程并发写入的产品语义，也不为此增加跨进程 file lock、lease、
-revision或 compare-and-swap token。
+`pulsara-local-settings:v2` 是唯一接受的格式。Hard cut 不读取 v1、不从 `.env` 或 Keychain 导入，
+也不做双读、迁移或 fallback；已有用户需要在 GUI 重新填写 key。格式或权限无效时普通 read 返回
+typed unavailable，本机 HTTP/设置壳仍可启动；用户发起的显式设置 mutation可以用当前提交的
+closed values重建文件。
 
-所有 API key 的唯一 durable authority 是 macOS Keychain。Production adapter通过 `keyring` 的
-macOS Keychain backend实现，并在启动/首次 credential操作时确认实际 backend type确为
-`keyring.backends.macOS.Keyring`；不得接受 plaintext、fallback或任意第三方 keyring backend。
-无法加载、Keychain被锁定/拒绝或当前平台不是受支持的 macOS backend时，返回下述 typed状态，
-不能回落到文件或环境变量。Keychain固定使用 service namespace：
+同一 Web 进程内只有一个 process-local `LocalSettingsStore` mutation owner。模型配置添加、精确
+删除、PostgreSQL保存与两枚 DashScope key的 replace/clear都必须在该 owner的同一异步互斥区内
+重新读取最新 document、只修改目标字段并完成一次 atomic replace；调用方不得先读取旧 snapshot
+后分别覆盖。Mutation从开始落盘到结果确定采用 cancellation-shielded局部 settlement；replace后
+发生 commit-unknown时，同一 owner重新读取**完整目标 document**，exact相等即确认成功，不相等或
+无法读取则返回 typed indeterminate。这里没有两存储提交，也不需要 orphan清理、receipt、repair
+job、revision或跨进程 lock。
 
-```text
-com.pulsara.agent.credentials.v1
-```
+添加模型配置时，先对 frozen catalog或 closed user-declared facts完成 validation，再生成 random
+`ModelConnectionId`，最后把 metadata与 nullable API key作为一个 document value发布。删除按 exact
+ID幂等执行，同一 write同时移除该 record和 key，只保留其他模型配置、PostgreSQL与两枚 DashScope
+字段。HTTP response与 bootstrap只返回 non-secret summary和 `credential_configured: bool`；不返回
+key、masked key、persistent secret reference或文件片段。保存成功或失败后，前端都清空 password
+input；不提供 reveal/read-back API。
 
-account name 是可读的 closed字符串，不做 hash：
+两枚 DashScope key相互独立，用户可以填同一个阿里云百炼 key，也可以分别轮换；Pulsara不根据
+`sk-*` 等外观猜 provider。Embedding继续使用既有 `text-embedding-v4` / 1024-dimension 与
+DashScope-compatible endpoint，reranker继续使用 `qwen3-rerank` / DashScope contract。Provider、
+model、endpoint、dimension、timeout/concurrency等执行参数不进入 GUI。缺少 embedding key时 dense
+recall/governance relatedness按现有 advisory degradation工作；缺少 reranker key时 explicit search
+使用现有 pre-rerank结果。两者均不阻止 app、用户 turn、lexical memory path或主模型 dispatch。
 
-```text
-model/<ModelConnectionId.value>
-retrieval/dashscope/embedding
-retrieval/dashscope/rerank
-```
+每次 provider、embedding或 rerank logical operation在真正 open时从本次已读取的
+`LocalSettings` value取得一次 exact key；同一 operation的 bounded transparent physical retries
+复用该值，不逐 attempt重读文件。已经取得值的 operation在用户随后删除/替换配置后继续结算，下一
+operation读取新值或明确缺失。不得跨 operation缓存含 key 的 provider client，也不增加 key
+fingerprint、generation、durable invalidation event或 credential-store abstraction。
 
-Public port只接受三个 closed typed key family：
-
-```text
-ModelProviderCredential(ModelConnectionId)
-DashScopeEmbeddingCredential
-DashScopeRerankCredential
-```
-
-非 secret read model不再把所有失败压成 bool，而使用：
-
-```text
-CredentialState = PRESENT | MISSING | DENIED | UNAVAILABLE
-```
-
-`PRESENT` 只表示 exact Keychain item可读取；`MISSING` 表示 item不存在；用户或系统拒绝访问为
-`DENIED`；backend不存在、损坏或无法建立连接为 `UNAVAILABLE`。`put` 只有在 Keychain确认 exact
-account已写入/替换后成功；`delete` 对不存在 item幂等返回 `MISSING`，删除成功返回 `DELETED`，
-拒绝和 backend不可用保持各自 typed outcome。任何查询、mutation response与日志都不返回 value、
-persistent reference、vault revision或 opaque item ID。Tests只通过依赖注入使用同一 port的 fake，
-不把 fake注册成 production backend。
-
-两枚 DashScope credential 相互独立，用户可以填同一个阿里云百炼 key，也可以分别轮换；Pulsara
-不根据 `sk-*` 等字符串外观猜 provider。它们只能被对应固定 backend 借用：embedding 继续使用
-现有 `text-embedding-v4` / 1024-dimension semantic contract 与 DashScope compatible endpoint，
-reranker继续使用现有 `qwen3-rerank` / DashScope contract。Provider、model、endpoint、dimension、
-timeout/concurrency等现有执行参数不进入 GUI，也不新增 provider selector；删除它们的 production
-env owner，继续由现有 code contract拥有。
-
-如果系统没有可用 secure credential backend，写入 API key 以 typed
-`secure_credential_store_unavailable` 或 `secure_credential_store_denied` 失败；禁止明文 YAML/JSON、PostgreSQL、browser
-`localStorage`、命令行参数、环境变量或“暂时 fallback”保存 key。Tests 使用显式 in-memory fake，
-不把 production 降级成测试 backend。Credential value、hash、vault item ID与 vault revision都不
-进入 target、binding、session snapshot或 compatibility digest。
-
-添加一组模型配置时：
-
-1. 对同一 frozen `SelectableModelCatalog` 验证 route/model、context/model-ID filter、wire API、
-   endpoint 与 hard limits；
-2. 生成新的 random `ModelConnectionId`；
-3. 将 API key 写入 credential vault；
-4. 进入 cancellation-shielded settlement section，在唯一 `LocalSettingsStore` mutation owner内
-   重新读取最新文件，按 generated ID合并 metadata，再完成 write/fsync/atomic replace/parent-dir
-   fsync；从 Keychain写入成功开始，caller取消也必须 join这段局部 settlement；
-5. 若 metadata publish明确在 replace前失败，删除刚写入的 exact account；若 replace或其后续
-   fsync/response出现 commit-unknown，必须在同一 owner内按 generated ID重新读取：metadata已存在
-   且 exact相等则保留 secret并返回已发布结果；可确认 metadata不存在才删除 secret；文件无法读取
-   或结果仍未知时保留可能的 orphan secret并返回 typed indeterminate，不得冒险删掉可能已发布配置
-   的唯一 credential。
-
-进程在两项 durable write之间崩溃仍可能留下不可见 orphan secret；它没有对应 metadata时不构成
-可执行配置。本轮不增加 repair job、receipt、checkpoint、revision、后台扫描或第二个 credential
-registry。上述 process-local owner与结算规则只防止同一 GUI/Web进程的 add/add、add/PostgreSQL-save
-lost update和可观察 commit-unknown，不把 local settings提升为跨进程事务系统。
-
-Embedding/reranker key 的 replace/clear只改变各自 vault item；一次失败不改变另一枚 key，也不写
-PostgreSQL/event/job。没有 embedding key时 automatic dense recall/governance relatedness按现有
-advisory degradation工作；没有 reranker key时 explicit search使用现有 pre-rerank结果。两者都不得
-阻止 app启动、用户 turn、memory lexical path或主模型 dispatch。
-
-每次真实 embedding/rerank logical operation在其既有局部 deadline内各 borrow一次当前 typed
-credential；该 operation既有的 bounded physical retries复用同一 borrow，不能逐 attempt重读
-Keychain。已开始的 operation继续使用自己借到的值，后续 operation观察 replace/clear结果。不得把
-含 key 的 provider client跨 operation缓存成第二 credential owner，也不为轮换增加 key fingerprint、
-generation或 durable invalidation event。
-
-Web mutation request 中的 key 只在本地 same-origin/loopback request body 与该次 call 内短暂存在。
-Mutation response、bootstrap、session snapshot、diagnostics 与日志只能返回
-`credential_state: CredentialState`；密码输入保存成功或失败后都清空，不提供 reveal/read-back API。
-Provider/retrieval open通过窄的短期 borrow取得 exact secret；borrow是 value owner而不是 Keychain
-item的 durable alias，结束时清空/释放其本地引用。现有 `ProcessApiKeyBoundary` 相应
-hard-cut 并重命名为 value-parameterized `ProcessCredentialBoundary`，不再从唯一
-`PULSARA_API_KEY` 环境变量读取全局 secret，也不演化成 credential store。
+Web mutation request中的 key只在 same-origin/loopback request body、React非持久输入与该次调用的
+内存值中短暂存在。Mutation response、bootstrap、session snapshot、diagnostics与日志只返回
+configured bool；browser `localStorage`、URL、PostgreSQL与 canonical transcript均不得包含 key。
+现有 `ProcessCredentialBoundary` 若用于构造单次 provider client，只接受本 operation已读取的 value，
+不是 durable store，也不从 `PULSARA_API_KEY` 回读全局 secret。
 
 #### 9.2.1 PostgreSQL 配置与无数据库 bootstrap
 
@@ -1354,7 +1343,7 @@ CLI `pulsara db migrate`，不得在普通 Host启动、schema verify或 user tu
 允许直接检查的本机 DSN，不创建 DSN fingerprint、credential row、database identity cache或
 PostgreSQL settings table。
 
-`LocalWebApplication.start()` 必须先发布 static UI、local-settings/credential endpoints 与设置页，
+`LocalWebApplication.start()` 必须先发布 static UI、closed local-settings endpoints 与设置页，
 再尝试构造 database-backed `KernelHostCore`。不能像当前代码一样在 HTTP listener发布前调用
 `sessions.prepare()` 并让 PostgreSQL失败杀死整个 Web app。数据面状态是普通 process-local
 observation：
@@ -1391,7 +1380,7 @@ OpenRouter · openai/gpt-5.6-luna
 Responses · 400,000 上下文 · API key 已保存
 ```
 
-“添加配置”只要求四项：
+“Models.dev 目录”入口只要求四项：
 
 1. Provider/route；
 2. Model ID；
@@ -1402,8 +1391,17 @@ Provider/model selectors 只消费 kernel 的 `SelectableModelCatalog`：只显�
 `limit.context >= 256000` 且 model ID leaf 不以 `claude`/`gemini` 开头的条目；provider 过滤后
 没有模型则不显示。前端不得再次实现 threshold、leaf 解析或 family/provider heuristics。
 
-Base URL不是第五个必填项，按 §6.1 的 exact precedence解析并在确认摘要显示；首轮不存在
-隐藏的 arbitrary custom endpoint入口。
+Base URL不是目录入口的第五个必填项，按 §6.1 的 exact precedence解析并在确认摘要显示。
+
+相邻的“自定义服务”入口要求：配置名称、Base URL、Model ID、Chat/Responses、认证方式、
+context window、最大输出、tool calling，以及 reasoning control。认证方式只有 Bearer API key与
+无需认证；选择后者时 local-settings record的 `api_key` 必须为 `null`，且 SDK不得从环境变量补取
+key。Reasoning只允许
+`provider default`、Chat通用 `toggle` 或用户给出的 exact effort列表；unknown应选 provider default，
+不在线试探。所有字段都是 user/operator asserted facts，不冒充 catalog evidence。
+
+自定义入口同样执行 256,000 context最低门槛。它不允许 arbitrary request JSON、header模板、
+provider/model条件分支或 adapter代码；用户选错 Chat/Responses时保留具体协议错误，不自动换 API。
 
 若 selected model 有 `provider.shape=responses|completions`，对应 API 标为“models.dev 建议”；
 用户选另一项时只显示 non-blocking warning，仍可确认保存。`provider.shape` 缺失时不显示推荐
@@ -1415,9 +1413,16 @@ Base URL不是第五个必填项，按 §6.1 的 exact precedence解析并在确
 > Pulsara 当前只支持与 OpenAI Chat Completions 或 Responses 兼容的接口。模型出现在目录中
 > 不代表所选提供方一定支持你选择的 API 协议；若调用失败，请返回这里更换配置。
 
-保存动作只做 local schema/contract validation 与 credential write，不为了“验证”而偷偷发送
-一个模型请求，也不把 HTTP 200 当作协议兼容证明。保存成功后新卡片立即加入同一个 read
-model；reasoning control 不出现在设置页。
+保存动作只做 local schema/contract validation 与一次 local-settings document write，不为了“验证”而偷偷发送
+模型请求，也不把 HTTP 200 当作长期协议兼容证明。显式“测试连接”是独立动作：它通过用户所选
+通用 adapter发送一次有 45 秒物理边界、64 output-token上限且不自动 retry的极短请求；临时 key只
+存在于该请求进程内，不发布 local-settings record。测试失败不阻止随后保存，保存也不要求先
+测试。保存成功后新卡片立即加入同一个 read model；目录连接的 reasoning control不在设置页编辑，
+自定义连接仅声明 target control domain，仍不保存会话默认。
+
+每张已保存模型卡片提供“删除”。第一次点击只打开行内确认，不显示不可用的 edit/rotate；确认后
+调用 exact、幂等删除。成功文案明确说明配置与其中的 key均已移除、已有会话不会自动改用其他
+模型。设置页立即采用返回的 non-secret列表；全局 refresh失败不能把已成功删除误报为“未删除”。
 
 同一“模型”分区在模型配置卡片下显示一个固定的“记忆检索 · 阿里云百炼 DashScope”组：
 
@@ -1427,7 +1432,7 @@ Reranker  · qwen3-rerank                    [未配置 / 已配置] [填写或�
 ```
 
 这里只填写/替换/清除两枚 key，不显示 provider、endpoint、model 或高级参数 selector。文案明确
-说明这是可选的记忆相关性增强；未配置不会阻止对话。Frontend永远只收到 typed credential state，不把
+说明这是可选的记忆相关性增强；未配置不会阻止对话。Frontend永远只收到 configured bool，不把
 input value回填为 masked secret，也不把 key放入 React持久状态、URL或 browser storage。
 
 “本地服务”分区增加 PostgreSQL card，显示 data-plane状态、runtime DSN、optional admin DSN与
@@ -1441,6 +1446,7 @@ GET  /api/model-catalog
 POST /api/model-catalog/refresh
 GET  /api/model-configurations
 POST /api/model-configurations
+DELETE /api/model-configurations/{connection_id}
 GET  /api/local-settings
 PUT  /api/local-settings/postgres
 POST /api/local-settings/postgres/check
@@ -1457,7 +1463,7 @@ binding mutation一次提交完整 `ModelCallBinding`，改变 connection或 rea
 browser connection resource。Catalog refresh只尝试构造并发布 §10.2 的 process-local immutable
 snapshot；它不写 settings/数据库，也不热改 active target。
 
-应用可以在零模型配置、零 DashScope credential、未配置/不可连接 PostgreSQL且没有任何旧
+应用可以在零模型配置、零 DashScope key、未配置/不可连接 PostgreSQL且没有任何旧
 product-config env时启动并打开设置。数据库 ready但未选择模型时，会话页显示“请先添加并选择
 模型配置”，发送按钮不可执行，并提供直达设置页的入口；启动本身不能再因任一旧 `.env` 字段
 缺失而失败。
@@ -1555,8 +1561,8 @@ admission取得哪一个 binding；mutation/admission response返回 resulting n
 供 UI 渲染 canonical choice。
 
 Host在打开 canonical PostgreSQL transaction前取得本次 frozen process-local config/catalog
-snapshots；事务内禁止读取 `${PULSARA_HOME}`、访问网络/OS credential vault或取得 credential
-borrow。Queue binding已知，因而可在事务外完成 non-secret pure resolution；direct admission必须先
+snapshots；事务内禁止读取 `${PULSARA_HOME}`、访问网络或取得 API key value。Queue binding已知，
+因而可在事务外完成 non-secret pure resolution；direct admission必须先
 在锁内读取 canonical session binding，再只针对上述已冻结内存值做 pure validation。队列消费采用：
 
 1. 在事务外 decode queue payload的 non-secret binding，并从冻结 snapshots
@@ -1572,14 +1578,14 @@ borrow。Queue binding已知，因而可在事务外完成 non-secret pure resol
    identity与 frozen binding；
 4. 将相同 binding写入新 turn，消费 queue item、接受用户 entry并创建
    turn；
-5. commit后到该 turn第一次 provider open才以 binding中的 frozen connection ID取得唯一短期 credential borrow；
-   metadata/target不再重读。Vault backend/key此时缺失按现有 model-call failure路径终止已接纳 turn，
-   不把它倒退成 queue rejection，也不作第二次 borrow。
+5. commit后到该 turn第一次 provider open才执行一次 local-settings read，并按 binding的 frozen
+   connection ID取得 API key value；resolved metadata/target不随这次 read重算。配置/key缺失按现有
+   model-call failure路径终止已接纳 turn，不把它倒退成 queue rejection，也不作第二次读取。
 
 Direct ROOT admission使用同一分界：事务前冻结 config/catalog snapshots，事务内锁 session、取得
-canonical binding、对冻结内存值pure resolve并完成 turn/entry写入，commit后 provider open只
-borrow一次 credential。这样 filesystem/network/vault延迟不会
-占用 session/queue数据库锁，borrow、prepared plan与 transport handle仍各自只有一个 linear owner。
+canonical binding、对冻结内存值pure resolve并完成 turn/entry写入，commit后 provider open才读
+一次当前 local-settings并取得 key。这样 filesystem/network延迟不会占用 session/queue数据库锁，
+key value、prepared plan与 transport handle仍各自只有一个 operation owner。
 
 `sessions.model_call_binding` 只表示下一条尚未 admission的新输入的当前选择，不是历史 turn
 authority；历史执行以 queue/turn binding与 resolved model-call fact为准。
@@ -1591,7 +1597,7 @@ value。无需新增 preference-changed event：当前控制窗口直接采用 m
 ### 9.7 Kernel wiring、config-check 与 env hard cut
 
 `LLMConfig.pro/flash` 不收敛成一个新的全局 `LLMConfig.model`；它们整体由用户级
-`LocalSettingsStore`、typed credential-store ports 与 per-session binding 取代。`ModelRole` 整个
+`LocalSettingsStore` 与 per-session binding 取代。`ModelRole` 整个
 类型删除，而不是留下只有 `PRO` 的单值 enum。所有依赖 role 的 API 参数、fact 字段、CLI
 option 与分支一并删除。
 
@@ -1600,7 +1606,7 @@ session/turn 已冻结的同一 `ModelConnectionId` 和 `ResolvedModelTarget`。
 purpose 类型表达；purpose、output cap 与 deadline 不拥有 model routing authority，也不能
 借 auxiliary 名义解析另一配置。没有 session/turn origin 的设置/catalog 操作不打开模型。
 
-Production product configuration 的唯一入口是上述本机设置/vault边界。删除：
+Production product configuration 的唯一入口是上述单一本机设置文件。删除：
 
 ```text
 PULSARA_API_KEY
@@ -1650,18 +1656,22 @@ reasoning/model fallback。
 
 `pulsara app` / local Web server 在零配置时也必须启动。`pulsara db status|migrate|verify` 默认读取
 同一 saved PostgreSQL config；migrate缺少 admin DSN时才返回 typed可操作错误，不回落环境变量。
-`config-check` 读取同一 local settings、typed credential state与一次 catalog snapshot，分别报告
-PostgreSQL配置/连通/schema状态、两枚 DashScope credential state，以及每条 model connection
-的 credential、catalog、adapter、endpoint与§4.7 budget状态。零配置返回可操作的 setup状态，但
+`config-check` 读取同一 local settings与一次 catalog snapshot，分别报告
+PostgreSQL配置/连通/schema状态、两枚 DashScope configured bool，以及每条 model connection
+的 key-configured、catalog、adapter、endpoint与§4.7 budget状态。零配置返回可操作的 setup状态，但
 不能阻止用户启动 app进入设置页。Config-check不发送模型/retrieval请求，不输出 key。
 
-### 9.8 首轮不引入第二条 custom target 来源
+### 9.8 显式 user-declared target 来源
 
-本文产品流程只接受 models.dev catalog-backed target。既然设置页不提供 custom route，就不在
-kernel里预先实现一条无人使用的 `完整 custom contract + 另一套 validator` 后门。私有 endpoint、
-self-hosted deployment或 models.dev缺失的 model若成为真实产品需求，必须另行定义其来源、hard
-limits、reasoning/tool facts与 UI；不能在本轮借 `arbitrary JSON`、env或 field-path DSL绕过
-catalog-backed单一路径。
+私有 endpoint、self-hosted deployment或 models.dev缺失的模型使用 §9.3 已暴露的 closed
+`UserDeclaredModelTarget`。它与 models.dev 是两个事实来源，而不是第二套执行路径：resolver先把
+两者变成同一 entry-shaped target facts，再 exact join通用 OpenAI-compatible Chat/Responses
+route-wire contract。Models.dev不可用时 user-declared connection仍可解析；catalog connection仍
+必须 exact命中当前 selectable snapshot。
+
+该来源不支持 provider-specific field path、raw JSON、任意 header、model-family猜测、在线能力
+探测或协议 fallback。新增真实 wire形状仍只能进入通用 adapter的 shape-based normalization，不能
+进入某条自定义连接的配置文本。
 
 ---
 
@@ -1746,13 +1756,14 @@ watchdog，不为 Host/turn增加 total wall-clock lifetime cap。
 | 责任 | 所有者 |
 |---|---|
 | provider/model 列表、display name、默认 endpoint hint | models.dev |
-| limits、reasoning options、tool-call 布尔值 | models.dev |
+| 目录 target 的 limits、reasoning options、tool-call 布尔值 | models.dev |
+| 自定义 target 的 display name、endpoint、limits、reasoning/tool facts与认证种类 | 用户显式填写的 closed `UserDeclaredModelTarget` |
 | 256k context 与 Claude/Gemini model-ID leaf 选择过滤 | Pulsara kernel 的单一 `SelectableModelCatalog` predicate |
 | Responses / Completions 非强制建议（存在时） | models.dev `model.provider.shape` |
 | Chat / Responses 的选择 | 用户保存的 `ModelConnectionConfig` |
-| model API key durable value | macOS Keychain；只由 typed model-provider credential port borrow |
-| DashScope embedding/reranker key durable value | 同一 macOS Keychain service中的两个 fixed typed items |
-| endpoint、non-secret connection metadata 与本机 PostgreSQL DSN | `${PULSARA_HOME}/local-settings.yaml` |
+| Bearer model API key durable value | 对应 model connection record的 `api_key`；no-auth为 `null` |
+| DashScope embedding/reranker key durable value | `dashscope_credentials` 中两个独立 nullable字段 |
+| endpoint、connection metadata、全部 API key 与本机 PostgreSQL DSN | `${PULSARA_HOME}/local-settings.yaml` |
 | embedding/reranker provider、model、endpoint与执行参数 | 现有 fixed DashScope code contracts；不是 GUI/provider universe |
 | provider `npm` 到通用 wire dialect 的解析 | models.dev metadata + Pulsara 的小型 dialect classifier |
 | request主干、SSE、terminal、tool correlation、closed observed-field replay | Pulsara 通用 Chat/Responses adapter |
@@ -1763,6 +1774,9 @@ watchdog，不为 Host/turn增加 total wall-clock lifetime cap。
 这个边界意味着 Pulsara 不再调研并手工录入每个 provider/model，也不维护 route allowlist。
 全部 `@ai-sdk/openai-compatible` route 自动复用通用 Chat/Responses transport及其 reasoning
 request/replay逻辑；provider与 model不会成为另一层 wire lowering owner。
+
+User-declared facts不进入 `ModelCatalogSnapshot`，不反向修改 models.dev，也不建立另一份 catalog。
+它们只随对应 connection保存在 local settings，并在 resolver边界物化为同一 target contract。
 
 ### 10.4 Zhipu AI / GLM-5.3 的端到端示例
 
@@ -1827,13 +1841,16 @@ Endpoint        https://open.bigmodel.cn/api/paas/v4  # 自动解析，只读
 
 ### 10.5 Catalog 变化
 
-Saved connection 只保存 exact target IDs 与 endpoint，不保存派生 policy、
+Catalog-backed saved connection只保存 exact target IDs 与 endpoint，不保存派生 policy、
 reasoning 或 catalog row。新 cold Host 读到的 models.dev row 若已删除、`limit.context` 已降到
 256,000 以下，或现在命中 Claude/Gemini leaf filter，该 connection 标为不可选择并要求用户
 新增另一配置；不自动换 model/route/API。会话 binding中的 reasoning若仍属于 exact target
 就继续使用；若 target 或 choice 已失效，按 §5.4 重新计算默认并给出 UI 提示，不做 projection
 或 alias。Active turn/installed epoch 已冻结的 connection、target 与 selection 不受 catalog
 refresh 影响。
+
+User-declared saved connection保存其 closed target facts，不依赖 catalog refresh；其会话 selection
+仍按相同 validation/reconciliation算法处理。修改事实不原地更新 connection，而是新增另一配置。
 
 ---
 
@@ -1898,7 +1915,7 @@ connection/target 继续使用。会话在 §9.4 修改下一条输入的 connec
 - messages 只追加 suffix；
 - reasoning control 不注入 dynamic pre-prefix content；
 - 后续 catalog refresh 不热替换 route/wire/model contract；
-- credential borrow、配置列表变化或另一个 session 的选择不改当前 epoch。
+- API key value、配置列表变化或另一个 session 的选择不改当前 epoch。
 
 Existing provider-input compatibility join 增加 frozen `ModelConnectionId` 的 exact equality；不把
 它哈希进另一个 fingerprint。同 target但不同 connection仍不兼容，必须走 new cold epoch。
@@ -1928,14 +1945,14 @@ materializer，而不能继续伪装成 output control。
 ### 12.4 Linear owner
 
 Universe resolution 与 settings read model 都是 pure value construction，不取得 provider
-execution authority。Credential store 只在 turn/admission transaction已 commit、dispatch已冻结
-`ModelConnectionId` 且真正进入 provider open时签发一份短期 linear borrow；任何 canonical
-PostgreSQL transaction内都不得访问 vault。现有 prepared plan/open-once/transport handle 仍是
-唯一 execution owner：
+execution authority。只有在 turn/admission transaction已 commit、dispatch已冻结
+`ModelConnectionId` 且真正进入 provider open时，adapter才从 local settings读取一次 API key；
+任何 canonical PostgreSQL transaction内都不得读取 settings文件。现有 prepared
+plan/open-once/transport handle 仍是唯一 execution owner：
 
 - resolver不 materialize provider input；
-- 同一 logical provider call只取得一份 credential borrow，其全部 byte-equivalent transparent
-  physical retries复用该值；call结算/close/cancel后不可复用，单个 retry attempt不得重新 borrow；
+- 同一 logical provider call只取得一份 API key value，其全部 byte-equivalent transparent
+  physical retries复用该值；call结算/close/cancel后不可复用，单个 retry attempt不得重新读取；
 - adapter内不重新 resolve target；
 - retry只重放同一个 prepared physical request；
 - 不因 route fallback创建 alias plan；
@@ -1961,10 +1978,10 @@ tests/test_llm_model_target.py
   `ModelTargetContract`；
 - §4.2 的 exact 256k + model-ID leaf filter，以及过滤后空 provider 删除；
 - 完整保留组合 reasoning options、provider `npm` dialect与 optional `provider.shape` hint；
-- exact catalog lookup、generic dialect adapter join与 validation；
+- exact catalog lookup、closed user-declared facts、generic dialect adapter join与同一 validation；
 - top-level fetch/JSON结构失败使 snapshot unavailable；row/option局部异常按 §4.6 诊断并降级；
   invalid hard limits只拒绝该 row；
-- 不实现未暴露的 custom target第二来源。
+- user-declared target不进入 catalog、不在线探测，也不携带 arbitrary wire配置。
 
 不得新增 production `model_targets.v*.json`、per-model Python constants 或后台 refresh worker。
 
@@ -1984,49 +2001,47 @@ tests/test_llm_model_target.py
 文件名是否继续叫 `provider.py` 不影响语义；类型名与 public contract 不得继续使用
 `ModelCapability*`。
 
-### 13.3 Local settings、model connection 与 credential store
+### 13.3 Local settings、model connection 与 API key
 
 ```text
 src/pulsara_agent/settings.py
 src/pulsara_agent/llm/model_connections.py
-src/pulsara_agent/local_credentials.py
 src/pulsara_agent/retrieval/config.py
-src/pulsara_agent/process_credential_boundary.py（取代并删除旧 process_api_key_boundary.py）
 pyproject.toml
 uv.lock
 tests/test_settings.py
 tests/test_llm_model_connections.py
-tests/test_local_credentials.py
 tests/test_retrieval_credentials.py
 ```
 
 - hard-cut `settings.py` 的 eager `PulsaraSettings` / `.env` parser / monolithic env config，实施
-  `${PULSARA_HOME}/local-settings.yaml` closed codec、no-follow、0600 与 atomic replace；
-- 同一 local-settings document只实现 PostgreSQL config与 add/list/read exact
-  `ModelConnectionConfig`，由一个 process-local mutation owner串行化 read-modify-write；不保存 catalog
-  row、reasoning或 arbitrary settings，不增加跨进程 lock/revision；
-- production model/retrieval credential ports共用 `local_credentials.py` 中唯一的 macOS Keychain
-  adapter与 closed typed account mapping；增加 `keyring` dependency并拒绝非 macOS fallback backend；
-  test fake只通过显式 port注入；
+  `${PULSARA_HOME}/local-settings.yaml` v2 closed codec、no-follow、0700/0600 与 atomic replace；
+- 同一 local-settings document实现 PostgreSQL config、model connection metadata + nullable key、
+  DashScope两枚 nullable key，以及 add/list/read/delete/replace/clear exact operations；由一个
+  process-local mutation owner串行化 read-modify-write；catalog连接不保存 catalog row，自定义连接
+  只保存 closed user-declared target facts；两者都不保存会话 reasoning默认或 arbitrary settings，
+  不增加跨进程 lock/revision；
+- hard-cut 删除 `local_credentials.py`、`keyring` dependency、Keychain backend/fake与全部双存储结算；
+  不读取或迁移旧 Keychain item；
 - retrieval config删除 provider/model/base URL/tuning/feature-toggle env owner，只保留现有 fixed
-  DashScope contracts与外部注入的短期 credential borrow；
-- Web/API/read model 从不返回 secret，只返回 `CredentialState`；Keychain denied/unavailable与 missing
-  不得合并；
-- `ProcessCredentialBoundary` 由 caller提供 exact borrowed secret，不再观察唯一环境变量，也不
-  成为 store；删除旧类名、module alias与 `PULSARA_API_KEY_ENVIRONMENT_NAME` owner；
-- add metadata在 replace前明确失败才删除当次 secret；replace commit-unknown先按 generated ID精确
-  reread，无法确认时保留可能 orphan并返回 typed indeterminate；不增加 durable recovery machinery。
+  DashScope contracts，并由每次 logical operation从local settings读取一次对应key；
+- Web/API/read model从不返回 secret，只返回 configured bool；
+- `ProcessCredentialBoundary` 若被 provider SDK/client边界复用，只接收该 logical operation已从
+  settings读取的 exact value，不观察 product环境变量，也不成为 store；
+- add/delete/replace都是单个完整 document mutation；commit-unknown exact reread完整目标值，
+  不增加 durable recovery machinery。
 
 ### 13.4 `llm/models.py`、`llm/config.py`
 
 - `ModelProfile` 不再从 provider profile复制 support bool；
 - 删除 `ModelRole`、`ModelProfile.role`、`LLMConfig.pro/flash`、`pro_model/flash_model` aliases、
   `model_for(role)` 与 `slot_for(role)`；
-- 不新增全局 `LLMConfig.model`；model target/endpoint/credential 来自 per-session selected
-  `ModelConnectionConfig`；
+- 不新增全局 `LLMConfig.model`；model target/endpoint来自per-session selected
+  `ModelConnectionConfig`，API key由adapter open时按其connection ID读取；
 - hard limits从 frozen models.dev entry取得；
-- connection config只保留 ID/target/endpoint；output/safety policy按 §4.7 确定性派生；
-- `config-check` 逐条完成 local settings/credential/catalog validation，但零配置不阻止 app启动；
+- connection config保留 ID/target/endpoint与 nullable user-declared facts；output/safety policy按
+  §4.7 确定性派生；
+- `config-check` 逐条完成 local settings/key-configured/catalog validation，但零配置不阻止 app启动；
 - hard-cut 删除旧 thinking/support env路径、global model/API key env、全部 PRO/FLASH、retrieval、
   PostgreSQL product-config env与 display-only compatibility alias。
 - `src/pulsara_agent/llm/retry.py` 删除 `retry_config_from_env()`；
@@ -2135,8 +2150,8 @@ src/pulsara_agent/web_app/http_server.py
   binding fingerprint；
 - Host先在 transaction外取得 frozen process-local config/catalog snapshots；queue item可在事务外
   pure resolve，direct admission则在锁内取得 canonical binding后只对这些已冻结内存值做 pure
-  validation，不在 transaction内读 filesystem/network/vault；queue -> turn在唯一 transaction中
-  复制同一 ID/value；credential只在 commit后的 provider open borrow；subagent/continuation exact继承；
+  validation，不在 transaction内读 filesystem/network/settings；queue -> turn在唯一 transaction中
+  复制同一 ID/value；API key只在 commit后的 provider open读取一次；subagent/continuation exact继承；
 - connection switch在下一次 dispatch走 new cold epoch，不 same-epoch rebase；
 - 不增加 preference/connection event、job、checkpoint、revision table 或 PostgreSQL settings表。
 
@@ -2158,12 +2173,14 @@ frontend/app/styles/settings.css
 frontend/app/styles/workbench.css（或当前 composer 所在样式文件）
 ```
 
-前端只消费 local Web/kernel投影，不直接二次 parse models.dev JSON。Settings显示配置 cards与
-四字段添加流程，不保存 reasoning、不保留 API key；DashScope secret fields只能 replace/clear且
+前端只消费 local Web/kernel投影，不直接二次 parse models.dev JSON。Settings显示配置 cards、
+目录四字段入口与 closed自定义入口；不保存会话 reasoning默认，不在 React持久状态、browser
+storage或 response中保留 API key；DashScope secret fields只能 replace/clear且
 永不回填；PostgreSQL card在 database-not-ready时仍可操作。对话输入框提供 saved-connection
 selector与唯一 reasoning selector，selector mutation先更新 session canonical binding，NEW_TURN
-admission再冻结该值。增加 §9.3 的 closed local-settings/catalog/list/add/session endpoints；所有
-credential response均只返回 typed state，所有 data-plane unavailable状态均使用 typed read model。
+admission再冻结该值。增加 §9.3 的 closed local-settings/catalog/list/add/delete/session endpoints；
+所有 key相关 response均只返回 configured bool，所有 data-plane unavailable
+状态均使用 typed read model。显式测试与保存使用同一个 closed request shape，但测试不发布任何配置。
 
 ### 13.10 Existing regressions
 
@@ -2185,9 +2202,9 @@ README.zh-CN.md
 
 ## 14. 实施顺序
 
-1. 先写 `.env` loader/全部 production env owner删除、closed local-settings mutation owner、credential
-   port fake、macOS Keychain backend contract、DashScope两枚 key、zero-database Web bootstrap与
-   PostgreSQL GUI flow的 failing tests。
+1. 先写 `.env` loader/全部 production env owner删除、single-document local-settings mutation owner、
+   model/DashScope key fields、exact model deletion、zero-database Web bootstrap与 PostgreSQL GUI flow
+   的 failing tests。
 2. 写 models.dev recorded fixture parser、256k/Claude/Gemini filter、exact selection、
    shape-warning、model-connection store、request golden与 binding-freeze concurrency tests。
 3. 新增 direct catalog client、`ModelCatalogSnapshot`、`SelectableModelCatalog` 与 closed
@@ -2195,9 +2212,9 @@ README.zh-CN.md
 4. 用至少两个“同 model、不同 route、不同 choices”的 fixture证明 identity；另覆盖
    shape present/absent。
 5. 实现 `route + user-selected wire API + model` exact resolver，不建 per-model local table。
-6. 实现统一 local-settings document及 process-local mutation owner、单一 macOS Keychain
-   model/retrieval credential port与 secret borrow boundary；embedding/reranker继续使用 fixed
-   DashScope contracts。
+6. 实现统一 local-settings v2 document及 process-local mutation owner；model key与两枚 retrieval
+   key随同一 closed document原子保存，embedding/reranker继续使用 fixed DashScope contracts；删除
+   Keychain模块、依赖与双存储 settlement。
 7. hard-cut config/models/resolution/facts，删除 PRO/FLASH、global env target、role参数/fact、
    bool/raw/omit-default旧路径。
 8. hard-cut CLI、Host/Web wiring与 bootstrap：先启设置壳，再可选发布 PostgreSQL-backed data plane；
@@ -2206,8 +2223,9 @@ README.zh-CN.md
 10. 用 generic tracker取代 Chat dense/origin index accumulator。
 11. hard-cut baseline、session binding API、prompt command/queue/turn freeze 与 exact
     confirmation；reset 已核验的本地 disposable PostgreSQL。
-12. 接入 local-settings/catalog read model、设置页 model cards/add flow、DashScope credential rows、
-    PostgreSQL card，以及 composer model/reasoning selector。
+12. 接入 local-settings/catalog read model、设置页 model cards/add/delete flow、DashScope key rows、
+    PostgreSQL card，以及 composer model/reasoning selector；删除后的 stale session保持原 ID并要求
+    用户显式重选。
 13. 实现 catalog unavailable、filter reason、wire shape mismatch warning、database-not-ready与
     “修改连接配置”错误入口。
 14. 跑 terminal/retry/replay/prefix/final-wire focused regressions。
@@ -2217,8 +2235,8 @@ README.zh-CN.md
 17. 对通用 Chat/Responses dialect选取有可用 credential的代表 target运行 real-provider dogfood；
     无凭据的代表 route精确报告环境阻塞。
 
-不得保留旧的 local model table等待以后切换。Production首轮只有 models.dev-backed这一条
-target source与一条 resolved path。
+不得保留旧的 local model table等待以后切换。Production有 models.dev与显式 user-declared两种
+target fact source，但只有一条 resolved target / generic adapter执行路径。
 
 ---
 
@@ -2252,7 +2270,10 @@ target source与一条 resolved path。
   diagnostic，不自动无 tools重试；无 tools call不受影响；
 - `model.provider.api` 正确覆盖 provider-level endpoint 预填值；
 - `provider.shape=responses|completions` 正确投影为 hint，缺失为 neutral；
-- 不存在 custom/env target绕过 catalog-backed validator；
+- user-declared target要求 context/output/tool/reasoning/auth的 closed完整形状，context `255999`
+  被拒绝、`256000` exact接受；它不进入 catalog，也不允许 env/raw JSON/header绕过；
+- user-declared target在 catalog owner无 snapshot时仍可解析，并与 catalog target复用同一
+  `ModelTargetContract`、budget derivation及 Chat/Responses adapter；
 - catalog fetch不携带 API key/prompt/workspace数据；
 - snapshot取得后 request lookup不读网络、不写数据库、不产生 event/job；
 - fetch/top-level JSON结构失败产生 typed `model_catalog_unavailable/invalid`，不回落本地旧表；
@@ -2272,8 +2293,7 @@ target source与一条 resolved path。
 - provider真实 `minimal/auto/adaptive` 作为 catalog raw value 保留，不建全局 rank；
 - provider真实 `null/none` 按 models.dev contract 显示为 disabled；
 - `toggle + effort`、`toggle + budget`、`effort + budget` 与三者组合均完整保留；
-- effort与budget作为替代 family一次只能选择一个；有 toggle时任一 graded selection均同时
-  exact启用 toggle，不能发送 effort+budget或漏掉 required enable；
+- 三种 family作为替代 selection一次只能选择一个；不得把 toggle、effort与budget拼成一个请求；
 - effort含 `null/none` 又声明 toggle时保留两个 exact关闭入口；选择任一只发送该 selection定义的
   wire control，不使 target不可执行；
 - explicit choice必须 exact membership；
@@ -2289,8 +2309,10 @@ target source与一条 resolved path。
   limit推导，仍可使用同 row的 effort/toggle，只有开放 budget时用 provider-default；
 - target切换清除不适用 choice并计算新 target自己的上中位默认，不迁移同名值；
 - 同 target preference仍合法时不因 catalog顺序变化而重算；
-- catalog parser保留toggle/budget事实；当前通用Chat/Responses adapter不发明其wire shape，因而
-  不把未实现的control加入可执行菜单；
+- catalog parser保留toggle/budget事实；当前通用Chat adapter明确支持 toggle并通过 SDK
+  `extra_body` lower为最终 HTTP root `reasoning={"enabled":false|true}`，Responses与两种通用
+  adapter尚未实现的budget不进入可执行
+  菜单；
 - fixed-on exact omission；
 - unavailable正常执行且不发送 selector；
 - provider-default正常执行、不发送 selector且不宣称实际 reasoning state；
@@ -2320,9 +2342,9 @@ target source与一条 resolved path。
 - generic defaults/extra body不能覆盖 reasoning-owned key；
 - output cap、store、stream、usage与 existing request fields不漂移；
 - reasoning control不出现在 context-bearing final-wire projection；
-- canonical数据库 transaction内不访问 credential store；prepared call只在 commit后的 provider
-  open从其 frozen connection ID borrow一次 credential，不回读 session current value；同一 logical
-  call的全部 transparent physical retries复用该 borrow，测试断言 Keychain/fake read次数为 1；
+- canonical数据库 transaction内不读 local-settings文件；prepared call只在 commit后的 provider
+  open按 frozen connection ID读取一次 key，不回读 session current value；同一 logical call的全部
+  transparent physical retries复用该值，测试断言 settings read次数为 1；
 - core与 compaction中不存在 route/model名称分支。
 
 ### 15.4 Tool-call correlation
@@ -2354,6 +2376,8 @@ target source与一条 resolved path。
 - incomplete/unknown terminal不 retry；
 - Chat actual reasoning fields仍 exact replay；
 - Responses ordered reasoning/message/function_call仍 exact replay；
+- Responses 多段 reasoning summary逐个 exact join其 `summary_index`，并在live与terminal replay
+  projection中保留独立展示块和公开顺序；
 - reasoning choice改变不翻译历史 carrier；
 - wire API/model/endpoint/adapter contract/replay contract变化仍走 cold semantic continuation。
 
@@ -2378,17 +2402,20 @@ target source与一条 resolved path。
 ### 15.7 UI / config-check
 
 - 设置页显示零到多张 saved model-connection cards与“添加配置”，不存在单行全局“当前模型”；
-- 添加流程只要求 provider、model ID、API key、Chat/Responses；endpoint按 exact precedence自动
-  解析并在确认页展示；
+- 目录添加流程只要求 provider、model ID、API key、Chat/Responses；endpoint按 exact precedence
+  自动解析并在确认页展示；自定义入口完整显示配置名称、Base URL、Model ID、API、认证、context、
+  output、tool calling与 reasoning control；
 - route selector只投影仍有 selectable model 的 direct/gateway entries；model列表只来自
   selected provider 的 filtered entries；
 - context/Claude/Gemini filter的 UI fixture与 kernel projection exact一致；
 - Chat/Responses 始终是用户选择，不被 catalog 强制；
 - shape match 显示推荐，shape mismatch 只 warning 仍可保存，shape absent 不警告；
 - 所有确认页均显示“只支持 OpenAI Chat Completions / Responses compatible endpoint”说明；
-- 保存配置不打开 provider；保存成功后 key input清空且 read model只显示
-  `credential_state=PRESENT`；Keychain item缺失、访问拒绝与 backend不可用分别显示
-  `MISSING/DENIED/UNAVAILABLE`，都不返回 secret；
+- 保存配置不打开 provider；独立测试发送一次有界极短请求，失败不禁止保存且不发布配置；保存
+  成功后 key input清空，Bearer read model只显示 `credential_configured=true`，no-auth为 false且
+  单独显示“无需认证”；任何 read response都不返回 secret；
+- 模型卡片删除需行内确认；DELETE按 exact ID幂等，同一次 document replace移除 metadata + key，
+  保留其他模型、PostgreSQL与DashScope字段；引用该 ID的会话不自动改绑，composer显示重新选择引导；
 - reasoning列表与 exact contract一致；
 - effort/budget同时存在时单个推理菜单分组展示两种替代 control，三种合法组合及默认优先级均
   与 kernel read model一致；开放 budget不出现伪数值输入；局部未知/非法 option只显示非阻塞
@@ -2417,26 +2444,27 @@ target source与一条 resolved path。
 - secret不进入 diagnostics、universe或 client projection；
 - legacy supports/thinking/raw effort字段不存在。
 
-### 15.8 Local settings、credential 与 Session / queue / turn storage
+### 15.8 Local settings、API key 与 Session / queue / turn storage
 
-- `local-settings.yaml` 的 nullable PostgreSQL config、ordered connection metadata、stable random
-  ID、closed codec、no-follow、0700/0600 与 atomic replace均通过；文件不含 reasoning、key、
+- `local-settings.yaml` v2的 nullable PostgreSQL config、ordered catalog/user-declared connection + key、
+  两枚DashScope key、stable random ID、closed codec、no-follow、0700/0600与atomic replace均通过；文件
+  可含自定义 target声明的 reasoning control domain，但不含会话 reasoning preference/default、
   fingerprint、revision或 catalog副本；
-- model、DashScope embedding与 DashScope rerank API key只进入 credential-store fake/production
-  port；metadata文件、PostgreSQL、Web response、log与 diagnostics逐字扫描均不含 exact secret；
-- production adapter只接受 macOS Keychain backend；fixed service/account mapping exact，missing、
-  denied、unavailable、replace、delete与 idempotent delete outcomes逐项覆盖；fake只由测试显式注入；
-- secure backend不可用/拒绝 typed失败且无 plaintext fallback；metadata在 replace前失败会清理当次
-  secret；replace后/commit-unknown按 generated ID精确 reread，metadata存在则保留并视为已发布，
-  确认不存在才清理，无法确认则保留可能 orphan并返回 indeterminate；
-- 同一 `LocalSettingsStore` mutation owner并发执行 add/add与 add/PostgreSQL-save时不 lost update；
-  cancellation从 vault write成功起必须 join metadata settlement；before-replace、after-replace与
-  parent-directory-fsync failure injection均覆盖，且不增加 revision/receipt/repair job；
+- Bearer model、DashScope embedding与DashScope rerank API key只进入该文件；PostgreSQL、Web response、
+  browser storage、log与 diagnostics逐字扫描均不含 exact secret；no-auth record的 key exact为 null；
+- production不存在 Keychain/keyring/credential-store backend、fake、fallback或迁移；v1与旧Keychain
+  item不读取，用户重新填写；
+- 同一 `LocalSettingsStore` mutation owner并发执行 add/add、add/delete与add/PostgreSQL-save时不
+  lost update；cancellation必须join单次document settlement；before-replace、after-replace与
+  parent-directory-fsync failure injection均覆盖；commit-unknown exact reread完整目标document，且
+  不增加 revision/receipt/repair job；
+- delete exact ID同时移除 record + key并保持siblings/PostgreSQL/DashScope；重复delete幂等；不改
+  session/queue/turn binding，已open operation继续，下一次读取观察缺失；
 - embedding key缺失只禁用 dense channel，rerank key缺失只使用 pre-rerank结果；二者互不借用、
   不阻止 app/turn/主模型；
-- replace/clear不改变已开始 retrieval operation的单次 borrow及其 bounded physical retries，下一
+- replace/clear不改变已开始 retrieval operation已取得的key及其 bounded physical retries，下一
   operation取得新值/缺失状态；
-  provider client不跨 operation持有旧 key，且没有 credential generation/fingerprint/event；
+  provider client不跨 operation持有旧 key，且没有 key generation/fingerprint/event；
 - PostgreSQL未配置、runtime不可达、schema需动作三种状态都不阻止设置 HTTP/UI；admin DSN缺失只
   阻止显式 migrate，普通 runtime verify不使用 admin DSN；
 - local-settings损坏时 app仍发布可修复的设置壳；保存新 DSN不热换正在运行的 repository，且不
@@ -2459,8 +2487,8 @@ target source与一条 resolved path。
 - binding中的 connection ID不伪造到 filesystem config的数据库 FK；metadata缺失、hard limits
   permanent invalid或整个 route/wire adapter缺失使 pending queue复用现有 `REJECTED` settlement且
   不创建 turn；局部 catalog option diagnostic不拒绝；暂时没有 catalog
-  snapshot保持 `PENDING`；vault/key缺失只在 commit后 provider open终止已接纳 turn；各路径均不
-  double-borrow；
+  snapshot保持 `PENDING`；配置/key缺失只在 commit后 provider open终止已接纳 turn；各路径均不
+  重复读取key；
 - reasoning preference change不产生 transcript entry或新 prefix root；connection switch只走
   approved new cold epoch；两者都不新增 agent event/job/checkpoint；
 - clean-v0 schema与 expected catalog更新，event/subject/guard/relation/job oracle计数不增加。
@@ -2482,8 +2510,8 @@ target source与一条 resolved path。
 - auxiliary 局部 output cap不修改 base model config，也不创建第二个 model slot；
 - auxiliary purpose/deadline/input/output bounds仍各自生效；
 - bootstrap只返回 non-secret connection collection；设置页不存在“主要模型/轻量模型”；
-- tests/support builders注入 connection/credential stores，不用相同值伪造双 slot；
-- process credential boundary取得 caller-borrowed exact secret，不回读 global environment；
+- tests/support builders注入包含connection/key的 `LocalSettingsStore`，不用相同值伪造双 slot；
+- process credential boundary取得caller为本operation读取的exact secret，不回读global environment；
 - production 与 active docs 中不存在 `ModelRole.FLASH`、`PULSARA_FLASH_*`、
   `flash_model` 或 display-only compatibility alias。
 
@@ -2495,7 +2523,7 @@ target source与一条 resolved path。
 
 ```bash
 uv run pytest -q tests/test_llm_model_catalog.py tests/test_llm_model_target.py
-uv run pytest -q tests/test_llm_model_connections.py tests/test_local_credentials.py tests/test_retrieval_credentials.py
+uv run pytest -q tests/test_llm_model_connections.py tests/test_retrieval_credentials.py
 uv run pytest -q tests/test_settings.py
 uv run pytest -q tests/test_local_web_http_surface.py -k 'settings or database or zero_config'
 uv run pytest -q tests/test_round5a1_provider_output_termination.py
@@ -2532,14 +2560,13 @@ Real-provider dogfood 至少覆盖：
    证明配置不会串线；缺少第二凭据时精确报告环境阻塞；
 10. 从无 product config启动 local Web，实机打开设置页，保存并检查已核验的本机 disposable
     PostgreSQL；证明 HTTP/settings shell在数据库配置前可用，data plane验证后可进入 ready；
-11. 若两枚 DashScope credential可用，通过 GUI write-only endpoints配置后各执行一次真实 embedding/
+11. 若两枚 DashScope key可用，通过 GUI write-only endpoints配置后各执行一次真实 embedding/
     rerank并验证缺少任一枚时的独立退化；不可用时精确报告环境阻塞；
-12. 测试 harness即使从 process environment取得 dogfood secret，也只注入 in-memory typed
-    credential-store port，全程不输出或持久化其值；这不是 production env config路径。
-13. 在当前 macOS Keychain backend可用时，用一个不进入 local-settings的随机临时
-    `ModelConnectionId`完成 put → state/borrow → replace → delete → missing smoke，并在 finally删除
-    exact item；sentinel value不输出。若 Keychain被拒绝或不可用，精确报告 `DENIED/UNAVAILABLE`
-    环境阻塞，不伪称通过，也不回落文件。
+12. Real-provider dogfood通过临时 `PULSARA_HOME`或用户明确配置的GUI路径写入v2 local settings；
+    不输出key，结束后删除临时目录。不得恢复production env读取、in-memory credential-store fake或
+    Keychain旁路。
+13. 对临时 local settings完成 model add → configured read model → provider open → delete → missing
+    smoke；response/log不含sentinel，文件权限保持0700/0600，finally删除临时目录。
 
 每个 production wire dialect必须有 official wire evidence、request golden与 recorded stream
 fixture/normalized contract。Live dogfood覆盖当前可用 credential，并至少尽力覆盖一个
@@ -2586,19 +2613,21 @@ models.dev新增 model不要求 Pulsara为每条 row重跑 conformance；用户�
 28. 前端再次 parse models.dev 并自行实现 256k、Claude/Gemini 或 shape filter；
 29. 用 provider name、family、display name过滤 Claude/Gemini，或只检查完整 raw ID开头而漏掉
     `google/gemini-*` / `anthropic/claude-*`；
-30. 把任一 model/embedding/rerank API key写入 metadata文件、PostgreSQL、localStorage、日志、
-    response，或提供 reveal API；
+30. 把任一 model/embedding/rerank API key写入 `${PULSARA_HOME}/local-settings.yaml` 之外的
+    metadata sidecar、PostgreSQL、localStorage、日志、response，或提供 reveal API；
 31. 将 saved connection列表第一项静默当作所有新会话的全局默认；
 32. running/pending工作存在时热换 connection、取消旧队列或在同一 epoch 改 endpoint/model/API；
 33. 配置 ID 原地改成另一个 target，或让 auxiliary call选择另一配置；
-34. 为实现 model-connection add/list/select 顺手增加未定义语义的 connection edit/delete/rotate UI。
+34. 为实现 model-connection add/list/select/delete 顺手增加未定义语义的 connection edit/rotate UI，
+    或删除时扫描/重绑已有 session、queue、turn；
 35. 把完整 `ModelTargetContract`、reasoning control domain、display metadata或 selection再次 hash进
     target compatibility digest；
 36. 在现有 transport binding之外新增 request/reasoning codec ID registry或 profile fingerprint；
 37. 因一个 catalog row、未知 optional字段或单个 reasoning option异常而拒绝整份 snapshot；
 38. 为 connection + target + selection建立重复数据库列、binding fingerprint或 PostgreSQL profile表；
 39. 仅为了简化竞态而在 running/pending工作期间禁止用户修改下一条输入的模型选择。
-40. 在首轮 UI不暴露的情况下预建 custom target第二来源、field override或 arbitrary wire DSL。
+40. 让 user-declared target携带 field override、arbitrary wire DSL/header模板、adapter代码，或把它
+    实现为第二套 transport/resolution状态机。
 41. 保留 `.env` parser、`--env-file`、production `from_env()` 或 local-settings/env双读迁移期；
 42. 为 PostgreSQL/DashScope设置建立 PostgreSQL表、event、job、receipt、revision、watcher或
     local-settings fingerprint；
@@ -2606,13 +2635,13 @@ models.dev新增 model不要求 Pulsara为每条 row重跑 conformance；用户�
 44. 因 embedding/reranker key缺失或远端失败而阻止 app、主模型、用户 turn或 lexical memory path；
 45. 保存 PostgreSQL DSN时自动 migrate/reset、热换正在运行的 repository，或为此增加
     busy/no-pending gate与 pending-config authority。
-46. 让 generic keyring自动选择 plaintext/第三方 backend，或在 macOS Keychain不可用时回落
-    YAML、环境变量、browser storage或数据库；
-47. 把 Keychain `DENIED/UNAVAILABLE` 合并成 `MISSING`，或在响应中返回 persistent item reference；
+46. 保留 Keychain/keyring/credential-store、明文sidecar或环境变量作为第二secret owner、迁移源、
+    fallback或测试专用production分支；
+47. 在API响应中返回 key、masked key、配置文件片段或persistent secret reference；
 48. settings、Host与 queue各自维护互不相知的 catalog snapshot，或用数据库
     fingerprint/generation协调它们；
-49. local-settings publish发生 commit-unknown时无条件删除刚写入的 secret，或为解决它增加
-    durable receipt/repair worker；
+49. local-settings publish发生 commit-unknown时凭猜测报告成功/失败，或为解决它增加durable
+    receipt/repair worker，而不是exact reread完整目标document；
 50. 只删除显眼的 model/key env，却保留 request defaults、thinking、support、model identity或
     retry env从 production旁路改变 adapter行为。
 
@@ -2634,11 +2663,11 @@ models.dev新增 model不要求 Pulsara为每条 row重跑 conformance；用户�
    compatibility aliases全部不存在；
 8. Raw catalog经过唯一 kernel predicate，只向产品暴露 `limit.context >= 256000` 且 model ID
    leaf不以 Claude/Gemini 开头的 rows；前端不重复过滤；
-9. 设置页以 cards/add flow管理配置，普通流程只需 provider、model ID、API key、Chat/Responses；
-   会话 composer从已保存配置中选择一条；
-10. 所有 API key只持久化在 verified macOS Keychain backend；model key用 fixed service +
-    connection ID，embedding/reranker用两个 fixed typed slots；metadata、PostgreSQL与 client
-    projections只含 connection ID/typed credential state，不提供 read-back；
+9. 设置页以 cards/add/delete flow管理配置；目录流程只需 provider、model ID、API key、Chat/Responses，
+   自定义流程收集 §9.3 的 closed user assertions；会话 composer从已保存配置中选择一条；
+10. 所有 API key只持久化在 `${PULSARA_HOME}/local-settings.yaml` v2；Bearer model key与对应
+    connection record同存，no-auth exact为null，embedding/reranker使用两个fixed nullable字段；
+    PostgreSQL与client projections只含connection ID/configured bool，不提供read-back；
 11. UI/CLI只展示 exact catalog entry 的真实 reasoning controls，完整保留组合
    toggle/effort/budget；effort/budget是替代 selection family；局部未知/非法 family被诊断并
    省略，合法 sibling或 provider-default仍可执行；
@@ -2665,23 +2694,23 @@ models.dev新增 model不要求 Pulsara为每条 row重跑 conformance；用户�
     transport变化改变唯一 target digest；endpoint source包含 canonical full base path，同源异路径不
     相等；message/native-tool lowering、assistant replay与 estimator
     由 `ProviderInputEpochCompatibility` 既有独立槽位比较，变化仍不兼容且不被 target digest重复 hash；
-25. connection只存 ID/target/endpoint，output/safety policy由 hard limits确定性派生；四字段添加
-    流程没有隐藏的第五/第六项；
+25. connection只存 ID/target/endpoint与 nullable closed user-declared facts，output/safety policy
+    由 hard limits确定性派生；目录流程没有隐藏字段，自定义流程不开放 arbitrary wire配置；
 26. NEW_TURN admission与 session binding mutation由现有 session row lock串行化；admission取得
     canonical binding且不增加 stale-composer rejection path；数据库 transaction内不访问
-    filesystem/vault，credential只在 commit后的 provider open取得一次；
+    filesystem/settings，API key只在 commit后的 provider open读取一次；
 27. catalog client没有新增 durable cache authority；PostgreSQL只在 sessions/queue/turn各增加
     一个最小 `model_call_binding` 字段，event/subject/guard/relation/job oracle类别无变化；
-28. target只有 models.dev-backed单一 typed validation/resolution路径，不预建未暴露的 custom
-    source；
+28. models.dev与显式 user-declared是两种 typed fact source，但共享单一 target
+    validation/resolution路径；custom不依赖 catalog snapshot，也不形成第二套 registry；
 29. focused、full、PostgreSQL与可用 real-provider dogfood通过；
 30. 每个 production-supported wire dialect都有 official evidence与 golden/fixture；所有
     可用 credential执行代表 live smoke，缺失凭据逐 route报告而不伪称通过；
-31. 外部阻塞逐 target精确报告，API key从未输出或落入非 credential-vault persistence；
+31. 外部阻塞逐 target精确报告，API key从未输出或落入 single local-settings之外的 persistence；
 32. production、tests、README与 config-check只描述新路径，无 compatibility alias、feature flag
     或双读写；
-33. `${PULSARA_HOME}/local-settings.yaml` 是 model-connection metadata与本机 PostgreSQL DSN的
-    单一 closed authority，不含 secret、fingerprint、revision、catalog副本或 arbitrary KV；
+33. `${PULSARA_HOME}/local-settings.yaml` 是 model-connection metadata + key、两枚DashScope key与
+    本机PostgreSQL DSN的单一closed authority，不含fingerprint、revision、catalog副本或arbitrary KV；
 34. 设置页可配置多组主模型、两枚 fixed DashScope retrieval key与 runtime/optional admin DSN；
     embedding/reranker没有伪 provider/model selector，admin DSN只用于显式 migration；
 35. static HTTP/settings shell在 PostgreSQL未配置、不可达或 schema需动作时仍可启动；data plane
@@ -2690,13 +2719,13 @@ models.dev新增 model不要求 Pulsara为每条 row重跑 conformance；用户�
     lexical memory path；
 37. 本轮没有新增 config/catalog/credential/binding fingerprint、PostgreSQL settings table、
     event、job、checkpoint、receipt、watcher或 total-lifetime cap。
-38. 同一进程所有 local-settings mutation由一个 owner串行化并在锁内 reread；vault写入后的
+38. 同一进程所有 local-settings mutation由一个 owner串行化并在锁内 reread；单document写入的
     cancellation/commit-unknown按 §9.2精确结算，不增加跨进程事务、revision或 repair authority；
 39. Settings、connection validation、Host admission与 queue consumption共享一个 disposable
     process-local catalog owner；成功 refresh只影响未来 admission，active epoch不 rebase，且没有
     durable cache/event/job；
-40. model与两枚 retrieval credential的 `PRESENT/MISSING/DENIED/UNAVAILABLE` 语义、fixed
-    Keychain account mapping与 logical-operation单次 borrow均由 tests证明；
+40. model与两枚retrieval key的configured/missing语义、closed字段映射、exact delete/replace以及
+    logical-operation单次读取均由tests证明；
 41. `retry_config_from_env()`、SDK retry override及 request/thinking/support hidden env owner全部删除；
     既有 physical retry defaults与 semantic-output retry barrier保持，未变成 GUI或新 total cap。
 42. assistant replay contract独立变化复用既有 `PROVIDER_LOWERING_CHANGED` cold-reset reason；没有新增

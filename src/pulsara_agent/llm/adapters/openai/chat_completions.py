@@ -13,13 +13,9 @@ from pulsara_agent.llm.adapters.openai.client import (
     OpenAITransportTimeoutPolicy,
     admit_provider_request,
     build_async_openai_client,
+    openai_auth_request_options,
 )
 from pulsara_agent.process_credential_boundary import ProcessCredentialBoundary
-from pulsara_agent.local_credentials import (
-    CredentialBorrow,
-    LocalCredentialStore,
-    ModelProviderCredential,
-)
 from pulsara_agent.llm.adapters.openai.errors import classify_llm_error
 from pulsara_agent.llm.adapters.openai.events import (
     ProviderLiveItemBuilder,
@@ -79,13 +75,14 @@ from pulsara_agent.llm.retry import (
     apply_retry_after_cap,
     compute_retry_delay,
 )
+from pulsara_agent.settings import LocalSettingsStore
 
 
 @dataclass(slots=True)
 class OpenAIChatCompletionsTransport:
     """Adapter for OpenAI Chat Completions-compatible APIs."""
 
-    credentials: LocalCredentialStore = field(repr=False)
+    settings: LocalSettingsStore = field(repr=False)
     timeout_policy: OpenAITransportTimeoutPolicy
     api: str = OPENAI_CHAT_COMPLETIONS_API
     binding_id: str = "pulsara.openai.chat_completions"
@@ -128,14 +125,15 @@ class OpenAIChatCompletionsTransport:
 
         payload = build_chat_completions_payload(call=call, context=context)
         should_close_client = self._client is None
-        borrow: CredentialBorrow | None = None
+        api_key: str | None = None
         if self._client is None:
-            borrow = self.credentials.borrow(
-                ModelProviderCredential(call.binding.connection_id)
-            )
-            credential_boundary = ProcessCredentialBoundary(borrow.value)
+            if call.target.connection.requires_api_key:
+                api_key = self.settings.read().require_model_api_key(
+                    call.binding.connection_id
+                )
+            credential_boundary = ProcessCredentialBoundary(api_key or "")
             client = build_async_openai_client(
-                api_key=borrow.value,
+                api_key=api_key,
                 base_url=model.base_url,
                 timeout_policy=self.timeout_policy,
                 credential_boundary=credential_boundary,
@@ -167,7 +165,13 @@ class OpenAIChatCompletionsTransport:
                         credential_boundary=credential_boundary,
                         payload=payload,
                         operation=lambda: client.chat.completions.create(
-                            **payload, stream=True
+                            **payload,
+                            stream=True,
+                            **openai_auth_request_options(
+                                requires_api_key=(
+                                    call.target.connection.requires_api_key
+                                )
+                            ),
                         ),
                     )
                     async for raw_chunk in stream:
@@ -257,8 +261,7 @@ class OpenAIChatCompletionsTransport:
         finally:
             if should_close_client:
                 await client.close()
-            if borrow is not None:
-                borrow.close()
+            api_key = None
 
         report = accumulator.usage_report
         if report is not None or completed_model_identity is not None:

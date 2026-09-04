@@ -94,12 +94,7 @@ from pulsara_agent.ports.tool_execution import ToolOutputSourceCoverage
 from pulsara_agent.primitives.context import freeze_json
 from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
 from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
-from pulsara_agent.local_credentials import (
-    CredentialState,
-    DashScopeEmbeddingCredential,
-    DashScopeRerankCredential,
-    InMemoryCredentialStore,
-)
+from pulsara_agent.settings import LocalDashScopeCredentials, LocalSettings
 from pulsara_agent.primitives.run_permission import (
     RunPermissionAdmissionSource,
     build_run_permission_snapshot,
@@ -629,7 +624,7 @@ def test_round8_clean_v0_memory_schema_is_the_closed_context_hard_cut(
             )
 
 
-def test_round8_memory_remote_credentials_are_typed_and_ignore_environment(
+def test_round8_memory_remote_credentials_come_only_from_local_settings(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     for name in (
@@ -645,17 +640,18 @@ def test_round8_memory_remote_credentials_are_typed_and_ignore_environment(
     assert EmbeddingBackendConfig() == EmbeddingBackendConfig()
     assert RerankBackendConfig() == RerankBackendConfig()
 
-    credentials = InMemoryCredentialStore()
-    embedding_key = DashScopeEmbeddingCredential()
-    rerank_key = DashScopeRerankCredential()
-    assert credentials.state(embedding_key) is CredentialState.MISSING
-    assert credentials.state(rerank_key) is CredentialState.MISSING
-    credentials.put(embedding_key, "typed-embedding-secret")
-    credentials.put(rerank_key, "typed-rerank-secret")
-    with credentials.borrow(embedding_key) as borrowed:
-        assert borrowed.value == "typed-embedding-secret"
-    with credentials.borrow(rerank_key) as borrowed:
-        assert borrowed.value == "typed-rerank-secret"
+    empty = LocalSettings()
+    assert empty.dashscope_api_key("embedding") is None
+    assert empty.dashscope_api_key("rerank") is None
+    configured = LocalSettings(
+        dashscope_credentials=LocalDashScopeCredentials(
+            "typed-embedding-secret", "typed-rerank-secret"
+        )
+    )
+    assert configured.require_dashscope_api_key("embedding") == (
+        "typed-embedding-secret"
+    )
+    assert configured.require_dashscope_api_key("rerank") == "typed-rerank-secret"
 
 
 def test_round8_opt_out_and_hint_matchers_are_closed() -> None:
@@ -1899,7 +1895,7 @@ def test_round8_preference_head_and_automatic_recall_are_separate_advisory_sourc
             explicit_rerank=False,
         ),
         io_owner=io_owner,
-        credentials=InMemoryCredentialStore(),
+        settings=SimpleNamespace(read=lambda: LocalSettings()),
     )
 
     async def exercise() -> tuple[object, object, object]:
@@ -2021,9 +2017,13 @@ def test_round8_optional_provider_and_relation_failures_remain_advisory(
         fail_provider,
     )
     io_owner = KernelSessionIO()
-    credentials = InMemoryCredentialStore()
-    credentials.put(DashScopeEmbeddingCredential(), "embedding-only")
-    credentials.put(DashScopeRerankCredential(), "rerank-only")
+    settings = SimpleNamespace(
+        read=lambda: LocalSettings(
+            dashscope_credentials=LocalDashScopeCredentials(
+                "embedding-only", "rerank-only"
+            )
+        )
+    )
     port = KernelMemoryToolPort(
         repository=repository,
         session_id=lease.guard.session_id,
@@ -2038,7 +2038,7 @@ def test_round8_optional_provider_and_relation_failures_remain_advisory(
             explicit_rerank=True,
         ),
         io_owner=io_owner,
-        credentials=credentials,
+        settings=settings,
     )
 
     def fail_relation_enrichment(**_kwargs):

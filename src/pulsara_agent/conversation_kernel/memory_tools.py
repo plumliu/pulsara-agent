@@ -61,12 +61,6 @@ from pulsara_agent.model_input.contracts import (
     ContextSourceKind,
 )
 from pulsara_agent.primitives.context import canonical_json_bytes
-from pulsara_agent.local_credentials import (
-    CredentialState,
-    DashScopeEmbeddingCredential,
-    DashScopeRerankCredential,
-    LocalCredentialStore,
-)
 from pulsara_agent.ports.tool_execution import (
     ToolOutputArtifactCandidate,
     ToolOutputSourceCoverage,
@@ -83,6 +77,7 @@ from pulsara_agent.retrieval.embedding.factory import build_embedding_provider
 from pulsara_agent.retrieval.embedding.protocol import EmbeddingProvider
 from pulsara_agent.retrieval.rerank.factory import build_rerank_provider
 from pulsara_agent.retrieval.rerank.protocol import RerankProvider
+from pulsara_agent.settings import LocalSettingsStore, LocalSettingsUnavailable
 
 if TYPE_CHECKING:
     from pulsara_agent.conversation_kernel.memory.governor import (
@@ -121,7 +116,7 @@ class KernelMemoryToolPort:
         embedding_provider: EmbeddingProvider | None = None,
         rerank_provider: RerankProvider | None = None,
         io_owner: KernelSessionIO,
-        credentials: LocalCredentialStore,
+        settings: LocalSettingsStore,
     ) -> None:
         self._repository = repository
         self._session_id = session_id
@@ -147,7 +142,7 @@ class KernelMemoryToolPort:
         self._write_hint_matcher = CheapMemoryWriteHintMatcher()
         self._closed = False
         self._governor: AdvisoryMemoryGovernor | None = None
-        self._credentials = credentials
+        self._settings = settings
 
     @property
     def tool_names(self) -> frozenset[str]:
@@ -539,14 +534,12 @@ class KernelMemoryToolPort:
     async def _embedding_provider(self) -> EmbeddingProvider | None:
         if not MEMORY_EMBEDDING_CONTRACT.accepts(self._embedding_config):
             return None
-        if self._embedding is None and self._credentials.state(
-            DashScopeEmbeddingCredential()
-        ) is CredentialState.PRESENT:
+        if self._embedding is None and self._dashscope_key_is_configured("embedding"):
             async with self._provider_lock:
                 if self._embedding is None and not self._closed:
                     self._embedding = build_embedding_provider(
                         self._embedding_config,
-                        credentials=self._credentials,
+                        settings=self._settings,
                     )
         return self._embedding
 
@@ -556,8 +549,7 @@ class KernelMemoryToolPort:
             not self._feature_config.explicit_rerank
             or config.provider != "dashscope"
             or config.model != "qwen3-rerank"
-            or self._credentials.state(DashScopeRerankCredential())
-            is not CredentialState.PRESENT
+            or not self._dashscope_key_is_configured("rerank")
         ):
             return None
         if self._rerank is None:
@@ -565,9 +557,15 @@ class KernelMemoryToolPort:
                 if self._rerank is None and not self._closed:
                     self._rerank = build_rerank_provider(
                         config,
-                        credentials=self._credentials,
+                        settings=self._settings,
                     )
         return self._rerank
+
+    def _dashscope_key_is_configured(self, kind) -> bool:
+        try:
+            return self._settings.read().dashscope_api_key(kind) is not None
+        except LocalSettingsUnavailable:
+            return False
 
     async def _rerank_explicit(self, query: str, result, *, total_deadline: float):
         try:

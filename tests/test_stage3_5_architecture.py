@@ -207,8 +207,8 @@ def test_stage3_5_process_local_task_sites_are_closed() -> None:
         # admission and lock-acquisition tasks. Provider/retrieval callers no
         # longer create parallel sink tasks of their own.
         "src/pulsara_agent/process_credential_boundary.py",
-        # The local-settings owner shields the post-Keychain metadata
-        # settlement so cancellation cannot strand a known-unpublished key.
+        # The local-settings owner shields the single-document settlement so
+        # cancellation cannot report an unknown publication as settled.
         "src/pulsara_agent/settings.py",
         # The local application owns four process-local task sites: its HTTP
         # server, one protocol connection pump, one browser bridge request,

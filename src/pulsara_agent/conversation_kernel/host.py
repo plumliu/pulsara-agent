@@ -625,7 +625,7 @@ class KernelHostSession:
             rerank_config=retrieval.rerank,
             feature_config=retrieval.memory,
             io_owner=self._io,
-            credentials=model_runtime.credentials,
+            settings=model_runtime.settings,
         )
         self._memory_tools.bind_deadline_factory(self._deadlines)
         self._memory_governor = AdvisoryMemoryGovernor(

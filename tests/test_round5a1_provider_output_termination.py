@@ -553,7 +553,7 @@ def test_chat_replay_byte_overflow_is_typed_and_not_retried(
     timeout = OpenAITransportTimeoutPolicy(1, 1, 1, 1, None)
     completions = FakeCompletions()
     adapter = OpenAIChatCompletionsTransport(
-        credentials=runtime.credentials,
+        settings=runtime.settings,
         timeout_policy=timeout,
         retry_config=LLMRetryConfig(enabled=True, attempts=3),
     )
@@ -1063,8 +1063,7 @@ def test_chat_reused_index_is_disambiguated_only_by_exact_call_id() -> None:
         accumulator.apply(_chat_chunk({"tool_calls": [tool_call]}))
     accumulator.apply(_chat_chunk({}, "tool_calls"))
     assert [
-        item["function"]["arguments"]
-        for item in accumulator.tool_calls.completed_calls
+        item["function"]["arguments"] for item in accumulator.tool_calls.completed_calls
     ] == ['{"x":1}', '{"x":2}']
 
     ambiguous = ChatCompletionAccumulator(
@@ -1087,9 +1086,7 @@ def test_chat_reused_index_is_disambiguated_only_by_exact_call_id() -> None:
         )
     with pytest.raises(LLMTransportContractError) as exc_info:
         ambiguous.apply(
-            _chat_chunk(
-                {"tool_calls": [{"index": 4, "function": {"arguments": "{}"}}]}
-            )
+            _chat_chunk({"tool_calls": [{"index": 4, "function": {"arguments": "{}"}}]})
         )
     assert exc_info.value.reason_code == "transport_tool_call_correlation_ambiguous"
 
@@ -1133,9 +1130,7 @@ def test_chat_delayed_identity_and_name_bind_one_provisional_call() -> None:
         ToolCallDeltaPayload,
     ]
     accumulator.apply(
-        _chat_chunk(
-            {"tool_calls": [{"index": 91, "function": {"arguments": "true}"}}]}
-        )
+        _chat_chunk({"tool_calls": [{"index": 91, "function": {"arguments": "true}"}}]})
     )
     accumulator.apply(_chat_chunk({}, "tool_calls"))
     assert accumulator.tool_calls.completed_calls[0]["function"]["arguments"] == (
@@ -2188,6 +2183,7 @@ def test_responses_reasoning_summary_and_content_are_separate_exact_streams() ->
         {
             "type": "response.reasoning_summary_text.delta",
             "output_index": 0,
+            "summary_index": 0,
             "delta": "summary",
         }
     )
@@ -2196,6 +2192,7 @@ def test_responses_reasoning_summary_and_content_are_separate_exact_streams() ->
             {
                 "type": "response.reasoning_summary_text.done",
                 "output_index": 0,
+                "summary_index": 0,
                 "text": "summary",
             }
         )
@@ -2236,6 +2233,53 @@ def test_responses_reasoning_summary_and_content_are_separate_exact_streams() ->
         for item in events
         if isinstance(item, ThinkingStartPayload)
     ] == [ReasoningPresentationKind.SUMMARY, ReasoningPresentationKind.FULL]
+    assert isinstance(accumulator.finish(), ProviderAdapterTerminal)
+
+
+def test_responses_multiple_reasoning_summary_parts_join_by_summary_index() -> None:
+    accumulator = ResponsesCompletionAccumulator(builder=ProviderLiveItemBuilder())
+    events = []
+    for summary_index, text in enumerate(("first summary", "second summary")):
+        events.extend(
+            accumulator.apply(
+                {
+                    "type": "response.reasoning_summary_text.delta",
+                    "output_index": 0,
+                    "summary_index": summary_index,
+                    "delta": text,
+                }
+            )
+        )
+        events.extend(
+            accumulator.apply(
+                {
+                    "type": "response.reasoning_summary_text.done",
+                    "output_index": 0,
+                    "summary_index": summary_index,
+                    "text": text,
+                }
+            )
+        )
+
+    accumulator.apply(
+        _completed_response(
+            [
+                {
+                    "type": "reasoning",
+                    "id": "reasoning:multi-summary",
+                    "status": "completed",
+                    "summary": [
+                        {"type": "summary_text", "text": "first summary"},
+                        {"type": "summary_text", "text": "second summary"},
+                    ],
+                }
+            ]
+        )
+    )
+
+    assert [
+        item.final_text for item in events if isinstance(item, ThinkingEndPayload)
+    ] == ["first summary", "second summary"]
     assert isinstance(accumulator.finish(), ProviderAdapterTerminal)
 
 
@@ -2936,12 +2980,12 @@ async def _consume_provider_shaped_sse(*, api: str, base_url: str) -> list[objec
     binding = test_model_binding(runtime)
     adapter = (
         OpenAIChatCompletionsTransport(
-            credentials=runtime.credentials,
+            settings=runtime.settings,
             timeout_policy=timeout,
         )
         if api == OPENAI_CHAT_COMPLETIONS_API
         else OpenAIResponsesTransport(
-            credentials=runtime.credentials,
+            settings=runtime.settings,
             timeout_policy=timeout,
         )
     )

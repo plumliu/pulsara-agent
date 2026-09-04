@@ -223,7 +223,7 @@ def test_provider_visible_chat_reasoning_is_derived_from_exact_replay_text() -> 
     ]
 
 
-def test_provider_visible_responses_reasoning_distinguishes_summary_and_full_text() -> (
+def test_provider_visible_responses_reasoning_preserves_each_summary_and_content_part() -> (
     None
 ):
     candidate = _candidate(
@@ -232,8 +232,14 @@ def test_provider_visible_responses_reasoning_distinguishes_summary_and_full_tex
                 "type": "reasoning",
                 "id": "reasoning:1",
                 "status": "completed",
-                "summary": [{"type": "summary_text", "text": "short summary"}],
-                "content": [{"type": "reasoning_text", "text": "full reasoning"}],
+                "summary": [
+                    {"type": "summary_text", "text": "first summary"},
+                    {"type": "summary_text", "text": "second summary"},
+                ],
+                "content": [
+                    {"type": "reasoning_text", "text": "first reasoning"},
+                    {"type": "reasoning_text", "text": "second reasoning"},
+                ],
                 "encrypted_content": "opaque-carrier-is-not-product-text",
             }
         ),
@@ -249,8 +255,10 @@ def test_provider_visible_responses_reasoning_distinguishes_summary_and_full_tex
     )
 
     assert [(item.presentation_kind, item.text) for item in projected] == [
-        (ReasoningPresentationKind.SUMMARY, "short summary"),
-        (ReasoningPresentationKind.FULL, "full reasoning"),
+        (ReasoningPresentationKind.SUMMARY, "first summary"),
+        (ReasoningPresentationKind.SUMMARY, "second summary"),
+        (ReasoningPresentationKind.FULL, "first reasoning"),
+        (ReasoningPresentationKind.FULL, "second reasoning"),
     ]
     assert "opaque-carrier" not in repr(projected)
 

@@ -47,12 +47,6 @@ from pulsara_agent.llm.model_target import (
     resolve_model_target_contract,
 )
 from pulsara_agent.llm.runtime import ModelRuntime
-from pulsara_agent.local_credentials import (
-    DashScopeEmbeddingCredential,
-    DashScopeRerankCredential,
-    MacOSKeychainCredentialStore,
-    ModelProviderCredential,
-)
 from pulsara_agent.mcp_config import (
     McpServerConfig,
     StdioTransportConfig,
@@ -386,7 +380,7 @@ def main() -> None:
 
 
 async def _kernel_host_run(args) -> object:
-    _settings, catalog, _credentials, runtime = _runtime_services()
+    _settings, catalog, runtime = _runtime_services()
     await catalog.refresh()
     core = KernelHostCore.production(model_runtime=runtime)
     session = None
@@ -409,11 +403,10 @@ async def _local_web_app(args) -> None:
         run_local_web_application,
     )
 
-    settings, catalog, credentials, runtime = _runtime_services()
+    settings, catalog, runtime = _runtime_services()
     application = LocalWebApplication(
         settings=settings,
         catalog=catalog,
-        credentials=credentials,
         model_runtime=runtime,
         workspace_input=_workspace_input_from_args(args),
         permission_policy=_permission_policy(args),
@@ -445,7 +438,7 @@ async def _open_initial_session(core: KernelHostCore, args):
 
 
 async def _kernel_host_repl(args) -> None:
-    _settings, catalog, _credentials, runtime = _runtime_services()
+    _settings, catalog, runtime = _runtime_services()
     await catalog.refresh()
     core = KernelHostCore.production(model_runtime=runtime)
     repl_prompt: ReplPrompt = build_repl_prompt(
@@ -2049,17 +2042,15 @@ def _print_agent_run_result(result) -> None:
 def _runtime_services():
     settings = LocalSettingsStore()
     catalog = ModelCatalogOwner(ModelsDevCatalogClient())
-    credentials = MacOSKeychainCredentialStore()
     runtime = ModelRuntime.production(
         settings=settings,
         catalog=catalog,
-        credentials=credentials,
     )
-    return settings, catalog, credentials, runtime
+    return settings, catalog, runtime
 
 
 async def _config_check() -> dict[str, object]:
-    settings_store, catalog, credentials, runtime = _runtime_services()
+    settings_store, catalog, runtime = _runtime_services()
     settings_status = "ready"
     settings_error: str | None = None
     try:
@@ -2079,12 +2070,12 @@ async def _config_check() -> dict[str, object]:
     for connection in settings.model_connections:
         status = "ready"
         detail: str | None = None
-        if catalog_status != "ready":
+        if catalog_status != "ready" and connection.user_declared is None:
             status = "catalog_unavailable"
         else:
             try:
                 contract = resolve_model_target_contract(
-                    catalog=runtime.selectable_catalog(),
+                    catalog=catalog.selectable(),
                     connection=connection,
                     route_wires=runtime.route_wires,
                 )
@@ -2107,9 +2098,15 @@ async def _config_check() -> dict[str, object]:
                 "wire_api": connection.target.wire_api.value,
                 "model_id": connection.target.model_id,
                 "base_url": connection.base_url,
-                "credential_state": credentials.state(
-                    ModelProviderCredential(connection.id)
-                ).value,
+                "source": (
+                    "models_dev"
+                    if connection.user_declared is None
+                    else "user_declared"
+                ),
+                "authentication": connection.authentication.value,
+                "credential_configured": (
+                    settings.model_api_key(connection.id) is not None
+                ),
                 "status": status,
                 "detail": detail,
             }
@@ -2141,8 +2138,12 @@ async def _config_check() -> dict[str, object]:
         "catalog": {"status": catalog_status, "detail": catalog_error},
         "database": database,
         "dashscope_credentials": {
-            "embedding": credentials.state(DashScopeEmbeddingCredential()).value,
-            "rerank": credentials.state(DashScopeRerankCredential()).value,
+            "embedding_configured": (
+                settings.dashscope_api_key("embedding") is not None
+            ),
+            "rerank_configured": (
+                settings.dashscope_api_key("rerank") is not None
+            ),
         },
         "model_connections": connections,
     }

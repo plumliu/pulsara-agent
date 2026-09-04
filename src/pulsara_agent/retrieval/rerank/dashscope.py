@@ -9,16 +9,13 @@ from typing import Any
 
 import httpx
 
-from pulsara_agent.local_credentials import (
-    DashScopeRerankCredential,
-    LocalCredentialStore,
-)
 from pulsara_agent.process_credential_boundary import (
     ProcessCredentialBoundary,
     ProcessCredentialBoundAsyncClient,
     admit_process_credential_http_operation,
 )
 from pulsara_agent.retrieval.errors import RerankServiceError
+from pulsara_agent.settings import LocalSettingsStore
 
 from .protocol import RerankResult
 
@@ -37,7 +34,7 @@ class DashScopeRerankProvider:
         timeout_seconds: float,
         max_retries: int,
         maximum_concurrent: int,
-        credentials: LocalCredentialStore,
+        settings: LocalSettingsStore,
     ) -> None:
         if model != "qwen3-rerank":
             raise ValueError("rerank model is outside the V1 contract")
@@ -49,7 +46,7 @@ class DashScopeRerankProvider:
         self._max_retries = max(0, max_retries)
         self._semaphore = asyncio.Semaphore(1)
         self._timeout_seconds = timeout_seconds
-        self._credentials = credentials
+        self._settings = settings
 
     async def aclose(self) -> None:
         return None
@@ -84,14 +81,14 @@ class DashScopeRerankProvider:
         if len(encoded) > 192 * 1024:
             raise RerankServiceError("rerank request exceeds its aggregate bound")
         async with self._semaphore:
-            borrow = self._credentials.borrow(DashScopeRerankCredential())
-            boundary = ProcessCredentialBoundary(borrow.value)
+            api_key = self._settings.read().require_dashscope_api_key("rerank")
+            boundary = ProcessCredentialBoundary(api_key)
             client = ProcessCredentialBoundAsyncClient(
                 credential_boundary=boundary,
                 credential_header_names=frozenset({b"authorization"}),
                 timeout=httpx.Timeout(self._timeout_seconds),
                 headers={
-                    "Authorization": f"Bearer {borrow.value}",
+                    "Authorization": f"Bearer {api_key}",
                     "Content-Type": "application/json",
                 },
             )
@@ -132,7 +129,7 @@ class DashScopeRerankProvider:
                         await response.aclose()
             finally:
                 await client.aclose()
-                borrow.close()
+                api_key = ""
             if body is None:
                 raise RerankServiceError("rerank response body is absent")
         try:

@@ -15,9 +15,11 @@ from pulsara_agent.llm.errors import ModelTargetCapabilityMismatch
 from pulsara_agent.llm.input import LLMMessage, ToolSpec
 from pulsara_agent.llm.model_catalog import (
     ModelTargetKey,
+    ReasoningEffortChoices,
     ReasoningFixedOn,
     ReasoningProviderDefault,
     ReasoningSelectableControls,
+    ReasoningToggle,
     ReasoningUnavailable,
     WireApi,
     parse_models_dev_catalog,
@@ -25,16 +27,19 @@ from pulsara_agent.llm.model_catalog import (
 )
 from pulsara_agent.llm.model_connections import (
     ModelCallBinding,
+    ModelConnectionAuthentication,
     ModelConnectionId,
     ReasoningBudgetSelection,
     ReasoningEffortSelection,
     ReasoningToggleSelection,
+    UserDeclaredModelTarget,
 )
 from pulsara_agent.llm.model_target import (
     ModelReasoningSelectionInvalid,
     ModelTargetNotExecutable,
     canonicalize_endpoint,
     create_model_connection,
+    create_user_declared_model_connection,
     default_reasoning_selection,
     reasoning_wire_fields,
     reconcile_model_call_binding,
@@ -189,7 +194,10 @@ def test_deepseek_uses_existing_generic_chat_and_responses_request_builders() ->
         call=responses_call, context=responses_context
     )
     assert responses_payload["model"] == "deepseek-v4-flash"
-    assert responses_payload["reasoning"] == {"effort": "high"}
+    assert responses_payload["reasoning"] == {
+        "effort": "high",
+        "summary": "auto",
+    }
 
 
 @pytest.mark.parametrize("wire_api", tuple(WireApi))
@@ -248,8 +256,52 @@ def test_exact_wire_lowering_belongs_to_generic_wire_api_adapter() -> None:
     assert dict(zhipu.extra_body) == {}
     assert dict(router.root) == {"reasoning_effort": "xhigh"}
     assert dict(router.extra_body) == {}
-    assert dict(zhipu_responses.root) == {"reasoning": {"effort": "max"}}
+    assert dict(zhipu_responses.root) == {
+        "reasoning": {"effort": "max", "summary": "auto"}
+    }
     assert dict(zhipu_responses.extra_body) == {}
+
+
+@pytest.mark.parametrize("enabled", (False, True))
+def test_generic_chat_toggle_lowers_to_reasoning_enabled(enabled: bool) -> None:
+    fixture = {
+        "future-provider": {
+            "name": "Future Provider",
+            "npm": "@ai-sdk/openai-compatible",
+            "api": "https://future.example/v1",
+            "models": {
+                "future-toggle-model": {
+                    "reasoning": True,
+                    "reasoning_options": [{"type": "toggle"}],
+                    "tool_call": True,
+                    "limit": {"context": 256_000, "output": 8_192},
+                }
+            },
+        }
+    }
+    selection = ReasoningToggleSelection(enabled)
+    call, context = _resolved_call(
+        "future-provider",
+        "future-toggle-model",
+        WireApi.OPENAI_CHAT_COMPLETIONS,
+        selection,
+        fixture=fixture,
+    )
+
+    assert isinstance(call.target.contract.reasoning, ReasoningSelectableControls)
+    assert call.target.contract.reasoning.toggle is not None
+    assert default_reasoning_selection(call.target.contract.reasoning) == (
+        ReasoningToggleSelection(True)
+    )
+    fields = reasoning_wire_fields(call.target.contract, selection)
+    assert dict(fields.root) == {}
+    assert dict(fields.extra_body) == {"reasoning": {"enabled": enabled}}
+
+    payload = build_chat_completions_payload(call=call, context=context)
+    assert payload["extra_body"] == {"reasoning": {"enabled": enabled}}
+    assert "reasoning" not in payload
+    assert "reasoning_effort" not in payload
+    assert "reasoning" not in project_chat_context_bearing_payload_fields(payload)
 
 
 def test_generic_adapter_exposes_catalog_effort_without_route_specific_controls() -> None:
@@ -273,7 +325,9 @@ def test_generic_adapter_exposes_catalog_effort_without_route_specific_controls(
     fields = reasoning_wire_fields(
         gateway.target, ReasoningEffortSelection("xhigh")
     )
-    assert dict(fields.root) == {"reasoning": {"effort": "xhigh"}}
+    assert dict(fields.root) == {
+        "reasoning": {"effort": "xhigh", "summary": "auto"}
+    }
     assert dict(fields.extra_body) == {}
 
 
@@ -476,7 +530,10 @@ def test_reasoning_request_golden_is_not_context_bearing() -> None:
     openai_payload = build_responses_payload(
         call=openai_call, context=openai_context
     )
-    assert openai_payload["reasoning"] == {"effort": "high"}
+    assert openai_payload["reasoning"] == {
+        "effort": "high",
+        "summary": "auto",
+    }
     assert "reasoning" not in project_responses_context_bearing_payload_fields(
         openai_payload
     )
@@ -593,3 +650,75 @@ def test_no_selector_targets_omit_reasoning_request_fields(
     assert "reasoning" not in payload
     assert "reasoning_effort" not in payload
     assert "extra_body" not in payload
+
+
+def test_user_declared_target_resolves_without_catalog_and_uses_generic_chat() -> None:
+    route_wires = production_route_wire_registry()
+    resolved = create_user_declared_model_connection(
+        model_id="local-model",
+        wire_api=WireApi.OPENAI_CHAT_COMPLETIONS,
+        base_url="http://127.0.0.1:9000/v1/",
+        declaration=UserDeclaredModelTarget(
+            configuration_name="Local Gateway",
+            total_context_tokens=300_000,
+            max_output_tokens=12_000,
+            tool_call=True,
+            reasoning=ReasoningSelectableControls(
+                effort=ReasoningEffortChoices(("low", "high"))
+            ),
+            authentication=ModelConnectionAuthentication.NONE,
+        ),
+        route_wires=route_wires,
+        connection_id=ModelConnectionId("model-connection:" + "d" * 32),
+    )
+    binding = ModelCallBinding(
+        resolved.config.id,
+        ReasoningEffortSelection("high"),
+    )
+    registry = test_model_runtime(
+        wire_api=WireApi.OPENAI_CHAT_COMPLETIONS.value
+    ).transport_registry(OpenAITransportTimeoutPolicy(1, 1, 1, 1, None))
+    target = resolve_model_target(
+        connection=resolved.config,
+        binding=binding,
+        catalog=None,
+        route_wires=route_wires,
+        registry=registry,
+    )
+    call = resolve_model_call(
+        target=target,
+        binding=binding,
+        purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
+    )
+    context = LLMContext(
+        messages=(LLMMessage.user("hello"),),
+        context_id="custom-target",
+        resolved_model_call_id=call.resolved_model_call_id,
+        target_fingerprint=call.target.fact.target_fingerprint,
+        model_call_index=1,
+    )
+
+    assert target.contract.target_facts.route_name == "Local Gateway"
+    assert target.contract.target_facts.limits.total_context_tokens == 300_000
+    assert target.contract.canonical_endpoint_base_url == "http://127.0.0.1:9000/v1"
+    assert build_chat_completions_payload(call=call, context=context)[
+        "reasoning_effort"
+    ] == "high"
+
+
+def test_user_declared_reasoning_control_cannot_be_silently_dropped() -> None:
+    with pytest.raises(ModelTargetNotExecutable, match="unsupported"):
+        create_user_declared_model_connection(
+            model_id="local-model",
+            wire_api=WireApi.OPENAI_RESPONSES,
+            base_url="http://127.0.0.1:9000/v1",
+            declaration=UserDeclaredModelTarget(
+                configuration_name="Responses Toggle",
+                total_context_tokens=256_000,
+                max_output_tokens=8_192,
+                tool_call=True,
+                reasoning=ReasoningSelectableControls(toggle=ReasoningToggle()),
+                authentication=ModelConnectionAuthentication.NONE,
+            ),
+            route_wires=production_route_wire_registry(),
+        )

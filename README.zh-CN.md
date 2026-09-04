@@ -152,9 +152,10 @@ Pulsara 不再从 `.env` 或产品专用环境变量读取配置。启动本地�
   并添加 API key；
 - 可选地分别填写 DashScope embedding 与 rerank 两枚独立 key。
 
-非 secret metadata 只保存在 `${PULSARA_HOME}/local-settings.yaml`（或 Pulsara
-默认 home）；API key 为 write-only，只进入 macOS Keychain。零配置也能启动应用和
-设置壳；缺少任一 DashScope key 时 sparse memory recall 仍可使用。
+PostgreSQL DSN、模型配置与全部 API key 一同保存在 closed
+`${PULSARA_HOME}/local-settings.yaml`（或 Pulsara 默认 home）中；目录权限为 `0700`，
+文件权限为 `0600`。API key 在 UI 中仍为 write-only，本地 API 不会返回其值。零配置也能启动
+应用和设置壳；缺少任一 DashScope key 时 sparse memory recall 仍可使用。
 
 ```sh
 uv run pulsara app

@@ -389,7 +389,7 @@ class NormalizedLLMTransport:
                     message="The model catalog does not confirm tool-call support.",
                 ),
             )
-            if context.tools and call.target.contract.catalog_facts.tool_call is None
+            if context.tools and call.target.contract.target_facts.tool_call is None
             else ()
         )
         return NormalizedProviderTransportExecution(

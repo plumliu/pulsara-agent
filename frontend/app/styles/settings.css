@@ -40,9 +40,9 @@
 .healthy-value i { display: inline-block; width: 6px; height: 6px; margin-right: 4px; border-radius: 50%; background: var(--green); }
 .storage-value { color: var(--muted); font-family: var(--mono); font-size: var(--type-caption); }
 .settings-group > header > div { min-width: 0; flex: 1; }
-.settings-header-action, .credential-actions button, .form-actions button, .settings-alert button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-height: 30px; padding: 0 9px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper-raised); color: var(--muted); font-size: var(--type-caption); white-space: nowrap; }
-.settings-header-action:hover, .credential-actions button:hover, .form-actions button:hover, .settings-alert button:hover { border-color: var(--line-strong); color: var(--ink); }
-.settings-header-action:disabled, .credential-actions button:disabled, .form-actions button:disabled { opacity: .48; cursor: default; }
+.settings-header-action, .credential-actions button, .form-actions button, .settings-alert button, .model-config-card__actions button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-height: 30px; padding: 0 9px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper-raised); color: var(--muted); font-size: var(--type-caption); white-space: nowrap; }
+.settings-header-action:hover, .credential-actions button:hover, .form-actions button:hover, .settings-alert button:hover, .model-config-card__actions button:hover { border-color: var(--line-strong); color: var(--ink); }
+.settings-header-action:disabled, .credential-actions button:disabled, .form-actions button:disabled, .model-config-card__actions button:disabled { opacity: .48; cursor: default; }
 .settings-alert, .settings-loading { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border: 1px solid color-mix(in srgb,var(--amber) 25%,var(--line)); border-radius: 10px; background: color-mix(in srgb,var(--amber-soft) 45%,var(--paper-raised)); color: var(--muted); font-size: var(--type-caption); }
 .settings-alert > span { flex: 1; }
 .settings-alert--inside { margin: 13px 15px 0; }
@@ -59,17 +59,27 @@
 .model-config-card strong { overflow: hidden; font-size: var(--type-small); text-overflow: ellipsis; white-space: nowrap; }
 .model-config-card small { margin-top: 4px; color: var(--faint); font-size: var(--type-caption); }
 .model-config-card code { margin-top: 4px; color: var(--muted); font-family: var(--mono); font-size: var(--type-micro); }
+.model-config-card__actions { display: grid; justify-items: end; gap: 7px; }
+.model-config-card__actions .model-delete-trigger { min-height: 26px; padding: 0 7px; border-color: transparent; background: transparent; }
+.model-delete-confirmation { display: grid; grid-template-columns: auto auto; justify-items: end; gap: 6px; max-width: 290px; }
+.model-delete-confirmation > span { grid-column: 1 / -1; color: var(--faint); font-size: var(--type-micro); line-height: 1.45; }
+.model-config-card__actions .subtle-danger { color: var(--red); }
 .credential-state, .database-state { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-family: var(--mono); font-size: var(--type-micro); white-space: nowrap; }
 .credential-state i, .database-state i { width: 6px; height: 6px; border-radius: 50%; background: var(--faint); }
 .credential-state--present, .database-state--ready { color: var(--green); }
 .credential-state--present i, .database-state--ready i { background: var(--green); }
-.credential-state--denied, .credential-state--unavailable, .database-state--database_unavailable, .database-state--database_schema_action_required { color: var(--amber); }
-.credential-state--denied i, .credential-state--unavailable i, .database-state--database_unavailable i, .database-state--database_schema_action_required i { background: var(--amber); }
+.database-state--database_unavailable, .database-state--database_schema_action_required { color: var(--amber); }
+.database-state--database_unavailable i, .database-state--database_schema_action_required i { background: var(--amber); }
+.model-source-picker { display: flex; gap: 5px; padding: 12px 15px 0; }
+.model-source-picker button { min-height: 30px; padding: 0 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper); color: var(--muted); font-size: var(--type-caption); }
+.model-source-picker button.is-active { border-color: color-mix(in srgb,var(--blue) 35%,var(--line)); background: var(--blue-soft); color: var(--blue); font-weight: 700; }
 .settings-form-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px; padding: 15px; }
 .settings-form-grid label, .database-form label { display: grid; gap: 6px; }
 .settings-form-grid label > span, .database-form label > span { color: var(--muted); font-size: var(--type-caption); font-weight: 700; }
 .settings-form-grid input, .settings-form-grid select, .credential-actions input, .database-form input { min-width: 0; height: 36px; padding: 0 10px; border: 1px solid var(--line); border-radius: 8px; outline: none; background: var(--paper); color: var(--ink); font: inherit; font-size: var(--type-small); }
 .settings-form-grid input:focus, .settings-form-grid select:focus, .credential-actions input:focus, .database-form input:focus { border-color: color-mix(in srgb,var(--blue) 55%,var(--line)); box-shadow: 0 0 0 3px color-mix(in srgb,var(--blue) 10%,transparent); }
+.settings-form-grid .model-tool-call-field { grid-column: 1 / -1; display: flex; flex-direction: row; align-items: center; gap: 8px; min-height: 36px; color: var(--muted); font-size: var(--type-caption); font-weight: 700; }
+.settings-form-grid .model-tool-call-field input { width: 15px; height: 15px; padding: 0; accent-color: var(--blue); }
 .model-confirmation { display: grid; gap: 11px; margin: 0 15px 15px; padding: 13px; border: 1px solid var(--line); border-radius: 10px; background: var(--paper-deep); }
 .model-confirmation > strong { font-size: var(--type-small); }
 .model-confirmation dl { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 7px 15px; margin: 0; }
@@ -95,7 +105,8 @@
 @media (max-width: 720px) {
   .settings-form-grid, .model-confirmation dl { grid-template-columns: 1fr; }
   .model-config-card { grid-template-columns: 32px minmax(0,1fr); }
-  .model-config-card > .credential-state { grid-column: 2; }
+  .model-config-card__actions { grid-column: 2; justify-items: start; }
+  .model-delete-confirmation { justify-items: start; }
   .credential-row { grid-template-columns: 1fr; }
   .credential-actions { grid-column: 1; justify-content: flex-start; flex-wrap: wrap; }
   .database-state-row { display: grid; }

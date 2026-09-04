@@ -17,33 +17,36 @@ from pulsara_agent.llm.model_catalog import (
     ModelCatalogOwner,
     ModelCatalogUnavailable,
     ModelTargetKey,
+    ReasoningEffortChoices,
     ReasoningFixedOn,
     ReasoningProviderDefault,
     ReasoningSelectableControls,
+    ReasoningToggle,
     ReasoningUnavailable,
     WireApi,
 )
 from pulsara_agent.llm.model_connections import (
+    ModelConnectionAuthentication,
     ModelConnectionConfig,
+    ModelConnectionId,
+    UserDeclaredModelTarget,
     model_call_binding_from_dict,
     model_connection_to_dict,
     reasoning_selection_to_dict,
 )
 from pulsara_agent.llm.model_target import (
+    ResolvedModelConnection,
     controls_supported_by_adapter,
     create_model_connection,
+    create_user_declared_model_connection,
     default_reasoning_selection,
     resolve_model_target_contract,
 )
-from pulsara_agent.llm.runtime import ModelRuntime, ModelRuntimeUnavailable
-from pulsara_agent.local_credentials import (
-    CredentialStoreError,
-    CredentialState,
-    DashScopeEmbeddingCredential,
-    DashScopeRerankCredential,
-    LocalCredentialStore,
-    ModelProviderCredential,
+from pulsara_agent.llm.connection_probe import (
+    ModelConnectionProbeFailure,
+    probe_model_connection,
 )
+from pulsara_agent.llm.runtime import ModelRuntime, ModelRuntimeUnavailable
 from pulsara_agent.mcp_config import (
     McpConfiguredServerBoundExceeded,
     WorkspaceMcpConfigStaleError,
@@ -55,8 +58,10 @@ from pulsara_agent.web_app.session_controller import (
     SessionWorkspaceKind,
 )
 from pulsara_agent.settings import (
+    DashScopeCredentialKind,
     LocalPostgresConfig,
     LocalSettings,
+    LocalSettingsPublishIndeterminate,
     LocalSettingsStore,
     LocalSettingsUnavailable,
 )
@@ -95,6 +100,26 @@ def _reasoning_payload(value) -> dict[str, object]:
     if isinstance(value, ReasoningProviderDefault):
         return {"kind": "provider_default"}
     raise TypeError(type(value).__name__)
+
+
+def _user_declared_reasoning(value: object):
+    if value == {"kind": "provider_default"}:
+        return ReasoningProviderDefault()
+    if value == {"kind": "toggle"}:
+        return ReasoningSelectableControls(toggle=ReasoningToggle())
+    if isinstance(value, dict) and set(value) == {"kind", "values"}:
+        if value["kind"] != "effort":
+            raise ValueError("custom reasoning kind is invalid")
+        values = value["values"]
+        if not isinstance(values, list) or not all(
+            isinstance(item, str) and item and item == item.strip()
+            for item in values
+        ):
+            raise ValueError("custom reasoning efforts are invalid")
+        return ReasoningSelectableControls(
+            effort=ReasoningEffortChoices(tuple(values))
+        )
+    raise ValueError("custom reasoning has an invalid closed shape")
 
 
 def _catalog_entry_payload(
@@ -165,11 +190,9 @@ def _wire_shape_warning(hint: str | None, wire_api: WireApi) -> bool:
     return wire_api is not expected
 
 
-def _dashscope_credential(kind: str):
-    if kind == "embedding":
-        return DashScopeEmbeddingCredential()
-    if kind == "rerank":
-        return DashScopeRerankCredential()
+def _dashscope_credential_kind(kind: str) -> DashScopeCredentialKind:
+    if kind in {"embedding", "rerank"}:
+        return cast(DashScopeCredentialKind, kind)
     raise ValueError("unknown DashScope credential kind")
 
 
@@ -212,7 +235,6 @@ class LocalHttpServer:
         is_draining: Callable[[], bool],
         settings: LocalSettingsStore,
         catalog: ModelCatalogOwner,
-        credentials: LocalCredentialStore,
         model_runtime: ModelRuntime,
         database_state: Callable[[], str],
         refresh_database_state: Callable[[], Awaitable[object]],
@@ -226,7 +248,6 @@ class LocalHttpServer:
         self._is_draining = is_draining
         self.settings = settings
         self.catalog = catalog
-        self.credentials = credentials
         self.model_runtime = model_runtime
         self._database_state = database_state
         self._refresh_database_state = refresh_database_state
@@ -302,6 +323,13 @@ class LocalHttpServer:
         )
         self._app.router.add_post(
             "/api/model-configurations", self._add_model_configuration
+        )
+        self._app.router.add_delete(
+            "/api/model-configurations/{connection_id}",
+            self._delete_model_configuration,
+        )
+        self._app.router.add_post(
+            "/api/model-configurations/test", self._test_model_configuration
         )
         self._app.router.add_get("/api/local-settings", self._local_settings)
         self._app.router.add_put(
@@ -446,33 +474,19 @@ class LocalHttpServer:
                 status=409,
                 retryable=False,
             )
-        except CredentialStoreError as exc:
-            if exc.state is CredentialState.DENIED:
-                return self._error_response(
-                    "secure_credential_store_denied",
-                    "系统钥匙串拒绝了这次访问。",
-                    status=403,
-                    retryable=True,
-                )
-            if exc.state is CredentialState.UNAVAILABLE:
-                return self._error_response(
-                    "secure_credential_store_unavailable",
-                    "系统钥匙串当前不可用。",
-                    status=503,
-                    retryable=True,
-                )
-            return self._error_response(
-                "secure_credential_missing",
-                "需要的访问密钥尚未保存。",
-                status=409,
-                retryable=False,
-            )
         except LocalSettingsUnavailable:
             return self._error_response(
                 "local_settings_unavailable",
                 "本机设置文件无法读取；请在设置页保存新配置以修复。",
                 status=409,
                 retryable=False,
+            )
+        except LocalSettingsPublishIndeterminate:
+            return self._error_response(
+                "local_settings_publication_indeterminate",
+                "无法确认本机设置是否已经保存；请重新读取设置后再决定是否重试。",
+                status=503,
+                retryable=True,
             )
         except ModelCatalogUnavailable:
             return self._error_response(
@@ -672,25 +686,10 @@ class LocalHttpServer:
 
     async def _add_model_configuration(self, request: web.Request) -> web.Response:
         body = await self._json_body(request)
-        if set(body) != {"route_id", "model_id", "wire_api", "api_key"}:
-            raise ValueError("model configuration has an invalid closed shape")
-        if not all(isinstance(body[key], str) and body[key] for key in body):
-            raise ValueError("model configuration fields must be non-empty text")
-        target = ModelTargetKey(
-            route_id=cast(str, body["route_id"]),
-            wire_api=WireApi(cast(str, body["wire_api"])),
-            model_id=cast(str, body["model_id"]),
-        )
-        selectable = self.model_runtime.selectable_catalog()
-        resolved = create_model_connection(
-            catalog=selectable,
-            target=target,
-            route_wires=self.model_runtime.route_wires,
-        )
+        resolved, api_key = self._resolve_model_configuration_body(body)
         await self.settings.add_model_connection(
             connection=resolved.config,
-            api_key=cast(str, body["api_key"]),
-            credentials=self.credentials,
+            api_key=api_key,
         )
         return web.json_response(
             {
@@ -698,11 +697,130 @@ class LocalHttpServer:
                     resolved.config
                 ),
                 "wire_shape_warning": _wire_shape_warning(
-                    resolved.target.catalog_facts.wire_shape_hint,
-                    target.wire_api,
+                    resolved.target.target_facts.wire_shape_hint,
+                    resolved.config.target.wire_api,
                 ),
             },
             status=201,
+        )
+
+    async def _delete_model_configuration(
+        self, request: web.Request
+    ) -> web.Response:
+        connection_id = ModelConnectionId(request.match_info["connection_id"])
+        settings, deleted = await self.settings.delete_model_connection(connection_id)
+        return web.json_response(
+            {
+                "model_configuration_id": connection_id.value,
+                "deleted": deleted,
+                "model_configurations": await self._connection_summaries(settings),
+            }
+        )
+
+    async def _test_model_configuration(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        resolved, api_key = self._resolve_model_configuration_body(body)
+        try:
+            await probe_model_connection(
+                resolved=resolved,
+                catalog=self.catalog.selectable(),
+                route_wires=self.model_runtime.route_wires,
+                api_key=api_key,
+            )
+        except ModelConnectionProbeFailure as exc:
+            raise HttpPublicError(
+                "MODEL_CONNECTION_TEST_FAILED",
+                f"测试请求未通过（{exc.code}）：{exc.message}",
+                status=409,
+                retryable=True,
+            ) from exc
+        return web.json_response({"status": "ready"})
+
+    def _resolve_model_configuration_body(
+        self, body: dict[str, object]
+    ) -> tuple[ResolvedModelConnection, str | None]:
+        source = body.get("source")
+        if source == "models_dev":
+            expected = {"source", "route_id", "model_id", "wire_api", "api_key"}
+            if set(body) != expected or not all(
+                isinstance(body[key], str) and body[key] for key in expected
+            ):
+                raise ValueError("catalog model configuration has an invalid shape")
+            target = ModelTargetKey(
+                route_id=cast(str, body["route_id"]),
+                wire_api=WireApi(cast(str, body["wire_api"])),
+                model_id=cast(str, body["model_id"]),
+            )
+            return (
+                create_model_connection(
+                    catalog=self.model_runtime.selectable_catalog(),
+                    target=target,
+                    route_wires=self.model_runtime.route_wires,
+                ),
+                cast(str, body["api_key"]),
+            )
+        if source != "user_declared":
+            raise ValueError("model configuration source is invalid")
+        expected = {
+            "source",
+            "configuration_name",
+            "base_url",
+            "model_id",
+            "wire_api",
+            "authentication",
+            "api_key",
+            "context_tokens",
+            "max_output_tokens",
+            "tool_call",
+            "reasoning",
+        }
+        if set(body) != expected:
+            raise ValueError("custom model configuration has an invalid closed shape")
+        name = body["configuration_name"]
+        base_url = body["base_url"]
+        model_id = body["model_id"]
+        raw_wire_api = body["wire_api"]
+        raw_authentication = body["authentication"]
+        context_tokens = body["context_tokens"]
+        max_output_tokens = body["max_output_tokens"]
+        tool_call = body["tool_call"]
+        if (
+            not isinstance(name, str)
+            or not isinstance(base_url, str)
+            or not isinstance(model_id, str)
+            or not isinstance(raw_wire_api, str)
+            or not isinstance(raw_authentication, str)
+            or isinstance(context_tokens, bool)
+            or not isinstance(context_tokens, int)
+            or isinstance(max_output_tokens, bool)
+            or not isinstance(max_output_tokens, int)
+            or not isinstance(tool_call, bool)
+        ):
+            raise ValueError("custom model configuration fields are invalid")
+        authentication = ModelConnectionAuthentication(raw_authentication)
+        api_key = body["api_key"]
+        if authentication is ModelConnectionAuthentication.BEARER_API_KEY:
+            if not isinstance(api_key, str) or not api_key:
+                raise ValueError("custom bearer connection requires an API key")
+        elif api_key is not None:
+            raise ValueError("custom no-auth connection cannot include an API key")
+        declaration = UserDeclaredModelTarget(
+            configuration_name=name,
+            total_context_tokens=context_tokens,
+            max_output_tokens=max_output_tokens,
+            tool_call=tool_call,
+            reasoning=_user_declared_reasoning(body["reasoning"]),
+            authentication=authentication,
+        )
+        return (
+            create_user_declared_model_connection(
+                model_id=model_id,
+                wire_api=WireApi(raw_wire_api),
+                base_url=base_url,
+                declaration=declaration,
+                route_wires=self.model_runtime.route_wires,
+            ),
+            cast(str | None, api_key),
         )
 
     async def _local_settings(self, _request: web.Request) -> web.Response:
@@ -774,24 +892,21 @@ class LocalHttpServer:
         return web.json_response(report.to_dict())
 
     async def _put_dashscope_credential(self, request: web.Request) -> web.Response:
-        key = _dashscope_credential(request.match_info["kind"])
+        kind = _dashscope_credential_kind(request.match_info["kind"])
         body = await self._json_body(request)
-        if set(body) != {"api_key"} or not isinstance(body["api_key"], str):
+        if (
+            set(body) != {"api_key"}
+            or not isinstance(body["api_key"], str)
+            or not body["api_key"]
+        ):
             raise ValueError("DashScope credential has an invalid closed shape")
-        state = await asyncio.to_thread(
-            self.credentials.put, key, body["api_key"]
-        )
-        return web.json_response({"credential_state": state.value})
+        await self.settings.save_dashscope_api_key(kind, body["api_key"])
+        return web.json_response({"configured": True})
 
     async def _delete_dashscope_credential(self, request: web.Request) -> web.Response:
-        key = _dashscope_credential(request.match_info["kind"])
-        outcome = await asyncio.to_thread(self.credentials.delete, key)
-        state = (
-            CredentialState.MISSING.value
-            if outcome.value in {"DELETED", "MISSING"}
-            else outcome.value
-        )
-        return web.json_response({"credential_state": state})
+        kind = _dashscope_credential_kind(request.match_info["kind"])
+        await self.settings.delete_dashscope_api_key(kind)
+        return web.json_response({"configured": False})
 
     async def _update_model_call_binding(self, request: web.Request) -> web.Response:
         body = await self._json_body(request)
@@ -811,14 +926,6 @@ class LocalHttpServer:
         except LocalSettingsUnavailable:
             settings = LocalSettings()
             settings_state = "unavailable"
-        embedding, rerank = await asyncio.gather(
-            asyncio.to_thread(
-                self.credentials.state, DashScopeEmbeddingCredential()
-            ),
-            asyncio.to_thread(
-                self.credentials.state, DashScopeRerankCredential()
-            ),
-        )
         return {
             "local_settings": {
                 "state": settings_state,
@@ -831,8 +938,12 @@ class LocalHttpServer:
                     }
                 ),
                 "dashscope_credentials": {
-                    "embedding": embedding.value,
-                    "rerank": rerank.value,
+                    "embedding_configured": (
+                        settings.dashscope_api_key("embedding") is not None
+                    ),
+                    "rerank_configured": (
+                        settings.dashscope_api_key("rerank") is not None
+                    ),
                 },
             },
             "model_configurations": await self._connection_summaries(settings),
@@ -851,13 +962,21 @@ class LocalHttpServer:
     async def _connection_summary(
         self, connection: ModelConnectionConfig
     ) -> dict[str, object]:
-        state = await asyncio.to_thread(
-            self.credentials.state, ModelProviderCredential(connection.id)
-        )
         payload = model_connection_to_dict(connection)
+        payload.pop("user_declared", None)
+        payload.update(
+            {
+                "source": (
+                    "models_dev"
+                    if connection.user_declared is None
+                    else "user_declared"
+                ),
+                "authentication": connection.authentication.value,
+            }
+        )
         try:
             contract = resolve_model_target_contract(
-                catalog=self.model_runtime.selectable_catalog(),
+                catalog=self.catalog.selectable(),
                 connection=connection,
                 route_wires=self.model_runtime.route_wires,
             )
@@ -865,7 +984,7 @@ class LocalHttpServer:
             payload.update(
                 {
                     "status": "unavailable",
-                    "credential_state": state.value,
+                    "credential_configured": connection.requires_api_key,
                     "reasoning": {"kind": "unavailable"},
                 }
             )
@@ -873,10 +992,12 @@ class LocalHttpServer:
         payload.update(
             {
                 "status": "ready",
-                "credential_state": state.value,
-                "route_name": contract.catalog_facts.route_name,
-                "display_name": contract.catalog_facts.display_name,
-                "context_tokens": contract.catalog_facts.limits.total_context_tokens,
+                "credential_configured": connection.requires_api_key,
+                "route_name": contract.target_facts.route_name,
+                "display_name": contract.target_facts.display_name,
+                "context_tokens": contract.target_facts.limits.total_context_tokens,
+                "max_output_tokens": contract.target_facts.limits.max_output_tokens,
+                "tool_call": contract.target_facts.tool_call,
                 "reasoning": _reasoning_payload(contract.reasoning),
                 "default_reasoning": reasoning_selection_to_dict(
                     default_reasoning_selection(contract.reasoning)

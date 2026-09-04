@@ -9,19 +9,13 @@ from aiohttp import ClientSession, DummyCookieJar
 import pytest
 
 from pulsara_agent import mcp_config
+from pulsara_agent.web_app import http_server as http_server_module
 from pulsara_agent.web_app import session_controller as session_controller_module
 from pulsara_agent.web_app.browser_bridge import LocalBrowserBridge
 from pulsara_agent.web_app.http_server import LocalHttpServer
 from pulsara_agent.web_app.session_controller import LocalSessionController
 from pulsara_agent.llm.model_catalog import ModelsDevCatalogClient
 from pulsara_agent.llm.runtime import ModelRuntime
-from pulsara_agent.local_credentials import (
-    CredentialState,
-    DashScopeEmbeddingCredential,
-    DashScopeRerankCredential,
-    InMemoryCredentialStore,
-    ModelProviderCredential,
-)
 from pulsara_agent.settings import LocalSettingsStore
 from pulsara_agent.capability.user_skill_config import (
     load_user_skill_config,
@@ -39,7 +33,6 @@ def _model_server_dependencies() -> dict[str, object]:
     return {
         "settings": runtime.settings,
         "catalog": runtime.catalog,
-        "credentials": runtime.credentials,
         "model_runtime": runtime,
         "database_state": lambda: "ready",
         "refresh_database_state": refresh_database_state,
@@ -278,11 +271,9 @@ async def _exercise_zero_config_settings_and_database(tmp_path: Path) -> None:
     (static_root / "index.html").write_text("Pulsara settings", encoding="utf-8")
     base = test_model_runtime()
     settings = LocalSettingsStore(tmp_path / "pulsara" / "local-settings.yaml")
-    credentials = InMemoryCredentialStore()
     runtime = ModelRuntime(
         settings=settings,
         catalog=base.catalog,
-        credentials=credentials,
         route_wires=base.route_wires,
     )
     database_state = "database_not_configured"
@@ -307,7 +298,6 @@ async def _exercise_zero_config_settings_and_database(tmp_path: Path) -> None:
         is_draining=lambda: False,
         settings=settings,
         catalog=base.catalog,
-        credentials=credentials,
         model_runtime=runtime,
         database_state=lambda: database_state,
         refresh_database_state=refresh_database_state,
@@ -350,6 +340,7 @@ async def _exercise_zero_config_settings_and_database(tmp_path: Path) -> None:
             async with client.post(
                 f"{server.origin}/api/model-configurations",
                 json={
+                    "source": "models_dev",
                     "route_id": "test",
                     "model_id": "test-model",
                     "wire_api": "openai_responses",
@@ -361,44 +352,86 @@ async def _exercise_zero_config_settings_and_database(tmp_path: Path) -> None:
                 payload = await response.json()
                 rendered = str(payload)
                 assert secret not in rendered
-                assert payload["model_configuration"]["credential_state"] == "PRESENT"
+                assert payload["model_configuration"]["credential_configured"] is True
                 connection_id = payload["model_configuration"]["id"]
 
             stored = settings.read()
             assert len(stored.model_connections) == 1
             assert stored.model_connections[0].id.value == connection_id
-            assert secret not in settings.path.read_text(encoding="utf-8")
-            assert credentials.state(
-                ModelProviderCredential(stored.model_connections[0].id)
-            ) is CredentialState.PRESENT
+            assert stored.model_api_key(stored.model_connections[0].id) == secret
+            assert secret in settings.path.read_text(encoding="utf-8")
 
-            for kind, key in (
-                ("embedding", DashScopeEmbeddingCredential()),
-                ("rerank", DashScopeRerankCredential()),
-            ):
+            async with client.post(
+                f"{server.origin}/api/model-configurations",
+                json={
+                    "source": "user_declared",
+                    "configuration_name": "Local No Auth",
+                    "base_url": "http://127.0.0.1:11434/v1",
+                    "model_id": "local-model",
+                    "wire_api": "openai_responses",
+                    "authentication": "none",
+                    "api_key": None,
+                    "context_tokens": 256_000,
+                    "max_output_tokens": 8_192,
+                    "tool_call": True,
+                    "reasoning": {"kind": "provider_default"},
+                },
+                headers=mutation_headers,
+            ) as response:
+                assert response.status == 201
+                custom = (await response.json())["model_configuration"]
+                assert custom["source"] == "user_declared"
+                assert custom["route_name"] == "Local No Auth"
+                assert custom["credential_configured"] is False
+                assert custom["authentication"] == "none"
+
+            stored = settings.read()
+            assert len(stored.model_connections) == 2
+            assert stored.model_connections[1].user_declared is not None
+
+            async with client.delete(
+                f"{server.origin}/api/model-configurations/{connection_id}",
+                headers=mutation_headers,
+            ) as response:
+                assert response.status == 200
+                deleted = await response.json()
+                assert deleted["model_configuration_id"] == connection_id
+                assert deleted["deleted"] is True
+                assert [
+                    item["id"] for item in deleted["model_configurations"]
+                ] == [custom["id"]]
+            stored = settings.read()
+            assert [item.id.value for item in stored.model_connections] == [
+                custom["id"]
+            ]
+            assert stored.model_api_keys == ()
+            assert secret not in settings.path.read_text(encoding="utf-8")
+
+            async with client.delete(
+                f"{server.origin}/api/model-configurations/{connection_id}",
+                headers=mutation_headers,
+            ) as response:
+                assert response.status == 200
+                assert (await response.json())["deleted"] is False
+
+            for kind in ("embedding", "rerank"):
                 async with client.put(
                     f"{server.origin}/api/local-settings/dashscope-credentials/{kind}",
                     json={"api_key": f"{kind}-secret"},
                     headers=mutation_headers,
                 ) as response:
                     assert response.status == 200
-                    assert (await response.json()) == {
-                        "credential_state": "PRESENT"
-                    }
-                assert credentials.state(key) is CredentialState.PRESENT
+                    assert (await response.json()) == {"configured": True}
+                assert settings.read().dashscope_api_key(kind) == f"{kind}-secret"
 
             async with client.delete(
                 f"{server.origin}/api/local-settings/dashscope-credentials/embedding",
                 headers=mutation_headers,
             ) as response:
                 assert response.status == 200
-                assert (await response.json()) == {"credential_state": "MISSING"}
-            assert credentials.state(DashScopeEmbeddingCredential()) is (
-                CredentialState.MISSING
-            )
-            assert credentials.state(DashScopeRerankCredential()) is (
-                CredentialState.PRESENT
-            )
+                assert (await response.json()) == {"configured": False}
+            assert settings.read().dashscope_api_key("embedding") is None
+            assert settings.read().dashscope_api_key("rerank") == "rerank-secret"
 
             async with client.put(
                 f"{server.origin}/api/local-settings/postgres",
@@ -415,6 +448,71 @@ async def _exercise_zero_config_settings_and_database(tmp_path: Path) -> None:
             assert settings_saved == 1
             assert state_refreshes == 0
             assert settings.read().postgres is not None
+    finally:
+        await server.aclose()
+
+
+def test_model_connection_test_is_independent_from_save(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asyncio.run(_exercise_model_connection_test(tmp_path, monkeypatch))
+
+
+async def _exercise_model_connection_test(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    static_root = tmp_path / "static"
+    static_root.mkdir()
+    (static_root / "index.html").write_text("Pulsara settings", encoding="utf-8")
+    base = test_model_runtime()
+    settings = LocalSettingsStore(tmp_path / "pulsara" / "local-settings.yaml")
+    runtime = ModelRuntime(
+        settings=settings,
+        catalog=base.catalog,
+        route_wires=base.route_wires,
+    )
+    observed: dict[str, object] = {}
+
+    async def probe(**kwargs: object) -> None:
+        observed.update(kwargs)
+
+    monkeypatch.setattr(http_server_module, "probe_model_connection", probe)
+    server = LocalHttpServer(
+        sessions=cast(LocalSessionController, _Sessions()),
+        bridge=cast(LocalBrowserBridge, _Bridge()),
+        static_root=static_root,
+        requested_port=0,
+        is_ready=lambda: True,
+        is_draining=lambda: False,
+        **_model_server_dependencies_for_runtime(runtime),
+    )
+    await server.start()
+    try:
+        async with ClientSession(cookie_jar=DummyCookieJar()) as client:
+            async with client.post(
+                f"{server.origin}/api/model-configurations/test",
+                json={
+                    "source": "user_declared",
+                    "configuration_name": "Private Gateway",
+                    "base_url": "https://models.example.test/v1",
+                    "model_id": "private-model",
+                    "wire_api": "openai_responses",
+                    "authentication": "bearer_api_key",
+                    "api_key": "transient-secret",
+                    "context_tokens": 300_000,
+                    "max_output_tokens": 16_384,
+                    "tool_call": False,
+                    "reasoning": {"kind": "effort", "values": ["low", "high"]},
+                },
+                headers={"Origin": server.origin, "Sec-Fetch-Site": "same-origin"},
+            ) as response:
+                assert response.status == 200
+                assert await response.json() == {"status": "ready"}
+        assert settings.read().model_connections == ()
+        assert settings.read().model_api_keys == ()
+        resolved = observed["resolved"]
+        assert resolved.config.user_declared.configuration_name == "Private Gateway"
+        assert observed["api_key"] == "transient-secret"
     finally:
         await server.aclose()
 
@@ -469,7 +567,6 @@ def _model_server_dependencies_for_runtime(runtime: ModelRuntime) -> dict[str, o
     return {
         "settings": runtime.settings,
         "catalog": runtime.catalog,
-        "credentials": runtime.credentials,
         "model_runtime": runtime,
         "database_state": lambda: "ready",
         "refresh_database_state": refresh_database_state,

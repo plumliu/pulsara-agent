@@ -13,6 +13,7 @@ from urllib.parse import unquote, urlsplit
 from pulsara_agent.llm.model_catalog import (
     ModelCatalogEntry,
     ModelCatalogEntryKey,
+    ModelHardLimits,
     ModelTargetKey,
     ReasoningControlContract,
     ReasoningProviderDefault,
@@ -29,6 +30,8 @@ from pulsara_agent.llm.model_connections import (
     ReasoningEffortSelection,
     ReasoningSelection,
     ReasoningToggleSelection,
+    USER_DECLARED_MODEL_ROUTE_ID,
+    UserDeclaredModelTarget,
 )
 from pulsara_agent.llm.provider import ModelIdentityPolicy
 from pulsara_agent.llm.provider import RouteWireProfile
@@ -128,7 +131,7 @@ class RouteWireRegistry:
 
 
 @dataclass(frozen=True, slots=True)
-class ModelCatalogFacts:
+class ModelTargetFacts:
     display_name: str
     route_name: str
     tool_call: bool | None
@@ -139,7 +142,7 @@ class ModelCatalogFacts:
 @dataclass(frozen=True, slots=True)
 class ModelTargetContract:
     key: ModelTargetKey
-    catalog_facts: ModelCatalogFacts
+    target_facts: ModelTargetFacts
     reasoning: ReasoningControlContract
     route_wire: RouteWireContract
     canonical_endpoint_base_url: str
@@ -253,32 +256,70 @@ def controls_supported_by_adapter(
 
 def resolve_model_target_contract(
     *,
-    catalog: SelectableModelCatalog,
+    catalog: SelectableModelCatalog | None,
     connection: ModelConnectionConfig,
     route_wires: RouteWireRegistry,
 ) -> ModelTargetContract:
-    try:
-        entry = catalog.require(connection.target.catalog_key)
-    except KeyError as exc:
-        raise ModelTargetNotExecutable(str(exc)) from exc
+    entry = _entry_for_connection(catalog=catalog, connection=connection)
     try:
         route_wire = route_wires.contract_for(entry, connection.target.wire_api)
     except KeyError as exc:
         raise ModelTargetNotExecutable(str(exc)) from exc
     limits = derive_model_context_limits(entry)
     canonical_endpoint = canonicalize_endpoint(connection.base_url)
+    reasoning = controls_supported_by_adapter(entry.reasoning, route_wire)
+    if connection.user_declared is not None and reasoning != entry.reasoning:
+        raise ModelTargetNotExecutable(
+            "custom reasoning control is unsupported by the selected wire API"
+        )
     return ModelTargetContract(
         key=connection.target,
-        catalog_facts=ModelCatalogFacts(
+        target_facts=ModelTargetFacts(
             display_name=entry.display_name,
             route_name=entry.route_name,
             tool_call=entry.tool_call,
             limits=limits,
             wire_shape_hint=entry.wire_shape_hint,
         ),
-        reasoning=controls_supported_by_adapter(entry.reasoning, route_wire),
+        reasoning=reasoning,
         route_wire=route_wire,
         canonical_endpoint_base_url=canonical_endpoint,
+    )
+
+
+def _entry_for_connection(
+    *,
+    catalog: SelectableModelCatalog | None,
+    connection: ModelConnectionConfig,
+) -> ModelCatalogEntry:
+    declared = connection.user_declared
+    if declared is not None:
+        hard_limits = _user_declared_hard_limits(declared)
+        return ModelCatalogEntry(
+            key=connection.target.catalog_key,
+            route_name=declared.configuration_name,
+            display_name=connection.target.model_id,
+            endpoint=connection.base_url,
+            wire_dialect=RouteWireDialect.OPENAI_COMPATIBLE,
+            total_context_tokens=hard_limits.total_context_tokens,
+            limits=hard_limits,
+            reasoning=declared.reasoning,
+            tool_call=declared.tool_call,
+            wire_shape_hint=None,
+        )
+    if catalog is None:
+        raise ModelTargetNotExecutable("model catalog snapshot is unavailable")
+    try:
+        return catalog.require(connection.target.catalog_key)
+    except KeyError as exc:
+        raise ModelTargetNotExecutable(str(exc)) from exc
+
+
+def _user_declared_hard_limits(value: UserDeclaredModelTarget) -> ModelHardLimits:
+    return ModelHardLimits(
+        value.total_context_tokens,
+        value.total_context_tokens,
+        value.max_output_tokens,
     )
 
 
@@ -301,6 +342,32 @@ def create_model_connection(
         config=config,
         target=resolve_model_target_contract(
             catalog=catalog, connection=config, route_wires=route_wires
+        ),
+    )
+
+
+def create_user_declared_model_connection(
+    *,
+    model_id: str,
+    wire_api: WireApi,
+    base_url: str,
+    declaration: UserDeclaredModelTarget,
+    route_wires: RouteWireRegistry,
+    connection_id: ModelConnectionId | None = None,
+) -> ResolvedModelConnection:
+    resolved_id = connection_id or ModelConnectionId.new()
+    config = ModelConnectionConfig(
+        id=resolved_id,
+        target=ModelTargetKey(USER_DECLARED_MODEL_ROUTE_ID, wire_api, model_id),
+        base_url=canonicalize_endpoint(base_url),
+        user_declared=declaration,
+    )
+    return ResolvedModelConnection(
+        config=config,
+        target=resolve_model_target_contract(
+            catalog=None,
+            connection=config,
+            route_wires=route_wires,
         ),
     )
 
@@ -402,7 +469,7 @@ def with_output_cap(
 ) -> ModelTargetContract:
     if maximum_output_tokens < 1:
         raise ValueError("model output cap must be positive")
-    limits = target.catalog_facts.limits
+    limits = target.target_facts.limits
     cap = min(maximum_output_tokens, limits.max_output_tokens)
     pre_margin = min(
         limits.max_input_tokens, limits.total_context_tokens - cap
@@ -417,7 +484,7 @@ def with_output_cap(
     )
     return replace(
         target,
-        catalog_facts=replace(target.catalog_facts, limits=bounded),
+        target_facts=replace(target.target_facts, limits=bounded),
     )
 
 
@@ -468,7 +535,7 @@ __all__ = [
     "FrozenModelResolutionSnapshot",
     "DEFAULT_OUTPUT_TOKEN_TARGET",
     "INPUT_SAFETY_MARGIN_TARGET",
-    "ModelCatalogFacts",
+    "ModelTargetFacts",
     "ModelReasoningSelectionInvalid",
     "ModelTargetContract",
     "ModelTargetNotExecutable",
@@ -479,6 +546,7 @@ __all__ = [
     "canonicalize_endpoint",
     "controls_supported_by_adapter",
     "create_model_connection",
+    "create_user_declared_model_connection",
     "default_reasoning_selection",
     "derive_model_context_limits",
     "reasoning_wire_fields",

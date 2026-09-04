@@ -71,7 +71,7 @@ def resolve_model_target(
     *,
     connection: ModelConnectionConfig,
     binding: ModelCallBinding,
-    catalog: SelectableModelCatalog,
+    catalog: SelectableModelCatalog | None,
     route_wires: RouteWireRegistry,
     registry: NormalizedLLMTransportRegistry,
 ) -> ResolvedModelTarget:
@@ -95,7 +95,7 @@ def resolve_model_target(
         or transport.contract_version != adapter.transport_contract_version
     ):
         raise ModelTransportUnavailable("route/wire transport contract drifted")
-    limits = contract.catalog_facts.limits
+    limits = contract.target_facts.limits
     output = limits.default_output_tokens
     pre_margin = min(
         limits.max_input_tokens,
@@ -206,7 +206,7 @@ def rebind_model_target(
     *,
     connection: ModelConnectionConfig,
     binding: ModelCallBinding,
-    catalog: SelectableModelCatalog,
+    catalog: SelectableModelCatalog | None,
     route_wires: RouteWireRegistry,
     registry: NormalizedLLMTransportRegistry,
     fact: ResolvedModelTargetFact,

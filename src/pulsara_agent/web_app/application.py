@@ -19,10 +19,6 @@ from pulsara_agent.llm.model_catalog import (
     ModelsDevCatalogClient,
 )
 from pulsara_agent.llm.runtime import ModelRuntime
-from pulsara_agent.local_credentials import (
-    LocalCredentialStore,
-    MacOSKeychainCredentialStore,
-)
 from pulsara_agent.settings import LocalSettingsStore, LocalSettingsUnavailable
 from pulsara_agent.storage.migrations.errors import (
     PostgresSchemaError,
@@ -70,7 +66,6 @@ class LocalWebApplication:
         port: int = 0,
         static_root: Path | None = None,
         catalog: ModelCatalogOwner | None = None,
-        credentials: LocalCredentialStore | None = None,
         model_runtime: ModelRuntime | None = None,
         core: KernelHostCore | None = None,
     ) -> None:
@@ -78,11 +73,9 @@ class LocalWebApplication:
             raise ValueError("local Web port is out of bounds")
         self.settings = settings or LocalSettingsStore()
         self.catalog = catalog or ModelCatalogOwner(ModelsDevCatalogClient())
-        self.credentials = credentials or MacOSKeychainCredentialStore()
         self.model_runtime = model_runtime or ModelRuntime.production(
             settings=self.settings,
             catalog=self.catalog,
-            credentials=self.credentials,
         )
         self.workspace_input = workspace_input
         self.permission_policy = permission_policy
@@ -156,7 +149,6 @@ class LocalWebApplication:
                     is_draining=lambda: self.draining,
                     settings=self.settings,
                     catalog=self.catalog,
-                    credentials=self.credentials,
                     model_runtime=self.model_runtime,
                     database_state=lambda: self.database_state.value,
                     refresh_database_state=self.refresh_database_state,

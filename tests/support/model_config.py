@@ -32,17 +32,13 @@ from pulsara_agent.llm.provider_replay import provider_replay_contract_fingerpri
 from pulsara_agent.llm.retry import LLMRetryConfig
 from pulsara_agent.llm.route_wires import production_route_wire_registry
 from pulsara_agent.llm.runtime import ModelRuntime
-from pulsara_agent.local_credentials import (
-    InMemoryCredentialStore,
-    ModelProviderCredential,
-)
 from pulsara_agent.primitives.model_call import ModelContextLimits
 from pulsara_agent.conversation_kernel.contracts import PromptDeliveryMode
 from pulsara_agent.conversation_kernel.repository import (
     build_prepared_root_turn_intent,
 )
 from pulsara_agent.conversation_kernel.steer import PreparedPromptIngressCommand
-from pulsara_agent.settings import LocalPostgresConfig, LocalSettings
+from pulsara_agent.settings import LocalModelApiKey, LocalPostgresConfig, LocalSettings
 
 
 @dataclass(slots=True)
@@ -151,10 +147,9 @@ def test_model_runtime(
                 LocalPostgresConfig(postgres_dsn) if postgres_dsn is not None else None
             ),
             model_connections=(connection,),
+            model_api_keys=(LocalModelApiKey(connection_id, api_key),),
         )
     )
-    credentials = InMemoryCredentialStore()
-    credentials.put(ModelProviderCredential(connection_id), api_key)
 
     base_contract = production_route_wire_registry().contract_for(
         entry, parsed_wire_api
@@ -181,7 +176,6 @@ def test_model_runtime(
     return TestModelRuntime(  # type: ignore[arg-type] - explicit immutable test store
         settings=settings,
         catalog=catalog,
-        credentials=credentials,
         route_wires=route_wires,
         retry=retry,
     )

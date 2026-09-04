@@ -75,7 +75,7 @@ def validate_model_context_shape_for_call(
         raise ModelContextIdentityMismatch(
             "compiled model context requires model_call_index"
         )
-    if context.tools and call.target.contract.catalog_facts.tool_call is False:
+    if context.tools and call.target.contract.target_facts.tool_call is False:
         raise ModelTargetCapabilityMismatch("model target does not support tools")
     if any(message.role is MessageRole.SYSTEM for message in context.messages):
         raise ModelContextIdentityMismatch(

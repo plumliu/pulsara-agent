@@ -1,18 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from pulsara_agent.conversation_kernel.memory_tools import KernelMemoryToolPort
-from pulsara_agent.local_credentials import (
-    CredentialState,
-    CredentialStoreError,
-    DashScopeEmbeddingCredential,
-    DashScopeRerankCredential,
-    InMemoryCredentialStore,
-)
 from pulsara_agent.retrieval.config import (
     EmbeddingBackendConfig,
     RerankBackendConfig,
@@ -20,9 +14,10 @@ from pulsara_agent.retrieval.config import (
 from pulsara_agent.retrieval.embedding.openai_compatible import (
     OpenAICompatibleEmbeddingProvider,
 )
+from pulsara_agent.settings import LocalSettingsStore
 
 
-def _memory_port(credentials: InMemoryCredentialStore) -> KernelMemoryToolPort:
+def _memory_port(settings: LocalSettingsStore) -> KernelMemoryToolPort:
     return KernelMemoryToolPort(
         repository=SimpleNamespace(connection_provider=object()),
         session_id="session:test",
@@ -30,49 +25,39 @@ def _memory_port(credentials: InMemoryCredentialStore) -> KernelMemoryToolPort:
         embedding_config=EmbeddingBackendConfig(),
         rerank_config=RerankBackendConfig(),
         io_owner=object(),
-        credentials=credentials,
+        settings=settings,
     )
 
 
-def test_embedding_and_rerank_credentials_are_independent() -> None:
+def test_embedding_and_rerank_keys_are_independent(tmp_path: Path) -> None:
     async def exercise() -> None:
-        credentials = InMemoryCredentialStore()
-        port = _memory_port(credentials)
+        settings = LocalSettingsStore(tmp_path / "local-settings.yaml")
+        port = _memory_port(settings)
         assert await port._embedding_provider() is None
         assert await port._rerank_provider() is None
 
-        credentials.put(DashScopeEmbeddingCredential(), "embedding-secret")
+        await settings.save_dashscope_api_key("embedding", "embedding-secret")
         assert await port._embedding_provider() is not None
         assert await port._rerank_provider() is None
 
-        credentials.put(DashScopeRerankCredential(), "rerank-secret")
+        await settings.save_dashscope_api_key("rerank", "rerank-secret")
         assert await port._rerank_provider() is not None
         await port.aclose()
 
     asyncio.run(exercise())
 
 
-@pytest.mark.parametrize(
-    ("unavailable", "denied", "expected"),
-    (
-        (False, False, CredentialState.MISSING),
-        (True, False, CredentialState.UNAVAILABLE),
-        (False, True, CredentialState.DENIED),
-    ),
-)
-def test_missing_or_blocked_retrieval_credentials_degrade_without_borrow(
-    unavailable: bool,
-    denied: bool,
-    expected: CredentialState,
+@pytest.mark.parametrize("unreadable", (False, True))
+def test_missing_or_unreadable_retrieval_settings_degrade_without_opening_provider(
+    tmp_path: Path,
+    unreadable: bool,
 ) -> None:
     async def exercise() -> None:
-        credentials = InMemoryCredentialStore(
-            unavailable=unavailable,
-            denied=denied,
-        )
-        port = _memory_port(credentials)
-        assert credentials.state(DashScopeEmbeddingCredential()) is expected
-        assert credentials.state(DashScopeRerankCredential()) is expected
+        path = tmp_path / "local-settings.yaml"
+        if unreadable:
+            path.write_text("schema: [\n", encoding="utf-8")
+        settings = LocalSettingsStore(path)
+        port = _memory_port(settings)
         assert await port._embedding_provider() is None
         assert await port._rerank_provider() is None
         pre_rerank = SimpleNamespace(facts=("pre-rerank-result",))
@@ -84,30 +69,13 @@ def test_missing_or_blocked_retrieval_credentials_degrade_without_borrow(
             )
             is pre_rerank
         )
-        assert credentials.borrow_count == 0
         await port.aclose()
 
     asyncio.run(exercise())
 
 
-def test_retrieval_borrow_is_a_snapshot_across_replace_and_clear() -> None:
-    credentials = InMemoryCredentialStore()
-    key = DashScopeEmbeddingCredential()
-    credentials.put(key, "first-secret")
-    active = credentials.borrow(key)
-    credentials.put(key, "second-secret")
-    assert active.value == "first-secret"
-    with credentials.borrow(key) as next_operation:
-        assert next_operation.value == "second-secret"
-    credentials.delete(key)
-    assert active.value == "first-secret"
-    active.close()
-    with pytest.raises(CredentialStoreError) as raised:
-        credentials.borrow(key)
-    assert raised.value.state is CredentialState.MISSING
-
-
-def test_embedding_operation_borrows_once_and_next_operation_reads_replacement(
+def test_retrieval_operation_reads_once_and_next_operation_uses_replacement(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import pulsara_agent.retrieval.embedding.openai_compatible as embedding_module
@@ -141,21 +109,19 @@ def test_embedding_operation_borrows_once_and_next_operation_reads_replacement(
     monkeypatch.setattr(embedding_module.openai, "AsyncOpenAI", _Client)
 
     async def exercise() -> None:
-        credentials = InMemoryCredentialStore()
-        key = DashScopeEmbeddingCredential()
-        credentials.put(key, "first-secret")
+        settings = LocalSettingsStore(tmp_path / "local-settings.yaml")
+        await settings.save_dashscope_api_key("embedding", "first-secret")
         provider = OpenAICompatibleEmbeddingProvider(
             model="text-embedding-v4",
             base_url="https://dashscope.example/v1",
-            credentials=credentials,
+            settings=settings,
         )
 
         first = asyncio.create_task(provider.embed("first operation"))
         await started.wait()
-        credentials.put(key, "second-secret")
+        await settings.save_dashscope_api_key("embedding", "second-secret")
         release.set()
         assert len(await first) == 1024
-        assert credentials.borrow_count == 1
 
         started.clear()
         release.clear()
@@ -163,7 +129,6 @@ def test_embedding_operation_borrows_once_and_next_operation_reads_replacement(
         await started.wait()
         release.set()
         assert len(await second) == 1024
-        assert credentials.borrow_count == 2
         assert observed_keys == ["first-secret", "second-secret"]
 
     asyncio.run(exercise())

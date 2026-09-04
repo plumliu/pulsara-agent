@@ -37,8 +37,6 @@ export type DatabaseDataPlaneState =
   | 'database_schema_action_required'
   | 'ready';
 
-export type LocalCredentialState = 'PRESENT' | 'MISSING' | 'DENIED' | 'UNAVAILABLE';
-
 export type ReasoningSelectionPayload =
   | { kind: 'effort'; value: string | null }
   | { kind: 'toggle'; enabled: boolean }
@@ -63,18 +61,47 @@ export interface ReasoningControlSummary {
 
 export interface ModelConfigurationSummary {
   id: string;
+  source: 'models_dev' | 'user_declared';
   route_id: string;
   wire_api: 'openai_chat_completions' | 'openai_responses';
   model_id: string;
   base_url: string;
   status: 'ready' | 'unavailable';
-  credential_state: LocalCredentialState;
+  authentication: 'bearer_api_key' | 'none';
+  credential_configured: boolean;
   route_name?: string;
   display_name?: string;
   context_tokens?: number;
+  max_output_tokens?: number;
+  tool_call?: boolean | null;
   reasoning: ReasoningControlSummary;
   default_reasoning?: ReasoningSelectionPayload | null;
 }
+
+export type ModelConfigurationInput =
+  | {
+    source: 'models_dev';
+    route_id: string;
+    model_id: string;
+    wire_api: 'openai_chat_completions' | 'openai_responses';
+    api_key: string;
+  }
+  | {
+    source: 'user_declared';
+    configuration_name: string;
+    base_url: string;
+    model_id: string;
+    wire_api: 'openai_chat_completions' | 'openai_responses';
+    authentication: 'bearer_api_key' | 'none';
+    api_key: string | null;
+    context_tokens: number;
+    max_output_tokens: number;
+    tool_call: boolean;
+    reasoning:
+      | { kind: 'provider_default' }
+      | { kind: 'toggle' }
+      | { kind: 'effort'; values: string[] };
+  };
 
 export interface ModelCatalogWireApi {
   wire_api: 'openai_chat_completions' | 'openai_responses';
@@ -112,8 +139,8 @@ export interface LocalSettingsSummary {
   state?: 'ready' | 'unavailable';
   postgres: { runtime_dsn: string; admin_dsn: string | null } | null;
   dashscope_credentials: {
-    embedding: LocalCredentialState;
-    rerank: LocalCredentialState;
+    embedding_configured: boolean;
+    rerank_configured: boolean;
   };
 }
 
@@ -201,17 +228,18 @@ export interface RuntimeAdapter {
   bootstrap(): Promise<RuntimeBootstrap>;
   modelCatalog(refresh?: boolean): Promise<ModelCatalogReadModel>;
   localSettings(): Promise<LocalSettingsReadModel>;
-  addModelConfiguration(input: {
-    route_id: string;
-    model_id: string;
-    wire_api: 'openai_chat_completions' | 'openai_responses';
-    api_key: string;
-  }): Promise<{ model_configuration: ModelConfigurationSummary; wire_shape_warning: boolean }>;
+  addModelConfiguration(input: ModelConfigurationInput): Promise<{ model_configuration: ModelConfigurationSummary; wire_shape_warning: boolean }>;
+  deleteModelConfiguration(connectionId: string): Promise<{
+    model_configuration_id: string;
+    deleted: boolean;
+    model_configurations: ModelConfigurationSummary[];
+  }>;
+  testModelConfiguration(input: ModelConfigurationInput): Promise<{ status: 'ready' }>;
   savePostgres(runtimeDsn: string, adminDsn: string | null): Promise<LocalSettingsReadModel & { restart_required: boolean }>;
   checkPostgres(): Promise<Record<string, unknown>>;
   migratePostgres(): Promise<Record<string, unknown>>;
-  putDashScopeCredential(kind: 'embedding' | 'rerank', apiKey: string): Promise<LocalCredentialState>;
-  deleteDashScopeCredential(kind: 'embedding' | 'rerank'): Promise<LocalCredentialState>;
+  putDashScopeCredential(kind: 'embedding' | 'rerank', apiKey: string): Promise<boolean>;
+  deleteDashScopeCredential(kind: 'embedding' | 'rerank'): Promise<boolean>;
   updateModelCallBinding(sessionId: string, binding: ModelCallBindingPayload): Promise<ModelCallBindingUpdate>;
   connect(sessionId: string, takeover?: boolean): Promise<RuntimeConnection>;
   createSession(selection: SessionWorkspaceSelection): Promise<SessionSummary>;
@@ -672,16 +700,28 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
     return apiRequest<LocalSettingsReadModel>('/api/local-settings');
   }
 
-  async addModelConfiguration(input: {
-    route_id: string;
-    model_id: string;
-    wire_api: 'openai_chat_completions' | 'openai_responses';
-    api_key: string;
-  }) {
+  async addModelConfiguration(input: ModelConfigurationInput) {
     return apiRequest<{
       model_configuration: ModelConfigurationSummary;
       wire_shape_warning: boolean;
     }>('/api/model-configurations', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+  }
+
+  async deleteModelConfiguration(connectionId: string) {
+    return apiRequest<{
+      model_configuration_id: string;
+      deleted: boolean;
+      model_configurations: ModelConfigurationSummary[];
+    }>(`/api/model-configurations/${encodeURIComponent(connectionId)}`, {
+      method: 'DELETE',
+    });
+  }
+
+  async testModelConfiguration(input: ModelConfigurationInput) {
+    return apiRequest<{ status: 'ready' }>('/api/model-configurations/test', {
       method: 'POST',
       body: JSON.stringify(input),
     });
@@ -705,20 +745,20 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
     return apiRequest<Record<string, unknown>>('/api/local-settings/postgres/migrate', { method: 'POST' });
   }
 
-  async putDashScopeCredential(kind: 'embedding' | 'rerank', apiKey: string): Promise<LocalCredentialState> {
-    const value = await apiRequest<{ credential_state: LocalCredentialState }>(
+  async putDashScopeCredential(kind: 'embedding' | 'rerank', apiKey: string): Promise<boolean> {
+    const value = await apiRequest<{ configured: boolean }>(
       `/api/local-settings/dashscope-credentials/${kind}`,
       { method: 'PUT', body: JSON.stringify({ api_key: apiKey }) },
     );
-    return value.credential_state;
+    return value.configured;
   }
 
-  async deleteDashScopeCredential(kind: 'embedding' | 'rerank'): Promise<LocalCredentialState> {
-    const value = await apiRequest<{ credential_state: LocalCredentialState }>(
+  async deleteDashScopeCredential(kind: 'embedding' | 'rerank'): Promise<boolean> {
+    const value = await apiRequest<{ configured: boolean }>(
       `/api/local-settings/dashscope-credentials/${kind}`,
       { method: 'DELETE' },
     );
-    return value.credential_state;
+    return value.configured;
   }
 
   async updateModelCallBinding(
